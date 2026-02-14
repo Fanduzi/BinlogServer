@@ -24,6 +24,8 @@ type MySQLRunner struct {
 	dataDir         string
 	fetcher         MasterStatusFetcher
 	checkpointStore CheckpointStore
+	uploader        FileUploader
+	uploadPrefix    string
 }
 
 type CheckpointStore interface {
@@ -36,6 +38,17 @@ type RunnerOption func(*MySQLRunner)
 func WithCheckpointStore(store CheckpointStore) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.checkpointStore = store
+	}
+}
+
+type FileUploader interface {
+	UploadFile(ctx context.Context, taskID, localPath, objectKey string) error
+}
+
+func WithUploader(uploader FileUploader, prefix string) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.uploader = uploader
+		r.uploadPrefix = prefix
 	}
 }
 
@@ -93,7 +106,8 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 	}
 	currentPos := start.Pos
 
-	file, writer, err := r.openBinlogWriter(task, currentFile, currentPos)
+	currentPath := ""
+	file, writer, currentPath, err := r.openBinlogWriter(task, currentFile, currentPos)
 	if err != nil {
 		return err
 	}
@@ -120,7 +134,13 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 				if err := file.Close(); err != nil {
 					return err
 				}
-				file, writer, err = r.openBinlogWriter(task, currentFile, currentPos)
+				if r.uploader != nil {
+					objectKey := buildObjectKey(r.uploadPrefix, task.ID, filepath.Base(currentPath))
+					if err := r.uploader.UploadFile(ctx, task.ID, currentPath, objectKey); err != nil {
+						return err
+					}
+				}
+				file, writer, currentPath, err = r.openBinlogWriter(task, currentFile, currentPos)
 				if err != nil {
 					return err
 				}
@@ -174,34 +194,34 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 	}
 }
 
-func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initialPos uint32) (*os.File, *binlog.Writer, error) {
+func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initialPos uint32) (*os.File, *binlog.Writer, string, error) {
 	dir := filepath.Join(r.dataDir, task.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if err := cleanupExpiredBinlogs(dir, task.Storage.RetentionDays, time.Now(), fileName); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	path := filepath.Join(dir, fileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	info, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if info.Size() == 0 {
 		if _, err := f.Write(binlogMagic); err != nil {
 			_ = f.Close()
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		if err := f.Sync(); err != nil {
 			_ = f.Close()
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 	}
 
@@ -209,7 +229,7 @@ func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initial
 		File: fileName,
 		Pos:  initialPos,
 	})
-	return f, writer, nil
+	return f, writer, path, nil
 }
 
 func defaultServerID(taskID string) uint32 {
@@ -299,4 +319,12 @@ func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeF
 		}
 	}
 	return nil
+}
+
+func buildObjectKey(prefix, taskID, fileName string) string {
+	base := filepath.ToSlash(filepath.Join(taskID, fileName))
+	if prefix == "" {
+		return base
+	}
+	return filepath.ToSlash(filepath.Join(prefix, base))
 }

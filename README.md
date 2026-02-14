@@ -25,6 +25,15 @@ go run ./cmd/binlog-server
 
 可选元数据 MySQL DSN：`BINLOG_SERVER_META_DSN=user:pass@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true`
 
+可选上传（S3/OBS 兼容）：
+- `BINLOG_SERVER_UPLOAD_ENDPOINT`
+- `BINLOG_SERVER_UPLOAD_BUCKET`
+- `BINLOG_SERVER_UPLOAD_ACCESS_KEY`
+- `BINLOG_SERVER_UPLOAD_SECRET_KEY`
+- `BINLOG_SERVER_UPLOAD_REGION`（可选）
+- `BINLOG_SERVER_UPLOAD_PREFIX`（可选）
+- `BINLOG_SERVER_UPLOAD_USE_SSL=true|false`
+
 ## API
 
 - `POST /api/tasks` body 示例：
@@ -99,6 +108,7 @@ go run ./cmd/binlog-server
 
 如果配置了 `BINLOG_SERVER_META_DSN`，任务配置与状态会持久化到外部 MySQL，服务重启后会自动恢复任务元数据。
 同时会持久化每个任务的最新 checkpoint（`file/pos`），重启后优先从 checkpoint 位点继续拉取。
+开启上传后，binlog rotate 封口后会上传到对象存储，object key 规则：`<prefix>/<taskID>/<fileName>`（prefix 可空）。
 
 ## 测试
 

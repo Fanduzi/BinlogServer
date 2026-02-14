@@ -12,6 +12,7 @@ import (
 	"binlog_server/internal/meta"
 	"binlog_server/internal/replication"
 	"binlog_server/internal/tasks"
+	"binlog_server/internal/upload"
 )
 
 type App struct {
@@ -45,6 +46,21 @@ func (a *App) Run(ctx context.Context) error {
 		opts = append(opts, tasks.WithStore(mysqlStore))
 		opts = append(opts, tasks.WithCheckpointReader(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
+	}
+
+	if a.cfg.UploadEndpoint != "" && a.cfg.UploadBucket != "" && a.cfg.UploadAccessKey != "" && a.cfg.UploadSecretKey != "" {
+		uploader, err := upload.NewS3Uploader(upload.S3Config{
+			Endpoint:  a.cfg.UploadEndpoint,
+			Bucket:    a.cfg.UploadBucket,
+			AccessKey: a.cfg.UploadAccessKey,
+			SecretKey: a.cfg.UploadSecretKey,
+			Region:    a.cfg.UploadRegion,
+			UseSSL:    a.cfg.UploadUseSSL,
+		})
+		if err != nil {
+			return err
+		}
+		runnerOpts = append(runnerOpts, replication.WithUploader(uploader, a.cfg.UploadPrefix))
 	}
 
 	runner := replication.NewMySQLRunner(a.cfg.DataDir, runnerOpts...)

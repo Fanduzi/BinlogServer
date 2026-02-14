@@ -16,4 +16,10 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.MetaDSN != "" {
 		t.Fatalf("expected empty meta dsn, got %s", cfg.MetaDSN)
 	}
+	if cfg.UploadEndpoint != "" || cfg.UploadBucket != "" {
+		t.Fatalf("expected upload config empty by default, got endpoint=%q bucket=%q", cfg.UploadEndpoint, cfg.UploadBucket)
+	}
+	if cfg.UploadUseSSL {
+		t.Fatal("expected upload ssl disabled by default")
+	}
 }
