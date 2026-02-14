@@ -13,4 +13,7 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.DataDir != "./data" {
 		t.Fatalf("expected ./data, got %s", cfg.DataDir)
 	}
+	if cfg.MetaDSN != "" {
+		t.Fatalf("expected empty meta dsn, got %s", cfg.MetaDSN)
+	}
 }

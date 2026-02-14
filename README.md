@@ -23,6 +23,8 @@ go run ./cmd/binlog-server
 默认数据目录：`./data`  
 可通过环境变量覆盖：`BINLOG_SERVER_DATA_DIR=/path/to/data`
 
+可选元数据 MySQL DSN：`BINLOG_SERVER_META_DSN=user:pass@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true`
+
 ## API
 
 - `POST /api/tasks` body 示例：
@@ -89,6 +91,8 @@ go run ./cmd/binlog-server
 - `GET /healthz`
 
 说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
+
+如果配置了 `BINLOG_SERVER_META_DSN`，任务配置与状态会持久化到外部 MySQL，服务重启后会自动恢复任务元数据。
 
 ## 测试
 

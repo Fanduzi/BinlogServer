@@ -9,6 +9,7 @@ import (
 
 	"binlog_server/internal/api"
 	"binlog_server/internal/config"
+	"binlog_server/internal/meta"
 	"binlog_server/internal/replication"
 	"binlog_server/internal/tasks"
 )
@@ -31,7 +32,26 @@ func New(cfg config.Config) *App {
 
 func (a *App) Run(ctx context.Context) error {
 	runner := replication.NewMySQLRunner(a.cfg.DataDir)
-	scheduler := tasks.NewScheduler(tasks.WithRunner(runner))
+	opts := []tasks.Option{
+		tasks.WithRunner(runner),
+	}
+
+	var mysqlStore *meta.MySQLTaskStore
+	if a.cfg.MetaDSN != "" {
+		var err error
+		mysqlStore, err = meta.NewMySQLTaskStore(a.cfg.MetaDSN)
+		if err != nil {
+			return err
+		}
+		defer mysqlStore.Close()
+		opts = append(opts, tasks.WithStore(mysqlStore))
+	}
+
+	scheduler := tasks.NewScheduler(opts...)
+	if err := scheduler.Restore(context.Background()); err != nil {
+		return err
+	}
+
 	handler := api.NewServer(scheduler)
 	server := &http.Server{Handler: handler}
 

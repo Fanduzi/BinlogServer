@@ -16,6 +16,11 @@ type Runner interface {
 	Run(ctx context.Context, task Task) error
 }
 
+type TaskStore interface {
+	UpsertTask(ctx context.Context, task Task) error
+	ListTasks(ctx context.Context) ([]Task, error)
+}
+
 type Option func(*Scheduler)
 
 func WithRunner(runner Runner) Option {
@@ -24,11 +29,18 @@ func WithRunner(runner Runner) Option {
 	}
 }
 
+func WithStore(store TaskStore) Option {
+	return func(s *Scheduler) {
+		s.store = store
+	}
+}
+
 type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
 	tasks   map[string]Task
 	runner  Runner
+	store   TaskStore
 	cancels map[string]context.CancelFunc
 }
 
@@ -64,6 +76,11 @@ func (s *Scheduler) CreateTask(name string) (Task, error) {
 		UpdatedAt: now,
 	}
 	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		delete(s.tasks, id)
+		s.seq--
+		return Task{}, err
+	}
 	return task, nil
 }
 
@@ -85,6 +102,9 @@ func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 	task.Source = source
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -109,6 +129,9 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 	task.Start = start
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -136,6 +159,10 @@ func (s *Scheduler) StartTask(id string) error {
 	task.State = StateRunning
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	runner := s.runner
 	s.mu.Unlock()
 
@@ -171,6 +198,9 @@ func (s *Scheduler) MarkRetryableError(id, msg string) error {
 	task.LastError = msg
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -197,6 +227,10 @@ func (s *Scheduler) StopTask(id string) error {
 	task.State = StateStopped
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -243,4 +277,38 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task) {
 	current.LastError = err.Error()
 	current.UpdatedAt = time.Now()
 	s.tasks[id] = current
+	_ = s.persistTaskLocked(current)
+}
+
+func (s *Scheduler) Restore(ctx context.Context) error {
+	if s.store == nil {
+		return nil
+	}
+
+	list, err := s.store.ListTasks(ctx)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.tasks = make(map[string]Task, len(list))
+	maxSeq := 0
+	for _, task := range list {
+		s.tasks[task.ID] = task
+
+		if n, err := strconv.Atoi(task.ID); err == nil && n > maxSeq {
+			maxSeq = n
+		}
+	}
+	s.seq = maxSeq
+	return nil
+}
+
+func (s *Scheduler) persistTaskLocked(task Task) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.UpsertTask(context.Background(), task)
 }
