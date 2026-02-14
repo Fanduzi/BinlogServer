@@ -42,6 +42,12 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if req.Storage != nil {
+			if err := s.tasks.ConfigureStorage(task.ID, *req.Storage); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
 		task, err = s.tasks.GetTask(task.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

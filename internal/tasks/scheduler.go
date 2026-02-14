@@ -15,6 +15,8 @@ import (
 var ErrTaskNotFound = errors.New("task not found")
 var ErrInvalidSourceConfig = errors.New("invalid source config")
 
+const defaultRetentionDays = 7
+
 type Runner interface {
 	Run(ctx context.Context, task Task) error
 }
@@ -105,6 +107,9 @@ func (s *Scheduler) CreateTask(name string) (Task, error) {
 		Start: StartConfig{
 			Mode: StartModeLatest,
 		},
+		Storage: Storage{
+			RetentionDays: defaultRetentionDays,
+		},
 		UpdatedAt: now,
 	}
 	s.tasks[id] = task
@@ -159,6 +164,27 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 		return ErrTaskNotFound
 	}
 	task.Start = start
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
+	if storage.RetentionDays <= 0 {
+		storage.RetentionDays = defaultRetentionDays
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, ok := s.tasks[id]
+	if !ok {
+		return ErrTaskNotFound
+	}
+	task.Storage = storage
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	if err := s.persistTaskLocked(task); err != nil {

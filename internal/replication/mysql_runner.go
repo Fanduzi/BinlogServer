@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
@@ -92,7 +93,7 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 	}
 	currentPos := start.Pos
 
-	file, writer, err := r.openBinlogWriter(task.ID, currentFile, currentPos)
+	file, writer, err := r.openBinlogWriter(task, currentFile, currentPos)
 	if err != nil {
 		return err
 	}
@@ -119,7 +120,7 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 				if err := file.Close(); err != nil {
 					return err
 				}
-				file, writer, err = r.openBinlogWriter(task.ID, currentFile, currentPos)
+				file, writer, err = r.openBinlogWriter(task, currentFile, currentPos)
 				if err != nil {
 					return err
 				}
@@ -173,9 +174,12 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 	}
 }
 
-func (r *MySQLRunner) openBinlogWriter(taskID, fileName string, initialPos uint32) (*os.File, *binlog.Writer, error) {
-	dir := filepath.Join(r.dataDir, taskID)
+func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initialPos uint32) (*os.File, *binlog.Writer, error) {
+	dir := filepath.Join(r.dataDir, task.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, nil, err
+	}
+	if err := cleanupExpiredBinlogs(dir, task.Storage.RetentionDays, time.Now(), fileName); err != nil {
 		return nil, nil, err
 	}
 
@@ -263,4 +267,36 @@ func effectiveStartFromCheckpoint(start tasks.StartConfig, checkpoint binlog.Che
 		File: checkpoint.File,
 		Pos:  checkpoint.Pos,
 	}
+}
+
+func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeFileName string) error {
+	if retentionDays <= 0 {
+		retentionDays = 7
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	expireBefore := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if entry.Name() == activeFileName {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().Before(expireBefore) {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

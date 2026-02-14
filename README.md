@@ -42,6 +42,9 @@ go run ./cmd/binlog-server
   },
   "start": {
     "mode": "LATEST"
+  },
+  "storage": {
+    "retention_days": 7
   }
 }
 ```
@@ -92,6 +95,7 @@ go run ./cmd/binlog-server
 - `GET /healthz`
 
 说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
+`storage.retention_days` 默认 7 天，runner 会在打开 binlog 文件时清理过期文件（跳过当前活动文件）。
 
 如果配置了 `BINLOG_SERVER_META_DSN`，任务配置与状态会持久化到外部 MySQL，服务重启后会自动恢复任务元数据。
 同时会持久化每个任务的最新 checkpoint（`file/pos`），重启后优先从 checkpoint 位点继续拉取。

@@ -50,5 +50,6 @@ type StartConfig struct {
 }
 
 type Storage struct {
-	Dir string `json:"dir,omitempty"`
+	Dir           string `json:"dir,omitempty"`
+	RetentionDays int    `json:"retention_days,omitempty"`
 }

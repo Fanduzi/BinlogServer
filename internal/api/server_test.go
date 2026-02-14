@@ -79,7 +79,8 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	reqBody := `{
 		"name":"cluster-a",
 		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001},
-		"start":{"mode":"FILE_POS","file":"mysql-bin.000001","pos":4}
+		"start":{"mode":"FILE_POS","file":"mysql-bin.000001","pos":4},
+		"storage":{"dir":"./data","retention_days":15}
 	}`
 	createResp := httptest.NewRecorder()
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(reqBody))
@@ -98,6 +99,9 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	}
 	if created.Start.Mode != tasks.StartModeFilePos || created.Start.File != "mysql-bin.000001" || created.Start.Pos != 4 {
 		t.Fatalf("start not persisted: %+v", created.Start)
+	}
+	if created.Storage.RetentionDays != 15 {
+		t.Fatalf("storage not persisted: %+v", created.Storage)
 	}
 }
 

@@ -12,6 +12,7 @@ type taskService interface {
 	CreateTask(name string) (tasks.Task, error)
 	ConfigureSource(id string, source tasks.SourceConfig) error
 	ConfigureStart(id string, start tasks.StartConfig) error
+	ConfigureStorage(id string, storage tasks.Storage) error
 	GetTask(id string) (tasks.Task, error)
 	GetCheckpoint(ctx context.Context, id string) (binlog.Checkpoint, bool, error)
 	ListTasks() []tasks.Task
