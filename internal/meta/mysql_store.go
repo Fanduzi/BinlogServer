@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -21,6 +22,16 @@ CREATE TABLE IF NOT EXISTS backup_tasks (
   source_json JSON NOT NULL,
   start_json JSON NOT NULL,
   storage_json JSON NOT NULL,
+  updated_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
+const createCheckpointTableSQL = `
+CREATE TABLE IF NOT EXISTS backup_checkpoints (
+  task_id VARCHAR(64) PRIMARY KEY,
+  file_name VARCHAR(255) NOT NULL,
+  pos BIGINT UNSIGNED NOT NULL,
+  gtid_set TEXT NULL,
   updated_at DATETIME(6) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
@@ -42,6 +53,22 @@ const listTaskSQL = `
 SELECT id, name, state, last_error, source_json, start_json, storage_json, updated_at
 FROM backup_tasks
 ORDER BY id;
+`
+
+const upsertCheckpointSQL = `
+INSERT INTO backup_checkpoints (task_id, file_name, pos, gtid_set, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  file_name = VALUES(file_name),
+  pos = VALUES(pos),
+  gtid_set = VALUES(gtid_set),
+  updated_at = VALUES(updated_at);
+`
+
+const loadCheckpointSQL = `
+SELECT file_name, pos, gtid_set, updated_at
+FROM backup_checkpoints
+WHERE task_id = ?;
 `
 
 type MySQLTaskStore struct {
@@ -75,6 +102,10 @@ func (s *MySQLTaskStore) Close() error {
 
 func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, createTaskTableSQL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, createCheckpointTableSQL)
 	return err
 }
 
@@ -162,4 +193,39 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 		return nil, err
 	}
 	return list, nil
+}
+
+func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, checkpoint binlog.Checkpoint) error {
+	updatedAt := checkpoint.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
+
+	_, err := s.db.ExecContext(
+		ctx,
+		upsertCheckpointSQL,
+		taskID,
+		checkpoint.File,
+		checkpoint.Pos,
+		checkpoint.GTIDSet,
+		updatedAt,
+	)
+	return err
+}
+
+func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
+	var (
+		cp      binlog.Checkpoint
+		gtidSet sql.NullString
+	)
+
+	row := s.db.QueryRowContext(ctx, loadCheckpointSQL, taskID)
+	if err := row.Scan(&cp.File, &cp.Pos, &gtidSet, &cp.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return binlog.Checkpoint{}, false, nil
+		}
+		return binlog.Checkpoint{}, false, err
+	}
+	cp.GTIDSet = gtidSet.String
+	return cp, true, nil
 }

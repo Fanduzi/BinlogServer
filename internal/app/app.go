@@ -31,10 +31,8 @@ func New(cfg config.Config) *App {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	runner := replication.NewMySQLRunner(a.cfg.DataDir)
-	opts := []tasks.Option{
-		tasks.WithRunner(runner),
-	}
+	var runnerOpts []replication.RunnerOption
+	opts := []tasks.Option{}
 
 	var mysqlStore *meta.MySQLTaskStore
 	if a.cfg.MetaDSN != "" {
@@ -45,7 +43,11 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		defer mysqlStore.Close()
 		opts = append(opts, tasks.WithStore(mysqlStore))
+		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
 	}
+
+	runner := replication.NewMySQLRunner(a.cfg.DataDir, runnerOpts...)
+	opts = append(opts, tasks.WithRunner(runner))
 
 	scheduler := tasks.NewScheduler(opts...)
 	if err := scheduler.Restore(context.Background()); err != nil {

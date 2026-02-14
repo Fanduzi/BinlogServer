@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -81,6 +82,62 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	}
 	if list[0].ID != "7" || list[0].State != tasks.StateStopped {
 		t.Fatalf("unexpected task loaded: %+v", list[0])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_UpsertCheckpoint(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	cp := binlog.Checkpoint{
+		File: "mysql-bin.000123",
+		Pos:  456,
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta(upsertCheckpointSQL)).
+		WithArgs("task-1", "mysql-bin.000123", uint32(456), "", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := store.UpsertCheckpoint(context.Background(), "task-1", cp); err != nil {
+		t.Fatalf("UpsertCheckpoint returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_LoadCheckpoint(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{"file_name", "pos", "gtid_set", "updated_at"}).
+		AddRow("mysql-bin.000123", uint32(456), "", now)
+	mock.ExpectQuery(regexp.QuoteMeta(loadCheckpointSQL)).
+		WithArgs("task-1").
+		WillReturnRows(rows)
+
+	cp, ok, err := store.LoadCheckpoint(context.Background(), "task-1")
+	if err != nil {
+		t.Fatalf("LoadCheckpoint returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected checkpoint exists")
+	}
+	if cp.File != "mysql-bin.000123" || cp.Pos != 456 {
+		t.Fatalf("unexpected checkpoint: %+v", cp)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

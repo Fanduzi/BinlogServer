@@ -20,24 +20,49 @@ import (
 var binlogMagic = []byte{0xfe, 'b', 'i', 'n'}
 
 type MySQLRunner struct {
-	dataDir string
-	fetcher MasterStatusFetcher
+	dataDir         string
+	fetcher         MasterStatusFetcher
+	checkpointStore CheckpointStore
 }
 
-func NewMySQLRunner(dataDir string) *MySQLRunner {
+type CheckpointStore interface {
+	UpsertCheckpoint(ctx context.Context, taskID string, checkpoint binlog.Checkpoint) error
+	LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error)
+}
+
+type RunnerOption func(*MySQLRunner)
+
+func WithCheckpointStore(store CheckpointStore) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.checkpointStore = store
+	}
+}
+
+func NewMySQLRunner(dataDir string, opts ...RunnerOption) *MySQLRunner {
 	if dataDir == "" {
 		dataDir = "./data"
 	}
-	return &MySQLRunner{
+	r := &MySQLRunner{
 		dataDir: dataDir,
 		fetcher: &mysqlStatusFetcher{},
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 	start, err := ResolveStart(ctx, task, r.fetcher)
 	if err != nil {
 		return err
+	}
+	if r.checkpointStore != nil {
+		checkpoint, ok, err := r.checkpointStore.LoadCheckpoint(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		start = effectiveStartFromCheckpoint(start, checkpoint, ok)
 	}
 
 	cfg := buildSyncerConfig(task)
@@ -116,7 +141,13 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 			return err
 		}
 
-		currentPos = writer.CurrentCheckpoint().Pos
+		checkpoint := writer.CurrentCheckpoint()
+		currentPos = checkpoint.Pos
+		if r.checkpointStore != nil {
+			if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, checkpoint); err != nil {
+				return err
+			}
+		}
 	}
 }
 
@@ -218,4 +249,18 @@ func (f *mysqlStatusFetcher) FetchMasterStatus(_ context.Context, source tasks.S
 		File: file,
 		Pos:  uint32(pos),
 	}, nil
+}
+
+func effectiveStartFromCheckpoint(start tasks.StartConfig, checkpoint binlog.Checkpoint, exists bool) tasks.StartConfig {
+	if !exists {
+		return start
+	}
+	if checkpoint.File == "" || checkpoint.Pos == 0 {
+		return start
+	}
+	return tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: checkpoint.File,
+		Pos:  checkpoint.Pos,
+	}
 }

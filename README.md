@@ -93,6 +93,7 @@ go run ./cmd/binlog-server
 说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
 
 如果配置了 `BINLOG_SERVER_META_DSN`，任务配置与状态会持久化到外部 MySQL，服务重启后会自动恢复任务元数据。
+同时会持久化每个任务的最新 checkpoint（`file/pos`），重启后优先从 checkpoint 位点继续拉取。
 
 ## 测试
 
