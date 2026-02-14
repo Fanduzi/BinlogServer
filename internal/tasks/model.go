@@ -53,3 +53,12 @@ type Storage struct {
 	Dir           string `json:"dir,omitempty"`
 	RetentionDays int    `json:"retention_days,omitempty"`
 }
+
+type TaskEvent struct {
+	TaskID   string    `json:"task_id"`
+	Type     string    `json:"type"`
+	Message  string    `json:"message,omitempty"`
+	Detail   string    `json:"detail,omitempty"`
+	Time     time.Time `json:"time"`
+	Sequence int64     `json:"sequence"`
+}

@@ -66,6 +66,7 @@ type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
 	tasks   map[string]Task
+	events  map[string][]TaskEvent
 	runner  Runner
 	store   TaskStore
 	cancels map[string]context.CancelFunc
@@ -74,11 +75,13 @@ type Scheduler struct {
 	retryMaxDelay  time.Duration
 
 	checkpointReader CheckpointReader
+	eventSeq         int64
 }
 
 func NewScheduler(opts ...Option) *Scheduler {
 	s := &Scheduler{
 		tasks:   make(map[string]Task),
+		events:  make(map[string][]TaskEvent),
 		cancels: make(map[string]context.CancelFunc),
 
 		retryBaseDelay: time.Second,
@@ -114,6 +117,7 @@ func (s *Scheduler) CreateTask(name string) (Task, error) {
 		UpdatedAt: now,
 	}
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_CREATED", "task created", "")
 	if err := s.persistTaskLocked(task); err != nil {
 		delete(s.tasks, id)
 		s.seq--
@@ -140,6 +144,7 @@ func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 	task.Source = source
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_SOURCE_CONFIGURED", "source configured", source.Host)
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -167,6 +172,7 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 	task.Start = start
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_START_CONFIGURED", "start strategy configured", string(start.Mode))
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -188,6 +194,7 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	task.Storage = storage
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_STORAGE_CONFIGURED", "storage configured", "")
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -209,6 +216,7 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 	task.Name = name
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_RENAMED", "task renamed", name)
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -239,6 +247,7 @@ func (s *Scheduler) StartTask(id string) error {
 	task.State = StateRunning
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_STARTED", "task started", "")
 	if err := s.persistTaskLocked(task); err != nil {
 		s.mu.Unlock()
 		return err
@@ -278,6 +287,7 @@ func (s *Scheduler) MarkRetryableError(id, msg string) error {
 	task.LastError = msg
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_RETRY_BACKOFF", "task entered retry backoff", msg)
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -307,6 +317,7 @@ func (s *Scheduler) StopTask(id string) error {
 	task.State = StateStopped
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_STOPPED", "task stopped", "")
 	if err := s.persistTaskLocked(task); err != nil {
 		s.mu.Unlock()
 		return err
@@ -338,6 +349,7 @@ func (s *Scheduler) DeleteTask(id string) error {
 		delete(s.cancels, id)
 	}
 	delete(s.tasks, id)
+	delete(s.events, id)
 	if s.store != nil {
 		if err := s.store.DeleteTask(context.Background(), id); err != nil {
 			return err
@@ -380,6 +392,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task) {
 		current.LastError = err.Error()
 		current.UpdatedAt = time.Now()
 		s.tasks[id] = current
+		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", err.Error())
 		_ = s.persistTaskLocked(current)
 		s.mu.Unlock()
 
@@ -407,6 +420,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task) {
 		current.LastError = ""
 		current.UpdatedAt = time.Now()
 		s.tasks[id] = current
+		s.appendEventLocked(id, "TASK_RETRY_RECOVERED", "task recovered after retry", "")
 		_ = s.persistTaskLocked(current)
 		task = current
 		s.mu.Unlock()
@@ -427,6 +441,7 @@ func (s *Scheduler) Restore(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	s.tasks = make(map[string]Task, len(list))
+	s.events = make(map[string][]TaskEvent, len(list))
 	maxSeq := 0
 	for _, task := range list {
 		s.tasks[task.ID] = task
@@ -466,4 +481,35 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 		return binlog.Checkpoint{}, false, nil
 	}
 	return s.checkpointReader.LoadCheckpoint(ctx, taskID)
+}
+
+func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.tasks[taskID]; !ok {
+		return nil, ErrTaskNotFound
+	}
+	events := s.events[taskID]
+	if limit <= 0 || limit >= len(events) {
+		out := make([]TaskEvent, len(events))
+		copy(out, events)
+		return out, nil
+	}
+	out := make([]TaskEvent, limit)
+	copy(out, events[len(events)-limit:])
+	return out, nil
+}
+
+func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string) {
+	s.eventSeq++
+	event := TaskEvent{
+		TaskID:   taskID,
+		Type:     eventType,
+		Message:  message,
+		Detail:   detail,
+		Time:     time.Now(),
+		Sequence: s.eventSeq,
+	}
+	s.events[taskID] = append(s.events[taskID], event)
 }
