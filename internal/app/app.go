@@ -46,7 +46,9 @@ func (a *App) Run(ctx context.Context) error {
 		opts = append(opts, tasks.WithStore(mysqlStore))
 		opts = append(opts, tasks.WithCheckpointReader(mysqlStore))
 		opts = append(opts, tasks.WithEventStore(mysqlStore))
+		opts = append(opts, tasks.WithFileStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
+		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
 	}
 
 	if a.cfg.UploadEndpoint != "" && a.cfg.UploadBucket != "" && a.cfg.UploadAccessKey != "" && a.cfg.UploadSecretKey != "" {

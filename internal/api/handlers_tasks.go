@@ -122,6 +122,19 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, events)
 			return
 		}
+		if r.Method == http.MethodGet && action == "files" {
+			files, err := s.tasks.ListFiles(taskID, 200)
+			if err != nil {
+				if errors.Is(err, tasks.ErrTaskNotFound) {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, files)
+			return
+		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

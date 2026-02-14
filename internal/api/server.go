@@ -18,6 +18,7 @@ type taskService interface {
 	GetTask(id string) (tasks.Task, error)
 	GetCheckpoint(ctx context.Context, id string) (binlog.Checkpoint, bool, error)
 	ListEvents(id string, limit int) ([]tasks.TaskEvent, error)
+	ListFiles(id string, limit int) ([]tasks.BinlogFile, error)
 	ListTasks() []tasks.Task
 	DeleteTask(id string) error
 	StartTask(id string) error

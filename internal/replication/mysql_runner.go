@@ -24,6 +24,7 @@ type MySQLRunner struct {
 	dataDir         string
 	fetcher         MasterStatusFetcher
 	checkpointStore CheckpointStore
+	fileMetaStore   FileMetaStore
 	uploader        FileUploader
 	uploadPrefix    string
 }
@@ -38,6 +39,16 @@ type RunnerOption func(*MySQLRunner)
 func WithCheckpointStore(store CheckpointStore) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.checkpointStore = store
+	}
+}
+
+type FileMetaStore interface {
+	UpsertBinlogFile(ctx context.Context, meta tasks.BinlogFile) error
+}
+
+func WithFileMetaStore(store FileMetaStore) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.fileMetaStore = store
 	}
 }
 
@@ -105,6 +116,8 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 		currentFile = fmt.Sprintf("task-%s.binlog", task.ID)
 	}
 	currentPos := start.Pos
+	currentStartPos := start.Pos
+	currentCreatedAt := time.Now()
 
 	currentPath := ""
 	file, writer, currentPath, err := r.openBinlogWriter(task, currentFile, currentPos)
@@ -134,6 +147,25 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 				if err := file.Close(); err != nil {
 					return err
 				}
+				if r.fileMetaStore != nil {
+					info, err := os.Stat(currentPath)
+					if err != nil {
+						return err
+					}
+					meta := tasks.BinlogFile{
+						TaskID:    task.ID,
+						FileName:  filepath.Base(currentPath),
+						FilePath:  currentPath,
+						SizeBytes: info.Size(),
+						StartPos:  currentStartPos,
+						EndPos:    currentPos,
+						CreatedAt: currentCreatedAt,
+						SealedAt:  time.Now(),
+					}
+					if err := r.fileMetaStore.UpsertBinlogFile(ctx, meta); err != nil {
+						return err
+					}
+				}
 				if r.uploader != nil {
 					objectKey := buildObjectKey(r.uploadPrefix, task.ID, filepath.Base(currentPath))
 					if err := r.uploader.UploadFile(ctx, task.ID, currentPath, objectKey); err != nil {
@@ -144,6 +176,8 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 				if err != nil {
 					return err
 				}
+				currentStartPos = currentPos
+				currentCreatedAt = time.Now()
 			}
 		}
 

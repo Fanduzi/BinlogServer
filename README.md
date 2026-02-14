@@ -107,6 +107,7 @@ go run ./cmd/binlog-server
 - `POST /api/tasks/{id}/stop`
 - `GET /api/tasks/{id}/checkpoint`
 - `GET /api/tasks/{id}/events`
+- `GET /api/tasks/{id}/files`
 - `GET /healthz`
 
 说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。

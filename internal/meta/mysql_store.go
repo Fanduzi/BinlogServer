@@ -49,6 +49,22 @@ CREATE TABLE IF NOT EXISTS task_events (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
+const createBinlogFilesTableSQL = `
+CREATE TABLE IF NOT EXISTS binlog_files (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  task_id VARCHAR(64) NOT NULL,
+  file_name VARCHAR(255) NOT NULL,
+  file_path TEXT NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  start_pos BIGINT UNSIGNED NOT NULL,
+  end_pos BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME(6) NOT NULL,
+  sealed_at DATETIME(6) NOT NULL,
+  UNIQUE KEY uk_task_file (task_id, file_name),
+  INDEX idx_task_sealed (task_id, sealed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
 const upsertTaskSQL = `
 INSERT INTO backup_tasks (id, name, state, last_error, source_json, start_json, storage_json, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -102,6 +118,26 @@ ORDER BY id DESC
 LIMIT ?;
 `
 
+const upsertBinlogFileSQL = `
+INSERT INTO binlog_files (task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  file_path = VALUES(file_path),
+  size_bytes = VALUES(size_bytes),
+  start_pos = VALUES(start_pos),
+  end_pos = VALUES(end_pos),
+  created_at = VALUES(created_at),
+  sealed_at = VALUES(sealed_at);
+`
+
+const listBinlogFilesSQL = `
+SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at
+FROM binlog_files
+WHERE task_id = ?
+ORDER BY sealed_at DESC
+LIMIT ?;
+`
+
 type MySQLTaskStore struct {
 	db *sql.DB
 }
@@ -141,6 +177,10 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, createTaskEventsTableSQL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, createBinlogFilesTableSQL)
 	return err
 }
 
@@ -314,6 +354,65 @@ func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit in
 	// Return events in ascending order for stable timeline.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.BinlogFile) error {
+	createdAt := meta.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	sealedAt := meta.SealedAt
+	if sealedAt.IsZero() {
+		sealedAt = createdAt
+	}
+
+	_, err := s.db.ExecContext(
+		ctx,
+		upsertBinlogFileSQL,
+		meta.TaskID,
+		meta.FileName,
+		meta.FilePath,
+		meta.SizeBytes,
+		meta.StartPos,
+		meta.EndPos,
+		createdAt,
+		sealedAt,
+	)
+	return err
+}
+
+func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+
+	rows, err := s.db.QueryContext(ctx, listBinlogFilesSQL, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []tasks.BinlogFile
+	for rows.Next() {
+		var item tasks.BinlogFile
+		if err := rows.Scan(
+			&item.TaskID,
+			&item.FileName,
+			&item.FilePath,
+			&item.SizeBytes,
+			&item.StartPos,
+			&item.EndPos,
+			&item.CreatedAt,
+			&item.SealedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -114,6 +114,39 @@ func (f *fakeCheckpointReader) LoadCheckpoint(_ context.Context, taskID string) 
 	return cp, ok, nil
 }
 
+type fakeFileStore struct {
+	files map[string][]tasks.BinlogFile
+}
+
+func newFakeFileStore() *fakeFileStore {
+	return &fakeFileStore{files: make(map[string][]tasks.BinlogFile)}
+}
+
+func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
+	items := f.files[meta.TaskID]
+	for i := range items {
+		if items[i].FileName == meta.FileName {
+			items[i] = meta
+			f.files[meta.TaskID] = items
+			return nil
+		}
+	}
+	f.files[meta.TaskID] = append(items, meta)
+	return nil
+}
+
+func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
+	items := f.files[taskID]
+	if limit <= 0 || limit >= len(items) {
+		out := make([]tasks.BinlogFile, len(items))
+		copy(out, items)
+		return out, nil
+	}
+	out := make([]tasks.BinlogFile, limit)
+	copy(out, items[len(items)-limit:])
+	return out, nil
+}
+
 func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	reader := &fakeCheckpointReader{
 		checkpoints: map[string]binlog.Checkpoint{
@@ -237,6 +270,42 @@ func TestTaskAPI_ListEvents(t *testing.T) {
 	}
 	if len(events) == 0 {
 		t.Fatal("expected events not empty")
+	}
+}
+
+func TestTaskAPI_ListFiles(t *testing.T) {
+	fileStore := newFakeFileStore()
+	fileStore.files["1"] = []tasks.BinlogFile{
+		{
+			TaskID:   "1",
+			FileName: "mysql-bin.000001",
+			FilePath: "/tmp/mysql-bin.000001",
+		},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithFileStore(fileStore))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createResp.Code)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/1/files", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var files []tasks.BinlogFile
+	if err := json.Unmarshal(resp.Body.Bytes(), &files); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file item, got %d", len(files))
 	}
 }
 

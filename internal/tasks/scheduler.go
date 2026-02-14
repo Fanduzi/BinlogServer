@@ -36,6 +36,11 @@ type EventStore interface {
 	ListEvents(ctx context.Context, taskID string, limit int) ([]TaskEvent, error)
 }
 
+type FileStore interface {
+	UpsertBinlogFile(ctx context.Context, meta BinlogFile) error
+	ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]BinlogFile, error)
+}
+
 type Option func(*Scheduler)
 
 func WithRunner(runner Runner) Option {
@@ -73,6 +78,12 @@ func WithEventStore(store EventStore) Option {
 	}
 }
 
+func WithFileStore(store FileStore) Option {
+	return func(s *Scheduler) {
+		s.fileStore = store
+	}
+}
+
 type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
@@ -87,6 +98,7 @@ type Scheduler struct {
 
 	checkpointReader CheckpointReader
 	eventStore       EventStore
+	fileStore        FileStore
 	eventSeq         int64
 }
 
@@ -514,6 +526,19 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	out := make([]TaskEvent, limit)
 	copy(out, events[len(events)-limit:])
 	return out, nil
+}
+
+func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.tasks[taskID]; !ok {
+		return nil, ErrTaskNotFound
+	}
+	if s.fileStore == nil {
+		return []BinlogFile{}, nil
+	}
+	return s.fileStore.ListBinlogFiles(context.Background(), taskID, limit)
 }
 
 func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string) {

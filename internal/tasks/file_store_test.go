@@ -1,0 +1,71 @@
+package tasks
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+type fakeFileStore struct {
+	files map[string][]BinlogFile
+}
+
+func newFakeFileStore() *fakeFileStore {
+	return &fakeFileStore{files: make(map[string][]BinlogFile)}
+}
+
+func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile) error {
+	items := f.files[meta.TaskID]
+	for i := range items {
+		if items[i].FileName == meta.FileName {
+			items[i] = meta
+			f.files[meta.TaskID] = items
+			return nil
+		}
+	}
+	f.files[meta.TaskID] = append(items, meta)
+	return nil
+}
+
+func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit int) ([]BinlogFile, error) {
+	items := f.files[taskID]
+	if limit <= 0 || limit >= len(items) {
+		out := make([]BinlogFile, len(items))
+		copy(out, items)
+		return out, nil
+	}
+	out := make([]BinlogFile, limit)
+	copy(out, items[len(items)-limit:])
+	return out, nil
+}
+
+func TestScheduler_ListFilesFromStore(t *testing.T) {
+	store := newFakeFileStore()
+	store.files["1"] = []BinlogFile{
+		{
+			TaskID:    "1",
+			FileName:  "mysql-bin.000001",
+			FilePath:  "/tmp/mysql-bin.000001",
+			SizeBytes: 1024,
+			StartPos:  4,
+			EndPos:    1200,
+			CreatedAt: time.Now().Add(-time.Hour),
+			SealedAt:  time.Now(),
+		},
+	}
+	s := NewScheduler(WithFileStore(store))
+	if _, err := s.CreateTask("cluster-a"); err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	files, err := s.ListFiles("1", 10)
+	if err != nil {
+		t.Fatalf("ListFiles returned error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].FileName != "mysql-bin.000001" {
+		t.Fatalf("unexpected file name: %s", files[0].FileName)
+	}
+}

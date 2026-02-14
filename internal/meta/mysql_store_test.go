@@ -209,3 +209,61 @@ func TestMySQLTaskStore_AppendAndListEvents(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	fileMeta := tasks.BinlogFile{
+		TaskID:    "1",
+		FileName:  "mysql-bin.000001",
+		FilePath:  "/tmp/mysql-bin.000001",
+		SizeBytes: 1024,
+		StartPos:  4,
+		EndPos:    1200,
+		CreatedAt: time.Now().Add(-time.Minute),
+		SealedAt:  time.Now(),
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta(upsertBinlogFileSQL)).
+		WithArgs(
+			"1",
+			"mysql-bin.000001",
+			"/tmp/mysql-bin.000001",
+			int64(1024),
+			uint32(4),
+			uint32(1200),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	if err := store.UpsertBinlogFile(context.Background(), fileMeta); err != nil {
+		t.Fatalf("UpsertBinlogFile returned error: %v", err)
+	}
+
+	rows := sqlmock.NewRows([]string{
+		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
+	}).AddRow("1", "mysql-bin.000001", "/tmp/mysql-bin.000001", int64(1024), uint32(4), uint32(1200), time.Now().Add(-time.Minute), time.Now())
+	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
+		WithArgs("1", 10).
+		WillReturnRows(rows)
+
+	files, err := store.ListBinlogFiles(context.Background(), "1", 10)
+	if err != nil {
+		t.Fatalf("ListBinlogFiles returned error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].FileName != "mysql-bin.000001" {
+		t.Fatalf("unexpected file name: %s", files[0].FileName)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

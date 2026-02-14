@@ -62,3 +62,14 @@ type TaskEvent struct {
 	Time     time.Time `json:"time"`
 	Sequence int64     `json:"sequence"`
 }
+
+type BinlogFile struct {
+	TaskID    string    `json:"task_id"`
+	FileName  string    `json:"file_name"`
+	FilePath  string    `json:"file_path"`
+	SizeBytes int64     `json:"size_bytes"`
+	StartPos  uint32    `json:"start_pos"`
+	EndPos    uint32    `json:"end_pos"`
+	CreatedAt time.Time `json:"created_at"`
+	SealedAt  time.Time `json:"sealed_at"`
+}

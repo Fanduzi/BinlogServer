@@ -210,7 +210,7 @@ async function showDetail(id) {
   state.selectedId = id;
   detailHintEl.textContent = `任务 #${id}`;
 
-  const [task, checkpoint, events] = await Promise.all([
+  const [task, checkpoint, events, files] = await Promise.all([
     api(`/api/tasks/${id}`),
     fetch(`/api/tasks/${id}/checkpoint`).then(async (res) => {
       if (res.status === 404) return null;
@@ -218,6 +218,7 @@ async function showDetail(id) {
       return await res.json();
     }),
     api(`/api/tasks/${id}/events`),
+    api(`/api/tasks/${id}/files`),
   ]);
 
   const cpBlock = checkpoint
@@ -232,6 +233,16 @@ async function showDetail(id) {
     </div>
   `).join("");
 
+  const filesHtml = (files || []).map((f) => `
+    <tr>
+      <td>${escapeHtml(f.file_name || "-")}</td>
+      <td>${escapeHtml(String(f.size_bytes || 0))}</td>
+      <td>${escapeHtml(String(f.start_pos || 0))}</td>
+      <td>${escapeHtml(String(f.end_pos || 0))}</td>
+      <td>${escapeHtml(f.sealed_at || "")}</td>
+    </tr>
+  `).join("");
+
   detailContentEl.innerHTML = `
     <section class="card">
       <h3>${escapeHtml(task.name || "-")}</h3>
@@ -243,6 +254,15 @@ async function showDetail(id) {
     <section class="card">
       <h3>Checkpoint</h3>
       ${cpBlock}
+      <h3>Files</h3>
+      ${filesHtml ? `
+        <div class="events">
+          <table>
+            <thead><tr><th>File</th><th>Size</th><th>Start</th><th>End</th><th>SealedAt</th></tr></thead>
+            <tbody>${filesHtml}</tbody>
+          </table>
+        </div>
+      ` : '<p class="muted">暂无落盘文件记录</p>'}
       <h3>Events</h3>
       <div class="events">${eventHtml || '<p class="muted">暂无事件</p>'}</div>
     </section>
