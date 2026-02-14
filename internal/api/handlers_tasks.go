@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"binlog_server/internal/tasks"
@@ -141,7 +142,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method == http.MethodGet && action == "events" {
-			events, err := s.tasks.ListEvents(taskID, 200)
+			events, err := s.tasks.ListEvents(taskID, parseLimit(r, 200))
 			if err != nil {
 				if errors.Is(err, tasks.ErrTaskNotFound) {
 					http.Error(w, err.Error(), http.StatusNotFound)
@@ -154,7 +155,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method == http.MethodGet && action == "files" {
-			files, err := s.tasks.ListFiles(taskID, 200)
+			files, err := s.tasks.ListFiles(taskID, parseLimit(r, 200))
 			if err != nil {
 				if errors.Is(err, tasks.ErrTaskNotFound) {
 					http.Error(w, err.Error(), http.StatusNotFound)
@@ -190,6 +191,18 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func parseLimit(r *http.Request, fallback int) int {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
 }
 
 func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID string) {

@@ -21,6 +21,9 @@ document.getElementById("cancelEditBtn").addEventListener("click", resetForm);
 formEl.addEventListener("submit", onSubmitForm);
 
 loadTasks(false);
+setInterval(() => {
+  loadTasks(true).catch(() => {});
+}, 15000);
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -232,8 +235,8 @@ async function showDetail(id) {
       if (!res.ok) throw new Error(await res.text());
       return await res.json();
     }),
-    api(`/api/tasks/${id}/events`),
-    api(`/api/tasks/${id}/files`),
+    api(`/api/tasks/${id}/events?limit=120`),
+    api(`/api/tasks/${id}/files?limit=80`),
   ]);
 
   const cpBlock = checkpoint

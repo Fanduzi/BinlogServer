@@ -309,6 +309,40 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 	}
 }
 
+func TestTaskAPI_ListEventsWithLimit(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createResp.Code)
+	}
+	if err := scheduler.StartTask("1"); err != nil {
+		t.Fatalf("start task: %v", err)
+	}
+	if err := scheduler.StopTask("1"); err != nil {
+		t.Fatalf("stop task: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/1/events?limit=1", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var events []tasks.TaskEvent
+	if err := json.Unmarshal(resp.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event due to limit, got %d", len(events))
+	}
+}
+
 func TestUI_RootRedirectAndDashboardPage(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
