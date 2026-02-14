@@ -43,6 +43,7 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		defer mysqlStore.Close()
 		opts = append(opts, tasks.WithStore(mysqlStore))
+		opts = append(opts, tasks.WithCheckpointReader(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
 	}
 

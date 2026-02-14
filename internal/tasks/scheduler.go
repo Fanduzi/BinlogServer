@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"binlog_server/internal/binlog"
 )
 
 var ErrTaskNotFound = errors.New("task not found")
@@ -20,6 +22,10 @@ type Runner interface {
 type TaskStore interface {
 	UpsertTask(ctx context.Context, task Task) error
 	ListTasks(ctx context.Context) ([]Task, error)
+}
+
+type CheckpointReader interface {
+	LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error)
 }
 
 type Option func(*Scheduler)
@@ -47,6 +53,12 @@ func WithRetryBackoff(base, max time.Duration) Option {
 	}
 }
 
+func WithCheckpointReader(reader CheckpointReader) Option {
+	return func(s *Scheduler) {
+		s.checkpointReader = reader
+	}
+}
+
 type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
@@ -57,6 +69,8 @@ type Scheduler struct {
 
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+
+	checkpointReader CheckpointReader
 }
 
 func NewScheduler(opts ...Option) *Scheduler {
@@ -374,4 +388,14 @@ func (s *Scheduler) retryDelay(attempt int) time.Duration {
 		return s.retryMaxDelay
 	}
 	return time.Duration(delay)
+}
+
+func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
+	if _, err := s.GetTask(taskID); err != nil {
+		return binlog.Checkpoint{}, false, err
+	}
+	if s.checkpointReader == nil {
+		return binlog.Checkpoint{}, false, nil
+	}
+	return s.checkpointReader.LoadCheckpoint(ctx, taskID)
 }

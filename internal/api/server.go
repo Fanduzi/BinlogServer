@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 )
 
@@ -11,6 +13,7 @@ type taskService interface {
 	ConfigureSource(id string, source tasks.SourceConfig) error
 	ConfigureStart(id string, start tasks.StartConfig) error
 	GetTask(id string) (tasks.Task, error)
+	GetCheckpoint(ctx context.Context, id string) (binlog.Checkpoint, bool, error)
 	ListTasks() []tasks.Task
 	StartTask(id string) error
 	StopTask(id string) error

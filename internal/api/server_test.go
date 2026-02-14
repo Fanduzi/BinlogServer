@@ -2,11 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 )
 
@@ -96,5 +98,50 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	}
 	if created.Start.Mode != tasks.StartModeFilePos || created.Start.File != "mysql-bin.000001" || created.Start.Pos != 4 {
 		t.Fatalf("start not persisted: %+v", created.Start)
+	}
+}
+
+type fakeCheckpointReader struct {
+	checkpoints map[string]binlog.Checkpoint
+}
+
+func (f *fakeCheckpointReader) LoadCheckpoint(_ context.Context, taskID string) (binlog.Checkpoint, bool, error) {
+	cp, ok := f.checkpoints[taskID]
+	return cp, ok, nil
+}
+
+func TestTaskAPI_GetCheckpoint(t *testing.T) {
+	reader := &fakeCheckpointReader{
+		checkpoints: map[string]binlog.Checkpoint{
+			"1": {
+				File: "mysql-bin.000123",
+				Pos:  456,
+			},
+		},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithCheckpointReader(reader))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createResp.Code)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/1/checkpoint", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var cp binlog.Checkpoint
+	if err := json.Unmarshal(resp.Body.Bytes(), &cp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if cp.File != "mysql-bin.000123" || cp.Pos != 456 {
+		t.Fatalf("unexpected checkpoint: %+v", cp)
 	}
 }

@@ -67,6 +67,23 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	action := parts[1]
 
 	if r.Method != http.MethodPost {
+		if r.Method == http.MethodGet && action == "checkpoint" {
+			checkpoint, ok, err := s.tasks.GetCheckpoint(r.Context(), taskID)
+			if err != nil {
+				if errors.Is(err, tasks.ErrTaskNotFound) {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				http.Error(w, "checkpoint not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, checkpoint)
+			return
+		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
