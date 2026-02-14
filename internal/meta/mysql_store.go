@@ -55,6 +55,11 @@ FROM backup_tasks
 ORDER BY id;
 `
 
+const deleteTaskSQL = `
+DELETE FROM backup_tasks
+WHERE id = ?;
+`
+
 const upsertCheckpointSQL = `
 INSERT INTO backup_checkpoints (task_id, file_name, pos, gtid_set, updated_at)
 VALUES (?, ?, ?, ?, ?)
@@ -193,6 +198,11 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 		return nil, err
 	}
 	return list, nil
+}
+
+func (s *MySQLTaskStore) DeleteTask(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx, deleteTaskSQL, taskID)
+	return err
 }
 
 func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, checkpoint binlog.Checkpoint) error {

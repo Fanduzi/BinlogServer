@@ -144,3 +144,23 @@ func TestMySQLTaskStore_LoadCheckpoint(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestMySQLTaskStore_DeleteTask(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	mock.ExpectExec(regexp.QuoteMeta(deleteTaskSQL)).
+		WithArgs("1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := store.DeleteTask(context.Background(), "1"); err != nil {
+		t.Fatalf("DeleteTask returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

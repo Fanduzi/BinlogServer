@@ -10,6 +10,7 @@ type fakeStore struct {
 	tasks     map[string]Task
 	upsertErr error
 	listErr   error
+	deleteErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -33,6 +34,14 @@ func (f *fakeStore) ListTasks(_ context.Context) ([]Task, error) {
 		out = append(out, t)
 	}
 	return out, nil
+}
+
+func (f *fakeStore) DeleteTask(_ context.Context, taskID string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	delete(f.tasks, taskID)
+	return nil
 }
 
 func TestScheduler_PersistsCreatedTask(t *testing.T) {

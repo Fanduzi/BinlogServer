@@ -149,3 +149,65 @@ func TestTaskAPI_GetCheckpoint(t *testing.T) {
 		t.Fatalf("unexpected checkpoint: %+v", cp)
 	}
 }
+
+func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createResp.Code)
+	}
+
+	updateBody := `{
+		"name":"cluster-b",
+		"source":{"host":"10.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":300001},
+		"start":{"mode":"GTID","gtid_set":"24BC785E-9A61-11E1-8A5D-080027635EF5:1-10"},
+		"storage":{"retention_days":30}
+	}`
+	updateResp := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateResp, updateReq)
+	if updateResp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+
+	var updated tasks.Task
+	if err := json.Unmarshal(updateResp.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updated.Name != "cluster-b" {
+		t.Fatalf("expected name cluster-b, got %s", updated.Name)
+	}
+	if updated.Start.Mode != tasks.StartModeGTID || updated.Start.GTIDSet == "" {
+		t.Fatalf("start not updated: %+v", updated.Start)
+	}
+	if updated.Storage.RetentionDays != 30 {
+		t.Fatalf("storage not updated: %+v", updated.Storage)
+	}
+
+	getResp := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tasks/1", nil)
+	handler.ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", getResp.Code)
+	}
+
+	deleteResp := httptest.NewRecorder()
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/tasks/1", nil)
+	handler.ServeHTTP(deleteResp, deleteReq)
+	if deleteResp.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", deleteResp.Code)
+	}
+
+	getAfterDeleteResp := httptest.NewRecorder()
+	getAfterDeleteReq := httptest.NewRequest(http.MethodGet, "/api/tasks/1", nil)
+	handler.ServeHTTP(getAfterDeleteResp, getAfterDeleteReq)
+	if getAfterDeleteResp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", getAfterDeleteResp.Code)
+	}
+}

@@ -24,6 +24,7 @@ type Runner interface {
 type TaskStore interface {
 	UpsertTask(ctx context.Context, task Task) error
 	ListTasks(ctx context.Context) ([]Task, error)
+	DeleteTask(ctx context.Context, taskID string) error
 }
 
 type CheckpointReader interface {
@@ -193,6 +194,27 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	return nil
 }
 
+func (s *Scheduler) ConfigureName(id, name string) error {
+	if name == "" {
+		return errors.New("name is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, ok := s.tasks[id]
+	if !ok {
+		return ErrTaskNotFound
+	}
+	task.Name = name
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	if err := s.persistTaskLocked(task); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Scheduler) StartTask(id string) error {
 	s.mu.Lock()
 
@@ -302,6 +324,26 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 		return Task{}, ErrTaskNotFound
 	}
 	return task, nil
+}
+
+func (s *Scheduler) DeleteTask(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.tasks[id]; !ok {
+		return ErrTaskNotFound
+	}
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
+	}
+	delete(s.tasks, id)
+	if s.store != nil {
+		if err := s.store.DeleteTask(context.Background(), id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Scheduler) ListTasks() []Task {

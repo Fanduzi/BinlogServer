@@ -98,6 +98,9 @@ go run ./cmd/binlog-server
 ```
 
 - `GET /api/tasks`
+- `GET /api/tasks/{id}`
+- `PUT /api/tasks/{id}`
+- `DELETE /api/tasks/{id}`
 - `POST /api/tasks/{id}/start`
 - `POST /api/tasks/{id}/stop`
 - `GET /api/tasks/{id}/checkpoint`
