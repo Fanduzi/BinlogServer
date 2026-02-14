@@ -69,3 +69,32 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 		t.Fatalf("expected final state %s, got %s", tasks.StateStopped, list[0].State)
 	}
 }
+
+func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	reqBody := `{
+		"name":"cluster-a",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001},
+		"start":{"mode":"FILE_POS","file":"mysql-bin.000001","pos":4}
+	}`
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(reqBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	var created tasks.Task
+	if err := json.Unmarshal(createResp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.Source.Host != "127.0.0.1" || created.Source.User != "repl" {
+		t.Fatalf("source not persisted: %+v", created.Source)
+	}
+	if created.Start.Mode != tasks.StartModeFilePos || created.Start.File != "mysql-bin.000001" || created.Start.Pos != 4 {
+		t.Fatalf("start not persisted: %+v", created.Start)
+	}
+}

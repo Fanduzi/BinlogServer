@@ -9,6 +9,7 @@ import (
 
 	"binlog_server/internal/api"
 	"binlog_server/internal/config"
+	"binlog_server/internal/replication"
 	"binlog_server/internal/tasks"
 )
 
@@ -29,7 +30,8 @@ func New(cfg config.Config) *App {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	scheduler := tasks.NewScheduler()
+	runner := replication.NewMySQLRunner(a.cfg.DataDir)
+	scheduler := tasks.NewScheduler(tasks.WithRunner(runner))
 	handler := api.NewServer(scheduler)
 	server := &http.Server{Handler: handler}
 

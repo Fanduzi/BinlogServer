@@ -10,7 +10,10 @@ import (
 )
 
 type createTaskRequest struct {
-	Name string `json:"name"`
+	Name    string              `json:"name"`
+	Source  *tasks.SourceConfig `json:"source,omitempty"`
+	Start   *tasks.StartConfig  `json:"start,omitempty"`
+	Storage *tasks.Storage      `json:"storage,omitempty"`
 }
 
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +28,23 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		task, err := s.tasks.CreateTask(req.Name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Source != nil {
+			if err := s.tasks.ConfigureSource(task.ID, *req.Source); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if req.Start != nil {
+			if err := s.tasks.ConfigureStart(task.ID, *req.Start); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		task, err = s.tasks.GetTask(task.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusCreated, task)

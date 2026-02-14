@@ -10,4 +10,7 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.ListenAddr != ":8080" {
 		t.Fatalf("expected :8080, got %s", cfg.ListenAddr)
 	}
+	if cfg.DataDir != "./data" {
+		t.Fatalf("expected ./data, got %s", cfg.DataDir)
+	}
 }
