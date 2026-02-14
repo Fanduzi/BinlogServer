@@ -4,7 +4,7 @@ Binlog Server MVP（进行中）。
 
 当前已实现：
 
-- 单进程 Go 服务启动骨架
+- 单进程 Go 服务启动骨架（Gin 路由）
 - 任务状态机与内存调度器
 - 管理 API（创建任务、列表、启动、停止）
 - 健康检查 `/healthz`
@@ -21,6 +21,7 @@ go run ./cmd/binlog-server
 可通过环境变量覆盖：`BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080`
 
 启动后打开管理台：`http://127.0.0.1:8080/ui/`
+（这是内置旧版 UI，便于兼容；推荐使用 `frontend/` 新前端）
   
 默认数据目录：`./data`  
 可通过环境变量覆盖：`BINLOG_SERVER_DATA_DIR=/path/to/data`
@@ -35,6 +36,25 @@ go run ./cmd/binlog-server
 - `BINLOG_SERVER_UPLOAD_REGION`（可选）
 - `BINLOG_SERVER_UPLOAD_PREFIX`（可选）
 - `BINLOG_SERVER_UPLOAD_USE_SSL=true|false`
+
+## 前后端分离开发
+
+后端：
+
+```bash
+go run ./cmd/binlog-server
+```
+
+前端（Vue3 + Element Plus）：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+默认前端地址：`http://127.0.0.1:5173`  
+`vite` 已代理 `/api` 到 `http://127.0.0.1:8080`。
 
 ## API
 
@@ -119,6 +139,7 @@ go run ./cmd/binlog-server
 任务事件（创建、启动、重试、错误等）也会持久化到 MySQL，可通过 `/api/tasks/{id}/events` 查询。
 `/api/tasks/{id}/files` 会返回文件元数据与上传状态（`LOCAL_ONLY/UPLOADED/UPLOAD_FAILED`）。
 开启上传后，binlog rotate 封口后会上传到对象存储，object key 规则：`<prefix>/<taskID>/<fileName>`（prefix 可空）。
+当前上传策略是“最佳努力模式”：上传失败会记录为 `UPLOAD_FAILED`，但不会中断 binlog 拉取。
 
 ## 测试
 

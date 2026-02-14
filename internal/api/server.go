@@ -7,6 +7,8 @@ import (
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 	"binlog_server/internal/ui"
+
+	"github.com/gin-gonic/gin"
 )
 
 type taskService interface {
@@ -27,35 +29,38 @@ type taskService interface {
 
 type Server struct {
 	tasks taskService
-	mux   *http.ServeMux
+	gin   *gin.Engine
 }
 
 func NewServer(taskSvc taskService) http.Handler {
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.New()
+	engine.Use(gin.Recovery())
+
 	s := &Server{
 		tasks: taskSvc,
-		mux:   http.NewServeMux(),
+		gin:   engine,
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("/healthz", s.handleHealth)
-	s.mux.HandleFunc("/api/summary", s.handleSummary)
-	s.mux.HandleFunc("/api/tasks", s.handleTasks)
-	s.mux.HandleFunc("/api/tasks/", s.handleTaskAction)
-	s.mux.Handle("/ui/", http.StripPrefix("/ui/", ui.Handler()))
-	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		http.Redirect(w, r, "/ui/", http.StatusFound)
+	s.gin.GET("/healthz", gin.WrapF(s.handleHealth))
+	s.gin.GET("/api/summary", gin.WrapF(s.handleSummary))
+	s.gin.POST("/api/tasks", gin.WrapF(s.handleTasks))
+	s.gin.GET("/api/tasks", gin.WrapF(s.handleTasks))
+	s.gin.Any("/api/tasks/*path", gin.WrapF(s.handleTaskAction))
+
+	uiHandler := http.StripPrefix("/ui/", ui.Handler())
+	s.gin.Any("/ui/*path", gin.WrapH(uiHandler))
+	s.gin.GET("/", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/ui/")
 	})
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.gin.ServeHTTP(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
