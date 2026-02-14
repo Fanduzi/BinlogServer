@@ -41,6 +41,7 @@ func NewServer(taskSvc taskService) http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
+	s.mux.HandleFunc("/api/summary", s.handleSummary)
 	s.mux.HandleFunc("/api/tasks", s.handleTasks)
 	s.mux.HandleFunc("/api/tasks/", s.handleTaskAction)
 	s.mux.Handle("/ui/", http.StripPrefix("/ui/", ui.Handler()))

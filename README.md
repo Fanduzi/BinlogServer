@@ -100,6 +100,7 @@ go run ./cmd/binlog-server
 ```
 
 - `GET /api/tasks`
+- `GET /api/summary`
 - `GET /api/tasks/{id}`
 - `PUT /api/tasks/{id}`
 - `DELETE /api/tasks/{id}`

@@ -93,6 +93,31 @@ h2 {
   margin-bottom: 12px;
 }
 
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.stat {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  background: #f8fbfc;
+}
+
+.stat p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stat strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 24px;
+}
+
 .muted {
   color: var(--muted);
   font-size: 13px;
@@ -246,6 +271,9 @@ tr:hover td {
   }
   .detail-content {
     grid-template-columns: 1fr;
+  }
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 }
 

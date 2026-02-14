@@ -10,6 +10,11 @@ const taskTableEl = document.getElementById("taskTable");
 const taskCountEl = document.getElementById("taskCount");
 const detailHintEl = document.getElementById("detailHint");
 const detailContentEl = document.getElementById("detailContent");
+const sumTotalEl = document.getElementById("sumTotal");
+const sumRunningEl = document.getElementById("sumRunning");
+const sumRetryEl = document.getElementById("sumRetry");
+const sumStoppedEl = document.getElementById("sumStopped");
+const sumFailedEl = document.getElementById("sumFailed");
 
 document.getElementById("refreshBtn").addEventListener("click", () => loadTasks(true));
 document.getElementById("cancelEditBtn").addEventListener("click", resetForm);
@@ -110,6 +115,7 @@ async function onSubmitForm(e) {
 async function loadTasks(keepSelection) {
   try {
     state.tasks = await api("/api/tasks");
+    await loadSummary();
     renderTaskTable();
     taskCountEl.textContent = `${state.tasks.length} tasks`;
 
@@ -121,6 +127,15 @@ async function loadTasks(keepSelection) {
   } catch (err) {
     taskTableEl.innerHTML = `<p class="muted">加载失败: ${escapeHtml(err.message || String(err))}</p>`;
   }
+}
+
+async function loadSummary() {
+  const summary = await api("/api/summary");
+  sumTotalEl.textContent = String(summary.total || 0);
+  sumRunningEl.textContent = String(summary.running || 0);
+  sumRetryEl.textContent = String(summary.retry_backoff || 0);
+  sumStoppedEl.textContent = String(summary.stopped || 0);
+  sumFailedEl.textContent = String(summary.failed || 0);
 }
 
 function renderTaskTable() {

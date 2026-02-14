@@ -333,3 +333,47 @@ func TestUI_RootRedirectAndDashboardPage(t *testing.T) {
 		t.Fatalf("expected ui html to contain dashboard title, got body=%s", uiResp.Body.String())
 	}
 }
+
+func TestAPI_Summary(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	taskA, err := scheduler.CreateTask("a")
+	if err != nil {
+		t.Fatalf("CreateTask A returned error: %v", err)
+	}
+	taskB, err := scheduler.CreateTask("b")
+	if err != nil {
+		t.Fatalf("CreateTask B returned error: %v", err)
+	}
+	if err := scheduler.StartTask(taskA.ID); err != nil {
+		t.Fatalf("StartTask A returned error: %v", err)
+	}
+	if err := scheduler.StartTask(taskB.ID); err != nil {
+		t.Fatalf("StartTask B returned error: %v", err)
+	}
+	if err := scheduler.StopTask(taskB.ID); err != nil {
+		t.Fatalf("StopTask B returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summary", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]int
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["total"] != 2 {
+		t.Fatalf("expected total=2, got %d", body["total"])
+	}
+	if body["running"] != 1 {
+		t.Fatalf("expected running=1, got %d", body["running"])
+	}
+	if body["stopped"] != 1 {
+		t.Fatalf("expected stopped=1, got %d", body["stopped"])
+	}
+}

@@ -9,6 +9,37 @@ import (
 	"binlog_server/internal/tasks"
 )
 
+type summaryResponse struct {
+	Total        int `json:"total"`
+	Running      int `json:"running"`
+	RetryBackoff int `json:"retry_backoff"`
+	Stopped      int `json:"stopped"`
+	Failed       int `json:"failed"`
+}
+
+func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	items := s.tasks.ListTasks()
+	resp := summaryResponse{Total: len(items)}
+	for _, task := range items {
+		switch task.State {
+		case tasks.StateRunning:
+			resp.Running++
+		case tasks.StateRetryBackoff:
+			resp.RetryBackoff++
+		case tasks.StateStopped:
+			resp.Stopped++
+		case tasks.StateFailed:
+			resp.Failed++
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 type createTaskRequest struct {
 	Name    string              `json:"name"`
 	Source  *tasks.SourceConfig `json:"source,omitempty"`
