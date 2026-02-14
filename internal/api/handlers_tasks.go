@@ -92,9 +92,9 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusCreated, task)
+		writeJSON(w, http.StatusCreated, sanitizeTask(task))
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.tasks.ListTasks())
+		writeJSON(w, http.StatusOK, sanitizeTaskList(s.tasks.ListTasks()))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -217,7 +217,7 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, task)
+		writeJSON(w, http.StatusOK, sanitizeTask(task))
 	case http.MethodPut:
 		var req updateTaskRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -273,7 +273,7 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, task)
+		writeJSON(w, http.StatusOK, sanitizeTask(task))
 	case http.MethodDelete:
 		if err := s.tasks.DeleteTask(taskID); err != nil {
 			if errors.Is(err, tasks.ErrTaskNotFound) {
@@ -293,4 +293,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func sanitizeTask(task tasks.Task) tasks.Task {
+	task.Source.Password = ""
+	return task
+}
+
+func sanitizeTaskList(items []tasks.Task) []tasks.Task {
+	out := make([]tasks.Task, len(items))
+	for i := range items {
+		out[i] = sanitizeTask(items[i])
+	}
+	return out
 }

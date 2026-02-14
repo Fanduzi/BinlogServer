@@ -165,6 +165,9 @@ func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 	if !ok {
 		return ErrTaskNotFound
 	}
+	if source.Password == "" {
+		source.Password = task.Source.Password
+	}
 	task.Source = source
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task

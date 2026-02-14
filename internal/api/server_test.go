@@ -97,11 +97,22 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	if created.Source.Host != "127.0.0.1" || created.Source.User != "repl" {
 		t.Fatalf("source not persisted: %+v", created.Source)
 	}
+	if created.Source.Password != "" {
+		t.Fatalf("expected password hidden in response, got %q", created.Source.Password)
+	}
 	if created.Start.Mode != tasks.StartModeFilePos || created.Start.File != "mysql-bin.000001" || created.Start.Pos != 4 {
 		t.Fatalf("start not persisted: %+v", created.Start)
 	}
 	if created.Storage.RetentionDays != 15 {
 		t.Fatalf("storage not persisted: %+v", created.Storage)
+	}
+
+	stored, err := scheduler.GetTask(created.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if stored.Source.Password != "secret" {
+		t.Fatalf("expected password stored internally, got %q", stored.Source.Password)
 	}
 }
 
@@ -221,6 +232,28 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 	}
 	if updated.Storage.RetentionDays != 30 {
 		t.Fatalf("storage not updated: %+v", updated.Storage)
+	}
+	if updated.Source.Password != "" {
+		t.Fatalf("expected password hidden in response, got %q", updated.Source.Password)
+	}
+
+	updateNoPassword := `{
+		"source":{"host":"10.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":300001}
+	}`
+	updateNoPwdResp := httptest.NewRecorder()
+	updateNoPwdReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(updateNoPassword))
+	updateNoPwdReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateNoPwdResp, updateNoPwdReq)
+	if updateNoPwdResp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", updateNoPwdResp.Code, updateNoPwdResp.Body.String())
+	}
+
+	internalTask, err := scheduler.GetTask("1")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if internalTask.Source.Password != "secret" {
+		t.Fatalf("expected password preserved when omitted, got %q", internalTask.Source.Password)
 	}
 
 	getResp := httptest.NewRecorder()
