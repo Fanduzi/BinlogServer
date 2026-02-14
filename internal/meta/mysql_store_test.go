@@ -164,3 +164,48 @@ func TestMySQLTaskStore_DeleteTask(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestMySQLTaskStore_AppendAndListEvents(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	event := tasks.TaskEvent{
+		TaskID:  "1",
+		Type:    "TASK_STARTED",
+		Message: "task started",
+		Detail:  "",
+		Time:    time.Now(),
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta(insertTaskEventSQL)).
+		WithArgs("1", "TASK_STARTED", "task started", "", sqlmock.AnyArg(), int64(0)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	if err := store.AppendEvent(context.Background(), event); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+
+	rows := sqlmock.NewRows([]string{"task_id", "event_type", "message", "detail", "event_time", "event_seq"}).
+		AddRow("1", "TASK_STARTED", "task started", "", time.Now(), int64(12))
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskEventsSQL)).
+		WithArgs("1", 10).
+		WillReturnRows(rows)
+
+	events, err := store.ListEvents(context.Background(), "1", 10)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != "TASK_STARTED" {
+		t.Fatalf("unexpected event type: %s", events[0].Type)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

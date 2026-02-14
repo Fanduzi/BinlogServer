@@ -112,6 +112,7 @@ go run ./cmd/binlog-server
 
 如果配置了 `BINLOG_SERVER_META_DSN`，任务配置与状态会持久化到外部 MySQL，服务重启后会自动恢复任务元数据。
 同时会持久化每个任务的最新 checkpoint（`file/pos`），重启后优先从 checkpoint 位点继续拉取。
+任务事件（创建、启动、重试、错误等）也会持久化到 MySQL，可通过 `/api/tasks/{id}/events` 查询。
 开启上传后，binlog rotate 封口后会上传到对象存储，object key 规则：`<prefix>/<taskID>/<fileName>`（prefix 可空）。
 
 ## 测试

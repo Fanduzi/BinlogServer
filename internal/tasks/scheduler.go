@@ -31,6 +31,11 @@ type CheckpointReader interface {
 	LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error)
 }
 
+type EventStore interface {
+	AppendEvent(ctx context.Context, event TaskEvent) error
+	ListEvents(ctx context.Context, taskID string, limit int) ([]TaskEvent, error)
+}
+
 type Option func(*Scheduler)
 
 func WithRunner(runner Runner) Option {
@@ -62,6 +67,12 @@ func WithCheckpointReader(reader CheckpointReader) Option {
 	}
 }
 
+func WithEventStore(store EventStore) Option {
+	return func(s *Scheduler) {
+		s.eventStore = store
+	}
+}
+
 type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
@@ -75,6 +86,7 @@ type Scheduler struct {
 	retryMaxDelay  time.Duration
 
 	checkpointReader CheckpointReader
+	eventStore       EventStore
 	eventSeq         int64
 }
 
@@ -490,6 +502,9 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	if _, ok := s.tasks[taskID]; !ok {
 		return nil, ErrTaskNotFound
 	}
+	if s.eventStore != nil {
+		return s.eventStore.ListEvents(context.Background(), taskID, limit)
+	}
 	events := s.events[taskID]
 	if limit <= 0 || limit >= len(events) {
 		out := make([]TaskEvent, len(events))
@@ -512,4 +527,7 @@ func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string)
 		Sequence: s.eventSeq,
 	}
 	s.events[taskID] = append(s.events[taskID], event)
+	if s.eventStore != nil {
+		_ = s.eventStore.AppendEvent(context.Background(), event)
+	}
 }

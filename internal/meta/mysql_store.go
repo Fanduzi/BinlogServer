@@ -36,6 +36,19 @@ CREATE TABLE IF NOT EXISTS backup_checkpoints (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
+const createTaskEventsTableSQL = `
+CREATE TABLE IF NOT EXISTS task_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  task_id VARCHAR(64) NOT NULL,
+  event_type VARCHAR(64) NOT NULL,
+  message TEXT NULL,
+  detail TEXT NULL,
+  event_time DATETIME(6) NOT NULL,
+  event_seq BIGINT NOT NULL,
+  INDEX idx_task_events_task_time (task_id, event_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
 const upsertTaskSQL = `
 INSERT INTO backup_tasks (id, name, state, last_error, source_json, start_json, storage_json, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -76,6 +89,19 @@ FROM backup_checkpoints
 WHERE task_id = ?;
 `
 
+const insertTaskEventSQL = `
+INSERT INTO task_events (task_id, event_type, message, detail, event_time, event_seq)
+VALUES (?, ?, ?, ?, ?, ?);
+`
+
+const listTaskEventsSQL = `
+SELECT task_id, event_type, message, detail, event_time, event_seq
+FROM task_events
+WHERE task_id = ?
+ORDER BY id DESC
+LIMIT ?;
+`
+
 type MySQLTaskStore struct {
 	db *sql.DB
 }
@@ -111,6 +137,10 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, createCheckpointTableSQL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, createTaskEventsTableSQL)
 	return err
 }
 
@@ -238,4 +268,52 @@ func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (bin
 	}
 	cp.GTIDSet = gtidSet.String
 	return cp, true, nil
+}
+
+func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent) error {
+	eventTime := event.Time
+	if eventTime.IsZero() {
+		eventTime = time.Now()
+	}
+
+	_, err := s.db.ExecContext(
+		ctx,
+		insertTaskEventSQL,
+		event.TaskID,
+		event.Type,
+		event.Message,
+		event.Detail,
+		eventTime,
+		event.Sequence,
+	)
+	return err
+}
+
+func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit int) ([]tasks.TaskEvent, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, listTaskEventsSQL, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []tasks.TaskEvent
+	for rows.Next() {
+		var e tasks.TaskEvent
+		if err := rows.Scan(&e.TaskID, &e.Type, &e.Message, &e.Detail, &e.Time, &e.Sequence); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Return events in ascending order for stable timeline.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }
