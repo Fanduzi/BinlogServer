@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -35,6 +36,17 @@ func WithStore(store TaskStore) Option {
 	}
 }
 
+func WithRetryBackoff(base, max time.Duration) Option {
+	return func(s *Scheduler) {
+		if base > 0 {
+			s.retryBaseDelay = base
+		}
+		if max > 0 {
+			s.retryMaxDelay = max
+		}
+	}
+}
+
 type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
@@ -42,12 +54,18 @@ type Scheduler struct {
 	runner  Runner
 	store   TaskStore
 	cancels map[string]context.CancelFunc
+
+	retryBaseDelay time.Duration
+	retryMaxDelay  time.Duration
 }
 
 func NewScheduler(opts ...Option) *Scheduler {
 	s := &Scheduler{
 		tasks:   make(map[string]Task),
 		cancels: make(map[string]context.CancelFunc),
+
+		retryBaseDelay: time.Second,
+		retryMaxDelay:  30 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -258,26 +276,59 @@ func (s *Scheduler) ListTasks() []Task {
 }
 
 func (s *Scheduler) runTask(ctx context.Context, id string, task Task) {
-	err := s.runner.Run(ctx, task)
-	if err == nil || errors.Is(err, context.Canceled) {
-		return
-	}
+	attempt := 0
+	for {
+		err := s.runner.Run(ctx, task)
+		if err == nil || errors.Is(err, context.Canceled) {
+			return
+		}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+		s.mu.Lock()
+		current, ok := s.tasks[id]
+		if !ok {
+			s.mu.Unlock()
+			return
+		}
+		if current.State == StateStopped || current.State == StateStopping {
+			s.mu.Unlock()
+			return
+		}
 
-	current, ok := s.tasks[id]
-	if !ok {
-		return
+		current.State = StateRetryBackoff
+		current.LastError = err.Error()
+		current.UpdatedAt = time.Now()
+		s.tasks[id] = current
+		_ = s.persistTaskLocked(current)
+		s.mu.Unlock()
+
+		attempt++
+		delay := s.retryDelay(attempt)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		s.mu.Lock()
+		current, ok = s.tasks[id]
+		if !ok {
+			s.mu.Unlock()
+			return
+		}
+		if current.State == StateStopped || current.State == StateStopping {
+			s.mu.Unlock()
+			return
+		}
+		current.State = StateRunning
+		current.LastError = ""
+		current.UpdatedAt = time.Now()
+		s.tasks[id] = current
+		_ = s.persistTaskLocked(current)
+		task = current
+		s.mu.Unlock()
 	}
-	if current.State == StateStopped || current.State == StateStopping {
-		return
-	}
-	current.State = StateRetryBackoff
-	current.LastError = err.Error()
-	current.UpdatedAt = time.Now()
-	s.tasks[id] = current
-	_ = s.persistTaskLocked(current)
 }
 
 func (s *Scheduler) Restore(ctx context.Context) error {
@@ -311,4 +362,16 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 		return nil
 	}
 	return s.store.UpsertTask(context.Background(), task)
+}
+
+func (s *Scheduler) retryDelay(attempt int) time.Duration {
+	if attempt <= 1 {
+		return s.retryBaseDelay
+	}
+
+	delay := float64(s.retryBaseDelay) * math.Pow(2, float64(attempt-1))
+	if delay > float64(s.retryMaxDelay) {
+		return s.retryMaxDelay
+	}
+	return time.Duration(delay)
 }
