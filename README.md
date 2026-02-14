@@ -19,6 +19,8 @@ go run ./cmd/binlog-server
 
 默认监听地址：`:8080`  
 可通过环境变量覆盖：`BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080`
+
+启动后打开管理台：`http://127.0.0.1:8080/ui/`
   
 默认数据目录：`./data`  
 可通过环境变量覆盖：`BINLOG_SERVER_DATA_DIR=/path/to/data`

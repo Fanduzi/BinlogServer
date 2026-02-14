@@ -6,6 +6,7 @@ import (
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
+	"binlog_server/internal/ui"
 )
 
 type taskService interface {
@@ -41,6 +42,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/api/tasks", s.handleTasks)
 	s.mux.HandleFunc("/api/tasks/", s.handleTaskAction)
+	s.mux.Handle("/ui/", http.StripPrefix("/ui/", ui.Handler()))
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

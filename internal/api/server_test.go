@@ -239,3 +239,28 @@ func TestTaskAPI_ListEvents(t *testing.T) {
 		t.Fatal("expected events not empty")
 	}
 }
+
+func TestUI_RootRedirectAndDashboardPage(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	rootResp := httptest.NewRecorder()
+	rootReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	handler.ServeHTTP(rootResp, rootReq)
+	if rootResp.Code != http.StatusFound {
+		t.Fatalf("expected 302 for root, got %d", rootResp.Code)
+	}
+	if loc := rootResp.Header().Get("Location"); loc != "/ui/" {
+		t.Fatalf("expected redirect to /ui/, got %q", loc)
+	}
+
+	uiResp := httptest.NewRecorder()
+	uiReq := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	handler.ServeHTTP(uiResp, uiReq)
+	if uiResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /ui/, got %d", uiResp.Code)
+	}
+	if !bytes.Contains(uiResp.Body.Bytes(), []byte("Binlog Control Tower")) {
+		t.Fatalf("expected ui html to contain dashboard title, got body=%s", uiResp.Body.String())
+	}
+}

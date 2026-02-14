@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binlog Control Tower</title>
+  <link rel="stylesheet" href="/ui/styles.css">
+</head>
+<body>
+  <div class="backdrop"></div>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <p class="eyebrow">Binlog Backup Console</p>
+        <h1>Binlog Control Tower</h1>
+      </div>
+      <div class="toolbar">
+        <button id="refreshBtn" class="btn btn-light">刷新</button>
+      </div>
+    </header>
+
+    <section class="layout">
+      <article class="panel create-panel">
+        <h2 id="formTitle">创建任务</h2>
+        <form id="taskForm">
+          <div class="grid two">
+            <label>任务名<input name="name" required></label>
+            <label>源库主机<input name="host" required placeholder="127.0.0.1"></label>
+            <label>端口<input name="port" type="number" value="3306" required></label>
+            <label>用户<input name="user" required placeholder="repl"></label>
+            <label>密码<input name="password" type="password"></label>
+            <label>Server ID<input name="server_id" type="number" value="200001"></label>
+            <label>Flavor
+              <select name="flavor">
+                <option value="mysql">mysql</option>
+              </select>
+            </label>
+            <label>保留天数<input name="retention_days" type="number" value="7"></label>
+          </div>
+
+          <div class="grid three">
+            <label>起点模式
+              <select name="start_mode" id="startMode">
+                <option value="LATEST">LATEST</option>
+                <option value="FILE_POS">FILE_POS</option>
+                <option value="GTID">GTID</option>
+              </select>
+            </label>
+            <label>起始文件<input name="start_file" placeholder="mysql-bin.000001"></label>
+            <label>起始位置<input name="start_pos" type="number" placeholder="4"></label>
+          </div>
+          <label>GTID Set<input name="start_gtid" placeholder="24BC...:1-10"></label>
+
+          <div class="actions">
+            <button class="btn btn-primary" type="submit">保存</button>
+            <button class="btn btn-light" type="button" id="cancelEditBtn">取消编辑</button>
+          </div>
+        </form>
+      </article>
+
+      <article class="panel list-panel">
+        <div class="panel-head">
+          <h2>任务列表</h2>
+          <p id="taskCount" class="muted">0 tasks</p>
+        </div>
+        <div id="taskTable" class="task-table"></div>
+      </article>
+    </section>
+
+    <section class="layout single">
+      <article class="panel detail-panel">
+        <div class="panel-head">
+          <h2>任务详情</h2>
+          <p id="detailHint" class="muted">点击任务查看 checkpoint 与事件</p>
+        </div>
+        <div id="detailContent" class="detail-content"></div>
+      </article>
+    </section>
+  </main>
+  <script src="/ui/app.js"></script>
+</body>
+</html>
