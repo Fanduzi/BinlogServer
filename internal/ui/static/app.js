@@ -257,6 +257,8 @@ async function showDetail(id) {
       <td>${escapeHtml(String(f.size_bytes || 0))}</td>
       <td>${escapeHtml(String(f.start_pos || 0))}</td>
       <td>${escapeHtml(String(f.end_pos || 0))}</td>
+      <td>${escapeHtml(f.upload_state || "LOCAL_ONLY")}</td>
+      <td>${escapeHtml(f.object_key || "-")}</td>
       <td>${escapeHtml(f.sealed_at || "")}</td>
     </tr>
   `).join("");
@@ -276,7 +278,7 @@ async function showDetail(id) {
       ${filesHtml ? `
         <div class="events">
           <table>
-            <thead><tr><th>File</th><th>Size</th><th>Start</th><th>End</th><th>SealedAt</th></tr></thead>
+            <thead><tr><th>File</th><th>Size</th><th>Start</th><th>End</th><th>Upload</th><th>ObjectKey</th><th>SealedAt</th></tr></thead>
             <tbody>${filesHtml}</tbody>
           </table>
         </div>

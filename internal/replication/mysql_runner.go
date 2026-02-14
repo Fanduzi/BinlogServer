@@ -147,29 +147,48 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 				if err := file.Close(); err != nil {
 					return err
 				}
+				var fileMeta *tasks.BinlogFile
 				if r.fileMetaStore != nil {
 					info, err := os.Stat(currentPath)
 					if err != nil {
 						return err
 					}
 					meta := tasks.BinlogFile{
-						TaskID:    task.ID,
-						FileName:  filepath.Base(currentPath),
-						FilePath:  currentPath,
-						SizeBytes: info.Size(),
-						StartPos:  currentStartPos,
-						EndPos:    currentPos,
-						CreatedAt: currentCreatedAt,
-						SealedAt:  time.Now(),
+						TaskID:      task.ID,
+						FileName:    filepath.Base(currentPath),
+						FilePath:    currentPath,
+						SizeBytes:   info.Size(),
+						StartPos:    currentStartPos,
+						EndPos:      currentPos,
+						CreatedAt:   currentCreatedAt,
+						SealedAt:    time.Now(),
+						UploadState: "LOCAL_ONLY",
 					}
 					if err := r.fileMetaStore.UpsertBinlogFile(ctx, meta); err != nil {
 						return err
 					}
+					fileMeta = &meta
 				}
 				if r.uploader != nil {
 					objectKey := buildObjectKey(r.uploadPrefix, task.ID, filepath.Base(currentPath))
 					if err := r.uploader.UploadFile(ctx, task.ID, currentPath, objectKey); err != nil {
+						if fileMeta != nil {
+							fileMeta.UploadState = "UPLOAD_FAILED"
+							fileMeta.UploadError = err.Error()
+							if saveErr := r.fileMetaStore.UpsertBinlogFile(ctx, *fileMeta); saveErr != nil {
+								return saveErr
+							}
+						}
 						return err
+					}
+					if fileMeta != nil {
+						fileMeta.UploadState = "UPLOADED"
+						fileMeta.ObjectKey = objectKey
+						fileMeta.UploadError = ""
+						fileMeta.UploadedAt = time.Now()
+						if err := r.fileMetaStore.UpsertBinlogFile(ctx, *fileMeta); err != nil {
+							return err
+						}
 					}
 				}
 				file, writer, currentPath, err = r.openBinlogWriter(task, currentFile, currentPos)

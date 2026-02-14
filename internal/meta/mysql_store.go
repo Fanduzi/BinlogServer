@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS binlog_files (
   end_pos BIGINT UNSIGNED NOT NULL,
   created_at DATETIME(6) NOT NULL,
   sealed_at DATETIME(6) NOT NULL,
+  object_key TEXT NULL,
+  upload_state VARCHAR(32) NOT NULL DEFAULT 'LOCAL_ONLY',
+  upload_error TEXT NULL,
+  uploaded_at DATETIME(6) NULL,
   UNIQUE KEY uk_task_file (task_id, file_name),
   INDEX idx_task_sealed (task_id, sealed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -119,19 +123,27 @@ LIMIT ?;
 `
 
 const upsertBinlogFileSQL = `
-INSERT INTO binlog_files (task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO binlog_files (
+  task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
+  object_key, upload_state, upload_error, uploaded_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   file_path = VALUES(file_path),
   size_bytes = VALUES(size_bytes),
   start_pos = VALUES(start_pos),
   end_pos = VALUES(end_pos),
   created_at = VALUES(created_at),
-  sealed_at = VALUES(sealed_at);
+  sealed_at = VALUES(sealed_at),
+  object_key = VALUES(object_key),
+  upload_state = VALUES(upload_state),
+  upload_error = VALUES(upload_error),
+  uploaded_at = VALUES(uploaded_at);
 `
 
 const listBinlogFilesSQL = `
-SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at
+SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
+       object_key, upload_state, upload_error, uploaded_at
 FROM binlog_files
 WHERE task_id = ?
 ORDER BY sealed_at DESC
@@ -367,6 +379,15 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	if sealedAt.IsZero() {
 		sealedAt = createdAt
 	}
+	uploadedAt := sql.NullTime{}
+	if !meta.UploadedAt.IsZero() {
+		uploadedAt.Valid = true
+		uploadedAt.Time = meta.UploadedAt
+	}
+	uploadState := meta.UploadState
+	if uploadState == "" {
+		uploadState = "LOCAL_ONLY"
+	}
 
 	_, err := s.db.ExecContext(
 		ctx,
@@ -379,6 +400,10 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 		meta.EndPos,
 		createdAt,
 		sealedAt,
+		meta.ObjectKey,
+		uploadState,
+		meta.UploadError,
+		uploadedAt,
 	)
 	return err
 }
@@ -397,6 +422,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 	var out []tasks.BinlogFile
 	for rows.Next() {
 		var item tasks.BinlogFile
+		var uploadedAt sql.NullTime
 		if err := rows.Scan(
 			&item.TaskID,
 			&item.FileName,
@@ -406,8 +432,15 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 			&item.EndPos,
 			&item.CreatedAt,
 			&item.SealedAt,
+			&item.ObjectKey,
+			&item.UploadState,
+			&item.UploadError,
+			&uploadedAt,
 		); err != nil {
 			return nil, err
+		}
+		if uploadedAt.Valid {
+			item.UploadedAt = uploadedAt.Time
 		}
 		out = append(out, item)
 	}

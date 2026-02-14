@@ -219,14 +219,18 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 
 	store := newMySQLTaskStoreFromDB(db)
 	fileMeta := tasks.BinlogFile{
-		TaskID:    "1",
-		FileName:  "mysql-bin.000001",
-		FilePath:  "/tmp/mysql-bin.000001",
-		SizeBytes: 1024,
-		StartPos:  4,
-		EndPos:    1200,
-		CreatedAt: time.Now().Add(-time.Minute),
-		SealedAt:  time.Now(),
+		TaskID:      "1",
+		FileName:    "mysql-bin.000001",
+		FilePath:    "/tmp/mysql-bin.000001",
+		SizeBytes:   1024,
+		StartPos:    4,
+		EndPos:      1200,
+		CreatedAt:   time.Now().Add(-time.Minute),
+		SealedAt:    time.Now(),
+		ObjectKey:   "prefix/1/mysql-bin.000001",
+		UploadState: "UPLOADED",
+		UploadError: "",
+		UploadedAt:  time.Now(),
 	}
 
 	mock.ExpectExec(regexp.QuoteMeta(upsertBinlogFileSQL)).
@@ -239,6 +243,10 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 			uint32(1200),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
+			"prefix/1/mysql-bin.000001",
+			"UPLOADED",
+			"",
+			sqlmock.AnyArg(),
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	if err := store.UpsertBinlogFile(context.Background(), fileMeta); err != nil {
@@ -247,7 +255,11 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 
 	rows := sqlmock.NewRows([]string{
 		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
-	}).AddRow("1", "mysql-bin.000001", "/tmp/mysql-bin.000001", int64(1024), uint32(4), uint32(1200), time.Now().Add(-time.Minute), time.Now())
+		"object_key", "upload_state", "upload_error", "uploaded_at",
+	}).AddRow(
+		"1", "mysql-bin.000001", "/tmp/mysql-bin.000001", int64(1024), uint32(4), uint32(1200), time.Now().Add(-time.Minute), time.Now(),
+		"prefix/1/mysql-bin.000001", "UPLOADED", "", time.Now(),
+	)
 	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
 		WithArgs("1", 10).
 		WillReturnRows(rows)
@@ -261,6 +273,9 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 	if files[0].FileName != "mysql-bin.000001" {
 		t.Fatalf("unexpected file name: %s", files[0].FileName)
+	}
+	if files[0].UploadState != "UPLOADED" {
+		t.Fatalf("unexpected upload state: %s", files[0].UploadState)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
