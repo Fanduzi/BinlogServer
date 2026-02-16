@@ -8,22 +8,23 @@ import (
 
 const acquireLeaseSQL = `
 INSERT INTO task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
-VALUES (?, ?, 1, ?, ?)
+VALUES (?, ?, 1, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), NOW(6))
 ON DUPLICATE KEY UPDATE
-  owner_worker_id = IF(lease_expire_at <= ?, ?, owner_worker_id),
-  epoch = IF(lease_expire_at <= ?, epoch + 1, epoch),
-  lease_expire_at = IF(lease_expire_at <= ?, ?, lease_expire_at),
-  renewed_at = IF(lease_expire_at <= ?, VALUES(renewed_at), renewed_at);
+  owner_worker_id = IF(lease_expire_at <= NOW(6), ?, owner_worker_id),
+  epoch = IF(lease_expire_at <= NOW(6), epoch + 1, epoch),
+  lease_expire_at = IF(lease_expire_at <= NOW(6), DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), lease_expire_at),
+  renewed_at = IF(lease_expire_at <= NOW(6), NOW(6), renewed_at);
 `
 
 const renewLeaseSQL = `
 UPDATE task_leases
-SET lease_expire_at = ?, renewed_at = ?
+SET lease_expire_at = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), renewed_at = NOW(6)
 WHERE task_id = ? AND owner_worker_id = ? AND epoch = ?;
 `
 
 const releaseLeaseSQL = `
-DELETE FROM task_leases
+UPDATE task_leases
+SET owner_worker_id = '', lease_expire_at = NOW(6), renewed_at = NOW(6)
 WHERE task_id = ? AND owner_worker_id = ? AND epoch = ?;
 `
 
@@ -31,6 +32,10 @@ const getLeaseSQL = `
 SELECT task_id, owner_worker_id, epoch, lease_expire_at, renewed_at
 FROM task_leases
 WHERE task_id = ?;
+`
+
+const currentDBTimeSQL = `
+SELECT NOW(6);
 `
 
 type Lease struct {
@@ -50,55 +55,91 @@ func NewLeaseStore(db *sql.DB) *LeaseStore {
 }
 
 func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, now time.Time, ttl time.Duration) (int64, bool, error) {
-	leaseExpireAt := now.Add(ttl)
-	_, err := s.db.ExecContext(
-		ctx,
-		acquireLeaseSQL,
-		taskID,
-		workerID,
-		leaseExpireAt,
-		now,
-		now,
-		workerID,
-		now,
-		now,
-		leaseExpireAt,
-		now,
+	_ = now
+	ttlMicros := durationToMicroseconds(ttl)
+	var (
+		epoch int64
+		ok    bool
 	)
-	if err != nil {
-		return 0, false, err
-	}
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		_, err := s.db.ExecContext(
+			ctx,
+			acquireLeaseSQL,
+			taskID,
+			workerID,
+			ttlMicros,
+			workerID,
+			ttlMicros,
+		)
+		if err != nil {
+			return err
+		}
 
-	lease, ok, err := s.Get(ctx, taskID)
+		lease, exists, err := s.getNoRetry(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			epoch = 0
+			ok = false
+			return nil
+		}
+
+		dbNow, err := s.currentDBTimeNoRetry(ctx)
+		if err != nil {
+			return err
+		}
+		epoch = lease.Epoch
+		ok = lease.OwnerWorkerID == workerID && lease.LeaseExpireAt.After(dbNow)
+		return nil
+	})
 	if err != nil {
 		return 0, false, err
 	}
-	if !ok {
-		return 0, false, nil
-	}
-	if lease.OwnerWorkerID != workerID || !lease.LeaseExpireAt.After(now) {
-		return lease.Epoch, false, nil
-	}
-	return lease.Epoch, true, nil
+	return epoch, ok, nil
 }
 
 func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error) {
-	result, err := s.db.ExecContext(
-		ctx,
-		renewLeaseSQL,
-		now.Add(ttl),
-		now,
-		taskID,
-		workerID,
-		epoch,
-	)
+	_ = now
+	var renewed bool
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		result, err := s.db.ExecContext(
+			ctx,
+			renewLeaseSQL,
+			durationToMicroseconds(ttl),
+			taskID,
+			workerID,
+			epoch,
+		)
+		if err != nil {
+			return err
+		}
+		renewed, err = rowsAffectedGreaterThanZero(result)
+		return err
+	})
 	if err != nil {
 		return false, err
 	}
-	return rowsAffectedGreaterThanZero(result)
+	return renewed, nil
 }
 
 func (s *LeaseStore) Get(ctx context.Context, taskID string) (Lease, bool, error) {
+	var (
+		lease Lease
+		ok    bool
+	)
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		var err error
+		lease, ok, err = s.getNoRetry(ctx, taskID)
+		return err
+	})
+	if err != nil {
+		return Lease{}, false, err
+	}
+	return lease, ok, nil
+}
+
+func (s *LeaseStore) getNoRetry(ctx context.Context, taskID string) (Lease, bool, error) {
 	row := s.db.QueryRowContext(ctx, getLeaseSQL, taskID)
 	var lease Lease
 	if err := row.Scan(
@@ -117,11 +158,40 @@ func (s *LeaseStore) Get(ctx context.Context, taskID string) (Lease, bool, error
 }
 
 func (s *LeaseStore) Release(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
-	result, err := s.db.ExecContext(ctx, releaseLeaseSQL, taskID, workerID, epoch)
+	var released bool
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		result, err := s.db.ExecContext(ctx, releaseLeaseSQL, taskID, workerID, epoch)
+		if err != nil {
+			return err
+		}
+		released, err = rowsAffectedGreaterThanZero(result)
+		return err
+	})
 	if err != nil {
 		return false, err
 	}
-	return rowsAffectedGreaterThanZero(result)
+	return released, nil
+}
+
+func (s *LeaseStore) currentDBTime(ctx context.Context) (time.Time, error) {
+	var now time.Time
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		var err error
+		now, err = s.currentDBTimeNoRetry(ctx)
+		return err
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return now, nil
+}
+
+func (s *LeaseStore) currentDBTimeNoRetry(ctx context.Context) (time.Time, error) {
+	var now time.Time
+	if err := s.db.QueryRowContext(ctx, currentDBTimeSQL).Scan(&now); err != nil {
+		return time.Time{}, err
+	}
+	return now, nil
 }
 
 func rowsAffectedGreaterThanZero(result sql.Result) (bool, error) {
@@ -130,4 +200,11 @@ func rowsAffectedGreaterThanZero(result sql.Result) (bool, error) {
 		return false, err
 	}
 	return affected > 0, nil
+}
+
+func durationToMicroseconds(d time.Duration) int64 {
+	if d <= 0 {
+		return 1
+	}
+	return d.Microseconds()
 }

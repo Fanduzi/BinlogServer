@@ -96,6 +96,34 @@ CREATE TABLE IF NOT EXISTS task_runs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
+const hasBinlogFilesColumnSQL = `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'binlog_files'
+  AND column_name = ?;
+`
+
+const addBinlogFilesSourceFileColumnSQL = `
+ALTER TABLE binlog_files
+ADD COLUMN source_file VARCHAR(255) NULL AFTER file_name;
+`
+
+const addBinlogFilesEpochColumnSQL = `
+ALTER TABLE binlog_files
+ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0 AFTER file_path;
+`
+
+const addBinlogFilesStateColumnSQL = `
+ALTER TABLE binlog_files
+ADD COLUMN state VARCHAR(32) NOT NULL DEFAULT 'SEALED' AFTER epoch;
+`
+
+const addBinlogFilesChecksumColumnSQL = `
+ALTER TABLE binlog_files
+ADD COLUMN checksum VARCHAR(128) NULL AFTER state;
+`
+
 const upsertTaskSQL = `
 INSERT INTO backup_tasks (id, name, state, last_error, source_json, start_json, storage_json, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -223,11 +251,43 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := s.ensureBinlogFilesMigration(ctx); err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, createTaskLeasesTableSQL)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, createTaskRunsTableSQL)
+	return err
+}
+
+func (s *MySQLTaskStore) ensureBinlogFilesMigration(ctx context.Context) error {
+	if err := s.ensureBinlogFilesColumn(ctx, "source_file", addBinlogFilesSourceFileColumnSQL); err != nil {
+		return err
+	}
+	if err := s.ensureBinlogFilesColumn(ctx, "epoch", addBinlogFilesEpochColumnSQL); err != nil {
+		return err
+	}
+	if err := s.ensureBinlogFilesColumn(ctx, "state", addBinlogFilesStateColumnSQL); err != nil {
+		return err
+	}
+	if err := s.ensureBinlogFilesColumn(ctx, "checksum", addBinlogFilesChecksumColumnSQL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *MySQLTaskStore) ensureBinlogFilesColumn(ctx context.Context, columnName, alterSQL string) error {
+	var count int
+	row := s.db.QueryRowContext(ctx, hasBinlogFilesColumnSQL, columnName)
+	if err := row.Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, alterSQL)
 	return err
 }
 
