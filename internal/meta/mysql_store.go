@@ -54,7 +54,11 @@ CREATE TABLE IF NOT EXISTS binlog_files (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   task_id VARCHAR(64) NOT NULL,
   file_name VARCHAR(255) NOT NULL,
+  source_file VARCHAR(255) NULL,
   file_path TEXT NOT NULL,
+  epoch BIGINT NOT NULL DEFAULT 0,
+  state VARCHAR(32) NOT NULL DEFAULT 'SEALED',
+  checksum VARCHAR(128) NULL,
   size_bytes BIGINT NOT NULL,
   start_pos BIGINT UNSIGNED NOT NULL,
   end_pos BIGINT UNSIGNED NOT NULL,
@@ -66,6 +70,29 @@ CREATE TABLE IF NOT EXISTS binlog_files (
   uploaded_at DATETIME(6) NULL,
   UNIQUE KEY uk_task_file (task_id, file_name),
   INDEX idx_task_sealed (task_id, sealed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
+const createTaskLeasesTableSQL = `
+CREATE TABLE IF NOT EXISTS task_leases (
+  task_id VARCHAR(64) PRIMARY KEY,
+  owner_worker_id VARCHAR(128) NOT NULL,
+  epoch BIGINT NOT NULL,
+  lease_expire_at DATETIME(6) NOT NULL,
+  renewed_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
+const createTaskRunsTableSQL = `
+CREATE TABLE IF NOT EXISTS task_runs (
+  run_id VARCHAR(64) PRIMARY KEY,
+  task_id VARCHAR(64) NOT NULL,
+  worker_id VARCHAR(128) NOT NULL,
+  epoch BIGINT NOT NULL,
+  started_at DATETIME(6) NOT NULL,
+  ended_at DATETIME(6) NULL,
+  end_reason VARCHAR(64) NULL,
+  INDEX idx_task_runs_task_started (task_id, started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
@@ -193,6 +220,14 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, createBinlogFilesTableSQL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, createTaskLeasesTableSQL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, createTaskRunsTableSQL)
 	return err
 }
 
