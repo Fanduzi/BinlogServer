@@ -116,3 +116,88 @@ func TestLoadConfig_MissingExplicitFileReturnsError(t *testing.T) {
 		t.Fatal("expected error when explicit config file does not exist")
 	}
 }
+
+func TestLoadConfig_ClusterDefaults(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_MODE", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_ROLE", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_ID", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_TTL_SEC", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_RENEW_INTERVAL_SEC", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_GRACE_SEC", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_FAILOVER_POLICY", "")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Mode != "standalone" {
+		t.Fatalf("expected mode standalone, got %q", cfg.Mode)
+	}
+	if cfg.Cluster.Role != "all-in-one" {
+		t.Fatalf("expected cluster role all-in-one, got %q", cfg.Cluster.Role)
+	}
+	if cfg.Cluster.LeaseTTLSec != 15 {
+		t.Fatalf("expected lease_ttl_sec=15, got %d", cfg.Cluster.LeaseTTLSec)
+	}
+	if cfg.Cluster.LeaseRenewIntervalSec != 5 {
+		t.Fatalf("expected lease_renew_interval_sec=5, got %d", cfg.Cluster.LeaseRenewIntervalSec)
+	}
+	if cfg.Cluster.LeaseGraceSec != 30 {
+		t.Fatalf("expected lease_grace_sec=30, got %d", cfg.Cluster.LeaseGraceSec)
+	}
+	if cfg.Cluster.FailoverPolicy != "rebuild_current_file" {
+		t.Fatalf("expected failover_policy rebuild_current_file, got %q", cfg.Cluster.FailoverPolicy)
+	}
+}
+
+func TestLoadConfig_ClusterFromYAML(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_MODE", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_ROLE", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_ID", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_TTL_SEC", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_RENEW_INTERVAL_SEC", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_GRACE_SEC", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_FAILOVER_POLICY", "")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+mode: "cluster"
+cluster:
+  role: "worker"
+  worker_id: "worker-a"
+  lease_ttl_sec: 20
+  lease_renew_interval_sec: 6
+  lease_grace_sec: 45
+  failover_policy: "rebuild_current_file"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Mode != "cluster" {
+		t.Fatalf("expected mode cluster, got %q", cfg.Mode)
+	}
+	if cfg.Cluster.Role != "worker" {
+		t.Fatalf("expected cluster role worker, got %q", cfg.Cluster.Role)
+	}
+	if cfg.Cluster.WorkerID != "worker-a" {
+		t.Fatalf("expected cluster worker_id worker-a, got %q", cfg.Cluster.WorkerID)
+	}
+	if cfg.Cluster.LeaseTTLSec != 20 {
+		t.Fatalf("expected lease_ttl_sec=20, got %d", cfg.Cluster.LeaseTTLSec)
+	}
+	if cfg.Cluster.LeaseRenewIntervalSec != 6 {
+		t.Fatalf("expected lease_renew_interval_sec=6, got %d", cfg.Cluster.LeaseRenewIntervalSec)
+	}
+	if cfg.Cluster.LeaseGraceSec != 45 {
+		t.Fatalf("expected lease_grace_sec=45, got %d", cfg.Cluster.LeaseGraceSec)
+	}
+	if cfg.Cluster.FailoverPolicy != "rebuild_current_file" {
+		t.Fatalf("expected failover_policy rebuild_current_file, got %q", cfg.Cluster.FailoverPolicy)
+	}
+}

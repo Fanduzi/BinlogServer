@@ -1,6 +1,15 @@
 listen_addr: ":8080"
 data_dir: "./data"
 meta_dsn: ""
+mode: "standalone" # standalone | cluster
+
+cluster:
+  role: "all-in-one" # control-plane | worker | all-in-one
+  worker_id: ""
+  lease_ttl_sec: 15
+  lease_renew_interval_sec: 5
+  lease_grace_sec: 30
+  failover_policy: "rebuild_current_file"
 
 upload:
   endpoint: ""
@@ -10,4 +19,3 @@ upload:
   region: ""
   prefix: ""
   use_ssl: false
-
