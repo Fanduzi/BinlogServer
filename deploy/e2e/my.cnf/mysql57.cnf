@@ -1,0 +1,4 @@
+[mysqld]
+server_id=101
+expire_logs_days=7
+

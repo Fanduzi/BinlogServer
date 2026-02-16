@@ -1,0 +1,19 @@
+{
+  "Debug": true,
+  "ListenAddress": ":3000",
+  "MySQLTopologyUser": "root",
+  "MySQLTopologyPassword": "root",
+  "BackendDB": "sqlite",
+  "SQLite3DataFile": "/tmp/orchestrator.sqlite3",
+  "MySQLConnectTimeoutSeconds": 2,
+  "DefaultInstancePort": 3306,
+  "DiscoverByShowSlaveHosts": true,
+  "InstancePollSeconds": 5,
+  "UnseenInstanceForgetHours": 1,
+  "SnapshotTopologiesIntervalHours": 0,
+  "HostnameResolveMethod": "none",
+  "SkipBinlogServerUnresolveCheck": true,
+  "StatusEndpoint": "/api/status",
+  "StatusSimpleHealth": true,
+  "ReadOnly": false
+}

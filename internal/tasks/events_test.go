@@ -3,10 +3,13 @@ package tasks
 import "testing"
 
 func TestScheduler_RecordsEvents(t *testing.T) {
-	s := NewScheduler()
+	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
 	task, err := s.CreateTask("cluster-a")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
 	}
 
 	if err := s.StartTask(task.ID); err != nil {

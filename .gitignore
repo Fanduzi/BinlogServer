@@ -2,3 +2,5 @@
 data/
 frontend/node_modules/
 frontend/dist/
+.DS_Store
+tmp/e2e/data/

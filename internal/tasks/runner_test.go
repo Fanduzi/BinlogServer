@@ -47,6 +47,42 @@ func (r *failOnceRunner) Run(ctx context.Context, _ Task) error {
 	return context.Canceled
 }
 
+type readyGateRunner struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *readyGateRunner) Run(_ context.Context, _ Task) error {
+	return nil
+}
+
+func (r *readyGateRunner) RunWithNotify(ctx context.Context, _ Task, onReady func()) error {
+	select {
+	case <-r.entered:
+	default:
+		close(r.entered)
+	}
+	<-r.release
+	onReady()
+	<-ctx.Done()
+	return context.Canceled
+}
+
+type delayedStopRunner struct {
+	started chan Task
+	delay   time.Duration
+}
+
+func (r *delayedStopRunner) Run(ctx context.Context, task Task) error {
+	select {
+	case r.started <- task:
+	default:
+	}
+	<-ctx.Done()
+	time.Sleep(r.delay)
+	return context.Canceled
+}
+
 func TestScheduler_StartTaskWithRunnerRequiresSource(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
 	task, err := s.CreateTask("cluster-a")
@@ -123,12 +159,19 @@ func TestScheduler_StopTaskCancelsRunner(t *testing.T) {
 		t.Fatalf("StopTask returned error: %v", err)
 	}
 
-	got, err := s.GetTask(task.ID)
-	if err != nil {
-		t.Fatalf("GetTask returned error: %v", err)
-	}
-	if got.State != StateStopped {
-		t.Fatalf("expected state %s, got %s", StateStopped, got.State)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected state %s, got %s", StateStopped, got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -191,5 +234,111 @@ func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 
 	if err := s.StopTask(task.ID); err != nil {
 		t.Fatalf("StopTask returned error: %v", err)
+	}
+}
+
+func TestScheduler_StartTaskTransitionsFromStartingAfterRunnerReady(t *testing.T) {
+	runner := &readyGateRunner{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	s := NewScheduler(WithRunner(runner))
+
+	task, err := s.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not enter")
+	}
+
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State != StateStarting {
+		t.Fatalf("expected state %s before runner ready, got %s", StateStarting, got.State)
+	}
+
+	close(runner.release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err = s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected state %s after runner ready, got %s", StateRunning, got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
+	}
+}
+
+func TestScheduler_StopTaskTransitionsStoppingToStopped(t *testing.T) {
+	runner := &delayedStopRunner{
+		started: make(chan Task, 1),
+		delay:   80 * time.Millisecond,
+	}
+	s := NewScheduler(WithRunner(runner))
+
+	task, err := s.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner was not invoked")
+	}
+
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
+	}
+
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State != StateStopping {
+		t.Fatalf("expected immediate state %s, got %s", StateStopping, got.State)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err = s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected eventual state %s, got %s", StateStopped, got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

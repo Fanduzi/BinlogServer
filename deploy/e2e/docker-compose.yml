@@ -1,0 +1,95 @@
+services:
+  mysql57:
+    image: mysql:5.7
+    platform: linux/amd64
+    container_name: binlog-e2e-mysql57
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    ports:
+      - "13306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./init/00-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./my.cnf/base.cnf:/etc/mysql/conf.d/00-base.cnf:ro
+      - ./my.cnf/mysql57.cnf:/etc/mysql/conf.d/10-service.cnf:ro
+
+  mysql80:
+    image: mysql:8.0
+    container_name: binlog-e2e-mysql80
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    ports:
+      - "13307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./init/00-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./my.cnf/base.cnf:/etc/mysql/conf.d/00-base.cnf:ro
+      - ./my.cnf/mysql80.cnf:/etc/mysql/conf.d/10-service.cnf:ro
+
+  percona57:
+    image: percona/percona-server:5.7
+    platform: linux/amd64
+    container_name: binlog-e2e-percona57
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    ports:
+      - "13308:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./init/00-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./my.cnf/base.cnf:/etc/my.cnf.d/00-base.cnf:ro
+      - ./my.cnf/percona57.cnf:/etc/my.cnf.d/10-service.cnf:ro
+
+  percona80:
+    image: percona/percona-server:8.0
+    container_name: binlog-e2e-percona80
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    ports:
+      - "13309:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./init/00-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./my.cnf/base.cnf:/etc/my.cnf.d/00-base.cnf:ro
+      - ./my.cnf/percona80.cnf:/etc/my.cnf.d/10-service.cnf:ro
+
+  orchestrator:
+    image: openarkcode/orchestrator:latest
+    platform: linux/amd64
+    container_name: binlog-e2e-orchestrator
+    depends_on:
+      mysql80:
+        condition: service_healthy
+    ports:
+      - "13000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./orchestrator/orchestrator.conf.json:/etc/orchestrator.conf.json:ro

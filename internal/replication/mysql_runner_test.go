@@ -29,6 +29,9 @@ func TestBuildSyncerConfig_Defaults(t *testing.T) {
 	if cfg.ServerID == 0 {
 		t.Fatal("expected non-zero server id")
 	}
+	if cfg.SemiSyncEnabled {
+		t.Fatal("expected semi-sync disabled by default")
+	}
 }
 
 func TestBuildSyncerConfig_UsesTaskServerID(t *testing.T) {
@@ -46,5 +49,23 @@ func TestBuildSyncerConfig_UsesTaskServerID(t *testing.T) {
 
 	if cfg.ServerID != 330099 {
 		t.Fatalf("expected server id 330099, got %d", cfg.ServerID)
+	}
+}
+
+func TestBuildSyncerConfig_UsesTaskSemiSync(t *testing.T) {
+	cfg := buildSyncerConfig(tasks.Task{
+		ID: "89",
+		Source: tasks.SourceConfig{
+			Host:     "10.0.0.2",
+			Port:     3306,
+			User:     "repl",
+			Password: "secret",
+			Flavor:   "mysql",
+			SemiSync: true,
+		},
+	})
+
+	if !cfg.SemiSyncEnabled {
+		t.Fatal("expected semi-sync enabled from task source config")
 	}
 }

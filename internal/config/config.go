@@ -1,6 +1,12 @@
 package config
 
-import "os"
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/spf13/viper"
+)
 
 type Config struct {
 	ListenAddr string
@@ -17,27 +23,69 @@ type Config struct {
 }
 
 func LoadConfig(path string) (Config, error) {
-	_ = path
+	v := viper.New()
+	v.SetEnvPrefix("BINLOG_SERVER")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	// 默认值 < 配置文件 < 环境变量。
+	v.SetDefault("listen_addr", ":8080")
+	v.SetDefault("data_dir", "./data")
+	v.SetDefault("upload.use_ssl", false)
+
+	if path != "" {
+		v.SetConfigFile(path)
+		if err := v.ReadInConfig(); err != nil {
+			return Config{}, fmt.Errorf("read config file %q: %w", path, err)
+		}
+	} else {
+		// 未显式指定时尝试加载 ./config.yaml，不存在则忽略。
+		v.SetConfigName("config")
+		v.SetConfigType("yaml")
+		v.AddConfigPath(".")
+		if err := v.ReadInConfig(); err != nil {
+			var notFound viper.ConfigFileNotFoundError
+			if !errors.As(err, &notFound) {
+				return Config{}, fmt.Errorf("read default config file: %w", err)
+			}
+		}
+	}
 
 	cfg := Config{
-		ListenAddr: ":8080",
-		DataDir:    "./data",
+		ListenAddr:     getString(v, "listen_addr"),
+		DataDir:        getString(v, "data_dir"),
+		MetaDSN:        getString(v, "meta_dsn"),
+		UploadEndpoint: getString(v, "upload.endpoint", "upload_endpoint"),
+		UploadBucket:   getString(v, "upload.bucket", "upload_bucket"),
+		UploadAccessKey: getString(v,
+			"upload.access_key",
+			"upload_access_key",
+		),
+		UploadSecretKey: getString(v,
+			"upload.secret_key",
+			"upload_secret_key",
+		),
+		UploadRegion: getString(v, "upload.region", "upload_region"),
+		UploadPrefix: getString(v, "upload.prefix", "upload_prefix"),
+		UploadUseSSL: getBool(v, "upload.use_ssl", "upload_use_ssl"),
 	}
-	if v := os.Getenv("BINLOG_SERVER_LISTEN_ADDR"); v != "" {
-		cfg.ListenAddr = v
-	}
-	if v := os.Getenv("BINLOG_SERVER_DATA_DIR"); v != "" {
-		cfg.DataDir = v
-	}
-	if v := os.Getenv("BINLOG_SERVER_META_DSN"); v != "" {
-		cfg.MetaDSN = v
-	}
-	cfg.UploadEndpoint = os.Getenv("BINLOG_SERVER_UPLOAD_ENDPOINT")
-	cfg.UploadBucket = os.Getenv("BINLOG_SERVER_UPLOAD_BUCKET")
-	cfg.UploadAccessKey = os.Getenv("BINLOG_SERVER_UPLOAD_ACCESS_KEY")
-	cfg.UploadSecretKey = os.Getenv("BINLOG_SERVER_UPLOAD_SECRET_KEY")
-	cfg.UploadRegion = os.Getenv("BINLOG_SERVER_UPLOAD_REGION")
-	cfg.UploadPrefix = os.Getenv("BINLOG_SERVER_UPLOAD_PREFIX")
-	cfg.UploadUseSSL = os.Getenv("BINLOG_SERVER_UPLOAD_USE_SSL") == "1" || os.Getenv("BINLOG_SERVER_UPLOAD_USE_SSL") == "true"
 	return cfg, nil
+}
+
+func getString(v *viper.Viper, keys ...string) string {
+	for _, key := range keys {
+		if val := strings.TrimSpace(v.GetString(key)); val != "" {
+			return val
+		}
+	}
+	return ""
+}
+
+func getBool(v *viper.Viper, keys ...string) bool {
+	for _, key := range keys {
+		if v.IsSet(key) {
+			return v.GetBool(key)
+		}
+	}
+	return false
 }

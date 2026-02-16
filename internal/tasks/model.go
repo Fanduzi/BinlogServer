@@ -40,6 +40,8 @@ type SourceConfig struct {
 	Password string `json:"password,omitempty"`
 	Flavor   string `json:"flavor"`
 	ServerID uint32 `json:"server_id"`
+	// SemiSync=true 时尝试以 semi-sync 协议拉流；主库不支持时会自动降级为异步。
+	SemiSync bool `json:"semi_sync,omitempty"`
 }
 
 type StartConfig struct {
@@ -76,4 +78,12 @@ type BinlogFile struct {
 	UploadState string    `json:"upload_state,omitempty"`
 	UploadError string    `json:"upload_error,omitempty"`
 	UploadedAt  time.Time `json:"uploaded_at"`
+}
+
+type ReplicationProgress struct {
+	TaskID       string    `json:"task_id"`
+	LastEventAt  time.Time `json:"last_event_at"`
+	LastEventFile string   `json:"last_event_file"`
+	LastEventPos uint32    `json:"last_event_pos"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }

@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      e2e_profile:
+        description: "e2e profile to run"
+        required: true
+        default: quick
+        type: choice
+        options:
+          - quick
+          - full
+
+permissions:
+  contents: read
+
+jobs:
+  unit-and-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      E2E_PROFILE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile || 'quick' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Unit Tests
+        run: go test ./...
+
+      - name: E2E Suite
+        run: |
+          E2E_DIR="./tmp/e2e/data-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          E2E_SERVER_LOG="/tmp/binlog-server.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --profile "$E2E_PROFILE"
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          cat /tmp/binlog-server.log || true
+          docker compose -f deploy/e2e/docker-compose.yml logs || true
+
+      - name: Cleanup
+        if: always()
+        run: ./scripts/e2e/down.sh

@@ -1,25 +1,17 @@
 package main
 
 import (
-	"context"
 	"log"
-	"os/signal"
-	"syscall"
 
-	"binlog_server/internal/app"
-	"binlog_server/internal/config"
+	"binlog_server/cmd/binlog-server/cmd"
 )
 
+// @title Binlog Server API
+// @version 0.1.0
+// @description Centralized MySQL binlog backup service API.
+// @BasePath /
 func main() {
-	cfg, err := config.LoadConfig("")
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	if err := app.New(cfg).Run(ctx); err != nil {
-		log.Fatalf("run app: %v", err)
+	if err := cmd.NewRootCommand().Execute(); err != nil {
+		log.Fatal(err)
 	}
 }

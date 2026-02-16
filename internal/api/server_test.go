@@ -7,17 +7,27 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 )
 
+type fakeAPIRunner struct{}
+
+func (r *fakeAPIRunner) Run(_ context.Context, _ tasks.Task) error {
+	return nil
+}
+
 func TestTaskAPI_CreateListStartStop(t *testing.T) {
-	scheduler := tasks.NewScheduler()
+	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -55,20 +65,28 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 
 	finalListResp := httptest.NewRecorder()
 	finalListReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
-	handler.ServeHTTP(finalListResp, finalListReq)
-	if finalListResp.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", finalListResp.Code)
-	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		finalListResp = httptest.NewRecorder()
+		handler.ServeHTTP(finalListResp, finalListReq)
+		if finalListResp.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", finalListResp.Code)
+		}
 
-	var list []tasks.Task
-	if err := json.Unmarshal(finalListResp.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode list response: %v", err)
-	}
-	if len(list) != 1 {
-		t.Fatalf("expected one task, got %d", len(list))
-	}
-	if list[0].State != tasks.StateStopped {
-		t.Fatalf("expected final state %s, got %s", tasks.StateStopped, list[0].State)
+		var list []tasks.Task
+		if err := json.Unmarshal(finalListResp.Body.Bytes(), &list); err != nil {
+			t.Fatalf("decode list response: %v", err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("expected one task, got %d", len(list))
+		}
+		if list[0].State == tasks.StateStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected final state %s, got %s", tasks.StateStopped, list[0].State)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -191,6 +209,17 @@ func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	}
 	if cp.File != "mysql-bin.000123" || cp.Pos != 456 {
 		t.Fatalf("unexpected checkpoint: %+v", cp)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw response: %v", err)
+	}
+	if _, ok := raw["file"]; !ok {
+		t.Fatalf("expected lowercase key 'file', body=%s", resp.Body.String())
+	}
+	if _, ok := raw["pos"]; !ok {
+		t.Fatalf("expected lowercase key 'pos', body=%s", resp.Body.String())
 	}
 }
 
@@ -343,11 +372,14 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 }
 
 func TestTaskAPI_ListEventsWithLimit(t *testing.T) {
-	scheduler := tasks.NewScheduler()
+	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -396,13 +428,16 @@ func TestUI_RootRedirectAndDashboardPage(t *testing.T) {
 	if uiResp.Code != http.StatusOK {
 		t.Fatalf("expected 200 for /ui/, got %d", uiResp.Code)
 	}
-	if !bytes.Contains(uiResp.Body.Bytes(), []byte("Binlog Control Tower")) {
-		t.Fatalf("expected ui html to contain dashboard title, got body=%s", uiResp.Body.String())
+	if !bytes.Contains(uiResp.Body.Bytes(), []byte("Binlog Server Console")) {
+		t.Fatalf("expected ui html to contain console title, got body=%s", uiResp.Body.String())
+	}
+	if !bytes.Contains(uiResp.Body.Bytes(), []byte(`id="app"`)) {
+		t.Fatalf("expected ui html to contain vue mount root, got body=%s", uiResp.Body.String())
 	}
 }
 
 func TestAPI_Summary(t *testing.T) {
-	scheduler := tasks.NewScheduler()
+	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
 
 	taskA, err := scheduler.CreateTask("a")
@@ -413,11 +448,36 @@ func TestAPI_Summary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask B returned error: %v", err)
 	}
+	if err := scheduler.ConfigureSource(taskA.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource A returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(taskB.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource B returned error: %v", err)
+	}
 	if err := scheduler.StartTask(taskA.ID); err != nil {
 		t.Fatalf("StartTask A returned error: %v", err)
 	}
 	if err := scheduler.StartTask(taskB.ID); err != nil {
 		t.Fatalf("StartTask B returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		a, err := scheduler.GetTask(taskA.ID)
+		if err != nil {
+			t.Fatalf("GetTask A returned error: %v", err)
+		}
+		b, err := scheduler.GetTask(taskB.ID)
+		if err != nil {
+			t.Fatalf("GetTask B returned error: %v", err)
+		}
+		if a.State == tasks.StateRunning && b.State == tasks.StateRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tasks did not reach running state in time: A=%s B=%s", a.State, b.State)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if err := scheduler.StopTask(taskB.ID); err != nil {
 		t.Fatalf("StopTask B returned error: %v", err)
@@ -442,5 +502,289 @@ func TestAPI_Summary(t *testing.T) {
 	}
 	if body["stopped"] != 1 {
 		t.Fatalf("expected stopped=1, got %d", body["stopped"])
+	}
+}
+
+func TestTaskAPI_ListTasksBySourceFilter(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	a, err := scheduler.CreateTask("a")
+	if err != nil {
+		t.Fatalf("CreateTask A returned error: %v", err)
+	}
+	b, err := scheduler.CreateTask("b")
+	if err != nil {
+		t.Fatalf("CreateTask B returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(a.ID, tasks.SourceConfig{Host: "10.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource A returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(b.ID, tasks.SourceConfig{Host: "10.0.0.2", Port: 3307, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource B returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks?host=10.0.0.2&port=3307", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var list []tasks.Task
+	if err := json.Unmarshal(resp.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(list))
+	}
+	if list[0].Source.Host != "10.0.0.2" || list[0].Source.Port != 3307 {
+		t.Fatalf("unexpected source: %+v", list[0].Source)
+	}
+}
+
+func TestAPI_SourceLookup(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	a, err := scheduler.CreateTask("a")
+	if err != nil {
+		t.Fatalf("CreateTask A returned error: %v", err)
+	}
+	b, err := scheduler.CreateTask("b")
+	if err != nil {
+		t.Fatalf("CreateTask B returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(a.ID, tasks.SourceConfig{Host: "10.0.0.9", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource A returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(b.ID, tasks.SourceConfig{Host: "10.0.0.9", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource B returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/sources/lookup?host=10.0.0.9&port=3306", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["exists"] != true {
+		t.Fatalf("expected exists=true, got %v", body["exists"])
+	}
+	if int(body["count"].(float64)) != 2 {
+		t.Fatalf("expected count=2, got %v", body["count"])
+	}
+
+	notFoundResp := httptest.NewRecorder()
+	notFoundReq := httptest.NewRequest(http.MethodGet, "/api/sources/lookup?host=10.0.0.9&port=3310", nil)
+	handler.ServeHTTP(notFoundResp, notFoundReq)
+	if notFoundResp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", notFoundResp.Code, notFoundResp.Body.String())
+	}
+
+	var notFoundBody map[string]any
+	if err := json.Unmarshal(notFoundResp.Body.Bytes(), &notFoundBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if notFoundBody["exists"] != false {
+		t.Fatalf("expected exists=false, got %v", notFoundBody["exists"])
+	}
+	if int(notFoundBody["count"].(float64)) != 0 {
+		t.Fatalf("expected count=0, got %v", notFoundBody["count"])
+	}
+}
+
+func TestTaskAPI_GetReplication(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	scheduler.ReportReplicationProgress(task.ID, time.Now().Add(-8*time.Second), "mysql-bin.000777", 456)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/replication", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["task_id"] != task.ID {
+		t.Fatalf("unexpected task_id: %v", body["task_id"])
+	}
+	if body["last_event_file"] != "mysql-bin.000777" {
+		t.Fatalf("unexpected last_event_file: %v", body["last_event_file"])
+	}
+	if body["has_progress"] != true {
+		t.Fatalf("expected has_progress=true, got %v", body["has_progress"])
+	}
+}
+
+func TestTaskAPI_GetReplication_AbnormalReasonNoProgress(t *testing.T) {
+	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{
+		Host: "127.0.0.1",
+		Port: 3306,
+		User: "repl",
+	}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := scheduler.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cur, err := scheduler.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if cur.State == tasks.StateRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task did not reach running state in time: %s", cur.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/replication", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["status"] != "ABNORMAL" {
+		t.Fatalf("expected ABNORMAL, got %v", body["status"])
+	}
+	if body["reason"] != "NO_PROGRESS" {
+		t.Fatalf("expected reason=NO_PROGRESS, got %v", body["reason"])
+	}
+}
+
+func TestAPI_Dashboard(t *testing.T) {
+	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
+	handler := NewServer(scheduler)
+
+	taskA, err := scheduler.CreateTask("a")
+	if err != nil {
+		t.Fatalf("CreateTask A returned error: %v", err)
+	}
+	taskB, err := scheduler.CreateTask("b")
+	if err != nil {
+		t.Fatalf("CreateTask B returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(taskA.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource A returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(taskB.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3307, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource B returned error: %v", err)
+	}
+	if err := scheduler.StartTask(taskA.ID); err != nil {
+		t.Fatalf("StartTask A returned error: %v", err)
+	}
+
+	scheduler.ReportReplicationProgress(taskA.ID, time.Now().Add(-3*time.Second), "mysql-bin.000001", 123)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["summary"]; !ok {
+		t.Fatal("expected summary in dashboard response")
+	}
+	tasksAny, ok := body["tasks"].([]any)
+	if !ok {
+		t.Fatalf("expected tasks array, got %T", body["tasks"])
+	}
+	if len(tasksAny) != 2 {
+		t.Fatalf("expected 2 dashboard tasks, got %d", len(tasksAny))
+	}
+}
+
+func TestAPI_SwaggerUI(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil)
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte("Swagger UI")) {
+		t.Fatalf("expected Swagger UI page, got body=%s", resp.Body.String())
+	}
+}
+
+func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/swagger/doc.json", nil)
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	paths, ok := body["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected paths object, got %T", body["paths"])
+	}
+
+	required := []string{
+		"/healthz",
+		"/api/summary",
+		"/api/dashboard",
+		"/api/sources/lookup",
+		"/api/tasks",
+		"/api/tasks/{id}",
+		"/api/tasks/{id}/start",
+		"/api/tasks/{id}/stop",
+		"/api/tasks/{id}/checkpoint",
+		"/api/tasks/{id}/events",
+		"/api/tasks/{id}/files",
+		"/api/tasks/{id}/replication",
+	}
+	for _, key := range required {
+		if _, exists := paths[key]; !exists {
+			t.Fatalf("expected swagger path %s", key)
+		}
 	}
 }

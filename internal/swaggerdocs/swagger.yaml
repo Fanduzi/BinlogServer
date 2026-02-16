@@ -1,0 +1,703 @@
+basePath: /
+definitions:
+  api.createTaskRequest:
+    properties:
+      name:
+        type: string
+      source:
+        $ref: '#/definitions/tasks.SourceConfig'
+      start:
+        $ref: '#/definitions/tasks.StartConfig'
+      storage:
+        $ref: '#/definitions/tasks.Storage'
+    type: object
+  api.dashboardResponse:
+    properties:
+      generated_at:
+        type: string
+      sources:
+        items:
+          $ref: '#/definitions/api.sourceOverview'
+        type: array
+      summary:
+        $ref: '#/definitions/api.summaryResponse'
+      tasks:
+        items:
+          $ref: '#/definitions/api.dashboardTaskItem'
+        type: array
+      threshold_seconds:
+        type: integer
+    type: object
+  api.dashboardTaskItem:
+    properties:
+      replication:
+        $ref: '#/definitions/api.taskReplicationResponse'
+      task:
+        $ref: '#/definitions/tasks.Task'
+    type: object
+  api.sourceLookupResponse:
+    properties:
+      count:
+        type: integer
+      exists:
+        type: boolean
+      host:
+        type: string
+      port:
+        type: integer
+      task_ids:
+        items:
+          type: string
+        type: array
+    type: object
+  api.sourceOverview:
+    properties:
+      abnormal:
+        type: integer
+      delayed:
+        type: integer
+      host:
+        type: string
+      normal:
+        type: integer
+      port:
+        type: integer
+      running:
+        type: integer
+      task_count:
+        type: integer
+    type: object
+  api.summaryResponse:
+    properties:
+      abnormal:
+        type: integer
+      delayed:
+        type: integer
+      failed:
+        type: integer
+      normal:
+        type: integer
+      retry_backoff:
+        type: integer
+      running:
+        type: integer
+      stopped:
+        type: integer
+      total:
+        type: integer
+    type: object
+  api.taskReplicationResponse:
+    properties:
+      delay_seconds:
+        type: integer
+      has_progress:
+        type: boolean
+      last_error:
+        type: string
+      last_event_at:
+        type: string
+      last_event_file:
+        type: string
+      last_event_pos:
+        type: integer
+      reason:
+        type: string
+      state:
+        $ref: '#/definitions/tasks.State'
+      status:
+        type: string
+      task_id:
+        type: string
+      threshold_seconds:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  api.updateTaskRequest:
+    properties:
+      name:
+        type: string
+      source:
+        $ref: '#/definitions/tasks.SourceConfig'
+      start:
+        $ref: '#/definitions/tasks.StartConfig'
+      storage:
+        $ref: '#/definitions/tasks.Storage'
+    type: object
+  binlog.Checkpoint:
+    properties:
+      file:
+        type: string
+      gtid_set:
+        type: string
+      pos:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  tasks.BinlogFile:
+    properties:
+      created_at:
+        type: string
+      end_pos:
+        type: integer
+      file_name:
+        type: string
+      file_path:
+        type: string
+      object_key:
+        type: string
+      sealed_at:
+        type: string
+      size_bytes:
+        type: integer
+      start_pos:
+        type: integer
+      task_id:
+        type: string
+      upload_error:
+        type: string
+      upload_state:
+        type: string
+      uploaded_at:
+        type: string
+    type: object
+  tasks.SourceConfig:
+    properties:
+      flavor:
+        type: string
+      host:
+        type: string
+      password:
+        type: string
+      port:
+        type: integer
+      semi_sync:
+        description: SemiSync=true 时尝试以 semi-sync 协议拉流；主库不支持时会自动降级为异步。
+        type: boolean
+      server_id:
+        type: integer
+      user:
+        type: string
+    type: object
+  tasks.StartConfig:
+    properties:
+      file:
+        type: string
+      gtid_set:
+        type: string
+      mode:
+        $ref: '#/definitions/tasks.StartMode'
+      pos:
+        type: integer
+    type: object
+  tasks.StartMode:
+    enum:
+    - LATEST
+    - FILE_POS
+    - GTID
+    type: string
+    x-enum-varnames:
+    - StartModeLatest
+    - StartModeFilePos
+    - StartModeGTID
+  tasks.State:
+    enum:
+    - CREATED
+    - STARTING
+    - RUNNING
+    - RETRY_BACKOFF
+    - FAILED
+    - STOPPING
+    - STOPPED
+    type: string
+    x-enum-varnames:
+    - StateCreated
+    - StateStarting
+    - StateRunning
+    - StateRetryBackoff
+    - StateFailed
+    - StateStopping
+    - StateStopped
+  tasks.Storage:
+    properties:
+      dir:
+        type: string
+      retention_days:
+        type: integer
+    type: object
+  tasks.Task:
+    properties:
+      id:
+        type: string
+      last_error:
+        type: string
+      name:
+        type: string
+      source:
+        $ref: '#/definitions/tasks.SourceConfig'
+      start:
+        $ref: '#/definitions/tasks.StartConfig'
+      state:
+        $ref: '#/definitions/tasks.State'
+      storage:
+        $ref: '#/definitions/tasks.Storage'
+      updated_at:
+        type: string
+    type: object
+  tasks.TaskEvent:
+    properties:
+      detail:
+        type: string
+      message:
+        type: string
+      sequence:
+        type: integer
+      task_id:
+        type: string
+      time:
+        type: string
+      type:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: Centralized MySQL binlog backup service API.
+  title: Binlog Server API
+  version: 0.1.0
+paths:
+  /api/dashboard:
+    get:
+      parameters:
+      - description: Filter by source host
+        in: query
+        name: host
+        type: string
+      - description: Filter by source port
+        in: query
+        name: port
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.dashboardResponse'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "405":
+          description: Method Not Allowed
+          schema:
+            type: string
+      summary: Get task dashboard with replication delay overview
+      tags:
+      - Dashboard
+  /api/sources/lookup:
+    get:
+      parameters:
+      - description: MySQL source host
+        in: query
+        name: host
+        required: true
+        type: string
+      - description: MySQL source port
+        in: query
+        name: port
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.sourceLookupResponse'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "405":
+          description: Method Not Allowed
+          schema:
+            type: string
+      summary: Lookup tasks by source host and port
+      tags:
+      - Dashboard
+  /api/summary:
+    get:
+      parameters:
+      - description: Filter by source host
+        in: query
+        name: host
+        type: string
+      - description: Filter by source port
+        in: query
+        name: port
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.summaryResponse'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "405":
+          description: Method Not Allowed
+          schema:
+            type: string
+      summary: Get task summary counters
+      tags:
+      - Dashboard
+  /api/tasks:
+    get:
+      consumes:
+      - application/json
+      parameters:
+      - description: Filter by source host (GET only)
+        in: query
+        name: host
+        type: string
+      - description: Filter by source port (GET only)
+        in: query
+        name: port
+        type: integer
+      - description: Task create payload (POST only)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.createTaskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/tasks.Task'
+            type: array
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/tasks.Task'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "405":
+          description: Method Not Allowed
+          schema:
+            type: string
+      summary: Create or list tasks
+      tags:
+      - Tasks
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Filter by source host (GET only)
+        in: query
+        name: host
+        type: string
+      - description: Filter by source port (GET only)
+        in: query
+        name: port
+        type: integer
+      - description: Task create payload (POST only)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.createTaskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/tasks.Task'
+            type: array
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/tasks.Task'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "405":
+          description: Method Not Allowed
+          schema:
+            type: string
+      summary: Create or list tasks
+      tags:
+      - Tasks
+  /api/tasks/{id}:
+    delete:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+      summary: Delete task
+      tags:
+      - Tasks
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/tasks.Task'
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Get task by ID
+      tags:
+      - Tasks
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task update payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.updateTaskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/tasks.Task'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Update task configuration
+      tags:
+      - Tasks
+  /api/tasks/{id}/checkpoint:
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/binlog.Checkpoint'
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Get task checkpoint
+      tags:
+      - Tasks
+  /api/tasks/{id}/events:
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Event list limit
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/tasks.TaskEvent'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: List task events
+      tags:
+      - Tasks
+  /api/tasks/{id}/files:
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: File list limit
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/tasks.BinlogFile'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: List binlog file metadata
+      tags:
+      - Tasks
+  /api/tasks/{id}/replication:
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.taskReplicationResponse'
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Get task replication delay and latest position
+      tags:
+      - Tasks
+  /api/tasks/{id}/start:
+    post:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+      summary: Start task
+      tags:
+      - Tasks
+  /api/tasks/{id}/stop:
+    post:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+      summary: Stop task
+      tags:
+      - Tasks
+  /healthz:
+    get:
+      responses:
+        "200":
+          description: ok
+          schema:
+            type: string
+      summary: Service health check
+      tags:
+      - System
+swagger: "2.0"

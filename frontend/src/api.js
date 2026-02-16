@@ -10,8 +10,18 @@ export async function getSummary() {
   return data;
 }
 
-export async function listTasks() {
-  const { data } = await http.get("/api/tasks");
+export async function getDashboard(params = {}) {
+  const { data } = await http.get("/api/dashboard", { params });
+  return data;
+}
+
+export async function lookupSource(params = {}) {
+  const { data } = await http.get("/api/sources/lookup", { params });
+  return data;
+}
+
+export async function listTasks(params = {}) {
+  const { data } = await http.get("/api/tasks", { params });
   return data;
 }
 
@@ -50,6 +60,11 @@ export async function getCheckpoint(id) {
     if (err?.response?.status === 404) return null;
     throw err;
   }
+}
+
+export async function getReplication(id) {
+  const { data } = await http.get(`/api/tasks/${id}/replication`);
+  return data;
 }
 
 export async function listEvents(id, limit = 120) {

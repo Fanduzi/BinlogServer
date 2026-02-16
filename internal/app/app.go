@@ -32,11 +32,13 @@ func New(cfg config.Config) *App {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	var runnerOpts []replication.RunnerOption
 	opts := []tasks.Option{}
+	var runnerOpts []replication.RunnerOption
 
 	var mysqlStore *meta.MySQLTaskStore
 	if a.cfg.MetaDSN != "" {
+		// 如果配置了 metadata DB，把它同时注入 scheduler（control plane）
+		// 和 runner（data plane 的 checkpoint/file metadata）。
 		var err error
 		mysqlStore, err = meta.NewMySQLTaskStore(a.cfg.MetaDSN)
 		if err != nil {
@@ -52,6 +54,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	if a.cfg.UploadEndpoint != "" && a.cfg.UploadBucket != "" && a.cfg.UploadAccessKey != "" && a.cfg.UploadSecretKey != "" {
+		// upload 是可选能力；启用后 runner 会上传 sealed binlog file。
 		uploader, err := upload.NewS3Uploader(upload.S3Config{
 			Endpoint:  a.cfg.UploadEndpoint,
 			Bucket:    a.cfg.UploadBucket,
@@ -66,10 +69,11 @@ func (a *App) Run(ctx context.Context) error {
 		runnerOpts = append(runnerOpts, replication.WithUploader(uploader, a.cfg.UploadPrefix))
 	}
 
-	runner := replication.NewMySQLRunner(a.cfg.DataDir, runnerOpts...)
-	opts = append(opts, tasks.WithRunner(runner))
-
 	scheduler := tasks.NewScheduler(opts...)
+	runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))
+	runner := replication.NewMySQLRunner(a.cfg.DataDir, runnerOpts...)
+	scheduler.SetRunner(runner)
+	// Restore 必须在对外服务前执行，保证 API 看到的是恢复后的稳定状态。
 	if err := scheduler.Restore(context.Background()); err != nil {
 		return err
 	}
@@ -81,11 +85,14 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// 暴露实际绑定地址（ListenAddr 使用 :0 时尤其有用）。
 	a.setAddr(ln.Addr().String())
+	// readyCh 只在 listener 绑定成功后关闭。
 	a.readyOnce.Do(func() { close(a.readyCh) })
 
 	go func() {
 		<-ctx.Done()
+		// graceful shutdown 允许 in-flight request 尽量完成。
 		_ = server.Shutdown(context.Background())
 	}()
 

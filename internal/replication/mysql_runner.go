@@ -27,6 +27,13 @@ type MySQLRunner struct {
 	fileMetaStore   FileMetaStore
 	uploader        FileUploader
 	uploadPrefix    string
+	progressReporter ProgressReporter
+}
+
+type eventHandlerFunc func(*replication.BinlogEvent) error
+
+func (f eventHandlerFunc) HandleEvent(e *replication.BinlogEvent) error {
+	return f(e)
 }
 
 type CheckpointStore interface {
@@ -56,10 +63,20 @@ type FileUploader interface {
 	UploadFile(ctx context.Context, taskID, localPath, objectKey string) error
 }
 
+type ProgressReporter interface {
+	ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32)
+}
+
 func WithUploader(uploader FileUploader, prefix string) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.uploader = uploader
 		r.uploadPrefix = prefix
+	}
+}
+
+func WithProgressReporter(reporter ProgressReporter) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.progressReporter = reporter
 	}
 }
 
@@ -78,11 +95,23 @@ func NewMySQLRunner(dataDir string, opts ...RunnerOption) *MySQLRunner {
 }
 
 func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
+	// 兼容 Runner 基础接口：不携带 ready 回调。
+	return r.run(ctx, task, nil)
+}
+
+func (r *MySQLRunner) RunWithNotify(ctx context.Context, task tasks.Task, onReady func()) error {
+	// 提供给 Scheduler 的增强接口：runner ready 时主动回调。
+	return r.run(ctx, task, onReady)
+}
+
+func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) error {
+	// 先解析请求的 start strategy（LATEST/FILE_POS/GTID）。
 	start, err := ResolveStart(ctx, task, r.fetcher)
 	if err != nil {
 		return err
 	}
 	if r.checkpointStore != nil {
+		// 持久化 checkpoint 优先级更高，保证重启后的 resumability。
 		checkpoint, ok, err := r.checkpointStore.LoadCheckpoint(ctx, task.ID)
 		if err != nil {
 			return err
@@ -90,7 +119,141 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 		start = effectiveStartFromCheckpoint(start, checkpoint, ok)
 	}
 
+	currentFile := start.File
+	if currentFile == "" {
+		currentFile = fmt.Sprintf("task-%s.binlog", task.ID)
+	}
+	currentPos := start.Pos
+	currentStartPos := start.Pos
+	currentCreatedAt := time.Now()
+
+	currentPath := ""
+	file, writer, currentPath, err := r.openBinlogWriter(task, currentFile, currentPos)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+	}()
+
+	appendAndPersist := func(raw []byte, next binlog.Checkpoint) error {
+		if err := writer.Append(raw, next); err != nil {
+			return err
+		}
+		// 只有 writer flush 成功后才推进 checkpoint。
+		if err := writer.FlushAndCheckpoint(); err != nil {
+			return err
+		}
+
+		checkpoint := writer.CurrentCheckpoint()
+		currentPos = checkpoint.Pos
+		if r.checkpointStore != nil {
+			if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, checkpoint); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// 单条事件处理逻辑：异步模式（GetEvent）与半同步模式（SynchronousEventHandler）共用。
+	handleEvent := func(event *replication.BinlogEvent) error {
+		if event == nil || event.Header == nil {
+			return nil
+		}
+		sourceEventAt := sourceEventTime(event)
+
+		if event.Header.EventType == replication.ROTATE_EVENT {
+			rotate, ok := event.Event.(*replication.RotateEvent)
+			if ok && len(rotate.NextLogName) > 0 {
+				nextFile := string(rotate.NextLogName)
+				nextPos := uint32(rotate.Position)
+
+				// 复制流开头常见一个 synthetic rotate（log_pos=0，指向当前文件）。
+				// 该事件不在真实 binlog 文件里，写入会破坏和源文件的一致性。
+				if event.Header.LogPos == 0 && nextFile == currentFile {
+					currentPos = nextPos
+					return nil
+				}
+
+				// 真实 rotate 必须先写入旧文件，再封口旧文件并切到新文件。
+				rotateCheckpoint := binlog.Checkpoint{
+					File: currentFile,
+					Pos:  event.Header.LogPos,
+				}
+				if rotateCheckpoint.Pos == 0 {
+					rotateCheckpoint.Pos = currentPos
+				}
+				if err := appendAndPersist(event.RawData, rotateCheckpoint); err != nil {
+					return err
+				}
+
+				if err := file.Close(); err != nil {
+					return err
+				}
+				file = nil
+				if err := r.finalizeSealedFile(
+					ctx,
+					task,
+					currentPath,
+					currentStartPos,
+					rotateCheckpoint.Pos,
+					currentCreatedAt,
+					time.Now(),
+				); err != nil {
+					return err
+				}
+
+				currentFile = nextFile
+				currentPos = nextPos
+				file, writer, currentPath, err = r.openBinlogWriter(task, currentFile, currentPos)
+				if err != nil {
+					return err
+				}
+				currentStartPos = currentPos
+				currentCreatedAt = time.Now()
+
+				// rotate 后立即把 checkpoint 切到新文件起点，保证重启从新文件继续。
+				if r.checkpointStore != nil {
+					if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, binlog.Checkpoint{
+						File: currentFile,
+						Pos:  currentPos,
+					}); err != nil {
+						return err
+					}
+				}
+				if r.progressReporter != nil {
+					r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos)
+				}
+				return nil
+			}
+		}
+
+		next := binlog.Checkpoint{
+			File: currentFile,
+			Pos:  event.Header.LogPos,
+		}
+		if next.Pos == 0 {
+			next.Pos = currentPos
+		}
+
+		if err := appendAndPersist(event.RawData, next); err != nil {
+			return err
+		}
+		if r.progressReporter != nil {
+			r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos)
+		}
+		return nil
+	}
+
+	semiSyncRequested := task.Source.SemiSync
 	cfg := buildSyncerConfig(task)
+	if semiSyncRequested {
+		// 半同步模式使用同步处理器：只有 HandleEvent 成功返回后才会 ACK。
+		// 这样可保证 ACK 发生在本地 fsync/checkpoint 成功之后。
+		cfg.SynchronousEventHandler = eventHandlerFunc(handleEvent)
+	}
 	syncer := replication.NewBinlogSyncer(cfg)
 	defer syncer.Close()
 
@@ -111,20 +274,24 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 		return err
 	}
 
-	currentFile := start.File
-	if currentFile == "" {
-		currentFile = fmt.Sprintf("task-%s.binlog", task.ID)
+	if onReady != nil {
+		// 到这里说明复制连接和本地 writer 都已就绪，可切换为 RUNNING。
+		onReady()
 	}
-	currentPos := start.Pos
-	currentStartPos := start.Pos
-	currentCreatedAt := time.Now()
 
-	currentPath := ""
-	file, writer, currentPath, err := r.openBinlogWriter(task, currentFile, currentPos)
-	if err != nil {
-		return err
+	if semiSyncRequested {
+		// SynchronousEventHandler 模式下，事件由 syncer 内部 goroutine 推送到 handler。
+		// 这里阻塞等待错误或取消，保持任务生命周期。
+		for {
+			_, err := streamer.GetEvent(ctx)
+			if err != nil {
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+					return nil
+				}
+				return err
+			}
+		}
 	}
-	defer file.Close()
 
 	for {
 		event, err := streamer.GetEvent(ctx)
@@ -134,60 +301,8 @@ func (r *MySQLRunner) Run(ctx context.Context, task tasks.Task) error {
 			}
 			return err
 		}
-		if event == nil || event.Header == nil {
-			continue
-		}
-
-		if event.Header.EventType == replication.ROTATE_EVENT {
-			rotate, ok := event.Event.(*replication.RotateEvent)
-			if ok && len(rotate.NextLogName) > 0 {
-				currentFile = string(rotate.NextLogName)
-				currentPos = uint32(rotate.Position)
-
-				if err := file.Close(); err != nil {
-					return err
-				}
-				if err := r.finalizeSealedFile(
-					ctx,
-					task,
-					currentPath,
-					currentStartPos,
-					currentPos,
-					currentCreatedAt,
-					time.Now(),
-				); err != nil {
-					return err
-				}
-				file, writer, currentPath, err = r.openBinlogWriter(task, currentFile, currentPos)
-				if err != nil {
-					return err
-				}
-				currentStartPos = currentPos
-				currentCreatedAt = time.Now()
-			}
-		}
-
-		next := binlog.Checkpoint{
-			File: currentFile,
-			Pos:  event.Header.LogPos,
-		}
-		if next.Pos == 0 {
-			next.Pos = currentPos
-		}
-
-		if err := writer.Append(event.RawData, next); err != nil {
+		if err := handleEvent(event); err != nil {
 			return err
-		}
-		if err := writer.FlushAndCheckpoint(); err != nil {
-			return err
-		}
-
-		checkpoint := writer.CurrentCheckpoint()
-		currentPos = checkpoint.Pos
-		if r.checkpointStore != nil {
-			if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, checkpoint); err != nil {
-				return err
-			}
 		}
 	}
 }
@@ -204,6 +319,7 @@ func (r *MySQLRunner) finalizeSealedFile(
 	var fileMeta *tasks.BinlogFile
 
 	if r.fileMetaStore != nil {
+		// 先落本地 file metadata；upload state 初始为 LOCAL_ONLY。
 		info, err := os.Stat(localPath)
 		if err != nil {
 			return err
@@ -237,7 +353,7 @@ func (r *MySQLRunner) finalizeSealedFile(
 				return saveErr
 			}
 		}
-		// Best-effort policy: ignore upload failure to avoid interrupting binlog pull.
+		// best-effort policy：upload 失败也继续拉 binlog。
 		return nil
 	}
 
@@ -265,13 +381,14 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 	}
 
 	return replication.BinlogSyncerConfig{
-		ServerID:       serverID,
-		Flavor:         flavor,
-		Host:           task.Source.Host,
-		Port:           task.Source.Port,
-		User:           task.Source.User,
-		Password:       task.Source.Password,
-		RawModeEnabled: true,
+		ServerID:        serverID,
+		Flavor:          flavor,
+		Host:            task.Source.Host,
+		Port:            task.Source.Port,
+		User:            task.Source.User,
+		Password:        task.Source.Password,
+		RawModeEnabled:  true,
+		SemiSyncEnabled: task.Source.SemiSync,
 	}
 }
 
@@ -408,4 +525,11 @@ func buildObjectKey(prefix, taskID, fileName string) string {
 		return base
 	}
 	return filepath.ToSlash(filepath.Join(prefix, base))
+}
+
+func sourceEventTime(event *replication.BinlogEvent) time.Time {
+	if event == nil || event.Header == nil || event.Header.Timestamp == 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(event.Header.Timestamp), 0).UTC()
 }

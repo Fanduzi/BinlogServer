@@ -1,0 +1,7 @@
+[mysqld]
+server_id=104
+gtid_mode=ON
+enforce_gtid_consistency=ON
+binlog_expire_logs_seconds=604800
+binlog_transaction_compression=ON
+binlog_transaction_compression_level_zstd=3

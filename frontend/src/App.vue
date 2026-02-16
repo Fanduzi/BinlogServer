@@ -1,81 +1,247 @@
 <template>
-  <div class="page">
+  <div class="page-shell">
+    <div class="orb orb-a" />
+    <div class="orb orb-b" />
+
     <header class="hero">
-      <div>
-        <p class="eyebrow">Binlog Backup Console</p>
-        <h1>Binlog Server 管理台</h1>
+      <div class="hero-copy">
+        <p class="kicker"><i class="fa-solid fa-wave-square" /> BINLOG SERVER</p>
+        <h1>Binlog Server</h1>
+        <p class="hero-desc">
+          Lag, health, and source coverage in one place.
+        </p>
       </div>
-      <div class="actions">
-        <el-button type="primary" @click="openCreate">新建任务</el-button>
-        <el-button @click="refreshAll">刷新</el-button>
+      <div class="hero-actions">
+        <el-button type="primary" @click="openCreate">
+          <i class="fa-solid fa-plus" /> 新建任务
+        </el-button>
+        <el-button @click="openBatchCreate">
+          <i class="fa-solid fa-layer-group" /> 批量创建
+        </el-button>
+        <el-button :loading="loading" @click="refreshAll">
+          <i class="fa-solid fa-rotate" /> 刷新
+        </el-button>
       </div>
     </header>
 
-    <section class="summary">
-      <div class="card">
-        <span>总任务</span>
-        <strong>{{ summary.total }}</strong>
-      </div>
-      <div class="card">
-        <span>运行中</span>
-        <strong>{{ summary.running }}</strong>
-      </div>
-      <div class="card">
-        <span>重试中</span>
-        <strong>{{ summary.retry_backoff }}</strong>
-      </div>
-      <div class="card">
-        <span>已停止</span>
-        <strong>{{ summary.stopped }}</strong>
-      </div>
-      <div class="card">
-        <span>失败</span>
-        <strong>{{ summary.failed }}</strong>
-      </div>
+    <section class="metric-grid">
+      <article class="metric-card">
+        <p><i class="fa-solid fa-layer-group" /> 总任务</p>
+        <strong>{{ dashboard.summary.total }}</strong>
+      </article>
+      <article class="metric-card">
+        <p><i class="fa-solid fa-play" /> 运行中</p>
+        <strong>{{ dashboard.summary.running }}</strong>
+      </article>
+      <article class="metric-card">
+        <p><i class="fa-solid fa-circle-check" /> 正常</p>
+        <strong>{{ dashboard.summary.normal }}</strong>
+      </article>
+      <article class="metric-card">
+        <p><i class="fa-solid fa-hourglass-half" /> 延迟</p>
+        <strong>{{ dashboard.summary.delayed }}</strong>
+      </article>
+      <article class="metric-card">
+        <p><i class="fa-solid fa-triangle-exclamation" /> 异常</p>
+        <strong>{{ dashboard.summary.abnormal }}</strong>
+      </article>
+      <article class="metric-card">
+        <p><i class="fa-solid fa-bug" /> 失败</p>
+        <strong>{{ dashboard.summary.failed }}</strong>
+      </article>
     </section>
 
-    <el-card shadow="never" class="list-card">
-      <template #header>
-        <div class="card-header">
-          <span>任务列表</span>
-          <span class="muted">{{ tasks.length }} tasks</span>
-        </div>
-      </template>
+    <section class="workspace">
+      <aside class="left-pane">
+        <el-card shadow="never" class="panel-card">
+          <template #header>
+            <div class="panel-title">
+              <span><i class="fa-solid fa-magnifying-glass" /> 源库反查</span>
+              <span class="panel-hint">host:port</span>
+            </div>
+          </template>
 
-      <el-table :data="tasks" stripe border @row-click="showDetail">
-        <el-table-column prop="id" label="ID" width="70" />
-        <el-table-column prop="name" label="名称" min-width="150" />
-        <el-table-column label="状态" width="130">
-          <template #default="{ row }">
-            <el-tag size="small" :type="stateTagType(row.state)">{{ row.state }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="源库" min-width="190">
-          <template #default="{ row }">
-            {{ row.source?.host || "-" }}:{{ row.source?.port || "-" }}
-          </template>
-        </el-table-column>
-        <el-table-column label="起点" width="110">
-          <template #default="{ row }">{{ row.start?.mode || "-" }}</template>
-        </el-table-column>
-        <el-table-column label="保留天数" width="100">
-          <template #default="{ row }">{{ row.storage?.retention_days || "-" }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
-          <template #default="{ row }">
-            <el-space wrap>
-              <el-button size="small" @click.stop="showDetail(row)">详情</el-button>
-              <el-button size="small" @click.stop="openEdit(row)">编辑</el-button>
-              <el-button size="small" type="success" @click.stop="onStart(row)">启动</el-button>
-              <el-button size="small" type="warning" @click.stop="onStop(row)">停止</el-button>
-              <el-button size="small" type="danger" @click.stop="onDelete(row)">删除</el-button>
-            </el-space>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+          <div class="lookup-form">
+            <el-input
+              v-model="sourceQuery.host"
+              placeholder="host，例如 127.0.0.1"
+              clearable
+            />
+            <el-input-number
+              v-model="sourceQuery.port"
+              :min="1"
+              :max="65535"
+              controls-position="right"
+            />
+            <div class="btn-row">
+              <el-button type="primary" :loading="loading" @click="applySourceFilter">查询</el-button>
+              <el-button @click="clearSourceFilter">清空</el-button>
+            </div>
+          </div>
 
-    <el-dialog v-model="formVisible" :title="formMode === 'create' ? '新建任务' : `编辑任务 #${form.id}`" width="860px">
+          <div class="meta-line">
+            <span>阈值 {{ dashboard.threshold_seconds }}s</span>
+            <span>{{ formatTs(dashboard.generated_at) }}</span>
+          </div>
+
+          <div v-if="lookup.checked" class="lookup-state">
+            <el-tag :type="lookup.exists ? 'success' : 'info'">
+              {{ lookup.exists ? "已存在拉取任务" : "未找到拉取任务" }}
+            </el-tag>
+            <span>匹配数量：{{ lookup.count }}</span>
+          </div>
+        </el-card>
+
+        <el-card shadow="never" class="panel-card">
+          <template #header>
+            <div class="panel-title">
+              <span><i class="fa-solid fa-sliders" /> 任务筛选</span>
+              <span class="panel-hint">quick filters</span>
+            </div>
+          </template>
+
+          <div class="filter-stack">
+            <el-input v-model="uiFilter.keyword" clearable placeholder="按任务 ID/名称搜索" />
+            <el-input v-model="uiFilter.sourceKeyword" clearable placeholder="按源库 host:port 过滤" />
+            <el-select v-model="uiFilter.taskState">
+              <el-option label="全部任务状态" value="ALL" />
+              <el-option v-for="state in taskStates" :key="state" :label="state" :value="state" />
+            </el-select>
+            <el-select v-model="uiFilter.replicationStatus">
+              <el-option label="全部复制状态" value="ALL" />
+              <el-option v-for="status in replicationStatuses" :key="status" :label="status" :value="status" />
+            </el-select>
+            <el-select v-model="uiFilter.sortBy">
+              <el-option label="延迟高优先" value="delay_desc" />
+              <el-option label="最近更新优先" value="updated_desc" />
+              <el-option label="任务名 A-Z" value="name_asc" />
+            </el-select>
+            <div class="switch-row">
+              <span>仅看告警任务</span>
+              <el-switch v-model="uiFilter.onlyAlert" />
+            </div>
+            <el-button @click="resetUiFilter">重置筛选</el-button>
+          </div>
+        </el-card>
+      </aside>
+
+      <section class="right-pane">
+        <el-card shadow="never" class="panel-card">
+          <template #header>
+            <div class="panel-title">
+              <span><i class="fa-solid fa-network-wired" /> 源库覆盖</span>
+              <span class="panel-hint">{{ dashboard.sources.length }} hosts</span>
+            </div>
+          </template>
+
+          <div class="source-board">
+            <div
+              v-for="item in dashboard.sources"
+              :key="`${item.host}:${item.port}`"
+              class="source-cell"
+            >
+              <p class="source-name">{{ item.host }}:{{ item.port }}</p>
+              <p class="source-stats">
+                任务 {{ item.task_count }} / 运行 {{ item.running }} / 正常 {{ item.normal }} / 延迟 {{ item.delayed }} / 异常 {{ item.abnormal }}
+              </p>
+            </div>
+          </div>
+        </el-card>
+
+        <el-card shadow="never" class="panel-card table-card">
+          <template #header>
+            <div class="panel-title">
+              <span><i class="fa-solid fa-table" /> 任务明细</span>
+              <div class="panel-title-actions">
+                <span class="panel-hint">筛选后 {{ filteredTasks.length }} / 总计 {{ dashboard.tasks.length }}</span>
+                <el-button size="small" @click="openBatchCreate">
+                  <i class="fa-solid fa-layer-group" /> 批量创建
+                </el-button>
+              </div>
+            </div>
+          </template>
+
+          <el-table
+            :data="pagedTasks"
+            border
+            stripe
+            row-key="task.id"
+            @row-click="onRowClick"
+          >
+            <el-table-column label="ID" width="70">
+              <template #default="{ row }">{{ row.task.id }}</template>
+            </el-table-column>
+            <el-table-column label="名称" min-width="180">
+              <template #default="{ row }">{{ row.task.name }}</template>
+            </el-table-column>
+            <el-table-column label="任务状态" width="120">
+              <template #default="{ row }">
+                <el-tag size="small" :type="stateTagType(row.task.state)">{{ row.task.state }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="复制状态" width="150">
+              <template #default="{ row }">
+                <div class="replication-cell">
+                  <el-tag size="small" :type="replicationTagType(row.replication.status)">
+                    {{ row.replication.status }}
+                  </el-tag>
+                  <el-tooltip
+                    v-if="hasReplicationReason(row.replication)"
+                    :content="formatReplicationReason(row.replication)"
+                    placement="top"
+                    effect="light"
+                  >
+                    <i class="fa-solid fa-circle-info reason-tip-icon" @click.stop />
+                  </el-tooltip>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="延迟(s)" width="100">
+              <template #default="{ row }">{{ formatDelay(row.replication.delay_seconds, row.replication.has_progress) }}</template>
+            </el-table-column>
+            <el-table-column label="源库" min-width="170">
+              <template #default="{ row }">{{ sourceLabel(row.task) }}</template>
+            </el-table-column>
+            <el-table-column label="最近事件时间" min-width="170">
+              <template #default="{ row }">{{ formatTs(row.replication.last_event_at) }}</template>
+            </el-table-column>
+            <el-table-column label="SemiSync" width="90">
+              <template #default="{ row }">{{ row.task.source?.semi_sync ? "ON" : "OFF" }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="350" fixed="right" class-name="action-col">
+              <template #default="{ row }">
+                <div class="action-row">
+                  <el-button class="action-btn" size="small" @click.stop="showDetail(row.task)">详情</el-button>
+                  <el-button class="action-btn" size="small" @click.stop="openEdit(row.task)">编辑</el-button>
+                  <el-button class="action-btn" size="small" type="success" @click.stop="onStart(row.task)">启动</el-button>
+                  <el-button class="action-btn" size="small" type="warning" @click.stop="onStop(row.task)">停止</el-button>
+                  <el-button class="action-btn" size="small" type="danger" @click.stop="onDelete(row.task)">删除</el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager-wrap">
+            <el-pagination
+              background
+              layout="total, sizes, prev, pager, next"
+              :total="filteredTasks.length"
+              :page-size="pager.pageSize"
+              :current-page="pager.page"
+              :page-sizes="[20, 50, 100]"
+              @size-change="onPageSizeChange"
+              @current-change="onPageChange"
+            />
+          </div>
+        </el-card>
+      </section>
+    </section>
+
+    <el-dialog
+      v-model="formVisible"
+      :title="formMode === 'create' ? '新建任务' : `编辑任务 #${form.id}`"
+      width="920px"
+    >
       <el-form :model="form" label-width="92px">
         <el-row :gutter="12">
           <el-col :span="12"><el-form-item label="任务名"><el-input v-model="form.name" /></el-form-item></el-col>
@@ -85,6 +251,7 @@
           <el-col :span="12"><el-form-item label="密码"><el-input v-model="form.source.password" show-password placeholder="编辑时留空=不修改" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="Server ID"><el-input-number v-model="form.source.server_id" :min="1" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="Flavor"><el-input v-model="form.source.flavor" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="SemiSync"><el-switch v-model="form.source.semi_sync" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="保留天数"><el-input-number v-model="form.storage.retention_days" :min="1" /></el-form-item></el-col>
           <el-col :span="8">
             <el-form-item label="起点模式">
@@ -106,80 +273,398 @@
       </template>
     </el-dialog>
 
-    <el-drawer v-model="detailVisible" size="65%" :title="detailTask ? `任务详情 #${detailTask.id}` : '任务详情'">
+    <el-dialog v-model="batchVisible" title="批量创建任务" width="920px">
+      <el-alert type="info" show-icon :closable="false">
+        <p>每行一条，支持三种格式：</p>
+        <p><code>name,host,port</code> 或 <code>host,port</code> 或 <code>host:port</code></p>
+      </el-alert>
+      <el-row :gutter="12" class="batch-grid">
+        <el-col :span="12">
+          <el-form label-width="98px">
+            <el-form-item label="复制用户">
+              <el-input v-model="batchForm.user" />
+            </el-form-item>
+            <el-form-item label="复制密码">
+              <el-input v-model="batchForm.password" show-password />
+            </el-form-item>
+            <el-form-item label="Flavor">
+              <el-input v-model="batchForm.flavor" />
+            </el-form-item>
+            <el-form-item label="起始 ServerID">
+              <el-input-number v-model="batchForm.serverIdStart" :min="1" />
+            </el-form-item>
+            <el-form-item label="保留天数">
+              <el-input-number v-model="batchForm.retentionDays" :min="1" />
+            </el-form-item>
+            <el-form-item label="SemiSync">
+              <el-switch v-model="batchForm.semiSync" />
+            </el-form-item>
+            <el-form-item label="创建后启动">
+              <el-switch v-model="batchForm.autoStart" />
+            </el-form-item>
+          </el-form>
+        </el-col>
+        <el-col :span="12">
+          <el-input
+            v-model="batchForm.lines"
+            type="textarea"
+            :rows="14"
+            placeholder="示例：
+e2e-mysql57,127.0.0.1,13306
+e2e-mysql80,127.0.0.1,13307
+127.0.0.1:13308"
+          />
+        </el-col>
+        <el-col :span="24">
+          <div class="batch-preview-toolbar">
+            <div class="batch-preview-summary">
+              <span>预览状态：</span>
+              <el-tag v-if="batchPreview.ready && batchPreview.errors.length === 0" size="small" type="success">可提交</el-tag>
+              <el-tag v-else-if="batchPreview.ready" size="small" type="danger">有错误</el-tag>
+              <el-tag v-else size="small" type="info">未预览</el-tag>
+              <span class="batch-preview-count">有效 {{ batchPreview.validCount }} / 错误 {{ batchPreview.errors.length }}</span>
+            </div>
+            <div class="batch-preview-actions">
+              <el-button @click="previewBatchCreate">预览校验</el-button>
+              <el-button @click="clearBatchPreview">清空预览</el-button>
+            </div>
+          </div>
+
+          <el-table v-if="batchPreview.rows.length" :data="batchPreview.rows" size="small" border class="batch-preview-table">
+            <el-table-column prop="lineNo" label="行号" width="80" />
+            <el-table-column prop="name" label="任务名" min-width="180" />
+            <el-table-column prop="host" label="Host" min-width="160" />
+            <el-table-column prop="port" label="Port" width="100" />
+            <el-table-column label="校验" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.valid ? 'success' : 'danger'">{{ row.valid ? "通过" : "失败" }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="error" label="原因" min-width="220" />
+          </el-table>
+        </el-col>
+      </el-row>
+      <template #footer>
+        <el-button @click="batchVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!batchPreview.canSubmit" @click="submitBatchCreate">开始批量创建</el-button>
+      </template>
+    </el-dialog>
+
+    <el-drawer v-model="detailVisible" size="66%" :title="detailTask ? `任务详情 #${detailTask.id}` : '任务详情'">
       <template v-if="detailTask">
-        <el-descriptions border :column="2">
-          <el-descriptions-item label="名称">{{ detailTask.name }}</el-descriptions-item>
-          <el-descriptions-item label="状态">{{ detailTask.state }}</el-descriptions-item>
-          <el-descriptions-item label="源库">{{ detailTask.source?.host }}:{{ detailTask.source?.port }}</el-descriptions-item>
-          <el-descriptions-item label="起点">{{ detailTask.start?.mode }}</el-descriptions-item>
-        </el-descriptions>
+        <div class="detail-stack">
+          <section class="detail-panel">
+            <h3><i class="fa-solid fa-circle-info" /> 基础信息</h3>
+            <div class="detail-grid">
+              <div class="detail-item"><span>名称</span><strong>{{ detailTask.name }}</strong></div>
+              <div class="detail-item"><span>状态</span><strong>{{ detailTask.state }}</strong></div>
+              <div class="detail-item"><span>源库</span><strong>{{ sourceLabel(detailTask) }}</strong></div>
+              <div class="detail-item"><span>起点</span><strong>{{ detailTask.start?.mode }}</strong></div>
+              <div class="detail-item"><span>SemiSync</span><strong>{{ detailTask.source?.semi_sync ? "ON" : "OFF" }}</strong></div>
+              <div class="detail-item"><span>保留天数</span><strong>{{ detailTask.storage?.retention_days }}</strong></div>
+            </div>
+          </section>
 
-        <el-divider content-position="left">Checkpoint</el-divider>
-        <div class="checkpoint">{{ checkpoint ? `${checkpoint.file}:${checkpoint.pos}` : "暂无" }}</div>
+          <section class="detail-panel" v-if="detailReplication">
+            <h3><i class="fa-solid fa-wave-square" /> 复制状态</h3>
+            <div class="detail-grid">
+              <div class="detail-item">
+                <span>状态</span>
+                <strong><el-tag :type="replicationTagType(detailReplication.status)">{{ detailReplication.status }}</el-tag></strong>
+              </div>
+              <div class="detail-item"><span>延迟(s)</span><strong>{{ formatDelay(detailReplication.delay_seconds, detailReplication.has_progress) }}</strong></div>
+              <div class="detail-item"><span>原因</span><strong>{{ formatReplicationReason(detailReplication) }}</strong></div>
+              <div class="detail-item"><span>Reason Code</span><strong>{{ detailReplication.reason || "--" }}</strong></div>
+              <div class="detail-item"><span>阈值(s)</span><strong>{{ detailReplication.threshold_seconds || "--" }}</strong></div>
+              <div class="detail-item"><span>最近事件时间</span><strong>{{ formatTs(detailReplication.last_event_at) }}</strong></div>
+              <div class="detail-item"><span>最近位点</span><strong>{{ detailReplication.last_event_file || "-" }}:{{ detailReplication.last_event_pos || 0 }}</strong></div>
+            </div>
+          </section>
 
-        <el-divider content-position="left">文件元数据</el-divider>
-        <el-table :data="files" size="small" border>
-          <el-table-column prop="file_name" label="File" min-width="180" />
-          <el-table-column prop="size_bytes" label="Size" width="100" />
-          <el-table-column prop="start_pos" label="Start" width="90" />
-          <el-table-column prop="end_pos" label="End" width="90" />
-          <el-table-column prop="upload_state" label="Upload" width="130" />
-          <el-table-column prop="object_key" label="ObjectKey" min-width="190" />
-        </el-table>
+          <section class="detail-panel">
+            <h3><i class="fa-solid fa-location-dot" /> Checkpoint</h3>
+            <div class="checkpoint">{{ formatCheckpoint(checkpoint) }}</div>
+          </section>
 
-        <el-divider content-position="left">事件</el-divider>
-        <el-timeline>
-          <el-timeline-item v-for="ev in events" :key="`${ev.sequence}-${ev.type}`" :timestamp="ev.time">
-            <strong>{{ ev.type }}</strong>
-            <p>{{ ev.message }}</p>
-          </el-timeline-item>
-        </el-timeline>
+          <section class="detail-panel">
+            <h3><i class="fa-solid fa-file-lines" /> 文件元数据</h3>
+            <el-table :data="files" size="small" border>
+              <el-table-column prop="file_name" label="File" min-width="180" />
+              <el-table-column prop="size_bytes" label="Size" width="100" />
+              <el-table-column prop="start_pos" label="Start" width="90" />
+              <el-table-column prop="end_pos" label="End" width="90" />
+              <el-table-column prop="upload_state" label="Upload" width="130" />
+              <el-table-column prop="object_key" label="ObjectKey" min-width="190" />
+            </el-table>
+          </section>
+
+          <section class="detail-panel">
+            <h3><i class="fa-solid fa-clock-rotate-left" /> 事件</h3>
+            <el-timeline>
+              <el-timeline-item
+                v-for="ev in events"
+                :key="`${ev.sequence}-${ev.type}`"
+                :timestamp="ev.time"
+              >
+                <strong>{{ ev.type }}</strong>
+                <p>{{ ev.message }}</p>
+              </el-timeline-item>
+            </el-timeline>
+          </section>
+        </div>
       </template>
     </el-drawer>
   </div>
 </template>
 
 <script setup>
-import { reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   createTask,
   deleteTask,
   getCheckpoint,
-  getSummary,
+  getDashboard,
+  getReplication,
   getTask,
   listEvents,
   listFiles,
-  listTasks,
+  lookupSource,
   startTask,
   stopTask,
   updateTask,
 } from "./api";
 
-const summary = reactive({ total: 0, running: 0, retry_backoff: 0, stopped: 0, failed: 0 });
-const tasks = ref([]);
+const loading = ref(false);
+const dashboard = reactive({
+  generated_at: "",
+  threshold_seconds: 30,
+  summary: {
+    total: 0,
+    running: 0,
+    retry_backoff: 0,
+    stopped: 0,
+    failed: 0,
+    normal: 0,
+    delayed: 0,
+    abnormal: 0,
+  },
+  tasks: [],
+  sources: [],
+});
+
+const sourceQuery = reactive({
+  host: "",
+  port: null,
+});
+
+const lookup = reactive({
+  checked: false,
+  exists: false,
+  count: 0,
+});
+
+const uiFilter = reactive({
+  keyword: "",
+  sourceKeyword: "",
+  taskState: "ALL",
+  replicationStatus: "ALL",
+  sortBy: "delay_desc",
+  onlyAlert: false,
+});
+
+const pager = reactive({
+  page: 1,
+  pageSize: 20,
+});
+
+const taskStates = ["CREATED", "STARTING", "RUNNING", "RETRY_BACKOFF", "STOPPING", "STOPPED", "FAILED"];
+const replicationStatuses = ["NORMAL", "DELAYED", "ABNORMAL", "IDLE"];
 
 const formVisible = ref(false);
 const formMode = ref("create");
 const form = reactive(defaultForm());
+const batchVisible = ref(false);
+const batchForm = reactive(defaultBatchForm());
+const batchPreview = reactive({
+  ready: false,
+  canSubmit: false,
+  validCount: 0,
+  rows: [],
+  errors: [],
+});
 
 const detailVisible = ref(false);
 const detailTask = ref(null);
+const detailReplication = ref(null);
 const checkpoint = ref(null);
 const events = ref([]);
 const files = ref([]);
+
+const filteredTasks = computed(() => {
+  let rows = [...dashboard.tasks];
+
+  if (uiFilter.keyword.trim()) {
+    const kw = uiFilter.keyword.trim().toLowerCase();
+    rows = rows.filter((row) => {
+      const id = String(row.task?.id || "").toLowerCase();
+      const name = String(row.task?.name || "").toLowerCase();
+      return id.includes(kw) || name.includes(kw);
+    });
+  }
+
+  if (uiFilter.sourceKeyword.trim()) {
+    const sourceKw = uiFilter.sourceKeyword.trim().toLowerCase();
+    rows = rows.filter((row) => sourceLabel(row.task).toLowerCase().includes(sourceKw));
+  }
+
+  if (uiFilter.taskState !== "ALL") {
+    rows = rows.filter((row) => row.task?.state === uiFilter.taskState);
+  }
+
+  if (uiFilter.replicationStatus !== "ALL") {
+    rows = rows.filter((row) => row.replication?.status === uiFilter.replicationStatus);
+  }
+
+  if (uiFilter.onlyAlert) {
+    rows = rows.filter((row) => {
+      const rep = row.replication?.status;
+      const taskState = row.task?.state;
+      return rep === "ABNORMAL" || rep === "DELAYED" || taskState === "FAILED" || taskState === "RETRY_BACKOFF";
+    });
+  }
+
+  rows.sort((a, b) => {
+    if (uiFilter.sortBy === "name_asc") {
+      return String(a.task?.name || "").localeCompare(String(b.task?.name || ""));
+    }
+    if (uiFilter.sortBy === "updated_desc") {
+      const at = new Date(a.task?.updated_at || 0).getTime();
+      const bt = new Date(b.task?.updated_at || 0).getTime();
+      return bt - at;
+    }
+
+    const ad = Number(a.replication?.delay_seconds ?? -1);
+    const bd = Number(b.replication?.delay_seconds ?? -1);
+    return bd - ad;
+  });
+
+  return rows;
+});
+
+const pagedTasks = computed(() => {
+  const start = (pager.page - 1) * pager.pageSize;
+  return filteredTasks.value.slice(start, start + pager.pageSize);
+});
+
+watch(
+  () => [
+    uiFilter.keyword,
+    uiFilter.sourceKeyword,
+    uiFilter.taskState,
+    uiFilter.replicationStatus,
+    uiFilter.sortBy,
+    uiFilter.onlyAlert,
+    dashboard.tasks.length,
+  ],
+  () => {
+    pager.page = 1;
+  },
+);
+
+watch(
+  () => [filteredTasks.value.length, pager.pageSize],
+  () => {
+    const maxPage = Math.max(1, Math.ceil(filteredTasks.value.length / pager.pageSize));
+    if (pager.page > maxPage) pager.page = maxPage;
+  },
+);
+
+watch(
+  () => batchForm.lines,
+  () => {
+    if (!batchVisible.value || !batchPreview.ready) return;
+    clearBatchPreview();
+  },
+);
 
 refreshAll();
 
 async function refreshAll() {
   try {
-    const [sum, list] = await Promise.all([getSummary(), listTasks()]);
-    Object.assign(summary, sum || {});
-    tasks.value = list || [];
+    loading.value = true;
+    const data = await getDashboard(buildSourceFilter());
+    Object.assign(dashboard.summary, data?.summary || {});
+    dashboard.tasks = data?.tasks || [];
+    dashboard.sources = data?.sources || [];
+    dashboard.generated_at = data?.generated_at || "";
+    dashboard.threshold_seconds = Number(data?.threshold_seconds || 30);
   } catch (err) {
     ElMessage.error(parseErr(err));
+  } finally {
+    loading.value = false;
   }
+}
+
+function buildSourceFilter() {
+  const params = {};
+  if (sourceQuery.host?.trim()) params.host = sourceQuery.host.trim();
+  if (sourceQuery.port) params.port = Number(sourceQuery.port);
+  return params;
+}
+
+async function applySourceFilter() {
+  const params = buildSourceFilter();
+  if (!params.host || !params.port) {
+    ElMessage.error("请输入 host 和 port 再查询");
+    return;
+  }
+
+  try {
+    loading.value = true;
+    const [lookupResp, dashboardResp] = await Promise.all([
+      lookupSource(params),
+      getDashboard(params),
+    ]);
+    lookup.checked = true;
+    lookup.exists = !!lookupResp?.exists;
+    lookup.count = Number(lookupResp?.count || 0);
+    Object.assign(dashboard.summary, dashboardResp?.summary || {});
+    dashboard.tasks = dashboardResp?.tasks || [];
+    dashboard.sources = dashboardResp?.sources || [];
+    dashboard.generated_at = dashboardResp?.generated_at || "";
+    dashboard.threshold_seconds = Number(dashboardResp?.threshold_seconds || 30);
+  } catch (err) {
+    ElMessage.error(parseErr(err));
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function clearSourceFilter() {
+  sourceQuery.host = "";
+  sourceQuery.port = null;
+  lookup.checked = false;
+  lookup.exists = false;
+  lookup.count = 0;
+  await refreshAll();
+}
+
+function resetUiFilter() {
+  uiFilter.keyword = "";
+  uiFilter.sourceKeyword = "";
+  uiFilter.taskState = "ALL";
+  uiFilter.replicationStatus = "ALL";
+  uiFilter.sortBy = "delay_desc";
+  uiFilter.onlyAlert = false;
+}
+
+function onPageChange(page) {
+  pager.page = page;
+}
+
+function onPageSizeChange(size) {
+  pager.pageSize = size;
 }
 
 function defaultForm() {
@@ -193,6 +678,7 @@ function defaultForm() {
       password: "",
       flavor: "mysql",
       server_id: 200001,
+      semi_sync: false,
     },
     start: {
       mode: "LATEST",
@@ -206,6 +692,32 @@ function defaultForm() {
   };
 }
 
+function defaultBatchForm() {
+  return {
+    lines: "",
+    user: "repl",
+    password: "replpass",
+    flavor: "mysql",
+    serverIdStart: 300000,
+    retentionDays: 7,
+    semiSync: false,
+    autoStart: false,
+  };
+}
+
+function clearBatchPreview() {
+  batchPreview.ready = false;
+  batchPreview.canSubmit = false;
+  batchPreview.validCount = 0;
+  batchPreview.rows = [];
+  batchPreview.errors = [];
+}
+
+function resetBatchForm() {
+  Object.assign(batchForm, defaultBatchForm());
+  clearBatchPreview();
+}
+
 function resetForm() {
   Object.assign(form, defaultForm());
 }
@@ -216,9 +728,14 @@ function openCreate() {
   formVisible.value = true;
 }
 
-function openEdit(row) {
+function openBatchCreate() {
+  resetBatchForm();
+  batchVisible.value = true;
+}
+
+function openEdit(task) {
   formMode.value = "edit";
-  Object.assign(form, defaultForm(), JSON.parse(JSON.stringify(row)));
+  Object.assign(form, defaultForm(), JSON.parse(JSON.stringify(task)));
   form.source.password = "";
   formVisible.value = true;
 }
@@ -226,7 +743,10 @@ function openEdit(row) {
 function buildPayload() {
   const payload = {
     name: form.name.trim(),
-    source: { ...form.source },
+    source: {
+      ...form.source,
+      semi_sync: !!form.source.semi_sync,
+    },
     start: { mode: form.start.mode },
     storage: { retention_days: Number(form.storage.retention_days || 7) },
   };
@@ -240,6 +760,182 @@ function buildPayload() {
     payload.start.gtid_set = form.start.gtid_set?.trim() || "";
   }
   return payload;
+}
+
+function parseBatchLine(raw, lineNo) {
+  const parts = raw.split(",").map((x) => x.trim()).filter(Boolean);
+  let name = "";
+  let host = "";
+  let port = 0;
+
+  if (parts.length === 1) {
+    if (!parts[0].includes(":")) throw new Error(`第 ${lineNo} 行格式错误，单列必须是 host:port`);
+    [host, port] = parseHostPort(parts[0], lineNo);
+    name = `task-${host}-${port}`;
+  } else if (parts.length === 2) {
+    if (parts[1].includes(":")) {
+      name = parts[0];
+      [host, port] = parseHostPort(parts[1], lineNo);
+    } else if (parts[0].includes(":")) {
+      [host, port] = parseHostPort(parts[0], lineNo);
+      name = parts[1];
+    } else {
+      host = parts[0];
+      port = Number(parts[1]);
+      name = `task-${host}-${port}`;
+    }
+  } else if (parts.length === 3) {
+    name = parts[0];
+    host = parts[1];
+    port = Number(parts[2]);
+  } else {
+    throw new Error(`第 ${lineNo} 行格式错误，只支持 name,host,port / host,port / host:port`);
+  }
+
+  if (!host || !Number.isInteger(Number(port)) || Number(port) <= 0 || Number(port) > 65535) {
+    throw new Error(`第 ${lineNo} 行端口不合法`);
+  }
+  if (!name) {
+    name = `task-${host}-${port}`;
+  }
+  return { lineNo, name, host, port: Number(port) };
+}
+
+function parseBatchLines(rawText) {
+  const rows = [];
+  const errors = [];
+  const sourceSeen = new Set();
+  const nameSeen = new Set();
+
+  const lines = rawText.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const lineNo = i + 1;
+    const raw = lines[i].trim();
+    if (!raw || raw.startsWith("#")) continue;
+
+    try {
+      const row = parseBatchLine(raw, lineNo);
+      const sourceKey = `${row.host}:${row.port}`;
+      const nameKey = row.name.toLowerCase();
+      if (sourceSeen.has(sourceKey)) {
+        throw new Error(`第 ${lineNo} 行源库重复：${sourceKey}`);
+      }
+      if (nameSeen.has(nameKey)) {
+        throw new Error(`第 ${lineNo} 行任务名重复：${row.name}`);
+      }
+      sourceSeen.add(sourceKey);
+      nameSeen.add(nameKey);
+      rows.push({ ...row, valid: true, error: "" });
+    } catch (err) {
+      const msg = err?.message || `第 ${lineNo} 行格式错误`;
+      rows.push({
+        lineNo,
+        name: "--",
+        host: "--",
+        port: "--",
+        valid: false,
+        error: msg,
+      });
+      errors.push(msg);
+    }
+  }
+  if (!rows.length) {
+    errors.push("没有可解析的数据行");
+  }
+  return { rows, errors };
+}
+
+function parseHostPort(text, lineNo) {
+  const idx = text.lastIndexOf(":");
+  if (idx <= 0 || idx === text.length - 1) throw new Error(`第 ${lineNo} 行 host:port 格式错误`);
+  const host = text.slice(0, idx).trim();
+  const port = Number(text.slice(idx + 1).trim());
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`第 ${lineNo} 行 host:port 格式错误`);
+  }
+  return [host, port];
+}
+
+function previewBatchCreate() {
+  const parsed = parseBatchLines(batchForm.lines || "");
+  batchPreview.rows = parsed.rows;
+  batchPreview.errors = parsed.errors;
+  batchPreview.validCount = parsed.rows.filter((x) => x.valid).length;
+  batchPreview.ready = true;
+  batchPreview.canSubmit = batchPreview.validCount > 0 && parsed.errors.length === 0;
+
+  if (!batchPreview.rows.length || parsed.errors.length > 0) {
+    ElMessage.warning(`预览完成：有效 ${batchPreview.validCount}，错误 ${parsed.errors.length}`);
+    return;
+  }
+  ElMessage.success(`预览通过：共 ${batchPreview.validCount} 条`);
+}
+
+async function submitBatchCreate() {
+  try {
+    if (!batchPreview.ready) {
+      ElMessage.warning("请先点击“预览校验”");
+      return;
+    }
+    if (!batchPreview.canSubmit) {
+      ElMessage.error("预览未通过，请修正后重试");
+      return;
+    }
+    if (!batchForm.user.trim()) {
+      ElMessage.error("复制用户不能为空");
+      return;
+    }
+    const rows = batchPreview.rows.filter((x) => x.valid);
+
+    let success = 0;
+    const errors = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      const source = {
+        host: row.host,
+        port: row.port,
+        user: batchForm.user.trim(),
+        flavor: batchForm.flavor?.trim() || "mysql",
+        server_id: Number(batchForm.serverIdStart) + i,
+        semi_sync: !!batchForm.semiSync,
+      };
+      if (batchForm.password) {
+        source.password = batchForm.password;
+      }
+
+      const payload = {
+        name: row.name,
+        source,
+        start: { mode: "LATEST" },
+        storage: { retention_days: Number(batchForm.retentionDays || 7) },
+      };
+
+      try {
+        const created = await createTask(payload);
+        if (batchForm.autoStart) {
+          await startTask(created.id);
+        }
+        success += 1;
+      } catch (err) {
+        errors.push(`${row.name}(${row.host}:${row.port}) -> ${parseErr(err)}`);
+      }
+    }
+
+    await refreshAll();
+    if (!errors.length) {
+      ElMessage.success(`批量创建成功，共 ${success} 个任务`);
+      batchVisible.value = false;
+      return;
+    }
+
+    ElMessage.warning(`成功 ${success} 个，失败 ${errors.length} 个`);
+    await ElMessageBox.alert(`<pre style="white-space: pre-wrap">${errors.join("\n")}</pre>`, "批量创建失败明细", {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: "知道了",
+    });
+  } catch (err) {
+    ElMessage.error(parseErr(err));
+  }
 }
 
 async function submitForm() {
@@ -263,47 +959,53 @@ async function submitForm() {
   }
 }
 
-async function onStart(row) {
+async function onStart(task) {
   try {
-    await startTask(row.id);
-    ElMessage.success(`任务 #${row.id} 已启动`);
+    await startTask(task.id);
+    ElMessage.success(`任务 #${task.id} 已启动`);
     await refreshAll();
   } catch (err) {
     ElMessage.error(parseErr(err));
   }
 }
 
-async function onStop(row) {
+async function onStop(task) {
   try {
-    await stopTask(row.id);
-    ElMessage.success(`任务 #${row.id} 已停止`);
+    await stopTask(task.id);
+    ElMessage.success(`任务 #${task.id} 已停止`);
     await refreshAll();
   } catch (err) {
     ElMessage.error(parseErr(err));
   }
 }
 
-async function onDelete(row) {
+async function onDelete(task) {
   try {
-    await ElMessageBox.confirm(`确认删除任务 #${row.id} ?`, "删除确认", { type: "warning" });
-    await deleteTask(row.id);
-    ElMessage.success(`任务 #${row.id} 已删除`);
+    await ElMessageBox.confirm(`确认删除任务 #${task.id} ?`, "删除确认", { type: "warning" });
+    await deleteTask(task.id);
+    ElMessage.success(`任务 #${task.id} 已删除`);
     await refreshAll();
   } catch (err) {
     if (err !== "cancel") ElMessage.error(parseErr(err));
   }
 }
 
-async function showDetail(row) {
+function onRowClick(row) {
+  showDetail(row.task);
+}
+
+async function showDetail(taskOrID) {
   try {
-    const id = row.id || row;
-    const [task, cp, evs, fs] = await Promise.all([
+    const id = typeof taskOrID === "string" ? taskOrID : taskOrID.id;
+    const [task, cp, evs, fs, replication] = await Promise.all([
       getTask(id),
       getCheckpoint(id),
       listEvents(id, 120),
       listFiles(id, 80),
+      getReplication(id),
     ]);
     detailTask.value = task;
+    detailReplication.value = replication;
     checkpoint.value = cp;
     events.value = evs || [];
     files.value = fs || [];
@@ -313,6 +1015,10 @@ async function showDetail(row) {
   }
 }
 
+function sourceLabel(task) {
+  return `${task?.source?.host || "-"}:${task?.source?.port || "-"}`;
+}
+
 function stateTagType(state) {
   if (state === "RUNNING") return "success";
   if (state === "RETRY_BACKOFF") return "warning";
@@ -320,97 +1026,627 @@ function stateTagType(state) {
   return "info";
 }
 
+function replicationTagType(status) {
+  if (status === "NORMAL") return "success";
+  if (status === "DELAYED") return "warning";
+  if (status === "ABNORMAL") return "danger";
+  return "info";
+}
+
+function formatDelay(delaySeconds, hasProgress) {
+  if (!hasProgress || delaySeconds === undefined || delaySeconds === null) {
+    return "--";
+  }
+  return String(delaySeconds);
+}
+
+function formatTs(ts) {
+  if (!ts) return "--";
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleString();
+}
+
+function formatCheckpoint(cp) {
+  if (!cp) return "暂无";
+  const file = cp.file || cp.File || cp.file_name || cp.FileName || cp.binlog_file || cp.BinlogFile || "-";
+  const pos = cp.pos ?? cp.Pos ?? cp.position ?? cp.Position ?? cp.binlog_pos ?? cp.BinlogPos ?? 0;
+  return `${file}:${pos}`;
+}
+
+function formatReplicationReason(rep) {
+  if (!rep) return "--";
+  const reasonMap = {
+    NO_PROGRESS: "未收到复制事件",
+    DELAY_EXCEEDS_THRESHOLD: "延迟超过阈值",
+    RUNNER_ERROR: "复制错误",
+    TASK_STATE_ERROR: "任务状态异常",
+  };
+  const rawErr = rep.last_error || rep.error || rep.err || rep.message || "";
+  if (rawErr) {
+    const label = reasonMap[rep.reason] || rep.reason || "复制错误";
+    return `${label}: ${rawErr}`;
+  }
+  if (rep.reason) return reasonMap[rep.reason] || rep.reason;
+  if (rep.status === "DELAYED") return "延迟超过阈值";
+  if (rep.status === "ABNORMAL") return "复制异常（暂无详细错误）";
+  return "--";
+}
+
+function hasReplicationReason(rep) {
+  return formatReplicationReason(rep) !== "--";
+}
+
 function parseErr(err) {
-  return err?.response?.data || err?.message || String(err);
+  if (typeof err?.response?.data === "string") return err.response.data;
+  if (err?.response?.data) return JSON.stringify(err.response.data);
+  return err?.message || String(err);
 }
 </script>
 
 <style scoped>
-.page {
-  max-width: 1440px;
+@import url("https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+.page-shell {
+  --bg: #f5f7ff;
+  --surface: rgba(255, 255, 255, 0.9);
+  --line: #e8ecfa;
+  --text: #1f2c49;
+  --sub: #7e88a6;
+  --accent: #5e72e4;
+  --accent-soft: rgba(91, 140, 255, 0.12);
+
+  position: relative;
+  max-width: 1720px;
   margin: 0 auto;
-  padding: 20px;
   min-height: 100vh;
-  background: linear-gradient(135deg, #eef5f8, #f9fcfd);
+  padding: 24px;
+  font-family: "Open Sans", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 8% 14%, rgba(91, 140, 255, 0.12), transparent 36%),
+    radial-gradient(circle at 92% 6%, rgba(244, 114, 182, 0.08), transparent 28%),
+    linear-gradient(165deg, #fafbff, var(--bg));
+}
+
+.orb {
+  position: absolute;
+  pointer-events: none;
+  border-radius: 999px;
+  filter: blur(54px);
+  opacity: 0.24;
+}
+
+.orb-a {
+  width: 230px;
+  height: 230px;
+  right: -70px;
+  top: 58px;
+  background: rgba(91, 140, 255, 0.3);
+}
+
+.orb-b {
+  width: 200px;
+  height: 200px;
+  left: -72px;
+  bottom: 34px;
+  background: rgba(244, 114, 182, 0.2);
 }
 
 .hero {
+  position: relative;
+  z-index: 1;
   display: flex;
-  align-items: flex-end;
   justify-content: space-between;
-  margin-bottom: 16px;
+  gap: 18px;
+  align-items: flex-end;
+  margin-bottom: 18px;
+  padding: 0;
 }
 
-.eyebrow {
+.hero-copy {
+  max-width: 900px;
+}
+
+.kicker {
   margin: 0;
+  color: var(--accent);
+  letter-spacing: 0.14em;
   font-size: 12px;
-  color: #0f766e;
-  letter-spacing: .1em;
-  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.kicker i {
+  margin-right: 6px;
 }
 
 h1 {
-  margin: 6px 0 0;
-  font-size: 34px;
+  margin: 8px 0 6px;
+  font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+  font-size: 42px;
+  line-height: 1.03;
+  letter-spacing: -0.03em;
 }
 
-.actions {
+.hero-desc {
+  margin: 0;
+  color: var(--sub);
+  max-width: 820px;
+}
+
+.hero-actions {
   display: flex;
   gap: 10px;
 }
 
-.summary {
+.hero-actions i {
+  margin-right: 6px;
+}
+
+.metric-grid {
+  position: relative;
+  z-index: 1;
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  grid-template-columns: repeat(6, minmax(130px, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
 
-.card {
-  background: #fff;
-  border: 1px solid #dde8ee;
-  border-radius: 12px;
-  padding: 10px 12px;
+.metric-card {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 18px;
+  padding: 12px;
+  backdrop-filter: blur(6px);
+  box-shadow:
+    0 10px 22px rgba(31, 44, 73, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  transition: box-shadow 0.22s ease;
 }
 
-.card span {
-  color: #5f7281;
+.metric-card:hover {
+  box-shadow:
+    0 14px 26px rgba(31, 44, 73, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.metric-card p {
+  margin: 0;
+  color: var(--sub);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.metric-card i {
+  color: #5e72e4;
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(94, 114, 228, 0.14);
+}
+
+.metric-card strong {
+  display: block;
+  margin-top: 10px;
+  font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+  font-size: 34px;
+  line-height: 1;
+}
+
+.workspace {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.left-pane,
+.right-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panel-card {
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow:
+    0 14px 26px rgba(31, 44, 73, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(8px);
+  transition: box-shadow 0.22s ease;
+}
+
+.panel-card:hover {
+  box-shadow:
+    0 18px 30px rgba(31, 44, 73, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.panel-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  font-weight: 600;
+}
+
+.panel-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-title i {
+  margin-right: 8px;
+  color: var(--accent);
+}
+
+.panel-hint {
+  color: var(--sub);
+  font-size: 12px;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.lookup-form {
+  display: grid;
+  gap: 10px;
+}
+
+.btn-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.meta-line {
+  margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  color: var(--sub);
+  font-size: 12px;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.lookup-state {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--sub);
   font-size: 12px;
 }
 
-.card strong {
-  display: block;
-  margin-top: 6px;
-  font-size: 26px;
+.filter-stack {
+  display: grid;
+  gap: 10px;
 }
 
-.list-card {
-  margin-bottom: 14px;
-}
-
-.card-header {
+.switch-row {
+  border: 1px dashed #d8e1ff;
+  border-radius: 10px;
+  padding: 10px;
   display: flex;
   justify-content: space-between;
-  width: 100%;
+  align-items: center;
+  color: var(--sub);
 }
 
-.muted {
-  color: #6b7e8b;
+.source-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(250px, 1fr));
+  gap: 10px;
+}
+
+.source-cell {
+  border: 1px solid #ecf0fb;
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.source-name {
+  margin: 0;
+  font-weight: 700;
+}
+
+.source-stats {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.table-card :deep(.el-table th.el-table__cell) {
+  background: #f7f9ff;
+  color: #5c6885;
+  font-weight: 600;
+}
+
+.table-card :deep(.el-table td.el-table__cell),
+.table-card :deep(.el-table th.el-table__cell) {
+  border-bottom-color: #e8edfb;
+}
+
+.table-card :deep(.el-table) {
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.replication-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.reason-tip-icon {
+  color: #95a2c5;
+  font-size: 12px;
+  cursor: help;
+  transition: color 0.15s ease;
+}
+
+.reason-tip-icon:hover {
+  color: var(--accent);
+}
+
+.action-row {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.table-card :deep(.action-col .cell) {
+  white-space: nowrap;
+  overflow: visible;
+}
+
+.table-card :deep(.action-row .el-button + .el-button) {
+  margin-left: 0;
+}
+
+.pager-wrap {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.batch-grid {
+  margin-top: 12px;
+}
+
+.batch-preview-toolbar {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.batch-preview-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.batch-preview-count {
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.batch-preview-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.batch-preview-table {
+  margin-top: 10px;
 }
 
 .checkpoint {
-  font-size: 14px;
-  color: #334b59;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--text);
 }
 
-@media (max-width: 1080px) {
-  .summary {
-    grid-template-columns: repeat(2, minmax(120px, 1fr));
+.detail-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.detail-panel {
+  border: 1px solid #e7ecfb;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.88);
+  padding: 12px;
+}
+
+.detail-panel h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: #506187;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.detail-item {
+  border: 1px solid #edf1fc;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+}
+
+.detail-item span {
+  display: block;
+  color: #8a96b1;
+  font-size: 12px;
+}
+
+.detail-item strong {
+  margin-top: 6px;
+  display: block;
+  color: #2f3b58;
+  word-break: break-word;
+}
+
+:deep(.el-card__header) {
+  border-bottom-color: #edf1fb;
+}
+
+:deep(.el-input__wrapper),
+:deep(.el-select__wrapper),
+:deep(.el-input-number .el-input__wrapper) {
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid #e2e8fb;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 2px 8px rgba(72, 93, 143, 0.06);
+}
+
+:deep(.el-input__wrapper.is-focus),
+:deep(.el-select__wrapper.is-focused),
+:deep(.el-input-number .el-input__wrapper.is-focus) {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.94),
+    0 0 0 2px rgba(91, 140, 255, 0.2),
+    0 4px 12px rgba(72, 93, 143, 0.08);
+}
+
+:deep(.el-button--primary) {
+  background: linear-gradient(135deg, #5e72e4, #7586ea);
+  border-color: #6679e8;
+  box-shadow: 0 6px 14px rgba(94, 114, 228, 0.22);
+}
+
+:deep(.el-button--primary:hover) {
+  background: linear-gradient(135deg, #5367dd, #687be6);
+  border-color: #5367dd;
+}
+
+:deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger)) {
+  border-radius: 12px;
+  border-color: #dfe6fa;
+  background: rgba(255, 255, 255, 0.88);
+  color: #5f6d90;
+}
+
+.table-card :deep(.action-btn) {
+  min-width: 60px;
+  padding-left: 8px;
+  padding-right: 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.table-card :deep(.action-btn.el-button--success) {
+  background: linear-gradient(135deg, #e9f9f0, #dff5ea);
+  border-color: #c7eeda;
+  color: #2f9a67;
+}
+
+.table-card :deep(.action-btn.el-button--warning) {
+  background: linear-gradient(135deg, #fff4df, #ffefd4);
+  border-color: #f7dfae;
+  color: #b57a0a;
+}
+
+.table-card :deep(.action-btn.el-button--danger) {
+  background: linear-gradient(135deg, #ffe8ee, #ffdfe8);
+  border-color: #f5c7d4;
+  color: #bf3f66;
+}
+
+.table-card :deep(.action-btn.el-button--success:hover),
+.table-card :deep(.action-btn.el-button--warning:hover),
+.table-card :deep(.action-btn.el-button--danger:hover) {
+  filter: brightness(0.98);
+}
+
+:deep(.el-tag) {
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+:deep(.el-tag--success) {
+  background: rgba(46, 198, 122, 0.12);
+  border-color: rgba(46, 198, 122, 0.2);
+  color: #1b9f60;
+}
+
+:deep(.el-tag--warning) {
+  background: rgba(251, 179, 50, 0.14);
+  border-color: rgba(251, 179, 50, 0.2);
+  color: #af7608;
+}
+
+:deep(.el-tag--danger) {
+  background: rgba(241, 93, 124, 0.14);
+  border-color: rgba(241, 93, 124, 0.2);
+  color: #b83858;
+}
+
+:deep(.el-tag--info) {
+  background: rgba(106, 126, 168, 0.12);
+  border-color: rgba(106, 126, 168, 0.2);
+  color: #6f7c9f;
+}
+
+@media (max-width: 1380px) {
+  .metric-grid {
+    grid-template-columns: repeat(3, minmax(130px, 1fr));
   }
+}
+
+@media (max-width: 1120px) {
+  .page-shell {
+    padding: 14px;
+  }
+
+  h1 {
+    font-size: 40px;
+  }
+
   .hero {
     flex-direction: column;
     align-items: flex-start;
-    gap: 10px;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .source-board {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .action-row {
+    gap: 4px;
   }
 }
 </style>

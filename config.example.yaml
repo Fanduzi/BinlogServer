@@ -1,0 +1,13 @@
+listen_addr: ":8080"
+data_dir: "./data"
+meta_dsn: ""
+
+upload:
+  endpoint: ""
+  bucket: ""
+  access_key: ""
+  secret_key: ""
+  region: ""
+  prefix: ""
+  use_ssl: false
+

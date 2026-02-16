@@ -1,0 +1,89 @@
+# E2E 脚本说明
+
+本目录用于本项目的端到端测试，覆盖：
+
+- 基础拉流与 checkpoint 推进
+- MySQL 8.0 压缩事务与 binlog 文件一致性校验
+- orchestrator 拓扑发现行为
+- semi-sync ACK/阻塞语义
+
+## 依赖
+
+运行前请确保本机有：
+
+- `docker`（含 `docker compose`）
+- `curl`
+- `jq`
+- `go`
+
+可选：
+
+- `make`（用于快捷命令）
+
+## 推荐入口
+
+优先使用统一入口脚本 `run-suite.sh`：
+
+```bash
+# 日常回归（默认）：smoke + compression
+./scripts/e2e/run-suite.sh
+
+# 全量回归：smoke + compression + orchestrator + semisync
+./scripts/e2e/run-suite.sh --profile full
+
+# 自定义场景
+./scripts/e2e/run-suite.sh --scenarios smoke,compression
+./scripts/e2e/run-suite.sh --scenarios orchestrator,semisync
+```
+
+也可用 `Makefile`：
+
+```bash
+make e2e-quick
+make e2e-full
+make e2e SCENARIOS=smoke,compression
+```
+
+## 脚本列表
+
+- `up.sh`: 启动 4 个 source MySQL（`mysql57/mysql80/percona57/percona80`）并等待可用。
+- `run-server.sh`: 用 e2e 配置启动 `binlog-server`。
+- `down.sh`: 清理 e2e 容器与 volume。
+- `smoke.sh`: 创建并启动 4 个基础任务，写入数据并查看 checkpoint。
+- `smoke-compression.sh`: 验证压缩事务场景，主动 rotate 并对比源端与备份 binlog 的 md5。
+- `smoke-orchestrator.sh`: 验证 orchestrator 拓扑里是否误纳入 binlog 拉流客户端。
+- `smoke-semisync.sh`: 验证 `semi_sync=true` 时的 client 挂载与停任务后主库提交阻塞到 timeout。
+- `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
+
+## 常用环境变量
+
+- `E2E_DATA_DIR`: e2e 数据目录（默认 `./tmp/e2e/data-suite-<timestamp>`）。
+- `E2E_SERVER_LOG`: `run-suite.sh` 启动后端时的日志路径（默认 `/tmp/binlog-server-e2e-suite.log`）。
+- `SEMISYNC_TIMEOUT_MS`: `smoke-semisync.sh` 使用的半同步 timeout（默认 `7000`）。
+
+## 排障建议
+
+- 保留现场环境：
+
+```bash
+./scripts/e2e/run-suite.sh --profile full --keep-env
+```
+
+- 查看后端日志：
+
+```bash
+cat /tmp/binlog-server-e2e-suite.log
+```
+
+- 查看容器状态与日志：
+
+```bash
+docker compose -f deploy/e2e/docker-compose.yml ps
+docker compose -f deploy/e2e/docker-compose.yml logs
+```
+
+- 排障后清理：
+
+```bash
+./scripts/e2e/down.sh
+```
