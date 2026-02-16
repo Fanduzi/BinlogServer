@@ -328,16 +328,18 @@ func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, ch
 		updatedAt = time.Now()
 	}
 
-	_, err := s.db.ExecContext(
-		ctx,
-		upsertCheckpointSQL,
-		taskID,
-		checkpoint.File,
-		checkpoint.Pos,
-		checkpoint.GTIDSet,
-		updatedAt,
-	)
-	return err
+	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		_, err := s.db.ExecContext(
+			ctx,
+			upsertCheckpointSQL,
+			taskID,
+			checkpoint.File,
+			checkpoint.Pos,
+			checkpoint.GTIDSet,
+			updatedAt,
+		)
+		return err
+	})
 }
 
 func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
@@ -424,23 +426,25 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 		uploadState = "LOCAL_ONLY"
 	}
 
-	_, err := s.db.ExecContext(
-		ctx,
-		upsertBinlogFileSQL,
-		meta.TaskID,
-		meta.FileName,
-		meta.FilePath,
-		meta.SizeBytes,
-		meta.StartPos,
-		meta.EndPos,
-		createdAt,
-		sealedAt,
-		meta.ObjectKey,
-		uploadState,
-		meta.UploadError,
-		uploadedAt,
-	)
-	return err
+	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		_, err := s.db.ExecContext(
+			ctx,
+			upsertBinlogFileSQL,
+			meta.TaskID,
+			meta.FileName,
+			meta.FilePath,
+			meta.SizeBytes,
+			meta.StartPos,
+			meta.EndPos,
+			createdAt,
+			sealedAt,
+			meta.ObjectKey,
+			uploadState,
+			meta.UploadError,
+			uploadedAt,
+		)
+		return err
+	})
 }
 
 func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
