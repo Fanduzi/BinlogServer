@@ -9,6 +9,34 @@ export default defineConfig(({ mode }) => {
   return {
     base: uiBase,
     plugins: [vue()],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            const normalized = id.replace(/\\/g, "/");
+            if (!normalized.includes("/node_modules/")) {
+              return undefined;
+            }
+            if (
+              normalized.includes("/node_modules/vue/") ||
+              normalized.includes("/node_modules/@vue/")
+            ) {
+              return "vendor-vue";
+            }
+            if (
+              normalized.includes("/node_modules/element-plus/") ||
+              normalized.includes("/node_modules/@element-plus/")
+            ) {
+              return "vendor-element";
+            }
+            if (normalized.includes("/node_modules/@fortawesome/")) {
+              return "vendor-icons";
+            }
+            return undefined;
+          },
+        },
+      },
+    },
     server: {
       port: 5173,
       proxy: {
