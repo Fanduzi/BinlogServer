@@ -15,11 +15,19 @@ import (
 var ErrTaskNotFound = errors.New("task not found")
 var ErrInvalidSourceConfig = errors.New("invalid source config")
 var ErrRunnerNotConfigured = errors.New("runner is not configured")
+var ErrLeaseNotAcquired = errors.New("lease not acquired")
+var ErrClusterWorkerIDRequired = errors.New("cluster worker id is required")
 
 const defaultRetentionDays = 7
 
 type Runner interface {
 	Run(ctx context.Context, task Task) error
+}
+
+type LeaseManager interface {
+	Acquire(ctx context.Context, taskID, workerID string, now time.Time, ttl time.Duration) (int64, bool, error)
+	Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error)
+	Release(ctx context.Context, taskID, workerID string, epoch int64) (bool, error)
 }
 
 type runnerWithNotify interface {
@@ -91,6 +99,32 @@ func WithFileStore(store FileStore) Option {
 	}
 }
 
+func WithClusterLeaseManager(manager LeaseManager) Option {
+	return func(s *Scheduler) {
+		s.leaseManager = manager
+	}
+}
+
+func WithClusterWorkerID(workerID string) Option {
+	return func(s *Scheduler) {
+		s.clusterWorkerID = workerID
+	}
+}
+
+func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
+	return func(s *Scheduler) {
+		if ttl > 0 {
+			s.leaseTTL = ttl
+		}
+		if renewInterval > 0 {
+			s.leaseRenewInterval = renewInterval
+		}
+		if grace > 0 {
+			s.leaseGrace = grace
+		}
+	}
+}
+
 type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
@@ -104,6 +138,12 @@ type Scheduler struct {
 
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+
+	leaseManager       LeaseManager
+	clusterWorkerID    string
+	leaseTTL           time.Duration
+	leaseRenewInterval time.Duration
+	leaseGrace         time.Duration
 
 	checkpointReader CheckpointReader
 	eventStore       EventStore
@@ -119,8 +159,11 @@ func NewScheduler(opts ...Option) *Scheduler {
 		cancels: make(map[string]context.CancelFunc),
 		runs:    make(map[string]chan struct{}),
 
-		retryBaseDelay: time.Second,
-		retryMaxDelay:  30 * time.Second,
+		retryBaseDelay:     time.Second,
+		retryMaxDelay:      30 * time.Second,
+		leaseTTL:           15 * time.Second,
+		leaseRenewInterval: 5 * time.Second,
+		leaseGrace:         30 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -289,6 +332,25 @@ func (s *Scheduler) StartTask(id string) error {
 		s.mu.Unlock()
 		return ErrInvalidSourceConfig
 	}
+	if s.leaseManager != nil && s.clusterWorkerID == "" {
+		s.mu.Unlock()
+		return ErrClusterWorkerIDRequired
+	}
+
+	if s.leaseManager != nil {
+		epoch, acquired, err := s.leaseManager.Acquire(context.Background(), id, s.clusterWorkerID, time.Now(), s.leaseTTL)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if !acquired {
+			s.mu.Unlock()
+			return ErrLeaseNotAcquired
+		}
+		task.OwnerWorkerID = s.clusterWorkerID
+		task.Epoch = epoch
+		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
+	}
 
 	task.State = StateStarting
 	task.UpdatedAt = time.Now()
@@ -313,6 +375,10 @@ func (s *Scheduler) StartTask(id string) error {
 	s.runs[id] = done
 	taskForRun := s.tasks[id]
 	s.mu.Unlock()
+
+	if s.leaseManager != nil && taskForRun.Epoch > 0 {
+		go s.renewLeaseLoop(ctx, id, taskForRun.OwnerWorkerID, taskForRun.Epoch)
+	}
 
 	go s.runTask(ctx, id, taskForRun, done)
 	return nil
@@ -349,7 +415,7 @@ func (s *Scheduler) StopTask(id string) error {
 		s.mu.Unlock()
 		return ErrTaskNotFound
 	}
-	if task.State != StateRunning && task.State != StateRetryBackoff && task.State != StateStarting {
+	if task.State != StateRunning && task.State != StateRetryBackoff && task.State != StateStarting && task.State != StateLeaseDegraded {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot stop from state %s", task.State)
 	}
@@ -460,15 +526,26 @@ func (s *Scheduler) GetReplicationProgress(taskID string) (ReplicationProgress, 
 
 func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}) {
 	defer func() {
+		var (
+			releaseOwner string
+			releaseEpoch int64
+		)
 		s.mu.Lock()
 		if currentDone, ok := s.runs[id]; ok && currentDone == done {
 			delete(s.runs, id)
 		}
 		// 收到 stop 请求后，直到执行 goroutine 真退出才收敛到 STOPPED。
-		if task, ok := s.tasks[id]; ok && task.State == StateStopping {
+		if currentTask, ok := s.tasks[id]; ok && currentTask.State == StateStopping {
 			_ = s.markStoppedLocked(id)
+			if s.leaseManager != nil && currentTask.OwnerWorkerID != "" && currentTask.Epoch > 0 {
+				releaseOwner = currentTask.OwnerWorkerID
+				releaseEpoch = currentTask.Epoch
+			}
 		}
 		s.mu.Unlock()
+		if s.leaseManager != nil && releaseOwner != "" && releaseEpoch > 0 {
+			_, _ = s.leaseManager.Release(context.Background(), id, releaseOwner, releaseEpoch)
+		}
 		close(done)
 	}()
 
@@ -562,6 +639,91 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
 	// 向后兼容旧 runner：没有 notify 能力时，在 Run 前乐观置为 RUNNING。
 	onReady()
 	return s.runner.Run(ctx, task)
+}
+
+func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epoch int64) {
+	ticker := time.NewTicker(s.leaseRenewInterval)
+	defer ticker.Stop()
+
+	var degradedSince time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		ok, err := s.leaseManager.Renew(context.Background(), id, workerID, epoch, time.Now(), s.leaseTTL)
+		if err == nil && ok {
+			if !degradedSince.IsZero() {
+				degradedSince = time.Time{}
+				s.mu.Lock()
+				task, exists := s.tasks[id]
+				if exists && task.State == StateLeaseDegraded {
+					task.State = StateRunning
+					task.LastError = ""
+					task.UpdatedAt = time.Now()
+					s.tasks[id] = task
+					s.appendEventLocked(id, "TASK_LEASE_RENEWED", "lease renewed", "")
+					_ = s.persistTaskLocked(task)
+				}
+				s.mu.Unlock()
+			}
+			continue
+		}
+
+		if err == nil && !ok {
+			s.mu.Lock()
+			s.failSafeStopLocked(id, "TASK_LEASE_LOST", "lease lost")
+			s.mu.Unlock()
+			return
+		}
+
+		now := time.Now()
+		s.mu.Lock()
+		task, exists := s.tasks[id]
+		if exists && task.State != StateStopping && task.State != StateStopped {
+			if task.State != StateLeaseDegraded {
+				task.State = StateLeaseDegraded
+				s.appendEventLocked(id, "TASK_LEASE_DEGRADED", "lease renew failed", err.Error())
+			}
+			task.LastError = err.Error()
+			task.UpdatedAt = now
+			s.tasks[id] = task
+			_ = s.persistTaskLocked(task)
+		}
+		s.mu.Unlock()
+
+		if degradedSince.IsZero() {
+			degradedSince = now
+		}
+		if now.Sub(degradedSince) >= s.leaseGrace {
+			s.mu.Lock()
+			s.failSafeStopLocked(id, "TASK_LEASE_GRACE_EXCEEDED", "lease renew grace exceeded")
+			s.mu.Unlock()
+			return
+		}
+	}
+}
+
+func (s *Scheduler) failSafeStopLocked(id, eventType, message string) {
+	task, ok := s.tasks[id]
+	if !ok {
+		return
+	}
+	if task.State == StateStopping || task.State == StateStopped {
+		return
+	}
+	task.State = StateStopping
+	task.LastError = message
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	s.appendEventLocked(id, eventType, message, "")
+	_ = s.persistTaskLocked(task)
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
+	}
 }
 
 func (s *Scheduler) markStoppedLocked(id string) error {

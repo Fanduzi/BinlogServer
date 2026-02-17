@@ -5,24 +5,29 @@ import "time"
 type State string
 
 const (
-	StateCreated      State = "CREATED"
-	StateStarting     State = "STARTING"
-	StateRunning      State = "RUNNING"
-	StateRetryBackoff State = "RETRY_BACKOFF"
-	StateFailed       State = "FAILED"
-	StateStopping     State = "STOPPING"
-	StateStopped      State = "STOPPED"
+	StateCreated        State = "CREATED"
+	StateStarting       State = "STARTING"
+	StateRunning        State = "RUNNING"
+	StateLeaseDegraded  State = "LEASE_DEGRADED"
+	StateRebuildingFile State = "REBUILDING_FILE"
+	StateRetryBackoff   State = "RETRY_BACKOFF"
+	StateFailed         State = "FAILED"
+	StateStopping       State = "STOPPING"
+	StateStopped        State = "STOPPED"
 )
 
 type Task struct {
-	ID        string       `json:"id"`
-	Name      string       `json:"name"`
-	State     State        `json:"state"`
-	LastError string       `json:"last_error,omitempty"`
-	Source    SourceConfig `json:"source"`
-	Start     StartConfig  `json:"start"`
-	Storage   Storage      `json:"storage"`
-	UpdatedAt time.Time    `json:"updated_at"`
+	ID            string       `json:"id"`
+	Name          string       `json:"name"`
+	State         State        `json:"state"`
+	LastError     string       `json:"last_error,omitempty"`
+	OwnerWorkerID string       `json:"owner_worker_id,omitempty"`
+	Epoch         int64        `json:"epoch,omitempty"`
+	RunID         string       `json:"run_id,omitempty"`
+	Source        SourceConfig `json:"source"`
+	Start         StartConfig  `json:"start"`
+	Storage       Storage      `json:"storage"`
+	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
 type StartMode string
@@ -81,9 +86,9 @@ type BinlogFile struct {
 }
 
 type ReplicationProgress struct {
-	TaskID       string    `json:"task_id"`
-	LastEventAt  time.Time `json:"last_event_at"`
-	LastEventFile string   `json:"last_event_file"`
-	LastEventPos uint32    `json:"last_event_pos"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	TaskID        string    `json:"task_id"`
+	LastEventAt   time.Time `json:"last_event_at"`
+	LastEventFile string    `json:"last_event_file"`
+	LastEventPos  uint32    `json:"last_event_pos"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
