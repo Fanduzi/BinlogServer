@@ -672,6 +672,12 @@ const docTemplate = `{
                         "name": "id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Run history limit (default 10, max 200)",
+                        "name": "limit",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -1038,6 +1044,12 @@ const docTemplate = `{
         "api.taskRunView": {
             "type": "object",
             "properties": {
+                "end_reason": {
+                    "type": "string"
+                },
+                "ended_at": {
+                    "type": "string"
+                },
                 "epoch": {
                     "type": "integer"
                 },

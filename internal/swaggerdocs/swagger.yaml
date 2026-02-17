@@ -143,6 +143,10 @@ definitions:
     type: object
   api.taskRunView:
     properties:
+      end_reason:
+        type: string
+      ended_at:
+        type: string
       epoch:
         type: integer
       run_id:
@@ -758,6 +762,10 @@ paths:
         name: id
         required: true
         type: string
+      - description: Run history limit (default 10, max 200)
+        in: query
+        name: limit
+        type: integer
       produces:
       - application/json
       responses:

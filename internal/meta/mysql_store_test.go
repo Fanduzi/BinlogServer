@@ -38,14 +38,69 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 		Start: tasks.StartConfig{Mode: tasks.StartModeLatest},
 	}
 
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(loadTaskRunStateSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"run_id"}))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
 		WithArgs("1", "cluster-a", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(insertTaskRunSQL)).
+		WithArgs("run-1", "1", "worker-a", int64(7), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
 	if err := store.UpsertTask(context.Background(), task); err != nil {
 		t.Fatalf("UpsertTask returned error: %v", err)
 	}
 
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	task := tasks.Task{
+		ID:            "1",
+		Name:          "cluster-a",
+		State:         tasks.StateStopped,
+		OwnerWorkerID: "",
+		Epoch:         0,
+		RunID:         "",
+		LastError:     "",
+		Source: tasks.SourceConfig{
+			Host:     "127.0.0.1",
+			Port:     3306,
+			User:     "repl",
+			Password: "secret",
+			Flavor:   "mysql",
+			ServerID: 200001,
+		},
+		Start: tasks.StartConfig{Mode: tasks.StartModeLatest},
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(loadTaskRunStateSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"run_id"}).AddRow("run-1"))
+	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
+		WithArgs("1", "cluster-a", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(finishTaskRunSQL)).
+		WithArgs(sqlmock.AnyArg(), "NORMAL_STOP", "run-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := store.UpsertTask(context.Background(), task); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
@@ -459,6 +514,72 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
 	if err := store.ensureSchema(context.Background()); err != nil {
 		t.Fatalf("ensureSchema returned error: %v", err)
 	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListTaskRuns(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{
+		"run_id", "task_id", "worker_id", "epoch", "started_at", "ended_at", "end_reason",
+	}).
+		AddRow("run-2", "task-1", "worker-b", int64(8), now, nil, nil).
+		AddRow("run-1", "task-1", "worker-a", int64(7), now.Add(-time.Hour), now.Add(-30*time.Minute), "NORMAL_STOP")
+
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskRunsSQL)).
+		WithArgs("task-1", 10).
+		WillReturnRows(rows)
+
+	runs, err := store.ListTaskRuns(context.Background(), "task-1", 0)
+	if err != nil {
+		t.Fatalf("ListTaskRuns returned error: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	if runs[0].RunID != "run-2" || !runs[0].EndedAt.IsZero() {
+		t.Fatalf("unexpected latest run: %+v", runs[0])
+	}
+	if runs[1].RunID != "run-1" || runs[1].EndReason != "NORMAL_STOP" || runs[1].EndedAt.IsZero() {
+		t.Fatalf("unexpected historical run: %+v", runs[1])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListTaskRuns_LimitCappedTo200(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	rows := sqlmock.NewRows([]string{
+		"run_id", "task_id", "worker_id", "epoch", "started_at", "ended_at", "end_reason",
+	})
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskRunsSQL)).
+		WithArgs("task-1", 200).
+		WillReturnRows(rows)
+
+	runs, err := store.ListTaskRuns(context.Background(), "task-1", 999)
+	if err != nil {
+		t.Fatalf("ListTaskRuns returned error: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("expected empty runs, got %d", len(runs))
+	}
+
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}

@@ -42,6 +42,10 @@ type TaskStore interface {
 	DeleteTask(ctx context.Context, taskID string) error
 }
 
+type taskRunReader interface {
+	ListTaskRuns(ctx context.Context, taskID string, limit int) ([]TaskRun, error)
+}
+
 type CheckpointReader interface {
 	LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error)
 }
@@ -852,6 +856,41 @@ func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 		return []BinlogFile{}, nil
 	}
 	return s.fileStore.ListBinlogFiles(context.Background(), taskID, limit)
+}
+
+func (s *Scheduler) ListRuns(taskID string, limit int) ([]TaskRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	s.mu.Lock()
+	task, ok := s.tasks[taskID]
+	store := s.store
+	s.mu.Unlock()
+
+	if !ok {
+		return nil, ErrTaskNotFound
+	}
+
+	if reader, ok := store.(taskRunReader); ok {
+		return reader.ListTaskRuns(context.Background(), taskID, limit)
+	}
+
+	if task.RunID == "" {
+		return []TaskRun{}, nil
+	}
+	return []TaskRun{
+		{
+			RunID:     task.RunID,
+			TaskID:    task.ID,
+			WorkerID:  task.OwnerWorkerID,
+			Epoch:     task.Epoch,
+			StartedAt: task.UpdatedAt,
+		},
+	}, nil
 }
 
 func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string) {

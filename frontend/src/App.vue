@@ -450,7 +450,7 @@ e2e-mysql80,127.0.0.1,13307
           </section>
 
           <section class="detail-panel">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> 当前 Run 信息（接口当前最多返回 1 条）</h3>
+            <h3><i class="fa-solid fa-clock-rotate-left" /> Run History（最近 {{ runHistoryLimit }} 条）</h3>
             <el-table :data="detailRunsLimited" size="small" border>
               <el-table-column prop="run_id" label="Run ID" min-width="180" />
               <el-table-column prop="worker_id" label="Worker" min-width="120" />
@@ -458,8 +458,14 @@ e2e-mysql80,127.0.0.1,13307
               <el-table-column label="Started At" min-width="170">
                 <template #default="{ row }">{{ formatTs(row.started_at) }}</template>
               </el-table-column>
+              <el-table-column label="Ended At" min-width="170">
+                <template #default="{ row }">{{ formatTs(row.ended_at) }}</template>
+              </el-table-column>
+              <el-table-column label="End Reason" min-width="140">
+                <template #default="{ row }">{{ row.end_reason || "--" }}</template>
+              </el-table-column>
             </el-table>
-            <el-empty v-if="detailRunsLimited.length === 0" description="暂无当前 run 信息" :image-size="56" />
+            <el-empty v-if="detailRunsLimited.length === 0" description="暂无 run history" :image-size="56" />
           </section>
 
           <section class="detail-panel">
@@ -1160,7 +1166,7 @@ async function showDetail(taskOrID) {
     ]);
     const [leaseResult, runsResult] = await Promise.allSettled([
       getTaskLease(id),
-      listTaskRuns(id),
+      listTaskRuns(id, RUN_HISTORY_LIMIT),
     ]);
     const lease = leaseResult.status === "fulfilled" ? leaseResult.value : null;
     const runs = runsResult.status === "fulfilled" ? runsResult.value : [];

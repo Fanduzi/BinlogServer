@@ -35,6 +35,51 @@ func (m *fakeAPILeaseManager) Release(_ context.Context, _ string, _ string, _ i
 	return true, nil
 }
 
+type fakeAPIRunHistoryStore struct {
+	tasks     map[string]tasks.Task
+	runs      map[string][]tasks.TaskRun
+	lastLimit int
+}
+
+func newFakeAPIRunHistoryStore() *fakeAPIRunHistoryStore {
+	return &fakeAPIRunHistoryStore{
+		tasks: make(map[string]tasks.Task),
+		runs:  make(map[string][]tasks.TaskRun),
+	}
+}
+
+func (s *fakeAPIRunHistoryStore) UpsertTask(_ context.Context, task tasks.Task) error {
+	s.tasks[task.ID] = task
+	return nil
+}
+
+func (s *fakeAPIRunHistoryStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+	out := make([]tasks.Task, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		out = append(out, task)
+	}
+	return out, nil
+}
+
+func (s *fakeAPIRunHistoryStore) DeleteTask(_ context.Context, taskID string) error {
+	delete(s.tasks, taskID)
+	delete(s.runs, taskID)
+	return nil
+}
+
+func (s *fakeAPIRunHistoryStore) ListTaskRuns(_ context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {
+	s.lastLimit = limit
+	rows := s.runs[taskID]
+	if limit <= 0 || limit >= len(rows) {
+		out := make([]tasks.TaskRun, len(rows))
+		copy(out, rows)
+		return out, nil
+	}
+	out := make([]tasks.TaskRun, limit)
+	copy(out, rows[:limit])
+	return out, nil
+}
+
 func TestTaskAPI_CreateListStartStop(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
@@ -827,8 +872,10 @@ func TestAPI_ClusterTaskLease(t *testing.T) {
 }
 
 func TestAPI_ClusterTaskRuns(t *testing.T) {
+	runStore := newFakeAPIRunHistoryStore()
 	scheduler := tasks.NewScheduler(
 		tasks.WithRunner(&fakeAPIRunner{}),
+		tasks.WithStore(runStore),
 		tasks.WithClusterLeaseManager(&fakeAPILeaseManager{epoch: 11}),
 		tasks.WithClusterWorkerID("worker-a"),
 	)
@@ -844,9 +891,28 @@ func TestAPI_ClusterTaskRuns(t *testing.T) {
 	if err := scheduler.StartTask(task.ID); err != nil {
 		t.Fatalf("StartTask returned error: %v", err)
 	}
+	now := time.Now()
+	runStore.runs[task.ID] = []tasks.TaskRun{
+		{
+			RunID:     "run-2",
+			TaskID:    task.ID,
+			WorkerID:  "worker-b",
+			Epoch:     12,
+			StartedAt: now,
+		},
+		{
+			RunID:     "run-1",
+			TaskID:    task.ID,
+			WorkerID:  "worker-a",
+			Epoch:     11,
+			StartedAt: now.Add(-time.Hour),
+			EndedAt:   now.Add(-30 * time.Minute),
+			EndReason: "NORMAL_STOP",
+		},
+	}
 
 	resp := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/runs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/runs?limit=999", nil)
 	handler.ServeHTTP(resp, req)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
@@ -856,11 +922,17 @@ func TestAPI_ClusterTaskRuns(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &runs); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("expected 1 run item, got %d", len(runs))
+	if runStore.lastLimit != 200 {
+		t.Fatalf("expected limit clamped to 200, got %d", runStore.lastLimit)
 	}
-	if runs[0]["run_id"] == "" {
-		t.Fatalf("expected non-empty run_id, got %+v", runs[0])
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 run items, got %d", len(runs))
+	}
+	if runs[0]["run_id"] != "run-2" {
+		t.Fatalf("unexpected latest run: %+v", runs[0])
+	}
+	if runs[1]["end_reason"] != "NORMAL_STOP" {
+		t.Fatalf("unexpected end_reason on historical run: %+v", runs[1])
 	}
 }
 

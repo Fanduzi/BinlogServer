@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"binlog_server/internal/binlog"
@@ -234,6 +235,36 @@ ORDER BY sealed_at DESC
 LIMIT ?;
 `
 
+const loadTaskRunStateSQL = `
+SELECT run_id
+FROM backup_tasks
+WHERE id = ?;
+`
+
+const insertTaskRunSQL = `
+INSERT INTO task_runs (run_id, task_id, worker_id, epoch, started_at)
+VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  task_id = VALUES(task_id),
+  worker_id = VALUES(worker_id),
+  epoch = VALUES(epoch),
+  started_at = VALUES(started_at);
+`
+
+const finishTaskRunSQL = `
+UPDATE task_runs
+SET ended_at = ?, end_reason = ?
+WHERE run_id = ? AND ended_at IS NULL;
+`
+
+const listTaskRunsSQL = `
+SELECT run_id, task_id, worker_id, epoch, started_at, ended_at, end_reason
+FROM task_runs
+WHERE task_id = ?
+ORDER BY started_at DESC
+LIMIT ?;
+`
+
 type MySQLTaskStore struct {
 	db *sql.DB
 }
@@ -368,7 +399,21 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		updatedAt = time.Now()
 	}
 
-	_, err = s.db.ExecContext(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var previousRunID sql.NullString
+	row := tx.QueryRowContext(ctx, loadTaskRunStateSQL, task.ID)
+	if err := row.Scan(&previousRunID); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	if _, err = tx.ExecContext(
 		ctx,
 		upsertTaskSQL,
 		task.ID,
@@ -382,8 +427,43 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		string(startJSON),
 		string(storageJSON),
 		updatedAt,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+
+	currentRunID := strings.TrimSpace(task.RunID)
+	previous := strings.TrimSpace(previousRunID.String)
+
+	if currentRunID != "" && currentRunID != previous {
+		if _, err = tx.ExecContext(
+			ctx,
+			insertTaskRunSQL,
+			currentRunID,
+			task.ID,
+			task.OwnerWorkerID,
+			task.Epoch,
+			updatedAt,
+		); err != nil {
+			return err
+		}
+	}
+
+	if previous != "" && previous != currentRunID {
+		if _, err = tx.ExecContext(
+			ctx,
+			finishTaskRunSQL,
+			updatedAt,
+			inferRunEndReason(task),
+			previous,
+		); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
@@ -617,4 +697,61 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *MySQLTaskStore) ListTaskRuns(ctx context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	rows, err := s.db.QueryContext(ctx, listTaskRunsSQL, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []tasks.TaskRun
+	for rows.Next() {
+		var item tasks.TaskRun
+		var endedAt sql.NullTime
+		var endReason sql.NullString
+		if err := rows.Scan(
+			&item.RunID,
+			&item.TaskID,
+			&item.WorkerID,
+			&item.Epoch,
+			&item.StartedAt,
+			&endedAt,
+			&endReason,
+		); err != nil {
+			return nil, err
+		}
+		if endedAt.Valid {
+			item.EndedAt = endedAt.Time
+		}
+		if endReason.Valid {
+			item.EndReason = endReason.String
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func inferRunEndReason(task tasks.Task) string {
+	if task.LastError == "" {
+		return "NORMAL_STOP"
+	}
+	if strings.Contains(strings.ToLower(task.LastError), "lease") {
+		if strings.Contains(strings.ToLower(task.LastError), "grace") {
+			return "LEASE_GRACE_EXCEEDED"
+		}
+		return "LEASE_LOST"
+	}
+	return "STOP_WITH_ERROR"
 }

@@ -145,6 +145,7 @@ func (s *Server) swaggerTaskLeaseDoc() {}
 // @Tags Cluster
 // @Produce json
 // @Param id path string true "Task ID"
+// @Param limit query int false "Run history limit (default 10, max 200)"
 // @Success 200 {array} taskRunView
 // @Failure 404 {string} string
 // @Failure 500 {string} string

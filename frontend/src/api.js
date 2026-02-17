@@ -82,8 +82,8 @@ export async function getTaskLease(id) {
   return data;
 }
 
-export async function listTaskRuns(id) {
-  const { data } = await http.get(`/api/tasks/${id}/runs`);
+export async function listTaskRuns(id, limit = 10) {
+  const { data } = await http.get(`/api/tasks/${id}/runs`, { params: { limit } });
   return data;
 }
 

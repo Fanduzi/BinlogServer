@@ -32,6 +32,8 @@ type taskRunView struct {
 	WorkerID  string    `json:"worker_id,omitempty"`
 	Epoch     int64     `json:"epoch"`
 	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at,omitempty"`
+	EndReason string    `json:"end_reason,omitempty"`
 }
 
 type clusterOverview struct {
@@ -107,7 +109,12 @@ func (s *Server) handleTaskLease(w http.ResponseWriter, r *http.Request, taskID 
 }
 
 func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request, taskID string) {
-	task, err := s.tasks.GetTask(taskID)
+	limit := parseLimit(r, 10)
+	if limit > 200 {
+		limit = 200
+	}
+
+	runs, err := s.tasks.ListRuns(taskID, limit)
 	if err != nil {
 		if errors.Is(err, tasks.ErrTaskNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -117,17 +124,19 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request, taskID s
 		return
 	}
 
-	runs := []taskRunView{}
-	if task.RunID != "" {
-		runs = append(runs, taskRunView{
-			RunID:     task.RunID,
-			TaskID:    task.ID,
-			WorkerID:  task.OwnerWorkerID,
-			Epoch:     task.Epoch,
-			StartedAt: task.UpdatedAt,
+	out := make([]taskRunView, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, taskRunView{
+			RunID:     run.RunID,
+			TaskID:    run.TaskID,
+			WorkerID:  run.WorkerID,
+			Epoch:     run.Epoch,
+			StartedAt: run.StartedAt,
+			EndedAt:   run.EndedAt,
+			EndReason: run.EndReason,
 		})
 	}
-	writeJSON(w, http.StatusOK, runs)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleClusterOverview(w http.ResponseWriter, r *http.Request) {

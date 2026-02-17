@@ -70,6 +70,16 @@ type TaskEvent struct {
 	Sequence int64     `json:"sequence"`
 }
 
+type TaskRun struct {
+	RunID     string    `json:"run_id"`
+	TaskID    string    `json:"task_id"`
+	WorkerID  string    `json:"worker_id,omitempty"`
+	Epoch     int64     `json:"epoch"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at,omitempty"`
+	EndReason string    `json:"end_reason,omitempty"`
+}
+
 type BinlogFile struct {
 	TaskID      string    `json:"task_id"`
 	FileName    string    `json:"file_name"`
