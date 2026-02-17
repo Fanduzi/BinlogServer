@@ -24,10 +24,24 @@ export default defineConfig(({ mode }) => {
               return "vendor-vue";
             }
             if (
+              normalized.includes("/node_modules/element-plus/es/components/")
+            ) {
+              const marker = "/node_modules/element-plus/es/components/";
+              const componentPath = normalized.split(marker)[1] || "";
+              const componentName = componentPath.split("/")[0];
+              const ch = componentName[0]?.toLowerCase() || "z";
+              return ch <= "m" ? "vendor-element-c1" : "vendor-element-c2";
+            }
+            if (
+              normalized.includes("/node_modules/element-plus/es/locale/")
+            ) {
+              return "vendor-element-locale";
+            }
+            if (
               normalized.includes("/node_modules/element-plus/") ||
               normalized.includes("/node_modules/@element-plus/")
             ) {
-              return "vendor-element";
+              return undefined;
             }
             if (normalized.includes("/node_modules/@fortawesome/")) {
               return "vendor-icons";
