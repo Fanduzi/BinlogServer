@@ -15,6 +15,12 @@ GRANT ALL PRIVILEGES ON binlog_e2e_percona80.* TO 'repl'@'%';
 CREATE USER IF NOT EXISTS 'meta'@'%' IDENTIFIED BY 'metapass';
 GRANT ALL PRIVILEGES ON binlog_meta.* TO 'meta'@'%';
 
+CREATE USER IF NOT EXISTS 'repl_meta'@'%' IDENTIFIED BY 'MetaRepl!2026';
+GRANT REPLICATION SLAVE ON *.* TO 'repl_meta'@'%';
+
+CREATE USER IF NOT EXISTS 'proxysql_monitor'@'%' IDENTIFIED BY 'MetaMon!2026';
+GRANT REPLICATION CLIENT, PROCESS ON *.* TO 'proxysql_monitor'@'%';
+
 CREATE TABLE IF NOT EXISTS binlog_e2e_57.t1 (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   v VARCHAR(1024) NOT NULL,
