@@ -9,6 +9,7 @@ KEEP_ENV=0
 SERVER_PID=""
 SERVER_LOG="${E2E_SERVER_LOG:-/tmp/binlog-server-e2e-suite.log}"
 DATA_DIR="${E2E_DATA_DIR:-$ROOT_DIR/tmp/e2e/data-suite-$(date +%s)}"
+META_DSN=""
 
 usage() {
   cat <<'EOF'
@@ -17,7 +18,7 @@ Usage:
 
 Profiles:
   quick  -> smoke,compression
-  full   -> smoke,compression,orchestrator,semisync
+  full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
   --profile <name>     选择预设场景集（默认 quick）
@@ -30,6 +31,7 @@ Scenarios:
   compression
   orchestrator
   semisync
+  meta-failover
 EOF
 }
 
@@ -77,7 +79,7 @@ build_scenarios() {
       echo "smoke compression"
       ;;
     full)
-      echo "smoke compression orchestrator semisync"
+      echo "smoke compression orchestrator semisync meta-failover"
       ;;
     *)
       echo "unsupported profile: $PROFILE" >&2
@@ -116,11 +118,26 @@ run_scenario() {
     semisync)
       "$ROOT_DIR/scripts/e2e/smoke-semisync.sh"
       ;;
+    meta-failover)
+      "$ROOT_DIR/scripts/e2e/smoke-meta-failover.sh"
+      ;;
     *)
       echo "unsupported scenario: $name" >&2
       return 1
       ;;
   esac
+}
+
+has_scenario() {
+  local target="$1"
+  shift
+  local item
+  for item in "$@"; do
+    if [[ "$item" == "$target" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 cleanup() {
@@ -158,8 +175,18 @@ main() {
   "$ROOT_DIR/scripts/e2e/down.sh" >/dev/null 2>&1 || true
   "$ROOT_DIR/scripts/e2e/up.sh"
 
+  if has_scenario "meta-failover" "${scenarios[@]}"; then
+    META_DSN="meta:metapass@tcp(127.0.0.1:16036)/binlog_meta?parseTime=true"
+    docker compose -f "$ROOT_DIR/deploy/e2e/docker-compose.yml" up -d meta-primary meta-replica meta-proxysql
+    "$ROOT_DIR/scripts/e2e/setup-meta-replication.sh"
+  fi
+
   mkdir -p "$DATA_DIR"
-  BINLOG_SERVER_DATA_DIR="$DATA_DIR" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+  if [[ -n "$META_DSN" ]]; then
+    BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+  else
+    BINLOG_SERVER_DATA_DIR="$DATA_DIR" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+  fi
   SERVER_PID=$!
   wait_server_ready
   echo "[suite] binlog-server ready pid=$SERVER_PID"

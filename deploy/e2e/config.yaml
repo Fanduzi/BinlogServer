@@ -1,5 +1,6 @@
 listen_addr: "127.0.0.1:18080"
 data_dir: "./tmp/e2e/data"
+# 默认使用 mysql57；meta-failover 场景会通过 BINLOG_SERVER_META_DSN 覆盖到 ProxySQL(16036)。
 meta_dsn: "meta:metapass@tcp(127.0.0.1:13306)/binlog_meta?parseTime=true"
 upload:
   use_ssl: false
