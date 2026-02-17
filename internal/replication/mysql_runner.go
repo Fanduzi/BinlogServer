@@ -441,6 +441,9 @@ func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initial
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, "", err
 	}
+	if err := cleanupStaleOpenFiles(dir, task.Epoch); err != nil {
+		return nil, nil, "", err
+	}
 	localFileName := openFileName(fileName, task.Epoch)
 	if err := cleanupExpiredBinlogs(dir, task.Storage.RetentionDays, time.Now(), localFileName); err != nil {
 		return nil, nil, "", err
@@ -574,6 +577,40 @@ func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeF
 			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func cleanupStaleOpenFiles(dir string, currentEpoch int64) error {
+	if currentEpoch <= 0 {
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		idx := strings.LastIndex(name, ".open.e")
+		if idx <= 0 {
+			continue
+		}
+		epochText := name[idx+len(".open.e"):]
+		epoch, err := strconv.ParseInt(epochText, 10, 64)
+		if err != nil {
+			continue
+		}
+		if epoch == currentEpoch {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return err
 		}
 	}
 	return nil
