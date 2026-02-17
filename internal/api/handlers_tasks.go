@@ -436,6 +436,14 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, buildReplicationResponse(task, progress, ok, time.Now(), defaultDelayThresholdSeconds))
 			return
 		}
+		if r.Method == http.MethodGet && action == "lease" {
+			s.handleTaskLease(w, r, taskID)
+			return
+		}
+		if r.Method == http.MethodGet && action == "runs" {
+			s.handleTaskRuns(w, r, taskID)
+			return
+		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

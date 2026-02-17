@@ -54,6 +54,8 @@ func (s *Server) routes() {
 	s.gin.GET("/api/summary", gin.WrapF(s.handleSummary))
 	s.gin.GET("/api/dashboard", gin.WrapF(s.handleDashboard))
 	s.gin.GET("/api/sources/lookup", gin.WrapF(s.handleSourceLookup))
+	s.gin.GET("/api/workers", gin.WrapF(s.handleWorkers))
+	s.gin.GET("/api/cluster/overview", gin.WrapF(s.handleClusterOverview))
 	s.gin.POST("/api/tasks", gin.WrapF(s.handleTasks))
 	s.gin.GET("/api/tasks", gin.WrapF(s.handleTasks))
 	s.gin.Any("/api/tasks/*path", gin.WrapF(s.handleTaskAction))

@@ -19,6 +19,22 @@ func (r *fakeAPIRunner) Run(_ context.Context, _ tasks.Task) error {
 	return nil
 }
 
+type fakeAPILeaseManager struct {
+	epoch int64
+}
+
+func (m *fakeAPILeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Time, _ time.Duration) (int64, bool, error) {
+	return m.epoch, true, nil
+}
+
+func (m *fakeAPILeaseManager) Renew(_ context.Context, _ string, _ string, _ int64, _ time.Time, _ time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (m *fakeAPILeaseManager) Release(_ context.Context, _ string, _ string, _ int64) (bool, error) {
+	return true, nil
+}
+
 func TestTaskAPI_CreateListStartStop(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
@@ -728,6 +744,161 @@ func TestAPI_Dashboard(t *testing.T) {
 	}
 	if len(tasksAny) != 2 {
 		t.Fatalf("expected 2 dashboard tasks, got %d", len(tasksAny))
+	}
+}
+
+func TestAPI_ClusterWorkers(t *testing.T) {
+	scheduler := tasks.NewScheduler(
+		tasks.WithRunner(&fakeAPIRunner{}),
+		tasks.WithClusterLeaseManager(&fakeAPILeaseManager{epoch: 7}),
+		tasks.WithClusterWorkerID("worker-a"),
+	)
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := scheduler.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/workers", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var workers []map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &workers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("expected 1 worker item, got %d", len(workers))
+	}
+	if workers[0]["worker_id"] != "worker-a" {
+		t.Fatalf("unexpected worker_id: %v", workers[0]["worker_id"])
+	}
+}
+
+func TestAPI_ClusterTaskLease(t *testing.T) {
+	scheduler := tasks.NewScheduler(
+		tasks.WithRunner(&fakeAPIRunner{}),
+		tasks.WithClusterLeaseManager(&fakeAPILeaseManager{epoch: 9}),
+		tasks.WithClusterWorkerID("worker-a"),
+	)
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := scheduler.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/lease", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var lease map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &lease); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if lease["task_id"] != task.ID {
+		t.Fatalf("unexpected task_id: %v", lease["task_id"])
+	}
+	if lease["owner_worker_id"] != "worker-a" {
+		t.Fatalf("unexpected owner_worker_id: %v", lease["owner_worker_id"])
+	}
+	if int(lease["epoch"].(float64)) != 9 {
+		t.Fatalf("unexpected epoch: %v", lease["epoch"])
+	}
+}
+
+func TestAPI_ClusterTaskRuns(t *testing.T) {
+	scheduler := tasks.NewScheduler(
+		tasks.WithRunner(&fakeAPIRunner{}),
+		tasks.WithClusterLeaseManager(&fakeAPILeaseManager{epoch: 11}),
+		tasks.WithClusterWorkerID("worker-a"),
+	)
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := scheduler.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/runs", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var runs []map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &runs); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run item, got %d", len(runs))
+	}
+	if runs[0]["run_id"] == "" {
+		t.Fatalf("expected non-empty run_id, got %+v", runs[0])
+	}
+}
+
+func TestAPI_ClusterOverview(t *testing.T) {
+	scheduler := tasks.NewScheduler(
+		tasks.WithRunner(&fakeAPIRunner{}),
+		tasks.WithClusterLeaseManager(&fakeAPILeaseManager{epoch: 13}),
+		tasks.WithClusterWorkerID("worker-a"),
+	)
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := scheduler.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/overview", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var overview map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if int(overview["task_count"].(float64)) != 1 {
+		t.Fatalf("unexpected task_count: %v", overview["task_count"])
+	}
+	if int(overview["worker_count"].(float64)) != 1 {
+		t.Fatalf("unexpected worker_count: %v", overview["worker_count"])
 	}
 }
 
