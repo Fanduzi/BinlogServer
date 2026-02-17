@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
-API="http://127.0.0.1:18080"
-ORC_API="http://127.0.0.1:13000/api"
+API="${E2E_API:-http://127.0.0.1:18080}"
+ORC_API="${E2E_ORC_API:-http://127.0.0.1:13000/api}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }

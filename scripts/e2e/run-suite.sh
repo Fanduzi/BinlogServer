@@ -177,7 +177,6 @@ main() {
 
   if has_scenario "meta-failover" "${scenarios[@]}"; then
     META_DSN="meta:metapass@tcp(127.0.0.1:16036)/binlog_meta?parseTime=true"
-    docker compose -f "$ROOT_DIR/deploy/e2e/docker-compose.yml" up -d meta-primary meta-replica meta-proxysql
     "$ROOT_DIR/scripts/e2e/setup-meta-replication.sh"
   fi
 

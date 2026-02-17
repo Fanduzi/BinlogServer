@@ -76,6 +76,7 @@ make e2e SCENARIOS=smoke,compression
 1. 执行 `setup-meta-replication.sh` 建立主从复制
 2. 将 `BINLOG_SERVER_META_DSN` 覆盖到 `127.0.0.1:16036`（ProxySQL）
 3. 执行 `smoke-meta-failover.sh` 验证 failover 后恢复
+4. 可通过 `E2E_API` / `E2E_ORC_API` 覆盖 binlog-server 与 orchestrator 地址。
 
 ## 排障建议
 
