@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"binlog_server/internal/binlog"
@@ -19,14 +20,16 @@ import (
 )
 
 var binlogMagic = []byte{0xfe, 'b', 'i', 'n'}
+var ErrLeaseEpochMismatch = errors.New("lease/epoch mismatch")
 
 type MySQLRunner struct {
-	dataDir         string
-	fetcher         MasterStatusFetcher
-	checkpointStore CheckpointStore
-	fileMetaStore   FileMetaStore
-	uploader        FileUploader
-	uploadPrefix    string
+	dataDir          string
+	fetcher          MasterStatusFetcher
+	checkpointStore  CheckpointStore
+	fileMetaStore    FileMetaStore
+	uploader         FileUploader
+	uploadPrefix     string
+	leaseVerifier    LeaseVerifier
 	progressReporter ProgressReporter
 }
 
@@ -67,10 +70,26 @@ type ProgressReporter interface {
 	ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32)
 }
 
+type LeaseVerifier interface {
+	VerifyLease(ctx context.Context, task tasks.Task) (bool, error)
+}
+
+type leaseVerifierFunc func(context.Context, tasks.Task) (bool, error)
+
+func (f leaseVerifierFunc) VerifyLease(ctx context.Context, task tasks.Task) (bool, error) {
+	return f(ctx, task)
+}
+
 func WithUploader(uploader FileUploader, prefix string) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.uploader = uploader
 		r.uploadPrefix = prefix
+	}
+}
+
+func WithLeaseVerifier(verifier LeaseVerifier) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.leaseVerifier = verifier
 	}
 }
 
@@ -316,18 +335,43 @@ func (r *MySQLRunner) finalizeSealedFile(
 	createdAt time.Time,
 	sealedAt time.Time,
 ) error {
+	if task.Epoch > 0 && r.leaseVerifier != nil {
+		ok, err := r.leaseVerifier.VerifyLease(ctx, task)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrLeaseEpochMismatch
+		}
+	}
+
+	sealedPath, sourceFile, err := sealPath(localPath, task.Epoch)
+	if err != nil {
+		return err
+	}
+	if localPath != sealedPath {
+		if _, err := os.Stat(sealedPath); err == nil {
+			return fmt.Errorf("sealed file already exists: %s", sealedPath)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Rename(localPath, sealedPath); err != nil {
+			return err
+		}
+	}
+
 	var fileMeta *tasks.BinlogFile
 
 	if r.fileMetaStore != nil {
 		// 先落本地 file metadata；upload state 初始为 LOCAL_ONLY。
-		info, err := os.Stat(localPath)
+		info, err := os.Stat(sealedPath)
 		if err != nil {
 			return err
 		}
 		meta := tasks.BinlogFile{
 			TaskID:      task.ID,
-			FileName:    filepath.Base(localPath),
-			FilePath:    localPath,
+			FileName:    sourceFile,
+			FilePath:    sealedPath,
 			SizeBytes:   info.Size(),
 			StartPos:    startPos,
 			EndPos:      endPos,
@@ -344,8 +388,8 @@ func (r *MySQLRunner) finalizeSealedFile(
 	if r.uploader == nil {
 		return nil
 	}
-	objectKey := buildObjectKey(r.uploadPrefix, task.ID, filepath.Base(localPath))
-	if err := r.uploader.UploadFile(ctx, task.ID, localPath, objectKey); err != nil {
+	objectKey := buildObjectKey(r.uploadPrefix, task.ID, sourceFile)
+	if err := r.uploader.UploadFile(ctx, task.ID, sealedPath, objectKey); err != nil {
 		if fileMeta != nil {
 			fileMeta.UploadState = "UPLOAD_FAILED"
 			fileMeta.UploadError = err.Error()
@@ -397,11 +441,12 @@ func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initial
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, "", err
 	}
-	if err := cleanupExpiredBinlogs(dir, task.Storage.RetentionDays, time.Now(), fileName); err != nil {
+	localFileName := openFileName(fileName, task.Epoch)
+	if err := cleanupExpiredBinlogs(dir, task.Storage.RetentionDays, time.Now(), localFileName); err != nil {
 		return nil, nil, "", err
 	}
 
-	path := filepath.Join(dir, fileName)
+	path := filepath.Join(dir, localFileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, nil, "", err
@@ -525,6 +570,27 @@ func buildObjectKey(prefix, taskID, fileName string) string {
 		return base
 	}
 	return filepath.ToSlash(filepath.Join(prefix, base))
+}
+
+func openFileName(sourceFile string, epoch int64) string {
+	if epoch <= 0 {
+		return sourceFile
+	}
+	return fmt.Sprintf("%s.open.e%d", sourceFile, epoch)
+}
+
+func sealPath(localPath string, epoch int64) (string, string, error) {
+	base := filepath.Base(localPath)
+	if epoch <= 0 {
+		return localPath, base, nil
+	}
+
+	expectedSuffix := fmt.Sprintf(".open.e%d", epoch)
+	sourceFile := strings.TrimSuffix(base, expectedSuffix)
+	if sourceFile == base {
+		return "", "", fmt.Errorf("open file %s does not match epoch %d", base, epoch)
+	}
+	return filepath.Join(filepath.Dir(localPath), sourceFile), sourceFile, nil
 }
 
 func sourceEventTime(event *replication.BinlogEvent) time.Time {
