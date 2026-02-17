@@ -15,6 +15,16 @@ export async function getDashboard(params = {}) {
   return data;
 }
 
+export async function listWorkers() {
+  const { data } = await http.get("/api/workers");
+  return data;
+}
+
+export async function getClusterOverview() {
+  const { data } = await http.get("/api/cluster/overview");
+  return data;
+}
+
 export async function lookupSource(params = {}) {
   const { data } = await http.get("/api/sources/lookup", { params });
   return data;
@@ -64,6 +74,16 @@ export async function getCheckpoint(id) {
 
 export async function getReplication(id) {
   const { data } = await http.get(`/api/tasks/${id}/replication`);
+  return data;
+}
+
+export async function getTaskLease(id) {
+  const { data } = await http.get(`/api/tasks/${id}/lease`);
+  return data;
+}
+
+export async function listTaskRuns(id) {
+  const { data } = await http.get(`/api/tasks/${id}/runs`);
   return data;
 }
 

@@ -129,6 +129,56 @@
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="panel-title">
+              <span><i class="fa-solid fa-sitemap" /> Cluster 视图</span>
+              <span class="panel-hint">{{ cluster.overview.worker_count }} workers</span>
+            </div>
+          </template>
+
+          <div class="cluster-overview-grid">
+            <div class="cluster-stat-cell">
+              <p>任务总数</p>
+              <strong>{{ cluster.overview.task_count }}</strong>
+            </div>
+            <div class="cluster-stat-cell">
+              <p>运行中任务</p>
+              <strong>{{ cluster.overview.running_task_count }}</strong>
+            </div>
+            <div class="cluster-stat-cell">
+              <p>持有 Lease</p>
+              <strong>{{ cluster.overview.leased_task_count }}</strong>
+            </div>
+          </div>
+
+          <div class="cluster-worker-list">
+            <div
+              v-for="worker in workerRows"
+              :key="worker.worker_id"
+              class="cluster-worker-item"
+            >
+              <div class="cluster-worker-head">
+                <strong>{{ worker.worker_id }}</strong>
+                <el-tag size="small" :type="worker.online ? 'success' : 'info'">
+                  {{ worker.online ? "在线" : "离线" }}
+                </el-tag>
+              </div>
+              <p>
+                任务 {{ worker.task_count }} / 运行 {{ worker.running }} / Lease {{ worker.leased }}
+              </p>
+              <p class="cluster-worker-time">
+                最近更新时间：{{ formatTs(worker.updated_at) }}
+              </p>
+            </div>
+            <el-empty
+              v-if="workerRows.length === 0"
+              description="暂无 worker 数据"
+              :image-size="56"
+            />
+          </div>
+        </el-card>
+
+        <el-card shadow="never" class="panel-card">
+          <template #header>
+            <div class="panel-title">
               <span><i class="fa-solid fa-network-wired" /> 源库覆盖</span>
               <span class="panel-hint">{{ dashboard.sources.length }} hosts</span>
             </div>
@@ -177,6 +227,14 @@
             <el-table-column label="任务状态" width="120">
               <template #default="{ row }">
                 <el-tag size="small" :type="stateTagType(row.task.state)">{{ row.task.state }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="归属 Worker" min-width="130">
+              <template #default="{ row }">{{ ownerWorkerLabel(row.task) }}</template>
+            </el-table-column>
+            <el-table-column label="Lease 风险" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="leaseRiskTagType(row.task)">{{ leaseRiskLabel(row.task) }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="复制状态" width="150">
@@ -381,6 +439,29 @@ e2e-mysql80,127.0.0.1,13307
             </div>
           </section>
 
+          <section class="detail-panel" v-if="detailLease">
+            <h3><i class="fa-solid fa-key" /> Cluster Lease</h3>
+            <div class="detail-grid">
+              <div class="detail-item"><span>归属 Worker</span><strong>{{ detailLease.owner_worker_id || "--" }}</strong></div>
+              <div class="detail-item"><span>Epoch</span><strong>{{ detailLease.epoch || "--" }}</strong></div>
+              <div class="detail-item"><span>Lease 风险</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
+              <div class="detail-item"><span>更新时间</span><strong>{{ formatTs(detailLease.updated_at) }}</strong></div>
+            </div>
+          </section>
+
+          <section class="detail-panel">
+            <h3><i class="fa-solid fa-clock-rotate-left" /> Run History（最近 {{ runHistoryLimit }} 条）</h3>
+            <el-table :data="detailRunsLimited" size="small" border>
+              <el-table-column prop="run_id" label="Run ID" min-width="180" />
+              <el-table-column prop="worker_id" label="Worker" min-width="120" />
+              <el-table-column prop="epoch" label="Epoch" width="100" />
+              <el-table-column label="Started At" min-width="170">
+                <template #default="{ row }">{{ formatTs(row.started_at) }}</template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-if="detailRunsLimited.length === 0" description="暂无 run history" :image-size="56" />
+          </section>
+
           <section class="detail-panel">
             <h3><i class="fa-solid fa-location-dot" /> Checkpoint</h3>
             <div class="checkpoint">{{ formatCheckpoint(checkpoint) }}</div>
@@ -423,12 +504,16 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import {
   createTask,
   deleteTask,
+  getClusterOverview,
   getCheckpoint,
   getDashboard,
   getReplication,
+  getTaskLease,
   getTask,
+  listTaskRuns,
   listEvents,
   listFiles,
+  listWorkers,
   lookupSource,
   startTask,
   stopTask,
@@ -436,6 +521,8 @@ import {
 } from "./api";
 
 const loading = ref(false);
+const LEASE_RISK_SECONDS = 45;
+const RUN_HISTORY_LIMIT = 10;
 const dashboard = reactive({
   generated_at: "",
   threshold_seconds: 30,
@@ -451,6 +538,17 @@ const dashboard = reactive({
   },
   tasks: [],
   sources: [],
+});
+
+const cluster = reactive({
+  overview: {
+    task_count: 0,
+    worker_count: 0,
+    running_task_count: 0,
+    leased_task_count: 0,
+  },
+  workers: [],
+  leaseByTask: {},
 });
 
 const sourceQuery = reactive({
@@ -497,6 +595,9 @@ const batchPreview = reactive({
 const detailVisible = ref(false);
 const detailTask = ref(null);
 const detailReplication = ref(null);
+const detailLease = ref(null);
+const detailRuns = ref([]);
+const runHistoryLimit = ref(RUN_HISTORY_LIMIT);
 const checkpoint = ref(null);
 const events = ref([]);
 const files = ref([]);
@@ -557,6 +658,20 @@ const pagedTasks = computed(() => {
   return filteredTasks.value.slice(start, start + pager.pageSize);
 });
 
+const workerRows = computed(() => {
+  const now = Date.now();
+  return (cluster.workers || []).map((worker) => {
+    const updatedMs = toTimeMs(worker.updated_at);
+    const online = updatedMs > 0 && now - updatedMs <= LEASE_RISK_SECONDS * 1000;
+    return {
+      ...worker,
+      online,
+    };
+  });
+});
+
+const detailRunsLimited = computed(() => detailRuns.value.slice(0, runHistoryLimit.value));
+
 watch(
   () => [
     uiFilter.keyword,
@@ -588,17 +703,27 @@ watch(
   },
 );
 
+watch(
+  () => pagedTasks.value.map((row) => row.task?.id || "").join(","),
+  () => {
+    void prefetchTaskLeasesForPage();
+  },
+  { immediate: true },
+);
+
 refreshAll();
 
 async function refreshAll() {
   try {
     loading.value = true;
-    const data = await getDashboard(buildSourceFilter());
-    Object.assign(dashboard.summary, data?.summary || {});
-    dashboard.tasks = data?.tasks || [];
-    dashboard.sources = data?.sources || [];
-    dashboard.generated_at = data?.generated_at || "";
-    dashboard.threshold_seconds = Number(data?.threshold_seconds || 30);
+    const [dashboardData, overviewData, workersData] = await Promise.all([
+      getDashboard(buildSourceFilter()),
+      getClusterOverview(),
+      listWorkers(),
+    ]);
+    applyDashboardData(dashboardData);
+    applyClusterData(overviewData, workersData);
+    await prefetchTaskLeasesForPage();
   } catch (err) {
     ElMessage.error(parseErr(err));
   } finally {
@@ -613,6 +738,35 @@ function buildSourceFilter() {
   return params;
 }
 
+function applyDashboardData(data) {
+  Object.assign(dashboard.summary, data?.summary || {});
+  dashboard.tasks = data?.tasks || [];
+  dashboard.sources = data?.sources || [];
+  dashboard.generated_at = data?.generated_at || "";
+  dashboard.threshold_seconds = Number(data?.threshold_seconds || 30);
+}
+
+function applyClusterData(overview, workers) {
+  cluster.overview.task_count = Number(overview?.task_count || 0);
+  cluster.overview.worker_count = Number(overview?.worker_count || 0);
+  cluster.overview.running_task_count = Number(overview?.running_task_count || 0);
+  cluster.overview.leased_task_count = Number(overview?.leased_task_count || 0);
+  cluster.workers = Array.isArray(workers) ? workers : [];
+}
+
+async function prefetchTaskLeasesForPage() {
+  const ids = pagedTasks.value.map((row) => row.task?.id).filter(Boolean);
+  if (!ids.length) return;
+
+  const results = await Promise.allSettled(ids.map((id) => getTaskLease(id)));
+  results.forEach((result, idx) => {
+    const id = ids[idx];
+    if (result.status === "fulfilled") {
+      cluster.leaseByTask[id] = result.value;
+    }
+  });
+}
+
 async function applySourceFilter() {
   const params = buildSourceFilter();
   if (!params.host || !params.port) {
@@ -622,18 +776,18 @@ async function applySourceFilter() {
 
   try {
     loading.value = true;
-    const [lookupResp, dashboardResp] = await Promise.all([
+    const [lookupResp, dashboardResp, overviewResp, workersResp] = await Promise.all([
       lookupSource(params),
       getDashboard(params),
+      getClusterOverview(),
+      listWorkers(),
     ]);
     lookup.checked = true;
     lookup.exists = !!lookupResp?.exists;
     lookup.count = Number(lookupResp?.count || 0);
-    Object.assign(dashboard.summary, dashboardResp?.summary || {});
-    dashboard.tasks = dashboardResp?.tasks || [];
-    dashboard.sources = dashboardResp?.sources || [];
-    dashboard.generated_at = dashboardResp?.generated_at || "";
-    dashboard.threshold_seconds = Number(dashboardResp?.threshold_seconds || 30);
+    applyDashboardData(dashboardResp);
+    applyClusterData(overviewResp, workersResp);
+    await prefetchTaskLeasesForPage();
   } catch (err) {
     ElMessage.error(parseErr(err));
   } finally {
@@ -997,18 +1151,24 @@ function onRowClick(row) {
 async function showDetail(taskOrID) {
   try {
     const id = typeof taskOrID === "string" ? taskOrID : taskOrID.id;
-    const [task, cp, evs, fs, replication] = await Promise.all([
+    const [task, cp, evs, fs, replication, lease, runs] = await Promise.all([
       getTask(id),
       getCheckpoint(id),
       listEvents(id, 120),
       listFiles(id, 80),
       getReplication(id),
+      getTaskLease(id),
+      listTaskRuns(id),
     ]);
     detailTask.value = task;
     detailReplication.value = replication;
+    detailLease.value = lease;
+    detailRuns.value = Array.isArray(runs) ? runs : [];
+    runHistoryLimit.value = RUN_HISTORY_LIMIT;
     checkpoint.value = cp;
     events.value = evs || [];
     files.value = fs || [];
+    cluster.leaseByTask[id] = lease;
     detailVisible.value = true;
   } catch (err) {
     ElMessage.error(parseErr(err));
@@ -1017,6 +1177,30 @@ async function showDetail(taskOrID) {
 
 function sourceLabel(task) {
   return `${task?.source?.host || "-"}:${task?.source?.port || "-"}`;
+}
+
+function ownerWorkerLabel(task) {
+  const leaseWorker = cluster.leaseByTask[task?.id]?.owner_worker_id;
+  return task?.owner_worker_id || leaseWorker || "--";
+}
+
+function leaseRiskTagType(task, leaseOverride = null) {
+  const label = leaseRiskLabel(task, leaseOverride);
+  if (label === "正常") return "success";
+  if (label === "风险") return "warning";
+  return "info";
+}
+
+function leaseRiskLabel(task, leaseOverride = null) {
+  const lease = leaseOverride || cluster.leaseByTask[task?.id];
+  const owner = lease?.owner_worker_id || task?.owner_worker_id;
+  const epoch = Number(lease?.epoch ?? task?.epoch ?? 0);
+  if (!owner || epoch <= 0) return "--";
+
+  const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
+  if (updatedMs <= 0) return "风险";
+  const stale = Date.now() - updatedMs > LEASE_RISK_SECONDS * 1000;
+  return stale ? "风险" : "正常";
 }
 
 function stateTagType(state) {
@@ -1045,6 +1229,13 @@ function formatTs(ts) {
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return "--";
   return date.toLocaleString();
+}
+
+function toTimeMs(ts) {
+  if (!ts) return 0;
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return 0;
+  return date.getTime();
 }
 
 function formatCheckpoint(cp) {
@@ -1309,6 +1500,64 @@ h1 {
   display: grid;
   grid-template-columns: repeat(2, minmax(250px, 1fr));
   gap: 10px;
+}
+
+.cluster-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.cluster-stat-cell {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--surface-soft);
+}
+
+.cluster-stat-cell p {
+  margin: 0;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.cluster-stat-cell strong {
+  margin-top: 8px;
+  display: block;
+  font-size: 26px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.cluster-worker-list {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.cluster-worker-item {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  background: #fff;
+}
+
+.cluster-worker-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.cluster-worker-item p {
+  margin: 8px 0 0;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.cluster-worker-time {
+  font-family: "IBM Plex Mono", monospace;
 }
 
 .source-cell {
@@ -1622,6 +1871,14 @@ h1 {
   }
 
   .source-board {
+    grid-template-columns: 1fr;
+  }
+
+  .cluster-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cluster-worker-list {
     grid-template-columns: 1fr;
   }
 
