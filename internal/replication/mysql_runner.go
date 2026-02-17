@@ -135,7 +135,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		if err != nil {
 			return err
 		}
-		start = effectiveStartFromCheckpoint(start, checkpoint, ok)
+		start, _ = effectiveStartForTakeover(task, start, checkpoint, ok)
 	}
 
 	currentFile := start.File
@@ -530,6 +530,21 @@ func effectiveStartFromCheckpoint(start tasks.StartConfig, checkpoint binlog.Che
 		File: checkpoint.File,
 		Pos:  checkpoint.Pos,
 	}
+}
+
+func effectiveStartForTakeover(task tasks.Task, start tasks.StartConfig, checkpoint binlog.Checkpoint, exists bool) (tasks.StartConfig, bool) {
+	effective := effectiveStartFromCheckpoint(start, checkpoint, exists)
+	if task.Epoch <= 1 {
+		return effective, false
+	}
+	if effective.Mode != tasks.StartModeFilePos || effective.File == "" || effective.Pos <= 4 {
+		return effective, false
+	}
+	return tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: effective.File,
+		Pos:  4,
+	}, true
 }
 
 func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeFileName string) error {
