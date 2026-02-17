@@ -208,7 +208,7 @@
             <el-table-column label="SemiSync" width="90">
               <template #default="{ row }">{{ row.task.source?.semi_sync ? "ON" : "OFF" }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="310" fixed="right" class-name="action-col">
+            <el-table-column label="操作" width="286" fixed="right" class-name="action-col">
               <template #default="{ row }">
                 <div class="action-row">
                   <el-button class="action-btn" size="small" @click.stop="showDetail(row.task)">详情</el-button>
@@ -1091,6 +1091,7 @@ function parseErr(err) {
 .page-shell {
   --bg: #fafafa;
   --surface: #ffffff;
+  --surface-soft: #fcfcfc;
   --line: #ebebeb;
   --line-strong: #dbdbdb;
   --text: #111111;
@@ -1103,7 +1104,11 @@ function parseErr(err) {
   padding: 24px;
   font-family: "Geist", "SF Pro Display", "PingFang SC", sans-serif;
   color: var(--text);
-  background: radial-gradient(circle at 0% 0%, #ffffff 0, #fafafa 45%);
+  background:
+    radial-gradient(circle at 0% 0%, #ffffff 0, #fafafa 42%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.015) 1px, transparent 1px),
+    linear-gradient(rgba(0, 0, 0, 0.015) 1px, transparent 1px);
+  background-size: auto, 28px 28px, 28px 28px;
 }
 
 .orb {
@@ -1115,7 +1120,8 @@ function parseErr(err) {
   justify-content: space-between;
   align-items: flex-end;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
+  animation: rise-fade 0.36s ease both;
 }
 
 .hero-copy {
@@ -1136,7 +1142,7 @@ function parseErr(err) {
 
 h1 {
   margin: 6px 0 4px;
-  font-size: 38px;
+  font-size: 40px;
   line-height: 1.06;
   letter-spacing: -0.03em;
   font-weight: 700;
@@ -1156,6 +1162,11 @@ h1 {
   margin-right: 6px;
 }
 
+.hero-actions :deep(.el-button) {
+  height: 36px;
+  font-weight: 600;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(130px, 1fr));
@@ -1166,9 +1177,10 @@ h1 {
 .metric-card {
   border: 1px solid var(--line);
   background: var(--surface);
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 12px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  animation: rise-fade 0.42s ease both;
 }
 
 .metric-card p {
@@ -1187,9 +1199,10 @@ h1 {
 .metric-card strong {
   display: block;
   margin-top: 10px;
-  font-size: 30px;
+  font-size: 32px;
   line-height: 1;
   letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 .workspace {
@@ -1206,10 +1219,21 @@ h1 {
 }
 
 .panel-card {
-  border-radius: 16px;
+  border-radius: 14px;
   border: 1px solid var(--line);
   background: var(--surface);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
+  animation: rise-fade 0.5s ease both;
+}
+
+.panel-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.05);
 }
 
 .panel-title {
@@ -1291,7 +1315,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 10px 12px;
-  background: #fff;
+  background: var(--surface-soft);
 }
 
 .source-name {
@@ -1315,11 +1339,17 @@ h1 {
 .table-card :deep(.el-table td.el-table__cell),
 .table-card :deep(.el-table th.el-table__cell) {
   border-bottom-color: var(--line);
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .table-card :deep(.el-table) {
   border-radius: 12px;
   overflow: hidden;
+}
+
+.table-card :deep(.el-table__body tr:hover > td.el-table__cell) {
+  background: #fcfcfc;
 }
 
 .replication-cell {
@@ -1341,7 +1371,7 @@ h1 {
 
 .action-row {
   display: inline-flex;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: nowrap;
   white-space: nowrap;
 }
@@ -1473,6 +1503,7 @@ h1 {
 
 :deep(.el-button) {
   border-radius: 10px;
+  font-weight: 500;
 }
 
 :deep(.el-button--primary) {
@@ -1498,13 +1529,14 @@ h1 {
 }
 
 .table-card :deep(.action-btn) {
-  min-width: 52px;
-  height: 30px;
-  padding-left: 9px;
-  padding-right: 9px;
+  min-width: 46px;
+  height: 28px;
+  padding-left: 8px;
+  padding-right: 8px;
   border-radius: 999px;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11px;
+  letter-spacing: 0.01em;
 }
 
 .table-card :deep(.action-btn.el-button--success) {
@@ -1552,6 +1584,17 @@ h1 {
   background: #f4f4f5;
   border-color: #e4e4e7;
   color: #52525b;
+}
+
+@keyframes rise-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @media (max-width: 1380px) {

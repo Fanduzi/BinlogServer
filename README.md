@@ -13,6 +13,9 @@ Binlog Server MVP（进行中）。
 
 学习路线文档：`docs/learning-guide.md`  
 分节目录：`docs/learning/README.md`
+部署模式文档：`docs/deployment-modes.md`
+集群 HA 设计草案：`docs/plans/2026-02-16-cluster-ha-design.md`
+集群 HA 实施计划：`docs/plans/2026-02-16-cluster-ha-implementation-plan.md`
 
 ## 运行
 
