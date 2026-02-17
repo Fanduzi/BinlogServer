@@ -450,7 +450,7 @@ e2e-mysql80,127.0.0.1,13307
           </section>
 
           <section class="detail-panel">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> Run History（最近 {{ runHistoryLimit }} 条）</h3>
+            <h3><i class="fa-solid fa-clock-rotate-left" /> 当前 Run 信息（接口当前最多返回 1 条）</h3>
             <el-table :data="detailRunsLimited" size="small" border>
               <el-table-column prop="run_id" label="Run ID" min-width="180" />
               <el-table-column prop="worker_id" label="Worker" min-width="120" />
@@ -459,7 +459,7 @@ e2e-mysql80,127.0.0.1,13307
                 <template #default="{ row }">{{ formatTs(row.started_at) }}</template>
               </el-table-column>
             </el-table>
-            <el-empty v-if="detailRunsLimited.length === 0" description="暂无 run history" :image-size="56" />
+            <el-empty v-if="detailRunsLimited.length === 0" description="暂无当前 run 信息" :image-size="56" />
           </section>
 
           <section class="detail-panel">
@@ -1151,15 +1151,20 @@ function onRowClick(row) {
 async function showDetail(taskOrID) {
   try {
     const id = typeof taskOrID === "string" ? taskOrID : taskOrID.id;
-    const [task, cp, evs, fs, replication, lease, runs] = await Promise.all([
+    const [task, cp, evs, fs, replication] = await Promise.all([
       getTask(id),
       getCheckpoint(id),
       listEvents(id, 120),
       listFiles(id, 80),
       getReplication(id),
+    ]);
+    const [leaseResult, runsResult] = await Promise.allSettled([
       getTaskLease(id),
       listTaskRuns(id),
     ]);
+    const lease = leaseResult.status === "fulfilled" ? leaseResult.value : null;
+    const runs = runsResult.status === "fulfilled" ? runsResult.value : [];
+
     detailTask.value = task;
     detailReplication.value = replication;
     detailLease.value = lease;
@@ -1168,7 +1173,9 @@ async function showDetail(taskOrID) {
     checkpoint.value = cp;
     events.value = evs || [];
     files.value = fs || [];
-    cluster.leaseByTask[id] = lease;
+    if (lease) {
+      cluster.leaseByTask[id] = lease;
+    }
     detailVisible.value = true;
   } catch (err) {
     ElMessage.error(parseErr(err));
