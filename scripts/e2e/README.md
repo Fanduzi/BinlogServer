@@ -6,6 +6,7 @@
 - MySQL 8.0 压缩事务与 binlog 文件一致性校验
 - orchestrator 拓扑发现行为
 - semi-sync ACK/阻塞语义
+- metadata MySQL failover（Percona57 主从 + ProxySQL + orchestrator）
 
 ## 依赖
 
@@ -28,12 +29,13 @@
 # 日常回归（默认）：smoke + compression
 ./scripts/e2e/run-suite.sh
 
-# 全量回归：smoke + compression + orchestrator + semisync
+# 全量回归：smoke + compression + orchestrator + semisync + meta-failover
 ./scripts/e2e/run-suite.sh --profile full
 
 # 自定义场景
 ./scripts/e2e/run-suite.sh --scenarios smoke,compression
 ./scripts/e2e/run-suite.sh --scenarios orchestrator,semisync
+./scripts/e2e/run-suite.sh --scenarios meta-failover
 ```
 
 也可用 `Makefile`：
@@ -53,6 +55,8 @@ make e2e SCENARIOS=smoke,compression
 - `smoke-compression.sh`: 验证压缩事务场景，主动 rotate 并对比源端与备份 binlog 的 md5。
 - `smoke-orchestrator.sh`: 验证 orchestrator 拓扑里是否误纳入 binlog 拉流客户端。
 - `smoke-semisync.sh`: 验证 `semi_sync=true` 时的 client 挂载与停任务后主库提交阻塞到 timeout。
+- `setup-meta-replication.sh`: 初始化 meta-primary/meta-replica GTID 主从复制与 ProxySQL 监控账号。
+- `smoke-meta-failover.sh`: 触发 orchestrator 切主，验证元数据库 failover 后 checkpoint 继续推进。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
 ## 常用环境变量
@@ -60,6 +64,18 @@ make e2e SCENARIOS=smoke,compression
 - `E2E_DATA_DIR`: e2e 数据目录（默认 `./tmp/e2e/data-suite-<timestamp>`）。
 - `E2E_SERVER_LOG`: `run-suite.sh` 启动后端时的日志路径（默认 `/tmp/binlog-server-e2e-suite.log`）。
 - `SEMISYNC_TIMEOUT_MS`: `smoke-semisync.sh` 使用的半同步 timeout（默认 `7000`）。
+
+## meta-failover 场景说明
+
+`meta-failover` 场景会额外拉起：
+- `meta-primary` / `meta-replica`（Percona57）
+- `meta-proxysql`（meta DSN 固定入口）
+- `orchestrator`（触发切主）
+
+运行该场景时，`run-suite.sh` 会自动：
+1. 执行 `setup-meta-replication.sh` 建立主从复制
+2. 将 `BINLOG_SERVER_META_DSN` 覆盖到 `127.0.0.1:16036`（ProxySQL）
+3. 执行 `smoke-meta-failover.sh` 验证 failover 后恢复
 
 ## 排障建议
 
