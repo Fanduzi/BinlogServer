@@ -1,0 +1,12 @@
+[mysqld]
+server_id=202
+log_bin=mysql-bin
+binlog_format=ROW
+binlog_row_image=FULL
+gtid_mode=ON
+enforce_gtid_consistency=ON
+log_slave_updates=ON
+master_info_repository=TABLE
+relay_log_info_repository=TABLE
+read_only=ON
+skip_name_resolve=ON

@@ -1,0 +1,48 @@
+datadir="/var/lib/proxysql"
+
+admin_variables=
+{
+  admin_credentials="admin:MetaAdmin!2026;cluster:MetaCluster!2026"
+  cluster_username="cluster"
+  cluster_password="MetaCluster!2026"
+  mysql_ifaces="0.0.0.0:6036"
+  stats_credentials="stats:MetaStats!2026"
+}
+
+mysql_variables=
+{
+  threads=2
+  max_connections=1024
+  interfaces="0.0.0.0:16036"
+  default_schema="information_schema"
+  monitor_username="proxysql_monitor"
+  monitor_password="MetaMon!2026"
+  monitor_connect_interval=5000
+  monitor_ping_interval=5000
+  monitor_read_only_interval=2000
+  monitor_connect_timeout=2000
+  monitor_ping_timeout=1000
+  connect_timeout_server=3000
+  ping_timeout_server=500
+  default_charset="utf8"
+}
+
+mysql_replication_hostgroups=
+(
+  {
+    writer_hostgroup=10
+    reader_hostgroup=11
+    comment="meta rw split"
+  }
+)
+
+mysql_servers=
+(
+  { address="meta-primary", port=3306, hostgroup=10, max_connections=200, comment="meta primary" },
+  { address="meta-replica", port=3306, hostgroup=10, max_connections=200, comment="meta replica candidate" }
+)
+
+mysql_users:
+(
+  { username="meta", password="metapass", default_hostgroup=10, transaction_persistent=1, active=1 }
+)

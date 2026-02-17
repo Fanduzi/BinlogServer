@@ -77,6 +77,62 @@ services:
       - ./my.cnf/base.cnf:/etc/my.cnf.d/00-base.cnf:ro
       - ./my.cnf/percona80.cnf:/etc/my.cnf.d/10-service.cnf:ro
 
+  meta-primary:
+    image: percona/percona-server:5.7
+    platform: linux/amd64
+    container_name: binlog-e2e-meta-primary
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    ports:
+      - "13316:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./init/00-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./my.cnf/meta-primary.cnf:/etc/my.cnf.d/10-service.cnf:ro
+
+  meta-replica:
+    image: percona/percona-server:5.7
+    platform: linux/amd64
+    container_name: binlog-e2e-meta-replica
+    depends_on:
+      meta-primary:
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    ports:
+      - "13317:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./init/00-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./my.cnf/meta-replica.cnf:/etc/my.cnf.d/10-service.cnf:ro
+
+  meta-proxysql:
+    image: proxysql/proxysql:2.3.2
+    platform: linux/amd64
+    container_name: binlog-e2e-meta-proxysql
+    depends_on:
+      meta-primary:
+        condition: service_healthy
+      meta-replica:
+        condition: service_healthy
+    ports:
+      - "6036:6036"
+      - "16036:16036"
+    volumes:
+      - ./proxysql/proxysql-meta.cnf:/etc/proxysql.cnf:ro
+
   orchestrator:
     image: openarkcode/orchestrator:latest
     platform: linux/amd64
