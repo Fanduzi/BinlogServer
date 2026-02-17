@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -325,7 +327,10 @@ func TestApp_ResumeClusterWorkerTasksStartsRecoveredActiveTasks(t *testing.T) {
 		t.Fatalf("Restore returned error: %v", err)
 	}
 
-	resumeClusterWorkerTasks(s)
+	stats := resumeClusterWorkerTasks(s)
+	if stats.Considered != 1 || stats.Resumed != 1 || stats.StopErrors != 0 || stats.StartErrors != 0 {
+		t.Fatalf("unexpected resume stats: %+v", stats)
+	}
 
 	select {
 	case started := <-runner.started:
@@ -340,6 +345,62 @@ func TestApp_ResumeClusterWorkerTasksStartsRecoveredActiveTasks(t *testing.T) {
 	case started := <-runner.started:
 		t.Fatalf("expected created task not auto-started, got task=%s", started.ID)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+type fakeResumeScheduler struct {
+	items      []tasks.Task
+	stopErr    map[string]error
+	startErr   map[string]error
+	stopCalls  []string
+	startCalls []string
+}
+
+func (f *fakeResumeScheduler) ListTasks() []tasks.Task {
+	return append([]tasks.Task(nil), f.items...)
+}
+
+func (f *fakeResumeScheduler) StopTask(id string) error {
+	f.stopCalls = append(f.stopCalls, id)
+	if err, ok := f.stopErr[id]; ok {
+		return err
+	}
+	return nil
+}
+
+func (f *fakeResumeScheduler) StartTask(id string) error {
+	f.startCalls = append(f.startCalls, id)
+	if err, ok := f.startErr[id]; ok {
+		return err
+	}
+	return nil
+}
+
+func TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors(t *testing.T) {
+	resumer := &fakeResumeScheduler{
+		items: []tasks.Task{
+			{ID: "1", State: tasks.StateRunning},
+			{ID: "2", State: tasks.StateLeaseDegraded},
+		},
+		stopErr: map[string]error{
+			"1": errors.New("stop failed"),
+		},
+		startErr: map[string]error{
+			"2": errors.New("start failed"),
+		},
+	}
+
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(origWriter)
+
+	stats := resumeClusterWorkerTasks(resumer)
+	if stats.Considered != 2 || stats.Resumed != 0 || stats.StopErrors != 1 || stats.StartErrors != 1 {
+		t.Fatalf("unexpected resume stats: %+v", stats)
+	}
+	if !strings.Contains(buf.String(), "task=1") || !strings.Contains(buf.String(), "task=2") {
+		t.Fatalf("expected error logs contain task ids, got logs=%q", buf.String())
 	}
 }
 

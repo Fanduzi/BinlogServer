@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -96,7 +97,16 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	if workerEnabled && isClusterMode(a.cfg) {
-		resumeClusterWorkerTasks(scheduler)
+		stats := resumeClusterWorkerTasks(scheduler)
+		if stats.StopErrors > 0 || stats.StartErrors > 0 {
+			log.Printf(
+				"cluster resume completed with errors considered=%d resumed=%d stop_errors=%d start_errors=%d",
+				stats.Considered,
+				stats.Resumed,
+				stats.StopErrors,
+				stats.StartErrors,
+			)
+		}
 	}
 
 	if !controlPlaneEnabled {
@@ -237,12 +247,37 @@ func isNonNilInterface(v any) bool {
 	}
 }
 
-func resumeClusterWorkerTasks(scheduler *tasks.Scheduler) {
+type resumeClusterStats struct {
+	Considered  int
+	Resumed     int
+	StopErrors  int
+	StartErrors int
+}
+
+type clusterTaskResumer interface {
+	ListTasks() []tasks.Task
+	StopTask(id string) error
+	StartTask(id string) error
+}
+
+func resumeClusterWorkerTasks(scheduler clusterTaskResumer) resumeClusterStats {
+	var stats resumeClusterStats
 	for _, task := range scheduler.ListTasks() {
 		switch task.State {
 		case tasks.StateRunning, tasks.StateStarting, tasks.StateRetryBackoff, tasks.StateLeaseDegraded:
-			_ = scheduler.StopTask(task.ID)
-			_ = scheduler.StartTask(task.ID)
+			stats.Considered++
+			if err := scheduler.StopTask(task.ID); err != nil {
+				stats.StopErrors++
+				log.Printf("cluster resume stop failed task=%s err=%v", task.ID, err)
+				continue
+			}
+			if err := scheduler.StartTask(task.ID); err != nil {
+				stats.StartErrors++
+				log.Printf("cluster resume start failed task=%s err=%v", task.ID, err)
+				continue
+			}
+			stats.Resumed++
 		}
 	}
+	return stats
 }
