@@ -208,6 +208,10 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 - `GET /api/tasks/{id}/replication`（复制延迟与最近位点）
 - `GET /api/tasks/{id}/events`
 - `GET /api/tasks/{id}/files`
+- `GET /api/workers`（集群 worker 视图）
+- `GET /api/cluster/overview`（集群汇总）
+- `GET /api/tasks/{id}/lease`（任务 lease 归属）
+- `GET /api/tasks/{id}/runs`（当前 run 信息）
 - `GET /healthz`
 
 说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
@@ -221,6 +225,109 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 `/api/tasks/{id}/files` 会返回文件元数据与上传状态（`LOCAL_ONLY/UPLOADED/UPLOAD_FAILED`）。
 开启上传后，binlog rotate 封口后会上传到对象存储，object key 规则：`<prefix>/<taskID>/<fileName>`（prefix 可空）。
 当前上传策略是“最佳努力模式”：上传失败会记录为 `UPLOAD_FAILED`，但不会中断 binlog 拉取。
+
+## Cluster 部署与运行（速查）
+
+### 1) standalone（默认）
+
+```yaml
+mode: standalone
+listen_addr: ":8080"
+data_dir: "./data"
+meta_dsn: ""
+```
+
+适用场景：单机、快速上线、无集群抢占需求。
+
+### 2) cluster + all-in-one（单节点集群形态）
+
+```yaml
+mode: cluster
+cluster:
+  role: all-in-one
+  worker_id: "node-a"
+  lease_ttl_sec: 15
+  lease_renew_interval_sec: 5
+  lease_grace_sec: 30
+  failover_policy: rebuild_current_file
+meta_dsn: "user:pass@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true"
+```
+
+适用场景：小规模集群，先接入 lease/epoch 语义，再平滑扩容。
+
+### 3) cluster + control-plane / worker（推荐生产形态）
+
+control-plane 节点：
+
+```yaml
+mode: cluster
+cluster:
+  role: control-plane
+meta_dsn: "user:pass@tcp(meta-vip:3306)/binlog_meta?parseTime=true"
+listen_addr: ":8080"
+```
+
+worker 节点：
+
+```yaml
+mode: cluster
+cluster:
+  role: worker
+  worker_id: "worker-bj-a"
+  lease_ttl_sec: 15
+  lease_renew_interval_sec: 5
+  lease_grace_sec: 30
+  failover_policy: rebuild_current_file
+meta_dsn: "user:pass@tcp(meta-vip:3306)/binlog_meta?parseTime=true"
+```
+
+部署建议：
+- control-plane 至少 1 台（按 API/UI SLA 可做多实例）。
+- worker 至少 2 台，`worker_id` 全局唯一。
+- 所有节点 `meta_dsn` 指向同一元数据库入口（VIP/ProxySQL）。
+
+## Failover 期间预期行为与告警解释
+
+在 cluster 模式、元数据库发生主从切换时，预期行为如下：
+
+1. worker 可能短暂进入 lease 续约失败窗口（degraded）。
+2. 若在 `lease_grace_sec` 内恢复，任务继续运行；checkpoint 持续推进。
+3. 若超出 `lease_grace_sec` 仍无法续约，worker fail-safe 停止（避免错误 seal/upload）。
+4. 重新抢占成功后按 `rebuild_current_file` 策略恢复，优先保证文件完整与字节一致。
+
+常见事件/告警可从 `/api/tasks/{id}/events` 观察：
+- `TASK_LEASE_DEGRADED`：续约失败但仍在 grace 窗口。
+- `TASK_LEASE_LOST`：lease 丢失，触发保护停机。
+- `TASK_LEASE_GRACE_EXCEEDED`：grace 超时，必须停止。
+
+## 运维排障入口（关键命令）
+
+健康与基础状态：
+
+```bash
+curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1:8080/api/summary | jq
+curl -s http://127.0.0.1:8080/api/cluster/overview | jq
+curl -s http://127.0.0.1:8080/api/workers | jq
+```
+
+按任务排障：
+
+```bash
+TASK_ID=1
+curl -s "http://127.0.0.1:8080/api/tasks/${TASK_ID}" | jq
+curl -s "http://127.0.0.1:8080/api/tasks/${TASK_ID}/replication" | jq
+curl -s "http://127.0.0.1:8080/api/tasks/${TASK_ID}/lease" | jq
+curl -s "http://127.0.0.1:8080/api/tasks/${TASK_ID}/runs" | jq
+curl -s "http://127.0.0.1:8080/api/tasks/${TASK_ID}/events?limit=50" | jq
+```
+
+e2e 回归（failover 相关）：
+
+```bash
+./scripts/e2e/run-suite.sh --scenarios meta-failover
+./scripts/e2e/run-suite.sh --scenarios meta-failover-override
+```
 
 ## Docker E2E
 
