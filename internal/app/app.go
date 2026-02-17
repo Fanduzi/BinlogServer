@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"binlog_server/internal/api"
@@ -32,6 +33,8 @@ func New(cfg config.Config) *App {
 }
 
 func (a *App) Run(ctx context.Context) error {
+	controlPlaneEnabled, workerEnabled := resolveRoleMode(a.cfg)
+
 	opts := []tasks.Option{}
 	var runnerOpts []replication.RunnerOption
 
@@ -70,12 +73,21 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	scheduler := tasks.NewScheduler(opts...)
-	runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))
-	runner := replication.NewMySQLRunner(a.cfg.DataDir, runnerOpts...)
-	scheduler.SetRunner(runner)
+	if workerEnabled {
+		runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))
+		runner := replication.NewMySQLRunner(a.cfg.DataDir, runnerOpts...)
+		scheduler.SetRunner(runner)
+	}
 	// Restore 必须在对外服务前执行，保证 API 看到的是恢复后的稳定状态。
 	if err := scheduler.Restore(context.Background()); err != nil {
 		return err
+	}
+
+	if !controlPlaneEnabled {
+		a.setAddr("")
+		a.readyOnce.Do(func() { close(a.readyCh) })
+		<-ctx.Done()
+		return nil
 	}
 
 	handler := api.NewServer(scheduler)
@@ -117,4 +129,21 @@ func (a *App) setAddr(addr string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.addr = addr
+}
+
+func resolveRoleMode(cfg config.Config) (controlPlaneEnabled bool, workerEnabled bool) {
+	if strings.ToLower(strings.TrimSpace(cfg.Mode)) != "cluster" {
+		return true, true
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.Cluster.Role)) {
+	case "control-plane":
+		return true, false
+	case "worker":
+		return false, true
+	case "all-in-one", "":
+		return true, true
+	default:
+		return true, true
+	}
 }
