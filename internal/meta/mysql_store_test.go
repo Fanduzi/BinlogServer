@@ -21,9 +21,12 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 
 	store := newMySQLTaskStoreFromDB(db)
 	task := tasks.Task{
-		ID:    "1",
-		Name:  "cluster-a",
-		State: tasks.StateRunning,
+		ID:            "1",
+		Name:          "cluster-a",
+		State:         tasks.StateRunning,
+		OwnerWorkerID: "worker-a",
+		Epoch:         7,
+		RunID:         "run-1",
 		Source: tasks.SourceConfig{
 			Host:     "127.0.0.1",
 			Port:     3306,
@@ -36,7 +39,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 	}
 
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "RUNNING", "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("1", "cluster-a", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	if err := store.UpsertTask(context.Background(), task); err != nil {
@@ -59,12 +62,15 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	now := time.Now()
 
 	rows := sqlmock.NewRows([]string{
-		"id", "name", "state", "last_error", "source_json", "start_json", "storage_json", "updated_at",
+		"id", "name", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
 	}).AddRow(
 		"7",
 		"cluster-restored",
 		"STOPPED",
 		"",
+		"worker-a",
+		int64(9),
+		"run-9",
 		`{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}`,
 		`{"mode":"LATEST"}`,
 		`{"dir":"./data"}`,
@@ -82,6 +88,9 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	}
 	if list[0].ID != "7" || list[0].State != tasks.StateStopped {
 		t.Fatalf("unexpected task loaded: %+v", list[0])
+	}
+	if list[0].OwnerWorkerID != "worker-a" || list[0].Epoch != 9 || list[0].RunID != "run-9" {
+		t.Fatalf("unexpected cluster run fields: owner=%q epoch=%d run_id=%q", list[0].OwnerWorkerID, list[0].Epoch, list[0].RunID)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -294,6 +303,15 @@ func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 
 	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("owner_worker_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("epoch").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("run_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createTaskEventsTableSQL)).
@@ -336,6 +354,15 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
 
 	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("owner_worker_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("epoch").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("run_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createTaskEventsTableSQL)).
@@ -367,6 +394,63 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(addBinlogFilesChecksumColumnSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
+	mock.ExpectExec(regexp.QuoteMeta(createTaskLeasesTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := store.ensureSchema(context.Background()); err != nil {
+		t.Fatalf("ensureSchema returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+
+	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("owner_worker_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksOwnerWorkerIDColumnSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("epoch").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksEpochColumnSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("run_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksRunIDColumnSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createTaskEventsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createBinlogFilesTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
+		WithArgs("source_file").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
+		WithArgs("epoch").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
+		WithArgs("state").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
+		WithArgs("checksum").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta(createTaskLeasesTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).

@@ -459,9 +459,9 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 
 func (s *Scheduler) DeleteTask(id string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.tasks[id]; !ok {
+	task, ok := s.tasks[id]
+	if !ok {
+		s.mu.Unlock()
 		return ErrTaskNotFound
 	}
 	if cancel, ok := s.cancels[id]; ok {
@@ -474,8 +474,14 @@ func (s *Scheduler) DeleteTask(id string) error {
 	delete(s.replica, id)
 	if s.store != nil {
 		if err := s.store.DeleteTask(context.Background(), id); err != nil {
+			s.mu.Unlock()
 			return err
 		}
+	}
+	s.mu.Unlock()
+
+	if s.leaseManager != nil && task.OwnerWorkerID != "" && task.Epoch > 0 {
+		_, _ = s.leaseManager.Release(context.Background(), id, task.OwnerWorkerID, task.Epoch)
 	}
 	return nil
 }
@@ -735,6 +741,9 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 		return nil
 	}
 	task.State = StateStopped
+	task.OwnerWorkerID = ""
+	task.Epoch = 0
+	task.RunID = ""
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_STOPPED", "task stopped", "")

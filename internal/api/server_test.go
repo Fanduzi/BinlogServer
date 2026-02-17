@@ -944,6 +944,8 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 		"/api/summary",
 		"/api/dashboard",
 		"/api/sources/lookup",
+		"/api/workers",
+		"/api/cluster/overview",
 		"/api/tasks",
 		"/api/tasks/{id}",
 		"/api/tasks/{id}/start",
@@ -952,6 +954,8 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 		"/api/tasks/{id}/events",
 		"/api/tasks/{id}/files",
 		"/api/tasks/{id}/replication",
+		"/api/tasks/{id}/lease",
+		"/api/tasks/{id}/runs",
 	}
 	for _, key := range required {
 		if _, exists := paths[key]; !exists {

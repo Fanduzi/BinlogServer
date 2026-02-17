@@ -54,6 +54,13 @@ func NewLeaseStore(db *sql.DB) *LeaseStore {
 	return &LeaseStore{db: db}
 }
 
+func NewLeaseStoreFromTaskStore(store *MySQLTaskStore) *LeaseStore {
+	if store == nil {
+		return nil
+	}
+	return &LeaseStore{db: store.db}
+}
+
 func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, now time.Time, ttl time.Duration) (int64, bool, error) {
 	_ = now
 	ttlMicros := durationToMicroseconds(ttl)
@@ -192,6 +199,24 @@ func (s *LeaseStore) currentDBTimeNoRetry(ctx context.Context) (time.Time, error
 		return time.Time{}, err
 	}
 	return now, nil
+}
+
+func (s *LeaseStore) VerifyOwnership(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
+	lease, ok, err := s.Get(ctx, taskID)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	if lease.OwnerWorkerID != workerID || lease.Epoch != epoch {
+		return false, nil
+	}
+	dbNow, err := s.currentDBTime(ctx)
+	if err != nil {
+		return false, err
+	}
+	return lease.LeaseExpireAt.After(dbNow), nil
 }
 
 func rowsAffectedGreaterThanZero(result sql.Result) (bool, error) {

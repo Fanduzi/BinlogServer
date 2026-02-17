@@ -19,11 +19,37 @@ CREATE TABLE IF NOT EXISTS backup_tasks (
   name VARCHAR(255) NOT NULL,
   state VARCHAR(32) NOT NULL,
   last_error TEXT NULL,
+  owner_worker_id VARCHAR(128) NULL,
+  epoch BIGINT NOT NULL DEFAULT 0,
+  run_id VARCHAR(128) NULL,
   source_json JSON NOT NULL,
   start_json JSON NOT NULL,
   storage_json JSON NOT NULL,
   updated_at DATETIME(6) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
+const hasBackupTasksColumnSQL = `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'backup_tasks'
+  AND column_name = ?;
+`
+
+const addBackupTasksOwnerWorkerIDColumnSQL = `
+ALTER TABLE backup_tasks
+ADD COLUMN owner_worker_id VARCHAR(128) NULL AFTER last_error;
+`
+
+const addBackupTasksEpochColumnSQL = `
+ALTER TABLE backup_tasks
+ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0 AFTER owner_worker_id;
+`
+
+const addBackupTasksRunIDColumnSQL = `
+ALTER TABLE backup_tasks
+ADD COLUMN run_id VARCHAR(128) NULL AFTER epoch;
 `
 
 const createCheckpointTableSQL = `
@@ -125,12 +151,15 @@ ADD COLUMN checksum VARCHAR(128) NULL AFTER state;
 `
 
 const upsertTaskSQL = `
-INSERT INTO backup_tasks (id, name, state, last_error, source_json, start_json, storage_json, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO backup_tasks (id, name, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   state = VALUES(state),
   last_error = VALUES(last_error),
+  owner_worker_id = VALUES(owner_worker_id),
+  epoch = VALUES(epoch),
+  run_id = VALUES(run_id),
   source_json = VALUES(source_json),
   start_json = VALUES(start_json),
   storage_json = VALUES(storage_json),
@@ -138,7 +167,7 @@ ON DUPLICATE KEY UPDATE
 `
 
 const listTaskSQL = `
-SELECT id, name, state, last_error, source_json, start_json, storage_json, updated_at
+SELECT id, name, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
 FROM backup_tasks
 ORDER BY id;
 `
@@ -239,6 +268,9 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := s.ensureBackupTasksMigration(ctx); err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, createCheckpointTableSQL)
 	if err != nil {
 		return err
@@ -259,6 +291,32 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, createTaskRunsTableSQL)
+	return err
+}
+
+func (s *MySQLTaskStore) ensureBackupTasksMigration(ctx context.Context) error {
+	if err := s.ensureBackupTasksColumn(ctx, "owner_worker_id", addBackupTasksOwnerWorkerIDColumnSQL); err != nil {
+		return err
+	}
+	if err := s.ensureBackupTasksColumn(ctx, "epoch", addBackupTasksEpochColumnSQL); err != nil {
+		return err
+	}
+	if err := s.ensureBackupTasksColumn(ctx, "run_id", addBackupTasksRunIDColumnSQL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *MySQLTaskStore) ensureBackupTasksColumn(ctx context.Context, columnName, alterSQL string) error {
+	var count int
+	row := s.db.QueryRowContext(ctx, hasBackupTasksColumnSQL, columnName)
+	if err := row.Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, alterSQL)
 	return err
 }
 
@@ -317,6 +375,9 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		task.Name,
 		string(task.State),
 		task.LastError,
+		task.OwnerWorkerID,
+		task.Epoch,
+		task.RunID,
 		string(sourceJSON),
 		string(startJSON),
 		string(storageJSON),
@@ -337,6 +398,9 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 		var (
 			task        tasks.Task
 			state       string
+			ownerWorker sql.NullString
+			epoch       int64
+			runID       sql.NullString
 			sourceJSON  string
 			startJSON   string
 			storageJSON string
@@ -348,6 +412,9 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 			&task.Name,
 			&state,
 			&lastError,
+			&ownerWorker,
+			&epoch,
+			&runID,
 			&sourceJSON,
 			&startJSON,
 			&storageJSON,
@@ -358,6 +425,9 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 
 		task.State = tasks.State(state)
 		task.LastError = lastError.String
+		task.OwnerWorkerID = ownerWorker.String
+		task.Epoch = epoch
+		task.RunID = runID.String
 		task.UpdatedAt = updatedAt
 		if err := json.Unmarshal([]byte(sourceJSON), &task.Source); err != nil {
 			return nil, fmt.Errorf("decode source json for task %s: %w", task.ID, err)

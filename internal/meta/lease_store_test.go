@@ -372,3 +372,63 @@ func TestLeaseStore_GetRetriesTransientError(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestLeaseStore_VerifyOwnership(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := NewLeaseStore(db)
+	now := time.Unix(1735689600, 0).UTC()
+
+	mock.ExpectQuery(regexp.QuoteMeta(getLeaseSQL)).
+		WithArgs("task-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"task_id", "owner_worker_id", "epoch", "lease_expire_at", "renewed_at",
+		}).AddRow("task-1", "worker-a", int64(7), now.Add(15*time.Second), now))
+	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
+
+	ok, err := store.VerifyOwnership(context.Background(), "task-1", "worker-a", 7)
+	if err != nil {
+		t.Fatalf("VerifyOwnership returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ownership verification success")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestLeaseStore_VerifyOwnershipMismatch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := NewLeaseStore(db)
+	now := time.Unix(1735689600, 0).UTC()
+
+	mock.ExpectQuery(regexp.QuoteMeta(getLeaseSQL)).
+		WithArgs("task-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"task_id", "owner_worker_id", "epoch", "lease_expire_at", "renewed_at",
+		}).AddRow("task-1", "worker-b", int64(9), now.Add(15*time.Second), now))
+
+	ok, err := store.VerifyOwnership(context.Background(), "task-1", "worker-a", 7)
+	if err != nil {
+		t.Fatalf("VerifyOwnership returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ownership verification rejected")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

@@ -15,6 +15,31 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/api/cluster/overview": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Cluster"
+                ],
+                "summary": "Get cluster overview",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.clusterOverview"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/api/dashboard": {
             "get": {
                 "produces": [
@@ -551,6 +576,46 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/tasks/{id}/lease": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Cluster"
+                ],
+                "summary": "Get task lease info",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.taskLeaseView"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/api/tasks/{id}/replication": {
             "get": {
                 "produces": [
@@ -574,6 +639,49 @@ const docTemplate = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/api.taskReplicationResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/tasks/{id}/runs": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Cluster"
+                ],
+                "summary": "List task run sessions",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/api.taskRunView"
+                            }
                         }
                     },
                     "404": {
@@ -665,6 +773,34 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/workers": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Cluster"
+                ],
+                "summary": "List cluster workers",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/api.workerItem"
+                            }
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/healthz": {
             "get": {
                 "tags": [
@@ -683,6 +819,29 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "api.clusterOverview": {
+            "type": "object",
+            "properties": {
+                "leased_task_count": {
+                    "type": "integer"
+                },
+                "running_task_count": {
+                    "type": "integer"
+                },
+                "task_count": {
+                    "type": "integer"
+                },
+                "worker_count": {
+                    "type": "integer"
+                },
+                "workers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.workerItem"
+                    }
+                }
+            }
+        },
         "api.createTaskRequest": {
             "type": "object",
             "properties": {
@@ -815,6 +974,26 @@ const docTemplate = `{
                 }
             }
         },
+        "api.taskLeaseView": {
+            "type": "object",
+            "properties": {
+                "epoch": {
+                    "type": "integer"
+                },
+                "owner_worker_id": {
+                    "type": "string"
+                },
+                "state": {
+                    "$ref": "#/definitions/tasks.State"
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
         "api.taskReplicationResponse": {
             "type": "object",
             "properties": {
@@ -856,6 +1035,26 @@ const docTemplate = `{
                 }
             }
         },
+        "api.taskRunView": {
+            "type": "object",
+            "properties": {
+                "epoch": {
+                    "type": "integer"
+                },
+                "run_id": {
+                    "type": "string"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "worker_id": {
+                    "type": "string"
+                }
+            }
+        },
         "api.updateTaskRequest": {
             "type": "object",
             "properties": {
@@ -870,6 +1069,29 @@ const docTemplate = `{
                 },
                 "storage": {
                     "$ref": "#/definitions/tasks.Storage"
+                }
+            }
+        },
+        "api.workerItem": {
+            "type": "object",
+            "properties": {
+                "has_updated": {
+                    "type": "boolean"
+                },
+                "leased": {
+                    "type": "integer"
+                },
+                "running": {
+                    "type": "integer"
+                },
+                "task_count": {
+                    "type": "integer"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "worker_id": {
+                    "type": "string"
                 }
             }
         },
@@ -994,6 +1216,8 @@ const docTemplate = `{
                 "CREATED",
                 "STARTING",
                 "RUNNING",
+                "LEASE_DEGRADED",
+                "REBUILDING_FILE",
                 "RETRY_BACKOFF",
                 "FAILED",
                 "STOPPING",
@@ -1003,6 +1227,8 @@ const docTemplate = `{
                 "StateCreated",
                 "StateStarting",
                 "StateRunning",
+                "StateLeaseDegraded",
+                "StateRebuildingFile",
                 "StateRetryBackoff",
                 "StateFailed",
                 "StateStopping",
@@ -1023,6 +1249,9 @@ const docTemplate = `{
         "tasks.Task": {
             "type": "object",
             "properties": {
+                "epoch": {
+                    "type": "integer"
+                },
                 "id": {
                     "type": "string"
                 },
@@ -1030,6 +1259,12 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "name": {
+                    "type": "string"
+                },
+                "owner_worker_id": {
+                    "type": "string"
+                },
+                "run_id": {
                     "type": "string"
                 },
                 "source": {

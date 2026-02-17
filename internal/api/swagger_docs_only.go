@@ -110,3 +110,43 @@ func (s *Server) swaggerTaskFilesDoc() {}
 // @Failure 500 {string} string
 // @Router /api/tasks/{id}/replication [get]
 func (s *Server) swaggerTaskReplicationDoc() {}
+
+// swaggerWorkersDoc godoc
+// @Summary List cluster workers
+// @Tags Cluster
+// @Produce json
+// @Success 200 {array} workerItem
+// @Failure 405 {string} string
+// @Router /api/workers [get]
+func (s *Server) swaggerWorkersDoc() {}
+
+// swaggerClusterOverviewDoc godoc
+// @Summary Get cluster overview
+// @Tags Cluster
+// @Produce json
+// @Success 200 {object} clusterOverview
+// @Failure 405 {string} string
+// @Router /api/cluster/overview [get]
+func (s *Server) swaggerClusterOverviewDoc() {}
+
+// swaggerTaskLeaseDoc godoc
+// @Summary Get task lease info
+// @Tags Cluster
+// @Produce json
+// @Param id path string true "Task ID"
+// @Success 200 {object} taskLeaseView
+// @Failure 404 {string} string
+// @Failure 500 {string} string
+// @Router /api/tasks/{id}/lease [get]
+func (s *Server) swaggerTaskLeaseDoc() {}
+
+// swaggerTaskRunsDoc godoc
+// @Summary List task run sessions
+// @Tags Cluster
+// @Produce json
+// @Param id path string true "Task ID"
+// @Success 200 {array} taskRunView
+// @Failure 404 {string} string
+// @Failure 500 {string} string
+// @Router /api/tasks/{id}/runs [get]
+func (s *Server) swaggerTaskRunsDoc() {}
