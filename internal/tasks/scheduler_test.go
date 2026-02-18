@@ -241,6 +241,44 @@ func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
 	}
 }
 
+func TestScheduler_StartTaskRejectsNonDispatchStartingTask(t *testing.T) {
+	lease := &fakeLeaseManager{
+		acquireEpoch: 11,
+		acquireOK:    true,
+	}
+	s := NewScheduler(
+		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+	)
+
+	task, err := s.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+
+	// 非 dispatch STARTING（owner/epoch/run_id 不为空）不应被 Claim/Start 放行。
+	s.mu.Lock()
+	nonDispatch := s.tasks[task.ID]
+	nonDispatch.State = StateStarting
+	nonDispatch.OwnerWorkerID = "worker-old"
+	nonDispatch.Epoch = 7
+	nonDispatch.RunID = "run-old"
+	s.tasks[task.ID] = nonDispatch
+	s.mu.Unlock()
+
+	err = s.StartTask(task.ID)
+	if err == nil {
+		t.Fatal("expected cannot start from state STARTING, got nil")
+	}
+	if err.Error() != "cannot start from state STARTING" {
+		t.Fatalf("expected cannot-start error, got %v", err)
+	}
+}
+
 type schedulerTestStore struct {
 	mu    sync.Mutex
 	tasks map[string]Task

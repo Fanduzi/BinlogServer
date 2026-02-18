@@ -326,7 +326,12 @@ func (s *Scheduler) StartTask(id string) error {
 		s.mu.Unlock()
 		return ErrTaskNotFound
 	}
-	canClaimDispatched := task.State == StateStarting && s.runner != nil && s.leaseManager != nil
+	canClaimDispatched := task.State == StateStarting &&
+		task.OwnerWorkerID == "" &&
+		task.Epoch == 0 &&
+		task.RunID == "" &&
+		s.runner != nil &&
+		s.leaseManager != nil
 	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && !canClaimDispatched {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start from state %s", task.State)
