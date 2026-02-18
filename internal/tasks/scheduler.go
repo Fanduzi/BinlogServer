@@ -326,7 +326,8 @@ func (s *Scheduler) StartTask(id string) error {
 		s.mu.Unlock()
 		return ErrTaskNotFound
 	}
-	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff {
+	canClaimDispatched := task.State == StateStarting && s.runner != nil && s.leaseManager != nil
+	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && !canClaimDispatched {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start from state %s", task.State)
 	}
@@ -407,6 +408,58 @@ func (s *Scheduler) StartTask(id string) error {
 
 	go s.runTask(ctx, id, taskForRun, done)
 	return nil
+}
+
+// ClaimStartingTasks 让在线 worker 在常驻状态下接管 control-plane dispatch 的 STARTING 任务。
+func (s *Scheduler) ClaimStartingTasks() (int, error) {
+	s.mu.Lock()
+	store := s.store
+	runner := s.runner
+	leaseManager := s.leaseManager
+	s.mu.Unlock()
+
+	if store == nil || runner == nil || leaseManager == nil {
+		return 0, nil
+	}
+
+	list, err := store.ListTasks(context.Background())
+	if err != nil {
+		return 0, err
+	}
+
+	claimed := 0
+	for _, item := range list {
+		if item.State != StateStarting {
+			continue
+		}
+		if !s.prepareStartingTaskClaim(item) {
+			continue
+		}
+		if err := s.StartTask(item.ID); err != nil {
+			// 竞争窗口下可能被其他 worker 先拿到 lease，或状态已变；这里按 best-effort 跳过。
+			continue
+		}
+		claimed++
+	}
+	return claimed, nil
+}
+
+func (s *Scheduler) prepareStartingTaskClaim(item Task) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if done, ok := s.runs[item.ID]; ok && !isClosed(done) {
+		return false
+	}
+
+	if current, ok := s.tasks[item.ID]; ok {
+		if current.State == StateRunning || current.State == StateRetryBackoff || current.State == StateLeaseDegraded || current.State == StateStopping {
+			return false
+		}
+	}
+
+	s.tasks[item.ID] = item
+	return true
 }
 
 func (s *Scheduler) MarkRetryableError(id, msg string) error {

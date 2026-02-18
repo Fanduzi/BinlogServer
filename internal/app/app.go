@@ -121,6 +121,7 @@ func (a *App) Run(ctx context.Context) error {
 				effectiveBinaryVersion(),
 				5*time.Second,
 			)
+			go startWorkerClaimLoop(ctx, scheduler, 2*time.Second)
 		}
 	}
 
@@ -250,6 +251,10 @@ type workerHeartbeatSink interface {
 	UpsertWorkerHeartbeat(ctx context.Context, hb tasks.WorkerHeartbeat) error
 }
 
+type startingTaskClaimer interface {
+	ClaimStartingTasks() (int, error)
+}
+
 func startWorkerHeartbeatLoop(ctx context.Context, sink workerHeartbeatSink, workerID, host, version string, interval time.Duration) {
 	if sink == nil || workerID == "" {
 		return
@@ -285,6 +290,34 @@ func startWorkerHeartbeatLoop(ctx context.Context, sink workerHeartbeatSink, wor
 			return
 		case <-ticker.C:
 			report("ONLINE")
+		}
+	}
+}
+
+func startWorkerClaimLoop(ctx context.Context, claimer startingTaskClaimer, interval time.Duration) {
+	if claimer == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			claimed, err := claimer.ClaimStartingTasks()
+			if err != nil {
+				log.Printf("worker claim starting tasks failed err=%v", err)
+				continue
+			}
+			if claimed > 0 {
+				log.Printf("worker claimed starting tasks count=%d", claimed)
+			}
 		}
 	}
 }

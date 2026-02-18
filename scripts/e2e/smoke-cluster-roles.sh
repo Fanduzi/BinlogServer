@@ -234,10 +234,7 @@ echo "[cluster-roles] create + start task via control-plane api"
 TASK_ID="$(create_task)"
 start_task "$TASK_ID"
 
-# 当前实现由 worker 启动恢复流程接管 STARTING 任务，重启 worker 触发一次恢复。
-stop_worker
-start_worker
-wait_worker_online
+# 在线 worker 应该在常驻状态下直接接管 STARTING 任务，无需重启。
 wait_task_running "$TASK_ID"
 echo "[cluster-roles] task running task_id=$TASK_ID"
 

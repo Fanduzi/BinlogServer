@@ -178,6 +178,69 @@ func TestScheduler_GetTaskRefreshesFromStore(t *testing.T) {
 	}
 }
 
+func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: make(map[string]Task),
+	}
+	lease := &fakeLeaseManager{
+		acquireEpoch: 9,
+		acquireOK:    true,
+	}
+
+	control := NewScheduler(
+		WithStore(store),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("control-plane-a"),
+	)
+	workerRunner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(workerRunner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+	)
+
+	task, err := control.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := control.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := control.StartTask(task.ID); err != nil {
+		t.Fatalf("control StartTask returned error: %v", err)
+	}
+
+	claimed, err := worker.ClaimStartingTasks()
+	if err != nil {
+		t.Fatalf("ClaimStartingTasks returned error: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1, got %d", claimed)
+	}
+
+	select {
+	case <-workerRunner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected worker runner to start claimed task")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := worker.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected state %s, got %s", StateRunning, got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 type schedulerTestStore struct {
 	mu    sync.Mutex
 	tasks map[string]Task
