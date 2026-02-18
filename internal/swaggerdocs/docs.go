@@ -788,6 +788,14 @@ const docTemplate = `{
                     "Cluster"
                 ],
                 "summary": "List cluster workers",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Workers list limit (max 200)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",

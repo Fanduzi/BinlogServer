@@ -846,6 +846,11 @@ paths:
       - Tasks
   /api/workers:
     get:
+      parameters:
+      - description: Workers list limit (max 200)
+        in: query
+        name: limit
+        type: integer
       produces:
       - application/json
       responses:

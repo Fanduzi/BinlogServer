@@ -115,6 +115,7 @@ func (s *Server) swaggerTaskReplicationDoc() {}
 // @Summary List cluster workers
 // @Tags Cluster
 // @Produce json
+// @Param limit query int false "Workers list limit (max 200)"
 // @Success 200 {array} workerItem
 // @Failure 405 {string} string
 // @Router /api/workers [get]
