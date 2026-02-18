@@ -330,15 +330,32 @@ func (s *Scheduler) StartTask(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start from state %s", task.State)
 	}
-	if s.runner == nil {
-		// 没有 runner 时不允许启动，避免状态被错误标记为 RUNNING。
-		s.mu.Unlock()
-		return ErrRunnerNotConfigured
-	}
 	// Scheduler 在 start 前强制校验最小 source config。
 	if task.Source.Host == "" || task.Source.Port == 0 || task.Source.User == "" {
 		s.mu.Unlock()
 		return ErrInvalidSourceConfig
+	}
+	// cluster control-plane 允许 dispatch-only start：仅写入 STARTING，由 worker 接管执行。
+	if s.runner == nil {
+		if s.leaseManager == nil {
+			// 非 cluster dispatch 场景仍要求本地 runner，防止误标记状态。
+			s.mu.Unlock()
+			return ErrRunnerNotConfigured
+		}
+		task.State = StateStarting
+		task.LastError = ""
+		task.OwnerWorkerID = ""
+		task.Epoch = 0
+		task.RunID = ""
+		task.UpdatedAt = time.Now()
+		s.tasks[id] = task
+		s.appendEventLocked(id, "TASK_START_DISPATCHED", "task start dispatched to worker", "")
+		if err := s.persistTaskLocked(task); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.mu.Unlock()
+		return nil
 	}
 	if s.leaseManager != nil && s.clusterWorkerID == "" {
 		s.mu.Unlock()
@@ -456,9 +473,30 @@ func (s *Scheduler) StopTask(id string) error {
 
 func (s *Scheduler) GetTask(id string) (Task, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	task, ok := s.tasks[id]
+	store := s.store
+	s.mu.Unlock()
+
+	if store != nil {
+		list, err := store.ListTasks(context.Background())
+		if err == nil {
+			for _, item := range list {
+				if item.ID != id {
+					continue
+				}
+				s.mu.Lock()
+				s.tasks[id] = item
+				s.mu.Unlock()
+				return item, nil
+			}
+			return Task{}, ErrTaskNotFound
+		}
+		if ok {
+			return task, nil
+		}
+		return Task{}, err
+	}
+
 	if !ok {
 		return Task{}, ErrTaskNotFound
 	}

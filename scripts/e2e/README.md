@@ -7,6 +7,7 @@
 - orchestrator 拓扑发现行为
 - semi-sync ACK/阻塞语义
 - metadata MySQL failover（Percona57 主从 + ProxySQL + orchestrator）
+- cluster 角色分离（control-plane + worker）与 worker heartbeat 在线/离线恢复
 
 ## 依赖
 
@@ -36,6 +37,8 @@
 ./scripts/e2e/run-suite.sh --scenarios smoke,compression
 ./scripts/e2e/run-suite.sh --scenarios orchestrator,semisync
 ./scripts/e2e/run-suite.sh --scenarios meta-failover
+./scripts/e2e/run-suite.sh --scenarios meta-failover-override
+./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
 ```
 
 也可用 `Makefile`：
@@ -58,6 +61,7 @@ make e2e SCENARIOS=smoke,compression
 - `setup-meta-replication.sh`: 初始化 meta-primary/meta-replica GTID 主从复制与 ProxySQL 监控账号。
 - `smoke-meta-failover.sh`: 触发 orchestrator 切主，验证元数据库 failover 后 checkpoint 继续推进。
 - `smoke-meta-failover-override.sh`: 用非默认 `E2E_API/E2E_ORC_API` 地址（localhost）覆盖并执行 failover 场景。
+- `smoke-cluster-roles.sh`: 启动 control-plane + worker 双进程，验证任务执行、worker 离线检测与恢复链路。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
 ## 常用环境变量
@@ -65,6 +69,19 @@ make e2e SCENARIOS=smoke,compression
 - `E2E_DATA_DIR`: e2e 数据目录（默认 `./tmp/e2e/data-suite-<timestamp>`）。
 - `E2E_SERVER_LOG`: `run-suite.sh` 启动后端时的日志路径（默认 `/tmp/binlog-server-e2e-suite.log`）。
 - `SEMISYNC_TIMEOUT_MS`: `smoke-semisync.sh` 使用的半同步 timeout（默认 `7000`）。
+- `E2E_WORKER_ID`: `smoke-cluster-roles.sh` 中 worker 进程上报的 worker_id（默认 `e2e-worker-1`）。
+- `E2E_WORKER_OFFLINE_WAIT_SEC`: `smoke-cluster-roles.sh` 停 worker 后等待离线判定的秒数（默认 `20`）。
+
+## smoke-cluster-roles 场景说明
+
+该场景用于真实多进程验证 cluster 角色分离：
+
+1. 启动 control-plane（仅 API/UI）与 worker（仅执行）两个独立进程。
+2. 通过 control-plane API 创建并启动任务，确认任务进入 `RUNNING`。
+3. 写入 source 数据并确认 checkpoint 推进，证明由 worker 执行。
+4. 查询 `/api/workers`，确认 worker `online=true` 且存在 `last_seen_at`。
+5. 停止 worker，等待超过在线阈值后确认 `online=false`。
+6. 重启 worker，确认 `online=true` 恢复且任务继续推进。
 
 ## meta-failover 场景说明
 
@@ -76,7 +93,7 @@ make e2e SCENARIOS=smoke,compression
 运行该场景时，`run-suite.sh` 会自动：
 1. 执行 `setup-meta-replication.sh` 建立主从复制
 2. 将 `BINLOG_SERVER_META_DSN` 覆盖到 `127.0.0.1:16036`（ProxySQL）
-3. 执行 `smoke-meta-failover.sh` 验证 failover 后恢复
+3. 执行 `smoke-meta-failover.sh` 或 `smoke-meta-failover-override.sh` 验证 failover 后恢复
 4. 可通过 `E2E_API` / `E2E_ORC_API` 覆盖 binlog-server 与 orchestrator 地址。
 
 ## 排障建议

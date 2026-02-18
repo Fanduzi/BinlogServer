@@ -32,6 +32,8 @@ Scenarios:
   orchestrator
   semisync
   meta-failover
+  meta-failover-override
+  smoke-cluster-roles
 EOF
 }
 
@@ -121,6 +123,12 @@ run_scenario() {
     meta-failover)
       "$ROOT_DIR/scripts/e2e/smoke-meta-failover.sh"
       ;;
+    meta-failover-override)
+      "$ROOT_DIR/scripts/e2e/smoke-meta-failover-override.sh"
+      ;;
+    smoke-cluster-roles)
+      E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-cluster-roles.sh"
+      ;;
     *)
       echo "unsupported scenario: $name" >&2
       return 1
@@ -175,20 +183,27 @@ main() {
   "$ROOT_DIR/scripts/e2e/down.sh" >/dev/null 2>&1 || true
   "$ROOT_DIR/scripts/e2e/up.sh"
 
-  if has_scenario "meta-failover" "${scenarios[@]}"; then
+  if has_scenario "meta-failover" "${scenarios[@]}" || has_scenario "meta-failover-override" "${scenarios[@]}"; then
     META_DSN="meta:metapass@tcp(127.0.0.1:16036)/binlog_meta?parseTime=true"
     "$ROOT_DIR/scripts/e2e/setup-meta-replication.sh"
   fi
 
   mkdir -p "$DATA_DIR"
-  if [[ -n "$META_DSN" ]]; then
-    BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+  if has_scenario "smoke-cluster-roles" "${scenarios[@]}"; then
+    if [[ "${#scenarios[@]}" -ne 1 ]]; then
+      echo "scenario smoke-cluster-roles must run alone" >&2
+      exit 1
+    fi
   else
-    BINLOG_SERVER_DATA_DIR="$DATA_DIR" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+    if [[ -n "$META_DSN" ]]; then
+      BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+    else
+      BINLOG_SERVER_DATA_DIR="$DATA_DIR" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+    fi
+    SERVER_PID=$!
+    wait_server_ready
+    echo "[suite] binlog-server ready pid=$SERVER_PID"
   fi
-  SERVER_PID=$!
-  wait_server_ready
-  echo "[suite] binlog-server ready pid=$SERVER_PID"
 
   for s in "${scenarios[@]}"; do
     echo "[suite] scenario=$s"
