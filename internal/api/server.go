@@ -26,6 +26,7 @@ type taskService interface {
 	ListEvents(id string, limit int) ([]tasks.TaskEvent, error)
 	ListFiles(id string, limit int) ([]tasks.BinlogFile, error)
 	ListRuns(id string, limit int) ([]tasks.TaskRun, error)
+	ListWorkerHeartbeats(limit int) ([]tasks.WorkerHeartbeat, error)
 	ListTasks() []tasks.Task
 	DeleteTask(id string) error
 	StartTask(id string) error

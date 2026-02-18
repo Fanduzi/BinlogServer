@@ -38,6 +38,7 @@ func (m *fakeAPILeaseManager) Release(_ context.Context, _ string, _ string, _ i
 type fakeAPIRunHistoryStore struct {
 	tasks     map[string]tasks.Task
 	runs      map[string][]tasks.TaskRun
+	workers   []tasks.WorkerHeartbeat
 	lastLimit int
 }
 
@@ -77,6 +78,23 @@ func (s *fakeAPIRunHistoryStore) ListTaskRuns(_ context.Context, taskID string, 
 	}
 	out := make([]tasks.TaskRun, limit)
 	copy(out, rows[:limit])
+	return out, nil
+}
+
+func (s *fakeAPIRunHistoryStore) UpsertWorkerHeartbeat(_ context.Context, hb tasks.WorkerHeartbeat) error {
+	for i := range s.workers {
+		if s.workers[i].WorkerID == hb.WorkerID {
+			s.workers[i] = hb
+			return nil
+		}
+	}
+	s.workers = append(s.workers, hb)
+	return nil
+}
+
+func (s *fakeAPIRunHistoryStore) ListWorkerHeartbeats(_ context.Context, _ int) ([]tasks.WorkerHeartbeat, error) {
+	out := make([]tasks.WorkerHeartbeat, len(s.workers))
+	copy(out, s.workers)
 	return out, nil
 }
 
@@ -793,8 +811,10 @@ func TestAPI_Dashboard(t *testing.T) {
 }
 
 func TestAPI_ClusterWorkers(t *testing.T) {
+	runStore := newFakeAPIRunHistoryStore()
 	scheduler := tasks.NewScheduler(
 		tasks.WithRunner(&fakeAPIRunner{}),
+		tasks.WithStore(runStore),
 		tasks.WithClusterLeaseManager(&fakeAPILeaseManager{epoch: 7}),
 		tasks.WithClusterWorkerID("worker-a"),
 	)
@@ -809,6 +829,15 @@ func TestAPI_ClusterWorkers(t *testing.T) {
 	}
 	if err := scheduler.StartTask(task.ID); err != nil {
 		t.Fatalf("StartTask returned error: %v", err)
+	}
+	runStore.workers = []tasks.WorkerHeartbeat{
+		{
+			WorkerID:   "worker-a",
+			Host:       "host-a",
+			Version:    "v1.0.0",
+			LastSeenAt: time.Now(),
+			Status:     "ONLINE",
+		},
 	}
 
 	resp := httptest.NewRecorder()
@@ -827,6 +856,9 @@ func TestAPI_ClusterWorkers(t *testing.T) {
 	}
 	if workers[0]["worker_id"] != "worker-a" {
 		t.Fatalf("unexpected worker_id: %v", workers[0]["worker_id"])
+	}
+	if workers[0]["online"] != true {
+		t.Fatalf("expected worker online=true, got %v", workers[0]["online"])
 	}
 }
 

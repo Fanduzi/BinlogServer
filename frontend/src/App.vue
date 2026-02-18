@@ -165,7 +165,7 @@
                 任务 {{ worker.task_count }} / 运行 {{ worker.running }} / Lease {{ worker.leased }}
               </p>
               <p class="cluster-worker-time">
-                最近更新时间：{{ formatTs(worker.updated_at) }}
+                最近心跳：{{ formatTs(worker.last_seen_at) }}
               </p>
             </div>
             <el-empty
@@ -665,12 +665,16 @@ const pagedTasks = computed(() => {
 });
 
 const workerRows = computed(() => {
-  const now = Date.now();
   return (cluster.workers || []).map((worker) => {
-    const updatedMs = toTimeMs(worker.updated_at);
-    const online = updatedMs > 0 && now - updatedMs <= LEASE_RISK_SECONDS * 1000;
+    const seenAt = worker.last_seen_at || worker.updated_at;
+    const fallbackOnline = (() => {
+      const updatedMs = toTimeMs(seenAt);
+      return updatedMs > 0 && Date.now() - updatedMs <= LEASE_RISK_SECONDS * 1000;
+    })();
+    const online = typeof worker.online === "boolean" ? worker.online : fallbackOnline;
     return {
       ...worker,
+      last_seen_at: seenAt,
       online,
     };
   });

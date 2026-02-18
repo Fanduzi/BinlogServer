@@ -80,6 +80,14 @@ type TaskRun struct {
 	EndReason string    `json:"end_reason,omitempty"`
 }
 
+type WorkerHeartbeat struct {
+	WorkerID   string    `json:"worker_id"`
+	Host       string    `json:"host"`
+	Version    string    `json:"version"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	Status     string    `json:"status"`
+}
+
 type BinlogFile struct {
 	TaskID      string    `json:"task_id"`
 	FileName    string    `json:"file_name"`

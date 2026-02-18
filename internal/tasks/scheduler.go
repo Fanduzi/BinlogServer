@@ -46,6 +46,10 @@ type taskRunReader interface {
 	ListTaskRuns(ctx context.Context, taskID string, limit int) ([]TaskRun, error)
 }
 
+type workerHeartbeatReader interface {
+	ListWorkerHeartbeats(ctx context.Context, limit int) ([]WorkerHeartbeat, error)
+}
+
 type CheckpointReader interface {
 	LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error)
 }
@@ -891,6 +895,24 @@ func (s *Scheduler) ListRuns(taskID string, limit int) ([]TaskRun, error) {
 			StartedAt: task.UpdatedAt,
 		},
 	}, nil
+}
+
+func (s *Scheduler) ListWorkerHeartbeats(limit int) ([]WorkerHeartbeat, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+
+	if reader, ok := store.(workerHeartbeatReader); ok {
+		return reader.ListWorkerHeartbeats(context.Background(), limit)
+	}
+	return []WorkerHeartbeat{}, nil
 }
 
 func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string) {

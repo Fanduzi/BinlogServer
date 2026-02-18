@@ -389,6 +389,8 @@ func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if err := store.ensureSchema(context.Background()); err != nil {
 		t.Fatalf("ensureSchema returned error: %v", err)
@@ -453,6 +455,8 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if err := store.ensureSchema(context.Background()); err != nil {
 		t.Fatalf("ensureSchema returned error: %v", err)
@@ -509,6 +513,8 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(createTaskLeasesTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if err := store.ensureSchema(context.Background()); err != nil {
@@ -578,6 +584,53 @@ func TestMySQLTaskStore_ListTaskRuns_LimitCappedTo200(t *testing.T) {
 	}
 	if len(runs) != 0 {
 		t.Fatalf("expected empty runs, got %d", len(runs))
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_UpsertAndListWorkerHeartbeats(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	now := time.Now()
+	hb := tasks.WorkerHeartbeat{
+		WorkerID:   "worker-a",
+		Host:       "host-a",
+		Version:    "v1.0.0",
+		LastSeenAt: now,
+		Status:     "ONLINE",
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta(upsertWorkerHeartbeatSQL)).
+		WithArgs("worker-a", "host-a", "v1.0.0", sqlmock.AnyArg(), "ONLINE").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := store.UpsertWorkerHeartbeat(context.Background(), hb); err != nil {
+		t.Fatalf("UpsertWorkerHeartbeat returned error: %v", err)
+	}
+
+	rows := sqlmock.NewRows([]string{"worker_id", "host", "version", "last_seen_at", "status"}).
+		AddRow("worker-a", "host-a", "v1.0.0", now, "ONLINE")
+	mock.ExpectQuery(regexp.QuoteMeta(listWorkerHeartbeatsSQL)).
+		WithArgs(200).
+		WillReturnRows(rows)
+
+	items, err := store.ListWorkerHeartbeats(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("ListWorkerHeartbeats returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].WorkerID != "worker-a" || items[0].Status != "ONLINE" {
+		t.Fatalf("unexpected heartbeat item: %+v", items[0])
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

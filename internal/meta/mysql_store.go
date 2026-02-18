@@ -123,6 +123,17 @@ CREATE TABLE IF NOT EXISTS task_runs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
+const createWorkerHeartbeatsTableSQL = `
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+  worker_id VARCHAR(128) PRIMARY KEY,
+  host VARCHAR(255) NOT NULL,
+  version VARCHAR(64) NOT NULL,
+  last_seen_at DATETIME(6) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  INDEX idx_worker_heartbeats_seen (last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
 const hasBinlogFilesColumnSQL = `
 SELECT COUNT(*)
 FROM information_schema.columns
@@ -265,6 +276,23 @@ ORDER BY started_at DESC
 LIMIT ?;
 `
 
+const upsertWorkerHeartbeatSQL = `
+INSERT INTO worker_heartbeats (worker_id, host, version, last_seen_at, status)
+VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  host = VALUES(host),
+  version = VALUES(version),
+  last_seen_at = VALUES(last_seen_at),
+  status = VALUES(status);
+`
+
+const listWorkerHeartbeatsSQL = `
+SELECT worker_id, host, version, last_seen_at, status
+FROM worker_heartbeats
+ORDER BY worker_id ASC
+LIMIT ?;
+`
+
 type MySQLTaskStore struct {
 	db *sql.DB
 }
@@ -322,6 +350,10 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, createTaskRunsTableSQL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, createWorkerHeartbeatsTableSQL)
 	return err
 }
 
@@ -754,4 +786,54 @@ func inferRunEndReason(task tasks.Task) string {
 		return "LEASE_LOST"
 	}
 	return "STOP_WITH_ERROR"
+}
+
+func (s *MySQLTaskStore) UpsertWorkerHeartbeat(ctx context.Context, hb tasks.WorkerHeartbeat) error {
+	lastSeenAt := hb.LastSeenAt
+	if lastSeenAt.IsZero() {
+		lastSeenAt = time.Now()
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		upsertWorkerHeartbeatSQL,
+		hb.WorkerID,
+		hb.Host,
+		hb.Version,
+		lastSeenAt,
+		hb.Status,
+	)
+	return err
+}
+
+func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([]tasks.WorkerHeartbeat, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, listWorkerHeartbeatsSQL, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []tasks.WorkerHeartbeat
+	for rows.Next() {
+		var item tasks.WorkerHeartbeat
+		if err := rows.Scan(
+			&item.WorkerID,
+			&item.Host,
+			&item.Version,
+			&item.LastSeenAt,
+			&item.Status,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

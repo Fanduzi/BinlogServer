@@ -1090,16 +1090,31 @@ const docTemplate = `{
                 "has_updated": {
                     "type": "boolean"
                 },
+                "host": {
+                    "type": "string"
+                },
+                "last_seen_at": {
+                    "type": "string"
+                },
                 "leased": {
                     "type": "integer"
                 },
+                "online": {
+                    "type": "boolean"
+                },
                 "running": {
                     "type": "integer"
+                },
+                "status": {
+                    "type": "string"
                 },
                 "task_count": {
                     "type": "integer"
                 },
                 "updated_at": {
+                    "type": "string"
+                },
+                "version": {
                     "type": "string"
                 },
                 "worker_id": {

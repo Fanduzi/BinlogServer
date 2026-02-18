@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +106,20 @@ func (a *App) Run(ctx context.Context) error {
 				stats.Resumed,
 				stats.StopErrors,
 				stats.StartErrors,
+			)
+		}
+	}
+	if workerEnabled && isClusterMode(a.cfg) {
+		if mysqlStore != nil {
+			sink := workerHeartbeatSink(mysqlStore)
+			workerID := effectiveClusterWorkerID(a.cfg)
+			go startWorkerHeartbeatLoop(
+				ctx,
+				sink,
+				workerID,
+				effectiveHostname(workerID),
+				effectiveBinaryVersion(),
+				5*time.Second,
 			)
 		}
 	}
@@ -206,6 +221,72 @@ func effectiveClusterWorkerID(cfg config.Config) string {
 		return "worker-default"
 	}
 	return host
+}
+
+func effectiveHostname(fallback string) string {
+	host, err := os.Hostname()
+	if err != nil {
+		return fallback
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fallback
+	}
+	return host
+}
+
+func effectiveBinaryVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "devel"
+	}
+	if info.Main.Version == "" {
+		return "devel"
+	}
+	return info.Main.Version
+}
+
+type workerHeartbeatSink interface {
+	UpsertWorkerHeartbeat(ctx context.Context, hb tasks.WorkerHeartbeat) error
+}
+
+func startWorkerHeartbeatLoop(ctx context.Context, sink workerHeartbeatSink, workerID, host, version string, interval time.Duration) {
+	if sink == nil || workerID == "" {
+		return
+	}
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	report := func(status string) {
+		timeoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		err := sink.UpsertWorkerHeartbeat(timeoutCtx, tasks.WorkerHeartbeat{
+			WorkerID:   workerID,
+			Host:       host,
+			Version:    version,
+			LastSeenAt: time.Now(),
+			Status:     status,
+		})
+		if err != nil {
+			log.Printf("worker heartbeat upsert failed worker=%s status=%s err=%v", workerID, status, err)
+		}
+	}
+
+	report("ONLINE")
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			report("OFFLINE")
+			return
+		case <-ticker.C:
+			report("ONLINE")
+		}
+	}
 }
 
 func applyClusterRuntimeOptions(

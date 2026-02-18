@@ -11,6 +11,11 @@ import (
 
 type workerItem struct {
 	WorkerID   string    `json:"worker_id"`
+	Host       string    `json:"host,omitempty"`
+	Version    string    `json:"version,omitempty"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	Status     string    `json:"status"`
+	Online     bool      `json:"online"`
 	TaskCount  int       `json:"task_count"`
 	Running    int       `json:"running"`
 	Leased     int       `json:"leased"`
@@ -43,6 +48,8 @@ type clusterOverview struct {
 	LeasedTaskCount  int          `json:"leased_task_count"`
 	Workers          []workerItem `json:"workers"`
 }
+
+const workerOnlineThreshold = 15 * time.Second
 
 func buildWorkerItems(items []tasks.Task) []workerItem {
 	byID := make(map[string]*workerItem)
@@ -85,7 +92,55 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, buildWorkerItems(s.tasks.ListTasks()))
+	heartbeats, err := s.tasks.ListWorkerHeartbeats(parseLimit(r, 200))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	taskStats := make(map[string]workerItem)
+	for _, task := range s.tasks.ListTasks() {
+		if task.OwnerWorkerID == "" {
+			continue
+		}
+		entry := taskStats[task.OwnerWorkerID]
+		entry.TaskCount++
+		if task.State == tasks.StateRunning {
+			entry.Running++
+		}
+		if task.Epoch > 0 {
+			entry.Leased++
+		}
+		taskStats[task.OwnerWorkerID] = entry
+	}
+
+	now := time.Now()
+	items := make([]workerItem, 0, len(heartbeats))
+	for _, hb := range heartbeats {
+		stats := taskStats[hb.WorkerID]
+		online := hb.Status == "ONLINE" && !hb.LastSeenAt.IsZero() && now.Sub(hb.LastSeenAt) <= workerOnlineThreshold
+		status := hb.Status
+		if !online {
+			status = "OFFLINE"
+		}
+		items = append(items, workerItem{
+			WorkerID:   hb.WorkerID,
+			Host:       hb.Host,
+			Version:    hb.Version,
+			LastSeenAt: hb.LastSeenAt,
+			Status:     status,
+			Online:     online,
+			TaskCount:  stats.TaskCount,
+			Running:    stats.Running,
+			Leased:     stats.Leased,
+			UpdatedAt:  hb.LastSeenAt,
+			HasUpdated: !hb.LastSeenAt.IsZero(),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].WorkerID < items[j].WorkerID
+	})
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) handleTaskLease(w http.ResponseWriter, r *http.Request, taskID string) {
