@@ -15,12 +15,14 @@ on:
         options:
           - quick
           - full
+          - cluster-roles
 
 permissions:
   contents: read
 
 jobs:
   unit-and-e2e:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile != 'cluster-roles' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -48,6 +50,36 @@ jobs:
         if: failure()
         run: |
           cat /tmp/binlog-server.log || true
+          docker compose -f deploy/e2e/docker-compose.yml logs || true
+
+      - name: Cleanup
+        if: always()
+        run: ./scripts/e2e/down.sh
+
+  e2e-cluster-roles:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'cluster-roles' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: E2E Cluster Roles Scenario
+        run: |
+          E2E_DIR="./tmp/e2e/data-ci-cluster-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          E2E_SERVER_LOG="/tmp/binlog-server-cluster.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          cat /tmp/binlog-server-cluster.log || true
           docker compose -f deploy/e2e/docker-compose.yml logs || true
 
       - name: Cleanup
