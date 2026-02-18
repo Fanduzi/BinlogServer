@@ -39,6 +39,7 @@
 ./scripts/e2e/run-suite.sh --scenarios meta-failover
 ./scripts/e2e/run-suite.sh --scenarios meta-failover-override
 ./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
+./scripts/e2e/run-suite.sh --scenarios smoke-control-plane-failover
 ```
 
 也可用 `Makefile`：
@@ -62,6 +63,7 @@ make e2e SCENARIOS=smoke,compression
 - `smoke-meta-failover.sh`: 触发 orchestrator 切主，验证元数据库 failover 后 checkpoint 继续推进。
 - `smoke-meta-failover-override.sh`: 用非默认 `E2E_API/E2E_ORC_API` 地址（localhost）覆盖并执行 failover 场景。
 - `smoke-cluster-roles.sh`: 启动 control-plane + worker 双进程，验证任务执行、worker 离线检测与恢复链路。
+- `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
 ## 常用环境变量
@@ -83,6 +85,16 @@ make e2e SCENARIOS=smoke,compression
 4. 查询 `/api/workers`，确认 worker `online=true` 且存在 `last_seen_at`；并校验 worker health probe (`/healthz`,`/readyz`) 可用且不暴露 `/api/*`。
 5. 停止 worker，等待超过在线阈值后确认 `online=false`。
 6. 重启 worker，确认 `online=true` 恢复且任务继续推进。
+
+## smoke-control-plane-failover 场景说明
+
+该场景用于验证 control-plane 故障不影响 worker 数据面：
+
+1. 启动 control-plane + worker，创建并启动任务，确认 `RUNNING`。
+2. 记录 checkpoint A，写入数据并推进到 checkpoint B（B > A）。
+3. 停止 control-plane（worker 保持运行），再次写入数据。
+4. 重启 control-plane，查询 checkpoint C（C > B），证明控面停机窗口内 worker 仍持续复制。
+5. 验证 control-plane 恢复后 `/healthz` 与任务 API 可访问，且 `/api/workers` 仍展示 worker 在线状态。
 
 ## meta-failover 场景说明
 
