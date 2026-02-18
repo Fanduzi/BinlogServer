@@ -7,6 +7,7 @@ API="${E2E_API:-http://127.0.0.1:18080}"
 DATA_DIR="${E2E_DATA_DIR:-$ROOT_DIR/tmp/e2e/data-cluster-roles-$(date +%s)}"
 WORKER_ID="${E2E_WORKER_ID:-e2e-worker-1}"
 WORKER_OFFLINE_WAIT_SEC="${E2E_WORKER_OFFLINE_WAIT_SEC:-20}"
+WORKER_HEALTH_ADDR="${E2E_WORKER_HEALTH_ADDR:-127.0.0.1:18081}"
 
 RUN_TAG="$(date +%s)"
 CONTROL_LOG="${E2E_CONTROL_LOG:-/tmp/binlog-server-e2e-control-${RUN_TAG}.log}"
@@ -68,6 +69,7 @@ start_worker() {
   BINLOG_SERVER_MODE="cluster" \
   BINLOG_SERVER_CLUSTER_ROLE="worker" \
   BINLOG_SERVER_CLUSTER_WORKER_ID="$WORKER_ID" \
+  BINLOG_SERVER_CLUSTER_WORKER_HEALTH_LISTEN_ADDR="$WORKER_HEALTH_ADDR" \
   BINLOG_SERVER_DATA_DIR="$worker_data_dir" \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$WORKER_LOG" 2>&1 &
   WORKER_PID=$!
@@ -109,6 +111,29 @@ wait_worker_offline() {
   echo "worker did not become offline in time: worker_id=$WORKER_ID" >&2
   curl -fsS "$API/api/workers?limit=200" >&2 || true
   return 1
+}
+
+wait_worker_health_ready() {
+  local health_api="http://$WORKER_HEALTH_ADDR"
+  for _ in {1..60}; do
+    if curl -fsS "$health_api/healthz" >/dev/null 2>&1 && curl -fsS "$health_api/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "worker health probe not ready in time: addr=$WORKER_HEALTH_ADDR" >&2
+  cat "$WORKER_LOG" >&2 || true
+  return 1
+}
+
+assert_worker_health_api_blocked() {
+  local health_api="http://$WORKER_HEALTH_ADDR"
+  local http_code
+  http_code="$(curl -sS -o /tmp/e2e-worker-health-api-${RUN_TAG}.resp -w '%{http_code}' "$health_api/api/tasks")"
+  if [[ "$http_code" != "404" ]]; then
+    echo "expected worker health probe to block /api/*, got http=$http_code body=$(cat /tmp/e2e-worker-health-api-${RUN_TAG}.resp)" >&2
+    return 1
+  fi
 }
 
 create_task() {
@@ -228,6 +253,8 @@ echo "[cluster-roles] control-plane ready pid=$CONTROL_PID"
 echo "[cluster-roles] start worker process"
 start_worker
 wait_worker_online
+wait_worker_health_ready
+assert_worker_health_api_blocked
 echo "[cluster-roles] worker online worker_id=$WORKER_ID pid=$WORKER_PID"
 
 echo "[cluster-roles] create + start task via control-plane api"
@@ -264,6 +291,7 @@ RECOVER_BEFORE_POS="$(checkpoint_pos)"
 echo "[cluster-roles] restart worker and verify recovery"
 start_worker
 wait_worker_online
+wait_worker_health_ready
 wait_task_running "$TASK_ID"
 write_source_data "cluster-roles-after-recover-${RUN_TAG}"
 wait_checkpoint_progress "$TASK_ID" "$RECOVER_BEFORE_FILE" "$RECOVER_BEFORE_POS"

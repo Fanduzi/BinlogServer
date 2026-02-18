@@ -26,8 +26,9 @@ type App struct {
 	readyCh   chan struct{}
 	readyOnce sync.Once
 
-	mu   sync.Mutex
-	addr string
+	mu               sync.Mutex
+	addr             string
+	workerHealthAddr string
 }
 
 func New(cfg config.Config) *App {
@@ -126,6 +127,15 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	if !controlPlaneEnabled {
+		if workerEnabled && strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr) != "" {
+			addr, err := startWorkerHealthServer(ctx, strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr))
+			if err != nil {
+				return err
+			}
+			a.setWorkerHealthAddr(addr)
+		} else {
+			a.setWorkerHealthAddr("")
+		}
 		a.setAddr("")
 		a.readyOnce.Do(func() { close(a.readyCh) })
 		<-ctx.Done()
@@ -171,6 +181,18 @@ func (a *App) setAddr(addr string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.addr = addr
+}
+
+func (a *App) WorkerHealthAddr() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.workerHealthAddr
+}
+
+func (a *App) setWorkerHealthAddr(addr string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workerHealthAddr = addr
 }
 
 func resolveRoleMode(cfg config.Config) (controlPlaneEnabled bool, workerEnabled bool) {
@@ -320,6 +342,44 @@ func startWorkerClaimLoop(ctx context.Context, claimer startingTaskClaimer, inte
 			}
 		}
 	}
+}
+
+func startWorkerHealthServer(ctx context.Context, listenAddr string) (string, error) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	server := &http.Server{Handler: mux}
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return "", err
+	}
+
+	go func() {
+		<-ctx.Done()
+		_ = server.Shutdown(context.Background())
+	}()
+
+	go func() {
+		err := server.Serve(ln)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("worker health server stopped err=%v", err)
+		}
+	}()
+
+	return ln.Addr().String(), nil
 }
 
 func applyClusterRuntimeOptions(

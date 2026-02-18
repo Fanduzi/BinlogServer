@@ -135,6 +135,42 @@ func TestApp_ClusterWorkerRole(t *testing.T) {
 	waitRunExit(t, errCh)
 }
 
+func TestApp_ClusterWorkerRoleWithHealthProbe(t *testing.T) {
+	cfg := config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Mode:       "cluster",
+		Cluster: config.ClusterConfig{
+			Role:                   "worker",
+			WorkerHealthListenAddr: "127.0.0.1:0",
+		},
+	}
+	a := New(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- a.Run(ctx)
+	}()
+
+	waitReady(t, a)
+
+	if a.Addr() != "" {
+		t.Fatalf("expected worker role to skip control-plane listener, got addr=%s", a.Addr())
+	}
+	if a.WorkerHealthAddr() == "" {
+		t.Fatal("expected worker health probe listener to be exposed")
+	}
+
+	assertHTTPStatus(t, "http://"+a.WorkerHealthAddr()+"/healthz", http.StatusOK)
+	assertHTTPStatus(t, "http://"+a.WorkerHealthAddr()+"/readyz", http.StatusOK)
+	assertHTTPStatus(t, "http://"+a.WorkerHealthAddr()+"/api/tasks", http.StatusNotFound)
+
+	cancel()
+	waitRunExit(t, errCh)
+}
+
 func TestApp_ClusterAllInOneRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",

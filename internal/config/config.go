@@ -26,12 +26,13 @@ type Config struct {
 }
 
 type ClusterConfig struct {
-	Role                  string
-	WorkerID              string
-	LeaseTTLSec           int
-	LeaseRenewIntervalSec int
-	LeaseGraceSec         int
-	FailoverPolicy        string
+	Role                   string
+	WorkerID               string
+	WorkerHealthListenAddr string
+	LeaseTTLSec            int
+	LeaseRenewIntervalSec  int
+	LeaseGraceSec          int
+	FailoverPolicy         string
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -45,6 +46,7 @@ func LoadConfig(path string) (Config, error) {
 	v.SetDefault("data_dir", "./data")
 	v.SetDefault("mode", "standalone")
 	v.SetDefault("cluster.role", "all-in-one")
+	v.SetDefault("cluster.worker_health_listen_addr", "")
 	v.SetDefault("cluster.lease_ttl_sec", 15)
 	v.SetDefault("cluster.lease_renew_interval_sec", 5)
 	v.SetDefault("cluster.lease_grace_sec", 30)
@@ -70,17 +72,18 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	cfg := Config{
-		ListenAddr:     getString(v, "listen_addr"),
-		DataDir:        getString(v, "data_dir"),
-		MetaDSN:        getString(v, "meta_dsn"),
-		Mode:           getString(v, "mode"),
+		ListenAddr: getString(v, "listen_addr"),
+		DataDir:    getString(v, "data_dir"),
+		MetaDSN:    getString(v, "meta_dsn"),
+		Mode:       getString(v, "mode"),
 		Cluster: ClusterConfig{
-			Role:                  getString(v, "cluster.role"),
-			WorkerID:              getString(v, "cluster.worker_id"),
-			LeaseTTLSec:           getInt(v, "cluster.lease_ttl_sec"),
-			LeaseRenewIntervalSec: getInt(v, "cluster.lease_renew_interval_sec"),
-			LeaseGraceSec:         getInt(v, "cluster.lease_grace_sec"),
-			FailoverPolicy:        getString(v, "cluster.failover_policy"),
+			Role:                   getString(v, "cluster.role"),
+			WorkerID:               getString(v, "cluster.worker_id"),
+			WorkerHealthListenAddr: getString(v, "cluster.worker_health_listen_addr"),
+			LeaseTTLSec:            getInt(v, "cluster.lease_ttl_sec"),
+			LeaseRenewIntervalSec:  getInt(v, "cluster.lease_renew_interval_sec"),
+			LeaseGraceSec:          getInt(v, "cluster.lease_grace_sec"),
+			FailoverPolicy:         getString(v, "cluster.failover_policy"),
 		},
 		UploadEndpoint: getString(v, "upload.endpoint", "upload_endpoint"),
 		UploadBucket:   getString(v, "upload.bucket", "upload_bucket"),

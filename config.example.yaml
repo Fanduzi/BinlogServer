@@ -6,6 +6,7 @@ mode: "standalone" # standalone | cluster
 cluster:
   role: "all-in-one" # control-plane | worker | all-in-one
   worker_id: ""
+  worker_health_listen_addr: "" # 仅 role=worker 时生效；示例: "127.0.0.1:18081"
   lease_ttl_sec: 15
   lease_renew_interval_sec: 5
   lease_grace_sec: 30

@@ -71,6 +71,7 @@ make e2e SCENARIOS=smoke,compression
 - `SEMISYNC_TIMEOUT_MS`: `smoke-semisync.sh` 使用的半同步 timeout（默认 `7000`）。
 - `E2E_WORKER_ID`: `smoke-cluster-roles.sh` 中 worker 进程上报的 worker_id（默认 `e2e-worker-1`）。
 - `E2E_WORKER_OFFLINE_WAIT_SEC`: `smoke-cluster-roles.sh` 停 worker 后等待离线判定的秒数（默认 `20`）。
+- `E2E_WORKER_HEALTH_ADDR`: `smoke-cluster-roles.sh` 中 worker health probe 地址（默认 `127.0.0.1:18081`）。
 
 ## smoke-cluster-roles 场景说明
 
@@ -79,7 +80,7 @@ make e2e SCENARIOS=smoke,compression
 1. 启动 control-plane（仅 API/UI）与 worker（仅执行）两个独立进程。
 2. 通过 control-plane API 创建并启动任务，确认任务进入 `RUNNING`。
 3. 写入 source 数据并确认 checkpoint 推进，证明由 worker 执行。
-4. 查询 `/api/workers`，确认 worker `online=true` 且存在 `last_seen_at`。
+4. 查询 `/api/workers`，确认 worker `online=true` 且存在 `last_seen_at`；并校验 worker health probe (`/healthz`,`/readyz`) 可用且不暴露 `/api/*`。
 5. 停止 worker，等待超过在线阈值后确认 `online=false`。
 6. 重启 worker，确认 `online=true` 恢复且任务继续推进。
 

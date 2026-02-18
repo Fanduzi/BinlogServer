@@ -121,6 +121,7 @@ func TestLoadConfig_ClusterDefaults(t *testing.T) {
 	t.Setenv("BINLOG_SERVER_MODE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_ROLE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_ID", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_HEALTH_LISTEN_ADDR", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_TTL_SEC", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_RENEW_INTERVAL_SEC", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_GRACE_SEC", "")
@@ -135,6 +136,9 @@ func TestLoadConfig_ClusterDefaults(t *testing.T) {
 	}
 	if cfg.Cluster.Role != "all-in-one" {
 		t.Fatalf("expected cluster role all-in-one, got %q", cfg.Cluster.Role)
+	}
+	if cfg.Cluster.WorkerHealthListenAddr != "" {
+		t.Fatalf("expected empty worker_health_listen_addr, got %q", cfg.Cluster.WorkerHealthListenAddr)
 	}
 	if cfg.Cluster.LeaseTTLSec != 15 {
 		t.Fatalf("expected lease_ttl_sec=15, got %d", cfg.Cluster.LeaseTTLSec)
@@ -154,6 +158,7 @@ func TestLoadConfig_ClusterFromYAML(t *testing.T) {
 	t.Setenv("BINLOG_SERVER_MODE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_ROLE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_ID", "")
+	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_HEALTH_LISTEN_ADDR", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_TTL_SEC", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_RENEW_INTERVAL_SEC", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_LEASE_GRACE_SEC", "")
@@ -166,6 +171,7 @@ mode: "cluster"
 cluster:
   role: "worker"
   worker_id: "worker-a"
+  worker_health_listen_addr: "127.0.0.1:19081"
   lease_ttl_sec: 20
   lease_renew_interval_sec: 6
   lease_grace_sec: 45
@@ -187,6 +193,9 @@ cluster:
 	}
 	if cfg.Cluster.WorkerID != "worker-a" {
 		t.Fatalf("expected cluster worker_id worker-a, got %q", cfg.Cluster.WorkerID)
+	}
+	if cfg.Cluster.WorkerHealthListenAddr != "127.0.0.1:19081" {
+		t.Fatalf("expected worker_health_listen_addr 127.0.0.1:19081, got %q", cfg.Cluster.WorkerHealthListenAddr)
 	}
 	if cfg.Cluster.LeaseTTLSec != 20 {
 		t.Fatalf("expected lease_ttl_sec=20, got %d", cfg.Cluster.LeaseTTLSec)
