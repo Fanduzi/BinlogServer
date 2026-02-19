@@ -36,6 +36,7 @@ Scenarios:
   smoke-observability
   smoke-cluster-roles
   smoke-control-plane-failover
+  smoke-worker-crash-recovery
 EOF
 }
 
@@ -137,6 +138,9 @@ run_scenario() {
     smoke-control-plane-failover)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-control-plane-failover.sh"
       ;;
+    smoke-worker-crash-recovery)
+      E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-worker-crash-recovery.sh"
+      ;;
     *)
       echo "unsupported scenario: $name" >&2
       return 1
@@ -197,9 +201,9 @@ main() {
   fi
 
   mkdir -p "$DATA_DIR"
-  if has_scenario "smoke-cluster-roles" "${scenarios[@]}" || has_scenario "smoke-control-plane-failover" "${scenarios[@]}"; then
+  if has_scenario "smoke-cluster-roles" "${scenarios[@]}" || has_scenario "smoke-control-plane-failover" "${scenarios[@]}" || has_scenario "smoke-worker-crash-recovery" "${scenarios[@]}"; then
     if [[ "${#scenarios[@]}" -ne 1 ]]; then
-      echo "scenario smoke-cluster-roles/smoke-control-plane-failover must run alone" >&2
+      echo "scenario smoke-cluster-roles/smoke-control-plane-failover/smoke-worker-crash-recovery must run alone" >&2
       exit 1
     fi
   else

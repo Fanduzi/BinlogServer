@@ -41,6 +41,7 @@
 ./scripts/e2e/run-suite.sh --scenarios smoke-observability
 ./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
 ./scripts/e2e/run-suite.sh --scenarios smoke-control-plane-failover
+./scripts/e2e/run-suite.sh --scenarios smoke-worker-crash-recovery
 ```
 
 也可用 `Makefile`：
@@ -66,6 +67,7 @@ make e2e SCENARIOS=smoke,compression
 - `smoke-observability.sh`: 验证 `/metrics` 核心指标存在，且 `task_state_count` 与 `checkpoint_age_seconds` 随状态/时间变化。
 - `smoke-cluster-roles.sh`: 启动 control-plane + worker 双进程，验证任务执行、worker 离线检测与恢复链路。
 - `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
+- `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
 ## 常用环境变量
@@ -106,6 +108,17 @@ make e2e SCENARIOS=smoke,compression
 3. 停止 control-plane（worker 保持运行），再次写入数据。
 4. 重启 control-plane，查询 checkpoint C（C > B），证明控面停机窗口内 worker 仍持续复制。
 5. 验证 control-plane 恢复后 `/healthz` 与任务 API 可访问，且 `/api/workers` 仍展示 worker 在线状态。
+
+## smoke-worker-crash-recovery 场景说明
+
+该场景用于验证 worker 异常崩溃与接管后的 strict consistency：
+
+1. 启动 control-plane + worker1，创建并启动任务到 `RUNNING`。
+2. 写入 source 数据并触发 rotate。
+3. 在检测到 `OPEN` 文件后强制 kill worker1（模拟崩溃）。
+4. 启动 worker2（复用同一数据目录）接管任务，确认 `epoch` 增长且 checkpoint 持续推进。
+5. 停任务后校验：旧 epoch `OPEN` 文件被清理，且不存在遗留 `.open.e*`。
+6. 抽样对比主库与备份 sealed 文件 md5（1-2 个文件）一致。
 
 ## meta-failover 场景说明
 
