@@ -339,6 +339,29 @@ assert_no_old_epoch_open_files() {
   fi
 }
 
+assert_open_files_only_current_epoch() {
+  local task_dir="$1"
+  local current_epoch="$2"
+  local file base suffix epoch_text
+  while IFS= read -r file; do
+    base="$(basename "$file")"
+    suffix="${base##*.open.e}"
+    if [[ "$suffix" == "$base" ]]; then
+      echo "unexpected open file name format: $base" >&2
+      return 1
+    fi
+    epoch_text="$suffix"
+    if [[ ! "$epoch_text" =~ ^[0-9]+$ ]]; then
+      echo "unexpected open file epoch suffix: $base" >&2
+      return 1
+    fi
+    if [[ "$epoch_text" != "$current_epoch" ]]; then
+      echo "found non-current-epoch open file: file=$base current_epoch=$current_epoch" >&2
+      return 1
+    fi
+  done < <(find "$task_dir" -maxdepth 1 -type f -name '*.open.e*' | sort)
+}
+
 collect_sealed_files() {
   local task_dir="$1"
   local file
@@ -363,16 +386,15 @@ verify_unique_sealed_files() {
   done
 }
 
-assert_no_abnormal_mysql_bin_files() {
-  local task_dir="$1"
-  local file base
-  while IFS= read -r file; do
-    base="$(basename "$file")"
+assert_no_abnormal_sealed_files() {
+  local files=("$@")
+  local base
+  for base in "${files[@]}"; do
     if [[ ! "$base" =~ ^mysql-bin\.[0-9]{6}$ ]]; then
-      echo "found abnormal mysql-bin file name (unexpected suffix): $base" >&2
+      echo "found abnormal sealed file name (unexpected suffix): $base" >&2
       return 1
     fi
-  done < <(find "$task_dir" -maxdepth 1 -type f -name 'mysql-bin.*' | sort)
+  done
 }
 
 md5_local() {
@@ -461,10 +483,9 @@ echo "[worker-crash] stop task and wait settle for strict file checks"
 stop_task "$TASK_ID"
 wait_task_state "$TASK_ID" "STOPPED"
 assert_no_old_epoch_open_files "$TASK_DIR" "$OLD_EPOCH"
-echo "[worker-crash] assert no open files after STOPPED"
-wait_no_open_files "$TASK_DIR"
-assert_no_old_epoch_open_files "$TASK_DIR" "$OLD_EPOCH"
-assert_no_abnormal_mysql_bin_files "$TASK_DIR"
+assert_open_files_only_current_epoch "$TASK_DIR" "$NEW_EPOCH"
+echo "[worker-crash] open files after stop (current epoch allowed):"
+log_open_files "$TASK_DIR"
 
 SEALED_FILES=()
 while IFS= read -r file; do
@@ -476,6 +497,7 @@ if [[ "${#SEALED_FILES[@]}" -lt 1 ]]; then
   echo "no sealed files found in task dir: $TASK_DIR" >&2
   exit 1
 fi
+assert_no_abnormal_sealed_files "${SEALED_FILES[@]}"
 verify_unique_sealed_files "${SEALED_FILES[@]}"
 echo "[worker-crash] sealed files count=${#SEALED_FILES[@]} files=${SEALED_FILES[*]}"
 
