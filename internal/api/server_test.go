@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -383,6 +384,66 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 	handler.ServeHTTP(getAfterDeleteResp, getAfterDeleteReq)
 	if getAfterDeleteResp.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", getAfterDeleteResp.Code)
+	}
+}
+
+func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
+	store := newFakeAPIRunHistoryStore()
+	checkpointReader := &fakeCheckpointReader{
+		checkpoints: map[string]binlog.Checkpoint{},
+	}
+	fileStore := newFakeFileStore()
+	scheduler := tasks.NewScheduler(
+		tasks.WithStore(store),
+		tasks.WithCheckpointReader(checkpointReader),
+		tasks.WithFileStore(fileStore),
+	)
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	scheduler.ReportReplicationProgress(task.ID, time.Now().Add(-3*time.Second), "mysql-bin.000001", 123)
+	checkpointReader.checkpoints[task.ID] = binlog.Checkpoint{
+		File:      "mysql-bin.000001",
+		Pos:       123,
+		UpdatedAt: time.Now().Add(-5 * time.Second),
+	}
+	if err := fileStore.UpsertBinlogFile(context.Background(), tasks.BinlogFile{
+		TaskID:      task.ID,
+		FileName:    "mysql-bin.000001",
+		UploadState: "UPLOAD_FAILED",
+	}); err != nil {
+		t.Fatalf("UpsertBinlogFile returned error: %v", err)
+	}
+	store.workers = []tasks.WorkerHeartbeat{
+		{
+			WorkerID:   "worker-a",
+			LastSeenAt: time.Now(),
+			Status:     "ONLINE",
+		},
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	body := resp.Body.String()
+	required := []string{
+		"binlog_server_task_state_count",
+		"binlog_server_replication_lag_seconds",
+		"binlog_server_checkpoint_age_seconds",
+		"binlog_server_worker_online",
+		"binlog_server_upload_failures_total",
+	}
+	for _, name := range required {
+		if !strings.Contains(body, name) {
+			t.Fatalf("expected metrics output contains %s, body=%s", name, body)
+		}
 	}
 }
 

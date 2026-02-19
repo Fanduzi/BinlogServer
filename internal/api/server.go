@@ -2,7 +2,12 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"binlog_server/internal/binlog"
 	_ "binlog_server/internal/swaggerdocs"
@@ -53,6 +58,7 @@ func NewServer(taskSvc taskService) http.Handler {
 
 func (s *Server) routes() {
 	s.gin.GET("/healthz", gin.WrapF(s.handleHealth))
+	s.gin.GET("/metrics", gin.WrapF(s.handleMetrics))
 	s.gin.GET("/api/summary", gin.WrapF(s.handleSummary))
 	s.gin.GET("/api/dashboard", gin.WrapF(s.handleDashboard))
 	s.gin.GET("/api/sources/lookup", gin.WrapF(s.handleSourceLookup))
@@ -82,4 +88,136 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(s.renderPrometheusMetrics()))
+}
+
+func (s *Server) renderPrometheusMetrics() string {
+	var b strings.Builder
+	now := time.Now()
+	items := s.tasks.ListTasks()
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].ID < items[j].ID
+	})
+
+	b.WriteString("# HELP binlog_server_task_state_count Number of tasks by state.\n")
+	b.WriteString("# TYPE binlog_server_task_state_count gauge\n")
+	stateCount := make(map[string]int)
+	for _, task := range items {
+		stateCount[string(task.State)]++
+	}
+	states := make([]string, 0, len(stateCount))
+	for state := range stateCount {
+		states = append(states, state)
+	}
+	sort.Strings(states)
+	for _, state := range states {
+		writePromSample(&b, "binlog_server_task_state_count", map[string]string{
+			"state": state,
+		}, float64(stateCount[state]))
+	}
+
+	b.WriteString("# HELP binlog_server_replication_lag_seconds Replication lag seconds by task.\n")
+	b.WriteString("# TYPE binlog_server_replication_lag_seconds gauge\n")
+	for _, task := range items {
+		progress, ok, err := s.tasks.GetReplicationProgress(task.ID)
+		if err != nil || !ok || progress.LastEventAt.IsZero() {
+			continue
+		}
+		lag := now.Sub(progress.LastEventAt).Seconds()
+		if lag < 0 {
+			lag = 0
+		}
+		writePromSample(&b, "binlog_server_replication_lag_seconds", map[string]string{
+			"task_id": task.ID,
+		}, lag)
+	}
+
+	b.WriteString("# HELP binlog_server_checkpoint_age_seconds Checkpoint age seconds by task.\n")
+	b.WriteString("# TYPE binlog_server_checkpoint_age_seconds gauge\n")
+	for _, task := range items {
+		checkpoint, ok, err := s.tasks.GetCheckpoint(context.Background(), task.ID)
+		if err != nil || !ok || checkpoint.UpdatedAt.IsZero() {
+			continue
+		}
+		age := now.Sub(checkpoint.UpdatedAt).Seconds()
+		if age < 0 {
+			age = 0
+		}
+		writePromSample(&b, "binlog_server_checkpoint_age_seconds", map[string]string{
+			"task_id": task.ID,
+		}, age)
+	}
+
+	b.WriteString("# HELP binlog_server_worker_online Worker online status (1=online,0=offline).\n")
+	b.WriteString("# TYPE binlog_server_worker_online gauge\n")
+	heartbeats, err := s.tasks.ListWorkerHeartbeats(200)
+	if err == nil {
+		sort.Slice(heartbeats, func(i, j int) bool {
+			return heartbeats[i].WorkerID < heartbeats[j].WorkerID
+		})
+		for _, hb := range heartbeats {
+			online := strings.EqualFold(hb.Status, "ONLINE") && !hb.LastSeenAt.IsZero() && now.Sub(hb.LastSeenAt) <= workerOnlineThreshold
+			value := 0.0
+			if online {
+				value = 1.0
+			}
+			writePromSample(&b, "binlog_server_worker_online", map[string]string{
+				"worker_id": hb.WorkerID,
+			}, value)
+		}
+	}
+
+	b.WriteString("# HELP binlog_server_upload_failures_total Total number of upload failed file records.\n")
+	b.WriteString("# TYPE binlog_server_upload_failures_total gauge\n")
+	uploadFailuresTotal := 0
+	for _, task := range items {
+		files, err := s.tasks.ListFiles(task.ID, 200)
+		if err != nil {
+			continue
+		}
+		for _, file := range files {
+			if strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
+				uploadFailuresTotal++
+			}
+		}
+	}
+	writePromSample(&b, "binlog_server_upload_failures_total", nil, float64(uploadFailuresTotal))
+
+	return b.String()
+}
+
+func writePromSample(b *strings.Builder, name string, labels map[string]string, value float64) {
+	b.WriteString(name)
+	if len(labels) > 0 {
+		keys := make([]string, 0, len(labels))
+		for key := range labels {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		b.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(b, `%s="%s"`, key, escapePromLabelValue(labels[key]))
+		}
+		b.WriteByte('}')
+	}
+	b.WriteByte(' ')
+	b.WriteString(strconv.FormatFloat(value, 'f', -1, 64))
+	b.WriteByte('\n')
+}
+
+func escapePromLabelValue(v string) string {
+	v = strings.ReplaceAll(v, `\`, `\\`)
+	v = strings.ReplaceAll(v, "\n", `\n`)
+	return strings.ReplaceAll(v, `"`, `\"`)
 }

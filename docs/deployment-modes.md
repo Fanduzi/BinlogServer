@@ -132,6 +132,12 @@ curl -s "http://127.0.0.1:8080/api/tasks/${TASK_ID}/runs" | jq
 curl -s "http://127.0.0.1:8080/api/tasks/${TASK_ID}/events?limit=50" | jq
 ```
 
+## 5. 指标与告警（示例）
+
+- 指标端点：`GET /metrics`
+- 规则与 runbook 示例：`docs/observability.md`
+- 本项目不内置告警引擎，仅提供 Prometheus rule 示例，运行侧由外部 Prometheus/Alertmanager 承担。
+
 e2e 验证入口：
 
 ```bash
@@ -144,7 +150,7 @@ e2e 验证入口：
 
 ---
 
-## 5. 常见误区
+## 6. 常见误区
 
 - `5173` 是 Vite 开发端口，仅用于本地开发热更新。
 - 生产不需要 `npm run dev`。

@@ -13,6 +13,7 @@ Binlog Server MVP（进行中）。
 
 学习路线文档：`docs/learning-guide.md`  
 分节目录：`docs/learning/README.md`
+架构图文档：`docs/architecture-diagrams.md`
 部署模式文档：`docs/deployment-modes.md`
 集群 HA 设计草案：`docs/plans/2026-02-16-cluster-ha-design.md`
 集群 HA 实施计划：`docs/plans/2026-02-16-cluster-ha-implementation-plan.md`
@@ -212,6 +213,7 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 - `GET /api/cluster/overview`（集群汇总）
 - `GET /api/tasks/{id}/lease`（任务 lease 归属）
 - `GET /api/tasks/{id}/runs`（Run History，最近 N 条）
+- `GET /metrics`（Prometheus 指标）
 - `GET /healthz`
 
 说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
@@ -422,3 +424,8 @@ make e2e SCENARIOS=smoke,compression
 ```bash
 go test ./...
 ```
+
+## Observability
+
+- 指标入口：`GET /metrics`（Prometheus exposition 格式）
+- 观测文档：`docs/observability.md`
