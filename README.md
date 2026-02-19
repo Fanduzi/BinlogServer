@@ -211,7 +211,7 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 - `GET /api/workers`（集群 worker 视图）
 - `GET /api/cluster/overview`（集群汇总）
 - `GET /api/tasks/{id}/lease`（任务 lease 归属）
-- `GET /api/tasks/{id}/runs`（当前 run 信息）
+- `GET /api/tasks/{id}/runs`（Run History，最近 N 条）
 - `GET /healthz`
 
 说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
@@ -274,6 +274,7 @@ mode: cluster
 cluster:
   role: worker
   worker_id: "worker-bj-a"
+  worker_health_listen_addr: ":18081"
   lease_ttl_sec: 15
   lease_renew_interval_sec: 5
   lease_grace_sec: 30
@@ -285,6 +286,7 @@ meta_dsn: "user:pass@tcp(meta-vip:3306)/binlog_meta?parseTime=true"
 - control-plane 至少 1 台（按 API/UI SLA 可做多实例）。
 - worker 至少 2 台，`worker_id` 全局唯一。
 - 所有节点 `meta_dsn` 指向同一元数据库入口（VIP/ProxySQL）。
+- 若是 worker-only 部署，建议配置 `cluster.worker_health_listen_addr` 暴露 `/healthz` 与 `/readyz` 供探针使用。
 
 ## Failover 期间预期行为与告警解释
 
@@ -327,6 +329,8 @@ e2e 回归（failover 相关）：
 ```bash
 ./scripts/e2e/run-suite.sh --scenarios meta-failover
 ./scripts/e2e/run-suite.sh --scenarios meta-failover-override
+./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
+./scripts/e2e/run-suite.sh --scenarios smoke-control-plane-failover
 ```
 
 ## Docker E2E
@@ -381,7 +385,7 @@ make e2e-quick
 全量（full）回归：
 
 ```bash
-# full：smoke + compression + orchestrator + semisync
+# full：smoke + compression + orchestrator + semisync + meta-failover
 ./scripts/e2e/run-suite.sh --profile full
 # 或
 make e2e-full

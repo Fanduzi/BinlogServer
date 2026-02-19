@@ -66,6 +66,7 @@ mode: cluster
 cluster:
   role: worker
   worker_id: "worker-bj-a"
+  worker_health_listen_addr: ":18081"
   lease_ttl_sec: 15
   lease_renew_interval_sec: 5
   lease_grace_sec: 30
@@ -114,6 +115,9 @@ meta_dsn: "user:pass@tcp(meta-vip:3306)/binlog_meta?parseTime=true"
 # 基础健康
 curl -s http://127.0.0.1:8080/healthz
 curl -s http://127.0.0.1:8080/api/summary | jq
+# worker-only 探针（若配置了 worker_health_listen_addr）
+curl -s http://127.0.0.1:18081/healthz
+curl -s http://127.0.0.1:18081/readyz
 
 # 集群总览
 curl -s http://127.0.0.1:8080/api/cluster/overview | jq
@@ -134,6 +138,8 @@ e2e 验证入口：
 ./scripts/e2e/run-suite.sh --scenarios smoke,compression
 ./scripts/e2e/run-suite.sh --scenarios meta-failover
 ./scripts/e2e/run-suite.sh --scenarios meta-failover-override
+./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
+./scripts/e2e/run-suite.sh --scenarios smoke-control-plane-failover
 ```
 
 ---
