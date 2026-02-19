@@ -117,8 +117,9 @@ make e2e SCENARIOS=smoke,compression
 2. 写入 source 数据并触发 rotate。
 3. 在检测到 `OPEN` 文件后强制 kill worker1（模拟崩溃）。
 4. 启动 worker2（复用同一数据目录）接管任务，确认 `epoch` 增长且 checkpoint 持续推进。
-5. 停任务后校验：旧 epoch `OPEN` 文件被清理，且不存在遗留 `.open.e*`。
-6. 抽样对比主库与备份 sealed 文件 md5（1-2 个文件）一致。
+5. 停任务并到 `STOPPED` 后，硬断言目录内 `.open.e*` 总数为 `0`（`wait_no_open_files`）；并校验旧 epoch `OPEN` 文件不存在。
+6. 校验 `find "$TASK_DIR" -maxdepth 1 -type f -name 'mysql-bin.*'` 结果中不存在异常后缀文件名（只允许 `mysql-bin.000001` 这类 sealed 名称）。
+7. 抽样对比主库与备份 sealed 文件 md5（1-2 个文件）一致。
 
 ## meta-failover 场景说明
 

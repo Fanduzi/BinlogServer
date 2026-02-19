@@ -363,6 +363,18 @@ verify_unique_sealed_files() {
   done
 }
 
+assert_no_abnormal_mysql_bin_files() {
+  local task_dir="$1"
+  local file base
+  while IFS= read -r file; do
+    base="$(basename "$file")"
+    if [[ ! "$base" =~ ^mysql-bin\.[0-9]{6}$ ]]; then
+      echo "found abnormal mysql-bin file name (unexpected suffix): $base" >&2
+      return 1
+    fi
+  done < <(find "$task_dir" -maxdepth 1 -type f -name 'mysql-bin.*' | sort)
+}
+
 md5_local() {
   local file="$1"
   if command -v md5sum >/dev/null 2>&1; then
@@ -449,8 +461,10 @@ echo "[worker-crash] stop task and wait settle for strict file checks"
 stop_task "$TASK_ID"
 wait_task_state "$TASK_ID" "STOPPED"
 assert_no_old_epoch_open_files "$TASK_DIR" "$OLD_EPOCH"
-echo "[worker-crash] current open files (if any) after stop:"
-log_open_files "$TASK_DIR"
+echo "[worker-crash] assert no open files after STOPPED"
+wait_no_open_files "$TASK_DIR"
+assert_no_old_epoch_open_files "$TASK_DIR" "$OLD_EPOCH"
+assert_no_abnormal_mysql_bin_files "$TASK_DIR"
 
 SEALED_FILES=()
 while IFS= read -r file; do
