@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"binlog_server/internal/binlog"
 )
 
 func TestScheduler_StartTaskTransitionsToRunning(t *testing.T) {
@@ -178,6 +180,46 @@ func TestScheduler_GetTaskRefreshesFromStore(t *testing.T) {
 	}
 }
 
+type schedulerCheckpointReader struct {
+	checkpoints map[string]binlog.Checkpoint
+}
+
+func (r *schedulerCheckpointReader) LoadCheckpoint(_ context.Context, taskID string) (binlog.Checkpoint, bool, error) {
+	cp, ok := r.checkpoints[taskID]
+	return cp, ok, nil
+}
+
+func TestScheduler_GetCheckpointDoesNotRefreshTaskListForKnownTask(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: make(map[string]Task),
+	}
+	reader := &schedulerCheckpointReader{
+		checkpoints: map[string]binlog.Checkpoint{},
+	}
+	s := NewScheduler(WithStore(store), WithCheckpointReader(reader))
+
+	task, err := s.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	reader.checkpoints[task.ID] = binlog.Checkpoint{
+		File:      "mysql-bin.000001",
+		Pos:       4,
+		UpdatedAt: time.Now(),
+	}
+
+	_, ok, err := s.GetCheckpoint(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected checkpoint exists")
+	}
+	if got := store.ListTasksCalls(); got != 0 {
+		t.Fatalf("expected store ListTasks not called for known task, got %d", got)
+	}
+}
+
 func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
 	store := &schedulerTestStore{
 		tasks: make(map[string]Task),
@@ -280,8 +322,9 @@ func TestScheduler_StartTaskRejectsNonDispatchStartingTask(t *testing.T) {
 }
 
 type schedulerTestStore struct {
-	mu    sync.Mutex
-	tasks map[string]Task
+	mu            sync.Mutex
+	tasks         map[string]Task
+	listTasksCall int
 }
 
 func (s *schedulerTestStore) UpsertTask(_ context.Context, task Task) error {
@@ -294,6 +337,7 @@ func (s *schedulerTestStore) UpsertTask(_ context.Context, task Task) error {
 func (s *schedulerTestStore) ListTasks(_ context.Context) ([]Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.listTasksCall++
 	out := make([]Task, 0, len(s.tasks))
 	for _, task := range s.tasks {
 		out = append(out, task)
@@ -306,4 +350,10 @@ func (s *schedulerTestStore) DeleteTask(_ context.Context, taskID string) error 
 	defer s.mu.Unlock()
 	delete(s.tasks, taskID)
 	return nil
+}
+
+func (s *schedulerTestStore) ListTasksCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listTasksCall
 }

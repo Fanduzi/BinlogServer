@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -445,6 +447,67 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 			t.Fatalf("expected metrics output contains %s, body=%s", name, body)
 		}
 	}
+}
+
+func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
+	store := newFakeAPIRunHistoryStore()
+	fileStore := newFakeFileStore()
+	scheduler := tasks.NewScheduler(
+		tasks.WithStore(store),
+		tasks.WithFileStore(fileStore),
+	)
+	handler := NewServer(scheduler)
+
+	task, err := scheduler.CreateTask("cluster-a")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	for i := 0; i < 201; i++ {
+		if err := fileStore.UpsertBinlogFile(context.Background(), tasks.BinlogFile{
+			TaskID:      task.ID,
+			FileName:    fmt.Sprintf("mysql-bin.%06d", i),
+			UploadState: "UPLOAD_FAILED",
+		}); err != nil {
+			t.Fatalf("UpsertBinlogFile returned error: %v", err)
+		}
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	got, ok, err := readPromMetricValue(resp.Body.String(), "binlog_server_upload_failures_total")
+	if err != nil {
+		t.Fatalf("readPromMetricValue returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("missing metric binlog_server_upload_failures_total, body=%s", resp.Body.String())
+	}
+	if got != 201 {
+		t.Fatalf("expected binlog_server_upload_failures_total=201, got %v", got)
+	}
+}
+
+func readPromMetricValue(body, metricName string) (float64, bool, error) {
+	lines := strings.Split(body, "\n")
+	prefix := metricName + " "
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		valueText := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		v, err := strconv.ParseFloat(valueText, 64)
+		if err != nil {
+			return 0, false, err
+		}
+		return v, true, nil
+	}
+	return 0, false, nil
 }
 
 func TestTaskAPI_ListEvents(t *testing.T) {

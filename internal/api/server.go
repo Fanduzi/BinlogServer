@@ -177,15 +177,23 @@ func (s *Server) renderPrometheusMetrics() string {
 
 	b.WriteString("# HELP binlog_server_upload_failures_total Total number of upload failed file records.\n")
 	b.WriteString("# TYPE binlog_server_upload_failures_total gauge\n")
-	uploadFailuresTotal := 0
-	for _, task := range items {
-		files, err := s.tasks.ListFiles(task.ID, 200)
-		if err != nil {
-			continue
+	var uploadFailuresTotal int64
+	if counter, ok := s.tasks.(interface{ CountUploadFailures() (int64, error) }); ok {
+		total, err := counter.CountUploadFailures()
+		if err == nil {
+			uploadFailuresTotal = total
 		}
-		for _, file := range files {
-			if strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
-				uploadFailuresTotal++
+	} else {
+		const allFilesLimit = int(^uint(0) >> 1)
+		for _, task := range items {
+			files, err := s.tasks.ListFiles(task.ID, allFilesLimit)
+			if err != nil {
+				continue
+			}
+			for _, file := range files {
+				if strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
+					uploadFailuresTotal++
+				}
 			}
 		}
 	}

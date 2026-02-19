@@ -246,6 +246,12 @@ ORDER BY sealed_at DESC
 LIMIT ?;
 `
 
+const countUploadFailuresSQL = `
+SELECT COUNT(*)
+FROM binlog_files
+WHERE upload_state = 'UPLOAD_FAILED';
+`
+
 const loadTaskRunStateSQL = `
 SELECT run_id
 FROM backup_tasks
@@ -729,6 +735,15 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *MySQLTaskStore) CountUploadFailures(ctx context.Context) (int64, error) {
+	var count int64
+	row := s.db.QueryRowContext(ctx, countUploadFailuresSQL)
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *MySQLTaskStore) ListTaskRuns(ctx context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {

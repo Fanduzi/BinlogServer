@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +63,10 @@ type EventStore interface {
 type FileStore interface {
 	UpsertBinlogFile(ctx context.Context, meta BinlogFile) error
 	ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]BinlogFile, error)
+}
+
+type uploadFailureCounter interface {
+	CountUploadFailures(ctx context.Context) (int64, error)
 }
 
 type Option func(*Scheduler)
@@ -914,8 +919,31 @@ func (s *Scheduler) retryDelay(attempt int) time.Duration {
 }
 
 func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
-	if _, err := s.GetTask(taskID); err != nil {
-		return binlog.Checkpoint{}, false, err
+	s.mu.Lock()
+	_, ok := s.tasks[taskID]
+	store := s.store
+	s.mu.Unlock()
+
+	if !ok && store != nil {
+		list, err := store.ListTasks(context.Background())
+		if err != nil {
+			return binlog.Checkpoint{}, false, err
+		}
+		found := false
+		s.mu.Lock()
+		for _, item := range list {
+			s.tasks[item.ID] = item
+			if item.ID == taskID {
+				found = true
+			}
+		}
+		s.mu.Unlock()
+		if !found {
+			return binlog.Checkpoint{}, false, ErrTaskNotFound
+		}
+	}
+	if !ok && store == nil {
+		return binlog.Checkpoint{}, false, ErrTaskNotFound
 	}
 	if s.checkpointReader == nil {
 		return binlog.Checkpoint{}, false, nil
@@ -956,6 +984,38 @@ func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 		return []BinlogFile{}, nil
 	}
 	return s.fileStore.ListBinlogFiles(context.Background(), taskID, limit)
+}
+
+func (s *Scheduler) CountUploadFailures() (int64, error) {
+	s.mu.Lock()
+	fileStore := s.fileStore
+	taskIDs := make([]string, 0, len(s.tasks))
+	for taskID := range s.tasks {
+		taskIDs = append(taskIDs, taskID)
+	}
+	s.mu.Unlock()
+
+	if fileStore == nil {
+		return 0, nil
+	}
+	if counter, ok := fileStore.(uploadFailureCounter); ok {
+		return counter.CountUploadFailures(context.Background())
+	}
+
+	var total int64
+	const allFilesLimit = int(^uint(0) >> 1)
+	for _, taskID := range taskIDs {
+		files, err := fileStore.ListBinlogFiles(context.Background(), taskID, allFilesLimit)
+		if err != nil {
+			continue
+		}
+		for _, file := range files {
+			if strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
+				total++
+			}
+		}
+	}
+	return total, nil
 }
 
 func (s *Scheduler) ListRuns(taskID string, limit int) ([]TaskRun, error) {

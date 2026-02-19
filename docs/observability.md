@@ -15,7 +15,7 @@
 - `binlog_server_replication_lag_seconds{task_id="<TASK_ID>"}`
 - `binlog_server_checkpoint_age_seconds{task_id="<TASK_ID>"}`
 - `binlog_server_worker_online{worker_id="<WORKER_ID>"}`
-- `binlog_server_upload_failures_total`
+- `binlog_server_upload_failures_total`（当前元数据中 `UPLOAD_FAILED` 记录总数）
 
 ## 2. Prometheus 抓取配置示例
 
