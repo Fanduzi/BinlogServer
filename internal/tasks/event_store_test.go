@@ -39,7 +39,7 @@ func TestScheduler_UsesEventStore(t *testing.T) {
 		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
 	)
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}

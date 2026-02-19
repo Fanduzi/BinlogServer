@@ -85,7 +85,7 @@ func (r *delayedStopRunner) Run(ctx context.Context, task Task) error {
 
 func TestScheduler_StartTaskWithRunnerRequiresSource(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestScheduler_StartTaskInvokesRunner(t *testing.T) {
 	runner := &fakeRunner{started: make(chan Task, 1)}
 	s := NewScheduler(WithRunner(runner))
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestScheduler_StopTaskCancelsRunner(t *testing.T) {
 	runner := &fakeRunner{started: make(chan Task, 1)}
 	s := NewScheduler(WithRunner(runner))
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestScheduler_StopTaskCancelsRunner(t *testing.T) {
 
 func TestScheduler_ConfigureSourceRejectsInvalid(t *testing.T) {
 	s := NewScheduler()
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 		WithRetryBackoff(10*time.Millisecond, 20*time.Millisecond),
 	)
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestScheduler_StartTaskTransitionsFromStartingAfterRunnerReady(t *testing.T
 	}
 	s := NewScheduler(WithRunner(runner))
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestScheduler_StopTaskTransitionsStoppingToStopped(t *testing.T) {
 	}
 	s := NewScheduler(WithRunner(runner))
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}

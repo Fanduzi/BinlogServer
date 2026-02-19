@@ -63,7 +63,8 @@ func TestRebuildCurrentFile_TakeoverProducesSingleSealedFile(t *testing.T) {
 
 	err := runner.finalizeSealedFile(
 		context.Background(),
-		tasks.Task{ID: "task-a", Epoch: 8, OwnerWorkerID: "worker-b"},
+		tasks.Task{ID: "task-a", ClusterKey: "cluster-a", Epoch: 8, OwnerWorkerID: "worker-b"},
+		"srv-uuid-1",
 		openPath,
 		4,
 		1024,

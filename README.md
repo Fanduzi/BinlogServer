@@ -15,6 +15,7 @@ Binlog Server MVP（进行中）。
 分节目录：`docs/learning/README.md`
 架构图文档：`docs/architecture-diagrams.md`
 部署模式文档：`docs/deployment-modes.md`
+TODO 与里程碑：`docs/TODO.md`
 集群 HA 设计草案：`docs/plans/2026-02-16-cluster-ha-design.md`
 集群 HA 实施计划：`docs/plans/2026-02-16-cluster-ha-implementation-plan.md`
 
@@ -48,7 +49,7 @@ go build -o binlog-server ./cmd/binlog-server
 
 可选元数据 MySQL DSN：`BINLOG_SERVER_META_DSN=user:pass@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true`
 
-可选上传（S3/OBS 兼容）：
+可选上传（当前实现：S3 API 兼容对象存储）：
 - `BINLOG_SERVER_UPLOAD_ENDPOINT`
 - `BINLOG_SERVER_UPLOAD_BUCKET`
 - `BINLOG_SERVER_UPLOAD_ACCESS_KEY`
@@ -56,6 +57,10 @@ go build -o binlog-server ./cmd/binlog-server
 - `BINLOG_SERVER_UPLOAD_REGION`（可选）
 - `BINLOG_SERVER_UPLOAD_PREFIX`（可选）
 - `BINLOG_SERVER_UPLOAD_USE_SSL=true|false`
+
+上传路线图（已确认）：
+- AWS S3：继续使用 MinIO S3 SDK。
+- 华为云 OBS / 腾讯云 COS / 阿里云 OSS：后续切换为各自官方 SDK（而非继续统一走 S3 兼容层）。
 
 配置加载优先级：`默认值 < YAML 配置文件 < 环境变量`。  
 未传 `--config` 时，会尝试读取当前目录 `./config.yaml`，不存在则忽略。
@@ -138,6 +143,7 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 ```json
 {
   "name": "cluster-a",
+  "cluster_key": "cluster-a-prod",
   "source": {
     "host": "127.0.0.1",
     "port": 3306,
@@ -161,6 +167,7 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 ```json
 {
   "name": "cluster-a",
+  "cluster_key": "cluster-a-prod",
   "source": {
     "host": "127.0.0.1",
     "port": 3306,
@@ -181,6 +188,7 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 ```json
 {
   "name": "cluster-a",
+  "cluster_key": "cluster-a-prod",
   "source": {
     "host": "127.0.0.1",
     "port": 3306,
@@ -216,7 +224,8 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 - `GET /metrics`（Prometheus 指标）
 - `GET /healthz`
 
-说明：如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
+说明：`cluster_key` 为创建/更新任务必填字段，且全局唯一。
+如果服务启用了 MySQL runner（当前默认启用），任务 `start` 前必须配置有效 `source`。
 `storage.retention_days` 默认 7 天，runner 会在打开 binlog 文件时清理过期文件（跳过当前活动文件）。
 `source.server_id` 支持自定义，推荐为每个任务显式设置唯一值，避免与其他 replication client/slave 冲突；不设置时系统会按 task ID 自动生成默认值。
 `source.semi_sync` 默认 `false`；设置为 `true` 时会尝试半同步拉流，若主库未开启半同步会自动降级为异步继续运行。
@@ -225,8 +234,21 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 同时会持久化每个任务的最新 checkpoint（`file/pos`），重启后优先从 checkpoint 位点继续拉取。
 任务事件（创建、启动、重试、错误等）也会持久化到 MySQL，可通过 `/api/tasks/{id}/events` 查询。
 `/api/tasks/{id}/files` 会返回文件元数据与上传状态（`LOCAL_ONLY/UPLOADED/UPLOAD_FAILED`）。
-开启上传后，binlog rotate 封口后会上传到对象存储，object key 规则：`<prefix>/<taskID>/<fileName>`（prefix 可空）。
+开启上传后，只会在 binlog 文件 **seal（封口）** 后上传。  
+这里 `seal` 指：当前 OPEN 文件在 rotate 或 stop 时被重命名为最终文件名（去掉 `.open.e<epoch>`），不再继续写入。
+上传触发时机是“文件已封口且不再追加”，避免对象存储上出现同名对象多版本覆盖和低频层早删成本风险。
+object key 规则（当前实现）：`<prefix>/<cluster_key>/<source_server_uuid>/<fileName>`（prefix 可空）。
 当前上传策略是“最佳努力模式”：上传失败会记录为 `UPLOAD_FAILED`，但不会中断 binlog 拉取。
+默认不做远端对象回读校验（不额外 download 对象做 checksum 比对），由本地 seal/rotate 语义保证“单文件完整后再上传”。
+
+当前实现基于 S3 API 兼容协议，常见可用后端包括：
+- 华为云 OBS（S3 兼容）
+- 腾讯云 COS（S3 兼容）
+- 阿里云 OSS（需使用其 S3 兼容接入方式）
+
+后续目标（已在 TODO 记录）：
+- AWS S3 继续使用 MinIO SDK；
+- 华为云 OBS / 腾讯云 COS / 阿里云 OSS 分别接入官方 SDK 实现。
 
 ## Cluster 部署与运行（速查）
 

@@ -852,6 +852,9 @@
         "api.createTaskRequest": {
             "type": "object",
             "properties": {
+                "cluster_key": {
+                    "type": "string"
+                },
                 "name": {
                     "type": "string"
                 },
@@ -1071,6 +1074,9 @@
         "api.updateTaskRequest": {
             "type": "object",
             "properties": {
+                "cluster_key": {
+                    "type": "string"
+                },
                 "name": {
                     "type": "string"
                 },
@@ -1277,6 +1283,9 @@
         "tasks.Task": {
             "type": "object",
             "properties": {
+                "cluster_key": {
+                    "type": "string"
+                },
                 "epoch": {
                     "type": "integer"
                 },

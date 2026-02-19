@@ -118,7 +118,7 @@ create_task() {
   local resp
   resp="$(curl -fsS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"e2e-control-plane-failover-${RUN_TAG}\",\"source\":{\"host\":\"127.0.0.1\",\"port\":13306,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":${sid}},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")"
+    -d "{\"name\":\"e2e-control-plane-failover-${RUN_TAG}\",\"cluster_key\":\"e2e-control-plane-failover-${RUN_TAG}\",\"source\":{\"host\":\"127.0.0.1\",\"port\":13306,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":${sid}},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")"
 
   local id
   id="$(printf '%s' "$resp" | jq -r '.id // empty')"

@@ -108,6 +108,7 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 	createResp := httptest.NewRecorder()
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
+		"cluster_key":"cluster-a-key",
 		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
@@ -178,6 +179,7 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 
 	reqBody := `{
 		"name":"cluster-a",
+		"cluster_key":"cluster-a-key",
 		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001},
 		"start":{"mode":"FILE_POS","file":"mysql-bin.000001","pos":4},
 		"storage":{"dir":"./data","retention_days":15}
@@ -213,6 +215,77 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	}
 	if stored.Source.Password != "secret" {
 		t.Fatalf("expected password stored internally, got %q", stored.Source.Password)
+	}
+}
+
+func TestTaskAPI_CreateTaskRequiresClusterKey(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+
+	if createResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when cluster_key missing, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+}
+
+func TestTaskAPI_UpdateTaskRequiresClusterKey(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"cluster_key":"cluster-a-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected create 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	updateResp := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(`{"name":"cluster-b"}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateResp, updateReq)
+	if updateResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when cluster_key missing in update, got %d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+}
+
+func TestTaskAPI_ClusterKeyMustBeUnique(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	first := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"cluster_key":"dup-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
+	firstReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(first, firstReq)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("expected first create 201, got %d body=%s", first.Code, first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-b",
+		"cluster_key":"dup-key",
+		"source":{"host":"127.0.0.1","port":3307,"user":"repl","flavor":"mysql","server_id":200002}
+	}`))
+	secondReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(second, secondReq)
+	if second.Code != http.StatusBadRequest {
+		t.Fatalf("expected duplicate cluster_key rejected with 400, got %d body=%s", second.Code, second.Body.String())
 	}
 }
 
@@ -271,7 +344,7 @@ func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -310,7 +383,7 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -319,6 +392,7 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 
 	updateBody := `{
 		"name":"cluster-b",
+		"cluster_key":"cluster-a-key",
 		"source":{"host":"10.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":300001},
 		"start":{"mode":"GTID","gtid_set":"24BC785E-9A61-11E1-8A5D-080027635EF5:1-10"},
 		"storage":{"retention_days":30}
@@ -349,6 +423,7 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 	}
 
 	updateNoPassword := `{
+		"cluster_key":"cluster-a-key",
 		"source":{"host":"10.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":300001}
 	}`
 	updateNoPwdResp := httptest.NewRecorder()
@@ -402,7 +477,7 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 	)
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -458,7 +533,7 @@ func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
 	)
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -515,7 +590,7 @@ func TestTaskAPI_ListEvents(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -551,7 +626,7 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -581,6 +656,7 @@ func TestTaskAPI_ListEventsWithLimit(t *testing.T) {
 	createResp := httptest.NewRecorder()
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
+		"cluster_key":"cluster-a-key",
 		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
@@ -643,11 +719,11 @@ func TestAPI_Summary(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
 
-	taskA, err := scheduler.CreateTask("a")
+	taskA, err := scheduler.CreateTask("a", "a-key")
 	if err != nil {
 		t.Fatalf("CreateTask A returned error: %v", err)
 	}
-	taskB, err := scheduler.CreateTask("b")
+	taskB, err := scheduler.CreateTask("b", "b-key")
 	if err != nil {
 		t.Fatalf("CreateTask B returned error: %v", err)
 	}
@@ -712,11 +788,11 @@ func TestTaskAPI_ListTasksBySourceFilter(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
 
-	a, err := scheduler.CreateTask("a")
+	a, err := scheduler.CreateTask("a", "a-key")
 	if err != nil {
 		t.Fatalf("CreateTask A returned error: %v", err)
 	}
-	b, err := scheduler.CreateTask("b")
+	b, err := scheduler.CreateTask("b", "b-key")
 	if err != nil {
 		t.Fatalf("CreateTask B returned error: %v", err)
 	}
@@ -750,11 +826,11 @@ func TestAPI_SourceLookup(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
 
-	a, err := scheduler.CreateTask("a")
+	a, err := scheduler.CreateTask("a", "a-key")
 	if err != nil {
 		t.Fatalf("CreateTask A returned error: %v", err)
 	}
-	b, err := scheduler.CreateTask("b")
+	b, err := scheduler.CreateTask("b", "b-key")
 	if err != nil {
 		t.Fatalf("CreateTask B returned error: %v", err)
 	}
@@ -806,7 +882,7 @@ func TestTaskAPI_GetReplication(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -838,7 +914,7 @@ func TestTaskAPI_GetReplication_AbnormalReasonNoProgress(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -891,11 +967,11 @@ func TestAPI_Dashboard(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
 
-	taskA, err := scheduler.CreateTask("a")
+	taskA, err := scheduler.CreateTask("a", "a-key")
 	if err != nil {
 		t.Fatalf("CreateTask A returned error: %v", err)
 	}
-	taskB, err := scheduler.CreateTask("b")
+	taskB, err := scheduler.CreateTask("b", "b-key")
 	if err != nil {
 		t.Fatalf("CreateTask B returned error: %v", err)
 	}
@@ -944,7 +1020,7 @@ func TestAPI_ClusterWorkers(t *testing.T) {
 	)
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -994,7 +1070,7 @@ func TestAPI_ClusterTaskLease(t *testing.T) {
 	)
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -1037,7 +1113,7 @@ func TestAPI_ClusterTaskRuns(t *testing.T) {
 	)
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -1100,7 +1176,7 @@ func TestAPI_ClusterOverview(t *testing.T) {
 	)
 	handler := NewServer(scheduler)
 
-	task, err := scheduler.CreateTask("cluster-a")
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}

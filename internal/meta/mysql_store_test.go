@@ -23,6 +23,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 	task := tasks.Task{
 		ID:            "1",
 		Name:          "cluster-a",
+		ClusterKey:    "cluster-a-key",
 		State:         tasks.StateRunning,
 		OwnerWorkerID: "worker-a",
 		Epoch:         7,
@@ -43,7 +44,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("1", "cluster-a", "cluster-a-key", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(insertTaskRunSQL)).
 		WithArgs("run-1", "1", "worker-a", int64(7), sqlmock.AnyArg()).
@@ -70,6 +71,7 @@ func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 	task := tasks.Task{
 		ID:            "1",
 		Name:          "cluster-a",
+		ClusterKey:    "cluster-a-key",
 		State:         tasks.StateStopped,
 		OwnerWorkerID: "",
 		Epoch:         0,
@@ -91,7 +93,7 @@ func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}).AddRow("run-1"))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(finishTaskRunSQL)).
 		WithArgs(sqlmock.AnyArg(), "NORMAL_STOP", "run-1").
@@ -117,10 +119,11 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	now := time.Now()
 
 	rows := sqlmock.NewRows([]string{
-		"id", "name", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
+		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
 	}).AddRow(
 		"7",
 		"cluster-restored",
+		"cluster-restored-key",
 		"STOPPED",
 		"",
 		"worker-a",
@@ -146,6 +149,9 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	}
 	if list[0].OwnerWorkerID != "worker-a" || list[0].Epoch != 9 || list[0].RunID != "run-9" {
 		t.Fatalf("unexpected cluster run fields: owner=%q epoch=%d run_id=%q", list[0].OwnerWorkerID, list[0].Epoch, list[0].RunID)
+	}
+	if list[0].ClusterKey != "cluster-restored-key" {
+		t.Fatalf("unexpected cluster key: %q", list[0].ClusterKey)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -359,6 +365,9 @@ func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("cluster_key").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
 		WithArgs("owner_worker_id").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
@@ -366,6 +375,9 @@ func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
 		WithArgs("run_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksIndexSQL)).
+		WithArgs("uk_backup_tasks_cluster_key").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -412,6 +424,9 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("cluster_key").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
 		WithArgs("owner_worker_id").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
@@ -419,6 +434,9 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
 		WithArgs("run_id").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksIndexSQL)).
+		WithArgs("uk_backup_tasks_cluster_key").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -478,6 +496,11 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
+		WithArgs("cluster_key").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksClusterKeyColumnSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
 		WithArgs("owner_worker_id").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksOwnerWorkerIDColumnSQL)).
@@ -491,6 +514,11 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
 		WithArgs("run_id").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksRunIDColumnSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksIndexSQL)).
+		WithArgs("uk_backup_tasks_cluster_key").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksClusterKeyUniqueSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))

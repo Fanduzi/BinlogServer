@@ -20,7 +20,8 @@ import (
 )
 
 type taskService interface {
-	CreateTask(name string) (tasks.Task, error)
+	CreateTask(name string, clusterKey string) (tasks.Task, error)
+	ConfigureClusterKey(id string, clusterKey string) error
 	ConfigureName(id string, name string) error
 	ConfigureSource(id string, source tasks.SourceConfig) error
 	ConfigureStart(id string, start tasks.StartConfig) error

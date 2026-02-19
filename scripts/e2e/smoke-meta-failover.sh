@@ -14,6 +14,19 @@ need_cmd curl
 need_cmd docker
 need_cmd jq
 
+CHECKPOINT_HTTP_CODE=""
+CHECKPOINT_HTTP_BODY=""
+
+api_get() {
+  local path="$1"
+  curl -fsS "$API$path"
+}
+
+api_post() {
+  local path="$1"
+  curl -fsS -X POST "$API$path"
+}
+
 json_get_str() {
   local json="$1"
   local lower_key="$2"
@@ -99,9 +112,12 @@ create_task() {
   local sid
   sid=$((340000 + RANDOM % 20000))
   local resp
-  resp=$(curl -sS -X POST "$API/api/tasks" \
+  if ! resp="$(curl -fsS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$task_name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":13307,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$task_name\",\"cluster_key\":\"$task_name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":13307,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")"; then
+    echo "create task request failed" >&2
+    exit 1
+  fi
 
   local id
   id="$(json_get_str "$resp" "id" "ID")"
@@ -109,14 +125,17 @@ create_task() {
     echo "create task failed: $resp" >&2
     exit 1
   fi
-  curl -sS -X POST "$API/api/tasks/$id/start" >/dev/null
+  api_post "/api/tasks/$id/start" >/dev/null
   printf '%s' "$id"
 }
 
 task_state() {
   local task_id="$1"
   local resp
-  resp="$(curl -sS "$API/api/tasks/$task_id")"
+  if ! resp="$(api_get "/api/tasks/$task_id")"; then
+    echo "query task state failed: task_id=$task_id" >&2
+    return 1
+  fi
   json_get_str "$resp" "state" "State"
 }
 
@@ -124,13 +143,15 @@ wait_task_running() {
   local task_id="$1"
   for _ in {1..120}; do
     local st
-    st="$(task_state "$task_id")"
+    if ! st="$(task_state "$task_id")"; then
+      return 1
+    fi
     if [[ "$st" == "RUNNING" ]]; then
       return 0
     fi
     if [[ "$st" == "FAILED" || "$st" == "STOPPED" ]]; then
       echo "task $task_id entered terminal state: $st" >&2
-      curl -sS "$API/api/tasks/$task_id" >&2 || true
+      api_get "/api/tasks/$task_id" >&2 || true
       return 1
     fi
     sleep 1
@@ -141,29 +162,64 @@ wait_task_running() {
 
 checkpoint_json() {
   local task_id="$1"
-  curl -sS "$API/api/tasks/$task_id/checkpoint"
+  if ! checkpoint_fetch "$task_id"; then
+    return 1
+  fi
+  if [[ "$CHECKPOINT_HTTP_CODE" != "200" ]]; then
+    echo "query checkpoint failed: task_id=$task_id http=$CHECKPOINT_HTTP_CODE body=$CHECKPOINT_HTTP_BODY" >&2
+    return 1
+  fi
+  printf '%s' "$CHECKPOINT_HTTP_BODY"
+}
+
+checkpoint_fetch() {
+  local task_id="$1"
+  local raw
+  if ! raw="$(curl -sS -w $'\n%{http_code}' "$API/api/tasks/$task_id/checkpoint")"; then
+    echo "query checkpoint request failed: task_id=$task_id" >&2
+    return 1
+  fi
+  CHECKPOINT_HTTP_CODE="${raw##*$'\n'}"
+  CHECKPOINT_HTTP_BODY="${raw%$'\n'*}"
 }
 
 checkpoint_file() {
   local task_id="$1"
   local resp
-  resp="$(checkpoint_json "$task_id")"
+  if ! resp="$(checkpoint_json "$task_id")"; then
+    echo "query checkpoint file failed: task_id=$task_id" >&2
+    return 1
+  fi
   json_get_str "$resp" "file" "File"
 }
 
 checkpoint_pos() {
   local task_id="$1"
   local resp
-  resp="$(checkpoint_json "$task_id")"
+  if ! resp="$(checkpoint_json "$task_id")"; then
+    echo "query checkpoint pos failed: task_id=$task_id" >&2
+    return 1
+  fi
   json_get_num "$resp" "pos" "Pos"
 }
 
 wait_checkpoint_ready() {
   local task_id="$1"
   for _ in {1..120}; do
+    if ! checkpoint_fetch "$task_id"; then
+      return 1
+    fi
+    if [[ "$CHECKPOINT_HTTP_CODE" == "404" ]]; then
+      sleep 1
+      continue
+    fi
+    if [[ "$CHECKPOINT_HTTP_CODE" != "200" ]]; then
+      echo "checkpoint query failed while waiting ready: task_id=$task_id http=$CHECKPOINT_HTTP_CODE body=$CHECKPOINT_HTTP_BODY" >&2
+      return 1
+    fi
     local file pos
-    file="$(checkpoint_file "$task_id")"
-    pos="$(checkpoint_pos "$task_id")"
+    file="$(json_get_str "$CHECKPOINT_HTTP_BODY" "file" "File")"
+    pos="$(json_get_num "$CHECKPOINT_HTTP_BODY" "pos" "Pos")"
     if [[ -n "$file" && "$file" != "null" && -n "$pos" && "$pos" != "null" ]]; then
       return 0
     fi
@@ -185,9 +241,20 @@ wait_checkpoint_progress() {
   local before_pos="$3"
 
   for _ in {1..180}; do
+    if ! checkpoint_fetch "$task_id"; then
+      return 1
+    fi
+    if [[ "$CHECKPOINT_HTTP_CODE" == "404" ]]; then
+      sleep 1
+      continue
+    fi
+    if [[ "$CHECKPOINT_HTTP_CODE" != "200" ]]; then
+      echo "checkpoint query failed while waiting progress: task_id=$task_id http=$CHECKPOINT_HTTP_CODE body=$CHECKPOINT_HTTP_BODY" >&2
+      return 1
+    fi
     local file pos
-    file="$(checkpoint_file "$task_id")"
-    pos="$(checkpoint_pos "$task_id")"
+    file="$(json_get_str "$CHECKPOINT_HTTP_BODY" "file" "File")"
+    pos="$(json_get_num "$CHECKPOINT_HTTP_BODY" "pos" "Pos")"
     if [[ -n "$file" && -n "$pos" && "$file" != "null" && "$pos" != "null" ]]; then
       if [[ "$file" != "$before_file" ]] || [[ "$pos" =~ ^[0-9]+$ && "$before_pos" =~ ^[0-9]+$ && "$pos" -gt "$before_pos" ]]; then
         return 0
@@ -196,7 +263,9 @@ wait_checkpoint_progress() {
     sleep 1
   done
   echo "checkpoint did not progress after failover, before=${before_file}:${before_pos}" >&2
-  echo "after=$(checkpoint_json "$task_id")" >&2
+  local after_json
+  after_json="$(checkpoint_json "$task_id" || true)"
+  echo "after=${after_json:-<unavailable>}" >&2
   return 1
 }
 

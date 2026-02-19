@@ -18,6 +18,7 @@ const createTaskTableSQL = `
 CREATE TABLE IF NOT EXISTS backup_tasks (
   id VARCHAR(64) PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
+  cluster_key VARCHAR(255) NOT NULL,
   state VARCHAR(32) NOT NULL,
   last_error TEXT NULL,
   owner_worker_id VARCHAR(128) NULL,
@@ -26,7 +27,8 @@ CREATE TABLE IF NOT EXISTS backup_tasks (
   source_json JSON NOT NULL,
   start_json JSON NOT NULL,
   storage_json JSON NOT NULL,
-  updated_at DATETIME(6) NOT NULL
+  updated_at DATETIME(6) NOT NULL,
+  UNIQUE KEY uk_backup_tasks_cluster_key (cluster_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
@@ -43,6 +45,11 @@ ALTER TABLE backup_tasks
 ADD COLUMN owner_worker_id VARCHAR(128) NULL AFTER last_error;
 `
 
+const addBackupTasksClusterKeyColumnSQL = `
+ALTER TABLE backup_tasks
+ADD COLUMN cluster_key VARCHAR(255) NOT NULL DEFAULT '' AFTER name;
+`
+
 const addBackupTasksEpochColumnSQL = `
 ALTER TABLE backup_tasks
 ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0 AFTER owner_worker_id;
@@ -51,6 +58,19 @@ ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0 AFTER owner_worker_id;
 const addBackupTasksRunIDColumnSQL = `
 ALTER TABLE backup_tasks
 ADD COLUMN run_id VARCHAR(128) NULL AFTER epoch;
+`
+
+const hasBackupTasksIndexSQL = `
+SELECT COUNT(*)
+FROM information_schema.statistics
+WHERE table_schema = DATABASE()
+  AND table_name = 'backup_tasks'
+  AND index_name = ?;
+`
+
+const addBackupTasksClusterKeyUniqueSQL = `
+ALTER TABLE backup_tasks
+ADD UNIQUE KEY uk_backup_tasks_cluster_key (cluster_key);
 `
 
 const createCheckpointTableSQL = `
@@ -163,10 +183,11 @@ ADD COLUMN checksum VARCHAR(128) NULL AFTER state;
 `
 
 const upsertTaskSQL = `
-INSERT INTO backup_tasks (id, name, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
+  cluster_key = VALUES(cluster_key),
   state = VALUES(state),
   last_error = VALUES(last_error),
   owner_worker_id = VALUES(owner_worker_id),
@@ -179,7 +200,7 @@ ON DUPLICATE KEY UPDATE
 `
 
 const listTaskSQL = `
-SELECT id, name, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
+SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
 FROM backup_tasks
 ORDER BY id;
 `
@@ -364,6 +385,9 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 }
 
 func (s *MySQLTaskStore) ensureBackupTasksMigration(ctx context.Context) error {
+	if err := s.ensureBackupTasksColumn(ctx, "cluster_key", addBackupTasksClusterKeyColumnSQL); err != nil {
+		return err
+	}
 	if err := s.ensureBackupTasksColumn(ctx, "owner_worker_id", addBackupTasksOwnerWorkerIDColumnSQL); err != nil {
 		return err
 	}
@@ -373,12 +397,28 @@ func (s *MySQLTaskStore) ensureBackupTasksMigration(ctx context.Context) error {
 	if err := s.ensureBackupTasksColumn(ctx, "run_id", addBackupTasksRunIDColumnSQL); err != nil {
 		return err
 	}
+	if err := s.ensureBackupTasksIndex(ctx, "uk_backup_tasks_cluster_key", addBackupTasksClusterKeyUniqueSQL); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (s *MySQLTaskStore) ensureBackupTasksColumn(ctx context.Context, columnName, alterSQL string) error {
 	var count int
 	row := s.db.QueryRowContext(ctx, hasBackupTasksColumnSQL, columnName)
+	if err := row.Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, alterSQL)
+	return err
+}
+
+func (s *MySQLTaskStore) ensureBackupTasksIndex(ctx context.Context, indexName, alterSQL string) error {
+	var count int
+	row := s.db.QueryRowContext(ctx, hasBackupTasksIndexSQL, indexName)
 	if err := row.Scan(&count); err != nil {
 		return err
 	}
@@ -456,6 +496,7 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		upsertTaskSQL,
 		task.ID,
 		task.Name,
+		task.ClusterKey,
 		string(task.State),
 		task.LastError,
 		task.OwnerWorkerID,
@@ -528,6 +569,7 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 		if err := rows.Scan(
 			&task.ID,
 			&task.Name,
+			&task.ClusterKey,
 			&state,
 			&lastError,
 			&ownerWorker,

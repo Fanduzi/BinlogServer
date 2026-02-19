@@ -48,7 +48,7 @@ func TestScheduler_PersistsCreatedTask(t *testing.T) {
 	store := newFakeStore()
 	s := NewScheduler(WithStore(store))
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestScheduler_RestoreLoadsTasks(t *testing.T) {
 		t.Fatalf("unexpected restored task name: %s", got.Name)
 	}
 
-	newTask, err := s.CreateTask("next")
+	newTask, err := s.CreateTask("next", "next-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestScheduler_CreateTaskReturnsErrorWhenStoreFails(t *testing.T) {
 	store.upsertErr = errors.New("store unavailable")
 	s := NewScheduler(WithStore(store))
 
-	_, err := s.CreateTask("cluster-a")
+	_, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err == nil {
 		t.Fatal("expected error when store upsert fails")
 	}

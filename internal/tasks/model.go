@@ -19,6 +19,7 @@ const (
 type Task struct {
 	ID            string       `json:"id"`
 	Name          string       `json:"name"`
+	ClusterKey    string       `json:"cluster_key"`
 	State         State        `json:"state"`
 	LastError     string       `json:"last_error,omitempty"`
 	OwnerWorkerID string       `json:"owner_worker_id,omitempty"`

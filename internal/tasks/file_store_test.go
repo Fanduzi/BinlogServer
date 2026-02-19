@@ -54,7 +54,7 @@ func TestScheduler_ListFilesFromStore(t *testing.T) {
 		},
 	}
 	s := NewScheduler(WithFileStore(store))
-	if _, err := s.CreateTask("cluster-a"); err != nil {
+	if _, err := s.CreateTask("cluster-a", "cluster-a-key"); err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
 

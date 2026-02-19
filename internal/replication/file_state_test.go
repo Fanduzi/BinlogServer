@@ -72,6 +72,7 @@ func TestFileState_SealRequiresLeaseAndEpochMatch(t *testing.T) {
 	err := runner.finalizeSealedFile(
 		context.Background(),
 		tasks.Task{ID: "1", Epoch: 7, OwnerWorkerID: "worker-a"},
+		"srv-uuid-1",
 		openPath,
 		4,
 		1024,
@@ -117,7 +118,8 @@ func TestFileState_NeverPublishOpenFile(t *testing.T) {
 
 	err := runner.finalizeSealedFile(
 		context.Background(),
-		tasks.Task{ID: "1", Epoch: 12, OwnerWorkerID: "worker-a"},
+		tasks.Task{ID: "1", ClusterKey: "cluster-a", Epoch: 12, OwnerWorkerID: "worker-a"},
+		"srv-uuid-1",
 		openPath,
 		4,
 		1024,

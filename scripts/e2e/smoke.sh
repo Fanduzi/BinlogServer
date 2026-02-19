@@ -22,7 +22,7 @@ create_task() {
   local resp
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$port,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$port,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
 
   local id
   id=$(printf '%s' "$resp" | jq -r '.id // empty')

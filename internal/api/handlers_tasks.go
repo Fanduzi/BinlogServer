@@ -270,17 +270,19 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskRequest struct {
-	Name    string              `json:"name"`
-	Source  *tasks.SourceConfig `json:"source,omitempty"`
-	Start   *tasks.StartConfig  `json:"start,omitempty"`
-	Storage *tasks.Storage      `json:"storage,omitempty"`
+	Name       string              `json:"name"`
+	ClusterKey string              `json:"cluster_key"`
+	Source     *tasks.SourceConfig `json:"source,omitempty"`
+	Start      *tasks.StartConfig  `json:"start,omitempty"`
+	Storage    *tasks.Storage      `json:"storage,omitempty"`
 }
 
 type updateTaskRequest struct {
-	Name    *string             `json:"name,omitempty"`
-	Source  *tasks.SourceConfig `json:"source,omitempty"`
-	Start   *tasks.StartConfig  `json:"start,omitempty"`
-	Storage *tasks.Storage      `json:"storage,omitempty"`
+	Name       *string             `json:"name,omitempty"`
+	ClusterKey string              `json:"cluster_key"`
+	Source     *tasks.SourceConfig `json:"source,omitempty"`
+	Start      *tasks.StartConfig  `json:"start,omitempty"`
+	Storage    *tasks.Storage      `json:"storage,omitempty"`
 }
 
 // handleTasks godoc
@@ -306,7 +308,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		task, err := s.tasks.CreateTask(req.Name)
+		task, err := s.tasks.CreateTask(req.Name, req.ClusterKey)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -580,6 +582,18 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 		var req updateTaskRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.ClusterKey) == "" {
+			http.Error(w, "cluster_key is required", http.StatusBadRequest)
+			return
+		}
+		if err := s.tasks.ConfigureClusterKey(taskID, req.ClusterKey); err != nil {
+			if errors.Is(err, tasks.ErrTaskNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if req.Name != nil {

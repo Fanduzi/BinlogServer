@@ -82,7 +82,7 @@ create_task() {
   # 创建一个 LATEST 起点任务，使 binlog_server 与 source 建立 dump 连接。
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$task_name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":13307,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":330901},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$task_name\",\"cluster_key\":\"$task_name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":13307,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":330901},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
   local id
   id=$(json_get_str "$resp" "id" "ID")
   if [[ -z "$id" || "$id" == "null" ]]; then

@@ -24,13 +24,18 @@ var ErrLeaseEpochMismatch = errors.New("lease/epoch mismatch")
 
 type MySQLRunner struct {
 	dataDir          string
-	fetcher          MasterStatusFetcher
+	fetcher          sourceMetaFetcher
 	checkpointStore  CheckpointStore
 	fileMetaStore    FileMetaStore
 	uploader         FileUploader
 	uploadPrefix     string
 	leaseVerifier    LeaseVerifier
 	progressReporter ProgressReporter
+}
+
+type sourceMetaFetcher interface {
+	MasterStatusFetcher
+	FetchServerUUID(ctx context.Context, source tasks.SourceConfig) (string, error)
 }
 
 type eventHandlerFunc func(*replication.BinlogEvent) error
@@ -124,6 +129,15 @@ func (r *MySQLRunner) RunWithNotify(ctx context.Context, task tasks.Task, onRead
 }
 
 func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) error {
+	sourceServerUUID, err := r.fetcher.FetchServerUUID(ctx, task.Source)
+	if err != nil {
+		return err
+	}
+	sourceServerUUID = strings.TrimSpace(sourceServerUUID)
+	if sourceServerUUID == "" {
+		return errors.New("empty source server_uuid")
+	}
+
 	// 先解析请求的 start strategy（LATEST/FILE_POS/GTID）。
 	start, err := ResolveStart(ctx, task, r.fetcher)
 	if err != nil {
@@ -215,6 +229,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				if err := r.finalizeSealedFile(
 					ctx,
 					task,
+					sourceServerUUID,
 					currentPath,
 					currentStartPos,
 					rotateCheckpoint.Pos,
@@ -329,6 +344,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 func (r *MySQLRunner) finalizeSealedFile(
 	ctx context.Context,
 	task tasks.Task,
+	sourceServerUUID string,
 	localPath string,
 	startPos uint32,
 	endPos uint32,
@@ -388,7 +404,14 @@ func (r *MySQLRunner) finalizeSealedFile(
 	if r.uploader == nil {
 		return nil
 	}
-	objectKey := buildObjectKey(r.uploadPrefix, task.ID, sourceFile)
+	if strings.TrimSpace(task.ClusterKey) == "" {
+		return errors.New("cluster_key is required")
+	}
+	sourceServerUUID = strings.TrimSpace(sourceServerUUID)
+	if sourceServerUUID == "" {
+		return errors.New("source server_uuid is required")
+	}
+	objectKey := buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, sourceFile)
 	if err := r.uploader.UploadFile(ctx, task.ID, sealedPath, objectKey); err != nil {
 		if fileMeta != nil {
 			fileMeta.UploadState = "UPLOAD_FAILED"
@@ -521,6 +544,33 @@ func (f *mysqlStatusFetcher) FetchMasterStatus(_ context.Context, source tasks.S
 	}, nil
 }
 
+func (f *mysqlStatusFetcher) FetchServerUUID(_ context.Context, source tasks.SourceConfig) (string, error) {
+	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
+	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	result, err := conn.Execute("SHOW VARIABLES LIKE 'server_uuid'")
+	if err != nil {
+		return "", err
+	}
+	if result == nil || result.Resultset == nil || result.Resultset.RowNumber() == 0 {
+		return "", errors.New("empty server_uuid")
+	}
+
+	value, err := result.GetString(0, 1)
+	if err != nil {
+		return "", err
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("empty server_uuid")
+	}
+	return value, nil
+}
+
 func effectiveStartFromCheckpoint(start tasks.StartConfig, checkpoint binlog.Checkpoint, exists bool) tasks.StartConfig {
 	if !exists {
 		return start
@@ -616,8 +666,8 @@ func cleanupStaleOpenFiles(dir string, currentEpoch int64) error {
 	return nil
 }
 
-func buildObjectKey(prefix, taskID, fileName string) string {
-	base := filepath.ToSlash(filepath.Join(taskID, fileName))
+func buildObjectKey(prefix, clusterKey, sourceServerUUID, fileName string) string {
+	base := filepath.ToSlash(filepath.Join(clusterKey, sourceServerUUID, fileName))
 	if prefix == "" {
 		return base
 	}

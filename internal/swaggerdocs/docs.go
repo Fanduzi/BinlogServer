@@ -859,6 +859,9 @@ const docTemplate = `{
         "api.createTaskRequest": {
             "type": "object",
             "properties": {
+                "cluster_key": {
+                    "type": "string"
+                },
                 "name": {
                     "type": "string"
                 },
@@ -1078,6 +1081,9 @@ const docTemplate = `{
         "api.updateTaskRequest": {
             "type": "object",
             "properties": {
+                "cluster_key": {
+                    "type": "string"
+                },
                 "name": {
                     "type": "string"
                 },
@@ -1284,6 +1290,9 @@ const docTemplate = `{
         "tasks.Task": {
             "type": "object",
             "properties": {
+                "cluster_key": {
+                    "type": "string"
+                },
                 "epoch": {
                     "type": "integer"
                 },

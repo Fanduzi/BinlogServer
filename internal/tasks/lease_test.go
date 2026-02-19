@@ -57,7 +57,7 @@ func TestScheduler_ClusterStartRequiresLease(t *testing.T) {
 		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond),
 	)
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestScheduler_LeaseLostTransitionsToStoppingStopped(t *testing.T) {
 		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 30*time.Millisecond),
 	)
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestScheduler_LeaseRenewFailureEntersDegradedThenStop(t *testing.T) {
 		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 40*time.Millisecond),
 	)
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestScheduler_DeleteTaskReleasesLease(t *testing.T) {
 		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond),
 	)
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}

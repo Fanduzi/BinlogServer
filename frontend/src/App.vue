@@ -303,6 +303,7 @@
       <el-form :model="form" label-width="92px">
         <el-row :gutter="12">
           <el-col :span="12"><el-form-item label="任务名"><el-input v-model="form.name" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="Cluster Key"><el-input v-model="form.cluster_key" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="主机"><el-input v-model="form.source.host" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="端口"><el-input-number v-model="form.source.port" :min="1" :max="65535" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="用户"><el-input v-model="form.source.user" /></el-form-item></el-col>
@@ -415,6 +416,7 @@ e2e-mysql80,127.0.0.1,13307
             <h3><i class="fa-solid fa-circle-info" /> 基础信息</h3>
             <div class="detail-grid">
               <div class="detail-item"><span>名称</span><strong>{{ detailTask.name }}</strong></div>
+              <div class="detail-item"><span>Cluster Key</span><strong>{{ detailTask.cluster_key || "--" }}</strong></div>
               <div class="detail-item"><span>状态</span><strong>{{ detailTask.state }}</strong></div>
               <div class="detail-item"><span>源库</span><strong>{{ sourceLabel(detailTask) }}</strong></div>
               <div class="detail-item"><span>起点</span><strong>{{ detailTask.start?.mode }}</strong></div>
@@ -835,6 +837,7 @@ function defaultForm() {
   return {
     id: "",
     name: "",
+    cluster_key: "",
     source: {
       host: "127.0.0.1",
       port: 3306,
@@ -907,6 +910,7 @@ function openEdit(task) {
 function buildPayload() {
   const payload = {
     name: form.name.trim(),
+    cluster_key: form.cluster_key?.trim(),
     source: {
       ...form.source,
       semi_sync: !!form.source.semi_sync,
@@ -962,7 +966,13 @@ function parseBatchLine(raw, lineNo) {
   if (!name) {
     name = `task-${host}-${port}`;
   }
-  return { lineNo, name, host, port: Number(port) };
+  return {
+    lineNo,
+    name,
+    host,
+    port: Number(port),
+    clusterKey: makeClusterKey(name, host, Number(port), lineNo),
+  };
 }
 
 function parseBatchLines(rawText) {
@@ -970,6 +980,7 @@ function parseBatchLines(rawText) {
   const errors = [];
   const sourceSeen = new Set();
   const nameSeen = new Set();
+  const clusterKeySeen = new Set();
 
   const lines = rawText.split("\n");
   for (let i = 0; i < lines.length; i += 1) {
@@ -987,8 +998,12 @@ function parseBatchLines(rawText) {
       if (nameSeen.has(nameKey)) {
         throw new Error(`第 ${lineNo} 行任务名重复：${row.name}`);
       }
+      if (clusterKeySeen.has(row.clusterKey)) {
+        throw new Error(`第 ${lineNo} 行 cluster_key 重复：${row.clusterKey}`);
+      }
       sourceSeen.add(sourceKey);
       nameSeen.add(nameKey);
+      clusterKeySeen.add(row.clusterKey);
       rows.push({ ...row, valid: true, error: "" });
     } catch (err) {
       const msg = err?.message || `第 ${lineNo} 行格式错误`;
@@ -1069,6 +1084,7 @@ async function submitBatchCreate() {
 
       const payload = {
         name: row.name,
+        cluster_key: row.clusterKey,
         source,
         start: { mode: "LATEST" },
         storage: { retention_days: Number(batchForm.retentionDays || 7) },
@@ -1107,6 +1123,10 @@ async function submitForm() {
     const payload = buildPayload();
     if (!payload.name) {
       ElMessage.error("任务名不能为空");
+      return;
+    }
+    if (!payload.cluster_key) {
+      ElMessage.error("cluster_key 不能为空");
       return;
     }
     if (formMode.value === "create") {
@@ -1289,6 +1309,15 @@ function parseErr(err) {
   if (typeof err?.response?.data === "string") return err.response.data;
   if (err?.response?.data) return JSON.stringify(err.response.data);
   return err?.message || String(err);
+}
+
+function makeClusterKey(name, host, port, lineNo = 0) {
+  const raw = `${name}-${host}-${port}-${lineNo}`.toLowerCase();
+  const key = raw
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return key || `cluster-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
 </script>
 

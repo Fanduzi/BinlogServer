@@ -18,6 +18,8 @@ var ErrInvalidSourceConfig = errors.New("invalid source config")
 var ErrRunnerNotConfigured = errors.New("runner is not configured")
 var ErrLeaseNotAcquired = errors.New("lease not acquired")
 var ErrClusterWorkerIDRequired = errors.New("cluster worker id is required")
+var ErrClusterKeyRequired = errors.New("cluster_key is required")
+var ErrClusterKeyExists = errors.New("cluster_key already exists")
 
 const defaultRetentionDays = 7
 
@@ -190,21 +192,33 @@ func (s *Scheduler) SetRunner(runner Runner) {
 	s.runner = runner
 }
 
-func (s *Scheduler) CreateTask(name string) (Task, error) {
+func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
+	name = strings.TrimSpace(name)
+	clusterKey = strings.TrimSpace(clusterKey)
 	if name == "" {
 		return Task{}, errors.New("name is required")
+	}
+	if clusterKey == "" {
+		return Task{}, ErrClusterKeyRequired
+	}
+	if err := s.syncTasksFromStore(); err != nil {
+		return Task{}, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.isClusterKeyUniqueLocked(clusterKey, "") {
+		return Task{}, ErrClusterKeyExists
+	}
 
 	s.seq++
 	id := strconv.Itoa(s.seq)
 	now := time.Now()
 	task := Task{
-		ID:    id,
-		Name:  name,
-		State: StateCreated,
+		ID:         id,
+		Name:       name,
+		ClusterKey: clusterKey,
+		State:      StateCreated,
 		Start: StartConfig{
 			Mode: StartModeLatest,
 		},
@@ -301,7 +315,37 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	return nil
 }
 
+func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
+	clusterKey = strings.TrimSpace(clusterKey)
+	if clusterKey == "" {
+		return ErrClusterKeyRequired
+	}
+	if err := s.syncTasksFromStore(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, ok := s.tasks[id]
+	if !ok {
+		return ErrTaskNotFound
+	}
+	if !s.isClusterKeyUniqueLocked(clusterKey, id) {
+		return ErrClusterKeyExists
+	}
+	task.ClusterKey = clusterKey
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_CLUSTER_KEY_CONFIGURED", "cluster key configured", clusterKey)
+	if err := s.persistTaskLocked(task); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Scheduler) ConfigureName(id, name string) error {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("name is required")
 	}
@@ -1088,4 +1132,40 @@ func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string)
 		// 事件落库失败不阻断主流程，保证调度与拉流优先可用。
 		_ = s.eventStore.AppendEvent(context.Background(), event)
 	}
+}
+
+func (s *Scheduler) isClusterKeyUniqueLocked(clusterKey, excludeTaskID string) bool {
+	for _, task := range s.tasks {
+		if task.ID == excludeTaskID {
+			continue
+		}
+		if task.ClusterKey == clusterKey {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Scheduler) syncTasksFromStore() error {
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+
+	list, err := store.ListTasks(context.Background())
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, task := range list {
+		s.tasks[task.ID] = task
+		if n, convErr := strconv.Atoi(task.ID); convErr == nil && n > s.seq {
+			s.seq = n
+		}
+	}
+	return nil
 }

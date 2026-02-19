@@ -39,7 +39,7 @@ create_task_file_pos() {
   # 从 FILE/POS 起点拉取，确保我们明确验证“一个完整 binlog 文件”的一致性。
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$port,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"FILE_POS\",\"file\":\"$file\",\"pos\":$pos},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$port,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"FILE_POS\",\"file\":\"$file\",\"pos\":$pos},\"storage\":{\"retention_days\":7}}")
 
   local id
   id=$(json_get_str "$resp" "id" "ID")

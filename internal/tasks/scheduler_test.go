@@ -11,7 +11,7 @@ import (
 
 func TestScheduler_StartTaskTransitionsToRunning(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -39,9 +39,26 @@ func TestScheduler_StartTaskTransitionsToRunning(t *testing.T) {
 	}
 }
 
+func TestScheduler_CreateTaskRequiresClusterKey(t *testing.T) {
+	s := NewScheduler()
+	if _, err := s.CreateTask("cluster-a", ""); err != ErrClusterKeyRequired {
+		t.Fatalf("expected ErrClusterKeyRequired, got %v", err)
+	}
+}
+
+func TestScheduler_CreateTaskRejectsDuplicateClusterKey(t *testing.T) {
+	s := NewScheduler()
+	if _, err := s.CreateTask("cluster-a", "dup-key"); err != nil {
+		t.Fatalf("first CreateTask returned error: %v", err)
+	}
+	if _, err := s.CreateTask("cluster-b", "dup-key"); err != ErrClusterKeyExists {
+		t.Fatalf("expected ErrClusterKeyExists, got %v", err)
+	}
+}
+
 func TestScheduler_RetryableErrorTransitionsToBackoff(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -70,7 +87,7 @@ func TestScheduler_RetryableErrorTransitionsToBackoff(t *testing.T) {
 
 func TestScheduler_StopTaskTransitionsToStopped(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -103,7 +120,7 @@ func TestScheduler_StopTaskTransitionsToStopped(t *testing.T) {
 
 func TestScheduler_StartTaskWithoutRunnerReturnsError(t *testing.T) {
 	s := NewScheduler()
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -129,7 +146,7 @@ func TestScheduler_StartTaskWithoutRunnerInClusterDispatchMode(t *testing.T) {
 		WithClusterLeaseManager(lease),
 		WithClusterWorkerID("control-plane-a"),
 	)
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -159,7 +176,7 @@ func TestScheduler_GetTaskRefreshesFromStore(t *testing.T) {
 	}
 	s := NewScheduler(WithStore(store))
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -198,7 +215,7 @@ func TestScheduler_GetCheckpointDoesNotRefreshTaskListForKnownTask(t *testing.T)
 	}
 	s := NewScheduler(WithStore(store), WithCheckpointReader(reader))
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -215,8 +232,16 @@ func TestScheduler_GetCheckpointDoesNotRefreshTaskListForKnownTask(t *testing.T)
 	if !ok {
 		t.Fatal("expected checkpoint exists")
 	}
-	if got := store.ListTasksCalls(); got != 0 {
-		t.Fatalf("expected store ListTasks not called for known task, got %d", got)
+	if got := store.ListTasksCalls(); got != 1 {
+		t.Fatalf("expected store ListTasks called once by CreateTask sync, got %d", got)
+	}
+
+	_, _, err = s.GetCheckpoint(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint returned error: %v", err)
+	}
+	if got := store.ListTasksCalls(); got != 1 {
+		t.Fatalf("expected GetCheckpoint not to trigger extra ListTasks for known task, got %d", got)
 	}
 }
 
@@ -242,7 +267,7 @@ func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
 		WithClusterWorkerID("worker-a"),
 	)
 
-	task, err := control.CreateTask("cluster-a")
+	task, err := control.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
@@ -294,7 +319,7 @@ func TestScheduler_StartTaskRejectsNonDispatchStartingTask(t *testing.T) {
 		WithClusterWorkerID("worker-a"),
 	)
 
-	task, err := s.CreateTask("cluster-a")
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}

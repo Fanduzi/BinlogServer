@@ -70,6 +70,8 @@ make e2e SCENARIOS=smoke,compression
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
+说明：当前所有场景创建任务时均显式传入 `cluster_key`（创建/更新必填且全局唯一）。
+
 ## 常用环境变量
 
 - `E2E_DATA_DIR`: e2e 数据目录（默认 `./tmp/e2e/data-suite-<timestamp>`）。

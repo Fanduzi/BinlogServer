@@ -47,7 +47,8 @@ func TestFinalizeSealedFile_BestEffortOnUploadFailure(t *testing.T) {
 
 	err := runner.finalizeSealedFile(
 		context.Background(),
-		tasks.Task{ID: "1"},
+		tasks.Task{ID: "1", ClusterKey: "cluster-a"},
+		"srv-uuid-1",
 		path,
 		4,
 		1024,
@@ -86,7 +87,8 @@ func TestFinalizeSealedFile_UploadSuccess(t *testing.T) {
 
 	err := runner.finalizeSealedFile(
 		context.Background(),
-		tasks.Task{ID: "1"},
+		tasks.Task{ID: "1", ClusterKey: "cluster-a"},
+		"srv-uuid-1",
 		path,
 		4,
 		1024,

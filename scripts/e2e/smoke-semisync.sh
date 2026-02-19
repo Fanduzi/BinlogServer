@@ -146,7 +146,7 @@ create_semisync_task() {
   local resp id
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$SOURCE_PORT,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid,\"semi_sync\":true},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$SOURCE_PORT,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid,\"semi_sync\":true},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
   id=$(json_get_str "$resp" "id" "ID")
   if [[ -z "$id" || "$id" == "null" ]]; then
     echo "create task failed: $resp" >&2

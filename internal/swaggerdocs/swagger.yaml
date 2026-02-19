@@ -17,6 +17,8 @@ definitions:
     type: object
   api.createTaskRequest:
     properties:
+      cluster_key:
+        type: string
       name:
         type: string
       source:
@@ -160,6 +162,8 @@ definitions:
     type: object
   api.updateTaskRequest:
     properties:
+      cluster_key:
+        type: string
       name:
         type: string
       source:
@@ -302,6 +306,8 @@ definitions:
     type: object
   tasks.Task:
     properties:
+      cluster_key:
+        type: string
       epoch:
         type: integer
       id:
