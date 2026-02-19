@@ -33,6 +33,7 @@ Scenarios:
   semisync
   meta-failover
   meta-failover-override
+  smoke-observability
   smoke-cluster-roles
   smoke-control-plane-failover
 EOF
@@ -126,6 +127,9 @@ run_scenario() {
       ;;
     meta-failover-override)
       "$ROOT_DIR/scripts/e2e/smoke-meta-failover-override.sh"
+      ;;
+    smoke-observability)
+      "$ROOT_DIR/scripts/e2e/smoke-observability.sh"
       ;;
     smoke-cluster-roles)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-cluster-roles.sh"

@@ -38,6 +38,7 @@
 ./scripts/e2e/run-suite.sh --scenarios orchestrator,semisync
 ./scripts/e2e/run-suite.sh --scenarios meta-failover
 ./scripts/e2e/run-suite.sh --scenarios meta-failover-override
+./scripts/e2e/run-suite.sh --scenarios smoke-observability
 ./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
 ./scripts/e2e/run-suite.sh --scenarios smoke-control-plane-failover
 ```
@@ -62,6 +63,7 @@ make e2e SCENARIOS=smoke,compression
 - `setup-meta-replication.sh`: 初始化 meta-primary/meta-replica GTID 主从复制与 ProxySQL 监控账号。
 - `smoke-meta-failover.sh`: 触发 orchestrator 切主，验证元数据库 failover 后 checkpoint 继续推进。
 - `smoke-meta-failover-override.sh`: 用非默认 `E2E_API/E2E_ORC_API` 地址（localhost）覆盖并执行 failover 场景。
+- `smoke-observability.sh`: 验证 `/metrics` 核心指标存在，且 `task_state_count` 与 `checkpoint_age_seconds` 随状态/时间变化。
 - `smoke-cluster-roles.sh`: 启动 control-plane + worker 双进程，验证任务执行、worker 离线检测与恢复链路。
 - `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
@@ -85,6 +87,15 @@ make e2e SCENARIOS=smoke,compression
 4. 查询 `/api/workers`，确认 worker `online=true` 且存在 `last_seen_at`；并校验 worker health probe (`/healthz`,`/readyz`) 可用且不暴露 `/api/*`。
 5. 停止 worker，等待超过在线阈值后确认 `online=false`。
 6. 重启 worker，确认 `online=true` 恢复且任务继续推进。
+
+## smoke-observability 场景说明
+
+该场景用于验证 observability 最小回归链路：
+
+1. 创建并启动任务，确认任务状态进入 `RUNNING`。
+2. 调用 `/metrics`，确认 5 个核心指标名都可见。
+3. 验证 `task_state_count` 随任务状态变化（`CREATED -> RUNNING -> STOPPED`）。
+4. 写入 source 数据并等待 checkpoint 生成，验证 `checkpoint_age_seconds` 两次抓取间递增。
 
 ## smoke-control-plane-failover 场景说明
 
