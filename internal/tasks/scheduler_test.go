@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +54,45 @@ func TestScheduler_CreateTaskRejectsDuplicateClusterKey(t *testing.T) {
 	}
 	if _, err := s.CreateTask("cluster-b", "dup-key"); err != ErrClusterKeyExists {
 		t.Fatalf("expected ErrClusterKeyExists, got %v", err)
+	}
+}
+
+func TestScheduler_CreateTaskRejectsInvalidClusterKey(t *testing.T) {
+	s := NewScheduler()
+	cases := []string{
+		"../x",
+		"a/b",
+		`a\b`,
+		"a b",
+		"a@b",
+	}
+	for _, clusterKey := range cases {
+		_, err := s.CreateTask("cluster-a", clusterKey)
+		if !errors.Is(err, ErrInvalidClusterKey) {
+			t.Fatalf("cluster_key=%q expected ErrInvalidClusterKey, got %v", clusterKey, err)
+		}
+	}
+}
+
+func TestScheduler_ConfigureClusterKeyRejectsInvalidClusterKey(t *testing.T) {
+	s := NewScheduler()
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	cases := []string{
+		"../x",
+		"a/b",
+		`a\b`,
+		"a b",
+		"a@b",
+	}
+	for _, clusterKey := range cases {
+		err := s.ConfigureClusterKey(task.ID, clusterKey)
+		if !errors.Is(err, ErrInvalidClusterKey) {
+			t.Fatalf("cluster_key=%q expected ErrInvalidClusterKey, got %v", clusterKey, err)
+		}
 	}
 }
 

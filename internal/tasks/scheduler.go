@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,9 @@ var ErrLeaseNotAcquired = errors.New("lease not acquired")
 var ErrClusterWorkerIDRequired = errors.New("cluster worker id is required")
 var ErrClusterKeyRequired = errors.New("cluster_key is required")
 var ErrClusterKeyExists = errors.New("cluster_key already exists")
+var ErrInvalidClusterKey = errors.New("invalid cluster_key")
+
+var clusterKeyAllowedPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 const defaultRetentionDays = 7
 
@@ -194,12 +198,12 @@ func (s *Scheduler) SetRunner(runner Runner) {
 
 func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 	name = strings.TrimSpace(name)
-	clusterKey = strings.TrimSpace(clusterKey)
 	if name == "" {
 		return Task{}, errors.New("name is required")
 	}
-	if clusterKey == "" {
-		return Task{}, ErrClusterKeyRequired
+	validatedClusterKey, err := normalizeAndValidateClusterKey(clusterKey)
+	if err != nil {
+		return Task{}, err
 	}
 	if err := s.syncTasksFromStore(); err != nil {
 		return Task{}, err
@@ -207,7 +211,7 @@ func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.isClusterKeyUniqueLocked(clusterKey, "") {
+	if !s.isClusterKeyUniqueLocked(validatedClusterKey, "") {
 		return Task{}, ErrClusterKeyExists
 	}
 
@@ -217,7 +221,7 @@ func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 	task := Task{
 		ID:         id,
 		Name:       name,
-		ClusterKey: clusterKey,
+		ClusterKey: validatedClusterKey,
 		State:      StateCreated,
 		Start: StartConfig{
 			Mode: StartModeLatest,
@@ -316,9 +320,9 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 }
 
 func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
-	clusterKey = strings.TrimSpace(clusterKey)
-	if clusterKey == "" {
-		return ErrClusterKeyRequired
+	validatedClusterKey, err := normalizeAndValidateClusterKey(clusterKey)
+	if err != nil {
+		return err
 	}
 	if err := s.syncTasksFromStore(); err != nil {
 		return err
@@ -331,13 +335,13 @@ func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
 	if !ok {
 		return ErrTaskNotFound
 	}
-	if !s.isClusterKeyUniqueLocked(clusterKey, id) {
+	if !s.isClusterKeyUniqueLocked(validatedClusterKey, id) {
 		return ErrClusterKeyExists
 	}
-	task.ClusterKey = clusterKey
+	task.ClusterKey = validatedClusterKey
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_CLUSTER_KEY_CONFIGURED", "cluster key configured", clusterKey)
+	s.appendEventLocked(id, "TASK_CLUSTER_KEY_CONFIGURED", "cluster key configured", validatedClusterKey)
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -1168,4 +1172,18 @@ func (s *Scheduler) syncTasksFromStore() error {
 		}
 	}
 	return nil
+}
+
+func normalizeAndValidateClusterKey(clusterKey string) (string, error) {
+	key := strings.TrimSpace(clusterKey)
+	if key == "" {
+		return "", ErrClusterKeyRequired
+	}
+	if strings.Contains(key, "/") || strings.Contains(key, `\`) || strings.Contains(key, "..") {
+		return "", ErrInvalidClusterKey
+	}
+	if !clusterKeyAllowedPattern.MatchString(key) {
+		return "", ErrInvalidClusterKey
+	}
+	return key, nil
 }

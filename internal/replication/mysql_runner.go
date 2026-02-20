@@ -667,11 +667,16 @@ func cleanupStaleOpenFiles(dir string, currentEpoch int64) error {
 }
 
 func buildObjectKey(prefix, clusterKey, sourceServerUUID, fileName string) string {
-	base := filepath.ToSlash(filepath.Join(clusterKey, sourceServerUUID, fileName))
-	if prefix == "" {
-		return base
+	parts := make([]string, 0, 4)
+	if p := strings.Trim(strings.TrimSpace(prefix), "/"); p != "" {
+		parts = append(parts, p)
 	}
-	return filepath.ToSlash(filepath.Join(prefix, base))
+	parts = append(parts,
+		strings.Trim(strings.TrimSpace(clusterKey), "/"),
+		strings.Trim(strings.TrimSpace(sourceServerUUID), "/"),
+		strings.Trim(strings.TrimSpace(fileName), "/"),
+	)
+	return strings.Join(parts, "/")
 }
 
 func openFileName(sourceFile string, epoch int64) string {
