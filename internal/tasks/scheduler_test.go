@@ -459,15 +459,137 @@ func TestScheduler_StartTaskRejectsNonDispatchStartingTask(t *testing.T) {
 	}
 }
 
+func TestScheduler_UpdateTaskAppliesValidPatchAtomically(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: make(map[string]Task),
+	}
+	s := NewScheduler(WithStore(store))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Flavor: "mysql", ServerID: 200001}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+
+	nextName := "cluster-a-updated"
+	nextSource := SourceConfig{Host: "127.0.0.1", Port: 3307, User: "repl2", Flavor: "mysql", ServerID: 200002}
+	nextStart := StartConfig{Mode: StartModeFilePos, File: "mysql-bin.000001", Pos: 4}
+	nextStorage := Storage{RetentionDays: 30}
+	updated, err := s.UpdateTask(task.ID, TaskPatch{
+		Name:       &nextName,
+		ClusterKey: "cluster-a-key-updated",
+		Source:     &nextSource,
+		Start:      &nextStart,
+		Storage:    &nextStorage,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask returned error: %v", err)
+	}
+
+	if updated.Name != nextName {
+		t.Fatalf("expected name %q, got %q", nextName, updated.Name)
+	}
+	if updated.ClusterKey != "cluster-a-key-updated" {
+		t.Fatalf("expected cluster_key updated, got %q", updated.ClusterKey)
+	}
+	if updated.Source.Port != 3307 || updated.Start.Mode != StartModeFilePos || updated.Storage.RetentionDays != 30 {
+		t.Fatalf("expected source/start/storage updated, got source=%+v start=%+v storage=%+v", updated.Source, updated.Start, updated.Storage)
+	}
+}
+
+func TestScheduler_UpdateTaskRejectsInvalidPatchWithoutMutation(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: make(map[string]Task),
+	}
+	s := NewScheduler(WithStore(store))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Flavor: "mysql", ServerID: 200001}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	original, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+
+	nextName := "cluster-b"
+	_, err = s.UpdateTask(task.ID, TaskPatch{
+		Name:       &nextName,
+		ClusterKey: "cluster-b-key",
+		Start:      &StartConfig{Mode: StartMode("BAD_MODE")},
+	})
+	if err == nil {
+		t.Fatal("expected invalid patch error, got nil")
+	}
+
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.Name != original.Name || got.ClusterKey != original.ClusterKey || got.Source != original.Source || got.Start != original.Start || got.Storage != original.Storage {
+		t.Fatalf("task mutated after invalid patch, got=%+v want=%+v", got, original)
+	}
+}
+
+func TestScheduler_UpdateTaskStoreFailureHasNoMutation(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: make(map[string]Task),
+	}
+	s := NewScheduler(WithStore(store))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Flavor: "mysql", ServerID: 200001}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	original, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+
+	nextName := "cluster-b"
+	nextSource := SourceConfig{Host: "127.0.0.1", Port: 3307, User: "repl2", Flavor: "mysql", ServerID: 200002}
+	nextStorage := Storage{RetentionDays: 30}
+	store.SetUpsertErr(errors.New("store unavailable"))
+	_, err = s.UpdateTask(task.ID, TaskPatch{
+		Name:       &nextName,
+		ClusterKey: "cluster-b-key",
+		Source:     &nextSource,
+		Storage:    &nextStorage,
+	})
+	if err == nil {
+		t.Fatal("expected store error, got nil")
+	}
+
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.Name != original.Name || got.ClusterKey != original.ClusterKey || got.Source != original.Source || got.Start != original.Start || got.Storage != original.Storage {
+		t.Fatalf("task mutated after store failure, got=%+v want=%+v", got, original)
+	}
+}
+
 type schedulerTestStore struct {
 	mu            sync.Mutex
 	tasks         map[string]Task
 	listTasksCall int
+	upsertErr     error
 }
 
 func (s *schedulerTestStore) UpsertTask(_ context.Context, task Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.upsertErr != nil {
+		return s.upsertErr
+	}
 	s.tasks[task.ID] = task
 	return nil
 }
@@ -494,4 +616,10 @@ func (s *schedulerTestStore) ListTasksCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.listTasksCall
+}
+
+func (s *schedulerTestStore) SetUpsertErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upsertErr = err
 }

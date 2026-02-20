@@ -31,6 +31,14 @@ type Task struct {
 	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
+type TaskPatch struct {
+	Name       *string       `json:"name,omitempty"`
+	ClusterKey string        `json:"cluster_key"`
+	Source     *SourceConfig `json:"source,omitempty"`
+	Start      *StartConfig  `json:"start,omitempty"`
+	Storage    *Storage      `json:"storage,omitempty"`
+}
+
 type StartMode string
 
 const (

@@ -360,11 +360,16 @@ func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
 	if createResp.Code != http.StatusCreated {
 		t.Fatalf("expected create 201, got %d body=%s", createResp.Code, createResp.Body.String())
 	}
+	var created tasks.Task
+	if err := json.Unmarshal(createResp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create task failed: %v", err)
+	}
 
 	updateResp := httptest.NewRecorder()
 	updateReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(`{
 		"name":"cluster-b",
 		"cluster_key":"cluster-b-key",
+		"source":{"host":"127.0.0.2","port":3307,"user":"other","flavor":"mysql","server_id":200002},
 		"start":{"mode":"BAD_MODE"}
 	}`))
 	updateReq.Header.Set("Content-Type", "application/json")
@@ -389,6 +394,15 @@ func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
 	}
 	if task.Name != "cluster-a" {
 		t.Fatalf("name changed after failed update: got %q", task.Name)
+	}
+	if task.Source != created.Source {
+		t.Fatalf("source changed after failed update: got=%+v want=%+v", task.Source, created.Source)
+	}
+	if task.Start != created.Start {
+		t.Fatalf("start changed after failed update: got=%+v want=%+v", task.Start, created.Start)
+	}
+	if task.Storage != created.Storage {
+		t.Fatalf("storage changed after failed update: got=%+v want=%+v", task.Storage, created.Storage)
 	}
 }
 

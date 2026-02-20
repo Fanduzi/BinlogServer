@@ -594,72 +594,22 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		if err := s.tasks.ValidateTaskUpdate(taskID, req.ClusterKey, req.Name, req.Source, req.Start, req.Storage); err != nil {
-			if errors.Is(err, tasks.ErrTaskNotFound) {
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.tasks.ConfigureClusterKey(taskID, req.ClusterKey); err != nil {
-			if errors.Is(err, tasks.ErrTaskNotFound) {
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if req.Name != nil {
-			if err := s.tasks.ConfigureName(taskID, *req.Name); err != nil {
-				if errors.Is(err, tasks.ErrTaskNotFound) {
-					http.Error(w, err.Error(), http.StatusNotFound)
-					return
-				}
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		if req.Source != nil {
-			if err := s.tasks.ConfigureSource(taskID, *req.Source); err != nil {
-				if errors.Is(err, tasks.ErrTaskNotFound) {
-					http.Error(w, err.Error(), http.StatusNotFound)
-					return
-				}
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		if req.Start != nil {
-			if err := s.tasks.ConfigureStart(taskID, *req.Start); err != nil {
-				if errors.Is(err, tasks.ErrTaskNotFound) {
-					http.Error(w, err.Error(), http.StatusNotFound)
-					return
-				}
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		if req.Storage != nil {
-			if err := s.tasks.ConfigureStorage(taskID, *req.Storage); err != nil {
-				if errors.Is(err, tasks.ErrTaskNotFound) {
-					http.Error(w, err.Error(), http.StatusNotFound)
-					return
-				}
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		task, err := s.tasks.GetTask(taskID)
+		updated, err := s.tasks.UpdateTask(taskID, tasks.TaskPatch{
+			Name:       req.Name,
+			ClusterKey: req.ClusterKey,
+			Source:     req.Source,
+			Start:      req.Start,
+			Storage:    req.Storage,
+		})
 		if err != nil {
 			if errors.Is(err, tasks.ErrTaskNotFound) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, http.StatusOK, sanitizeTask(task))
+		writeJSON(w, http.StatusOK, sanitizeTask(updated))
 	case http.MethodDelete:
 		if err := s.tasks.DeleteTask(taskID); err != nil {
 			if errors.Is(err, tasks.ErrTaskNotFound) {

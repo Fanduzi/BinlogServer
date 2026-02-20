@@ -21,7 +21,7 @@ import (
 
 type taskService interface {
 	CreateTask(name string, clusterKey string) (tasks.Task, error)
-	ValidateTaskUpdate(id, clusterKey string, name *string, source *tasks.SourceConfig, start *tasks.StartConfig, storage *tasks.Storage) error
+	UpdateTask(id string, patch tasks.TaskPatch) (tasks.Task, error)
 	ConfigureClusterKey(id string, clusterKey string) error
 	ConfigureName(id string, name string) error
 	ConfigureSource(id string, source tasks.SourceConfig) error

@@ -321,44 +321,89 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	return nil
 }
 
-func (s *Scheduler) ValidateTaskUpdate(id, clusterKey string, name *string, source *SourceConfig, start *StartConfig, storage *Storage) error {
-	validatedClusterKey, err := normalizeAndValidateClusterKey(clusterKey)
+func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
+	validatedClusterKey, err := normalizeAndValidateClusterKey(patch.ClusterKey)
 	if err != nil {
-		return err
+		return Task{}, err
 	}
-	if name != nil {
-		if _, err := normalizeAndValidateTaskName(*name); err != nil {
-			return err
+
+	var validatedName *string
+	if patch.Name != nil {
+		name, err := normalizeAndValidateTaskName(*patch.Name)
+		if err != nil {
+			return Task{}, err
 		}
+		validatedName = &name
 	}
-	if source != nil {
-		if _, err := normalizeAndValidateSourceConfig(*source); err != nil {
-			return err
+
+	var validatedSource *SourceConfig
+	if patch.Source != nil {
+		source, err := normalizeAndValidateSourceConfig(*patch.Source)
+		if err != nil {
+			return Task{}, err
 		}
+		validatedSource = &source
 	}
-	if start != nil {
-		if _, err := normalizeAndValidateStartConfig(*start); err != nil {
-			return err
+
+	var validatedStart *StartConfig
+	if patch.Start != nil {
+		start, err := normalizeAndValidateStartConfig(*patch.Start)
+		if err != nil {
+			return Task{}, err
 		}
+		validatedStart = &start
 	}
-	if storage != nil {
-		if _, err := normalizeAndValidateStorage(*storage); err != nil {
-			return err
+
+	var validatedStorage *Storage
+	if patch.Storage != nil {
+		storage, err := normalizeAndValidateStorage(*patch.Storage)
+		if err != nil {
+			return Task{}, err
 		}
+		validatedStorage = &storage
 	}
+
 	if err := s.syncTasksFromStore(); err != nil {
-		return err
+		return Task{}, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.tasks[id]; !ok {
-		return ErrTaskNotFound
+
+	current, ok := s.tasks[id]
+	if !ok {
+		return Task{}, ErrTaskNotFound
 	}
 	if !s.isClusterKeyUniqueLocked(validatedClusterKey, id) {
-		return ErrClusterKeyExists
+		return Task{}, ErrClusterKeyExists
 	}
-	return nil
+
+	next := current
+	next.ClusterKey = validatedClusterKey
+	if validatedName != nil {
+		next.Name = *validatedName
+	}
+	if validatedSource != nil {
+		if validatedSource.Password == "" {
+			validatedSource.Password = current.Source.Password
+		}
+		next.Source = *validatedSource
+	}
+	if validatedStart != nil {
+		next.Start = *validatedStart
+	}
+	if validatedStorage != nil {
+		next.Storage = *validatedStorage
+	}
+	next.UpdatedAt = time.Now()
+
+	if err := s.persistTaskLocked(next); err != nil {
+		return Task{}, err
+	}
+
+	s.tasks[id] = next
+	s.appendEventLocked(id, "TASK_UPDATED", "task updated", "")
+	return next, nil
 }
 
 func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
