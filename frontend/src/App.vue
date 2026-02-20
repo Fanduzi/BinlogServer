@@ -531,6 +531,14 @@ import {
 const loading = ref(false);
 const LEASE_RISK_SECONDS = 45;
 const RUN_HISTORY_LIMIT = 10;
+const NAME_MAX_LENGTH = 255;
+const CLUSTER_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
+const SOURCE_HOST_MAX_LENGTH = 255;
+const SOURCE_USER_MAX_LENGTH = 128;
+const SOURCE_FLAVOR_MAX_LENGTH = 32;
+const START_FILE_MAX_LENGTH = 255;
+const RETENTION_DAYS_MIN = 1;
+const RETENTION_DAYS_MAX = 3650;
 const dashboard = reactive({
   generated_at: "",
   threshold_seconds: 30,
@@ -913,10 +921,13 @@ function buildPayload() {
     cluster_key: form.cluster_key?.trim(),
     source: {
       ...form.source,
+      host: form.source.host?.trim() || "",
+      user: form.source.user?.trim() || "",
+      flavor: form.source.flavor?.trim() || "",
       semi_sync: !!form.source.semi_sync,
     },
     start: { mode: form.start.mode },
-    storage: { retention_days: Number(form.storage.retention_days || 7) },
+    storage: { retention_days: Number(form.storage.retention_days) },
   };
   if (!payload.source.password) delete payload.source.password;
 
@@ -1087,8 +1098,13 @@ async function submitBatchCreate() {
         cluster_key: row.clusterKey,
         source,
         start: { mode: "LATEST" },
-        storage: { retention_days: Number(batchForm.retentionDays || 7) },
+        storage: { retention_days: Number(batchForm.retentionDays) },
       };
+      const validationErr = validateTaskPayload(payload);
+      if (validationErr) {
+        errors.push(`${row.name}(${row.host}:${row.port}) -> ${validationErr}`);
+        continue;
+      }
 
       try {
         const created = await createTask(payload);
@@ -1121,12 +1137,9 @@ async function submitBatchCreate() {
 async function submitForm() {
   try {
     const payload = buildPayload();
-    if (!payload.name) {
-      ElMessage.error("任务名不能为空");
-      return;
-    }
-    if (!payload.cluster_key) {
-      ElMessage.error("cluster_key 不能为空");
+    const validationErr = validateTaskPayload(payload);
+    if (validationErr) {
+      ElMessage.error(validationErr);
       return;
     }
     if (formMode.value === "create") {
@@ -1318,6 +1331,80 @@ function makeClusterKey(name, host, port, lineNo = 0) {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   return key || `cluster-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+}
+
+function validateTaskPayload(payload) {
+  const name = String(payload?.name || "").trim();
+  if (!name || name.length > NAME_MAX_LENGTH) {
+    return "任务名不合法（1-255 字符）";
+  }
+
+  const clusterKey = String(payload?.cluster_key || "").trim();
+  if (!clusterKey) {
+    return "cluster_key 不能为空";
+  }
+  if (
+    clusterKey.includes("/") ||
+    clusterKey.includes("\\") ||
+    clusterKey.includes("..") ||
+    !CLUSTER_KEY_PATTERN.test(clusterKey)
+  ) {
+    return "cluster_key 不合法（仅允许字母数字._-，禁止 / \\\\ ..）";
+  }
+
+  const source = payload?.source || {};
+  const host = String(source.host || "").trim();
+  const user = String(source.user || "").trim();
+  const flavorRaw = String(source.flavor || "").trim();
+  const flavor = flavorRaw || "mysql";
+  const port = Number(source.port || 0);
+  const serverID = Number(source.server_id || 0);
+
+  if (!host || host.length > SOURCE_HOST_MAX_LENGTH || hasWhitespace(host)) {
+    return "source.host 不合法";
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return "source.port 不合法（1-65535）";
+  }
+  if (!user || user.length > SOURCE_USER_MAX_LENGTH || hasWhitespace(user)) {
+    return "source.user 不合法";
+  }
+  if (!flavor || flavor.length > SOURCE_FLAVOR_MAX_LENGTH || !CLUSTER_KEY_PATTERN.test(flavor)) {
+    return "source.flavor 不合法";
+  }
+  if (!Number.isInteger(serverID) || serverID < 0 || serverID > 4294967295) {
+    return "source.server_id 不合法（0 或 1..4294967295）";
+  }
+
+  const start = payload?.start || {};
+  const mode = String(start.mode || "").trim();
+  if (!["LATEST", "FILE_POS", "GTID"].includes(mode)) {
+    return "start.mode 不合法";
+  }
+  if (mode === "FILE_POS") {
+    const file = String(start.file || "").trim();
+    const pos = Number(start.pos || 0);
+    if (!file || file.length > START_FILE_MAX_LENGTH || !Number.isInteger(pos) || pos <= 0) {
+      return "FILE_POS 模式要求合法 file/pos";
+    }
+  }
+  if (mode === "GTID") {
+    const gtidSet = String(start.gtid_set || "").trim();
+    if (!gtidSet) {
+      return "GTID 模式要求 gtid_set";
+    }
+  }
+
+  const retentionDays = Number(payload?.storage?.retention_days || 0);
+  if (!Number.isInteger(retentionDays) || retentionDays < RETENTION_DAYS_MIN || retentionDays > RETENTION_DAYS_MAX) {
+    return "storage.retention_days 不合法（1-3650）";
+  }
+
+  return "";
+}
+
+function hasWhitespace(text) {
+  return /\s/.test(String(text || ""));
 }
 </script>
 

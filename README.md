@@ -230,6 +230,18 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 `source.server_id` 支持自定义，推荐为每个任务显式设置唯一值，避免与其他 replication client/slave 冲突；不设置时系统会按 task ID 自动生成默认值。
 `source.semi_sync` 默认 `false`；设置为 `true` 时会尝试半同步拉流，若主库未开启半同步会自动降级为异步继续运行。
 
+输入校验规则（前端预校验 + 后端权威校验）：
+- `name`：trim 后 1-255 字符。
+- `cluster_key`：trim 后非空；仅允许 `[a-zA-Z0-9._-]`；禁止 `/`、`\`、`..`。
+- `source.host`：trim 后非空、长度 <=255，且不允许空白字符。
+- `source.port`：1-65535。
+- `source.user`：trim 后非空、长度 <=128，且不允许空白字符。
+- `source.flavor`：为空时默认 `mysql`；非空时仅允许 `[a-zA-Z0-9._-]` 且长度 <=32。
+- `start.mode`：仅允许 `LATEST` / `FILE_POS` / `GTID`。
+- `start.file`、`start.pos`：当 `FILE_POS` 时必填，且 `file` 长度 <=255、`pos` > 0。
+- `start.gtid_set`：当 `GTID` 时必填且非空。
+- `storage.retention_days`：1-3650。
+
 如果配置了 `BINLOG_SERVER_META_DSN`，任务配置与状态会持久化到外部 MySQL，服务重启后会自动恢复任务元数据。
 同时会持久化每个任务的最新 checkpoint（`file/pos`），重启后优先从 checkpoint 位点继续拉取。
 任务事件（创建、启动、重试、错误等）也会持久化到 MySQL，可通过 `/api/tasks/{id}/events` 查询。

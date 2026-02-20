@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,25 @@ func TestScheduler_CreateTaskRequiresClusterKey(t *testing.T) {
 	s := NewScheduler()
 	if _, err := s.CreateTask("cluster-a", ""); err != ErrClusterKeyRequired {
 		t.Fatalf("expected ErrClusterKeyRequired, got %v", err)
+	}
+}
+
+func TestScheduler_CreateTaskRejectsInvalidName(t *testing.T) {
+	s := NewScheduler()
+	longName := strings.Repeat("a", 256)
+	if _, err := s.CreateTask(longName, "cluster-a-key"); err == nil {
+		t.Fatal("expected invalid name error, got nil")
+	}
+}
+
+func TestScheduler_ConfigureNameRejectsInvalidName(t *testing.T) {
+	s := NewScheduler()
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureName(task.ID, strings.Repeat("b", 256)); err == nil {
+		t.Fatal("expected invalid name error, got nil")
 	}
 }
 
@@ -93,6 +113,59 @@ func TestScheduler_ConfigureClusterKeyRejectsInvalidClusterKey(t *testing.T) {
 		if !errors.Is(err, ErrInvalidClusterKey) {
 			t.Fatalf("cluster_key=%q expected ErrInvalidClusterKey, got %v", clusterKey, err)
 		}
+	}
+}
+
+func TestScheduler_ConfigureSourceRejectsInvalidHostAndFlavor(t *testing.T) {
+	s := NewScheduler()
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	if err := s.ConfigureSource(task.ID, SourceConfig{
+		Host:   "bad host",
+		Port:   3306,
+		User:   "repl",
+		Flavor: "mysql",
+	}); !errors.Is(err, ErrInvalidSourceConfig) {
+		t.Fatalf("expected ErrInvalidSourceConfig for invalid host, got %v", err)
+	}
+
+	if err := s.ConfigureSource(task.ID, SourceConfig{
+		Host:   "127.0.0.1",
+		Port:   3306,
+		User:   "repl",
+		Flavor: "mysql@8",
+	}); !errors.Is(err, ErrInvalidSourceConfig) {
+		t.Fatalf("expected ErrInvalidSourceConfig for invalid flavor, got %v", err)
+	}
+}
+
+func TestScheduler_ConfigureStartRejectsInvalidMode(t *testing.T) {
+	s := NewScheduler()
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	if err := s.ConfigureStart(task.ID, StartConfig{Mode: StartMode("BAD_MODE")}); err == nil {
+		t.Fatal("expected invalid start mode error, got nil")
+	}
+}
+
+func TestScheduler_ConfigureStorageRejectsInvalidRetentionDays(t *testing.T) {
+	s := NewScheduler()
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	if err := s.ConfigureStorage(task.ID, Storage{RetentionDays: 0}); err == nil {
+		t.Fatal("expected invalid retention_days error for 0, got nil")
+	}
+	if err := s.ConfigureStorage(task.ID, Storage{RetentionDays: 3651}); err == nil {
+		t.Fatal("expected invalid retention_days error for upper bound overflow, got nil")
 	}
 }
 

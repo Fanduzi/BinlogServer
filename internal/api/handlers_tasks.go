@@ -270,19 +270,29 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskRequest struct {
-	Name       string              `json:"name"`
-	ClusterKey string              `json:"cluster_key"`
-	Source     *tasks.SourceConfig `json:"source,omitempty"`
-	Start      *tasks.StartConfig  `json:"start,omitempty"`
-	Storage    *tasks.Storage      `json:"storage,omitempty"`
+	// Name 任务名（trim 后 1-255 字符）。
+	Name string `json:"name"`
+	// ClusterKey 集群标识（必填；仅允许 [a-zA-Z0-9._-]；禁止 / \ ..）。
+	ClusterKey string `json:"cluster_key"`
+	// Source 源库配置：host/user 必填且不得含空白；port 1-65535；flavor 为空默认 mysql。
+	Source *tasks.SourceConfig `json:"source,omitempty"`
+	// Start 起点策略：LATEST|FILE_POS|GTID。
+	Start *tasks.StartConfig `json:"start,omitempty"`
+	// Storage 存储策略：retention_days 必须在 1..3650。
+	Storage *tasks.Storage `json:"storage,omitempty"`
 }
 
 type updateTaskRequest struct {
-	Name       *string             `json:"name,omitempty"`
-	ClusterKey string              `json:"cluster_key"`
-	Source     *tasks.SourceConfig `json:"source,omitempty"`
-	Start      *tasks.StartConfig  `json:"start,omitempty"`
-	Storage    *tasks.Storage      `json:"storage,omitempty"`
+	// Name 任务名（trim 后 1-255 字符）。
+	Name *string `json:"name,omitempty"`
+	// ClusterKey 集群标识（必填；仅允许 [a-zA-Z0-9._-]；禁止 / \ ..）。
+	ClusterKey string `json:"cluster_key"`
+	// Source 源库配置：host/user 必填且不得含空白；port 1-65535；flavor 为空默认 mysql。
+	Source *tasks.SourceConfig `json:"source,omitempty"`
+	// Start 起点策略：LATEST|FILE_POS|GTID。
+	Start *tasks.StartConfig `json:"start,omitempty"`
+	// Storage 存储策略：retention_days 必须在 1..3650。
+	Storage *tasks.Storage `json:"storage,omitempty"`
 }
 
 // handleTasks godoc
@@ -292,7 +302,7 @@ type updateTaskRequest struct {
 // @Produce json
 // @Param host query string false "Filter by source host (GET only)"
 // @Param port query int false "Filter by source port (GET only)"
-// @Param body body createTaskRequest true "Task create payload (POST only)"
+// @Param body body createTaskRequest true "Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-], source/start/storage 按字段规则校验)"
 // @Success 200 {array} tasks.Task
 // @Success 201 {object} tasks.Task
 // @Failure 400 {string} string

@@ -22,10 +22,18 @@ var ErrClusterWorkerIDRequired = errors.New("cluster worker id is required")
 var ErrClusterKeyRequired = errors.New("cluster_key is required")
 var ErrClusterKeyExists = errors.New("cluster_key already exists")
 var ErrInvalidClusterKey = errors.New("invalid cluster_key")
+var ErrInvalidTaskName = errors.New("invalid name")
 
 var clusterKeyAllowedPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 const defaultRetentionDays = 7
+const maxTaskNameLength = 255
+const maxSourceHostLength = 255
+const maxSourceUserLength = 128
+const maxFlavorLength = 32
+const maxStartFileLength = 255
+const minRetentionDays = 1
+const maxRetentionDays = 3650
 
 type Runner interface {
 	Run(ctx context.Context, task Task) error
@@ -197,9 +205,9 @@ func (s *Scheduler) SetRunner(runner Runner) {
 }
 
 func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return Task{}, errors.New("name is required")
+	validatedName, err := normalizeAndValidateTaskName(name)
+	if err != nil {
+		return Task{}, err
 	}
 	validatedClusterKey, err := normalizeAndValidateClusterKey(clusterKey)
 	if err != nil {
@@ -220,7 +228,7 @@ func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 	now := time.Now()
 	task := Task{
 		ID:         id,
-		Name:       name,
+		Name:       validatedName,
 		ClusterKey: validatedClusterKey,
 		State:      StateCreated,
 		Start: StartConfig{
@@ -242,11 +250,9 @@ func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 }
 
 func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
-	if source.Host == "" || source.Port == 0 || source.User == "" {
-		return ErrInvalidSourceConfig
-	}
-	if source.Flavor == "" {
-		source.Flavor = "mysql"
+	normalized, err := normalizeAndValidateSourceConfig(source)
+	if err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -256,13 +262,13 @@ func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 	if !ok {
 		return ErrTaskNotFound
 	}
-	if source.Password == "" {
-		source.Password = task.Source.Password
+	if normalized.Password == "" {
+		normalized.Password = task.Source.Password
 	}
-	task.Source = source
+	task.Source = normalized
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_SOURCE_CONFIGURED", "source configured", source.Host)
+	s.appendEventLocked(id, "TASK_SOURCE_CONFIGURED", "source configured", normalized.Host)
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -270,14 +276,9 @@ func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 }
 
 func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
-	if start.Mode == "" {
-		start.Mode = StartModeLatest
-	}
-	if start.Mode == StartModeFilePos && (start.File == "" || start.Pos == 0) {
-		return errors.New("file/pos is required")
-	}
-	if start.Mode == StartModeGTID && start.GTIDSet == "" {
-		return errors.New("gtid_set is required")
+	normalized, err := normalizeAndValidateStartConfig(start)
+	if err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -287,10 +288,10 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 	if !ok {
 		return ErrTaskNotFound
 	}
-	task.Start = start
+	task.Start = normalized
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_START_CONFIGURED", "start strategy configured", string(start.Mode))
+	s.appendEventLocked(id, "TASK_START_CONFIGURED", "start strategy configured", string(normalized.Mode))
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -298,8 +299,9 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 }
 
 func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
-	if storage.RetentionDays <= 0 {
-		storage.RetentionDays = defaultRetentionDays
+	normalized, err := normalizeAndValidateStorage(storage)
+	if err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -309,7 +311,7 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	if !ok {
 		return ErrTaskNotFound
 	}
-	task.Storage = storage
+	task.Storage = normalized
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_STORAGE_CONFIGURED", "storage configured", "")
@@ -349,9 +351,9 @@ func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
 }
 
 func (s *Scheduler) ConfigureName(id, name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return errors.New("name is required")
+	validatedName, err := normalizeAndValidateTaskName(name)
+	if err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -361,10 +363,10 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 	if !ok {
 		return ErrTaskNotFound
 	}
-	task.Name = name
+	task.Name = validatedName
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_RENAMED", "task renamed", name)
+	s.appendEventLocked(id, "TASK_RENAMED", "task renamed", validatedName)
 	if err := s.persistTaskLocked(task); err != nil {
 		return err
 	}
@@ -1186,4 +1188,82 @@ func normalizeAndValidateClusterKey(clusterKey string) (string, error) {
 		return "", ErrInvalidClusterKey
 	}
 	return key, nil
+}
+
+func normalizeAndValidateTaskName(name string) (string, error) {
+	normalized := strings.TrimSpace(name)
+	if normalized == "" {
+		return "", ErrInvalidTaskName
+	}
+	if len(normalized) > maxTaskNameLength {
+		return "", ErrInvalidTaskName
+	}
+	return normalized, nil
+}
+
+func normalizeAndValidateSourceConfig(source SourceConfig) (SourceConfig, error) {
+	normalized := source
+	normalized.Host = strings.TrimSpace(source.Host)
+	normalized.User = strings.TrimSpace(source.User)
+	normalized.Flavor = strings.TrimSpace(source.Flavor)
+	if normalized.Flavor == "" {
+		normalized.Flavor = "mysql"
+	}
+
+	if normalized.Host == "" || normalized.Port == 0 || normalized.User == "" {
+		return SourceConfig{}, ErrInvalidSourceConfig
+	}
+	if len(normalized.Host) > maxSourceHostLength || hasWhitespace(normalized.Host) {
+		return SourceConfig{}, ErrInvalidSourceConfig
+	}
+	if len(normalized.User) > maxSourceUserLength || hasWhitespace(normalized.User) {
+		return SourceConfig{}, ErrInvalidSourceConfig
+	}
+	if len(normalized.Flavor) > maxFlavorLength || !clusterKeyAllowedPattern.MatchString(normalized.Flavor) {
+		return SourceConfig{}, ErrInvalidSourceConfig
+	}
+	return normalized, nil
+}
+
+func normalizeAndValidateStartConfig(start StartConfig) (StartConfig, error) {
+	normalized := start
+	if normalized.Mode == "" {
+		normalized.Mode = StartModeLatest
+	}
+	switch normalized.Mode {
+	case StartModeLatest:
+		normalized.File = ""
+		normalized.Pos = 0
+		normalized.GTIDSet = ""
+		return normalized, nil
+	case StartModeFilePos:
+		normalized.File = strings.TrimSpace(normalized.File)
+		if normalized.File == "" || normalized.Pos == 0 || len(normalized.File) > maxStartFileLength {
+			return StartConfig{}, errors.New("file/pos is required")
+		}
+		normalized.GTIDSet = ""
+		return normalized, nil
+	case StartModeGTID:
+		normalized.GTIDSet = strings.TrimSpace(normalized.GTIDSet)
+		if normalized.GTIDSet == "" {
+			return StartConfig{}, errors.New("gtid_set is required")
+		}
+		normalized.File = ""
+		normalized.Pos = 0
+		return normalized, nil
+	default:
+		return StartConfig{}, errors.New("invalid start mode")
+	}
+}
+
+func normalizeAndValidateStorage(storage Storage) (Storage, error) {
+	normalized := storage
+	if normalized.RetentionDays < minRetentionDays || normalized.RetentionDays > maxRetentionDays {
+		return Storage{}, errors.New("invalid retention_days")
+	}
+	return normalized, nil
+}
+
+func hasWhitespace(value string) bool {
+	return strings.ContainsAny(value, " \t\r\n")
 }

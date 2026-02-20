@@ -289,6 +289,62 @@ func TestTaskAPI_ClusterKeyMustBeUnique(t *testing.T) {
 	}
 }
 
+func TestTaskAPI_CreateRejectsInvalidInput(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	cases := []string{
+		`{"name":"` + strings.Repeat("a", 256) + `","cluster_key":"cluster-a-key"}`,
+		`{"name":"cluster-a","cluster_key":"../bad"}`,
+		`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"bad host","port":3306,"user":"repl","flavor":"mysql","server_id":200001}}`,
+		`{"name":"cluster-a","cluster_key":"cluster-a-key","start":{"mode":"BAD_MODE"}}`,
+		`{"name":"cluster-a","cluster_key":"cluster-a-key","storage":{"retention_days":0}}`,
+	}
+	for _, body := range cases {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid create payload, got %d body=%s", resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestTaskAPI_UpdateRejectsInvalidInput(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"cluster_key":"cluster-a-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	cases := []string{
+		`{"name":"` + strings.Repeat("b", 256) + `","cluster_key":"cluster-a-key"}`,
+		`{"name":"cluster-b","cluster_key":"../bad"}`,
+		`{"name":"cluster-b","cluster_key":"cluster-a-key","source":{"host":"bad host","port":3306,"user":"repl","flavor":"mysql"}}`,
+		`{"name":"cluster-b","cluster_key":"cluster-a-key","start":{"mode":"BAD_MODE"}}`,
+		`{"name":"cluster-b","cluster_key":"cluster-a-key","storage":{"retention_days":3651}}`,
+	}
+	for _, body := range cases {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid update payload, got %d body=%s", resp.Code, resp.Body.String())
+		}
+	}
+}
+
 type fakeCheckpointReader struct {
 	checkpoints map[string]binlog.Checkpoint
 }

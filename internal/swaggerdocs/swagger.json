@@ -196,7 +196,7 @@
                         "in": "query"
                     },
                     {
-                        "description": "Task create payload (POST only)",
+                        "description": "Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-], source/start/storage 按字段规则校验)",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -260,7 +260,7 @@
                         "in": "query"
                     },
                     {
-                        "description": "Task create payload (POST only)",
+                        "description": "Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-], source/start/storage 按字段规则校验)",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -359,7 +359,7 @@
                         "required": true
                     },
                     {
-                        "description": "Task update payload",
+                        "description": "Task update payload（cluster_key 必填；name/cluster_key/source/start/storage 按字段规则校验）",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -853,19 +853,36 @@
             "type": "object",
             "properties": {
                 "cluster_key": {
+                    "description": "ClusterKey 集群标识（必填；仅允许 [a-zA-Z0-9._-]；禁止 / \\ ..）。",
                     "type": "string"
                 },
                 "name": {
+                    "description": "Name 任务名（trim 后 1-255 字符）。",
                     "type": "string"
                 },
                 "source": {
-                    "$ref": "#/definitions/tasks.SourceConfig"
+                    "description": "Source 源库配置：host/user 必填且不得含空白；port 1-65535；flavor 为空默认 mysql。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/tasks.SourceConfig"
+                        }
+                    ]
                 },
                 "start": {
-                    "$ref": "#/definitions/tasks.StartConfig"
+                    "description": "Start 起点策略：LATEST|FILE_POS|GTID。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/tasks.StartConfig"
+                        }
+                    ]
                 },
                 "storage": {
-                    "$ref": "#/definitions/tasks.Storage"
+                    "description": "Storage 存储策略：retention_days 必须在 1..3650。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/tasks.Storage"
+                        }
+                    ]
                 }
             }
         },
@@ -1075,19 +1092,36 @@
             "type": "object",
             "properties": {
                 "cluster_key": {
+                    "description": "ClusterKey 集群标识（必填；仅允许 [a-zA-Z0-9._-]；禁止 / \\ ..）。",
                     "type": "string"
                 },
                 "name": {
+                    "description": "Name 任务名（trim 后 1-255 字符）。",
                     "type": "string"
                 },
                 "source": {
-                    "$ref": "#/definitions/tasks.SourceConfig"
+                    "description": "Source 源库配置：host/user 必填且不得含空白；port 1-65535；flavor 为空默认 mysql。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/tasks.SourceConfig"
+                        }
+                    ]
                 },
                 "start": {
-                    "$ref": "#/definitions/tasks.StartConfig"
+                    "description": "Start 起点策略：LATEST|FILE_POS|GTID。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/tasks.StartConfig"
+                        }
+                    ]
                 },
                 "storage": {
-                    "$ref": "#/definitions/tasks.Storage"
+                    "description": "Storage 存储策略：retention_days 必须在 1..3650。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/tasks.Storage"
+                        }
+                    ]
                 }
             }
         },

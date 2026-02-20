@@ -42,6 +42,7 @@
 ./scripts/e2e/run-suite.sh --scenarios smoke-cluster-roles
 ./scripts/e2e/run-suite.sh --scenarios smoke-control-plane-failover
 ./scripts/e2e/run-suite.sh --scenarios smoke-worker-crash-recovery
+./scripts/e2e/run-suite.sh --scenarios smoke-invalid-inputs
 ```
 
 也可用 `Makefile`：
@@ -68,6 +69,7 @@ make e2e SCENARIOS=smoke,compression
 - `smoke-cluster-roles.sh`: 启动 control-plane + worker 双进程，验证任务执行、worker 离线检测与恢复链路。
 - `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
+- `smoke-invalid-inputs.sh`: 验证任务 API 对非法输入返回 `400`（cluster_key/source/start/storage）。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
 说明：当前所有场景创建任务时均显式传入 `cluster_key`（创建/更新必填且全局唯一）。

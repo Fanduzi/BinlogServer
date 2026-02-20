@@ -37,6 +37,7 @@ Scenarios:
   smoke-cluster-roles
   smoke-control-plane-failover
   smoke-worker-crash-recovery
+  smoke-invalid-inputs
 EOF
 }
 
@@ -140,6 +141,9 @@ run_scenario() {
       ;;
     smoke-worker-crash-recovery)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-worker-crash-recovery.sh"
+      ;;
+    smoke-invalid-inputs)
+      "$ROOT_DIR/scripts/e2e/smoke-invalid-inputs.sh"
       ;;
     *)
       echo "unsupported scenario: $name" >&2
