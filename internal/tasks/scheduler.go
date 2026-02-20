@@ -321,6 +321,46 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	return nil
 }
 
+func (s *Scheduler) ValidateTaskUpdate(id, clusterKey string, name *string, source *SourceConfig, start *StartConfig, storage *Storage) error {
+	validatedClusterKey, err := normalizeAndValidateClusterKey(clusterKey)
+	if err != nil {
+		return err
+	}
+	if name != nil {
+		if _, err := normalizeAndValidateTaskName(*name); err != nil {
+			return err
+		}
+	}
+	if source != nil {
+		if _, err := normalizeAndValidateSourceConfig(*source); err != nil {
+			return err
+		}
+	}
+	if start != nil {
+		if _, err := normalizeAndValidateStartConfig(*start); err != nil {
+			return err
+		}
+	}
+	if storage != nil {
+		if _, err := normalizeAndValidateStorage(*storage); err != nil {
+			return err
+		}
+	}
+	if err := s.syncTasksFromStore(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tasks[id]; !ok {
+		return ErrTaskNotFound
+	}
+	if !s.isClusterKeyUniqueLocked(validatedClusterKey, id) {
+		return ErrClusterKeyExists
+	}
+	return nil
+}
+
 func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
 	validatedClusterKey, err := normalizeAndValidateClusterKey(clusterKey)
 	if err != nil {

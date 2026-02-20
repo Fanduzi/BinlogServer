@@ -3,6 +3,8 @@ set -euo pipefail
 
 API="${E2E_API:-http://127.0.0.1:18080}"
 RUN_TAG="$(date +%s)"
+BASE_CLUSTER_KEY="e2e-invalid-input-base-${RUN_TAG}"
+UPDATED_CLUSTER_KEY="e2e-invalid-input-updated-${RUN_TAG}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }
@@ -40,14 +42,29 @@ assert_put_400() {
   rm -f "$resp_file"
 }
 
+assert_task_cluster_key() {
+  local task_id="$1"
+  local expected="$2"
+  local resp
+  if ! resp="$(curl -fsS "$API/api/tasks/$task_id")"; then
+    echo "failed to query task $task_id after invalid update" >&2
+    exit 1
+  fi
+  local actual
+  actual="$(printf '%s' "$resp" | jq -r '.cluster_key // empty')"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "task $task_id cluster_key changed unexpectedly: expected=$expected actual=$actual" >&2
+    exit 1
+  fi
+}
+
 create_valid_task() {
   local sid
   sid=$((400000 + RANDOM % 10000))
   local name="e2e-invalid-input-base-${RUN_TAG}"
-  local cluster_key="e2e-invalid-input-base-${RUN_TAG}"
   local payload
   payload="$(cat <<JSON
-{"name":"$name","cluster_key":"$cluster_key","source":{"host":"127.0.0.1","port":13306,"user":"repl","password":"replpass","flavor":"mysql","server_id":$sid},"start":{"mode":"LATEST"},"storage":{"retention_days":7}}
+{"name":"$name","cluster_key":"$BASE_CLUSTER_KEY","source":{"host":"127.0.0.1","port":13306,"user":"repl","password":"replpass","flavor":"mysql","server_id":$sid},"start":{"mode":"LATEST"},"storage":{"retention_days":7}}
 JSON
 )"
   local resp
@@ -74,9 +91,11 @@ echo "[invalid-inputs] create one valid task for update checks"
 TASK_ID="$(create_valid_task)"
 
 echo "[invalid-inputs] verify update rejects invalid start.mode"
-assert_put_400 "$TASK_ID" '{"name":"updated-name","cluster_key":"e2e-invalid-input-base","start":{"mode":"BAD_MODE"}}'
+assert_put_400 "$TASK_ID" "{\"name\":\"updated-name\",\"cluster_key\":\"$UPDATED_CLUSTER_KEY\",\"start\":{\"mode\":\"BAD_MODE\"}}"
+assert_task_cluster_key "$TASK_ID" "$BASE_CLUSTER_KEY"
 
 echo "[invalid-inputs] verify update rejects invalid storage.retention_days"
-assert_put_400 "$TASK_ID" '{"name":"updated-name","cluster_key":"e2e-invalid-input-base","storage":{"retention_days":0}}'
+assert_put_400 "$TASK_ID" "{\"name\":\"updated-name\",\"cluster_key\":\"$UPDATED_CLUSTER_KEY\",\"storage\":{\"retention_days\":0}}"
+assert_task_cluster_key "$TASK_ID" "$BASE_CLUSTER_KEY"
 
 echo "[invalid-inputs] success"

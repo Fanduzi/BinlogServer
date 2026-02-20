@@ -345,6 +345,53 @@ func TestTaskAPI_UpdateRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"cluster_key":"cluster-a-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected create 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	updateResp := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(`{
+		"name":"cluster-b",
+		"cluster_key":"cluster-b-key",
+		"start":{"mode":"BAD_MODE"}
+	}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateResp, updateReq)
+	if updateResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected update 400, got %d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+
+	getResp := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tasks/1", nil)
+	handler.ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("expected get 200, got %d body=%s", getResp.Code, getResp.Body.String())
+	}
+
+	var task tasks.Task
+	if err := json.Unmarshal(getResp.Body.Bytes(), &task); err != nil {
+		t.Fatalf("decode get task failed: %v", err)
+	}
+	if task.ClusterKey != "cluster-a-key" {
+		t.Fatalf("cluster_key changed after failed update: got %q", task.ClusterKey)
+	}
+	if task.Name != "cluster-a" {
+		t.Fatalf("name changed after failed update: got %q", task.Name)
+	}
+}
+
 type fakeCheckpointReader struct {
 	checkpoints map[string]binlog.Checkpoint
 }

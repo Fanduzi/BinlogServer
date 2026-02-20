@@ -594,8 +594,12 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		if strings.TrimSpace(req.ClusterKey) == "" {
-			http.Error(w, "cluster_key is required", http.StatusBadRequest)
+		if err := s.tasks.ValidateTaskUpdate(taskID, req.ClusterKey, req.Name, req.Source, req.Start, req.Storage); err != nil {
+			if errors.Is(err, tasks.ErrTaskNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := s.tasks.ConfigureClusterKey(taskID, req.ClusterKey); err != nil {
