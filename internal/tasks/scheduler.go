@@ -1350,7 +1350,7 @@ func (s *Scheduler) ListUploadFailureReasons(taskID string, limit int) ([]Upload
 		if !strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
 			continue
 		}
-		reason := normalizeUploadFailureReason(file.UploadError)
+		reason := NormalizeUploadFailureReason(file.UploadError)
 		item := agg[reason]
 		item.Reason = reason
 		item.Count++
@@ -1386,7 +1386,7 @@ func (s *Scheduler) ListUploadFailureReasons(taskID string, limit int) ([]Upload
 	return out, nil
 }
 
-func normalizeUploadFailureReason(reason string) string {
+func NormalizeUploadFailureReason(reason string) string {
 	normalized := strings.Join(strings.Fields(strings.TrimSpace(reason)), " ")
 	if normalized == "" {
 		return "unknown"

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -284,16 +285,11 @@ FROM binlog_files
 WHERE upload_state = 'UPLOAD_FAILED';
 `
 
-const listUploadFailureReasonsSQL = `
-SELECT COALESCE(NULLIF(TRIM(upload_error), ''), 'unknown') AS reason,
-       COUNT(*) AS cnt,
-       MAX(COALESCE(uploaded_at, sealed_at, created_at)) AS latest_time
+const listUploadFailureReasonDetailsSQL = `
+SELECT upload_error, uploaded_at, sealed_at, created_at
 FROM binlog_files
 WHERE task_id = ?
-  AND upload_state = 'UPLOAD_FAILED'
-GROUP BY reason
-ORDER BY cnt DESC, latest_time DESC, reason ASC
-LIMIT ?;
+  AND upload_state = 'UPLOAD_FAILED';
 `
 
 const loadTaskRunStateSQL = `
@@ -864,22 +860,58 @@ func (s *MySQLTaskStore) ListUploadFailureReasons(ctx context.Context, taskID st
 		limit = 200
 	}
 
-	rows, err := s.db.QueryContext(ctx, listUploadFailureReasonsSQL, taskID, limit)
+	rows, err := s.db.QueryContext(ctx, listUploadFailureReasonDetailsSQL, taskID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var out []tasks.UploadFailureReason
+	agg := make(map[string]tasks.UploadFailureReason)
 	for rows.Next() {
-		var item tasks.UploadFailureReason
-		if err := rows.Scan(&item.Reason, &item.Count, &item.LatestTime); err != nil {
+		var (
+			rawReason string
+			uploaded  sql.NullTime
+			sealedAt  time.Time
+			createdAt time.Time
+		)
+		if err := rows.Scan(&rawReason, &uploaded, &sealedAt, &createdAt); err != nil {
 			return nil, err
 		}
-		out = append(out, item)
+		reason := tasks.NormalizeUploadFailureReason(rawReason)
+		item := agg[reason]
+		item.Reason = reason
+		item.Count++
+		latest := sealedAt
+		if createdAt.After(latest) {
+			latest = createdAt
+		}
+		if uploaded.Valid && uploaded.Time.After(latest) {
+			latest = uploaded.Time
+		}
+		if latest.After(item.LatestTime) {
+			item.LatestTime = latest
+		}
+		agg[reason] = item
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	out := make([]tasks.UploadFailureReason, 0, len(agg))
+	for _, item := range agg {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if !out[i].LatestTime.Equal(out[j].LatestTime) {
+			return out[i].LatestTime.After(out[j].LatestTime)
+		}
+		return out[i].Reason < out[j].Reason
+	})
+	if limit < len(out) {
+		out = out[:limit]
 	}
 	return out, nil
 }

@@ -396,11 +396,15 @@ func TestMySQLTaskStore_ListUploadFailureReasons(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db)
-	rows := sqlmock.NewRows([]string{"reason", "cnt", "latest_time"}).
-		AddRow("network timeout", int64(5), time.Now()).
-		AddRow("permission denied", int64(2), time.Now().Add(-time.Minute))
-	mock.ExpectQuery(regexp.QuoteMeta(listUploadFailureReasonsSQL)).
-		WithArgs("1", 20).
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{"upload_error", "uploaded_at", "sealed_at", "created_at"}).
+		AddRow(" network   timeout ", nil, now.Add(-2*time.Minute), now.Add(-4*time.Minute)).
+		AddRow("network timeout", nil, now.Add(-1*time.Minute), now.Add(-3*time.Minute)).
+		AddRow("network timeout", nil, now.Add(-90*time.Second), now.Add(-200*time.Second)).
+		AddRow("permission denied", nil, now.Add(-3*time.Minute), now.Add(-5*time.Minute)).
+		AddRow("permission denied", now.Add(-30*time.Second), now.Add(-10*time.Minute), now.Add(-11*time.Minute))
+	mock.ExpectQuery(regexp.QuoteMeta(listUploadFailureReasonDetailsSQL)).
+		WithArgs("1").
 		WillReturnRows(rows)
 
 	items, err := store.ListUploadFailureReasons(context.Background(), "1", 20)
@@ -410,11 +414,17 @@ func TestMySQLTaskStore_ListUploadFailureReasons(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(items))
 	}
-	if items[0].Reason != "network timeout" || items[0].Count != 5 {
+	if items[0].Reason != "network timeout" || items[0].Count != 3 {
 		t.Fatalf("unexpected first row: %+v", items[0])
+	}
+	if !items[0].LatestTime.Equal(now.Add(-1 * time.Minute)) {
+		t.Fatalf("unexpected first row latest_time: %v", items[0].LatestTime)
 	}
 	if items[1].Reason != "permission denied" || items[1].Count != 2 {
 		t.Fatalf("unexpected second row: %+v", items[1])
+	}
+	if !items[1].LatestTime.Equal(now.Add(-30 * time.Second)) {
+		t.Fatalf("unexpected second row latest_time: %v", items[1].LatestTime)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
