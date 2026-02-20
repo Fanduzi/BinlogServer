@@ -380,6 +380,10 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskRetryUpload(w, r, taskID)
 		return
 	}
+	if len(parts) == 3 && parts[1] == "upload-failures" && parts[2] == "reasons" {
+		s.handleTaskUploadFailureReasons(w, r, taskID)
+		return
+	}
 	if len(parts) != 2 {
 		http.NotFound(w, r)
 		return
@@ -518,6 +522,30 @@ func (s *Server) handleTaskRetryUpload(w http.ResponseWriter, r *http.Request, t
 	writeJSON(w, http.StatusOK, stats)
 }
 
+func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit, err := parseUploadFailureReasonsLimit(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	items, err := s.tasks.ListUploadFailureReasons(taskID, limit)
+	if err != nil {
+		if errors.Is(err, tasks.ErrTaskNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
 func parseLimit(r *http.Request, fallback int) int {
 	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 	if raw == "" {
@@ -537,6 +565,18 @@ func parseRetryUploadLimit(r *http.Request) (int, error) {
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 || n > 1000 {
+		return 0, errors.New("invalid limit")
+	}
+	return n, nil
+}
+
+func parseUploadFailureReasonsLimit(r *http.Request) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return 20, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 || n > 200 {
 		return 0, errors.New("invalid limit")
 	}
 	return n, nil

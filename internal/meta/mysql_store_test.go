@@ -388,6 +388,40 @@ func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
 	}
 }
 
+func TestMySQLTaskStore_ListUploadFailureReasons(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	rows := sqlmock.NewRows([]string{"reason", "cnt", "latest_time"}).
+		AddRow("network timeout", int64(5), time.Now()).
+		AddRow("permission denied", int64(2), time.Now().Add(-time.Minute))
+	mock.ExpectQuery(regexp.QuoteMeta(listUploadFailureReasonsSQL)).
+		WithArgs("1", 20).
+		WillReturnRows(rows)
+
+	items, err := store.ListUploadFailureReasons(context.Background(), "1", 20)
+	if err != nil {
+		t.Fatalf("ListUploadFailureReasons returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(items))
+	}
+	if items[0].Reason != "network timeout" || items[0].Count != 5 {
+		t.Fatalf("unexpected first row: %+v", items[0])
+	}
+	if items[1].Reason != "permission denied" || items[1].Count != 2 {
+		t.Fatalf("unexpected second row: %+v", items[1])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

@@ -253,3 +253,111 @@ func TestScheduler_RetryFailedUploadsRejectsConcurrentJob(t *testing.T) {
 		t.Fatalf("first retry returned error: %v", err)
 	}
 }
+
+func TestScheduler_RetryFailedUploadsUpdatesMetrics(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := newRetryTestFileStore()
+	uploader := &retryTestUploader{
+		errByObject: map[string]error{
+			"prefix/cluster-a/uuid/mysql-bin.000031": errors.New("upload failed"),
+		},
+	}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	store.files[task.ID] = []BinlogFile{
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000030",
+			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000030"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000030",
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000031",
+			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000031"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000031",
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000032",
+			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000032"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOADED",
+			ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000032",
+		},
+	}
+
+	if _, err := s.RetryFailedUploads(task.ID, 100); err != nil {
+		t.Fatalf("RetryFailedUploads returned error: %v", err)
+	}
+
+	metrics := s.GetUploadRetryMetrics()
+	if metrics.Success != 1 || metrics.Failed != 1 || metrics.Skipped != 1 {
+		t.Fatalf("unexpected retry metrics: %+v", metrics)
+	}
+	if metrics.LastTs <= 0 {
+		t.Fatalf("expected LastTs > 0, got %d", metrics.LastTs)
+	}
+}
+
+func TestScheduler_ListUploadFailureReasons(t *testing.T) {
+	store := newRetryTestFileStore()
+	s := NewScheduler(WithFileStore(store))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	now := time.Now()
+	store.files[task.ID] = []BinlogFile{
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000040",
+			UploadState: "UPLOAD_FAILED",
+			UploadError: "network timeout",
+			SealedAt:    now.Add(-3 * time.Minute),
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000041",
+			UploadState: "UPLOAD_FAILED",
+			UploadError: " network timeout ",
+			SealedAt:    now.Add(-1 * time.Minute),
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000042",
+			UploadState: "UPLOAD_FAILED",
+			UploadError: "permission denied",
+			SealedAt:    now,
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000043",
+			UploadState: "UPLOADED",
+			UploadError: "",
+			SealedAt:    now,
+		},
+	}
+
+	reasons, err := s.ListUploadFailureReasons(task.ID, 20)
+	if err != nil {
+		t.Fatalf("ListUploadFailureReasons returned error: %v", err)
+	}
+	if len(reasons) != 2 {
+		t.Fatalf("expected 2 reasons, got %d", len(reasons))
+	}
+	if reasons[0].Reason != "network timeout" || reasons[0].Count != 2 {
+		t.Fatalf("unexpected first reason item: %+v", reasons[0])
+	}
+	if reasons[1].Reason != "permission denied" || reasons[1].Count != 1 {
+		t.Fatalf("unexpected second reason item: %+v", reasons[1])
+	}
+}

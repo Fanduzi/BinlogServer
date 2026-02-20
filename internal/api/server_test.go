@@ -713,6 +713,8 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 		"binlog_server_checkpoint_age_seconds",
 		"binlog_server_worker_online",
 		"binlog_server_upload_failures_total",
+		"binlog_server_upload_retry_total",
+		"binlog_server_upload_retry_last_ts",
 	}
 	for _, name := range required {
 		if !strings.Contains(body, name) {
@@ -764,6 +766,104 @@ func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
 	}
 }
 
+func TestTaskAPI_MetricsIncludeRetryUploadCounters(t *testing.T) {
+	fileStore := newFakeFileStore()
+	tmpDir := t.TempDir()
+	okFile := filepath.Join(tmpDir, "mysql-bin.000200")
+	failFile := filepath.Join(tmpDir, "mysql-bin.000201")
+	if err := os.WriteFile(okFile, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write okFile failed: %v", err)
+	}
+	if err := os.WriteFile(failFile, []byte("fail"), 0o644); err != nil {
+		t.Fatalf("write failFile failed: %v", err)
+	}
+	fileStore.files["1"] = []tasks.BinlogFile{
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000200",
+			FilePath:    okFile,
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/key/mysql-bin.000200",
+		},
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000201",
+			FilePath:    failFile,
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/key/mysql-bin.000201",
+		},
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000202",
+			FilePath:    failFile,
+			SealedAt:    time.Now(),
+			UploadState: "UPLOADED",
+			ObjectKey:   "prefix/key/mysql-bin.000202",
+		},
+	}
+	uploader := &fakeRetryUploader{
+		errByObject: map[string]error{
+			"prefix/key/mysql-bin.000201": errors.New("network timeout"),
+		},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithFileStore(fileStore), tasks.WithFileUploader(uploader))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	retryResp := httptest.NewRecorder()
+	retryReq := httptest.NewRequest(http.MethodPost, "/api/tasks/1/files/retry-upload?limit=100", nil)
+	handler.ServeHTTP(retryResp, retryReq)
+	if retryResp.Code != http.StatusOK {
+		t.Fatalf("expected retry 200, got %d body=%s", retryResp.Code, retryResp.Body.String())
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected metrics 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	success, ok, err := readPromMetricValueWithLabels(resp.Body.String(), "binlog_server_upload_retry_total", map[string]string{"result": "success"})
+	if err != nil {
+		t.Fatalf("read success metric failed: %v", err)
+	}
+	if !ok || success != 1 {
+		t.Fatalf("expected success=1, got ok=%v value=%v body=%s", ok, success, resp.Body.String())
+	}
+	failed, ok, err := readPromMetricValueWithLabels(resp.Body.String(), "binlog_server_upload_retry_total", map[string]string{"result": "failed"})
+	if err != nil {
+		t.Fatalf("read failed metric failed: %v", err)
+	}
+	if !ok || failed != 1 {
+		t.Fatalf("expected failed=1, got ok=%v value=%v body=%s", ok, failed, resp.Body.String())
+	}
+	skipped, ok, err := readPromMetricValueWithLabels(resp.Body.String(), "binlog_server_upload_retry_total", map[string]string{"result": "skipped"})
+	if err != nil {
+		t.Fatalf("read skipped metric failed: %v", err)
+	}
+	if !ok || skipped != 1 {
+		t.Fatalf("expected skipped=1, got ok=%v value=%v body=%s", ok, skipped, resp.Body.String())
+	}
+
+	lastTS, ok, err := readPromMetricValue(resp.Body.String(), "binlog_server_upload_retry_last_ts")
+	if err != nil {
+		t.Fatalf("read last_ts metric failed: %v", err)
+	}
+	if !ok || lastTS <= 0 {
+		t.Fatalf("expected last_ts > 0, got ok=%v value=%v body=%s", ok, lastTS, resp.Body.String())
+	}
+}
+
 func readPromMetricValue(body, metricName string) (float64, bool, error) {
 	lines := strings.Split(body, "\n")
 	prefix := metricName + " "
@@ -780,6 +880,114 @@ func readPromMetricValue(body, metricName string) (float64, bool, error) {
 		return v, true, nil
 	}
 	return 0, false, nil
+}
+
+func readPromMetricValueWithLabels(body, metricName string, expectedLabels map[string]string) (float64, bool, error) {
+	lines := strings.Split(body, "\n")
+	prefix := metricName + "{"
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		rightBrace := strings.Index(line, "}")
+		if rightBrace < 0 || rightBrace+1 >= len(line) {
+			continue
+		}
+		labelsRaw := strings.TrimPrefix(line[:rightBrace+1], metricName+"{")
+		labelsRaw = strings.TrimSuffix(labelsRaw, "}")
+		labels := map[string]string{}
+		if strings.TrimSpace(labelsRaw) != "" {
+			parts := strings.Split(labelsRaw, ",")
+			for _, part := range parts {
+				pair := strings.SplitN(strings.TrimSpace(part), "=", 2)
+				if len(pair) != 2 {
+					continue
+				}
+				labels[pair[0]] = strings.Trim(pair[1], `"`)
+			}
+		}
+		matched := true
+		for key, want := range expectedLabels {
+			if labels[key] != want {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		valueText := strings.TrimSpace(line[rightBrace+1:])
+		v, err := strconv.ParseFloat(valueText, 64)
+		if err != nil {
+			return 0, false, err
+		}
+		return v, true, nil
+	}
+	return 0, false, nil
+}
+
+func TestTaskAPI_ListUploadFailureReasons(t *testing.T) {
+	fileStore := newFakeFileStore()
+	now := time.Now()
+	fileStore.files["1"] = []tasks.BinlogFile{
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000300",
+			UploadState: "UPLOAD_FAILED",
+			UploadError: "network timeout",
+			SealedAt:    now.Add(-2 * time.Minute),
+		},
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000301",
+			UploadState: "UPLOAD_FAILED",
+			UploadError: " network timeout ",
+			SealedAt:    now.Add(-1 * time.Minute),
+		},
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000302",
+			UploadState: "UPLOAD_FAILED",
+			UploadError: "permission denied",
+			SealedAt:    now,
+		},
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000303",
+			UploadState: "UPLOADED",
+			UploadError: "",
+			SealedAt:    now,
+		},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithFileStore(fileStore))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/1/upload-failures/reasons?limit=20", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var reasons []map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &reasons); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if len(reasons) != 2 {
+		t.Fatalf("expected 2 aggregated reasons, got %d body=%s", len(reasons), resp.Body.String())
+	}
+	if reasons[0]["reason"] != "network timeout" || int(reasons[0]["count"].(float64)) != 2 {
+		t.Fatalf("unexpected first reason item: %+v", reasons[0])
+	}
 }
 
 func TestTaskAPI_ListEvents(t *testing.T) {
@@ -1558,6 +1766,7 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 		"/api/tasks/{id}/checkpoint",
 		"/api/tasks/{id}/events",
 		"/api/tasks/{id}/files",
+		"/api/tasks/{id}/upload-failures/reasons",
 		"/api/tasks/{id}/replication",
 		"/api/tasks/{id}/lease",
 		"/api/tasks/{id}/runs",

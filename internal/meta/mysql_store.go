@@ -284,6 +284,18 @@ FROM binlog_files
 WHERE upload_state = 'UPLOAD_FAILED';
 `
 
+const listUploadFailureReasonsSQL = `
+SELECT COALESCE(NULLIF(TRIM(upload_error), ''), 'unknown') AS reason,
+       COUNT(*) AS cnt,
+       MAX(COALESCE(uploaded_at, sealed_at, created_at)) AS latest_time
+FROM binlog_files
+WHERE task_id = ?
+  AND upload_state = 'UPLOAD_FAILED'
+GROUP BY reason
+ORDER BY cnt DESC, latest_time DESC, reason ASC
+LIMIT ?;
+`
+
 const loadTaskRunStateSQL = `
 SELECT run_id
 FROM backup_tasks
@@ -842,6 +854,34 @@ func (s *MySQLTaskStore) CountUploadFailures(ctx context.Context) (int64, error)
 		return 0, err
 	}
 	return count, nil
+}
+
+func (s *MySQLTaskStore) ListUploadFailureReasons(ctx context.Context, taskID string, limit int) ([]tasks.UploadFailureReason, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	rows, err := s.db.QueryContext(ctx, listUploadFailureReasonsSQL, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []tasks.UploadFailureReason
+	for rows.Next() {
+		var item tasks.UploadFailureReason
+		if err := rows.Scan(&item.Reason, &item.Count, &item.LatestTime); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *MySQLTaskStore) ListTaskRuns(ctx context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {

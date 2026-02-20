@@ -33,6 +33,8 @@ type taskService interface {
 	ListEvents(id string, limit int) ([]tasks.TaskEvent, error)
 	ListFiles(id string, limit int) ([]tasks.BinlogFile, error)
 	RetryFailedUploads(id string, limit int) (tasks.UploadRetryStats, error)
+	GetUploadRetryMetrics() tasks.UploadRetryMetrics
+	ListUploadFailureReasons(id string, limit int) ([]tasks.UploadFailureReason, error)
 	ListRuns(id string, limit int) ([]tasks.TaskRun, error)
 	ListWorkerHeartbeats(limit int) ([]tasks.WorkerHeartbeat, error)
 	ListTasks() []tasks.Task
@@ -201,6 +203,23 @@ func (s *Server) renderPrometheusMetrics() string {
 		}
 	}
 	writePromSample(&b, "binlog_server_upload_failures_total", nil, float64(uploadFailuresTotal))
+
+	b.WriteString("# HELP binlog_server_upload_retry_total Total retry-upload API result count.\n")
+	b.WriteString("# TYPE binlog_server_upload_retry_total counter\n")
+	retryMetrics := s.tasks.GetUploadRetryMetrics()
+	writePromSample(&b, "binlog_server_upload_retry_total", map[string]string{
+		"result": "success",
+	}, float64(retryMetrics.Success))
+	writePromSample(&b, "binlog_server_upload_retry_total", map[string]string{
+		"result": "failed",
+	}, float64(retryMetrics.Failed))
+	writePromSample(&b, "binlog_server_upload_retry_total", map[string]string{
+		"result": "skipped",
+	}, float64(retryMetrics.Skipped))
+
+	b.WriteString("# HELP binlog_server_upload_retry_last_ts Last retry-upload API execution time in unix seconds.\n")
+	b.WriteString("# TYPE binlog_server_upload_retry_last_ts gauge\n")
+	writePromSample(&b, "binlog_server_upload_retry_last_ts", nil, float64(retryMetrics.LastTs))
 
 	return b.String()
 }

@@ -114,6 +114,19 @@ func (s *Server) swaggerTaskFilesDoc() {}
 // @Router /api/tasks/{id}/files/retry-upload [post]
 func (s *Server) swaggerTaskRetryUploadDoc() {}
 
+// swaggerTaskUploadFailureReasonsDoc godoc
+// @Summary Aggregate upload failure reasons
+// @Tags Tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Param limit query int false "Failure reason list limit" default(20) maximum(200)
+// @Success 200 {array} tasks.UploadFailureReason
+// @Failure 400 {string} string
+// @Failure 404 {string} string
+// @Failure 500 {string} string
+// @Router /api/tasks/{id}/upload-failures/reasons [get]
+func (s *Server) swaggerTaskUploadFailureReasonsDoc() {}
+
 // swaggerTaskReplicationDoc godoc
 // @Summary Get task replication delay and latest position
 // @Tags Tasks

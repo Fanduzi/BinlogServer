@@ -46,6 +46,19 @@ type UploadRetryStats struct {
 	Skipped   int `json:"skipped"`
 }
 
+type UploadRetryMetrics struct {
+	Success int64 `json:"success"`
+	Failed  int64 `json:"failed"`
+	Skipped int64 `json:"skipped"`
+	LastTs  int64 `json:"last_ts"`
+}
+
+type UploadFailureReason struct {
+	Reason     string    `json:"reason"`
+	Count      int64     `json:"count"`
+	LatestTime time.Time `json:"latest_time,omitempty"`
+}
+
 type StartMode string
 
 const (

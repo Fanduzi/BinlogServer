@@ -16,6 +16,8 @@
 - `binlog_server_checkpoint_age_seconds{task_id="<TASK_ID>"}`
 - `binlog_server_worker_online{worker_id="<WORKER_ID>"}`
 - `binlog_server_upload_failures_total`（当前元数据中 `UPLOAD_FAILED` 记录总数）
+- `binlog_server_upload_retry_total{result="success|failed|skipped"}`（手动调用 `retry-upload` API 后按结果累加）
+- `binlog_server_upload_retry_last_ts`（最近一次手动调用 `retry-upload` API 的 unix seconds 时间戳）
 
 ## 2. Prometheus 抓取配置示例
 
@@ -71,6 +73,24 @@ groups:
         annotations:
           summary: "Upload failures detected"
           description: "upload failed file records exist"
+
+      - alert: BinlogServerUploadRetryHasFailures
+        expr: increase(binlog_server_upload_retry_total{result="failed"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retry upload has failed attempts"
+          description: "retry-upload API reported failed results in last 10m"
+
+      - alert: BinlogServerUploadRetryNotTriggeredLongTime
+        expr: time() - binlog_server_upload_retry_last_ts > 86400
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Retry upload not triggered for over 24h"
+          description: "No manual retry-upload execution observed in the last 24h"
 ```
 
 ## 4. Runbook（告警排查步骤）
@@ -101,8 +121,9 @@ groups:
 
 ### 4.4 Upload Failures Detected
 
-1. 查询 `/api/tasks/{id}/files` 筛查 `UPLOAD_FAILED` 记录。
-2. 检查对象存储凭证、网络、bucket 权限与 endpoint 可达性。
-3. 检查上传失败错误文案（`upload_error`）定位具体原因。
-4. 修复外部依赖后手动触发补传：`POST /api/tasks/{id}/files/retry-upload?limit=100`。
-5. 再次查询 `/api/tasks/{id}/files`，确认历史失败文件开始转为 `UPLOADED`。
+1. 先看指标：`binlog_server_upload_failures_total` 与 `increase(binlog_server_upload_retry_total{result="failed"}[10m])`，确认是否仍有失败积压且最近补传仍失败。
+2. 调用聚合 API：`GET /api/tasks/{id}/upload-failures/reasons?limit=20`，按 `reason/count/latest_time` 快速定位主要失败类型。
+3. 再查询 `/api/tasks/{id}/files` 抽样失败文件，确认是否集中在同一 source/object_key 或同一时间窗口。
+4. 检查对象存储凭证、网络、bucket 权限与 endpoint 可达性，按聚合原因优先处理高频失败。
+5. 修复后触发补传：`POST /api/tasks/{id}/files/retry-upload?limit=100`，观察 `binlog_server_upload_retry_total{result="success"}` 是否增长、`result="failed"` 是否收敛。
+6. 二次确认：`/api/tasks/{id}/upload-failures/reasons` 高频原因消退，`/api/tasks/{id}/files` 中历史失败文件逐步转为 `UPLOADED`。

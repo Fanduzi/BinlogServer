@@ -57,11 +57,12 @@ DoD（完成定义）：
 
 ### B. 上传可靠性（M2）
 
-- [ ] `Task 23`：上传失败补偿机制（最小版）  
+- [x] `Task 23`：上传失败补偿机制（最小版）  
   建议范围：
   - 增加“补传触发入口”（API/CLI 二选一）
   - 只处理 `UPLOAD_FAILED` 文件
   - 保持 best-effort 主链路不变
+  证据：`./scripts/e2e/run-suite.sh --scenarios smoke-retry-upload`。
 
 - [x] `Task 23.1`：object key 命名升级（集群唯一标识）  
   建议范围：

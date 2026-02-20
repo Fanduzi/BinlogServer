@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,6 +97,10 @@ type FileUploader interface {
 
 type uploadFailureCounter interface {
 	CountUploadFailures(ctx context.Context) (int64, error)
+}
+
+type uploadFailureReasonReader interface {
+	ListUploadFailureReasons(ctx context.Context, taskID string, limit int) ([]UploadFailureReason, error)
 }
 
 type Option func(*Scheduler)
@@ -198,6 +203,10 @@ type Scheduler struct {
 	fileStore        FileStore
 	fileUploader     FileUploader
 	retryUploads     map[string]struct{}
+	retrySuccess     int64
+	retryFailed      int64
+	retrySkipped     int64
+	retryLastTS      int64
 	eventSeq         int64
 }
 
@@ -1226,6 +1235,8 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 		stats.Succeeded++
 	}
 
+	s.recordUploadRetryMetrics(stats)
+
 	return stats, nil
 }
 
@@ -1281,6 +1292,106 @@ func (s *Scheduler) CountUploadFailures() (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+func (s *Scheduler) GetUploadRetryMetrics() UploadRetryMetrics {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return UploadRetryMetrics{
+		Success: s.retrySuccess,
+		Failed:  s.retryFailed,
+		Skipped: s.retrySkipped,
+		LastTs:  s.retryLastTS,
+	}
+}
+
+func (s *Scheduler) recordUploadRetryMetrics(stats UploadRetryStats) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retrySuccess += int64(stats.Succeeded)
+	s.retryFailed += int64(stats.Failed)
+	s.retrySkipped += int64(stats.Skipped)
+	s.retryLastTS = time.Now().Unix()
+}
+
+func (s *Scheduler) ListUploadFailureReasons(taskID string, limit int) ([]UploadFailureReason, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if err := s.syncTasksFromStore(); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if _, ok := s.tasks[taskID]; !ok {
+		s.mu.Unlock()
+		return nil, ErrTaskNotFound
+	}
+	fileStore := s.fileStore
+	s.mu.Unlock()
+
+	if fileStore == nil {
+		return []UploadFailureReason{}, nil
+	}
+	if reader, ok := fileStore.(uploadFailureReasonReader); ok {
+		return reader.ListUploadFailureReasons(context.Background(), taskID, limit)
+	}
+
+	const allFilesLimit = int(^uint(0) >> 1)
+	files, err := fileStore.ListBinlogFiles(context.Background(), taskID, allFilesLimit)
+	if err != nil {
+		return nil, err
+	}
+	agg := make(map[string]UploadFailureReason)
+	for _, file := range files {
+		if !strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
+			continue
+		}
+		reason := normalizeUploadFailureReason(file.UploadError)
+		item := agg[reason]
+		item.Reason = reason
+		item.Count++
+		latest := file.UploadedAt
+		if latest.IsZero() {
+			latest = file.SealedAt
+		}
+		if latest.IsZero() {
+			latest = file.CreatedAt
+		}
+		if latest.After(item.LatestTime) {
+			item.LatestTime = latest
+		}
+		agg[reason] = item
+	}
+
+	out := make([]UploadFailureReason, 0, len(agg))
+	for _, item := range agg {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if !out[i].LatestTime.Equal(out[j].LatestTime) {
+			return out[i].LatestTime.After(out[j].LatestTime)
+		}
+		return out[i].Reason < out[j].Reason
+	})
+	if limit < len(out) {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func normalizeUploadFailureReason(reason string) string {
+	normalized := strings.Join(strings.Fields(strings.TrimSpace(reason)), " ")
+	if normalized == "" {
+		return "unknown"
+	}
+	return normalized
 }
 
 func (s *Scheduler) ListRuns(taskID string, limit int) ([]TaskRun, error) {
