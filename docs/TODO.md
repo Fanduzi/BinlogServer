@@ -51,8 +51,9 @@ DoD（完成定义）：
 
 ### A. 一致性与恢复（M2）
 
-- [ ] `Task 22`：worker 在 OPEN 阶段崩溃接管 e2e  
-  验收：checkpoint 持续推进、stale `.open.e*` 清理、md5 抽样一致。
+- [x] `Task 22`：worker 在 OPEN 阶段崩溃接管 e2e  
+  验收：checkpoint 持续推进、stale `.open.e*` 清理、md5 抽样一致。  
+  证据：`./scripts/e2e/run-suite.sh --scenarios smoke-worker-crash-recovery`（场景脚本：`scripts/e2e/smoke-worker-crash-recovery.sh`）。
 
 ### B. 上传可靠性（M2）
 

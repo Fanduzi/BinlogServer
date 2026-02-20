@@ -267,6 +267,17 @@ ORDER BY sealed_at DESC
 LIMIT ?;
 `
 
+const listFailedSealedBinlogFilesSQL = `
+SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
+       object_key, upload_state, upload_error, uploaded_at
+FROM binlog_files
+WHERE task_id = ?
+  AND upload_state = 'UPLOAD_FAILED'
+  AND file_name NOT LIKE '%.open.e%'
+ORDER BY sealed_at DESC
+LIMIT ?;
+`
+
 const countUploadFailuresSQL = `
 SELECT COUNT(*)
 FROM binlog_files
@@ -743,6 +754,51 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 	}
 
 	rows, err := s.db.QueryContext(ctx, listBinlogFilesSQL, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []tasks.BinlogFile
+	for rows.Next() {
+		var item tasks.BinlogFile
+		var uploadedAt sql.NullTime
+		if err := rows.Scan(
+			&item.TaskID,
+			&item.FileName,
+			&item.FilePath,
+			&item.SizeBytes,
+			&item.StartPos,
+			&item.EndPos,
+			&item.CreatedAt,
+			&item.SealedAt,
+			&item.ObjectKey,
+			&item.UploadState,
+			&item.UploadError,
+			&uploadedAt,
+		); err != nil {
+			return nil, err
+		}
+		if uploadedAt.Valid {
+			item.UploadedAt = uploadedAt.Time
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	rows, err := s.db.QueryContext(ctx, listFailedSealedBinlogFilesSQL, taskID, limit)
 	if err != nil {
 		return nil, err
 	}

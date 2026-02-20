@@ -38,6 +38,7 @@ Scenarios:
   smoke-control-plane-failover
   smoke-worker-crash-recovery
   smoke-invalid-inputs
+  smoke-retry-upload
 EOF
 }
 
@@ -109,6 +110,40 @@ wait_server_ready() {
   return 1
 }
 
+start_suite_server() {
+  if [[ -n "$SERVER_PID" ]]; then
+    return 0
+  fi
+  if [[ -n "$META_DSN" ]]; then
+    BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+  else
+    BINLOG_SERVER_DATA_DIR="$DATA_DIR" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
+  fi
+  SERVER_PID=$!
+  wait_server_ready
+  echo "[suite] binlog-server ready pid=$SERVER_PID"
+}
+
+stop_suite_server() {
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" >/dev/null 2>&1 || true
+    wait "$SERVER_PID" >/dev/null 2>&1 || true
+    SERVER_PID=""
+  fi
+}
+
+is_self_managed_scenario() {
+  local name="$1"
+  case "$name" in
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 run_scenario() {
   local name="$1"
   case "$name" in
@@ -145,6 +180,9 @@ run_scenario() {
     smoke-invalid-inputs)
       "$ROOT_DIR/scripts/e2e/smoke-invalid-inputs.sh"
       ;;
+    smoke-retry-upload)
+      E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-retry-upload.sh"
+      ;;
     *)
       echo "unsupported scenario: $name" >&2
       return 1
@@ -165,10 +203,7 @@ has_scenario() {
 }
 
 cleanup() {
-  if [[ -n "$SERVER_PID" ]]; then
-    kill "$SERVER_PID" >/dev/null 2>&1 || true
-    wait "$SERVER_PID" >/dev/null 2>&1 || true
-  fi
+  stop_suite_server
   if [[ "$KEEP_ENV" -eq 0 ]]; then
     "$ROOT_DIR/scripts/e2e/down.sh" >/dev/null 2>&1 || true
   fi
@@ -205,23 +240,13 @@ main() {
   fi
 
   mkdir -p "$DATA_DIR"
-  if has_scenario "smoke-cluster-roles" "${scenarios[@]}" || has_scenario "smoke-control-plane-failover" "${scenarios[@]}" || has_scenario "smoke-worker-crash-recovery" "${scenarios[@]}"; then
-    if [[ "${#scenarios[@]}" -ne 1 ]]; then
-      echo "scenario smoke-cluster-roles/smoke-control-plane-failover/smoke-worker-crash-recovery must run alone" >&2
-      exit 1
-    fi
-  else
-    if [[ -n "$META_DSN" ]]; then
-      BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
-    else
-      BINLOG_SERVER_DATA_DIR="$DATA_DIR" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
-    fi
-    SERVER_PID=$!
-    wait_server_ready
-    echo "[suite] binlog-server ready pid=$SERVER_PID"
-  fi
 
   for s in "${scenarios[@]}"; do
+    if is_self_managed_scenario "$s"; then
+      stop_suite_server
+    else
+      start_suite_server
+    fi
     echo "[suite] scenario=$s"
     run_scenario "$s"
     echo "[suite] scenario=$s done"

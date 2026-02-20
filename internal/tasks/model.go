@@ -39,6 +39,13 @@ type TaskPatch struct {
 	Storage    *Storage      `json:"storage,omitempty"`
 }
 
+type UploadRetryStats struct {
+	Scanned   int `json:"scanned"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
+}
+
 type StartMode string
 
 const (

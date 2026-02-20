@@ -68,6 +68,9 @@ func TestFinalizeSealedFile_BestEffortOnUploadFailure(t *testing.T) {
 	if last.UploadState != "UPLOAD_FAILED" {
 		t.Fatalf("expected UPLOAD_FAILED, got %s", last.UploadState)
 	}
+	if last.ObjectKey == "" {
+		t.Fatal("expected object key recorded on upload failure")
+	}
 }
 
 func TestFinalizeSealedFile_UploadSuccess(t *testing.T) {

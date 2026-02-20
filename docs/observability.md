@@ -104,5 +104,5 @@ groups:
 1. 查询 `/api/tasks/{id}/files` 筛查 `UPLOAD_FAILED` 记录。
 2. 检查对象存储凭证、网络、bucket 权限与 endpoint 可达性。
 3. 检查上传失败错误文案（`upload_error`）定位具体原因。
-4. 修复后观察新封口文件上传状态是否恢复 `UPLOADED`。
-5. 持续有失败时，先保障拉流稳定，再单独处理历史补传策略。
+4. 修复外部依赖后手动触发补传：`POST /api/tasks/{id}/files/retry-upload?limit=100`。
+5. 再次查询 `/api/tasks/{id}/files`，确认历史失败文件开始转为 `UPLOADED`。

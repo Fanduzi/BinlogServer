@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -510,6 +512,22 @@ func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit 
 	return out, nil
 }
 
+type fakeRetryUploader struct {
+	errByObject map[string]error
+}
+
+func (u *fakeRetryUploader) UploadFile(_ context.Context, _ string, localPath, objectKey string) error {
+	if _, err := os.Stat(localPath); err != nil {
+		return err
+	}
+	if u.errByObject != nil {
+		if err := u.errByObject[objectKey]; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	reader := &fakeCheckpointReader{
 		checkpoints: map[string]binlog.Checkpoint{
@@ -825,6 +843,110 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 	}
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file item, got %d", len(files))
+	}
+}
+
+func TestTaskAPI_RetryUploadLimitValidation(t *testing.T) {
+	fileStore := newFakeFileStore()
+	uploader := &fakeRetryUploader{}
+	scheduler := tasks.NewScheduler(tasks.WithFileStore(fileStore), tasks.WithFileUploader(uploader))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	cases := []string{
+		"/api/tasks/1/files/retry-upload?limit=0",
+		"/api/tasks/1/files/retry-upload?limit=1001",
+		"/api/tasks/1/files/retry-upload?limit=abc",
+	}
+	for _, path := range cases {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestTaskAPI_RetryUploadReturnsStats(t *testing.T) {
+	fileStore := newFakeFileStore()
+	tmpDir := t.TempDir()
+	file1 := filepath.Join(tmpDir, "mysql-bin.000100")
+	file2 := filepath.Join(tmpDir, "mysql-bin.000101")
+	openFile := filepath.Join(tmpDir, "mysql-bin.000102.open.e1")
+	if err := os.WriteFile(file1, []byte("a"), 0o644); err != nil {
+		t.Fatalf("write file1 failed: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("b"), 0o644); err != nil {
+		t.Fatalf("write file2 failed: %v", err)
+	}
+	if err := os.WriteFile(openFile, []byte("c"), 0o644); err != nil {
+		t.Fatalf("write open file failed: %v", err)
+	}
+
+	fileStore.files["1"] = []tasks.BinlogFile{
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000100",
+			FilePath:    file1,
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/key/mysql-bin.000100",
+		},
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000101",
+			FilePath:    file2,
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/key/mysql-bin.000101",
+		},
+		{
+			TaskID:      "1",
+			FileName:    "mysql-bin.000102.open.e1",
+			FilePath:    openFile,
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/key/mysql-bin.000102.open.e1",
+		},
+	}
+
+	uploader := &fakeRetryUploader{
+		errByObject: map[string]error{
+			"prefix/key/mysql-bin.000101": errors.New("upload failed"),
+		},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithFileStore(fileStore), tasks.WithFileUploader(uploader))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/1/files/retry-upload?limit=100", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var stats map[string]int
+	if err := json.Unmarshal(resp.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if stats["succeeded"] != 1 || stats["failed"] != 1 || stats["skipped"] != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
 	}
 }
 

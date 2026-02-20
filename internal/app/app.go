@@ -85,6 +85,7 @@ func (a *App) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		opts = append(opts, tasks.WithFileUploader(uploader))
 		runnerOpts = append(runnerOpts, replication.WithUploader(uploader, a.cfg.UploadPrefix))
 	}
 

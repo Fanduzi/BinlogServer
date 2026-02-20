@@ -43,6 +43,7 @@
 ./scripts/e2e/run-suite.sh --scenarios smoke-control-plane-failover
 ./scripts/e2e/run-suite.sh --scenarios smoke-worker-crash-recovery
 ./scripts/e2e/run-suite.sh --scenarios smoke-invalid-inputs
+./scripts/e2e/run-suite.sh --scenarios smoke-retry-upload
 ```
 
 也可用 `Makefile`：
@@ -70,6 +71,7 @@ make e2e SCENARIOS=smoke,compression
 - `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
 - `smoke-invalid-inputs.sh`: 验证任务 API 对非法输入返回 `400`（cluster_key/source/start/storage）。
+- `smoke-retry-upload.sh`: 验证上传失败后可通过 `/api/tasks/{id}/files/retry-upload` 人工触发补传，且不影响 checkpoint 推进。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
 说明：当前所有场景创建任务时均显式传入 `cluster_key`（创建/更新必填且全局唯一）。
@@ -124,6 +126,18 @@ make e2e SCENARIOS=smoke,compression
 5. 停任务并到 `STOPPED` 后，校验旧 epoch `OPEN` 文件已清理；若仍有 `OPEN` 文件，必须全部属于 current epoch（允许存在，不计为异常）。
 6. 仅对 sealed 文件集合做命名校验与唯一性校验（`mysql-bin.######`，无异常后缀）。
 7. 抽样对比主库与备份 sealed 文件 md5（1-2 个文件）一致。
+
+## smoke-retry-upload 场景说明
+
+该场景用于验证“上传失败补偿机制（最小版）”：
+
+1. 启动 minio 与 bucket，并以 upload 配置启动 binlog-server。
+2. 创建并启动任务，确认 checkpoint 已建立。
+3. 停止 minio，写入并 rotate，触发 `UPLOAD_FAILED` 文件记录。
+4. 继续写入源库，确认 checkpoint 仍持续推进（best-effort 语义不变）。
+5. 恢复 minio，调用 `POST /api/tasks/{id}/files/retry-upload?limit=100`。
+6. 断言 `succeeded >= 1` 且至少一个文件状态变为 `UPLOADED`。
+7. 再次写入并确认 checkpoint 继续推进。
 
 ## meta-failover 场景说明
 

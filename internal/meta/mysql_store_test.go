@@ -353,6 +353,41 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 }
 
+func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	rows := sqlmock.NewRows([]string{
+		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at",
+	}).AddRow(
+		"1", "mysql-bin.000002", "/tmp/mysql-bin.000002", int64(2048), uint32(4), uint32(2200), time.Now().Add(-time.Minute), time.Now(),
+		"prefix/cluster-a/uuid/mysql-bin.000002", "UPLOAD_FAILED", "network timeout", nil,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(listFailedSealedBinlogFilesSQL)).
+		WithArgs("1", 100).
+		WillReturnRows(rows)
+
+	files, err := store.ListFailedUploadBinlogFiles(context.Background(), "1", 0)
+	if err != nil {
+		t.Fatalf("ListFailedUploadBinlogFiles returned error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].UploadState != "UPLOAD_FAILED" {
+		t.Fatalf("expected upload state UPLOAD_FAILED, got %s", files[0].UploadState)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

@@ -376,6 +376,10 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskEntity(w, r, taskID)
 		return
 	}
+	if len(parts) == 3 && parts[1] == "files" && parts[2] == "retry-upload" {
+		s.handleTaskRetryUpload(w, r, taskID)
+		return
+	}
 	if len(parts) != 2 {
 		http.NotFound(w, r)
 		return
@@ -482,6 +486,38 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleTaskRetryUpload(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit, err := parseRetryUploadLimit(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	stats, err := s.tasks.RetryFailedUploads(taskID, limit)
+	if err != nil {
+		switch {
+		case errors.Is(err, tasks.ErrTaskNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, tasks.ErrInvalidRetryUploadLimit):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, tasks.ErrUploadRetryInProgress):
+			http.Error(w, err.Error(), http.StatusConflict)
+		case errors.Is(err, tasks.ErrUploadRetryNotAvailable):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
 func parseLimit(r *http.Request, fallback int) int {
 	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 	if raw == "" {
@@ -492,6 +528,18 @@ func parseLimit(r *http.Request, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func parseRetryUploadLimit(r *http.Request) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return 100, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 || n > 1000 {
+		return 0, errors.New("invalid limit")
+	}
+	return n, nil
 }
 
 func (s *Server) filterTasksBySource(items []tasks.Task, r *http.Request) ([]tasks.Task, bool, error) {

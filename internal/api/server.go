@@ -32,6 +32,7 @@ type taskService interface {
 	GetCheckpoint(ctx context.Context, id string) (binlog.Checkpoint, bool, error)
 	ListEvents(id string, limit int) ([]tasks.TaskEvent, error)
 	ListFiles(id string, limit int) ([]tasks.BinlogFile, error)
+	RetryFailedUploads(id string, limit int) (tasks.UploadRetryStats, error)
 	ListRuns(id string, limit int) ([]tasks.TaskRun, error)
 	ListWorkerHeartbeats(limit int) ([]tasks.WorkerHeartbeat, error)
 	ListTasks() []tasks.Task

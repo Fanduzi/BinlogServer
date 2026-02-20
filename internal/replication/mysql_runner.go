@@ -414,6 +414,7 @@ func (r *MySQLRunner) finalizeSealedFile(
 	objectKey := buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, sourceFile)
 	if err := r.uploader.UploadFile(ctx, task.ID, sealedPath, objectKey); err != nil {
 		if fileMeta != nil {
+			fileMeta.ObjectKey = objectKey
 			fileMeta.UploadState = "UPLOAD_FAILED"
 			fileMeta.UploadError = err.Error()
 			if saveErr := r.fileMetaStore.UpsertBinlogFile(ctx, *fileMeta); saveErr != nil {

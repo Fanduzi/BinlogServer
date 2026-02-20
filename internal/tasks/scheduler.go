@@ -23,6 +23,9 @@ var ErrClusterKeyRequired = errors.New("cluster_key is required")
 var ErrClusterKeyExists = errors.New("cluster_key already exists")
 var ErrInvalidClusterKey = errors.New("invalid cluster_key")
 var ErrInvalidTaskName = errors.New("invalid name")
+var ErrInvalidRetryUploadLimit = errors.New("invalid retry upload limit")
+var ErrUploadRetryNotAvailable = errors.New("upload retry is not available")
+var ErrUploadRetryInProgress = errors.New("upload retry already in progress")
 var ErrFilePosRequired = errors.New("file/pos is required")
 var ErrGTIDSetRequired = errors.New("gtid_set is required")
 var ErrInvalidStartMode = errors.New("invalid start mode")
@@ -83,6 +86,14 @@ type FileStore interface {
 	ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]BinlogFile, error)
 }
 
+type failedUploadFileReader interface {
+	ListFailedUploadBinlogFiles(ctx context.Context, taskID string, limit int) ([]BinlogFile, error)
+}
+
+type FileUploader interface {
+	UploadFile(ctx context.Context, taskID, localPath, objectKey string) error
+}
+
 type uploadFailureCounter interface {
 	CountUploadFailures(ctx context.Context) (int64, error)
 }
@@ -127,6 +138,12 @@ func WithEventStore(store EventStore) Option {
 func WithFileStore(store FileStore) Option {
 	return func(s *Scheduler) {
 		s.fileStore = store
+	}
+}
+
+func WithFileUploader(uploader FileUploader) Option {
+	return func(s *Scheduler) {
+		s.fileUploader = uploader
 	}
 }
 
@@ -179,6 +196,8 @@ type Scheduler struct {
 	checkpointReader CheckpointReader
 	eventStore       EventStore
 	fileStore        FileStore
+	fileUploader     FileUploader
+	retryUploads     map[string]struct{}
 	eventSeq         int64
 }
 
@@ -195,6 +214,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		leaseTTL:           15 * time.Second,
 		leaseRenewInterval: 5 * time.Second,
 		leaseGrace:         30 * time.Second,
+		retryUploads:       make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -1123,6 +1143,112 @@ func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 		return []BinlogFile{}, nil
 	}
 	return s.fileStore.ListBinlogFiles(context.Background(), taskID, limit)
+}
+
+func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetryStats, error) {
+	const (
+		defaultLimit = 100
+		maxLimit     = 1000
+	)
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		return UploadRetryStats{}, ErrInvalidRetryUploadLimit
+	}
+	if err := s.syncTasksFromStore(); err != nil {
+		return UploadRetryStats{}, err
+	}
+
+	s.mu.Lock()
+	if _, ok := s.tasks[taskID]; !ok {
+		s.mu.Unlock()
+		return UploadRetryStats{}, ErrTaskNotFound
+	}
+	if _, running := s.retryUploads[taskID]; running {
+		s.mu.Unlock()
+		return UploadRetryStats{}, ErrUploadRetryInProgress
+	}
+	fileStore := s.fileStore
+	uploader := s.fileUploader
+	s.retryUploads[taskID] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.retryUploads, taskID)
+		s.mu.Unlock()
+	}()
+
+	if fileStore == nil || uploader == nil {
+		return UploadRetryStats{}, ErrUploadRetryNotAvailable
+	}
+
+	files, err := s.listRetryUploadCandidates(taskID, limit, fileStore)
+	if err != nil {
+		return UploadRetryStats{}, err
+	}
+
+	var stats UploadRetryStats
+	for _, file := range files {
+		stats.Scanned++
+		if !strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
+			stats.Skipped++
+			continue
+		}
+		if !isSealedFileForRetry(file) {
+			stats.Skipped++
+			continue
+		}
+		if strings.TrimSpace(file.FilePath) == "" {
+			stats.Failed++
+			_ = s.markRetryUploadFailure(fileStore, file, "retry upload skipped: empty file_path")
+			continue
+		}
+		if strings.TrimSpace(file.ObjectKey) == "" {
+			stats.Failed++
+			_ = s.markRetryUploadFailure(fileStore, file, "retry upload skipped: empty object_key")
+			continue
+		}
+
+		if err := uploader.UploadFile(context.Background(), taskID, file.FilePath, file.ObjectKey); err != nil {
+			stats.Failed++
+			_ = s.markRetryUploadFailure(fileStore, file, err.Error())
+			continue
+		}
+
+		file.UploadState = "UPLOADED"
+		file.UploadError = ""
+		file.UploadedAt = time.Now()
+		if err := fileStore.UpsertBinlogFile(context.Background(), file); err != nil {
+			stats.Failed++
+			continue
+		}
+		stats.Succeeded++
+	}
+
+	return stats, nil
+}
+
+func (s *Scheduler) listRetryUploadCandidates(taskID string, limit int, fileStore FileStore) ([]BinlogFile, error) {
+	if reader, ok := fileStore.(failedUploadFileReader); ok {
+		return reader.ListFailedUploadBinlogFiles(context.Background(), taskID, limit)
+	}
+	return fileStore.ListBinlogFiles(context.Background(), taskID, limit)
+}
+
+func (s *Scheduler) markRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) error {
+	file.UploadState = "UPLOAD_FAILED"
+	file.UploadError = reason
+	return fileStore.UpsertBinlogFile(context.Background(), file)
+}
+
+func isSealedFileForRetry(file BinlogFile) bool {
+	name := strings.ToLower(strings.TrimSpace(file.FileName))
+	path := strings.ToLower(strings.TrimSpace(file.FilePath))
+	if strings.Contains(name, ".open.e") || strings.Contains(path, ".open.e") {
+		return false
+	}
+	return !file.SealedAt.IsZero()
 }
 
 func (s *Scheduler) CountUploadFailures() (int64, error) {
