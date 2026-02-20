@@ -27,7 +27,7 @@ func (s *Server) swaggerTaskGetDoc() {}
 // @Accept json
 // @Produce json
 // @Param id path string true "Task ID"
-// @Param body body updateTaskRequest true "Task update payload（cluster_key 必填；name/cluster_key/source/start/storage 按字段规则校验）"
+// @Param body body updateTaskRequest true "Task update payload（cluster_key 必填，仅允许 [a-zA-Z0-9._-]，禁止 / \\ ..；name/source/start/storage 按字段规则校验）"
 // @Success 200 {object} tasks.Task
 // @Failure 400 {string} string
 // @Failure 404 {string} string

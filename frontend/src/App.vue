@@ -977,12 +977,18 @@ function parseBatchLine(raw, lineNo) {
   if (!name) {
     name = `task-${host}-${port}`;
   }
+  const clusterKey = makeClusterKey(name, host, Number(port), lineNo);
+  const clusterKeyErr = validateClusterKey(clusterKey);
+  if (clusterKeyErr) {
+    throw new Error(`第 ${lineNo} 行 cluster_key 不合法：${clusterKeyErr}`);
+  }
+
   return {
     lineNo,
     name,
     host,
     port: Number(port),
-    clusterKey: makeClusterKey(name, host, Number(port), lineNo),
+    clusterKey,
   };
 }
 
@@ -1333,13 +1339,8 @@ function makeClusterKey(name, host, port, lineNo = 0) {
   return key || `cluster-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
 
-function validateTaskPayload(payload) {
-  const name = String(payload?.name || "").trim();
-  if (!name || name.length > NAME_MAX_LENGTH) {
-    return "任务名不合法（1-255 字符）";
-  }
-
-  const clusterKey = String(payload?.cluster_key || "").trim();
+function validateClusterKey(clusterKeyRaw) {
+  const clusterKey = String(clusterKeyRaw || "").trim();
   if (!clusterKey) {
     return "cluster_key 不能为空";
   }
@@ -1350,6 +1351,19 @@ function validateTaskPayload(payload) {
     !CLUSTER_KEY_PATTERN.test(clusterKey)
   ) {
     return "cluster_key 不合法（仅允许字母数字._-，禁止 / \\\\ ..）";
+  }
+  return "";
+}
+
+function validateTaskPayload(payload) {
+  const name = String(payload?.name || "").trim();
+  if (!name || name.length > NAME_MAX_LENGTH) {
+    return "任务名不合法（1-255 字符）";
+  }
+
+  const clusterKeyErr = validateClusterKey(payload?.cluster_key);
+  if (clusterKeyErr) {
+    return clusterKeyErr;
   }
 
   const source = payload?.source || {};

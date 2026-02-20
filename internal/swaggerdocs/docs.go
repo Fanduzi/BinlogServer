@@ -366,7 +366,7 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "Task update payload（cluster_key 必填；name/cluster_key/source/start/storage 按字段规则校验）",
+                        "description": "Task update payload（cluster_key 必填，仅允许 [a-zA-Z0-9._-]，禁止 / \\\\ ..；name/source/start/storage 按字段规则校验）",
                         "name": "body",
                         "in": "body",
                         "required": true,
