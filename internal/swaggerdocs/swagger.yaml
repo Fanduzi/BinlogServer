@@ -362,6 +362,17 @@ definitions:
       type:
         type: string
     type: object
+  tasks.UploadRetryStats:
+    properties:
+      failed:
+        type: integer
+      scanned:
+        type: integer
+      skipped:
+        type: integer
+      succeeded:
+        type: integer
+    type: object
 info:
   contact: {}
   description: Centralized MySQL binlog backup service API.
@@ -735,6 +746,46 @@ paths:
           schema:
             type: string
       summary: List binlog file metadata
+      tags:
+      - Tasks
+  /api/tasks/{id}/files/retry-upload:
+    post:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - default: 100
+        description: Retry upload limit
+        in: query
+        maximum: 1000
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/tasks.UploadRetryStats'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "409":
+          description: Conflict
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Retry failed upload binlog files
       tags:
       - Tasks
   /api/tasks/{id}/lease:

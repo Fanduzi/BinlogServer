@@ -100,6 +100,20 @@ func (s *Server) swaggerTaskEventsDoc() {}
 // @Router /api/tasks/{id}/files [get]
 func (s *Server) swaggerTaskFilesDoc() {}
 
+// swaggerTaskRetryUploadDoc godoc
+// @Summary Retry failed upload binlog files
+// @Tags Tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Param limit query int false "Retry upload limit" default(100) maximum(1000)
+// @Success 200 {object} tasks.UploadRetryStats
+// @Failure 400 {string} string
+// @Failure 404 {string} string
+// @Failure 409 {string} string
+// @Failure 500 {string} string
+// @Router /api/tasks/{id}/files/retry-upload [post]
+func (s *Server) swaggerTaskRetryUploadDoc() {}
+
 // swaggerTaskReplicationDoc godoc
 // @Summary Get task replication delay and latest position
 // @Tags Tasks
