@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -406,8 +407,69 @@ func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
 	}
 }
 
+func TestTaskAPI_UpdateTaskStoreFailureReturnsInternalServerError(t *testing.T) {
+	store := newFailingUpdateStore()
+	scheduler := tasks.NewScheduler(tasks.WithStore(store))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"cluster-a",
+		"cluster_key":"cluster-a-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected create 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	store.failUpsert = true
+	updateResp := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(`{
+		"name":"cluster-b",
+		"cluster_key":"cluster-b-key",
+		"source":{"host":"127.0.0.1","port":3307,"user":"repl2","flavor":"mysql","server_id":200002}
+	}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateResp, updateReq)
+	if updateResp.Code != http.StatusInternalServerError {
+		t.Fatalf("expected update 500 on store failure, got %d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+}
+
 type fakeCheckpointReader struct {
 	checkpoints map[string]binlog.Checkpoint
+}
+
+type failingUpdateStore struct {
+	tasks      map[string]tasks.Task
+	failUpsert bool
+}
+
+func newFailingUpdateStore() *failingUpdateStore {
+	return &failingUpdateStore{tasks: make(map[string]tasks.Task)}
+}
+
+func (s *failingUpdateStore) UpsertTask(_ context.Context, task tasks.Task) error {
+	if s.failUpsert {
+		return errors.New("store unavailable")
+	}
+	s.tasks[task.ID] = task
+	return nil
+}
+
+func (s *failingUpdateStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+	out := make([]tasks.Task, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		out = append(out, task)
+	}
+	return out, nil
+}
+
+func (s *failingUpdateStore) DeleteTask(_ context.Context, taskID string) error {
+	delete(s.tasks, taskID)
+	return nil
 }
 
 func (f *fakeCheckpointReader) LoadCheckpoint(_ context.Context, taskID string) (binlog.Checkpoint, bool, error) {

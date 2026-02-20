@@ -23,6 +23,10 @@ var ErrClusterKeyRequired = errors.New("cluster_key is required")
 var ErrClusterKeyExists = errors.New("cluster_key already exists")
 var ErrInvalidClusterKey = errors.New("invalid cluster_key")
 var ErrInvalidTaskName = errors.New("invalid name")
+var ErrFilePosRequired = errors.New("file/pos is required")
+var ErrGTIDSetRequired = errors.New("gtid_set is required")
+var ErrInvalidStartMode = errors.New("invalid start mode")
+var ErrInvalidRetentionDays = errors.New("invalid retention_days")
 
 var clusterKeyAllowedPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
@@ -1324,27 +1328,27 @@ func normalizeAndValidateStartConfig(start StartConfig) (StartConfig, error) {
 	case StartModeFilePos:
 		normalized.File = strings.TrimSpace(normalized.File)
 		if normalized.File == "" || normalized.Pos == 0 || len(normalized.File) > maxStartFileLength {
-			return StartConfig{}, errors.New("file/pos is required")
+			return StartConfig{}, ErrFilePosRequired
 		}
 		normalized.GTIDSet = ""
 		return normalized, nil
 	case StartModeGTID:
 		normalized.GTIDSet = strings.TrimSpace(normalized.GTIDSet)
 		if normalized.GTIDSet == "" {
-			return StartConfig{}, errors.New("gtid_set is required")
+			return StartConfig{}, ErrGTIDSetRequired
 		}
 		normalized.File = ""
 		normalized.Pos = 0
 		return normalized, nil
 	default:
-		return StartConfig{}, errors.New("invalid start mode")
+		return StartConfig{}, ErrInvalidStartMode
 	}
 }
 
 func normalizeAndValidateStorage(storage Storage) (Storage, error) {
 	normalized := storage
 	if normalized.RetentionDays < minRetentionDays || normalized.RetentionDays > maxRetentionDays {
-		return Storage{}, errors.New("invalid retention_days")
+		return Storage{}, ErrInvalidRetentionDays
 	}
 	return normalized, nil
 }

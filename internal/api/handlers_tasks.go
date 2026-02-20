@@ -606,7 +606,11 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			if isTaskUpdateBadRequest(err) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, sanitizeTask(updated))
@@ -623,6 +627,18 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func isTaskUpdateBadRequest(err error) bool {
+	return errors.Is(err, tasks.ErrClusterKeyRequired) ||
+		errors.Is(err, tasks.ErrInvalidClusterKey) ||
+		errors.Is(err, tasks.ErrClusterKeyExists) ||
+		errors.Is(err, tasks.ErrInvalidTaskName) ||
+		errors.Is(err, tasks.ErrInvalidSourceConfig) ||
+		errors.Is(err, tasks.ErrFilePosRequired) ||
+		errors.Is(err, tasks.ErrGTIDSetRequired) ||
+		errors.Is(err, tasks.ErrInvalidStartMode) ||
+		errors.Is(err, tasks.ErrInvalidRetentionDays)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
