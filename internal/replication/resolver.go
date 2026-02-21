@@ -8,15 +8,20 @@ import (
 	"binlog_server/internal/tasks"
 )
 
+// MasterStatus 对应源库 SHOW MASTER STATUS 返回的位点。
 type MasterStatus struct {
+	// File/Pos 对应 SHOW MASTER STATUS 的当前位点。
 	File string
 	Pos  uint32
 }
 
+// MasterStatusFetcher 定义读取主库位点的能力。
 type MasterStatusFetcher interface {
+	// FetchMasterStatus 拉取主库当前 file/pos。
 	FetchMasterStatus(ctx context.Context, source tasks.SourceConfig) (MasterStatus, error)
 }
 
+// ResolveStart 将任务 start 策略解析为可直接用于拉流的起点配置。
 func ResolveStart(ctx context.Context, task tasks.Task, fetcher MasterStatusFetcher) (tasks.StartConfig, error) {
 	start := task.Start
 	if start.Mode == "" {

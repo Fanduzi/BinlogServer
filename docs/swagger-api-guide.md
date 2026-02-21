@@ -23,11 +23,12 @@
 
 ## 3. 接口分组说明
 
-当前文档主要分为三个分组：
+当前文档主要分为四个分组：
 
 1. `System`
 2. `Dashboard`
 3. `Tasks`
+4. `Cluster`
 
 ### 3.1 System
 
@@ -54,7 +55,16 @@
 - `GET /api/tasks/{id}/checkpoint`：查看 checkpoint
 - `GET /api/tasks/{id}/events`：查看事件流
 - `GET /api/tasks/{id}/files`：查看 binlog 文件元数据
+- `POST /api/tasks/{id}/files/retry-upload`：手动补传 `UPLOAD_FAILED` 文件
+- `GET /api/tasks/{id}/upload-failures/reasons`：按错误原因聚合上传失败记录
 - `GET /api/tasks/{id}/replication`：查看复制延迟与最新位点
+
+### 3.4 Cluster
+
+- `GET /api/workers`：worker 列表与在线状态（支持 `limit`）
+- `GET /api/cluster/overview`：cluster 汇总信息
+- `GET /api/tasks/{id}/lease`：任务 lease 持有者与风险状态
+- `GET /api/tasks/{id}/runs`：任务 run history（支持 `limit`）
 
 ## 4. 常用调试场景（建议顺序）
 
@@ -88,6 +98,12 @@
    - `summary`：全局统计
    - `tasks[].replication`：单任务复制状态
    - `sources[]`：按源库聚合统计
+
+### 场景 E：上传失败后的批量补传
+
+1. 先执行 `GET /api/tasks/{id}/upload-failures/reasons?limit=20`，确认主要失败原因与频次。
+2. 修复凭证/网络/Bucket 权限后，执行 `POST /api/tasks/{id}/files/retry-upload?limit=100`。
+3. 再执行 `GET /api/tasks/{id}/files`，确认失败记录逐步转为 `UPLOADED`。
 
 ## 5. 示例请求与返回
 

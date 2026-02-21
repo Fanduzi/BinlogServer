@@ -372,14 +372,17 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	taskID := parts[0]
+	// /api/tasks/{id}
 	if len(parts) == 1 {
 		s.handleTaskEntity(w, r, taskID)
 		return
 	}
+	// /api/tasks/{id}/files/retry-upload
 	if len(parts) == 3 && parts[1] == "files" && parts[2] == "retry-upload" {
 		s.handleTaskRetryUpload(w, r, taskID)
 		return
 	}
+	// /api/tasks/{id}/upload-failures/reasons
 	if len(parts) == 3 && parts[1] == "upload-failures" && parts[2] == "reasons" {
 		s.handleTaskUploadFailureReasons(w, r, taskID)
 		return
@@ -547,12 +550,15 @@ func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.R
 }
 
 func parseLimit(r *http.Request, fallback int) int {
+	// 常见误解：
+	// 这里对非法 limit 不报 400，而是回退到 fallback，目的是提升列表接口容错性。
 	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 	if raw == "" {
 		return fallback
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
+		// 列表类接口对非法 limit 采用 fallback，避免影响主流程可用性。
 		return fallback
 	}
 	return n
@@ -682,6 +688,8 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		// PUT 走 Scheduler.UpdateTask 原子更新：
+		// 统一校验后一次性落库，避免“部分字段成功、后续字段失败”导致的数据不一致。
 		updated, err := s.tasks.UpdateTask(taskID, tasks.TaskPatch{
 			Name:       req.Name,
 			ClusterKey: req.ClusterKey,

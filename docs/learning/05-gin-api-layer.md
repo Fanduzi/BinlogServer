@@ -1,8 +1,18 @@
 # 第 5 节：Gin API 层
 
+## 全链路导读
+
+- 全链路定位：控制面对外协议层（把用户操作翻译为调度行为）
+- 前置阅读：第 0 节
+- 学完你应能：定位一个 API 从路由到 scheduler 的调用路径，并判断状态码与错误语义
+
 ## 目标
 
 看懂路由组织、请求参数绑定、响应脱敏和错误处理。
+
+## 更新提示（alpha.2）
+
+当前 API 已包含 cluster endpoints 与 Swagger UI。
 
 ## 核心文件
 
@@ -16,8 +26,10 @@
 
 1. 任务管理：create/list/get/update/delete/start/stop
 2. 可观测接口：checkpoint/events/files/summary
-3. 健康检查：`/healthz`
-4. UI 兼容入口：`/ui/*` 与 `/` 重定向
+3. cluster 接口：workers/cluster overview/task lease/task runs
+4. Swagger：`/swagger/*any`
+5. 健康检查：`/healthz`
+6. UI 兼容入口：`/ui/*` 与 `/` 重定向
 
 映射方式是：
 
@@ -55,7 +67,8 @@ Gin Router -> Handler (协议层)
 
 1. `{id}` 只有一段时，交给 `handleTaskEntity` 处理 `GET/PUT/DELETE`。
 2. `{action}` 是 `start/stop/checkpoint/events/files` 时做对应分发。
-3. `events/files` 支持 `limit` 参数，使用 `parseLimit` 解析并兜底。
+3. `{action}` 也支持 `replication/lease/runs`。
+4. `events/files/runs` 支持 `limit` 参数，使用 `parseLimit` 解析并兜底。
 
 ### 4) `handleTaskEntity`
 
@@ -71,7 +84,7 @@ Gin Router -> Handler (协议层)
 ## 关键点
 
 1. source 密码字段在响应里做脱敏。
-2. `events/files` 支持 `limit` 查询参数。
+2. `events/files/runs/workers` 都有 limit 语义（默认值与上限不同）。
 3. handler 负责协议层，业务逻辑交给 scheduler/store。
 4. 任务不存在统一映射 `404`，参数/状态错误多为 `400`。
 5. 非法方法统一 `405`，路径不匹配返回 `404`。
@@ -107,3 +120,14 @@ curl -s "http://127.0.0.1:8080/api/tasks/1/files?limit=20" | jq .
 2. 为什么 API 层不要直接依赖 MySQL 客户端？
 3. 如果新增 `/api/tasks/{id}/metrics`，你会放在 `handleTaskAction` 还是新 handler？为什么？
 4. 为什么“脱敏在 API 层做”比“数据库不存密码”更现实？
+
+## 5 分钟最小实操
+
+1. 分别调用一条正常 API 和一条非法参数 API。
+2. 对比返回码，确认你理解 4xx/5xx 边界。
+3. 在代码中定位这两条请求分别经过的 handler 函数。
+
+## 本节实战检查
+
+- 对照 `docs/learning/chapter-dod-matrix.md` 的「第 5 节」。
+- 完成本节最小证据后再进入下一节。

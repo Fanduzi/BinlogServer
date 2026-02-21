@@ -2,6 +2,7 @@ package binlog
 
 import "time"
 
+// Checkpoint 记录 binlog 同步已安全落盘的位置。
 type Checkpoint struct {
 	File      string    `json:"file"`
 	Pos       uint32    `json:"pos"`

@@ -70,11 +70,12 @@ DoD（完成定义）：
   - object key 改为：`<prefix>/<cluster_key>/<source_server_uuid>/<fileName>`
   - 更新 API/UI/e2e 测试用例，开发阶段不做旧任务兼容
 
-- [ ] `Task 24`：上传可观测增强  
+- [x] `Task 24`：上传可观测增强  
   建议范围：
   - 补传成功/失败计数
   - 最近失败原因聚合
   - runbook 补充“如何批量补传”
+  证据：`./scripts/e2e/run-suite.sh --scenarios smoke-retry-upload,smoke-observability`。
 
 - [ ] `Task 24.1`：多云对象存储接入能力明确化  
   建议范围：
@@ -103,10 +104,13 @@ DoD（完成定义）：
 2. sealed 后触发上传，记录 `LOCAL_ONLY/UPLOADED/UPLOAD_FAILED`。
 3. 上传失败不阻断拉流（best-effort）。
 4. 仅对已 seal 的 binlog 文件触发上传，不上传仍在写入的 OPEN 文件。
+5. 已提供手动补传入口：`POST /api/tasks/{id}/files/retry-upload`（按 `limit` 处理失败文件）。
+6. 已提供失败原因聚合：`GET /api/tasks/{id}/upload-failures/reasons`。
+7. 已提供补传可观测指标：`binlog_server_upload_retry_total`、`binlog_server_upload_retry_last_ts`。
 
 未完成：
 1. 自动补传队列（后台持续重试）。
-2. 批量补传入口（当前无标准化运维入口）。
+2. 多云官方 SDK（OBS/COS/OSS）接入实现（当前仅路线已确认）。
 3. 断点续传跨重启恢复（multipart 会话持久化）尚未落地。
 
 当前非目标（已明确）：

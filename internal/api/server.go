@@ -20,6 +20,7 @@ import (
 )
 
 type taskService interface {
+	// 任务 CRUD/控制。
 	CreateTask(name string, clusterKey string) (tasks.Task, error)
 	UpdateTask(id string, patch tasks.TaskPatch) (tasks.Task, error)
 	ConfigureClusterKey(id string, clusterKey string) error
@@ -43,11 +44,13 @@ type taskService interface {
 	StopTask(id string) error
 }
 
+// Server 是 Gin HTTP 入口，负责路由和 handler 组织。
 type Server struct {
 	tasks taskService
 	gin   *gin.Engine
 }
 
+// NewServer 构建 API/UI HTTP handler。
 func NewServer(taskSvc taskService) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -61,6 +64,7 @@ func NewServer(taskSvc taskService) http.Handler {
 	return s
 }
 
+// routes 注册所有 HTTP 路由（system/tasks/cluster/swagger/ui）。
 func (s *Server) routes() {
 	s.gin.GET("/healthz", gin.WrapF(s.handleHealth))
 	s.gin.GET("/metrics", gin.WrapF(s.handleMetrics))
@@ -81,6 +85,7 @@ func (s *Server) routes() {
 	})
 }
 
+// ServeHTTP 实现 http.Handler 接口。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.gin.ServeHTTP(w, r)
 }
@@ -95,6 +100,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+// handleMetrics 返回 Prometheus 文本格式指标。
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -104,7 +110,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(s.renderPrometheusMetrics()))
 }
 
+// renderPrometheusMetrics 采集并渲染当前指标快照。
 func (s *Server) renderPrometheusMetrics() string {
+	// 常见误解：
+	// metrics 采集是 best-effort：单项采集失败会跳过，不阻断整个 /metrics 响应，
+	// 这样观测端点不会反向影响主链路可用性。
 	var b strings.Builder
 	now := time.Now()
 	items := s.tasks.ListTasks()
@@ -224,6 +234,7 @@ func (s *Server) renderPrometheusMetrics() string {
 	return b.String()
 }
 
+// writePromSample 追加一条 Prometheus 样本行。
 func writePromSample(b *strings.Builder, name string, labels map[string]string, value float64) {
 	b.WriteString(name)
 	if len(labels) > 0 {
@@ -246,6 +257,7 @@ func writePromSample(b *strings.Builder, name string, labels map[string]string, 
 	b.WriteByte('\n')
 }
 
+// escapePromLabelValue 对 label 值做 Prometheus 规则转义。
 func escapePromLabelValue(v string) string {
 	v = strings.ReplaceAll(v, `\`, `\\`)
 	v = strings.ReplaceAll(v, "\n", `\n`)

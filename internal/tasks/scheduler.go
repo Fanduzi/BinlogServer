@@ -43,13 +43,19 @@ const maxStartFileLength = 255
 const minRetentionDays = 1
 const maxRetentionDays = 3650
 
+// Runner 定义任务执行器接口。
 type Runner interface {
+	// Run 启动任务执行主循环；返回时表示本次运行结束。
 	Run(ctx context.Context, task Task) error
 }
 
+// LeaseManager 定义 cluster lease 的获取/续租/释放接口。
 type LeaseManager interface {
+	// Acquire 尝试获取任务 lease，成功时返回当前 epoch。
 	Acquire(ctx context.Context, taskID, workerID string, now time.Time, ttl time.Duration) (int64, bool, error)
+	// Renew 续租当前 lease，返回是否续租成功。
 	Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error)
+	// Release 主动释放 lease（best-effort）。
 	Release(ctx context.Context, taskID, workerID string, epoch int64) (bool, error)
 }
 
@@ -59,9 +65,13 @@ type runnerWithNotify interface {
 	RunWithNotify(ctx context.Context, task Task, onReady func()) error
 }
 
+// TaskStore 定义任务元数据持久化接口。
 type TaskStore interface {
+	// UpsertTask 持久化任务配置与状态。
 	UpsertTask(ctx context.Context, task Task) error
+	// ListTasks 列出全部任务。
 	ListTasks(ctx context.Context) ([]Task, error)
+	// DeleteTask 删除指定任务。
 	DeleteTask(ctx context.Context, taskID string) error
 }
 
@@ -73,17 +83,25 @@ type workerHeartbeatReader interface {
 	ListWorkerHeartbeats(ctx context.Context, limit int) ([]WorkerHeartbeat, error)
 }
 
+// CheckpointReader 定义 checkpoint 读取接口。
 type CheckpointReader interface {
+	// LoadCheckpoint 读取任务 checkpoint。
 	LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error)
 }
 
+// EventStore 定义任务事件存储接口。
 type EventStore interface {
+	// AppendEvent 追加任务事件。
 	AppendEvent(ctx context.Context, event TaskEvent) error
+	// ListEvents 按倒序读取任务事件。
 	ListEvents(ctx context.Context, taskID string, limit int) ([]TaskEvent, error)
 }
 
+// FileStore 定义 binlog 文件元数据存储接口。
 type FileStore interface {
+	// UpsertBinlogFile 写入/更新文件元数据。
 	UpsertBinlogFile(ctx context.Context, meta BinlogFile) error
+	// ListBinlogFiles 按倒序读取文件元数据。
 	ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]BinlogFile, error)
 }
 
@@ -91,7 +109,9 @@ type failedUploadFileReader interface {
 	ListFailedUploadBinlogFiles(ctx context.Context, taskID string, limit int) ([]BinlogFile, error)
 }
 
+// FileUploader 定义对象存储上传接口。
 type FileUploader interface {
+	// UploadFile 上传本地 sealed 文件到对象存储。
 	UploadFile(ctx context.Context, taskID, localPath, objectKey string) error
 }
 
@@ -103,20 +123,24 @@ type uploadFailureReasonReader interface {
 	ListUploadFailureReasons(ctx context.Context, taskID string, limit int) ([]UploadFailureReason, error)
 }
 
+// Option 用于配置 Scheduler 的可选注入项。
 type Option func(*Scheduler)
 
+// WithRunner 注入任务执行器。
 func WithRunner(runner Runner) Option {
 	return func(s *Scheduler) {
 		s.runner = runner
 	}
 }
 
+// WithStore 注入任务持久化存储。
 func WithStore(store TaskStore) Option {
 	return func(s *Scheduler) {
 		s.store = store
 	}
 }
 
+// WithRetryBackoff 配置 runner 错误后的退避参数。
 func WithRetryBackoff(base, max time.Duration) Option {
 	return func(s *Scheduler) {
 		if base > 0 {
@@ -128,42 +152,49 @@ func WithRetryBackoff(base, max time.Duration) Option {
 	}
 }
 
+// WithCheckpointReader 注入 checkpoint 读取器。
 func WithCheckpointReader(reader CheckpointReader) Option {
 	return func(s *Scheduler) {
 		s.checkpointReader = reader
 	}
 }
 
+// WithEventStore 注入事件存储。
 func WithEventStore(store EventStore) Option {
 	return func(s *Scheduler) {
 		s.eventStore = store
 	}
 }
 
+// WithFileStore 注入文件元数据存储。
 func WithFileStore(store FileStore) Option {
 	return func(s *Scheduler) {
 		s.fileStore = store
 	}
 }
 
+// WithFileUploader 注入对象存储上传器。
 func WithFileUploader(uploader FileUploader) Option {
 	return func(s *Scheduler) {
 		s.fileUploader = uploader
 	}
 }
 
+// WithClusterLeaseManager 启用 cluster lease 管理。
 func WithClusterLeaseManager(manager LeaseManager) Option {
 	return func(s *Scheduler) {
 		s.leaseManager = manager
 	}
 }
 
+// WithClusterWorkerID 设置当前实例在 cluster 中的 worker_id。
 func WithClusterWorkerID(workerID string) Option {
 	return func(s *Scheduler) {
 		s.clusterWorkerID = workerID
 	}
 }
 
+// WithClusterLease 配置 lease 的 TTL、续租周期和降级宽限时间。
 func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
 	return func(s *Scheduler) {
 		if ttl > 0 {
@@ -178,6 +209,7 @@ func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
 	}
 }
 
+// Scheduler 负责任务配置管理、状态机推进和运行编排。
 type Scheduler struct {
 	mu      sync.Mutex
 	seq     int
@@ -192,6 +224,7 @@ type Scheduler struct {
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
 
+	// cluster 相关字段：当 leaseManager != nil 时，Scheduler 进入分布式单执行语义。
 	leaseManager       LeaseManager
 	clusterWorkerID    string
 	leaseTTL           time.Duration
@@ -210,6 +243,7 @@ type Scheduler struct {
 	eventSeq         int64
 }
 
+// NewScheduler 创建调度器并应用可选项。
 func NewScheduler(opts ...Option) *Scheduler {
 	s := &Scheduler{
 		tasks:   make(map[string]Task),
@@ -231,12 +265,14 @@ func NewScheduler(opts ...Option) *Scheduler {
 	return s
 }
 
+// SetRunner 动态替换 runner 实现（测试和运行时装配会用到）。
 func (s *Scheduler) SetRunner(runner Runner) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.runner = runner
 }
 
+// CreateTask 创建任务并写入默认配置（start=LATEST, retention=7）。
 func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 	validatedName, err := normalizeAndValidateTaskName(name)
 	if err != nil {
@@ -282,6 +318,7 @@ func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 	return task, nil
 }
 
+// ConfigureSource 更新任务源库配置。
 func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 	normalized, err := normalizeAndValidateSourceConfig(source)
 	if err != nil {
@@ -308,6 +345,7 @@ func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 	return nil
 }
 
+// ConfigureStart 更新任务拉流起点配置。
 func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 	normalized, err := normalizeAndValidateStartConfig(start)
 	if err != nil {
@@ -331,6 +369,7 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 	return nil
 }
 
+// ConfigureStorage 更新任务存储策略。
 func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	normalized, err := normalizeAndValidateStorage(storage)
 	if err != nil {
@@ -354,7 +393,9 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	return nil
 }
 
+// UpdateTask 以原子方式应用 patch（先校验，后一次落库）。
 func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
+	// 先做整包校验，再一次性落库；避免“前几项成功、后几项失败”的部分持久化副作用。
 	validatedClusterKey, err := normalizeAndValidateClusterKey(patch.ClusterKey)
 	if err != nil {
 		return Task{}, err
@@ -411,6 +452,7 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 		return Task{}, ErrClusterKeyExists
 	}
 
+	// 基于 current 构造 next，保证未传字段保持原值（partial update 语义）。
 	next := current
 	next.ClusterKey = validatedClusterKey
 	if validatedName != nil {
@@ -439,6 +481,7 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	return next, nil
 }
 
+// ConfigureClusterKey 更新任务 cluster_key（要求全局唯一）。
 func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
 	validatedClusterKey, err := normalizeAndValidateClusterKey(clusterKey)
 	if err != nil {
@@ -468,6 +511,7 @@ func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
 	return nil
 }
 
+// ConfigureName 更新任务名。
 func (s *Scheduler) ConfigureName(id, name string) error {
 	validatedName, err := normalizeAndValidateTaskName(name)
 	if err != nil {
@@ -491,9 +535,11 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 	return nil
 }
 
+// StartTask 启动任务；cluster 模式下会先 acquire lease。
 func (s *Scheduler) StartTask(id string) error {
 	s.mu.Lock()
 
+	// Step 1: 校验任务存在、状态可启动、source 最小配置可用。
 	task, ok := s.tasks[id]
 	if !ok {
 		s.mu.Unlock()
@@ -505,6 +551,7 @@ func (s *Scheduler) StartTask(id string) error {
 		task.RunID == "" &&
 		s.runner != nil &&
 		s.leaseManager != nil
+	// 仅允许 claim “干净的 dispatch STARTING 任务”，避免误接管非预期中间态。
 	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && !canClaimDispatched {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start from state %s", task.State)
@@ -514,6 +561,7 @@ func (s *Scheduler) StartTask(id string) error {
 		s.mu.Unlock()
 		return ErrInvalidSourceConfig
 	}
+	// Step 2: control-plane dispatch-only 分支（本地无 runner）。
 	// cluster control-plane 允许 dispatch-only start：仅写入 STARTING，由 worker 接管执行。
 	if s.runner == nil {
 		if s.leaseManager == nil {
@@ -541,6 +589,7 @@ func (s *Scheduler) StartTask(id string) error {
 		return ErrClusterWorkerIDRequired
 	}
 
+	// Step 3: worker 执行分支，先 acquire lease，再进入 STARTING。
 	if s.leaseManager != nil {
 		epoch, acquired, err := s.leaseManager.Acquire(context.Background(), id, s.clusterWorkerID, time.Now(), s.leaseTTL)
 		if err != nil {
@@ -567,6 +616,7 @@ func (s *Scheduler) StartTask(id string) error {
 	}
 	s.mu.Unlock()
 
+	// Step 4: 启动 run/renew goroutine，进入真实执行期。
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 
@@ -590,6 +640,9 @@ func (s *Scheduler) StartTask(id string) error {
 
 // ClaimStartingTasks 让在线 worker 在常驻状态下接管 control-plane dispatch 的 STARTING 任务。
 func (s *Scheduler) ClaimStartingTasks() (int, error) {
+	// 常见误解：
+	// 这里不是“抢占 RUNNING 任务”，而是只处理 dispatch 出去且仍为 STARTING 的任务。
+	// 真正是否能执行仍要依赖 StartTask 内部 lease Acquire 结果。
 	s.mu.Lock()
 	store := s.store
 	runner := s.runner
@@ -622,6 +675,7 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 	return claimed, nil
 }
 
+// prepareStartingTaskClaim 把 store 里的 STARTING 任务注入内存，并过滤本机不可接管场景。
 func (s *Scheduler) prepareStartingTaskClaim(item Task) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -640,6 +694,7 @@ func (s *Scheduler) prepareStartingTaskClaim(item Task) bool {
 	return true
 }
 
+// MarkRetryableError 将任务标记为 RETRY_BACKOFF 并记录错误信息。
 func (s *Scheduler) MarkRetryableError(id, msg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -663,6 +718,7 @@ func (s *Scheduler) MarkRetryableError(id, msg string) error {
 	return nil
 }
 
+// StopTask 请求停止任务（两阶段：STOPPING -> STOPPED）。
 func (s *Scheduler) StopTask(id string) error {
 	s.mu.Lock()
 
@@ -685,6 +741,10 @@ func (s *Scheduler) StopTask(id string) error {
 	task.State = StateStopping
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
+	// 常见误解：
+	// “调用 StopTask 后应立刻看到 STOPPED”并不成立。这里先写 STOPPING，
+	// 只有 run goroutine 真正退出后才会转为 STOPPED，确保状态语义等于“执行已结束”。
+	// 两阶段停止：先对外可见 STOPPING，再等待 run goroutine defer 收敛到 STOPPED。
 	s.appendEventLocked(id, "TASK_STOPPING", "task stopping", "")
 	if err := s.persistTaskLocked(task); err != nil {
 		s.mu.Unlock()
@@ -702,7 +762,11 @@ func (s *Scheduler) StopTask(id string) error {
 	return nil
 }
 
+// GetTask 读取任务详情；必要时会从 store 刷新。
 func (s *Scheduler) GetTask(id string) (Task, error) {
+	// 常见误解：
+	// GetTask 返回的不一定是“纯内存快照”，当配置了 store 时会尝试拉取持久化最新值，
+	// 目的是让 API 视图更接近真实元数据状态。
 	s.mu.Lock()
 	task, ok := s.tasks[id]
 	store := s.store
@@ -734,6 +798,7 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 	return task, nil
 }
 
+// DeleteTask 删除任务，并尝试释放 lease/停止运行。
 func (s *Scheduler) DeleteTask(id string) error {
 	s.mu.Lock()
 	task, ok := s.tasks[id]
@@ -763,6 +828,7 @@ func (s *Scheduler) DeleteTask(id string) error {
 	return nil
 }
 
+// ListTasks 列出当前内存视图中的全部任务。
 func (s *Scheduler) ListTasks() []Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -774,6 +840,7 @@ func (s *Scheduler) ListTasks() []Task {
 	return out
 }
 
+// ReportReplicationProgress 上报最新复制进度，供延迟计算和展示。
 func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -796,6 +863,7 @@ func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.
 	s.replica[taskID] = progress
 }
 
+// GetReplicationProgress 获取任务复制进度快照。
 func (s *Scheduler) GetReplicationProgress(taskID string) (ReplicationProgress, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -807,6 +875,7 @@ func (s *Scheduler) GetReplicationProgress(taskID string) (ReplicationProgress, 
 	return progress, ok, nil
 }
 
+// runTask 托管单任务执行 goroutine，包含错误重试与状态收敛逻辑。
 func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}) {
 	defer func() {
 		var (
@@ -818,6 +887,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			delete(s.runs, id)
 		}
 		// 收到 stop 请求后，直到执行 goroutine 真退出才收敛到 STOPPED。
+		// 这样 API 层的 STOPPED 表示“执行路径已结束”，而不是“仅发出停止请求”。
 		if currentTask, ok := s.tasks[id]; ok && currentTask.State == StateStopping {
 			_ = s.markStoppedLocked(id)
 			if s.leaseManager != nil && currentTask.OwnerWorkerID != "" && currentTask.Epoch > 0 {
@@ -829,9 +899,13 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		if s.leaseManager != nil && releaseOwner != "" && releaseEpoch > 0 {
 			_, _ = s.leaseManager.Release(context.Background(), id, releaseOwner, releaseEpoch)
 		}
+		// 常见误解：
+		// done 不是“任务开始执行”的信号，而是“本轮执行完全结束”的信号。
+		// StopTask/状态收敛逻辑依赖这个 close 时机判断是否可标记 STOPPED。
 		close(done)
 	}()
 
+	// Step 1: 调用 runRunner 执行一次会话；错误则进入退避重试。
 	attempt := 0
 	for {
 		// runRunner 是一次“会话级”执行：内部会一直拉 binlog，直到 stop 或报错才返回。
@@ -859,6 +933,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		_ = s.persistTaskLocked(current)
 		s.mu.Unlock()
 
+		// Step 2: 指数退避等待，避免瞬时故障导致热重试风暴。
 		attempt++
 		// 使用 exponential backoff，保护 source DB 并避免热重试。
 		delay := s.retryDelay(attempt)
@@ -880,6 +955,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			s.mu.Unlock()
 			return
 		}
+		// Step 3: 重试前先回到 STARTING，等待下一轮 runner ready 回调。
 		current.State = StateStarting
 		current.UpdatedAt = time.Now()
 		s.tasks[id] = current
@@ -891,7 +967,9 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 	}
 }
 
+// runRunner 负责把 Scheduler 状态机与 Runner 生命周期对齐。
 func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
+	// Step 1: 定义 ready 回调，把任务状态收敛到 RUNNING。
 	onReady := func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -919,15 +997,18 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
 		// 类型断言：如果 runner 支持 RunWithNotify，就走精确 ready 语义。
 		return n.RunWithNotify(ctx, task, onReady)
 	}
+	// Step 2: 兼容旧 runner（无 notify），采用乐观 ready 语义。
 	// 向后兼容旧 runner：没有 notify 能力时，在 Run 前乐观置为 RUNNING。
 	onReady()
 	return s.runner.Run(ctx, task)
 }
 
+// renewLeaseLoop 在 cluster 模式下周期续租，并处理降级/失租停机。
 func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epoch int64) {
 	ticker := time.NewTicker(s.leaseRenewInterval)
 	defer ticker.Stop()
 
+	// Step 1: 正常续租时保持/恢复 RUNNING。
 	var degradedSince time.Time
 	for {
 		select {
@@ -956,12 +1037,14 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		}
 
 		if err == nil && !ok {
+			// lease 被抢占/丢失：立刻 fail-safe stop，避免双写同一任务。
 			s.mu.Lock()
 			s.failSafeStopLocked(id, "TASK_LEASE_LOST", "lease lost")
 			s.mu.Unlock()
 			return
 		}
 
+		// Step 2: 续租报错进入 LEASE_DEGRADED，并开始 grace 计时。
 		now := time.Now()
 		s.mu.Lock()
 		task, exists := s.tasks[id]
@@ -980,7 +1063,9 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		if degradedSince.IsZero() {
 			degradedSince = now
 		}
+		// Step 3: 超过 grace 仍不可续租，触发 fail-safe 停止。
 		if now.Sub(degradedSince) >= s.leaseGrace {
+			// 超过 grace 仍无法续租，必须停止，优先保证文件语义与单执行安全。
 			s.mu.Lock()
 			s.failSafeStopLocked(id, "TASK_LEASE_GRACE_EXCEEDED", "lease renew grace exceeded")
 			s.mu.Unlock()
@@ -989,6 +1074,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 	}
 }
 
+// failSafeStopLocked 在持锁上下文内触发强制停止（用于 lease 异常场景）。
 func (s *Scheduler) failSafeStopLocked(id, eventType, message string) {
 	task, ok := s.tasks[id]
 	if !ok {
@@ -1009,6 +1095,7 @@ func (s *Scheduler) failSafeStopLocked(id, eventType, message string) {
 	}
 }
 
+// markStoppedLocked 将任务收敛到最终 STOPPED 并清理运行时 ownership 字段。
 func (s *Scheduler) markStoppedLocked(id string) error {
 	task, ok := s.tasks[id]
 	if !ok {
@@ -1027,6 +1114,7 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 	return s.persistTaskLocked(task)
 }
 
+// isClosed 判断 channel 是否已关闭（nil 视为已关闭）。
 func isClosed(ch <-chan struct{}) bool {
 	if ch == nil {
 		return true
@@ -1039,6 +1127,7 @@ func isClosed(ch <-chan struct{}) bool {
 	}
 }
 
+// Restore 从持久化层恢复任务到内存视图。
 func (s *Scheduler) Restore(ctx context.Context) error {
 	if s.store == nil {
 		return nil
@@ -1067,6 +1156,7 @@ func (s *Scheduler) Restore(ctx context.Context) error {
 	return nil
 }
 
+// persistTaskLocked 在持锁上下文下把任务状态写入 store。
 func (s *Scheduler) persistTaskLocked(task Task) error {
 	if s.store == nil {
 		return nil
@@ -1074,6 +1164,7 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 	return s.store.UpsertTask(context.Background(), task)
 }
 
+// retryDelay 计算指数退避时长（有上限）。
 func (s *Scheduler) retryDelay(attempt int) time.Duration {
 	if attempt <= 1 {
 		return s.retryBaseDelay
@@ -1086,12 +1177,14 @@ func (s *Scheduler) retryDelay(attempt int) time.Duration {
 	return time.Duration(delay)
 }
 
+// GetCheckpoint 读取任务 checkpoint（优先 reader，不可用时返回未命中）。
 func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
 	s.mu.Lock()
 	_, ok := s.tasks[taskID]
 	store := s.store
 	s.mu.Unlock()
 
+	// Step 1: 内存未命中时，从 store 同步一次任务视图。
 	if !ok && store != nil {
 		list, err := store.ListTasks(context.Background())
 		if err != nil {
@@ -1113,12 +1206,14 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 	if !ok && store == nil {
 		return binlog.Checkpoint{}, false, ErrTaskNotFound
 	}
+	// Step 2: 读 checkpoint（未配置 reader 时返回未命中）。
 	if s.checkpointReader == nil {
 		return binlog.Checkpoint{}, false, nil
 	}
 	return s.checkpointReader.LoadCheckpoint(ctx, taskID)
 }
 
+// ListEvents 列出任务事件，limit<=0 时按默认值处理。
 func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1141,6 +1236,7 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	return out, nil
 }
 
+// ListFiles 列出任务文件元数据。
 func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1154,6 +1250,7 @@ func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 	return s.fileStore.ListBinlogFiles(context.Background(), taskID, limit)
 }
 
+// RetryFailedUploads 手动重试失败上传（仅 sealed 且状态为 UPLOAD_FAILED）。
 func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetryStats, error) {
 	const (
 		defaultLimit = 100
@@ -1169,6 +1266,7 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 		return UploadRetryStats{}, err
 	}
 
+	// Step 1: 参数归一化 + 任务存在性 + 并发互斥校验。
 	s.mu.Lock()
 	if _, ok := s.tasks[taskID]; !ok {
 		s.mu.Unlock()
@@ -1192,6 +1290,7 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 		return UploadRetryStats{}, ErrUploadRetryNotAvailable
 	}
 
+	// Step 2: 拉取候选并逐个重试，单文件失败不影响其他文件。
 	files, err := s.listRetryUploadCandidates(taskID, limit, fileStore)
 	if err != nil {
 		return UploadRetryStats{}, err
@@ -1235,11 +1334,13 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 		stats.Succeeded++
 	}
 
+	// Step 3: 汇总到全局 retry metrics。
 	s.recordUploadRetryMetrics(stats)
 
 	return stats, nil
 }
 
+// listRetryUploadCandidates 优先使用“失败文件专用查询”，否则退化到全量查询。
 func (s *Scheduler) listRetryUploadCandidates(taskID string, limit int, fileStore FileStore) ([]BinlogFile, error) {
 	if reader, ok := fileStore.(failedUploadFileReader); ok {
 		return reader.ListFailedUploadBinlogFiles(context.Background(), taskID, limit)
@@ -1247,12 +1348,14 @@ func (s *Scheduler) listRetryUploadCandidates(taskID string, limit int, fileStor
 	return fileStore.ListBinlogFiles(context.Background(), taskID, limit)
 }
 
+// markRetryUploadFailure 记录单文件补传失败状态和错误原因。
 func (s *Scheduler) markRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) error {
 	file.UploadState = "UPLOAD_FAILED"
 	file.UploadError = reason
 	return fileStore.UpsertBinlogFile(context.Background(), file)
 }
 
+// isSealedFileForRetry 判定文件是否满足补传前提（已 seal 且非 open 文件）。
 func isSealedFileForRetry(file BinlogFile) bool {
 	name := strings.ToLower(strings.TrimSpace(file.FileName))
 	path := strings.ToLower(strings.TrimSpace(file.FilePath))
@@ -1262,6 +1365,7 @@ func isSealedFileForRetry(file BinlogFile) bool {
 	return !file.SealedAt.IsZero()
 }
 
+// CountUploadFailures 统计全局上传失败记录数（metrics 使用）。
 func (s *Scheduler) CountUploadFailures() (int64, error) {
 	s.mu.Lock()
 	fileStore := s.fileStore
@@ -1294,6 +1398,7 @@ func (s *Scheduler) CountUploadFailures() (int64, error) {
 	return total, nil
 }
 
+// GetUploadRetryMetrics 返回 retry-upload 的累计观测指标。
 func (s *Scheduler) GetUploadRetryMetrics() UploadRetryMetrics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1305,6 +1410,7 @@ func (s *Scheduler) GetUploadRetryMetrics() UploadRetryMetrics {
 	}
 }
 
+// recordUploadRetryMetrics 累加 retry-upload 的观测计数。
 func (s *Scheduler) recordUploadRetryMetrics(stats UploadRetryStats) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1314,7 +1420,11 @@ func (s *Scheduler) recordUploadRetryMetrics(stats UploadRetryStats) {
 	s.retryLastTS = time.Now().Unix()
 }
 
+// ListUploadFailureReasons 按原因聚合上传失败，便于排障。
 func (s *Scheduler) ListUploadFailureReasons(taskID string, limit int) ([]UploadFailureReason, error) {
+	// 常见误解：
+	// 这里返回的是“归一化后的原因聚合”，不是原始错误明细。
+	// 设计目的：压缩噪声，便于直接看 Top N 问题类别。
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1386,6 +1496,7 @@ func (s *Scheduler) ListUploadFailureReasons(taskID string, limit int) ([]Upload
 	return out, nil
 }
 
+// NormalizeUploadFailureReason 归一化失败原因（trim/压缩空白/空值转 unknown）。
 func NormalizeUploadFailureReason(reason string) string {
 	normalized := strings.Join(strings.Fields(strings.TrimSpace(reason)), " ")
 	if normalized == "" {
@@ -1394,6 +1505,7 @@ func NormalizeUploadFailureReason(reason string) string {
 	return normalized
 }
 
+// ListRuns 返回任务运行历史（按 started_at 倒序）。
 func (s *Scheduler) ListRuns(taskID string, limit int) ([]TaskRun, error) {
 	if limit <= 0 {
 		limit = 10
@@ -1429,6 +1541,7 @@ func (s *Scheduler) ListRuns(taskID string, limit int) ([]TaskRun, error) {
 	}, nil
 }
 
+// ListWorkerHeartbeats 返回 worker 心跳列表（用于 cluster 观测）。
 func (s *Scheduler) ListWorkerHeartbeats(limit int) ([]WorkerHeartbeat, error) {
 	if limit <= 0 {
 		limit = 200
@@ -1447,6 +1560,7 @@ func (s *Scheduler) ListWorkerHeartbeats(limit int) ([]WorkerHeartbeat, error) {
 	return []WorkerHeartbeat{}, nil
 }
 
+// appendEventLocked 追加事件到内存并 best-effort 写入持久化层。
 func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string) {
 	// 函数名里的 Locked 表示：调用方必须已经持有 s.mu。
 	// 这里会修改 eventSeq 和 events map，需要同一把锁保护。
@@ -1466,6 +1580,7 @@ func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string)
 	}
 }
 
+// isClusterKeyUniqueLocked 校验 cluster_key 在任务集合中是否唯一。
 func (s *Scheduler) isClusterKeyUniqueLocked(clusterKey, excludeTaskID string) bool {
 	for _, task := range s.tasks {
 		if task.ID == excludeTaskID {
@@ -1478,7 +1593,11 @@ func (s *Scheduler) isClusterKeyUniqueLocked(clusterKey, excludeTaskID string) b
 	return true
 }
 
+// syncTasksFromStore 把 store 任务视图同步到内存。
 func (s *Scheduler) syncTasksFromStore() error {
+	// 常见误解：
+	// sync 不是“全量覆盖重建内存”，而是 upsert 合并；
+	// 删除语义仍由 DeleteTask 控制，避免把临时运行态误删。
 	s.mu.Lock()
 	store := s.store
 	s.mu.Unlock()
@@ -1493,6 +1612,9 @@ func (s *Scheduler) syncTasksFromStore() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 这里采用 upsert 到内存视图，不主动清空 map：
+	// 1) 兼容本进程刚创建但尚未来得及从 store 读回的任务；
+	// 2) 删除路径由 DeleteTask 显式清理，避免周期 sync 误抹临时态。
 	for _, task := range list {
 		s.tasks[task.ID] = task
 		if n, convErr := strconv.Atoi(task.ID); convErr == nil && n > s.seq {
@@ -1502,6 +1624,7 @@ func (s *Scheduler) syncTasksFromStore() error {
 	return nil
 }
 
+// normalizeAndValidateClusterKey 归一化并校验 cluster_key 合法性。
 func normalizeAndValidateClusterKey(clusterKey string) (string, error) {
 	key := strings.TrimSpace(clusterKey)
 	if key == "" {
@@ -1516,6 +1639,7 @@ func normalizeAndValidateClusterKey(clusterKey string) (string, error) {
 	return key, nil
 }
 
+// normalizeAndValidateTaskName 归一化并校验任务名。
 func normalizeAndValidateTaskName(name string) (string, error) {
 	normalized := strings.TrimSpace(name)
 	if normalized == "" {
@@ -1527,6 +1651,7 @@ func normalizeAndValidateTaskName(name string) (string, error) {
 	return normalized, nil
 }
 
+// normalizeAndValidateSourceConfig 归一化并校验源库配置。
 func normalizeAndValidateSourceConfig(source SourceConfig) (SourceConfig, error) {
 	normalized := source
 	normalized.Host = strings.TrimSpace(source.Host)
@@ -1551,6 +1676,7 @@ func normalizeAndValidateSourceConfig(source SourceConfig) (SourceConfig, error)
 	return normalized, nil
 }
 
+// normalizeAndValidateStartConfig 归一化并校验起点配置。
 func normalizeAndValidateStartConfig(start StartConfig) (StartConfig, error) {
 	normalized := start
 	if normalized.Mode == "" {
@@ -1582,6 +1708,7 @@ func normalizeAndValidateStartConfig(start StartConfig) (StartConfig, error) {
 	}
 }
 
+// normalizeAndValidateStorage 归一化并校验存储策略。
 func normalizeAndValidateStorage(storage Storage) (Storage, error) {
 	normalized := storage
 	if normalized.RetentionDays < minRetentionDays || normalized.RetentionDays > maxRetentionDays {
@@ -1590,6 +1717,7 @@ func normalizeAndValidateStorage(storage Storage) (Storage, error) {
 	return normalized, nil
 }
 
+// hasWhitespace 判断字符串是否包含空白字符。
 func hasWhitespace(value string) bool {
 	return strings.ContainsAny(value, " \t\r\n")
 }

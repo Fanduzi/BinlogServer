@@ -38,22 +38,31 @@ const currentDBTimeSQL = `
 SELECT NOW(6);
 `
 
+// Lease 表示某任务当前 lease 的持有信息。
 type Lease struct {
+	// TaskID 是 lease 绑定的任务 ID。
 	TaskID        string
+	// OwnerWorkerID 是当前持有该 lease 的 worker。
 	OwnerWorkerID string
+	// Epoch 是单调递增的 fencing token。
 	Epoch         int64
+	// LeaseExpireAt 是 lease 过期时间（以 DB 时间为准）。
 	LeaseExpireAt time.Time
+	// RenewedAt 是最近续租时间。
 	RenewedAt     time.Time
 }
 
+// LeaseStore 负责基于 MySQL 表实现 lease acquire/renew/release。
 type LeaseStore struct {
 	db *sql.DB
 }
 
+// NewLeaseStore 基于 *sql.DB 构建 LeaseStore。
 func NewLeaseStore(db *sql.DB) *LeaseStore {
 	return &LeaseStore{db: db}
 }
 
+// NewLeaseStoreFromTaskStore 复用 MySQLTaskStore 的 DB 句柄创建 LeaseStore。
 func NewLeaseStoreFromTaskStore(store *MySQLTaskStore) *LeaseStore {
 	if store == nil {
 		return nil
@@ -61,6 +70,7 @@ func NewLeaseStoreFromTaskStore(store *MySQLTaskStore) *LeaseStore {
 	return &LeaseStore{db: store.db}
 }
 
+// Acquire 尝试获取 lease，返回 epoch 和是否成功。
 func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, now time.Time, ttl time.Duration) (int64, bool, error) {
 	_ = now
 	ttlMicros := durationToMicroseconds(ttl)
@@ -106,6 +116,7 @@ func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, now t
 	return epoch, ok, nil
 }
 
+// Renew 续租指定 epoch 的 lease，返回是否续租成功。
 func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error) {
 	_ = now
 	var renewed bool
@@ -130,6 +141,7 @@ func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch i
 	return renewed, nil
 }
 
+// Get 读取任务当前 lease 记录。
 func (s *LeaseStore) Get(ctx context.Context, taskID string) (Lease, bool, error) {
 	var (
 		lease Lease
@@ -164,6 +176,7 @@ func (s *LeaseStore) getNoRetry(ctx context.Context, taskID string) (Lease, bool
 	return lease, true, nil
 }
 
+// Release 释放 lease（通过软过期而非删除行）。
 func (s *LeaseStore) Release(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
 	var released bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
@@ -201,6 +214,7 @@ func (s *LeaseStore) currentDBTimeNoRetry(ctx context.Context) (time.Time, error
 	return now, nil
 }
 
+// VerifyOwnership 校验给定 worker/epoch 当前是否仍拥有有效 lease。
 func (s *LeaseStore) VerifyOwnership(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
 	lease, ok, err := s.Get(ctx, taskID)
 	if err != nil {
@@ -227,6 +241,7 @@ func rowsAffectedGreaterThanZero(result sql.Result) (bool, error) {
 	return affected > 0, nil
 }
 
+// durationToMicroseconds 将 TTL 转为 SQL INTERVAL 需要的微秒值。
 func durationToMicroseconds(d time.Duration) int64 {
 	if d <= 0 {
 		return 1

@@ -537,3 +537,15 @@ git commit -m "docs: finalize cluster ha operational guide"
 4. 回滚路径：
    - 配置切回 `mode: standalone`
    - 保留已有任务元数据结构，不删除旧表，仅停用 cluster 功能。
+
+---
+
+## Task 13-22 续篇说明（2026-02-20）
+
+本计划最初定义到 `Task 12`。后续落地过程中新增了 `Task 13-22`，用于补齐 API 能力、worker 可观测、多进程 e2e、CI 回归与 observability 基础能力，并继续推进 worker 崩溃接管一致性回归。
+
+为避免本文件过长，续篇拆分到以下文档：
+
+- `docs/plans/2026-02-18-cluster-ha-task-13-18-extension.md`
+- `docs/plans/2026-02-19-cluster-ha-task-19-20-observability-extension.md`
+- `docs/plans/2026-02-20-cluster-ha-task-21-22-extension.md`

@@ -22,6 +22,8 @@
 3. 未完成当前 Task 的全部 Gate，不允许开始下一个 Task。
 4. review 结论存在 `Critical/Major` finding 时，必须先修复再继续。
 5. 禁止“只补测试不接运行时路径”的提交通过验收。
+6. 每个 Task 必须归属到一个 Milestone（见 `docs/TODO.md`），不允许孤立新增 Task。
+7. 凡是用户可控输入（前端表单、批量导入、API query/path/body/header、配置项）必须做“前端预校验 + 后端权威校验”，任一缺失均阻塞。
 
 ## 3. Gate 定义
 
@@ -36,6 +38,7 @@
   - 运行时接线路径
   - 测试范围
   - 文档/契约同步项
+  - 输入校验矩阵（参数名、来源、约束、前端校验点、后端校验点）
 
 通过标准：
 - 有明确 DoD 与禁止项（Out of Scope）。
@@ -151,7 +154,32 @@
 4. `/api` 新 endpoint 是否同步到 Swagger 产物。
 5. worker 模式是否有实际工作循环，而非仅阻塞等待退出。
 
-## 6. Task 执行模板（可直接复制）
+## 6. 输入校验硬门禁（全项目）
+
+所有“用户可控输入”均适用本节；不区分 standalone/cluster，不区分前后端入口。
+
+### 6.1 覆盖范围
+
+1. 前端 UI：表单输入、筛选条件、批量创建文本/CSV。
+2. HTTP API：`path`/`query`/`header`/`body` 全部参数。
+3. 配置输入：YAML、环境变量、CLI flags。
+4. 外部标识：`cluster_key`、host/port、对象存储 prefix、起点策略参数（file/pos/gtid）等。
+
+### 6.2 最低校验要求（必须全部满足）
+
+1. 前端预校验：必填、类型、长度、范围、枚举、格式（regex）与互斥关系。
+2. 后端权威校验：即使绕过前端也必须拦截非法输入，返回 `400` 与清晰错误信息。
+3. 存储兜底约束：关键字段使用 `NOT NULL`、`UNIQUE`、必要 `CHECK`（或应用层等价约束）。
+4. 错误文案一致：前端提示与后端错误语义一致，避免“前端放行、后端拒绝但无解释”。
+
+### 6.3 测试与验收要求（阻塞项）
+
+1. 后端至少覆盖：合法样例、非法样例、边界样例（min/max/空值/格式错误）。
+2. 前端至少覆盖：提交前拦截（不发请求）和错误提示渲染（若已有前端测试基础）。
+3. e2e 至少覆盖 1 条非法输入场景（例如批量导入含坏行时可预览并拒绝提交）。
+4. Gate 7 报告必须附“输入校验证据清单”（测试名 + 命令 + 关键输出）。
+
+## 7. Task 执行模板（可直接复制）
 
 ```md
 ## Task <N> - <Title>
@@ -161,6 +189,8 @@
 - DoD:
   1.
   2.
+- Input Validation Matrix:
+  - param: <name>, source: <ui/api/config>, constraints: <required/type/range/format>, frontend: <yes/no>, backend: <yes/no>
 - Out of Scope:
   1.
 
@@ -189,6 +219,7 @@
 ### Gate 4 - Contract Sync
 - Swagger updated: yes/no
 - Config/doc updated: yes/no
+- Validation rules synced to frontend/backend/docs: yes/no
 - Evidence:
   - <文件路径>
 
@@ -213,17 +244,21 @@
   1.
 - Risks:
   1.
+- Input Validation Evidence:
+  - <测试名/命令/关键输出>
 - Next Task Boundary:
   - <只允许进入的下一步>
 ```
 
-## 7. Cluster 计划快速清单（Task 4-20）
+## 8. Cluster 计划快速清单（Task 4-24）
 
 用于：
 
 - `docs/plans/2026-02-16-cluster-ha-implementation-plan.md`（Task 1-12）
 - `docs/plans/2026-02-18-cluster-ha-task-13-18-extension.md`（Task 13-18）
 - `docs/plans/2026-02-19-cluster-ha-task-19-20-observability-extension.md`（Task 19-20）
+- `docs/plans/2026-02-20-cluster-ha-task-21-22-extension.md`（Task 21-22）
+- `docs/TODO.md`（Task 23+ backlog）
 
 - Task 4（lease lifecycle）
   - [ ] scheduler acquire/renew/release 在真实启动路径可达
@@ -295,6 +330,19 @@
   - [ ] 新增 `smoke-observability` 场景并可独立执行
   - [ ] 场景验证 5 个核心指标存在，且至少 2 个指标值发生预期变化
   - [ ] CI 新增独立 observability job，`workflow_dispatch` 可单独触发
+- Task 22（worker crash 接管一致性 e2e）
+  - [ ] 模拟 worker 在 OPEN 阶段异常退出并由新 worker 接管
+  - [ ] checkpoint 在接管前后持续推进（无回退）
+  - [ ] stale `.open.e*` 可清理且不影响最终 seal 结果
+  - [ ] 抽样校验主库 binlog 与备份文件 md5 一致
+- Task 23（上传失败补偿最小闭环）
+  - [ ] 提供手动补传入口（仅处理 `UPLOAD_FAILED` + sealed 文件）
+  - [ ] 返回补传统计（scanned/succeeded/failed/skipped）
+  - [ ] 并发触发同任务补传时有冲突保护
+- Task 24（上传可观测增强）
+  - [ ] `/metrics` 暴露补传指标（`upload_retry_total`、`upload_retry_last_ts`）
+  - [ ] 提供上传失败原因聚合 API（`/upload-failures/reasons`）
+  - [ ] runbook 覆盖“先看指标 -> 再看聚合原因 -> 再补传验证”路径
 
 ---
 

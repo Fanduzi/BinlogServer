@@ -8,11 +8,17 @@ import (
 	"time"
 )
 
+// RetryPolicy 描述一次重试流程的退避和判错策略。
 type RetryPolicy struct {
+	// BaseDelay 是首次重试等待时间。
 	BaseDelay   time.Duration
+	// MaxDelay 是退避上限。
 	MaxDelay    time.Duration
+	// MaxRetries 是最大重试次数（不含首次执行）。
 	MaxRetries  int
+	// Jitter 是随机抖动比例（0~1）。
 	Jitter      float64
+	// IsTransient 判断错误是否可重试。
 	IsTransient func(error) bool
 }
 
@@ -20,14 +26,17 @@ type permanentError struct {
 	err error
 }
 
+// Error 返回原始错误文本。
 func (e permanentError) Error() string {
 	return e.err.Error()
 }
 
+// Unwrap 支持 errors.Is/errors.As 解包。
 func (e permanentError) Unwrap() error {
 	return e.err
 }
 
+// Permanent 将错误包装为“不可重试”。
 func Permanent(err error) error {
 	if err == nil {
 		return nil
@@ -35,6 +44,7 @@ func Permanent(err error) error {
 	return permanentError{err: err}
 }
 
+// WithRetry 按策略执行带重试的函数。
 func WithRetry(ctx context.Context, policy RetryPolicy, fn func() error) error {
 	policy = normalizeRetryPolicy(policy)
 
@@ -68,6 +78,7 @@ func WithRetry(ctx context.Context, policy RetryPolicy, fn func() error) error {
 	}
 }
 
+// DefaultMySQLRetryPolicy 返回适用于 MySQL 元数据操作的默认重试策略。
 func DefaultMySQLRetryPolicy() RetryPolicy {
 	return RetryPolicy{
 		BaseDelay:  100 * time.Millisecond,
@@ -80,6 +91,7 @@ func DefaultMySQLRetryPolicy() RetryPolicy {
 	}
 }
 
+// IsTransientMySQLError 基于错误文本做瞬时错误判定。
 func IsTransientMySQLError(err error) bool {
 	if err == nil {
 		return false

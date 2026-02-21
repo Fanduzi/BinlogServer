@@ -10,6 +10,7 @@ type syncFile interface {
 	Sync() error
 }
 
+// Writer 把 event 写入文件，并在 fsync 成功后推进 checkpoint。
 type Writer struct {
 	mu         sync.Mutex
 	file       syncFile
@@ -18,6 +19,7 @@ type Writer struct {
 	hasPending bool
 }
 
+// NewWriter 创建一个带初始 checkpoint 的 Writer。
 func NewWriter(file syncFile, initial Checkpoint) *Writer {
 	return &Writer{
 		file:    file,
@@ -25,6 +27,7 @@ func NewWriter(file syncFile, initial Checkpoint) *Writer {
 	}
 }
 
+// Append 先写入 event，再暂存对应的 next checkpoint。
 func (w *Writer) Append(event []byte, next Checkpoint) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -37,6 +40,7 @@ func (w *Writer) Append(event []byte, next Checkpoint) error {
 	return nil
 }
 
+// FlushAndCheckpoint 执行 fsync，并在成功后提交 pending checkpoint。
 func (w *Writer) FlushAndCheckpoint() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -53,6 +57,7 @@ func (w *Writer) FlushAndCheckpoint() error {
 	return nil
 }
 
+// CurrentCheckpoint 返回当前已提交的 checkpoint。
 func (w *Writer) CurrentCheckpoint() Checkpoint {
 	w.mu.Lock()
 	defer w.mu.Unlock()

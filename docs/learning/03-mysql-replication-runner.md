@@ -1,8 +1,18 @@
 # 第 3 节：MySQL 复制拉流主流程
 
+## 全链路导读
+
+- 全链路定位：数据面核心执行链路（拉流、写盘、checkpoint、seal/upload）
+- 前置阅读：第 0 节、第 1 节、第 2 节
+- 学完你应能：解释 event 到文件落盘的完整路径，以及为何 checkpoint 只能在安全语义后推进
+
 ## 目标
 
 看懂 runner 如何从 MySQL 复制协议持续拉取 binlog、落盘、rotate、上传。
+
+## 更新提示（alpha.2）
+
+当前 runner 在 cluster 下受 lease/epoch 约束，并支持 semi-sync（默认关闭，失败自动降级异步）。
 
 ## 核心文件
 
@@ -62,7 +72,7 @@ Run(task)
 
 1. 若配置了 `fileMetaStore`，先写本地元数据，默认 `UploadState=LOCAL_ONLY`。
 2. 若未配置 uploader，直接返回。
-3. 构建 object key：`<prefix>/<taskID>/<fileName>`（prefix 可空）。
+3. 构建 object key（当前实现）：`<prefix>/<cluster_key>/<source_server_uuid>/<fileName>`（prefix 可空）。
 4. 调 `UploadFile`。
 5. 上传失败：写 `UPLOAD_FAILED` + `upload_error`，然后返回 `nil`（不中断拉流）。
 6. 上传成功：写 `UPLOADED` + `object_key` + `uploaded_at`。
@@ -72,6 +82,13 @@ Run(task)
 - 策略：最佳努力。
 - 行为：上传失败时记录 `UPLOAD_FAILED` 和错误信息，但不中断拉流。
 - 意义：保证“备份持续性”优先于“实时上传成功率”。
+- 命名语义（已落地）：`cluster_key + source_server_uuid` 组合，用于区分不同集群与切主场景，避免对象 key 冲突。
+
+## cluster 语义补充
+
+1. 文件写入采用 OPEN/SEALED 状态机，避免 failover 期间出现不完整发布文件。
+2. worker 在 seal/upload 前会校验 lease/epoch，有疑问则 fail-safe 停止。
+3. 任务接管时使用 `rebuild_current_file` 策略保证单文件完整性。
 
 ## checkpoint 推进语义
 
@@ -104,3 +121,14 @@ Run(task)
 2. rotate 后为什么要立即落一条文件元数据？
 3. `effectiveStartFromCheckpoint` 为什么优先级高于请求体里的 start 配置？
 4. 如果 `FlushAndCheckpoint` 失败，为什么必须立刻返回错误而不是忽略？
+
+## 5 分钟最小实操
+
+1. 启动一个可拉流任务，连续查看 `checkpoint` 与 `files`。
+2. 观察一次 rotate 后文件状态变化（OPEN 到 seal 后元数据写入）。
+3. 解释一句：为什么上传失败记录为 `UPLOAD_FAILED` 但任务继续跑。
+
+## 本节实战检查
+
+- 对照 `docs/learning/chapter-dod-matrix.md` 的「第 3 节」。
+- 完成本节最小证据后再进入下一节。

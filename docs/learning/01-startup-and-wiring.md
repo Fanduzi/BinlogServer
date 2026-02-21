@@ -1,8 +1,18 @@
 # 第 1 节：程序启动与依赖装配
 
+## 全链路导读
+
+- 全链路定位：系统入口与装配层（把控制面/数据面拼起来）
+- 前置阅读：第 0 节
+- 学完你应能：准确说出进程启动后依赖如何注入，以及不同 role 如何被装配
+
 ## 目标
 
 看懂服务从进程启动到 HTTP API 可用的完整路径，以及关键依赖是如何装配的。
+
+## 更新提示（alpha.2）
+
+本节保留基础装配主线；cluster 角色分离与 worker-only 健康探针请结合第 9 节一起看。
 
 ## 代码入口
 
@@ -20,12 +30,11 @@ main.main
   -> App.Run(ctx)
       -> (可选) meta.NewMySQLTaskStore
       -> (可选) upload.NewS3Uploader
-      -> replication.NewMySQLRunner
-      -> tasks.NewScheduler
+      -> resolveRoleMode (standalone / control-plane / worker / all-in-one)
+      -> tasks.NewScheduler + (可选) replication.NewMySQLRunner
       -> scheduler.Restore
-      -> api.NewServer
-      -> net.Listen
-      -> http.Server.Serve
+      -> (worker && cluster) heartbeat + claim loop
+      -> (control-plane) api.NewServer -> net.Listen -> http.Server.Serve
 ```
 
 如果你只记一件事：`main.go` 只负责“启动流程”，`app.Run` 才是系统装配中心。
@@ -45,14 +54,15 @@ main.main
 
 ### 2) `config.LoadConfig`
 
-配置策略是“默认值 + 环境变量覆盖”：
+配置策略是“默认值 + 配置文件 + 环境变量覆盖”：
 
 1. 默认 `ListenAddr=":8080"`、`DataDir="./data"`。
-2. 若存在 `BINLOG_SERVER_LISTEN_ADDR`、`BINLOG_SERVER_DATA_DIR` 就覆盖。
-3. 读取可选 `BINLOG_SERVER_META_DSN`。
-4. 读取上传参数（endpoint/bucket/key/secret/region/prefix/use_ssl）。
+2. 若传入 `--config`，先读指定 YAML；否则尝试 `./config.yaml`（不存在则忽略）。
+3. 若存在 `BINLOG_SERVER_*` 环境变量则覆盖配置文件值。
+4. 读取 cluster 配置（`mode/role/worker_id/worker_health_listen_addr`）。
+5. 读取可选 `BINLOG_SERVER_META_DSN` 与上传参数。
 
-注意：当前实现里 `path` 参数没有使用，这是为了后续扩展配置文件预留接口。
+注意：当前 `LoadConfig(path)` 中 `path` 已生效，不再是预留参数。
 
 ### 3) `app.New`
 
@@ -68,12 +78,14 @@ main.main
 1. 根据 `MetaDSN` 决定是否创建 `MySQLTaskStore`。  
 创建后会把它注入 scheduler 的 store/checkpoint/event/file 接口，同时注入 runner 的 checkpoint/file meta 接口。
 2. 根据上传配置是否完整，决定是否构建 `S3Uploader` 并注入 runner。
-3. 创建 `MySQLRunner`，再创建 `Scheduler` 并注入 runner。
+3. 按 role 装配：
+   - control-plane：不注入 runner
+   - worker/all-in-one：注入 `MySQLRunner`
 4. 调 `scheduler.Restore(context.Background())` 做启动恢复（任务/位点）。
-5. 创建 Gin handler（`api.NewServer(scheduler)`），再包进 `http.Server`。
-6. `net.Listen` 绑定地址，写入 `a.addr`，关闭 `readyCh`。
-7. 启 goroutine 等待 `ctx.Done()`，调用 `server.Shutdown` 实现优雅停机。
-8. `server.Serve(ln)` 阻塞对外服务；若非 `http.ErrServerClosed` 则返回错误。
+5. worker + cluster 下会启动 heartbeat loop 和 claim loop。
+6. 若是 worker-only 且配置了 `cluster.worker_health_listen_addr`，会启动独立 health probe 服务。
+7. 仅当 control-plane enabled 时才创建 Gin handler 并对外提供管理 API。
+8. 启 goroutine 等待 `ctx.Done()`，调用 `server.Shutdown` 实现优雅停机。
 
 ### 5) `Ready/Addr`
 
@@ -94,8 +106,9 @@ main.main
 
 1. `MetaDSN` 错误：`meta.NewMySQLTaskStore` 会直接失败，服务起不来。
 2. 上传参数不完整：不会启用 uploader（但拉流仍可运行）。
-3. 监听地址冲突：`net.Listen` 报错退出。
-4. `Restore` 失败：说明元数据恢复路径异常，服务启动中止。
+3. role 配置不符合预期：会出现“有 API 但不执行”或“执行了但无 API”。
+4. 监听地址冲突：`net.Listen` 报错退出。
+5. `Restore` 失败：说明元数据恢复路径异常，服务启动中止。
 
 ## 动手练习
 
@@ -120,3 +133,14 @@ BINLOG_SERVER_META_DSN='bad-dsn' go run ./cmd/binlog-server
 2. 为什么不建议在 handler 内直接创建底层依赖？
 3. `Ready()` 和 `Addr()` 这两个方法主要解决了什么测试问题？
 4. 如果要支持配置文件 + 环境变量共存，最自然应改哪个函数？
+
+## 5 分钟最小实操
+
+1. 执行 `go run ./cmd/binlog-server --config ./config.example.yaml`。
+2. 执行 `curl -s http://127.0.0.1:8080/healthz`，确认返回 `ok`。
+3. 改一次 `listen_addr` 后重启，确认你知道配置在哪一层生效。
+
+## 本节实战检查
+
+- 对照 `docs/learning/chapter-dod-matrix.md` 的「第 1 节」。
+- 完成本节最小证据后再进入下一节。

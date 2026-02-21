@@ -43,3 +43,9 @@
 
 - Gate 流程：`docs/process/task-gate.md`
 - Release 文档：`docs/releases/v0.1.0-alpha.2.md`
+
+## 后续续篇说明（2026-02-20）
+
+`Task 21-22` 已迁移到：
+
+- `docs/plans/2026-02-20-cluster-ha-task-21-22-extension.md`

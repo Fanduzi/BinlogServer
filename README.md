@@ -217,6 +217,8 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 - `GET /api/tasks/{id}/replication`（复制延迟与最近位点）
 - `GET /api/tasks/{id}/events`
 - `GET /api/tasks/{id}/files`
+- `POST /api/tasks/{id}/files/retry-upload`（手动补传 `UPLOAD_FAILED` 文件）
+- `GET /api/tasks/{id}/upload-failures/reasons`（失败原因聚合）
 - `GET /api/workers`（集群 worker 视图）
 - `GET /api/cluster/overview`（集群汇总）
 - `GET /api/tasks/{id}/lease`（任务 lease 归属）
@@ -251,6 +253,8 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go
 上传触发时机是“文件已封口且不再追加”，避免对象存储上出现同名对象多版本覆盖和低频层早删成本风险。
 object key 规则（当前实现）：`<prefix>/<cluster_key>/<source_server_uuid>/<fileName>`（prefix 可空）。
 当前上传策略是“最佳努力模式”：上传失败会记录为 `UPLOAD_FAILED`，但不会中断 binlog 拉取。
+可通过 `POST /api/tasks/{id}/files/retry-upload?limit=100` 对历史 `UPLOAD_FAILED` 文件做手动补传。
+可通过 `GET /api/tasks/{id}/upload-failures/reasons?limit=20` 聚合查看失败原因与频次。
 默认不做远端对象回读校验（不额外 download 对象做 checksum 比对），由本地 seal/rotate 语义保证“单文件完整后再上传”。
 
 当前实现基于 S3 API 兼容协议，常见可用后端包括：

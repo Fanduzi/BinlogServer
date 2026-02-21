@@ -2,6 +2,12 @@
 
 如果你感觉“单个函数看得懂，但整体不知道在干什么”，先读这节。
 
+## 全链路导读
+
+- 全链路定位：系统地图（控制面 + 数据面 + 可观测面总览）
+- 前置阅读：无（课程起点）
+- 学完你应能：用 3 分钟讲清系统边界、核心角色与主链路
+
 ## 1. 项目要解决什么问题
 
 目标是把大量 MySQL 实例的 binlog 备份统一管理起来：
@@ -10,7 +16,12 @@
 2. 拉取到本地后可选上传到 S3/OBS
 3. 记录完整元数据（任务状态、checkpoint、事件、文件与上传状态）
 
-## 2. 三条主链路（必须记住）
+当前版本已支持两种部署范式：
+
+1. standalone（单进程）
+2. cluster（control-plane + worker 分离，支持高可用接管）
+
+## 2. 三条主链路（重点掌握）
 
 1. 控制面链路  
 前端/API 接收操作 -> 调度器变更任务状态
@@ -43,7 +54,7 @@ events/files/checkpoint 持久化 -> API 查询 -> 前端展示
 `frontend/src/App.vue` + `frontend/src/api.js`  
 负责管理台展示和交互。
 
-## 4. 启动时序（高频面试题）
+## 4. 启动时序（重点理解）
 
 1. `main` 加载配置并创建带信号的 `context`
 2. `app.Run` 组装 store/uploader/runner/scheduler
@@ -62,6 +73,12 @@ events/files/checkpoint 持久化 -> API 查询 -> 前端展示
 5. 上传（可选）：成功 `UPLOADED`，失败 `UPLOAD_FAILED`（最佳努力，不中断拉流）
 6. 停止任务：cancel 上下文，状态转 `STOPPED`
 
+cluster 模式下会额外出现：
+
+1. control-plane dispatch 到 `STARTING`
+2. worker claim + lease acquire 后进入 `RUNNING`
+3. lease 异常时进入 `LEASE_DEGRADED`，超出 grace 会 fail-safe stop
+
 ## 6. 关键术语速查
 
 1. `Restore`：启动恢复任务状态到内存
@@ -70,12 +87,24 @@ events/files/checkpoint 持久化 -> API 查询 -> 前端展示
 4. `Best-effort upload`：上传失败仅记状态，不停止拉流
 5. `Retention`：本地文件保留天数清理策略
 
-## 7. 最推荐的阅读顺序
+## 7. 最推荐的阅读顺序（自顶向下）
 
-1. `main.go` -> `app.go`（先懂系统如何拼起来）
-2. `handlers_tasks.go` -> `scheduler.go`（懂控制面）
-3. `mysql_runner.go`（懂数据面）
-4. `mysql_store.go`（懂恢复与可观测）
+先按“系统 -> 控制面 -> 数据面 -> 集群可靠性”的顺序读文档，再下钻到函数级别：
 
-读到这里后，再进入第 1~7 节细讲会轻松很多。
+1. 系统地图：`00-project-overview` + `docs/architecture-diagrams.md`
+2. 控制面链路：`05-gin-api-layer` -> `02-task-model-and-scheduler` -> `01-startup-and-wiring`
+3. 数据面链路：`03-mysql-replication-runner` -> `04-metadata-persistence`
+4. 集群与运维：`09/10/11` -> `07` -> `12` -> `08`
 
+这样读完后，再回到代码文件顺序（`main -> app -> handlers -> scheduler -> runner -> store`）会更容易建立完整心智模型。
+
+## 5 分钟最小实操
+
+1. 打开 `docs/architecture-diagrams.md`，对照说出控制面/数据面/可观测面各 1 个职责。
+2. 在本地写 6~10 行“项目总览速记”，要求包含 `task`、`checkpoint`、`upload` 三个关键词。
+3. 用自己的话回答：为什么这个项目不是“单纯 mysqlbinlog 包装器”。
+
+## 本节实战检查
+
+- 对照 `docs/learning/chapter-dod-matrix.md` 的「第 0 节」。
+- 完成本节最小证据后再进入下一节。

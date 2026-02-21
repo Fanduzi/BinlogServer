@@ -1,8 +1,18 @@
 # 第 4 节：元数据持久化（MySQL Store）
 
+## 全链路导读
+
+- 全链路定位：控制面与数据面的共享状态层（恢复、查询、可观测的事实来源）
+- 前置阅读：第 0 节、第 3 节
+- 学完你应能：说清每张元数据表的职责，以及恢复和查询为何依赖这层
+
 ## 目标
 
 看懂任务、checkpoint、events、files 如何持久化与恢复。
+
+## 更新提示（alpha.2）
+
+当前 store 已扩展为 cluster 元数据中心，不再只有 4 张表。
 
 ## 核心文件
 
@@ -11,12 +21,15 @@
 
 ## 一眼看数据模型
 
-`MySQLTaskStore` 维护 4 张表：
+`MySQLTaskStore` 当前维护 7 张核心表：
 
 1. `backup_tasks`：任务配置与当前状态（`source/start/storage` 用 JSON 存）。
 2. `backup_checkpoints`：每个任务一条最新位点（`file/pos/gtid_set`）。
 3. `task_events`：任务事件时间线（追加写）。
 4. `binlog_files`：每个封口文件的元数据与上传状态。
+5. `task_leases`：任务 lease owner + epoch + 续租时间。
+6. `task_runs`：每次运行会话（run history）。
+7. `worker_heartbeats`：worker 在线心跳。
 
 ## 初始化与建表
 
@@ -28,8 +41,8 @@
 
 ### `ensureSchema`
 
-顺序执行 4 条 `CREATE TABLE IF NOT EXISTS`。  
-这让新环境可以“无手工建表”直接启动。
+顺序执行全部 schema 语句与必要迁移（含旧表加列）。  
+这让新环境可“无手工建表”直接启动，老环境可平滑升级。
 
 ## 逐函数讲解（按对象）
 
@@ -62,12 +75,19 @@
 3. `uploaded_at` 用 `sql.NullTime`，避免零时间污染。
 4. `ListBinlogFiles`：按 `sealed_at DESC` 返回最近文件列表。
 
+### 5) Cluster 对象：`task_leases` / `task_runs` / `worker_heartbeats`
+
+1. `task_leases`：由 lease store 做 acquire/renew/release CAS 控制。
+2. `task_runs`：记录每次 run 的 `worker_id/epoch/started_at/ended_at/end_reason`。
+3. `worker_heartbeats`：写入 worker 最近心跳，供 `/api/workers` 判定在线状态。
+
 ## 关键点
 
 1. 服务重启后如何恢复任务与位点。
 2. `binlog_files` 的上传字段：`object_key/upload_state/upload_error/uploaded_at`。
-3. SQL upsert 设计如何避免重复写入冲突。
-4. `task_events` 查询返回前会反转，保证时间顺序稳定。
+3. lease/run/heartbeat 三张表如何支撑 cluster 可观测与唯一执行。
+4. SQL upsert 设计如何避免重复写入冲突。
+5. `task_events` 查询返回前会反转，保证时间顺序稳定。
 
 ## 恢复链路（启动时）
 
@@ -91,3 +111,14 @@
 2. 为什么 files 元数据需要单独表，而不是塞进任务表？
 3. 为什么 `ListEvents` 不是直接 `ORDER BY id ASC LIMIT ?`？
 4. 如果将 `source` 从 JSON 改成列存，收益和代价分别是什么？
+
+## 5 分钟最小实操
+
+1. 配置 `meta_dsn` 后启动并创建任务。
+2. 重启服务，确认任务与 checkpoint 能恢复。
+3. 用一句话区分“任务恢复”和“位点恢复”的触发时机。
+
+## 本节实战检查
+
+- 对照 `docs/learning/chapter-dod-matrix.md` 的「第 4 节」。
+- 完成本节最小证据后再进入下一节。
