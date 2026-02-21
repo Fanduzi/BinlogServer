@@ -155,6 +155,16 @@ CREATE TABLE IF NOT EXISTS worker_heartbeats (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
+const createWorkerRegistrationsTableSQL = `
+CREATE TABLE IF NOT EXISTS worker_registrations (
+  worker_id VARCHAR(128) PRIMARY KEY,
+  session_id VARCHAR(128) NOT NULL,
+  lease_expire_at DATETIME(6) NOT NULL,
+  renewed_at DATETIME(6) NOT NULL,
+  INDEX idx_worker_registrations_expire (lease_expire_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+`
+
 const hasBinlogFilesColumnSQL = `
 SELECT COUNT(*)
 FROM information_schema.columns
@@ -339,6 +349,26 @@ ORDER BY worker_id ASC
 LIMIT ?;
 `
 
+const acquireWorkerRegistrationSQL = `
+INSERT INTO worker_registrations (worker_id, session_id, lease_expire_at, renewed_at)
+VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), NOW(6))
+ON DUPLICATE KEY UPDATE
+  session_id = IF(session_id = VALUES(session_id) OR lease_expire_at <= NOW(6), VALUES(session_id), session_id),
+  lease_expire_at = IF(session_id = VALUES(session_id) OR lease_expire_at <= NOW(6), VALUES(lease_expire_at), lease_expire_at),
+  renewed_at = IF(session_id = VALUES(session_id) OR lease_expire_at <= NOW(6), NOW(6), renewed_at);
+`
+
+const renewWorkerRegistrationSQL = `
+UPDATE worker_registrations
+SET lease_expire_at = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), renewed_at = NOW(6)
+WHERE worker_id = ? AND session_id = ?;
+`
+
+const releaseWorkerRegistrationSQL = `
+DELETE FROM worker_registrations
+WHERE worker_id = ? AND session_id = ?;
+`
+
 type MySQLTaskStore struct {
 	db *sql.DB
 }
@@ -400,6 +430,10 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, createWorkerHeartbeatsTableSQL)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, createWorkerRegistrationsTableSQL)
 	return err
 }
 
@@ -1021,4 +1055,60 @@ func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID, sessionID string, ttl time.Duration) (bool, error) {
+	var ok bool
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		result, err := s.db.ExecContext(
+			ctx,
+			acquireWorkerRegistrationSQL,
+			workerID,
+			sessionID,
+			durationToMicroseconds(ttl),
+		)
+		if err != nil {
+			return err
+		}
+		ok, err = rowsAffectedGreaterThanZero(result)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+func (s *MySQLTaskStore) RenewWorkerRegistration(ctx context.Context, workerID, sessionID string, ttl time.Duration) (bool, error) {
+	var ok bool
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		result, err := s.db.ExecContext(
+			ctx,
+			renewWorkerRegistrationSQL,
+			durationToMicroseconds(ttl),
+			workerID,
+			sessionID,
+		)
+		if err != nil {
+			return err
+		}
+		ok, err = rowsAffectedGreaterThanZero(result)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+func (s *MySQLTaskStore) ReleaseWorkerRegistration(ctx context.Context, workerID, sessionID string) error {
+	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		_, err := s.db.ExecContext(
+			ctx,
+			releaseWorkerRegistrationSQL,
+			workerID,
+			sessionID,
+		)
+		return err
+	})
 }

@@ -482,6 +482,8 @@ func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createWorkerRegistrationsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if err := store.ensureSchema(context.Background()); err != nil {
 		t.Fatalf("ensureSchema returned error: %v", err)
@@ -554,6 +556,8 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createWorkerRegistrationsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if err := store.ensureSchema(context.Background()); err != nil {
 		t.Fatalf("ensureSchema returned error: %v", err)
@@ -622,6 +626,8 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(createWorkerRegistrationsTableSQL)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if err := store.ensureSchema(context.Background()); err != nil {
@@ -740,6 +746,60 @@ func TestMySQLTaskStore_UpsertAndListWorkerHeartbeats(t *testing.T) {
 		t.Fatalf("unexpected heartbeat item: %+v", items[0])
 	}
 
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_AcquireWorkerRegistrationHeldByOtherSession(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	mock.ExpectExec(regexp.QuoteMeta(acquireWorkerRegistrationSQL)).
+		WithArgs("worker-a", "session-b", durationToMicroseconds(15*time.Second)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	ok, err := store.AcquireWorkerRegistration(context.Background(), "worker-a", "session-b", 15*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireWorkerRegistration returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected acquire=false when worker_id held by another active session")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_RenewAndReleaseWorkerRegistration(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	mock.ExpectExec(regexp.QuoteMeta(renewWorkerRegistrationSQL)).
+		WithArgs(durationToMicroseconds(12*time.Second), "worker-a", "session-a").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(releaseWorkerRegistrationSQL)).
+		WithArgs("worker-a", "session-a").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	ok, err := store.RenewWorkerRegistration(context.Background(), "worker-a", "session-a", 12*time.Second)
+	if err != nil {
+		t.Fatalf("RenewWorkerRegistration returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected renew=true")
+	}
+	if err := store.ReleaseWorkerRegistration(context.Background(), "worker-a", "session-a"); err != nil {
+		t.Fatalf("ReleaseWorkerRegistration returned error: %v", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
