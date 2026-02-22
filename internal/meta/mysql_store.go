@@ -369,6 +369,12 @@ DELETE FROM worker_registrations
 WHERE worker_id = ? AND session_id = ?;
 `
 
+const getWorkerRegistrationSQL = `
+SELECT session_id, lease_expire_at
+FROM worker_registrations
+WHERE worker_id = ?;
+`
+
 type MySQLTaskStore struct {
 	db *sql.DB
 }
@@ -1060,7 +1066,7 @@ func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([
 func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID, sessionID string, ttl time.Duration) (bool, error) {
 	var ok bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		result, err := s.db.ExecContext(
+		_, err := s.db.ExecContext(
 			ctx,
 			acquireWorkerRegistrationSQL,
 			workerID,
@@ -1070,8 +1076,21 @@ func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID
 		if err != nil {
 			return err
 		}
-		ok, err = rowsAffectedGreaterThanZero(result)
-		return err
+
+		reg, exists, err := s.getWorkerRegistrationNoRetry(ctx, workerID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			ok = false
+			return nil
+		}
+		var dbNow time.Time
+		if err := s.db.QueryRowContext(ctx, currentDBTimeSQL).Scan(&dbNow); err != nil {
+			return err
+		}
+		ok = reg.sessionID == sessionID && reg.leaseExpireAt.After(dbNow)
+		return nil
 	})
 	if err != nil {
 		return false, err
@@ -1111,4 +1130,21 @@ func (s *MySQLTaskStore) ReleaseWorkerRegistration(ctx context.Context, workerID
 		)
 		return err
 	})
+}
+
+type workerRegistrationRecord struct {
+	sessionID     string
+	leaseExpireAt time.Time
+}
+
+func (s *MySQLTaskStore) getWorkerRegistrationNoRetry(ctx context.Context, workerID string) (workerRegistrationRecord, bool, error) {
+	var rec workerRegistrationRecord
+	row := s.db.QueryRowContext(ctx, getWorkerRegistrationSQL, workerID)
+	if err := row.Scan(&rec.sessionID, &rec.leaseExpireAt); err != nil {
+		if err == sql.ErrNoRows {
+			return workerRegistrationRecord{}, false, nil
+		}
+		return workerRegistrationRecord{}, false, err
+	}
+	return rec, true, nil
 }

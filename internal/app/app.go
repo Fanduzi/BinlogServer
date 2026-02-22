@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"binlog_server/internal/api"
@@ -34,6 +35,7 @@ const (
 )
 
 var workerIDInvalidCharPattern = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+var errWorkerRegistrationOwnershipLost = errors.New("worker registration ownership lost")
 
 type App struct {
 	cfg       config.Config
@@ -53,10 +55,14 @@ func New(cfg config.Config) *App {
 }
 
 func (a *App) Run(ctx context.Context) error {
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
 	controlPlaneEnabled, workerEnabled := resolveRoleMode(a.cfg)
 
 	opts := []tasks.Option{}
 	var runnerOpts []replication.RunnerOption
+	var registrationOwnershipLost atomic.Bool
 
 	var resolvedWorkerID string
 	if workerEnabled && isClusterMode(a.cfg) {
@@ -110,6 +116,10 @@ func (a *App) Run(ctx context.Context) error {
 			sessionID,
 			effectiveWorkerRegistrationRenewInterval(a.cfg, registrationTTL),
 			registrationTTL,
+			func() {
+				registrationOwnershipLost.Store(true)
+				runCancel()
+			},
 		)
 		defer func() {
 			releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -117,6 +127,10 @@ func (a *App) Run(ctx context.Context) error {
 			if err := mysqlStore.ReleaseWorkerRegistration(releaseCtx, resolvedWorkerID, sessionID); err != nil {
 				log.Printf("worker registration release failed worker=%s session=%s err=%v", resolvedWorkerID, sessionID, err)
 			}
+		}()
+		go func() {
+			<-runCtx.Done()
+			registrationCancel()
 		}()
 	}
 
@@ -172,20 +186,20 @@ func (a *App) Run(ctx context.Context) error {
 		if mysqlStore != nil {
 			sink := workerHeartbeatSink(mysqlStore)
 			go startWorkerHeartbeatLoop(
-				ctx,
+				runCtx,
 				sink,
 				resolvedWorkerID,
 				effectiveHostname(resolvedWorkerID),
 				effectiveBinaryVersion(),
 				5*time.Second,
 			)
-			go startWorkerClaimLoop(ctx, scheduler, 2*time.Second)
+			go startWorkerClaimLoop(runCtx, scheduler, 2*time.Second)
 		}
 	}
 
 	if !controlPlaneEnabled {
 		if workerEnabled && strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr) != "" {
-			addr, err := startWorkerHealthServer(ctx, strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr))
+			addr, err := startWorkerHealthServer(runCtx, strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr))
 			if err != nil {
 				return err
 			}
@@ -195,7 +209,10 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		a.setAddr("")
 		a.readyOnce.Do(func() { close(a.readyCh) })
-		<-ctx.Done()
+		<-runCtx.Done()
+		if registrationOwnershipLost.Load() {
+			return errWorkerRegistrationOwnershipLost
+		}
 		return nil
 	}
 
@@ -212,12 +229,15 @@ func (a *App) Run(ctx context.Context) error {
 	a.readyOnce.Do(func() { close(a.readyCh) })
 
 	go func() {
-		<-ctx.Done()
+		<-runCtx.Done()
 		// graceful shutdown 允许 in-flight request 尽量完成。
 		_ = server.Shutdown(context.Background())
 	}()
 
 	err = server.Serve(ln)
+	if registrationOwnershipLost.Load() {
+		return errWorkerRegistrationOwnershipLost
+	}
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -569,7 +589,13 @@ func startWorkerClaimLoop(ctx context.Context, claimer startingTaskClaimer, inte
 	}
 }
 
-func startWorkerRegistrationRenewLoop(ctx context.Context, store workerRegistrationStore, workerID, sessionID string, interval, ttl time.Duration) {
+func startWorkerRegistrationRenewLoop(
+	ctx context.Context,
+	store workerRegistrationStore,
+	workerID, sessionID string,
+	interval, ttl time.Duration,
+	onOwnershipLost func(),
+) {
 	if store == nil || workerID == "" || sessionID == "" {
 		return
 	}
@@ -596,6 +622,10 @@ func startWorkerRegistrationRenewLoop(ctx context.Context, store workerRegistrat
 			}
 			if !ok {
 				log.Printf("worker registration renew lost ownership worker=%s session=%s", workerID, sessionID)
+				if onOwnershipLost != nil {
+					onOwnershipLost()
+				}
+				return
 			}
 		}
 	}

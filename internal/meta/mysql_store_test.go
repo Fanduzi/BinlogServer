@@ -761,7 +761,14 @@ func TestMySQLTaskStore_AcquireWorkerRegistrationHeldByOtherSession(t *testing.T
 	store := newMySQLTaskStoreFromDB(db)
 	mock.ExpectExec(regexp.QuoteMeta(acquireWorkerRegistrationSQL)).
 		WithArgs("worker-a", "session-b", durationToMicroseconds(15*time.Second)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(getWorkerRegistrationSQL)).
+		WithArgs("worker-a").
+		WillReturnRows(sqlmock.NewRows([]string{"session_id", "lease_expire_at"}).
+			AddRow("session-other", now.Add(10*time.Second)))
+	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
 
 	ok, err := store.AcquireWorkerRegistration(context.Background(), "worker-a", "session-b", 15*time.Second)
 	if err != nil {
@@ -769,6 +776,37 @@ func TestMySQLTaskStore_AcquireWorkerRegistrationHeldByOtherSession(t *testing.T
 	}
 	if ok {
 		t.Fatal("expected acquire=false when worker_id held by another active session")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_AcquireWorkerRegistrationSuccessAfterReadBack(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	mock.ExpectExec(regexp.QuoteMeta(acquireWorkerRegistrationSQL)).
+		WithArgs("worker-a", "session-a", durationToMicroseconds(15*time.Second)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(getWorkerRegistrationSQL)).
+		WithArgs("worker-a").
+		WillReturnRows(sqlmock.NewRows([]string{"session_id", "lease_expire_at"}).
+			AddRow("session-a", now.Add(10*time.Second)))
+	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
+
+	ok, err := store.AcquireWorkerRegistration(context.Background(), "worker-a", "session-a", 15*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireWorkerRegistration returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected acquire=true when read-back owner/session is current and lease valid")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
