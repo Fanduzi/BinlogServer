@@ -1,7 +1,12 @@
 # internal/tasks Module
 
 ## Files
-- `scheduler.go`: 任务状态机与调度核心。
+- `scheduler.go`: 调度器核心类型、选项注入与通用辅助函数。
+- `scheduler_task_ops.go`: 任务 CRUD 与配置更新（非运行时生命周期）。
+- `scheduler_lifecycle.go`: 启停、运行协程与重试退避生命周期流程。
+- `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
+- `scheduler_observability.go`: 复制进度、checkpoint、事件/文件/运行历史查询。
+- `scheduler_retry_upload.go`: 上传失败补偿重试与失败原因聚合。
 - `model.go`: 任务领域模型与状态定义。
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
 - `event_store_test.go` 中 fake store 为并发安全实现，用于 `-race` 校验稳定性。
