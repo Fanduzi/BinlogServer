@@ -895,6 +895,50 @@ func TestAPI_AuthMiddlewareCanExposeMetricsAndAPIByConfig(t *testing.T) {
 	}
 }
 
+// TestAPI_AuthMiddlewareAPIKeyMode 验证 API Key 模式的失败/成功路径与自定义 header。
+func TestAPI_AuthMiddlewareAPIKeyMode(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler, WithAuth(AuthConfig{
+		Enabled:        true,
+		Mode:           AuthModeAPIKey,
+		APIKey:         "secret-key",
+		APIKeyHeader:   "X-Custom-API-Key",
+		ProtectAPI:     true,
+		ProtectMetrics: true,
+	}))
+
+	noHeaderResp := httptest.NewRecorder()
+	noHeaderReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	handler.ServeHTTP(noHeaderResp, noHeaderReq)
+	if noHeaderResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when api key header missing, got %d body=%s", noHeaderResp.Code, noHeaderResp.Body.String())
+	}
+
+	wrongKeyResp := httptest.NewRecorder()
+	wrongKeyReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	wrongKeyReq.Header.Set("X-Custom-API-Key", "wrong-key")
+	handler.ServeHTTP(wrongKeyResp, wrongKeyReq)
+	if wrongKeyResp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when api key is wrong, got %d body=%s", wrongKeyResp.Code, wrongKeyResp.Body.String())
+	}
+
+	wrongHeaderResp := httptest.NewRecorder()
+	wrongHeaderReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	wrongHeaderReq.Header.Set("X-API-Key", "secret-key")
+	handler.ServeHTTP(wrongHeaderResp, wrongHeaderReq)
+	if wrongHeaderResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when using wrong header name, got %d body=%s", wrongHeaderResp.Code, wrongHeaderResp.Body.String())
+	}
+
+	okResp := httptest.NewRecorder()
+	okReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	okReq.Header.Set("X-Custom-API-Key", "secret-key")
+	handler.ServeHTTP(okResp, okReq)
+	if okResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 when api key is valid, got %d body=%s", okResp.Code, okResp.Body.String())
+	}
+}
+
 // TestTaskAPI_MetricsIncludeRetryUploadCounters 验证相关行为。
 func TestTaskAPI_MetricsIncludeRetryUploadCounters(t *testing.T) {
 	fileStore := newFakeFileStore()

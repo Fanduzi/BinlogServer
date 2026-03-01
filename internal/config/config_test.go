@@ -406,6 +406,41 @@ upload:
 	}
 }
 
+// TestLoadConfig_E2EStyleConfigWithoutAuthToken 验证 e2e 风格配置在未提供 auth token 时可正常加载。
+func TestLoadConfig_E2EStyleConfigWithoutAuthToken(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_MODE", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_API_KEY", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_API_KEY_HEADER", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+listen_addr: "127.0.0.1:18080"
+data_dir: "./tmp/e2e/data"
+meta_dsn: ""
+upload:
+  use_ssl: false
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.API.Auth.Enabled {
+		t.Fatalf("expected api.auth.enabled default=false for e2e-friendly startup, got %+v", cfg.API.Auth)
+	}
+	if cfg.API.Auth.ProtectAPI || cfg.API.Auth.ProtectMetrics {
+		t.Fatalf("expected api auth route protection defaults disabled, got %+v", cfg.API.Auth)
+	}
+}
+
 // TestLoadConfig_InvalidHTTPTimeoutValidation 验证非法 HTTP 超时配置会被拒绝。
 func TestLoadConfig_InvalidHTTPTimeoutValidation(t *testing.T) {
 	setRequiredAuthEnv(t)

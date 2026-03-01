@@ -85,11 +85,11 @@ make migrate-up META_DSN="$META_DSN"
 - `BINLOG_SERVER_UPLOAD_PREFIX`（可选）
 - `BINLOG_SERVER_UPLOAD_USE_SSL=true|false`
 
-API 鉴权（默认保护 `/api/*` 与 `/metrics`）：
+API 鉴权（默认不保护路由；生产建议开启）：
 - `BINLOG_SERVER_API_AUTH_ENABLED=true|false`
 - `BINLOG_SERVER_API_AUTH_MODE=bearer|api_key`
-- `BINLOG_SERVER_API_AUTH_BEARER_TOKEN`（`mode=bearer` 时必填）
-- `BINLOG_SERVER_API_AUTH_API_KEY`（`mode=api_key` 时必填）
+- `BINLOG_SERVER_API_AUTH_BEARER_TOKEN`（`mode=bearer` 且开启路由保护时必填）
+- `BINLOG_SERVER_API_AUTH_API_KEY`（`mode=api_key` 且开启路由保护时必填）
 - `BINLOG_SERVER_API_AUTH_API_KEY_HEADER`（默认 `X-API-Key`）
 - `BINLOG_SERVER_API_AUTH_PROTECT_API=true|false`
 - `BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true|false`

@@ -6,6 +6,7 @@
 - `handlers_tasks.go`: 任务相关 API 处理。
 - `handlers_cluster.go`: 集群观测与控制相关 API。
 - `swagger_docs_only.go`: swagger 注释占位。
+- `server_test.go`: API 行为测试（含 Bearer/API Key 鉴权失败/成功路径）。
 
 ## Exports
 - `/api/tasks*`: 任务创建、启动、停止、查询、重传等。
