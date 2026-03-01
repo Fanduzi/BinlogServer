@@ -1,3 +1,7 @@
+// input: runtime config, scheduler/runner/meta store dependencies, process context
+// output: application lifecycle control including startup, role wiring, and shutdown
+// pos: application composition layer that wires modules into runnable service modes
+// note: if this file changes, update this header and module AGENTS.md.
 package app
 
 import (
@@ -21,6 +25,7 @@ import (
 	"binlog_server/internal/tasks"
 )
 
+// TestApp_StartAndServeHealth 验证相关行为。
 func TestApp_StartAndServeHealth(t *testing.T) {
 	cfg := config.Config{ListenAddr: "127.0.0.1:0"}
 	a := New(cfg)
@@ -60,6 +65,7 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 	}
 }
 
+// TestApp_ClusterControlPlaneRole 验证相关行为。
 func TestApp_ClusterControlPlaneRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
@@ -110,6 +116,7 @@ func TestApp_ClusterControlPlaneRole(t *testing.T) {
 	waitRunExit(t, errCh)
 }
 
+// TestApp_ClusterWorkerRole 验证相关行为。
 func TestApp_ClusterWorkerRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
@@ -138,6 +145,7 @@ func TestApp_ClusterWorkerRole(t *testing.T) {
 	waitRunExit(t, errCh)
 }
 
+// TestApp_ClusterWorkerRoleWithHealthProbe 验证相关行为。
 func TestApp_ClusterWorkerRoleWithHealthProbe(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
@@ -174,6 +182,7 @@ func TestApp_ClusterWorkerRoleWithHealthProbe(t *testing.T) {
 	waitRunExit(t, errCh)
 }
 
+// TestApp_ClusterAllInOneRole 验证相关行为。
 func TestApp_ClusterAllInOneRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
@@ -229,20 +238,24 @@ type appLeaseManager struct {
 	acquireEpoch int64
 }
 
-func (m *appLeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Time, _ time.Duration) (int64, bool, error) {
+// Acquire 实现对应功能逻辑。
+func (m *appLeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Duration) (int64, bool, error) {
 	return m.acquireEpoch, m.acquireOK, nil
 }
 
+// Renew 实现对应功能逻辑。
 func (m *appLeaseManager) Renew(_ context.Context, _ string, _ string, _ int64, _ time.Time, _ time.Duration) (bool, error) {
 	return true, nil
 }
 
+// Release 实现对应功能逻辑。
 func (m *appLeaseManager) Release(_ context.Context, _ string, _ string, _ int64) (bool, error) {
 	return true, nil
 }
 
 type appLeaseVerifier struct{}
 
+// VerifyLease 实现对应功能逻辑。
 func (v *appLeaseVerifier) VerifyLease(_ context.Context, _ tasks.Task) (bool, error) {
 	return true, nil
 }
@@ -251,6 +264,7 @@ type appFakeRunner struct {
 	started chan tasks.Task
 }
 
+// Run 实现对应功能逻辑。
 func (r *appFakeRunner) Run(ctx context.Context, task tasks.Task) error {
 	select {
 	case r.started <- task:
@@ -265,10 +279,12 @@ type appFakeStore struct {
 	tasks map[string]tasks.Task
 }
 
+// newAppFakeStore 实现对应功能逻辑。
 func newAppFakeStore() *appFakeStore {
 	return &appFakeStore{tasks: make(map[string]tasks.Task)}
 }
 
+// UpsertTask 实现对应功能逻辑。
 func (s *appFakeStore) UpsertTask(_ context.Context, task tasks.Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -276,6 +292,7 @@ func (s *appFakeStore) UpsertTask(_ context.Context, task tasks.Task) error {
 	return nil
 }
 
+// ListTasks 实现对应功能逻辑。
 func (s *appFakeStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -286,6 +303,7 @@ func (s *appFakeStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
 	return out, nil
 }
 
+// DeleteTask 实现对应功能逻辑。
 func (s *appFakeStore) DeleteTask(_ context.Context, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -293,6 +311,7 @@ func (s *appFakeStore) DeleteTask(_ context.Context, taskID string) error {
 	return nil
 }
 
+// TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier 验证相关行为。
 func TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier(t *testing.T) {
 	cfg := config.Config{
 		Mode: "cluster",
@@ -329,6 +348,7 @@ func TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier(t *testing.T) {
 	}
 }
 
+// TestApp_ResumeClusterWorkerTasksStartsRecoveredActiveTasks 验证相关行为。
 func TestApp_ResumeClusterWorkerTasksStartsRecoveredActiveTasks(t *testing.T) {
 	store := newAppFakeStore()
 	store.tasks["1"] = tasks.Task{
@@ -394,6 +414,7 @@ type appHeartbeatCaptureSink struct {
 	ch    chan struct{}
 }
 
+// UpsertWorkerHeartbeat 实现对应功能逻辑。
 func (s *appHeartbeatCaptureSink) UpsertWorkerHeartbeat(_ context.Context, hb tasks.WorkerHeartbeat) error {
 	s.mu.Lock()
 	s.items = append(s.items, hb)
@@ -405,6 +426,7 @@ func (s *appHeartbeatCaptureSink) UpsertWorkerHeartbeat(_ context.Context, hb ta
 	return nil
 }
 
+// latest 实现对应功能逻辑。
 func (s *appHeartbeatCaptureSink) latest() (tasks.WorkerHeartbeat, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -419,19 +441,23 @@ type fakeWorkerRegistrationStore struct {
 	calls   int
 }
 
+// AcquireWorkerRegistration 实现对应功能逻辑。
 func (s *fakeWorkerRegistrationStore) AcquireWorkerRegistration(_ context.Context, _, _ string, _ time.Duration) (bool, error) {
 	return true, nil
 }
 
+// RenewWorkerRegistration 实现对应功能逻辑。
 func (s *fakeWorkerRegistrationStore) RenewWorkerRegistration(_ context.Context, _, _ string, _ time.Duration) (bool, error) {
 	s.calls++
 	return s.renewOK, nil
 }
 
+// ReleaseWorkerRegistration 实现对应功能逻辑。
 func (s *fakeWorkerRegistrationStore) ReleaseWorkerRegistration(_ context.Context, _, _ string) error {
 	return nil
 }
 
+// TestResolveClusterWorkerID_AutoGeneratedStable 验证相关行为。
 func TestResolveClusterWorkerID_AutoGeneratedStable(t *testing.T) {
 	cfg := config.Config{
 		DataDir: t.TempDir(),
@@ -472,6 +498,7 @@ func TestResolveClusterWorkerID_AutoGeneratedStable(t *testing.T) {
 	}
 }
 
+// TestResolveClusterWorkerID_ConfigValueTakesPriority 验证相关行为。
 func TestResolveClusterWorkerID_ConfigValueTakesPriority(t *testing.T) {
 	cfg := config.Config{
 		DataDir: t.TempDir(),
@@ -494,6 +521,7 @@ func TestResolveClusterWorkerID_ConfigValueTakesPriority(t *testing.T) {
 	}
 }
 
+// TestApp_ClusterWorkerIDUsedConsistentlyBySchedulerAndHeartbeat 验证相关行为。
 func TestApp_ClusterWorkerIDUsedConsistentlyBySchedulerAndHeartbeat(t *testing.T) {
 	workerID := "worker-consistent-a"
 	cfg := config.Config{
@@ -548,6 +576,7 @@ func TestApp_ClusterWorkerIDUsedConsistentlyBySchedulerAndHeartbeat(t *testing.T
 	}
 }
 
+// TestStartWorkerRegistrationRenewLoop_TriggersOwnershipLostCallback 验证相关行为。
 func TestStartWorkerRegistrationRenewLoop_TriggersOwnershipLostCallback(t *testing.T) {
 	store := &fakeWorkerRegistrationStore{renewOK: false}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -587,10 +616,12 @@ type fakeResumeScheduler struct {
 	startCalls []string
 }
 
+// ListTasks 实现对应功能逻辑。
 func (f *fakeResumeScheduler) ListTasks() []tasks.Task {
 	return append([]tasks.Task(nil), f.items...)
 }
 
+// StopTask 实现对应功能逻辑。
 func (f *fakeResumeScheduler) StopTask(id string) error {
 	f.stopCalls = append(f.stopCalls, id)
 	if err, ok := f.stopErr[id]; ok {
@@ -599,6 +630,7 @@ func (f *fakeResumeScheduler) StopTask(id string) error {
 	return nil
 }
 
+// StartTask 实现对应功能逻辑。
 func (f *fakeResumeScheduler) StartTask(id string) error {
 	f.startCalls = append(f.startCalls, id)
 	if err, ok := f.startErr[id]; ok {
@@ -607,6 +639,7 @@ func (f *fakeResumeScheduler) StartTask(id string) error {
 	return nil
 }
 
+// TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors 验证相关行为。
 func TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors(t *testing.T) {
 	resumer := &fakeResumeScheduler{
 		items: []tasks.Task{
@@ -635,6 +668,7 @@ func TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors(t *testing.T) {
 	}
 }
 
+// waitReady 实现对应功能逻辑。
 func waitReady(t *testing.T, a *App) {
 	t.Helper()
 	select {
@@ -644,6 +678,7 @@ func waitReady(t *testing.T, a *App) {
 	}
 }
 
+// waitRunExit 实现对应功能逻辑。
 func waitRunExit(t *testing.T, errCh <-chan error) {
 	t.Helper()
 	select {
@@ -656,6 +691,7 @@ func waitRunExit(t *testing.T, errCh <-chan error) {
 	}
 }
 
+// assertHTTPStatus 实现对应功能逻辑。
 func assertHTTPStatus(t *testing.T, url string, want int) {
 	t.Helper()
 	resp, err := http.Get(url)
@@ -674,6 +710,7 @@ type httpResult struct {
 	Body       []byte
 }
 
+// postJSON 实现对应功能逻辑。
 func postJSON(t *testing.T, url string, body string) httpResult {
 	t.Helper()
 	reqBody := bytes.NewBufferString(body)

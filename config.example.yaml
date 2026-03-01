@@ -1,6 +1,6 @@
 listen_addr: ":8080"
 data_dir: "./data"
-meta_dsn: ""
+meta_dsn: "${BINLOG_SERVER_META_DSN}" # 推荐用环境变量注入，避免明文口令
 mode: "standalone" # standalone | cluster
 
 cluster:
@@ -15,8 +15,18 @@ cluster:
 upload:
   endpoint: ""
   bucket: ""
-  access_key: ""
-  secret_key: ""
+  access_key: "${BINLOG_SERVER_UPLOAD_ACCESS_KEY}" # 推荐用环境变量注入
+  secret_key: "${BINLOG_SERVER_UPLOAD_SECRET_KEY}" # 推荐用环境变量注入
   region: ""
   prefix: ""
   use_ssl: false
+
+log:
+  level: "info"
+  encoding: "json" # json | console
+  file: "./logs/binlog-server.log"
+  max_size_mb: 100
+  max_backups: 7
+  max_age_days: 30
+  compress: false
+  rotate_interval: "24h"

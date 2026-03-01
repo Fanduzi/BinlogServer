@@ -1,3 +1,7 @@
+// input: HTTP requests, router params, scheduler/task service interfaces
+// output: REST API responses and status codes for task/cluster operations
+// pos: external control-plane API layer bridging clients and domain services
+// note: if this file changes, update this header and module AGENTS.md.
 package api
 
 import (
@@ -21,6 +25,7 @@ import (
 
 type fakeAPIRunner struct{}
 
+// Run 实现对应功能逻辑。
 func (r *fakeAPIRunner) Run(_ context.Context, _ tasks.Task) error {
 	return nil
 }
@@ -29,14 +34,17 @@ type fakeAPILeaseManager struct {
 	epoch int64
 }
 
-func (m *fakeAPILeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Time, _ time.Duration) (int64, bool, error) {
+// Acquire 实现对应功能逻辑。
+func (m *fakeAPILeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Duration) (int64, bool, error) {
 	return m.epoch, true, nil
 }
 
+// Renew 实现对应功能逻辑。
 func (m *fakeAPILeaseManager) Renew(_ context.Context, _ string, _ string, _ int64, _ time.Time, _ time.Duration) (bool, error) {
 	return true, nil
 }
 
+// Release 实现对应功能逻辑。
 func (m *fakeAPILeaseManager) Release(_ context.Context, _ string, _ string, _ int64) (bool, error) {
 	return true, nil
 }
@@ -48,6 +56,7 @@ type fakeAPIRunHistoryStore struct {
 	lastLimit int
 }
 
+// newFakeAPIRunHistoryStore 实现对应功能逻辑。
 func newFakeAPIRunHistoryStore() *fakeAPIRunHistoryStore {
 	return &fakeAPIRunHistoryStore{
 		tasks: make(map[string]tasks.Task),
@@ -55,11 +64,13 @@ func newFakeAPIRunHistoryStore() *fakeAPIRunHistoryStore {
 	}
 }
 
+// UpsertTask 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) UpsertTask(_ context.Context, task tasks.Task) error {
 	s.tasks[task.ID] = task
 	return nil
 }
 
+// ListTasks 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
 	out := make([]tasks.Task, 0, len(s.tasks))
 	for _, task := range s.tasks {
@@ -68,12 +79,14 @@ func (s *fakeAPIRunHistoryStore) ListTasks(_ context.Context) ([]tasks.Task, err
 	return out, nil
 }
 
+// DeleteTask 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) DeleteTask(_ context.Context, taskID string) error {
 	delete(s.tasks, taskID)
 	delete(s.runs, taskID)
 	return nil
 }
 
+// ListTaskRuns 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) ListTaskRuns(_ context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {
 	s.lastLimit = limit
 	rows := s.runs[taskID]
@@ -87,6 +100,7 @@ func (s *fakeAPIRunHistoryStore) ListTaskRuns(_ context.Context, taskID string, 
 	return out, nil
 }
 
+// UpsertWorkerHeartbeat 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) UpsertWorkerHeartbeat(_ context.Context, hb tasks.WorkerHeartbeat) error {
 	for i := range s.workers {
 		if s.workers[i].WorkerID == hb.WorkerID {
@@ -98,12 +112,14 @@ func (s *fakeAPIRunHistoryStore) UpsertWorkerHeartbeat(_ context.Context, hb tas
 	return nil
 }
 
+// ListWorkerHeartbeats 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) ListWorkerHeartbeats(_ context.Context, _ int) ([]tasks.WorkerHeartbeat, error) {
 	out := make([]tasks.WorkerHeartbeat, len(s.workers))
 	copy(out, s.workers)
 	return out, nil
 }
 
+// TestTaskAPI_CreateListStartStop 验证相关行为。
 func TestTaskAPI_CreateListStartStop(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
@@ -176,6 +192,7 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_CreateWithSourceAndStart 验证相关行为。
 func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -221,6 +238,7 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_CreateTaskRequiresClusterKey 验证相关行为。
 func TestTaskAPI_CreateTaskRequiresClusterKey(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -238,6 +256,7 @@ func TestTaskAPI_CreateTaskRequiresClusterKey(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_UpdateTaskRequiresClusterKey 验证相关行为。
 func TestTaskAPI_UpdateTaskRequiresClusterKey(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -263,6 +282,7 @@ func TestTaskAPI_UpdateTaskRequiresClusterKey(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_ClusterKeyMustBeUnique 验证相关行为。
 func TestTaskAPI_ClusterKeyMustBeUnique(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -292,6 +312,7 @@ func TestTaskAPI_ClusterKeyMustBeUnique(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_CreateRejectsInvalidInput 验证相关行为。
 func TestTaskAPI_CreateRejectsInvalidInput(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -314,6 +335,7 @@ func TestTaskAPI_CreateRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_UpdateRejectsInvalidInput 验证相关行为。
 func TestTaskAPI_UpdateRejectsInvalidInput(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -348,6 +370,7 @@ func TestTaskAPI_UpdateRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_UpdateInvalidStartHasNoSideEffects 验证相关行为。
 func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -409,6 +432,7 @@ func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_UpdateTaskStoreFailureReturnsInternalServerError 验证相关行为。
 func TestTaskAPI_UpdateTaskStoreFailureReturnsInternalServerError(t *testing.T) {
 	store := newFailingUpdateStore()
 	scheduler := tasks.NewScheduler(tasks.WithStore(store))
@@ -449,10 +473,12 @@ type failingUpdateStore struct {
 	failUpsert bool
 }
 
+// newFailingUpdateStore 实现对应功能逻辑。
 func newFailingUpdateStore() *failingUpdateStore {
 	return &failingUpdateStore{tasks: make(map[string]tasks.Task)}
 }
 
+// UpsertTask 实现对应功能逻辑。
 func (s *failingUpdateStore) UpsertTask(_ context.Context, task tasks.Task) error {
 	if s.failUpsert {
 		return errors.New("store unavailable")
@@ -461,6 +487,7 @@ func (s *failingUpdateStore) UpsertTask(_ context.Context, task tasks.Task) erro
 	return nil
 }
 
+// ListTasks 实现对应功能逻辑。
 func (s *failingUpdateStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
 	out := make([]tasks.Task, 0, len(s.tasks))
 	for _, task := range s.tasks {
@@ -469,11 +496,13 @@ func (s *failingUpdateStore) ListTasks(_ context.Context) ([]tasks.Task, error) 
 	return out, nil
 }
 
+// DeleteTask 实现对应功能逻辑。
 func (s *failingUpdateStore) DeleteTask(_ context.Context, taskID string) error {
 	delete(s.tasks, taskID)
 	return nil
 }
 
+// LoadCheckpoint 实现对应功能逻辑。
 func (f *fakeCheckpointReader) LoadCheckpoint(_ context.Context, taskID string) (binlog.Checkpoint, bool, error) {
 	cp, ok := f.checkpoints[taskID]
 	return cp, ok, nil
@@ -483,10 +512,12 @@ type fakeFileStore struct {
 	files map[string][]tasks.BinlogFile
 }
 
+// newFakeFileStore 实现对应功能逻辑。
 func newFakeFileStore() *fakeFileStore {
 	return &fakeFileStore{files: make(map[string][]tasks.BinlogFile)}
 }
 
+// UpsertBinlogFile 实现对应功能逻辑。
 func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
 	items := f.files[meta.TaskID]
 	for i := range items {
@@ -500,6 +531,7 @@ func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFil
 	return nil
 }
 
+// ListBinlogFiles 实现对应功能逻辑。
 func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
 	items := f.files[taskID]
 	if limit <= 0 || limit >= len(items) {
@@ -516,6 +548,7 @@ type fakeRetryUploader struct {
 	errByObject map[string]error
 }
 
+// UploadFile 实现对应功能逻辑。
 func (u *fakeRetryUploader) UploadFile(_ context.Context, _ string, localPath, objectKey string) error {
 	if _, err := os.Stat(localPath); err != nil {
 		return err
@@ -528,6 +561,7 @@ func (u *fakeRetryUploader) UploadFile(_ context.Context, _ string, localPath, o
 	return nil
 }
 
+// TestTaskAPI_GetCheckpoint 验证相关行为。
 func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	reader := &fakeCheckpointReader{
 		checkpoints: map[string]binlog.Checkpoint{
@@ -575,6 +609,7 @@ func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_UpdateAndDeleteTask 验证相关行为。
 func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -661,6 +696,7 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 	}
 }
 
+// TestAPI_MetricsEndpointContainsCoreMetrics 验证相关行为。
 func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 	store := newFakeAPIRunHistoryStore()
 	checkpointReader := &fakeCheckpointReader{
@@ -723,6 +759,7 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 	}
 }
 
+// TestAPI_MetricsUploadFailuresTotalCountsAllRecords 验证相关行为。
 func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
 	store := newFakeAPIRunHistoryStore()
 	fileStore := newFakeFileStore()
@@ -766,6 +803,7 @@ func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_MetricsIncludeRetryUploadCounters 验证相关行为。
 func TestTaskAPI_MetricsIncludeRetryUploadCounters(t *testing.T) {
 	fileStore := newFakeFileStore()
 	tmpDir := t.TempDir()
@@ -864,6 +902,7 @@ func TestTaskAPI_MetricsIncludeRetryUploadCounters(t *testing.T) {
 	}
 }
 
+// readPromMetricValue 实现对应功能逻辑。
 func readPromMetricValue(body, metricName string) (float64, bool, error) {
 	lines := strings.Split(body, "\n")
 	prefix := metricName + " "
@@ -882,6 +921,7 @@ func readPromMetricValue(body, metricName string) (float64, bool, error) {
 	return 0, false, nil
 }
 
+// readPromMetricValueWithLabels 实现对应功能逻辑。
 func readPromMetricValueWithLabels(body, metricName string, expectedLabels map[string]string) (float64, bool, error) {
 	lines := strings.Split(body, "\n")
 	prefix := metricName + "{"
@@ -927,6 +967,7 @@ func readPromMetricValueWithLabels(body, metricName string, expectedLabels map[s
 	return 0, false, nil
 }
 
+// TestTaskAPI_ListUploadFailureReasons 验证相关行为。
 func TestTaskAPI_ListUploadFailureReasons(t *testing.T) {
 	fileStore := newFakeFileStore()
 	now := time.Now()
@@ -990,6 +1031,7 @@ func TestTaskAPI_ListUploadFailureReasons(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_ListEvents 验证相关行为。
 func TestTaskAPI_ListEvents(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -1018,6 +1060,7 @@ func TestTaskAPI_ListEvents(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_ListFiles 验证相关行为。
 func TestTaskAPI_ListFiles(t *testing.T) {
 	fileStore := newFakeFileStore()
 	fileStore.files["1"] = []tasks.BinlogFile{
@@ -1054,6 +1097,7 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_RetryUploadLimitValidation 验证相关行为。
 func TestTaskAPI_RetryUploadLimitValidation(t *testing.T) {
 	fileStore := newFakeFileStore()
 	uploader := &fakeRetryUploader{}
@@ -1083,6 +1127,7 @@ func TestTaskAPI_RetryUploadLimitValidation(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_RetryUploadReturnsStats 验证相关行为。
 func TestTaskAPI_RetryUploadReturnsStats(t *testing.T) {
 	fileStore := newFakeFileStore()
 	tmpDir := t.TempDir()
@@ -1158,6 +1203,7 @@ func TestTaskAPI_RetryUploadReturnsStats(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_ListEventsWithLimit 验证相关行为。
 func TestTaskAPI_ListEventsWithLimit(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
@@ -1196,6 +1242,7 @@ func TestTaskAPI_ListEventsWithLimit(t *testing.T) {
 	}
 }
 
+// TestUI_RootRedirectAndDashboardPage 验证相关行为。
 func TestUI_RootRedirectAndDashboardPage(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -1224,6 +1271,7 @@ func TestUI_RootRedirectAndDashboardPage(t *testing.T) {
 	}
 }
 
+// TestAPI_Summary 验证相关行为。
 func TestAPI_Summary(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
@@ -1293,6 +1341,7 @@ func TestAPI_Summary(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_ListTasksBySourceFilter 验证相关行为。
 func TestTaskAPI_ListTasksBySourceFilter(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -1331,6 +1380,7 @@ func TestTaskAPI_ListTasksBySourceFilter(t *testing.T) {
 	}
 }
 
+// TestAPI_SourceLookup 验证相关行为。
 func TestAPI_SourceLookup(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -1387,6 +1437,7 @@ func TestAPI_SourceLookup(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_GetReplication 验证相关行为。
 func TestTaskAPI_GetReplication(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -1419,6 +1470,7 @@ func TestTaskAPI_GetReplication(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_GetReplication_AbnormalReasonNoProgress 验证相关行为。
 func TestTaskAPI_GetReplication_AbnormalReasonNoProgress(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
@@ -1472,6 +1524,7 @@ func TestTaskAPI_GetReplication_AbnormalReasonNoProgress(t *testing.T) {
 	}
 }
 
+// TestAPI_Dashboard 验证相关行为。
 func TestAPI_Dashboard(t *testing.T) {
 	scheduler := tasks.NewScheduler(tasks.WithRunner(&fakeAPIRunner{}))
 	handler := NewServer(scheduler)
@@ -1519,6 +1572,7 @@ func TestAPI_Dashboard(t *testing.T) {
 	}
 }
 
+// TestAPI_ClusterWorkers 验证相关行为。
 func TestAPI_ClusterWorkers(t *testing.T) {
 	runStore := newFakeAPIRunHistoryStore()
 	scheduler := tasks.NewScheduler(
@@ -1571,6 +1625,7 @@ func TestAPI_ClusterWorkers(t *testing.T) {
 	}
 }
 
+// TestAPI_ClusterTaskLease 验证相关行为。
 func TestAPI_ClusterTaskLease(t *testing.T) {
 	scheduler := tasks.NewScheduler(
 		tasks.WithRunner(&fakeAPIRunner{}),
@@ -1612,6 +1667,7 @@ func TestAPI_ClusterTaskLease(t *testing.T) {
 	}
 }
 
+// TestAPI_ClusterTaskRuns 验证相关行为。
 func TestAPI_ClusterTaskRuns(t *testing.T) {
 	runStore := newFakeAPIRunHistoryStore()
 	scheduler := tasks.NewScheduler(
@@ -1677,6 +1733,7 @@ func TestAPI_ClusterTaskRuns(t *testing.T) {
 	}
 }
 
+// TestAPI_ClusterOverview 验证相关行为。
 func TestAPI_ClusterOverview(t *testing.T) {
 	scheduler := tasks.NewScheduler(
 		tasks.WithRunner(&fakeAPIRunner{}),
@@ -1715,6 +1772,7 @@ func TestAPI_ClusterOverview(t *testing.T) {
 	}
 }
 
+// TestAPI_SwaggerUI 验证相关行为。
 func TestAPI_SwaggerUI(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)
@@ -1731,6 +1789,7 @@ func TestAPI_SwaggerUI(t *testing.T) {
 	}
 }
 
+// TestAPI_SwaggerDocContainsKeyPaths 验证相关行为。
 func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 	scheduler := tasks.NewScheduler()
 	handler := NewServer(scheduler)

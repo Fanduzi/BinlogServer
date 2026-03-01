@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -20,6 +24,7 @@ type fileStateUploader struct {
 	uploadErr error
 }
 
+// UploadFile 实现对应功能逻辑。
 func (u *fileStateUploader) UploadFile(_ context.Context, taskID, localPath, objectKey string) error {
 	u.calls++
 	u.lastTask = taskID
@@ -32,11 +37,13 @@ type fileStateMetaStore struct {
 	metas []tasks.BinlogFile
 }
 
+// UpsertBinlogFile 实现对应功能逻辑。
 func (s *fileStateMetaStore) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
 	s.metas = append(s.metas, meta)
 	return nil
 }
 
+// TestFileState_OpenFileUsesEpochSuffix 验证相关行为。
 func TestFileState_OpenFileUsesEpochSuffix(t *testing.T) {
 	runner := NewMySQLRunner(t.TempDir())
 
@@ -51,6 +58,7 @@ func TestFileState_OpenFileUsesEpochSuffix(t *testing.T) {
 	}
 }
 
+// TestFileState_SealRequiresLeaseAndEpochMatch 验证相关行为。
 func TestFileState_SealRequiresLeaseAndEpochMatch(t *testing.T) {
 	dir := t.TempDir()
 	openPath := filepath.Join(dir, "mysql-bin.000123.open.e7")
@@ -98,6 +106,7 @@ func TestFileState_SealRequiresLeaseAndEpochMatch(t *testing.T) {
 	}
 }
 
+// TestFileState_NeverPublishOpenFile 验证相关行为。
 func TestFileState_NeverPublishOpenFile(t *testing.T) {
 	dir := t.TempDir()
 	openPath := filepath.Join(dir, "mysql-bin.000888.open.e12")

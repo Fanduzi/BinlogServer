@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
@@ -10,16 +14,19 @@ type fakeEventStore struct {
 	appendCalls int
 }
 
+// newFakeEventStore 实现对应功能逻辑。
 func newFakeEventStore() *fakeEventStore {
 	return &fakeEventStore{events: make(map[string][]TaskEvent)}
 }
 
+// AppendEvent 实现对应功能逻辑。
 func (f *fakeEventStore) AppendEvent(_ context.Context, event TaskEvent) error {
 	f.appendCalls++
 	f.events[event.TaskID] = append(f.events[event.TaskID], event)
 	return nil
 }
 
+// ListEvents 实现对应功能逻辑。
 func (f *fakeEventStore) ListEvents(_ context.Context, taskID string, limit int) ([]TaskEvent, error) {
 	items := f.events[taskID]
 	if limit <= 0 || limit >= len(items) {
@@ -32,6 +39,7 @@ func (f *fakeEventStore) ListEvents(_ context.Context, taskID string, limit int)
 	return out, nil
 }
 
+// TestScheduler_UsesEventStore 验证相关行为。
 func TestScheduler_UsesEventStore(t *testing.T) {
 	eventStore := newFakeEventStore()
 	s := NewScheduler(

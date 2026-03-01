@@ -1,8 +1,13 @@
+// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
+// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// pos: metadata persistence layer between domain scheduler and MySQL storage engine
+// note: if this file changes, update this header and module AGENTS.md.
 package meta
 
 import (
 	"context"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,8 +15,10 @@ import (
 	"binlog_server/internal/tasks"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
+// TestMySQLTaskStore_UpsertTask 验证相关行为。
 func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -60,6 +67,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop 验证相关行为。
 func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -108,6 +116,7 @@ func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_ListTasks 验证相关行为。
 func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -159,6 +168,7 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_UpsertCheckpoint 验证相关行为。
 func TestMySQLTaskStore_UpsertCheckpoint(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -184,6 +194,7 @@ func TestMySQLTaskStore_UpsertCheckpoint(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_LoadCheckpoint 验证相关行为。
 func TestMySQLTaskStore_LoadCheckpoint(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -215,6 +226,7 @@ func TestMySQLTaskStore_LoadCheckpoint(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_DeleteTask 验证相关行为。
 func TestMySQLTaskStore_DeleteTask(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -235,6 +247,7 @@ func TestMySQLTaskStore_DeleteTask(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_AppendAndListEvents 验证相关行为。
 func TestMySQLTaskStore_AppendAndListEvents(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -280,6 +293,7 @@ func TestMySQLTaskStore_AppendAndListEvents(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_UpsertAndListBinlogFiles 验证相关行为。
 func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -353,6 +367,7 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_ListFailedUploadBinlogFiles 验证相关行为。
 func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -388,6 +403,7 @@ func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_ListUploadFailureReasons 验证相关行为。
 func TestMySQLTaskStore_ListUploadFailureReasons(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -432,7 +448,49 @@ func TestMySQLTaskStore_ListUploadFailureReasons(t *testing.T) {
 	}
 }
 
-func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
+func expectSchemaCheckQueries(
+	mock sqlmock.Sqlmock,
+	missingTables map[string]bool,
+	missingColumns map[string]map[string]bool,
+	missingIndexes map[string]map[string]bool,
+) {
+	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(minRequiredSchemaVersion, false))
+
+	for _, table := range requiredTableSchemas {
+		tableCount := 1
+		if missingTables != nil && missingTables[table.Name] {
+			tableCount = 0
+		}
+		mock.ExpectQuery(regexp.QuoteMeta(hasTableSQL)).
+			WithArgs(table.Name).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(tableCount))
+		if tableCount == 0 {
+			continue
+		}
+		for _, column := range table.Columns {
+			columnCount := 1
+			if missingColumns != nil && missingColumns[table.Name] != nil && missingColumns[table.Name][column] {
+				columnCount = 0
+			}
+			mock.ExpectQuery(regexp.QuoteMeta(hasColumnSQL)).
+				WithArgs(table.Name, column).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(columnCount))
+		}
+		for _, index := range table.Indexes {
+			indexCount := 1
+			if missingIndexes != nil && missingIndexes[table.Name] != nil && missingIndexes[table.Name][index] {
+				indexCount = 0
+			}
+			mock.ExpectQuery(regexp.QuoteMeta(hasIndexSQL)).
+				WithArgs(table.Name, index).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(indexCount))
+		}
+	}
+}
+
+// TestMySQLTaskStore_EnsureSchemaMissingMigrationTable 验证缺少 schema_migrations 时报错。
+func TestMySQLTaskStore_EnsureSchemaMissingMigrationTable(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New returned error: %v", err)
@@ -440,50 +498,55 @@ func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db)
+	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
+		WillReturnError(&mysqlDriver.MySQLError{Number: 1146, Message: "Table 'binlog.schema_migrations' doesn't exist"})
 
-	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("cluster_key").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("owner_worker_id").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("epoch").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("run_id").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksIndexSQL)).
-		WithArgs("uk_backup_tasks_cluster_key").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskEventsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createBinlogFilesTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("source_file").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("epoch").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("state").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("checksum").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskLeasesTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createWorkerRegistrationsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	err = store.ensureSchema(context.Background())
+	if err == nil {
+		t.Fatal("expected schema version validation error")
+	}
+	if !strings.Contains(err.Error(), "missing table schema_migrations") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_EnsureSchemaDirtyVersion 验证 dirty 版本状态会阻止启动。
+func TestMySQLTaskStore_EnsureSchemaDirtyVersion(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(minRequiredSchemaVersion, true))
+
+	err = store.ensureSchema(context.Background())
+	if err == nil {
+		t.Fatal("expected schema version dirty error")
+	}
+	if !strings.Contains(err.Error(), "dirty") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_EnsureSchemaValid 验证 schema 完整时校验通过。
+func TestMySQLTaskStore_EnsureSchemaValid(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db)
+	expectSchemaCheckQueries(mock, nil, nil, nil)
 
 	if err := store.ensureSchema(context.Background()); err != nil {
 		t.Fatalf("ensureSchema returned error: %v", err)
@@ -493,7 +556,8 @@ func TestMySQLTaskStore_InitSchemaIncludesLeaseTables(t *testing.T) {
 	}
 }
 
-func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
+// TestMySQLTaskStore_EnsureSchemaMissingColumn 验证缺列时会给出明确报错。
+func TestMySQLTaskStore_EnsureSchemaMissingColumn(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New returned error: %v", err)
@@ -501,73 +565,24 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBinlogFilesColumns(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db)
+	expectSchemaCheckQueries(mock, nil, map[string]map[string]bool{
+		"backup_tasks": {"cluster_key": true},
+	}, nil)
 
-	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("cluster_key").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("owner_worker_id").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("epoch").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("run_id").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksIndexSQL)).
-		WithArgs("uk_backup_tasks_cluster_key").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskEventsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createBinlogFilesTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("source_file").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBinlogFilesSourceFileColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("epoch").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBinlogFilesEpochColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("state").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBinlogFilesStateColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("checksum").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBinlogFilesChecksumColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	mock.ExpectExec(regexp.QuoteMeta(createTaskLeasesTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createWorkerRegistrationsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	if err := store.ensureSchema(context.Background()); err != nil {
-		t.Fatalf("ensureSchema returned error: %v", err)
+	err = store.ensureSchema(context.Background())
+	if err == nil {
+		t.Fatal("expected schema validation error")
+	}
+	if !strings.Contains(err.Error(), "missing column backup_tasks.cluster_key") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
 
-func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
+// TestMySQLTaskStore_EnsureSchemaMissingTable 验证缺表时会给出明确报错。
+func TestMySQLTaskStore_EnsureSchemaMissingTable(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New returned error: %v", err)
@@ -575,69 +590,21 @@ func TestMySQLTaskStore_EnsureSchemaMigratesBackupTaskColumns(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db)
+	expectSchemaCheckQueries(mock, map[string]bool{"binlog_files": true}, nil, nil)
 
-	mock.ExpectExec(regexp.QuoteMeta(createTaskTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("cluster_key").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksClusterKeyColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("owner_worker_id").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksOwnerWorkerIDColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("epoch").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksEpochColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksColumnSQL)).
-		WithArgs("run_id").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksRunIDColumnSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBackupTasksIndexSQL)).
-		WithArgs("uk_backup_tasks_cluster_key").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta(addBackupTasksClusterKeyUniqueSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createCheckpointTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskEventsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createBinlogFilesTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("source_file").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("epoch").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("state").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(regexp.QuoteMeta(hasBinlogFilesColumnSQL)).
-		WithArgs("checksum").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskLeasesTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createTaskRunsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createWorkerHeartbeatsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(createWorkerRegistrationsTableSQL)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	if err := store.ensureSchema(context.Background()); err != nil {
-		t.Fatalf("ensureSchema returned error: %v", err)
+	err = store.ensureSchema(context.Background())
+	if err == nil {
+		t.Fatal("expected schema validation error")
+	}
+	if !strings.Contains(err.Error(), "missing table binlog_files") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
 
+// TestMySQLTaskStore_ListTaskRuns 验证相关行为。
 func TestMySQLTaskStore_ListTaskRuns(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -676,6 +643,7 @@ func TestMySQLTaskStore_ListTaskRuns(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_ListTaskRuns_LimitCappedTo200 验证相关行为。
 func TestMySQLTaskStore_ListTaskRuns_LimitCappedTo200(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -704,6 +672,7 @@ func TestMySQLTaskStore_ListTaskRuns_LimitCappedTo200(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_UpsertAndListWorkerHeartbeats 验证相关行为。
 func TestMySQLTaskStore_UpsertAndListWorkerHeartbeats(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -751,6 +720,7 @@ func TestMySQLTaskStore_UpsertAndListWorkerHeartbeats(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_AcquireWorkerRegistrationHeldByOtherSession 验证相关行为。
 func TestMySQLTaskStore_AcquireWorkerRegistrationHeldByOtherSession(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -782,6 +752,7 @@ func TestMySQLTaskStore_AcquireWorkerRegistrationHeldByOtherSession(t *testing.T
 	}
 }
 
+// TestMySQLTaskStore_AcquireWorkerRegistrationSuccessAfterReadBack 验证相关行为。
 func TestMySQLTaskStore_AcquireWorkerRegistrationSuccessAfterReadBack(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -813,6 +784,7 @@ func TestMySQLTaskStore_AcquireWorkerRegistrationSuccessAfterReadBack(t *testing
 	}
 }
 
+// TestMySQLTaskStore_RenewAndReleaseWorkerRegistration 验证相关行为。
 func TestMySQLTaskStore_RenewAndReleaseWorkerRegistration(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

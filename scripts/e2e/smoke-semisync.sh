@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# output: deterministic e2e orchestration, scenario execution, and verification logs
+# pos: integration-test automation layer validating end-to-end system behavior
+# note: if this file changes, update this header and module AGENTS.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

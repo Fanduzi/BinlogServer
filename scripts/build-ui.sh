@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# input: frontend source tree, node toolchain, and build configuration dependencies
+# output: compiled frontend assets synchronized into backend static serving directory
+# pos: build pipeline bridge between frontend artifacts and backend embedded UI delivery
+# note: if this file changes, update this header and module AGENTS.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
@@ -18,6 +22,7 @@ type retryTestUploader struct {
 	block       chan struct{}
 }
 
+// UploadFile 实现对应功能逻辑。
 func (u *retryTestUploader) UploadFile(_ context.Context, _ string, localPath, objectKey string) error {
 	if u.started != nil {
 		select {
@@ -41,6 +46,7 @@ func (u *retryTestUploader) UploadFile(_ context.Context, _ string, localPath, o
 	return nil
 }
 
+// callCount 实现对应功能逻辑。
 func (u *retryTestUploader) callCount() int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -52,10 +58,12 @@ type retryTestFileStore struct {
 	files map[string][]BinlogFile
 }
 
+// newRetryTestFileStore 实现对应功能逻辑。
 func newRetryTestFileStore() *retryTestFileStore {
 	return &retryTestFileStore{files: make(map[string][]BinlogFile)}
 }
 
+// UpsertBinlogFile 实现对应功能逻辑。
 func (s *retryTestFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -71,6 +79,7 @@ func (s *retryTestFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile
 	return nil
 }
 
+// ListBinlogFiles 实现对应功能逻辑。
 func (s *retryTestFileStore) ListBinlogFiles(_ context.Context, taskID string, limit int) ([]BinlogFile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -85,6 +94,7 @@ func (s *retryTestFileStore) ListBinlogFiles(_ context.Context, taskID string, l
 	return out, nil
 }
 
+// get 实现对应功能逻辑。
 func (s *retryTestFileStore) get(taskID, fileName string) (BinlogFile, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -96,6 +106,7 @@ func (s *retryTestFileStore) get(taskID, fileName string) (BinlogFile, bool) {
 	return BinlogFile{}, false
 }
 
+// writeRetryTestFile 实现对应功能逻辑。
 func writeRetryTestFile(t *testing.T, dir, name string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -105,6 +116,7 @@ func writeRetryTestFile(t *testing.T, dir, name string) string {
 	return path
 }
 
+// TestScheduler_RetryFailedUploadsOnlyFailedSealed 验证相关行为。
 func TestScheduler_RetryFailedUploadsOnlyFailedSealed(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := newRetryTestFileStore()
@@ -172,6 +184,7 @@ func TestScheduler_RetryFailedUploadsOnlyFailedSealed(t *testing.T) {
 	}
 }
 
+// TestScheduler_RetryFailedUploadsStateTransitionOnError 验证相关行为。
 func TestScheduler_RetryFailedUploadsStateTransitionOnError(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := newRetryTestFileStore()
@@ -215,6 +228,7 @@ func TestScheduler_RetryFailedUploadsStateTransitionOnError(t *testing.T) {
 	}
 }
 
+// TestScheduler_RetryFailedUploadsRejectsConcurrentJob 验证相关行为。
 func TestScheduler_RetryFailedUploadsRejectsConcurrentJob(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := newRetryTestFileStore()
@@ -254,6 +268,7 @@ func TestScheduler_RetryFailedUploadsRejectsConcurrentJob(t *testing.T) {
 	}
 }
 
+// TestScheduler_RetryFailedUploadsUpdatesMetrics 验证相关行为。
 func TestScheduler_RetryFailedUploadsUpdatesMetrics(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := newRetryTestFileStore()
@@ -308,6 +323,7 @@ func TestScheduler_RetryFailedUploadsUpdatesMetrics(t *testing.T) {
 	}
 }
 
+// TestScheduler_ListUploadFailureReasons 验证相关行为。
 func TestScheduler_ListUploadFailureReasons(t *testing.T) {
 	store := newRetryTestFileStore()
 	s := NewScheduler(WithFileStore(store))

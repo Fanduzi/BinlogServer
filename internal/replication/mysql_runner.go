@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -5,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,6 +26,11 @@ import (
 
 var binlogMagic = []byte{0xfe, 'b', 'i', 'n'}
 var ErrLeaseEpochMismatch = errors.New("lease/epoch mismatch")
+
+const (
+	defaultServerIDBase uint32 = 200000
+	defaultServerIDMod  uint32 = 1000000
+)
 
 // MySQLRunner 负责执行复制协议拉流、文件落盘、checkpoint 与上传流程。
 type MySQLRunner struct {
@@ -151,6 +161,7 @@ func (r *MySQLRunner) RunWithNotify(ctx context.Context, task tasks.Task, onRead
 	return r.run(ctx, task, onReady)
 }
 
+// run 执行一次任务复制会话，包含 checkpoint 恢复、拉流、落盘与收尾流程。
 func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) error {
 	// Step 1: 解析源库标识与复制起点（含 checkpoint 接管修正）。
 	// 常见误解：
@@ -196,7 +207,9 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	}
 	defer func() {
 		if file != nil {
-			_ = file.Close()
+			if err := file.Close(); err != nil {
+				log.Printf("close binlog file failed path=%s err=%v", currentPath, err)
+			}
 		}
 	}()
 
@@ -529,16 +542,22 @@ func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initial
 
 	info, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("close binlog file after stat failure path=%s err=%v", path, closeErr)
+		}
 		return nil, nil, "", err
 	}
 	if info.Size() == 0 {
 		if _, err := f.Write(binlogMagic); err != nil {
-			_ = f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("close binlog file after write failure path=%s err=%v", path, closeErr)
+			}
 			return nil, nil, "", err
 		}
 		if err := f.Sync(); err != nil {
-			_ = f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("close binlog file after sync failure path=%s err=%v", path, closeErr)
+			}
 			return nil, nil, "", err
 		}
 	}
@@ -554,12 +573,12 @@ func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initial
 // defaultServerID 为未显式配置 server_id 的任务生成稳定默认值。
 func defaultServerID(taskID string) uint32 {
 	if n, err := strconv.ParseUint(taskID, 10, 32); err == nil {
-		return uint32(200000 + n)
+		return defaultServerIDBase + uint32(n)
 	}
 
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(taskID))
-	return 200000 + (h.Sum32() % 1000000)
+	return defaultServerIDBase + (h.Sum32() % defaultServerIDMod)
 }
 
 type mysqlStatusFetcher struct{}
@@ -731,6 +750,7 @@ func cleanupStaleOpenFiles(dir string, currentEpoch int64) error {
 	return nil
 }
 
+// buildObjectKey 生成上传对象路径（prefix/cluster_key/server_uuid/file_name）。
 func buildObjectKey(prefix, clusterKey, sourceServerUUID, fileName string) string {
 	// 注意不要用 filepath.Join：
 	// object key 是对象存储逻辑路径，不应被本地路径规则（clean/绝对路径）影响。

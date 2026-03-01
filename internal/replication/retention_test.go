@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -7,6 +11,7 @@ import (
 	"time"
 )
 
+// TestCleanupExpiredBinlogs_RemovesOldFiles 验证相关行为。
 func TestCleanupExpiredBinlogs_RemovesOldFiles(t *testing.T) {
 	dir := t.TempDir()
 	oldFile := filepath.Join(dir, "mysql-bin.000001")
@@ -41,6 +46,7 @@ func TestCleanupExpiredBinlogs_RemovesOldFiles(t *testing.T) {
 	}
 }
 
+// TestCleanupExpiredBinlogs_DefaultRetention 验证相关行为。
 func TestCleanupExpiredBinlogs_DefaultRetention(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "mysql-bin.000001")

@@ -1,3 +1,7 @@
+// input: HTTP requests, router params, scheduler/task service interfaces
+// output: REST API responses and status codes for task/cluster operations
+// pos: external control-plane API layer bridging clients and domain services
+// note: if this file changes, update this header and module AGENTS.md.
 package api
 
 import (

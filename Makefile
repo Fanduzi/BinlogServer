@@ -1,4 +1,4 @@
-.PHONY: help test ui-build e2e-quick e2e-full e2e
+.PHONY: help test ui-build e2e-quick e2e-full e2e migrate-up migrate-down migrate-version migrate-force
 
 help:
 	@echo "Targets:"
@@ -7,6 +7,10 @@ help:
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
 	@echo "  make e2e SCENARIOS=a,b,c        # run custom e2e scenarios"
+	@echo "  make migrate-up META_DSN=...    # apply DB migrations"
+	@echo "  make migrate-down META_DSN=...  # rollback one migration (blocked when MIGRATE_ENV=prod)"
+	@echo "  make migrate-version META_DSN=... # show current migration version"
+	@echo "  make migrate-force META_DSN=... VERSION=N # force migration version (blocked when MIGRATE_ENV=prod)"
 
 test:
 	go test ./...
@@ -26,3 +30,19 @@ e2e:
 		exit 1; \
 	fi
 	./scripts/e2e/run-suite.sh --scenarios "$(SCENARIOS)"
+
+migrate-up:
+	META_DSN="$(META_DSN)" MIGRATE_ENV="$(MIGRATE_ENV)" go run ./cmd/migrate up
+
+migrate-down:
+	META_DSN="$(META_DSN)" MIGRATE_ENV="$(MIGRATE_ENV)" ALLOW_DESTRUCTIVE_MIGRATE="$(ALLOW_DESTRUCTIVE_MIGRATE)" go run ./cmd/migrate down --steps 1
+
+migrate-version:
+	META_DSN="$(META_DSN)" MIGRATE_ENV="$(MIGRATE_ENV)" go run ./cmd/migrate version
+
+migrate-force:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "usage: make migrate-force META_DSN=... VERSION=1"; \
+		exit 1; \
+	fi
+	META_DSN="$(META_DSN)" MIGRATE_ENV="$(MIGRATE_ENV)" ALLOW_DESTRUCTIVE_MIGRATE="$(ALLOW_DESTRUCTIVE_MIGRATE)" go run ./cmd/migrate force "$(VERSION)"

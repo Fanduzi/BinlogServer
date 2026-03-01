@@ -1,3 +1,7 @@
+// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
+// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// pos: metadata persistence layer between domain scheduler and MySQL storage engine
+// note: if this file changes, update this header and module AGENTS.md.
 package meta
 
 import (
@@ -7,6 +11,7 @@ import (
 	"time"
 )
 
+// TestWithRetry_RetryOnTransientErrors 验证相关行为。
 func TestWithRetry_RetryOnTransientErrors(t *testing.T) {
 	var attempts int
 	errTransient := errors.New("transient")
@@ -36,6 +41,7 @@ func TestWithRetry_RetryOnTransientErrors(t *testing.T) {
 	}
 }
 
+// TestWithRetry_StopOnPermanentErrors 验证相关行为。
 func TestWithRetry_StopOnPermanentErrors(t *testing.T) {
 	var attempts int
 	baseErr := errors.New("bad request")
@@ -64,6 +70,7 @@ func TestWithRetry_StopOnPermanentErrors(t *testing.T) {
 	}
 }
 
+// TestWithRetry_DeadlineExceeded 验证相关行为。
 func TestWithRetry_DeadlineExceeded(t *testing.T) {
 	var attempts int
 	errTransient := errors.New("temporary down")

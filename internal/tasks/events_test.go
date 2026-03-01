@@ -1,7 +1,12 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import "testing"
 
+// TestScheduler_RecordsEvents 验证相关行为。
 func TestScheduler_RecordsEvents(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")

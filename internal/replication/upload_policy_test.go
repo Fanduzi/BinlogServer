@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -16,6 +20,7 @@ type fakeUploader struct {
 	calls int
 }
 
+// UploadFile 实现对应功能逻辑。
 func (f *fakeUploader) UploadFile(_ context.Context, _ string, _ string, _ string) error {
 	f.calls++
 	return f.err
@@ -25,11 +30,13 @@ type fakeMetaStore struct {
 	metas []tasks.BinlogFile
 }
 
+// UpsertBinlogFile 实现对应功能逻辑。
 func (f *fakeMetaStore) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
 	f.metas = append(f.metas, meta)
 	return nil
 }
 
+// TestFinalizeSealedFile_BestEffortOnUploadFailure 验证相关行为。
 func TestFinalizeSealedFile_BestEffortOnUploadFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mysql-bin.000001")
@@ -73,6 +80,7 @@ func TestFinalizeSealedFile_BestEffortOnUploadFailure(t *testing.T) {
 	}
 }
 
+// TestFinalizeSealedFile_UploadSuccess 验证相关行为。
 func TestFinalizeSealedFile_UploadSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mysql-bin.000001")

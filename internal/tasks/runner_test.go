@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
@@ -12,6 +16,7 @@ type fakeRunner struct {
 	started chan Task
 }
 
+// Run 实现对应功能逻辑。
 func (f *fakeRunner) Run(ctx context.Context, task Task) error {
 	select {
 	case f.started <- task:
@@ -27,6 +32,7 @@ type failOnceRunner struct {
 	secondRunNotify chan struct{}
 }
 
+// Run 实现对应功能逻辑。
 func (r *failOnceRunner) Run(ctx context.Context, _ Task) error {
 	r.mu.Lock()
 	r.calls++
@@ -52,10 +58,12 @@ type readyGateRunner struct {
 	release chan struct{}
 }
 
+// Run 实现对应功能逻辑。
 func (r *readyGateRunner) Run(_ context.Context, _ Task) error {
 	return nil
 }
 
+// RunWithNotify 实现对应功能逻辑。
 func (r *readyGateRunner) RunWithNotify(ctx context.Context, _ Task, onReady func()) error {
 	select {
 	case <-r.entered:
@@ -73,6 +81,7 @@ type delayedStopRunner struct {
 	delay   time.Duration
 }
 
+// Run 实现对应功能逻辑。
 func (r *delayedStopRunner) Run(ctx context.Context, task Task) error {
 	select {
 	case r.started <- task:
@@ -83,6 +92,7 @@ func (r *delayedStopRunner) Run(ctx context.Context, task Task) error {
 	return context.Canceled
 }
 
+// TestScheduler_StartTaskWithRunnerRequiresSource 验证相关行为。
 func TestScheduler_StartTaskWithRunnerRequiresSource(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -96,6 +106,7 @@ func TestScheduler_StartTaskWithRunnerRequiresSource(t *testing.T) {
 	}
 }
 
+// TestScheduler_StartTaskInvokesRunner 验证相关行为。
 func TestScheduler_StartTaskInvokesRunner(t *testing.T) {
 	runner := &fakeRunner{started: make(chan Task, 1)}
 	s := NewScheduler(WithRunner(runner))
@@ -130,6 +141,7 @@ func TestScheduler_StartTaskInvokesRunner(t *testing.T) {
 	}
 }
 
+// TestScheduler_StopTaskCancelsRunner 验证相关行为。
 func TestScheduler_StopTaskCancelsRunner(t *testing.T) {
 	runner := &fakeRunner{started: make(chan Task, 1)}
 	s := NewScheduler(WithRunner(runner))
@@ -175,6 +187,7 @@ func TestScheduler_StopTaskCancelsRunner(t *testing.T) {
 	}
 }
 
+// TestScheduler_ConfigureSourceRejectsInvalid 验证相关行为。
 func TestScheduler_ConfigureSourceRejectsInvalid(t *testing.T) {
 	s := NewScheduler()
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -188,6 +201,7 @@ func TestScheduler_ConfigureSourceRejectsInvalid(t *testing.T) {
 	}
 }
 
+// TestScheduler_AutoRetryAfterRunnerError 验证相关行为。
 func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 	runner := &failOnceRunner{secondRunNotify: make(chan struct{})}
 	s := NewScheduler(
@@ -237,6 +251,7 @@ func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 	}
 }
 
+// TestScheduler_StartTaskTransitionsFromStartingAfterRunnerReady 验证相关行为。
 func TestScheduler_StartTaskTransitionsFromStartingAfterRunnerReady(t *testing.T) {
 	runner := &readyGateRunner{
 		entered: make(chan struct{}),
@@ -292,6 +307,7 @@ func TestScheduler_StartTaskTransitionsFromStartingAfterRunnerReady(t *testing.T
 	}
 }
 
+// TestScheduler_StopTaskTransitionsStoppingToStopped 验证相关行为。
 func TestScheduler_StopTaskTransitionsStoppingToStopped(t *testing.T) {
 	runner := &delayedStopRunner{
 		started: make(chan Task, 1),

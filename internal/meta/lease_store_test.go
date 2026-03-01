@@ -1,3 +1,7 @@
+// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
+// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// pos: metadata persistence layer between domain scheduler and MySQL storage engine
+// note: if this file changes, update this header and module AGENTS.md.
 package meta
 
 import (
@@ -10,6 +14,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
+// TestLeaseStore_AcquireRenewRelease 验证相关行为。
 func TestLeaseStore_AcquireRenewRelease(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -33,7 +38,7 @@ func TestLeaseStore_AcquireRenewRelease(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
 		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
 
-	epoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", now, ttl)
+	epoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", ttl)
 	if err != nil {
 		t.Fatalf("Acquire returned error: %v", err)
 	}
@@ -73,6 +78,7 @@ func TestLeaseStore_AcquireRenewRelease(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_FencingByEpoch 验证相关行为。
 func TestLeaseStore_FencingByEpoch(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -96,7 +102,7 @@ func TestLeaseStore_FencingByEpoch(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
 		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
 
-	epoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", now, ttl)
+	epoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", ttl)
 	if err != nil {
 		t.Fatalf("Acquire returned error: %v", err)
 	}
@@ -134,6 +140,7 @@ func TestLeaseStore_FencingByEpoch(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_ReleaseThenAcquireKeepsEpochMonotonic 验证相关行为。
 func TestLeaseStore_ReleaseThenAcquireKeepsEpochMonotonic(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -157,7 +164,7 @@ func TestLeaseStore_ReleaseThenAcquireKeepsEpochMonotonic(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
 		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
 
-	firstEpoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", now, ttl)
+	firstEpoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", ttl)
 	if err != nil {
 		t.Fatalf("Acquire returned error: %v", err)
 	}
@@ -190,7 +197,7 @@ func TestLeaseStore_ReleaseThenAcquireKeepsEpochMonotonic(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
 		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
 
-	secondEpoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-b", now, ttl)
+	secondEpoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-b", ttl)
 	if err != nil {
 		t.Fatalf("Acquire returned error: %v", err)
 	}
@@ -206,6 +213,7 @@ func TestLeaseStore_ReleaseThenAcquireKeepsEpochMonotonic(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_ReleaseUsesSoftExpireInsteadOfDelete 验证相关行为。
 func TestLeaseStore_ReleaseUsesSoftExpireInsteadOfDelete(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -231,6 +239,7 @@ func TestLeaseStore_ReleaseUsesSoftExpireInsteadOfDelete(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_AcquireRetriesTransientError 验证相关行为。
 func TestLeaseStore_AcquireRetriesTransientError(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -258,7 +267,7 @@ func TestLeaseStore_AcquireRetriesTransientError(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(currentDBTimeSQL)).
 		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
 
-	epoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", now, ttl)
+	epoch, ok, err := store.Acquire(context.Background(), "task-1", "worker-a", ttl)
 	if err != nil {
 		t.Fatalf("Acquire returned error: %v", err)
 	}
@@ -274,6 +283,7 @@ func TestLeaseStore_AcquireRetriesTransientError(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_RenewRetriesTransientError 验证相关行为。
 func TestLeaseStore_RenewRetriesTransientError(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -307,6 +317,7 @@ func TestLeaseStore_RenewRetriesTransientError(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_ReleaseRetriesTransientError 验证相关行为。
 func TestLeaseStore_ReleaseRetriesTransientError(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -337,6 +348,7 @@ func TestLeaseStore_ReleaseRetriesTransientError(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_GetRetriesTransientError 验证相关行为。
 func TestLeaseStore_GetRetriesTransientError(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -373,6 +385,7 @@ func TestLeaseStore_GetRetriesTransientError(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_VerifyOwnership 验证相关行为。
 func TestLeaseStore_VerifyOwnership(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -404,6 +417,7 @@ func TestLeaseStore_VerifyOwnership(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_VerifyOwnershipMismatch 验证相关行为。
 func TestLeaseStore_VerifyOwnershipMismatch(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

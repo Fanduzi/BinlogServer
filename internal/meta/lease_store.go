@@ -1,3 +1,7 @@
+// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
+// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// pos: metadata persistence layer between domain scheduler and MySQL storage engine
+// note: if this file changes, update this header and module AGENTS.md.
 package meta
 
 import (
@@ -41,15 +45,15 @@ SELECT NOW(6);
 // Lease 表示某任务当前 lease 的持有信息。
 type Lease struct {
 	// TaskID 是 lease 绑定的任务 ID。
-	TaskID        string
+	TaskID string
 	// OwnerWorkerID 是当前持有该 lease 的 worker。
 	OwnerWorkerID string
 	// Epoch 是单调递增的 fencing token。
-	Epoch         int64
+	Epoch int64
 	// LeaseExpireAt 是 lease 过期时间（以 DB 时间为准）。
 	LeaseExpireAt time.Time
 	// RenewedAt 是最近续租时间。
-	RenewedAt     time.Time
+	RenewedAt time.Time
 }
 
 // LeaseStore 负责基于 MySQL 表实现 lease acquire/renew/release。
@@ -71,8 +75,7 @@ func NewLeaseStoreFromTaskStore(store *MySQLTaskStore) *LeaseStore {
 }
 
 // Acquire 尝试获取 lease，返回 epoch 和是否成功。
-func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, now time.Time, ttl time.Duration) (int64, bool, error) {
-	_ = now
+func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl time.Duration) (int64, bool, error) {
 	ttlMicros := durationToMicroseconds(ttl)
 	var (
 		epoch int64
@@ -158,6 +161,7 @@ func (s *LeaseStore) Get(ctx context.Context, taskID string) (Lease, bool, error
 	return lease, ok, nil
 }
 
+// getNoRetry 读取单任务 lease 记录（不带重试封装）。
 func (s *LeaseStore) getNoRetry(ctx context.Context, taskID string) (Lease, bool, error) {
 	row := s.db.QueryRowContext(ctx, getLeaseSQL, taskID)
 	var lease Lease
@@ -193,6 +197,7 @@ func (s *LeaseStore) Release(ctx context.Context, taskID, workerID string, epoch
 	return released, nil
 }
 
+// currentDBTime 获取数据库当前时间（带重试）。
 func (s *LeaseStore) currentDBTime(ctx context.Context) (time.Time, error) {
 	var now time.Time
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
@@ -206,6 +211,7 @@ func (s *LeaseStore) currentDBTime(ctx context.Context) (time.Time, error) {
 	return now, nil
 }
 
+// currentDBTimeNoRetry 获取数据库当前时间（不带重试）。
 func (s *LeaseStore) currentDBTimeNoRetry(ctx context.Context) (time.Time, error) {
 	var now time.Time
 	if err := s.db.QueryRowContext(ctx, currentDBTimeSQL).Scan(&now); err != nil {
@@ -233,6 +239,7 @@ func (s *LeaseStore) VerifyOwnership(ctx context.Context, taskID, workerID strin
 	return lease.LeaseExpireAt.After(dbNow), nil
 }
 
+// rowsAffectedGreaterThanZero 判断 SQL 执行是否影响至少一行。
 func rowsAffectedGreaterThanZero(result sql.Result) (bool, error) {
 	affected, err := result.RowsAffected()
 	if err != nil {

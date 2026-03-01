@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
@@ -11,6 +15,7 @@ import (
 	"binlog_server/internal/binlog"
 )
 
+// TestScheduler_StartTaskTransitionsToRunning 验证相关行为。
 func TestScheduler_StartTaskTransitionsToRunning(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -41,6 +46,7 @@ func TestScheduler_StartTaskTransitionsToRunning(t *testing.T) {
 	}
 }
 
+// TestScheduler_CreateTaskRequiresClusterKey 验证相关行为。
 func TestScheduler_CreateTaskRequiresClusterKey(t *testing.T) {
 	s := NewScheduler()
 	if _, err := s.CreateTask("cluster-a", ""); err != ErrClusterKeyRequired {
@@ -48,6 +54,7 @@ func TestScheduler_CreateTaskRequiresClusterKey(t *testing.T) {
 	}
 }
 
+// TestScheduler_CreateTaskRejectsInvalidName 验证相关行为。
 func TestScheduler_CreateTaskRejectsInvalidName(t *testing.T) {
 	s := NewScheduler()
 	longName := strings.Repeat("a", 256)
@@ -56,6 +63,7 @@ func TestScheduler_CreateTaskRejectsInvalidName(t *testing.T) {
 	}
 }
 
+// TestScheduler_ConfigureNameRejectsInvalidName 验证相关行为。
 func TestScheduler_ConfigureNameRejectsInvalidName(t *testing.T) {
 	s := NewScheduler()
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -67,6 +75,7 @@ func TestScheduler_ConfigureNameRejectsInvalidName(t *testing.T) {
 	}
 }
 
+// TestScheduler_CreateTaskRejectsDuplicateClusterKey 验证相关行为。
 func TestScheduler_CreateTaskRejectsDuplicateClusterKey(t *testing.T) {
 	s := NewScheduler()
 	if _, err := s.CreateTask("cluster-a", "dup-key"); err != nil {
@@ -77,6 +86,7 @@ func TestScheduler_CreateTaskRejectsDuplicateClusterKey(t *testing.T) {
 	}
 }
 
+// TestScheduler_CreateTaskRejectsInvalidClusterKey 验证相关行为。
 func TestScheduler_CreateTaskRejectsInvalidClusterKey(t *testing.T) {
 	s := NewScheduler()
 	cases := []string{
@@ -94,6 +104,7 @@ func TestScheduler_CreateTaskRejectsInvalidClusterKey(t *testing.T) {
 	}
 }
 
+// TestScheduler_ConfigureClusterKeyRejectsInvalidClusterKey 验证相关行为。
 func TestScheduler_ConfigureClusterKeyRejectsInvalidClusterKey(t *testing.T) {
 	s := NewScheduler()
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -116,6 +127,7 @@ func TestScheduler_ConfigureClusterKeyRejectsInvalidClusterKey(t *testing.T) {
 	}
 }
 
+// TestScheduler_ConfigureSourceRejectsInvalidHostAndFlavor 验证相关行为。
 func TestScheduler_ConfigureSourceRejectsInvalidHostAndFlavor(t *testing.T) {
 	s := NewScheduler()
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -142,6 +154,7 @@ func TestScheduler_ConfigureSourceRejectsInvalidHostAndFlavor(t *testing.T) {
 	}
 }
 
+// TestScheduler_ConfigureStartRejectsInvalidMode 验证相关行为。
 func TestScheduler_ConfigureStartRejectsInvalidMode(t *testing.T) {
 	s := NewScheduler()
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -154,6 +167,7 @@ func TestScheduler_ConfigureStartRejectsInvalidMode(t *testing.T) {
 	}
 }
 
+// TestScheduler_ConfigureStorageRejectsInvalidRetentionDays 验证相关行为。
 func TestScheduler_ConfigureStorageRejectsInvalidRetentionDays(t *testing.T) {
 	s := NewScheduler()
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -169,6 +183,7 @@ func TestScheduler_ConfigureStorageRejectsInvalidRetentionDays(t *testing.T) {
 	}
 }
 
+// TestScheduler_RetryableErrorTransitionsToBackoff 验证相关行为。
 func TestScheduler_RetryableErrorTransitionsToBackoff(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -198,6 +213,7 @@ func TestScheduler_RetryableErrorTransitionsToBackoff(t *testing.T) {
 	}
 }
 
+// TestScheduler_StopTaskTransitionsToStopped 验证相关行为。
 func TestScheduler_StopTaskTransitionsToStopped(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -231,6 +247,7 @@ func TestScheduler_StopTaskTransitionsToStopped(t *testing.T) {
 	}
 }
 
+// TestScheduler_StartTaskWithoutRunnerReturnsError 验证相关行为。
 func TestScheduler_StartTaskWithoutRunnerReturnsError(t *testing.T) {
 	s := NewScheduler()
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -250,6 +267,7 @@ func TestScheduler_StartTaskWithoutRunnerReturnsError(t *testing.T) {
 	}
 }
 
+// TestScheduler_StartTaskWithoutRunnerInClusterDispatchMode 验证相关行为。
 func TestScheduler_StartTaskWithoutRunnerInClusterDispatchMode(t *testing.T) {
 	lease := &fakeLeaseManager{
 		acquireEpoch: 7,
@@ -283,6 +301,7 @@ func TestScheduler_StartTaskWithoutRunnerInClusterDispatchMode(t *testing.T) {
 	}
 }
 
+// TestScheduler_GetTaskRefreshesFromStore 验证相关行为。
 func TestScheduler_GetTaskRefreshesFromStore(t *testing.T) {
 	store := &schedulerTestStore{
 		tasks: make(map[string]Task),
@@ -314,11 +333,13 @@ type schedulerCheckpointReader struct {
 	checkpoints map[string]binlog.Checkpoint
 }
 
+// LoadCheckpoint 实现对应功能逻辑。
 func (r *schedulerCheckpointReader) LoadCheckpoint(_ context.Context, taskID string) (binlog.Checkpoint, bool, error) {
 	cp, ok := r.checkpoints[taskID]
 	return cp, ok, nil
 }
 
+// TestScheduler_GetCheckpointDoesNotRefreshTaskListForKnownTask 验证相关行为。
 func TestScheduler_GetCheckpointDoesNotRefreshTaskListForKnownTask(t *testing.T) {
 	store := &schedulerTestStore{
 		tasks: make(map[string]Task),
@@ -358,6 +379,7 @@ func TestScheduler_GetCheckpointDoesNotRefreshTaskListForKnownTask(t *testing.T)
 	}
 }
 
+// TestScheduler_ClaimStartingTasksClaimsDispatchedTask 验证相关行为。
 func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
 	store := &schedulerTestStore{
 		tasks: make(map[string]Task),
@@ -421,6 +443,7 @@ func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
 	}
 }
 
+// TestScheduler_StartTaskRejectsNonDispatchStartingTask 验证相关行为。
 func TestScheduler_StartTaskRejectsNonDispatchStartingTask(t *testing.T) {
 	lease := &fakeLeaseManager{
 		acquireEpoch: 11,
@@ -459,6 +482,7 @@ func TestScheduler_StartTaskRejectsNonDispatchStartingTask(t *testing.T) {
 	}
 }
 
+// TestScheduler_UpdateTaskAppliesValidPatchAtomically 验证相关行为。
 func TestScheduler_UpdateTaskAppliesValidPatchAtomically(t *testing.T) {
 	store := &schedulerTestStore{
 		tasks: make(map[string]Task),
@@ -499,6 +523,7 @@ func TestScheduler_UpdateTaskAppliesValidPatchAtomically(t *testing.T) {
 	}
 }
 
+// TestScheduler_UpdateTaskRejectsInvalidPatchWithoutMutation 验证相关行为。
 func TestScheduler_UpdateTaskRejectsInvalidPatchWithoutMutation(t *testing.T) {
 	store := &schedulerTestStore{
 		tasks: make(map[string]Task),
@@ -536,6 +561,7 @@ func TestScheduler_UpdateTaskRejectsInvalidPatchWithoutMutation(t *testing.T) {
 	}
 }
 
+// TestScheduler_UpdateTaskStoreFailureHasNoMutation 验证相关行为。
 func TestScheduler_UpdateTaskStoreFailureHasNoMutation(t *testing.T) {
 	store := &schedulerTestStore{
 		tasks: make(map[string]Task),
@@ -584,6 +610,7 @@ type schedulerTestStore struct {
 	upsertErr     error
 }
 
+// UpsertTask 实现对应功能逻辑。
 func (s *schedulerTestStore) UpsertTask(_ context.Context, task Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -594,6 +621,7 @@ func (s *schedulerTestStore) UpsertTask(_ context.Context, task Task) error {
 	return nil
 }
 
+// ListTasks 实现对应功能逻辑。
 func (s *schedulerTestStore) ListTasks(_ context.Context) ([]Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -605,6 +633,7 @@ func (s *schedulerTestStore) ListTasks(_ context.Context) ([]Task, error) {
 	return out, nil
 }
 
+// DeleteTask 实现对应功能逻辑。
 func (s *schedulerTestStore) DeleteTask(_ context.Context, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -612,12 +641,14 @@ func (s *schedulerTestStore) DeleteTask(_ context.Context, taskID string) error 
 	return nil
 }
 
+// ListTasksCalls 实现对应功能逻辑。
 func (s *schedulerTestStore) ListTasksCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.listTasksCall
 }
 
+// SetUpsertErr 实现对应功能逻辑。
 func (s *schedulerTestStore) SetUpsertErr(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

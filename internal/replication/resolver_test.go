@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -14,6 +18,7 @@ type fakeStatusFetcher struct {
 	calls  int
 }
 
+// FetchMasterStatus 实现对应功能逻辑。
 func (f *fakeStatusFetcher) FetchMasterStatus(_ context.Context, _ tasks.SourceConfig) (MasterStatus, error) {
 	f.calls++
 	if f.err != nil {
@@ -22,6 +27,7 @@ func (f *fakeStatusFetcher) FetchMasterStatus(_ context.Context, _ tasks.SourceC
 	return f.status, nil
 }
 
+// TestResolveStart_LatestUsesMasterStatus 验证相关行为。
 func TestResolveStart_LatestUsesMasterStatus(t *testing.T) {
 	fetcher := &fakeStatusFetcher{
 		status: MasterStatus{
@@ -55,6 +61,7 @@ func TestResolveStart_LatestUsesMasterStatus(t *testing.T) {
 	}
 }
 
+// TestResolveStart_FilePosDirect 验证相关行为。
 func TestResolveStart_FilePosDirect(t *testing.T) {
 	fetcher := &fakeStatusFetcher{}
 	task := tasks.Task{
@@ -77,6 +84,7 @@ func TestResolveStart_FilePosDirect(t *testing.T) {
 	}
 }
 
+// TestResolveStart_GtidDirect 验证相关行为。
 func TestResolveStart_GtidDirect(t *testing.T) {
 	fetcher := &fakeStatusFetcher{}
 	task := tasks.Task{
@@ -98,6 +106,7 @@ func TestResolveStart_GtidDirect(t *testing.T) {
 	}
 }
 
+// TestResolveStart_LatestFetchError 验证相关行为。
 func TestResolveStart_LatestFetchError(t *testing.T) {
 	wantErr := errors.New("connection failed")
 	fetcher := &fakeStatusFetcher{err: wantErr}

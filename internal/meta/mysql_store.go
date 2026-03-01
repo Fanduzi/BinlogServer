@@ -1,9 +1,14 @@
+// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
+// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// pos: metadata persistence layer between domain scheduler and MySQL storage engine
+// note: if this file changes, update this header and module AGENTS.md.
 package meta
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -12,186 +17,107 @@ import (
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-const createTaskTableSQL = `
-CREATE TABLE IF NOT EXISTS backup_tasks (
-  id VARCHAR(64) PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
-  cluster_key VARCHAR(255) NOT NULL,
-  state VARCHAR(32) NOT NULL,
-  last_error TEXT NULL,
-  owner_worker_id VARCHAR(128) NULL,
-  epoch BIGINT NOT NULL DEFAULT 0,
-  run_id VARCHAR(128) NULL,
-  source_json JSON NOT NULL,
-  start_json JSON NOT NULL,
-  storage_json JSON NOT NULL,
-  updated_at DATETIME(6) NOT NULL,
-  UNIQUE KEY uk_backup_tasks_cluster_key (cluster_key)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+const minRequiredSchemaVersion int64 = 1
+
+const currentSchemaVersionSQL = `
+SELECT version, dirty
+FROM schema_migrations
+LIMIT 1;
 `
 
-const hasBackupTasksColumnSQL = `
+const hasTableSQL = `
+SELECT COUNT(*)
+FROM information_schema.tables
+WHERE table_schema = DATABASE()
+  AND table_name = ?;
+`
+
+const hasColumnSQL = `
 SELECT COUNT(*)
 FROM information_schema.columns
 WHERE table_schema = DATABASE()
-  AND table_name = 'backup_tasks'
+  AND table_name = ?
   AND column_name = ?;
 `
 
-const addBackupTasksOwnerWorkerIDColumnSQL = `
-ALTER TABLE backup_tasks
-ADD COLUMN owner_worker_id VARCHAR(128) NULL AFTER last_error;
-`
-
-const addBackupTasksClusterKeyColumnSQL = `
-ALTER TABLE backup_tasks
-ADD COLUMN cluster_key VARCHAR(255) NOT NULL DEFAULT '' AFTER name;
-`
-
-const addBackupTasksEpochColumnSQL = `
-ALTER TABLE backup_tasks
-ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0 AFTER owner_worker_id;
-`
-
-const addBackupTasksRunIDColumnSQL = `
-ALTER TABLE backup_tasks
-ADD COLUMN run_id VARCHAR(128) NULL AFTER epoch;
-`
-
-const hasBackupTasksIndexSQL = `
+const hasIndexSQL = `
 SELECT COUNT(*)
 FROM information_schema.statistics
 WHERE table_schema = DATABASE()
-  AND table_name = 'backup_tasks'
+  AND table_name = ?
   AND index_name = ?;
 `
 
-const addBackupTasksClusterKeyUniqueSQL = `
-ALTER TABLE backup_tasks
-ADD UNIQUE KEY uk_backup_tasks_cluster_key (cluster_key);
-`
+type tableSchemaSpec struct {
+	Name    string
+	Columns []string
+	Indexes []string
+}
 
-const createCheckpointTableSQL = `
-CREATE TABLE IF NOT EXISTS backup_checkpoints (
-  task_id VARCHAR(64) PRIMARY KEY,
-  file_name VARCHAR(255) NOT NULL,
-  pos BIGINT UNSIGNED NOT NULL,
-  gtid_set TEXT NULL,
-  updated_at DATETIME(6) NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`
-
-const createTaskEventsTableSQL = `
-CREATE TABLE IF NOT EXISTS task_events (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  task_id VARCHAR(64) NOT NULL,
-  event_type VARCHAR(64) NOT NULL,
-  message TEXT NULL,
-  detail TEXT NULL,
-  event_time DATETIME(6) NOT NULL,
-  event_seq BIGINT NOT NULL,
-  INDEX idx_task_events_task_time (task_id, event_time)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`
-
-const createBinlogFilesTableSQL = `
-CREATE TABLE IF NOT EXISTS binlog_files (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  task_id VARCHAR(64) NOT NULL,
-  file_name VARCHAR(255) NOT NULL,
-  source_file VARCHAR(255) NULL,
-  file_path TEXT NOT NULL,
-  epoch BIGINT NOT NULL DEFAULT 0,
-  state VARCHAR(32) NOT NULL DEFAULT 'SEALED',
-  checksum VARCHAR(128) NULL,
-  size_bytes BIGINT NOT NULL,
-  start_pos BIGINT UNSIGNED NOT NULL,
-  end_pos BIGINT UNSIGNED NOT NULL,
-  created_at DATETIME(6) NOT NULL,
-  sealed_at DATETIME(6) NOT NULL,
-  object_key TEXT NULL,
-  upload_state VARCHAR(32) NOT NULL DEFAULT 'LOCAL_ONLY',
-  upload_error TEXT NULL,
-  uploaded_at DATETIME(6) NULL,
-  UNIQUE KEY uk_task_file (task_id, file_name),
-  INDEX idx_task_sealed (task_id, sealed_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`
-
-const createTaskLeasesTableSQL = `
-CREATE TABLE IF NOT EXISTS task_leases (
-  task_id VARCHAR(64) PRIMARY KEY,
-  owner_worker_id VARCHAR(128) NOT NULL,
-  epoch BIGINT NOT NULL,
-  lease_expire_at DATETIME(6) NOT NULL,
-  renewed_at DATETIME(6) NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`
-
-const createTaskRunsTableSQL = `
-CREATE TABLE IF NOT EXISTS task_runs (
-  run_id VARCHAR(64) PRIMARY KEY,
-  task_id VARCHAR(64) NOT NULL,
-  worker_id VARCHAR(128) NOT NULL,
-  epoch BIGINT NOT NULL,
-  started_at DATETIME(6) NOT NULL,
-  ended_at DATETIME(6) NULL,
-  end_reason VARCHAR(64) NULL,
-  INDEX idx_task_runs_task_started (task_id, started_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`
-
-const createWorkerHeartbeatsTableSQL = `
-CREATE TABLE IF NOT EXISTS worker_heartbeats (
-  worker_id VARCHAR(128) PRIMARY KEY,
-  host VARCHAR(255) NOT NULL,
-  version VARCHAR(64) NOT NULL,
-  last_seen_at DATETIME(6) NOT NULL,
-  status VARCHAR(32) NOT NULL,
-  INDEX idx_worker_heartbeats_seen (last_seen_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`
-
-const createWorkerRegistrationsTableSQL = `
-CREATE TABLE IF NOT EXISTS worker_registrations (
-  worker_id VARCHAR(128) PRIMARY KEY,
-  session_id VARCHAR(128) NOT NULL,
-  lease_expire_at DATETIME(6) NOT NULL,
-  renewed_at DATETIME(6) NOT NULL,
-  INDEX idx_worker_registrations_expire (lease_expire_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`
-
-const hasBinlogFilesColumnSQL = `
-SELECT COUNT(*)
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'binlog_files'
-  AND column_name = ?;
-`
-
-const addBinlogFilesSourceFileColumnSQL = `
-ALTER TABLE binlog_files
-ADD COLUMN source_file VARCHAR(255) NULL AFTER file_name;
-`
-
-const addBinlogFilesEpochColumnSQL = `
-ALTER TABLE binlog_files
-ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0 AFTER file_path;
-`
-
-const addBinlogFilesStateColumnSQL = `
-ALTER TABLE binlog_files
-ADD COLUMN state VARCHAR(32) NOT NULL DEFAULT 'SEALED' AFTER epoch;
-`
-
-const addBinlogFilesChecksumColumnSQL = `
-ALTER TABLE binlog_files
-ADD COLUMN checksum VARCHAR(128) NULL AFTER state;
-`
+var requiredTableSchemas = []tableSchemaSpec{
+	{
+		Name: "backup_tasks",
+		Columns: []string{
+			"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id",
+			"source_json", "start_json", "storage_json", "updated_at",
+		},
+		Indexes: []string{"PRIMARY", "uk_backup_tasks_cluster_key"},
+	},
+	{
+		Name: "backup_checkpoints",
+		Columns: []string{
+			"task_id", "file_name", "pos", "gtid_set", "updated_at",
+		},
+		Indexes: []string{"PRIMARY"},
+	},
+	{
+		Name: "task_events",
+		Columns: []string{
+			"id", "task_id", "event_type", "message", "detail", "event_time", "event_seq",
+		},
+		Indexes: []string{"PRIMARY", "idx_task_events_task_time"},
+	},
+	{
+		Name: "binlog_files",
+		Columns: []string{
+			"id", "task_id", "file_name", "source_file", "file_path", "epoch", "state", "checksum",
+			"size_bytes", "start_pos", "end_pos", "created_at", "sealed_at", "object_key",
+			"upload_state", "upload_error", "uploaded_at",
+		},
+		Indexes: []string{"PRIMARY", "uk_task_file", "idx_task_sealed"},
+	},
+	{
+		Name: "task_leases",
+		Columns: []string{
+			"task_id", "owner_worker_id", "epoch", "lease_expire_at", "renewed_at",
+		},
+		Indexes: []string{"PRIMARY"},
+	},
+	{
+		Name: "task_runs",
+		Columns: []string{
+			"run_id", "task_id", "worker_id", "epoch", "started_at", "ended_at", "end_reason",
+		},
+		Indexes: []string{"PRIMARY", "idx_task_runs_task_started"},
+	},
+	{
+		Name: "worker_heartbeats",
+		Columns: []string{
+			"worker_id", "host", "version", "last_seen_at", "status",
+		},
+		Indexes: []string{"PRIMARY", "idx_worker_heartbeats_seen"},
+	},
+	{
+		Name: "worker_registrations",
+		Columns: []string{
+			"worker_id", "session_id", "lease_expire_at", "renewed_at",
+		},
+		Indexes: []string{"PRIMARY", "idx_worker_registrations_expire"},
+	},
+}
 
 const upsertTaskSQL = `
 INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at)
@@ -349,6 +275,7 @@ ORDER BY worker_id ASC
 LIMIT ?;
 `
 
+// acquireWorkerRegistrationSQL 以单条 UPSERT 表达“同 session 续租 + 过期接管”语义。
 const acquireWorkerRegistrationSQL = `
 INSERT INTO worker_registrations (worker_id, session_id, lease_expire_at, renewed_at)
 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), NOW(6))
@@ -358,12 +285,14 @@ ON DUPLICATE KEY UPDATE
   renewed_at = IF(session_id = VALUES(session_id) OR lease_expire_at <= NOW(6), NOW(6), renewed_at);
 `
 
+// renewWorkerRegistrationSQL 只允许当前 session 续租（条件更新）。
 const renewWorkerRegistrationSQL = `
 UPDATE worker_registrations
 SET lease_expire_at = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), renewed_at = NOW(6)
 WHERE worker_id = ? AND session_id = ?;
 `
 
+// releaseWorkerRegistrationSQL 只删除当前 session 的注册记录，防止误删他人会话。
 const releaseWorkerRegistrationSQL = `
 DELETE FROM worker_registrations
 WHERE worker_id = ? AND session_id = ?;
@@ -379,6 +308,7 @@ type MySQLTaskStore struct {
 	db *sql.DB
 }
 
+// NewMySQLTaskStore 创建 MySQL 元数据存储并校验 schema 就绪。
 func NewMySQLTaskStore(dsn string) (*MySQLTaskStore, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -393,10 +323,12 @@ func NewMySQLTaskStore(dsn string) (*MySQLTaskStore, error) {
 	return store, nil
 }
 
+// newMySQLTaskStoreFromDB 基于现有 DB 句柄创建存储实例（用于测试注入）。
 func newMySQLTaskStoreFromDB(db *sql.DB) *MySQLTaskStore {
 	return &MySQLTaskStore{db: db}
 }
 
+// Close 关闭底层数据库连接。
 func (s *MySQLTaskStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
@@ -404,119 +336,108 @@ func (s *MySQLTaskStore) Close() error {
 	return s.db.Close()
 }
 
+// ensureSchema 校验元数据表结构是否满足当前版本要求。
 func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, createTaskTableSQL)
-	if err != nil {
+	if err := s.ensureSchemaVersion(ctx); err != nil {
 		return err
 	}
-	if err := s.ensureBackupTasksMigration(ctx); err != nil {
-		return err
+
+	var missing []string
+	for _, table := range requiredTableSchemas {
+		exists, err := s.hasTable(ctx, table.Name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			missing = append(missing, fmt.Sprintf("missing table %s", table.Name))
+			continue
+		}
+		for _, column := range table.Columns {
+			hasColumn, err := s.hasColumn(ctx, table.Name, column)
+			if err != nil {
+				return err
+			}
+			if !hasColumn {
+				missing = append(missing, fmt.Sprintf("missing column %s.%s", table.Name, column))
+			}
+		}
+		for _, index := range table.Indexes {
+			hasIndex, err := s.hasIndex(ctx, table.Name, index)
+			if err != nil {
+				return err
+			}
+			if !hasIndex {
+				missing = append(missing, fmt.Sprintf("missing index %s.%s", table.Name, index))
+			}
+		}
 	}
-	_, err = s.db.ExecContext(ctx, createCheckpointTableSQL)
-	if err != nil {
-		return err
+	if len(missing) == 0 {
+		return nil
 	}
-	_, err = s.db.ExecContext(ctx, createTaskEventsTableSQL)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, createBinlogFilesTableSQL)
-	if err != nil {
-		return err
-	}
-	if err := s.ensureBinlogFilesMigration(ctx); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, createTaskLeasesTableSQL)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, createTaskRunsTableSQL)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, createWorkerHeartbeatsTableSQL)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, createWorkerRegistrationsTableSQL)
-	return err
+	sort.Strings(missing)
+	return fmt.Errorf(
+		"metadata schema is not up to date; apply database migration before startup: %s",
+		strings.Join(missing, "; "),
+	)
 }
 
-func (s *MySQLTaskStore) ensureBackupTasksMigration(ctx context.Context) error {
-	if err := s.ensureBackupTasksColumn(ctx, "cluster_key", addBackupTasksClusterKeyColumnSQL); err != nil {
+func (s *MySQLTaskStore) ensureSchemaVersion(ctx context.Context) error {
+	var (
+		version int64
+		dirty   bool
+	)
+	err := s.db.QueryRowContext(ctx, currentSchemaVersionSQL).Scan(&version, &dirty)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("schema_migrations is empty; run migrations to version >= %d", minRequiredSchemaVersion)
+		}
+		if isMySQLTableNotFoundError(err) {
+			return fmt.Errorf("missing table schema_migrations; run golang-migrate before startup")
+		}
 		return err
 	}
-	if err := s.ensureBackupTasksColumn(ctx, "owner_worker_id", addBackupTasksOwnerWorkerIDColumnSQL); err != nil {
-		return err
+	if dirty {
+		return fmt.Errorf("schema_migrations is dirty at version=%d; repair migration state before startup", version)
 	}
-	if err := s.ensureBackupTasksColumn(ctx, "epoch", addBackupTasksEpochColumnSQL); err != nil {
-		return err
-	}
-	if err := s.ensureBackupTasksColumn(ctx, "run_id", addBackupTasksRunIDColumnSQL); err != nil {
-		return err
-	}
-	if err := s.ensureBackupTasksIndex(ctx, "uk_backup_tasks_cluster_key", addBackupTasksClusterKeyUniqueSQL); err != nil {
-		return err
+	if version < minRequiredSchemaVersion {
+		return fmt.Errorf("schema version too old: current=%d required>=%d", version, minRequiredSchemaVersion)
 	}
 	return nil
 }
 
-func (s *MySQLTaskStore) ensureBackupTasksColumn(ctx context.Context, columnName, alterSQL string) error {
+func isMySQLTableNotFoundError(err error) bool {
+	var mysqlErr *mysqlDriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1146
+}
+
+func (s *MySQLTaskStore) hasTable(ctx context.Context, tableName string) (bool, error) {
 	var count int
-	row := s.db.QueryRowContext(ctx, hasBackupTasksColumnSQL, columnName)
+	row := s.db.QueryRowContext(ctx, hasTableSQL, tableName)
 	if err := row.Scan(&count); err != nil {
-		return err
+		return false, err
 	}
-	if count > 0 {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx, alterSQL)
-	return err
+	return count > 0, nil
 }
 
-func (s *MySQLTaskStore) ensureBackupTasksIndex(ctx context.Context, indexName, alterSQL string) error {
+func (s *MySQLTaskStore) hasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
 	var count int
-	row := s.db.QueryRowContext(ctx, hasBackupTasksIndexSQL, indexName)
+	row := s.db.QueryRowContext(ctx, hasColumnSQL, tableName, columnName)
 	if err := row.Scan(&count); err != nil {
-		return err
+		return false, err
 	}
-	if count > 0 {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx, alterSQL)
-	return err
+	return count > 0, nil
 }
 
-func (s *MySQLTaskStore) ensureBinlogFilesMigration(ctx context.Context) error {
-	if err := s.ensureBinlogFilesColumn(ctx, "source_file", addBinlogFilesSourceFileColumnSQL); err != nil {
-		return err
-	}
-	if err := s.ensureBinlogFilesColumn(ctx, "epoch", addBinlogFilesEpochColumnSQL); err != nil {
-		return err
-	}
-	if err := s.ensureBinlogFilesColumn(ctx, "state", addBinlogFilesStateColumnSQL); err != nil {
-		return err
-	}
-	if err := s.ensureBinlogFilesColumn(ctx, "checksum", addBinlogFilesChecksumColumnSQL); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *MySQLTaskStore) ensureBinlogFilesColumn(ctx context.Context, columnName, alterSQL string) error {
+func (s *MySQLTaskStore) hasIndex(ctx context.Context, tableName, indexName string) (bool, error) {
 	var count int
-	row := s.db.QueryRowContext(ctx, hasBinlogFilesColumnSQL, columnName)
+	row := s.db.QueryRowContext(ctx, hasIndexSQL, tableName, indexName)
 	if err := row.Scan(&count); err != nil {
-		return err
+		return false, err
 	}
-	if count > 0 {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx, alterSQL)
-	return err
+	return count > 0, nil
 }
 
+// UpsertTask 写入任务最新快照，并在状态收敛时补写 run 终态信息。
 func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error {
 	sourceJSON, err := json.Marshal(task.Source)
 	if err != nil {
@@ -604,6 +525,7 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	return nil
 }
 
+// ListTasks 读取全部任务快照并反序列化配置字段。
 func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 	rows, err := s.db.QueryContext(ctx, listTaskSQL)
 	if err != nil {
@@ -666,11 +588,13 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 	return list, nil
 }
 
+// DeleteTask 删除任务及其关联元数据。
 func (s *MySQLTaskStore) DeleteTask(ctx context.Context, taskID string) error {
 	_, err := s.db.ExecContext(ctx, deleteTaskSQL, taskID)
 	return err
 }
 
+// UpsertCheckpoint 写入任务 checkpoint 快照。
 func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, checkpoint binlog.Checkpoint) error {
 	updatedAt := checkpoint.UpdatedAt
 	if updatedAt.IsZero() {
@@ -691,6 +615,7 @@ func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, ch
 	})
 }
 
+// LoadCheckpoint 读取任务最近 checkpoint。
 func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
 	var (
 		cp      binlog.Checkpoint
@@ -708,6 +633,7 @@ func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (bin
 	return cp, true, nil
 }
 
+// AppendEvent 追加任务事件记录。
 func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent) error {
 	eventTime := event.Time
 	if eventTime.IsZero() {
@@ -727,6 +653,7 @@ func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent)
 	return err
 }
 
+// ListEvents 按时间倒序读取任务事件，并限制返回条数。
 func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit int) ([]tasks.TaskEvent, error) {
 	if limit <= 0 {
 		limit = 200
@@ -756,6 +683,7 @@ func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit in
 	return out, nil
 }
 
+// UpsertBinlogFile 写入/更新 binlog 文件元数据。
 func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.BinlogFile) error {
 	createdAt := meta.CreatedAt
 	if createdAt.IsZero() {
@@ -796,6 +724,7 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	})
 }
 
+// ListBinlogFiles 列出任务 binlog 文件元数据（按更新时间倒序）。
 func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
 	if limit <= 0 {
 		limit = 200
@@ -838,6 +767,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 	return out, nil
 }
 
+// ListFailedUploadBinlogFiles 列出上传失败的 sealed 文件。
 func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
 	if limit <= 0 {
 		limit = 100
@@ -883,6 +813,7 @@ func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID
 	return out, nil
 }
 
+// CountUploadFailures 统计上传失败文件总数。
 func (s *MySQLTaskStore) CountUploadFailures(ctx context.Context) (int64, error) {
 	var count int64
 	row := s.db.QueryRowContext(ctx, countUploadFailuresSQL)
@@ -892,6 +823,7 @@ func (s *MySQLTaskStore) CountUploadFailures(ctx context.Context) (int64, error)
 	return count, nil
 }
 
+// ListUploadFailureReasons 聚合任务上传失败原因并按次数排序。
 func (s *MySQLTaskStore) ListUploadFailureReasons(ctx context.Context, taskID string, limit int) ([]tasks.UploadFailureReason, error) {
 	if limit <= 0 {
 		limit = 20
@@ -956,6 +888,7 @@ func (s *MySQLTaskStore) ListUploadFailureReasons(ctx context.Context, taskID st
 	return out, nil
 }
 
+// ListTaskRuns 列出任务运行历史记录。
 func (s *MySQLTaskStore) ListTaskRuns(ctx context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {
 	if limit <= 0 {
 		limit = 10
@@ -1000,6 +933,7 @@ func (s *MySQLTaskStore) ListTaskRuns(ctx context.Context, taskID string, limit 
 	return out, nil
 }
 
+// inferRunEndReason 根据任务终态字段推导 run 结束原因枚举。
 func inferRunEndReason(task tasks.Task) string {
 	if task.LastError == "" {
 		return "NORMAL_STOP"
@@ -1013,6 +947,7 @@ func inferRunEndReason(task tasks.Task) string {
 	return "STOP_WITH_ERROR"
 }
 
+// UpsertWorkerHeartbeat 写入 worker 心跳记录。
 func (s *MySQLTaskStore) UpsertWorkerHeartbeat(ctx context.Context, hb tasks.WorkerHeartbeat) error {
 	lastSeenAt := hb.LastSeenAt
 	if lastSeenAt.IsZero() {
@@ -1030,6 +965,7 @@ func (s *MySQLTaskStore) UpsertWorkerHeartbeat(ctx context.Context, hb tasks.Wor
 	return err
 }
 
+// ListWorkerHeartbeats 列出 worker 心跳快照。
 func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([]tasks.WorkerHeartbeat, error) {
 	if limit <= 0 {
 		limit = 200
@@ -1063,9 +999,17 @@ func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([
 	return out, nil
 }
 
+// AcquireWorkerRegistration 获取 worker_id 注册所有权。
+// 语义：
+// 1) 若 worker_id 不存在，创建并占有；
+// 2) 若已被同 session 占有，续租并保持占有；
+// 3) 若被其他 session 占有但已过期，接管；
+// 4) 若被其他 session 活跃占有，返回 ok=false。
 func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID, sessionID string, ttl time.Duration) (bool, error) {
 	var ok bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		// 先执行“可接管条件更新”：
+		// 仅当“同 session”或“已过期”时，才会改写 session_id 与过期时间。
 		_, err := s.db.ExecContext(
 			ctx,
 			acquireWorkerRegistrationSQL,
@@ -1077,6 +1021,7 @@ func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID
 			return err
 		}
 
+		// 再回读 + 对齐 DB 当前时间判定最终结果，避免应用机时钟偏差。
 		reg, exists, err := s.getWorkerRegistrationNoRetry(ctx, workerID)
 		if err != nil {
 			return err
@@ -1098,6 +1043,8 @@ func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID
 	return ok, nil
 }
 
+// RenewWorkerRegistration 为当前 session 续约 worker_id 注册。
+// 仅当 (worker_id, session_id) 精确匹配时更新成功；若返回 ok=false，表示所有权已不在当前 session。
 func (s *MySQLTaskStore) RenewWorkerRegistration(ctx context.Context, workerID, sessionID string, ttl time.Duration) (bool, error) {
 	var ok bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
@@ -1120,6 +1067,8 @@ func (s *MySQLTaskStore) RenewWorkerRegistration(ctx context.Context, workerID, 
 	return ok, nil
 }
 
+// ReleaseWorkerRegistration 释放当前 session 的 worker_id 注册记录。
+// 删除条件包含 session_id，避免误删其他实例刚接管的注册。
 func (s *MySQLTaskStore) ReleaseWorkerRegistration(ctx context.Context, workerID, sessionID string) error {
 	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		_, err := s.db.ExecContext(
@@ -1137,6 +1086,7 @@ type workerRegistrationRecord struct {
 	leaseExpireAt time.Time
 }
 
+// getWorkerRegistrationNoRetry 读取 worker 注册记录（不带重试封装）。
 func (s *MySQLTaskStore) getWorkerRegistrationNoRetry(ctx context.Context, workerID string) (workerRegistrationRecord, bool, error) {
 	var rec workerRegistrationRecord
 	row := s.db.QueryRowContext(ctx, getWorkerRegistrationSQL, workerID)

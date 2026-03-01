@@ -1,3 +1,7 @@
+// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
+// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// pos: metadata persistence layer between domain scheduler and MySQL storage engine
+// note: if this file changes, update this header and module AGENTS.md.
 package meta
 
 import (
@@ -11,13 +15,13 @@ import (
 // RetryPolicy 描述一次重试流程的退避和判错策略。
 type RetryPolicy struct {
 	// BaseDelay 是首次重试等待时间。
-	BaseDelay   time.Duration
+	BaseDelay time.Duration
 	// MaxDelay 是退避上限。
-	MaxDelay    time.Duration
+	MaxDelay time.Duration
 	// MaxRetries 是最大重试次数（不含首次执行）。
-	MaxRetries  int
+	MaxRetries int
 	// Jitter 是随机抖动比例（0~1）。
-	Jitter      float64
+	Jitter float64
 	// IsTransient 判断错误是否可重试。
 	IsTransient func(error) bool
 }
@@ -109,11 +113,13 @@ func IsTransientMySQLError(err error) bool {
 		strings.Contains(msg, "eof")
 }
 
+// isPermanentError 判断错误链上是否包含 permanent 标记。
 func isPermanentError(err error) bool {
 	var perr permanentError
 	return errors.As(err, &perr)
 }
 
+// normalizeRetryPolicy 补全重试策略默认值并修正非法配置。
 func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
 	if policy.BaseDelay <= 0 {
 		policy.BaseDelay = 50 * time.Millisecond
@@ -136,6 +142,7 @@ func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
 	return policy
 }
 
+// retryBackoff 计算第 n 次重试的等待时长（指数退避 + 上限）。
 func retryBackoff(policy RetryPolicy, attempt int) time.Duration {
 	backoff := policy.BaseDelay
 	for i := 0; i < attempt; i++ {

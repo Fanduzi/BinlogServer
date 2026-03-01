@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# output: deterministic e2e orchestration, scenario execution, and verification logs
+# pos: integration-test automation layer validating end-to-end system behavior
+# note: if this file changes, update this header and module AGENTS.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -20,6 +24,9 @@ MINIO_BUCKET="e2e-retry-upload"
 CHECKPOINT_HTTP_CODE=""
 CHECKPOINT_HTTP_BODY=""
 
+source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
+META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13306)}"
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }
 }
@@ -28,6 +35,7 @@ need_cmd curl
 need_cmd docker
 need_cmd jq
 need_cmd go
+e2e_ensure_meta_schema "$ROOT_DIR" "$META_DSN"
 
 kill_server() {
   if [[ -n "$SERVER_PID" ]]; then
@@ -65,6 +73,7 @@ start_server_with_upload() {
   BINLOG_SERVER_UPLOAD_REGION="us-east-1" \
   BINLOG_SERVER_UPLOAD_PREFIX="e2e/retry-upload" \
   BINLOG_SERVER_UPLOAD_USE_SSL="false" \
+  BINLOG_SERVER_META_DSN="$META_DSN" \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   wait_api_ready

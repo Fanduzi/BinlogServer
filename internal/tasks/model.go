@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import "time"
@@ -7,23 +11,23 @@ type State string
 
 const (
 	// StateCreated 表示任务已创建但尚未启动。
-	StateCreated        State = "CREATED"
+	StateCreated State = "CREATED"
 	// StateStarting 表示任务已进入启动流程，等待 runner ready 或 worker claim。
-	StateStarting       State = "STARTING"
+	StateStarting State = "STARTING"
 	// StateRunning 表示任务正在拉取并持久化 binlog。
-	StateRunning        State = "RUNNING"
+	StateRunning State = "RUNNING"
 	// StateLeaseDegraded 表示 lease 续约出现异常但仍在 grace 窗口内。
-	StateLeaseDegraded  State = "LEASE_DEGRADED"
+	StateLeaseDegraded State = "LEASE_DEGRADED"
 	// StateRebuildingFile 表示 failover 后正在重建当前 binlog 文件。
 	StateRebuildingFile State = "REBUILDING_FILE"
 	// StateRetryBackoff 表示任务因可重试错误进入退避等待。
-	StateRetryBackoff   State = "RETRY_BACKOFF"
+	StateRetryBackoff State = "RETRY_BACKOFF"
 	// StateFailed 表示任务因不可恢复错误失败停止。
-	StateFailed         State = "FAILED"
+	StateFailed State = "FAILED"
 	// StateStopping 表示已收到停止请求，等待执行 goroutine 收敛。
-	StateStopping       State = "STOPPING"
+	StateStopping State = "STOPPING"
 	// StateStopped 表示执行路径已经完全退出。
-	StateStopped        State = "STOPPED"
+	StateStopped State = "STOPPED"
 )
 
 // Task 是任务的核心元数据模型（配置 + 运行时状态）。
@@ -79,11 +83,11 @@ type StartMode string
 
 const (
 	// StartModeLatest 表示从主库当前最新位点开始。
-	StartModeLatest  StartMode = "LATEST"
+	StartModeLatest StartMode = "LATEST"
 	// StartModeFilePos 表示从指定 file/pos 开始。
 	StartModeFilePos StartMode = "FILE_POS"
 	// StartModeGTID 表示从指定 GTID 集开始。
-	StartModeGTID    StartMode = "GTID"
+	StartModeGTID StartMode = "GTID"
 )
 
 // SourceConfig 描述源 MySQL 连接与复制参数。

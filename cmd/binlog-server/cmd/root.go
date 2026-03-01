@@ -1,3 +1,7 @@
+// input: config loader, signal context, logging setup, app runtime dependencies
+// output: root cobra command that starts binlog-server in configured mode
+// pos: CLI orchestration entry between process bootstrap and app lifecycle
+// note: if this file changes, update this header and module AGENTS.md.
 package cmd
 
 import (
@@ -8,10 +12,12 @@ import (
 
 	"binlog_server/internal/app"
 	"binlog_server/internal/config"
+	"binlog_server/internal/logging"
 
 	"github.com/spf13/cobra"
 )
 
+// NewRootCommand 创建 binlog-server CLI 根命令。
 func NewRootCommand() *cobra.Command {
 	var configPath string
 
@@ -26,6 +32,11 @@ func NewRootCommand() *cobra.Command {
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+			_, cleanupLogger, err := logging.Setup(ctx, cfg.Log)
+			if err != nil {
+				return fmt.Errorf("setup logger: %w", err)
+			}
+			defer cleanupLogger()
 
 			if err := app.New(cfg).Run(ctx); err != nil {
 				return fmt.Errorf("run app: %w", err)

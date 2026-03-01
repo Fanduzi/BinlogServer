@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -6,6 +10,7 @@ import (
 	"binlog_server/internal/tasks"
 )
 
+// TestBuildSyncerConfig_Defaults 验证相关行为。
 func TestBuildSyncerConfig_Defaults(t *testing.T) {
 	cfg := buildSyncerConfig(tasks.Task{
 		ID: "12",
@@ -34,6 +39,7 @@ func TestBuildSyncerConfig_Defaults(t *testing.T) {
 	}
 }
 
+// TestBuildSyncerConfig_UsesTaskServerID 验证相关行为。
 func TestBuildSyncerConfig_UsesTaskServerID(t *testing.T) {
 	cfg := buildSyncerConfig(tasks.Task{
 		ID: "88",
@@ -52,6 +58,7 @@ func TestBuildSyncerConfig_UsesTaskServerID(t *testing.T) {
 	}
 }
 
+// TestBuildSyncerConfig_UsesTaskSemiSync 验证相关行为。
 func TestBuildSyncerConfig_UsesTaskSemiSync(t *testing.T) {
 	cfg := buildSyncerConfig(tasks.Task{
 		ID: "89",

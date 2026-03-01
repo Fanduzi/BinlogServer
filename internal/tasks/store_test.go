@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
@@ -13,10 +17,12 @@ type fakeStore struct {
 	deleteErr error
 }
 
+// newFakeStore 实现对应功能逻辑。
 func newFakeStore() *fakeStore {
 	return &fakeStore{tasks: make(map[string]Task)}
 }
 
+// UpsertTask 实现对应功能逻辑。
 func (f *fakeStore) UpsertTask(_ context.Context, task Task) error {
 	if f.upsertErr != nil {
 		return f.upsertErr
@@ -25,6 +31,7 @@ func (f *fakeStore) UpsertTask(_ context.Context, task Task) error {
 	return nil
 }
 
+// ListTasks 实现对应功能逻辑。
 func (f *fakeStore) ListTasks(_ context.Context) ([]Task, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
@@ -36,6 +43,7 @@ func (f *fakeStore) ListTasks(_ context.Context) ([]Task, error) {
 	return out, nil
 }
 
+// DeleteTask 实现对应功能逻辑。
 func (f *fakeStore) DeleteTask(_ context.Context, taskID string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr
@@ -44,6 +52,7 @@ func (f *fakeStore) DeleteTask(_ context.Context, taskID string) error {
 	return nil
 }
 
+// TestScheduler_PersistsCreatedTask 验证相关行为。
 func TestScheduler_PersistsCreatedTask(t *testing.T) {
 	store := newFakeStore()
 	s := NewScheduler(WithStore(store))
@@ -62,6 +71,7 @@ func TestScheduler_PersistsCreatedTask(t *testing.T) {
 	}
 }
 
+// TestScheduler_RestoreLoadsTasks 验证相关行为。
 func TestScheduler_RestoreLoadsTasks(t *testing.T) {
 	store := newFakeStore()
 	store.tasks["7"] = Task{
@@ -98,6 +108,7 @@ func TestScheduler_RestoreLoadsTasks(t *testing.T) {
 	}
 }
 
+// TestScheduler_CreateTaskReturnsErrorWhenStoreFails 验证相关行为。
 func TestScheduler_CreateTaskReturnsErrorWhenStoreFails(t *testing.T) {
 	store := newFakeStore()
 	store.upsertErr = errors.New("store unavailable")

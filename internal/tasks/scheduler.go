@@ -1,11 +1,17 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,7 +58,7 @@ type Runner interface {
 // LeaseManager 定义 cluster lease 的获取/续租/释放接口。
 type LeaseManager interface {
 	// Acquire 尝试获取任务 lease，成功时返回当前 epoch。
-	Acquire(ctx context.Context, taskID, workerID string, now time.Time, ttl time.Duration) (int64, bool, error)
+	Acquire(ctx context.Context, taskID, workerID string, ttl time.Duration) (int64, bool, error)
 	// Renew 续租当前 lease，返回是否续租成功。
 	Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error)
 	// Release 主动释放 lease（best-effort）。
@@ -591,7 +597,7 @@ func (s *Scheduler) StartTask(id string) error {
 
 	// Step 3: worker 执行分支，先 acquire lease，再进入 STARTING。
 	if s.leaseManager != nil {
-		epoch, acquired, err := s.leaseManager.Acquire(context.Background(), id, s.clusterWorkerID, time.Now(), s.leaseTTL)
+		epoch, acquired, err := s.leaseManager.Acquire(context.Background(), id, s.clusterWorkerID, s.leaseTTL)
 		if err != nil {
 			s.mu.Unlock()
 			return err
@@ -658,6 +664,8 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 		return 0, err
 	}
 
+	// 基于持久化快照做 best-effort 认领；
+	// 并发竞争由 StartTask 内的状态校验 + lease Acquire 结果保证安全。
 	claimed := 0
 	for _, item := range list {
 		if item.State != StateStarting {
@@ -681,11 +689,13 @@ func (s *Scheduler) prepareStartingTaskClaim(item Task) bool {
 	defer s.mu.Unlock()
 
 	if done, ok := s.runs[item.ID]; ok && !isClosed(done) {
+		// 本机已有活跃 run goroutine，拒绝重复接管。
 		return false
 	}
 
 	if current, ok := s.tasks[item.ID]; ok {
 		if current.State == StateRunning || current.State == StateRetryBackoff || current.State == StateLeaseDegraded || current.State == StateStopping {
+			// 本地状态已进入执行/停止路径，不用 store 快照覆盖。
 			return false
 		}
 	}
@@ -823,7 +833,9 @@ func (s *Scheduler) DeleteTask(id string) error {
 	s.mu.Unlock()
 
 	if s.leaseManager != nil && task.OwnerWorkerID != "" && task.Epoch > 0 {
-		_, _ = s.leaseManager.Release(context.Background(), id, task.OwnerWorkerID, task.Epoch)
+		if released, err := s.leaseManager.Release(context.Background(), id, task.OwnerWorkerID, task.Epoch); err != nil || !released {
+			log.Printf("lease release on delete failed task=%s owner=%s epoch=%d released=%v err=%v", id, task.OwnerWorkerID, task.Epoch, released, err)
+		}
 	}
 	return nil
 }
@@ -897,7 +909,9 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		}
 		s.mu.Unlock()
 		if s.leaseManager != nil && releaseOwner != "" && releaseEpoch > 0 {
-			_, _ = s.leaseManager.Release(context.Background(), id, releaseOwner, releaseEpoch)
+			if released, err := s.leaseManager.Release(context.Background(), id, releaseOwner, releaseEpoch); err != nil || !released {
+				log.Printf("lease release on run exit failed task=%s owner=%s epoch=%d released=%v err=%v", id, releaseOwner, releaseEpoch, released, err)
+			}
 		}
 		// 常见误解：
 		// done 不是“任务开始执行”的信号，而是“本轮执行完全结束”的信号。
@@ -999,12 +1013,22 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
 	}
 	// Step 2: 兼容旧 runner（无 notify），采用乐观 ready 语义。
 	// 向后兼容旧 runner：没有 notify 能力时，在 Run 前乐观置为 RUNNING。
+	// 该路径可能出现“短暂 RUNNING 后立即失败”；失败会在 runTask 的错误分支回收状态。
 	onReady()
 	return s.runner.Run(ctx, task)
 }
 
 // renewLeaseLoop 在 cluster 模式下周期续租，并处理降级/失租停机。
 func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epoch int64) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("lease renew loop panic task=%s worker=%s epoch=%d panic=%v stack=%s", id, workerID, epoch, r, debug.Stack())
+			s.mu.Lock()
+			s.failSafeStopLocked(id, "TASK_LEASE_RENEW_PANIC", fmt.Sprintf("lease renew loop panic: %v", r))
+			s.mu.Unlock()
+		}
+	}()
+
 	ticker := time.NewTicker(s.leaseRenewInterval)
 	defer ticker.Stop()
 
@@ -1020,6 +1044,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		ok, err := s.leaseManager.Renew(context.Background(), id, workerID, epoch, time.Now(), s.leaseTTL)
 		if err == nil && ok {
 			if !degradedSince.IsZero() {
+				// 从降级状态恢复后，清空降级计时并收敛回 RUNNING。
 				degradedSince = time.Time{}
 				s.mu.Lock()
 				task, exists := s.tasks[id]
@@ -1090,6 +1115,7 @@ func (s *Scheduler) failSafeStopLocked(id, eventType, message string) {
 	s.appendEventLocked(id, eventType, message, "")
 	_ = s.persistTaskLocked(task)
 	if cancel, ok := s.cancels[id]; ok {
+		// 这里只发取消信号；最终 STOPPED 由 runTask defer 统一收敛。
 		cancel()
 		delete(s.cancels, id)
 	}
@@ -1105,6 +1131,7 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 		return nil
 	}
 	task.State = StateStopped
+	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。
 	task.OwnerWorkerID = ""
 	task.Epoch = 0
 	task.RunID = ""
@@ -1161,7 +1188,11 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 	if s.store == nil {
 		return nil
 	}
-	return s.store.UpsertTask(context.Background(), task)
+	// 避免持锁执行潜在慢 I/O（DB），降低调度锁的阻塞影响。
+	s.mu.Unlock()
+	err := s.store.UpsertTask(context.Background(), task)
+	s.mu.Lock()
+	return err
 }
 
 // retryDelay 计算指数退避时长（有上限）。

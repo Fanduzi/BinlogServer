@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
@@ -10,10 +14,12 @@ type fakeFileStore struct {
 	files map[string][]BinlogFile
 }
 
+// newFakeFileStore 实现对应功能逻辑。
 func newFakeFileStore() *fakeFileStore {
 	return &fakeFileStore{files: make(map[string][]BinlogFile)}
 }
 
+// UpsertBinlogFile 实现对应功能逻辑。
 func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile) error {
 	items := f.files[meta.TaskID]
 	for i := range items {
@@ -27,6 +33,7 @@ func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile) err
 	return nil
 }
 
+// ListBinlogFiles 实现对应功能逻辑。
 func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit int) ([]BinlogFile, error) {
 	items := f.files[taskID]
 	if limit <= 0 || limit >= len(items) {
@@ -39,6 +46,7 @@ func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit 
 	return out, nil
 }
 
+// TestScheduler_ListFilesFromStore 验证相关行为。
 func TestScheduler_ListFilesFromStore(t *testing.T) {
 	store := newFakeFileStore()
 	store.files["1"] = []BinlogFile{

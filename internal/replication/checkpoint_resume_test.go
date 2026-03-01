@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -7,6 +11,7 @@ import (
 	"binlog_server/internal/tasks"
 )
 
+// TestEffectiveStart_UsesCheckpointWhenPresent 验证相关行为。
 func TestEffectiveStart_UsesCheckpointWhenPresent(t *testing.T) {
 	start := tasks.StartConfig{
 		Mode: tasks.StartModeFilePos,
@@ -24,6 +29,7 @@ func TestEffectiveStart_UsesCheckpointWhenPresent(t *testing.T) {
 	}
 }
 
+// TestEffectiveStart_IgnoreInvalidCheckpoint 验证相关行为。
 func TestEffectiveStart_IgnoreInvalidCheckpoint(t *testing.T) {
 	start := tasks.StartConfig{
 		Mode: tasks.StartModeGTID,
@@ -35,6 +41,7 @@ func TestEffectiveStart_IgnoreInvalidCheckpoint(t *testing.T) {
 	}
 }
 
+// TestEffectiveStart_NoCheckpoint 验证相关行为。
 func TestEffectiveStart_NoCheckpoint(t *testing.T) {
 	start := tasks.StartConfig{
 		Mode: tasks.StartModeFilePos,
@@ -48,6 +55,7 @@ func TestEffectiveStart_NoCheckpoint(t *testing.T) {
 	}
 }
 
+// TestRebuildCurrentFile_UsesCheckpointFileFromPos4OnTakeover 验证相关行为。
 func TestRebuildCurrentFile_UsesCheckpointFileFromPos4OnTakeover(t *testing.T) {
 	start := tasks.StartConfig{
 		Mode: tasks.StartModeFilePos,

@@ -1,3 +1,7 @@
+// input: local binlog files, object store credentials/config, upload retry context
+// output: object storage upload operations and upload status/error outcomes
+// pos: outbound storage adapter layer for sealed binlog artifact distribution
+// note: if this file changes, update this header and module AGENTS.md.
 package upload
 
 import (
@@ -12,16 +16,16 @@ import (
 // S3Config 是 S3/兼容对象存储上传配置。
 type S3Config struct {
 	// Endpoint 是对象存储访问地址（支持 S3 兼容端点）。
-	Endpoint  string
+	Endpoint string
 	// Bucket 是目标桶名。
-	Bucket    string
+	Bucket string
 	// AccessKey/SecretKey 是访问凭证。
 	AccessKey string
 	SecretKey string
 	// Region 是区域标识（部分厂商可选）。
-	Region    string
+	Region string
 	// UseSSL 控制是否使用 HTTPS。
-	UseSSL    bool
+	UseSSL bool
 }
 
 // S3Uploader 是基于 minio-go 的 S3 兼容上传实现。

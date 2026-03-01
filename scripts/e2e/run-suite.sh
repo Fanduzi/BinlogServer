@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
+# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# output: deterministic e2e orchestration, scenario execution, and verification logs
+# pos: integration-test automation layer validating end-to-end system behavior
+# note: if this file changes, update this header and module AGENTS.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
 API="http://127.0.0.1:18080"
 PROFILE="quick"
 SCENARIOS_RAW=""
@@ -114,11 +119,7 @@ start_suite_server() {
   if [[ -n "$SERVER_PID" ]]; then
     return 0
   fi
-  if [[ -n "$META_DSN" ]]; then
-    BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
-  else
-    BINLOG_SERVER_DATA_DIR="$DATA_DIR" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
-  fi
+  BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   wait_server_ready
   echo "[suite] binlog-server ready pid=$SERVER_PID"
@@ -235,9 +236,12 @@ main() {
   "$ROOT_DIR/scripts/e2e/up.sh"
 
   if has_scenario "meta-failover" "${scenarios[@]}" || has_scenario "meta-failover-override" "${scenarios[@]}"; then
-    META_DSN="meta:metapass@tcp(127.0.0.1:16036)/binlog_meta?parseTime=true"
+    META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 16036)}"
     "$ROOT_DIR/scripts/e2e/setup-meta-replication.sh"
+  elif [[ -z "$META_DSN" ]]; then
+    META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13306)}"
   fi
+  e2e_ensure_meta_schema "$ROOT_DIR" "$META_DSN"
 
   mkdir -p "$DATA_DIR"
 

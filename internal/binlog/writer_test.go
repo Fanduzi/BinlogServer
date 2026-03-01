@@ -1,3 +1,7 @@
+// input: replication events, checkpoint state, local filesystem dependencies
+// output: binlog file writing, file rotation metadata, and checkpoint progression
+// pos: binlog persistence primitives used by replication runtime and recovery flows
+// note: if this file changes, update this header and module AGENTS.md.
 package binlog
 
 import (
@@ -12,15 +16,18 @@ type fakeFile struct {
 	syncCalls int
 }
 
+// Write 实现对应功能逻辑。
 func (f *fakeFile) Write(p []byte) (int, error) {
 	return f.buf.Write(p)
 }
 
+// Sync 实现对应功能逻辑。
 func (f *fakeFile) Sync() error {
 	f.syncCalls++
 	return f.syncErr
 }
 
+// TestWriter_AdvanceCheckpointAfterSync 验证相关行为。
 func TestWriter_AdvanceCheckpointAfterSync(t *testing.T) {
 	file := &fakeFile{}
 	initial := Checkpoint{File: "mysql-bin.000001", Pos: 4}
@@ -48,6 +55,7 @@ func TestWriter_AdvanceCheckpointAfterSync(t *testing.T) {
 	}
 }
 
+// TestWriter_NoCheckpointAdvanceWhenSyncFails 验证相关行为。
 func TestWriter_NoCheckpointAdvanceWhenSyncFails(t *testing.T) {
 	file := &fakeFile{syncErr: errors.New("sync failed")}
 	initial := Checkpoint{File: "mysql-bin.000001", Pos: 4}

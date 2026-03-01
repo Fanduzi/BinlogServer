@@ -1,3 +1,7 @@
+// input: replication events, checkpoint state, local filesystem dependencies
+// output: binlog file writing, file rotation metadata, and checkpoint progression
+// pos: binlog persistence primitives used by replication runtime and recovery flows
+// note: if this file changes, update this header and module AGENTS.md.
 package binlog
 
 import (

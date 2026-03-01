@@ -1,3 +1,7 @@
+// input: HTTP requests, router params, scheduler/task service interfaces
+// output: REST API responses and status codes for task/cluster operations
+// pos: external control-plane API layer bridging clients and domain services
+// note: if this file changes, update this header and module AGENTS.md.
 package api
 
 import (
@@ -147,12 +151,11 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "port is required", http.StatusBadRequest)
 		return
 	}
-	portNum, err := strconv.Atoi(portRaw)
-	if err != nil || portNum <= 0 || portNum > 65535 {
+	port, err := parsePort(portRaw)
+	if err != nil {
 		http.Error(w, "invalid port", http.StatusBadRequest)
 		return
 	}
-	port := uint16(portNum)
 
 	resp := sourceLookupResponse{
 		Host:    host,
@@ -359,6 +362,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleTaskAction 处理 start/stop 等任务动作请求。
 func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/tasks/"), "/")
 	if path == "" {
@@ -493,6 +497,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleTaskRetryUpload 触发指定任务的失败文件重传并返回统计。
 func (s *Server) handleTaskRetryUpload(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -525,6 +530,7 @@ func (s *Server) handleTaskRetryUpload(w http.ResponseWriter, r *http.Request, t
 	writeJSON(w, http.StatusOK, stats)
 }
 
+// handleTaskUploadFailureReasons 返回指定任务的上传失败原因聚合。
 func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -549,6 +555,7 @@ func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, items)
 }
 
+// parseLimit 解析通用分页参数 limit，失败时回退默认值。
 func parseLimit(r *http.Request, fallback int) int {
 	// 常见误解：
 	// 这里对非法 limit 不报 400，而是回退到 fallback，目的是提升列表接口容错性。
@@ -564,6 +571,7 @@ func parseLimit(r *http.Request, fallback int) int {
 	return n
 }
 
+// parseRetryUploadLimit 解析重传接口的 limit 参数并做边界校验。
 func parseRetryUploadLimit(r *http.Request) (int, error) {
 	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 	if raw == "" {
@@ -576,6 +584,7 @@ func parseRetryUploadLimit(r *http.Request) (int, error) {
 	return n, nil
 }
 
+// parseUploadFailureReasonsLimit 解析失败原因接口的 limit 参数并做边界校验。
 func parseUploadFailureReasonsLimit(r *http.Request) (int, error) {
 	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 	if raw == "" {
@@ -588,6 +597,7 @@ func parseUploadFailureReasonsLimit(r *http.Request) (int, error) {
 	return n, nil
 }
 
+// filterTasksBySource 按 source 查询参数过滤任务集合。
 func (s *Server) filterTasksBySource(items []tasks.Task, r *http.Request) ([]tasks.Task, bool, error) {
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
 	portRaw := strings.TrimSpace(r.URL.Query().Get("port"))
@@ -596,11 +606,11 @@ func (s *Server) filterTasksBySource(items []tasks.Task, r *http.Request) ([]tas
 	}
 	var port uint16
 	if portRaw != "" {
-		p, err := strconv.Atoi(portRaw)
-		if err != nil || p <= 0 || p > 65535 {
+		p, err := parsePort(portRaw)
+		if err != nil {
 			return nil, false, errors.New("invalid port")
 		}
-		port = uint16(p)
+		port = p
 	}
 
 	out := make([]tasks.Task, 0, len(items))
@@ -616,6 +626,16 @@ func (s *Server) filterTasksBySource(items []tasks.Task, r *http.Request) ([]tas
 	return out, true, nil
 }
 
+// parsePort 解析并校验 TCP 端口号（1-65535）。
+func parsePort(raw string) (uint16, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n <= 0 || n > 65535 {
+		return 0, errors.New("invalid port")
+	}
+	return uint16(n), nil
+}
+
+// buildReplicationResponse 组装复制状态响应并计算延迟与异常原因。
 func buildReplicationResponse(task tasks.Task, progress tasks.ReplicationProgress, exists bool, now time.Time, thresholdSeconds int64) taskReplicationResponse {
 	resp := taskReplicationResponse{
 		TaskID:           task.ID,
@@ -669,6 +689,7 @@ func buildReplicationResponse(task tasks.Task, progress tasks.ReplicationProgres
 	return resp
 }
 
+// handleTaskEntity 处理单任务详情、更新与删除请求。
 func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID string) {
 	switch r.Method {
 	case http.MethodGet:
@@ -725,6 +746,7 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 	}
 }
 
+// isTaskUpdateBadRequest 判断任务更新错误是否应返回 4xx。
 func isTaskUpdateBadRequest(err error) bool {
 	return errors.Is(err, tasks.ErrClusterKeyRequired) ||
 		errors.Is(err, tasks.ErrInvalidClusterKey) ||
@@ -737,17 +759,20 @@ func isTaskUpdateBadRequest(err error) bool {
 		errors.Is(err, tasks.ErrInvalidRetentionDays)
 }
 
+// writeJSON 统一输出 JSON 响应。
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// sanitizeTask 对任务输出做脱敏处理（如密码字段）。
 func sanitizeTask(task tasks.Task) tasks.Task {
 	task.Source.Password = ""
 	return task
 }
 
+// sanitizeTaskList 对任务列表执行批量脱敏。
 func sanitizeTaskList(items []tasks.Task) []tasks.Task {
 	out := make([]tasks.Task, len(items))
 	for i := range items {

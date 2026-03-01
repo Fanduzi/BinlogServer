@@ -1,3 +1,7 @@
+// input: HTTP requests, router params, scheduler/task service interfaces
+// output: REST API responses and status codes for task/cluster operations
+// pos: external control-plane API layer bridging clients and domain services
+// note: if this file changes, update this header and module AGENTS.md.
 package api
 
 import (
@@ -51,6 +55,7 @@ type clusterOverview struct {
 
 const workerOnlineThreshold = 15 * time.Second
 
+// buildWorkerItems 从任务 ownership 视图构建 worker 维度聚合结果。
 func buildWorkerItems(items []tasks.Task) []workerItem {
 	byID := make(map[string]*workerItem)
 	for _, task := range items {
@@ -87,6 +92,7 @@ func buildWorkerItems(items []tasks.Task) []workerItem {
 	return workers
 }
 
+// handleWorkers 返回 worker 在线状态与任务统计列表。
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -143,6 +149,7 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+// handleTaskLease 返回指定任务的 lease 快照信息。
 func (s *Server) handleTaskLease(w http.ResponseWriter, r *http.Request, taskID string) {
 	task, err := s.tasks.GetTask(taskID)
 	if err != nil {
@@ -163,6 +170,7 @@ func (s *Server) handleTaskLease(w http.ResponseWriter, r *http.Request, taskID 
 	})
 }
 
+// handleTaskRuns 返回指定任务的运行历史记录。
 func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request, taskID string) {
 	limit := parseLimit(r, 10)
 	if limit > 200 {
@@ -194,6 +202,7 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request, taskID s
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleClusterOverview 返回集群概览数据（worker、lease、任务分布）。
 func (s *Server) handleClusterOverview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

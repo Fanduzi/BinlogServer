@@ -1,3 +1,7 @@
+// input: task commands/events, runner callbacks, store/lease/uploader dependencies
+// output: task state transitions, scheduling decisions, and execution coordination
+// pos: core domain orchestration layer governing backup task lifecycle and policies
+// note: if this file changes, update this header and module AGENTS.md.
 package tasks
 
 import (
@@ -21,10 +25,12 @@ type fakeLeaseManager struct {
 	releaseFn    func(taskID, workerID string, epoch int64) (bool, error)
 }
 
-func (f *fakeLeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Time, _ time.Duration) (int64, bool, error) {
+// Acquire 实现对应功能逻辑。
+func (f *fakeLeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Duration) (int64, bool, error) {
 	return f.acquireEpoch, f.acquireOK, f.acquireErr
 }
 
+// Renew 实现对应功能逻辑。
 func (f *fakeLeaseManager) Renew(_ context.Context, _ string, _ string, _ int64, _ time.Time, _ time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -35,6 +41,7 @@ func (f *fakeLeaseManager) Renew(_ context.Context, _ string, _ string, _ int64,
 	return f.renewFn(f.renewCalls)
 }
 
+// Release 实现对应功能逻辑。
 func (f *fakeLeaseManager) Release(_ context.Context, taskID string, workerID string, epoch int64) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -45,6 +52,7 @@ func (f *fakeLeaseManager) Release(_ context.Context, taskID string, workerID st
 	return true, nil
 }
 
+// TestScheduler_ClusterStartRequiresLease 验证相关行为。
 func TestScheduler_ClusterStartRequiresLease(t *testing.T) {
 	lease := &fakeLeaseManager{
 		acquireEpoch: 7,
@@ -79,6 +87,7 @@ func TestScheduler_ClusterStartRequiresLease(t *testing.T) {
 	}
 }
 
+// TestScheduler_LeaseLostTransitionsToStoppingStopped 验证相关行为。
 func TestScheduler_LeaseLostTransitionsToStoppingStopped(t *testing.T) {
 	lease := &fakeLeaseManager{
 		acquireEpoch: 9,
@@ -122,6 +131,7 @@ func TestScheduler_LeaseLostTransitionsToStoppingStopped(t *testing.T) {
 	}
 }
 
+// TestScheduler_LeaseRenewFailureEntersDegradedThenStop 验证相关行为。
 func TestScheduler_LeaseRenewFailureEntersDegradedThenStop(t *testing.T) {
 	lease := &fakeLeaseManager{
 		acquireEpoch: 11,
@@ -166,6 +176,7 @@ func TestScheduler_LeaseRenewFailureEntersDegradedThenStop(t *testing.T) {
 	}
 }
 
+// TestScheduler_DeleteTaskReleasesLease 验证相关行为。
 func TestScheduler_DeleteTaskReleasesLease(t *testing.T) {
 	lease := &fakeLeaseManager{
 		acquireEpoch: 15,
@@ -214,6 +225,7 @@ func TestScheduler_DeleteTaskReleasesLease(t *testing.T) {
 	}
 }
 
+// waitTaskState 实现对应功能逻辑。
 func waitTaskState(t *testing.T, s *Scheduler, taskID string, timeout time.Duration, want State) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

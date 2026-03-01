@@ -1,3 +1,7 @@
+// input: source replication config, task state, checkpoint/file store dependencies
+// output: replication run control, local binlog artifacts, and upload/recovery signals
+// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// note: if this file changes, update this header and module AGENTS.md.
 package replication
 
 import (
@@ -11,6 +15,7 @@ import (
 	"binlog_server/internal/tasks"
 )
 
+// TestRebuildCurrentFile_AfterTakeover 验证相关行为。
 func TestRebuildCurrentFile_AfterTakeover(t *testing.T) {
 	start := tasks.StartConfig{
 		Mode: tasks.StartModeFilePos,
@@ -43,6 +48,7 @@ func TestRebuildCurrentFile_AfterTakeover(t *testing.T) {
 	}
 }
 
+// TestRebuildCurrentFile_TakeoverProducesSingleSealedFile 验证相关行为。
 func TestRebuildCurrentFile_TakeoverProducesSingleSealedFile(t *testing.T) {
 	dir := t.TempDir()
 	openPath := filepath.Join(dir, "mysql-bin.000123.open.e8")

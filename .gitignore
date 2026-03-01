@@ -6,3 +6,8 @@ frontend/dist/
 tmp/e2e/data/
 /AGENTS.md
 /CLAUDE.md
+/CLAUDE_CN.md
+/.envrc
+/.tool-versions
+/logs/
+/tmp/
