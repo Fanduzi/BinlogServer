@@ -1,7 +1,8 @@
+// Package replication provides module-level functionality for replication.
 // input: source replication config, task state, checkpoint/file store dependencies
 // output: replication run control, local binlog artifacts, and upload/recovery signals
 // pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package replication
 
 import "testing"

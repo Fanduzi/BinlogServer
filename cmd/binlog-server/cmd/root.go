@@ -1,7 +1,8 @@
+// Package cmd provides module-level functionality for cmd.
 // input: config loader, signal context, logging setup, app runtime dependencies
 // output: root cobra command that starts binlog-server in configured mode
 // pos: CLI orchestration entry between process bootstrap and app lifecycle
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package cmd
 
 import (

@@ -1,7 +1,8 @@
+// Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants
 // output: validated runtime configuration structs for downstream modules
 // pos: configuration boundary translating external settings into internal options
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package config
 
 import (

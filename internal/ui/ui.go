@@ -1,7 +1,8 @@
+// Package ui provides module-level functionality for ui.
 // input: embedded static assets and HTTP handler integration dependencies
 // output: UI static file serving handler for browser-based management console
 // pos: UI delivery adapter exposing bundled frontend assets from backend process
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package ui
 
 import (

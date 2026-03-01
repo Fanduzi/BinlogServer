@@ -178,3 +178,7 @@ docker compose -f deploy/e2e/docker-compose.yml logs
 ```bash
 ./scripts/e2e/down.sh
 ```
+
+## Package Comment Rule
+
+- Go 文件的软件包注释采用 `Package [package name] ...` 形式。

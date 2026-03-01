@@ -17,6 +17,27 @@ Binlog Server：MySQL binlog 拉取、落盘、位点持久化与集群租约调
 集群 HA 实施计划：`docs/develop/plans/2026-02-16-cluster-ha-implementation-plan.md`
 Swagger 使用指南：`docs/swagger-api-guide.md`
 
+## Architecture
+
+Binlog Server 由命令入口层（`cmd`）、核心运行时（`internal`）、前端管理台（`frontend`）和工程脚本（`scripts`）组成。  
+服务启动后，API 与 UI 统一由后端进程暴露；任务调度驱动复制与元数据持久化，前端通过 `/api/*` 进行控制与观测。
+
+### Modules
+
+| Module | Description | Doc |
+|--------|-------------|-----|
+| `cmd` | 服务与迁移命令入口 | [README](cmd/README.md) |
+| `cmd/binlog-server` | 主服务启动命令 | [README](cmd/binlog-server/README.md) |
+| `cmd/migrate` | 数据库迁移命令 | [README](cmd/migrate/README.md) |
+| `internal` | 核心业务与基础设施模块 | [README](internal/README.md) |
+| `internal/api` | HTTP API 与路由 | [README](internal/api/README.md) |
+| `internal/tasks` | 任务状态机与调度核心 | [README](internal/tasks/README.md) |
+| `internal/meta` | 元数据存储与 schema 校验 | [README](internal/meta/README.md) |
+| `internal/replication` | MySQL 复制执行链路 | [README](internal/replication/README.md) |
+| `frontend` | 管理台前端源码与构建 | [README](frontend/README.md) |
+| `scripts` | 构建与 E2E 脚本入口 | [README](scripts/README.md) |
+| `scripts/e2e` | E2E 套件与场景脚本 | [README](scripts/e2e/README.md) |
+
 ## 运行
 
 ```bash

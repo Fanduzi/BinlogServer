@@ -1,7 +1,8 @@
+// Package app provides module-level functionality for app.
 // input: runtime config, scheduler/runner/meta store dependencies, process context
 // output: application lifecycle control including startup, role wiring, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package app
 
 import (

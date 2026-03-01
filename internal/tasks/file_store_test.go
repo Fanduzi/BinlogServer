@@ -1,7 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
 // output: task state transitions, scheduling decisions, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (

@@ -1,7 +1,8 @@
+// Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context
 // output: object storage upload operations and upload status/error outcomes
 // pos: outbound storage adapter layer for sealed binlog artifact distribution
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package upload
 
 import (

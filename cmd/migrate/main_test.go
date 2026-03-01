@@ -1,7 +1,8 @@
+// Package main provides module-level functionality for main.
 // input: migration files, META_DSN/env flags, golang-migrate driver dependencies
 // output: schema migration commands (up/down/version/force/goto) execution results
 // pos: database schema migration CLI for operational change management
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package main
 
 import "testing"

@@ -1,10 +1,10 @@
-# cmd/binlog-server AGENTS
+# cmd/binlog-server Module
 
-## Members
+## Files
 - `main.go`: 进程入口。
 - `cmd/root.go`: Cobra root command，负责配置加载与应用启动。
 
-## Interfaces
+## Exports
 - CLI 接口：`binlog-server --config <path>`。
 - 运行入口：执行 app 运行时。
 
@@ -14,3 +14,7 @@
 
 ## Update Rule
 - 入口参数、启动流程、信号处理变化时，更新本文件。
+
+## Package Comment Rule
+
+- Go 文件的软件包注释采用 `Package [package name] ...` 形式。

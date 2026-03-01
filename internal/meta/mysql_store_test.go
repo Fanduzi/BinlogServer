@@ -1,7 +1,8 @@
+// Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts, retry/lease timing policies
 // output: persistent metadata operations for tasks, leases, runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package meta
 
 import (

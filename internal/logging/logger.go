@@ -1,7 +1,8 @@
+// Package logging provides module-level functionality for logging.
 // input: log configuration options, output streams, rotation backends
 // output: initialized global logger and stdlib log redirection behavior
 // pos: logging infrastructure setup shared by application startup and runtime paths
-// note: if this file changes, update this header and module AGENTS.md.
+// note: if this file changes, update this header and module README.md.
 package logging
 
 import (
