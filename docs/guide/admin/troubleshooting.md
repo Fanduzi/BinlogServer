@@ -314,7 +314,6 @@ WHERE id = '{task_id}';
 - 优先处理 `TASK_RUNNER_ERROR` 对应根因（源库连通、权限、磁盘空间、元数据库可用性）。
 - 若任务陷入错误重试且位点不前进，可执行 `stop` / `start` 触发新 run，并观察 `/runs` 与 `/events` 是否恢复推进。
 - 若只见 `.open.e*` 文件且未 seal，先确认任务是否仍持有有效 lease，避免失租后继续误操作文件。
-```
 
 ## 6. 性能问题
 
@@ -366,17 +365,19 @@ curl -X POST http://localhost:8080/api/tasks/{task_id}/stop
 
 ```sql
 -- 谨慎操作！确保没有其他 worker 在执行
-DELETE FROM leases WHERE task_id = 'xxx';
+UPDATE task_leases
+SET owner_worker_id = '', lease_expire_at = NOW(6), renewed_at = NOW(6)
+WHERE task_id = 'xxx';
 ```
 
 ### 7.3 清理过期数据
 
 ```sql
 -- 清理过期 worker 注册
-DELETE FROM worker_registrations WHERE expires_at < NOW();
+DELETE FROM worker_registrations WHERE lease_expire_at < NOW(6);
 
 -- 清理过期租约
-DELETE FROM leases WHERE expires_at < NOW();
+DELETE FROM task_leases WHERE lease_expire_at < NOW(6);
 ```
 
 ## 8. 获取支持

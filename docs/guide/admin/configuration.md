@@ -338,7 +338,7 @@ curl -X POST http://localhost:8080/api/tasks \
     },
     "start": {
       "mode": "GTID",
-      "gtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"
+      "gtid_set": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"
     }
   }'
 ```
@@ -439,7 +439,7 @@ curl http://localhost:8080/api/workers
 **健康检查：**
 
 ```bash
-curl http://localhost:8080/api/health
+curl http://localhost:8080/healthz
 ```
 
 ## 5. 环境变量示例
@@ -517,8 +517,7 @@ data:
 
 | 错误 | 原因 |
 |------|------|
-| `cluster.worker_id is required in cluster mode` | 集群模式未配置 worker_id |
-| `meta.dsn is required in cluster mode` | 集群模式未配置元数据库 |
+| `worker_id is already in use: <worker-id>` | 同一 `worker_id` 被其他活跃实例占用 |
 | `storage.retention_days must be 1-3650` | 保留天数超出范围 |
 | `invalid cluster_key format` | cluster_key 包含非法字符 |
 
