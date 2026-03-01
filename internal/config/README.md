@@ -7,6 +7,9 @@
 ## Exports
 - `LoadConfig(path)`：加载配置。
 - 环境变量覆盖规则与占位符展开。
+- `api.auth.*`：API 鉴权开关、模式（`bearer`/`api_key`）与凭证配置。
+- `http.control_plane.*` / `http.worker_health.*`：HTTP 超时配置（ReadHeader/Read/Write/Idle）。
+- 内置配置校验：鉴权凭证缺失或超时配置非法会返回错误。
 
 ## Dependencies
 - Upstream: `cmd/binlog-server`, `internal/app`。

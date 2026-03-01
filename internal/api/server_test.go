@@ -804,6 +804,97 @@ func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
 	}
 }
 
+// TestAPI_AuthMiddlewareProtectsMetricsAndAPIRoutes 验证 Bearer 鉴权中间件对 /metrics 与 /api/* 生效。
+func TestAPI_AuthMiddlewareProtectsMetricsAndAPIRoutes(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler, WithAuth(AuthConfig{
+		Enabled:        true,
+		Mode:           AuthModeBearer,
+		BearerToken:    "secret-token",
+		ProtectAPI:     true,
+		ProtectMetrics: true,
+	}))
+
+	healthResp := httptest.NewRecorder()
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	handler.ServeHTTP(healthResp, healthReq)
+	if healthResp.Code != http.StatusOK {
+		t.Fatalf("expected /healthz 200 without auth, got %d", healthResp.Code)
+	}
+
+	metricsNoAuthResp := httptest.NewRecorder()
+	metricsNoAuthReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(metricsNoAuthResp, metricsNoAuthReq)
+	if metricsNoAuthResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected /metrics 401 without auth, got %d body=%s", metricsNoAuthResp.Code, metricsNoAuthResp.Body.String())
+	}
+
+	metricsForbiddenResp := httptest.NewRecorder()
+	metricsForbiddenReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsForbiddenReq.Header.Set("Authorization", "Bearer wrong-token")
+	handler.ServeHTTP(metricsForbiddenResp, metricsForbiddenReq)
+	if metricsForbiddenResp.Code != http.StatusForbidden {
+		t.Fatalf("expected /metrics 403 with bad token, got %d body=%s", metricsForbiddenResp.Code, metricsForbiddenResp.Body.String())
+	}
+
+	metricsOKResp := httptest.NewRecorder()
+	metricsOKReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsOKReq.Header.Set("Authorization", "Bearer secret-token")
+	handler.ServeHTTP(metricsOKResp, metricsOKReq)
+	if metricsOKResp.Code != http.StatusOK {
+		t.Fatalf("expected /metrics 200 with valid token, got %d body=%s", metricsOKResp.Code, metricsOKResp.Body.String())
+	}
+
+	apiNoAuthResp := httptest.NewRecorder()
+	apiNoAuthReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	handler.ServeHTTP(apiNoAuthResp, apiNoAuthReq)
+	if apiNoAuthResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected /api/tasks 401 without auth, got %d body=%s", apiNoAuthResp.Code, apiNoAuthResp.Body.String())
+	}
+
+	apiForbiddenResp := httptest.NewRecorder()
+	apiForbiddenReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	apiForbiddenReq.Header.Set("Authorization", "Bearer wrong-token")
+	handler.ServeHTTP(apiForbiddenResp, apiForbiddenReq)
+	if apiForbiddenResp.Code != http.StatusForbidden {
+		t.Fatalf("expected /api/tasks 403 with bad token, got %d body=%s", apiForbiddenResp.Code, apiForbiddenResp.Body.String())
+	}
+
+	apiOKResp := httptest.NewRecorder()
+	apiOKReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	apiOKReq.Header.Set("Authorization", "Bearer secret-token")
+	handler.ServeHTTP(apiOKResp, apiOKReq)
+	if apiOKResp.Code != http.StatusOK {
+		t.Fatalf("expected /api/tasks 200 with valid token, got %d body=%s", apiOKResp.Code, apiOKResp.Body.String())
+	}
+}
+
+// TestAPI_AuthMiddlewareCanExposeMetricsAndAPIByConfig 验证可按配置放开 /metrics 与 /api/*。
+func TestAPI_AuthMiddlewareCanExposeMetricsAndAPIByConfig(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler, WithAuth(AuthConfig{
+		Enabled:        true,
+		Mode:           AuthModeBearer,
+		BearerToken:    "secret-token",
+		ProtectAPI:     false,
+		ProtectMetrics: false,
+	}))
+
+	metricsResp := httptest.NewRecorder()
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(metricsResp, metricsReq)
+	if metricsResp.Code != http.StatusOK {
+		t.Fatalf("expected /metrics 200 when protection disabled, got %d body=%s", metricsResp.Code, metricsResp.Body.String())
+	}
+
+	apiResp := httptest.NewRecorder()
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	handler.ServeHTTP(apiResp, apiReq)
+	if apiResp.Code != http.StatusOK {
+		t.Fatalf("expected /api/tasks 200 when protection disabled, got %d body=%s", apiResp.Code, apiResp.Body.String())
+	}
+}
+
 // TestTaskAPI_MetricsIncludeRetryUploadCounters 验证相关行为。
 func TestTaskAPI_MetricsIncludeRetryUploadCounters(t *testing.T) {
 	fileStore := newFakeFileStore()

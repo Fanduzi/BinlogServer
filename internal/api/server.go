@@ -53,10 +53,19 @@ type taskService interface {
 type Server struct {
 	tasks taskService
 	gin   *gin.Engine
+	auth  AuthConfig
 }
 
 // NewServer 构建 API/UI HTTP handler。
-func NewServer(taskSvc taskService) http.Handler {
+func NewServer(taskSvc taskService, opts ...ServerOption) http.Handler {
+	options := defaultServerOptions()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	options.auth = normalizeAuthConfig(options.auth)
+
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.Use(gin.Recovery())
@@ -64,6 +73,7 @@ func NewServer(taskSvc taskService) http.Handler {
 	s := &Server{
 		tasks: taskSvc,
 		gin:   engine,
+		auth:  options.auth,
 	}
 	s.routes()
 	return s
@@ -72,15 +82,26 @@ func NewServer(taskSvc taskService) http.Handler {
 // routes 注册所有 HTTP 路由（system/tasks/cluster/swagger/ui）。
 func (s *Server) routes() {
 	s.gin.GET("/healthz", gin.WrapF(s.handleHealth))
-	s.gin.GET("/metrics", gin.WrapF(s.handleMetrics))
-	s.gin.GET("/api/summary", gin.WrapF(s.handleSummary))
-	s.gin.GET("/api/dashboard", gin.WrapF(s.handleDashboard))
-	s.gin.GET("/api/sources/lookup", gin.WrapF(s.handleSourceLookup))
-	s.gin.GET("/api/workers", gin.WrapF(s.handleWorkers))
-	s.gin.GET("/api/cluster/overview", gin.WrapF(s.handleClusterOverview))
-	s.gin.POST("/api/tasks", gin.WrapF(s.handleTasks))
-	s.gin.GET("/api/tasks", gin.WrapF(s.handleTasks))
-	s.gin.Any("/api/tasks/*path", gin.WrapF(s.handleTaskAction))
+	metricsHandlers := []gin.HandlerFunc{}
+	if s.auth.Enabled && s.auth.ProtectMetrics {
+		metricsHandlers = append(metricsHandlers, s.authMiddleware())
+	}
+	metricsHandlers = append(metricsHandlers, gin.WrapF(s.handleMetrics))
+	s.gin.GET("/metrics", metricsHandlers...)
+
+	apiHandlers := []gin.HandlerFunc{}
+	if s.auth.Enabled && s.auth.ProtectAPI {
+		apiHandlers = append(apiHandlers, s.authMiddleware())
+	}
+	apiGroup := s.gin.Group("/api", apiHandlers...)
+	apiGroup.GET("/summary", gin.WrapF(s.handleSummary))
+	apiGroup.GET("/dashboard", gin.WrapF(s.handleDashboard))
+	apiGroup.GET("/sources/lookup", gin.WrapF(s.handleSourceLookup))
+	apiGroup.GET("/workers", gin.WrapF(s.handleWorkers))
+	apiGroup.GET("/cluster/overview", gin.WrapF(s.handleClusterOverview))
+	apiGroup.POST("/tasks", gin.WrapF(s.handleTasks))
+	apiGroup.GET("/tasks", gin.WrapF(s.handleTasks))
+	apiGroup.Any("/tasks/*path", gin.WrapF(s.handleTaskAction))
 	s.gin.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerfiles.Handler))
 
 	uiHandler := http.StripPrefix("/ui/", ui.Handler())

@@ -37,7 +37,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: "go.mod"
           cache: true
 
       - name: Unit Tests
@@ -70,7 +70,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: "go.mod"
           cache: true
 
       - name: E2E Cluster Roles Scenario
@@ -100,7 +100,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: "go.mod"
           cache: true
 
       - name: E2E Observability Scenario
@@ -130,7 +130,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: "go.mod"
           cache: true
 
       - name: E2E Worker Crash Recovery Scenario

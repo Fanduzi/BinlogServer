@@ -7,6 +7,8 @@
 ## Exports
 - `New(cfg)` / `Run(ctx)`: 应用生命周期入口。
 - role/mode 装配逻辑：control-plane/worker/all-in-one。
+- control-plane 与 worker-health HTTP server 均应用可配置超时（ReadHeader/Read/Write/Idle）。
+- API server 支持从 `config.API.Auth` 注入鉴权策略。
 
 ## Dependencies
 - Upstream: `cmd/binlog-server`。

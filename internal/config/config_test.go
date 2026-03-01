@@ -14,8 +14,18 @@ import (
 	"testing"
 )
 
+func setRequiredAuthEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "true")
+	t.Setenv("BINLOG_SERVER_API_AUTH_MODE", "bearer")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "test-token")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "true")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "true")
+}
+
 // TestLoadConfig_DefaultValues 验证相关行为。
 func TestLoadConfig_DefaultValues(t *testing.T) {
+	setRequiredAuthEnv(t)
 	t.Setenv("BINLOG_SERVER_LISTEN_ADDR", "")
 	t.Setenv("BINLOG_SERVER_DATA_DIR", "")
 	t.Setenv("BINLOG_SERVER_META_DSN", "")
@@ -69,10 +79,26 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Log.RotateInterval != "24h" {
 		t.Fatalf("expected default log rotate_interval=24h, got %q", cfg.Log.RotateInterval)
 	}
+	if cfg.HTTP.ControlPlane.ReadHeaderTimeoutSec <= 0 || cfg.HTTP.ControlPlane.ReadTimeoutSec <= 0 || cfg.HTTP.ControlPlane.WriteTimeoutSec <= 0 || cfg.HTTP.ControlPlane.IdleTimeoutSec <= 0 {
+		t.Fatalf("expected positive control-plane HTTP timeout defaults, got %+v", cfg.HTTP.ControlPlane)
+	}
+	if cfg.HTTP.WorkerHealth.ReadHeaderTimeoutSec <= 0 || cfg.HTTP.WorkerHealth.ReadTimeoutSec <= 0 || cfg.HTTP.WorkerHealth.WriteTimeoutSec <= 0 || cfg.HTTP.WorkerHealth.IdleTimeoutSec <= 0 {
+		t.Fatalf("expected positive worker-health HTTP timeout defaults, got %+v", cfg.HTTP.WorkerHealth)
+	}
+	if !cfg.API.Auth.Enabled || cfg.API.Auth.Mode != "bearer" || cfg.API.Auth.BearerToken != "test-token" {
+		t.Fatalf("unexpected API auth defaults/overrides: %+v", cfg.API.Auth)
+	}
 }
 
 // TestLoadConfig_FromYAMLFile 验证相关行为。
 func TestLoadConfig_FromYAMLFile(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_MODE", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_API_KEY", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_API_KEY_HEADER", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "")
 	t.Setenv("BINLOG_SERVER_LISTEN_ADDR", "")
 	t.Setenv("BINLOG_SERVER_UPLOAD_USE_SSL", "")
 	t.Setenv("BINLOG_SERVER_LOG_LEVEL", "")
@@ -93,6 +119,24 @@ upload:
   region: "cn-north-1"
   prefix: "prod"
   use_ssl: true
+api:
+  auth:
+    enabled: true
+    mode: "bearer"
+    bearer_token: "yaml-token"
+    protect_api: true
+    protect_metrics: false
+http:
+  control_plane:
+    read_header_timeout_sec: 6
+    read_timeout_sec: 31
+    write_timeout_sec: 32
+    idle_timeout_sec: 121
+  worker_health:
+    read_header_timeout_sec: 4
+    read_timeout_sec: 11
+    write_timeout_sec: 12
+    idle_timeout_sec: 33
 log:
   level: "debug"
   encoding: "console"
@@ -144,10 +188,20 @@ log:
 	if cfg.Log.RotateInterval != "12h" {
 		t.Fatalf("expected log rotate_interval 12h, got %q", cfg.Log.RotateInterval)
 	}
+	if cfg.API.Auth.BearerToken != "yaml-token" || cfg.API.Auth.ProtectMetrics {
+		t.Fatalf("unexpected api auth config: %+v", cfg.API.Auth)
+	}
+	if cfg.HTTP.ControlPlane.ReadHeaderTimeoutSec != 6 || cfg.HTTP.ControlPlane.ReadTimeoutSec != 31 || cfg.HTTP.ControlPlane.WriteTimeoutSec != 32 || cfg.HTTP.ControlPlane.IdleTimeoutSec != 121 {
+		t.Fatalf("unexpected control-plane http timeout config: %+v", cfg.HTTP.ControlPlane)
+	}
+	if cfg.HTTP.WorkerHealth.ReadHeaderTimeoutSec != 4 || cfg.HTTP.WorkerHealth.ReadTimeoutSec != 11 || cfg.HTTP.WorkerHealth.WriteTimeoutSec != 12 || cfg.HTTP.WorkerHealth.IdleTimeoutSec != 33 {
+		t.Fatalf("unexpected worker-health http timeout config: %+v", cfg.HTTP.WorkerHealth)
+	}
 }
 
 // TestLoadConfig_EnvOverridesYAML 验证相关行为。
 func TestLoadConfig_EnvOverridesYAML(t *testing.T) {
+	setRequiredAuthEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := `
@@ -196,6 +250,7 @@ func TestLoadConfig_MissingExplicitFileReturnsError(t *testing.T) {
 
 // TestLoadConfig_ClusterDefaults 验证相关行为。
 func TestLoadConfig_ClusterDefaults(t *testing.T) {
+	setRequiredAuthEnv(t)
 	t.Setenv("BINLOG_SERVER_MODE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_ROLE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_ID", "")
@@ -234,6 +289,7 @@ func TestLoadConfig_ClusterDefaults(t *testing.T) {
 
 // TestLoadConfig_ClusterFromYAML 验证相关行为。
 func TestLoadConfig_ClusterFromYAML(t *testing.T) {
+	setRequiredAuthEnv(t)
 	t.Setenv("BINLOG_SERVER_MODE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_ROLE", "")
 	t.Setenv("BINLOG_SERVER_CLUSTER_WORKER_ID", "")
@@ -292,6 +348,7 @@ cluster:
 
 // TestLoadConfig_ExpandsEnvPlaceholders 验证敏感字段支持 ${ENV_VAR} 占位符展开。
 func TestLoadConfig_ExpandsEnvPlaceholders(t *testing.T) {
+	setRequiredAuthEnv(t)
 	t.Setenv("TEST_META_DSN", "user:pass@tcp(127.0.0.1:3306)/meta?parseTime=true")
 	t.Setenv("TEST_UPLOAD_SK", "super-secret")
 
@@ -320,6 +377,7 @@ upload:
 
 // TestLoadConfig_WarnsPlaintextSensitiveValues 验证配置文件明文敏感项会触发告警。
 func TestLoadConfig_WarnsPlaintextSensitiveValues(t *testing.T) {
+	setRequiredAuthEnv(t)
 	var buf bytes.Buffer
 	orig := log.Writer()
 	log.SetOutput(&buf)
@@ -345,5 +403,36 @@ upload:
 	}
 	if !strings.Contains(logs, `key "upload.secret_key" appears to contain plaintext`) {
 		t.Fatalf("expected upload.secret_key warning, logs=%q", logs)
+	}
+}
+
+// TestLoadConfig_InvalidHTTPTimeoutValidation 验证非法 HTTP 超时配置会被拒绝。
+func TestLoadConfig_InvalidHTTPTimeoutValidation(t *testing.T) {
+	setRequiredAuthEnv(t)
+	t.Setenv("BINLOG_SERVER_HTTP_CONTROL_PLANE_READ_TIMEOUT_SEC", "0")
+
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatal("expected error when http.control_plane.read_timeout_sec <= 0")
+	}
+	if !strings.Contains(err.Error(), "http.control_plane.read_timeout_sec must be > 0") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestLoadConfig_InvalidAPIAuthValidation 验证鉴权保护开启时必须提供凭证。
+func TestLoadConfig_InvalidAPIAuthValidation(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "true")
+	t.Setenv("BINLOG_SERVER_API_AUTH_MODE", "bearer")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "true")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "true")
+
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatal("expected error when bearer auth enabled without token")
+	}
+	if !strings.Contains(err.Error(), "api.auth.bearer_token is required") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

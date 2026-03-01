@@ -85,6 +85,15 @@ make migrate-up META_DSN="$META_DSN"
 - `BINLOG_SERVER_UPLOAD_PREFIX`（可选）
 - `BINLOG_SERVER_UPLOAD_USE_SSL=true|false`
 
+API 鉴权（默认保护 `/api/*` 与 `/metrics`）：
+- `BINLOG_SERVER_API_AUTH_ENABLED=true|false`
+- `BINLOG_SERVER_API_AUTH_MODE=bearer|api_key`
+- `BINLOG_SERVER_API_AUTH_BEARER_TOKEN`（`mode=bearer` 时必填）
+- `BINLOG_SERVER_API_AUTH_API_KEY`（`mode=api_key` 时必填）
+- `BINLOG_SERVER_API_AUTH_API_KEY_HEADER`（默认 `X-API-Key`）
+- `BINLOG_SERVER_API_AUTH_PROTECT_API=true|false`
+- `BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true|false`
+
 上传适配说明：
 - 当前上传实现走 S3 API 兼容路径（MinIO SDK）。
 - 其余对象存储厂商可通过兼容层接入，是否切换官方 SDK 以代码实现为准。

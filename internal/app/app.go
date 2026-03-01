@@ -234,7 +234,11 @@ func (a *App) Run(ctx context.Context) error {
 	if !controlPlaneEnabled {
 		// worker-only 模式不启动主 API，仅按需暴露健康检查端口。
 		if workerEnabled && strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr) != "" {
-			addr, err := startWorkerHealthServer(runCtx, strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr))
+			addr, err := startWorkerHealthServer(
+				runCtx,
+				strings.TrimSpace(a.cfg.Cluster.WorkerHealthListenAddr),
+				a.cfg.HTTP.WorkerHealth,
+			)
 			if err != nil {
 				return err
 			}
@@ -252,8 +256,16 @@ func (a *App) Run(ctx context.Context) error {
 		return nil
 	}
 
-	handler := api.NewServer(scheduler)
-	server := &http.Server{Handler: handler}
+	handler := api.NewServer(scheduler, api.WithAuth(api.AuthConfig{
+		Enabled:        a.cfg.API.Auth.Enabled,
+		Mode:           api.AuthMode(strings.ToLower(strings.TrimSpace(a.cfg.API.Auth.Mode))),
+		BearerToken:    a.cfg.API.Auth.BearerToken,
+		APIKey:         a.cfg.API.Auth.APIKey,
+		APIKeyHeader:   a.cfg.API.Auth.APIKeyHeader,
+		ProtectAPI:     a.cfg.API.Auth.ProtectAPI,
+		ProtectMetrics: a.cfg.API.Auth.ProtectMetrics,
+	}))
+	server := buildHTTPServer(handler, a.cfg.HTTP.ControlPlane)
 
 	ln, err := net.Listen("tcp", a.cfg.ListenAddr)
 	if err != nil {
@@ -712,7 +724,7 @@ func startWorkerRegistrationRenewLoop(
 }
 
 // startWorkerHealthServer 启动 worker 专用健康检查端点（/healthz 与 /readyz）。
-func startWorkerHealthServer(ctx context.Context, listenAddr string) (string, error) {
+func startWorkerHealthServer(ctx context.Context, listenAddr string, timeoutCfg config.HTTPServerTimeoutConfig) (string, error) {
 	// 该服务只做最小探活语义，不承载业务读写。
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -730,7 +742,7 @@ func startWorkerHealthServer(ctx context.Context, listenAddr string) (string, er
 		w.WriteHeader(http.StatusOK)
 	})
 
-	server := &http.Server{Handler: mux}
+	server := buildHTTPServer(mux, timeoutCfg)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return "", err
@@ -749,6 +761,17 @@ func startWorkerHealthServer(ctx context.Context, listenAddr string) (string, er
 	}()
 
 	return ln.Addr().String(), nil
+}
+
+// buildHTTPServer 根据配置构建带超时的 HTTP server，避免慢连接拖垮控制面。
+func buildHTTPServer(handler http.Handler, timeoutCfg config.HTTPServerTimeoutConfig) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: time.Duration(timeoutCfg.ReadHeaderTimeoutSec) * time.Second,
+		ReadTimeout:       time.Duration(timeoutCfg.ReadTimeoutSec) * time.Second,
+		WriteTimeout:      time.Duration(timeoutCfg.WriteTimeoutSec) * time.Second,
+		IdleTimeout:       time.Duration(timeoutCfg.IdleTimeoutSec) * time.Second,
+	}
 }
 
 // applyClusterRuntimeOptions 在 cluster 模式下注入 lease 与 worker 标识相关运行时选项。

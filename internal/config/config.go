@@ -43,6 +43,12 @@ type Config struct {
 
 	// Log 是日志输出与轮转配置。
 	Log LogConfig
+
+	// API 是 HTTP API 层鉴权相关配置。
+	API APIConfig
+
+	// HTTP 是各监听器的超时配置。
+	HTTP HTTPConfig
 }
 
 // ClusterConfig 定义 cluster 角色和 lease 参数。
@@ -66,6 +72,38 @@ type LogConfig struct {
 	MaxAgeDays     int
 	Compress       bool
 	RotateInterval string
+}
+
+// APIConfig 定义 API 鉴权控制配置。
+type APIConfig struct {
+	Auth APIAuthConfig
+}
+
+// APIAuthConfig 定义 /metrics 与 /api/* 鉴权策略。
+type APIAuthConfig struct {
+	Enabled bool
+	Mode    string
+
+	BearerToken  string
+	APIKey       string
+	APIKeyHeader string
+
+	ProtectAPI     bool
+	ProtectMetrics bool
+}
+
+// HTTPConfig 定义不同 HTTP server 的超时配置。
+type HTTPConfig struct {
+	ControlPlane HTTPServerTimeoutConfig
+	WorkerHealth HTTPServerTimeoutConfig
+}
+
+// HTTPServerTimeoutConfig 定义单个 HTTP server 的超时参数（秒）。
+type HTTPServerTimeoutConfig struct {
+	ReadHeaderTimeoutSec int
+	ReadTimeoutSec       int
+	WriteTimeoutSec      int
+	IdleTimeoutSec       int
 }
 
 // LoadConfig 按“默认值 < 配置文件 < 环境变量”顺序加载配置。
@@ -94,6 +132,19 @@ func LoadConfig(path string) (Config, error) {
 	v.SetDefault("log.max_age_days", 30)
 	v.SetDefault("log.compress", false)
 	v.SetDefault("log.rotate_interval", "24h")
+	v.SetDefault("api.auth.enabled", true)
+	v.SetDefault("api.auth.mode", "bearer")
+	v.SetDefault("api.auth.api_key_header", "X-API-Key")
+	v.SetDefault("api.auth.protect_api", true)
+	v.SetDefault("api.auth.protect_metrics", true)
+	v.SetDefault("http.control_plane.read_header_timeout_sec", 5)
+	v.SetDefault("http.control_plane.read_timeout_sec", 30)
+	v.SetDefault("http.control_plane.write_timeout_sec", 30)
+	v.SetDefault("http.control_plane.idle_timeout_sec", 120)
+	v.SetDefault("http.worker_health.read_header_timeout_sec", 3)
+	v.SetDefault("http.worker_health.read_timeout_sec", 10)
+	v.SetDefault("http.worker_health.write_timeout_sec", 10)
+	v.SetDefault("http.worker_health.idle_timeout_sec", 30)
 
 	if path != "" {
 		v.SetConfigFile(path)
@@ -150,6 +201,69 @@ func LoadConfig(path string) (Config, error) {
 			Compress:       getBool(v, "log.compress", "log_compress"),
 			RotateInterval: getString(v, "log.rotate_interval", "log_rotate_interval"),
 		},
+		API: APIConfig{
+			Auth: APIAuthConfig{
+				Enabled:      getBool(v, "api.auth.enabled", "api_auth_enabled"),
+				Mode:         strings.ToLower(getString(v, "api.auth.mode", "api_auth_mode")),
+				BearerToken:  getString(v, "api.auth.bearer_token", "api_auth_bearer_token"),
+				APIKey:       getString(v, "api.auth.api_key", "api_auth_api_key"),
+				APIKeyHeader: getString(v, "api.auth.api_key_header", "api_auth_api_key_header"),
+				ProtectAPI:   getBool(v, "api.auth.protect_api", "api_auth_protect_api"),
+				ProtectMetrics: getBool(v,
+					"api.auth.protect_metrics",
+					"api_auth_protect_metrics",
+				),
+			},
+		},
+		HTTP: HTTPConfig{
+			ControlPlane: HTTPServerTimeoutConfig{
+				ReadHeaderTimeoutSec: getInt(
+					v,
+					"http.control_plane.read_header_timeout_sec",
+					"http_control_plane_read_header_timeout_sec",
+				),
+				ReadTimeoutSec: getInt(
+					v,
+					"http.control_plane.read_timeout_sec",
+					"http_control_plane_read_timeout_sec",
+				),
+				WriteTimeoutSec: getInt(
+					v,
+					"http.control_plane.write_timeout_sec",
+					"http_control_plane_write_timeout_sec",
+				),
+				IdleTimeoutSec: getInt(
+					v,
+					"http.control_plane.idle_timeout_sec",
+					"http_control_plane_idle_timeout_sec",
+				),
+			},
+			WorkerHealth: HTTPServerTimeoutConfig{
+				ReadHeaderTimeoutSec: getInt(
+					v,
+					"http.worker_health.read_header_timeout_sec",
+					"http_worker_health_read_header_timeout_sec",
+				),
+				ReadTimeoutSec: getInt(
+					v,
+					"http.worker_health.read_timeout_sec",
+					"http_worker_health_read_timeout_sec",
+				),
+				WriteTimeoutSec: getInt(
+					v,
+					"http.worker_health.write_timeout_sec",
+					"http_worker_health_write_timeout_sec",
+				),
+				IdleTimeoutSec: getInt(
+					v,
+					"http.worker_health.idle_timeout_sec",
+					"http_worker_health_idle_timeout_sec",
+				),
+			},
+		},
+	}
+	if err := validateConfig(cfg); err != nil {
+		return Config{}, err
 	}
 	warnSensitivePlaintextInConfig(v)
 	return cfg, nil
@@ -217,4 +331,59 @@ func warnSensitivePlaintextInConfig(v *viper.Viper) {
 		}
 		log.Printf("config warning: key %q appears to contain plaintext sensitive value; prefer ${ENV_VAR} or environment injection", key)
 	}
+}
+
+func validateConfig(cfg Config) error {
+	if err := validateHTTPTimeoutConfig("http.control_plane", cfg.HTTP.ControlPlane); err != nil {
+		return err
+	}
+	if err := validateHTTPTimeoutConfig("http.worker_health", cfg.HTTP.WorkerHealth); err != nil {
+		return err
+	}
+	if err := validateAPIAuthConfig(cfg.API.Auth); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateHTTPTimeoutConfig(scope string, cfg HTTPServerTimeoutConfig) error {
+	if cfg.ReadHeaderTimeoutSec <= 0 {
+		return fmt.Errorf("%s.read_header_timeout_sec must be > 0", scope)
+	}
+	if cfg.ReadTimeoutSec <= 0 {
+		return fmt.Errorf("%s.read_timeout_sec must be > 0", scope)
+	}
+	if cfg.WriteTimeoutSec <= 0 {
+		return fmt.Errorf("%s.write_timeout_sec must be > 0", scope)
+	}
+	if cfg.IdleTimeoutSec <= 0 {
+		return fmt.Errorf("%s.idle_timeout_sec must be > 0", scope)
+	}
+	return nil
+}
+
+func validateAPIAuthConfig(cfg APIAuthConfig) error {
+	if !cfg.Enabled {
+		if cfg.ProtectAPI || cfg.ProtectMetrics {
+			return errors.New("api.auth.enabled=false cannot protect api or metrics routes")
+		}
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
+	switch mode {
+	case "bearer":
+		if strings.TrimSpace(cfg.BearerToken) == "" && (cfg.ProtectAPI || cfg.ProtectMetrics) {
+			return errors.New("api.auth.bearer_token is required when protection is enabled")
+		}
+	case "api_key":
+		if strings.TrimSpace(cfg.APIKey) == "" && (cfg.ProtectAPI || cfg.ProtectMetrics) {
+			return errors.New("api.auth.api_key is required when protection is enabled")
+		}
+		if strings.TrimSpace(cfg.APIKeyHeader) == "" {
+			return errors.New("api.auth.api_key_header must not be empty")
+		}
+	default:
+		return fmt.Errorf("api.auth.mode must be bearer or api_key, got %q", cfg.Mode)
+	}
+	return nil
 }

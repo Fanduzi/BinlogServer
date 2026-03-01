@@ -21,6 +21,28 @@ upload:
   prefix: ""
   use_ssl: false
 
+api:
+  auth:
+    enabled: true
+    mode: "bearer" # bearer | api_key
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}" # 推荐用环境变量注入
+    api_key: ""
+    api_key_header: "X-API-Key"
+    protect_api: true
+    protect_metrics: true
+
+http:
+  control_plane:
+    read_header_timeout_sec: 5
+    read_timeout_sec: 30
+    write_timeout_sec: 30
+    idle_timeout_sec: 120
+  worker_health:
+    read_header_timeout_sec: 3
+    read_timeout_sec: 10
+    write_timeout_sec: 10
+    idle_timeout_sec: 30
+
 log:
   level: "info"
   encoding: "json" # json | console

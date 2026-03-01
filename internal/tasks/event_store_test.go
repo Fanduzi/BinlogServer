@@ -7,12 +7,14 @@ package tasks
 
 import (
 	"context"
+	"sync"
 	"testing"
 )
 
 type fakeEventStore struct {
 	events      map[string][]TaskEvent
 	appendCalls int
+	mu          sync.Mutex
 }
 
 // newFakeEventStore 实现对应功能逻辑。
@@ -22,6 +24,8 @@ func newFakeEventStore() *fakeEventStore {
 
 // AppendEvent 实现对应功能逻辑。
 func (f *fakeEventStore) AppendEvent(_ context.Context, event TaskEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.appendCalls++
 	f.events[event.TaskID] = append(f.events[event.TaskID], event)
 	return nil
@@ -29,6 +33,8 @@ func (f *fakeEventStore) AppendEvent(_ context.Context, event TaskEvent) error {
 
 // ListEvents 实现对应功能逻辑。
 func (f *fakeEventStore) ListEvents(_ context.Context, taskID string, limit int) ([]TaskEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	items := f.events[taskID]
 	if limit <= 0 || limit >= len(items) {
 		out := make([]TaskEvent, len(items))
@@ -66,6 +72,8 @@ func TestScheduler_UsesEventStore(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("expected events from event store")
 	}
+	eventStore.mu.Lock()
+	defer eventStore.mu.Unlock()
 	if eventStore.appendCalls == 0 {
 		t.Fatal("expected append event called")
 	}
