@@ -1,6 +1,6 @@
 # binlog_server
 
-Binlog Server MVP（进行中）。
+Binlog Server：MySQL binlog 拉取、落盘、位点持久化与集群租约调度服务。
 
 当前已实现：
 
@@ -11,13 +11,11 @@ Binlog Server MVP（进行中）。
 - `fsync` 成功后才推进 checkpoint 的可靠性语义
 - MySQL 复制协议拉流（`LATEST/FILE_POS/GTID` 起点）
 
-学习路线文档：`docs/learning-guide.md`  
-分节目录：`docs/learning/README.md`
-架构图文档：`docs/architecture-diagrams.md`
-部署模式文档：`docs/deployment-modes.md`
-TODO 与里程碑：`docs/TODO.md`
-集群 HA 设计草案：`docs/plans/2026-02-16-cluster-ha-design.md`
-集群 HA 实施计划：`docs/plans/2026-02-16-cluster-ha-implementation-plan.md`
+学习与运维入口：`docs/guide/README.md`
+开发 TODO：`docs/develop/TODO.md`
+集群 HA 设计草案：`docs/develop/plans/2026-02-16-cluster-ha-design.md`
+集群 HA 实施计划：`docs/develop/plans/2026-02-16-cluster-ha-implementation-plan.md`
+Swagger 使用指南：`docs/swagger-api-guide.md`
 
 ## 运行
 
@@ -47,7 +45,15 @@ go build -o binlog-server ./cmd/binlog-server
 默认数据目录：`./data`  
 可通过环境变量覆盖：`BINLOG_SERVER_DATA_DIR=/path/to/data`
 
-可选元数据 MySQL DSN：`BINLOG_SERVER_META_DSN=user:pass@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true`
+可选元数据 MySQL DSN：`BINLOG_SERVER_META_DSN=${BINLOG_META_DSN}`
+
+使用元数据库时，请先执行数据库迁移（服务启动不会自动建表/改表）：
+
+```bash
+export BINLOG_META_PASS='replace_me'
+export META_DSN="meta:${BINLOG_META_PASS}@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true"
+make migrate-up META_DSN="$META_DSN"
+```
 
 可选上传（当前实现：S3 API 兼容对象存储）：
 - `BINLOG_SERVER_UPLOAD_ENDPOINT`
@@ -58,9 +64,9 @@ go build -o binlog-server ./cmd/binlog-server
 - `BINLOG_SERVER_UPLOAD_PREFIX`（可选）
 - `BINLOG_SERVER_UPLOAD_USE_SSL=true|false`
 
-上传路线图（已确认）：
-- AWS S3：继续使用 MinIO S3 SDK。
-- 华为云 OBS / 腾讯云 COS / 阿里云 OSS：后续切换为各自官方 SDK（而非继续统一走 S3 兼容层）。
+上传适配说明：
+- 当前上传实现走 S3 API 兼容路径（MinIO SDK）。
+- 其余对象存储厂商可通过兼容层接入，是否切换官方 SDK 以代码实现为准。
 
 配置加载优先级：`默认值 < YAML 配置文件 < 环境变量`。  
 未传 `--config` 时，会尝试读取当前目录 `./config.yaml`，不存在则忽略。
@@ -290,7 +296,7 @@ cluster:
   lease_renew_interval_sec: 5
   lease_grace_sec: 30
   failover_policy: rebuild_current_file
-meta_dsn: "user:pass@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true"
+meta_dsn: "${BINLOG_SERVER_META_DSN}"
 ```
 
 适用场景：小规模集群，先接入 lease/epoch 语义，再平滑扩容。
@@ -303,7 +309,7 @@ control-plane 节点：
 mode: cluster
 cluster:
   role: control-plane
-meta_dsn: "user:pass@tcp(meta-vip:3306)/binlog_meta?parseTime=true"
+meta_dsn: "${BINLOG_SERVER_META_DSN}"
 listen_addr: ":8080"
 ```
 
@@ -319,7 +325,7 @@ cluster:
   lease_renew_interval_sec: 5
   lease_grace_sec: 30
   failover_policy: rebuild_current_file
-meta_dsn: "user:pass@tcp(meta-vip:3306)/binlog_meta?parseTime=true"
+meta_dsn: "${BINLOG_SERVER_META_DSN}"
 ```
 
 部署建议：
