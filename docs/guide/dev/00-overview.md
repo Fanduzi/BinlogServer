@@ -140,7 +140,7 @@ app.Run(ctx, cfg)
 ├─► 5. 创建 Scheduler
 │     scheduler = tasks.NewScheduler(
 │         WithStore(mysqlStore),
-│         WithLeaseManager(leaseStore),
+│         WithClusterLeaseManager(leaseStore),
 │         WithRunner(runner),
 │         ...
 │     )
