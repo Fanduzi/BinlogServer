@@ -192,14 +192,14 @@ func Run(ctx context.Context, cfg *config.Config) error {
 // 注意：Scheduler 模块已拆分为多个文件（scheduler*.go）
 func NewScheduler(opts ...Option) *Scheduler {
     s := &Scheduler{
-        tasks:     make(map[string]Task),
-        cancels:   make(map[string]context.CancelFunc),
-        runs:      make(map[string]<-chan struct{}),
+        tasks:   make(map[string]Task),
+        cancels: make(map[string]context.CancelFunc),
+        runs:    make(map[string]chan struct{}),
 
         // 默认值
-        leaseTTL:         30 * time.Second,
-        leaseRenewInterval: 10 * time.Second,
-        leaseGrace:       60 * time.Second,
+        leaseTTL:           15 * time.Second,
+        leaseRenewInterval: 5 * time.Second,
+        leaseGrace:         30 * time.Second,
     }
 
     // 应用选项
@@ -222,7 +222,7 @@ func WithStore(store Store) Option {
     }
 }
 
-func WithLeaseManager(lm LeaseManager) Option {
+func WithClusterLeaseManager(lm LeaseManager) Option {
     return func(s *Scheduler) {
         s.leaseManager = lm
     }

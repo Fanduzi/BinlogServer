@@ -73,7 +73,7 @@
 
 ```bash
 # 1. 确认鉴权配置
-curl http://localhost:8080/api/healthz  # 健康检查始终不需要鉴权
+curl http://localhost:8080/healthz  # 健康检查始终不需要鉴权
 
 # 2. 测试 Bearer Token
 curl -H "Authorization: Bearer your-token" \
