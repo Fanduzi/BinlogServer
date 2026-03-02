@@ -189,6 +189,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 
 ```go
 // internal/tasks/scheduler.go
+// 注意：Scheduler 模块已拆分为多个文件（scheduler*.go）
 func NewScheduler(opts ...Option) *Scheduler {
     s := &Scheduler{
         tasks:     make(map[string]Task),
@@ -388,7 +389,7 @@ func (s *Scheduler) StopAll(ctx context.Context) error {
 | Cobra 配置 | `cmd/binlog-server/cmd/root.go` |
 | 配置加载 | `internal/config/config.go` |
 | 应用启动 | `internal/app/app.go` |
-| Scheduler | `internal/tasks/scheduler.go` |
+| Scheduler | `internal/tasks/scheduler*.go`（多文件模块） |
 
 ## 10. 本章小结
 

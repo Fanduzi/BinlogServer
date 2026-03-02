@@ -59,25 +59,75 @@ go build -o binlog-server ./cmd/binlog-server
 
 ### 2.2 创建配置文件
 
+**最小可运行配置（开发/测试环境）：**
+
 ```yaml
-# config.yaml
+# config.yaml - 开发环境最小配置
 listen_addr: ":8080"
-data_dir: "/data/binlog"
-
-# 单机模式，不需要元数据库
+data_dir: "./data"
 mode: "standalone"
-
-# 源 MySQL 连接示例（在创建任务时指定，这里只是模板）
-# source:
-#   host: "127.0.0.1"
-#   port: 3306
-#   user: "repl"
-#   password: "your_password"
 
 # 日志配置
 log:
   level: "info"
-  format: "json"
+  encoding: "json"
+```
+
+**注意：** 默认情况下 API 不启用鉴权（`api.auth.enabled=false`），适合开发/测试环境。
+
+**生产环境推荐配置（启用鉴权）：**
+
+```yaml
+# config.yaml - 生产环境配置
+listen_addr: ":8080"
+data_dir: "/data/binlog"
+mode: "standalone"
+
+# API 鉴权配置（生产环境必须启用）
+api:
+  auth:
+    enabled: true
+    mode: "bearer"
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
+    protect_api: true
+    protect_metrics: true
+
+# HTTP 超时配置
+http:
+  control_plane:
+    read_header_timeout_sec: 5
+    read_timeout_sec: 30
+    write_timeout_sec: 30
+    idle_timeout_sec: 120
+
+# 日志配置
+log:
+  level: "info"
+  encoding: "json"
+  file: "/var/log/binlog-server/app.log"
+  max_size_mb: 100
+  max_backups: 7
+  max_age_days: 30
+  compress: true
+```
+
+```bash
+# 设置鉴权 Token
+export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="your-secure-random-token"
+
+# 启动服务
+./binlog-server --config config.yaml
+```
+
+**使用 API（启用鉴权后）：**
+
+```bash
+# 健康检查不需要鉴权
+curl http://localhost:8080/healthz
+
+# API 请求需要 Bearer Token
+curl -H "Authorization: Bearer your-secure-random-token" \
+  http://localhost:8080/api/tasks
 ```
 
 ### 2.3 启动服务
@@ -140,15 +190,29 @@ mode: "cluster"
 cluster:
   role: "control-plane"
   worker_id: "control-plane-1"
+  lease_ttl_sec: 30
+  lease_renew_interval_sec: 10
+  lease_grace_sec: 60
 
 # 元数据库连接（推荐使用环境变量占位符）
 meta_dsn: "${BINLOG_SERVER_META_DSN}"
 
-# 租约配置
-cluster:
-  lease_ttl_sec: 30
-  lease_renew_interval_sec: 10
-  lease_grace_sec: 60
+# API 鉴权配置（生产环境推荐启用）
+api:
+  auth:
+    enabled: true
+    mode: "bearer"
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
+    protect_api: true
+    protect_metrics: true
+
+# HTTP 超时配置
+http:
+  control_plane:
+    read_header_timeout_sec: 5
+    read_timeout_sec: 30
+    write_timeout_sec: 30
+    idle_timeout_sec: 120
 
 log:
   level: "info"
@@ -159,7 +223,6 @@ log:
 
 ```yaml
 # worker.yaml
-listen_addr: ":8081"  # Worker 也需要 API 用于健康检查
 data_dir: "/data/binlog"
 
 mode: "cluster"
@@ -174,10 +237,20 @@ cluster:
 # 元数据库连接（推荐使用环境变量占位符）
 meta_dsn: "${BINLOG_SERVER_META_DSN}"
 
+# HTTP 超时配置（worker 健康检查）
+http:
+  worker_health:
+    read_header_timeout_sec: 3
+    read_timeout_sec: 10
+    write_timeout_sec: 10
+    idle_timeout_sec: 30
+
 log:
   level: "info"
   encoding: "json"
 ```
+
+**注意：** Worker 角色不暴露 API（只有健康检查端口），因此不需要 `api.auth` 配置。
 
 **worker_id 说明：**
 
@@ -194,6 +267,7 @@ log:
 ```bash
 # 设置环境变量（敏感信息）
 export BINLOG_SERVER_META_DSN="user:password@tcp(127.0.0.1:3306)/binlog_server_meta?parseTime=true"
+export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="your-secure-random-token"
 
 # 启动 Control Plane
 ./binlog-server --config control-plane.yaml
@@ -240,6 +314,7 @@ WantedBy=multi-user.target
 BINLOG_SERVER_META_DSN=user:password@tcp(127.0.0.1:3306)/binlog_server_meta?parseTime=true
 BINLOG_SERVER_UPLOAD_ACCESS_KEY=your_access_key
 BINLOG_SERVER_UPLOAD_SECRET_KEY=your_secret_key
+BINLOG_SERVER_API_AUTH_BEARER_TOKEN=your-secure-random-token
 ```
 
 ```bash
@@ -386,6 +461,53 @@ Error: worker registration failed
 1. worker_id 是否唯一
 2. 元数据库是否可连接
 3. 是否有其他 session 占用该 worker_id
+
+### 7.4 API 返回 401/403 错误
+
+**症状：** 调用 API 返回 401 Unauthorized 或 403 Forbidden
+
+**原因：** 启用了 API 鉴权但请求未携带正确的凭证
+
+**解决方案：**
+
+```bash
+# 检查是否启用了鉴权
+grep "api.auth.enabled" config.yaml
+
+# 使用正确的 Bearer Token
+curl -H "Authorization: Bearer your-token" \
+  http://localhost:8080/api/tasks
+
+# 或使用 API Key
+curl -H "X-API-Key: your-api-key" \
+  http://localhost:8080/api/tasks
+```
+
+### 7.5 启动报配置验证错误
+
+**症状：** 启动失败，报类似以下错误
+
+```
+api.auth.enabled=false cannot protect api or metrics routes
+```
+
+**原因：** 配置逻辑冲突
+
+**解决方案：**
+
+```yaml
+# 错误：enabled=false 但 protect=true
+api:
+  auth:
+    enabled: false
+    protect_api: true  # ❌ 冲突
+
+# 正确：要么启用鉴权，要么关闭保护
+api:
+  auth:
+    enabled: true
+    protect_api: true  # ✅
+```
 
 ## 8. 下一步
 

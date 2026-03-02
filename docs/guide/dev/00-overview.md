@@ -224,10 +224,23 @@ app.Run(ctx, cfg)
 | Config | 配置加载和验证 | `internal/config/` |
 | MySQLStore | 任务/事件/文件元数据持久化 | `internal/meta/mysql_store.go` |
 | LeaseStore | 租约管理（获取/续租/释放） | `internal/meta/lease_store.go` |
-| Scheduler | 任务状态机、分发、调度 | `internal/tasks/scheduler.go` |
+| Scheduler | 任务状态机、分发、调度 | `internal/tasks/scheduler*.go`（多文件） |
 | Runner | 实际执行 binlog 复制 | `internal/replication/mysql_runner.go` |
 | Uploader | 上传文件到云存储 | `internal/upload/s3_uploader.go` |
 | API Server | HTTP API 和 UI | `internal/api/` |
+
+**Scheduler 模块文件结构：**
+
+```
+internal/tasks/
+├── scheduler.go              # 核心：Scheduler 结构、Option、Restore
+├── scheduler_cluster_lease.go # 集群租约：acquire/renew/release
+├── scheduler_lifecycle.go    # 生命周期：Start/Stop/Run
+├── scheduler_observability.go # 可观测性：Prometheus 指标
+├── scheduler_retry_upload.go # 上传重试：RetryFailedUploads
+├── scheduler_task_ops.go     # 任务操作：Create/Get/List/Delete
+└── model.go                  # 数据模型：Task/Event/File 等
+```
 
 ## 5. 两种运行模式
 
@@ -290,11 +303,12 @@ app.Run(ctx, cfg)
 | CLI 参数 | `cmd/binlog-server/cmd/root.go` |
 | 启动流程 | `internal/app/app.go` |
 | 配置加载 | `internal/config/config.go` |
-| 任务状态机 | `internal/tasks/scheduler.go` |
+| 任务状态机 | `internal/tasks/scheduler*.go`（多文件模块） |
 | 复制执行 | `internal/replication/mysql_runner.go` |
 | 元数据存储 | `internal/meta/mysql_store.go` |
 | 租约管理 | `internal/meta/lease_store.go` |
 | HTTP API | `internal/api/server.go` |
+| API 鉴权 | `internal/api/auth.go` |
 
 ## 7. 阅读建议
 

@@ -311,8 +311,8 @@ Response:
 | 组件 | 代码位置 |
 |------|----------|
 | Worker 注册 | `internal/meta/mysql_store.go` |
-| Claim Loop | `internal/tasks/scheduler.go` (ClaimStartingTasks) |
-| Renew Loop | `internal/tasks/scheduler.go` (renewLeaseLoop) |
+| Claim Loop | `internal/tasks/scheduler_lifecycle.go` |
+| Renew Loop | `internal/tasks/scheduler_cluster_lease.go` |
 | 角色配置 | `internal/config/config.go` |
 
 ## 6. 本章小结

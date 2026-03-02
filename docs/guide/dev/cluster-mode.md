@@ -443,9 +443,9 @@ lease:
 | 功能 | 文件 |
 |------|------|
 | 角色判断 | `internal/app/app.go` |
-| Worker 注册 | `internal/tasks/scheduler.go` |
-| Claim Loop | `internal/tasks/scheduler.go` |
-| Renew Loop | `internal/tasks/scheduler.go` |
+| Worker 注册 | `internal/app/app.go` |
+| Claim Loop | `internal/tasks/scheduler_lifecycle.go` |
+| Renew Loop | `internal/tasks/scheduler_cluster_lease.go` |
 | LeaseStore | `internal/meta/lease_store.go` |
 
 ## 9. 本章小结

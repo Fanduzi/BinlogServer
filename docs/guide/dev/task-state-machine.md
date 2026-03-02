@@ -368,12 +368,12 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 | 功能 | 文件 | 函数 |
 |------|------|------|
 | 状态定义 | `internal/tasks/model.go` | `TaskState` |
-| 创建任务 | `internal/tasks/scheduler.go` | `CreateTask` |
-| 启动任务 | `internal/tasks/scheduler.go` | `StartTask` |
-| 停止任务 | `internal/tasks/scheduler.go` | `StopTask` |
-| 执行任务 | `internal/tasks/scheduler.go` | `runTask` |
-| 续租循环 | `internal/tasks/scheduler.go` | `renewLeaseLoop` |
-| 接管任务 | `internal/tasks/scheduler.go` | `ClaimStartingTasks` |
+| 创建任务 | `internal/tasks/scheduler_task_ops.go` | `CreateTask` |
+| 启动任务 | `internal/tasks/scheduler_lifecycle.go` | `StartTask` |
+| 停止任务 | `internal/tasks/scheduler_lifecycle.go` | `StopTask` |
+| 执行任务 | `internal/tasks/scheduler_lifecycle.go` | `runTask` |
+| 续租循环 | `internal/tasks/scheduler_cluster_lease.go` | `renewLeaseLoop` |
+| 接管任务 | `internal/tasks/scheduler_lifecycle.go` | `ClaimStartingTasks` |
 
 ## 7. 本章小结
 
