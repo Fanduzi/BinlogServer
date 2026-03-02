@@ -256,7 +256,7 @@ Instance B (RUNNING Task 3, 4) ──── 怎么知道要接管 Task 1, 2？
 | Store 接口 | `internal/tasks/store.go` |
 | MySQLStore 实现 | `internal/meta/mysql_store.go` |
 | Checkpoint 读取 | `internal/replication/mysql_runner.go` |
-| Restore 逻辑 | `internal/tasks/scheduler.go`（核心模块） |
+| Restore 逻辑 | `internal/tasks/scheduler_observability.go` |
 
 ## 7. 本章小结
 
