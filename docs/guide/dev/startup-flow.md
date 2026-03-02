@@ -157,8 +157,8 @@ func Run(ctx context.Context, cfg *config.Config) error {
     // 3. 创建 Scheduler
     schedulerOpts := []tasks.Option{
         tasks.WithStore(store),
-        tasks.WithLeaseManager(leaseManager),
-        tasks.WithUploader(uploader),
+        tasks.WithClusterLeaseManager(leaseManager),
+        tasks.WithFileUploader(uploader),
         // ...
     }
     scheduler := tasks.NewScheduler(schedulerOpts...)
