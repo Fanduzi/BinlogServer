@@ -43,6 +43,8 @@ config warning: key "meta_dsn" appears to contain plaintext sensitive value; pre
 - `meta_dsn` - 元数据库连接串
 - `upload.access_key` - 对象存储 Access Key
 - `upload.secret_key` - 对象存储 Secret Key
+- `api.auth.bearer_token` - API Bearer Token
+- `api.auth.api_key` - API Key
 
 ## 2. 完整配置示例
 
@@ -78,6 +80,30 @@ upload:
   region: ""
   prefix: ""
   use_ssl: false
+
+# API 鉴权配置
+api:
+  auth:
+    enabled: false             # 是否启用鉴权（默认不启用）
+    mode: "bearer"             # 鉴权模式：bearer | api_key
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
+    api_key: ""
+    api_key_header: "X-API-Key"
+    protect_api: false         # 是否保护 /api/* 路由
+    protect_metrics: false     # 是否保护 /metrics 路由
+
+# HTTP 超时配置
+http:
+  control_plane:               # control-plane API 服务超时
+    read_header_timeout_sec: 5
+    read_timeout_sec: 30
+    write_timeout_sec: 30
+    idle_timeout_sec: 120
+  worker_health:               # worker 健康检查服务超时
+    read_header_timeout_sec: 3
+    read_timeout_sec: 10
+    write_timeout_sec: 10
+    idle_timeout_sec: 30
 
 # 日志配置
 log:
@@ -270,6 +296,165 @@ export BINLOG_SERVER_LOG_MAX_AGE_DAYS="60"
 export BINLOG_SERVER_LOG_COMPRESS="true"
 export BINLOG_SERVER_LOG_ROTATE_INTERVAL="12h"
 ```
+
+### 3.6 API 鉴权配置
+
+**默认行为：API 不启用鉴权保护。**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api.auth.enabled` | bool | false | 是否启用鉴权 |
+| `api.auth.mode` | string | bearer | 鉴权模式：bearer / api_key |
+| `api.auth.bearer_token` | string | - | Bearer Token（推荐使用环境变量占位符） |
+| `api.auth.api_key` | string | - | API Key（推荐使用环境变量占位符） |
+| `api.auth.api_key_header` | string | X-API-Key | API Key 所在的请求头名称 |
+| `api.auth.protect_api` | bool | false | 是否保护 `/api/*` 路由 |
+| `api.auth.protect_metrics` | bool | false | 是否保护 `/metrics` 路由 |
+
+**鉴权模式说明：**
+
+| 模式 | 客户端使用方式 | 适用场景 |
+|------|--------------|----------|
+| `bearer` | `Authorization: Bearer <token>` | OAuth 兼容、标准 JWT 场景 |
+| `api_key` | `X-API-Key: <key>`（可自定义头名） | 简单服务间调用 |
+
+**保护范围：**
+
+| 路由 | 默认状态 | `protect_api=true` | `protect_metrics=true` |
+|------|---------|-------------------|----------------------|
+| `/healthz` | 不保护 | 不保护 | 不保护 |
+| `/metrics` | 不保护 | 不保护 | **需要鉴权** |
+| `/api/*` | 不保护 | **需要鉴权** | - |
+| `/swagger/*` | 不保护 | 不保护 | 不保护 |
+| `/ui/*` | 不保护 | 不保护 | 不保护 |
+
+**开发环境配置（默认，无鉴权）：**
+
+```yaml
+api:
+  auth:
+    enabled: false
+    protect_api: false
+    protect_metrics: false
+```
+
+**生产环境配置（启用鉴权）：**
+
+```yaml
+api:
+  auth:
+    enabled: true
+    mode: "bearer"
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
+    protect_api: true
+    protect_metrics: true
+```
+
+```bash
+# 设置环境变量
+export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="your-secure-token-here"
+```
+
+**使用 Bearer Token 调用 API：**
+
+```bash
+curl -H "Authorization: Bearer your-secure-token-here" \
+  http://localhost:8080/api/tasks
+```
+
+**使用 API Key 调用 API：**
+
+```yaml
+# 配置
+api:
+  auth:
+    enabled: true
+    mode: "api_key"
+    api_key: "${BINLOG_SERVER_API_AUTH_API_KEY}"
+    api_key_header: "X-API-Key"
+    protect_api: true
+```
+
+```bash
+# 调用
+curl -H "X-API-Key: your-api-key-here" \
+  http://localhost:8080/api/tasks
+```
+
+**配置验证规则：**
+
+- `enabled=false` 时，`protect_api` 和 `protect_metrics` 必须为 `false`（否则启动报错）
+- `enabled=true` 且启用保护时，必须配置对应的凭证（`bearer_token` 或 `api_key`）
+- `mode` 只能是 `bearer` 或 `api_key`
+
+### 3.7 HTTP 超时配置
+
+HTTP 超时配置用于防止慢连接拖垮服务，**两个独立的 HTTP 服务**各有独立配置：
+
+| 服务 | 配置块 | 监听地址 | 用途 |
+|------|--------|---------|------|
+| Control Plane | `http.control_plane` | `listen_addr` | API/UI/Swagger/Metrics |
+| Worker Health | `http.worker_health` | `cluster.worker_health_listen_addr` | 健康检查（仅 worker 角色） |
+
+**超时参数说明：**
+
+| 参数 | 默认值（Control Plane） | 默认值（Worker Health） | 说明 |
+|------|----------------------|----------------------|------|
+| `read_header_timeout_sec` | 5 | 3 | 读取请求头的超时（秒） |
+| `read_timeout_sec` | 30 | 10 | 读取整个请求体的超时（秒） |
+| `write_timeout_sec` | 30 | 10 | 写入响应的超时（秒） |
+| `idle_timeout_sec` | 120 | 30 | Keep-Alive 连接空闲超时（秒） |
+
+**超时参数的意义：**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      HTTP 请求生命周期                           │
+│                                                                 │
+│  客户端 ──────► 建立连接 ──────► 发送请求头 ──────► 发送请求体    │
+│                    │                 │                  │       │
+│                    │                 │                  │       │
+│                    │                 ▼                  ▼       │
+│                    │         ReadHeaderTimeout    ReadTimeout   │
+│                    │                                        │    │
+│                    ▼                                        ▼    │
+│               IdleTimeout                           WriteTimeout │
+│              (Keep-Alive)                              (响应)    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**推荐配置：**
+
+```yaml
+http:
+  control_plane:
+    read_header_timeout_sec: 5    # 防止慢速攻击
+    read_timeout_sec: 30          # 允许较大请求体
+    write_timeout_sec: 30         # 允许较大响应
+    idle_timeout_sec: 120         # 支持连接复用
+  worker_health:
+    read_header_timeout_sec: 3    # 健康检查要求快速响应
+    read_timeout_sec: 10
+    write_timeout_sec: 10
+    idle_timeout_sec: 30          # 健康检查不需要长连接复用
+```
+
+**环境变量：**
+
+```bash
+export BINLOG_SERVER_HTTP_CONTROL_PLANE_READ_TIMEOUT_SEC="60"
+export BINLOG_SERVER_HTTP_CONTROL_PLANE_WRITE_TIMEOUT_SEC="60"
+export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
+```
+
+**为什么需要超时配置？**
+
+| 问题 | 没有超时 | 有超时 |
+|------|---------|--------|
+| 慢速攻击（Slowloris） | 连接堆积，耗尽资源 | `ReadHeaderTimeout` 快速断开 |
+| 大文件上传阻塞 | 长时间占用连接 | `ReadTimeout` 限制时间 |
+| 慢客户端阻塞响应 | 其他请求排队 | `WriteTimeout` 释放连接 |
+| 空闲连接占用 | 连接池耗尽 | `IdleTimeout` 回收连接 |
 
 ## 4. 任务配置参数
 
@@ -520,6 +705,12 @@ data:
 | `worker_id is already in use: <worker-id>` | 同一 `worker_id` 被其他活跃实例占用 |
 | `storage.retention_days must be 1-3650` | 保留天数超出范围 |
 | `invalid cluster_key format` | cluster_key 包含非法字符 |
+| `api.auth.enabled=false cannot protect api or metrics routes` | `enabled=false` 但 `protect_api` 或 `protect_metrics` 为 `true` |
+| `api.auth.bearer_token is required when protection is enabled` | 启用保护但未配置 `bearer_token` |
+| `api.auth.api_key is required when protection is enabled` | 启用保护但未配置 `api_key` |
+| `api.auth.mode must be bearer or api_key` | `mode` 值非法 |
+| `http.control_plane.read_timeout_sec must be > 0` | 超时参数必须大于 0 |
+| `http.worker_health.read_header_timeout_sec must be > 0` | 超时参数必须大于 0 |
 
 ## 7. 下一步
 

@@ -271,8 +271,8 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, taskID, workerID string,
 |------|----------|
 | LeaseStore 接口 | `internal/meta/lease_store.go` |
 | LeaseStore 实现 | `internal/meta/lease_store.go` |
-| 续租循环 | `internal/tasks/scheduler.go` (renewLeaseLoop) |
-| 降级处理 | `internal/tasks/scheduler.go` |
+| 续租循环 | `internal/tasks/scheduler_cluster_lease.go` |
+| 降级处理 | `internal/tasks/scheduler_cluster_lease.go` |
 
 ## 7. 本章小结
 

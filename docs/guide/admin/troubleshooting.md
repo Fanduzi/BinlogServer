@@ -54,6 +54,90 @@
 | `server_uuid mismatch` | server_id 冲突 | 检查 server_id 配置 |
 | `lease acquire failed` | 租约被其他 worker 持有 | 正常现象，或检查是否有重复 worker |
 | `checkpoint save failed` | 无法保存位点 | 检查元数据库连接 |
+| `api.auth.enabled=false cannot protect` | 鉴权未启用但尝试保护路由 | 设置 `api.auth.enabled=true` 或关闭保护 |
+| `bearer_token is required when protection is enabled` | 启用保护但未配置凭证 | 配置 `bearer_token` 或 `api_key` |
+| `http.*.read_timeout_sec must be > 0` | 超时参数配置非法 | 确保所有超时参数 > 0 |
+
+### 2.4 API 鉴权错误
+
+当启用 API 鉴权后，请求可能返回以下错误：
+
+| HTTP 状态码 | 场景 | 原因 | 解决方案 |
+|------------|------|------|----------|
+| 401 Unauthorized | Bearer 模式 | 缺少 `Authorization` 头 | 添加 `Authorization: Bearer <token>` |
+| 401 Unauthorized | API Key 模式 | 缺少 API Key 头 | 添加对应的请求头（如 `X-API-Key: <key>`） |
+| 403 Forbidden | Bearer 模式 | Token 格式错误（无 `Bearer ` 前缀） | 确保格式为 `Bearer <token>` |
+| 403 Forbidden | 任意模式 | 凭证不匹配 | 检查 Token/API Key 是否正确 |
+
+**排查步骤：**
+
+```bash
+# 1. 确认鉴权配置
+curl http://localhost:8080/api/healthz  # 健康检查始终不需要鉴权
+
+# 2. 测试 Bearer Token
+curl -H "Authorization: Bearer your-token" \
+  http://localhost:8080/api/tasks
+
+# 3. 测试 API Key
+curl -H "X-API-Key: your-api-key" \
+  http://localhost:8080/api/tasks
+
+# 4. 查看服务日志确认鉴权配置生效
+# 日志中会显示 api.auth.enabled=true
+```
+
+**常见配置错误：**
+
+```yaml
+# 错误：enabled=false 但 protect_api=true
+api:
+  auth:
+    enabled: false
+    protect_api: true  # ❌ 启动报错
+
+# 正确：要么启用鉴权，要么关闭保护
+api:
+  auth:
+    enabled: true
+    protect_api: true  # ✅
+```
+
+### 2.5 HTTP 超时问题
+
+当客户端遇到连接超时或断开时，可能是 HTTP 超时配置问题：
+
+| 症状 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| 大请求返回 408/超时 | `read_timeout_sec` 过小 | 增大 `http.control_plane.read_timeout_sec` |
+| 大响应被截断 | `write_timeout_sec` 过小 | 增大 `http.control_plane.write_timeout_sec` |
+| 连接频繁重建 | `idle_timeout_sec` 过小 | 增大 `idle_timeout_sec` |
+| 慢客户端攻击 | 无 `read_header_timeout_sec` | 确保 > 0（默认 5 秒） |
+
+**排查步骤：**
+
+```bash
+# 1. 检查当前超时配置
+# 查看配置文件或环境变量
+
+# 2. 测试慢请求
+time curl -X POST http://localhost:8080/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test","cluster_key":"test","source":{"host":"10.0.0.1","port":3306,"user":"repl","password":"secret"},"start":{"mode":"LATEST"}}'
+
+# 3. 检查服务端日志是否有超时断开记录
+```
+
+**生产环境推荐值：**
+
+```yaml
+http:
+  control_plane:
+    read_header_timeout_sec: 5
+    read_timeout_sec: 60       # 大任务创建可能需要更长时间
+    write_timeout_sec: 60      # 大响应（如文件列表）可能需要更长时间
+    idle_timeout_sec: 120
+```
 
 ## 3. API 诊断
 

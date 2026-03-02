@@ -192,7 +192,7 @@ func main() {
 | 组件 | 代码位置 |
 |------|----------|
 | API Server | `internal/api/server.go` |
-| Scheduler | `internal/tasks/scheduler.go` |
+| Scheduler | `internal/tasks/scheduler*.go` |
 | Runner | `internal/replication/mysql_runner.go` |
 | 任务模型 | `internal/tasks/model.go` |
 
