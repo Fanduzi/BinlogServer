@@ -11,3 +11,4 @@ tmp/e2e/data/
 /.tool-versions
 /logs/
 /tmp/
+/.worktrees/
