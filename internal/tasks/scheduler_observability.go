@@ -87,7 +87,9 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 
 	// Step 1: 内存未命中时，从 store 同步一次任务视图。
 	if !ok && store != nil {
-		list, err := store.ListTasks(context.Background())
+		readCtx, cancel := s.withReadTimeout(ctx)
+		list, err := store.ListTasks(readCtx)
+		cancel()
 		if err != nil {
 			return binlog.Checkpoint{}, false, err
 		}
@@ -124,7 +126,10 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	}
 	if s.eventStore != nil {
 		// 优先读持久化事件，避免重启后只看到内存中的事件片段。
-		return s.eventStore.ListEvents(context.Background(), taskID, limit)
+		ctx, cancel := s.withReadTimeout(context.Background())
+		events, err := s.eventStore.ListEvents(ctx, taskID, limit)
+		cancel()
+		return events, err
 	}
 	events := s.events[taskID]
 	if limit <= 0 || limit >= len(events) {
@@ -148,7 +153,10 @@ func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 	if s.fileStore == nil {
 		return []BinlogFile{}, nil
 	}
-	return s.fileStore.ListBinlogFiles(context.Background(), taskID, limit)
+	ctx, cancel := s.withReadTimeout(context.Background())
+	files, err := s.fileStore.ListBinlogFiles(ctx, taskID, limit)
+	cancel()
+	return files, err
 }
 
 // RetryFailedUploads 手动重试失败上传（仅 sealed 且状态为 UPLOAD_FAILED）。
@@ -171,7 +179,10 @@ func (s *Scheduler) ListRuns(taskID string, limit int) ([]TaskRun, error) {
 	}
 
 	if reader, ok := store.(taskRunReader); ok {
-		return reader.ListTaskRuns(context.Background(), taskID, limit)
+		ctx, cancel := s.withReadTimeout(context.Background())
+		runs, err := reader.ListTaskRuns(ctx, taskID, limit)
+		cancel()
+		return runs, err
 	}
 
 	if task.RunID == "" {
@@ -202,7 +213,10 @@ func (s *Scheduler) ListWorkerHeartbeats(limit int) ([]WorkerHeartbeat, error) {
 	s.mu.Unlock()
 
 	if reader, ok := store.(workerHeartbeatReader); ok {
-		return reader.ListWorkerHeartbeats(context.Background(), limit)
+		ctx, cancel := s.withReadTimeout(context.Background())
+		items, err := reader.ListWorkerHeartbeats(ctx, limit)
+		cancel()
+		return items, err
 	}
 	return []WorkerHeartbeat{}, nil
 }

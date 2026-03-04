@@ -93,7 +93,10 @@ func (a *App) Run(ctx context.Context) error {
 		// 如果配置了 metadata DB，把它同时注入 scheduler（control plane）
 		// 和 runner（data plane 的 checkpoint/file metadata）。
 		var err error
-		mysqlStore, err = meta.NewMySQLTaskStore(a.cfg.MetaDSN)
+		mysqlStore, err = meta.NewMySQLTaskStoreWithSchemaTimeout(
+			a.cfg.MetaDSN,
+			time.Duration(a.cfg.Meta.Timeout.WriteSec)*time.Second,
+		)
 		if err != nil {
 			return err
 		}
@@ -106,6 +109,13 @@ func (a *App) Run(ctx context.Context) error {
 		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
 		leaseStore = meta.NewLeaseStoreFromTaskStore(mysqlStore)
 	}
+
+	opts = append(opts, tasks.WithInternalCallTimeouts(tasks.InternalCallTimeouts{
+		Read:   time.Duration(a.cfg.Meta.Timeout.ReadSec) * time.Second,
+		Write:  time.Duration(a.cfg.Meta.Timeout.WriteSec) * time.Second,
+		Lease:  time.Duration(a.cfg.Meta.Timeout.LeaseSec) * time.Second,
+		Upload: time.Duration(a.cfg.Meta.Timeout.UploadSec) * time.Second,
+	}))
 
 	if workerEnabled && isClusterMode(a.cfg) && mysqlStore != nil {
 		// 注册语义：同一 worker_id 在同一时刻只能被一个活跃会话占用。
@@ -198,7 +208,9 @@ func (a *App) Run(ctx context.Context) error {
 		scheduler.SetRunner(runner)
 	}
 	// Restore 必须在对外服务前执行，保证 API 看到的是恢复后的稳定状态。
-	if err := scheduler.Restore(context.Background()); err != nil {
+	restoreCtx, cancelRestore := context.WithTimeout(runCtx, time.Duration(a.cfg.Meta.Timeout.ReadSec)*time.Second)
+	defer cancelRestore()
+	if err := scheduler.Restore(restoreCtx); err != nil {
 		return err
 	}
 	if workerEnabled && isClusterMode(a.cfg) {
