@@ -5,42 +5,19 @@
 
 ---
 
-## 通用要求（每个阶段都要附带）
+## 通用调度头（每个阶段都要附带）
 
 ```text
 你在仓库 /Users/fan/GolangProjects/BinlogServer 工作。
 请仅执行本阶段任务，不跨阶段“顺手重构”。
+Apply repository skill: task-delivery-guardrails.
+Enforce all constraints, verification gates, and delivery artifacts defined in:
+.agents/skills/task-delivery-guardrails/SKILL.md
 
-全局约束：
-1) 不修改 docs/guide/*（该目录由 Claude 负责）。
-2) 不改变对外行为语义（状态码、核心错误语义、状态机流程）。
-3) 每次变更保持最小闭环，先测后改，最后回归。
-4) 三层文档协议：至少同步受影响模块 README 与必要 L3 头注释。
-5) 必须使用独立分支 + 独立 worktree 开发，不在 main 工作目录直接改代码。
-   - 分支命名建议：hardening/pX-*
-   - 需在交付物中提供 `git branch --show-current` 与 `git worktree list` 摘要作为证明。
-
-阶段验收命令（必须全部通过）：
-- go test ./...
-- go test -race ./internal/tasks ./internal/api ./internal/replication
-- go vet ./...
-- make e2e-quick
-
-交付物（必须包含）：
-1) commit hash（按顺序）
-2) git show --stat --name-only <hash范围> 摘要
-3) 代码变更清单 + 测试变更清单
-4) 配置变更（若有）与兼容性说明
-5) 回滚命令（git revert 级别）
-6) 未决事项
-7) 分支/worktree 证明：`git branch --show-current` + `git worktree list` 摘要
-
-回滚后验证（必须执行）：
-- git revert <target_commit>
-- go test ./...
-- go test -race ./internal/tasks ./internal/api ./internal/replication
-- go vet ./...
-- make e2e-quick
+补充约束（本计划特有）：
+1) docs/guide/* 由 Claude 负责；除非本阶段明确要求，否则不要修改。
+2) 除非本阶段明确声明，保持对外行为语义不变。
+3) 默认使用独立分支 + 独立 worktree（除非 reviewer 明确豁免）。
 ```
 
 ---
@@ -48,7 +25,7 @@
 ## P0 Prompt（Baseline & Guardrails）
 
 ```text
-在遵循“通用要求”的前提下，执行 P0：基线固化与回归保护。
+在遵循“通用调度头”的前提下，执行 P0：基线固化与回归保护。
 
 任务：
 1) 整理统一验证入口（脚本或明确命令集合）覆盖 test/race/vet/e2e-quick。
@@ -63,6 +40,7 @@
 
 注意：
 - P0 不做业务逻辑改动。
+- 验证层级：Full（若要降级，需 reviewer 明确批准）。
 ```
 
 ---
@@ -70,7 +48,7 @@
 ## P1 Prompt（Context Timeout Hardening）
 
 ```text
-在遵循“通用要求”的前提下，执行 P1：内部调用超时边界治理。
+在遵循“通用调度头”的前提下，执行 P1：内部调用超时边界治理。
 
 任务：
 1) 盘点 internal/tasks 与 internal/meta 中无界 context.Background() 调用，按读/写/lease/上传分类。
@@ -83,6 +61,7 @@
 
 验收额外要求：
 - 提交“调用点盘点表”（改前/改后）与配置项说明。
+- 验证层级：Full（若要降级，需 reviewer 明确批准）。
 ```
 
 ---
@@ -90,7 +69,7 @@
 ## P2 Prompt（Retry Standardization）
 
 ```text
-在遵循“通用要求”的前提下，执行 P2：重试策略标准化。
+在遵循“通用调度头”的前提下，执行 P2：重试策略标准化。
 
 任务：
 1) 先补行为对齐测试：transient 重试、permanent 直返、context cancel/deadline 终止、max retries/jitter。
@@ -116,6 +95,7 @@ type Policy struct {
 
 验收额外要求：
 - 提供“旧实现 vs 新实现”的行为对照摘要。
+- 验证层级：Full（若要降级，需 reviewer 明确批准）。
 ```
 
 ---
@@ -123,7 +103,7 @@ type Policy struct {
 ## P3 Prompt（SQL Access Governance Decision Gate）
 
 ```text
-在遵循“通用要求”的前提下，执行 P3：SQL 访问层治理决策与试点。
+在遵循“通用调度头”的前提下，执行 P3：SQL 访问层治理决策与试点。
 
 先做决策评估（必须）：
 1) 输出复杂度评估：SQL 数量、手写 Scan 点位、事务/复杂语句分布。
@@ -150,6 +130,7 @@ type Policy struct {
 验收额外要求：
 - 输出“决策报告 + 试点结果”，并给出是否继续扩展到 mysql_store 主体的建议。
 - 若执行 sqlc 路线，附 make sqlc-generate / make sqlc-verify 的结果摘要。
+- 验证层级：Full（若要降级，需 reviewer 明确批准）。
 ```
 
 ---
@@ -157,7 +138,7 @@ type Policy struct {
 ## P4 Prompt（API Validation Unification）
 
 ```text
-在遵循“通用要求”的前提下，执行 P4：API 参数校验统一。
+在遵循“通用调度头”的前提下，执行 P4：API 参数校验统一。
 
 任务：
 1) 选 2-3 个高频接口试点，使用 Gin binding + validator 替代重复 parse/if。
@@ -167,6 +148,7 @@ type Policy struct {
 
 验收额外要求：
 - 提供“旧错误响应 vs 新错误响应”兼容性对照。
+- 验证层级：Full（若要降级，需 reviewer 明确批准）。
 ```
 
 ---
@@ -174,7 +156,7 @@ type Policy struct {
 ## P5a Prompt（Prometheus Upgrade）
 
 ```text
-在遵循“通用要求”的前提下，执行 P5a：Prometheus 指标升级。
+在遵循“通用调度头”的前提下，执行 P5a：Prometheus 指标升级。
 
 任务：
 1) 用 prometheus/client_golang 实现指标采集与输出。
@@ -184,6 +166,7 @@ type Policy struct {
 
 验收额外要求：
 - 输出“兼容性清单”：保留指标、变更指标、新增指标。
+- 验证层级：Full（若要降级，需 reviewer 明确批准）。
 ```
 
 ---
@@ -191,7 +174,7 @@ type Policy struct {
 ## P5b Prompt（OTel Basic Tracing）
 
 ```text
-在遵循“通用要求”的前提下，执行 P5b：OTel 基础 tracing。
+在遵循“通用调度头”的前提下，执行 P5b：OTel 基础 tracing。
 
 任务：
 1) 先确定导出策略（默认禁用；推荐 OTLP，Jaeger 可选）。
@@ -203,4 +186,5 @@ type Policy struct {
 验收额外要求：
 - 明确“默认关闭时零影响”的证据。
 - 给出最小启用配置示例（不写 docs/guide，只写模块说明或注释）。
+- 验证层级：Full（若要降级，需 reviewer 明确批准）。
 ```

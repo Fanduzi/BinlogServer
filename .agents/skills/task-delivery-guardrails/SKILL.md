@@ -1,14 +1,25 @@
 ---
-name: phase-execution-guardrails
-description: Repository-level guardrails for execution quality, verification, and delivery completeness
+name: task-delivery-guardrails
+description: Repository-level guardrails for task delivery quality, verification, and completion artifacts
 ---
 
-# Phase Execution Guardrails
+# Task Delivery Guardrails
 
 ## When to use
 
 Use this skill when dispatching implementation, refactor, bugfix, reliability, or integration tasks to an execution agent.
 This is a general delivery guardrail skill, not limited to a specific phase plan.
+
+## Responsibility boundary
+
+Use this file as the single source of truth for:
+1. Non-negotiable constraints
+2. Verification gate selection (Minimal/Standard/Full)
+3. Required delivery artifacts
+4. Rollback validation policy
+
+`docs/develop/plans/*phase-prompts.md` should only define phase-specific work items and phase-specific acceptance additions.
+Do not duplicate full guardrail rules in phase prompt docs.
 
 ## Non-negotiable constraints
 
@@ -82,12 +93,67 @@ When rollback verification is required, validate with:
 4. `go vet ./...`
 5. `make e2e-quick`
 
+## Review output contract
+
+After each review, always provide two blocks:
+
+1. `Review Verdict` (for reviewer/user)
+2. `Worker Prompt` (copy-paste instructions for execution agent)
+
+### Review Verdict format
+
+1. Merge decision: `approved` or `changes_required`
+2. Findings ordered by severity (`P0`, `P1`, `P2`) with file references
+3. Risk/impact statement (behavioral, compatibility, operational)
+4. Optional nits/non-blocking suggestions
+
+### Worker Prompt format
+
+Must include:
+1. Scope and constraints (`only this stage`, `no unrelated refactor`)
+2. Mandatory fix list with target files and expected behavior
+3. Explicit forbidden changes (if needed)
+4. Verification commands (selected by gate tier)
+5. Delivery artifacts required by this skill
+
+Template:
+
+```text
+Apply repository skill: task-delivery-guardrails.
+Work only on the requested scope; do not perform unrelated refactors.
+
+Objective:
+- <one-sentence goal>
+
+Mandatory fixes:
+1) <file>: <required change and expected behavior>
+2) <file>: <required change and expected behavior>
+
+Forbidden changes:
+- <if any>
+
+Verification gate:
+- <Minimal|Standard|Full> (reason: <short reason>)
+
+Run and report:
+- <commands from selected gate>
+
+Delivery artifacts:
+1) commit hashes (ordered)
+2) git show --stat --name-only <hash-range>
+3) code-change summary + test-change summary
+4) config compatibility notes (if config changed)
+5) rollback command (git revert <commit>)
+6) unresolved items
+7) branch/worktree proof (`git branch --show-current`, `git worktree list`)
+```
+
 ## Dispatch template
 
 Paste this at the top of any execution dispatch prompt:
 
 ```text
-Apply repository skill: phase-execution-guardrails.
+Apply repository skill: task-delivery-guardrails.
 Enforce all constraints, verification gates, and delivery artifacts defined in:
-.agents/skills/phase-execution-guardrails/SKILL.md
+.agents/skills/task-delivery-guardrails/SKILL.md
 ```
