@@ -16,6 +16,9 @@
 2) 不改变对外行为语义（状态码、核心错误语义、状态机流程）。
 3) 每次变更保持最小闭环，先测后改，最后回归。
 4) 三层文档协议：至少同步受影响模块 README 与必要 L3 头注释。
+5) 必须使用独立分支 + 独立 worktree 开发，不在 main 工作目录直接改代码。
+   - 分支命名建议：hardening/pX-*
+   - 需在交付物中提供 `git branch --show-current` 与 `git worktree list` 摘要作为证明。
 
 阶段验收命令（必须全部通过）：
 - go test ./...
@@ -30,6 +33,7 @@
 4) 配置变更（若有）与兼容性说明
 5) 回滚命令（git revert 级别）
 6) 未决事项
+7) 分支/worktree 证明：`git branch --show-current` + `git worktree list` 摘要
 
 回滚后验证（必须执行）：
 - git revert <target_commit>
