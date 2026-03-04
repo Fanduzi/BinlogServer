@@ -25,6 +25,9 @@ Enforce all constraints, verification gates, and delivery artifacts defined in:
 ## P0 Prompt（Baseline & Guardrails）
 
 ```text
+Apply repository skill: task-delivery-guardrails.
+严格按 docs/develop/plans/2026-03-02-foundation-hardening-phase-prompts.md 的 P0 Prompt 执行，只做 P0 范围。
+
 在遵循“通用调度头”的前提下，执行 P0：基线固化与回归保护。
 
 任务：
@@ -48,6 +51,9 @@ Enforce all constraints, verification gates, and delivery artifacts defined in:
 ## P1 Prompt（Context Timeout Hardening）
 
 ```text
+Apply repository skill: task-delivery-guardrails.
+严格按 docs/develop/plans/2026-03-02-foundation-hardening-phase-prompts.md 的 P1 Prompt 执行，只做 P1 范围。
+
 在遵循“通用调度头”的前提下，执行 P1：内部调用超时边界治理。
 
 任务：
@@ -68,7 +74,10 @@ Enforce all constraints, verification gates, and delivery artifacts defined in:
 
 ## P2 Prompt（Retry Standardization）
 
-```text
+````text
+Apply repository skill: task-delivery-guardrails.
+严格按 docs/develop/plans/2026-03-02-foundation-hardening-phase-prompts.md 的 P2 Prompt 执行，只做 P2 范围。
+
 在遵循“通用调度头”的前提下，执行 P2：重试策略标准化。
 
 任务：
@@ -96,13 +105,16 @@ type Policy struct {
 验收额外要求：
 - 提供“旧实现 vs 新实现”的行为对照摘要。
 - 验证层级：Full（若要降级，需 reviewer 明确批准）。
-```
+````
 
 ---
 
 ## P3 Prompt（SQL Access Governance Decision Gate）
 
 ```text
+Apply repository skill: task-delivery-guardrails.
+严格按 docs/develop/plans/2026-03-02-foundation-hardening-phase-prompts.md 的 P3 Prompt 执行，只做 P3 范围。
+
 在遵循“通用调度头”的前提下，执行 P3：SQL 访问层治理决策与试点。
 
 先做决策评估（必须）：
@@ -138,6 +150,9 @@ type Policy struct {
 ## P4 Prompt（API Validation Unification）
 
 ```text
+Apply repository skill: task-delivery-guardrails.
+严格按 docs/develop/plans/2026-03-02-foundation-hardening-phase-prompts.md 的 P4 Prompt 执行，只做 P4 范围。
+
 在遵循“通用调度头”的前提下，执行 P4：API 参数校验统一。
 
 任务：
@@ -156,6 +171,9 @@ type Policy struct {
 ## P5a Prompt（Prometheus Upgrade）
 
 ```text
+Apply repository skill: task-delivery-guardrails.
+严格按 docs/develop/plans/2026-03-02-foundation-hardening-phase-prompts.md 的 P5a Prompt 执行，只做 P5a 范围。
+
 在遵循“通用调度头”的前提下，执行 P5a：Prometheus 指标升级。
 
 任务：
@@ -174,6 +192,9 @@ type Policy struct {
 ## P5b Prompt（OTel Basic Tracing）
 
 ```text
+Apply repository skill: task-delivery-guardrails.
+严格按 docs/develop/plans/2026-03-02-foundation-hardening-phase-prompts.md 的 P5b Prompt 执行，只做 P5b 范围。
+
 在遵循“通用调度头”的前提下，执行 P5b：OTel 基础 tracing。
 
 任务：
