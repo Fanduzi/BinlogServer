@@ -72,6 +72,7 @@
    - `internal/tasks/*` 调用 `store/eventStore/fileStore/leaseManager/uploader` 的路径。
    - `internal/meta/*` 长耗时 DB 路径。
 2. 先盘点现有 `context.Background()` 用法并按操作分类（读/写/lease/上传）。
+   - 建议命令：`rg -n "context.Background\\(" internal/`
 3. 明确与现有 `http.control_plane.*` / `http.worker_health.*` 的关系：
    - HTTP 超时仅控制入站连接层；
    - 本阶段新增的是内部依赖调用超时（存储/租约/上传），不得混淆。
@@ -149,6 +150,10 @@
    - 可选：`make generate` 聚合所有生成步骤。
 5. 将 `make sqlc-verify` 接入 CI（至少在 SQL/schema 相关变更时执行）。
 6. 评估是否扩展到 `mysql_store` 主体（按收益/风险决定，并给出优先级顺序）。
+7. 明确 `internal/meta/mysql_store.go` 的迁移优先级建议：
+   - P3 首先迁移 `lease_store`（高风险高收益）
+   - 其次 `task_runs + worker_heartbeats`（中等复杂度）
+   - 最后评估 `mysql_store` 主体（体量大，需拆子域逐步推进）
 
 **任务分解（若选 gorm 路线）**
 1. 建立 PoC，仅覆盖单一读接口。
@@ -185,6 +190,7 @@
 1. 试点接口手写校验显著减少，错误返回语义不变。
 2. `internal/api` 新增针对 binding/validator 的单测覆盖。
 3. Swagger 描述与实际校验一致（抽样核对关键接口）。
+   - 对关键接口执行“注解参数约束 vs validator 标签”逐项核对并记录差异。
 4. `config.example.yaml` 兼容性不受影响。
 5. `test/race/vet` 全绿。
 6. `make e2e-quick` 全绿。
@@ -226,6 +232,7 @@
 1. 确定导出策略：
    - 默认禁用（开发手动开启）；
    - 首选 OTLP（http/grpc 二选一），Jaeger 作为兼容选项。
+   - 在阶段评审中明确导出器决策：`otlp-http` / `otlp-grpc` / `jaeger` / `disabled`。
 2. HTTP 入站与元数据存储调用接入基础 span。
 3. 配置采样率和开关，避免默认高开销。
 4. 做开销对比（至少给出请求路径级别的 before/after）。

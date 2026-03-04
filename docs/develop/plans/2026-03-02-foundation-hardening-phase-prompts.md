@@ -30,6 +30,13 @@
 4) 配置变更（若有）与兼容性说明
 5) 回滚命令（git revert 级别）
 6) 未决事项
+
+回滚后验证（必须执行）：
+- git revert <target_commit>
+- go test ./...
+- go test -race ./internal/tasks ./internal/api ./internal/replication
+- go vet ./...
+- make e2e-quick
 ```
 
 ---
@@ -85,6 +92,21 @@
 3) 替换 internal/meta/retry.go 自研实现，保持错误语义一致。
 4) 保持对现有调用方的最小侵入改造。
 
+适配层接口草图（可调整命名，但语义保持）：
+```go
+type RetryExecutor interface {
+    Do(ctx context.Context, policy Policy, fn func() error) error
+}
+
+type Policy struct {
+    BaseDelay  time.Duration
+    MaxDelay   time.Duration
+    MaxRetries int
+    Jitter     float64
+    IsTransient func(error) bool
+}
+```
+
 验收额外要求：
 - 提供“旧实现 vs 新实现”的行为对照摘要。
 ```
@@ -109,6 +131,10 @@
    - make sqlc-generate
    - make sqlc-verify（生成后 git diff --exit-code）
 5) CI 接入 make sqlc-verify（至少 SQL/schema 相关改动必须执行）。
+6) 输出 sqlc 所需 SQL 签名/queries 组织方案（用于 sqlc.yaml/sqlc.json），至少包含：
+   - lease 相关 query 名称与参数/返回结构
+   - task_runs/worker_heartbeats 相关 query 名称与参数/返回结构
+   - 生成包路径与调用侧适配方式
 
 若走 gorm 路线：
 1) 仅做单一读接口 PoC，不进入 lease/关键写路径。
