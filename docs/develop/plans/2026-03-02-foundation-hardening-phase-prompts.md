@@ -74,7 +74,9 @@
 
 任务：
 1) 盘点 internal/tasks 与 internal/meta 中无界 context.Background() 调用，按读/写/lease/上传分类。
+   - 建议命令：`rg -n "context.Background\\(" internal/`
 2) 设计并落地内部调用超时配置（建议 config.Meta.* 分层），不要与 http.control_plane/http.worker_health 混淆。
+   - 说明要求：HTTP 超时仅管入站连接；本阶段治理的是内部依赖调用超时。
 3) 将关键路径替换为 context.WithTimeout，并保留上下文取消语义。
 4) 增加超时场景测试（慢存储/卡住依赖）。
 5) 校验 config.example.yaml 兼容性（默认配置可启动，历史配置不崩）。
@@ -93,6 +95,7 @@
 任务：
 1) 先补行为对齐测试：transient 重试、permanent 直返、context cancel/deadline 终止、max retries/jitter。
 2) 引入 cenkalti/backoff/v4（v4.x）并通过适配层封装，禁止业务直接依赖第三方类型。
+   - 依赖固化要求：提交 go.mod/go.sum 变更并说明版本锁定策略。
 3) 替换 internal/meta/retry.go 自研实现，保持错误语义一致。
 4) 保持对现有调用方的最小侵入改造。
 
@@ -192,6 +195,7 @@ type Policy struct {
 
 任务：
 1) 先确定导出策略（默认禁用；推荐 OTLP，Jaeger 可选）。
+   - 必须在阶段评审中明确四选一决策：`otlp-http` / `otlp-grpc` / `jaeger` / `disabled`。
 2) 接入 HTTP 入站 span 与元数据存储调用 span。
 3) 增加采样率与开关配置，确保默认低风险。
 4) 做开销对比（开关关闭/开启）。
