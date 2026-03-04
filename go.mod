@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/gin-gonic/gin v1.11.0
 	github.com/go-mysql-org/go-mysql v1.13.0
 	github.com/go-sql-driver/mysql v1.9.3
