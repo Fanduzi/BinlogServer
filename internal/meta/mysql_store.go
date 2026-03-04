@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/meta/sqlcgen"
 	"binlog_server/internal/tasks"
 
 	mysqlDriver "github.com/go-sql-driver/mysql"
@@ -230,50 +231,69 @@ WHERE task_id = ?
 `
 
 const loadTaskRunStateSQL = `
+-- name: LoadTaskRunState :one
 SELECT run_id
 FROM backup_tasks
-WHERE id = ?;
+WHERE id = ?
 `
 
 const insertTaskRunSQL = `
+-- name: UpsertTaskRun :exec
 INSERT INTO task_runs (run_id, task_id, worker_id, epoch, started_at)
-VALUES (?, ?, ?, ?, ?)
+VALUES (
+  ?,
+  ?,
+  ?,
+  ?,
+  ?
+)
 ON DUPLICATE KEY UPDATE
   task_id = VALUES(task_id),
   worker_id = VALUES(worker_id),
   epoch = VALUES(epoch),
-  started_at = VALUES(started_at);
+  started_at = VALUES(started_at)
 `
 
 const finishTaskRunSQL = `
+-- name: FinishTaskRun :exec
 UPDATE task_runs
 SET ended_at = ?, end_reason = ?
-WHERE run_id = ? AND ended_at IS NULL;
+WHERE run_id = ?
+  AND ended_at IS NULL
 `
 
 const listTaskRunsSQL = `
+-- name: ListTaskRuns :many
 SELECT run_id, task_id, worker_id, epoch, started_at, ended_at, end_reason
 FROM task_runs
 WHERE task_id = ?
 ORDER BY started_at DESC
-LIMIT ?;
+LIMIT ?
 `
 
 const upsertWorkerHeartbeatSQL = `
+-- name: UpsertWorkerHeartbeat :exec
 INSERT INTO worker_heartbeats (worker_id, host, version, last_seen_at, status)
-VALUES (?, ?, ?, ?, ?)
+VALUES (
+  ?,
+  ?,
+  ?,
+  ?,
+  ?
+)
 ON DUPLICATE KEY UPDATE
   host = VALUES(host),
   version = VALUES(version),
   last_seen_at = VALUES(last_seen_at),
-  status = VALUES(status);
+  status = VALUES(status)
 `
 
 const listWorkerHeartbeatsSQL = `
+-- name: ListWorkerHeartbeats :many
 SELECT worker_id, host, version, last_seen_at, status
 FROM worker_heartbeats
 ORDER BY worker_id ASC
-LIMIT ?;
+LIMIT ?
 `
 
 // acquireWorkerRegistrationSQL 以单条 UPSERT 表达“同 session 续租 + 过期接管”语义。
@@ -481,8 +501,9 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	}()
 
 	var previousRunID sql.NullString
-	row := tx.QueryRowContext(ctx, loadTaskRunStateSQL, task.ID)
-	if err := row.Scan(&previousRunID); err != nil && err != sql.ErrNoRows {
+	queries := sqlcgen.New(tx)
+	previousRunID, err = queries.LoadTaskRunState(ctx, task.ID)
+	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
 
@@ -509,27 +530,23 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	previous := strings.TrimSpace(previousRunID.String)
 
 	if currentRunID != "" && currentRunID != previous {
-		if _, err = tx.ExecContext(
-			ctx,
-			insertTaskRunSQL,
-			currentRunID,
-			task.ID,
-			task.OwnerWorkerID,
-			task.Epoch,
-			updatedAt,
-		); err != nil {
+		if err = queries.UpsertTaskRun(ctx, sqlcgen.UpsertTaskRunParams{
+			RunID:     currentRunID,
+			TaskID:    task.ID,
+			WorkerID:  task.OwnerWorkerID,
+			Epoch:     task.Epoch,
+			StartedAt: updatedAt,
+		}); err != nil {
 			return err
 		}
 	}
 
 	if previous != "" && previous != currentRunID {
-		if _, err = tx.ExecContext(
-			ctx,
-			finishTaskRunSQL,
-			updatedAt,
-			inferRunEndReason(task),
-			previous,
-		); err != nil {
+		if err = queries.FinishTaskRun(ctx, sqlcgen.FinishTaskRunParams{
+			EndedAt:   sql.NullTime{Time: updatedAt, Valid: true},
+			EndReason: sql.NullString{String: inferRunEndReason(task), Valid: true},
+			RunID:     previous,
+		}); err != nil {
 			return err
 		}
 	}
@@ -912,38 +929,30 @@ func (s *MySQLTaskStore) ListTaskRuns(ctx context.Context, taskID string, limit 
 		limit = 200
 	}
 
-	rows, err := s.db.QueryContext(ctx, listTaskRunsSQL, taskID, limit)
+	rows, err := sqlcgen.New(s.db).ListTaskRuns(ctx, sqlcgen.ListTaskRunsParams{
+		TaskID: taskID,
+		Limit:  int32(limit),
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var out []tasks.TaskRun
-	for rows.Next() {
-		var item tasks.TaskRun
-		var endedAt sql.NullTime
-		var endReason sql.NullString
-		if err := rows.Scan(
-			&item.RunID,
-			&item.TaskID,
-			&item.WorkerID,
-			&item.Epoch,
-			&item.StartedAt,
-			&endedAt,
-			&endReason,
-		); err != nil {
-			return nil, err
+	out := make([]tasks.TaskRun, 0, len(rows))
+	for _, row := range rows {
+		item := tasks.TaskRun{
+			RunID:     row.RunID,
+			TaskID:    row.TaskID,
+			WorkerID:  row.WorkerID,
+			Epoch:     row.Epoch,
+			StartedAt: row.StartedAt,
 		}
-		if endedAt.Valid {
-			item.EndedAt = endedAt.Time
+		if row.EndedAt.Valid {
+			item.EndedAt = row.EndedAt.Time
 		}
-		if endReason.Valid {
-			item.EndReason = endReason.String
+		if row.EndReason.Valid {
+			item.EndReason = row.EndReason.String
 		}
 		out = append(out, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return out, nil
 }
@@ -968,16 +977,13 @@ func (s *MySQLTaskStore) UpsertWorkerHeartbeat(ctx context.Context, hb tasks.Wor
 	if lastSeenAt.IsZero() {
 		lastSeenAt = time.Now()
 	}
-	_, err := s.db.ExecContext(
-		ctx,
-		upsertWorkerHeartbeatSQL,
-		hb.WorkerID,
-		hb.Host,
-		hb.Version,
-		lastSeenAt,
-		hb.Status,
-	)
-	return err
+	return sqlcgen.New(s.db).UpsertWorkerHeartbeat(ctx, sqlcgen.UpsertWorkerHeartbeatParams{
+		WorkerID:   hb.WorkerID,
+		Host:       hb.Host,
+		Version:    hb.Version,
+		LastSeenAt: lastSeenAt,
+		Status:     hb.Status,
+	})
 }
 
 // ListWorkerHeartbeats 列出 worker 心跳快照。
@@ -988,28 +994,19 @@ func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([
 	if limit > 200 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, listWorkerHeartbeatsSQL, limit)
+	rows, err := sqlcgen.New(s.db).ListWorkerHeartbeats(ctx, int32(limit))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []tasks.WorkerHeartbeat
-	for rows.Next() {
-		var item tasks.WorkerHeartbeat
-		if err := rows.Scan(
-			&item.WorkerID,
-			&item.Host,
-			&item.Version,
-			&item.LastSeenAt,
-			&item.Status,
-		); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	out := make([]tasks.WorkerHeartbeat, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, tasks.WorkerHeartbeat{
+			WorkerID:   row.WorkerID,
+			Host:       row.Host,
+			Version:    row.Version,
+			LastSeenAt: row.LastSeenAt,
+			Status:     row.Status,
+		})
 	}
 	return out, nil
 }
