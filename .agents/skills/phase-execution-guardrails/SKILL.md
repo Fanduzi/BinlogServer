@@ -78,8 +78,9 @@ When rollback verification is required, validate with:
 
 1. `go test ./...`
 2. `go test -race ./internal/tasks ./internal/api ./internal/replication`
-3. `go vet ./...`
-4. `make e2e-quick`
+3. `go test -race <affected-packages>` (append additional affected packages beyond the default set)
+4. `go vet ./...`
+5. `make e2e-quick`
 
 ## Dispatch template
 
