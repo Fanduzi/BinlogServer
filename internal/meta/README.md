@@ -7,7 +7,7 @@
 
 ## Exports
 - Task/Checkpoint/Event/File/Lease/Run/Worker metadata 存储接口。
-- 启动期 schema 版本与结构校验。
+- 启动期 schema 版本与结构校验（支持 schema 校验超时配置）。
 
 ## Dependencies
 - Upstream: `internal/tasks`, `internal/app`, `internal/replication`。

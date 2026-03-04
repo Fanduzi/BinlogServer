@@ -306,18 +306,26 @@ WHERE worker_id = ?;
 `
 
 type MySQLTaskStore struct {
-	db *sql.DB
+	db            *sql.DB
+	schemaTimeout time.Duration
 }
 
 // NewMySQLTaskStore 创建 MySQL 元数据存储并校验 schema 就绪。
 func NewMySQLTaskStore(dsn string) (*MySQLTaskStore, error) {
+	return NewMySQLTaskStoreWithSchemaTimeout(dsn, 5*time.Second)
+}
+
+// NewMySQLTaskStoreWithSchemaTimeout 创建 MySQL 元数据存储并设置 schema 校验超时。
+func NewMySQLTaskStoreWithSchemaTimeout(dsn string, schemaTimeout time.Duration) (*MySQLTaskStore, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
 
-	store := newMySQLTaskStoreFromDB(db)
-	if err := store.ensureSchema(context.Background()); err != nil {
+	store := newMySQLTaskStoreFromDB(db, schemaTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), store.schemaTimeout)
+	defer cancel()
+	if err := store.ensureSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -325,8 +333,14 @@ func NewMySQLTaskStore(dsn string) (*MySQLTaskStore, error) {
 }
 
 // newMySQLTaskStoreFromDB 基于现有 DB 句柄创建存储实例（用于测试注入）。
-func newMySQLTaskStoreFromDB(db *sql.DB) *MySQLTaskStore {
-	return &MySQLTaskStore{db: db}
+func newMySQLTaskStoreFromDB(db *sql.DB, schemaTimeout time.Duration) *MySQLTaskStore {
+	if schemaTimeout <= 0 {
+		schemaTimeout = 5 * time.Second
+	}
+	return &MySQLTaskStore{
+		db:            db,
+		schemaTimeout: schemaTimeout,
+	}
 }
 
 // Close 关闭底层数据库连接。

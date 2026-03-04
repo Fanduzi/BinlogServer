@@ -79,7 +79,10 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 			continue
 		}
 
-		if err := uploader.UploadFile(context.Background(), taskID, file.FilePath, file.ObjectKey); err != nil {
+		uploadCtx, cancelUpload := s.withUploadTimeout(context.Background())
+		err := uploader.UploadFile(uploadCtx, taskID, file.FilePath, file.ObjectKey)
+		cancelUpload()
+		if err != nil {
 			stats.Failed++
 			_ = s.markRetryUploadFailure(fileStore, file, err.Error())
 			continue
@@ -88,7 +91,10 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 		file.UploadState = "UPLOADED"
 		file.UploadError = ""
 		file.UploadedAt = time.Now()
-		if err := fileStore.UpsertBinlogFile(context.Background(), file); err != nil {
+		writeCtx, cancelWrite := s.withWriteTimeout(context.Background())
+		err = fileStore.UpsertBinlogFile(writeCtx, file)
+		cancelWrite()
+		if err != nil {
 			stats.Failed++
 			continue
 		}
@@ -104,16 +110,25 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 // listRetryUploadCandidates 优先使用“失败文件专用查询”，否则退化到全量查询。
 func (s *Scheduler) listRetryUploadCandidates(taskID string, limit int, fileStore FileStore) ([]BinlogFile, error) {
 	if reader, ok := fileStore.(failedUploadFileReader); ok {
-		return reader.ListFailedUploadBinlogFiles(context.Background(), taskID, limit)
+		ctx, cancel := s.withReadTimeout(context.Background())
+		files, err := reader.ListFailedUploadBinlogFiles(ctx, taskID, limit)
+		cancel()
+		return files, err
 	}
-	return fileStore.ListBinlogFiles(context.Background(), taskID, limit)
+	ctx, cancel := s.withReadTimeout(context.Background())
+	files, err := fileStore.ListBinlogFiles(ctx, taskID, limit)
+	cancel()
+	return files, err
 }
 
 // markRetryUploadFailure 记录单文件补传失败状态和错误原因。
 func (s *Scheduler) markRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) error {
 	file.UploadState = "UPLOAD_FAILED"
 	file.UploadError = reason
-	return fileStore.UpsertBinlogFile(context.Background(), file)
+	ctx, cancel := s.withWriteTimeout(context.Background())
+	err := fileStore.UpsertBinlogFile(ctx, file)
+	cancel()
+	return err
 }
 
 // isSealedFileForRetry 判定文件是否满足补传前提（已 seal 且非 open 文件）。
@@ -140,13 +155,18 @@ func (s *Scheduler) CountUploadFailures() (int64, error) {
 		return 0, nil
 	}
 	if counter, ok := fileStore.(uploadFailureCounter); ok {
-		return counter.CountUploadFailures(context.Background())
+		ctx, cancel := s.withReadTimeout(context.Background())
+		total, err := counter.CountUploadFailures(ctx)
+		cancel()
+		return total, err
 	}
 
 	var total int64
 	const allFilesLimit = int(^uint(0) >> 1)
 	for _, taskID := range taskIDs {
-		files, err := fileStore.ListBinlogFiles(context.Background(), taskID, allFilesLimit)
+		ctx, cancel := s.withReadTimeout(context.Background())
+		files, err := fileStore.ListBinlogFiles(ctx, taskID, allFilesLimit)
+		cancel()
 		if err != nil {
 			continue
 		}
@@ -208,11 +228,16 @@ func (s *Scheduler) ListUploadFailureReasons(taskID string, limit int) ([]Upload
 		return []UploadFailureReason{}, nil
 	}
 	if reader, ok := fileStore.(uploadFailureReasonReader); ok {
-		return reader.ListUploadFailureReasons(context.Background(), taskID, limit)
+		ctx, cancel := s.withReadTimeout(context.Background())
+		reasons, err := reader.ListUploadFailureReasons(ctx, taskID, limit)
+		cancel()
+		return reasons, err
 	}
 
 	const allFilesLimit = int(^uint(0) >> 1)
-	files, err := fileStore.ListBinlogFiles(context.Background(), taskID, allFilesLimit)
+	ctx, cancel := s.withReadTimeout(context.Background())
+	files, err := fileStore.ListBinlogFiles(ctx, taskID, allFilesLimit)
+	cancel()
 	if err != nil {
 		return nil, err
 	}

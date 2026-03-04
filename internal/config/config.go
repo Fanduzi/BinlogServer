@@ -49,6 +49,8 @@ type Config struct {
 
 	// HTTP 是各监听器的超时配置。
 	HTTP HTTPConfig
+	// Meta 是内部依赖调用（存储/lease/上传）的超时配置。
+	Meta MetaConfig
 }
 
 // ClusterConfig 定义 cluster 角色和 lease 参数。
@@ -106,6 +108,19 @@ type HTTPServerTimeoutConfig struct {
 	IdleTimeoutSec       int
 }
 
+// MetaConfig 定义内部调用边界配置。
+type MetaConfig struct {
+	Timeout MetaTimeoutConfig
+}
+
+// MetaTimeoutConfig 定义内部依赖调用超时（秒）。
+type MetaTimeoutConfig struct {
+	ReadSec   int
+	WriteSec  int
+	LeaseSec  int
+	UploadSec int
+}
+
 // LoadConfig 按“默认值 < 配置文件 < 环境变量”顺序加载配置。
 func LoadConfig(path string) (Config, error) {
 	v := viper.New()
@@ -145,6 +160,10 @@ func LoadConfig(path string) (Config, error) {
 	v.SetDefault("http.worker_health.read_timeout_sec", 10)
 	v.SetDefault("http.worker_health.write_timeout_sec", 10)
 	v.SetDefault("http.worker_health.idle_timeout_sec", 30)
+	v.SetDefault("meta.timeout.read_sec", 3)
+	v.SetDefault("meta.timeout.write_sec", 5)
+	v.SetDefault("meta.timeout.lease_sec", 2)
+	v.SetDefault("meta.timeout.upload_sec", 30)
 
 	if path != "" {
 		v.SetConfigFile(path)
@@ -261,6 +280,22 @@ func LoadConfig(path string) (Config, error) {
 				),
 			},
 		},
+		Meta: MetaConfig{
+			Timeout: MetaTimeoutConfig{
+				ReadSec: getInt(v, "meta.timeout.read_sec", "meta_timeout_read_sec"),
+				WriteSec: getInt(
+					v,
+					"meta.timeout.write_sec",
+					"meta_timeout_write_sec",
+				),
+				LeaseSec: getInt(v, "meta.timeout.lease_sec", "meta_timeout_lease_sec"),
+				UploadSec: getInt(
+					v,
+					"meta.timeout.upload_sec",
+					"meta_timeout_upload_sec",
+				),
+			},
+		},
 	}
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
@@ -343,6 +378,9 @@ func validateConfig(cfg Config) error {
 	if err := validateAPIAuthConfig(cfg.API.Auth); err != nil {
 		return err
 	}
+	if err := validateMetaTimeoutConfig("meta.timeout", cfg.Meta.Timeout); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -384,6 +422,22 @@ func validateAPIAuthConfig(cfg APIAuthConfig) error {
 		}
 	default:
 		return fmt.Errorf("api.auth.mode must be bearer or api_key, got %q", cfg.Mode)
+	}
+	return nil
+}
+
+func validateMetaTimeoutConfig(scope string, cfg MetaTimeoutConfig) error {
+	if cfg.ReadSec <= 0 {
+		return fmt.Errorf("%s.read_sec must be > 0", scope)
+	}
+	if cfg.WriteSec <= 0 {
+		return fmt.Errorf("%s.write_sec must be > 0", scope)
+	}
+	if cfg.LeaseSec <= 0 {
+		return fmt.Errorf("%s.lease_sec must be > 0", scope)
+	}
+	if cfg.UploadSec <= 0 {
+		return fmt.Errorf("%s.upload_sec must be > 0", scope)
 	}
 	return nil
 }

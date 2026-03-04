@@ -27,7 +27,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	task := tasks.Task{
 		ID:            "1",
 		Name:          "cluster-a",
@@ -76,7 +76,7 @@ func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	task := tasks.Task{
 		ID:            "1",
 		Name:          "cluster-a",
@@ -125,7 +125,7 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
 
 	rows := sqlmock.NewRows([]string{
@@ -177,7 +177,7 @@ func TestMySQLTaskStore_UpsertCheckpoint(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	cp := binlog.Checkpoint{
 		File: "mysql-bin.000123",
 		Pos:  456,
@@ -203,7 +203,7 @@ func TestMySQLTaskStore_LoadCheckpoint(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
 	rows := sqlmock.NewRows([]string{"file_name", "pos", "gtid_set", "updated_at"}).
 		AddRow("mysql-bin.000123", uint32(456), "", now)
@@ -235,7 +235,7 @@ func TestMySQLTaskStore_DeleteTask(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	mock.ExpectExec(regexp.QuoteMeta(deleteTaskSQL)).
 		WithArgs("1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -256,7 +256,7 @@ func TestMySQLTaskStore_AppendAndListEvents(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	event := tasks.TaskEvent{
 		TaskID:  "1",
 		Type:    "TASK_STARTED",
@@ -302,7 +302,7 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	fileMeta := tasks.BinlogFile{
 		TaskID:      "1",
 		FileName:    "mysql-bin.000001",
@@ -376,7 +376,7 @@ func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	rows := sqlmock.NewRows([]string{
 		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
 		"object_key", "upload_state", "upload_error", "uploaded_at",
@@ -412,7 +412,7 @@ func TestMySQLTaskStore_ListUploadFailureReasons(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
 	rows := sqlmock.NewRows([]string{"upload_error", "uploaded_at", "sealed_at", "created_at"}).
 		AddRow(" network   timeout ", nil, now.Add(-2*time.Minute), now.Add(-4*time.Minute)).
@@ -498,7 +498,7 @@ func TestMySQLTaskStore_EnsureSchemaMissingMigrationTable(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
 		WillReturnError(&mysqlDriver.MySQLError{Number: 1146, Message: "Table 'binlog.schema_migrations' doesn't exist"})
 
@@ -522,7 +522,7 @@ func TestMySQLTaskStore_EnsureSchemaDirtyVersion(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(minRequiredSchemaVersion, true))
 
@@ -546,7 +546,7 @@ func TestMySQLTaskStore_EnsureSchemaValid(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	expectSchemaCheckQueries(mock, nil, nil, nil)
 
 	if err := store.ensureSchema(context.Background()); err != nil {
@@ -565,7 +565,7 @@ func TestMySQLTaskStore_EnsureSchemaMissingColumn(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	expectSchemaCheckQueries(mock, nil, map[string]map[string]bool{
 		"backup_tasks": {"cluster_key": true},
 	}, nil)
@@ -590,7 +590,7 @@ func TestMySQLTaskStore_EnsureSchemaMissingTable(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	expectSchemaCheckQueries(mock, map[string]bool{"binlog_files": true}, nil, nil)
 
 	err = store.ensureSchema(context.Background())
@@ -613,7 +613,7 @@ func TestMySQLTaskStore_ListTaskRuns(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
 	rows := sqlmock.NewRows([]string{
 		"run_id", "task_id", "worker_id", "epoch", "started_at", "ended_at", "end_reason",
@@ -652,7 +652,7 @@ func TestMySQLTaskStore_ListTaskRuns_LimitCappedTo200(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	rows := sqlmock.NewRows([]string{
 		"run_id", "task_id", "worker_id", "epoch", "started_at", "ended_at", "end_reason",
 	})
@@ -681,7 +681,7 @@ func TestMySQLTaskStore_UpsertAndListWorkerHeartbeats(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
 	hb := tasks.WorkerHeartbeat{
 		WorkerID:   "worker-a",
@@ -729,7 +729,7 @@ func TestMySQLTaskStore_AcquireWorkerRegistrationHeldByOtherSession(t *testing.T
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	mock.ExpectExec(regexp.QuoteMeta(acquireWorkerRegistrationSQL)).
 		WithArgs("worker-a", "session-b", durationToMicroseconds(15*time.Second)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -761,7 +761,7 @@ func TestMySQLTaskStore_AcquireWorkerRegistrationSuccessAfterReadBack(t *testing
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	mock.ExpectExec(regexp.QuoteMeta(acquireWorkerRegistrationSQL)).
 		WithArgs("worker-a", "session-a", durationToMicroseconds(15*time.Second)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -793,7 +793,7 @@ func TestMySQLTaskStore_RenewAndReleaseWorkerRegistration(t *testing.T) {
 	}
 	defer db.Close()
 
-	store := newMySQLTaskStoreFromDB(db)
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	mock.ExpectExec(regexp.QuoteMeta(renewWorkerRegistrationSQL)).
 		WithArgs(durationToMicroseconds(12*time.Second), "worker-a", "session-a").
 		WillReturnResult(sqlmock.NewResult(0, 1))
