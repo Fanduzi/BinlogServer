@@ -14,6 +14,8 @@
 ## Exports
 - 任务 CRUD、启动停止、状态推进。
 - 事件记录、文件元信息、上传补偿。
+- `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
+- Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。
 
 ## Dependencies
 - Upstream: `internal/api`, `internal/app`。

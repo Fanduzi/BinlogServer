@@ -35,7 +35,9 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		case <-ticker.C:
 		}
 
-		ok, err := s.leaseManager.Renew(context.Background(), id, workerID, epoch, time.Now(), s.leaseTTL)
+		leaseCtx, cancel := s.withLeaseTimeout(ctx)
+		ok, err := s.leaseManager.Renew(leaseCtx, id, workerID, epoch, time.Now(), s.leaseTTL)
+		cancel()
 		if err == nil && ok {
 			if !degradedSince.IsZero() {
 				// 从降级状态恢复后，清空降级计时并收敛回 RUNNING。

@@ -126,6 +126,14 @@ type uploadFailureReasonReader interface {
 	ListUploadFailureReasons(ctx context.Context, taskID string, limit int) ([]UploadFailureReason, error)
 }
 
+// InternalCallTimeouts 定义 Scheduler 内部依赖调用超时边界。
+type InternalCallTimeouts struct {
+	Read   time.Duration
+	Write  time.Duration
+	Lease  time.Duration
+	Upload time.Duration
+}
+
 // Option 用于配置 Scheduler 的可选注入项。
 type Option func(*Scheduler)
 
@@ -212,6 +220,24 @@ func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
 	}
 }
 
+// WithInternalCallTimeouts 配置内部依赖调用超时（读/写/lease/上传）。
+func WithInternalCallTimeouts(timeout InternalCallTimeouts) Option {
+	return func(s *Scheduler) {
+		if timeout.Read > 0 {
+			s.internalReadTimeout = timeout.Read
+		}
+		if timeout.Write > 0 {
+			s.internalWriteTimeout = timeout.Write
+		}
+		if timeout.Lease > 0 {
+			s.internalLeaseTimeout = timeout.Lease
+		}
+		if timeout.Upload > 0 {
+			s.internalUploadTimeout = timeout.Upload
+		}
+	}
+}
+
 // Scheduler 负责任务配置管理、状态机推进和运行编排。
 type Scheduler struct {
 	mu      sync.Mutex
@@ -226,6 +252,11 @@ type Scheduler struct {
 
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+	// 内部依赖调用超时治理：用于 store/lease/uploader 边界，避免无界阻塞。
+	internalReadTimeout   time.Duration
+	internalWriteTimeout  time.Duration
+	internalLeaseTimeout  time.Duration
+	internalUploadTimeout time.Duration
 
 	// cluster 相关字段：当 leaseManager != nil 时，Scheduler 进入分布式单执行语义。
 	leaseManager       LeaseManager
@@ -255,12 +286,16 @@ func NewScheduler(opts ...Option) *Scheduler {
 		cancels: make(map[string]context.CancelFunc),
 		runs:    make(map[string]chan struct{}),
 
-		retryBaseDelay:     time.Second,
-		retryMaxDelay:      30 * time.Second,
-		leaseTTL:           15 * time.Second,
-		leaseRenewInterval: 5 * time.Second,
-		leaseGrace:         30 * time.Second,
-		retryUploads:       make(map[string]struct{}),
+		retryBaseDelay:        time.Second,
+		retryMaxDelay:         30 * time.Second,
+		leaseTTL:              15 * time.Second,
+		leaseRenewInterval:    5 * time.Second,
+		leaseGrace:            30 * time.Second,
+		retryUploads:          make(map[string]struct{}),
+		internalReadTimeout:   3 * time.Second,
+		internalWriteTimeout:  5 * time.Second,
+		internalLeaseTimeout:  2 * time.Second,
+		internalUploadTimeout: 30 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -283,7 +318,9 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 	}
 	// 避免持锁执行潜在慢 I/O（DB），降低调度锁的阻塞影响。
 	s.mu.Unlock()
-	err := s.store.UpsertTask(context.Background(), task)
+	ctx, cancel := s.withWriteTimeout(context.Background())
+	err := s.store.UpsertTask(ctx, task)
+	cancel()
 	s.mu.Lock()
 	return err
 }
@@ -318,7 +355,9 @@ func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string)
 	s.events[taskID] = append(s.events[taskID], event)
 	if s.eventStore != nil {
 		// 事件落库失败不阻断主流程，保证调度与拉流优先可用。
-		_ = s.eventStore.AppendEvent(context.Background(), event)
+		ctx, cancel := s.withWriteTimeout(context.Background())
+		_ = s.eventStore.AppendEvent(ctx, event)
+		cancel()
 	}
 }
 
@@ -347,7 +386,9 @@ func (s *Scheduler) syncTasksFromStore() error {
 		return nil
 	}
 
-	list, err := store.ListTasks(context.Background())
+	ctx, cancel := s.withReadTimeout(context.Background())
+	list, err := store.ListTasks(ctx)
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -364,6 +405,32 @@ func (s *Scheduler) syncTasksFromStore() error {
 		}
 	}
 	return nil
+}
+
+func (s *Scheduler) withReadTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return withTimeout(parent, s.internalReadTimeout)
+}
+
+func (s *Scheduler) withWriteTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return withTimeout(parent, s.internalWriteTimeout)
+}
+
+func (s *Scheduler) withLeaseTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return withTimeout(parent, s.internalLeaseTimeout)
+}
+
+func (s *Scheduler) withUploadTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return withTimeout(parent, s.internalUploadTimeout)
+}
+
+func withTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 // normalizeAndValidateClusterKey 归一化并校验 cluster_key 合法性。

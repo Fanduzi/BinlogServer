@@ -68,7 +68,9 @@ func (s *Scheduler) StartTask(id string) error {
 
 	// Step 3: worker 执行分支，先 acquire lease，再进入 STARTING。
 	if s.leaseManager != nil {
-		epoch, acquired, err := s.leaseManager.Acquire(context.Background(), id, s.clusterWorkerID, s.leaseTTL)
+		leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
+		epoch, acquired, err := s.leaseManager.Acquire(leaseCtx, id, s.clusterWorkerID, s.leaseTTL)
+		cancelLease()
 		if err != nil {
 			s.mu.Unlock()
 			return err
@@ -130,7 +132,9 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 		return 0, nil
 	}
 
-	list, err := store.ListTasks(context.Background())
+	readCtx, cancelRead := s.withReadTimeout(context.Background())
+	list, err := store.ListTasks(readCtx)
+	cancelRead()
 	if err != nil {
 		return 0, err
 	}
@@ -266,7 +270,10 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		}
 		s.mu.Unlock()
 		if s.leaseManager != nil && releaseOwner != "" && releaseEpoch > 0 {
-			if released, err := s.leaseManager.Release(context.Background(), id, releaseOwner, releaseEpoch); err != nil || !released {
+			releaseCtx, cancelRelease := s.withLeaseTimeout(context.Background())
+			released, err := s.leaseManager.Release(releaseCtx, id, releaseOwner, releaseEpoch)
+			cancelRelease()
+			if err != nil || !released {
 				log.Printf("lease release on run exit failed task=%s owner=%s epoch=%d released=%v err=%v", id, releaseOwner, releaseEpoch, released, err)
 			}
 		}

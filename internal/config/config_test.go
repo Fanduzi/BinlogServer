@@ -85,6 +85,9 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.HTTP.WorkerHealth.ReadHeaderTimeoutSec <= 0 || cfg.HTTP.WorkerHealth.ReadTimeoutSec <= 0 || cfg.HTTP.WorkerHealth.WriteTimeoutSec <= 0 || cfg.HTTP.WorkerHealth.IdleTimeoutSec <= 0 {
 		t.Fatalf("expected positive worker-health HTTP timeout defaults, got %+v", cfg.HTTP.WorkerHealth)
 	}
+	if cfg.Meta.Timeout.ReadSec <= 0 || cfg.Meta.Timeout.WriteSec <= 0 || cfg.Meta.Timeout.LeaseSec <= 0 || cfg.Meta.Timeout.UploadSec <= 0 {
+		t.Fatalf("expected positive meta timeout defaults, got %+v", cfg.Meta.Timeout)
+	}
 	if !cfg.API.Auth.Enabled || cfg.API.Auth.Mode != "bearer" || cfg.API.Auth.BearerToken != "test-token" {
 		t.Fatalf("unexpected API auth defaults/overrides: %+v", cfg.API.Auth)
 	}
@@ -137,6 +140,12 @@ http:
     read_timeout_sec: 11
     write_timeout_sec: 12
     idle_timeout_sec: 33
+meta:
+  timeout:
+    read_sec: 4
+    write_sec: 9
+    lease_sec: 6
+    upload_sec: 21
 log:
   level: "debug"
   encoding: "console"
@@ -197,6 +206,9 @@ log:
 	if cfg.HTTP.WorkerHealth.ReadHeaderTimeoutSec != 4 || cfg.HTTP.WorkerHealth.ReadTimeoutSec != 11 || cfg.HTTP.WorkerHealth.WriteTimeoutSec != 12 || cfg.HTTP.WorkerHealth.IdleTimeoutSec != 33 {
 		t.Fatalf("unexpected worker-health http timeout config: %+v", cfg.HTTP.WorkerHealth)
 	}
+	if cfg.Meta.Timeout.ReadSec != 4 || cfg.Meta.Timeout.WriteSec != 9 || cfg.Meta.Timeout.LeaseSec != 6 || cfg.Meta.Timeout.UploadSec != 21 {
+		t.Fatalf("unexpected meta timeout config: %+v", cfg.Meta.Timeout)
+	}
 }
 
 // TestLoadConfig_EnvOverridesYAML 验证相关行为。
@@ -237,6 +249,9 @@ upload:
 	}
 	if cfg.Log.File != "/var/log/binlog-server.log" {
 		t.Fatalf("expected env override log.file, got %q", cfg.Log.File)
+	}
+	if cfg.Meta.Timeout.ReadSec != 3 || cfg.Meta.Timeout.WriteSec != 5 || cfg.Meta.Timeout.LeaseSec != 2 || cfg.Meta.Timeout.UploadSec != 30 {
+		t.Fatalf("expected default meta timeout fallback for legacy yaml, got %+v", cfg.Meta.Timeout)
 	}
 }
 
