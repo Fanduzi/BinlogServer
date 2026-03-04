@@ -7,6 +7,7 @@
 | File | Responsibility |
 |------|---------------|
 | build-ui.sh | 构建 frontend 并同步到 internal/ui/static |
+| verify-phase-acceptance.sh | 统一执行阶段验收命令（test/race/vet/e2e-quick）并输出耗时摘要 |
 | e2e/ | E2E 套件与场景脚本 |
 
 ## Exports
@@ -14,6 +15,7 @@
 - `make ui-build`
 - `make e2e-quick`
 - `make e2e-full`
+- `./scripts/verify-phase-acceptance.sh`
 
 ## Dependencies
 
