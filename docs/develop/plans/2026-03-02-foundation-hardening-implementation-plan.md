@@ -143,7 +143,12 @@
 1. 试点子域：`lease_store`（最小闭环）。
 2. 第二子域：`task_runs + worker_heartbeats`。
 3. 明确 sqlc 与 golang-migrate 集成流程（schema 变更 -> migrate -> sqlc 生成 -> 编译校验）。
-4. 评估是否扩展到 `mysql_store` 主体（按收益/风险决定，并给出优先级顺序）。
+4. 补充 `Makefile` 生成与校验目标：
+   - `make sqlc-generate`（执行 `sqlc generate`）
+   - `make sqlc-verify`（执行生成后 `git diff --exit-code`，阻断未提交生成物）
+   - 可选：`make generate` 聚合所有生成步骤。
+5. 将 `make sqlc-verify` 接入 CI（至少在 SQL/schema 相关变更时执行）。
+6. 评估是否扩展到 `mysql_store` 主体（按收益/风险决定，并给出优先级顺序）。
 
 **任务分解（若选 gorm 路线）**
 1. 建立 PoC，仅覆盖单一读接口。
@@ -153,9 +158,11 @@
 **验收点**
 1. 至少一个子域完成治理并在编译期/测试中体现收益。
 2. 不引入核心状态机行为变化。
-3. `config.example.yaml` 兼容性不受影响。
-4. `test/race/vet` 全绿。
-5. `make e2e-quick` 全绿。
+3. `Makefile` 的 `sqlc-generate/sqlc-verify` 可执行，且 `sqlc-verify` 能发现未提交生成物。
+4. CI 已接入 `sqlc-verify`（或明确阶段内临时策略与后续落地时间点）。
+5. `config.example.yaml` 兼容性不受影响。
+6. `test/race/vet` 全绿。
+7. `make e2e-quick` 全绿。
 
 **回滚点**
 - 子域级回滚：每个子域独立 commit，不做跨域大爆改。
@@ -307,3 +314,4 @@ P0 必须产出以下基线（初始为 TBD，执行后填实测值）：
 4. 性能对比（至少基线项 before/after）
 5. 回滚命令（`git revert <hash>` 级别）
 6. 未决事项（遗留问题与建议）
+7. 若阶段涉及 sqlc：`make sqlc-generate` 与 `make sqlc-verify` 结果摘要

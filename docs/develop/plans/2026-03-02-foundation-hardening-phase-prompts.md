@@ -105,6 +105,10 @@
 1) 先试点 lease_store。
 2) 再试点 task_runs + worker_heartbeats。
 3) 明确 sqlc 与 golang-migrate 的集成流程（schema -> migrate -> generate -> compile/test）。
+4) 在 Makefile 增加并使用：
+   - make sqlc-generate
+   - make sqlc-verify（生成后 git diff --exit-code）
+5) CI 接入 make sqlc-verify（至少 SQL/schema 相关改动必须执行）。
 
 若走 gorm 路线：
 1) 仅做单一读接口 PoC，不进入 lease/关键写路径。
@@ -112,6 +116,7 @@
 
 验收额外要求：
 - 输出“决策报告 + 试点结果”，并给出是否继续扩展到 mysql_store 主体的建议。
+- 若执行 sqlc 路线，附 make sqlc-generate / make sqlc-verify 的结果摘要。
 ```
 
 ---
@@ -165,4 +170,3 @@
 - 明确“默认关闭时零影响”的证据。
 - 给出最小启用配置示例（不写 docs/guide，只写模块说明或注释）。
 ```
-
