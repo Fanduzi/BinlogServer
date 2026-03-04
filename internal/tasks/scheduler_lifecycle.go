@@ -270,7 +270,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		}
 		s.mu.Unlock()
 		if s.leaseManager != nil && releaseOwner != "" && releaseEpoch > 0 {
-			releaseCtx, cancelRelease := s.withLeaseTimeout(ctx)
+			releaseCtx, cancelRelease := s.withLeaseTimeout(context.Background())
 			released, err := s.leaseManager.Release(releaseCtx, id, releaseOwner, releaseEpoch)
 			cancelRelease()
 			if err != nil || !released {
