@@ -98,3 +98,57 @@ func TestWithRetry_DeadlineExceeded(t *testing.T) {
 		t.Fatalf("expected at least one attempt, got %d", attempts)
 	}
 }
+
+// TestWithRetry_ContextCanceled 验证相关行为。
+func TestWithRetry_ContextCanceled(t *testing.T) {
+	var attempts int
+	errTransient := errors.New("transient")
+	policy := RetryPolicy{
+		BaseDelay:  50 * time.Millisecond,
+		MaxDelay:   50 * time.Millisecond,
+		MaxRetries: 100,
+		Jitter:     0,
+		IsTransient: func(err error) bool {
+			return errors.Is(err, errTransient)
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := WithRetry(ctx, policy, func() error {
+		attempts++
+		return errTransient
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected attempts=1 when ctx already canceled, got %d", attempts)
+	}
+}
+
+// TestWithRetry_MaxRetriesAndJitter 验证相关行为。
+func TestWithRetry_MaxRetriesAndJitter(t *testing.T) {
+	var attempts int
+	errTransient := errors.New("transient")
+	policy := RetryPolicy{
+		BaseDelay:  1 * time.Millisecond,
+		MaxDelay:   2 * time.Millisecond,
+		MaxRetries: 2,
+		Jitter:     0.5,
+		IsTransient: func(err error) bool {
+			return errors.Is(err, errTransient)
+		},
+	}
+
+	err := WithRetry(context.Background(), policy, func() error {
+		attempts++
+		return errTransient
+	})
+	if !errors.Is(err, errTransient) {
+		t.Fatalf("expected transient error after retry exhaustion, got %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected attempts=3 (1 initial + 2 retries), got %d", attempts)
+	}
+}

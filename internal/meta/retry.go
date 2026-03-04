@@ -8,13 +8,14 @@ package meta
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"strings"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
-// RetryPolicy 描述一次重试流程的退避和判错策略。
-type RetryPolicy struct {
+// Policy 描述一次重试流程的退避和判错策略。
+type Policy struct {
 	// BaseDelay 是首次重试等待时间。
 	BaseDelay time.Duration
 	// MaxDelay 是退避上限。
@@ -26,6 +27,16 @@ type RetryPolicy struct {
 	// IsTransient 判断错误是否可重试。
 	IsTransient func(error) bool
 }
+
+// RetryPolicy 保持对现有调用方的兼容别名。
+type RetryPolicy = Policy
+
+// RetryExecutor 定义统一重试执行接口，屏蔽第三方类型细节。
+type RetryExecutor interface {
+	Do(ctx context.Context, policy Policy, fn func() error) error
+}
+
+type backoffRetryExecutor struct{}
 
 type permanentError struct {
 	err error
@@ -49,38 +60,11 @@ func Permanent(err error) error {
 	return permanentError{err: err}
 }
 
+var defaultRetryExecutor RetryExecutor = backoffRetryExecutor{}
+
 // WithRetry 按策略执行带重试的函数。
 func WithRetry(ctx context.Context, policy RetryPolicy, fn func() error) error {
-	policy = normalizeRetryPolicy(policy)
-
-	for attempt := 0; ; attempt++ {
-		err := fn()
-		if err == nil {
-			return nil
-		}
-
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		if isPermanentError(err) {
-			return err
-		}
-		if policy.IsTransient != nil && !policy.IsTransient(err) {
-			return err
-		}
-		if attempt >= policy.MaxRetries {
-			return err
-		}
-
-		wait := retryBackoff(policy, attempt)
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return defaultRetryExecutor.Do(ctx, normalizeRetryPolicy(policy), fn)
 }
 
 // DefaultMySQLRetryPolicy 返回适用于 MySQL 元数据操作的默认重试策略。
@@ -121,7 +105,7 @@ func isPermanentError(err error) bool {
 }
 
 // normalizeRetryPolicy 补全重试策略默认值并修正非法配置。
-func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
+func normalizeRetryPolicy(policy Policy) Policy {
 	if policy.BaseDelay <= 0 {
 		policy.BaseDelay = 50 * time.Millisecond
 	}
@@ -143,21 +127,36 @@ func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
 	return policy
 }
 
-// retryBackoff 计算第 n 次重试的等待时长（指数退避 + 上限）。
-func retryBackoff(policy RetryPolicy, attempt int) time.Duration {
-	backoff := policy.BaseDelay
-	for i := 0; i < attempt; i++ {
-		backoff *= 2
-		if backoff >= policy.MaxDelay {
-			backoff = policy.MaxDelay
-			break
+// Do 执行带退避与重试上限的函数调用。
+func (e backoffRetryExecutor) Do(ctx context.Context, policy Policy, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	policy = normalizeRetryPolicy(policy)
+
+	exp := backoff.NewExponentialBackOff()
+	exp.InitialInterval = policy.BaseDelay
+	exp.RandomizationFactor = policy.Jitter
+	exp.Multiplier = 2
+	exp.MaxInterval = policy.MaxDelay
+	exp.MaxElapsedTime = 0
+	exp.Reset()
+
+	strategy := backoff.WithContext(backoff.WithMaxRetries(exp, uint64(policy.MaxRetries)), ctx)
+	return backoff.Retry(func() error {
+		err := fn()
+		if err == nil {
+			return nil
 		}
-	}
-	if policy.Jitter <= 0 {
-		return backoff
-	}
-	min := 1 - policy.Jitter
-	max := 1 + policy.Jitter
-	factor := min + (max-min)*rand.Float64() // #nosec G404 -- jitter randomness is non-security related.
-	return time.Duration(float64(backoff) * factor)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return backoff.Permanent(err)
+		}
+		if isPermanentError(err) {
+			return backoff.Permanent(err)
+		}
+		if policy.IsTransient != nil && !policy.IsTransient(err) {
+			return backoff.Permanent(err)
+		}
+		return err
+	}, strategy)
 }
