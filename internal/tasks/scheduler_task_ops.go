@@ -286,7 +286,9 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 	s.mu.Unlock()
 
 	if store != nil {
-		list, err := store.ListTasks(context.Background())
+		ctx, cancel := s.withReadTimeout(context.Background())
+		list, err := store.ListTasks(ctx)
+		cancel()
 		if err == nil {
 			for _, item := range list {
 				if item.ID != id {
@@ -328,15 +330,21 @@ func (s *Scheduler) DeleteTask(id string) error {
 	delete(s.events, id)
 	delete(s.replica, id)
 	if s.store != nil {
-		if err := s.store.DeleteTask(context.Background(), id); err != nil {
+		ctx, cancel := s.withWriteTimeout(context.Background())
+		if err := s.store.DeleteTask(ctx, id); err != nil {
+			cancel()
 			s.mu.Unlock()
 			return err
 		}
+		cancel()
 	}
 	s.mu.Unlock()
 
 	if s.leaseManager != nil && task.OwnerWorkerID != "" && task.Epoch > 0 {
-		if released, err := s.leaseManager.Release(context.Background(), id, task.OwnerWorkerID, task.Epoch); err != nil || !released {
+		ctx, cancel := s.withLeaseTimeout(context.Background())
+		released, err := s.leaseManager.Release(ctx, id, task.OwnerWorkerID, task.Epoch)
+		cancel()
+		if err != nil || !released {
 			log.Printf("lease release on delete failed task=%s owner=%s epoch=%d released=%v err=%v", id, task.OwnerWorkerID, task.Epoch, released, err)
 		}
 	}

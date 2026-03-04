@@ -43,6 +43,13 @@ http:
     write_timeout_sec: 10
     idle_timeout_sec: 30
 
+meta:
+  timeout:
+    read_sec: 3
+    write_sec: 5
+    lease_sec: 2
+    upload_sec: 30
+
 log:
   level: "info"
   encoding: "json" # json | console
