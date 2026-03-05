@@ -758,6 +758,22 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 			t.Fatalf("expected metrics output contains %s, body=%s", name, body)
 		}
 	}
+
+	if !strings.Contains(body, `binlog_server_task_state_count{state="`+string(task.State)+`"}`) {
+		t.Fatalf("expected task_state metric with state label, body=%s", body)
+	}
+	if !strings.Contains(body, `binlog_server_replication_lag_seconds{task_id="`+task.ID+`"}`) {
+		t.Fatalf("expected replication lag metric with task_id label, body=%s", body)
+	}
+	if !strings.Contains(body, `binlog_server_checkpoint_age_seconds{task_id="`+task.ID+`"}`) {
+		t.Fatalf("expected checkpoint age metric with task_id label, body=%s", body)
+	}
+	if !strings.Contains(body, `binlog_server_worker_online{worker_id="worker-a"} 1`) {
+		t.Fatalf("expected worker_online metric with worker_id label, body=%s", body)
+	}
+	if !strings.Contains(body, `# TYPE binlog_server_upload_retry_total counter`) {
+		t.Fatalf("expected upload_retry_total type counter, body=%s", body)
+	}
 }
 
 // TestAPI_MetricsUploadFailuresTotalCountsAllRecords 验证相关行为。
