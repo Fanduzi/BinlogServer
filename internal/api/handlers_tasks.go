@@ -168,6 +168,10 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := strings.TrimSpace(query.Host)
+	if host == "" {
+		http.Error(w, "host is required", http.StatusBadRequest)
+		return
+	}
 	port, err := parsePort(query.Port)
 	if err != nil {
 		http.Error(w, "invalid port", http.StatusBadRequest)
