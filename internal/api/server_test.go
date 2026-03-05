@@ -1616,6 +1616,7 @@ func TestAPI_SourceLookupValidationErrors(t *testing.T) {
 		want string
 	}{
 		{path: "/api/sources/lookup?port=3306", want: "host is required"},
+		{path: "/api/sources/lookup?host=%20%20%20&port=3306", want: "host is required"},
 		{path: "/api/sources/lookup?host=10.0.0.9", want: "port is required"},
 		{path: "/api/sources/lookup?host=10.0.0.9&port=abc", want: "invalid port"},
 	}
