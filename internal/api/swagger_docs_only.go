@@ -110,7 +110,7 @@ func (s *Server) swaggerTaskFilesDoc() {}
 // @Tags Tasks
 // @Produce json
 // @Param id path string true "Task ID"
-// @Param limit query int false "Retry upload limit" default(100) maximum(1000)
+// @Param limit query int false "Retry upload limit" minimum(1) default(100) maximum(1000)
 // @Success 200 {object} tasks.UploadRetryStats
 // @Failure 400 {string} string
 // @Failure 404 {string} string
@@ -124,7 +124,7 @@ func (s *Server) swaggerTaskRetryUploadDoc() {}
 // @Tags Tasks
 // @Produce json
 // @Param id path string true "Task ID"
-// @Param limit query int false "Failure reason list limit" default(20) maximum(200)
+// @Param limit query int false "Failure reason list limit" minimum(1) default(20) maximum(200)
 // @Success 200 {array} tasks.UploadFailureReason
 // @Failure 400 {string} string
 // @Failure 404 {string} string
