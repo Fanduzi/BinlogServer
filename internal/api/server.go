@@ -7,12 +7,7 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
 
 	"binlog_server/internal/binlog"
 	_ "binlog_server/internal/swaggerdocs"
@@ -51,9 +46,10 @@ type taskService interface {
 
 // Server 是 Gin HTTP 入口，负责路由和 handler 组织。
 type Server struct {
-	tasks taskService
-	gin   *gin.Engine
-	auth  AuthConfig
+	tasks          taskService
+	gin            *gin.Engine
+	auth           AuthConfig
+	metricsHandler http.Handler
 }
 
 // NewServer 构建 API/UI HTTP handler。
@@ -71,9 +67,10 @@ func NewServer(taskSvc taskService, opts ...ServerOption) http.Handler {
 	engine.Use(gin.Recovery())
 
 	s := &Server{
-		tasks: taskSvc,
-		gin:   engine,
-		auth:  options.auth,
+		tasks:          taskSvc,
+		gin:            engine,
+		auth:           options.auth,
+		metricsHandler: newMetricsHandler(taskSvc),
 	}
 	s.routes()
 	return s
@@ -132,160 +129,5 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = w.Write([]byte(s.renderPrometheusMetrics()))
-}
-
-// renderPrometheusMetrics 采集并渲染当前指标快照。
-func (s *Server) renderPrometheusMetrics() string {
-	// 常见误解：
-	// metrics 采集是 best-effort：单项采集失败会跳过，不阻断整个 /metrics 响应，
-	// 这样观测端点不会反向影响主链路可用性。
-	var b strings.Builder
-	now := time.Now()
-	items := s.tasks.ListTasks()
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].ID < items[j].ID
-	})
-
-	b.WriteString("# HELP binlog_server_task_state_count Number of tasks by state.\n")
-	b.WriteString("# TYPE binlog_server_task_state_count gauge\n")
-	stateCount := make(map[string]int)
-	for _, task := range items {
-		stateCount[string(task.State)]++
-	}
-	states := make([]string, 0, len(stateCount))
-	for state := range stateCount {
-		states = append(states, state)
-	}
-	sort.Strings(states)
-	for _, state := range states {
-		writePromSample(&b, "binlog_server_task_state_count", map[string]string{
-			"state": state,
-		}, float64(stateCount[state]))
-	}
-
-	b.WriteString("# HELP binlog_server_replication_lag_seconds Replication lag seconds by task.\n")
-	b.WriteString("# TYPE binlog_server_replication_lag_seconds gauge\n")
-	for _, task := range items {
-		progress, ok, err := s.tasks.GetReplicationProgress(task.ID)
-		if err != nil || !ok || progress.LastEventAt.IsZero() {
-			continue
-		}
-		lag := now.Sub(progress.LastEventAt).Seconds()
-		if lag < 0 {
-			lag = 0
-		}
-		writePromSample(&b, "binlog_server_replication_lag_seconds", map[string]string{
-			"task_id": task.ID,
-		}, lag)
-	}
-
-	b.WriteString("# HELP binlog_server_checkpoint_age_seconds Checkpoint age seconds by task.\n")
-	b.WriteString("# TYPE binlog_server_checkpoint_age_seconds gauge\n")
-	for _, task := range items {
-		checkpoint, ok, err := s.tasks.GetCheckpoint(context.Background(), task.ID)
-		if err != nil || !ok || checkpoint.UpdatedAt.IsZero() {
-			continue
-		}
-		age := now.Sub(checkpoint.UpdatedAt).Seconds()
-		if age < 0 {
-			age = 0
-		}
-		writePromSample(&b, "binlog_server_checkpoint_age_seconds", map[string]string{
-			"task_id": task.ID,
-		}, age)
-	}
-
-	b.WriteString("# HELP binlog_server_worker_online Worker online status (1=online,0=offline).\n")
-	b.WriteString("# TYPE binlog_server_worker_online gauge\n")
-	heartbeats, err := s.tasks.ListWorkerHeartbeats(200)
-	if err == nil {
-		sort.Slice(heartbeats, func(i, j int) bool {
-			return heartbeats[i].WorkerID < heartbeats[j].WorkerID
-		})
-		for _, hb := range heartbeats {
-			online := strings.EqualFold(hb.Status, "ONLINE") && !hb.LastSeenAt.IsZero() && now.Sub(hb.LastSeenAt) <= workerOnlineThreshold
-			value := 0.0
-			if online {
-				value = 1.0
-			}
-			writePromSample(&b, "binlog_server_worker_online", map[string]string{
-				"worker_id": hb.WorkerID,
-			}, value)
-		}
-	}
-
-	b.WriteString("# HELP binlog_server_upload_failures_total Total number of upload failed file records.\n")
-	b.WriteString("# TYPE binlog_server_upload_failures_total gauge\n")
-	var uploadFailuresTotal int64
-	if counter, ok := s.tasks.(interface{ CountUploadFailures() (int64, error) }); ok {
-		total, err := counter.CountUploadFailures()
-		if err == nil {
-			uploadFailuresTotal = total
-		}
-	} else {
-		const allFilesLimit = int(^uint(0) >> 1)
-		for _, task := range items {
-			files, err := s.tasks.ListFiles(task.ID, allFilesLimit)
-			if err != nil {
-				continue
-			}
-			for _, file := range files {
-				if strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
-					uploadFailuresTotal++
-				}
-			}
-		}
-	}
-	writePromSample(&b, "binlog_server_upload_failures_total", nil, float64(uploadFailuresTotal))
-
-	b.WriteString("# HELP binlog_server_upload_retry_total Total retry-upload API result count.\n")
-	b.WriteString("# TYPE binlog_server_upload_retry_total counter\n")
-	retryMetrics := s.tasks.GetUploadRetryMetrics()
-	writePromSample(&b, "binlog_server_upload_retry_total", map[string]string{
-		"result": "success",
-	}, float64(retryMetrics.Success))
-	writePromSample(&b, "binlog_server_upload_retry_total", map[string]string{
-		"result": "failed",
-	}, float64(retryMetrics.Failed))
-	writePromSample(&b, "binlog_server_upload_retry_total", map[string]string{
-		"result": "skipped",
-	}, float64(retryMetrics.Skipped))
-
-	b.WriteString("# HELP binlog_server_upload_retry_last_ts Last retry-upload API execution time in unix seconds.\n")
-	b.WriteString("# TYPE binlog_server_upload_retry_last_ts gauge\n")
-	writePromSample(&b, "binlog_server_upload_retry_last_ts", nil, float64(retryMetrics.LastTs))
-
-	return b.String()
-}
-
-// writePromSample 追加一条 Prometheus 样本行。
-func writePromSample(b *strings.Builder, name string, labels map[string]string, value float64) {
-	b.WriteString(name)
-	if len(labels) > 0 {
-		keys := make([]string, 0, len(labels))
-		for key := range labels {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		b.WriteByte('{')
-		for i, key := range keys {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			fmt.Fprintf(b, `%s="%s"`, key, escapePromLabelValue(labels[key]))
-		}
-		b.WriteByte('}')
-	}
-	b.WriteByte(' ')
-	b.WriteString(strconv.FormatFloat(value, 'f', -1, 64))
-	b.WriteByte('\n')
-}
-
-// escapePromLabelValue 对 label 值做 Prometheus 规则转义。
-func escapePromLabelValue(v string) string {
-	v = strings.ReplaceAll(v, `\`, `\\`)
-	v = strings.ReplaceAll(v, "\n", `\n`)
-	return strings.ReplaceAll(v, `"`, `\"`)
+	s.metricsHandler.ServeHTTP(w, r)
 }

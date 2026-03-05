@@ -2,6 +2,7 @@
 
 ## Files
 - `server.go`: HTTP server/router 组装。
+- `metrics_prometheus.go`: `/metrics` 采集与输出（基于 `prometheus/client_golang`）。
 - `auth.go`: 路由级鉴权配置与认证中间件。
 - `handlers_tasks.go`: 任务相关 API 处理。
 - `handlers_cluster.go`: 集群观测与控制相关 API。
@@ -17,6 +18,7 @@
 ## Dependencies
 - Upstream: HTTP client/UI。
 - Downstream: `internal/tasks` service 接口。
+- Metrics: `github.com/prometheus/client_golang`（兼容现有 `binlog_server_*` 指标契约）。
 
 ## Update Rule
 - 路由、请求/响应结构、错误语义变化时，更新本文件。
