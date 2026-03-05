@@ -1260,6 +1260,40 @@ func TestTaskAPI_RetryUploadLimitValidation(t *testing.T) {
 		if resp.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for %s, got %d body=%s", path, resp.Code, resp.Body.String())
 		}
+		if got := strings.TrimSpace(resp.Body.String()); got != "invalid limit" {
+			t.Fatalf("expected invalid limit for %s, got %q", path, got)
+		}
+	}
+}
+
+// TestTaskAPI_UploadFailureReasonsLimitValidation 验证相关行为。
+func TestTaskAPI_UploadFailureReasonsLimitValidation(t *testing.T) {
+	scheduler := tasks.NewScheduler(tasks.WithFileStore(newFakeFileStore()))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	cases := []string{
+		"/api/tasks/1/upload-failures/reasons?limit=0",
+		"/api/tasks/1/upload-failures/reasons?limit=201",
+		"/api/tasks/1/upload-failures/reasons?limit=abc",
+	}
+	for _, path := range cases {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d body=%s", path, resp.Code, resp.Body.String())
+		}
+		if got := strings.TrimSpace(resp.Body.String()); got != "invalid limit" {
+			t.Fatalf("expected invalid limit for %s, got %q", path, got)
+		}
 	}
 }
 
@@ -1570,6 +1604,31 @@ func TestAPI_SourceLookup(t *testing.T) {
 	}
 	if int(notFoundBody["count"].(float64)) != 0 {
 		t.Fatalf("expected count=0, got %v", notFoundBody["count"])
+	}
+}
+
+// TestAPI_SourceLookupValidationErrors 验证相关行为。
+func TestAPI_SourceLookupValidationErrors(t *testing.T) {
+	handler := NewServer(tasks.NewScheduler())
+
+	cases := []struct {
+		path string
+		want string
+	}{
+		{path: "/api/sources/lookup?port=3306", want: "host is required"},
+		{path: "/api/sources/lookup?host=10.0.0.9", want: "port is required"},
+		{path: "/api/sources/lookup?host=10.0.0.9&port=abc", want: "invalid port"},
+	}
+	for _, tc := range cases {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d body=%s", tc.path, resp.Code, resp.Body.String())
+		}
+		if got := strings.TrimSpace(resp.Body.String()); got != tc.want {
+			t.Fatalf("expected %q for %s, got %q", tc.want, tc.path, got)
+		}
 	}
 }
 
