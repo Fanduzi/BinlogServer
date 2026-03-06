@@ -77,6 +77,9 @@ func NewLeaseStoreFromTaskStore(store *MySQLTaskStore) *LeaseStore {
 
 // Acquire 尝试获取 lease，返回 epoch 和是否成功。
 func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl time.Duration) (int64, bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.lease_store.acquire")
+	defer endMetaSpan(span)
+
 	ttlMicros := durationToMicroseconds(ttl)
 	var (
 		epoch int64
@@ -122,6 +125,9 @@ func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl t
 
 // Renew 续租指定 epoch 的 lease，返回是否续租成功。
 func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.lease_store.renew")
+	defer endMetaSpan(span)
+
 	_ = now
 	var renewed bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
@@ -147,6 +153,9 @@ func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch i
 
 // Get 读取任务当前 lease 记录。
 func (s *LeaseStore) Get(ctx context.Context, taskID string) (Lease, bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.lease_store.get")
+	defer endMetaSpan(span)
+
 	var (
 		lease Lease
 		ok    bool
@@ -183,6 +192,9 @@ func (s *LeaseStore) getNoRetry(ctx context.Context, taskID string) (Lease, bool
 
 // Release 释放 lease（通过软过期而非删除行）。
 func (s *LeaseStore) Release(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.lease_store.release")
+	defer endMetaSpan(span)
+
 	var released bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		result, err := s.db.ExecContext(ctx, releaseLeaseSQL, taskID, workerID, epoch)
@@ -223,6 +235,9 @@ func (s *LeaseStore) currentDBTimeNoRetry(ctx context.Context) (time.Time, error
 
 // VerifyOwnership 校验给定 worker/epoch 当前是否仍拥有有效 lease。
 func (s *LeaseStore) VerifyOwnership(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.lease_store.verify_ownership")
+	defer endMetaSpan(span)
+
 	lease, ok, err := s.Get(ctx, taskID)
 	if err != nil {
 		return false, err

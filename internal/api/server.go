@@ -51,9 +51,10 @@ type taskService interface {
 
 // Server 是 Gin HTTP 入口，负责路由和 handler 组织。
 type Server struct {
-	tasks taskService
-	gin   *gin.Engine
-	auth  AuthConfig
+	tasks   taskService
+	gin     *gin.Engine
+	auth    AuthConfig
+	tracing TracingConfig
 }
 
 // NewServer 构建 API/UI HTTP handler。
@@ -71,9 +72,10 @@ func NewServer(taskSvc taskService, opts ...ServerOption) http.Handler {
 	engine.Use(gin.Recovery())
 
 	s := &Server{
-		tasks: taskSvc,
-		gin:   engine,
-		auth:  options.auth,
+		tasks:   taskSvc,
+		gin:     engine,
+		auth:    options.auth,
+		tracing: options.tracing,
 	}
 	s.routes()
 	return s
@@ -81,6 +83,9 @@ func NewServer(taskSvc taskService, opts ...ServerOption) http.Handler {
 
 // routes 注册所有 HTTP 路由（system/tasks/cluster/swagger/ui）。
 func (s *Server) routes() {
+	if s.tracing.Enabled {
+		s.gin.Use(tracingMiddleware(s.tracing))
+	}
 	s.gin.GET("/healthz", gin.WrapF(s.handleHealth))
 	metricsHandlers := []gin.HandlerFunc{}
 	if s.auth.Enabled && s.auth.ProtectMetrics {
