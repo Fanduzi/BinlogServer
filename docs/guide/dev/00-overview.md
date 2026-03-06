@@ -9,16 +9,19 @@
 ```
 main()
   │
-  └─► rootCmd.Execute()                    # Cobra CLI 入口
+  └─► cmd.NewRootCommand().Execute()     # Cobra CLI 入口
         │
-        └─► RunE: func(cmd, args)           # Cobra 命令处理
+        └─► RunE: func(cmd, args)         # Cobra 命令处理
               │
-              ├─► config.Load(path)         # 加载配置
+              ├─► config.LoadConfig(path) # 加载配置（Viper）
               │
-              ├─► signal.NotifyContext()    # 创建信号上下文
+              ├─► signal.NotifyContext()  # 创建信号上下文
               │
-              └─► app.Run(ctx, cfg)         # 启动应用 ⭐
+              ├─► logging.Setup()         # 初始化日志
+              │
+              └─► app.New(cfg).Run(ctx)   # 启动应用 ⭐
                     │
+                    ├─► 初始化 tracing（可选）
                     ├─► 初始化存储层
                     ├─► 创建 Scheduler
                     ├─► 恢复任务状态
@@ -34,7 +37,7 @@ cmd/binlog-server/
     └── root.go       # Cobra rootCmd 定义
 
 internal/app/
-└── app.go            # func Run(ctx, cfg) - 核心启动逻辑
+└── app.go            # func (a *App) Run(ctx) - 核心启动逻辑
 ```
 
 ## 2. 配置加载流程
@@ -56,24 +59,37 @@ internal/app/
 └─────────────────────────────────────────────────────┘
 ```
 
-### 2.2 加载代码
+### 2.2 加载代码（使用 Viper）
 
 ```go
 // internal/config/config.go
-func Load(path string) (*Config, error) {
-    // 1. 默认值
-    cfg := DefaultConfig()
+func LoadConfig(path string) (Config, error) {
+    v := viper.New()
 
-    // 2. 从 YAML 文件加载
+    // 1. 设置默认值
+    v.SetDefault("listen_addr", ":8080")
+    v.SetDefault("mode", "standalone")
+    // ...
+
+    // 2. 从文件加载
     if path != "" {
-        data, _ := os.ReadFile(path)
-        yaml.Unmarshal(data, cfg)
+        v.SetConfigFile(path)
+    } else {
+        v.SetConfigName("config")
+        v.AddConfigPath(".")
     }
+    v.ReadInConfig()
 
     // 3. 环境变量覆盖
-    loadFromEnv(cfg)
+    v.SetEnvPrefix("BINLOG_SERVER")
+    v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+    v.AutomaticEnv()
 
-    // 4. 验证
+    // 4. 解析到结构体
+    var cfg Config
+    v.Unmarshal(&cfg)
+
+    // 5. 验证
     cfg.Validate()
 
     return cfg, nil
@@ -87,7 +103,7 @@ func Load(path string) (*Config, error) {
     ↓
 环境变量: BINLOG_SERVER_CLUSTER_WORKER_ID
 
-规则: BINLOG_SERVER_ + 大写 + 下划线连接
+规则: BINLOG_SERVER_ + 大写 + 下划线连接（. 替换为 _）
 ```
 
 ### 2.4 配置结构
@@ -99,20 +115,32 @@ type Config struct {
     DataDir    string
     Mode       string  // standalone / cluster
 
-    // 元数据
-    Meta MetaConfig
-
-    // 集群
+    // 集群配置
     Cluster ClusterConfig
 
-    // 租约
-    Lease LeaseConfig
+    // 上传配置
+    UploadEndpoint  string
+    UploadBucket    string
+    UploadAccessKey string
+    UploadSecretKey string
+    UploadRegion    string
+    UploadPrefix    string
+    UploadUseSSL    bool
 
-    // 上传
-    Upload UploadConfig
-
-    // 日志
+    // 日志配置
     Log LogConfig
+
+    // API 认证配置
+    API APIConfig
+
+    // HTTP 超时配置
+    HTTP HTTPConfig
+
+    // 元数据调用超时配置
+    Meta MetaTimeoutConfig
+
+    // OpenTelemetry tracing 配置
+    Tracing TracingConfig
 }
 ```
 
@@ -121,23 +149,26 @@ type Config struct {
 ### 3.1 完整流程图
 
 ```
-app.Run(ctx, cfg)
+app.Run(ctx)
 │
-├─► 1. 解析角色
+├─► 1. 初始化 tracing（如果启用）
+│     tracerProvider, shutdownTracing = initTracing(cfg.Tracing)
+│
+├─► 2. 解析角色
 │     controlPlaneEnabled, workerEnabled = resolveRoleMode(cfg)
 │
-├─► 2. 解析 worker_id（cluster 模式）
+├─► 3. 解析 worker_id（cluster 模式）
 │     workerID = resolveClusterWorkerID(cfg)
 │     - 优先使用配置值
 │     - 否则读取/生成 .worker-id 文件
 │
-├─► 3. 初始化元数据存储（cluster 模式）
-│     mysqlStore = meta.NewMySQLStore(cfg.Meta)
+├─► 4. 初始化元数据存储（cluster 模式）
+│     mysqlStore = meta.NewMySQLTaskStore(cfg.MetaDSN)
 │
-├─► 4. 初始化上传器（可选）
+├─► 5. 初始化上传器（可选）
 │     uploader = upload.NewS3Uploader(cfg.Upload)
 │
-├─► 5. 创建 Scheduler
+├─► 6. 创建 Scheduler
 │     scheduler = tasks.NewScheduler(
 │         WithStore(mysqlStore),
 │         WithClusterLeaseManager(leaseStore),
@@ -145,16 +176,19 @@ app.Run(ctx, cfg)
 │         ...
 │     )
 │
-├─► 6. 恢复任务状态
+├─► 7. 恢复任务状态
 │     scheduler.Restore(ctx)
-│     - 从数据库加载任务
-│     - 重新启动 RUNNING 状态的任务
+│     - 从数据库加载任务到内存
 │
-├─► 7. Worker 注册（cluster + worker 角色）
+├─► 8. Worker 注册（cluster + worker 角色）
 │     mysqlStore.AcquireWorkerRegistration(workerID, sessionID)
 │     startWorkerRegistrationRenewLoop(...)
 │
-├─► 8. 启动角色服务
+├─► 9. 恢复集群任务（cluster + worker 角色）
+│     resumeClusterWorkerTasks(scheduler)
+│     - 重启 RUNNING/STARTING/RETRY_BACKOFF 状态的任务
+│
+├─► 10. 启动角色服务
 │     │
 │     ├─► control-plane: API Server + UI
 │     │     apiServer.Run(ctx)
@@ -165,7 +199,7 @@ app.Run(ctx, cfg)
 │     │
 │     └─► all-in-one: 两者都启动
 │
-└─► 9. 等待信号，优雅关闭
+└─► 11. 等待信号，优雅关闭
       <-ctx.Done()
       scheduler.StopAll(shutdownCtx)
 ```
@@ -174,14 +208,16 @@ app.Run(ctx, cfg)
 
 | 顺序 | 组件 | 原因 |
 |------|------|------|
-| 1 | 解析角色 | 决定后续启动哪些服务 |
-| 2 | worker_id | 后续注册和租约都依赖它 |
-| 3 | 元数据存储 | Scheduler、Lease 都依赖它 |
-| 4 | 上传器 | Runner 依赖它 |
-| 5 | Scheduler | 核心组件，依赖上述所有 |
-| 6 | Restore | 必须在启动服务前恢复状态 |
-| 7 | Worker 注册 | 必须在执行任务前完成 |
-| 8 | 角色服务 | 最后启动，开始对外服务 |
+| 1 | Tracing | 后续组件可能需要 tracing |
+| 2 | 解析角色 | 决定后续启动哪些服务 |
+| 3 | worker_id | 后续注册和租约都依赖它 |
+| 4 | 元数据存储 | Scheduler、Lease 都依赖它 |
+| 5 | 上传器 | Runner 依赖它 |
+| 6 | Scheduler | 核心组件，依赖上述所有 |
+| 7 | Restore | 必须在启动服务前加载状态 |
+| 8 | Worker 注册 | 必须在执行任务前完成 |
+| 9 | 恢复集群任务 | 必须在 Claim Loop 前执行 |
+| 10 | 角色服务 | 最后启动，开始对外服务 |
 
 ## 4. 核心组件关系
 
@@ -221,8 +257,8 @@ app.Run(ctx, cfg)
 
 | 组件 | 职责 | 代码位置 |
 |------|------|----------|
-| Config | 配置加载和验证 | `internal/config/` |
-| MySQLStore | 任务/事件/文件元数据持久化 | `internal/meta/mysql_store.go` |
+| Config | 配置加载和验证（Viper） | `internal/config/` |
+| MySQLStore | 任务/事件/文件元数据持久化 | `internal/meta/mysql_*.go` |
 | LeaseStore | 租约管理（获取/续租/释放） | `internal/meta/lease_store.go` |
 | Scheduler | 任务状态机、分发、调度 | `internal/tasks/scheduler*.go`（多文件） |
 | Runner | 实际执行 binlog 复制 | `internal/replication/mysql_runner.go` |
@@ -233,13 +269,13 @@ app.Run(ctx, cfg)
 
 ```
 internal/tasks/
-├── scheduler.go              # 核心：Scheduler 结构、Option、Restore
-├── scheduler_cluster_lease.go # 集群租约：acquire/renew/release
-├── scheduler_lifecycle.go    # 生命周期：Start/Stop/Run
-├── scheduler_observability.go # 可观测性：Prometheus 指标
-├── scheduler_retry_upload.go # 上传重试：RetryFailedUploads
-├── scheduler_task_ops.go     # 任务操作：Create/Get/List/Delete
-└── model.go                  # 数据模型：Task/Event/File 等
+├── model.go                   # 核心数据模型：Task、State、配置结构等
+├── scheduler.go               # 核心：Scheduler 结构、Option、接口定义
+├── scheduler_lifecycle.go     # 生命周期：Start/Stop/Run/Claim
+├── scheduler_task_ops.go      # 任务操作：Create/Update/Delete/Configure
+├── scheduler_cluster_lease.go # 集群租约：renewLeaseLoop、failSafeStop
+├── scheduler_retry_upload.go  # 上传重试：RetryFailedUploads
+└── scheduler_observability.go # 可观测性：Prometheus 指标
 ```
 
 ## 5. 两种运行模式
@@ -305,7 +341,7 @@ internal/tasks/
 | 配置加载 | `internal/config/config.go` |
 | 任务状态机 | `internal/tasks/scheduler*.go`（多文件模块） |
 | 复制执行 | `internal/replication/mysql_runner.go` |
-| 元数据存储 | `internal/meta/mysql_store.go` |
+| 元数据存储 | `internal/meta/mysql_*.go` |
 | 租约管理 | `internal/meta/lease_store.go` |
 | HTTP API | `internal/api/server.go` |
 | API 鉴权 | `internal/api/auth.go` |
