@@ -14,6 +14,13 @@
 - `/healthz`, `/readyz`: 健康检查接口。
 - 可配置鉴权：支持 `Bearer Token` 或 `API Key`；`/healthz` 默认匿名，`/metrics` 与 `/api/*` 可按配置开启保护。
 
+## Validation Pilot (P4)
+- 试点采用 Gin binding + validator 替换手工 query parse/if：
+  - `/api/sources/lookup`（`host`/`port` 必填 + 端口格式校验）
+  - `/api/tasks/{id}/files/retry-upload`（`limit` 范围 1..1000，默认 100）
+  - `/api/tasks/{id}/upload-failures/reasons`（`limit` 范围 1..200，默认 20）
+- 错误映射保持兼容：`host is required` / `port is required` / `invalid port` / `invalid limit`。
+
 ## Dependencies
 - Upstream: HTTP client/UI。
 - Downstream: `internal/tasks` service 接口。

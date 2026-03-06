@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"binlog_server/internal/tasks"
+
+	"github.com/gin-gonic/gin/binding"
+	validator "github.com/go-playground/validator/v10"
 )
 
 type summaryResponse struct {
@@ -76,6 +79,23 @@ type sourceLookupResponse struct {
 	TaskIDs []string `json:"task_ids"`
 }
 
+type sourceLookupQuery struct {
+	Host string `form:"host" binding:"required"`
+	Port string `form:"port" binding:"required"`
+}
+
+type listLimitQuery struct {
+	Limit *int `form:"limit" binding:"omitempty,min=1"`
+}
+
+type retryUploadLimitQuery struct {
+	Limit *int `form:"limit" binding:"omitempty,min=1,max=1000"`
+}
+
+type uploadFailureReasonsLimitQuery struct {
+	Limit *int `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
 // handleSummary godoc
 // @Summary Get task summary counters
 // @Tags Dashboard
@@ -130,8 +150,8 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 // @Summary Lookup tasks by source host and port
 // @Tags Dashboard
 // @Produce json
-// @Param host query string true "MySQL source host"
-// @Param port query int true "MySQL source port"
+// @Param host query string true "MySQL source host (required)"
+// @Param port query int true "MySQL source port (required, 1-65535)"
 // @Success 200 {object} sourceLookupResponse
 // @Failure 400 {string} string
 // @Failure 405 {string} string
@@ -142,17 +162,17 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host := strings.TrimSpace(r.URL.Query().Get("host"))
+	var query sourceLookupQuery
+	if err := binding.Query.Bind(r, &query); err != nil {
+		http.Error(w, mapSourceLookupBindError(err), http.StatusBadRequest)
+		return
+	}
+	host := strings.TrimSpace(query.Host)
 	if host == "" {
 		http.Error(w, "host is required", http.StatusBadRequest)
 		return
 	}
-	portRaw := strings.TrimSpace(r.URL.Query().Get("port"))
-	if portRaw == "" {
-		http.Error(w, "port is required", http.StatusBadRequest)
-		return
-	}
-	port, err := parsePort(portRaw)
+	port, err := parsePort(query.Port)
 	if err != nil {
 		http.Error(w, "invalid port", http.StatusBadRequest)
 		return
@@ -560,42 +580,36 @@ func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.R
 func parseLimit(r *http.Request, fallback int) int {
 	// 常见误解：
 	// 这里对非法 limit 不报 400，而是回退到 fallback，目的是提升列表接口容错性。
-	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
-	if raw == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 {
+	var query listLimitQuery
+	if err := binding.Query.Bind(r, &query); err != nil || query.Limit == nil {
 		// 列表类接口对非法 limit 采用 fallback，避免影响主流程可用性。
 		return fallback
 	}
-	return n
+	return *query.Limit
 }
 
 // parseRetryUploadLimit 解析重传接口的 limit 参数并做边界校验。
 func parseRetryUploadLimit(r *http.Request) (int, error) {
-	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
-	if raw == "" {
-		return 100, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 || n > 1000 {
+	var query retryUploadLimitQuery
+	if err := binding.Query.Bind(r, &query); err != nil {
 		return 0, errors.New("invalid limit")
 	}
-	return n, nil
+	if query.Limit == nil {
+		return 100, nil
+	}
+	return *query.Limit, nil
 }
 
 // parseUploadFailureReasonsLimit 解析失败原因接口的 limit 参数并做边界校验。
 func parseUploadFailureReasonsLimit(r *http.Request) (int, error) {
-	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
-	if raw == "" {
-		return 20, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 || n > 200 {
+	var query uploadFailureReasonsLimitQuery
+	if err := binding.Query.Bind(r, &query); err != nil {
 		return 0, errors.New("invalid limit")
 	}
-	return n, nil
+	if query.Limit == nil {
+		return 20, nil
+	}
+	return *query.Limit, nil
 }
 
 // filterTasksBySource 按 source 查询参数过滤任务集合。
@@ -634,6 +648,21 @@ func parsePort(raw string) (uint16, error) {
 		return 0, errors.New("invalid port")
 	}
 	return uint16(n), nil
+}
+
+func mapSourceLookupBindError(err error) string {
+	var validationErrs validator.ValidationErrors
+	if errors.As(err, &validationErrs) {
+		for _, fieldErr := range validationErrs {
+			switch fieldErr.Field() {
+			case "Host":
+				return "host is required"
+			case "Port":
+				return "port is required"
+			}
+		}
+	}
+	return "invalid port"
 }
 
 // buildReplicationResponse 组装复制状态响应并计算延迟与异常原因。
