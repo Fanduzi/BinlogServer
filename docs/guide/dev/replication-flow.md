@@ -24,11 +24,8 @@
 
 ```go
 type Runner interface {
-    // Run 执行复制任务，阻塞直到 ctx 取消或出错
+    // Run 启动任务执行主循环；返回时表示本次运行结束
     Run(ctx context.Context, task Task) error
-
-    // GetStatus 获取当前复制状态
-    GetStatus() ReplicationStatus
 }
 ```
 
@@ -36,14 +33,14 @@ type Runner interface {
 
 ```go
 type MySQLRunner struct {
-    binlogWriter    *binlog.Writer       // 文件写入器
-    checkpointStore meta.CheckpointStore // 位点存储
-    uploader        upload.Uploader      // 上传器（可选）
-
-    // 运行时状态
-    mu       sync.Mutex
-    status   ReplicationStatus
-    progress Progress
+    dataDir          string              // 本地存储目录
+    fetcher          sourceMetaFetcher   // 源库元数据获取器
+    checkpointStore  CheckpointStore     // 位点存储
+    fileMetaStore    FileMetaStore       // 文件元数据存储
+    uploader         FileUploader        // 上传器（可选）
+    uploadPrefix     string              // 对象存储前缀
+    leaseVerifier    LeaseVerifier       // 租约验证器（可选）
+    progressReporter ProgressReporter    // 进度上报器（可选）
 }
 ```
 
@@ -116,7 +113,7 @@ func (r *MySQLRunner) getStartPosition(ctx context.Context, task Task) (binlog.P
 
     case "GTID":
         // 从指定 GTID 开始
-        return binlog.GTIDSet(task.Start.GTID), nil
+        return binlog.GTIDSet(task.Start.GTIDSet), nil
 
     default:
         return nil, fmt.Errorf("unknown start mode: %s", task.Start.Mode)
@@ -259,11 +256,10 @@ func (w *Writer) Write(event BinlogEvent) error {
 
 ```go
 type Checkpoint struct {
-    TaskID      string
-    File        string    // 当前文件名
-    Pos         uint32    // 文件内位置
-    GTID        string    // GTID 集合（可选）
-    UpdatedAt   time.Time
+    File      string    // 当前文件名
+    Pos       uint32    // 文件内位置
+    GTIDSet   string    // GTID 集合（可选）
+    UpdatedAt time.Time
 }
 ```
 
@@ -429,10 +425,11 @@ func (r *MySQLRunner) Run(ctx context.Context, task Task) error {
 
 | 组件 | 文件 |
 |------|------|
-| Runner 接口 | `internal/tasks/runner.go` |
+| Runner 接口 | `internal/tasks/scheduler.go` |
 | MySQLRunner | `internal/replication/mysql_runner.go` |
 | Writer | `internal/binlog/writer.go` |
-| Checkpoint | `internal/meta/mysql_store.go` |
+| Checkpoint | `internal/binlog/checkpoint.go` |
+| CheckpointStore | `internal/replication/mysql_runner.go`（接口定义） |
 
 ## 11. 本章小结
 
