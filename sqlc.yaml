@@ -1,0 +1,14 @@
+version: "2"
+sql:
+  - engine: "mysql"
+    schema: "migrations/000001_init_schema.up.sql"
+    queries:
+      - "internal/meta/sql/lease.sql"
+      - "internal/meta/sql/task_runs_worker_heartbeats.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/meta/sqlcgen"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_empty_slices: true

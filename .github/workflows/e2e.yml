@@ -43,6 +43,9 @@ jobs:
       - name: Unit Tests
         run: go test ./...
 
+      - name: sqlc Verify
+        run: make sqlc-verify
+
       - name: E2E Suite
         run: |
           E2E_DIR="./tmp/e2e/data-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

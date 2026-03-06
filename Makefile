@@ -1,4 +1,4 @@
-.PHONY: help test ui-build e2e-quick e2e-full e2e migrate-up migrate-down migrate-version migrate-force
+.PHONY: help test ui-build e2e-quick e2e-full e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 help:
 	@echo "Targets:"
@@ -7,6 +7,8 @@ help:
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
 	@echo "  make e2e SCENARIOS=a,b,c        # run custom e2e scenarios"
+	@echo "  make sqlc-generate              # generate typed SQL code from sqlc.yaml"
+	@echo "  make sqlc-verify                # regenerate and check for no git diff"
 	@echo "  make migrate-up META_DSN=...    # apply DB migrations"
 	@echo "  make migrate-down META_DSN=...  # rollback one migration (blocked when MIGRATE_ENV=prod)"
 	@echo "  make migrate-version META_DSN=... # show current migration version"
@@ -46,3 +48,13 @@ migrate-force:
 		exit 1; \
 	fi
 	META_DSN="$(META_DSN)" MIGRATE_ENV="$(MIGRATE_ENV)" ALLOW_DESTRUCTIVE_MIGRATE="$(ALLOW_DESTRUCTIVE_MIGRATE)" go run ./cmd/migrate force "$(VERSION)"
+
+sqlc-generate:
+	@GOPROXY=$${GOPROXY:-https://proxy.golang.org,direct} \
+	GOSUMDB=$${GOSUMDB:-sum.golang.org} \
+	CGO_ENABLED=0 \
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.28.0 generate -f sqlc.yaml
+
+sqlc-verify:
+	@$(MAKE) sqlc-generate
+	git diff --exit-code

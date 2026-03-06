@@ -9,38 +9,59 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"binlog_server/internal/meta/sqlcgen"
 )
 
 const acquireLeaseSQL = `
+-- name: AcquireTaskLease :exec
 INSERT INTO task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
-VALUES (?, ?, 1, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), NOW(6))
+VALUES (
+  ?,
+  ?,
+  1,
+  DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
+  NOW(6)
+)
 ON DUPLICATE KEY UPDATE
   owner_worker_id = IF(lease_expire_at <= NOW(6), ?, owner_worker_id),
   epoch = IF(lease_expire_at <= NOW(6), epoch + 1, epoch),
-  lease_expire_at = IF(lease_expire_at <= NOW(6), DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), lease_expire_at),
-  renewed_at = IF(lease_expire_at <= NOW(6), NOW(6), renewed_at);
+  lease_expire_at = IF(
+    lease_expire_at <= NOW(6),
+    DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
+    lease_expire_at
+  ),
+  renewed_at = IF(lease_expire_at <= NOW(6), NOW(6), renewed_at)
 `
 
 const renewLeaseSQL = `
+-- name: RenewTaskLease :execresult
 UPDATE task_leases
 SET lease_expire_at = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), renewed_at = NOW(6)
-WHERE task_id = ? AND owner_worker_id = ? AND epoch = ?;
+WHERE task_id = ?
+  AND owner_worker_id = ?
+  AND epoch = ?
 `
 
 const releaseLeaseSQL = `
+-- name: ReleaseTaskLease :execresult
 UPDATE task_leases
 SET owner_worker_id = '', lease_expire_at = NOW(6), renewed_at = NOW(6)
-WHERE task_id = ? AND owner_worker_id = ? AND epoch = ?;
+WHERE task_id = ?
+  AND owner_worker_id = ?
+  AND epoch = ?
 `
 
 const getLeaseSQL = `
+-- name: GetTaskLease :one
 SELECT task_id, owner_worker_id, epoch, lease_expire_at, renewed_at
 FROM task_leases
-WHERE task_id = ?;
+WHERE task_id = ?
 `
 
 const currentDBTimeSQL = `
-SELECT NOW(6);
+-- name: GetCurrentDBTime :one
+SELECT NOW(6)
 `
 
 // Lease 表示某任务当前 lease 的持有信息。
@@ -75,6 +96,10 @@ func NewLeaseStoreFromTaskStore(store *MySQLTaskStore) *LeaseStore {
 	return &LeaseStore{db: store.db}
 }
 
+func (s *LeaseStore) queries() *sqlcgen.Queries {
+	return sqlcgen.New(s.db)
+}
+
 // Acquire 尝试获取 lease，返回 epoch 和是否成功。
 func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl time.Duration) (int64, bool, error) {
 	ctx, span := startMetaSpan(ctx, "meta.lease_store.acquire")
@@ -86,15 +111,11 @@ func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl t
 		ok    bool
 	)
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		_, err := s.db.ExecContext(
-			ctx,
-			acquireLeaseSQL,
-			taskID,
-			workerID,
-			ttlMicros,
-			workerID,
-			ttlMicros,
-		)
+		err := s.queries().AcquireTaskLease(ctx, sqlcgen.AcquireTaskLeaseParams{
+			TaskID:    taskID,
+			WorkerID:  workerID,
+			TtlMicros: ttlMicros,
+		})
 		if err != nil {
 			return err
 		}
@@ -131,14 +152,12 @@ func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch i
 	_ = now
 	var renewed bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		result, err := s.db.ExecContext(
-			ctx,
-			renewLeaseSQL,
-			durationToMicroseconds(ttl),
-			taskID,
-			workerID,
-			epoch,
-		)
+		result, err := s.queries().RenewTaskLease(ctx, sqlcgen.RenewTaskLeaseParams{
+			TtlMicros: durationToMicroseconds(ttl),
+			TaskID:    taskID,
+			WorkerID:  workerID,
+			Epoch:     epoch,
+		})
 		if err != nil {
 			return err
 		}
@@ -173,21 +192,20 @@ func (s *LeaseStore) Get(ctx context.Context, taskID string) (Lease, bool, error
 
 // getNoRetry 读取单任务 lease 记录（不带重试封装）。
 func (s *LeaseStore) getNoRetry(ctx context.Context, taskID string) (Lease, bool, error) {
-	row := s.db.QueryRowContext(ctx, getLeaseSQL, taskID)
-	var lease Lease
-	if err := row.Scan(
-		&lease.TaskID,
-		&lease.OwnerWorkerID,
-		&lease.Epoch,
-		&lease.LeaseExpireAt,
-		&lease.RenewedAt,
-	); err != nil {
+	row, err := s.queries().GetTaskLease(ctx, taskID)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return Lease{}, false, nil
 		}
 		return Lease{}, false, err
 	}
-	return lease, true, nil
+	return Lease{
+		TaskID:        row.TaskID,
+		OwnerWorkerID: row.OwnerWorkerID,
+		Epoch:         row.Epoch,
+		LeaseExpireAt: row.LeaseExpireAt,
+		RenewedAt:     row.RenewedAt,
+	}, true, nil
 }
 
 // Release 释放 lease（通过软过期而非删除行）。
@@ -197,7 +215,11 @@ func (s *LeaseStore) Release(ctx context.Context, taskID, workerID string, epoch
 
 	var released bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		result, err := s.db.ExecContext(ctx, releaseLeaseSQL, taskID, workerID, epoch)
+		result, err := s.queries().ReleaseTaskLease(ctx, sqlcgen.ReleaseTaskLeaseParams{
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Epoch:    epoch,
+		})
 		if err != nil {
 			return err
 		}
@@ -226,11 +248,7 @@ func (s *LeaseStore) currentDBTime(ctx context.Context) (time.Time, error) {
 
 // currentDBTimeNoRetry 获取数据库当前时间（不带重试）。
 func (s *LeaseStore) currentDBTimeNoRetry(ctx context.Context) (time.Time, error) {
-	var now time.Time
-	if err := s.db.QueryRowContext(ctx, currentDBTimeSQL).Scan(&now); err != nil {
-		return time.Time{}, err
-	}
-	return now, nil
+	return s.queries().GetCurrentDBTime(ctx)
 }
 
 // VerifyOwnership 校验给定 worker/epoch 当前是否仍拥有有效 lease。
