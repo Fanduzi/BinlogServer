@@ -454,6 +454,9 @@ func (s *MySQLTaskStore) hasIndex(ctx context.Context, tableName, indexName stri
 
 // UpsertTask 写入任务最新快照，并在状态收敛时补写 run 终态信息。
 func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.upsert_task")
+	defer endMetaSpan(span)
+
 	sourceJSON, err := json.Marshal(task.Source)
 	if err != nil {
 		return err
@@ -542,6 +545,9 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 
 // ListTasks 读取全部任务快照并反序列化配置字段。
 func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks")
+	defer endMetaSpan(span)
+
 	rows, err := s.db.QueryContext(ctx, listTaskSQL)
 	if err != nil {
 		return nil, err
@@ -605,12 +611,18 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 
 // DeleteTask 删除任务及其关联元数据。
 func (s *MySQLTaskStore) DeleteTask(ctx context.Context, taskID string) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.delete_task")
+	defer endMetaSpan(span)
+
 	_, err := s.db.ExecContext(ctx, deleteTaskSQL, taskID)
 	return err
 }
 
 // UpsertCheckpoint 写入任务 checkpoint 快照。
 func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, checkpoint binlog.Checkpoint) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.upsert_checkpoint")
+	defer endMetaSpan(span)
+
 	updatedAt := checkpoint.UpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = time.Now()
@@ -632,6 +644,9 @@ func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, ch
 
 // LoadCheckpoint 读取任务最近 checkpoint。
 func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.load_checkpoint")
+	defer endMetaSpan(span)
+
 	var (
 		cp      binlog.Checkpoint
 		gtidSet sql.NullString
@@ -650,6 +665,9 @@ func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (bin
 
 // AppendEvent 追加任务事件记录。
 func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.append_event")
+	defer endMetaSpan(span)
+
 	eventTime := event.Time
 	if eventTime.IsZero() {
 		eventTime = time.Now()
@@ -670,6 +688,9 @@ func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent)
 
 // ListEvents 按时间倒序读取任务事件，并限制返回条数。
 func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit int) ([]tasks.TaskEvent, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_events")
+	defer endMetaSpan(span)
+
 	if limit <= 0 {
 		limit = 200
 	}
@@ -700,6 +721,9 @@ func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit in
 
 // UpsertBinlogFile 写入/更新 binlog 文件元数据。
 func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.BinlogFile) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.upsert_binlog_file")
+	defer endMetaSpan(span)
+
 	createdAt := meta.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = time.Now()
@@ -741,6 +765,9 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 
 // ListBinlogFiles 列出任务 binlog 文件元数据（按更新时间倒序）。
 func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_binlog_files")
+	defer endMetaSpan(span)
+
 	if limit <= 0 {
 		limit = 200
 	}
@@ -784,6 +811,9 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 
 // ListFailedUploadBinlogFiles 列出上传失败的 sealed 文件。
 func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_failed_upload_binlog_files")
+	defer endMetaSpan(span)
+
 	if limit <= 0 {
 		limit = 100
 	}
@@ -830,6 +860,9 @@ func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID
 
 // CountUploadFailures 统计上传失败文件总数。
 func (s *MySQLTaskStore) CountUploadFailures(ctx context.Context) (int64, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.count_upload_failures")
+	defer endMetaSpan(span)
+
 	var count int64
 	row := s.db.QueryRowContext(ctx, countUploadFailuresSQL)
 	if err := row.Scan(&count); err != nil {
@@ -840,6 +873,9 @@ func (s *MySQLTaskStore) CountUploadFailures(ctx context.Context) (int64, error)
 
 // ListUploadFailureReasons 聚合任务上传失败原因并按次数排序。
 func (s *MySQLTaskStore) ListUploadFailureReasons(ctx context.Context, taskID string, limit int) ([]tasks.UploadFailureReason, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_upload_failure_reasons")
+	defer endMetaSpan(span)
+
 	if limit <= 0 {
 		limit = 20
 	}
@@ -905,6 +941,9 @@ func (s *MySQLTaskStore) ListUploadFailureReasons(ctx context.Context, taskID st
 
 // ListTaskRuns 列出任务运行历史记录。
 func (s *MySQLTaskStore) ListTaskRuns(ctx context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_task_runs")
+	defer endMetaSpan(span)
+
 	if limit <= 0 {
 		limit = 10
 	}
@@ -964,6 +1003,9 @@ func inferRunEndReason(task tasks.Task) string {
 
 // UpsertWorkerHeartbeat 写入 worker 心跳记录。
 func (s *MySQLTaskStore) UpsertWorkerHeartbeat(ctx context.Context, hb tasks.WorkerHeartbeat) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.upsert_worker_heartbeat")
+	defer endMetaSpan(span)
+
 	lastSeenAt := hb.LastSeenAt
 	if lastSeenAt.IsZero() {
 		lastSeenAt = time.Now()
@@ -982,6 +1024,9 @@ func (s *MySQLTaskStore) UpsertWorkerHeartbeat(ctx context.Context, hb tasks.Wor
 
 // ListWorkerHeartbeats 列出 worker 心跳快照。
 func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([]tasks.WorkerHeartbeat, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_worker_heartbeats")
+	defer endMetaSpan(span)
+
 	if limit <= 0 {
 		limit = 200
 	}
@@ -1021,6 +1066,9 @@ func (s *MySQLTaskStore) ListWorkerHeartbeats(ctx context.Context, limit int) ([
 // 3) 若被其他 session 占有但已过期，接管；
 // 4) 若被其他 session 活跃占有，返回 ok=false。
 func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID, sessionID string, ttl time.Duration) (bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.acquire_worker_registration")
+	defer endMetaSpan(span)
+
 	var ok bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		// 先执行“可接管条件更新”：
@@ -1061,6 +1109,9 @@ func (s *MySQLTaskStore) AcquireWorkerRegistration(ctx context.Context, workerID
 // RenewWorkerRegistration 为当前 session 续约 worker_id 注册。
 // 仅当 (worker_id, session_id) 精确匹配时更新成功；若返回 ok=false，表示所有权已不在当前 session。
 func (s *MySQLTaskStore) RenewWorkerRegistration(ctx context.Context, workerID, sessionID string, ttl time.Duration) (bool, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.renew_worker_registration")
+	defer endMetaSpan(span)
+
 	var ok bool
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		result, err := s.db.ExecContext(
@@ -1085,6 +1136,9 @@ func (s *MySQLTaskStore) RenewWorkerRegistration(ctx context.Context, workerID, 
 // ReleaseWorkerRegistration 释放当前 session 的 worker_id 注册记录。
 // 删除条件包含 session_id，避免误删其他实例刚接管的注册。
 func (s *MySQLTaskStore) ReleaseWorkerRegistration(ctx context.Context, workerID, sessionID string) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.release_worker_registration")
+	defer endMetaSpan(span)
+
 	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		_, err := s.db.ExecContext(
 			ctx,

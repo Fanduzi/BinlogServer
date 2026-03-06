@@ -4,6 +4,7 @@
 - `mysql_store.go`: 元数据持久化实现与 schema 校验。
 - `lease_store.go`: lease 读写逻辑。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
+- `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。
 
 ## Exports
 - Task/Checkpoint/Event/File/Lease/Run/Worker metadata 存储接口。
@@ -13,6 +14,7 @@
 - Upstream: `internal/tasks`, `internal/app`, `internal/replication`。
 - Downstream: MySQL (`database/sql`)。
 - Retry adaptor: `github.com/cenkalti/backoff/v4`（仅 `retry.go` 内部使用）。
+- Tracing: `go.opentelemetry.io/otel`（仅在 app 启用 tracing 时生效）。
 
 ## Update Rule
 - 表结构契约、查询语义、重试策略变化时，更新本文件。

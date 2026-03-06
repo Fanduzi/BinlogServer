@@ -50,6 +50,7 @@ type Server struct {
 	gin            *gin.Engine
 	auth           AuthConfig
 	metricsHandler http.Handler
+	tracing TracingConfig
 }
 
 // NewServer 构建 API/UI HTTP handler。
@@ -71,6 +72,7 @@ func NewServer(taskSvc taskService, opts ...ServerOption) http.Handler {
 		gin:            engine,
 		auth:           options.auth,
 		metricsHandler: newMetricsHandler(taskSvc),
+		tracing: options.tracing,
 	}
 	s.routes()
 	return s
@@ -78,6 +80,9 @@ func NewServer(taskSvc taskService, opts ...ServerOption) http.Handler {
 
 // routes 注册所有 HTTP 路由（system/tasks/cluster/swagger/ui）。
 func (s *Server) routes() {
+	if s.tracing.Enabled {
+		s.gin.Use(tracingMiddleware(s.tracing))
+	}
 	s.gin.GET("/healthz", gin.WrapF(s.handleHealth))
 	metricsHandlers := []gin.HandlerFunc{}
 	if s.auth.Enabled && s.auth.ProtectMetrics {
