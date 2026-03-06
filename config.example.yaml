@@ -50,6 +50,13 @@ meta:
     lease_sec: 2
     upload_sec: 30
 
+tracing:
+  enabled: false
+  exporter: "disabled" # disabled | otlp-http | otlp-grpc | jaeger
+  endpoint: "http://127.0.0.1:4318/v1/traces"
+  sample_ratio: 0.1
+  service_name: "binlog-server"
+
 log:
   level: "info"
   encoding: "json" # json | console

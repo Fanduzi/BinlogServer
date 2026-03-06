@@ -88,6 +88,9 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.Meta.Timeout.ReadSec <= 0 || cfg.Meta.Timeout.WriteSec <= 0 || cfg.Meta.Timeout.LeaseSec <= 0 || cfg.Meta.Timeout.UploadSec <= 0 {
 		t.Fatalf("expected positive meta timeout defaults, got %+v", cfg.Meta.Timeout)
 	}
+	if cfg.Tracing.Enabled || cfg.Tracing.Exporter != "disabled" || cfg.Tracing.SampleRatio != 0.1 {
+		t.Fatalf("unexpected tracing defaults: %+v", cfg.Tracing)
+	}
 	if !cfg.API.Auth.Enabled || cfg.API.Auth.Mode != "bearer" || cfg.API.Auth.BearerToken != "test-token" {
 		t.Fatalf("unexpected API auth defaults/overrides: %+v", cfg.API.Auth)
 	}
@@ -146,6 +149,12 @@ meta:
     write_sec: 9
     lease_sec: 6
     upload_sec: 21
+tracing:
+  enabled: true
+  exporter: "otlp-http"
+  endpoint: "http://127.0.0.1:4318/v1/traces"
+  sample_ratio: 0.5
+  service_name: "binlog-server-dev"
 log:
   level: "debug"
   encoding: "console"
@@ -209,6 +218,9 @@ log:
 	if cfg.Meta.Timeout.ReadSec != 4 || cfg.Meta.Timeout.WriteSec != 9 || cfg.Meta.Timeout.LeaseSec != 6 || cfg.Meta.Timeout.UploadSec != 21 {
 		t.Fatalf("unexpected meta timeout config: %+v", cfg.Meta.Timeout)
 	}
+	if !cfg.Tracing.Enabled || cfg.Tracing.Exporter != "otlp-http" || cfg.Tracing.SampleRatio != 0.5 || cfg.Tracing.ServiceName != "binlog-server-dev" {
+		t.Fatalf("unexpected tracing config: %+v", cfg.Tracing)
+	}
 }
 
 // TestLoadConfig_EnvOverridesYAML 验证相关行为。
@@ -252,6 +264,56 @@ upload:
 	}
 	if cfg.Meta.Timeout.ReadSec != 3 || cfg.Meta.Timeout.WriteSec != 5 || cfg.Meta.Timeout.LeaseSec != 2 || cfg.Meta.Timeout.UploadSec != 30 {
 		t.Fatalf("expected default meta timeout fallback for legacy yaml, got %+v", cfg.Meta.Timeout)
+	}
+}
+
+// TestLoadConfig_InvalidTracingSampleRatio 验证 tracing 采样率越界时返回错误。
+func TestLoadConfig_InvalidTracingSampleRatio(t *testing.T) {
+	setRequiredAuthEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+tracing:
+  enabled: true
+  exporter: "otlp-http"
+  endpoint: "http://127.0.0.1:4318/v1/traces"
+  sample_ratio: 1.5
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for invalid tracing.sample_ratio")
+	}
+	if !strings.Contains(err.Error(), "tracing.sample_ratio") {
+		t.Fatalf("expected tracing.sample_ratio validation error, got %v", err)
+	}
+}
+
+// TestLoadConfig_UnsupportedEnabledTracingExporter 验证启用 tracing 时仅支持 otlp-http。
+func TestLoadConfig_UnsupportedEnabledTracingExporter(t *testing.T) {
+	setRequiredAuthEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+tracing:
+  enabled: true
+  exporter: "jaeger"
+  endpoint: "http://127.0.0.1:4318/v1/traces"
+  sample_ratio: 0.5
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unsupported enabled tracing exporter")
+	}
+	if !strings.Contains(err.Error(), "otlp-http") {
+		t.Fatalf("expected otlp-http constraint in error, got %v", err)
 	}
 }
 

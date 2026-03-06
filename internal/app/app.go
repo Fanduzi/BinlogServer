@@ -68,6 +68,16 @@ func (a *App) Run(ctx context.Context) error {
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
+	tracerProvider, shutdownTracing, err := initTracing(a.cfg.Tracing)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = shutdownTracing(context.Background())
+	}()
+	meta.ConfigureTracing(a.cfg.Tracing.Enabled && a.cfg.Tracing.Exporter != "disabled", tracerProvider)
+	defer meta.ConfigureTracing(false, nil)
+
 	// 解析运行角色：是否对外提供 API（control-plane）以及是否执行任务（worker）。
 	controlPlaneEnabled, workerEnabled := resolveRoleMode(a.cfg)
 
@@ -92,7 +102,6 @@ func (a *App) Run(ctx context.Context) error {
 	if a.cfg.MetaDSN != "" {
 		// 如果配置了 metadata DB，把它同时注入 scheduler（control plane）
 		// 和 runner（data plane 的 checkpoint/file metadata）。
-		var err error
 		mysqlStore, err = meta.NewMySQLTaskStoreWithSchemaTimeout(
 			a.cfg.MetaDSN,
 			time.Duration(a.cfg.Meta.Timeout.WriteSec)*time.Second,
@@ -268,7 +277,7 @@ func (a *App) Run(ctx context.Context) error {
 		return nil
 	}
 
-	handler := api.NewServer(scheduler, api.WithAuth(api.AuthConfig{
+	apiOptions := []api.ServerOption{api.WithAuth(api.AuthConfig{
 		Enabled:        a.cfg.API.Auth.Enabled,
 		Mode:           api.AuthMode(strings.ToLower(strings.TrimSpace(a.cfg.API.Auth.Mode))),
 		BearerToken:    a.cfg.API.Auth.BearerToken,
@@ -276,7 +285,15 @@ func (a *App) Run(ctx context.Context) error {
 		APIKeyHeader:   a.cfg.API.Auth.APIKeyHeader,
 		ProtectAPI:     a.cfg.API.Auth.ProtectAPI,
 		ProtectMetrics: a.cfg.API.Auth.ProtectMetrics,
-	}))
+	})}
+	if a.cfg.Tracing.Enabled && a.cfg.Tracing.Exporter != "disabled" {
+		apiOptions = append(apiOptions, api.WithTracing(api.TracingConfig{
+			Enabled:        true,
+			ServiceName:    a.cfg.Tracing.ServiceName,
+			TracerProvider: tracerProvider,
+		}))
+	}
+	handler := api.NewServer(scheduler, apiOptions...)
 	server := buildHTTPServer(handler, a.cfg.HTTP.ControlPlane)
 
 	ln, err := net.Listen("tcp", a.cfg.ListenAddr)
