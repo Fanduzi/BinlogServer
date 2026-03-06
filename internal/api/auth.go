@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type AuthMode string
@@ -33,7 +34,15 @@ type AuthConfig struct {
 }
 
 type serverOptions struct {
-	auth AuthConfig
+	auth    AuthConfig
+	tracing TracingConfig
+}
+
+// TracingConfig 控制 API HTTP 入站 tracing 行为。
+type TracingConfig struct {
+	Enabled        bool
+	ServiceName    string
+	TracerProvider trace.TracerProvider
 }
 
 // ServerOption 用于覆盖 NewServer 默认配置。
@@ -46,6 +55,13 @@ func WithAuth(cfg AuthConfig) ServerOption {
 	}
 }
 
+// WithTracing 注入 API tracing 配置。
+func WithTracing(cfg TracingConfig) ServerOption {
+	return func(opts *serverOptions) {
+		opts.tracing = cfg
+	}
+}
+
 func defaultServerOptions() serverOptions {
 	return serverOptions{
 		auth: AuthConfig{
@@ -54,6 +70,10 @@ func defaultServerOptions() serverOptions {
 			APIKeyHeader:   "X-API-Key",
 			ProtectAPI:     false,
 			ProtectMetrics: false,
+		},
+		tracing: TracingConfig{
+			Enabled:     false,
+			ServiceName: "binlog-server",
 		},
 	}
 }

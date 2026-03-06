@@ -51,6 +51,8 @@ type Config struct {
 	HTTP HTTPConfig
 	// Meta 是内部依赖调用（存储/lease/上传）的超时配置。
 	Meta MetaConfig
+	// Tracing 是 OpenTelemetry tracing 配置（默认关闭）。
+	Tracing TracingConfig
 }
 
 // ClusterConfig 定义 cluster 角色和 lease 参数。
@@ -121,6 +123,15 @@ type MetaTimeoutConfig struct {
 	UploadSec int
 }
 
+// TracingConfig 定义 OpenTelemetry tracing 配置。
+type TracingConfig struct {
+	Enabled     bool
+	Exporter    string
+	Endpoint    string
+	SampleRatio float64
+	ServiceName string
+}
+
 // LoadConfig 按“默认值 < 配置文件 < 环境变量”顺序加载配置。
 func LoadConfig(path string) (Config, error) {
 	v := viper.New()
@@ -164,6 +175,11 @@ func LoadConfig(path string) (Config, error) {
 	v.SetDefault("meta.timeout.write_sec", 5)
 	v.SetDefault("meta.timeout.lease_sec", 2)
 	v.SetDefault("meta.timeout.upload_sec", 30)
+	v.SetDefault("tracing.enabled", false)
+	v.SetDefault("tracing.exporter", "disabled")
+	v.SetDefault("tracing.endpoint", "http://127.0.0.1:4318/v1/traces")
+	v.SetDefault("tracing.sample_ratio", 0.1)
+	v.SetDefault("tracing.service_name", "binlog-server")
 
 	if path != "" {
 		v.SetConfigFile(path)
@@ -296,6 +312,13 @@ func LoadConfig(path string) (Config, error) {
 				),
 			},
 		},
+		Tracing: TracingConfig{
+			Enabled:     getBool(v, "tracing.enabled", "tracing_enabled"),
+			Exporter:    strings.ToLower(getString(v, "tracing.exporter", "tracing_exporter")),
+			Endpoint:    getString(v, "tracing.endpoint", "tracing_endpoint"),
+			SampleRatio: getFloat64(v, "tracing.sample_ratio", "tracing_sample_ratio"),
+			ServiceName: getString(v, "tracing.service_name", "tracing_service_name"),
+		},
 	}
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
@@ -329,6 +352,16 @@ func getInt(v *viper.Viper, keys ...string) int {
 	for _, key := range keys {
 		if v.IsSet(key) {
 			return v.GetInt(key)
+		}
+	}
+	return 0
+}
+
+// getFloat64 返回首个已设置的浮点配置值。
+func getFloat64(v *viper.Viper, keys ...string) float64 {
+	for _, key := range keys {
+		if v.IsSet(key) {
+			return v.GetFloat64(key)
 		}
 	}
 	return 0
@@ -379,6 +412,9 @@ func validateConfig(cfg Config) error {
 		return err
 	}
 	if err := validateMetaTimeoutConfig("meta.timeout", cfg.Meta.Timeout); err != nil {
+		return err
+	}
+	if err := validateTracingConfig(cfg.Tracing); err != nil {
 		return err
 	}
 	return nil
@@ -438,6 +474,30 @@ func validateMetaTimeoutConfig(scope string, cfg MetaTimeoutConfig) error {
 	}
 	if cfg.UploadSec <= 0 {
 		return fmt.Errorf("%s.upload_sec must be > 0", scope)
+	}
+	return nil
+}
+
+func validateTracingConfig(cfg TracingConfig) error {
+	if strings.TrimSpace(cfg.Exporter) == "" {
+		return errors.New("tracing.exporter must not be empty")
+	}
+	switch cfg.Exporter {
+	case "disabled", "otlp-http", "otlp-grpc", "jaeger":
+	default:
+		return fmt.Errorf("tracing.exporter must be one of disabled|otlp-http|otlp-grpc|jaeger, got %q", cfg.Exporter)
+	}
+	if cfg.Enabled && cfg.Exporter != "disabled" && cfg.Exporter != "otlp-http" {
+		return fmt.Errorf("P5b currently supports tracing.exporter=otlp-http when enabled, got %q", cfg.Exporter)
+	}
+	if cfg.SampleRatio < 0 || cfg.SampleRatio > 1 {
+		return errors.New("tracing.sample_ratio must be within [0,1]")
+	}
+	if strings.TrimSpace(cfg.ServiceName) == "" {
+		return errors.New("tracing.service_name must not be empty")
+	}
+	if cfg.Enabled && cfg.Exporter != "disabled" && strings.TrimSpace(cfg.Endpoint) == "" {
+		return errors.New("tracing.endpoint must not be empty when tracing is enabled")
 	}
 	return nil
 }

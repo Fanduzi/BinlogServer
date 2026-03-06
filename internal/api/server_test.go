@@ -22,6 +22,10 @@ import (
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type fakeAPIRunner struct{}
@@ -817,6 +821,98 @@ func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
 	}
 	if got != 201 {
 		t.Fatalf("expected binlog_server_upload_failures_total=201, got %v", got)
+	}
+}
+
+// TestAPI_TracingDisabledHasZeroIngressSpans 验证默认关闭时不产生入站 span。
+func TestAPI_TracingDisabledHasZeroIngressSpans(t *testing.T) {
+	prevProvider := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(prevProvider)
+
+	spanRecorder := tracetest.NewSpanRecorder()
+	tracerProvider := sdktrace.NewTracerProvider()
+	tracerProvider.RegisterSpanProcessor(spanRecorder)
+	otel.SetTracerProvider(tracerProvider)
+
+	handler := NewServer(tasks.NewScheduler())
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := len(spanRecorder.Ended()); got != 0 {
+		t.Fatalf("expected no spans when tracing disabled, got %d", got)
+	}
+}
+
+// TestAPI_TracingEnabledCreatesIngressSpan 验证启用后会生成 HTTP 入站 span。
+func TestAPI_TracingEnabledCreatesIngressSpan(t *testing.T) {
+	spanRecorder := tracetest.NewSpanRecorder()
+	tracerProvider := sdktrace.NewTracerProvider()
+	tracerProvider.RegisterSpanProcessor(spanRecorder)
+
+	handler := NewServer(
+		tasks.NewScheduler(),
+		WithTracing(TracingConfig{
+			Enabled:        true,
+			ServiceName:    "binlog-server",
+			TracerProvider: tracerProvider,
+		}),
+	)
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	ended := spanRecorder.Ended()
+	if len(ended) == 0 {
+		t.Fatal("expected at least one span when tracing enabled")
+	}
+	if ended[0].Name() != "GET /api/tasks" {
+		t.Fatalf("unexpected span name: %s", ended[0].Name())
+	}
+}
+
+// BenchmarkAPIHealthzTracingDisabled 评估 tracing 关闭时的请求开销基线。
+func BenchmarkAPIHealthzTracingDisabled(b *testing.B) {
+	handler := NewServer(tasks.NewScheduler())
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			b.Fatalf("expected 200, got %d", resp.Code)
+		}
+	}
+}
+
+// BenchmarkAPIHealthzTracingEnabled 评估 tracing 开启时的请求开销。
+func BenchmarkAPIHealthzTracingEnabled(b *testing.B) {
+	tracerProvider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	handler := NewServer(
+		tasks.NewScheduler(),
+		WithTracing(TracingConfig{
+			Enabled:        true,
+			ServiceName:    "binlog-server",
+			TracerProvider: tracerProvider,
+		}),
+	)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			b.Fatalf("expected 200, got %d", resp.Code)
+		}
 	}
 }
 
