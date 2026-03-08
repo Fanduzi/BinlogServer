@@ -96,7 +96,7 @@ type SourceConfig struct {
 	Host     string `json:"host"`
 	Port     uint16 `json:"port"`
 	User     string `json:"user"`
-	Password string `json:"password,omitempty"`
+	Password string `json:"password,omitempty"` // 仅用于输入，API 响应前会清空
 	Flavor   string `json:"flavor"`
 	ServerID uint32 `json:"server_id"`
 	// SemiSync=true 时尝试以 semi-sync 协议拉流；主库不支持时会自动降级为异步。

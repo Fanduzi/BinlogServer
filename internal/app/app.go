@@ -63,6 +63,17 @@ func New(cfg config.Config) *App {
 // Run 启动应用运行时：按 mode/role 组装 scheduler 与 runner，
 // 在 cluster 场景维护 worker 注册、心跳与任务认领，并在 control-plane 模式对外提供 HTTP API。
 func (a *App) Run(ctx context.Context) error {
+	// 安全检查：生产环境强制要求认证。
+	if !a.cfg.API.Auth.Enabled {
+		if os.Getenv("PRODUCTION") == "true" {
+			return errors.New("api.auth.enabled must be true in PRODUCTION mode (set PRODUCTION=false for development)")
+		}
+		// 开发环境显示警告。
+		log.Printf("\x1b[33m\x1b[1m⚠️  SECURITY WARNING: API authentication is DISABLED\x1b[0m")
+		log.Printf("\x1b[33m   For production, set api.auth.enabled=true and configure your auth method.\x1b[0m")
+		log.Printf("\x1b[33m   See docs/security.md for details.\x1b[0m")
+	}
+
 	// runCtx 统一管理本次运行生命周期：
 	// 上游取消或内部致命事件（如注册所有权丢失）都会触发全链路退出。
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -286,6 +297,11 @@ func (a *App) Run(ctx context.Context) error {
 		ProtectAPI:     a.cfg.API.Auth.ProtectAPI,
 		ProtectMetrics: a.cfg.API.Auth.ProtectMetrics,
 	})}
+	apiOptions = append(apiOptions, api.WithRateLimit(api.RateLimiterConfig{
+		Enabled:           a.cfg.API.RateLimit.Enabled,
+		RequestsPerSecond: a.cfg.API.RateLimit.RequestsPerSecond,
+		Burst:             a.cfg.API.RateLimit.Burst,
+	}))
 	if a.cfg.Tracing.Enabled && a.cfg.Tracing.Exporter != "disabled" {
 		apiOptions = append(apiOptions, api.WithTracing(api.TracingConfig{
 			Enabled:        true,

@@ -21,12 +21,13 @@ import (
 // NewRootCommand 创建 binlog-server CLI 根命令。
 func NewRootCommand() *cobra.Command {
 	var configPath string
+	var encryptionKey string
 
 	root := &cobra.Command{
 		Use:   "binlog-server",
 		Short: "Centralized MySQL binlog backup service",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cfg, err := config.LoadConfig(configPath)
+			cfg, err := config.LoadConfigWithEncryption(configPath, encryptionKey)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
@@ -47,5 +48,6 @@ func NewRootCommand() *cobra.Command {
 	}
 
 	root.Flags().StringVarP(&configPath, "config", "c", "", "YAML config file path (default: ./config.yaml if exists)")
+	root.Flags().StringVar(&encryptionKey, "encryption-key", "", "Encryption key for encrypted config values (32 bytes for AES-256)")
 	return root
 }

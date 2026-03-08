@@ -34,8 +34,9 @@ type AuthConfig struct {
 }
 
 type serverOptions struct {
-	auth    AuthConfig
-	tracing TracingConfig
+	auth       AuthConfig
+	tracing    TracingConfig
+	rateLimit  RateLimiterConfig
 }
 
 // TracingConfig 控制 API HTTP 入站 tracing 行为。
@@ -62,6 +63,13 @@ func WithTracing(cfg TracingConfig) ServerOption {
 	}
 }
 
+// WithRateLimit 注入 API 速率限制配置。
+func WithRateLimit(cfg RateLimiterConfig) ServerOption {
+	return func(opts *serverOptions) {
+		opts.rateLimit = cfg
+	}
+}
+
 func defaultServerOptions() serverOptions {
 	return serverOptions{
 		auth: AuthConfig{
@@ -74,6 +82,11 @@ func defaultServerOptions() serverOptions {
 		tracing: TracingConfig{
 			Enabled:     false,
 			ServiceName: "binlog-server",
+		},
+		rateLimit: RateLimiterConfig{
+			Enabled:           true,
+			RequestsPerSecond: 100.0,
+			Burst:             200,
 		},
 	}
 }

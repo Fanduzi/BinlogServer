@@ -387,7 +387,90 @@ curl -H "X-API-Key: your-api-key-here" \
 - `enabled=true` 且启用保护时，必须配置对应的凭证（`bearer_token` 或 `api_key`）
 - `mode` 只能是 `bearer` 或 `api_key`
 
-### 3.7 HTTP 超时配置
+**生产环境认证警告：**
+
+当 `api.auth.enabled=false` 时，启动时会显示黄色警告：
+
+```
+⚠️  SECURITY WARNING: API authentication is DISABLED
+   For production, set api.auth.enabled=true and configure your auth method.
+   See docs/security.md for details.
+```
+
+如果设置环境变量 `PRODUCTION=true`，则服务拒绝在未启用认证时启动：
+
+```bash
+export PRODUCTION=true
+./binlog-server --config config.yaml
+# Error: api.auth.enabled must be true in PRODUCTION mode
+```
+
+### 3.7 API 限流配置
+
+为防止 API 滥用，Binlog Server 内置了基于 IP 的令牌桶限流器：
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api.rate_limit.enabled` | bool | true | 是否启用限流 |
+| `api.rate_limit.requests_per_second` | float | 100 | 每秒请求数上限 |
+| `api.rate_limit.burst` | int | 200 | 突发容量 |
+
+**限流机制说明：**
+
+- 基于**客户端 IP** 维度限流（支持 `X-Forwarded-For` 和 `X-Real-IP` 头）
+- 使用令牌桶算法，允许短时突发流量（burst）
+- 超过限制返回 HTTP 429：`{"error":"rate limit exceeded","code":429}`
+
+**配置示例：**
+
+```yaml
+api:
+  rate_limit:
+    enabled: true
+    requests_per_second: 100  # 100 req/s
+    burst: 200                # 允许短时突发到 200
+```
+
+**环境变量：**
+
+```bash
+export BINLOG_SERVER_API_RATE_LIMIT_ENABLED=true
+export BINLOG_SERVER_API_RATE_LIMIT_REQUESTS_PER_SECOND=100
+export BINLOG_SERVER_API_RATE_LIMIT_BURST=200
+```
+
+### 3.8 配置值加密
+
+对于无法使用环境变量的场景，支持在配置文件中使用 AES-256-GCM 加密值：
+
+**加密值格式：** `enc:aes256:<base64-encoded-ciphertext>`
+
+**使用步骤：**
+
+1. **生成 32 字节密钥**（AES-256 需要）：
+   ```bash
+   openssl rand -base64 32 | head -c 32
+   ```
+
+2. **在配置中使用加密值**：
+   ```yaml
+   api:
+     auth:
+       bearer_token: "enc:aes256:gK7vX2mP..."
+   ```
+
+3. **启动时提供密钥**：
+   ```bash
+   ./binlog-server --config config.yaml --encryption-key "your-32-byte-encryption-key"
+   ```
+
+**安全建议：**
+
+- 加密密钥应通过安全渠道注入（如 Kubernetes Secret、Vault）
+- 不要将加密密钥提交到版本控制
+- 优先使用环境变量，加密值作为备选方案
+
+### 3.9 HTTP 超时配置
 
 HTTP 超时配置用于防止慢连接拖垮服务，**两个独立的 HTTP 服务**各有独立配置：
 

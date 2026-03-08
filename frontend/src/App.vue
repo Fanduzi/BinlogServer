@@ -21,6 +21,9 @@
         <el-button :loading="loading" @click="refreshAll">
           <i class="fa-solid fa-rotate" /> 刷新
         </el-button>
+        <el-button @click="openSettings">
+          <i class="fa-solid fa-gear" /> 设置
+        </el-button>
       </div>
     </header>
 
@@ -503,11 +506,32 @@ e2e-mysql80,127.0.0.1,13307
         </div>
       </template>
     </el-drawer>
+
+    <!-- Settings Dialog -->
+    <el-dialog v-model="settingsVisible" title="设置" width="480px">
+      <el-form label-width="100px">
+        <el-form-item label="API Token">
+          <el-input
+            v-model="settingsToken"
+            type="password"
+            show-password
+            placeholder="输入 Bearer Token"
+          />
+          <div class="form-hint">
+            配置 API 认证令牌。启用认证后需要设置此项才能访问 API。
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="settingsVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveSettings">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   createTask,
@@ -527,6 +551,7 @@ import {
   stopTask,
   updateTask,
 } from "./api";
+import { getAuthToken, setAuthToken } from "./utils/auth.js";
 
 const loading = ref(false);
 const LEASE_RISK_SECONDS = 45;
@@ -539,6 +564,31 @@ const SOURCE_FLAVOR_MAX_LENGTH = 32;
 const START_FILE_MAX_LENGTH = 255;
 const RETENTION_DAYS_MIN = 1;
 const RETENTION_DAYS_MAX = 3650;
+
+// Settings state
+const settingsVisible = ref(false);
+const settingsToken = ref("");
+
+// Auth event listener
+onMounted(() => {
+  window.addEventListener("auth-required", () => {
+    settingsVisible.value = true;
+  });
+});
+
+function openSettings() {
+  settingsToken.value = getAuthToken() || "";
+  settingsVisible.value = true;
+}
+
+function saveSettings() {
+  setAuthToken(settingsToken.value);
+  settingsVisible.value = false;
+  ElMessage.success("设置已保存");
+  // Refresh to apply new auth token.
+  refreshAll();
+}
+
 const dashboard = reactive({
   generated_at: "",
   threshold_seconds: 30,
@@ -1617,6 +1667,13 @@ h1 {
   color: var(--sub);
   font-size: 12px;
   font-family: "IBM Plex Mono", monospace;
+}
+
+.form-hint {
+  margin-top: 6px;
+  color: var(--sub);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .lookup-state {

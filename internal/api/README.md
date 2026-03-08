@@ -1,44 +1,39 @@
 # internal/api Module
 
 ## Files
-- `server.go`: HTTP server/router 组装。
-- `metrics_prometheus.go`: `/metrics` 采集与输出（基于 `prometheus/client_golang`）。
-  核心指标名在无业务样本时也会输出占位样本，保证指标名可见性兼容。
-- `auth.go`: 路由级鉴权配置与认证中间件。
-- `tracing.go`: HTTP 入站 tracing middleware（OTel span）。
-- `handlers_tasks.go`: 任务相关 API 处理。
-- `handlers_cluster.go`: 集群观测与控制相关 API。
-- `swagger_docs_only.go`: swagger 注释占位。
-- `server_test.go`: API 行为测试（含 Bearer/API Key 鉴权失败/成功路径）。
+| File | Responsibility |
+|------|---------------|
+| `server.go` | HTTP server/router 组装、路由注册 |
+| `auth.go` | 路由级鉴权配置与认证中间件、ServerOption 定义 |
+| `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
+| `metrics_prometheus.go` | `/metrics` 采集与输出（基于 `prometheus/client_golang`） |
+| `tracing.go` | HTTP 入站 tracing middleware（OTel span） |
+| `handlers_tasks.go` | 任务相关 API 处理（CRUD、启动停止、checkpoint 等） |
+| `handlers_cluster.go` | 集群观测与控制相关 API（workers、overview） |
+| `swagger_docs_only.go` | swagger 注释占位 |
 
 ## Exports
-- `/api/tasks*`: 任务创建、启动、停止、查询、重传等。
-- `/api/cluster/*`, `/api/workers`: 集群与 worker 状态接口。
-- `/healthz`, `/readyz`: 健康检查接口。
-- 可配置鉴权：支持 `Bearer Token` 或 `API Key`；`/healthz` 默认匿名，`/metrics` 与 `/api/*` 可按配置开启保护。
+- `NewServer(taskService, ...ServerOption) http.Handler` - 创建 API 服务器
+- `WithAuth(AuthConfig) ServerOption` - 注入认证配置
+- `WithTracing(TracingConfig) ServerOption` - 注入 tracing 配置
+- `WithRateLimit(RateLimiterConfig) ServerOption` - 注入限流配置
+
+## Dependencies
+- Upstream: `internal/app` - 应用启动时注入
+- Downstream: `internal/tasks` - 任务服务接口
+- Metrics: `github.com/prometheus/client_golang`
+- Tracing: `go.opentelemetry.io/otel`
+
+## Features
+- 认证：支持 Bearer Token 或 API Key；`/healthz` 默认匿名，`/metrics` 与 `/api/*` 可配置保护
+- 限流：基于 IP 的令牌桶限流，默认 100 req/s，burst 200
+- Tracing：OTel HTTP span（可选）
 
 ## Validation Pilot (P4)
-- 试点采用 Gin binding + validator 替换手工 query parse/if：
+- Gin binding + validator 校验：
   - `/api/sources/lookup`（`host`/`port` 必填 + 端口格式校验）
   - `/api/tasks/{id}/files/retry-upload`（`limit` 范围 1..1000，默认 100）
   - `/api/tasks/{id}/upload-failures/reasons`（`limit` 范围 1..200，默认 20）
-- 错误映射保持兼容：`host is required` / `port is required` / `invalid port` / `invalid limit`。
-
-## Dependencies
-- Upstream: HTTP client/UI。
-- Downstream: `internal/tasks` service 接口。
-- Metrics: `github.com/prometheus/client_golang`（兼容现有 `binlog_server_*` 指标契约）。
-- Tracing: `go.opentelemetry.io/otel`（通过 app 配置按需启用，默认关闭）。
-
-## Observability Regression Guardrail
-- 指标契约：`binlog_server_replication_lag_seconds`、`binlog_server_checkpoint_age_seconds`、`binlog_server_worker_online` 在无业务样本时也要保留指标名可见性（占位样本）。
-- 本地回归建议至少执行：
-  - `go test ./internal/api -run MetricsEndpointContainsCoreMetrics -count=1`
-  - `make e2e-observability`
 
 ## Update Rule
-- 路由、请求/响应结构、错误语义变化时，更新本文件。
-
-## Package Comment Rule
-
-- Go 文件的软件包注释采用 `Package [package name] ...` 形式。
+- 路由、请求/响应结构、认证/限流配置变化时，更新本文件。

@@ -1,9 +1,64 @@
+// input: axios HTTP client, utils/auth.js for token management
+// output: API functions (getSummary, getDashboard, createTask, etc.)
+// pos: frontend API layer with auth interceptors for backend communication
+// note: if this file changes, update this header and frontend/README.md
+
 import axios from "axios";
+import { getAuthToken, clearAuthToken } from "./utils/auth.js";
 
 const http = axios.create({
   baseURL: "/",
   timeout: 10000,
 });
+
+// Request interceptor: add auth header if token is configured.
+http.interceptors.request.use(
+  (config) => {
+    const token = getAuthToken();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error),
+);
+
+// Response interceptor: handle 401 errors.
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      // Clear invalid token.
+      clearAuthToken();
+      // Show auth dialog if not already shown.
+      if (!window.__authDialogShown) {
+        window.__authDialogShown = true;
+        showAuthDialog();
+      }
+    }
+    return Promise.reject(error);
+  },
+);
+
+/**
+ * Show authentication required dialog.
+ */
+function showAuthDialog() {
+  const message = `API Authentication Required
+
+Please configure your API token:
+1. Get your token from the server administrator
+2. Open Settings and enter the token
+3. Refresh the page
+
+See docs/security.md for details.`;
+
+  if (confirm(message + "\n\nClick OK to open Settings")) {
+    // Trigger settings modal if available.
+    window.dispatchEvent(new CustomEvent("auth-required"));
+  }
+  window.__authDialogShown = false;
+}
 
 export async function getSummary() {
   const { data } = await http.get("/api/summary");
@@ -83,16 +138,22 @@ export async function getTaskLease(id) {
 }
 
 export async function listTaskRuns(id, limit = 10) {
-  const { data } = await http.get(`/api/tasks/${id}/runs`, { params: { limit } });
+  const { data } = await http.get(`/api/tasks/${id}/runs`, {
+    params: { limit },
+  });
   return data;
 }
 
 export async function listEvents(id, limit = 120) {
-  const { data } = await http.get(`/api/tasks/${id}/events`, { params: { limit } });
+  const { data } = await http.get(`/api/tasks/${id}/events`, {
+    params: { limit },
+  });
   return data;
 }
 
 export async function listFiles(id, limit = 80) {
-  const { data } = await http.get(`/api/tasks/${id}/files`, { params: { limit } });
+  const { data } = await http.get(`/api/tasks/${id}/files`, {
+    params: { limit },
+  });
   return data;
 }
