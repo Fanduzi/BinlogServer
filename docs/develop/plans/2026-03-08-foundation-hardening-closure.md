@@ -22,11 +22,10 @@
 1. `go test ./...`: PASS
 2. `go test -race ./internal/tasks ./internal/api ./internal/replication`: PASS
 3. `go vet ./...`: PASS
-4. `make e2e-quick`: FAIL（环境阻塞）
-   - 错误：`Cannot connect to the Docker daemon at unix:///Users/fan/.docker/run/docker.sock. Is the docker daemon running?`
-   - 结论：当前为本机 Docker 未启动导致，非代码回归证据。
+4. `make e2e-quick`: PASS（补跑通过）
+   - 说明：同日先前一次失败原因为本机 Docker daemon 未启动；启动后重跑通过。
 5. `/Users/fan/.codex/skills/check-three-level-doc/scripts/check_three_level_doc.sh`: PASS（`[three-level-doc] OK`）
 
 ## Residual Items
 
-1. 启动本机 Docker daemon 后，补跑 `make e2e-quick` 并回填结果。
+1. 无。
