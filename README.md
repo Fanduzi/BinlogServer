@@ -19,24 +19,28 @@ Swagger 使用指南：`docs/swagger-api-guide.md`
 
 ## Architecture
 
-Binlog Server 由命令入口层（`cmd`）、核心运行时（`internal`）、前端管理台（`frontend`）和工程脚本（`scripts`）组成。  
+Binlog Server 由命令入口层（`cmd`）、核心运行时（`internal`）、前端管理台（`frontend`）和工程脚本（`scripts`）组成。
 服务启动后，API 与 UI 统一由后端进程暴露；任务调度驱动复制与元数据持久化，前端通过 `/api/*` 进行控制与观测。
 
 ### Modules
 
 | Module | Description | Doc |
 |--------|-------------|-----|
-| `cmd` | 服务与迁移命令入口 | [README](cmd/README.md) |
 | `cmd/binlog-server` | 主服务启动命令 | [README](cmd/binlog-server/README.md) |
 | `cmd/migrate` | 数据库迁移命令 | [README](cmd/migrate/README.md) |
-| `internal` | 核心业务与基础设施模块 | [README](internal/README.md) |
-| `internal/api` | HTTP API 与路由 | [README](internal/api/README.md) |
+| `internal/api` | HTTP API 与路由、认证、限流 | [README](internal/api/README.md) |
+| `internal/app` | 应用生命周期与角色组装 | [README](internal/app/README.md) |
 | `internal/tasks` | 任务状态机与调度核心 | [README](internal/tasks/README.md) |
-| `internal/meta` | 元数据存储与 schema 校验 | [README](internal/meta/README.md) |
+| `internal/meta` | 元数据存储与 lease 管理 | [README](internal/meta/README.md) |
 | `internal/replication` | MySQL 复制执行链路 | [README](internal/replication/README.md) |
-| `frontend` | 管理台前端源码与构建 | [README](frontend/README.md) |
-| `scripts` | 构建与 E2E 脚本入口 | [README](scripts/README.md) |
-| `scripts/e2e` | E2E 套件与场景脚本 | [README](scripts/e2e/README.md) |
+| `internal/binlog` | Binlog 文件写入与 checkpoint | [README](internal/binlog/README.md) |
+| `internal/config` | YAML/环境变量配置加载与加密 | [README](internal/config/README.md) |
+| `internal/upload` | S3 兼容对象存储上传 | [README](internal/upload/README.md) |
+| `internal/logging` | 日志配置与轮转 | [README](internal/logging/README.md) |
+| `internal/ui` | 嵌入式前端静态文件 | [README](internal/ui/README.md) |
+| `internal/swaggerdocs` | Swagger 文档生成 | [README](internal/swaggerdocs/README.md) |
+| `frontend` | Vue3 管理台前端 | [README](frontend/README.md) |
+| `scripts/e2e` | E2E 测试套件 | [README](scripts/e2e/README.md) |
 
 ## 运行
 
@@ -75,6 +79,17 @@ export BINLOG_META_PASS='replace_me'
 export META_DSN="meta:${BINLOG_META_PASS}@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true"
 make migrate-up META_DSN="$META_DSN"
 ```
+
+> ⚠️ **Security Warning**
+>
+> By default, API authentication is **DISABLED** for development convenience.
+>
+> **For production deployments, you MUST:**
+> 1. Set `api.auth.enabled: true` (or `BINLOG_SERVER_API_AUTH_ENABLED=true`)
+> 2. Configure your authentication method (Bearer Token or API Key)
+> 3. Set `api.auth.protect_api: true` to enable route protection
+>
+> See [docs/security.md](docs/security.md) for detailed security configuration.
 
 可选上传（当前实现：S3 API 兼容对象存储）：
 - `BINLOG_SERVER_UPLOAD_ENDPOINT`

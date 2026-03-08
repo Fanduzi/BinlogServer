@@ -80,7 +80,15 @@ type LogConfig struct {
 
 // APIConfig 定义 API 鉴权控制配置。
 type APIConfig struct {
-	Auth APIAuthConfig
+	Auth      APIAuthConfig
+	RateLimit RateLimitConfig
+}
+
+// RateLimitConfig 定义 API 速率限制配置。
+type RateLimitConfig struct {
+	Enabled            bool
+	RequestsPerSecond  float64
+	Burst              int
 }
 
 // APIAuthConfig 定义 /metrics 与 /api/* 鉴权策略。
@@ -132,8 +140,24 @@ type TracingConfig struct {
 	ServiceName string
 }
 
-// LoadConfig 按“默认值 < 配置文件 < 环境变量”顺序加载配置。
+// LoadConfig 按"默认值 < 配置文件 < 环境变量"顺序加载配置。
+// 这是 LoadConfigWithEncryption 的包装，不使用加密。
 func LoadConfig(path string) (Config, error) {
+	return LoadConfigWithEncryption(path, "")
+}
+
+// LoadConfigWithEncryption 按"默认值 < 配置文件 < 环境变量"顺序加载配置。
+// encryptionKey 用于解密以 enc:aes256: 为前缀的配置值。
+func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error) {
+	var decryptor *Decryptor
+	if encryptionKey != "" {
+		var err error
+		decryptor, err = NewDecryptor(encryptionKey)
+		if err != nil {
+			return Config{}, fmt.Errorf("create decryptor: %w", err)
+		}
+	}
+
 	v := viper.New()
 	v.SetEnvPrefix("BINLOG_SERVER")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -163,6 +187,9 @@ func LoadConfig(path string) (Config, error) {
 	v.SetDefault("api.auth.api_key_header", "X-API-Key")
 	v.SetDefault("api.auth.protect_api", false)
 	v.SetDefault("api.auth.protect_metrics", false)
+	v.SetDefault("api.rate_limit.enabled", true)
+	v.SetDefault("api.rate_limit.requests_per_second", 100.0)
+	v.SetDefault("api.rate_limit.burst", 200)
 	v.SetDefault("http.control_plane.read_header_timeout_sec", 5)
 	v.SetDefault("http.control_plane.read_timeout_sec", 30)
 	v.SetDefault("http.control_plane.write_timeout_sec", 30)
@@ -200,54 +227,59 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	cfg := Config{
-		ListenAddr: getString(v, "listen_addr"),
-		DataDir:    getString(v, "data_dir"),
-		MetaDSN:    getString(v, "meta_dsn"),
-		Mode:       getString(v, "mode"),
+		ListenAddr: getString(v, decryptor, "listen_addr"),
+		DataDir:    getString(v, decryptor, "data_dir"),
+		MetaDSN:    getString(v, decryptor, "meta_dsn"),
+		Mode:       getString(v, decryptor, "mode"),
 		Cluster: ClusterConfig{
-			Role:                   getString(v, "cluster.role"),
-			WorkerID:               getString(v, "cluster.worker_id"),
-			WorkerHealthListenAddr: getString(v, "cluster.worker_health_listen_addr"),
+			Role:                   getString(v, decryptor, "cluster.role"),
+			WorkerID:               getString(v, decryptor, "cluster.worker_id"),
+			WorkerHealthListenAddr: getString(v, decryptor, "cluster.worker_health_listen_addr"),
 			LeaseTTLSec:            getInt(v, "cluster.lease_ttl_sec"),
 			LeaseRenewIntervalSec:  getInt(v, "cluster.lease_renew_interval_sec"),
 			LeaseGraceSec:          getInt(v, "cluster.lease_grace_sec"),
-			FailoverPolicy:         getString(v, "cluster.failover_policy"),
+			FailoverPolicy:         getString(v, decryptor, "cluster.failover_policy"),
 		},
-		UploadEndpoint: getString(v, "upload.endpoint", "upload_endpoint"),
-		UploadBucket:   getString(v, "upload.bucket", "upload_bucket"),
-		UploadAccessKey: getString(v,
+		UploadEndpoint: getString(v, decryptor, "upload.endpoint", "upload_endpoint"),
+		UploadBucket:   getString(v, decryptor, "upload.bucket", "upload_bucket"),
+		UploadAccessKey: getString(v, decryptor,
 			"upload.access_key",
 			"upload_access_key",
 		),
-		UploadSecretKey: getString(v,
+		UploadSecretKey: getString(v, decryptor,
 			"upload.secret_key",
 			"upload_secret_key",
 		),
-		UploadRegion: getString(v, "upload.region", "upload_region"),
-		UploadPrefix: getString(v, "upload.prefix", "upload_prefix"),
+		UploadRegion: getString(v, decryptor, "upload.region", "upload_region"),
+		UploadPrefix: getString(v, decryptor, "upload.prefix", "upload_prefix"),
 		UploadUseSSL: getBool(v, "upload.use_ssl", "upload_use_ssl"),
 		Log: LogConfig{
-			Level:          getString(v, "log.level", "log_level"),
-			Encoding:       getString(v, "log.encoding", "log_encoding"),
-			File:           getString(v, "log.file", "log_file"),
+			Level:          getString(v, decryptor, "log.level", "log_level"),
+			Encoding:       getString(v, decryptor, "log.encoding", "log_encoding"),
+			File:           getString(v, decryptor, "log.file", "log_file"),
 			MaxSizeMB:      getInt(v, "log.max_size_mb", "log_max_size_mb"),
 			MaxBackups:     getInt(v, "log.max_backups", "log_max_backups"),
 			MaxAgeDays:     getInt(v, "log.max_age_days", "log_max_age_days"),
 			Compress:       getBool(v, "log.compress", "log_compress"),
-			RotateInterval: getString(v, "log.rotate_interval", "log_rotate_interval"),
+			RotateInterval: getString(v, decryptor, "log.rotate_interval", "log_rotate_interval"),
 		},
 		API: APIConfig{
 			Auth: APIAuthConfig{
 				Enabled:      getBool(v, "api.auth.enabled", "api_auth_enabled"),
-				Mode:         strings.ToLower(getString(v, "api.auth.mode", "api_auth_mode")),
-				BearerToken:  getString(v, "api.auth.bearer_token", "api_auth_bearer_token"),
-				APIKey:       getString(v, "api.auth.api_key", "api_auth_api_key"),
-				APIKeyHeader: getString(v, "api.auth.api_key_header", "api_auth_api_key_header"),
+				Mode:         strings.ToLower(getString(v, decryptor, "api.auth.mode", "api_auth_mode")),
+				BearerToken:  getString(v, decryptor, "api.auth.bearer_token", "api_auth_bearer_token"),
+				APIKey:       getString(v, decryptor, "api.auth.api_key", "api_auth_api_key"),
+				APIKeyHeader: getString(v, decryptor, "api.auth.api_key_header", "api_auth_api_key_header"),
 				ProtectAPI:   getBool(v, "api.auth.protect_api", "api_auth_protect_api"),
 				ProtectMetrics: getBool(v,
 					"api.auth.protect_metrics",
 					"api_auth_protect_metrics",
 				),
+			},
+			RateLimit: RateLimitConfig{
+				Enabled:           getBool(v, "api.rate_limit.enabled", "api_rate_limit_enabled"),
+				RequestsPerSecond: getFloat64(v, "api.rate_limit.requests_per_second", "api_rate_limit_requests_per_second"),
+				Burst:             getInt(v, "api.rate_limit.burst", "api_rate_limit_burst"),
 			},
 		},
 		HTTP: HTTPConfig{
@@ -314,10 +346,10 @@ func LoadConfig(path string) (Config, error) {
 		},
 		Tracing: TracingConfig{
 			Enabled:     getBool(v, "tracing.enabled", "tracing_enabled"),
-			Exporter:    strings.ToLower(getString(v, "tracing.exporter", "tracing_exporter")),
-			Endpoint:    getString(v, "tracing.endpoint", "tracing_endpoint"),
+			Exporter:    strings.ToLower(getString(v, decryptor, "tracing.exporter", "tracing_exporter")),
+			Endpoint:    getString(v, decryptor, "tracing.endpoint", "tracing_endpoint"),
 			SampleRatio: getFloat64(v, "tracing.sample_ratio", "tracing_sample_ratio"),
-			ServiceName: getString(v, "tracing.service_name", "tracing_service_name"),
+			ServiceName: getString(v, decryptor, "tracing.service_name", "tracing_service_name"),
 		},
 	}
 	if err := validateConfig(cfg); err != nil {
@@ -328,10 +360,20 @@ func LoadConfig(path string) (Config, error) {
 }
 
 // getString 返回首个非空配置值（按 keys 顺序）。
-func getString(v *viper.Viper, keys ...string) string {
+// 支持 enc:aes256: 前缀的解密。
+func getString(v *viper.Viper, decryptor *Decryptor, keys ...string) string {
 	for _, key := range keys {
 		if val := strings.TrimSpace(v.GetString(key)); val != "" {
-			return expandEnvPlaceholders(val)
+			val = expandEnvPlaceholders(val)
+			if decryptor != nil {
+				decrypted, err := decryptor.DecryptIfEncrypted(val)
+				if err != nil {
+					log.Printf("config warning: failed to decrypt key %q: %v", key, err)
+					continue
+				}
+				val = decrypted
+			}
+			return val
 		}
 	}
 	return ""
@@ -385,6 +427,8 @@ func warnSensitivePlaintextInConfig(v *viper.Viper) {
 		"meta_dsn",
 		"upload.access_key",
 		"upload.secret_key",
+		"api.auth.bearer_token",
+		"api.auth.api_key",
 	}
 	for _, key := range sensitiveKeys {
 		if !v.InConfig(key) {
