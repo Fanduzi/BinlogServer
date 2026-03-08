@@ -801,9 +801,37 @@ func TestAPI_MetricsEndpointContainsCoreMetricsWithoutReplicationProgress(t *tes
 
 	body := resp.Body.String()
 	required := []string{
+		"binlog_server_task_state_count",
 		"binlog_server_replication_lag_seconds",
 		"binlog_server_checkpoint_age_seconds",
 		"binlog_server_worker_online",
+		"binlog_server_upload_failures_total",
+	}
+	for _, name := range required {
+		if !strings.Contains(body, name) {
+			t.Fatalf("expected metrics output contains %s, body=%s", name, body)
+		}
+	}
+}
+
+// TestAPI_MetricsEndpointCoreMetricsExistOnEmptySystem 验证空系统下核心指标名仍可见。
+func TestAPI_MetricsEndpointCoreMetricsExistOnEmptySystem(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	body := resp.Body.String()
+	required := []string{
+		"binlog_server_replication_lag_seconds",
+		"binlog_server_checkpoint_age_seconds",
+		"binlog_server_worker_online",
+		"binlog_server_upload_failures_total",
 	}
 	for _, name := range required {
 		if !strings.Contains(body, name) {

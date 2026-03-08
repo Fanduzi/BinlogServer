@@ -51,6 +51,7 @@
 ```bash
 make e2e-quick
 make e2e-full
+make e2e-observability
 make e2e SCENARIOS=smoke,compression
 ```
 
