@@ -30,6 +30,12 @@
 - Metrics: `github.com/prometheus/client_golang`（兼容现有 `binlog_server_*` 指标契约）。
 - Tracing: `go.opentelemetry.io/otel`（通过 app 配置按需启用，默认关闭）。
 
+## Observability Regression Guardrail
+- 指标契约：`binlog_server_replication_lag_seconds`、`binlog_server_checkpoint_age_seconds`、`binlog_server_worker_online` 在无业务样本时也要保留指标名可见性（占位样本）。
+- 本地回归建议至少执行：
+  - `go test ./internal/api -run MetricsEndpointContainsCoreMetrics -count=1`
+  - `make e2e-observability`
+
 ## Update Rule
 - 路由、请求/响应结构、错误语义变化时，更新本文件。
 
