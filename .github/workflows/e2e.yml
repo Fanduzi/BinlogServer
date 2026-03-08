@@ -108,8 +108,9 @@ jobs:
 
       - name: E2E Observability Scenario
         run: |
-          E2E_DIR="./tmp/e2e/data-ci-observability-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          E2E_SERVER_LOG="/tmp/binlog-server-observability.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --scenarios smoke-observability
+          E2E_DATA_DIR="./tmp/e2e/data-ci-observability-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+          E2E_SERVER_LOG="/tmp/binlog-server-observability.log" \
+          make e2e-observability
 
       - name: Dump Logs On Failure
         if: failure()
