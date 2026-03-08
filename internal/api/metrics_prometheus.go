@@ -110,6 +110,7 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.taskStateCountDesc, prometheus.GaugeValue, float64(stateCount[state]), state)
 	}
 
+	replicationLagEmitted := false
 	for _, task := range items {
 		progress, ok, err := c.tasks.GetReplicationProgress(task.ID)
 		if err != nil || !ok || progress.LastEventAt.IsZero() {
@@ -120,8 +121,13 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			lag = 0
 		}
 		ch <- prometheus.MustNewConstMetric(c.replicationLagSeconds, prometheus.GaugeValue, lag, task.ID)
+		replicationLagEmitted = true
+	}
+	if !replicationLagEmitted {
+		ch <- prometheus.MustNewConstMetric(c.replicationLagSeconds, prometheus.GaugeValue, 0, "")
 	}
 
+	checkpointAgeEmitted := false
 	for _, task := range items {
 		checkpoint, ok, err := c.tasks.GetCheckpoint(context.Background(), task.ID)
 		if err != nil || !ok || checkpoint.UpdatedAt.IsZero() {
@@ -132,10 +138,15 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			age = 0
 		}
 		ch <- prometheus.MustNewConstMetric(c.checkpointAgeSeconds, prometheus.GaugeValue, age, task.ID)
+		checkpointAgeEmitted = true
+	}
+	if !checkpointAgeEmitted {
+		ch <- prometheus.MustNewConstMetric(c.checkpointAgeSeconds, prometheus.GaugeValue, 0, "")
 	}
 
 	heartbeats, err := c.tasks.ListWorkerHeartbeats(200)
 	if err == nil {
+		workerOnlineEmitted := false
 		sort.Slice(heartbeats, func(i, j int) bool {
 			return heartbeats[i].WorkerID < heartbeats[j].WorkerID
 		})
@@ -146,6 +157,10 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 				value = 1.0
 			}
 			ch <- prometheus.MustNewConstMetric(c.workerOnlineDesc, prometheus.GaugeValue, value, hb.WorkerID)
+			workerOnlineEmitted = true
+		}
+		if !workerOnlineEmitted {
+			ch <- prometheus.MustNewConstMetric(c.workerOnlineDesc, prometheus.GaugeValue, 0, "")
 		}
 	}
 

@@ -780,6 +780,38 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 	}
 }
 
+// TestAPI_MetricsEndpointContainsCoreMetricsWithoutReplicationProgress 验证未上报复制进度时也暴露核心指标名。
+func TestAPI_MetricsEndpointContainsCoreMetricsWithoutReplicationProgress(t *testing.T) {
+	store := newFakeAPIRunHistoryStore()
+	scheduler := tasks.NewScheduler(
+		tasks.WithStore(store),
+	)
+	handler := NewServer(scheduler)
+
+	if _, err := scheduler.CreateTask("cluster-a", "cluster-a-key"); err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	body := resp.Body.String()
+	required := []string{
+		"binlog_server_replication_lag_seconds",
+		"binlog_server_checkpoint_age_seconds",
+		"binlog_server_worker_online",
+	}
+	for _, name := range required {
+		if !strings.Contains(body, name) {
+			t.Fatalf("expected metrics output contains %s, body=%s", name, body)
+		}
+	}
+}
+
 // TestAPI_MetricsUploadFailuresTotalCountsAllRecords 验证相关行为。
 func TestAPI_MetricsUploadFailuresTotalCountsAllRecords(t *testing.T) {
 	store := newFakeAPIRunHistoryStore()
