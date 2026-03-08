@@ -1,4 +1,4 @@
-.PHONY: help test ui-build e2e-quick e2e-full e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test ui-build e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 help:
 	@echo "Targets:"
@@ -6,6 +6,7 @@ help:
 	@echo "  make ui-build                   # build frontend and sync to internal/ui/static"
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
+	@echo "  make e2e-observability          # run observability e2e (smoke-observability)"
 	@echo "  make e2e SCENARIOS=a,b,c        # run custom e2e scenarios"
 	@echo "  make sqlc-generate              # generate typed SQL code from sqlc.yaml"
 	@echo "  make sqlc-verify                # regenerate and check for no git diff"
@@ -25,6 +26,9 @@ e2e-quick:
 
 e2e-full:
 	./scripts/e2e/run-suite.sh --profile full
+
+e2e-observability:
+	./scripts/e2e/run-suite.sh --scenarios smoke-observability
 
 e2e:
 	@if [ -z "$(SCENARIOS)" ]; then \
