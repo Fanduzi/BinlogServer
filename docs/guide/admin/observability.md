@@ -30,40 +30,30 @@ curl http://localhost:8080/metrics
 
 **任务指标：**
 
-| 指标名 | 类型 | 说明 |
-|--------|------|------|
-| `binlog_server_tasks_total` | gauge | 任务总数 |
-| `binlog_server_tasks_by_state` | gauge | 各状态任务数 |
-| `binlog_server_task_started_total` | counter | 任务启动次数 |
-| `binlog_server_task_stopped_total` | counter | 任务停止次数 |
-| `binlog_server_task_errors_total` | counter | 任务错误次数 |
+| 指标名 | 类型 | 标签 | 说明 |
+|--------|------|------|------|
+| `binlog_server_task_state_count` | gauge | `state` | 各状态任务数 |
 
 **复制指标：**
 
-| 指标名 | 类型 | 说明 |
-|--------|------|------|
-| `binlog_server_replication_lag_seconds` | gauge | 复制延迟（秒） |
-| `binlog_server_replication_connected` | gauge | 是否连接（0/1） |
-| `binlog_server_binlog_events_total` | counter | 收到的 binlog 事件数 |
-| `binlog_server_binlog_bytes_total` | counter | 收到的 binlog 字节数 |
-| `binlog_server_binlog_files_total` | counter | 写入的文件数 |
+| 指标名 | 类型 | 标签 | 说明 |
+|--------|------|------|------|
+| `binlog_server_replication_lag_seconds` | gauge | `task_id` | 复制延迟（秒） |
+| `binlog_server_checkpoint_age_seconds` | gauge | `task_id` | Checkpoint 年龄（秒） |
 
-**文件指标：**
+**Worker 指标：**
 
-| 指标名 | 类型 | 说明 |
-|--------|------|------|
-| `binlog_server_file_size_bytes` | gauge | 当前文件大小 |
-| `binlog_server_files_uploaded_total` | counter | 上传成功的文件数 |
-| `binlog_server_files_upload_failed_total` | counter | 上传失败的文件数 |
+| 指标名 | 类型 | 标签 | 说明 |
+|--------|------|------|------|
+| `binlog_server_worker_online` | gauge | `worker_id` | Worker 在线状态（1=在线，0=离线） |
 
-**集群指标：**
+**上传指标：**
 
-| 指标名 | 类型 | 说明 |
-|--------|------|------|
-| `binlog_server_workers_active` | gauge | 活跃 worker 数 |
-| `binlog_server_lease_renew_total` | counter | 租约续租次数 |
-| `binlog_server_lease_renew_failed_total` | counter | 租约续租失败次数 |
-| `binlog_server_lease_acquired_total` | counter | 租约获取次数 |
+| 指标名 | 类型 | 标签 | 说明 |
+|--------|------|------|------|
+| `binlog_server_upload_failures_total` | gauge | - | 上传失败的文件记录数 |
+| `binlog_server_upload_retry_total` | counter | `result` | 重试上传 API 调用结果（success/failed/skipped） |
+| `binlog_server_upload_retry_last_ts` | gauge | - | 最近一次重试上传 API 执行时间（Unix 时间戳） |
 
 **Go 运行时指标：**
 
@@ -108,29 +98,33 @@ scrape_configs:
 **任务状态分布：**
 
 ```promql
-binlog_server_tasks_by_state
+binlog_server_task_state_count
 ```
 
-**P95 复制延迟：**
+**复制延迟（按任务）：**
 
 ```promql
-histogram_quantile(0.95,
-  rate(binlog_server_replication_lag_seconds_bucket[5m])
-)
+binlog_server_replication_lag_seconds
 ```
 
-**每秒 binlog 流量：**
+**Checkpoint 年龄：**
 
 ```promql
-rate(binlog_server_binlog_bytes_total[1m])
+binlog_server_checkpoint_age_seconds
 ```
 
-**上传成功率：**
+**Worker 在线状态：**
 
 ```promql
-rate(binlog_server_files_uploaded_total[5m])
+binlog_server_worker_online
+```
+
+**上传重试成功率：**
+
+```promql
+sum(rate(binlog_server_upload_retry_total{result="success"}[5m]))
 /
-(rate(binlog_server_files_uploaded_total[5m]) + rate(binlog_server_files_upload_failed_total[5m]))
+sum(rate(binlog_server_upload_retry_total[5m]))
 ```
 
 ## 4. 告警规则
@@ -143,14 +137,6 @@ groups:
   - name: binlog-server
     rules:
       # 任务告警
-      - alert: TaskDown
-        expr: binlog_server_replication_connected == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Task {{ $labels.task_id }} is not connected"
-
       - alert: TaskHighLag
         expr: binlog_server_replication_lag_seconds > 30
         for: 5m
@@ -159,39 +145,55 @@ groups:
         annotations:
           summary: "Task {{ $labels.task_id }} has high replication lag"
 
-      - alert: TaskRestarting
-        expr: rate(binlog_server_task_started_total[5m]) > 0.1
+      - alert: TaskCheckpointStale
+        expr: binlog_server_checkpoint_age_seconds > 300
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Task {{ $labels.task_id }} is restarting frequently"
+          summary: "Task {{ $labels.task_id }} checkpoint is stale"
+
+      - alert: TaskInFailedState
+        expr: binlog_server_task_state_count{state="FAILED"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Task is in FAILED state"
 
       # 集群告警
       - alert: NoActiveWorkers
-        expr: binlog_server_workers_active == 0
+        expr: sum(binlog_server_worker_online) == 0
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "No active workers in the cluster"
 
-      - alert: WorkerLeaseRenewFailed
-        expr: rate(binlog_server_lease_renew_failed_total[5m]) > 0
+      - alert: WorkerOffline
+        expr: binlog_server_worker_online == 0
         for: 2m
         labels:
           severity: warning
         annotations:
-          summary: "Worker {{ $labels.worker_id }} lease renew failing"
+          summary: "Worker {{ $labels.worker_id }} is offline"
 
       # 上传告警
-      - alert: UploadFailing
-        expr: rate(binlog_server_files_upload_failed_total[5m]) > 0
+      - alert: UploadFailuresExist
+        expr: binlog_server_upload_failures_total > 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Upload failing for task {{ $labels.task_id }}"
+          summary: "Upload failures exist for tasks"
+
+      - alert: UploadRetryFailing
+        expr: rate(binlog_server_upload_retry_total{result="failed"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Upload retry is failing"
 ```
 
 ### 4.2 告警分级
