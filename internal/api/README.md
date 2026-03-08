@@ -3,6 +3,7 @@
 ## Files
 - `server.go`: HTTP server/router 组装。
 - `metrics_prometheus.go`: `/metrics` 采集与输出（基于 `prometheus/client_golang`）。
+  核心指标名在无业务样本时也会输出占位样本，保证指标名可见性兼容。
 - `auth.go`: 路由级鉴权配置与认证中间件。
 - `tracing.go`: HTTP 入站 tracing middleware（OTel span）。
 - `handlers_tasks.go`: 任务相关 API 处理。
