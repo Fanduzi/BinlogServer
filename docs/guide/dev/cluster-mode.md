@@ -427,15 +427,30 @@ Worker A           MySQL            Worker B
 
 ```yaml
 cluster:
-  role: "worker"              # 角色
-  worker_id: "worker-1"       # 唯一标识
-  claim_interval: "5s"        # Claim 检查间隔
-  heartbeat_interval: "10s"   # 心跳间隔
+  role: "worker"              # 角色: control-plane / worker / all-in-one
+  worker_id: "worker-1"       # 唯一标识（可选，不配置则自动生成）
+  worker_health_listen_addr: ""  # worker 健康检查地址（仅 role=worker 时生效）
+  lease_ttl_sec: 15           # 租约有效期（秒）
+  lease_renew_interval_sec: 5  # 续租间隔（秒）
+  lease_grace_sec: 30         # 宽限期（秒）
+  failover_policy: "rebuild_current_file"  # 故障恢复策略
+```
 
-lease:
-  ttl: "30s"                  # 租约有效期
-  renew_interval: "10s"       # 续租间隔
-  grace_period: "60s"         # 宽限期
+**配置说明：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `cluster.role` | all-in-one | 角色：control-plane / worker / all-in-one |
+| `cluster.worker_id` | 自动生成 | Worker 唯一标识，不配置则自动生成并持久化到 `.worker-id` 文件 |
+| `cluster.lease_ttl_sec` | 15 | 任务租约有效期（秒），也是 worker registration 的租期 |
+| `cluster.lease_renew_interval_sec` | 5 | 任务续租间隔，worker registration 续租也复用该值 |
+| `cluster.lease_grace_sec` | 30 | 续租失败后的宽限期 |
+| `cluster.failover_policy` | rebuild_current_file | 故障恢复时重建当前 binlog 文件 |
+
+**推荐配置关系：**
+
+```
+lease_renew_interval_sec < lease_ttl_sec < lease_grace_sec
 ```
 
 ## 8. 代码位置
