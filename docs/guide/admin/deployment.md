@@ -109,6 +109,14 @@ log:
   max_backups: 7
   max_age_days: 30
   compress: true
+
+# Tracing 配置（可选，用于分布式追踪）
+tracing:
+  enabled: false                    # 是否启用 tracing
+  service_name: "binlog-server"     # 服务名称
+  exporter_type: "otlp-http"        # 导出器类型：otlp-http / stdout
+  otlp_http_endpoint: ""            # OTLP HTTP 端点（如 http://jaeger:4318/v1/traces）
+  sample_ratio: 1.0                # 采样率（0.0-1.0，生产环境建议 0.1 或更低）
 ```
 
 ```bash
