@@ -1,9 +1,10 @@
-.PHONY: help test ui-build e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test ui-build release-assets e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 help:
 	@echo "Targets:"
 	@echo "  make test                       # run unit tests"
 	@echo "  make ui-build                   # build frontend and sync to internal/ui/static"
+	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
 	@echo "  make e2e-observability          # run observability e2e (smoke-observability)"
@@ -20,6 +21,9 @@ test:
 
 ui-build:
 	./scripts/build-ui.sh
+
+release-assets:
+	VERSION="$(VERSION)" ./scripts/release-assets.sh
 
 e2e-quick:
 	./scripts/e2e/run-suite.sh --profile quick
