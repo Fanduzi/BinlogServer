@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+Maintenance rules:
+
+- Add user-visible or operator-visible changes to `Unreleased` as they land.
+- Before a release, review `Unreleased` and make sure schema, config, `sqlc`, and observability changes are clearly called out.
+- When cutting a release, move `Unreleased` entries into a dated release section and start a fresh `Unreleased` block.
+
 ## [Unreleased]
 
 ### Added
