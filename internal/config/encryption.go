@@ -8,6 +8,7 @@ package config
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	crypto_rand "crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -112,10 +113,10 @@ func (d *Decryptor) Encrypt(plaintext string) (string, error) {
 	}
 
 	nonce := make([]byte, gcm.NonceSize())
-	// 使用简单的 nonce 生成（生产环境应使用 crypto/rand）
-	// 注意：这里仅用于生成工具，实际解密时 nonce 从密文中提取
-	for i := range nonce {
-		nonce[i] = byte(i)
+	// 使用加密安全的随机数生成器生成 nonce
+	// AES-GCM 的安全性依赖于 nonce 的唯一性，必须使用 crypto/rand
+	if _, err := crypto_rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("generate nonce failed: %w", err)
 	}
 
 	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
