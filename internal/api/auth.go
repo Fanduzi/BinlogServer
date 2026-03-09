@@ -6,6 +6,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -116,7 +117,7 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 				c.AbortWithStatus(http.StatusUnauthorized)
 				return
 			}
-			if presented != s.auth.APIKey {
+			if subtle.ConstantTimeCompare([]byte(presented), []byte(s.auth.APIKey)) != 1 {
 				c.AbortWithStatus(http.StatusForbidden)
 				return
 			}
@@ -140,7 +141,7 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 				c.AbortWithStatus(http.StatusUnauthorized)
 				return
 			}
-			if token != s.auth.BearerToken {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.auth.BearerToken)) != 1 {
 				c.AbortWithStatus(http.StatusForbidden)
 				return
 			}
