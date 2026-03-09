@@ -1,8 +1,33 @@
 # binlog_server
 
-Binlog Server 是一个用于拉取 MySQL binlog、落盘 sealed 文件、持久化 checkpoint，并通过 lease 调度任务执行的 Go 服务。
+Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负责从源库持续读取 binlog、落盘本地文件、持久化 checkpoint，并提供 API 控制、UI、S3-compatible upload 与集群调度能力。
 
-如果你第一次打开这个仓库，建议先看 `Quick Start` 跑通服务，再按需进入更详细的 guide 和模块文档。
+如果你第一次打开这个仓库，先看 `Quick Start` 跑通服务；如果你在判断“这个项目适不适合我”，先看下面的定位说明。
+
+## 这个项目解决什么问题
+
+它把“拉 MySQL binlog、落盘、记 checkpoint、管理任务状态”收敛成一个独立服务，而不是让你自己拼脚本、cron 和零散元数据。
+
+适合：
+
+- 想把 binlog 拉取、落盘、状态管理做成一个可运维的服务
+- 需要从 `LATEST`、`FILE_POS`、`GTID` 启动任务
+- 需要本地持久化，并且可能接 S3-compatible upload
+- 需要 API / UI / observability，而不是一次性脚本
+
+不太适合：
+
+- 只做一次性导出，不做持续复制
+- 不需要 task orchestration，只想快速写个单机脚本
+- 希望它直接替代完整 CDC 平台
+
+## 为什么用它
+
+- 明确的 checkpoint 语义：只有 `fsync` 成功后才推进 checkpoint
+- 支持 `LATEST` / `FILE_POS` / `GTID` 三种起点
+- 内建 API、UI、Swagger、metrics 与可选 tracing
+- 支持 metadata 存储、lease 调度与 S3-compatible upload
+- 仓库内带有 E2E 场景，方便验证回归
 
 ## Quick Start
 
@@ -86,6 +111,14 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 - Swagger: `http://127.0.0.1:8080/swagger/index.html`
 
 如果你要看更完整的运维与使用说明，从 [docs/guide/README.md](docs/guide/README.md) 进入。
+
+### 运行后你会看到什么
+
+- `/healthz` 返回 `ok`
+- `/api/tasks` 能看到你刚创建的任务
+- `/ui/` 可以打开管理界面
+- `/swagger/index.html` 可以直接查看和调试 API
+- 任务启动后，checkpoint 与 metrics 会逐步反映运行状态
 
 > ⚠️ **Security Warning**
 >

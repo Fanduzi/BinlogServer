@@ -20,8 +20,10 @@ Make the repository landing experience usable for a first-time open source visit
 
 Reworked the root `README.md` into a shorter entry document:
 
+- project framing (`what it solves`, `who it is for`, `when not to use it`)
 - concise product summary
 - quick start with executable commands
+- expected result after quick start
 - first-task flow
 - minimal production notes
 - common pitfalls
