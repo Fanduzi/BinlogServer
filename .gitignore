@@ -12,3 +12,4 @@ tmp/e2e/data/
 /logs/
 /tmp/
 /.worktrees/
+/dist/
