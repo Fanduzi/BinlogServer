@@ -29,6 +29,29 @@ Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负�
 - 支持 metadata 存储、lease 调度与 S3-compatible upload
 - 仓库内带有 E2E 场景，方便验证回归
 
+## Install / Download
+
+- 对于带 tag 的公开版本，优先从 GitHub Releases 下载与你平台匹配的压缩包：
+  - `binlog-server_<version>_darwin_amd64.tar.gz`
+  - `binlog-server_<version>_darwin_arm64.tar.gz`
+  - `binlog-server_<version>_linux_amd64.tar.gz`
+  - `binlog-server_<version>_linux_arm64.tar.gz`
+- 同一页会提供 `checksums.txt`，下载后先校验再解压。
+- `/ui/` 所需前端静态资源已经内嵌在二进制里，不需要额外下载前端包。
+
+源码构建作为 fallback：
+
+```bash
+make ui-build
+go build -o binlog-server ./cmd/binlog-server
+```
+
+如果你要在本地准备一组 release 产物：
+
+```bash
+make release-assets VERSION=v0.1.0
+```
+
 ## Quick Start
 
 这部分只保留“第一次跑起来”所需的最短路径。
