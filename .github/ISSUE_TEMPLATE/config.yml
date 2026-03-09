@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Report
+    url: https://github.com/Fanduzi/BinlogServer/blob/main/SECURITY.md
+    about: Report security vulnerabilities through the responsible disclosure path in SECURITY.md, not a public issue.
+  - name: Usage And Operations Guide
+    url: https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/README.md
+    about: Start here for setup, troubleshooting, and operational usage questions before opening a public issue.
