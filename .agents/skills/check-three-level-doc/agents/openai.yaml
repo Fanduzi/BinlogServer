@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check Three-level Doc"
+  short_description: "Run three-level doc loop compliance checks"
+  default_prompt: "Use $check-three-level-doc to validate three-level documentation compliance for current changes."
