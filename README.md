@@ -1,48 +1,48 @@
 # binlog_server
 
-Binlog Server is a Go service for pulling MySQL binlog, writing local sealed files, persisting checkpoints, and coordinating task execution with lease-aware scheduling.
+Binlog Server 是一个用于拉取 MySQL binlog、落盘 sealed 文件、持久化 checkpoint，并通过 lease 调度任务执行的 Go 服务。
 
-It is designed for operators who want a control plane API, resumable replication tasks, local durability, and optional S3-compatible upload.
+如果你第一次打开这个仓库，建议先看 `Quick Start` 跑通服务，再按需进入更详细的 guide 和模块文档。
 
 ## Quick Start
 
-Use this path if you want to get the service up and verify the basic API as quickly as possible.
+这部分只保留“第一次跑起来”所需的最短路径。
 
-### Prerequisites
+### 前置条件
 
 - Go `1.24+`
-- A reachable MySQL instance with binlog enabled
-- Optional: Docker, if you want to run the E2E suite
+- 一个可访问的 MySQL 实例，并且已经开启 binlog
+- 如需跑 E2E：Docker 可用
 
-### 1. Start the server
+### 1. 启动服务
 
 ```bash
 go run ./cmd/binlog-server
 ```
 
-Default listen address: `:8080`
+默认监听地址是 `:8080`。
 
-If you want an explicit address:
+如果你想显式指定监听地址：
 
 ```bash
 BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
 ```
 
-### 2. Verify health
+### 2. 验证 `/healthz`
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
-Expected response:
+期望返回：
 
 ```text
 ok
 ```
 
-### 3. Create your first task
+### 3. 创建第一个任务
 
-Replace the source connection values with a MySQL instance you control.
+把下面示例里的 MySQL 连接信息替换成你自己的实例：
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
@@ -66,37 +66,48 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
   }'
 ```
 
-### 4. Start the task
+### 4. 启动任务
 
-Replace `<task-id>` with the `id` returned by the previous command.
+把 `<task-id>` 替换成上一步返回的 `id`：
 
 ```bash
 curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 ```
 
-### 5. Check task state
+### 5. 查看任务状态
 
 ```bash
 curl -fsS http://127.0.0.1:8080/api/tasks
 ```
 
-### 6. Open the UI or Swagger
+### 6. 打开 UI 或 Swagger
 
 - UI: `http://127.0.0.1:8080/ui/`
 - Swagger: `http://127.0.0.1:8080/swagger/index.html`
 
-If you want the longer operational walkthrough, start from [docs/guide/README.md](docs/guide/README.md).
+如果你要看更完整的运维与使用说明，从 [docs/guide/README.md](docs/guide/README.md) 进入。
 
-## Minimal Production Notes
+> ⚠️ **Security Warning**
+>
+> By default, API authentication is **DISABLED** for development convenience.
+>
+> **For production deployments, you MUST:**
+> 1. Set `api.auth.enabled: true` (or `BINLOG_SERVER_API_AUTH_ENABLED=true`)
+> 2. Configure your authentication method (Bearer Token or API Key)
+> 3. Set `api.auth.protect_api: true` to enable route protection
+>
+> See [docs/security.md](docs/security.md) for detailed security configuration.
 
-Development defaults are intentionally loose. Production should not use the default posture unchanged.
+## 最小生产配置提示
 
-- Auth: API auth is disabled by default for developer convenience. In production, enable auth and protect both `/api/*` and `/metrics`. See [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md).
-- Meta DB: if you use `meta_dsn`, run migrations before starting the service. The service does not auto-create or auto-upgrade schema.
-- Upload: S3-compatible upload is optional. If you enable it, provide a complete upload config set; partial config will fail uploader initialization.
-- Tracing: OpenTelemetry is designed to be low-risk and default-off. Enable it explicitly and validate the exporter configuration before production rollout.
+开发环境默认值偏宽松，生产环境不要直接照搬。
 
-Minimum production checklist:
+- Auth：默认关闭，生产环境至少应保护 `/api/*` 与 `/metrics`。
+- Meta DB：如果配置了 `meta_dsn`，必须先执行 migration，服务不会自动建表或自动升级 schema。
+- Upload：S3-compatible upload 是可选能力，但一旦启用，必填项必须完整。
+- Tracing：默认关闭，启用前先确认 exporter 配置和采样策略。
+
+生产环境最小建议：
 
 ```bash
 export BINLOG_SERVER_API_AUTH_ENABLED=true
@@ -106,76 +117,83 @@ export BINLOG_SERVER_API_AUTH_PROTECT_API=true
 export BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true
 ```
 
-If you use a metadata database:
+如果使用 metadata database：
 
 ```bash
 export META_DSN='meta:replace_me@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true'
 make migrate-up META_DSN="$META_DSN"
 ```
 
-## Common Pitfalls
+如需启用 upload，至少提供这些配置：
 
-### `make e2e-quick` fails locally
+- `BINLOG_SERVER_UPLOAD_ENDPOINT`
+- `BINLOG_SERVER_UPLOAD_BUCKET`
+- `BINLOG_SERVER_UPLOAD_ACCESS_KEY`
+- `BINLOG_SERVER_UPLOAD_SECRET_KEY`
 
-- Check that Docker Desktop or another Docker daemon is running.
-- The E2E suite pulls MySQL and Percona images and starts local containers.
-- Detailed E2E usage lives in [scripts/e2e/README.md](scripts/e2e/README.md).
+## FAQ / Common Pitfalls
 
-### The service starts but meta-backed tasks fail
+### `make e2e-quick` 本地失败
 
-- If `meta_dsn` is configured, the schema must already exist.
-- Run `make migrate-up META_DSN=...` before starting the server.
-- Migration command details are in [cmd/migrate/README.md](cmd/migrate/README.md).
+- 先确认 Docker Desktop 或其他 Docker daemon 已启动。
+- E2E 会拉起 MySQL / Percona 容器，并依赖本地 Docker 环境。
+- 更详细的 E2E 说明见 [scripts/e2e/README.md](scripts/e2e/README.md)。
 
-### Auth is still open in production
+### 配了 `meta_dsn` 但任务跑不起来
 
-- This is the most important default to override.
-- Development keeps auth disabled; production should not.
-- Review [SECURITY.md](SECURITY.md) before exposing the service.
+- 常见原因是 metadata schema 还没 migrate。
+- 先执行 `make migrate-up META_DSN=...`，再启动服务。
+- 迁移命令说明见 [cmd/migrate/README.md](cmd/migrate/README.md)。
 
-### Upload does not work
+### 生产环境忘了开 auth
 
-- `endpoint`, `bucket`, `access_key`, and `secret_key` must all be present together.
-- Region and prefix are optional; partial required config is not.
-- Current upload implementation targets S3-compatible APIs.
+- 这是当前最需要显式覆盖的开发默认值。
+- 开发环境默认关闭 auth，生产环境不应该这样部署。
+- 具体安全配置建议见 [SECURITY.md](SECURITY.md) 和 [docs/security.md](docs/security.md)。
 
-### Metrics or tracing look empty
+### upload 配置了但上传不工作
 
-- `/metrics` exists even before tasks are running; some metrics are placeholders until real activity appears.
-- Tracing is default-off, so seeing no spans is expected unless you enabled it explicitly.
+- `endpoint`、`bucket`、`access_key`、`secret_key` 必须完整出现。
+- `region` 和 `prefix` 是可选项，不属于初始化必填。
+- 当前 upload 实现面向 S3-compatible API。
 
-## Upgrade And Release
+### `/metrics` 或 tracing 看起来“没数据”
 
-Before upgrading, read [CHANGELOG.md](CHANGELOG.md).
+- `/metrics` 在任务还没运行时也会暴露基础指标；部分值可能只是 placeholder。
+- tracing 默认关闭，所以没有 span 通常是预期行为，不一定是故障。
 
-Pay attention to these classes of changes:
+## Upgrade / Release 入口
 
-- Schema or migration requirements
-- Config key additions or deprecations
-- SQL generation workflow changes such as `sqlc`
-- Observability contract changes that affect dashboards or alerts
+升级前先看 [CHANGELOG.md](CHANGELOG.md)。
 
-This repository does not auto-apply migrations or auto-rewrite config for you, so upgrades should be treated as an operator task, not just a binary swap.
+升级时优先关注这几类变化：
 
-## Repository Map
+- schema / migration 变更
+- config key 新增、废弃或默认值变化
+- `sqlc` 相关工作流变化
+- observability 合约变化，例如 metrics / tracing 对 dashboard 或告警的影响
 
-Use these docs when you need more than the quick start:
+这个仓库不会自动帮你 apply migration，也不会自动迁移配置，因此升级应当按运维变更来处理，而不是只替换二进制。
 
-| Topic | Entry |
+## 仓库入口导航
+
+如果你已经跑通 `Quick Start`，下一步从这里进入：
+
+| 主题 | 入口 |
 | --- | --- |
-| Operator and usage guides | [docs/guide/README.md](docs/guide/README.md) |
-| Security policy | [SECURITY.md](SECURITY.md) |
-| Changelog | [CHANGELOG.md](CHANGELOG.md) |
-| Server command | [cmd/binlog-server/README.md](cmd/binlog-server/README.md) |
-| Database migrations | [cmd/migrate/README.md](cmd/migrate/README.md) |
-| API module | [internal/api/README.md](internal/api/README.md) |
-| Replication runtime | [internal/replication/README.md](internal/replication/README.md) |
-| Upload module | [internal/upload/README.md](internal/upload/README.md) |
-| E2E suite | [scripts/e2e/README.md](scripts/e2e/README.md) |
+| 使用与运维 guide | [docs/guide/README.md](docs/guide/README.md) |
+| 安全策略 | [SECURITY.md](SECURITY.md) |
+| 版本变化 | [CHANGELOG.md](CHANGELOG.md) |
+| 服务启动命令 | [cmd/binlog-server/README.md](cmd/binlog-server/README.md) |
+| 数据库迁移 | [cmd/migrate/README.md](cmd/migrate/README.md) |
+| API 模块 | [internal/api/README.md](internal/api/README.md) |
+| 复制执行链路 | [internal/replication/README.md](internal/replication/README.md) |
+| Upload 模块 | [internal/upload/README.md](internal/upload/README.md) |
+| E2E 测试套件 | [scripts/e2e/README.md](scripts/e2e/README.md) |
 
-## Development
+## 开发验证入口
 
-Run the main verification gates:
+常用验证命令：
 
 ```bash
 go test ./...
@@ -183,7 +201,7 @@ go vet ./...
 make e2e-quick
 ```
 
-If you want the frontend in separate dev mode:
+如果你要以前后端分离方式开发前端：
 
 ```bash
 cd frontend
