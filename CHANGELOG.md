@@ -12,6 +12,8 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-03-09
+
 ### Added
 
 - Root `SECURITY.md` security policy for vulnerability reporting.
