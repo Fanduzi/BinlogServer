@@ -1,52 +1,58 @@
 # binlog_server
 
-Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负责从源库持续读取 binlog、落盘本地文件、持久化 checkpoint，并提供 API 控制、UI、S3-compatible upload 与集群调度能力。
+[![Release](https://img.shields.io/github/v/release/Fanduzi/BinlogServer?display_name=tag)](https://github.com/Fanduzi/BinlogServer/releases)
+![Platform](https://img.shields.io/badge/platform-darwin%20amd64%20%7C%20darwin%20arm64%20%7C%20linux%20amd64%20%7C%20linux%20arm64-blue)
+[![License](https://img.shields.io/github/license/Fanduzi/BinlogServer)](LICENSE)
 
-如果你第一次打开这个仓库，先看 `Quick Start` 跑通服务；如果你在判断“这个项目适不适合我”，先看下面的定位说明。
+English | [中文](README_ZH.md) | [Changelog](CHANGELOG.md) | [Security](SECURITY.md)
 
-## 这个项目解决什么问题
+Binlog Server is a service for pulling MySQL binlog into durable local files, persisting checkpoint state, and managing replication tasks through an API-driven control plane with UI, optional S3-compatible upload, and cluster coordination support.
 
-它把“拉 MySQL binlog、落盘、记 checkpoint、管理任务状态”收敛成一个独立服务，而不是让你自己拼脚本、cron 和零散元数据。
+If this is your first time visiting the repository, start with `Quick Start`. If you are evaluating whether the project fits your use case, read the positioning section below first.
 
-适合：
+## What Problem Does It Solve?
 
-- 想把 binlog 拉取、落盘、状态管理做成一个可运维的服务
-- 需要从 `LATEST`、`FILE_POS`、`GTID` 启动任务
-- 需要本地持久化，并且可能接 S3-compatible upload
-- 需要 API / UI / observability，而不是一次性脚本
+It turns binlog pulling, local persistence, checkpoint tracking, and task lifecycle management into an operational service instead of a collection of scripts, cron jobs, and ad hoc metadata.
 
-不太适合：
+Good fit for:
 
-- 只做一次性导出，不做持续复制
-- 不需要 task orchestration，只想快速写个单机脚本
-- 希望它直接替代完整 CDC 平台
+- Teams that want binlog pulling, local durability, and task state management as a service
+- Environments that need `LATEST`, `FILE_POS`, or `GTID` start modes
+- Workflows that want local persistence with optional S3-compatible upload
+- Operators who want API, UI, and observability instead of a one-off script
 
-## 为什么用它
+Probably not a fit for:
 
-- 明确的 checkpoint 语义：只有 `fsync` 成功后才推进 checkpoint
-- 支持 `LATEST` / `FILE_POS` / `GTID` 三种起点
-- 内建 API、UI、Swagger、metrics 与可选 tracing
-- 支持 metadata 存储、lease 调度与 S3-compatible upload
-- 仓库内带有 E2E 场景，方便验证回归
+- One-time exports instead of continuous replication
+- Very small single-node scripts without task orchestration needs
+- Teams looking for a full CDC platform replacement
+
+## Why Use It?
+
+- Clear checkpoint semantics: checkpoint advances only after local `fsync` succeeds
+- Supports `LATEST`, `FILE_POS`, and `GTID` start modes
+- Built-in API, UI, Swagger, metrics, and optional tracing
+- Supports metadata-backed coordination, lease management, and S3-compatible upload
+- Includes repository E2E scenarios to validate core regression paths
 
 ## Install / Download
 
-- 对于带 tag 的公开版本，优先从 GitHub Releases 下载与你平台匹配的压缩包：
+- For tagged public releases, download the archive that matches your platform from GitHub Releases:
   - `binlog-server_<version>_darwin_amd64.tar.gz`
   - `binlog-server_<version>_darwin_arm64.tar.gz`
   - `binlog-server_<version>_linux_amd64.tar.gz`
   - `binlog-server_<version>_linux_arm64.tar.gz`
-- 同一页会提供 `checksums.txt`，下载后先校验再解压。
-- `/ui/` 所需前端静态资源已经内嵌在二进制里，不需要额外下载前端包。
+- The release page also provides `checksums.txt`; verify it before extracting.
+- UI assets are embedded into the binary, so you do not need to download a separate frontend package.
 
-源码构建作为 fallback：
+Source build remains the fallback path:
 
 ```bash
 make ui-build
 go build -o binlog-server ./cmd/binlog-server
 ```
 
-如果你要在本地准备一组 release 产物：
+To prepare a local set of release assets:
 
 ```bash
 make release-assets VERSION=v0.1.0
@@ -54,43 +60,43 @@ make release-assets VERSION=v0.1.0
 
 ## Quick Start
 
-这部分只保留“第一次跑起来”所需的最短路径。
+This section keeps the shortest path to a working service.
 
-### 前置条件
+### Prerequisites
 
 - Go `1.24+`
-- 一个可访问的 MySQL 实例，并且已经开启 binlog
-- 如需跑 E2E：Docker 可用
+- A reachable MySQL instance with binlog enabled
+- Docker available if you want to run E2E scenarios
 
-### 1. 启动服务
+### 1. Start the service
 
 ```bash
 go run ./cmd/binlog-server
 ```
 
-默认监听地址是 `:8080`。
+The default listen address is `:8080`.
 
-如果你想显式指定监听地址：
+To set it explicitly:
 
 ```bash
 BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
 ```
 
-### 2. 验证 `/healthz`
+### 2. Verify `/healthz`
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
-期望返回：
+Expected response:
 
 ```text
 ok
 ```
 
-### 3. 创建第一个任务
+### 3. Create your first task
 
-把下面示例里的 MySQL 连接信息替换成你自己的实例：
+Replace the MySQL connection details with your own instance:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
@@ -114,34 +120,34 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
   }'
 ```
 
-### 4. 启动任务
+### 4. Start the task
 
-把 `<task-id>` 替换成上一步返回的 `id`：
+Replace `<task-id>` with the `id` returned from the previous step:
 
 ```bash
 curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 ```
 
-### 5. 查看任务状态
+### 5. Check task state
 
 ```bash
 curl -fsS http://127.0.0.1:8080/api/tasks
 ```
 
-### 6. 打开 UI 或 Swagger
+### 6. Open the UI or Swagger
 
 - UI: `http://127.0.0.1:8080/ui/`
 - Swagger: `http://127.0.0.1:8080/swagger/index.html`
 
-如果你要看更完整的运维与使用说明，从 [docs/guide/README.md](docs/guide/README.md) 进入。
+For more operational and usage guidance, continue from [docs/guide/README.md](docs/guide/README.md).
 
-### 运行后你会看到什么
+### What You Should See
 
-- `/healthz` 返回 `ok`
-- `/api/tasks` 能看到你刚创建的任务
-- `/ui/` 可以打开管理界面
-- `/swagger/index.html` 可以直接查看和调试 API
-- 任务启动后，checkpoint 与 metrics 会逐步反映运行状态
+- `/healthz` returns `ok`
+- `/api/tasks` lists the task you just created
+- `/ui/` opens the management interface
+- `/swagger/index.html` lets you inspect and try the API
+- After the task starts, checkpoint and metrics begin reflecting runtime state
 
 > ⚠️ **Security Warning**
 >
@@ -150,20 +156,20 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 > **For production deployments, you MUST:**
 > 1. Set `api.auth.enabled: true` (or `BINLOG_SERVER_API_AUTH_ENABLED=true`)
 > 2. Configure your authentication method (Bearer Token or API Key)
-> 3. Set `api.auth.protect_api: true` to enable route protection
+> 3. Protect `/api/*` and `/metrics`
 >
-> See [docs/security.md](docs/security.md) for detailed security configuration.
+> See [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md) for security guidance.
 
-## 最小生产配置提示
+## Minimal Production Notes
 
-开发环境默认值偏宽松，生产环境不要直接照搬。
+Development defaults are intentionally permissive. Do not carry them unchanged into production.
 
-- Auth：默认关闭，生产环境至少应保护 `/api/*` 与 `/metrics`。
-- Meta DB：如果配置了 `meta_dsn`，必须先执行 migration，服务不会自动建表或自动升级 schema。
-- Upload：S3-compatible upload 是可选能力，但一旦启用，必填项必须完整。
-- Tracing：默认关闭，启用前先确认 exporter 配置和采样策略。
+- Auth: disabled by default; production should protect at least `/api/*` and `/metrics`
+- Meta DB: if `meta_dsn` is configured, run migrations first; the service does not auto-create or auto-upgrade schema
+- Upload: S3-compatible upload is optional, but required fields must be complete when enabled
+- Tracing: disabled by default; validate exporter configuration and sampling before rollout
 
-生产环境最小建议：
+Minimum production baseline:
 
 ```bash
 export BINLOG_SERVER_API_AUTH_ENABLED=true
@@ -173,14 +179,14 @@ export BINLOG_SERVER_API_AUTH_PROTECT_API=true
 export BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true
 ```
 
-如果使用 metadata database：
+If you use the metadata database:
 
 ```bash
 export META_DSN='meta:replace_me@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true'
 make migrate-up META_DSN="$META_DSN"
 ```
 
-如需启用 upload，至少提供这些配置：
+If you enable upload, provide at least:
 
 - `BINLOG_SERVER_UPLOAD_ENDPOINT`
 - `BINLOG_SERVER_UPLOAD_BUCKET`
@@ -189,67 +195,67 @@ make migrate-up META_DSN="$META_DSN"
 
 ## FAQ / Common Pitfalls
 
-### `make e2e-quick` 本地失败
+### `make e2e-quick` fails locally
 
-- 先确认 Docker Desktop 或其他 Docker daemon 已启动。
-- E2E 会拉起 MySQL / Percona 容器，并依赖本地 Docker 环境。
-- 更详细的 E2E 说明见 [scripts/e2e/README.md](scripts/e2e/README.md)。
+- Make sure Docker Desktop or another Docker daemon is running first.
+- E2E scenarios start MySQL / Percona containers and depend on local Docker availability.
+- See [scripts/e2e/README.md](scripts/e2e/README.md) for more details.
 
-### 配了 `meta_dsn` 但任务跑不起来
+### Tasks fail after configuring `meta_dsn`
 
-- 常见原因是 metadata schema 还没 migrate。
-- 先执行 `make migrate-up META_DSN=...`，再启动服务。
-- 迁移命令说明见 [cmd/migrate/README.md](cmd/migrate/README.md)。
+- A common cause is that the metadata schema has not been migrated yet.
+- Run `make migrate-up META_DSN=...` before starting the service.
+- Migration command details are documented in [cmd/migrate/README.md](cmd/migrate/README.md).
 
-### 生产环境忘了开 auth
+### Auth was left disabled in production
 
-- 这是当前最需要显式覆盖的开发默认值。
-- 开发环境默认关闭 auth，生产环境不应该这样部署。
-- 具体安全配置建议见 [SECURITY.md](SECURITY.md) 和 [docs/security.md](docs/security.md)。
+- This is the most important development default to override.
+- Development keeps auth off for convenience; production should not.
+- See [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md) for concrete guidance.
 
-### upload 配置了但上传不工作
+### Upload is configured but files do not upload
 
-- `endpoint`、`bucket`、`access_key`、`secret_key` 必须完整出现。
-- `region` 和 `prefix` 是可选项，不属于初始化必填。
-- 当前 upload 实现面向 S3-compatible API。
+- `endpoint`, `bucket`, `access_key`, and `secret_key` must all be present.
+- `region` and `prefix` are optional and not part of initialization minimums.
+- The current implementation targets S3-compatible APIs.
 
-### `/metrics` 或 tracing 看起来“没数据”
+### `/metrics` or tracing looks empty
 
-- `/metrics` 在任务还没运行时也会暴露基础指标；部分值可能只是 placeholder。
-- tracing 默认关闭，所以没有 span 通常是预期行为，不一定是故障。
+- `/metrics` exposes core metric families even before tasks start; some values may still be placeholders.
+- Tracing is off by default, so the absence of spans is often expected rather than a fault.
 
-## Upgrade / Release 入口
+## Upgrade / Release Entry
 
-升级前先看 [CHANGELOG.md](CHANGELOG.md)。
+Review [CHANGELOG.md](CHANGELOG.md) before upgrading.
 
-升级时优先关注这几类变化：
+Pay particular attention to these change types:
 
-- schema / migration 变更
-- config key 新增、废弃或默认值变化
-- `sqlc` 相关工作流变化
-- observability 合约变化，例如 metrics / tracing 对 dashboard 或告警的影响
+- schema / migration changes
+- new, deprecated, or default-shifted config keys
+- `sqlc` workflow changes
+- observability contract changes that affect dashboards or alerts
 
-这个仓库不会自动帮你 apply migration，也不会自动迁移配置，因此升级应当按运维变更来处理，而不是只替换二进制。
+This repository does not apply migrations or migrate configuration for you, so upgrades should be handled as an operator change, not just a binary swap.
 
-## 仓库入口导航
+## Repository Map
 
-如果你已经跑通 `Quick Start`，下一步从这里进入：
+Once `Quick Start` works, continue from these entry points:
 
-| 主题 | 入口 |
+| Topic | Entry |
 | --- | --- |
-| 使用与运维 guide | [docs/guide/README.md](docs/guide/README.md) |
-| 安全策略 | [SECURITY.md](SECURITY.md) |
-| 版本变化 | [CHANGELOG.md](CHANGELOG.md) |
-| 服务启动命令 | [cmd/binlog-server/README.md](cmd/binlog-server/README.md) |
-| 数据库迁移 | [cmd/migrate/README.md](cmd/migrate/README.md) |
-| API 模块 | [internal/api/README.md](internal/api/README.md) |
-| 复制执行链路 | [internal/replication/README.md](internal/replication/README.md) |
-| Upload 模块 | [internal/upload/README.md](internal/upload/README.md) |
-| E2E 测试套件 | [scripts/e2e/README.md](scripts/e2e/README.md) |
+| Usage and operations guide | [docs/guide/README.md](docs/guide/README.md) |
+| Security policy | [SECURITY.md](SECURITY.md) |
+| Version history | [CHANGELOG.md](CHANGELOG.md) |
+| Service startup command | [cmd/binlog-server/README.md](cmd/binlog-server/README.md) |
+| Database migration | [cmd/migrate/README.md](cmd/migrate/README.md) |
+| API module | [internal/api/README.md](internal/api/README.md) |
+| Replication pipeline | [internal/replication/README.md](internal/replication/README.md) |
+| Upload module | [internal/upload/README.md](internal/upload/README.md) |
+| E2E suite | [scripts/e2e/README.md](scripts/e2e/README.md) |
 
-## 开发验证入口
+## Development Validation
 
-常用验证命令：
+Common verification commands:
 
 ```bash
 go test ./...
@@ -257,7 +263,7 @@ go vet ./...
 make e2e-quick
 ```
 
-如果你要以前后端分离方式开发前端：
+If you want frontend-only development:
 
 ```bash
 cd frontend
