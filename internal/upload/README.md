@@ -3,6 +3,7 @@
 ## Files
 - `s3_uploader.go`: 对象存储上传实现。
 - `s3_uploader_test.go`: 上传行为测试。
+  重点覆盖配置校验、上传成功/失败、空对象 key、本地文件缺失、context cancel/deadline 与 HTTPS endpoint 场景。
 
 ## Exports
 - 上传接口：将 sealed binlog 文件上传到对象存储。
