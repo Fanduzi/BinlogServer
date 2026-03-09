@@ -13,6 +13,7 @@ TARGETS="${RELEASE_TARGETS:-darwin/amd64 darwin/arm64 linux/amd64 linux/arm64}"
 BUILD_UI="${BUILD_UI:-1}"
 UI_STATIC_DIR="$ROOT_DIR/internal/ui/static"
 ui_backup_dir=""
+checksum_cmd=()
 
 restore_ui_static() {
   if [[ -n "$ui_backup_dir" && -d "$ui_backup_dir" ]]; then
@@ -21,6 +22,21 @@ restore_ui_static() {
     cp -R "$ui_backup_dir/." "$UI_STATIC_DIR/" 2>/dev/null || true
     rm -rf "$ui_backup_dir"
   fi
+}
+
+resolve_checksum_cmd() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    checksum_cmd=(sha256sum)
+    return
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    checksum_cmd=(shasum -a 256)
+    return
+  fi
+
+  echo "[release] error: need sha256sum or shasum to generate checksums.txt" >&2
+  exit 1
 }
 
 if [[ "$BUILD_UI" == "1" ]]; then
@@ -41,6 +57,7 @@ fi
 
 rm -rf "$DIST_ROOT"
 mkdir -p "$DIST_ROOT"
+resolve_checksum_cmd
 
 for target in $TARGETS; do
   os="${target%/*}"
@@ -63,7 +80,7 @@ done
 
 (
   cd "$DIST_ROOT"
-  shasum -a 256 ./*.tar.gz > checksums.txt
+  "${checksum_cmd[@]}" ./*.tar.gz > checksums.txt
 )
 
 echo "[release] done: $DIST_ROOT"
