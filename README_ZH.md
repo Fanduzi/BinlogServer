@@ -1,4 +1,4 @@
-# binlog_server
+# BinlogServer
 
 [English](README.md) | 中文 | [更新日志](CHANGELOG.md) | [安全策略](SECURITY.md)
 
