@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -43,6 +44,8 @@ type MySQLRunner struct {
 	uploadPrefix     string
 	leaseVerifier    LeaseVerifier
 	progressReporter ProgressReporter
+	newSyncer        func(replication.BinlogSyncerConfig) binlogSyncer
+	writerOpener     func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error)
 }
 
 type sourceMetaFetcher interface {
@@ -51,6 +54,32 @@ type sourceMetaFetcher interface {
 }
 
 type eventHandlerFunc func(*replication.BinlogEvent) error
+
+type binlogStreamer interface {
+	GetEvent(context.Context) (*replication.BinlogEvent, error)
+}
+
+type binlogSyncer interface {
+	StartSync(gomysql.Position) (binlogStreamer, error)
+	StartSyncGTID(gomysql.GTIDSet) (binlogStreamer, error)
+	Close()
+}
+
+type liveBinlogSyncer struct {
+	inner *replication.BinlogSyncer
+}
+
+func (s *liveBinlogSyncer) StartSync(pos gomysql.Position) (binlogStreamer, error) {
+	return s.inner.StartSync(pos)
+}
+
+func (s *liveBinlogSyncer) StartSyncGTID(set gomysql.GTIDSet) (binlogStreamer, error) {
+	return s.inner.StartSyncGTID(set)
+}
+
+func (s *liveBinlogSyncer) Close() {
+	s.inner.Close()
+}
 
 // HandleEvent 让函数类型实现 go-mysql 的事件处理接口。
 func (f eventHandlerFunc) HandleEvent(e *replication.BinlogEvent) error {
@@ -202,7 +231,14 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	currentCreatedAt := time.Now()
 
 	currentPath := ""
-	file, writer, currentPath, err := r.openBinlogWriter(task, currentFile, currentPos)
+	writerOpener := r.writerOpener
+	if writerOpener == nil {
+		writerOpener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			return r.openBinlogWriter(task, fileName, initialPos)
+		}
+	}
+
+	file, writer, currentPath, err := writerOpener(task, currentFile, currentPos)
 	if err != nil {
 		return err
 	}
@@ -286,7 +322,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 				currentFile = nextFile
 				currentPos = nextPos
-				file, writer, currentPath, err = r.openBinlogWriter(task, currentFile, currentPos)
+				file, writer, currentPath, err = writerOpener(task, currentFile, currentPos)
 				if err != nil {
 					return err
 				}
@@ -334,10 +370,16 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		// 这样可保证 ACK 发生在本地 fsync/checkpoint 成功之后（防止 ACK 早于持久化）。
 		cfg.SynchronousEventHandler = eventHandlerFunc(handleEvent)
 	}
-	syncer := replication.NewBinlogSyncer(cfg)
+	newSyncer := r.newSyncer
+	if newSyncer == nil {
+		newSyncer = func(cfg replication.BinlogSyncerConfig) binlogSyncer {
+			return &liveBinlogSyncer{inner: replication.NewBinlogSyncer(cfg)}
+		}
+	}
+	syncer := newSyncer(cfg)
 	defer syncer.Close()
 
-	var streamer *replication.BinlogStreamer
+	var streamer binlogStreamer
 	switch start.Mode {
 	case tasks.StartModeFilePos:
 		streamer, err = syncer.StartSync(gomysql.Position{Name: start.File, Pos: start.Pos})
