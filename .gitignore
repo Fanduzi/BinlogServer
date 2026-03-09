@@ -14,3 +14,4 @@ tmp/e2e/data/
 /.worktrees/
 /dist/
 /bin/
+.gitnexus
