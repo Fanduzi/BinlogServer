@@ -1,0 +1,4 @@
+interface:
+  display_name: "Three-level Doc"
+  short_description: "Three-level docs workflow for every project"
+  default_prompt: "Use $three-level-doc to create and maintain required project documentation."
