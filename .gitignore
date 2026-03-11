@@ -13,3 +13,4 @@ tmp/e2e/data/
 /tmp/
 /.worktrees/
 /dist/
+/bin/
