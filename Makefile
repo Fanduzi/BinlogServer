@@ -1,8 +1,10 @@
-.PHONY: help test ui-build release-assets e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test build build-linux ui-build release-assets e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 help:
 	@echo "Targets:"
 	@echo "  make test                       # run unit tests"
+	@echo "  make build                      # build a local bin/binlog-server binary with embedded UI"
+	@echo "  make build-linux                # build a local bin/binlog-server-linux-amd64 binary with embedded UI"
 	@echo "  make ui-build                   # build frontend and sync to internal/ui/static"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
@@ -18,6 +20,14 @@ help:
 
 test:
 	go test ./...
+
+build: ui-build
+	@mkdir -p bin
+	go build -o $${BINARY:-bin/binlog-server} ./cmd/binlog-server
+
+build-linux: ui-build
+	@mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $${BINARY:-bin/binlog-server-linux-amd64} ./cmd/binlog-server
 
 ui-build:
 	./scripts/build-ui.sh

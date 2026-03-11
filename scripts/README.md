@@ -13,6 +13,8 @@
 
 ## Exports
 
+- `make build`
+- `make build-linux`
 - `make ui-build`
 - `make release-assets VERSION=v0.1.0`
 - `make e2e-quick`
