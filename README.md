@@ -1,4 +1,3 @@
-<div align="center">
 <pre>
  ____                  ___                       ____
 /\  _`\    __         /\_ \                     /\  _`\
@@ -11,6 +10,7 @@
                                           \_/__/
 </pre>
 
+<div align="center">
 # BinlogServer
 
 [![Release](https://img.shields.io/github/v/release/Fanduzi/BinlogServer?display_name=tag)](https://github.com/Fanduzi/BinlogServer/releases)

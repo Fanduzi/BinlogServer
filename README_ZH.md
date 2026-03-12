@@ -1,4 +1,3 @@
-<div align="center">
 <pre>
  ____                  ___                       ____
 /\  _`\    __         /\_ \                     /\  _`\
@@ -11,6 +10,7 @@
                                           \_/__/
 </pre>
 
+<div align="center">
 # BinlogServer
 
 [English](README.md) | 中文 | [更新日志](CHANGELOG.md) | [安全策略](SECURITY.md)
