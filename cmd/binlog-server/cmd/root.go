@@ -6,48 +6,35 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"os/signal"
-	"syscall"
-
-	"binlog_server/internal/app"
-	"binlog_server/internal/config"
-	"binlog_server/internal/logging"
 
 	"github.com/spf13/cobra"
 )
+
+var runRootApp = defaultRunRootApp
 
 // NewRootCommand 创建 binlog-server CLI 根命令。
 func NewRootCommand() *cobra.Command {
 	var configPath string
 	var encryptionKey string
+	var versionOnly bool
 
 	root := &cobra.Command{
 		Use:   "binlog-server",
 		Short: "Centralized MySQL binlog backup service",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			cfg, err := config.LoadConfigWithEncryption(configPath, encryptionKey)
-			if err != nil {
-				return fmt.Errorf("load config: %w", err)
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if versionOnly {
+				_, err := fmt.Fprintln(cmd.OutOrStdout(), effectiveVersionInfo().Version)
+				return err
 			}
-
-			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-			defer stop()
-			_, cleanupLogger, err := logging.Setup(ctx, cfg.Log)
-			if err != nil {
-				return fmt.Errorf("setup logger: %w", err)
-			}
-			defer cleanupLogger()
-
-			if err := app.New(cfg).Run(ctx); err != nil {
-				return fmt.Errorf("run app: %w", err)
-			}
-			return nil
+			return runRootApp(configPath, encryptionKey)
 		},
 	}
 
 	root.Flags().StringVarP(&configPath, "config", "c", "", "YAML config file path (default: ./config.yaml if exists)")
 	root.Flags().StringVar(&encryptionKey, "encryption-key", "", "Encryption key for encrypted config values (32 bytes for AES-256)")
+	root.Flags().BoolVar(&versionOnly, "version", false, "Print version and exit")
+	root.AddCommand(newVersionCommand())
 	return root
 }
