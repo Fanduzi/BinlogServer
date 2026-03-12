@@ -1,4 +1,6 @@
-<pre>
+<div align="center">
+  <div style="display:inline-block; text-align:left;">
+    <pre>
  ____                  ___                       ____
 /\  _`\    __         /\_ \                     /\  _`\
 \ \ \L\ \ /\_\    ___ \//\ \     ___      __    \ \,\L\_\     __   _ __   __  __     __   _ __
@@ -8,9 +10,12 @@
     \/___/   \/_/\/_/\/_/\/____/\/___/  \/___L\ \   \/_____/\/____/ \/_/   \/__/   \/____/ \/_/
                                           /\____/
                                           \_/__/
-</pre>
+    </pre>
+  </div>
+</div>
 
 <div align="center">
+
 # BinlogServer
 
 [![Release](https://img.shields.io/github/v/release/Fanduzi/BinlogServer?display_name=tag)](https://github.com/Fanduzi/BinlogServer/releases)
