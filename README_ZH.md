@@ -60,7 +60,7 @@ make release-assets VERSION=v0.1.0
 
 ### 前置条件
 
-- Go `1.26.0+`
+- Go `1.26.1+`
 - 一个可访问的 MySQL 实例，并且已经开启 binlog
 - 如需跑 E2E：Docker 可用
 
