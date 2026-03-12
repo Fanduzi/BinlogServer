@@ -1,3 +1,16 @@
+<div align="center">
+<pre>
+ ____                  ___                       ____
+/\  _`\    __         /\_ \                     /\  _`\
+\ \ \L\ \ /\_\    ___ \//\ \     ___      __    \ \,\L\_\     __   _ __   __  __     __   _ __
+ \ \  _ <'\/\ \ /' _ `\ \ \ \   / __`\  /'_ `\   \/_\__ \   /'__`\/\`'__\/\ \/\ \  /'__`\/\`'__\
+  \ \ \L\ \\ \ \/\ \/\ \ \_\ \_/\ \L\ \/\ \L\ \    /\ \L\ \/\  __/\ \ \/ \ \ \_/ |/\  __/\ \ \/
+   \ \____/ \ \_\ \_\ \_\/\____\ \____/\ \____ \   \ `\____\ \____\\ \_\  \ \___/ \ \____\\ \_\
+    \/___/   \/_/\/_/\/_/\/____/\/___/  \/___L\ \   \/_____/\/____/ \/_/   \/__/   \/____/ \/_/
+                                          /\____/
+                                          \_/__/
+</pre>
+
 # BinlogServer
 
 [![Release](https://img.shields.io/github/v/release/Fanduzi/BinlogServer?display_name=tag)](https://github.com/Fanduzi/BinlogServer/releases)
@@ -5,6 +18,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 English | [中文](README_ZH.md) | [Changelog](CHANGELOG.md) | [Security](SECURITY.md)
+</div>
 
 Binlog Server is a service for pulling MySQL binlog into durable local files, persisting checkpoint state, and managing replication tasks through an API-driven control plane with UI, optional S3-compatible upload, and cluster coordination support.
 
