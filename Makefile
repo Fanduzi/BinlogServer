@@ -1,10 +1,16 @@
 .PHONY: help test build build-linux ui-build release-assets e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
+VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo devel)
+BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+VERSION_PKG := binlog_server/cmd/binlog-server/cmd
+GO_BUILD_LDFLAGS := -X '$(VERSION_PKG).buildVersion=$(VERSION)' -X '$(VERSION_PKG).buildCommit=$(BUILD_COMMIT)' -X '$(VERSION_PKG).buildDate=$(BUILD_DATE)'
+
 help:
 	@echo "Targets:"
 	@echo "  make test                       # run unit tests"
-	@echo "  make build                      # build a local bin/binlog-server binary with embedded UI"
-	@echo "  make build-linux                # build a local bin/binlog-server-linux-amd64 binary with embedded UI"
+	@echo "  make build [VERSION=vX.Y.Z]     # build a local bin/binlog-server binary with embedded UI"
+	@echo "  make build-linux [VERSION=vX.Y.Z] # build a local bin/binlog-server-linux-amd64 binary with embedded UI"
 	@echo "  make ui-build                   # build frontend and sync to internal/ui/static"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
@@ -23,17 +29,17 @@ test:
 
 build: ui-build
 	@mkdir -p bin
-	go build -o $${BINARY:-bin/binlog-server} ./cmd/binlog-server
+	go build -ldflags "$(GO_BUILD_LDFLAGS)" -o $${BINARY:-bin/binlog-server} ./cmd/binlog-server
 
 build-linux: ui-build
 	@mkdir -p bin
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $${BINARY:-bin/binlog-server-linux-amd64} ./cmd/binlog-server
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(GO_BUILD_LDFLAGS)" -o $${BINARY:-bin/binlog-server-linux-amd64} ./cmd/binlog-server
 
 ui-build:
 	./scripts/build-ui.sh
 
 release-assets:
-	VERSION="$(VERSION)" ./scripts/release-assets.sh
+	VERSION="$(VERSION)" BUILD_COMMIT="$(BUILD_COMMIT)" BUILD_DATE="$(BUILD_DATE)" ./scripts/release-assets.sh
 
 e2e-quick:
 	./scripts/e2e/run-suite.sh --profile quick

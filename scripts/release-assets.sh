@@ -8,12 +8,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_NAME="${PROJECT_NAME:-binlog-server}"
 VERSION="${VERSION:-dev}"
+BUILD_COMMIT="${BUILD_COMMIT:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)}"
+BUILD_DATE="${BUILD_DATE:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 DIST_ROOT="${DIST_ROOT:-$ROOT_DIR/dist/$VERSION}"
 TARGETS="${RELEASE_TARGETS:-darwin/amd64 darwin/arm64 linux/amd64 linux/arm64}"
 BUILD_UI="${BUILD_UI:-1}"
 UI_STATIC_DIR="$ROOT_DIR/internal/ui/static"
 ui_backup_dir=""
 checksum_cmd=()
+VERSION_PKG="binlog_server/cmd/binlog-server/cmd"
 
 restore_ui_static() {
   if [[ -n "$ui_backup_dir" && -d "$ui_backup_dir" ]]; then
@@ -71,7 +74,9 @@ for target in $TARGETS; do
   (
     cd "$ROOT_DIR"
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-      go build -trimpath -o "$stage_dir/$PROJECT_NAME" ./cmd/binlog-server
+      go build -trimpath \
+        -ldflags "-X ${VERSION_PKG}.buildVersion=$VERSION -X ${VERSION_PKG}.buildCommit=$BUILD_COMMIT -X ${VERSION_PKG}.buildDate=$BUILD_DATE" \
+        -o "$stage_dir/$PROJECT_NAME" ./cmd/binlog-server
   )
 
   echo "[release] archive $artifact_name.tar.gz"
