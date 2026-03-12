@@ -7,14 +7,14 @@
 | File | Responsibility |
 |------|---------------|
 | build-ui.sh | 构建 frontend 并同步到 internal/ui/static |
-| release-assets.sh | 构建带内嵌 UI 的多平台 release 二进制、压缩包与 checksums |
+| release-assets.sh | 构建带内嵌 UI 且写入版本/commit/build date 的多平台 release 二进制、压缩包与 checksums |
 | verify-phase-acceptance.sh | 统一执行阶段验收命令（test/race/vet/e2e-quick）并输出耗时摘要 |
 | e2e/ | E2E 套件与场景脚本 |
 
 ## Exports
 
-- `make build`
-- `make build-linux`
+- `make build [VERSION=v0.1.0]`
+- `make build-linux [VERSION=v0.1.0]`
 - `make ui-build`
 - `make release-assets VERSION=v0.1.0`
 - `make e2e-quick`
