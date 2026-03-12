@@ -86,7 +86,7 @@ This section keeps the shortest path to a working service.
 
 ### Prerequisites
 
-- Go `1.26.0+`
+- Go `1.26.1+`
 - A reachable MySQL instance with binlog enabled
 - Docker available if you want to run E2E scenarios
 
