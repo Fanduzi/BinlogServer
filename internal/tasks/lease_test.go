@@ -282,6 +282,220 @@ func TestScheduler_LeaseRenewRecoveryWithinGraceKeepsRunning(t *testing.T) {
 	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
 }
 
+// TestScheduler_OwnershipLossLeavesHealthyRunningPosture 验证 ownership-loss 后旧 owner 退出健康运行态。
+func TestScheduler_OwnershipLossLeavesHealthyRunningPosture(t *testing.T) {
+	lease := &fakeLeaseManager{
+		acquireEpoch: 18,
+		acquireOK:    true,
+		renewFn: func(_ int) (bool, error) {
+			return false, nil
+		},
+	}
+	runner := &delayedStopRunner{
+		started: make(chan Task, 1),
+		delay:   100 * time.Millisecond,
+	}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 80*time.Millisecond),
+	)
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner was not invoked")
+	}
+
+	waitTaskState(t, s, task.ID, 2*time.Second, StateStopping)
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State == StateRunning {
+		t.Fatalf("expected ownership-loss to exit healthy running posture, got %s", got.State)
+	}
+	if got.OwnerWorkerID == "" || got.Epoch == 0 || got.RunID == "" {
+		t.Fatalf("expected runtime ownership retained until final convergence, got owner=%q epoch=%d run_id=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
+	}
+}
+
+// TestScheduler_OwnershipLossSuppressesProgressAfterRenewLoss 验证 renew 报告 ownership-loss 后旧 owner 不再更新 progress。
+func TestScheduler_OwnershipLossSuppressesProgressAfterRenewLoss(t *testing.T) {
+	lease := &fakeLeaseManager{
+		acquireEpoch: 19,
+		acquireOK:    true,
+		renewFn: func(_ int) (bool, error) {
+			return false, nil
+		},
+	}
+	runner := &delayedStopRunner{
+		started: make(chan Task, 1),
+		delay:   100 * time.Millisecond,
+	}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 80*time.Millisecond),
+	)
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner was not invoked")
+	}
+
+	s.ReportReplicationProgress(task.ID, time.Unix(100, 0), "mysql-bin.000001", 123)
+	before, ok, err := s.GetReplicationProgress(task.ID)
+	if err != nil {
+		t.Fatalf("GetReplicationProgress returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected initial replication progress to exist")
+	}
+
+	waitTaskState(t, s, task.ID, 2*time.Second, StateStopping)
+
+	s.ReportReplicationProgress(task.ID, time.Unix(200, 0), "mysql-bin.000002", 456)
+	after, ok, err := s.GetReplicationProgress(task.ID)
+	if err != nil {
+		t.Fatalf("GetReplicationProgress returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected replication progress to remain readable")
+	}
+	if after.LastEventAt != before.LastEventAt || after.LastEventFile != before.LastEventFile || after.LastEventPos != before.LastEventPos {
+		t.Fatalf("expected progress to stop changing after ownership loss, before=%+v after=%+v", before, after)
+	}
+}
+
+// TestScheduler_OwnershipLossStopPathIsIdempotent 验证 ownership-loss stop 路径在重复信号下保持幂等。
+func TestScheduler_OwnershipLossStopPathIsIdempotent(t *testing.T) {
+	lease := &fakeLeaseManager{
+		acquireEpoch: 20,
+		acquireOK:    true,
+	}
+	runner := &delayedStopRunner{
+		started: make(chan Task, 1),
+		delay:   50 * time.Millisecond,
+	}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 80*time.Millisecond),
+	)
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner was not invoked")
+	}
+
+	s.mu.Lock()
+	s.failSafeStopLocked(task.ID, "TASK_LEASE_LOST", "lease lost")
+	s.failSafeStopLocked(task.ID, "TASK_LEASE_LOST", "lease lost")
+	s.mu.Unlock()
+
+	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
+
+	events, err := s.ListEvents(task.ID, 20)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	leaseLostEvents := 0
+	for _, event := range events {
+		if event.Type == "TASK_LEASE_LOST" {
+			leaseLostEvents++
+		}
+	}
+	if leaseLostEvents != 1 {
+		t.Fatalf("expected exactly one ownership-loss stop event, got %d", leaseLostEvents)
+	}
+}
+
+// TestScheduler_OwnershipLossClearsRuntimeOwnershipOnStop 验证 ownership-loss 最终收敛后清空 runtime ownership 字段。
+func TestScheduler_OwnershipLossClearsRuntimeOwnershipOnStop(t *testing.T) {
+	lease := &fakeLeaseManager{
+		acquireEpoch: 21,
+		acquireOK:    true,
+		renewFn: func(_ int) (bool, error) {
+			return false, nil
+		},
+	}
+	runner := &delayedStopRunner{
+		started: make(chan Task, 1),
+		delay:   50 * time.Millisecond,
+	}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 80*time.Millisecond),
+	)
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner was not invoked")
+	}
+
+	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.OwnerWorkerID != "" || got.Epoch != 0 || got.RunID != "" {
+		t.Fatalf("expected ownership cleared after final stop, got owner=%q epoch=%d run_id=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
+	}
+}
+
 // TestScheduler_FailSafeStopIsIdempotentAcrossLeaseLossSignals 验证重复 lease-loss 信号下 fail-safe stop 保持幂等。
 func TestScheduler_FailSafeStopIsIdempotentAcrossLeaseLossSignals(t *testing.T) {
 	lease := &fakeLeaseManager{
