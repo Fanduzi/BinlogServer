@@ -17,7 +17,12 @@ func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.tasks[taskID]; !ok {
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return
+	}
+	if task.State == StateStopping || task.State == StateStopped {
+		// fail-safe stop 已开始后，拒绝继续接受“健康运行态”的进度上报。
 		return
 	}
 	progress := s.replica[taskID]
