@@ -21,10 +21,139 @@ import (
 	"testing"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/config"
 	"binlog_server/internal/replication"
 	"binlog_server/internal/tasks"
 )
+
+type fakeAppMetaStore struct {
+	regMu sync.Mutex
+
+	acquireOK      bool
+	acquireCalls   int
+	renewOK        bool
+	renewErr       error
+	renewCalls     int
+	releaseCalls   int
+	heartbeats     []tasks.WorkerHeartbeat
+	listTasks      []tasks.Task
+	waitRenewCalls chan struct{}
+}
+
+func (s *fakeAppMetaStore) Close() error { return nil }
+
+func (s *fakeAppMetaStore) UpsertTask(_ context.Context, task tasks.Task) error {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	replaced := false
+	for i := range s.listTasks {
+		if s.listTasks[i].ID == task.ID {
+			s.listTasks[i] = task
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.listTasks = append(s.listTasks, task)
+	}
+	return nil
+}
+
+func (s *fakeAppMetaStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return append([]tasks.Task(nil), s.listTasks...), nil
+}
+
+func (s *fakeAppMetaStore) DeleteTask(_ context.Context, taskID string) error {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	filtered := s.listTasks[:0]
+	for _, task := range s.listTasks {
+		if task.ID != taskID {
+			filtered = append(filtered, task)
+		}
+	}
+	s.listTasks = filtered
+	return nil
+}
+
+func (s *fakeAppMetaStore) LoadCheckpoint(_ context.Context, _ string) (binlog.Checkpoint, bool, error) {
+	return binlog.Checkpoint{}, false, nil
+}
+
+func (s *fakeAppMetaStore) UpsertCheckpoint(_ context.Context, _ string, _ binlog.Checkpoint) error {
+	return nil
+}
+
+func (s *fakeAppMetaStore) AppendEvent(_ context.Context, _ tasks.TaskEvent) error { return nil }
+
+func (s *fakeAppMetaStore) ListEvents(_ context.Context, _ string, _ int) ([]tasks.TaskEvent, error) {
+	return nil, nil
+}
+
+func (s *fakeAppMetaStore) UpsertBinlogFile(_ context.Context, _ tasks.BinlogFile) error { return nil }
+
+func (s *fakeAppMetaStore) ListBinlogFiles(_ context.Context, _ string, _ int) ([]tasks.BinlogFile, error) {
+	return nil, nil
+}
+
+func (s *fakeAppMetaStore) CountUploadFailures(_ context.Context) (int64, error) { return 0, nil }
+
+func (s *fakeAppMetaStore) ListUploadFailureReasons(_ context.Context, _ string, _ int) ([]tasks.UploadFailureReason, error) {
+	return nil, nil
+}
+
+func (s *fakeAppMetaStore) ListTaskRuns(_ context.Context, _ string, _ int) ([]tasks.TaskRun, error) {
+	return nil, nil
+}
+
+func (s *fakeAppMetaStore) ListWorkerHeartbeats(_ context.Context, _ int) ([]tasks.WorkerHeartbeat, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return append([]tasks.WorkerHeartbeat(nil), s.heartbeats...), nil
+}
+
+func (s *fakeAppMetaStore) UpsertWorkerHeartbeat(_ context.Context, hb tasks.WorkerHeartbeat) error {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	s.heartbeats = append(s.heartbeats, hb)
+	return nil
+}
+
+func (s *fakeAppMetaStore) AcquireWorkerRegistration(_ context.Context, _, _ string, _ time.Duration) (bool, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	s.acquireCalls++
+	return s.acquireOK, nil
+}
+
+func (s *fakeAppMetaStore) RenewWorkerRegistration(_ context.Context, _, _ string, _ time.Duration) (bool, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	s.renewCalls++
+	if s.waitRenewCalls != nil {
+		select {
+		case s.waitRenewCalls <- struct{}{}:
+		default:
+		}
+	}
+	return s.renewOK, s.renewErr
+}
+
+func (s *fakeAppMetaStore) ReleaseWorkerRegistration(_ context.Context, _, _ string) error {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	s.releaseCalls++
+	return nil
+}
+
+func (s *fakeAppMetaStore) snapshot() (acquireCalls, renewCalls, releaseCalls int, heartbeats []tasks.WorkerHeartbeat) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return s.acquireCalls, s.renewCalls, s.releaseCalls, append([]tasks.WorkerHeartbeat(nil), s.heartbeats...)
+}
 
 // TestApp_StartAndServeHealth 验证相关行为。
 func TestApp_StartAndServeHealth(t *testing.T) {
@@ -258,6 +387,23 @@ type appLeaseVerifier struct{}
 
 // VerifyLease 实现对应功能逻辑。
 func (v *appLeaseVerifier) VerifyLease(_ context.Context, _ tasks.Task) (bool, error) {
+	return true, nil
+}
+
+type appRunLeaseManager struct {
+	acquireOK    bool
+	acquireEpoch int64
+}
+
+func (m *appRunLeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Duration) (int64, bool, error) {
+	return m.acquireEpoch, m.acquireOK, nil
+}
+
+func (m *appRunLeaseManager) Renew(_ context.Context, _ string, _ string, _ int64, _ time.Time, _ time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (m *appRunLeaseManager) Release(_ context.Context, _ string, _ string, _ int64) (bool, error) {
 	return true, nil
 }
 
@@ -609,6 +755,213 @@ func TestStartWorkerRegistrationRenewLoop_TriggersOwnershipLostCallback(t *testi
 	}
 }
 
+// TestApp_RunRejectsDuplicateWorkerRegistrationOwnership 验证已有 active session 持有时 duplicate worker_id 启动被拒绝。
+func TestApp_RunRejectsDuplicateWorkerRegistrationOwnership(t *testing.T) {
+	store := &fakeAppMetaStore{
+		acquireOK: false,
+		renewOK:   true,
+	}
+	restoreMetaStoreFactory := newAppMetaStoreForRun
+	newAppMetaStoreForRun = func(_ config.Config) (appMetaStore, error) {
+		return store, nil
+	}
+	defer func() { newAppMetaStoreForRun = restoreMetaStoreFactory }()
+
+	cfg := config.Config{
+		DataDir:    t.TempDir(),
+		MetaDSN:    "fake-meta",
+		Mode:       "cluster",
+		ListenAddr: "127.0.0.1:0",
+		Cluster: config.ClusterConfig{
+			Role:                  "worker",
+			WorkerID:              "worker-dup-a",
+			LeaseTTLSec:           1,
+			LeaseRenewIntervalSec: 1,
+			LeaseGraceSec:         2,
+		},
+	}
+
+	err := New(cfg).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "worker_id is already in use") {
+		t.Fatalf("expected duplicate worker_id rejection, got %v", err)
+	}
+	acquireCalls, renewCalls, releaseCalls, _ := store.snapshot()
+	if acquireCalls != 1 || renewCalls != 0 || releaseCalls != 0 {
+		t.Fatalf("unexpected registration calls acquire=%d renew=%d release=%d", acquireCalls, renewCalls, releaseCalls)
+	}
+}
+
+// TestApp_RunWorkerRoleReturnsOwnershipLostAndKeepsControlPlaneOff 验证 cluster+worker 失租后退出健康 worker posture 且不启 control-plane。
+func TestApp_RunWorkerRoleReturnsOwnershipLostAndKeepsControlPlaneOff(t *testing.T) {
+	store := &fakeAppMetaStore{
+		acquireOK:      true,
+		renewOK:        false,
+		waitRenewCalls: make(chan struct{}, 1),
+	}
+	restoreMetaStoreFactory := newAppMetaStoreForRun
+	newAppMetaStoreForRun = func(_ config.Config) (appMetaStore, error) {
+		return store, nil
+	}
+	defer func() { newAppMetaStoreForRun = restoreMetaStoreFactory }()
+
+	cfg := config.Config{
+		DataDir:    t.TempDir(),
+		MetaDSN:    "fake-meta",
+		Mode:       "cluster",
+		ListenAddr: "127.0.0.1:0",
+		Cluster: config.ClusterConfig{
+			Role:                   "worker",
+			WorkerID:               "worker-owned-a",
+			WorkerHealthListenAddr: "127.0.0.1:0",
+			LeaseTTLSec:            1,
+			LeaseRenewIntervalSec:  1,
+			LeaseGraceSec:          2,
+		},
+	}
+	a := New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+
+	waitReady(t, a)
+	if a.Addr() != "" {
+		t.Fatalf("expected worker role to keep control-plane off, got addr=%q", a.Addr())
+	}
+	if a.WorkerHealthAddr() == "" {
+		t.Fatal("expected worker health probe to be exposed before ownership loss")
+	}
+
+	waitForSignal(t, store.waitRenewCalls, 2*time.Second, "renew call")
+	err := waitErr(t, errCh, 3*time.Second)
+	if !errors.Is(err, errWorkerRegistrationOwnershipLost) {
+		t.Fatalf("expected errWorkerRegistrationOwnershipLost, got %v", err)
+	}
+}
+
+// TestApp_RunAllInOneRoleReturnsOwnershipLostButKeepsRoleSemantics 验证 cluster+all-in-one 保持既有语义但不忽略 registration ownership loss。
+func TestApp_RunAllInOneRoleReturnsOwnershipLostButKeepsRoleSemantics(t *testing.T) {
+	store := &fakeAppMetaStore{
+		acquireOK:      true,
+		renewOK:        false,
+		waitRenewCalls: make(chan struct{}, 1),
+	}
+	restoreMetaStoreFactory := newAppMetaStoreForRun
+	newAppMetaStoreForRun = func(_ config.Config) (appMetaStore, error) {
+		return store, nil
+	}
+	defer func() { newAppMetaStoreForRun = restoreMetaStoreFactory }()
+
+	cfg := config.Config{
+		DataDir:    t.TempDir(),
+		MetaDSN:    "fake-meta",
+		Mode:       "cluster",
+		ListenAddr: "127.0.0.1:0",
+		Cluster: config.ClusterConfig{
+			Role:                  "all-in-one",
+			WorkerID:              "worker-all-in-one-a",
+			LeaseTTLSec:           1,
+			LeaseRenewIntervalSec: 1,
+			LeaseGraceSec:         2,
+		},
+	}
+	a := New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+
+	waitReady(t, a)
+	if a.Addr() == "" {
+		t.Fatal("expected all-in-one role to still expose control-plane listener")
+	}
+	assertHTTPStatus(t, "http://"+a.Addr()+"/healthz", http.StatusOK)
+
+	waitForSignal(t, store.waitRenewCalls, 2*time.Second, "renew call")
+	err := waitErr(t, errCh, 3*time.Second)
+	if !errors.Is(err, errWorkerRegistrationOwnershipLost) {
+		t.Fatalf("expected errWorkerRegistrationOwnershipLost, got %v", err)
+	}
+}
+
+// TestApp_RunWorkerIdentityStaysCoherentForActiveSession 验证 task/heartbeat worker identity 与 active session 保持一致。
+func TestApp_RunWorkerIdentityStaysCoherentForActiveSession(t *testing.T) {
+	store := &fakeAppMetaStore{
+		acquireOK: true,
+		renewOK:   true,
+	}
+	restoreMetaStoreFactory := newAppMetaStoreForRun
+	newAppMetaStoreForRun = func(_ config.Config) (appMetaStore, error) {
+		return store, nil
+	}
+	defer func() { newAppMetaStoreForRun = restoreMetaStoreFactory }()
+
+	restoreNewRunner := newRunnerForRun
+	started := make(chan tasks.Task, 1)
+	newRunnerForRun = func(_ config.Config, opts ...replication.RunnerOption) tasks.Runner {
+		return &appFakeRunner{started: started}
+	}
+	defer func() { newRunnerForRun = restoreNewRunner }()
+	restoreLeaseRuntime := newClusterLeaseRuntimeForRun
+	newClusterLeaseRuntimeForRun = func(_ appMetaStore) (tasks.LeaseManager, replication.LeaseVerifier) {
+		return &appRunLeaseManager{acquireOK: true, acquireEpoch: 7}, &appLeaseVerifier{}
+	}
+	defer func() { newClusterLeaseRuntimeForRun = restoreLeaseRuntime }()
+
+	cfg := config.Config{
+		DataDir:    t.TempDir(),
+		MetaDSN:    "fake-meta",
+		Mode:       "cluster",
+		ListenAddr: "127.0.0.1:0",
+		Cluster: config.ClusterConfig{
+			Role:                  "all-in-one",
+			WorkerID:              "worker-session-coherent-a",
+			LeaseTTLSec:           5,
+			LeaseRenewIntervalSec: 1,
+			LeaseGraceSec:         2,
+		},
+	}
+	a := New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	waitReady(t, a)
+
+	taskBody := `{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl"}}`
+	createResp := postJSON(t, "http://"+a.Addr()+"/api/tasks", taskBody)
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected create status 201, got %d body=%s", createResp.StatusCode, string(createResp.Body))
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(createResp.Body, &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	startResp := postJSON(t, "http://"+a.Addr()+"/api/tasks/"+created.ID+"/start", "")
+	if startResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected start status 204, got %d body=%s", startResp.StatusCode, string(startResp.Body))
+	}
+
+	var startedTask tasks.Task
+	select {
+	case startedTask = <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected runner start")
+	}
+	if startedTask.OwnerWorkerID != cfg.Cluster.WorkerID {
+		t.Fatalf("expected started task owner=%q, got %q", cfg.Cluster.WorkerID, startedTask.OwnerWorkerID)
+	}
+
+	waitForHeartbeatWorkerID(t, store, cfg.Cluster.WorkerID, 2*time.Second)
+
+	cancel()
+	err := waitErr(t, errCh, 3*time.Second)
+	if err != nil {
+		t.Fatalf("expected clean shutdown, got %v", err)
+	}
+}
+
 type fakeResumeScheduler struct {
 	items      []tasks.Task
 	stopErr    map[string]error
@@ -689,6 +1042,43 @@ func waitRunExit(t *testing.T, errCh <-chan error) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("app did not shut down in time")
+	}
+}
+
+func waitErr(t *testing.T, errCh <-chan error, timeout time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(timeout):
+		t.Fatal("app did not shut down in time")
+		return nil
+	}
+}
+
+func waitForSignal(t *testing.T, ch <-chan struct{}, timeout time.Duration, label string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+		t.Fatalf("expected %s in time", label)
+	}
+}
+
+func waitForHeartbeatWorkerID(t *testing.T, store *fakeAppMetaStore, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		_, _, _, heartbeats := store.snapshot()
+		for _, hb := range heartbeats {
+			if hb.WorkerID == want && hb.Status == "ONLINE" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected heartbeat worker_id=%q", want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
