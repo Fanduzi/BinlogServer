@@ -42,6 +42,38 @@ const (
 var workerIDInvalidCharPattern = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 var errWorkerRegistrationOwnershipLost = errors.New("worker registration ownership lost")
 
+type appMetaStore interface {
+	tasks.TaskStore
+	tasks.CheckpointReader
+	tasks.EventStore
+	tasks.FileStore
+	replication.CheckpointStore
+	replication.FileMetaStore
+	workerHeartbeatSink
+	workerRegistrationStore
+	Close() error
+}
+
+var newAppMetaStoreForRun = func(cfg config.Config) (appMetaStore, error) {
+	return meta.NewMySQLTaskStoreWithSchemaTimeout(
+		cfg.MetaDSN,
+		time.Duration(cfg.Meta.Timeout.WriteSec)*time.Second,
+	)
+}
+
+var newClusterLeaseRuntimeForRun = func(store appMetaStore) (tasks.LeaseManager, replication.LeaseVerifier) {
+	mysqlStore, ok := store.(*meta.MySQLTaskStore)
+	if !ok {
+		return nil, nil
+	}
+	leaseStore := meta.NewLeaseStoreFromTaskStore(mysqlStore)
+	return leaseStore, leaseVerifierFromStore{leaseStore: leaseStore}
+}
+
+var newRunnerForRun = func(cfg config.Config, opts ...replication.RunnerOption) tasks.Runner {
+	return replication.NewMySQLRunner(cfg.DataDir, opts...)
+}
+
 type App struct {
 	cfg       config.Config
 	readyCh   chan struct{}
@@ -108,15 +140,13 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 
-	var mysqlStore *meta.MySQLTaskStore
-	var leaseStore *meta.LeaseStore
+	var mysqlStore appMetaStore
+	var leaseManager tasks.LeaseManager
+	var leaseVerifier replication.LeaseVerifier
 	if a.cfg.MetaDSN != "" {
 		// 如果配置了 metadata DB，把它同时注入 scheduler（control plane）
 		// 和 runner（data plane 的 checkpoint/file metadata）。
-		mysqlStore, err = meta.NewMySQLTaskStoreWithSchemaTimeout(
-			a.cfg.MetaDSN,
-			time.Duration(a.cfg.Meta.Timeout.WriteSec)*time.Second,
-		)
+		mysqlStore, err = newAppMetaStoreForRun(a.cfg)
 		if err != nil {
 			return err
 		}
@@ -127,7 +157,7 @@ func (a *App) Run(ctx context.Context) error {
 		opts = append(opts, tasks.WithFileStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
-		leaseStore = meta.NewLeaseStoreFromTaskStore(mysqlStore)
+		leaseManager, leaseVerifier = newClusterLeaseRuntimeForRun(mysqlStore)
 	}
 
 	opts = append(opts, tasks.WithInternalCallTimeouts(tasks.InternalCallTimeouts{
@@ -196,8 +226,8 @@ func (a *App) Run(ctx context.Context) error {
 	opts, runnerOpts = applyClusterRuntimeOptions(
 		a.cfg,
 		resolvedWorkerID,
-		leaseStore,
-		leaseVerifierFromStore{leaseStore: leaseStore},
+		leaseManager,
+		leaseVerifier,
 		opts,
 		runnerOpts,
 	)
@@ -224,7 +254,7 @@ func (a *App) Run(ctx context.Context) error {
 	if workerEnabled {
 		// 将 runner 进度回传给 scheduler，供 API/状态机读取。
 		runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))
-		runner := replication.NewMySQLRunner(a.cfg.DataDir, runnerOpts...)
+		runner := newRunnerForRun(a.cfg, runnerOpts...)
 		scheduler.SetRunner(runner)
 	}
 	// Restore 必须在对外服务前执行，保证 API 看到的是恢复后的稳定状态。
