@@ -15,3 +15,4 @@ tmp/e2e/data/
 /dist/
 /bin/
 .gitnexus
+.claude/
