@@ -17,8 +17,8 @@
 - Downstream: 后端 `/api/*` 端点
 
 ## Features
-- 认证支持：Bearer Token 配置（Settings 对话框），API 请求自动携带 Authorization 头
-- 401 处理：自动弹出认证提示，引导用户配置 Token
+- 认证支持：Bearer Token 配置（设置对话框），API 请求自动携带 Authorization 头
+- 401 处理：统一为中文运维提示，并直接引导用户进入设置配置 Token
 
 ## Update Rule
 - 前端模块边界、接口契约、构建流程变化时，更新本文件。

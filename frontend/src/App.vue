@@ -1,3 +1,9 @@
+<!--
+input: dashboard/task API data, local filter state, auth-required browser event
+output: operator-focused console UI with task list, detail drawer, forms, and settings
+pos: single-page frontend entry for Binlog Server operations console
+note: keep create/edit/start/stop flows intact; update this header if page responsibilities change
+-->
 <template>
   <div class="page-shell">
     <div class="orb orb-a" />
@@ -6,9 +12,9 @@
     <header class="hero">
       <div class="hero-copy">
         <p class="kicker"><i class="fa-solid fa-wave-square" /> BINLOG SERVER</p>
-        <h1>Binlog Server</h1>
+        <h1>Binlog Server 运维控制台</h1>
         <p class="hero-desc">
-          Lag, health, and source coverage in one place.
+          优先发现异常、失败与延迟任务，并在详情中完成处置。
         </p>
       </div>
       <div class="hero-actions">
@@ -28,39 +34,143 @@
     </header>
 
     <section class="metric-grid">
-      <article class="metric-card">
+      <article
+        class="metric-card metric-card--danger"
+        role="button"
+        tabindex="0"
+        data-testid="kpi-abnormal"
+        :data-active="activeQuickFilter === 'abnormal'"
+        @click="applyQuickFilter('abnormal')"
+        @keydown.enter.prevent="applyQuickFilter('abnormal')"
+        @keydown.space.prevent="applyQuickFilter('abnormal')"
+      >
+        <p><i class="fa-solid fa-triangle-exclamation" /> 异常任务</p>
+        <strong data-testid="kpi-abnormal-value">{{ dashboard.summary.abnormal }}</strong>
+      </article>
+      <article
+        class="metric-card metric-card--danger"
+        role="button"
+        tabindex="0"
+        data-testid="kpi-failed"
+        :data-active="activeQuickFilter === 'failed'"
+        @click="applyQuickFilter('failed')"
+        @keydown.enter.prevent="applyQuickFilter('failed')"
+        @keydown.space.prevent="applyQuickFilter('failed')"
+      >
+        <p><i class="fa-solid fa-bug" /> 失败任务</p>
+        <strong data-testid="kpi-failed-value">{{ dashboard.summary.failed }}</strong>
+      </article>
+      <article
+        class="metric-card metric-card--warning"
+        role="button"
+        tabindex="0"
+        data-testid="kpi-delayed"
+        :data-active="activeQuickFilter === 'delayed'"
+        @click="applyQuickFilter('delayed')"
+        @keydown.enter.prevent="applyQuickFilter('delayed')"
+        @keydown.space.prevent="applyQuickFilter('delayed')"
+      >
+        <p><i class="fa-solid fa-hourglass-half" /> 延迟任务</p>
+        <strong data-testid="kpi-delayed-value">{{ dashboard.summary.delayed }}</strong>
+      </article>
+      <article
+        class="metric-card"
+        role="button"
+        tabindex="0"
+        data-testid="kpi-running"
+        :data-active="activeQuickFilter === 'running'"
+        @click="applyQuickFilter('running')"
+        @keydown.enter.prevent="applyQuickFilter('running')"
+        @keydown.space.prevent="applyQuickFilter('running')"
+      >
+        <p><i class="fa-solid fa-play" /> 运行中任务</p>
+        <strong>{{ dashboard.summary.running }}</strong>
+      </article>
+      <article
+        class="metric-card"
+        role="button"
+        tabindex="0"
+        data-testid="kpi-all"
+        :data-active="activeQuickFilter === 'all'"
+        @click="applyQuickFilter('all')"
+        @keydown.enter.prevent="applyQuickFilter('all')"
+        @keydown.space.prevent="applyQuickFilter('all')"
+      >
         <p><i class="fa-solid fa-layer-group" /> 总任务</p>
         <strong>{{ dashboard.summary.total }}</strong>
       </article>
-      <article class="metric-card">
-        <p><i class="fa-solid fa-play" /> 运行中</p>
-        <strong>{{ dashboard.summary.running }}</strong>
-      </article>
-      <article class="metric-card">
-        <p><i class="fa-solid fa-circle-check" /> 正常</p>
+      <article
+        class="metric-card metric-card--success"
+        role="button"
+        tabindex="0"
+        data-testid="kpi-normal"
+        :data-active="activeQuickFilter === 'normal'"
+        @click="applyQuickFilter('normal')"
+        @keydown.enter.prevent="applyQuickFilter('normal')"
+        @keydown.space.prevent="applyQuickFilter('normal')"
+      >
+        <p><i class="fa-solid fa-circle-check" /> 正常任务</p>
         <strong>{{ dashboard.summary.normal }}</strong>
       </article>
-      <article class="metric-card">
-        <p><i class="fa-solid fa-hourglass-half" /> 延迟</p>
-        <strong>{{ dashboard.summary.delayed }}</strong>
-      </article>
-      <article class="metric-card">
-        <p><i class="fa-solid fa-triangle-exclamation" /> 异常</p>
-        <strong>{{ dashboard.summary.abnormal }}</strong>
-      </article>
-      <article class="metric-card">
-        <p><i class="fa-solid fa-bug" /> 失败</p>
-        <strong>{{ dashboard.summary.failed }}</strong>
-      </article>
     </section>
+
+    <el-alert
+      v-if="authRequiredMessage"
+      data-testid="auth-required-banner"
+      class="auth-required-banner"
+      type="warning"
+      show-icon
+      :closable="false"
+      :title="authRequiredTitle"
+      :description="authRequiredMessage"
+    />
 
     <section class="workspace">
       <aside class="left-pane">
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="panel-title">
+              <span><i class="fa-solid fa-sliders" /> 运维筛选</span>
+              <span class="panel-hint">优先排查异常</span>
+            </div>
+          </template>
+
+          <div class="filter-stack">
+            <div class="filter-chip-row">
+              <el-button size="small" :type="uiFilter.onlyAlert ? 'primary' : 'default'" @click="applyQuickFilter('alert')">仅看告警</el-button>
+              <el-button size="small" @click="applyQuickFilter('abnormal')">异常</el-button>
+              <el-button size="small" @click="applyQuickFilter('failed')">失败</el-button>
+              <el-button size="small" @click="applyQuickFilter('delayed')">延迟</el-button>
+            </div>
+            <el-input v-model="uiFilter.keyword" clearable placeholder="按任务 ID/名称搜索" />
+            <el-select v-model="uiFilter.taskState">
+              <el-option label="全部任务状态" value="ALL" />
+              <el-option v-for="state in taskStates" :key="state" :label="stateLabel(state)" :value="state" />
+            </el-select>
+            <el-select v-model="uiFilter.replicationStatus">
+              <el-option label="全部复制状态" value="ALL" />
+              <el-option v-for="status in replicationStatuses" :key="status" :label="replicationStatusLabel(status)" :value="status" />
+            </el-select>
+            <el-input v-model="uiFilter.sourceKeyword" clearable placeholder="按源库 host:port 过滤" />
+            <el-select v-model="uiFilter.sortBy">
+              <el-option label="风险优先" value="delay_desc" />
+              <el-option label="最近更新优先" value="updated_desc" />
+              <el-option label="任务名 A-Z" value="name_asc" />
+            </el-select>
+            <div class="switch-row">
+              <span>告警任务优先显示</span>
+              <el-switch v-model="uiFilter.onlyAlert" />
+            </div>
+            <div class="filter-summary" data-testid="filter-summary">当前显示 {{ filteredTasks.length }} 个任务</div>
+            <el-button @click="resetUiFilter">重置筛选</el-button>
+          </div>
+        </el-card>
+
+        <el-card shadow="never" class="panel-card panel-card--secondary">
+          <template #header>
+            <div class="panel-title">
               <span><i class="fa-solid fa-magnifying-glass" /> 源库反查</span>
-              <span class="panel-hint">host:port</span>
+              <span class="panel-hint">辅助定位</span>
             </div>
           </template>
 
@@ -83,47 +193,15 @@
           </div>
 
           <div class="meta-line">
-            <span>阈值 {{ dashboard.threshold_seconds }}s</span>
+            <span>延迟阈值 {{ dashboard.threshold_seconds }}s</span>
             <span>{{ formatTs(dashboard.generated_at) }}</span>
           </div>
 
           <div v-if="lookup.checked" class="lookup-state">
             <el-tag :type="lookup.exists ? 'success' : 'info'">
-              {{ lookup.exists ? "已存在拉取任务" : "未找到拉取任务" }}
+              {{ lookup.exists ? "已存在采集任务" : "未找到采集任务" }}
             </el-tag>
             <span>匹配数量：{{ lookup.count }}</span>
-          </div>
-        </el-card>
-
-        <el-card shadow="never" class="panel-card">
-          <template #header>
-            <div class="panel-title">
-              <span><i class="fa-solid fa-sliders" /> 任务筛选</span>
-              <span class="panel-hint">quick filters</span>
-            </div>
-          </template>
-
-          <div class="filter-stack">
-            <el-input v-model="uiFilter.keyword" clearable placeholder="按任务 ID/名称搜索" />
-            <el-input v-model="uiFilter.sourceKeyword" clearable placeholder="按源库 host:port 过滤" />
-            <el-select v-model="uiFilter.taskState">
-              <el-option label="全部任务状态" value="ALL" />
-              <el-option v-for="state in taskStates" :key="state" :label="state" :value="state" />
-            </el-select>
-            <el-select v-model="uiFilter.replicationStatus">
-              <el-option label="全部复制状态" value="ALL" />
-              <el-option v-for="status in replicationStatuses" :key="status" :label="status" :value="status" />
-            </el-select>
-            <el-select v-model="uiFilter.sortBy">
-              <el-option label="延迟高优先" value="delay_desc" />
-              <el-option label="最近更新优先" value="updated_desc" />
-              <el-option label="任务名 A-Z" value="name_asc" />
-            </el-select>
-            <div class="switch-row">
-              <span>仅看告警任务</span>
-              <el-switch v-model="uiFilter.onlyAlert" />
-            </div>
-            <el-button @click="resetUiFilter">重置筛选</el-button>
           </div>
         </el-card>
       </aside>
@@ -132,8 +210,8 @@
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="panel-title">
-              <span><i class="fa-solid fa-sitemap" /> Cluster 视图</span>
-              <span class="panel-hint">{{ cluster.overview.worker_count }} workers</span>
+              <span><i class="fa-solid fa-sitemap" /> 集群视图</span>
+              <span class="panel-hint">{{ cluster.overview.worker_count }} 个 Worker</span>
             </div>
           </template>
 
@@ -173,6 +251,7 @@
             </div>
             <el-empty
               v-if="workerRows.length === 0"
+              data-testid="workers-empty"
               description="暂无 worker 数据"
               :image-size="56"
             />
@@ -187,7 +266,7 @@
             </div>
           </template>
 
-          <div class="source-board">
+          <div class="source-board" v-if="dashboard.sources.length > 0">
             <div
               v-for="item in dashboard.sources"
               :key="`${item.host}:${item.port}`"
@@ -199,12 +278,18 @@
               </p>
             </div>
           </div>
+          <el-empty
+            v-else
+            data-testid="sources-empty"
+            description="暂无 source coverage 数据"
+            :image-size="56"
+          />
         </el-card>
 
         <el-card shadow="never" class="panel-card table-card">
           <template #header>
             <div class="panel-title">
-              <span><i class="fa-solid fa-table" /> 任务明细</span>
+              <span><i class="fa-solid fa-table" /> 任务列表</span>
               <div class="panel-title-actions">
                 <span class="panel-hint">筛选后 {{ filteredTasks.length }} / 总计 {{ dashboard.tasks.length }}</span>
                 <el-button size="small" @click="openBatchCreate">
@@ -219,17 +304,18 @@
             border
             stripe
             row-key="task.id"
+            :row-class-name="taskRowClassName"
             @row-click="onRowClick"
           >
             <el-table-column label="ID" width="70">
-              <template #default="{ row }">{{ row.task.id }}</template>
+              <template #default="{ row }"><span :data-testid="`task-row-${row.task.id}`">{{ row.task.id }}</span></template>
             </el-table-column>
             <el-table-column label="名称" min-width="180">
               <template #default="{ row }">{{ row.task.name }}</template>
             </el-table-column>
-            <el-table-column label="任务状态" width="120">
+            <el-table-column label="任务状态" width="140">
               <template #default="{ row }">
-                <el-tag size="small" :type="stateTagType(row.task.state)">{{ row.task.state }}</el-tag>
+                <el-tag size="small" :type="stateTagType(row.task.state)">{{ stateLabel(row.task.state) }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="归属 Worker" min-width="130">
@@ -240,11 +326,11 @@
                 <el-tag size="small" :type="leaseRiskTagType(row.task)">{{ leaseRiskLabel(row.task) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="复制状态" width="150">
+            <el-table-column label="复制状态" width="170">
               <template #default="{ row }">
                 <div class="replication-cell">
                   <el-tag size="small" :type="replicationTagType(row.replication.status)">
-                    {{ row.replication.status }}
+                    {{ replicationStatusLabel(row.replication.status) }}
                   </el-tag>
                   <el-tooltip
                     v-if="hasReplicationReason(row.replication)"
@@ -269,18 +355,20 @@
             <el-table-column label="SemiSync" width="90">
               <template #default="{ row }">{{ row.task.source?.semi_sync ? "ON" : "OFF" }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="286" fixed="right" class-name="action-col">
+            <el-table-column label="操作" width="110" fixed="right" class-name="action-col">
               <template #default="{ row }">
                 <div class="action-row">
-                  <el-button class="action-btn" size="small" @click.stop="showDetail(row.task)">详情</el-button>
-                  <el-button class="action-btn" size="small" @click.stop="openEdit(row.task)">编辑</el-button>
-                  <el-button class="action-btn" size="small" type="success" @click.stop="onStart(row.task)">启动</el-button>
-                  <el-button class="action-btn" size="small" type="warning" @click.stop="onStop(row.task)">停止</el-button>
-                  <el-button class="action-btn" size="small" type="danger" @click.stop="onDelete(row.task)">删除</el-button>
+                  <el-button class="action-btn" size="small" :data-testid="`task-detail-trigger-${row.task.id}`" @click.stop="showDetail(row.task)">详情</el-button>
                 </div>
               </template>
             </el-table-column>
           </el-table>
+          <el-empty
+            v-if="pagedTasks.length === 0"
+            data-testid="task-table-empty"
+            description="暂无任务"
+            :image-size="56"
+          />
 
           <div class="pager-wrap">
             <el-pagination
@@ -412,86 +500,123 @@ e2e-mysql80,127.0.0.1,13307
       </template>
     </el-dialog>
 
-    <el-drawer v-model="detailVisible" size="66%" :title="detailTask ? `任务详情 #${detailTask.id}` : '任务详情'">
+    <el-drawer v-model="detailVisible" data-testid="task-drawer" size="66%" :title="detailTask ? `任务详情 #${detailTask.id}` : '任务详情'">
       <template v-if="detailTask">
         <div class="detail-stack">
+          <section class="detail-panel detail-panel--hero">
+            <div class="detail-hero">
+              <div>
+                <div class="detail-hero-kicker">任务处理中心</div>
+                <h3><i class="fa-solid fa-circle-info" /> {{ detailTask.name }}</h3>
+                <div class="detail-hero-meta">
+                  <el-tag data-testid="task-drawer-status" :type="stateTagType(detailTask.state)">{{ stateLabel(detailTask.state) }}</el-tag>
+                  <el-tag v-if="detailReplication" data-testid="task-drawer-replication" :type="replicationTagType(detailReplication.status)">{{ replicationStatusLabel(detailReplication.status) }}</el-tag>
+                  <span data-testid="task-drawer-source">源库 {{ sourceLabel(detailTask) }}</span>
+                  <span>Cluster Key {{ detailTask.cluster_key || "--" }}</span>
+                </div>
+              </div>
+              <div class="detail-action-row" data-testid="task-drawer-actions">
+                <el-button data-testid="task-action-edit" @click="openEdit(detailTask)">编辑</el-button>
+                <el-button data-testid="task-action-start" type="success" @click="onStart(detailTask)">启动</el-button>
+                <el-button data-testid="task-action-stop" type="warning" @click="onStop(detailTask)">停止</el-button>
+                <el-button data-testid="task-action-delete" type="danger" plain @click="onDelete(detailTask)">删除</el-button>
+              </div>
+            </div>
+            <div class="detail-grid detail-grid--summary">
+              <div class="detail-item"><span>当前状态</span><strong>{{ stateLabel(detailTask.state) }}</strong></div>
+              <div class="detail-item"><span>复制状态</span><strong>{{ detailReplication ? replicationStatusLabel(detailReplication.status) : "--" }}</strong></div>
+              <div class="detail-item"><span>延迟</span><strong>{{ detailReplication ? `${formatDelay(detailReplication.delay_seconds, detailReplication.has_progress)} 秒` : "--" }}</strong></div>
+              <div class="detail-item"><span>Lease 状态</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
+            </div>
+          </section>
+
+          <section class="detail-panel" v-if="detailReplication">
+            <h3><i class="fa-solid fa-wave-square" /> 复制与位点</h3>
+            <div class="detail-grid">
+              <div class="detail-item">
+                <span>复制状态</span>
+                <strong><el-tag :type="replicationTagType(detailReplication.status)">{{ replicationStatusLabel(detailReplication.status) }}</el-tag></strong>
+              </div>
+              <div class="detail-item"><span>延迟</span><strong>{{ formatDelay(detailReplication.delay_seconds, detailReplication.has_progress) }} 秒</strong></div>
+              <div class="detail-item"><span>当前 Checkpoint</span><strong data-testid="task-drawer-checkpoint">{{ formatCheckpoint(checkpoint) }}</strong></div>
+              <div class="detail-item"><span>异常原因</span><strong>{{ formatReplicationReason(detailReplication) }}</strong></div>
+              <div class="detail-item"><span>告警阈值</span><strong>{{ detailReplication.threshold_seconds || "--" }} 秒</strong></div>
+              <div class="detail-item"><span>最近事件时间</span><strong>{{ formatTs(detailReplication.last_event_at) }}</strong></div>
+              <div class="detail-item"><span>最近位点</span><strong>{{ detailReplication.last_event_file || "-" }}:{{ detailReplication.last_event_pos || 0 }}</strong></div>
+              <div class="detail-item"><span>状态码</span><strong>{{ detailReplication.reason || "--" }}</strong></div>
+            </div>
+          </section>
+
           <section class="detail-panel">
             <h3><i class="fa-solid fa-circle-info" /> 基础信息</h3>
             <div class="detail-grid">
               <div class="detail-item"><span>名称</span><strong>{{ detailTask.name }}</strong></div>
               <div class="detail-item"><span>Cluster Key</span><strong>{{ detailTask.cluster_key || "--" }}</strong></div>
-              <div class="detail-item"><span>状态</span><strong>{{ detailTask.state }}</strong></div>
               <div class="detail-item"><span>源库</span><strong>{{ sourceLabel(detailTask) }}</strong></div>
-              <div class="detail-item"><span>起点</span><strong>{{ detailTask.start?.mode }}</strong></div>
-              <div class="detail-item"><span>SemiSync</span><strong>{{ detailTask.source?.semi_sync ? "ON" : "OFF" }}</strong></div>
-              <div class="detail-item"><span>保留天数</span><strong>{{ detailTask.storage?.retention_days }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel" v-if="detailReplication">
-            <h3><i class="fa-solid fa-wave-square" /> 复制状态</h3>
-            <div class="detail-grid">
-              <div class="detail-item">
-                <span>状态</span>
-                <strong><el-tag :type="replicationTagType(detailReplication.status)">{{ detailReplication.status }}</el-tag></strong>
-              </div>
-              <div class="detail-item"><span>延迟(s)</span><strong>{{ formatDelay(detailReplication.delay_seconds, detailReplication.has_progress) }}</strong></div>
-              <div class="detail-item"><span>原因</span><strong>{{ formatReplicationReason(detailReplication) }}</strong></div>
-              <div class="detail-item"><span>Reason Code</span><strong>{{ detailReplication.reason || "--" }}</strong></div>
-              <div class="detail-item"><span>阈值(s)</span><strong>{{ detailReplication.threshold_seconds || "--" }}</strong></div>
-              <div class="detail-item"><span>最近事件时间</span><strong>{{ formatTs(detailReplication.last_event_at) }}</strong></div>
-              <div class="detail-item"><span>最近位点</span><strong>{{ detailReplication.last_event_file || "-" }}:{{ detailReplication.last_event_pos || 0 }}</strong></div>
+              <div class="detail-item"><span>起点模式</span><strong>{{ detailTask.start?.mode || "--" }}</strong></div>
+              <div class="detail-item"><span>SemiSync</span><strong>{{ detailTask.source?.semi_sync ? "开启" : "关闭" }}</strong></div>
+              <div class="detail-item"><span>保留天数</span><strong>{{ detailTask.storage?.retention_days || "--" }}</strong></div>
             </div>
           </section>
 
           <section class="detail-panel" v-if="detailLease">
-            <h3><i class="fa-solid fa-key" /> Cluster Lease</h3>
+            <h3><i class="fa-solid fa-key" /> Lease 与 Worker</h3>
             <div class="detail-grid">
-              <div class="detail-item"><span>归属 Worker</span><strong>{{ detailLease.owner_worker_id || "--" }}</strong></div>
+              <div class="detail-item"><span>归属 Worker</span><strong data-testid="task-drawer-worker">{{ detailLease.owner_worker_id || "--" }}</strong></div>
               <div class="detail-item"><span>Epoch</span><strong>{{ detailLease.epoch || "--" }}</strong></div>
-              <div class="detail-item"><span>Lease 风险</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
+              <div class="detail-item"><span>Lease 状态</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
               <div class="detail-item"><span>更新时间</span><strong>{{ formatTs(detailLease.updated_at) }}</strong></div>
             </div>
           </section>
 
           <section class="detail-panel">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> Run History（最近 {{ runHistoryLimit }} 条）</h3>
+            <h3><i class="fa-solid fa-file-lines" /> 文件与上传</h3>
+            <div class="detail-panel-toolbar">
+              <el-button
+                v-if="files.some((file) => file.upload_state === 'UPLOAD_FAILED')"
+                data-testid="retry-upload-action"
+                size="small"
+                type="warning"
+                @click="retryFailedUploads(detailTask)"
+              >
+                重试上传失败文件
+              </el-button>
+            </div>
+            <el-table :data="files" size="small" border>
+              <el-table-column prop="file_name" label="文件" min-width="180" />
+              <el-table-column prop="size_bytes" label="大小" width="100" />
+              <el-table-column prop="start_pos" label="起始位点" width="100" />
+              <el-table-column prop="end_pos" label="结束位点" width="100" />
+              <el-table-column prop="upload_state" label="上传状态" width="130">
+                <template #default="{ row }">
+                  <span :data-testid="`file-upload-state-${row.file_name}`">{{ row.upload_state }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="object_key" label="对象键" min-width="190" />
+            </el-table>
+          </section>
+
+          <section class="detail-panel" data-testid="task-drawer-runs">
+            <h3><i class="fa-solid fa-clock-rotate-left" /> 运行历史（最近 {{ runHistoryLimit }} 条）</h3>
             <el-table :data="detailRunsLimited" size="small" border>
-              <el-table-column prop="run_id" label="Run ID" min-width="180" />
+              <el-table-column prop="run_id" label="运行 ID" min-width="180" />
               <el-table-column prop="worker_id" label="Worker" min-width="120" />
               <el-table-column prop="epoch" label="Epoch" width="100" />
-              <el-table-column label="Started At" min-width="170">
+              <el-table-column label="开始时间" min-width="170">
                 <template #default="{ row }">{{ formatTs(row.started_at) }}</template>
               </el-table-column>
-              <el-table-column label="Ended At" min-width="170">
+              <el-table-column label="结束时间" min-width="170">
                 <template #default="{ row }">{{ formatTs(row.ended_at) }}</template>
               </el-table-column>
-              <el-table-column label="End Reason" min-width="140">
+              <el-table-column label="结束原因" min-width="140">
                 <template #default="{ row }">{{ row.end_reason || "--" }}</template>
               </el-table-column>
             </el-table>
-            <el-empty v-if="detailRunsLimited.length === 0" description="暂无 run history" :image-size="56" />
+            <el-empty v-if="detailRunsLimited.length === 0" description="暂无运行历史" :image-size="56" />
           </section>
 
-          <section class="detail-panel">
-            <h3><i class="fa-solid fa-location-dot" /> Checkpoint</h3>
-            <div class="checkpoint">{{ formatCheckpoint(checkpoint) }}</div>
-          </section>
-
-          <section class="detail-panel">
-            <h3><i class="fa-solid fa-file-lines" /> 文件元数据</h3>
-            <el-table :data="files" size="small" border>
-              <el-table-column prop="file_name" label="File" min-width="180" />
-              <el-table-column prop="size_bytes" label="Size" width="100" />
-              <el-table-column prop="start_pos" label="Start" width="90" />
-              <el-table-column prop="end_pos" label="End" width="90" />
-              <el-table-column prop="upload_state" label="Upload" width="130" />
-              <el-table-column prop="object_key" label="ObjectKey" min-width="190" />
-            </el-table>
-          </section>
-
-          <section class="detail-panel">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> 事件</h3>
+          <section class="detail-panel" data-testid="task-drawer-events">
+            <h3><i class="fa-solid fa-clock-rotate-left" /> 事件时间线</h3>
             <el-timeline>
               <el-timeline-item
                 v-for="ev in events"
@@ -508,11 +633,12 @@ e2e-mysql80,127.0.0.1,13307
     </el-drawer>
 
     <!-- Settings Dialog -->
-    <el-dialog v-model="settingsVisible" title="设置" width="480px">
+    <el-dialog v-model="settingsVisible" data-testid="settings-dialog" title="设置" width="480px">
       <el-form label-width="100px">
         <el-form-item label="API Token">
           <el-input
             v-model="settingsToken"
+            data-testid="settings-token-input"
             type="password"
             show-password
             placeholder="输入 Bearer Token"
@@ -547,6 +673,7 @@ import {
   listFiles,
   listWorkers,
   lookupSource,
+  retryUpload,
   startTask,
   stopTask,
   updateTask,
@@ -568,11 +695,16 @@ const RETENTION_DAYS_MAX = 3650;
 // Settings state
 const settingsVisible = ref(false);
 const settingsToken = ref("");
+const authRequiredTitle = "需要重新认证";
+const authRequiredMessage = ref("");
+const activeQuickFilter = ref("all");
 
 // Auth event listener
 onMounted(() => {
-  window.addEventListener("auth-required", () => {
+  window.addEventListener("auth-required", (event) => {
+    authRequiredMessage.value = event?.detail?.message || "接口认证已失效或尚未配置。";
     settingsVisible.value = true;
+    settingsToken.value = getAuthToken() || "";
   });
 });
 
@@ -584,8 +716,9 @@ function openSettings() {
 function saveSettings() {
   setAuthToken(settingsToken.value);
   settingsVisible.value = false;
+  authRequiredMessage.value = "";
+  window.__authDialogShown = false;
   ElMessage.success("设置已保存");
-  // Refresh to apply new auth token.
   refreshAll();
 }
 
@@ -644,6 +777,21 @@ const pager = reactive({
 
 const taskStates = ["CREATED", "STARTING", "RUNNING", "RETRY_BACKOFF", "STOPPING", "STOPPED", "FAILED"];
 const replicationStatuses = ["NORMAL", "DELAYED", "ABNORMAL", "IDLE"];
+const TASK_STATE_LABELS = {
+  CREATED: "已创建",
+  STARTING: "启动中",
+  RUNNING: "运行中",
+  RETRY_BACKOFF: "重试退避",
+  STOPPING: "停止中",
+  STOPPED: "已停止",
+  FAILED: "失败",
+};
+const REPLICATION_STATUS_LABELS = {
+  NORMAL: "正常",
+  DELAYED: "延迟",
+  ABNORMAL: "异常",
+  IDLE: "空闲",
+};
 
 const formVisible = ref(false);
 const formMode = ref("create");
@@ -881,6 +1029,43 @@ function resetUiFilter() {
   uiFilter.replicationStatus = "ALL";
   uiFilter.sortBy = "delay_desc";
   uiFilter.onlyAlert = false;
+  activeQuickFilter.value = "all";
+}
+
+function applyQuickFilter(kind) {
+  activeQuickFilter.value = kind;
+  if (kind === "all") {
+    resetUiFilter();
+    return;
+  }
+
+  uiFilter.onlyAlert = false;
+  uiFilter.taskState = "ALL";
+  uiFilter.replicationStatus = "ALL";
+
+  if (kind === "alert") {
+    uiFilter.onlyAlert = true;
+    return;
+  }
+  if (kind === "abnormal") {
+    uiFilter.replicationStatus = "ABNORMAL";
+    return;
+  }
+  if (kind === "failed") {
+    uiFilter.taskState = "FAILED";
+    return;
+  }
+  if (kind === "delayed") {
+    uiFilter.replicationStatus = "DELAYED";
+    return;
+  }
+  if (kind === "running") {
+    uiFilter.taskState = "RUNNING";
+    return;
+  }
+  if (kind === "normal") {
+    uiFilter.replicationStatus = "NORMAL";
+  }
 }
 
 function onPageChange(page) {
@@ -1243,8 +1428,22 @@ async function onDelete(task) {
   }
 }
 
+function taskRowClassName({ row }) {
+  return row?.task?.id ? `task-row task-row-${row.task.id}` : "task-row";
+}
+
 function onRowClick(row) {
-  showDetail(row.task);
+  void showDetail(row.task);
+}
+
+async function retryFailedUploads(task) {
+  try {
+    await retryUpload(task.id, 100);
+    files.value = await listFiles(task.id, 80);
+    ElMessage.success("失败文件已触发重试上传");
+  } catch (err) {
+    ElMessage.error(parseErr(err));
+  }
 }
 
 async function showDetail(taskOrID) {
@@ -1307,6 +1506,14 @@ function leaseRiskLabel(task, leaseOverride = null) {
   if (updatedMs <= 0) return "风险";
   const stale = Date.now() - updatedMs > LEASE_RISK_SECONDS * 1000;
   return stale ? "风险" : "正常";
+}
+
+function stateLabel(state) {
+  return TASK_STATE_LABELS[state] || state || "--";
+}
+
+function replicationStatusLabel(status) {
+  return REPLICATION_STATUS_LABELS[status] || status || "--";
 }
 
 function stateTagType(state) {
@@ -1539,6 +1746,7 @@ h1 {
 .hero-desc {
   margin: 0;
   color: var(--sub);
+  max-width: 560px;
 }
 
 .hero-actions {
@@ -1569,6 +1777,11 @@ h1 {
   padding: 12px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
   animation: rise-fade 0.42s ease both;
+  cursor: pointer;
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 .metric-card p {
@@ -1591,6 +1804,38 @@ h1 {
   line-height: 1;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
+}
+
+.metric-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+}
+
+.metric-card--danger {
+  border-color: #fecaca;
+  background: linear-gradient(180deg, #fff8f8 0%, #fff 100%);
+}
+
+.metric-card--danger p,
+.metric-card--danger i,
+.metric-card--danger strong {
+  color: #991b1b;
+}
+
+.metric-card--warning {
+  border-color: #fde68a;
+  background: linear-gradient(180deg, #fffdf2 0%, #fff 100%);
+}
+
+.metric-card--warning p,
+.metric-card--warning i,
+.metric-card--warning strong {
+  color: #92400e;
+}
+
+.metric-card--success {
+  border-color: #bbf7d0;
 }
 
 .workspace {
@@ -1622,6 +1867,10 @@ h1 {
   transform: translateY(-1px);
   border-color: var(--line-strong);
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.05);
+}
+
+.panel-card--secondary {
+  opacity: 0.98;
 }
 
 .panel-title {
@@ -1688,6 +1937,17 @@ h1 {
 .filter-stack {
   display: grid;
   gap: 10px;
+}
+
+.filter-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filter-summary {
+  color: var(--sub);
+  font-size: 12px;
 }
 
 .switch-row {
@@ -1805,6 +2065,10 @@ h1 {
   background: #fcfcfc;
 }
 
+.table-card :deep(.el-table__body tr) {
+  cursor: pointer;
+}
+
 .replication-cell {
   display: inline-flex;
   align-items: center;
@@ -1887,6 +2151,45 @@ h1 {
 .detail-stack {
   display: grid;
   gap: 12px;
+}
+
+.detail-panel--hero {
+  border-color: var(--line-strong);
+  background: linear-gradient(180deg, #fcfcfc 0%, #fff 100%);
+}
+
+.detail-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.detail-hero-kicker {
+  color: var(--sub);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.detail-hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.detail-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.detail-grid--summary {
+  margin-top: 12px;
 }
 
 .detail-panel {
@@ -1982,10 +2285,10 @@ h1 {
 }
 
 .table-card :deep(.action-btn) {
-  min-width: 46px;
+  min-width: 56px;
   height: 28px;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-left: 10px;
+  padding-right: 10px;
   border-radius: 999px;
   font-weight: 600;
   font-size: 11px;
@@ -2092,6 +2395,10 @@ h1 {
 
   .action-row {
     gap: 4px;
+  }
+
+  .detail-hero {
+    flex-direction: column;
   }
 }
 </style>
