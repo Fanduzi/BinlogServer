@@ -1,0 +1,50 @@
+version: 2
+
+project_name: binlog-server
+
+before:
+  hooks:
+    - go mod download
+    - sh -c 'cd frontend && npm ci'
+    - ./scripts/build-ui.sh
+
+builds:
+  - id: binlog-server
+    main: ./cmd/binlog-server
+    binary: binlog-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - >-
+        -s -w
+        -X binlog_server/cmd/binlog-server/cmd.buildVersion={{ .Version }}
+        -X binlog_server/cmd/binlog-server/cmd.buildCommit={{ .FullCommit }}
+        -X binlog_server/cmd/binlog-server/cmd.buildDate={{ .Date }}
+
+archives:
+  - id: release-archive
+    ids:
+      - binlog-server
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: false
+  replace_existing_draft: true
+
+changelog:
+  disable: true
+
+source:
+  enabled: false
