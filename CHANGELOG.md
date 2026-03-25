@@ -12,6 +12,18 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-03-25
+
+### Added
+
+- Playwright-based frontend E2E acceptance coverage for empty-state, KPI filtering, task drawer, retry-upload, and auth-required flows.
+
+### Changed
+
+- Reworked the embedded web UI into a more operator-focused console with alert-first KPI hierarchy, reduced row-action noise, and a stronger detail drawer workflow.
+- Localized frontend auth guidance and added in-app settings-driven recovery for `401` API responses.
+- Added retry-upload affordance in the task detail drawer and refreshed embedded static UI assets.
+
 ## [v0.1.0] - 2026-03-09
 
 ### Added

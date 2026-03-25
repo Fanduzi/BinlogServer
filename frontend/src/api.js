@@ -1,7 +1,7 @@
-// input: axios HTTP client, utils/auth.js for token management
-// output: API functions (getSummary, getDashboard, createTask, etc.)
+// input: axios HTTP client, utils/auth.js token storage, backend 401 responses
+// output: API request helpers plus auth-required event dispatch for the settings flow
 // pos: frontend API layer with auth interceptors for backend communication
-// note: if this file changes, update this header and frontend/README.md
+// note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
 import axios from "axios";
 import { getAuthToken, clearAuthToken } from "./utils/auth.js";
@@ -44,20 +44,22 @@ http.interceptors.response.use(
  * Show authentication required dialog.
  */
 function showAuthDialog() {
-  const message = `API Authentication Required
+  const messageLines = [
+    "接口认证已失效或尚未配置。",
+    "请按以下步骤处理：",
+    "1. 向管理员获取 API Token",
+    "2. 打开“设置”并填写 Token",
+    "3. 保存后重新刷新数据",
+  ];
 
-Please configure your API token:
-1. Get your token from the server administrator
-2. Open Settings and enter the token
-3. Refresh the page
-
-See docs/security.md for details.`;
-
-  if (confirm(message + "\n\nClick OK to open Settings")) {
-    // Trigger settings modal if available.
-    window.dispatchEvent(new CustomEvent("auth-required"));
-  }
-  window.__authDialogShown = false;
+  window.dispatchEvent(
+    new CustomEvent("auth-required", {
+      detail: {
+        message: messageLines.join("\n"),
+        lines: messageLines,
+      },
+    }),
+  );
 }
 
 export async function getSummary() {
@@ -155,5 +157,16 @@ export async function listFiles(id, limit = 80) {
   const { data } = await http.get(`/api/tasks/${id}/files`, {
     params: { limit },
   });
+  return data;
+}
+
+export async function retryUpload(id, limit = 100) {
+  const { data } = await http.post(
+    `/api/tasks/${id}/files/retry-upload`,
+    null,
+    {
+      params: { limit },
+    },
+  );
   return data;
 }

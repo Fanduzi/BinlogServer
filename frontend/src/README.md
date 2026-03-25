@@ -7,8 +7,8 @@
 | File | Responsibility |
 |------|---------------|
 | main.js | Vue 应用入口 |
-| App.vue | 主页面与交互逻辑 |
-| api.js | 与后端 `/api` 的请求封装 |
+| App.vue | 运维控制台主页面，含告警优先指标、任务列表、详情抽屉与设置流程 |
+| api.js | 与后端 `/api` 的请求封装，含认证拦截与设置引导事件 |
 
 ## Exports
 
