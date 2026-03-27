@@ -10,6 +10,7 @@ test('dashboard KPI filters update active state and support keyboard', async ({ 
   await expect(abnormalKpi).toHaveAttribute('data-active', 'true')
   await expect(page.getByTestId('filter-summary')).toContainText('1 个任务')
   await expect(page.getByTestId('task-row-201')).toBeVisible()
+  await expect(page.locator('.cluster-worker-item')).toHaveCount(0)
 
   const delayedKpi = page.getByTestId('kpi-delayed')
   await delayedKpi.focus()
