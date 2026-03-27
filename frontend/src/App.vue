@@ -2,10 +2,10 @@
 input: dashboard/task API data, local filter state, auth-required browser event
 output: operator-focused console UI with task list, detail drawer, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console
-note: keep create/edit/start/stop flows intact; update this header if page responsibilities change
+note: supports left-menu multi-view operations split while keeping create/edit/start/stop flows intact
 -->
 <template>
-  <div class="page-shell">
+  <div class="page-shell" :class="{ 'page-shell--menu-collapsed': menuCollapsed }">
     <div class="orb orb-a" />
     <div class="orb orb-b" />
 
@@ -125,9 +125,73 @@ note: keep create/edit/start/stop flows intact; update this header if page respo
       :description="authRequiredMessage"
     />
 
-    <section class="workspace">
-      <aside class="left-pane">
-        <el-card shadow="never" class="panel-card">
+    <section class="workspace" :class="{ 'workspace--no-pane': activeView === 'overview' || activeView === 'workers' }">
+      <aside class="nav-pane" :class="{ 'nav-pane--collapsed': menuCollapsed }">
+        <div class="nav-head">
+          <div class="nav-brand" :title="menuCollapsed ? 'Binlog Console' : ''">
+            <span class="nav-brand-icon"><i class="fa-solid fa-wave-square" /></span>
+            <span class="nav-brand-text">Binlog Console</span>
+          </div>
+        </div>
+        <button
+          class="nav-item"
+          :class="{ 'nav-item--active': activeView === 'overview' }"
+          data-testid="view-nav-overview"
+          @click="switchView('overview')"
+        >
+          <span><i class="fa-solid fa-border-all" /><span class="nav-label">总览</span></span>
+          <span class="nav-badge">{{ dashboard.summary.total }}</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ 'nav-item--active': activeView === 'tasks' }"
+          data-testid="view-nav-tasks"
+          @click="switchView('tasks')"
+        >
+          <span><i class="fa-solid fa-table-list" /><span class="nav-label">任务列表</span></span>
+          <span class="nav-badge">{{ filteredTasks.length }}</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ 'nav-item--active': activeView === 'sources' }"
+          data-testid="view-nav-sources"
+          @click="switchView('sources')"
+        >
+          <span><i class="fa-solid fa-database" /><span class="nav-label">源库覆盖</span></span>
+          <span class="nav-badge">{{ dashboard.sources.length }}</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ 'nav-item--active': activeView === 'workers' }"
+          data-testid="view-nav-workers"
+          @click="switchView('workers')"
+        >
+          <span><i class="fa-solid fa-network-wired" /><span class="nav-label">Worker 运维</span></span>
+          <span class="nav-badge">{{ cluster.overview.worker_count }}</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ 'nav-item--active': activeView === 'alerts' }"
+          data-testid="view-nav-alerts"
+          @click="switchView('alerts')"
+        >
+          <span><i class="fa-solid fa-bell" /><span class="nav-label">异常与告警</span></span>
+          <span class="nav-badge">{{ dashboard.summary.abnormal + dashboard.summary.failed + dashboard.summary.delayed }}</span>
+        </button>
+        <div class="nav-foot">
+          <button
+            class="nav-collapse-btn nav-collapse-btn--dock"
+            :title="menuCollapsed ? '展开菜单' : '折叠菜单'"
+            data-testid="view-nav-collapse"
+            @click="menuCollapsed = !menuCollapsed"
+          >
+            <i :class="menuCollapsed ? 'fa-solid fa-angles-right' : 'fa-solid fa-angles-left'" />
+          </button>
+        </div>
+      </aside>
+
+      <aside v-if="activeView === 'tasks' || activeView === 'alerts' || activeView === 'sources'" class="left-pane">
+        <el-card v-if="activeView === 'tasks' || activeView === 'alerts'" shadow="never" class="panel-card">
           <template #header>
             <div class="panel-title">
               <span><i class="fa-solid fa-sliders" /> 运维筛选</span>
@@ -166,7 +230,7 @@ note: keep create/edit/start/stop flows intact; update this header if page respo
           </div>
         </el-card>
 
-        <el-card shadow="never" class="panel-card panel-card--secondary">
+        <el-card v-if="activeView === 'sources'" shadow="never" class="panel-card panel-card--secondary">
           <template #header>
             <div class="panel-title">
               <span><i class="fa-solid fa-magnifying-glass" /> 源库反查</span>
@@ -207,7 +271,11 @@ note: keep create/edit/start/stop flows intact; update this header if page respo
       </aside>
 
       <section class="right-pane">
-        <el-card shadow="never" class="panel-card">
+        <el-card
+          v-if="activeView === 'overview' || activeView === 'workers'"
+          shadow="never"
+          class="panel-card"
+        >
           <template #header>
             <div class="panel-title">
               <span><i class="fa-solid fa-sitemap" /> 集群视图</span>
@@ -230,7 +298,7 @@ note: keep create/edit/start/stop flows intact; update this header if page respo
             </div>
           </div>
 
-          <div class="cluster-worker-list">
+          <div v-if="activeView === 'workers'" class="cluster-worker-list">
             <div
               v-for="worker in workerRows"
               :key="worker.worker_id"
@@ -256,9 +324,16 @@ note: keep create/edit/start/stop flows intact; update this header if page respo
               :image-size="56"
             />
           </div>
+          <div v-else class="overview-note">
+            Worker 明细已迁移到「Worker 运维」工作区，当前仅保留集群摘要。
+          </div>
         </el-card>
 
-        <el-card shadow="never" class="panel-card">
+        <el-card
+          v-if="activeView === 'overview' || activeView === 'sources'"
+          shadow="never"
+          class="panel-card"
+        >
           <template #header>
             <div class="panel-title">
               <span><i class="fa-solid fa-network-wired" /> 源库覆盖</span>
@@ -286,12 +361,25 @@ note: keep create/edit/start/stop flows intact; update this header if page respo
           />
         </el-card>
 
-        <el-card shadow="never" class="panel-card table-card">
+        <el-card
+          v-if="activeView === 'tasks' || activeView === 'alerts'"
+          shadow="never"
+          class="panel-card table-card"
+        >
           <template #header>
             <div class="panel-title">
-              <span><i class="fa-solid fa-table" /> 任务列表</span>
+              <span>
+                <i :class="activeView === 'alerts' ? 'fa-solid fa-bell' : 'fa-solid fa-table'" />
+                {{ activeView === "alerts" ? "异常与告警任务" : "任务列表" }}
+              </span>
               <div class="panel-title-actions">
-                <span class="panel-hint">筛选后 {{ filteredTasks.length }} / 总计 {{ dashboard.tasks.length }}</span>
+                <span class="panel-hint">
+                  {{
+                    activeView === "alerts"
+                      ? `告警筛选 ${filteredTasks.length} / 总计 ${dashboard.tasks.length}`
+                      : `筛选后 ${filteredTasks.length} / 总计 ${dashboard.tasks.length}`
+                  }}
+                </span>
                 <el-button size="small" @click="openBatchCreate">
                   <i class="fa-solid fa-layer-group" /> 批量创建
                 </el-button>
@@ -657,7 +745,7 @@ e2e-mysql80,127.0.0.1,13307
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch, onMounted } from "vue";
+import { computed, reactive, ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   createTask,
@@ -691,6 +779,13 @@ const SOURCE_FLAVOR_MAX_LENGTH = 32;
 const START_FILE_MAX_LENGTH = 255;
 const RETENTION_DAYS_MIN = 1;
 const RETENTION_DAYS_MAX = 3650;
+const VIEW_HASH_MAP = {
+  overview: "#/overview",
+  tasks: "#/tasks",
+  sources: "#/sources",
+  workers: "#/workers",
+  alerts: "#/alerts",
+};
 
 // Settings state
 const settingsVisible = ref(false);
@@ -698,14 +793,39 @@ const settingsToken = ref("");
 const authRequiredTitle = "需要重新认证";
 const authRequiredMessage = ref("");
 const activeQuickFilter = ref("all");
+const activeView = ref(resolveViewFromHash());
+const menuCollapsed = ref(false);
 
-// Auth event listener
+// Auth + URL route listeners
+function handleAuthRequired(event) {
+  authRequiredMessage.value = event?.detail?.message || "接口认证已失效或尚未配置。";
+  settingsVisible.value = true;
+  settingsToken.value = getAuthToken() || "";
+}
+
+function handleHashChange() {
+  const { view, mode } = parseHashRoute();
+  if (view === "tasks" && mode === "alerts") {
+    activateAlertsView(false);
+    return;
+  }
+  if (view === "alerts") {
+    activateAlertsView(false);
+    return;
+  }
+  activeView.value = view;
+}
+
 onMounted(() => {
-  window.addEventListener("auth-required", (event) => {
-    authRequiredMessage.value = event?.detail?.message || "接口认证已失效或尚未配置。";
-    settingsVisible.value = true;
-    settingsToken.value = getAuthToken() || "";
-  });
+  window.addEventListener("auth-required", handleAuthRequired);
+  window.addEventListener("hashchange", handleHashChange);
+  handleHashChange();
+  syncHash(activeView.value, true);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("auth-required", handleAuthRequired);
+  window.removeEventListener("hashchange", handleHashChange);
 });
 
 function openSettings() {
@@ -877,7 +997,7 @@ const workerRows = computed(() => {
     const seenAt = worker.last_seen_at || worker.updated_at;
     const fallbackOnline = (() => {
       const updatedMs = toTimeMs(seenAt);
-      return updatedMs > 0 && Date.now() - updatedMs <= LEASE_RISK_SECONDS * 1000;
+      return updatedMs > 0 && nowRefMs() - updatedMs <= LEASE_RISK_SECONDS * 1000;
     })();
     const online = typeof worker.online === "boolean" ? worker.online : fallbackOnline;
     return {
@@ -1032,10 +1152,59 @@ function resetUiFilter() {
   activeQuickFilter.value = "all";
 }
 
-function applyQuickFilter(kind) {
+function resolveViewFromHash() {
+  return parseHashRoute().view;
+}
+
+function parseHashRoute() {
+  const hash = typeof window !== "undefined" ? String(window.location.hash || "") : "";
+  const normalized = hash.replace(/^#/, "");
+  const [path, queryText = ""] = normalized.split("?");
+  const query = new URLSearchParams(queryText || "");
+  const mode = query.get("mode") || "";
+  if (path === "/tasks") return { view: "tasks", mode };
+  if (path === "/sources") return { view: "sources", mode };
+  if (path === "/workers") return { view: "workers", mode };
+  if (path === "/alerts") return { view: "alerts", mode };
+  return { view: "overview", mode };
+}
+
+function syncHash(view, replace = false) {
+  if (typeof window === "undefined") return;
+  const nextHash = VIEW_HASH_MAP[view] || VIEW_HASH_MAP.overview;
+  if (window.location.hash === nextHash) return;
+  if (replace) {
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+    return;
+  }
+  window.location.hash = nextHash;
+}
+
+function activateAlertsView(syncHashWhenNeeded = true) {
+  activeQuickFilter.value = "alert";
+  uiFilter.onlyAlert = true;
+  uiFilter.taskState = "ALL";
+  uiFilter.replicationStatus = "ALL";
+  activeView.value = "alerts";
+  if (syncHashWhenNeeded) syncHash("alerts");
+}
+
+function switchView(view) {
+  if (view === "alerts") {
+    activateAlertsView(true);
+    return;
+  }
+  activeView.value = view;
+  syncHash(view);
+}
+
+function applyQuickFilter(kind, options = {}) {
+  const { syncHashWhenNeeded = true } = options;
   activeQuickFilter.value = kind;
   if (kind === "all") {
     resetUiFilter();
+    activeView.value = "tasks";
+    if (syncHashWhenNeeded) syncHash("tasks");
     return;
   }
 
@@ -1044,28 +1213,41 @@ function applyQuickFilter(kind) {
   uiFilter.replicationStatus = "ALL";
 
   if (kind === "alert") {
-    uiFilter.onlyAlert = true;
+    activateAlertsView(syncHashWhenNeeded);
     return;
   }
   if (kind === "abnormal") {
     uiFilter.replicationStatus = "ABNORMAL";
+    activeView.value = "tasks";
+    if (syncHashWhenNeeded) syncHash("tasks");
     return;
   }
   if (kind === "failed") {
     uiFilter.taskState = "FAILED";
+    activeView.value = "tasks";
+    if (syncHashWhenNeeded) syncHash("tasks");
     return;
   }
   if (kind === "delayed") {
     uiFilter.replicationStatus = "DELAYED";
+    activeView.value = "tasks";
+    if (syncHashWhenNeeded) syncHash("tasks");
     return;
   }
   if (kind === "running") {
     uiFilter.taskState = "RUNNING";
+    activeView.value = "tasks";
+    if (syncHashWhenNeeded) syncHash("tasks");
     return;
   }
   if (kind === "normal") {
     uiFilter.replicationStatus = "NORMAL";
+    activeView.value = "tasks";
+    if (syncHashWhenNeeded) syncHash("tasks");
+    return;
   }
+  activeView.value = "tasks";
+  if (syncHashWhenNeeded) syncHash("tasks");
 }
 
 function onPageChange(page) {
@@ -1504,7 +1686,7 @@ function leaseRiskLabel(task, leaseOverride = null) {
 
   const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
   if (updatedMs <= 0) return "风险";
-  const stale = Date.now() - updatedMs > LEASE_RISK_SECONDS * 1000;
+  const stale = nowRefMs() - updatedMs > LEASE_RISK_SECONDS * 1000;
   return stale ? "风险" : "正常";
 }
 
@@ -1549,6 +1731,11 @@ function toTimeMs(ts) {
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return 0;
   return date.getTime();
+}
+
+function nowRefMs() {
+  const dashboardMs = toTimeMs(dashboard.generated_at);
+  return dashboardMs > 0 ? dashboardMs : Date.now();
 }
 
 function formatCheckpoint(cp) {
@@ -1696,7 +1883,7 @@ function hasWhitespace(text) {
   max-width: 1720px;
   margin: 0 auto;
   min-height: 100vh;
-  padding: 24px;
+  padding: 24px 24px 24px 252px;
   font-family: "Geist", "SF Pro Display", "PingFang SC", sans-serif;
   color: var(--text);
   background:
@@ -1704,6 +1891,10 @@ function hasWhitespace(text) {
     linear-gradient(90deg, rgba(0, 0, 0, 0.015) 1px, transparent 1px),
     linear-gradient(rgba(0, 0, 0, 0.015) 1px, transparent 1px);
   background-size: auto, 28px 28px, 28px 28px;
+}
+
+.page-shell--menu-collapsed {
+  padding-left: 96px;
 }
 
 .orb {
@@ -1842,6 +2033,166 @@ h1 {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   gap: 12px;
+}
+
+.workspace--no-pane {
+  grid-template-columns: 1fr;
+}
+
+.nav-pane {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 228px;
+  overflow: auto;
+  border-right: 1px solid #e2e8f0;
+  border-radius: 0;
+  background: #f7f8fa;
+  padding: 10px 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.nav-pane--collapsed {
+  width: 72px;
+  align-items: center;
+}
+
+.nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.nav-foot {
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+.nav-pane--collapsed .nav-head {
+  justify-content: center;
+}
+
+.nav-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #0f172a;
+  min-height: 30px;
+}
+
+.nav-brand-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: #e2e8f0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #334155;
+  font-size: 12px;
+}
+
+.nav-brand-text {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.nav-pane--collapsed .nav-brand-text {
+  display: none;
+}
+
+.nav-collapse-btn {
+  border: 0;
+  background: transparent;
+  color: #475569;
+  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+}
+
+.nav-collapse-btn--dock {
+  width: 100%;
+  height: 34px;
+  text-align: left;
+  padding-left: 8px;
+}
+
+.nav-pane--collapsed .nav-collapse-btn--dock {
+  width: 38px;
+  padding-left: 0;
+  text-align: center;
+}
+
+.nav-pane--collapsed .nav-foot {
+  width: 38px;
+}
+
+.nav-item {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.nav-item span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.nav-item i {
+  color: #64748b;
+}
+
+.nav-item--active {
+  background: #e9edf3;
+  color: #0b1220;
+  font-weight: 600;
+}
+
+.nav-item:hover {
+  background: #edf1f6;
+}
+
+.nav-pane--collapsed .nav-item {
+  width: 38px;
+  height: 38px;
+  justify-content: center;
+  padding: 0;
+}
+
+.nav-pane--collapsed .nav-item span {
+  width: 100%;
+  justify-content: center;
+}
+
+.nav-pane--collapsed .nav-label,
+.nav-pane--collapsed .nav-badge {
+  display: none;
+}
+
+.nav-badge {
+  font-family: "IBM Plex Mono", monospace;
+  color: #94a3b8;
+  font-size: 11px;
 }
 
 .left-pane,
@@ -2022,6 +2373,15 @@ h1 {
 
 .cluster-worker-time {
   font-family: "IBM Plex Mono", monospace;
+}
+
+.overview-note {
+  margin-top: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  padding: 10px;
+  color: var(--sub);
+  font-size: 12px;
 }
 
 .source-cell {
@@ -2364,6 +2724,10 @@ h1 {
     padding: 14px;
   }
 
+  .page-shell--menu-collapsed {
+    padding-left: 14px;
+  }
+
   h1 {
     font-size: 32px;
   }
@@ -2375,6 +2739,38 @@ h1 {
 
   .workspace {
     grid-template-columns: 1fr;
+  }
+
+  .nav-pane {
+    position: static;
+    top: auto;
+    width: auto;
+    max-height: none;
+    overflow: visible;
+    border-right: 1px solid var(--line);
+    border-radius: 12px;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .nav-pane--collapsed {
+    width: auto;
+  }
+
+  .nav-pane--collapsed .nav-brand-text,
+  .nav-pane--collapsed .nav-label,
+  .nav-pane--collapsed .nav-badge {
+    display: inline-flex;
+  }
+
+  .nav-pane--collapsed .nav-item {
+    width: auto;
+    height: auto;
+    justify-content: space-between;
+    padding: 6px 8px;
   }
 
   .source-board {

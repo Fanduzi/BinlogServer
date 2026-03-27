@@ -12,6 +12,22 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.1.2] - 2026-03-27
+
+### Added
+
+- Frontend development mock mode for Vite dev with shared scenario assets reused by Playwright E2E.
+- New frontend mock scenarios for cluster/lease resilience coverage, including control-plane-down worker-running views.
+- Workspace-C planning docs for ops console IA redesign in `docs/develop/plans/2026-03-27-ops-console-workspace-c-*.md`.
+
+### Changed
+
+- Reorganized the ops console into workspace-oriented views (`overview`, `tasks`, `sources`, `workers`, `alerts`) with deep-link routing semantics.
+- Moved task filters to task/alert context and source lookup to source context to reduce cross-page cognitive load.
+- Updated left navigation to full-height docked behavior with bottom-docked collapse control and compact icon alignment in collapsed mode.
+- Normalized KPI navigation behavior so task-oriented metrics consistently route to task-focused workflows.
+- Adjusted lease risk evaluation to use dashboard reference time in mock-driven views, avoiding false-risk inflation from local clock skew.
+
 ## [v0.1.1] - 2026-03-25
 
 ### Added
