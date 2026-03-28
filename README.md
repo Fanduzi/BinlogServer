@@ -57,28 +57,6 @@ Probably not a fit for:
 - Supports metadata-backed coordination, lease management, and S3-compatible upload
 - Includes repository E2E scenarios to validate core regression paths
 
-## Architecture
-
-BinlogServer is organized as a control-plane-oriented service with clear boundaries between HTTP/API handling, task orchestration, replication execution, metadata persistence, upload integration, and UI delivery.
-
-### Modules
-
-| Module | Responsibility | Entry |
-| --- | --- | --- |
-| `cmd` | Top-level service startup and migration commands | [cmd/README.md](cmd/README.md) |
-| `internal/api` | HTTP routes, request validation, Swagger, metrics, tracing hooks | [internal/api/README.md](internal/api/README.md) |
-| `internal/app` | Runtime assembly and role lifecycle orchestration | [internal/app/README.md](internal/app/README.md) |
-| `internal/binlog` | Local binlog file writing and checkpoint persistence helpers | [internal/binlog/README.md](internal/binlog/README.md) |
-| `internal/config` | YAML and environment-based configuration loading | [internal/config/README.md](internal/config/README.md) |
-| `internal/logging` | Logger setup and log output rotation | [internal/logging/README.md](internal/logging/README.md) |
-| `internal/meta` | Metadata storage, schema checks, lease-backed coordination data | [internal/meta/README.md](internal/meta/README.md) |
-| `internal/replication` | MySQL replication pull loop and durable local write path | [internal/replication/README.md](internal/replication/README.md) |
-| `internal/tasks` | Task state machine, scheduling, and execution orchestration | [internal/tasks/README.md](internal/tasks/README.md) |
-| `internal/ui` | Embedded UI asset serving | [internal/ui/README.md](internal/ui/README.md) |
-| `internal/upload` | S3-compatible upload integration | [internal/upload/README.md](internal/upload/README.md) |
-| `scripts` | Local build helpers, release asset packaging, and E2E entrypoints | [scripts/README.md](scripts/README.md) |
-| `frontend` | Frontend source and build pipeline for the embedded UI | [frontend/README.md](frontend/README.md) |
-
 ## Install / Download
 
 - For tagged public releases, download the archive that matches your platform from GitHub Releases:
@@ -280,6 +258,28 @@ Pay particular attention to these change types:
 - observability contract changes that affect dashboards or alerts
 
 This repository does not apply migrations or migrate configuration for you, so upgrades should be handled as an operator change, not just a binary swap.
+
+## Architecture
+
+BinlogServer is organized as a control-plane-oriented service with clear boundaries between HTTP/API handling, task orchestration, replication execution, metadata persistence, upload integration, and UI delivery.
+
+### Modules
+
+| Module | Responsibility | Entry |
+| --- | --- | --- |
+| `cmd` | Top-level service startup and migration commands | [cmd/README.md](cmd/README.md) |
+| `internal/api` | HTTP routes, request validation, Swagger, metrics, tracing hooks | [internal/api/README.md](internal/api/README.md) |
+| `internal/app` | Runtime assembly and role lifecycle orchestration | [internal/app/README.md](internal/app/README.md) |
+| `internal/binlog` | Local binlog file writing and checkpoint persistence helpers | [internal/binlog/README.md](internal/binlog/README.md) |
+| `internal/config` | YAML and environment-based configuration loading | [internal/config/README.md](internal/config/README.md) |
+| `internal/logging` | Logger setup and log output rotation | [internal/logging/README.md](internal/logging/README.md) |
+| `internal/meta` | Metadata storage, schema checks, lease-backed coordination data | [internal/meta/README.md](internal/meta/README.md) |
+| `internal/replication` | MySQL replication pull loop and durable local write path | [internal/replication/README.md](internal/replication/README.md) |
+| `internal/tasks` | Task state machine, scheduling, and execution orchestration | [internal/tasks/README.md](internal/tasks/README.md) |
+| `internal/ui` | Embedded UI asset serving | [internal/ui/README.md](internal/ui/README.md) |
+| `internal/upload` | S3-compatible upload integration | [internal/upload/README.md](internal/upload/README.md) |
+| `scripts` | Local build helpers, release asset packaging, and E2E entrypoints | [scripts/README.md](scripts/README.md) |
+| `frontend` | Frontend source and build pipeline for the embedded UI | [frontend/README.md](frontend/README.md) |
 
 ## Repository Map
 
