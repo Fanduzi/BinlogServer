@@ -5,6 +5,7 @@ pos: single-page frontend entry for Binlog Server operations console
 note: supports left-menu multi-view operations split while keeping create/edit/start/stop flows intact
 -->
 <template>
+  <el-config-provider :locale="elLocale">
   <div class="page-shell" :class="{ 'page-shell--menu-collapsed': menuCollapsed }">
     <div class="orb orb-a" />
     <div class="orb orb-b" />
@@ -745,11 +746,14 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
       </template>
     </el-dialog>
   </div>
+  </el-config-provider>
 </template>
 
 <script setup>
 import { computed, reactive, ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
+import zhCnLocale from "element-plus/dist/locale/zh-cn.mjs";
+import enLocale from "element-plus/dist/locale/en.mjs";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   createTask,
@@ -798,6 +802,7 @@ const VIEW_HASH_MAP = {
 const settingsVisible = ref(false);
 const settingsToken = ref("");
 const currentLocale = ref(getLocale());
+const elLocale = computed(() => currentLocale.value === "zh-CN" ? zhCnLocale : enLocale);
 const authRequiredTitle = computed(() => t("auth.reauthRequired"));
 const authRequiredMessage = ref("");
 const activeQuickFilter = ref("all");
@@ -1728,7 +1733,7 @@ function formatTs(ts) {
   if (!ts) return "--";
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return "--";
-  return date.toLocaleString();
+  return date.toLocaleString(currentLocale.value);
 }
 
 function toTimeMs(ts) {

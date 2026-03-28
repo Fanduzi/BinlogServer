@@ -4,6 +4,7 @@ import {
   ElButton,
   ElCard,
   ElCol,
+  ElConfigProvider,
   ElDialog,
   ElDrawer,
   ElEmpty,
@@ -41,6 +42,7 @@ app.use(i18n);
   ElButton,
   ElCard,
   ElCol,
+  ElConfigProvider,
   ElDialog,
   ElDrawer,
   ElEmpty,
@@ -60,11 +62,5 @@ app.use(i18n);
   ElTimelineItem,
   ElTooltip,
 ].forEach((component) => app.use(component));
-
-// Configure Element Plus locale based on current i18n locale
-app.provide(
-  "elementLocale",
-  getLocale() === "zh-CN" ? zhCnLocale : enLocale
-);
 
 app.mount("#app");
