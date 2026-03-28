@@ -258,6 +258,28 @@ make migrate-up META_DSN="$META_DSN"
 
 这个仓库不会自动帮你 apply migration，也不会自动迁移配置，因此升级应当按运维变更来处理，而不是只替换二进制。
 
+## 架构
+
+BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排、复制执行、元数据持久化、Upload 集成与 UI 交付之间边界清晰。
+
+### 模块
+
+| 模块 | 职责 | 入口 |
+| --- | --- | --- |
+| `cmd` | 服务顶层启动与迁移命令 | [cmd/README.md](cmd/README.md) |
+| `internal/api` | HTTP 路由、请求校验、Swagger、metrics、tracing hook | [internal/api/README.md](internal/api/README.md) |
+| `internal/app` | 运行时装配与角色生命周期编排 | [internal/app/README.md](internal/app/README.md) |
+| `internal/binlog` | 本地 binlog 文件写入与 checkpoint 持久化辅助 | [internal/binlog/README.md](internal/binlog/README.md) |
+| `internal/config` | 基于 YAML 与环境变量的配置加载 | [internal/config/README.md](internal/config/README.md) |
+| `internal/logging` | Logger 初始化与日志输出轮转 | [internal/logging/README.md](internal/logging/README.md) |
+| `internal/meta` | 元数据存储、schema 校验、租约协调数据 | [internal/meta/README.md](internal/meta/README.md) |
+| `internal/replication` | MySQL 复制拉取循环与持久化本地写入链路 | [internal/replication/README.md](internal/replication/README.md) |
+| `internal/tasks` | 任务状态机、调度与执行编排 | [internal/tasks/README.md](internal/tasks/README.md) |
+| `internal/ui` | 内嵌 UI 静态资源服务 | [internal/ui/README.md](internal/ui/README.md) |
+| `internal/upload` | S3-compatible Upload 集成 | [internal/upload/README.md](internal/upload/README.md) |
+| `scripts` | 本地构建辅助、Release 产物打包与 E2E 入口 | [scripts/README.md](scripts/README.md) |
+| `frontend` | 内嵌 UI 的前端源码与构建流水线 | [frontend/README.md](frontend/README.md) |
+
 ## 仓库入口导航
 
 如果你已经跑通 `Quick Start`，下一步从这里进入：
