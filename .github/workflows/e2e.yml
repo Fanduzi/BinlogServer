@@ -18,6 +18,7 @@ on:
           - cluster-roles
           - observability
           - worker-crash-recovery
+          - retry-upload
 
 permissions:
   contents: read
@@ -134,7 +135,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-worker-crash-recovery:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'worker-crash-recovery' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'worker-crash-recovery' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -157,6 +158,36 @@ jobs:
         if: failure()
         run: |
           cat /tmp/binlog-server-worker-crash.log || true
+          docker compose -f deploy/e2e/docker-compose.yml logs || true
+
+      - name: Cleanup
+        if: always()
+        run: ./scripts/e2e/down.sh
+
+  e2e-retry-upload:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'retry-upload' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: E2E Retry Upload Scenario
+        run: |
+          E2E_DIR="./tmp/e2e/data-ci-retry-upload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          E2E_SERVER_LOG="/tmp/binlog-server-retry-upload.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --scenarios smoke-retry-upload
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          cat /tmp/binlog-server-retry-upload.log || true
           docker compose -f deploy/e2e/docker-compose.yml logs || true
 
       - name: Cleanup
