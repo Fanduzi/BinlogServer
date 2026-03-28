@@ -22,7 +22,10 @@
 ![Platform](https://img.shields.io/badge/platform-darwin%20amd64%20%7C%20darwin%20arm64%20%7C%20linux%20amd64%20%7C%20linux%20arm64-blue)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-English | [中文](README_ZH.md) | [Changelog](CHANGELOG.md) | [Security](SECURITY.md)
+[![English](https://img.shields.io/badge/lang-English-blue.svg)](README.md)
+[![中文](https://img.shields.io/badge/lang-中文-inactive.svg)](README_ZH.md)
+[![Changelog](https://img.shields.io/badge/docs-Changelog-informational.svg)](CHANGELOG.md)
+[![Security](https://img.shields.io/badge/docs-Security-critical.svg)](SECURITY.md)
 </div>
 
 Binlog Server is a service for pulling MySQL binlog into durable local files, persisting checkpoint state, and managing replication tasks through an API-driven control plane with UI, optional S3-compatible upload, and cluster coordination support.

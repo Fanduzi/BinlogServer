@@ -23,12 +23,19 @@ import {
   ElTimelineItem,
   ElTooltip,
 } from "element-plus";
+import zhCnLocale from "element-plus/dist/locale/zh-cn.mjs";
+import enLocale from "element-plus/dist/locale/en.mjs";
 import "element-plus/dist/index.css";
 import "@fortawesome/fontawesome-free/css/all.min.css";
 import App from "./App.vue";
+import { i18n, getLocale } from "./locales";
 
 const app = createApp(App);
 
+// Register i18n
+app.use(i18n);
+
+// Register Element Plus components
 [
   ElAlert,
   ElButton,
@@ -53,5 +60,11 @@ const app = createApp(App);
   ElTimelineItem,
   ElTooltip,
 ].forEach((component) => app.use(component));
+
+// Configure Element Plus locale based on current i18n locale
+app.provide(
+  "elementLocale",
+  getLocale() === "zh-CN" ? zhCnLocale : enLocale
+);
 
 app.mount("#app");
