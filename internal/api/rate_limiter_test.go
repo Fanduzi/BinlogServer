@@ -6,12 +6,23 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 )
+
+func newTestRequest(t *testing.T, method, target string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, target, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	return req
+}
 
 func TestNewIPRateLimiter(t *testing.T) {
 	cfg := RateLimiterConfig{Enabled: true, RequestsPerSecond: 10, Burst: 5}
@@ -35,26 +46,21 @@ func TestIPRateLimiter_Allow_Disabled(t *testing.T) {
 }
 
 func TestIPRateLimiter_Allow_Burst(t *testing.T) {
-	// Burst=3, rps=0.001 (effectively no refill during test).
 	rl := NewIPRateLimiter(RateLimiterConfig{Enabled: true, RequestsPerSecond: 0.001, Burst: 3})
-	ip := "10.0.0.1"
-
-	// First 3 should be allowed (burst).
+	// Burst of 3: first 3 allowed, 4th denied.
 	for i := 0; i < 3; i++ {
-		if !rl.Allow(ip) {
-			t.Fatalf("request %d should be allowed (within burst)", i+1)
+		if !rl.Allow("1.2.3.4") {
+			t.Fatalf("request %d should be allowed within burst", i+1)
 		}
 	}
-	// 4th should be denied.
-	if rl.Allow(ip) {
-		t.Fatal("request beyond burst should be denied")
+	if rl.Allow("1.2.3.4") {
+		t.Fatal("4th request should be denied (burst exhausted)")
 	}
 }
 
 func TestIPRateLimiter_Allow_PerIP(t *testing.T) {
 	rl := NewIPRateLimiter(RateLimiterConfig{Enabled: true, RequestsPerSecond: 0.001, Burst: 1})
-
-	// Each IP gets its own bucket — both first requests should be allowed.
+	// Each IP gets its own bucket.
 	if !rl.Allow("192.168.1.1") {
 		t.Fatal("first request for IP-A should be allowed")
 	}
@@ -70,40 +76,53 @@ func TestIPRateLimiter_Allow_PerIP(t *testing.T) {
 	}
 }
 
-func TestExtractClientIP_XForwardedFor(t *testing.T) {
-	tests := []struct {
-		name   string
-		header string
-		want   string
-	}{
-		{"single IP", "1.2.3.4", "1.2.3.4"},
-		{"multiple IPs", "1.2.3.4, 5.6.7.8", "1.2.3.4"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req, _ := http.NewRequest(http.MethodGet, "/", nil)
-			req.Header.Set("X-Forwarded-For", tc.header)
-			got := extractClientIP(req)
-			if got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
+func TestIPRateLimiter_Concurrent(t *testing.T) {
+	// MEDIUM-3: verify getLimiter double-checked lock is race-free.
+	rl := NewIPRateLimiter(RateLimiterConfig{Enabled: true, RequestsPerSecond: 1000, Burst: 1000})
+	const goroutines = 50
+	const ipsPerGoroutine = 20
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		g := g
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < ipsPerGoroutine; i++ {
+				ip := fmt.Sprintf("10.%d.%d.1", g, i)
+				rl.Allow(ip)
+				rl.Allow(ip) // second call hits fast path
 			}
-		})
+		}()
 	}
-}
-
-func TestExtractClientIP_XRealIP(t *testing.T) {
-	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Real-IP", "9.8.7.6")
-	if got := extractClientIP(req); got != "9.8.7.6" {
-		t.Errorf("got %q, want 9.8.7.6", got)
-	}
+	wg.Wait()
 }
 
 func TestExtractClientIP_RemoteAddr(t *testing.T) {
-	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req := newTestRequest(t, http.MethodGet, "/")
 	req.RemoteAddr = "192.168.0.1:54321"
 	if got := extractClientIP(req); got != "192.168.0.1" {
 		t.Errorf("got %q, want 192.168.0.1", got)
+	}
+}
+
+func TestExtractClientIP_RemoteAddr_IPv6(t *testing.T) {
+	req := newTestRequest(t, http.MethodGet, "/")
+	req.RemoteAddr = "[::1]:54321"
+	if got := extractClientIP(req); got != "::1" {
+		t.Errorf("got %q, want ::1", got)
+	}
+}
+
+// TestExtractClientIP_IgnoresForwardedHeaders verifies that X-Forwarded-For and
+// X-Real-IP are NOT trusted (no reverse proxy in front of this service).
+func TestExtractClientIP_IgnoresForwardedHeaders(t *testing.T) {
+	req := newTestRequest(t, http.MethodGet, "/")
+	req.RemoteAddr = "10.0.0.1:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	req.Header.Set("X-Real-IP", "5.6.7.8")
+	// Should use RemoteAddr, not the spoofed headers.
+	if got := extractClientIP(req); got != "10.0.0.1" {
+		t.Errorf("got %q, want 10.0.0.1 (headers must be ignored)", got)
 	}
 }
 
@@ -116,7 +135,7 @@ func TestRateLimitMiddleware_Disabled(t *testing.T) {
 	router.GET("/ping", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodGet, "/ping", nil)
+	req := newTestRequest(t, http.MethodGet, "/ping")
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
@@ -131,7 +150,7 @@ func TestRateLimitMiddleware_Nil(t *testing.T) {
 	router.GET("/ping", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodGet, "/ping", nil)
+	req := newTestRequest(t, http.MethodGet, "/ping")
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
@@ -149,16 +168,16 @@ func TestRateLimitMiddleware_Exceeded(t *testing.T) {
 
 	// First request — should pass.
 	w1 := httptest.NewRecorder()
-	req1, _ := http.NewRequest(http.MethodGet, "/ping", nil)
+	req1 := newTestRequest(t, http.MethodGet, "/ping")
 	req1.RemoteAddr = "10.0.0.1:1234"
 	router.ServeHTTP(w1, req1)
 	if w1.Code != http.StatusOK {
 		t.Errorf("first request: expected 200, got %d", w1.Code)
 	}
 
-	// Second request same IP — should be rate limited.
+	// Second request from same IP — should be rate limited.
 	w2 := httptest.NewRecorder()
-	req2, _ := http.NewRequest(http.MethodGet, "/ping", nil)
+	req2 := newTestRequest(t, http.MethodGet, "/ping")
 	req2.RemoteAddr = "10.0.0.1:1235"
 	router.ServeHTTP(w2, req2)
 	if w2.Code != http.StatusTooManyRequests {
