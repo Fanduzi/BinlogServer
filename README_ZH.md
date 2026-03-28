@@ -17,7 +17,10 @@
 <div align="center">
 # BinlogServer
 
-[English](README.md) | 中文 | [更新日志](CHANGELOG.md) | [安全策略](SECURITY.md)
+[![English](https://img.shields.io/badge/lang-English-inactive.svg)](README.md)
+[![中文](https://img.shields.io/badge/lang-中文-blue.svg)](README_ZH.md)
+[![更新日志](https://img.shields.io/badge/docs-更新日志-informational.svg)](CHANGELOG.md)
+[![安全策略](https://img.shields.io/badge/docs-安全策略-critical.svg)](SECURITY.md)
 </div>
 
 Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负责从源库持续读取 binlog、落盘本地文件、持久化 checkpoint，并提供 API 控制、UI、S3-compatible upload 与集群调度能力。
