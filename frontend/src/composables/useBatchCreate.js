@@ -9,8 +9,8 @@ import { createTask, startTask } from "../api.js";
 function defaultBatchForm() {
   return {
     lines: "",
-    user: "repl",
-    password: "replpass",
+    user: "",
+    password: "",
     flavor: "mysql",
     serverIdStart: 300000,
     retentionDays: 7,
@@ -61,7 +61,8 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
 
   function parseHostPort(text, lineNo) {
     const idx = text.lastIndexOf(":");
-    if (idx <= 0 || idx === text.length - 1) throw new Error(t("batch.errors.hostPortFormatError", { lineNo }));
+    if (idx <= 0 || idx === text.length - 1)
+      throw new Error(t("batch.errors.hostPortFormatError", { lineNo }));
     const host = text.slice(0, idx).trim();
     const port = Number(text.slice(idx + 1).trim());
     if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
@@ -71,13 +72,19 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
   }
 
   function parseBatchLine(raw, lineNo) {
-    const parts = raw.split(",").map((x) => x.trim()).filter(Boolean);
+    const parts = raw
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
     let name = "";
     let host = "";
     let port = 0;
 
     if (parts.length === 1) {
-      if (!parts[0].includes(":")) throw new Error(t("batch.errors.singleColumnMustBeHostPort", { lineNo }));
+      if (!parts[0].includes(":"))
+        throw new Error(
+          t("batch.errors.singleColumnMustBeHostPort", { lineNo }),
+        );
       [host, port] = parseHostPort(parts[0], lineNo);
       name = `task-${host}-${port}`;
     } else if (parts.length === 2) {
@@ -97,13 +104,33 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
       throw new Error(t("batch.errors.onlySupportFormats", { lineNo }));
     }
 
-    if (!host || !Number.isInteger(Number(port)) || Number(port) <= 0 || Number(port) > 65535) {
+    if (
+      !host ||
+      !Number.isInteger(Number(port)) ||
+      Number(port) <= 0 ||
+      Number(port) > 65535
+    ) {
       throw new Error(t("batch.errors.portInvalid", { lineNo }));
     }
     if (!name) name = `task-${host}-${port}`;
     const clusterKey = makeClusterKey(name, host, Number(port), lineNo);
-    const clusterKeyErr = validateTaskPayload({ name, cluster_key: clusterKey, source: { host, port: Number(port), user: "repl", flavor: "mysql", server_id: 1 }, start: { mode: "LATEST" }, storage: { retention_days: 7 } });
-    if (clusterKeyErr) throw new Error(t("batch.errors.clusterKeyInvalid", { lineNo, error: clusterKeyErr }));
+    const clusterKeyErr = validateTaskPayload({
+      name,
+      cluster_key: clusterKey,
+      source: {
+        host,
+        port: Number(port),
+        user: "repl",
+        flavor: "mysql",
+        server_id: 1,
+      },
+      start: { mode: "LATEST" },
+      storage: { retention_days: 7 },
+    });
+    if (clusterKeyErr)
+      throw new Error(
+        t("batch.errors.clusterKeyInvalid", { lineNo, error: clusterKeyErr }),
+      );
     return { lineNo, name, host, port: Number(port), clusterKey };
   }
 
@@ -122,16 +149,36 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
         const row = parseBatchLine(raw, lineNo);
         const sourceKey = `${row.host}:${row.port}`;
         const nameKey = row.name.toLowerCase();
-        if (sourceSeen.has(sourceKey)) throw new Error(t("batch.errors.sourceDuplicate", { lineNo, source: sourceKey }));
-        if (nameSeen.has(nameKey)) throw new Error(t("batch.errors.nameDuplicate", { lineNo, name: row.name }));
-        if (clusterKeySeen.has(row.clusterKey)) throw new Error(t("batch.errors.clusterKeyDuplicate", { lineNo, key: row.clusterKey }));
+        if (sourceSeen.has(sourceKey))
+          throw new Error(
+            t("batch.errors.sourceDuplicate", { lineNo, source: sourceKey }),
+          );
+        if (nameSeen.has(nameKey))
+          throw new Error(
+            t("batch.errors.nameDuplicate", { lineNo, name: row.name }),
+          );
+        if (clusterKeySeen.has(row.clusterKey))
+          throw new Error(
+            t("batch.errors.clusterKeyDuplicate", {
+              lineNo,
+              key: row.clusterKey,
+            }),
+          );
         sourceSeen.add(sourceKey);
         nameSeen.add(nameKey);
         clusterKeySeen.add(row.clusterKey);
         rows.push({ ...row, valid: true, error: "" });
       } catch (err) {
-        const msg = err?.message || t("batch.errors.lineFormatError", { lineNo });
-        rows.push({ lineNo, name: "--", host: "--", port: "--", valid: false, error: msg });
+        const msg =
+          err?.message || t("batch.errors.lineFormatError", { lineNo });
+        rows.push({
+          lineNo,
+          name: "--",
+          host: "--",
+          port: "--",
+          valid: false,
+          error: msg,
+        });
         errors.push(msg);
       }
     }
@@ -145,12 +192,20 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
     batchPreview.errors = parsed.errors;
     batchPreview.validCount = parsed.rows.filter((x) => x.valid).length;
     batchPreview.ready = true;
-    batchPreview.canSubmit = batchPreview.validCount > 0 && parsed.errors.length === 0;
+    batchPreview.canSubmit =
+      batchPreview.validCount > 0 && parsed.errors.length === 0;
     if (!batchPreview.rows.length || parsed.errors.length > 0) {
-      ElMessage.warning(t("msg.previewComplete", { valid: batchPreview.validCount, errors: parsed.errors.length }));
+      ElMessage.warning(
+        t("msg.previewComplete", {
+          valid: batchPreview.validCount,
+          errors: parsed.errors.length,
+        }),
+      );
       return;
     }
-    ElMessage.success(t("msg.previewPassed", { count: batchPreview.validCount }));
+    ElMessage.success(
+      t("msg.previewPassed", { count: batchPreview.validCount }),
+    );
   }
 
   async function submitBatchCreate() {
@@ -176,13 +231,20 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
           storage: { retention_days: Number(batchForm.retentionDays) },
         };
         const validationErr = validateTaskPayload(payload);
-        if (validationErr) { errors.push(`${row.name}(${row.host}:${row.port}) -> ${validationErr}`); continue; }
+        if (validationErr) {
+          errors.push(
+            `${row.name}(${row.host}:${row.port}) -> ${validationErr}`,
+          );
+          continue;
+        }
         try {
           const created = await createTask(payload);
           if (batchForm.autoStart) await startTask(created.id);
           success += 1;
         } catch (err) {
-          errors.push(`${row.name}(${row.host}:${row.port}) -> ${parseErr(err)}`);
+          errors.push(
+            `${row.name}(${row.host}:${row.port}) -> ${parseErr(err)}`,
+          );
         }
       }
       await refreshAll();
@@ -191,12 +253,26 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
         batchVisible.value = false;
         return;
       }
-      ElMessage.warning(t("msg.batchPartialSuccess", { success, failed: errors.length }));
-      await ElMessageBox.alert(`<pre style="white-space: pre-wrap">${errors.join("\n")}</pre>`, t("msg.batchCreateFailedDetail"), { dangerouslyUseHTMLString: true, confirmButtonText: t("btn.gotIt") });
+      ElMessage.warning(
+        t("msg.batchPartialSuccess", { success, failed: errors.length }),
+      );
+      await ElMessageBox.alert(
+        `<pre style="white-space: pre-wrap">${errors.join("\n")}</pre>`,
+        t("msg.batchCreateFailedDetail"),
+        { dangerouslyUseHTMLString: true, confirmButtonText: t("btn.gotIt") },
+      );
     } catch (err) {
       ElMessage.error(parseErr(err));
     }
   }
 
-  return { batchVisible, batchForm, batchPreview, openBatchCreate, previewBatchCreate, submitBatchCreate, clearBatchPreview };
+  return {
+    batchVisible,
+    batchForm,
+    batchPreview,
+    openBatchCreate,
+    previewBatchCreate,
+    submitBatchCreate,
+    clearBatchPreview,
+  };
 }
