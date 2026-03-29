@@ -227,7 +227,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
               <span>{{ $t('filter.alertFirst') }}</span>
               <el-switch v-model="uiFilter.onlyAlert" />
             </div>
-            <div class="filter-summary" data-testid="filter-summary">{{ $t('filter.showingCount', { count: filteredTasks.length }) }}</div>
+            <div class="filter-summary" data-testid="filter-summary" aria-live="polite" aria-atomic="true">{{ $t('filter.showingCount', { count: filteredTasks.length }) }}</div>
             <el-button @click="resetUiFilter">{{ $t('btn.resetFilter') }}</el-button>
           </div>
         </el-card>
@@ -395,7 +395,9 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
             stripe
             row-key="task.id"
             :row-class-name="taskRowClassName"
+            :row-attr="() => ({ tabindex: '0' })"
             @row-click="onRowClick"
+            @keydown.enter="onTableKeyEnter"
           >
             <el-table-column :label="$t('table.id')" width="70">
               <template #default="{ row }"><span class="task-id-cell" :data-testid="`task-row-${row.task.id}`">{{ row.task.id }}</span></template>
@@ -820,8 +822,8 @@ window.addEventListener('resize', () => { windowWidth.value = window.innerWidth;
 const isMobile = computed(() => windowWidth.value < 768);
 
 // Auth + URL route listeners
-function handleAuthRequired(event) {
-  authRequiredMessage.value = event?.detail?.message || t("auth.tokenExpired");
+function handleAuthRequired() {
+  authRequiredMessage.value = t("auth.tokenExpired");
   settingsVisible.value = true;
   settingsToken.value = getAuthToken() || "";
 }
@@ -913,6 +915,13 @@ const uiFilter = reactive({
   onlyAlert: false,
 });
 
+const debouncedKeyword = ref("");
+const debouncedSourceKeyword = ref("");
+let _kwTimer = null;
+let _srcTimer = null;
+watch(() => uiFilter.keyword, (v) => { clearTimeout(_kwTimer); _kwTimer = setTimeout(() => { debouncedKeyword.value = v; }, 300); }, { immediate: true });
+watch(() => uiFilter.sourceKeyword, (v) => { clearTimeout(_srcTimer); _srcTimer = setTimeout(() => { debouncedSourceKeyword.value = v; }, 300); }, { immediate: true });
+
 const pager = reactive({
   page: 1,
   pageSize: 20,
@@ -956,8 +965,8 @@ const files = ref([]);
 const filteredTasks = computed(() => {
   let rows = [...dashboard.tasks];
 
-  if (uiFilter.keyword.trim()) {
-    const kw = uiFilter.keyword.trim().toLowerCase();
+  if (debouncedKeyword.value.trim()) {
+    const kw = debouncedKeyword.value.trim().toLowerCase();
     rows = rows.filter((row) => {
       const id = String(row.task?.id || "").toLowerCase();
       const name = String(row.task?.name || "").toLowerCase();
@@ -965,8 +974,8 @@ const filteredTasks = computed(() => {
     });
   }
 
-  if (uiFilter.sourceKeyword.trim()) {
-    const sourceKw = uiFilter.sourceKeyword.trim().toLowerCase();
+  if (debouncedSourceKeyword.value.trim()) {
+    const sourceKw = debouncedSourceKeyword.value.trim().toLowerCase();
     rows = rows.filter((row) => sourceLabel(row.task).toLowerCase().includes(sourceKw));
   }
 
@@ -1029,8 +1038,8 @@ const detailRunsLimited = computed(() => detailRuns.value.slice(0, runHistoryLim
 
 watch(
   () => [
-    uiFilter.keyword,
-    uiFilter.sourceKeyword,
+    debouncedKeyword.value,
+    debouncedSourceKeyword.value,
     uiFilter.taskState,
     uiFilter.replicationStatus,
     uiFilter.sortBy,
@@ -1635,6 +1644,14 @@ function onRowClick(row) {
   void showDetail(row.task);
 }
 
+function onTableKeyEnter(e) {
+  const tr = e.target.closest("tr");
+  if (!tr) return;
+  const trs = Array.from(tr.closest("tbody")?.querySelectorAll("tr") || []);
+  const idx = trs.indexOf(tr);
+  if (idx >= 0 && idx < pagedTasks.value.length) onRowClick(pagedTasks.value[idx]);
+}
+
 async function retryFailedUploads(task) {
   try {
     await retryUpload(task.id, 100);
@@ -1888,11 +1905,23 @@ function hasWhitespace(text) {
   --bg: #f5f5f4;
   --surface: #ffffff;
   --surface-soft: #f8f8f7;
+  --surface-raised: #fcfcfb;
   --line: #e7e5e4;
   --line-strong: #d6d3d1;
   --text: #111827;
+  --text-secondary: #374151;
+  --text-tertiary: #4b5563;
+  --text-muted: #9ca3af;
+  --text-label: #52525b;
+  --text-dim: #71717a;
+  --text-strong: #18181b;
   --sub: #6b7280;
   --accent: #111827;
+  --accent-hover: #1f2937;
+  --surface-page: #fafaf9;
+  --surface-card: #fdfdfc;
+  --text-heading: #3f3f46;
+  --line-connector: #d4d4d8;
 
   max-width: 1720px;
   margin: 0 auto;
@@ -1900,7 +1929,7 @@ function hasWhitespace(text) {
   padding: 24px 24px 24px 252px;
   font-family: "Geist", "SF Pro Display", "PingFang SC", sans-serif;
   color: var(--text);
-  background: linear-gradient(180deg, #fafaf9 0%, var(--bg) 100%);
+  background: linear-gradient(180deg, var(--surface-page) 0%, var(--bg) 100%);
 }
 
 .page-shell--menu-collapsed {
@@ -1927,7 +1956,7 @@ function hasWhitespace(text) {
 
 .kicker {
   margin: 0 0 2px;
-  color: #6b7280;
+  color: var(--sub);
   letter-spacing: 0.14em;
   font-size: 10px;
   font-weight: 700;
@@ -1947,7 +1976,7 @@ h1 {
 
 .hero-desc {
   margin: 0;
-  color: #6b7280;
+  color: var(--sub);
   max-width: 520px;
   font-size: 14px;
   line-height: 1.55;
@@ -1980,7 +2009,7 @@ h1 {
 
 .metric-card {
   border: 1px solid var(--line);
-  background: #fcfcfb;
+  background: var(--surface-raised);
   border-radius: 12px;
   padding: 13px 14px;
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.025);
@@ -1995,7 +2024,7 @@ h1 {
 
 .metric-card p {
   margin: 0;
-  color: #6b7280;
+  color: var(--sub);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -2005,7 +2034,7 @@ h1 {
 }
 
 .metric-card i {
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 
 .metric-card strong {
@@ -2014,19 +2043,19 @@ h1 {
   font-size: 28px;
   line-height: 1;
   letter-spacing: -0.03em;
-  color: #111827;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
 .metric-card:hover {
   transform: translateY(-1px);
-  border-color: #d6d3d1;
+  border-color: var(--line-strong);
   box-shadow: 0 6px 14px rgba(17, 24, 39, 0.04);
 }
 
 .metric-card[data-active='true'] {
   border-color: #cbd5e1;
-  background: #ffffff;
+  background: var(--surface);
   box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.14);
 }
 
@@ -2065,7 +2094,7 @@ h1 {
 
 .metric-card--success p,
 .metric-card--success i {
-  color: #6b7280;
+  color: var(--sub);
 }
 
 .metric-card--success strong {
@@ -2133,11 +2162,11 @@ h1 {
   width: 24px;
   height: 24px;
   border-radius: 7px;
-  background: #e7e5e4;
+  background: var(--line);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #52525b;
+  color: var(--text-label);
   font-size: 12px;
 }
 
@@ -2145,7 +2174,7 @@ h1 {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 .nav-pane--collapsed .nav-brand-text {
@@ -2155,7 +2184,7 @@ h1 {
 .nav-collapse-btn {
   border: 0;
   background: transparent;
-  color: #6b7280;
+  color: var(--sub);
   border-radius: 8px;
   width: 30px;
   height: 30px;
@@ -2165,7 +2194,7 @@ h1 {
 
 .nav-collapse-btn:hover {
   background: rgba(255, 255, 255, 0.6);
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 .nav-collapse-btn--dock {
@@ -2189,7 +2218,7 @@ h1 {
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
-  color: #374151;
+  color: var(--text-secondary);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2212,19 +2241,19 @@ h1 {
 }
 
 .nav-item i {
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 
 .nav-item--active {
   background: rgba(255, 255, 255, 0.88);
   border-color: rgba(148, 163, 184, 0.2);
-  color: #111827;
+  color: var(--text);
   font-weight: 600;
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.03);
 }
 
 .nav-item--active i {
-  color: #4b5563;
+  color: var(--text-tertiary);
 }
 
 .nav-item:hover {
@@ -2251,7 +2280,7 @@ h1 {
 
 .nav-badge {
   font-family: "IBM Plex Mono", monospace;
-  color: #9ca3af;
+  color: var(--text-muted);
   font-size: 11px;
 }
 
@@ -2282,7 +2311,7 @@ h1 {
 }
 
 .panel-card--secondary {
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .panel-title {
@@ -2301,7 +2330,7 @@ h1 {
 
 .panel-title i {
   margin-right: 8px;
-  color: #525252;
+  color: var(--text-label);
 }
 
 .panel-hint {
@@ -2365,14 +2394,14 @@ h1 {
 }
 
 .switch-row {
-  border: 1px dashed #d6d3d1;
+  border: 1px dashed var(--line-strong);
   border-radius: 12px;
   padding: 12px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   color: var(--sub);
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .filter-chip-row :deep(.el-button) {
@@ -2385,17 +2414,17 @@ h1 {
 .filter-stack :deep(.el-input__wrapper),
 .filter-stack :deep(.el-select__wrapper) {
   min-height: 38px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .filter-stack :deep(.el-switch__core) {
-  border-color: #d6d3d1;
-  background: #e7e5e4;
+  border-color: var(--line-strong);
+  background: var(--line);
 }
 
 .filter-stack :deep(.el-switch.is-checked .el-switch__core) {
-  border-color: #111827;
-  background: #111827;
+  border-color: var(--text);
+  background: var(--accent);
 }
 
 .source-board {
@@ -2414,7 +2443,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 12px 12px 14px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
@@ -2431,7 +2460,7 @@ h1 {
   font-size: 28px;
   line-height: 1;
   letter-spacing: -0.03em;
-  color: #111827;
+  color: var(--text);
   font-family: "IBM Plex Mono", monospace;
 }
 
@@ -2446,7 +2475,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 12px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.02);
 }
 
@@ -2458,7 +2487,7 @@ h1 {
 }
 
 .cluster-worker-id {
-  color: #111827;
+  color: var(--text);
   font-size: 13px;
   letter-spacing: -0.01em;
 }
@@ -2471,31 +2500,31 @@ h1 {
 
 .cluster-worker-time {
   font-family: "IBM Plex Mono", monospace;
-  color: #6b7280;
+  color: var(--sub);
 }
 
 .overview-note {
   margin-top: 12px;
-  border: 1px dashed #d6d3d1;
+  border: 1px dashed var(--line-strong);
   border-radius: 12px;
   padding: 12px;
   color: var(--sub);
   font-size: 12px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .source-cell {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 12px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
 .source-name {
   margin: 0;
   font-weight: 600;
-  color: #111827;
+  color: var(--text);
   line-height: 1.35;
 }
 
@@ -2513,14 +2542,14 @@ h1 {
   border-radius: 12px;
   overflow: hidden;
   --el-table-border-color: var(--line);
-  --el-table-row-hover-bg-color: #fafaf9;
-  --el-table-header-bg-color: #f8f8f7;
-  --el-table-tr-bg-color: #ffffff;
+  --el-table-row-hover-bg-color: var(--bg);
+  --el-table-header-bg-color: var(--surface-soft);
+  --el-table-tr-bg-color: var(--surface);
 }
 
 .table-card :deep(.el-table th.el-table__cell) {
-  background: #f8f8f7;
-  color: #4b5563;
+  background: var(--surface-soft);
+  color: var(--text-tertiary);
   font-weight: 600;
   font-size: 12px;
   letter-spacing: 0.02em;
@@ -2538,11 +2567,11 @@ h1 {
 }
 
 .table-card :deep(.el-table td.el-table__cell) {
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 .task-id-cell {
-  color: #6b7280;
+  color: var(--sub);
   font-family: "IBM Plex Mono", monospace;
   font-size: 12px;
 }
@@ -2552,7 +2581,7 @@ h1 {
 }
 
 .table-card :deep(.el-table__body tr:hover > td.el-table__cell) {
-  background: #fafaf9;
+  background: var(--surface-page);
 }
 
 .table-card :deep(.el-table__body tr) {
@@ -2561,12 +2590,12 @@ h1 {
 
 .task-name-cell {
   font-weight: 600;
-  color: #111827;
+  color: var(--text);
 }
 
 .delay-cell {
   font-family: "IBM Plex Mono", monospace;
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 .replication-cell {
@@ -2576,14 +2605,14 @@ h1 {
 }
 
 .reason-tip-icon {
-  color: #9ca3af;
+  color: var(--text-muted);
   font-size: 12px;
   cursor: help;
   transition: color 0.15s ease;
 }
 
 .reason-tip-icon:hover {
-  color: #4b5563;
+  color: var(--text-tertiary);
 }
 
 .action-row {
@@ -2605,14 +2634,14 @@ h1 {
 .table-card :deep(.action-btn) {
   border-color: transparent;
   background: transparent;
-  color: #6b7280;
+  color: var(--sub);
   font-weight: 500;
 }
 
 .table-card :deep(.action-btn:hover) {
   border-color: var(--line);
-  background: #ffffff;
-  color: #111827;
+  background: var(--surface);
+  color: var(--text);
 }
 
 .pager-wrap {
@@ -2668,7 +2697,7 @@ h1 {
 
 .detail-panel--hero {
   border-color: var(--line-strong);
-  background: linear-gradient(180deg, #fdfdfc 0%, #fafaf9 100%);
+  background: linear-gradient(180deg, var(--surface-card) 0%, var(--surface-page) 100%);
   padding: 14px;
 }
 
@@ -2682,11 +2711,11 @@ h1 {
 .detail-hero h3 {
   margin-bottom: 0;
   font-size: 20px;
-  color: #111827;
+  color: var(--text);
 }
 
 .detail-hero-kicker {
-  color: #6b7280;
+  color: var(--sub);
   font-size: 11px;
   letter-spacing: 0.12em;
   font-weight: 700;
@@ -2745,7 +2774,7 @@ h1 {
 .detail-panel h3 {
   margin: 0 0 12px;
   font-size: 14px;
-  color: #3f3f46;
+  color: var(--text-heading);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2761,13 +2790,13 @@ h1 {
   border-radius: 12px;
   overflow: hidden;
   --el-table-border-color: var(--line);
-  --el-table-header-bg-color: #f8f8f7;
-  --el-table-row-hover-bg-color: #fafaf9;
+  --el-table-header-bg-color: var(--surface-soft);
+  --el-table-row-hover-bg-color: var(--bg);
 }
 
 .detail-panel :deep(.el-table th.el-table__cell) {
-  background: #f8f8f7;
-  color: #52525b;
+  background: var(--surface-soft);
+  color: var(--text-label);
   font-size: 12px;
   font-weight: 600;
 }
@@ -2780,7 +2809,7 @@ h1 {
 }
 
 .detail-panel :deep(.el-timeline-item__node) {
-  background-color: #d4d4d8;
+  background-color: var(--line-connector);
 }
 
 .detail-panel :deep(.el-timeline-item__tail) {
@@ -2797,25 +2826,25 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px;
-  background: #fdfdfc;
+  background: var(--surface-card);
 }
 
 .detail-item span {
   display: block;
-  color: #71717a;
+  color: var(--text-dim);
   font-size: 12px;
 }
 
 .detail-item strong {
   margin-top: 6px;
   display: block;
-  color: #18181b;
+  color: var(--text-strong);
   word-break: break-word;
 }
 
 .form-hint {
   margin-top: 6px;
-  color: #71717a;
+  color: var(--text-dim);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -2829,7 +2858,7 @@ h1 {
 }
 
 .task-detail-drawer {
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .task-detail-drawer :deep(.el-drawer__header) {
@@ -2839,7 +2868,7 @@ h1 {
 }
 
 .task-detail-drawer :deep(.el-drawer__title) {
-  color: #111827;
+  color: var(--text);
   font-size: 15px;
   font-weight: 700;
 }
@@ -2857,11 +2886,11 @@ h1 {
   margin-right: 0;
   padding: 18px 20px 14px;
   border-bottom: 1px solid var(--line);
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .settings-dialog :deep(.el-dialog__title) {
-  color: #111827;
+  color: var(--text);
   font-size: 15px;
   font-weight: 700;
 }
@@ -2884,20 +2913,20 @@ h1 {
 }
 
 .settings-dialog :deep(.el-form-item__label) {
-  color: #52525b;
+  color: var(--text-label);
   font-weight: 600;
 }
 
 .settings-dialog :deep(.el-input__wrapper),
 .settings-dialog :deep(.el-select__wrapper) {
   min-height: 40px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .settings-dialog :deep(.el-dialog__footer) {
   padding: 12px 20px 18px;
   border-top: 1px solid var(--line);
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 :deep(.el-input__wrapper),
@@ -2926,26 +2955,26 @@ h1 {
   font-weight: 500;
 }
 :deep(.el-button--primary) {
-  background: #111827;
-  border-color: #111827;
+  background: var(--accent);
+  border-color: var(--text);
   color: #fff;
 }
 
 :deep(.el-button--primary:hover) {
-  background: #1f2937;
-  border-color: #1f2937;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 :deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger)) {
   border-color: var(--line);
   background: #fff;
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 :deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):hover) {
   border-color: var(--line-strong);
-  background: #fafaf9;
-  color: #111827;
+  background: var(--surface-page);
+  color: var(--text);
 }
 
 .table-card :deep(.action-btn) {
@@ -3008,8 +3037,8 @@ h1 {
 
 :deep(.el-tag--info) {
   background: #f5f5f4;
-  border-color: #e7e5e4;
-  color: #52525b;
+  border-color: var(--line);
+  color: var(--text-label);
 }
 
 @keyframes rise-fade {
