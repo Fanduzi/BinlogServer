@@ -101,22 +101,7 @@ async function mockRequest(method, path, options = {}) {
  * Show authentication required dialog.
  */
 function showAuthDialog() {
-  const messageLines = [
-    "接口认证已失效或尚未配置。",
-    "请按以下步骤处理：",
-    "1. 向管理员获取 API Token",
-    "2. 打开“设置”并填写 Token",
-    "3. 保存后重新刷新数据",
-  ];
-
-  window.dispatchEvent(
-    new CustomEvent("auth-required", {
-      detail: {
-        message: messageLines.join("\n"),
-        lines: messageLines,
-      },
-    }),
-  );
+  window.dispatchEvent(new CustomEvent("auth-required"));
 }
 
 export async function getSummary() {
