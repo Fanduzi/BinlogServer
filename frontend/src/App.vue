@@ -779,10 +779,18 @@ import {
 } from "./api";
 import { getAuthToken, setAuthToken } from "./utils/auth.js";
 import { setLocale, getLocale } from "./locales";
+import { useWindowState } from "./composables/useWindowState.js";
+import { useAuth } from "./composables/useAuth.js";
+import { useDashboard } from "./composables/useDashboard.js";
+import { useSourceLookup } from "./composables/useSourceLookup.js";
+import { useTaskFilter } from "./composables/useTaskFilter.js";
+import { useTaskDetail } from "./composables/useTaskDetail.js";
+import { useTaskForm } from "./composables/useTaskForm.js";
+import { useBatchCreate } from "./composables/useBatchCreate.js";
+import { useFormatters } from "./composables/useFormatters.js";
 
 const { t } = useI18n();
 
-const loading = ref(false);
 const LEASE_RISK_SECONDS = 45;
 const RUN_HISTORY_LIMIT = 10;
 const NAME_MAX_LENGTH = 255;
@@ -802,13 +810,9 @@ const VIEW_HASH_MAP = {
 };
 
 // Settings state
-const settingsVisible = ref(false);
-const settingsToken = ref("");
 const currentLocale = ref(getLocale());
 const elLocale = computed(() => currentLocale.value === "zh-CN" ? zhCnLocale : enLocale);
-const authRequiredTitle = computed(() => t("auth.reauthRequired"));
-const authRequiredMessage = ref("");
-const activeQuickFilter = ref("all");
+const { settingsVisible, settingsToken, authRequiredMessage, authRequiredTitle, openSettings, saveSettings } = useAuth(() => refreshAll());
 const activeView = ref(resolveViewFromHash());
 
 // Locale change handler
@@ -816,18 +820,9 @@ function onLocaleChange(locale) {
   setLocale(locale);
   window.location.reload();
 }
-const menuCollapsed = ref(false);
-const windowWidth = ref(window.innerWidth);
-window.addEventListener('resize', () => { windowWidth.value = window.innerWidth; });
-const isMobile = computed(() => windowWidth.value < 768);
+const { menuCollapsed, windowWidth, isMobile } = useWindowState();
 
-// Auth + URL route listeners
-function handleAuthRequired() {
-  authRequiredMessage.value = t("auth.tokenExpired");
-  settingsVisible.value = true;
-  settingsToken.value = getAuthToken() || "";
-}
-
+// URL route listener
 function handleHashChange() {
   const { view, mode } = parseHashRoute();
   if (view === "tasks" && mode === "alerts") {
@@ -842,181 +837,49 @@ function handleHashChange() {
 }
 
 onMounted(() => {
-  window.addEventListener("auth-required", handleAuthRequired);
   window.addEventListener("hashchange", handleHashChange);
   handleHashChange();
   syncHash(activeView.value, true);
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("auth-required", handleAuthRequired);
   window.removeEventListener("hashchange", handleHashChange);
 });
 
-function openSettings() {
-  settingsToken.value = getAuthToken() || "";
-  settingsVisible.value = true;
-}
+const { loading, dashboard, cluster, toTimeMs, nowRefMs, applyDashboardData, applyClusterData, buildSourceFilter } = useDashboard();
 
-function saveSettings() {
-  setAuthToken(settingsToken.value);
-  settingsVisible.value = false;
-  authRequiredMessage.value = "";
-  window.__authDialogShown = false;
-  ElMessage.success(t("msg.settingsSaved"));
-  refreshAll();
-}
+const { sourceQuery, lookup, clearLookupState } = useSourceLookup();
 
-const dashboard = reactive({
-  generated_at: "",
-  threshold_seconds: 30,
-  summary: {
-    total: 0,
-    running: 0,
-    retry_backoff: 0,
-    stopped: 0,
-    failed: 0,
-    normal: 0,
-    delayed: 0,
-    abnormal: 0,
-  },
-  tasks: [],
-  sources: [],
-});
+const {
+  uiFilter, pager, activeQuickFilter,
+  filteredTasks, pagedTasks,
+  taskStates, replicationStatuses,
+  stateLabel, replicationStatusLabel, sourceLabel,
+  resetUiFilter,
+} = useTaskFilter(dashboard);
 
-const cluster = reactive({
-  overview: {
-    task_count: 0,
-    worker_count: 0,
-    running_task_count: 0,
-    leased_task_count: 0,
-  },
-  workers: [],
-  leaseByTask: {},
-});
+const {
+  formVisible, formMode, form,
+  openCreate, openEdit, buildPayload, validateTaskPayload, resetForm,
+} = useTaskForm();
 
-const sourceQuery = reactive({
-  host: "",
-  port: null,
-});
+const {
+  batchVisible, batchForm, batchPreview,
+  openBatchCreate, previewBatchCreate, submitBatchCreate, clearBatchPreview,
+} = useBatchCreate({ refreshAll, validateTaskPayload, parseErr });
 
-const lookup = reactive({
-  checked: false,
-  exists: false,
-  count: 0,
-});
+const {
+  detailVisible, detailTask, detailReplication, detailLease,
+  detailRuns, runHistoryLimit, checkpoint, events, files,
+  showDetail,
+} = useTaskDetail({ cluster });
 
-const uiFilter = reactive({
-  keyword: "",
-  sourceKeyword: "",
-  taskState: "ALL",
-  replicationStatus: "ALL",
-  sortBy: "delay_desc",
-  onlyAlert: false,
-});
-
-const debouncedKeyword = ref("");
-const debouncedSourceKeyword = ref("");
-let _kwTimer = null;
-let _srcTimer = null;
-watch(() => uiFilter.keyword, (v) => { clearTimeout(_kwTimer); _kwTimer = setTimeout(() => { debouncedKeyword.value = v; }, 300); }, { immediate: true });
-watch(() => uiFilter.sourceKeyword, (v) => { clearTimeout(_srcTimer); _srcTimer = setTimeout(() => { debouncedSourceKeyword.value = v; }, 300); }, { immediate: true });
-
-const pager = reactive({
-  page: 1,
-  pageSize: 20,
-});
-
-const taskStates = ["CREATED", "STARTING", "RUNNING", "RETRY_BACKOFF", "STOPPING", "STOPPED", "FAILED"];
-const replicationStatuses = ["NORMAL", "DELAYED", "ABNORMAL", "IDLE"];
-
-// i18n helper functions
-function stateLabel(state) {
-  return t(`state.${state}`) || state || "--";
-}
-
-function replicationStatusLabel(status) {
-  return t(`replication.${status}`) || status || "--";
-}
-
-const formVisible = ref(false);
-const formMode = ref("create");
-const form = reactive(defaultForm());
-const batchVisible = ref(false);
-const batchForm = reactive(defaultBatchForm());
-const batchPreview = reactive({
-  ready: false,
-  canSubmit: false,
-  validCount: 0,
-  rows: [],
-  errors: [],
-});
-
-const detailVisible = ref(false);
-const detailTask = ref(null);
-const detailReplication = ref(null);
-const detailLease = ref(null);
-const detailRuns = ref([]);
-const runHistoryLimit = ref(RUN_HISTORY_LIMIT);
-const checkpoint = ref(null);
-const events = ref([]);
-const files = ref([]);
-
-const filteredTasks = computed(() => {
-  let rows = [...dashboard.tasks];
-
-  if (debouncedKeyword.value.trim()) {
-    const kw = debouncedKeyword.value.trim().toLowerCase();
-    rows = rows.filter((row) => {
-      const id = String(row.task?.id || "").toLowerCase();
-      const name = String(row.task?.name || "").toLowerCase();
-      return id.includes(kw) || name.includes(kw);
-    });
-  }
-
-  if (debouncedSourceKeyword.value.trim()) {
-    const sourceKw = debouncedSourceKeyword.value.trim().toLowerCase();
-    rows = rows.filter((row) => sourceLabel(row.task).toLowerCase().includes(sourceKw));
-  }
-
-  if (uiFilter.taskState !== "ALL") {
-    rows = rows.filter((row) => row.task?.state === uiFilter.taskState);
-  }
-
-  if (uiFilter.replicationStatus !== "ALL") {
-    rows = rows.filter((row) => row.replication?.status === uiFilter.replicationStatus);
-  }
-
-  if (uiFilter.onlyAlert) {
-    rows = rows.filter((row) => {
-      const rep = row.replication?.status;
-      const taskState = row.task?.state;
-      return rep === "ABNORMAL" || rep === "DELAYED" || taskState === "FAILED" || taskState === "RETRY_BACKOFF";
-    });
-  }
-
-  rows.sort((a, b) => {
-    if (uiFilter.sortBy === "name_asc") {
-      return String(a.task?.name || "").localeCompare(String(b.task?.name || ""));
-    }
-    if (uiFilter.sortBy === "updated_desc") {
-      const at = new Date(a.task?.updated_at || 0).getTime();
-      const bt = new Date(b.task?.updated_at || 0).getTime();
-      return bt - at;
-    }
-
-    const ad = Number(a.replication?.delay_seconds ?? -1);
-    const bd = Number(b.replication?.delay_seconds ?? -1);
-    return bd - ad;
-  });
-
-  return rows;
-});
-
-const pagedTasks = computed(() => {
-  const start = (pager.page - 1) * pager.pageSize;
-  return filteredTasks.value.slice(start, start + pager.pageSize);
-});
+const {
+  ownerWorkerLabel, leaseRiskTagType, leaseRiskLabel,
+  stateTagType, replicationTagType,
+  formatDelay, formatTs, formatCheckpoint,
+  formatReplicationReason, hasReplicationReason, parseErr,
+} = useFormatters({ cluster, toTimeMs, nowRefMs, currentLocale });
 
 const workerRows = computed(() => {
   return (cluster.workers || []).map((worker) => {
@@ -1081,7 +944,7 @@ async function refreshAll() {
   try {
     loading.value = true;
     const [dashboardData, overviewData, workersData] = await Promise.all([
-      getDashboard(buildSourceFilter()),
+      getDashboard(buildSourceFilter(sourceQuery)),
       getClusterOverview(),
       listWorkers(),
     ]);
@@ -1095,28 +958,6 @@ async function refreshAll() {
   }
 }
 
-function buildSourceFilter() {
-  const params = {};
-  if (sourceQuery.host?.trim()) params.host = sourceQuery.host.trim();
-  if (sourceQuery.port) params.port = Number(sourceQuery.port);
-  return params;
-}
-
-function applyDashboardData(data) {
-  Object.assign(dashboard.summary, data?.summary || {});
-  dashboard.tasks = data?.tasks || [];
-  dashboard.sources = data?.sources || [];
-  dashboard.generated_at = data?.generated_at || "";
-  dashboard.threshold_seconds = Number(data?.threshold_seconds || 30);
-}
-
-function applyClusterData(overview, workers) {
-  cluster.overview.task_count = Number(overview?.task_count || 0);
-  cluster.overview.worker_count = Number(overview?.worker_count || 0);
-  cluster.overview.running_task_count = Number(overview?.running_task_count || 0);
-  cluster.overview.leased_task_count = Number(overview?.leased_task_count || 0);
-  cluster.workers = Array.isArray(workers) ? workers : [];
-}
 
 async function prefetchTaskLeasesForPage() {
   const ids = pagedTasks.value.map((row) => row.task?.id).filter(Boolean);
@@ -1160,22 +1001,8 @@ async function applySourceFilter() {
 }
 
 async function clearSourceFilter() {
-  sourceQuery.host = "";
-  sourceQuery.port = null;
-  lookup.checked = false;
-  lookup.exists = false;
-  lookup.count = 0;
+  clearLookupState();
   await refreshAll();
-}
-
-function resetUiFilter() {
-  uiFilter.keyword = "";
-  uiFilter.sourceKeyword = "";
-  uiFilter.taskState = "ALL";
-  uiFilter.replicationStatus = "ALL";
-  uiFilter.sortBy = "delay_desc";
-  uiFilter.onlyAlert = false;
-  activeQuickFilter.value = "all";
 }
 
 function resolveViewFromHash() {
@@ -1284,305 +1111,6 @@ function onPageSizeChange(size) {
   pager.pageSize = size;
 }
 
-function defaultForm() {
-  return {
-    id: "",
-    name: "",
-    cluster_key: "",
-    source: {
-      host: "127.0.0.1",
-      port: 3306,
-      user: "repl",
-      password: "",
-      flavor: "mysql",
-      server_id: 200001,
-      semi_sync: false,
-    },
-    start: {
-      mode: "LATEST",
-      file: "",
-      pos: 0,
-      gtid_set: "",
-    },
-    storage: {
-      retention_days: 7,
-    },
-  };
-}
-
-function defaultBatchForm() {
-  return {
-    lines: "",
-    user: "repl",
-    password: "replpass",
-    flavor: "mysql",
-    serverIdStart: 300000,
-    retentionDays: 7,
-    semiSync: false,
-    autoStart: false,
-  };
-}
-
-function clearBatchPreview() {
-  batchPreview.ready = false;
-  batchPreview.canSubmit = false;
-  batchPreview.validCount = 0;
-  batchPreview.rows = [];
-  batchPreview.errors = [];
-}
-
-function resetBatchForm() {
-  Object.assign(batchForm, defaultBatchForm());
-  clearBatchPreview();
-}
-
-function resetForm() {
-  Object.assign(form, defaultForm());
-}
-
-function openCreate() {
-  formMode.value = "create";
-  resetForm();
-  formVisible.value = true;
-}
-
-function openBatchCreate() {
-  resetBatchForm();
-  batchVisible.value = true;
-}
-
-function openEdit(task) {
-  formMode.value = "edit";
-  Object.assign(form, defaultForm(), JSON.parse(JSON.stringify(task)));
-  form.source.password = "";
-  formVisible.value = true;
-}
-
-function buildPayload() {
-  const payload = {
-    name: form.name.trim(),
-    cluster_key: form.cluster_key?.trim(),
-    source: {
-      ...form.source,
-      host: form.source.host?.trim() || "",
-      user: form.source.user?.trim() || "",
-      flavor: form.source.flavor?.trim() || "",
-      semi_sync: !!form.source.semi_sync,
-    },
-    start: { mode: form.start.mode },
-    storage: { retention_days: Number(form.storage.retention_days) },
-  };
-  if (!payload.source.password) delete payload.source.password;
-
-  if (payload.start.mode === "FILE_POS") {
-    payload.start.file = form.start.file?.trim() || "";
-    payload.start.pos = Number(form.start.pos || 0);
-  }
-  if (payload.start.mode === "GTID") {
-    payload.start.gtid_set = form.start.gtid_set?.trim() || "";
-  }
-  return payload;
-}
-
-function parseBatchLine(raw, lineNo) {
-  const parts = raw.split(",").map((x) => x.trim()).filter(Boolean);
-  let name = "";
-  let host = "";
-  let port = 0;
-
-  if (parts.length === 1) {
-    if (!parts[0].includes(":")) throw new Error(t("batch.errors.singleColumnMustBeHostPort", { lineNo }));
-    [host, port] = parseHostPort(parts[0], lineNo);
-    name = `task-${host}-${port}`;
-  } else if (parts.length === 2) {
-    if (parts[1].includes(":")) {
-      name = parts[0];
-      [host, port] = parseHostPort(parts[1], lineNo);
-    } else if (parts[0].includes(":")) {
-      [host, port] = parseHostPort(parts[0], lineNo);
-      name = parts[1];
-    } else {
-      host = parts[0];
-      port = Number(parts[1]);
-      name = `task-${host}-${port}`;
-    }
-  } else if (parts.length === 3) {
-    name = parts[0];
-    host = parts[1];
-    port = Number(parts[2]);
-  } else {
-    throw new Error(t("batch.errors.onlySupportFormats", { lineNo }));
-  }
-
-  if (!host || !Number.isInteger(Number(port)) || Number(port) <= 0 || Number(port) > 65535) {
-    throw new Error(t("batch.errors.portInvalid", { lineNo }));
-  }
-  if (!name) {
-    name = `task-${host}-${port}`;
-  }
-  const clusterKey = makeClusterKey(name, host, Number(port), lineNo);
-  const clusterKeyErr = validateClusterKey(clusterKey);
-  if (clusterKeyErr) {
-    throw new Error(t("batch.errors.clusterKeyInvalid", { lineNo, error: clusterKeyErr }));
-  }
-
-  return {
-    lineNo,
-    name,
-    host,
-    port: Number(port),
-    clusterKey,
-  };
-}
-
-function parseBatchLines(rawText) {
-  const rows = [];
-  const errors = [];
-  const sourceSeen = new Set();
-  const nameSeen = new Set();
-  const clusterKeySeen = new Set();
-
-  const lines = rawText.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
-    const lineNo = i + 1;
-    const raw = lines[i].trim();
-    if (!raw || raw.startsWith("#")) continue;
-
-    try {
-      const row = parseBatchLine(raw, lineNo);
-      const sourceKey = `${row.host}:${row.port}`;
-      const nameKey = row.name.toLowerCase();
-      if (sourceSeen.has(sourceKey)) {
-        throw new Error(t("batch.errors.sourceDuplicate", { lineNo, source: sourceKey }));
-      }
-      if (nameSeen.has(nameKey)) {
-        throw new Error(t("batch.errors.nameDuplicate", { lineNo, name: row.name }));
-      }
-      if (clusterKeySeen.has(row.clusterKey)) {
-        throw new Error(t("batch.errors.clusterKeyDuplicate", { lineNo, key: row.clusterKey }));
-      }
-      sourceSeen.add(sourceKey);
-      nameSeen.add(nameKey);
-      clusterKeySeen.add(row.clusterKey);
-      rows.push({ ...row, valid: true, error: "" });
-    } catch (err) {
-      const msg = err?.message || t("batch.errors.lineFormatError", { lineNo });
-      rows.push({
-        lineNo,
-        name: "--",
-        host: "--",
-        port: "--",
-        valid: false,
-        error: msg,
-      });
-      errors.push(msg);
-    }
-  }
-  if (!rows.length) {
-    errors.push(t("batch.noData"));
-  }
-  return { rows, errors };
-}
-
-function parseHostPort(text, lineNo) {
-  const idx = text.lastIndexOf(":");
-  if (idx <= 0 || idx === text.length - 1) throw new Error(t("batch.errors.hostPortFormatError", { lineNo }));
-  const host = text.slice(0, idx).trim();
-  const port = Number(text.slice(idx + 1).trim());
-  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error(t("batch.errors.hostPortFormatError", { lineNo }));
-  }
-  return [host, port];
-}
-
-function previewBatchCreate() {
-  const parsed = parseBatchLines(batchForm.lines || "");
-  batchPreview.rows = parsed.rows;
-  batchPreview.errors = parsed.errors;
-  batchPreview.validCount = parsed.rows.filter((x) => x.valid).length;
-  batchPreview.ready = true;
-  batchPreview.canSubmit = batchPreview.validCount > 0 && parsed.errors.length === 0;
-
-  if (!batchPreview.rows.length || parsed.errors.length > 0) {
-    ElMessage.warning(t("msg.previewComplete", { valid: batchPreview.validCount, errors: parsed.errors.length }));
-    return;
-  }
-  ElMessage.success(t("msg.previewPassed", { count: batchPreview.validCount }));
-}
-
-async function submitBatchCreate() {
-  try {
-    if (!batchPreview.ready) {
-      ElMessage.warning(t("msg.previewFirst"));
-      return;
-    }
-    if (!batchPreview.canSubmit) {
-      ElMessage.error(t("msg.previewFailed"));
-      return;
-    }
-    if (!batchForm.user.trim()) {
-      ElMessage.error(t("msg.userRequired"));
-      return;
-    }
-    const rows = batchPreview.rows.filter((x) => x.valid);
-
-    let success = 0;
-    const errors = [];
-    for (let i = 0; i < rows.length; i += 1) {
-      const row = rows[i];
-      const source = {
-        host: row.host,
-        port: row.port,
-        user: batchForm.user.trim(),
-        flavor: batchForm.flavor?.trim() || "mysql",
-        server_id: Number(batchForm.serverIdStart) + i,
-        semi_sync: !!batchForm.semiSync,
-      };
-      if (batchForm.password) {
-        source.password = batchForm.password;
-      }
-
-      const payload = {
-        name: row.name,
-        cluster_key: row.clusterKey,
-        source,
-        start: { mode: "LATEST" },
-        storage: { retention_days: Number(batchForm.retentionDays) },
-      };
-      const validationErr = validateTaskPayload(payload);
-      if (validationErr) {
-        errors.push(`${row.name}(${row.host}:${row.port}) -> ${validationErr}`);
-        continue;
-      }
-
-      try {
-        const created = await createTask(payload);
-        if (batchForm.autoStart) {
-          await startTask(created.id);
-        }
-        success += 1;
-      } catch (err) {
-        errors.push(`${row.name}(${row.host}:${row.port}) -> ${parseErr(err)}`);
-      }
-    }
-
-    await refreshAll();
-    if (!errors.length) {
-      ElMessage.success(t("msg.batchCreateSuccess", { count: success }));
-      batchVisible.value = false;
-      return;
-    }
-
-    ElMessage.warning(t("msg.batchPartialSuccess", { success, failed: errors.length }));
-    await ElMessageBox.alert(`<pre style="white-space: pre-wrap">${errors.join("\n")}</pre>`, t("msg.batchCreateFailedDetail"), {
-      dangerouslyUseHTMLString: true,
-      confirmButtonText: t("btn.gotIt"),
-    });
-  } catch (err) {
-    ElMessage.error(parseErr(err));
-  }
-}
-
 async function submitForm() {
   try {
     const payload = buildPayload();
@@ -1662,239 +1190,7 @@ async function retryFailedUploads(task) {
   }
 }
 
-async function showDetail(taskOrID) {
-  try {
-    const id = typeof taskOrID === "string" ? taskOrID : taskOrID.id;
-    const [task, cp, evs, fs, replication] = await Promise.all([
-      getTask(id),
-      getCheckpoint(id),
-      listEvents(id, 120),
-      listFiles(id, 80),
-      getReplication(id),
-    ]);
-    const [leaseResult, runsResult] = await Promise.allSettled([
-      getTaskLease(id),
-      listTaskRuns(id, RUN_HISTORY_LIMIT),
-    ]);
-    const lease = leaseResult.status === "fulfilled" ? leaseResult.value : null;
-    const runs = runsResult.status === "fulfilled" ? runsResult.value : [];
 
-    detailTask.value = task;
-    detailReplication.value = replication;
-    detailLease.value = lease;
-    detailRuns.value = Array.isArray(runs) ? runs : [];
-    runHistoryLimit.value = RUN_HISTORY_LIMIT;
-    checkpoint.value = cp;
-    events.value = evs || [];
-    files.value = fs || [];
-    if (lease) {
-      cluster.leaseByTask[id] = lease;
-    }
-    detailVisible.value = true;
-  } catch (err) {
-    ElMessage.error(parseErr(err));
-  }
-}
-
-function sourceLabel(task) {
-  return `${task?.source?.host || "-"}:${task?.source?.port || "-"}`;
-}
-
-function ownerWorkerLabel(task) {
-  const leaseWorker = cluster.leaseByTask[task?.id]?.owner_worker_id;
-  return task?.owner_worker_id || leaseWorker || "--";
-}
-
-function leaseRiskTagType(task, leaseOverride = null) {
-  const lease = leaseOverride || cluster.leaseByTask[task?.id];
-  const owner = lease?.owner_worker_id || task?.owner_worker_id;
-  const epoch = Number(lease?.epoch ?? task?.epoch ?? 0);
-  if (!owner || epoch <= 0) return "info";
-
-  const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
-  if (updatedMs <= 0) return "warning";
-  const stale = nowRefMs() - updatedMs > LEASE_RISK_SECONDS * 1000;
-  return stale ? "warning" : "success";
-}
-
-function leaseRiskLabel(task, leaseOverride = null) {
-  const lease = leaseOverride || cluster.leaseByTask[task?.id];
-  const owner = lease?.owner_worker_id || task?.owner_worker_id;
-  const epoch = Number(lease?.epoch ?? task?.epoch ?? 0);
-  if (!owner || epoch <= 0) return "--";
-
-  const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
-  if (updatedMs <= 0) return t("lease.risk");
-  const stale = nowRefMs() - updatedMs > LEASE_RISK_SECONDS * 1000;
-  return stale ? t("lease.risk") : t("lease.normal");
-}
-
-function stateTagType(state) {
-  if (state === "RUNNING") return "success";
-  if (state === "RETRY_BACKOFF") return "warning";
-  if (state === "FAILED") return "danger";
-  return "info";
-}
-
-function replicationTagType(status) {
-  if (status === "NORMAL") return "success";
-  if (status === "DELAYED") return "warning";
-  if (status === "ABNORMAL") return "danger";
-  return "info";
-}
-
-function formatDelay(delaySeconds, hasProgress) {
-  if (!hasProgress || delaySeconds === undefined || delaySeconds === null) {
-    return "--";
-  }
-  return String(delaySeconds);
-}
-
-function formatTs(ts) {
-  if (!ts) return "--";
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return "--";
-  return date.toLocaleString(currentLocale.value);
-}
-
-function toTimeMs(ts) {
-  if (!ts) return 0;
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return 0;
-  return date.getTime();
-}
-
-function nowRefMs() {
-  const dashboardMs = toTimeMs(dashboard.generated_at);
-  return dashboardMs > 0 ? dashboardMs : Date.now();
-}
-
-function formatCheckpoint(cp) {
-  if (!cp) return t("detail.noCheckpoint");
-  const file = cp.file || cp.File || cp.file_name || cp.FileName || cp.binlog_file || cp.BinlogFile || "-";
-  const pos = cp.pos ?? cp.Pos ?? cp.position ?? cp.Position ?? cp.binlog_pos ?? cp.BinlogPos ?? 0;
-  return `${file}:${pos}`;
-}
-
-function formatReplicationReason(rep) {
-  if (!rep) return "--";
-  const reasonMap = {
-    NO_PROGRESS: t("replication.noProgress"),
-    DELAY_EXCEEDS_THRESHOLD: t("replication.delayExceedsThreshold"),
-    RUNNER_ERROR: t("replication.runnerError"),
-    TASK_STATE_ERROR: t("replication.taskStateError"),
-  };
-  const rawErr = rep.last_error || rep.error || rep.err || rep.message || "";
-  if (rawErr) {
-    const label = reasonMap[rep.reason] || rep.reason || t("replication.runnerError");
-    return `${label}: ${rawErr}`;
-  }
-  if (rep.reason) return reasonMap[rep.reason] || rep.reason;
-  if (rep.status === "DELAYED") return t("replication.delayExceedsThreshold");
-  if (rep.status === "ABNORMAL") return t("replication.abnormalNoDetail");
-  return "--";
-}
-
-function hasReplicationReason(rep) {
-  return formatReplicationReason(rep) !== "--";
-}
-
-function parseErr(err) {
-  if (typeof err?.response?.data === "string") return err.response.data;
-  if (err?.response?.data) return JSON.stringify(err.response.data);
-  return err?.message || String(err);
-}
-
-function makeClusterKey(name, host, port, lineNo = 0) {
-  const raw = `${name}-${host}-${port}-${lineNo}`.toLowerCase();
-  const key = raw
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  return key || `cluster-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-}
-
-function validateClusterKey(clusterKeyRaw) {
-  const clusterKey = String(clusterKeyRaw || "").trim();
-  if (!clusterKey) {
-    return t("validation.clusterKeyEmpty");
-  }
-  if (
-    clusterKey.includes("/") ||
-    clusterKey.includes("\\") ||
-    clusterKey.includes("..") ||
-    !CLUSTER_KEY_PATTERN.test(clusterKey)
-  ) {
-    return t("validation.clusterKeyInvalid");
-  }
-  return "";
-}
-
-function validateTaskPayload(payload) {
-  const name = String(payload?.name || "").trim();
-  if (!name || name.length > NAME_MAX_LENGTH) {
-    return t("validation.taskNameInvalid");
-  }
-
-  const clusterKeyErr = validateClusterKey(payload?.cluster_key);
-  if (clusterKeyErr) {
-    return clusterKeyErr;
-  }
-
-  const source = payload?.source || {};
-  const host = String(source.host || "").trim();
-  const user = String(source.user || "").trim();
-  const flavorRaw = String(source.flavor || "").trim();
-  const flavor = flavorRaw || "mysql";
-  const port = Number(source.port || 0);
-  const serverID = Number(source.server_id || 0);
-
-  if (!host || host.length > SOURCE_HOST_MAX_LENGTH || hasWhitespace(host)) {
-    return t("validation.hostInvalid");
-  }
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return t("validation.portInvalid");
-  }
-  if (!user || user.length > SOURCE_USER_MAX_LENGTH || hasWhitespace(user)) {
-    return t("validation.userInvalid");
-  }
-  if (!flavor || flavor.length > SOURCE_FLAVOR_MAX_LENGTH || !CLUSTER_KEY_PATTERN.test(flavor)) {
-    return t("validation.flavorInvalid");
-  }
-  if (!Number.isInteger(serverID) || serverID < 0 || serverID > 4294967295) {
-    return t("validation.serverIdInvalid");
-  }
-
-  const start = payload?.start || {};
-  const mode = String(start.mode || "").trim();
-  if (!["LATEST", "FILE_POS", "GTID"].includes(mode)) {
-    return t("validation.startModeInvalid");
-  }
-  if (mode === "FILE_POS") {
-    const file = String(start.file || "").trim();
-    const pos = Number(start.pos || 0);
-    if (!file || file.length > START_FILE_MAX_LENGTH || !Number.isInteger(pos) || pos <= 0) {
-      return t("validation.filePosRequired");
-    }
-  }
-  if (mode === "GTID") {
-    const gtidSet = String(start.gtid_set || "").trim();
-    if (!gtidSet) {
-      return t("validation.gtidSetRequired");
-    }
-  }
-
-  const retentionDays = Number(payload?.storage?.retention_days || 0);
-  if (!Number.isInteger(retentionDays) || retentionDays < RETENTION_DAYS_MIN || retentionDays > RETENTION_DAYS_MAX) {
-    return t("validation.retentionInvalid");
-  }
-
-  return "";
-}
-
-function hasWhitespace(text) {
-  return /\s/.test(String(text || ""));
-}
 </script>
 
 <style scoped>
