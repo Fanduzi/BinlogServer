@@ -18,3 +18,4 @@ tmp/e2e/data/
 .claude/
 /*.pen
 /.codex/
+/.playwright-mcp/
