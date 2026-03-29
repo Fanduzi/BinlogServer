@@ -287,15 +287,15 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
           <div class="cluster-overview-grid">
             <div class="cluster-stat-cell">
               <p>{{ $t('cluster.taskCount') }}</p>
-              <strong>{{ cluster.overview.task_count }}</strong>
+              <strong class="cluster-stat-value">{{ cluster.overview.task_count }}</strong>
             </div>
             <div class="cluster-stat-cell">
               <p>{{ $t('cluster.runningTaskCount') }}</p>
-              <strong>{{ cluster.overview.running_task_count }}</strong>
+              <strong class="cluster-stat-value">{{ cluster.overview.running_task_count }}</strong>
             </div>
             <div class="cluster-stat-cell">
               <p>{{ $t('cluster.leasedTaskCount') }}</p>
-              <strong>{{ cluster.overview.leased_task_count }}</strong>
+              <strong class="cluster-stat-value">{{ cluster.overview.leased_task_count }}</strong>
             </div>
           </div>
 
@@ -306,7 +306,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
               class="cluster-worker-item"
             >
               <div class="cluster-worker-head">
-                <strong>{{ worker.worker_id }}</strong>
+                <strong class="cluster-worker-id">{{ worker.worker_id }}</strong>
                 <el-tag size="small" :type="worker.online ? 'success' : 'info'">
                   {{ worker.online ? $t('cluster.workerOnline') : $t('cluster.workerOffline') }}
                 </el-tag>
@@ -349,7 +349,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
               class="source-cell"
             >
               <p class="source-name">{{ item.host }}:{{ item.port }}</p>
-              <p class="source-stats">
+              <p class="source-stats source-stats--summary">
                 {{ $t('source.stats', { tasks: item.task_count, running: item.running, normal: item.normal, delayed: item.delayed, abnormal: item.abnormal }) }}
               </p>
             </div>
@@ -397,10 +397,10 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
             @row-click="onRowClick"
           >
             <el-table-column :label="$t('table.id')" width="70">
-              <template #default="{ row }"><span :data-testid="`task-row-${row.task.id}`">{{ row.task.id }}</span></template>
+              <template #default="{ row }"><span class="task-id-cell" :data-testid="`task-row-${row.task.id}`">{{ row.task.id }}</span></template>
             </el-table-column>
             <el-table-column :label="$t('table.name')" min-width="180">
-              <template #default="{ row }">{{ row.task.name }}</template>
+              <template #default="{ row }"><span class="task-name-cell">{{ row.task.name }}</span></template>
             </el-table-column>
             <el-table-column :label="$t('table.taskState')" width="140">
               <template #default="{ row }">
@@ -433,7 +433,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
               </template>
             </el-table-column>
             <el-table-column :label="$t('table.delay')" width="100">
-              <template #default="{ row }">{{ formatDelay(row.replication.delay_seconds, row.replication.has_progress) }}</template>
+              <template #default="{ row }"><span class="delay-cell">{{ formatDelay(row.replication.delay_seconds, row.replication.has_progress) }}</span></template>
             </el-table-column>
             <el-table-column :label="$t('table.source')" min-width="170">
               <template #default="{ row }">{{ sourceLabel(row.task) }}</template>
@@ -586,7 +586,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
       </template>
     </el-dialog>
 
-    <el-drawer v-model="detailVisible" data-testid="task-drawer" size="66%" :title="detailTask ? `${$t('detail.center')} #${detailTask.id}` : $t('detail.center')">
+    <el-drawer v-model="detailVisible" class="task-detail-drawer" data-testid="task-drawer" size="66%" :title="detailTask ? `${$t('detail.center')} #${detailTask.id}` : $t('detail.center')">
       <template v-if="detailTask">
         <div class="detail-stack">
           <section class="detail-panel detail-panel--hero">
@@ -719,8 +719,8 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
     </el-drawer>
 
     <!-- Settings Dialog -->
-    <el-dialog v-model="settingsVisible" data-testid="settings-dialog" :title="$t('settings.title')" width="480px">
-      <el-form label-width="100px">
+    <el-dialog v-model="settingsVisible" class="settings-dialog" data-testid="settings-dialog" :title="$t('settings.title')" width="480px">
+      <el-form class="settings-form" label-width="100px">
         <el-form-item :label="$t('settings.language')">
           <el-select v-model="currentLocale" @change="onLocaleChange">
             <el-option :label="$t('settings.langZhCN')" value="zh-CN" />
@@ -1881,14 +1881,14 @@ function hasWhitespace(text) {
 @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap");
 
 .page-shell {
-  --bg: #fafafa;
+  --bg: #f5f5f4;
   --surface: #ffffff;
-  --surface-soft: #fcfcfc;
-  --line: #ebebeb;
-  --line-strong: #dbdbdb;
-  --text: #111111;
-  --sub: #666666;
-  --accent: #111111;
+  --surface-soft: #f8f8f7;
+  --line: #e7e5e4;
+  --line-strong: #d6d3d1;
+  --text: #111827;
+  --sub: #6b7280;
+  --accent: #111827;
 
   max-width: 1720px;
   margin: 0 auto;
@@ -1896,11 +1896,7 @@ function hasWhitespace(text) {
   padding: 24px 24px 24px 252px;
   font-family: "Geist", "SF Pro Display", "PingFang SC", sans-serif;
   color: var(--text);
-  background:
-    radial-gradient(circle at 0% 0%, #ffffff 0, #fafafa 42%),
-    linear-gradient(90deg, rgba(0, 0, 0, 0.015) 1px, transparent 1px),
-    linear-gradient(rgba(0, 0, 0, 0.015) 1px, transparent 1px);
-  background-size: auto, 28px 28px, 28px 28px;
+  background: linear-gradient(180deg, #fafaf9 0%, var(--bg) 100%);
 }
 
 .page-shell--menu-collapsed {
@@ -1914,22 +1910,23 @@ function hasWhitespace(text) {
 .hero {
   display: flex;
   justify-content: space-between;
-  align-items: flex-end;
-  gap: 16px;
-  margin-bottom: 18px;
+  align-items: flex-start;
+  gap: 20px;
+  margin-bottom: 14px;
+  padding-bottom: 6px;
   animation: rise-fade 0.36s ease both;
 }
 
 .hero-copy {
-  max-width: 900px;
+  max-width: 760px;
 }
 
 .kicker {
-  margin: 0;
-  color: var(--sub);
-  letter-spacing: 0.12em;
-  font-size: 11px;
-  font-weight: 600;
+  margin: 0 0 2px;
+  color: #6b7280;
+  letter-spacing: 0.14em;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .kicker i {
@@ -1937,22 +1934,27 @@ function hasWhitespace(text) {
 }
 
 h1 {
-  margin: 6px 0 4px;
-  font-size: 40px;
-  line-height: 1.06;
+  margin: 0 0 6px;
+  font-size: 30px;
+  line-height: 1.08;
   letter-spacing: -0.03em;
-  font-weight: 700;
+  font-weight: 640;
 }
 
 .hero-desc {
   margin: 0;
-  color: var(--sub);
-  max-width: 560px;
+  color: #6b7280;
+  max-width: 520px;
+  font-size: 14px;
+  line-height: 1.55;
 }
 
 .hero-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
+  padding-top: 2px;
 }
 
 .hero-actions i {
@@ -1960,7 +1962,8 @@ h1 {
 }
 
 .hero-actions :deep(.el-button) {
-  height: 36px;
+  height: 34px;
+  padding-inline: 13px;
   font-weight: 600;
 }
 
@@ -1968,75 +1971,101 @@ h1 {
   display: grid;
   grid-template-columns: repeat(6, minmax(130px, 1fr));
   gap: 10px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .metric-card {
   border: 1px solid var(--line);
-  background: var(--surface);
+  background: #fcfcfb;
   border-radius: 12px;
-  padding: 12px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  padding: 13px 14px;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.025);
   animation: rise-fade 0.42s ease both;
   cursor: pointer;
   transition:
-    transform 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background-color 0.18s ease;
 }
 
 .metric-card p {
   margin: 0;
-  color: var(--sub);
+  color: #6b7280;
   font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
 .metric-card i {
-  color: #525252;
+  color: #9ca3af;
 }
 
 .metric-card strong {
   display: block;
-  margin-top: 10px;
-  font-size: 32px;
+  margin-top: 12px;
+  font-size: 28px;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
+  color: #111827;
   font-variant-numeric: tabular-nums;
 }
 
 .metric-card:hover {
   transform: translateY(-1px);
-  border-color: var(--line-strong);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+  border-color: #d6d3d1;
+  box-shadow: 0 6px 14px rgba(17, 24, 39, 0.04);
+}
+
+.metric-card[data-active='true'] {
+  border-color: #cbd5e1;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.14);
 }
 
 .metric-card--danger {
-  border-color: #fecaca;
-  background: linear-gradient(180deg, #fff8f8 0%, #fff 100%);
+  border-color: #efcaca;
+  background: #fff8f8;
 }
 
 .metric-card--danger p,
-.metric-card--danger i,
+.metric-card--danger i {
+  color: #b42318;
+}
+
 .metric-card--danger strong {
   color: #991b1b;
 }
 
 .metric-card--warning {
-  border-color: #fde68a;
-  background: linear-gradient(180deg, #fffdf2 0%, #fff 100%);
+  border-color: #efdfa8;
+  background: #fffdf7;
 }
 
 .metric-card--warning p,
-.metric-card--warning i,
+.metric-card--warning i {
+  color: #9a6700;
+}
+
 .metric-card--warning strong {
   color: #92400e;
 }
 
 .metric-card--success {
-  border-color: #bbf7d0;
+  border-color: #e3e8e3;
+  background: #fbfcfb;
+}
+
+.metric-card--success p,
+.metric-card--success i {
+  color: #6b7280;
+}
+
+.metric-card--success strong {
+  color: #166534;
 }
 
 .workspace {
@@ -2056,13 +2085,13 @@ h1 {
   bottom: 0;
   width: 228px;
   overflow: auto;
-  border-right: 1px solid #e2e8f0;
+  border-right: 1px solid #e5e7eb;
   border-radius: 0;
-  background: #f7f8fa;
-  padding: 10px 6px 8px;
+  background: linear-gradient(180deg, #f7f7f6 0%, #f3f4f6 100%);
+  padding: 14px 10px 10px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 5px;
 }
 
 .nav-pane--collapsed {
@@ -2075,12 +2104,13 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 4px;
-  margin-bottom: 2px;
+  margin-bottom: 6px;
+  padding: 0 2px;
 }
 
 .nav-foot {
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 10px;
 }
 
 .nav-pane--collapsed .nav-head {
@@ -2091,26 +2121,27 @@ h1 {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #0f172a;
+  color: var(--text);
   min-height: 30px;
 }
 
 .nav-brand-icon {
   width: 24px;
   height: 24px;
-  border-radius: 6px;
-  background: #e2e8f0;
+  border-radius: 7px;
+  background: #e7e5e4;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #334155;
+  color: #52525b;
   font-size: 12px;
 }
 
 .nav-brand-text {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #374151;
 }
 
 .nav-pane--collapsed .nav-brand-text {
@@ -2120,11 +2151,17 @@ h1 {
 .nav-collapse-btn {
   border: 0;
   background: transparent;
-  color: #475569;
+  color: #6b7280;
   border-radius: 8px;
   width: 30px;
   height: 30px;
   cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.nav-collapse-btn:hover {
+  background: rgba(255, 255, 255, 0.6);
+  color: #374151;
 }
 
 .nav-collapse-btn--dock {
@@ -2145,46 +2182,55 @@ h1 {
 }
 
 .nav-item {
-  border: 0;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   background: transparent;
-  color: #0f172a;
+  color: #374151;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 6px 8px;
-  font-size: 14px;
-  font-weight: 500;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 550;
   cursor: pointer;
   transition:
     background 0.15s ease,
-    color 0.15s ease;
+    color 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
 }
 
 .nav-item span {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 
 .nav-item i {
-  color: #64748b;
+  color: #9ca3af;
 }
 
 .nav-item--active {
-  background: #e9edf3;
-  color: #0b1220;
+  background: rgba(255, 255, 255, 0.88);
+  border-color: rgba(148, 163, 184, 0.2);
+  color: #111827;
   font-weight: 600;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.03);
+}
+
+.nav-item--active i {
+  color: #4b5563;
 }
 
 .nav-item:hover {
-  background: #edf1f6;
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(229, 231, 235, 0.9);
 }
 
 .nav-pane--collapsed .nav-item {
-  width: 38px;
-  height: 38px;
+  width: 40px;
+  height: 40px;
   justify-content: center;
   padding: 0;
 }
@@ -2201,7 +2247,7 @@ h1 {
 
 .nav-badge {
   font-family: "IBM Plex Mono", monospace;
-  color: #94a3b8;
+  color: #9ca3af;
   font-size: 11px;
 }
 
@@ -2216,22 +2262,23 @@ h1 {
   border-radius: 14px;
   border: 1px solid var(--line);
   background: var(--surface);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.03);
   transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease,
-    border-color 0.2s ease;
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease;
   animation: rise-fade 0.5s ease both;
 }
 
 .panel-card:hover {
   transform: translateY(-1px);
   border-color: var(--line-strong);
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 6px 16px rgba(17, 24, 39, 0.04);
 }
 
 .panel-card--secondary {
-  opacity: 0.98;
+  background: #fcfcfb;
 }
 
 .panel-title {
@@ -2309,16 +2356,42 @@ h1 {
 .filter-summary {
   color: var(--sub);
   font-size: 12px;
+  font-family: "IBM Plex Mono", monospace;
+  letter-spacing: 0.01em;
 }
 
 .switch-row {
-  border: 1px dashed var(--line-strong);
-  border-radius: 10px;
-  padding: 10px;
+  border: 1px dashed #d6d3d1;
+  border-radius: 12px;
+  padding: 12px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   color: var(--sub);
+  background: #fcfcfb;
+}
+
+.filter-chip-row :deep(.el-button) {
+  min-height: 32px;
+  padding-inline: 12px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.filter-stack :deep(.el-input__wrapper),
+.filter-stack :deep(.el-select__wrapper) {
+  min-height: 38px;
+  background: #fcfcfb;
+}
+
+.filter-stack :deep(.el-switch__core) {
+  border-color: #d6d3d1;
+  background: #e7e5e4;
+}
+
+.filter-stack :deep(.el-switch.is-checked .el-switch__core) {
+  border-color: #111827;
+  background: #111827;
 }
 
 .source-board {
@@ -2335,23 +2408,27 @@ h1 {
 
 .cluster-stat-cell {
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px;
-  background: var(--surface-soft);
+  border-radius: 12px;
+  padding: 12px 12px 14px;
+  background: #fcfcfb;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
 .cluster-stat-cell p {
   margin: 0;
   color: var(--sub);
   font-size: 12px;
+  letter-spacing: 0.01em;
 }
 
-.cluster-stat-cell strong {
-  margin-top: 8px;
+.cluster-stat-value {
+  margin-top: 10px;
   display: block;
-  font-size: 26px;
+  font-size: 28px;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
+  color: #111827;
+  font-family: "IBM Plex Mono", monospace;
 }
 
 .cluster-worker-list {
@@ -2364,8 +2441,9 @@ h1 {
 .cluster-worker-item {
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 10px;
-  background: #fff;
+  padding: 12px;
+  background: #fcfcfb;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.02);
 }
 
 .cluster-worker-head {
@@ -2373,6 +2451,12 @@ h1 {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+}
+
+.cluster-worker-id {
+  color: #111827;
+  font-size: 13px;
+  letter-spacing: -0.01em;
 }
 
 .cluster-worker-item p {
@@ -2383,28 +2467,32 @@ h1 {
 
 .cluster-worker-time {
   font-family: "IBM Plex Mono", monospace;
+  color: #6b7280;
 }
 
 .overview-note {
-  margin-top: 10px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 10px;
-  padding: 10px;
+  margin-top: 12px;
+  border: 1px dashed #d6d3d1;
+  border-radius: 12px;
+  padding: 12px;
   color: var(--sub);
   font-size: 12px;
+  background: #fcfcfb;
 }
 
 .source-cell {
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 10px 12px;
-  background: var(--surface-soft);
+  padding: 12px;
+  background: #fcfcfb;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
 .source-name {
   margin: 0;
   font-weight: 600;
-  color: #111;
+  color: #111827;
+  line-height: 1.35;
 }
 
 .source-stats {
@@ -2413,30 +2501,68 @@ h1 {
   color: var(--sub);
 }
 
-.table-card :deep(.el-table th.el-table__cell) {
-  background: #fafafa;
-  color: #3f3f46;
-  font-weight: 600;
-}
-
-.table-card :deep(.el-table td.el-table__cell),
-.table-card :deep(.el-table th.el-table__cell) {
-  border-bottom-color: var(--line);
-  padding-top: 10px;
-  padding-bottom: 10px;
+.source-stats--summary {
+  line-height: 1.6;
 }
 
 .table-card :deep(.el-table) {
   border-radius: 12px;
   overflow: hidden;
+  --el-table-border-color: var(--line);
+  --el-table-row-hover-bg-color: #fafaf9;
+  --el-table-header-bg-color: #f8f8f7;
+  --el-table-tr-bg-color: #ffffff;
+}
+
+.table-card :deep(.el-table th.el-table__cell) {
+  background: #f8f8f7;
+  color: #4b5563;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.table-card :deep(.el-table td.el-table__cell),
+.table-card :deep(.el-table th.el-table__cell) {
+  border-bottom-color: var(--line);
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+
+.table-card :deep(.el-table .cell) {
+  line-height: 1.45;
+}
+
+.table-card :deep(.el-table td.el-table__cell) {
+  color: #374151;
+}
+
+.task-id-cell {
+  color: #6b7280;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+}
+
+.table-card :deep(.el-table__inner-wrapper::before) {
+  background-color: var(--line);
 }
 
 .table-card :deep(.el-table__body tr:hover > td.el-table__cell) {
-  background: #fcfcfc;
+  background: #fafaf9;
 }
 
 .table-card :deep(.el-table__body tr) {
   cursor: pointer;
+}
+
+.task-name-cell {
+  font-weight: 600;
+  color: #111827;
+}
+
+.delay-cell {
+  font-family: "IBM Plex Mono", monospace;
+  color: #374151;
 }
 
 .replication-cell {
@@ -2446,14 +2572,14 @@ h1 {
 }
 
 .reason-tip-icon {
-  color: #8b8b8b;
+  color: #9ca3af;
   font-size: 12px;
   cursor: help;
   transition: color 0.15s ease;
 }
 
 .reason-tip-icon:hover {
-  color: #111;
+  color: #4b5563;
 }
 
 .action-row {
@@ -2470,6 +2596,19 @@ h1 {
 
 .table-card :deep(.action-row .el-button + .el-button) {
   margin-left: 0;
+}
+
+.table-card :deep(.action-btn) {
+  border-color: transparent;
+  background: transparent;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.table-card :deep(.action-btn:hover) {
+  border-color: var(--line);
+  background: #ffffff;
+  color: #111827;
 }
 
 .pager-wrap {
@@ -2525,20 +2664,29 @@ h1 {
 
 .detail-panel--hero {
   border-color: var(--line-strong);
-  background: linear-gradient(180deg, #fcfcfc 0%, #fff 100%);
+  background: linear-gradient(180deg, #fdfdfc 0%, #fafaf9 100%);
+  padding: 14px;
 }
 
 .detail-hero {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: 18px;
   flex-wrap: wrap;
 }
 
+.detail-hero h3 {
+  margin-bottom: 0;
+  font-size: 20px;
+  color: #111827;
+}
+
 .detail-hero-kicker {
-  color: var(--sub);
-  font-size: 12px;
-  margin-bottom: 6px;
+  color: #6b7280;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+  margin-bottom: 8px;
 }
 
 .detail-hero-meta {
@@ -2551,22 +2699,43 @@ h1 {
   font-size: 12px;
 }
 
+.detail-hero-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+}
+
 .detail-action-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: flex-start;
+  padding-top: 2px;
+}
+
+.detail-action-row :deep(.el-button) {
+  min-width: 88px;
+  min-height: 34px;
+}
+
+.detail-action-row :deep(.el-button--danger) {
+  margin-left: 8px;
 }
 
 .detail-grid--summary {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .detail-panel {
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #fff;
+  background: var(--surface);
   padding: 12px;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.02);
 }
 
 .detail-panel h3 {
@@ -2576,6 +2745,42 @@ h1 {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.detail-panel-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.detail-panel :deep(.el-table) {
+  border-radius: 12px;
+  overflow: hidden;
+  --el-table-border-color: var(--line);
+  --el-table-header-bg-color: #f8f8f7;
+  --el-table-row-hover-bg-color: #fafaf9;
+}
+
+.detail-panel :deep(.el-table th.el-table__cell) {
+  background: #f8f8f7;
+  color: #52525b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detail-panel :deep(.el-table td.el-table__cell),
+.detail-panel :deep(.el-table th.el-table__cell) {
+  border-bottom-color: var(--line);
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+.detail-panel :deep(.el-timeline-item__node) {
+  background-color: #d4d4d8;
+}
+
+.detail-panel :deep(.el-timeline-item__tail) {
+  border-left-color: #e7e5e4;
 }
 
 .detail-grid {
@@ -2588,7 +2793,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px;
-  background: #fff;
+  background: #fdfdfc;
 }
 
 .detail-item span {
@@ -2604,12 +2809,91 @@ h1 {
   word-break: break-word;
 }
 
+.form-hint {
+  margin-top: 6px;
+  color: #71717a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 :deep(.el-card__header) {
   border-bottom-color: var(--line);
 }
 
 :deep(.el-card__body) {
   padding: 14px;
+}
+
+.task-detail-drawer {
+  background: #fcfcfb;
+}
+
+.task-detail-drawer :deep(.el-drawer__header) {
+  margin-bottom: 0;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-detail-drawer :deep(.el-drawer__title) {
+  color: #111827;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.task-detail-drawer :deep(.el-drawer__body) {
+  padding: 16px 20px 20px;
+}
+
+.settings-dialog {
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.settings-dialog :deep(.el-dialog__header) {
+  margin-right: 0;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #fcfcfb;
+}
+
+.settings-dialog :deep(.el-dialog__title) {
+  color: #111827;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.settings-dialog :deep(.el-dialog__body) {
+  padding: 18px 20px 14px;
+}
+
+.settings-form {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-dialog :deep(.el-form-item) {
+  margin-bottom: 16px;
+}
+
+.settings-dialog :deep(.el-form-item:last-child) {
+  margin-bottom: 0;
+}
+
+.settings-dialog :deep(.el-form-item__label) {
+  color: #52525b;
+  font-weight: 600;
+}
+
+.settings-dialog :deep(.el-input__wrapper),
+.settings-dialog :deep(.el-select__wrapper) {
+  min-height: 40px;
+  background: #fcfcfb;
+}
+
+.settings-dialog :deep(.el-dialog__footer) {
+  padding: 12px 20px 18px;
+  border-top: 1px solid var(--line);
+  background: #fcfcfb;
 }
 
 :deep(.el-input__wrapper),
@@ -2621,37 +2905,43 @@ h1 {
   box-shadow: none;
 }
 
+:deep(.el-input__wrapper:hover),
+:deep(.el-select__wrapper:hover),
+:deep(.el-input-number .el-input__wrapper:hover) {
+  border-color: var(--line-strong);
+}
+
 :deep(.el-input__wrapper.is-focus),
 :deep(.el-select__wrapper.is-focused),
 :deep(.el-input-number .el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px #111111 inset;
+  box-shadow: 0 0 0 1px #111827 inset;
 }
 
 :deep(.el-button) {
   border-radius: 10px;
   font-weight: 500;
 }
-
 :deep(.el-button--primary) {
-  background: #111;
-  border-color: #111;
+  background: #111827;
+  border-color: #111827;
   color: #fff;
 }
 
 :deep(.el-button--primary:hover) {
-  background: #242424;
-  border-color: #242424;
+  background: #1f2937;
+  border-color: #1f2937;
 }
 
 :deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger)) {
   border-color: var(--line);
   background: #fff;
-  color: #2f2f2f;
+  color: #374151;
 }
 
 :deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):hover) {
-  border-color: #bdbdbd;
-  color: #111;
+  border-color: var(--line-strong);
+  background: #fafaf9;
+  color: #111827;
 }
 
 .table-card :deep(.action-btn) {
@@ -2683,32 +2973,38 @@ h1 {
   color: #991b1b;
 }
 
+.metric-card:focus-visible {
+  outline: 2px solid #111827;
+  outline-offset: 2px;
+}
+
 :deep(.el-tag) {
   border-radius: 999px;
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 :deep(.el-tag--success) {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
+  background: #f4fbf6;
+  border-color: #cfe8d6;
   color: #166534;
 }
 
 :deep(.el-tag--warning) {
-  background: #fffbeb;
-  border-color: #fde68a;
+  background: #fffaf0;
+  border-color: #efd99a;
   color: #92400e;
 }
 
 :deep(.el-tag--danger) {
-  background: #fef2f2;
-  border-color: #fecaca;
+  background: #fff4f4;
+  border-color: #f1c7c7;
   color: #991b1b;
 }
 
 :deep(.el-tag--info) {
-  background: #f4f4f5;
-  border-color: #e4e4e7;
+  background: #f5f5f4;
+  border-color: #e7e5e4;
   color: #52525b;
 }
 
@@ -2739,7 +3035,7 @@ h1 {
   }
 
   h1 {
-    font-size: 32px;
+    font-size: 28px;
   }
 
   .hero {
@@ -2759,7 +3055,7 @@ h1 {
     overflow: visible;
     border-right: 1px solid var(--line);
     border-radius: 12px;
-    background: #f8fafc;
+    background: linear-gradient(180deg, rgba(250, 250, 249, 0.96) 0%, rgba(244, 244, 243, 0.98) 100%);
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;
