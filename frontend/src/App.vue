@@ -10,187 +10,37 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
     <div class="orb orb-a" />
     <div class="orb orb-b" />
 
-    <header class="hero">
-      <div class="hero-copy">
-        <p class="kicker"><i class="fa-solid fa-wave-square" /> BINLOG SERVER</p>
-        <h1>{{ $t('app.title') }}</h1>
-        <p class="hero-desc">
-          {{ $t('app.description') }}
-        </p>
-      </div>
-      <div class="hero-actions">
-        <el-button type="primary" @click="openCreate">
-          <i class="fa-solid fa-plus" /> {{ $t('btn.createTask') }}
-        </el-button>
-        <el-button @click="openBatchCreate">
-          <i class="fa-solid fa-layer-group" /> {{ $t('btn.batchCreate') }}
-        </el-button>
-        <el-button :loading="loading" @click="refreshAll">
-          <i class="fa-solid fa-rotate" /> {{ $t('btn.refresh') }}
-        </el-button>
-        <el-button @click="openSettings">
-          <i class="fa-solid fa-gear" /> {{ $t('btn.settings') }}
-        </el-button>
-      </div>
-    </header>
+    <AppHeader
+      :loading="loading"
+      @create="openCreate"
+      @batch-create="openBatchCreate"
+      @refresh="refreshAll"
+      @settings="openSettings"
+    />
 
-    <section class="metric-grid">
-      <article
-        class="metric-card metric-card--danger"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-abnormal"
-        :data-active="activeQuickFilter === 'abnormal'"
-        @click="applyQuickFilter('abnormal')"
-        @keydown.enter.prevent="applyQuickFilter('abnormal')"
-        @keydown.space.prevent="applyQuickFilter('abnormal')"
-      >
-        <p><i class="fa-solid fa-triangle-exclamation" /> {{ $t('metrics.abnormal') }}</p>
-        <strong data-testid="kpi-abnormal-value">{{ dashboard.summary.abnormal }}</strong>
-      </article>
-      <article
-        class="metric-card metric-card--danger"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-failed"
-        :data-active="activeQuickFilter === 'failed'"
-        @click="applyQuickFilter('failed')"
-        @keydown.enter.prevent="applyQuickFilter('failed')"
-        @keydown.space.prevent="applyQuickFilter('failed')"
-      >
-        <p><i class="fa-solid fa-bug" /> {{ $t('metrics.failed') }}</p>
-        <strong data-testid="kpi-failed-value">{{ dashboard.summary.failed }}</strong>
-      </article>
-      <article
-        class="metric-card metric-card--warning"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-delayed"
-        :data-active="activeQuickFilter === 'delayed'"
-        @click="applyQuickFilter('delayed')"
-        @keydown.enter.prevent="applyQuickFilter('delayed')"
-        @keydown.space.prevent="applyQuickFilter('delayed')"
-      >
-        <p><i class="fa-solid fa-hourglass-half" /> {{ $t('metrics.delayed') }}</p>
-        <strong data-testid="kpi-delayed-value">{{ dashboard.summary.delayed }}</strong>
-      </article>
-      <article
-        class="metric-card"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-running"
-        :data-active="activeQuickFilter === 'running'"
-        @click="applyQuickFilter('running')"
-        @keydown.enter.prevent="applyQuickFilter('running')"
-        @keydown.space.prevent="applyQuickFilter('running')"
-      >
-        <p><i class="fa-solid fa-play" /> {{ $t('metrics.running') }}</p>
-        <strong>{{ dashboard.summary.running }}</strong>
-      </article>
-      <article
-        class="metric-card"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-all"
-        :data-active="activeQuickFilter === 'all'"
-        @click="applyQuickFilter('all')"
-        @keydown.enter.prevent="applyQuickFilter('all')"
-        @keydown.space.prevent="applyQuickFilter('all')"
-      >
-        <p><i class="fa-solid fa-layer-group" /> {{ $t('metrics.total') }}</p>
-        <strong>{{ dashboard.summary.total }}</strong>
-      </article>
-      <article
-        class="metric-card metric-card--success"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-normal"
-        :data-active="activeQuickFilter === 'normal'"
-        @click="applyQuickFilter('normal')"
-        @keydown.enter.prevent="applyQuickFilter('normal')"
-        @keydown.space.prevent="applyQuickFilter('normal')"
-      >
-        <p><i class="fa-solid fa-circle-check" /> {{ $t('metrics.normal') }}</p>
-        <strong>{{ dashboard.summary.normal }}</strong>
-      </article>
-    </section>
+    <MetricGrid
+      :summary="dashboard.summary"
+      :active-quick-filter="activeQuickFilter"
+      @filter="applyQuickFilter"
+    />
 
-    <el-alert
+    <AlertBanner
       v-if="authRequiredMessage"
-      data-testid="auth-required-banner"
-      class="auth-required-banner"
-      type="warning"
-      show-icon
-      :closable="false"
       :title="authRequiredTitle"
-      :description="authRequiredMessage"
+      :message="authRequiredMessage"
     />
 
     <section class="workspace" :class="{ 'workspace--no-pane': activeView === 'overview' || activeView === 'workers' }">
-      <aside class="nav-pane" :class="{ 'nav-pane--collapsed': menuCollapsed }">
-        <div class="nav-head">
-          <div class="nav-brand" :title="menuCollapsed ? $t('nav.brand') : ''">
-            <span class="nav-brand-icon"><i class="fa-solid fa-wave-square" /></span>
-            <span class="nav-brand-text">{{ $t('nav.brand') }}</span>
-          </div>
-        </div>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'overview' }"
-          data-testid="view-nav-overview"
-          @click="switchView('overview')"
-        >
-          <span><i class="fa-solid fa-border-all" /><span class="nav-label">{{ $t('nav.overview') }}</span></span>
-          <span class="nav-badge">{{ dashboard.summary.total }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'tasks' }"
-          data-testid="view-nav-tasks"
-          @click="switchView('tasks')"
-        >
-          <span><i class="fa-solid fa-table-list" /><span class="nav-label">{{ $t('nav.tasks') }}</span></span>
-          <span class="nav-badge">{{ filteredTasks.length }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'sources' }"
-          data-testid="view-nav-sources"
-          @click="switchView('sources')"
-        >
-          <span><i class="fa-solid fa-database" /><span class="nav-label">{{ $t('nav.sources') }}</span></span>
-          <span class="nav-badge">{{ dashboard.sources.length }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'workers' }"
-          data-testid="view-nav-workers"
-          @click="switchView('workers')"
-        >
-          <span><i class="fa-solid fa-network-wired" /><span class="nav-label">{{ $t('nav.workers') }}</span></span>
-          <span class="nav-badge">{{ cluster.overview.worker_count }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'alerts' }"
-          data-testid="view-nav-alerts"
-          @click="switchView('alerts')"
-        >
-          <span><i class="fa-solid fa-bell" /><span class="nav-label">{{ $t('nav.alerts') }}</span></span>
-          <span class="nav-badge">{{ dashboard.summary.abnormal + dashboard.summary.failed + dashboard.summary.delayed }}</span>
-        </button>
-        <div class="nav-foot">
-          <button
-            class="nav-collapse-btn nav-collapse-btn--dock"
-            :title="menuCollapsed ? $t('btn.expandMenu') : $t('btn.collapseMenu')"
-            :aria-label="menuCollapsed ? $t('btn.expandMenu') : $t('btn.collapseMenu')"
-            data-testid="view-nav-collapse"
-            @click="menuCollapsed = !menuCollapsed"
-          >
-            <i :class="menuCollapsed ? 'fa-solid fa-angles-right' : 'fa-solid fa-angles-left'" aria-hidden="true" />
-          </button>
-        </div>
-      </aside>
+      <NavPane
+        v-model="menuCollapsed"
+        :active-view="activeView"
+        :total-count="dashboard.summary.total"
+        :filtered-tasks-count="filteredTasks.length"
+        :sources-count="dashboard.sources.length"
+        :worker-count="cluster.overview.worker_count"
+        :alert-count="dashboard.summary.abnormal + dashboard.summary.failed + dashboard.summary.delayed"
+        @switch-view="switchView"
+      />
 
       <aside v-if="activeView === 'tasks' || activeView === 'alerts' || activeView === 'sources'" class="left-pane">
         <el-card v-if="activeView === 'tasks' || activeView === 'alerts'" shadow="never" class="panel-card">
@@ -478,276 +328,59 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
       </section>
     </section>
 
-    <el-dialog
-      v-model="formVisible"
-      :title="formMode === 'create' ? $t('btn.createTask') : `${$t('btn.edit')} #${form.id}`"
-      :width="isMobile ? '95vw' : '860px'"
-    >
-      <el-form :model="form" label-width="92px">
-        <el-row :gutter="12">
-          <el-col :span="12"><el-form-item :label="$t('form.taskName')"><el-input v-model="form.name" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.clusterKey')"><el-input v-model="form.cluster_key" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.host')"><el-input v-model="form.source.host" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.port')"><el-input-number v-model="form.source.port" :min="1" :max="65535" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.user')"><el-input v-model="form.source.user" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.password')"><el-input v-model="form.source.password" show-password :placeholder="$t('form.passwordHint')" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.serverId')"><el-input-number v-model="form.source.server_id" :min="1" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.flavor')"><el-input v-model="form.source.flavor" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.semiSync')"><el-switch v-model="form.source.semi_sync" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.retentionDays')"><el-input-number v-model="form.storage.retention_days" :min="1" /></el-form-item></el-col>
-          <el-col :span="8">
-            <el-form-item :label="$t('form.startMode')">
-              <el-select v-model="form.start.mode" style="width: 100%">
-                <el-option value="LATEST" label="LATEST" />
-                <el-option value="FILE_POS" label="FILE_POS" />
-                <el-option value="GTID" label="GTID" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8"><el-form-item :label="$t('form.file')"><el-input v-model="form.start.file" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item :label="$t('form.position')"><el-input-number v-model="form.start.pos" :min="0" /></el-form-item></el-col>
-          <el-col :span="24"><el-form-item :label="$t('form.gtidSet')"><el-input v-model="form.start.gtid_set" /></el-form-item></el-col>
-        </el-row>
-      </el-form>
-      <template #footer>
-        <el-button @click="formVisible = false">{{ $t('btn.cancel') }}</el-button>
-        <el-button type="primary" @click="submitForm">{{ $t('btn.save') }}</el-button>
-      </template>
-    </el-dialog>
+    <TaskCreateDialog
+      v-model:visible="formVisible"
+      :is-mobile="isMobile"
+      :mode="formMode"
+      :form="form"
+      @submit="submitForm"
+    />
 
-    <el-dialog v-model="batchVisible" :title="$t('batch.title')" :width="isMobile ? '95vw' : '860px'">
-      <el-alert type="info" show-icon :closable="false">
-        <p>{{ $t('batch.formatHint') }}</p>
-        <p><code>name,host,port</code> {{ $t('batch.formatOr') }} <code>host,port</code> {{ $t('batch.formatOr') }} <code>host:port</code></p>
-      </el-alert>
-      <el-row :gutter="12" class="batch-grid">
-        <el-col :span="12">
-          <el-form label-width="98px">
-            <el-form-item :label="$t('form.replUser')">
-              <el-input v-model="batchForm.user" />
-            </el-form-item>
-            <el-form-item :label="$t('form.replPassword')">
-              <el-input v-model="batchForm.password" show-password />
-            </el-form-item>
-            <el-form-item :label="$t('form.flavor')">
-              <el-input v-model="batchForm.flavor" />
-            </el-form-item>
-            <el-form-item :label="$t('form.serverIdStart')">
-              <el-input-number v-model="batchForm.serverIdStart" :min="1" />
-            </el-form-item>
-            <el-form-item :label="$t('form.retentionDays')">
-              <el-input-number v-model="batchForm.retentionDays" :min="1" />
-            </el-form-item>
-            <el-form-item :label="$t('form.semiSync')">
-              <el-switch v-model="batchForm.semiSync" />
-            </el-form-item>
-            <el-form-item :label="$t('form.autoStart')">
-              <el-switch v-model="batchForm.autoStart" />
-            </el-form-item>
-          </el-form>
-        </el-col>
-        <el-col :span="12">
-          <el-input
-            v-model="batchForm.lines"
-            type="textarea"
-            :rows="14"
-            :placeholder="$t('placeholder.hostExample')"
-          />
-        </el-col>
-        <el-col :span="24">
-          <div class="batch-preview-toolbar">
-            <div class="batch-preview-summary">
-              <span>{{ $t('batch.previewStatus') }}</span>
-              <el-tag v-if="batchPreview.ready && batchPreview.errors.length === 0" size="small" type="success">{{ $t('batch.submittable') }}</el-tag>
-              <el-tag v-else-if="batchPreview.ready" size="small" type="danger">{{ $t('batch.hasErrors') }}</el-tag>
-              <el-tag v-else size="small" type="info">{{ $t('batch.notPreviewed') }}</el-tag>
-              <span class="batch-preview-count">{{ $t('batch.validErrorCount', { valid: batchPreview.validCount, errors: batchPreview.errors.length }) }}</span>
-            </div>
-            <div class="batch-preview-actions">
-              <el-button @click="previewBatchCreate">{{ $t('btn.previewValidate') }}</el-button>
-              <el-button @click="clearBatchPreview">{{ $t('btn.clearPreview') }}</el-button>
-            </div>
-          </div>
+    <BatchCreateDialog
+      v-model:visible="batchVisible"
+      :is-mobile="isMobile"
+      :batch-form="batchForm"
+      :batch-preview="batchPreview"
+      @preview="previewBatchCreate"
+      @submit="submitBatchCreate"
+    />
 
-          <el-table v-if="batchPreview.rows.length" :data="batchPreview.rows" size="small" border class="batch-preview-table">
-            <el-table-column prop="lineNo" :label="$t('table.lineNo')" width="80" />
-            <el-table-column prop="name" :label="$t('form.taskName')" min-width="180" />
-            <el-table-column prop="host" :label="$t('batch.host')" min-width="160" />
-            <el-table-column prop="port" :label="$t('batch.port')" width="100" />
-            <el-table-column :label="$t('table.validation')" width="110">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.valid ? 'success' : 'danger'">{{ row.valid ? $t('batch.passed') : $t('batch.failed') }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="error" :label="$t('batch.reason')" min-width="220" />
-          </el-table>
-        </el-col>
-      </el-row>
-      <template #footer>
-        <el-button @click="batchVisible = false">{{ $t('btn.cancel') }}</el-button>
-        <el-button type="primary" :disabled="!batchPreview.canSubmit" @click="submitBatchCreate">{{ $t('btn.startBatchCreate') }}</el-button>
-      </template>
-    </el-dialog>
-
-    <el-drawer v-model="detailVisible" class="task-detail-drawer" data-testid="task-drawer" size="66%" :title="detailTask ? `${$t('detail.center')} #${detailTask.id}` : $t('detail.center')">
-      <template v-if="detailTask">
-        <div class="detail-stack">
-          <section class="detail-panel detail-panel--hero">
-            <div class="detail-hero">
-              <div>
-                <div class="detail-hero-kicker">{{ $t('detail.center') }}</div>
-                <h3><i class="fa-solid fa-circle-info" /> {{ detailTask.name }}</h3>
-                <div class="detail-hero-meta">
-                  <el-tag data-testid="task-drawer-status" :type="stateTagType(detailTask.state)">{{ stateLabel(detailTask.state) }}</el-tag>
-                  <el-tag v-if="detailReplication" data-testid="task-drawer-replication" :type="replicationTagType(detailReplication.status)">{{ replicationStatusLabel(detailReplication.status) }}</el-tag>
-                  <span data-testid="task-drawer-source">{{ $t('detail.source') }} {{ sourceLabel(detailTask) }}</span>
-                  <span>{{ $t('detail.clusterKey') }} {{ detailTask.cluster_key || "--" }}</span>
-                </div>
-              </div>
-              <div class="detail-action-row" data-testid="task-drawer-actions">
-                <el-button data-testid="task-action-edit" @click="openEdit(detailTask)">{{ $t('btn.edit') }}</el-button>
-                <el-button data-testid="task-action-start" type="success" @click="onStart(detailTask)">{{ $t('btn.start') }}</el-button>
-                <el-button data-testid="task-action-stop" type="warning" @click="onStop(detailTask)">{{ $t('btn.stop') }}</el-button>
-                <el-button data-testid="task-action-delete" type="danger" plain @click="onDelete(detailTask)">{{ $t('btn.delete') }}</el-button>
-              </div>
-            </div>
-            <div class="detail-grid detail-grid--summary">
-              <div class="detail-item"><span>{{ $t('detail.currentState') }}</span><strong>{{ stateLabel(detailTask.state) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.replicationStatus') }}</span><strong>{{ detailReplication ? replicationStatusLabel(detailReplication.status) : "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.delay') }}</span><strong>{{ detailReplication ? `${formatDelay(detailReplication.delay_seconds, detailReplication.has_progress)} ${$t('detail.seconds')}` : "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel" v-if="detailReplication">
-            <h3><i class="fa-solid fa-wave-square" /> {{ $t('detail.replicationAndPosition') }}</h3>
-            <div class="detail-grid">
-              <div class="detail-item">
-                <span>{{ $t('detail.replicationStatus') }}</span>
-                <strong><el-tag :type="replicationTagType(detailReplication.status)">{{ replicationStatusLabel(detailReplication.status) }}</el-tag></strong>
-              </div>
-              <div class="detail-item"><span>{{ $t('detail.delay') }}</span><strong>{{ formatDelay(detailReplication.delay_seconds, detailReplication.has_progress) }} {{ $t('detail.seconds') }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.checkpoint') }}</span><strong data-testid="task-drawer-checkpoint">{{ formatCheckpoint(checkpoint) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.errorReason') }}</span><strong>{{ formatReplicationReason(detailReplication) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.alertThreshold') }}</span><strong>{{ detailReplication.threshold_seconds || "--" }} {{ $t('detail.seconds') }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.lastEventTime') }}</span><strong>{{ formatTs(detailReplication.last_event_at) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.lastPosition') }}</span><strong>{{ detailReplication.last_event_file || "-" }}:{{ detailReplication.last_event_pos || 0 }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.statusCode') }}</span><strong>{{ detailReplication.reason || "--" }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel">
-            <h3><i class="fa-solid fa-circle-info" /> {{ $t('detail.basicInfo') }}</h3>
-            <div class="detail-grid">
-              <div class="detail-item"><span>{{ $t('table.name') }}</span><strong>{{ detailTask.name }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.clusterKey') }}</span><strong>{{ detailTask.cluster_key || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.source') }}</span><strong>{{ sourceLabel(detailTask) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.startMode') }}</span><strong>{{ detailTask.start?.mode || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('form.semiSync') }}</span><strong>{{ detailTask.source?.semi_sync ? $t('detail.on') : $t('detail.off') }}</strong></div>
-              <div class="detail-item"><span>{{ $t('form.retentionDays') }}</span><strong>{{ detailTask.storage?.retention_days || "--" }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel" v-if="detailLease">
-            <h3><i class="fa-solid fa-key" /> {{ $t('detail.leaseAndWorker') }}</h3>
-            <div class="detail-grid">
-              <div class="detail-item"><span>{{ $t('detail.ownerWorker') }}</span><strong data-testid="task-drawer-worker">{{ detailLease.owner_worker_id || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.epoch') }}</span><strong>{{ detailLease.epoch || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.updatedAt') }}</span><strong>{{ formatTs(detailLease.updated_at) }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel">
-            <h3><i class="fa-solid fa-file-lines" /> {{ $t('detail.filesAndUpload') }}</h3>
-            <div class="detail-panel-toolbar">
-              <el-button
-                v-if="files.some((file) => file.upload_state === 'UPLOAD_FAILED')"
-                data-testid="retry-upload-action"
-                size="small"
-                type="warning"
-                @click="retryFailedUploads(detailTask)"
-              >
-                {{ $t('btn.retryUpload') }}
-              </el-button>
-            </div>
-            <el-table :data="files" size="small" border>
-              <el-table-column prop="file_name" :label="$t('table.file')" min-width="180" />
-              <el-table-column prop="size_bytes" :label="$t('table.size')" width="100" />
-              <el-table-column prop="start_pos" :label="$t('table.startPos')" width="100" />
-              <el-table-column prop="end_pos" :label="$t('table.endPos')" width="100" />
-              <el-table-column prop="upload_state" :label="$t('table.uploadState')" width="130">
-                <template #default="{ row }">
-                  <span :data-testid="`file-upload-state-${row.file_name}`">{{ row.upload_state }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="object_key" :label="$t('table.objectKey')" min-width="190" />
-            </el-table>
-          </section>
-
-          <section class="detail-panel" data-testid="task-drawer-runs">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> {{ $t('detail.runHistory', { limit: runHistoryLimit }) }}</h3>
-            <el-table :data="detailRunsLimited" size="small" border>
-              <el-table-column prop="run_id" :label="$t('table.runId')" min-width="180" />
-              <el-table-column prop="worker_id" :label="$t('table.worker')" min-width="120" />
-              <el-table-column prop="epoch" :label="$t('table.epoch')" width="100" />
-              <el-table-column :label="$t('table.startTime')" min-width="170">
-                <template #default="{ row }">{{ formatTs(row.started_at) }}</template>
-              </el-table-column>
-              <el-table-column :label="$t('table.endTime')" min-width="170">
-                <template #default="{ row }">{{ formatTs(row.ended_at) }}</template>
-              </el-table-column>
-              <el-table-column :label="$t('table.endReason')" min-width="140">
-                <template #default="{ row }">{{ row.end_reason || "--" }}</template>
-              </el-table-column>
-            </el-table>
-            <el-empty v-if="detailRunsLimited.length === 0" :description="$t('empty.noRunHistory')" :image-size="56" />
-          </section>
-
-          <section class="detail-panel" data-testid="task-drawer-events">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> {{ $t('detail.eventTimeline') }}</h3>
-            <el-timeline>
-              <el-timeline-item
-                v-for="ev in events"
-                :key="`${ev.sequence}-${ev.type}`"
-                :timestamp="ev.time"
-              >
-                <strong>{{ ev.type }}</strong>
-                <p>{{ ev.message }}</p>
-              </el-timeline-item>
-            </el-timeline>
-          </section>
-        </div>
-      </template>
-    </el-drawer>
+    <TaskDetailDrawer
+      v-model:visible="detailVisible"
+      :task="detailTask"
+      :replication="detailReplication"
+      :lease="detailLease"
+      :checkpoint="checkpoint"
+      :files="files"
+      :runs-limited="detailRunsLimited"
+      :events="events"
+      :run-history-limit="runHistoryLimit"
+      :state-tag-type="stateTagType"
+      :state-label="stateLabel"
+      :replication-tag-type="replicationTagType"
+      :replication-status-label="replicationStatusLabel"
+      :source-label="sourceLabel"
+      :lease-risk-label="leaseRiskLabel"
+      :format-delay="formatDelay"
+      :format-checkpoint="formatCheckpoint"
+      :format-replication-reason="formatReplicationReason"
+      :format-ts="formatTs"
+      @edit="openEdit"
+      @start="onStart"
+      @stop="onStop"
+      @delete="onDelete"
+      @retry-upload="retryFailedUploads"
+    />
 
     <!-- Settings Dialog -->
-    <el-dialog v-model="settingsVisible" class="settings-dialog" data-testid="settings-dialog" :title="$t('settings.title')" :width="isMobile ? '95vw' : '480px'">
-      <el-form class="settings-form" label-width="100px">
-        <el-form-item :label="$t('settings.language')">
-          <el-select v-model="currentLocale" @change="onLocaleChange">
-            <el-option :label="$t('settings.langZhCN')" value="zh-CN" />
-            <el-option :label="$t('settings.langEn')" value="en" />
-          </el-select>
-        </el-form-item>
-        <el-form-item :label="$t('settings.apiToken')">
-          <el-input
-            v-model="settingsToken"
-            data-testid="settings-token-input"
-            type="password"
-            show-password
-            :placeholder="$t('auth.tokenPlaceholder')"
-          />
-          <div class="form-hint">
-            {{ $t('auth.tokenHint') }}
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="settingsVisible = false">{{ $t('btn.cancel') }}</el-button>
-        <el-button type="primary" @click="saveSettings">{{ $t('btn.save') }}</el-button>
-      </template>
-    </el-dialog>
+    <SettingsDialog
+      v-model:visible="settingsVisible"
+      v-model:token="settingsToken"
+      :is-mobile="isMobile"
+      :current-locale="currentLocale"
+      @locale-change="onLocaleChange"
+      @save="saveSettings"
+    />
   </div>
   </el-config-provider>
 </template>
@@ -788,6 +421,14 @@ import { useTaskDetail } from "./composables/useTaskDetail.js";
 import { useTaskForm } from "./composables/useTaskForm.js";
 import { useBatchCreate } from "./composables/useBatchCreate.js";
 import { useFormatters } from "./composables/useFormatters.js";
+import AlertBanner from "./components/AlertBanner.vue";
+import MetricGrid from "./components/MetricGrid.vue";
+import NavPane from "./components/NavPane.vue";
+import AppHeader from "./components/AppHeader.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
+import TaskCreateDialog from "./components/TaskCreateDialog.vue";
+import BatchCreateDialog from "./components/BatchCreateDialog.vue";
+import TaskDetailDrawer from "./components/TaskDetailDrawer.vue";
 
 const { t } = useI18n();
 
