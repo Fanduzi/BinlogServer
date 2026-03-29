@@ -183,10 +183,11 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
           <button
             class="nav-collapse-btn nav-collapse-btn--dock"
             :title="menuCollapsed ? $t('btn.expandMenu') : $t('btn.collapseMenu')"
+            :aria-label="menuCollapsed ? $t('btn.expandMenu') : $t('btn.collapseMenu')"
             data-testid="view-nav-collapse"
             @click="menuCollapsed = !menuCollapsed"
           >
-            <i :class="menuCollapsed ? 'fa-solid fa-angles-right' : 'fa-solid fa-angles-left'" />
+            <i :class="menuCollapsed ? 'fa-solid fa-angles-right' : 'fa-solid fa-angles-left'" aria-hidden="true" />
           </button>
         </div>
       </aside>
@@ -478,7 +479,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
     <el-dialog
       v-model="formVisible"
       :title="formMode === 'create' ? $t('btn.createTask') : `${$t('btn.edit')} #${form.id}`"
-      width="920px"
+      :width="isMobile ? '95vw' : '860px'"
     >
       <el-form :model="form" label-width="92px">
         <el-row :gutter="12">
@@ -512,7 +513,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
       </template>
     </el-dialog>
 
-    <el-dialog v-model="batchVisible" :title="$t('batch.title')" width="920px">
+    <el-dialog v-model="batchVisible" :title="$t('batch.title')" :width="isMobile ? '95vw' : '860px'">
       <el-alert type="info" show-icon :closable="false">
         <p>{{ $t('batch.formatHint') }}</p>
         <p><code>name,host,port</code> {{ $t('batch.formatOr') }} <code>host,port</code> {{ $t('batch.formatOr') }} <code>host:port</code></p>
@@ -719,7 +720,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
     </el-drawer>
 
     <!-- Settings Dialog -->
-    <el-dialog v-model="settingsVisible" class="settings-dialog" data-testid="settings-dialog" :title="$t('settings.title')" width="480px">
+    <el-dialog v-model="settingsVisible" class="settings-dialog" data-testid="settings-dialog" :title="$t('settings.title')" :width="isMobile ? '95vw' : '480px'">
       <el-form class="settings-form" label-width="100px">
         <el-form-item :label="$t('settings.language')">
           <el-select v-model="currentLocale" @change="onLocaleChange">
@@ -814,6 +815,9 @@ function onLocaleChange(locale) {
   window.location.reload();
 }
 const menuCollapsed = ref(false);
+const windowWidth = ref(window.innerWidth);
+window.addEventListener('resize', () => { windowWidth.value = window.innerWidth; });
+const isMobile = computed(() => windowWidth.value < 768);
 
 // Auth + URL route listeners
 function handleAuthRequired(event) {
@@ -3101,6 +3105,53 @@ h1 {
 
   .detail-hero {
     flex-direction: column;
+  }
+}
+
+@media (max-width: 767px) {
+  .page-shell {
+    padding: 10px;
+  }
+
+  .hero {
+    padding: 14px 0 10px;
+  }
+
+  h1 {
+    font-size: 22px;
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .nav-pane {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .nav-collapse-btn--dock {
+    display: none;
+  }
+
+  .action-row {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .action-row .el-button {
+    flex: 1 1 auto;
+    min-width: 80px;
+  }
+
+  .hero-actions {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>
