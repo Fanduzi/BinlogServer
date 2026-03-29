@@ -370,6 +370,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
       @stop="onStop"
       @delete="onDelete"
       @retry-upload="retryFailedUploads"
+      :is-mobile="isMobile"
     />
 
     <!-- Settings Dialog -->
@@ -835,9 +836,6 @@ async function retryFailedUploads(task) {
 </script>
 
 <style scoped>
-@import url("https://fonts.cdnfonts.com/css/geist");
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap");
-
 .page-shell {
   --bg: #f5f5f4;
   --surface: #ffffff;

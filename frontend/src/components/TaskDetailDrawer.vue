@@ -3,7 +3,7 @@
     :model-value="visible"
     class="task-detail-drawer"
     data-testid="task-drawer"
-    size="66%"
+    :size="isMobile ? '100%' : '66%'"
     :title="task ? `${$t('detail.center')} #${task.id}` : $t('detail.center')"
     @update:model-value="$emit('update:visible', $event)"
   >
@@ -160,6 +160,7 @@ defineProps({
   formatCheckpoint: { type: Function, required: true },
   formatReplicationReason: { type: Function, required: true },
   formatTs: { type: Function, required: true },
+  isMobile: { type: Boolean, default: false },
 });
 defineEmits(['update:visible', 'edit', 'start', 'stop', 'delete', 'retry-upload']);
 </script>
