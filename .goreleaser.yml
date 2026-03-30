@@ -42,9 +42,7 @@ checksum:
 release:
   draft: false
   replace_existing_draft: true
-
-changelog:
-  disable: true
+  mode: replace
 
 source:
   enabled: false
