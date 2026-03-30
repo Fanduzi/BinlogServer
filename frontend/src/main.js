@@ -27,7 +27,8 @@ import {
 import zhCnLocale from "element-plus/dist/locale/zh-cn.mjs";
 import enLocale from "element-plus/dist/locale/en.mjs";
 import "element-plus/dist/index.css";
-import "@fortawesome/fontawesome-free/css/all.min.css";
+import "@fortawesome/fontawesome-free/css/fontawesome.min.css";
+import "@fortawesome/fontawesome-free/css/solid.min.css";
 import App from "./App.vue";
 import { i18n, getLocale } from "./locales";
 

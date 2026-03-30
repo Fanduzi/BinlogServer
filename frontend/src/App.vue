@@ -10,186 +10,37 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
     <div class="orb orb-a" />
     <div class="orb orb-b" />
 
-    <header class="hero">
-      <div class="hero-copy">
-        <p class="kicker"><i class="fa-solid fa-wave-square" /> BINLOG SERVER</p>
-        <h1>{{ $t('app.title') }}</h1>
-        <p class="hero-desc">
-          {{ $t('app.description') }}
-        </p>
-      </div>
-      <div class="hero-actions">
-        <el-button type="primary" @click="openCreate">
-          <i class="fa-solid fa-plus" /> {{ $t('btn.createTask') }}
-        </el-button>
-        <el-button @click="openBatchCreate">
-          <i class="fa-solid fa-layer-group" /> {{ $t('btn.batchCreate') }}
-        </el-button>
-        <el-button :loading="loading" @click="refreshAll">
-          <i class="fa-solid fa-rotate" /> {{ $t('btn.refresh') }}
-        </el-button>
-        <el-button @click="openSettings">
-          <i class="fa-solid fa-gear" /> {{ $t('btn.settings') }}
-        </el-button>
-      </div>
-    </header>
+    <AppHeader
+      :loading="loading"
+      @create="openCreate"
+      @batch-create="openBatchCreate"
+      @refresh="refreshAll"
+      @settings="openSettings"
+    />
 
-    <section class="metric-grid">
-      <article
-        class="metric-card metric-card--danger"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-abnormal"
-        :data-active="activeQuickFilter === 'abnormal'"
-        @click="applyQuickFilter('abnormal')"
-        @keydown.enter.prevent="applyQuickFilter('abnormal')"
-        @keydown.space.prevent="applyQuickFilter('abnormal')"
-      >
-        <p><i class="fa-solid fa-triangle-exclamation" /> {{ $t('metrics.abnormal') }}</p>
-        <strong data-testid="kpi-abnormal-value">{{ dashboard.summary.abnormal }}</strong>
-      </article>
-      <article
-        class="metric-card metric-card--danger"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-failed"
-        :data-active="activeQuickFilter === 'failed'"
-        @click="applyQuickFilter('failed')"
-        @keydown.enter.prevent="applyQuickFilter('failed')"
-        @keydown.space.prevent="applyQuickFilter('failed')"
-      >
-        <p><i class="fa-solid fa-bug" /> {{ $t('metrics.failed') }}</p>
-        <strong data-testid="kpi-failed-value">{{ dashboard.summary.failed }}</strong>
-      </article>
-      <article
-        class="metric-card metric-card--warning"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-delayed"
-        :data-active="activeQuickFilter === 'delayed'"
-        @click="applyQuickFilter('delayed')"
-        @keydown.enter.prevent="applyQuickFilter('delayed')"
-        @keydown.space.prevent="applyQuickFilter('delayed')"
-      >
-        <p><i class="fa-solid fa-hourglass-half" /> {{ $t('metrics.delayed') }}</p>
-        <strong data-testid="kpi-delayed-value">{{ dashboard.summary.delayed }}</strong>
-      </article>
-      <article
-        class="metric-card"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-running"
-        :data-active="activeQuickFilter === 'running'"
-        @click="applyQuickFilter('running')"
-        @keydown.enter.prevent="applyQuickFilter('running')"
-        @keydown.space.prevent="applyQuickFilter('running')"
-      >
-        <p><i class="fa-solid fa-play" /> {{ $t('metrics.running') }}</p>
-        <strong>{{ dashboard.summary.running }}</strong>
-      </article>
-      <article
-        class="metric-card"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-all"
-        :data-active="activeQuickFilter === 'all'"
-        @click="applyQuickFilter('all')"
-        @keydown.enter.prevent="applyQuickFilter('all')"
-        @keydown.space.prevent="applyQuickFilter('all')"
-      >
-        <p><i class="fa-solid fa-layer-group" /> {{ $t('metrics.total') }}</p>
-        <strong>{{ dashboard.summary.total }}</strong>
-      </article>
-      <article
-        class="metric-card metric-card--success"
-        role="button"
-        tabindex="0"
-        data-testid="kpi-normal"
-        :data-active="activeQuickFilter === 'normal'"
-        @click="applyQuickFilter('normal')"
-        @keydown.enter.prevent="applyQuickFilter('normal')"
-        @keydown.space.prevent="applyQuickFilter('normal')"
-      >
-        <p><i class="fa-solid fa-circle-check" /> {{ $t('metrics.normal') }}</p>
-        <strong>{{ dashboard.summary.normal }}</strong>
-      </article>
-    </section>
+    <MetricGrid
+      :summary="dashboard.summary"
+      :active-quick-filter="activeQuickFilter"
+      @filter="applyQuickFilter"
+    />
 
-    <el-alert
+    <AlertBanner
       v-if="authRequiredMessage"
-      data-testid="auth-required-banner"
-      class="auth-required-banner"
-      type="warning"
-      show-icon
-      :closable="false"
       :title="authRequiredTitle"
-      :description="authRequiredMessage"
+      :message="authRequiredMessage"
     />
 
     <section class="workspace" :class="{ 'workspace--no-pane': activeView === 'overview' || activeView === 'workers' }">
-      <aside class="nav-pane" :class="{ 'nav-pane--collapsed': menuCollapsed }">
-        <div class="nav-head">
-          <div class="nav-brand" :title="menuCollapsed ? $t('nav.brand') : ''">
-            <span class="nav-brand-icon"><i class="fa-solid fa-wave-square" /></span>
-            <span class="nav-brand-text">{{ $t('nav.brand') }}</span>
-          </div>
-        </div>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'overview' }"
-          data-testid="view-nav-overview"
-          @click="switchView('overview')"
-        >
-          <span><i class="fa-solid fa-border-all" /><span class="nav-label">{{ $t('nav.overview') }}</span></span>
-          <span class="nav-badge">{{ dashboard.summary.total }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'tasks' }"
-          data-testid="view-nav-tasks"
-          @click="switchView('tasks')"
-        >
-          <span><i class="fa-solid fa-table-list" /><span class="nav-label">{{ $t('nav.tasks') }}</span></span>
-          <span class="nav-badge">{{ filteredTasks.length }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'sources' }"
-          data-testid="view-nav-sources"
-          @click="switchView('sources')"
-        >
-          <span><i class="fa-solid fa-database" /><span class="nav-label">{{ $t('nav.sources') }}</span></span>
-          <span class="nav-badge">{{ dashboard.sources.length }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'workers' }"
-          data-testid="view-nav-workers"
-          @click="switchView('workers')"
-        >
-          <span><i class="fa-solid fa-network-wired" /><span class="nav-label">{{ $t('nav.workers') }}</span></span>
-          <span class="nav-badge">{{ cluster.overview.worker_count }}</span>
-        </button>
-        <button
-          class="nav-item"
-          :class="{ 'nav-item--active': activeView === 'alerts' }"
-          data-testid="view-nav-alerts"
-          @click="switchView('alerts')"
-        >
-          <span><i class="fa-solid fa-bell" /><span class="nav-label">{{ $t('nav.alerts') }}</span></span>
-          <span class="nav-badge">{{ dashboard.summary.abnormal + dashboard.summary.failed + dashboard.summary.delayed }}</span>
-        </button>
-        <div class="nav-foot">
-          <button
-            class="nav-collapse-btn nav-collapse-btn--dock"
-            :title="menuCollapsed ? $t('btn.expandMenu') : $t('btn.collapseMenu')"
-            data-testid="view-nav-collapse"
-            @click="menuCollapsed = !menuCollapsed"
-          >
-            <i :class="menuCollapsed ? 'fa-solid fa-angles-right' : 'fa-solid fa-angles-left'" />
-          </button>
-        </div>
-      </aside>
+      <NavPane
+        v-model="menuCollapsed"
+        :active-view="activeView"
+        :total-count="dashboard.summary.total"
+        :filtered-tasks-count="filteredTasks.length"
+        :sources-count="dashboard.sources.length"
+        :worker-count="cluster.overview.worker_count"
+        :alert-count="dashboard.summary.abnormal + dashboard.summary.failed + dashboard.summary.delayed"
+        @switch-view="switchView"
+      />
 
       <aside v-if="activeView === 'tasks' || activeView === 'alerts' || activeView === 'sources'" class="left-pane">
         <el-card v-if="activeView === 'tasks' || activeView === 'alerts'" shadow="never" class="panel-card">
@@ -226,7 +77,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
               <span>{{ $t('filter.alertFirst') }}</span>
               <el-switch v-model="uiFilter.onlyAlert" />
             </div>
-            <div class="filter-summary" data-testid="filter-summary">{{ $t('filter.showingCount', { count: filteredTasks.length }) }}</div>
+            <div class="filter-summary" data-testid="filter-summary" aria-live="polite" aria-atomic="true">{{ $t('filter.showingCount', { count: filteredTasks.length }) }}</div>
             <el-button @click="resetUiFilter">{{ $t('btn.resetFilter') }}</el-button>
           </div>
         </el-card>
@@ -394,7 +245,9 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
             stripe
             row-key="task.id"
             :row-class-name="taskRowClassName"
+            :row-attr="() => ({ tabindex: '0' })"
             @row-click="onRowClick"
+            @keydown.enter="onTableKeyEnter"
           >
             <el-table-column :label="$t('table.id')" width="70">
               <template #default="{ row }"><span class="task-id-cell" :data-testid="`task-row-${row.task.id}`">{{ row.task.id }}</span></template>
@@ -475,276 +328,60 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
       </section>
     </section>
 
-    <el-dialog
-      v-model="formVisible"
-      :title="formMode === 'create' ? $t('btn.createTask') : `${$t('btn.edit')} #${form.id}`"
-      width="920px"
-    >
-      <el-form :model="form" label-width="92px">
-        <el-row :gutter="12">
-          <el-col :span="12"><el-form-item :label="$t('form.taskName')"><el-input v-model="form.name" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.clusterKey')"><el-input v-model="form.cluster_key" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.host')"><el-input v-model="form.source.host" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.port')"><el-input-number v-model="form.source.port" :min="1" :max="65535" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.user')"><el-input v-model="form.source.user" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.password')"><el-input v-model="form.source.password" show-password :placeholder="$t('form.passwordHint')" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.serverId')"><el-input-number v-model="form.source.server_id" :min="1" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.flavor')"><el-input v-model="form.source.flavor" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.semiSync')"><el-switch v-model="form.source.semi_sync" /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item :label="$t('form.retentionDays')"><el-input-number v-model="form.storage.retention_days" :min="1" /></el-form-item></el-col>
-          <el-col :span="8">
-            <el-form-item :label="$t('form.startMode')">
-              <el-select v-model="form.start.mode" style="width: 100%">
-                <el-option value="LATEST" label="LATEST" />
-                <el-option value="FILE_POS" label="FILE_POS" />
-                <el-option value="GTID" label="GTID" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8"><el-form-item :label="$t('form.file')"><el-input v-model="form.start.file" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item :label="$t('form.position')"><el-input-number v-model="form.start.pos" :min="0" /></el-form-item></el-col>
-          <el-col :span="24"><el-form-item :label="$t('form.gtidSet')"><el-input v-model="form.start.gtid_set" /></el-form-item></el-col>
-        </el-row>
-      </el-form>
-      <template #footer>
-        <el-button @click="formVisible = false">{{ $t('btn.cancel') }}</el-button>
-        <el-button type="primary" @click="submitForm">{{ $t('btn.save') }}</el-button>
-      </template>
-    </el-dialog>
+    <TaskCreateDialog
+      v-model:visible="formVisible"
+      :is-mobile="isMobile"
+      :mode="formMode"
+      :form="form"
+      @submit="submitForm"
+    />
 
-    <el-dialog v-model="batchVisible" :title="$t('batch.title')" width="920px">
-      <el-alert type="info" show-icon :closable="false">
-        <p>{{ $t('batch.formatHint') }}</p>
-        <p><code>name,host,port</code> {{ $t('batch.formatOr') }} <code>host,port</code> {{ $t('batch.formatOr') }} <code>host:port</code></p>
-      </el-alert>
-      <el-row :gutter="12" class="batch-grid">
-        <el-col :span="12">
-          <el-form label-width="98px">
-            <el-form-item :label="$t('form.replUser')">
-              <el-input v-model="batchForm.user" />
-            </el-form-item>
-            <el-form-item :label="$t('form.replPassword')">
-              <el-input v-model="batchForm.password" show-password />
-            </el-form-item>
-            <el-form-item :label="$t('form.flavor')">
-              <el-input v-model="batchForm.flavor" />
-            </el-form-item>
-            <el-form-item :label="$t('form.serverIdStart')">
-              <el-input-number v-model="batchForm.serverIdStart" :min="1" />
-            </el-form-item>
-            <el-form-item :label="$t('form.retentionDays')">
-              <el-input-number v-model="batchForm.retentionDays" :min="1" />
-            </el-form-item>
-            <el-form-item :label="$t('form.semiSync')">
-              <el-switch v-model="batchForm.semiSync" />
-            </el-form-item>
-            <el-form-item :label="$t('form.autoStart')">
-              <el-switch v-model="batchForm.autoStart" />
-            </el-form-item>
-          </el-form>
-        </el-col>
-        <el-col :span="12">
-          <el-input
-            v-model="batchForm.lines"
-            type="textarea"
-            :rows="14"
-            :placeholder="$t('placeholder.hostExample')"
-          />
-        </el-col>
-        <el-col :span="24">
-          <div class="batch-preview-toolbar">
-            <div class="batch-preview-summary">
-              <span>{{ $t('batch.previewStatus') }}</span>
-              <el-tag v-if="batchPreview.ready && batchPreview.errors.length === 0" size="small" type="success">{{ $t('batch.submittable') }}</el-tag>
-              <el-tag v-else-if="batchPreview.ready" size="small" type="danger">{{ $t('batch.hasErrors') }}</el-tag>
-              <el-tag v-else size="small" type="info">{{ $t('batch.notPreviewed') }}</el-tag>
-              <span class="batch-preview-count">{{ $t('batch.validErrorCount', { valid: batchPreview.validCount, errors: batchPreview.errors.length }) }}</span>
-            </div>
-            <div class="batch-preview-actions">
-              <el-button @click="previewBatchCreate">{{ $t('btn.previewValidate') }}</el-button>
-              <el-button @click="clearBatchPreview">{{ $t('btn.clearPreview') }}</el-button>
-            </div>
-          </div>
+    <BatchCreateDialog
+      v-model:visible="batchVisible"
+      :is-mobile="isMobile"
+      :batch-form="batchForm"
+      :batch-preview="batchPreview"
+      @preview="previewBatchCreate"
+      @submit="submitBatchCreate"
+    />
 
-          <el-table v-if="batchPreview.rows.length" :data="batchPreview.rows" size="small" border class="batch-preview-table">
-            <el-table-column prop="lineNo" :label="$t('table.lineNo')" width="80" />
-            <el-table-column prop="name" :label="$t('form.taskName')" min-width="180" />
-            <el-table-column prop="host" :label="$t('batch.host')" min-width="160" />
-            <el-table-column prop="port" :label="$t('batch.port')" width="100" />
-            <el-table-column :label="$t('table.validation')" width="110">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.valid ? 'success' : 'danger'">{{ row.valid ? $t('batch.passed') : $t('batch.failed') }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="error" :label="$t('batch.reason')" min-width="220" />
-          </el-table>
-        </el-col>
-      </el-row>
-      <template #footer>
-        <el-button @click="batchVisible = false">{{ $t('btn.cancel') }}</el-button>
-        <el-button type="primary" :disabled="!batchPreview.canSubmit" @click="submitBatchCreate">{{ $t('btn.startBatchCreate') }}</el-button>
-      </template>
-    </el-dialog>
-
-    <el-drawer v-model="detailVisible" class="task-detail-drawer" data-testid="task-drawer" size="66%" :title="detailTask ? `${$t('detail.center')} #${detailTask.id}` : $t('detail.center')">
-      <template v-if="detailTask">
-        <div class="detail-stack">
-          <section class="detail-panel detail-panel--hero">
-            <div class="detail-hero">
-              <div>
-                <div class="detail-hero-kicker">{{ $t('detail.center') }}</div>
-                <h3><i class="fa-solid fa-circle-info" /> {{ detailTask.name }}</h3>
-                <div class="detail-hero-meta">
-                  <el-tag data-testid="task-drawer-status" :type="stateTagType(detailTask.state)">{{ stateLabel(detailTask.state) }}</el-tag>
-                  <el-tag v-if="detailReplication" data-testid="task-drawer-replication" :type="replicationTagType(detailReplication.status)">{{ replicationStatusLabel(detailReplication.status) }}</el-tag>
-                  <span data-testid="task-drawer-source">{{ $t('detail.source') }} {{ sourceLabel(detailTask) }}</span>
-                  <span>{{ $t('detail.clusterKey') }} {{ detailTask.cluster_key || "--" }}</span>
-                </div>
-              </div>
-              <div class="detail-action-row" data-testid="task-drawer-actions">
-                <el-button data-testid="task-action-edit" @click="openEdit(detailTask)">{{ $t('btn.edit') }}</el-button>
-                <el-button data-testid="task-action-start" type="success" @click="onStart(detailTask)">{{ $t('btn.start') }}</el-button>
-                <el-button data-testid="task-action-stop" type="warning" @click="onStop(detailTask)">{{ $t('btn.stop') }}</el-button>
-                <el-button data-testid="task-action-delete" type="danger" plain @click="onDelete(detailTask)">{{ $t('btn.delete') }}</el-button>
-              </div>
-            </div>
-            <div class="detail-grid detail-grid--summary">
-              <div class="detail-item"><span>{{ $t('detail.currentState') }}</span><strong>{{ stateLabel(detailTask.state) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.replicationStatus') }}</span><strong>{{ detailReplication ? replicationStatusLabel(detailReplication.status) : "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.delay') }}</span><strong>{{ detailReplication ? `${formatDelay(detailReplication.delay_seconds, detailReplication.has_progress)} ${$t('detail.seconds')}` : "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel" v-if="detailReplication">
-            <h3><i class="fa-solid fa-wave-square" /> {{ $t('detail.replicationAndPosition') }}</h3>
-            <div class="detail-grid">
-              <div class="detail-item">
-                <span>{{ $t('detail.replicationStatus') }}</span>
-                <strong><el-tag :type="replicationTagType(detailReplication.status)">{{ replicationStatusLabel(detailReplication.status) }}</el-tag></strong>
-              </div>
-              <div class="detail-item"><span>{{ $t('detail.delay') }}</span><strong>{{ formatDelay(detailReplication.delay_seconds, detailReplication.has_progress) }} {{ $t('detail.seconds') }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.checkpoint') }}</span><strong data-testid="task-drawer-checkpoint">{{ formatCheckpoint(checkpoint) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.errorReason') }}</span><strong>{{ formatReplicationReason(detailReplication) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.alertThreshold') }}</span><strong>{{ detailReplication.threshold_seconds || "--" }} {{ $t('detail.seconds') }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.lastEventTime') }}</span><strong>{{ formatTs(detailReplication.last_event_at) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.lastPosition') }}</span><strong>{{ detailReplication.last_event_file || "-" }}:{{ detailReplication.last_event_pos || 0 }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.statusCode') }}</span><strong>{{ detailReplication.reason || "--" }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel">
-            <h3><i class="fa-solid fa-circle-info" /> {{ $t('detail.basicInfo') }}</h3>
-            <div class="detail-grid">
-              <div class="detail-item"><span>{{ $t('table.name') }}</span><strong>{{ detailTask.name }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.clusterKey') }}</span><strong>{{ detailTask.cluster_key || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.source') }}</span><strong>{{ sourceLabel(detailTask) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.startMode') }}</span><strong>{{ detailTask.start?.mode || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('form.semiSync') }}</span><strong>{{ detailTask.source?.semi_sync ? $t('detail.on') : $t('detail.off') }}</strong></div>
-              <div class="detail-item"><span>{{ $t('form.retentionDays') }}</span><strong>{{ detailTask.storage?.retention_days || "--" }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel" v-if="detailLease">
-            <h3><i class="fa-solid fa-key" /> {{ $t('detail.leaseAndWorker') }}</h3>
-            <div class="detail-grid">
-              <div class="detail-item"><span>{{ $t('detail.ownerWorker') }}</span><strong data-testid="task-drawer-worker">{{ detailLease.owner_worker_id || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.epoch') }}</span><strong>{{ detailLease.epoch || "--" }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(detailTask, detailLease) }}</strong></div>
-              <div class="detail-item"><span>{{ $t('detail.updatedAt') }}</span><strong>{{ formatTs(detailLease.updated_at) }}</strong></div>
-            </div>
-          </section>
-
-          <section class="detail-panel">
-            <h3><i class="fa-solid fa-file-lines" /> {{ $t('detail.filesAndUpload') }}</h3>
-            <div class="detail-panel-toolbar">
-              <el-button
-                v-if="files.some((file) => file.upload_state === 'UPLOAD_FAILED')"
-                data-testid="retry-upload-action"
-                size="small"
-                type="warning"
-                @click="retryFailedUploads(detailTask)"
-              >
-                {{ $t('btn.retryUpload') }}
-              </el-button>
-            </div>
-            <el-table :data="files" size="small" border>
-              <el-table-column prop="file_name" :label="$t('table.file')" min-width="180" />
-              <el-table-column prop="size_bytes" :label="$t('table.size')" width="100" />
-              <el-table-column prop="start_pos" :label="$t('table.startPos')" width="100" />
-              <el-table-column prop="end_pos" :label="$t('table.endPos')" width="100" />
-              <el-table-column prop="upload_state" :label="$t('table.uploadState')" width="130">
-                <template #default="{ row }">
-                  <span :data-testid="`file-upload-state-${row.file_name}`">{{ row.upload_state }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="object_key" :label="$t('table.objectKey')" min-width="190" />
-            </el-table>
-          </section>
-
-          <section class="detail-panel" data-testid="task-drawer-runs">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> {{ $t('detail.runHistory', { limit: runHistoryLimit }) }}</h3>
-            <el-table :data="detailRunsLimited" size="small" border>
-              <el-table-column prop="run_id" :label="$t('table.runId')" min-width="180" />
-              <el-table-column prop="worker_id" :label="$t('table.worker')" min-width="120" />
-              <el-table-column prop="epoch" :label="$t('table.epoch')" width="100" />
-              <el-table-column :label="$t('table.startTime')" min-width="170">
-                <template #default="{ row }">{{ formatTs(row.started_at) }}</template>
-              </el-table-column>
-              <el-table-column :label="$t('table.endTime')" min-width="170">
-                <template #default="{ row }">{{ formatTs(row.ended_at) }}</template>
-              </el-table-column>
-              <el-table-column :label="$t('table.endReason')" min-width="140">
-                <template #default="{ row }">{{ row.end_reason || "--" }}</template>
-              </el-table-column>
-            </el-table>
-            <el-empty v-if="detailRunsLimited.length === 0" :description="$t('empty.noRunHistory')" :image-size="56" />
-          </section>
-
-          <section class="detail-panel" data-testid="task-drawer-events">
-            <h3><i class="fa-solid fa-clock-rotate-left" /> {{ $t('detail.eventTimeline') }}</h3>
-            <el-timeline>
-              <el-timeline-item
-                v-for="ev in events"
-                :key="`${ev.sequence}-${ev.type}`"
-                :timestamp="ev.time"
-              >
-                <strong>{{ ev.type }}</strong>
-                <p>{{ ev.message }}</p>
-              </el-timeline-item>
-            </el-timeline>
-          </section>
-        </div>
-      </template>
-    </el-drawer>
+    <TaskDetailDrawer
+      v-model:visible="detailVisible"
+      :task="detailTask"
+      :replication="detailReplication"
+      :lease="detailLease"
+      :checkpoint="checkpoint"
+      :files="files"
+      :runs-limited="detailRunsLimited"
+      :events="events"
+      :run-history-limit="runHistoryLimit"
+      :state-tag-type="stateTagType"
+      :state-label="stateLabel"
+      :replication-tag-type="replicationTagType"
+      :replication-status-label="replicationStatusLabel"
+      :source-label="sourceLabel"
+      :lease-risk-label="leaseRiskLabel"
+      :format-delay="formatDelay"
+      :format-checkpoint="formatCheckpoint"
+      :format-replication-reason="formatReplicationReason"
+      :format-ts="formatTs"
+      @edit="openEdit"
+      @start="onStart"
+      @stop="onStop"
+      @delete="onDelete"
+      @retry-upload="retryFailedUploads"
+      :is-mobile="isMobile"
+    />
 
     <!-- Settings Dialog -->
-    <el-dialog v-model="settingsVisible" class="settings-dialog" data-testid="settings-dialog" :title="$t('settings.title')" width="480px">
-      <el-form class="settings-form" label-width="100px">
-        <el-form-item :label="$t('settings.language')">
-          <el-select v-model="currentLocale" @change="onLocaleChange">
-            <el-option :label="$t('settings.langZhCN')" value="zh-CN" />
-            <el-option :label="$t('settings.langEn')" value="en" />
-          </el-select>
-        </el-form-item>
-        <el-form-item :label="$t('settings.apiToken')">
-          <el-input
-            v-model="settingsToken"
-            data-testid="settings-token-input"
-            type="password"
-            show-password
-            :placeholder="$t('auth.tokenPlaceholder')"
-          />
-          <div class="form-hint">
-            {{ $t('auth.tokenHint') }}
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="settingsVisible = false">{{ $t('btn.cancel') }}</el-button>
-        <el-button type="primary" @click="saveSettings">{{ $t('btn.save') }}</el-button>
-      </template>
-    </el-dialog>
+    <SettingsDialog
+      v-model:visible="settingsVisible"
+      v-model:token="settingsToken"
+      :is-mobile="isMobile"
+      :current-locale="currentLocale"
+      @locale-change="onLocaleChange"
+      @save="saveSettings"
+    />
   </div>
   </el-config-provider>
 </template>
@@ -776,10 +413,26 @@ import {
 } from "./api";
 import { getAuthToken, setAuthToken } from "./utils/auth.js";
 import { setLocale, getLocale } from "./locales";
+import { useWindowState } from "./composables/useWindowState.js";
+import { useAuth } from "./composables/useAuth.js";
+import { useDashboard } from "./composables/useDashboard.js";
+import { useSourceLookup } from "./composables/useSourceLookup.js";
+import { useTaskFilter } from "./composables/useTaskFilter.js";
+import { useTaskDetail } from "./composables/useTaskDetail.js";
+import { useTaskForm } from "./composables/useTaskForm.js";
+import { useBatchCreate } from "./composables/useBatchCreate.js";
+import { useFormatters } from "./composables/useFormatters.js";
+import AlertBanner from "./components/AlertBanner.vue";
+import MetricGrid from "./components/MetricGrid.vue";
+import NavPane from "./components/NavPane.vue";
+import AppHeader from "./components/AppHeader.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
+import TaskCreateDialog from "./components/TaskCreateDialog.vue";
+import BatchCreateDialog from "./components/BatchCreateDialog.vue";
+import TaskDetailDrawer from "./components/TaskDetailDrawer.vue";
 
 const { t } = useI18n();
 
-const loading = ref(false);
 const LEASE_RISK_SECONDS = 45;
 const RUN_HISTORY_LIMIT = 10;
 const NAME_MAX_LENGTH = 255;
@@ -799,13 +452,9 @@ const VIEW_HASH_MAP = {
 };
 
 // Settings state
-const settingsVisible = ref(false);
-const settingsToken = ref("");
 const currentLocale = ref(getLocale());
 const elLocale = computed(() => currentLocale.value === "zh-CN" ? zhCnLocale : enLocale);
-const authRequiredTitle = computed(() => t("auth.reauthRequired"));
-const authRequiredMessage = ref("");
-const activeQuickFilter = ref("all");
+const { settingsVisible, settingsToken, authRequiredMessage, authRequiredTitle, openSettings, saveSettings } = useAuth(() => refreshAll());
 const activeView = ref(resolveViewFromHash());
 
 // Locale change handler
@@ -813,15 +462,9 @@ function onLocaleChange(locale) {
   setLocale(locale);
   window.location.reload();
 }
-const menuCollapsed = ref(false);
+const { menuCollapsed, windowWidth, isMobile } = useWindowState();
 
-// Auth + URL route listeners
-function handleAuthRequired(event) {
-  authRequiredMessage.value = event?.detail?.message || t("auth.tokenExpired");
-  settingsVisible.value = true;
-  settingsToken.value = getAuthToken() || "";
-}
-
+// URL route listener
 function handleHashChange() {
   const { view, mode } = parseHashRoute();
   if (view === "tasks" && mode === "alerts") {
@@ -836,174 +479,50 @@ function handleHashChange() {
 }
 
 onMounted(() => {
-  window.addEventListener("auth-required", handleAuthRequired);
   window.addEventListener("hashchange", handleHashChange);
   handleHashChange();
   syncHash(activeView.value, true);
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("auth-required", handleAuthRequired);
   window.removeEventListener("hashchange", handleHashChange);
 });
 
-function openSettings() {
-  settingsToken.value = getAuthToken() || "";
-  settingsVisible.value = true;
-}
+const { loading, dashboard, cluster, toTimeMs, nowRefMs, applyDashboardData, applyClusterData, buildSourceFilter } = useDashboard();
 
-function saveSettings() {
-  setAuthToken(settingsToken.value);
-  settingsVisible.value = false;
-  authRequiredMessage.value = "";
-  window.__authDialogShown = false;
-  ElMessage.success(t("msg.settingsSaved"));
-  refreshAll();
-}
+const { sourceQuery, lookup, clearLookupState } = useSourceLookup();
 
-const dashboard = reactive({
-  generated_at: "",
-  threshold_seconds: 30,
-  summary: {
-    total: 0,
-    running: 0,
-    retry_backoff: 0,
-    stopped: 0,
-    failed: 0,
-    normal: 0,
-    delayed: 0,
-    abnormal: 0,
-  },
-  tasks: [],
-  sources: [],
-});
+const {
+  uiFilter, pager, activeQuickFilter,
+  filteredTasks, pagedTasks,
+  taskStates, replicationStatuses,
+  stateLabel, replicationStatusLabel, sourceLabel,
+  debouncedKeyword, debouncedSourceKeyword,
+  resetUiFilter,
+} = useTaskFilter(dashboard);
 
-const cluster = reactive({
-  overview: {
-    task_count: 0,
-    worker_count: 0,
-    running_task_count: 0,
-    leased_task_count: 0,
-  },
-  workers: [],
-  leaseByTask: {},
-});
+const {
+  ownerWorkerLabel, leaseRiskTagType, leaseRiskLabel,
+  stateTagType, replicationTagType,
+  formatDelay, formatTs, formatCheckpoint,
+  formatReplicationReason, hasReplicationReason, parseErr,
+} = useFormatters({ cluster, toTimeMs, nowRefMs, currentLocale });
 
-const sourceQuery = reactive({
-  host: "",
-  port: null,
-});
+const {
+  formVisible, formMode, form,
+  openCreate, openEdit, buildPayload, validateTaskPayload, resetForm,
+} = useTaskForm({ refreshAll, parseErr });
 
-const lookup = reactive({
-  checked: false,
-  exists: false,
-  count: 0,
-});
+const {
+  batchVisible, batchForm, batchPreview,
+  openBatchCreate, previewBatchCreate, submitBatchCreate, clearBatchPreview,
+} = useBatchCreate({ refreshAll, validateTaskPayload, parseErr });
 
-const uiFilter = reactive({
-  keyword: "",
-  sourceKeyword: "",
-  taskState: "ALL",
-  replicationStatus: "ALL",
-  sortBy: "delay_desc",
-  onlyAlert: false,
-});
-
-const pager = reactive({
-  page: 1,
-  pageSize: 20,
-});
-
-const taskStates = ["CREATED", "STARTING", "RUNNING", "RETRY_BACKOFF", "STOPPING", "STOPPED", "FAILED"];
-const replicationStatuses = ["NORMAL", "DELAYED", "ABNORMAL", "IDLE"];
-
-// i18n helper functions
-function stateLabel(state) {
-  return t(`state.${state}`) || state || "--";
-}
-
-function replicationStatusLabel(status) {
-  return t(`replication.${status}`) || status || "--";
-}
-
-const formVisible = ref(false);
-const formMode = ref("create");
-const form = reactive(defaultForm());
-const batchVisible = ref(false);
-const batchForm = reactive(defaultBatchForm());
-const batchPreview = reactive({
-  ready: false,
-  canSubmit: false,
-  validCount: 0,
-  rows: [],
-  errors: [],
-});
-
-const detailVisible = ref(false);
-const detailTask = ref(null);
-const detailReplication = ref(null);
-const detailLease = ref(null);
-const detailRuns = ref([]);
-const runHistoryLimit = ref(RUN_HISTORY_LIMIT);
-const checkpoint = ref(null);
-const events = ref([]);
-const files = ref([]);
-
-const filteredTasks = computed(() => {
-  let rows = [...dashboard.tasks];
-
-  if (uiFilter.keyword.trim()) {
-    const kw = uiFilter.keyword.trim().toLowerCase();
-    rows = rows.filter((row) => {
-      const id = String(row.task?.id || "").toLowerCase();
-      const name = String(row.task?.name || "").toLowerCase();
-      return id.includes(kw) || name.includes(kw);
-    });
-  }
-
-  if (uiFilter.sourceKeyword.trim()) {
-    const sourceKw = uiFilter.sourceKeyword.trim().toLowerCase();
-    rows = rows.filter((row) => sourceLabel(row.task).toLowerCase().includes(sourceKw));
-  }
-
-  if (uiFilter.taskState !== "ALL") {
-    rows = rows.filter((row) => row.task?.state === uiFilter.taskState);
-  }
-
-  if (uiFilter.replicationStatus !== "ALL") {
-    rows = rows.filter((row) => row.replication?.status === uiFilter.replicationStatus);
-  }
-
-  if (uiFilter.onlyAlert) {
-    rows = rows.filter((row) => {
-      const rep = row.replication?.status;
-      const taskState = row.task?.state;
-      return rep === "ABNORMAL" || rep === "DELAYED" || taskState === "FAILED" || taskState === "RETRY_BACKOFF";
-    });
-  }
-
-  rows.sort((a, b) => {
-    if (uiFilter.sortBy === "name_asc") {
-      return String(a.task?.name || "").localeCompare(String(b.task?.name || ""));
-    }
-    if (uiFilter.sortBy === "updated_desc") {
-      const at = new Date(a.task?.updated_at || 0).getTime();
-      const bt = new Date(b.task?.updated_at || 0).getTime();
-      return bt - at;
-    }
-
-    const ad = Number(a.replication?.delay_seconds ?? -1);
-    const bd = Number(b.replication?.delay_seconds ?? -1);
-    return bd - ad;
-  });
-
-  return rows;
-});
-
-const pagedTasks = computed(() => {
-  const start = (pager.page - 1) * pager.pageSize;
-  return filteredTasks.value.slice(start, start + pager.pageSize);
-});
+const {
+  detailVisible, detailTask, detailReplication, detailLease,
+  detailRuns, runHistoryLimit, checkpoint, events, files,
+  showDetail,
+} = useTaskDetail(cluster);
 
 const workerRows = computed(() => {
   return (cluster.workers || []).map((worker) => {
@@ -1025,8 +544,8 @@ const detailRunsLimited = computed(() => detailRuns.value.slice(0, runHistoryLim
 
 watch(
   () => [
-    uiFilter.keyword,
-    uiFilter.sourceKeyword,
+    debouncedKeyword.value,
+    debouncedSourceKeyword.value,
     uiFilter.taskState,
     uiFilter.replicationStatus,
     uiFilter.sortBy,
@@ -1068,7 +587,7 @@ async function refreshAll() {
   try {
     loading.value = true;
     const [dashboardData, overviewData, workersData] = await Promise.all([
-      getDashboard(buildSourceFilter()),
+      getDashboard(buildSourceFilter(sourceQuery)),
       getClusterOverview(),
       listWorkers(),
     ]);
@@ -1082,28 +601,6 @@ async function refreshAll() {
   }
 }
 
-function buildSourceFilter() {
-  const params = {};
-  if (sourceQuery.host?.trim()) params.host = sourceQuery.host.trim();
-  if (sourceQuery.port) params.port = Number(sourceQuery.port);
-  return params;
-}
-
-function applyDashboardData(data) {
-  Object.assign(dashboard.summary, data?.summary || {});
-  dashboard.tasks = data?.tasks || [];
-  dashboard.sources = data?.sources || [];
-  dashboard.generated_at = data?.generated_at || "";
-  dashboard.threshold_seconds = Number(data?.threshold_seconds || 30);
-}
-
-function applyClusterData(overview, workers) {
-  cluster.overview.task_count = Number(overview?.task_count || 0);
-  cluster.overview.worker_count = Number(overview?.worker_count || 0);
-  cluster.overview.running_task_count = Number(overview?.running_task_count || 0);
-  cluster.overview.leased_task_count = Number(overview?.leased_task_count || 0);
-  cluster.workers = Array.isArray(workers) ? workers : [];
-}
 
 async function prefetchTaskLeasesForPage() {
   const ids = pagedTasks.value.map((row) => row.task?.id).filter(Boolean);
@@ -1147,22 +644,8 @@ async function applySourceFilter() {
 }
 
 async function clearSourceFilter() {
-  sourceQuery.host = "";
-  sourceQuery.port = null;
-  lookup.checked = false;
-  lookup.exists = false;
-  lookup.count = 0;
+  clearLookupState();
   await refreshAll();
-}
-
-function resetUiFilter() {
-  uiFilter.keyword = "";
-  uiFilter.sourceKeyword = "";
-  uiFilter.taskState = "ALL";
-  uiFilter.replicationStatus = "ALL";
-  uiFilter.sortBy = "delay_desc";
-  uiFilter.onlyAlert = false;
-  activeQuickFilter.value = "all";
 }
 
 function resolveViewFromHash() {
@@ -1271,305 +754,6 @@ function onPageSizeChange(size) {
   pager.pageSize = size;
 }
 
-function defaultForm() {
-  return {
-    id: "",
-    name: "",
-    cluster_key: "",
-    source: {
-      host: "127.0.0.1",
-      port: 3306,
-      user: "repl",
-      password: "",
-      flavor: "mysql",
-      server_id: 200001,
-      semi_sync: false,
-    },
-    start: {
-      mode: "LATEST",
-      file: "",
-      pos: 0,
-      gtid_set: "",
-    },
-    storage: {
-      retention_days: 7,
-    },
-  };
-}
-
-function defaultBatchForm() {
-  return {
-    lines: "",
-    user: "repl",
-    password: "replpass",
-    flavor: "mysql",
-    serverIdStart: 300000,
-    retentionDays: 7,
-    semiSync: false,
-    autoStart: false,
-  };
-}
-
-function clearBatchPreview() {
-  batchPreview.ready = false;
-  batchPreview.canSubmit = false;
-  batchPreview.validCount = 0;
-  batchPreview.rows = [];
-  batchPreview.errors = [];
-}
-
-function resetBatchForm() {
-  Object.assign(batchForm, defaultBatchForm());
-  clearBatchPreview();
-}
-
-function resetForm() {
-  Object.assign(form, defaultForm());
-}
-
-function openCreate() {
-  formMode.value = "create";
-  resetForm();
-  formVisible.value = true;
-}
-
-function openBatchCreate() {
-  resetBatchForm();
-  batchVisible.value = true;
-}
-
-function openEdit(task) {
-  formMode.value = "edit";
-  Object.assign(form, defaultForm(), JSON.parse(JSON.stringify(task)));
-  form.source.password = "";
-  formVisible.value = true;
-}
-
-function buildPayload() {
-  const payload = {
-    name: form.name.trim(),
-    cluster_key: form.cluster_key?.trim(),
-    source: {
-      ...form.source,
-      host: form.source.host?.trim() || "",
-      user: form.source.user?.trim() || "",
-      flavor: form.source.flavor?.trim() || "",
-      semi_sync: !!form.source.semi_sync,
-    },
-    start: { mode: form.start.mode },
-    storage: { retention_days: Number(form.storage.retention_days) },
-  };
-  if (!payload.source.password) delete payload.source.password;
-
-  if (payload.start.mode === "FILE_POS") {
-    payload.start.file = form.start.file?.trim() || "";
-    payload.start.pos = Number(form.start.pos || 0);
-  }
-  if (payload.start.mode === "GTID") {
-    payload.start.gtid_set = form.start.gtid_set?.trim() || "";
-  }
-  return payload;
-}
-
-function parseBatchLine(raw, lineNo) {
-  const parts = raw.split(",").map((x) => x.trim()).filter(Boolean);
-  let name = "";
-  let host = "";
-  let port = 0;
-
-  if (parts.length === 1) {
-    if (!parts[0].includes(":")) throw new Error(t("batch.errors.singleColumnMustBeHostPort", { lineNo }));
-    [host, port] = parseHostPort(parts[0], lineNo);
-    name = `task-${host}-${port}`;
-  } else if (parts.length === 2) {
-    if (parts[1].includes(":")) {
-      name = parts[0];
-      [host, port] = parseHostPort(parts[1], lineNo);
-    } else if (parts[0].includes(":")) {
-      [host, port] = parseHostPort(parts[0], lineNo);
-      name = parts[1];
-    } else {
-      host = parts[0];
-      port = Number(parts[1]);
-      name = `task-${host}-${port}`;
-    }
-  } else if (parts.length === 3) {
-    name = parts[0];
-    host = parts[1];
-    port = Number(parts[2]);
-  } else {
-    throw new Error(t("batch.errors.onlySupportFormats", { lineNo }));
-  }
-
-  if (!host || !Number.isInteger(Number(port)) || Number(port) <= 0 || Number(port) > 65535) {
-    throw new Error(t("batch.errors.portInvalid", { lineNo }));
-  }
-  if (!name) {
-    name = `task-${host}-${port}`;
-  }
-  const clusterKey = makeClusterKey(name, host, Number(port), lineNo);
-  const clusterKeyErr = validateClusterKey(clusterKey);
-  if (clusterKeyErr) {
-    throw new Error(t("batch.errors.clusterKeyInvalid", { lineNo, error: clusterKeyErr }));
-  }
-
-  return {
-    lineNo,
-    name,
-    host,
-    port: Number(port),
-    clusterKey,
-  };
-}
-
-function parseBatchLines(rawText) {
-  const rows = [];
-  const errors = [];
-  const sourceSeen = new Set();
-  const nameSeen = new Set();
-  const clusterKeySeen = new Set();
-
-  const lines = rawText.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
-    const lineNo = i + 1;
-    const raw = lines[i].trim();
-    if (!raw || raw.startsWith("#")) continue;
-
-    try {
-      const row = parseBatchLine(raw, lineNo);
-      const sourceKey = `${row.host}:${row.port}`;
-      const nameKey = row.name.toLowerCase();
-      if (sourceSeen.has(sourceKey)) {
-        throw new Error(t("batch.errors.sourceDuplicate", { lineNo, source: sourceKey }));
-      }
-      if (nameSeen.has(nameKey)) {
-        throw new Error(t("batch.errors.nameDuplicate", { lineNo, name: row.name }));
-      }
-      if (clusterKeySeen.has(row.clusterKey)) {
-        throw new Error(t("batch.errors.clusterKeyDuplicate", { lineNo, key: row.clusterKey }));
-      }
-      sourceSeen.add(sourceKey);
-      nameSeen.add(nameKey);
-      clusterKeySeen.add(row.clusterKey);
-      rows.push({ ...row, valid: true, error: "" });
-    } catch (err) {
-      const msg = err?.message || t("batch.errors.lineFormatError", { lineNo });
-      rows.push({
-        lineNo,
-        name: "--",
-        host: "--",
-        port: "--",
-        valid: false,
-        error: msg,
-      });
-      errors.push(msg);
-    }
-  }
-  if (!rows.length) {
-    errors.push(t("batch.noData"));
-  }
-  return { rows, errors };
-}
-
-function parseHostPort(text, lineNo) {
-  const idx = text.lastIndexOf(":");
-  if (idx <= 0 || idx === text.length - 1) throw new Error(t("batch.errors.hostPortFormatError", { lineNo }));
-  const host = text.slice(0, idx).trim();
-  const port = Number(text.slice(idx + 1).trim());
-  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error(t("batch.errors.hostPortFormatError", { lineNo }));
-  }
-  return [host, port];
-}
-
-function previewBatchCreate() {
-  const parsed = parseBatchLines(batchForm.lines || "");
-  batchPreview.rows = parsed.rows;
-  batchPreview.errors = parsed.errors;
-  batchPreview.validCount = parsed.rows.filter((x) => x.valid).length;
-  batchPreview.ready = true;
-  batchPreview.canSubmit = batchPreview.validCount > 0 && parsed.errors.length === 0;
-
-  if (!batchPreview.rows.length || parsed.errors.length > 0) {
-    ElMessage.warning(t("msg.previewComplete", { valid: batchPreview.validCount, errors: parsed.errors.length }));
-    return;
-  }
-  ElMessage.success(t("msg.previewPassed", { count: batchPreview.validCount }));
-}
-
-async function submitBatchCreate() {
-  try {
-    if (!batchPreview.ready) {
-      ElMessage.warning(t("msg.previewFirst"));
-      return;
-    }
-    if (!batchPreview.canSubmit) {
-      ElMessage.error(t("msg.previewFailed"));
-      return;
-    }
-    if (!batchForm.user.trim()) {
-      ElMessage.error(t("msg.userRequired"));
-      return;
-    }
-    const rows = batchPreview.rows.filter((x) => x.valid);
-
-    let success = 0;
-    const errors = [];
-    for (let i = 0; i < rows.length; i += 1) {
-      const row = rows[i];
-      const source = {
-        host: row.host,
-        port: row.port,
-        user: batchForm.user.trim(),
-        flavor: batchForm.flavor?.trim() || "mysql",
-        server_id: Number(batchForm.serverIdStart) + i,
-        semi_sync: !!batchForm.semiSync,
-      };
-      if (batchForm.password) {
-        source.password = batchForm.password;
-      }
-
-      const payload = {
-        name: row.name,
-        cluster_key: row.clusterKey,
-        source,
-        start: { mode: "LATEST" },
-        storage: { retention_days: Number(batchForm.retentionDays) },
-      };
-      const validationErr = validateTaskPayload(payload);
-      if (validationErr) {
-        errors.push(`${row.name}(${row.host}:${row.port}) -> ${validationErr}`);
-        continue;
-      }
-
-      try {
-        const created = await createTask(payload);
-        if (batchForm.autoStart) {
-          await startTask(created.id);
-        }
-        success += 1;
-      } catch (err) {
-        errors.push(`${row.name}(${row.host}:${row.port}) -> ${parseErr(err)}`);
-      }
-    }
-
-    await refreshAll();
-    if (!errors.length) {
-      ElMessage.success(t("msg.batchCreateSuccess", { count: success }));
-      batchVisible.value = false;
-      return;
-    }
-
-    ElMessage.warning(t("msg.batchPartialSuccess", { success, failed: errors.length }));
-    await ElMessageBox.alert(`<pre style="white-space: pre-wrap">${errors.join("\n")}</pre>`, t("msg.batchCreateFailedDetail"), {
-      dangerouslyUseHTMLString: true,
-      confirmButtonText: t("btn.gotIt"),
-    });
-  } catch (err) {
-    ElMessage.error(parseErr(err));
-  }
-}
-
 async function submitForm() {
   try {
     const payload = buildPayload();
@@ -1631,6 +815,14 @@ function onRowClick(row) {
   void showDetail(row.task);
 }
 
+function onTableKeyEnter(e) {
+  const tr = e.target.closest("tr");
+  if (!tr) return;
+  const trs = Array.from(tr.closest("tbody")?.querySelectorAll("tr") || []);
+  const idx = trs.indexOf(tr);
+  if (idx >= 0 && idx < pagedTasks.value.length) onRowClick(pagedTasks.value[idx]);
+}
+
 async function retryFailedUploads(task) {
   try {
     await retryUpload(task.id, 100);
@@ -1641,254 +833,31 @@ async function retryFailedUploads(task) {
   }
 }
 
-async function showDetail(taskOrID) {
-  try {
-    const id = typeof taskOrID === "string" ? taskOrID : taskOrID.id;
-    const [task, cp, evs, fs, replication] = await Promise.all([
-      getTask(id),
-      getCheckpoint(id),
-      listEvents(id, 120),
-      listFiles(id, 80),
-      getReplication(id),
-    ]);
-    const [leaseResult, runsResult] = await Promise.allSettled([
-      getTaskLease(id),
-      listTaskRuns(id, RUN_HISTORY_LIMIT),
-    ]);
-    const lease = leaseResult.status === "fulfilled" ? leaseResult.value : null;
-    const runs = runsResult.status === "fulfilled" ? runsResult.value : [];
 
-    detailTask.value = task;
-    detailReplication.value = replication;
-    detailLease.value = lease;
-    detailRuns.value = Array.isArray(runs) ? runs : [];
-    runHistoryLimit.value = RUN_HISTORY_LIMIT;
-    checkpoint.value = cp;
-    events.value = evs || [];
-    files.value = fs || [];
-    if (lease) {
-      cluster.leaseByTask[id] = lease;
-    }
-    detailVisible.value = true;
-  } catch (err) {
-    ElMessage.error(parseErr(err));
-  }
-}
-
-function sourceLabel(task) {
-  return `${task?.source?.host || "-"}:${task?.source?.port || "-"}`;
-}
-
-function ownerWorkerLabel(task) {
-  const leaseWorker = cluster.leaseByTask[task?.id]?.owner_worker_id;
-  return task?.owner_worker_id || leaseWorker || "--";
-}
-
-function leaseRiskTagType(task, leaseOverride = null) {
-  const lease = leaseOverride || cluster.leaseByTask[task?.id];
-  const owner = lease?.owner_worker_id || task?.owner_worker_id;
-  const epoch = Number(lease?.epoch ?? task?.epoch ?? 0);
-  if (!owner || epoch <= 0) return "info";
-
-  const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
-  if (updatedMs <= 0) return "warning";
-  const stale = nowRefMs() - updatedMs > LEASE_RISK_SECONDS * 1000;
-  return stale ? "warning" : "success";
-}
-
-function leaseRiskLabel(task, leaseOverride = null) {
-  const lease = leaseOverride || cluster.leaseByTask[task?.id];
-  const owner = lease?.owner_worker_id || task?.owner_worker_id;
-  const epoch = Number(lease?.epoch ?? task?.epoch ?? 0);
-  if (!owner || epoch <= 0) return "--";
-
-  const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
-  if (updatedMs <= 0) return t("lease.risk");
-  const stale = nowRefMs() - updatedMs > LEASE_RISK_SECONDS * 1000;
-  return stale ? t("lease.risk") : t("lease.normal");
-}
-
-function stateTagType(state) {
-  if (state === "RUNNING") return "success";
-  if (state === "RETRY_BACKOFF") return "warning";
-  if (state === "FAILED") return "danger";
-  return "info";
-}
-
-function replicationTagType(status) {
-  if (status === "NORMAL") return "success";
-  if (status === "DELAYED") return "warning";
-  if (status === "ABNORMAL") return "danger";
-  return "info";
-}
-
-function formatDelay(delaySeconds, hasProgress) {
-  if (!hasProgress || delaySeconds === undefined || delaySeconds === null) {
-    return "--";
-  }
-  return String(delaySeconds);
-}
-
-function formatTs(ts) {
-  if (!ts) return "--";
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return "--";
-  return date.toLocaleString(currentLocale.value);
-}
-
-function toTimeMs(ts) {
-  if (!ts) return 0;
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return 0;
-  return date.getTime();
-}
-
-function nowRefMs() {
-  const dashboardMs = toTimeMs(dashboard.generated_at);
-  return dashboardMs > 0 ? dashboardMs : Date.now();
-}
-
-function formatCheckpoint(cp) {
-  if (!cp) return t("detail.noCheckpoint");
-  const file = cp.file || cp.File || cp.file_name || cp.FileName || cp.binlog_file || cp.BinlogFile || "-";
-  const pos = cp.pos ?? cp.Pos ?? cp.position ?? cp.Position ?? cp.binlog_pos ?? cp.BinlogPos ?? 0;
-  return `${file}:${pos}`;
-}
-
-function formatReplicationReason(rep) {
-  if (!rep) return "--";
-  const reasonMap = {
-    NO_PROGRESS: t("replication.noProgress"),
-    DELAY_EXCEEDS_THRESHOLD: t("replication.delayExceedsThreshold"),
-    RUNNER_ERROR: t("replication.runnerError"),
-    TASK_STATE_ERROR: t("replication.taskStateError"),
-  };
-  const rawErr = rep.last_error || rep.error || rep.err || rep.message || "";
-  if (rawErr) {
-    const label = reasonMap[rep.reason] || rep.reason || t("replication.runnerError");
-    return `${label}: ${rawErr}`;
-  }
-  if (rep.reason) return reasonMap[rep.reason] || rep.reason;
-  if (rep.status === "DELAYED") return t("replication.delayExceedsThreshold");
-  if (rep.status === "ABNORMAL") return t("replication.abnormalNoDetail");
-  return "--";
-}
-
-function hasReplicationReason(rep) {
-  return formatReplicationReason(rep) !== "--";
-}
-
-function parseErr(err) {
-  if (typeof err?.response?.data === "string") return err.response.data;
-  if (err?.response?.data) return JSON.stringify(err.response.data);
-  return err?.message || String(err);
-}
-
-function makeClusterKey(name, host, port, lineNo = 0) {
-  const raw = `${name}-${host}-${port}-${lineNo}`.toLowerCase();
-  const key = raw
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  return key || `cluster-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-}
-
-function validateClusterKey(clusterKeyRaw) {
-  const clusterKey = String(clusterKeyRaw || "").trim();
-  if (!clusterKey) {
-    return t("validation.clusterKeyEmpty");
-  }
-  if (
-    clusterKey.includes("/") ||
-    clusterKey.includes("\\") ||
-    clusterKey.includes("..") ||
-    !CLUSTER_KEY_PATTERN.test(clusterKey)
-  ) {
-    return t("validation.clusterKeyInvalid");
-  }
-  return "";
-}
-
-function validateTaskPayload(payload) {
-  const name = String(payload?.name || "").trim();
-  if (!name || name.length > NAME_MAX_LENGTH) {
-    return t("validation.taskNameInvalid");
-  }
-
-  const clusterKeyErr = validateClusterKey(payload?.cluster_key);
-  if (clusterKeyErr) {
-    return clusterKeyErr;
-  }
-
-  const source = payload?.source || {};
-  const host = String(source.host || "").trim();
-  const user = String(source.user || "").trim();
-  const flavorRaw = String(source.flavor || "").trim();
-  const flavor = flavorRaw || "mysql";
-  const port = Number(source.port || 0);
-  const serverID = Number(source.server_id || 0);
-
-  if (!host || host.length > SOURCE_HOST_MAX_LENGTH || hasWhitespace(host)) {
-    return t("validation.hostInvalid");
-  }
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return t("validation.portInvalid");
-  }
-  if (!user || user.length > SOURCE_USER_MAX_LENGTH || hasWhitespace(user)) {
-    return t("validation.userInvalid");
-  }
-  if (!flavor || flavor.length > SOURCE_FLAVOR_MAX_LENGTH || !CLUSTER_KEY_PATTERN.test(flavor)) {
-    return t("validation.flavorInvalid");
-  }
-  if (!Number.isInteger(serverID) || serverID < 0 || serverID > 4294967295) {
-    return t("validation.serverIdInvalid");
-  }
-
-  const start = payload?.start || {};
-  const mode = String(start.mode || "").trim();
-  if (!["LATEST", "FILE_POS", "GTID"].includes(mode)) {
-    return t("validation.startModeInvalid");
-  }
-  if (mode === "FILE_POS") {
-    const file = String(start.file || "").trim();
-    const pos = Number(start.pos || 0);
-    if (!file || file.length > START_FILE_MAX_LENGTH || !Number.isInteger(pos) || pos <= 0) {
-      return t("validation.filePosRequired");
-    }
-  }
-  if (mode === "GTID") {
-    const gtidSet = String(start.gtid_set || "").trim();
-    if (!gtidSet) {
-      return t("validation.gtidSetRequired");
-    }
-  }
-
-  const retentionDays = Number(payload?.storage?.retention_days || 0);
-  if (!Number.isInteger(retentionDays) || retentionDays < RETENTION_DAYS_MIN || retentionDays > RETENTION_DAYS_MAX) {
-    return t("validation.retentionInvalid");
-  }
-
-  return "";
-}
-
-function hasWhitespace(text) {
-  return /\s/.test(String(text || ""));
-}
 </script>
 
-<style scoped>
-@import url("https://fonts.cdnfonts.com/css/geist");
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap");
-
+<style>
 .page-shell {
   --bg: #f5f5f4;
   --surface: #ffffff;
   --surface-soft: #f8f8f7;
+  --surface-raised: #fcfcfb;
   --line: #e7e5e4;
   --line-strong: #d6d3d1;
   --text: #111827;
+  --text-secondary: #374151;
+  --text-tertiary: #4b5563;
+  --text-muted: #9ca3af;
+  --text-label: #52525b;
+  --text-dim: #71717a;
+  --text-strong: #18181b;
   --sub: #6b7280;
   --accent: #111827;
+  --accent-hover: #1f2937;
+  --surface-page: #fafaf9;
+  --surface-card: #fdfdfc;
+  --text-heading: #3f3f46;
+  --line-connector: #d4d4d8;
 
   max-width: 1720px;
   margin: 0 auto;
@@ -1896,7 +865,7 @@ function hasWhitespace(text) {
   padding: 24px 24px 24px 252px;
   font-family: "Geist", "SF Pro Display", "PingFang SC", sans-serif;
   color: var(--text);
-  background: linear-gradient(180deg, #fafaf9 0%, var(--bg) 100%);
+  background: linear-gradient(180deg, var(--surface-page) 0%, var(--bg) 100%);
 }
 
 .page-shell--menu-collapsed {
@@ -1923,7 +892,7 @@ function hasWhitespace(text) {
 
 .kicker {
   margin: 0 0 2px;
-  color: #6b7280;
+  color: var(--sub);
   letter-spacing: 0.14em;
   font-size: 10px;
   font-weight: 700;
@@ -1943,7 +912,7 @@ h1 {
 
 .hero-desc {
   margin: 0;
-  color: #6b7280;
+  color: var(--sub);
   max-width: 520px;
   font-size: 14px;
   line-height: 1.55;
@@ -1961,7 +930,7 @@ h1 {
   margin-right: 6px;
 }
 
-.hero-actions :deep(.el-button) {
+.hero-actions .el-button {
   height: 34px;
   padding-inline: 13px;
   font-weight: 600;
@@ -1976,7 +945,7 @@ h1 {
 
 .metric-card {
   border: 1px solid var(--line);
-  background: #fcfcfb;
+  background: var(--surface-raised);
   border-radius: 12px;
   padding: 13px 14px;
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.025);
@@ -1991,7 +960,7 @@ h1 {
 
 .metric-card p {
   margin: 0;
-  color: #6b7280;
+  color: var(--sub);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -2001,7 +970,7 @@ h1 {
 }
 
 .metric-card i {
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 
 .metric-card strong {
@@ -2010,19 +979,19 @@ h1 {
   font-size: 28px;
   line-height: 1;
   letter-spacing: -0.03em;
-  color: #111827;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
 .metric-card:hover {
   transform: translateY(-1px);
-  border-color: #d6d3d1;
+  border-color: var(--line-strong);
   box-shadow: 0 6px 14px rgba(17, 24, 39, 0.04);
 }
 
 .metric-card[data-active='true'] {
   border-color: #cbd5e1;
-  background: #ffffff;
+  background: var(--surface);
   box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.14);
 }
 
@@ -2061,7 +1030,7 @@ h1 {
 
 .metric-card--success p,
 .metric-card--success i {
-  color: #6b7280;
+  color: var(--sub);
 }
 
 .metric-card--success strong {
@@ -2129,11 +1098,11 @@ h1 {
   width: 24px;
   height: 24px;
   border-radius: 7px;
-  background: #e7e5e4;
+  background: var(--line);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #52525b;
+  color: var(--text-label);
   font-size: 12px;
 }
 
@@ -2141,7 +1110,7 @@ h1 {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 .nav-pane--collapsed .nav-brand-text {
@@ -2151,7 +1120,7 @@ h1 {
 .nav-collapse-btn {
   border: 0;
   background: transparent;
-  color: #6b7280;
+  color: var(--sub);
   border-radius: 8px;
   width: 30px;
   height: 30px;
@@ -2161,7 +1130,7 @@ h1 {
 
 .nav-collapse-btn:hover {
   background: rgba(255, 255, 255, 0.6);
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 .nav-collapse-btn--dock {
@@ -2185,7 +1154,7 @@ h1 {
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
-  color: #374151;
+  color: var(--text-secondary);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2208,19 +1177,19 @@ h1 {
 }
 
 .nav-item i {
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 
 .nav-item--active {
   background: rgba(255, 255, 255, 0.88);
   border-color: rgba(148, 163, 184, 0.2);
-  color: #111827;
+  color: var(--text);
   font-weight: 600;
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.03);
 }
 
 .nav-item--active i {
-  color: #4b5563;
+  color: var(--text-tertiary);
 }
 
 .nav-item:hover {
@@ -2247,7 +1216,7 @@ h1 {
 
 .nav-badge {
   font-family: "IBM Plex Mono", monospace;
-  color: #9ca3af;
+  color: var(--text-muted);
   font-size: 11px;
 }
 
@@ -2278,7 +1247,7 @@ h1 {
 }
 
 .panel-card--secondary {
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .panel-title {
@@ -2297,7 +1266,7 @@ h1 {
 
 .panel-title i {
   margin-right: 8px;
-  color: #525252;
+  color: var(--text-label);
 }
 
 .panel-hint {
@@ -2361,37 +1330,37 @@ h1 {
 }
 
 .switch-row {
-  border: 1px dashed #d6d3d1;
+  border: 1px dashed var(--line-strong);
   border-radius: 12px;
   padding: 12px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   color: var(--sub);
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
-.filter-chip-row :deep(.el-button) {
+.filter-chip-row .el-button {
   min-height: 32px;
   padding-inline: 12px;
   border-radius: 999px;
   font-weight: 600;
 }
 
-.filter-stack :deep(.el-input__wrapper),
-.filter-stack :deep(.el-select__wrapper) {
+.filter-stack .el-input__wrapper,
+.filter-stack .el-select__wrapper {
   min-height: 38px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
-.filter-stack :deep(.el-switch__core) {
-  border-color: #d6d3d1;
-  background: #e7e5e4;
+.filter-stack .el-switch__core {
+  border-color: var(--line-strong);
+  background: var(--line);
 }
 
-.filter-stack :deep(.el-switch.is-checked .el-switch__core) {
-  border-color: #111827;
-  background: #111827;
+.filter-stack .el-switch.is-checked .el-switch__core {
+  border-color: var(--text);
+  background: var(--accent);
 }
 
 .source-board {
@@ -2410,7 +1379,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 12px 12px 14px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
@@ -2427,7 +1396,7 @@ h1 {
   font-size: 28px;
   line-height: 1;
   letter-spacing: -0.03em;
-  color: #111827;
+  color: var(--text);
   font-family: "IBM Plex Mono", monospace;
 }
 
@@ -2442,7 +1411,7 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 12px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.02);
 }
 
@@ -2454,7 +1423,7 @@ h1 {
 }
 
 .cluster-worker-id {
-  color: #111827;
+  color: var(--text);
   font-size: 13px;
   letter-spacing: -0.01em;
 }
@@ -2467,31 +1436,31 @@ h1 {
 
 .cluster-worker-time {
   font-family: "IBM Plex Mono", monospace;
-  color: #6b7280;
+  color: var(--sub);
 }
 
 .overview-note {
   margin-top: 12px;
-  border: 1px dashed #d6d3d1;
+  border: 1px dashed var(--line-strong);
   border-radius: 12px;
   padding: 12px;
   color: var(--sub);
   font-size: 12px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
 .source-cell {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 12px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
 .source-name {
   margin: 0;
   font-weight: 600;
-  color: #111827;
+  color: var(--text);
   line-height: 1.35;
 }
 
@@ -2505,64 +1474,64 @@ h1 {
   line-height: 1.6;
 }
 
-.table-card :deep(.el-table) {
+.table-card .el-table {
   border-radius: 12px;
   overflow: hidden;
   --el-table-border-color: var(--line);
-  --el-table-row-hover-bg-color: #fafaf9;
-  --el-table-header-bg-color: #f8f8f7;
-  --el-table-tr-bg-color: #ffffff;
+  --el-table-row-hover-bg-color: var(--bg);
+  --el-table-header-bg-color: var(--surface-soft);
+  --el-table-tr-bg-color: var(--surface);
 }
 
-.table-card :deep(.el-table th.el-table__cell) {
-  background: #f8f8f7;
-  color: #4b5563;
+.table-card .el-table th.el-table__cell {
+  background: var(--surface-soft);
+  color: var(--text-tertiary);
   font-weight: 600;
   font-size: 12px;
   letter-spacing: 0.02em;
 }
 
-.table-card :deep(.el-table td.el-table__cell),
-.table-card :deep(.el-table th.el-table__cell) {
+.table-card .el-table td.el-table__cell,
+.table-card .el-table th.el-table__cell {
   border-bottom-color: var(--line);
   padding-top: 11px;
   padding-bottom: 11px;
 }
 
-.table-card :deep(.el-table .cell) {
+.table-card .el-table .cell {
   line-height: 1.45;
 }
 
-.table-card :deep(.el-table td.el-table__cell) {
-  color: #374151;
+.table-card .el-table td.el-table__cell {
+  color: var(--text-secondary);
 }
 
 .task-id-cell {
-  color: #6b7280;
+  color: var(--sub);
   font-family: "IBM Plex Mono", monospace;
   font-size: 12px;
 }
 
-.table-card :deep(.el-table__inner-wrapper::before) {
+.table-card .el-table__inner-wrapper::before {
   background-color: var(--line);
 }
 
-.table-card :deep(.el-table__body tr:hover > td.el-table__cell) {
-  background: #fafaf9;
+.table-card .el-table__body tr:hover > td.el-table__cell {
+  background: var(--surface-page);
 }
 
-.table-card :deep(.el-table__body tr) {
+.table-card .el-table__body tr {
   cursor: pointer;
 }
 
 .task-name-cell {
   font-weight: 600;
-  color: #111827;
+  color: var(--text);
 }
 
 .delay-cell {
   font-family: "IBM Plex Mono", monospace;
-  color: #374151;
+  color: var(--text-secondary);
 }
 
 .replication-cell {
@@ -2572,14 +1541,14 @@ h1 {
 }
 
 .reason-tip-icon {
-  color: #9ca3af;
+  color: var(--text-muted);
   font-size: 12px;
   cursor: help;
   transition: color 0.15s ease;
 }
 
 .reason-tip-icon:hover {
-  color: #4b5563;
+  color: var(--text-tertiary);
 }
 
 .action-row {
@@ -2589,26 +1558,26 @@ h1 {
   white-space: nowrap;
 }
 
-.table-card :deep(.action-col .cell) {
+.table-card .action-col .cell {
   white-space: nowrap;
   overflow: visible;
 }
 
-.table-card :deep(.action-row .el-button + .el-button) {
+.table-card .action-row .el-button + .el-button {
   margin-left: 0;
 }
 
-.table-card :deep(.action-btn) {
+.table-card .action-btn {
   border-color: transparent;
   background: transparent;
-  color: #6b7280;
+  color: var(--sub);
   font-weight: 500;
 }
 
-.table-card :deep(.action-btn:hover) {
+.table-card .action-btn:hover {
   border-color: var(--line);
-  background: #ffffff;
-  color: #111827;
+  background: var(--surface);
+  color: var(--text);
 }
 
 .pager-wrap {
@@ -2664,7 +1633,7 @@ h1 {
 
 .detail-panel--hero {
   border-color: var(--line-strong);
-  background: linear-gradient(180deg, #fdfdfc 0%, #fafaf9 100%);
+  background: linear-gradient(180deg, var(--surface-card) 0%, var(--surface-page) 100%);
   padding: 14px;
 }
 
@@ -2678,11 +1647,11 @@ h1 {
 .detail-hero h3 {
   margin-bottom: 0;
   font-size: 20px;
-  color: #111827;
+  color: var(--text);
 }
 
 .detail-hero-kicker {
-  color: #6b7280;
+  color: var(--sub);
   font-size: 11px;
   letter-spacing: 0.12em;
   font-weight: 700;
@@ -2717,12 +1686,12 @@ h1 {
   padding-top: 2px;
 }
 
-.detail-action-row :deep(.el-button) {
+.detail-action-row .el-button {
   min-width: 88px;
   min-height: 34px;
 }
 
-.detail-action-row :deep(.el-button--danger) {
+.detail-action-row .el-button--danger {
   margin-left: 8px;
 }
 
@@ -2741,7 +1710,7 @@ h1 {
 .detail-panel h3 {
   margin: 0 0 12px;
   font-size: 14px;
-  color: #3f3f46;
+  color: var(--text-heading);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2753,33 +1722,33 @@ h1 {
   margin-bottom: 10px;
 }
 
-.detail-panel :deep(.el-table) {
+.detail-panel .el-table {
   border-radius: 12px;
   overflow: hidden;
   --el-table-border-color: var(--line);
-  --el-table-header-bg-color: #f8f8f7;
-  --el-table-row-hover-bg-color: #fafaf9;
+  --el-table-header-bg-color: var(--surface-soft);
+  --el-table-row-hover-bg-color: var(--bg);
 }
 
-.detail-panel :deep(.el-table th.el-table__cell) {
-  background: #f8f8f7;
-  color: #52525b;
+.detail-panel .el-table th.el-table__cell {
+  background: var(--surface-soft);
+  color: var(--text-label);
   font-size: 12px;
   font-weight: 600;
 }
 
-.detail-panel :deep(.el-table td.el-table__cell),
-.detail-panel :deep(.el-table th.el-table__cell) {
+.detail-panel .el-table td.el-table__cell,
+.detail-panel .el-table th.el-table__cell {
   border-bottom-color: var(--line);
   padding-top: 9px;
   padding-bottom: 9px;
 }
 
-.detail-panel :deep(.el-timeline-item__node) {
-  background-color: #d4d4d8;
+.detail-panel .el-timeline-item__node {
+  background-color: var(--line-connector);
 }
 
-.detail-panel :deep(.el-timeline-item__tail) {
+.detail-panel .el-timeline-item__tail {
   border-left-color: #e7e5e4;
 }
 
@@ -2793,54 +1762,54 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px;
-  background: #fdfdfc;
+  background: var(--surface-card);
 }
 
 .detail-item span {
   display: block;
-  color: #71717a;
+  color: var(--text-dim);
   font-size: 12px;
 }
 
 .detail-item strong {
   margin-top: 6px;
   display: block;
-  color: #18181b;
+  color: var(--text-strong);
   word-break: break-word;
 }
 
 .form-hint {
   margin-top: 6px;
-  color: #71717a;
+  color: var(--text-dim);
   font-size: 12px;
   line-height: 1.5;
 }
 
-:deep(.el-card__header) {
+.el-card__header {
   border-bottom-color: var(--line);
 }
 
-:deep(.el-card__body) {
+.el-card__body {
   padding: 14px;
 }
 
 .task-detail-drawer {
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
-.task-detail-drawer :deep(.el-drawer__header) {
+.task-detail-drawer .el-drawer__header {
   margin-bottom: 0;
   padding: 18px 20px 14px;
   border-bottom: 1px solid var(--line);
 }
 
-.task-detail-drawer :deep(.el-drawer__title) {
-  color: #111827;
+.task-detail-drawer .el-drawer__title {
+  color: var(--text);
   font-size: 15px;
   font-weight: 700;
 }
 
-.task-detail-drawer :deep(.el-drawer__body) {
+.task-detail-drawer .el-drawer__body {
   padding: 16px 20px 20px;
 }
 
@@ -2849,20 +1818,20 @@ h1 {
   overflow: hidden;
 }
 
-.settings-dialog :deep(.el-dialog__header) {
+.settings-dialog .el-dialog__header {
   margin-right: 0;
   padding: 18px 20px 14px;
   border-bottom: 1px solid var(--line);
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
-.settings-dialog :deep(.el-dialog__title) {
-  color: #111827;
+.settings-dialog .el-dialog__title {
+  color: var(--text);
   font-size: 15px;
   font-weight: 700;
 }
 
-.settings-dialog :deep(.el-dialog__body) {
+.settings-dialog .el-dialog__body {
   padding: 18px 20px 14px;
 }
 
@@ -2871,80 +1840,80 @@ h1 {
   gap: 4px;
 }
 
-.settings-dialog :deep(.el-form-item) {
+.settings-dialog .el-form-item {
   margin-bottom: 16px;
 }
 
-.settings-dialog :deep(.el-form-item:last-child) {
+.settings-dialog .el-form-item:last-child {
   margin-bottom: 0;
 }
 
-.settings-dialog :deep(.el-form-item__label) {
-  color: #52525b;
+.settings-dialog .el-form-item__label {
+  color: var(--text-label);
   font-weight: 600;
 }
 
-.settings-dialog :deep(.el-input__wrapper),
-.settings-dialog :deep(.el-select__wrapper) {
+.settings-dialog .el-input__wrapper,
+.settings-dialog .el-select__wrapper {
   min-height: 40px;
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
-.settings-dialog :deep(.el-dialog__footer) {
+.settings-dialog .el-dialog__footer {
   padding: 12px 20px 18px;
   border-top: 1px solid var(--line);
-  background: #fcfcfb;
+  background: var(--surface-raised);
 }
 
-:deep(.el-input__wrapper),
-:deep(.el-select__wrapper),
-:deep(.el-input-number .el-input__wrapper) {
+.el-input__wrapper,
+.el-select__wrapper,
+.el-input-number .el-input__wrapper {
   border-radius: 10px;
   background: #fff;
   border: 1px solid var(--line);
   box-shadow: none;
 }
 
-:deep(.el-input__wrapper:hover),
-:deep(.el-select__wrapper:hover),
-:deep(.el-input-number .el-input__wrapper:hover) {
+.el-input__wrapper:hover,
+.el-select__wrapper:hover,
+.el-input-number .el-input__wrapper:hover {
   border-color: var(--line-strong);
 }
 
-:deep(.el-input__wrapper.is-focus),
-:deep(.el-select__wrapper.is-focused),
-:deep(.el-input-number .el-input__wrapper.is-focus) {
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-input-number .el-input__wrapper.is-focus {
   box-shadow: 0 0 0 1px #111827 inset;
 }
 
-:deep(.el-button) {
+.el-button {
   border-radius: 10px;
   font-weight: 500;
 }
-:deep(.el-button--primary) {
-  background: #111827;
-  border-color: #111827;
+.el-button--primary {
+  background: var(--accent);
+  border-color: var(--text);
   color: #fff;
 }
 
-:deep(.el-button--primary:hover) {
-  background: #1f2937;
-  border-color: #1f2937;
+.el-button--primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
-:deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger)) {
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger) {
   border-color: var(--line);
   background: #fff;
-  color: #374151;
+  color: var(--text-secondary);
 }
 
-:deep(.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):hover) {
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):hover {
   border-color: var(--line-strong);
-  background: #fafaf9;
-  color: #111827;
+  background: var(--surface-page);
+  color: var(--text);
 }
 
-.table-card :deep(.action-btn) {
+.table-card .action-btn {
   min-width: 56px;
   height: 28px;
   padding-left: 10px;
@@ -2955,19 +1924,19 @@ h1 {
   letter-spacing: 0.01em;
 }
 
-.table-card :deep(.action-btn.el-button--success) {
+.table-card .action-btn.el-button--success {
   background: #f0fdf4;
   border-color: #bbf7d0;
   color: #166534;
 }
 
-.table-card :deep(.action-btn.el-button--warning) {
+.table-card .action-btn.el-button--warning {
   background: #fffbeb;
   border-color: #fde68a;
   color: #92400e;
 }
 
-.table-card :deep(.action-btn.el-button--danger) {
+.table-card .action-btn.el-button--danger {
   background: #fef2f2;
   border-color: #fecaca;
   color: #991b1b;
@@ -2978,34 +1947,34 @@ h1 {
   outline-offset: 2px;
 }
 
-:deep(.el-tag) {
+.el-tag {
   border-radius: 999px;
   font-weight: 600;
   letter-spacing: 0.01em;
 }
 
-:deep(.el-tag--success) {
+.el-tag--success {
   background: #f4fbf6;
   border-color: #cfe8d6;
   color: #166534;
 }
 
-:deep(.el-tag--warning) {
+.el-tag--warning {
   background: #fffaf0;
   border-color: #efd99a;
   color: #92400e;
 }
 
-:deep(.el-tag--danger) {
+.el-tag--danger {
   background: #fff4f4;
   border-color: #f1c7c7;
   color: #991b1b;
 }
 
-:deep(.el-tag--info) {
+.el-tag--info {
   background: #f5f5f4;
-  border-color: #e7e5e4;
-  color: #52525b;
+  border-color: var(--line);
+  color: var(--text-label);
 }
 
 @keyframes rise-fade {
@@ -3101,6 +2070,53 @@ h1 {
 
   .detail-hero {
     flex-direction: column;
+  }
+}
+
+@media (max-width: 767px) {
+  .page-shell {
+    padding: 10px;
+  }
+
+  .hero {
+    padding: 14px 0 10px;
+  }
+
+  h1 {
+    font-size: 22px;
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .nav-pane {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .nav-collapse-btn--dock {
+    display: none;
+  }
+
+  .action-row {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .action-row .el-button {
+    flex: 1 1 auto;
+    min-width: 80px;
+  }
+
+  .hero-actions {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>
