@@ -21,6 +21,6 @@ test('hash URLs can deep-link to tasks/sources/alerts views', async ({ page }) =
 
   await page.goto('/#/alerts')
   await expect(page.getByTestId('view-nav-alerts')).toHaveClass(/nav-item--active/)
-  await expect(page.getByText('异常与告警任务')).toBeVisible()
+  await expect(page.locator('.table-card .panel-title', { hasText: '异常与告警' })).toBeVisible()
   await expect(page.getByText('告警筛选')).toBeVisible()
 })

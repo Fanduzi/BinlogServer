@@ -19,3 +19,5 @@ tmp/e2e/data/
 /*.pen
 /.codex/
 /.playwright-mcp/
+frontend/test-results/
+test-results/
