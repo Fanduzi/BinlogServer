@@ -181,6 +181,8 @@ export function useTaskFilter(dashboard) {
     activeQuickFilter,
     filteredTasks,
     pagedTasks,
+    debouncedKeyword,
+    debouncedSourceKeyword,
     resetUiFilter,
   };
 }
