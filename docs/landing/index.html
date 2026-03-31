@@ -1,0 +1,1210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BinlogServer — Centralized MySQL Binlog Backup Control Plane</title>
+  <meta name="description" content="BinlogServer is a centralized MySQL binlog backup control plane with durable local-first persistence, API/UI operations, cluster coordination, observability, and optional S3-compatible upload." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --accent2: #3fb950;
+      --warn: #d29922;
+      --danger: #f85149;
+      --glow: rgba(88,166,255,0.15);
+      --radius: 10px;
+      --transition: 0.2s ease;
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+    .mono,
+    .hero-code::before,
+    .hero-code code,
+    .code-block code,
+    .rules-table .mono,
+    .release-note,
+    .fit-badge {
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .tag-go     { background: rgba(0,168,220,0.15); color: #58d3f7; border: 1px solid rgba(0,168,220,0.3); }
+    .tag-api    { background: rgba(88,166,255,0.15); color: #9ecbff; border: 1px solid rgba(88,166,255,0.3); }
+    .tag-ui     { background: rgba(168,100,255,0.15); color: #c084fc; border: 1px solid rgba(168,100,255,0.3); }
+    .tag-cluster{ background: rgba(63,185,80,0.15); color: var(--accent2); border: 1px solid rgba(63,185,80,0.3); }
+    .tag-new    { background: rgba(210,153,34,0.15); color: var(--warn); border: 1px solid rgba(210,153,34,0.3); }
+
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(13,17,23,0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    nav .container {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 60px; gap: 16px;
+    }
+    .nav-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text);
+      flex-shrink: 0;
+    }
+    .nav-logo-icon {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, var(--accent), #79c0ff);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 900; font-size: 1rem; color: #0d1117;
+    }
+    .nav-logo-text { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.02em; }
+    .nav-links { display: flex; align-items: center; gap: 24px; list-style: none; margin-left: auto; }
+    .nav-links a { color: var(--muted); text-decoration: none; font-size: 0.875rem; font-weight: 500; transition: color var(--transition); }
+    .nav-links a:hover { color: var(--text); }
+    .nav-actions { display: flex; align-items: center; gap: 14px; }
+    .nav-lang {
+      display: inline-flex; align-items: center; gap: 8px;
+      color: var(--muted); font-size: 0.82rem;
+      border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
+      background: rgba(255,255,255,0.02);
+    }
+    .lang-btn {
+      border: none; background: transparent; color: var(--muted); cursor: pointer;
+      font: inherit; font-weight: 700; transition: color var(--transition), opacity var(--transition);
+      opacity: 0.7;
+    }
+    .lang-btn.active, .lang-btn:hover { color: var(--text); opacity: 1; }
+    .nav-cta {
+      padding: 7px 16px;
+      background: var(--accent); color: #0d1117;
+      border-radius: var(--radius); font-size: 0.85rem; font-weight: 600;
+      text-decoration: none; transition: opacity var(--transition);
+      flex-shrink: 0;
+    }
+    .nav-cta:hover { opacity: 0.85; color: #0d1117; }
+
+    .hero {
+      padding: 160px 0 100px;
+      text-align: center;
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 50%; transform: translateX(-50%);
+      width: 800px; height: 600px;
+      background: radial-gradient(ellipse at center, rgba(88,166,255,0.08) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .hero-badge { margin-bottom: 24px; }
+    .hero h1 {
+      font-size: clamp(2.9rem, 6vw, 4.6rem);
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      line-height: 1.03;
+      margin-bottom: 24px;
+      background: linear-gradient(135deg, #e6edf3 30%, #79c0ff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      white-space: pre-line;
+      max-width: 860px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .hero-sub {
+      font-size: clamp(1rem, 2.5vw, 1.18rem);
+      color: var(--muted);
+      max-width: 760px;
+      margin: 0 auto 40px;
+      line-height: 1.75;
+      white-space: pre-line;
+    }
+    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 48px; }
+    .btn-primary {
+      padding: 12px 28px;
+      background: var(--accent); color: #0d1117;
+      border-radius: var(--radius); font-weight: 700; font-size: 0.95rem;
+      text-decoration: none; border: none; cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(88,166,255,0.3); }
+    .btn-secondary {
+      padding: 12px 28px;
+      background: transparent; color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      font-weight: 600; font-size: 0.95rem;
+      text-decoration: none; cursor: pointer;
+      transition: border-color var(--transition), background var(--transition);
+    }
+    .btn-secondary:hover { border-color: var(--accent); background: var(--glow); }
+    .hero-code {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 28px;
+      max-width: 720px;
+      margin: 0 auto;
+      text-align: left;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero-code::before {
+      content: 'control plane';
+      position: absolute; top: 12px; left: 16px;
+      font-size: 0.7rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .hero-code code,
+    .code-block code {
+      font-size: 0.82rem;
+      line-height: 1.68;
+      letter-spacing: 0;
+      text-rendering: geometricPrecision;
+      -webkit-font-smoothing: auto;
+      font-weight: 400;
+    }
+    .hero-code code {
+      display: block;
+      color: #9ecbff;
+      padding-top: 20px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-weight: 400;
+    }
+    .hero-code .prompt { color: var(--accent2); }
+    .badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; justify-content: center; }
+
+    section { padding: 90px 0; }
+    section.alt { background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .section-label {
+      font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--accent);
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      font-weight: 800; letter-spacing: -0.03em;
+      margin-bottom: 16px; line-height: 1.15;
+      white-space: pre-line;
+    }
+    .section-sub {
+      font-size: 1rem; color: var(--muted);
+      max-width: 680px; margin-bottom: 48px; line-height: 1.7;
+      white-space: pre-line;
+    }
+
+    .impact-grid,
+    .capability-grid,
+    .surface-grid,
+    .fit-grid,
+    .trust-grid,
+    .release-grid {
+      display: grid;
+      gap: 16px;
+    }
+    .impact-grid { grid-template-columns: repeat(3, 1fr); }
+    .capability-grid { grid-template-columns: repeat(3, 1fr); }
+    .surface-grid { grid-template-columns: repeat(4, 1fr); }
+    .fit-grid { grid-template-columns: repeat(3, 1fr); }
+    .trust-grid { grid-template-columns: repeat(4, 1fr); }
+    .release-grid { grid-template-columns: 1fr 1fr; }
+
+    .card,
+    .surface-card,
+    .fit-card,
+    .trust-card,
+    .release-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      transition: border-color var(--transition), transform 0.15s ease;
+    }
+    .card:hover,
+    .surface-card:hover,
+    .fit-card:hover,
+    .trust-card:hover,
+    .release-card:hover { border-color: rgba(88,166,255,0.4); transform: translateY(-2px); }
+    .card h3,
+    .surface-card h3,
+    .fit-card h3,
+    .trust-card h3,
+    .release-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 10px; }
+    .card p,
+    .surface-card p,
+    .fit-card p,
+    .trust-card p,
+    .release-card p { font-size: 0.88rem; color: var(--muted); line-height: 1.7; }
+    .card-icon,
+    .surface-icon,
+    .fit-icon,
+    .trust-icon {
+      width: 40px; height: 40px;
+      background: rgba(88,166,255,0.1);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 16px;
+      font-size: 1.15rem;
+    }
+    .surface-card,
+    .trust-card { text-align: center; }
+    .surface-icon,
+    .trust-icon { margin-left: auto; margin-right: auto; }
+
+    .pipeline {
+      display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;
+      margin-bottom: 28px;
+    }
+    .pipeline-step {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 18px;
+      font-weight: 700;
+      font-size: 0.9rem;
+      text-align: center;
+      min-width: 145px;
+    }
+    .pipeline-step span { display: block; margin-top: 4px; font-size: 0.72rem; color: var(--muted); font-weight: 500; }
+    .pipeline-arrow { color: var(--border); font-size: 1.2rem; }
+
+    .rules-table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      font-size: 0.875rem;
+    }
+    .rules-table th {
+      background: rgba(88,166,255,0.06);
+      padding: 12px 16px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    .rules-table td { padding: 12px 16px; border-bottom: 1px solid rgba(48,54,61,0.5); vertical-align: top; }
+    .rules-table tr:last-child td { border-bottom: none; }
+    .rules-table tr:hover td { background: rgba(88,166,255,0.03); }
+    .rules-table .mono { color: var(--accent); font-size: 0.8rem; }
+
+    .fit-card.good { border-color: rgba(63,185,80,0.3); }
+    .fit-card.bad { border-color: rgba(248,81,73,0.3); }
+    .fit-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 14px;
+    }
+    .fit-list { display: grid; gap: 10px; }
+    .fit-item {
+      display: flex; align-items: flex-start; gap: 10px;
+      font-size: 0.86rem; color: var(--muted); line-height: 1.7;
+    }
+    .fit-item strong { color: var(--text); font-size: 0.8rem; min-width: 22px; }
+
+    .timeline { position: relative; padding-left: 32px; }
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 7px; top: 8px; bottom: 8px;
+      width: 2px;
+      background: linear-gradient(to bottom, var(--accent), rgba(88,166,255,0.1));
+      border-radius: 1px;
+    }
+    .timeline-item { position: relative; margin-bottom: 32px; }
+    .timeline-item::before {
+      content: '';
+      position: absolute;
+      left: -28px; top: 8px;
+      width: 10px; height: 10px;
+      background: var(--accent);
+      border-radius: 50%;
+      border: 2px solid var(--bg);
+    }
+    .timeline-date { font-size: 0.75rem; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+    .timeline-version { font-weight: 800; font-size: 1rem; margin-bottom: 6px; }
+    .release-note {
+      display: inline-flex; margin-top: 10px; padding: 4px 8px;
+      border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 0.72rem;
+    }
+
+    .cta-section {
+      padding: 100px 0;
+      text-align: center;
+      background: radial-gradient(ellipse at center, rgba(88,166,255,0.06) 0%, transparent 65%);
+    }
+    .cta-section h2 {
+      font-size: clamp(2rem, 5vw, 3rem);
+      font-weight: 900; letter-spacing: -0.04em;
+      margin-bottom: 16px;
+      white-space: pre-line;
+    }
+    .cta-section p { color: var(--muted); font-size: 1.08rem; margin-bottom: 40px; white-space: pre-line; }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 48px 0;
+    }
+    .footer-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr 1fr;
+      gap: 40px;
+      margin-bottom: 40px;
+    }
+    .footer-brand p { color: var(--muted); font-size: 0.85rem; margin-top: 12px; line-height: 1.6; max-width: 360px; white-space: pre-line; }
+    .footer-col-title { font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 16px; }
+    .footer-col ul { list-style: none; }
+    .footer-col li { margin-bottom: 8px; }
+    .footer-col a { color: var(--muted); text-decoration: none; font-size: 0.875rem; transition: color var(--transition); }
+    .footer-col a:hover { color: var(--text); }
+    .footer-bottom {
+      border-top: 1px solid var(--border);
+      padding-top: 24px;
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 16px;
+      font-size: 0.8rem; color: var(--muted);
+      flex-wrap: wrap;
+    }
+
+    .back-to-top {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      width: 44px;
+      height: 44px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(22,27,34,0.94);
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.3);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(8px);
+      transition: opacity var(--transition), transform var(--transition), border-color var(--transition);
+      z-index: 120;
+    }
+    .back-to-top.visible { opacity: 1; pointer-events: auto; transform: translateY(0); }
+    .back-to-top:hover { border-color: rgba(88,166,255,0.5); }
+    .back-to-top svg { width: 18px; height: 18px; }
+    .i18n-root { transition: opacity 0.18s ease, transform 0.18s ease; }
+    .i18n-root.switching { opacity: 0.72; transform: translateY(4px); }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-up { animation: fadeUp 0.6s ease forwards; opacity: 0; }
+    .reveal { opacity: 1; transform: none; transition: opacity 0.45s ease, transform 0.45s ease; }
+    .reveal.visible { opacity: 1; transform: none; }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .animate-fade-up,
+      .reveal,
+      .card,
+      .surface-card,
+      .fit-card,
+      .trust-card,
+      .release-card,
+      .back-to-top {
+        animation: none !important;
+        transition: none !important;
+        transform: none !important;
+      }
+      .animate-fade-up,
+      .reveal { opacity: 1 !important; }
+    }
+
+    @media (max-width: 980px) {
+      .impact-grid,
+      .capability-grid,
+      .fit-grid,
+      .release-grid,
+      .trust-grid { grid-template-columns: 1fr 1fr; }
+      .surface-grid { grid-template-columns: repeat(2, 1fr); }
+      .nav-links { display: none; }
+      .footer-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 640px) {
+      .impact-grid,
+      .capability-grid,
+      .fit-grid,
+      .release-grid,
+      .trust-grid,
+      .surface-grid,
+      .footer-grid { grid-template-columns: 1fr; }
+      .hero { padding: 120px 0 60px; }
+      .pipeline { flex-direction: column; }
+      .pipeline-arrow { transform: rotate(90deg); }
+      .nav-actions { gap: 8px; }
+      .nav-cta { padding: 7px 12px; }
+      .footer-bottom { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body id="top">
+  <div class="i18n-root" id="i18n-root">
+    <nav>
+    <div class="container">
+      <a href="#top" class="nav-logo">
+        <div class="nav-logo-icon">BS</div>
+        <span class="nav-logo-text">BinlogServer</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="#features" data-i18n="navFeatures">Features</a></li>
+        <li><a href="#pipeline" data-i18n="navPipeline">How it Works</a></li>
+        <li><a href="#positioning" data-i18n="navPositioning">Positioning</a></li>
+        <li><a href="#surfaces" data-i18n="navSurfaces">Surfaces</a></li>
+        <li><a href="#changelog" data-i18n="navChangelog">Changelog</a></li>
+      </ul>
+      <div class="nav-actions">
+        <div class="nav-lang" data-i18n-aria-label="langToggleAria" aria-label="Language switcher" role="group">
+          <button type="button" class="lang-btn active" data-lang="en" aria-pressed="true">EN</button>
+          <button type="button" class="lang-btn" data-lang="zh" aria-pressed="false">中文</button>
+        </div>
+        <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" class="nav-cta" data-i18n="navCta">Releases</a>
+      </div>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container" style="position:relative;">
+      <div class="hero-badge animate-fade-up" style="animation-delay:0.05s;">
+        <span class="tag tag-new" data-i18n="heroBadge">Durable local files · explicit checkpoint semantics</span>
+      </div>
+      <h1 class="animate-fade-up" style="animation-delay:0.12s;" data-i18n="heroTitle">MySQL binlog backup control plane
+for real operations</h1>
+      <p class="hero-sub animate-fade-up" style="animation-delay:0.2s;" data-i18n="heroSub">BinlogServer centralizes MySQL binlog backup behind one service. Run local-first durable capture, inspect state through API and embedded UI, scale into cluster roles, export metrics, and archive sealed files with optional S3-compatible upload.</p>
+      <div class="hero-actions animate-fade-up" style="animation-delay:0.28s;">
+        <a href="../guide/admin/deployment.md" class="btn-primary" data-i18n="heroPrimary">Open Deployment Guide</a>
+        <a href="#features" class="btn-secondary" data-i18n="heroSecondary">Learn More</a>
+      </div>
+      <div class="hero-code animate-fade-up" style="animation-delay:0.36s;">
+        <code data-i18n="heroCode">Control plane  Create → Start → Observe → Retry upload
+Data path      Pull binlog → Write local files → Seal → Archive
+Deployment     Standalone / Control-plane / Worker / All-in-one
+Signals        Checkpoint / Lag / Events / Workers / Metrics</code>
+      </div>
+      <div class="badge-row animate-fade-up" style="animation-delay:0.44s;">
+        <span class="tag tag-go">Go</span>
+        <span class="tag tag-api">API</span>
+        <span class="tag tag-ui">Embedded UI</span>
+        <span class="tag tag-cluster">Cluster</span>
+        <span class="tag tag-api">Prometheus</span>
+        <span class="tag tag-go">Apache 2.0</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="surfaces" class="alt">
+    <div class="container">
+      <p class="section-label" data-i18n="surfacesLabel">One product, four surfaces</p>
+      <h2 class="section-title" data-i18n="surfacesTitle">Same backup engine,
+every operating environment</h2>
+      <p class="section-sub" data-i18n="surfacesSub">BinlogServer exposes one operator model across API, embedded UI, cluster deployment, and observability. You are not stitching backup state together from unrelated tools.</p>
+
+      <div class="surface-grid">
+        <div class="surface-card reveal">
+          <div class="surface-icon">⚡</div>
+          <h3 data-i18n="surface1Title">HTTP API</h3>
+          <p data-i18n="surface1Body">Task lifecycle, checkpoint, replication status, files, dashboard data, cluster overview, and events.</p>
+        </div>
+        <div class="surface-card reveal">
+          <div class="surface-icon">🌐</div>
+          <h3 data-i18n="surface2Title">Embedded UI</h3>
+          <p data-i18n="surface2Body">A built-in operator console for daily backup management instead of a separate frontend deployment burden.</p>
+        </div>
+        <div class="surface-card reveal">
+          <div class="surface-icon">🧩</div>
+          <h3 data-i18n="surface3Title">Cluster Roles</h3>
+          <p data-i18n="surface3Body">Control-plane, worker, and all-in-one roles support HA-friendly coordination and execution separation.</p>
+        </div>
+        <div class="surface-card reveal">
+          <div class="surface-icon">📈</div>
+          <h3 data-i18n="surface4Title">Observability</h3>
+          <p data-i18n="surface4Body">Prometheus metrics, worker heartbeats, health checks, and task events make backup state continuously visible.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="container">
+      <p class="section-label" data-i18n="featuresLabel">Capabilities</p>
+      <h2 class="section-title" data-i18n="featuresTitle">Operate the parts that
+scripted backup usually hides</h2>
+      <p class="section-sub" data-i18n="featuresSub">The point is not merely pulling binlog. The point is making backup durable, inspectable, restartable, and operable by a team.</p>
+
+      <div class="capability-grid">
+        <div class="card reveal">
+          <div class="card-icon">🧱</div>
+          <h3 data-i18n="feature1Title">Durable local-first capture</h3>
+          <p data-i18n="feature1Body">Checkpoint advances only after local `fsync` succeeds, so progress reflects durable state instead of optimistic buffering.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon">🔄</div>
+          <h3 data-i18n="feature2Title">Explicit upload retry</h3>
+          <p data-i18n="feature2Body">S3-compatible upload is optional and best-effort. Archive failure does not stop replication, and retry stays operator-controlled.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon">🛰️</div>
+          <h3 data-i18n="feature3Title">Observable task state</h3>
+          <p data-i18n="feature3Body">Inspect lag, files, checkpoints, worker ownership, heartbeats, and event history through stable interfaces.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon">🎛️</div>
+          <h3 data-i18n="feature4Title">Task lifecycle control</h3>
+          <p data-i18n="feature4Body">Create, start, stop, inspect, and recover multiple backup tasks through one service instead of per-host ad hoc flows.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon">🗂️</div>
+          <h3 data-i18n="feature5Title">Multiple start modes</h3>
+          <p data-i18n="feature5Body">Support `LATEST`, `FILE_POS`, and `GTID` while preserving a single operator mental model for backup runs.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon">🛡️</div>
+          <h3 data-i18n="feature6Title">Cluster-aware coordination</h3>
+          <p data-i18n="feature6Body">Lease-backed ownership and worker heartbeat semantics support failover and cleaner role separation in production.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="pipeline" class="alt">
+    <div class="container">
+      <p class="section-label" data-i18n="pipelineLabel">Under the hood</p>
+      <h2 class="section-title" data-i18n="pipelineTitle">How the backup pipeline works</h2>
+      <p class="section-sub" data-i18n="pipelineSub">From operator intent to archive retry, the execution path is deterministic and easy to explain.</p>
+
+      <div class="pipeline">
+        <div class="pipeline-step" data-i18n="pipelineStep1">Create Task<span>source / start mode / retention</span></div>
+        <span class="pipeline-arrow">→</span>
+        <div class="pipeline-step" data-i18n="pipelineStep2">Run Capture<span>pull / write / rotate / seal</span></div>
+        <span class="pipeline-arrow">→</span>
+        <div class="pipeline-step" data-i18n="pipelineStep3">Archive<span>optional S3-compatible upload</span></div>
+        <span class="pipeline-arrow">→</span>
+        <div class="pipeline-step" data-i18n="pipelineStep4">Observe<span>metrics / workers / events</span></div>
+      </div>
+
+      <div class="impact-grid">
+        <div class="card reveal">
+          <div class="card-icon">📄</div>
+          <h3 data-i18n="pipelineCard1Title">Create</h3>
+          <p data-i18n="pipelineCard1Body">API validates task input, stores task metadata, and turns backup intent into a schedulable object.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon">⚙️</div>
+          <h3 data-i18n="pipelineCard2Title">Capture</h3>
+          <p data-i18n="pipelineCard2Body">Runner pulls binlog events, writes local files, rotates sealed segments, and updates checkpoint only after durable persistence.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon">📡</div>
+          <h3 data-i18n="pipelineCard3Title">Observe</h3>
+          <p data-i18n="pipelineCard3Body">Operators inspect file state, lag, retries, cluster health, and progress through metrics and APIs instead of shell output.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="positioning">
+    <div class="container">
+      <p class="section-label" data-i18n="positioningLabel">Positioning</p>
+      <h2 class="section-title" data-i18n="positioningTitle">Say what the product is,
+and what it is not</h2>
+      <p class="section-sub" data-i18n="positioningSub">This page should make one thing unmistakable: BinlogServer is a centralized MySQL binlog backup control plane. It is not a generic CDC platform or a broad event streaming layer.</p>
+
+      <table class="rules-table reveal">
+        <thead>
+          <tr>
+            <th data-i18n="positioningHead1">Claim</th>
+            <th data-i18n="positioningHead2">What supports it</th>
+            <th data-i18n="positioningHead3">How to say it</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td data-i18n="positioningRow1A">Durable progress</td>
+            <td data-i18n="positioningRow1B">Checkpoint only moves after local durability is confirmed.</td>
+            <td class="mono" data-i18n="positioningRow1C">Checkpoint advances only after local fsync succeeds.</td>
+          </tr>
+          <tr>
+            <td data-i18n="positioningRow2A">Archive support</td>
+            <td data-i18n="positioningRow2B">Uploader is optional, best-effort, and retryable without stopping capture.</td>
+            <td class="mono" data-i18n="positioningRow2C">Optional S3-compatible upload.</td>
+          </tr>
+          <tr>
+            <td data-i18n="positioningRow3A">Product category</td>
+            <td data-i18n="positioningRow3B">Capabilities and docs center on backup operations, not general CDC downstream fan-out.</td>
+            <td class="mono" data-i18n="positioningRow3C">Centralized MySQL binlog backup control plane.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="fit" class="alt">
+    <div class="container">
+      <p class="section-label" data-i18n="fitLabel">Good fit / Not fit</p>
+      <h2 class="section-title" data-i18n="fitTitle">Use BinlogServer where backup
+needs a real operating contract</h2>
+      <p class="section-sub" data-i18n="fitSub">Sharp products are easier to trust when they draw boundaries. BinlogServer fits backup operations that need reliability and visibility, not every database workflow under the sun.</p>
+
+      <div class="fit-grid">
+        <div class="fit-card good reveal">
+          <div class="fit-badge" data-i18n="fitGoodBadge">Good fit</div>
+          <h3 data-i18n="fitGoodTitle">Teams that need centralized backup operations</h3>
+          <div class="fit-list">
+            <div class="fit-item"><strong>01</strong><span data-i18n="fitGood1">Multiple MySQL sources with one service handling lifecycle, inspection, and recovery.</span></div>
+            <div class="fit-item"><strong>02</strong><span data-i18n="fitGood2">Operators who care about visible checkpoint semantics and restart behavior.</span></div>
+            <div class="fit-item"><strong>03</strong><span data-i18n="fitGood3">Environments that want local-first capture plus optional S3-compatible archive.</span></div>
+          </div>
+        </div>
+        <div class="fit-card bad reveal">
+          <div class="fit-badge" data-i18n="fitBadBadge">Not fit</div>
+          <h3 data-i18n="fitBadTitle">Teams looking for generic CDC infrastructure</h3>
+          <div class="fit-list">
+            <div class="fit-item"><strong>01</strong><span data-i18n="fitBad1">Broad transformation pipelines, fan-out delivery, or generalized stream processing.</span></div>
+            <div class="fit-item"><strong>02</strong><span data-i18n="fitBad2">Workloads that require remote object storage success to synchronously gate capture progress.</span></div>
+            <div class="fit-item"><strong>03</strong><span data-i18n="fitBad3">Temporary one-off scripting where centralized operations do not matter.</span></div>
+          </div>
+        </div>
+        <div class="fit-card reveal">
+          <div class="fit-badge" data-i18n="fitDecisionBadge">Positioning shortcut</div>
+          <h3 data-i18n="fitDecisionTitle">If the problem is backup operations, it fits</h3>
+          <p data-i18n="fitDecisionBody">If you need safer, more visible, centrally operated MySQL binlog backup, BinlogServer is the right story. If you need full CDC plumbing for downstream systems, it is the wrong headline.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="trust">
+    <div class="container">
+      <p class="section-label" data-i18n="trustLabel">Trust signals</p>
+      <h2 class="section-title" data-i18n="trustTitle">Credibility comes from operator evidence,
+not just promise copy</h2>
+      <p class="section-sub" data-i18n="trustSub">BinlogServer already has the right shape for a believable infrastructure product: API endpoints, UI iteration, E2E coverage, security policy, changelog cadence, and scenario-driven reliability work.</p>
+
+      <div class="trust-grid">
+        <div class="trust-card reveal">
+          <div class="trust-icon">📘</div>
+          <h3 data-i18n="trust1Title">Documented concepts</h3>
+          <p data-i18n="trust1Body">Deployment modes, observability, and architecture docs make the operator story explicit.</p>
+        </div>
+        <div class="trust-card reveal">
+          <div class="trust-icon">🧪</div>
+          <h3 data-i18n="trust2Title">Scenario testing</h3>
+          <p data-i18n="trust2Body">Quick and full E2E flows cover retry upload, cluster behavior, observability, and worker failure recovery.</p>
+        </div>
+        <div class="trust-card reveal">
+          <div class="trust-icon">🔐</div>
+          <h3 data-i18n="trust3Title">Security posture</h3>
+          <p data-i18n="trust3Body">Public security policy and hardening work signal that this is being shaped toward production use.</p>
+        </div>
+        <div class="trust-card reveal">
+          <div class="trust-icon">📦</div>
+          <h3 data-i18n="trust4Title">Visible release line</h3>
+          <p data-i18n="trust4Body">Recent releases show continued investment in operator console quality, auth guidance, and runtime reliability.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="changelog" class="alt">
+    <div class="container">
+      <p class="section-label" data-i18n="changelogLabel">Releases</p>
+      <h2 class="section-title" data-i18n="changelogTitle">Recent work trends toward
+better UI, better ops, better reliability</h2>
+      <p class="section-sub" data-i18n="changelogSub">The recent story is not random feature sprawl. It is clearer operator workflows, stronger frontend validation, and more production-minded behavior.</p>
+
+      <div class="release-grid">
+        <div class="release-card reveal">
+          <h3 data-i18n="releaseLeftTitle">Release timeline</h3>
+          <div class="timeline">
+            <div class="timeline-item">
+              <div class="timeline-date">2026-03-27</div>
+              <div class="timeline-version">v0.1.2</div>
+              <p data-i18n="release1">Workspace-oriented ops console updates and deeper task navigation improved the operator experience.</p>
+            </div>
+            <div class="timeline-item">
+              <div class="timeline-date">2026-03-25</div>
+              <div class="timeline-version">v0.1.1</div>
+              <p data-i18n="release2">Frontend E2E acceptance coverage, auth guidance, and retry-upload affordances strengthened real operating paths.</p>
+            </div>
+            <div class="timeline-item">
+              <div class="timeline-date">2026-03-09</div>
+              <div class="timeline-version">v0.1.0</div>
+              <p data-i18n="release3">The first public release landed with security policy, hardening, metrics, validation, and tracing work.</p>
+            </div>
+          </div>
+        </div>
+        <div class="release-card reveal">
+          <h3 data-i18n="releaseRightTitle">What the homepage should emphasize</h3>
+          <div class="timeline">
+            <div class="timeline-item">
+              <div class="timeline-date" data-i18n="releaseFocus1Date">Current direction</div>
+              <div class="timeline-version" data-i18n="releaseFocus1Title">Control plane maturity</div>
+              <p data-i18n="releaseFocus1Body">Stress centralized operations, not “yet another script that happens to pull binlog.”</p>
+              <span class="release-note" data-i18n="releaseNote1">UI + reliability + ops</span>
+            </div>
+            <div class="timeline-item">
+              <div class="timeline-date" data-i18n="releaseFocus2Date">Reliability message</div>
+              <div class="timeline-version" data-i18n="releaseFocus2Title">Durable local-first capture</div>
+              <p data-i18n="releaseFocus2Body">Checkpoint semantics and explicit retry-upload flows are better proof than vague infra slogans.</p>
+              <span class="release-note" data-i18n="releaseNote2">fsync-backed checkpoint</span>
+            </div>
+            <div class="timeline-item">
+              <div class="timeline-date" data-i18n="releaseFocus3Date">Boundary condition</div>
+              <div class="timeline-version" data-i18n="releaseFocus3Title">Not generic CDC</div>
+              <p data-i18n="releaseFocus3Body">Keep the story grounded in backup operations, cluster execution, observability, and optional S3-compatible archive.</p>
+              <span class="release-note" data-i18n="releaseNote3">backup control plane</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-section">
+    <div class="container">
+      <h2 data-i18n="ctaTitle">Move binlog backup out of shell history
+and into a real product surface</h2>
+      <p data-i18n="ctaSub">Review the deployment guide, inspect the release line, and evaluate BinlogServer as what it already is: a centralized MySQL binlog backup control plane.</p>
+      <div class="hero-actions" style="margin-bottom:0;">
+        <a href="../guide/admin/deployment.md" class="btn-primary" data-i18n="ctaPrimary">Open Deployment Guide</a>
+        <a href="../../research_product_website_20260330.md" class="btn-secondary" data-i18n="ctaSecondary">Read Product Research</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a href="#top" class="nav-logo" style="margin-bottom:0;">
+            <div class="nav-logo-icon">BS</div>
+            <span class="nav-logo-text">BinlogServer</span>
+          </a>
+          <p data-i18n="footerBrand">Centralized MySQL binlog backup service for teams that want durable local capture, visible state, and operator control. Apache 2.0 licensed.</p>
+          <div class="badge-row" style="justify-content:flex-start; margin-top:16px;">
+            <span class="tag tag-go">Go</span>
+            <span class="tag tag-go">Apache 2.0</span>
+          </div>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-title" data-i18n="footerCol1">Start</div>
+          <ul>
+            <li><a href="../guide/admin/deployment.md" data-i18n="footerLink1">Deployment Guide</a></li>
+            <li><a href="../../research_product_website_20260330.md" data-i18n="footerLink2">Product Research</a></li>
+            <li><a href="../../CHANGELOG.md" data-i18n="footerLink3">Changelog</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-title" data-i18n="footerCol2">Product</div>
+          <ul>
+            <li><a href="#features" data-i18n="footerLink4">Capabilities</a></li>
+            <li><a href="#pipeline" data-i18n="footerLink5">How it Works</a></li>
+            <li><a href="#fit" data-i18n="footerLink6">Good fit / Not fit</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-title" data-i18n="footerCol3">Project</div>
+          <ul>
+            <li><a href="https://github.com/Fanduzi/BinlogServer" target="_blank" rel="noopener">GitHub</a></li>
+            <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases</a></li>
+            <li><a href="https://github.com/Fanduzi/BinlogServer/issues" target="_blank" rel="noopener" data-i18n="footerLink8">Issues</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span data-i18n="footerBottomLeft">© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.</span>
+        <span data-i18n="footerBottomRight">Single-file bilingual landing page for local preview.</span>
+      </div>
+    </div>
+  </footer>
+
+    <button type="button" class="back-to-top" id="backToTop" data-i18n-aria-label="backToTopAria" aria-label="Back to top">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 15l-6-6-6 6"></path>
+      </svg>
+    </button>
+  </div>
+
+  <script>
+    const translations = {
+      en: {
+        pageTitle: 'BinlogServer — Centralized MySQL Binlog Backup Control Plane',
+        pageDescription: 'BinlogServer is a centralized MySQL binlog backup control plane with durable local-first persistence, API/UI operations, cluster coordination, observability, and optional S3-compatible upload.',
+        langToggleAria: 'Language switcher',
+        backToTopAria: 'Back to top',
+        navFeatures: 'Features',
+        navPipeline: 'How it Works',
+        navPositioning: 'Positioning',
+        navSurfaces: 'Surfaces',
+        navChangelog: 'Changelog',
+        navCta: 'Releases',
+        heroBadge: 'Durable local files · explicit checkpoint semantics',
+        heroTitle: 'MySQL binlog backup control plane\nfor real operations',
+        heroSub: 'BinlogServer centralizes MySQL binlog backup behind one service. Run local-first durable capture, inspect state through API and embedded UI, scale into cluster roles, export metrics, and archive sealed files with optional S3-compatible upload.',
+        heroPrimary: 'Open Deployment Guide',
+        heroSecondary: 'Learn More',
+        heroCode: 'Control plane  Create → Start → Observe → Retry upload\nData path      Pull binlog → Write local files → Seal → Archive\nDeployment     Standalone / Control-plane / Worker / All-in-one\nSignals        Checkpoint / Lag / Events / Workers / Metrics',
+        surfacesLabel: 'One product, four surfaces',
+        surfacesTitle: 'Same backup engine,\nevery operating environment',
+        surfacesSub: 'BinlogServer exposes one operator model across API, embedded UI, cluster deployment, and observability. You are not stitching backup state together from unrelated tools.',
+        surface1Title: 'HTTP API',
+        surface1Body: 'Task lifecycle, checkpoint, replication status, files, dashboard data, cluster overview, and events.',
+        surface2Title: 'Embedded UI',
+        surface2Body: 'A built-in operator console for daily backup management instead of a separate frontend deployment burden.',
+        surface3Title: 'Cluster Roles',
+        surface3Body: 'Control-plane, worker, and all-in-one roles support HA-friendly coordination and execution separation.',
+        surface4Title: 'Observability',
+        surface4Body: 'Prometheus metrics, worker heartbeats, health checks, and task events make backup state continuously visible.',
+        featuresLabel: 'Capabilities',
+        featuresTitle: 'Operate the parts that\nscripted backup usually hides',
+        featuresSub: 'The point is not merely pulling binlog. The point is making backup durable, inspectable, restartable, and operable by a team.',
+        feature1Title: 'Durable local-first capture',
+        feature1Body: 'Checkpoint advances only after local `fsync` succeeds, so progress reflects durable state instead of optimistic buffering.',
+        feature2Title: 'Explicit upload retry',
+        feature2Body: 'S3-compatible upload is optional and best-effort. Archive failure does not stop replication, and retry stays operator-controlled.',
+        feature3Title: 'Observable task state',
+        feature3Body: 'Inspect lag, files, checkpoints, worker ownership, heartbeats, and event history through stable interfaces.',
+        feature4Title: 'Task lifecycle control',
+        feature4Body: 'Create, start, stop, inspect, and recover multiple backup tasks through one service instead of per-host ad hoc flows.',
+        feature5Title: 'Multiple start modes',
+        feature5Body: 'Support `LATEST`, `FILE_POS`, and `GTID` while preserving a single operator mental model for backup runs.',
+        feature6Title: 'Cluster-aware coordination',
+        feature6Body: 'Lease-backed ownership and worker heartbeat semantics support failover and cleaner role separation in production.',
+        pipelineLabel: 'Under the hood',
+        pipelineTitle: 'How the backup pipeline works',
+        pipelineSub: 'From operator intent to archive retry, the execution path is deterministic and easy to explain.',
+        pipelineStep1: 'Create Task<span>source / start mode / retention</span>',
+        pipelineStep2: 'Run Capture<span>pull / write / rotate / seal</span>',
+        pipelineStep3: 'Archive<span>optional S3-compatible upload</span>',
+        pipelineStep4: 'Observe<span>metrics / workers / events</span>',
+        pipelineCard1Title: 'Create',
+        pipelineCard1Body: 'API validates task input, stores task metadata, and turns backup intent into a schedulable object.',
+        pipelineCard2Title: 'Capture',
+        pipelineCard2Body: 'Runner pulls binlog events, writes local files, rotates sealed segments, and updates checkpoint only after durable persistence.',
+        pipelineCard3Title: 'Observe',
+        pipelineCard3Body: 'Operators inspect file state, lag, retries, cluster health, and progress through metrics and APIs instead of shell output.',
+        positioningLabel: 'Positioning',
+        positioningTitle: 'Say what the product is,\nand what it is not',
+        positioningSub: 'This page should make one thing unmistakable: BinlogServer is a centralized MySQL binlog backup control plane. It is not a generic CDC platform or a broad event streaming layer.',
+        positioningHead1: 'Claim',
+        positioningHead2: 'What supports it',
+        positioningHead3: 'How to say it',
+        positioningRow1A: 'Durable progress',
+        positioningRow1B: 'Checkpoint only moves after local durability is confirmed.',
+        positioningRow1C: 'Checkpoint advances only after local fsync succeeds.',
+        positioningRow2A: 'Archive support',
+        positioningRow2B: 'Uploader is optional, best-effort, and retryable without stopping capture.',
+        positioningRow2C: 'Optional S3-compatible upload.',
+        positioningRow3A: 'Product category',
+        positioningRow3B: 'Capabilities and docs center on backup operations, not general CDC downstream fan-out.',
+        positioningRow3C: 'Centralized MySQL binlog backup control plane.',
+        fitLabel: 'Good fit / Not fit',
+        fitTitle: 'Use BinlogServer where backup\nneeds a real operating contract',
+        fitSub: 'Sharp products are easier to trust when they draw boundaries. BinlogServer fits backup operations that need reliability and visibility, not every database workflow under the sun.',
+        fitGoodBadge: 'Good fit',
+        fitGoodTitle: 'Teams that need centralized backup operations',
+        fitGood1: 'Multiple MySQL sources with one service handling lifecycle, inspection, and recovery.',
+        fitGood2: 'Operators who care about visible checkpoint semantics and restart behavior.',
+        fitGood3: 'Environments that want local-first capture plus optional S3-compatible archive.',
+        fitBadBadge: 'Not fit',
+        fitBadTitle: 'Teams looking for generic CDC infrastructure',
+        fitBad1: 'Broad transformation pipelines, fan-out delivery, or generalized stream processing.',
+        fitBad2: 'Workloads that require remote object storage success to synchronously gate capture progress.',
+        fitBad3: 'Temporary one-off scripting where centralized operations do not matter.',
+        fitDecisionBadge: 'Positioning shortcut',
+        fitDecisionTitle: 'If the problem is backup operations, it fits',
+        fitDecisionBody: 'If you need safer, more visible, centrally operated MySQL binlog backup, BinlogServer is the right story. If you need full CDC plumbing for downstream systems, it is the wrong headline.',
+        trustLabel: 'Trust signals',
+        trustTitle: 'Credibility comes from operator evidence,\nnot just promise copy',
+        trustSub: 'BinlogServer already has the right shape for a believable infrastructure product: API endpoints, UI iteration, E2E coverage, security policy, changelog cadence, and scenario-driven reliability work.',
+        trust1Title: 'Documented concepts',
+        trust1Body: 'Deployment modes, observability, and architecture docs make the operator story explicit.',
+        trust2Title: 'Scenario testing',
+        trust2Body: 'Quick and full E2E flows cover retry upload, cluster behavior, observability, and worker failure recovery.',
+        trust3Title: 'Security posture',
+        trust3Body: 'Public security policy and hardening work signal that this is being shaped toward production use.',
+        trust4Title: 'Visible release line',
+        trust4Body: 'Recent releases show continued investment in operator console quality, auth guidance, and runtime reliability.',
+        changelogLabel: 'Releases',
+        changelogTitle: 'Recent work trends toward\nbetter UI, better ops, better reliability',
+        changelogSub: 'The recent story is not random feature sprawl. It is clearer operator workflows, stronger frontend validation, and more production-minded behavior.',
+        releaseLeftTitle: 'Release timeline',
+        release1: 'Workspace-oriented ops console updates and deeper task navigation improved the operator experience.',
+        release2: 'Frontend E2E acceptance coverage, auth guidance, and retry-upload affordances strengthened real operating paths.',
+        release3: 'The first public release landed with security policy, hardening, metrics, validation, and tracing work.',
+        releaseRightTitle: 'What the homepage should emphasize',
+        releaseFocus1Date: 'Current direction',
+        releaseFocus1Title: 'Control plane maturity',
+        releaseFocus1Body: 'Stress centralized operations, not “yet another script that happens to pull binlog.”',
+        releaseNote1: 'UI + reliability + ops',
+        releaseFocus2Date: 'Reliability message',
+        releaseFocus2Title: 'Durable local-first capture',
+        releaseFocus2Body: 'Checkpoint semantics and explicit retry-upload flows are better proof than vague infra slogans.',
+        releaseNote2: 'fsync-backed checkpoint',
+        releaseFocus3Date: 'Boundary condition',
+        releaseFocus3Title: 'Not generic CDC',
+        releaseFocus3Body: 'Keep the story grounded in backup operations, cluster execution, observability, and optional S3-compatible archive.',
+        releaseNote3: 'backup control plane',
+        ctaTitle: 'Move binlog backup out of shell history\nand into a real product surface',
+        ctaSub: 'Review the deployment guide, inspect the release line, and evaluate BinlogServer as what it already is: a centralized MySQL binlog backup control plane.',
+        ctaPrimary: 'Open Deployment Guide',
+        ctaSecondary: 'Read Product Research',
+        footerBrand: 'Centralized MySQL binlog backup service for teams that want durable local capture, visible state, and operator control. Apache 2.0 licensed.',
+        footerCol1: 'Start',
+        footerLink1: 'Deployment Guide',
+        footerLink2: 'Product Research',
+        footerLink3: 'Changelog',
+        footerCol2: 'Product',
+        footerLink4: 'Capabilities',
+        footerLink5: 'How it Works',
+        footerLink6: 'Good fit / Not fit',
+        footerCol3: 'Project',
+        footerLink7: 'Releases',
+        footerLink8: 'Issues',
+        footerBottomLeft: '© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.',
+        footerBottomRight: 'Single-file bilingual landing page for local preview.'
+      },
+      zh: {
+        pageTitle: 'BinlogServer — 集中式 MySQL Binlog 备份控制平面',
+        pageDescription: 'BinlogServer 是一个集中式 MySQL binlog 备份控制平面，提供本地优先持久化、API/UI 运维入口、集群协调、可观测性，以及可选的兼容 S3 的上传能力。',
+        langToggleAria: '语言切换',
+        backToTopAria: '回到顶部',
+        navFeatures: '能力',
+        navPipeline: '工作原理',
+        navPositioning: '定位',
+        navSurfaces: '界面',
+        navChangelog: '版本',
+        navCta: '版本发布',
+        heroBadge: '本地可靠文件 · 明确检查点语义',
+        heroTitle: '面向真实运维的\nMySQL binlog 备份控制平面',
+        heroSub: 'BinlogServer 把 MySQL binlog 备份集中到一个服务里：本地优先的可靠采集、通过 API 与内置 UI 可见的运行状态、可扩展到集群角色的执行模型、Prometheus 指标，以及可选的兼容 S3 的归档上传。',
+        heroPrimary: '打开部署指南',
+        heroSecondary: '了解更多',
+        heroCode: '控制平面  创建 → 启动 → 观测 → 重试上传\n数据链路      拉取 binlog → 写入本地文件 → 封存 → 归档\n部署方式      单机 / 控制平面 / 工作节点 / 一体化\n观测信号      检查点 / 延迟 / 事件 / 工作节点 / 指标',
+        surfacesLabel: '一个产品，四类界面',
+        surfacesTitle: '同一套备份引擎，\n覆盖每个运维环境',
+        surfacesSub: 'BinlogServer 在 API、内置 UI、集群部署和可观测性之间共享同一套运维模型，而不是把备份状态拆散到多个互不相干的工具里。',
+        surface1Title: 'HTTP API',
+        surface1Body: '覆盖任务生命周期、检查点、复制状态、文件列表、仪表盘、集群总览与事件。',
+        surface2Title: '内置 UI',
+        surface2Body: '内建运维控制台，日常管理备份任务时不需要再额外维护一套独立前端部署。',
+        surface3Title: '集群角色',
+        surface3Body: '控制平面、工作节点与一体化角色支持更适合生产环境的高可用协调与执行分离。',
+        surface4Title: '可观测性',
+        surface4Body: 'Prometheus 指标、工作节点心跳、健康检查和任务事件让备份状态持续可见。',
+        featuresLabel: '核心能力',
+        featuresTitle: '把脚本式备份通常藏起来的部分\n真正运维起来',
+        featuresSub: '重点不只是拉取 binlog，而是把备份做成可靠、可检查、可重启、可由团队共同运维的系统。',
+        feature1Title: '本地优先、可靠落盘',
+        feature1Body: '只有本地 `fsync` 成功后检查点才会推进，因此进度反映的是可靠状态，而不是乐观缓冲。',
+        feature2Title: '显式上传重试',
+        feature2Body: '兼容 S3 的上传是可选的、尽力而为的。归档失败不会停止复制，重试仍由运维明确控制。',
+        feature3Title: '状态可观测',
+        feature3Body: '通过稳定接口检查延迟、文件、检查点、工作节点归属、心跳与事件历史。',
+        feature4Title: '任务生命周期控制',
+        feature4Body: '在一个服务中创建、启动、停止、检查并恢复多条备份任务，而不是依赖单机上的零散脚本流程。',
+        feature5Title: '多种起始模式',
+        feature5Body: '支持 `LATEST`、`FILE_POS` 和 `GTID`，同时保持统一的运维心智模型。',
+        feature6Title: '集群协调能力',
+        feature6Body: '基于租约的归属与工作节点心跳语义让故障切换和角色分离更适合生产环境。',
+        pipelineLabel: '内部机制',
+        pipelineTitle: '备份管线如何工作',
+        pipelineSub: '从运维意图到归档重试，整条执行路径是确定且容易解释的。',
+        pipelineStep1: '创建任务<span>数据源 / 起始模式 / 保留策略</span>',
+        pipelineStep2: '执行采集<span>拉取 / 写入 / 轮转 / 封存</span>',
+        pipelineStep3: '归档上传<span>可选的兼容 S3 上传</span>',
+        pipelineStep4: '持续观测<span>指标 / 工作节点 / 事件</span>',
+        pipelineCard1Title: '创建',
+        pipelineCard1Body: 'API 验证输入、存储任务元数据，把备份意图变成可调度对象。',
+        pipelineCard2Title: '采集',
+        pipelineCard2Body: '执行器拉取 binlog 事件、写入本地文件、轮转已封存分段，并且只在可靠持久化后更新检查点。',
+        pipelineCard3Title: '观测',
+        pipelineCard3Body: '运维团队通过指标和 API 检查文件状态、延迟、重试、集群健康与整体进度，而不是盯着 shell 输出。',
+        positioningLabel: '产品定位',
+        positioningTitle: '说清楚产品是什么，\n以及它不是什么',
+        positioningSub: '这个页面应该让一件事非常明确：BinlogServer 是集中式 MySQL binlog 备份控制平面，而不是通用 CDC 平台，更不是泛化事件流层。',
+        positioningHead1: '主张',
+        positioningHead2: '支撑依据',
+        positioningHead3: '建议表述',
+        positioningRow1A: '可靠进度',
+        positioningRow1B: '检查点只有在本地持久化确认之后才会推进。',
+        positioningRow1C: '只有本地 fsync 成功后，检查点才会推进。',
+        positioningRow2A: '归档能力',
+        positioningRow2B: '上传器是可选、尽力而为且支持重试的，不会阻塞采集。',
+        positioningRow2C: '可选的兼容 S3 上传。',
+        positioningRow3A: '产品类别',
+        positioningRow3B: '能力与文档都围绕备份运维，而不是通用 CDC 的下游分发。',
+        positioningRow3C: '集中式 MySQL binlog 备份控制平面。',
+        fitLabel: '适合 / 不适合',
+        fitTitle: '在备份真正需要\n运维契约的地方使用 BinlogServer',
+        fitSub: '边界清晰的产品更容易被信任。BinlogServer 适合需要可靠性与可见性的备份运维，而不是所有数据库工作流。',
+        fitGoodBadge: '适合',
+        fitGoodTitle: '需要集中式备份运维的团队',
+        fitGood1: '多个 MySQL 源实例由一个服务负责生命周期、检查与恢复。',
+        fitGood2: '关注检查点可见语义与重启行为的运维团队。',
+        fitGood3: '需要本地优先采集，同时希望可选接入兼容 S3 归档的环境。',
+        fitBadBadge: '不适合',
+        fitBadTitle: '寻找通用 CDC 基础设施的团队',
+        fitBad1: '大而全的转换流水线、fan-out 分发或泛化流处理。',
+        fitBad2: '要求远端对象存储成功必须同步决定采集进度是否前进的工作负载。',
+        fitBad3: '不需要集中运维、只做一次性脚本处理的临时场景。',
+        fitDecisionBadge: '一句话判断',
+        fitDecisionTitle: '如果问题是“备份运维”，它就合适',
+        fitDecisionBody: '如果你需要更安全、更可见、更集中式的 MySQL binlog 备份运维面，BinlogServer 就是正确叙事；如果你需要的是完整 CDC 基础设施，那这不是对的标题。',
+        trustLabel: '可信信号',
+        trustTitle: '基础设施产品的可信度来自运维证据，\n不只是宣传文案',
+        trustSub: 'BinlogServer 已经具备一个可信基础设施产品该有的轮廓：API 端点、UI 演进、E2E 覆盖、安全策略、版本节奏，以及场景化可靠性工作。',
+        trust1Title: '文档化概念',
+        trust1Body: '部署模式、可观测性与架构文档让运维故事是明确可读的。',
+        trust2Title: '场景测试',
+        trust2Body: '快速与完整 E2E 场景覆盖了重试上传、集群行为、可观测性与工作节点故障恢复。',
+        trust3Title: '安全姿态',
+        trust3Body: '公开的安全策略与加固工作说明项目正在朝生产可用方向打磨。',
+        trust4Title: '可见的版本线',
+        trust4Body: '近期版本持续投入在运维控制台质量、认证指引与运行期可靠性上。',
+        changelogLabel: '版本演进',
+        changelogTitle: '近期工作明显朝着\n更好的 UI、更好的运维、更好的可靠性前进',
+        changelogSub: '最近的变化不是零散功能堆砌，而是更清晰的运维流程、更强的前端验证，以及更偏生产的行为。',
+        releaseLeftTitle: '版本时间线',
+        release1: '面向工作区的运维控制台更新与更深入的任务导航体验提升了运维使用体验。',
+        release2: '前端 E2E 验收覆盖、认证指引和重试上传交互强化了真实运维路径。',
+        release3: '首个公开版本已经带有安全策略、加固工作、指标、输入校验与链路追踪。',
+        releaseRightTitle: '首页应该强调什么',
+        releaseFocus1Date: '当前方向',
+        releaseFocus1Title: '控制平面成熟度',
+        releaseFocus1Body: '强调集中式运维，而不是“另一个会拉 binlog 的脚本”。',
+        releaseNote1: 'UI + 可靠性 + 运维',
+        releaseFocus2Date: '可靠性信息',
+        releaseFocus2Title: '本地优先、可靠采集',
+        releaseFocus2Body: '检查点语义和显式重试上传流程，比空泛的基础设施口号更有说服力。',
+        releaseNote2: 'fsync 支撑的检查点',
+        releaseFocus3Date: '边界条件',
+        releaseFocus3Title: '不是通用 CDC',
+        releaseFocus3Body: '整个叙事应该牢牢落在备份运维、集群执行、可观测性和可选的兼容 S3 归档上。',
+        releaseNote3: '备份控制平面',
+        ctaTitle: '把 binlog 备份从命令行历史里拉出来，\n放回真正的产品界面',
+        ctaSub: '先看部署指南，再检查版本线，把 BinlogServer 当作它本来就已经是的东西去评估：集中式 MySQL binlog 备份控制平面。',
+        ctaPrimary: '打开部署指南',
+        ctaSecondary: '阅读产品研究',
+        footerBrand: '面向需要可靠本地采集、状态可见和运维控制的团队的集中式 MySQL binlog 备份服务。Apache 2.0 许可。',
+        footerCol1: '开始',
+        footerLink1: '部署指南',
+        footerLink2: '产品研究',
+        footerLink3: '版本记录',
+        footerCol2: '产品',
+        footerLink4: '核心能力',
+        footerLink5: '工作原理',
+        footerLink6: '适合 / 不适合',
+        footerCol3: '项目',
+        footerLink7: '版本发布',
+        footerLink8: '问题反馈',
+        footerBottomLeft: '© 2026 Fanduzi. BinlogServer 使用 Apache 2.0 许可证。',
+        footerBottomRight: '单文件双语落地页，可直接本地预览。'
+      }
+    };
+
+    const root = document.getElementById('i18n-root');
+    const applyLanguage = (lang) => {
+      const content = translations[lang] || translations.en;
+      document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+      document.title = content.pageTitle;
+      const description = document.querySelector('meta[name="description"]');
+      if (description) description.setAttribute('content', content.pageDescription);
+
+      document.querySelectorAll('[data-i18n]').forEach((node) => {
+        const key = node.dataset.i18n;
+        if (content[key]) node.innerHTML = content[key].replace(/\n/g, '<br>');
+      });
+
+      document.querySelectorAll('[data-i18n-aria-label]').forEach((node) => {
+        const key = node.dataset.i18nAriaLabel;
+        if (content[key]) node.setAttribute('aria-label', content[key]);
+      });
+
+      document.querySelectorAll('.lang-btn').forEach((button) => {
+        const isActive = button.dataset.lang === lang;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+
+      localStorage.setItem('binlogserver-lang', lang);
+    };
+
+    const switchLanguage = (lang) => {
+      root.classList.add('switching');
+      window.setTimeout(() => {
+        applyLanguage(lang);
+        root.classList.remove('switching');
+      }, 90);
+    };
+
+    const savedLanguage = localStorage.getItem('binlogserver-lang');
+    const preferredLanguage = savedLanguage || (navigator.language && navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en');
+    applyLanguage(preferredLanguage);
+
+    document.querySelectorAll('.lang-btn').forEach((button) => {
+      button.addEventListener('click', () => switchLanguage(button.dataset.lang));
+    });
+
+    const backToTop = document.getElementById('backToTop');
+    const toggleBackToTop = () => {
+      backToTop.classList.toggle('visible', window.scrollY > 520);
+    };
+
+    window.addEventListener('scroll', toggleBackToTop, { passive: true });
+    toggleBackToTop();
+
+    backToTop.addEventListener('click', () => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  </script>
+</body>
+</html>
