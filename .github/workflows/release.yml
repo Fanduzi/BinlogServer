@@ -52,6 +52,19 @@ jobs:
           version: "~> v2"
           args: check
 
+      - name: Verify Linux binary compatibility
+        run: make check-linux-compat VERSION="${GITHUB_REF_NAME}"
+
+      - name: Prepare release archives without publishing
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --skip=publish,announce --release-notes ${{ env.RELEASE_NOTES_FILE }}
+
+      - name: Verify Linux release archive compatibility
+        run: make check-linux-release-archive VERSION="${GITHUB_REF_NAME}"
+
       - name: Publish release assets
         uses: goreleaser/goreleaser-action@v7
         with:

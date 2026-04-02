@@ -51,11 +51,14 @@ FLUSH PRIVILEGES;
 # 从源码编译
 git clone https://github.com/your-org/binlog-server.git
 cd binlog-server
-go build -o binlog-server ./cmd/binlog-server
+make build-linux
+cp bin/binlog-server-linux-amd64 ./binlog-server
 
 # 或下载预编译版本
 # wget https://github.com/your-org/binlog-server/releases/download/v0.1.0/binlog-server-linux-amd64
 ```
+
+说明：Linux 部署二进制必须保持 `CGO_ENABLED=0`，避免 Ubuntu 等较新发行版构建出的产物绑定更高版本的 `glibc`；当前仓库的 `make build-linux` 和 release 流程默认按兼容 `glibc 2.17` 的方向构建。
 
 ### 2.2 创建配置文件
 
@@ -347,7 +350,7 @@ sudo systemctl status binlog-server
 FROM golang:1.24-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o binlog-server ./cmd/binlog-server
+RUN CGO_ENABLED=0 go build -o binlog-server ./cmd/binlog-server
 
 FROM alpine:3.19
 RUN apk --no-cache add ca-certificates tzdata

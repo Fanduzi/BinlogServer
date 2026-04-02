@@ -22,6 +22,10 @@
 
 - `make`（用于快捷命令）
 
+兼容性说明：
+
+- `run-server.sh` 构建的临时 Linux 测试二进制默认关闭 CGO，用于贴近 release 产物的 `glibc 2.17` 兼容基线。
+
 ## 推荐入口
 
 优先使用统一入口脚本 `run-suite.sh`：
@@ -58,7 +62,7 @@ make e2e SCENARIOS=smoke,compression
 ## 脚本列表
 
 - `up.sh`: 启动 4 个 source MySQL（`mysql57/mysql80/percona57/percona80`）并等待可用。
-- `run-server.sh`: 用 e2e 配置启动 `binlog-server`。
+- `run-server.sh`: 用 e2e 配置启动 `binlog-server`，并以 `CGO_ENABLED=0` 构建临时测试二进制，避免 Linux 测试环境绑定构建机 glibc。
 - `down.sh`: 清理 e2e 容器与 volume。
 - `smoke.sh`: 创建并启动 4 个基础任务，写入数据并查看 checkpoint。
 - `smoke-compression.sh`: 验证压缩事务场景，主动 rotate 并对比源端与备份 binlog 的 md5。

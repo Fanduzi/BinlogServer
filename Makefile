@@ -1,4 +1,4 @@
-.PHONY: help test build build-linux ui-build release-assets e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test build build-linux check-linux-compat check-linux-release-archive ui-build release-assets e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo devel)
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -9,8 +9,10 @@ GO_BUILD_LDFLAGS := -X '$(VERSION_PKG).buildVersion=$(VERSION)' -X '$(VERSION_PK
 help:
 	@echo "Targets:"
 	@echo "  make test                       # run unit tests"
-	@echo "  make build [VERSION=vX.Y.Z]     # build a local bin/binlog-server binary with embedded UI"
-	@echo "  make build-linux [VERSION=vX.Y.Z] # build a local bin/binlog-server-linux-amd64 binary with embedded UI"
+	@echo "  make build [VERSION=vX.Y.Z]     # build a local bin/binlog-server binary with embedded UI and CGO disabled"
+	@echo "  make build-linux [VERSION=vX.Y.Z] # build a Linux amd64 binary with CGO disabled for older glibc hosts"
+	@echo "  make check-linux-compat [VERSION=vX.Y.Z] # build Linux amd64 and assert no dynamic glibc dependency"
+	@echo "  make check-linux-release-archive VERSION=vX.Y.Z # verify the Linux amd64 release tar.gz embeds a glibc-safe binary"
 	@echo "  make ui-build                   # build frontend and sync to internal/ui/static"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
@@ -29,11 +31,32 @@ test:
 
 build: ui-build
 	@mkdir -p bin
-	go build -ldflags "$(GO_BUILD_LDFLAGS)" -o $${BINARY:-bin/binlog-server} ./cmd/binlog-server
+	CGO_ENABLED=0 go build -ldflags "$(GO_BUILD_LDFLAGS)" -o $${BINARY:-bin/binlog-server} ./cmd/binlog-server
 
 build-linux: ui-build
 	@mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(GO_BUILD_LDFLAGS)" -o $${BINARY:-bin/binlog-server-linux-amd64} ./cmd/binlog-server
+
+check-linux-compat: build-linux
+	./scripts/check-linux-compat.sh $${BINARY:-bin/binlog-server-linux-amd64}
+
+check-linux-release-archive:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "usage: make check-linux-release-archive VERSION=v0.1.0"; \
+		exit 1; \
+	fi
+	@archive_path=""; \
+	for candidate in "dist/binlog-server_$(VERSION)_linux_amd64.tar.gz" "dist/$(VERSION)/binlog-server_$(VERSION)_linux_amd64.tar.gz"; do \
+		if [ -f "$$candidate" ]; then \
+			archive_path="$$candidate"; \
+			break; \
+		fi; \
+	done; \
+	if [ -z "$$archive_path" ]; then \
+		echo "archive not found for VERSION=$(VERSION) under dist/"; \
+		exit 1; \
+	fi; \
+	./scripts/check-linux-release-archive.sh "$$archive_path"
 
 ui-build:
 	./scripts/build-ui.sh

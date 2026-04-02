@@ -70,8 +70,10 @@ Probably not a fit for:
 Source build remains the fallback path:
 
 ```bash
-make ui-build
-go build -o binlog-server ./cmd/binlog-server
+make build
+
+# Linux deployment binaries should keep CGO disabled to avoid host glibc coupling.
+make build-linux
 ```
 
 To prepare a local set of release assets:
