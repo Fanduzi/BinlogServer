@@ -72,8 +72,11 @@
 ### 本地构建
 
 ```bash
-# 构建后端
-go build -o binlog-server ./cmd/binlog-server
+# 构建后端（默认关闭 CGO，避免 Linux 产物绑定构建机 glibc）
+make build
+
+# 构建 Linux 发布二进制
+make build-linux
 
 # 构建前端
 make ui-build

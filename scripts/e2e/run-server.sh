@@ -16,5 +16,6 @@ BIN_PATH="${BINLOG_SERVER_BIN:-$ROOT_DIR/tmp/e2e/binlog-server-e2e}"
 mkdir -p "$DATA_DIR"
 mkdir -p "$(dirname "$BIN_PATH")"
 # 使用 e2e 配置启动后端；具体 role/listen_addr 等由 BINLOG_SERVER_* 环境变量覆盖。
-go build -o "$BIN_PATH" ./cmd/binlog-server
+# 关闭 CGO，避免 Linux 环境的测试二进制绑定构建机 glibc 版本。
+CGO_ENABLED=0 go build -o "$BIN_PATH" ./cmd/binlog-server
 exec "$BIN_PATH" --config "$CONFIG_PATH"

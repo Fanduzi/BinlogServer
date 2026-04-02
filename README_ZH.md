@@ -69,8 +69,10 @@ Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负�
 源码构建作为 fallback：
 
 ```bash
-make ui-build
-go build -o binlog-server ./cmd/binlog-server
+make build
+
+# Linux 部署二进制请保持 CGO 关闭，避免绑定构建机 glibc 版本。
+make build-linux
 ```
 
 如果你要在本地准备一组 release 产物：
