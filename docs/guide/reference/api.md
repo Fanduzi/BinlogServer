@@ -438,7 +438,7 @@ curl "http://localhost:8080/api/workers?limit=10"
       "session_id": "abc123",
       "role": "worker",
       "host": "10.0.1.1",
-      "version": "v0.1.0",
+      "version": "v0.4.1",
       "status": "ONLINE",
       "expires_at": "2024-01-01T10:10:00Z",
       "updated_at": "2024-01-01T10:00:00Z"
