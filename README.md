@@ -79,7 +79,7 @@ make build-linux
 To prepare a local set of release assets:
 
 ```bash
-make release-assets VERSION=v0.1.0
+make release-assets VERSION=v0.4.1
 ```
 
 ## Quick Start

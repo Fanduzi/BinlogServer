@@ -78,7 +78,7 @@ make build-linux
 如果你要在本地准备一组 release 产物：
 
 ```bash
-make release-assets VERSION=v0.1.0
+make release-assets VERSION=v0.4.1
 ```
 
 ## Quick Start
