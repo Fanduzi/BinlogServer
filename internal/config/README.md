@@ -14,6 +14,7 @@
 - `Decryptor.DecryptIfEncrypted(value)` - 解密带 `enc:aes256:` 前缀的值
 
 ## Configuration Sections
+- `meta_dsn` 为空时，standalone 控制面持久化到 `data_dir`（不再是纯内存）
 - `api.auth.*` - API 鉴权开关、模式（`bearer`/`api_key`）与凭证配置
 - `api.rate_limit.*` - API 限流配置（enabled/requests_per_second/burst），默认 100 req/s、burst 200
 - `http.control_plane.*` / `http.worker_health.*` - HTTP 超时配置

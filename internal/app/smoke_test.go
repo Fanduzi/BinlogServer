@@ -157,7 +157,7 @@ func (s *fakeAppMetaStore) snapshot() (acquireCalls, renewCalls, releaseCalls in
 
 // TestApp_StartAndServeHealth 验证相关行为。
 func TestApp_StartAndServeHealth(t *testing.T) {
-	cfg := config.Config{ListenAddr: "127.0.0.1:0"}
+	cfg := config.Config{ListenAddr: "127.0.0.1:0", DataDir: t.TempDir()}
 	a := New(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -199,6 +199,7 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 func TestApp_ClusterControlPlaneRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
+		DataDir:    t.TempDir(),
 		Mode:       "cluster",
 		Cluster: config.ClusterConfig{
 			Role: "control-plane",
@@ -224,7 +225,7 @@ func TestApp_ClusterControlPlaneRole(t *testing.T) {
 	createBody := `{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl"}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}
 	}`
 	createResp := postJSON(t, "http://"+a.Addr()+"/api/tasks", createBody)
 	if createResp.StatusCode != http.StatusCreated {
@@ -250,6 +251,7 @@ func TestApp_ClusterControlPlaneRole(t *testing.T) {
 func TestApp_ClusterWorkerRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
+		DataDir:    t.TempDir(),
 		Mode:       "cluster",
 		Cluster: config.ClusterConfig{
 			Role: "worker",
@@ -279,6 +281,7 @@ func TestApp_ClusterWorkerRole(t *testing.T) {
 func TestApp_ClusterWorkerRoleWithHealthProbe(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
+		DataDir:    t.TempDir(),
 		Mode:       "cluster",
 		Cluster: config.ClusterConfig{
 			Role:                   "worker",
@@ -316,6 +319,7 @@ func TestApp_ClusterWorkerRoleWithHealthProbe(t *testing.T) {
 func TestApp_ClusterAllInOneRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
+		DataDir:    t.TempDir(),
 		Mode:       "cluster",
 		Cluster: config.ClusterConfig{
 			Role: "all-in-one",
@@ -341,7 +345,7 @@ func TestApp_ClusterAllInOneRole(t *testing.T) {
 	createBody := `{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl"}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}
 	}`
 	createResp := postJSON(t, "http://"+a.Addr()+"/api/tasks", createBody)
 	if createResp.StatusCode != http.StatusCreated {
@@ -355,9 +359,10 @@ func TestApp_ClusterAllInOneRole(t *testing.T) {
 		t.Fatalf("decode create response: %v", err)
 	}
 	startResp := postJSON(t, "http://"+a.Addr()+"/api/tasks/"+created.ID+"/start", "")
-	if startResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected start status 204 in all-in-one role, got %d body=%s", startResp.StatusCode, string(startResp.Body))
+	if startResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected start status 200 in all-in-one role, got %d body=%s", startResp.StatusCode, string(startResp.Body))
 	}
+	_ = postJSON(t, "http://"+a.Addr()+"/api/tasks/"+created.ID+"/stop", "")
 
 	cancel()
 	waitRunExit(t, errCh)
@@ -927,7 +932,7 @@ func TestApp_RunWorkerIdentityStaysCoherentForActiveSession(t *testing.T) {
 	go func() { errCh <- a.Run(ctx) }()
 	waitReady(t, a)
 
-	taskBody := `{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl"}}`
+	taskBody := `{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`
 	createResp := postJSON(t, "http://"+a.Addr()+"/api/tasks", taskBody)
 	if createResp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected create status 201, got %d body=%s", createResp.StatusCode, string(createResp.Body))
@@ -939,8 +944,8 @@ func TestApp_RunWorkerIdentityStaysCoherentForActiveSession(t *testing.T) {
 		t.Fatalf("decode create response: %v", err)
 	}
 	startResp := postJSON(t, "http://"+a.Addr()+"/api/tasks/"+created.ID+"/start", "")
-	if startResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected start status 204, got %d body=%s", startResp.StatusCode, string(startResp.Body))
+	if startResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected start status 200, got %d body=%s", startResp.StatusCode, string(startResp.Body))
 	}
 
 	var startedTask tasks.Task

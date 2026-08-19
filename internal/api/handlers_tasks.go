@@ -338,36 +338,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req createTaskRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "invalid json")
 			return
 		}
 
-		task, err := s.tasks.CreateTask(req.Name, req.ClusterKey)
+		task, err := s.tasks.CreateTaskFromSpec(req.Name, req.ClusterKey, req.Source, req.Start, req.Storage)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if req.Source != nil {
-			if err := s.tasks.ConfigureSource(task.ID, *req.Source); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		if req.Start != nil {
-			if err := s.tasks.ConfigureStart(task.ID, *req.Start); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		if req.Storage != nil {
-			if err := s.tasks.ConfigureStorage(task.ID, *req.Storage); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		task, err = s.tasks.GetTask(task.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeTaskError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, sanitizeTask(task))
@@ -508,11 +485,19 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		if errors.Is(err, tasks.ErrTaskNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		writeTaskError(w, err)
+		return
+	}
+	if action == "start" {
+		task, getErr := s.tasks.GetTask(taskID)
+		if getErr != nil {
+			writeTaskError(w, getErr)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"id":    task.ID,
+			"state": string(task.State),
+		})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -702,7 +687,13 @@ func buildReplicationResponse(task tasks.Task, progress tasks.ReplicationProgres
 			resp.Reason = "TASK_STATE_ERROR"
 		}
 	case tasks.StateRunning:
-		if !exists || progress.LastEventAt.IsZero() {
+		if progress.CaughtUp {
+			resp.DelaySeconds = 0
+			resp.Status = "IDLE"
+			resp.Reason = ""
+			return resp
+		}
+		if !exists || (progress.LastEventAt.IsZero() && progress.LastEventFile == "") {
 			resp.Status = "ABNORMAL"
 			resp.Reason = "NO_PROGRESS"
 			return resp
@@ -750,14 +741,14 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 		})
 		if err != nil {
 			if errors.Is(err, tasks.ErrTaskNotFound) {
-				http.Error(w, err.Error(), http.StatusNotFound)
+				writeAPIError(w, http.StatusNotFound, "TASK_NOT_FOUND", err.Error())
 				return
 			}
 			if isTaskUpdateBadRequest(err) {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, err.Error())
 				return
 			}
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
 			return
 		}
 		writeJSON(w, http.StatusOK, sanitizeTask(updated))
@@ -783,10 +774,34 @@ func isTaskUpdateBadRequest(err error) bool {
 		errors.Is(err, tasks.ErrClusterKeyExists) ||
 		errors.Is(err, tasks.ErrInvalidTaskName) ||
 		errors.Is(err, tasks.ErrInvalidSourceConfig) ||
+		errors.Is(err, tasks.ErrSourceRequired) ||
+		errors.Is(err, tasks.ErrSourcePasswordRequired) ||
+		errors.Is(err, tasks.ErrStorageDirNotSupported) ||
 		errors.Is(err, tasks.ErrFilePosRequired) ||
 		errors.Is(err, tasks.ErrGTIDSetRequired) ||
 		errors.Is(err, tasks.ErrInvalidStartMode) ||
 		errors.Is(err, tasks.ErrInvalidRetentionDays)
+}
+
+type apiErrorBody struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, apiErrorBody{Error: msg, Code: code})
+}
+
+func writeTaskError(w http.ResponseWriter, err error) {
+	if errors.Is(err, tasks.ErrTaskNotFound) {
+		writeAPIError(w, http.StatusNotFound, "TASK_NOT_FOUND", err.Error())
+		return
+	}
+	if isTaskUpdateBadRequest(err) {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, err.Error())
+		return
+	}
+	writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, err.Error())
 }
 
 // writeJSON 统一输出 JSON 响应。

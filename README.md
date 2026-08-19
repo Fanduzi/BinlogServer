@@ -59,52 +59,55 @@ Probably not a fit for:
 
 ## Install / Download
 
-- For tagged public releases, download the archive that matches your platform from GitHub Releases:
-  - `binlog-server_<version>_darwin_amd64.tar.gz`
-  - `binlog-server_<version>_darwin_arm64.tar.gz`
-  - `binlog-server_<version>_linux_amd64.tar.gz`
-  - `binlog-server_<version>_linux_arm64.tar.gz`
-- The release page also provides `checksums.txt`; verify it before extracting.
-- UI assets are embedded into the binary, so you do not need to download a separate frontend package.
+For tagged public releases, download the archive that matches your platform from [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases):
 
-Source build remains the fallback path:
+- `binlog-server_<version>_darwin_amd64.tar.gz`
+- `binlog-server_<version>_darwin_arm64.tar.gz`
+- `binlog-server_<version>_linux_amd64.tar.gz`
+- `binlog-server_<version>_linux_arm64.tar.gz`
 
-```bash
-make build
+The real asset name is `binlog-server_<ver>_<os>_<arch>.tar.gz` (for example `binlog-server_0.4.1_linux_amd64.tar.gz`). The release page also provides `checksums.txt`; verify it before extracting. The tarball contains a versioned subdirectory:
 
-# Linux deployment binaries should keep CGO disabled to avoid host glibc coupling.
-make build-linux
+```text
+binlog-server_0.4.1_linux_amd64/
+  binlog-server
+  README.md
+  README_ZH.md
+  CHANGELOG.md
+  LICENSE
 ```
 
-To prepare a local set of release assets:
-
-```bash
-make release-assets VERSION=v0.4.1
-```
+UI assets are embedded into the binary, so you do not need a separate frontend package.
 
 ## Quick Start
 
-This section keeps the shortest path to a working service.
+This is the shortest path for release operators. You do not need Go installed.
 
 ### Prerequisites
 
-- Go `1.26.1+`
-- A reachable MySQL instance with binlog enabled
-- Docker available if you want to run E2E scenarios
+- A release tarball for your platform from GitHub Releases
+- A reachable MySQL or MariaDB instance with `log_bin` enabled
 
-### 1. Start the service
-
-```bash
-go run ./cmd/binlog-server
-```
-
-The default listen address is `:8080`.
-
-To set it explicitly:
+### 1. Download, verify, extract, run
 
 ```bash
-BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
+VER=0.4.1
+OS=linux          # linux | darwin
+ARCH=amd64        # amd64 | arm64
+
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing
+
+tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+cd "binlog-server_${VER}_${OS}_${ARCH}"
+
+export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
+export BINLOG_SERVER_DATA_DIR=./data
+./binlog-server
 ```
+
+The default listen address is `:8080` if you omit `BINLOG_SERVER_LISTEN_ADDR`.
 
 ### 2. Verify `/healthz`
 
@@ -163,7 +166,7 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 - UI: `http://127.0.0.1:8080/ui/`
 - Swagger: `http://127.0.0.1:8080/swagger/index.html`
 
-For more operational and usage guidance, continue from [docs/guide/README.md](docs/guide/README.md).
+For more operational and usage guidance, continue from [docs/guide/README.md](docs/guide/README.md) and [docs/guide/admin/deployment.md](docs/guide/admin/deployment.md).
 
 ### What You Should See
 
@@ -298,6 +301,32 @@ Once `Quick Start` works, continue from these entry points:
 | Replication pipeline | [internal/replication/README.md](internal/replication/README.md) |
 | Upload module | [internal/upload/README.md](internal/upload/README.md) |
 | E2E suite | [scripts/e2e/README.md](scripts/e2e/README.md) |
+
+## Development
+
+Source build is the fallback path when you are changing the code, not installing a release.
+
+Prerequisites: Go `1.26.1+`. Docker is needed only for E2E.
+
+```bash
+make build
+
+# Linux deployment binaries should keep CGO disabled to avoid host glibc coupling.
+make build-linux
+
+# Run from source
+go run ./cmd/binlog-server
+BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
+
+# Prepare a local set of release assets
+make release-assets VERSION=v0.4.1
+```
+
+Standalone (no `meta_dsn`) persists tasks and fsynced checkpoints under `BINLOG_SERVER_DATA_DIR` (default `./data`):
+
+- task metadata: `{data_dir}/.meta/tasks/{id}.json`
+- checkpoint: `{data_dir}/{id}/checkpoint.json`
+- binlog files: `{data_dir}/{id}/` (`storage.dir` is rejected; this path is fixed)
 
 ## Development Validation
 

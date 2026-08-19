@@ -108,7 +108,7 @@ curl -X POST http://localhost:8080/api/tasks \
     },
     "start": {
       "mode": "GTID",
-      "gtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"
+      "gtid_set": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"
     }
   }'
 ```
@@ -126,8 +126,9 @@ curl -X POST http://localhost:8080/api/tasks \
 | start.mode | string | 是 | LATEST / FILE_POS / GTID |
 | start.file | string | 条件 | 文件名（FILE_POS 模式必填） |
 | start.pos | int | 条件 | 位置（FILE_POS 模式必填） |
-| start.gtid | string | 条件 | GTID（GTID 模式必填） |
+| start.gtid_set | string | 条件 | GTID 集合（GTID 模式必填；也接受别名 `gtid`） |
 | storage.retention_days | int | 否 | 保留天数（默认 7，范围 1-3650） |
+| storage.dir | string | 否 | **不支持**。文件固定写在 `{data_dir}/{task_id}/`，传入非空值会 400 |
 
 **响应示例：**
 
@@ -575,11 +576,19 @@ curl http://localhost:8080/metrics
 
 | HTTP 状态码 | 错误码 | 说明 |
 |------------|--------|------|
-| 400 | INVALID_REQUEST | 请求参数错误 |
+| 400 | INVALID_REQUEST | 请求参数错误（校验失败不落库） |
 | 404 | TASK_NOT_FOUND | 任务不存在 |
 | 409 | TASK_ALREADY_EXISTS | 任务已存在 |
 | 409 | INVALID_STATE_TRANSITION | 状态转换非法 |
 | 500 | INTERNAL_ERROR | 内部错误 |
+
+任务 `last_error` 里的稳定源库错误码：
+
+| 错误码 | 说明 | 重试 |
+|--------|------|------|
+| SOURCE_ACCESS_DENIED | 源库 ERROR 1045 | 否，进入 FAILED |
+| SOURCE_LOG_BIN_OFF | 源库未开 binlog | 否，进入 FAILED |
+| SOURCE_IDENTITY_UNAVAILABLE | 无法读取源库身份 | 否，进入 FAILED |
 
 ## 10. 常用调试场景
 

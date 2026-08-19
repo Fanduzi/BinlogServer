@@ -184,7 +184,7 @@ JSON
   fi
   local code
   code="$(curl -sS -o /tmp/e2e-retry-upload-start-${RUN_TAG}.resp -w '%{http_code}' -X POST "$API/api/tasks/$task_id/start")"
-  if [[ "$code" != "204" ]]; then
+  if [[ "$code" != "200" ]]; then
     echo "start task failed: http=$code body=$(cat /tmp/e2e-retry-upload-start-${RUN_TAG}.resp)" >&2
     exit 1
   fi

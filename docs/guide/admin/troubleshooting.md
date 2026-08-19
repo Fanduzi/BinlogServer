@@ -188,8 +188,8 @@ curl http://localhost:8080/api/tasks/{task_id}/replication
 ```
 
 关键字段：
-- `status`: `NORMAL / DELAYED / ABNORMAL`
-- `delay_seconds`: 基于 `last_event_at` 计算的延迟秒数
+- `status`: `NORMAL / DELAYED / ABNORMAL / IDLE`
+- `delay_seconds`: 落后源库 tip 的秒数。已经跟到最新位点、正在等待下一条事件时为 `0`，状态为 `IDLE`（不用最后一条 binlog event 的时间戳当延迟）
 - `has_progress=false`: 当前没有可用复制进度（需结合任务状态判断）
 
 ### 3.4 任务事件

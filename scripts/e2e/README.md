@@ -8,6 +8,7 @@
 - semi-sync ACK/阻塞语义
 - metadata MySQL failover（Percona57 主从 + ProxySQL + orchestrator）
 - cluster 角色分离（control-plane + worker）与 worker heartbeat 在线/离线恢复
+- `POST /api/tasks/{id}/start` 成功现在是 HTTP 200 JSON（不再是 204）
 
 ## 依赖
 

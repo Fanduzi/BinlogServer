@@ -133,7 +133,7 @@ start_task() {
   local task_id="$1"
   local http_code
   http_code="$(curl -sS -o /tmp/e2e-worker-crash-start-${RUN_TAG}.resp -w '%{http_code}' -X POST "$API/api/tasks/$task_id/start")"
-  if [[ "$http_code" != "204" ]]; then
+  if [[ "$http_code" != "200" ]]; then
     echo "start task failed: http=$http_code body=$(cat /tmp/e2e-worker-crash-start-${RUN_TAG}.resp)" >&2
     return 1
   fi

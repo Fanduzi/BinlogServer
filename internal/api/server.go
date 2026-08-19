@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses and status codes for task/cluster operations
+// output: REST API responses including /healthz and /api/health
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -22,6 +22,7 @@ import (
 type taskService interface {
 	// 任务 CRUD/控制。
 	CreateTask(name string, clusterKey string) (tasks.Task, error)
+	CreateTaskFromSpec(name string, clusterKey string, source *tasks.SourceConfig, start *tasks.StartConfig, storage *tasks.Storage) (tasks.Task, error)
 	UpdateTask(id string, patch tasks.TaskPatch) (tasks.Task, error)
 	ConfigureClusterKey(id string, clusterKey string) error
 	ConfigureName(id string, name string) error
@@ -105,6 +106,7 @@ func (s *Server) routes() {
 		apiHandlers = append(apiHandlers, s.authMiddleware())
 	}
 	apiGroup := s.gin.Group("/api", apiHandlers...)
+	apiGroup.GET("/health", gin.WrapF(s.handleAPIHealth))
 	apiGroup.GET("/summary", gin.WrapF(s.handleSummary))
 	apiGroup.GET("/dashboard", gin.WrapF(s.handleDashboard))
 	apiGroup.GET("/sources/lookup", gin.WrapF(s.handleSourceLookup))
@@ -135,6 +137,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// handleAPIHealth godoc
+// @Summary Service health check (JSON)
+// @Tags System
+// @Produce json
+// @Success 200 {object} map[string]string
+// @Router /api/health [get]
+func (s *Server) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleMetrics 返回 Prometheus 文本格式指标。

@@ -604,6 +604,89 @@ func TestScheduler_UpdateTaskStoreFailureHasNoMutation(t *testing.T) {
 	}
 }
 
+func TestScheduler_CreateTaskFromSpecRejectsMissingGTIDWithoutPersist(t *testing.T) {
+	store := newFakeStore()
+	s := NewScheduler(WithStore(store))
+	source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "secret", Flavor: "mysql"}
+	start := StartConfig{Mode: StartModeGTID}
+	_, err := s.CreateTaskFromSpec("repro-400-create", "repro-400-create", &source, &start, nil)
+	if !errors.Is(err, ErrGTIDSetRequired) {
+		t.Fatalf("expected ErrGTIDSetRequired, got %v", err)
+	}
+	if len(store.tasks) != 0 {
+		t.Fatalf("expected no persisted task, got %+v", store.tasks)
+	}
+	if len(s.ListTasks()) != 0 {
+		t.Fatalf("expected no in-memory task after validation failure")
+	}
+}
+
+func TestScheduler_CreateTaskFromSpecAcceptsGTIDAliasAndRequiresPassword(t *testing.T) {
+	s := NewScheduler()
+	source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Flavor: "mysql"}
+	_, err := s.CreateTaskFromSpec("no-pass", "no-pass", &source, nil, nil)
+	if !errors.Is(err, ErrSourcePasswordRequired) {
+		t.Fatalf("expected ErrSourcePasswordRequired, got %v", err)
+	}
+
+	source.Password = "secret"
+	start := StartConfig{Mode: StartModeGTID, GTIDSet: "0-1-1"}
+	task, err := s.CreateTaskFromSpec("gtid-ok", "gtid-ok", &source, &start, nil)
+	if err != nil {
+		t.Fatalf("CreateTaskFromSpec: %v", err)
+	}
+	if task.Start.GTIDSet != "0-1-1" {
+		t.Fatalf("expected gtid_set persisted, got %+v", task.Start)
+	}
+}
+
+func TestScheduler_CreateTaskFromSpecRejectsStorageDir(t *testing.T) {
+	s := NewScheduler()
+	source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "secret"}
+	storage := Storage{Dir: "./custom", RetentionDays: 7}
+	_, err := s.CreateTaskFromSpec("dir-task", "dir-task", &source, nil, &storage)
+	if !errors.Is(err, ErrStorageDirNotSupported) {
+		t.Fatalf("expected ErrStorageDirNotSupported, got %v", err)
+	}
+}
+
+func TestScheduler_PermanentRunnerErrorMarksFailed(t *testing.T) {
+	s := NewScheduler(WithRunner(&permanentErrorRunner{}))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateFailed {
+			if !strings.Contains(got.LastError, CodeSourceAccessDenied) {
+				t.Fatalf("expected SOURCE_ACCESS_DENIED in last_error, got %q", got.LastError)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected FAILED, got %s err=%q", got.State, got.LastError)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type permanentErrorRunner struct{}
+
+func (r *permanentErrorRunner) Run(_ context.Context, _ Task) error {
+	return NewPermanentError(CodeSourceAccessDenied, "Access denied for user 'repl'")
+}
+
 type schedulerTestStore struct {
 	mu            sync.Mutex
 	tasks         map[string]Task

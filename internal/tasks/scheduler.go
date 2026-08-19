@@ -34,6 +34,9 @@ var ErrFilePosRequired = errors.New("file/pos is required")
 var ErrGTIDSetRequired = errors.New("gtid_set is required")
 var ErrInvalidStartMode = errors.New("invalid start mode")
 var ErrInvalidRetentionDays = errors.New("invalid retention_days")
+var ErrSourcePasswordRequired = errors.New("source.password is required")
+var ErrSourceRequired = errors.New("source.host/port/user/password is required")
+var ErrStorageDirNotSupported = errors.New("storage.dir is not supported; files are stored at {data_dir}/{task_id}/")
 
 var clusterKeyAllowedPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
@@ -520,6 +523,10 @@ func normalizeAndValidateStartConfig(start StartConfig) (StartConfig, error) {
 // normalizeAndValidateStorage 归一化并校验存储策略。
 func normalizeAndValidateStorage(storage Storage) (Storage, error) {
 	normalized := storage
+	if strings.TrimSpace(normalized.Dir) != "" {
+		return Storage{}, ErrStorageDirNotSupported
+	}
+	normalized.Dir = ""
 	if normalized.RetentionDays < minRetentionDays || normalized.RetentionDays > maxRetentionDays {
 		return Storage{}, ErrInvalidRetentionDays
 	}

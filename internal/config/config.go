@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants
-// output: validated runtime configuration structs for downstream modules
+// output: validated runtime configuration structs including data_dir persistence semantics
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -24,7 +24,7 @@ type Config struct {
 	ListenAddr string
 	// DataDir 是本地 binlog 文件落盘目录。
 	DataDir string
-	// MetaDSN 是元数据 MySQL 连接串；为空则走内存模式。
+	// MetaDSN 是元数据 MySQL 连接串；为空则把控制面持久化到 data_dir。
 	MetaDSN string
 	// Mode 支持 standalone/cluster。
 	Mode string
@@ -86,9 +86,9 @@ type APIConfig struct {
 
 // RateLimitConfig 定义 API 速率限制配置。
 type RateLimitConfig struct {
-	Enabled            bool
-	RequestsPerSecond  float64
-	Burst              int
+	Enabled           bool
+	RequestsPerSecond float64
+	Burst             int
 }
 
 // APIAuthConfig 定义 /metrics 与 /api/* 鉴权策略。

@@ -2,6 +2,7 @@
 
 ## Files
 - `mysql_store.go`: 元数据持久化实现与 schema 校验。
+- `file_store.go`: standalone 文件元数据存储（无 `meta_dsn` 时使用）。
 - `lease_store.go`: lease 读写逻辑。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。
@@ -10,6 +11,7 @@
 
 ## Exports
 - Task/Checkpoint/Event/File/Lease/Run/Worker metadata 存储接口。
+- `NewFileTaskStore(dataDir)`：任务写 `{data_dir}/.meta/tasks/{id}.json`，checkpoint 写 `{data_dir}/{id}/checkpoint.json`（fsync）。
 - 启动期 schema 版本与结构校验（支持 schema 校验超时配置）。
 
 ## Dependencies

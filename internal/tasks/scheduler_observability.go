@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and store snapshots
-// output: observability-facing task progress, events, files, runs, and worker heartbeat views
+// output: observability-facing task progress (including caught-up), events, files, runs, and heartbeats
 // pos: scheduler read/query layer for API and metrics consumption
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -36,6 +36,32 @@ func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.
 	if pos > 0 {
 		progress.LastEventPos = pos
 	}
+	progress.CaughtUp = false
+	progress.UpdatedAt = time.Now()
+	s.replica[taskID] = progress
+}
+
+// ReportReplicationCaughtUp 标记任务已跟到源库 tip，延迟应视为 0 / IDLE。
+func (s *Scheduler) ReportReplicationCaughtUp(taskID string, file string, pos uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return
+	}
+	if task.State == StateStopping || task.State == StateStopped {
+		return
+	}
+	progress := s.replica[taskID]
+	progress.TaskID = taskID
+	if file != "" {
+		progress.LastEventFile = file
+	}
+	if pos > 0 {
+		progress.LastEventPos = pos
+	}
+	progress.CaughtUp = true
 	progress.UpdatedAt = time.Now()
 	s.replica[taskID] = progress
 }

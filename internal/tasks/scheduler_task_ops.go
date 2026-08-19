@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task mutation requests and persisted task snapshots from TaskStore
-// output: validated task CRUD/config updates persisted into scheduler state
+// input: task mutation requests, full create specs, and persisted task snapshots from TaskStore
+// output: validated task CRUD/config updates persisted only after whole-spec validation
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -13,6 +13,15 @@ import (
 )
 
 func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
+	return s.createTask(name, clusterKey, nil, nil, nil, false)
+}
+
+// CreateTaskFromSpec 在一次校验通过后才落库；HTTP 400 路径不得留下半成品任务。
+func (s *Scheduler) CreateTaskFromSpec(name, clusterKey string, source *SourceConfig, start *StartConfig, storage *Storage) (Task, error) {
+	return s.createTask(name, clusterKey, source, start, storage, true)
+}
+
+func (s *Scheduler) createTask(name, clusterKey string, source *SourceConfig, start *StartConfig, storage *Storage, requireSource bool) (Task, error) {
 	validatedName, err := normalizeAndValidateTaskName(name)
 	if err != nil {
 		return Task{}, err
@@ -21,6 +30,48 @@ func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
+
+	var validatedSource SourceConfig
+	if requireSource {
+		if source == nil {
+			return Task{}, ErrSourceRequired
+		}
+		if source.Password == "" {
+			return Task{}, ErrSourcePasswordRequired
+		}
+		validatedSource, err = normalizeAndValidateSourceConfig(*source)
+		if err != nil {
+			return Task{}, err
+		}
+		validatedSource.Password = source.Password
+	} else if source != nil {
+		validatedSource, err = normalizeAndValidateSourceConfig(*source)
+		if err != nil {
+			return Task{}, err
+		}
+		validatedSource.Password = source.Password
+	}
+
+	validatedStart := StartConfig{Mode: StartModeLatest}
+	if start != nil {
+		validatedStart, err = normalizeAndValidateStartConfig(*start)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+
+	validatedStorage := Storage{RetentionDays: defaultRetentionDays}
+	if storage != nil {
+		candidate := *storage
+		if candidate.RetentionDays == 0 && candidate.Dir == "" {
+			candidate.RetentionDays = defaultRetentionDays
+		}
+		validatedStorage, err = normalizeAndValidateStorage(candidate)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+
 	if err := s.syncTasksFromStore(); err != nil {
 		return Task{}, err
 	}
@@ -39,13 +90,10 @@ func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
 		Name:       validatedName,
 		ClusterKey: validatedClusterKey,
 		State:      StateCreated,
-		Start: StartConfig{
-			Mode: StartModeLatest,
-		},
-		Storage: Storage{
-			RetentionDays: defaultRetentionDays,
-		},
-		UpdatedAt: now,
+		Source:     validatedSource,
+		Start:      validatedStart,
+		Storage:    validatedStorage,
+		UpdatedAt:  now,
 	}
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_CREATED", "task created", "")

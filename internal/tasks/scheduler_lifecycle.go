@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: start/stop commands, runner callbacks, and runtime cancellation signals
-// output: task state transitions across STARTING/RUNNING/RETRY/STOPPING lifecycle
+// input: start/stop commands, runner callbacks, permanent/retryable errors, cancellation signals
+// output: task state transitions across STARTING/RUNNING/RETRY/FAILED/STOPPING lifecycle
 // pos: scheduler execution lifecycle orchestration excluding lease-renew loop details
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func (s *Scheduler) StartTask(id string) error {
@@ -303,11 +305,20 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 
+		errMsg := err.Error()
+		zap.L().Error("runner error", zap.String("task_id", id), zap.Error(err))
+		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
+		if IsPermanent(err) {
+			_ = s.markFailedLocked(id, errMsg)
+			s.mu.Unlock()
+			return
+		}
+
 		current.State = StateRetryBackoff
-		current.LastError = err.Error()
+		current.LastError = errMsg
 		current.UpdatedAt = time.Now()
 		s.tasks[id] = current
-		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", err.Error())
+		s.appendEventLocked(id, "TASK_RETRY_BACKOFF", "task entered retry backoff", errMsg)
 		_ = s.persistTaskLocked(current)
 		s.mu.Unlock()
 
@@ -403,6 +414,32 @@ func (s *Scheduler) failSafeStopLocked(id, eventType, message string) {
 		cancel()
 		delete(s.cancels, id)
 	}
+}
+
+// markFailedLocked 将任务收敛到 FAILED，用于不可恢复的源库/配置错误。
+func (s *Scheduler) markFailedLocked(id, message string) error {
+	task, ok := s.tasks[id]
+	if !ok {
+		return nil
+	}
+	if task.State == StateFailed {
+		task.LastError = message
+		s.tasks[id] = task
+		return nil
+	}
+	task.State = StateFailed
+	task.LastError = message
+	task.OwnerWorkerID = ""
+	task.Epoch = 0
+	task.RunID = ""
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_FAILED", "task failed", message)
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
+	}
+	return s.persistTaskLocked(task)
 }
 
 // markStoppedLocked 将任务收敛到最终 STOPPED 并清理运行时 ownership 字段。

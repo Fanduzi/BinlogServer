@@ -53,10 +53,11 @@ func (s *Server) swaggerTaskDeleteDoc() {}
 // swaggerTaskStartDoc godoc
 // @Summary Start task
 // @Tags Tasks
+// @Produce json
 // @Param id path string true "Task ID"
-// @Success 204 {string} string
-// @Failure 400 {string} string
-// @Failure 404 {string} string
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} apiErrorBody
+// @Failure 404 {object} apiErrorBody
 // @Router /api/tasks/{id}/start [post]
 func (s *Server) swaggerTaskStartDoc() {}
 

@@ -12,6 +12,19 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- Quick Start is now download/verify/extract/`./binlog-server`; `go run` / `make build` moved to Development (#9).
+- `flavor=mariadb` probes `server_id` + `gtid_domain_id` and fails with `log_bin is off` instead of `empty server_uuid` (#10).
+- `POST /api/tasks` validates the full spec before persist; HTTP 400 no longer leaves a LATEST task (#11).
+- Standalone (no `meta_dsn`) persists tasks and fsynced checkpoints under `BINLOG_SERVER_DATA_DIR` and resumes after crash (#12).
+- Bind failures no longer dump cobra Usage; access denied maps to `SOURCE_ACCESS_DENIED` without infinite retry; quiet-master lag is `IDLE`/`0`; `GET /api/health` works (#13).
+
+### Changed
+
+- Canonical GTID field is `gtid_set`; request alias `gtid` is accepted. `storage.dir` is rejected; files live at `{data_dir}/{task_id}/`.
+- `POST /api/tasks/{id}/start` returns JSON `{"id","state"}` instead of 204.
+
 ## [v0.1.2] - 2026-03-27
 
 ### Added

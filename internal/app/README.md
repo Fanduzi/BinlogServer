@@ -8,6 +8,7 @@
 ## Exports
 - `New(cfg)` / `Run(ctx)`: 应用生命周期入口。
 - role/mode 装配逻辑：control-plane/worker/all-in-one。
+- 未配置 `meta_dsn` 时注入 `meta.FileTaskStore`，standalone 任务/checkpoint 落在 `data_dir`，重启后按 checkpoint resume。
 - control-plane 与 worker-health HTTP server 均应用可配置超时（ReadHeader/Read/Write/Idle）。
 - 通过 `config.meta.timeout.*` 注入 tasks/meta 的内部依赖调用超时（读/写/lease/上传）。
 - API server 支持从 `config.API.Auth` 注入鉴权策略。

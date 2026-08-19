@@ -2,8 +2,9 @@
 
 ## Files
 - `scheduler.go`: 调度器核心类型、选项注入与通用辅助函数。
-- `scheduler_task_ops.go`: 任务 CRUD 与配置更新（非运行时生命周期）。
-- `scheduler_lifecycle.go`: 启停、运行协程与重试退避生命周期流程。
+- `scheduler_task_ops.go`: 任务 CRUD 与配置更新；`CreateTaskFromSpec` 先整包校验再一次落库。
+- `scheduler_lifecycle.go`: 启停、运行协程、可重试退避与不可恢复 FAILED。
+- `errors.go`: `PermanentError`（`SOURCE_ACCESS_DENIED` / `SOURCE_LOG_BIN_OFF` 等）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
 - `scheduler_observability.go`: 复制进度、checkpoint、事件/文件/运行历史查询。
 - `scheduler_retry_upload.go`: 上传失败补偿重试与失败原因聚合。

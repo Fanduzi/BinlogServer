@@ -353,19 +353,13 @@ ORDER BY created_at DESC;
 ### 7.1 HTTP 健康检查
 
 ```bash
-# 简单检查
+# JSON 健康检查
 curl http://localhost:8080/api/health
 # {"status": "ok"}
 
-# 详细检查（包含依赖）
-curl http://localhost:8080/api/health?full=true
-# {
-#   "status": "ok",
-#   "checks": {
-#     "database": "ok",
-#     "storage": "ok"
-#   }
-# }
+# 进程级健康检查（纯文本，始终保留）
+curl http://localhost:8080/healthz
+# ok
 ```
 
 ### 7.2 Kubernetes 探针
@@ -373,14 +367,14 @@ curl http://localhost:8080/api/health?full=true
 ```yaml
 livenessProbe:
   httpGet:
-    path: /api/health
+    path: /healthz   # 或 /api/health
     port: 8080
   initialDelaySeconds: 10
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
-    path: /api/health
+    path: /healthz   # 或 /api/health
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 5

@@ -1,7 +1,7 @@
 // Package replication provides module-level functionality for replication.
-// input: source replication config, task state, checkpoint/file store dependencies
-// output: replication run control, local binlog artifacts, and upload/recovery signals
-// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// input: source replication config, flavor-aware identity, checkpoint/file store dependencies
+// output: replication run control, durable local artifacts, caught-up progress, and permanent source errors
+// pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
 
@@ -200,17 +200,17 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	// source_server_uuid 作为 object key 的稳定维度，避免 cluster_key 相同但源实例切换时冲突。
 	sourceServerUUID, err := r.fetcher.FetchServerUUID(ctx, task.Source)
 	if err != nil {
-		return err
+		return classifySourceError(err)
 	}
 	sourceServerUUID = strings.TrimSpace(sourceServerUUID)
 	if sourceServerUUID == "" {
-		return errors.New("empty source server_uuid")
+		return tasks.NewPermanentError(tasks.CodeSourceIdentityUnavailable, "empty source server_uuid")
 	}
 
 	// 先解析请求的 start strategy（LATEST/FILE_POS/GTID）。
 	start, err := ResolveStart(ctx, task, r.fetcher)
 	if err != nil {
-		return err
+		return classifySourceError(err)
 	}
 	if r.checkpointStore != nil {
 		// 持久化 checkpoint 优先级更高，保证重启后的 resumability。
@@ -240,6 +240,9 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 	file, writer, currentPath, err := writerOpener(task, currentFile, currentPos)
 	if err != nil {
+		return err
+	}
+	if err := r.persistOpenFileMeta(ctx, task, currentFile, currentPath, currentPos, currentCreatedAt); err != nil {
 		return err
 	}
 	defer func() {
@@ -393,41 +396,103 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		return fmt.Errorf("unsupported resolved start mode: %s", start.Mode)
 	}
 	if err != nil {
-		return err
+		return classifySourceError(err)
 	}
 
 	if onReady != nil {
 		// 到这里说明“连接 + 起点 + writer”都已 ready，Scheduler 可安全切 RUNNING。
 		onReady()
 	}
+	r.reportCaughtUp(task.ID, currentFile, currentPos)
 
 	if semiSyncRequested {
 		// SynchronousEventHandler 模式下，事件由 syncer 内部 goroutine 推送到 handler。
 		// 这里阻塞等待错误或取消，保持任务生命周期。
 		for {
-			_, err := streamer.GetEvent(ctx)
+			event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos)
 			if err != nil {
 				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 					return nil
 				}
 				return err
 			}
+			if event == nil {
+				continue
+			}
 		}
 	}
 
 	// Step 5: 异步模式主循环（逐条拉取并处理事件）。
 	for {
-		event, err := streamer.GetEvent(ctx)
+		event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return err
 		}
+		if event == nil {
+			continue
+		}
 		if err := handleEvent(event); err != nil {
 			return err
 		}
 	}
+}
+
+const idlePollInterval = 2 * time.Second
+
+func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID, file string, pos uint32) (*replication.BinlogEvent, error) {
+	eventCtx, cancel := context.WithTimeout(ctx, idlePollInterval)
+	event, err := streamer.GetEvent(eventCtx)
+	cancel()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			r.reportCaughtUp(taskID, file, pos)
+			return nil, nil
+		}
+		return nil, classifySourceError(err)
+	}
+	return event, nil
+}
+
+func (r *MySQLRunner) reportCaughtUp(taskID, file string, pos uint32) {
+	if r.progressReporter == nil {
+		return
+	}
+	if reporter, ok := r.progressReporter.(interface {
+		ReportReplicationCaughtUp(taskID string, file string, pos uint32)
+	}); ok {
+		reporter.ReportReplicationCaughtUp(taskID, file, pos)
+	}
+}
+
+func (r *MySQLRunner) persistOpenFileMeta(ctx context.Context, task tasks.Task, fileName, path string, startPos uint32, createdAt time.Time) error {
+	if r.fileMetaStore == nil {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return r.fileMetaStore.UpsertBinlogFile(ctx, tasks.BinlogFile{
+		TaskID:      task.ID,
+		FileName:    fileName,
+		FilePath:    path,
+		SizeBytes:   info.Size(),
+		StartPos:    startPos,
+		CreatedAt:   createdAt,
+		UploadState: "LOCAL_ONLY",
+	})
 }
 
 // finalizeSealedFile 负责 open 文件 seal、元数据落库以及 best-effort 上传。
@@ -631,13 +696,16 @@ func (f *mysqlStatusFetcher) FetchMasterStatus(_ context.Context, source tasks.S
 	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
 	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
 	if err != nil {
-		return MasterStatus{}, err
+		return MasterStatus{}, classifySourceError(err)
 	}
 	defer conn.Close()
 
 	result, err := conn.Execute("SHOW MASTER STATUS")
-	if err != nil {
-		return MasterStatus{}, err
+	if err != nil || result == nil || result.Resultset == nil || result.Resultset.RowNumber() == 0 {
+		result, err = conn.Execute("SHOW BINLOG STATUS")
+		if err != nil {
+			return MasterStatus{}, classifySourceError(err)
+		}
 	}
 	if result == nil || result.Resultset == nil || result.Resultset.RowNumber() == 0 {
 		return MasterStatus{}, errors.New("empty master status")
@@ -658,32 +726,38 @@ func (f *mysqlStatusFetcher) FetchMasterStatus(_ context.Context, source tasks.S
 	}, nil
 }
 
-// FetchServerUUID 读取源库 server_uuid（用于 object key 维度）。
+// FetchServerUUID 读取源库身份（MySQL server_uuid；MariaDB 使用 server_id+gtid_domain_id）。
 func (f *mysqlStatusFetcher) FetchServerUUID(_ context.Context, source tasks.SourceConfig) (string, error) {
 	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
 	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
 	if err != nil {
-		return "", err
+		return "", classifySourceError(err)
 	}
 	defer conn.Close()
 
-	result, err := conn.Execute("SHOW VARIABLES LIKE 'server_uuid'")
+	logBin, err := queryVariable(conn, "log_bin")
+	if err != nil {
+		return "", classifySourceError(err)
+	}
+	serverUUID, _ := queryVariable(conn, "server_uuid")
+	serverID, _ := queryVariable(conn, "server_id")
+	domainID, _ := queryVariable(conn, "gtid_domain_id")
+	return resolveSourceIdentity(source.Flavor, logBin, serverUUID, serverID, domainID)
+}
+
+func queryVariable(conn *sqlclient.Conn, name string) (string, error) {
+	result, err := conn.Execute("SHOW VARIABLES LIKE '" + name + "'")
 	if err != nil {
 		return "", err
 	}
 	if result == nil || result.Resultset == nil || result.Resultset.RowNumber() == 0 {
-		return "", errors.New("empty server_uuid")
+		return "", nil
 	}
-
 	value, err := result.GetString(0, 1)
 	if err != nil {
 		return "", err
 	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", errors.New("empty server_uuid")
-	}
-	return value, nil
+	return strings.TrimSpace(value), nil
 }
 
 // effectiveStartFromCheckpoint 在 checkpoint 可用时覆盖请求起点。

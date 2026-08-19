@@ -6,7 +6,7 @@ binlog-server CLI 子命令定义目录。
 
 | File | Responsibility |
 |------|---------------|
-| root.go | Cobra root command，负责参数绑定、根命令参数校验与应用启动调用 |
+| root.go | Cobra root command，负责参数绑定、根命令参数校验与应用启动调用；`SilenceUsage`/`SilenceErrors` 避免 bind 失败刷 Usage |
 | version.go | `version` 子命令、`--version` 输出与 ASCII banner 版本信息渲染 |
 | root_test.go | CLI 回归测试，覆盖 `version`、`--version` 与位置参数校验 |
 

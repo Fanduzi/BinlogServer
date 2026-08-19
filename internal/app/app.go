@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle control including startup, role wiring, and shutdown
+// input: runtime config, scheduler/runner/meta or file store dependencies, process context
+// output: application lifecycle control including standalone file persistence and resume
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -158,6 +158,18 @@ func (a *App) Run(ctx context.Context) error {
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
 		leaseManager, leaseVerifier = newClusterLeaseRuntimeForRun(mysqlStore)
+	} else {
+		// standalone 无 meta_dsn 时，把任务/checkpoint/files 持久化到 data_dir，保证 kill -9 后可恢复。
+		fileStore, err := meta.NewFileTaskStore(a.cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, tasks.WithStore(fileStore))
+		opts = append(opts, tasks.WithCheckpointReader(fileStore))
+		opts = append(opts, tasks.WithEventStore(fileStore))
+		opts = append(opts, tasks.WithFileStore(fileStore))
+		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(fileStore))
+		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(fileStore))
 	}
 
 	opts = append(opts, tasks.WithInternalCallTimeouts(tasks.InternalCallTimeouts{
@@ -263,12 +275,13 @@ func (a *App) Run(ctx context.Context) error {
 	if err := scheduler.Restore(restoreCtx); err != nil {
 		return err
 	}
-	if workerEnabled && isClusterMode(a.cfg) {
-		// worker 重启后把可恢复任务重新拉起，清理遗留的中间态。
+	if workerEnabled {
+		// cluster worker 与 standalone 都从持久化状态恢复 RUNNING/STARTING/RETRY 任务，
+		// 由 runner 按 checkpoint 续拉，而不是静默改回 LATEST。
 		stats := resumeClusterWorkerTasks(scheduler)
 		if stats.StopErrors > 0 || stats.StartErrors > 0 {
 			log.Printf(
-				"cluster resume completed with errors considered=%d resumed=%d stop_errors=%d start_errors=%d",
+				"task resume completed with errors considered=%d resumed=%d stop_errors=%d start_errors=%d",
 				stats.Considered,
 				stats.Resumed,
 				stats.StopErrors,

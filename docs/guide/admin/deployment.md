@@ -6,11 +6,14 @@
 
 ### 1.1 软件要求
 
+发布包部署不需要安装 Go。
+
 | 组件 | 版本要求 |
 |------|----------|
-| Go | 1.26.1+ |
-| MySQL | 5.7+ / 8.0+（作为元数据存储） |
-| 源 MySQL | 5.7+ / 8.0+（需要开启 binlog） |
+| 发布包 | 从 GitHub Releases 下载对应平台 `binlog-server_<ver>_<os>_<arch>.tar.gz` |
+| Go | 仅源码构建需要 1.26.1+ |
+| MySQL | 5.7+ / 8.0+（仅 cluster 模式作为元数据存储） |
+| 源库 | MySQL 5.7+/8.0+ 或 MariaDB 10+/11+（需要开启 `log_bin`） |
 
 ### 1.2 源 MySQL 配置
 
@@ -45,22 +48,39 @@ FLUSH PRIVILEGES;
 
 ## 2. 单机模式部署
 
-### 2.1 下载或编译
+### 2.1 下载发布包（推荐）
+
+真实资产名是 `binlog-server_<ver>_<os>_<arch>.tar.gz`，解压后二进制在一层版本子目录里。
 
 ```bash
-# 从源码编译
-git clone https://github.com/your-org/binlog-server.git
-cd binlog-server
-make build-linux
-cp bin/binlog-server-linux-amd64 ./binlog-server
+VER=0.4.1
+OS=linux          # linux | darwin
+ARCH=amd64        # amd64 | arm64
 
-# 或下载预编译版本
-# wget https://github.com/your-org/binlog-server/releases/download/v0.4.1/binlog-server-linux-amd64
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing
+
+tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+cd "binlog-server_${VER}_${OS}_${ARCH}"
+# 目录内是 ./binlog-server
+```
+
+### 2.1.1 从源码编译（开发路径）
+
+```bash
+git clone https://github.com/Fanduzi/BinlogServer.git
+cd BinlogServer
+make build-linux
 ```
 
 说明：Linux 部署二进制必须保持 `CGO_ENABLED=0`，避免 Ubuntu 等较新发行版构建出的产物绑定更高版本的 `glibc`；当前仓库的 `make build-linux` 和 release 流程默认按兼容 `glibc 2.17` 的方向构建。
 
 ### 2.2 创建配置文件
+
+未配置 `meta_dsn` 时，standalone 仍会把任务、事件和已 fsync 的 checkpoint 写到 `data_dir`（或 `BINLOG_SERVER_DATA_DIR`）。进程 `kill -9` 后重启会恢复任务并从 checkpoint 续拉，不会静默改回 `LATEST`。
+
+本地文件路径固定为 `{data_dir}/{task_id}/`。创建任务时如果传入 `storage.dir` 会被拒绝。
 
 **最小可运行配置（开发/测试环境）：**
 
@@ -133,8 +153,9 @@ export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="your-secure-random-token"
 **使用 API（启用鉴权后）：**
 
 ```bash
-# 健康检查不需要鉴权
+# 健康检查不需要鉴权（/healthz 与 /api/health 均可）
 curl http://localhost:8080/healthz
+curl http://localhost:8080/api/health
 
 # API 请求需要 Bearer Token
 curl -H "Authorization: Bearer your-secure-random-token" \
@@ -416,8 +437,13 @@ MYSQL_ROOT_PASSWORD=your_secure_password
 ### 6.1 API 端点
 
 ```bash
-# 服务健康检查
+# 服务健康检查（JSON）
 curl http://localhost:8080/api/health
+# {"status":"ok"}
+
+# 进程级健康检查（纯文本）
+curl http://localhost:8080/healthz
+# ok
 
 # 查看集群状态
 curl http://localhost:8080/api/cluster/overview
