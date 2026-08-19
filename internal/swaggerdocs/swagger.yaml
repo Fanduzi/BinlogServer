@@ -1,5 +1,12 @@
 basePath: /
 definitions:
+  api.apiErrorBody:
+    properties:
+      code:
+        type: string
+      error:
+        type: string
+    type: object
   api.clusterOverview:
     properties:
       leased_task_count:
@@ -259,6 +266,7 @@ definitions:
       host:
         type: string
       password:
+        description: 仅用于输入，API 响应前会清空
         type: string
       port:
         type: integer
@@ -433,15 +441,29 @@ paths:
       summary: Get task dashboard with replication delay overview
       tags:
       - Dashboard
+  /api/health:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Service health check (JSON)
+      tags:
+      - System
   /api/sources/lookup:
     get:
       parameters:
-      - description: MySQL source host
+      - description: MySQL source host (required)
         in: query
         name: host
         required: true
         type: string
-      - description: MySQL source port
+      - description: MySQL source port (required, 1-65535)
         in: query
         name: port
         required: true
@@ -769,6 +791,7 @@ paths:
         description: Retry upload limit
         in: query
         maximum: 1000
+        minimum: 1
         name: limit
         type: integer
       produces:
@@ -889,19 +912,23 @@ paths:
         name: id
         required: true
         type: string
+      produces:
+      - application/json
       responses:
-        "204":
-          description: No Content
+        "200":
+          description: OK
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "400":
           description: Bad Request
           schema:
-            type: string
+            $ref: '#/definitions/api.apiErrorBody'
         "404":
           description: Not Found
           schema:
-            type: string
+            $ref: '#/definitions/api.apiErrorBody'
       summary: Start task
       tags:
       - Tasks
@@ -941,6 +968,7 @@ paths:
         description: Failure reason list limit
         in: query
         maximum: 200
+        minimum: 1
         name: limit
         type: integer
       produces:

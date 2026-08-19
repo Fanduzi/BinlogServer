@@ -2,9 +2,11 @@
 
 ## Files
 - `docs.go`: 生成的 swagger/openapi 文档代码。
+- `swagger.json` / `swagger.yaml`: 与 `docs.go` 同步的 OpenAPI 产物。
 
 ## Exports
 - swagger 文档元数据供 API 文档页面消费。
+- 当前契约：`POST /api/tasks/{id}/start` 成功为 200 JSON；`GET /api/health` 与 `/healthz` 均在 spec 中。
 
 ## Dependencies
 - Upstream: `internal/api` 注释与接口定义。

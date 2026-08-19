@@ -89,6 +89,28 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/health": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Service health check (JSON)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/sources/lookup": {
             "get": {
                 "produces": [
@@ -101,14 +123,14 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "MySQL source host",
+                        "description": "MySQL source host (required)",
                         "name": "host",
                         "in": "query",
                         "required": true
                     },
                     {
                         "type": "integer",
-                        "description": "MySQL source port",
+                        "description": "MySQL source port (required, 1-65535)",
                         "name": "port",
                         "in": "query",
                         "required": true
@@ -599,6 +621,7 @@ const docTemplate = `{
                     },
                     {
                         "maximum": 1000,
+                        "minimum": 1,
                         "type": "integer",
                         "default": 100,
                         "description": "Retry upload limit",
@@ -771,6 +794,9 @@ const docTemplate = `{
         },
         "/api/tasks/{id}/start": {
             "post": {
+                "produces": [
+                    "application/json"
+                ],
                 "tags": [
                     "Tasks"
                 ],
@@ -785,22 +811,25 @@ const docTemplate = `{
                     }
                 ],
                 "responses": {
-                    "204": {
-                        "description": "No Content",
+                    "200": {
+                        "description": "OK",
                         "schema": {
-                            "type": "string"
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/api.apiErrorBody"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/api.apiErrorBody"
                         }
                     }
                 }
@@ -862,6 +891,7 @@ const docTemplate = `{
                     },
                     {
                         "maximum": 200,
+                        "minimum": 1,
                         "type": "integer",
                         "default": 20,
                         "description": "Failure reason list limit",
@@ -954,6 +984,17 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "api.apiErrorBody": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
         "api.clusterOverview": {
             "type": "object",
             "properties": {
@@ -1359,6 +1400,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "password": {
+                    "description": "仅用于输入，API 响应前会清空",
                     "type": "string"
                 },
                 "port": {
@@ -1554,7 +1596,6 @@ var SwaggerInfo = &swag.Spec{
 	RightDelim:       "}}",
 }
 
-// init 实现对应功能逻辑。
 func init() {
 	swag.Register(SwaggerInfo.InstanceName(), SwaggerInfo)
 }
