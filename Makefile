@@ -48,7 +48,11 @@ check-linux-release-archive:
 		exit 1; \
 	fi
 	@archive_path=""; \
-	for candidate in "dist/binlog-server_$(VERSION)_linux_amd64.tar.gz" "dist/$(VERSION)/binlog-server_$(VERSION)_linux_amd64.tar.gz"; do \
+	for candidate in \
+		"dist/binlog-server_$(VERSION)_linux_amd64.tar.gz" \
+		"dist/binlog-server_$(patsubst v%,%,$(VERSION))_linux_amd64.tar.gz" \
+		"dist/$(VERSION)/binlog-server_$(VERSION)_linux_amd64.tar.gz" \
+		"dist/$(patsubst v%,%,$(VERSION))/binlog-server_$(patsubst v%,%,$(VERSION))_linux_amd64.tar.gz"; do \
 		if [ -f "$$candidate" ]; then \
 			archive_path="$$candidate"; \
 			break; \
