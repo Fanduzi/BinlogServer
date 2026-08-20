@@ -37,7 +37,9 @@ build-linux: ui-build
 	@mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(GO_BUILD_LDFLAGS)" -o $${BINARY:-bin/binlog-server-linux-amd64} ./cmd/binlog-server
 
-check-linux-compat: build-linux
+check-linux-compat:
+	@mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(GO_BUILD_LDFLAGS)" -o $${BINARY:-bin/binlog-server-linux-amd64} ./cmd/binlog-server
 	./scripts/check-linux-compat.sh $${BINARY:-bin/binlog-server-linux-amd64}
 
 check-linux-release-archive:
