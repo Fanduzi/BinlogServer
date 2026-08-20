@@ -12,6 +12,8 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.4.2] - 2026-08-21
+
 ### Fixed
 
 - Create task now validates the full spec before persist. HTTP 400 no longer leaves a `LATEST` task behind.
