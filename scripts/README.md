@@ -6,7 +6,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| build-ui.sh | 构建 frontend 并同步到 internal/ui/static |
+| build-ui.sh | 构建 frontend 并同步到 internal/ui/static；本地没有 vite 时先 `npm ci` |
 | check-linux-compat.sh | 检查 Linux 二进制是否为静态链接且无动态 libc 依赖，防止发布产物绑定构建机 glibc |
 | check-linux-release-archive.sh | 解包 Linux release tar.gz 并复用兼容性检查，确保实际发布归档内的二进制仍满足 glibc 基线 |
 | release-assets.sh | 构建带内嵌 UI 且写入版本/commit/build date 的多平台 release 二进制、压缩包与 checksums；作为本地/手工发版兜底入口 |
