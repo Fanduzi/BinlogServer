@@ -24,7 +24,7 @@ type Config struct {
 	ListenAddr string
 	// DataDir 是本地 binlog 文件落盘目录。
 	DataDir string
-	// MetaDSN 是元数据 MySQL 连接串；为空则走内存模式。
+	// MetaDSN 是元数据 MySQL 连接串；为空则控制面只在内存，进程退出后任务元数据丢失。
 	MetaDSN string
 	// Mode 支持 standalone/cluster。
 	Mode string

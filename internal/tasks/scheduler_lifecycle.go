@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: start/stop commands, runner callbacks, and runtime cancellation signals
-// output: task state transitions across STARTING/RUNNING/RETRY/STOPPING lifecycle
+// input: start/stop commands, runner callbacks, permanent/retryable errors, cancellation signals
+// output: task state transitions across STARTING/RUNNING/RETRY/FAILED/STOPPING lifecycle
 // pos: scheduler execution lifecycle orchestration excluding lease-renew loop details
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func (s *Scheduler) StartTask(id string) error {
@@ -29,7 +31,7 @@ func (s *Scheduler) StartTask(id string) error {
 		s.runner != nil &&
 		s.leaseManager != nil
 	// 仅允许 claim “干净的 dispatch STARTING 任务”，避免误接管非预期中间态。
-	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && !canClaimDispatched {
+	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && task.State != StateFailed && !canClaimDispatched {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start from state %s", task.State)
 	}
@@ -85,6 +87,7 @@ func (s *Scheduler) StartTask(id string) error {
 	}
 
 	task.State = StateStarting
+	task.LastError = ""
 	task.UpdatedAt = time.Now()
 	// 注意：这里仅表示“已发起启动流程”，不是“runner 已 ready”。
 	s.tasks[id] = task
@@ -303,11 +306,20 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 
+		errMsg := err.Error()
+		zap.L().Error("runner error", zap.String("task_id", id), zap.Error(err))
+		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
+		if IsPermanent(err) {
+			_ = s.markFailedLocked(id, errMsg)
+			s.mu.Unlock()
+			return
+		}
+
 		current.State = StateRetryBackoff
-		current.LastError = err.Error()
+		current.LastError = errMsg
 		current.UpdatedAt = time.Now()
 		s.tasks[id] = current
-		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", err.Error())
+		s.appendEventLocked(id, "TASK_RETRY_BACKOFF", "task entered retry backoff", errMsg)
 		_ = s.persistTaskLocked(current)
 		s.mu.Unlock()
 
@@ -403,6 +415,33 @@ func (s *Scheduler) failSafeStopLocked(id, eventType, message string) {
 		cancel()
 		delete(s.cancels, id)
 	}
+}
+
+// markFailedLocked 将任务收敛到 FAILED，用于不可恢复的源库/配置错误。
+// StartTask 允许从 FAILED 再次启动，方便值班改完密码/配置后重试。
+func (s *Scheduler) markFailedLocked(id, message string) error {
+	task, ok := s.tasks[id]
+	if !ok {
+		return nil
+	}
+	if task.State == StateFailed {
+		task.LastError = message
+		s.tasks[id] = task
+		return s.persistTaskLocked(task)
+	}
+	task.State = StateFailed
+	task.LastError = message
+	task.OwnerWorkerID = ""
+	task.Epoch = 0
+	task.RunID = ""
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_FAILED", "task failed", message)
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
+	}
+	return s.persistTaskLocked(task)
 }
 
 // markStoppedLocked 将任务收敛到最终 STOPPED 并清理运行时 ownership 字段。

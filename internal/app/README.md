@@ -3,7 +3,7 @@
 ## Files
 - `app.go`: 应用主流程与运行时装配。
 - `tracing.go`: tracing provider 初始化与生命周期管理。
-- `smoke_test.go`: 应用层烟测。
+- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`）。
 
 ## Exports
 - `New(cfg)` / `Run(ctx)`: 应用生命周期入口。

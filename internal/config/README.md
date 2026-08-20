@@ -3,7 +3,7 @@
 ## Files
 | File | Responsibility |
 |------|---------------|
-| `config.go` | 配置模型、加载与默认值、校验 |
+| `config.go` | 配置模型、加载与默认值、校验（`meta_dsn` 为空时 standalone 控制面仅内存） |
 | `config_test.go` | 配置加载与覆盖规则测试 |
 | `encryption.go` | AES-256-GCM 配置值解密工具 |
 

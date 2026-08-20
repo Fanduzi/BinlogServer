@@ -131,7 +131,7 @@ log:
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `meta_dsn` | string | - | MySQL 连接字符串（cluster 模式必需） |
+| `meta_dsn` | string | - | MySQL 连接字符串。cluster 模式必需。standalone 为空时控制面只在内存，进程退出后任务元数据丢失；binlog 文件仍落在 `data_dir`。 |
 
 **DSN 格式：**
 

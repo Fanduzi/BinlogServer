@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses and status codes for task/cluster operations
+// output: REST API JSON responses including structured 400 bodies for create validation
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -329,7 +329,7 @@ type updateTaskRequest struct {
 // @Param body body createTaskRequest true "Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-], source/start/storage 按字段规则校验)"
 // @Success 200 {array} tasks.Task
 // @Success 201 {object} tasks.Task
-// @Failure 400 {string} string
+// @Failure 400 {object} apiErrorBody
 // @Failure 405 {string} string
 // @Router /api/tasks [get]
 // @Router /api/tasks [post]
@@ -338,36 +338,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req createTaskRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "invalid json")
 			return
 		}
 
-		task, err := s.tasks.CreateTask(req.Name, req.ClusterKey)
+		task, err := s.tasks.CreateTaskFromSpec(req.Name, req.ClusterKey, req.Source, req.Start, req.Storage)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if req.Source != nil {
-			if err := s.tasks.ConfigureSource(task.ID, *req.Source); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		if req.Start != nil {
-			if err := s.tasks.ConfigureStart(task.ID, *req.Start); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		if req.Storage != nil {
-			if err := s.tasks.ConfigureStorage(task.ID, *req.Storage); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-		task, err = s.tasks.GetTask(task.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeTaskError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, sanitizeTask(task))
@@ -736,7 +713,7 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 	case http.MethodPut:
 		var req updateTaskRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "invalid json")
 			return
 		}
 		// PUT 走 Scheduler.UpdateTask 原子更新：
@@ -783,10 +760,33 @@ func isTaskUpdateBadRequest(err error) bool {
 		errors.Is(err, tasks.ErrClusterKeyExists) ||
 		errors.Is(err, tasks.ErrInvalidTaskName) ||
 		errors.Is(err, tasks.ErrInvalidSourceConfig) ||
+		errors.Is(err, tasks.ErrSourceRequired) ||
+		errors.Is(err, tasks.ErrSourcePasswordRequired) ||
 		errors.Is(err, tasks.ErrFilePosRequired) ||
 		errors.Is(err, tasks.ErrGTIDSetRequired) ||
 		errors.Is(err, tasks.ErrInvalidStartMode) ||
 		errors.Is(err, tasks.ErrInvalidRetentionDays)
+}
+
+type apiErrorBody struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, apiErrorBody{Error: msg, Code: code})
+}
+
+func writeTaskError(w http.ResponseWriter, err error) {
+	if errors.Is(err, tasks.ErrTaskNotFound) {
+		writeAPIError(w, http.StatusNotFound, "TASK_NOT_FOUND", err.Error())
+		return
+	}
+	if isTaskUpdateBadRequest(err) {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, err.Error())
+		return
+	}
+	writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
 }
 
 // writeJSON 统一输出 JSON 响应。
