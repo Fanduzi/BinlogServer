@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: frontend source tree, node toolchain, and build configuration dependencies
-# output: compiled frontend assets synchronized into backend static serving directory
+# output: compiled frontend assets synchronized into backend static serving directory; npm ci when vite is missing
 # pos: build pipeline bridge between frontend artifacts and backend embedded UI delivery
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -12,6 +12,10 @@ UI_STATIC_DIR="$ROOT_DIR/internal/ui/static"
 echo "[ui] build frontend (base=/ui/)"
 (
   cd "$FRONTEND_DIR"
+  if [[ ! -x node_modules/.bin/vite ]]; then
+    echo "[ui] vite not found; running npm ci"
+    npm ci
+  fi
   npm run build
 )
 
