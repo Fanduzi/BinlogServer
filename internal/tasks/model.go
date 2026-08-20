@@ -1,11 +1,14 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
+// input: task JSON payloads, runner callbacks, store/lease/uploader dependencies
+// output: task/start/source models including gtid alias decoding
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // State 表示任务生命周期状态。
 type State string
@@ -104,11 +107,36 @@ type SourceConfig struct {
 }
 
 // StartConfig 描述复制起点策略。
+// Canonical GTID field is gtid_set; gtid is accepted as an input alias.
 type StartConfig struct {
 	Mode    StartMode `json:"mode"`
 	File    string    `json:"file,omitempty"`
 	Pos     uint32    `json:"pos,omitempty"`
 	GTIDSet string    `json:"gtid_set,omitempty"`
+}
+
+type startConfigJSON struct {
+	Mode    StartMode `json:"mode"`
+	File    string    `json:"file,omitempty"`
+	Pos     uint32    `json:"pos,omitempty"`
+	GTIDSet string    `json:"gtid_set,omitempty"`
+	GTID    string    `json:"gtid,omitempty"`
+}
+
+// UnmarshalJSON accepts both gtid_set and the api.md alias gtid.
+func (s *StartConfig) UnmarshalJSON(data []byte) error {
+	var raw startConfigJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	s.Mode = raw.Mode
+	s.File = raw.File
+	s.Pos = raw.Pos
+	s.GTIDSet = raw.GTIDSet
+	if s.GTIDSet == "" {
+		s.GTIDSet = raw.GTID
+	}
+	return nil
 }
 
 // Storage 描述本地存储策略。

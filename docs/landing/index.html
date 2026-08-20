@@ -520,7 +520,7 @@
 for real operations</h1>
       <p class="hero-sub animate-fade-up" style="animation-delay:0.2s;" data-i18n="heroSub">BinlogServer centralizes MySQL binlog backup behind one service. Run local-first durable capture, inspect state through API and embedded UI, scale into cluster roles, export metrics, and archive sealed files with optional S3-compatible upload.</p>
       <div class="hero-actions animate-fade-up" style="animation-delay:0.28s;">
-        <a href="../guide/admin/deployment.md" class="btn-primary" data-i18n="heroPrimary">Open Deployment Guide</a>
+        <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Open Deployment Guide</a>
         <a href="#features" class="btn-secondary" data-i18n="heroSecondary">Learn More</a>
       </div>
       <div class="hero-code animate-fade-up" style="animation-delay:0.36s;">
@@ -536,6 +536,25 @@ Signals        Checkpoint / Lag / Events / Workers / Metrics</code>
         <span class="tag tag-cluster">Cluster</span>
         <span class="tag tag-api">Prometheus</span>
         <span class="tag tag-go">Apache 2.0</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="deployment" class="alt">
+    <div class="container">
+      <p class="section-label" data-i18n="deployLabel">Quick Start</p>
+      <h2 class="section-title" data-i18n="deployTitle">Download the release tarball,
+verify, extract, run</h2>
+      <p class="section-sub" data-i18n="deploySub">Operators do not need Go. Real assets are named <code>binlog-server_&lt;ver&gt;_&lt;os&gt;_&lt;arch&gt;.tar.gz</code> and extract into a versioned subdirectory. Full write-up: <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/deployment.md">docs/guide/admin/deployment.md</a>.</p>
+      <div class="hero-code">
+        <code data-i18n="deployCode">VER=0.4.1 OS=linux ARCH=amd64
+curl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz
+curl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt
+sha256sum -c checksums.txt --ignore-missing
+tar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz
+cd binlog-server_${VER}_${OS}_${ARCH}
+export BINLOG_SERVER_DATA_DIR=./data
+./binlog-server</code>
       </div>
     </div>
   </section>
@@ -814,8 +833,8 @@ better UI, better ops, better reliability</h2>
 and into a real product surface</h2>
       <p data-i18n="ctaSub">Review the deployment guide, inspect the release line, and evaluate BinlogServer as what it already is: a centralized MySQL binlog backup control plane.</p>
       <div class="hero-actions" style="margin-bottom:0;">
-        <a href="../guide/admin/deployment.md" class="btn-primary" data-i18n="ctaPrimary">Open Deployment Guide</a>
-        <a href="../../research_product_website_20260330.md" class="btn-secondary" data-i18n="ctaSecondary">Read Product Research</a>
+        <a href="#deployment" class="btn-primary" data-i18n="ctaPrimary">Open Deployment Guide</a>
+        <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/README.md" class="btn-secondary" data-i18n="ctaSecondary">Read the Guide</a>
       </div>
     </div>
   </section>
@@ -837,9 +856,9 @@ and into a real product surface</h2>
         <div class="footer-col">
           <div class="footer-col-title" data-i18n="footerCol1">Start</div>
           <ul>
-            <li><a href="../guide/admin/deployment.md" data-i18n="footerLink1">Deployment Guide</a></li>
-            <li><a href="../../research_product_website_20260330.md" data-i18n="footerLink2">Product Research</a></li>
-            <li><a href="../../CHANGELOG.md" data-i18n="footerLink3">Changelog</a></li>
+            <li><a href="#deployment" data-i18n="footerLink1">Deployment Guide</a></li>
+            <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/README.md" data-i18n="footerLink2">Operator Guide</a></li>
+            <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" data-i18n="footerLink3">Changelog</a></li>
           </ul>
         </div>
         <div class="footer-col">
@@ -886,6 +905,10 @@ and into a real product surface</h2>
         navSurfaces: 'Surfaces',
         navChangelog: 'Changelog',
         navCta: 'Releases',
+        deployLabel: 'Quick Start',
+        deployTitle: 'Download the release tarball,\nverify, extract, run',
+        deploySub: 'Operators do not need Go. Real assets are named binlog-server_<ver>_<os>_<arch>.tar.gz and extract into a versioned subdirectory.',
+        deployCode: 'VER=0.4.1 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         heroBadge: 'v0.4.1 — latest release',
         heroTitle: 'MySQL binlog backup control plane\nfor real operations',
         heroSub: 'BinlogServer centralizes MySQL binlog backup behind one service. Run local-first durable capture, inspect state through API and embedded UI, scale into cluster roles, export metrics, and archive sealed files with optional S3-compatible upload.',
@@ -1023,6 +1046,10 @@ and into a real product surface</h2>
         navSurfaces: '界面',
         navChangelog: '版本',
         navCta: '版本发布',
+        deployLabel: '快速开始',
+        deployTitle: '下载 release tarball，\n校验、解压、运行',
+        deploySub: '值班不需要安装 Go。真实资产名是 binlog-server_<ver>_<os>_<arch>.tar.gz，解压后在一层版本子目录里。',
+        deployCode: 'VER=0.4.1 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         heroBadge: 'v0.4.1 — 最新发布',
         heroTitle: '面向真实运维的\nMySQL binlog 备份控制平面',
         heroSub: 'BinlogServer 把 MySQL binlog 备份集中到一个服务里：本地优先的可靠采集、通过 API 与内置 UI 可见的运行状态、可扩展到集群角色的执行模型、Prometheus 指标，以及可选的兼容 S3 的归档上传。',
@@ -1177,6 +1204,11 @@ and into a real product surface</h2>
 
       localStorage.setItem('binlogserver-lang', lang);
     };
+
+    const docPaths = new Set(['/docs', '/docs/', '/docs/deployment', '/docs/deployment/', '/deployment', '/deployment/', '/guide', '/guide/']);
+    if (docPaths.has(location.pathname) && location.hash !== '#deployment') {
+      location.hash = 'deployment';
+    }
 
     const switchLanguage = (lang) => {
       root.classList.add('switching');

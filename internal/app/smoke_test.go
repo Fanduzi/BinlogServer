@@ -224,7 +224,7 @@ func TestApp_ClusterControlPlaneRole(t *testing.T) {
 	createBody := `{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl"}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}
 	}`
 	createResp := postJSON(t, "http://"+a.Addr()+"/api/tasks", createBody)
 	if createResp.StatusCode != http.StatusCreated {
@@ -341,7 +341,7 @@ func TestApp_ClusterAllInOneRole(t *testing.T) {
 	createBody := `{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl"}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}
 	}`
 	createResp := postJSON(t, "http://"+a.Addr()+"/api/tasks", createBody)
 	if createResp.StatusCode != http.StatusCreated {
@@ -927,7 +927,7 @@ func TestApp_RunWorkerIdentityStaysCoherentForActiveSession(t *testing.T) {
 	go func() { errCh <- a.Run(ctx) }()
 	waitReady(t, a)
 
-	taskBody := `{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl"}}`
+	taskBody := `{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`
 	createResp := postJSON(t, "http://"+a.Addr()+"/api/tasks", taskBody)
 	if createResp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected create status 201, got %d body=%s", createResp.StatusCode, string(createResp.Body))

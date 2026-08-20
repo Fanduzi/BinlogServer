@@ -133,7 +133,7 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
@@ -251,7 +251,7 @@ func TestTaskAPI_CreateTaskRequiresClusterKey(t *testing.T) {
 	createResp := httptest.NewRecorder()
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
@@ -270,7 +270,7 @@ func TestTaskAPI_UpdateTaskRequiresClusterKey(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
@@ -296,7 +296,7 @@ func TestTaskAPI_ClusterKeyMustBeUnique(t *testing.T) {
 	firstReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
 		"cluster_key":"dup-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	firstReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(first, firstReq)
@@ -308,7 +308,7 @@ func TestTaskAPI_ClusterKeyMustBeUnique(t *testing.T) {
 	secondReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-b",
 		"cluster_key":"dup-key",
-		"source":{"host":"127.0.0.1","port":3307,"user":"repl","flavor":"mysql","server_id":200002}
+		"source":{"host":"127.0.0.1","port":3307,"user":"repl","password":"secret","flavor":"mysql","server_id":200002}
 	}`))
 	secondReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(second, secondReq)
@@ -325,7 +325,7 @@ func TestTaskAPI_CreateRejectsInvalidInput(t *testing.T) {
 	cases := []string{
 		`{"name":"` + strings.Repeat("a", 256) + `","cluster_key":"cluster-a-key"}`,
 		`{"name":"cluster-a","cluster_key":"../bad"}`,
-		`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"bad host","port":3306,"user":"repl","flavor":"mysql","server_id":200001}}`,
+		`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"bad host","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}}`,
 		`{"name":"cluster-a","cluster_key":"cluster-a-key","start":{"mode":"BAD_MODE"}}`,
 		`{"name":"cluster-a","cluster_key":"cluster-a-key","storage":{"retention_days":0}}`,
 	}
@@ -340,6 +340,84 @@ func TestTaskAPI_CreateRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// TestTaskAPI_CreateInvalidStartDoesNotPersist 验证 400 不得留下默认 LATEST 任务。
+func TestTaskAPI_CreateInvalidStartDoesNotPersist(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing gtid_set", `{"name":"repro-400-create","cluster_key":"repro-400-create","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"replpass"},"start":{"mode":"GTID"}}`},
+		{"missing file/pos", `{"name":"repro-file","cluster_key":"repro-file","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"replpass"},"start":{"mode":"FILE_POS"}}`},
+		{"missing source", `{"name":"repro-nosource","cluster_key":"repro-nosource"}`},
+		{"missing password", `{"name":"repro-nopass","cluster_key":"repro-nopass","source":{"host":"127.0.0.1","port":3306,"user":"repl"}}`},
+	}
+	for _, tc := range cases {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d body=%s", tc.name, resp.Code, resp.Body.String())
+		}
+		var body apiErrorBody
+		if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: expected JSON error body, got %s", tc.name, resp.Body.String())
+		}
+		if body.Code != tasks.CodeInvalidRequest || body.Error == "" {
+			t.Fatalf("%s: unexpected error body %+v", tc.name, body)
+		}
+	}
+	if got := len(scheduler.ListTasks()); got != 0 {
+		t.Fatalf("expected no persisted tasks after 400 creates, got %d", got)
+	}
+}
+
+// TestTaskAPI_CreateAcceptsGTIDAlias 验证 api.md 的 start.gtid 别名写入 gtid_set。
+func TestTaskAPI_CreateAcceptsGTIDAlias(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"gtid-alias","cluster_key":"gtid-alias",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"},
+		"start":{"mode":"GTID","gtid":"3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var created tasks.Task
+	if err := json.Unmarshal(resp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Start.Mode != tasks.StartModeGTID || created.Start.GTIDSet != "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100" {
+		t.Fatalf("expected gtid alias mapped to gtid_set, got %+v", created.Start)
+	}
+}
+
+// TestTaskAPI_HealthJSON 验证文档中的 /api/health。
+func TestTaskAPI_HealthJSON(t *testing.T) {
+	handler := NewServer(tasks.NewScheduler())
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Fatalf("unexpected health body %+v", body)
+	}
+}
+
 // TestTaskAPI_UpdateRejectsInvalidInput 验证相关行为。
 func TestTaskAPI_UpdateRejectsInvalidInput(t *testing.T) {
 	scheduler := tasks.NewScheduler()
@@ -349,7 +427,7 @@ func TestTaskAPI_UpdateRejectsInvalidInput(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
@@ -360,7 +438,7 @@ func TestTaskAPI_UpdateRejectsInvalidInput(t *testing.T) {
 	cases := []string{
 		`{"name":"` + strings.Repeat("b", 256) + `","cluster_key":"cluster-a-key"}`,
 		`{"name":"cluster-b","cluster_key":"../bad"}`,
-		`{"name":"cluster-b","cluster_key":"cluster-a-key","source":{"host":"bad host","port":3306,"user":"repl","flavor":"mysql"}}`,
+		`{"name":"cluster-b","cluster_key":"cluster-a-key","source":{"host":"bad host","port":3306,"user":"repl","password":"secret","flavor":"mysql"}}`,
 		`{"name":"cluster-b","cluster_key":"cluster-a-key","start":{"mode":"BAD_MODE"}}`,
 		`{"name":"cluster-b","cluster_key":"cluster-a-key","storage":{"retention_days":3651}}`,
 	}
@@ -384,7 +462,7 @@ func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
@@ -447,7 +525,7 @@ func TestTaskAPI_UpdateTaskStoreFailureReturnsInternalServerError(t *testing.T) 
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
@@ -580,7 +658,7 @@ func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -620,7 +698,7 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -661,7 +739,7 @@ func TestTaskAPI_UpdateAndDeleteTask(t *testing.T) {
 
 	updateNoPassword := `{
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"10.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":300001}
+		"source":{"host":"10.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":300001}
 	}`
 	updateNoPwdResp := httptest.NewRecorder()
 	updateNoPwdReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(updateNoPassword))
@@ -1158,7 +1236,7 @@ func TestTaskAPI_MetricsIncludeRetryUploadCounters(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -1313,7 +1391,7 @@ func TestTaskAPI_ListUploadFailureReasons(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -1345,7 +1423,7 @@ func TestTaskAPI_ListEvents(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -1382,7 +1460,7 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -1413,7 +1491,7 @@ func TestTaskAPI_RetryUploadLimitValidation(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -1444,7 +1522,7 @@ func TestTaskAPI_UploadFailureReasonsLimitValidation(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -1522,7 +1600,7 @@ func TestTaskAPI_RetryUploadReturnsStats(t *testing.T) {
 	handler := NewServer(scheduler)
 
 	createResp := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
@@ -1554,7 +1632,7 @@ func TestTaskAPI_ListEventsWithLimit(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
 		"name":"cluster-a",
 		"cluster_key":"cluster-a-key",
-		"source":{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001}
 	}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createResp, createReq)

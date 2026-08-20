@@ -1,6 +1,6 @@
 // Package cmd provides module-level functionality for cmd.
 // input: config loader, signal context, logging setup, app runtime dependencies
-// output: root cobra command that starts binlog-server in configured mode
+// output: root cobra command that starts binlog-server without dumping Usage on bind errors
 // pos: CLI orchestration entry between process bootstrap and app lifecycle
 // note: if this file changes, update this header and module README.md.
 package cmd
@@ -20,9 +20,11 @@ func NewRootCommand() *cobra.Command {
 	var versionOnly bool
 
 	root := &cobra.Command{
-		Use:   "binlog-server",
-		Short: "Centralized MySQL binlog backup service",
-		Args:  cobra.NoArgs,
+		Use:           "binlog-server",
+		Short:         "Centralized MySQL binlog backup service",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if versionOnly {
 				_, err := fmt.Fprintln(cmd.OutOrStdout(), effectiveVersionInfo().Version)

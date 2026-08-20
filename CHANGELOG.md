@@ -12,6 +12,20 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- Create task now validates the full spec before persist. HTTP 400 no longer leaves a `LATEST` task behind.
+- `flavor=mariadb` probes `server_id` + `gtid_domain_id` instead of MySQL-only `@@server_uuid`. `log_bin=off` fails as `SOURCE_LOG_BIN_OFF`.
+- Access denied (ERROR 1045) is `SOURCE_ACCESS_DENIED` and enters `FAILED` instead of infinite retry. `POST /start` can restart a `FAILED` task after the operator fixes credentials.
+- Silent masters no longer report multi-hour `DELAYED` lag: an idle dump wait treats lag as 0 / `NORMAL`. Heartbeat events are not written into backup files.
+- Bind failures no longer dump cobra `Usage`.
+- `GET /api/health` returns `{"status":"ok"}` (keep `/healthz`).
+
+### Changed
+
+- Quick Start is download/verify/extract/`./binlog-server`. `go run` moved to Development.
+- Standalone without `meta_dsn` is documented as in-memory control plane. Restartable tasks need `meta_dsn`.
+
 ## [v0.1.2] - 2026-03-27
 
 ### Added

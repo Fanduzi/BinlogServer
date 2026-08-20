@@ -16,6 +16,49 @@ import (
 	"binlog_server/internal/binlog"
 )
 
+func TestScheduler_CreateTaskFromSpecDoesNotPersistOnInvalidStart(t *testing.T) {
+	s := NewScheduler()
+	source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "secret"}
+	start := StartConfig{Mode: StartModeGTID}
+	_, err := s.CreateTaskFromSpec("repro-400-create", "repro-400-create", &source, &start, nil)
+	if !errors.Is(err, ErrGTIDSetRequired) {
+		t.Fatalf("expected ErrGTIDSetRequired, got %v", err)
+	}
+	if got := len(s.ListTasks()); got != 0 {
+		t.Fatalf("expected no persisted task, got %d", got)
+	}
+}
+
+func TestScheduler_StartTaskFromFailed(t *testing.T) {
+	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "secret"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	s.mu.Lock()
+	if err := s.markFailedLocked(task.ID, "SOURCE_ACCESS_DENIED: denied"); err != nil {
+		s.mu.Unlock()
+		t.Fatalf("markFailedLocked: %v", err)
+	}
+	s.mu.Unlock()
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask from FAILED: %v", err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateStarting && got.State != StateRunning {
+		t.Fatalf("expected STARTING/RUNNING after restart, got %s", got.State)
+	}
+	if got.LastError != "" {
+		t.Fatalf("expected last_error cleared, got %q", got.LastError)
+	}
+}
+
 // TestScheduler_StartTaskTransitionsToRunning 验证相关行为。
 func TestScheduler_StartTaskTransitionsToRunning(t *testing.T) {
 	s := NewScheduler(WithRunner(&fakeRunner{started: make(chan Task, 1)}))

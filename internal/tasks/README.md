@@ -2,8 +2,9 @@
 
 ## Files
 - `scheduler.go`: 调度器核心类型、选项注入与通用辅助函数。
-- `scheduler_task_ops.go`: 任务 CRUD 与配置更新（非运行时生命周期）。
-- `scheduler_lifecycle.go`: 启停、运行协程与重试退避生命周期流程。
+- `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec）。
+- `scheduler_lifecycle.go`: 启停、运行协程、重试退避与不可恢复 FAILED。
+- `errors.go`: 永久错误类型（1045 / log_bin off / 身份不可用）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
 - `scheduler_observability.go`: 复制进度、checkpoint、事件/文件/运行历史查询。
 - `scheduler_retry_upload.go`: 上传失败补偿重试与失败原因聚合。
@@ -13,6 +14,8 @@
 
 ## Exports
 - 任务 CRUD、启动停止、状态推进。
+- `CreateTaskFromSpec`：整包校验后才 persist。
+- `FAILED` 可再次 `StartTask`（改完源库配置后）。
 - 事件记录、文件元信息、上传补偿。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
 - Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。

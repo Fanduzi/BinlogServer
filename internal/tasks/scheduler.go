@@ -34,6 +34,8 @@ var ErrFilePosRequired = errors.New("file/pos is required")
 var ErrGTIDSetRequired = errors.New("gtid_set is required")
 var ErrInvalidStartMode = errors.New("invalid start mode")
 var ErrInvalidRetentionDays = errors.New("invalid retention_days")
+var ErrSourcePasswordRequired = errors.New("source.password is required")
+var ErrSourceRequired = errors.New("source.host/port/user/password is required")
 
 var clusterKeyAllowedPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
