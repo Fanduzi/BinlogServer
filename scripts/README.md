@@ -17,7 +17,7 @@
 
 - `make build [VERSION=v0.1.0]`（默认 `CGO_ENABLED=0`）
 - `make build-linux [VERSION=v0.1.0]`（Linux 发布二进制默认 `CGO_ENABLED=0`，避免绑定构建机 glibc）
-- `make check-linux-compat [VERSION=v0.1.0]`
+- `make check-linux-compat [VERSION=v0.1.0]`（只编 Linux 二进制做静态链接检查，不重建 frontend，避免弄脏 git 树）
 - `make check-linux-release-archive VERSION=v0.1.0`
 - `make ui-build`
 - `make release-assets VERSION=v0.1.0`
