@@ -2,17 +2,9 @@ version: 2
 
 project_name: binlog-server
 
-# The dry-run goreleaser step rebuilds the embedded UI before publish.
-# Ignore those generated files so the second goreleaser run is not dirty.
-git:
-  ignore:
-    - "internal/ui/static/**"
-
 before:
   hooks:
     - go mod download
-    - sh -c 'cd frontend && npm ci'
-    - ./scripts/build-ui.sh
 
 builds:
   - id: binlog-server
