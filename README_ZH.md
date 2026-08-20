@@ -58,52 +58,55 @@ Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负�
 
 ## 安装 / 下载
 
-- 对于带 tag 的公开版本，优先从 GitHub Releases 下载与你平台匹配的压缩包：
-  - `binlog-server_<version>_darwin_amd64.tar.gz`
-  - `binlog-server_<version>_darwin_arm64.tar.gz`
-  - `binlog-server_<version>_linux_amd64.tar.gz`
-  - `binlog-server_<version>_linux_arm64.tar.gz`
-- 同一页会提供 `checksums.txt`，下载后先校验再解压。
-- `/ui/` 所需前端静态资源已经内嵌在二进制里，不需要额外下载前端包。
+带 tag 的公开版本，从 [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases) 下载对应平台压缩包：
 
-源码构建作为 fallback：
+- `binlog-server_<version>_darwin_amd64.tar.gz`
+- `binlog-server_<version>_darwin_arm64.tar.gz`
+- `binlog-server_<version>_linux_amd64.tar.gz`
+- `binlog-server_<version>_linux_arm64.tar.gz`
 
-```bash
-make build
+真实资产名是 `binlog-server_<ver>_<os>_<arch>.tar.gz`（例如 `binlog-server_0.4.1_linux_amd64.tar.gz`）。同一页提供 `checksums.txt`，先校验再解压。压缩包里有一层版本子目录：
 
-# Linux 部署二进制请保持 CGO 关闭，避免绑定构建机 glibc 版本。
-make build-linux
+```text
+binlog-server_0.4.1_linux_amd64/
+  binlog-server
+  README.md
+  README_ZH.md
+  CHANGELOG.md
+  LICENSE
 ```
 
-如果你要在本地准备一组 release 产物：
-
-```bash
-make release-assets VERSION=v0.4.1
-```
+`/ui/` 所需前端静态资源已经内嵌在二进制里，不需要额外下载前端包。
 
 ## Quick Start
 
-这部分只保留“第一次跑起来”所需的最短路径。
+这是给 release 操作员的最短路径，不需要安装 Go。
 
 ### 前置条件
 
-- Go `1.26.1+`
-- 一个可访问的 MySQL 实例，并且已经开启 binlog
-- 如需跑 E2E：Docker 可用
+- GitHub Releases 上对应平台的 tarball
+- 一台已开启 `log_bin` 的 MySQL 或 MariaDB
 
-### 1. 启动服务
-
-```bash
-go run ./cmd/binlog-server
-```
-
-默认监听地址是 `:8080`。
-
-如果你想显式指定监听地址：
+### 1. 下载、校验、解压、运行
 
 ```bash
-BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
+VER=0.4.1
+OS=linux          # linux | darwin
+ARCH=amd64        # amd64 | arm64
+
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing
+
+tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+cd "binlog-server_${VER}_${OS}_${ARCH}"
+
+export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
+export BINLOG_SERVER_DATA_DIR=./data
+./binlog-server
 ```
+
+未设置 `BINLOG_SERVER_LISTEN_ADDR` 时，默认监听 `:8080`。
 
 ### 2. 验证 `/healthz`
 
@@ -189,6 +192,7 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 
 - Auth：默认关闭，生产环境至少应保护 `/api/*` 与 `/metrics`
 - Meta DB：如果配置了 `meta_dsn`，必须先执行 migration，服务不会自动建表或自动升级 schema
+- 未配置 `meta_dsn` 的 standalone：任务元数据、checkpoint、文件记录只在内存。进程 `kill -9` / 重启后控制面清空。已经写到 `{data_dir}/{task_id}/` 的 binlog 会变成孤儿文件。需要重启可恢复、以及运行中 `GET /checkpoint` / `GET /files` 时，请配置 `meta_dsn`。`storage.dir` 会被忽略，真实路径固定为 `{data_dir}/{task_id}/`。
 - Upload：S3-compatible upload 是可选能力，但一旦启用，必填项必须完整
 - Tracing：默认关闭，启用前先确认 exporter 配置和采样策略
 
@@ -297,6 +301,26 @@ BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排�
 | 复制执行链路 | [internal/replication/README.md](internal/replication/README.md) |
 | Upload 模块 | [internal/upload/README.md](internal/upload/README.md) |
 | E2E 测试套件 | [scripts/e2e/README.md](scripts/e2e/README.md) |
+
+## 开发
+
+改代码时用源码构建，不要把它当成 release 安装路径。
+
+前置：Go `1.26.1+`。E2E 才需要 Docker。
+
+```bash
+make build
+
+# Linux 部署二进制请保持 CGO 关闭，避免绑定构建机 glibc 版本。
+make build-linux
+
+# 从源码运行
+go run ./cmd/binlog-server
+BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
+
+# 本地准备一组 release 产物
+make release-assets VERSION=v0.4.1
+```
 
 ## 开发验证入口
 

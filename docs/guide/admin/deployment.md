@@ -48,14 +48,21 @@ FLUSH PRIVILEGES;
 ### 2.1 下载或编译
 
 ```bash
-# 从源码编译
-git clone https://github.com/your-org/binlog-server.git
-cd binlog-server
-make build-linux
-cp bin/binlog-server-linux-amd64 ./binlog-server
+# 推荐：下载 GitHub Release tarball（不需要 Go）
+VER=0.4.1
+OS=linux          # linux | darwin
+ARCH=amd64        # amd64 | arm64
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing
+tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+cd "binlog-server_${VER}_${OS}_${ARCH}"
 
-# 或下载预编译版本
-# wget https://github.com/your-org/binlog-server/releases/download/v0.4.1/binlog-server-linux-amd64
+# 或从源码编译（开发机）
+# git clone https://github.com/Fanduzi/BinlogServer.git
+# cd BinlogServer
+# make build-linux
+# cp bin/binlog-server ./binlog-server
 ```
 
 说明：Linux 部署二进制必须保持 `CGO_ENABLED=0`，避免 Ubuntu 等较新发行版构建出的产物绑定更高版本的 `glibc`；当前仓库的 `make build-linux` 和 release 流程默认按兼容 `glibc 2.17` 的方向构建。
@@ -69,6 +76,9 @@ cp bin/binlog-server-linux-amd64 ./binlog-server
 listen_addr: ":8080"
 data_dir: "./data"
 mode: "standalone"
+
+# 未配置 meta_dsn 时，任务/checkpoint/files 只在内存，进程退出后控制面丢失。
+# 需要重启可恢复时请配置 meta_dsn 并先跑 migration。
 
 # 日志配置
 log:

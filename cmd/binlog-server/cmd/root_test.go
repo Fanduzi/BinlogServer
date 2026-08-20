@@ -7,6 +7,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -138,5 +139,27 @@ func TestRootCommandWithoutArgsStillStartsApp(t *testing.T) {
 	}
 	if startCalls != 1 {
 		t.Fatalf("expected app startup to run once, got %d calls", startCalls)
+	}
+}
+
+func TestRootCommandRunErrorOmitsUsage(t *testing.T) {
+	restoreRun := setTestRunRootApp(func(string, string) error {
+		return errors.New("listen tcp :8080: bind: address already in use")
+	})
+	defer restoreRun()
+
+	cmd := NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs(nil)
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected bind error")
+	}
+	output := stdout.String()
+	if strings.Contains(output, "Usage:") {
+		t.Fatalf("expected no cobra Usage dump, got %q", output)
 	}
 }

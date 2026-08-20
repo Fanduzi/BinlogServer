@@ -108,7 +108,7 @@ curl -X POST http://localhost:8080/api/tasks \
     },
     "start": {
       "mode": "GTID",
-      "gtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"
+      "gtid_set": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"
     }
   }'
 ```
@@ -126,8 +126,10 @@ curl -X POST http://localhost:8080/api/tasks \
 | start.mode | string | 是 | LATEST / FILE_POS / GTID |
 | start.file | string | 条件 | 文件名（FILE_POS 模式必填） |
 | start.pos | int | 条件 | 位置（FILE_POS 模式必填） |
-| start.gtid | string | 条件 | GTID（GTID 模式必填） |
+| start.gtid_set | string | 条件 | GTID 集合（GTID 模式必填）。也接受别名 `gtid`。 |
 | storage.retention_days | int | 否 | 保留天数（默认 7，范围 1-3650） |
+
+校验失败返回 HTTP 400 JSON `{"error","code"}`，**不会落库**。`source.host/port/user/password` 必填；`FILE_POS` 必须带 file/pos；`GTID` 必须带 `gtid_set`（或别名 `gtid`）。不要假设 400 之后任务不存在——实现上 400 就是没写入。
 
 **响应示例：**
 
@@ -254,7 +256,7 @@ curl http://localhost:8080/api/tasks/{task_id}/checkpoint
   "task_id": "task-xxx",
   "file": "mysql-bin.000010",
   "pos": 12345,
-  "gtid": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100",
+  "gtid_set": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100",
   "updated_at": "2024-01-01T10:05:00Z"
 }
 ```

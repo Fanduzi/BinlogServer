@@ -3,7 +3,7 @@
 ## Files
 | File | Responsibility |
 |------|---------------|
-| `server.go` | HTTP server/router 组装、路由注册 |
+| `server.go` | HTTP server/router 组装、路由注册（含 `/healthz` 与 `/api/health`） |
 | `auth.go` | 路由级鉴权配置与认证中间件、ServerOption 定义 |
 | `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
 | `metrics_prometheus.go` | `/metrics` 采集与输出（基于 `prometheus/client_golang`） |
@@ -26,6 +26,8 @@
 
 ## Features
 - 认证：支持 Bearer Token 或 API Key；`/healthz` 默认匿名，`/metrics` 与 `/api/*` 可配置保护
+- 创建任务：`CreateTaskFromSpec` 整包校验通过后才落库；400 返回 JSON `{"error","code"}`
+- 健康检查：`GET /healthz` 文本 `ok`；`GET /api/health` JSON `{"status":"ok"}`
 - 限流：基于 IP 的令牌桶限流，默认 100 req/s，burst 200
 - Tracing：OTel HTTP span（可选）
 
