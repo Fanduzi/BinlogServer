@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle control including startup, role wiring, and shutdown
+// input: runtime config including metadata DSN, scheduler/runner/meta store dependencies, process context
+// output: application lifecycle control with metadata/source isolation, role wiring, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,8 @@ import (
 	"binlog_server/internal/replication"
 	"binlog_server/internal/tasks"
 	"binlog_server/internal/upload"
+
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 const (
@@ -144,6 +147,10 @@ func (a *App) Run(ctx context.Context) error {
 	var leaseManager tasks.LeaseManager
 	var leaseVerifier replication.LeaseVerifier
 	if a.cfg.MetaDSN != "" {
+		metaHost, metaPort, comparable := metadataSourceEndpoint(a.cfg.MetaDSN)
+		if comparable {
+			opts = append(opts, tasks.WithMetadataSourceEndpoint(metaHost, metaPort))
+		}
 		// 如果配置了 metadata DB，把它同时注入 scheduler（control plane）
 		// 和 runner（data plane 的 checkpoint/file metadata）。
 		mysqlStore, err = newAppMetaStoreForRun(a.cfg)
@@ -366,6 +373,27 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func metadataSourceEndpoint(dsn string) (string, uint16, bool) {
+	// Store construction remains the source of truth for DSN errors; this helper
+	// only extracts TCP endpoints that can be compared with task sources.
+	cfg, err := mysqlDriver.ParseDSN(dsn)
+	if err != nil {
+		return "", 0, false
+	}
+	if !strings.HasPrefix(cfg.Net, "tcp") {
+		return "", 0, false
+	}
+	host, portText, err := net.SplitHostPort(cfg.Addr)
+	if err != nil {
+		return "", 0, false
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
+		return "", 0, false
+	}
+	return host, uint16(port), true
 }
 
 // Ready 返回应用就绪信号通道（listener 绑定成功后关闭）。

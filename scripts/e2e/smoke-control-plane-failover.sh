@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# input: isolated metadata DSN plus local tooling and control-plane failover dependencies
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -22,7 +22,7 @@ CHECKPOINT_HTTP_CODE=""
 CHECKPOINT_HTTP_BODY=""
 
 source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
-META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13306)}"
+META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13316)}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }

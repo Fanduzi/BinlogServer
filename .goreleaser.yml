@@ -24,15 +24,33 @@ builds:
         -X binlog_server/cmd/binlog-server/cmd.buildVersion={{ .Version }}
         -X binlog_server/cmd/binlog-server/cmd.buildCommit={{ .FullCommit }}
         -X binlog_server/cmd/binlog-server/cmd.buildDate={{ .Date }}
+  - id: migrate
+    main: ./cmd/migrate
+    binary: migrate
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - id: release-archive
     ids:
       - binlog-server
+      - migrate
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     wrap_in_directory: true
+    files:
+      - LICENSE*
+      - README.md
+      - README_ZH.md
+      - CHANGELOG.md
+      - migrations/*.sql
 
 checksum:
   name_template: checksums.txt
