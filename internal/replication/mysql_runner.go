@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
-// input: source replication config, flavor-aware identity, checkpoint/file store dependencies
-// output: replication run control, durable local artifacts, idle lag progress, and permanent source errors
+// input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
+// output: replication run control, observable OPEN/SEALED artifacts, idle lag progress, and permanent source errors
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -234,7 +234,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	writerOpener := r.writerOpener
 	if writerOpener == nil {
 		writerOpener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
-			return r.openBinlogWriter(task, fileName, initialPos)
+			return r.openBinlogWriter(ctx, task, fileName, initialPos)
 		}
 	}
 
@@ -264,6 +264,25 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		currentPos = checkpoint.Pos
 		if r.checkpointStore != nil {
 			if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, checkpoint); err != nil {
+				return err
+			}
+		}
+		if r.fileMetaStore != nil {
+			info, err := os.Stat(currentPath)
+			if err != nil {
+				return err
+			}
+			if err := r.fileMetaStore.UpsertBinlogFile(ctx, tasks.BinlogFile{
+				TaskID:      task.ID,
+				FileName:    currentFile,
+				FilePath:    currentPath,
+				State:       "OPEN",
+				SizeBytes:   info.Size(),
+				StartPos:    currentStartPos,
+				EndPos:      checkpoint.Pos,
+				CreatedAt:   currentCreatedAt,
+				UploadState: "LOCAL_ONLY",
+			}); err != nil {
 				return err
 			}
 		}
@@ -524,6 +543,7 @@ func (r *MySQLRunner) finalizeSealedFile(
 			TaskID:      task.ID,
 			FileName:    sourceFile,
 			FilePath:    sealedPath,
+			State:       "SEALED",
 			SizeBytes:   info.Size(),
 			StartPos:    startPos,
 			EndPos:      endPos,
@@ -601,7 +621,7 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 }
 
 // openBinlogWriter 打开（或创建）本地 open 文件并返回带初始 checkpoint 的 writer。
-func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initialPos uint32) (*os.File, *binlog.Writer, string, error) {
+func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fileName string, initialPos uint32) (*os.File, *binlog.Writer, string, error) {
 	// Step 1: 准备目录并清理 stale open / 过期文件。
 	dir := filepath.Join(r.dataDir, task.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -644,7 +664,31 @@ func (r *MySQLRunner) openBinlogWriter(task tasks.Task, fileName string, initial
 		}
 	}
 
-	// Step 3: 返回带初始 checkpoint 的 writer。
+	// Step 3: 持久化当前 open segment，供运行中 /files 查询。
+	info, err = f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, "", err
+	}
+	if r.fileMetaStore != nil {
+		createdAt := time.Now()
+		if err := r.fileMetaStore.UpsertBinlogFile(ctx, tasks.BinlogFile{
+			TaskID:      task.ID,
+			FileName:    fileName,
+			FilePath:    path,
+			State:       "OPEN",
+			SizeBytes:   info.Size(),
+			StartPos:    initialPos,
+			EndPos:      initialPos,
+			CreatedAt:   createdAt,
+			UploadState: "LOCAL_ONLY",
+		}); err != nil {
+			_ = f.Close()
+			return nil, nil, "", err
+		}
+	}
+
+	// Step 4: 返回带初始 checkpoint 的 writer。
 	writer := binlog.NewWriter(f, binlog.Checkpoint{
 		File: fileName,
 		Pos:  initialPos,

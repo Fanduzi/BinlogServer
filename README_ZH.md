@@ -192,7 +192,7 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 
 - Auth：默认关闭，生产环境至少应保护 `/api/*` 与 `/metrics`
 - Meta DB：如果配置了 `meta_dsn`，必须先执行 migration，服务不会自动建表或自动升级 schema
-- 未配置 `meta_dsn` 的 standalone：任务元数据、checkpoint、文件记录只在内存。进程 `kill -9` / 重启后控制面清空。已经写到 `{data_dir}/{task_id}/` 的 binlog 会变成孤儿文件。需要重启可恢复、以及运行中 `GET /checkpoint` / `GET /files` 时，请配置 `meta_dsn`。`storage.dir` 会被忽略，真实路径固定为 `{data_dir}/{task_id}/`。
+- 未配置 `meta_dsn` 的 standalone：任务元数据、checkpoint、文件记录只在内存。进程 `kill -9` / 重启后控制面清空。已经写到 `{data_dir}/{task_id}/` 的 binlog 会变成孤儿文件。配置 `meta_dsn` 后，持久化的 active task 会在重启时自动从 checkpoint 续传，运行中 `GET /files` 也会列出当前 `OPEN` segment。`storage.dir` 会被忽略，真实路径固定为 `{data_dir}/{task_id}/`。
 - Upload：S3-compatible upload 是可选能力，但一旦启用，必填项必须完整
 - Tracing：默认关闭，启用前先确认 exporter 配置和采样策略
 

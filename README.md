@@ -193,7 +193,7 @@ Development defaults are intentionally permissive. Do not carry them unchanged i
 
 - Auth: disabled by default; production should protect at least `/api/*` and `/metrics`
 - Meta DB: if `meta_dsn` is configured, run migrations first; the service does not auto-create or auto-upgrade schema
-- Standalone without `meta_dsn` keeps task metadata, checkpoints, and file records in memory only. `kill -9` / process restart drops the control plane. Binlog bytes already written under `{data_dir}/{task_id}/` remain as orphan files. For restartable tasks and `GET /checkpoint` / `GET /files`, configure `meta_dsn`. `storage.dir` is ignored; files always go to `{data_dir}/{task_id}/`.
+- Standalone without `meta_dsn` keeps task metadata, checkpoints, and file records in memory only. `kill -9` / process restart drops the control plane. Binlog bytes already written under `{data_dir}/{task_id}/` remain as orphan files. With `meta_dsn`, persisted active tasks resume automatically from their checkpoint after restart, and `GET /files` includes the current `OPEN` segment. `storage.dir` is ignored; files always go to `{data_dir}/{task_id}/`.
 - Upload: S3-compatible upload is optional, but required fields must be complete when enabled
 - Tracing: disabled by default; validate exporter configuration and sampling before rollout
 

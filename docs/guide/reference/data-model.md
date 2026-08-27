@@ -125,6 +125,7 @@ type BinlogFile struct {
     TaskID      string    `json:"task_id"`
     FileName    string    `json:"file_name"`
     FilePath    string    `json:"file_path"`
+    State       string    `json:"state"` // OPEN / SEALED
     SizeBytes   int64     `json:"size_bytes"`
     StartPos    uint32    `json:"start_pos"`
     EndPos      uint32    `json:"end_pos"`

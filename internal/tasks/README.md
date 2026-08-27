@@ -17,6 +17,7 @@
 - `CreateTaskFromSpec`：整包校验后才 persist。
 - `FAILED` 可再次 `StartTask`（改完源库配置后）。
 - 事件记录、文件元信息、上传补偿。
+- `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
 - Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
