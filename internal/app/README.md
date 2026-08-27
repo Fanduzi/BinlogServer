@@ -4,6 +4,7 @@
 - `app.go`: 应用主流程与运行时装配。
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`）。
+- `restart_recovery_test.go`: standalone 重启后持久化 active task 自动恢复的回归测试。
 
 ## Exports
 - `New(cfg)` / `Run(ctx)`: 应用生命周期入口。
@@ -12,6 +13,7 @@
 - 通过 `config.meta.timeout.*` 注入 tasks/meta 的内部依赖调用超时（读/写/lease/上传）。
 - API server 支持从 `config.API.Auth` 注入鉴权策略。
 - tracing：默认关闭；启用时装配 HTTP 入站 span 与元数据存储调用 span。
+- standalone/cluster worker 启动时自动恢复 metadata 中遗留的 active task，并从 checkpoint 续传。
 
 ### Minimal Tracing Config Example
 ```yaml

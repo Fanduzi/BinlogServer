@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle control including startup, role wiring, and shutdown
+// input: runtime config, persisted task state, scheduler/runner/meta store dependencies, process context
+// output: application lifecycle control including active-task restart recovery, role wiring, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -263,12 +263,12 @@ func (a *App) Run(ctx context.Context) error {
 	if err := scheduler.Restore(restoreCtx); err != nil {
 		return err
 	}
-	if workerEnabled && isClusterMode(a.cfg) {
+	if workerEnabled {
 		// worker 重启后把可恢复任务重新拉起，清理遗留的中间态。
-		stats := resumeClusterWorkerTasks(scheduler)
+		stats := resumePersistedActiveTasks(scheduler)
 		if stats.StopErrors > 0 || stats.StartErrors > 0 {
 			log.Printf(
-				"cluster resume completed with errors considered=%d resumed=%d stop_errors=%d start_errors=%d",
+				"task resume completed with errors considered=%d resumed=%d stop_errors=%d start_errors=%d",
 				stats.Considered,
 				stats.Resumed,
 				stats.StopErrors,
@@ -919,22 +919,22 @@ func isNonNilInterface(v any) bool {
 	}
 }
 
-type resumeClusterStats struct {
+type resumeStats struct {
 	Considered  int
 	Resumed     int
 	StopErrors  int
 	StartErrors int
 }
 
-type clusterTaskResumer interface {
+type taskResumer interface {
 	ListTasks() []tasks.Task
 	StopTask(id string) error
 	StartTask(id string) error
 }
 
-// resumeClusterWorkerTasks 在 worker 启动时重置并恢复可运行任务，避免残留状态阻塞调度。
-func resumeClusterWorkerTasks(scheduler clusterTaskResumer) resumeClusterStats {
-	var stats resumeClusterStats
+// resumePersistedActiveTasks 在 worker 启动时重置并恢复持久化的 active 任务。
+func resumePersistedActiveTasks(scheduler taskResumer) resumeStats {
+	var stats resumeStats
 	for _, task := range scheduler.ListTasks() {
 		switch task.State {
 		case tasks.StateRunning, tasks.StateStarting, tasks.StateRetryBackoff, tasks.StateLeaseDegraded:
@@ -942,12 +942,12 @@ func resumeClusterWorkerTasks(scheduler clusterTaskResumer) resumeClusterStats {
 			stats.Considered++
 			if err := scheduler.StopTask(task.ID); err != nil {
 				stats.StopErrors++
-				log.Printf("cluster resume stop failed task=%s err=%v", task.ID, err)
+				log.Printf("task resume stop failed task=%s err=%v", task.ID, err)
 				continue
 			}
 			if err := scheduler.StartTask(task.ID); err != nil {
 				stats.StartErrors++
-				log.Printf("cluster resume start failed task=%s err=%v", task.ID, err)
+				log.Printf("task resume start failed task=%s err=%v", task.ID, err)
 				continue
 			}
 			stats.Resumed++

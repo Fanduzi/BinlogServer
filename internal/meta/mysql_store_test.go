@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
-// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies
+// output: persistence contract coverage for tasks, files, leases, runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -307,6 +307,7 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 		TaskID:      "1",
 		FileName:    "mysql-bin.000001",
 		FilePath:    "/tmp/mysql-bin.000001",
+		State:       "SEALED",
 		SizeBytes:   1024,
 		StartPos:    4,
 		EndPos:      1200,
@@ -323,6 +324,7 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 			"1",
 			"mysql-bin.000001",
 			"/tmp/mysql-bin.000001",
+			"SEALED",
 			int64(1024),
 			uint32(4),
 			uint32(1200),
@@ -339,10 +341,10 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 
 	rows := sqlmock.NewRows([]string{
-		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
+		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
 		"object_key", "upload_state", "upload_error", "uploaded_at",
 	}).AddRow(
-		"1", "mysql-bin.000001", "/tmp/mysql-bin.000001", int64(1024), uint32(4), uint32(1200), time.Now().Add(-time.Minute), time.Now(),
+		"1", "mysql-bin.000001", "/tmp/mysql-bin.000001", "SEALED", int64(1024), uint32(4), uint32(1200), time.Now().Add(-time.Minute), time.Now(),
 		"prefix/1/mysql-bin.000001", "UPLOADED", "", time.Now(),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
@@ -361,6 +363,9 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 	if files[0].UploadState != "UPLOADED" {
 		t.Fatalf("unexpected upload state: %s", files[0].UploadState)
+	}
+	if files[0].State != "SEALED" {
+		t.Fatalf("unexpected file state: %s", files[0].State)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
