@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# input: local tooling, optional E2E_MYSQL57_PORT override, and invalid-input e2e dependencies
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
 API="${E2E_API:-http://127.0.0.1:18080}"
+MYSQL57_PORT="${E2E_MYSQL57_PORT:-13306}"
 RUN_TAG="$(date +%s)"
 BASE_CLUSTER_KEY="e2e-invalid-input-base-${RUN_TAG}"
 UPDATED_CLUSTER_KEY="e2e-invalid-input-updated-${RUN_TAG}"
@@ -83,7 +84,7 @@ assert_task_baseline_unchanged() {
   [[ "$actual_name" == "$BASE_NAME" ]] || { echo "task $task_id name changed unexpectedly: $actual_name" >&2; exit 1; }
   [[ "$actual_key" == "$BASE_CLUSTER_KEY" ]] || { echo "task $task_id cluster_key changed unexpectedly: $actual_key" >&2; exit 1; }
   [[ "$actual_host" == "127.0.0.1" ]] || { echo "task $task_id source.host changed unexpectedly: $actual_host" >&2; exit 1; }
-  [[ "$actual_port" == "13306" ]] || { echo "task $task_id source.port changed unexpectedly: $actual_port" >&2; exit 1; }
+  [[ "$actual_port" == "$MYSQL57_PORT" ]] || { echo "task $task_id source.port changed unexpectedly: $actual_port" >&2; exit 1; }
   [[ "$actual_user" == "repl" ]] || { echo "task $task_id source.user changed unexpectedly: $actual_user" >&2; exit 1; }
   [[ "$actual_start" == "LATEST" ]] || { echo "task $task_id start.mode changed unexpectedly: $actual_start" >&2; exit 1; }
   [[ "$actual_retention" == "7" ]] || { echo "task $task_id storage.retention_days changed unexpectedly: $actual_retention" >&2; exit 1; }
@@ -95,7 +96,7 @@ create_valid_task() {
   local name="$BASE_NAME"
   local payload
   payload="$(cat <<JSON
-{"name":"$name","cluster_key":"$BASE_CLUSTER_KEY","source":{"host":"127.0.0.1","port":13306,"user":"repl","password":"replpass","flavor":"mysql","server_id":$sid},"start":{"mode":"LATEST"},"storage":{"retention_days":7}}
+{"name":"$name","cluster_key":"$BASE_CLUSTER_KEY","source":{"host":"127.0.0.1","port":$MYSQL57_PORT,"user":"repl","password":"replpass","flavor":"mysql","server_id":$sid},"start":{"mode":"LATEST"},"storage":{"retention_days":7}}
 JSON
 )"
   local resp
@@ -113,10 +114,10 @@ JSON
 }
 
 echo "[invalid-inputs] verify create rejects invalid cluster_key"
-assert_post_400 '{"name":"invalid-a","cluster_key":"../bad","source":{"host":"127.0.0.1","port":13306,"user":"repl","flavor":"mysql","server_id":410001}}'
+assert_post_400 "{\"name\":\"invalid-a\",\"cluster_key\":\"../bad\",\"source\":{\"host\":\"127.0.0.1\",\"port\":${MYSQL57_PORT},\"user\":\"repl\",\"flavor\":\"mysql\",\"server_id\":410001}}"
 
 echo "[invalid-inputs] verify create rejects invalid source.host"
-assert_post_400 '{"name":"invalid-b","cluster_key":"invalid-b","source":{"host":"bad host","port":13306,"user":"repl","flavor":"mysql","server_id":410002}}'
+assert_post_400 "{\"name\":\"invalid-b\",\"cluster_key\":\"invalid-b\",\"source\":{\"host\":\"bad host\",\"port\":${MYSQL57_PORT},\"user\":\"repl\",\"flavor\":\"mysql\",\"server_id\":410002}}"
 
 echo "[invalid-inputs] create one valid task for update checks"
 TASK_ID="$(create_valid_task)"

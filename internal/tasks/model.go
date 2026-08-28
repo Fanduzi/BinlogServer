@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task JSON payloads, runner callbacks, store/lease/uploader dependencies
-// output: task/start/source models including gtid alias decoding
+// input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
+// output: task/start/source/file models including gtid alias decoding and OPEN/SEALED observability
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -180,6 +180,7 @@ type BinlogFile struct {
 	TaskID      string    `json:"task_id"`
 	FileName    string    `json:"file_name"`
 	FilePath    string    `json:"file_path"`
+	State       string    `json:"state"`
 	SizeBytes   int64     `json:"size_bytes"`
 	StartPos    uint32    `json:"start_pos"`
 	EndPos      uint32    `json:"end_pos"`

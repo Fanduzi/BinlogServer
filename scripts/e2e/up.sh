@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
-# output: deterministic e2e orchestration, scenario execution, and verification logs
+# output: four source databases plus an isolated metadata database ready for e2e scenarios
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -8,8 +8,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
 
-# 这里只拉起 source MySQL，避免把按需场景（如 orchestrator）也默认启动。
-services=(mysql57 mysql80 percona57 percona80)
+# 这里只拉起 source MySQL 和独立 metadata MySQL，避免启动 orchestrator 等按需服务。
+services=(mysql57 mysql80 percona57 percona80 meta-primary)
 
 cd "$ROOT_DIR"
 docker compose -f "$COMPOSE_FILE" up -d "${services[@]}"

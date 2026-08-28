@@ -70,6 +70,8 @@ Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负�
 ```text
 binlog-server_0.4.2_linux_amd64/
   binlog-server
+  migrate
+  migrations/
   README.md
   README_ZH.md
   CHANGELOG.md
@@ -86,6 +88,8 @@ binlog-server_0.4.2_linux_amd64/
 
 - GitHub Releases 上对应平台的 tarball
 - 一台已开启 `log_bin` 的 MySQL 或 MariaDB
+
+> **metadata 必须隔离：** 配置 `meta_dsn` 时，它必须使用独立 MySQL 实例，且绝不能加入 binlog 备份任务集。服务会拒绝 TCP `host:port` 完全相同的 source；别名和代理场景仍需由运维保证实例隔离。
 
 ### 1. 下载、校验、解压、运行
 
@@ -191,8 +195,8 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 开发环境默认值偏宽松，生产环境不要直接照搬。
 
 - Auth：默认关闭，生产环境至少应保护 `/api/*` 与 `/metrics`
-- Meta DB：如果配置了 `meta_dsn`，必须先执行 migration，服务不会自动建表或自动升级 schema
-- 未配置 `meta_dsn` 的 standalone：任务元数据、checkpoint、文件记录只在内存。进程 `kill -9` / 重启后控制面清空。已经写到 `{data_dir}/{task_id}/` 的 binlog 会变成孤儿文件。需要重启可恢复、以及运行中 `GET /checkpoint` / `GET /files` 时，请配置 `meta_dsn`。`storage.dir` 会被忽略，真实路径固定为 `{data_dir}/{task_id}/`。
+- Meta DB：如果配置了 `meta_dsn`，必须使用绝不作为复制源的独立 MySQL 实例，并先执行 migration；服务不会自动建表或自动升级 schema
+- 未配置 `meta_dsn` 的 standalone：任务元数据、checkpoint、文件记录只在内存。进程 `kill -9` / 重启后控制面清空。已经写到 `{data_dir}/{task_id}/` 的 binlog 会变成孤儿文件。配置 `meta_dsn` 后，持久化的 active task 会在重启时自动从 checkpoint 续传，运行中 `GET /files` 也会列出当前 `OPEN` segment。`storage.dir` 会被忽略，真实路径固定为 `{data_dir}/{task_id}/`。
 - Upload：S3-compatible upload 是可选能力，但一旦启用，必填项必须完整
 - Tracing：默认关闭，启用前先确认 exporter 配置和采样策略
 
@@ -210,7 +214,8 @@ export BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true
 
 ```bash
 export META_DSN='meta:replace_me@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true'
-make migrate-up META_DSN="$META_DSN"
+./migrate up --dsn "$META_DSN" --path ./migrations
+export BINLOG_SERVER_META_DSN="$META_DSN"
 ```
 
 如需启用 upload，至少提供这些配置：
@@ -306,7 +311,7 @@ BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排�
 
 改代码时用源码构建，不要把它当成 release 安装路径。
 
-前置：Go `1.26.1+`。E2E 才需要 Docker。
+前置：Go `1.26.7+`。E2E 才需要 Docker。
 
 ```bash
 make build

@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle control including startup, role wiring, and shutdown
+// input: runtime config, persisted active tasks, scheduler/runner/meta store dependencies, process context
+// output: application lifecycle coverage for startup recovery, role wiring, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -495,8 +495,8 @@ func TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier(t *testing.T) {
 	}
 }
 
-// TestApp_ResumeClusterWorkerTasksStartsRecoveredActiveTasks 验证相关行为。
-func TestApp_ResumeClusterWorkerTasksStartsRecoveredActiveTasks(t *testing.T) {
+// TestApp_ResumePersistedActiveTasksStartsRecoveredTasks 验证相关行为。
+func TestApp_ResumePersistedActiveTasksStartsRecoveredTasks(t *testing.T) {
 	store := newAppFakeStore()
 	store.tasks["1"] = tasks.Task{
 		ID:            "1",
@@ -534,7 +534,7 @@ func TestApp_ResumeClusterWorkerTasksStartsRecoveredActiveTasks(t *testing.T) {
 		t.Fatalf("Restore returned error: %v", err)
 	}
 
-	stats := resumeClusterWorkerTasks(s)
+	stats := resumePersistedActiveTasks(s)
 	if stats.Considered != 1 || stats.Resumed != 1 || stats.StopErrors != 0 || stats.StartErrors != 0 {
 		t.Fatalf("unexpected resume stats: %+v", stats)
 	}
@@ -1013,7 +1013,7 @@ func TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(origWriter)
 
-	stats := resumeClusterWorkerTasks(resumer)
+	stats := resumePersistedActiveTasks(resumer)
 	if stats.Considered != 2 || stats.Resumed != 0 || stats.StopErrors != 1 || stats.StartErrors != 1 {
 		t.Fatalf("unexpected resume stats: %+v", stats)
 	}

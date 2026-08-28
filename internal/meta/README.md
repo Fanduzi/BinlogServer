@@ -1,7 +1,7 @@
 # internal/meta Module
 
 ## Files
-- `mysql_store.go`: 元数据持久化实现与 schema 校验。
+- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）。
 - `lease_store.go`: lease 读写逻辑。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。
@@ -9,7 +9,7 @@
 - `sqlcgen/*`: sqlc 生成代码（禁止手改，使用 `make sqlc-generate` 更新）。
 
 ## Exports
-- Task/Checkpoint/Event/File/Lease/Run/Worker metadata 存储接口。
+- Task/Checkpoint/Event/File（含 OPEN/SEALED）/Lease/Run/Worker metadata 存储接口。
 - 启动期 schema 版本与结构校验（支持 schema 校验超时配置）。
 
 ## Dependencies

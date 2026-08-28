@@ -1324,6 +1324,9 @@
                 "start_pos": {
                     "type": "integer"
                 },
+                "state": {
+                    "type": "string"
+                },
                 "task_id": {
                     "type": "string"
                 },

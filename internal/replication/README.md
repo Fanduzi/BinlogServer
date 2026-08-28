@@ -1,7 +1,7 @@
 # internal/replication Module
 
 ## Files
-- `mysql_runner.go`: 复制主执行流程（含 idle lag 上报、heartbeat 跳过落盘）。
+- `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、idle lag 上报、heartbeat 跳过落盘）。
 - `source_identity.go`: MySQL/MariaDB 源库身份与永久错误分类。
 - `resolver.go`: 起点解析。
 - 其余 `*_test.go`: 复制、恢复、上传等行为测试。
@@ -10,7 +10,7 @@
 ## Exports
 - Runner 启停与进度上报。
 - MariaDB 身份：`mariadb:<server_id>:<gtid_domain_id>`；MySQL 仍用 `server_uuid`。
-- 文件落盘、checkpoint 对接、上传触发。
+- 文件落盘、checkpoint 对接、随落盘进度更新的 OPEN/SEALED 生命周期元数据、上传触发。
 
 ## Dependencies
 - Upstream: `internal/tasks` 调度层。
