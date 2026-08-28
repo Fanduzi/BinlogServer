@@ -86,7 +86,7 @@ make e2e SCENARIOS=smoke,compression
 - `E2E_DATA_DIR`: e2e 数据目录（默认 `./tmp/e2e/data-suite-<timestamp>`）。
 - `E2E_SERVER_LOG`: `run-suite.sh` 启动后端时的日志路径（默认 `/tmp/binlog-server-e2e-suite.log`）。
 - `E2E_META_DSN`: metadata DSN 覆盖值；默认连接独立的 `meta-primary`（`127.0.0.1:13316`），不得指向任一 source。
-- `E2E_MYSQL57_PORT`: mysql57 source 的宿主机端口（默认 `13306`），本机端口冲突时可覆盖。
+- `E2E_MYSQL57_PORT`: 所有 mysql57 source 场景使用的宿主机端口（默认 `13306`），本机端口冲突时可覆盖。
 - `SEMISYNC_TIMEOUT_MS`: `smoke-semisync.sh` 使用的半同步 timeout（默认 `7000`）。
 - `E2E_WORKER_ID`: `smoke-cluster-roles.sh` 中 worker 进程上报的 worker_id（默认 `e2e-worker-1`）。
 - `E2E_WORKER_OFFLINE_WAIT_SEC`: `smoke-cluster-roles.sh` 停 worker 后等待离线判定的秒数（默认 `20`）。

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: isolated metadata DSN plus local tooling and retry-upload e2e dependencies
+# input: isolated metadata DSN, optional E2E_MYSQL57_PORT override, and retry-upload e2e dependencies
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -8,6 +8,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
 API="${E2E_API:-http://127.0.0.1:18080}"
+MYSQL57_PORT="${E2E_MYSQL57_PORT:-13306}"
 DATA_DIR="${E2E_DATA_DIR:-$ROOT_DIR/tmp/e2e/data-retry-upload-$(date +%s)}"
 RUN_TAG="$(date +%s)"
 
@@ -168,7 +169,7 @@ create_task() {
   local name="e2e-retry-upload-${RUN_TAG}"
   local payload
   payload="$(cat <<JSON
-{"name":"$name","cluster_key":"$name","source":{"host":"127.0.0.1","port":13306,"user":"repl","password":"replpass","flavor":"mysql","server_id":$sid},"start":{"mode":"LATEST"},"storage":{"retention_days":7}}
+{"name":"$name","cluster_key":"$name","source":{"host":"127.0.0.1","port":$MYSQL57_PORT,"user":"repl","password":"replpass","flavor":"mysql","server_id":$sid},"start":{"mode":"LATEST"},"storage":{"retention_days":7}}
 JSON
 )"
   local resp
