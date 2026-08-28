@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
+// input: task commands/events, metadata source policy, runner callbacks, store/lease/uploader dependencies
+// output: validated task state transitions, scheduling decisions, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,6 +8,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"strconv"
@@ -146,6 +147,14 @@ func WithRunner(runner Runner) Option {
 	}
 }
 
+// WithMetadataSourceEndpoint prevents tasks from replicating the metadata MySQL endpoint.
+func WithMetadataSourceEndpoint(host string, port uint16) Option {
+	return func(s *Scheduler) {
+		s.metadataSourceHost = normalizeEndpointHost(host)
+		s.metadataSourcePort = port
+	}
+}
+
 // WithStore 注入任务持久化存储。
 func WithStore(store TaskStore) Option {
 	return func(s *Scheduler) {
@@ -242,15 +251,17 @@ func WithInternalCallTimeouts(timeout InternalCallTimeouts) Option {
 
 // Scheduler 负责任务配置管理、状态机推进和运行编排。
 type Scheduler struct {
-	mu      sync.Mutex
-	seq     int
-	tasks   map[string]Task
-	events  map[string][]TaskEvent
-	replica map[string]ReplicationProgress
-	runner  Runner
-	store   TaskStore
-	cancels map[string]context.CancelFunc
-	runs    map[string]chan struct{}
+	mu                 sync.Mutex
+	seq                int
+	tasks              map[string]Task
+	events             map[string][]TaskEvent
+	replica            map[string]ReplicationProgress
+	runner             Runner
+	store              TaskStore
+	metadataSourceHost string
+	metadataSourcePort uint16
+	cancels            map[string]context.CancelFunc
+	runs               map[string]chan struct{}
 
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
@@ -485,6 +496,28 @@ func normalizeAndValidateSourceConfig(source SourceConfig) (SourceConfig, error)
 		return SourceConfig{}, ErrInvalidSourceConfig
 	}
 	return normalized, nil
+}
+
+func (s *Scheduler) normalizeAndValidateSourceConfig(source SourceConfig) (SourceConfig, error) {
+	normalized, err := normalizeAndValidateSourceConfig(source)
+	if err != nil {
+		return SourceConfig{}, err
+	}
+	if err := s.validateMetadataSourceEndpoint(normalized); err != nil {
+		return SourceConfig{}, err
+	}
+	return normalized, nil
+}
+
+func (s *Scheduler) validateMetadataSourceEndpoint(source SourceConfig) error {
+	if s.metadataSourcePort != 0 && source.Port == s.metadataSourcePort && normalizeEndpointHost(source.Host) == s.metadataSourceHost {
+		return fmt.Errorf("%w: source %s:%d is the metadata MySQL endpoint; use a separate MySQL instance", ErrInvalidSourceConfig, source.Host, source.Port)
+	}
+	return nil
+}
+
+func normalizeEndpointHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 }
 
 // normalizeAndValidateStartConfig 归一化并校验起点配置。

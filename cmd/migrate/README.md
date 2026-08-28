@@ -7,6 +7,7 @@
 ## Exports
 - 命令：`up`, `down --steps`, `version`, `force`, `goto`。
 - 参数：`--dsn`, `--path`, `--env`, `--allow-destructive`。
+- Release：归档内提供 `migrate` 可执行文件及 `migrations/*.sql`，无需 Go 工具链即可执行迁移。
 
 ## Dependencies
 - Upstream: 运维脚本/Makefile 调用。

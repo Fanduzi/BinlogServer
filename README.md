@@ -71,6 +71,8 @@ The real asset name is `binlog-server_<ver>_<os>_<arch>.tar.gz` (for example `bi
 ```text
 binlog-server_0.4.2_linux_amd64/
   binlog-server
+  migrate
+  migrations/
   README.md
   README_ZH.md
   CHANGELOG.md
@@ -87,6 +89,8 @@ This is the shortest path for release operators. You do not need Go installed.
 
 - A release tarball for your platform from GitHub Releases
 - A reachable MySQL or MariaDB instance with `log_bin` enabled
+
+> **Metadata isolation is mandatory:** when `meta_dsn` is configured, its MySQL instance must be separate from every replication source and must never be added to the backup task set. The server rejects an exact matching TCP `host:port`; aliases and proxies still require operator isolation.
 
 ### 1. Download, verify, extract, run
 
@@ -192,8 +196,8 @@ For more operational and usage guidance, continue from [docs/guide/README.md](do
 Development defaults are intentionally permissive. Do not carry them unchanged into production.
 
 - Auth: disabled by default; production should protect at least `/api/*` and `/metrics`
-- Meta DB: if `meta_dsn` is configured, run migrations first; the service does not auto-create or auto-upgrade schema
-- Standalone without `meta_dsn` keeps task metadata, checkpoints, and file records in memory only. `kill -9` / process restart drops the control plane. Binlog bytes already written under `{data_dir}/{task_id}/` remain as orphan files. For restartable tasks and `GET /checkpoint` / `GET /files`, configure `meta_dsn`. `storage.dir` is ignored; files always go to `{data_dir}/{task_id}/`.
+- Meta DB: if `meta_dsn` is configured, use an independent MySQL instance that is never a replication source, and run migrations first; the service does not auto-create or auto-upgrade schema
+- Standalone without `meta_dsn` keeps task metadata, checkpoints, and file records in memory only. `kill -9` / process restart drops the control plane. Binlog bytes already written under `{data_dir}/{task_id}/` remain as orphan files. With `meta_dsn`, persisted active tasks resume automatically from their checkpoint after restart, and `GET /files` includes the current `OPEN` segment. `storage.dir` is ignored; files always go to `{data_dir}/{task_id}/`.
 - Upload: S3-compatible upload is optional, but required fields must be complete when enabled
 - Tracing: disabled by default; validate exporter configuration and sampling before rollout
 
@@ -211,7 +215,8 @@ If you use the metadata database:
 
 ```bash
 export META_DSN='meta:replace_me@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true'
-make migrate-up META_DSN="$META_DSN"
+./migrate up --dsn "$META_DSN" --path ./migrations
+export BINLOG_SERVER_META_DSN="$META_DSN"
 ```
 
 If you enable upload, provide at least:
@@ -307,7 +312,7 @@ Once `Quick Start` works, continue from these entry points:
 
 Source build is the path when you are changing the code, not installing a release.
 
-Prerequisites: Go `1.26.1+`. Docker is needed only for E2E.
+Prerequisites: Go `1.26.7+`. Docker is needed only for E2E.
 
 ```bash
 make build

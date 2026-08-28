@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# input: local tooling (docker/curl/jq/go), source databases, and an isolated metadata database
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -239,7 +239,7 @@ main() {
     META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 16036)}"
     "$ROOT_DIR/scripts/e2e/setup-meta-replication.sh"
   elif [[ -z "$META_DSN" ]]; then
-    META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13306)}"
+    META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13316)}"
   fi
   e2e_ensure_meta_schema "$ROOT_DIR" "$META_DSN"
 
