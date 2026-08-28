@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task mutation requests, full create specs, and persisted task snapshots from TaskStore
-// output: validated task CRUD/config updates persisted only after whole-spec validation
+// input: task mutation requests, metadata source policy, full create specs, and persisted task snapshots from TaskStore
+// output: source-isolated task CRUD/config updates persisted only after whole-spec validation
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -39,13 +39,13 @@ func (s *Scheduler) createTask(name, clusterKey string, source *SourceConfig, st
 		if source.Password == "" {
 			return Task{}, ErrSourcePasswordRequired
 		}
-		validatedSource, err = normalizeAndValidateSourceConfig(*source)
+		validatedSource, err = s.normalizeAndValidateSourceConfig(*source)
 		if err != nil {
 			return Task{}, err
 		}
 		validatedSource.Password = source.Password
 	} else if source != nil {
-		validatedSource, err = normalizeAndValidateSourceConfig(*source)
+		validatedSource, err = s.normalizeAndValidateSourceConfig(*source)
 		if err != nil {
 			return Task{}, err
 		}
@@ -107,7 +107,7 @@ func (s *Scheduler) createTask(name, clusterKey string, source *SourceConfig, st
 
 // ConfigureSource 更新任务源库配置。
 func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
-	normalized, err := normalizeAndValidateSourceConfig(source)
+	normalized, err := s.normalizeAndValidateSourceConfig(source)
 	if err != nil {
 		return err
 	}
@@ -199,7 +199,7 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 
 	var validatedSource *SourceConfig
 	if patch.Source != nil {
-		source, err := normalizeAndValidateSourceConfig(*patch.Source)
+		source, err := s.normalizeAndValidateSourceConfig(*patch.Source)
 		if err != nil {
 			return Task{}, err
 		}

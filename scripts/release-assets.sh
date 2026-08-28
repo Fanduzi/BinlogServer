@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # input: repo source tree, Go toolchain, Node toolchain, and target version/platform settings
-# output: local release asset directories, tar.gz archives, and checksums.txt under dist/<version>
-# pos: local release packaging entrypoint bridging embedded UI build and multi-platform binaries
+# output: complete local release archives with service/migrate binaries, migration SQL, docs, and checksums
+# pos: local release packaging validator mirroring the GoReleaser archive contract
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -77,7 +77,13 @@ for target in $TARGETS; do
       go build -trimpath \
         -ldflags "-X ${VERSION_PKG}.buildVersion=$VERSION -X ${VERSION_PKG}.buildCommit=$BUILD_COMMIT -X ${VERSION_PKG}.buildDate=$BUILD_DATE" \
         -o "$stage_dir/$PROJECT_NAME" ./cmd/binlog-server
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+      go build -trimpath -o "$stage_dir/migrate" ./cmd/migrate
   )
+
+  cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/README.md" "$ROOT_DIR/README_ZH.md" "$ROOT_DIR/CHANGELOG.md" "$stage_dir/"
+  mkdir -p "$stage_dir/migrations"
+  cp "$ROOT_DIR"/migrations/*.sql "$stage_dir/migrations/"
 
   echo "[release] archive $artifact_name.tar.gz"
   tar -C "$DIST_ROOT" -czf "$archive_path" "$artifact_name"
