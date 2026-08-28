@@ -54,7 +54,7 @@
 - `POST /api/tasks/{id}/stop`：停止任务
 - `GET /api/tasks/{id}/checkpoint`：查看 checkpoint
 - `GET /api/tasks/{id}/events`：查看事件流
-- `GET /api/tasks/{id}/files`：查看 binlog 文件元数据
+- `GET /api/tasks/{id}/files`：查看 binlog 文件元数据（`state=OPEN` 表示当前未封存 segment，`SEALED` 表示已封存）
 - `POST /api/tasks/{id}/files/retry-upload`：手动补传 `UPLOAD_FAILED` 文件
 - `GET /api/tasks/{id}/upload-failures/reasons`：按错误原因聚合上传失败记录
 - `GET /api/tasks/{id}/replication`：查看复制延迟与最新位点

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: start/stop commands, runner callbacks, permanent/retryable errors, cancellation signals
-// output: task state transitions across STARTING/RUNNING/RETRY/FAILED/STOPPING lifecycle
+// input: start/stop commands, metadata source policy, runner callbacks, permanent/retryable errors, cancellation signals
+// output: guarded task state transitions across STARTING/RUNNING/RETRY/FAILED/STOPPING lifecycle
 // pos: scheduler execution lifecycle orchestration excluding lease-renew loop details
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -39,6 +39,10 @@ func (s *Scheduler) StartTask(id string) error {
 	if task.Source.Host == "" || task.Source.Port == 0 || task.Source.User == "" {
 		s.mu.Unlock()
 		return ErrInvalidSourceConfig
+	}
+	if err := s.validateMetadataSourceEndpoint(task.Source); err != nil {
+		s.mu.Unlock()
+		return err
 	}
 	// Step 2: control-plane dispatch-only 分支（本地无 runner）。
 	// cluster control-plane 允许 dispatch-only start：仅写入 STARTING，由 worker 接管执行。

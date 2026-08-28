@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# input: local tooling, e2e services, and optional E2E_MYSQL57_PORT host-port override
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -57,7 +57,7 @@ wait_running() {
 
 echo "[e2e] create + start tasks"
 # 每个 source 使用固定唯一 server_id，避免 replication client 冲突。
-id57=$(create_task "e2e-mysql57" 13306 310101)
+id57=$(create_task "e2e-mysql57" "${E2E_MYSQL57_PORT:-13306}" 310101)
 id80=$(create_task "e2e-mysql80" 13307 310102)
 idp57=$(create_task "e2e-percona57" 13308 310103)
 idp80=$(create_task "e2e-percona80" 13309 310104)

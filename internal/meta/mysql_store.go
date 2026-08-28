@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
-// input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// input: MySQL connections, SQL schema/contracts including file lifecycle state, retry/lease timing policies
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -180,12 +180,13 @@ LIMIT ?;
 
 const upsertBinlogFileSQL = `
 INSERT INTO binlog_files (
-  task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
+  task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
   object_key, upload_state, upload_error, uploaded_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   file_path = VALUES(file_path),
+  state = VALUES(state),
   size_bytes = VALUES(size_bytes),
   start_pos = VALUES(start_pos),
   end_pos = VALUES(end_pos),
@@ -198,7 +199,7 @@ ON DUPLICATE KEY UPDATE
 `
 
 const listBinlogFilesSQL = `
-SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
+SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
        object_key, upload_state, upload_error, uploaded_at
 FROM binlog_files
 WHERE task_id = ?
@@ -758,6 +759,10 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	if uploadState == "" {
 		uploadState = "LOCAL_ONLY"
 	}
+	state := meta.State
+	if state == "" {
+		state = "SEALED"
+	}
 
 	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		_, err := s.db.ExecContext(
@@ -766,6 +771,7 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 			meta.TaskID,
 			meta.FileName,
 			meta.FilePath,
+			state,
 			meta.SizeBytes,
 			meta.StartPos,
 			meta.EndPos,
@@ -803,6 +809,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 			&item.TaskID,
 			&item.FileName,
 			&item.FilePath,
+			&item.State,
 			&item.SizeBytes,
 			&item.StartPos,
 			&item.EndPos,
