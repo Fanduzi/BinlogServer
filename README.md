@@ -312,7 +312,7 @@ Once `Quick Start` works, continue from these entry points:
 
 Source build is the path when you are changing the code, not installing a release.
 
-Prerequisites: Go `1.26.1+`. Docker is needed only for E2E.
+Prerequisites: Go `1.26.7+`. Docker is needed only for E2E.
 
 ```bash
 make build

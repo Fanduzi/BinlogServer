@@ -311,7 +311,7 @@ BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排�
 
 改代码时用源码构建，不要把它当成 release 安装路径。
 
-前置：Go `1.26.1+`。E2E 才需要 Docker。
+前置：Go `1.26.7+`。E2E 才需要 Docker。
 
 ```bash
 make build
