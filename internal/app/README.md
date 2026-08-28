@@ -4,7 +4,7 @@
 - `app.go`: 应用主流程与运行时装配。
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`）。
-- `restart_recovery_test.go`: standalone 重启后持久化 active task 自动恢复的回归测试。
+- `restart_recovery_test.go`: standalone 重启后安全的持久化 active task 自动恢复、metadata/source 冲突任务保持停止的回归测试。
 - `source_guard_test.go`: 从 `meta_dsn` 到任务 API 的 metadata/source 隔离装配回归测试。
 
 ## Exports
