@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: tracing runtime config (enabled/exporter/endpoint/sampling/service name)
-// output: OpenTelemetry tracer provider initialization and shutdown hook
+// output: OpenTelemetry tracer provider initialization, default OTLP trace path compatibility, and shutdown hook
 // pos: app bootstrapping layer that controls tracing lifecycle for all modules
 // note: if this file changes, update this header and module README.md.
 package app
@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"binlog_server/internal/config"
@@ -35,6 +36,10 @@ func initTracing(cfg config.TracingConfig) (trace.TracerProvider, func(context.C
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
 		return nil, nil, fmt.Errorf("tracing endpoint is required when tracing is enabled")
+	}
+	if parsedEndpoint, err := url.Parse(endpoint); err == nil && parsedEndpoint.Path == "" {
+		parsedEndpoint.Path = "/v1/traces"
+		endpoint = parsedEndpoint.String()
 	}
 	serviceName := strings.TrimSpace(cfg.ServiceName)
 	if serviceName == "" {
