@@ -514,7 +514,7 @@
   <section class="hero">
     <div class="container" style="position:relative;">
       <div class="hero-badge animate-fade-up" style="animation-delay:0.05s;">
-        <span class="tag tag-new" data-i18n="heroBadge">v0.4.2 — latest release</span>
+        <span class="tag tag-new" data-i18n="heroBadge">v0.4.3 — latest release</span>
       </div>
       <h1 class="animate-fade-up" style="animation-delay:0.12s;" data-i18n="heroTitle">MySQL binlog backup control plane
 for real operations</h1>
@@ -547,7 +547,7 @@ Signals        Checkpoint / Lag / Events / Workers / Metrics</code>
 verify, extract, run</h2>
       <p class="section-sub" data-i18n="deploySub">Operators do not need Go. Real assets are named <code>binlog-server_&lt;ver&gt;_&lt;os&gt;_&lt;arch&gt;.tar.gz</code> and extract into a versioned subdirectory. Full write-up: <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/deployment.md">docs/guide/admin/deployment.md</a>.</p>
       <div class="hero-code">
-        <code data-i18n="deployCode">VER=0.4.2 OS=linux ARCH=amd64
+        <code data-i18n="deployCode">VER=0.4.3 OS=linux ARCH=amd64
 curl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz
 curl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt
 sha256sum -c checksums.txt --ignore-missing
@@ -784,19 +784,19 @@ better UI, better ops, better reliability</h2>
           <h3 data-i18n="releaseLeftTitle">Release timeline</h3>
           <div class="timeline">
             <div class="timeline-item">
+              <div class="timeline-date">2026-08-30</div>
+              <div class="timeline-version">v0.4.3</div>
+              <p data-i18n="release1">Loopback aliases can no longer bypass metadata/source isolation, and source lookup uses the same endpoint identity.</p>
+            </div>
+            <div class="timeline-item">
               <div class="timeline-date">2026-08-21</div>
               <div class="timeline-version">v0.4.2</div>
-              <p data-i18n="release1">Operator dogfood patch: MariaDB can start, invalid creates no longer persist as LATEST, and Quick Start installs the release tarball.</p>
+              <p data-i18n="release2">Operator dogfood patch: MariaDB can start, invalid creates no longer persist as LATEST, and Quick Start installs the release tarball.</p>
             </div>
             <div class="timeline-item">
               <div class="timeline-date">2026-03-30</div>
               <div class="timeline-version">v0.4.1</div>
-              <p data-i18n="release2">Frontend audit fixes restored button and tag styling, and expanded Playwright coverage for split views and retry-upload flows.</p>
-            </div>
-            <div class="timeline-item">
-              <div class="timeline-date">2026-03-29</div>
-              <div class="timeline-version">v0.4.0</div>
-              <p data-i18n="release3">The operations console received a visual polish pass that improved hierarchy, density, and readability without changing backend contracts.</p>
+              <p data-i18n="release3">Frontend audit fixes restored button and tag styling, and expanded Playwright coverage for split views and retry-upload flows.</p>
             </div>
           </div>
         </div>
@@ -908,8 +908,8 @@ and into a real product surface</h2>
         deployLabel: 'Quick Start',
         deployTitle: 'Download the release tarball,\nverify, extract, run',
         deploySub: 'Operators do not need Go. Real assets are named binlog-server_<ver>_<os>_<arch>.tar.gz and extract into a versioned subdirectory.',
-        deployCode: 'VER=0.4.2 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
-        heroBadge: 'v0.4.2 — latest release',
+        deployCode: 'VER=0.4.3 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        heroBadge: 'v0.4.3 — latest release',
         heroTitle: 'MySQL binlog backup control plane\nfor real operations',
         heroSub: 'BinlogServer centralizes MySQL binlog backup behind one service. Run local-first durable capture, inspect state through API and embedded UI, scale into cluster roles, export metrics, and archive sealed files with optional S3-compatible upload.',
         heroPrimary: 'Open Deployment Guide',
@@ -1000,9 +1000,9 @@ and into a real product surface</h2>
         changelogTitle: 'Recent work trends toward\nbetter UI, better ops, better reliability',
         changelogSub: 'The recent story is not random feature sprawl. It is clearer operator workflows, stronger frontend validation, and more production-minded behavior.',
         releaseLeftTitle: 'Release timeline',
-        release1: 'Operator dogfood patch: MariaDB can start, invalid creates no longer persist as LATEST, and Quick Start installs the release tarball.',
-        release2: 'Frontend audit fixes restored button and tag styling, and expanded Playwright coverage for split views and retry-upload flows.',
-        release3: 'The operations console received a visual polish pass that improved hierarchy, density, and readability without changing backend contracts.',
+        release1: 'Loopback aliases can no longer bypass metadata/source isolation, and source lookup uses the same endpoint identity.',
+        release2: 'Operator dogfood patch: MariaDB can start, invalid creates no longer persist as LATEST, and Quick Start installs the release tarball.',
+        release3: 'Frontend audit fixes restored button and tag styling, and expanded Playwright coverage for split views and retry-upload flows.',
         releaseRightTitle: 'What the homepage should emphasize',
         releaseFocus1Date: 'Current direction',
         releaseFocus1Title: 'Control plane maturity',
@@ -1049,8 +1049,8 @@ and into a real product surface</h2>
         deployLabel: '快速开始',
         deployTitle: '下载 release tarball，\n校验、解压、运行',
         deploySub: '值班不需要安装 Go。真实资产名是 binlog-server_<ver>_<os>_<arch>.tar.gz，解压后在一层版本子目录里。',
-        deployCode: 'VER=0.4.2 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
-        heroBadge: 'v0.4.2 — 最新发布',
+        deployCode: 'VER=0.4.3 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        heroBadge: 'v0.4.3 — 最新发布',
         heroTitle: '面向真实运维的\nMySQL binlog 备份控制平面',
         heroSub: 'BinlogServer 把 MySQL binlog 备份集中到一个服务里：本地优先的可靠采集、通过 API 与内置 UI 可见的运行状态、可扩展到集群角色的执行模型、Prometheus 指标，以及可选的兼容 S3 的归档上传。',
         heroPrimary: '打开部署指南',
@@ -1141,9 +1141,9 @@ and into a real product surface</h2>
         changelogTitle: '近期工作明显朝着\n更好的 UI、更好的运维、更好的可靠性前进',
         changelogSub: '最近的变化不是零散功能堆砌，而是更清晰的运维流程、更强的前端验证，以及更偏生产的行为。',
         releaseLeftTitle: '版本时间线',
-        release1: '值班 dogfood 补丁：MariaDB 可以启动，非法创建不再落成 LATEST，Quick Start 改为安装 release tarball。',
-        release2: '前端审计修复恢复了按钮与标签样式，并补强了 split view 与 retry-upload 流程的 Playwright 覆盖。',
-        release3: '运维控制台完成了一轮视觉抛光，在不改变后端契约的前提下提升了层次、密度与可读性。',
+        release1: 'loopback 别名不再能够绕过 metadata/source 隔离检查，source lookup 也使用同一套端点身份规则。',
+        release2: '值班 dogfood 补丁：MariaDB 可以启动，非法创建不再落成 LATEST，Quick Start 改为安装 release tarball。',
+        release3: '前端审计修复恢复了按钮与标签样式，并补强了 split view 与 retry-upload 流程的 Playwright 覆盖。',
         releaseRightTitle: '首页应该强调什么',
         releaseFocus1Date: '当前方向',
         releaseFocus1Title: '控制平面成熟度',

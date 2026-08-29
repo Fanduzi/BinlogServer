@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.4.3] - 2026-08-30
+
+### Fixed
+
+- Metadata/source isolation now treats `localhost`, IPv4 loopback literals in `127/8`, and IPv6 loopback literals such as `::1` as one same-port endpoint identity without DNS resolution; create, update, and start reject aliases, and source lookup returns the same matches.
+
 ## [v0.4.2] - 2026-08-21
 
 ### Fixed
