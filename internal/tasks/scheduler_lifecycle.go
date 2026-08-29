@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals
-// output: guarded start/stop, bounded source retry, and cancellation orchestration
+// output: guarded start/stop, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -301,7 +301,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			s.mu.Unlock()
 			return
 		}
-		if IsRetryableSourceError(err) {
+		if IsSourceUnreachable(err) {
 			consecutiveSourceFailures++
 			if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
 				logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))

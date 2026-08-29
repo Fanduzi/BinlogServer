@@ -1,5 +1,5 @@
 // Package replication provides module-level functionality for replication.
-// input: source connection results, network failures, flavor, log_bin and identity variables
+// input: source connection results, network/stream disconnects, flavor, log_bin and identity variables
 // output: stable source identity strings and typed permanent/retryable source errors
 // pos: flavor-aware source probe and operator-error classification boundary
 // note: if this file changes, update this header and module README.md.
@@ -8,6 +8,7 @@ package replication
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 
@@ -32,7 +33,7 @@ func classifySourceError(err error) error {
 		return tasks.NewPermanentError(tasks.CodeSourceAccessDenied, err.Error())
 	}
 	var networkErr *net.OpError
-	if errors.As(err, &networkErr) {
+	if errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return tasks.NewRetryableSourceError(tasks.CodeSourceUnreachable, err.Error())
 	}
 	return err

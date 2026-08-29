@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner/source failures and stable operator error codes
-// output: typed permanent and retryable source errors used by task retry policy
+// output: typed permanent/retryable source errors and the SOURCE_UNREACHABLE budget predicate
 // pos: shared operator-error types used by scheduler retry policy and source probing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -38,10 +38,10 @@ func NewRetryableSourceError(code, message string) error {
 	return &RetryableSourceError{Code: code, Message: message}
 }
 
-// IsRetryableSourceError reports whether err is a classified retryable source failure.
-func IsRetryableSourceError(err error) bool {
+// IsSourceUnreachable reports whether err consumes the unreachable-source retry budget.
+func IsSourceUnreachable(err error) bool {
 	var sourceErr *RetryableSourceError
-	return errors.As(err, &sourceErr)
+	return errors.As(err, &sourceErr) && sourceErr.Code == CodeSourceUnreachable
 }
 
 // PermanentError is an unrecoverable task error that must not enter RETRY_BACKOFF.

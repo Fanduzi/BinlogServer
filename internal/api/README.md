@@ -36,7 +36,8 @@
 ## Validation Pilot (P4)
 - Gin binding + validator 校验：
   - `/api/sources/lookup`（`host`/`port` 必填 + 端口格式校验）
-  - `/api/tasks/{id}/files/retry-upload`（`limit` 范围 1..1000，默认 100）
+- `/api/tasks/{id}/files/retry-upload`（`limit` 范围 1..1000，默认 100）
+- task、replication 与 dashboard 响应保留 `FAILED` 状态及稳定的源错误 `last_error`，供管理台直接展示。
   - `/api/tasks/{id}/upload-failures/reasons`（`limit` 范围 1..200，默认 20）
 
 ## Update Rule
