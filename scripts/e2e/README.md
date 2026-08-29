@@ -48,6 +48,7 @@
 ./scripts/e2e/run-suite.sh --scenarios smoke-worker-crash-recovery
 ./scripts/e2e/run-suite.sh --scenarios smoke-invalid-inputs
 ./scripts/e2e/run-suite.sh --scenarios smoke-retry-upload
+./scripts/e2e/run-suite.sh --scenarios smoke-scale
 ```
 
 也可用 `Makefile`：
@@ -56,6 +57,7 @@
 make e2e-quick
 make e2e-full
 make e2e-observability
+make e2e-scale
 make e2e SCENARIOS=smoke,compression
 make e2e-topology-check
 ```
@@ -80,6 +82,7 @@ make e2e-topology-check
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
 - `smoke-invalid-inputs.sh`: 验证任务 API 对非法输入返回 `400`（cluster_key/source/start/storage）。
 - `smoke-retry-upload.sh`: 验证上传失败后可通过 `/api/tasks/{id}/files/retry-upload` 人工触发补传，且不影响 checkpoint 推进。
+- `smoke-scale.sh`: 可选的 1000 控制面任务/100 实时流规模证据；复用单个 MySQL fixture（不把它当作数百个独立集群），按 100 条 batch 创建、校验分页/聚合、受控启动流，先写 priming marker 再快照每条 checkpoint，第二个 marker 后验证每条流推进及其 checkpoint 精确文件，并写入 JSON 报告。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
 说明：当前所有场景创建任务时均显式传入 `cluster_key`（创建/更新必填且全局唯一）。
@@ -99,6 +102,10 @@ make e2e-topology-check
 - `E2E_WORKER_ID`: `smoke-cluster-roles.sh` 中 worker 进程上报的 worker_id（默认 `e2e-worker-1`）。
 - `E2E_WORKER_OFFLINE_WAIT_SEC`: `smoke-cluster-roles.sh` 停 worker 后等待离线判定的秒数（默认 `20`）。
 - `E2E_WORKER_HEALTH_ADDR`: `smoke-cluster-roles.sh` 中 worker health probe 地址（默认 `127.0.0.1:18081`）。
+- `E2E_SCALE_CONTROL_TASKS` / `E2E_SCALE_LIVE_STREAMS`: scale 场景的控制任务/实时流数，默认 `1000` / `100`；实时流最多显式提高到 `300`。
+- `E2E_SCALE_START_RATE`: 每秒启动实时流数（默认 `10`，最多 `25`，低于默认 API 限流）；`E2E_SCALE_REQUEST_DELAY_SEC` 控制 checkpoint 抓取节流；`E2E_SCALE_REPORT` 指定 JSON 证据输出路径。
+
+`smoke-scale` 要求 `E2E_SERVER_PID` 指向存活的 suite server。它会在 disposable `mysql57` 与 `meta-primary` 上执行 `SET GLOBAL max_connections = LIVE_STREAMS + 20`，重新读取并在数据库未接受该容量时失败；因此只适合此隔离 E2E Compose 环境。
 
 所有正式 E2E 入口都会加载 `lib-topology.sh`，必填值不能为空，端口必须处于 `1-65535`。Compose 保留同值兜底，仅用于直接执行 `docker compose ... ps/logs` 等排障命令；`make e2e-topology-check` 会阻止两处默认值漂移。
 

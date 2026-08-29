@@ -1,0 +1,11 @@
+# Production deployment template. Keep secrets outside this file.
+listen_addr: ":8080"
+data_dir: "./data"
+
+api:
+  auth:
+    enabled: true
+    mode: "bearer"
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
+    protect_api: true
+    protect_metrics: true
