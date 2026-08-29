@@ -57,6 +57,7 @@ make e2e-quick
 make e2e-full
 make e2e-observability
 make e2e SCENARIOS=smoke,compression
+make e2e-topology-check
 ```
 
 ## 脚本列表
@@ -69,6 +70,8 @@ make e2e SCENARIOS=smoke,compression
 - `smoke-orchestrator.sh`: 验证 orchestrator 拓扑里是否误纳入 binlog 拉流客户端。
 - `smoke-semisync.sh`: 验证 `semi_sync=true` 时的 client 挂载与停任务后主库提交阻塞到 timeout。
 - `setup-meta-replication.sh`: 初始化 meta-primary/meta-replica GTID 主从复制与 ProxySQL 监控账号。
+- `lib-topology.sh`: 解析并校验统一的数据库 host、端口、共享凭据和 metadata DSN。
+- `topology-contract-test.sh`: 无需 Docker，验证拓扑默认值、覆盖优先级、direct/failover 选择、端口校验及 Compose 兜底一致性。
 - `smoke-meta-failover.sh`: 触发 orchestrator 切主，验证元数据库 failover 后 checkpoint 继续推进。
 - `smoke-meta-failover-override.sh`: 用非默认 `E2E_API/E2E_ORC_API` 地址（localhost）覆盖并执行 failover 场景。
 - `smoke-observability.sh`: 验证 `/metrics` 核心指标存在，且 `task_state_count` 与 `checkpoint_age_seconds` 随状态/时间变化。
@@ -85,12 +88,19 @@ make e2e SCENARIOS=smoke,compression
 
 - `E2E_DATA_DIR`: e2e 数据目录（默认 `./tmp/e2e/data-suite-<timestamp>`）。
 - `E2E_SERVER_LOG`: `run-suite.sh` 启动后端时的日志路径（默认 `/tmp/binlog-server-e2e-suite.log`）。
-- `E2E_META_DSN`: metadata DSN 覆盖值；默认连接独立的 `meta-primary`（`127.0.0.1:13316`），不得指向任一 source。
-- `E2E_MYSQL57_PORT`: 所有 mysql57 source 场景使用的宿主机端口（默认 `13306`），本机端口冲突时可覆盖。
+- `E2E_SOURCE_HOST` / `E2E_SOURCE_USER` / `E2E_SOURCE_PASS`: source 任务共享连接参数，默认 `127.0.0.1` / `repl` / `replpass`。
+- `E2E_MYSQL57_PORT` / `E2E_MYSQL80_PORT`: MySQL 5.7/8.0 宿主机端口，默认 `13306` / `13307`。
+- `E2E_PERCONA57_PORT` / `E2E_PERCONA80_PORT`: Percona 5.7/8.0 宿主机端口，默认 `13308` / `13309`。
+- `E2E_META_HOST` / `E2E_META_USER` / `E2E_META_PASS` / `E2E_META_DB`: metadata 连接参数，默认 `127.0.0.1` / `meta` / `metapass` / `binlog_meta`。
+- `E2E_META_PRIMARY_PORT` / `E2E_META_REPLICA_PORT`: metadata 主从宿主机端口，默认 `13316` / `13317`。
+- `E2E_META_PROXYSQL_ADMIN_PORT` / `E2E_META_PROXYSQL_PORT`: ProxySQL 管理端口和 SQL 端口，默认 `6036` / `16036`。
+- `E2E_META_DSN`: 完整 metadata DSN 覆盖值，优先级高于上述 metadata 分项；未设置时由具名的 `direct` 或 `failover` 拓扑生成。
 - `SEMISYNC_TIMEOUT_MS`: `smoke-semisync.sh` 使用的半同步 timeout（默认 `7000`）。
 - `E2E_WORKER_ID`: `smoke-cluster-roles.sh` 中 worker 进程上报的 worker_id（默认 `e2e-worker-1`）。
 - `E2E_WORKER_OFFLINE_WAIT_SEC`: `smoke-cluster-roles.sh` 停 worker 后等待离线判定的秒数（默认 `20`）。
 - `E2E_WORKER_HEALTH_ADDR`: `smoke-cluster-roles.sh` 中 worker health probe 地址（默认 `127.0.0.1:18081`）。
+
+所有正式 E2E 入口都会加载 `lib-topology.sh`，必填值不能为空，端口必须处于 `1-65535`。Compose 保留同值兜底，仅用于直接执行 `docker compose ... ps/logs` 等排障命令；`make e2e-topology-check` 会阻止两处默认值漂移。
 
 ## smoke-cluster-roles 场景说明
 

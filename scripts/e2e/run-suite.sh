@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go), source databases, and an isolated metadata database
+# input: local tooling, canonical E2E database topology, scenarios, and profile selection
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -236,10 +236,10 @@ main() {
   "$ROOT_DIR/scripts/e2e/up.sh"
 
   if has_scenario "meta-failover" "${scenarios[@]}" || has_scenario "meta-failover-override" "${scenarios[@]}"; then
-    META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 16036)}"
+    META_DSN="$(e2e_meta_dsn failover)"
     "$ROOT_DIR/scripts/e2e/setup-meta-replication.sh"
   elif [[ -z "$META_DSN" ]]; then
-    META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13316)}"
+    META_DSN="$(e2e_meta_dsn direct)"
   fi
   e2e_ensure_meta_schema "$ROOT_DIR" "$META_DSN"
 

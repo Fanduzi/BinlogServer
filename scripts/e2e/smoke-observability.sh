@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling, optional E2E_MYSQL57_PORT override, and observability e2e dependencies
+# input: local tooling, observability dependencies, and the canonical E2E database topology
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -7,8 +7,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
+source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
 API="${E2E_API:-http://127.0.0.1:18080}"
-MYSQL57_PORT="${E2E_MYSQL57_PORT:-13306}"
+MYSQL57_PORT="$E2E_MYSQL57_PORT"
 RUN_TAG="$(date +%s)"
 
 need_cmd() {
@@ -94,7 +95,7 @@ create_task() {
   local resp
   resp="$(curl -fsS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"e2e-observability-${RUN_TAG}\",\"cluster_key\":\"e2e-observability-${RUN_TAG}\",\"source\":{\"host\":\"127.0.0.1\",\"port\":${MYSQL57_PORT},\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":${sid}},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")"
+    -d "{\"name\":\"e2e-observability-${RUN_TAG}\",\"cluster_key\":\"e2e-observability-${RUN_TAG}\",\"source\":{\"host\":\"$E2E_SOURCE_HOST\",\"port\":${MYSQL57_PORT},\"user\":\"$E2E_SOURCE_USER\",\"password\":\"$E2E_SOURCE_PASS\",\"flavor\":\"mysql\",\"server_id\":${sid}},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")"
   local id
   id="$(printf '%s' "$resp" | jq -r '.id // empty')"
   if [[ -z "$id" || "$id" == "null" ]]; then

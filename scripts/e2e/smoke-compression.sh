@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# input: local tooling, e2e services, and the canonical E2E database topology
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -7,6 +7,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
+source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
 API="http://127.0.0.1:18080"
 DATA_DIR="${E2E_DATA_DIR:-$ROOT_DIR/tmp/e2e/data}"
 
@@ -43,7 +44,7 @@ create_task_file_pos() {
   # 从 FILE/POS 起点拉取，确保我们明确验证“一个完整 binlog 文件”的一致性。
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$port,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"FILE_POS\",\"file\":\"$file\",\"pos\":$pos},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"$E2E_SOURCE_HOST\",\"port\":$port,\"user\":\"$E2E_SOURCE_USER\",\"password\":\"$E2E_SOURCE_PASS\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"FILE_POS\",\"file\":\"$file\",\"pos\":$pos},\"storage\":{\"retention_days\":7}}")
 
   local id
   id=$(json_get_str "$resp" "id" "ID")
@@ -235,7 +236,7 @@ verify_one_source() {
 run_tag="$(date +%s)"
 
 # 只对 8.0 系列做压缩事务专项（5.7 不支持该特性）。
-verify_one_source "mysql80" "13307" "320801" "binlog_e2e_80" "$run_tag"
-verify_one_source "percona80" "13309" "320802" "binlog_e2e_percona80" "$run_tag"
+verify_one_source "mysql80" "$E2E_MYSQL80_PORT" "320801" "binlog_e2e_80" "$run_tag"
+verify_one_source "percona80" "$E2E_PERCONA80_PORT" "320802" "binlog_e2e_percona80" "$run_tag"
 
 echo "[compression] success: mysql80/percona80 compressed transaction replicated and md5 matched"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: isolated metadata DSN, optional E2E_MYSQL57_PORT override, and cluster-role e2e dependencies
+# input: canonical E2E database topology and cluster-role e2e dependencies
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -8,7 +8,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
 API="${E2E_API:-http://127.0.0.1:18080}"
-MYSQL57_PORT="${E2E_MYSQL57_PORT:-13306}"
 DATA_DIR="${E2E_DATA_DIR:-$ROOT_DIR/tmp/e2e/data-cluster-roles-$(date +%s)}"
 WORKER_ID="${E2E_WORKER_ID:-e2e-worker-1}"
 WORKER_OFFLINE_WAIT_SEC="${E2E_WORKER_OFFLINE_WAIT_SEC:-20}"
@@ -24,7 +23,8 @@ CHECKPOINT_HTTP_CODE=""
 CHECKPOINT_HTTP_BODY=""
 
 source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
-META_DSN="${E2E_META_DSN:-$(e2e_default_meta_dsn 13316)}"
+MYSQL57_PORT="$E2E_MYSQL57_PORT"
+META_DSN="$(e2e_meta_dsn direct)"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }
@@ -154,7 +154,7 @@ create_task() {
   local resp
   resp="$(curl -fsS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"e2e-cluster-roles-${RUN_TAG}\",\"cluster_key\":\"e2e-cluster-roles-${RUN_TAG}\",\"source\":{\"host\":\"127.0.0.1\",\"port\":${MYSQL57_PORT},\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":${sid}},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")"
+    -d "{\"name\":\"e2e-cluster-roles-${RUN_TAG}\",\"cluster_key\":\"e2e-cluster-roles-${RUN_TAG}\",\"source\":{\"host\":\"$E2E_SOURCE_HOST\",\"port\":${MYSQL57_PORT},\"user\":\"$E2E_SOURCE_USER\",\"password\":\"$E2E_SOURCE_PASS\",\"flavor\":\"mysql\",\"server_id\":${sid}},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")"
 
   local id
   id="$(printf '%s' "$resp" | jq -r '.id // empty')"

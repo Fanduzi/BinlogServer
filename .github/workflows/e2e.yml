@@ -57,10 +57,15 @@ jobs:
       - name: Unit Tests
         run: go test ./...
 
+      - name: E2E Topology Contract
+        run: make e2e-topology-check
+
       - name: sqlc Verify
         run: make sqlc-verify
 
       - name: E2E Suite
+        env:
+          E2E_MYSQL57_PORT: 23306
         run: |
           E2E_DIR="./tmp/e2e/data-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           E2E_SERVER_LOG="/tmp/binlog-server.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --profile "$E2E_PROFILE"
