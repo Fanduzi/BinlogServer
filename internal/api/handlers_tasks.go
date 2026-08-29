@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including loopback-equivalent source lookup and structured 400 bodies
+// output: REST API JSON responses including loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -23,6 +23,7 @@ import (
 type summaryResponse struct {
 	Total        int `json:"total"`
 	Running      int `json:"running"`
+	Starting     int `json:"starting"`
 	RetryBackoff int `json:"retry_backoff"`
 	Stopped      int `json:"stopped"`
 	Failed       int `json:"failed"`
@@ -58,6 +59,7 @@ type sourceOverview struct {
 	Port      uint16 `json:"port"`
 	TaskCount int    `json:"task_count"`
 	Running   int    `json:"running"`
+	Starting  int    `json:"starting"`
 	Normal    int    `json:"normal"`
 	Delayed   int    `json:"delayed"`
 	Abnormal  int    `json:"abnormal"`
@@ -124,6 +126,8 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		switch task.State {
 		case tasks.StateRunning:
 			resp.Running++
+		case tasks.StateStarting:
+			resp.Starting++
 		case tasks.StateRetryBackoff:
 			resp.RetryBackoff++
 		case tasks.StateStopped:
@@ -235,6 +239,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		switch task.State {
 		case tasks.StateRunning:
 			resp.Summary.Running++
+		case tasks.StateStarting:
+			resp.Summary.Starting++
 		case tasks.StateRetryBackoff:
 			resp.Summary.RetryBackoff++
 		case tasks.StateStopped:
@@ -271,6 +277,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		item.TaskCount++
 		if task.State == tasks.StateRunning {
 			item.Running++
+		}
+		if task.State == tasks.StateStarting {
+			item.Starting++
 		}
 		switch rep.Status {
 		case "NORMAL":

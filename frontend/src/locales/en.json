@@ -15,6 +15,7 @@
     "abnormal": "Abnormal Tasks",
     "failed": "Failed Tasks",
     "delayed": "Delayed Tasks",
+    "starting": "Starting Tasks",
     "running": "Running Tasks",
     "total": "Total Tasks",
     "normal": "Normal Tasks"
@@ -230,7 +231,7 @@
     "taskExists": "Collection task exists",
     "taskNotFound": "No collection task found",
     "matchCount": "Match count: {count}",
-    "stats": "Tasks {tasks} / Running {running} / Normal {normal} / Delayed {delayed} / Abnormal {abnormal}"
+    "stats": "Tasks {tasks} / Starting {starting} / Running {running} / Normal {normal} / Delayed {delayed} / Abnormal {abnormal}"
   },
   "cluster": {
     "title": "Cluster View",

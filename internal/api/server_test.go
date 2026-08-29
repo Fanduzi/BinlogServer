@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, operator error visibility, task/cluster status codes, and source lookup regression coverage
+// output: REST/dashboard responses, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -33,6 +33,24 @@ type fakeAPIRunner struct{}
 // Run 实现对应功能逻辑。
 func (r *fakeAPIRunner) Run(_ context.Context, _ tasks.Task) error {
 	return nil
+}
+
+type apiReadyGateRunner struct {
+	readyIDs map[string]bool
+}
+
+// Run 实现对应功能逻辑。
+func (r *apiReadyGateRunner) Run(_ context.Context, _ tasks.Task) error {
+	return nil
+}
+
+// RunWithNotify 实现 runner ready 回调控制，用于验证 STARTING 与 RUNNING 的边界。
+func (r *apiReadyGateRunner) RunWithNotify(ctx context.Context, task tasks.Task, onReady func()) error {
+	if r.readyIDs[task.ID] {
+		onReady()
+	}
+	<-ctx.Done()
+	return context.Canceled
 }
 
 type fakeAPILeaseManager struct {
@@ -1758,6 +1776,206 @@ func TestAPI_Summary(t *testing.T) {
 	}
 	if body["stopped"] != 1 {
 		t.Fatalf("expected stopped=1, got %d", body["stopped"])
+	}
+}
+
+// TestAPI_SummaryAndDashboardCountStartingSeparately 验证 STARTING 计数不混入 RUNNING。
+func TestAPI_SummaryAndDashboardCountStartingSeparately(t *testing.T) {
+	scheduler := tasks.NewScheduler(tasks.WithRunner(&apiReadyGateRunner{
+		readyIDs: map[string]bool{"1": true},
+	}))
+	handler := NewServer(scheduler)
+
+	var taskIDs []string
+	for _, name := range []string{"running", "starting"} {
+		task, err := scheduler.CreateTask(name, name+"-key")
+		if err != nil {
+			t.Fatalf("CreateTask %s returned error: %v", name, err)
+		}
+		if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{
+			Host: "127.0.0.1",
+			Port: 3306,
+			User: "repl",
+		}); err != nil {
+			t.Fatalf("ConfigureSource %s returned error: %v", name, err)
+		}
+		taskIDs = append(taskIDs, task.ID)
+	}
+	t.Cleanup(func() {
+		for _, id := range taskIDs {
+			_ = scheduler.StopTask(id)
+		}
+	})
+
+	for _, id := range taskIDs {
+		if err := scheduler.StartTask(id); err != nil {
+			t.Fatalf("StartTask %s returned error: %v", id, err)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		running, err := scheduler.GetTask(taskIDs[0])
+		if err != nil {
+			t.Fatalf("GetTask running returned error: %v", err)
+		}
+		starting, err := scheduler.GetTask(taskIDs[1])
+		if err != nil {
+			t.Fatalf("GetTask starting returned error: %v", err)
+		}
+		if running.State == tasks.StateRunning && starting.State == tasks.StateStarting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tasks did not reach expected states: running=%s starting=%s", running.State, starting.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var summary struct {
+		Total    int `json:"total"`
+		Running  int `json:"running"`
+		Starting int `json:"starting"`
+	}
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/summary", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("summary: expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary response: %v", err)
+	}
+	if summary.Total != 2 || summary.Running != 1 || summary.Starting != 1 {
+		t.Fatalf("unexpected summary counters: %+v", summary)
+	}
+
+	var dashboard struct {
+		Summary struct {
+			Total    int `json:"total"`
+			Running  int `json:"running"`
+			Starting int `json:"starting"`
+		} `json:"summary"`
+		Sources []struct {
+			TaskCount int `json:"task_count"`
+			Running   int `json:"running"`
+			Starting  int `json:"starting"`
+		} `json:"sources"`
+	}
+	resp = httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/dashboard", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("dashboard: expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &dashboard); err != nil {
+		t.Fatalf("decode dashboard response: %v", err)
+	}
+	if dashboard.Summary.Total != 2 || dashboard.Summary.Running != 1 || dashboard.Summary.Starting != 1 {
+		t.Fatalf("unexpected dashboard summary counters: %+v", dashboard.Summary)
+	}
+	if len(dashboard.Sources) != 1 {
+		t.Fatalf("expected one source aggregate, got %d", len(dashboard.Sources))
+	}
+	source := dashboard.Sources[0]
+	if source.TaskCount != 2 || source.Running != 1 || source.Starting != 1 {
+		t.Fatalf("unexpected source counters: %+v", source)
+	}
+}
+
+// TestAPI_ControlPlaneDispatchStartingSummary 验证 control-plane dispatch-only 的 STARTING 汇总。
+func TestAPI_ControlPlaneDispatchStartingSummary(t *testing.T) {
+	store := newFakeAPIRunHistoryStore()
+	source := tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}
+	store.tasks = map[string]tasks.Task{
+		"1": {
+			ID:         "1",
+			Name:       "existing-running",
+			ClusterKey: "existing-running-key",
+			State:      tasks.StateRunning,
+			Source:     source,
+		},
+		"2": {
+			ID:         "2",
+			Name:       "dispatch-a",
+			ClusterKey: "dispatch-a-key",
+			State:      tasks.StateStopped,
+			Source:     source,
+		},
+		"3": {
+			ID:         "3",
+			Name:       "dispatch-b",
+			ClusterKey: "dispatch-b-key",
+			State:      tasks.StateStopped,
+			Source:     source,
+		},
+	}
+	scheduler := tasks.NewScheduler(
+		tasks.WithStore(store),
+		tasks.WithClusterLeaseManager(&fakeAPILeaseManager{epoch: 7}),
+	)
+	if err := scheduler.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	handler := NewServer(scheduler)
+
+	for _, id := range []string{"2", "3"} {
+		if err := scheduler.StartTask(id); err != nil {
+			t.Fatalf("dispatch StartTask %s returned error: %v", id, err)
+		}
+		got, err := scheduler.GetTask(id)
+		if err != nil {
+			t.Fatalf("GetTask %s returned error: %v", id, err)
+		}
+		if got.State != tasks.StateStarting {
+			t.Fatalf("expected task %s to remain STARTING after dispatch, got %s", id, got.State)
+		}
+	}
+
+	var summary struct {
+		Total    int `json:"total"`
+		Running  int `json:"running"`
+		Starting int `json:"starting"`
+	}
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/summary", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("summary: expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary response: %v", err)
+	}
+	if summary.Total != 3 || summary.Running != 1 || summary.Starting != 2 {
+		t.Fatalf("unexpected dispatch summary counters: %+v", summary)
+	}
+
+	var dashboard struct {
+		Summary struct {
+			Total    int `json:"total"`
+			Running  int `json:"running"`
+			Starting int `json:"starting"`
+		} `json:"summary"`
+		Sources []struct {
+			TaskCount int `json:"task_count"`
+			Running   int `json:"running"`
+			Starting  int `json:"starting"`
+		} `json:"sources"`
+	}
+	resp = httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/dashboard", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("dashboard: expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &dashboard); err != nil {
+		t.Fatalf("decode dashboard response: %v", err)
+	}
+	if dashboard.Summary.Total != 3 || dashboard.Summary.Running != 1 || dashboard.Summary.Starting != 2 {
+		t.Fatalf("unexpected dispatch dashboard summary counters: %+v", dashboard.Summary)
+	}
+	if len(dashboard.Sources) != 1 {
+		t.Fatalf("expected one dispatch source aggregate, got %d", len(dashboard.Sources))
+	}
+	sourceSummary := dashboard.Sources[0]
+	if sourceSummary.TaskCount != 3 || sourceSummary.Running != 1 || sourceSummary.Starting != 2 {
+		t.Fatalf("unexpected dispatch source counters: %+v", sourceSummary)
 	}
 }
 

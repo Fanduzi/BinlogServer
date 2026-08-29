@@ -8,7 +8,7 @@
 | `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
 | `metrics_prometheus.go` | `/metrics` 采集与输出（基于 `prometheus/client_golang`） |
 | `tracing.go` | HTTP 入站 tracing middleware（OTel span） |
-| `handlers_tasks.go` | 任务相关 API 处理（CRUD、启动停止、checkpoint、loopback-aware source lookup 等） |
+| `handlers_tasks.go` | 任务相关 API 处理（CRUD、启动停止、checkpoint、loopback-aware source lookup、summary/dashboard 及 source 状态聚合） |
 | `handlers_cluster.go` | 集群观测与控制相关 API（workers、overview） |
 | `swagger_docs_only.go` | swagger 注释占位 |
 
@@ -17,6 +17,8 @@
 - `WithAuth(AuthConfig) ServerOption` - 注入认证配置
 - `WithTracing(TracingConfig) ServerOption` - 注入 tracing 配置
 - `WithRateLimit(RateLimiterConfig) ServerOption` - 注入限流配置
+- `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。
+- `GET /api/dashboard` - 返回同口径 summary、任务明细与 source 聚合；source 状态计数同时暴露 `starting` 与 `running`。
 
 ## Dependencies
 - Upstream: `internal/app` - 应用启动时注入
@@ -30,6 +32,8 @@
 - source lookup：`GET /api/sources/lookup` 使用 tasks 共享 loopback 分类归并 localhost 与显式 loopback literal，端口仍严格匹配；非 loopback host 保持修剪后的原文精确匹配且不做 DNS 解析。
 - 健康检查：`GET /healthz` 文本 `ok`；`GET /api/health` JSON `{"status":"ok"}`
 - 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。
+- 状态汇总：summary/dashboard 保留既有计数键，并新增 `starting`；STARTING 不混入 `running`。
+- Source 聚合：dashboard source 项保留 `running`，并新增独立 `starting` 状态计数。
 - 限流：基于 IP 的令牌桶限流，默认 100 req/s，burst 200
 - Tracing：OTel HTTP span（可选）
 

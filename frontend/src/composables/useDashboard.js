@@ -1,6 +1,7 @@
 // input: API layer (getDashboard, getClusterOverview, listWorkers, getTaskLease)
-// output: dashboard + cluster reactive state, loading flag, refresh helpers, nowRefMs
+// output: dashboard + cluster reactive state, status counters including STARTING, loading flag, refresh helpers, nowRefMs
 // pos: central data layer composable; sourceQuery/lookup live in useSourceLookup
+// note: if this file changes, update this header and frontend/src/README.md
 import { reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import {
@@ -18,6 +19,7 @@ export function useDashboard() {
     threshold_seconds: 30,
     summary: {
       total: 0,
+      starting: 0,
       running: 0,
       retry_backoff: 0,
       stopped: 0,

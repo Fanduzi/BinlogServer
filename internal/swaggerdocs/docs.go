@@ -1095,6 +1095,9 @@ const docTemplate = `{
                 "running": {
                     "type": "integer"
                 },
+                "starting": {
+                    "type": "integer"
+                },
                 "task_count": {
                     "type": "integer"
                 }
@@ -1119,6 +1122,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "running": {
+                    "type": "integer"
+                },
+                "starting": {
                     "type": "integer"
                 },
                 "stopped": {

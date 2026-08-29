@@ -15,6 +15,7 @@
     "abnormal": "异常任务",
     "failed": "失败任务",
     "delayed": "延迟任务",
+    "starting": "启动中任务",
     "running": "运行中任务",
     "total": "总任务",
     "normal": "正常任务"
@@ -230,7 +231,7 @@
     "taskExists": "已存在采集任务",
     "taskNotFound": "未找到采集任务",
     "matchCount": "匹配数量：{count}",
-    "stats": "任务 {tasks} / 运行 {running} / 正常 {normal} / 延迟 {delayed} / 异常 {abnormal}"
+    "stats": "任务 {tasks} / 启动 {starting} / 运行 {running} / 正常 {normal} / 延迟 {delayed} / 异常 {abnormal}"
   },
   "cluster": {
     "title": "集群视图",
