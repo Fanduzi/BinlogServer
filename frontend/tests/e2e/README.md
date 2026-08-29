@@ -6,7 +6,7 @@ Playwright 端到端回归模块，验证运维控制台的首屏、导航、筛
 
 | File | Responsibility |
 |------|---------------|
-| `starting-summary.spec.ts` | 锁定 STARTING 指标可见、与 RUNNING 分离及 source 映射 |
+| `starting-summary.spec.ts` | 锁定 STARTING 指标可见、与 RUNNING 分离、source 映射及缺少 starting 字段时回退 0 |
 | `dashboard-filters.spec.ts` | 指标卡筛选与键盘交互 |
 | `dashboard-empty.spec.ts` | 空态和零指标 |
 | `mock-handler.spec.ts` / `dev-mock-api.spec.ts` | 共享 mock/API helper 合同 |

@@ -1,7 +1,7 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
 // output: deterministic mock API responses including independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
-// note: if this file changes, update this header and frontend/README.md
+// note: if this file changes, update this header and frontend/src/mocks/README.md.
 
 import { cloneMockValue, getMockScenario } from "./mock-data.js";
 
