@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, task pagination/filter validation regression coverage, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
+// output: REST/dashboard responses, task pagination/filter validation regression coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -392,6 +392,252 @@ func TestTaskAPI_CreateInvalidStartDoesNotPersist(t *testing.T) {
 	}
 	if got := len(scheduler.ListTasks()); got != 0 {
 		t.Fatalf("expected no persisted tasks after 400 creates, got %d", got)
+	}
+}
+
+func batchCreateItem(name, clusterKey string, port uint16) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"cluster_key": clusterKey,
+		"source": map[string]any{
+			"host":      "127.0.0.1",
+			"port":      port,
+			"user":      "repl",
+			"password":  "secret",
+			"flavor":    "mysql",
+			"server_id": 200001,
+		},
+		"start":   map[string]any{"mode": "LATEST"},
+		"storage": map[string]any{"retention_days": 7},
+	}
+}
+
+func postBatchCreate(t *testing.T, handler http.Handler, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal batch body: %v", err)
+	}
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/batch", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(resp, req)
+	return resp
+}
+
+func decodeBatchResults(t *testing.T, resp *httptest.ResponseRecorder) []map[string]any {
+	t.Helper()
+	var results []map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &results); err != nil {
+		t.Fatalf("decode batch response: %v; body=%s", err, resp.Body.String())
+	}
+	return results
+}
+
+func TestTaskAPI_BatchCreateAcceptsOneAndOneHundredItems(t *testing.T) {
+	for _, count := range []int{1, 100} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			scheduler := tasks.NewScheduler()
+			handler := NewServer(scheduler)
+			items := make([]map[string]any, count)
+			for i := range items {
+				items[i] = batchCreateItem(
+					fmt.Sprintf("batch-task-%d", i),
+					fmt.Sprintf("batch-key-%d", i),
+					uint16(3306+i),
+				)
+			}
+
+			resp := postBatchCreate(t, handler, map[string]any{"items": items})
+			if resp.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+			}
+			results := decodeBatchResults(t, resp)
+			if len(results) != count {
+				t.Fatalf("expected %d results, got %d", count, len(results))
+			}
+			if got := len(scheduler.ListTasks()); got != count {
+				t.Fatalf("expected %d created tasks, got %d", count, got)
+			}
+			for i, result := range results {
+				if int(result["index"].(float64)) != i {
+					t.Fatalf("result %d has wrong index: %+v", i, result)
+				}
+				if result["cluster_key"] != fmt.Sprintf("batch-key-%d", i) {
+					t.Fatalf("result %d has wrong cluster key: %+v", i, result)
+				}
+				if _, ok := result["task"]; !ok {
+					t.Fatalf("result %d missing task: %+v", i, result)
+				}
+				if _, ok := result["error"]; ok {
+					t.Fatalf("result %d unexpectedly has error: %+v", i, result)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskAPI_BatchCreateRejectsGlobalEnvelopeWithoutCreating(t *testing.T) {
+	cases := []struct {
+		name string
+		body any
+	}{
+		{name: "missing items", body: map[string]any{}},
+		{name: "null items", body: map[string]any{"items": nil}},
+		{name: "empty items", body: map[string]any{"items": []any{}}},
+		{name: "non-array items", body: map[string]any{"items": map[string]any{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheduler := tasks.NewScheduler()
+			handler := NewServer(scheduler)
+			resp := postBatchCreate(t, handler, tc.body)
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d body=%s", resp.Code, resp.Body.String())
+			}
+			var body apiErrorBody
+			if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if body.Code != tasks.CodeInvalidRequest || body.Error == "" {
+				t.Fatalf("unexpected error body %+v", body)
+			}
+			if got := len(scheduler.ListTasks()); got != 0 {
+				t.Fatalf("expected zero created tasks, got %d", got)
+			}
+		})
+	}
+
+	t.Run("malformed json", func(t *testing.T) {
+		scheduler := tasks.NewScheduler()
+		handler := NewServer(scheduler)
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks/batch", strings.NewReader("{"))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest || len(scheduler.ListTasks()) != 0 {
+			t.Fatalf("expected malformed envelope 400 with zero tasks, got %d body=%s tasks=%d", resp.Code, resp.Body.String(), len(scheduler.ListTasks()))
+		}
+	})
+
+	t.Run("over maximum", func(t *testing.T) {
+		scheduler := tasks.NewScheduler()
+		handler := NewServer(scheduler)
+		items := make([]map[string]any, 101)
+		for i := range items {
+			items[i] = batchCreateItem(fmt.Sprintf("batch-task-%d", i), fmt.Sprintf("batch-key-%d", i), uint16(3306+i))
+		}
+		resp := postBatchCreate(t, handler, map[string]any{"items": items})
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for 101 items, got %d body=%s", resp.Code, resp.Body.String())
+		}
+		if got := len(scheduler.ListTasks()); got != 0 {
+			t.Fatalf("expected zero created tasks after 101-item rejection, got %d", got)
+		}
+	})
+}
+
+func TestTaskAPI_BatchCreateKeepsPartialOrderAndStructuredErrors(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+	items := []map[string]any{
+		batchCreateItem("first", "batch-first", 3306),
+		{"name": "invalid", "cluster_key": "batch-invalid"},
+		batchCreateItem("third", "batch-third", 3308),
+	}
+
+	resp := postBatchCreate(t, handler, map[string]any{"items": items})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	results := decodeBatchResults(t, resp)
+	if len(results) != 3 {
+		t.Fatalf("expected three ordered results, got %d", len(results))
+	}
+	for i, key := range []string{"batch-first", "batch-invalid", "batch-third"} {
+		if int(results[i]["index"].(float64)) != i || results[i]["cluster_key"] != key {
+			t.Fatalf("result %d lost order or cluster key: %+v", i, results[i])
+		}
+	}
+	if _, ok := results[0]["task"]; !ok {
+		t.Fatalf("first item should succeed: %+v", results[0])
+	}
+	if _, ok := results[2]["task"]; !ok {
+		t.Fatalf("third item should succeed: %+v", results[2])
+	}
+	itemError, ok := results[1]["error"].(map[string]any)
+	if !ok || itemError["code"] != tasks.CodeInvalidRequest || itemError["error"] != tasks.ErrSourceRequired.Error() {
+		t.Fatalf("invalid item should retain structured INVALID_REQUEST error: %+v", results[1])
+	}
+	if got := len(scheduler.ListTasks()); got != 2 {
+		t.Fatalf("expected two created tasks, got %d", got)
+	}
+}
+
+func TestTaskAPI_BatchCreateRejectsSameSchedulerDuplicateKeysPerItem(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+	items := []map[string]any{
+		batchCreateItem("first", "same-key", 3306),
+		batchCreateItem("duplicate", "same-key", 3307),
+		batchCreateItem("third", "third-key", 3308),
+	}
+
+	resp := postBatchCreate(t, handler, map[string]any{"items": items})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	results := decodeBatchResults(t, resp)
+	if _, ok := results[0]["task"]; !ok {
+		t.Fatalf("first duplicate-key item should succeed: %+v", results[0])
+	}
+	duplicateError, ok := results[1]["error"].(map[string]any)
+	if !ok || duplicateError["code"] != tasks.CodeInvalidRequest || duplicateError["error"] != tasks.ErrClusterKeyExists.Error() {
+		t.Fatalf("second duplicate-key item should fail with existing error: %+v", results[1])
+	}
+	if _, ok := results[2]["task"]; !ok {
+		t.Fatalf("item after duplicate should still succeed: %+v", results[2])
+	}
+	if got := len(scheduler.ListTasks()); got != 2 {
+		t.Fatalf("expected two created tasks, got %d", got)
+	}
+}
+
+func TestTaskAPI_BatchCreateRedactsPassword(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+	resp := postBatchCreate(t, handler, map[string]any{"items": []map[string]any{batchCreateItem("secret", "secret-key", 3306)}})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	results := decodeBatchResults(t, resp)
+	task := results[0]["task"].(map[string]any)
+	source := task["source"].(map[string]any)
+	if got, ok := source["password"]; ok && got != "" {
+		t.Fatalf("batch response leaked password: %v", got)
+	}
+}
+
+func TestTaskAPI_BatchCreateConsumesOneRateLimitToken(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler, WithRateLimit(RateLimiterConfig{
+		Enabled:           true,
+		RequestsPerSecond: 0.001,
+		Burst:             1,
+	}))
+	items := make([]map[string]any, 100)
+	for i := range items {
+		items[i] = batchCreateItem(fmt.Sprintf("limited-%d", i), fmt.Sprintf("limited-key-%d", i), uint16(3306+i))
+	}
+	first := postBatchCreate(t, handler, map[string]any{"items": items})
+	if first.Code != http.StatusOK {
+		t.Fatalf("100-item batch should consume one token and succeed, got %d body=%s", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	handler.ServeHTTP(second, req)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("next request should be rate limited after one batch token, got %d body=%s", second.Code, second.Body.String())
 	}
 }
 
@@ -2808,6 +3054,7 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 		"/api/workers",
 		"/api/cluster/overview",
 		"/api/tasks",
+		"/api/tasks/batch",
 		"/api/tasks/{id}",
 		"/api/tasks/{id}/start",
 		"/api/tasks/{id}/stop",
@@ -2862,6 +3109,13 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 	assertQueryParams(tasksGet, "host", "port", "state", "limit", "offset")
 	dashboardGet := getOperation("/api/dashboard")
 	assertQueryParams(dashboardGet, "host", "port", "state", "limit", "offset")
+	batchPath, ok := paths["/api/tasks/batch"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected batch swagger path object, got %T", paths["/api/tasks/batch"])
+	}
+	if _, ok := batchPath["post"].(map[string]any); !ok {
+		t.Fatalf("expected POST operation for /api/tasks/batch, got %T", batchPath["post"])
+	}
 	definitions, ok := body["definitions"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected swagger definitions, got %T", body["definitions"])

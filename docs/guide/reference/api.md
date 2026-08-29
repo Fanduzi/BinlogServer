@@ -142,7 +142,36 @@ curl -X POST http://localhost:8080/api/tasks \
 }
 ```
 
-### 3.2 列出任务
+### 3.2 批量创建任务
+
+```bash
+curl -X POST http://localhost:8080/api/tasks/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {
+        "name": "backup-mysql-a",
+        "cluster_key": "cluster-a",
+        "source": {"host": "10.0.0.1", "port": 3306, "user": "repl", "password": "secret"},
+        "start": {"mode": "LATEST"},
+        "storage": {"retention_days": 30}
+      },
+      {
+        "name": "backup-mysql-b",
+        "cluster_key": "cluster-b",
+        "source": {"host": "10.0.0.2", "port": 3306, "user": "repl", "password": "secret"},
+        "start": {"mode": "LATEST"},
+        "storage": {"retention_days": 30}
+      }
+    ]
+  }'
+```
+
+`items` 必须是 1..100 个现有创建请求。缺失、空数组、非数组、JSON 格式错误或超过 100 个时，接口返回 HTTP 400 `{"error","code"}`，且不会创建任何任务。合法 envelope 按顺序逐项校验和创建；单项失败不会阻塞其他项。
+
+响应为有序数组，每项包含 `index`、`cluster_key`，成功时包含已脱敏的 `task`，失败时包含结构化 `error`（`{"error":"...","code":"INVALID_REQUEST"}`）。
+
+### 3.3 列出任务
 
 ```bash
 # 列出所有任务
@@ -180,7 +209,7 @@ curl "http://localhost:8080/api/tasks?cluster_key=prod-cluster"
 }
 ```
 
-### 3.3 获取任务详情
+### 3.4 获取任务详情
 
 ```bash
 curl http://localhost:8080/api/tasks/{task_id}
@@ -205,7 +234,7 @@ curl http://localhost:8080/api/tasks/{task_id}
 }
 ```
 
-### 3.4 启动任务
+### 3.5 启动任务
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks/{task_id}/start
@@ -217,7 +246,7 @@ curl -X POST http://localhost:8080/api/tasks/{task_id}/start
 {"id": "task-xxx", "state": "STARTING"}
 ```
 
-### 3.5 停止任务
+### 3.6 停止任务
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks/{task_id}/stop
@@ -229,7 +258,7 @@ curl -X POST http://localhost:8080/api/tasks/{task_id}/stop
 {"id": "task-xxx", "state": "STOPPING"}
 ```
 
-### 3.6 删除任务
+### 3.7 删除任务
 
 ```bash
 curl -X DELETE http://localhost:8080/api/tasks/{task_id}

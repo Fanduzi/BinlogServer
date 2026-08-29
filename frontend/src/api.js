@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers plus auth-required event dispatch for real and mock-backed settings flows
+// output: API request helpers, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -166,6 +166,14 @@ export async function createTask(payload) {
     return mockRequest("POST", "/api/tasks", { data: payload });
   }
   const { data } = await http.post("/api/tasks", payload);
+  return data;
+}
+
+export async function createTasksBatch(payload) {
+  if (useMockAPI) {
+    return mockRequest("POST", "/api/tasks/batch", { data: payload });
+  }
+  const { data } = await http.post("/api/tasks/batch", payload);
   return data;
 }
 

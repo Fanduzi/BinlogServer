@@ -46,6 +46,7 @@
 ### 3.3 Tasks
 
 - `POST /api/tasks`：创建任务
+- `POST /api/tasks/batch`：批量创建任务（`items` 为 1..100 个创建请求；envelope 错误整体 400，合法 envelope 返回有序逐项结果）
 - `GET /api/tasks`：任务列表（支持 `host`/`port`/`state` 过滤与 `limit`/`offset` 分页；默认 100，limit 仅允许 1..500，超过 500 返回 400 `invalid limit`）
 - `GET /api/tasks/{id}`：任务详情
 - `PUT /api/tasks/{id}`：更新任务
@@ -105,6 +106,12 @@
 1. 先执行 `GET /api/tasks/{id}/upload-failures/reasons?limit=20`，确认主要失败原因与频次。
 2. 修复凭证/网络/Bucket 权限后，执行 `POST /api/tasks/{id}/files/retry-upload?limit=100`。
 3. 再执行 `GET /api/tasks/{id}/files`，确认失败记录逐步转为 `UPLOADED`。
+
+### 场景 F：批量创建任务
+
+1. 使用 `POST /api/tasks/batch`，请求体为 `{ "items": [ ... ] }`，最多提交 100 个现有创建请求。
+2. 缺失/空/格式错误 envelope 或超过 100 项时返回 HTTP 400，且不会创建任务。
+3. 合法 envelope 返回 HTTP 200 的有序结果数组；每个失败项带 `INVALID_REQUEST` 错误，后续项仍会继续处理，成功任务中的 source 密码不会返回。
 
 ## 5. 示例请求与返回
 

@@ -14,7 +14,7 @@
 ## Exports
 
 - 被 `internal/ui` 挂载并通过 `/ui/` 提供访问。
-- 当前构建产物包含独立 starting 指标卡、服务端分页任务列表、全局/当前页筛选范围提示和 source 状态计数，使用 `make ui-build` 同步。
+- 当前构建产物包含独立 starting 指标卡、服务端分页任务列表、全局/当前页筛选范围提示、source 状态计数和单请求批量任务创建，使用 `make ui-build` 同步。
 
 ## Dependencies
 

@@ -316,6 +316,54 @@
                 }
             }
         },
+        "/api/tasks/batch": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Tasks"
+                ],
+                "summary": "Create tasks in batch",
+                "parameters": [
+                    {
+                        "description": "Batch task create payload (1-100 items)",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.batchCreateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/api.batchCreateResult"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiErrorBody"
+                        }
+                    },
+                    "405": {
+                        "description": "Method Not Allowed",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/api/tasks/{id}": {
             "get": {
                 "produces": [
@@ -969,6 +1017,34 @@
                 },
                 "error": {
                     "type": "string"
+                }
+            }
+        },
+        "api.batchCreateRequest": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.createTaskRequest"
+                    }
+                }
+            }
+        },
+        "api.batchCreateResult": {
+            "type": "object",
+            "properties": {
+                "cluster_key": {
+                    "type": "string"
+                },
+                "error": {
+                    "$ref": "#/definitions/api.apiErrorBody"
+                },
+                "index": {
+                    "type": "integer"
+                },
+                "task": {
+                    "$ref": "#/definitions/tasks.Task"
                 }
             }
         },
