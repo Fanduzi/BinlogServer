@@ -2,7 +2,7 @@
 input: dashboard/task API data, local filter state, auth-required browser event
 output: operator-focused console UI with task list, status KPIs, detail drawer, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console
-note: supports left-menu multi-view operations split while keeping create/edit/start/stop flows intact
+note: if this file changes, update this header and frontend/README.md.
 -->
 <template>
   <el-config-provider :locale="elLocale">

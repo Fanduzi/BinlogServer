@@ -1,7 +1,7 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
 // output: reusable mock datasets shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
-// note: if this file changes, update this header and frontend/README.md
+// note: if this file changes, update this header and frontend/src/mocks/README.md.
 
 const now = "2026-03-25T08:00:00Z";
 

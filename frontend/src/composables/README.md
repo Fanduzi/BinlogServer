@@ -6,7 +6,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| `useDashboard.js` | Dashboard/cluster 数据容器、刷新和 source 查询参数；保留 starting/running 计数 |
+| `useDashboard.js` | Dashboard/cluster 数据容器、刷新和 source 查询参数；保留 starting/running 计数，缺少 starting 的响应按 0 处理 |
 | `useTaskFilter.js` | 任务状态/复制状态筛选、排序和分页 |
 | `useFormatters.js` | 状态、lease、复制信息和时间格式化 |
 | `useSourceLookup.js` | source host/port 查询状态 |

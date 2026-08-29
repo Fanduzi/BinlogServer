@@ -6,7 +6,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| * | 由前端构建工具生成的资源文件；本次新增 bundle 带有 L3 生成产物声明 |
+| * | 由前端构建工具生成的资源文件；entry hash 由 `make ui-build` 同步并保留 L3 生成产物声明 |
 
 ## Exports
 

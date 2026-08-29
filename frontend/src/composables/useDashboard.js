@@ -59,7 +59,7 @@ export function useDashboard() {
     if (!data) return;
     dashboard.generated_at = data.generated_at || "";
     dashboard.threshold_seconds = data.threshold_seconds || 30;
-    Object.assign(dashboard.summary, data.summary || {});
+    Object.assign(dashboard.summary, data.summary || {}, { starting: data.summary?.starting ?? 0 });
     dashboard.tasks = Array.isArray(data.tasks) ? data.tasks : [];
     dashboard.sources = Array.isArray(data.sources) ? data.sources : [];
   }
