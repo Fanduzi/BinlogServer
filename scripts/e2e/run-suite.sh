@@ -44,6 +44,7 @@ Scenarios:
   smoke-worker-crash-recovery
   smoke-invalid-inputs
   smoke-retry-upload
+  smoke-scale
 EOF
 }
 
@@ -183,6 +184,9 @@ run_scenario() {
       ;;
     smoke-retry-upload)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-retry-upload.sh"
+      ;;
+    smoke-scale)
+      E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" "$ROOT_DIR/scripts/e2e/smoke-scale.sh"
       ;;
     *)
       echo "unsupported scenario: $name" >&2

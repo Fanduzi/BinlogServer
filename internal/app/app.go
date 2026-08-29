@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config including metadata DSN, persisted task state, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle control with metadata/source isolation, active-task restart recovery, role wiring, and shutdown
+// input: runtime config, PRODUCTION environment flag, persisted task state, scheduler/runner/meta store dependencies, process context
+// output: role-aware application lifecycle control with production control-plane auth checks, metadata/source isolation, restart recovery, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -98,12 +98,18 @@ func New(cfg config.Config) *App {
 // Run 启动应用运行时：按 mode/role 组装 scheduler 与 runner，
 // 在 cluster 场景维护 worker 注册、心跳与任务认领，并在 control-plane 模式对外提供 HTTP API。
 func (a *App) Run(ctx context.Context) error {
-	// 安全检查：生产环境强制要求认证。
-	if !a.cfg.API.Auth.Enabled {
-		if os.Getenv("PRODUCTION") == "true" {
-			return errors.New("api.auth.enabled must be true in PRODUCTION mode (set PRODUCTION=false for development)")
+	// 先解析角色，worker-only 不暴露 control-plane API，不能套用 API 鉴权启动约束。
+	controlPlaneEnabled, workerEnabled := resolveRoleMode(a.cfg)
+	production, err := productionMode(os.Getenv("PRODUCTION"))
+	if err != nil {
+		return err
+	}
+	if controlPlaneEnabled {
+		if err := validateProductionAuth(a.cfg.API.Auth, production); err != nil {
+			return err
 		}
-		// 开发环境显示警告。
+	}
+	if controlPlaneEnabled && !a.cfg.API.Auth.Enabled {
 		log.Printf("\x1b[33m\x1b[1m⚠️  SECURITY WARNING: API authentication is DISABLED\x1b[0m")
 		log.Printf("\x1b[33m   For production, set api.auth.enabled=true and configure your auth method.\x1b[0m")
 		log.Printf("\x1b[33m   See docs/security.md for details.\x1b[0m")
@@ -123,9 +129,6 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 	meta.ConfigureTracing(a.cfg.Tracing.Enabled && a.cfg.Tracing.Exporter != "disabled", tracerProvider)
 	defer meta.ConfigureTracing(false, nil)
-
-	// 解析运行角色：是否对外提供 API（control-plane）以及是否执行任务（worker）。
-	controlPlaneEnabled, workerEnabled := resolveRoleMode(a.cfg)
 
 	// opts 供 scheduler 使用；runnerOpts 供数据面 runner 使用。
 	opts := []tasks.Option{}
@@ -373,6 +376,31 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func productionMode(raw string) (bool, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return false, nil
+	}
+	production, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid PRODUCTION value %q: %w", value, err)
+	}
+	return production, nil
+}
+
+func validateProductionAuth(auth config.APIAuthConfig, production bool) error {
+	if !production {
+		return nil
+	}
+	if !auth.Enabled {
+		return errors.New("api.auth.enabled must be true in PRODUCTION mode (set PRODUCTION=false for development)")
+	}
+	if !auth.ProtectAPI || !auth.ProtectMetrics {
+		return errors.New("api.auth.protect_api and api.auth.protect_metrics must be true in PRODUCTION mode")
+	}
+	return config.ValidateAPIAuthConfig(auth)
 }
 
 func metadataSourceEndpoint(dsn string) (string, uint16, bool) {

@@ -211,6 +211,8 @@ export BINLOG_SERVER_API_AUTH_PROTECT_API=true
 export BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true
 ```
 
+Start from [`config.production.example.yaml`](config.production.example.yaml); it contains no credential, needs only the protected bearer-token environment variable, and refuses to load until that placeholder is resolved.
+
 If you use the metadata database:
 
 ```bash

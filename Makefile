@@ -1,4 +1,4 @@
-.PHONY: help test build build-linux check-linux-compat check-linux-release-archive ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test build build-linux check-linux-compat check-linux-release-archive ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e-scale e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo devel)
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -19,6 +19,7 @@ help:
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
 	@echo "  make e2e-observability          # run observability e2e (smoke-observability)"
+	@echo "  make e2e-scale                  # opt-in 1000-control-task / 100-live-stream scale evidence"
 	@echo "  make e2e SCENARIOS=a,b,c        # run custom e2e scenarios"
 	@echo "  make sqlc-generate              # generate typed SQL code from sqlc.yaml"
 	@echo "  make sqlc-verify                # regenerate and check for no git diff"
@@ -82,6 +83,9 @@ e2e-full:
 
 e2e-observability:
 	./scripts/e2e/run-suite.sh --scenarios smoke-observability
+
+e2e-scale:
+	./scripts/e2e/run-suite.sh --scenarios smoke-scale
 
 e2e:
 	@if [ -z "$(SCENARIOS)" ]; then \

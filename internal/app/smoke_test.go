@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config, persisted active tasks, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle coverage for startup recovery, role wiring, and shutdown
+// input: runtime config/template, persisted active tasks, scheduler/runner/meta store dependencies, process context
+// output: application lifecycle plus real-route production auth and worker-only regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -192,6 +192,97 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("app did not shut down in time")
+	}
+}
+
+// TestApp_ProductionAuthProtectsRealRoutes verifies config reaches the live app router without closing health checks.
+func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
+	t.Setenv("PRODUCTION", "TRUE")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "test-token")
+	t.Setenv("BINLOG_SERVER_LISTEN_ADDR", "127.0.0.1:0")
+	cfg, err := config.LoadConfig(filepath.Join("..", "..", "config.production.example.yaml"))
+	if err != nil {
+		t.Fatalf("load production template: %v", err)
+	}
+	if cfg.MetaDSN != "" {
+		t.Fatalf("production template must not require metadata credentials, got %q", cfg.MetaDSN)
+	}
+	a := New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	defer func() {
+		cancel()
+		waitRunExit(t, errCh)
+	}()
+
+	waitReady(t, a)
+	base := "http://" + a.Addr()
+	assertHTTPStatus(t, base+"/healthz", http.StatusOK)
+	for _, path := range []string{"/api/tasks", "/metrics"} {
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected %s without auth to return 401, got %d", path, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+
+		req, err := http.NewRequest(http.MethodGet, base+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer test-token")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("authorized GET %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected %s with bearer auth to return 200, got %d", path, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+// TestApp_ProductionWorkerOnlySkipsControlPlaneAuth verifies a worker-only process has no API surface to protect.
+func TestApp_ProductionWorkerOnlySkipsControlPlaneAuth(t *testing.T) {
+	t.Setenv("PRODUCTION", "1")
+	a := New(config.Config{
+		DataDir: t.TempDir(), Mode: "cluster", ListenAddr: "127.0.0.1:0",
+		Cluster: config.ClusterConfig{Role: "worker", WorkerID: "production-worker", WorkerHealthListenAddr: "127.0.0.1:0"},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	defer func() {
+		cancel()
+		waitRunExit(t, errCh)
+	}()
+
+	waitReady(t, a)
+	if a.Addr() != "" {
+		t.Fatalf("worker-only process must not expose control-plane API, got %q", a.Addr())
+	}
+	assertHTTPStatus(t, "http://"+a.WorkerHealthAddr()+"/healthz", http.StatusOK)
+}
+
+// TestApp_ProductionRejectsProgrammaticAuthSecrets verifies App.Run cannot bypass config validation before binding a listener.
+func TestApp_ProductionRejectsProgrammaticAuthSecrets(t *testing.T) {
+	t.Setenv("PRODUCTION", "true")
+	for _, auth := range []config.APIAuthConfig{
+		{Enabled: true, Mode: "bearer", ProtectAPI: true, ProtectMetrics: true},
+		{Enabled: true, Mode: "bearer", BearerToken: "${TOKEN}", ProtectAPI: true, ProtectMetrics: true},
+		{Enabled: true, Mode: "api_key", APIKeyHeader: "X-API-Key", ProtectAPI: true, ProtectMetrics: true},
+		{Enabled: true, Mode: "api_key", APIKey: "${TOKEN}", APIKeyHeader: "X-API-Key", ProtectAPI: true, ProtectMetrics: true},
+	} {
+		a := New(config.Config{ListenAddr: "127.0.0.1:0", API: config.APIConfig{Auth: auth}})
+		if err := a.Run(context.Background()); err == nil {
+			t.Fatalf("expected auth config %+v to fail before serving", auth)
+		}
+		if a.Addr() != "" {
+			t.Fatalf("invalid auth config bound a listener: %q", a.Addr())
+		}
 	}
 }
 

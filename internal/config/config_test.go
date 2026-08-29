@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants
-// output: validated runtime configuration structs for downstream modules
+// output: config loading regression coverage including unresolved protected-auth secret rejection
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -546,5 +546,29 @@ func TestLoadConfig_InvalidAPIAuthValidation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "api.auth.bearer_token is required") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestLoadConfig_RejectsUnresolvedProtectedAuthSecret verifies deployment templates cannot start protected routes with a missing environment secret.
+func TestLoadConfig_RejectsUnresolvedProtectedAuthSecret(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_MODE", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`api:
+  auth:
+    enabled: true
+    mode: bearer
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
+    protect_api: true
+    protect_metrics: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "api.auth.bearer_token is required") {
+		t.Fatalf("expected unresolved bearer token error, got %v", err)
 	}
 }

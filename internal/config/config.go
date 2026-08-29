@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants
-// output: validated runtime configuration structs for downstream modules
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -86,9 +86,9 @@ type APIConfig struct {
 
 // RateLimitConfig 定义 API 速率限制配置。
 type RateLimitConfig struct {
-	Enabled            bool
-	RequestsPerSecond  float64
-	Burst              int
+	Enabled           bool
+	RequestsPerSecond float64
+	Burst             int
 }
 
 // APIAuthConfig 定义 /metrics 与 /api/* 鉴权策略。
@@ -452,7 +452,7 @@ func validateConfig(cfg Config) error {
 	if err := validateHTTPTimeoutConfig("http.worker_health", cfg.HTTP.WorkerHealth); err != nil {
 		return err
 	}
-	if err := validateAPIAuthConfig(cfg.API.Auth); err != nil {
+	if err := ValidateAPIAuthConfig(cfg.API.Auth); err != nil {
 		return err
 	}
 	if err := validateMetaTimeoutConfig("meta.timeout", cfg.Meta.Timeout); err != nil {
@@ -480,7 +480,8 @@ func validateHTTPTimeoutConfig(scope string, cfg HTTPServerTimeoutConfig) error 
 	return nil
 }
 
-func validateAPIAuthConfig(cfg APIAuthConfig) error {
+// ValidateAPIAuthConfig validates route protection, auth mode, and required resolved credentials.
+func ValidateAPIAuthConfig(cfg APIAuthConfig) error {
 	if !cfg.Enabled {
 		if cfg.ProtectAPI || cfg.ProtectMetrics {
 			return errors.New("api.auth.enabled=false cannot protect api or metrics routes")
@@ -490,11 +491,11 @@ func validateAPIAuthConfig(cfg APIAuthConfig) error {
 	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
 	switch mode {
 	case "bearer":
-		if strings.TrimSpace(cfg.BearerToken) == "" && (cfg.ProtectAPI || cfg.ProtectMetrics) {
+		if unresolvedSecret(cfg.BearerToken) && (cfg.ProtectAPI || cfg.ProtectMetrics) {
 			return errors.New("api.auth.bearer_token is required when protection is enabled")
 		}
 	case "api_key":
-		if strings.TrimSpace(cfg.APIKey) == "" && (cfg.ProtectAPI || cfg.ProtectMetrics) {
+		if unresolvedSecret(cfg.APIKey) && (cfg.ProtectAPI || cfg.ProtectMetrics) {
 			return errors.New("api.auth.api_key is required when protection is enabled")
 		}
 		if strings.TrimSpace(cfg.APIKeyHeader) == "" {
@@ -504,6 +505,10 @@ func validateAPIAuthConfig(cfg APIAuthConfig) error {
 		return fmt.Errorf("api.auth.mode must be bearer or api_key, got %q", cfg.Mode)
 	}
 	return nil
+}
+
+func unresolvedSecret(value string) bool {
+	return strings.TrimSpace(value) == "" || envPlaceholderPattern.MatchString(value)
 }
 
 func validateMetaTimeoutConfig(scope string, cfg MetaTimeoutConfig) error {
