@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
-# output: deterministic e2e orchestration, scenario execution, and verification logs
-# pos: integration-test automation layer validating end-to-end system behavior
+# input: Docker, awk, and the canonical E2E database topology
+# output: configured metadata replication and ProxySQL readiness
+# pos: metadata failover topology setup adapter
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
+source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }

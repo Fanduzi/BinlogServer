@@ -27,7 +27,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       TZ: UTC
     ports:
-      - "13307:3306"
+      - "${E2E_MYSQL80_PORT:-13307}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
       interval: 5s
@@ -47,7 +47,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       TZ: UTC
     ports:
-      - "13308:3306"
+      - "${E2E_PERCONA57_PORT:-13308}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
       interval: 5s
@@ -66,7 +66,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       TZ: UTC
     ports:
-      - "13309:3306"
+      - "${E2E_PERCONA80_PORT:-13309}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
       interval: 5s
@@ -86,7 +86,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       TZ: UTC
     ports:
-      - "13316:3306"
+      - "${E2E_META_PRIMARY_PORT:-13316}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
       interval: 5s
@@ -108,7 +108,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       TZ: UTC
     ports:
-      - "13317:3306"
+      - "${E2E_META_REPLICA_PORT:-13317}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
       interval: 5s
@@ -128,8 +128,8 @@ services:
       meta-replica:
         condition: service_healthy
     ports:
-      - "6036:6036"
-      - "16036:16036"
+      - "${E2E_META_PROXYSQL_ADMIN_PORT:-6036}:6036"
+      - "${E2E_META_PROXYSQL_PORT:-16036}:16036"
     volumes:
       - ./proxysql/proxysql-meta.cnf:/etc/proxysql.cnf:ro
 

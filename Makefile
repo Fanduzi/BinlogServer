@@ -1,4 +1,4 @@
-.PHONY: help test build build-linux check-linux-compat check-linux-release-archive ui-build release-assets e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test build build-linux check-linux-compat check-linux-release-archive ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo devel)
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -15,6 +15,7 @@ help:
 	@echo "  make check-linux-release-archive VERSION=vX.Y.Z # verify required assets and glibc safety in the Linux amd64 release tar.gz"
 	@echo "  make ui-build                   # build frontend and sync to internal/ui/static"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
+	@echo "  make e2e-topology-check         # validate E2E database topology without Docker"
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
 	@echo "  make e2e-observability          # run observability e2e (smoke-observability)"
@@ -69,6 +70,9 @@ ui-build:
 
 release-assets:
 	VERSION="$(VERSION)" BUILD_COMMIT="$(BUILD_COMMIT)" BUILD_DATE="$(BUILD_DATE)" ./scripts/release-assets.sh
+
+e2e-topology-check:
+	./scripts/e2e/topology-contract-test.sh
 
 e2e-quick:
 	./scripts/e2e/run-suite.sh --profile quick
