@@ -8,7 +8,7 @@
 | `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
 | `metrics_prometheus.go` | `/metrics` 采集与输出（基于 `prometheus/client_golang`） |
 | `tracing.go` | HTTP 入站 tracing middleware（OTel span） |
-| `handlers_tasks.go` | 任务相关 API 处理（CRUD、启动停止、checkpoint、loopback-aware source lookup、summary/dashboard 及 source 状态聚合） |
+| `handlers_tasks.go` | 任务相关 API 处理（CRUD、启动停止、checkpoint、loopback-aware source lookup、summary/dashboard 聚合，以及任务 state/host/port 服务端分页） |
 | `handlers_cluster.go` | 集群观测与控制相关 API（workers、overview） |
 | `swagger_docs_only.go` | swagger 注释占位 |
 
@@ -19,6 +19,8 @@
 - `WithRateLimit(RateLimiterConfig) ServerOption` - 注入限流配置
 - `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。
 - `GET /api/dashboard` - 返回同口径 summary、任务明细与 source 聚合；source 状态计数同时暴露 `starting` 与 `running`。
+- `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页；支持 host/port/state 过滤，默认 limit=100，最大有效 limit=500。
+- `GET /api/dashboard` - 支持同一组过滤/分页参数；`summary`/`sources` 按全量过滤结果聚合，仅 `tasks` 明细切页，并返回 `total/limit/offset`。
 
 ## Dependencies
 - Upstream: `internal/app` - 应用启动时注入
@@ -34,6 +36,7 @@
 - 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。
 - 状态汇总：summary/dashboard 保留既有计数键，并新增 `starting`；STARTING 不混入 `running`。
 - Source 聚合：dashboard source 项保留 `running`，并新增独立 `starting` 状态计数。
+- 服务端分页：任务与 dashboard 使用稳定 task ID 顺序在全量快照上过滤、计数和切片；非法 state/limit/offset/port 返回 400，超出 limit 上限时有效值为 500。
 - 限流：基于 IP 的令牌桶限流，默认 100 req/s，burst 200
 - Tracing：OTel HTTP span（可选）
 

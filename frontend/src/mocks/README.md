@@ -7,13 +7,13 @@
 | File | Responsibility |
 |------|---------------|
 | mock-data.js | 定义共享 mock 场景数据（含 starting 状态场景） |
-| mock-handler.js | 将 API method/path/query/body 分发到对应 mock 场景，并维护最小状态变化 |
+| mock-handler.js | 将 API method/path/query/body 分发到对应 mock 场景，模拟 server pagination/filter，并维护最小状态变化 |
 
 ## Exports
 
-- 共享 mock 场景数据
+- 共享 mock 场景数据（含 `pagination`）
 - 共享 mock request handler / session factory
-- Dashboard summary/source response 中按任务状态分别生成 `starting` 与 `running`。
+- Dashboard summary/source response 中按任务状态分别生成 `starting` 与 `running`，并按全量过滤结果返回 `total/limit/offset`。
 
 ## Dependencies
 

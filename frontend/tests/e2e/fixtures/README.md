@@ -11,7 +11,7 @@ Playwright 测试夹具，提供共享 mock 场景类型和 API 路由适配。
 
 ## Interfaces
 
-- `MockScenario`：包含 `starting` 场景的场景名合同。
+- `MockScenario`：包含 `starting`、`pagination` 场景的场景名合同。
 - `registerMockRoutes(page, options)`：安装可配置的 mock route。
 
 ## Dependencies

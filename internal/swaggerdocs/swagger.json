@@ -54,6 +54,24 @@
                         "description": "Filter by source port",
                         "name": "port",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by task state",
+                        "name": "state",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size (default 100, maximum 500)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Zero-based page offset (default 0)",
+                        "name": "offset",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -78,6 +96,28 @@
                 }
             }
         },
+        "/api/health": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Service health check (JSON)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/sources/lookup": {
             "get": {
                 "produces": [
@@ -97,7 +137,7 @@
                     },
                     {
                         "type": "integer",
-                        "description": "MySQL source port",
+                        "description": "MySQL source port (required, 1-65535)",
                         "name": "port",
                         "in": "query",
                         "required": true
@@ -172,53 +212,50 @@
         },
         "/api/tasks": {
             "get": {
-                "consumes": [
-                    "application/json"
-                ],
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "Tasks"
                 ],
-                "summary": "Create or list tasks",
+                "summary": "List tasks",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Filter by source host (GET only)",
+                        "description": "Filter by source host",
                         "name": "host",
                         "in": "query"
                     },
                     {
                         "type": "integer",
-                        "description": "Filter by source port (GET only)",
+                        "description": "Filter by source port",
                         "name": "port",
                         "in": "query"
                     },
                     {
-                        "description": "Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-], source/start/storage 按字段规则校验)",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/api.createTaskRequest"
-                        }
+                        "type": "string",
+                        "description": "Filter by task state (CREATED, STARTING, RUNNING, LEASE_DEGRADED, REBUILDING_FILE, RETRY_BACKOFF, FAILED, STOPPING, STOPPED)",
+                        "name": "state",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size (default 100, maximum 500)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Zero-based page offset (default 0)",
+                        "name": "offset",
+                        "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/tasks.Task"
-                            }
-                        }
-                    },
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "$ref": "#/definitions/tasks.Task"
+                            "$ref": "#/definitions/api.taskListResponse"
                         }
                     },
                     "400": {
@@ -248,18 +285,6 @@
                 "summary": "Create or list tasks",
                 "parameters": [
                     {
-                        "type": "string",
-                        "description": "Filter by source host (GET only)",
-                        "name": "host",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "description": "Filter by source port (GET only)",
-                        "name": "port",
-                        "in": "query"
-                    },
-                    {
                         "description": "Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-], source/start/storage 按字段规则校验)",
                         "name": "body",
                         "in": "body",
@@ -270,15 +295,6 @@
                     }
                 ],
                 "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/tasks.Task"
-                            }
-                        }
-                    },
                     "201": {
                         "description": "Created",
                         "schema": {
@@ -288,7 +304,7 @@
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/api.apiErrorBody"
                         }
                     },
                     "405": {
@@ -588,6 +604,7 @@
                     },
                     {
                         "maximum": 1000,
+                        "minimum": 1,
                         "type": "integer",
                         "default": 100,
                         "description": "Retry upload limit",
@@ -851,6 +868,7 @@
                     },
                     {
                         "maximum": 200,
+                        "minimum": 1,
                         "type": "integer",
                         "default": 20,
                         "description": "Failure reason list limit",
@@ -943,6 +961,17 @@
         }
     },
     "definitions": {
+        "api.apiErrorBody": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
         "api.clusterOverview": {
             "type": "object",
             "properties": {
@@ -1009,6 +1038,12 @@
                 "generated_at": {
                     "type": "string"
                 },
+                "limit": {
+                    "type": "integer"
+                },
+                "offset": {
+                    "type": "integer"
+                },
                 "sources": {
                     "type": "array",
                     "items": {
@@ -1025,6 +1060,9 @@
                     }
                 },
                 "threshold_seconds": {
+                    "type": "integer"
+                },
+                "total": {
                     "type": "integer"
                 }
             }
@@ -1141,6 +1179,26 @@
                 },
                 "updated_at": {
                     "type": "string"
+                }
+            }
+        },
+        "api.taskListResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/tasks.Task"
+                    }
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "offset": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
                 }
             }
         },
@@ -1357,6 +1415,7 @@
                     "type": "string"
                 },
                 "password": {
+                    "description": "仅用于输入，API 响应前会清空",
                     "type": "string"
                 },
                 "port": {

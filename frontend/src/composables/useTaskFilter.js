@@ -1,6 +1,7 @@
-// input: dashboard.tasks array, i18n t(), sourceLabel helper
-// output: uiFilter state, pager, filteredTasks, pagedTasks, quick filter actions
-// pos: task list filtering and pagination logic
+// input: dashboard task page plus total/compatibility metadata, i18n t(), sourceLabel helper
+// output: uiFilter state, server pager/query builder, current-page filteredTasks, pagedTasks, quick filter actions
+// pos: task list filtering and server pagination coordination
+// note: if this file changes, update this header and frontend/src/composables/README.md.
 import { computed, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -11,6 +12,8 @@ export function useTaskFilter(dashboard) {
     "CREATED",
     "STARTING",
     "RUNNING",
+    "LEASE_DEGRADED",
+    "REBUILDING_FILE",
     "RETRY_BACKOFF",
     "STOPPING",
     "STOPPED",
@@ -128,9 +131,21 @@ export function useTaskFilter(dashboard) {
   });
 
   const pagedTasks = computed(() => {
+    if (dashboard.has_pagination) return filteredTasks.value;
     const start = (pager.page - 1) * pager.pageSize;
     return filteredTasks.value.slice(start, start + pager.pageSize);
   });
+
+  const serverTotal = computed(() => dashboard.total ?? dashboard.summary?.total ?? 0);
+
+  function buildPaginationParams() {
+    const params = {
+      limit: pager.pageSize,
+      offset: (pager.page - 1) * pager.pageSize,
+    };
+    if (uiFilter.taskState !== "ALL") params.state = uiFilter.taskState;
+    return params;
+  }
 
   watch(
     () => [
@@ -140,7 +155,6 @@ export function useTaskFilter(dashboard) {
       uiFilter.replicationStatus,
       uiFilter.sortBy,
       uiFilter.onlyAlert,
-      dashboard.tasks.length,
     ],
     () => {
       pager.page = 1;
@@ -148,11 +162,11 @@ export function useTaskFilter(dashboard) {
   );
 
   watch(
-    () => [filteredTasks.value.length, pager.pageSize],
+    () => [serverTotal.value, pager.pageSize],
     () => {
       const maxPage = Math.max(
         1,
-        Math.ceil(filteredTasks.value.length / pager.pageSize),
+        Math.ceil(serverTotal.value / pager.pageSize),
       );
       if (pager.page > maxPage) pager.page = maxPage;
     },
@@ -178,6 +192,8 @@ export function useTaskFilter(dashboard) {
     sourceLabel,
     uiFilter,
     pager,
+    serverTotal,
+    buildPaginationParams,
     activeQuickFilter,
     filteredTasks,
     pagedTasks,

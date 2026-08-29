@@ -96,6 +96,8 @@
     "CREATED": "已创建",
     "STARTING": "启动中",
     "RUNNING": "运行中",
+    "LEASE_DEGRADED": "租约降级",
+    "REBUILDING_FILE": "重建文件中",
     "RETRY_BACKOFF": "重试退避",
     "STOPPING": "停止中",
     "STOPPED": "已停止",

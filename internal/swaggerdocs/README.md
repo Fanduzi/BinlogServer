@@ -5,12 +5,12 @@
 - `swagger.json` / `swagger.yaml`: 生成的 OpenAPI 规范文件。
 
 ## Exports
-- swagger 文档元数据供 API 文档页面消费，`BinlogFile` 包含 `OPEN/SEALED` state；summary/dashboard/source 契约包含独立 `starting` 计数，`running` 仅代表 RUNNING。
+- swagger 文档元数据供 API 文档页面消费，`BinlogFile` 包含 `OPEN/SEALED` state；summary/dashboard/source 契约包含独立 `starting` 计数，`running` 仅代表 RUNNING；任务列表与 dashboard 暴露 state/host/port 过滤及 `total/limit/offset` 分页字段。
 - `/api/sources/lookup` 文档说明 localhost 与显式 loopback literal 共用 host identity，其他 host 按原文字面匹配。
 
 ## Generation Note
 
-- 主线文档中的完整 swag 生成命令当前会产生约 1769 行与本任务无关的历史 churn；本 issue 只同步 `starting` schema 增量，保留该生成债务待后续专门处理。
+- 使用 `go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go -o internal/swaggerdocs --parseInternal` 生成 `docs.go`、`swagger.json` 与 `swagger.yaml`。
 
 ## Dependencies
 - Upstream: `internal/api` 注释与接口定义。

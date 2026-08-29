@@ -1,5 +1,5 @@
 // input: API layer (getDashboard, getClusterOverview, listWorkers, getTaskLease)
-// output: dashboard + cluster reactive state, status counters including STARTING, loading flag, refresh helpers, nowRefMs
+// output: dashboard + cluster reactive state, server pagination metadata, legacy page fallback, status counters including STARTING, loading flag, refresh helpers, nowRefMs
 // pos: central data layer composable; sourceQuery/lookup live in useSourceLookup
 // note: if this file changes, update this header and frontend/src/README.md
 import { reactive, ref } from "vue";
@@ -17,6 +17,10 @@ export function useDashboard() {
   const dashboard = reactive({
     generated_at: "",
     threshold_seconds: 30,
+    total: 0,
+    limit: 100,
+    offset: 0,
+    has_pagination: false,
     summary: {
       total: 0,
       starting: 0,
@@ -57,10 +61,29 @@ export function useDashboard() {
 
   function applyDashboardData(data) {
     if (!data) return;
+    const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    const summaryTotal = data.summary?.total;
+    const total = data.total === undefined ? (summaryTotal ?? tasks.length) : data.total;
+    if (!Number.isInteger(total) || total < 0) {
+      throw new Error("invalid dashboard total");
+    }
+    const limit = data.limit === undefined ? 100 : data.limit;
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new Error("invalid dashboard limit");
+    }
+    const offset = data.offset === undefined ? 0 : data.offset;
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new Error("invalid dashboard offset");
+    }
     dashboard.generated_at = data.generated_at || "";
     dashboard.threshold_seconds = data.threshold_seconds || 30;
+    dashboard.total = total;
+    dashboard.limit = limit;
+    dashboard.offset = offset;
+    dashboard.has_pagination =
+      data.total !== undefined && data.limit !== undefined && data.offset !== undefined;
     Object.assign(dashboard.summary, data.summary || {}, { starting: data.summary?.starting ?? 0 });
-    dashboard.tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    dashboard.tasks = tasks;
     dashboard.sources = Array.isArray(data.sources) ? data.sources : [];
   }
 

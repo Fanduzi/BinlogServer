@@ -38,15 +38,15 @@
 
 - `GET /api/summary`
   作用：返回任务总览计数（running/stopped/failed 等）。
-- `GET /api/dashboard`
-  作用：返回大盘聚合数据（summary + tasks + sources），可用于前端大屏。
+- `GET /api/dashboard?host=...&port=...&state=...&limit=...&offset=...`
+  作用：返回大盘聚合数据（summary + tasks + sources）。过滤后的全量结果用于 summary/sources 聚合，只有 tasks 明细按页返回；响应顶层带有效 `total`、`limit`、`offset`。
 - `GET /api/sources/lookup?host=...&port=...`
   作用：按源库 `host:port` 判断是否已有拉取任务，返回存在性与匹配数量。
 
 ### 3.3 Tasks
 
 - `POST /api/tasks`：创建任务
-- `GET /api/tasks`：任务列表（支持 `host`/`port` 过滤）
+- `GET /api/tasks`：任务列表（支持 `host`/`port`/`state` 过滤与 `limit`/`offset` 分页；默认 100，最大有效 500）
 - `GET /api/tasks/{id}`：任务详情
 - `PUT /api/tasks/{id}`：更新任务
 - `DELETE /api/tasks/{id}`：删除任务
@@ -93,11 +93,12 @@
 
 ### 场景 D：大盘视角排查
 
-1. 执行 `GET /api/dashboard`
+1. 执行 `GET /api/dashboard?state=FAILED&limit=20&offset=0`
 2. 观察：
-   - `summary`：全局统计
-   - `tasks[].replication`：单任务复制状态
-   - `sources[]`：按源库聚合统计
+   - `total/limit/offset`：过滤结果总数与有效分页参数
+   - `summary`：全部过滤任务统计，不受当前页大小影响
+   - `tasks[].replication`：当前页单任务复制状态
+   - `sources[]`：全部过滤任务按源库聚合统计
 
 ### 场景 E：上传失败后的批量补传
 

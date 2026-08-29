@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses and status codes for task/cluster operations
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -14,6 +14,21 @@ var (
 	_ tasks.Task
 	_ binlog.Checkpoint
 )
+
+// swaggerTaskListDoc godoc
+// @Summary List tasks
+// @Tags Tasks
+// @Produce json
+// @Param host query string false "Filter by source host"
+// @Param port query int false "Filter by source port"
+// @Param state query string false "Filter by task state (CREATED, STARTING, RUNNING, LEASE_DEGRADED, REBUILDING_FILE, RETRY_BACKOFF, FAILED, STOPPING, STOPPED)"
+// @Param limit query int false "Page size (default 100, maximum 500)"
+// @Param offset query int false "Zero-based page offset (default 0)"
+// @Success 200 {object} taskListResponse
+// @Failure 400 {string} string
+// @Failure 405 {string} string
+// @Router /api/tasks [get]
+func (s *Server) swaggerTaskListDoc() {}
 
 // swaggerTaskGetDoc godoc
 // @Summary Get task by ID

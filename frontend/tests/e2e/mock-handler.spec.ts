@@ -26,3 +26,19 @@ test('shared mock handler returns healthy dashboard payload', async () => {
   expect(Array.isArray(response.body.tasks)).toBe(true)
   expect(response.body.tasks).toHaveLength(1)
 })
+
+test('shared mock handler returns server-paged task list metadata', async () => {
+  const moduleUrl = new URL('../../src/mocks/mock-handler.js', import.meta.url).href
+  const { handleMockRequest } = await import(moduleUrl)
+
+  const response = handleMockRequest({
+    scenario: 'pagination',
+    method: 'GET',
+    path: '/api/tasks',
+    query: new URLSearchParams('limit=1&offset=20'),
+  })
+
+  expect(response.status).toBe(200)
+  expect(response.body).toMatchObject({ total: 25, limit: 1, offset: 20 })
+  expect(response.body.items).toHaveLength(1)
+})
