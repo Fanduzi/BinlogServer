@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task commands/events, metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: validated task state transitions, scheduling decisions, and execution coordination
+// input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
+// output: source validation decisions, task state transitions, scheduling decisions, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -516,8 +517,34 @@ func (s *Scheduler) validateMetadataSourceEndpoint(source SourceConfig) error {
 	return nil
 }
 
+// normalizeEndpointHost compares endpoint spellings without DNS resolution.
 func normalizeEndpointHost(host string) string {
-	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	normalized := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if isLoopbackHost(normalized) {
+		return "127.0.0.1"
+	}
+	return normalized
+}
+
+// IsLoopbackHost reports whether host is localhost or a loopback IP literal.
+// It intentionally does not resolve arbitrary hostnames.
+func IsLoopbackHost(host string) bool {
+	return isLoopbackHost(host)
+}
+
+func isLoopbackHost(host string) bool {
+	normalized := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if normalized == "localhost" {
+		return true
+	}
+	if len(normalized) >= 2 && normalized[0] == '[' && normalized[len(normalized)-1] == ']' {
+		normalized = normalized[1 : len(normalized)-1]
+		if !strings.Contains(normalized, ":") {
+			return false
+		}
+	}
+	ip := net.ParseIP(normalized)
+	return ip != nil && ip.IsLoopback()
 }
 
 // normalizeAndValidateStartConfig 归一化并校验起点配置。

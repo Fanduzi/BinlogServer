@@ -11,7 +11,7 @@
 - `scheduler_retry_upload.go`: 上传失败补偿重试与失败原因聚合。
 - `model.go`: 任务领域模型与状态定义。
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
-- `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试。
+- `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试，覆盖 localhost、127/8、::1 与 IPv6 括号表示。
 - `event_store_test.go` 中 fake store 为并发安全实现，用于 `-race` 校验稳定性。
 
 ## Exports
@@ -21,7 +21,8 @@
 - 事件记录、文件元信息、上传补偿。
 - `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
-- `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/start 时拒绝同端点 source。
+- `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与 source lookup 共享。
+- `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/configure/start 时拒绝同端点 source。
 - Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
 - runner/lease 的自动转换保持 best-effort 持久化语义，并统一记录持久化失败日志。

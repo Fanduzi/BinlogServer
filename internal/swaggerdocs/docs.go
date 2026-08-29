@@ -101,7 +101,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "MySQL source host",
+                        "description": "MySQL source host (required); localhost and explicit loopback literals (127/8, ::1, including bracketed IPv6) share one identity, other hosts match exact spelling",
                         "name": "host",
                         "in": "query",
                         "required": true

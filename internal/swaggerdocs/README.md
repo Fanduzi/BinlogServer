@@ -6,6 +6,7 @@
 
 ## Exports
 - swagger 文档元数据供 API 文档页面消费，`BinlogFile` 包含 `OPEN/SEALED` state。
+- `/api/sources/lookup` 文档说明 localhost 与显式 loopback literal 共用 host identity，其他 host 按原文字面匹配。
 
 ## Dependencies
 - Upstream: `internal/api` 注释与接口定义。
