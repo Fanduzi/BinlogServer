@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# input: local tooling, e2e services, and the canonical E2E database topology
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -7,6 +7,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
+source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
 API="http://127.0.0.1:18080"
 ORC_API="http://127.0.0.1:13000/api"
 DISCOVER_HOST="mysql80"
@@ -86,7 +87,7 @@ create_task() {
   # 创建一个 LATEST 起点任务，使 binlog_server 与 source 建立 dump 连接。
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$task_name\",\"cluster_key\":\"$task_name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":13307,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":330901},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$task_name\",\"cluster_key\":\"$task_name\",\"source\":{\"host\":\"$E2E_SOURCE_HOST\",\"port\":$E2E_MYSQL80_PORT,\"user\":\"$E2E_SOURCE_USER\",\"password\":\"$E2E_SOURCE_PASS\",\"flavor\":\"mysql\",\"server_id\":330901},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
   local id
   id=$(json_get_str "$resp" "id" "ID")
   if [[ -z "$id" || "$id" == "null" ]]; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling (docker/curl/jq/go) and e2e environment/service dependencies
+# input: local tooling, e2e services, and the canonical E2E database topology
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -7,9 +7,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
+source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
 API="http://127.0.0.1:18080"
 SOURCE_SERVICE="mysql80"
-SOURCE_PORT="13307"
+SOURCE_PORT="$E2E_MYSQL80_PORT"
 SEMISYNC_TIMEOUT_MS="${SEMISYNC_TIMEOUT_MS:-7000}"
 task_id=""
 mode=""
@@ -150,7 +151,7 @@ create_semisync_task() {
   local resp id
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$SOURCE_PORT,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid,\"semi_sync\":true},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"$E2E_SOURCE_HOST\",\"port\":$SOURCE_PORT,\"user\":\"$E2E_SOURCE_USER\",\"password\":\"$E2E_SOURCE_PASS\",\"flavor\":\"mysql\",\"server_id\":$sid,\"semi_sync\":true},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
   id=$(json_get_str "$resp" "id" "ID")
   if [[ -z "$id" || "$id" == "null" ]]; then
     echo "create task failed: $resp" >&2

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: local tooling, e2e services, and optional E2E_MYSQL57_PORT host-port override
+# input: local tooling, e2e services, and the canonical E2E database topology
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -7,6 +7,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
+source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
 API="http://127.0.0.1:18080"
 
 need_cmd() {
@@ -26,7 +27,7 @@ create_task() {
   local resp
   resp=$(curl -sS -X POST "$API/api/tasks" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"127.0.0.1\",\"port\":$port,\"user\":\"repl\",\"password\":\"replpass\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
+    -d "{\"name\":\"$name\",\"cluster_key\":\"$name\",\"source\":{\"host\":\"$E2E_SOURCE_HOST\",\"port\":$port,\"user\":\"$E2E_SOURCE_USER\",\"password\":\"$E2E_SOURCE_PASS\",\"flavor\":\"mysql\",\"server_id\":$sid},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}")
 
   local id
   id=$(printf '%s' "$resp" | jq -r '.id // empty')
@@ -57,10 +58,10 @@ wait_running() {
 
 echo "[e2e] create + start tasks"
 # 每个 source 使用固定唯一 server_id，避免 replication client 冲突。
-id57=$(create_task "e2e-mysql57" "${E2E_MYSQL57_PORT:-13306}" 310101)
-id80=$(create_task "e2e-mysql80" 13307 310102)
-idp57=$(create_task "e2e-percona57" 13308 310103)
-idp80=$(create_task "e2e-percona80" 13309 310104)
+id57=$(create_task "e2e-mysql57" "$E2E_MYSQL57_PORT" 310101)
+id80=$(create_task "e2e-mysql80" "$E2E_MYSQL80_PORT" 310102)
+idp57=$(create_task "e2e-percona57" "$E2E_PERCONA57_PORT" 310103)
+idp80=$(create_task "e2e-percona80" "$E2E_PERCONA80_PORT" 310104)
 
 wait_running "$id57"
 wait_running "$id80"
