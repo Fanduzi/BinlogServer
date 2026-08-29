@@ -1,5 +1,5 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
-// output: reusable mock datasets, including server-pagination scenarios, shared by Vite dev mode and Playwright E2E adapters
+// output: reusable mock datasets, including server-pagination/current-page filter scenarios, shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -146,7 +146,10 @@ export const mockScenarios = {
       const id = String(index + 1).padStart(3, "0");
       const state = index % 2 === 0 ? "RUNNING" : "FAILED";
       return {
-        task: buildTask(id, { name: `page-task-${id}`, state }),
+        task: buildTask(id, {
+          name: id === "021" ? "later-page-only-match" : `page-task-${id}`,
+          state,
+        }),
         replication: buildReplication({
           status: state === "FAILED" ? "ABNORMAL" : "NORMAL",
         }),

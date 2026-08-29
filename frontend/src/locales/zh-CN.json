@@ -156,17 +156,20 @@
     "none": "暂无"
   },
   "filter": {
-    "title": "运维筛选",
-    "hint": "优先排查异常",
-    "allTaskStates": "全部任务状态",
-    "allReplicationStatuses": "全部复制状态",
-    "sortByDelay": "风险优先",
-    "sortByUpdated": "最近更新优先",
-    "sortByName": "任务名 A-Z",
-    "alertFirst": "告警任务优先显示",
-    "showingCount": "当前显示 {count} 个任务",
-    "filteredCount": "筛选后 {filtered} / 总计 {total}",
-    "alertFilteredCount": "告警筛选 {filtered} / 总计 {total}"
+    "title": "任务筛选（当前页）",
+    "hint": "任务状态全局筛选；其余控件仅作用于当前页",
+    "scopeNote": "任务状态由服务端全局筛选；关键词、源库、复制状态、告警和排序仅作用于当前页。",
+    "taskStateScope": "任务状态（服务端/全局）",
+    "sortHint": "排序（当前页）",
+    "allTaskStates": "全部任务状态（服务端/全局）",
+    "allReplicationStatuses": "全部复制状态（当前页）",
+    "sortByDelay": "风险优先（当前页）",
+    "sortByUpdated": "最近更新优先（当前页）",
+    "sortByName": "任务名 A-Z（当前页）",
+    "alertFirst": "告警任务优先显示（当前页）",
+    "showingCount": "当前页匹配：{count} 个任务",
+    "filteredCount": "当前页匹配：{filtered}；全局总数：{total}",
+    "alertFilteredCount": "当前页告警：{filtered}；全局总数：{total}"
   },
   "batch": {
     "title": "批量创建任务",
@@ -255,8 +258,8 @@
     "tokenHint": "配置 API 认证令牌。启用认证后需要设置此项才能访问 API。"
   },
   "placeholder": {
-    "searchTask": "按任务 ID/名称搜索",
-    "filterSource": "按源库 host:port 过滤",
+    "searchTask": "按当前页任务 ID/名称搜索",
+    "filterSource": "按当前页源库 host:port 过滤",
     "hostExample": "host，例如 127.0.0.1"
   },
   "panel": {

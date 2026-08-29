@@ -232,7 +232,7 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 // @Param host query string false "Filter by source host"
 // @Param port query int false "Filter by source port"
 // @Param state query string false "Filter by task state"
-// @Param limit query int false "Page size (default 100, maximum 500)"
+// @Param limit query int false "Page size (default 100, range 1-500; values above 500 return 400)"
 // @Param offset query int false "Zero-based page offset (default 0)"
 // @Success 200 {object} dashboardResponse
 // @Failure 400 {string} string
@@ -667,7 +667,7 @@ func parseTaskListQuery(r *http.Request) (taskListQuery, error) {
 			return taskListQuery{}, errors.New("invalid limit")
 		}
 		if limit > maxTaskListLimit {
-			limit = maxTaskListLimit
+			return taskListQuery{}, errors.New("invalid limit")
 		}
 		query.Limit = limit
 	}

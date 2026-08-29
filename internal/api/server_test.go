@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, task pagination/filter regression coverage, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
+// output: REST/dashboard responses, task pagination/filter validation regression coverage, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -2102,7 +2102,6 @@ func TestTaskAPI_TaskPaginationAndDashboardAggregation(t *testing.T) {
 	}{
 		{name: "limit one", path: "/api/tasks?limit=1", wantLimit: 1, wantItems: 1},
 		{name: "limit five hundred", path: "/api/tasks?limit=500", wantLimit: 500, wantItems: 500},
-		{name: "over maximum is capped", path: "/api/tasks?limit=1000", wantLimit: 500, wantItems: 500},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, resp := getTasks(tc.path)
@@ -2148,6 +2147,8 @@ func TestTaskAPI_TaskPaginationAndDashboardAggregation(t *testing.T) {
 		"/api/tasks?limit=0",
 		"/api/tasks?limit=-1",
 		"/api/tasks?limit=abc",
+		"/api/tasks?limit=501",
+		"/api/tasks?limit=1000",
 		"/api/tasks?offset=-1",
 		"/api/tasks?offset=abc",
 		"/api/tasks?state=UNKNOWN",
@@ -2160,6 +2161,16 @@ func TestTaskAPI_TaskPaginationAndDashboardAggregation(t *testing.T) {
 		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
 		if resp.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for %s, got %d body=%s", path, resp.Code, resp.Body.String())
+		}
+		if strings.HasPrefix(path, "/api/tasks?limit=") && strings.TrimSpace(resp.Body.String()) != "invalid limit" {
+			t.Fatalf("expected invalid limit for %s, got %q", path, strings.TrimSpace(resp.Body.String()))
+		}
+	}
+	for _, path := range []string{"/api/dashboard?limit=501", "/api/dashboard?limit=1000"} {
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+		if resp.Code != http.StatusBadRequest || strings.TrimSpace(resp.Body.String()) != "invalid limit" {
+			t.Fatalf("expected dashboard invalid limit for %s, got %d body=%s", path, resp.Code, resp.Body.String())
 		}
 	}
 

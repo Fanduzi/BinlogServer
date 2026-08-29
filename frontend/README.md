@@ -4,7 +4,7 @@
 | File | Responsibility |
 |------|---------------|
 | `src/main.js` | Vue 应用入口 |
-| `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、任务详情与设置对话框 |
+| `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、全局/当前页筛选范围、任务详情与设置对话框 |
 | `src/components/MetricGrid.vue` | 首屏任务指标卡，分别展示 starting 与 running |
 | `src/api.js` | API 调用封装，含真实后端请求、401 处理与开发态 mock 分发 |
 | `src/composables/useDashboard.js` | Dashboard/cluster 响应状态容器，消费 server `total/limit/offset`（旧响应保留本地分页兜底），保留 starting 与 running 独立计数 |
@@ -27,7 +27,7 @@
 - 401 处理：统一为中文运维提示，并直接引导用户进入设置配置 Token
 - 多视图运维分区：左侧菜单切换 `总览 / 任务列表 / 源库覆盖 / Worker 运维 / 异常与告警`，降低单页长滚动操作成本
 - 启动可见性：首屏指标卡和 source coverage 同时展示独立 `starting`，不把 STARTING 混入 `running`
-- 服务端分页：任务列表用 dashboard 的有效 `total/limit/offset` 请求页数据，页面切换不会用当前页长度冒充全局总数；state/host/port 过滤随请求发送。
+- 服务端分页：任务列表用 dashboard 的有效 `total/limit/offset` 请求页数据，页面切换不会用当前页长度冒充全局总数；state/host/port 过滤随请求发送，关键词/源库文本/复制状态/告警/排序明确仅作用于当前页。
 - URL 深链支持：可直接访问 `/#/tasks`、`/#/sources`、`/#/workers`、`/#/alerts` 分享指定运维视图
 - 工具归属拆分：`运维筛选`仅在任务/告警工作区显示，`源库反查`仅在源库工作区显示
 - E2E 回归覆盖：Playwright 用例覆盖分视图导航、深链、空态、详情抽屉、上传重试与 starting 指标 mock 场景

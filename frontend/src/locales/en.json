@@ -156,17 +156,20 @@
     "none": "None"
   },
   "filter": {
-    "title": "Operations Filter",
-    "hint": "Prioritize alerts",
-    "allTaskStates": "All Task States",
-    "allReplicationStatuses": "All Replication Statuses",
-    "sortByDelay": "Risk Priority",
-    "sortByUpdated": "Recently Updated",
-    "sortByName": "Name A-Z",
-    "alertFirst": "Show Alert Tasks First",
-    "showingCount": "Showing {count} tasks",
-    "filteredCount": "{filtered} filtered / {total} total",
-    "alertFilteredCount": "{filtered} alerts / {total} total"
+    "title": "Task Filters (current page)",
+    "hint": "Task state is global; other controls apply to this page",
+    "scopeNote": "Task state is a server/global filter. Keyword, source, replication, alert, and sort controls apply to the current page.",
+    "taskStateScope": "Task state (server/global)",
+    "sortHint": "Sort (current page)",
+    "allTaskStates": "All Task States (server/global)",
+    "allReplicationStatuses": "All Replication Statuses (current page)",
+    "sortByDelay": "Risk Priority (current page)",
+    "sortByUpdated": "Recently Updated (current page)",
+    "sortByName": "Name A-Z (current page)",
+    "alertFirst": "Show Alert Tasks First (current page)",
+    "showingCount": "Current-page matches: {count}",
+    "filteredCount": "Current-page matches: {filtered}; global total: {total}",
+    "alertFilteredCount": "Current-page alerts: {filtered}; global total: {total}"
   },
   "batch": {
     "title": "Batch Create Tasks",
@@ -255,8 +258,8 @@
     "tokenHint": "Configure API authentication token. This is required when authentication is enabled."
   },
   "placeholder": {
-    "searchTask": "Search by task ID/name",
-    "filterSource": "Filter by source host:port",
+    "searchTask": "Search current page by task ID/name",
+    "filterSource": "Filter current page by source host:port",
     "hostExample": "host, e.g. 127.0.0.1"
   },
   "panel": {

@@ -46,7 +46,7 @@
 ### 3.3 Tasks
 
 - `POST /api/tasks`：创建任务
-- `GET /api/tasks`：任务列表（支持 `host`/`port`/`state` 过滤与 `limit`/`offset` 分页；默认 100，最大有效 500）
+- `GET /api/tasks`：任务列表（支持 `host`/`port`/`state` 过滤与 `limit`/`offset` 分页；默认 100，limit 仅允许 1..500，超过 500 返回 400 `invalid limit`）
 - `GET /api/tasks/{id}`：任务详情
 - `PUT /api/tasks/{id}`：更新任务
 - `DELETE /api/tasks/{id}`：删除任务
