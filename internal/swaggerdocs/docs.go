@@ -74,7 +74,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Page size (default 100, maximum 500)",
+                        "description": "Page size (default 100, range 1-500; values above 500 return 400)",
                         "name": "limit",
                         "in": "query"
                     },
@@ -251,7 +251,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Page size (default 100, maximum 500)",
+                        "description": "Page size (default 100, range 1-500; values above 500 return 400 invalid limit)",
                         "name": "limit",
                         "in": "query"
                     },

@@ -452,7 +452,8 @@ paths:
         in: query
         name: state
         type: string
-      - description: Page size (default 100, maximum 500)
+      - description: Page size (default 100, range 1-500; values above 500 return
+          400)
         in: query
         name: limit
         type: integer
@@ -570,7 +571,8 @@ paths:
         in: query
         name: state
         type: string
-      - description: Page size (default 100, maximum 500)
+      - description: Page size (default 100, range 1-500; values above 500 return
+          400 invalid limit)
         in: query
         name: limit
         type: integer

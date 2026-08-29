@@ -1,6 +1,6 @@
 <!--
-input: dashboard/task API data with server pagination metadata, local filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, status KPIs, detail drawer, forms, and settings
+input: dashboard/task API data with server pagination metadata, local current-page filter state, auth-required browser event
+output: operator-focused console UI with server-paged task list and explicit global/current-page filter scopes, status KPIs, detail drawer, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -58,7 +58,9 @@ note: if this file changes, update this header and frontend/README.md.
               <el-button size="small" @click="applyQuickFilter('failed')">{{ $t('metrics.failed') }}</el-button>
               <el-button size="small" @click="applyQuickFilter('delayed')">{{ $t('metrics.delayed') }}</el-button>
             </div>
+            <div class="filter-scope-note" data-testid="filter-scope-note">{{ $t('filter.scopeNote') }}</div>
             <el-input v-model="uiFilter.keyword" clearable :placeholder="$t('placeholder.searchTask')" />
+            <div class="filter-label">{{ $t('filter.taskStateScope') }}</div>
             <el-select v-model="uiFilter.taskState">
               <el-option :label="$t('filter.allTaskStates')" value="ALL" />
               <el-option v-for="state in taskStates" :key="state" :label="stateLabel(state)" :value="state" />
@@ -68,6 +70,7 @@ note: if this file changes, update this header and frontend/README.md.
               <el-option v-for="status in replicationStatuses" :key="status" :label="replicationStatusLabel(status)" :value="status" />
             </el-select>
             <el-input v-model="uiFilter.sourceKeyword" clearable :placeholder="$t('placeholder.filterSource')" />
+            <div class="filter-label">{{ $t('filter.sortHint') }}</div>
             <el-select v-model="uiFilter.sortBy">
               <el-option :label="$t('filter.sortByDelay')" value="delay_desc" />
               <el-option :label="$t('filter.sortByUpdated')" value="updated_desc" />
@@ -225,7 +228,7 @@ note: if this file changes, update this header and frontend/README.md.
                 {{ activeView === "alerts" ? $t('nav.alerts') : $t('nav.tasks') }}
               </span>
               <div class="panel-title-actions">
-                <span class="panel-hint">
+                <span class="panel-hint" data-testid="task-filter-count">
                   {{
                     activeView === "alerts"
                       ? $t('filter.alertFilteredCount', { filtered: filteredTasks.length, total: serverTotal })
@@ -1320,6 +1323,23 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.filter-scope-note {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--sub);
+  background: var(--surface-soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.filter-label {
+  color: var(--text-label);
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: -5px;
 }
 
 .filter-summary {

@@ -32,5 +32,5 @@ test('left menu switches between overview/tasks/sources/alerts views', async ({ 
 
   await page.getByTestId('view-nav-alerts').click()
   await expect(page.locator('.table-card .panel-title', { hasText: '异常与告警' })).toBeVisible()
-  await expect(page.getByText('告警筛选')).toBeVisible()
+  await expect(page.getByTestId('filter-scope-note')).toContainText('任务状态由服务端全局筛选')
 })

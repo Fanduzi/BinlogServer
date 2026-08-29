@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including server pagination, independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including server pagination/filter validation, independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -268,8 +268,8 @@ function parseTaskQuery(query) {
   }
   if (query.has("limit")) {
     const limit = parseInteger(query.get("limit"));
-    if (limit === null || limit <= 0) return { error: "invalid limit" };
-    result.limit = Math.min(limit, MAX_TASK_LIMIT);
+    if (limit === null || limit <= 0 || limit > MAX_TASK_LIMIT) return { error: "invalid limit" };
+    result.limit = limit;
   }
   if (query.has("offset")) {
     const offset = parseInteger(query.get("offset"));

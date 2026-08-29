@@ -22,7 +22,7 @@ var (
 // @Param host query string false "Filter by source host"
 // @Param port query int false "Filter by source port"
 // @Param state query string false "Filter by task state (CREATED, STARTING, RUNNING, LEASE_DEGRADED, REBUILDING_FILE, RETRY_BACKOFF, FAILED, STOPPING, STOPPED)"
-// @Param limit query int false "Page size (default 100, maximum 500)"
+// @Param limit query int false "Page size (default 100, range 1-500; values above 500 return 400 invalid limit)"
 // @Param offset query int false "Zero-based page offset (default 0)"
 // @Success 200 {object} taskListResponse
 // @Failure 400 {string} string
