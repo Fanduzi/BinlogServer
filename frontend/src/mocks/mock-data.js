@@ -44,6 +44,7 @@ function buildReplication(overrides = {}) {
 export const mockScenarioNames = [
   "empty",
   "healthy",
+  "starting",
   "anomaly",
   "upload-failed",
   "auth-required",
@@ -138,6 +139,20 @@ export const mockScenarios = {
       running_task_count: 1,
       leased_task_count: 1,
     },
+  },
+  starting: {
+    tasks: [
+      {
+        task: buildTask("150", {
+          name: "task-starting",
+          state: "STARTING",
+          owner_worker_id: "",
+        }),
+        replication: buildReplication({ status: "IDLE", has_progress: false }),
+      },
+    ],
+    sources: [],
+    workers: [],
   },
   anomaly: {
     summary: {

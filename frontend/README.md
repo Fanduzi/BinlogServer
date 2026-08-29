@@ -5,7 +5,9 @@
 |------|---------------|
 | `src/main.js` | Vue 应用入口 |
 | `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、任务详情与设置对话框 |
+| `src/components/MetricGrid.vue` | 首屏任务指标卡，分别展示 starting 与 running |
 | `src/api.js` | API 调用封装，含真实后端请求、401 处理与开发态 mock 分发 |
+| `src/composables/useDashboard.js` | Dashboard/cluster 响应状态容器，保留 starting 与 running 独立计数 |
 | `src/mocks/mock-data.js` | 共享 mock 场景数据，供 Vite dev 与 Playwright E2E 复用 |
 | `src/mocks/mock-handler.js` | 共享 mock 请求分发与最小状态模拟 |
 | `src/utils/auth.js` | 认证 Token 管理（localStorage 读写） |
@@ -23,12 +25,13 @@
 - 认证支持：Bearer Token 配置（设置对话框），API 请求自动携带 Authorization 头
 - 401 处理：统一为中文运维提示，并直接引导用户进入设置配置 Token
 - 多视图运维分区：左侧菜单切换 `总览 / 任务列表 / 源库覆盖 / Worker 运维 / 异常与告警`，降低单页长滚动操作成本
+- 启动可见性：首屏指标卡和 source coverage 同时展示独立 `starting`，不把 STARTING 混入 `running`
 - URL 深链支持：可直接访问 `/#/tasks`、`/#/sources`、`/#/workers`、`/#/alerts` 分享指定运维视图
 - 工具归属拆分：`运维筛选`仅在任务/告警工作区显示，`源库反查`仅在源库工作区显示
-- E2E 回归覆盖：Playwright 用例覆盖分视图导航、深链、空态、详情抽屉与上传重试 mock 场景
+- E2E 回归覆盖：Playwright 用例覆盖分视图导航、深链、空态、详情抽屉、上传重试与 starting 指标 mock 场景
 - 开发态 mock：显式环境变量打开后，前端可直接使用共享场景数据启动，不依赖真实后端
 - 共享 mock 资产：Vite dev 与 Playwright 路由拦截复用同一套 mock 数据与 handler，避免双份漂移
-- 内置 mock 场景：`empty`、`healthy`、`anomaly`、`upload-failed`、`auth-required`、`cluster-degraded`、`lease-risk`、`control-plane-down-worker-running`
+- 内置 mock 场景：`empty`、`healthy`、`starting`、`anomaly`、`upload-failed`、`auth-required`、`cluster-degraded`、`lease-risk`、`control-plane-down-worker-running`
 
 ## Update Rule
 - 前端模块边界、接口契约、构建流程变化时，更新本文件。

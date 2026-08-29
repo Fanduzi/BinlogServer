@@ -1,6 +1,6 @@
 <!--
 input: dashboard/task API data, local filter state, auth-required browser event
-output: operator-focused console UI with task list, detail drawer, forms, and settings
+output: operator-focused console UI with task list, status KPIs, detail drawer, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console
 note: supports left-menu multi-view operations split while keeping create/edit/start/stop flows intact
 -->
@@ -201,7 +201,7 @@ note: supports left-menu multi-view operations split while keeping create/edit/s
             >
               <p class="source-name">{{ item.host }}:{{ item.port }}</p>
               <p class="source-stats source-stats--summary">
-                {{ $t('source.stats', { tasks: item.task_count, running: item.running, normal: item.normal, delayed: item.delayed, abnormal: item.abnormal }) }}
+                {{ $t('source.stats', { tasks: item.task_count, starting: item.starting ?? 0, running: item.running, normal: item.normal, delayed: item.delayed, abnormal: item.abnormal }) }}
               </p>
             </div>
           </div>
@@ -730,6 +730,12 @@ function applyQuickFilter(kind, options = {}) {
     if (syncHashWhenNeeded) syncHash("tasks");
     return;
   }
+  if (kind === "starting") {
+    uiFilter.taskState = "STARTING";
+    activeView.value = "tasks";
+    if (syncHashWhenNeeded) syncHash("tasks");
+    return;
+  }
   if (kind === "running") {
     uiFilter.taskState = "RUNNING";
     activeView.value = "tasks";
@@ -938,7 +944,7 @@ h1 {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  grid-template-columns: repeat(7, minmax(130px, 1fr));
   gap: 10px;
   margin-bottom: 16px;
 }

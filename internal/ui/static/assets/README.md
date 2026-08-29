@@ -6,11 +6,12 @@
 
 | File | Responsibility |
 |------|---------------|
-| * | 由前端构建工具生成的资源文件 |
+| * | 由前端构建工具生成的资源文件；本次新增 bundle 带有 L3 生成产物声明 |
 
 ## Exports
 
 - 作为 `/ui/` 资源子路径被浏览器按需加载。
+- 当前 hash bundle 与 `internal/ui/static/index.html` 成对发布；starting UI 变更后由 `make ui-build` 更新。
 
 ## Dependencies
 

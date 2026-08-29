@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/README.md
 
@@ -70,6 +70,7 @@ function buildSourceSummary(rows) {
         host: task.source?.host || "",
         port: task.source?.port || 0,
         task_count: 0,
+        starting: 0,
         running: 0,
         normal: 0,
         delayed: 0,
@@ -78,6 +79,7 @@ function buildSourceSummary(rows) {
     }
     const source = grouped.get(key);
     source.task_count += 1;
+    if (task.state === "STARTING") source.starting += 1;
     if (task.state === "RUNNING") source.running += 1;
     if (replication.status === "NORMAL") source.normal += 1;
     if (replication.status === "DELAYED") source.delayed += 1;
@@ -89,6 +91,7 @@ function buildSourceSummary(rows) {
 function buildSummary(rows) {
   return {
     total: rows.length,
+    starting: rows.filter((row) => row.task?.state === "STARTING").length,
     running: rows.filter((row) => row.task?.state === "RUNNING").length,
     retry_backoff: rows.filter((row) => row.task?.state === "RETRY_BACKOFF").length,
     stopped: rows.filter((row) => row.task?.state === "STOPPED").length,
