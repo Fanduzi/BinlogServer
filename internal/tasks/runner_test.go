@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
-// pos: core domain orchestration layer governing backup task lifecycle and policies
+// input: task commands/events, retryable/permanent runner callbacks, store/lease/uploader dependencies
+// output: runner invocation, retry, readiness, stop, and permanent-failure assertions
+// pos: public Scheduler seam tests for runner-driven task lifecycle behavior
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -31,6 +31,25 @@ type failOnceRunner struct {
 	mu              sync.Mutex
 	calls           int
 	secondRunNotify chan struct{}
+}
+
+type permanentFailureRunner struct {
+	mu    sync.Mutex
+	calls int
+}
+
+// Run returns an unrecoverable source error.
+func (r *permanentFailureRunner) Run(context.Context, Task) error {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	return NewPermanentError(CodeSourceAccessDenied, "denied")
+}
+
+func (r *permanentFailureRunner) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 // Run 实现对应功能逻辑。
@@ -249,6 +268,64 @@ func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 
 	if err := s.StopTask(task.ID); err != nil {
 		t.Fatalf("StopTask returned error: %v", err)
+	}
+}
+
+// TestScheduler_PermanentRunnerErrorTransitionsToFailed verifies that permanent
+// runner errors stop the retry loop and retain the operator-facing reason.
+func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
+	runner := &permanentFailureRunner{}
+	s := NewScheduler(WithRunner(runner))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateFailed {
+			if got.LastError != "SOURCE_ACCESS_DENIED: denied" {
+				t.Fatalf("expected permanent error detail, got %q", got.LastError)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected state %s, got %s", StateFailed, got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	events, err := s.ListEvents(task.ID, 0)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	var runnerErrorIndex, failedIndex = -1, -1
+	for i, event := range events {
+		switch event.Type {
+		case "TASK_RUNNER_ERROR":
+			runnerErrorIndex = i
+		case "TASK_FAILED":
+			failedIndex = i
+		case "TASK_RETRY_BACKOFF":
+			t.Fatal("permanent runner error must not enter retry backoff")
+		}
+	}
+	if runnerErrorIndex < 0 || failedIndex != runnerErrorIndex+1 {
+		t.Fatalf("expected TASK_RUNNER_ERROR immediately followed by TASK_FAILED, got %#v", events)
+	}
+	if calls := runner.callCount(); calls != 1 {
+		t.Fatalf("expected runner called once, got %d", calls)
 	}
 }
 

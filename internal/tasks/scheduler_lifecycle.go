@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, permanent/retryable errors, cancellation signals
-// output: guarded task state transitions across STARTING/RUNNING/RETRY/FAILED/STOPPING lifecycle
-// pos: scheduler execution lifecycle orchestration excluding lease-renew loop details
+// output: guarded start/stop, runner retry, and cancellation orchestration
+// pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -52,15 +52,7 @@ func (s *Scheduler) StartTask(id string) error {
 			s.mu.Unlock()
 			return ErrRunnerNotConfigured
 		}
-		task.State = StateStarting
-		task.LastError = ""
-		task.OwnerWorkerID = ""
-		task.Epoch = 0
-		task.RunID = ""
-		task.UpdatedAt = time.Now()
-		s.tasks[id] = task
-		s.appendEventLocked(id, "TASK_START_DISPATCHED", "task start dispatched to worker", "")
-		if err := s.persistTaskLocked(task); err != nil {
+		if err := s.markStartDispatchedLocked(task); err != nil {
 			s.mu.Unlock()
 			return err
 		}
@@ -90,13 +82,8 @@ func (s *Scheduler) StartTask(id string) error {
 		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
 	}
 
-	task.State = StateStarting
-	task.LastError = ""
-	task.UpdatedAt = time.Now()
 	// 注意：这里仅表示“已发起启动流程”，不是“runner 已 ready”。
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_STARTED", "task started", "")
-	if err := s.persistTaskLocked(task); err != nil {
+	if err := s.markStartingLocked(task); err != nil {
 		s.mu.Unlock()
 		return err
 	}
@@ -199,15 +186,7 @@ func (s *Scheduler) MarkRetryableError(id, msg string) error {
 		return fmt.Errorf("cannot mark retryable error from state %s", task.State)
 	}
 
-	task.State = StateRetryBackoff
-	task.LastError = msg
-	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_RETRY_BACKOFF", "task entered retry backoff", msg)
-	if err := s.persistTaskLocked(task); err != nil {
-		return err
-	}
-	return nil
+	return s.markRetryBackoffLocked(task, msg)
 }
 
 // StopTask 请求停止任务（两阶段：STOPPING -> STOPPED）。
@@ -230,15 +209,11 @@ func (s *Scheduler) StopTask(id string) error {
 		delete(s.cancels, id)
 	}
 
-	task.State = StateStopping
-	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
 	// 常见误解：
 	// “调用 StopTask 后应立刻看到 STOPPED”并不成立。这里先写 STOPPING，
 	// 只有 run goroutine 真正退出后才会转为 STOPPED，确保状态语义等于“执行已结束”。
 	// 两阶段停止：先对外可见 STOPPING，再等待 run goroutine defer 收敛到 STOPPED。
-	s.appendEventLocked(id, "TASK_STOPPING", "task stopping", "")
-	if err := s.persistTaskLocked(task); err != nil {
+	if err := s.markStoppingLocked(task); err != nil {
 		s.mu.Unlock()
 		return err
 	}
@@ -269,7 +244,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		// 收到 stop 请求后，直到执行 goroutine 真退出才收敛到 STOPPED。
 		// 这样 API 层的 STOPPED 表示“执行路径已结束”，而不是“仅发出停止请求”。
 		if currentTask, ok := s.tasks[id]; ok && currentTask.State == StateStopping {
-			_ = s.markStoppedLocked(id)
+			logTransitionPersistError(id, StateStopped, s.markStoppedLocked(id))
 			if s.leaseManager != nil && currentTask.OwnerWorkerID != "" && currentTask.Epoch > 0 {
 				releaseOwner = currentTask.OwnerWorkerID
 				releaseEpoch = currentTask.Epoch
@@ -314,17 +289,12 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		zap.L().Error("runner error", zap.String("task_id", id), zap.Error(err))
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
 		if IsPermanent(err) {
-			_ = s.markFailedLocked(id, errMsg)
+			logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
 			s.mu.Unlock()
 			return
 		}
 
-		current.State = StateRetryBackoff
-		current.LastError = errMsg
-		current.UpdatedAt = time.Now()
-		s.tasks[id] = current
-		s.appendEventLocked(id, "TASK_RETRY_BACKOFF", "task entered retry backoff", errMsg)
-		_ = s.persistTaskLocked(current)
+		logTransitionPersistError(id, StateRetryBackoff, s.markRetryBackoffLocked(current, errMsg))
 		s.mu.Unlock()
 
 		// Step 2: 指数退避等待，避免瞬时故障导致热重试风暴。
@@ -350,12 +320,8 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 		// Step 3: 重试前先回到 STARTING，等待下一轮 runner ready 回调。
-		current.State = StateStarting
-		current.UpdatedAt = time.Now()
-		s.tasks[id] = current
 		// 重试前先回到 STARTING，等 runner onReady 后再切 RUNNING。
-		s.appendEventLocked(id, "TASK_RETRYING", "retrying runner", "")
-		_ = s.persistTaskLocked(current)
+		logTransitionPersistError(id, StateStarting, s.markRetryingLocked(&current))
 		task = current
 		s.mu.Unlock()
 	}
@@ -368,23 +334,7 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		current, ok := s.tasks[id]
-		if !ok {
-			return
-		}
-		if current.State == StateStopped || current.State == StateStopping {
-			return
-		}
-		if current.State == StateRunning {
-			return
-		}
-
-		current.State = StateRunning
-		current.LastError = ""
-		current.UpdatedAt = time.Now()
-		s.tasks[id] = current
-		s.appendEventLocked(id, "TASK_RUNNING", "runner is running", "")
-		_ = s.persistTaskLocked(current)
+		logTransitionPersistError(id, StateRunning, s.markRunnerReadyLocked(id))
 	}
 
 	if n, ok := s.runner.(runnerWithNotify); ok {
@@ -396,76 +346,6 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
 	// 该路径可能出现“短暂 RUNNING 后立即失败”；失败会在 runTask 的错误分支回收状态。
 	onReady()
 	return s.runner.Run(ctx, task)
-}
-
-// renewLeaseLoop 在 cluster 模式下周期续租，并处理降级/失租停机。
-
-func (s *Scheduler) failSafeStopLocked(id, eventType, message string) {
-	task, ok := s.tasks[id]
-	if !ok {
-		return
-	}
-	if task.State == StateStopping || task.State == StateStopped {
-		return
-	}
-	task.State = StateStopping
-	task.LastError = message
-	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, eventType, message, "")
-	_ = s.persistTaskLocked(task)
-	if cancel, ok := s.cancels[id]; ok {
-		// 这里只发取消信号；最终 STOPPED 由 runTask defer 统一收敛。
-		cancel()
-		delete(s.cancels, id)
-	}
-}
-
-// markFailedLocked 将任务收敛到 FAILED，用于不可恢复的源库/配置错误。
-// StartTask 允许从 FAILED 再次启动，方便值班改完密码/配置后重试。
-func (s *Scheduler) markFailedLocked(id, message string) error {
-	task, ok := s.tasks[id]
-	if !ok {
-		return nil
-	}
-	if task.State == StateFailed {
-		task.LastError = message
-		s.tasks[id] = task
-		return s.persistTaskLocked(task)
-	}
-	task.State = StateFailed
-	task.LastError = message
-	task.OwnerWorkerID = ""
-	task.Epoch = 0
-	task.RunID = ""
-	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_FAILED", "task failed", message)
-	if cancel, ok := s.cancels[id]; ok {
-		cancel()
-		delete(s.cancels, id)
-	}
-	return s.persistTaskLocked(task)
-}
-
-// markStoppedLocked 将任务收敛到最终 STOPPED 并清理运行时 ownership 字段。
-func (s *Scheduler) markStoppedLocked(id string) error {
-	task, ok := s.tasks[id]
-	if !ok {
-		return nil
-	}
-	if task.State == StateStopped {
-		return nil
-	}
-	task.State = StateStopped
-	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。
-	task.OwnerWorkerID = ""
-	task.Epoch = 0
-	task.RunID = ""
-	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_STOPPED", "task stopped", "")
-	return s.persistTaskLocked(task)
 }
 
 // isClosed 判断 channel 是否已关闭（nil 视为已关闭）。
