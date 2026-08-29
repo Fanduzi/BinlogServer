@@ -1,12 +1,14 @@
 // Package replication provides module-level functionality for replication.
-// input: source connection results, flavor, log_bin and identity variables
-// output: stable source identity strings and permanent source configuration errors
-// pos: flavor-aware source probe used before binlog dump starts
+// input: source connection results, network failures, flavor, log_bin and identity variables
+// output: stable source identity strings and typed permanent/retryable source errors
+// pos: flavor-aware source probe and operator-error classification boundary
 // note: if this file changes, update this header and module README.md.
 package replication
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	"binlog_server/internal/tasks"
@@ -28,6 +30,10 @@ func classifySourceError(err error) error {
 	}
 	if isAccessDeniedMessage(err.Error()) {
 		return tasks.NewPermanentError(tasks.CodeSourceAccessDenied, err.Error())
+	}
+	var networkErr *net.OpError
+	if errors.As(err, &networkErr) {
+		return tasks.NewRetryableSourceError(tasks.CodeSourceUnreachable, err.Error())
 	}
 	return err
 }
