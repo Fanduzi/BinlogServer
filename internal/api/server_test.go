@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
-// input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses and status codes for task/cluster operations
+// input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
+// output: REST API responses and regression coverage for task/cluster operations and source lookup
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -1854,6 +1854,82 @@ func TestAPI_SourceLookup(t *testing.T) {
 	}
 	if int(notFoundBody["count"].(float64)) != 0 {
 		t.Fatalf("expected count=0, got %v", notFoundBody["count"])
+	}
+}
+
+func TestAPI_SourceLookupUsesLoopbackEndpointIdentity(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	sources := []struct {
+		name string
+		host string
+		port uint16
+	}{
+		{name: "localhost", host: "localhost", port: 3306},
+		{name: "ipv4 loopback", host: "127.255.255.255", port: 3306},
+		{name: "ipv6 loopback", host: "::1", port: 3306},
+		{name: "loopback different port", host: "127.0.0.3", port: 3307},
+		{name: "non-loopback primary", host: "db-primary.example", port: 3306},
+		{name: "non-loopback secondary", host: "db-secondary.example", port: 3306},
+		{name: "non-loopback bracketed ipv6", host: "[2001:db8::1]", port: 3306},
+	}
+	for _, source := range sources {
+		task, err := scheduler.CreateTask(source.name, strings.ReplaceAll(source.name, " ", "-"))
+		if err != nil {
+			t.Fatalf("CreateTask %q returned error: %v", source.name, err)
+		}
+		if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{Host: source.host, Port: source.port, User: "repl"}); err != nil {
+			t.Fatalf("ConfigureSource %q returned error: %v", source.name, err)
+		}
+	}
+
+	lookup := func(t *testing.T, host string, port uint16) (bool, int, string) {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/sources/lookup?host=%s&port=%d", host, port), nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("lookup %s:%d returned %d body=%s", host, port, resp.Code, resp.Body.String())
+		}
+		var body struct {
+			Exists  bool     `json:"exists"`
+			Count   int      `json:"count"`
+			TaskIDs []string `json:"task_ids"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode lookup %s:%d response: %v", host, port, err)
+		}
+		return body.Exists, body.Count, strings.Join(body.TaskIDs, ",")
+	}
+
+	cases := []struct {
+		name     string
+		host     string
+		port     uint16
+		wantIDs  string
+		wantSize int
+	}{
+		{name: "ipv4 loopback identity", host: "127.0.0.1", port: 3306, wantIDs: "1,2,3", wantSize: 3},
+		{name: "uppercase localhost", host: "LOCALHOST", port: 3306, wantIDs: "1,2,3", wantSize: 3},
+		{name: "trailing dot localhost", host: "localhost.", port: 3306, wantIDs: "1,2,3", wantSize: 3},
+		{name: "bracketed ipv6 identity", host: "[::1]", port: 3306, wantIDs: "1,2,3", wantSize: 3},
+		{name: "different port succeeds", host: "localhost", port: 3307, wantIDs: "4", wantSize: 1},
+		{name: "port mismatch", host: "localhost", port: 3308, wantIDs: "", wantSize: 0},
+		{name: "non-loopback exact host", host: "db-primary.example", port: 3306, wantIDs: "5", wantSize: 1},
+		{name: "non-loopback case remains exact", host: "DB-PRIMARY.EXAMPLE", port: 3306, wantIDs: "", wantSize: 0},
+		{name: "non-loopback trailing dot remains exact", host: "db-primary.example.", port: 3306, wantIDs: "", wantSize: 0},
+		{name: "non-loopback different host", host: "db-unknown.example", port: 3306, wantIDs: "", wantSize: 0},
+		{name: "non-loopback bracketed ipv6 exact", host: "[2001:db8::1]", port: 3306, wantIDs: "7", wantSize: 1},
+		{name: "non-loopback ipv6 brackets remain exact", host: "2001:db8::1", port: 3306, wantIDs: "", wantSize: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exists, count, taskIDs := lookup(t, tc.host, tc.port)
+			if exists != (tc.wantSize > 0) || count != tc.wantSize || taskIDs != tc.wantIDs {
+				t.Fatalf("lookup %s:%d got exists=%v count=%d task_ids=%q, want exists=%v count=%d task_ids=%q", tc.host, tc.port, exists, count, taskIDs, tc.wantSize > 0, tc.wantSize, tc.wantIDs)
+			}
+		})
 	}
 }
 

@@ -89,7 +89,7 @@ binlog-server_0.4.2_linux_amd64/
 - GitHub Releases 上对应平台的 tarball
 - 一台已开启 `log_bin` 的 MySQL 或 MariaDB
 
-> **metadata 必须隔离：** 配置 `meta_dsn` 时，它必须使用独立 MySQL 实例，且绝不能加入 binlog 备份任务集。服务会拒绝 TCP `host:port` 完全相同的 source；别名和代理场景仍需由运维保证实例隔离。
+> **metadata 必须隔离：** 配置 `meta_dsn` 时，它必须使用独立 MySQL 实例，且绝不能加入 binlog 备份任务集。服务会拒绝 TCP `host:port` 完全相同的 source，并将 `localhost` 与显式 loopback literal（`127/8`、`::1`，包括带括号的 IPv6）视为同一端点类别；其他别名和代理场景仍需由运维保证实例隔离。
 
 ### 1. 下载、校验、解压、运行
 

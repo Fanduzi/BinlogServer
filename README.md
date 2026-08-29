@@ -90,7 +90,7 @@ This is the shortest path for release operators. You do not need Go installed.
 - A release tarball for your platform from GitHub Releases
 - A reachable MySQL or MariaDB instance with `log_bin` enabled
 
-> **Metadata isolation is mandatory:** when `meta_dsn` is configured, its MySQL instance must be separate from every replication source and must never be added to the backup task set. The server rejects an exact matching TCP `host:port`; aliases and proxies still require operator isolation.
+> **Metadata isolation is mandatory:** when `meta_dsn` is configured, its MySQL instance must be separate from every replication source and must never be added to the backup task set. The server rejects an exact matching TCP `host:port` and treats `localhost` plus explicit loopback literals (`127/8` and `::1`, including bracketed IPv6) as the same endpoint class; other aliases and proxies still require operator isolation.
 
 ### 1. Download, verify, extract, run
 

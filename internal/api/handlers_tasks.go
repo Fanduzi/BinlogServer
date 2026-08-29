@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
-// input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API JSON responses including structured 400 bodies for create validation
+// input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
+// output: REST API JSON responses including loopback-equivalent source lookup and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -150,7 +150,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 // @Summary Lookup tasks by source host and port
 // @Tags Dashboard
 // @Produce json
-// @Param host query string true "MySQL source host (required)"
+// @Param host query string true "MySQL source host (required); localhost and explicit loopback literals (127/8, ::1, including bracketed IPv6) share one identity, other hosts match exact spelling"
 // @Param port query int true "MySQL source port (required, 1-65535)"
 // @Success 200 {object} sourceLookupResponse
 // @Failure 400 {string} string
@@ -184,7 +184,9 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 		TaskIDs: []string{},
 	}
 	for _, task := range s.tasks.ListTasks() {
-		if task.Source.Host != host || task.Source.Port != port {
+		sameHost := task.Source.Host == host ||
+			(tasks.IsLoopbackHost(task.Source.Host) && tasks.IsLoopbackHost(host))
+		if !sameHost || task.Source.Port != port {
 			continue
 		}
 		resp.TaskIDs = append(resp.TaskIDs, task.ID)

@@ -438,7 +438,9 @@ paths:
   /api/sources/lookup:
     get:
       parameters:
-      - description: MySQL source host
+      - description: MySQL source host (required); localhost and explicit loopback
+          literals (127/8, ::1, including bracketed IPv6) share one identity, other
+          hosts match exact spelling
         in: query
         name: host
         required: true
