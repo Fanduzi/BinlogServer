@@ -4,6 +4,7 @@
 - `scheduler.go`: 调度器核心类型、选项注入与通用辅助函数。
 - `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec）。
 - `scheduler_lifecycle.go`: 启停、运行协程、重试退避与不可恢复 FAILED。
+- `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 永久错误类型（1045 / log_bin off / 身份不可用）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
 - `scheduler_observability.go`: 复制进度、checkpoint、事件/文件/运行历史查询。
@@ -23,6 +24,7 @@
 - `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/start 时拒绝同端点 source。
 - Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
+- runner/lease 的自动转换保持 best-effort 持久化语义，并统一记录持久化失败日志。
 
 ## Dependencies
 - Upstream: `internal/api`, `internal/app`。
