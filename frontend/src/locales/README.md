@@ -7,8 +7,8 @@
 | File | Responsibility |
 |------|---------------|
 | `index.js` | 创建 i18n 实例并管理当前语言 |
-| `zh-CN.json` | 中文文案，包括启动中与 source starting 计数文本 |
-| `en.json` | 英文文案，包括 Starting Tasks 与 source Starting 文本 |
+| `zh-CN.json` | 中文文案，包括启动中、租约降级、文件重建与 source starting 计数文本 |
+| `en.json` | 英文文案，包括 Starting Tasks、Lease Degraded、Rebuilding File 与 source Starting 文本 |
 
 ## Interfaces
 

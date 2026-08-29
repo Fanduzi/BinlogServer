@@ -1,6 +1,6 @@
 <!--
-input: dashboard/task API data, local filter state, auth-required browser event
-output: operator-focused console UI with task list, status KPIs, detail drawer, forms, and settings
+input: dashboard/task API data with server pagination metadata, local filter state, auth-required browser event
+output: operator-focused console UI with server-paged task list, status KPIs, detail drawer, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -35,7 +35,7 @@ note: if this file changes, update this header and frontend/README.md.
         v-model="menuCollapsed"
         :active-view="activeView"
         :total-count="dashboard.summary.total"
-        :filtered-tasks-count="filteredTasks.length"
+        :filtered-tasks-count="serverTotal"
         :sources-count="dashboard.sources.length"
         :worker-count="cluster.overview.worker_count"
         :alert-count="dashboard.summary.abnormal + dashboard.summary.failed + dashboard.summary.delayed"
@@ -228,8 +228,8 @@ note: if this file changes, update this header and frontend/README.md.
                 <span class="panel-hint">
                   {{
                     activeView === "alerts"
-                      ? $t('filter.alertFilteredCount', { filtered: filteredTasks.length, total: dashboard.tasks.length })
-                      : $t('filter.filteredCount', { filtered: filteredTasks.length, total: dashboard.tasks.length })
+                      ? $t('filter.alertFilteredCount', { filtered: filteredTasks.length, total: serverTotal })
+                      : $t('filter.filteredCount', { filtered: filteredTasks.length, total: serverTotal })
                   }}
                 </span>
                 <el-button size="small" @click="openBatchCreate">
@@ -316,7 +316,7 @@ note: if this file changes, update this header and frontend/README.md.
             <el-pagination
               background
               layout="total, sizes, prev, pager, next"
-              :total="filteredTasks.length"
+              :total="serverTotal"
               :page-size="pager.pageSize"
               :current-page="pager.page"
               :page-sizes="[20, 50, 100]"
@@ -495,9 +495,9 @@ const { sourceQuery, lookup, clearLookupState } = useSourceLookup();
 const {
   uiFilter, pager, activeQuickFilter,
   filteredTasks, pagedTasks,
+  serverTotal, buildPaginationParams,
   taskStates, replicationStatuses,
   stateLabel, replicationStatusLabel, sourceLabel,
-  debouncedKeyword, debouncedSourceKeyword,
   resetUiFilter,
 } = useTaskFilter(dashboard);
 
@@ -543,29 +543,6 @@ const workerRows = computed(() => {
 const detailRunsLimited = computed(() => detailRuns.value.slice(0, runHistoryLimit.value));
 
 watch(
-  () => [
-    debouncedKeyword.value,
-    debouncedSourceKeyword.value,
-    uiFilter.taskState,
-    uiFilter.replicationStatus,
-    uiFilter.sortBy,
-    uiFilter.onlyAlert,
-    dashboard.tasks.length,
-  ],
-  () => {
-    pager.page = 1;
-  },
-);
-
-watch(
-  () => [filteredTasks.value.length, pager.pageSize],
-  () => {
-    const maxPage = Math.max(1, Math.ceil(filteredTasks.value.length / pager.pageSize));
-    if (pager.page > maxPage) pager.page = maxPage;
-  },
-);
-
-watch(
   () => batchForm.lines,
   () => {
     if (!batchVisible.value || !batchPreview.ready) return;
@@ -581,13 +558,24 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => [uiFilter.taskState, pager.page, pager.pageSize],
+  ([state, page, pageSize], previous) => {
+    if (previous && (state !== previous[0] || pageSize !== previous[2]) && page !== 1) {
+      pager.page = 1;
+      return;
+    }
+    void refreshAll();
+  },
+);
+
 refreshAll();
 
 async function refreshAll() {
   try {
     loading.value = true;
     const [dashboardData, overviewData, workersData] = await Promise.all([
-      getDashboard(buildSourceFilter(sourceQuery)),
+      getDashboard(buildDashboardParams()),
       getClusterOverview(),
       listWorkers(),
     ]);
@@ -599,6 +587,10 @@ async function refreshAll() {
   } finally {
     loading.value = false;
   }
+}
+
+function buildDashboardParams() {
+  return { ...buildSourceFilter(sourceQuery), ...buildPaginationParams() };
 }
 
 
@@ -616,7 +608,7 @@ async function prefetchTaskLeasesForPage() {
 }
 
 async function applySourceFilter() {
-  const params = buildSourceFilter();
+  const params = buildSourceFilter(sourceQuery);
   if (!params.host || !params.port) {
     ElMessage.error(t("msg.hostPortRequired"));
     return;
@@ -624,9 +616,10 @@ async function applySourceFilter() {
 
   try {
     loading.value = true;
+    pager.page = 1;
     const [lookupResp, dashboardResp, overviewResp, workersResp] = await Promise.all([
       lookupSource(params),
-      getDashboard(params),
+      getDashboard({ ...params, ...buildPaginationParams() }),
       getClusterOverview(),
       listWorkers(),
     ]);
@@ -757,6 +750,7 @@ function onPageChange(page) {
 }
 
 function onPageSizeChange(size) {
+  pager.page = 1;
   pager.pageSize = size;
 }
 

@@ -1,14 +1,40 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including server pagination, independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
 import { cloneMockValue, getMockScenario } from "./mock-data.js";
 
 const DEFAULT_TIMESTAMP = "2026-03-25T08:00:00Z";
+const DEFAULT_TASK_LIMIT = 100;
+const MAX_TASK_LIMIT = 500;
+const TASK_STATES = new Set([
+  "CREATED",
+  "STARTING",
+  "RUNNING",
+  "LEASE_DEGRADED",
+  "REBUILDING_FILE",
+  "RETRY_BACKOFF",
+  "FAILED",
+  "STOPPING",
+  "STOPPED",
+]);
+
+function parseInteger(value) {
+  const raw = String(value ?? "");
+  if (!/^-?\d+$/.test(raw)) return null;
+  const number = Number(raw);
+  return Number.isSafeInteger(number) ? number : null;
+}
 
 function deepClone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function sanitizeTask(task) {
+  const output = deepClone(task);
+  if (output.source) output.source.password = "";
+  return output;
 }
 
 function normalizeScenarioName(name) {
@@ -222,14 +248,68 @@ function createInitialState(scenarioName) {
   };
 }
 
-function currentDashboard(state) {
-  return {
+function parseTaskQuery(query) {
+  const result = {
+    host: String(query.get("host") || "").trim(),
+    port: null,
+    state: null,
+    limit: DEFAULT_TASK_LIMIT,
+    offset: 0,
+  };
+  if (query.has("port")) {
+    const port = parseInteger(query.get("port"));
+    if (port === null || port < 1 || port > 65535) return { error: "invalid port" };
+    result.port = port;
+  }
+  if (query.has("state")) {
+    const state = String(query.get("state") || "").trim();
+    if (!TASK_STATES.has(state)) return { error: "invalid state" };
+    result.state = state;
+  }
+  if (query.has("limit")) {
+    const limit = parseInteger(query.get("limit"));
+    if (limit === null || limit <= 0) return { error: "invalid limit" };
+    result.limit = Math.min(limit, MAX_TASK_LIMIT);
+  }
+  if (query.has("offset")) {
+    const offset = parseInteger(query.get("offset"));
+    if (offset === null || offset < 0) return { error: "invalid offset" };
+    result.offset = offset;
+  }
+  return result;
+}
+
+function filteredTaskRows(state, taskQuery) {
+  return state.tasks
+    .filter((row) => {
+      const source = row.task?.source || {};
+      return (
+        (!taskQuery.host || source.host === taskQuery.host) &&
+        (taskQuery.port === null || Number(source.port) === taskQuery.port) &&
+        (!taskQuery.state || row.task?.state === taskQuery.state)
+      );
+    })
+    .sort((a, b) => String(a.task?.id || "").localeCompare(String(b.task?.id || "")));
+}
+
+function currentDashboard(state, query) {
+  const taskQuery = parseTaskQuery(query);
+  if (taskQuery.error) return ok({ error: taskQuery.error }, 400);
+  const rows = filteredTaskRows(state, taskQuery);
+  const end = Math.min(rows.length, taskQuery.offset + taskQuery.limit);
+  return ok({
     generated_at: DEFAULT_TIMESTAMP,
     threshold_seconds: 30,
-    summary: buildSummary(state.tasks),
-    tasks: deepClone(state.tasks),
-    sources: buildSourceSummary(state.tasks),
-  };
+    total: rows.length,
+    limit: taskQuery.limit,
+    offset: taskQuery.offset,
+    summary: buildSummary(rows),
+    tasks: deepClone(rows.slice(taskQuery.offset, end)).map((row) => ({
+      ...row,
+      task: sanitizeTask(row.task),
+    })),
+    sources: buildSourceSummary(rows),
+  });
 }
 
 function currentWorkers(state) {
@@ -402,20 +482,7 @@ export function handleMockRequest(input) {
   }
 
   if (path === "/api/dashboard" && method === "GET") {
-    const response = currentDashboard(state);
-    const host = String(query.get("host") || "").trim();
-    const port = Number(query.get("port") || 0);
-    if (!host || !port) return ok(response);
-    const filteredRows = response.tasks.filter((row) => {
-      const source = row.task?.source || {};
-      return source.host === host && Number(source.port) === port;
-    });
-    return ok({
-      ...response,
-      summary: buildSummary(filteredRows),
-      tasks: filteredRows,
-      sources: buildSourceSummary(filteredRows),
-    });
+    return currentDashboard(state, query);
   }
 
   if (path === "/api/cluster/overview" && method === "GET") {
@@ -431,23 +498,32 @@ export function handleMockRequest(input) {
   }
 
   if (path === "/api/tasks" && method === "GET") {
-    return ok(deepClone(state.tasks));
+    const taskQuery = parseTaskQuery(query);
+    if (taskQuery.error) return ok({ error: taskQuery.error }, 400);
+    const rows = filteredTaskRows(state, taskQuery);
+    const end = Math.min(rows.length, taskQuery.offset + taskQuery.limit);
+    return ok({
+      items: rows.slice(taskQuery.offset, end).map((row) => sanitizeTask(row.task)),
+      total: rows.length,
+      limit: taskQuery.limit,
+      offset: taskQuery.offset,
+    });
   }
 
   if (path === "/api/tasks" && method === "POST") {
     const created = createTaskRowFromPayload(state, cloneMockValue(input.body || {}));
-    return ok(created, 201);
+    return ok(sanitizeTask(created), 201);
   }
 
   const taskMatch = path.match(/^\/api\/tasks\/([^/]+)$/);
   if (taskMatch && method === "GET") {
     const id = taskMatch[1];
-    return ok(deepClone(state.detailsByID[id] || findTaskRow(state, id)?.task || {}));
+    return ok(sanitizeTask(state.detailsByID[id] || findTaskRow(state, id)?.task || {}));
   }
   if (taskMatch && method === "PUT") {
     const id = taskMatch[1];
     const updated = updateTaskRow(state, id, cloneMockValue(input.body || {}));
-    return updated ? ok(updated) : ok({ error: "task not found" }, 404);
+    return updated ? ok(sanitizeTask(updated)) : ok({ error: "task not found" }, 404);
   }
   if (taskMatch && method === "DELETE") {
     const id = taskMatch[1];

@@ -8,6 +8,7 @@ import { mockScenarios } from '../../../src/mocks/mock-data.js'
 export type MockScenario =
   | 'empty'
   | 'healthy'
+  | 'pagination'
   | 'starting'
   | 'anomaly'
   | 'upload-failed'

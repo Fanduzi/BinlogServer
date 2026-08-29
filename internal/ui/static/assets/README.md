@@ -11,7 +11,7 @@
 ## Exports
 
 - 作为 `/ui/` 资源子路径被浏览器按需加载。
-- 当前 hash bundle 与 `internal/ui/static/index.html` 成对发布；starting UI 变更后由 `make ui-build` 更新。
+- 当前 hash bundle 与 `internal/ui/static/index.html` 成对发布；starting 或服务端分页 UI 变更后由 `make ui-build` 更新。
 
 ## Dependencies
 

@@ -1,5 +1,12 @@
 basePath: /
 definitions:
+  api.apiErrorBody:
+    properties:
+      code:
+        type: string
+      error:
+        type: string
+    type: object
   api.clusterOverview:
     properties:
       leased_task_count:
@@ -40,6 +47,10 @@ definitions:
     properties:
       generated_at:
         type: string
+      limit:
+        type: integer
+      offset:
+        type: integer
       sources:
         items:
           $ref: '#/definitions/api.sourceOverview'
@@ -51,6 +62,8 @@ definitions:
           $ref: '#/definitions/api.dashboardTaskItem'
         type: array
       threshold_seconds:
+        type: integer
+      total:
         type: integer
     type: object
   api.dashboardTaskItem:
@@ -127,6 +140,19 @@ definitions:
         type: string
       updated_at:
         type: string
+    type: object
+  api.taskListResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/tasks.Task'
+        type: array
+      limit:
+        type: integer
+      offset:
+        type: integer
+      total:
+        type: integer
     type: object
   api.taskReplicationResponse:
     properties:
@@ -265,6 +291,7 @@ definitions:
       host:
         type: string
       password:
+        description: 仅用于输入，API 响应前会清空
         type: string
       port:
         type: integer
@@ -421,6 +448,18 @@ paths:
         in: query
         name: port
         type: integer
+      - description: Filter by task state
+        in: query
+        name: state
+        type: string
+      - description: Page size (default 100, maximum 500)
+        in: query
+        name: limit
+        type: integer
+      - description: Zero-based page offset (default 0)
+        in: query
+        name: offset
+        type: integer
       produces:
       - application/json
       responses:
@@ -439,6 +478,20 @@ paths:
       summary: Get task dashboard with replication delay overview
       tags:
       - Dashboard
+  /api/health:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Service health check (JSON)
+      tags:
+      - System
   /api/sources/lookup:
     get:
       parameters:
@@ -449,7 +502,7 @@ paths:
         name: host
         required: true
         type: string
-      - description: MySQL source port
+      - description: MySQL source port (required, 1-65535)
         in: query
         name: port
         required: true
@@ -503,37 +556,35 @@ paths:
       - Dashboard
   /api/tasks:
     get:
-      consumes:
-      - application/json
       parameters:
-      - description: Filter by source host (GET only)
+      - description: Filter by source host
         in: query
         name: host
         type: string
-      - description: Filter by source port (GET only)
+      - description: Filter by source port
         in: query
         name: port
         type: integer
-      - description: Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-],
-          source/start/storage 按字段规则校验)
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/api.createTaskRequest'
+      - description: Filter by task state (CREATED, STARTING, RUNNING, LEASE_DEGRADED,
+          REBUILDING_FILE, RETRY_BACKOFF, FAILED, STOPPING, STOPPED)
+        in: query
+        name: state
+        type: string
+      - description: Page size (default 100, maximum 500)
+        in: query
+        name: limit
+        type: integer
+      - description: Zero-based page offset (default 0)
+        in: query
+        name: offset
+        type: integer
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            items:
-              $ref: '#/definitions/tasks.Task'
-            type: array
-        "201":
-          description: Created
-          schema:
-            $ref: '#/definitions/tasks.Task'
+            $ref: '#/definitions/api.taskListResponse'
         "400":
           description: Bad Request
           schema:
@@ -542,21 +593,13 @@ paths:
           description: Method Not Allowed
           schema:
             type: string
-      summary: Create or list tasks
+      summary: List tasks
       tags:
       - Tasks
     post:
       consumes:
       - application/json
       parameters:
-      - description: Filter by source host (GET only)
-        in: query
-        name: host
-        type: string
-      - description: Filter by source port (GET only)
-        in: query
-        name: port
-        type: integer
       - description: Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-],
           source/start/storage 按字段规则校验)
         in: body
@@ -567,12 +610,6 @@ paths:
       produces:
       - application/json
       responses:
-        "200":
-          description: OK
-          schema:
-            items:
-              $ref: '#/definitions/tasks.Task'
-            type: array
         "201":
           description: Created
           schema:
@@ -580,7 +617,7 @@ paths:
         "400":
           description: Bad Request
           schema:
-            type: string
+            $ref: '#/definitions/api.apiErrorBody'
         "405":
           description: Method Not Allowed
           schema:
@@ -777,6 +814,7 @@ paths:
         description: Retry upload limit
         in: query
         maximum: 1000
+        minimum: 1
         name: limit
         type: integer
       produces:
@@ -949,6 +987,7 @@ paths:
         description: Failure reason list limit
         in: query
         maximum: 200
+        minimum: 1
         name: limit
         type: integer
       produces:

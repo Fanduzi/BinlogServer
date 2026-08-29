@@ -29,10 +29,13 @@ test('missing starting counter resets to zero after a nonzero response', async (
     session.request({ method: 'GET', path: '/api/dashboard' }),
   ]
   delete dashboardResponses[1].body.summary.starting
+  delete dashboardResponses[1].body.total
+  delete dashboardResponses[1].body.limit
+  delete dashboardResponses[1].body.offset
   let dashboardCall = 0
 
   await registerMockRoutes(page, { scenario: 'starting' })
-  await page.route('**/api/dashboard', async (route) => {
+  await page.route('**/api/dashboard*', async (route) => {
     const response = dashboardResponses[Math.min(dashboardCall++, dashboardResponses.length - 1)]
     await route.fulfill({
       status: response.status,

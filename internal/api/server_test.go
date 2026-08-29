@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
+// output: REST/dashboard responses, task pagination/filter regression coverage, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -198,18 +198,20 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 			t.Fatalf("expected 200, got %d", finalListResp.Code)
 		}
 
-		var list []tasks.Task
+		var list struct {
+			Items []tasks.Task `json:"items"`
+		}
 		if err := json.Unmarshal(finalListResp.Body.Bytes(), &list); err != nil {
 			t.Fatalf("decode list response: %v", err)
 		}
-		if len(list) != 1 {
-			t.Fatalf("expected one task, got %d", len(list))
+		if len(list.Items) != 1 {
+			t.Fatalf("expected one task, got %d", len(list.Items))
 		}
-		if list[0].State == tasks.StateStopped {
+		if list.Items[0].State == tasks.StateStopped {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected final state %s, got %s", tasks.StateStopped, list[0].State)
+			t.Fatalf("expected final state %s, got %s", tasks.StateStopped, list.Items[0].State)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -2006,15 +2008,194 @@ func TestTaskAPI_ListTasksBySourceFilter(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
 	}
 
-	var list []tasks.Task
+	var list struct {
+		Items []tasks.Task `json:"items"`
+	}
 	if err := json.Unmarshal(resp.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("expected 1 task, got %d", len(list))
+	if len(list.Items) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(list.Items))
 	}
-	if list[0].Source.Host != "10.0.0.2" || list[0].Source.Port != 3307 {
-		t.Fatalf("unexpected source: %+v", list[0].Source)
+	if list.Items[0].Source.Host != "10.0.0.2" || list.Items[0].Source.Port != 3307 {
+		t.Fatalf("unexpected source: %+v", list.Items[0].Source)
+	}
+}
+
+// TestTaskAPI_TaskPaginationAndDashboardAggregation 验证服务端分页、过滤与 dashboard 全量聚合。
+func TestTaskAPI_TaskPaginationAndDashboardAggregation(t *testing.T) {
+	const totalTasks = 505
+	store := newFakeAPIRunHistoryStore()
+	failedTasks := 0
+	combinedTasks := 0
+	for i := 1; i <= totalTasks; i++ {
+		state := tasks.StateCreated
+		if i%2 == 0 {
+			state = tasks.StateFailed
+			failedTasks++
+		}
+		host := "db-a"
+		port := uint16(3306)
+		if i%3 == 0 {
+			host = "db-b"
+			port = 3307
+			if state == tasks.StateFailed {
+				combinedTasks++
+			}
+		}
+		id := strconv.Itoa(i)
+		store.tasks[id] = tasks.Task{
+			ID:         id,
+			Name:       "task-" + id,
+			ClusterKey: "cluster-" + id,
+			State:      state,
+			Source: tasks.SourceConfig{
+				Host:     host,
+				Port:     port,
+				User:     "repl",
+				Password: "secret",
+			},
+		}
+	}
+
+	scheduler := tasks.NewScheduler(tasks.WithStore(store))
+	if err := scheduler.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	handler := NewServer(scheduler)
+
+	type taskPage struct {
+		Items  []tasks.Task `json:"items"`
+		Total  int          `json:"total"`
+		Limit  int          `json:"limit"`
+		Offset int          `json:"offset"`
+	}
+	getTasks := func(path string) (taskPage, *httptest.ResponseRecorder) {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+		var body taskPage
+		if resp.Code == http.StatusOK {
+			if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %s response: %v; body=%s", path, err, resp.Body.String())
+			}
+		}
+		return body, resp
+	}
+
+	first, resp := getTasks("/api/tasks")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("default list returned %d body=%s", resp.Code, resp.Body.String())
+	}
+	if first.Total != totalTasks || first.Limit != 100 || first.Offset != 0 || len(first.Items) != 100 {
+		t.Fatalf("unexpected default page metadata/items: total=%d limit=%d offset=%d items=%d", first.Total, first.Limit, first.Offset, len(first.Items))
+	}
+	if first.Items[0].Source.Password != "" {
+		t.Fatalf("expected task password redacted, got %q", first.Items[0].Source.Password)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		path      string
+		wantLimit int
+		wantItems int
+	}{
+		{name: "limit one", path: "/api/tasks?limit=1", wantLimit: 1, wantItems: 1},
+		{name: "limit five hundred", path: "/api/tasks?limit=500", wantLimit: 500, wantItems: 500},
+		{name: "over maximum is capped", path: "/api/tasks?limit=1000", wantLimit: 500, wantItems: 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, resp := getTasks(tc.path)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("list returned %d body=%s", resp.Code, resp.Body.String())
+			}
+			if body.Total != totalTasks || body.Limit != tc.wantLimit || body.Offset != 0 || len(body.Items) != tc.wantItems {
+				t.Fatalf("unexpected page: total=%d limit=%d offset=%d items=%d", body.Total, body.Limit, body.Offset, len(body.Items))
+			}
+		})
+	}
+
+	offsetPage, resp := getTasks("/api/tasks?limit=1&offset=100")
+	if resp.Code != http.StatusOK || len(offsetPage.Items) != 1 || offsetPage.Total != totalTasks || offsetPage.Limit != 1 || offsetPage.Offset != 100 {
+		t.Fatalf("unexpected offset page: status=%d body=%s page=%+v", resp.Code, resp.Body.String(), offsetPage)
+	}
+	repeatedOffsetPage, resp := getTasks("/api/tasks?limit=1&offset=100")
+	if resp.Code != http.StatusOK || len(repeatedOffsetPage.Items) != 1 || repeatedOffsetPage.Items[0].ID != offsetPage.Items[0].ID {
+		t.Fatalf("offset page was not stable: first=%+v repeated=%+v status=%d", offsetPage, repeatedOffsetPage, resp.Code)
+	}
+
+	failedPage, resp := getTasks("/api/tasks?state=FAILED&limit=500")
+	if resp.Code != http.StatusOK || failedPage.Total != failedTasks || len(failedPage.Items) != failedTasks || failedPage.Limit != 500 {
+		t.Fatalf("unexpected state page: status=%d body=%s page=%+v", resp.Code, resp.Body.String(), failedPage)
+	}
+	for _, item := range failedPage.Items {
+		if item.State != tasks.StateFailed {
+			t.Fatalf("state filter returned %s task %s", item.State, item.ID)
+		}
+	}
+
+	combinedPage, resp := getTasks("/api/tasks?host=db-b&port=3307&state=FAILED&limit=500")
+	if resp.Code != http.StatusOK || combinedPage.Total != combinedTasks || len(combinedPage.Items) != combinedTasks {
+		t.Fatalf("unexpected combined filter page: status=%d body=%s page=%+v", resp.Code, resp.Body.String(), combinedPage)
+	}
+
+	emptyPage, resp := getTasks("/api/tasks?host=missing.example&limit=1")
+	if resp.Code != http.StatusOK || emptyPage.Total != 0 || emptyPage.Limit != 1 || emptyPage.Offset != 0 || emptyPage.Items == nil || len(emptyPage.Items) != 0 {
+		t.Fatalf("unexpected empty page: status=%d body=%s page=%+v", resp.Code, resp.Body.String(), emptyPage)
+	}
+
+	for _, path := range []string{
+		"/api/tasks?limit=0",
+		"/api/tasks?limit=-1",
+		"/api/tasks?limit=abc",
+		"/api/tasks?offset=-1",
+		"/api/tasks?offset=abc",
+		"/api/tasks?state=UNKNOWN",
+		"/api/tasks?port=abc",
+		"/api/tasks?port=0",
+		"/api/tasks?port=65536",
+		"/api/tasks?port=",
+	} {
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+
+	var dashboard struct {
+		Total   int `json:"total"`
+		Limit   int `json:"limit"`
+		Offset  int `json:"offset"`
+		Summary struct {
+			Total    int `json:"total"`
+			Failed   int `json:"failed"`
+			Abnormal int `json:"abnormal"`
+		} `json:"summary"`
+		Tasks []struct {
+			Task        tasks.Task `json:"task"`
+			Replication struct {
+				Status string `json:"status"`
+			} `json:"replication"`
+		} `json:"tasks"`
+		Sources []struct {
+			TaskCount int `json:"task_count"`
+			Abnormal  int `json:"abnormal"`
+		} `json:"sources"`
+	}
+	dashboardResp := httptest.NewRecorder()
+	handler.ServeHTTP(dashboardResp, httptest.NewRequest(http.MethodGet, "/api/dashboard?host=db-b&port=3307&state=FAILED&limit=1&offset=1", nil))
+	if dashboardResp.Code != http.StatusOK {
+		t.Fatalf("dashboard returned %d body=%s", dashboardResp.Code, dashboardResp.Body.String())
+	}
+	if err := json.Unmarshal(dashboardResp.Body.Bytes(), &dashboard); err != nil {
+		t.Fatalf("decode dashboard response: %v", err)
+	}
+	if dashboard.Total != combinedTasks || dashboard.Limit != 1 || dashboard.Offset != 1 || dashboard.Summary.Total != combinedTasks || dashboard.Summary.Failed != combinedTasks || dashboard.Summary.Abnormal != combinedTasks {
+		t.Fatalf("dashboard aggregate used page values: %+v", dashboard)
+	}
+	if len(dashboard.Tasks) != 1 || dashboard.Tasks[0].Task.Source.Password != "" || len(dashboard.Sources) != 1 || dashboard.Sources[0].TaskCount != combinedTasks || dashboard.Sources[0].Abnormal != combinedTasks {
+		t.Fatalf("unexpected dashboard page/source response: %+v", dashboard)
 	}
 }
 
@@ -2630,6 +2811,63 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 	for _, key := range required {
 		if _, exists := paths[key]; !exists {
 			t.Fatalf("expected swagger path %s", key)
+		}
+	}
+
+	getOperation := func(path string) map[string]any {
+		t.Helper()
+		pathBody, ok := paths[path].(map[string]any)
+		if !ok {
+			t.Fatalf("expected swagger path object for %s, got %T", path, paths[path])
+		}
+		operation, ok := pathBody["get"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected GET operation for %s, got %T", path, pathBody["get"])
+		}
+		return operation
+	}
+	assertQueryParams := func(operation map[string]any, names ...string) {
+		t.Helper()
+		params, ok := operation["parameters"].([]any)
+		if !ok {
+			t.Fatalf("expected swagger parameters, got %T", operation["parameters"])
+		}
+		for _, name := range names {
+			found := false
+			for _, raw := range params {
+				param, ok := raw.(map[string]any)
+				if ok && param["name"] == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected swagger query parameter %q", name)
+			}
+		}
+	}
+
+	tasksGet := getOperation("/api/tasks")
+	assertQueryParams(tasksGet, "host", "port", "state", "limit", "offset")
+	dashboardGet := getOperation("/api/dashboard")
+	assertQueryParams(dashboardGet, "host", "port", "state", "limit", "offset")
+	definitions, ok := body["definitions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected swagger definitions, got %T", body["definitions"])
+	}
+	for _, definitionName := range []string{"api.taskListResponse", "api.dashboardResponse"} {
+		definition, ok := definitions[definitionName].(map[string]any)
+		if !ok {
+			t.Fatalf("expected swagger definition %s", definitionName)
+		}
+		properties, ok := definition["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected properties for swagger definition %s", definitionName)
+		}
+		for _, property := range []string{"total", "limit", "offset"} {
+			if _, ok := properties[property]; !ok {
+				t.Fatalf("expected %s.%s in swagger definition", definitionName, property)
+			}
 		}
 	}
 }

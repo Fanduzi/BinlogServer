@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
+// output: REST API JSON responses including paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -33,6 +33,11 @@ type summaryResponse struct {
 }
 
 const defaultDelayThresholdSeconds = int64(30)
+
+const (
+	defaultTaskListLimit = 100
+	maxTaskListLimit     = 500
+)
 
 type taskReplicationResponse struct {
 	TaskID           string      `json:"task_id"`
@@ -68,9 +73,27 @@ type sourceOverview struct {
 type dashboardResponse struct {
 	GeneratedAt      time.Time           `json:"generated_at"`
 	ThresholdSeconds int64               `json:"threshold_seconds"`
+	Total            int                 `json:"total"`
+	Limit            int                 `json:"limit"`
+	Offset           int                 `json:"offset"`
 	Summary          summaryResponse     `json:"summary"`
 	Tasks            []dashboardTaskItem `json:"tasks"`
 	Sources          []sourceOverview    `json:"sources"`
+}
+
+type taskListResponse struct {
+	Items  []tasks.Task `json:"items"`
+	Total  int          `json:"total"`
+	Limit  int          `json:"limit"`
+	Offset int          `json:"offset"`
+}
+
+type taskListQuery struct {
+	Host   string
+	Port   *uint16
+	State  *tasks.State
+	Limit  int
+	Offset int
 }
 
 type sourceLookupResponse struct {
@@ -208,6 +231,9 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param host query string false "Filter by source host"
 // @Param port query int false "Filter by source port"
+// @Param state query string false "Filter by task state"
+// @Param limit query int false "Page size (default 100, maximum 500)"
+// @Param offset query int false "Zero-based page offset (default 0)"
 // @Success 200 {object} dashboardResponse
 // @Failure 400 {string} string
 // @Failure 405 {string} string
@@ -218,24 +244,30 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, _, err := s.filterTasksBySource(s.tasks.ListTasks(), r)
+	query, err := parseTaskListQuery(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	items := filterTasksByQuery(s.tasks.ListTasks(), query)
+	sortTasksByID(items)
+	pageStart, pageEnd := taskPageBounds(len(items), query.Offset, query.Limit)
 	now := time.Now()
 	resp := dashboardResponse{
 		GeneratedAt:      now,
 		ThresholdSeconds: defaultDelayThresholdSeconds,
+		Total:            len(items),
+		Limit:            query.Limit,
+		Offset:           query.Offset,
 		Summary: summaryResponse{
 			Total: len(items),
 		},
-		Tasks:   make([]dashboardTaskItem, 0, len(items)),
+		Tasks:   make([]dashboardTaskItem, 0, pageEnd-pageStart),
 		Sources: []sourceOverview{},
 	}
 
 	sourceMap := make(map[string]*sourceOverview)
-	for _, task := range items {
+	for i, task := range items {
 		switch task.State {
 		case tasks.StateRunning:
 			resp.Summary.Running++
@@ -260,10 +292,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			resp.Summary.Abnormal++
 		}
 
-		resp.Tasks = append(resp.Tasks, dashboardTaskItem{
-			Task:        sanitizeTask(task),
-			Replication: rep,
-		})
+		if i >= pageStart && i < pageEnd {
+			resp.Tasks = append(resp.Tasks, dashboardTaskItem{
+				Task:        sanitizeTask(task),
+				Replication: rep,
+			})
+		}
 
 		key := task.Source.Host + ":" + strconv.Itoa(int(task.Source.Port))
 		item, exists := sourceMap[key]
@@ -335,14 +369,10 @@ type updateTaskRequest struct {
 // @Tags Tasks
 // @Accept json
 // @Produce json
-// @Param host query string false "Filter by source host (GET only)"
-// @Param port query int false "Filter by source port (GET only)"
 // @Param body body createTaskRequest true "Task create payload (name:1-255, cluster_key:[a-zA-Z0-9._-], source/start/storage 按字段规则校验)"
-// @Success 200 {array} tasks.Task
 // @Success 201 {object} tasks.Task
 // @Failure 400 {object} apiErrorBody
 // @Failure 405 {string} string
-// @Router /api/tasks [get]
 // @Router /api/tasks [post]
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -360,12 +390,20 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusCreated, sanitizeTask(task))
 	case http.MethodGet:
-		items, _, err := s.filterTasksBySource(s.tasks.ListTasks(), r)
+		query, err := parseTaskListQuery(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, http.StatusOK, sanitizeTaskList(items))
+		items := filterTasksByQuery(s.tasks.ListTasks(), query)
+		sortTasksByID(items)
+		page := paginateTasks(items, query.Offset, query.Limit)
+		writeJSON(w, http.StatusOK, taskListResponse{
+			Items:  sanitizeTaskList(page),
+			Total:  len(items),
+			Limit:  query.Limit,
+			Offset: query.Offset,
+		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -598,6 +636,107 @@ func parseUploadFailureReasonsLimit(r *http.Request) (int, error) {
 		return 20, nil
 	}
 	return *query.Limit, nil
+}
+
+// parseTaskListQuery 解析任务列表与 dashboard 共用的过滤、分页参数。
+func parseTaskListQuery(r *http.Request) (taskListQuery, error) {
+	values := r.URL.Query()
+	query := taskListQuery{
+		Host:   strings.TrimSpace(values.Get("host")),
+		Limit:  defaultTaskListLimit,
+		Offset: 0,
+	}
+
+	if _, ok := values["port"]; ok {
+		port, err := parsePort(values.Get("port"))
+		if err != nil {
+			return taskListQuery{}, errors.New("invalid port")
+		}
+		query.Port = &port
+	}
+	if _, ok := values["state"]; ok {
+		state, err := parseTaskState(values.Get("state"))
+		if err != nil {
+			return taskListQuery{}, err
+		}
+		query.State = &state
+	}
+	if _, ok := values["limit"]; ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(values.Get("limit")))
+		if err != nil || limit <= 0 {
+			return taskListQuery{}, errors.New("invalid limit")
+		}
+		if limit > maxTaskListLimit {
+			limit = maxTaskListLimit
+		}
+		query.Limit = limit
+	}
+	if _, ok := values["offset"]; ok {
+		offset, err := strconv.Atoi(strings.TrimSpace(values.Get("offset")))
+		if err != nil || offset < 0 {
+			return taskListQuery{}, errors.New("invalid offset")
+		}
+		query.Offset = offset
+	}
+	return query, nil
+}
+
+func parseTaskState(raw string) (tasks.State, error) {
+	state := tasks.State(strings.TrimSpace(raw))
+	switch state {
+	case tasks.StateCreated,
+		tasks.StateStarting,
+		tasks.StateRunning,
+		tasks.StateLeaseDegraded,
+		tasks.StateRebuildingFile,
+		tasks.StateRetryBackoff,
+		tasks.StateFailed,
+		tasks.StateStopping,
+		tasks.StateStopped:
+		return state, nil
+	default:
+		return "", errors.New("invalid state")
+	}
+}
+
+func filterTasksByQuery(items []tasks.Task, query taskListQuery) []tasks.Task {
+	out := make([]tasks.Task, 0, len(items))
+	for _, task := range items {
+		if query.Host != "" && task.Source.Host != query.Host {
+			continue
+		}
+		if query.Port != nil && task.Source.Port != *query.Port {
+			continue
+		}
+		if query.State != nil && task.State != *query.State {
+			continue
+		}
+		out = append(out, task)
+	}
+	return out
+}
+
+// sortTasksByID keeps API pages aligned with the metadata store's ORDER BY id convention.
+func sortTasksByID(items []tasks.Task) {
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].ID < items[j].ID
+	})
+}
+
+func taskPageBounds(total, offset, limit int) (int, int) {
+	if offset >= total {
+		return total, total
+	}
+	end := total
+	if limit <= total-offset {
+		end = offset + limit
+	}
+	return offset, end
+}
+
+func paginateTasks(items []tasks.Task, offset, limit int) []tasks.Task {
+	start, end := taskPageBounds(len(items), offset, limit)
+	return items[start:end]
 }
 
 // filterTasksBySource 按 source 查询参数过滤任务集合。

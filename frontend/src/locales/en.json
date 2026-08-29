@@ -96,6 +96,8 @@
     "CREATED": "Created",
     "STARTING": "Starting",
     "RUNNING": "Running",
+    "LEASE_DEGRADED": "Lease Degraded",
+    "REBUILDING_FILE": "Rebuilding File",
     "RETRY_BACKOFF": "Retry Backoff",
     "STOPPING": "Stopping",
     "STOPPED": "Stopped",
