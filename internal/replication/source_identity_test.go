@@ -1,13 +1,16 @@
 // Package replication provides module-level functionality for replication.
-// input: flavor/log_bin/identity fixtures and go-mysql style error strings
-// output: source identity resolution and permanent-error classification assertions
+// input: flavor/log_bin/identity fixtures plus source-network and go-mysql error values
+// output: source identity plus permanent/retryable operator-error classification assertions
 // pos: unit tests for MariaDB/MySQL source probe semantics
 // note: if this file changes, update this header and module README.md.
 package replication
 
 import (
 	"errors"
+	"net"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"binlog_server/internal/tasks"
@@ -59,5 +62,23 @@ func TestClassifySourceError_AccessDenied(t *testing.T) {
 	var pe *tasks.PermanentError
 	if !errors.As(err, &pe) || pe.Code != tasks.CodeSourceAccessDenied {
 		t.Fatalf("expected SOURCE_ACCESS_DENIED, got %v", err)
+	}
+}
+
+func TestClassifySourceError_UnreachableNetwork(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.ECONNREFUSED, syscall.EHOSTUNREACH} {
+		err := classifySourceError(&net.OpError{Op: "dial", Net: "tcp", Err: errno})
+		var sourceErr *tasks.RetryableSourceError
+		if !errors.As(err, &sourceErr) || sourceErr.Code != tasks.CodeSourceUnreachable {
+			t.Fatalf("%v: expected SOURCE_UNREACHABLE, got %v", errno, err)
+		}
+		if tasks.IsPermanent(err) {
+			t.Fatalf("%v: unreachable source must remain retryable", errno)
+		}
+	}
+
+	diskErr := &os.PathError{Op: "write", Path: "/data/binlog", Err: syscall.ENOSPC}
+	if got := classifySourceError(diskErr); got != diskErr {
+		t.Fatalf("local disk error must not be classified as source unreachable: %v", got)
 	}
 }

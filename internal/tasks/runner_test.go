@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, retryable/permanent runner callbacks, store/lease/uploader dependencies
-// output: runner invocation, retry, readiness, stop, and permanent-failure assertions
+// output: runner invocation, retry cap/reset, readiness, stop, and permanent-failure assertions
 // pos: public Scheduler seam tests for runner-driven task lifecycle behavior
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -36,6 +36,52 @@ type failOnceRunner struct {
 type permanentFailureRunner struct {
 	mu    sync.Mutex
 	calls int
+}
+
+type unreachableRunner struct {
+	mu    sync.Mutex
+	calls int
+}
+
+type readyResetRunner struct {
+	mu      sync.Mutex
+	calls   int
+	resumed chan struct{}
+}
+
+func (r *readyResetRunner) Run(context.Context, Task) error {
+	return errors.New("RunWithNotify required")
+}
+
+func (r *readyResetRunner) RunWithNotify(ctx context.Context, _ Task, onReady func()) error {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	r.mu.Unlock()
+
+	if call < 10 {
+		return NewRetryableSourceError(CodeSourceUnreachable, "dial tcp: connection refused")
+	}
+	onReady()
+	if call == 10 {
+		return NewRetryableSourceError(CodeSourceUnreachable, "read tcp: connection reset")
+	}
+	close(r.resumed)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (r *unreachableRunner) Run(context.Context, Task) error {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	return NewRetryableSourceError(CodeSourceUnreachable, "dial tcp: connection refused")
+}
+
+func (r *unreachableRunner) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 // Run returns an unrecoverable source error.
@@ -326,6 +372,78 @@ func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
 	}
 	if calls := runner.callCount(); calls != 1 {
 		t.Fatalf("expected runner called once, got %d", calls)
+	}
+}
+
+func TestScheduler_UnreachableSourceFailsAfterTenConsecutiveAttempts(t *testing.T) {
+	runner := &unreachableRunner{}
+	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "203.0.113.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateFailed {
+			if got.LastError != "SOURCE_UNREACHABLE: dial tcp: connection refused" {
+				t.Fatalf("expected stable source error detail, got %q", got.LastError)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = s.StopTask(task.ID)
+			t.Fatalf("expected state %s after retry cap, got %s", StateFailed, got.State)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if calls := runner.callCount(); calls != 10 {
+		t.Fatalf("expected 10 runner attempts, got %d", calls)
+	}
+}
+
+func TestScheduler_RunnerReadyResetsConsecutiveSourceFailures(t *testing.T) {
+	runner := &readyResetRunner{resumed: make(chan struct{})}
+	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "203.0.113.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.resumed:
+	case <-time.After(2 * time.Second):
+		got, _ := s.GetTask(task.ID)
+		t.Fatalf("expected retry budget reset after ready, state=%s", got.State)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State != StateRunning || got.LastError != "" {
+		t.Fatalf("expected resumed runner to be RUNNING without error, got state=%s last_error=%q", got.State, got.LastError)
+	}
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
 	}
 }
 

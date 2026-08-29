@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: start/stop commands, metadata source policy, runner callbacks, permanent/retryable errors, cancellation signals
-// output: guarded start/stop, runner retry, and cancellation orchestration
+// input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals
+// output: guarded start/stop, bounded source retry, and cancellation orchestration
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,10 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+const maxConsecutiveRetryableSourceFailures = 10
 
 func (s *Scheduler) StartTask(id string) error {
 	s.mu.Lock()
@@ -267,9 +270,14 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 
 	// Step 1: 调用 runRunner 执行一次会话；错误则进入退避重试。
 	attempt := 0
+	consecutiveSourceFailures := 0
 	for {
 		// runRunner 是一次“会话级”执行：内部会一直拉 binlog，直到 stop 或报错才返回。
-		err := s.runRunner(ctx, id, task)
+		ready, err := s.runRunner(ctx, id, task)
+		if ready {
+			attempt = 0
+			consecutiveSourceFailures = 0
+		}
 		if err == nil || errors.Is(err, context.Canceled) {
 			return
 		}
@@ -292,6 +300,16 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
 			s.mu.Unlock()
 			return
+		}
+		if IsRetryableSourceError(err) {
+			consecutiveSourceFailures++
+			if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
+				logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
+				s.mu.Unlock()
+				return
+			}
+		} else {
+			consecutiveSourceFailures = 0
 		}
 
 		logTransitionPersistError(id, StateRetryBackoff, s.markRetryBackoffLocked(current, errMsg))
@@ -328,9 +346,11 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 }
 
 // runRunner 负责把 Scheduler 状态机与 Runner 生命周期对齐。
-func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
+func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) (bool, error) {
+	var ready atomic.Bool
 	// Step 1: 定义 ready 回调，把任务状态收敛到 RUNNING。
 	onReady := func() {
+		ready.Store(true)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
@@ -339,13 +359,15 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) error {
 
 	if n, ok := s.runner.(runnerWithNotify); ok {
 		// 类型断言：如果 runner 支持 RunWithNotify，就走精确 ready 语义。
-		return n.RunWithNotify(ctx, task, onReady)
+		err := n.RunWithNotify(ctx, task, onReady)
+		return ready.Load(), err
 	}
 	// Step 2: 兼容旧 runner（无 notify），采用乐观 ready 语义。
 	// 向后兼容旧 runner：没有 notify 能力时，在 Run 前乐观置为 RUNNING。
 	// 该路径可能出现“短暂 RUNNING 后立即失败”；失败会在 runTask 的错误分支回收状态。
 	onReady()
-	return s.runner.Run(ctx, task)
+	// 乐观状态不等于 runner 明确 ready，不重置连续源失败计数。
+	return false, s.runner.Run(ctx, task)
 }
 
 // isClosed 判断 channel 是否已关闭（nil 视为已关闭）。

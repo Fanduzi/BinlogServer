@@ -3,9 +3,9 @@
 ## Files
 - `scheduler.go`: 调度器核心类型、选项注入与通用辅助函数。
 - `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec）。
-- `scheduler_lifecycle.go`: 启停、运行协程、重试退避与不可恢复 FAILED。
+- `scheduler_lifecycle.go`: 启停、运行协程、重试退避，以及连续 10 次源不可达后的 FAILED（runner ready 后重新计数）。
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
-- `errors.go`: 永久错误类型（1045 / log_bin off / 身份不可用）。
+- `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用，以及可重试的 `SOURCE_UNREACHABLE`）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
 - `scheduler_observability.go`: 复制进度、checkpoint、事件/文件/运行历史查询。
 - `scheduler_retry_upload.go`: 上传失败补偿重试与失败原因聚合。
@@ -18,6 +18,7 @@
 - 任务 CRUD、启动停止、状态推进。
 - `CreateTaskFromSpec`：整包校验后才 persist。
 - `FAILED` 可再次 `StartTask`（改完源库配置后）。
+- `SOURCE_UNREACHABLE` 连续失败最多重试 10 次；runner ready 会清零进程内连续失败计数，服务重启后重新计数。
 - 事件记录、文件元信息、上传补偿。
 - `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
