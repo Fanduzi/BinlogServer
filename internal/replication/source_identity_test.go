@@ -1,5 +1,5 @@
 // Package replication provides module-level functionality for replication.
-// input: flavor/log_bin/identity fixtures plus source-network and go-mysql error values
+// input: flavor/log_bin/identity fixtures plus wrapped source-network and stream-read errors
 // output: source identity plus permanent/retryable operator-error classification assertions
 // pos: unit tests for MariaDB/MySQL source probe semantics
 // note: if this file changes, update this header and module README.md.
@@ -7,6 +7,8 @@ package replication
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -80,5 +82,18 @@ func TestClassifySourceError_UnreachableNetwork(t *testing.T) {
 	diskErr := &os.PathError{Op: "write", Path: "/data/binlog", Err: syscall.ENOSPC}
 	if got := classifySourceError(diskErr); got != diskErr {
 		t.Fatalf("local disk error must not be classified as source unreachable: %v", got)
+	}
+}
+
+func TestClassifySourceError_StreamDisconnect(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("GetEvent: read packet header: %w", io.EOF),
+		fmt.Errorf("GetEvent: %w", fmt.Errorf("read packet body: %w", io.ErrUnexpectedEOF)),
+	} {
+		classified := classifySourceError(err)
+		var sourceErr *tasks.RetryableSourceError
+		if !errors.As(classified, &sourceErr) || sourceErr.Code != tasks.CodeSourceUnreachable {
+			t.Fatalf("expected SOURCE_UNREACHABLE for wrapped stream disconnect, got %v", classified)
+		}
 	}
 }

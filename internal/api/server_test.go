@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
-// input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API responses and regression coverage for task/cluster operations and source lookup
+// input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
+// output: REST/dashboard responses, operator error visibility, task/cluster status codes, and source lookup regression coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -2091,6 +2091,63 @@ func TestAPI_Dashboard(t *testing.T) {
 	}
 	if len(tasksAny) != 2 {
 		t.Fatalf("expected 2 dashboard tasks, got %d", len(tasksAny))
+	}
+}
+
+func TestAPI_SourceUnreachableFailureIsVisibleToDashboard(t *testing.T) {
+	const lastError = "SOURCE_UNREACHABLE: GetEvent: unexpected EOF"
+	store := newFakeAPIRunHistoryStore()
+	store.tasks["37"] = tasks.Task{
+		ID:         "37",
+		Name:       "unreachable-source",
+		ClusterKey: "unreachable-source-key",
+		State:      tasks.StateFailed,
+		LastError:  lastError,
+		Source:     tasks.SourceConfig{Host: "203.0.113.1", Port: 3306, User: "repl"},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithStore(store))
+	if err := scheduler.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	handler := NewServer(scheduler)
+
+	taskResp := httptest.NewRecorder()
+	handler.ServeHTTP(taskResp, httptest.NewRequest(http.MethodGet, "/api/tasks/37", nil))
+	if taskResp.Code != http.StatusOK {
+		t.Fatalf("expected task 200, got %d body=%s", taskResp.Code, taskResp.Body.String())
+	}
+	var taskBody tasks.Task
+	if err := json.Unmarshal(taskResp.Body.Bytes(), &taskBody); err != nil {
+		t.Fatalf("decode task response: %v", err)
+	}
+	if taskBody.State != tasks.StateFailed || taskBody.LastError != lastError {
+		t.Fatalf("expected FAILED/SOURCE_UNREACHABLE task response, got state=%s last_error=%q", taskBody.State, taskBody.LastError)
+	}
+
+	replicationResp := httptest.NewRecorder()
+	handler.ServeHTTP(replicationResp, httptest.NewRequest(http.MethodGet, "/api/tasks/37/replication", nil))
+	if replicationResp.Code != http.StatusOK {
+		t.Fatalf("expected replication 200, got %d body=%s", replicationResp.Code, replicationResp.Body.String())
+	}
+	var replicationBody taskReplicationResponse
+	if err := json.Unmarshal(replicationResp.Body.Bytes(), &replicationBody); err != nil {
+		t.Fatalf("decode replication response: %v", err)
+	}
+	if replicationBody.State != tasks.StateFailed || replicationBody.Status != "ABNORMAL" || replicationBody.Reason != "RUNNER_ERROR" || replicationBody.LastError != lastError {
+		t.Fatalf("unexpected replication response: %#v", replicationBody)
+	}
+
+	dashboardResp := httptest.NewRecorder()
+	handler.ServeHTTP(dashboardResp, httptest.NewRequest(http.MethodGet, "/api/dashboard", nil))
+	if dashboardResp.Code != http.StatusOK {
+		t.Fatalf("expected dashboard 200, got %d body=%s", dashboardResp.Code, dashboardResp.Body.String())
+	}
+	var dashboardBody dashboardResponse
+	if err := json.Unmarshal(dashboardResp.Body.Bytes(), &dashboardBody); err != nil {
+		t.Fatalf("decode dashboard response: %v", err)
+	}
+	if len(dashboardBody.Tasks) != 1 || dashboardBody.Tasks[0].Task.State != tasks.StateFailed || dashboardBody.Tasks[0].Task.LastError != lastError || dashboardBody.Tasks[0].Replication.LastError != lastError {
+		t.Fatalf("expected dashboard FAILED/SOURCE_UNREACHABLE visibility, got %#v", dashboardBody.Tasks)
 	}
 }
 

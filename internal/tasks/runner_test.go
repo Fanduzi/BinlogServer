@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, retryable/permanent runner callbacks, store/lease/uploader dependencies
-// output: runner invocation, retry cap/reset, readiness, stop, and permanent-failure assertions
+// output: runner invocation, code-specific retry cap/reset, readiness, stop, and permanent-failure assertions
 // pos: public Scheduler seam tests for runner-driven task lifecycle behavior
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -39,14 +39,35 @@ type permanentFailureRunner struct {
 }
 
 type unreachableRunner struct {
-	mu    sync.Mutex
-	calls int
+	mu        sync.Mutex
+	calls     int
+	attempted chan int
+	release   chan struct{}
 }
 
 type readyResetRunner struct {
 	mu      sync.Mutex
 	calls   int
 	resumed chan struct{}
+}
+
+type otherRetryableSourceRunner struct {
+	mu       sync.Mutex
+	calls    int
+	eleventh chan struct{}
+}
+
+func (r *otherRetryableSourceRunner) Run(ctx context.Context, _ Task) error {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	r.mu.Unlock()
+	if call == 11 {
+		close(r.eleventh)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return NewRetryableSourceError("SOURCE_THROTTLED", "source busy")
 }
 
 func (r *readyResetRunner) Run(context.Context, Task) error {
@@ -71,10 +92,23 @@ func (r *readyResetRunner) RunWithNotify(ctx context.Context, _ Task, onReady fu
 	return ctx.Err()
 }
 
-func (r *unreachableRunner) Run(context.Context, Task) error {
+func (r *unreachableRunner) Run(ctx context.Context, _ Task) error {
 	r.mu.Lock()
 	r.calls++
+	call := r.calls
 	r.mu.Unlock()
+	if r.attempted != nil {
+		select {
+		case r.attempted <- call:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return NewRetryableSourceError(CodeSourceUnreachable, "dial tcp: connection refused")
 }
 
@@ -376,19 +410,65 @@ func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
 }
 
 func TestScheduler_UnreachableSourceFailsAfterTenConsecutiveAttempts(t *testing.T) {
-	runner := &unreachableRunner{}
-	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
-
-	task, err := s.CreateTask("cluster-a", "cluster-a-key")
-	if err != nil {
-		t.Fatalf("CreateTask returned error: %v", err)
+	task := Task{
+		ID:         "37",
+		Name:       "restored-task",
+		ClusterKey: "cluster-a-key",
+		State:      StateRetryBackoff,
+		LastError:  "SOURCE_UNREACHABLE: previous process",
+		Source:     SourceConfig{Host: "203.0.113.1", Port: 3306, User: "repl"},
 	}
-	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "203.0.113.1", Port: 3306, User: "repl"}); err != nil {
-		t.Fatalf("ConfigureSource returned error: %v", err)
+	store := &schedulerTestStore{tasks: map[string]Task{task.ID: task}}
+	runner := &unreachableRunner{attempted: make(chan int), release: make(chan struct{})}
+	s := NewScheduler(WithStore(store), WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
+	if err := s.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
 	}
 	if err := s.StartTask(task.ID); err != nil {
 		t.Fatalf("StartTask returned error: %v", err)
 	}
+	t.Cleanup(func() { _ = s.StopTask(task.ID) })
+
+	expectAttempt := func(want int) {
+		t.Helper()
+		select {
+		case got := <-runner.attempted:
+			if got != want {
+				t.Fatalf("expected attempt %d, got %d", want, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for attempt %d", want)
+		}
+	}
+	assertEventCounts := func(wantRunnerErrors, wantRetries, wantFailed int) {
+		t.Helper()
+		events, err := s.ListEvents(task.ID, 0)
+		if err != nil {
+			t.Fatalf("ListEvents returned error: %v", err)
+		}
+		counts := map[string]int{}
+		for _, event := range events {
+			counts[event.Type]++
+		}
+		if counts["TASK_RUNNER_ERROR"] != wantRunnerErrors || counts["TASK_RETRY_BACKOFF"] != wantRetries || counts["TASK_RETRYING"] != wantRetries || counts["TASK_FAILED"] != wantFailed {
+			t.Fatalf("unexpected retry event counts at attempt %d: %#v", wantRunnerErrors, counts)
+		}
+	}
+
+	expectAttempt(1)
+	runner.release <- struct{}{}
+	expectAttempt(2)
+	assertEventCounts(1, 1, 0)
+
+	for attempt := 2; attempt < 9; attempt++ {
+		runner.release <- struct{}{}
+		expectAttempt(attempt + 1)
+	}
+	runner.release <- struct{}{}
+	expectAttempt(10)
+	assertEventCounts(9, 9, 0)
+
+	runner.release <- struct{}{}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -408,9 +488,16 @@ func TestScheduler_UnreachableSourceFailsAfterTenConsecutiveAttempts(t *testing.
 		}
 		time.Sleep(time.Millisecond)
 	}
-
+	assertEventCounts(10, 9, 1)
 	if calls := runner.callCount(); calls != 10 {
 		t.Fatalf("expected 10 runner attempts, got %d", calls)
+	}
+	events, err := s.ListEvents(task.ID, 0)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	if n := len(events); n < 2 || events[n-2].Type != "TASK_RUNNER_ERROR" || events[n-1].Type != "TASK_FAILED" {
+		t.Fatalf("expected exhaustion to end with runner error then failed, got %#v", events)
 	}
 }
 
@@ -441,6 +528,32 @@ func TestScheduler_RunnerReadyResetsConsecutiveSourceFailures(t *testing.T) {
 	}
 	if got.State != StateRunning || got.LastError != "" {
 		t.Fatalf("expected resumed runner to be RUNNING without error, got state=%s last_error=%q", got.State, got.LastError)
+	}
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
+	}
+}
+
+func TestScheduler_OtherRetryableSourceCodeIsNotCapped(t *testing.T) {
+	runner := &otherRetryableSourceRunner{eleventh: make(chan struct{})}
+	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.eleventh:
+	case <-time.After(2 * time.Second):
+		got, _ := s.GetTask(task.ID)
+		t.Fatalf("expected non-SOURCE_UNREACHABLE retries to continue, state=%s", got.State)
 	}
 	if err := s.StopTask(task.ID); err != nil {
 		t.Fatalf("StopTask returned error: %v", err)
