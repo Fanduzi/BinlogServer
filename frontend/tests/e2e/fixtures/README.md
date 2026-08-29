@@ -7,7 +7,7 @@ Playwright 测试夹具，提供共享 mock 场景类型和 API 路由适配。
 | File | Responsibility |
 |------|---------------|
 | `mock-data.ts` | 暴露共享场景的 TypeScript union 与测试类型 |
-| `mock-routes.ts` | 将 Page 的 `/api/**` 请求转发给共享 mock session |
+| `mock-routes.ts` | 将 Page 的 `/api/**` 请求（含 JSON body）转发给共享 mock session，并可注入首个 start 失败 |
 
 ## Interfaces
 

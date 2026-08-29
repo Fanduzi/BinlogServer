@@ -5,7 +5,7 @@
 - `swagger.json` / `swagger.yaml`: 生成的 OpenAPI 规范文件。
 
 ## Exports
-- swagger 文档元数据供 API 文档页面消费，`BinlogFile` 包含 `OPEN/SEALED` state；summary/dashboard/source 契约包含独立 `starting` 计数，`running` 仅代表 RUNNING；任务列表与 dashboard 暴露 state/host/port 过滤及 `total/limit/offset` 分页字段，limit 超过 500 返回 400。
+- swagger 文档元数据供 API 文档页面消费，包含 `POST /api/tasks/batch` 的 1..100 envelope、逐项有序结果与结构化错误；`BinlogFile` 包含 `OPEN/SEALED` state；summary/dashboard/source 契约包含独立 `starting` 计数，`running` 仅代表 RUNNING；任务列表与 dashboard 暴露 state/host/port 过滤及 `total/limit/offset` 分页字段，limit 超过 500 返回 400。
 - `/api/sources/lookup` 文档说明 localhost 与显式 loopback literal 共用 host identity，其他 host 按原文字面匹配。
 
 ## Generation Note

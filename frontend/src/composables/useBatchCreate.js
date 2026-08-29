@@ -1,10 +1,13 @@
-// input: refreshAll callback, validateTaskPayload, parseErr, API calls
-// output: batchForm state, batchPreview state, batch actions
+// input: refreshAll callback, validateTaskPayload, parseErr, and batch/start API calls
+// output: batchForm state, local 100-item preview validation, one-request batch creation actions, and safe text errors
 // pos: batch task creation logic
+// note: if this file changes, update this header and frontend/src/composables/README.md.
 import { reactive, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { createTask, startTask } from "../api.js";
+import { createTasksBatch, startTask } from "../api.js";
+
+const MAX_BATCH_ITEMS = 100;
 
 function defaultBatchForm() {
   return {
@@ -189,16 +192,27 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
   function previewBatchCreate() {
     const parsed = parseBatchLines(batchForm.lines || "");
     batchPreview.rows = parsed.rows;
-    batchPreview.errors = parsed.errors;
-    batchPreview.validCount = parsed.rows.filter((x) => x.valid).length;
+    const validCount = parsed.rows.filter((x) => x.valid).length;
+    const tooManyError =
+      validCount > MAX_BATCH_ITEMS
+        ? t("batch.tooManyItems", { max: MAX_BATCH_ITEMS })
+        : "";
+    batchPreview.errors = tooManyError
+      ? [...parsed.errors, tooManyError]
+      : parsed.errors;
+    batchPreview.validCount = validCount;
     batchPreview.ready = true;
     batchPreview.canSubmit =
-      batchPreview.validCount > 0 && parsed.errors.length === 0;
-    if (!batchPreview.rows.length || parsed.errors.length > 0) {
+      batchPreview.validCount > 0 && batchPreview.errors.length === 0;
+    if (tooManyError) {
+      ElMessage.error(tooManyError);
+      return;
+    }
+    if (!batchPreview.rows.length || batchPreview.errors.length > 0) {
       ElMessage.warning(
         t("msg.previewComplete", {
           valid: batchPreview.validCount,
-          errors: parsed.errors.length,
+          errors: batchPreview.errors.length,
         }),
       );
       return;
@@ -213,6 +227,8 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
       const validRows = batchPreview.rows.filter((r) => r.valid);
       const errors = [];
       let success = 0;
+      const submittedRows = [];
+      const payloads = [];
       for (const row of validRows) {
         const source = {
           host: row.host,
@@ -237,14 +253,32 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
           );
           continue;
         }
-        try {
-          const created = await createTask(payload);
-          if (batchForm.autoStart) await startTask(created.id);
-          success += 1;
-        } catch (err) {
-          errors.push(
-            `${row.name}(${row.host}:${row.port}) -> ${parseErr(err)}`,
-          );
+        submittedRows.push(row);
+        payloads.push(payload);
+      }
+
+      if (payloads.length) {
+        const results = await createTasksBatch({ items: payloads });
+        for (const result of results) {
+          const row = submittedRows[Number(result?.index)];
+          const label = row
+            ? `${row.name}(${row.host}:${row.port})`
+            : result?.cluster_key || "batch item";
+          if (result?.task) {
+            try {
+              if (batchForm.autoStart) await startTask(result.task.id);
+              success += 1;
+            } catch (err) {
+              errors.push(`${label} -> ${parseErr(err)}`);
+            }
+            continue;
+          }
+          const itemError = result?.error;
+          const message =
+            typeof itemError === "string"
+              ? itemError
+              : itemError?.error || JSON.stringify(itemError || "unknown error");
+          errors.push(`${label} -> ${message}`);
         }
       }
       await refreshAll();
@@ -257,9 +291,9 @@ export function useBatchCreate({ refreshAll, validateTaskPayload, parseErr }) {
         t("msg.batchPartialSuccess", { success, failed: errors.length }),
       );
       await ElMessageBox.alert(
-        `<pre style="white-space: pre-wrap">${errors.join("\n")}</pre>`,
+        errors.join("\n"),
         t("msg.batchCreateFailedDetail"),
-        { dangerouslyUseHTMLString: true, confirmButtonText: t("btn.gotIt") },
+        { confirmButtonText: t("btn.gotIt") },
       );
     } catch (err) {
       ElMessage.error(parseErr(err));

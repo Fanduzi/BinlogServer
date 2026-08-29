@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including server pagination/filter validation, independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, server pagination/filter validation, independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -364,6 +364,49 @@ function createTaskRowFromPayload(state, payload) {
   return task;
 }
 
+function validateMockCreatePayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "invalid json";
+  if (!String(payload.name || "").trim()) return "invalid name";
+  if (!String(payload.cluster_key || "").trim()) return "cluster_key is required";
+  const source = payload.source;
+  if (!source) return "source.host/port/user/password is required";
+  if (!source.host || !source.port || !source.user) return "source.host/port/user/password is required";
+  if (!source.password) return "source.password is required";
+  if (!Number.isInteger(Number(source.port)) || Number(source.port) < 1 || Number(source.port) > 65535) {
+    return "invalid source config";
+  }
+  return "";
+}
+
+function createTaskBatchFromPayload(state, body) {
+  const items = body?.items;
+  if (!Array.isArray(items)) return ok({ error: "items must be an array", code: "INVALID_REQUEST" }, 400);
+  if (items.length === 0) return ok({ error: "items must not be empty", code: "INVALID_REQUEST" }, 400);
+  if (items.length > 100) return ok({ error: "items must contain at most 100 items", code: "INVALID_REQUEST" }, 400);
+
+  return ok(items.map((rawItem, index) => {
+    const item = cloneMockValue(rawItem);
+    const clusterKey = typeof item?.cluster_key === "string" ? item.cluster_key : "";
+    const validationError = validateMockCreatePayload(item);
+    if (validationError) {
+      return {
+        index,
+        cluster_key: clusterKey,
+        error: { error: validationError, code: "INVALID_REQUEST" },
+      };
+    }
+    if (state.tasks.some((row) => row.task.cluster_key === clusterKey)) {
+      return {
+        index,
+        cluster_key: clusterKey,
+        error: { error: "cluster_key already exists", code: "INVALID_REQUEST" },
+      };
+    }
+    const task = createTaskRowFromPayload(state, item);
+    return { index, cluster_key: task.cluster_key, task: sanitizeTask(task) };
+  }));
+}
+
 function updateTaskRow(state, id, payload) {
   const row = findTaskRow(state, id);
   if (!row) return null;
@@ -513,6 +556,10 @@ export function handleMockRequest(input) {
   if (path === "/api/tasks" && method === "POST") {
     const created = createTaskRowFromPayload(state, cloneMockValue(input.body || {}));
     return ok(sanitizeTask(created), 201);
+  }
+
+  if (path === "/api/tasks/batch" && method === "POST") {
+    return createTaskBatchFromPayload(state, input.body);
   }
 
   const taskMatch = path.match(/^\/api\/tasks\/([^/]+)$/);

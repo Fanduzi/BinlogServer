@@ -1,13 +1,15 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -37,6 +39,7 @@ const defaultDelayThresholdSeconds = int64(30)
 const (
 	defaultTaskListLimit = 100
 	maxTaskListLimit     = 500
+	maxBatchCreateItems  = 100
 )
 
 type taskReplicationResponse struct {
@@ -351,6 +354,21 @@ type createTaskRequest struct {
 	Storage *tasks.Storage `json:"storage,omitempty"`
 }
 
+type batchCreateRequest struct {
+	Items []createTaskRequest `json:"items"`
+}
+
+type batchCreateEnvelope struct {
+	Items json.RawMessage `json:"items"`
+}
+
+type batchCreateResult struct {
+	Index      int           `json:"index"`
+	ClusterKey string        `json:"cluster_key"`
+	Task       *tasks.Task   `json:"task,omitempty"`
+	Error      *apiErrorBody `json:"error,omitempty"`
+}
+
 type updateTaskRequest struct {
 	// Name 任务名（trim 后 1-255 字符）。
 	Name *string `json:"name,omitempty"`
@@ -409,6 +427,78 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleTaskBatch creates valid items independently while preserving request order.
+// @Summary Create tasks in batch
+// @Tags Tasks
+// @Accept json
+// @Produce json
+// @Param body body batchCreateRequest true "Batch task create payload (1-100 items)"
+// @Success 200 {array} batchCreateResult
+// @Failure 400 {object} apiErrorBody
+// @Failure 405 {string} string
+// @Router /api/tasks/batch [post]
+func (s *Server) handleTaskBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var envelope batchCreateEnvelope
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&envelope); err != nil {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "invalid json")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "invalid json")
+		return
+	}
+	if len(bytes.TrimSpace(envelope.Items)) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Items), []byte("null")) {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "items is required")
+		return
+	}
+
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(envelope.Items, &rawItems); err != nil {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "items must be an array")
+		return
+	}
+	if len(rawItems) == 0 {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "items must not be empty")
+		return
+	}
+	if len(rawItems) > maxBatchCreateItems {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "items must contain at most 100 items")
+		return
+	}
+
+	results := make([]batchCreateResult, len(rawItems))
+	for i, rawItem := range rawItems {
+		result := batchCreateResult{Index: i}
+		var req createTaskRequest
+		if err := json.Unmarshal(rawItem, &req); err != nil {
+			result.Error = &apiErrorBody{Error: "invalid json", Code: tasks.CodeInvalidRequest}
+			results[i] = result
+			continue
+		}
+		result.ClusterKey = req.ClusterKey
+
+		task, err := s.tasks.CreateTaskFromSpec(req.Name, req.ClusterKey, req.Source, req.Start, req.Storage)
+		if err != nil {
+			errorBody := taskErrorBody(err)
+			result.Error = &errorBody
+			results[i] = result
+			continue
+		}
+		sanitized := sanitizeTask(task)
+		result.ClusterKey = sanitized.ClusterKey
+		result.Task = &sanitized
+		results[i] = result
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
 // handleTaskAction 处理 start/stop 等任务动作请求。
 func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/tasks/"), "/")
@@ -423,6 +513,10 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	taskID := parts[0]
+	if len(parts) == 1 && taskID == "batch" {
+		s.handleTaskBatch(w, r)
+		return
+	}
 	// /api/tasks/{id}
 	if len(parts) == 1 {
 		s.handleTaskEntity(w, r, taskID)
@@ -928,15 +1022,24 @@ func writeAPIError(w http.ResponseWriter, status int, code, msg string) {
 }
 
 func writeTaskError(w http.ResponseWriter, err error) {
+	body := taskErrorBody(err)
+	status := http.StatusInternalServerError
+	if body.Code == "TASK_NOT_FOUND" {
+		status = http.StatusNotFound
+	} else if body.Code == tasks.CodeInvalidRequest {
+		status = http.StatusBadRequest
+	}
+	writeAPIError(w, status, body.Code, body.Error)
+}
+
+func taskErrorBody(err error) apiErrorBody {
 	if errors.Is(err, tasks.ErrTaskNotFound) {
-		writeAPIError(w, http.StatusNotFound, "TASK_NOT_FOUND", err.Error())
-		return
+		return apiErrorBody{Error: err.Error(), Code: "TASK_NOT_FOUND"}
 	}
 	if isTaskUpdateBadRequest(err) {
-		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, err.Error())
-		return
+		return apiErrorBody{Error: err.Error(), Code: tasks.CodeInvalidRequest}
 	}
-	writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+	return apiErrorBody{Error: "internal server error", Code: "INTERNAL_ERROR"}
 }
 
 // writeJSON 统一输出 JSON 响应。

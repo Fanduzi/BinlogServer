@@ -11,13 +11,14 @@
 | `useFormatters.js` | 状态、lease、复制信息和时间格式化 |
 | `useSourceLookup.js` | source host/port 查询状态 |
 | `useTaskDetail.js` | 任务详情抽屉数据加载 |
-| `useTaskForm.js` / `useBatchCreate.js` | 单任务/批量创建表单状态与动作 |
+| `useTaskForm.js` / `useBatchCreate.js` | 单任务/批量创建表单状态与动作；批量预览最多 100 个有效行，提交使用一次 `/api/tasks/batch` 请求 |
 | `useAuth.js` / `useWindowState.js` | 认证提示与响应式窗口状态 |
 
 ## Interfaces
 
 - `useDashboard()` 返回 `dashboard.summary`、任务/source 列表、server pagination metadata、cluster 状态和刷新 helpers。
 - `useTaskFilter(dashboard)` 返回任务筛选、server page 参数、当前页任务和 quick-filter 状态；taskState 是服务端/全局筛选，keyword/sourceKeyword/replicationStatus/onlyAlert/sortBy 仅作用于当前页，不根据当前页推导全局 total。
+- `useBatchCreate(...)` 保留行预校验和 100 项上限，将有效 payload 合并为一次 batch 请求，按结果索引安全显示失败项，并对每个成功任务执行可选 autoStart。
 
 ## Dependencies
 

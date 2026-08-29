@@ -183,6 +183,7 @@
     "passed": "Passed",
     "failed": "Failed",
     "noData": "No parsable data rows",
+    "tooManyItems": "Batch create supports at most {max} tasks",
     "host": "Host",
     "port": "Port",
     "reason": "Reason",

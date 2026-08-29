@@ -1,5 +1,5 @@
-// input: Playwright Page route interception plus shared mock session options
-// output: browser request interception wired to the shared frontend mock handler
+// input: Playwright Page route interception, shared mock session options, and optional first-start failure injection
+// output: browser request interception with JSON bodies wired to the shared frontend mock handler
 // pos: Playwright adapter layer between browser requests and frontend shared mock responses
 // note: if this file changes, update this header and frontend/README.md
 
@@ -11,10 +11,12 @@ export interface MockRouteOptions {
   scenario: MockScenario
   auth401Paths?: string[]
   onRetryUpload?: () => void
+  failFirstStart?: boolean
 }
 
 export async function registerMockRoutes(page: Page, options: MockRouteOptions) {
   const auth401Paths = options.auth401Paths || []
+  let failedFirstStart = false
   const session = createMockSession({
     scenario: options.scenario,
     onRetryUpload: options.onRetryUpload,
@@ -34,10 +36,20 @@ export async function registerMockRoutes(page: Page, options: MockRouteOptions) 
       })
     }
 
+    if (options.failFirstStart && method === 'POST' && /^\/api\/tasks\/[^/]+\/start$/.test(path) && !failedFirstStart) {
+      failedFirstStart = true
+      return route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'start failed', code: 'INVALID_REQUEST' }),
+      })
+    }
+
     const response = session.request({
       method,
       path,
       query: url.searchParams,
+      body: request.postData() ? request.postDataJSON() : undefined,
     })
     return route.fulfill({
       status: response.status,

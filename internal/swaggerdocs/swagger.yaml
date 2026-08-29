@@ -7,6 +7,24 @@ definitions:
       error:
         type: string
     type: object
+  api.batchCreateRequest:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/api.createTaskRequest'
+        type: array
+    type: object
+  api.batchCreateResult:
+    properties:
+      cluster_key:
+        type: string
+      error:
+        $ref: '#/definitions/api.apiErrorBody'
+      index:
+        type: integer
+      task:
+        $ref: '#/definitions/tasks.Task'
+    type: object
   api.clusterOverview:
     properties:
       leased_task_count:
@@ -1014,6 +1032,37 @@ paths:
           schema:
             type: string
       summary: Aggregate upload failure reasons
+      tags:
+      - Tasks
+  /api/tasks/batch:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Batch task create payload (1-100 items)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.batchCreateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.batchCreateResult'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.apiErrorBody'
+        "405":
+          description: Method Not Allowed
+          schema:
+            type: string
+      summary: Create tasks in batch
       tags:
       - Tasks
   /api/workers:
