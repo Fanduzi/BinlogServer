@@ -14,7 +14,7 @@
 - 共享 mock 场景数据（含 `pagination`）
 - 共享 mock request handler / session factory
 - `/api/tasks/batch` mock：校验 1..100 envelope，返回有序 `{index,cluster_key,task|error}`，并脱敏成功任务密码。
-- Dashboard summary/source response 中按任务状态分别生成 `starting` 与 `running`，并按全量过滤结果返回 `total/limit/offset`；pagination 场景覆盖后页当前页匹配，limit 超过 500 返回 400。
+- Dashboard summary/source response 中按任务状态分别生成 `starting` 与 `running`，并按全量过滤结果返回 `total/limit/offset`；任务页按数字 id 升序（非数字 id 排在数字之后），pagination 场景覆盖后页当前页匹配，limit 超过 500 返回 400。
 
 ## Dependencies
 

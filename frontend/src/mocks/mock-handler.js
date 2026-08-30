@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, server pagination/filter validation, independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered server pagination/filter validation, independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -25,6 +25,22 @@ function parseInteger(value) {
   if (!/^-?\d+$/.test(raw)) return null;
   const number = Number(raw);
   return Number.isSafeInteger(number) ? number : null;
+}
+
+function compareNumericTaskID(a, b) {
+  const left = String(a ?? "");
+  const right = String(b ?? "");
+  const leftNum = /^[0-9]+$/.test(left) ? Number(left) : null;
+  const rightNum = /^[0-9]+$/.test(right) ? Number(right) : null;
+  const leftOK = leftNum !== null && Number.isSafeInteger(leftNum);
+  const rightOK = rightNum !== null && Number.isSafeInteger(rightNum);
+  if (leftOK && rightOK) {
+    if (leftNum !== rightNum) return leftNum - rightNum;
+    return left.localeCompare(right);
+  }
+  if (leftOK) return -1;
+  if (rightOK) return 1;
+  return left.localeCompare(right);
 }
 
 function deepClone(value) {
@@ -289,7 +305,7 @@ function filteredTaskRows(state, taskQuery) {
         (!taskQuery.state || row.task?.state === taskQuery.state)
       );
     })
-    .sort((a, b) => String(a.task?.id || "").localeCompare(String(b.task?.id || "")));
+    .sort((a, b) => compareNumericTaskID(a.task?.id, b.task?.id));
 }
 
 function currentDashboard(state, query) {

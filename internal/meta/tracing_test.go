@@ -7,6 +7,7 @@ package meta
 
 import (
 	"context"
+	"regexp"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestMySQLTaskStore_ListTasks_TracingEnabled(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
-	mock.ExpectQuery(listTaskSQL).WillReturnRows(sqlmock.NewRows([]string{
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(sqlmock.NewRows([]string{
 		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
 	}))
 

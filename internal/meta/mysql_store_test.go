@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies
-// output: persistence contract coverage for tasks, files, leases, runs, and checkpoints
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, and numeric ListTasks order
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -166,6 +166,13 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestListTaskSQL_OrdersByNumericID 验证 ListTasks 按数字 id 排序，避免 VARCHAR 字典序。
+func TestListTaskSQL_OrdersByNumericID(t *testing.T) {
+	if !strings.Contains(listTaskSQL, "ORDER BY CAST(id AS UNSIGNED), id") {
+		t.Fatalf("listTaskSQL must order by CAST(id AS UNSIGNED), id, got %q", listTaskSQL)
 	}
 }
 

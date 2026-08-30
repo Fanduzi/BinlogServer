@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, numeric-id-ordered paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -810,11 +810,39 @@ func filterTasksByQuery(items []tasks.Task, query taskListQuery) []tasks.Task {
 	return out
 }
 
-// sortTasksByID keeps API pages aligned with the metadata store's ORDER BY id convention.
+// sortTasksByID keeps API pages aligned with the metadata store's
+// ORDER BY CAST(id AS UNSIGNED), id convention: numeric ids ascending,
+// then non-numeric ids by string.
 func sortTasksByID(items []tasks.Task) {
 	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].ID < items[j].ID
+		return lessTaskID(items[i].ID, items[j].ID)
 	})
+}
+
+func lessTaskID(a, b string) bool {
+	ai, aOK := parseNumericTaskID(a)
+	bi, bOK := parseNumericTaskID(b)
+	switch {
+	case aOK && bOK:
+		if ai != bi {
+			return ai < bi
+		}
+		return a < b
+	case aOK:
+		return true
+	case bOK:
+		return false
+	default:
+		return a < b
+	}
+}
+
+func parseNumericTaskID(id string) (uint64, bool) {
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func taskPageBounds(total, offset, limit int) (int, int) {
