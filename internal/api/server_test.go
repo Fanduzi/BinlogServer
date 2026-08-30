@@ -1063,7 +1063,7 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
-	scheduler.ReportReplicationProgress(task.ID, time.Now().Add(-3*time.Second), "mysql-bin.000001", 123)
+	scheduler.ReportReplicationProgress(task.ID, time.Now().Add(-3*time.Second), "mysql-bin.000001", 123, false)
 	checkpointReader.checkpoints[task.ID] = binlog.Checkpoint{
 		File:      "mysql-bin.000001",
 		Pos:       123,
@@ -2745,7 +2745,7 @@ func TestTaskAPI_GetReplication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask returned error: %v", err)
 	}
-	scheduler.ReportReplicationProgress(task.ID, time.Now().Add(-8*time.Second), "mysql-bin.000777", 456)
+	scheduler.ReportReplicationProgress(task.ID, time.Now().Add(-8*time.Second), "mysql-bin.000777", 456, false)
 
 	resp := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/replication", nil)
@@ -2846,7 +2846,7 @@ func TestAPI_Dashboard(t *testing.T) {
 		t.Fatalf("StartTask A returned error: %v", err)
 	}
 
-	scheduler.ReportReplicationProgress(taskA.ID, time.Now().Add(-3*time.Second), "mysql-bin.000001", 123)
+	scheduler.ReportReplicationProgress(taskA.ID, time.Now().Add(-3*time.Second), "mysql-bin.000001", 123, false)
 
 	resp := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)

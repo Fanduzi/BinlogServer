@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding and OPEN/SEALED observability
+// output: task/start/source/file models including gtid alias decoding, OPEN/SEALED observability, and at-tip replication progress
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -199,4 +199,7 @@ type ReplicationProgress struct {
 	LastEventFile string    `json:"last_event_file"`
 	LastEventPos  uint32    `json:"last_event_pos"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// AtTip is true when the dump is at the source's current file/pos.
+	// Delay/status must not treat last-event header age as lag in that case.
+	AtTip bool `json:"-"`
 }

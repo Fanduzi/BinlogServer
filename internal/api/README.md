@@ -47,6 +47,7 @@
   - `/api/tasks/{id}/files/retry-upload`（`limit` 范围 1..1000，默认 100）
   - `/api/tasks/{id}/upload-failures/reasons`（`limit` 范围 1..200，默认 20）
 - task、replication 与 dashboard 响应保留 `FAILED` 状态及稳定的源错误 `last_error`，供管理台直接展示。
+- RUNNING 且 dump 已在源 tip（`ReplicationProgress.AtTip`）时，`delay_seconds` 为 0 / `NORMAL`，即使 `last_event_at` 仍是旧 event header；仍在追位点的 catch-up 继续按 `now - last_event_at` 计算 DELAYED。
 
 ## Update Rule
 - 路由、请求/响应结构、认证/限流配置变化时，更新本文件。
