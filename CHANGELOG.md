@@ -12,6 +12,16 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-08-30
+
+### Changed
+
+- Operator download examples in README, the landing page, and the deployment guide now pin `v0.5.1`. They still showed `v0.4.3` after the `v0.5.0` tag.
+
+### Notes
+
+- Runtime behavior is unchanged from `v0.5.0`. Isolated `make e2e-scale` (1000 control-plane tasks / 100 live streams) and production-template bearer auth were recorded locally; one MySQL fixture supplied the dump clients, so this is not independent-cluster capacity.
+
 ## [v0.5.0] - 2026-08-30
 
 ### Added

@@ -65,10 +65,10 @@ Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负�
 - `binlog-server_<version>_linux_amd64.tar.gz`
 - `binlog-server_<version>_linux_arm64.tar.gz`
 
-真实资产名是 `binlog-server_<ver>_<os>_<arch>.tar.gz`（例如 `binlog-server_0.4.3_linux_amd64.tar.gz`）。同一页提供 `checksums.txt`，先校验再解压。压缩包里有一层版本子目录：
+真实资产名是 `binlog-server_<ver>_<os>_<arch>.tar.gz`（例如 `binlog-server_0.5.1_linux_amd64.tar.gz`）。同一页提供 `checksums.txt`，先校验再解压。压缩包里有一层版本子目录：
 
 ```text
-binlog-server_0.4.3_linux_amd64/
+binlog-server_0.5.1_linux_amd64/
   binlog-server
   migrate
   migrations/
@@ -94,7 +94,7 @@ binlog-server_0.4.3_linux_amd64/
 ### 1. 下载、校验、解压、运行
 
 ```bash
-VER=0.4.3
+VER=0.5.1
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -324,7 +324,7 @@ go run ./cmd/binlog-server
 BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
 
 # 本地准备一组 release 产物
-make release-assets VERSION=v0.4.3
+make release-assets VERSION=v0.5.1
 ```
 
 ## 开发验证入口
