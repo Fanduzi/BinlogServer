@@ -19,7 +19,7 @@
 - `WithRateLimit(RateLimiterConfig) ServerOption` - 注入限流配置
 - `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。
 - `GET /api/dashboard` - 返回同口径 summary、任务明细与 source 聚合；source 状态计数同时暴露 `starting` 与 `running`。
-- `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页；支持 host/port/state 过滤，默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
+- `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页；页序为数字 id 升序；支持 host/port/state 过滤，默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
 - `GET /api/dashboard` - 支持同一组过滤/分页参数；`summary`/`sources` 按全量过滤结果聚合，仅 `tasks` 明细切页，并返回 `total/limit/offset`。
 - `POST /api/tasks/batch` - 接收 `items` 数组（1..100 个现有创建请求），整包 envelope 错误返回 400 且不创建；合法 envelope 按顺序逐项调用 `CreateTaskFromSpec`，返回 200 的 `{index,cluster_key,task|error}` 结果数组。
 
@@ -37,7 +37,7 @@
 - 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。
 - 状态汇总：summary/dashboard 保留既有计数键，并新增 `starting`；STARTING 不混入 `running`。
 - Source 聚合：dashboard source 项保留 `running`，并新增独立 `starting` 状态计数。
-- 服务端分页：任务与 dashboard 使用稳定 task ID 顺序在全量快照上过滤、计数和切片；非法 state/limit/offset/port 返回 400，limit 超过 500 返回 `invalid limit`。
+- 服务端分页：任务与 dashboard 在全量快照上过滤、计数和切片，页序按数字 task ID 升序（非数字 ID 排在数字之后、按字符串稳定排序）；非法 state/limit/offset/port 返回 400，limit 超过 500 返回 `invalid limit`。
 - 限流：基于 IP 的令牌桶限流，默认 100 req/s，burst 200
 - Tracing：OTel HTTP span（可选）
 
