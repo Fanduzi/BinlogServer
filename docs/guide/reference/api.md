@@ -316,7 +316,7 @@ curl http://localhost:8080/api/tasks/{task_id}/replication
 
 | 值 | 说明 |
 |----|------|
-| NORMAL | 正常，延迟 < 阈值 |
+| NORMAL | 正常，延迟 < 阈值；已在源 tip 时延迟视为 0（即使 `last_event_at` 是旧 event header） |
 | DELAYED | 延迟，延迟 >= 阈值 |
 | ABNORMAL | 异常，无法获取位点 |
 | IDLE | 空闲，长时间无事件 |

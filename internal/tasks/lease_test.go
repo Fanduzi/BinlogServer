@@ -369,7 +369,7 @@ func TestScheduler_OwnershipLossSuppressesProgressAfterRenewLoss(t *testing.T) {
 		t.Fatal("runner was not invoked")
 	}
 
-	s.ReportReplicationProgress(task.ID, time.Unix(100, 0), "mysql-bin.000001", 123)
+	s.ReportReplicationProgress(task.ID, time.Unix(100, 0), "mysql-bin.000001", 123, false)
 	before, ok, err := s.GetReplicationProgress(task.ID)
 	if err != nil {
 		t.Fatalf("GetReplicationProgress returned error: %v", err)
@@ -380,7 +380,7 @@ func TestScheduler_OwnershipLossSuppressesProgressAfterRenewLoss(t *testing.T) {
 
 	waitTaskState(t, s, task.ID, 2*time.Second, StateStopping)
 
-	s.ReportReplicationProgress(task.ID, time.Unix(200, 0), "mysql-bin.000002", 456)
+	s.ReportReplicationProgress(task.ID, time.Unix(200, 0), "mysql-bin.000002", 456, false)
 	after, ok, err := s.GetReplicationProgress(task.ID)
 	if err != nil {
 		t.Fatalf("GetReplicationProgress returned error: %v", err)
@@ -586,7 +586,7 @@ func TestScheduler_FailSafeStopSuppressesReplicationProgress(t *testing.T) {
 		t.Fatal("runner was not invoked")
 	}
 
-	s.ReportReplicationProgress(task.ID, time.Unix(100, 0), "mysql-bin.000001", 123)
+	s.ReportReplicationProgress(task.ID, time.Unix(100, 0), "mysql-bin.000001", 123, false)
 	before, ok, err := s.GetReplicationProgress(task.ID)
 	if err != nil {
 		t.Fatalf("GetReplicationProgress returned error: %v", err)
@@ -601,7 +601,7 @@ func TestScheduler_FailSafeStopSuppressesReplicationProgress(t *testing.T) {
 
 	waitTaskState(t, s, task.ID, 2*time.Second, StateStopping)
 
-	s.ReportReplicationProgress(task.ID, time.Unix(200, 0), "mysql-bin.000002", 456)
+	s.ReportReplicationProgress(task.ID, time.Unix(200, 0), "mysql-bin.000002", 456, false)
 	after, ok, err := s.GetReplicationProgress(task.ID)
 	if err != nil {
 		t.Fatalf("GetReplicationProgress returned error: %v", err)

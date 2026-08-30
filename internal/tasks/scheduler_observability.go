@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and store snapshots
-// output: observability-facing task progress, events, files, runs, and worker heartbeat views
+// output: observability-facing task progress including at-tip lag, events, files, runs, and worker heartbeat views
 // pos: scheduler read/query layer for API and metrics consumption
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -13,7 +13,7 @@ import (
 	"binlog_server/internal/binlog"
 )
 
-func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32) {
+func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32, atTip bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -36,6 +36,7 @@ func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.
 	if pos > 0 {
 		progress.LastEventPos = pos
 	}
+	progress.AtTip = atTip
 	progress.UpdatedAt = time.Now()
 	s.replica[taskID] = progress
 }

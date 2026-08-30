@@ -7,9 +7,9 @@
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用，以及可重试的 `SOURCE_UNREACHABLE`）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
-- `scheduler_observability.go`: 复制进度、checkpoint、事件/文件/运行历史查询。
+- `scheduler_observability.go`: 复制进度（含 at-tip）、checkpoint、事件/文件/运行历史查询。
 - `scheduler_retry_upload.go`: 上传失败补偿重试与失败原因聚合。
-- `model.go`: 任务领域模型与状态定义。
+- `model.go`: 任务领域模型与状态定义（含复制进度 `AtTip`）。
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
 - `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试，覆盖 localhost、127/8、::1 与 IPv6 括号表示。
 - `event_store_test.go` 中 fake store 为并发安全实现，用于 `-race` 校验稳定性。

@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, checkpoint semantics, error propagation, and stop cleanup
+// output: runner-level tests for start selection, LATEST at-tip vs catch-up progress, checkpoint semantics, error propagation, and stop cleanup
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -80,14 +80,16 @@ type progressReport struct {
 	at     time.Time
 	file   string
 	pos    uint32
+	atTip  bool
 }
 
-func (f *fakeRunnerProgressReporter) ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32) {
+func (f *fakeRunnerProgressReporter) ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32, atTip bool) {
 	f.reports = append(f.reports, progressReport{
 		taskID: taskID,
 		at:     sourceEventAt,
 		file:   file,
 		pos:    pos,
+		atTip:  atTip,
 	})
 }
 
@@ -128,9 +130,9 @@ type streamResult struct {
 }
 
 type fakeStreamer struct {
-	results         []streamResult
-	calls           int
-	blockUntilCtx   bool
+	results          []streamResult
+	calls            int
+	blockUntilCtx    bool
 	getEventReturned chan struct{}
 }
 
@@ -158,13 +160,13 @@ func (f *fakeStreamer) GetEvent(ctx context.Context) (*goreplication.BinlogEvent
 }
 
 type fakeSyncer struct {
-	streamer      binlogStreamer
-	startPos      gomysql.Position
-	startPosCalls int
-	startGTID     gomysql.GTIDSet
+	streamer       binlogStreamer
+	startPos       gomysql.Position
+	startPosCalls  int
+	startGTID      gomysql.GTIDSet
 	startGTIDCalls int
-	startErr      error
-	closeCalls    int
+	startErr       error
+	closeCalls     int
 }
 
 func (f *fakeSyncer) StartSync(pos gomysql.Position) (binlogStreamer, error) {
@@ -190,11 +192,15 @@ func (f *fakeSyncer) Close() {
 }
 
 func newRunnerEvent(logPos uint32) *goreplication.BinlogEvent {
+	return newRunnerEventAt(logPos, time.Now())
+}
+
+func newRunnerEventAt(logPos uint32, ts time.Time) *goreplication.BinlogEvent {
 	return &goreplication.BinlogEvent{
 		Header: &goreplication.EventHeader{
 			EventType: goreplication.QUERY_EVENT,
 			LogPos:    logPos,
-			Timestamp: uint32(time.Now().Unix()),
+			Timestamp: uint32(ts.Unix()),
 		},
 		RawData: []byte{0x01, 0x02, 0x03},
 	}
@@ -249,6 +255,120 @@ func TestMySQLRunnerRun_LatestResolvesAndStartsFromMasterStatus(t *testing.T) {
 	}
 	if closer.closeCalls != 1 {
 		t.Fatalf("expected writer closer called once, got %d", closer.closeCalls)
+	}
+}
+
+func newTestRunner(t *testing.T, fetcher sourceMetaFetcher, syncer binlogSyncer, reporter *fakeRunnerProgressReporter) *MySQLRunner {
+	t.Helper()
+	return &MySQLRunner{
+		fetcher:          fetcher,
+		progressReporter: reporter,
+		newSyncer: func(_ goreplication.BinlogSyncerConfig) binlogSyncer {
+			return syncer
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			file := &fakeSyncFile{}
+			return &fakeCloser{}, binlog.NewWriter(file, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+	}
+}
+
+// TestMySQLRunnerRun_LatestStartReportsAtTipBeforeNextEvent 验证 LATEST 在 StartSync 成功后立刻按 at-tip 上报，
+// 不等 2s idle，也不把 dump 握手事件的旧 header 时间当成落后。
+func TestMySQLRunnerRun_LatestStartReportsAtTipBeforeNextEvent(t *testing.T) {
+	oldEventAt := time.Date(2026, 8, 27, 4, 47, 20, 0, time.UTC)
+	fetcher := &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000003", Pos: 56456},
+		serverUUID: "srv-uuid-1",
+	}
+	streamer := &fakeStreamer{
+		results: []streamResult{
+			{event: newRunnerEventAt(0, oldEventAt)},
+			{err: context.Canceled},
+		},
+	}
+	syncer := &fakeSyncer{streamer: streamer}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := newTestRunner(t, fetcher, syncer, reporter)
+
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest}))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(reporter.reports) == 0 {
+		t.Fatal("expected LATEST start to report at-tip progress before the next dump event / idle timeout")
+	}
+	first := reporter.reports[0]
+	if !first.atTip || first.file != "mysql-bin.000003" || first.pos != 56456 {
+		t.Fatalf("first progress report %+v, want at-tip mysql-bin.000003:56456 immediately after StartSync", first)
+	}
+	last := reporter.reports[len(reporter.reports)-1]
+	if !last.atTip {
+		t.Fatalf("handshake event overwrote at-tip: last report %+v", last)
+	}
+	if last.file != "mysql-bin.000003" || last.pos != 56456 {
+		t.Fatalf("last progress report %+v, want tip file/pos preserved", last)
+	}
+}
+
+// TestMySQLRunnerRun_FilePosCatchUpKeepsEventHeaderLag 验证 FILE_POS 追旧事件时不能标成 at-tip。
+func TestMySQLRunnerRun_FilePosCatchUpKeepsEventHeaderLag(t *testing.T) {
+	oldEventAt := time.Date(2026, 8, 27, 4, 47, 20, 0, time.UTC)
+	streamer := &fakeStreamer{
+		results: []streamResult{
+			{event: newRunnerEventAt(120, oldEventAt)},
+			{err: context.Canceled},
+		},
+	}
+	syncer := &fakeSyncer{streamer: streamer}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := newTestRunner(t, &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"}, syncer, reporter)
+
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: "mysql-bin.000010",
+		Pos:  4,
+	}))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(reporter.reports) != 1 {
+		t.Fatalf("expected 1 catch-up progress report, got %+v", reporter.reports)
+	}
+	got := reporter.reports[0]
+	if got.atTip {
+		t.Fatalf("FILE_POS catch-up reported at-tip: %+v", got)
+	}
+	if got.pos != 120 || !got.at.Equal(oldEventAt) {
+		t.Fatalf("catch-up report %+v, want pos=120 and old event header time", got)
+	}
+}
+
+// TestMySQLRunnerRun_IdlePollReportsAtTip 验证 2s idle 与 LATEST start 共用 at-tip 规则。
+func TestMySQLRunnerRun_IdlePollReportsAtTip(t *testing.T) {
+	streamer := &fakeStreamer{
+		results: []streamResult{
+			{err: context.DeadlineExceeded},
+			{err: context.Canceled},
+		},
+	}
+	syncer := &fakeSyncer{streamer: streamer}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := newTestRunner(t, &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"}, syncer, reporter)
+
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: "mysql-bin.000010",
+		Pos:  4,
+	}))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(reporter.reports) != 1 || !reporter.reports[0].atTip {
+		t.Fatalf("idle poll should report at-tip, got %+v", reporter.reports)
+	}
+	if reporter.reports[0].file != "mysql-bin.000010" || reporter.reports[0].pos != 4 {
+		t.Fatalf("idle at-tip report %+v, want start file/pos", reporter.reports[0])
 	}
 }
 
@@ -336,8 +456,8 @@ func TestMySQLRunnerRun_AdvancesCheckpointOnlyAfterFlush(t *testing.T) {
 	syncer := &fakeSyncer{streamer: streamer}
 	reporter := &fakeRunnerProgressReporter{}
 	runner := &MySQLRunner{
-		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
-		checkpointStore: store,
+		fetcher:          &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		checkpointStore:  store,
 		progressReporter: reporter,
 		newSyncer: func(_ goreplication.BinlogSyncerConfig) binlogSyncer {
 			return syncer
@@ -469,7 +589,7 @@ func TestMySQLRunnerRun_ContextCancelStopsAndReleasesResources(t *testing.T) {
 	defer cancel()
 
 	streamer := &fakeStreamer{
-		blockUntilCtx:   true,
+		blockUntilCtx:    true,
 		getEventReturned: make(chan struct{}),
 	}
 	syncer := &fakeSyncer{streamer: streamer}

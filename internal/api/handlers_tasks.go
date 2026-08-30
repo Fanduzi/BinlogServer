@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, numeric-id-ordered paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, numeric-id-ordered paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -927,11 +927,16 @@ func buildReplicationResponse(task tasks.Task, progress tasks.ReplicationProgres
 		if !progress.LastEventAt.IsZero() {
 			lastEventAt := progress.LastEventAt
 			resp.LastEventAt = &lastEventAt
-			delay := int64(now.Sub(progress.LastEventAt).Seconds())
-			if delay < 0 {
-				delay = 0
+			if progress.AtTip {
+				// Dump is at the source tip (LATEST start or idle). Header age is not lag.
+				resp.DelaySeconds = 0
+			} else {
+				delay := int64(now.Sub(progress.LastEventAt).Seconds())
+				if delay < 0 {
+					delay = 0
+				}
+				resp.DelaySeconds = delay
 			}
-			resp.DelaySeconds = delay
 		}
 		if !progress.UpdatedAt.IsZero() {
 			updatedAt := progress.UpdatedAt

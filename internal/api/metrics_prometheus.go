@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: scheduler/task service snapshots and progress used for metric exposition
-// output: Prometheus collector and /metrics handler wiring with stable metric contracts
+// output: Prometheus collector and /metrics handler wiring with stable metric contracts, including at-tip replication lag of 0
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -117,7 +117,7 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			continue
 		}
 		lag := now.Sub(progress.LastEventAt).Seconds()
-		if lag < 0 {
+		if progress.AtTip || lag < 0 {
 			lag = 0
 		}
 		ch <- prometheus.MustNewConstMetric(c.replicationLagSeconds, prometheus.GaugeValue, lag, task.ID)

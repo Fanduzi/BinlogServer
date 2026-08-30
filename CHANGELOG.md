@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- LATEST start at the source tip no longer reports `DELAYED` from a days-old binlog event header. `delay_seconds` is 0 / `NORMAL` as soon as StartSync succeeds; FILE_POS/GTID catch-up that is still behind the tip keeps real lag. `last_event_at` may still show the last event header time.
+
 ## [v0.5.1] - 2026-08-30
 
 ### Changed
