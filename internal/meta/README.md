@@ -1,7 +1,7 @@
 # internal/meta Module
 
 ## Files
-- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）。
+- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`ListTasks` 使用 `ORDER BY CAST(id AS UNSIGNED), id`，不改变 `id` 列类型。
 - `lease_store.go`: lease 读写逻辑。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。

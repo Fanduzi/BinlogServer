@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, task pagination/filter validation regression coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
+// output: REST/dashboard responses, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -2454,6 +2454,127 @@ func TestTaskAPI_TaskPaginationAndDashboardAggregation(t *testing.T) {
 	if len(dashboard.Tasks) != 1 || dashboard.Tasks[0].Task.Source.Password != "" || len(dashboard.Sources) != 1 || dashboard.Sources[0].TaskCount != combinedTasks || dashboard.Sources[0].Abnormal != combinedTasks {
 		t.Fatalf("unexpected dashboard page/source response: %+v", dashboard)
 	}
+}
+
+// TestTaskAPI_ListTasksNumericIDPageOrder 验证任务列表按数字 id 升序分页，非数字 id 排在数字之后。
+func TestTaskAPI_ListTasksNumericIDPageOrder(t *testing.T) {
+	store := newFakeAPIRunHistoryStore()
+	for _, id := range []string{"100", "10", "2", "1", "task-b", "task-a"} {
+		store.tasks[id] = tasks.Task{
+			ID:         id,
+			Name:       "task-" + id,
+			ClusterKey: "cluster-" + id,
+			State:      tasks.StateCreated,
+			Source: tasks.SourceConfig{
+				Host:     "db-a",
+				Port:     3306,
+				User:     "repl",
+				Password: "secret",
+			},
+		}
+	}
+	scheduler := tasks.NewScheduler(tasks.WithStore(store))
+	if err := scheduler.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	handler := NewServer(scheduler)
+
+	type taskPage struct {
+		Items  []tasks.Task `json:"items"`
+		Total  int          `json:"total"`
+		Limit  int          `json:"limit"`
+		Offset int          `json:"offset"`
+	}
+	getIDs := func(path string) []string {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s returned %d body=%s", path, resp.Code, resp.Body.String())
+		}
+		var page taskPage
+		if err := json.Unmarshal(resp.Body.Bytes(), &page); err != nil {
+			t.Fatalf("decode %s: %v body=%s", path, err, resp.Body.String())
+		}
+		ids := make([]string, len(page.Items))
+		for i, item := range page.Items {
+			ids[i] = item.ID
+		}
+		return ids
+	}
+
+	if got, want := getIDs("/api/tasks?limit=10&offset=0"), []string{"1", "2", "10", "100", "task-a", "task-b"}; !equalStrings(got, want) {
+		t.Fatalf("first page ids = %v, want %v", got, want)
+	}
+	if got, want := getIDs("/api/tasks?limit=2&offset=0"), []string{"1", "2"}; !equalStrings(got, want) {
+		t.Fatalf("offset=0 limit=2 ids = %v, want %v", got, want)
+	}
+	if got, want := getIDs("/api/tasks?limit=2&offset=2"), []string{"10", "100"}; !equalStrings(got, want) {
+		t.Fatalf("offset=2 limit=2 ids = %v, want %v", got, want)
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/dashboard?limit=10&offset=0", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("dashboard returned %d body=%s", resp.Code, resp.Body.String())
+	}
+	var dashboard struct {
+		Tasks []struct {
+			Task tasks.Task `json:"task"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &dashboard); err != nil {
+		t.Fatalf("decode dashboard: %v", err)
+	}
+	got := make([]string, len(dashboard.Tasks))
+	for i, item := range dashboard.Tasks {
+		got[i] = item.Task.ID
+	}
+	want := []string{"1", "2", "10", "100", "task-a", "task-b"}
+	if !equalStrings(got, want) {
+		t.Fatalf("dashboard page ids = %v, want %v", got, want)
+	}
+}
+
+// TestSortTasksByID_NumericPageOrder 验证 sortTasksByID+paginateTasks 按数字 id 切页。
+func TestSortTasksByID_NumericPageOrder(t *testing.T) {
+	items := []tasks.Task{
+		{ID: "100"},
+		{ID: "task-b"},
+		{ID: "2"},
+		{ID: "10"},
+		{ID: "task-a"},
+		{ID: "1"},
+	}
+	sortTasksByID(items)
+	got := taskIDs(paginateTasks(items, 0, 10))
+	want := []string{"1", "2", "10", "100", "task-a", "task-b"}
+	if !equalStrings(got, want) {
+		t.Fatalf("sorted page ids = %v, want %v", got, want)
+	}
+	if got, want := taskIDs(paginateTasks(items, 0, 4)), []string{"1", "2", "10", "100"}; !equalStrings(got, want) {
+		t.Fatalf("offset=0 limit=4 ids = %v, want %v", got, want)
+	}
+}
+
+func taskIDs(items []tasks.Task) []string {
+	ids := make([]string, len(items))
+	for i, item := range items {
+		ids[i] = item.ID
+	}
+	return ids
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestAPI_SourceLookup 验证相关行为。
