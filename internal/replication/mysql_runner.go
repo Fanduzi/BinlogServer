@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, idle lag progress, and permanent source errors
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip/idle lag progress, and permanent source errors
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -125,8 +125,8 @@ type FileUploader interface {
 
 // ProgressReporter 定义复制进度上报接口。
 type ProgressReporter interface {
-	// ReportReplicationProgress 上报复制进度。
-	ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32)
+	// ReportReplicationProgress 上报复制进度。atTip 表示 dump 已在源库当前 file/pos。
+	ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32, atTip bool)
 }
 
 // LeaseVerifier 定义 cluster 下 lease ownership 校验接口。
@@ -196,7 +196,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	// Step 1: 解析源库标识与复制起点（含 checkpoint 接管修正）。
 	// 常见误解：
 	// onReady 只表示“复制连接+writer 已就绪”，不代表已经收到第一条业务事件。
-	// RUNNING 的含义是执行链路 ready，而不是延迟一定为 0。
+	// FILE_POS/GTID 追旧事件时 RUNNING 仍可 DELAYED；fresh LATEST 在 StartSync 成功时已在源 tip。
 	// source_server_uuid 作为 object key 的稳定维度，避免 cluster_key 相同但源实例切换时冲突。
 	sourceServerUUID, err := r.fetcher.FetchServerUUID(ctx, task.Source)
 	if err != nil {
@@ -208,10 +208,12 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	}
 
 	// 先解析请求的 start strategy（LATEST/FILE_POS/GTID）。
+	requestedLatest := task.Start.Mode == tasks.StartModeLatest || task.Start.Mode == ""
 	start, err := ResolveStart(ctx, task, r.fetcher)
 	if err != nil {
 		return classifySourceError(err)
 	}
+	checkpointExists := false
 	if r.checkpointStore != nil {
 		// 持久化 checkpoint 优先级更高，保证重启后的 resumability。
 		checkpoint, ok, err := r.checkpointStore.LoadCheckpoint(ctx, task.ID)
@@ -219,7 +221,11 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			return err
 		}
 		start, _ = effectiveStartForTakeover(task, start, checkpoint, ok)
+		checkpointExists = ok
 	}
+	// Fresh LATEST has already resolved to SHOW MASTER STATUS, so StartSync is at tip.
+	// A checkpoint means this run may still be catching up.
+	atTip := requestedLatest && !checkpointExists
 
 	// Step 2: 打开当前 open 文件并构造 writer。
 	currentFile := start.File
@@ -299,7 +305,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 		if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
 			if r.progressReporter != nil {
-				r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos)
+				r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
 			}
 			return nil
 		}
@@ -365,7 +371,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 					}
 				}
 				if r.progressReporter != nil {
-					r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos)
+					r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
 				}
 				return nil
 			}
@@ -383,7 +389,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			return err
 		}
 		if r.progressReporter != nil {
-			r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos)
+			r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
 		}
 		return nil
 	}
@@ -422,6 +428,11 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		return classifySourceError(err)
 	}
 
+	if atTip && r.progressReporter != nil {
+		// LATEST StartSync is already at master file/pos; do not wait for idle or the next event.
+		r.progressReporter.ReportReplicationProgress(task.ID, time.Now().UTC(), currentFile, currentPos, true)
+	}
+
 	if onReady != nil {
 		// 到这里说明“连接 + 起点 + writer”都已 ready，Scheduler 可安全切 RUNNING。
 		onReady()
@@ -431,7 +442,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		// SynchronousEventHandler 模式下，事件由 syncer 内部 goroutine 推送到 handler。
 		// 这里阻塞等待错误或取消，保持任务生命周期。
 		for {
-			event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos)
+			event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos, &atTip)
 			if err != nil {
 				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 					return nil
@@ -446,7 +457,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 	// Step 5: 异步模式主循环（逐条拉取并处理事件）。
 	for {
-		event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos)
+		event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos, &atTip)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				return nil
@@ -464,7 +475,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 const idlePollInterval = 2 * time.Second
 
-func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID, file string, pos uint32) (*replication.BinlogEvent, error) {
+func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID, file string, pos uint32, atTip *bool) (*replication.BinlogEvent, error) {
 	eventCtx, cancel := context.WithTimeout(ctx, idlePollInterval)
 	event, err := streamer.GetEvent(eventCtx)
 	cancel()
@@ -477,9 +488,12 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			// No event for idlePollInterval means the dump is at tip.
-			// Use wall clock so last-event age on a silent master is not reported as lag.
+			// Share the LATEST-start at-tip rule: delay must not use event-header age.
+			if atTip != nil {
+				*atTip = true
+			}
 			if r.progressReporter != nil {
-				r.progressReporter.ReportReplicationProgress(taskID, time.Now().UTC(), file, pos)
+				r.progressReporter.ReportReplicationProgress(taskID, time.Now().UTC(), file, pos, true)
 			}
 			return nil, nil
 		}

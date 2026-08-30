@@ -189,7 +189,7 @@ curl http://localhost:8080/api/tasks/{task_id}/replication
 
 关键字段：
 - `status`: `NORMAL / DELAYED / ABNORMAL`
-- `delay_seconds`: 基于 `last_event_at` 计算的延迟秒数
+- `delay_seconds`: lag in seconds. At the source tip (LATEST start after StartSync, or idle dump wait) this is 0 even if `last_event_at` is an old event header. Catch-up that is still behind the source tip uses `now - last_event_at`.
 - `has_progress=false`: 当前没有可用复制进度（需结合任务状态判断）
 
 ### 3.4 任务事件
