@@ -49,7 +49,7 @@ FLUSH PRIVILEGES;
 
 ```bash
 # 推荐：下载 GitHub Release tarball（不需要 Go）
-VER=0.5.1
+VER=0.5.2
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"

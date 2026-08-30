@@ -12,9 +12,16 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.2] - 2026-08-30
+
+### Changed
+
+- Operator download examples in README, the landing page, and the deployment guide now pin `v0.5.2`.
+
 ### Fixed
 
 - LATEST start at the source tip no longer reports `DELAYED` from a days-old binlog event header. `delay_seconds` is 0 / `NORMAL` as soon as StartSync succeeds; FILE_POS/GTID catch-up that is still behind the tip keeps real lag. `last_event_at` may still show the last event header time.
+- Task list and dashboard pages sort numeric string ids as integers, so page 1 is `1,2,3` rather than `1,10,100`.
 
 ## [v0.5.1] - 2026-08-30
 
