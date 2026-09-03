@@ -1,7 +1,7 @@
 # internal/meta Module
 
 ## Files
-- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`ListTasks` 使用 `ORDER BY CAST(id AS UNSIGNED), id`，不改变 `id` 列类型。
+- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`ListTasks` 使用 `ORDER BY CAST(id AS UNSIGNED), id`，不改变 `id` 列类型。配置了 encryption key 时只加密 `source_json` 的 `password` 字段（`enc:aes256:`），无 key 时保持明文以兼容现有部署。
 - `lease_store.go`: lease 读写逻辑。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。
@@ -10,11 +10,12 @@
 
 ## Exports
 - Task/Checkpoint/Event/File（含 OPEN/SEALED）/Lease/Run/Worker metadata 存储接口。
+- `NewMySQLTaskStoreWithSchemaTimeout(dsn, timeout, encryptionKey)`：可选 AES-256 key，用于 source 密码加解密。
 - 启动期 schema 版本与结构校验（支持 schema 校验超时配置）。
 
 ## Dependencies
 - Upstream: `internal/tasks`, `internal/app`, `internal/replication`。
-- Downstream: MySQL (`database/sql`)。
+- Downstream: MySQL (`database/sql`)；源库密码加解密复用 `internal/config` 的 AES-256-GCM helpers。
 - Retry adaptor: `github.com/cenkalti/backoff/v4`（仅 `retry.go` 内部使用）。
 - Tracing: `go.opentelemetry.io/otel`（仅在 app 启用 tracing 时生效）。
 - SQL codegen: `github.com/sqlc-dev/sqlc`（通过 Makefile 统一生成/校验）。

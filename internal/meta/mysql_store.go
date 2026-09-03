@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
-// input: MySQL connections, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with ListTasks ordered by numeric id
+// input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with ListTasks ordered by numeric id and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/config"
 	"binlog_server/internal/meta/sqlcgen"
 	"binlog_server/internal/tasks"
 
@@ -329,21 +330,27 @@ WHERE worker_id = ?;
 type MySQLTaskStore struct {
 	db            *sql.DB
 	schemaTimeout time.Duration
+	sourceCrypto  *config.Decryptor
 }
 
 // NewMySQLTaskStore 创建 MySQL 元数据存储并校验 schema 就绪。
 func NewMySQLTaskStore(dsn string) (*MySQLTaskStore, error) {
-	return NewMySQLTaskStoreWithSchemaTimeout(dsn, 5*time.Second)
+	return NewMySQLTaskStoreWithSchemaTimeout(dsn, 5*time.Second, "")
 }
 
 // NewMySQLTaskStoreWithSchemaTimeout 创建 MySQL 元数据存储并设置 schema 校验超时。
-func NewMySQLTaskStoreWithSchemaTimeout(dsn string, schemaTimeout time.Duration) (*MySQLTaskStore, error) {
+// encryptionKey 为空时 source_json 密码保持明文；非空时使用 AES-256-GCM（enc:aes256:）。
+func NewMySQLTaskStoreWithSchemaTimeout(dsn string, schemaTimeout time.Duration, encryptionKey string) (*MySQLTaskStore, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
 
 	store := newMySQLTaskStoreFromDB(db, schemaTimeout)
+	if err := store.setSourcePasswordKey(encryptionKey); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), store.schemaTimeout)
 	defer cancel()
 	if err := store.ensureSchema(ctx); err != nil {
@@ -362,6 +369,52 @@ func newMySQLTaskStoreFromDB(db *sql.DB, schemaTimeout time.Duration) *MySQLTask
 		db:            db,
 		schemaTimeout: schemaTimeout,
 	}
+}
+
+func (s *MySQLTaskStore) setSourcePasswordKey(key string) error {
+	if s == nil {
+		return nil
+	}
+	if strings.TrimSpace(key) == "" {
+		s.sourceCrypto = nil
+		return nil
+	}
+	decryptor, err := config.NewDecryptor(key)
+	if err != nil {
+		return err
+	}
+	s.sourceCrypto = decryptor
+	return nil
+}
+
+func (s *MySQLTaskStore) marshalSource(source tasks.SourceConfig) ([]byte, error) {
+	if s != nil && s.sourceCrypto != nil && source.Password != "" && !strings.HasPrefix(source.Password, config.EncryptionPrefix) {
+		encrypted, err := s.sourceCrypto.Encrypt(source.Password)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt source password: %w", err)
+		}
+		source.Password = encrypted
+	}
+	return json.Marshal(source)
+}
+
+func (s *MySQLTaskStore) unmarshalSource(sourceJSON string) (tasks.SourceConfig, error) {
+	var source tasks.SourceConfig
+	if err := json.Unmarshal([]byte(sourceJSON), &source); err != nil {
+		return source, err
+	}
+	if source.Password == "" || !strings.HasPrefix(source.Password, config.EncryptionPrefix) {
+		return source, nil
+	}
+	if s == nil || s.sourceCrypto == nil {
+		return source, fmt.Errorf("encrypted source password requires --encryption-key: %w", config.ErrEncryptionKeyRequired)
+	}
+	plain, err := s.sourceCrypto.Decrypt(source.Password)
+	if err != nil {
+		return source, fmt.Errorf("decrypt source password: %w", err)
+	}
+	source.Password = plain
+	return source, nil
 }
 
 // Close 关闭底层数据库连接。
@@ -478,7 +531,7 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.upsert_task")
 	defer endMetaSpan(span)
 
-	sourceJSON, err := json.Marshal(task.Source)
+	sourceJSON, err := s.marshalSource(task.Source)
 	if err != nil {
 		return err
 	}
@@ -609,9 +662,11 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 		task.Epoch = epoch
 		task.RunID = runID.String
 		task.UpdatedAt = updatedAt
-		if err := json.Unmarshal([]byte(sourceJSON), &task.Source); err != nil {
+		source, err := s.unmarshalSource(sourceJSON)
+		if err != nil {
 			return nil, fmt.Errorf("decode source json for task %s: %w", task.ID, err)
 		}
+		task.Source = source
 		if err := json.Unmarshal([]byte(startJSON), &task.Start); err != nil {
 			return nil, fmt.Errorf("decode start json for task %s: %w", task.ID, err)
 		}

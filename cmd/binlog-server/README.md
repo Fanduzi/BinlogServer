@@ -5,7 +5,7 @@
 - `cmd/root.go`: Cobra root command，负责配置加载与应用启动。
 
 ## Exports
-- CLI 接口：`binlog-server --config <path>`。
+- CLI 接口：`binlog-server --config <path>`；`--encryption-key` 同时解密 `enc:aes256:` 配置值并加密 meta 中的源库密码。
 - 运行入口：执行 app 运行时。
 
 ## Dependencies

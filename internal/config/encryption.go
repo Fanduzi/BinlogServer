@@ -1,7 +1,7 @@
 // Package config provides module-level functionality for config.
-// input: encrypted config values with enc:aes256: prefix
-// output: decrypted plaintext values for internal use
-// pos: security boundary for protecting sensitive configuration values
+// input: plaintext or enc:aes256: values and a 32-byte AES-256 key
+// output: AES-256-GCM encrypt/decrypt helpers sharing the enc:aes256: prefix
+// pos: security boundary for protecting sensitive configuration and source-password values
 // note: if this file changes, update this header and module README.md.
 package config
 

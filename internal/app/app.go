@@ -61,6 +61,7 @@ var newAppMetaStoreForRun = func(cfg config.Config) (appMetaStore, error) {
 	return meta.NewMySQLTaskStoreWithSchemaTimeout(
 		cfg.MetaDSN,
 		time.Duration(cfg.Meta.Timeout.WriteSec)*time.Second,
+		cfg.EncryptionKey,
 	)
 }
 
