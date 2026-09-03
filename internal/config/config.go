@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
-// input: YAML files, environment variables, default config constants
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets
+// input: YAML files, environment variables, default config constants, optional --encryption-key
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets and default protect flags to true when auth is enabled and unset
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -352,6 +352,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			ServiceName: getString(v, decryptor, "tracing.service_name", "tracing_service_name"),
 		},
 	}
+	applyEnabledAuthProtectDefaults(v, &cfg.API.Auth)
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
 	}
@@ -384,6 +385,33 @@ func getBool(v *viper.Viper, keys ...string) bool {
 	for _, key := range keys {
 		if v.IsSet(key) {
 			return v.GetBool(key)
+		}
+	}
+	return false
+}
+
+// applyEnabledAuthProtectDefaults treats unset protect flags as true when auth is enabled.
+// Do not SetDefault(protect_*, true): that would fail enabled=false validation.
+func applyEnabledAuthProtectDefaults(v *viper.Viper, auth *APIAuthConfig) {
+	if auth == nil || !auth.Enabled {
+		return
+	}
+	if !isBoolConfigured(v, "api.auth.protect_api", "api_auth_protect_api") {
+		auth.ProtectAPI = true
+	}
+	if !isBoolConfigured(v, "api.auth.protect_metrics", "api_auth_protect_metrics") {
+		auth.ProtectMetrics = true
+	}
+}
+
+func isBoolConfigured(v *viper.Viper, keys ...string) bool {
+	for _, key := range keys {
+		if v.InConfig(key) {
+			return true
+		}
+		envKey := "BINLOG_SERVER_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+		if val, ok := os.LookupEnv(envKey); ok && strings.TrimSpace(val) != "" {
+			return true
 		}
 	}
 	return false

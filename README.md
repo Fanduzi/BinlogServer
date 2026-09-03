@@ -182,12 +182,13 @@ For more operational and usage guidance, continue from [docs/guide/README.md](do
 
 > ⚠️ **Security Warning**
 >
-> By default, API authentication is **DISABLED** for development convenience.
+> By default, API authentication is **DISABLED** only for loopback demo binds (`127.0.0.1`/`localhost`/`::1`).
+> Non-loopback `listen_addr` (including the default `:8080` and `0.0.0.0:8080`) fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are all true. `PRODUCTION=true` still requires the same independently.
 >
 > **For production deployments, you MUST:**
 > 1. Set `api.auth.enabled: true` (or `BINLOG_SERVER_API_AUTH_ENABLED=true`)
 > 2. Configure your authentication method (Bearer Token or API Key)
-> 3. Protect `/api/*` and `/metrics`
+> 3. Protect `/api/*` and `/metrics` (these default true when auth is enabled and the flags are unset)
 >
 > See [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md) for security guidance.
 
@@ -195,7 +196,7 @@ For more operational and usage guidance, continue from [docs/guide/README.md](do
 
 Development defaults are intentionally permissive. Do not carry them unchanged into production.
 
-- Auth: disabled by default; production should protect at least `/api/*` and `/metrics`
+- Auth: disabled by default only on loopback; non-loopback listen and `PRODUCTION=true` require enabled auth plus protected `/api/*` and `/metrics`
 - Meta DB: if `meta_dsn` is configured, use an independent MySQL instance that is never a replication source, and run migrations first; the service does not auto-create or auto-upgrade schema
 - Standalone without `meta_dsn` keeps task metadata, checkpoints, and file records in memory only. `kill -9` / process restart drops the control plane. Binlog bytes already written under `{data_dir}/{task_id}/` remain as orphan files. With `meta_dsn`, persisted active tasks resume automatically from their checkpoint after restart, and `GET /files` includes the current `OPEN` segment. `storage.dir` is ignored; files always go to `{data_dir}/{task_id}/`.
 - Upload: S3-compatible upload is optional, but required fields must be complete when enabled

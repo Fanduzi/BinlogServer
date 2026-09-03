@@ -181,12 +181,13 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 
 > ⚠️ **Security Warning**
 >
-> 默认关闭 API authentication，是为了降低开发环境启动门槛。
+> 默认关闭 API authentication 仅适用于 loopback 演示绑定（`127.0.0.1`/`localhost`/`::1`）。
+> 非 loopback 的 `listen_addr`（含默认 `:8080` 和 `0.0.0.0:8080`）启动时 fail-close，必须同时开启 `api.auth.enabled`、`protect_api` 和 `protect_metrics`。`PRODUCTION=true` 仍会独立强制同一组约束。
 >
 > **生产环境必须：**
 > 1. 设置 `api.auth.enabled: true`（或 `BINLOG_SERVER_API_AUTH_ENABLED=true`）
 > 2. 配置认证方式（Bearer Token 或 API Key）
-> 3. 保护 `/api/*` 与 `/metrics`
+> 3. 保护 `/api/*` 与 `/metrics`（`enabled=true` 且未显式设置时，这两个标志默认为 true）
 >
 > 具体安全建议见 [SECURITY.md](SECURITY.md) 与 [docs/security.md](docs/security.md)。
 
@@ -194,7 +195,7 @@ curl -fsS http://127.0.0.1:8080/api/tasks
 
 开发环境默认值偏宽松，生产环境不要直接照搬。
 
-- Auth：默认关闭，生产环境至少应保护 `/api/*` 与 `/metrics`
+- Auth：仅 loopback 默认可关闭；非 loopback listen 与 `PRODUCTION=true` 都要求开启鉴权并保护 `/api/*` 与 `/metrics`
 - Meta DB：如果配置了 `meta_dsn`，必须使用绝不作为复制源的独立 MySQL 实例，并先执行 migration；服务不会自动建表或自动升级 schema
 - 未配置 `meta_dsn` 的 standalone：任务元数据、checkpoint、文件记录只在内存。进程 `kill -9` / 重启后控制面清空。已经写到 `{data_dir}/{task_id}/` 的 binlog 会变成孤儿文件。配置 `meta_dsn` 后，持久化的 active task 会在重启时自动从 checkpoint 续传，运行中 `GET /files` 也会列出当前 `OPEN` segment。`storage.dir` 会被忽略，真实路径固定为 `{data_dir}/{task_id}/`。
 - Upload：S3-compatible upload 是可选能力，但一旦启用，必填项必须完整
