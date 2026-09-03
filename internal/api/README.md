@@ -30,7 +30,7 @@
 - Tracing: `go.opentelemetry.io/otel`
 
 ## Features
-- 认证：支持 Bearer Token 或 API Key；`/healthz` 默认匿名，`/metrics` 与 `/api/*` 可配置保护
+- 认证：支持 Bearer Token 或 API Key；`/healthz` 默认匿名，`/metrics` 与 `/api/*` 可配置保护。`sanitizeTask` 在响应中清空 `source.password`（解密仅供内部使用）。`/ui` 与 `/swagger` 仍不走 API auth。
 - 创建任务：`CreateTaskFromSpec` 整包校验通过后才落库；400 返回 JSON `{"error","code"}`。批量创建复用同一入口，单项错误不阻塞后续项，成功任务脱敏返回。
 - source lookup：`GET /api/sources/lookup` 使用 tasks 共享 loopback 分类归并 localhost 与显式 loopback literal，端口仍严格匹配；非 loopback host 保持修剪后的原文精确匹配且不做 DNS 解析。
 - 健康检查：`GET /healthz` 文本 `ok`；`GET /api/health` JSON `{"status":"ok"}`

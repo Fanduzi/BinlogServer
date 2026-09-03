@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets and default protect flags to true when auth is enabled and unset
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -53,6 +53,10 @@ type Config struct {
 	Meta MetaConfig
 	// Tracing 是 OpenTelemetry tracing 配置（默认关闭）。
 	Tracing TracingConfig
+
+	// EncryptionKey 来自 --encryption-key / LoadConfigWithEncryption，不从 YAML 读取。
+	// 空值表示不加密 backup_tasks.source_json 中的源库密码。
+	EncryptionKey string
 }
 
 // ClusterConfig 定义 cluster 角色和 lease 参数。
@@ -351,6 +355,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			SampleRatio: getFloat64(v, "tracing.sample_ratio", "tracing_sample_ratio"),
 			ServiceName: getString(v, decryptor, "tracing.service_name", "tracing_service_name"),
 		},
+		EncryptionKey: encryptionKey,
 	}
 	applyEnabledAuthProtectDefaults(v, &cfg.API.Auth)
 	if err := validateConfig(cfg); err != nil {

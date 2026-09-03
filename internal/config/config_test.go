@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional encryption key
-// output: config loading regression coverage including unresolved protected-auth secret rejection and enabled-auth protect-flag defaults
+// output: config loading regression coverage including unresolved protected-auth secret rejection, enabled-auth protect-flag defaults, and EncryptionKey passthrough
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -635,5 +635,24 @@ api:
 	}
 	if cfg.API.Auth.ProtectAPI || cfg.API.Auth.ProtectMetrics {
 		t.Fatalf("expected explicit protect false to be preserved, got %+v", cfg.API.Auth)
+	}
+}
+
+func TestLoadConfigWithEncryption_RetainsKey(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "")
+
+	key := "01234567890123456789012345678901"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("listen_addr: \"127.0.0.1:18080\"\n"), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err := LoadConfigWithEncryption(path, key)
+	if err != nil {
+		t.Fatalf("LoadConfigWithEncryption returned error: %v", err)
+	}
+	if cfg.EncryptionKey != key {
+		t.Fatalf("expected encryption key to be retained for meta wiring, got %q", cfg.EncryptionKey)
 	}
 }

@@ -17,7 +17,7 @@ api:
     mode: bearer
     bearer_token: "your-secret-token"
     protect_api: true
-    protect_metrics: true  # Optional: also protect /metrics endpoint
+    protect_metrics: true  # defaults to true when api.auth.enabled=true and unset
 ```
 
 Or via environment variables:
@@ -99,6 +99,8 @@ For enhanced security, you can encrypt sensitive values in your configuration fi
    ```bash
    ./binlog-server --config config.yaml --encryption-key "your-32-byte-encryption-key"
    ```
+   The same key encrypts task source passwords in `backup_tasks.source_json`. Without a key, those passwords remain plaintext JSON.
+
 ### Encrypted Value Format
 
 Encrypted values use the format: `enc:aes256:<base64-encoded-ciphertext>`
@@ -160,3 +162,5 @@ When authentication is disabled, Binlog Server will display a warning at startup
 The control-plane also fail-closes when `listen_addr` is not loopback (`:8080` and `0.0.0.0:8080` count as non-loopback). Local demo on `127.0.0.1`/`localhost`/`::1` may keep auth disabled.
 
 In production mode (when `PRODUCTION=true` environment variable is set), the server will refuse to start without authentication enabled. This check is independent of listen_addr and is not weakened.
+
+When `--encryption-key` is set, task source passwords are stored in `backup_tasks.source_json` as `enc:aes256:` ciphertext and decrypted only for internal use. API responses still redact `source.password`. Without a key, existing plaintext rows continue to load.

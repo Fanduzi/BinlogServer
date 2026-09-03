@@ -1,5 +1,5 @@
 // Package cmd provides module-level functionality for cmd.
-// input: config loader, signal context, logging setup, app runtime dependencies
+// input: config loader, optional --encryption-key, signal context, logging setup, app runtime dependencies
 // output: root cobra command that starts binlog-server without dumping Usage on bind errors
 // pos: CLI orchestration entry between process bootstrap and app lifecycle
 // note: if this file changes, update this header and module README.md.
@@ -35,7 +35,7 @@ func NewRootCommand() *cobra.Command {
 	}
 
 	root.Flags().StringVarP(&configPath, "config", "c", "", "YAML config file path (default: ./config.yaml if exists)")
-	root.Flags().StringVar(&encryptionKey, "encryption-key", "", "Encryption key for encrypted config values (32 bytes for AES-256)")
+	root.Flags().StringVar(&encryptionKey, "encryption-key", "", "AES-256 key (32 bytes) for enc:aes256: config values and source passwords in meta")
 	root.Flags().BoolVar(&versionOnly, "version", false, "Print version and exit")
 	root.AddCommand(newVersionCommand())
 	return root
