@@ -243,7 +243,7 @@ export BINLOG_SERVER_META_DSN="$META_DSN"
 ### 生产环境忘了开 auth
 
 - 这是当前最需要显式覆盖的开发默认值。
-- 开发环境默认关闭 auth，生产环境不应该这样部署。
+- 本机 loopback（127.0.0.1/localhost/::1）可以保持关闭鉴权；非 loopback 监听和 PRODUCTION=true 必须开鉴权。
 - 具体安全配置建议见 [SECURITY.md](SECURITY.md) 和 [docs/security.md](docs/security.md)。
 
 ### upload 配置了但上传不工作

@@ -1,6 +1,6 @@
+# Loopback may stay unauthenticated for local demo.
 # Non-loopback binds (:8080, 0.0.0.0:8080) require api.auth.enabled + protect_api + protect_metrics.
-# Loopback (127.0.0.1/localhost/::1) may stay unauthenticated for local demo.
-listen_addr: ":8080"
+listen_addr: "127.0.0.1:8080"
 data_dir: "./data"
 meta_dsn: "${BINLOG_SERVER_META_DSN}" # 推荐用环境变量注入，避免明文口令
 mode: "standalone" # standalone | cluster
@@ -30,8 +30,7 @@ api:
     bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}" # 推荐用环境变量注入
     api_key: ""
     api_key_header: "X-API-Key"
-    protect_api: false # enabled=true 且未设置时默认为 true；显式 false 仅 loopback 可启动
-    protect_metrics: false
+    # Omit protect_api / protect_metrics: when enabled=true they default to true.
 
 http:
   control_plane:

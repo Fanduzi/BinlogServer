@@ -246,7 +246,7 @@ If you enable upload, provide at least:
 ### Auth was left disabled in production
 
 - This is the most important development default to override.
-- Development keeps auth off for convenience; production should not.
+- Loopback binds (127.0.0.1/localhost/::1) may stay unauthenticated; non-loopback listen and PRODUCTION=true require auth.
 - See [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md) for concrete guidance.
 
 ### Upload is configured but files do not upload
