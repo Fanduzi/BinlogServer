@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, LATEST at-tip vs catch-up progress, checkpoint semantics, error propagation, and stop cleanup
+// output: runner-level tests for start selection, LATEST at-tip vs catch-up/idle-behind progress, checkpoint semantics, error propagation, and stop cleanup
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -344,8 +344,12 @@ func TestMySQLRunnerRun_FilePosCatchUpKeepsEventHeaderLag(t *testing.T) {
 	}
 }
 
-// TestMySQLRunnerRun_IdlePollReportsAtTip 验证 2s idle 与 LATEST start 共用 at-tip 规则。
+// TestMySQLRunnerRun_IdlePollReportsAtTip 验证 dump 已在 master file/pos 时，2s idle 标 at-tip。
 func TestMySQLRunnerRun_IdlePollReportsAtTip(t *testing.T) {
+	fetcher := &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000010", Pos: 4},
+		serverUUID: "srv-uuid-1",
+	}
 	streamer := &fakeStreamer{
 		results: []streamResult{
 			{err: context.DeadlineExceeded},
@@ -354,7 +358,7 @@ func TestMySQLRunnerRun_IdlePollReportsAtTip(t *testing.T) {
 	}
 	syncer := &fakeSyncer{streamer: streamer}
 	reporter := &fakeRunnerProgressReporter{}
-	runner := newTestRunner(t, &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"}, syncer, reporter)
+	runner := newTestRunner(t, fetcher, syncer, reporter)
 
 	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
 		Mode: tasks.StartModeFilePos,
@@ -364,11 +368,98 @@ func TestMySQLRunnerRun_IdlePollReportsAtTip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
+	if fetcher.fetchStatusCall != 1 {
+		t.Fatalf("idle at-tip should confirm via FetchMasterStatus once, got %d", fetcher.fetchStatusCall)
+	}
 	if len(reporter.reports) != 1 || !reporter.reports[0].atTip {
-		t.Fatalf("idle poll should report at-tip, got %+v", reporter.reports)
+		t.Fatalf("idle poll at master file/pos should report at-tip, got %+v", reporter.reports)
 	}
 	if reporter.reports[0].file != "mysql-bin.000010" || reporter.reports[0].pos != 4 {
 		t.Fatalf("idle at-tip report %+v, want start file/pos", reporter.reports[0])
+	}
+}
+
+// TestMySQLRunnerRun_IdlePollBehindMasterDoesNotReportAtTip 验证追位点时 2s idle
+// 不能把 atTip 粘成 true；落后 master 时 delay 继续按 event time。
+func TestMySQLRunnerRun_IdlePollBehindMasterDoesNotReportAtTip(t *testing.T) {
+	oldEventAt := time.Date(2026, 8, 27, 4, 47, 20, 0, time.UTC)
+	fetcher := &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000020", Pos: 100},
+		serverUUID: "srv-uuid-1",
+	}
+	streamer := &fakeStreamer{
+		results: []streamResult{
+			{err: context.DeadlineExceeded},
+			{event: newRunnerEventAt(120, oldEventAt)},
+			{err: context.Canceled},
+		},
+	}
+	syncer := &fakeSyncer{streamer: streamer}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := newTestRunner(t, fetcher, syncer, reporter)
+
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: "mysql-bin.000010",
+		Pos:  4,
+	}))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if fetcher.fetchStatusCall != 1 {
+		t.Fatalf("idle should confirm tip via FetchMasterStatus once, got %d", fetcher.fetchStatusCall)
+	}
+	if len(reporter.reports) != 2 {
+		t.Fatalf("expected idle + catch-up progress reports, got %+v", reporter.reports)
+	}
+	idle := reporter.reports[0]
+	if idle.atTip {
+		t.Fatalf("idle while behind master reported at-tip: %+v", idle)
+	}
+	if !idle.at.IsZero() {
+		t.Fatalf("idle-behind report must not overwrite event time, got %+v", idle)
+	}
+	if idle.file != "mysql-bin.000010" || idle.pos != 4 {
+		t.Fatalf("idle-behind report %+v, want start file/pos", idle)
+	}
+	got := reporter.reports[1]
+	if got.atTip {
+		t.Fatalf("atTip stuck true after idle while behind: %+v", got)
+	}
+	if got.pos != 120 || !got.at.Equal(oldEventAt) {
+		t.Fatalf("catch-up report %+v, want pos=120 and old event header time", got)
+	}
+}
+
+// TestMySQLRunnerRun_IdlePollMasterStatusErrorDoesNotReportAtTip 验证 idle 无法确认 master 位点时保守保持 atTip=false。
+func TestMySQLRunnerRun_IdlePollMasterStatusErrorDoesNotReportAtTip(t *testing.T) {
+	fetcher := &fakeSourceMetaFetcher{
+		statusErr:  errors.New("show master status failed"),
+		serverUUID: "srv-uuid-1",
+	}
+	streamer := &fakeStreamer{
+		results: []streamResult{
+			{err: context.DeadlineExceeded},
+			{err: context.Canceled},
+		},
+	}
+	syncer := &fakeSyncer{streamer: streamer}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := newTestRunner(t, fetcher, syncer, reporter)
+
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: "mysql-bin.000010",
+		Pos:  4,
+	}))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if fetcher.fetchStatusCall != 1 {
+		t.Fatalf("idle should still call FetchMasterStatus, got %d", fetcher.fetchStatusCall)
+	}
+	if len(reporter.reports) != 1 || reporter.reports[0].atTip {
+		t.Fatalf("idle with master-status error should not report at-tip, got %+v", reporter.reports)
 	}
 }
 

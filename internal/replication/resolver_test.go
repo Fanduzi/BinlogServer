@@ -1,7 +1,7 @@
 // Package replication provides module-level functionality for replication.
-// input: source replication config, task state, checkpoint/file store dependencies
-// output: replication run control, local binlog artifacts, and upload/recovery signals
-// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// input: task start strategy, fake MasterStatusFetcher, dump file/pos fixtures
+// output: resolver coverage for start modes and conservative dump-vs-master file/pos comparison
+// pos: start-point resolver and idle at-tip comparison test boundary
 // note: if this file changes, update this header and module README.md.
 package replication
 
@@ -217,5 +217,96 @@ func TestResolveStart_UnsupportedMode(t *testing.T) {
 	_, err := ResolveStart(context.Background(), task, &fakeStatusFetcher{})
 	if err == nil || err.Error() != "unsupported start mode: BAD_MODE" {
 		t.Fatalf("expected unsupported start mode error, got %v", err)
+	}
+}
+
+// TestDumpAtOrBeyondMaster 验证 dump 与 master file/pos 的保守比较（先 file 后 pos）。
+func TestDumpAtOrBeyondMaster(t *testing.T) {
+	tests := []struct {
+		name   string
+		file   string
+		pos    uint32
+		master MasterStatus
+		want   bool
+	}{
+		{
+			name:   "same file and pos",
+			file:   "mysql-bin.000010",
+			pos:    4,
+			master: MasterStatus{File: "mysql-bin.000010", Pos: 4},
+			want:   true,
+		},
+		{
+			name:   "same file dump ahead",
+			file:   "mysql-bin.000010",
+			pos:    100,
+			master: MasterStatus{File: "mysql-bin.000010", Pos: 4},
+			want:   true,
+		},
+		{
+			name:   "same file dump behind",
+			file:   "mysql-bin.000010",
+			pos:    4,
+			master: MasterStatus{File: "mysql-bin.000010", Pos: 100},
+			want:   false,
+		},
+		{
+			name:   "dump later file",
+			file:   "mysql-bin.000011",
+			pos:    4,
+			master: MasterStatus{File: "mysql-bin.000010", Pos: 999},
+			want:   true,
+		},
+		{
+			name:   "dump earlier file",
+			file:   "mysql-bin.000009",
+			pos:    999,
+			master: MasterStatus{File: "mysql-bin.000010", Pos: 4},
+			want:   false,
+		},
+		{
+			name:   "padded suffix same seq",
+			file:   "mysql-bin.000010",
+			pos:    4,
+			master: MasterStatus{File: "mysql-bin.10", Pos: 4},
+			want:   true,
+		},
+		{
+			name:   "different prefix",
+			file:   "mysql-bin.000010",
+			pos:    4,
+			master: MasterStatus{File: "binlog.000010", Pos: 4},
+			want:   false,
+		},
+		{
+			name:   "unparseable dump file",
+			file:   "custom-binlog",
+			pos:    4,
+			master: MasterStatus{File: "mysql-bin.000010", Pos: 4},
+			want:   false,
+		},
+		{
+			name:   "empty master",
+			file:   "mysql-bin.000010",
+			pos:    4,
+			master: MasterStatus{},
+			want:   false,
+		},
+		{
+			name:   "master pos zero",
+			file:   "mysql-bin.000010",
+			pos:    4,
+			master: MasterStatus{File: "mysql-bin.000010", Pos: 0},
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := dumpAtOrBeyondMaster(tt.file, tt.pos, tt.master)
+			if got != tt.want {
+				t.Fatalf("dumpAtOrBeyondMaster(%q, %d, %+v)=%v, want %v", tt.file, tt.pos, tt.master, got, tt.want)
+			}
+		})
 	}
 }
