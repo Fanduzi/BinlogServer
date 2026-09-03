@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip/idle lag progress, and permanent source errors
+// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, and permanent source errors
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -442,7 +442,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		// SynchronousEventHandler 模式下，事件由 syncer 内部 goroutine 推送到 handler。
 		// 这里阻塞等待错误或取消，保持任务生命周期。
 		for {
-			event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos, &atTip)
+			event, err := r.nextEvent(ctx, streamer, task.ID, task.Source, currentFile, currentPos, &atTip)
 			if err != nil {
 				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 					return nil
@@ -457,7 +457,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 	// Step 5: 异步模式主循环（逐条拉取并处理事件）。
 	for {
-		event, err := r.nextEvent(ctx, streamer, task.ID, currentFile, currentPos, &atTip)
+		event, err := r.nextEvent(ctx, streamer, task.ID, task.Source, currentFile, currentPos, &atTip)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				return nil
@@ -475,7 +475,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 const idlePollInterval = 2 * time.Second
 
-func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID, file string, pos uint32, atTip *bool) (*replication.BinlogEvent, error) {
+func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID string, source tasks.SourceConfig, file string, pos uint32, atTip *bool) (*replication.BinlogEvent, error) {
 	eventCtx, cancel := context.WithTimeout(ctx, idlePollInterval)
 	event, err := streamer.GetEvent(eventCtx)
 	cancel()
@@ -487,19 +487,35 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 			return nil, err
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			// No event for idlePollInterval means the dump is at tip.
-			// Share the LATEST-start at-tip rule: delay must not use event-header age.
+			// Quiet dump wait is not at-tip by itself: FILE_POS/GTID catch-up can
+			// idle while still behind SHOW MASTER STATUS. Confirm file then pos.
+			tip := r.confirmIdleAtTip(ctx, source, file, pos)
 			if atTip != nil {
-				*atTip = true
+				*atTip = tip
 			}
 			if r.progressReporter != nil {
-				r.progressReporter.ReportReplicationProgress(taskID, time.Now().UTC(), file, pos, true)
+				eventAt := time.Time{}
+				if tip {
+					eventAt = time.Now().UTC()
+				}
+				r.progressReporter.ReportReplicationProgress(taskID, eventAt, file, pos, tip)
 			}
 			return nil, nil
 		}
 		return nil, classifySourceError(err)
 	}
 	return event, nil
+}
+
+func (r *MySQLRunner) confirmIdleAtTip(ctx context.Context, source tasks.SourceConfig, file string, pos uint32) bool {
+	if r.fetcher == nil {
+		return false
+	}
+	status, err := r.fetcher.FetchMasterStatus(ctx, source)
+	if err != nil {
+		return false
+	}
+	return dumpAtOrBeyondMaster(file, pos, status)
 }
 
 // finalizeSealedFile 负责 open 文件 seal、元数据落库以及 best-effort 上传。
