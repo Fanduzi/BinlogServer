@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, task state transitions, scheduling decisions, and execution coordination
+// output: source validation decisions, task state transitions, scheduling decisions, expired-lease listing contract, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -80,6 +80,12 @@ type TaskStore interface {
 	ListTasks(ctx context.Context) ([]Task, error)
 	// DeleteTask 删除指定任务。
 	DeleteTask(ctx context.Context, taskID string) error
+}
+
+// ExpiredLeaseTaskLister lists active tasks whose cluster lease has expired.
+type ExpiredLeaseTaskLister interface {
+	// ListTasksWithExpiredLease lists RUNNING/LEASE_DEGRADED/RETRY_BACKOFF tasks with lease_expire_at <= NOW(6).
+	ListTasksWithExpiredLease(ctx context.Context) ([]Task, error)
 }
 
 type taskRunReader interface {

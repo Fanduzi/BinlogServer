@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, persisted task state, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production control-plane auth checks, metadata/source isolation, restart recovery, and shutdown
+// output: role-aware application lifecycle control with production control-plane auth checks, metadata/source isolation, restart recovery, expired-lease claim, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -298,7 +298,7 @@ func (a *App) Run(ctx context.Context) error {
 				effectiveBinaryVersion(),
 				5*time.Second,
 			)
-			// 定期认领 STARTING 任务，驱动分发后的任务进入真实执行。
+			// 定期认领 STARTING 与租约已过期任务，驱动分发后的任务进入真实执行。
 			go startWorkerClaimLoop(runCtx, scheduler, 2*time.Second)
 		}
 	}
@@ -727,8 +727,9 @@ type workerRegistrationStore interface {
 	ReleaseWorkerRegistration(ctx context.Context, workerID, sessionID string) error
 }
 
-type startingTaskClaimer interface {
+type workerTaskClaimer interface {
 	ClaimStartingTasks() (int, error)
+	ClaimExpiredTasks() (int, error)
 }
 
 // startWorkerHeartbeatLoop 周期上报 worker ONLINE/OFFLINE 心跳。
@@ -774,8 +775,8 @@ func startWorkerHeartbeatLoop(ctx context.Context, sink workerHeartbeatSink, wor
 	}
 }
 
-// startWorkerClaimLoop 周期触发 STARTING 任务认领，驱动 worker 拉起待执行任务。
-func startWorkerClaimLoop(ctx context.Context, claimer startingTaskClaimer, interval time.Duration) {
+// startWorkerClaimLoop 周期触发 STARTING 与过期租约任务认领，驱动 worker 拉起待执行任务。
+func startWorkerClaimLoop(ctx context.Context, claimer workerTaskClaimer, interval time.Duration) {
 	if claimer == nil {
 		return
 	}
@@ -795,10 +796,14 @@ func startWorkerClaimLoop(ctx context.Context, claimer startingTaskClaimer, inte
 			claimed, err := claimer.ClaimStartingTasks()
 			if err != nil {
 				log.Printf("worker claim starting tasks failed err=%v", err)
-				continue
-			}
-			if claimed > 0 {
+			} else if claimed > 0 {
 				log.Printf("worker claimed starting tasks count=%d", claimed)
+			}
+			expired, err := claimer.ClaimExpiredTasks()
+			if err != nil {
+				log.Printf("worker claim expired-lease tasks failed err=%v", err)
+			} else if expired > 0 {
+				log.Printf("worker claimed expired-lease tasks count=%d", expired)
 			}
 		}
 	}

@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with ListTasks ordered by numeric id
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with ListTasks ordered by numeric id and ListTasksWithExpiredLease for cluster takeover
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -142,6 +142,15 @@ const listTaskSQL = `
 SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
 FROM backup_tasks
 ORDER BY CAST(id AS UNSIGNED), id;
+`
+
+const listTasksWithExpiredLeaseSQL = `
+SELECT t.id, t.name, t.cluster_key, t.state, t.last_error, t.owner_worker_id, t.epoch, t.run_id, t.source_json, t.start_json, t.storage_json, t.updated_at
+FROM backup_tasks t
+INNER JOIN task_leases l ON l.task_id = t.id
+WHERE t.state IN ('RUNNING', 'LEASE_DEGRADED', 'RETRY_BACKOFF')
+  AND l.lease_expire_at <= NOW(6)
+ORDER BY CAST(t.id AS UNSIGNED), t.id;
 `
 
 const deleteTaskSQL = `
@@ -330,6 +339,9 @@ type MySQLTaskStore struct {
 	db            *sql.DB
 	schemaTimeout time.Duration
 }
+
+var _ tasks.TaskStore = (*MySQLTaskStore)(nil)
+var _ tasks.ExpiredLeaseTaskLister = (*MySQLTaskStore)(nil)
 
 // NewMySQLTaskStore 创建 MySQL 元数据存储并校验 schema 就绪。
 func NewMySQLTaskStore(dsn string) (*MySQLTaskStore, error) {
@@ -571,7 +583,23 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanBackupTaskRows(rows)
+}
 
+// ListTasksWithExpiredLease lists active tasks whose joined lease row is already expired.
+func (s *MySQLTaskStore) ListTasksWithExpiredLease(ctx context.Context) ([]tasks.Task, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks_with_expired_lease")
+	defer endMetaSpan(span)
+
+	rows, err := s.db.QueryContext(ctx, listTasksWithExpiredLeaseSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBackupTaskRows(rows)
+}
+
+func scanBackupTaskRows(rows *sql.Rows) ([]tasks.Task, error) {
 	var list []tasks.Task
 	for rows.Next() {
 		var (

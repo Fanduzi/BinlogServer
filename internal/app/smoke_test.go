@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth and worker-only regression coverage
+// output: application lifecycle plus real-route production auth, worker-only, and expired-lease claim-loop regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -811,6 +811,52 @@ func TestApp_ClusterWorkerIDUsedConsistentlyBySchedulerAndHeartbeat(t *testing.T
 	}
 	if hb.WorkerID != startedTask.OwnerWorkerID {
 		t.Fatalf("expected heartbeat worker_id equals scheduler owner_worker_id, hb=%q task=%q", hb.WorkerID, startedTask.OwnerWorkerID)
+	}
+}
+
+type fakeWorkerClaimer struct {
+	mu              sync.Mutex
+	startingCalls   int
+	expiredCalls    int
+	startingErr     error
+	expiredErr      error
+	startingClaimed int
+	expiredClaimed  int
+}
+
+func (f *fakeWorkerClaimer) ClaimStartingTasks() (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.startingCalls++
+	return f.startingClaimed, f.startingErr
+}
+
+func (f *fakeWorkerClaimer) ClaimExpiredTasks() (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expiredCalls++
+	return f.expiredClaimed, f.expiredErr
+}
+
+// TestStartWorkerClaimLoop_ClaimsStartingAndExpired 验证认领循环同时认领 STARTING 与过期租约任务。
+func TestStartWorkerClaimLoop_ClaimsStartingAndExpired(t *testing.T) {
+	claimer := &fakeWorkerClaimer{startingClaimed: 1, expiredClaimed: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go startWorkerClaimLoop(ctx, claimer, 10*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		claimer.mu.Lock()
+		startingCalls, expiredCalls := claimer.startingCalls, claimer.expiredCalls
+		claimer.mu.Unlock()
+		if startingCalls > 0 && expiredCalls > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected both claim methods, starting=%d expired=%d", startingCalls, expiredCalls)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
