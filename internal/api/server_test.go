@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
+// output: REST/dashboard responses, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -93,13 +93,37 @@ func (s *fakeAPIRunHistoryStore) UpsertTask(_ context.Context, task tasks.Task) 
 	return nil
 }
 
-// ListTasks 实现对应功能逻辑。
-func (s *fakeAPIRunHistoryStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+func (s *fakeAPIRunHistoryStore) snapshot() []tasks.Task {
 	out := make([]tasks.Task, 0, len(s.tasks))
 	for _, task := range s.tasks {
 		out = append(out, task)
 	}
-	return out, nil
+	return out
+}
+
+// GetTask 实现对应功能逻辑。
+func (s *fakeAPIRunHistoryStore) GetTask(_ context.Context, taskID string) (tasks.Task, error) {
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return tasks.Task{}, tasks.ErrTaskNotFound
+	}
+	return task, nil
+}
+
+// ListTasks 实现对应功能逻辑。
+func (s *fakeAPIRunHistoryStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+	return s.snapshot(), nil
+}
+
+// ListTasksPage 实现对应功能逻辑。
+func (s *fakeAPIRunHistoryStore) ListTasksPage(_ context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	page, total := tasks.PageTasks(s.snapshot(), filter)
+	return page, total, nil
+}
+
+// ListStartingUnownedTasks 实现对应功能逻辑。
+func (s *fakeAPIRunHistoryStore) ListStartingUnownedTasks(_ context.Context) ([]tasks.Task, error) {
+	return tasks.StartingUnownedTasks(s.snapshot()), nil
 }
 
 // DeleteTask 实现对应功能逻辑。
@@ -836,13 +860,37 @@ func (s *failingUpdateStore) UpsertTask(_ context.Context, task tasks.Task) erro
 	return nil
 }
 
-// ListTasks 实现对应功能逻辑。
-func (s *failingUpdateStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+func (s *failingUpdateStore) snapshot() []tasks.Task {
 	out := make([]tasks.Task, 0, len(s.tasks))
 	for _, task := range s.tasks {
 		out = append(out, task)
 	}
-	return out, nil
+	return out
+}
+
+// GetTask 实现对应功能逻辑。
+func (s *failingUpdateStore) GetTask(_ context.Context, taskID string) (tasks.Task, error) {
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return tasks.Task{}, tasks.ErrTaskNotFound
+	}
+	return task, nil
+}
+
+// ListTasks 实现对应功能逻辑。
+func (s *failingUpdateStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+	return s.snapshot(), nil
+}
+
+// ListTasksPage 实现对应功能逻辑。
+func (s *failingUpdateStore) ListTasksPage(_ context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	page, total := tasks.PageTasks(s.snapshot(), filter)
+	return page, total, nil
+}
+
+// ListStartingUnownedTasks 实现对应功能逻辑。
+func (s *failingUpdateStore) ListStartingUnownedTasks(_ context.Context) ([]tasks.Task, error) {
+	return tasks.StartingUnownedTasks(s.snapshot()), nil
 }
 
 // DeleteTask 实现对应功能逻辑。
@@ -2533,6 +2581,109 @@ func TestTaskAPI_ListTasksNumericIDPageOrder(t *testing.T) {
 	want := []string{"1", "2", "10", "100", "task-a", "task-b"}
 	if !equalStrings(got, want) {
 		t.Fatalf("dashboard page ids = %v, want %v", got, want)
+	}
+}
+
+type panicListTaskStore struct {
+	tasks map[string]tasks.Task
+}
+
+func newPanicListTaskStore() *panicListTaskStore {
+	return &panicListTaskStore{tasks: make(map[string]tasks.Task)}
+}
+
+func (s *panicListTaskStore) snapshot() []tasks.Task {
+	out := make([]tasks.Task, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		out = append(out, task)
+	}
+	return out
+}
+
+func (s *panicListTaskStore) UpsertTask(_ context.Context, task tasks.Task) error {
+	s.tasks[task.ID] = task
+	return nil
+}
+
+func (s *panicListTaskStore) GetTask(_ context.Context, taskID string) (tasks.Task, error) {
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return tasks.Task{}, tasks.ErrTaskNotFound
+	}
+	return task, nil
+}
+
+func (s *panicListTaskStore) ListTasks(context.Context) ([]tasks.Task, error) {
+	panic("ListTasks must not be used for paged list")
+}
+
+func (s *panicListTaskStore) ListTasksPage(_ context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	page, total := tasks.PageTasks(s.snapshot(), filter)
+	return page, total, nil
+}
+
+func (s *panicListTaskStore) ListStartingUnownedTasks(_ context.Context) ([]tasks.Task, error) {
+	return tasks.StartingUnownedTasks(s.snapshot()), nil
+}
+
+func (s *panicListTaskStore) DeleteTask(_ context.Context, taskID string) error {
+	delete(s.tasks, taskID)
+	return nil
+}
+
+// TestTaskAPI_ListTasksPageDoesNotLoadAllRows 验证列表/dashboard 翻页走 ListTasksPage，不依赖整表 ListTasks。
+func TestTaskAPI_ListTasksPageDoesNotLoadAllRows(t *testing.T) {
+	const totalTasks = 6
+	store := newPanicListTaskStore()
+	for i := 1; i <= totalTasks; i++ {
+		id := strconv.Itoa(i)
+		store.tasks[id] = tasks.Task{
+			ID:         id,
+			Name:       "task-" + id,
+			ClusterKey: "cluster-" + id,
+			State:      tasks.StateCreated,
+			Source:     tasks.SourceConfig{Host: "db-a", Port: 3306, User: "repl"},
+		}
+	}
+	handler := NewServer(tasks.NewScheduler(tasks.WithStore(store)))
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/tasks?limit=2&offset=2", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("list returned %d body=%s", resp.Code, resp.Body.String())
+	}
+	var page struct {
+		Items  []tasks.Task `json:"items"`
+		Total  int          `json:"total"`
+		Limit  int          `json:"limit"`
+		Offset int          `json:"offset"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode list: %v body=%s", err, resp.Body.String())
+	}
+	if page.Total != totalTasks || page.Limit != 2 || page.Offset != 2 || len(page.Items) != 2 {
+		t.Fatalf("unexpected page: %+v", page)
+	}
+	if page.Items[0].ID != "3" || page.Items[1].ID != "4" {
+		t.Fatalf("unexpected page ids: %s %s", page.Items[0].ID, page.Items[1].ID)
+	}
+
+	dashboardResp := httptest.NewRecorder()
+	handler.ServeHTTP(dashboardResp, httptest.NewRequest(http.MethodGet, "/api/dashboard?limit=2&offset=2", nil))
+	if dashboardResp.Code != http.StatusOK {
+		t.Fatalf("dashboard returned %d body=%s", dashboardResp.Code, dashboardResp.Body.String())
+	}
+	var dashboard struct {
+		Total int `json:"total"`
+		Tasks []struct {
+			Task tasks.Task `json:"task"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(dashboardResp.Body.Bytes(), &dashboard); err != nil {
+		t.Fatalf("decode dashboard: %v body=%s", err, dashboardResp.Body.String())
+	}
+	if dashboard.Total != totalTasks || len(dashboard.Tasks) != 2 || dashboard.Tasks[0].Task.ID != "3" || dashboard.Tasks[1].Task.ID != "4" {
+		t.Fatalf("unexpected dashboard page: %+v", dashboard)
 	}
 }
 

@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
-// input: replication/checkpoint/event/file/history read requests and store snapshots
+// input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
 // output: observability-facing task progress including at-tip lag, events, files, runs, and worker heartbeat views
-// pos: scheduler read/query layer for API and metrics consumption
+// pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -91,26 +91,17 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 	store := s.store
 	s.mu.Unlock()
 
-	// Step 1: 内存未命中时，从 store 同步一次任务视图。
+	// Step 1: 内存未命中时，按主键补齐该任务，不加载整表。
 	if !ok && store != nil {
 		readCtx, cancel := s.withReadTimeout(ctx)
-		list, err := store.ListTasks(readCtx)
+		item, err := store.GetTask(readCtx, taskID)
 		cancel()
 		if err != nil {
 			return binlog.Checkpoint{}, false, err
 		}
-		found := false
 		s.mu.Lock()
-		for _, item := range list {
-			s.tasks[item.ID] = item
-			if item.ID == taskID {
-				found = true
-			}
-		}
+		s.tasks[item.ID] = item
 		s.mu.Unlock()
-		if !found {
-			return binlog.Checkpoint{}, false, ErrTaskNotFound
-		}
 	}
 	if !ok && store == nil {
 		return binlog.Checkpoint{}, false, ErrTaskNotFound

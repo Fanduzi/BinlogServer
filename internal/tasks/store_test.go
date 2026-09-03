@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
+// output: persistence-backed scheduler coverage including GetTask/ListTasksPage fakes
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -32,16 +32,46 @@ func (f *fakeStore) UpsertTask(_ context.Context, task Task) error {
 	return nil
 }
 
+func (f *fakeStore) snapshot() []Task {
+	out := make([]Task, 0, len(f.tasks))
+	for _, t := range f.tasks {
+		out = append(out, t)
+	}
+	return out
+}
+
+// GetTask 实现对应功能逻辑。
+func (f *fakeStore) GetTask(_ context.Context, taskID string) (Task, error) {
+	task, ok := f.tasks[taskID]
+	if !ok {
+		return Task{}, ErrTaskNotFound
+	}
+	return task, nil
+}
+
 // ListTasks 实现对应功能逻辑。
 func (f *fakeStore) ListTasks(_ context.Context) ([]Task, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	out := make([]Task, 0, len(f.tasks))
-	for _, t := range f.tasks {
-		out = append(out, t)
+	return f.snapshot(), nil
+}
+
+// ListTasksPage 实现对应功能逻辑。
+func (f *fakeStore) ListTasksPage(_ context.Context, filter TaskListFilter) ([]Task, int, error) {
+	if f.listErr != nil {
+		return nil, 0, f.listErr
 	}
-	return out, nil
+	page, total := PageTasks(f.snapshot(), filter)
+	return page, total, nil
+}
+
+// ListStartingUnownedTasks 实现对应功能逻辑。
+func (f *fakeStore) ListStartingUnownedTasks(_ context.Context) ([]Task, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return StartingUnownedTasks(f.snapshot()), nil
 }
 
 // DeleteTask 实现对应功能逻辑。

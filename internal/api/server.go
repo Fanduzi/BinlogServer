@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses including task batch creation, /healthz, and /api/health
+// output: REST API responses including SQL-paged task lists, task batch creation, /healthz, and /api/health
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -40,6 +40,7 @@ type taskService interface {
 	ListRuns(id string, limit int) ([]tasks.TaskRun, error)
 	ListWorkerHeartbeats(limit int) ([]tasks.WorkerHeartbeat, error)
 	ListTasks() []tasks.Task
+	ListTasksPage(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error)
 	DeleteTask(id string) error
 	StartTask(id string) error
 	StopTask(id string) error

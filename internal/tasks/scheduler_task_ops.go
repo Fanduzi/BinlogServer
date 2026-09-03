@@ -1,12 +1,13 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task mutation requests, metadata source policy, full create specs, and persisted task snapshots from TaskStore
-// output: source-isolated task CRUD/config updates persisted only after whole-spec validation
+// input: task mutation requests, metadata source policy, full create specs, and TaskStore GetTask/ListTasksPage
+// output: source-isolated task CRUD/config updates, primary-key GetTask refresh, and paged list reads
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strconv"
 	"time"
@@ -326,7 +327,7 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 
 func (s *Scheduler) GetTask(id string) (Task, error) {
 	// 常见误解：
-	// GetTask 返回的不一定是“纯内存快照”，当配置了 store 时会尝试拉取持久化最新值，
+	// GetTask 返回的不一定是“纯内存快照”，当配置了 store 时会按主键拉取持久化最新值，
 	// 目的是让 API 视图更接近真实元数据状态。
 	s.mu.Lock()
 	task, ok := s.tasks[id]
@@ -335,18 +336,15 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 
 	if store != nil {
 		ctx, cancel := s.withReadTimeout(context.Background())
-		list, err := store.ListTasks(ctx)
+		item, err := store.GetTask(ctx, id)
 		cancel()
 		if err == nil {
-			for _, item := range list {
-				if item.ID != id {
-					continue
-				}
-				s.mu.Lock()
-				s.tasks[id] = item
-				s.mu.Unlock()
-				return item, nil
-			}
+			s.mu.Lock()
+			s.tasks[id] = item
+			s.mu.Unlock()
+			return item, nil
+		}
+		if errors.Is(err, ErrTaskNotFound) {
 			return Task{}, ErrTaskNotFound
 		}
 		if ok {
@@ -409,6 +407,23 @@ func (s *Scheduler) ListTasks() []Task {
 		out = append(out, task)
 	}
 	return out
+}
+
+// ListTasksPage 返回过滤后的一页任务。有 store 时走 SQL 分页；standalone 仍切内存快照。
+func (s *Scheduler) ListTasksPage(ctx context.Context, filter TaskListFilter) ([]Task, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+	if store != nil {
+		readCtx, cancel := s.withReadTimeout(ctx)
+		defer cancel()
+		return store.ListTasksPage(readCtx, filter)
+	}
+	page, total := PageTasks(s.ListTasks(), filter)
+	return page, total, nil
 }
 
 // ReportReplicationProgress 上报最新复制进度，供延迟计算和展示。

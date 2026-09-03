@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, task state transitions, scheduling decisions, and execution coordination
+// output: source validation decisions, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -76,8 +76,14 @@ type runnerWithNotify interface {
 type TaskStore interface {
 	// UpsertTask 持久化任务配置与状态。
 	UpsertTask(ctx context.Context, task Task) error
+	// GetTask 按主键读取单个任务。
+	GetTask(ctx context.Context, taskID string) (Task, error)
 	// ListTasks 列出全部任务。
 	ListTasks(ctx context.Context) ([]Task, error)
+	// ListTasksPage 按过滤条件分页读取任务，total 为过滤后的 COUNT。
+	ListTasksPage(ctx context.Context, filter TaskListFilter) ([]Task, int, error)
+	// ListStartingUnownedTasks 仅读取 STARTING 且 owner 为空的任务。
+	ListStartingUnownedTasks(ctx context.Context) ([]Task, error)
 	// DeleteTask 删除指定任务。
 	DeleteTask(ctx context.Context, taskID string) error
 }
