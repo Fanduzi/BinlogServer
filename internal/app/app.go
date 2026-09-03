@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config, PRODUCTION environment flag, persisted task state, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production control-plane auth checks, metadata/source isolation, restart recovery, and shutdown
+// input: runtime config, PRODUCTION environment flag, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
+// output: role-aware application lifecycle control with production control-plane auth checks, metadata/source isolation, worker-scoped restart recovery, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -275,7 +275,8 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if workerEnabled {
 		// worker 重启后把可恢复任务重新拉起，清理遗留的中间态。
-		stats := resumePersistedActiveTasks(scheduler)
+		// cluster 传入本实例 worker id，避免 StopTask 把其他 worker 仍在跑的任务写成 STOPPED。
+		stats := resumePersistedActiveTasks(scheduler, resolvedWorkerID)
 		if stats.StopErrors > 0 || stats.StartErrors > 0 {
 			log.Printf(
 				"task resume completed with errors considered=%d resumed=%d stop_errors=%d start_errors=%d",
@@ -989,25 +990,48 @@ type taskResumer interface {
 }
 
 // resumePersistedActiveTasks 在 worker 启动时重置并恢复持久化的 active 任务。
-func resumePersistedActiveTasks(scheduler taskResumer) resumeStats {
+// clusterWorkerID 为空时按 standalone 恢复全部 active 任务；非空时只 Stop+Start 本 worker 拥有的任务和无主 STARTING。
+func resumePersistedActiveTasks(scheduler taskResumer, clusterWorkerID string) resumeStats {
 	var stats resumeStats
 	for _, task := range scheduler.ListTasks() {
-		switch task.State {
-		case tasks.StateRunning, tasks.StateStarting, tasks.StateRetryBackoff, tasks.StateLeaseDegraded:
-			// 这些状态都需要 worker 继续推进；通过 stop->start 让其在当前实例重新走 lease 获取流程。
-			stats.Considered++
-			if err := scheduler.StopTask(task.ID); err != nil {
-				stats.StopErrors++
-				log.Printf("task resume stop failed task=%s err=%v", task.ID, err)
-				continue
-			}
-			if err := scheduler.StartTask(task.ID); err != nil {
-				stats.StartErrors++
-				log.Printf("task resume start failed task=%s err=%v", task.ID, err)
-				continue
-			}
-			stats.Resumed++
+		if !shouldResumePersistedTask(task, clusterWorkerID) {
+			continue
 		}
+		// 这些状态都需要本 worker 继续推进；通过 stop->start 让其在当前实例重新走 lease 获取流程。
+		stats.Considered++
+		if err := scheduler.StopTask(task.ID); err != nil {
+			stats.StopErrors++
+			log.Printf("task resume stop failed task=%s err=%v", task.ID, err)
+			continue
+		}
+		if err := scheduler.StartTask(task.ID); err != nil {
+			stats.StartErrors++
+			log.Printf("task resume start failed task=%s err=%v", task.ID, err)
+			continue
+		}
+		stats.Resumed++
 	}
 	return stats
+}
+
+// shouldResumePersistedTask 判断启动恢复是否应对该任务执行 Stop+Start。
+// standalone（worker id 为空）恢复全部 active 任务；cluster 只恢复本 worker 拥有的任务，以及 owner 为空且 epoch 为 0 的 STARTING。
+func shouldResumePersistedTask(task tasks.Task, clusterWorkerID string) bool {
+	switch task.State {
+	case tasks.StateRunning, tasks.StateStarting, tasks.StateRetryBackoff, tasks.StateLeaseDegraded:
+	default:
+		return false
+	}
+	workerID := strings.TrimSpace(clusterWorkerID)
+	if workerID == "" {
+		return true
+	}
+	owner := strings.TrimSpace(task.OwnerWorkerID)
+	if owner == workerID {
+		return true
+	}
+	if owner != "" {
+		return false
+	}
+	return task.State == tasks.StateStarting && task.Epoch <= 0
 }
