@@ -5,7 +5,7 @@
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `tracing_test.go`: OTLP HTTP 默认 traces 路径兼容性回归测试。
 - `http_server_test.go`: HTTP 超时和生产环境 auth fail-closed 校验测试。
-- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由的回归。
+- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由、以及 cluster 启动只恢复本 worker 任务的回归。
 - `restart_recovery_test.go`: standalone 重启后安全的持久化 active task 自动恢复、metadata/source 冲突任务保持停止的回归测试。
 - `source_guard_test.go`: 从 `meta_dsn` 到任务 API 的 metadata/source 隔离装配回归测试。
 
@@ -18,7 +18,8 @@
 - API server 支持从 `config.API.Auth` 注入鉴权策略。
 - 非空 `PRODUCTION` 用标准布尔值解析；control-plane 在 true 时强制 auth 已启用、同时保护 `/api/*` 和 `/metrics`，并复用 `config.ValidateAPIAuthConfig` 校验模式/已解析凭证；worker-only 不暴露该 API 且不套用此约束。
 - tracing：默认关闭；启用时装配 HTTP 入站 span 与元数据存储调用 span；无路径的 OTLP HTTP endpoint 沿用 `/v1/traces` 默认路径。
-- standalone/cluster worker 启动时自动恢复 metadata 中遗留的 active task，并从 checkpoint 续传。
+- standalone worker 启动时 Stop+Start 全部 persisted active task，并从 checkpoint 续传。
+- cluster worker 启动时只 Stop+Start 本 worker 拥有的任务以及无主 STARTING（owner 为空且 epoch 为 0），不会对其他 worker 的 RUNNING 调用 StopTask。
 
 ### Minimal Tracing Config Example
 ```yaml
