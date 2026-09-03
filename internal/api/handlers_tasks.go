@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, numeric-id-ordered paginated task/dashboard data, loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, SQL-paged task/dashboard data with COUNT totals, loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -252,25 +252,28 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	page, total, err := s.tasks.ListTasksPage(r.Context(), query.toFilter())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	items := filterTasksByQuery(s.tasks.ListTasks(), query)
-	sortTasksByID(items)
-	pageStart, pageEnd := taskPageBounds(len(items), query.Offset, query.Limit)
 	now := time.Now()
 	resp := dashboardResponse{
 		GeneratedAt:      now,
 		ThresholdSeconds: defaultDelayThresholdSeconds,
-		Total:            len(items),
+		Total:            total,
 		Limit:            query.Limit,
 		Offset:           query.Offset,
 		Summary: summaryResponse{
 			Total: len(items),
 		},
-		Tasks:   make([]dashboardTaskItem, 0, pageEnd-pageStart),
+		Tasks:   make([]dashboardTaskItem, 0, len(page)),
 		Sources: []sourceOverview{},
 	}
 
 	sourceMap := make(map[string]*sourceOverview)
-	for i, task := range items {
+	for _, task := range items {
 		switch task.State {
 		case tasks.StateRunning:
 			resp.Summary.Running++
@@ -293,13 +296,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			resp.Summary.Delayed++
 		case "ABNORMAL":
 			resp.Summary.Abnormal++
-		}
-
-		if i >= pageStart && i < pageEnd {
-			resp.Tasks = append(resp.Tasks, dashboardTaskItem{
-				Task:        sanitizeTask(task),
-				Replication: rep,
-			})
 		}
 
 		key := task.Source.Host + ":" + strconv.Itoa(int(task.Source.Port))
@@ -337,6 +333,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		return resp.Sources[i].Host < resp.Sources[j].Host
 	})
+
+	for _, task := range page {
+		progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
+		resp.Tasks = append(resp.Tasks, dashboardTaskItem{
+			Task:        sanitizeTask(task),
+			Replication: buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds),
+		})
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -413,12 +417,14 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		items := filterTasksByQuery(s.tasks.ListTasks(), query)
-		sortTasksByID(items)
-		page := paginateTasks(items, query.Offset, query.Limit)
+		page, total, err := s.tasks.ListTasksPage(r.Context(), query.toFilter())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, http.StatusOK, taskListResponse{
 			Items:  sanitizeTaskList(page),
-			Total:  len(items),
+			Total:  total,
 			Limit:  query.Limit,
 			Offset: query.Offset,
 		})
@@ -775,6 +781,16 @@ func parseTaskListQuery(r *http.Request) (taskListQuery, error) {
 	return query, nil
 }
 
+func (q taskListQuery) toFilter() tasks.TaskListFilter {
+	return tasks.TaskListFilter{
+		Host:   q.Host,
+		Port:   q.Port,
+		State:  q.State,
+		Limit:  q.Limit,
+		Offset: q.Offset,
+	}
+}
+
 func parseTaskState(raw string) (tasks.State, error) {
 	state := tasks.State(strings.TrimSpace(raw))
 	switch state {
@@ -794,71 +810,18 @@ func parseTaskState(raw string) (tasks.State, error) {
 }
 
 func filterTasksByQuery(items []tasks.Task, query taskListQuery) []tasks.Task {
-	out := make([]tasks.Task, 0, len(items))
-	for _, task := range items {
-		if query.Host != "" && task.Source.Host != query.Host {
-			continue
-		}
-		if query.Port != nil && task.Source.Port != *query.Port {
-			continue
-		}
-		if query.State != nil && task.State != *query.State {
-			continue
-		}
-		out = append(out, task)
-	}
-	return out
+	return tasks.FilterTasks(items, query.toFilter())
 }
 
 // sortTasksByID keeps API pages aligned with the metadata store's
 // ORDER BY CAST(id AS UNSIGNED), id convention: numeric ids ascending,
 // then non-numeric ids by string.
 func sortTasksByID(items []tasks.Task) {
-	sort.SliceStable(items, func(i, j int) bool {
-		return lessTaskID(items[i].ID, items[j].ID)
-	})
-}
-
-func lessTaskID(a, b string) bool {
-	ai, aOK := parseNumericTaskID(a)
-	bi, bOK := parseNumericTaskID(b)
-	switch {
-	case aOK && bOK:
-		if ai != bi {
-			return ai < bi
-		}
-		return a < b
-	case aOK:
-		return true
-	case bOK:
-		return false
-	default:
-		return a < b
-	}
-}
-
-func parseNumericTaskID(id string) (uint64, bool) {
-	n, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return n, true
-}
-
-func taskPageBounds(total, offset, limit int) (int, int) {
-	if offset >= total {
-		return total, total
-	}
-	end := total
-	if limit <= total-offset {
-		end = offset + limit
-	}
-	return offset, end
+	tasks.SortTasksByID(items)
 }
 
 func paginateTasks(items []tasks.Task, offset, limit int) []tasks.Task {
-	start, end := taskPageBounds(len(items), offset, limit)
-	return items[start:end]
+	return tasks.PaginateTasks(items, offset, limit)
 }
 
 // filterTasksBySource 按 source 查询参数过滤任务集合。
