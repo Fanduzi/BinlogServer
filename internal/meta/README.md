@@ -1,7 +1,7 @@
 # internal/meta Module
 
 ## Files
-- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`ListTasks` 使用 `ORDER BY CAST(id AS UNSIGNED), id`，不改变 `id` 列类型。
+- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`ListTasks` 使用 `ORDER BY CAST(id AS UNSIGNED), id`，不改变 `id` 列类型；`ListTasksWithExpiredLease` 以 INNER JOIN `task_leases` 列出租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF。
 - `lease_store.go`: lease 读写逻辑。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。
@@ -10,6 +10,7 @@
 
 ## Exports
 - Task/Checkpoint/Event/File（含 OPEN/SEALED）/Lease/Run/Worker metadata 存储接口。
+- `ListTasksWithExpiredLease`：cluster worker 接管查询，只返回 `lease_expire_at <= NOW(6)` 的活跃任务。
 - 启动期 schema 版本与结构校验（支持 schema 校验超时配置）。
 
 ## Dependencies

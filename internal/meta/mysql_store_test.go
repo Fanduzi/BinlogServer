@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, and numeric ListTasks order
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, numeric ListTasks order, and expired-lease listing
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -173,6 +173,70 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 func TestListTaskSQL_OrdersByNumericID(t *testing.T) {
 	if !strings.Contains(listTaskSQL, "ORDER BY CAST(id AS UNSIGNED), id") {
 		t.Fatalf("listTaskSQL must order by CAST(id AS UNSIGNED), id, got %q", listTaskSQL)
+	}
+}
+
+// TestListTasksWithExpiredLeaseSQL_JoinsExpiredActiveStates 验证过期租约查询只覆盖可接管状态。
+func TestListTasksWithExpiredLeaseSQL_JoinsExpiredActiveStates(t *testing.T) {
+	if !strings.Contains(listTasksWithExpiredLeaseSQL, "INNER JOIN task_leases") {
+		t.Fatalf("listTasksWithExpiredLeaseSQL must join task_leases, got %q", listTasksWithExpiredLeaseSQL)
+	}
+	if !strings.Contains(listTasksWithExpiredLeaseSQL, "lease_expire_at <= NOW(6)") {
+		t.Fatalf("listTasksWithExpiredLeaseSQL must filter expired leases, got %q", listTasksWithExpiredLeaseSQL)
+	}
+	for _, state := range []string{"RUNNING", "LEASE_DEGRADED", "RETRY_BACKOFF"} {
+		if !strings.Contains(listTasksWithExpiredLeaseSQL, state) {
+			t.Fatalf("listTasksWithExpiredLeaseSQL must include state %s, got %q", state, listTasksWithExpiredLeaseSQL)
+		}
+	}
+	if !strings.Contains(listTasksWithExpiredLeaseSQL, "ORDER BY CAST(t.id AS UNSIGNED), t.id") {
+		t.Fatalf("listTasksWithExpiredLeaseSQL must order by numeric id, got %q", listTasksWithExpiredLeaseSQL)
+	}
+}
+
+// TestMySQLTaskStore_ListTasksWithExpiredLease 验证过期租约任务列表扫描。
+func TestMySQLTaskStore_ListTasksWithExpiredLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{
+		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
+	}).AddRow(
+		"7",
+		"cluster-expired",
+		"cluster-expired-key",
+		"RUNNING",
+		"",
+		"worker-dead",
+		int64(9),
+		"run-9",
+		`{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}`,
+		`{"mode":"LATEST"}`,
+		`{"dir":"./data"}`,
+		now,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(listTasksWithExpiredLeaseSQL)).WillReturnRows(rows)
+
+	list, err := store.ListTasksWithExpiredLease(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasksWithExpiredLease returned error: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(list))
+	}
+	if list[0].ID != "7" || list[0].State != tasks.StateRunning {
+		t.Fatalf("unexpected task loaded: %+v", list[0])
+	}
+	if list[0].OwnerWorkerID != "worker-dead" || list[0].Epoch != 9 || list[0].RunID != "run-9" {
+		t.Fatalf("unexpected cluster run fields: owner=%q epoch=%d run_id=%q", list[0].OwnerWorkerID, list[0].Epoch, list[0].RunID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
 
