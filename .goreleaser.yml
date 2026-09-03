@@ -50,6 +50,8 @@ archives:
       - README.md
       - README_ZH.md
       - CHANGELOG.md
+      - config.example.yaml
+      - config.production.example.yaml
       - migrations/*.sql
 
 checksum:
