@@ -3,8 +3,8 @@
 ## Files
 | File | Responsibility |
 |------|---------------|
-| `config.go` | 配置模型、加载与默认值、校验（`meta_dsn` 为空时 standalone 控制面仅内存；受保护 auth 不接受未解析 `${ENV}` 密钥） |
-| `config_test.go` | 配置加载、覆盖规则和受保护 auth 未解析密钥测试 |
+| `config.go` | 配置模型、加载与默认值、校验（`meta_dsn` 为空时 standalone 控制面仅内存；受保护 auth 不接受未解析 `${ENV}` 密钥；`enabled=true` 时未设置的 protect 标志视为 true） |
+| `config_test.go` | 配置加载、覆盖规则、protect 默认值和受保护 auth 未解析密钥测试 |
 | `encryption.go` | AES-256-GCM 配置值解密工具 |
 
 ## Exports
@@ -15,7 +15,7 @@
 - `Decryptor.DecryptIfEncrypted(value)` - 解密带 `enc:aes256:` 前缀的值
 
 ## Configuration Sections
-- `api.auth.*` - API 鉴权开关、模式（`bearer`/`api_key`）与凭证配置
+- `api.auth.*` - API 鉴权开关、模式（`bearer`/`api_key`）与凭证配置；`enabled=true` 且未显式设置时 `protect_api`/`protect_metrics` 为 true
 - `config.production.example.yaml`（仓库根目录）- 无密钥且可直接加载的生产模板；仅需环境变量注入 bearer token，并同时保护 `/api/*` 与 `/metrics`
 - `api.rate_limit.*` - API 限流配置（enabled/requests_per_second/burst），默认 100 req/s、burst 200
 - `http.control_plane.*` / `http.worker_health.*` - HTTP 超时配置

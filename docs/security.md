@@ -99,7 +99,6 @@ For enhanced security, you can encrypt sensitive values in your configuration fi
    ```bash
    ./binlog-server --config config.yaml --encryption-key "your-32-byte-encryption-key"
    ```
-
 ### Encrypted Value Format
 
 Encrypted values use the format: `enc:aes256:<base64-encoded-ciphertext>`
@@ -158,4 +157,6 @@ When authentication is disabled, Binlog Server will display a warning at startup
    See docs/security.md for details.
 ```
 
-In production mode (when `PRODUCTION=true` environment variable is set), the server will refuse to start without authentication enabled.
+The control-plane also fail-closes when `listen_addr` is not loopback (`:8080` and `0.0.0.0:8080` count as non-loopback). Local demo on `127.0.0.1`/`localhost`/`::1` may keep auth disabled.
+
+In production mode (when `PRODUCTION=true` environment variable is set), the server will refuse to start without authentication enabled. This check is independent of listen_addr and is not weakened.

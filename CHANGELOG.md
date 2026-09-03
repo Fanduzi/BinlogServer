@@ -12,6 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Changed
+
+- Control-plane `listen_addr` that is not loopback (`:8080`, `0.0.0.0:8080`, and any non-`127.0.0.1`/`localhost`/`::1` bind) now requires `api.auth.enabled`, `protect_api`, and `protect_metrics` at `App.Run`. Loopback binds may stay unauthenticated for local demo. `PRODUCTION=true` still fail-closes independently and is not weakened.
+- When `api.auth.enabled=true`, unset `protect_api` / `protect_metrics` now default to true. Explicit `false` is still honored at config load, but non-loopback listen and `PRODUCTION=true` still reject that combination. `listen_addr` default remains `:8080`.
+
 ## [v0.5.2] - 2026-08-30
 
 ### Changed

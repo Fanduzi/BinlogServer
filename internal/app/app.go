@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config, PRODUCTION environment flag, persisted task state, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production control-plane auth checks, metadata/source isolation, restart recovery, and shutdown
+// input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, scheduler/runner/meta store dependencies, process context
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, metadata/source isolation, restart recovery, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -105,7 +105,7 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	if controlPlaneEnabled {
-		if err := validateProductionAuth(a.cfg.API.Auth, production); err != nil {
+		if err := validateControlPlaneAuth(a.cfg.ListenAddr, a.cfg.API.Auth, production); err != nil {
 			return err
 		}
 	}
@@ -390,6 +390,16 @@ func productionMode(raw string) (bool, error) {
 	return production, nil
 }
 
+func validateControlPlaneAuth(listenAddr string, auth config.APIAuthConfig, production bool) error {
+	if err := validateProductionAuth(auth, production); err != nil {
+		return err
+	}
+	if isLoopbackListenAddr(listenAddr) {
+		return nil
+	}
+	return validateNonLoopbackAuth(auth)
+}
+
 func validateProductionAuth(auth config.APIAuthConfig, production bool) error {
 	if !production {
 		return nil
@@ -401,6 +411,31 @@ func validateProductionAuth(auth config.APIAuthConfig, production bool) error {
 		return errors.New("api.auth.protect_api and api.auth.protect_metrics must be true in PRODUCTION mode")
 	}
 	return config.ValidateAPIAuthConfig(auth)
+}
+
+func validateNonLoopbackAuth(auth config.APIAuthConfig) error {
+	if !auth.Enabled {
+		return errors.New("api.auth.enabled must be true when listen_addr is not loopback")
+	}
+	if !auth.ProtectAPI || !auth.ProtectMetrics {
+		return errors.New("api.auth.protect_api and api.auth.protect_metrics must be true when listen_addr is not loopback")
+	}
+	return config.ValidateAPIAuthConfig(auth)
+}
+
+func isLoopbackListenAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false
+	}
+	return tasks.IsLoopbackHost(host)
 }
 
 func metadataSourceEndpoint(dsn string) (string, uint16, bool) {
