@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: runtime config/template, persisted active tasks, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth and worker-only regression coverage
+// input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
+// output: application lifecycle plus real-route production auth, worker-only, and cluster resume ownership-filter regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -625,7 +625,7 @@ func TestApp_ResumePersistedActiveTasksStartsRecoveredTasks(t *testing.T) {
 		t.Fatalf("Restore returned error: %v", err)
 	}
 
-	stats := resumePersistedActiveTasks(s)
+	stats := resumePersistedActiveTasks(s, "")
 	if stats.Considered != 1 || stats.Resumed != 1 || stats.StopErrors != 0 || stats.StartErrors != 0 {
 		t.Fatalf("unexpected resume stats: %+v", stats)
 	}
@@ -1088,8 +1088,9 @@ func (f *fakeResumeScheduler) StartTask(id string) error {
 func TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors(t *testing.T) {
 	resumer := &fakeResumeScheduler{
 		items: []tasks.Task{
-			{ID: "1", State: tasks.StateRunning},
-			{ID: "2", State: tasks.StateLeaseDegraded},
+			{ID: "1", State: tasks.StateRunning, OwnerWorkerID: "W1", Epoch: 3},
+			{ID: "2", State: tasks.StateLeaseDegraded, OwnerWorkerID: "W1", Epoch: 4},
+			{ID: "foreign", State: tasks.StateRunning, OwnerWorkerID: "W2", Epoch: 8},
 		},
 		stopErr: map[string]error{
 			"1": errors.New("stop failed"),
@@ -1104,13 +1105,159 @@ func TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(origWriter)
 
-	stats := resumePersistedActiveTasks(resumer)
+	stats := resumePersistedActiveTasks(resumer, "W1")
 	if stats.Considered != 2 || stats.Resumed != 0 || stats.StopErrors != 1 || stats.StartErrors != 1 {
 		t.Fatalf("unexpected resume stats: %+v", stats)
+	}
+	if containsString(resumer.stopCalls, "foreign") || containsString(resumer.startCalls, "foreign") {
+		t.Fatalf("foreign running task was resumed, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
 	}
 	if !strings.Contains(buf.String(), "task=1") || !strings.Contains(buf.String(), "task=2") {
 		t.Fatalf("expected error logs contain task ids, got logs=%q", buf.String())
 	}
+}
+
+// TestApp_ResumeClusterWorkerSkipsForeignRunning 验证 cluster 启动不会 Stop+Start 其他 worker 的 RUNNING。
+func TestApp_ResumeClusterWorkerSkipsForeignRunning(t *testing.T) {
+	resumer := &fakeResumeScheduler{
+		items: []tasks.Task{
+			{ID: "foreign", State: tasks.StateRunning, OwnerWorkerID: "W2", Epoch: 4},
+			{ID: "own", State: tasks.StateRunning, OwnerWorkerID: "W1", Epoch: 2},
+			{ID: "starting", State: tasks.StateStarting},
+			{ID: "foreign-starting", State: tasks.StateStarting, OwnerWorkerID: "W2", Epoch: 1},
+		},
+	}
+
+	stats := resumePersistedActiveTasks(resumer, "W1")
+	if stats.Considered != 2 || stats.Resumed != 2 || stats.StopErrors != 0 || stats.StartErrors != 0 {
+		t.Fatalf("unexpected resume stats: %+v", stats)
+	}
+	if containsString(resumer.stopCalls, "foreign") || containsString(resumer.startCalls, "foreign") {
+		t.Fatalf("foreign RUNNING was Stop/Start, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
+	}
+	if containsString(resumer.stopCalls, "foreign-starting") || containsString(resumer.startCalls, "foreign-starting") {
+		t.Fatalf("foreign STARTING was Stop/Start, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
+	}
+	if !containsString(resumer.stopCalls, "own") || !containsString(resumer.startCalls, "own") {
+		t.Fatalf("expected own RUNNING to be Stop+Start, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
+	}
+	if !containsString(resumer.stopCalls, "starting") || !containsString(resumer.startCalls, "starting") {
+		t.Fatalf("expected unowned STARTING to be resumed, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
+	}
+}
+
+// TestApp_ResumeStandaloneStillResumesForeignOwnedRunning 验证 standalone（无 worker 过滤）仍恢复全部 RUNNING。
+func TestApp_ResumeStandaloneStillResumesForeignOwnedRunning(t *testing.T) {
+	resumer := &fakeResumeScheduler{
+		items: []tasks.Task{
+			{ID: "running", State: tasks.StateRunning, OwnerWorkerID: "W2", Epoch: 4},
+		},
+	}
+
+	stats := resumePersistedActiveTasks(resumer, "")
+	if stats.Considered != 1 || stats.Resumed != 1 || stats.StopErrors != 0 || stats.StartErrors != 0 {
+		t.Fatalf("unexpected resume stats: %+v", stats)
+	}
+	if len(resumer.stopCalls) != 1 || resumer.stopCalls[0] != "running" {
+		t.Fatalf("expected standalone resume to StopTask running, got %v", resumer.stopCalls)
+	}
+	if len(resumer.startCalls) != 1 || resumer.startCalls[0] != "running" {
+		t.Fatalf("expected standalone resume to StartTask running, got %v", resumer.startCalls)
+	}
+}
+
+// TestApp_ResumeClusterWorkerDoesNotPersistForeignRunningStopped 验证不会把别人的 RUNNING 持久化为 STOPPED。
+func TestApp_ResumeClusterWorkerDoesNotPersistForeignRunningStopped(t *testing.T) {
+	store := newAppFakeStore()
+	source := tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}
+	start := tasks.StartConfig{Mode: tasks.StartModeLatest}
+	store.tasks["foreign"] = tasks.Task{
+		ID:            "foreign",
+		Name:          "foreign",
+		State:         tasks.StateRunning,
+		OwnerWorkerID: "W2",
+		Epoch:         7,
+		Source:        source,
+		Start:         start,
+	}
+	store.tasks["own"] = tasks.Task{
+		ID:            "own",
+		Name:          "own",
+		State:         tasks.StateRunning,
+		OwnerWorkerID: "W1",
+		Epoch:         3,
+		Source:        source,
+		Start:         start,
+	}
+	store.tasks["starting"] = tasks.Task{
+		ID:     "starting",
+		Name:   "starting",
+		State:  tasks.StateStarting,
+		Source: source,
+		Start:  start,
+	}
+
+	runner := &appFakeRunner{started: make(chan tasks.Task, 4)}
+	s := tasks.NewScheduler(
+		tasks.WithStore(store),
+		tasks.WithRunner(runner),
+		tasks.WithClusterLeaseManager(&appLeaseManager{acquireOK: true, acquireEpoch: 11}),
+		tasks.WithClusterWorkerID("W1"),
+	)
+	if err := s.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+
+	stats := resumePersistedActiveTasks(s, "W1")
+	if stats.Considered != 2 || stats.Resumed != 2 || stats.StopErrors != 0 || stats.StartErrors != 0 {
+		t.Fatalf("unexpected resume stats: %+v", stats)
+	}
+
+	foreign, err := s.GetTask("foreign")
+	if err != nil {
+		t.Fatalf("GetTask foreign: %v", err)
+	}
+	if foreign.State != tasks.StateRunning {
+		t.Fatalf("expected foreign task to stay RUNNING, got %s", foreign.State)
+	}
+	persisted, err := store.ListTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	for _, task := range persisted {
+		if task.ID == "foreign" && task.State != tasks.StateRunning {
+			t.Fatalf("foreign RUNNING persisted as %s", task.State)
+		}
+	}
+
+	started := map[string]struct{}{}
+	deadline := time.After(2 * time.Second)
+	for len(started) < 2 {
+		select {
+		case task := <-runner.started:
+			if task.ID == "foreign" {
+				t.Fatal("foreign RUNNING task was started on this worker")
+			}
+			started[task.ID] = struct{}{}
+		case <-deadline:
+			t.Fatalf("expected own and unowned starting to start, got %v", started)
+		}
+	}
+	if _, ok := started["own"]; !ok {
+		t.Fatal("expected own RUNNING to be started")
+	}
+	if _, ok := started["starting"]; !ok {
+		t.Fatal("expected unowned STARTING to be started")
+	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 // waitReady 实现对应功能逻辑。
