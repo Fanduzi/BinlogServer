@@ -1,7 +1,7 @@
 # internal/meta Module
 
 ## Files
-- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`ListTasks` 使用 `ORDER BY CAST(id AS UNSIGNED), id`，不改变 `id` 列类型；`ListTasksWithExpiredLease` 以 INNER JOIN `task_leases` 列出租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF。配置了 encryption key 时只加密 `source_json` 的 `password` 字段（`enc:aes256:`），无 key 时保持明文以兼容现有部署。
+- `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`GetTask` 按主键读取；`ListTasks` 仍为 Restore 全量快照（`ORDER BY CAST(id AS UNSIGNED), id`）；`ListTasksPage` 使用同一排序加 `LIMIT/OFFSET` 与 COUNT，host/port 过滤经 `JSON_EXTRACT(source_json)`；`ListStartingUnownedTasks` 只查 STARTING 且 owner 为空；`ListTasksWithExpiredLease` 以 INNER JOIN `task_leases` 列出租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF。配置了 encryption key 时只加密 `source_json` 的 `password` 字段（`enc:aes256:`），无 key 时保持明文以兼容现有部署。
 - `lease_store.go`: lease 读写逻辑。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。
@@ -9,7 +9,7 @@
 - `sqlcgen/*`: sqlc 生成代码（禁止手改，使用 `make sqlc-generate` 更新）。
 
 ## Exports
-- Task/Checkpoint/Event/File（含 OPEN/SEALED）/Lease/Run/Worker metadata 存储接口。
+- Task/Checkpoint/Event/File（含 OPEN/SEALED）/Lease/Run/Worker metadata 存储接口（含 `GetTask`、`ListTasksPage`、`ListStartingUnownedTasks`）。
 - `ListTasksWithExpiredLease`：cluster worker 接管查询，只返回 `lease_expire_at <= NOW(6)` 的活跃任务。
 - `NewMySQLTaskStoreWithSchemaTimeout(dsn, timeout, encryptionKey)`：可选 AES-256 key，用于 source 密码加解密。
 - 启动期 schema 版本与结构校验（支持 schema 校验超时配置）。

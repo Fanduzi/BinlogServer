@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
+// output: task state transitions, primary-key GetTask/GetCheckpoint refresh, STARTING-unowned claim, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -371,6 +371,35 @@ func TestScheduler_GetTaskRefreshesFromStore(t *testing.T) {
 	if got.State != StateRunning {
 		t.Fatalf("expected state %s from store, got %s", StateRunning, got.State)
 	}
+	if got := store.ListTasksCalls(); got != 1 {
+		t.Fatalf("expected CreateTask sync ListTasks once, got %d", got)
+	}
+	if got := store.GetTaskCalls(); got != 1 {
+		t.Fatalf("expected GetTask to hit store.GetTask once, got %d", got)
+	}
+}
+
+// TestScheduler_GetTaskUsesPrimaryKeyNotFullList 验证 GetTask 不走整表 ListTasks。
+func TestScheduler_GetTaskUsesPrimaryKeyNotFullList(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: map[string]Task{
+			"9": {ID: "9", Name: "remote", State: StateStopped},
+		},
+	}
+	s := NewScheduler(WithStore(store))
+	got, err := s.GetTask("9")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.Name != "remote" {
+		t.Fatalf("unexpected task: %+v", got)
+	}
+	if got := store.ListTasksCalls(); got != 0 {
+		t.Fatalf("GetTask must not call ListTasks, got %d", got)
+	}
+	if got := store.GetTaskCalls(); got != 1 {
+		t.Fatalf("expected GetTask calls=1, got %d", got)
+	}
 }
 
 type schedulerCheckpointReader struct {
@@ -421,6 +450,40 @@ func TestScheduler_GetCheckpointDoesNotRefreshTaskListForKnownTask(t *testing.T)
 	if got := store.ListTasksCalls(); got != 1 {
 		t.Fatalf("expected GetCheckpoint not to trigger extra ListTasks for known task, got %d", got)
 	}
+	if got := store.GetTaskCalls(); got != 0 {
+		t.Fatalf("expected GetCheckpoint not to call GetTask for known task, got %d", got)
+	}
+}
+
+// TestScheduler_GetCheckpointLoadsMissingTaskByPrimaryKey 验证缺失任务按主键补齐，不加载整表。
+func TestScheduler_GetCheckpointLoadsMissingTaskByPrimaryKey(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: map[string]Task{
+			"9": {ID: "9", Name: "remote", State: StateStopped},
+		},
+	}
+	reader := &schedulerCheckpointReader{
+		checkpoints: map[string]binlog.Checkpoint{
+			"9": {File: "mysql-bin.000009", Pos: 4},
+		},
+	}
+	s := NewScheduler(WithStore(store), WithCheckpointReader(reader))
+	cp, ok, err := s.GetCheckpoint(context.Background(), "9")
+	if err != nil {
+		t.Fatalf("GetCheckpoint returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected checkpoint exists")
+	}
+	if cp.File != "mysql-bin.000009" {
+		t.Fatalf("unexpected checkpoint: %+v", cp)
+	}
+	if got := store.ListTasksCalls(); got != 0 {
+		t.Fatalf("GetCheckpoint must not call ListTasks, got %d", got)
+	}
+	if got := store.GetTaskCalls(); got != 1 {
+		t.Fatalf("expected GetTask calls=1, got %d", got)
+	}
 }
 
 // TestScheduler_ClaimStartingTasksClaimsDispatchedTask 验证相关行为。
@@ -464,6 +527,12 @@ func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
 	if claimed != 1 {
 		t.Fatalf("expected claimed=1, got %d", claimed)
 	}
+	if got := store.ListStartingUnownedCalls(); got != 1 {
+		t.Fatalf("expected ListStartingUnownedTasks once, got %d", got)
+	}
+	if got := store.ListTasksCalls(); got != 1 {
+		t.Fatalf("expected ListTasks only from CreateTask sync, got %d", got)
+	}
 
 	select {
 	case <-workerRunner.started:
@@ -484,6 +553,57 @@ func TestScheduler_ClaimStartingTasksClaimsDispatchedTask(t *testing.T) {
 			t.Fatalf("expected state %s, got %s", StateRunning, got.State)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestScheduler_ClaimStartingTasksDoesNotListAllTasks 验证认领只查询 STARTING 空 owner，不走整表 ListTasks。
+func TestScheduler_ClaimStartingTasksDoesNotListAllTasks(t *testing.T) {
+	store := &schedulerTestStore{
+		tasks: map[string]Task{
+			"1": {
+				ID:     "1",
+				Name:   "dispatch",
+				State:  StateStarting,
+				Source: SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+			},
+			"2": {
+				ID:            "2",
+				Name:          "owned",
+				State:         StateStarting,
+				OwnerWorkerID: "worker-b",
+				Source:        SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+			},
+			"3": {
+				ID:     "3",
+				Name:   "running",
+				State:  StateRunning,
+				Source: SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+			},
+		},
+	}
+	lease := &fakeLeaseManager{
+		acquireEpoch: 3,
+		acquireOK:    true,
+	}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+	)
+
+	claimed, err := worker.ClaimStartingTasks()
+	if err != nil {
+		t.Fatalf("ClaimStartingTasks returned error: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1, got %d", claimed)
+	}
+	if got := store.ListTasksCalls(); got != 0 {
+		t.Fatalf("ClaimStartingTasks must not call ListTasks, got %d", got)
+	}
+	if got := store.ListStartingUnownedCalls(); got != 1 {
+		t.Fatalf("expected ListStartingUnownedTasks once, got %d", got)
 	}
 }
 
@@ -648,10 +768,12 @@ func TestScheduler_UpdateTaskStoreFailureHasNoMutation(t *testing.T) {
 }
 
 type schedulerTestStore struct {
-	mu            sync.Mutex
-	tasks         map[string]Task
-	listTasksCall int
-	upsertErr     error
+	mu                      sync.Mutex
+	tasks                   map[string]Task
+	listTasksCall           int
+	getTaskCall             int
+	listStartingUnownedCall int
+	upsertErr               error
 }
 
 // UpsertTask 实现对应功能逻辑。
@@ -665,16 +787,48 @@ func (s *schedulerTestStore) UpsertTask(_ context.Context, task Task) error {
 	return nil
 }
 
+func (s *schedulerTestStore) snapshotLocked() []Task {
+	out := make([]Task, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		out = append(out, task)
+	}
+	return out
+}
+
+// GetTask 实现对应功能逻辑。
+func (s *schedulerTestStore) GetTask(_ context.Context, taskID string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.getTaskCall++
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return Task{}, ErrTaskNotFound
+	}
+	return task, nil
+}
+
 // ListTasks 实现对应功能逻辑。
 func (s *schedulerTestStore) ListTasks(_ context.Context) ([]Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.listTasksCall++
-	out := make([]Task, 0, len(s.tasks))
-	for _, task := range s.tasks {
-		out = append(out, task)
-	}
-	return out, nil
+	return s.snapshotLocked(), nil
+}
+
+// ListTasksPage 实现对应功能逻辑。
+func (s *schedulerTestStore) ListTasksPage(_ context.Context, filter TaskListFilter) ([]Task, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	page, total := PageTasks(s.snapshotLocked(), filter)
+	return page, total, nil
+}
+
+// ListStartingUnownedTasks 实现对应功能逻辑。
+func (s *schedulerTestStore) ListStartingUnownedTasks(_ context.Context) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listStartingUnownedCall++
+	return StartingUnownedTasks(s.snapshotLocked()), nil
 }
 
 // DeleteTask 实现对应功能逻辑。
@@ -690,6 +844,20 @@ func (s *schedulerTestStore) ListTasksCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.listTasksCall
+}
+
+// GetTaskCalls 实现对应功能逻辑。
+func (s *schedulerTestStore) GetTaskCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getTaskCall
+}
+
+// ListStartingUnownedCalls 实现对应功能逻辑。
+func (s *schedulerTestStore) ListStartingUnownedCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listStartingUnownedCall
 }
 
 // SetUpsertErr 实现对应功能逻辑。

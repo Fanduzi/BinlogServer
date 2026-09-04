@@ -787,6 +787,33 @@ func (s *expiredLeaseTestStore) ListTasks(_ context.Context) ([]Task, error) {
 	return out, nil
 }
 
+func (s *expiredLeaseTestStore) GetTask(_ context.Context, taskID string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return Task{}, ErrTaskNotFound
+	}
+	return task, nil
+}
+
+func (s *expiredLeaseTestStore) ListTasksPage(_ context.Context, filter TaskListFilter) ([]Task, int, error) {
+	list, err := s.ListTasks(context.Background())
+	if err != nil {
+		return nil, 0, err
+	}
+	page, total := PageTasks(list, filter)
+	return page, total, nil
+}
+
+func (s *expiredLeaseTestStore) ListStartingUnownedTasks(_ context.Context) ([]Task, error) {
+	list, err := s.ListTasks(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return StartingUnownedTasks(list), nil
+}
+
 func (s *expiredLeaseTestStore) DeleteTask(_ context.Context, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

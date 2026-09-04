@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, numeric ListTasks order, expired-lease listing, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, expired-lease listing, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -179,7 +179,199 @@ func TestListTaskSQL_OrdersByNumericID(t *testing.T) {
 	}
 }
 
-// TestListTasksWithExpiredLeaseSQL_JoinsExpiredActiveStates 验证过期租约查询只覆盖可接管状态。
+func toDriverValues(args []any) []driver.Value {
+	out := make([]driver.Value, len(args))
+	for i, arg := range args {
+		out[i] = arg
+	}
+	return out
+}
+
+func taskRowColumns() []string {
+	return []string{
+		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
+	}
+}
+
+func addTaskRow(rows *sqlmock.Rows, id, name, clusterKey, state, sourceJSON string, now time.Time) *sqlmock.Rows {
+	return rows.AddRow(
+		id,
+		name,
+		clusterKey,
+		state,
+		"",
+		"",
+		int64(0),
+		"",
+		sourceJSON,
+		`{"mode":"LATEST"}`,
+		`{"dir":"./data"}`,
+		now,
+	)
+}
+
+// TestMySQLTaskStore_GetTaskUsesPrimaryKey 验证 GetTask 走 WHERE id=?。
+func TestMySQLTaskStore_GetTaskUsesPrimaryKey(t *testing.T) {
+	if !strings.Contains(getTaskSQL, "WHERE id = ?") {
+		t.Fatalf("getTaskSQL must filter by primary key, got %q", getTaskSQL)
+	}
+	if strings.Contains(getTaskSQL, "LIMIT") {
+		t.Fatalf("getTaskSQL must not paginate, got %q", getTaskSQL)
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	rows := addTaskRow(sqlmock.NewRows(taskRowColumns()), "7", "cluster-restored", "cluster-restored-key", "STOPPED",
+		`{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}`, now)
+	mock.ExpectQuery(regexp.QuoteMeta(getTaskSQL)).WithArgs("7").WillReturnRows(rows)
+
+	got, err := store.GetTask(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.ID != "7" || got.Name != "cluster-restored" {
+		t.Fatalf("unexpected task: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_GetTaskNotFound 验证主键未命中映射为 ErrTaskNotFound。
+func TestMySQLTaskStore_GetTaskNotFound(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	mock.ExpectQuery(regexp.QuoteMeta(getTaskSQL)).WithArgs("missing").WillReturnRows(sqlmock.NewRows(taskRowColumns()))
+
+	_, err = store.GetTask(context.Background(), "missing")
+	if err != tasks.ErrTaskNotFound {
+		t.Fatalf("expected ErrTaskNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestListTasksPageSQL_PushesFiltersAndLimit 验证分页 SQL 含 ORDER BY/LIMIT，JSON_EXTRACT 仅在 host/port 出现。
+func TestListTasksPageSQL_PushesFiltersAndLimit(t *testing.T) {
+	countSQL, selectSQL, _, selectArgs := listTasksPageSQL(tasks.TaskListFilter{Limit: 2, Offset: 2})
+	if strings.Contains(countSQL, "JSON_EXTRACT") || strings.Contains(selectSQL, "JSON_EXTRACT") {
+		t.Fatalf("JSON_EXTRACT must be omitted without host/port, count=%q select=%q", countSQL, selectSQL)
+	}
+	if !strings.Contains(selectSQL, "ORDER BY CAST(id AS UNSIGNED), id LIMIT ? OFFSET ?") {
+		t.Fatalf("paged select must order then limit, got %q", selectSQL)
+	}
+	if len(selectArgs) != 2 || selectArgs[0] != 2 || selectArgs[1] != 2 {
+		t.Fatalf("expected limit/offset args [2 2], got %#v", selectArgs)
+	}
+
+	state := tasks.StateFailed
+	port := uint16(3307)
+	_, filteredSQL, countArgs, pageArgs := listTasksPageSQL(tasks.TaskListFilter{
+		Host:   "db-b",
+		Port:   &port,
+		State:  &state,
+		Limit:  2,
+		Offset: 2,
+	})
+	if !strings.Contains(filteredSQL, "state = ?") {
+		t.Fatalf("state filter missing: %q", filteredSQL)
+	}
+	if !strings.Contains(filteredSQL, "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host')) = ?") {
+		t.Fatalf("host JSON_EXTRACT missing: %q", filteredSQL)
+	}
+	if !strings.Contains(filteredSQL, "CAST(JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.port')) AS UNSIGNED) = ?") {
+		t.Fatalf("port JSON_EXTRACT missing: %q", filteredSQL)
+	}
+	if len(countArgs) != 3 {
+		t.Fatalf("expected 3 count args, got %#v", countArgs)
+	}
+	if len(pageArgs) != 5 {
+		t.Fatalf("expected 5 page args (filters+limit+offset), got %#v", pageArgs)
+	}
+}
+
+// TestMySQLTaskStore_ListTasksPageUsesCountAndLimit 验证 COUNT + LIMIT/OFFSET，handler 不必看到整表。
+func TestMySQLTaskStore_ListTasksPageUsesCountAndLimit(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	filter := tasks.TaskListFilter{Limit: 2, Offset: 2}
+	countSQL, selectSQL, _, selectArgs := listTasksPageSQL(filter)
+	mock.ExpectQuery(regexp.QuoteMeta(countSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(6))
+
+	now := time.Now()
+	rows := addTaskRow(sqlmock.NewRows(taskRowColumns()), "3", "task-3", "k-3", "CREATED",
+		`{"host":"db-a","port":3306}`, now)
+	rows = addTaskRow(rows, "4", "task-4", "k-4", "CREATED", `{"host":"db-a","port":3306}`, now)
+	mock.ExpectQuery(regexp.QuoteMeta(selectSQL)).WithArgs(toDriverValues(selectArgs)...).WillReturnRows(rows)
+
+	page, total, err := store.ListTasksPage(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("ListTasksPage returned error: %v", err)
+	}
+	if total != 6 || len(page) != 2 || page[0].ID != "3" || page[1].ID != "4" {
+		t.Fatalf("unexpected page total=%d items=%+v", total, page)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_ListStartingUnownedTasks 验证只查询 STARTING 且 owner 为空。
+func TestMySQLTaskStore_ListStartingUnownedTasks(t *testing.T) {
+	if !strings.Contains(listStartingUnownedTaskSQL, "state = ?") {
+		t.Fatalf("claim SQL must filter state, got %q", listStartingUnownedTaskSQL)
+	}
+	if !strings.Contains(listStartingUnownedTaskSQL, "owner_worker_id IS NULL OR owner_worker_id = ''") {
+		t.Fatalf("claim SQL must filter empty owner, got %q", listStartingUnownedTaskSQL)
+	}
+	if strings.Contains(listStartingUnownedTaskSQL, "LIMIT") {
+		t.Fatalf("claim SQL must not paginate, got %q", listStartingUnownedTaskSQL)
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	rows := addTaskRow(sqlmock.NewRows(taskRowColumns()), "1", "dispatch", "k-1", "STARTING",
+		`{"host":"127.0.0.1","port":3306}`, now)
+	mock.ExpectQuery(regexp.QuoteMeta(listStartingUnownedTaskSQL)).
+		WithArgs(string(tasks.StateStarting)).
+		WillReturnRows(rows)
+
+	list, err := store.ListStartingUnownedTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListStartingUnownedTasks returned error: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "1" {
+		t.Fatalf("unexpected claim list: %+v", list)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestListTasksWithExpiredLeaseSQL_JoinsExpiredActiveStates(t *testing.T) {
 	if !strings.Contains(listTasksWithExpiredLeaseSQL, "INNER JOIN task_leases") {
 		t.Fatalf("listTasksWithExpiredLeaseSQL must join task_leases, got %q", listTasksWithExpiredLeaseSQL)
@@ -456,6 +648,8 @@ func TestNewMySQLTaskStoreWithSchemaTimeout_RejectsInvalidEncryptionKey(t *testi
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestMySQLTaskStore_UpsertCheckpoint 验证相关行为。
 
 // TestMySQLTaskStore_UpsertCheckpoint 验证相关行为。
 func TestMySQLTaskStore_UpsertCheckpoint(t *testing.T) {

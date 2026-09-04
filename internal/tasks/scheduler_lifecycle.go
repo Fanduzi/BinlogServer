@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals
-// output: guarded start/stop, bounded SOURCE_UNREACHABLE retry, expired-lease takeover without StopTask, and cancellation orchestration
+// input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks
+// output: guarded start/stop, STARTING-unowned claim ticks, expired-lease takeover without StopTask, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -145,13 +145,13 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 	}
 
 	readCtx, cancelRead := s.withReadTimeout(context.Background())
-	list, err := store.ListTasks(readCtx)
+	list, err := store.ListStartingUnownedTasks(readCtx)
 	cancelRead()
 	if err != nil {
 		return 0, err
 	}
 
-	// 基于持久化快照做 best-effort 认领；
+	// 基于 STARTING + 空 owner 的定向查询做 best-effort 认领；
 	// 并发竞争由 StartTask 内的状态校验 + lease Acquire 结果保证安全。
 	claimed := 0
 	for _, item := range list {
@@ -309,8 +309,6 @@ func (s *Scheduler) StopTask(id string) error {
 	s.mu.Unlock()
 	return nil
 }
-
-// GetTask 读取任务详情；必要时会从 store 刷新。
 
 func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}) {
 	defer func() {

@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth, worker-only, cluster resume ownership-filter, and expired-lease claim-loop regression coverage
+// output: application lifecycle plus real-route production auth, TaskStore page/get fakes, worker-only, cluster resume ownership-filter, and expired-lease claim-loop regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -60,10 +60,29 @@ func (s *fakeAppMetaStore) UpsertTask(_ context.Context, task tasks.Task) error 
 	return nil
 }
 
+func (s *fakeAppMetaStore) GetTask(_ context.Context, taskID string) (tasks.Task, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return tasks.LookupTask(s.listTasks, taskID)
+}
+
 func (s *fakeAppMetaStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
 	s.regMu.Lock()
 	defer s.regMu.Unlock()
 	return append([]tasks.Task(nil), s.listTasks...), nil
+}
+
+func (s *fakeAppMetaStore) ListTasksPage(_ context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	page, total := tasks.PageTasks(append([]tasks.Task(nil), s.listTasks...), filter)
+	return page, total, nil
+}
+
+func (s *fakeAppMetaStore) ListStartingUnownedTasks(_ context.Context) ([]tasks.Task, error) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return tasks.StartingUnownedTasks(append([]tasks.Task(nil), s.listTasks...)), nil
 }
 
 func (s *fakeAppMetaStore) DeleteTask(_ context.Context, taskID string) error {
@@ -530,15 +549,45 @@ func (s *appFakeStore) UpsertTask(_ context.Context, task tasks.Task) error {
 	return nil
 }
 
-// ListTasks 实现对应功能逻辑。
-func (s *appFakeStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *appFakeStore) snapshot() []tasks.Task {
 	out := make([]tasks.Task, 0, len(s.tasks))
 	for _, task := range s.tasks {
 		out = append(out, task)
 	}
-	return out, nil
+	return out
+}
+
+// GetTask 实现对应功能逻辑。
+func (s *appFakeStore) GetTask(_ context.Context, taskID string) (tasks.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return tasks.Task{}, tasks.ErrTaskNotFound
+	}
+	return task, nil
+}
+
+// ListTasks 实现对应功能逻辑。
+func (s *appFakeStore) ListTasks(_ context.Context) ([]tasks.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot(), nil
+}
+
+// ListTasksPage 实现对应功能逻辑。
+func (s *appFakeStore) ListTasksPage(_ context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	page, total := tasks.PageTasks(s.snapshot(), filter)
+	return page, total, nil
+}
+
+// ListStartingUnownedTasks 实现对应功能逻辑。
+func (s *appFakeStore) ListStartingUnownedTasks(_ context.Context) ([]tasks.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return tasks.StartingUnownedTasks(s.snapshot()), nil
 }
 
 // DeleteTask 实现对应功能逻辑。
