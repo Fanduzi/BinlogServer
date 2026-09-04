@@ -1,7 +1,7 @@
 // Package replication provides module-level functionality for replication.
-// input: source replication config, task state, checkpoint/file store dependencies
-// output: replication run control, local binlog artifacts, and upload/recovery signals
-// pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
+// input: task start strategy, MasterStatusFetcher, dump file/pos
+// output: resolved FILE_POS/GTID start, conservative dump-vs-master file/pos comparison
+// pos: start-point resolver and idle at-tip comparison helper
 // note: if this file changes, update this header and module README.md.
 package replication
 
@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"binlog_server/internal/tasks"
 )
@@ -63,4 +65,52 @@ func ResolveStart(ctx context.Context, task tasks.Task, fetcher MasterStatusFetc
 	default:
 		return tasks.StartConfig{}, fmt.Errorf("unsupported start mode: %s", start.Mode)
 	}
+}
+
+// dumpAtOrBeyondMaster reports whether dump file/pos is at or past SHOW MASTER STATUS.
+// Comparison is file then pos. Typical names are mysql-bin.NNNNNN; unparseable or
+// mismatched prefixes are treated as not at tip.
+func dumpAtOrBeyondMaster(file string, pos uint32, master MasterStatus) bool {
+	if file == "" || master.File == "" || master.Pos == 0 {
+		return false
+	}
+	cmp, ok := compareBinlogFiles(file, master.File)
+	if !ok {
+		return false
+	}
+	if cmp != 0 {
+		return cmp > 0
+	}
+	return pos >= master.Pos
+}
+
+func compareBinlogFiles(a, b string) (int, bool) {
+	if a == b {
+		return 0, true
+	}
+	aPrefix, aSeq, aOK := splitBinlogName(a)
+	bPrefix, bSeq, bOK := splitBinlogName(b)
+	if !aOK || !bOK || aPrefix != bPrefix {
+		return 0, false
+	}
+	switch {
+	case aSeq > bSeq:
+		return 1, true
+	case aSeq < bSeq:
+		return -1, true
+	default:
+		return 0, true
+	}
+}
+
+func splitBinlogName(name string) (prefix string, seq uint64, ok bool) {
+	i := strings.LastIndex(name, ".")
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
+	}
+	seq, err := strconv.ParseUint(name[i+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name[:i], seq, true
 }
