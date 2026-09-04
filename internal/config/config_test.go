@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
-// input: YAML files, environment variables, default config constants
-// output: config loading regression coverage including unresolved protected-auth secret rejection
+// input: YAML files, environment variables, default config constants, optional encryption key
+// output: config loading regression coverage including unresolved protected-auth secret rejection, enabled-auth protect-flag defaults, and EncryptionKey passthrough
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -570,5 +570,89 @@ func TestLoadConfig_RejectsUnresolvedProtectedAuthSecret(t *testing.T) {
 	}
 	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "api.auth.bearer_token is required") {
 		t.Fatalf("expected unresolved bearer token error, got %v", err)
+	}
+}
+
+func TestLoadConfig_AuthEnabledUnsetProtectDefaultsTrue(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_MODE", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_API_KEY", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_API_KEY_HEADER", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+listen_addr: "127.0.0.1:18080"
+api:
+  auth:
+    enabled: true
+    mode: bearer
+    bearer_token: test-token
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if !cfg.API.Auth.Enabled {
+		t.Fatalf("expected auth enabled, got %+v", cfg.API.Auth)
+	}
+	if !cfg.API.Auth.ProtectAPI || !cfg.API.Auth.ProtectMetrics {
+		t.Fatalf("expected protect flags to default true when auth enabled and unset, got %+v", cfg.API.Auth)
+	}
+}
+
+func TestLoadConfig_AuthEnabledExplicitProtectFalse(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_MODE", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+listen_addr: "127.0.0.1:18080"
+api:
+  auth:
+    enabled: true
+    mode: bearer
+    bearer_token: test-token
+    protect_api: false
+    protect_metrics: false
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.API.Auth.ProtectAPI || cfg.API.Auth.ProtectMetrics {
+		t.Fatalf("expected explicit protect false to be preserved, got %+v", cfg.API.Auth)
+	}
+}
+
+func TestLoadConfigWithEncryption_RetainsKey(t *testing.T) {
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "")
+
+	key := "01234567890123456789012345678901"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("listen_addr: \"127.0.0.1:18080\"\n"), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err := LoadConfigWithEncryption(path, key)
+	if err != nil {
+		t.Fatalf("LoadConfigWithEncryption returned error: %v", err)
+	}
+	if cfg.EncryptionKey != key {
+		t.Fatalf("expected encryption key to be retained for meta wiring, got %q", cfg.EncryptionKey)
 	}
 }
