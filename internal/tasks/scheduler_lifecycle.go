@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals
-// output: guarded start/stop, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
+// output: guarded start/stop, bounded SOURCE_UNREACHABLE retry, expired-lease takeover without StopTask, and cancellation orchestration
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -33,8 +33,17 @@ func (s *Scheduler) StartTask(id string) error {
 		task.RunID == "" &&
 		s.runner != nil &&
 		s.leaseManager != nil
+	canTakeoverExpired := s.runner != nil && s.leaseManager != nil &&
+		(task.State == StateRunning || task.State == StateLeaseDegraded)
+	if canTakeoverExpired {
+		if done, ok := s.runs[id]; ok && !isClosed(done) {
+			// 本机仍有活跃 run goroutine，拒绝把未退出的本地执行再拉起一份。
+			canTakeoverExpired = false
+		}
+	}
 	// 仅允许 claim “干净的 dispatch STARTING 任务”，避免误接管非预期中间态。
-	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && task.State != StateFailed && !canClaimDispatched {
+	// 过期 RUNNING/LEASE_DEGRADED 可在 Acquire 成功后接管；Acquire 失败则不改状态。
+	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && task.State != StateFailed && !canClaimDispatched && !canTakeoverExpired {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start from state %s", task.State)
 	}
@@ -69,6 +78,8 @@ func (s *Scheduler) StartTask(id string) error {
 
 	// Step 3: worker 执行分支，先 acquire lease，再进入 STARTING。
 	if s.leaseManager != nil {
+		previousOwner := task.OwnerWorkerID
+		previousState := task.State
 		leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
 		epoch, acquired, err := s.leaseManager.Acquire(leaseCtx, id, s.clusterWorkerID, s.leaseTTL)
 		cancelLease()
@@ -83,6 +94,10 @@ func (s *Scheduler) StartTask(id string) error {
 		task.OwnerWorkerID = s.clusterWorkerID
 		task.Epoch = epoch
 		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
+		if previousState == StateRunning || previousState == StateLeaseDegraded {
+			s.appendEventLocked(id, "TASK_LEASE_TAKEOVER", "claimed expired lease", previousOwner)
+			log.Printf("claimed expired lease task=%s previous_owner=%s previous_state=%s epoch=%d", id, previousOwner, previousState, epoch)
+		}
 	}
 
 	// 注意：这里仅表示“已发起启动流程”，不是“runner 已 ready”。
@@ -155,6 +170,51 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 	return claimed, nil
 }
 
+// ClaimExpiredTasks 让在线 worker 接管租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF 任务。
+func (s *Scheduler) ClaimExpiredTasks() (int, error) {
+	s.mu.Lock()
+	store := s.store
+	runner := s.runner
+	leaseManager := s.leaseManager
+	s.mu.Unlock()
+
+	if store == nil || runner == nil || leaseManager == nil {
+		return 0, nil
+	}
+	lister, ok := store.(ExpiredLeaseTaskLister)
+	if !ok {
+		return 0, nil
+	}
+
+	readCtx, cancelRead := s.withReadTimeout(context.Background())
+	list, err := lister.ListTasksWithExpiredLease(readCtx)
+	cancelRead()
+	if err != nil {
+		return 0, err
+	}
+
+	claimed := 0
+	for _, item := range list {
+		if !isExpiredLeaseTakeoverState(item.State) {
+			continue
+		}
+		if !s.prepareExpiredTaskClaim(item) {
+			continue
+		}
+		if err := s.StartTask(item.ID); err != nil {
+			// 竞争窗口下可能被其他 worker 先拿到 lease，或本机仍持有有效执行；按 best-effort 跳过。
+			continue
+		}
+		log.Printf("claimed expired-lease task=%s previous_owner=%s previous_state=%s", item.ID, item.OwnerWorkerID, item.State)
+		claimed++
+	}
+	return claimed, nil
+}
+
+func isExpiredLeaseTakeoverState(state State) bool {
+	return state == StateRunning || state == StateLeaseDegraded || state == StateRetryBackoff
+}
+
 // prepareStartingTaskClaim 把 store 里的 STARTING 任务注入内存，并过滤本机不可接管场景。
 func (s *Scheduler) prepareStartingTaskClaim(item Task) bool {
 	s.mu.Lock()
@@ -170,6 +230,24 @@ func (s *Scheduler) prepareStartingTaskClaim(item Task) bool {
 			// 本地状态已进入执行/停止路径，不用 store 快照覆盖。
 			return false
 		}
+	}
+
+	s.tasks[item.ID] = item
+	return true
+}
+
+// prepareExpiredTaskClaim 把 store 里租约已过期的任务注入内存，并过滤本机仍在执行的场景。
+func (s *Scheduler) prepareExpiredTaskClaim(item Task) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if done, ok := s.runs[item.ID]; ok && !isClosed(done) {
+		// 本机已有活跃 run goroutine，拒绝重复接管。
+		return false
+	}
+	if current, ok := s.tasks[item.ID]; ok && current.State == StateStopping {
+		// 本地已进入停止路径，不用 store 快照覆盖。
+		return false
 	}
 
 	s.tasks[item.ID] = item

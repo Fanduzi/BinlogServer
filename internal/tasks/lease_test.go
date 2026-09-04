@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
+// output: task state transitions, scheduling decisions, cluster lease, and expired-lease takeover coverage
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -19,6 +19,7 @@ type fakeLeaseManager struct {
 	acquireEpoch int64
 	acquireOK    bool
 	acquireErr   error
+	acquireCalls int
 
 	renewCalls    int
 	renewFn       func(call int) (bool, error)
@@ -29,6 +30,9 @@ type fakeLeaseManager struct {
 
 // Acquire 实现对应功能逻辑。
 func (f *fakeLeaseManager) Acquire(_ context.Context, _ string, _ string, _ time.Duration) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acquireCalls++
 	return f.acquireEpoch, f.acquireOK, f.acquireErr
 }
 
@@ -752,5 +756,405 @@ func waitLeaseRenewCalls(t *testing.T, lease *fakeLeaseManager, want int, timeou
 			t.Fatalf("expected at least %d renew calls, got %d", want, got)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type expiredLeaseTestStore struct {
+	mu       sync.Mutex
+	tasks    map[string]Task
+	expired  []Task
+	upserted []Task
+}
+
+func (s *expiredLeaseTestStore) UpsertTask(_ context.Context, task Task) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tasks == nil {
+		s.tasks = make(map[string]Task)
+	}
+	s.tasks[task.ID] = task
+	s.upserted = append(s.upserted, task)
+	return nil
+}
+
+func (s *expiredLeaseTestStore) ListTasks(_ context.Context) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Task, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		out = append(out, task)
+	}
+	return out, nil
+}
+
+func (s *expiredLeaseTestStore) DeleteTask(_ context.Context, taskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tasks, taskID)
+	return nil
+}
+
+func (s *expiredLeaseTestStore) ListTasksWithExpiredLease(_ context.Context) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Task, len(s.expired))
+	copy(out, s.expired)
+	return out, nil
+}
+
+func (s *expiredLeaseTestStore) persistedStates() []State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	states := make([]State, 0, len(s.upserted))
+	for _, task := range s.upserted {
+		states = append(states, task.State)
+	}
+	return states
+}
+
+func newExpiredOwnedTask(id, owner string, state State) Task {
+	return Task{
+		ID:            id,
+		Name:          "cluster-a",
+		ClusterKey:    "cluster-a-key",
+		State:         state,
+		OwnerWorkerID: owner,
+		Epoch:         7,
+		RunID:         "run-old",
+		Source:        SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+		Start:         StartConfig{Mode: StartModeLatest},
+	}
+}
+
+func assertNoStopPersisted(t *testing.T, store *expiredLeaseTestStore) {
+	t.Helper()
+	for _, state := range store.persistedStates() {
+		if state == StateStopping || state == StateStopped {
+			t.Fatalf("takeover persisted %s", state)
+		}
+	}
+}
+
+func waitRunnerStarted(t *testing.T, runner *fakeRunner) {
+	t.Helper()
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected worker runner to start claimed task")
+	}
+}
+
+func TestScheduler_ClaimExpiredTasksStartsExpiredRunningTask(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 22, acquireOK: true}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+
+	task := newExpiredOwnedTask("1", "worker-dead", StateRunning)
+	store.tasks[task.ID] = task
+	store.expired = []Task{task}
+
+	claimed, err := worker.ClaimExpiredTasks()
+	if err != nil {
+		t.Fatalf("ClaimExpiredTasks returned error: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1, got %d", claimed)
+	}
+	lease.mu.Lock()
+	acquireCalls := lease.acquireCalls
+	lease.mu.Unlock()
+	if acquireCalls == 0 {
+		t.Fatal("expected lease acquire on expired takeover")
+	}
+
+	waitRunnerStarted(t, runner)
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateRunning)
+	assertNoStopPersisted(t, store)
+
+	got, err := worker.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.OwnerWorkerID != "worker-b" {
+		t.Fatalf("expected owner worker-b after takeover, got %q", got.OwnerWorkerID)
+	}
+	if got.Epoch != 22 {
+		t.Fatalf("expected epoch 22 after takeover, got %d", got.Epoch)
+	}
+
+	events, err := worker.ListEvents(task.ID, 20)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	sawTakeover := false
+	for _, event := range events {
+		if event.Type == "TASK_STOPPING" || event.Type == "TASK_STOPPED" {
+			t.Fatalf("takeover emitted stop event %s", event.Type)
+		}
+		if event.Type == "TASK_LEASE_TAKEOVER" {
+			sawTakeover = true
+		}
+	}
+	if !sawTakeover {
+		t.Fatal("expected TASK_LEASE_TAKEOVER event")
+	}
+
+	if err := worker.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
+	}
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+}
+
+func TestScheduler_ClaimExpiredTasksDoesNotPersistStoppedWhenAcquireFails(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 28, acquireOK: false}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+
+	task := newExpiredOwnedTask("1", "worker-live", StateRunning)
+	store.tasks[task.ID] = task
+	store.expired = []Task{task}
+
+	claimed, err := worker.ClaimExpiredTasks()
+	if err != nil {
+		t.Fatalf("ClaimExpiredTasks returned error: %v", err)
+	}
+	if claimed != 0 {
+		t.Fatalf("expected claimed=0 when acquire fails, got %d", claimed)
+	}
+	got, err := worker.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State != StateRunning || got.OwnerWorkerID != "worker-live" {
+		t.Fatalf("expected original running owner retained, got state=%s owner=%q", got.State, got.OwnerWorkerID)
+	}
+	assertNoStopPersisted(t, store)
+	select {
+	case <-runner.started:
+		t.Fatal("did not expect runner to start when acquire failed")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestScheduler_ClaimExpiredTasksIgnoresValidLease(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 23, acquireOK: true}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+
+	task := newExpiredOwnedTask("1", "worker-live", StateRunning)
+	store.tasks[task.ID] = task
+	store.expired = nil
+
+	claimed, err := worker.ClaimExpiredTasks()
+	if err != nil {
+		t.Fatalf("ClaimExpiredTasks returned error: %v", err)
+	}
+	if claimed != 0 {
+		t.Fatalf("expected claimed=0 for valid lease, got %d", claimed)
+	}
+	select {
+	case <-runner.started:
+		t.Fatal("did not expect runner to start for unexpired lease")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestScheduler_StartTaskDoesNotStealLiveLease(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 24, acquireOK: false}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	s := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+
+	s.mu.Lock()
+	current := s.tasks[task.ID]
+	current.State = StateRunning
+	current.OwnerWorkerID = "worker-live"
+	current.Epoch = 7
+	current.RunID = "run-live"
+	s.tasks[task.ID] = current
+	s.mu.Unlock()
+	if err := store.UpsertTask(context.Background(), current); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+
+	err = s.StartTask(task.ID)
+	if !errors.Is(err, ErrLeaseNotAcquired) {
+		t.Fatalf("expected ErrLeaseNotAcquired, got %v", err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State != StateRunning {
+		t.Fatalf("expected state %s after failed takeover, got %s", StateRunning, got.State)
+	}
+	if got.OwnerWorkerID != "worker-live" {
+		t.Fatalf("expected original owner retained, got %q", got.OwnerWorkerID)
+	}
+	assertNoStopPersisted(t, store)
+	select {
+	case <-runner.started:
+		t.Fatal("did not expect runner to start when lease is still valid")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestScheduler_ClaimStartingTasksStillClaimsUnownedStarting(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 25, acquireOK: true}
+	control := NewScheduler(
+		WithStore(store),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("control-plane-a"),
+	)
+	workerRunner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(workerRunner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+	)
+
+	task, err := control.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := control.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := control.StartTask(task.ID); err != nil {
+		t.Fatalf("control StartTask returned error: %v", err)
+	}
+
+	running := newExpiredOwnedTask("99", "worker-dead", StateRunning)
+	store.mu.Lock()
+	store.tasks[running.ID] = running
+	store.expired = []Task{running}
+	store.mu.Unlock()
+
+	claimed, err := worker.ClaimStartingTasks()
+	if err != nil {
+		t.Fatalf("ClaimStartingTasks returned error: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1 starting task, got %d", claimed)
+	}
+	waitRunnerStarted(t, workerRunner)
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateRunning)
+
+	if err := worker.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
+	}
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+}
+
+func TestScheduler_ClaimExpiredTasksSkipsLocalLiveRun(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 26, acquireOK: true}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+	)
+
+	task, err := worker.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := worker.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := worker.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+	waitRunnerStarted(t, runner)
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateRunning)
+
+	got, err := worker.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	store.mu.Lock()
+	store.expired = []Task{got}
+	store.mu.Unlock()
+
+	claimed, err := worker.ClaimExpiredTasks()
+	if err != nil {
+		t.Fatalf("ClaimExpiredTasks returned error: %v", err)
+	}
+	if claimed != 0 {
+		t.Fatalf("expected claimed=0 when local run is live, got %d", claimed)
+	}
+
+	if err := worker.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
+	}
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+}
+
+func TestScheduler_ClaimExpiredTasksStartsExpiredLeaseDegradedAndRetryBackoff(t *testing.T) {
+	for _, state := range []State{StateLeaseDegraded, StateRetryBackoff} {
+		t.Run(string(state), func(t *testing.T) {
+			store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+			lease := &fakeLeaseManager{acquireEpoch: 27, acquireOK: true}
+			runner := &fakeRunner{started: make(chan Task, 1)}
+			worker := NewScheduler(
+				WithStore(store),
+				WithRunner(runner),
+				WithClusterLeaseManager(lease),
+				WithClusterWorkerID("worker-b"),
+			)
+			task := newExpiredOwnedTask("1", "worker-dead", state)
+			store.tasks[task.ID] = task
+			store.expired = []Task{task}
+
+			claimed, err := worker.ClaimExpiredTasks()
+			if err != nil {
+				t.Fatalf("ClaimExpiredTasks returned error: %v", err)
+			}
+			if claimed != 1 {
+				t.Fatalf("expected claimed=1, got %d", claimed)
+			}
+			waitRunnerStarted(t, runner)
+			waitTaskState(t, worker, task.ID, 2*time.Second, StateRunning)
+			assertNoStopPersisted(t, store)
+			if err := worker.StopTask(task.ID); err != nil {
+				t.Fatalf("StopTask returned error: %v", err)
+			}
+			waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+		})
 	}
 }
