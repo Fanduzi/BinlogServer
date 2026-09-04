@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: scheduler store/lease/uploader dependencies and timeout option configuration
-// output: timeout-boundary regression coverage for internal read/lease/upload calls
+// output: timeout-boundary regression coverage for GetTask/ListTasksPage/claim read, lease, and upload calls
 // pos: scheduler timeout governance tests for internal dependency interactions
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -23,12 +23,24 @@ func (s *timeoutListStore) UpsertTask(context.Context, Task) error { return nil 
 func (s *timeoutListStore) DeleteTask(context.Context, string) error {
 	return nil
 }
-func (s *timeoutListStore) ListTasks(ctx context.Context) ([]Task, error) {
+func (s *timeoutListStore) waitDeadline(ctx context.Context) error {
 	if _, ok := ctx.Deadline(); !ok {
-		return nil, errTimeoutTestMissingDeadline
+		return errTimeoutTestMissingDeadline
 	}
 	<-ctx.Done()
-	return nil, ctx.Err()
+	return ctx.Err()
+}
+func (s *timeoutListStore) GetTask(ctx context.Context, _ string) (Task, error) {
+	return Task{}, s.waitDeadline(ctx)
+}
+func (s *timeoutListStore) ListTasks(ctx context.Context) ([]Task, error) {
+	return nil, s.waitDeadline(ctx)
+}
+func (s *timeoutListStore) ListTasksPage(ctx context.Context, _ TaskListFilter) ([]Task, int, error) {
+	return nil, 0, s.waitDeadline(ctx)
+}
+func (s *timeoutListStore) ListStartingUnownedTasks(ctx context.Context) ([]Task, error) {
+	return nil, s.waitDeadline(ctx)
 }
 
 type timeoutLeaseManager struct{}

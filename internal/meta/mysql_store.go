@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with ListTasks ordered by numeric id, ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage SQL LIMIT/OFFSET, ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -139,6 +139,8 @@ ON DUPLICATE KEY UPDATE
   updated_at = VALUES(updated_at);
 `
 
+const taskSelectColumns = `id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at`
+
 const listTaskSQL = `
 SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
 FROM backup_tasks
@@ -152,6 +154,20 @@ INNER JOIN task_leases l ON l.task_id = t.id
 WHERE t.state IN ('RUNNING', 'LEASE_DEGRADED', 'RETRY_BACKOFF')
   AND l.lease_expire_at <= NOW(6)
 ORDER BY CAST(t.id AS UNSIGNED), t.id;
+`
+
+const getTaskSQL = `
+SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
+FROM backup_tasks
+WHERE id = ?;
+`
+
+const listStartingUnownedTaskSQL = `
+SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
+FROM backup_tasks
+WHERE state = ?
+  AND (owner_worker_id IS NULL OR owner_worker_id = '')
+ORDER BY CAST(id AS UNSIGNED), id;
 `
 
 const deleteTaskSQL = `
@@ -626,25 +642,92 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	return nil
 }
 
-// ListTasks 读取全部任务快照并反序列化配置字段。
-func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
-	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks")
-	defer endMetaSpan(span)
-
-	rows, err := s.db.QueryContext(ctx, listTaskSQL)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return s.scanBackupTaskRows(rows)
+type rowScanner interface {
+	Scan(dest ...any) error
 }
 
-// ListTasksWithExpiredLease lists active tasks whose joined lease row is already expired.
-func (s *MySQLTaskStore) ListTasksWithExpiredLease(ctx context.Context) ([]tasks.Task, error) {
-	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks_with_expired_lease")
-	defer endMetaSpan(span)
+func taskListFilterClause(filter tasks.TaskListFilter) (string, []any) {
+	var parts []string
+	var args []any
+	if filter.State != nil {
+		parts = append(parts, "state = ?")
+		args = append(args, string(*filter.State))
+	}
+	if filter.Host != "" {
+		parts = append(parts, "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host')) = ?")
+		args = append(args, filter.Host)
+	}
+	if filter.Port != nil {
+		parts = append(parts, "CAST(JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.port')) AS UNSIGNED) = ?")
+		args = append(args, int(*filter.Port))
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(parts, " AND "), args
+}
 
-	rows, err := s.db.QueryContext(ctx, listTasksWithExpiredLeaseSQL)
+func listTasksPageSQL(filter tasks.TaskListFilter) (countSQL, selectSQL string, countArgs, selectArgs []any) {
+	where, args := taskListFilterClause(filter)
+	countSQL = "SELECT COUNT(*) FROM backup_tasks" + where
+	selectSQL = "SELECT " + taskSelectColumns + " FROM backup_tasks" + where + " ORDER BY CAST(id AS UNSIGNED), id LIMIT ? OFFSET ?"
+	countArgs = append([]any(nil), args...)
+	selectArgs = append(append([]any(nil), args...), filter.Limit, filter.Offset)
+	return countSQL, selectSQL, countArgs, selectArgs
+}
+
+func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
+	var (
+		task        tasks.Task
+		state       string
+		ownerWorker sql.NullString
+		epoch       int64
+		runID       sql.NullString
+		sourceJSON  string
+		startJSON   string
+		storageJSON string
+		lastError   sql.NullString
+		updatedAt   time.Time
+	)
+	if err := src.Scan(
+		&task.ID,
+		&task.Name,
+		&task.ClusterKey,
+		&state,
+		&lastError,
+		&ownerWorker,
+		&epoch,
+		&runID,
+		&sourceJSON,
+		&startJSON,
+		&storageJSON,
+		&updatedAt,
+	); err != nil {
+		return tasks.Task{}, err
+	}
+
+	task.State = tasks.State(state)
+	task.LastError = lastError.String
+	task.OwnerWorkerID = ownerWorker.String
+	task.Epoch = epoch
+	task.RunID = runID.String
+	task.UpdatedAt = updatedAt
+	source, err := s.unmarshalSource(sourceJSON)
+	if err != nil {
+		return tasks.Task{}, fmt.Errorf("decode source json for task %s: %w", task.ID, err)
+	}
+	task.Source = source
+	if err := json.Unmarshal([]byte(startJSON), &task.Start); err != nil {
+		return tasks.Task{}, fmt.Errorf("decode start json for task %s: %w", task.ID, err)
+	}
+	if err := json.Unmarshal([]byte(storageJSON), &task.Storage); err != nil {
+		return tasks.Task{}, fmt.Errorf("decode storage json for task %s: %w", task.ID, err)
+	}
+	return task, nil
+}
+
+func (s *MySQLTaskStore) queryTasks(ctx context.Context, query string, args ...any) ([]tasks.Task, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -653,61 +736,71 @@ func (s *MySQLTaskStore) ListTasksWithExpiredLease(ctx context.Context) ([]tasks
 }
 
 func (s *MySQLTaskStore) scanBackupTaskRows(rows *sql.Rows) ([]tasks.Task, error) {
-	var list []tasks.Task
+	list := make([]tasks.Task, 0)
 	for rows.Next() {
-		var (
-			task        tasks.Task
-			state       string
-			ownerWorker sql.NullString
-			epoch       int64
-			runID       sql.NullString
-			sourceJSON  string
-			startJSON   string
-			storageJSON string
-			lastError   sql.NullString
-			updatedAt   time.Time
-		)
-		if err := rows.Scan(
-			&task.ID,
-			&task.Name,
-			&task.ClusterKey,
-			&state,
-			&lastError,
-			&ownerWorker,
-			&epoch,
-			&runID,
-			&sourceJSON,
-			&startJSON,
-			&storageJSON,
-			&updatedAt,
-		); err != nil {
+		task, err := s.scanTask(rows)
+		if err != nil {
 			return nil, err
 		}
-
-		task.State = tasks.State(state)
-		task.LastError = lastError.String
-		task.OwnerWorkerID = ownerWorker.String
-		task.Epoch = epoch
-		task.RunID = runID.String
-		task.UpdatedAt = updatedAt
-		source, err := s.unmarshalSource(sourceJSON)
-		if err != nil {
-			return nil, fmt.Errorf("decode source json for task %s: %w", task.ID, err)
-		}
-		task.Source = source
-		if err := json.Unmarshal([]byte(startJSON), &task.Start); err != nil {
-			return nil, fmt.Errorf("decode start json for task %s: %w", task.ID, err)
-		}
-		if err := json.Unmarshal([]byte(storageJSON), &task.Storage); err != nil {
-			return nil, fmt.Errorf("decode storage json for task %s: %w", task.ID, err)
-		}
-
 		list = append(list, task)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return list, nil
+}
+
+// ListTasksWithExpiredLease lists active tasks whose joined lease row is already expired.
+func (s *MySQLTaskStore) ListTasksWithExpiredLease(ctx context.Context) ([]tasks.Task, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks_with_expired_lease")
+	defer endMetaSpan(span)
+	return s.queryTasks(ctx, listTasksWithExpiredLeaseSQL)
+}
+
+// ListTasks 读取全部任务快照并反序列化配置字段。Restore 仍使用该全量路径。
+func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks")
+	defer endMetaSpan(span)
+	return s.queryTasks(ctx, listTaskSQL)
+}
+
+// GetTask 按主键读取单个任务。
+func (s *MySQLTaskStore) GetTask(ctx context.Context, taskID string) (tasks.Task, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.get_task")
+	defer endMetaSpan(span)
+
+	task, err := s.scanTask(s.db.QueryRowContext(ctx, getTaskSQL, taskID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return tasks.Task{}, tasks.ErrTaskNotFound
+	}
+	if err != nil {
+		return tasks.Task{}, err
+	}
+	return task, nil
+}
+
+// ListTasksPage 在 SQL 层过滤、COUNT 并 LIMIT/OFFSET，不把整表读进内存再切页。
+func (s *MySQLTaskStore) ListTasksPage(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks_page")
+	defer endMetaSpan(span)
+
+	countSQL, selectSQL, countArgs, selectArgs := listTasksPageSQL(filter)
+	var total int
+	if err := s.db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	list, err := s.queryTasks(ctx, selectSQL, selectArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return list, total, nil
+}
+
+// ListStartingUnownedTasks 仅查询 STARTING 且 owner_worker_id 为空的任务。
+func (s *MySQLTaskStore) ListStartingUnownedTasks(ctx context.Context) ([]tasks.Task, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_starting_unowned_tasks")
+	defer endMetaSpan(span)
+	return s.queryTasks(ctx, listStartingUnownedTaskSQL, string(tasks.StateStarting))
 }
 
 // DeleteTask 删除任务及其关联元数据。
