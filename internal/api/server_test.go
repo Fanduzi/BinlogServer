@@ -263,6 +263,16 @@ func TestTaskAPI_CreateWithSourceAndStart(t *testing.T) {
 	}
 }
 
+func TestSanitizeTaskClearsPassword(t *testing.T) {
+	got := sanitizeTask(tasks.Task{Source: tasks.SourceConfig{Host: "127.0.0.1", Password: "secret"}})
+	if got.Source.Password != "" {
+		t.Fatalf("expected sanitizeTask to redact password after internal decrypt, got %q", got.Source.Password)
+	}
+	if got.Source.Host != "127.0.0.1" {
+		t.Fatalf("expected other source fields to remain, got %+v", got.Source)
+	}
+}
+
 // TestTaskAPI_CreateTaskRequiresClusterKey 验证相关行为。
 func TestTaskAPI_CreateTaskRequiresClusterKey(t *testing.T) {
 	scheduler := tasks.NewScheduler()

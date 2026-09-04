@@ -1,18 +1,21 @@
 // Package meta provides module-level functionality for meta.
-// input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, numeric ListTasks order, and expired-lease listing
+// input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, numeric ListTasks order, expired-lease listing, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
 
 import (
 	"context"
+	"database/sql/driver"
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/config"
 	"binlog_server/internal/tasks"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -237,6 +240,220 @@ func TestMySQLTaskStore_ListTasksWithExpiredLease(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+const testSourcePasswordKey = "01234567890123456789012345678901"
+
+type encryptedSourceJSONArg struct {
+	key      string
+	password string
+	host     string
+}
+
+func (a encryptedSourceJSONArg) Match(v driver.Value) bool {
+	raw, ok := v.(string)
+	if !ok {
+		b, ok := v.([]byte)
+		if !ok {
+			return false
+		}
+		raw = string(b)
+	}
+	var src tasks.SourceConfig
+	if err := json.Unmarshal([]byte(raw), &src); err != nil {
+		return false
+	}
+	if src.Host != a.host || src.User != "repl" || !strings.HasPrefix(src.Password, config.EncryptionPrefix) {
+		return false
+	}
+	d, err := config.NewDecryptor(a.key)
+	if err != nil {
+		return false
+	}
+	plain, err := d.Decrypt(src.Password)
+	return err == nil && plain == a.password
+}
+
+func TestMySQLTaskStore_EncryptsSourcePasswordWhenKeySet(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	if err := store.setSourcePasswordKey(testSourcePasswordKey); err != nil {
+		t.Fatalf("setSourcePasswordKey: %v", err)
+	}
+	task := tasks.Task{
+		ID:         "1",
+		Name:       "cluster-a",
+		ClusterKey: "cluster-a-key",
+		State:      tasks.StateCreated,
+		Source: tasks.SourceConfig{
+			Host:     "127.0.0.1",
+			Port:     3306,
+			User:     "repl",
+			Password: "secret",
+			Flavor:   "mysql",
+			ServerID: 200001,
+		},
+		Start: tasks.StartConfig{Mode: tasks.StartModeLatest},
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(loadTaskRunStateSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"run_id"}))
+	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
+		WithArgs("1", "cluster-a", "cluster-a-key", "CREATED", "", "", int64(0), "", encryptedSourceJSONArg{
+			key:      testSourcePasswordKey,
+			password: "secret",
+			host:     "127.0.0.1",
+		}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	if err := store.UpsertTask(context.Background(), task); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	if task.Source.Password != "secret" {
+		t.Fatalf("UpsertTask must not mutate in-memory password, got %q", task.Source.Password)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListTasksDecryptsSourcePassword(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	if err := store.setSourcePasswordKey(testSourcePasswordKey); err != nil {
+		t.Fatalf("setSourcePasswordKey: %v", err)
+	}
+	d, err := config.NewDecryptor(testSourcePasswordKey)
+	if err != nil {
+		t.Fatalf("NewDecryptor: %v", err)
+	}
+	encrypted, err := d.Encrypt("secret")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	sourceJSON, err := json.Marshal(tasks.SourceConfig{
+		Host:     "127.0.0.1",
+		Port:     3306,
+		User:     "repl",
+		Password: encrypted,
+		Flavor:   "mysql",
+		ServerID: 200001,
+	})
+	if err != nil {
+		t.Fatalf("marshal source: %v", err)
+	}
+
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{
+		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
+	}).AddRow(
+		"1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "",
+		string(sourceJSON), `{"mode":"LATEST"}`, `{"dir":"./data"}`, now,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(rows)
+
+	list, err := store.ListTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasks returned error: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(list))
+	}
+	if list[0].Source.Password != "secret" {
+		t.Fatalf("expected decrypted plaintext password on Task.Source, got %q", list[0].Source.Password)
+	}
+	if list[0].Source.Host != "127.0.0.1" {
+		t.Fatalf("expected other source fields to stay plaintext, got %+v", list[0].Source)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListTasksLoadsPlaintextSourcePasswordWithoutPrefix(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	if err := store.setSourcePasswordKey(testSourcePasswordKey); err != nil {
+		t.Fatalf("setSourcePasswordKey: %v", err)
+	}
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{
+		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
+	}).AddRow(
+		"1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "",
+		`{"host":"127.0.0.1","port":3306,"user":"repl","password":"legacy-secret","flavor":"mysql","server_id":200001}`,
+		`{"mode":"LATEST"}`, `{"dir":"./data"}`, now,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(rows)
+
+	list, err := store.ListTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasks returned error: %v", err)
+	}
+	if len(list) != 1 || list[0].Source.Password != "legacy-secret" {
+		t.Fatalf("expected existing plaintext source_json to load, got %+v err=%v", list, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListTasksLoadsPlaintextWithoutKey(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{
+		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
+	}).AddRow(
+		"1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "",
+		`{"host":"127.0.0.1","port":3306,"user":"repl","password":"legacy-secret","flavor":"mysql","server_id":200001}`,
+		`{"mode":"LATEST"}`, `{"dir":"./data"}`, now,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(rows)
+
+	list, err := store.ListTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasks returned error: %v", err)
+	}
+	if len(list) != 1 || list[0].Source.Password != "legacy-secret" {
+		t.Fatalf("expected plaintext persist without key, got %+v err=%v", list, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestNewMySQLTaskStoreWithSchemaTimeout_RejectsInvalidEncryptionKey(t *testing.T) {
+	_, err := NewMySQLTaskStoreWithSchemaTimeout("user:pass@tcp(127.0.0.1:3306)/meta", time.Second, "short")
+	if err == nil {
+		t.Fatal("expected invalid encryption key to fail before schema checks")
+	}
+	if !strings.Contains(err.Error(), "32 bytes") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

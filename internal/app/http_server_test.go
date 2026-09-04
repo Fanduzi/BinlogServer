@@ -1,12 +1,14 @@
 // Package app provides module-level functionality for app.
-// input: HTTP timeout config and PRODUCTION environment values
-// output: HTTP timeout plus production auth/boolean parsing regression coverage
+// input: HTTP timeout config, PRODUCTION environment values, and control-plane listen_addr
+// output: HTTP timeout plus production/non-loopback auth fail-closed regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
 
 import (
+	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +61,80 @@ func TestValidateProductionAuthFailsClosed(t *testing.T) {
 	}
 	if err := validateProductionAuth(config.APIAuthConfig{}, false); err != nil {
 		t.Fatalf("development defaults must remain unchanged: %v", err)
+	}
+}
+
+func TestIsLoopbackListenAddr(t *testing.T) {
+	loopback := []string{"127.0.0.1:8080", "localhost:18080", "[::1]:8080", "127.0.0.1:0"}
+	for _, addr := range loopback {
+		if !isLoopbackListenAddr(addr) {
+			t.Fatalf("expected loopback listen %q", addr)
+		}
+	}
+	nonLoopback := []string{":8080", "0.0.0.0:8080", "[::]:8080", "192.168.1.10:8080", ""}
+	for _, addr := range nonLoopback {
+		if isLoopbackListenAddr(addr) {
+			t.Fatalf("expected non-loopback listen %q", addr)
+		}
+	}
+}
+
+func TestApp_NonLoopbackListenRejectsDisabledAuth(t *testing.T) {
+	for _, addr := range []string{":8080", "0.0.0.0:8080"} {
+		a := New(config.Config{ListenAddr: addr})
+		err := a.Run(context.Background())
+		if err == nil {
+			t.Fatalf("expected App.Run to reject non-loopback listen %q with auth disabled", addr)
+		}
+		if !strings.Contains(err.Error(), "listen_addr is not loopback") {
+			t.Fatalf("unexpected error for %q: %v", addr, err)
+		}
+		if a.Addr() != "" {
+			t.Fatalf("non-loopback listen %q bound a listener without auth: %q", addr, a.Addr())
+		}
+	}
+}
+
+func TestApp_LoopbackListenAllowsDisabledAuth(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:0", "localhost:18080", "[::1]:0"} {
+		if err := validateControlPlaneAuth(addr, config.APIAuthConfig{}, false); err != nil {
+			t.Fatalf("loopback listen %q should allow disabled auth: %v", addr, err)
+		}
+	}
+
+	a := New(config.Config{ListenAddr: "127.0.0.1:0"})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("app did not exit after cancel")
+		}
+	}()
+
+	select {
+	case <-a.Ready():
+	case err := <-errCh:
+		t.Fatalf("loopback listen with auth disabled failed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("app did not become ready in time")
+	}
+}
+
+func TestValidateControlPlaneAuth_NonLoopbackRequiresProtectFlags(t *testing.T) {
+	auth := config.APIAuthConfig{
+		Enabled: true, Mode: "bearer", BearerToken: "test-token",
+	}
+	if err := validateControlPlaneAuth(":8080", auth, false); err == nil {
+		t.Fatal("expected non-loopback listen to require protect_api and protect_metrics")
+	}
+	auth.ProtectAPI = true
+	auth.ProtectMetrics = true
+	if err := validateControlPlaneAuth(":8080", auth, false); err != nil {
+		t.Fatalf("expected fully protected non-loopback auth to pass: %v", err)
 	}
 }
 
