@@ -20,9 +20,8 @@
 - control-plane `listen_addr` 非 loopback（含 `:8080`、`0.0.0.0:8080`）时同样强制 `api.auth.enabled` + `protect_api` + `protect_metrics`；`127.0.0.1`/`localhost`/`::1` 可保持未鉴权本地演示。`/healthz` 仍匿名。
 - 创建 meta store 时把 `config.EncryptionKey` 注入，用于 `source_json` 源库密码加解密。
 - tracing：默认关闭；启用时装配 HTTP 入站 span 与元数据存储调用 span；无路径的 OTLP HTTP endpoint 沿用 `/v1/traces` 默认路径。
-- standalone worker 启动时 Stop+Start 全部 persisted active task，并从 checkpoint 续传。
-- cluster worker 启动时只 Stop+Start 本 worker 拥有的任务以及无主 STARTING（owner 为空且 epoch 为 0），不会对其他 worker 的 RUNNING 调用 StopTask。
-- cluster worker claim 循环同时认领无主 STARTING 与租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF。
+- worker 启动与认领循环都走 `ClaimRunnableTasks`：没人要的 STARTING、过期租约、自己名下空闲的 active 任务。不对别人仍持有未过期租约的 RUNNING 做 Stop。
+- 封文件前验租走 `LeaseManager.Verify`，不再把 MySQL store 转一层。
 
 ### Minimal Tracing Config Example
 ```yaml

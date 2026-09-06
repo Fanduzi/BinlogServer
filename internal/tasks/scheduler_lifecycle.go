@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks
-// output: guarded start/stop, STARTING-unowned claim ticks, expired-lease takeover without StopTask, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
+// input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
+// output: guarded start/stop, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -18,6 +18,18 @@ import (
 
 const maxConsecutiveRetryableSourceFailures = 10
 
+func (s *Scheduler) releaseTaskLease(taskID, owner string, epoch int64) {
+	if s.leaseManager == nil || owner == "" || epoch <= 0 {
+		return
+	}
+	ctx, cancel := s.withLeaseTimeout(context.Background())
+	released, err := s.leaseManager.Release(ctx, taskID, owner, epoch)
+	cancel()
+	if err != nil || !released {
+		log.Printf("lease release failed task=%s owner=%s epoch=%d released=%v err=%v", taskID, owner, epoch, released, err)
+	}
+}
+
 func (s *Scheduler) StartTask(id string) error {
 	s.mu.Lock()
 
@@ -27,23 +39,25 @@ func (s *Scheduler) StartTask(id string) error {
 		s.mu.Unlock()
 		return ErrTaskNotFound
 	}
+	hasLiveRun := false
+	if done, ok := s.runs[id]; ok && !isClosed(done) {
+		hasLiveRun = true
+	}
 	canClaimDispatched := task.State == StateStarting &&
 		task.OwnerWorkerID == "" &&
 		task.Epoch == 0 &&
 		task.RunID == "" &&
 		s.runner != nil &&
 		s.leaseManager != nil
-	canTakeoverExpired := s.runner != nil && s.leaseManager != nil &&
+	canTakeoverExpired := s.runner != nil && s.leaseManager != nil && !hasLiveRun &&
 		(task.State == StateRunning || task.State == StateLeaseDegraded)
-	if canTakeoverExpired {
-		if done, ok := s.runs[id]; ok && !isClosed(done) {
-			// 本机仍有活跃 run goroutine，拒绝把未退出的本地执行再拉起一份。
-			canTakeoverExpired = false
-		}
-	}
+	canResumeIdle := s.runner != nil && !hasLiveRun &&
+		(task.State == StateRunning || task.State == StateLeaseDegraded || task.State == StateStarting || task.State == StateRetryBackoff) &&
+		(s.leaseManager == nil || task.OwnerWorkerID == s.clusterWorkerID)
 	// 仅允许 claim “干净的 dispatch STARTING 任务”，避免误接管非预期中间态。
 	// 过期 RUNNING/LEASE_DEGRADED 可在 Acquire 成功后接管；Acquire 失败则不改状态。
-	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && task.State != StateFailed && !canClaimDispatched && !canTakeoverExpired {
+	// 本机空闲的 active 任务（开机接上 / 单机无租约表）走 canResumeIdle，不先 Stop。
+	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && task.State != StateFailed && !canClaimDispatched && !canTakeoverExpired && !canResumeIdle {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start from state %s", task.State)
 	}
@@ -183,7 +197,7 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 	}
 	lister, ok := store.(ExpiredLeaseTaskLister)
 	if !ok {
-		return 0, nil
+		return 0, ErrExpiredLeaseLookupNotAvailable
 	}
 
 	readCtx, cancelRead := s.withReadTimeout(context.Background())
@@ -213,6 +227,54 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 
 func isExpiredLeaseTakeoverState(state State) bool {
 	return state == StateRunning || state == StateLeaseDegraded || state == StateRetryBackoff
+}
+
+// ClaimRunnableTasks 把该本 Worker 跑的任务跑起来：没人要的 STARTING、过期租约、以及自己名下还空着的。
+func (s *Scheduler) ClaimRunnableTasks() (int, error) {
+	claimed, err := s.ClaimStartingTasks()
+	if err != nil {
+		return claimed, err
+	}
+	expired, err := s.ClaimExpiredTasks()
+	claimed += expired
+	if err != nil {
+		return claimed, err
+	}
+	owned, err := s.claimOwnedIdleTasks()
+	return claimed + owned, err
+}
+
+func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
+	s.mu.Lock()
+	leaseManager := s.leaseManager
+	workerID := s.clusterWorkerID
+	snapshot := make([]Task, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		snapshot = append(snapshot, task)
+	}
+	s.mu.Unlock()
+
+	claimed := 0
+	for _, task := range snapshot {
+		if !isClaimableActiveState(task.State) {
+			continue
+		}
+		if leaseManager != nil && task.OwnerWorkerID != workerID {
+			continue
+		}
+		if err := s.StartTask(task.ID); err != nil {
+			if errors.Is(err, ErrInvalidSourceConfig) {
+				_ = s.StopTask(task.ID)
+			}
+			continue
+		}
+		claimed++
+	}
+	return claimed, nil
+}
+
+func isClaimableActiveState(state State) bool {
+	return state == StateRunning || state == StateStarting || state == StateRetryBackoff || state == StateLeaseDegraded
 }
 
 // prepareStartingTaskClaim 把 store 里的 STARTING 任务注入内存，并过滤本机不可接管场景。
@@ -330,14 +392,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			}
 		}
 		s.mu.Unlock()
-		if s.leaseManager != nil && releaseOwner != "" && releaseEpoch > 0 {
-			releaseCtx, cancelRelease := s.withLeaseTimeout(context.Background())
-			released, err := s.leaseManager.Release(releaseCtx, id, releaseOwner, releaseEpoch)
-			cancelRelease()
-			if err != nil || !released {
-				log.Printf("lease release on run exit failed task=%s owner=%s epoch=%d released=%v err=%v", id, releaseOwner, releaseEpoch, released, err)
-			}
-		}
+		s.releaseTaskLease(id, releaseOwner, releaseEpoch)
 		// 常见误解：
 		// done 不是“任务开始执行”的信号，而是“本轮执行完全结束”的信号。
 		// StopTask/状态收敛逻辑依赖这个 close 时机判断是否可标记 STOPPED。
@@ -373,15 +428,19 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		zap.L().Error("runner error", zap.String("task_id", id), zap.Error(err))
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
 		if IsPermanent(err) {
+			owner, epoch := current.OwnerWorkerID, current.Epoch
 			logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
 			s.mu.Unlock()
+			s.releaseTaskLease(id, owner, epoch)
 			return
 		}
 		if IsSourceUnreachable(err) {
 			consecutiveSourceFailures++
 			if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
+				owner, epoch := current.OwnerWorkerID, current.Epoch
 				logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
 				s.mu.Unlock()
+				s.releaseTaskLease(id, owner, epoch)
 				return
 			}
 		} else {

@@ -2,7 +2,7 @@
 
 ## Files
 - `mysql_store.go`: 元数据持久化实现与 schema 校验（含 binlog file OPEN/SEALED 状态）；`GetTask` 按主键读取；`ListTasks` 仍为 Restore 全量快照（`ORDER BY CAST(id AS UNSIGNED), id`）；`ListTasksPage` 使用同一排序加 `LIMIT/OFFSET` 与 COUNT，host/port 过滤经 `JSON_EXTRACT(source_json)`；`ListStartingUnownedTasks` 只查 STARTING 且 owner 为空；`ListTasksWithExpiredLease` 以 INNER JOIN `task_leases` 列出租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF。配置了 encryption key 时只加密 `source_json` 的 `password` 字段（`enc:aes256:`），无 key 时保持明文以兼容现有部署。
-- `lease_store.go`: lease 读写逻辑。
+- `lease_store.go`: lease 读写（Acquire/Renew/Release/Verify，与封文件前验租同一扇门）。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。
 - `sql/*.sql`: sqlc 查询定义（当前试点覆盖 lease、task_runs、worker_heartbeats）。

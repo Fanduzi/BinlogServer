@@ -95,6 +95,12 @@ func (s *retryTestFileStore) ListBinlogFiles(_ context.Context, taskID string, l
 	return out, nil
 }
 
+func (s *retryTestFileStore) ListFailedUploadBinlogFiles(_ context.Context, taskID string, limit int) ([]BinlogFile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return FailedUploadFiles(s.files[taskID], limit), nil
+}
+
 // get 实现对应功能逻辑。
 func (s *retryTestFileStore) get(taskID, fileName string) (BinlogFile, bool) {
 	s.mu.Lock()
@@ -115,6 +121,72 @@ func writeRetryTestFile(t *testing.T, dir, name string) string {
 		t.Fatalf("write test file failed: %v", err)
 	}
 	return path
+}
+
+func TestScheduler_RetryFailedUploadsRequiresFailedUploadLookup(t *testing.T) {
+	store := newFakeFileStore()
+	s := NewScheduler(WithFileStore(store), WithFileUploader(&retryTestUploader{}))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	store.files[task.ID] = []BinlogFile{
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000001",
+			FilePath:    "/tmp/mysql-bin.000001",
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000001",
+		},
+	}
+
+	_, err = s.RetryFailedUploads(task.ID, 10)
+	if !errors.Is(err, ErrFailedUploadLookupNotAvailable) {
+		t.Fatalf("expected ErrFailedUploadLookupNotAvailable, got %v", err)
+	}
+}
+
+func TestScheduler_RetryFailedUploadsFindsFailedFileOutsideListWindow(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := newRetryTestFileStore()
+	uploader := &retryTestUploader{}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	store.files[task.ID] = []BinlogFile{
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000001",
+			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000001"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOADED",
+			ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000001",
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000002",
+			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000002"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000002",
+		},
+	}
+
+	stats, err := s.RetryFailedUploads(task.ID, 1)
+	if err != nil {
+		t.Fatalf("RetryFailedUploads returned error: %v", err)
+	}
+	if stats.Succeeded != 1 {
+		t.Fatalf("expected succeeded=1, got %+v", stats)
+	}
+	if uploader.callCount() != 1 {
+		t.Fatalf("expected 1 upload call, got %d", uploader.callCount())
+	}
 }
 
 // TestScheduler_RetryFailedUploadsOnlyFailedSealed 验证相关行为。
@@ -316,7 +388,7 @@ func TestScheduler_RetryFailedUploadsUpdatesMetrics(t *testing.T) {
 	}
 
 	metrics := s.GetUploadRetryMetrics()
-	if metrics.Success != 1 || metrics.Failed != 1 || metrics.Skipped != 1 {
+	if metrics.Success != 1 || metrics.Failed != 1 || metrics.Skipped != 0 {
 		t.Fatalf("unexpected retry metrics: %+v", metrics)
 	}
 	if metrics.LastTs <= 0 {

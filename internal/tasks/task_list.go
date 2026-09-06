@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: in-memory task snapshots and TaskListFilter host/port/state/limit/offset
-// output: numeric-id-ordered filtered pages, COUNT totals, and STARTING-unowned subsets
+// input: in-memory task snapshots, TaskListFilter host/port/state/limit/offset, and binlog file snapshots
+// output: numeric-id-ordered filtered pages, COUNT totals, STARTING-unowned subsets, and UPLOAD_FAILED file subsets
 // pos: shared list/filter/page helpers for TaskStore fakes and standalone Scheduler paging
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,6 +8,7 @@ package tasks
 import (
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // TaskListFilter is the list/dashboard page contract pushed to SQL when a store is configured.
@@ -94,6 +95,21 @@ func PageTasks(items []Task, filter TaskListFilter) ([]Task, int) {
 	filtered := FilterTasks(items, filter)
 	SortTasksByID(filtered)
 	return PaginateTasks(filtered, filter.Offset, filter.Limit), len(filtered)
+}
+
+// FailedUploadFiles returns UPLOAD_FAILED files, capped by limit when limit > 0.
+func FailedUploadFiles(items []BinlogFile, limit int) []BinlogFile {
+	out := make([]BinlogFile, 0)
+	for _, item := range items {
+		if !strings.EqualFold(item.UploadState, "UPLOAD_FAILED") {
+			continue
+		}
+		out = append(out, item)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 // StartingUnownedTasks returns STARTING tasks whose owner_worker_id is empty.

@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, and permanent source errors
+// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, sealed upload via tasks.ApplySealedUpload, and permanent source errors
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -40,7 +40,7 @@ type MySQLRunner struct {
 	fetcher          sourceMetaFetcher
 	checkpointStore  CheckpointStore
 	fileMetaStore    FileMetaStore
-	uploader         FileUploader
+	uploader         tasks.FileUploader
 	uploadPrefix     string
 	leaseVerifier    LeaseVerifier
 	progressReporter ProgressReporter
@@ -117,12 +117,6 @@ func WithFileMetaStore(store FileMetaStore) RunnerOption {
 	}
 }
 
-// FileUploader 定义对象存储上传接口。
-type FileUploader interface {
-	// UploadFile 上传 sealed 文件。
-	UploadFile(ctx context.Context, taskID, localPath, objectKey string) error
-}
-
 // ProgressReporter 定义复制进度上报接口。
 type ProgressReporter interface {
 	// ReportReplicationProgress 上报复制进度。atTip 表示 dump 已在源库当前 file/pos。
@@ -143,7 +137,7 @@ func (f leaseVerifierFunc) VerifyLease(ctx context.Context, task tasks.Task) (bo
 }
 
 // WithUploader 注入对象存储上传器及 object key prefix。
-func WithUploader(uploader FileUploader, prefix string) RunnerOption {
+func WithUploader(uploader tasks.FileUploader, prefix string) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.uploader = uploader
 		r.uploadPrefix = prefix
@@ -597,31 +591,25 @@ func (r *MySQLRunner) finalizeSealedFile(
 	if sourceServerUUID == "" {
 		return errors.New("source server_uuid is required")
 	}
-	// Step 4: best-effort 上传；失败仅记录 UPLOAD_FAILED，不中断主链路。
 	objectKey := buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, sourceFile)
-	if err := r.uploader.UploadFile(ctx, task.ID, sealedPath, objectKey); err != nil {
-		if fileMeta != nil {
-			fileMeta.ObjectKey = objectKey
-			fileMeta.UploadState = "UPLOAD_FAILED"
-			fileMeta.UploadError = err.Error()
-			if saveErr := r.fileMetaStore.UpsertBinlogFile(ctx, *fileMeta); saveErr != nil {
-				return saveErr
-			}
+	if fileMeta == nil {
+		fileMeta = &tasks.BinlogFile{
+			TaskID:      task.ID,
+			FileName:    sourceFile,
+			FilePath:    sealedPath,
+			State:       "SEALED",
+			StartPos:    startPos,
+			EndPos:      endPos,
+			CreatedAt:   createdAt,
+			SealedAt:    sealedAt,
+			ObjectKey:   objectKey,
+			UploadState: "LOCAL_ONLY",
 		}
-		// best-effort policy：upload 失败只落失败元数据，不打断拉流主链路。
-		return nil
-	}
-
-	if fileMeta != nil {
-		fileMeta.UploadState = "UPLOADED"
+	} else {
 		fileMeta.ObjectKey = objectKey
-		fileMeta.UploadError = ""
-		fileMeta.UploadedAt = time.Now()
-		if err := r.fileMetaStore.UpsertBinlogFile(ctx, *fileMeta); err != nil {
-			return err
-		}
 	}
-	return nil
+	_, err = tasks.ApplySealedUpload(ctx, r.uploader, r.fileMetaStore, *fileMeta)
+	return err
 }
 
 // buildSyncerConfig 基于任务配置构造 go-mysql syncer 参数。

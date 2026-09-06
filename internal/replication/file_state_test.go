@@ -157,6 +157,50 @@ func TestFileState_SealRequiresLeaseAndEpochMatch(t *testing.T) {
 	if _, err := os.Stat(openPath); err != nil {
 		t.Fatalf("expected open file retained on rejected seal, stat err=%v", err)
 	}
+}
+
+type memoryLeaseVerifier struct {
+	leases *tasks.MemoryLease
+}
+
+func (v memoryLeaseVerifier) VerifyLease(ctx context.Context, task tasks.Task) (bool, error) {
+	return v.leases.Verify(ctx, task.ID, task.OwnerWorkerID, task.Epoch)
+}
+
+func TestFileState_SealAsksSameMemoryLeaseDoor(t *testing.T) {
+	dir := t.TempDir()
+	openPath := filepath.Join(dir, "mysql-bin.000123.open.e1")
+	if err := os.WriteFile(openPath, []byte("binlog-data"), 0o644); err != nil {
+		t.Fatalf("write open file: %v", err)
+	}
+	leases := tasks.NewMemoryLease()
+	epoch, ok, err := leases.Acquire(context.Background(), "1", "worker-a", time.Hour)
+	if err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+	if _, err := leases.Release(context.Background(), "1", "worker-a", epoch); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	runner := &MySQLRunner{
+		leaseVerifier: memoryLeaseVerifier{leases: leases},
+	}
+	err = runner.finalizeSealedFile(
+		context.Background(),
+		tasks.Task{ID: "1", Epoch: epoch, OwnerWorkerID: "worker-a", ClusterKey: "cluster-a"},
+		"srv-uuid-1",
+		openPath,
+		4,
+		1024,
+		time.Now().Add(-time.Minute),
+		time.Now(),
+	)
+	if !errors.Is(err, ErrLeaseEpochMismatch) {
+		t.Fatalf("expected ErrLeaseEpochMismatch after Release, got %v", err)
+	}
+	if _, err := os.Stat(openPath); err != nil {
+		t.Fatalf("expected open file retained, stat err=%v", err)
+	}
 	sealedPath := filepath.Join(dir, "mysql-bin.000123")
 	if _, err := os.Stat(sealedPath); !os.IsNotExist(err) {
 		t.Fatalf("expected sealed file not created, stat err=%v", err)

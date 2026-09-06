@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>BinlogServer 架构评审</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap");
+      body { font-family: "IBM Plex Sans", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif; }
+      h1, h2, h3, .serif { font-family: Fraunces, "Songti SC", "Noto Serif SC", serif; }
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(165deg, #0f172a 0%, #1e293b 60%, #334155 100%); }
+      .mass-iface { background: repeating-linear-gradient(-45deg, #fecaca, #fecaca 6px, #fee2e2 6px, #fee2e2 12px); }
+      .mass-impl { background: #0f172a; }
+      pre.mermaid { margin: 0; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900">
+    <main class="max-w-5xl mx-auto px-6 py-14 space-y-16">
+      <header class="space-y-6">
+        <p class="text-xs uppercase tracking-[0.22em] text-stone-500">BinlogServer · 2026-09-06</p>
+        <h1 class="text-4xl leading-tight text-stone-900">架构评审</h1>
+        <p class="text-stone-600 max-w-2xl leading-relaxed">热点来自近期改动：租约接管、恢复、认领、上传重试、任务分页。领域词用术语表；架构词用设计词汇：<span class="font-medium">module / interface / implementation / depth / deep / shallow / seam / adapter / leverage / locality</span>。</p>
+        <div class="flex flex-wrap gap-4 text-xs text-stone-600 pt-2">
+          <span class="inline-flex items-center gap-2"><span class="h-3 w-8 rounded-sm border border-slate-400 bg-white"></span> module</span>
+          <span class="inline-flex items-center gap-2"><span class="h-px w-8 border-t border-dashed border-slate-500"></span> seam</span>
+          <span class="inline-flex items-center gap-2"><span class="h-px w-8 bg-red-600"></span> 泄漏</span>
+          <span class="inline-flex items-center gap-2"><span class="h-3 w-8 rounded-sm bg-slate-900"></span> deep module</span>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-14">
+
+        <article id="ownership" class="rounded-2xl border border-stone-200 bg-white p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <h2 class="text-2xl text-stone-900">把任务所有权收成一个 deep module</h2>
+            <div class="flex gap-2">
+              <span class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-1 text-xs font-medium">Strong</span>
+              <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-medium">local-substitutable</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-stone-500 leading-relaxed">
+            internal/tasks/scheduler_lifecycle.go<br>
+            internal/tasks/scheduler_cluster_lease.go<br>
+            internal/tasks/scheduler_transitions.go<br>
+            internal/replication/mysql_runner.go<br>
+            internal/meta/lease_store.go<br>
+            internal/app/app.go
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-stone-200 bg-stone-50 p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-500 mb-3">现在 · 租约泄漏</p>
+              <pre class="mermaid">
+flowchart TB
+  CP[控制面 StartTask]
+  Claim[Worker 认领循环]
+  Resume[App Restore Stop+Start]
+  S[Scheduler]
+  Run[Runner seal]
+  Adp[App leaseVerifierFromStore]
+  Store[LeaseStore]
+  CP --> S
+  Claim --> S
+  Resume --> S
+  S -->|Acquire Renew Release| Store
+  S -.type-assert.-> Extra[ExpiredLeaseTaskLister]
+  Run -->|VerifyLease| Adp
+  Adp -->|leak| Store
+  S -->|Fail-safe Stop| Run
+  classDef leak stroke:#dc2626,stroke-width:2px,color:#7f1d1d;
+  class Adp,Extra leak
+              </pre>
+            </div>
+            <div class="rounded-lg border border-slate-800 deep p-4 text-stone-100">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">之后 · 一个所有权 module</p>
+              <div class="h-[280px] flex flex-col">
+                <div class="border border-dashed border-stone-400 rounded px-3 py-2 text-center text-xs uppercase tracking-wider">
+                  interface · 这个任务现在归谁跑？
+                </div>
+                <div class="flex-1 mt-3 rounded border border-slate-600 p-3 space-y-1.5 text-xs tracking-wider text-stone-400">
+                  <div>Acquire / Renew / Release</div>
+                  <div>认领 STARTING</div>
+                  <div>认领过期租约</div>
+                  <div>本 Worker 恢复</div>
+                  <div>Fail-safe Stop</div>
+                  <div>seal 前再验租</div>
+                  <div class="pt-2 text-stone-500">内部：Epoch、宽限期、降级</div>
+                </div>
+                <p class="mt-3 text-[11px] text-stone-400 leading-relaxed">Scheduler 只负责拉起执行。Runner 在 seal 前走同一条 seam。App 不再组装 VerifyLease。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm leading-relaxed">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">问题</h3>
+              <p>租约是一个概念，却摊成三个 interface 外加一个 App adapter。认领、恢复、Fail-safe Stop、seal 时验租分落在不同 module，所有权没有 locality。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">改法</h3>
+              <p>加深一个任务所有权 module，接口要小。Scheduler 与 Runner 穿过同一条 seam。App 只启动这个 module，不再重装租约。</p>
+            </div>
+          </div>
+          <ul class="text-sm space-y-1 text-stone-800">
+            <li>· locality：#55 #56 #19 都在这里</li>
+            <li>· leverage：一条 seam，两处调用</li>
+            <li>· FAILED 目前不 Release 租约</li>
+            <li>· 测试不再用永远成功的 verifier</li>
+            <li>· 删掉 App 的 leaseVerifierFromStore</li>
+          </ul>
+        </article>
+
+        <article id="upload" class="rounded-2xl border border-stone-200 bg-white p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <h2 class="text-2xl text-stone-900">把尽力上传收成一个 module</h2>
+            <div class="flex gap-2">
+              <span class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-1 text-xs font-medium">Strong</span>
+              <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-medium">ports &amp; adapters</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-stone-500 leading-relaxed">
+            internal/replication/mysql_runner.go<br>
+            internal/tasks/scheduler_retry_upload.go<br>
+            internal/tasks/scheduler.go<br>
+            internal/upload/s3_uploader.go<br>
+            internal/app/app.go
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-stone-200 bg-stone-50 p-4 space-y-2">
+              <p class="text-xs uppercase tracking-wider text-stone-500 mb-3">现在 · 两份 FileUploader</p>
+              <div class="space-y-1.5">
+                <div class="h-10 border-l-4 border-stone-300 bg-white px-3 flex items-center text-xs tracking-wider">Rotate / 停止</div>
+                <div class="h-10 border-l-4 border-red-500 bg-red-50 px-3 flex items-center text-xs tracking-wider">Runner 拼 object key 并上传</div>
+                <div class="h-10 border-l-4 border-stone-300 bg-white px-3 flex items-center text-xs tracking-wider">写入 UPLOAD_FAILED</div>
+                <div class="h-10 border-l-4 border-red-500 bg-red-50 px-3 flex items-center text-xs tracking-wider">Scheduler 重试，第二份 FileUploader</div>
+                <div class="h-10 border-l-4 border-stone-300 bg-white px-3 flex items-center text-xs tracking-wider">type-assert failedUploadFileReader</div>
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-800 deep p-4 space-y-2">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">之后 · 一个上传 module</p>
+              <div class="space-y-1.5">
+                <div class="h-10 border-l-4 border-stone-500 bg-slate-800 px-3 flex items-center text-xs tracking-wider text-stone-300">Runner 只 seal，并 fsync</div>
+                <div class="h-[168px] border-l-4 border-emerald-400 bg-slate-900 px-3 py-3 text-xs tracking-wider text-stone-200 space-y-1">
+                  <div>interface · 上传这份已 seal 文件</div>
+                  <div class="text-stone-500 font-normal normal-case tracking-normal pt-1 leading-relaxed">object key、首次上传、重试、UPLOAD_FAILED / UPLOADED、指标</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 leading-relaxed">
+            不重开 ADR-001。云厂商 seam 仍是 FileUploader（S3 / OBS / COS / OSS 各一个 adapter）。加深的是<strong>调用</strong>它的那个 module。
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm leading-relaxed">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">问题</h3>
+              <p>尽力上传被切开：Runner 做首次尝试，Scheduler 做重试，各有一份 FileUploader。策略没有 locality；重试信任一份它自己没算过的 object key。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">改法</h3>
+              <p>加深一个上传 module。Runner 只负责 seal。云侧 seam 已经有两个 adapter：生产走 S3，测试走内存。</p>
+            </div>
+          </div>
+          <ul class="text-sm space-y-1 text-stone-800">
+            <li>· locality：首次上传和重试在一起</li>
+            <li>· leverage：一份 FileUploader，多家云</li>
+            <li>· 删掉重复的 interface</li>
+            <li>· 测试覆盖 seal-key == retry-key</li>
+          </ul>
+        </article>
+
+        <article id="observation" class="rounded-2xl border border-stone-200 bg-white p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <h2 class="text-2xl text-stone-900">任务列表只留一条读路径</h2>
+            <div class="flex gap-2">
+              <span class="rounded-full bg-amber-100 text-amber-900 px-3 py-1 text-xs font-medium">Worth exploring</span>
+              <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-medium">in-process</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-stone-500 leading-relaxed">
+            internal/api/handlers_tasks.go<br>
+            internal/api/server.go<br>
+            internal/tasks/scheduler_task_ops.go<br>
+            internal/tasks/task_list.go<br>
+            internal/meta/mysql_store.go
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-stone-200 bg-stone-50 p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-500 mb-3">现在 · 两套宇宙</p>
+              <div class="relative h-[280px]">
+                <svg viewBox="0 0 360 260" class="w-full h-full">
+                  <rect x="20" y="20" width="140" height="36" rx="4" fill="#fff" stroke="#a8a29e"/>
+                  <text x="90" y="42" text-anchor="middle" font-size="11" fill="#44403c" font-family="IBM Plex Sans, PingFang SC, sans-serif">仪表盘</text>
+                  <path d="M70 56 L70 90" stroke="#dc2626" stroke-width="2"/>
+                  <path d="M110 56 L110 90" stroke="#dc2626" stroke-width="2"/>
+                  <rect x="20" y="90" width="90" height="48" rx="4" fill="#fef2f2" stroke="#dc2626"/>
+                  <text x="65" y="110" text-anchor="middle" font-size="9" fill="#7f1d1d" font-family="IBM Plex Sans, PingFang SC, sans-serif">ListTasksPage</text>
+                  <text x="65" y="124" text-anchor="middle" font-size="8" fill="#991b1b" font-family="IBM Plex Sans, PingFang SC, sans-serif">SQL COUNT</text>
+                  <rect x="120" y="90" width="90" height="48" rx="4" fill="#fef2f2" stroke="#dc2626"/>
+                  <text x="165" y="110" text-anchor="middle" font-size="9" fill="#7f1d1d" font-family="IBM Plex Sans, PingFang SC, sans-serif">ListTasks()</text>
+                  <text x="165" y="124" text-anchor="middle" font-size="8" fill="#991b1b" font-family="IBM Plex Sans, PingFang SC, sans-serif">全量快照</text>
+                  <rect x="20" y="170" width="90" height="36" rx="4" fill="#fff" stroke="#a8a29e"/>
+                  <text x="65" y="192" text-anchor="middle" font-size="10" fill="#44403c" font-family="IBM Plex Sans, PingFang SC, sans-serif">分页 + total</text>
+                  <rect x="120" y="170" width="90" height="36" rx="4" fill="#fff" stroke="#a8a29e"/>
+                  <text x="165" y="192" text-anchor="middle" font-size="10" fill="#44403c" font-family="IBM Plex Sans, PingFang SC, sans-serif">汇总计数</text>
+                  <path d="M65 138 L65 170" stroke="#78716c"/>
+                  <path d="M165 138 L165 170" stroke="#78716c"/>
+                  <text x="280" y="40" font-size="10" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">taskService</text>
+                  <text x="280" y="56" font-size="10" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">24 个方法</text>
+                  <text x="280" y="72" font-size="10" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">= Scheduler</text>
+                  <rect x="250" y="90" width="90" height="116" rx="4" fill="#fff" stroke="#a8a29e"/>
+                  <text x="295" y="120" text-anchor="middle" font-size="9" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">Create Update</text>
+                  <text x="295" y="136" text-anchor="middle" font-size="9" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">Start Stop</text>
+                  <text x="295" y="152" text-anchor="middle" font-size="9" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">Files Events</text>
+                  <text x="295" y="168" text-anchor="middle" font-size="9" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">Retry Upload</text>
+                  <text x="295" y="184" text-anchor="middle" font-size="9" fill="#78716c" font-family="IBM Plex Sans, PingFang SC, sans-serif">Heartbeats</text>
+                </svg>
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-800 deep p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">之后 · 一个观测 module</p>
+              <div class="h-[280px] flex flex-col justify-center gap-3">
+                <div class="border border-dashed border-stone-400 rounded px-3 py-2 text-center text-xs tracking-wider text-stone-200">
+                  interface · 分页、汇总、按源聚合
+                </div>
+                <div class="flex-1 rounded border border-slate-600 p-3 text-xs tracking-wider text-stone-400 space-y-1">
+                  <div>有 Store 走 SQL 分页</div>
+                  <div>单机走内存分页</div>
+                  <div>延迟 / at-tip 状态</div>
+                  <div>按源聚合</div>
+                </div>
+                <p class="text-[11px] text-stone-400 leading-relaxed">HTTP 只做 JSON 映射。不再自己决定读哪一套列表。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm leading-relaxed">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">问题</h3>
+              <p>仪表盘分页走 ListTasksPage，汇总仍扫 ListTasks()。task_list.go 是 shallow 的纯函数；真正的 bug 在两条调用路径。HTTP 的 taskService 几乎和 Scheduler 一样宽。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">改法</h3>
+              <p>加深一个任务观测 module，让分页、汇总、按源计数共用一次读取。HTTP 不再按方法镜像 Scheduler。</p>
+            </div>
+          </div>
+          <ul class="text-sm space-y-1 text-stone-800">
+            <li>· locality：#59 分页就在这里</li>
+            <li>· leverage：一次读取，多处展示</li>
+            <li>· interface 收窄，不再等于 taskService</li>
+            <li>· 测试同时打到分页和汇总</li>
+          </ul>
+        </article>
+
+        <article id="store" class="rounded-2xl border border-stone-200 bg-white p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <h2 class="text-2xl text-stone-900">把 Store 的 seam 写明白</h2>
+            <div class="flex gap-2">
+              <span class="rounded-full bg-amber-100 text-amber-900 px-3 py-1 text-xs font-medium">Worth exploring</span>
+              <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-medium">local-substitutable</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-stone-500 leading-relaxed">
+            internal/tasks/scheduler.go<br>
+            internal/meta/mysql_store.go<br>
+            internal/meta/lease_store.go<br>
+            internal/replication/mysql_runner.go<br>
+            internal/app/app.go
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-stone-200 bg-stone-50 p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-500 mb-3">现在 · interface ≈ 一袋 type-assert</p>
+              <div class="flex items-end gap-2 h-[260px] px-2">
+                <div class="flex-1 flex flex-col justify-end gap-1">
+                  <div class="mass-iface h-36 rounded-t border border-red-300"></div>
+                  <div class="mass-impl h-20 rounded-b"></div>
+                  <p class="text-[10px] tracking-wider text-center mt-1 text-stone-500">声明的 Store</p>
+                </div>
+                <div class="flex-1 flex flex-col justify-end gap-1">
+                  <div class="mass-iface h-44 rounded-t border border-red-300"></div>
+                  <div class="mass-impl h-8 rounded-b"></div>
+                  <p class="text-[10px] tracking-wider text-center mt-1 text-stone-500">可选断言</p>
+                </div>
+                <div class="flex-1 flex flex-col justify-end gap-1">
+                  <div class="h-8 rounded-t bg-slate-200 border border-slate-300"></div>
+                  <div class="mass-impl h-44 rounded-b"></div>
+                  <p class="text-[10px] tracking-wider text-center mt-1 text-stone-500">MySQLTaskStore</p>
+                </div>
+              </div>
+              <p class="text-[11px] text-stone-500 mt-2 leading-relaxed">斜纹是 interface 面积，深色是 implementation。ClaimExpiredTasks 在缺额外 interface 时静默返回 0。</p>
+            </div>
+            <div class="rounded-lg border border-slate-800 deep p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">之后 · 具名 seam，一个 adapter</p>
+              <div class="h-[260px] flex items-end gap-3 px-2">
+                <div class="flex-1 flex flex-col justify-end">
+                  <div class="h-8 rounded-t bg-emerald-400/80"></div>
+                  <div class="h-44 rounded-b bg-slate-900 border border-slate-600 p-2 text-[10px] tracking-wider text-stone-400 space-y-1">
+                    <div>任务目录</div>
+                    <div>租约行</div>
+                    <div>Checkpoint</div>
+                    <div>文件元数据</div>
+                    <div>事件 / 运行记录</div>
+                  </div>
+                  <p class="text-[10px] tracking-wider text-center mt-1 text-stone-400">deep Store adapter</p>
+                </div>
+              </div>
+              <p class="text-[11px] text-stone-400 mt-2 leading-relaxed">调用方注入自己用到的 seam。没有静默 type-assert。测试 fake 实现具名 seam，而不是十个方法的袋子。</p>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm leading-relaxed">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">问题</h3>
+              <p>Scheduler 声明 TaskStore，再 type-assert ExpiredLeaseTaskLister、failedUploadFileReader、uploadFailureCounter、taskRunReader、workerHeartbeatReader。Checkpoint 与文件元数据在 Scheduler 和 Runner 各定义一次。MySQLTaskStore 本身是 deep 的；围着它的 seam 不是。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">改法</h3>
+              <p>每条 Store seam 写明白并注入。MySQL 仍只保留一个 adapter。两个 adapter 已经成立：生产走 MySQL，测试走内存 fake。</p>
+            </div>
+          </div>
+          <ul class="text-sm space-y-1 text-stone-800">
+            <li>· locality：认领不能静默空转</li>
+            <li>· leverage：一个 adapter，具名 seam</li>
+            <li>· fake 不再重写分页</li>
+            <li>· Checkpoint / 文件不再双胞胎</li>
+          </ul>
+        </article>
+
+        <article id="scheduler-width" class="rounded-2xl border border-stone-200 bg-white p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <h2 class="text-2xl text-stone-900">先别拆 Scheduler</h2>
+            <div class="flex gap-2">
+              <span class="rounded-full bg-slate-200 text-slate-800 px-3 py-1 text-xs font-medium">Speculative</span>
+              <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-medium">in-process</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-stone-500 leading-relaxed">
+            internal/tasks/scheduler.go<br>
+            internal/tasks/scheduler_*.go
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-stone-200 bg-stone-50 p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-500 mb-3">今天 · 类型很宽，文件很浅</p>
+              <pre class="mermaid">
+flowchart LR
+  Ops[task_ops] --> S[Scheduler 类型]
+  Life[lifecycle] --> S
+  Trans[transitions] --> S
+  Lease[cluster_lease] --> S
+  Obs[observability] --> S
+  Retry[retry_upload] --> S
+  classDef leak stroke:#dc2626,stroke-width:1.5px;
+  class Ops,Life,Trans,Lease,Obs,Retry leak
+              </pre>
+            </div>
+            <div class="rounded-lg border border-stone-200 bg-stone-50 p-4 flex items-center">
+              <p class="text-sm text-stone-700 leading-relaxed">这些文件共享一把锁和同一袋注入。删掉任何一个文件，方法只是搬回去。深度来自把所有权、上传、观测各自收成 seam，不是再给同一个类型加文件。</p>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm leading-relaxed">
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">问题</h3>
+              <p>Scheduler 是一个很宽的 module：CRUD、状态机、租约、上传重试、恢复、Worker 心跳。文件不是 module。现在拆，只会再造一堆 shallow 的透传。</p>
+            </div>
+            <div>
+              <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-2">改法</h3>
+              <p>先做上面三件加深。等所有权、上传、观测各自有了 seam，再回头看能不能把 Scheduler 的 interface 收窄。</p>
+            </div>
+          </div>
+          <ul class="text-sm space-y-1 text-stone-800">
+            <li>· 删除测试：按文件拆通不过</li>
+            <li>· mark*Locked 配方留在内部</li>
+            <li>· REBUILDING_FILE 是未使用状态</li>
+          </ul>
+        </article>
+
+      </section>
+
+      <section id="top-recommendation" class="rounded-2xl border-2 border-slate-900 bg-white p-8 space-y-4">
+        <p class="text-xs uppercase tracking-[0.22em] text-stone-500">首选</p>
+        <h2 class="text-3xl text-stone-900"><a href="#ownership" class="underline decoration-stone-300 hover:decoration-stone-900">把任务所有权收成一个 deep module</a></h2>
+        <p class="text-stone-700 max-w-2xl leading-relaxed">最近一串 bug——过期租约接管、恢复别的 Worker 的 RUNNING 任务、重启 Restore——都落在这条 seam 上。lease_test.go 已经 1187 行，因为测试必须拼出整个 Scheduler，才能问「这个任务现在归谁跑」。先加深这个问题。</p>
+      </section>
+    </main>
+  </body>
+</html>
