@@ -72,6 +72,10 @@ func (m *fakeAPILeaseManager) Release(_ context.Context, _ string, _ string, _ i
 	return true, nil
 }
 
+func (m *fakeAPILeaseManager) Verify(_ context.Context, _ string, _ string, _ int64) (bool, error) {
+	return true, nil
+}
+
 type fakeAPIRunHistoryStore struct {
 	tasks     map[string]tasks.Task
 	runs      map[string][]tasks.TaskRun
@@ -951,6 +955,10 @@ func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit 
 	return out, nil
 }
 
+func (f *fakeFileStore) ListFailedUploadBinlogFiles(_ context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
+	return tasks.FailedUploadFiles(f.files[taskID], limit), nil
+}
+
 type fakeRetryUploader struct {
 	errByObject map[string]error
 }
@@ -1599,8 +1607,8 @@ func TestTaskAPI_MetricsIncludeRetryUploadCounters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read skipped metric failed: %v", err)
 	}
-	if !ok || skipped != 1 {
-		t.Fatalf("expected skipped=1, got ok=%v value=%v body=%s", ok, skipped, resp.Body.String())
+	if !ok || skipped != 0 {
+		t.Fatalf("expected skipped=0, got ok=%v value=%v body=%s", ok, skipped, resp.Body.String())
 	}
 
 	lastTS, ok, err := readPromMetricValue(resp.Body.String(), "binlog_server_upload_retry_last_ts")

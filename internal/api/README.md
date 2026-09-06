@@ -20,7 +20,7 @@
 - `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。
 - `GET /api/dashboard` - 返回同口径 summary、任务明细与 source 聚合；source 状态计数同时暴露 `starting` 与 `running`。
 - `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页；页序为数字 id 升序；支持 host/port/state 过滤；cluster/mysql 走 `ListTasksPage`（COUNT + `ORDER BY CAST(id AS UNSIGNED), id LIMIT/OFFSET`），standalone 仍切内存快照。默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
-- `GET /api/dashboard` - 支持同一组过滤/分页参数；`tasks`/`total` 使用同一分页查询（total 为 COUNT）；`summary`/`sources` 仍按内存过滤快照聚合 delay 口径，并返回 `total/limit/offset`。
+- `GET /api/dashboard` - 支持同一组过滤/分页参数；`tasks`/`total`/`summary.total` 同一套过滤，total 为 COUNT；`summary`/`sources` 用过滤后的匹配集聚合，不再 `ListTasks()` 扫全表。
 - `POST /api/tasks/batch` - 接收 `items` 数组（1..100 个现有创建请求），整包 envelope 错误返回 400 且不创建；合法 envelope 按顺序逐项调用 `CreateTaskFromSpec`，返回 200 的 `{index,cluster_key,task|error}` 结果数组。
 
 ## Dependencies
