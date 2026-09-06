@@ -12,14 +12,26 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.3] - 2026-09-06
+
 ### Changed
 
+- Operator download examples in README, the landing page, and the deployment guide now pin `v0.5.3`.
 - Control-plane `listen_addr` that is not loopback (`:8080`, `0.0.0.0:8080`, and any non-`127.0.0.1`/`localhost`/`::1` bind) now requires `api.auth.enabled`, `protect_api`, and `protect_metrics` at `App.Run`. Loopback binds may stay unauthenticated for local demo. `PRODUCTION=true` still fail-closes independently and is not weakened.
 - When `api.auth.enabled=true`, unset `protect_api` / `protect_metrics` now default to true. Explicit `false` is still honored at config load, but non-loopback listen and `PRODUCTION=true` still reject that combination. `listen_addr` default remains `:8080`.
+- `GET /api/tasks` and dashboard task pages filter and page in SQL (`COUNT` + `LIMIT/OFFSET`). `GetTask` uses the primary key. Worker claim ticks query unowned `STARTING` instead of loading every task. Dashboard summary/sources still aggregate in-process delay. Public `{items,total,limit,offset}` shape is unchanged.
+- OpenTelemetry Go API/SDK/trace/OTLP HTTP exporter moved from 1.45.0 to 1.46.0.
 
 ### Security
 
 - Source passwords in `backup_tasks.source_json` are encrypted with AES-256-GCM (`enc:aes256:`) when `--encryption-key` is provided. Other source fields stay plaintext JSON. Without a key, plaintext persist is unchanged so existing deploys keep starting.
+
+### Fixed
+
+- Cluster workers claim `RUNNING`/`LEASE_DEGRADED`/`RETRY_BACKOFF` tasks whose lease has expired and resume dump after a successful Acquire, without going through `StopTask`.
+- A newly started cluster worker no longer Stop+Starts another worker's live `RUNNING` task, which previously persisted `STOPPED` while dump continued on the original owner.
+- FILE_POS/GTID catch-up no longer sticks `atTip` (and therefore `delay_seconds=0`) after a quiet 2s idle gap. Tip is confirmed against `SHOW MASTER STATUS` / `SHOW BINLOG STATUS`. Fresh LATEST start at tip is unchanged.
+- Release tarballs include `config.example.yaml` and `config.production.example.yaml`, matching the documented production start path.
 
 ## [v0.5.2] - 2026-08-30
 
