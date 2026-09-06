@@ -65,10 +65,10 @@ Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负�
 - `binlog-server_<version>_linux_amd64.tar.gz`
 - `binlog-server_<version>_linux_arm64.tar.gz`
 
-真实资产名是 `binlog-server_<ver>_<os>_<arch>.tar.gz`（例如 `binlog-server_0.5.2_linux_amd64.tar.gz`）。同一页提供 `checksums.txt`，先校验再解压。压缩包里有一层版本子目录：
+真实资产名是 `binlog-server_<ver>_<os>_<arch>.tar.gz`（例如 `binlog-server_0.5.3_linux_amd64.tar.gz`）。同一页提供 `checksums.txt`，先校验再解压。压缩包里有一层版本子目录：
 
 ```text
-binlog-server_0.5.2_linux_amd64/
+binlog-server_0.5.3_linux_amd64/
   binlog-server
   migrate
   migrations/
@@ -76,6 +76,8 @@ binlog-server_0.5.2_linux_amd64/
   README_ZH.md
   CHANGELOG.md
   LICENSE
+  config.example.yaml
+  config.production.example.yaml
 ```
 
 `/ui/` 所需前端静态资源已经内嵌在二进制里，不需要额外下载前端包。
@@ -94,7 +96,7 @@ binlog-server_0.5.2_linux_amd64/
 ### 1. 下载、校验、解压、运行
 
 ```bash
-VER=0.5.2
+VER=0.5.3
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,7 +112,7 @@ export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server
 ```
 
-未设置 `BINLOG_SERVER_LISTEN_ADDR` 时，默认监听 `:8080`。
+未设置 `BINLOG_SERVER_LISTEN_ADDR` 时，默认监听 `:8080`。非 loopback 绑定必须开 API 鉴权；上面的示例用 loopback，本地演示可以不配 token。
 
 ### 2. 验证 `/healthz`
 
@@ -325,7 +327,7 @@ go run ./cmd/binlog-server
 BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
 
 # 本地准备一组 release 产物
-make release-assets VERSION=v0.5.2
+make release-assets VERSION=v0.5.3
 ```
 
 ## 开发验证入口

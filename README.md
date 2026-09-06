@@ -66,10 +66,10 @@ For tagged public releases, download the archive that matches your platform from
 - `binlog-server_<version>_linux_amd64.tar.gz`
 - `binlog-server_<version>_linux_arm64.tar.gz`
 
-The real asset name is `binlog-server_<ver>_<os>_<arch>.tar.gz` (for example `binlog-server_0.5.2_linux_amd64.tar.gz`). The release page also provides `checksums.txt`; verify it before extracting. The tarball contains a versioned subdirectory:
+The real asset name is `binlog-server_<ver>_<os>_<arch>.tar.gz` (for example `binlog-server_0.5.3_linux_amd64.tar.gz`). The release page also provides `checksums.txt`; verify it before extracting. The tarball contains a versioned subdirectory:
 
 ```text
-binlog-server_0.5.2_linux_amd64/
+binlog-server_0.5.3_linux_amd64/
   binlog-server
   migrate
   migrations/
@@ -77,6 +77,8 @@ binlog-server_0.5.2_linux_amd64/
   README_ZH.md
   CHANGELOG.md
   LICENSE
+  config.example.yaml
+  config.production.example.yaml
 ```
 
 UI assets are embedded into the binary, so you do not need a separate frontend package.
@@ -95,7 +97,7 @@ This is the shortest path for release operators. You do not need Go installed.
 ### 1. Download, verify, extract, run
 
 ```bash
-VER=0.5.2
+VER=0.5.3
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -111,7 +113,7 @@ export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server
 ```
 
-The default listen address is `:8080` if you omit `BINLOG_SERVER_LISTEN_ADDR`.
+The default listen address is `:8080` if you omit `BINLOG_SERVER_LISTEN_ADDR`. Non-loopback binds require API auth; the example above uses loopback so a local demo can start without a token.
 
 ### 2. Verify `/healthz`
 
@@ -328,7 +330,7 @@ go run ./cmd/binlog-server
 BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
 
 # Prepare a local set of release assets
-make release-assets VERSION=v0.5.2
+make release-assets VERSION=v0.5.3
 ```
 
 ## Development Validation
