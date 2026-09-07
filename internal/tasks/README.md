@@ -4,14 +4,14 @@
 - `scheduler.go`: 调度器核心类型、选项注入、`TaskStore`（含 GetTask/ListTasksPage/ListStartingUnownedTasks）与通用辅助函数；`ExpiredLeaseTaskLister` 供 cluster 过期租约查询（缺实现返回 `ErrExpiredLeaseLookupNotAvailable`）。
 - `memory_lease.go`: 进程内 `LeaseManager`，单机与测试走同一扇任务所有权门；`Release` 立刻腾出租约。
 - `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec）；`GetTask` 按主键刷新；`ListTasksPage` 在有 store 时走 SQL 分页。
-- `scheduler_lifecycle.go`: 启停、运行协程、重试退避、`ClaimStartingTasks` 只认领 STARTING 空 owner、`ClaimExpiredTasks` 过期租约接管（缺查询报错，不走 StopTask），以及连续 10 次源不可达后的 FAILED（runner ready 后重新计数）。
+- `scheduler_lifecycle.go`: 启停、`ClaimRunnableTasks`（无主 STARTING + 过期租约 + 自己名下空闲）、重试退避、FAILED 立刻放租约。
 - `task_list.go`: 数字 id 排序、host/port/state 过滤、内存分页，以及 `FailedUploadFiles` / `StartingUnownedTasks`，供 standalone 与测试 fake 复用。
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用，以及可重试的 `SOURCE_UNREACHABLE`）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
 - `scheduler_observability.go`: 复制进度（含 at-tip）、checkpoint、事件/文件/运行历史查询。
 - `scheduler_retry_upload.go`: 上传失败补偿重试（只走失败文件查询，缺查询报错）与失败原因聚合。
-- `sealed_upload.go`: 尽力上传的唯一调用方（首次封文件后与重试共用）。
+- `sealed_upload.go`: 尽力上传的唯一调用方（`ApplySealedUpload`、`ObjectKey`）；首次封文件后与重试共用。
 - `model.go`: 任务领域模型与状态定义（含复制进度 `AtTip`）。
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
 - `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试，覆盖 localhost、127/8、::1 与 IPv6 括号表示。

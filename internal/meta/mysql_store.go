@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage SQL LIMIT/OFFSET, ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT), ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -670,8 +670,14 @@ func taskListFilterClause(filter tasks.TaskListFilter) (string, []any) {
 func listTasksPageSQL(filter tasks.TaskListFilter) (countSQL, selectSQL string, countArgs, selectArgs []any) {
 	where, args := taskListFilterClause(filter)
 	countSQL = "SELECT COUNT(*) FROM backup_tasks" + where
-	selectSQL = "SELECT " + taskSelectColumns + " FROM backup_tasks" + where + " ORDER BY CAST(id AS UNSIGNED), id LIMIT ? OFFSET ?"
 	countArgs = append([]any(nil), args...)
+	order := " ORDER BY CAST(id AS UNSIGNED), id"
+	if filter.Limit <= 0 {
+		selectSQL = "SELECT " + taskSelectColumns + " FROM backup_tasks" + where + order
+		selectArgs = append([]any(nil), args...)
+		return countSQL, selectSQL, countArgs, selectArgs
+	}
+	selectSQL = "SELECT " + taskSelectColumns + " FROM backup_tasks" + where + order + " LIMIT ? OFFSET ?"
 	selectArgs = append(append([]any(nil), args...), filter.Limit, filter.Offset)
 	return countSQL, selectSQL, countArgs, selectArgs
 }

@@ -9,6 +9,14 @@ import (
 	"testing"
 )
 
+func TestPageTasks_UnboundedLimitReturnsAllMatching(t *testing.T) {
+	items := []Task{{ID: "1"}, {ID: "2"}, {ID: "3"}}
+	page, total := PageTasks(items, TaskListFilter{Limit: 0, Offset: 0})
+	if total != 3 || len(page) != 3 {
+		t.Fatalf("unbounded page len=%d total=%d, want 3/3", len(page), total)
+	}
+}
+
 func TestPageTasks_NumericIDOrderAndTotal(t *testing.T) {
 	items := []Task{
 		{ID: "100"},

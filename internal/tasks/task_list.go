@@ -73,9 +73,13 @@ func parseNumericTaskID(id string) (uint64, bool) {
 }
 
 // TaskPageBounds returns the [start, end) slice range for a page.
+// limit <= 0 means the rest of the list (unbounded).
 func TaskPageBounds(total, offset, limit int) (int, int) {
 	if offset >= total {
 		return total, total
+	}
+	if limit <= 0 {
+		return offset, total
 	}
 	end := total
 	if limit <= total-offset {

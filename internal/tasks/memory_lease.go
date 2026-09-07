@@ -17,10 +17,10 @@ type memoryLeaseRow struct {
 	expire time.Time
 }
 
-// MemoryLease is an in-process LeaseManager. Standalone and tests use this
-// instead of the MySQL lease table. Semantics match task_leases: Acquire
-// only takes over when the row is missing or already expired; Release
-// expires the row immediately.
+// MemoryLease is an in-process LeaseManager. Standalone has one process, so
+// this is always this process. Tests share one table across fake workers.
+// Semantics match task_leases: Acquire only takes over when the row is
+// missing or already expired; Release expires the row immediately.
 type MemoryLease struct {
 	mu   sync.Mutex
 	rows map[string]memoryLeaseRow
