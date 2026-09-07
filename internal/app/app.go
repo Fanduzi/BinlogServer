@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, metadata/source isolation, ClaimRunnableTasks on start and claim ticks, LeaseManager.Verify for seal, and shutdown
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, metadata/source isolation, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -65,13 +65,12 @@ var newAppMetaStoreForRun = func(cfg config.Config) (appMetaStore, error) {
 	)
 }
 
-var newClusterLeaseRuntimeForRun = func(store appMetaStore) (tasks.LeaseManager, replication.LeaseVerifier) {
+var newClusterLeaseRuntimeForRun = func(store appMetaStore) tasks.LeaseManager {
 	mysqlStore, ok := store.(*meta.MySQLTaskStore)
 	if !ok {
-		return nil, nil
+		return nil
 	}
-	leaseStore := meta.NewLeaseStoreFromTaskStore(mysqlStore)
-	return leaseStore, leaseVerifierFromManager{manager: leaseStore}
+	return meta.NewLeaseStoreFromTaskStore(mysqlStore)
 }
 
 var newRunnerForRun = func(cfg config.Config, opts ...replication.RunnerOption) tasks.Runner {
@@ -149,7 +148,6 @@ func (a *App) Run(ctx context.Context) error {
 
 	var mysqlStore appMetaStore
 	var leaseManager tasks.LeaseManager
-	var leaseVerifier replication.LeaseVerifier
 	if a.cfg.MetaDSN != "" {
 		metaHost, metaPort, comparable := metadataSourceEndpoint(a.cfg.MetaDSN)
 		if comparable {
@@ -168,7 +166,15 @@ func (a *App) Run(ctx context.Context) error {
 		opts = append(opts, tasks.WithFileStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
-		leaseManager, leaseVerifier = newClusterLeaseRuntimeForRun(mysqlStore)
+		if isClusterMode(a.cfg) {
+			leaseManager = newClusterLeaseRuntimeForRun(mysqlStore)
+		}
+	}
+	if workerEnabled && !isClusterMode(a.cfg) {
+		leaseManager = tasks.NewMemoryLease()
+		if resolvedWorkerID == "" {
+			resolvedWorkerID = "standalone"
+		}
 	}
 
 	opts = append(opts, tasks.WithInternalCallTimeouts(tasks.InternalCallTimeouts{
@@ -238,7 +244,7 @@ func (a *App) Run(ctx context.Context) error {
 		a.cfg,
 		resolvedWorkerID,
 		leaseManager,
-		leaseVerifier,
+		workerEnabled,
 		opts,
 		runnerOpts,
 	)
@@ -257,7 +263,11 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 		opts = append(opts, tasks.WithFileUploader(uploader))
-		runnerOpts = append(runnerOpts, replication.WithUploader(uploader, a.cfg.UploadPrefix))
+		store := mysqlStore
+		runnerOpts = append(runnerOpts, replication.WithSealedHandler(func(ctx context.Context, file tasks.BinlogFile) error {
+			_, err := tasks.ApplySealedUpload(ctx, uploader, store, file)
+			return err
+		}, a.cfg.UploadPrefix))
 	}
 
 	// 先组装 scheduler，再根据 worker 开关决定是否挂载 runner。
@@ -504,21 +514,6 @@ func resolveRoleMode(cfg config.Config) (controlPlaneEnabled bool, workerEnabled
 	default:
 		return true, true
 	}
-}
-
-type leaseVerifierFromManager struct {
-	manager tasks.LeaseManager
-}
-
-// VerifyLease 封文件前问同一扇任务所有权门：当前 worker/epoch 是否仍持有租约。
-func (v leaseVerifierFromManager) VerifyLease(ctx context.Context, task tasks.Task) (bool, error) {
-	if v.manager == nil {
-		return false, nil
-	}
-	if task.ID == "" || task.OwnerWorkerID == "" || task.Epoch <= 0 {
-		return false, nil
-	}
-	return v.manager.Verify(ctx, task.ID, task.OwnerWorkerID, task.Epoch)
 }
 
 // isClusterMode 返回当前是否处于 cluster 模式。
@@ -933,32 +928,32 @@ func buildHTTPServer(handler http.Handler, timeoutCfg config.HTTPServerTimeoutCo
 	}
 }
 
-// applyClusterRuntimeOptions 在 cluster 模式下注入 lease 与 worker 标识相关运行时选项。
+// applyClusterRuntimeOptions 注入任务所有权：集群用 MySQL 租约，单机 worker 用 MemoryLease。
 func applyClusterRuntimeOptions(
 	cfg config.Config,
 	workerID string,
 	leaseManager tasks.LeaseManager,
-	leaseVerifier replication.LeaseVerifier,
+	workerEnabled bool,
 	opts []tasks.Option,
 	runnerOpts []replication.RunnerOption,
 ) ([]tasks.Option, []replication.RunnerOption) {
-	if !isClusterMode(cfg) || !isNonNilInterface(leaseManager) {
-		// 非 cluster 或 lease manager 无效时，不注入任何 cluster 运行时能力。
+	if !isNonNilInterface(leaseManager) {
 		return opts, runnerOpts
 	}
 
 	opts = append(opts,
 		tasks.WithClusterLeaseManager(leaseManager),
 		tasks.WithClusterWorkerID(workerID),
-		tasks.WithClusterLease(
+	)
+	if isClusterMode(cfg) {
+		opts = append(opts, tasks.WithClusterLease(
 			time.Duration(cfg.Cluster.LeaseTTLSec)*time.Second,
 			time.Duration(cfg.Cluster.LeaseRenewIntervalSec)*time.Second,
 			time.Duration(cfg.Cluster.LeaseGraceSec)*time.Second,
-		),
-	)
-	if leaseVerifier != nil {
-		// runner 在关键写路径再次验租，避免失租后继续产出数据。
-		runnerOpts = append(runnerOpts, replication.WithLeaseVerifier(leaseVerifier))
+		))
+	}
+	if workerEnabled {
+		runnerOpts = append(runnerOpts, replication.WithLeaseVerifier(leaseManager))
 	}
 	return opts, runnerOpts
 }

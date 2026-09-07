@@ -259,7 +259,7 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 		if !isClaimableActiveState(task.State) {
 			continue
 		}
-		if leaseManager != nil && task.OwnerWorkerID != workerID {
+		if leaseManager != nil && task.OwnerWorkerID != "" && task.OwnerWorkerID != workerID {
 			continue
 		}
 		if err := s.StartTask(task.ID); err != nil {

@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, SQL-paged task/dashboard data with matching-list summary (same filter as page COUNT), loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard/summary then memory paging, loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -258,19 +258,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	page, total, err := s.tasks.ListTasksPage(r.Context(), query.toFilter())
+	items, total, err := s.listMatchingTasks(r.Context(), query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	items, matchTotal, err := s.listMatchingTasks(r.Context(), query)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if matchTotal != total {
-		total = matchTotal
-	}
+	page := tasks.PaginateTasks(items, query.Offset, query.Limit)
 	now := time.Now()
 	resp := dashboardResponse{
 		GeneratedAt:      now,
@@ -797,18 +790,8 @@ func parseTaskListQuery(r *http.Request) (taskListQuery, error) {
 func (s *Server) listMatchingTasks(ctx context.Context, query taskListQuery) ([]tasks.Task, int, error) {
 	filter := query.toFilter()
 	filter.Offset = 0
-	probe := filter
-	probe.Limit = 1
-	_, total, err := s.tasks.ListTasksPage(ctx, probe)
-	if err != nil {
-		return nil, 0, err
-	}
-	if total <= 0 {
-		return []tasks.Task{}, 0, nil
-	}
-	filter.Limit = total
-	items, total, err := s.tasks.ListTasksPage(ctx, filter)
-	return items, total, err
+	filter.Limit = 0
+	return s.tasks.ListTasksPage(ctx, filter)
 }
 
 func (q taskListQuery) toFilter() tasks.TaskListFilter {

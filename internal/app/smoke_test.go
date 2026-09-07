@@ -504,13 +504,6 @@ func (m *appLeaseManager) Verify(_ context.Context, _ string, _ string, _ int64)
 	return m.acquireOK, nil
 }
 
-type appLeaseVerifier struct{}
-
-// VerifyLease 实现对应功能逻辑。
-func (v *appLeaseVerifier) VerifyLease(_ context.Context, _ tasks.Task) (bool, error) {
-	return true, nil
-}
-
 type appRunLeaseManager struct {
 	acquireOK    bool
 	acquireEpoch int64
@@ -618,6 +611,35 @@ func (s *appFakeStore) DeleteTask(_ context.Context, taskID string) error {
 }
 
 // TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier 验证相关行为。
+func TestApp_StandaloneRuntimeOptionsWireMemoryLease(t *testing.T) {
+	cfg := config.Config{Mode: "standalone"}
+	leases := tasks.NewMemoryLease()
+	opts, runnerOpts := applyClusterRuntimeOptions(cfg, "standalone", leases, true, nil, nil)
+	s := tasks.NewScheduler(append(opts, tasks.WithRunner(&appFakeRunner{started: make(chan tasks.Task, 1)}))...)
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("standalone StartTask: %v", err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.OwnerWorkerID != "standalone" || got.Epoch <= 0 {
+		t.Fatalf("expected MemoryLease ownership, got owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	}
+	runner := replication.NewMySQLRunner(t.TempDir(), runnerOpts...)
+	field := reflect.ValueOf(runner).Elem().FieldByName("leaseVerifier")
+	if !field.IsValid() || field.IsNil() {
+		t.Fatal("expected runner to verify via the same MemoryLease")
+	}
+}
+
 func TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier(t *testing.T) {
 	cfg := config.Config{
 		Mode: "cluster",
@@ -630,9 +652,8 @@ func TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier(t *testing.T) {
 		},
 	}
 	leaseManager := &appLeaseManager{acquireOK: false, acquireEpoch: 7}
-	leaseVerifier := &appLeaseVerifier{}
 
-	opts, runnerOpts := applyClusterRuntimeOptions(cfg, "worker-a", leaseManager, leaseVerifier, nil, nil)
+	opts, runnerOpts := applyClusterRuntimeOptions(cfg, "worker-a", leaseManager, true, nil, nil)
 
 	s := tasks.NewScheduler(append(opts, tasks.WithRunner(&appFakeRunner{started: make(chan tasks.Task, 1)}))...)
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -843,7 +864,7 @@ func TestApp_ClusterWorkerIDUsedConsistentlyBySchedulerAndHeartbeat(t *testing.T
 		},
 	}
 	leaseManager := &appLeaseManager{acquireOK: true, acquireEpoch: 7}
-	opts, _ := applyClusterRuntimeOptions(cfg, workerID, leaseManager, nil, nil, nil)
+	opts, _ := applyClusterRuntimeOptions(cfg, workerID, leaseManager, true, nil, nil)
 
 	runner := &appFakeRunner{started: make(chan tasks.Task, 1)}
 	s := tasks.NewScheduler(append(opts, tasks.WithRunner(runner))...)
@@ -1100,8 +1121,8 @@ func TestApp_RunWorkerIdentityStaysCoherentForActiveSession(t *testing.T) {
 	}
 	defer func() { newRunnerForRun = restoreNewRunner }()
 	restoreLeaseRuntime := newClusterLeaseRuntimeForRun
-	newClusterLeaseRuntimeForRun = func(_ appMetaStore) (tasks.LeaseManager, replication.LeaseVerifier) {
-		return &appRunLeaseManager{acquireOK: true, acquireEpoch: 7}, &appLeaseVerifier{}
+	newClusterLeaseRuntimeForRun = func(_ appMetaStore) tasks.LeaseManager {
+		return &appRunLeaseManager{acquireOK: true, acquireEpoch: 7}
 	}
 	defer func() { newClusterLeaseRuntimeForRun = restoreLeaseRuntime }()
 

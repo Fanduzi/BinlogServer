@@ -47,11 +47,8 @@ func TestFinalizeSealedFile_BestEffortOnUploadFailure(t *testing.T) {
 
 	uploader := &fakeUploader{err: errors.New("upload failed")}
 	metaStore := &fakeMetaStore{}
-	runner := &MySQLRunner{
-		uploader:      uploader,
-		fileMetaStore: metaStore,
-		uploadPrefix:  "prefix",
-	}
+	runner := &MySQLRunner{fileMetaStore: metaStore}
+	WithUploader(uploader, "prefix")(runner)
 
 	err := runner.finalizeSealedFile(
 		context.Background(),
@@ -91,11 +88,8 @@ func TestFinalizeSealedFile_UploadSuccess(t *testing.T) {
 
 	uploader := &fakeUploader{}
 	metaStore := &fakeMetaStore{}
-	runner := &MySQLRunner{
-		uploader:      uploader,
-		fileMetaStore: metaStore,
-		uploadPrefix:  "prefix",
-	}
+	runner := &MySQLRunner{fileMetaStore: metaStore}
+	WithUploader(uploader, "prefix")(runner)
 
 	err := runner.finalizeSealedFile(
 		context.Background(),

@@ -125,14 +125,11 @@ func TestFileState_SealRequiresLeaseAndEpochMatch(t *testing.T) {
 
 	uploader := &fileStateUploader{}
 	metaStore := &fileStateMetaStore{}
-	runner := &MySQLRunner{
-		uploader:      uploader,
-		fileMetaStore: metaStore,
-		uploadPrefix:  "prefix",
-		leaseVerifier: leaseVerifierFunc(func(context.Context, tasks.Task) (bool, error) {
-			return false, nil
-		}),
-	}
+	runner := &MySQLRunner{fileMetaStore: metaStore}
+	WithUploader(uploader, "prefix")(runner)
+	WithLeaseVerifier(leaseVerifierFunc(func(context.Context, string, string, int64) (bool, error) {
+		return false, nil
+	}))(runner)
 
 	err := runner.finalizeSealedFile(
 		context.Background(),
@@ -159,13 +156,7 @@ func TestFileState_SealRequiresLeaseAndEpochMatch(t *testing.T) {
 	}
 }
 
-type memoryLeaseVerifier struct {
-	leases *tasks.MemoryLease
-}
 
-func (v memoryLeaseVerifier) VerifyLease(ctx context.Context, task tasks.Task) (bool, error) {
-	return v.leases.Verify(ctx, task.ID, task.OwnerWorkerID, task.Epoch)
-}
 
 func TestFileState_SealAsksSameMemoryLeaseDoor(t *testing.T) {
 	dir := t.TempDir()
@@ -183,7 +174,7 @@ func TestFileState_SealAsksSameMemoryLeaseDoor(t *testing.T) {
 	}
 
 	runner := &MySQLRunner{
-		leaseVerifier: memoryLeaseVerifier{leases: leases},
+		leaseVerifier: leases,
 	}
 	err = runner.finalizeSealedFile(
 		context.Background(),
@@ -217,14 +208,11 @@ func TestFileState_NeverPublishOpenFile(t *testing.T) {
 
 	uploader := &fileStateUploader{}
 	metaStore := &fileStateMetaStore{}
-	runner := &MySQLRunner{
-		uploader:      uploader,
-		fileMetaStore: metaStore,
-		uploadPrefix:  "prefix",
-		leaseVerifier: leaseVerifierFunc(func(context.Context, tasks.Task) (bool, error) {
-			return true, nil
-		}),
-	}
+	runner := &MySQLRunner{fileMetaStore: metaStore}
+	WithUploader(uploader, "prefix")(runner)
+	WithLeaseVerifier(leaseVerifierFunc(func(context.Context, string, string, int64) (bool, error) {
+		return true, nil
+	}))(runner)
 
 	err := runner.finalizeSealedFile(
 		context.Background(),

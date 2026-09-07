@@ -1,7 +1,7 @@
 # internal/replication Module
 
 ## Files
-- `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、LATEST 立即 at-tip、idle 仅在 dump 达到 master file/pos 时标 at-tip、heartbeat 跳过落盘）。封文件后上传走 `tasks.ApplySealedUpload`。
+- `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、LATEST 立即 at-tip、idle 仅在 dump 达到 master file/pos 时标 at-tip、heartbeat 跳过落盘）。封文件后把已 seal 文件交给注入的 handler 上传。
 - `source_identity.go`: MySQL/MariaDB 源库身份，以及永久认证/配置错误与可重试网络错误分类。
 - `resolver.go`: 起点解析，以及 dump 与 SHOW MASTER STATUS file/pos 的保守比较。
 - 其余 `*_test.go`: 复制、恢复、上传等行为测试。

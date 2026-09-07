@@ -1,14 +1,29 @@
 // Package tasks provides module-level functionality for tasks.
 // input: sealed binlog file metadata, FileUploader, and file metadata writer
-// output: UPLOADED or UPLOAD_FAILED metadata; upload failure does not fail the caller
+// output: ObjectKey, UPLOADED or UPLOAD_FAILED metadata; upload failure does not fail the caller
 // pos: single best-effort upload caller used after seal and on retry
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"strings"
 	"time"
 )
+
+// ObjectKey builds the object-store key. It joins with "/" and does not filepath.Clean.
+func ObjectKey(prefix, clusterKey, sourceServerUUID, fileName string) string {
+	parts := make([]string, 0, 4)
+	if p := strings.Trim(strings.TrimSpace(prefix), "/"); p != "" {
+		parts = append(parts, p)
+	}
+	parts = append(parts,
+		strings.Trim(strings.TrimSpace(clusterKey), "/"),
+		strings.Trim(strings.TrimSpace(sourceServerUUID), "/"),
+		strings.Trim(strings.TrimSpace(fileName), "/"),
+	)
+	return strings.Join(parts, "/")
+}
 
 // BinlogFileWriter persists binlog file metadata.
 type BinlogFileWriter interface {
