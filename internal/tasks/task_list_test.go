@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: in-memory task snapshots used by PageTasks and StartingUnownedTasks
-// output: numeric-id page order and STARTING-unowned subset coverage
+// input: in-memory task snapshots used by PageTasks and StartingUnownedTasks, and file snapshots used by FailedUploadFiles
+// output: numeric-id page order, STARTING-unowned subset coverage, and UPLOAD_FAILED file subset coverage
 // pos: unit tests for shared task list helpers
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,6 +8,14 @@ package tasks
 import (
 	"testing"
 )
+
+func TestPageTasks_UnboundedLimitReturnsAllMatching(t *testing.T) {
+	items := []Task{{ID: "1"}, {ID: "2"}, {ID: "3"}}
+	page, total := PageTasks(items, TaskListFilter{Limit: 0, Offset: 0})
+	if total != 3 || len(page) != 3 {
+		t.Fatalf("unbounded page len=%d total=%d, want 3/3", len(page), total)
+	}
+}
 
 func TestPageTasks_NumericIDOrderAndTotal(t *testing.T) {
 	items := []Task{
@@ -26,6 +34,19 @@ func TestPageTasks_NumericIDOrderAndTotal(t *testing.T) {
 	want := []string{"10", "100"}
 	if got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("page ids = %v, want %v", got, want)
+	}
+}
+
+func TestFailedUploadFiles_FiltersAndCaps(t *testing.T) {
+	items := []BinlogFile{
+		{FileName: "a", UploadState: "UPLOADED"},
+		{FileName: "b", UploadState: "UPLOAD_FAILED"},
+		{FileName: "c", UploadState: "upload_failed"},
+		{FileName: "d", UploadState: "UPLOAD_FAILED"},
+	}
+	got := FailedUploadFiles(items, 2)
+	if len(got) != 2 || got[0].FileName != "b" || got[1].FileName != "c" {
+		t.Fatalf("FailedUploadFiles = %+v, want b then c", got)
 	}
 }
 

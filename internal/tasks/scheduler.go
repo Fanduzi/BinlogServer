@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, and execution coordination
+// output: source validation decisions, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -32,6 +32,8 @@ var ErrInvalidTaskName = errors.New("invalid name")
 var ErrInvalidRetryUploadLimit = errors.New("invalid retry upload limit")
 var ErrUploadRetryNotAvailable = errors.New("upload retry is not available")
 var ErrUploadRetryInProgress = errors.New("upload retry already in progress")
+var ErrExpiredLeaseLookupNotAvailable = errors.New("expired lease lookup is not available")
+var ErrFailedUploadLookupNotAvailable = errors.New("failed upload lookup is not available")
 var ErrFilePosRequired = errors.New("file/pos is required")
 var ErrGTIDSetRequired = errors.New("gtid_set is required")
 var ErrInvalidStartMode = errors.New("invalid start mode")
@@ -64,6 +66,8 @@ type LeaseManager interface {
 	Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error)
 	// Release 主动释放 lease（best-effort）。
 	Release(ctx context.Context, taskID, workerID string, epoch int64) (bool, error)
+	// Verify 判断 worker/epoch 是否仍持有未过期租约。封文件前与占/续/放走同一扇门。
+	Verify(ctx context.Context, taskID, workerID string, epoch int64) (bool, error)
 }
 
 type runnerWithNotify interface {

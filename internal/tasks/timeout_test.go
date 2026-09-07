@@ -66,6 +66,13 @@ func (m *timeoutLeaseManager) Release(ctx context.Context, _ string, _ string, _
 	<-ctx.Done()
 	return false, ctx.Err()
 }
+func (m *timeoutLeaseManager) Verify(ctx context.Context, _ string, _ string, _ int64) (bool, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		return false, errTimeoutTestMissingDeadline
+	}
+	<-ctx.Done()
+	return false, ctx.Err()
+}
 
 type timeoutUploader struct{}
 

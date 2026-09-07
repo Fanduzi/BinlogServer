@@ -1,12 +1,13 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, SQL-paged task/dashboard data with COUNT totals, loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard/summary then memory paging, loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -140,13 +141,18 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, _, err := s.filterTasksBySource(s.tasks.ListTasks(), r)
+	query, err := parseTaskListQuery(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	items, total, err := s.listMatchingTasks(r.Context(), query)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	resp := summaryResponse{Total: len(items)}
+	resp := summaryResponse{Total: total}
 	now := time.Now()
 	for _, task := range items {
 		switch task.State {
@@ -252,12 +258,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	page, total, err := s.tasks.ListTasksPage(r.Context(), query.toFilter())
+	items, total, err := s.listMatchingTasks(r.Context(), query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	items := filterTasksByQuery(s.tasks.ListTasks(), query)
+	page := tasks.PaginateTasks(items, query.Offset, query.Limit)
 	now := time.Now()
 	resp := dashboardResponse{
 		GeneratedAt:      now,
@@ -266,7 +272,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Limit:            query.Limit,
 		Offset:           query.Offset,
 		Summary: summaryResponse{
-			Total: len(items),
+			Total: total,
 		},
 		Tasks:   make([]dashboardTaskItem, 0, len(page)),
 		Sources: []sourceOverview{},
@@ -779,6 +785,13 @@ func parseTaskListQuery(r *http.Request) (taskListQuery, error) {
 		query.Offset = offset
 	}
 	return query, nil
+}
+
+func (s *Server) listMatchingTasks(ctx context.Context, query taskListQuery) ([]tasks.Task, int, error) {
+	filter := query.toFilter()
+	filter.Offset = 0
+	filter.Limit = 0
+	return s.tasks.ListTasksPage(ctx, filter)
 }
 
 func (q taskListQuery) toFilter() tasks.TaskListFilter {

@@ -59,14 +59,11 @@ func TestRebuildCurrentFile_TakeoverProducesSingleSealedFile(t *testing.T) {
 
 	uploader := &fileStateUploader{}
 	metaStore := &fileStateMetaStore{}
-	runner := &MySQLRunner{
-		uploader:      uploader,
-		fileMetaStore: metaStore,
-		uploadPrefix:  "prefix",
-		leaseVerifier: leaseVerifierFunc(func(context.Context, tasks.Task) (bool, error) {
-			return true, nil
-		}),
-	}
+	runner := &MySQLRunner{fileMetaStore: metaStore}
+	WithUploader(uploader, "prefix")(runner)
+	WithLeaseVerifier(leaseVerifierFunc(func(context.Context, string, string, int64) (bool, error) {
+		return true, nil
+	}))(runner)
 
 	err := runner.finalizeSealedFile(
 		context.Background(),

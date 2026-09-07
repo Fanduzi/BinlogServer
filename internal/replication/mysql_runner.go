@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, and permanent source errors
+// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, sealed-file handoff for upload, and permanent source errors
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -40,9 +40,9 @@ type MySQLRunner struct {
 	fetcher          sourceMetaFetcher
 	checkpointStore  CheckpointStore
 	fileMetaStore    FileMetaStore
-	uploader         FileUploader
 	uploadPrefix     string
 	leaseVerifier    LeaseVerifier
+	sealedHandler    func(context.Context, tasks.BinlogFile) error
 	progressReporter ProgressReporter
 	newSyncer        func(replication.BinlogSyncerConfig) binlogSyncer
 	writerOpener     func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error)
@@ -117,40 +117,43 @@ func WithFileMetaStore(store FileMetaStore) RunnerOption {
 	}
 }
 
-// FileUploader 定义对象存储上传接口。
-type FileUploader interface {
-	// UploadFile 上传 sealed 文件。
-	UploadFile(ctx context.Context, taskID, localPath, objectKey string) error
-}
-
 // ProgressReporter 定义复制进度上报接口。
 type ProgressReporter interface {
 	// ReportReplicationProgress 上报复制进度。atTip 表示 dump 已在源库当前 file/pos。
 	ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32, atTip bool)
 }
 
-// LeaseVerifier 定义 cluster 下 lease ownership 校验接口。
+// LeaseVerifier 封文件前问租约是否仍在。tasks.LeaseManager 直接满足，不必经 App 转一层。
 type LeaseVerifier interface {
-	// VerifyLease 校验当前任务 lease/epoch 是否仍有效。
-	VerifyLease(ctx context.Context, task tasks.Task) (bool, error)
+	Verify(ctx context.Context, taskID, workerID string, epoch int64) (bool, error)
 }
 
-type leaseVerifierFunc func(context.Context, tasks.Task) (bool, error)
+type leaseVerifierFunc func(context.Context, string, string, int64) (bool, error)
 
-// VerifyLease 让函数类型实现 LeaseVerifier 接口。
-func (f leaseVerifierFunc) VerifyLease(ctx context.Context, task tasks.Task) (bool, error) {
-	return f(ctx, task)
+func (f leaseVerifierFunc) Verify(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
+	return f(ctx, taskID, workerID, epoch)
 }
 
 // WithUploader 注入对象存储上传器及 object key prefix。
-func WithUploader(uploader FileUploader, prefix string) RunnerOption {
+func WithUploader(uploader tasks.FileUploader, prefix string) RunnerOption {
 	return func(r *MySQLRunner) {
-		r.uploader = uploader
+		r.uploadPrefix = prefix
+		r.sealedHandler = func(ctx context.Context, file tasks.BinlogFile) error {
+			_, err := tasks.ApplySealedUpload(ctx, uploader, r.fileMetaStore, file)
+			return err
+		}
+	}
+}
+
+// WithSealedHandler 在封文件后把已 seal 文件交给调用方上传（生产由 App 注入 ApplySealedUpload）。
+func WithSealedHandler(handler func(context.Context, tasks.BinlogFile) error, prefix string) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.sealedHandler = handler
 		r.uploadPrefix = prefix
 	}
 }
 
-// WithLeaseVerifier 注入 lease 校验器（cluster 安全边界）。
+// WithLeaseVerifier 注入封文件前的租约校验（LeaseManager.Verify 可直接传入）。
 func WithLeaseVerifier(verifier LeaseVerifier) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.leaseVerifier = verifier
@@ -534,8 +537,7 @@ func (r *MySQLRunner) finalizeSealedFile(
 	// 2) “seal 只是改文件名”不完整；cluster 下 seal/upload 前必须再校验 lease ownership。
 	// Step 1: cluster 下先做 ownership 校验，防止失租后继续发布文件。
 	if task.Epoch > 0 && r.leaseVerifier != nil {
-		// cluster 下 seal/upload 前再次校验 lease/epoch，防止失租后继续发布文件。
-		ok, err := r.leaseVerifier.VerifyLease(ctx, task)
+		ok, err := r.leaseVerifier.Verify(ctx, task.ID, task.OwnerWorkerID, task.Epoch)
 		if err != nil {
 			return err
 		}
@@ -587,7 +589,7 @@ func (r *MySQLRunner) finalizeSealedFile(
 		fileMeta = &meta
 	}
 
-	if r.uploader == nil {
+	if r.sealedHandler == nil {
 		return nil
 	}
 	if strings.TrimSpace(task.ClusterKey) == "" {
@@ -597,31 +599,24 @@ func (r *MySQLRunner) finalizeSealedFile(
 	if sourceServerUUID == "" {
 		return errors.New("source server_uuid is required")
 	}
-	// Step 4: best-effort 上传；失败仅记录 UPLOAD_FAILED，不中断主链路。
 	objectKey := buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, sourceFile)
-	if err := r.uploader.UploadFile(ctx, task.ID, sealedPath, objectKey); err != nil {
-		if fileMeta != nil {
-			fileMeta.ObjectKey = objectKey
-			fileMeta.UploadState = "UPLOAD_FAILED"
-			fileMeta.UploadError = err.Error()
-			if saveErr := r.fileMetaStore.UpsertBinlogFile(ctx, *fileMeta); saveErr != nil {
-				return saveErr
-			}
+	if fileMeta == nil {
+		fileMeta = &tasks.BinlogFile{
+			TaskID:      task.ID,
+			FileName:    sourceFile,
+			FilePath:    sealedPath,
+			State:       "SEALED",
+			StartPos:    startPos,
+			EndPos:      endPos,
+			CreatedAt:   createdAt,
+			SealedAt:    sealedAt,
+			ObjectKey:   objectKey,
+			UploadState: "LOCAL_ONLY",
 		}
-		// best-effort policy：upload 失败只落失败元数据，不打断拉流主链路。
-		return nil
-	}
-
-	if fileMeta != nil {
-		fileMeta.UploadState = "UPLOADED"
+	} else {
 		fileMeta.ObjectKey = objectKey
-		fileMeta.UploadError = ""
-		fileMeta.UploadedAt = time.Now()
-		if err := r.fileMetaStore.UpsertBinlogFile(ctx, *fileMeta); err != nil {
-			return err
-		}
 	}
-	return nil
+	return r.sealedHandler(ctx, *fileMeta)
 }
 
 // buildSyncerConfig 基于任务配置构造 go-mysql syncer 参数。
@@ -922,18 +917,7 @@ func cleanupStaleOpenFiles(dir string, currentEpoch int64) error {
 
 // buildObjectKey 生成上传对象路径（prefix/cluster_key/server_uuid/file_name）。
 func buildObjectKey(prefix, clusterKey, sourceServerUUID, fileName string) string {
-	// 注意不要用 filepath.Join：
-	// object key 是对象存储逻辑路径，不应被本地路径规则（clean/绝对路径）影响。
-	parts := make([]string, 0, 4)
-	if p := strings.Trim(strings.TrimSpace(prefix), "/"); p != "" {
-		parts = append(parts, p)
-	}
-	parts = append(parts,
-		strings.Trim(strings.TrimSpace(clusterKey), "/"),
-		strings.Trim(strings.TrimSpace(sourceServerUUID), "/"),
-		strings.Trim(strings.TrimSpace(fileName), "/"),
-	)
-	return strings.Join(parts, "/")
+	return tasks.ObjectKey(prefix, clusterKey, sourceServerUUID, fileName)
 }
 
 // openFileName 为 open 状态文件添加 epoch 后缀。

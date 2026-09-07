@@ -59,6 +59,12 @@ func (f *fakeLeaseManager) Release(ctx context.Context, taskID string, workerID 
 	return true, nil
 }
 
+func (f *fakeLeaseManager) Verify(_ context.Context, _ string, _ string, _ int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.acquireOK, f.acquireErr
+}
+
 // TestScheduler_ClusterStartRequiresLease 验证相关行为。
 func TestScheduler_ClusterStartRequiresLease(t *testing.T) {
 	lease := &fakeLeaseManager{
@@ -871,6 +877,149 @@ func waitRunnerStarted(t *testing.T, runner *fakeRunner) {
 	}
 }
 
+func TestScheduler_FailedReleasesLeaseSoOtherWorkerCanStart(t *testing.T) {
+	store := newFakeStore()
+	leases := NewMemoryLease()
+	ttl := time.Hour
+	a := NewScheduler(
+		WithStore(store),
+		WithRunner(&permanentFailureRunner{}),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(ttl, time.Minute, time.Minute),
+	)
+	task, err := a.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := a.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := a.StartTask(task.ID); err != nil {
+		t.Fatalf("worker-a StartTask: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := a.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected FAILED, got %s", got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	bRunner := &fakeRunner{started: make(chan Task, 1)}
+	b := NewScheduler(
+		WithStore(store),
+		WithRunner(bRunner),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-b"),
+		WithClusterLease(ttl, time.Minute, time.Minute),
+	)
+	if err := b.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if err := b.StartTask(task.ID); err != nil {
+		t.Fatalf("worker-b StartTask after FAILED: %v", err)
+	}
+	waitRunnerStarted(t, bRunner)
+}
+
+func TestScheduler_RetryBackoffKeepsLeaseFromOtherWorker(t *testing.T) {
+	store := newFakeStore()
+	leases := NewMemoryLease()
+	ttl := time.Hour
+	a := NewScheduler(
+		WithStore(store),
+		WithRunner(&unreachableRunner{}),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(ttl, time.Minute, time.Minute),
+		WithRetryBackoff(time.Hour, time.Hour),
+	)
+	task, err := a.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := a.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := a.StartTask(task.ID); err != nil {
+		t.Fatalf("worker-a StartTask: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := a.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateRetryBackoff {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected RETRY_BACKOFF, got %s", got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	b := NewScheduler(
+		WithStore(store),
+		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-b"),
+		WithClusterLease(ttl, time.Minute, time.Minute),
+	)
+	if err := b.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	err = b.StartTask(task.ID)
+	if !errors.Is(err, ErrLeaseNotAcquired) {
+		t.Fatalf("expected ErrLeaseNotAcquired during backoff, got %v", err)
+	}
+}
+
+func TestScheduler_StandaloneUsesMemoryLeaseDoor(t *testing.T) {
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("standalone"),
+	)
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask through MemoryLease: %v", err)
+	}
+	waitRunnerStarted(t, runner)
+}
+
+func TestScheduler_ClaimExpiredTasksRequiresExpiredLeaseLookup(t *testing.T) {
+	worker := NewScheduler(
+		WithStore(newFakeStore()),
+		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
+		WithClusterLeaseManager(&fakeLeaseManager{acquireOK: true, acquireEpoch: 1}),
+		WithClusterWorkerID("worker-b"),
+	)
+
+	claimed, err := worker.ClaimExpiredTasks()
+	if !errors.Is(err, ErrExpiredLeaseLookupNotAvailable) {
+		t.Fatalf("expected ErrExpiredLeaseLookupNotAvailable, got claimed=%d err=%v", claimed, err)
+	}
+	if claimed != 0 {
+		t.Fatalf("expected claimed=0, got %d", claimed)
+	}
+}
+
 func TestScheduler_ClaimExpiredTasksStartsExpiredRunningTask(t *testing.T) {
 	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
 	lease := &fakeLeaseManager{acquireEpoch: 22, acquireOK: true}
@@ -1183,5 +1332,150 @@ func TestScheduler_ClaimExpiredTasksStartsExpiredLeaseDegradedAndRetryBackoff(t 
 			}
 			waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
 		})
+	}
+}
+
+func TestScheduler_ClaimRunnableTasksClaimsUnownedStartingAndExpired(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 40, acquireOK: true}
+	runner := &fakeRunner{started: make(chan Task, 2)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+	starting := Task{
+		ID:         "1",
+		Name:       "cluster-a",
+		ClusterKey: "cluster-a-key",
+		State:      StateStarting,
+		Source:     SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+		Start:      StartConfig{Mode: StartModeLatest},
+	}
+	expired := newExpiredOwnedTask("2", "worker-dead", StateRunning)
+	store.tasks[starting.ID] = starting
+	store.tasks[expired.ID] = expired
+	store.expired = []Task{expired}
+
+	claimed, err := worker.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 2 {
+		t.Fatalf("expected claimed=2, got %d", claimed)
+	}
+	waitRunnerStarted(t, runner)
+	waitRunnerStarted(t, runner)
+	assertNoStopPersisted(t, store)
+}
+
+func TestScheduler_ClaimRunnableTasksSkipsForeignHeldTask(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	leases := NewMemoryLease()
+	ttl := time.Hour
+	aRunner := &fakeRunner{started: make(chan Task, 1)}
+	a := NewScheduler(
+		WithStore(store),
+		WithRunner(aRunner),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(ttl, time.Minute, time.Minute),
+	)
+	task, err := a.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := a.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := a.StartTask(task.ID); err != nil {
+		t.Fatalf("worker-a StartTask: %v", err)
+	}
+	waitRunnerStarted(t, aRunner)
+
+	b := NewScheduler(
+		WithStore(store),
+		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-b"),
+		WithClusterLease(ttl, time.Minute, time.Minute),
+	)
+	if err := b.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	claimed, err := b.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 0 {
+		t.Fatalf("expected claimed=0 for foreign held task, got %d", claimed)
+	}
+	got, err := b.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.OwnerWorkerID != "worker-a" {
+		t.Fatalf("foreign owner changed to %q", got.OwnerWorkerID)
+	}
+	if got.State == StateStopping || got.State == StateStopped {
+		t.Fatalf("foreign task was stopped: %s", got.State)
+	}
+}
+
+func TestScheduler_ClaimRunnableTasksStandaloneStartsIdleRunning(t *testing.T) {
+	store := newFakeStore()
+	task := Task{
+		ID:         "1",
+		Name:       "cluster-a",
+		ClusterKey: "cluster-a-key",
+		State:      StateRunning,
+		Source:     SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+		Start:      StartConfig{Mode: StartModeLatest},
+	}
+	if err := store.UpsertTask(context.Background(), task); err != nil {
+		t.Fatalf("UpsertTask: %v", err)
+	}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	s := NewScheduler(WithStore(store), WithRunner(runner))
+	if err := s.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	claimed, err := s.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1, got %d", claimed)
+	}
+	waitRunnerStarted(t, runner)
+}
+
+func TestScheduler_ClaimRunnableTasksSkipsLocalLiveRun(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireEpoch: 41, acquireOK: true}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+	task := newExpiredOwnedTask("1", "worker-b", StateRunning)
+	store.tasks[task.ID] = task
+	if err := worker.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if err := worker.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	waitRunnerStarted(t, runner)
+
+	claimed, err := worker.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 0 {
+		t.Fatalf("expected claimed=0 when local run is live, got %d", claimed)
 	}
 }

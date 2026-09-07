@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify), runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -271,6 +271,11 @@ func (s *LeaseStore) VerifyOwnership(ctx context.Context, taskID, workerID strin
 		return false, err
 	}
 	return lease.LeaseExpireAt.After(dbNow), nil
+}
+
+// Verify implements tasks.LeaseManager using the same ownership row as Acquire/Renew/Release.
+func (s *LeaseStore) Verify(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
+	return s.VerifyOwnership(ctx, taskID, workerID, epoch)
 }
 
 // rowsAffectedGreaterThanZero 判断 SQL 执行是否影响至少一行。
