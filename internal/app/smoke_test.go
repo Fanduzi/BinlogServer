@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth, TaskStore page/get fakes, worker-only, cluster resume ownership-filter, and expired-lease claim-loop regression coverage
+// output: application lifecycle plus real-route production auth, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -83,6 +82,14 @@ func (s *fakeAppMetaStore) ListStartingUnownedTasks(_ context.Context) ([]tasks.
 	s.regMu.Lock()
 	defer s.regMu.Unlock()
 	return tasks.StartingUnownedTasks(append([]tasks.Task(nil), s.listTasks...)), nil
+}
+
+func (s *fakeAppMetaStore) ListTasksWithExpiredLease(_ context.Context) ([]tasks.Task, error) {
+	return nil, nil
+}
+
+func (s *fakeAppMetaStore) ListFailedUploadBinlogFiles(_ context.Context, _ string, _ int) ([]tasks.BinlogFile, error) {
+	return nil, nil
 }
 
 func (s *fakeAppMetaStore) DeleteTask(_ context.Context, taskID string) error {
@@ -493,11 +500,8 @@ func (m *appLeaseManager) Release(_ context.Context, _ string, _ string, _ int64
 	return true, nil
 }
 
-type appLeaseVerifier struct{}
-
-// VerifyLease 实现对应功能逻辑。
-func (v *appLeaseVerifier) VerifyLease(_ context.Context, _ tasks.Task) (bool, error) {
-	return true, nil
+func (m *appLeaseManager) Verify(_ context.Context, _ string, _ string, _ int64) (bool, error) {
+	return m.acquireOK, nil
 }
 
 type appRunLeaseManager struct {
@@ -515,6 +519,10 @@ func (m *appRunLeaseManager) Renew(_ context.Context, _ string, _ string, _ int6
 
 func (m *appRunLeaseManager) Release(_ context.Context, _ string, _ string, _ int64) (bool, error) {
 	return true, nil
+}
+
+func (m *appRunLeaseManager) Verify(_ context.Context, _ string, _ string, _ int64) (bool, error) {
+	return m.acquireOK, nil
 }
 
 type appFakeRunner struct {
@@ -590,6 +598,10 @@ func (s *appFakeStore) ListStartingUnownedTasks(_ context.Context) ([]tasks.Task
 	return tasks.StartingUnownedTasks(s.snapshot()), nil
 }
 
+func (s *appFakeStore) ListTasksWithExpiredLease(_ context.Context) ([]tasks.Task, error) {
+	return nil, nil
+}
+
 // DeleteTask 实现对应功能逻辑。
 func (s *appFakeStore) DeleteTask(_ context.Context, taskID string) error {
 	s.mu.Lock()
@@ -599,6 +611,35 @@ func (s *appFakeStore) DeleteTask(_ context.Context, taskID string) error {
 }
 
 // TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier 验证相关行为。
+func TestApp_StandaloneRuntimeOptionsWireMemoryLease(t *testing.T) {
+	cfg := config.Config{Mode: "standalone"}
+	leases := tasks.NewMemoryLease()
+	opts, runnerOpts := applyClusterRuntimeOptions(cfg, "standalone", leases, true, nil, nil)
+	s := tasks.NewScheduler(append(opts, tasks.WithRunner(&appFakeRunner{started: make(chan tasks.Task, 1)}))...)
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("standalone StartTask: %v", err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.OwnerWorkerID != "standalone" || got.Epoch <= 0 {
+		t.Fatalf("expected MemoryLease ownership, got owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	}
+	runner := replication.NewMySQLRunner(t.TempDir(), runnerOpts...)
+	field := reflect.ValueOf(runner).Elem().FieldByName("leaseVerifier")
+	if !field.IsValid() || field.IsNil() {
+		t.Fatal("expected runner to verify via the same MemoryLease")
+	}
+}
+
 func TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier(t *testing.T) {
 	cfg := config.Config{
 		Mode: "cluster",
@@ -611,9 +652,8 @@ func TestApp_ClusterRuntimeOptionsWireLeaseAndVerifier(t *testing.T) {
 		},
 	}
 	leaseManager := &appLeaseManager{acquireOK: false, acquireEpoch: 7}
-	leaseVerifier := &appLeaseVerifier{}
 
-	opts, runnerOpts := applyClusterRuntimeOptions(cfg, "worker-a", leaseManager, leaseVerifier, nil, nil)
+	opts, runnerOpts := applyClusterRuntimeOptions(cfg, "worker-a", leaseManager, true, nil, nil)
 
 	s := tasks.NewScheduler(append(opts, tasks.WithRunner(&appFakeRunner{started: make(chan tasks.Task, 1)}))...)
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -674,9 +714,12 @@ func TestApp_ResumePersistedActiveTasksStartsRecoveredTasks(t *testing.T) {
 		t.Fatalf("Restore returned error: %v", err)
 	}
 
-	stats := resumePersistedActiveTasks(s, "")
-	if stats.Considered != 1 || stats.Resumed != 1 || stats.StopErrors != 0 || stats.StartErrors != 0 {
-		t.Fatalf("unexpected resume stats: %+v", stats)
+	claimed, err := s.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1, got %d", claimed)
 	}
 
 	select {
@@ -821,7 +864,7 @@ func TestApp_ClusterWorkerIDUsedConsistentlyBySchedulerAndHeartbeat(t *testing.T
 		},
 	}
 	leaseManager := &appLeaseManager{acquireOK: true, acquireEpoch: 7}
-	opts, _ := applyClusterRuntimeOptions(cfg, workerID, leaseManager, nil, nil, nil)
+	opts, _ := applyClusterRuntimeOptions(cfg, workerID, leaseManager, true, nil, nil)
 
 	runner := &appFakeRunner{started: make(chan tasks.Task, 1)}
 	s := tasks.NewScheduler(append(opts, tasks.WithRunner(runner))...)
@@ -864,32 +907,21 @@ func TestApp_ClusterWorkerIDUsedConsistentlyBySchedulerAndHeartbeat(t *testing.T
 }
 
 type fakeWorkerClaimer struct {
-	mu              sync.Mutex
-	startingCalls   int
-	expiredCalls    int
-	startingErr     error
-	expiredErr      error
-	startingClaimed int
-	expiredClaimed  int
+	mu      sync.Mutex
+	calls   int
+	err     error
+	claimed int
 }
 
-func (f *fakeWorkerClaimer) ClaimStartingTasks() (int, error) {
+func (f *fakeWorkerClaimer) ClaimRunnableTasks() (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.startingCalls++
-	return f.startingClaimed, f.startingErr
+	f.calls++
+	return f.claimed, f.err
 }
 
-func (f *fakeWorkerClaimer) ClaimExpiredTasks() (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.expiredCalls++
-	return f.expiredClaimed, f.expiredErr
-}
-
-// TestStartWorkerClaimLoop_ClaimsStartingAndExpired 验证认领循环同时认领 STARTING 与过期租约任务。
-func TestStartWorkerClaimLoop_ClaimsStartingAndExpired(t *testing.T) {
-	claimer := &fakeWorkerClaimer{startingClaimed: 1, expiredClaimed: 1}
+func TestStartWorkerClaimLoop_ClaimsRunnableTasks(t *testing.T) {
+	claimer := &fakeWorkerClaimer{claimed: 2}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go startWorkerClaimLoop(ctx, claimer, 10*time.Millisecond)
@@ -897,13 +929,13 @@ func TestStartWorkerClaimLoop_ClaimsStartingAndExpired(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		claimer.mu.Lock()
-		startingCalls, expiredCalls := claimer.startingCalls, claimer.expiredCalls
+		calls := claimer.calls
 		claimer.mu.Unlock()
-		if startingCalls > 0 && expiredCalls > 0 {
+		if calls > 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected both claim methods, starting=%d expired=%d", startingCalls, expiredCalls)
+			t.Fatal("expected ClaimRunnableTasks to be called")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -1089,8 +1121,8 @@ func TestApp_RunWorkerIdentityStaysCoherentForActiveSession(t *testing.T) {
 	}
 	defer func() { newRunnerForRun = restoreNewRunner }()
 	restoreLeaseRuntime := newClusterLeaseRuntimeForRun
-	newClusterLeaseRuntimeForRun = func(_ appMetaStore) (tasks.LeaseManager, replication.LeaseVerifier) {
-		return &appRunLeaseManager{acquireOK: true, acquireEpoch: 7}, &appLeaseVerifier{}
+	newClusterLeaseRuntimeForRun = func(_ appMetaStore) tasks.LeaseManager {
+		return &appRunLeaseManager{acquireOK: true, acquireEpoch: 7}
 	}
 	defer func() { newClusterLeaseRuntimeForRun = restoreLeaseRuntime }()
 
@@ -1148,119 +1180,6 @@ func TestApp_RunWorkerIdentityStaysCoherentForActiveSession(t *testing.T) {
 	}
 }
 
-type fakeResumeScheduler struct {
-	items      []tasks.Task
-	stopErr    map[string]error
-	startErr   map[string]error
-	stopCalls  []string
-	startCalls []string
-}
-
-// ListTasks 实现对应功能逻辑。
-func (f *fakeResumeScheduler) ListTasks() []tasks.Task {
-	return append([]tasks.Task(nil), f.items...)
-}
-
-// StopTask 实现对应功能逻辑。
-func (f *fakeResumeScheduler) StopTask(id string) error {
-	f.stopCalls = append(f.stopCalls, id)
-	if err, ok := f.stopErr[id]; ok {
-		return err
-	}
-	return nil
-}
-
-// StartTask 实现对应功能逻辑。
-func (f *fakeResumeScheduler) StartTask(id string) error {
-	f.startCalls = append(f.startCalls, id)
-	if err, ok := f.startErr[id]; ok {
-		return err
-	}
-	return nil
-}
-
-// TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors 验证相关行为。
-func TestApp_ResumeClusterWorkerTasksLogsAndCountsErrors(t *testing.T) {
-	resumer := &fakeResumeScheduler{
-		items: []tasks.Task{
-			{ID: "1", State: tasks.StateRunning, OwnerWorkerID: "W1", Epoch: 3},
-			{ID: "2", State: tasks.StateLeaseDegraded, OwnerWorkerID: "W1", Epoch: 4},
-			{ID: "foreign", State: tasks.StateRunning, OwnerWorkerID: "W2", Epoch: 8},
-		},
-		stopErr: map[string]error{
-			"1": errors.New("stop failed"),
-		},
-		startErr: map[string]error{
-			"2": errors.New("start failed"),
-		},
-	}
-
-	var buf bytes.Buffer
-	origWriter := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(origWriter)
-
-	stats := resumePersistedActiveTasks(resumer, "W1")
-	if stats.Considered != 2 || stats.Resumed != 0 || stats.StopErrors != 1 || stats.StartErrors != 1 {
-		t.Fatalf("unexpected resume stats: %+v", stats)
-	}
-	if containsString(resumer.stopCalls, "foreign") || containsString(resumer.startCalls, "foreign") {
-		t.Fatalf("foreign running task was resumed, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
-	}
-	if !strings.Contains(buf.String(), "task=1") || !strings.Contains(buf.String(), "task=2") {
-		t.Fatalf("expected error logs contain task ids, got logs=%q", buf.String())
-	}
-}
-
-// TestApp_ResumeClusterWorkerSkipsForeignRunning 验证 cluster 启动不会 Stop+Start 其他 worker 的 RUNNING。
-func TestApp_ResumeClusterWorkerSkipsForeignRunning(t *testing.T) {
-	resumer := &fakeResumeScheduler{
-		items: []tasks.Task{
-			{ID: "foreign", State: tasks.StateRunning, OwnerWorkerID: "W2", Epoch: 4},
-			{ID: "own", State: tasks.StateRunning, OwnerWorkerID: "W1", Epoch: 2},
-			{ID: "starting", State: tasks.StateStarting},
-			{ID: "foreign-starting", State: tasks.StateStarting, OwnerWorkerID: "W2", Epoch: 1},
-		},
-	}
-
-	stats := resumePersistedActiveTasks(resumer, "W1")
-	if stats.Considered != 2 || stats.Resumed != 2 || stats.StopErrors != 0 || stats.StartErrors != 0 {
-		t.Fatalf("unexpected resume stats: %+v", stats)
-	}
-	if containsString(resumer.stopCalls, "foreign") || containsString(resumer.startCalls, "foreign") {
-		t.Fatalf("foreign RUNNING was Stop/Start, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
-	}
-	if containsString(resumer.stopCalls, "foreign-starting") || containsString(resumer.startCalls, "foreign-starting") {
-		t.Fatalf("foreign STARTING was Stop/Start, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
-	}
-	if !containsString(resumer.stopCalls, "own") || !containsString(resumer.startCalls, "own") {
-		t.Fatalf("expected own RUNNING to be Stop+Start, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
-	}
-	if !containsString(resumer.stopCalls, "starting") || !containsString(resumer.startCalls, "starting") {
-		t.Fatalf("expected unowned STARTING to be resumed, stop=%v start=%v", resumer.stopCalls, resumer.startCalls)
-	}
-}
-
-// TestApp_ResumeStandaloneStillResumesForeignOwnedRunning 验证 standalone（无 worker 过滤）仍恢复全部 RUNNING。
-func TestApp_ResumeStandaloneStillResumesForeignOwnedRunning(t *testing.T) {
-	resumer := &fakeResumeScheduler{
-		items: []tasks.Task{
-			{ID: "running", State: tasks.StateRunning, OwnerWorkerID: "W2", Epoch: 4},
-		},
-	}
-
-	stats := resumePersistedActiveTasks(resumer, "")
-	if stats.Considered != 1 || stats.Resumed != 1 || stats.StopErrors != 0 || stats.StartErrors != 0 {
-		t.Fatalf("unexpected resume stats: %+v", stats)
-	}
-	if len(resumer.stopCalls) != 1 || resumer.stopCalls[0] != "running" {
-		t.Fatalf("expected standalone resume to StopTask running, got %v", resumer.stopCalls)
-	}
-	if len(resumer.startCalls) != 1 || resumer.startCalls[0] != "running" {
-		t.Fatalf("expected standalone resume to StartTask running, got %v", resumer.startCalls)
-	}
-}
-
 // TestApp_ResumeClusterWorkerDoesNotPersistForeignRunningStopped 验证不会把别人的 RUNNING 持久化为 STOPPED。
 func TestApp_ResumeClusterWorkerDoesNotPersistForeignRunningStopped(t *testing.T) {
 	store := newAppFakeStore()
@@ -1303,9 +1222,12 @@ func TestApp_ResumeClusterWorkerDoesNotPersistForeignRunningStopped(t *testing.T
 		t.Fatalf("Restore returned error: %v", err)
 	}
 
-	stats := resumePersistedActiveTasks(s, "W1")
-	if stats.Considered != 2 || stats.Resumed != 2 || stats.StopErrors != 0 || stats.StartErrors != 0 {
-		t.Fatalf("unexpected resume stats: %+v", stats)
+	claimed, err := s.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 2 {
+		t.Fatalf("expected claimed=2, got %d", claimed)
 	}
 
 	foreign, err := s.GetTask("foreign")
@@ -1344,15 +1266,6 @@ func TestApp_ResumeClusterWorkerDoesNotPersistForeignRunningStopped(t *testing.T
 	if _, ok := started["starting"]; !ok {
 		t.Fatal("expected unowned STARTING to be started")
 	}
-}
-
-func containsString(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
 }
 
 // waitReady 实现对应功能逻辑。

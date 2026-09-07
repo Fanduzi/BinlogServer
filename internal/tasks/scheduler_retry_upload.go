@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: failed upload metadata, retry requests, and object storage uploader operations
-// output: retry-upload execution results, failure aggregations, and retry metrics snapshots
+// input: failed upload metadata via failedUploadFileReader, retry requests, and object storage uploader operations
+// output: retry-upload execution results, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
 // pos: scheduler upload-retry compensation and failure-observability logic
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -50,6 +50,9 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 	if fileStore == nil || uploader == nil {
 		return UploadRetryStats{}, ErrUploadRetryNotAvailable
 	}
+	if _, ok := fileStore.(failedUploadFileReader); !ok {
+		return UploadRetryStats{}, ErrFailedUploadLookupNotAvailable
+	}
 
 	// Step 2: 拉取候选并逐个重试，单文件失败不影响其他文件。
 	files, err := s.listRetryUploadCandidates(taskID, limit, fileStore)
@@ -80,21 +83,9 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 		}
 
 		uploadCtx, cancelUpload := s.withUploadTimeout(context.Background())
-		err := uploader.UploadFile(uploadCtx, taskID, file.FilePath, file.ObjectKey)
+		updated, err := ApplySealedUpload(uploadCtx, uploader, fileStore, file)
 		cancelUpload()
-		if err != nil {
-			stats.Failed++
-			_ = s.markRetryUploadFailure(fileStore, file, err.Error())
-			continue
-		}
-
-		file.UploadState = "UPLOADED"
-		file.UploadError = ""
-		file.UploadedAt = time.Now()
-		writeCtx, cancelWrite := s.withWriteTimeout(context.Background())
-		err = fileStore.UpsertBinlogFile(writeCtx, file)
-		cancelWrite()
-		if err != nil {
+		if err != nil || updated.UploadState != "UPLOADED" {
 			stats.Failed++
 			continue
 		}
@@ -107,16 +98,14 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 	return stats, nil
 }
 
-// listRetryUploadCandidates 优先使用“失败文件专用查询”，否则退化到全量查询。
+// listRetryUploadCandidates 只走失败文件查询，不再用限量 ListBinlogFiles 冒充「没有失败」。
 func (s *Scheduler) listRetryUploadCandidates(taskID string, limit int, fileStore FileStore) ([]BinlogFile, error) {
-	if reader, ok := fileStore.(failedUploadFileReader); ok {
-		ctx, cancel := s.withReadTimeout(context.Background())
-		files, err := reader.ListFailedUploadBinlogFiles(ctx, taskID, limit)
-		cancel()
-		return files, err
+	reader, ok := fileStore.(failedUploadFileReader)
+	if !ok {
+		return nil, ErrFailedUploadLookupNotAvailable
 	}
 	ctx, cancel := s.withReadTimeout(context.Background())
-	files, err := fileStore.ListBinlogFiles(ctx, taskID, limit)
+	files, err := reader.ListFailedUploadBinlogFiles(ctx, taskID, limit)
 	cancel()
 	return files, err
 }

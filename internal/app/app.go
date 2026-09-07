@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, metadata/source isolation, worker-scoped restart recovery, expired-lease claim, and shutdown
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, metadata/source isolation, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -65,13 +65,12 @@ var newAppMetaStoreForRun = func(cfg config.Config) (appMetaStore, error) {
 	)
 }
 
-var newClusterLeaseRuntimeForRun = func(store appMetaStore) (tasks.LeaseManager, replication.LeaseVerifier) {
+var newClusterLeaseRuntimeForRun = func(store appMetaStore) tasks.LeaseManager {
 	mysqlStore, ok := store.(*meta.MySQLTaskStore)
 	if !ok {
-		return nil, nil
+		return nil
 	}
-	leaseStore := meta.NewLeaseStoreFromTaskStore(mysqlStore)
-	return leaseStore, leaseVerifierFromStore{leaseStore: leaseStore}
+	return meta.NewLeaseStoreFromTaskStore(mysqlStore)
 }
 
 var newRunnerForRun = func(cfg config.Config, opts ...replication.RunnerOption) tasks.Runner {
@@ -149,7 +148,6 @@ func (a *App) Run(ctx context.Context) error {
 
 	var mysqlStore appMetaStore
 	var leaseManager tasks.LeaseManager
-	var leaseVerifier replication.LeaseVerifier
 	if a.cfg.MetaDSN != "" {
 		metaHost, metaPort, comparable := metadataSourceEndpoint(a.cfg.MetaDSN)
 		if comparable {
@@ -168,7 +166,15 @@ func (a *App) Run(ctx context.Context) error {
 		opts = append(opts, tasks.WithFileStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
-		leaseManager, leaseVerifier = newClusterLeaseRuntimeForRun(mysqlStore)
+		if isClusterMode(a.cfg) {
+			leaseManager = newClusterLeaseRuntimeForRun(mysqlStore)
+		}
+	}
+	if workerEnabled && !isClusterMode(a.cfg) {
+		leaseManager = tasks.NewMemoryLease()
+		if resolvedWorkerID == "" {
+			resolvedWorkerID = "standalone"
+		}
 	}
 
 	opts = append(opts, tasks.WithInternalCallTimeouts(tasks.InternalCallTimeouts{
@@ -238,7 +244,7 @@ func (a *App) Run(ctx context.Context) error {
 		a.cfg,
 		resolvedWorkerID,
 		leaseManager,
-		leaseVerifier,
+		workerEnabled,
 		opts,
 		runnerOpts,
 	)
@@ -257,7 +263,11 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 		opts = append(opts, tasks.WithFileUploader(uploader))
-		runnerOpts = append(runnerOpts, replication.WithUploader(uploader, a.cfg.UploadPrefix))
+		store := mysqlStore
+		runnerOpts = append(runnerOpts, replication.WithSealedHandler(func(ctx context.Context, file tasks.BinlogFile) error {
+			_, err := tasks.ApplySealedUpload(ctx, uploader, store, file)
+			return err
+		}, a.cfg.UploadPrefix))
 	}
 
 	// 先组装 scheduler，再根据 worker 开关决定是否挂载 runner。
@@ -275,17 +285,11 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	if workerEnabled {
-		// worker 重启后把可恢复任务重新拉起，清理遗留的中间态。
-		// cluster 传入本实例 worker id，避免 StopTask 把其他 worker 仍在跑的任务写成 STOPPED。
-		stats := resumePersistedActiveTasks(scheduler, resolvedWorkerID)
-		if stats.StopErrors > 0 || stats.StartErrors > 0 {
-			log.Printf(
-				"task resume completed with errors considered=%d resumed=%d stop_errors=%d start_errors=%d",
-				stats.Considered,
-				stats.Resumed,
-				stats.StopErrors,
-				stats.StartErrors,
-			)
+		claimed, err := scheduler.ClaimRunnableTasks()
+		if err != nil {
+			log.Printf("task claim on start failed err=%v claimed=%d", err, claimed)
+		} else if claimed > 0 {
+			log.Printf("task claim on start claimed=%d", claimed)
 		}
 	}
 	if workerEnabled && isClusterMode(a.cfg) {
@@ -510,21 +514,6 @@ func resolveRoleMode(cfg config.Config) (controlPlaneEnabled bool, workerEnabled
 	default:
 		return true, true
 	}
-}
-
-type leaseVerifierFromStore struct {
-	leaseStore *meta.LeaseStore
-}
-
-// VerifyLease 校验任务在元数据库中的 lease 归属是否仍有效。
-func (v leaseVerifierFromStore) VerifyLease(ctx context.Context, task tasks.Task) (bool, error) {
-	if v.leaseStore == nil {
-		return false, nil
-	}
-	if task.ID == "" || task.OwnerWorkerID == "" || task.Epoch <= 0 {
-		return false, nil
-	}
-	return v.leaseStore.VerifyOwnership(ctx, task.ID, task.OwnerWorkerID, task.Epoch)
 }
 
 // isClusterMode 返回当前是否处于 cluster 模式。
@@ -765,8 +754,7 @@ type workerRegistrationStore interface {
 }
 
 type workerTaskClaimer interface {
-	ClaimStartingTasks() (int, error)
-	ClaimExpiredTasks() (int, error)
+	ClaimRunnableTasks() (int, error)
 }
 
 // startWorkerHeartbeatLoop 周期上报 worker ONLINE/OFFLINE 心跳。
@@ -829,18 +817,11 @@ func startWorkerClaimLoop(ctx context.Context, claimer workerTaskClaimer, interv
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// claim 是幂等轮询：失败重试，成功按返回数量记录。
-			claimed, err := claimer.ClaimStartingTasks()
+			claimed, err := claimer.ClaimRunnableTasks()
 			if err != nil {
-				log.Printf("worker claim starting tasks failed err=%v", err)
+				log.Printf("worker claim runnable tasks failed err=%v", err)
 			} else if claimed > 0 {
-				log.Printf("worker claimed starting tasks count=%d", claimed)
-			}
-			expired, err := claimer.ClaimExpiredTasks()
-			if err != nil {
-				log.Printf("worker claim expired-lease tasks failed err=%v", err)
-			} else if expired > 0 {
-				log.Printf("worker claimed expired-lease tasks count=%d", expired)
+				log.Printf("worker claimed runnable tasks count=%d", claimed)
 			}
 		}
 	}
@@ -947,32 +928,32 @@ func buildHTTPServer(handler http.Handler, timeoutCfg config.HTTPServerTimeoutCo
 	}
 }
 
-// applyClusterRuntimeOptions 在 cluster 模式下注入 lease 与 worker 标识相关运行时选项。
+// applyClusterRuntimeOptions 注入任务所有权：集群用 MySQL 租约，单机 worker 用 MemoryLease。
 func applyClusterRuntimeOptions(
 	cfg config.Config,
 	workerID string,
 	leaseManager tasks.LeaseManager,
-	leaseVerifier replication.LeaseVerifier,
+	workerEnabled bool,
 	opts []tasks.Option,
 	runnerOpts []replication.RunnerOption,
 ) ([]tasks.Option, []replication.RunnerOption) {
-	if !isClusterMode(cfg) || !isNonNilInterface(leaseManager) {
-		// 非 cluster 或 lease manager 无效时，不注入任何 cluster 运行时能力。
+	if !isNonNilInterface(leaseManager) {
 		return opts, runnerOpts
 	}
 
 	opts = append(opts,
 		tasks.WithClusterLeaseManager(leaseManager),
 		tasks.WithClusterWorkerID(workerID),
-		tasks.WithClusterLease(
+	)
+	if isClusterMode(cfg) {
+		opts = append(opts, tasks.WithClusterLease(
 			time.Duration(cfg.Cluster.LeaseTTLSec)*time.Second,
 			time.Duration(cfg.Cluster.LeaseRenewIntervalSec)*time.Second,
 			time.Duration(cfg.Cluster.LeaseGraceSec)*time.Second,
-		),
-	)
-	if leaseVerifier != nil {
-		// runner 在关键写路径再次验租，避免失租后继续产出数据。
-		runnerOpts = append(runnerOpts, replication.WithLeaseVerifier(leaseVerifier))
+		))
+	}
+	if workerEnabled {
+		runnerOpts = append(runnerOpts, replication.WithLeaseVerifier(leaseManager))
 	}
 	return opts, runnerOpts
 }
@@ -1017,62 +998,4 @@ func isNonNilInterface(v any) bool {
 	}
 }
 
-type resumeStats struct {
-	Considered  int
-	Resumed     int
-	StopErrors  int
-	StartErrors int
-}
 
-type taskResumer interface {
-	ListTasks() []tasks.Task
-	StopTask(id string) error
-	StartTask(id string) error
-}
-
-// resumePersistedActiveTasks 在 worker 启动时重置并恢复持久化的 active 任务。
-// clusterWorkerID 为空时按 standalone 恢复全部 active 任务；非空时只 Stop+Start 本 worker 拥有的任务和无主 STARTING。
-func resumePersistedActiveTasks(scheduler taskResumer, clusterWorkerID string) resumeStats {
-	var stats resumeStats
-	for _, task := range scheduler.ListTasks() {
-		if !shouldResumePersistedTask(task, clusterWorkerID) {
-			continue
-		}
-		// 这些状态都需要本 worker 继续推进；通过 stop->start 让其在当前实例重新走 lease 获取流程。
-		stats.Considered++
-		if err := scheduler.StopTask(task.ID); err != nil {
-			stats.StopErrors++
-			log.Printf("task resume stop failed task=%s err=%v", task.ID, err)
-			continue
-		}
-		if err := scheduler.StartTask(task.ID); err != nil {
-			stats.StartErrors++
-			log.Printf("task resume start failed task=%s err=%v", task.ID, err)
-			continue
-		}
-		stats.Resumed++
-	}
-	return stats
-}
-
-// shouldResumePersistedTask 判断启动恢复是否应对该任务执行 Stop+Start。
-// standalone（worker id 为空）恢复全部 active 任务；cluster 只恢复本 worker 拥有的任务，以及 owner 为空且 epoch 为 0 的 STARTING。
-func shouldResumePersistedTask(task tasks.Task, clusterWorkerID string) bool {
-	switch task.State {
-	case tasks.StateRunning, tasks.StateStarting, tasks.StateRetryBackoff, tasks.StateLeaseDegraded:
-	default:
-		return false
-	}
-	workerID := strings.TrimSpace(clusterWorkerID)
-	if workerID == "" {
-		return true
-	}
-	owner := strings.TrimSpace(task.OwnerWorkerID)
-	if owner == workerID {
-		return true
-	}
-	if owner != "" {
-		return false
-	}
-	return task.State == tasks.StateStarting && task.Epoch <= 0
-}
