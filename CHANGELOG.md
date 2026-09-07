@@ -12,6 +12,21 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.4] - 2026-09-07
+
+### Changed
+
+- Operator download examples in README, the landing page, and the deployment guide now pin `v0.5.4`.
+- Standalone workers inject an in-process lease table and `worker_id=standalone`, so standalone and cluster share the same ownership door.
+- Process boot and the claim tick both call `ClaimRunnableTasks` instead of a separate resume path.
+- First sealed-file upload verifies the current lease, then shares `ApplySealedUpload` with retry-upload.
+- Dashboard and summary load matching tasks with one filtered read (`Limit<=0` unbounded), then page in process.
+
+### Fixed
+
+- `FAILED` releases the lease immediately so another worker can start the task without waiting for TTL.
+- Expired-lease and failed-upload lookups fail loud when the store does not implement the dedicated query, instead of silently scanning an empty result.
+
 ## [v0.5.3] - 2026-09-06
 
 ### Changed
