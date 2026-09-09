@@ -36,6 +36,20 @@ If this is your first time visiting the repository, start with `Quick Start`. If
 
 It turns binlog pulling, local persistence, checkpoint tracking, and task lifecycle management into an operational service instead of a collection of scripts, cron jobs, and ad hoc metadata.
 
+### Screenshots
+
+![Console overview](docs/images/console-dashboard.png)
+
+*Console overview*
+
+![Task detail](docs/images/task-detail.png)
+
+*Task detail*
+
+![Swagger API](docs/images/swagger.png)
+
+*Swagger API*
+
 Good fit for:
 
 - Teams that want binlog pulling, local durability, and task state management as a service
