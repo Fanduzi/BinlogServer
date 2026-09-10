@@ -35,6 +35,20 @@ Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负�
 
 它把“拉 MySQL binlog、落盘、记 checkpoint、管理任务状态”收敛成一个独立服务，而不是让你自己拼脚本、cron 和零散元数据。
 
+### 界面预览
+
+![控制台任务列表](docs/images/console-dashboard.png)
+
+*控制台任务列表*
+
+![任务详情](docs/images/task-detail.png)
+
+*任务详情*
+
+![Swagger 文档](docs/images/swagger.png)
+
+*Swagger 文档*
+
 适合：
 
 - 想把 binlog 拉取、落盘、状态管理做成一个可运维的服务
