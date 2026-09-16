@@ -1,5 +1,5 @@
 // input: shared frontend mock handler module under src/mocks
-// output: regression coverage for dashboard pagination metadata, strict limit validation, and lookup/list source-identity filters
+// output: regression coverage for dashboard pagination metadata, strict limit validation, and lookup/list SameSourceHost accept/reject filters
 // pos: Playwright-backed regression test for the shared mock handler contract
 // note: if this file changes, update this header and frontend/README.md
 
@@ -121,4 +121,55 @@ test('shared mock handler uses the same source identity for lookup and list filt
   expect(listPrimary.body.total).toBe(1)
   expect(listPrimary.body.items[0].source.host).toBe('db-primary.example')
   expect(listPrimaryCase.body.total).toBe(0)
+})
+
+test('shared mock handler loopback identity matches SameSourceHost accept/reject set', async () => {
+  const moduleUrl = new URL('../../src/mocks/mock-handler.js', import.meta.url).href
+  const { createMockSession } = await import(moduleUrl)
+  const session = createMockSession({ scenario: 'empty' })
+
+  const stored = [
+    { name: 'ipv4', host: '127.0.0.1' },
+    { name: 'name', host: 'localhost' },
+    { name: 'expanded', host: '0:0:0:0:0:0:0:1' },
+    { name: 'padded-groups', host: '0000:0000:0000:0000:0000:0000:0000:0001' },
+    { name: 'primary', host: 'db-primary.example' },
+  ]
+  for (const item of stored) {
+    const created = session.request({
+      method: 'POST',
+      path: '/api/tasks',
+      body: { name: item.name, cluster_key: item.name, source: { host: item.host, port: 3306 } },
+    })
+    expect(created.status).toBe(201)
+  }
+
+  const countFor = (host) => {
+    const query = new URLSearchParams({ host, port: '3306' })
+    const lookup = session.request({
+      method: 'GET',
+      path: '/api/sources/lookup',
+      query,
+    })
+    const list = session.request({
+      method: 'GET',
+      path: '/api/tasks',
+      query,
+    })
+    expect(lookup.status).toBe(200)
+    expect(list.status).toBe(200)
+    expect(list.body.total).toBe(lookup.body.count)
+    return lookup.body.count
+  }
+
+  expect(countFor('localhost')).toBe(4)
+  expect(countFor('127.0.0.1')).toBe(4)
+  expect(countFor('[::1]')).toBe(4)
+  expect(countFor('0:0:0:0:0:0:0:1')).toBe(4)
+  expect(countFor('0000:0000:0000:0000:0000:0000:0000:0001')).toBe(4)
+  expect(countFor('::ffff:127.0.0.1')).toBe(4)
+  expect(countFor('::ffff:7f00:1')).toBe(4)
+  expect(countFor('127.000.0.1')).toBe(0)
+  expect(countFor('[127.0.0.1]')).toBe(0)
+  expect(countFor('db-primary.example')).toBe(1)
 })
