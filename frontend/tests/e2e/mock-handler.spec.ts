@@ -1,5 +1,5 @@
 // input: shared frontend mock handler module under src/mocks
-// output: regression coverage for dashboard pagination metadata, strict limit validation, and lookup/list SameSourceHost accept/reject filters
+// output: regression coverage for dashboard one-read page/summary/source counts, strict limit validation, and lookup/dashboard SameSourceHost accept/reject filters
 // pos: Playwright-backed regression test for the shared mock handler contract
 // note: if this file changes, update this header and frontend/README.md
 
@@ -27,32 +27,34 @@ test('shared mock handler returns healthy dashboard payload', async () => {
   expect(response.body.tasks).toHaveLength(1)
 })
 
-test('shared mock handler returns server-paged task list metadata', async () => {
+test('shared mock handler returns one dashboard materialization for page, summary, and source counts', async () => {
   const moduleUrl = new URL('../../src/mocks/mock-handler.js', import.meta.url).href
   const { handleMockRequest } = await import(moduleUrl)
 
   const response = handleMockRequest({
     scenario: 'pagination',
     method: 'GET',
-    path: '/api/tasks',
+    path: '/api/dashboard',
     query: new URLSearchParams('limit=1&offset=20'),
   })
 
   expect(response.status).toBe(200)
-  expect(response.body).toMatchObject({ total: 25, limit: 1, offset: 20 })
-  expect(response.body.items).toHaveLength(1)
+  expect(response.body).toMatchObject({ total: 25, limit: 1, offset: 20, summary: { total: 25 } })
+  expect(response.body.tasks).toHaveLength(1)
+  const sourceTotal = (response.body.sources || []).reduce((sum, source) => sum + Number(source.task_count || 0), 0)
+  expect(sourceTotal).toBe(25)
 
   const invalid = handleMockRequest({
     scenario: 'pagination',
     method: 'GET',
-    path: '/api/tasks',
+    path: '/api/dashboard',
     query: new URLSearchParams('limit=501'),
   })
   expect(invalid.status).toBe(400)
   expect(invalid.body).toEqual({ error: 'invalid limit' })
 })
 
-test('shared mock handler uses the same source identity for lookup and list filters', async () => {
+test('shared mock handler uses the same source identity for lookup and dashboard filters', async () => {
   const moduleUrl = new URL('../../src/mocks/mock-handler.js', import.meta.url).href
   const { createMockSession } = await import(moduleUrl)
   const session = createMockSession({ scenario: 'empty' })
@@ -98,14 +100,14 @@ test('shared mock handler uses the same source identity for lookup and list filt
     path: '/api/dashboard',
     query: new URLSearchParams('host=127.0.0.1&port=3306'),
   })
-  const listPrimary = session.request({
+  const dashPrimary = session.request({
     method: 'GET',
-    path: '/api/tasks',
+    path: '/api/dashboard',
     query: new URLSearchParams('host=db-primary.example&port=3306'),
   })
-  const listPrimaryCase = session.request({
+  const dashPrimaryCase = session.request({
     method: 'GET',
-    path: '/api/tasks',
+    path: '/api/dashboard',
     query: new URLSearchParams('host=DB-PRIMARY.EXAMPLE&port=3306'),
   })
 
@@ -118,9 +120,10 @@ test('shared mock handler uses the same source identity for lookup and list filt
   expect(dashIP.body.total).toBe(2)
   expect(dashLocal.body.tasks.map((row) => row.task.source.host).sort()).toEqual(['127.0.0.1', 'localhost'])
   expect(dashIP.body.tasks.map((row) => row.task.source.host).sort()).toEqual(['127.0.0.1', 'localhost'])
-  expect(listPrimary.body.total).toBe(1)
-  expect(listPrimary.body.items[0].source.host).toBe('db-primary.example')
-  expect(listPrimaryCase.body.total).toBe(0)
+  expect(dashPrimary.body.total).toBe(1)
+  expect(dashPrimary.body.summary.total).toBe(1)
+  expect(dashPrimary.body.tasks[0].task.source.host).toBe('db-primary.example')
+  expect(dashPrimaryCase.body.total).toBe(0)
 })
 
 test('shared mock handler loopback identity matches SameSourceHost accept/reject set', async () => {
@@ -151,14 +154,15 @@ test('shared mock handler loopback identity matches SameSourceHost accept/reject
       path: '/api/sources/lookup',
       query,
     })
-    const list = session.request({
+    const dashboard = session.request({
       method: 'GET',
-      path: '/api/tasks',
+      path: '/api/dashboard',
       query,
     })
     expect(lookup.status).toBe(200)
-    expect(list.status).toBe(200)
-    expect(list.body.total).toBe(lookup.body.count)
+    expect(dashboard.status).toBe(200)
+    expect(dashboard.body.total).toBe(lookup.body.count)
+    expect(dashboard.body.summary.total).toBe(lookup.body.count)
     return lookup.body.count
   }
 

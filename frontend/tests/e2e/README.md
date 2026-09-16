@@ -7,10 +7,10 @@ Playwright 端到端回归模块，验证运维控制台的首屏、导航、筛
 | File | Responsibility |
 |------|---------------|
 | `starting-summary.spec.ts` | 锁定 STARTING 指标可见、与 RUNNING 分离、source 映射及缺少 starting 字段时回退 0 |
-| `server-pagination.spec.ts` | 锁定 dashboard server page 请求、全局 total、state page transition 与当前页筛选范围 |
+| `server-pagination.spec.ts` | 锁定 dashboard server page 请求、全局 total、state page transition、当前页筛选范围，以及缺少分页字段时不再本地切页 |
 | `dashboard-filters.spec.ts` | 指标卡筛选与键盘交互 |
 | `dashboard-empty.spec.ts` | 空态和零指标 |
-| `mock-handler.spec.ts` / `dev-mock-api.spec.ts` | 共享 mock/API helper 合同，含 lookup 与列表 host 过滤与 Go SameSourceHost 同一 accept/reject 集 |
+| `mock-handler.spec.ts` / `dev-mock-api.spec.ts` | 共享 mock/API helper 合同，含 lookup 与 dashboard host 过滤与 Go SameSourceHost 同一 accept/reject 集 |
 | `batch-create.spec.ts` | 批量创建本地 100 项上限、有序部分成功结果、密码脱敏、单次 batch 请求、安全错误文本与逐项自动启动 |
 | 其他 `*.spec.ts` | 详情、导航、lease、集群和上传重试场景 |
 | `fixtures/` | 共享场景类型与路由拦截 |

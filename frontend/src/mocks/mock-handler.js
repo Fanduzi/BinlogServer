@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered server pagination/filter validation, lookup/list SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
