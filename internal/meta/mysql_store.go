@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus loopback SQL aliases), ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -673,17 +673,25 @@ func taskListFilterClause(filter tasks.TaskListFilter) (string, []any) {
 	return " WHERE " + strings.Join(parts, " AND "), args
 }
 
-// loopbackSourceHostSQL matches stored hosts that IsLoopbackHost accepts:
-// localhost (case/trailing-dot), dotted-quad 127/8, ::1, and IPv4-mapped 127/8.
+// loopbackSourceHostSQL matches stored hosts that SameSourceHost/IsLoopbackHost accept.
+// It follows net.ParseIP: no leading-zero IPv4, and brackets only unwrap IPv6 (inner ':').
 func loopbackSourceHostSQL(hostExpr string) string {
 	normalized := "LOWER(TRIM(TRAILING '.' FROM TRIM(" + hostExpr + ")))"
-	unbracketed := "TRIM(BOTH ']' FROM TRIM(LEADING '[' FROM " + normalized + "))"
-	dottedQuad := normalized + " REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+$'"
+	// Same as IsLoopbackHost: strip [ ] only when the spelling contains ':'.
+	unbracketed := "CASE WHEN LEFT(" + normalized + ", 1) = '[' AND RIGHT(" + normalized + ", 1) = ']' AND INSTR(" + normalized + ", ':') > 0 THEN SUBSTRING(" + normalized + ", 2, CHAR_LENGTH(" + normalized + ") - 2) ELSE " + normalized + " END"
+	// MySQL 5.7 REGEXP has no {n}; spell out 0-255 without leading zeros.
+	ipv4Octet := "([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])"
+	ipv4Loopback := "'^127\\\\." + ipv4Octet + "\\\\." + ipv4Octet + "\\\\." + ipv4Octet + "$'"
+	looseDottedTail := "':[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+$'"
+	strictDottedTail := "':" + ipv4Octet + "\\\\." + ipv4Octet + "\\\\." + ipv4Octet + "\\\\." + ipv4Octet + "$'"
 	return "(" +
 		normalized + " = 'localhost'" +
-		" OR INET6_ATON(" + unbracketed + ") = INET6_ATON('::1')" +
-		" OR (" + dottedQuad + " AND INET_ATON(" + normalized + ") BETWEEN INET_ATON('127.0.0.0') AND INET_ATON('127.255.255.255'))" +
-		" OR (INET6_ATON(" + unbracketed + ") BETWEEN INET6_ATON('::ffff:127.0.0.0') AND INET6_ATON('::ffff:127.255.255.255'))" +
+		" OR " + unbracketed + " REGEXP " + ipv4Loopback +
+		" OR (INSTR(" + unbracketed + ", ':') > 0" +
+		" AND (" + unbracketed + " NOT REGEXP " + looseDottedTail +
+		" OR " + unbracketed + " REGEXP " + strictDottedTail + ")" +
+		" AND (INET6_ATON(" + unbracketed + ") = INET6_ATON('::1')" +
+		" OR INET6_ATON(" + unbracketed + ") BETWEEN INET6_ATON('::ffff:127.0.0.0') AND INET6_ATON('::ffff:127.255.255.255')))" +
 		")"
 }
 

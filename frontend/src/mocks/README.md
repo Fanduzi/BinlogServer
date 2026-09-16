@@ -15,7 +15,7 @@
 - 共享 mock request handler / session factory
 - `/api/tasks/batch` mock：校验 1..100 envelope，返回有序 `{index,cluster_key,task|error}`，并脱敏成功任务密码。
 - Dashboard summary/source response 中按任务状态分别生成 `starting` 与 `running`，并按全量过滤结果返回 `total/limit/offset`；任务页按数字 id 升序（非数字 id 排在数字之后），pagination 场景覆盖后页当前页匹配，limit 超过 500 返回 400。
-- lookup 与 dashboard/list 的 host 过滤共用同一套源身份：回环别名是同一台源，非回环仍精确匹配。
+- lookup 与 dashboard/list 的 host 过滤共用同一套源身份：回环别名与 Go `SameSourceHost` 同一 accept/reject 集（含展开 IPv6 `::1`，拒绝 `127.000.0.1` / `[127.0.0.1]`），非回环仍精确匹配。
 
 ## Dependencies
 
