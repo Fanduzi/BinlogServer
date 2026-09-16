@@ -1,13 +1,12 @@
 // Package api provides module-level functionality for api.
-// input: scheduler ListClusterObservation, replication/checkpoint progress, and worker heartbeats
-// output: Prometheus collector whose task/owner views use the same cluster observation as overview/workers
+// input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
+// output: Prometheus text for that scrape snapshot; store list errors stay 5xx instead of empty task_state_count
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -22,7 +21,8 @@ import (
 const allFilesLimit = int(^uint(0) >> 1)
 
 type apiMetricsCollector struct {
-	tasks taskService
+	tasks       taskService
+	observation []tasks.Task
 
 	taskStateCountDesc      *prometheus.Desc
 	replicationLagSeconds   *prometheus.Desc
@@ -33,9 +33,10 @@ type apiMetricsCollector struct {
 	uploadRetryLastTsGauge  *prometheus.Desc
 }
 
-func newAPIMetricsCollector(taskSvc taskService) *apiMetricsCollector {
+func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiMetricsCollector {
 	return &apiMetricsCollector{
-		tasks: taskSvc,
+		tasks:       taskSvc,
+		observation: observation,
 		taskStateCountDesc: prometheus.NewDesc(
 			"binlog_server_task_state_count",
 			"Number of tasks by state.",
@@ -93,11 +94,7 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
-	items, err := c.tasks.ListClusterObservation(context.Background())
-	if err != nil {
-		log.Printf("cluster observation for metrics failed: %v", err)
-		items = nil
-	}
+	items := append([]tasks.Task(nil), c.observation...)
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].ID < items[j].ID
 	})
@@ -202,7 +199,14 @@ func countUploadFailures(taskSvc taskService, items []tasks.Task) int64 {
 }
 
 func newMetricsHandler(taskSvc taskService) http.Handler {
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(newAPIMetricsCollector(taskSvc))
-	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		items, err := taskSvc.ListClusterObservation(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		registry := prometheus.NewRegistry()
+		registry.MustRegister(newAPIMetricsCollector(taskSvc, items))
+		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
+	})
 }

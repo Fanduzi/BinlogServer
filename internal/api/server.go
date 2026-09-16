@@ -155,14 +155,10 @@ func (s *Server) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleMetrics 返回 Prometheus 文本格式指标。
+// handleMetrics 返回 Prometheus 文本格式指标。一次 scrape 只读一份集群观测抄本。
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if _, err := s.tasks.ListClusterObservation(r.Context()); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.metricsHandler.ServeHTTP(w, r)
