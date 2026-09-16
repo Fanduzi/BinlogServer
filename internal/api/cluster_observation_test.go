@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP GET /api/cluster/overview, /api/workers, /metrics, and /api/dashboard
-// output: cluster observation from the store ownership copy, not filtered task observation or boot-time memory
+// output: cluster observation from the store ownership copy; /metrics uses one snapshot per scrape
 // pos: control-plane HTTP seam tests for cluster-wide ownership observation
 // note: if this file changes, update this header and module README.md.
 package api
@@ -236,6 +236,35 @@ func TestClusterObservation_NoStoreUsesMemoryList(t *testing.T) {
 	}
 }
 
+func TestClusterObservation_MetricsUsesOneStoreSnapshot(t *testing.T) {
+	inner := seedClusterObservationStore(t, tasks.Task{
+		ID:         "1",
+		Name:       "owned",
+		ClusterKey: "owned-key",
+		State:      tasks.StateRunning,
+		Source:     tasks.SourceConfig{Host: "db-a", Port: 3306, User: "repl"},
+	})
+	store := &countingClusterListStore{
+		TaskStore: inner,
+		failAt:    2,
+		err:       errors.New("second snapshot failed"),
+	}
+	scheduler := restoreSchedulerWithStore(t, store)
+	store.calls = 0
+	handler := NewServer(scheduler)
+
+	resp := getJSON(handler, "/metrics")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("metrics returned %d body=%s", resp.Code, resp.Body.String())
+	}
+	if store.calls != 1 {
+		t.Fatalf("ListTasks calls=%d, want 1 per scrape", store.calls)
+	}
+	if !strings.Contains(resp.Body.String(), `binlog_server_task_state_count{state="RUNNING"} 1`) {
+		t.Fatalf("metrics missing store RUNNING count, body=%s", resp.Body.String())
+	}
+}
+
 func TestClusterObservation_StoreErrorDoesNotReturnMemoryCopy(t *testing.T) {
 	inner := newGetTaskFailLoudStore(staleOwnershipTask())
 	store := &failingClusterListStore{TaskStore: inner}
@@ -260,6 +289,21 @@ type failingClusterListStore struct {
 
 func (s *failingClusterListStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 	if s.err != nil {
+		return nil, s.err
+	}
+	return s.TaskStore.ListTasks(ctx)
+}
+
+type countingClusterListStore struct {
+	tasks.TaskStore
+	calls  int
+	failAt int
+	err    error
+}
+
+func (s *countingClusterListStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
+	s.calls++
+	if s.failAt > 0 && s.calls >= s.failAt {
 		return nil, s.err
 	}
 	return s.TaskStore.ListTasks(ctx)
