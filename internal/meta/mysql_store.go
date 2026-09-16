@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT), ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus loopback SQL aliases), ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -646,6 +646,8 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+const sourceHostJSONExpr = "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host'))"
+
 func taskListFilterClause(filter tasks.TaskListFilter) (string, []any) {
 	var parts []string
 	var args []any
@@ -654,8 +656,12 @@ func taskListFilterClause(filter tasks.TaskListFilter) (string, []any) {
 		args = append(args, string(*filter.State))
 	}
 	if filter.Host != "" {
-		parts = append(parts, "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host')) = ?")
-		args = append(args, filter.Host)
+		if tasks.IsLoopbackHost(filter.Host) {
+			parts = append(parts, loopbackSourceHostSQL(sourceHostJSONExpr))
+		} else {
+			parts = append(parts, sourceHostJSONExpr+" = ?")
+			args = append(args, filter.Host)
+		}
 	}
 	if filter.Port != nil {
 		parts = append(parts, "CAST(JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.port')) AS UNSIGNED) = ?")
@@ -665,6 +671,20 @@ func taskListFilterClause(filter tasks.TaskListFilter) (string, []any) {
 		return "", nil
 	}
 	return " WHERE " + strings.Join(parts, " AND "), args
+}
+
+// loopbackSourceHostSQL matches stored hosts that IsLoopbackHost accepts:
+// localhost (case/trailing-dot), dotted-quad 127/8, ::1, and IPv4-mapped 127/8.
+func loopbackSourceHostSQL(hostExpr string) string {
+	normalized := "LOWER(TRIM(TRAILING '.' FROM TRIM(" + hostExpr + ")))"
+	unbracketed := "TRIM(BOTH ']' FROM TRIM(LEADING '[' FROM " + normalized + "))"
+	dottedQuad := normalized + " REGEXP '^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+$'"
+	return "(" +
+		normalized + " = 'localhost'" +
+		" OR INET6_ATON(" + unbracketed + ") = INET6_ATON('::1')" +
+		" OR (" + dottedQuad + " AND INET_ATON(" + normalized + ") BETWEEN INET_ATON('127.0.0.0') AND INET_ATON('127.255.255.255'))" +
+		" OR (INET6_ATON(" + unbracketed + ") BETWEEN INET6_ATON('::ffff:127.0.0.0') AND INET6_ATON('::ffff:127.255.255.255'))" +
+		")"
 }
 
 func listTasksPageSQL(filter tasks.TaskListFilter) (countSQL, selectSQL string, countArgs, selectArgs []any) {

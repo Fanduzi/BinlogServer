@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered server pagination/filter validation, independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered server pagination/filter validation, lookup/list SameSourceHost filtering, independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -25,6 +25,35 @@ function parseInteger(value) {
   if (!/^-?\d+$/.test(raw)) return null;
   const number = Number(raw);
   return Number.isSafeInteger(number) ? number : null;
+}
+
+function isLoopbackHost(host) {
+  let normalized = String(host ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "");
+  if (normalized === "localhost") return true;
+  if (normalized.length >= 2 && normalized.startsWith("[") && normalized.endsWith("]")) {
+    normalized = normalized.slice(1, -1);
+    if (!normalized.includes(":")) return false;
+  }
+  const ipv4 = normalized.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.some((part) => part > 255)) return false;
+    return octets[0] === 127;
+  }
+  if (normalized.startsWith("::ffff:")) {
+    return isLoopbackHost(normalized.slice("::ffff:".length));
+  }
+  if (!normalized.includes(":")) return false;
+  const compact = normalized.replace(/^0:0:0:0:0:0:0:1$/, "::1");
+  return compact === "::1" || compact === "0:0:0:0:0:0:0:1";
+}
+
+function sameSourceHost(left, right) {
+  if (left === right) return true;
+  return isLoopbackHost(left) && isLoopbackHost(right);
 }
 
 function compareNumericTaskID(a, b) {
@@ -197,7 +226,7 @@ function buildLookupResponse(state, query) {
   const port = Number(query.get("port") || 0);
   const count = state.tasks.filter((row) => {
     const source = row.task?.source || {};
-    return source.host === host && Number(source.port) === port;
+    return sameSourceHost(source.host, host) && Number(source.port) === port;
   }).length;
   return {
     exists: count > 0,
@@ -300,7 +329,7 @@ function filteredTaskRows(state, taskQuery) {
     .filter((row) => {
       const source = row.task?.source || {};
       return (
-        (!taskQuery.host || source.host === taskQuery.host) &&
+        (!taskQuery.host || sameSourceHost(source.host, taskQuery.host)) &&
         (taskQuery.port === null || Number(source.port) === taskQuery.port) &&
         (!taskQuery.state || row.task?.state === taskQuery.state)
       );

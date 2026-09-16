@@ -1,5 +1,5 @@
 // input: shared frontend mock handler module under src/mocks
-// output: regression coverage for dashboard pagination metadata and strict limit validation
+// output: regression coverage for dashboard pagination metadata, strict limit validation, and lookup/list source-identity filters
 // pos: Playwright-backed regression test for the shared mock handler contract
 // note: if this file changes, update this header and frontend/README.md
 
@@ -50,4 +50,75 @@ test('shared mock handler returns server-paged task list metadata', async () => 
   })
   expect(invalid.status).toBe(400)
   expect(invalid.body).toEqual({ error: 'invalid limit' })
+})
+
+test('shared mock handler uses the same source identity for lookup and list filters', async () => {
+  const moduleUrl = new URL('../../src/mocks/mock-handler.js', import.meta.url).href
+  const { createMockSession } = await import(moduleUrl)
+  const session = createMockSession({ scenario: 'empty' })
+
+  session.request({
+    method: 'POST',
+    path: '/api/tasks',
+    body: { name: 'loopback-ip', cluster_key: 'loopback-ip', source: { host: '127.0.0.1', port: 3306 } },
+  })
+  session.request({
+    method: 'POST',
+    path: '/api/tasks',
+    body: { name: 'loopback-name', cluster_key: 'loopback-name', source: { host: 'localhost', port: 3306 } },
+  })
+  session.request({
+    method: 'POST',
+    path: '/api/tasks',
+    body: { name: 'other-port', cluster_key: 'other-port', source: { host: '127.0.0.1', port: 3307 } },
+  })
+  session.request({
+    method: 'POST',
+    path: '/api/tasks',
+    body: { name: 'primary', cluster_key: 'primary', source: { host: 'db-primary.example', port: 3306 } },
+  })
+
+  const lookupLocal = session.request({
+    method: 'GET',
+    path: '/api/sources/lookup',
+    query: new URLSearchParams('host=localhost&port=3306'),
+  })
+  const lookupIP = session.request({
+    method: 'GET',
+    path: '/api/sources/lookup',
+    query: new URLSearchParams('host=127.0.0.1&port=3306'),
+  })
+  const dashLocal = session.request({
+    method: 'GET',
+    path: '/api/dashboard',
+    query: new URLSearchParams('host=localhost&port=3306'),
+  })
+  const dashIP = session.request({
+    method: 'GET',
+    path: '/api/dashboard',
+    query: new URLSearchParams('host=127.0.0.1&port=3306'),
+  })
+  const listPrimary = session.request({
+    method: 'GET',
+    path: '/api/tasks',
+    query: new URLSearchParams('host=db-primary.example&port=3306'),
+  })
+  const listPrimaryCase = session.request({
+    method: 'GET',
+    path: '/api/tasks',
+    query: new URLSearchParams('host=DB-PRIMARY.EXAMPLE&port=3306'),
+  })
+
+  expect(lookupLocal.status).toBe(200)
+  expect(lookupIP.status).toBe(200)
+  expect(lookupLocal.body.count).toBe(2)
+  expect(lookupIP.body.count).toBe(2)
+  expect(lookupLocal.body.exists).toBe(true)
+  expect(dashLocal.body.total).toBe(2)
+  expect(dashIP.body.total).toBe(2)
+  expect(dashLocal.body.tasks.map((row) => row.task.source.host).sort()).toEqual(['127.0.0.1', 'localhost'])
+  expect(dashIP.body.tasks.map((row) => row.task.source.host).sort()).toEqual(['127.0.0.1', 'localhost'])
+  expect(listPrimary.body.total).toBe(1)
+  expect(listPrimary.body.items[0].source.host).toBe('db-primary.example')
+  expect(listPrimaryCase.body.total).toBe(0)
 })
