@@ -1,12 +1,13 @@
 // Package api provides module-level functionality for api.
-// input: scheduler/task service snapshots and progress used for metric exposition
-// output: Prometheus collector and /metrics handler wiring with stable metric contracts, including at-tip replication lag of 0
+// input: scheduler ListClusterObservation, replication/checkpoint progress, and worker heartbeats
+// output: Prometheus collector whose task/owner views use the same cluster observation as overview/workers
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -92,7 +93,11 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
-	items := c.tasks.ListTasks()
+	items, err := c.tasks.ListClusterObservation(context.Background())
+	if err != nil {
+		log.Printf("cluster observation for metrics failed: %v", err)
+		items = nil
+	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].ID < items[j].ID
 	})

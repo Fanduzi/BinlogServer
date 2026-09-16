@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including 5xx on cluster observation store errors
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -165,6 +165,7 @@ func (s *Server) swaggerTaskReplicationDoc() {}
 // @Param limit query int false "Workers list limit (max 200)"
 // @Success 200 {array} workerItem
 // @Failure 405 {string} string
+// @Failure 500 {string} string
 // @Router /api/workers [get]
 func (s *Server) swaggerWorkersDoc() {}
 
@@ -174,6 +175,7 @@ func (s *Server) swaggerWorkersDoc() {}
 // @Produce json
 // @Success 200 {object} clusterOverview
 // @Failure 405 {string} string
+// @Failure 500 {string} string
 // @Router /api/cluster/overview [get]
 func (s *Server) swaggerClusterOverviewDoc() {}
 
