@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
-// input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses including SQL-paged task lists, task batch creation, /healthz, and /api/health
+// input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
+// output: REST API responses including SQL-paged task lists, cluster observation, /metrics 5xx on store list errors, /healthz, and /api/health
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -40,6 +40,7 @@ type taskService interface {
 	ListRuns(id string, limit int) ([]tasks.TaskRun, error)
 	ListWorkerHeartbeats(limit int) ([]tasks.WorkerHeartbeat, error)
 	ListTasks() []tasks.Task
+	ListClusterObservation(ctx context.Context) ([]tasks.Task, error)
 	ListTasksPage(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error)
 	DeleteTask(id string) error
 	StartTask(id string) error
@@ -158,6 +159,10 @@ func (s *Server) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, err := s.tasks.ListClusterObservation(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.metricsHandler.ServeHTTP(w, r)

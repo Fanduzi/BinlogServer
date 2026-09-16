@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task mutation requests, metadata source policy, full create specs, and TaskStore GetTask/ListTasksPage
-// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, and paged list reads
+// input: task mutation requests, metadata source policy, full create specs, and TaskStore GetTask/ListTasks/ListTasksPage
+// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, unfiltered cluster observation from store.ListTasks, and paged list reads
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -399,6 +399,23 @@ func (s *Scheduler) ListTasks() []Task {
 		out = append(out, task)
 	}
 	return out
+}
+
+// ListClusterObservation 返回全库所有权抄本。有 store 时读 store.ListTasks，
+// 不走任务观测过滤，也不用启动时的内存名单。没有 store 时仍用同一份内存名单。
+func (s *Scheduler) ListClusterObservation(ctx context.Context) ([]Task, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+	if store != nil {
+		readCtx, cancel := s.withReadTimeout(ctx)
+		defer cancel()
+		return store.ListTasks(readCtx)
+	}
+	return s.ListTasks(), nil
 }
 
 // ListTasksPage 返回过滤后的一页任务。有 store 时走 SQL 分页；standalone 仍切内存快照。

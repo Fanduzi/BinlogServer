@@ -1,7 +1,7 @@
 // Package api provides module-level functionality for api.
-// input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses and status codes for task/cluster operations
-// pos: external control-plane API layer bridging clients and domain services
+// input: HTTP requests, router params, ListClusterObservation, worker heartbeats, GetTask, and ListRuns
+// output: REST cluster overview/workers from the unfiltered store ownership copy (store list errors are 5xx), plus lease and run history views
+// pos: external control-plane API layer for cluster observation and per-task lease/run reads
 // note: if this file changes, update this header and module README.md.
 package api
 
@@ -105,20 +105,14 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	taskStats := make(map[string]workerItem)
-	for _, task := range s.tasks.ListTasks() {
-		if task.OwnerWorkerID == "" {
-			continue
-		}
-		entry := taskStats[task.OwnerWorkerID]
-		entry.TaskCount++
-		if task.State == tasks.StateRunning {
-			entry.Running++
-		}
-		if task.Epoch > 0 {
-			entry.Leased++
-		}
-		taskStats[task.OwnerWorkerID] = entry
+	observed, err := s.tasks.ListClusterObservation(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	taskStats := make(map[string]workerItem, len(observed))
+	for _, item := range buildWorkerItems(observed) {
+		taskStats[item.WorkerID] = item
 	}
 
 	now := time.Now()
@@ -210,7 +204,11 @@ func (s *Server) handleClusterOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := s.tasks.ListTasks()
+	items, err := s.tasks.ListClusterObservation(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	workers := buildWorkerItems(items)
 	resp := clusterOverview{
 		TaskCount:   len(items),

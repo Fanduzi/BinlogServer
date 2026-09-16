@@ -9,7 +9,8 @@
 | `metrics_prometheus.go` | `/metrics` 采集与输出（基于 `prometheus/client_golang`） |
 | `tracing.go` | HTTP 入站 tracing middleware（OTel span） |
 | `handlers_tasks.go` | 任务相关 API 处理（CRUD、批量创建、启动停止、checkpoint、source lookup、summary/dashboard 一次过滤读取后内存切页） |
-| `handlers_cluster.go` | 集群观测与控制相关 API（workers、overview） |
+| `handlers_cluster.go` | 集群观测：overview / workers 任务计数读 `ListClusterObservation`（有 store 时全库所有权抄本，不是任务页过滤，也不是启动内存名单） |
+| `cluster_observation_test.go` | HTTP 缝测试：过滤后的 dashboard 汇总 ≠ 集群人数；store 主人/状态变化反映到 overview/workers/metrics；无 store 仍用内存名单 |
 | `swagger_docs_only.go` | swagger 注释占位 |
 
 ## Exports
@@ -19,6 +20,7 @@
 - `WithRateLimit(RateLimiterConfig) ServerOption` - 注入限流配置
 - `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。
 - `GET /api/dashboard` - 返回同口径 summary、任务明细与 source 聚合；source 状态计数同时暴露 `starting` 与 `running`。
+- `GET /api/cluster/overview` / `GET /api/workers` / `GET /metrics` 的任务与主人计数共用 `ListClusterObservation`：有 store 时读 `store.ListTasks` 全库抄本，store 错误返回 5xx，不退回启动时的内存名单；没有 store 时仍读同一份内存名单。任务页 dashboard 过滤汇总不是集群人数。
 - `GET /api/tasks/{id}` - 按 id 读单个任务。有 store 时 store 未找到返回 404，其它 store 错误返回 5xx，不把内存里的旧主人/epoch 抄本当成 200；没有 store 时仍读内存名单。
 - `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页；页序为数字 id 升序；支持 host/port/state 过滤；cluster/mysql 走 `ListTasksPage`（COUNT + `ORDER BY CAST(id AS UNSIGNED), id LIMIT/OFFSET`），standalone 仍切内存快照。默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
 - `GET /api/dashboard` - 支持同一组过滤/分页参数；一次 `ListTasksPage`（Limit<=0 表示全部匹配）得到匹配集，再内存切页；`total` 与 `summary.total` 同一数字。
