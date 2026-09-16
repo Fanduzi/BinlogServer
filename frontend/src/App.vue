@@ -1,7 +1,7 @@
 <!--
-input: dashboard/task API data with server pagination metadata, local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list and explicit global/current-page filter scopes, status KPIs, detail drawer, forms, and settings
-pos: single-page frontend entry for Binlog Server operations console
+input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, status KPIs, detail drawer, forms, and settings
+pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
 <template>
@@ -398,16 +398,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import {
   createTask,
   deleteTask,
-  getClusterOverview,
-  getCheckpoint,
-  getDashboard,
-  getReplication,
-  getTaskLease,
-  getTask,
-  listTaskRuns,
-  listEvents,
   listFiles,
-  listWorkers,
   lookupSource,
   retryUpload,
   startTask,
@@ -491,7 +482,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("hashchange", handleHashChange);
 });
 
-const { loading, dashboard, cluster, toTimeMs, nowRefMs, applyDashboardData, applyClusterData, buildSourceFilter } = useDashboard();
+const { loading, dashboard, cluster, toTimeMs, nowRefMs, buildSourceFilter, refreshAll: refreshObservation } = useDashboard();
 
 const { sourceQuery, lookup, clearLookupState } = useSourceLookup();
 
@@ -509,7 +500,7 @@ const {
   stateTagType, replicationTagType,
   formatDelay, formatTs, formatCheckpoint,
   formatReplicationReason, hasReplicationReason, parseErr,
-} = useFormatters({ cluster, toTimeMs, nowRefMs, currentLocale });
+} = useFormatters({ toTimeMs, nowRefMs, currentLocale });
 
 const {
   formVisible, formMode, form,
@@ -525,7 +516,7 @@ const {
   detailVisible, detailTask, detailReplication, detailLease,
   detailRuns, runHistoryLimit, checkpoint, events, files,
   showDetail,
-} = useTaskDetail(cluster);
+} = useTaskDetail();
 
 const workerRows = computed(() => {
   return (cluster.workers || []).map((worker) => {
@@ -554,14 +545,6 @@ watch(
 );
 
 watch(
-  () => pagedTasks.value.map((row) => row.task?.id || "").join(","),
-  () => {
-    void prefetchTaskLeasesForPage();
-  },
-  { immediate: true },
-);
-
-watch(
   () => [uiFilter.taskState, pager.page, pager.pageSize],
   ([state, page, pageSize], previous) => {
     if (previous && (state !== previous[0] || pageSize !== previous[2]) && page !== 1) {
@@ -575,39 +558,11 @@ watch(
 refreshAll();
 
 async function refreshAll() {
-  try {
-    loading.value = true;
-    const [dashboardData, overviewData, workersData] = await Promise.all([
-      getDashboard(buildDashboardParams()),
-      getClusterOverview(),
-      listWorkers(),
-    ]);
-    applyDashboardData(dashboardData);
-    applyClusterData(overviewData, workersData);
-    await prefetchTaskLeasesForPage();
-  } catch (err) {
-    ElMessage.error(parseErr(err));
-  } finally {
-    loading.value = false;
-  }
+  await refreshObservation(buildDashboardParams());
 }
 
 function buildDashboardParams() {
   return { ...buildSourceFilter(sourceQuery), ...buildPaginationParams() };
-}
-
-
-async function prefetchTaskLeasesForPage() {
-  const ids = pagedTasks.value.map((row) => row.task?.id).filter(Boolean);
-  if (!ids.length) return;
-
-  const results = await Promise.allSettled(ids.map((id) => getTaskLease(id)));
-  results.forEach((result, idx) => {
-    const id = ids[idx];
-    if (result.status === "fulfilled") {
-      cluster.leaseByTask[id] = result.value;
-    }
-  });
 }
 
 async function applySourceFilter() {
@@ -617,25 +572,17 @@ async function applySourceFilter() {
     return;
   }
 
+  pager.page = 1;
   try {
-    loading.value = true;
-    pager.page = 1;
-    const [lookupResp, dashboardResp, overviewResp, workersResp] = await Promise.all([
+    const [lookupResp] = await Promise.all([
       lookupSource(params),
-      getDashboard({ ...params, ...buildPaginationParams() }),
-      getClusterOverview(),
-      listWorkers(),
+      refreshAll(),
     ]);
     lookup.checked = true;
     lookup.exists = !!lookupResp?.exists;
     lookup.count = Number(lookupResp?.count || 0);
-    applyDashboardData(dashboardResp);
-    applyClusterData(overviewResp, workersResp);
-    await prefetchTaskLeasesForPage();
   } catch (err) {
     ElMessage.error(parseErr(err));
-  } finally {
-    loading.value = false;
   }
 }
 

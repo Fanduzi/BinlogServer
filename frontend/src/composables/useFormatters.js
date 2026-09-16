@@ -1,34 +1,38 @@
-// input: cluster state, dashboard helpers, i18n, locale
+// input: dashboard time helpers, i18n, locale; optional single-task lease override for the detail drawer
 // output: label/tag/format helper functions used in template
-// pos: presentation utility composable; no side effects
+// pos: presentation utility composable; list lease risk uses the task copy, not GET /lease
+// note: if this file changes, update this header and frontend/src/composables/README.md
 import { useI18n } from "vue-i18n";
 
 const LEASE_RISK_SECONDS = 45;
 
-export function useFormatters({ cluster, toTimeMs, nowRefMs, currentLocale }) {
+export function useFormatters({ toTimeMs, nowRefMs, currentLocale }) {
   const { t } = useI18n();
 
   function ownerWorkerLabel(task) {
-    const leaseWorker = cluster.leaseByTask[task?.id]?.owner_worker_id;
-    return task?.owner_worker_id || leaseWorker || "--";
+    return task?.owner_worker_id || "--";
+  }
+
+  function leaseCopy(task, leaseOverride = null) {
+    return {
+      owner: leaseOverride?.owner_worker_id || task?.owner_worker_id,
+      epoch: Number(leaseOverride?.epoch ?? task?.epoch ?? 0),
+      updatedAt: leaseOverride?.updated_at || task?.updated_at,
+    };
   }
 
   function leaseRiskTagType(task, leaseOverride = null) {
-    const lease = leaseOverride || cluster.leaseByTask[task?.id];
-    const owner = lease?.owner_worker_id || task?.owner_worker_id;
-    const epoch = Number(lease?.epoch ?? task?.epoch ?? 0);
+    const { owner, epoch, updatedAt } = leaseCopy(task, leaseOverride);
     if (!owner || epoch <= 0) return "info";
-    const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
+    const updatedMs = toTimeMs(updatedAt);
     if (updatedMs <= 0) return "warning";
     return nowRefMs() - updatedMs > LEASE_RISK_SECONDS * 1000 ? "warning" : "success";
   }
 
   function leaseRiskLabel(task, leaseOverride = null) {
-    const lease = leaseOverride || cluster.leaseByTask[task?.id];
-    const owner = lease?.owner_worker_id || task?.owner_worker_id;
-    const epoch = Number(lease?.epoch ?? task?.epoch ?? 0);
+    const { owner, epoch, updatedAt } = leaseCopy(task, leaseOverride);
     if (!owner || epoch <= 0) return "--";
-    const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at);
+    const updatedMs = toTimeMs(updatedAt);
     if (updatedMs <= 0) return t("lease.risk");
     return nowRefMs() - updatedMs > LEASE_RISK_SECONDS * 1000 ? t("lease.risk") : t("lease.normal");
   }

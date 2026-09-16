@@ -1,5 +1,5 @@
 // input: shared pagination mock scenario, createMockSession for paging-stripped dashboard payloads, browser dashboard requests, and task list controls
-// output: regression coverage for server-side page transitions, state filtering, global totals, current-page filter scope, and no legacy local page when paging fields are missing
+// output: regression coverage for server-side page transitions, state filtering, global totals, current-page filter scope, no per-task /lease on page change, and no legacy local page when paging fields are missing
 // pos: Playwright E2E coverage for dashboard pagination contract consumption
 // note: if this file changes, update this header and frontend/tests/e2e/README.md.
 
@@ -50,6 +50,23 @@ test('current-page filters disclose scope and find matches on later server pages
   await expect(page.getByTestId('filter-summary')).toContainText('当前页匹配：1')
   await expect(page.getByTestId('task-filter-count')).toContainText('当前页匹配：1')
   await expect(page.getByTestId('task-filter-count')).toContainText('全局总数：25')
+})
+
+test('task list page changes do not request per-task leases', async ({ page }) => {
+  const leaseRequests: string[] = []
+  page.on('request', (request) => {
+    if (/\/api\/tasks\/[^/]+\/lease$/.test(new URL(request.url()).pathname)) {
+      leaseRequests.push(request.url())
+    }
+  })
+
+  await registerMockRoutes(page, { scenario: 'pagination' })
+  await page.goto('/#/tasks')
+
+  await expect(page.getByTestId('task-row-001')).toBeVisible()
+  await page.locator('.el-pagination .number').filter({ hasText: '2' }).click()
+  await expect(page.getByTestId('task-row-021')).toBeVisible()
+  expect(leaseRequests).toEqual([])
 })
 
 test('missing dashboard paging fields are not locally paged as a legacy payload', async ({ page }) => {
