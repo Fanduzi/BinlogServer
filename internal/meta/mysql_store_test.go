@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, expired-lease listing, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, loopback host-identity SQL, expired-lease listing, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -299,6 +299,28 @@ func TestListTasksPageSQL_PushesFiltersAndLimit(t *testing.T) {
 	}
 	if len(pageArgs) != 5 {
 		t.Fatalf("expected 5 page args (filters+limit+offset), got %#v", pageArgs)
+	}
+
+	_, loopbackSQL, loopbackCountArgs, _ := listTasksPageSQL(tasks.TaskListFilter{Host: "localhost"})
+	if strings.Contains(loopbackSQL, "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host')) = ?") {
+		t.Fatalf("loopback host must not use exact-text match, got %q", loopbackSQL)
+	}
+	if !strings.Contains(loopbackSQL, "localhost") || !strings.Contains(loopbackSQL, "127.0.0.0") || !strings.Contains(loopbackSQL, "::1") {
+		t.Fatalf("loopback host SQL must name localhost / 127/8 / ::1, got %q", loopbackSQL)
+	}
+	if !strings.Contains(loopbackSQL, "REGEXP") || !strings.Contains(loopbackSQL, "TRIM(TRAILING '.'") {
+		t.Fatalf("loopback host SQL must normalize spelling and require a dotted quad, got %q", loopbackSQL)
+	}
+	if len(loopbackCountArgs) != 0 {
+		t.Fatalf("loopback host SQL should bind no host literal, got %#v", loopbackCountArgs)
+	}
+
+	_, exactSQL, exactCountArgs, _ := listTasksPageSQL(tasks.TaskListFilter{Host: "db-primary.example"})
+	if !strings.Contains(exactSQL, "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host')) = ?") {
+		t.Fatalf("non-loopback host must stay exact, got %q", exactSQL)
+	}
+	if len(exactCountArgs) != 1 || exactCountArgs[0] != "db-primary.example" {
+		t.Fatalf("expected exact host arg, got %#v", exactCountArgs)
 	}
 }
 

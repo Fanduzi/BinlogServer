@@ -5,7 +5,7 @@
 - `memory_lease.go`: 进程内 `LeaseManager`，单机与测试走同一扇任务所有权门；`Release` 立刻腾出租约。
 - `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec）；`GetTask` 按主键刷新；`ListTasksPage` 在有 store 时走 SQL 分页。
 - `scheduler_lifecycle.go`: 启停、`ClaimRunnableTasks`（无主 STARTING + 过期租约 + 自己名下空闲）、重试退避、FAILED 立刻放租约。
-- `task_list.go`: 数字 id 排序、host/port/state 过滤、内存分页，以及 `FailedUploadFiles` / `StartingUnownedTasks`，供 standalone 与测试 fake 复用。
+- `task_list.go`: 数字 id 排序、host/port/state 过滤（host 走 `SameSourceHost`）、内存分页，以及 `FailedUploadFiles` / `StartingUnownedTasks`，供 standalone 与测试 fake 复用。
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用，以及可重试的 `SOURCE_UNREACHABLE`）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
@@ -31,7 +31,8 @@
 - 事件记录、文件元信息、上传补偿。
 - `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
-- `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与 source lookup 共享。
+- `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与源身份共享。
+- `SameSourceHost`：回环别名是同一台源，非回环仍精确匹配；lookup 与任务观测 host 过滤共用。
 - `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/configure/start 时拒绝同端点 source。
 - Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
