@@ -1,4 +1,4 @@
-// input: dashboard task page plus total/compatibility metadata, i18n t(), sourceLabel helper
+// input: dashboard task page plus required total/limit/offset, i18n t(), sourceLabel helper
 // output: uiFilter state, server pager/query builder, current-page filteredTasks, pagedTasks, quick filter actions
 // pos: task list filtering and server pagination coordination
 // note: if this file changes, update this header and frontend/src/composables/README.md.
@@ -130,13 +130,9 @@ export function useTaskFilter(dashboard) {
     return rows;
   });
 
-  const pagedTasks = computed(() => {
-    if (dashboard.has_pagination) return filteredTasks.value;
-    const start = (pager.page - 1) * pager.pageSize;
-    return filteredTasks.value.slice(start, start + pager.pageSize);
-  });
+  const pagedTasks = computed(() => filteredTasks.value);
 
-  const serverTotal = computed(() => dashboard.total ?? dashboard.summary?.total ?? 0);
+  const serverTotal = computed(() => dashboard.total);
 
   function buildPaginationParams() {
     const params = {

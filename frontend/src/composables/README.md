@@ -6,7 +6,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| `useDashboard.js` | Dashboard/cluster 数据容器、刷新和 source 查询参数；消费 server `total/limit/offset`，旧响应缺少分页字段时保留本地分页兜底，保留 starting/running 计数 |
+| `useDashboard.js` | Dashboard/cluster 数据容器、刷新和 source 查询参数；要求 dashboard 携带 `total/limit/offset`，缺少分页字段时拒绝应用，保留 starting/running 计数 |
 | `useTaskFilter.js` | 任务状态（服务端/全局）与当前页复制状态筛选、排序和 server 分页查询参数 |
 | `useFormatters.js` | 状态、lease、复制信息和时间格式化 |
 | `useSourceLookup.js` | source host/port 查询状态 |

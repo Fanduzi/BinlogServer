@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard/summary then memory paging, lookup and dashboard host filters sharing SameSourceHost, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard observation (page/summary/source counts) then memory paging, lookup and dashboard host filters sharing SameSourceHost, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
