@@ -1,13 +1,12 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task mutation requests, metadata source policy, full create specs, and TaskStore GetTask/ListTasksPage
-// output: source-isolated task CRUD/config updates, primary-key GetTask refresh, and paged list reads
+// input: task mutation requests, metadata source policy, full create specs, and TaskStore GetTask/ListTasks/ListTasksPage
+// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, unfiltered cluster observation from store.ListTasks, and paged list reads
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
-	"errors"
 	"log"
 	"strconv"
 	"time"
@@ -326,9 +325,8 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 // StartTask 启动任务；cluster 模式下会先 acquire lease。
 
 func (s *Scheduler) GetTask(id string) (Task, error) {
-	// 常见误解：
-	// GetTask 返回的不一定是“纯内存快照”，当配置了 store 时会按主键拉取持久化最新值，
-	// 目的是让 API 视图更接近真实元数据状态。
+	// 有 store 时按主键读最新值。store 说没有就是没有；其它错误原样失败，
+	// 不把内存里的旧主人/epoch 抄本当成读成功。没有 store 时仍读内存名单。
 	s.mu.Lock()
 	task, ok := s.tasks[id]
 	store := s.store
@@ -338,19 +336,13 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 		ctx, cancel := s.withReadTimeout(context.Background())
 		item, err := store.GetTask(ctx, id)
 		cancel()
-		if err == nil {
-			s.mu.Lock()
-			s.tasks[id] = item
-			s.mu.Unlock()
-			return item, nil
+		if err != nil {
+			return Task{}, err
 		}
-		if errors.Is(err, ErrTaskNotFound) {
-			return Task{}, ErrTaskNotFound
-		}
-		if ok {
-			return task, nil
-		}
-		return Task{}, err
+		s.mu.Lock()
+		s.tasks[id] = item
+		s.mu.Unlock()
+		return item, nil
 	}
 
 	if !ok {
@@ -407,6 +399,23 @@ func (s *Scheduler) ListTasks() []Task {
 		out = append(out, task)
 	}
 	return out
+}
+
+// ListClusterObservation 返回全库所有权抄本。有 store 时读 store.ListTasks，
+// 不走任务观测过滤，也不用启动时的内存名单。没有 store 时仍用同一份内存名单。
+func (s *Scheduler) ListClusterObservation(ctx context.Context) ([]Task, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+	if store != nil {
+		readCtx, cancel := s.withReadTimeout(ctx)
+		defer cancel()
+		return store.ListTasks(readCtx)
+	}
+	return s.ListTasks(), nil
 }
 
 // ListTasksPage 返回过滤后的一页任务。有 store 时走 SQL 分页；standalone 仍切内存快照。
