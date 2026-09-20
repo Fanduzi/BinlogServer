@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
+// output: API request helpers for dashboard observation, task CRUD/detail, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -104,15 +104,6 @@ function showAuthDialog() {
   window.dispatchEvent(new CustomEvent("auth-required"));
 }
 
-export async function getSummary() {
-  if (useMockAPI) {
-    const dashboard = await mockRequest("GET", "/api/dashboard");
-    return dashboard.summary;
-  }
-  const { data } = await http.get("/api/summary");
-  return data;
-}
-
 export async function getDashboard(params = {}) {
   if (useMockAPI) {
     return mockRequest("GET", "/api/dashboard", { params });
@@ -142,14 +133,6 @@ export async function lookupSource(params = {}) {
     return mockRequest("GET", "/api/sources/lookup", { params });
   }
   const { data } = await http.get("/api/sources/lookup", { params });
-  return data;
-}
-
-export async function listTasks(params = {}) {
-  if (useMockAPI) {
-    return mockRequest("GET", "/api/tasks", { params });
-  }
-  const { data } = await http.get("/api/tasks", { params });
   return data;
 }
 

@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and source lookup regression coverage
+// output: REST/dashboard responses, one-read dashboard observation (page/summary/source counts), SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and lookup/dashboard shared source-identity coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -2649,7 +2649,97 @@ func (s *panicListTaskStore) DeleteTask(_ context.Context, taskID string) error 
 	return nil
 }
 
-// TestTaskAPI_ListTasksPageDoesNotLoadAllRows 验证列表/dashboard 翻页走 ListTasksPage，不依赖整表 ListTasks。
+// TestTaskAPI_DashboardObservationUsesOneMaterialization 验证任务观测一次 Limit=0 物化：页 total、汇总 total、按源计数同一批。
+func TestTaskAPI_DashboardObservationUsesOneMaterialization(t *testing.T) {
+	store := &recordingPageStore{fakeAPIRunHistoryStore: newFakeAPIRunHistoryStore()}
+	failedOnB := 0
+	for i := 1; i <= 6; i++ {
+		id := strconv.Itoa(i)
+		state := tasks.StateCreated
+		host := "db-a"
+		port := uint16(3306)
+		if i%2 == 0 {
+			state = tasks.StateFailed
+			host = "db-b"
+			port = 3307
+			failedOnB++
+		}
+		store.tasks[id] = tasks.Task{
+			ID:         id,
+			Name:       "task-" + id,
+			ClusterKey: "cluster-" + id,
+			State:      state,
+			Source: tasks.SourceConfig{
+				Host:     host,
+				Port:     port,
+				User:     "repl",
+				Password: "secret",
+			},
+		}
+	}
+
+	scheduler := tasks.NewScheduler(tasks.WithStore(store))
+	if err := scheduler.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	store.filters = nil
+	handler := NewServer(scheduler)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/dashboard?host=db-b&port=3307&state=FAILED&limit=1&offset=1", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("dashboard returned %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var dashboard struct {
+		Total   int `json:"total"`
+		Limit   int `json:"limit"`
+		Offset  int `json:"offset"`
+		Summary struct {
+			Total  int `json:"total"`
+			Failed int `json:"failed"`
+		} `json:"summary"`
+		Tasks []struct {
+			Task tasks.Task `json:"task"`
+		} `json:"tasks"`
+		Sources []struct {
+			TaskCount int `json:"task_count"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &dashboard); err != nil {
+		t.Fatalf("decode dashboard: %v", err)
+	}
+
+	if len(store.filters) != 1 {
+		t.Fatalf("dashboard ListTasksPage calls = %d, want 1: %+v", len(store.filters), store.filters)
+	}
+	got := store.filters[0]
+	if got.Host != "db-b" || got.Port == nil || *got.Port != 3307 || got.State == nil || *got.State != tasks.StateFailed || got.Limit != 0 || got.Offset != 0 {
+		t.Fatalf("dashboard materialization filter = %+v, want host=db-b port=3307 state=FAILED limit=0 offset=0", got)
+	}
+	sourceTotal := 0
+	for _, source := range dashboard.Sources {
+		sourceTotal += source.TaskCount
+	}
+	if dashboard.Total != failedOnB || dashboard.Summary.Total != failedOnB || dashboard.Summary.Failed != failedOnB || sourceTotal != failedOnB {
+		t.Fatalf("page/summary/source totals diverged: total=%d summary=%d failed=%d sources=%d want %d", dashboard.Total, dashboard.Summary.Total, dashboard.Summary.Failed, sourceTotal, failedOnB)
+	}
+	if dashboard.Limit != 1 || dashboard.Offset != 1 || len(dashboard.Tasks) != 1 {
+		t.Fatalf("dashboard window = limit=%d offset=%d tasks=%d, want 1/1/1", dashboard.Limit, dashboard.Offset, len(dashboard.Tasks))
+	}
+}
+
+type recordingPageStore struct {
+	*fakeAPIRunHistoryStore
+	filters []tasks.TaskListFilter
+}
+
+func (s *recordingPageStore) ListTasksPage(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	s.filters = append(s.filters, filter)
+	return s.fakeAPIRunHistoryStore.ListTasksPage(ctx, filter)
+}
+
+// TestTaskAPI_ListTasksPageDoesNotLoadAllRows 验证列表 SQL 页与 dashboard 一次物化都走 ListTasksPage，不依赖整表 ListTasks。
 func TestTaskAPI_ListTasksPageDoesNotLoadAllRows(t *testing.T) {
 	const totalTasks = 6
 	store := newPanicListTaskStore()
@@ -2876,6 +2966,173 @@ func TestAPI_SourceLookupUsesLoopbackEndpointIdentity(t *testing.T) {
 				t.Fatalf("lookup %s:%d got exists=%v count=%d task_ids=%q, want exists=%v count=%d task_ids=%q", tc.host, tc.port, exists, count, taskIDs, tc.wantSize > 0, tc.wantSize, tc.wantIDs)
 			}
 		})
+	}
+}
+
+func TestAPI_LookupAndDashboardShareSourceIdentity(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	sources := []struct {
+		name string
+		host string
+		port uint16
+	}{
+		{name: "stored-localhost", host: "localhost", port: 3306},
+		{name: "stored-ipv4-loopback", host: "127.0.0.1", port: 3306},
+		{name: "stored-ipv6-loopback", host: "::1", port: 3306},
+		{name: "stored-loopback-other-port", host: "127.0.0.3", port: 3307},
+		{name: "stored-primary", host: "db-primary.example", port: 3306},
+		{name: "stored-secondary", host: "db-secondary.example", port: 3306},
+	}
+	for _, source := range sources {
+		task, err := scheduler.CreateTask(source.name, strings.ReplaceAll(source.name, " ", "-"))
+		if err != nil {
+			t.Fatalf("CreateTask %q returned error: %v", source.name, err)
+		}
+		if err := scheduler.ConfigureSource(task.ID, tasks.SourceConfig{Host: source.host, Port: source.port, User: "repl"}); err != nil {
+			t.Fatalf("ConfigureSource %q returned error: %v", source.name, err)
+		}
+	}
+
+	lookupIDs := func(t *testing.T, host string, port uint16) []string {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/sources/lookup?host=%s&port=%d", host, port), nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("lookup %s:%d returned %d body=%s", host, port, resp.Code, resp.Body.String())
+		}
+		var body struct {
+			TaskIDs []string `json:"task_ids"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode lookup %s:%d: %v", host, port, err)
+		}
+		return body.TaskIDs
+	}
+	dashboardIDs := func(t *testing.T, host string, port uint16) []string {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/dashboard?host=%s&port=%d", host, port), nil)
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("dashboard %s:%d returned %d body=%s", host, port, resp.Code, resp.Body.String())
+		}
+		var body struct {
+			Total int `json:"total"`
+			Tasks []struct {
+				Task tasks.Task `json:"task"`
+			} `json:"tasks"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode dashboard %s:%d: %v", host, port, err)
+		}
+		ids := make([]string, 0, len(body.Tasks))
+		for _, item := range body.Tasks {
+			ids = append(ids, item.Task.ID)
+		}
+		if body.Total != len(ids) {
+			t.Fatalf("dashboard %s:%d total=%d page=%d", host, port, body.Total, len(ids))
+		}
+		return ids
+	}
+
+	cases := []struct {
+		name    string
+		host    string
+		port    uint16
+		wantIDs string
+	}{
+		{name: "localhost query matches stored 127.0.0.1", host: "localhost", port: 3306, wantIDs: "1,2,3"},
+		{name: "127.0.0.1 query matches stored localhost", host: "127.0.0.1", port: 3306, wantIDs: "1,2,3"},
+		{name: "uppercase localhost is the same source", host: "LOCALHOST", port: 3306, wantIDs: "1,2,3"},
+		{name: "non-loopback stays exact", host: "db-primary.example", port: 3306, wantIDs: "5"},
+		{name: "non-loopback case stays exact", host: "DB-PRIMARY.EXAMPLE", port: 3306, wantIDs: ""},
+		{name: "non-loopback other machine stays other", host: "db-secondary.example", port: 3306, wantIDs: "6"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotLookup := strings.Join(lookupIDs(t, tc.host, tc.port), ",")
+			gotDashboard := strings.Join(dashboardIDs(t, tc.host, tc.port), ",")
+			if gotLookup != tc.wantIDs {
+				t.Fatalf("lookup %s:%d task_ids=%q, want %q", tc.host, tc.port, gotLookup, tc.wantIDs)
+			}
+			if gotDashboard != tc.wantIDs {
+				t.Fatalf("dashboard %s:%d task_ids=%q, want %q", tc.host, tc.port, gotDashboard, tc.wantIDs)
+			}
+			if gotLookup != gotDashboard {
+				t.Fatalf("lookup and dashboard disagreed for %s:%d: lookup=%q dashboard=%q", tc.host, tc.port, gotLookup, gotDashboard)
+			}
+		})
+	}
+}
+
+func TestAPI_LookupAndDashboardShareSourceIdentityViaStore(t *testing.T) {
+	store := newFakeAPIRunHistoryStore()
+	store.tasks["1"] = tasks.Task{
+		ID: "1", Name: "stored-localhost", ClusterKey: "stored-localhost", State: tasks.StateCreated,
+		Source: tasks.SourceConfig{Host: "localhost", Port: 3306, User: "repl"},
+	}
+	store.tasks["2"] = tasks.Task{
+		ID: "2", Name: "stored-ipv4", ClusterKey: "stored-ipv4", State: tasks.StateCreated,
+		Source: tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+	}
+	store.tasks["3"] = tasks.Task{
+		ID: "3", Name: "stored-primary", ClusterKey: "stored-primary", State: tasks.StateCreated,
+		Source: tasks.SourceConfig{Host: "db-primary.example", Port: 3306, User: "repl"},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithStore(store))
+	if err := scheduler.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	handler := NewServer(scheduler)
+
+	ids := func(t *testing.T, path string) []string {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s returned %d body=%s", path, resp.Code, resp.Body.String())
+		}
+		var lookup struct {
+			TaskIDs []string `json:"task_ids"`
+		}
+		if strings.Contains(path, "/sources/lookup") {
+			if err := json.Unmarshal(resp.Body.Bytes(), &lookup); err != nil {
+				t.Fatalf("decode lookup: %v", err)
+			}
+			return lookup.TaskIDs
+		}
+		var dashboard struct {
+			Tasks []struct {
+				Task tasks.Task `json:"task"`
+			} `json:"tasks"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &dashboard); err != nil {
+			t.Fatalf("decode dashboard: %v", err)
+		}
+		out := make([]string, 0, len(dashboard.Tasks))
+		for _, item := range dashboard.Tasks {
+			out = append(out, item.Task.ID)
+		}
+		return out
+	}
+
+	gotLookup := strings.Join(ids(t, "/api/sources/lookup?host=localhost&port=3306"), ",")
+	gotDashboard := strings.Join(ids(t, "/api/dashboard?host=localhost&port=3306"), ",")
+	if gotLookup != "1,2" || gotDashboard != "1,2" {
+		t.Fatalf("store path localhost identity: lookup=%q dashboard=%q, want 1,2", gotLookup, gotDashboard)
+	}
+	gotLookup = strings.Join(ids(t, "/api/sources/lookup?host=127.0.0.1&port=3306"), ",")
+	gotDashboard = strings.Join(ids(t, "/api/dashboard?host=127.0.0.1&port=3306"), ",")
+	if gotLookup != "1,2" || gotDashboard != "1,2" {
+		t.Fatalf("store path 127.0.0.1 identity: lookup=%q dashboard=%q, want 1,2", gotLookup, gotDashboard)
+	}
+	gotLookup = strings.Join(ids(t, "/api/sources/lookup?host=db-primary.example&port=3306"), ",")
+	gotDashboard = strings.Join(ids(t, "/api/dashboard?host=db-primary.example&port=3306"), ",")
+	if gotLookup != "3" || gotDashboard != "3" {
+		t.Fatalf("store path exact host: lookup=%q dashboard=%q, want 3", gotLookup, gotDashboard)
 	}
 }
 

@@ -1,6 +1,6 @@
-// input: API layer (getDashboard, getClusterOverview, listWorkers, getTaskLease)
-// output: dashboard + cluster reactive state, server pagination metadata, legacy page fallback, status counters including STARTING, loading flag, refresh helpers, nowRefMs
-// pos: central data layer composable; sourceQuery/lookup live in useSourceLookup
+// input: API layer (getDashboard, getClusterOverview, listWorkers)
+// output: dashboard + cluster reactive state, required server pagination metadata, status counters including STARTING, loading flag, one refreshAll orchestration, nowRefMs
+// pos: central data layer composable; sourceQuery/lookup live in useSourceLookup; list lease risk uses task owner/epoch, not /lease
 // note: if this file changes, update this header and frontend/src/README.md
 import { reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
@@ -8,7 +8,6 @@ import {
   getDashboard,
   getClusterOverview,
   listWorkers,
-  getTaskLease,
 } from "../api";
 
 export function useDashboard() {
@@ -20,7 +19,6 @@ export function useDashboard() {
     total: 0,
     limit: 100,
     offset: 0,
-    has_pagination: false,
     summary: {
       total: 0,
       starting: 0,
@@ -44,7 +42,6 @@ export function useDashboard() {
       leased_task_count: 0,
     },
     workers: [],
-    leaseByTask: {},
   });
 
   function toTimeMs(ts) {
@@ -62,16 +59,15 @@ export function useDashboard() {
   function applyDashboardData(data) {
     if (!data) return;
     const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-    const summaryTotal = data.summary?.total;
-    const total = data.total === undefined ? (summaryTotal ?? tasks.length) : data.total;
+    const total = data.total;
     if (!Number.isInteger(total) || total < 0) {
       throw new Error("invalid dashboard total");
     }
-    const limit = data.limit === undefined ? 100 : data.limit;
+    const limit = data.limit;
     if (!Number.isInteger(limit) || limit <= 0) {
       throw new Error("invalid dashboard limit");
     }
-    const offset = data.offset === undefined ? 0 : data.offset;
+    const offset = data.offset;
     if (!Number.isInteger(offset) || offset < 0) {
       throw new Error("invalid dashboard offset");
     }
@@ -80,8 +76,6 @@ export function useDashboard() {
     dashboard.total = total;
     dashboard.limit = limit;
     dashboard.offset = offset;
-    dashboard.has_pagination =
-      data.total !== undefined && data.limit !== undefined && data.offset !== undefined;
     Object.assign(dashboard.summary, data.summary || {}, { starting: data.summary?.starting ?? 0 });
     dashboard.tasks = tasks;
     dashboard.sources = Array.isArray(data.sources) ? data.sources : [];
@@ -99,29 +93,16 @@ export function useDashboard() {
     return params;
   }
 
-  async function prefetchLeasesForIds(ids) {
-    if (!ids.length) return;
-    const results = await Promise.allSettled(ids.map((id) => getTaskLease(id)));
-    results.forEach((result, idx) => {
-      const id = ids[idx];
-      if (result.status === "fulfilled") {
-        cluster.leaseByTask[id] = result.value;
-      }
-    });
-  }
-
-  async function refreshAll(sourceQuery, onAfterRefresh) {
+  async function refreshAll(dashboardParams = {}) {
     try {
       loading.value = true;
-      const params = buildSourceFilter(sourceQuery);
       const [dashboardData, overviewData, workersData] = await Promise.all([
-        getDashboard(params),
+        getDashboard(dashboardParams),
         getClusterOverview(),
         listWorkers(),
       ]);
       applyDashboardData(dashboardData);
       applyClusterData(overviewData, workersData);
-      if (onAfterRefresh) await onAfterRefresh();
     } catch (err) {
       ElMessage.error(err?.message || String(err));
     } finally {
@@ -138,7 +119,6 @@ export function useDashboard() {
     applyDashboardData,
     applyClusterData,
     buildSourceFilter,
-    prefetchLeasesForIds,
     refreshAll,
   };
 }

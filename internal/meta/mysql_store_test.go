@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, expired-lease listing, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, SameSourceHost loopback SQL identity, expired-lease listing, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -300,6 +300,28 @@ func TestListTasksPageSQL_PushesFiltersAndLimit(t *testing.T) {
 	if len(pageArgs) != 5 {
 		t.Fatalf("expected 5 page args (filters+limit+offset), got %#v", pageArgs)
 	}
+
+	_, loopbackSQL, loopbackCountArgs, _ := listTasksPageSQL(tasks.TaskListFilter{Host: "localhost"})
+	if strings.Contains(loopbackSQL, "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host')) = ?") {
+		t.Fatalf("loopback host must not use exact-text match, got %q", loopbackSQL)
+	}
+	if !strings.Contains(loopbackSQL, "localhost") || !strings.Contains(loopbackSQL, "^127") || !strings.Contains(loopbackSQL, "::1") {
+		t.Fatalf("loopback host SQL must name localhost / 127/8 / ::1, got %q", loopbackSQL)
+	}
+	if !strings.Contains(loopbackSQL, "REGEXP") || !strings.Contains(loopbackSQL, "TRIM(TRAILING '.'") {
+		t.Fatalf("loopback host SQL must normalize spelling and require a dotted quad, got %q", loopbackSQL)
+	}
+	if len(loopbackCountArgs) != 0 {
+		t.Fatalf("loopback host SQL should bind no host literal, got %#v", loopbackCountArgs)
+	}
+
+	_, exactSQL, exactCountArgs, _ := listTasksPageSQL(tasks.TaskListFilter{Host: "db-primary.example"})
+	if !strings.Contains(exactSQL, "JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.host')) = ?") {
+		t.Fatalf("non-loopback host must stay exact, got %q", exactSQL)
+	}
+	if len(exactCountArgs) != 1 || exactCountArgs[0] != "db-primary.example" {
+		t.Fatalf("expected exact host arg, got %#v", exactCountArgs)
+	}
 }
 
 // TestMySQLTaskStore_ListTasksPageUsesCountAndLimit 验证 COUNT + LIMIT/OFFSET，handler 不必看到整表。
@@ -327,6 +349,125 @@ func TestMySQLTaskStore_ListTasksPageUsesCountAndLimit(t *testing.T) {
 		t.Fatalf("ListTasksPage returned error: %v", err)
 	}
 	if total != 6 || len(page) != 2 || page[0].ID != "3" || page[1].ID != "4" {
+		t.Fatalf("unexpected page total=%d items=%+v", total, page)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+type sourceIdentityCase struct {
+	host            string
+	sameAsLocalhost bool
+}
+
+// sameSourceHostCases is the accept/reject set shared by lookup (SameSourceHost)
+// and ListTasksPage SQL. Extra loopback spellings that ParseIP rejects stay exact.
+func sameSourceHostCases() []sourceIdentityCase {
+	return []sourceIdentityCase{
+		{host: "localhost", sameAsLocalhost: true},
+		{host: "LOCALHOST", sameAsLocalhost: true},
+		{host: "localhost.", sameAsLocalhost: true},
+		{host: "127.0.0.1", sameAsLocalhost: true},
+		{host: "127.0.0.0", sameAsLocalhost: true},
+		{host: "127.255.255.255", sameAsLocalhost: true},
+		{host: "::1", sameAsLocalhost: true},
+		{host: "[::1]", sameAsLocalhost: true},
+		{host: "0:0:0:0:0:0:0:1", sameAsLocalhost: true},
+		{host: "0000:0000:0000:0000:0000:0000:0000:0001", sameAsLocalhost: true},
+		{host: "::ffff:127.0.0.1", sameAsLocalhost: true},
+		{host: "[::ffff:127.0.0.1]", sameAsLocalhost: true},
+		{host: "::ffff:7f00:1", sameAsLocalhost: true},
+		{host: "127.000.0.1", sameAsLocalhost: false},
+		{host: "127.0.00.1", sameAsLocalhost: false},
+		{host: "[127.0.0.1]", sameAsLocalhost: false},
+		{host: "[localhost]", sameAsLocalhost: false},
+		{host: "db-primary.example", sameAsLocalhost: false},
+		{host: "[2001:db8::1]", sameAsLocalhost: false},
+		{host: "::ffff:10.0.0.1", sameAsLocalhost: false},
+	}
+}
+
+func assertLoopbackSQLMatchesSameSourceHost(t *testing.T, sqlText string) {
+	t.Helper()
+	if strings.Contains(sqlText, `^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$`) {
+		t.Fatalf("loopback SQL must not treat padded IPv4 as 127/8, got %q", sqlText)
+	}
+	if strings.Contains(sqlText, "INET_ATON(") {
+		t.Fatalf("INET_ATON accepts 127.000.0.1; use a no-leading-zero 127/8 regexp, got %q", sqlText)
+	}
+	if strings.Contains(sqlText, "TRIM(BOTH ']'") {
+		t.Fatalf("loopback SQL must not unbracket IPv4 like [127.0.0.1], got %q", sqlText)
+	}
+	if !strings.Contains(sqlText, "INSTR(") || !strings.Contains(sqlText, "':'") {
+		t.Fatalf("loopback SQL must unwrap brackets only when the host contains ':', got %q", sqlText)
+	}
+	if !strings.Contains(sqlText, "INET6_ATON('::1')") {
+		t.Fatalf("loopback SQL must keep INET6_ATON(::1) so expanded IPv6 loopback matches, got %q", sqlText)
+	}
+	if !strings.Contains(sqlText, "::ffff:127.0.0.0") {
+		t.Fatalf("loopback SQL must keep IPv4-mapped 127/8, got %q", sqlText)
+	}
+}
+
+// TestMySQLTaskStore_ListTasksPageSQLMatchesSameSourceHost 用 store 路径核对
+// ListTasksPage SQL/args 与 SameSourceHost 同一套源身份。
+//
+// Live MySQL is skipped: this package has no real MySQL test harness (go-sqlmock
+// only; e2e MySQL is docker-compose, not a unit fixture). The generated SQL/args
+// are asserted against tasks.SameSourceHost instead of executing INET6_ATON.
+func TestMySQLTaskStore_ListTasksPageSQLMatchesSameSourceHost(t *testing.T) {
+	loopbackSQL := loopbackSourceHostSQL(sourceHostJSONExpr)
+	assertLoopbackSQLMatchesSameSourceHost(t, loopbackSQL)
+
+	for _, tc := range sameSourceHostCases() {
+		same := tasks.SameSourceHost(tc.host, "localhost")
+		if same != tc.sameAsLocalhost {
+			t.Fatalf("SameSourceHost(%q, localhost)=%v, want %v", tc.host, same, tc.sameAsLocalhost)
+		}
+		_, selectSQL, countArgs, _ := listTasksPageSQL(tasks.TaskListFilter{Host: tc.host})
+		usesExact := strings.Contains(selectSQL, sourceHostJSONExpr+" = ?")
+		if tc.sameAsLocalhost {
+			if usesExact {
+				t.Fatalf("loopback filter %q must use identity SQL, got %q", tc.host, selectSQL)
+			}
+			if len(countArgs) != 0 {
+				t.Fatalf("loopback filter %q must bind no host arg, got %#v", tc.host, countArgs)
+			}
+			assertLoopbackSQLMatchesSameSourceHost(t, selectSQL)
+			continue
+		}
+		if !usesExact {
+			t.Fatalf("non-loopback filter %q must stay exact, got %q", tc.host, selectSQL)
+		}
+		if len(countArgs) != 1 || countArgs[0] != tc.host {
+			t.Fatalf("exact filter %q args=%#v", tc.host, countArgs)
+		}
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	filter := tasks.TaskListFilter{Host: "localhost", Limit: 10, Offset: 0}
+	countSQL, selectSQL, _, selectArgs := listTasksPageSQL(filter)
+	assertLoopbackSQLMatchesSameSourceHost(t, selectSQL)
+	mock.ExpectQuery(regexp.QuoteMeta(countSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	now := time.Now()
+	rows := addTaskRow(sqlmock.NewRows(taskRowColumns()), "1", "stored-localhost", "k-1", "CREATED",
+		`{"host":"localhost","port":3306}`, now)
+	rows = addTaskRow(rows, "2", "stored-ipv4", "k-2", "CREATED", `{"host":"127.0.0.1","port":3306}`, now)
+	mock.ExpectQuery(regexp.QuoteMeta(selectSQL)).WithArgs(toDriverValues(selectArgs)...).WillReturnRows(rows)
+
+	page, total, err := store.ListTasksPage(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("ListTasksPage returned error: %v", err)
+	}
+	if total != 2 || len(page) != 2 {
 		t.Fatalf("unexpected page total=%d items=%+v", total, page)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
