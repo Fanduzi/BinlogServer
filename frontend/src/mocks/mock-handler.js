@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered server pagination/filter validation, independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -25,6 +25,88 @@ function parseInteger(value) {
   if (!/^-?\d+$/.test(raw)) return null;
   const number = Number(raw);
   return Number.isSafeInteger(number) ? number : null;
+}
+
+function parseIPv4Octets(text) {
+  const parts = String(text).split(".");
+  if (parts.length !== 4) return null;
+  const octets = [];
+  for (const part of parts) {
+    if (!/^(0|[1-9]\d{0,2})$/.test(part)) return null;
+    const value = Number(part);
+    if (value > 255) return null;
+    octets.push(value);
+  }
+  return octets;
+}
+
+function parseIPv6HexGroups(side) {
+  if (side === "") return [];
+  const parts = side.split(":");
+  if (parts.some((part) => part === "" || !/^[0-9a-f]{1,4}$/.test(part))) return null;
+  return parts.map((part) => Number.parseInt(part, 16));
+}
+
+function parseIPv6Bytes(text) {
+  if (!text.includes(":")) return null;
+  let raw = text;
+  let ipv4 = null;
+  if (text.includes(".")) {
+    const lastColon = text.lastIndexOf(":");
+    ipv4 = parseIPv4Octets(text.slice(lastColon + 1));
+    if (!ipv4) return null;
+    raw = text.slice(0, lastColon);
+    if (raw.endsWith(":")) raw += ":";
+  }
+  const compression = raw.indexOf("::");
+  if (compression !== -1 && raw.indexOf("::", compression + 2) !== -1) return null;
+  const need = ipv4 ? 6 : 8;
+  let groups;
+  if (compression === -1) {
+    groups = parseIPv6HexGroups(raw);
+    if (!groups || groups.length !== need) return null;
+  } else {
+    const left = parseIPv6HexGroups(raw.slice(0, compression));
+    const right = parseIPv6HexGroups(raw.slice(compression + 2));
+    if (!left || !right) return null;
+    const zeros = need - left.length - right.length;
+    if (zeros < 1) return null;
+    groups = [...left, ...Array(zeros).fill(0), ...right];
+  }
+  const bytes = [];
+  for (const group of groups) {
+    bytes.push((group >> 8) & 0xff, group & 0xff);
+  }
+  if (ipv4) bytes.push(...ipv4);
+  return bytes.length === 16 ? bytes : null;
+}
+
+function isLoopbackIPLiteral(text) {
+  const v4 = parseIPv4Octets(text);
+  if (v4) return v4[0] === 127;
+  const v6 = parseIPv6Bytes(text);
+  if (!v6) return false;
+  const mapped = v6.slice(0, 10).every((byte) => byte === 0) && v6[10] === 0xff && v6[11] === 0xff;
+  if (mapped) return v6[12] === 127;
+  return v6.slice(0, 15).every((byte) => byte === 0) && v6[15] === 1;
+}
+
+function isLoopbackHost(host) {
+  let normalized = String(host ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "");
+  if (normalized === "localhost") return true;
+  if (normalized.length >= 2 && normalized.startsWith("[") && normalized.endsWith("]")) {
+    normalized = normalized.slice(1, -1);
+    if (!normalized.includes(":")) return false;
+  }
+  return isLoopbackIPLiteral(normalized);
+}
+
+function sameSourceHost(left, right) {
+  if (left === right) return true;
+  return isLoopbackHost(left) && isLoopbackHost(right);
 }
 
 function compareNumericTaskID(a, b) {
@@ -197,7 +279,7 @@ function buildLookupResponse(state, query) {
   const port = Number(query.get("port") || 0);
   const count = state.tasks.filter((row) => {
     const source = row.task?.source || {};
-    return source.host === host && Number(source.port) === port;
+    return sameSourceHost(source.host, host) && Number(source.port) === port;
   }).length;
   return {
     exists: count > 0,
@@ -300,7 +382,7 @@ function filteredTaskRows(state, taskQuery) {
     .filter((row) => {
       const source = row.task?.source || {};
       return (
-        (!taskQuery.host || source.host === taskQuery.host) &&
+        (!taskQuery.host || sameSourceHost(source.host, taskQuery.host)) &&
         (taskQuery.port === null || Number(source.port) === taskQuery.port) &&
         (!taskQuery.state || row.task?.state === taskQuery.state)
       );

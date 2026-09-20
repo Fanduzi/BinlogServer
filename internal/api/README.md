@@ -19,8 +19,8 @@
 - `WithRateLimit(RateLimiterConfig) ServerOption` - 注入限流配置
 - `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。
 - `GET /api/dashboard` - 返回同口径 summary、任务明细与 source 聚合；source 状态计数同时暴露 `starting` 与 `running`。
-- `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页；页序为数字 id 升序；支持 host/port/state 过滤；cluster/mysql 走 `ListTasksPage`（COUNT + `ORDER BY CAST(id AS UNSIGNED), id LIMIT/OFFSET`），standalone 仍切内存快照。默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
-- `GET /api/dashboard` - 支持同一组过滤/分页参数；一次 `ListTasksPage`（Limit<=0 表示全部匹配）得到匹配集，再内存切页；`total` 与 `summary.total` 同一数字。
+- `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页，不是控制台任务观测来源。页序为数字 id 升序；支持 host/port/state 过滤，host 与 lookup/dashboard 共用 `SameSourceHost`；cluster/mysql 走 `ListTasksPage`（COUNT + `ORDER BY CAST(id AS UNSIGNED), id LIMIT/OFFSET`），standalone 仍切内存快照。默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
+- `GET /api/dashboard` - 控制台任务观测唯一读取：同一组过滤/分页参数下一次 `ListTasksPage`（Limit<=0 表示全部匹配）得到匹配集，再内存切页；`total`、`summary.total` 与按源 `task_count` 同一批数字。
 - `POST /api/tasks/batch` - 接收 `items` 数组（1..100 个现有创建请求），整包 envelope 错误返回 400 且不创建；合法 envelope 按顺序逐项调用 `CreateTaskFromSpec`，返回 200 的 `{index,cluster_key,task|error}` 结果数组。
 
 ## Dependencies
@@ -32,12 +32,12 @@
 ## Features
 - 认证：支持 Bearer Token 或 API Key；`/healthz` 默认匿名，`/metrics` 与 `/api/*` 可配置保护。`sanitizeTask` 在响应中清空 `source.password`（解密仅供内部使用）。`/ui` 与 `/swagger` 仍不走 API auth。
 - 创建任务：`CreateTaskFromSpec` 整包校验通过后才落库；400 返回 JSON `{"error","code"}`。批量创建复用同一入口，单项错误不阻塞后续项，成功任务脱敏返回。
-- source lookup：`GET /api/sources/lookup` 使用 tasks 共享 loopback 分类归并 localhost 与显式 loopback literal，端口仍严格匹配；非 loopback host 保持修剪后的原文精确匹配且不做 DNS 解析。
+- 源身份：`GET /api/sources/lookup` 与 dashboard/summary/list 的 host 过滤共用 `tasks.SameSourceHost`。回环别名（localhost、127/8、::1，含括号 IPv6）是同一台源，端口仍严格匹配；非回环 host 保持修剪后的原文精确匹配且不做 DNS 解析。
 - 健康检查：`GET /healthz` 文本 `ok`；`GET /api/health` JSON `{"status":"ok"}`
 - 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。
 - 状态汇总：summary/dashboard 保留既有计数键，并新增 `starting`；STARTING 不混入 `running`。
 - Source 聚合：dashboard source 项保留 `running`，并新增独立 `starting` 状态计数。
-- 服务端分页：任务列表仍 SQL LIMIT/OFFSET；dashboard/summary 一次取出过滤匹配集再内存切页，total 与 summary.total 同一数字。非法 state/limit/offset/port 返回 400，limit 超过 500 返回 `invalid limit`。
+- 任务观测：控制台只信 dashboard。任务列表仍可 SQL LIMIT/OFFSET，但不做控制台观测；dashboard/summary 一次取出过滤匹配集再内存切页，total、summary.total 与按源计数同一数字。非法 state/limit/offset/port 返回 400，limit 超过 500 返回 `invalid limit`。
 - 限流：基于 IP 的令牌桶限流，默认 100 req/s，burst 200
 - Tracing：OTel HTTP span（可选）
 
