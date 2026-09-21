@@ -80,10 +80,10 @@ For tagged public releases, download the archive that matches your platform from
 - `binlog-server_<version>_linux_amd64.tar.gz`
 - `binlog-server_<version>_linux_arm64.tar.gz`
 
-The real asset name is `binlog-server_<ver>_<os>_<arch>.tar.gz` (for example `binlog-server_0.5.4_linux_amd64.tar.gz`). The release page also provides `checksums.txt`; verify it before extracting. The tarball contains a versioned subdirectory:
+The real asset name is `binlog-server_<ver>_<os>_<arch>.tar.gz` (for example `binlog-server_0.5.5_linux_amd64.tar.gz`). The release page also provides `checksums.txt`; verify it before extracting. The tarball contains a versioned subdirectory:
 
 ```text
-binlog-server_0.5.4_linux_amd64/
+binlog-server_0.5.5_linux_amd64/
   binlog-server
   migrate
   migrations/
@@ -111,7 +111,7 @@ This is the shortest path for release operators. You do not need Go installed.
 ### 1. Download, verify, extract, run
 
 ```bash
-VER=0.5.4
+VER=0.5.5
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -344,7 +344,7 @@ go run ./cmd/binlog-server
 BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
 
 # Prepare a local set of release assets
-make release-assets VERSION=v0.5.4
+make release-assets VERSION=v0.5.5
 ```
 
 ## Development Validation

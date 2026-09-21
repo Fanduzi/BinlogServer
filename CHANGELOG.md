@@ -12,6 +12,27 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.5] - 2026-09-21
+
+### Changed
+
+- Operator download examples in README, the landing page, and the deployment guide now pin `v0.5.5`.
+- Task-observation host filters and source lookup share `SameSourceHost`; loopback spellings are one source.
+- Cluster overview, worker task counters, and metrics task/owner views read the unfiltered store ownership copy.
+- The console task page requires dashboard paging fields and no longer locally re-pages a legacy payload.
+- Console list refresh uses the task owner/epoch copy for lease risk instead of per-row `/lease`.
+- Go modules: validator `v10.30.4`, MySQL driver `v1.10.1`, migrate `v4.20.1`, `golang.org/x/time` `v0.16.0`.
+
+### Fixed
+
+- `GetTask` fails loud on store miss or store error instead of returning a stale in-memory ownership copy.
+- Source lookup reads the store ownership copy instead of the boot-time memory list.
+- Retry-upload E2E pulls MinIO from Quay so CI is not blocked on Docker Hub `minio/minio:latest`.
+
+### Docs
+
+- README includes Console, task detail, and Swagger screenshots.
+
 ## [v0.5.4] - 2026-09-07
 
 ### Changed
