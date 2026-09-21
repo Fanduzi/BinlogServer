@@ -322,8 +322,6 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 	return nil
 }
 
-// StartTask 启动任务；cluster 模式下会先 acquire lease。
-
 func (s *Scheduler) GetTask(id string) (Task, error) {
 	// 有 store 时按主键读最新值。store 说没有就是没有；其它错误原样失败，
 	// 不把内存里的旧主人/epoch 抄本当成读成功。没有 store 时仍读内存名单。
