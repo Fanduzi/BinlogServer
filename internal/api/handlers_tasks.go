@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
-// input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard observation (page/summary/source counts) then memory paging, lookup and dashboard host filters sharing SameSourceHost, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
+// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard observation (page/summary/source counts) then memory paging, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -214,12 +214,18 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	items, err := s.tasks.ListClusterObservation(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	resp := sourceLookupResponse{
 		Host:    host,
 		Port:    port,
 		TaskIDs: []string{},
 	}
-	matched := tasks.FilterTasks(s.tasks.ListTasks(), tasks.TaskListFilter{Host: host, Port: &port})
+	matched := tasks.FilterTasks(items, tasks.TaskListFilter{Host: host, Port: &port})
 	for _, task := range matched {
 		resp.TaskIDs = append(resp.TaskIDs, task.ID)
 	}
@@ -831,35 +837,6 @@ func sortTasksByID(items []tasks.Task) {
 
 func paginateTasks(items []tasks.Task, offset, limit int) []tasks.Task {
 	return tasks.PaginateTasks(items, offset, limit)
-}
-
-// filterTasksBySource 按 source 查询参数过滤任务集合。
-func (s *Server) filterTasksBySource(items []tasks.Task, r *http.Request) ([]tasks.Task, bool, error) {
-	host := strings.TrimSpace(r.URL.Query().Get("host"))
-	portRaw := strings.TrimSpace(r.URL.Query().Get("port"))
-	if host == "" && portRaw == "" {
-		return items, false, nil
-	}
-	var port uint16
-	if portRaw != "" {
-		p, err := parsePort(portRaw)
-		if err != nil {
-			return nil, false, errors.New("invalid port")
-		}
-		port = p
-	}
-
-	out := make([]tasks.Task, 0, len(items))
-	for _, task := range items {
-		if host != "" && !tasks.SameSourceHost(task.Source.Host, host) {
-			continue
-		}
-		if portRaw != "" && task.Source.Port != port {
-			continue
-		}
-		out = append(out, task)
-	}
-	return out, true, nil
 }
 
 // parsePort 解析并校验 TCP 端口号（1-65535）。

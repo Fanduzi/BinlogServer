@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
-// input: HTTP GET /api/cluster/overview, /api/workers, /metrics, and /api/dashboard
-// output: cluster observation from the store ownership copy; /metrics uses one snapshot per scrape
+// input: HTTP GET /api/cluster/overview, /api/workers, /metrics, /api/dashboard, and /api/sources/lookup
+// output: cluster observation and source lookup from the store ownership copy; /metrics uses one snapshot per scrape
 // pos: control-plane HTTP seam tests for cluster-wide ownership observation
 // note: if this file changes, update this header and module README.md.
 package api
@@ -265,13 +265,77 @@ func TestClusterObservation_MetricsUsesOneStoreSnapshot(t *testing.T) {
 	}
 }
 
+func TestSourceLookup_UsesStoreCopyNotMemory(t *testing.T) {
+	store := seedClusterObservationStore(t, tasks.Task{
+		ID:         "1",
+		Name:       "src-a",
+		ClusterKey: "src-a-key",
+		State:      tasks.StateStopped,
+		Source:     tasks.SourceConfig{Host: "db-stale", Port: 3306, User: "repl"},
+	})
+	scheduler := restoreSchedulerWithStore(t, store)
+	handler := NewServer(scheduler)
+
+	current := store.tasks["1"]
+	current.Source.Host = "db-live"
+	store.tasks["1"] = current
+	store.tasks["2"] = tasks.Task{
+		ID:         "2",
+		Name:       "src-b",
+		ClusterKey: "src-b-key",
+		State:      tasks.StateCreated,
+		Source:     tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"},
+	}
+
+	memory := scheduler.ListTasks()
+	if len(memory) != 1 || memory[0].Source.Host != "db-stale" {
+		t.Fatalf("memory snapshot already refreshed: %+v", memory)
+	}
+
+	staleResp := getJSON(handler, "/api/sources/lookup?host=db-stale&port=3306")
+	if staleResp.Code != http.StatusOK {
+		t.Fatalf("lookup db-stale returned %d body=%s", staleResp.Code, staleResp.Body.String())
+	}
+	var stale sourceLookupResponse
+	if err := json.Unmarshal(staleResp.Body.Bytes(), &stale); err != nil {
+		t.Fatalf("decode lookup db-stale: %v", err)
+	}
+	if stale.Exists || stale.Count != 0 || len(stale.TaskIDs) != 0 {
+		t.Fatalf("lookup used boot-time memory host db-stale: %+v", stale)
+	}
+
+	liveResp := getJSON(handler, "/api/sources/lookup?host=db-live&port=3306")
+	if liveResp.Code != http.StatusOK {
+		t.Fatalf("lookup db-live returned %d body=%s", liveResp.Code, liveResp.Body.String())
+	}
+	var live sourceLookupResponse
+	if err := json.Unmarshal(liveResp.Body.Bytes(), &live); err != nil {
+		t.Fatalf("decode lookup db-live: %v", err)
+	}
+	if !live.Exists || live.Count != 1 || strings.Join(live.TaskIDs, ",") != "1" {
+		t.Fatalf("lookup db-live=%+v, want task 1 from store copy", live)
+	}
+
+	loopbackResp := getJSON(handler, "/api/sources/lookup?host=localhost&port=3306")
+	if loopbackResp.Code != http.StatusOK {
+		t.Fatalf("lookup localhost returned %d body=%s", loopbackResp.Code, loopbackResp.Body.String())
+	}
+	var loopback sourceLookupResponse
+	if err := json.Unmarshal(loopbackResp.Body.Bytes(), &loopback); err != nil {
+		t.Fatalf("decode lookup localhost: %v", err)
+	}
+	if !loopback.Exists || loopback.Count != 1 || strings.Join(loopback.TaskIDs, ",") != "2" {
+		t.Fatalf("lookup localhost=%+v, want task 2 via SameSourceHost on store copy", loopback)
+	}
+}
+
 func TestClusterObservation_StoreErrorDoesNotReturnMemoryCopy(t *testing.T) {
 	inner := newGetTaskFailLoudStore(staleOwnershipTask())
 	store := &failingClusterListStore{TaskStore: inner}
 	handler := NewServer(restoreSchedulerWithStore(t, store))
 	store.err = errors.New("store unavailable")
 
-	for _, path := range []string{"/api/cluster/overview", "/api/workers", "/metrics"} {
+	for _, path := range []string{"/api/cluster/overview", "/api/workers", "/metrics", "/api/sources/lookup?host=127.0.0.1&port=3306"} {
 		resp := getJSON(handler, path)
 		if resp.Code == http.StatusOK {
 			t.Fatalf("%s returned 200 after store list error; body=%s", path, resp.Body.String())
