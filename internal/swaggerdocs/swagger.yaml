@@ -452,6 +452,10 @@ paths:
           description: Method Not Allowed
           schema:
             type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
       summary: Get cluster overview
       tags:
       - Cluster
@@ -1083,6 +1087,10 @@ paths:
             type: array
         "405":
           description: Method Not Allowed
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
           schema:
             type: string
       summary: List cluster workers

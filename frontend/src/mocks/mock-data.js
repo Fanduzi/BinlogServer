@@ -1,5 +1,5 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
-// output: reusable mock datasets, including server-pagination/current-page filter scenarios, shared by Vite dev mode and Playwright E2E adapters
+// output: reusable mock datasets, including server-pagination/current-page filter scenarios and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -12,6 +12,7 @@ function buildTask(id, overrides = {}) {
     state: "RUNNING",
     cluster_key: `cluster-${id}`,
     owner_worker_id: "worker-a",
+    epoch: 1,
     updated_at: now,
     source: {
       host: "127.0.0.1",
@@ -407,6 +408,7 @@ export const mockScenarios = {
         task: buildTask("501", {
           name: "task-stale-lease",
           owner_worker_id: "worker-stale",
+          epoch: 4,
           updated_at: "2026-03-20T08:00:00Z",
         }),
         replication: buildReplication(),
@@ -415,6 +417,7 @@ export const mockScenarios = {
     taskDetail: buildTask("501", {
       name: "task-stale-lease",
       owner_worker_id: "worker-stale",
+      epoch: 4,
       updated_at: "2026-03-20T08:00:00Z",
     }),
     replication: buildReplication(),

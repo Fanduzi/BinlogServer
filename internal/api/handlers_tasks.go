@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard/summary then memory paging, loopback-equivalent source lookup, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard observation (page/summary/source counts) then memory paging, lookup and dashboard host filters sharing SameSourceHost, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -129,7 +129,7 @@ type uploadFailureReasonsLimitQuery struct {
 // @Summary Get task summary counters
 // @Tags Dashboard
 // @Produce json
-// @Param host query string false "Filter by source host"
+// @Param host query string false "Filter by source host; localhost and explicit loopback literals share one identity, other hosts match exact spelling"
 // @Param port query int false "Filter by source port"
 // @Success 200 {object} summaryResponse
 // @Failure 400 {string} string
@@ -219,12 +219,8 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 		Port:    port,
 		TaskIDs: []string{},
 	}
-	for _, task := range s.tasks.ListTasks() {
-		sameHost := task.Source.Host == host ||
-			(tasks.IsLoopbackHost(task.Source.Host) && tasks.IsLoopbackHost(host))
-		if !sameHost || task.Source.Port != port {
-			continue
-		}
+	matched := tasks.FilterTasks(s.tasks.ListTasks(), tasks.TaskListFilter{Host: host, Port: &port})
+	for _, task := range matched {
 		resp.TaskIDs = append(resp.TaskIDs, task.ID)
 	}
 	sort.Strings(resp.TaskIDs)
@@ -238,7 +234,7 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 // @Summary Get task dashboard with replication delay overview
 // @Tags Dashboard
 // @Produce json
-// @Param host query string false "Filter by source host"
+// @Param host query string false "Filter by source host; localhost and explicit loopback literals share one identity, other hosts match exact spelling"
 // @Param port query int false "Filter by source port"
 // @Param state query string false "Filter by task state"
 // @Param limit query int false "Page size (default 100, range 1-500; values above 500 return 400)"
@@ -855,7 +851,7 @@ func (s *Server) filterTasksBySource(items []tasks.Task, r *http.Request) ([]tas
 
 	out := make([]tasks.Task, 0, len(items))
 	for _, task := range items {
-		if host != "" && task.Source.Host != host {
+		if host != "" && !tasks.SameSourceHost(task.Source.Host, host) {
 			continue
 		}
 		if portRaw != "" && task.Source.Port != port {

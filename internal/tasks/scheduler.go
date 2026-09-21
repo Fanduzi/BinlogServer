@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, and execution coordination
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -546,6 +546,15 @@ func normalizeEndpointHost(host string) string {
 // It intentionally does not resolve arbitrary hostnames.
 func IsLoopbackHost(host string) bool {
 	return isLoopbackHost(host)
+}
+
+// SameSourceHost reports whether two host spellings name the same source.
+// Loopback aliases are one source. Other hosts match the exact stored spelling.
+func SameSourceHost(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return IsLoopbackHost(a) && IsLoopbackHost(b)
 }
 
 func isLoopbackHost(host string) bool {

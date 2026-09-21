@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs and 5xx on cluster observation store errors
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -19,7 +19,7 @@ var (
 // @Summary List tasks
 // @Tags Tasks
 // @Produce json
-// @Param host query string false "Filter by source host"
+// @Param host query string false "Filter by source host; localhost and explicit loopback literals share one identity, other hosts match exact spelling"
 // @Param port query int false "Filter by source port"
 // @Param state query string false "Filter by task state (CREATED, STARTING, RUNNING, LEASE_DEGRADED, REBUILDING_FILE, RETRY_BACKOFF, FAILED, STOPPING, STOPPED)"
 // @Param limit query int false "Page size (default 100, range 1-500; values above 500 return 400 invalid limit)"
@@ -165,6 +165,7 @@ func (s *Server) swaggerTaskReplicationDoc() {}
 // @Param limit query int false "Workers list limit (max 200)"
 // @Success 200 {array} workerItem
 // @Failure 405 {string} string
+// @Failure 500 {string} string
 // @Router /api/workers [get]
 func (s *Server) swaggerWorkersDoc() {}
 
@@ -174,6 +175,7 @@ func (s *Server) swaggerWorkersDoc() {}
 // @Produce json
 // @Success 200 {object} clusterOverview
 // @Failure 405 {string} string
+// @Failure 500 {string} string
 // @Router /api/cluster/overview [get]
 func (s *Server) swaggerClusterOverviewDoc() {}
 
