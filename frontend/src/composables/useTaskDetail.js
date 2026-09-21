@@ -1,6 +1,7 @@
-// input: cluster state (leaseByTask), API calls for task data
+// input: API calls for task data including single-task GET /lease
 // output: detail drawer state and showDetail action
-// pos: task detail drawer data management
+// pos: task detail drawer data management; /lease stays on this single-task path only
+// note: if this file changes, update this header and frontend/src/composables/README.md
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
@@ -16,7 +17,7 @@ import {
 
 const RUN_HISTORY_LIMIT = 10;
 
-export function useTaskDetail(cluster) {
+export function useTaskDetail() {
   const { t } = useI18n();
 
   const detailVisible = ref(false);
@@ -58,9 +59,6 @@ export function useTaskDetail(cluster) {
       checkpoint.value = cp;
       events.value = evs || [];
       files.value = fs || [];
-      if (lease) {
-        cluster.leaseByTask[id] = lease;
-      }
       detailVisible.value = true;
     } catch (err) {
       ElMessage.error(parseErr(err));

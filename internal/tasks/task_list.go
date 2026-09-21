@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: in-memory task snapshots, TaskListFilter host/port/state/limit/offset, and binlog file snapshots
-// output: numeric-id-ordered filtered pages, COUNT totals, STARTING-unowned subsets, and UPLOAD_FAILED file subsets
+// input: in-memory task snapshots, TaskListFilter host/port/state/limit/offset using SameSourceHost, and binlog file snapshots
+// output: numeric-id-ordered filtered pages with loopback-equivalent host identity, COUNT totals, STARTING-unowned subsets, and UPLOAD_FAILED file subsets
 // pos: shared list/filter/page helpers for TaskStore fakes and standalone Scheduler paging
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -24,7 +24,7 @@ type TaskListFilter struct {
 func FilterTasks(items []Task, filter TaskListFilter) []Task {
 	out := make([]Task, 0, len(items))
 	for _, task := range items {
-		if filter.Host != "" && task.Source.Host != filter.Host {
+		if filter.Host != "" && !SameSourceHost(task.Source.Host, filter.Host) {
 			continue
 		}
 		if filter.Port != nil && task.Source.Port != *filter.Port {

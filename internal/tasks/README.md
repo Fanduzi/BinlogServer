@@ -3,9 +3,9 @@
 ## Files
 - `scheduler.go`: 调度器核心类型、选项注入、`TaskStore`（含 GetTask/ListTasksPage/ListStartingUnownedTasks）与通用辅助函数；`ExpiredLeaseTaskLister` 供 cluster 过期租约查询（缺实现返回 `ErrExpiredLeaseLookupNotAvailable`）。
 - `memory_lease.go`: 进程内 `LeaseManager`，单机与测试走同一扇任务所有权门；`Release` 立刻腾出租约。
-- `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec）；`GetTask` 按主键刷新；`ListTasksPage` 在有 store 时走 SQL 分页。
+- `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec）；`GetTask` 按主键刷新，store 失败不退回内存旧抄本；`ListClusterObservation` 有 store 时读 `store.ListTasks` 全库所有权抄本；`ListTasksPage` 在有 store 时走 SQL 分页。
 - `scheduler_lifecycle.go`: 启停、`ClaimRunnableTasks`（无主 STARTING + 过期租约 + 自己名下空闲）、重试退避、FAILED 立刻放租约。
-- `task_list.go`: 数字 id 排序、host/port/state 过滤、内存分页，以及 `FailedUploadFiles` / `StartingUnownedTasks`，供 standalone 与测试 fake 复用。
+- `task_list.go`: 数字 id 排序、host/port/state 过滤（host 走 `SameSourceHost`）、内存分页，以及 `FailedUploadFiles` / `StartingUnownedTasks`，供 standalone 与测试 fake 复用。
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用，以及可重试的 `SOURCE_UNREACHABLE`）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
@@ -19,7 +19,7 @@
 
 ## Exports
 - 任务 CRUD、启动停止、状态推进。
-- `GetTask` 走 store 主键查询；`ListTasksPage` 返回 `{page, total}`；`ClaimStartingTasks` 不扫描整表。
+- `GetTask` 走 store 主键查询：store 说没有就是没有，其它错误原样失败，不退回内存里的旧主人/epoch 抄本；没有 store 时仍读内存名单。`ListClusterObservation` 返回全库所有权抄本（有 store 读 `store.ListTasks`，失败原样返回；没有 store 时仍用 `ListTasks` 内存名单），不走任务观测过滤。`ListTasksPage` 返回 `{page, total}`；`ClaimStartingTasks` 不扫描整表。
 - `ClaimRunnableTasks`：开机和平时同一条「把该我跑的跑起来」（无主 STARTING + 过期租约 + 自己名下空闲 active）。`ClaimStartingTasks` / `ClaimExpiredTasks` 仍可单独调用。cluster 下 store 必须实现 `ExpiredLeaseTaskLister`，否则返回 `ErrExpiredLeaseLookupNotAvailable`。
 - `RetryFailedUploads` 只走失败文件查询（`ListFailedUploadBinlogFiles`）。file store 未实现该查询时返回 `ErrFailedUploadLookupNotAvailable`，不得用限量 `ListBinlogFiles` 冒充没有失败文件。内存 fake 用 `FailedUploadFiles` 做等价实现。
 - `StartTask` 允许在 Acquire 成功后接管过期的 RUNNING/LEASE_DEGRADED；仍拒绝抢占未过期租约或本机仍在跑的任务。
@@ -31,7 +31,8 @@
 - 事件记录、文件元信息、上传补偿。
 - `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
-- `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与 source lookup 共享。
+- `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与源身份共享。
+- `SameSourceHost`：回环别名是同一台源，非回环仍精确匹配；lookup 与任务观测 host 过滤共用。
 - `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/configure/start 时拒绝同端点 source。
 - Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
