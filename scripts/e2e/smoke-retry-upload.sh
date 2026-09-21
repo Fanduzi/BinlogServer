@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: canonical E2E database topology and retry-upload e2e dependencies
+# input: canonical E2E database topology, retry-upload e2e dependencies, and Quay MinIO/mc images
 # output: deterministic e2e orchestration, scenario execution, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -20,6 +20,11 @@ MINIO_CONSOLE_PORT=19001
 MINIO_USER="minioadmin"
 MINIO_PASS="minioadmin"
 MINIO_BUCKET="e2e-retry-upload"
+# Docker Hub minio/minio and minio/mc return pull denied (verified 2026-09-21).
+# Official community MinIO is source-only; dl.min.io historical binaries return 410.
+# Quay still serves the last public RELEASE images.
+MINIO_IMAGE="${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}"
+MC_IMAGE="${MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z}"
 
 CHECKPOINT_HTTP_CODE=""
 CHECKPOINT_HTTP_BODY=""
@@ -94,17 +99,19 @@ wait_minio_live() {
 ensure_minio_bucket() {
   docker run --rm --network host \
     -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
-    minio/mc mb -p "local/${MINIO_BUCKET}" >/dev/null 2>&1 || true
+    "$MC_IMAGE" mb -p "local/${MINIO_BUCKET}" >/dev/null 2>&1 || true
 }
 
 start_minio() {
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
+  docker pull "$MINIO_IMAGE"
+  docker pull "$MC_IMAGE"
   docker run -d --name "$MINIO_NAME" \
     -p "${MINIO_PORT}:9000" \
     -p "${MINIO_CONSOLE_PORT}:9001" \
     -e "MINIO_ROOT_USER=${MINIO_USER}" \
     -e "MINIO_ROOT_PASSWORD=${MINIO_PASS}" \
-    minio/minio server /data --console-address ":9001" >/dev/null
+    "$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
   wait_minio_live
   ensure_minio_bucket
 }
