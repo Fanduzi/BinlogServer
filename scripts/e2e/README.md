@@ -25,6 +25,7 @@
 兼容性说明：
 
 - `run-server.sh` 构建的临时 Linux 测试二进制默认关闭 CGO，用于贴近 release 产物的 `glibc 2.17` 兼容基线。
+- `smoke-retry-upload` 从 Quay 拉 MinIO / `mc`（`MINIO_IMAGE` / `MC_IMAGE` 可覆盖）。Docker Hub 的 `minio/minio` 与 `minio/mc` 已拒绝匿名拉取。
 
 ## 推荐入口
 
@@ -155,7 +156,7 @@ make e2e-topology-check
 
 该场景用于验证“上传失败补偿机制（最小版）”：
 
-1. 启动 minio 与 bucket，并以 upload 配置启动 binlog-server。
+1. 从 Quay 启动 minio 与 bucket，并以 upload 配置启动 binlog-server。
 2. 创建并启动任务，确认 checkpoint 已建立。
 3. 停止 minio，写入并 rotate，触发 `UPLOAD_FAILED` 文件记录。
 4. 继续写入源库，确认 checkpoint 仍持续推进（best-effort 语义不变）。
