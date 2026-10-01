@@ -34,7 +34,7 @@ Preconditions:
 ## Gotchas
 
 - Start still returns 204 when the source is bad. `FAILED` shows up on a later GET, not in the start response.
-- Unreachable is retried before `FAILED` (ten consecutive source failures, with backoff from 1s up to 30s). A single immediate GET that still says `STARTING` or `RETRY_BACKOFF` is not a failure of the path. Keep polling.
+- Unreachable is retried before `FAILED` (ten consecutive source failures, with backoff from 1s up to 30s — wall clock often exceeds two minutes). A single immediate GET that still says `STARTING` or `RETRY_BACKOFF` is not a failure of the path. Keep polling until `FAILED`.
 - Bad password is permanent: `SOURCE_ACCESS_DENIED` does not spend the unreachable retry budget. A closed port will not produce `SOURCE_ACCESS_DENIED`.
 - The create response strips `source.password`. Do not look for the password in the saved JSON.
 - `last_error` on a failed task stays visible to dashboard and replication. Filtering `GET /api/tasks?state=FAILED` is a list page, not a substitute for the dashboard row.

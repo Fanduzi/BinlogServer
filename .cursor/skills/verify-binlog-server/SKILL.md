@@ -24,7 +24,7 @@ export BINLOG_SERVER_BIN="/absolute/path/to/release/binlog-server"
 
 Ready means launch exits 0: the pid file exists and `GET /healthz` returned `ok`. The helper creates `$BINLOG_VERIFY_BASE`, `$BINLOG_VERIFY_BASE/data`, and `$BINLOG_VERIFY_BASE/logs`, writes `$BINLOG_VERIFY_BASE/start.env`, starts the binary with `nohup` from that base directory, and records `$BINLOG_VERIFY_BASE/binlog-server.pid`.
 
-Unset `BINLOG_VERIFY_META_DSN` for a standalone memory control plane. When it is set, launch runs `migrate up` against that DSN before the server starts, and the server receives it as `BINLOG_SERVER_META_DSN`. Point the DSN at a database name reserved for this `BINLOG_VERIFY_RUN_ID`.
+Unset `BINLOG_VERIFY_META_DSN` for a standalone memory control plane. When it is set, launch runs `migrate up` against that DSN before the server starts, and the server receives it as `BINLOG_SERVER_META_DSN`. Point the DSN at a database name reserved for this `BINLOG_VERIFY_RUN_ID`. Include `parseTime=true` on the DSN (the helper appends it when missing); without it, task list/get returns HTTP 500 on DATETIME scan. The task `source` host:port must not be the same metadata endpoint. Checkpoint read/resume (`features/checkpoint-resume.md`) needs this meta DSN — without it `GET /api/tasks/<id>/checkpoint` always returns 404.
 
 Loopback listen (`127.0.0.1`) matches the quick start: API auth stays off. The child process gets a clean environment (`env -i`) so a leftover `BINLOG_SERVER_*` value from the parent shell cannot attach this run to another data dir or meta database.
 
