@@ -37,12 +37,12 @@ Preconditions:
 - **Doctor and readbacks use the helper.** The script exports `BINLOG_VERIFY_LISTEN`, `BINLOG_VERIFY_BASE`, `BINLOG_VERIFY_EVIDENCE`, and `BINLOG_VERIFY_META_DSN`, writes `config.yaml` with `mode: cluster` and `cluster.role: control-plane`, then runs `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh launch` and `doctor`. Doctor prints `PASS`. Task reads are `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /api/tasks/<id>`.
 - **Do not steal a live lease.** Run `scripts/failover-dogfood.sh run no-steal`. Exit is 0. After worker B has been up for longer than `lease_ttl_sec`, `still-a.json` still has `owner_worker_id` `worker-a`.
 - **Do not stomp on startup.** Run `scripts/failover-dogfood.sh run no-stomp`. Exit is 0. `still-a.json` is `RUNNING` with `owner_worker_id` `worker-a`, and `events.json` has no `TASK_STOPPED`.
-- **Claim during backoff.** Run `scripts/failover-dogfood.sh run backoff`. Exit is 0. `backoff-a.json` is `RETRY_BACKOFF` owned by `worker-a`. `claimed-b.json` is owned by `worker-b` and is not `STOPPED`.
+- **Claim during backoff.** Run `scripts/failover-dogfood.sh run backoff`. Exit is 0. `backoff-a.json` is `RETRY_BACKOFF` owned by `worker-a`. `claimed-b.json` is owned by `worker-b`, has a larger `epoch`, and is not `STOPPED`. `events.json` has no `TASK_STOPPED` or `TASK_STOPPING`. A `RETRY_BACKOFF` claim does not write `TASK_LEASE_TAKEOVER`.
 - **Release on failure.** Run `scripts/failover-dogfood.sh run failed`. Exit is 0. `failed.json` is `FAILED` with an empty `owner_worker_id`. `runs.json` includes `worker_id` `worker-b` after the next start.
 - **Pause A.** Run `scripts/failover-dogfood.sh run pause`. Exit is 0. `after-task.json` is `RUNNING` owned by `worker-b`. The first `worker-b` row in `states.tsv` is not earlier than the lease expiry recorded before the pause. A later row, at least `lease_ttl_sec + lease_grace_sec` after the pause, is still `worker-b` and not `STOPPED`.
 - **Console owner.** With `FAILOVER_CONSOLE_SHOT` set to a png path, `run happy` opens `/ui/`, clicks `view-nav-tasks` and `task-detail-trigger-<id>`, and requires `task-drawer-worker` to read `worker-b`.
 - **Cleanup.** Run `scripts/failover-dogfood.sh run cleanup`. Exit is 0. `listeners-after.txt` does not contain the control-plane, worker A, worker B, or meta ports. The evidence directory still exists.
-- **Trunk and perf.** `FAILOVER_TRUNK_BIN` points at the v0.5.5 binary. `scripts/failover-dogfood.sh live` runs the scenarios above plus the same happy path on the trunk binary. `scripts/failover-dogfood.sh perf` prints five interleaved kill-to-growing-file samples and exits 0 when the head median is less than or equal to the trunk median plus 5 seconds.
+- **Trunk and perf.** `FAILOVER_TRUNK_BIN` points at the baseline binary. This proof uses current main. `scripts/failover-dogfood.sh live` runs the scenarios above plus the same happy path on the trunk binary. `scripts/failover-dogfood.sh perf` prints five interleaved kill-to-growing-file samples and exits 0 when the head median is less than or equal to the trunk median plus 5 seconds.
 - **Proof.** `result.txt` in the scenario directory starts with `PASS`. `doctor.txt` contains `PASS`.
 
 ## Gotchas
@@ -54,3 +54,4 @@ Preconditions:
 - Start worker B only after A is `RUNNING` when the entry needs A to own the task. Two live workers both claim unowned `STARTING`.
 - A 404 checkpoint means the dump has not flushed yet. Happy-path proof waits for a checkpoint before killing A.
 - `GET /api/tasks/<id>/events` is served by the control plane from meta. Events written only inside a dead worker's memory are not the proof.
+- `TASK_LEASE_TAKEOVER` is written only when the previous state was `RUNNING` or `LEASE_DEGRADED`. The happy path and the pause path require it. The backoff path does not.

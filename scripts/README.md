@@ -25,7 +25,8 @@
 - `make e2e-quick`
 - `make e2e-full`
 - `./scripts/verify-phase-acceptance.sh`
-- `BINLOG_SERVER_BIN=... ./scripts/failover-dogfood.sh run happy`
+- `BINLOG_SERVER_BIN=... ./scripts/failover-dogfood.sh run happy|backoff|no-steal|no-stomp|failed|pause|cleanup`
+- `failover-dogfood.sh` 的 `RETRY_BACKOFF` 接管不要求 `TASK_LEASE_TAKEOVER`（该事件只在先前状态为 `RUNNING` 或 `LEASE_DEGRADED` 时写入）；通过条件是 owner 变为 `worker-b`、epoch 增大，且没有 `STOPPED`。
 
 ## Dependencies
 

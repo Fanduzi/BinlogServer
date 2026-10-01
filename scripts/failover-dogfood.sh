@@ -39,7 +39,7 @@ Usage: failover-dogfood.sh <run SCENARIO|live|perf|down>
 
 Required:
   BINLOG_SERVER_BIN       head binlog-server (migrate binary beside it)
-  FAILOVER_TRUNK_BIN      v0.5.5 binlog-server, for live and perf
+  FAILOVER_TRUNK_BIN      baseline binlog-server for live and perf (current main)
 
 Optional:
   FAILOVER_LEASE_TTL      default 15
@@ -406,7 +406,7 @@ lease_renewed_at() {
 lease_expire_unix() {
   local id="$1"
   mysql_exec "$FAILOVER_ROOT/mysql-meta/mysql.sock" -e \
-    "SELECT UNIX_TIMESTAMP(lease_expire_at) FROM ${META_DB}.task_leases WHERE task_id='${id}'"
+    "SELECT CAST(UNIX_TIMESTAMP(lease_expire_at) AS UNSIGNED) FROM ${META_DB}.task_leases WHERE task_id='${id}'"
 }
 
 dir_bytes() {
@@ -792,7 +792,8 @@ scenario_backoff() {
   [[ "$rc" == "0" ]] || fail "worker B did not claim RETRY_BACKOFF"
   cp "$SCENARIO_EVIDENCE/matched.json" "$SCENARIO_EVIDENCE/claimed-b.json"
   events_snapshot "$TASK_ID" "$SCENARIO_EVIDENCE/events.json"
-  assert_takeover_events "$SCENARIO_EVIDENCE/events.json" || fail "backoff events mismatch"
+  assert_no_stop_events "$SCENARIO_EVIDENCE/events.json" || fail "backoff events mismatch"
+  [[ "$(py_field "$SCENARIO_EVIDENCE/claimed-b.json" epoch)" -gt "$OLD_EPOCH" ]] || fail "backoff claim did not increase epoch"
   pass "RETRY_BACKOFF claimed by worker-b"
 }
 
@@ -968,6 +969,7 @@ measure_happy_seconds() {
 
 run_scenario() {
   local fn="$1" name="${2:-$1}"
+  fn="${fn//-/_}"
   SCENARIO="$name"
   SCENARIO_EVIDENCE="$EVIDENCE/$name"
   mkdir -p "$SCENARIO_EVIDENCE"
