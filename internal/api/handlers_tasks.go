@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, one-read filtered dashboard observation (page/summary/source counts) then memory paging, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -146,40 +146,12 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	items, total, err := s.listMatchingTasks(r.Context(), query)
+	summary, _, err := s.dashboardObservation(r.Context(), query, time.Now())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	resp := summaryResponse{Total: total}
-	now := time.Now()
-	for _, task := range items {
-		switch task.State {
-		case tasks.StateRunning:
-			resp.Running++
-		case tasks.StateStarting:
-			resp.Starting++
-		case tasks.StateRetryBackoff:
-			resp.RetryBackoff++
-		case tasks.StateStopped:
-			resp.Stopped++
-		case tasks.StateFailed:
-			resp.Failed++
-		}
-
-		progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
-		rep := buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds)
-		switch rep.Status {
-		case "NORMAL":
-			resp.Normal++
-		case "DELAYED":
-			resp.Delayed++
-		case "ABNORMAL":
-			resp.Abnormal++
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // handleSourceLookup godoc
@@ -260,88 +232,27 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	items, total, err := s.listMatchingTasks(r.Context(), query)
+	now := time.Now()
+	summary, sources, err := s.dashboardObservation(r.Context(), query, now)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	page := tasks.PaginateTasks(items, query.Offset, query.Limit)
-	now := time.Now()
+	page, _, err := s.tasks.ListTasksPage(r.Context(), query.toFilter())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	resp := dashboardResponse{
 		GeneratedAt:      now,
 		ThresholdSeconds: defaultDelayThresholdSeconds,
-		Total:            total,
+		Total:            summary.Total,
 		Limit:            query.Limit,
 		Offset:           query.Offset,
-		Summary: summaryResponse{
-			Total: total,
-		},
-		Tasks:   make([]dashboardTaskItem, 0, len(page)),
-		Sources: []sourceOverview{},
+		Summary:          summary,
+		Tasks:            make([]dashboardTaskItem, 0, len(page)),
+		Sources:          sources,
 	}
-
-	sourceMap := make(map[string]*sourceOverview)
-	for _, task := range items {
-		switch task.State {
-		case tasks.StateRunning:
-			resp.Summary.Running++
-		case tasks.StateStarting:
-			resp.Summary.Starting++
-		case tasks.StateRetryBackoff:
-			resp.Summary.RetryBackoff++
-		case tasks.StateStopped:
-			resp.Summary.Stopped++
-		case tasks.StateFailed:
-			resp.Summary.Failed++
-		}
-
-		progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
-		rep := buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds)
-		switch rep.Status {
-		case "NORMAL":
-			resp.Summary.Normal++
-		case "DELAYED":
-			resp.Summary.Delayed++
-		case "ABNORMAL":
-			resp.Summary.Abnormal++
-		}
-
-		key := task.Source.Host + ":" + strconv.Itoa(int(task.Source.Port))
-		item, exists := sourceMap[key]
-		if !exists {
-			item = &sourceOverview{
-				Host: task.Source.Host,
-				Port: task.Source.Port,
-			}
-			sourceMap[key] = item
-		}
-		item.TaskCount++
-		if task.State == tasks.StateRunning {
-			item.Running++
-		}
-		if task.State == tasks.StateStarting {
-			item.Starting++
-		}
-		switch rep.Status {
-		case "NORMAL":
-			item.Normal++
-		case "DELAYED":
-			item.Delayed++
-		case "ABNORMAL":
-			item.Abnormal++
-		}
-	}
-
-	for _, v := range sourceMap {
-		resp.Sources = append(resp.Sources, *v)
-	}
-	sort.Slice(resp.Sources, func(i, j int) bool {
-		if resp.Sources[i].Host == resp.Sources[j].Host {
-			return resp.Sources[i].Port < resp.Sources[j].Port
-		}
-		return resp.Sources[i].Host < resp.Sources[j].Host
-	})
-
 	for _, task := range page {
 		progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
 		resp.Tasks = append(resp.Tasks, dashboardTaskItem{
@@ -789,11 +700,86 @@ func parseTaskListQuery(r *http.Request) (taskListQuery, error) {
 	return query, nil
 }
 
-func (s *Server) listMatchingTasks(ctx context.Context, query taskListQuery) ([]tasks.Task, int, error) {
-	filter := query.toFilter()
-	filter.Offset = 0
-	filter.Limit = 0
-	return s.tasks.ListTasksPage(ctx, filter)
+type dashboardCounterService interface {
+	DashboardCounters(context.Context, tasks.TaskListFilter) (tasks.DashboardCounters, error)
+}
+
+func (s *Server) dashboardObservation(ctx context.Context, query taskListQuery, now time.Time) (summaryResponse, []sourceOverview, error) {
+	counter, ok := s.tasks.(dashboardCounterService)
+	if !ok {
+		return summaryResponse{}, nil, errors.New("dashboard counters are unavailable")
+	}
+	counters, err := counter.DashboardCounters(ctx, query.toFilter())
+	if err != nil {
+		return summaryResponse{}, nil, err
+	}
+	summary := summaryFromCounts(counters.States)
+	sources := sourcesFromCounts(counters.Sources)
+	applyRunningReplication(&summary, sources, counters.Running, now, func(id string) (tasks.ReplicationProgress, bool) {
+		progress, ok, _ := s.tasks.GetReplicationProgress(id)
+		return progress, ok
+	})
+	return summary, sources, nil
+}
+
+func summaryFromCounts(counts tasks.TaskStateCounts) summaryResponse {
+	return summaryResponse{
+		Total:        counts.Total,
+		Running:      counts.Running,
+		Starting:     counts.Starting,
+		RetryBackoff: counts.RetryBackoff,
+		Stopped:      counts.Stopped,
+		Failed:       counts.Failed,
+		Abnormal:     counts.Failed + counts.RetryBackoff,
+	}
+}
+
+func sourcesFromCounts(items []tasks.TaskSourceCount) []sourceOverview {
+	out := make([]sourceOverview, 0, len(items))
+	for _, item := range items {
+		out = append(out, sourceOverview{
+			Host:      item.Host,
+			Port:      item.Port,
+			TaskCount: item.TaskCount,
+			Running:   item.Running,
+			Starting:  item.Starting,
+			Abnormal:  item.Failed + item.RetryBackoff,
+		})
+	}
+	return out
+}
+
+func applyRunningReplication(summary *summaryResponse, sources []sourceOverview, refs []tasks.RunningTaskRef, now time.Time, progress func(string) (tasks.ReplicationProgress, bool)) {
+	bySource := make(map[string]*sourceOverview, len(sources))
+	for i := range sources {
+		bySource[sourceOverviewKey(sources[i].Host, sources[i].Port)] = &sources[i]
+	}
+	for _, ref := range refs {
+		prog, ok := progress(ref.ID)
+		rep := buildReplicationResponse(tasks.Task{ID: ref.ID, State: tasks.StateRunning}, prog, ok, now, defaultDelayThresholdSeconds)
+		src := bySource[sourceOverviewKey(ref.Host, ref.Port)]
+		switch rep.Status {
+		case "NORMAL":
+			summary.Normal++
+			if src != nil {
+				src.Normal++
+			}
+		case "DELAYED":
+			summary.Delayed++
+			if src != nil {
+				src.Delayed++
+			}
+		case "ABNORMAL":
+			summary.Abnormal++
+			if src != nil {
+				src.Abnormal++
+			}
+		}
+	}
+}
+
+func sourceOverviewKey(host string, port uint16) string {
+	return host + ":" + strconv.Itoa(int(port))
 }
 
 func (q taskListQuery) toFilter() tasks.TaskListFilter {

@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, SameSourceHost loopback SQL identity, expired-lease listing, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -350,6 +350,112 @@ func TestMySQLTaskStore_ListTasksPageUsesCountAndLimit(t *testing.T) {
 	}
 	if total != 6 || len(page) != 2 || page[0].ID != "3" || page[1].ID != "4" {
 		t.Fatalf("unexpected page total=%d items=%+v", total, page)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestTaskRollupSQL_GroupsWithoutLimit(t *testing.T) {
+	stateSQL, _ := taskStateCountSQL(tasks.TaskListFilter{Limit: 50, Offset: 10})
+	if strings.Contains(stateSQL, "LIMIT") || !strings.Contains(stateSQL, "GROUP BY state") {
+		t.Fatalf("state count SQL = %q", stateSQL)
+	}
+	sourceSQL, _ := taskSourceCountSQL(tasks.TaskListFilter{})
+	if !strings.Contains(sourceSQL, "GROUP BY") || !strings.Contains(sourceSQL, "SUM(state = 'RUNNING')") || strings.Contains(sourceSQL, "LIMIT") {
+		t.Fatalf("source count SQL = %q", sourceSQL)
+	}
+	if strings.Contains(sourceSQL, taskSelectColumns) {
+		t.Fatalf("source rollup must not select full task rows: %q", sourceSQL)
+	}
+
+	failed := tasks.StateFailed
+	runningSQL, runningArgs := runningTaskRefSQL(tasks.TaskListFilter{State: &failed})
+	if runningSQL != "" || runningArgs != nil {
+		t.Fatalf("non-running filter must not query refs, sql=%q args=%#v", runningSQL, runningArgs)
+	}
+	running := tasks.StateRunning
+	port := uint16(3306)
+	runningSQL, runningArgs = runningTaskRefSQL(tasks.TaskListFilter{State: &running, Host: "db-a", Port: &port})
+	if !strings.Contains(runningSQL, "SELECT id,") || strings.Contains(runningSQL, taskSelectColumns) {
+		t.Fatalf("running ref SQL = %q", runningSQL)
+	}
+	if len(runningArgs) != 3 || runningArgs[0] != "RUNNING" || runningArgs[1] != "db-a" || runningArgs[2] != 3306 {
+		t.Fatalf("running ref args = %#v", runningArgs)
+	}
+
+	loopbackSQL, loopbackArgs := taskStateCountSQL(tasks.TaskListFilter{Host: "localhost"})
+	if len(loopbackArgs) != 0 || !strings.Contains(loopbackSQL, "localhost") || strings.Contains(loopbackSQL, sourceHostJSONExpr+" = ?") {
+		t.Fatalf("loopback state SQL = %q args=%#v", loopbackSQL, loopbackArgs)
+	}
+}
+
+func TestMySQLTaskStore_CountRollupsUseGroupBy(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	state := tasks.StateFailed
+	filter := tasks.TaskListFilter{Host: "db-b", State: &state, Limit: 1, Offset: 1}
+
+	stateSQL, stateArgs := taskStateCountSQL(filter)
+	mock.ExpectQuery(regexp.QuoteMeta(stateSQL)).WithArgs(toDriverValues(stateArgs)...).
+		WillReturnRows(sqlmock.NewRows([]string{"state", "count"}).AddRow("FAILED", int64(4)))
+
+	counts, err := store.CountTaskStates(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("CountTaskStates returned error: %v", err)
+	}
+	if counts.Total != 4 || counts.Failed != 4 || counts.Running != 0 {
+		t.Fatalf("state counts = %+v", counts)
+	}
+
+	sourceSQL, sourceArgs := taskSourceCountSQL(filter)
+	mock.ExpectQuery(regexp.QuoteMeta(sourceSQL)).WithArgs(toDriverValues(sourceArgs)...).
+		WillReturnRows(sqlmock.NewRows([]string{"host", "port", "task_count", "running", "starting", "failed", "retry"}).
+			AddRow("db-b", int64(3307), int64(4), int64(0), int64(0), int64(4), int64(0)))
+
+	sources, err := store.CountTasksBySource(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("CountTasksBySource returned error: %v", err)
+	}
+	if len(sources) != 1 || sources[0].Host != "db-b" || sources[0].Port != 3307 || sources[0].TaskCount != 4 || sources[0].Failed != 4 {
+		t.Fatalf("sources = %+v", sources)
+	}
+
+	refs, err := store.ListRunningTaskRefs(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("ListRunningTaskRefs returned error: %v", err)
+	}
+	if refs != nil {
+		t.Fatalf("failed filter refs = %+v, want nil", refs)
+	}
+
+	open := tasks.TaskListFilter{Limit: 50}
+	stateSQL, stateArgs = taskStateCountSQL(open)
+	mock.ExpectQuery(regexp.QuoteMeta(stateSQL)).WithArgs(toDriverValues(stateArgs)...).
+		WillReturnRows(sqlmock.NewRows([]string{"state", "count"}).AddRow("RUNNING", int64(2)).AddRow("CREATED", int64(8)))
+	counts, err = store.CountTaskStates(context.Background(), open)
+	if err != nil {
+		t.Fatalf("open CountTaskStates returned error: %v", err)
+	}
+	if counts.Total != 10 || counts.Running != 2 {
+		t.Fatalf("open counts = %+v", counts)
+	}
+	refSQL, refArgs := runningTaskRefSQL(open)
+	mock.ExpectQuery(regexp.QuoteMeta(refSQL)).WithArgs(toDriverValues(refArgs)...).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "host", "port"}).
+			AddRow("9", "db-a", int64(3306)).
+			AddRow("10", "db-a", int64(3306)))
+	refs, err = store.ListRunningTaskRefs(context.Background(), open)
+	if err != nil {
+		t.Fatalf("open ListRunningTaskRefs returned error: %v", err)
+	}
+	if len(refs) != 2 || refs[0].ID != "9" || refs[0].Host != "db-a" || refs[0].Port != 3306 {
+		t.Fatalf("refs = %+v", refs)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)

@@ -1,4 +1,7 @@
 # Production deployment template. Keep secrets outside this file.
+# PRODUCTION=true refuses to start when --encryption-key is empty.
+# The key is a process flag, not a YAML field. Use 32 bytes for AES-256.
+# binlog-server --config config.production.example.yaml --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"
 listen_addr: ":8080"
 data_dir: "./data"
 

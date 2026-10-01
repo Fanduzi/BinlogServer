@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, /metrics 5xx on store list errors, /healthz, and /api/health
+// output: REST API responses including SQL-paged task lists, cluster observation, /metrics 5xx on store list errors, /healthz, /api/health, and the API auth middleware on /ui/* and /swagger/* when auth is enabled
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -117,10 +117,16 @@ func (s *Server) routes() {
 	apiGroup.POST("/tasks", gin.WrapF(s.handleTasks))
 	apiGroup.GET("/tasks", gin.WrapF(s.handleTasks))
 	apiGroup.Any("/tasks/*path", gin.WrapF(s.handleTaskAction))
-	s.gin.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerfiles.Handler))
-
-	uiHandler := http.StripPrefix("/ui/", ui.Handler())
-	s.gin.Any("/ui/*path", gin.WrapH(uiHandler))
+	swaggerHandler := ginSwagger.WrapHandler(swaggerfiles.Handler)
+	uiHandler := gin.WrapH(http.StripPrefix("/ui/", ui.Handler()))
+	if s.auth.Enabled {
+		authn := s.authMiddleware()
+		s.gin.GET("/swagger/*any", authn, swaggerHandler)
+		s.gin.Any("/ui/*path", authn, uiHandler)
+	} else {
+		s.gin.GET("/swagger/*any", swaggerHandler)
+		s.gin.Any("/ui/*path", uiHandler)
+	}
 	s.gin.GET("/", func(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/ui/")
 	})
