@@ -5,8 +5,6 @@
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
-# Kill only the pid recorded for this run. Never pkill, killall, or match by process name.
-
 HELPER_NAME="control-binlog-server"
 
 usage() {
