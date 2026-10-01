@@ -27,6 +27,7 @@
 - `./scripts/verify-phase-acceptance.sh`
 - `BINLOG_SERVER_BIN=... ./scripts/failover-dogfood.sh run happy|backoff|no-steal|no-stomp|failed|pause|cleanup`
 - `failover-dogfood.sh` 的 `RETRY_BACKOFF` 接管不要求 `TASK_LEASE_TAKEOVER`（该事件只在先前状态为 `RUNNING` 或 `LEASE_DEGRADED` 时写入）；通过条件是 owner 变为 `worker-b`、epoch 增大，且没有 `STOPPED`。
+- `perf` 计时把场景标准输出收进命令替换；源库插入循环的标准输出另开，避免把采样管道一直占住。
 
 ## Dependencies
 
