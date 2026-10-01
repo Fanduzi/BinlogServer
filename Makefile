@@ -13,7 +13,7 @@ help:
 	@echo "  make build-linux [VERSION=vX.Y.Z] # build a Linux amd64 binary with CGO disabled for older glibc hosts"
 	@echo "  make check-linux-compat [VERSION=vX.Y.Z] # build Linux amd64 and assert no dynamic glibc dependency"
 	@echo "  make check-linux-release-archive VERSION=vX.Y.Z # verify required assets and glibc safety in the Linux amd64 release tar.gz"
-	@echo "  make ui-build                   # build frontend and sync to internal/ui/static"
+	@echo "  make ui-build                   # build frontend, sync to internal/ui/static, and syntax-check the embedded ESM bundles"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
 	@echo "  make e2e-topology-check         # validate E2E database topology without Docker"
 	@echo "  make e2e-quick                  # run quick e2e (smoke,compression)"
