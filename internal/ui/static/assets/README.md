@@ -6,7 +6,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| `index-EqoT4ljl.js` | 当前前端 entry bundle，刷新只编排一次任务/集群/workers，列表租约风险用任务抄本；由 `make ui-build` 生成并保留 L3 声明 |
+| `index-EqoT4ljl.js` | 当前前端 entry bundle，刷新只编排一次任务/集群/workers，列表租约风险用任务抄本；由 `make ui-build` 生成并保留 L3 声明。import 列表里不能有多余的 `}`，否则 Console 无法挂载 |
 | * | 由前端构建工具生成的其他资源文件；历史与 vendor 资源保留 |
 
 ## Exports
