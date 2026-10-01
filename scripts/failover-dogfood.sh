@@ -677,7 +677,7 @@ user_dir = "/tmp/binlog-failover-chrome"
 os.makedirs(os.path.dirname(png), exist_ok=True)
 proc = subprocess.Popen([
     "google-chrome", "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-    "--no-first-run", f"--user-data-dir={user_dir}", f"--remote-debugging-port={port}",
+    "--no-first-run", "--remote-allow-origins=*", f"--user-data-dir={user_dir}", f"--remote-debugging-port={port}",
     "--window-size=1440,900", "about:blank",
 ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
