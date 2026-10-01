@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -710,6 +710,47 @@ func listTasksPageSQL(filter tasks.TaskListFilter) (countSQL, selectSQL string, 
 	return countSQL, selectSQL, countArgs, selectArgs
 }
 
+func dashboardCountFilter(filter tasks.TaskListFilter) tasks.TaskListFilter {
+	filter.Limit = 0
+	filter.Offset = 0
+	return filter
+}
+
+func sourceGroupExprs() (hostExpr, portExpr string) {
+	hostExpr = "COALESCE(" + sourceHostJSONExpr + ", '')"
+	portExpr = "CAST(JSON_UNQUOTE(JSON_EXTRACT(source_json, '$.port')) AS UNSIGNED)"
+	return hostExpr, portExpr
+}
+
+func taskStateCountSQL(filter tasks.TaskListFilter) (string, []any) {
+	where, args := taskListFilterClause(dashboardCountFilter(filter))
+	return "SELECT state, COUNT(*) FROM backup_tasks" + where + " GROUP BY state", args
+}
+
+func taskSourceCountSQL(filter tasks.TaskListFilter) (string, []any) {
+	where, args := taskListFilterClause(dashboardCountFilter(filter))
+	hostExpr, portExpr := sourceGroupExprs()
+	query := "SELECT " + hostExpr + ", " + portExpr +
+		", COUNT(*), CAST(COALESCE(SUM(state = 'RUNNING'), 0) AS SIGNED), CAST(COALESCE(SUM(state = 'STARTING'), 0) AS SIGNED), CAST(COALESCE(SUM(state = 'FAILED'), 0) AS SIGNED), CAST(COALESCE(SUM(state = 'RETRY_BACKOFF'), 0) AS SIGNED)" +
+		" FROM backup_tasks" + where +
+		" GROUP BY " + hostExpr + ", " + portExpr +
+		" ORDER BY " + hostExpr + ", " + portExpr
+	return query, args
+}
+
+// runningTaskRefSQL selects RUNNING id/host/port. A non-RUNNING state filter matches nothing.
+func runningTaskRefSQL(filter tasks.TaskListFilter) (string, []any) {
+	filter = dashboardCountFilter(filter)
+	if filter.State != nil && *filter.State != tasks.StateRunning {
+		return "", nil
+	}
+	running := tasks.StateRunning
+	filter.State = &running
+	where, args := taskListFilterClause(filter)
+	hostExpr, portExpr := sourceGroupExprs()
+	return "SELECT id, " + hostExpr + ", " + portExpr + " FROM backup_tasks" + where, args
+}
+
 func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 	var (
 		task        tasks.Task
@@ -828,6 +869,110 @@ func (s *MySQLTaskStore) ListTasksPage(ctx context.Context, filter tasks.TaskLis
 		return nil, 0, err
 	}
 	return list, total, nil
+}
+
+var _ tasks.TaskDashboardRollup = (*MySQLTaskStore)(nil)
+
+// CountTaskStates returns a GROUP BY state histogram for the filtered set.
+func (s *MySQLTaskStore) CountTaskStates(ctx context.Context, filter tasks.TaskListFilter) (tasks.TaskStateCounts, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.count_task_states")
+	defer endMetaSpan(span)
+
+	query, args := taskStateCountSQL(filter)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return tasks.TaskStateCounts{}, err
+	}
+	defer rows.Close()
+
+	var counts tasks.TaskStateCounts
+	for rows.Next() {
+		var (
+			state string
+			n     int64
+		)
+		if err := rows.Scan(&state, &n); err != nil {
+			return tasks.TaskStateCounts{}, err
+		}
+		counts.Add(tasks.State(state), int(n))
+	}
+	if err := rows.Err(); err != nil {
+		return tasks.TaskStateCounts{}, err
+	}
+	return counts, nil
+}
+
+// CountTasksBySource returns per stored host/port task and state counts.
+func (s *MySQLTaskStore) CountTasksBySource(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.TaskSourceCount, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.count_tasks_by_source")
+	defer endMetaSpan(span)
+
+	query, args := taskSourceCountSQL(filter)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]tasks.TaskSourceCount, 0)
+	for rows.Next() {
+		var (
+			item         tasks.TaskSourceCount
+			port         int64
+			taskCount    int64
+			running      int64
+			starting     int64
+			failed       int64
+			retryBackoff int64
+		)
+		if err := rows.Scan(&item.Host, &port, &taskCount, &running, &starting, &failed, &retryBackoff); err != nil {
+			return nil, err
+		}
+		item.Port = uint16(port)
+		item.TaskCount = int(taskCount)
+		item.Running = int(running)
+		item.Starting = int(starting)
+		item.Failed = int(failed)
+		item.RetryBackoff = int(retryBackoff)
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListRunningTaskRefs returns RUNNING task ids and stored source endpoints. It does not load full task rows.
+func (s *MySQLTaskStore) ListRunningTaskRefs(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.RunningTaskRef, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_running_task_refs")
+	defer endMetaSpan(span)
+
+	query, args := runningTaskRefSQL(filter)
+	if query == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]tasks.RunningTaskRef, 0)
+	for rows.Next() {
+		var (
+			ref  tasks.RunningTaskRef
+			port int64
+		)
+		if err := rows.Scan(&ref.ID, &ref.Host, &port); err != nil {
+			return nil, err
+		}
+		ref.Port = uint16(port)
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListStartingUnownedTasks 仅查询 STARTING 且 owner_worker_id 为空的任务。
