@@ -16,7 +16,7 @@
 - 通过 `config.meta.timeout.*` 注入 tasks/meta 的内部依赖调用超时（读/写/lease/上传）。
 - 对 TCP `meta_dsn` 提取 host/port 并注入 tasks，同端点 source 在 create/update/start 边界被拒绝。
 - API server 支持从 `config.API.Auth` 注入鉴权策略。
-- 非空 `PRODUCTION` 用标准布尔值解析；control-plane 在 true 时强制 auth 已启用、同时保护 `/api/*` 和 `/metrics`，并复用 `config.ValidateAPIAuthConfig` 校验模式/已解析凭证；worker-only 不暴露该 API 且不套用此约束。
+- 非空 `PRODUCTION` 用标准布尔值解析；true 时 `EncryptionKey`（`--encryption-key`）为空则拒绝启动。control-plane 在 true 时仍强制 auth 已启用、同时保护 `/api/*` 和 `/metrics`，并复用 `config.ValidateAPIAuthConfig` 校验模式/已解析凭证；worker-only 不暴露该 API 且不套用 auth 约束，但仍拒绝空的 encryption key。
 - control-plane `listen_addr` 非 loopback（含 `:8080`、`0.0.0.0:8080`）时同样强制 `api.auth.enabled` + `protect_api` + `protect_metrics`；`127.0.0.1`/`localhost`/`::1` 可保持未鉴权本地演示。`/healthz` 仍匿名。
 - 创建 meta store 时把 `config.EncryptionKey` 注入，用于 `source_json` 源库密码加解密。
 - tracing：默认关闭；启用时装配 HTTP 入站 span 与元数据存储调用 span；无路径的 OTLP HTTP endpoint 沿用 `/v1/traces` 默认路径。
