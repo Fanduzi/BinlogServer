@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage
+// output: application lifecycle plus real-route production auth, UI and swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -221,6 +221,29 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 	}
 }
 
+// TestApp_ProductionRefusesEmptyEncryptionKey verifies PRODUCTION exits before listen when --encryption-key is empty.
+func TestApp_ProductionRefusesEmptyEncryptionKey(t *testing.T) {
+	t.Setenv("PRODUCTION", "true")
+	auth := config.APIAuthConfig{
+		Enabled: true, Mode: "bearer", BearerToken: "test-token",
+		ProtectAPI: true, ProtectMetrics: true,
+	}
+	for _, key := range []string{"", "   "} {
+		a := New(config.Config{
+			ListenAddr:    "127.0.0.1:0",
+			EncryptionKey: key,
+			API:           config.APIConfig{Auth: auth},
+		})
+		err := a.Run(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "--encryption-key") {
+			t.Fatalf("key %q: expected PRODUCTION to refuse an empty encryption key, got %v", key, err)
+		}
+		if a.Addr() != "" {
+			t.Fatalf("key %q bound a listener: %q", key, a.Addr())
+		}
+	}
+}
+
 // TestApp_ProductionAuthProtectsRealRoutes verifies config reaches the live app router without closing health checks.
 func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 	t.Setenv("PRODUCTION", "TRUE")
@@ -233,6 +256,7 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 	if cfg.MetaDSN != "" {
 		t.Fatalf("production template must not require metadata credentials, got %q", cfg.MetaDSN)
 	}
+	cfg.EncryptionKey = "0123456789abcdef0123456789abcdef"
 	a := New(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -245,7 +269,7 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 	waitReady(t, a)
 	base := "http://" + a.Addr()
 	assertHTTPStatus(t, base+"/healthz", http.StatusOK)
-	for _, path := range []string{"/api/tasks", "/metrics"} {
+	for _, path := range []string{"/api/tasks", "/metrics", "/ui/", "/swagger/index.html"} {
 		resp, err := http.Get(base + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
@@ -276,7 +300,8 @@ func TestApp_ProductionWorkerOnlySkipsControlPlaneAuth(t *testing.T) {
 	t.Setenv("PRODUCTION", "1")
 	a := New(config.Config{
 		DataDir: t.TempDir(), Mode: "cluster", ListenAddr: "127.0.0.1:0",
-		Cluster: config.ClusterConfig{Role: "worker", WorkerID: "production-worker", WorkerHealthListenAddr: "127.0.0.1:0"},
+		EncryptionKey: "0123456789abcdef0123456789abcdef",
+		Cluster:       config.ClusterConfig{Role: "worker", WorkerID: "production-worker", WorkerHealthListenAddr: "127.0.0.1:0"},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -302,7 +327,11 @@ func TestApp_ProductionRejectsProgrammaticAuthSecrets(t *testing.T) {
 		{Enabled: true, Mode: "api_key", APIKeyHeader: "X-API-Key", ProtectAPI: true, ProtectMetrics: true},
 		{Enabled: true, Mode: "api_key", APIKey: "${TOKEN}", APIKeyHeader: "X-API-Key", ProtectAPI: true, ProtectMetrics: true},
 	} {
-		a := New(config.Config{ListenAddr: "127.0.0.1:0", API: config.APIConfig{Auth: auth}})
+		a := New(config.Config{
+			ListenAddr:    "127.0.0.1:0",
+			EncryptionKey: "0123456789abcdef0123456789abcdef",
+			API:           config.APIConfig{Auth: auth},
+		})
 		if err := a.Run(context.Background()); err == nil {
 			t.Fatalf("expected auth config %+v to fail before serving", auth)
 		}
