@@ -221,7 +221,6 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 	}
 }
 
-// TestApp_ProductionRefusesEmptyEncryptionKey verifies PRODUCTION exits before listen when --encryption-key is empty.
 func TestApp_ProductionRefusesEmptyEncryptionKey(t *testing.T) {
 	t.Setenv("PRODUCTION", "true")
 	auth := config.APIAuthConfig{
