@@ -347,7 +347,7 @@ start_inserter() {
       mysql --socket="$sock" -uroot -e "INSERT INTO failover_src.t1(v) VALUES ('tick');" >/dev/null 2>&1 || true
       sleep 0.3
     done
-  ) &
+  ) >/dev/null 2>&1 &
   echo $! >"$FAILOVER_ROOT/inserter.pid"
 }
 
