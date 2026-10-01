@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task mutation requests, metadata source policy, full create specs, and TaskStore GetTask/ListTasks/ListTasksPage
-// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, unfiltered cluster observation from store.ListTasks, and paged list reads
+// input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
+// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -431,6 +431,70 @@ func (s *Scheduler) ListTasksPage(ctx context.Context, filter TaskListFilter) ([
 	}
 	page, total := PageTasks(s.ListTasks(), filter)
 	return page, total, nil
+}
+
+// DashboardCounters returns filtered state counts, per-source rollups, and RUNNING refs.
+// Limit and offset are ignored. A TaskDashboardRollup store answers with SQL; other stores use one filtered read.
+func (s *Scheduler) DashboardCounters(ctx context.Context, filter TaskListFilter) (DashboardCounters, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	filter.Limit = 0
+	filter.Offset = 0
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+	if rollup, ok := store.(TaskDashboardRollup); ok {
+		readCtx, cancel := s.withReadTimeout(ctx)
+		defer cancel()
+		states, err := rollup.CountTaskStates(readCtx, filter)
+		if err != nil {
+			return DashboardCounters{}, err
+		}
+		sources, err := rollup.CountTasksBySource(readCtx, filter)
+		if err != nil {
+			return DashboardCounters{}, err
+		}
+		if sources == nil {
+			sources = []TaskSourceCount{}
+		}
+		var running []RunningTaskRef
+		if states.Running > 0 {
+			running, err = rollup.ListRunningTaskRefs(readCtx, filter)
+			if err != nil {
+				return DashboardCounters{}, err
+			}
+		}
+		return DashboardCounters{States: states, Sources: sources, Running: running}, nil
+	}
+	items, err := s.tasksMatchingFilter(ctx, filter)
+	if err != nil {
+		return DashboardCounters{}, err
+	}
+	sources := SummarizeTasksBySource(items)
+	if sources == nil {
+		sources = []TaskSourceCount{}
+	}
+	return DashboardCounters{
+		States:  SummarizeTaskStates(items),
+		Sources: sources,
+		Running: RunningRefs(items),
+	}, nil
+}
+
+func (s *Scheduler) tasksMatchingFilter(ctx context.Context, filter TaskListFilter) ([]Task, error) {
+	filter.Limit = 0
+	filter.Offset = 0
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+	if store != nil {
+		readCtx, cancel := s.withReadTimeout(ctx)
+		defer cancel()
+		items, _, err := store.ListTasksPage(readCtx, filter)
+		return items, err
+	}
+	return FilterTasks(s.ListTasks(), filter), nil
 }
 
 // ReportReplicationProgress 上报最新复制进度，供延迟计算和展示。
