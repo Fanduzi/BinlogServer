@@ -9,6 +9,7 @@ This directory is the maintained source for verifying user-facing BinlogServer b
 - Set `BINLOG_VERIFY_EVIDENCE` outside the base directory (default `/tmp/binlog-server-verify-evidence-$BINLOG_VERIFY_RUN_ID`).
 - Give every concurrent run its own `BINLOG_VERIFY_LISTEN`, `BINLOG_VERIFY_BASE`, and, when metadata is enabled, its own database name in `BINLOG_VERIFY_META_DSN`.
 - Checkpoint resume needs metadata enabled (`BINLOG_VERIFY_META_DSN` with `parseTime=true`). Standalone memory mode still covers health, lifecycle, dashboard, and failure paths.
+- Dual-worker lease takeover needs one meta MySQL, a source on a different port, and `scripts/failover-dogfood.sh`. The helper launches the control plane. Workers are `cluster.role=worker` and do not serve the helper's `/healthz` body `ok`.
 - Run `control-binlog-server.sh doctor` and require version, a live pid, `/healthz` `ok`, `/api/health` `status=ok`, `/ui/` 200, port ownership when `ss` can show it, and a final `PASS` line.
 - Drive only the instance this run started.
 
@@ -49,3 +50,4 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Checkpoint resume](./checkpoint-resume.md) covers reading a saved position and continuing from it.
 - [Dashboard summary](./dashboard-summary.md) covers summary counters and the overview KPI cards.
 - [Failure paths](./failure-paths.md) covers bad source password and unreachable source ending in `FAILED`.
+- [Dual-worker lease takeover](./failover-lease.md) covers worker B claiming a task after worker A's lease expires, without a `STOPPED` row on that path.

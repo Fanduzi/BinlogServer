@@ -12,6 +12,7 @@
 | check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL，并复用 glibc 兼容性检查 |
 | release-assets.sh | 构建含服务端、migrate、migration SQL、文档与 checksums 的多平台 release 归档；作为本地/手工发版兜底入口 |
 | verify-phase-acceptance.sh | 统一执行阶段验收命令（test/race/vet/e2e-quick）并输出耗时摘要 |
+| failover-dogfood.sh | 一个 meta MySQL 上的双 worker 租约接管复跑；控制面走 verify-binlog-server helper |
 | e2e/ | E2E 套件与场景脚本 |
 
 ## Exports
@@ -26,11 +27,16 @@
 - `make e2e-quick`
 - `make e2e-full`
 - `./scripts/verify-phase-acceptance.sh`
+- `BINLOG_SERVER_BIN=... ./scripts/failover-dogfood.sh run happy|backoff|no-steal|no-stomp|failed|pause|cleanup`
+- `failover-dogfood.sh` 的 `RETRY_BACKOFF` 接管不要求 `TASK_LEASE_TAKEOVER`（该事件只在先前状态为 `RUNNING` 或 `LEASE_DEGRADED` 时写入）；通过条件是 owner 变为 `worker-b`、epoch 增大，且没有 `STOPPED`。
+- `perf` 计时把场景标准输出收进命令替换；源库插入循环的标准输出另开，避免把采样管道一直占住。
+- Console 截图通过本机 Chrome DevTools 打开 `/ui/`，并允许 `127.0.0.1` 的调试来源。
 
 ## Dependencies
 
 - Upstream: Makefile / 开发者本地命令 / GitHub Actions release workflow。
 - Downstream: frontend 构建工具链、Docker、Go 服务进程、GitHub Release 资产发布。
+- `failover-dogfood.sh` 额外依赖本机 `mysqld`、`mysql`、已发布的 `binlog-server` 与旁边的 `migrate`，以及 `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh`。
 
 ## Release Notes
 
