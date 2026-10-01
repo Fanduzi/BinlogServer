@@ -35,4 +35,5 @@ Preconditions:
 - `GET /api/tasks` is a page. Overview numbers come from summary and dashboard, so a filtered task page can disagree with `kpi-all` without being a bug.
 - `kpi-running`, `kpi-all`, and `kpi-normal` have no separate `*-value` test id. Read the card text for those three.
 - `limit` above 500 on dashboard or summary returns 400 `invalid limit`.
+- With metadata, summary totals and source rollups use SQL `GROUP BY` (`CountTaskStates`, `CountTasksBySource`). Dashboard task rows are one `ListTasksPage` LIMIT/OFFSET page. Replication progress on those rows is only that page. `normal`, `delayed`, and RUNNING `abnormal` still cover every filtered RUNNING task via `ListRunningTaskRefs`, not a full task-row load.
 - Host filters treat `localhost` and explicit loopback literals as one source. Other host strings match exactly, including case.
