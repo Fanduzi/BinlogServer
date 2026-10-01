@@ -9,8 +9,8 @@
 ## Interface
 
 - `control-binlog-server.sh launch` — create `$BINLOG_VERIFY_BASE` (`data/`, `logs/`), optional `migrate up` when `BINLOG_VERIFY_META_DSN` is set, write `start.env`, start `BINLOG_SERVER_BIN`, wait until `GET /healthz` is `ok`, write the pid file
-- `control-binlog-server.sh doctor` — version, pid alive, `/healthz` `ok`, `/api/health` `status=ok`, `/ui/` 200, and (when `ss` can see owners) the listen port belongs to that pid
-- `control-binlog-server.sh curl [--] METHOD PATH [curl-args...]` — curl `BASE_URL` + path; a leading `--` before METHOD is optional
+- `control-binlog-server.sh doctor` — version, pid alive, `/healthz` `ok`, `/api/health` `status=ok`, `/ui/` 200, and (when `ss` can see owners) the listen port belongs to that pid; a passing run prints `PASS`
+- `control-binlog-server.sh curl METHOD PATH [curl-args...]` — curl `BASE_URL` + path; one leading `--` before METHOD is removed so the path is not parsed as the method
 - `control-binlog-server.sh cleanup` — signal only the pid in the pid file, remove `BINLOG_VERIFY_BASE`, leave `BINLOG_VERIFY_EVIDENCE` in place
 - `control-binlog-server.sh env-print` — print the resolved isolation variables to stdout and do not start a process
 

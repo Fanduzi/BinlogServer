@@ -45,7 +45,7 @@ Doctor passes only when all of these hold:
 - `GET /ui/` returns HTTP 200
 - when `ss` can see socket owners, the listen port is owned by that pid
 
-`ss` is preferred for the ownership check. If `ss` is missing or cannot show pids, doctor still requires the health checks above and says the ownership check was skipped.
+A passing doctor prints `PASS` on its own line and exits 0. `ss` is preferred for the ownership check. If `ss` is missing or cannot show pids, doctor still requires the health checks above and says the ownership check was skipped.
 
 ## Drive
 
@@ -78,12 +78,12 @@ Create-task JSON:
 
 ```bash
 HELPER=.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh
-"$HELPER" curl -- GET /healthz
-"$HELPER" curl -- POST /api/tasks -H 'Content-Type: application/json' -d @/path/to/task.json
-"$HELPER" curl -- POST /api/tasks/<id>/start
+"$HELPER" curl GET /healthz
+"$HELPER" curl POST /api/tasks -H 'Content-Type: application/json' -d @/path/to/task.json
+"$HELPER" curl POST /api/tasks/<id>/start
 ```
 
-A leading `--` before METHOD is optional. Arguments after PATH are passed to curl. Follow the feature file for the entry under test. One convenient route does not cover the other entries in that file.
+Arguments after PATH are passed to curl. The helper drops one leading `--` before METHOD so that marker is not taken as the method or the path. Follow the feature file for the entry under test. One convenient route does not cover the other entries in that file.
 
 ## Evidence
 
@@ -93,7 +93,7 @@ Write proof under `BINLOG_VERIFY_EVIDENCE`. Capture the request and the resultin
 mkdir -p "$BINLOG_VERIFY_EVIDENCE/health-console"
 .cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh doctor \
   | tee "$BINLOG_VERIFY_EVIDENCE/health-console/doctor.txt"
-.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl -- GET /healthz \
+.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /healthz \
   | tee "$BINLOG_VERIFY_EVIDENCE/health-console/healthz.txt"
 ```
 

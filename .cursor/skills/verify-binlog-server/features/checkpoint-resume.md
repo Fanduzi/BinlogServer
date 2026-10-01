@@ -24,11 +24,11 @@ Preconditions:
 - The task was created with `start.mode` of `LATEST`, `FILE_POS`, or `GTID`, then started, and has reached `RUNNING` long enough for a checkpoint to exist.
 - The source is not the meta database when `BINLOG_VERIFY_META_DSN` is set.
 
-- **Read checkpoint.** Fetch the saved position. Run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl -- GET /api/tasks/<id>/checkpoint -o "$BINLOG_VERIFY_EVIDENCE/checkpoint-resume/before.json" -w '%{http_code}'`. Status is `200`. `before.json` has non-empty `file` and `pos` greater than 0.
+- **Read checkpoint.** Fetch the saved position. Run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /api/tasks/<id>/checkpoint -o "$BINLOG_VERIFY_EVIDENCE/checkpoint-resume/before.json" -w '%{http_code}'`. Status is `200`. `before.json` has non-empty `file` and `pos` greater than 0.
 - **Drawer.** Open the task drawer. `task-drawer-checkpoint` shows the same file and position as `before.json`.
-- **Resume.** Stop, then start the same task. Run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl -- POST /api/tasks/<id>/stop -w '%{http_code}'` and, once state is `STOPPED`, `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl -- POST /api/tasks/<id>/start -w '%{http_code}'`. Both statuses are `204`.
-- **Read again.** Fetch the checkpoint after the new start. Run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl -- GET /api/tasks/<id>/checkpoint -o "$BINLOG_VERIFY_EVIDENCE/checkpoint-resume/after.json"`. `after.json` `file` matches `before.json` `file`, and `pos` is greater than or equal to the saved `pos`. It is not the create-time `FILE_POS` or an empty `LATEST` position from before the first flush.
-- **Absent.** On a task that has never flushed, run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl -- GET /api/tasks/<id>/checkpoint -w '%{http_code}'`. Status is `404` and the body says `checkpoint not found`.
+- **Resume.** Stop, then start the same task. Run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl POST /api/tasks/<id>/stop -w '%{http_code}'` and, once state is `STOPPED`, `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl POST /api/tasks/<id>/start -w '%{http_code}'`. Both statuses are `204`.
+- **Read again.** Fetch the checkpoint after the new start. Run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /api/tasks/<id>/checkpoint -o "$BINLOG_VERIFY_EVIDENCE/checkpoint-resume/after.json"`. `after.json` `file` matches `before.json` `file`, and `pos` is greater than or equal to the saved `pos`. It is not the create-time `FILE_POS` or an empty `LATEST` position from before the first flush.
+- **Absent.** On a task that has never flushed, run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /api/tasks/<id>/checkpoint -w '%{http_code}'`. Status is `404` and the body says `checkpoint not found`.
 - **Proof.** Save `before.json` and `after.json` under `$BINLOG_VERIFY_EVIDENCE/checkpoint-resume/`.
 
 ## Gotchas

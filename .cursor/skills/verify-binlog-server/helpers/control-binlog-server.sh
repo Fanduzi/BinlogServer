@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: BINLOG_VERIFY_* isolation variables, BINLOG_SERVER_BIN, optional migrate binary and meta DSN
-# output: one isolated binlog-server process, pid file, start.env, doctor, curl, and env-print results; cleanup removes only that instance
+# output: one isolated binlog-server process, pid file, start.env, doctor PASS line, curl, and env-print results; cleanup removes only that instance
 # pos: verification control helper for the verify-binlog-server skill
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -13,7 +13,7 @@ Usage: ${HELPER_NAME} <launch|doctor|curl|cleanup|env-print>
 
   launch
   doctor
-  curl [--] METHOD PATH [curl-args...]
+  curl METHOD PATH [curl-args...]
   cleanup
   env-print
 
@@ -282,6 +282,7 @@ cmd_doctor() {
   if [[ "$status" -ne 0 ]]; then
     exit "$status"
   fi
+  echo PASS
 }
 
 cmd_curl() {
@@ -290,7 +291,7 @@ cmd_curl() {
   fi
   local method="${1:-}" path="${2:-}"
   if [[ -z "$method" || -z "$path" ]]; then
-    echo "usage: ${HELPER_NAME} curl [--] METHOD PATH [curl-args...]" >&2
+    echo "usage: ${HELPER_NAME} curl METHOD PATH [curl-args...]" >&2
     exit 2
   fi
   shift 2

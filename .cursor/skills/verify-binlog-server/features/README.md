@@ -8,7 +8,7 @@ This directory is the maintained source for verifying user-facing BinlogServer b
 - Default listen is `127.0.0.1:18080`. Default base is `/tmp/binlog-server-verify-$BINLOG_VERIFY_RUN_ID`.
 - Set `BINLOG_VERIFY_EVIDENCE` outside the base directory (default `/tmp/binlog-server-verify-evidence-$BINLOG_VERIFY_RUN_ID`).
 - Give every concurrent run its own `BINLOG_VERIFY_LISTEN`, `BINLOG_VERIFY_BASE`, and, when metadata is enabled, its own database name in `BINLOG_VERIFY_META_DSN`.
-- Run `control-binlog-server.sh doctor` and require version, a live pid, `/healthz` `ok`, `/api/health` `status=ok`, `/ui/` 200, and port ownership when `ss` can show it.
+- Run `control-binlog-server.sh doctor` and require version, a live pid, `/healthz` `ok`, `/api/health` `status=ok`, `/ui/` 200, port ownership when `ss` can show it, and a final `PASS` line.
 - Drive only the instance this run started.
 
 ## Driving conventions
