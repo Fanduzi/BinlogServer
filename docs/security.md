@@ -132,20 +132,26 @@ Before deploying to production:
    - Set `api.auth.enabled: true`
    - Configure a strong, unique token
    - Protect both API and metrics endpoints
+   - With auth enabled, `/ui/*` and `/swagger/*` use the same auth middleware as `/api/*`
 
-2. **Use Environment Variables or Encryption**
+2. **Pass `--encryption-key`**
+   - `PRODUCTION=true` refuses to start when `--encryption-key` is empty
+   - Use 32 bytes so AES-256 can encrypt source passwords
+   - Pass the key as a process flag. The production YAML template does not store it
+
+3. **Use Environment Variables or Encryption**
    - Never commit plaintext secrets to version control
    - Use `${ENV_VAR}` syntax or encrypted values
 
-3. **Configure Rate Limiting**
+4. **Configure Rate Limiting**
    - Adjust `requests_per_second` based on your expected load
    - Set appropriate `burst` for legitimate traffic spikes
 
-4. **Review Log Output**
+5. **Review Log Output**
    - Ensure sensitive data (passwords, tokens) are not logged
    - Configure appropriate log levels
 
-5. **Network Security**
+6. **Network Security**
    - Use TLS for production deployments
    - Consider running behind a reverse proxy with additional security features
 
@@ -163,4 +169,4 @@ The control-plane also fail-closes when `listen_addr` is not loopback (`:8080` a
 
 In production mode (when `PRODUCTION=true` environment variable is set), the server will refuse to start without authentication enabled. This check is independent of listen_addr and is not weakened.
 
-When `--encryption-key` is set, task source passwords are stored in `backup_tasks.source_json` as `enc:aes256:` ciphertext and decrypted only for internal use. API responses still redact `source.password`. Without a key, existing plaintext rows continue to load.
+When `--encryption-key` is set, task source passwords are stored in `backup_tasks.source_json` as `enc:aes256:` ciphertext and decrypted only for internal use. API responses still redact `source.password`. Outside production, an empty key still loads existing plaintext rows. When `PRODUCTION=true`, an empty `--encryption-key` stops the process before it listens. That check stays in place when `api.auth.enabled` is already true.

@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: HTTP timeout config, PRODUCTION environment values, and control-plane listen_addr
-// output: HTTP timeout plus production/non-loopback auth fail-closed regression coverage
+// output: HTTP timeout plus production encryption-key and non-loopback auth fail-closed regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -135,6 +135,21 @@ func TestValidateControlPlaneAuth_NonLoopbackRequiresProtectFlags(t *testing.T) 
 	auth.ProtectMetrics = true
 	if err := validateControlPlaneAuth(":8080", auth, false); err != nil {
 		t.Fatalf("expected fully protected non-loopback auth to pass: %v", err)
+	}
+}
+
+func TestRequireProductionEncryptionKey(t *testing.T) {
+	if err := requireProductionEncryptionKey("", false); err != nil {
+		t.Fatalf("development must allow an empty encryption key: %v", err)
+	}
+	if err := requireProductionEncryptionKey("0123456789abcdef0123456789abcdef", true); err != nil {
+		t.Fatalf("production must allow a non-empty encryption key: %v", err)
+	}
+	for _, key := range []string{"", "   "} {
+		err := requireProductionEncryptionKey(key, true)
+		if err == nil || !strings.Contains(err.Error(), "--encryption-key") {
+			t.Fatalf("key %q: expected PRODUCTION to refuse an empty encryption key, got %v", key, err)
+		}
 	}
 }
 
