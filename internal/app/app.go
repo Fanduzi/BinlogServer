@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, metadata/source isolation, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, and shutdown
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -102,6 +102,9 @@ func (a *App) Run(ctx context.Context) error {
 	controlPlaneEnabled, workerEnabled := resolveRoleMode(a.cfg)
 	production, err := productionMode(os.Getenv("PRODUCTION"))
 	if err != nil {
+		return err
+	}
+	if err := requireProductionEncryptionKey(a.cfg.EncryptionKey, production); err != nil {
 		return err
 	}
 	if controlPlaneEnabled {
@@ -404,6 +407,13 @@ func validateControlPlaneAuth(listenAddr string, auth config.APIAuthConfig, prod
 		return nil
 	}
 	return validateNonLoopbackAuth(auth)
+}
+
+func requireProductionEncryptionKey(key string, production bool) error {
+	if !production || strings.TrimSpace(key) != "" {
+		return nil
+	}
+	return errors.New("--encryption-key is required in PRODUCTION mode")
 }
 
 func validateProductionAuth(auth config.APIAuthConfig, production bool) error {
@@ -997,5 +1007,3 @@ func isNonNilInterface(v any) bool {
 		return true
 	}
 }
-
-
