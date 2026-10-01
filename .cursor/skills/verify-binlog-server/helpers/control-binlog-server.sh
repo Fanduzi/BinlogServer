@@ -23,10 +23,29 @@ Isolation env (defaults shown):
   BINLOG_VERIFY_BASE       /tmp/binlog-server-verify-\$BINLOG_VERIFY_RUN_ID
   BINLOG_VERIFY_EVIDENCE   /tmp/binlog-server-verify-evidence-\$BINLOG_VERIFY_RUN_ID
   BINLOG_SERVER_BIN        released binlog-server binary (required for launch and doctor)
-  BINLOG_VERIFY_META_DSN   optional; launch runs migrate up when set
+  BINLOG_VERIFY_META_DSN   optional; launch runs migrate up when set (helper appends ?parseTime=true if missing)
   BINLOG_VERIFY_MIGRATE_BIN  optional; default is ./migrate next to the server binary
   BINLOG_VERIFY_MIGRATIONS   optional; default is ./migrations next to the server binary
 EOF
+}
+
+
+ensure_meta_dsn_parse_time() {
+  # MySQL driver must parse DATETIME into time.Time or List/Get return 500.
+  local dsn="$1"
+  if [[ -z "$dsn" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+  if [[ "$dsn" == *parseTime=* ]]; then
+    printf '%s' "$dsn"
+    return 0
+  fi
+  if [[ "$dsn" == *\?* ]]; then
+    printf '%s&parseTime=true' "$dsn"
+  else
+    printf '%s?parseTime=true' "$dsn"
+  fi
 }
 
 trim_slash() {
@@ -41,6 +60,7 @@ resolve_env() {
   EVIDENCE="$(trim_slash "${BINLOG_VERIFY_EVIDENCE:-/tmp/binlog-server-verify-evidence-${RUN_ID}}")"
   BIN="${BINLOG_SERVER_BIN:-}"
   META_DSN="${BINLOG_VERIFY_META_DSN:-}"
+  META_DSN="$(ensure_meta_dsn_parse_time "$META_DSN")"
   PID_FILE="${BASE}/binlog-server.pid"
   DATA_DIR="${BASE}/data"
   LOG_DIR="${BASE}/logs"

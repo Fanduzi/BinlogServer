@@ -20,9 +20,9 @@ After binlog has been flushed locally, the operator can read the saved file and 
 Preconditions:
 
 - Doctor has passed for this run.
-- A MySQL or MariaDB source with `log_bin` enabled accepts the task user for replication.
+- `BINLOG_VERIFY_META_DSN` is set for this launch. Without a metadata MySQL store the server has no checkpoint reader, so `GET /api/tasks/<id>/checkpoint` always returns 404 `checkpoint not found` even while replication is RUNNING.
+- A MySQL or MariaDB source with `log_bin` enabled accepts the task user for replication. Its host:port must not be the metadata endpoint (create returns 400 `INVALID_REQUEST` when they match).
 - The task was created with `start.mode` of `LATEST`, `FILE_POS`, or `GTID`, then started, and has reached `RUNNING` long enough for a checkpoint to exist.
-- The source is not the meta database when `BINLOG_VERIFY_META_DSN` is set.
 
 - **Read checkpoint.** Fetch the saved position. Run `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /api/tasks/<id>/checkpoint -o "$BINLOG_VERIFY_EVIDENCE/checkpoint-resume/before.json" -w '%{http_code}'`. Status is `200`. `before.json` has non-empty `file` and `pos` greater than 0.
 - **Drawer.** Open the task drawer. `task-drawer-checkpoint` shows the same file and position as `before.json`.
@@ -33,7 +33,7 @@ Preconditions:
 
 ## Gotchas
 
-- A 404 checkpoint is the absent case. It does not prove resume.
+- A 404 checkpoint is the absent case only when meta is enabled and the task has never flushed. Without meta, every checkpoint GET is 404 and proves nothing about resume.
 - Resume proof needs a source that actually accepts the dump. A closed port never writes `file` and `pos`.
 - A valid checkpoint overrides the create-time mode (`LATEST`, `FILE_POS`, or `GTID`) on the next start. Comparing only the task's `start` object will miss that.
 - Cluster takeover (epoch greater than 1) rebuilds the current file from position 4. A single-process standalone run does not take that path.
