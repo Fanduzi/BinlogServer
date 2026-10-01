@@ -12,7 +12,7 @@
 - `control-binlog-server.sh doctor` — version, pid alive, `/healthz` `ok`, `/api/health` `status=ok`, `/ui/` 200, and (when `ss` can see owners) the listen port belongs to that pid
 - `control-binlog-server.sh curl [--] METHOD PATH [curl-args...]` — curl `BASE_URL` + path; a leading `--` before METHOD is optional
 - `control-binlog-server.sh cleanup` — signal only the pid in the pid file, remove `BINLOG_VERIFY_BASE`, leave `BINLOG_VERIFY_EVIDENCE` in place
-- `control-binlog-server.sh env-print` — print the resolved isolation variables
+- `control-binlog-server.sh env-print` — print the resolved isolation variables to stdout and do not start a process
 
 The helper does not kill processes by name.
 

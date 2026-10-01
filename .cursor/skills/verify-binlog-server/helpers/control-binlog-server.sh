@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: BINLOG_VERIFY_* isolation variables, BINLOG_SERVER_BIN, optional migrate binary and meta DSN
-# output: one isolated binlog-server process, pid file, start.env, doctor and curl results; cleanup removes only that instance
+# output: one isolated binlog-server process, pid file, start.env, doctor, curl, and env-print results; cleanup removes only that instance
 # pos: verification control helper for the verify-binlog-server skill
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
