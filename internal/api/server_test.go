@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, one-read dashboard observation (page/summary/source counts), SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and lookup/dashboard shared source-identity coverage
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and lookup/dashboard shared source-identity coverage
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -2649,7 +2649,7 @@ func (s *panicListTaskStore) DeleteTask(_ context.Context, taskID string) error 
 	return nil
 }
 
-// TestTaskAPI_DashboardObservationUsesOneMaterialization 验证任务观测一次 Limit=0 物化：页 total、汇总 total、按源计数同一批。
+// TestTaskAPI_DashboardObservationUsesOneMaterialization 验证无 rollup 的 store 只做一次过滤读取再按页取行，页/汇总/按源计数仍同一批。
 func TestTaskAPI_DashboardObservationUsesOneMaterialization(t *testing.T) {
 	store := &recordingPageStore{fakeAPIRunHistoryStore: newFakeAPIRunHistoryStore()}
 	failedOnB := 0
@@ -2710,12 +2710,16 @@ func TestTaskAPI_DashboardObservationUsesOneMaterialization(t *testing.T) {
 		t.Fatalf("decode dashboard: %v", err)
 	}
 
-	if len(store.filters) != 1 {
-		t.Fatalf("dashboard ListTasksPage calls = %d, want 1: %+v", len(store.filters), store.filters)
+	if len(store.filters) != 2 {
+		t.Fatalf("dashboard ListTasksPage calls = %d, want 2: %+v", len(store.filters), store.filters)
 	}
 	got := store.filters[0]
 	if got.Host != "db-b" || got.Port == nil || *got.Port != 3307 || got.State == nil || *got.State != tasks.StateFailed || got.Limit != 0 || got.Offset != 0 {
-		t.Fatalf("dashboard materialization filter = %+v, want host=db-b port=3307 state=FAILED limit=0 offset=0", got)
+		t.Fatalf("counter materialization filter = %+v, want host=db-b port=3307 state=FAILED limit=0 offset=0", got)
+	}
+	pageFilter := store.filters[1]
+	if pageFilter.Limit != 1 || pageFilter.Offset != 1 {
+		t.Fatalf("page filter = %+v, want limit=1 offset=1", pageFilter)
 	}
 	sourceTotal := 0
 	for _, source := range dashboard.Sources {
@@ -2737,6 +2741,116 @@ type recordingPageStore struct {
 func (s *recordingPageStore) ListTasksPage(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
 	s.filters = append(s.filters, filter)
 	return s.fakeAPIRunHistoryStore.ListTasksPage(ctx, filter)
+}
+
+// rollupPageStore answers dashboard counters without a Limit=0 page read.
+type rollupPageStore struct {
+	*fakeAPIRunHistoryStore
+	filters []tasks.TaskListFilter
+}
+
+func (s *rollupPageStore) ListTasksPage(ctx context.Context, filter tasks.TaskListFilter) ([]tasks.Task, int, error) {
+	s.filters = append(s.filters, filter)
+	return s.fakeAPIRunHistoryStore.ListTasksPage(ctx, filter)
+}
+
+func (s *rollupPageStore) filtered(filter tasks.TaskListFilter) []tasks.Task {
+	filter.Limit = 0
+	filter.Offset = 0
+	return tasks.FilterTasks(s.snapshot(), filter)
+}
+
+func (s *rollupPageStore) CountTaskStates(_ context.Context, filter tasks.TaskListFilter) (tasks.TaskStateCounts, error) {
+	return tasks.SummarizeTaskStates(s.filtered(filter)), nil
+}
+
+func (s *rollupPageStore) CountTasksBySource(_ context.Context, filter tasks.TaskListFilter) ([]tasks.TaskSourceCount, error) {
+	return tasks.SummarizeTasksBySource(s.filtered(filter)), nil
+}
+
+func (s *rollupPageStore) ListRunningTaskRefs(_ context.Context, filter tasks.TaskListFilter) ([]tasks.RunningTaskRef, error) {
+	return tasks.RunningRefs(s.filtered(filter)), nil
+}
+
+func TestTaskAPI_DashboardRollupSkipsUnboundedPage(t *testing.T) {
+	store := &rollupPageStore{fakeAPIRunHistoryStore: newFakeAPIRunHistoryStore()}
+	source := tasks.SourceConfig{Host: "db-a", Port: 3306, User: "repl", Password: "secret"}
+	for _, id := range []string{"1", "2", "3"} {
+		store.tasks[id] = tasks.Task{
+			ID: id, Name: "run-" + id, ClusterKey: "run-" + id, State: tasks.StateRunning, Source: source,
+		}
+	}
+	store.tasks["4"] = tasks.Task{
+		ID: "4", Name: "bad", ClusterKey: "bad", State: tasks.StateFailed, LastError: "boom", Source: source,
+	}
+	scheduler := tasks.NewScheduler(tasks.WithStore(store))
+	if err := scheduler.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	for _, id := range []string{"1", "2", "3"} {
+		scheduler.ReportReplicationProgress(id, time.Now().Add(-3*time.Second), "mysql-bin.000001", 10, false)
+	}
+	handler := NewServer(scheduler)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/dashboard?limit=1&offset=0", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("dashboard returned %d body=%s", resp.Code, resp.Body.String())
+	}
+	var dashboard struct {
+		Total   int `json:"total"`
+		Limit   int `json:"limit"`
+		Summary struct {
+			Total    int `json:"total"`
+			Running  int `json:"running"`
+			Failed   int `json:"failed"`
+			Normal   int `json:"normal"`
+			Abnormal int `json:"abnormal"`
+		} `json:"summary"`
+		Tasks []struct {
+			Task tasks.Task `json:"task"`
+		} `json:"tasks"`
+		Sources []struct {
+			TaskCount int `json:"task_count"`
+			Running   int `json:"running"`
+			Normal    int `json:"normal"`
+			Abnormal  int `json:"abnormal"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &dashboard); err != nil {
+		t.Fatalf("decode dashboard: %v", err)
+	}
+	if dashboard.Total != 4 || dashboard.Limit != 1 || len(dashboard.Tasks) != 1 || dashboard.Tasks[0].Task.ID != "1" {
+		t.Fatalf("page = total %d limit %d tasks %+v", dashboard.Total, dashboard.Limit, dashboard.Tasks)
+	}
+	if dashboard.Summary.Total != 4 || dashboard.Summary.Running != 3 || dashboard.Summary.Failed != 1 || dashboard.Summary.Normal != 3 || dashboard.Summary.Abnormal != 1 {
+		t.Fatalf("summary = %+v", dashboard.Summary)
+	}
+	if len(dashboard.Sources) != 1 || dashboard.Sources[0].TaskCount != 4 || dashboard.Sources[0].Running != 3 || dashboard.Sources[0].Normal != 3 || dashboard.Sources[0].Abnormal != 1 {
+		t.Fatalf("sources = %+v", dashboard.Sources)
+	}
+	if len(store.filters) != 1 || store.filters[0].Limit != 1 || store.filters[0].Offset != 0 {
+		t.Fatalf("ListTasksPage filters = %+v, want one page read limit=1", store.filters)
+	}
+
+	summaryResp := httptest.NewRecorder()
+	handler.ServeHTTP(summaryResp, httptest.NewRequest(http.MethodGet, "/api/summary", nil))
+	if summaryResp.Code != http.StatusOK {
+		t.Fatalf("summary returned %d body=%s", summaryResp.Code, summaryResp.Body.String())
+	}
+	var summary struct {
+		Total    int `json:"total"`
+		Running  int `json:"running"`
+		Failed   int `json:"failed"`
+		Normal   int `json:"normal"`
+		Abnormal int `json:"abnormal"`
+	}
+	if err := json.Unmarshal(summaryResp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Total != dashboard.Summary.Total || summary.Running != dashboard.Summary.Running || summary.Failed != dashboard.Summary.Failed || summary.Normal != dashboard.Summary.Normal || summary.Abnormal != dashboard.Summary.Abnormal {
+		t.Fatalf("summary %+v disagrees with dashboard %+v", summary, dashboard.Summary)
+	}
 }
 
 // TestTaskAPI_ListTasksPageDoesNotLoadAllRows 验证列表 SQL 页与 dashboard 一次物化都走 ListTasksPage，不依赖整表 ListTasks。
