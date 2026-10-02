@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source connection results, network/stream disconnects, flavor, log_bin and identity variables
-// output: stable source identity strings and typed permanent/retryable source errors
+// output: stable source identity strings, MariaDB flavor hint when @@server_uuid is missing, and typed permanent/retryable source errors
 // pos: flavor-aware source probe and operator-error classification boundary
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -52,8 +52,34 @@ func isMariaDBFlavor(flavor string) bool {
 	return strings.EqualFold(strings.TrimSpace(flavor), "mariadb")
 }
 
+// mysqlServerUUIDUnavailable is the operator message when flavor=mysql probes a
+// source that has no @@server_uuid. MariaDB returns an empty SHOW VARIABLES row
+// or ERROR 1193 (unknown system variable).
+const mysqlServerUUIDUnavailable = "server_uuid is unavailable (empty result or unknown system variable). This source looks like MariaDB. Set flavor=mariadb"
+
+func isUnknownSystemVariable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unknown system variable") || strings.Contains(msg, "error 1193")
+}
+
+// identityFromProbe maps a server_uuid probe onto resolveSourceIdentity.
+// ERROR 1193 and an empty result are the same missing-variable signal.
+func identityFromProbe(flavor, logBin, serverUUID string, uuidErr error, serverID, domainID string) (string, error) {
+	if isUnknownSystemVariable(uuidErr) {
+		serverUUID = ""
+		uuidErr = nil
+	}
+	if uuidErr != nil {
+		return "", uuidErr
+	}
+	return resolveSourceIdentity(flavor, logBin, serverUUID, serverID, domainID)
+}
+
 // resolveSourceIdentity maps probed variables to a stable identity.
-// MariaDB 11 has no @@server_uuid; identity is mariadb:<server_id>:<gtid_domain_id>.
+// MariaDB has no @@server_uuid; identity is mariadb:<server_id>:<gtid_domain_id>.
 func resolveSourceIdentity(flavor, logBin, serverUUID, serverID, domainID string) (string, error) {
 	if !isLogBinEnabled(logBin) {
 		return "", tasks.NewPermanentError(tasks.CodeSourceLogBinOff, "log_bin is off")
@@ -71,7 +97,7 @@ func resolveSourceIdentity(flavor, logBin, serverUUID, serverID, domainID string
 	}
 	serverUUID = strings.TrimSpace(serverUUID)
 	if serverUUID == "" {
-		return "", tasks.NewPermanentError(tasks.CodeSourceIdentityUnavailable, "empty server_uuid")
+		return "", tasks.NewPermanentError(tasks.CodeSourceIdentityUnavailable, mysqlServerUUIDUnavailable)
 	}
 	return serverUUID, nil
 }

@@ -10,7 +10,7 @@
 ## Exports
 - Runner 启停与进度上报。fresh LATEST 在 StartSync 成功后立即按 at-tip 上报；idle dump wait 仅在 dump file/pos 已达到（或不落后于）源库 SHOW MASTER STATUS 时标 at-tip；仍落后的 FILE_POS/GTID 保持 event header lag。
 - 源网络超时、拒绝、主机不可达及复制流 EOF/UnexpectedEOF 统一暴露 `SOURCE_UNREACHABLE`，本地文件/metadata/lease 错误保持原分类。
-- MariaDB 身份：`mariadb:<server_id>:<gtid_domain_id>`；MySQL 仍用 `server_uuid`。
+- MariaDB 身份：`mariadb:<server_id>:<gtid_domain_id>`；MySQL 仍用 `server_uuid`。`flavor=mysql` 探测不到 `@@server_uuid`（空结果或 unknown system variable）时，永久错误 `SOURCE_IDENTITY_UNAVAILABLE` 提示这台源像 MariaDB，并要求 `flavor=mariadb`。`flavor=mariadb` 不读 `server_uuid`。
 - 文件落盘、checkpoint 对接、随落盘进度更新的 OPEN/SEALED 生命周期元数据；上传与重试共用 `tasks.ApplySealedUpload`。
 
 ## Dependencies
