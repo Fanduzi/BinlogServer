@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: frontend source tree, node toolchain, and build configuration dependencies
-# output: compiled frontend assets synchronized into backend static serving directory, with an L3 header stamped onto each JS bundle and an ESM syntax check; npm ci when vite is missing
+# output: compiled frontend assets synchronized into backend static serving directory, with an L3 header stamped onto each JS bundle and an ESM syntax check; locale messages compiled before the Vite build; npm ci when vite is missing
 # pos: build pipeline bridge between frontend artifacts and backend embedded UI delivery
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -16,6 +16,7 @@ echo "[ui] build frontend (base=/ui/)"
     echo "[ui] vite not found; running npm ci"
     npm ci
   fi
+  npm run test:locales
   npm run build
 )
 
