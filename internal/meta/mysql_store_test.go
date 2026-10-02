@@ -7,9 +7,9 @@ package meta
 
 import (
 	"context"
-	"errors"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
