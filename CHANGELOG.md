@@ -12,6 +12,28 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.6] - 2026-10-02
+
+### Added
+
+- `scripts/failover-dogfood.sh` and the verify-binlog-server failover-lease skill prove dual-worker lease takeover. The lease state machine is unchanged.
+- A project-local verify-binlog-server Cursor skill drives a released binary through the HTTP API and the embedded Console.
+
+### Changed
+
+- Operator download examples in README, the landing page, and the deployment guide now pin `v0.5.6`.
+- `GET /api/dashboard` and `GET /api/summary` count states and sources with SQL `GROUP BY` and page rows with `LIMIT/OFFSET` instead of scanning every matching task row.
+- When `api.auth.enabled=true`, `/ui/*` and `/swagger/*` use the API auth middleware. `/healthz` stays open.
+- Go modules: validator `v10.30.5`.
+
+### Fixed
+
+- The embedded Console bundle parses again. `v0.5.5` shipped a stray `}` in the entry import, so Chrome threw `SyntaxError` and the shell never mounted. CI and the release workflow run `scripts/check-ui-bundle.sh` (`node --check --input-type=module`).
+
+### Security
+
+- `PRODUCTION=true` refuses to start when `--encryption-key` is empty.
+
 ## [v0.5.5] - 2026-09-21
 
 ### Changed
