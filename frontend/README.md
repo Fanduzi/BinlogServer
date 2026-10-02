@@ -18,6 +18,7 @@
 - 本地开发：`npm run dev`
 - 开发态 mock：`VITE_USE_MOCK=true VITE_MOCK_SCENARIO=healthy npm run dev`
 - 构建产物：`npm run build`，供后端 `internal/ui/static/` 使用
+- 文案编译：`npm run test:locales`，用 vue-i18n 生产编译检查 `src/locales/*.json`（嵌入式 `/ui/` 会因非法 `@` 直接抛错）
 
 ## Dependencies
 - Upstream: 浏览器与开发者操作

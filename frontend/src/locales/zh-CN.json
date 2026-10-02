@@ -55,7 +55,7 @@
     "flavor": "Flavor",
     "flavorMysql": "mysql",
     "flavorMariaDB": "mariadb",
-    "flavorHint": "MariaDB 没有 @@server_uuid。源库是 MariaDB 时选 mariadb。",
+    "flavorHint": "MariaDB 没有 {'@@server_uuid'}。源库是 MariaDB 时选 mariadb。",
     "semiSync": "SemiSync",
     "retentionDays": "保留天数",
     "startMode": "起点模式",

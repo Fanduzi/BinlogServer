@@ -55,7 +55,7 @@
     "flavor": "Flavor",
     "flavorMysql": "mysql",
     "flavorMariaDB": "mariadb",
-    "flavorHint": "MariaDB has no @@server_uuid. Choose mariadb for a MariaDB source.",
+    "flavorHint": "MariaDB has no {'@@server_uuid'}. Choose mariadb for a MariaDB source.",
     "semiSync": "SemiSync",
     "retentionDays": "Retention Days",
     "startMode": "Start Mode",
