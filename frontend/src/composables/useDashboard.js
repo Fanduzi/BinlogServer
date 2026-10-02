@@ -1,5 +1,5 @@
 // input: API layer (getDashboard, getClusterOverview, listWorkers)
-// output: dashboard + cluster reactive state, required server pagination metadata, status counters including STARTING, loading flag, one refreshAll orchestration, nowRefMs
+// output: dashboard + cluster reactive state including overview.single_process, required server pagination metadata, status counters including STARTING, loading flag, one refreshAll orchestration, nowRefMs
 // pos: central data layer composable; sourceQuery/lookup live in useSourceLookup; list lease risk uses task owner/epoch, not /lease
 // note: if this file changes, update this header and frontend/src/README.md
 import { reactive, ref } from "vue";
@@ -40,6 +40,7 @@ export function useDashboard() {
       worker_count: 0,
       running_task_count: 0,
       leased_task_count: 0,
+      single_process: false,
     },
     workers: [],
   });

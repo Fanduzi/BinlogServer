@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -234,7 +234,9 @@ function buildWorkers(state) {
     const lease = state.leasesByID[row.task.id];
     const owner = lease?.owner_worker_id || row.task.owner_worker_id;
     if (!owner) continue;
+    // standalone is the in-process puller, not a worker, unless the scenario listed it.
     if (!byID.has(owner)) {
+      if (owner === "standalone") continue;
       byID.set(owner, {
         worker_id: owner,
         task_count: 0,
@@ -266,11 +268,19 @@ function buildWorkers(state) {
 }
 
 function buildClusterOverview(state) {
+  const workers = buildWorkers(state);
+  const owners = new Set();
+  for (const row of state.tasks) {
+    const owner = state.leasesByID[row.task.id]?.owner_worker_id || row.task?.owner_worker_id || "";
+    if (owner) owners.add(owner);
+  }
+  const singleProcess = workers.length === 0 && owners.size === 1 && owners.has("standalone");
   return {
     task_count: state.tasks.length,
-    worker_count: buildWorkers(state).length,
+    worker_count: workers.length,
     running_task_count: state.tasks.filter((row) => row.task?.state === "RUNNING").length,
     leased_task_count: state.tasks.filter((row) => state.leasesByID[row.task.id]?.owner_worker_id).length,
+    single_process: singleProcess,
   };
 }
 

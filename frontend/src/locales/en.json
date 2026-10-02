@@ -248,6 +248,7 @@
     "runningTaskCount": "Running Tasks",
     "leasedTaskCount": "Leased",
     "workerCount": "{count} Workers",
+    "singleProcess": "Single process: this process pulls tasks",
     "workerOnline": "Online",
     "workerOffline": "Offline",
     "lastHeartbeat": "Last heartbeat: {time}",

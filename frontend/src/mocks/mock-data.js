@@ -1,5 +1,5 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
-// output: reusable mock datasets, including server-pagination/current-page filter scenarios and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
+// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -53,6 +53,7 @@ export const mockScenarioNames = [
   "cluster-degraded",
   "lease-risk",
   "control-plane-down-worker-running",
+  "single-process",
 ];
 
 export const mockScenarios = {
@@ -75,6 +76,31 @@ export const mockScenarios = {
       worker_count: 0,
       running_task_count: 0,
       leased_task_count: 0,
+    },
+  },
+  "single-process": {
+    summary: {
+      total: 1,
+      running: 1,
+      retry_backoff: 0,
+      stopped: 0,
+      failed: 0,
+      normal: 1,
+      delayed: 0,
+      abnormal: 0,
+    },
+    tasks: [{
+      task: buildTask("100", { owner_worker_id: "standalone" }),
+      replication: buildReplication(),
+    }],
+    sources: [],
+    workers: [],
+    clusterOverview: {
+      task_count: 1,
+      worker_count: 0,
+      running_task_count: 1,
+      leased_task_count: 1,
+      single_process: true,
     },
   },
   healthy: {
