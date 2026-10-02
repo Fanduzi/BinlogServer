@@ -11,7 +11,7 @@
 | components/MetricGrid.vue | 首屏状态指标卡，分别展示 `summary.starting` 与 `summary.running` |
 | api.js | 与后端 `/api` 的请求封装，含 dashboard 任务观测、单/批量任务创建、认证拦截、设置引导事件与开发态 mock 分发；不再提供 summary / 全量 list 客户端 |
 | composables/useBatchCreate.js | 批量创建行预校验（最多 100 个有效行）、单次 batch API 调用及逐项自动启动 |
-| composables/useDashboard.js | Dashboard/cluster 响应状态与唯一刷新编排，只信 dashboard 的 `total/limit/offset`，保留 starting/running 独立计数，不按页预取 `/lease` |
+| composables/useDashboard.js | Dashboard/cluster 响应状态与唯一刷新编排，只信 dashboard 的 `total/limit/offset`，保留 starting/running 独立计数，保留 overview `single_process`，不按页预取 `/lease` |
 | composables/useTaskFilter.js | 当前页本地筛选和 server pagination 查询参数 |
 | mocks/mock-data.js | 共享 mock 场景数据 |
 | mocks/mock-handler.js | 共享 mock 请求分发与最小状态模拟 |

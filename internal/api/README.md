@@ -9,8 +9,8 @@
 | `metrics_prometheus.go` | `/metrics` 采集与输出：一次 scrape 只读一份 `ListClusterObservation`，失败 5xx，不在 Collect 里再读一遍后记日志并吐空计数 |
 | `tracing.go` | HTTP 入站 tracing middleware（OTel span） |
 | `handlers_tasks.go` | 任务相关 API 处理（CRUD、批量创建、启动停止、checkpoint、source lookup 读集群观测同一份 store 抄本再 `SameSourceHost` 过滤、summary/dashboard 用状态与按源 GROUP BY 计数，任务行走 LIMIT/OFFSET） |
-| `handlers_cluster.go` | 集群观测：overview / workers 任务计数读 `ListClusterObservation`（有 store 时全库所有权抄本，不是任务页过滤，也不是启动内存名单） |
-| `cluster_observation_test.go` | HTTP 缝测试：过滤后的 dashboard 汇总 ≠ 集群人数；store 主人/状态变化反映到 overview/workers/metrics；lookup 读同一份 store 抄本；无 store 仍用内存名单；`/metrics` 一次 scrape 只读一份 store 抄本 |
+| `handlers_cluster.go` | 集群观测：overview / workers 任务计数读 `ListClusterObservation`（有 store 时全库所有权抄本，不是任务页过滤，也不是启动内存名单）。无心跳的进程内主人 `standalone` 不计入 `worker_count`，overview 置 `single_process` |
+| `cluster_observation_test.go` | HTTP 缝测试：过滤后的 dashboard 汇总 ≠ 集群人数；store 主人/状态变化反映到 overview/workers/metrics；单机 + meta 的 overview `worker_count` 与 `/api/workers` 一致；lookup 读同一份 store 抄本；无 store 仍用内存名单；`/metrics` 一次 scrape 只读一份 store 抄本 |
 | `gettask_fail_loud_test.go` | HTTP 缝测试：有 store 时 `GET /api/tasks/{id}` store 未找到 404、其它 store 错误 5xx，不退回内存旧主人/epoch 抄本；没有 store 仍读内存名单 |
 | `swagger_docs_only.go` | swagger 注释占位 |
 
@@ -22,7 +22,7 @@
 - `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。有 `TaskDashboardRollup` 时状态计数走 SQL `GROUP BY`，不把匹配行整表读入内存。
 - `GET /api/dashboard` - 控制台任务观测唯一读取：返回同口径 summary（`starting` 与 `running` 独立）、任务明细与 source 聚合。状态计数与按源 `task_count`/`running`/`starting` 来自 `CountTaskStates` / `CountTasksBySource`；任务行是 `ListTasksPage` 的 LIMIT/OFFSET 页，复制进度只取该页。`normal`/`delayed` 与 RUNNING 的 `abnormal` 用 RUNNING id 引用分类，不加载整行。`total`、`summary.total` 与按源 `task_count` 仍是同一过滤集。无 rollup 的 store 仍用一次过滤读取做计数。
 - `GET /api/sources/lookup` - 按 host/port 查任务 id。有 store 时读集群观测同一份 `ListClusterObservation`（`store.ListTasks`）抄本，再用 `SameSourceHost` 过滤；store 错误返回 5xx，不退回启动时的内存名单。没有 store 时仍读同一份内存名单。
-- `GET /api/cluster/overview` / `GET /api/workers` / `GET /metrics` 的任务与主人计数共用 `ListClusterObservation`：有 store 时读 `store.ListTasks` 全库抄本，store 错误返回 5xx，不退回启动时的内存名单；没有 store 时仍读同一份内存名单。`/metrics` 一次 scrape 只读一份抄本。任务页 dashboard 过滤汇总不是集群人数。
+- `GET /api/cluster/overview` / `GET /api/workers` / `GET /metrics` 的任务与主人计数共用 `ListClusterObservation`：有 store 时读 `store.ListTasks` 全库抄本，store 错误返回 5xx，不退回启动时的内存名单；没有 store 时仍读同一份内存名单。`/metrics` 一次 scrape 只读一份抄本。任务页 dashboard 过滤汇总不是集群人数。单机进程的主人 `standalone` 在没有心跳时不进入 overview 的 worker 列表，`worker_count` 为 0 且 `single_process` 为 true（与 `/api/workers` 的空列表同一人数）；该 id 一旦有心跳，overview 与 `/api/workers` 用同一条在线状态和 `last_seen_at`。
 - `GET /api/tasks/{id}` - 按 id 读单个任务。有 store 时 store 未找到返回 404，其它 store 错误返回 5xx，不把内存里的旧主人/epoch 抄本当成 200；没有 store 时仍读内存名单。
 - `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页，不是控制台任务观测来源。页序为数字 id 升序；支持 host/port/state 过滤，host 与 lookup/dashboard 共用 `SameSourceHost`；cluster/mysql 走 `ListTasksPage`（COUNT + `ORDER BY CAST(id AS UNSIGNED), id LIMIT/OFFSET`），standalone 仍切内存快照。默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
 - `POST /api/tasks/batch` - 接收 `items` 数组（1..100 个现有创建请求），整包 envelope 错误返回 400 且不创建；合法 envelope 按顺序逐项调用 `CreateTaskFromSpec`，返回 200 的 `{index,cluster_key,task|error}` 结果数组。

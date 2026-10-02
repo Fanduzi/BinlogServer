@@ -248,6 +248,7 @@
     "runningTaskCount": "运行中任务",
     "leasedTaskCount": "持有 Lease",
     "workerCount": "{count} 个 Worker",
+    "singleProcess": "单机，任务由本进程拉取",
     "workerOnline": "在线",
     "workerOffline": "离线",
     "lastHeartbeat": "最近心跳：{time}",

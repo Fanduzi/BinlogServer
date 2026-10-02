@@ -1069,6 +1069,10 @@
                 "running_task_count": {
                     "type": "integer"
                 },
+                "single_process": {
+                    "type": "boolean",
+                    "description": "True when this process pulls tasks and no worker heartbeat exists. worker_count is 0."
+                },
                 "task_count": {
                     "type": "integer"
                 },

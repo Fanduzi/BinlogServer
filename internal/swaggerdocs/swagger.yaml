@@ -31,6 +31,9 @@ definitions:
         type: integer
       running_task_count:
         type: integer
+      single_process:
+        description: True when this process pulls tasks and no worker heartbeat exists. worker_count is 0.
+        type: boolean
       task_count:
         type: integer
       worker_count:
