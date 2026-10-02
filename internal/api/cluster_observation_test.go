@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP GET /api/cluster/overview, /api/workers, /metrics, /api/dashboard, and /api/sources/lookup
-// output: cluster observation and source lookup from the store ownership copy; /metrics uses one snapshot per scrape
+// output: cluster observation and source lookup from the store ownership copy; single-process meta keeps overview worker_count aligned with /api/workers; /metrics uses one snapshot per scrape
 // pos: control-plane HTTP seam tests for cluster-wide ownership observation
 // note: if this file changes, update this header and module README.md.
 package api
@@ -157,6 +157,90 @@ func TestClusterObservation_StoreOwnershipChangeUpdatesOverviewAndWorkers(t *tes
 	if staleWorkers.TaskCount != 0 || staleWorkers.Running != 0 || staleWorkers.Leased != 0 {
 		t.Fatalf("workers stale owner still counted: %+v", staleWorkers)
 	}
+}
+
+func TestClusterObservation_SingleProcessMetaOverviewMatchesWorkers(t *testing.T) {
+	store := seedClusterObservationStore(t,
+		tasks.Task{
+			ID:            "1",
+			Name:          "pull-a",
+			ClusterKey:    "pull-a",
+			State:         tasks.StateRunning,
+			OwnerWorkerID: localProcessWorkerID,
+			Epoch:         4,
+			Source:        tasks.SourceConfig{Host: "db-a", Port: 3306, User: "repl"},
+		},
+		tasks.Task{
+			ID:            "2",
+			Name:          "pull-b",
+			ClusterKey:    "pull-b",
+			State:         tasks.StateStopped,
+			OwnerWorkerID: localProcessWorkerID,
+			Epoch:         2,
+			Source:        tasks.SourceConfig{Host: "db-b", Port: 3306, User: "repl"},
+		},
+	)
+	handler := NewServer(restoreSchedulerWithStore(t, store))
+
+	overview, workers := readOverviewAndWorkers(t, handler)
+	if !overview.SingleProcess || overview.WorkerCount != 0 || len(overview.Workers) != 0 {
+		t.Fatalf("single-process overview=%+v, want single_process worker_count=0 workers=[]", overview)
+	}
+	if overview.TaskCount != 2 || overview.RunningTaskCount != 1 || overview.LeasedTaskCount != 2 {
+		t.Fatalf("single-process task counts=%+v, want task=2 running=1 leased=2", overview)
+	}
+	if len(workers) != overview.WorkerCount {
+		t.Fatalf("overview worker_count=%d /api/workers=%d", overview.WorkerCount, len(workers))
+	}
+
+	seen := time.Now().UTC().Truncate(time.Second)
+	store.workers = []tasks.WorkerHeartbeat{{
+		WorkerID:   localProcessWorkerID,
+		Host:       "this-host",
+		Version:    "v0",
+		LastSeenAt: seen,
+		Status:     "ONLINE",
+	}}
+	overview, workers = readOverviewAndWorkers(t, handler)
+	if overview.SingleProcess || overview.WorkerCount != 1 || len(overview.Workers) != 1 || len(workers) != 1 {
+		t.Fatalf("heartbeated local overview=%+v workers=%d", overview, len(workers))
+	}
+	if overview.Workers[0].WorkerID != localProcessWorkerID || workers[0].WorkerID != localProcessWorkerID {
+		t.Fatalf("worker id overview=%s workers=%s", overview.Workers[0].WorkerID, workers[0].WorkerID)
+	}
+	if !overview.Workers[0].Online || !workers[0].Online {
+		t.Fatalf("expected online on both, overview=%+v workers=%+v", overview.Workers[0], workers[0])
+	}
+	if !overview.Workers[0].LastSeenAt.Equal(workers[0].LastSeenAt) || !workers[0].LastSeenAt.Equal(seen) {
+		t.Fatalf("last_seen overview=%s workers=%s want=%s", overview.Workers[0].LastSeenAt, workers[0].LastSeenAt, seen)
+	}
+	if overview.Workers[0].TaskCount != workers[0].TaskCount || overview.Workers[0].Running != workers[0].Running || overview.Workers[0].Leased != workers[0].Leased {
+		t.Fatalf("task stats overview=%+v workers=%+v", overview.Workers[0], workers[0])
+	}
+}
+
+func readOverviewAndWorkers(t *testing.T, handler http.Handler) (clusterOverview, []workerItem) {
+	t.Helper()
+	overviewResp := getJSON(handler, "/api/cluster/overview")
+	if overviewResp.Code != http.StatusOK {
+		t.Fatalf("overview returned %d body=%s", overviewResp.Code, overviewResp.Body.String())
+	}
+	var overview clusterOverview
+	if err := json.Unmarshal(overviewResp.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	workersResp := getJSON(handler, "/api/workers")
+	if workersResp.Code != http.StatusOK {
+		t.Fatalf("workers returned %d body=%s", workersResp.Code, workersResp.Body.String())
+	}
+	var workers []workerItem
+	if err := json.Unmarshal(workersResp.Body.Bytes(), &workers); err != nil {
+		t.Fatalf("decode workers: %v", err)
+	}
+	if workers == nil {
+		t.Fatalf("workers JSON was null, want []")
+	}
+	return overview, workers
 }
 
 func workerByID(items []workerItem, id string) workerItem {

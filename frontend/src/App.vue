@@ -1,6 +1,6 @@
 <!--
 input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, status KPIs, detail drawer, forms, and settings
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -134,7 +134,7 @@ note: if this file changes, update this header and frontend/README.md.
           <template #header>
             <div class="panel-title">
               <span><i class="fa-solid fa-sitemap" /> {{ $t('cluster.title') }}</span>
-              <span class="panel-hint">{{ $t('cluster.workerCount', { count: cluster.overview.worker_count }) }}</span>
+              <span class="panel-hint" data-testid="cluster-worker-summary">{{ cluster.overview.single_process ? $t('cluster.singleProcess') : $t('cluster.workerCount', { count: cluster.overview.worker_count }) }}</span>
             </div>
           </template>
 
@@ -175,12 +175,12 @@ note: if this file changes, update this header and frontend/README.md.
             <el-empty
               v-if="workerRows.length === 0"
               data-testid="workers-empty"
-              :description="$t('cluster.noWorkers')"
+              :description="cluster.overview.single_process ? $t('cluster.singleProcess') : $t('cluster.noWorkers')"
               :image-size="56"
             />
           </div>
           <div v-else class="overview-note">
-            {{ $t('cluster.overviewNote') }}
+            {{ cluster.overview.single_process ? $t('cluster.singleProcess') : $t('cluster.overviewNote') }}
           </div>
         </el-card>
 

@@ -16,6 +16,7 @@ export type MockScenario =
   | 'cluster-degraded'
   | 'lease-risk'
   | 'control-plane-down-worker-running'
+  | 'single-process'
 
 export interface MockTaskRow {
   task: any
