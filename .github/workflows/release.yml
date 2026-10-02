@@ -35,6 +35,9 @@ jobs:
       - name: Check embedded Console bundle
         run: ./scripts/check-ui-bundle.sh
 
+      - name: Check landing page image assets
+        run: ./scripts/check-landing-assets.sh
+
       - name: Run unit tests
         run: go test ./...
 

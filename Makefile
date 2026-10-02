@@ -1,4 +1,4 @@
-.PHONY: help test build build-linux check-linux-compat check-linux-release-archive ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e-scale e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test build build-linux check-linux-compat check-linux-release-archive check-landing-assets ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e-scale e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo devel)
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -65,6 +65,9 @@ check-linux-release-archive:
 		exit 1; \
 	fi; \
 	./scripts/check-linux-release-archive.sh "$$archive_path"
+
+check-landing-assets:
+	./scripts/check-landing-assets.sh
 
 ui-build:
 	./scripts/build-ui.sh
