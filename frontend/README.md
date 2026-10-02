@@ -4,7 +4,7 @@
 | File | Responsibility |
 |------|---------------|
 | `src/main.js` | Vue 应用入口 |
-| `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、全局/当前页筛选范围、任务详情与设置对话框；刷新只走 `useDashboard.refreshAll` |
+| `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、全局/当前页筛选范围、任务详情与设置对话框；`single_process` 时总览与 Worker 页写明本进程拉取；刷新只走 `useDashboard.refreshAll` |
 | `src/components/MetricGrid.vue` | 首屏任务指标卡，分别展示 starting 与 running |
 | `src/api.js` | API 调用封装，含 dashboard 任务观测、真实后端请求、单/批量任务创建、401 处理与开发态 mock 分发；不提供 summary / 全量 list 客户端 |
 | `src/composables/useBatchCreate.js` | 批量任务表单预校验（最多 100 个有效行）、单次 `/api/tasks/batch` 创建请求与逐成功项自动启动 |
@@ -35,7 +35,7 @@
 - E2E 回归覆盖：Playwright 用例覆盖分视图导航、深链、空态、详情抽屉、上传重试与 starting 指标 mock 场景
 - 开发态 mock：显式环境变量打开后，前端可直接使用共享场景数据启动，不依赖真实后端
 - 共享 mock 资产：Vite dev 与 Playwright 路由拦截复用同一套 mock 数据与 handler，避免双份漂移
-- 内置 mock 场景：`empty`、`healthy`、`pagination`、`starting`、`anomaly`、`upload-failed`、`auth-required`、`cluster-degraded`、`lease-risk`、`control-plane-down-worker-running`
+- 内置 mock 场景：`empty`、`healthy`、`pagination`、`starting`、`anomaly`、`upload-failed`、`auth-required`、`cluster-degraded`、`lease-risk`、`control-plane-down-worker-running`、`single-process`
 
 ## Update Rule
 - 前端模块边界、接口契约、构建流程变化时，更新本文件。

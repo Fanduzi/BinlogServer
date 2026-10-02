@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, ListClusterObservation, worker heartbeats, GetTask, and ListRuns
-// output: REST cluster overview/workers from the unfiltered store ownership copy (store list errors are 5xx), plus lease and run history views
+// output: REST cluster overview/workers from the unfiltered store ownership copy (store list errors are 5xx); a heartbeats-less in-process owner is single_process with worker_count 0, plus lease and run history views
 // pos: external control-plane API layer for cluster observation and per-task lease/run reads
 // note: if this file changes, update this header and module README.md.
 package api
@@ -46,15 +46,22 @@ type taskRunView struct {
 	EndReason string    `json:"end_reason,omitempty"`
 }
 
+// clusterOverview is GET /api/cluster/overview.
+// SingleProcess is true when this process pulls tasks and no worker heartbeat exists.
 type clusterOverview struct {
 	TaskCount        int          `json:"task_count"`
 	WorkerCount      int          `json:"worker_count"`
 	RunningTaskCount int          `json:"running_task_count"`
 	LeasedTaskCount  int          `json:"leased_task_count"`
+	SingleProcess    bool         `json:"single_process"`
 	Workers          []workerItem `json:"workers"`
 }
 
 const workerOnlineThreshold = 15 * time.Second
+
+// localProcessWorkerID is the in-process owner app assigns when this process
+// pulls tasks itself. It is not a cluster worker unless a heartbeat row exists.
+const localProcessWorkerID = "standalone"
 
 // buildWorkerItems 从任务 ownership 视图构建 worker 维度聚合结果。
 func buildWorkerItems(items []tasks.Task) []workerItem {
@@ -93,6 +100,49 @@ func buildWorkerItems(items []tasks.Task) []workerItem {
 	return workers
 }
 
+// overviewWorkers drops the in-process owner when it has no heartbeat so
+// overview worker_count matches GET /api/workers. A heartbeat for that id is
+// copied onto the overview row. singleProcess reports that this process pulls.
+func overviewWorkers(owners []workerItem, heartbeats []tasks.WorkerHeartbeat, now time.Time) ([]workerItem, bool) {
+	hbByID := make(map[string]tasks.WorkerHeartbeat, len(heartbeats))
+	for _, hb := range heartbeats {
+		hbByID[hb.WorkerID] = hb
+	}
+	workers := make([]workerItem, 0, len(owners))
+	droppedLocal := false
+	for _, owner := range owners {
+		if owner.WorkerID != localProcessWorkerID {
+			workers = append(workers, owner)
+			continue
+		}
+		hb, ok := hbByID[owner.WorkerID]
+		if !ok {
+			droppedLocal = true
+			continue
+		}
+		workers = append(workers, applyHeartbeat(owner, hb, now))
+	}
+	singleProcess := droppedLocal && len(workers) == 0 && len(heartbeats) == 0
+	return workers, singleProcess
+}
+
+func applyHeartbeat(stats workerItem, hb tasks.WorkerHeartbeat, now time.Time) workerItem {
+	online := hb.Status == "ONLINE" && !hb.LastSeenAt.IsZero() && now.Sub(hb.LastSeenAt) <= workerOnlineThreshold
+	status := hb.Status
+	if !online {
+		status = "OFFLINE"
+	}
+	stats.WorkerID = hb.WorkerID
+	stats.Host = hb.Host
+	stats.Version = hb.Version
+	stats.LastSeenAt = hb.LastSeenAt
+	stats.Status = status
+	stats.Online = online
+	stats.UpdatedAt = hb.LastSeenAt
+	stats.HasUpdated = !hb.LastSeenAt.IsZero()
+	return stats
+}
+
 // handleWorkers 返回 worker 在线状态与任务统计列表。
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -118,25 +168,7 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	items := make([]workerItem, 0, len(heartbeats))
 	for _, hb := range heartbeats {
-		stats := taskStats[hb.WorkerID]
-		online := hb.Status == "ONLINE" && !hb.LastSeenAt.IsZero() && now.Sub(hb.LastSeenAt) <= workerOnlineThreshold
-		status := hb.Status
-		if !online {
-			status = "OFFLINE"
-		}
-		items = append(items, workerItem{
-			WorkerID:   hb.WorkerID,
-			Host:       hb.Host,
-			Version:    hb.Version,
-			LastSeenAt: hb.LastSeenAt,
-			Status:     status,
-			Online:     online,
-			TaskCount:  stats.TaskCount,
-			Running:    stats.Running,
-			Leased:     stats.Leased,
-			UpdatedAt:  hb.LastSeenAt,
-			HasUpdated: !hb.LastSeenAt.IsZero(),
-		})
+		items = append(items, applyHeartbeat(taskStats[hb.WorkerID], hb, now))
 	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].WorkerID < items[j].WorkerID
@@ -209,11 +241,17 @@ func (s *Server) handleClusterOverview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	workers := buildWorkerItems(items)
+	heartbeats, err := s.tasks.ListWorkerHeartbeats(200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	workers, singleProcess := overviewWorkers(buildWorkerItems(items), heartbeats, time.Now())
 	resp := clusterOverview{
-		TaskCount:   len(items),
-		WorkerCount: len(workers),
-		Workers:     workers,
+		TaskCount:     len(items),
+		WorkerCount:   len(workers),
+		SingleProcess: singleProcess,
+		Workers:       workers,
 	}
 	for _, task := range items {
 		if task.State == tasks.StateRunning {
