@@ -7,6 +7,7 @@ package meta
 
 import (
 	"context"
+	"errors"
 	"database/sql/driver"
 	"encoding/json"
 	"regexp"
@@ -236,6 +237,34 @@ func TestMySQLTaskStore_GetTaskUsesPrimaryKey(t *testing.T) {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
 	if got.ID != "7" || got.Name != "cluster-restored" {
+		t.Fatalf("unexpected task: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_GetTaskRetriesTransientEOF 验证 meta HA 瞬时 EOF 后 GetTask 会重试并成功。
+func TestMySQLTaskStore_GetTaskRetriesTransientEOF(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	rows := addTaskRow(sqlmock.NewRows(taskRowColumns()), "9", "after-failover", "after-failover-key", "RUNNING",
+		`{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200009}`, now)
+
+	mock.ExpectQuery(regexp.QuoteMeta(getTaskSQL)).WithArgs("9").WillReturnError(errors.New("unexpected EOF"))
+	mock.ExpectQuery(regexp.QuoteMeta(getTaskSQL)).WithArgs("9").WillReturnRows(rows)
+
+	got, err := store.GetTask(context.Background(), "9")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.ID != "9" || got.State != tasks.StateRunning {
 		t.Fatalf("unexpected task: %+v", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
