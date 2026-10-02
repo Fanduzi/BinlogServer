@@ -59,6 +59,12 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Check Console locale messages
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run test:locales
+
       - name: Check embedded Console bundle
         run: ./scripts/check-ui-bundle.sh
 

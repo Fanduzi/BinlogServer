@@ -6,7 +6,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| build-ui.sh | 构建 frontend 并同步到 internal/ui/static；给本次产物的 JS 按字节拼上 L3 头，再跑 `check-ui-bundle.sh`；本地没有 vite 时先 `npm ci` |
+| build-ui.sh | 构建 frontend 并同步到 internal/ui/static；先跑 `npm run test:locales` 编译 Console 文案，再给本次产物的 JS 按字节拼上 L3 头，然后跑 `check-ui-bundle.sh`；本地没有 vite 时先 `npm ci` |
 | check-ui-bundle.sh | 把 `internal/ui/static/index.html` 引用的 JS 当 ES module 做 `node --check --input-type=module`；`.js` 路径上的 `node --check` 会按 CommonJS 解析，抓不到 Chrome 拒绝的 import |
 | check-linux-compat.sh | 检查 Linux 二进制是否为静态链接且无动态 libc 依赖，防止发布产物绑定构建机 glibc |
 | check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL，并复用 glibc 兼容性检查 |
