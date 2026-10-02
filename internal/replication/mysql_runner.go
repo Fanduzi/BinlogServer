@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, sealed-file handoff for upload, and permanent source errors
+// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, sealed-file handoff for upload, and permanent source errors including the MariaDB flavor hint when @@server_uuid is missing
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -770,6 +770,7 @@ func (f *mysqlStatusFetcher) FetchMasterStatus(_ context.Context, source tasks.S
 }
 
 // FetchServerUUID 读取源库身份（MySQL server_uuid；MariaDB 使用 server_id+gtid_domain_id）。
+// server_uuid 为空或 unknown system variable 时，非 mariadb flavor 返回要求改 flavor 的永久错误。
 func (f *mysqlStatusFetcher) FetchServerUUID(_ context.Context, source tasks.SourceConfig) (string, error) {
 	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
 	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
@@ -782,10 +783,14 @@ func (f *mysqlStatusFetcher) FetchServerUUID(_ context.Context, source tasks.Sou
 	if err != nil {
 		return "", classifySourceError(err)
 	}
-	serverUUID, _ := queryVariable(conn, "server_uuid")
+	serverUUID, uuidErr := queryVariable(conn, "server_uuid")
 	serverID, _ := queryVariable(conn, "server_id")
 	domainID, _ := queryVariable(conn, "gtid_domain_id")
-	return resolveSourceIdentity(source.Flavor, logBin, serverUUID, serverID, domainID)
+	identity, err := identityFromProbe(source.Flavor, logBin, serverUUID, uuidErr, serverID, domainID)
+	if err != nil {
+		return "", classifySourceError(err)
+	}
+	return identity, nil
 }
 
 func queryVariable(conn *sqlclient.Conn, name string) (string, error) {

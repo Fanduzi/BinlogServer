@@ -14,7 +14,13 @@
         <el-form label-width="98px">
           <el-form-item :label="$t('form.replUser')"><el-input v-model="batchForm.user" /></el-form-item>
           <el-form-item :label="$t('form.replPassword')"><el-input v-model="batchForm.password" show-password /></el-form-item>
-          <el-form-item :label="$t('form.flavor')"><el-input v-model="batchForm.flavor" /></el-form-item>
+          <el-form-item :label="$t('form.flavor')">
+            <el-select v-model="batchForm.flavor" style="width: 100%">
+              <el-option value="mysql" :label="$t('form.flavorMysql')" />
+              <el-option value="mariadb" :label="$t('form.flavorMariaDB')" />
+            </el-select>
+            <p class="flavor-hint">{{ $t('form.flavorHint') }}</p>
+          </el-form-item>
           <el-form-item :label="$t('form.serverIdStart')"><el-input-number v-model="batchForm.serverIdStart" :min="1" /></el-form-item>
           <el-form-item :label="$t('form.retentionDays')"><el-input-number v-model="batchForm.retentionDays" :min="1" /></el-form-item>
           <el-form-item :label="$t('form.semiSync')"><el-switch v-model="batchForm.semiSync" /></el-form-item>
@@ -64,3 +70,12 @@ defineProps({
 });
 defineEmits(['update:visible', 'preview', 'submit']);
 </script>
+
+<style scoped>
+.flavor-hint {
+  margin: 6px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+</style>
