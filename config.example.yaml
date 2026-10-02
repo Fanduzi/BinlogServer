@@ -1,5 +1,15 @@
-# Loopback may stay unauthenticated for local demo.
-# Non-loopback binds (:8080, 0.0.0.0:8080) require api.auth.enabled + protect_api + protect_metrics.
+# BinlogServer v0.5.6 Comprehensive Configuration Reference
+#
+# Rule 1 (Auth Fail-Closed):
+#   - Loopback (127.0.0.1/localhost/::1) may stay unauthenticated for local testing.
+#   - Non-loopback binds (:8080, 0.0.0.0:8080) strictly require api.auth.enabled: true.
+# Rule 2 (Encryption Key):
+#   - In PRODUCTION=true, startup refuses to listen unless --encryption-key is passed.
+#   - Encryption key is a 32-byte AES process flag, not a YAML field.
+# Rule 3 (Decoupled S3 Archiving):
+#   - S3 upload failure never stops local binlog replication.
+#   - Retry anytime via POST /api/tasks/{task_id}/files/retry-upload.
+
 listen_addr: "127.0.0.1:8080"
 data_dir: "./data"
 meta_dsn: "${BINLOG_SERVER_META_DSN}" # 推荐用环境变量注入，避免明文口令
@@ -7,7 +17,7 @@ mode: "standalone" # standalone | cluster
 
 cluster:
   role: "all-in-one" # control-plane | worker | all-in-one
-  worker_id: ""
+  worker_id: "" # 推荐显式指定；留空则自动生成 wk-<host>-<ip>-<random> 并持久化
   worker_health_listen_addr: "" # 仅 role=worker 时生效；示例: "127.0.0.1:18081"
   lease_ttl_sec: 15
   lease_renew_interval_sec: 5
@@ -15,7 +25,7 @@ cluster:
   failover_policy: "rebuild_current_file"
 
 upload:
-  endpoint: ""
+  endpoint: "" # S3 / MinIO 端点，例如: s3.us-east-1.amazonaws.com
   bucket: ""
   access_key: "${BINLOG_SERVER_UPLOAD_ACCESS_KEY}" # 推荐用环境变量注入
   secret_key: "${BINLOG_SERVER_UPLOAD_SECRET_KEY}" # 推荐用环境变量注入

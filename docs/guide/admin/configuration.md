@@ -299,34 +299,39 @@ export BINLOG_SERVER_LOG_ROTATE_INTERVAL="12h"
 
 ### 3.6 API 鉴权配置
 
-**默认行为：API 不启用鉴权保护。**
+**鉴权默认行为与安全约束：**
+- **Loopback 监听：** 监听 `127.0.0.1` / `localhost` / `::1` 时，鉴权默认可关闭（`api.auth.enabled=false`），方便本地开发调试。
+- **非 Loopback 监听：** 监听 `:8080`、`0.0.0.0:8080` 或任何内网/公网 IP 时，系统启动时严格检查：`api.auth.enabled` 必须为 `true`，且 `protect_api` 与 `protect_metrics` 必须同时为 `true`，否则严格退出。
+- **保护标志默认值行为：** 当配置 `api.auth.enabled: true` 时，若未显式指定 `protect_api` 与 `protect_metrics`，配置加载器会自动将它们缺省视为 `true`（无需手动冗余指定）。若显式配置为 `false`，则非 Loopback 监听与 `PRODUCTION=true` 均会报错拦截。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `api.auth.enabled` | bool | false | 是否启用鉴权 |
-| `api.auth.mode` | string | bearer | 鉴权模式：bearer / api_key |
-| `api.auth.bearer_token` | string | - | Bearer Token（推荐使用环境变量占位符） |
-| `api.auth.api_key` | string | - | API Key（推荐使用环境变量占位符） |
+| `api.auth.enabled` | bool | false | 是否启用鉴权（非 Loopback 监听必须为 true） |
+| `api.auth.mode` | string | bearer | 鉴权模式：`bearer` 或 `api_key` |
+| `api.auth.bearer_token` | string | - | Bearer Token（推荐使用环境变量占位符，保护开启时必填） |
+| `api.auth.api_key` | string | - | API Key（推荐使用环境变量占位符，保护开启时必填） |
 | `api.auth.api_key_header` | string | X-API-Key | API Key 所在的请求头名称 |
-| `api.auth.protect_api` | bool | false | 是否保护 `/api/*` 路由 |
-| `api.auth.protect_metrics` | bool | false | 是否保护 `/metrics` 路由 |
+| `api.auth.protect_api` | bool | false (enabled 时缺省视为 true) | 是否保护 `/api/*` 路由 |
+| `api.auth.protect_metrics` | bool | false (enabled 时缺省视为 true) | 是否保护 `/metrics` 路由 |
 
 **鉴权模式说明：**
 
 | 模式 | 客户端使用方式 | 适用场景 |
 |------|--------------|----------|
-| `bearer` | `Authorization: Bearer <token>` | OAuth 兼容、标准 JWT 场景 |
-| `api_key` | `X-API-Key: <key>`（可自定义头名） | 简单服务间调用 |
+| `bearer` | `Authorization: Bearer <token>` | 标准 Bearer 认证，适合微服务与 Web 客户端 |
+| `api_key` | `X-API-Key: <key>`（可自定义头名） | 简单自动化脚本调用 |
 
-**保护范围：**
+**路由保护范围矩阵 (v0.5.6)：**
 
-| 路由 | 默认状态 | `protect_api=true` | `protect_metrics=true` |
-|------|---------|-------------------|----------------------|
-| `/healthz` | 不保护 | 不保护 | 不保护 |
-| `/metrics` | 不保护 | 不保护 | **需要鉴权** |
-| `/api/*` | 不保护 | **需要鉴权** | - |
-| `/swagger/*` | 不保护 | 不保护 | 不保护 |
-| `/ui/*` | 不保护 | 不保护 | 不保护 |
+| 路由 | 未开启鉴权 (`enabled=false`, 仅限 Loopback) | 开启鉴权 (`enabled=true`) |
+|------|---------|-------------------|
+| `/healthz` | **始终开放 (无鉴权)** | **始终开放 (无鉴权)**，供 LB/K8s 探活 |
+| `/metrics` | 开放 | **受保护** (要求 Token / Key) |
+| `/api/*` | 开放 | **受保护** (要求 Token / Key) |
+| `/swagger/*` | 开放 | **受保护** (跟从 `api.auth.enabled` 拦截) |
+| `/ui/*` | 开放 | **受保护** (跟从 `api.auth.enabled` 拦截) |
+
+> 💡 **v0.5.6 控制台安全说明：** 自 v0.5.6 起，当 `api.auth.enabled: true` 时，Web 控制台 `/ui/*` 与 Swagger `/swagger/*` 均会受到统一鉴权中间件保护。浏览器直接访问会收到 HTTP 401，需通过反向代理网关注入认证头，或通过前端携带凭据访问。只有 `/healthz` 始终保持开放。
 
 **开发环境配置（默认，无鉴权）：**
 
@@ -439,36 +444,34 @@ export BINLOG_SERVER_API_RATE_LIMIT_REQUESTS_PER_SECOND=100
 export BINLOG_SERVER_API_RATE_LIMIT_BURST=200
 ```
 
-### 3.8 配置值加密
+### 3.8 配置值加密与 `--encryption-key` 生产强校验
 
-对于无法使用环境变量的场景，支持在配置文件中使用 AES-256-GCM 加密值：
+BinlogServer 支持使用 AES-256-GCM 对敏感配置值进行加解密，同时也使用该密钥对元数据库中的源库连接密码进行落盘加密：
 
-**加密值格式：** `enc:aes256:<base64-encoded-ciphertext>`
+**核心安全规则：**
+1. **`PRODUCTION=true` 必须提供密钥：** 当设置环境变量 `PRODUCTION=true` 时，启动时必须通过命令行参数 `--encryption-key` 提供 32 字节的 AES 密钥。如果 key 为空，服务将拒绝启动，甚至不会打开网络监听端口。
+2. **源库密码透明落盘加密：** 只要提供了 `--encryption-key`，所有通过 API 创建或更新的任务，其源库密码在存入 MySQL `backup_tasks.source_json` 字段时，均会自动加密为 `enc:aes256:<base64-encoded-ciphertext>` 密文。非生产环境若未提供密钥，则保持旧版本兼容的明文 JSON 存储。
+3. **配置文件字段解密：** 配置文件中任何标有 `enc:aes256:...` 的值，在加载时会自动使用传入的密钥解密。
 
-**使用步骤：**
+**加密密钥生成与启动示例：**
 
-1. **生成 32 字节密钥**（AES-256 需要）：
+1. **生成 32 字节强随机密钥（AES-256 需要）：**
    ```bash
-   openssl rand -base64 32 | head -c 32
+   # 生成 32 字节十六进制字符密钥
+   export BINLOG_SERVER_ENCRYPTION_KEY="$(openssl rand -hex 16)"
    ```
 
-2. **在配置中使用加密值**：
-   ```yaml
-   api:
-     auth:
-       bearer_token: "enc:aes256:gK7vX2mP..."
-   ```
-
-3. **启动时提供密钥**：
+2. **在生产环境启动服务：**
    ```bash
-   ./binlog-server --config config.yaml --encryption-key "your-32-byte-encryption-key"
+   export PRODUCTION=true
+   export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="$(openssl rand -hex 32)"
+   
+   ./binlog-server --config config.production.example.yaml --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"
    ```
 
 **安全建议：**
-
-- 加密密钥应通过安全渠道注入（如 Kubernetes Secret、Vault）
-- 不要将加密密钥提交到版本控制
-- 优先使用环境变量，加密值作为备选方案
+- 密钥请通过受控的注入渠道（如 Kubernetes Secrets、HashiCorp Vault、AWS Secrets Manager）直接作为环境变量或命令行参数传递。
+- 绝不要将密钥写入 git 版本控制或硬编码在镜像中。
 
 ### 3.9 HTTP 超时配置
 
@@ -545,11 +548,15 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 
 ### 4.1 创建任务
 
+创建任务通过 `POST /api/tasks` 提交，其中存储与保留策略参数由 `storage` 对象控制：
+- `storage.retention_days`: 本地 binlog 分段文件保留天数（有效范围 `1` 到 `3650` 天，默认 `7` 天）。过期且已封存的分段由后台定期安全清理，正在写入的 `OPEN` 分段绝不会被清理。
+
 **从最新位置开始（LATEST）：**
 
 ```bash
 curl -X POST http://localhost:8080/api/tasks \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${TOKEN}" \
   -d '{
     "name": "backup-mysql-prod",
     "cluster_key": "prod-cluster",
@@ -686,10 +693,14 @@ curl "http://localhost:8080/api/tasks/{task_id}/events?limit=20"
 curl http://localhost:8080/api/tasks/{task_id}/files
 ```
 
-**重试上传失败的文件：**
+**重试上传失败的文件 (解耦归档与手动补传)：**
+
+S3 / 对象存储上传是完全异步解耦的，上传网络波动不会中断复制。若遇到失败文件，可通过 API 或 Web 控制台手动触发重传：
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/{task_id}/files/retry-upload
+# 重试当前任务失败的文件（支持 limit 参数，默认或最大按批次触发）
+curl -X POST "http://localhost:8080/api/tasks/{task_id}/files/retry-upload?limit=100" \
+  -H "Authorization: Bearer ${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
 ```
 
 **查看集群状态：**
