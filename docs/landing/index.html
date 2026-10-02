@@ -623,6 +623,9 @@ export BINLOG_SERVER_DATA_DIR=./data
         <p style="margin-top:20px; font-size:0.85rem; color:var(--muted);" data-i18n="deployNote">
           ⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including `:8080` or `0.0.0.0:8080`) strictly fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are enabled.
         </p>
+        <p style="margin-top:12px; font-size:0.85rem; color:var(--muted);" data-i18n="deployFlavor">
+          MariaDB sources must set <code>"flavor":"mariadb"</code>. The Console default and the MySQL Quick Start example use <code>mysql</code>. That flavor reads <code>@@server_uuid</code>, which MariaDB does not have, and the task fails immediately.
+        </p>
       </div>
     </section>
 
@@ -983,6 +986,7 @@ into a production control plane</h2>
         deploySub: 'Packaged release archives contain precompiled statically-linked binaries (binlog-server, migrate), SQL migrations, and production config templates. Operators do not need Go installed.',
         deployCode: 'VER=0.5.6 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind (127.0.0.1) allows unauthenticated local evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         deployNote: '⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including `:8080` or `0.0.0.0:8080`) strictly fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are enabled.',
+        deployFlavor: 'MariaDB sources must set <code>"flavor":"mariadb"</code>. The Console default and the MySQL Quick Start example use <code>mysql</code>. That flavor reads <code>@@server_uuid</code>, which MariaDB does not have, and the task fails immediately.',
         guaranteesLabel: 'Architectural Guarantees',
         guaranteesTitle: 'The four non-negotiables\nfor database backup systems',
         guaranteesSub: 'DBAs cannot afford optimistic progress or unhandled edge cases. Every component in BinlogServer is built around predictable durability and operational transparency.',
@@ -1132,6 +1136,7 @@ into a production control plane</h2>
         deploySub: '官方发布包内已打包静态编译二进制（binlog-server、migrate）、数据库迁移脚本与生产配置模板。DBA 在部署机上无需安装 Go 环境。',
         deployCode: 'VER=0.5.6 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback (127.0.0.1) 允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         deployNote: '⚠️ <strong>安全提示：</strong> 本机 Loopback 监听仅供本地评估。任何非 Loopback 监听地址（包括 `:8080` 或 `0.0.0.0:8080`）启动时严格 Fail-Close，必须配置 `api.auth.enabled=true` 并保护 `/api/*` 与 `/metrics`。',
+        deployFlavor: 'MariaDB 源库必须设置 <code>"flavor":"mariadb"</code>。控制台默认值和 MySQL 快速开始示例都是 <code>mysql</code>。这个 flavor 会读 <code>@@server_uuid</code>，MariaDB 没有该变量，任务会立刻失败。',
         guaranteesLabel: '四大架构设计保证',
         guaranteesTitle: '数据库备份软件\n绝不可妥协的四大原则',
         guaranteesSub: '生产数据库备份经不起任何含糊。BinlogServer 的每一处设计均围绕确定性的故障恢复边界与运维透明度展开。',
