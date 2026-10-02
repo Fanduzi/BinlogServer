@@ -13,6 +13,7 @@ Playwright 端到端回归模块，验证运维控制台的首屏、导航、筛
 | `dashboard-empty.spec.ts` | 空态和零指标 |
 | `mock-handler.spec.ts` / `dev-mock-api.spec.ts` | 共享 mock/API helper 合同，含 lookup 与 dashboard host 过滤与 Go SameSourceHost 同一 accept/reject 集 |
 | `batch-create.spec.ts` | 批量创建本地 100 项上限、有序部分成功结果、密码脱敏、单次 batch 请求、安全错误文本与逐项自动启动 |
+| `flavor-select.spec.ts` | 新建任务与批量创建的 Flavor 是 mysql/mariadb 下拉；选 mariadb 后创建请求带 `flavor=mariadb` |
 | 其他 `*.spec.ts` | 详情、导航、lease、集群和上传重试场景 |
 | `fixtures/` | 共享场景类型与路由拦截 |
 

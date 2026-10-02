@@ -8,7 +8,7 @@
 |------|---------------|
 | `index.js` | 创建 i18n 实例并管理当前语言 |
 | `zh-CN.json` | 中文文案，包括启动中、租约降级、文件重建、全局/当前页筛选范围与 source starting 计数文本 |
-| `en.json` | 英文文案，包括 Starting Tasks、Lease Degraded、Rebuilding File、global/current-page filter scope 与 source Starting 文本 |
+| `en.json` | 英文文案，包括 Starting Tasks、Lease Degraded、Rebuilding File、global/current-page filter scope、source Starting 文本，以及 Flavor 的 mysql/mariadb 选项和 MariaDB 提示 |
 
 ## Interfaces
 

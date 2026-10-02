@@ -14,7 +14,15 @@
         <el-col :span="12"><el-form-item :label="$t('form.user')"><el-input v-model="form.source.user" /></el-form-item></el-col>
         <el-col :span="12"><el-form-item :label="$t('form.password')"><el-input v-model="form.source.password" show-password :placeholder="$t('form.passwordHint')" /></el-form-item></el-col>
         <el-col :span="12"><el-form-item :label="$t('form.serverId')"><el-input-number v-model="form.source.server_id" :min="1" /></el-form-item></el-col>
-        <el-col :span="12"><el-form-item :label="$t('form.flavor')"><el-input v-model="form.source.flavor" /></el-form-item></el-col>
+        <el-col :span="12">
+          <el-form-item :label="$t('form.flavor')">
+            <el-select v-model="form.source.flavor" style="width: 100%">
+              <el-option value="mysql" :label="$t('form.flavorMysql')" />
+              <el-option value="mariadb" :label="$t('form.flavorMariaDB')" />
+            </el-select>
+            <p class="flavor-hint">{{ $t('form.flavorHint') }}</p>
+          </el-form-item>
+        </el-col>
         <el-col :span="12"><el-form-item :label="$t('form.semiSync')"><el-switch v-model="form.source.semi_sync" /></el-form-item></el-col>
         <el-col :span="12"><el-form-item :label="$t('form.retentionDays')"><el-input-number v-model="form.storage.retention_days" :min="1" /></el-form-item></el-col>
         <el-col :span="8">
@@ -47,3 +55,12 @@ defineProps({
 });
 defineEmits(['update:visible', 'submit']);
 </script>
+
+<style scoped>
+.flavor-hint {
+  margin: 6px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+</style>

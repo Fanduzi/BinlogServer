@@ -11,7 +11,7 @@
 | `TaskDetailDrawer.vue` | 任务详情、状态和操作入口 |
 | `AppHeader.vue` | 页面标题与刷新/创建/设置操作 |
 | `AlertBanner.vue` | 顶层认证/告警提示 |
-| `TaskCreateDialog.vue` / `BatchCreateDialog.vue` | 单任务与批量任务表单 |
+| `TaskCreateDialog.vue` / `BatchCreateDialog.vue` | 单任务与批量任务表单。Flavor 是 `mysql` / `mariadb` 下拉，默认 mysql；MariaDB 源必须选 mariadb |
 | `SettingsDialog.vue` | 前端设置与语言切换 |
 
 ## Interfaces

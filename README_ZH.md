@@ -90,7 +90,7 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 ### 前置条件
 
 - 从 [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases) 下载匹配当前操作系统与 CPU 架构的发布包。
-- 一台已启用 `log_bin=ON`、`binlog_format=ROW` 的源 MySQL 实例，并创建复制账号（`GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.*`）。
+- 一台已启用 `log_bin=ON`、`binlog_format=ROW` 的 MySQL 或 MariaDB 源库，并创建复制账号（`GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.*`）。MariaDB 必须提交 `"flavor":"mariadb"`。`mysql` 会去读 `@@server_uuid`，MariaDB 没有这个变量。
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
@@ -170,6 +170,7 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
 
 *重要参数说明：*
 - `cluster_key`: 集群标识，用于元数据分群和 S3 对象路径路由，仅允许 `[A-Za-z0-9._-]`。
+- `source.flavor`: `mysql` 或 `mariadb`。MariaDB 源库必须写 `"flavor":"mariadb"`。保持 `mysql` 会在启动时以 `SOURCE_IDENTITY_UNAVAILABLE` 失败，因为 MariaDB 没有 `@@server_uuid`。
 - `start.mode`: 启动起点，可选 `LATEST`（从源库最新位点）、`FILE_POS`（需提供 `file` 和 `pos`）或 `GTID`（需提供 `gtid_set`）。
 - `storage.retention_days`: 本地保留天数（有效范围 1..3650 天）。
 
