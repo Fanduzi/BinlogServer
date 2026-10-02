@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.6
+### 1. 下载、校验并解压 v0.5.7
 
 ```bash
-VER=0.5.6
+VER=0.5.7
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -112,7 +112,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.6_linux_amd64/
+binlog-server_0.5.7_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -232,17 +232,17 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.6)
+## 升级须知 (v0.5.7)
 
-在将生产环境升级至 `v0.5.6` 之前，请确认以下变更点：
+在将生产环境升级至 `v0.5.7` 之前，请确认以下变更点：
 
-- **无需数据库表结构变更:** `v0.5.6` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。
-- **`PRODUCTION=true` 强校验:** 设置了 `PRODUCTION=true` 必须携带非空的 `--encryption-key` 启动参数，否则服务启动中断。
-- **内嵌控制台修复:** 彻底解决了 v0.5.5 中前端打包语法导致的控制台挂载异常，现代浏览器访问 `/ui/` 顺畅呈现。
-- **UI 与 Swagger 纳入统一鉴权:** `api.auth.enabled=true` 时，`/ui/*` 与 `/swagger/*` 同样受鉴权保护；`/healthz` 保持开放。
-- **Dashboard 规模化 SQL 聚合:** `GET /api/dashboard` 与 `GET /api/summary` 改走数据库端 SQL `GROUP BY` 聚合与分页，杜绝全量扫表。
+- **无需数据库表结构变更:** `v0.5.7` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。
+- **元数据读取重试:** `GetTask`、任务列表和 checkpoint 会重试 meta MySQL 的瞬时错误。任务不存在仍然是找不到。
+- **MariaDB Flavor:** `mysql` 读不到 `@@server_uuid` 时仍是 `SOURCE_IDENTITY_UNAVAILABLE`，并提示设置 `flavor=mariadb`。`flavor=mariadb` 的身份识别没有改。
+- **单机概览:** 没有心跳的本进程不再计为离线 Worker。概览为 `worker_count=0`、`single_process=true`，`GET /api/workers` 为空。
+- **控制台 Flavor 下拉:** 创建任务的 Flavor 控件可以渲染。提示文案不再包含 vue-i18n 会拒绝的原始 `@@server_uuid`。
 
-详细版本记录：[docs/releases/v0.5.6.zh-CN.md](docs/releases/v0.5.6.zh-CN.md) | [docs/releases/release-notes-v0.5.6.md](docs/releases/release-notes-v0.5.6.md)
+详细版本记录：[docs/releases/v0.5.7.zh-CN.md](docs/releases/v0.5.7.zh-CN.md) | [docs/releases/release-notes-v0.5.7.md](docs/releases/release-notes-v0.5.7.md)
 
 ---
 

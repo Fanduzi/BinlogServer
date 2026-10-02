@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.6
+### 1. Download, verify, and unpack v0.5.7
 
 ```bash
-VER=0.5.6
+VER=0.5.7
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -113,7 +113,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.6_linux_amd64/
+binlog-server_0.5.7_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -233,17 +233,17 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.6)
+## Upgrade Notes (v0.5.7)
 
-Before upgrading existing deployments, review the v0.5.6 operator contract:
+Before upgrading existing deployments, review the v0.5.7 operator contract:
 
-- **Zero Schema Migrations:** `v0.5.6` requires no database migrations (`000001_init_schema` unchanged).
-- **Strict `PRODUCTION=true` Validation:** The process will not listen if `PRODUCTION=true` is set without a non-empty `--encryption-key`.
-- **Console Mounting Fix:** The embedded console bundle issue present in v0.5.5 has been resolved; `/ui/` mounts properly across modern browsers.
-- **UI &amp; Swagger Auth Protection:** When `api.auth.enabled=true`, `/ui/*` and `/swagger/*` enforce authentication middleware. `/healthz` stays open.
-- **SQL Aggregations at Scale:** `GET /api/dashboard` and `GET /api/summary` execute SQL `GROUP BY` aggregations with bounded `LIMIT/OFFSET` paging, eliminating in-process table scans.
+- **Zero Schema Migrations:** `v0.5.7` requires no database migrations (`000001_init_schema` unchanged).
+- **Meta Read Retry:** `GetTask`, task lists, and checkpoints retry transient meta MySQL errors. A missing task is still not found.
+- **MariaDB Flavor:** A `mysql` probe that cannot read `@@server_uuid` stays `SOURCE_IDENTITY_UNAVAILABLE` and tells the operator to set `flavor=mariadb`. `flavor=mariadb` identity is unchanged.
+- **Single-Process Overview:** A heartbeats-less local process is not an offline Worker. Overview reports `worker_count=0` and `single_process=true`, and `GET /api/workers` is empty.
+- **Console Flavor Select:** The create-task Flavor dropdown renders. The hint no longer contains a raw `@@server_uuid` token that vue-i18n rejects.
 
-Full release notes: [docs/releases/release-notes-v0.5.6.md](docs/releases/release-notes-v0.5.6.md) | [docs/releases/v0.5.6.zh-CN.md](docs/releases/v0.5.6.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.7.md](docs/releases/release-notes-v0.5.7.md) | [docs/releases/v0.5.7.zh-CN.md](docs/releases/v0.5.7.zh-CN.md)
 
 ---
 

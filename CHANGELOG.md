@@ -12,10 +12,20 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.7] - 2026-10-02
+
 ### Fixed
 
-- Console Flavor is a `mysql` / `mariadb` choice. A `flavor=mysql` probe that finds no `@@server_uuid` (empty result or unknown system variable) stays `SOURCE_IDENTITY_UNAVAILABLE` and tells the operator the source looks like MariaDB and to set `flavor=mariadb`. Quick Start and the landing page show `"flavor":"mariadb"` for MariaDB sources. `flavor=mariadb` identity is unchanged.
-- The embedded Console create-task and batch-create Flavor dropdown renders again. `form.flavorHint` no longer contains a raw `@@server_uuid` token, which vue-i18n@9 rejects while compiling production messages.
+- Task reads (`GetTask`, task lists, list counts, checkpoints) retry transient meta MySQL errors and recycle pooled connections, so a brief meta failover does not return 500. A missing task is still not found.
+- A `flavor=mysql` probe that finds no `@@server_uuid` stays `SOURCE_IDENTITY_UNAVAILABLE` and tells the operator the source looks like MariaDB and to set `flavor=mariadb`. `flavor=mariadb` identity is unchanged.
+- A heartbeats-less local process is not an offline Worker. Overview reports `worker_count=0` and `single_process=true`, `GET /api/workers` is empty, and the Console says this process pulls tasks.
+- The embedded Console create-task and batch-create Flavor dropdown renders again. The hint no longer contains a raw `@@server_uuid` token, which vue-i18n@9 rejects while compiling production messages. CI compiles locale catalogs before the UI build.
+
+### Changed
+
+- Operator download examples in README, the landing page, the deployment guide, and the config templates now pin `v0.5.7`.
+- Landing console screenshots ship as PNG assets. CI and the release workflow run `scripts/check-landing-assets.sh`.
+- The landing page and production template describe the Day-1 install and first backup path.
 
 ## [v0.5.6] - 2026-10-02
 
