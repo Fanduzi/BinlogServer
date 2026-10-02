@@ -92,6 +92,8 @@ func IsTransientMySQLError(err error) bool {
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "server has gone away") ||
+		strings.Contains(msg, "invalid connection") ||
+		strings.Contains(msg, "bad connection") ||
 		strings.Contains(msg, "read-only") ||
 		strings.Contains(msg, "read only") ||
 		strings.Contains(msg, "timeout") ||

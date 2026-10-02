@@ -137,11 +137,17 @@ create_task() {
 task_state() {
   local task_id="$1"
   local resp
-  if ! resp="$(api_get "/api/tasks/$task_id")"; then
-    echo "query task state failed: task_id=$task_id" >&2
-    return 1
-  fi
-  json_get_str "$resp" "state" "State"
+  # Meta HA takeover can briefly EOF pooled connections; retry before failing the lane.
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if resp="$(api_get "/api/tasks/$task_id" 2>/dev/null)"; then
+      json_get_str "$resp" "state" "State"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "query task state failed: task_id=$task_id" >&2
+  return 1
 }
 
 wait_task_running() {

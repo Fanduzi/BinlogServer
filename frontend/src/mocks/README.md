@@ -6,8 +6,8 @@
 
 | File | Responsibility |
 |------|---------------|
-| mock-data.js | 定义共享 mock 场景数据（含 starting 状态场景）；任务抄本带 owner/epoch，供列表租约风险使用 |
-| mock-handler.js | 将 API method/path/query/body 分发到对应 mock 场景，模拟 server pagination/filter、批量任务创建结果，并维护最小状态变化 |
+| mock-data.js | 定义共享 mock 场景数据（含 starting 与 single-process 场景）；任务抄本带 owner/epoch，供列表租约风险使用 |
+| mock-handler.js | 将 API method/path/query/body 分发到对应 mock 场景，模拟 server pagination/filter、批量任务创建结果，并维护最小状态变化；仅当 worker 列表为空且唯一主人是 standalone 时 overview `single_process` 为 true |
 
 ## Exports
 

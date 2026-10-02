@@ -6,10 +6,11 @@
 
 | File | Responsibility |
 |------|---------------|
-| build-ui.sh | 构建 frontend 并同步到 internal/ui/static；给本次产物的 JS 按字节拼上 L3 头，再跑 `check-ui-bundle.sh`；本地没有 vite 时先 `npm ci` |
+| build-ui.sh | 构建 frontend 并同步到 internal/ui/static；先跑 `npm run test:locales` 编译 Console 文案，再给本次产物的 JS 按字节拼上 L3 头，然后跑 `check-ui-bundle.sh`；本地没有 vite 时先 `npm ci` |
 | check-ui-bundle.sh | 把 `internal/ui/static/index.html` 引用的 JS 当 ES module 做 `node --check --input-type=module`；`.js` 路径上的 `node --check` 会按 CommonJS 解析，抓不到 Chrome 拒绝的 import |
 | check-linux-compat.sh | 检查 Linux 二进制是否为静态链接且无动态 libc 依赖，防止发布产物绑定构建机 glibc |
 | check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL，并复用 glibc 兼容性检查 |
+| check-landing-assets.sh | 校验落地页 HTML 引用的图片资源真实存在、非空且为有效 PNG 格式，防止部署回退为 HTML 造成图裂 |
 | release-assets.sh | 构建含服务端、migrate、migration SQL、文档与 checksums 的多平台 release 归档；作为本地/手工发版兜底入口 |
 | verify-phase-acceptance.sh | 统一执行阶段验收命令（test/race/vet/e2e-quick）并输出耗时摘要 |
 | failover-dogfood.sh | 一个 meta MySQL 上的双 worker 租约接管复跑；控制面走 verify-binlog-server helper |
@@ -21,6 +22,7 @@
 - `make build-linux [VERSION=v0.1.0]`（Linux 发布二进制默认 `CGO_ENABLED=0`，避免绑定构建机 glibc）
 - `make check-linux-compat [VERSION=v0.1.0]`（只编 Linux 二进制做静态链接检查，不重建 frontend，避免弄脏 git 树）
 - `make check-linux-release-archive VERSION=v0.1.0`
+- `make check-landing-assets`
 - `make ui-build`
 - `./scripts/check-ui-bundle.sh`
 - `make release-assets VERSION=v0.1.0`

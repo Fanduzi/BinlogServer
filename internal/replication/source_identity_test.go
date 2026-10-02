@@ -47,12 +47,69 @@ func TestResolveSourceIdentity_MySQLRequiresServerUUID(t *testing.T) {
 	if !tasks.IsPermanent(err) {
 		t.Fatalf("expected permanent empty server_uuid, got %v", err)
 	}
+	assertMariaDBFlavorHint(t, err)
 	id, err := resolveSourceIdentity("mysql", "1", "abc-uuid", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if id != "abc-uuid" {
 		t.Fatalf("unexpected identity %q", id)
+	}
+}
+
+func TestIdentityFromProbe_UnknownServerUUIDLooksLikeMariaDB(t *testing.T) {
+	uuidErr := errors.New("Error 1193 (HY000): Unknown system variable 'server_uuid'")
+	_, err := identityFromProbe("mysql", "ON", "", uuidErr, "101", "0")
+	if !tasks.IsPermanent(err) {
+		t.Fatalf("expected permanent identity error, got %v", err)
+	}
+	var pe *tasks.PermanentError
+	if !errors.As(err, &pe) || pe.Code != tasks.CodeSourceIdentityUnavailable {
+		t.Fatalf("expected SOURCE_IDENTITY_UNAVAILABLE, got %v", err)
+	}
+	assertMariaDBFlavorHint(t, err)
+
+	_, err = identityFromProbe("", "ON", "", nil, "101", "0")
+	assertMariaDBFlavorHint(t, err)
+}
+
+func TestIdentityFromProbe_OtherProbeErrorIsNotMariaDBHint(t *testing.T) {
+	probeErr := errors.New("read packet: connection reset")
+	_, err := identityFromProbe("mysql", "ON", "", probeErr, "1", "0")
+	if err == nil || tasks.IsPermanent(err) {
+		t.Fatalf("non-1193 probe error must stay unclassified, got %v", err)
+	}
+	if strings.Contains(err.Error(), "MariaDB") {
+		t.Fatalf("transport probe error must not look like a flavor mismatch: %v", err)
+	}
+}
+
+func TestIdentityFromProbe_MariaDBFlavorStillUsesServerID(t *testing.T) {
+	uuidErr := errors.New("ERROR 1193 (HY000): Unknown system variable 'server_uuid'")
+	id, err := identityFromProbe("mariadb", "ON", "", uuidErr, "101", "0")
+	if err != nil {
+		t.Fatalf("flavor=mariadb must ignore missing server_uuid, got %v", err)
+	}
+	if id != "mariadb:101:0" {
+		t.Fatalf("unexpected identity %q", id)
+	}
+
+	id, err = identityFromProbe("MariaDB", "1", "", nil, "7", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "mariadb:7:0" {
+		t.Fatalf("unexpected identity %q", id)
+	}
+}
+
+func assertMariaDBFlavorHint(t *testing.T, err error) {
+	t.Helper()
+	msg := err.Error()
+	for _, want := range []string{"SOURCE_IDENTITY_UNAVAILABLE", "MariaDB", "flavor=mariadb", "unknown system variable"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q must contain %q", msg, want)
+		}
 	}
 }
 

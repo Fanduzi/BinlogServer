@@ -12,6 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- Console Flavor is a `mysql` / `mariadb` choice. A `flavor=mysql` probe that finds no `@@server_uuid` (empty result or unknown system variable) stays `SOURCE_IDENTITY_UNAVAILABLE` and tells the operator the source looks like MariaDB and to set `flavor=mariadb`. Quick Start and the landing page show `"flavor":"mariadb"` for MariaDB sources. `flavor=mariadb` identity is unchanged.
+- The embedded Console create-task and batch-create Flavor dropdown renders again. `form.flavorHint` no longer contains a raw `@@server_uuid` token, which vue-i18n@9 rejects while compiling production messages.
+
 ## [v0.5.6] - 2026-10-02
 
 ### Added

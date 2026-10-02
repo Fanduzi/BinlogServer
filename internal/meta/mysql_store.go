@@ -373,6 +373,11 @@ func NewMySQLTaskStoreWithSchemaTimeout(dsn string, schemaTimeout time.Duration,
 	if err != nil {
 		return nil, err
 	}
+	// Recycle pooled connections so meta HA (ProxySQL / orchestrator takeover)
+	// does not leave the control plane stuck on a demoted writer.
+	db.SetConnMaxLifetime(30 * time.Second)
+	db.SetMaxIdleConns(8)
+	db.SetMaxOpenConns(32)
 
 	store := newMySQLTaskStoreFromDB(db, schemaTimeout)
 	if err := store.setSourcePasswordKey(encryptionKey); err != nil {
@@ -802,12 +807,24 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 }
 
 func (s *MySQLTaskStore) queryTasks(ctx context.Context, query string, args ...any) ([]tasks.Task, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	var list []tasks.Task
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		got, err := s.scanBackupTaskRows(rows)
+		if err != nil {
+			return err
+		}
+		list = got
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return s.scanBackupTaskRows(rows)
+	return list, nil
 }
 
 func (s *MySQLTaskStore) scanBackupTaskRows(rows *sql.Rows) ([]tasks.Task, error) {
@@ -844,11 +861,22 @@ func (s *MySQLTaskStore) GetTask(ctx context.Context, taskID string) (tasks.Task
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.get_task")
 	defer endMetaSpan(span)
 
-	task, err := s.scanTask(s.db.QueryRowContext(ctx, getTaskSQL, taskID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return tasks.Task{}, tasks.ErrTaskNotFound
-	}
+	var task tasks.Task
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		got, err := s.scanTask(s.db.QueryRowContext(ctx, getTaskSQL, taskID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return Permanent(tasks.ErrTaskNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		task = got
+		return nil
+	})
 	if err != nil {
+		if errors.Is(err, tasks.ErrTaskNotFound) {
+			return tasks.Task{}, tasks.ErrTaskNotFound
+		}
 		return tasks.Task{}, err
 	}
 	return task, nil
@@ -861,7 +889,10 @@ func (s *MySQLTaskStore) ListTasksPage(ctx context.Context, filter tasks.TaskLis
 
 	countSQL, selectSQL, countArgs, selectArgs := listTasksPageSQL(filter)
 	var total int
-	if err := s.db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total); err != nil {
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		return s.db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total)
+	})
+	if err != nil {
 		return nil, 0, err
 	}
 	list, err := s.queryTasks(ctx, selectSQL, selectArgs...)
@@ -1025,14 +1056,26 @@ func (s *MySQLTaskStore) LoadCheckpoint(ctx context.Context, taskID string) (bin
 		gtidSet sql.NullString
 	)
 
-	row := s.db.QueryRowContext(ctx, loadCheckpointSQL, taskID)
-	if err := row.Scan(&cp.File, &cp.Pos, &gtidSet, &cp.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return binlog.Checkpoint{}, false, nil
+	var found bool
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		row := s.db.QueryRowContext(ctx, loadCheckpointSQL, taskID)
+		if err := row.Scan(&cp.File, &cp.Pos, &gtidSet, &cp.UpdatedAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				found = false
+				return nil
+			}
+			return err
 		}
+		cp.GTIDSet = gtidSet.String
+		found = true
+		return nil
+	})
+	if err != nil {
 		return binlog.Checkpoint{}, false, err
 	}
-	cp.GTIDSet = gtidSet.String
+	if !found {
+		return binlog.Checkpoint{}, false, nil
+	}
 	return cp, true, nil
 }
 
