@@ -27,87 +27,74 @@
 [![安全策略](https://img.shields.io/badge/docs-安全策略-critical.svg)](SECURITY.md)
 </div>
 
-Binlog Server 是一个面向 MySQL binlog 备份与拉流场景的服务：负责从源库持续读取 binlog、落盘本地文件、持久化 checkpoint，并提供 API 控制、UI、S3-compatible upload 与集群调度能力。
+BinlogServer 是专为数据库运维与 DBA 团队打造的**集中式 MySQL Binlog 备份控制平面**。它负责从 MySQL / MariaDB 源库持续拉取 binlog 流落盘为本地文件，严格在本地 `fsync` 成功后提交 Checkpoint 位点，通过元数据库分布式租约实现多节点 Worker 自动故障切换，并提供解耦的兼容 S3 对象存储归档、内嵌运维 Web 控制台与完整的 REST API。
 
-如果你第一次打开这个仓库，先看 `Quick Start` 跑通服务；如果你在判断“这个项目适不适合我”，先看下面的定位说明。
+如果你正在评估 BinlogServer 是否适合业务场景，请先阅读下方的**四大架构设计保证**与**推荐部署架构**；如果你需要立即上线部署，可直接跳转至 **Quick Start**。
 
-## 这个项目解决什么问题
+---
 
-它把“拉 MySQL binlog、落盘、记 checkpoint、管理任务状态”收敛成一个独立服务，而不是让你自己拼脚本、cron 和零散元数据。
+## 解决的核心痛点
 
-### 界面预览
+在很多生产环境中，MySQL binlog 的备份仍然依赖于维护困难的 `mysqlbinlog` 散装脚本、缺少位点漂移追踪的 Crontab 任务，以及因为对象存储网络波动而反压导致复制被卡死的脆弱流程。
+
+BinlogServer 将这些痛点彻底收敛为标准的控制面基础设施：
+- **无虚假乐观进度：** Checkpoint 位点严格在本地文件 `fsync` 刷盘成功后方才推进。
+- **解耦异步归档：** 远端 S3 / MinIO 对象存储的抖动、限流或不可用，绝不反压阻断本地核心 binlog 复制流。
+- **集群租约故障自愈：** 基于 MySQL 元数据表的排他分布式租约，确保同一任务在任意时刻仅有一个 Worker 执行拉取，节点崩溃自动心跳超时接管。
+- **生产透明可观测：** 内嵌运维 Web 控制台、交互式 Swagger API 与 Prometheus `/metrics`，延迟计算直接对比源库 `SHOW MASTER STATUS` / `SHOW BINLOG STATUS` 实时位点。
+
+### 控制台与运维界面预览
 
 ![控制台任务列表](docs/images/console-dashboard.png)
-
-*控制台任务列表*
+*控制台概览：实时监控所有源实例的复制延迟、分段进度、Worker 归属与任务运行状态。*
 
 ![任务详情](docs/images/task-detail.png)
-
-*任务详情*
+*任务透视抽屉：清晰查看当前 GTID / File-Pos 位点、本地文件轮转记录，并支持对失败文件一键触发重试。*
 
 ![Swagger 文档](docs/images/swagger.png)
+*Swagger API 浏览器：完整的 OpenAPI 交互规范，便于无缝对接内部自动化运维平台与 CMDB。*
 
-*Swagger 文档*
+---
 
-适合：
+## 四大架构设计保证 (DBA First)
 
-- 想把 binlog 拉取、落盘、状态管理做成一个可运维的服务
-- 需要从 `LATEST`、`FILE_POS`、`GTID` 启动任务
-- 需要本地持久化，并且可能接 S3-compatible upload
-- 需要 API / UI / observability，而不是一次性脚本
+| 保证维度 | 底层工程实现 | 为什么 DBA 能放心使用 |
+|---|---|---|
+| **fsync 强一致检查点** | 仅在当前分段成功完成本地操作系统 `fsync` 刷盘后，元数据库或内存中的 Checkpoint 位点才被推进。 | 杜绝内存虚假推进。进程崩溃或服务器意外掉电重启后，任务必定能够从可靠落盘的字节位置精准续传。 |
+| **解耦异步归档** | S3 / MinIO 上传逻辑完全异步执行。上传遇到网络波动或对象存储故障时自动退避重试，并提供 API 与界面补传入口。 | 任何云存储服务故障或限流，绝不会牵连本地拉流核心链路，保障源库 binlog 持续快速腾挪。 |
+| **集群租约与防脑裂** | 基于独立元数据 MySQL 的分布式行级排他租约，并配合心跳持续续租。 | 杜绝多个节点同时拉取同一源库导致文件覆盖与网络浪费；Worker 故障停机后，其余健康节点在租约过期后自动竞态接管。 |
+| **严密 Fail-Closed 安全机制** | 非 Loopback 开放监听端口强制开启鉴权。设置 `PRODUCTION=true` 时，若未提供 32 字节 AES 密钥（`--encryption-key`）直接拒绝监听启动。 | 源库连接口令在元数据库中强制以 AES-256-GCM（`enc:aes256:`）密文存储；杜绝无认证控制面被暴露到公网。 |
+| **真实主库位点延迟** | 复制延迟计算直接比对源库当前的 `SHOW MASTER STATUS` 真实位点，而非仅参考 Binlog 事件 Header 中的历史时间戳。 | 彻底规避业务空闲期、夜间低峰期由时间戳静止引发的“虚假零延迟”或误告警。 |
 
-不太适合：
+---
 
-- 只做一次性导出，不做持续复制
-- 不需要 task orchestration，只想快速写个单机脚本
-- 希望它直接替代完整 CDC 平台
+## 推荐部署架构
 
-## 为什么用它
+BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可用性要求：
 
-- 明确的 checkpoint 语义：只有 `fsync` 成功后才推进 checkpoint
-- 支持 `LATEST` / `FILE_POS` / `GTID` 三种起点
-- 内建 API、UI、Swagger、metrics 与可选 tracing
-- 支持 metadata 存储、lease 调度与 S3-compatible upload
-- 仓库内带有 E2E 场景，方便验证回归
+1. **单机独立模式 (Standalone):**
+   - *未配置 `meta_dsn` 时：* 任务元数据与位点保存在内存，binlog 文件落盘在 `{data_dir}/{task_id}/`，适合本地开发验证。
+   - *配置 `meta_dsn` 后：* 任务配置、位点与文件生命周期持久化至独立 MySQL，进程重启后自动接续断点，适合单机生产备份。
+2. **控制面 + Worker 集群架构 (推荐生产方案):**
+   - *Control Plane 节点 (`cluster.role: control-plane`):* 专职暴露 REST API、Web 控制台与调度器，不执行复制拉取。
+   - *Worker 节点池 (`cluster.role: worker`):* 无状态工作节点，周期性上报心跳、竞争认领任务租约并执行拉流与落盘，节点故障平滑自动转移。
+3. **一体化集群节点 (`cluster.role: all-in-one`):**
+   - 单进程同时提供 API 控制面与本地 Worker 执行引擎，所有节点连接共享元数据 MySQL，适合资源紧凑的 2~3 节点高可用架构。
 
-## 安装 / 下载
+---
 
-带 tag 的公开版本，从 [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases) 下载对应平台压缩包：
+## Quick Start (面向生产运维)
 
-- `binlog-server_<version>_darwin_amd64.tar.gz`
-- `binlog-server_<version>_darwin_arm64.tar.gz`
-- `binlog-server_<version>_linux_amd64.tar.gz`
-- `binlog-server_<version>_linux_arm64.tar.gz`
-
-真实资产名是 `binlog-server_<ver>_<os>_<arch>.tar.gz`（例如 `binlog-server_0.5.6_linux_amd64.tar.gz`）。同一页提供 `checksums.txt`，先校验再解压。压缩包里有一层版本子目录：
-
-```text
-binlog-server_0.5.6_linux_amd64/
-  binlog-server
-  migrate
-  migrations/
-  README.md
-  README_ZH.md
-  CHANGELOG.md
-  LICENSE
-  config.example.yaml
-  config.production.example.yaml
-```
-
-`/ui/` 所需前端静态资源已经内嵌在二进制里，不需要额外下载前端包。
-
-## Quick Start
-
-这是给 release 操作员的最短路径，不需要安装 Go。
+发布包内提供编译好的静态二进制，部署机无需安装 Go 语言环境。
 
 ### 前置条件
 
-- GitHub Releases 上对应平台的 tarball
-- 一台已开启 `log_bin` 的 MySQL 或 MariaDB
+- 从 [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases) 下载匹配当前操作系统与 CPU 架构的发布包。
+- 一台已启用 `log_bin=ON`、`binlog_format=ROW` 的源 MySQL 实例，并创建复制账号（`GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.*`）。
 
-> **metadata 必须隔离：** 配置 `meta_dsn` 时，它必须使用独立 MySQL 实例，且绝不能加入 binlog 备份任务集。服务会拒绝 TCP `host:port` 完全相同的 source，并将 `localhost` 与显式 loopback literal（`127/8`、`::1`，包括带括号的 IPv6）视为同一端点类别；其他别名和代理场景仍需由运维保证实例隔离。
+> ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验、解压、运行
+### 1. 下载、校验并解压 v0.5.6
 
 ```bash
 VER=0.5.6
@@ -120,41 +107,56 @@ sha256sum -c checksums.txt --ignore-missing
 
 tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
+```
 
+发布包解压后的真实目录结构如下：
+
+```text
+binlog-server_0.5.6_linux_amd64/
+  binlog-server                  # 服务主二进制程序
+  migrate                        # 数据库 Schema 迁移工具
+  migrations/                    # SQL 结构迁移脚本
+  README.md                      # 英文文档
+  README_ZH.md                   # 中文文档
+  CHANGELOG.md                   # 版本更新记录
+  LICENSE                        # Apache 2.0 开源协议
+  config.example.yaml            # 完整参数参考配置
+  config.production.example.yaml # 生产安全推荐模板
+```
+
+### 2. 本地快速体验 (Loopback 监听)
+
+```bash
+# 绑定到 127.0.0.1 允许免鉴权快速启动演示
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server
 ```
 
-未设置 `BINLOG_SERVER_LISTEN_ADDR` 时，默认监听 `:8080`。非 loopback 绑定必须开 API 鉴权；上面的示例用 loopback，本地演示可以不配 token。
+*注意：* 服务默认监听地址为 `:8080`。任何非本地 Loopback 地址（包括 `0.0.0.0:8080` 与默认 `:8080`）启动时必须配置 `api.auth.enabled: true`，否则严格 Fail-Close 退出。
 
-### 2. 验证 `/healthz`
+### 3. 验证健康检查端点
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
+# 期望返回: ok
 ```
 
-期望返回：
+### 4. 提交第一个备份任务
 
-```text
-ok
-```
-
-### 3. 创建第一个任务
-
-把下面示例里的 MySQL 连接信息替换成你自己的实例：
+调用 `POST /api/tasks` 接口录入任务信息：
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
   -H 'Content-Type: application/json' \
   -d '{
-    "name": "quickstart-task",
-    "cluster_key": "quickstart-task",
+    "name": "prod-mysql-01",
+    "cluster_key": "prod-cluster-main",
     "source": {
-      "host": "127.0.0.1",
+      "host": "192.168.1.50",
       "port": 3306,
       "user": "repl",
-      "password": "secret",
+      "password": "your_repl_password",
       "flavor": "mysql"
     },
     "start": {
@@ -166,125 +168,82 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
   }'
 ```
 
-### 4. 启动任务
+*重要参数说明：*
+- `cluster_key`: 集群标识，用于元数据分群和 S3 对象路径路由，仅允许 `[A-Za-z0-9._-]`。
+- `start.mode`: 启动起点，可选 `LATEST`（从源库最新位点）、`FILE_POS`（需提供 `file` 和 `pos`）或 `GTID`（需提供 `gtid_set`）。
+- `storage.retention_days`: 本地保留天数（有效范围 1..3650 天）。
 
-把 `<task-id>` 替换成上一步返回的 `id`：
+### 5. 启动任务开始复制
+
+将 `<task-id>` 替换为创建任务接口返回的 `id`：
 
 ```bash
 curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 ```
 
-### 5. 查看任务状态
+### 6. 查看状态与访问控制台
 
-```bash
-curl -fsS http://127.0.0.1:8080/api/tasks
-```
+- **Web 控制台:** 浏览器访问 `http://127.0.0.1:8080/ui/`
+- **Swagger 调试页面:** 浏览器访问 `http://127.0.0.1:8080/swagger/index.html`
+- **API 查询任务:** `curl -fsS http://127.0.0.1:8080/api/tasks`
 
-### 6. 打开 UI 或 Swagger
+---
 
-- UI: `http://127.0.0.1:8080/ui/`
-- Swagger: `http://127.0.0.1:8080/swagger/index.html`
+## 生产部署安全检查清单
 
-如果你要看更完整的运维与使用说明，从 [docs/guide/README.md](docs/guide/README.md) 进入。
+生产上线前必须严格覆盖以下安全与架构基线：
 
-### 运行后你会看到什么
+### 1. 严格 Fail-Closed 安全与加密密钥
+- **开放端口必须鉴权:** 只要监听地址不是 Loopback，必须配置 `api.auth.enabled: true` 并同时开启 `protect_api` 与 `protect_metrics`。
+- **`PRODUCTION=true` 强制限制:** 当设置 `PRODUCTION=true` 环境变量时，进程在 `--encryption-key` 为空时将直接退出并不监听端口。
+- **生成 32 字节 AES 密钥:** 启动时通过命令行参数传入：
+  ```bash
+  export BINLOG_SERVER_ENCRYPTION_KEY="$(openssl rand -hex 16)" # 32 个十六进制字符 = 32 字节
+  ./binlog-server --config config.production.example.yaml --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"
+  ```
+- **口令落库加密:** 传入 `--encryption-key` 后，元数据库中任务配置的 `source_json` 源库密码会自动以 AES-256-GCM（`enc:aes256:`）密文存储。
+- **控制台鉴权保护:** 开启鉴权后，浏览器访问 `/ui/*` 与 `/swagger/*` 会被鉴权中间件拦截（未携带凭证返回 401）；`/healthz` 始终保持开放以便接入负载均衡健康探活。
 
-- `/healthz` 返回 `ok`
-- `/api/tasks` 能看到你刚创建的任务
-- `/ui/` 可以打开管理界面
-- `/swagger/index.html` 可以直接查看和调试 API
-- 任务启动后，checkpoint 与 metrics 会逐步反映运行状态
+### 2. 元数据库独立与迁移
+- 准备独立的 MySQL 元数据库并在启动前执行 Schema 初始化：
+  ```bash
+  export META_DSN='binlog_meta:secure_pass@tcp(10.0.0.15:3306)/binlog_server_meta?parseTime=true'
+  ./migrate up --dsn "$META_DSN" --path ./migrations
+  export BINLOG_SERVER_META_DSN="$META_DSN"
+  ```
 
-> ⚠️ **Security Warning**
->
-> 默认关闭 API authentication 仅适用于 loopback 演示绑定（`127.0.0.1`/`localhost`/`::1`）。
-> 非 loopback 的 `listen_addr`（含默认 `:8080` 和 `0.0.0.0:8080`）启动时 fail-close，必须同时开启 `api.auth.enabled`、`protect_api` 和 `protect_metrics`。`PRODUCTION=true` 仍会独立强制同一组约束。
->
-> **生产环境必须：**
-> 1. 设置 `api.auth.enabled: true`（或 `BINLOG_SERVER_API_AUTH_ENABLED=true`）
-> 2. 配置认证方式（Bearer Token 或 API Key）
-> 3. 保护 `/api/*` 与 `/metrics`（`enabled=true` 且未显式设置时，这两个标志默认为 true）
->
-> 具体安全建议见 [SECURITY.md](SECURITY.md) 与 [docs/security.md](docs/security.md)。
+### 3. 本地保留与对象存储归档
+- 本地分段文件保存在 `{data_dir}/{task_id}/`。
+- 复制循环会自动定期清理超过 `storage.retention_days` 的过期已封存分段，正在写入的 `OPEN` 分段绝对不会被误删。
+- 配置对象存储凭据实现远端冷备归档：
+  ```bash
+  export BINLOG_SERVER_UPLOAD_ENDPOINT="s3.us-east-1.amazonaws.com"
+  export BINLOG_SERVER_UPLOAD_BUCKET="my-mysql-binlogs"
+  export BINLOG_SERVER_UPLOAD_ACCESS_KEY="AKIA..."
+  export BINLOG_SERVER_UPLOAD_SECRET_KEY="..."
+  ```
+- 上传失败不会阻断复制，可通过 API 或 Web 控制台随时一键触发补传：
+  ```bash
+  curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
+  ```
 
-## 最小生产配置提示
+生产部署请直接参考 [`config.production.example.yaml`](config.production.example.yaml)。
 
-开发环境默认值偏宽松，生产环境不要直接照搬。
+---
 
-- Auth：仅 loopback 默认可关闭；非 loopback listen 与 `PRODUCTION=true` 都要求开启鉴权并保护 `/api/*` 与 `/metrics`
-- Meta DB：如果配置了 `meta_dsn`，必须使用绝不作为复制源的独立 MySQL 实例，并先执行 migration；服务不会自动建表或自动升级 schema
-- 未配置 `meta_dsn` 的 standalone：任务元数据、checkpoint、文件记录只在内存。进程 `kill -9` / 重启后控制面清空。已经写到 `{data_dir}/{task_id}/` 的 binlog 会变成孤儿文件。配置 `meta_dsn` 后，持久化的 active task 会在重启时自动从 checkpoint 续传，运行中 `GET /files` 也会列出当前 `OPEN` segment。`storage.dir` 会被忽略，真实路径固定为 `{data_dir}/{task_id}/`。
-- Upload：S3-compatible upload 是可选能力，但一旦启用，必填项必须完整
-- Tracing：默认关闭，启用前先确认 exporter 配置和采样策略
+## 升级须知 (v0.5.6)
 
-生产环境最小建议：
+在将生产环境升级至 `v0.5.6` 之前，请确认以下变更点：
 
-```bash
-export BINLOG_SERVER_API_AUTH_ENABLED=true
-export BINLOG_SERVER_API_AUTH_MODE=bearer
-export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="$(openssl rand -hex 32)"
-export BINLOG_SERVER_API_AUTH_PROTECT_API=true
-export BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true
-```
+- **无需数据库表结构变更:** `v0.5.6` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。
+- **`PRODUCTION=true` 强校验:** 设置了 `PRODUCTION=true` 必须携带非空的 `--encryption-key` 启动参数，否则服务启动中断。
+- **内嵌控制台修复:** 彻底解决了 v0.5.5 中前端打包语法导致的控制台挂载异常，现代浏览器访问 `/ui/` 顺畅呈现。
+- **UI 与 Swagger 纳入统一鉴权:** `api.auth.enabled=true` 时，`/ui/*` 与 `/swagger/*` 同样受鉴权保护；`/healthz` 保持开放。
+- **Dashboard 规模化 SQL 聚合:** `GET /api/dashboard` 与 `GET /api/summary` 改走数据库端 SQL `GROUP BY` 聚合与分页，杜绝全量扫表。
 
-如果使用 metadata database：
+详细版本记录：[docs/releases/v0.5.6.zh-CN.md](docs/releases/v0.5.6.zh-CN.md) | [docs/releases/release-notes-v0.5.6.md](docs/releases/release-notes-v0.5.6.md)
 
-```bash
-export META_DSN='meta:replace_me@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true'
-./migrate up --dsn "$META_DSN" --path ./migrations
-export BINLOG_SERVER_META_DSN="$META_DSN"
-```
-
-如需启用 upload，至少提供这些配置：
-
-- `BINLOG_SERVER_UPLOAD_ENDPOINT`
-- `BINLOG_SERVER_UPLOAD_BUCKET`
-- `BINLOG_SERVER_UPLOAD_ACCESS_KEY`
-- `BINLOG_SERVER_UPLOAD_SECRET_KEY`
-
-## FAQ / Common Pitfalls
-
-### `make e2e-quick` 本地失败
-
-- 先确认 Docker Desktop 或其他 Docker daemon 已启动。
-- E2E 会拉起 MySQL / Percona 容器，并依赖本地 Docker 环境。
-- 更详细的 E2E 说明见 [scripts/e2e/README.md](scripts/e2e/README.md)。
-
-### 配了 `meta_dsn` 但任务跑不起来
-
-- 常见原因是 metadata schema 还没 migrate。
-- 先执行 `make migrate-up META_DSN=...`，再启动服务。
-- 迁移命令说明见 [cmd/migrate/README.md](cmd/migrate/README.md)。
-
-### 生产环境忘了开 auth
-
-- 这是当前最需要显式覆盖的开发默认值。
-- 本机 loopback（127.0.0.1/localhost/::1）可以保持关闭鉴权；非 loopback 监听和 PRODUCTION=true 必须开鉴权。
-- 具体安全配置建议见 [SECURITY.md](SECURITY.md) 和 [docs/security.md](docs/security.md)。
-
-### upload 配置了但上传不工作
-
-- `endpoint`、`bucket`、`access_key`、`secret_key` 必须完整出现。
-- `region` 和 `prefix` 是可选项，不属于初始化必填。
-- 当前 upload 实现面向 S3-compatible API。
-
-### `/metrics` 或 tracing 看起来“没数据”
-
-- `/metrics` 在任务还没运行时也会暴露基础指标；部分值可能只是 placeholder。
-- tracing 默认关闭，所以没有 span 通常是预期行为，不一定是故障。
-
-## Upgrade / Release 入口
-
-升级前先看 [CHANGELOG.md](CHANGELOG.md)。
-
-升级时优先关注这几类变化：
-
-- schema / migration 变更
-- config key 新增、废弃或默认值变化
-- `sqlc` 相关工作流变化
-- observability 合约变化，例如 metrics / tracing 对 dashboard 或告警的影响
-
-这个仓库不会自动帮你 apply migration，也不会自动迁移配置，因此升级应当按运维变更来处理，而不是只替换二进制。
+---
 
 ## 架构
 
@@ -308,56 +267,36 @@ BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排�
 | `scripts` | 本地构建辅助、Release 产物打包与 E2E 入口 | [scripts/README.md](scripts/README.md) |
 | `frontend` | 内嵌 UI 的前端源码与构建流水线 | [frontend/README.md](frontend/README.md) |
 
+---
+
 ## 仓库入口导航
 
-如果你已经跑通 `Quick Start`，下一步从这里进入：
-
-| 主题 | 入口 |
+| 主题 | 文档入口 |
 | --- | --- |
-| 使用与运维 guide | [docs/guide/README.md](docs/guide/README.md) |
-| 安全策略 | [SECURITY.md](SECURITY.md) |
-| 版本变化 | [CHANGELOG.md](CHANGELOG.md) |
-| 服务启动命令 | [cmd/binlog-server/README.md](cmd/binlog-server/README.md) |
-| 数据库迁移 | [cmd/migrate/README.md](cmd/migrate/README.md) |
-| API 模块 | [internal/api/README.md](internal/api/README.md) |
-| 复制执行链路 | [internal/replication/README.md](internal/replication/README.md) |
-| Upload 模块 | [internal/upload/README.md](internal/upload/README.md) |
-| E2E 测试套件 | [scripts/e2e/README.md](scripts/e2e/README.md) |
+| 完整部署手册 | [docs/guide/admin/deployment.md](docs/guide/admin/deployment.md) |
+| 配置参数详解 | [docs/guide/admin/configuration.md](docs/guide/admin/configuration.md) |
+| 故障排查手册 | [docs/guide/admin/troubleshooting.md](docs/guide/admin/troubleshooting.md) |
+| 可观测性与监控指标 | [docs/guide/admin/observability.md](docs/guide/admin/observability.md) |
+| 安全策略说明 | [SECURITY.md](SECURITY.md) |
+| 版本更新记录 | [CHANGELOG.md](CHANGELOG.md) |
 
-## 开发
+---
 
-改代码时用源码构建，不要把它当成 release 安装路径。
+## 开发与源码构建
 
-前置：Go `1.26.7+`。E2E 才需要 Docker。
+从源码构建要求 Go `1.26.7+`。Docker 仅在运行自动化 E2E 场景测试时需要。
 
 ```bash
+# 编译当前平台二进制
 make build
 
-# Linux 部署二进制请保持 CGO 关闭，避免绑定构建机 glibc 版本。
+# 静态交叉编译 Linux 二进制 (CGO_ENABLED=0)
 make build-linux
 
-# 从源码运行
-go run ./cmd/binlog-server
-BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
-
-# 本地准备一组 release 产物
-make release-assets VERSION=v0.5.6
-```
-
-## 开发验证入口
-
-常用验证命令：
-
-```bash
+# 执行单元测试与代码检查
 go test ./...
 go vet ./...
+
+# 运行自动化 E2E 快速回归套件 (依赖 Docker)
 make e2e-quick
-```
-
-如果你要以前后端分离方式开发前端：
-
-```bash
-cd frontend
-npm install
-npm run dev
 ```

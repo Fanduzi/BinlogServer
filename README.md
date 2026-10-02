@@ -28,87 +28,74 @@
 [![Security](https://img.shields.io/badge/docs-Security-critical.svg)](SECURITY.md)
 </div>
 
-Binlog Server is a service for pulling MySQL binlog into durable local files, persisting checkpoint state, and managing replication tasks through an API-driven control plane with UI, optional S3-compatible upload, and cluster coordination support.
+BinlogServer is a centralized MySQL binlog backup control plane engineered for database reliability teams. It pulls binlog streams from MySQL/MariaDB instances into durable local files, commits checkpoint offsets only after disk `fsync`, coordinates multi-node worker failover via distributed leases, and provides decoupled S3-compatible archiving with an embedded web console and REST API.
 
-If this is your first time visiting the repository, start with `Quick Start`. If you are evaluating whether the project fits your use case, read the positioning section below first.
+If you are evaluating BinlogServer, start with the **Architectural Guarantees** and **Topologies** below. If you are deploying immediately, jump directly to **Quick Start**.
+
+---
 
 ## What Problem Does It Solve?
 
-It turns binlog pulling, local persistence, checkpoint tracking, and task lifecycle management into an operational service instead of a collection of scripts, cron jobs, and ad hoc metadata.
+In most production environments, MySQL binlog backup still relies on brittle `mysqlbinlog` shell scripts wrapped in cron jobs, custom daemon loops with untracked checkpoint drift, and synchronous scripts that halt replication whenever cloud storage hiccups.
 
-### Screenshots
+BinlogServer replaces shell history with an authoritative, observable control plane:
+- **Zero phantom progress:** Checkpoints advance strictly after local disk `fsync`.
+- **Decoupled archiving:** Remote S3/MinIO upload network hiccups or outages never stall the local replication capture loop.
+- **Automated cluster failover:** Multi-worker lease ownership backed by metadata MySQL guarantees exactly one active dumper per task, with automatic timeout takeover upon worker crash.
+- **Operational visibility:** Embedded Web Console, interactive Swagger API, and Prometheus `/metrics` evaluate replication lag directly against `SHOW MASTER STATUS` / `SHOW BINLOG STATUS`.
+
+### Live Console Preview
 
 ![Console overview](docs/images/console-dashboard.png)
-
-*Console overview*
+*Console Dashboard: Real-time replication lag, worker assignment, and task state classification.*
 
 ![Task detail](docs/images/task-detail.png)
-
-*Task detail*
+*Task Inspection: Precise GTID / file-pos coordinates, local segment rotation, and one-click manual upload retry.*
 
 ![Swagger API](docs/images/swagger.png)
+*Swagger Explorer: Full OpenAPI specification for CMDB automation and programmatic orchestration.*
 
-*Swagger API*
+---
 
-Good fit for:
+## Architectural Guarantees (DBA First)
 
-- Teams that want binlog pulling, local durability, and task state management as a service
-- Environments that need `LATEST`, `FILE_POS`, or `GTID` start modes
-- Workflows that want local persistence with optional S3-compatible upload
-- Operators who want API, UI, and observability instead of a one-off script
+| Guarantee | Engineering Implementation | Why DBAs Trust It |
+|---|---|---|
+| **Durable Checkpoints** | Checkpoint offset persists only after local `fsync` completes on the sealed binlog segment. | No optimistic in-memory progress. On process restart or crash recovery, replication resumes cleanly from the exact durable byte. |
+| **Decoupled S3 Archiving** | Upload to S3/MinIO operates asynchronously. Upload failures trigger backoff and can be retried via API or Console drawer. | Object storage rate limits or network partitions never stall binlog capture from primary databases. |
+| **Cluster HA &amp; Lease Ownership** | Distributed leases backed by metadata MySQL enforce mutually exclusive task ownership per worker. | Eliminates split-brain dumper conflicts on the same source. When a worker fails heartbeat renewal, healthy workers claim and resume the task. |
+| **Strict Fail-Closed Security** | Non-loopback binds mandate auth. In `PRODUCTION=true`, startup is refused without a 32-byte AES key (`--encryption-key`) and protected credentials. | Protects replication credentials with AES-256-GCM (`enc:aes256:`) in metadata; prevents accidental public exposure of unauthenticated control planes. |
+| **True Master Lag Tracking** | Lag is evaluated against source binlog coordinates (`SHOW MASTER STATUS` / `SHOW BINLOG STATUS`), not arbitrary sleep timers. | Accurate lag alerting during quiet nighttime periods; no misleading zero-lag reports on stalled streams. |
 
-Probably not a fit for:
+---
 
-- One-time exports instead of continuous replication
-- Very small single-node scripts without task orchestration needs
-- Teams looking for a full CDC platform replacement
+## Deployment Topologies
 
-## Why Use It?
+Choose the topology matching your availability and infrastructure requirements:
 
-- Clear checkpoint semantics: checkpoint advances only after local `fsync` succeeds
-- Supports `LATEST`, `FILE_POS`, and `GTID` start modes
-- Built-in API, UI, Swagger, metrics, and optional tracing
-- Supports metadata-backed coordination, lease management, and S3-compatible upload
-- Includes repository E2E scenarios to validate core regression paths
+1. **Standalone Mode (Single Process):**
+   - *Without `meta_dsn`:* Tasks and checkpoints run in-memory; binlog files land under `{data_dir}/{task_id}/`. Ideal for quick local testing and evaluation.
+   - *With `meta_dsn`:* Task metadata, checkpoints, and file catalogs persist in MySQL. On process restart, active tasks resume automatically from their last checkpoint.
+2. **Control Plane + Worker Pool (Cluster HA - Recommended):**
+   - *Control Plane nodes (`cluster.role: control-plane`):* Serve the REST API, embedded Console UI, and manage task lifecycle states without dumping binlogs.
+   - *Worker nodes (`cluster.role: worker`):* Headless processes that register heartbeats, compete for task leases, and execute continuous binlog replication. Automatic failover upon node failure.
+3. **All-in-one Cluster Node (`cluster.role: all-in-one`):**
+   - Single process running both the API server and worker replication loop, backed by a shared metadata MySQL. Suitable for compact 2-node or 3-node HA clusters.
 
-## Install / Download
+---
 
-For tagged public releases, download the archive that matches your platform from [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases):
+## Quick Start (Release Operators)
 
-- `binlog-server_<version>_darwin_amd64.tar.gz`
-- `binlog-server_<version>_darwin_arm64.tar.gz`
-- `binlog-server_<version>_linux_amd64.tar.gz`
-- `binlog-server_<version>_linux_arm64.tar.gz`
-
-The real asset name is `binlog-server_<ver>_<os>_<arch>.tar.gz` (for example `binlog-server_0.5.6_linux_amd64.tar.gz`). The release page also provides `checksums.txt`; verify it before extracting. The tarball contains a versioned subdirectory:
-
-```text
-binlog-server_0.5.6_linux_amd64/
-  binlog-server
-  migrate
-  migrations/
-  README.md
-  README_ZH.md
-  CHANGELOG.md
-  LICENSE
-  config.example.yaml
-  config.production.example.yaml
-```
-
-UI assets are embedded into the binary, so you do not need a separate frontend package.
-
-## Quick Start
-
-This is the shortest path for release operators. You do not need Go installed.
+Deploy official precompiled binaries without needing Go installed.
 
 ### Prerequisites
 
-- A release tarball for your platform from GitHub Releases
-- A reachable MySQL or MariaDB instance with `log_bin` enabled
+- A release archive for your OS/architecture from [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases).
+- A reachable MySQL/MariaDB source with `log_bin=ON`, `binlog_format=ROW`, and a replication account (`GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.*`).
 
-> **Metadata isolation is mandatory:** when `meta_dsn` is configured, its MySQL instance must be separate from every replication source and must never be added to the backup task set. The server rejects an exact matching TCP `host:port` and treats `localhost` plus explicit loopback literals (`127/8` and `::1`, including bracketed IPv6) as the same endpoint class; other aliases and proxies still require operator isolation.
+> ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, extract, run
+### 1. Download, verify, and unpack v0.5.6
 
 ```bash
 VER=0.5.6
@@ -121,41 +108,56 @@ sha256sum -c checksums.txt --ignore-missing
 
 tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
+```
 
+The release tarball contains everything required for operation:
+
+```text
+binlog-server_0.5.6_linux_amd64/
+  binlog-server                  # Main application executable
+  migrate                        # Schema migration utility
+  migrations/                    # SQL migrations
+  README.md                      # English documentation
+  README_ZH.md                   # Chinese documentation
+  CHANGELOG.md                   # Release history
+  LICENSE                        # Apache 2.0 license
+  config.example.yaml            # Annotated configuration reference
+  config.production.example.yaml # Hardened production baseline
+```
+
+### 2. Start local evaluation (Loopback)
+
+```bash
+# Loopback bind (127.0.0.1) allows unauthenticated local evaluation
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server
 ```
 
-The default listen address is `:8080` if you omit `BINLOG_SERVER_LISTEN_ADDR`. Non-loopback binds require API auth; the example above uses loopback so a local demo can start without a token.
+*Note:* Default listen address is `:8080`. Any non-loopback bind (`0.0.0.0:8080` or `:8080`) strictly fail-closes at startup unless `api.auth.enabled: true` is configured.
 
-### 2. Verify `/healthz`
+### 3. Verify health endpoint
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
+# Expected output: ok
 ```
 
-Expected response:
+### 4. Create your first replication task
 
-```text
-ok
-```
-
-### 3. Create your first task
-
-Replace the MySQL connection details with your own instance:
+Submit task parameters via `POST /api/tasks`:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
   -H 'Content-Type: application/json' \
   -d '{
-    "name": "quickstart-task",
-    "cluster_key": "quickstart-task",
+    "name": "prod-mysql-01",
+    "cluster_key": "prod-cluster-main",
     "source": {
-      "host": "127.0.0.1",
+      "host": "192.168.1.50",
       "port": 3306,
       "user": "repl",
-      "password": "secret",
+      "password": "your_repl_password",
       "flavor": "mysql"
     },
     "start": {
@@ -167,131 +169,86 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
   }'
 ```
 
-### 4. Start the task
+*Parameters:*
+- `cluster_key`: Identifier used for partitioning and object storage path routing (`[A-Za-z0-9._-]`).
+- `start.mode`: `LATEST` (replicate from source tip), `FILE_POS` (requires `file` and `pos`), or `GTID` (requires `gtid_set`).
+- `storage.retention_days`: Local retention boundary (1..3650 days).
 
-Replace `<task-id>` with the `id` returned from the previous step:
+### 5. Start the replication task
+
+Replace `<task-id>` with the ID returned by step 4:
 
 ```bash
 curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 ```
 
-### 5. Check task state
+### 6. Inspect state &amp; open the Web Console
 
-```bash
-curl -fsS http://127.0.0.1:8080/api/tasks
-```
+- **Web Console:** Open `http://127.0.0.1:8080/ui/` in your browser.
+- **Interactive Swagger:** Open `http://127.0.0.1:8080/swagger/index.html`.
+- **API Task List:** `curl -fsS http://127.0.0.1:8080/api/tasks`
 
-### 6. Open the UI or Swagger
+---
 
-- UI: `http://127.0.0.1:8080/ui/`
-- Swagger: `http://127.0.0.1:8080/swagger/index.html`
+## Production Deployment Checklist
 
-For more operational and usage guidance, continue from [docs/guide/README.md](docs/guide/README.md).
+Do not use permissive development defaults in production. Follow these mandatory rules:
 
-### What You Should See
+### 1. Fail-Closed Security &amp; Encryption Key
+- **Non-loopback listen:** Any non-loopback bind requires `api.auth.enabled: true`, `protect_api: true`, and `protect_metrics: true`.
+- **`PRODUCTION=true` enforcement:** In production mode, BinlogServer refuses to start if `--encryption-key` is empty.
+- **AES-256 Key generation:** Supply a 32-byte key via the `--encryption-key` flag:
+  ```bash
+  export BINLOG_SERVER_ENCRYPTION_KEY="$(openssl rand -hex 16)" # 32 hex chars = 32 bytes
+  ./binlog-server --config config.production.example.yaml --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"
+  ```
+- **Password encryption:** When `--encryption-key` is provided, source database passwords in `backup_tasks.source_json` are automatically encrypted at rest using AES-256-GCM (`enc:aes256:`).
+- **Console lock:** When authentication is enabled, browser access to `/ui/*` and `/swagger/*` is locked behind the same authentication middleware. `/healthz` remains unauthenticated for load balancers.
 
-- `/healthz` returns `ok`
-- `/api/tasks` lists the task you just created
-- `/ui/` opens the management interface
-- `/swagger/index.html` lets you inspect and try the API
-- After the task starts, checkpoint and metrics begin reflecting runtime state
+### 2. Metadata Database Setup
+- Prepare an isolated MySQL database and execute schema migrations before starting the service:
+  ```bash
+  export META_DSN='binlog_meta:secure_pass@tcp(10.0.0.15:3306)/binlog_server_meta?parseTime=true'
+  ./migrate up --dsn "$META_DSN" --path ./migrations
+  export BINLOG_SERVER_META_DSN="$META_DSN"
+  ```
 
-> ⚠️ **Security Warning**
->
-> By default, API authentication is **DISABLED** only for loopback demo binds (`127.0.0.1`/`localhost`/`::1`).
-> Non-loopback `listen_addr` (including the default `:8080` and `0.0.0.0:8080`) fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are all true. `PRODUCTION=true` still requires the same independently.
->
-> **For production deployments, you MUST:**
-> 1. Set `api.auth.enabled: true` (or `BINLOG_SERVER_API_AUTH_ENABLED=true`)
-> 2. Configure your authentication method (Bearer Token or API Key)
-> 3. Protect `/api/*` and `/metrics` (these default true when auth is enabled and the flags are unset)
->
-> See [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md) for security guidance.
+### 3. Local Retention &amp; Object Storage Upload
+- Local binlogs are stored at `{data_dir}/{task_id}/`.
+- Expired sealed segments older than `storage.retention_days` are automatically purged by the replication loop. The active `OPEN` segment is never deleted.
+- S3 upload is configured via environment variables or YAML:
+  ```bash
+  export BINLOG_SERVER_UPLOAD_ENDPOINT="s3.us-east-1.amazonaws.com"
+  export BINLOG_SERVER_UPLOAD_BUCKET="my-mysql-binlogs"
+  export BINLOG_SERVER_UPLOAD_ACCESS_KEY="AKIA..."
+  export BINLOG_SERVER_UPLOAD_SECRET_KEY="..."
+  ```
+- If an upload fails, replication continues uninterrupted. Trigger manual retry anytime:
+  ```bash
+  curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
+  ```
 
-## Minimal Production Notes
+Start production instances from [`config.production.example.yaml`](config.production.example.yaml).
 
-Development defaults are intentionally permissive. Do not carry them unchanged into production.
+---
 
-- Auth: disabled by default only on loopback; non-loopback listen and `PRODUCTION=true` require enabled auth plus protected `/api/*` and `/metrics`
-- Meta DB: if `meta_dsn` is configured, use an independent MySQL instance that is never a replication source, and run migrations first; the service does not auto-create or auto-upgrade schema
-- Standalone without `meta_dsn` keeps task metadata, checkpoints, and file records in memory only. `kill -9` / process restart drops the control plane. Binlog bytes already written under `{data_dir}/{task_id}/` remain as orphan files. With `meta_dsn`, persisted active tasks resume automatically from their checkpoint after restart, and `GET /files` includes the current `OPEN` segment. `storage.dir` is ignored; files always go to `{data_dir}/{task_id}/`.
-- Upload: S3-compatible upload is optional, but required fields must be complete when enabled
-- Tracing: disabled by default; validate exporter configuration and sampling before rollout
+## Upgrade Notes (v0.5.6)
 
-Minimum production baseline:
+Before upgrading existing deployments, review the v0.5.6 operator contract:
 
-```bash
-export BINLOG_SERVER_API_AUTH_ENABLED=true
-export BINLOG_SERVER_API_AUTH_MODE=bearer
-export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="$(openssl rand -hex 32)"
-export BINLOG_SERVER_API_AUTH_PROTECT_API=true
-export BINLOG_SERVER_API_AUTH_PROTECT_METRICS=true
-```
+- **Zero Schema Migrations:** `v0.5.6` requires no database migrations (`000001_init_schema` unchanged).
+- **Strict `PRODUCTION=true` Validation:** The process will not listen if `PRODUCTION=true` is set without a non-empty `--encryption-key`.
+- **Console Mounting Fix:** The embedded console bundle issue present in v0.5.5 has been resolved; `/ui/` mounts properly across modern browsers.
+- **UI &amp; Swagger Auth Protection:** When `api.auth.enabled=true`, `/ui/*` and `/swagger/*` enforce authentication middleware. `/healthz` stays open.
+- **SQL Aggregations at Scale:** `GET /api/dashboard` and `GET /api/summary` execute SQL `GROUP BY` aggregations with bounded `LIMIT/OFFSET` paging, eliminating in-process table scans.
 
-Start from [`config.production.example.yaml`](config.production.example.yaml); it contains no credential, needs only the protected bearer-token environment variable, and refuses to load until that placeholder is resolved.
+Full release notes: [docs/releases/release-notes-v0.5.6.md](docs/releases/release-notes-v0.5.6.md) | [docs/releases/v0.5.6.zh-CN.md](docs/releases/v0.5.6.zh-CN.md)
 
-If you use the metadata database:
-
-```bash
-export META_DSN='meta:replace_me@tcp(127.0.0.1:3306)/binlog_meta?parseTime=true'
-./migrate up --dsn "$META_DSN" --path ./migrations
-export BINLOG_SERVER_META_DSN="$META_DSN"
-```
-
-If you enable upload, provide at least:
-
-- `BINLOG_SERVER_UPLOAD_ENDPOINT`
-- `BINLOG_SERVER_UPLOAD_BUCKET`
-- `BINLOG_SERVER_UPLOAD_ACCESS_KEY`
-- `BINLOG_SERVER_UPLOAD_SECRET_KEY`
-
-## FAQ / Common Pitfalls
-
-### `make e2e-quick` fails locally
-
-- Make sure Docker Desktop or another Docker daemon is running first.
-- E2E scenarios start MySQL / Percona containers and depend on local Docker availability.
-- See [scripts/e2e/README.md](scripts/e2e/README.md) for more details.
-
-### Tasks fail after configuring `meta_dsn`
-
-- A common cause is that the metadata schema has not been migrated yet.
-- Run `make migrate-up META_DSN=...` before starting the service.
-- Migration command details are documented in [cmd/migrate/README.md](cmd/migrate/README.md).
-
-### Auth was left disabled in production
-
-- This is the most important development default to override.
-- Loopback binds (127.0.0.1/localhost/::1) may stay unauthenticated; non-loopback listen and PRODUCTION=true require auth.
-- See [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md) for concrete guidance.
-
-### Upload is configured but files do not upload
-
-- `endpoint`, `bucket`, `access_key`, and `secret_key` must all be present.
-- `region` and `prefix` are optional and not part of initialization minimums.
-- The current implementation targets S3-compatible APIs.
-
-### `/metrics` or tracing looks empty
-
-- `/metrics` exposes core metric families even before tasks start; some values may still be placeholders.
-- Tracing is off by default, so the absence of spans is often expected rather than a fault.
-
-## Upgrade / Release Entry
-
-Review [CHANGELOG.md](CHANGELOG.md) before upgrading.
-
-Pay particular attention to these change types:
-
-- schema / migration changes
-- new, deprecated, or default-shifted config keys
-- `sqlc` workflow changes
-- observability contract changes that affect dashboards or alerts
-
-This repository does not apply migrations or migrate configuration for you, so upgrades should be handled as an operator change, not just a binary swap.
+---
 
 ## Architecture
 
-BinlogServer is organized as a control-plane-oriented service with clear boundaries between HTTP/API handling, task orchestration, replication execution, metadata persistence, upload integration, and UI delivery.
+BinlogServer is structured as a modular control plane with clear separation between API ingestion, state scheduling, replication execution, metadata coordination, and UI delivery.
 
 ### Modules
 
@@ -311,56 +268,36 @@ BinlogServer is organized as a control-plane-oriented service with clear boundar
 | `scripts` | Local build helpers, release asset packaging, and E2E entrypoints | [scripts/README.md](scripts/README.md) |
 | `frontend` | Frontend source and build pipeline for the embedded UI | [frontend/README.md](frontend/README.md) |
 
+---
+
 ## Repository Map
 
-Once `Quick Start` works, continue from these entry points:
-
-| Topic | Entry |
+| Topic | Documentation Entry |
 | --- | --- |
-| Usage and operations guide | [docs/guide/README.md](docs/guide/README.md) |
-| Security policy | [SECURITY.md](SECURITY.md) |
-| Version history | [CHANGELOG.md](CHANGELOG.md) |
-| Service startup command | [cmd/binlog-server/README.md](cmd/binlog-server/README.md) |
-| Database migration | [cmd/migrate/README.md](cmd/migrate/README.md) |
-| API module | [internal/api/README.md](internal/api/README.md) |
-| Replication pipeline | [internal/replication/README.md](internal/replication/README.md) |
-| Upload module | [internal/upload/README.md](internal/upload/README.md) |
-| E2E suite | [scripts/e2e/README.md](scripts/e2e/README.md) |
+| Full Deployment Guide | [docs/guide/admin/deployment.md](docs/guide/admin/deployment.md) |
+| Configuration Reference | [docs/guide/admin/configuration.md](docs/guide/admin/configuration.md) |
+| Troubleshooting Runbook | [docs/guide/admin/troubleshooting.md](docs/guide/admin/troubleshooting.md) |
+| Observability &amp; Metrics | [docs/guide/admin/observability.md](docs/guide/admin/observability.md) |
+| Security Policy | [SECURITY.md](SECURITY.md) |
+| Release History | [CHANGELOG.md](CHANGELOG.md) |
 
-## Development
+---
 
-Source build is the path when you are changing the code, not installing a release.
+## Source Build &amp; Verification
 
-Prerequisites: Go `1.26.7+`. Docker is needed only for E2E.
+Building from source requires Go `1.26.7+`. Docker is required only for automated E2E tests.
 
 ```bash
+# Compile local binaries
 make build
 
-# Linux deployment binaries should keep CGO disabled to avoid host glibc coupling.
+# Compile Linux static binaries (CGO_ENABLED=0)
 make build-linux
 
-# Run from source
-go run ./cmd/binlog-server
-BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/binlog-server
-
-# Prepare a local set of release assets
-make release-assets VERSION=v0.5.6
-```
-
-## Development Validation
-
-Common verification commands:
-
-```bash
+# Run tests and linting
 go test ./...
 go vet ./...
+
+# Run fast automated E2E suite (requires Docker)
 make e2e-quick
-```
-
-If you want frontend-only development:
-
-```bash
-cd frontend
-npm install
-npm run dev
 ```

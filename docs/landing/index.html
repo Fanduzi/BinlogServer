@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BinlogServer — Centralized MySQL Binlog Backup Control Plane</title>
-  <meta name="description" content="BinlogServer is a centralized MySQL binlog backup control plane with durable local-first persistence, API/UI operations, cluster coordination, observability, and optional S3-compatible upload." />
+  <meta name="description" content="BinlogServer is a centralized MySQL binlog backup control plane with durable local fsync checkpoints, multi-worker lease failover, decoupled S3 archiving, and real-time observability." />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,6 +16,7 @@
     :root {
       --bg: #0d1117;
       --surface: #161b22;
+      --surface-subtle: #21262d;
       --border: #30363d;
       --text: #e6edf3;
       --muted: #8b949e;
@@ -70,7 +71,7 @@
 
     nav {
       position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-      background: rgba(13,17,23,0.85);
+      background: rgba(13,17,23,0.88);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--border);
@@ -118,7 +119,7 @@
     .nav-cta:hover { opacity: 0.85; color: #0d1117; }
 
     .hero {
-      padding: 160px 0 100px;
+      padding: 150px 0 90px;
       text-align: center;
       position: relative;
     }
@@ -132,29 +133,29 @@
     }
     .hero-badge { margin-bottom: 24px; }
     .hero h1 {
-      font-size: clamp(2.9rem, 6vw, 4.6rem);
+      font-size: clamp(2.6rem, 5.5vw, 4.2rem);
       font-weight: 900;
       letter-spacing: -0.04em;
-      line-height: 1.03;
+      line-height: 1.1;
       margin-bottom: 24px;
       background: linear-gradient(135deg, #e6edf3 30%, #79c0ff 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
       white-space: pre-line;
-      max-width: 860px;
+      max-width: 920px;
       margin-left: auto;
       margin-right: auto;
     }
     .hero-sub {
-      font-size: clamp(1rem, 2.5vw, 1.18rem);
+      font-size: clamp(1rem, 2.2vw, 1.18rem);
       color: var(--muted);
-      max-width: 760px;
-      margin: 0 auto 40px;
+      max-width: 800px;
+      margin: 0 auto 36px;
       line-height: 1.75;
       white-space: pre-line;
     }
-    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 48px; }
+    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 40px; }
     .btn-primary {
       padding: 12px 28px;
       background: var(--accent); color: #0d1117;
@@ -172,42 +173,35 @@
       transition: border-color var(--transition), background var(--transition);
     }
     .btn-secondary:hover { border-color: var(--accent); background: var(--glow); }
+
     .hero-code {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 20px 28px;
-      max-width: 720px;
+      max-width: 760px;
       margin: 0 auto;
       text-align: left;
       position: relative;
       overflow: hidden;
     }
     .hero-code::before {
-      content: 'control plane';
+      content: 'OPERATIONAL SPECS';
       position: absolute; top: 12px; left: 16px;
       font-size: 0.7rem; color: var(--muted);
       text-transform: uppercase; letter-spacing: 0.08em;
     }
-    .hero-code code,
-    .code-block code {
-      font-size: 0.82rem;
-      line-height: 1.68;
-      letter-spacing: 0;
-      text-rendering: geometricPrecision;
-      -webkit-font-smoothing: auto;
-      font-weight: 400;
-    }
     .hero-code code {
       display: block;
       color: #9ecbff;
-      padding-top: 20px;
+      padding-top: 16px;
       white-space: pre-wrap;
       word-break: break-word;
       font-weight: 400;
+      font-size: 0.83rem;
+      line-height: 1.7;
     }
-    .hero-code .prompt { color: var(--accent2); }
-    .badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; justify-content: center; }
+    .badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; justify-content: center; }
 
     section { padding: 90px 0; }
     section.alt { background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
@@ -219,17 +213,16 @@
     .section-title {
       font-size: clamp(1.8rem, 4vw, 2.6rem);
       font-weight: 800; letter-spacing: -0.03em;
-      margin-bottom: 16px; line-height: 1.15;
+      margin-bottom: 16px; line-height: 1.2;
       white-space: pre-line;
     }
     .section-sub {
       font-size: 1rem; color: var(--muted);
-      max-width: 680px; margin-bottom: 48px; line-height: 1.7;
+      max-width: 740px; margin-bottom: 40px; line-height: 1.7;
       white-space: pre-line;
     }
 
-    .impact-grid,
-    .capability-grid,
+    .card-grid,
     .surface-grid,
     .fit-grid,
     .trust-grid,
@@ -237,9 +230,8 @@
       display: grid;
       gap: 16px;
     }
-    .impact-grid { grid-template-columns: repeat(3, 1fr); }
-    .capability-grid { grid-template-columns: repeat(3, 1fr); }
-    .surface-grid { grid-template-columns: repeat(4, 1fr); }
+    .card-grid { grid-template-columns: repeat(4, 1fr); }
+    .surface-grid { grid-template-columns: repeat(3, 1fr); }
     .fit-grid { grid-template-columns: repeat(3, 1fr); }
     .trust-grid { grid-template-columns: repeat(4, 1fr); }
     .release-grid { grid-template-columns: 1fr 1fr; }
@@ -282,9 +274,60 @@
       font-size: 1.15rem;
     }
     .surface-card,
-    .trust-card { text-align: center; }
-    .surface-icon,
-    .trust-icon { margin-left: auto; margin-right: auto; }
+    .trust-card { text-align: left; }
+
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-top: 32px;
+    }
+    .gallery-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: border-color var(--transition), transform 0.15s ease;
+    }
+    .gallery-card:hover {
+      border-color: rgba(88,166,255,0.45);
+      transform: translateY(-2px);
+    }
+    .gallery-img-wrap {
+      background: #090d13;
+      border-bottom: 1px solid var(--border);
+      display: block;
+      overflow: hidden;
+      position: relative;
+    }
+    .gallery-img-wrap img {
+      width: 100%;
+      height: 200px;
+      object-fit: cover;
+      object-position: top;
+      display: block;
+      transition: transform 0.3s ease;
+    }
+    .gallery-card:hover .gallery-img-wrap img {
+      transform: scale(1.03);
+    }
+    .gallery-body {
+      padding: 18px 20px;
+      flex: 1;
+    }
+    .gallery-body h3 {
+      font-size: 0.96rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+    .gallery-body p {
+      font-size: 0.83rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
 
     .pipeline {
       display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;
@@ -398,84 +441,61 @@
     .footer-col a { color: var(--muted); text-decoration: none; font-size: 0.875rem; transition: color var(--transition); }
     .footer-col a:hover { color: var(--text); }
     .footer-bottom {
-      border-top: 1px solid var(--border);
+      border-top: 1px solid rgba(48,54,61,0.5);
       padding-top: 24px;
-      display: flex; justify-content: space-between; align-items: center;
-      gap: 16px;
-      font-size: 0.8rem; color: var(--muted);
-      flex-wrap: wrap;
+      display: flex; justify-content: space-between; gap: 16px;
+      color: var(--muted); font-size: 0.8rem;
     }
 
     .back-to-top {
       position: fixed;
-      right: 20px;
-      bottom: 20px;
-      width: 44px;
-      height: 44px;
-      border-radius: 999px;
+      right: 24px;
+      bottom: 24px;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
       border: 1px solid var(--border);
-      background: rgba(22,27,34,0.94);
+      background: rgba(22, 27, 34, 0.9);
       color: var(--text);
       display: inline-flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      box-shadow: 0 12px 30px rgba(0,0,0,0.3);
       opacity: 0;
       pointer-events: none;
-      transform: translateY(8px);
       transition: opacity var(--transition), transform var(--transition), border-color var(--transition);
-      z-index: 120;
+      z-index: 90;
     }
-    .back-to-top.visible { opacity: 1; pointer-events: auto; transform: translateY(0); }
-    .back-to-top:hover { border-color: rgba(88,166,255,0.5); }
-    .back-to-top svg { width: 18px; height: 18px; }
-    .i18n-root { transition: opacity 0.18s ease, transform 0.18s ease; }
-    .i18n-root.switching { opacity: 0.72; transform: translateY(4px); }
-
-    @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(20px); }
-      to { opacity: 1; transform: translateY(0); }
+    .back-to-top:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
     }
-    .animate-fade-up { animation: fadeUp 0.6s ease forwards; opacity: 0; }
-    .reveal { opacity: 1; transform: none; transition: opacity 0.45s ease, transform 0.45s ease; }
-    .reveal.visible { opacity: 1; transform: none; }
-
-    @media (prefers-reduced-motion: reduce) {
-      html { scroll-behavior: auto; }
-      .animate-fade-up,
-      .reveal,
-      .card,
-      .surface-card,
-      .fit-card,
-      .trust-card,
-      .release-card,
-      .back-to-top {
-        animation: none !important;
-        transition: none !important;
-        transform: none !important;
-      }
-      .animate-fade-up,
-      .reveal { opacity: 1 !important; }
+    .back-to-top.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .back-to-top svg {
+      width: 18px;
+      height: 18px;
     }
 
     @media (max-width: 980px) {
-      .impact-grid,
-      .capability-grid,
+      .card-grid,
+      .gallery-grid,
+      .surface-grid,
       .fit-grid,
       .release-grid,
       .trust-grid { grid-template-columns: 1fr 1fr; }
-      .surface-grid { grid-template-columns: repeat(2, 1fr); }
       .nav-links { display: none; }
       .footer-grid { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 640px) {
-      .impact-grid,
-      .capability-grid,
+      .card-grid,
+      .gallery-grid,
+      .surface-grid,
       .fit-grid,
       .release-grid,
       .trust-grid,
-      .surface-grid,
       .footer-grid { grid-template-columns: 1fr; }
       .hero { padding: 120px 0 60px; }
       .pipeline { flex-direction: column; }
@@ -489,402 +509,438 @@
 <body id="top">
   <div class="i18n-root" id="i18n-root">
     <nav>
-    <div class="container">
-      <a href="#top" class="nav-logo">
-        <div class="nav-logo-icon">BS</div>
-        <span class="nav-logo-text">BinlogServer</span>
-      </a>
-      <ul class="nav-links">
-        <li><a href="#features" data-i18n="navFeatures">Features</a></li>
-        <li><a href="#pipeline" data-i18n="navPipeline">How it Works</a></li>
-        <li><a href="#positioning" data-i18n="navPositioning">Positioning</a></li>
-        <li><a href="#surfaces" data-i18n="navSurfaces">Surfaces</a></li>
-        <li><a href="#changelog" data-i18n="navChangelog">Changelog</a></li>
-      </ul>
-      <div class="nav-actions">
-        <div class="nav-lang" data-i18n-aria-label="langToggleAria" aria-label="Language switcher" role="group">
-          <button type="button" class="lang-btn active" data-lang="en" aria-pressed="true">EN</button>
-          <button type="button" class="lang-btn" data-lang="zh" aria-pressed="false">中文</button>
+      <div class="container">
+        <a href="#top" class="nav-logo">
+          <div class="nav-logo-icon">BS</div>
+          <span class="nav-logo-text">BinlogServer</span>
+        </a>
+        <ul class="nav-links">
+          <li><a href="#console" data-i18n="navConsole">Console</a></li>
+          <li><a href="#deployment" data-i18n="navDeployment">Deployment</a></li>
+          <li><a href="#guarantees" data-i18n="navGuarantees">Guarantees</a></li>
+          <li><a href="#topologies" data-i18n="navTopologies">Topologies</a></li>
+          <li><a href="#positioning" data-i18n="navPositioning">Positioning</a></li>
+          <li><a href="#changelog" data-i18n="navChangelog">Changelog</a></li>
+        </ul>
+        <div class="nav-actions">
+          <div class="nav-lang" data-i18n-aria-label="langToggleAria" aria-label="Language switcher" role="group">
+            <button type="button" class="lang-btn active" data-lang="en" aria-pressed="true">EN</button>
+            <button type="button" class="lang-btn" data-lang="zh" aria-pressed="false">中文</button>
+          </div>
+          <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" class="nav-cta" data-i18n="navCta">Releases</a>
         </div>
-        <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" class="nav-cta" data-i18n="navCta">Releases</a>
       </div>
-    </div>
-  </nav>
+    </nav>
 
-  <section class="hero">
-    <div class="container" style="position:relative;">
-      <div class="hero-badge animate-fade-up" style="animation-delay:0.05s;">
-        <span class="tag tag-new" data-i18n="heroBadge">v0.5.6 — latest release</span>
+    <section class="hero">
+      <div class="container" style="position:relative;">
+        <div class="hero-badge">
+          <span class="tag tag-new" data-i18n="heroBadge">v0.5.6 — latest release</span>
+        </div>
+        <h1 data-i18n="heroTitle">Centralized MySQL Binlog Backup
+Control Plane</h1>
+        <p class="hero-sub" data-i18n="heroSub">Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.</p>
+        <div class="hero-actions">
+          <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Quick Start (v0.5.6)</a>
+          <a href="#console" class="btn-secondary" data-i18n="heroSecondary">Inspect Live Console</a>
+        </div>
+        <div class="hero-code">
+          <code data-i18n="heroCode">DURABILITY    Local fsync precedes checkpoint advance (zero optimistic progress)
+ARCHIVE       Decoupled S3 upload (upload failure never stalls binlog capture)
+CLUSTER       Multi-worker lease ownership with automatic failover &amp; zero split-brain
+OBSERVE       True lag vs source binlog tip, Prometheus metrics, and embedded Web UI</code>
+        </div>
+        <div class="badge-row">
+          <span class="tag tag-go">Go 1.26.7</span>
+          <span class="tag tag-cluster">MySQL 5.7+ / 8.0+ / MariaDB</span>
+          <span class="tag tag-ui">Embedded Web Console</span>
+          <span class="tag tag-api">REST &amp; Swagger</span>
+          <span class="tag tag-api">Prometheus /metrics</span>
+          <span class="tag tag-go">Apache 2.0</span>
+        </div>
       </div>
-      <h1 class="animate-fade-up" style="animation-delay:0.12s;" data-i18n="heroTitle">MySQL binlog backup control plane
-for real operations</h1>
-      <p class="hero-sub animate-fade-up" style="animation-delay:0.2s;" data-i18n="heroSub">BinlogServer centralizes MySQL binlog backup behind one service. Run local-first durable capture, inspect state through API and embedded UI, scale into cluster roles, export metrics, and archive sealed files with optional S3-compatible upload.</p>
-      <div class="hero-actions animate-fade-up" style="animation-delay:0.28s;">
-        <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Open Deployment Guide</a>
-        <a href="#features" class="btn-secondary" data-i18n="heroSecondary">Learn More</a>
-      </div>
-      <div class="hero-code animate-fade-up" style="animation-delay:0.36s;">
-        <code data-i18n="heroCode">Control plane  Create → Start → Observe → Retry upload
-Data path      Pull binlog → Write local files → Seal → Archive
-Deployment     Standalone / Control-plane / Worker / All-in-one
-Signals        Checkpoint / Lag / Events / Workers / Metrics</code>
-      </div>
-      <div class="badge-row animate-fade-up" style="animation-delay:0.44s;">
-        <span class="tag tag-go">Go</span>
-        <span class="tag tag-api">API</span>
-        <span class="tag tag-ui">Embedded UI</span>
-        <span class="tag tag-cluster">Cluster</span>
-        <span class="tag tag-api">Prometheus</span>
-        <span class="tag tag-go">Apache 2.0</span>
-      </div>
-    </div>
-  </section>
+    </section>
 
-  <section id="deployment" class="alt">
-    <div class="container">
-      <p class="section-label" data-i18n="deployLabel">Quick Start</p>
-      <h2 class="section-title" data-i18n="deployTitle">Download the release tarball,
-verify, extract, run</h2>
-      <p class="section-sub" data-i18n="deploySub">Operators do not need Go. Real assets are named <code>binlog-server_&lt;ver&gt;_&lt;os&gt;_&lt;arch&gt;.tar.gz</code> and extract into a versioned subdirectory. Full write-up: <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/deployment.md">docs/guide/admin/deployment.md</a>.</p>
-      <div class="hero-code">
-        <code data-i18n="deployCode">VER=0.5.6 OS=linux ARCH=amd64
-curl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz
-curl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt
+    <section id="console" class="alt">
+      <div class="container">
+        <p class="section-label" data-i18n="consoleLabel">Operator Console &amp; Interfaces</p>
+        <h2 class="section-title" data-i18n="consoleTitle">A real control plane you can trust,
+inspect, and operate</h2>
+        <p class="section-sub" data-i18n="consoleSub">BinlogServer embeds a production web console and comprehensive REST API directly into the release binary. No separate frontend service to build, deploy, or maintain.</p>
+
+        <div class="gallery-grid">
+          <div class="gallery-card">
+            <a href="../images/console-dashboard.png" target="_blank" rel="noopener" class="gallery-img-wrap">
+              <img src="../images/console-dashboard.png" alt="BinlogServer Dashboard Overview" loading="lazy" />
+            </a>
+            <div class="gallery-body">
+              <h3 data-i18n="gallery1Title">Centralized Task Overview</h3>
+              <p data-i18n="gallery1Body">Real-time replication lag, worker assignment, and task state classification across all MySQL sources.</p>
+            </div>
+          </div>
+          <div class="gallery-card">
+            <a href="../images/task-detail.png" target="_blank" rel="noopener" class="gallery-img-wrap">
+              <img src="../images/task-detail.png" alt="BinlogServer Task Inspection Drawer" loading="lazy" />
+            </a>
+            <div class="gallery-body">
+              <h3 data-i18n="gallery2Title">Task Detail &amp; Retry Upload</h3>
+              <p data-i18n="gallery2Body">Inspect exact GTID / file-pos coordinates, local segment rotation, and trigger manual S3 archive retries in one click.</p>
+            </div>
+          </div>
+          <div class="gallery-card">
+            <a href="../images/swagger.png" target="_blank" rel="noopener" class="gallery-img-wrap">
+              <img src="../images/swagger.png" alt="BinlogServer Swagger API" loading="lazy" />
+            </a>
+            <div class="gallery-body">
+              <h3 data-i18n="gallery3Title">Interactive Swagger &amp; API</h3>
+              <p data-i18n="gallery3Body">Full OpenAPI spec for CMDB automation, CI orchestration, and monitoring integration behind identical auth middleware.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="deployment">
+      <div class="container">
+        <p class="section-label" data-i18n="deployLabel">Quick Start &amp; Download</p>
+        <h2 class="section-title" data-i18n="deployTitle">Download official v0.5.6 release,
+verify checksum, run in seconds</h2>
+        <p class="section-sub" data-i18n="deploySub">Packaged release archives contain precompiled statically-linked binaries (`binlog-server`, `migrate`), SQL migrations, and production config templates. Operators do not need Go installed.</p>
+        <div class="hero-code">
+          <code data-i18n="deployCode">VER=0.5.6 OS=linux ARCH=amd64
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
 sha256sum -c checksums.txt --ignore-missing
-tar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz
-cd binlog-server_${VER}_${OS}_${ARCH}
+
+tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
+cd "binlog-server_${VER}_${OS}_${ARCH}"
+
+# Loopback bind (127.0.0.1) allows unauthenticated local evaluation
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server</code>
+        </div>
+        <p style="margin-top:20px; font-size:0.85rem; color:var(--muted);" data-i18n="deployNote">
+          ⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including `:8080` or `0.0.0.0:8080`) strictly fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are enabled.
+        </p>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section id="surfaces" class="alt">
-    <div class="container">
-      <p class="section-label" data-i18n="surfacesLabel">One product, four surfaces</p>
-      <h2 class="section-title" data-i18n="surfacesTitle">Same backup engine,
-every operating environment</h2>
-      <p class="section-sub" data-i18n="surfacesSub">BinlogServer exposes one operator model across API, embedded UI, cluster deployment, and observability. You are not stitching backup state together from unrelated tools.</p>
+    <section id="guarantees" class="alt">
+      <div class="container">
+        <p class="section-label" data-i18n="guaranteesLabel">Architectural Guarantees</p>
+        <h2 class="section-title" data-i18n="guaranteesTitle">The four non-negotiables
+for database backup systems</h2>
+        <p class="section-sub" data-i18n="guaranteesSub">DBAs cannot afford optimistic progress or unhandled edge cases. Every component in BinlogServer is built around predictable durability and operational transparency.</p>
 
-      <div class="surface-grid">
-        <div class="surface-card reveal">
-          <div class="surface-icon">⚡</div>
-          <h3 data-i18n="surface1Title">HTTP API</h3>
-          <p data-i18n="surface1Body">Task lifecycle, checkpoint, replication status, files, dashboard data, cluster overview, and events.</p>
-        </div>
-        <div class="surface-card reveal">
-          <div class="surface-icon">🌐</div>
-          <h3 data-i18n="surface2Title">Embedded UI</h3>
-          <p data-i18n="surface2Body">A built-in operator console for daily backup management instead of a separate frontend deployment burden.</p>
-        </div>
-        <div class="surface-card reveal">
-          <div class="surface-icon">🧩</div>
-          <h3 data-i18n="surface3Title">Cluster Roles</h3>
-          <p data-i18n="surface3Body">Control-plane, worker, and all-in-one roles support HA-friendly coordination and execution separation.</p>
-        </div>
-        <div class="surface-card reveal">
-          <div class="surface-icon">📈</div>
-          <h3 data-i18n="surface4Title">Observability</h3>
-          <p data-i18n="surface4Body">Prometheus metrics, worker heartbeats, health checks, and task events make backup state continuously visible.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="features">
-    <div class="container">
-      <p class="section-label" data-i18n="featuresLabel">Capabilities</p>
-      <h2 class="section-title" data-i18n="featuresTitle">Operate the parts that
-scripted backup usually hides</h2>
-      <p class="section-sub" data-i18n="featuresSub">The point is not merely pulling binlog. The point is making backup durable, inspectable, restartable, and operable by a team.</p>
-
-      <div class="capability-grid">
-        <div class="card reveal">
-          <div class="card-icon">🧱</div>
-          <h3 data-i18n="feature1Title">Durable local-first capture</h3>
-          <p data-i18n="feature1Body">Checkpoint advances only after local `fsync` succeeds, so progress reflects durable state instead of optimistic buffering.</p>
-        </div>
-        <div class="card reveal">
-          <div class="card-icon">🔄</div>
-          <h3 data-i18n="feature2Title">Explicit upload retry</h3>
-          <p data-i18n="feature2Body">S3-compatible upload is optional and best-effort. Archive failure does not stop replication, and retry stays operator-controlled.</p>
-        </div>
-        <div class="card reveal">
-          <div class="card-icon">🛰️</div>
-          <h3 data-i18n="feature3Title">Observable task state</h3>
-          <p data-i18n="feature3Body">Inspect lag, files, checkpoints, worker ownership, heartbeats, and event history through stable interfaces.</p>
-        </div>
-        <div class="card reveal">
-          <div class="card-icon">🎛️</div>
-          <h3 data-i18n="feature4Title">Task lifecycle control</h3>
-          <p data-i18n="feature4Body">Create, start, stop, inspect, and recover multiple backup tasks through one service instead of per-host ad hoc flows.</p>
-        </div>
-        <div class="card reveal">
-          <div class="card-icon">🗂️</div>
-          <h3 data-i18n="feature5Title">Multiple start modes</h3>
-          <p data-i18n="feature5Body">Support `LATEST`, `FILE_POS`, and `GTID` while preserving a single operator mental model for backup runs.</p>
-        </div>
-        <div class="card reveal">
-          <div class="card-icon">🛡️</div>
-          <h3 data-i18n="feature6Title">Cluster-aware coordination</h3>
-          <p data-i18n="feature6Body">Lease-backed ownership and worker heartbeat semantics support failover and cleaner role separation in production.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="pipeline" class="alt">
-    <div class="container">
-      <p class="section-label" data-i18n="pipelineLabel">Under the hood</p>
-      <h2 class="section-title" data-i18n="pipelineTitle">How the backup pipeline works</h2>
-      <p class="section-sub" data-i18n="pipelineSub">From operator intent to archive retry, the execution path is deterministic and easy to explain.</p>
-
-      <div class="pipeline">
-        <div class="pipeline-step" data-i18n="pipelineStep1">Create Task<span>source / start mode / retention</span></div>
-        <span class="pipeline-arrow">→</span>
-        <div class="pipeline-step" data-i18n="pipelineStep2">Run Capture<span>pull / write / rotate / seal</span></div>
-        <span class="pipeline-arrow">→</span>
-        <div class="pipeline-step" data-i18n="pipelineStep3">Archive<span>optional S3-compatible upload</span></div>
-        <span class="pipeline-arrow">→</span>
-        <div class="pipeline-step" data-i18n="pipelineStep4">Observe<span>metrics / workers / events</span></div>
-      </div>
-
-      <div class="impact-grid">
-        <div class="card reveal">
-          <div class="card-icon">📄</div>
-          <h3 data-i18n="pipelineCard1Title">Create</h3>
-          <p data-i18n="pipelineCard1Body">API validates task input, stores task metadata, and turns backup intent into a schedulable object.</p>
-        </div>
-        <div class="card reveal">
-          <div class="card-icon">⚙️</div>
-          <h3 data-i18n="pipelineCard2Title">Capture</h3>
-          <p data-i18n="pipelineCard2Body">Runner pulls binlog events, writes local files, rotates sealed segments, and updates checkpoint only after durable persistence.</p>
-        </div>
-        <div class="card reveal">
-          <div class="card-icon">📡</div>
-          <h3 data-i18n="pipelineCard3Title">Observe</h3>
-          <p data-i18n="pipelineCard3Body">Operators inspect file state, lag, retries, cluster health, and progress through metrics and APIs instead of shell output.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="positioning">
-    <div class="container">
-      <p class="section-label" data-i18n="positioningLabel">Positioning</p>
-      <h2 class="section-title" data-i18n="positioningTitle">Say what the product is,
-and what it is not</h2>
-      <p class="section-sub" data-i18n="positioningSub">This page should make one thing unmistakable: BinlogServer is a centralized MySQL binlog backup control plane. It is not a generic CDC platform or a broad event streaming layer.</p>
-
-      <table class="rules-table reveal">
-        <thead>
-          <tr>
-            <th data-i18n="positioningHead1">Claim</th>
-            <th data-i18n="positioningHead2">What supports it</th>
-            <th data-i18n="positioningHead3">How to say it</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td data-i18n="positioningRow1A">Durable progress</td>
-            <td data-i18n="positioningRow1B">Checkpoint only moves after local durability is confirmed.</td>
-            <td class="mono" data-i18n="positioningRow1C">Checkpoint advances only after local fsync succeeds.</td>
-          </tr>
-          <tr>
-            <td data-i18n="positioningRow2A">Archive support</td>
-            <td data-i18n="positioningRow2B">Uploader is optional, best-effort, and retryable without stopping capture.</td>
-            <td class="mono" data-i18n="positioningRow2C">Optional S3-compatible upload.</td>
-          </tr>
-          <tr>
-            <td data-i18n="positioningRow3A">Product category</td>
-            <td data-i18n="positioningRow3B">Capabilities and docs center on backup operations, not general CDC downstream fan-out.</td>
-            <td class="mono" data-i18n="positioningRow3C">Centralized MySQL binlog backup control plane.</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <section id="fit" class="alt">
-    <div class="container">
-      <p class="section-label" data-i18n="fitLabel">Good fit / Not fit</p>
-      <h2 class="section-title" data-i18n="fitTitle">Use BinlogServer where backup
-needs a real operating contract</h2>
-      <p class="section-sub" data-i18n="fitSub">Sharp products are easier to trust when they draw boundaries. BinlogServer fits backup operations that need reliability and visibility, not every database workflow under the sun.</p>
-
-      <div class="fit-grid">
-        <div class="fit-card good reveal">
-          <div class="fit-badge" data-i18n="fitGoodBadge">Good fit</div>
-          <h3 data-i18n="fitGoodTitle">Teams that need centralized backup operations</h3>
-          <div class="fit-list">
-            <div class="fit-item"><strong>01</strong><span data-i18n="fitGood1">Multiple MySQL sources with one service handling lifecycle, inspection, and recovery.</span></div>
-            <div class="fit-item"><strong>02</strong><span data-i18n="fitGood2">Operators who care about visible checkpoint semantics and restart behavior.</span></div>
-            <div class="fit-item"><strong>03</strong><span data-i18n="fitGood3">Environments that want local-first capture plus optional S3-compatible archive.</span></div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-icon">🧱</div>
+            <h3 data-i18n="g1Title">fsync Checkpoints</h3>
+            <p data-i18n="g1Body">Checkpoint offsets advance only after local `fsync` succeeds on disk. A process crash or sudden reboot never causes phantom progress.</p>
+          </div>
+          <div class="card">
+            <div class="card-icon">🔄</div>
+            <h3 data-i18n="g2Title">Decoupled Archiving</h3>
+            <p data-i18n="g2Body">S3-compatible upload is asynchronous and best-effort. Cloud storage throttling or outages never stall local replication streams.</p>
+          </div>
+          <div class="card">
+            <div class="card-icon">🛡️</div>
+            <h3 data-i18n="g3Title">Lease HA &amp; Failover</h3>
+            <p data-i18n="g3Body">Distributed lease locks backed by metadata MySQL ensure only one worker dumps a source at any time, with automatic timeout failover.</p>
+          </div>
+          <div class="card">
+            <div class="card-icon">🔐</div>
+            <h3 data-i18n="g4Title">Fail-Closed Security</h3>
+            <p data-i18n="g4Body">Non-loopback binds mandate authentication. `PRODUCTION=true` refuses startup without a 32-byte AES key and encrypts source passwords.</p>
           </div>
         </div>
-        <div class="fit-card bad reveal">
-          <div class="fit-badge" data-i18n="fitBadBadge">Not fit</div>
-          <h3 data-i18n="fitBadTitle">Teams looking for generic CDC infrastructure</h3>
-          <div class="fit-list">
-            <div class="fit-item"><strong>01</strong><span data-i18n="fitBad1">Broad transformation pipelines, fan-out delivery, or generalized stream processing.</span></div>
-            <div class="fit-item"><strong>02</strong><span data-i18n="fitBad2">Workloads that require remote object storage success to synchronously gate capture progress.</span></div>
-            <div class="fit-item"><strong>03</strong><span data-i18n="fitBad3">Temporary one-off scripting where centralized operations do not matter.</span></div>
+      </div>
+    </section>
+
+    <section id="topologies">
+      <div class="container">
+        <p class="section-label" data-i18n="topologiesLabel">Deployment Topologies</p>
+        <h2 class="section-title" data-i18n="topologiesTitle">Fit into your infrastructure
+with three battle-tested topologies</h2>
+        <p class="section-sub" data-i18n="topologiesSub">Whether testing locally on a laptop or running hundreds of replication tasks across an enterprise cluster, choose the right architecture without changing binlog format or client protocols.</p>
+
+        <div class="surface-grid">
+          <div class="surface-card">
+            <div class="surface-icon">💻</div>
+            <h3 data-i18n="topo1Title">1. Standalone Mode</h3>
+            <p data-i18n="topo1Body">Single process. Without `meta_dsn`, tasks run in-memory for testing. With `meta_dsn`, tasks, checkpoints, and sealed segments persist across restarts for simple single-node deployments.</p>
+          </div>
+          <div class="surface-card">
+            <div class="surface-icon">🏢</div>
+            <h3 data-i18n="topo2Title">2. Control Plane + Workers</h3>
+            <p data-i18n="topo2Body">Production recommended. Dedicated Control Plane nodes serve API/UI/Scheduler, while a pool of headless Workers claim task leases and perform binlog replication with automatic crash failover.</p>
+          </div>
+          <div class="surface-card">
+            <div class="surface-icon">📦</div>
+            <h3 data-i18n="topo3Title">3. All-in-one Cluster Node</h3>
+            <p data-i18n="topo3Body">A hybrid node running both the Control Plane API and Worker runner backed by a shared metadata MySQL. Ideal for small, cost-effective high-availability clusters.</p>
           </div>
         </div>
-        <div class="fit-card reveal">
-          <div class="fit-badge" data-i18n="fitDecisionBadge">Positioning shortcut</div>
-          <h3 data-i18n="fitDecisionTitle">If the problem is backup operations, it fits</h3>
-          <p data-i18n="fitDecisionBody">If you need safer, more visible, centrally operated MySQL binlog backup, BinlogServer is the right story. If you need full CDC plumbing for downstream systems, it is the wrong headline.</p>
-        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section id="trust">
-    <div class="container">
-      <p class="section-label" data-i18n="trustLabel">Trust signals</p>
-      <h2 class="section-title" data-i18n="trustTitle">Credibility comes from operator evidence,
-not just promise copy</h2>
-      <p class="section-sub" data-i18n="trustSub">BinlogServer already has the right shape for a believable infrastructure product: API endpoints, UI iteration, E2E coverage, security policy, changelog cadence, and scenario-driven reliability work.</p>
+    <section id="pipeline" class="alt">
+      <div class="container">
+        <p class="section-label" data-i18n="pipelineLabel">Data Path &amp; Lifecycle</p>
+        <h2 class="section-title" data-i18n="pipelineTitle">Deterministic binlog data flow
+from MySQL source to S3 archive</h2>
+        <p class="section-sub" data-i18n="pipelineSub">Every step in the pipeline adheres to explicit transactional boundaries, making disaster recovery and auditing completely transparent.</p>
 
-      <div class="trust-grid">
-        <div class="trust-card reveal">
-          <div class="trust-icon">📘</div>
-          <h3 data-i18n="trust1Title">Documented concepts</h3>
-          <p data-i18n="trust1Body">Deployment modes, observability, and architecture docs make the operator story explicit.</p>
+        <div class="pipeline">
+          <div class="pipeline-step" data-i18n="pipelineStep1">1. Task Spec<span>Source / Start mode / Retention</span></div>
+          <span class="pipeline-arrow">→</span>
+          <div class="pipeline-step" data-i18n="pipelineStep2">2. Binlog Sync<span>Pull events &amp; fsync local files</span></div>
+          <span class="pipeline-arrow">→</span>
+          <div class="pipeline-step" data-i18n="pipelineStep3">3. Rotate &amp; Seal<span>Mark closed &amp; advance checkpoint</span></div>
+          <span class="pipeline-arrow">→</span>
+          <div class="pipeline-step" data-i18n="pipelineStep4">4. Archive &amp; Clean<span>Async S3 upload &amp; retention purge</span></div>
         </div>
-        <div class="trust-card reveal">
-          <div class="trust-icon">🧪</div>
-          <h3 data-i18n="trust2Title">Scenario testing</h3>
-          <p data-i18n="trust2Body">Quick and full E2E flows cover retry upload, cluster behavior, observability, and worker failure recovery.</p>
-        </div>
-        <div class="trust-card reveal">
-          <div class="trust-icon">🔐</div>
-          <h3 data-i18n="trust3Title">Security posture</h3>
-          <p data-i18n="trust3Body">Public security policy and hardening work signal that this is being shaped toward production use.</p>
-        </div>
-        <div class="trust-card reveal">
-          <div class="trust-icon">📦</div>
-          <h3 data-i18n="trust4Title">Visible release line</h3>
-          <p data-i18n="trust4Body">Recent releases show continued investment in operator console quality, auth guidance, and runtime reliability.</p>
-        </div>
-      </div>
-    </div>
-  </section>
 
-  <section id="changelog" class="alt">
-    <div class="container">
-      <p class="section-label" data-i18n="changelogLabel">Releases</p>
-      <h2 class="section-title" data-i18n="changelogTitle">Recent work trends toward
-better UI, better ops, better reliability</h2>
-      <p class="section-sub" data-i18n="changelogSub">The recent story is not random feature sprawl. It is clearer operator workflows, stronger frontend validation, and more production-minded behavior.</p>
-
-      <div class="release-grid">
-        <div class="release-card reveal">
-          <h3 data-i18n="releaseLeftTitle">Release timeline</h3>
-          <div class="timeline">
-            <div class="timeline-item">
-              <div class="timeline-date">2026-10-02</div>
-              <div class="timeline-version">v0.5.6</div>
-              <p data-i18n="release1">The embedded Console mounts again, production refuses an empty encryption key and locks the UI when auth is on, and dashboard counters use SQL GROUP BY instead of scanning every task row.</p>
-            </div>
-            <div class="timeline-item">
-              <div class="timeline-date">2026-09-21</div>
-              <div class="timeline-version">v0.5.5</div>
-              <p data-i18n="release2">Control-plane reads fail loud instead of serving a stale copy, lookup and filters share source identity, cluster counts come from the store, and the console refreshes once without per-row leases.</p>
-            </div>
-            <div class="timeline-item">
-              <div class="timeline-date">2026-09-07</div>
-              <div class="timeline-version">v0.5.4</div>
-              <p data-i18n="release3">Standalone and cluster share one ownership door, FAILED releases the lease immediately, boot and claim ticks use ClaimRunnableTasks, and first upload shares ApplySealedUpload with retry.</p>
-            </div>
+        <div class="surface-grid">
+          <div class="surface-card">
+            <div class="surface-icon">🎯</div>
+            <h3 data-i18n="flow1Title">Flexible Start Modes</h3>
+            <p data-i18n="flow1Body">Support `LATEST` (start at source tip), `FILE_POS` (specific binlog file and offset), or `GTID` sets without losing consistency.</p>
+          </div>
+          <div class="surface-card">
+            <div class="surface-icon">⏱️</div>
+            <h3 data-i18n="flow2Title">True Master Lag Tracking</h3>
+            <p data-i18n="flow2Body">Replication lag is evaluated directly against `SHOW MASTER STATUS` coordinates, avoiding misleading zeros during idle periods.</p>
+          </div>
+          <div class="surface-card">
+            <div class="surface-icon">🗂️</div>
+            <h3 data-i18n="flow3Title">Automated Retention &amp; Retry</h3>
+            <p data-i18n="flow3Body">Configurable retention (1..3650 days) cleans up expired sealed files on disk. Upload failures trigger backoff and explicit retry APIs.</p>
           </div>
         </div>
-        <div class="release-card reveal">
-          <h3 data-i18n="releaseRightTitle">What the homepage should emphasize</h3>
-          <div class="timeline">
-            <div class="timeline-item">
-              <div class="timeline-date" data-i18n="releaseFocus1Date">Current direction</div>
-              <div class="timeline-version" data-i18n="releaseFocus1Title">Control plane maturity</div>
-              <p data-i18n="releaseFocus1Body">Stress centralized operations, not “yet another script that happens to pull binlog.”</p>
-              <span class="release-note" data-i18n="releaseNote1">UI + reliability + ops</span>
+      </div>
+    </section>
+
+    <section id="positioning">
+      <div class="container">
+        <p class="section-label" data-i18n="positioningLabel">Positioning</p>
+        <h2 class="section-title" data-i18n="positioningTitle">Clear operational boundaries:
+What BinlogServer is, and what it is not</h2>
+        <p class="section-sub" data-i18n="positioningSub">Products are easier to trust when they draw hard boundaries. BinlogServer is a specialized MySQL binlog backup control plane, not a bloated generic data platform.</p>
+
+        <table class="rules-table">
+          <thead>
+            <tr>
+              <th data-i18n="positioningHead1">Dimension</th>
+              <th data-i18n="positioningHead2">BinlogServer Design</th>
+              <th data-i18n="positioningHead3">Why DBAs Trust It</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-i18n="positioningRow1A">Durability Contract</td>
+              <td data-i18n="positioningRow1B">Checkpoint advances only after local fsync succeeds on disk.</td>
+              <td class="mono" data-i18n="positioningRow1C">Zero phantom progress; resumes safely on restart.</td>
+            </tr>
+            <tr>
+              <td data-i18n="positioningRow2A">Archive Decoupling</td>
+              <td data-i18n="positioningRow2B">S3 upload runs asynchronously with explicit retry endpoints.</td>
+              <td class="mono" data-i18n="positioningRow2C">Cloud storage downtime never stalls binlog replication.</td>
+            </tr>
+            <tr>
+              <td data-i18n="positioningRow3A">High Availability</td>
+              <td data-i18n="positioningRow3B">MySQL lease locks with heartbeat expiration and automatic takeover.</td>
+              <td class="mono" data-i18n="positioningRow3C">Prevents split-brain binlog dumpers on the same source.</td>
+            </tr>
+            <tr>
+              <td data-i18n="positioningRow4A">Product Scope</td>
+              <td data-i18n="positioningRow4B">Focused purely on binlog capture, storage, and PITR foundation.</td>
+              <td class="mono" data-i18n="positioningRow4C">No heavy JVM dependencies, Kafka clusters, or complex schema registries.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="fit" class="alt">
+      <div class="container">
+        <p class="section-label" data-i18n="fitLabel">Fit Assessment</p>
+        <h2 class="section-title" data-i18n="fitTitle">When should you deploy BinlogServer?</h2>
+        <p class="section-sub" data-i18n="fitSub">Evaluate BinlogServer against your real operational requirements:</p>
+
+        <div class="fit-grid">
+          <div class="fit-card good">
+            <div class="fit-badge" data-i18n="fitGoodBadge">Good Fit</div>
+            <h3 data-i18n="fitGoodTitle">Production MySQL Backup &amp; PITR</h3>
+            <div class="fit-list">
+              <div class="fit-item"><strong>01</strong><span data-i18n="fitGood1">Managing continuous binlog backups across dozens or hundreds of MySQL instances.</span></div>
+              <div class="fit-item"><strong>02</strong><span data-i18n="fitGood2">Requiring strict local fsync checkpoints before offloading to S3/MinIO.</span></div>
+              <div class="fit-item"><strong>03</strong><span data-i18n="fitGood3">Demanding real-time lag monitoring, visual console inspection, and cluster failover.</span></div>
             </div>
-            <div class="timeline-item">
-              <div class="timeline-date" data-i18n="releaseFocus2Date">Reliability message</div>
-              <div class="timeline-version" data-i18n="releaseFocus2Title">Durable local-first capture</div>
-              <p data-i18n="releaseFocus2Body">Checkpoint semantics and explicit retry-upload flows are better proof than vague infra slogans.</p>
-              <span class="release-note" data-i18n="releaseNote2">fsync-backed checkpoint</span>
+          </div>
+          <div class="fit-card bad">
+            <div class="fit-badge" data-i18n="fitBadBadge">Not a Fit</div>
+            <h3 data-i18n="fitBadTitle">Generic CDC / Event Streaming</h3>
+            <div class="fit-list">
+              <div class="fit-item"><strong>01</strong><span data-i18n="fitBad1">Parsing row-level mutation JSON to stream into Kafka, Flink, or Elasticsearch.</span></div>
+              <div class="fit-item"><strong>02</strong><span data-i18n="fitBad2">Requiring synchronous gating where capture halts if cloud storage is unreachable.</span></div>
+              <div class="fit-item"><strong>03</strong><span data-i18n="fitBad3">One-shot table exports or schema-only logical dump routines.</span></div>
             </div>
-            <div class="timeline-item">
-              <div class="timeline-date" data-i18n="releaseFocus3Date">Boundary condition</div>
-              <div class="timeline-version" data-i18n="releaseFocus3Title">Not generic CDC</div>
-              <p data-i18n="releaseFocus3Body">Keep the story grounded in backup operations, cluster execution, observability, and optional S3-compatible archive.</p>
-              <span class="release-note" data-i18n="releaseNote3">backup control plane</span>
+          </div>
+          <div class="fit-card">
+            <div class="fit-badge" data-i18n="fitDecisionBadge">The Bottom Line</div>
+            <h3 data-i18n="fitDecisionTitle">Engineered for Backup Reliability</h3>
+            <p data-i18n="fitDecisionBody">If your mandate is ensuring MySQL binlogs are captured reliably, persisted with rock-solid checkpoints, and archived without risking primary database operations, BinlogServer is the exact tool for the job.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="trust">
+      <div class="container">
+        <p class="section-label" data-i18n="trustLabel">Operational Evidence</p>
+        <h2 class="section-title" data-i18n="trustTitle">Engineering credibility built on
+rigorous automated verification</h2>
+        <p class="section-sub" data-i18n="trustSub">We do not ask DBAs to trust marketing claims. BinlogServer validates its failure modes and recovery paths through comprehensive automated E2E test suites.</p>
+
+        <div class="trust-grid">
+          <div class="trust-card">
+            <div class="trust-icon">🧪</div>
+            <h3 data-i18n="trust1Title">Failover Scenarios</h3>
+            <p data-i18n="trust1Body">Dual-worker lease takeover, worker crash recovery, and control plane failover tested against live MySQL engines.</p>
+          </div>
+          <div class="trust-card">
+            <div class="trust-icon">📦</div>
+            <h3 data-i18n="trust2Title">Archive Resiliency</h3>
+            <p data-i18n="trust2Body">S3 upload disconnection and backpressure tests prove capture loops continue writing local files without interruption.</p>
+          </div>
+          <div class="trust-card">
+            <div class="trust-icon">🔐</div>
+            <h3 data-i18n="trust3Title">Strict Fail-Closed</h3>
+            <p data-i18n="trust3Body">Production mode asserts valid 32-byte AES-256 keys and encrypted source credentials before binding network sockets.</p>
+          </div>
+          <div class="trust-card">
+            <div class="trust-icon">📊</div>
+            <h3 data-i18n="trust4Title">SQL-Paged Scale</h3>
+            <p data-i18n="trust4Body">Dashboard and task summaries use SQL GROUP BY aggregations with bounded LIMIT/OFFSET paging to protect metadata databases.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="changelog" class="alt">
+      <div class="container">
+        <p class="section-label" data-i18n="changelogLabel">Release Cadence</p>
+        <h2 class="section-title" data-i18n="changelogTitle">Continuous hardening focused on
+production stability and ergonomics</h2>
+        <p class="section-sub" data-i18n="changelogSub">Review recent release highlights designed specifically to eliminate operator surprise in production environments.</p>
+
+        <div class="release-grid">
+          <div class="release-card">
+            <h3 data-i18n="releaseLeftTitle">Recent Releases</h3>
+            <div class="timeline">
+              <div class="timeline-item">
+                <div class="timeline-date">2026-10-02</div>
+                <div class="timeline-version">v0.5.6 (Current)</div>
+                <p data-i18n="release1">Resolved embedded console mounting bundle, enforced strict fail-closed encryption keys in PRODUCTION mode, aligned /ui/* and /swagger/* behind auth middleware, and optimized dashboard queries with SQL GROUP BY aggregations.</p>
+              </div>
+              <div class="timeline-item">
+                <div class="timeline-date">2026-09-21</div>
+                <div class="timeline-version">v0.5.5</div>
+                <p data-i18n="release2">Store miss errors fail loud instead of serving stale copies, unified host lookup across loopback variants, and eliminated per-row lease polling on console list refresh.</p>
+              </div>
+              <div class="timeline-item">
+                <div class="timeline-date">2026-09-07</div>
+                <div class="timeline-version">v0.5.4</div>
+                <p data-i18n="release3">Unified standalone and cluster lease ownership doors, immediate lease release on FAILED tasks, and atomic ClaimRunnableTasks execution.</p>
+              </div>
+            </div>
+          </div>
+          <div class="release-card">
+            <h3 data-i18n="releaseRightTitle">DBA Production Checklist</h3>
+            <div class="timeline">
+              <div class="timeline-item">
+                <div class="timeline-date" data-i18n="check1Date">Step 1</div>
+                <div class="timeline-version" data-i18n="check1Title">Isolate Metadata MySQL</div>
+                <p data-i18n="check1Body">Ensure the metadata MySQL instance is dedicated and never added to the backup task set. Run `./migrate up` before starting.</p>
+                <span class="release-note" data-i18n="check1Note">Isolation mandatory</span>
+              </div>
+              <div class="timeline-item">
+                <div class="timeline-date" data-i18n="check2Date">Step 2</div>
+                <div class="timeline-version" data-i18n="check2Title">Configure Production Auth</div>
+                <p data-i18n="check2Body">Use `config.production.example.yaml` with `BINLOG_SERVER_API_AUTH_BEARER_TOKEN` and supply 32-byte `--encryption-key`.</p>
+                <span class="release-note" data-i18n="check2Note">Fail-closed security</span>
+              </div>
+              <div class="timeline-item">
+                <div class="timeline-date" data-i18n="check3Date">Step 3</div>
+                <div class="timeline-version" data-i18n="check3Title">Configure S3 &amp; Retention</div>
+                <p data-i18n="check3Body">Set `storage.retention_days` (1..3650) to manage local disk space while streaming sealed binlogs to object storage.</p>
+                <span class="release-note" data-i18n="check3Note">Decoupled archive</span>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="cta-section">
-    <div class="container">
-      <h2 data-i18n="ctaTitle">Move binlog backup out of shell history
-and into a real product surface</h2>
-      <p data-i18n="ctaSub">Review the deployment guide, inspect the release line, and evaluate BinlogServer as what it already is: a centralized MySQL binlog backup control plane.</p>
-      <div class="hero-actions" style="margin-bottom:0;">
-        <a href="#deployment" class="btn-primary" data-i18n="ctaPrimary">Open Deployment Guide</a>
-        <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/README.md" class="btn-secondary" data-i18n="ctaSecondary">Read the Guide</a>
+    <section class="cta-section">
+      <div class="container">
+        <h2 data-i18n="ctaTitle">Move MySQL binlog backup
+into a production control plane</h2>
+        <p data-i18n="ctaSub">Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.</p>
+        <div class="hero-actions" style="margin-bottom:0;">
+          <a href="#deployment" class="btn-primary" data-i18n="ctaPrimary">Get Started with v0.5.6</a>
+          <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/deployment.md" class="btn-secondary" data-i18n="ctaSecondary">Deployment Guide</a>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <footer>
-    <div class="container">
-      <div class="footer-grid">
-        <div class="footer-brand">
-          <a href="#top" class="nav-logo" style="margin-bottom:0;">
-            <div class="nav-logo-icon">BS</div>
-            <span class="nav-logo-text">BinlogServer</span>
-          </a>
-          <p data-i18n="footerBrand">Centralized MySQL binlog backup service for teams that want durable local capture, visible state, and operator control. Apache 2.0 licensed.</p>
-          <div class="badge-row" style="justify-content:flex-start; margin-top:16px;">
-            <span class="tag tag-go">Go</span>
-            <span class="tag tag-go">Apache 2.0</span>
+    <footer>
+      <div class="container">
+        <div class="footer-grid">
+          <div class="footer-brand">
+            <a href="#top" class="nav-logo" style="margin-bottom:0;">
+              <div class="nav-logo-icon">BS</div>
+              <span class="nav-logo-text">BinlogServer</span>
+            </a>
+            <p data-i18n="footerBrand">Centralized MySQL binlog backup control plane with durable local persistence, multi-worker failover, and decoupled S3 archiving. Apache 2.0 licensed.</p>
+            <div class="badge-row" style="justify-content:flex-start; margin-top:16px;">
+              <span class="tag tag-go">Go</span>
+              <span class="tag tag-go">Apache 2.0</span>
+            </div>
+          </div>
+          <div class="footer-col">
+            <div class="footer-col-title" data-i18n="footerCol1">Operations</div>
+            <ul>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/deployment.md" data-i18n="footerLink1">Deployment Guide</a></li>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/configuration.md" data-i18n="footerLink2">Configuration Reference</a></li>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/README.md" data-i18n="footerLink3">Guide Index</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <div class="footer-col-title" data-i18n="footerCol2">Architecture</div>
+            <ul>
+              <li><a href="#guarantees" data-i18n="footerLink4">Guarantees</a></li>
+              <li><a href="#topologies" data-i18n="footerLink5">Topologies</a></li>
+              <li><a href="#positioning" data-i18n="footerLink6">Fit Assessment</a></li>
+            </ul>
+          </div>
+          <div class="footer-col">
+            <div class="footer-col-title" data-i18n="footerCol3">Project</div>
+            <ul>
+              <li><a href="https://github.com/Fanduzi/BinlogServer" target="_blank" rel="noopener">GitHub</a></li>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases (v0.5.6)</a></li>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" data-i18n="footerLink8">Changelog</a></li>
+            </ul>
           </div>
         </div>
-        <div class="footer-col">
-          <div class="footer-col-title" data-i18n="footerCol1">Start</div>
-          <ul>
-            <li><a href="#deployment" data-i18n="footerLink1">Deployment Guide</a></li>
-            <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/README.md" data-i18n="footerLink2">Operator Guide</a></li>
-            <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" data-i18n="footerLink3">Changelog</a></li>
-          </ul>
-        </div>
-        <div class="footer-col">
-          <div class="footer-col-title" data-i18n="footerCol2">Product</div>
-          <ul>
-            <li><a href="#features" data-i18n="footerLink4">Capabilities</a></li>
-            <li><a href="#pipeline" data-i18n="footerLink5">How it Works</a></li>
-            <li><a href="#fit" data-i18n="footerLink6">Good fit / Not fit</a></li>
-          </ul>
-        </div>
-        <div class="footer-col">
-          <div class="footer-col-title" data-i18n="footerCol3">Project</div>
-          <ul>
-            <li><a href="https://github.com/Fanduzi/BinlogServer" target="_blank" rel="noopener">GitHub</a></li>
-            <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases</a></li>
-            <li><a href="https://github.com/Fanduzi/BinlogServer/issues" target="_blank" rel="noopener" data-i18n="footerLink8">Issues</a></li>
-          </ul>
+        <div class="footer-bottom">
+          <span data-i18n="footerBottomLeft">© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.</span>
+          <span data-i18n="footerBottomRight">Bilingual production landing page for MySQL DBAs.</span>
         </div>
       </div>
-      <div class="footer-bottom">
-        <span data-i18n="footerBottomLeft">© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.</span>
-        <span data-i18n="footerBottomRight">Single-file bilingual landing page for local preview.</span>
-      </div>
-    </div>
-  </footer>
+    </footer>
 
     <button type="button" class="back-to-top" id="backToTop" data-i18n-aria-label="backToTopAria" aria-label="Back to top">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -897,285 +953,301 @@ and into a real product surface</h2>
     const translations = {
       en: {
         pageTitle: 'BinlogServer — Centralized MySQL Binlog Backup Control Plane',
-        pageDescription: 'BinlogServer is a centralized MySQL binlog backup control plane with durable local-first persistence, API/UI operations, cluster coordination, observability, and optional S3-compatible upload.',
+        pageDescription: 'BinlogServer is a centralized MySQL binlog backup control plane with durable local fsync checkpoints, multi-worker lease failover, decoupled S3 archiving, and real-time observability.',
         langToggleAria: 'Language switcher',
         backToTopAria: 'Back to top',
-        navFeatures: 'Features',
-        navPipeline: 'How it Works',
+        navConsole: 'Console',
+        navDeployment: 'Deployment',
+        navGuarantees: 'Guarantees',
+        navTopologies: 'Topologies',
         navPositioning: 'Positioning',
-        navSurfaces: 'Surfaces',
         navChangelog: 'Changelog',
         navCta: 'Releases',
-        deployLabel: 'Quick Start',
-        deployTitle: 'Download the release tarball,\nverify, extract, run',
-        deploySub: 'Operators do not need Go. Real assets are named binlog-server_<ver>_<os>_<arch>.tar.gz and extract into a versioned subdirectory.',
-        deployCode: 'VER=0.5.6 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         heroBadge: 'v0.5.6 — latest release',
-        heroTitle: 'MySQL binlog backup control plane\nfor real operations',
-        heroSub: 'BinlogServer centralizes MySQL binlog backup behind one service. Run local-first durable capture, inspect state through API and embedded UI, scale into cluster roles, export metrics, and archive sealed files with optional S3-compatible upload.',
-        heroPrimary: 'Open Deployment Guide',
-        heroSecondary: 'Learn More',
-        heroCode: 'Control plane  Create → Start → Observe → Retry upload\nData path      Pull binlog → Write local files → Seal → Archive\nDeployment     Standalone / Control-plane / Worker / All-in-one\nSignals        Checkpoint / Lag / Events / Workers / Metrics',
-        surfacesLabel: 'One product, four surfaces',
-        surfacesTitle: 'Same backup engine,\nevery operating environment',
-        surfacesSub: 'BinlogServer exposes one operator model across API, embedded UI, cluster deployment, and observability. You are not stitching backup state together from unrelated tools.',
-        surface1Title: 'HTTP API',
-        surface1Body: 'Task lifecycle, checkpoint, replication status, files, dashboard data, cluster overview, and events.',
-        surface2Title: 'Embedded UI',
-        surface2Body: 'A built-in operator console for daily backup management instead of a separate frontend deployment burden.',
-        surface3Title: 'Cluster Roles',
-        surface3Body: 'Control-plane, worker, and all-in-one roles support HA-friendly coordination and execution separation.',
-        surface4Title: 'Observability',
-        surface4Body: 'Prometheus metrics, worker heartbeats, health checks, and task events make backup state continuously visible.',
-        featuresLabel: 'Capabilities',
-        featuresTitle: 'Operate the parts that\nscripted backup usually hides',
-        featuresSub: 'The point is not merely pulling binlog. The point is making backup durable, inspectable, restartable, and operable by a team.',
-        feature1Title: 'Durable local-first capture',
-        feature1Body: 'Checkpoint advances only after local `fsync` succeeds, so progress reflects durable state instead of optimistic buffering.',
-        feature2Title: 'Explicit upload retry',
-        feature2Body: 'S3-compatible upload is optional and best-effort. Archive failure does not stop replication, and retry stays operator-controlled.',
-        feature3Title: 'Observable task state',
-        feature3Body: 'Inspect lag, files, checkpoints, worker ownership, heartbeats, and event history through stable interfaces.',
-        feature4Title: 'Task lifecycle control',
-        feature4Body: 'Create, start, stop, inspect, and recover multiple backup tasks through one service instead of per-host ad hoc flows.',
-        feature5Title: 'Multiple start modes',
-        feature5Body: 'Support `LATEST`, `FILE_POS`, and `GTID` while preserving a single operator mental model for backup runs.',
-        feature6Title: 'Cluster-aware coordination',
-        feature6Body: 'Lease-backed ownership and worker heartbeat semantics support failover and cleaner role separation in production.',
-        pipelineLabel: 'Under the hood',
-        pipelineTitle: 'How the backup pipeline works',
-        pipelineSub: 'From operator intent to archive retry, the execution path is deterministic and easy to explain.',
-        pipelineStep1: 'Create Task<span>source / start mode / retention</span>',
-        pipelineStep2: 'Run Capture<span>pull / write / rotate / seal</span>',
-        pipelineStep3: 'Archive<span>optional S3-compatible upload</span>',
-        pipelineStep4: 'Observe<span>metrics / workers / events</span>',
-        pipelineCard1Title: 'Create',
-        pipelineCard1Body: 'API validates task input, stores task metadata, and turns backup intent into a schedulable object.',
-        pipelineCard2Title: 'Capture',
-        pipelineCard2Body: 'Runner pulls binlog events, writes local files, rotates sealed segments, and updates checkpoint only after durable persistence.',
-        pipelineCard3Title: 'Observe',
-        pipelineCard3Body: 'Operators inspect file state, lag, retries, cluster health, and progress through metrics and APIs instead of shell output.',
+        heroTitle: 'Centralized MySQL Binlog Backup\nControl Plane',
+        heroSub: 'Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.',
+        heroPrimary: 'Quick Start (v0.5.6)',
+        heroSecondary: 'Inspect Live Console',
+        heroCode: 'DURABILITY    Local fsync precedes checkpoint advance (zero optimistic progress)\nARCHIVE       Decoupled S3 upload (upload failure never stalls binlog capture)\nCLUSTER       Multi-worker lease ownership with automatic failover & zero split-brain\nOBSERVE       True lag vs source binlog tip, Prometheus metrics, and embedded Web UI',
+        consoleLabel: 'Operator Console & Interfaces',
+        consoleTitle: 'A real control plane you can trust,\ninspect, and operate',
+        consoleSub: 'BinlogServer embeds a production web console and comprehensive REST API directly into the release binary. No separate frontend service to build, deploy, or maintain.',
+        gallery1Title: 'Centralized Task Overview',
+        gallery1Body: 'Real-time replication lag, worker assignment, and task state classification across all MySQL sources.',
+        gallery2Title: 'Task Detail & Retry Upload',
+        gallery2Body: 'Inspect exact GTID / file-pos coordinates, local segment rotation, and trigger manual S3 archive retries in one click.',
+        gallery3Title: 'Interactive Swagger & API',
+        gallery3Body: 'Full OpenAPI spec for CMDB automation, CI orchestration, and monitoring integration behind identical auth middleware.',
+        deployLabel: 'Quick Start & Download',
+        deployTitle: 'Download official v0.5.6 release,\nverify checksum, run in seconds',
+        deploySub: 'Packaged release archives contain precompiled statically-linked binaries (binlog-server, migrate), SQL migrations, and production config templates. Operators do not need Go installed.',
+        deployCode: 'VER=0.5.6 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind (127.0.0.1) allows unauthenticated local evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        deployNote: '⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including `:8080` or `0.0.0.0:8080`) strictly fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are enabled.',
+        guaranteesLabel: 'Architectural Guarantees',
+        guaranteesTitle: 'The four non-negotiables\nfor database backup systems',
+        guaranteesSub: 'DBAs cannot afford optimistic progress or unhandled edge cases. Every component in BinlogServer is built around predictable durability and operational transparency.',
+        g1Title: 'fsync Checkpoints',
+        g1Body: 'Checkpoint offsets advance only after local `fsync` succeeds on disk. A process crash or sudden reboot never causes phantom progress.',
+        g2Title: 'Decoupled Archiving',
+        g2Body: 'S3-compatible upload is asynchronous and best-effort. Cloud storage throttling or outages never stall local replication streams.',
+        g3Title: 'Lease HA & Failover',
+        g3Body: 'Distributed lease locks backed by metadata MySQL ensure only one worker dumps a source at any time, with automatic timeout failover.',
+        g4Title: 'Fail-Closed Security',
+        g4Body: 'Non-loopback binds mandate authentication. `PRODUCTION=true` refuses startup without a 32-byte AES key and encrypts source passwords.',
+        topologiesLabel: 'Deployment Topologies',
+        topologiesTitle: 'Fit into your infrastructure\nwith three battle-tested topologies',
+        topologiesSub: 'Whether testing locally on a laptop or running hundreds of replication tasks across an enterprise cluster, choose the right architecture without changing binlog format or client protocols.',
+        topo1Title: '1. Standalone Mode',
+        topo1Body: 'Single process. Without `meta_dsn`, tasks run in-memory for testing. With `meta_dsn`, tasks, checkpoints, and sealed segments persist across restarts for simple single-node deployments.',
+        topo2Title: '2. Control Plane + Workers',
+        topo2Body: 'Production recommended. Dedicated Control Plane nodes serve API/UI/Scheduler, while a pool of headless Workers claim task leases and perform binlog replication with automatic crash failover.',
+        topo3Title: '3. All-in-one Cluster Node',
+        topo3Body: 'A hybrid node running both the Control Plane API and Worker runner backed by a shared metadata MySQL. Ideal for small, cost-effective high-availability clusters.',
+        pipelineLabel: 'Data Path & Lifecycle',
+        pipelineTitle: 'Deterministic binlog data flow\nfrom MySQL source to S3 archive',
+        pipelineSub: 'Every step in the pipeline adheres to explicit transactional boundaries, making disaster recovery and auditing completely transparent.',
+        pipelineStep1: '1. Task Spec<span>Source / Start mode / Retention</span>',
+        pipelineStep2: '2. Binlog Sync<span>Pull events & fsync local files</span>',
+        pipelineStep3: '3. Rotate & Seal<span>Mark closed & advance checkpoint</span>',
+        pipelineStep4: '4. Archive & Clean<span>Async S3 upload & retention purge</span>',
+        flow1Title: 'Flexible Start Modes',
+        flow1Body: 'Support `LATEST` (start at source tip), `FILE_POS` (specific binlog file and offset), or `GTID` sets without losing consistency.',
+        flow2Title: 'True Master Lag Tracking',
+        flow2Body: 'Replication lag is evaluated directly against `SHOW MASTER STATUS` coordinates, avoiding misleading zeros during idle periods.',
+        flow3Title: 'Automated Retention & Retry',
+        flow3Body: 'Configurable retention (1..3650 days) cleans up expired sealed files on disk. Upload failures trigger backoff and explicit retry APIs.',
         positioningLabel: 'Positioning',
-        positioningTitle: 'Say what the product is,\nand what it is not',
-        positioningSub: 'This page should make one thing unmistakable: BinlogServer is a centralized MySQL binlog backup control plane. It is not a generic CDC platform or a broad event streaming layer.',
-        positioningHead1: 'Claim',
-        positioningHead2: 'What supports it',
-        positioningHead3: 'How to say it',
-        positioningRow1A: 'Durable progress',
-        positioningRow1B: 'Checkpoint only moves after local durability is confirmed.',
-        positioningRow1C: 'Checkpoint advances only after local fsync succeeds.',
-        positioningRow2A: 'Archive support',
-        positioningRow2B: 'Uploader is optional, best-effort, and retryable without stopping capture.',
-        positioningRow2C: 'Optional S3-compatible upload.',
-        positioningRow3A: 'Product category',
-        positioningRow3B: 'Capabilities and docs center on backup operations, not general CDC downstream fan-out.',
-        positioningRow3C: 'Centralized MySQL binlog backup control plane.',
-        fitLabel: 'Good fit / Not fit',
-        fitTitle: 'Use BinlogServer where backup\nneeds a real operating contract',
-        fitSub: 'Sharp products are easier to trust when they draw boundaries. BinlogServer fits backup operations that need reliability and visibility, not every database workflow under the sun.',
-        fitGoodBadge: 'Good fit',
-        fitGoodTitle: 'Teams that need centralized backup operations',
-        fitGood1: 'Multiple MySQL sources with one service handling lifecycle, inspection, and recovery.',
-        fitGood2: 'Operators who care about visible checkpoint semantics and restart behavior.',
-        fitGood3: 'Environments that want local-first capture plus optional S3-compatible archive.',
-        fitBadBadge: 'Not fit',
-        fitBadTitle: 'Teams looking for generic CDC infrastructure',
-        fitBad1: 'Broad transformation pipelines, fan-out delivery, or generalized stream processing.',
-        fitBad2: 'Workloads that require remote object storage success to synchronously gate capture progress.',
-        fitBad3: 'Temporary one-off scripting where centralized operations do not matter.',
-        fitDecisionBadge: 'Positioning shortcut',
-        fitDecisionTitle: 'If the problem is backup operations, it fits',
-        fitDecisionBody: 'If you need safer, more visible, centrally operated MySQL binlog backup, BinlogServer is the right story. If you need full CDC plumbing for downstream systems, it is the wrong headline.',
-        trustLabel: 'Trust signals',
-        trustTitle: 'Credibility comes from operator evidence,\nnot just promise copy',
-        trustSub: 'BinlogServer already has the right shape for a believable infrastructure product: API endpoints, UI iteration, E2E coverage, security policy, changelog cadence, and scenario-driven reliability work.',
-        trust1Title: 'Documented concepts',
-        trust1Body: 'Deployment modes, observability, and architecture docs make the operator story explicit.',
-        trust2Title: 'Scenario testing',
-        trust2Body: 'Quick and full E2E flows cover retry upload, cluster behavior, observability, and worker failure recovery.',
-        trust3Title: 'Security posture',
-        trust3Body: 'Public security policy and hardening work signal that this is being shaped toward production use.',
-        trust4Title: 'Visible release line',
-        trust4Body: 'Recent releases show continued investment in operator console quality, auth guidance, and runtime reliability.',
-        changelogLabel: 'Releases',
-        changelogTitle: 'Recent work trends toward\nbetter UI, better ops, better reliability',
-        changelogSub: 'The recent story is not random feature sprawl. It is clearer operator workflows, stronger frontend validation, and more production-minded behavior.',
-        releaseLeftTitle: 'Release timeline',
-        release1: 'The embedded Console mounts again, production refuses an empty encryption key and locks the UI when auth is on, and dashboard counters use SQL GROUP BY instead of scanning every task row.',
-        release2: 'Control-plane reads fail loud instead of serving a stale copy, lookup and filters share source identity, cluster counts come from the store, and the console refreshes once without per-row leases.',
-        release3: 'Standalone and cluster share one ownership door, FAILED releases the lease immediately, boot and claim ticks use ClaimRunnableTasks, and first upload shares ApplySealedUpload with retry.',
-        releaseRightTitle: 'What the homepage should emphasize',
-        releaseFocus1Date: 'Current direction',
-        releaseFocus1Title: 'Control plane maturity',
-        releaseFocus1Body: 'Stress centralized operations, not “yet another script that happens to pull binlog.”',
-        releaseNote1: 'UI + reliability + ops',
-        releaseFocus2Date: 'Reliability message',
-        releaseFocus2Title: 'Durable local-first capture',
-        releaseFocus2Body: 'Checkpoint semantics and explicit retry-upload flows are better proof than vague infra slogans.',
-        releaseNote2: 'fsync-backed checkpoint',
-        releaseFocus3Date: 'Boundary condition',
-        releaseFocus3Title: 'Not generic CDC',
-        releaseFocus3Body: 'Keep the story grounded in backup operations, cluster execution, observability, and optional S3-compatible archive.',
-        releaseNote3: 'backup control plane',
-        ctaTitle: 'Move binlog backup out of shell history\nand into a real product surface',
-        ctaSub: 'Review the deployment guide, inspect the release line, and evaluate BinlogServer as what it already is: a centralized MySQL binlog backup control plane.',
-        ctaPrimary: 'Open Deployment Guide',
-        ctaSecondary: 'Read Product Research',
-        footerBrand: 'Centralized MySQL binlog backup service for teams that want durable local capture, visible state, and operator control. Apache 2.0 licensed.',
-        footerCol1: 'Start',
+        positioningTitle: 'Clear operational boundaries:\nWhat BinlogServer is, and what it is not',
+        positioningSub: 'Products are easier to trust when they draw hard boundaries. BinlogServer is a specialized MySQL binlog backup control plane, not a bloated generic data platform.',
+        positioningHead1: 'Dimension',
+        positioningHead2: 'BinlogServer Design',
+        positioningHead3: 'Why DBAs Trust It',
+        positioningRow1A: 'Durability Contract',
+        positioningRow1B: 'Checkpoint advances only after local fsync succeeds on disk.',
+        positioningRow1C: 'Zero phantom progress; resumes safely on restart.',
+        positioningRow2A: 'Archive Decoupling',
+        positioningRow2B: 'S3 upload runs asynchronously with explicit retry endpoints.',
+        positioningRow2C: 'Cloud storage downtime never stalls binlog replication.',
+        positioningRow3A: 'High Availability',
+        positioningRow3B: 'MySQL lease locks with heartbeat expiration and automatic takeover.',
+        positioningRow3C: 'Prevents split-brain binlog dumpers on the same source.',
+        positioningRow4A: 'Product Scope',
+        positioningRow4B: 'Focused purely on binlog capture, storage, and PITR foundation.',
+        positioningRow4C: 'No heavy JVM dependencies, Kafka clusters, or complex schema registries.',
+        fitLabel: 'Fit Assessment',
+        fitTitle: 'When should you deploy BinlogServer?',
+        fitSub: 'Evaluate BinlogServer against your real operational requirements:',
+        fitGoodBadge: 'Good Fit',
+        fitGoodTitle: 'Production MySQL Backup & PITR',
+        fitGood1: 'Managing continuous binlog backups across dozens or hundreds of MySQL instances.',
+        fitGood2: 'Requiring strict local fsync checkpoints before offloading to S3/MinIO.',
+        fitGood3: 'Demanding real-time lag monitoring, visual console inspection, and cluster failover.',
+        fitBadBadge: 'Not a Fit',
+        fitBadTitle: 'Generic CDC / Event Streaming',
+        fitBad1: 'Parsing row-level mutation JSON to stream into Kafka, Flink, or Elasticsearch.',
+        fitBad2: 'Requiring synchronous gating where capture halts if cloud storage is unreachable.',
+        fitBad3: 'One-shot table exports or schema-only logical dump routines.',
+        fitDecisionBadge: 'The Bottom Line',
+        fitDecisionTitle: 'Engineered for Backup Reliability',
+        fitDecisionBody: 'If your mandate is ensuring MySQL binlogs are captured reliably, persisted with rock-solid checkpoints, and archived without risking primary database operations, BinlogServer is the exact tool for the job.',
+        trustLabel: 'Operational Evidence',
+        trustTitle: 'Engineering credibility built on\nrigorous automated verification',
+        trustSub: 'We do not ask DBAs to trust marketing claims. BinlogServer validates its failure modes and recovery paths through comprehensive automated E2E test suites.',
+        trust1Title: 'Failover Scenarios',
+        trust1Body: 'Dual-worker lease takeover, worker crash recovery, and control plane failover tested against live MySQL engines.',
+        trust2Title: 'Archive Resiliency',
+        trust2Body: 'S3 upload disconnection and backpressure tests prove capture loops continue writing local files without interruption.',
+        trust3Title: 'Strict Fail-Closed',
+        trust3Body: 'Production mode asserts valid 32-byte AES-256 keys and encrypted source credentials before binding network sockets.',
+        trust4Title: 'SQL-Paged Scale',
+        trust4Body: 'Dashboard and task summaries use SQL GROUP BY aggregations with bounded LIMIT/OFFSET paging to protect metadata databases.',
+        changelogLabel: 'Release Cadence',
+        changelogTitle: 'Continuous hardening focused on\nproduction stability and ergonomics',
+        changelogSub: 'Review recent release highlights designed specifically to eliminate operator surprise in production environments.',
+        releaseLeftTitle: 'Recent Releases',
+        release1: 'Resolved embedded console mounting bundle, enforced strict fail-closed encryption keys in PRODUCTION mode, aligned /ui/* and /swagger/* behind auth middleware, and optimized dashboard queries with SQL GROUP BY aggregations.',
+        release2: 'Store miss errors fail loud instead of serving stale copies, unified host lookup across loopback variants, and eliminated per-row lease polling on console list refresh.',
+        release3: 'Unified standalone and cluster lease ownership doors, immediate lease release on FAILED tasks, and atomic ClaimRunnableTasks execution.',
+        releaseRightTitle: 'DBA Production Checklist',
+        check1Date: 'Step 1',
+        check1Title: 'Isolate Metadata MySQL',
+        check1Body: 'Ensure the metadata MySQL instance is dedicated and never added to the backup task set. Run `./migrate up` before starting.',
+        check1Note: 'Isolation mandatory',
+        check2Date: 'Step 2',
+        check2Title: 'Configure Production Auth',
+        check2Body: 'Use `config.production.example.yaml` with `BINLOG_SERVER_API_AUTH_BEARER_TOKEN` and supply 32-byte `--encryption-key`.',
+        check2Note: 'Fail-closed security',
+        check3Date: 'Step 3',
+        check3Title: 'Configure S3 & Retention',
+        check3Body: 'Set `storage.retention_days` (1..3650) to manage local disk space while streaming sealed binlogs to object storage.',
+        check3Note: 'Decoupled archive',
+        ctaTitle: 'Move MySQL binlog backup\ninto a production control plane',
+        ctaSub: 'Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.',
+        ctaPrimary: 'Get Started with v0.5.6',
+        ctaSecondary: 'Deployment Guide',
+        footerBrand: 'Centralized MySQL binlog backup control plane with durable local persistence, multi-worker failover, and decoupled S3 archiving. Apache 2.0 licensed.',
+        footerCol1: 'Operations',
         footerLink1: 'Deployment Guide',
-        footerLink2: 'Product Research',
-        footerLink3: 'Changelog',
-        footerCol2: 'Product',
-        footerLink4: 'Capabilities',
-        footerLink5: 'How it Works',
-        footerLink6: 'Good fit / Not fit',
+        footerLink2: 'Configuration Reference',
+        footerLink3: 'Guide Index',
+        footerCol2: 'Architecture',
+        footerLink4: 'Guarantees',
+        footerLink5: 'Topologies',
+        footerLink6: 'Fit Assessment',
         footerCol3: 'Project',
-        footerLink7: 'Releases',
-        footerLink8: 'Issues',
+        footerLink7: 'Releases (v0.5.6)',
+        footerLink8: 'Changelog',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.',
-        footerBottomRight: 'Single-file bilingual landing page for local preview.'
+        footerBottomRight: 'Bilingual production landing page for MySQL DBAs.'
       },
       zh: {
-        pageTitle: 'BinlogServer — 集中式 MySQL Binlog 备份控制平面',
-        pageDescription: 'BinlogServer 是一个集中式 MySQL binlog 备份控制平面，提供本地优先持久化、API/UI 运维入口、集群协调、可观测性，以及可选的兼容 S3 的上传能力。',
+        pageTitle: 'BinlogServer — 面向生产环境的集中式 MySQL Binlog 备份控制平面',
+        pageDescription: 'BinlogServer 是面向生产环境的集中式 MySQL binlog 备份控制平面，具备本地 fsync 强一致检查点、多节点租约故障切换、解耦 S3 归档与实时运维观测能力。',
         langToggleAria: '语言切换',
         backToTopAria: '回到顶部',
-        navFeatures: '能力',
-        navPipeline: '工作原理',
-        navPositioning: '定位',
-        navSurfaces: '界面',
-        navChangelog: '版本',
-        navCta: '版本发布',
-        deployLabel: '快速开始',
-        deployTitle: '下载 release tarball，\n校验、解压、运行',
-        deploySub: '值班不需要安装 Go。真实资产名是 binlog-server_<ver>_<os>_<arch>.tar.gz，解压后在一层版本子目录里。',
-        deployCode: 'VER=0.5.6 OS=linux ARCH=amd64\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncurl -fsSL -O https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt\nsha256sum -c checksums.txt --ignore-missing\ntar -xzf binlog-server_${VER}_${OS}_${ARCH}.tar.gz\ncd binlog-server_${VER}_${OS}_${ARCH}\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
-        heroBadge: 'v0.5.6 — 最新发布',
-        heroTitle: '面向真实运维的\nMySQL binlog 备份控制平面',
-        heroSub: 'BinlogServer 把 MySQL binlog 备份集中到一个服务里：本地优先的可靠采集、通过 API 与内置 UI 可见的运行状态、可扩展到集群角色的执行模型、Prometheus 指标，以及可选的兼容 S3 的归档上传。',
-        heroPrimary: '打开部署指南',
-        heroSecondary: '了解更多',
-        heroCode: '控制平面  创建 → 启动 → 观测 → 重试上传\n数据链路      拉取 binlog → 写入本地文件 → 封存 → 归档\n部署方式      单机 / 控制平面 / 工作节点 / 一体化\n观测信号      检查点 / 延迟 / 事件 / 工作节点 / 指标',
-        surfacesLabel: '一个产品，四类界面',
-        surfacesTitle: '同一套备份引擎，\n覆盖每个运维环境',
-        surfacesSub: 'BinlogServer 在 API、内置 UI、集群部署和可观测性之间共享同一套运维模型，而不是把备份状态拆散到多个互不相干的工具里。',
-        surface1Title: 'HTTP API',
-        surface1Body: '覆盖任务生命周期、检查点、复制状态、文件列表、仪表盘、集群总览与事件。',
-        surface2Title: '内置 UI',
-        surface2Body: '内建运维控制台，日常管理备份任务时不需要再额外维护一套独立前端部署。',
-        surface3Title: '集群角色',
-        surface3Body: '控制平面、工作节点与一体化角色支持更适合生产环境的高可用协调与执行分离。',
-        surface4Title: '可观测性',
-        surface4Body: 'Prometheus 指标、工作节点心跳、健康检查和任务事件让备份状态持续可见。',
-        featuresLabel: '核心能力',
-        featuresTitle: '把脚本式备份通常藏起来的部分\n真正运维起来',
-        featuresSub: '重点不只是拉取 binlog，而是把备份做成可靠、可检查、可重启、可由团队共同运维的系统。',
-        feature1Title: '本地优先、可靠落盘',
-        feature1Body: '只有本地 `fsync` 成功后检查点才会推进，因此进度反映的是可靠状态，而不是乐观缓冲。',
-        feature2Title: '显式上传重试',
-        feature2Body: '兼容 S3 的上传是可选的、尽力而为的。归档失败不会停止复制，重试仍由运维明确控制。',
-        feature3Title: '状态可观测',
-        feature3Body: '通过稳定接口检查延迟、文件、检查点、工作节点归属、心跳与事件历史。',
-        feature4Title: '任务生命周期控制',
-        feature4Body: '在一个服务中创建、启动、停止、检查并恢复多条备份任务，而不是依赖单机上的零散脚本流程。',
-        feature5Title: '多种起始模式',
-        feature5Body: '支持 `LATEST`、`FILE_POS` 和 `GTID`，同时保持统一的运维心智模型。',
-        feature6Title: '集群协调能力',
-        feature6Body: '基于租约的归属与工作节点心跳语义让故障切换和角色分离更适合生产环境。',
-        pipelineLabel: '内部机制',
-        pipelineTitle: '备份管线如何工作',
-        pipelineSub: '从运维意图到归档重试，整条执行路径是确定且容易解释的。',
-        pipelineStep1: '创建任务<span>数据源 / 起始模式 / 保留策略</span>',
-        pipelineStep2: '执行采集<span>拉取 / 写入 / 轮转 / 封存</span>',
-        pipelineStep3: '归档上传<span>可选的兼容 S3 上传</span>',
-        pipelineStep4: '持续观测<span>指标 / 工作节点 / 事件</span>',
-        pipelineCard1Title: '创建',
-        pipelineCard1Body: 'API 验证输入、存储任务元数据，把备份意图变成可调度对象。',
-        pipelineCard2Title: '采集',
-        pipelineCard2Body: '执行器拉取 binlog 事件、写入本地文件、轮转已封存分段，并且只在可靠持久化后更新检查点。',
-        pipelineCard3Title: '观测',
-        pipelineCard3Body: '运维团队通过指标和 API 检查文件状态、延迟、重试、集群健康与整体进度，而不是盯着 shell 输出。',
-        positioningLabel: '产品定位',
-        positioningTitle: '说清楚产品是什么，\n以及它不是什么',
-        positioningSub: '这个页面应该让一件事非常明确：BinlogServer 是集中式 MySQL binlog 备份控制平面，而不是通用 CDC 平台，更不是泛化事件流层。',
-        positioningHead1: '主张',
-        positioningHead2: '支撑依据',
-        positioningHead3: '建议表述',
-        positioningRow1A: '可靠进度',
-        positioningRow1B: '检查点只有在本地持久化确认之后才会推进。',
-        positioningRow1C: '只有本地 fsync 成功后，检查点才会推进。',
-        positioningRow2A: '归档能力',
-        positioningRow2B: '上传器是可选、尽力而为且支持重试的，不会阻塞采集。',
-        positioningRow2C: '可选的兼容 S3 上传。',
-        positioningRow3A: '产品类别',
-        positioningRow3B: '能力与文档都围绕备份运维，而不是通用 CDC 的下游分发。',
-        positioningRow3C: '集中式 MySQL binlog 备份控制平面。',
-        fitLabel: '适合 / 不适合',
-        fitTitle: '在备份真正需要\n运维契约的地方使用 BinlogServer',
-        fitSub: '边界清晰的产品更容易被信任。BinlogServer 适合需要可靠性与可见性的备份运维，而不是所有数据库工作流。',
-        fitGoodBadge: '适合',
-        fitGoodTitle: '需要集中式备份运维的团队',
-        fitGood1: '多个 MySQL 源实例由一个服务负责生命周期、检查与恢复。',
-        fitGood2: '关注检查点可见语义与重启行为的运维团队。',
-        fitGood3: '需要本地优先采集，同时希望可选接入兼容 S3 归档的环境。',
-        fitBadBadge: '不适合',
-        fitBadTitle: '寻找通用 CDC 基础设施的团队',
-        fitBad1: '大而全的转换流水线、fan-out 分发或泛化流处理。',
-        fitBad2: '要求远端对象存储成功必须同步决定采集进度是否前进的工作负载。',
-        fitBad3: '不需要集中运维、只做一次性脚本处理的临时场景。',
-        fitDecisionBadge: '一句话判断',
-        fitDecisionTitle: '如果问题是“备份运维”，它就合适',
-        fitDecisionBody: '如果你需要更安全、更可见、更集中式的 MySQL binlog 备份运维面，BinlogServer 就是正确叙事；如果你需要的是完整 CDC 基础设施，那这不是对的标题。',
-        trustLabel: '可信信号',
-        trustTitle: '基础设施产品的可信度来自运维证据，\n不只是宣传文案',
-        trustSub: 'BinlogServer 已经具备一个可信基础设施产品该有的轮廓：API 端点、UI 演进、E2E 覆盖、安全策略、版本节奏，以及场景化可靠性工作。',
-        trust1Title: '文档化概念',
-        trust1Body: '部署模式、可观测性与架构文档让运维故事是明确可读的。',
-        trust2Title: '场景测试',
-        trust2Body: '快速与完整 E2E 场景覆盖了重试上传、集群行为、可观测性与工作节点故障恢复。',
-        trust3Title: '安全姿态',
-        trust3Body: '公开的安全策略与加固工作说明项目正在朝生产可用方向打磨。',
-        trust4Title: '可见的版本线',
-        trust4Body: '近期版本持续投入在运维控制台质量、认证指引与运行期可靠性上。',
-        changelogLabel: '版本演进',
-        changelogTitle: '近期工作明显朝着\n更好的 UI、更好的运维、更好的可靠性前进',
-        changelogSub: '最近的变化不是零散功能堆砌，而是更清晰的运维流程、更强的前端验证，以及更偏生产的行为。',
-        releaseLeftTitle: '版本时间线',
-        release1: '嵌入 Console 能挂上了，生产模式拒绝空加密密钥并在鉴权开启时锁住 UI，dashboard 计数改走 SQL GROUP BY，不再扫每一行任务。',
-        release2: '控制面读失败不再用过期抄本冒充 200，lookup 和过滤共用源身份，集群计数来自 store，控制台只刷新一次、不再按行打 lease。',
-        release3: '单机和集群走同一扇所有权门，FAILED 立刻释放 lease，启动和认领循环共用 ClaimRunnableTasks，第一次上传和 retry 共用 ApplySealedUpload。',
-        releaseRightTitle: '首页应该强调什么',
-        releaseFocus1Date: '当前方向',
-        releaseFocus1Title: '控制平面成熟度',
-        releaseFocus1Body: '强调集中式运维，而不是“另一个会拉 binlog 的脚本”。',
-        releaseNote1: 'UI + 可靠性 + 运维',
-        releaseFocus2Date: '可靠性信息',
-        releaseFocus2Title: '本地优先、可靠采集',
-        releaseFocus2Body: '检查点语义和显式重试上传流程，比空泛的基础设施口号更有说服力。',
-        releaseNote2: 'fsync 支撑的检查点',
-        releaseFocus3Date: '边界条件',
-        releaseFocus3Title: '不是通用 CDC',
-        releaseFocus3Body: '整个叙事应该牢牢落在备份运维、集群执行、可观测性和可选的兼容 S3 归档上。',
-        releaseNote3: '备份控制平面',
-        ctaTitle: '把 binlog 备份从命令行历史里拉出来，\n放回真正的产品界面',
-        ctaSub: '先看部署指南，再检查版本线，把 BinlogServer 当作它本来就已经是的东西去评估：集中式 MySQL binlog 备份控制平面。',
-        ctaPrimary: '打开部署指南',
-        ctaSecondary: '阅读产品研究',
-        footerBrand: '面向需要可靠本地采集、状态可见和运维控制的团队的集中式 MySQL binlog 备份服务。Apache 2.0 许可。',
-        footerCol1: '开始',
-        footerLink1: '部署指南',
-        footerLink2: '产品研究',
-        footerLink3: '版本记录',
-        footerCol2: '产品',
-        footerLink4: '核心能力',
-        footerLink5: '工作原理',
-        footerLink6: '适合 / 不适合',
-        footerCol3: '项目',
-        footerLink7: '版本发布',
-        footerLink8: '问题反馈',
+        navConsole: '控制台',
+        navDeployment: '部署安装',
+        navGuarantees: '核心保证',
+        navTopologies: '架构拓扑',
+        navPositioning: '产品定位',
+        navChangelog: '版本演进',
+        navCta: '下载发布包',
+        heroBadge: 'v0.5.6 — 最新发布版本',
+        heroTitle: '面向生产环境的集中式\nMySQL Binlog 备份控制平面',
+        heroSub: '基于本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档的持续备份服务。专为关注确定性 RPO、状态可见与可靠故障恢复的 MySQL DBA 设计，告别脆弱的散装脚本。',
+        heroPrimary: '快速安装 (v0.5.6)',
+        heroSecondary: '查看控制台界面',
+        heroCode: '持久性保障    本地 fsync 成功后方才推进检查点（杜绝虚假乐观进度）\n归档解耦      S3 对象存储异步归档（远端网络抖动绝不阻塞本地实时复制）\n集群高可用    多 Worker 租约竞态与心跳超时自动接管（彻底杜绝双写脑裂）\n生产可观测    对比源库真实位点计算复制延迟，内置 Prometheus 指标与 Web 控制台',
+        consoleLabel: '运维控制台与管理接口',
+        consoleTitle: '开箱即用的专业控制台，\n状态一目了然，运维心中有数',
+        consoleSub: 'BinlogServer 将生产级 Web 控制台与完整的 REST API 直接内嵌在发布二进制中，无需额外维护前端 Node.js 运行时或部署独立 UI 服务。',
+        gallery1Title: '全局任务与工作节点概览',
+        gallery1Body: '实时呈现所有 MySQL 源实例的复制延迟、分段进度、Worker 分布与任务运行状态。',
+        gallery2Title: '任务深度透视与一键补传',
+        gallery2Body: '精准查看当前 GTID / File-Pos 位点坐标、本地文件轮转记录，并支持对归档失败的文件一键触发重试。',
+        gallery3Title: '交互式 Swagger API 文档',
+        gallery3Body: '提供完整的 OpenAPI 规范接口，方便无缝对接内部 CMDB、发布自动化流水线及告警系统。',
+        deployLabel: '快速开始与安装',
+        deployTitle: '下载官方 v0.5.6 发布包，\n校验哈希，数秒内完成启动',
+        deploySub: '官方发布包内已打包静态编译二进制（binlog-server、migrate）、数据库迁移脚本与生产配置模板。DBA 在部署机上无需安装 Go 环境。',
+        deployCode: 'VER=0.5.6 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback (127.0.0.1) 允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        deployNote: '⚠️ <strong>安全提示：</strong> 本机 Loopback 监听仅供本地评估。任何非 Loopback 监听地址（包括 `:8080` 或 `0.0.0.0:8080`）启动时严格 Fail-Close，必须配置 `api.auth.enabled=true` 并保护 `/api/*` 与 `/metrics`。',
+        guaranteesLabel: '四大架构设计保证',
+        guaranteesTitle: '数据库备份软件\n绝不可妥协的四大原则',
+        guaranteesSub: '生产数据库备份经不起任何含糊。BinlogServer 的每一处设计均围绕确定性的故障恢复边界与运维透明度展开。',
+        g1Title: 'fsync 强一致检查点',
+        g1Body: '检查点位点仅在本地文件完成 `fsync` 刷盘后推进。进程异常崩溃或主机断电重启，绝不产生虚假位点推进。',
+        g2Title: '解耦异步归档',
+        g2Body: 'S3 兼容对象存储上传完全异步执行。远端对象存储限流、不可用或网络异常，绝不阻塞本地 MySQL binlog 的实时拉取。',
+        g3Title: '租约高可用与自动接管',
+        g3Body: '基于 MySQL 元数据表的分布式租约锁，保证单个任务在任意时刻仅由单一 Worker 消费，节点故障后自动心跳超时接管。',
+        g4Title: '严密 Fail-Closed 安全机制',
+        g4Body: '开放网络端口必须开启鉴权。设置 `PRODUCTION=true` 时强制要求 32 字节 AES 密钥并对源库明文口令实施加密存储。',
+        topologiesLabel: '推荐部署架构',
+        topologiesTitle: '灵活适配三种经受验证的生产拓扑',
+        topologiesSub: '从单机轻量评估到跨机房数百实例的高可用备份集群，BinlogServer 均能以一致的运维心智模型高效支撑。',
+        topo1Title: '1. 单机独立模式 (Standalone)',
+        topo1Body: '单进程运行。未配置 `meta_dsn` 时位点保存在内存，适合验证；配置 `meta_dsn` 后重启自动从检查点续传，适合单节点生产备份。',
+        topo2Title: '2. 控制面 + Worker 集群 (推荐)',
+        topo2Body: '生产标配架构。独立的 Control Plane 节点专职提供 API/UI/调度，多台无状态 Worker 竞争任务租约执行复制，节点崩溃自动平滑接管。',
+        topo3Title: '3. 一体化集群节点 (All-in-one)',
+        topo3Body: '单进程同时承担 Control Plane API 与 Worker 执行能力，共享同一元数据库。适合资源有限但需要高可用切换的紧凑集群。',
+        pipelineLabel: '数据管线与流转',
+        pipelineTitle: '严谨可审计的 Binlog 处理链路',
+        pipelineSub: '从创建任务到对象存储归档，各个环节职责清晰、状态可溯，为数据库灾备提供坚实底座。',
+        pipelineStep1: '1. 定义任务<span>指定源库 / 起始位点 / 保留周期</span>',
+        pipelineStep2: '2. 实时复制<span>拉取事件流并即时 fsync 本地落盘</span>',
+        pipelineStep3: '3. 轮转与封存<span>封存旧文件并原子推进检查点</span>',
+        pipelineStep4: '4. 归档与清理<span>异步上传 S3 并在过期后安全清理</span>',
+        flow1Title: '全模式起点支持',
+        flow1Body: '支持 `LATEST`（从当前源库最新位点）、`FILE_POS`（指定 binlog 文件与偏移量）及 `GTID` 集合起始，平滑衔接各类备份方案。',
+        flow2Title: '真实主库位点延迟',
+        flow2Body: '延迟计算严格对比源库 `SHOW MASTER STATUS` 真实位点，彻底消除长事务空闲期产生的虚假零延迟误判。',
+        flow3Title: '自动轮转清理与重试',
+        flow3Body: '支持配置 1..3650 天保留期自动清理过期本地封存文件；上传失败自动退避，并支持 API/控制台手动一键补传。',
+        positioningLabel: '产品定位与边界',
+        positioningTitle: '说清楚产品是什么，\n更要说清楚它不是什么',
+        positioningSub: '定位清晰的工具才值得信赖。BinlogServer 专精于 MySQL binlog 备份与灾备恢复，绝非臃肿庞杂的通用流计算平台。',
+        positioningHead1: '对比维度',
+        positioningHead2: 'BinlogServer 的设计选择',
+        positioningHead3: '为什么 DBA 能放心用',
+        positioningRow1A: '位点推进契约',
+        positioningRow1B: '必须且仅在本地 fsync 刷盘成功后方才更新检查点。',
+        positioningRow1C: '无乐观内存推进，重启必定从可靠字节精准续传。',
+        positioningRow2A: '对象存储归档',
+        positioningRow2B: 'S3 上传完全异步执行，独立维护上传状态与重试入口。',
+        positioningRow2C: '对象存储抖动绝不影响核心数据库的主从拉取。',
+        positioningRow3A: '集群高可用',
+        positioningRow3B: '基于 MySQL 元数据表的排他租约与心跳检测机制。',
+        positioningRow3C: '杜绝同一任务多实例双写拉取造成的垃圾数据覆盖。',
+        positioningRow4A: '产品架构职责',
+        positioningRow4B: '专注于 binlog 的持续落盘、保留生命周期与 PITR 基础。',
+        positioningRow4C: '无需维护重型 JVM、Kafka 集群或繁琐的 Schema Registry。',
+        fitLabel: '场景适配建议',
+        fitTitle: '什么场景适合选用 BinlogServer？',
+        fitSub: '结合您的真实业务场景对号入座：',
+        fitGoodBadge: '非常适合',
+        fitGoodTitle: '生产级 MySQL 连续备份与 PITR 灾备',
+        fitGood1: '需要集中管理数十乃至数百台 MySQL 实例的持续 binlog 备份。',
+        fitGood2: '要求本地必须有绝对可靠的 fsync 检查点，再进一步归档至 S3/MinIO。',
+        fitGood3: '需要实时的复制延迟监控、直观的 Web 操作面板以及故障自动切换。',
+        fitBadBadge: '不建议使用',
+        fitBadTitle: '通用 CDC 异构数据同步 / 流计算',
+        fitBad1: '需要将变更解析为业务 JSON 并下发至 Kafka、Flink 或搜索引擎。',
+        fitBad2: '要求对象存储上传失败必须反压卡死 MySQL 复制流的场景。',
+        fitBad3: '偶尔执行一次的 mysqldump 逻辑全量导出脚本。',
+        fitDecisionBadge: '决策核心',
+        fitDecisionTitle: '专为高可靠备份而生',
+        fitDecisionBody: '如果您的核心目标是把 MySQL binlog 稳妥、可靠地拉下来、存得牢、看得清，并在需要时不丢数据地恢复，BinlogServer 就是为您量身打造的得力工具。',
+        trustLabel: '工程验证与证据',
+        trustTitle: '用严谨的自动化测试\n证明每一个恢复路径',
+        trustSub: '我们深知数据库无小事。BinlogServer 通过全自动化的 E2E 场景测试，系统化验证各种极端边界与恢复逻辑。',
+        trust1Title: '双 Worker 接管场景',
+        trust1Body: '自动化验证 Worker 节点崩溃后，另一存活 Worker 在租约超时后平滑接管，位点零丢失。',
+        trust2Title: '网络抖动与上传韧性',
+        trust2Body: '模拟 MinIO 对象存储中断与高压重试，验证本地复制流持续健康运行并成功触发补传。',
+        trust3Title: '生产安全 Fail-Closed',
+        trust3Body: '生产模式启动严格校验 32 字节 AES 密钥与凭证，未配置或密码占位符未解析直接拒绝启动。',
+        trust4Title: 'SQL 聚合规模防护',
+        trust4Body: '控制台概览与状态计数全部下推为 SQL GROUP BY 与 LIMIT/OFFSET 分页，绝不大表全表扫内存。',
+        changelogLabel: '近期版本演进',
+        changelogTitle: '持续打磨生产可靠性与运维体验',
+        changelogSub: '近期版本的迭代重点不是无序堆砌功能，而是全面提升控制台稳定度、鉴权防护与底层执行确定性。',
+        releaseLeftTitle: '近期发布里程碑',
+        release1: '修复了内嵌控制台的前端 bundle 加载异常；在 PRODUCTION 模式下强制要求 32 字节加密密钥；将 /ui/* 与 /swagger/* 纳入统一步骤鉴权；将 Dashboard 汇总查询升级为数据库端 GROUP BY 聚合。',
+        release2: '存储层查询失败严格抛错避免返回过时缓存；规范 IPv4/IPv6 loopback 源地址识别；控制台刷新优化为单次查询消除单行频繁打 lease。',
+        release3: '单机与集群统一所有权检查逻辑；任务 FAILED 状态立即释放租约释放资源；启动与轮询统一采用 ClaimRunnableTasks 原子推进。',
+        releaseRightTitle: 'DBA 生产上线检查清单',
+        check1Date: '第一步',
+        check1Title: '元数据库隔离',
+        check1Body: '元数据 MySQL 必须独立部署，严禁将元数据实例本身作为备份源。服务启动前务必先执行 `./migrate up`。',
+        check1Note: '隔离性强制要求',
+        check2Date: '第二步',
+        check2Title: '生产安全凭证配置',
+        check2Body: '基于 `config.production.example.yaml` 配置 Bearer Token，并在启动命令行传入 32 字节 `--encryption-key`。',
+        check2Note: 'Fail-Closed 严密防护',
+        check3Date: '第三步',
+        check3Title: '配置对象存储与保留期',
+        check3Body: '根据磁盘规划配置 `storage.retention_days`（1..3650 天），并注入 S3 认证凭证实现双重持久化。',
+        check3Note: '归档解耦运行',
+        ctaTitle: '将 MySQL Binlog 备份\n升级为生产级控制平面',
+        ctaSub: '查阅详细部署指南，参考标准的生产配置模板，用专业可靠的控制系统彻底替换摇摇欲坠的定时脚本。',
+        ctaPrimary: '开始使用 v0.5.6',
+        ctaSecondary: '查阅部署指南',
+        footerBrand: '面向生产环境的集中式 MySQL binlog 备份控制平面，具备本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档能力。基于 Apache 2.0 协议开源。',
+        footerCol1: '运维指南',
+        footerLink1: '完整部署指南',
+        footerLink2: '配置参数详解',
+        footerLink3: '文档索引',
+        footerCol2: '核心架构',
+        footerLink4: '设计保证',
+        footerLink5: '架构拓扑',
+        footerLink6: '适配建议',
+        footerCol3: '开源项目',
+        footerLink7: 'Release 资产 (v0.5.6)',
+        footerLink8: '更新日志',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer 使用 Apache 2.0 许可证。',
-        footerBottomRight: '单文件双语落地页，可直接本地预览。'
+        footerBottomRight: '专为 MySQL DBA 打造的单文件双语落地页。'
       }
     };
 
@@ -1206,17 +1278,12 @@ and into a real product surface</h2>
       localStorage.setItem('binlogserver-lang', lang);
     };
 
-    const docPaths = new Set(['/docs', '/docs/', '/docs/deployment', '/docs/deployment/', '/deployment', '/deployment/', '/guide', '/guide/']);
-    if (docPaths.has(location.pathname) && location.hash !== '#deployment') {
-      location.hash = 'deployment';
-    }
-
     const switchLanguage = (lang) => {
       root.classList.add('switching');
       window.setTimeout(() => {
         applyLanguage(lang);
         root.classList.remove('switching');
-      }, 90);
+      }, 80);
     };
 
     const savedLanguage = localStorage.getItem('binlogserver-lang');
@@ -1229,7 +1296,7 @@ and into a real product surface</h2>
 
     const backToTop = document.getElementById('backToTop');
     const toggleBackToTop = () => {
-      backToTop.classList.toggle('visible', window.scrollY > 520);
+      backToTop.classList.toggle('visible', window.scrollY > 480);
     };
 
     window.addEventListener('scroll', toggleBackToTop, { passive: true });
