@@ -203,7 +203,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
   ./binlog-server --config config.production.example.yaml --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"
   ```
 - **口令落库加密:** 传入 `--encryption-key` 后，元数据库中任务配置的 `source_json` 源库密码会自动以 AES-256-GCM（`enc:aes256:`）密文存储。
-- **控制台鉴权保护:** 开启鉴权后，浏览器访问 `/ui/*` 与 `/swagger/*` 会被鉴权中间件拦截（未携带凭证返回 401）；`/healthz` 始终保持开放以便接入负载均衡健康探活。
+- **控制台:** 浏览器直接打开 `/ui/`。页面和静态资源不要求 `Authorization` 头。`/api/*` 返回 401 时会弹出设置框，把 `api.auth.bearer_token` 配的 bearer token 粘进去。之后控制台请求带 `Authorization: Bearer`。`/api/*`、`/metrics`、`/swagger/*` 未带凭证仍然 401。`/healthz` 保持开放，给负载均衡探活。Swagger 页面没有填写 token 的入口，用 curl 或在反向代理里注入请求头。设置框里填的是 bearer token。`api_key` 模式给能自己带对应请求头的客户端用。
 
 ### 2. 元数据库独立与迁移
 - 准备独立的 MySQL 元数据库并在启动前执行 Schema 初始化：

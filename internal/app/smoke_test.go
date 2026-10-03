@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth, UI and swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage
+// output: application lifecycle plus real-route production auth, anonymous Console UI, swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -268,7 +268,7 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 	waitReady(t, a)
 	base := "http://" + a.Addr()
 	assertHTTPStatus(t, base+"/healthz", http.StatusOK)
-	for _, path := range []string{"/api/tasks", "/metrics", "/ui/", "/swagger/index.html"} {
+	for _, path := range []string{"/api/tasks", "/metrics", "/swagger/index.html"} {
 		resp, err := http.Get(base + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
@@ -291,6 +291,19 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 			t.Fatalf("expected %s with bearer auth to return 200, got %d", path, resp.StatusCode)
 		}
 		_ = resp.Body.Close()
+	}
+
+	uiResp, err := http.Get(base + "/ui/")
+	if err != nil {
+		t.Fatalf("GET /ui/: %v", err)
+	}
+	defer uiResp.Body.Close()
+	uiBody, err := io.ReadAll(uiResp.Body)
+	if err != nil {
+		t.Fatalf("read /ui/: %v", err)
+	}
+	if uiResp.StatusCode != http.StatusOK || len(uiBody) == 0 || !bytes.Contains(uiBody, []byte("Binlog Server Console")) {
+		t.Fatalf("expected /ui/ 200 with the console document, got %d body=%q", uiResp.StatusCode, uiBody)
 	}
 }
 

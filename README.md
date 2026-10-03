@@ -204,7 +204,7 @@ Do not use permissive development defaults in production. Follow these mandatory
   ./binlog-server --config config.production.example.yaml --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"
   ```
 - **Password encryption:** When `--encryption-key` is provided, source database passwords in `backup_tasks.source_json` are automatically encrypted at rest using AES-256-GCM (`enc:aes256:`).
-- **Console lock:** When authentication is enabled, browser access to `/ui/*` and `/swagger/*` is locked behind the same authentication middleware. `/healthz` remains unauthenticated for load balancers.
+- **Console:** Open `/ui/` in a browser. The page and its assets load without an `Authorization` header. A 401 from `/api/*` opens Settings; paste the same bearer token configured in `api.auth.bearer_token`. Later Console calls send `Authorization: Bearer`. `/api/*`, `/metrics`, and `/swagger/*` still reject missing credentials. `/healthz` stays unauthenticated for load balancers. Swagger has no token field; use curl or a reverse proxy that injects the header. The Settings field is a bearer token. `api_key` mode is for clients that send the configured header.
 
 ### 2. Metadata Database Setup
 - Prepare an isolated MySQL database and execute schema migrations before starting the service:

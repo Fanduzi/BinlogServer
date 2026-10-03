@@ -33,6 +33,8 @@ api:
     bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
     protect_api: true
     protect_metrics: true
+    # /ui/ loads in a browser without a header. Paste bearer_token in Console Settings.
+    # /api/*, /metrics, and /swagger/* still require it. /healthz stays open.
 
 # Decoupled S3-compatible cold storage archiving (optional, non-blocking)
 # S3 upload failures will NEVER stall real-time binlog replication.

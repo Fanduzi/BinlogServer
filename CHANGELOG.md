@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- With `api.auth.enabled=true`, `GET /ui/` and the Console assets load without an `Authorization` header. The Console Settings dialog collects the bearer token. `/api/*`, `/metrics`, and `/swagger/*` still require that credential. `/healthz` stays open.
+
 ## [v0.5.7] - 2026-10-02
 
 ### Fixed
