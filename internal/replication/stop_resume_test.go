@@ -1,7 +1,7 @@
 // Package replication provides module-level functionality for replication.
 // input: scheduler stop/start, in-memory lease, optional checkpoint store, and a scripted binlog stream
-// output: proof that stop then start appends source events from the previous durable end for standalone and catalog tasks, that mysqlbinlog or the binlog parser can read that boundary, and that adopt and empty-disk takeover stay on their existing positions
-// pos: operator-path regression for contiguous resume after stop
+// output: proof that stop then start appends source events from the previous durable end for standalone and catalog tasks, that mysqlbinlog or the binlog parser can read that boundary, that adopt and empty-disk takeover stay on their existing positions, and that kill-equivalent adopt resumes the open segment as one readable binlog
+// pos: operator-path regression for contiguous resume after stop and after kill-then-adopt
 // note: if this file changes, update this header and module README.md.
 package replication
 
@@ -292,6 +292,152 @@ func TestAdoptKeepsSavedFilePosWhenSourceMoved(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(taskDir, "mysql-bin.000004.open.e3")); err != nil {
 		t.Fatalf("adopt did not open the next epoch: %v", err)
 	}
+}
+
+// TestKillAdoptResumeKeepsBinlogAcrossCrash is a standalone kill -9: the open
+// segment is left with no task metadata. Adopt without a start override saves
+// FILE_POS at the last complete event, and start must append on that segment.
+func TestKillAdoptResumeKeepsBinlogAcrossCrash(t *testing.T) {
+	dir := t.TempDir()
+	beforeSQL := "INSERT INTO crash_boundary VALUES ('BEFORE-KILL')"
+	during1 := "INSERT INTO crash_boundary VALUES ('DURING-KILL-1')"
+	during2 := "INSERT INTO crash_boundary VALUES ('DURING-KILL-2')"
+	eventAt := time.Unix(1_700_000_000, 0).UTC()
+	firstEvents, endPos := chainBinlogEvents(4, eventAt, []namedEvent{
+		{typ: goreplication.FORMAT_DESCRIPTION_EVENT, body: formatDescriptionBody(eventAt)},
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", beforeSQL)},
+	})
+	duringEvents, _ := chainBinlogEvents(endPos, eventAt, []namedEvent{
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", during1)},
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", during2)},
+	})
+	phase := append([]*goreplication.BinlogEvent{preambleEvent(0, eventAt.Add(-time.Hour))}, duringEvents...)
+
+	const taskID = "11"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	openPath := filepath.Join(taskDir, "mysql-bin.000003.open.e1")
+	writeBinlogSegment(t, openPath, firstEvents)
+	info, err := os.Stat(openPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uint32(info.Size()) != endPos {
+		t.Fatalf("fixture size %d != last event end %d", info.Size(), endPos)
+	}
+
+	fetcher := &movableMaster{
+		status: MasterStatus{File: "mysql-bin.000004", Pos: 197},
+		uuid:   "11111111-1111-1111-1111-111111111111",
+	}
+	syncer := &stopResumeSyncer{phases: [][]*goreplication.BinlogEvent{phase}}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := NewMySQLRunner(dir)
+	runner.fetcher = fetcher
+	runner.progressReporter = reporter
+	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+
+	scheduler := tasks.NewScheduler(
+		tasks.WithDataDir(dir),
+		tasks.WithRunner(runner),
+		tasks.WithClusterLeaseManager(tasks.NewMemoryLease()),
+		tasks.WithClusterWorkerID("standalone"),
+		tasks.WithClusterLease(time.Minute, time.Minute, time.Minute),
+	)
+	if err := scheduler.StartTask(taskID); !errors.Is(err, tasks.ErrDiskBackupReadOnly) {
+		t.Fatalf("start before adopt: %v", err)
+	}
+	adopted, err := scheduler.AdoptDiskBackup(taskID, tasks.TaskPatch{
+		ClusterKey: "kill-adopt",
+		Source: &tasks.SourceConfig{
+			Host:     "127.0.0.1",
+			Port:     3306,
+			User:     "repl",
+			Password: "secret",
+			Flavor:   "mysql",
+		},
+	})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if adopted.Start.Mode != tasks.StartModeFilePos || adopted.Start.File != "mysql-bin.000003" || adopted.Start.Pos != endPos {
+		t.Fatalf("adopt start %+v, want FILE_POS mysql-bin.000003:%d", adopted.Start, endPos)
+	}
+	if err := scheduler.StartTask(taskID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForMarker(t, dir, taskID, during1)
+	waitForMarker(t, dir, taskID, during2)
+	if err := scheduler.StopTask(taskID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitTaskState(t, scheduler, taskID, tasks.StateStopped)
+
+	starts := syncer.positions()
+	if len(starts) != 1 || starts[0].Name != "mysql-bin.000003" || starts[0].Pos != endPos {
+		t.Fatalf("resume start %+v, want mysql-bin.000003:%d (not mysql-bin.000004:197, not position 4)", starts, endPos)
+	}
+	for _, report := range reporter.reports {
+		if report.atTip {
+			t.Fatalf("catch-up after kill reported at-tip: %+v", report)
+		}
+	}
+
+	matches, err := filepath.Glob(filepath.Join(taskDir, "mysql-bin.000003*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spanning string
+	for _, match := range matches {
+		body, readErr := os.ReadFile(match)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if bytes.Contains(body, []byte(during1)) {
+			spanning = match
+			break
+		}
+	}
+	if spanning == "" {
+		t.Fatalf("no segment contains %s in %v", during1, matches)
+	}
+	body, err := os.ReadFile(spanning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasBefore := bytes.Contains(body, []byte(beforeSQL))
+	eventType := byte(0)
+	if len(body) > 8 {
+		eventType = body[8]
+	}
+	if len(body) < 9 || !bytes.Equal(body[:4], binlogMagic) || eventType != byte(goreplication.FORMAT_DESCRIPTION_EVENT) || !hasBefore {
+		t.Fatalf("spanning %s size=%d first_event=0x%02x has_before=%v; want format description then %s", spanning, len(body), eventType, hasBefore, beforeSQL)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("source file split across %v", matches)
+	}
+	events := replayBinlogFile(t, spanning)
+	assertContiguousQueries(t, events, 4, beforeSQL, during1, true)
+	duringCount := 0
+	var during1End uint32
+	for _, ev := range events {
+		if ev.query == during1 {
+			during1End = ev.pos
+		}
+		if ev.query == during2 {
+			duringCount++
+			if ev.pos < ev.size || ev.pos-ev.size != during1End {
+				t.Fatalf("%s starts at %d, %s ended at %d", during2, ev.pos-ev.size, during1, during1End)
+			}
+		}
+	}
+	if duringCount != 1 {
+		t.Fatalf("%s count %d", during2, duringCount)
+	}
+	replayWithMySQLBinlog(t, spanning, beforeSQL, during1)
+	replayWithMySQLBinlog(t, spanning, during1, during2)
 }
 
 type namedEvent struct {
