@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
+// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -62,16 +62,29 @@ func listTaskBinlogFilesOnDisk(dataDir, taskID string, limit int) ([]BinlogFile,
 		}
 		files = append(files, item)
 	}
-	sort.SliceStable(files, func(i, j int) bool {
-		return binlogSegmentLess(files[i], files[j])
+	return WindowBinlogFilesForReplay(files, limit), nil
+}
+
+// WindowBinlogFilesForReplay orders rows the way listTaskBinlogFilesOnDisk does.
+// Lower source indexes come first. The same index lists the sealed name, then
+// open epochs from low to high. limit keeps the tail of that order, the highest
+// indexes. The key is the on-disk file name. An empty input is returned as-is.
+func WindowBinlogFilesForReplay(files []BinlogFile, limit int) []BinlogFile {
+	if len(files) == 0 {
+		return files
+	}
+	out := make([]BinlogFile, len(files))
+	copy(out, files)
+	sort.SliceStable(out, func(i, j int) bool {
+		return binlogSegmentLess(out[i], out[j])
 	})
 	if limit <= 0 {
 		limit = 200
 	}
-	if len(files) > limit {
-		files = files[len(files)-limit:]
+	if len(out) > limit {
+		out = out[len(out)-limit:]
 	}
-	return files, nil
+	return out
 }
 
 func taskBinlogDir(dataDir, taskID string) (string, bool) {
