@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Docs
+
+- The replay section says a MySQL source requires MySQL's own `mysqlbinlog`, and a MariaDB source requires `mariadb-binlog`. If `mysqlbinlog --version` prints MariaDB, do not use it against MySQL: the pipe fails at `check_constraint_checks` with error 1193 and no rows land. The files are not corrupt.
+
 ## [v0.5.8] - 2026-10-03
 
 ### Fixed
