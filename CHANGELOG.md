@@ -12,9 +12,19 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.10] - 2026-10-03
+
 ### Fixed
 
-- Standalone with no `meta_dsn`, after a restart on the same `data_dir`: `GET /api/tasks` and the dashboard list leftover directories that still contain sealed or `.open.e<epoch>` segments. The id is the directory name. `GET /api/tasks/{id}/files` uses the same disk scan (`file_name` is the source name, `file_path` is the on-disk path, ascending source index). Checkpoint stays 404 `checkpoint not found`. Those rows have no source credentials and are not started. A configured `meta_dsn` does not discover directories from disk. A non-empty `binlog_files` catalog is unchanged, and a store error does not fall back to disk.
+- Standalone with no `meta_dsn`, after the process exits and a new process starts on the same `data_dir`: leftover `{data_dir}/{task_id}/` directories that still contain sealed or `.open.e<epoch>` segments show up in `GET /api/tasks` and the Console without a known id. The id is the directory name. `GET /api/tasks/{id}/files` uses the existing disk-scan contract (`file_name` is the source name, an open `file_path` keeps `.open.e<epoch>`, `start_pos` and `end_pos` are 0, ascending source index). Checkpoint stays 404 `checkpoint not found`. The row has no source credentials. Start returns 400 with body `on-disk backup has no task metadata` and does not start replication. A configured `meta_dsn` does not discover directories from disk. A non-empty `binlog_files` catalog still wins, and extra files on disk are not listed. No new config key. No schema migration.
+
+### Changed
+
+- Operator download examples in README, the landing page, the deployment guide, the config templates, and the workers API example now pin `v0.5.10`.
+
+### Docs
+
+- `docs/guide/admin/configuration.md` no longer says that `GET /api/tasks/{id}/files` returns `[]` when `meta_dsn` is unset. This is a guide correction, not a behavior change. The published v0.5.9 tarball still has that sentence.
 
 ## [v0.5.9] - 2026-10-03
 
