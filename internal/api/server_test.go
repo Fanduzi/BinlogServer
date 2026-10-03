@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, restart discovery of leftover data directories, adopt-then-start of those directories, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -3760,6 +3760,9 @@ func TestTaskAPI_GetReplication_AbnormalReasonNoProgress(t *testing.T) {
 	}
 	if body["reason"] != "NO_PROGRESS" {
 		t.Fatalf("expected reason=NO_PROGRESS, got %v", body["reason"])
+	}
+	if _, ok := body["delay_seconds"]; ok {
+		t.Fatalf("delay_seconds=%v, want field omitted when RUNNING has no event-time sample", body["delay_seconds"])
 	}
 }
 

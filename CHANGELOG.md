@@ -15,6 +15,7 @@ Maintenance rules:
 ### Fixed
 
 - A caught-up `FILE_POS` resume, including standalone adopt at the highest segment size, no longer reports `DELAY_EXCEEDS_THRESHOLD` from the dump preamble. MySQL sends the binlog format description before any new event, with `log_pos` 0 or the original end position (126 on MySQL 8). That header time is when the file was created. The preamble is not written and does not move the cursor. If the resume position is already at `SHOW MASTER STATUS`, `delay_seconds` is 0 / `NORMAL` as soon as StartSync succeeds. Catch-up that is still behind the tip still uses `now - last_event_at`.
+- A caught-up RUNNING task includes `delay_seconds` as JSON `0` on `GET /api/tasks/{id}/replication` and the dashboard replication object. `omitempty` on `int64` was dropping that zero, so the Console showed `--` seconds while status stayed `NORMAL`. A task with no event-time sample still omits the field. The 30-second threshold, `DELAYED`, and the dump-preamble behavior are unchanged. No new config key. No schema migration.
 
 ## [v0.5.13] - 2026-10-03
 
