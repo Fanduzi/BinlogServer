@@ -392,3 +392,165 @@ sudo systemctl status binlog-server
   curl -X POST http://localhost:8080/api/tasks/{task_id}/files/retry-upload?limit=100 \
     -H "Authorization: Bearer ${TOKEN}"
   ```
+
+---
+
+## 7. 源库不可用时，用本地分段回放
+
+<a id="replay-local-segments"></a>
+
+English: [Replay local segments when the source is gone](#replay-local-segments-en).
+
+源库已经不可用、手里只剩落盘文件时，用这一节把分段交给 `mysqlbinlog` 或 `mariadb-binlog`。下面写的是当前代码的行为。
+
+### 7.1 文件在哪
+
+分段在 `{data_dir}/{task_id}/`。`data_dir` 默认是进程工作目录下的 `./data`，对应环境变量 `BINLOG_SERVER_DATA_DIR`。`task_id` 是创建任务返回的 id，Quick Start 的第一个任务是 `1`。
+
+单机模式下目录就在这个进程所在的机器上。集群模式下目录在执行该任务的 worker 本机，不在 control plane 上。
+
+Day-1 已经拉到数据并在源上 `FLUSH LOGS` 之后，常见内容是：
+
+```text
+./data/1/mysql-bin.000003
+./data/1/mysql-bin.000004.open.e1
+```
+
+`mysql-bin.NNNNNN` 是源库自己的 binlog 文件名。源库的 `log_bin` 前缀不同时，这里的前缀跟着变。
+
+### 7.2 封存名和 `.open.e<epoch>`
+
+不带 `.open.e<epoch>` 的文件已经封存。源库发出真实 rotate（例如 `FLUSH LOGS`）后，服务把当前文件 `rename` 成源文件名，字节不改。
+
+`mysql-bin.000004.open.e1` 是还没封存的分段。`e` 后面的数字是这次运行的租约 epoch，单机第一次 `start` 是 `1`。后缀只在文件名上。文件从 4 字节 magic header `fe 62 69 6e`（`0xfe` + `bin`）开始，后面是已经 `fsync` 的事件原文。封存前后是同一串字节。
+
+`mysqlbinlog` / `mariadb-binlog` 认这 4 个字节，不认文件名。把 `.open.e1` 的路径原样放进命令。`stop` 只关闭文件，不会做这次 `rename`。文件若只有这 4 个字节，说明还没有事件落盘，命令能打开它，输出里没有业务事件。
+
+每个序号只传一个文件，按序号从小到大：
+
+- 这个序号只有封存名：传封存名。
+- 这个序号只有 `.open.e<epoch>`：原样传这个路径。同一序号有多个 epoch 时，传数字最大的那个。
+- 同一序号封存名和 `.open.e*` 都在：只传 epoch 最大的 `.open.e*`。正常 rotate 之后旧名字不会留下；两个都在，说明后一次写入没有覆盖已经封存的文件。
+
+### 7.3 回放命令
+
+先停止任务，让当前分段不再追加。监听地址按实际替换。开启了 API 鉴权时加上 `Authorization: Bearer`。进程已经退出时，跳过 `stop`，直接读磁盘。任务已经是 `FAILED` 或 `STOPPED` 时，这个 `stop` 返回 HTTP 400，正文 `cannot stop from state ...`，文件当时没有被打开，直接回放。
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8080/api/tasks/1/stop
+```
+
+然后按源文件名序号从小到大回放。下面就是上一节那两个文件：
+
+```bash
+mysqlbinlog \
+  ./data/1/mysql-bin.000003 \
+  ./data/1/mysql-bin.000004.open.e1 \
+  | mysql -h 127.0.0.1 -u root -p
+```
+
+MariaDB 把 `mysqlbinlog` 换成 `mariadb-binlog`，把 `mysql` 换成 `mariadb`，文件顺序不变。
+
+管道右侧是恢复库。生产环境把 `./data` 换成 `data_dir`（部署示例里是 `/data/binlog-server/data`）。文件里已有的 GTID 事件会跟着这段输出执行。整段回放按上面的文件顺序即可。
+
+`LATEST` 从订阅成功之后的事件开始写。本地第一段不包含订阅之前已经写在源库该文件里的事件。
+
+### 7.4 源已经没了，信磁盘、files API，还是对象存储
+
+回放信磁盘上的字节。`{data_dir}/{task_id}/` 里仍保留的封存文件，加上还没封存的 `.open.e<epoch>`，就是已经 `fsync` 的全部分段。
+
+standalone 没配 `meta_dsn` 时，控制面只在内存：
+
+- 进程还在：`GET /api/tasks/{id}/files` 的正文是 `[]`，`GET /api/tasks/{id}/checkpoint` 是 `404`，正文是 `checkpoint not found`。
+- 进程退出后，任务也不在内存里，再查这个 id 是 `404 task not found`。目录还在。
+
+`[]` 和 `checkpoint not found` 表示没有文件索引、没有位点行。进程退出后的 `task not found` 表示内存里的任务没了。分段仍在磁盘上。
+
+配了 `meta_dsn` 时，files API 读 `binlog_files`，默认最多 200 条，按 `sealed_at` 倒序，这个顺序不能直接拿来当 `mysqlbinlog` 的参数顺序。`OPEN` 行的 `file_name` 是源文件名，`file_path` 才是带 `.open.e<epoch>` 的磁盘路径。checkpoint 的 `file` 和 `pos` 是最后一次 `fsync` 的源文件名和位点。回放清单仍以磁盘上的文件名为准。
+
+对象存储只保存已经封存并且上传成功的文件。对象键是 `{upload.prefix/}{cluster_key}/{source_identity}/{封存文件名}`，没有 `.open.e`。`source_identity` 在 MySQL 上是 `server_uuid`，在 MariaDB 上是 `mariadb:<server_id>:<gtid_domain_id>`。正在写的分段不会出现在桶里。`UPLOAD_FAILED` 的封存文件仍在磁盘上。没配上传时桶是空的。
+
+复制循环下次打开文件时，会删掉修改时间早于 `storage.retention_days` 的其他本地文件，当前这个 `.open.e<epoch>` 除外。更早的封存分段如果本地已经删掉、上传曾经成功，就只在对象存储里。
+
+源库以后又恢复、任务再次 `start` 并且连上源时，新的 epoch 会删掉其他 epoch 的 `.open.e*`。封存文件还在。要留住当前这段未封存的尾部，先把 `{data_dir}/{task_id}/` 复制出来。源已经连不上时，`start` 在打开本地文件之前失败，不会走到删除这一步。
+
+---
+
+## 8. Replay local segments when the source is gone
+
+<a id="replay-local-segments-en"></a>
+
+中文：[源库不可用时，用本地分段回放](#replay-local-segments).
+
+Use this section when the source is gone and the only copy is the files on disk. `mysqlbinlog` and `mariadb-binlog` read those files. The behavior below is what the current code does.
+
+### 8.1 Where the files are
+
+Segments live in `{data_dir}/{task_id}/`. `data_dir` defaults to `./data` under the process working directory (`BINLOG_SERVER_DATA_DIR`). `task_id` is the id returned when the task was created. The first Quick Start task is `1`.
+
+On a standalone process the directory is on that machine. In cluster mode it is on the worker that is running the task, not on the control plane.
+
+After a Day-1 pull and a source `FLUSH LOGS`, the directory usually looks like this:
+
+```text
+./data/1/mysql-bin.000003
+./data/1/mysql-bin.000004.open.e1
+```
+
+`mysql-bin.NNNNNN` is the source's own binlog file name. A different `log_bin` prefix shows up here unchanged.
+
+### 8.2 Sealed names and `.open.e<epoch>`
+
+A file with no `.open.e<epoch>` suffix is sealed. After a real rotate from the source (for example `FLUSH LOGS`), the server `rename`s the current file to the source file name. The bytes stay the same.
+
+`mysql-bin.000004.open.e1` is the segment that is still open. The number after `e` is the lease epoch of this run. The first `start` in a standalone process is `1`. The suffix is only on the name. The file starts with the 4-byte magic header `fe 62 69 6e` (`0xfe` + `bin`) and then the raw events that have been `fsync`ed. Sealing does not rewrite them.
+
+`mysqlbinlog` and `mariadb-binlog` accept that header. Pass the `.open.e1` path as it is. `stop` closes the file and leaves the name in place. A file that is only those 4 bytes has no events yet. The tool opens it and prints no row or statement events.
+
+Pass one file per index, in ascending index order:
+
+- Index has only the sealed name: pass that name.
+- Index has only `.open.e<epoch>`: pass that path unchanged. If several epochs exist for one index, pass the highest epoch.
+- Index has both a sealed name and `.open.e*`: pass only the highest-epoch `.open.e*` file. A successful rotate does not leave the old name behind. Both names mean a later write did not replace the sealed file.
+
+### 8.3 Replay command
+
+Stop the task first so the current segment stops growing. Change the listen address to match the process. Add `Authorization: Bearer` when API auth is on. If the process has already exited, skip `stop` and read the files. When the task is already `FAILED` or `STOPPED`, this `stop` returns HTTP 400 with body `cannot stop from state ...`. The file is not open then. Replay it directly.
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8080/api/tasks/1/stop
+```
+
+Replay in source-file index order. These are the two files from the layout above:
+
+```bash
+mysqlbinlog \
+  ./data/1/mysql-bin.000003 \
+  ./data/1/mysql-bin.000004.open.e1 \
+  | mysql -h 127.0.0.1 -u root -p
+```
+
+On MariaDB, use `mariadb-binlog` and `mariadb` with the same files in the same order.
+
+The right-hand side is the restore server. In production, replace `./data` with `data_dir` (the deployment samples use `/data/binlog-server/data`). GTID events already stored in the files are part of this output. Replay the files in this order.
+
+A `LATEST` task writes events from the moment the subscription is up. The first local segment does not contain events that were already in that source file before the subscription.
+
+### 8.4 Disk, the files API, or object storage
+
+Replay the bytes on disk. Sealed files still under `{data_dir}/{task_id}/`, plus the `.open.e<epoch>` segment that has not been sealed, are the segments that have been `fsync`ed.
+
+Standalone with no `meta_dsn` keeps the control plane in memory:
+
+- While the process is still up, `GET /api/tasks/{id}/files` returns `[]`, and `GET /api/tasks/{id}/checkpoint` returns `404` with body `checkpoint not found`.
+- After the process exits, the task is gone too. A later request for that id returns `404 task not found`. The directory remains.
+
+`[]` and `checkpoint not found` mean there is no file index and no checkpoint row. `task not found` after the process exits means the in-memory task is gone. The segments are still on disk.
+
+With `meta_dsn`, the files API reads `binlog_files`, returns at most 200 rows by default, and orders them by `sealed_at` descending. That order is not the `mysqlbinlog` argument order. An `OPEN` row's `file_name` is the source file name. `file_path` is the on-disk path that includes `.open.e<epoch>`. Checkpoint `file` and `pos` are the source file name and position of the last `fsync`. Build the replay list from the file names on disk.
+
+Object storage receives a file only after it is sealed and the upload succeeds. The object key is `{upload.prefix/}{cluster_key}/{source_identity}/{sealed file name}`, with no `.open.e`. `source_identity` is the MySQL `server_uuid`, or `mariadb:<server_id>:<gtid_domain_id>` for MariaDB. The segment still being written is not in the bucket. A sealed file in `UPLOAD_FAILED` is still on disk. With upload unconfigured, the bucket is empty.
+
+The next time the replication loop opens a file, it deletes other local files whose modification time is older than `storage.retention_days`. The current `.open.e<epoch>` file stays. An older sealed segment that was deleted locally and had been uploaded exists only in object storage.
+
+If the source comes back and a later `start` connects, the new epoch deletes `.open.e*` files from other epochs. Sealed files stay. Copy `{data_dir}/{task_id}/` first when you still need the unsealed tail. When the source is unreachable, `start` fails before it opens a local file, so it does not reach that delete.
