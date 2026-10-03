@@ -83,6 +83,7 @@
     "lineNo": "行号",
     "validation": "校验",
     "file": "文件",
+    "filePath": "磁盘路径",
     "size": "大小",
     "startPos": "起始位点",
     "endPos": "结束位点",

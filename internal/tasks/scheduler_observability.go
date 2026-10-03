@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, files, runs, and worker heartbeat views
+// output: observability-facing task progress including at-tip lag, events, meta or on-disk files, runs, and worker heartbeat views
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,6 +8,7 @@ package tasks
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	"binlog_server/internal/binlog"
@@ -139,21 +140,40 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	return out, nil
 }
 
-// ListFiles 列出任务文件元数据。
+// ListFiles 列出任务文件。元数据目录非空时保持原结果。
+// 未配置文件库，或该任务一条目录都没有时，扫描 {data_dir}/{task_id}。
 func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.tasks[taskID]; !ok {
+	_, ok := s.tasks[taskID]
+	store := s.fileStore
+	dataDir := s.dataDir
+	s.mu.Unlock()
+	if !ok {
 		return nil, ErrTaskNotFound
 	}
-	if s.fileStore == nil {
+	if store != nil {
+		ctx, cancel := s.withReadTimeout(context.Background())
+		files, err := store.ListBinlogFiles(ctx, taskID, limit)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		if len(files) > 0 || strings.TrimSpace(dataDir) == "" {
+			return files, nil
+		}
+		disk, err := listTaskBinlogFilesOnDisk(dataDir, taskID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(disk) == 0 {
+			return files, nil
+		}
+		return disk, nil
+	}
+	if strings.TrimSpace(dataDir) == "" {
 		return []BinlogFile{}, nil
 	}
-	ctx, cancel := s.withReadTimeout(context.Background())
-	files, err := s.fileStore.ListBinlogFiles(ctx, taskID, limit)
-	cancel()
-	return files, err
+	return listTaskBinlogFilesOnDisk(dataDir, taskID, limit)
 }
 
 // RetryFailedUploads 手动重试失败上传（仅 sealed 且状态为 UPLOAD_FAILED）。
