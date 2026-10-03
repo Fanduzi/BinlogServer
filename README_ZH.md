@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.7
+### 1. 下载、校验并解压 v0.5.8
 
 ```bash
-VER=0.5.7
+VER=0.5.8
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -112,7 +112,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.7_linux_amd64/
+binlog-server_0.5.8_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -122,6 +122,7 @@ binlog-server_0.5.7_linux_amd64/
   LICENSE                        # Apache 2.0 开源协议
   config.example.yaml            # 完整参数参考配置
   config.production.example.yaml # 生产安全推荐模板
+  docs/guide/                    # 运维指南，含本地分段回放
 ```
 
 ### 2. 本地快速体验 (Loopback 监听)
@@ -232,17 +233,15 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.7)
+## 升级须知 (v0.5.8)
 
-在将生产环境升级至 `v0.5.7` 之前，请确认以下变更点：
+在将生产环境升级至 `v0.5.8` 之前，请确认以下变更点：
 
-- **无需数据库表结构变更:** `v0.5.7` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。
-- **元数据读取重试:** `GetTask`、任务列表和 checkpoint 会重试 meta MySQL 的瞬时错误。任务不存在仍然是找不到。
-- **MariaDB Flavor:** `mysql` 读不到 `@@server_uuid` 时仍是 `SOURCE_IDENTITY_UNAVAILABLE`，并提示设置 `flavor=mariadb`。`flavor=mariadb` 的身份识别没有改。
-- **单机概览:** 没有心跳的本进程不再计为离线 Worker。概览为 `worker_count=0`、`single_process=true`，`GET /api/workers` 为空。
-- **控制台 Flavor 下拉:** 创建任务的 Flavor 控件可以渲染。提示文案不再包含 vue-i18n 会拒绝的原始 `@@server_uuid`。
+- **无需数据库表结构变更:** `v0.5.8` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。
+- **Bearer 鉴权下的控制台:** `/ui/` 和静态资源不需要 `Authorization` 头。设置框要求填写 bearer token，之后的请求带 `Authorization: Bearer`。`/api/*`、`/metrics`、`/swagger/*` 不带凭证仍返回 401。`/healthz` 仍是 200。配置键没有变化。
+- **磁盘回放:** 管理指南说明用 `mysqlbinlog` / `mariadb-binlog` 回放 `{data_dir}/{task_id}/mysql-bin.NNNNNN`。`.open.e<epoch>` 留在文件名上，路径原样传入。standalone 没配 `meta_dsn` 时，files 是 `[]`，checkpoint 是 404。对象存储里只有封存且上传成功的文件。`v0.5.7` 的发布包没有 `docs/guide`。`v0.5.8` 的发布包带上了它，解压后就能看到回放这一节。
 
-详细版本记录：[docs/releases/v0.5.7.zh-CN.md](docs/releases/v0.5.7.zh-CN.md) | [docs/releases/release-notes-v0.5.7.md](docs/releases/release-notes-v0.5.7.md)
+详细版本记录：[docs/releases/v0.5.8.zh-CN.md](docs/releases/v0.5.8.zh-CN.md) | [docs/releases/release-notes-v0.5.8.md](docs/releases/release-notes-v0.5.8.md)
 
 ---
 
