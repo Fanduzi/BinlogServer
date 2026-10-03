@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, structured 400 bodies, 400 on updates of read-only on-disk backups, and 200 when POST adopt attaches source identity to that same id
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, and 200 when POST adopt attaches source identity to that same id
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -51,11 +51,13 @@ type taskReplicationResponse struct {
 	LastError        string      `json:"last_error,omitempty"`
 	ThresholdSeconds int64       `json:"threshold_seconds"`
 	HasProgress      bool        `json:"has_progress"`
-	DelaySeconds     int64       `json:"delay_seconds,omitempty"`
-	LastEventAt      *time.Time  `json:"last_event_at,omitempty"`
-	LastEventFile    string      `json:"last_event_file,omitempty"`
-	LastEventPos     uint32      `json:"last_event_pos,omitempty"`
-	UpdatedAt        *time.Time  `json:"updated_at,omitempty"`
+	// DelaySeconds is a sampled lag. Nil means there is no event-time sample, so JSON omits the field.
+	// A non-nil 0 is caught up. omitempty on a plain int64 would drop that zero and the Console would show "--".
+	DelaySeconds  *int64     `json:"delay_seconds,omitempty"`
+	LastEventAt   *time.Time `json:"last_event_at,omitempty"`
+	LastEventFile string     `json:"last_event_file,omitempty"`
+	LastEventPos  uint32     `json:"last_event_pos,omitempty"`
+	UpdatedAt     *time.Time `json:"updated_at,omitempty"`
 }
 
 type dashboardTaskItem struct {
@@ -865,16 +867,15 @@ func buildReplicationResponse(task tasks.Task, progress tasks.ReplicationProgres
 		if !progress.LastEventAt.IsZero() {
 			lastEventAt := progress.LastEventAt
 			resp.LastEventAt = &lastEventAt
-			if progress.AtTip {
-				// Dump is at the source tip (LATEST start or idle). Header age is not lag.
-				resp.DelaySeconds = 0
-			} else {
-				delay := int64(now.Sub(progress.LastEventAt).Seconds())
+			delay := int64(0)
+			if !progress.AtTip {
+				// Header age is lag only while the dump is still behind the source tip.
+				delay = int64(now.Sub(progress.LastEventAt).Seconds())
 				if delay < 0 {
 					delay = 0
 				}
-				resp.DelaySeconds = delay
 			}
+			resp.DelaySeconds = &delay
 		}
 		if !progress.UpdatedAt.IsZero() {
 			updatedAt := progress.UpdatedAt
@@ -899,7 +900,7 @@ func buildReplicationResponse(task tasks.Task, progress tasks.ReplicationProgres
 			resp.Reason = "NO_PROGRESS"
 			return resp
 		}
-		if resp.DelaySeconds > thresholdSeconds {
+		if resp.DelaySeconds != nil && *resp.DelaySeconds > thresholdSeconds {
 			resp.Status = "DELAYED"
 			resp.Reason = "DELAY_EXCEEDS_THRESHOLD"
 		} else {
