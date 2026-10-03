@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, LATEST at-tip vs catch-up/idle-behind progress, checkpoint semantics, error propagation, and stop cleanup
+// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, dump-preamble lag, checkpoint semantics, error propagation, and stop cleanup
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -8,6 +8,7 @@ package replication
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -311,6 +312,135 @@ func TestMySQLRunnerRun_LatestStartReportsAtTipBeforeNextEvent(t *testing.T) {
 	}
 }
 
+// preambleEvent is the format description MySQL sends before events at the
+// requested position. logPos 0 is the documented rewrite; a positive logPos
+// still below the dump cursor is the original end_log_pos (126 on MySQL 8).
+func preambleEvent(logPos uint32, ts time.Time) *goreplication.BinlogEvent {
+	raw := make([]byte, 122)
+	raw[0] = 0xfe
+	return &goreplication.BinlogEvent{
+		Header: &goreplication.EventHeader{
+			EventType: goreplication.FORMAT_DESCRIPTION_EVENT,
+			LogPos:    logPos,
+			Timestamp: uint32(ts.Unix()),
+		},
+		RawData: raw,
+	}
+}
+
+// TestMySQLRunnerRun_FilePosAtTipIgnoresDumpPreamble 验证已经在源 tip 的 FILE_POS
+// （adopt 续传的最高分段大小）在 StartSync 之后立刻是 at-tip。dump 开头的
+// format description 不能写成新字节，也不能用它的 header 时间报 DELAYED。
+func TestMySQLRunnerRun_FilePosAtTipIgnoresDumpPreamble(t *testing.T) {
+	oldEventAt := time.Now().UTC().Add(-163 * time.Second).Truncate(time.Second)
+	for _, logPos := range []uint32{0, 126} {
+		t.Run(fmt.Sprintf("logpos_%d", logPos), func(t *testing.T) {
+			file := &fakeSyncFile{}
+			fetcher := &fakeSourceMetaFetcher{
+				status:     MasterStatus{File: "mysql-bin.000006", Pos: 197},
+				serverUUID: "srv-uuid-1",
+			}
+			streamer := &fakeStreamer{
+				results: []streamResult{
+					{event: preambleEvent(logPos, oldEventAt)},
+					{err: context.Canceled},
+				},
+			}
+			syncer := &fakeSyncer{streamer: streamer}
+			reporter := &fakeRunnerProgressReporter{}
+			runner := &MySQLRunner{
+				fetcher:          fetcher,
+				progressReporter: reporter,
+				newSyncer: func(_ goreplication.BinlogSyncerConfig) binlogSyncer {
+					return syncer
+				},
+				writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+					return &fakeCloser{}, binlog.NewWriter(file, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+				},
+			}
+
+			err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+				Mode: tasks.StartModeFilePos,
+				File: "mysql-bin.000006",
+				Pos:  197,
+			}))
+			if err != nil {
+				t.Fatalf("Run returned error: %v", err)
+			}
+			if len(reporter.reports) == 0 {
+				t.Fatal("caught-up FILE_POS must report at-tip before idle, or the first poll shows DELAYED from the preamble")
+			}
+			for _, got := range reporter.reports {
+				if !got.atTip {
+					t.Fatalf("report %+v, want at-tip; preamble header must not be DELAY_EXCEEDS_THRESHOLD", got)
+				}
+				if !got.at.After(oldEventAt) {
+					t.Fatalf("report time %s leaked the format-description header %s", got.at, oldEventAt)
+				}
+				if got.pos != 197 || got.file != "mysql-bin.000006" {
+					t.Fatalf("report %+v, want cursor to stay at mysql-bin.000006:197", got)
+				}
+			}
+			for _, chunk := range file.writes {
+				if len(chunk) == 122 {
+					t.Fatalf("wrote format-description preamble (%d bytes) into the open segment", len(chunk))
+				}
+			}
+		})
+	}
+}
+
+// TestMySQLRunnerRun_PreambleDoesNotHideCatchUpLag 验证仍落后 tip 时，preamble 不能
+// 改写位点，真实事件的 header 时间仍然是延迟。
+func TestMySQLRunnerRun_PreambleDoesNotHideCatchUpLag(t *testing.T) {
+	oldEventAt := time.Date(2026, 8, 27, 4, 47, 20, 0, time.UTC)
+	file := &fakeSyncFile{}
+	fetcher := &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000006", Pos: 500},
+		serverUUID: "srv-uuid-1",
+	}
+	streamer := &fakeStreamer{
+		results: []streamResult{
+			{event: preambleEvent(126, oldEventAt)},
+			{event: newRunnerEventAt(400, oldEventAt)},
+			{err: context.Canceled},
+		},
+	}
+	syncer := &fakeSyncer{streamer: streamer}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := &MySQLRunner{
+		fetcher:          fetcher,
+		progressReporter: reporter,
+		newSyncer: func(_ goreplication.BinlogSyncerConfig) binlogSyncer {
+			return syncer
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			return &fakeCloser{}, binlog.NewWriter(file, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+	}
+
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: "mysql-bin.000006",
+		Pos:  197,
+	}))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(reporter.reports) != 1 {
+		t.Fatalf("expected only the catch-up event, got %+v", reporter.reports)
+	}
+	got := reporter.reports[0]
+	if got.atTip || got.pos != 400 || !got.at.Equal(oldEventAt) {
+		t.Fatalf("catch-up report %+v, want pos=400, old header, not at-tip", got)
+	}
+	for _, chunk := range file.writes {
+		if len(chunk) == 122 {
+			t.Fatalf("wrote format-description preamble during catch-up")
+		}
+	}
+}
+
 // TestMySQLRunnerRun_FilePosCatchUpKeepsEventHeaderLag 验证 FILE_POS 追旧事件时不能标成 at-tip。
 func TestMySQLRunnerRun_FilePosCatchUpKeepsEventHeaderLag(t *testing.T) {
 	oldEventAt := time.Date(2026, 8, 27, 4, 47, 20, 0, time.UTC)
@@ -368,11 +498,11 @@ func TestMySQLRunnerRun_IdlePollReportsAtTip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if fetcher.fetchStatusCall != 1 {
-		t.Fatalf("idle at-tip should confirm via FetchMasterStatus once, got %d", fetcher.fetchStatusCall)
+	if fetcher.fetchStatusCall != 2 {
+		t.Fatalf("at-tip FILE_POS checks master at start and again on idle, got %d", fetcher.fetchStatusCall)
 	}
-	if len(reporter.reports) != 1 || !reporter.reports[0].atTip {
-		t.Fatalf("idle poll at master file/pos should report at-tip, got %+v", reporter.reports)
+	if len(reporter.reports) != 2 || !reporter.reports[0].atTip || !reporter.reports[1].atTip {
+		t.Fatalf("start and idle at master file/pos should both report at-tip, got %+v", reporter.reports)
 	}
 	if reporter.reports[0].file != "mysql-bin.000010" || reporter.reports[0].pos != 4 {
 		t.Fatalf("idle at-tip report %+v, want start file/pos", reporter.reports[0])
@@ -406,8 +536,8 @@ func TestMySQLRunnerRun_IdlePollBehindMasterDoesNotReportAtTip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if fetcher.fetchStatusCall != 1 {
-		t.Fatalf("idle should confirm tip via FetchMasterStatus once, got %d", fetcher.fetchStatusCall)
+	if fetcher.fetchStatusCall != 2 {
+		t.Fatalf("FILE_POS start and idle should each confirm tip, got %d", fetcher.fetchStatusCall)
 	}
 	if len(reporter.reports) != 2 {
 		t.Fatalf("expected idle + catch-up progress reports, got %+v", reporter.reports)
@@ -455,8 +585,8 @@ func TestMySQLRunnerRun_IdlePollMasterStatusErrorDoesNotReportAtTip(t *testing.T
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if fetcher.fetchStatusCall != 1 {
-		t.Fatalf("idle should still call FetchMasterStatus, got %d", fetcher.fetchStatusCall)
+	if fetcher.fetchStatusCall != 2 {
+		t.Fatalf("start and idle should each call FetchMasterStatus, got %d", fetcher.fetchStatusCall)
 	}
 	if len(reporter.reports) != 1 || reporter.reports[0].atTip {
 		t.Fatalf("idle with master-status error should not report at-tip, got %+v", reporter.reports)
