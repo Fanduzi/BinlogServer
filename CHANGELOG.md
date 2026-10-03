@@ -12,9 +12,15 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.13] - 2026-10-03
+
 ### Added
 
-- The Console task detail has an Adopt action for a leftover standalone directory that is already listed. It submits `POST /api/tasks/{id}/adopt` with `cluster_key` and source, shows `STOPPED`, and does not show the password. Adopt does not start replication. Start remains the existing start action and works after adopt. A catalog task's Edit still uses `PUT`. With `meta_dsn`, directories are not listed and the Console does not create a task from a directory. No new config key. No schema migration.
+- The Console is the surface on top of `POST /api/tasks/{id}/adopt` already in v0.5.11. The published v0.5.12 package still has no Console adopt button. Standalone with no `meta_dsn`: a leftover directory is listed. In the Chinese Console its detail actions are 认领, 启动, 停止, and 删除, and there is no 编辑. A task that already has source credentials shows 编辑, 启动, 停止, and 删除, and no 认领. 认领 submits `cluster_key` and source. Leaving the start mode at the default (highest segment end) does not send an override. The success toast is 任务已认领. The task stays 已停止, shows the source and cluster key, does not show the password, and does not start replication. The existing 启动 action then starts it. Dogfood on tip `39981ead` (`v0.0.0-20261003150852-39981ead3fd5`) saw `mysql-bin.000005.open.e2` in the same directory while the earlier segment sizes stayed unchanged. With `meta_dsn`, leftover directories are not listed (the Console table is empty; ids 99 and 42 do not appear) and there is no 认领. `POST /api/tasks/99/adopt` returns 404 with body `task not found`. `backup_tasks` stays 0. Adopt does not create a task from a directory. The API is unchanged. No schema migration. No new config key.
+
+### Changed
+
+- Operator download examples in README, the landing page, the deployment guide, the config templates, and the workers API example now pin `v0.5.13`.
 
 ## [v0.5.12] - 2026-10-03
 
