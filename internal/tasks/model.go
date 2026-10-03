@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, OPEN/SEALED observability, and at-tip replication progress
+// output: task/start/source/file models including gtid alias decoding, OPEN/SEALED observability, at-tip replication progress, and the process-local KeepLocalSegments flag for adopted leftover directories
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -48,6 +48,10 @@ type Task struct {
 	Start         StartConfig  `json:"start"`
 	Storage       Storage      `json:"storage"`
 	UpdatedAt     time.Time    `json:"updated_at"`
+	// KeepLocalSegments is set when standalone adopt attaches a leftover directory.
+	// Start then opens the next .open.e<epoch> and does not delete segments already there.
+	// It is process-local and omitted from API and metadata JSON.
+	KeepLocalSegments bool `json:"-"`
 }
 
 // TaskPatch 是任务更新接口使用的部分字段 patch。

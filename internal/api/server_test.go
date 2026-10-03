@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, restart discovery of leftover data directories, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, restart discovery of leftover data directories, adopt-then-start of those directories, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -2070,6 +2070,148 @@ func TestTaskAPI_RestartDiscoversDiskBackups(t *testing.T) {
 	}
 	if created.ID == "4" {
 		t.Fatalf("reused leftover id %s", created.ID)
+	}
+}
+
+type adoptResumeRunner struct {
+	dir  string
+	seen chan tasks.Task
+}
+
+func (r *adoptResumeRunner) Run(ctx context.Context, task tasks.Task) error {
+	if task.KeepLocalSegments && task.Epoch > 0 && task.Start.File != "" {
+		name := task.Start.File + ".open.e" + strconv.FormatInt(task.Epoch, 10)
+		if err := os.WriteFile(filepath.Join(r.dir, task.ID, name), []byte("new-bytes"), 0o644); err != nil {
+			return err
+		}
+	}
+	select {
+	case r.seen <- task:
+	default:
+	}
+	<-ctx.Done()
+	return context.Canceled
+}
+
+// TestTaskAPI_AdoptDiskBackupThenStart 验证磁盘孤儿在 adopt 之前不能启动，adopt 之后用同一 id 启动并在原目录写下一个 epoch。
+func TestTaskAPI_AdoptDiskBackupThenStart(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "4")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sealedBody := []byte("sealed-seg")
+	openBody := []byte("open-seg")
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), sealedBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e2"), openBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &adoptResumeRunner{dir: dir, seen: make(chan tasks.Task, 1)}
+	sched := tasks.NewScheduler(
+		tasks.WithDataDir(dir),
+		tasks.WithClusterLeaseManager(tasks.NewMemoryLease()),
+		tasks.WithClusterWorkerID("standalone"),
+		tasks.WithRunner(runner),
+	)
+	handler := NewServer(sched)
+	adoptBody := `{
+		"name":"restored",
+		"cluster_key":"adopted-4",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"s3cret-adopt","flavor":"mysql"}
+	}`
+
+	update := httptest.NewRecorder()
+	handler.ServeHTTP(update, httptest.NewRequest(http.MethodPut, "/api/tasks/4", bytes.NewBufferString(adoptBody)))
+	if update.Code != http.StatusBadRequest || !strings.Contains(update.Body.String(), "on-disk backup has no task metadata") {
+		t.Fatalf("update before adopt status=%d body=%s", update.Code, update.Body.String())
+	}
+	start := httptest.NewRecorder()
+	handler.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/api/tasks/4/start", nil))
+	if start.Code != http.StatusBadRequest || !strings.Contains(start.Body.String(), "on-disk backup has no task metadata") {
+		t.Fatalf("start before adopt status=%d body=%s", start.Code, start.Body.String())
+	}
+
+	adopt := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/4/adopt", bytes.NewBufferString(adoptBody))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(adopt, req)
+	if adopt.Code != http.StatusOK {
+		t.Fatalf("adopt status=%d body=%s", adopt.Code, adopt.Body.String())
+	}
+	if strings.Contains(adopt.Body.String(), "s3cret-adopt") {
+		t.Fatalf("password leaked: %s", adopt.Body.String())
+	}
+	var adopted tasks.Task
+	if err := json.Unmarshal(adopt.Body.Bytes(), &adopted); err != nil {
+		t.Fatal(err)
+	}
+	if adopted.ID != "4" || adopted.Name != "restored" || adopted.State != tasks.StateStopped || adopted.ClusterKey != "adopted-4" {
+		t.Fatalf("adopted %+v", adopted)
+	}
+	if adopted.Source.Host != "127.0.0.1" || adopted.Source.Port != 3306 || adopted.Source.User != "repl" || adopted.Source.Password != "" || adopted.Source.Flavor != "mysql" {
+		t.Fatalf("source %+v", adopted.Source)
+	}
+	if adopted.Start.Mode != tasks.StartModeFilePos || adopted.Start.File != "mysql-bin.000004" || adopted.Start.Pos != uint32(len(openBody)) {
+		t.Fatalf("start %+v", adopted.Start)
+	}
+
+	gotResp := httptest.NewRecorder()
+	handler.ServeHTTP(gotResp, httptest.NewRequest(http.MethodGet, "/api/tasks/4", nil))
+	if gotResp.Code != http.StatusOK || strings.Contains(gotResp.Body.String(), "s3cret-adopt") {
+		t.Fatalf("get status=%d body=%s", gotResp.Code, gotResp.Body.String())
+	}
+
+	started := httptest.NewRecorder()
+	handler.ServeHTTP(started, httptest.NewRequest(http.MethodPost, "/api/tasks/4/start", nil))
+	if started.Code != http.StatusNoContent {
+		t.Fatalf("start status=%d body=%s", started.Code, started.Body.String())
+	}
+	t.Cleanup(func() { _ = sched.StopTask("4") })
+	select {
+	case seen := <-runner.seen:
+		if seen.ID != "4" || seen.Epoch != 3 {
+			t.Fatalf("runner task %+v", seen)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner was not called")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := sched.GetTask("4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.State == tasks.StateRunning || got.State == tasks.StateStarting {
+			if got.State == tasks.StateRunning {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state %s", got.State)
+		}
+		if got.State == tasks.StateRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got, err := os.ReadFile(filepath.Join(taskDir, "mysql-bin.000003")); err != nil || string(got) != string(sealedBody) {
+		t.Fatalf("sealed: %v %q", err, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(taskDir, "mysql-bin.000004.open.e2")); err != nil || string(got) != string(openBody) {
+		t.Fatalf("open: %v %q", err, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(taskDir, "mysql-bin.000004.open.e3")); err != nil || string(got) != "new-bytes" {
+		t.Fatalf("new epoch: %v %q", err, got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "4" {
+		t.Fatalf("data dir: %+v", entries)
 	}
 }
 

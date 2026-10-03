@@ -65,6 +65,20 @@ func (s *Server) swaggerTaskUpdateDoc() {}
 // @Router /api/tasks/{id} [delete]
 func (s *Server) swaggerTaskDeleteDoc() {}
 
+// swaggerTaskAdoptDoc godoc
+// @Summary Adopt a leftover on-disk task directory
+// @Description Attaches cluster_key and source to a standalone disk-discovered task id. Omitted start resumes at FILE_POS at the size of the highest local segment. Does not start replication.
+// @Tags Tasks
+// @Accept json
+// @Produce json
+// @Param id path string true "Task ID"
+// @Param body body updateTaskRequest true "cluster_key and source (host/port/user/password/flavor) are required. name, start, and storage are optional."
+// @Success 200 {object} tasks.Task
+// @Failure 400 {string} string
+// @Failure 404 {string} string
+// @Router /api/tasks/{id}/adopt [post]
+func (s *Server) swaggerTaskAdoptDoc() {}
+
 // swaggerTaskStartDoc godoc
 // @Summary Start task
 // @Tags Tasks

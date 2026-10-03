@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -9,6 +9,7 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -188,6 +189,115 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 		return err
 	}
 	return nil
+}
+
+// AdoptDiskBackup attaches source identity to a leftover {data_dir}/{id} directory.
+// The id stays the directory name. Replication is not started.
+// With a task store configured, directories are not adopted from disk.
+func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (Task, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Task{}, ErrTaskNotFound
+	}
+	validatedClusterKey, err := normalizeAndValidateClusterKey(patch.ClusterKey)
+	if err != nil {
+		return Task{}, err
+	}
+	var validatedName string
+	if patch.Name != nil {
+		validatedName, err = normalizeAndValidateTaskName(*patch.Name)
+		if err != nil {
+			return Task{}, err
+		}
+	} else {
+		validatedName, err = normalizeAndValidateTaskName(id)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+	if patch.Source == nil {
+		return Task{}, ErrSourceRequired
+	}
+	if patch.Source.Password == "" {
+		return Task{}, ErrSourcePasswordRequired
+	}
+	validatedSource, err := s.normalizeAndValidateSourceConfig(*patch.Source)
+	if err != nil {
+		return Task{}, err
+	}
+	validatedSource.Password = patch.Source.Password
+
+	explicitStart := patch.Start != nil && strings.TrimSpace(string(patch.Start.Mode)) != ""
+	var validatedStart StartConfig
+	if explicitStart {
+		validatedStart, err = normalizeAndValidateStartConfig(*patch.Start)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+
+	var validatedStorage Storage
+	if patch.Storage != nil {
+		candidate := *patch.Storage
+		if candidate.RetentionDays == 0 && candidate.Dir == "" {
+			candidate.RetentionDays = defaultRetentionDays
+		}
+		validatedStorage, err = normalizeAndValidateStorage(candidate)
+		if err != nil {
+			return Task{}, err
+		}
+	} else {
+		validatedStorage = Storage{RetentionDays: defaultRetentionDays}
+	}
+
+	if err := s.syncTasksFromStore(); err != nil {
+		return Task{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.tasks[id]; ok {
+		return Task{}, ErrTaskAlreadyHasMetadata
+	}
+	if s.store != nil {
+		return Task{}, ErrTaskNotFound
+	}
+	if _, found, err := lookupDiskBackupTask(s.dataDir, id); err != nil {
+		return Task{}, err
+	} else if !found {
+		return Task{}, ErrTaskNotFound
+	}
+	if !explicitStart {
+		validatedStart, err = diskResumeStart(s.dataDir, id)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+	if !s.isClusterKeyUniqueLocked(validatedClusterKey, id) {
+		return Task{}, ErrClusterKeyExists
+	}
+	if n, convErr := strconv.Atoi(id); convErr == nil && n > s.seq {
+		s.seq = n
+	}
+
+	task := Task{
+		ID:                id,
+		Name:              validatedName,
+		ClusterKey:        validatedClusterKey,
+		State:             StateStopped,
+		Source:            validatedSource,
+		Start:             validatedStart,
+		Storage:           validatedStorage,
+		KeepLocalSegments: true,
+		UpdatedAt:         time.Now(),
+	}
+	if err := s.persistTaskLocked(task); err != nil {
+		return Task{}, err
+	}
+	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_ADOPTED", "on-disk backup adopted", validatedClusterKey)
+	return task, nil
 }
 
 // UpdateTask 以原子方式应用 patch（先校验，后一次落库）。
