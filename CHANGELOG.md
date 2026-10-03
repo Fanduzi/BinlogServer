@@ -12,6 +12,16 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.12] - 2026-10-03
+
+### Changed
+
+- Operator download examples in README, the landing page, the deployment guide, the config templates, and the workers API example now pin `v0.5.12`.
+
+### Docs
+
+- This patch only corrects the shipped guide. Behavior is unchanged from v0.5.11. English `docs/guide/admin/deployment.md` now says that adopting an id that is not a catalog task returns 404 with body `task not found`. Chinese section 7.4 describes the same adopt path: the leftover directory is listed, adopt before start, 200 and `STOPPED`, the password is not returned, an omitted start is `FILE_POS` at the highest segment name and size, start is 204 in the same directory, and with `meta_dsn` a directory that is not a catalog task is 404 `task not found`. The published v0.5.11 tarball still has the old Chinese 7.4 and the English sentence that omits 404. The Console has no adopt button.
+
 ## [v0.5.11] - 2026-10-03
 
 ### Added

@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.11
+### 1. 下载、校验并解压 v0.5.12
 
 ```bash
-VER=0.5.11
+VER=0.5.12
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -112,7 +112,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.11_linux_amd64/
+binlog-server_0.5.12_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -233,15 +233,15 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.11)
+## 升级须知 (v0.5.12)
 
-在将生产环境升级至 `v0.5.11` 之前，请确认以下变更点：
+在将生产环境升级至 `v0.5.12` 之前，请确认以下变更点：
 
-- **无需数据库表结构变更:** `v0.5.11` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。配置键没有变化。
-- **认领并续传:** standalone 没配 `meta_dsn` 时，`POST /api/tasks/{id}/adopt` 把 `cluster_key` 和 source 接到 `GET /api/tasks` 已经列出的遗留目录上。成功是 200，响应不带密码，状态保持 `STOPPED`，adopt 不会开始复制。adopt 之前，`PUT` 和 `POST` start 仍返回 400，正文是 `on-disk backup has no task metadata`，不会开始复制。没传 `start` 时，保存的位点是最高封存或 `.open.e*` 分段的源文件名和字节大小，模式是 `FILE_POS`。显式 `start.mode` 会覆盖这个默认值。本次 tip `9b4ded4` 的试用：`mysql-bin.000007` pos 477，等于那个 `.open.e1` 的大小。随后 `POST` start 返回 204，任务进入 `STARTING`，epoch 是 2，同一目录写出 `.open.e2`。原有分段还在。`v0.5.10` 已经发布了遗留目录列表。这一版是认领并续传。
+- **无需数据库表结构变更:** `v0.5.12` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。配置键没有变化。行为与 `v0.5.11` 相同。
+- **认领并续传（与 v0.5.11 相同）:** standalone 没配 `meta_dsn` 时，`POST /api/tasks/{id}/adopt` 把 `cluster_key` 和 source 接到 `GET /api/tasks` 已经列出的遗留目录上。成功是 200，响应不带密码，状态保持 `STOPPED`，adopt 不会开始复制。adopt 之前，`PUT` 和 `POST` start 仍返回 400，正文是 `on-disk backup has no task metadata`，不会开始复制。没传 `start` 时，保存的位点是最高封存或 `.open.e*` 分段的源文件名和字节大小，模式是 `FILE_POS`。显式 `start.mode` 会覆盖这个默认值。本次 tip `9b4ded4` 的试用：`mysql-bin.000007` pos 477，等于那个 `.open.e1` 的大小。随后 `POST` start 返回 204，任务进入 `STARTING`，epoch 是 2，同一目录写出 `.open.e2`。原有分段还在。`v0.5.10` 已经发布了遗留目录列表。`v0.5.11` 是认领并续传。这一补丁只修正随包指南。行为与 `v0.5.11` 相同。已发布的 v0.5.11 压缩包里仍是旧的中文 7.4，以及漏了 404 的英文句子。
 - **元数据库与控制台:** 配了 `meta_dsn` 时不会从磁盘发现目录。对不是目录任务的目录做 adopt，返回 404 `task not found`（试用目录 `99` 和 `42`）。这种模式下 adopt 不会从磁盘创建任务。Console 没有 adopt 按钮。编辑仍走 `PUT`，在 adopt 之前一直被拦住。
 
-详细版本记录：[docs/releases/v0.5.11.zh-CN.md](docs/releases/v0.5.11.zh-CN.md) | [docs/releases/release-notes-v0.5.11.md](docs/releases/release-notes-v0.5.11.md)
+详细版本记录：[docs/releases/v0.5.12.zh-CN.md](docs/releases/v0.5.12.zh-CN.md) | [docs/releases/release-notes-v0.5.12.md](docs/releases/release-notes-v0.5.12.md)
 
 ---
 

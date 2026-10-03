@@ -1,4 +1,4 @@
-# Production deployment template for BinlogServer v0.5.11.
+# Production deployment template for BinlogServer v0.5.12.
 #
 # DBA Security & Durability Principles:
 # 1. Non-loopback binds (:8080 or 0.0.0.0:8080) strictly mandate authentication.

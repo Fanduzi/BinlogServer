@@ -50,12 +50,12 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.11)
+## 3. 安装与产物准备 (v0.5.12)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档：
 
 ```bash
-VER=0.5.11
+VER=0.5.12
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,7 +69,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.11_linux_amd64/
+binlog-server_0.5.12_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema)
@@ -472,7 +472,8 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 - 进程还在、任务还在：`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`。返回封存文件和 `.open.e<epoch>`。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 带 `.open.e<epoch>`，可直接交给 `mysqlbinlog` / `mariadb-binlog`。顺序按源文件序号升序；同一序号先封存名，再按 epoch 从小到大。`limit` 默认 200，超出时保留序号最大的那段，窗口内仍是升序。目录里没有分段时正文是 `[]`。磁盘扫描不知道事件位点，`start_pos` 和 `end_pos` 是 0，不要当成 checkpoint。Console 任务文件表的「文件」列是磁盘文件名，「磁盘路径」列是这些 `file_path`。
 - 没有位点行时，`GET /api/tasks/{id}/checkpoint` 仍是 `404`，正文 `checkpoint not found`。磁盘扫描不编造 checkpoint。
-- 进程退出后，用同一个 `data_dir` 再启动：`GET /api/tasks` 和 dashboard 列出仍有封存或 `.open.e<epoch>` 分段的 `{data_dir}/<task_id>/`，id 就是目录名。`GET /api/tasks/{id}/files` 与上面同一份磁盘扫描。没有位点行时 checkpoint 仍是 `404 checkpoint not found`。这一行没有源库账号，不能启动。
+- 进程退出后，用同一个 `data_dir` 再启动：`GET /api/tasks` 和 dashboard 列出仍有封存或 `.open.e<epoch>` 分段的 `{data_dir}/<task_id>/`，id 就是目录名。`GET /api/tasks/{id}/files` 与上面同一份磁盘扫描。没有位点行时 checkpoint 仍是 `404 checkpoint not found`。这一行没有源库账号。先 adopt，再 start。adopt 之前，`PUT /api/tasks/{id}` 和 `POST /api/tasks/{id}/start` 返回 `400`，正文是 `on-disk backup has no task metadata`，不会开始复制。
+- `POST /api/tasks/{id}/adopt` 把 `cluster_key` 和 source 接到这个已经列出的遗留目录 id。请求体需要 `cluster_key` 和 `source`（`host`、`port`、`user`、`password`、`flavor`）。`name`、`start`、`storage` 可选。成功是 `200`，状态是 `STOPPED`，响应不返回密码。adopt 不会开始复制。没传 `start`，或 `start.mode` 为空时，保存的位点是 `FILE_POS`：`file` 是最高封存分段或 `.open.e*` 分段的源文件名，`pos` 是该分段的字节大小。显式 `start.mode` 会覆盖这个默认值。然后 `POST /api/tasks/{id}/start` 返回 `204`，新分段写在同一目录。原来的封存文件和 open 分段还在。配了 `meta_dsn` 时不会从磁盘发现这些目录，adopt 也不会从目录创建任务。对不是目录任务的目录做 adopt，返回 `404`，正文是 `task not found`。
 
 `checkpoint not found` 表示没有位点行。分段仍在磁盘上。回放命令仍按 7.2：每个序号只传一个文件。files API 把同一序号的封存名和各个 epoch 都列出来，方便核对；不要把同一序号的每一行都塞进命令。
 
@@ -563,7 +564,7 @@ Standalone with no `meta_dsn` still keeps tasks and checkpoints in memory. The s
 - While the process is up and the task still exists, `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/`. It returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path. An open segment's `file_path` includes `.open.e<epoch>` and is the path to pass to `mysqlbinlog` or `mariadb-binlog`. Order is ascending source index. The same index lists the sealed name first, then open epochs from low to high. `limit` defaults to 200 and, past that, keeps the highest indexes, still ascending inside the window. An empty directory returns `[]`. The disk scan does not know event offsets, so `start_pos` and `end_pos` are 0. Do not treat them as a checkpoint. The Console task files table shows the on-disk name in the file column and these `file_path` values in the on-disk path column.
 - With no checkpoint row, `GET /api/tasks/{id}/checkpoint` stays `404` with body `checkpoint not found`. The disk scan does not invent a checkpoint.
 - After the process exits and a new one starts with the same `data_dir`, `GET /api/tasks` and the dashboard list `{data_dir}/<task_id>/` directories that still contain sealed or `.open.e<epoch>` segments. The id is the directory name. `GET /api/tasks/{id}/files` uses the same disk scan. With no checkpoint row, checkpoint stays `404 checkpoint not found`. The row has no source credentials. `PUT /api/tasks/{id}` and `POST /api/tasks/{id}/start` return `400` with body `on-disk backup has no task metadata` and do not start replication.
-- `POST /api/tasks/{id}/adopt` attaches source identity to that same id. The body requires `cluster_key` and `source` (`host`, `port`, `user`, `password`, `flavor`). `name`, `start`, and `storage` are optional. Success is `200`. The response shows that id, the source fields with `password` omitted, and state `STOPPED`. Adopt does not start replication. When `start` is omitted, or `start.mode` is empty, the saved start is `FILE_POS`: `file` is the source name of the highest sealed or `.open.e*` segment under `{data_dir}/{id}/`, and `pos` is that file's size in bytes. An explicit `start.mode` of `LATEST`, `FILE_POS`, or `GTID` overrides that. Then `POST /api/tasks/{id}/start` returns `204`. The task enters `STARTING` or `RUNNING`, and new bytes are written in the same directory as the next `.open.e<epoch>`. The sealed files and the open segments that were already there stay. A configured `meta_dsn` does not discover these directories, and adopt does not create a task from a directory in that mode.
+- `POST /api/tasks/{id}/adopt` attaches source identity to that same id. The body requires `cluster_key` and `source` (`host`, `port`, `user`, `password`, `flavor`). `name`, `start`, and `storage` are optional. Success is `200`. The response shows that id, the source fields with `password` omitted, and state `STOPPED`. Adopt does not start replication. When `start` is omitted, or `start.mode` is empty, the saved start is `FILE_POS`: `file` is the source name of the highest sealed or `.open.e*` segment under `{data_dir}/{id}/`, and `pos` is that file's size in bytes. An explicit `start.mode` of `LATEST`, `FILE_POS`, or `GTID` overrides that. Then `POST /api/tasks/{id}/start` returns `204`. The task enters `STARTING` or `RUNNING`, and new bytes are written in the same directory as the next `.open.e<epoch>`. The sealed files and the open segments that were already there stay. A configured `meta_dsn` does not discover these directories, and adopt does not create a task from a directory in that mode. Adopting an id that is not a catalog task returns `404` with body `task not found`.
 
 `checkpoint not found` means there is no checkpoint row. The segments are still on disk. The replay command still follows section 8.2: one file per index. The files API lists every sealed name and every epoch for that index so you can see them. Do not pass every row for one index.
 
