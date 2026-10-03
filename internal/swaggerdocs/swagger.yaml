@@ -32,7 +32,6 @@ definitions:
       running_task_count:
         type: integer
       single_process:
-        description: True when this process pulls tasks and no worker heartbeat exists. worker_count is 0.
         type: boolean
       task_count:
         type: integer
@@ -465,7 +464,8 @@ paths:
   /api/dashboard:
     get:
       parameters:
-      - description: Filter by source host
+      - description: Filter by source host; localhost and explicit loopback literals
+          share one identity, other hosts match exact spelling
         in: query
         name: host
         type: string
@@ -554,7 +554,8 @@ paths:
   /api/summary:
     get:
       parameters:
-      - description: Filter by source host
+      - description: Filter by source host; localhost and explicit loopback literals
+          share one identity, other hosts match exact spelling
         in: query
         name: host
         type: string
@@ -583,7 +584,8 @@ paths:
   /api/tasks:
     get:
       parameters:
-      - description: Filter by source host
+      - description: Filter by source host; localhost and explicit loopback literals
+          share one identity, other hosts match exact spelling
         in: query
         name: host
         type: string
@@ -737,6 +739,44 @@ paths:
           schema:
             type: string
       summary: Update task configuration
+      tags:
+      - Tasks
+  /api/tasks/{id}/adopt:
+    post:
+      consumes:
+      - application/json
+      description: Attaches cluster_key and source to a standalone disk-discovered
+        task id. Omitted start resumes at FILE_POS at the size of the highest local
+        segment. Does not start replication.
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: cluster_key and source (host/port/user/password/flavor) are required.
+          name, start, and storage are optional.
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.updateTaskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/tasks.Task'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+      summary: Adopt a leftover on-disk task directory
       tags:
       - Tasks
   /api/tasks/{id}/checkpoint:

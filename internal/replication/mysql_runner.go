@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, sealed-file handoff for upload, and permanent source errors including the MariaDB flavor hint when @@server_uuid is missing
+// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, sealed-file handoff for upload, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep existing segments while opening the next epoch
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -652,8 +652,12 @@ func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fil
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, "", err
 	}
-	if err := cleanupStaleOpenFiles(dir, task.Epoch); err != nil {
-		return nil, nil, "", err
+	// An adopted leftover directory keeps sealed and .open.e* segments.
+	// A normal start still drops other epochs before opening this one.
+	if !task.KeepLocalSegments {
+		if err := cleanupStaleOpenFiles(dir, task.Epoch); err != nil {
+			return nil, nil, "", err
+		}
 	}
 	localFileName := openFileName(fileName, task.Epoch)
 	if err := cleanupExpiredBinlogs(dir, task.Storage.RetentionDays, time.Now(), localFileName); err != nil {

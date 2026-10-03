@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: temporary data directories with sealed and open binlog segment names
-// output: assertions for disk listing order, catalog fallback, checkpoint absence, and standalone restart discovery
+// output: assertions for disk listing order, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
 // pos: regression coverage for standalone files listing when meta has no catalog rows
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,7 +10,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"binlog_server/internal/binlog"
 )
@@ -356,4 +358,175 @@ func TestStandaloneRestart_DiscoversLeftoverDirectories(t *testing.T) {
 	if _, err := meta.GetTask(task.ID); !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("meta get err=%v", err)
 	}
+}
+
+func TestAdoptDiskBackup_DefaultFilePosThenStart(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "4")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sealedBody := []byte("sealed-seg")
+	openBody := []byte("open-seg")
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), sealedBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e2"), openBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &adoptFileRunner{dir: dir, seen: make(chan Task, 1)}
+	s := NewScheduler(
+		WithDataDir(dir),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("standalone"),
+		WithRunner(runner),
+	)
+	if err := s.StartTask("4"); !errors.Is(err, ErrDiskBackupReadOnly) {
+		t.Fatalf("start before adopt: %v", err)
+	}
+	if _, err := s.UpdateTask("4", TaskPatch{ClusterKey: "adopted-4"}); !errors.Is(err, ErrDiskBackupReadOnly) {
+		t.Fatalf("update before adopt: %v", err)
+	}
+	if _, err := s.AdoptDiskBackup("4", TaskPatch{ClusterKey: "adopted-4"}); !errors.Is(err, ErrSourceRequired) {
+		t.Fatalf("missing source: %v", err)
+	}
+
+	name := "restored"
+	adopted, err := s.AdoptDiskBackup("4", TaskPatch{
+		Name:       &name,
+		ClusterKey: "adopted-4",
+		Source: &SourceConfig{
+			Host:     "127.0.0.1",
+			Port:     3306,
+			User:     "repl",
+			Password: "s3cret-adopt",
+			Flavor:   "mysql",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.ID != "4" || adopted.Name != "restored" || adopted.State != StateStopped {
+		t.Fatalf("adopted %+v", adopted)
+	}
+	if adopted.Source.Host != "127.0.0.1" || adopted.Source.User != "repl" || adopted.Source.Password != "s3cret-adopt" || adopted.Source.Flavor != "mysql" {
+		t.Fatalf("source %+v", adopted.Source)
+	}
+	if adopted.Start.Mode != StartModeFilePos || adopted.Start.File != "mysql-bin.000004" || adopted.Start.Pos != uint32(len(openBody)) {
+		t.Fatalf("start %+v", adopted.Start)
+	}
+	if !adopted.KeepLocalSegments {
+		t.Fatal("expected keep-local flag")
+	}
+	if _, err := s.AdoptDiskBackup("4", TaskPatch{
+		ClusterKey: "other",
+		Source:     &SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "s3cret-adopt"},
+	}); !errors.Is(err, ErrTaskAlreadyHasMetadata) {
+		t.Fatalf("second adopt: %v", err)
+	}
+
+	if err := s.StartTask("4"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.StopTask("4") })
+	select {
+	case got := <-runner.seen:
+		if got.ID != "4" || got.Epoch != 3 || !got.KeepLocalSegments {
+			t.Fatalf("runner task %+v", got)
+		}
+		if got.Start.File != "mysql-bin.000004" || got.Start.Pos != uint32(len(openBody)) {
+			t.Fatalf("runner start %+v", got.Start)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner was not called")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask("4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.State == StateRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state %s", got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got, err := os.ReadFile(filepath.Join(taskDir, "mysql-bin.000003")); err != nil || string(got) != string(sealedBody) {
+		t.Fatalf("sealed changed: %v %q", err, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(taskDir, "mysql-bin.000004.open.e2")); err != nil || string(got) != string(openBody) {
+		t.Fatalf("open changed: %v %q", err, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(taskDir, "mysql-bin.000004.open.e3")); err != nil || string(got) != "new-bytes" {
+		t.Fatalf("new epoch: %v %q", err, got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "4" {
+		t.Fatalf("data_dir entries: %v", entries)
+	}
+}
+
+func TestAdoptDiskBackup_ExplicitStartAndMetaStore(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "4")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), []byte("sealed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewScheduler(WithDataDir(dir))
+	latest := StartModeLatest
+	adopted, err := s.AdoptDiskBackup("4", TaskPatch{
+		ClusterKey: "adopted-4",
+		Source:     &SourceConfig{Host: "10.0.0.8", Port: 3306, User: "repl", Password: "pw", Flavor: ""},
+		Start:      &StartConfig{Mode: latest},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Start.Mode != StartModeLatest || adopted.Start.File != "" || adopted.Start.Pos != 0 || adopted.Source.Flavor != "mysql" {
+		t.Fatalf("override %+v source %+v", adopted.Start, adopted.Source)
+	}
+	if adopted.State != StateStopped || adopted.Name != "4" {
+		t.Fatalf("identity %+v", adopted)
+	}
+
+	meta := NewScheduler(WithStore(newFakeStore()), WithDataDir(dir))
+	if _, err := meta.AdoptDiskBackup("4", TaskPatch{
+		ClusterKey: "adopted-4",
+		Source:     &SourceConfig{Host: "10.0.0.8", Port: 3306, User: "repl", Password: "pw"},
+	}); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("meta adopt: %v", err)
+	}
+	if got := meta.ListTasks(); len(got) != 0 {
+		t.Fatalf("meta discovered %+v", got)
+	}
+}
+
+type adoptFileRunner struct {
+	dir  string
+	seen chan Task
+}
+
+func (r *adoptFileRunner) Run(ctx context.Context, task Task) error {
+	if task.KeepLocalSegments && task.Epoch > 0 && task.Start.File != "" {
+		name := task.Start.File + ".open.e" + strconv.FormatInt(task.Epoch, 10)
+		if err := os.WriteFile(filepath.Join(r.dir, task.ID, name), []byte("new-bytes"), 0o644); err != nil {
+			return err
+		}
+	}
+	select {
+	case r.seen <- task:
+	default:
+	}
+	<-ctx.Done()
+	return context.Canceled
 }
