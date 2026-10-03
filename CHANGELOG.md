@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.16] - 2026-10-04
+
+### Fixed
+
+- Kill the process while a backup is `RUNNING`. This is not an API stop. The on-disk backup then has no task metadata. Adopt it without starting, then start it. The dump continues from the end position of the last complete event in the open segment. It does not jump to the current `SHOW MASTER STATUS`. It does not restart at position 4. When that open segment's last complete event already ends at the resume position, the segment is renamed onto the new epoch and new events are appended, so one source filename spans the crash. The file still starts with the format description, keeps the events written before the process died, and includes events the source committed while the process was down, once each. There is no gap and no duplicate event at the boundary. v0.5.15 already does this for a clean stop. The published v0.5.15 package does not do it after `kill -9`: adopt then start opened a new epoch whose first bytes were the magic plus events after the offset, so the format description and the pre-crash events stayed in the old segment and `mysqlbinlog` could not replay the new file. Direct start of that backup, before adopt, is still rejected because there is no task metadata. A clean stop and resume is unchanged. `delay_seconds` of 0, an omitted sample, a dump preamble that is not lag, and the 30-second real-lag threshold are unchanged from v0.5.15. No new API. No new config key. No schema migration.
+
 ## [v0.5.15] - 2026-10-04
 
 ### Fixed
