@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1106,7 +1106,7 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 		"prefix/1/mysql-bin.000001", "UPLOADED", "", time.Now(),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
-		WithArgs("1", 10).
+		WithArgs("1").
 		WillReturnRows(rows)
 
 	files, err := store.ListBinlogFiles(context.Background(), "1", 10)
@@ -1124,6 +1124,82 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 	if files[0].State != "SEALED" {
 		t.Fatalf("unexpected file state: %s", files[0].State)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_ListBinlogFilesReplayOrder 验证目录列表按源序号升序，同序号封存在 open 之前，limit 保留序号最大的窗口。
+func TestMySQLTaskStore_ListBinlogFilesReplayOrder(t *testing.T) {
+	if strings.Contains(listBinlogFilesSQL, "ORDER BY") || strings.Contains(listBinlogFilesSQL, "LIMIT") {
+		t.Fatalf("listBinlogFilesSQL must return every row for the task so the replay window is not sealed_at: %s", listBinlogFilesSQL)
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	newest := time.Now()
+	older := newest.Add(-2 * time.Hour)
+	oldest := newest.Add(-3 * time.Hour)
+	cols := []string{
+		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at",
+	}
+	// Row order is newest sealed_at first, which used to be the list order.
+	// 000002 sealed is newer than 000003. 000002's open epoch is newer than its seal.
+	catalogRows := func() *sqlmock.Rows {
+		return sqlmock.NewRows(cols).
+			AddRow("1", "mysql-bin.000002", "/data/1/mysql-bin.000002", "SEALED", int64(20), uint32(4), uint32(20), older, newest, "", "LOCAL_ONLY", "", nil).
+			AddRow("1", "mysql-bin.000002.open.e1", "/data/1/mysql-bin.000002.open.e1", "OPEN", int64(8), uint32(4), uint32(8), newest, newest, "", "LOCAL_ONLY", "", nil).
+			AddRow("1", "mysql-bin.000001", "/data/1/mysql-bin.000001", "SEALED", int64(10), uint32(4), uint32(10), oldest, oldest, "", "UPLOADED", "", nil).
+			AddRow("1", "mysql-bin.000003", "/data/1/mysql-bin.000003.open.e4", "OPEN", int64(30), uint32(4), uint32(30), older, older, "", "LOCAL_ONLY", "", nil)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
+		WithArgs("1").
+		WillReturnRows(catalogRows())
+	files, err := store.ListBinlogFiles(context.Background(), "1", 10)
+	if err != nil {
+		t.Fatalf("ListBinlogFiles returned error: %v", err)
+	}
+	want := []struct {
+		name  string
+		base  string
+		state string
+	}{
+		{"mysql-bin.000001", "mysql-bin.000001", "SEALED"},
+		{"mysql-bin.000002", "mysql-bin.000002", "SEALED"},
+		{"mysql-bin.000002.open.e1", "mysql-bin.000002.open.e1", "OPEN"},
+		{"mysql-bin.000003", "mysql-bin.000003.open.e4", "OPEN"},
+	}
+	if len(files) != len(want) {
+		t.Fatalf("got %d files: %+v", len(files), files)
+	}
+	for i, item := range want {
+		got := files[i]
+		if got.FileName != item.name || got.State != item.state || got.FilePath != "/data/1/"+item.base {
+			t.Fatalf("files[%d]=%s %s %s, want %s %s %s", i, got.FileName, got.State, got.FilePath, item.name, item.state, item.base)
+		}
+	}
+	if files[0].FileName >= files[len(files)-1].FileName {
+		t.Fatalf("first source index is not lower than last: %s then %s", files[0].FileName, files[len(files)-1].FileName)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
+		WithArgs("1").
+		WillReturnRows(catalogRows())
+	window, err := store.ListBinlogFiles(context.Background(), "1", 2)
+	if err != nil {
+		t.Fatalf("ListBinlogFiles window returned error: %v", err)
+	}
+	if len(window) != 2 || window[0].FilePath != "/data/1/mysql-bin.000002.open.e1" || window[1].FilePath != "/data/1/mysql-bin.000003.open.e4" {
+		t.Fatalf("limit window = %+v, want highest indexes 000002.open.e1 then 000003.open.e4", window)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

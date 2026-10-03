@@ -477,7 +477,7 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 `checkpoint not found` 表示没有位点行。分段仍在磁盘上。回放命令仍按 7.2：每个序号只传一个文件。files API 把同一序号的封存名和各个 epoch 都列出来，方便核对；不要把同一序号的每一行都塞进命令。
 
-配了 `meta_dsn` 时，files API 仍读 `binlog_files`。该任务有目录行时，默认最多 200 条，按 `sealed_at` 倒序，这个顺序不能直接拿来当 `mysqlbinlog` 的参数顺序。`OPEN` 行的 `file_name` 是源文件名，`file_path` 才是带 `.open.e<epoch>` 的磁盘路径。该任务一条目录都没有时，改用上面的磁盘扫描。checkpoint 的 `file` 和 `pos` 仍是最后一次 `fsync` 的源文件名和位点；没有位点行时仍是 404。选进回放命令的文件仍按 7.2。
+配了 `meta_dsn` 时，files API 仍读 `binlog_files`。该任务有目录行时，顺序与上面的磁盘扫描相同：按源文件序号升序；同一序号先封存名，再按 epoch 从小到大。默认最多 200 条，超出时保留序号最大的那段，窗口内仍是升序。Console 任务文件表从上到下就是这个顺序。`OPEN` 行的 `file_name` 是源文件名，`file_path` 才是带 `.open.e<epoch>` 的磁盘路径。该任务一条目录都没有时，改用上面的磁盘扫描。checkpoint 的 `file` 和 `pos` 仍是最后一次 `fsync` 的源文件名和位点；没有位点行时仍是 404。选进回放命令的文件仍按 7.2。
 
 对象存储只保存已经封存并且上传成功的文件。对象键是 `{upload.prefix/}{cluster_key}/{source_identity}/{封存文件名}`，没有 `.open.e`。`source_identity` 在 MySQL 上是 `server_uuid`，在 MariaDB 上是 `mariadb:<server_id>:<gtid_domain_id>`。正在写的分段不会出现在桶里。`UPLOAD_FAILED` 的封存文件仍在磁盘上。没配上传时桶是空的。
 
@@ -568,7 +568,7 @@ Standalone with no `meta_dsn` still keeps tasks and checkpoints in memory. The s
 
 `checkpoint not found` means there is no checkpoint row. The segments are still on disk. The replay command still follows section 8.2: one file per index. The files API lists every sealed name and every epoch for that index so you can see them. Do not pass every row for one index.
 
-With `meta_dsn`, the files API still reads `binlog_files` when that task has catalog rows. It returns at most 200 rows by default, ordered by `sealed_at` descending. That order is not the `mysqlbinlog` argument order. An `OPEN` row's `file_name` is the source file name. `file_path` is the on-disk path that includes `.open.e<epoch>`. When the catalog has no rows for that task, the API uses the disk scan above. Checkpoint `file` and `pos` are still the source file name and position of the last `fsync`. A missing checkpoint row is still 404. Choose replay arguments with section 8.2.
+With `meta_dsn`, the files API still reads `binlog_files` when that task has catalog rows. Order matches the disk scan above: ascending source index, and for one index the sealed name before open epochs. It returns at most 200 rows by default and, past that, keeps the highest indexes, still ascending inside the window. An `OPEN` row's `file_name` is the source file name. `file_path` is the on-disk path that includes `.open.e<epoch>`. When the catalog has no rows for that task, the API uses the disk scan above. Checkpoint `file` and `pos` are still the source file name and position of the last `fsync`. A missing checkpoint row is still 404. Choose replay arguments with section 8.2. The Console files table lists these rows from top to bottom in this order.
 
 Object storage receives a file only after it is sealed and the upload succeeds. The object key is `{upload.prefix/}{cluster_key}/{source_identity}/{sealed file name}`, with no `.open.e`. `source_identity` is the MySQL `server_uuid`, or `mariadb:<server_id>:<gtid_domain_id>` for MariaDB. The segment still being written is not in the bucket. A sealed file in `UPLOAD_FAILED` is still on disk. With upload unconfigured, the bucket is empty.
 

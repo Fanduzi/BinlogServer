@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, meta or on-disk files, leftover-directory file lists, runs, and worker heartbeat views
+// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, runs, and worker heartbeat views
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -174,7 +174,8 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	return out, nil
 }
 
-// ListFiles 列出任务文件。元数据目录非空时保持原结果。
+// ListFiles 列出任务文件。元数据目录非空时返回目录结果。
+// MySQL 目录已按源序号升序排好，同序号先封存再 open epoch；limit 保留序号最大的窗口。
 // 未配置文件库，或该任务一条目录都没有时，扫描 {data_dir}/{task_id}。
 // 没有 task store、内存里也没有这个 id 时，目录里仍有分段则同样扫描。
 func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
