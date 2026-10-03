@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: temporary data directories with sealed and open binlog segment names
-// output: assertions for disk listing order, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
+// output: assertions for disk listing order, catalog replay window, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
 // pos: regression coverage for standalone files listing when meta has no catalog rows
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -91,6 +91,44 @@ func TestListTaskBinlogFilesOnDisk_LimitKeepsHighestIndexes(t *testing.T) {
 	}
 	if filepath.Base(files[0].FilePath) != "mysql-bin.000002" || filepath.Base(files[1].FilePath) != "mysql-bin.000003.open.e1" {
 		t.Fatalf("window = %s, %s", files[0].FilePath, files[1].FilePath)
+	}
+}
+
+func TestWindowBinlogFilesForReplay_CatalogOrderAndLimit(t *testing.T) {
+	newest := time.Now()
+	older := newest.Add(-2 * time.Hour)
+	oldest := newest.Add(-3 * time.Hour)
+	files := []BinlogFile{
+		{FileName: "mysql-bin.000002", FilePath: "/data/1/mysql-bin.000002", State: "SEALED", SealedAt: newest},
+		{FileName: "mysql-bin.000002.open.e1", FilePath: "/data/1/mysql-bin.000002.open.e1", State: "OPEN", SealedAt: newest},
+		{FileName: "mysql-bin.000001", FilePath: "/data/1/mysql-bin.000001", State: "SEALED", SealedAt: oldest},
+		{FileName: "mysql-bin.000003", FilePath: "/data/1/mysql-bin.000003.open.e4", State: "OPEN", SealedAt: older},
+	}
+	original := files[0].FilePath
+	got := WindowBinlogFilesForReplay(files, 10)
+	if files[0].FilePath != original {
+		t.Fatalf("input reordered: %s", files[0].FilePath)
+	}
+	want := []string{
+		"/data/1/mysql-bin.000001",
+		"/data/1/mysql-bin.000002",
+		"/data/1/mysql-bin.000002.open.e1",
+		"/data/1/mysql-bin.000003.open.e4",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d", len(got))
+	}
+	for i, path := range want {
+		if got[i].FilePath != path {
+			t.Fatalf("got[%d]=%s want %s", i, got[i].FilePath, path)
+		}
+	}
+	if got[1].State != "SEALED" || got[2].State != "OPEN" {
+		t.Fatalf("same index states = %s, %s", got[1].State, got[2].State)
+	}
+	window := WindowBinlogFilesForReplay(files, 2)
+	if len(window) != 2 || window[0].FilePath != want[2] || window[1].FilePath != want[3] {
+		t.Fatalf("window = %s, %s", window[0].FilePath, window[1].FilePath)
 	}
 }
 

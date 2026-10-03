@@ -134,7 +134,7 @@ type EventStore interface {
 type FileStore interface {
 	// UpsertBinlogFile 写入/更新文件元数据。
 	UpsertBinlogFile(ctx context.Context, meta BinlogFile) error
-	// ListBinlogFiles 按倒序读取文件元数据。
+	// ListBinlogFiles 读取文件元数据。MySQL 目录按源序号升序，同序号封存在 open epoch 之前；limit 保留序号最大的窗口。
 	ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]BinlogFile, error)
 }
 

@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (sealed before open epochs of the same index; limit keeps the highest indexes), and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -224,13 +224,16 @@ ON DUPLICATE KEY UPDATE
   uploaded_at = VALUES(uploaded_at);
 `
 
+// listBinlogFilesSQL loads every catalog row for one task. Replay order and the
+// limit window are applied in Go (tasks.WindowBinlogFilesForReplay) so they
+// match the disk scan: ascending source index, sealed before open epochs of
+// that index, and the highest indexes when limit is smaller than the total.
+// The failed-upload query keeps its own sealed_at order.
 const listBinlogFilesSQL = `
 SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
        object_key, upload_state, upload_error, uploaded_at
 FROM binlog_files
 WHERE task_id = ?
-ORDER BY sealed_at DESC
-LIMIT ?;
 `
 
 const listFailedSealedBinlogFilesSQL = `
@@ -1184,7 +1187,9 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	})
 }
 
-// ListBinlogFiles 列出任务 binlog 文件元数据（按更新时间倒序）。
+// ListBinlogFiles lists one task's binlog catalog in mysqlbinlog replay order:
+// ascending source index, sealed name before open epochs of that index.
+// limit keeps the highest indexes.
 func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error) {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_binlog_files")
 	defer endMetaSpan(span)
@@ -1193,7 +1198,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 		limit = 200
 	}
 
-	rows, err := s.db.QueryContext(ctx, listBinlogFilesSQL, taskID, limit)
+	rows, err := s.db.QueryContext(ctx, listBinlogFilesSQL, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -1228,7 +1233,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return tasks.WindowBinlogFilesForReplay(out, limit), nil
 }
 
 // ListFailedUploadBinlogFiles 列出上传失败的 sealed 文件。
