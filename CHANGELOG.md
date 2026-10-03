@@ -24,7 +24,7 @@ Maintenance rules:
 
 ### Docs
 
-- The admin guide explains replaying on-disk segments with `mysqlbinlog` or `mariadb-binlog`. The path is `{data_dir}/{task_id}/mysql-bin.NNNNNN`. A `.open.e<epoch>` name is a filename suffix; the tool reads that path as-is. Standalone without `meta_dsn` returns `[]` from the files API and 404 for checkpoint, so replay the disk. Object storage keeps only sealed successful uploads. The release tarball does not contain `docs/guide`; this release's tree contains that section.
+- The admin guide explains replaying on-disk segments with `mysqlbinlog` or `mariadb-binlog`. The path is `{data_dir}/{task_id}/mysql-bin.NNNNNN`. A `.open.e<epoch>` name is a filename suffix; the tool reads that path as-is. Standalone without `meta_dsn` returns `[]` from the files API and 404 for checkpoint, so replay the disk. Object storage keeps only sealed successful uploads. The v0.5.7 archive omitted `docs/guide`. The v0.5.8 archive includes it, so the replay section is in the unpacked package.
 
 ## [v0.5.7] - 2026-10-02
 

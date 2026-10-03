@@ -123,6 +123,7 @@ binlog-server_0.5.8_linux_amd64/
   LICENSE                        # Apache 2.0 license
   config.example.yaml            # Annotated configuration reference
   config.production.example.yaml # Hardened production baseline
+  docs/guide/                    # Operator guide, including on-disk replay
 ```
 
 ### 2. Start local evaluation (Loopback)
@@ -239,7 +240,7 @@ Before upgrading existing deployments, review the v0.5.8 operator contract:
 
 - **Zero Schema Migrations:** `v0.5.8` requires no database migrations (`000001_init_schema` unchanged).
 - **Console With Bearer Auth:** `/ui/` and its assets load with no `Authorization` header. Settings asks for the bearer token; later API calls send `Authorization: Bearer`. `/api/*`, `/metrics`, and `/swagger/*` still return 401 without the credential. `/healthz` stays 200. Config keys are unchanged.
-- **Replay On Disk:** The admin guide explains `mysqlbinlog` / `mariadb-binlog` replay of `{data_dir}/{task_id}/mysql-bin.NNNNNN`. A `.open.e<epoch>` suffix stays on the filename; pass that path as-is. Standalone without `meta_dsn` returns `[]` for files and 404 for checkpoint. Object storage has only sealed successful uploads. `docs/guide` is not in the release tarball; this release's tree contains that section.
+- **Replay On Disk:** The admin guide explains `mysqlbinlog` / `mariadb-binlog` replay of `{data_dir}/{task_id}/mysql-bin.NNNNNN`. A `.open.e<epoch>` suffix stays on the filename; pass that path as-is. Standalone without `meta_dsn` returns `[]` for files and 404 for checkpoint. Object storage has only sealed successful uploads. The v0.5.7 archive omitted `docs/guide`. The v0.5.8 archive includes it, so the replay section is in the unpacked package.
 
 Full release notes: [docs/releases/release-notes-v0.5.8.md](docs/releases/release-notes-v0.5.8.md) | [docs/releases/v0.5.8.zh-CN.md](docs/releases/v0.5.8.zh-CN.md)
 

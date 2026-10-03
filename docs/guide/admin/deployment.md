@@ -77,7 +77,8 @@ binlog-server_0.5.8_linux_amd64/
 ├── config.production.example.yaml # 生产安全基线模板
 ├── README.md                      # 英文说明
 ├── README_ZH.md                   # 中文说明
-└── CHANGELOG.md                   # 版本记录
+├── CHANGELOG.md                   # 版本记录
+└── docs/guide/                    # 运维指南，含本地分段回放
 ```
 
 ---
