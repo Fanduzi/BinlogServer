@@ -12,9 +12,16 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.15] - 2026-10-04
+
 ### Fixed
 
-- Stop then start of a running backup continues from the last complete event in that task's open segment. Standalone without `meta_dsn` no longer jumps to the current `SHOW MASTER STATUS`. A catalog task, whose next start uses a new epoch, no longer rewinds to position 4 and deletes that segment. Events the source commits while the task is stopped are appended, so `mysqlbinlog` can read across the stop with no gap and no duplicate event at the boundary. A resume that is already at the master tip still reports `delay_seconds` 0. A task with no event-time sample still omits `delay_seconds`. A dump preamble is still not `DELAY_EXCEEDS_THRESHOLD`. Real catch-up lag still alarms. Adopt of a leftover directory is unchanged. No new config key. No schema migration.
+- Stop a `RUNNING` backup, let the source keep writing, then start the same task. Standalone with no `meta_dsn`, and a catalog task, both resume at the end position of the last complete event in the highest open segment. The dump does not jump to the current `SHOW MASTER STATUS`. It does not rewind to position 4 and delete that segment. A dump that started mid-file does not resume at the file size. The stopped open segment is renamed into the new epoch and appended, so one source filename spans the stop, with no gap and no duplicate event at the boundary. A partial event past that end position is dropped before the append. A catalog takeover with no complete event on disk still starts at position 4. Standalone with no checkpoint and no complete event still starts at the current master status. `KeepLocalSegments` adopt still uses the saved file size and opens a new epoch. A task already at the source tip still reports at tip. `delay_seconds` of 0, an omitted sample, a dump preamble that is not lag, and the 30-second real-lag threshold are unchanged from v0.5.14. No new API. No new config key. No schema migration.
+
+## [v0.5.14] - 2026-10-03
+
+### Fixed
+
 - A caught-up `FILE_POS` resume, including standalone adopt at the highest segment size, no longer reports `DELAY_EXCEEDS_THRESHOLD` from the dump preamble. MySQL sends the binlog format description before any new event, with `log_pos` 0 or the original end position (126 on MySQL 8). That header time is when the file was created. The preamble is not written and does not move the cursor. If the resume position is already at `SHOW MASTER STATUS`, `delay_seconds` is 0 / `NORMAL` as soon as StartSync succeeds. Catch-up that is still behind the tip still uses `now - last_event_at`.
 - A caught-up RUNNING task includes `delay_seconds` as JSON `0` on `GET /api/tasks/{id}/replication` and the dashboard replication object. `omitempty` on `int64` was dropping that zero, so the Console showed `--` seconds while status stayed `NORMAL`. A task with no event-time sample still omits the field. The 30-second threshold, `DELAYED`, and the dump-preamble behavior are unchanged. No new config key. No schema migration.
 
