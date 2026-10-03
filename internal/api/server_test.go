@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, restart discovery of leftover data directories, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -1887,17 +1887,6 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 // TestTaskAPI_ListFilesFromDiskWithoutMeta 验证 standalone 无 meta 时 files 返回磁盘分段，checkpoint 仍 404。
 func TestTaskAPI_ListFilesFromDiskWithoutMeta(t *testing.T) {
 	dir := t.TempDir()
-	taskDir := filepath.Join(dir, "1")
-	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e1"), []byte("open-seg"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), []byte("sealed-seg"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
 	scheduler := tasks.NewScheduler(tasks.WithDataDir(dir))
 	handler := NewServer(scheduler)
 
@@ -1907,6 +1896,16 @@ func TestTaskAPI_ListFilesFromDiskWithoutMeta(t *testing.T) {
 	handler.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e1"), []byte("open-seg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), []byte("sealed-seg"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	resp := httptest.NewRecorder()
@@ -1936,6 +1935,141 @@ func TestTaskAPI_ListFilesFromDiskWithoutMeta(t *testing.T) {
 	handler.ServeHTTP(cp, httptest.NewRequest(http.MethodGet, "/api/tasks/1/checkpoint", nil))
 	if cp.Code != http.StatusNotFound || !strings.Contains(cp.Body.String(), "checkpoint not found") {
 		t.Fatalf("checkpoint status=%d body=%s", cp.Code, cp.Body.String())
+	}
+}
+
+// TestTaskAPI_RestartDiscoversDiskBackups 验证 standalone 重启后，不知道旧 id 也能从 dashboard 找到磁盘目录并列出分段。
+func TestTaskAPI_RestartDiscoversDiskBackups(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "4")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), []byte("sealed-seg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e2"), []byte("open-seg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "5"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "5", "notes.txt"), []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(tasks.NewScheduler(tasks.WithDataDir(dir)))
+
+	dashResp := httptest.NewRecorder()
+	handler.ServeHTTP(dashResp, httptest.NewRequest(http.MethodGet, "/api/dashboard", nil))
+	if dashResp.Code != http.StatusOK {
+		t.Fatalf("dashboard status=%d body=%s", dashResp.Code, dashResp.Body.String())
+	}
+	var dash dashboardResponse
+	if err := json.Unmarshal(dashResp.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if dash.Summary.Total != 1 || dash.Summary.Stopped != 1 || len(dash.Tasks) != 1 {
+		t.Fatalf("dashboard summary=%+v tasks=%d", dash.Summary, len(dash.Tasks))
+	}
+	found := dash.Tasks[0].Task
+	if found.ID != "4" || found.State != tasks.StateStopped || found.Source.Host != "" || found.Source.User != "" {
+		t.Fatalf("discovered task %+v", found)
+	}
+	if dash.Tasks[0].Replication.Status != "IDLE" || dash.Tasks[0].Replication.HasProgress {
+		t.Fatalf("replication %+v", dash.Tasks[0].Replication)
+	}
+
+	listResp := httptest.NewRecorder()
+	handler.ServeHTTP(listResp, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listResp.Code, listResp.Body.String())
+	}
+	var list taskListResponse
+	if err := json.Unmarshal(listResp.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 1 || len(list.Items) != 1 || list.Items[0].ID != "4" {
+		t.Fatalf("list %+v", list)
+	}
+
+	getResp := httptest.NewRecorder()
+	handler.ServeHTTP(getResp, httptest.NewRequest(http.MethodGet, "/api/tasks/4", nil))
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("get status=%d body=%s", getResp.Code, getResp.Body.String())
+	}
+
+	filesResp := httptest.NewRecorder()
+	handler.ServeHTTP(filesResp, httptest.NewRequest(http.MethodGet, "/api/tasks/4/files", nil))
+	if filesResp.Code != http.StatusOK {
+		t.Fatalf("files status=%d body=%s", filesResp.Code, filesResp.Body.String())
+	}
+	var files []tasks.BinlogFile
+	if err := json.Unmarshal(filesResp.Body.Bytes(), &files); err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files %+v", files)
+	}
+	if files[0].FileName != "mysql-bin.000003" || files[0].State != "SEALED" || files[0].FilePath != filepath.Join(taskDir, "mysql-bin.000003") {
+		t.Fatalf("sealed %+v", files[0])
+	}
+	if files[1].FileName != "mysql-bin.000004" || files[1].State != "OPEN" || files[1].FilePath != filepath.Join(taskDir, "mysql-bin.000004.open.e2") {
+		t.Fatalf("open %+v", files[1])
+	}
+
+	cp := httptest.NewRecorder()
+	handler.ServeHTTP(cp, httptest.NewRequest(http.MethodGet, "/api/tasks/4/checkpoint", nil))
+	if cp.Code != http.StatusNotFound || !strings.Contains(cp.Body.String(), "checkpoint not found") {
+		t.Fatalf("checkpoint status=%d body=%s", cp.Code, cp.Body.String())
+	}
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "/api/tasks/missing/checkpoint", nil))
+	if unknown.Code != http.StatusNotFound || !strings.Contains(unknown.Body.String(), "task not found") {
+		t.Fatalf("unknown checkpoint status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+
+	events := httptest.NewRecorder()
+	handler.ServeHTTP(events, httptest.NewRequest(http.MethodGet, "/api/tasks/4/events", nil))
+	if events.Code != http.StatusOK || strings.TrimSpace(events.Body.String()) != "[]" {
+		t.Fatalf("events status=%d body=%s", events.Code, events.Body.String())
+	}
+	repl := httptest.NewRecorder()
+	handler.ServeHTTP(repl, httptest.NewRequest(http.MethodGet, "/api/tasks/4/replication", nil))
+	if repl.Code != http.StatusOK {
+		t.Fatalf("replication status=%d body=%s", repl.Code, repl.Body.String())
+	}
+
+	start := httptest.NewRecorder()
+	handler.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/api/tasks/4/start", nil))
+	if start.Code != http.StatusBadRequest || !strings.Contains(start.Body.String(), "on-disk backup has no task metadata") {
+		t.Fatalf("start status=%d body=%s", start.Code, start.Body.String())
+	}
+
+	overview := httptest.NewRecorder()
+	handler.ServeHTTP(overview, httptest.NewRequest(http.MethodGet, "/api/cluster/overview", nil))
+	if overview.Code != http.StatusOK {
+		t.Fatalf("overview status=%d body=%s", overview.Code, overview.Body.String())
+	}
+	var cluster clusterOverview
+	if err := json.Unmarshal(overview.Body.Bytes(), &cluster); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.TaskCount != 1 || cluster.WorkerCount != 0 || cluster.RunningTaskCount != 0 || cluster.LeasedTaskCount != 0 {
+		t.Fatalf("overview %+v", cluster)
+	}
+
+	create := httptest.NewRecorder()
+	handler.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"fresh","cluster_key":"fresh","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`)))
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	var created tasks.Task
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "4" {
+		t.Fatalf("reused leftover id %s", created.ID)
 	}
 }
 

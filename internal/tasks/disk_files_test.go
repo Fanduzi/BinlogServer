@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: temporary data directories with sealed and open binlog segment names
-// output: assertions for disk listing order, catalog fallback, and checkpoint absence
+// output: assertions for disk listing order, catalog fallback, checkpoint absence, and standalone restart discovery
 // pos: regression coverage for standalone files listing when meta has no catalog rows
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -115,7 +115,13 @@ func TestListTaskBinlogFilesOnDisk_MissingOrUnsafe(t *testing.T) {
 
 func TestScheduler_ListFiles_EmptyCatalogUsesDisk(t *testing.T) {
 	dir := t.TempDir()
-	taskDir := filepath.Join(dir, "1")
+	store := newFakeFileStore()
+	s := NewScheduler(WithFileStore(store), WithDataDir(dir))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -126,12 +132,7 @@ func TestScheduler_ListFiles_EmptyCatalogUsesDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := newFakeFileStore()
-	s := NewScheduler(WithFileStore(store), WithDataDir(dir))
-	if _, err := s.CreateTask("cluster-a", "cluster-a-key"); err != nil {
-		t.Fatal(err)
-	}
-	files, err := s.ListFiles("1", 10)
+	files, err := s.ListFiles(task.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,25 +149,26 @@ func TestScheduler_ListFiles_EmptyCatalogUsesDisk(t *testing.T) {
 
 func TestScheduler_ListFiles_CatalogWinsOverDisk(t *testing.T) {
 	dir := t.TempDir()
-	taskDir := filepath.Join(dir, "1")
+	store := newFakeFileStore()
+	s := NewScheduler(WithFileStore(store), WithDataDir(dir))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000099"), []byte("disk"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store := newFakeFileStore()
-	store.files["1"] = []BinlogFile{{
-		TaskID:   "1",
+	store.files[task.ID] = []BinlogFile{{
+		TaskID:   task.ID,
 		FileName: "mysql-bin.000001",
 		FilePath: "/meta/mysql-bin.000001",
 		State:    "SEALED",
 	}}
-	s := NewScheduler(WithFileStore(store), WithDataDir(dir))
-	if _, err := s.CreateTask("cluster-a", "cluster-a-key"); err != nil {
-		t.Fatal(err)
-	}
-	files, err := s.ListFiles("1", 10)
+	files, err := s.ListFiles(task.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,34 +186,35 @@ func (errListFileStore) ListBinlogFiles(context.Context, string, int) ([]BinlogF
 
 func TestScheduler_ListFiles_StoreErrorDoesNotScanDisk(t *testing.T) {
 	dir := t.TempDir()
-	taskDir := filepath.Join(dir, "1")
+	s := NewScheduler(WithFileStore(errListFileStore{}), WithDataDir(dir))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000001"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := NewScheduler(WithFileStore(errListFileStore{}), WithDataDir(dir))
-	if _, err := s.CreateTask("cluster-a", "cluster-a-key"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ListFiles("1", 10); err == nil || err.Error() != "db down" {
+	if _, err := s.ListFiles(task.ID, 10); err == nil || err.Error() != "db down" {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestGetCheckpoint_DiskFilesDoNotInventRow(t *testing.T) {
 	dir := t.TempDir()
-	taskDir := filepath.Join(dir, "1")
+	s := NewScheduler(WithDataDir(dir))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000001"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := NewScheduler(WithDataDir(dir))
-	task, err := s.CreateTask("cluster-a", "cluster-a-key")
-	if err != nil {
 		t.Fatal(err)
 	}
 	cp, ok, err := s.GetCheckpoint(context.Background(), task.ID)
@@ -235,5 +238,122 @@ func TestGetCheckpoint_DiskFilesDoNotInventRow(t *testing.T) {
 	}
 	if !ok || cp.File != "mysql-bin.000001" || cp.Pos != 128 {
 		t.Fatalf("stored checkpoint lost: ok=%v %+v", ok, cp)
+	}
+}
+
+func TestStandaloneRestart_DiscoversLeftoverDirectories(t *testing.T) {
+	dir := t.TempDir()
+	first := NewScheduler(WithDataDir(dir))
+	task, err := first.CreateTask("orders", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, task.ID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "notes.txt"), []byte("skip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000010"), []byte("ten"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e1"), []byte("open"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), []byte("sealed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "8"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "9"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "9", "notes.txt"), []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.ListTasks()) != 1 {
+		t.Fatalf("live task duplicated: %+v", first.ListTasks())
+	}
+
+	second := NewScheduler(WithDataDir(dir))
+	listed := second.ListTasks()
+	if len(listed) != 1 || listed[0].ID != task.ID {
+		t.Fatalf("discovered %+v, want only %s", listed, task.ID)
+	}
+	if listed[0].State != StateStopped || listed[0].Name != task.ID || listed[0].Source.Host != "" || listed[0].Source.User != "" {
+		t.Fatalf("identity %+v", listed[0])
+	}
+	got, err := second.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != task.ID || got.Source.Password != "" {
+		t.Fatalf("get %+v", got)
+	}
+	files, err := second.ListFiles(task.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("files %+v", files)
+	}
+	if files[0].FileName != "mysql-bin.000003" || files[0].State != "SEALED" || files[0].FilePath != filepath.Join(taskDir, "mysql-bin.000003") {
+		t.Fatalf("sealed %+v", files[0])
+	}
+	if files[1].FileName != "mysql-bin.000004" || files[1].State != "OPEN" || files[1].FilePath != filepath.Join(taskDir, "mysql-bin.000004.open.e1") {
+		t.Fatalf("open %+v", files[1])
+	}
+	if files[2].FileName != "mysql-bin.000010" || filepath.Base(files[2].FilePath) != "mysql-bin.000010" {
+		t.Fatalf("last %+v", files[2])
+	}
+	cp, ok, err := second.GetCheckpoint(context.Background(), task.ID)
+	if err != nil || ok || cp.File != "" || cp.Pos != 0 {
+		t.Fatalf("checkpoint err=%v ok=%v %+v", err, ok, cp)
+	}
+	events, err := second.ListEvents(task.ID, 10)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("events err=%v %+v", err, events)
+	}
+	if _, progressOK, err := second.GetReplicationProgress(task.ID); err != nil || progressOK {
+		t.Fatalf("progress err=%v ok=%v", err, progressOK)
+	}
+	if err := second.StartTask(task.ID); !errors.Is(err, ErrDiskBackupReadOnly) {
+		t.Fatalf("start err=%v", err)
+	}
+	if err := second.DeleteTask(task.ID); !errors.Is(err, ErrDiskBackupReadOnly) {
+		t.Fatalf("delete err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(taskDir, "mysql-bin.000003")); err != nil {
+		t.Fatal(err)
+	}
+	created, err := second.CreateTask("fresh", "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == task.ID {
+		t.Fatalf("reused leftover id %s", created.ID)
+	}
+	ids := map[string]bool{}
+	for _, item := range second.ListTasks() {
+		ids[item.ID] = true
+	}
+	if !ids[task.ID] || !ids[created.ID] || ids["8"] || ids["9"] {
+		t.Fatalf("ids %+v", ids)
+	}
+	if _, err := second.GetTask("missing"); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("missing err=%v", err)
+	}
+
+	meta := NewScheduler(WithStore(newFakeStore()), WithDataDir(dir))
+	if got := meta.ListTasks(); len(got) != 0 {
+		t.Fatalf("meta list discovered disk tasks: %+v", got)
+	}
+	if _, err := meta.ListFiles(task.ID, 10); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("meta files err=%v", err)
+	}
+	if _, err := meta.GetTask(task.ID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("meta get err=%v", err)
 	}
 }
