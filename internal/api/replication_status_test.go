@@ -1,11 +1,12 @@
 // Package api provides module-level functionality for api.
 // input: replication progress snapshots and task state for delay/status mapping
-// output: regression coverage that at-tip RUNNING lag stays NORMAL while catch-up lag stays DELAYED
+// output: regression coverage that at-tip RUNNING lag stays NORMAL with JSON delay_seconds 0, while catch-up lag stays DELAYED and a missing sample stays omitted
 // pos: API-layer test boundary for operator-visible replication delay semantics
 // note: if this file changes, update this header and module README.md.
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -35,8 +36,15 @@ func TestBuildReplicationResponse_RunningAtTipWithOldEventTimeIsNormal(t *testin
 	if resp.Status != "NORMAL" {
 		t.Fatalf("operator saw status=%s reason=%s, want NORMAL when dump is already at LATEST tip", resp.Status, resp.Reason)
 	}
-	if resp.DelaySeconds != 0 {
-		t.Fatalf("delay_seconds=%d, want 0 at LATEST tip even if last event header is days old", resp.DelaySeconds)
+	if resp.DelaySeconds == nil || *resp.DelaySeconds != 0 {
+		t.Fatalf("delay_seconds=%v, want 0 at LATEST tip even if last event header is days old", resp.DelaySeconds)
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal replication response: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"delay_seconds":0`)) {
+		t.Fatalf("caught-up JSON omitted delay_seconds 0: %s", raw)
 	}
 	if resp.LastEventAt == nil || !resp.LastEventAt.Equal(lastEventAt) {
 		t.Fatalf("last_event_at should remain header time for diagnostics, got %v", resp.LastEventAt)
@@ -65,11 +73,73 @@ func TestBuildReplicationResponse_RunningBehindTipKeepsCatchUpDelay(t *testing.T
 	if resp.Status != "DELAYED" {
 		t.Fatalf("status=%s reason=%s, want DELAYED while catch-up is still behind source tip", resp.Status, resp.Reason)
 	}
-	if resp.DelaySeconds != 72*60*60 {
-		t.Fatalf("delay_seconds=%d, want 259200 for 72h catch-up lag", resp.DelaySeconds)
+	if resp.DelaySeconds == nil || *resp.DelaySeconds != 72*60*60 {
+		t.Fatalf("delay_seconds=%v, want 259200 for 72h catch-up lag", resp.DelaySeconds)
 	}
 	if resp.Reason != "DELAY_EXCEEDS_THRESHOLD" {
 		t.Fatalf("reason=%s, want DELAY_EXCEEDS_THRESHOLD", resp.Reason)
+	}
+}
+
+// TestBuildReplicationResponse_SubSecondLagEncodesZero 验证不足 1 秒的追位点
+// 截成 0 时也必须写出 JSON 0，不能因为不是 at-tip 就把字段省掉。
+func TestBuildReplicationResponse_SubSecondLagEncodesZero(t *testing.T) {
+	now := time.Date(2026, 10, 3, 16, 39, 40, 0, time.UTC)
+	resp := buildReplicationResponse(
+		tasks.Task{ID: "1", State: tasks.StateRunning},
+		tasks.ReplicationProgress{
+			TaskID:        "1",
+			LastEventAt:   now.Add(-200 * time.Millisecond),
+			LastEventFile: "mysql-bin.000007",
+			LastEventPos:  438,
+			UpdatedAt:     now,
+		},
+		true,
+		now,
+		30,
+	)
+	if resp.Status != "NORMAL" || resp.Reason != "" {
+		t.Fatalf("status=%s reason=%s, want NORMAL for sub-second lag", resp.Status, resp.Reason)
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal replication response: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"delay_seconds":0`)) {
+		t.Fatalf("sub-second lag JSON omitted delay_seconds 0: %s", raw)
+	}
+}
+
+// TestBuildReplicationResponse_NoEventTimeOmitsDelaySeconds 验证还没有事件时间样本时
+// 省略 delay_seconds。has_progress 仍可为 true，Console 靠缺字段显示 "--"。
+func TestBuildReplicationResponse_NoEventTimeOmitsDelaySeconds(t *testing.T) {
+	now := time.Date(2026, 10, 3, 16, 40, 0, 0, time.UTC)
+	resp := buildReplicationResponse(
+		tasks.Task{ID: "1", State: tasks.StateRunning},
+		tasks.ReplicationProgress{
+			TaskID:        "1",
+			LastEventFile: "mysql-bin.000007",
+			LastEventPos:  4,
+		},
+		true,
+		now,
+		30,
+	)
+	if resp.Status != "ABNORMAL" || resp.Reason != "NO_PROGRESS" {
+		t.Fatalf("status=%s reason=%s, want ABNORMAL NO_PROGRESS", resp.Status, resp.Reason)
+	}
+	if !resp.HasProgress {
+		t.Fatal("has_progress should stay true when a progress row exists")
+	}
+	if resp.DelaySeconds != nil {
+		t.Fatalf("delay sample=%d, want none", *resp.DelaySeconds)
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal replication response: %v", err)
+	}
+	if bytes.Contains(raw, []byte(`"delay_seconds"`)) {
+		t.Fatalf("no-sample JSON included delay_seconds: %s", raw)
 	}
 }
 
@@ -138,8 +208,12 @@ func TestTaskAPI_GetReplication_LatestAtTipWithOldEventTimeIsNormal(t *testing.T
 	if body["status"] != "NORMAL" {
 		t.Fatalf("operator saw status=%v reason=%v, want NORMAL at LATEST tip", body["status"], body["reason"])
 	}
-	if delay, _ := body["delay_seconds"].(float64); delay != 0 {
-		t.Fatalf("delay_seconds=%v, want 0 at LATEST tip", body["delay_seconds"])
+	delay, ok := body["delay_seconds"]
+	if !ok {
+		t.Fatal("GET /replication omitted delay_seconds; a caught-up task must include 0")
+	}
+	if delay != float64(0) {
+		t.Fatalf("delay_seconds=%v (%T), want JSON number 0", delay, delay)
 	}
 	gotAt, _ := body["last_event_at"].(string)
 	parsed, err := time.Parse(time.RFC3339, gotAt)
