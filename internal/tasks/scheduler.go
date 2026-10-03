@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, and execution coordination
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -212,6 +212,13 @@ func WithFileStore(store FileStore) Option {
 	}
 }
 
+// WithDataDir 设置本地 binlog 根目录。文件目录为空时，ListFiles 扫描其中的分段。
+func WithDataDir(dir string) Option {
+	return func(s *Scheduler) {
+		s.dataDir = strings.TrimSpace(dir)
+	}
+}
+
 // WithFileUploader 注入对象存储上传器。
 func WithFileUploader(uploader FileUploader) Option {
 	return func(s *Scheduler) {
@@ -298,6 +305,7 @@ type Scheduler struct {
 	checkpointReader CheckpointReader
 	eventStore       EventStore
 	fileStore        FileStore
+	dataDir          string
 	fileUploader     FileUploader
 	retryUploads     map[string]struct{}
 	retrySuccess     int64

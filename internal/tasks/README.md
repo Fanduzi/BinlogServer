@@ -30,6 +30,7 @@
 - 仅 `SOURCE_UNREACHABLE` 连续失败最多重试 10 次；runner ready 会清零进程内连续失败计数，服务重启后重新计数，其他 retryable source code 不共享此封顶。
 - 事件记录、文件元信息、上传补偿。
 - `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
+- `ListFiles`：file store 返回非空时保持元数据结果。file store 未配置，或该任务结果为空且设置了 `WithDataDir` 时，扫描 `{data_dir}/{task_id}` 的封存名与 `.open.e<epoch>`，按源序号升序（同序号封存在前，再按 epoch 升序）。`limit` 保留序号最大的窗口。`file_name` 是源文件名，`file_path` 是磁盘路径。store 查询失败不改扫磁盘。磁盘列表不编造 checkpoint。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
 - `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与源身份共享。
 - `SameSourceHost`：回环别名是同一台源，非回环仍精确匹配；lookup 与任务观测 host 过滤共用。
