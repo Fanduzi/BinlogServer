@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, and lookup/dashboard shared source-identity coverage
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -1449,6 +1449,75 @@ func TestAPI_AuthMiddlewareProtectsMetricsAndAPIRoutes(t *testing.T) {
 	if apiOKResp.Code != http.StatusOK {
 		t.Fatalf("expected /api/tasks 200 with valid token, got %d body=%s", apiOKResp.Code, apiOKResp.Body.String())
 	}
+}
+
+// TestAPI_AuthEnabledServesConsoleWithoutBearer verifies a browser can load the Console
+// without an Authorization header while /api/*, /metrics, and /swagger/* stay protected.
+func TestAPI_AuthEnabledServesConsoleWithoutBearer(t *testing.T) {
+	handler := NewServer(tasks.NewScheduler(), WithAuth(AuthConfig{
+		Enabled:        true,
+		Mode:           AuthModeBearer,
+		BearerToken:    "secret-token",
+		ProtectAPI:     true,
+		ProtectMetrics: true,
+	}))
+
+	uiResp := httptest.NewRecorder()
+	uiReq := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	handler.ServeHTTP(uiResp, uiReq)
+	if uiResp.Code != http.StatusOK || uiResp.Body.Len() == 0 {
+		t.Fatalf("expected /ui/ 200 with a document, got %d len=%d", uiResp.Code, uiResp.Body.Len())
+	}
+	if !bytes.Contains(uiResp.Body.Bytes(), []byte("Binlog Server Console")) {
+		t.Fatalf("expected console title, got body=%s", uiResp.Body.String())
+	}
+	asset := consoleScriptPath(t, uiResp.Body.String())
+	assetResp := httptest.NewRecorder()
+	handler.ServeHTTP(assetResp, httptest.NewRequest(http.MethodGet, asset, nil))
+	if assetResp.Code != http.StatusOK || assetResp.Body.Len() == 0 {
+		t.Fatalf("expected console asset %s 200 with a body, got %d len=%d", asset, assetResp.Code, assetResp.Body.Len())
+	}
+
+	for _, path := range []string{"/api/tasks", "/api/summary", "/metrics", "/swagger/index.html"} {
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+		if resp.Code != http.StatusUnauthorized || resp.Body.Len() != 0 {
+			t.Fatalf("expected %s 401 with an empty body, got %d body=%q", path, resp.Code, resp.Body.String())
+		}
+	}
+
+	healthResp := httptest.NewRecorder()
+	handler.ServeHTTP(healthResp, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if healthResp.Code != http.StatusOK || healthResp.Body.String() != "ok" {
+		t.Fatalf("expected /healthz 200 ok, got %d %q", healthResp.Code, healthResp.Body.String())
+	}
+
+	authed := httptest.NewRecorder()
+	authedReq := httptest.NewRequest(http.MethodGet, "/api/summary", nil)
+	authedReq.Header.Set("Authorization", "Bearer secret-token")
+	handler.ServeHTTP(authed, authedReq)
+	if authed.Code != http.StatusOK {
+		t.Fatalf("expected /api/summary 200 with bearer, got %d body=%s", authed.Code, authed.Body.String())
+	}
+}
+
+func consoleScriptPath(t *testing.T, html string) string {
+	t.Helper()
+	const marker = `src="`
+	idx := strings.Index(html, marker)
+	if idx < 0 {
+		t.Fatalf("console html has no script src: %s", html)
+	}
+	rest := html[idx+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end <= 0 {
+		t.Fatalf("console script src is truncated: %s", rest)
+	}
+	src := rest[:end]
+	if !strings.HasPrefix(src, "/ui/") {
+		t.Fatalf("console script src %q is not served under /ui/", src)
+	}
+	return src
 }
 
 // TestAPI_AuthMiddlewareCanExposeMetricsAndAPIByConfig 验证可按配置放开 /metrics 与 /api/*。
