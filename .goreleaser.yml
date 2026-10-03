@@ -53,6 +53,7 @@ archives:
       - config.example.yaml
       - config.production.example.yaml
       - migrations/*.sql
+      - docs/guide/*.md
       - docs/guide/**/*
 
 checksum:
