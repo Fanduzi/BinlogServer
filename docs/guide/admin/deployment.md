@@ -462,7 +462,7 @@ MariaDB 把 `mysqlbinlog` 换成 `mariadb-binlog`，把 `mysql` 换成 `mariadb`
 
 standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁盘上：
 
-- 进程还在、任务还在：`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`。返回封存文件和 `.open.e<epoch>`。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 带 `.open.e<epoch>`，可直接交给 `mysqlbinlog` / `mariadb-binlog`。顺序按源文件序号升序；同一序号先封存名，再按 epoch 从小到大。`limit` 默认 200，超出时保留序号最大的那段，窗口内仍是升序。目录里没有分段时正文是 `[]`。Console 任务文件表的「文件」列是磁盘文件名，「磁盘路径」列是这些 `file_path`。
+- 进程还在、任务还在：`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`。返回封存文件和 `.open.e<epoch>`。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 带 `.open.e<epoch>`，可直接交给 `mysqlbinlog` / `mariadb-binlog`。顺序按源文件序号升序；同一序号先封存名，再按 epoch 从小到大。`limit` 默认 200，超出时保留序号最大的那段，窗口内仍是升序。目录里没有分段时正文是 `[]`。磁盘扫描不知道事件位点，`start_pos` 和 `end_pos` 是 0，不要当成 checkpoint。Console 任务文件表的「文件」列是磁盘文件名，「磁盘路径」列是这些 `file_path`。
 - 没有位点行时，`GET /api/tasks/{id}/checkpoint` 仍是 `404`，正文 `checkpoint not found`。磁盘扫描不编造 checkpoint。
 - 进程退出后，任务也不在内存里，再查这个 id 是 `404 task not found`。目录还在。
 
@@ -544,7 +544,7 @@ Replay the bytes on disk. Sealed files still under `{data_dir}/{task_id}/`, plus
 
 Standalone with no `meta_dsn` still keeps tasks and checkpoints in memory. The segments are on disk:
 
-- While the process is up and the task still exists, `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/`. It returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path. An open segment's `file_path` includes `.open.e<epoch>` and is the path to pass to `mysqlbinlog` or `mariadb-binlog`. Order is ascending source index. The same index lists the sealed name first, then open epochs from low to high. `limit` defaults to 200 and, past that, keeps the highest indexes, still ascending inside the window. An empty directory returns `[]`. The Console task files table shows the on-disk name in the file column and these `file_path` values in the on-disk path column.
+- While the process is up and the task still exists, `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/`. It returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path. An open segment's `file_path` includes `.open.e<epoch>` and is the path to pass to `mysqlbinlog` or `mariadb-binlog`. Order is ascending source index. The same index lists the sealed name first, then open epochs from low to high. `limit` defaults to 200 and, past that, keeps the highest indexes, still ascending inside the window. An empty directory returns `[]`. The disk scan does not know event offsets, so `start_pos` and `end_pos` are 0. Do not treat them as a checkpoint. The Console task files table shows the on-disk name in the file column and these `file_path` values in the on-disk path column.
 - With no checkpoint row, `GET /api/tasks/{id}/checkpoint` stays `404` with body `checkpoint not found`. The disk scan does not invent a checkpoint.
 - After the process exits, the task is gone too. A later request for that id returns `404 task not found`. The directory remains.
 
