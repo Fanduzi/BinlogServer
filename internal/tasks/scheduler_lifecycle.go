@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, refusal to start or stop a read-only on-disk backup, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
+// output: guarded start/stop, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -118,6 +118,13 @@ func (s *Scheduler) StartTask(id string) error {
 		}
 	}
 
+	if err := s.prepareDiskResumeEpochLocked(&task); err != nil {
+		owner, epoch := task.OwnerWorkerID, task.Epoch
+		s.mu.Unlock()
+		s.releaseTaskLease(id, owner, epoch)
+		return err
+	}
+
 	// 注意：这里仅表示“已发起启动流程”，不是“runner 已 ready”。
 	if err := s.markStartingLocked(task); err != nil {
 		s.mu.Unlock()
@@ -144,6 +151,57 @@ func (s *Scheduler) StartTask(id string) error {
 	}
 
 	go s.runTask(ctx, id, taskForRun, done)
+	return nil
+}
+
+// prepareDiskResumeEpochLocked raises an adopted task's epoch above every
+// leftover .open.e* file so the new segment sorts after them. Caller holds s.mu.
+func (s *Scheduler) prepareDiskResumeEpochLocked(task *Task) error {
+	if task == nil || !task.KeepLocalSegments {
+		return nil
+	}
+	next, err := diskNextOpenEpoch(s.dataDir, task.ID)
+	if err != nil {
+		return err
+	}
+	if s.leaseManager == nil {
+		if task.Epoch < next {
+			task.Epoch = next
+		}
+		return nil
+	}
+	ml, ok := s.leaseManager.(*MemoryLease)
+	if !ok {
+		if task.Epoch < next {
+			return fmt.Errorf("cannot resume on-disk segments at epoch %d", next)
+		}
+		return nil
+	}
+	const maxAdvance = 10000
+	advanced := 0
+	for task.Epoch < next {
+		if advanced >= maxAdvance {
+			return fmt.Errorf("cannot resume on-disk segments at epoch %d", next)
+		}
+		advanced++
+		prev := task.Epoch
+		owner := task.OwnerWorkerID
+		if owner == "" {
+			owner = s.clusterWorkerID
+		}
+		s.releaseTaskLease(task.ID, owner, prev)
+		leaseCtx, cancel := s.withLeaseTimeout(context.Background())
+		epoch, acquired, acquireErr := ml.Acquire(leaseCtx, task.ID, s.clusterWorkerID, s.leaseTTL)
+		cancel()
+		if acquireErr != nil {
+			return acquireErr
+		}
+		if !acquired || epoch <= prev {
+			return fmt.Errorf("cannot resume on-disk segments at epoch %d", next)
+		}
+		task.Epoch = epoch
+		task.OwnerWorkerID = s.clusterWorkerID
+	}
 	return nil
 }
 

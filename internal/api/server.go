@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
+// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -24,6 +24,7 @@ type taskService interface {
 	CreateTask(name string, clusterKey string) (tasks.Task, error)
 	CreateTaskFromSpec(name string, clusterKey string, source *tasks.SourceConfig, start *tasks.StartConfig, storage *tasks.Storage) (tasks.Task, error)
 	UpdateTask(id string, patch tasks.TaskPatch) (tasks.Task, error)
+	AdoptDiskBackup(id string, patch tasks.TaskPatch) (tasks.Task, error)
 	ConfigureClusterKey(id string, clusterKey string) error
 	ConfigureName(id string, name string) error
 	ConfigureSource(id string, source tasks.SourceConfig) error
