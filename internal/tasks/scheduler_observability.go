@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, meta or on-disk files, runs, and worker heartbeat views
+// output: observability-facing task progress including at-tip lag, events, meta or on-disk files, leftover-directory file lists, runs, and worker heartbeat views
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -45,13 +45,26 @@ func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.
 // GetReplicationProgress 获取任务复制进度快照。
 func (s *Scheduler) GetReplicationProgress(taskID string) (ReplicationProgress, bool, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	_, ok := s.tasks[taskID]
+	store := s.store
+	dataDir := s.dataDir
+	progress, hasProgress := s.replica[taskID]
+	s.mu.Unlock()
 
-	if _, ok := s.tasks[taskID]; !ok {
-		return ReplicationProgress{}, false, ErrTaskNotFound
+	if !ok {
+		if store != nil {
+			return ReplicationProgress{}, false, ErrTaskNotFound
+		}
+		_, found, err := lookupDiskBackupTask(dataDir, taskID)
+		if err != nil {
+			return ReplicationProgress{}, false, err
+		}
+		if !found {
+			return ReplicationProgress{}, false, ErrTaskNotFound
+		}
+		return ReplicationProgress{}, false, nil
 	}
-	progress, ok := s.replica[taskID]
-	return progress, ok, nil
+	return progress, hasProgress, nil
 }
 
 // runTask 托管单任务执行 goroutine，包含错误重试与状态收敛逻辑。
@@ -90,6 +103,7 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 	s.mu.Lock()
 	_, ok := s.tasks[taskID]
 	store := s.store
+	dataDir := s.dataDir
 	s.mu.Unlock()
 
 	// Step 1: 内存未命中时，按主键补齐该任务，不加载整表。
@@ -105,7 +119,13 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 		s.mu.Unlock()
 	}
 	if !ok && store == nil {
-		return binlog.Checkpoint{}, false, ErrTaskNotFound
+		_, found, err := lookupDiskBackupTask(dataDir, taskID)
+		if err != nil {
+			return binlog.Checkpoint{}, false, err
+		}
+		if !found {
+			return binlog.Checkpoint{}, false, ErrTaskNotFound
+		}
 	}
 	// Step 2: 读 checkpoint（未配置 reader 时返回未命中）。
 	if s.checkpointReader == nil {
@@ -117,11 +137,25 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 // ListEvents 列出任务事件，limit<=0 时按默认值处理。
 func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	s.mu.Lock()
+	_, ok := s.tasks[taskID]
+	if !ok {
+		store := s.store
+		dataDir := s.dataDir
+		s.mu.Unlock()
+		if store != nil {
+			return nil, ErrTaskNotFound
+		}
+		_, found, err := lookupDiskBackupTask(dataDir, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, ErrTaskNotFound
+		}
+		return []TaskEvent{}, nil
+	}
 	defer s.mu.Unlock()
 
-	if _, ok := s.tasks[taskID]; !ok {
-		return nil, ErrTaskNotFound
-	}
 	if s.eventStore != nil {
 		// 优先读持久化事件，避免重启后只看到内存中的事件片段。
 		ctx, cancel := s.withReadTimeout(context.Background())
@@ -142,14 +176,26 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 
 // ListFiles 列出任务文件。元数据目录非空时保持原结果。
 // 未配置文件库，或该任务一条目录都没有时，扫描 {data_dir}/{task_id}。
+// 没有 task store、内存里也没有这个 id 时，目录里仍有分段则同样扫描。
 func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 	s.mu.Lock()
 	_, ok := s.tasks[taskID]
 	store := s.fileStore
+	taskStore := s.store
 	dataDir := s.dataDir
 	s.mu.Unlock()
 	if !ok {
-		return nil, ErrTaskNotFound
+		if taskStore != nil {
+			return nil, ErrTaskNotFound
+		}
+		files, err := listTaskBinlogFilesOnDisk(dataDir, taskID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(files) == 0 {
+			return nil, ErrTaskNotFound
+		}
+		return files, nil
 	}
 	if store != nil {
 		ctx, cancel := s.withReadTimeout(context.Background())
