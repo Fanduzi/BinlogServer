@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- Standalone with no `meta_dsn`, after a restart on the same `data_dir`: `GET /api/tasks` and the dashboard list leftover directories that still contain sealed or `.open.e<epoch>` segments. The id is the directory name. `GET /api/tasks/{id}/files` uses the same disk scan (`file_name` is the source name, `file_path` is the on-disk path, ascending source index). Checkpoint stays 404 `checkpoint not found`. Those rows have no source credentials and are not started. A configured `meta_dsn` does not discover directories from disk. A non-empty `binlog_files` catalog is unchanged, and a store error does not fall back to disk.
+
 ## [v0.5.9] - 2026-10-03
 
 ### Fixed

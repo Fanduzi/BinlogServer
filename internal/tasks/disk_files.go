@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order
-// pos: disk listing used when the file catalog is missing or empty
+// output: sealed and open on-disk segments in ascending binlog index order, plus leftover task ids when no task store is configured
+// pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const binlogOpenEpochMark = ".open.e"
@@ -153,4 +154,120 @@ func binlogSegmentKey(file BinlogFile) segmentSortKey {
 		return segmentSortKey{name: name}
 	}
 	return segmentSortKey{seq: seq, epoch: epoch, name: name, ok: true}
+}
+
+// listDiskBackupTasks returns data_dir children that still contain sealed or
+// .open.e<epoch> segments and are not already in known. Ids already in memory
+// stay the live task. Hidden names and symlinks are skipped.
+// ponytail: full directory scan, cache if dashboard polls contend with start/stop.
+func listDiskBackupTasks(dataDir string, known map[string]struct{}) ([]Task, error) {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]Task, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if _, ok := known[name]; ok {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		task, found, err := lookupDiskBackupTask(dataDir, name)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		out = append(out, task)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return LessTaskID(out[i].ID, out[j].ID)
+	})
+	return out, nil
+}
+
+func lookupDiskBackupTask(dataDir, taskID string) (Task, bool, error) {
+	dir, ok := taskBinlogDir(dataDir, taskID)
+	if !ok || strings.HasPrefix(taskID, ".") {
+		return Task{}, false, nil
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Task{}, false, nil
+		}
+		return Task{}, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return Task{}, false, nil
+	}
+	files, err := listTaskBinlogFilesOnDisk(dataDir, taskID, 1)
+	if err != nil {
+		return Task{}, false, err
+	}
+	if len(files) == 0 {
+		return Task{}, false, nil
+	}
+	return diskBackupTask(taskID, info.ModTime().UTC()), true, nil
+}
+
+func diskBackupTask(id string, updated time.Time) Task {
+	return Task{
+		ID:        id,
+		Name:      id,
+		State:     StateStopped,
+		UpdatedAt: updated,
+	}
+}
+
+func maxNumericDiskBackupID(dataDir string) (int, error) {
+	found, err := listDiskBackupTasks(dataDir, nil)
+	if err != nil {
+		return 0, err
+	}
+	maxID := 0
+	for _, task := range found {
+		n, convErr := strconv.Atoi(task.ID)
+		if convErr != nil || n < 0 {
+			continue
+		}
+		if n > maxID {
+			maxID = n
+		}
+	}
+	return maxID, nil
+}
+
+func readOnlyDiskBackup(store TaskStore, dataDir, id string) error {
+	if store != nil {
+		return nil
+	}
+	_, found, err := lookupDiskBackupTask(dataDir, id)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	return ErrDiskBackupReadOnly
 }

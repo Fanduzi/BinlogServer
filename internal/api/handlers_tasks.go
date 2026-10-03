@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, and structured 400 bodies
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, structured 400 bodies, and 400 on updates of read-only on-disk backups
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -977,7 +977,8 @@ func isTaskUpdateBadRequest(err error) bool {
 		errors.Is(err, tasks.ErrFilePosRequired) ||
 		errors.Is(err, tasks.ErrGTIDSetRequired) ||
 		errors.Is(err, tasks.ErrInvalidStartMode) ||
-		errors.Is(err, tasks.ErrInvalidRetentionDays)
+		errors.Is(err, tasks.ErrInvalidRetentionDays) ||
+		errors.Is(err, tasks.ErrDiskBackupReadOnly)
 }
 
 type apiErrorBody struct {
