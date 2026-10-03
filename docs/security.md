@@ -66,6 +66,14 @@ curl -H "Authorization: Bearer your-secret-token" http://localhost:8080/api/task
 curl -H "X-API-Key: your-api-key" http://localhost:8080/api/tasks
 ```
 
+### Web Console
+
+Open `/ui/` in a browser. The address bar cannot set `Authorization`, and the server does not require it for `/ui/*`. The Console calls `/api/*`. A 401 opens Settings. Paste the bearer token. The page stores it and sends `Authorization: Bearer <token>` on later API calls.
+
+Unauthenticated `/api/*` still returns 401. `/metrics` follows `protect_metrics`. `/swagger/*` uses the same middleware when `api.auth.enabled=true` and has no token field; use curl or a reverse proxy. `/healthz` stays unauthenticated.
+
+The Settings field is a bearer token. `api_key` mode is for clients that send the configured header. The Console does not send that header.
+
 ## Key Management
 
 ### Environment Variables (Recommended)
@@ -132,7 +140,7 @@ Before deploying to production:
    - Set `api.auth.enabled: true`
    - Configure a strong, unique token
    - Protect both API and metrics endpoints
-   - With auth enabled, `/ui/*` and `/swagger/*` use the same auth middleware as `/api/*`
+   - With auth enabled, `/ui/*` loads without a credential so the Console can collect the bearer token. `/swagger/*` uses the same auth middleware as `/api/*`
 
 2. **Pass `--encryption-key`**
    - `PRODUCTION=true` refuses to start when `--encryption-key` is empty

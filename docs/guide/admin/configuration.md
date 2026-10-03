@@ -328,10 +328,10 @@ export BINLOG_SERVER_LOG_ROTATE_INTERVAL="12h"
 | `/healthz` | **始终开放 (无鉴权)** | **始终开放 (无鉴权)**，供 LB/K8s 探活 |
 | `/metrics` | 开放 | **受保护** (要求 Token / Key) |
 | `/api/*` | 开放 | **受保护** (要求 Token / Key) |
-| `/swagger/*` | 开放 | **受保护** (跟从 `api.auth.enabled` 拦截) |
-| `/ui/*` | 开放 | **受保护** (跟从 `api.auth.enabled` 拦截) |
+| `/swagger/*` | 开放 | **受保护** (跟从 `api.auth.enabled` 拦截，不跟 `protect_api`) |
+| `/ui/*` | 开放 | **开放**（页面和静态资源不鉴权；页面里的 `/api/*` 仍要 Token） |
 
-> 💡 **v0.5.6 控制台安全说明：** 自 v0.5.6 起，当 `api.auth.enabled: true` 时，Web 控制台 `/ui/*` 与 Swagger `/swagger/*` 均会受到统一鉴权中间件保护。浏览器直接访问会收到 HTTP 401，需通过反向代理网关注入认证头，或通过前端携带凭据访问。只有 `/healthz` 始终保持开放。
+> 浏览器打开 `/ui/` 不需要事先带 `Authorization`。`/api/*` 返回 401 时，控制台弹出设置框，填入 bearer token。Swagger 没有这个输入框，`/swagger/*` 仍用 curl 或反向代理注入请求头。`/healthz` 始终开放。设置框发送的是 `Authorization: Bearer`，不是 API Key 头。
 
 **开发环境配置（默认，无鉴权）：**
 
@@ -366,6 +366,10 @@ export BINLOG_SERVER_API_AUTH_BEARER_TOKEN="your-secure-token-here"
 curl -H "Authorization: Bearer your-secure-token-here" \
   http://localhost:8080/api/tasks
 ```
+
+浏览器打开 `http://<host>:<port>/ui/`，在设置里粘贴同一个 bearer token。不需要在地址栏或 curl 之外先准备 `Authorization` 头。
+
+
 
 **使用 API Key 调用 API：**
 

@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, /metrics 5xx on store list errors, /healthz, /api/health, and the API auth middleware on /ui/* and /swagger/* when auth is enabled
+// output: REST API responses including SQL-paged task lists, cluster observation, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -118,14 +118,13 @@ func (s *Server) routes() {
 	apiGroup.GET("/tasks", gin.WrapF(s.handleTasks))
 	apiGroup.Any("/tasks/*path", gin.WrapF(s.handleTaskAction))
 	swaggerHandler := ginSwagger.WrapHandler(swaggerfiles.Handler)
-	uiHandler := gin.WrapH(http.StripPrefix("/ui/", ui.Handler()))
+	// /ui/* stays anonymous. A browser cannot send Authorization on the address bar,
+	// and the Console collects the bearer token after it loads.
+	s.gin.Any("/ui/*path", gin.WrapH(http.StripPrefix("/ui/", ui.Handler())))
 	if s.auth.Enabled {
-		authn := s.authMiddleware()
-		s.gin.GET("/swagger/*any", authn, swaggerHandler)
-		s.gin.Any("/ui/*path", authn, uiHandler)
+		s.gin.GET("/swagger/*any", s.authMiddleware(), swaggerHandler)
 	} else {
 		s.gin.GET("/swagger/*any", swaggerHandler)
-		s.gin.Any("/ui/*path", uiHandler)
 	}
 	s.gin.GET("/", func(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/ui/")
