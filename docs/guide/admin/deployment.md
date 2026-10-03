@@ -50,12 +50,12 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.12)
+## 3. 安装与产物准备 (v0.5.13)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档：
 
 ```bash
-VER=0.5.12
+VER=0.5.13
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,7 +69,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.12_linux_amd64/
+binlog-server_0.5.13_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema)
