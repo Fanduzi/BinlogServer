@@ -12,9 +12,19 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.9] - 2026-10-03
+
+### Fixed
+
+- Standalone with no `meta_dsn`, or a meta catalog with no `binlog_files` rows for that task: `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/` and returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path and includes `.open.e<epoch>` for an open segment. Order is ascending source index; the same index lists the sealed name, then open epochs. `limit` keeps the highest indexes. `start_pos` and `end_pos` are 0 because the disk scan has no offsets. Checkpoint stays 404 `checkpoint not found` when there is no checkpoint row. A non-empty `binlog_files` catalog is unchanged (`sealed_at` descending) and is not replaced by the disk scan. A store error does not fall back to disk. The Console task files table shows the on-disk name and `file_path`.
+
+### Changed
+
+- Operator download examples in README, the landing page, the deployment guide, and the config templates now pin `v0.5.9`.
+
 ### Docs
 
-- The replay section says a MySQL source requires MySQL's own `mysqlbinlog`, and a MariaDB source requires `mariadb-binlog`. If `mysqlbinlog --version` prints MariaDB, do not use it against MySQL: the pipe fails at `check_constraint_checks` with error 1193 and no rows land. The files are not corrupt.
+- The replay section says a MySQL source requires MySQL's own `mysqlbinlog`, and a MariaDB source requires `mariadb-binlog`. If `mysqlbinlog --version` prints MariaDB, do not use it against MySQL: the pipe fails at `check_constraint_checks` with error 1193 and no rows land. The files are not corrupt. The v0.5.9 archive includes `docs/guide`.
 
 ## [v0.5.8] - 2026-10-03
 
