@@ -12,9 +12,15 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.11] - 2026-10-03
+
 ### Added
 
 - Standalone with no `meta_dsn`: `POST /api/tasks/{id}/adopt` attaches `cluster_key` and source credentials to a leftover `{data_dir}/{id}/` directory and keeps that id. The response is 200, password is omitted, and the state stays `STOPPED`. When `start` is omitted, the saved position is `FILE_POS` at the size of the highest sealed or `.open.e*` segment. An explicit `start.mode` overrides that. `POST /api/tasks/{id}/start` then returns 204 and writes the next epoch in the same directory. Existing sealed and open segments stay. Before adopt, update and start still return 400 `on-disk backup has no task metadata`. A configured `meta_dsn` still does not discover directories from disk. No new config key. No schema migration.
+
+### Changed
+
+- Operator download examples in README, the landing page, the deployment guide, the config templates, and the workers API example now pin `v0.5.11`.
 
 ## [v0.5.10] - 2026-10-03
 
