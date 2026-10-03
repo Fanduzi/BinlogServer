@@ -20,11 +20,11 @@
 - `WithTracing(TracingConfig) ServerOption` - 注入 tracing 配置
 - `WithRateLimit(RateLimiterConfig) ServerOption` - 注入限流配置
 - `GET /api/summary` - 返回兼容既有字段的任务计数；`starting` 单独统计 STARTING，`running` 仅统计 runner ready 后的 RUNNING。有 `TaskDashboardRollup` 时状态计数走 SQL `GROUP BY`，不把匹配行整表读入内存。
-- `GET /api/dashboard` - 控制台任务观测唯一读取：返回同口径 summary（`starting` 与 `running` 独立）、任务明细与 source 聚合。状态计数与按源 `task_count`/`running`/`starting` 来自 `CountTaskStates` / `CountTasksBySource`；任务行是 `ListTasksPage` 的 LIMIT/OFFSET 页，复制进度只取该页。`normal`/`delayed` 与 RUNNING 的 `abnormal` 用 RUNNING id 引用分类，不加载整行。`total`、`summary.total` 与按源 `task_count` 仍是同一过滤集。无 rollup 的 store 仍用一次过滤读取做计数。
-- `GET /api/sources/lookup` - 按 host/port 查任务 id。有 store 时读集群观测同一份 `ListClusterObservation`（`store.ListTasks`）抄本，再用 `SameSourceHost` 过滤；store 错误返回 5xx，不退回启动时的内存名单。没有 store 时仍读同一份内存名单。
-- `GET /api/cluster/overview` / `GET /api/workers` / `GET /metrics` 的任务与主人计数共用 `ListClusterObservation`：有 store 时读 `store.ListTasks` 全库抄本，store 错误返回 5xx，不退回启动时的内存名单；没有 store 时仍读同一份内存名单。`/metrics` 一次 scrape 只读一份抄本。任务页 dashboard 过滤汇总不是集群人数。单机进程的主人 `standalone` 在没有心跳时不进入 overview 的 worker 列表，`worker_count` 为 0 且 `single_process` 为 true（与 `/api/workers` 的空列表同一人数）；该 id 一旦有心跳，overview 与 `/api/workers` 用同一条在线状态和 `last_seen_at`。
-- `GET /api/tasks/{id}` - 按 id 读单个任务。有 store 时 store 未找到返回 404，其它 store 错误返回 5xx，不把内存里的旧主人/epoch 抄本当成 200；没有 store 时仍读内存名单。
-- `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页，不是控制台任务观测来源。页序为数字 id 升序；支持 host/port/state 过滤，host 与 lookup/dashboard 共用 `SameSourceHost`；cluster/mysql 走 `ListTasksPage`（COUNT + `ORDER BY CAST(id AS UNSIGNED), id LIMIT/OFFSET`），standalone 仍切内存快照。默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
+- `GET /api/dashboard` - 控制台任务观测唯一读取：返回同口径 summary（`starting` 与 `running` 独立）、任务明细与 source 聚合。状态计数与按源 `task_count`/`running`/`starting` 来自 `CountTaskStates` / `CountTasksBySource`；任务行是 `ListTasksPage` 的 LIMIT/OFFSET 页，复制进度只取该页。`normal`/`delayed` 与 RUNNING 的 `abnormal` 用 RUNNING id 引用分类，不加载整行。`total`、`summary.total` 与按源 `task_count` 仍是同一过滤集。无 rollup 的 store 仍用一次过滤读取做计数。没有 task store 时，这一页包含仍有分段的磁盘目录，Console 用现有任务表和文件表展示它们。
+- `GET /api/sources/lookup` - 按 host/port 查任务 id。有 store 时读集群观测同一份 `ListClusterObservation`（`store.ListTasks`）抄本，再用 `SameSourceHost` 过滤；store 错误返回 5xx，不退回启动时的内存名单。没有 store 时仍读同一份名单，含仍有分段的磁盘目录。
+- `GET /api/cluster/overview` / `GET /api/workers` / `GET /metrics` 的任务与主人计数共用 `ListClusterObservation`：有 store 时读 `store.ListTasks` 全库抄本，store 错误返回 5xx，不退回启动时的内存名单；没有 store 时仍读同一份名单，含仍有分段的磁盘目录。主人计数不把无 owner 的磁盘目录算进 worker。`/metrics` 一次 scrape 只读一份抄本。任务页 dashboard 过滤汇总不是集群人数。单机进程的主人 `standalone` 在没有心跳时不进入 overview 的 worker 列表，`worker_count` 为 0 且 `single_process` 为 true（与 `/api/workers` 的空列表同一人数）；该 id 一旦有心跳，overview 与 `/api/workers` 用同一条在线状态和 `last_seen_at`。
+- `GET /api/tasks/{id}` - 按 id 读单个任务。有 store 时 store 未找到返回 404，其它 store 错误返回 5xx，不把内存里的旧主人/epoch 抄本当成 200，也不改扫磁盘。没有 store 时先读内存名单；没有该 id 但 `{data_dir}/{id}` 仍有分段时返回只读身份（`STOPPED`，无 source）。
+- `GET /api/tasks` - 返回 `{items,total,limit,offset}` 任务页，不是控制台任务观测来源。页序为数字 id 升序；支持 host/port/state 过滤，host 与 lookup/dashboard 共用 `SameSourceHost`；cluster/mysql 走 `ListTasksPage`（COUNT + `ORDER BY CAST(id AS UNSIGNED), id LIMIT/OFFSET`），standalone 切内存快照，并在没有 store 时并上仍有分段的 `{data_dir}/<id>`。默认 limit=100，limit 必须为 1..500，超过 500 返回 400 `invalid limit`。
 - `POST /api/tasks/batch` - 接收 `items` 数组（1..100 个现有创建请求），整包 envelope 错误返回 400 且不创建；合法 envelope 按顺序逐项调用 `CreateTaskFromSpec`，返回 200 的 `{index,cluster_key,task|error}` 结果数组。
 
 ## Dependencies
@@ -38,7 +38,7 @@
 - 创建任务：`CreateTaskFromSpec` 整包校验通过后才落库；400 返回 JSON `{"error","code"}`。批量创建复用同一入口，单项错误不阻塞后续项，成功任务脱敏返回。
 - 源身份：`GET /api/sources/lookup` 与 dashboard/summary/list 的 host 过滤共用 `tasks.SameSourceHost`。lookup 任务名单有 store 时走集群观测同一份 `ListClusterObservation` 抄本，不是启动内存快照。回环别名（localhost、127/8、::1，含括号 IPv6）是同一台源，端口仍严格匹配；非回环 host 保持修剪后的原文精确匹配且不做 DNS 解析。
 - 健康检查：`GET /healthz` 文本 `ok`；`GET /api/health` JSON `{"status":"ok"}`
-- 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。配置了 file store 且该任务有目录行时，仍返回元数据结果（`sealed_at` 倒序）。未配置 file store，或该任务目录为空时，扫描 `{data_dir}/{task_id}` 的封存文件和 `.open.e<epoch>`，按源序号升序；`file_name` 是源文件名，`file_path` 是磁盘路径。不从磁盘编造 checkpoint。
+- 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。配置了 file store 且该任务有目录行时，仍返回元数据结果（`sealed_at` 倒序）。未配置 file store，或该任务目录为空时，扫描 `{data_dir}/{task_id}` 的封存文件和 `.open.e<epoch>`，按源序号升序；`file_name` 是源文件名，`file_path` 是磁盘路径。不从磁盘编造 checkpoint。没有 task store 时，重启后 dashboard 与 `GET /api/tasks` 列出仍有分段的目录，该 id 的 files 用同一扫描；Console 任务表点开即可看到磁盘路径。更新这种只读身份返回 400。有 task store 时不从磁盘发现任务。
 - 状态汇总：summary/dashboard 保留既有计数键，并新增 `starting`；STARTING 不混入 `running`。有元数据 rollup 时计数是 SQL `GROUP BY`。
 - Source 聚合：dashboard source 项保留 `running`，并新增独立 `starting` 状态计数。按源计数同样是 `GROUP BY` 存储的 host/port，回环别名不并成一行。
 - 任务观测：控制台只信 dashboard。任务列表与 dashboard 任务行走 SQL LIMIT/OFFSET；dashboard/summary 不再为计数调用 `Limit=0` 的整表读取。`total`、`summary.total` 与按源计数仍是同一过滤集。非法 state/limit/offset/port 返回 400，limit 超过 500 返回 `invalid limit`。

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
+// output: guarded start/stop, refusal to start or stop a read-only on-disk backup, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -36,7 +36,11 @@ func (s *Scheduler) StartTask(id string) error {
 	// Step 1: 校验任务存在、状态可启动、source 最小配置可用。
 	task, ok := s.tasks[id]
 	if !ok {
+		err := readOnlyDiskBackup(s.store, s.dataDir, id)
 		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return ErrTaskNotFound
 	}
 	hasLiveRun := false
@@ -338,7 +342,11 @@ func (s *Scheduler) StopTask(id string) error {
 
 	task, ok := s.tasks[id]
 	if !ok {
+		err := readOnlyDiskBackup(s.store, s.dataDir, id)
 		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return ErrTaskNotFound
 	}
 	if task.State != StateRunning && task.State != StateRetryBackoff && task.State != StateStarting && task.State != StateLeaseDegraded {

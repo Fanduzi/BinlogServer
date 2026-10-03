@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, primary-key GetTask refresh that fails on store errors, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -80,6 +80,16 @@ func (s *Scheduler) createTask(name, clusterKey string, source *SourceConfig, st
 	defer s.mu.Unlock()
 	if !s.isClusterKeyUniqueLocked(validatedClusterKey, "") {
 		return Task{}, ErrClusterKeyExists
+	}
+	// A leftover directory already owns this numeric id. The next task must not reuse it.
+	if s.store == nil {
+		diskMax, err := maxNumericDiskBackupID(s.dataDir)
+		if err != nil {
+			return Task{}, err
+		}
+		if diskMax > s.seq {
+			s.seq = diskMax
+		}
 	}
 
 	s.seq++
@@ -233,6 +243,9 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 
 	current, ok := s.tasks[id]
 	if !ok {
+		if err := readOnlyDiskBackup(s.store, s.dataDir, id); err != nil {
+			return Task{}, err
+		}
 		return Task{}, ErrTaskNotFound
 	}
 	if !s.isClusterKeyUniqueLocked(validatedClusterKey, id) {
@@ -324,10 +337,12 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 
 func (s *Scheduler) GetTask(id string) (Task, error) {
 	// 有 store 时按主键读最新值。store 说没有就是没有；其它错误原样失败，
-	// 不把内存里的旧主人/epoch 抄本当成读成功。没有 store 时仍读内存名单。
+	// 不把内存里的旧主人/epoch 抄本当成读成功，也不改扫 data_dir。
+	// 没有 store 时先读内存名单，再认 {data_dir}/{id} 里仍有分段的目录。
 	s.mu.Lock()
 	task, ok := s.tasks[id]
 	store := s.store
+	dataDir := s.dataDir
 	s.mu.Unlock()
 
 	if store != nil {
@@ -343,10 +358,23 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 		return item, nil
 	}
 
-	if !ok {
+	if ok {
+		return task, nil
+	}
+	disk, found, err := lookupDiskBackupTask(dataDir, id)
+	if err != nil {
+		return Task{}, err
+	}
+	if !found {
 		return Task{}, ErrTaskNotFound
 	}
-	return task, nil
+	s.mu.Lock()
+	if current, live := s.tasks[id]; live {
+		s.mu.Unlock()
+		return current, nil
+	}
+	s.mu.Unlock()
+	return disk, nil
 }
 
 // DeleteTask 删除任务，并尝试释放 lease/停止运行。
@@ -354,7 +382,11 @@ func (s *Scheduler) DeleteTask(id string) error {
 	s.mu.Lock()
 	task, ok := s.tasks[id]
 	if !ok {
+		err := readOnlyDiskBackup(s.store, s.dataDir, id)
 		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return ErrTaskNotFound
 	}
 	if cancel, ok := s.cancels[id]; ok {
@@ -387,16 +419,34 @@ func (s *Scheduler) DeleteTask(id string) error {
 	return nil
 }
 
-// ListTasks 列出当前内存视图中的全部任务。
+// ListTasks 列出当前内存视图中的全部任务。没有 task store 时，把仍有分段的
+// {data_dir}/<id> 目录并进同一份名单。磁盘读失败时仍返回内存任务。
 func (s *Scheduler) ListTasks() []Task {
+	items, err := s.listMemoryAndDiskTasks()
+	if err != nil {
+		log.Printf("list on-disk backups: %v", err)
+	}
+	return items
+}
+
+func (s *Scheduler) listMemoryAndDiskTasks() ([]Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	out := make([]Task, 0, len(s.tasks))
-	for _, task := range s.tasks {
+	known := make(map[string]struct{}, len(s.tasks))
+	for id, task := range s.tasks {
 		out = append(out, task)
+		known[id] = struct{}{}
 	}
-	return out
+	if s.store != nil {
+		return out, nil
+	}
+	disk, err := listDiskBackupTasks(s.dataDir, known)
+	if err != nil {
+		return out, err
+	}
+	return append(out, disk...), nil
 }
 
 // ListClusterObservation 返回全库所有权抄本。有 store 时读 store.ListTasks，
@@ -413,7 +463,7 @@ func (s *Scheduler) ListClusterObservation(ctx context.Context) ([]Task, error) 
 		defer cancel()
 		return store.ListTasks(readCtx)
 	}
-	return s.ListTasks(), nil
+	return s.listMemoryAndDiskTasks()
 }
 
 // ListTasksPage 返回过滤后的一页任务。有 store 时走 SQL 分页；standalone 仍切内存快照。
@@ -429,7 +479,11 @@ func (s *Scheduler) ListTasksPage(ctx context.Context, filter TaskListFilter) ([
 		defer cancel()
 		return store.ListTasksPage(readCtx, filter)
 	}
-	page, total := PageTasks(s.ListTasks(), filter)
+	items, err := s.listMemoryAndDiskTasks()
+	if err != nil {
+		return nil, 0, err
+	}
+	page, total := PageTasks(items, filter)
 	return page, total, nil
 }
 
@@ -494,7 +548,11 @@ func (s *Scheduler) tasksMatchingFilter(ctx context.Context, filter TaskListFilt
 		items, _, err := store.ListTasksPage(readCtx, filter)
 		return items, err
 	}
-	return FilterTasks(s.ListTasks(), filter), nil
+	items, err := s.listMemoryAndDiskTasks()
+	if err != nil {
+		return nil, err
+	}
+	return FilterTasks(items, filter), nil
 }
 
 // ReportReplicationProgress 上报最新复制进度，供延迟计算和展示。

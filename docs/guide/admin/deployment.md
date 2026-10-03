@@ -472,9 +472,9 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 - 进程还在、任务还在：`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`。返回封存文件和 `.open.e<epoch>`。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 带 `.open.e<epoch>`，可直接交给 `mysqlbinlog` / `mariadb-binlog`。顺序按源文件序号升序；同一序号先封存名，再按 epoch 从小到大。`limit` 默认 200，超出时保留序号最大的那段，窗口内仍是升序。目录里没有分段时正文是 `[]`。磁盘扫描不知道事件位点，`start_pos` 和 `end_pos` 是 0，不要当成 checkpoint。Console 任务文件表的「文件」列是磁盘文件名，「磁盘路径」列是这些 `file_path`。
 - 没有位点行时，`GET /api/tasks/{id}/checkpoint` 仍是 `404`，正文 `checkpoint not found`。磁盘扫描不编造 checkpoint。
-- 进程退出后，任务也不在内存里，再查这个 id 是 `404 task not found`。目录还在。
+- 进程退出后，用同一个 `data_dir` 再启动：`GET /api/tasks` 和 dashboard 列出仍有封存或 `.open.e<epoch>` 分段的 `{data_dir}/<task_id>/`，id 就是目录名。`GET /api/tasks/{id}/files` 与上面同一份磁盘扫描。没有位点行时 checkpoint 仍是 `404 checkpoint not found`。这一行没有源库账号，不能启动。
 
-`checkpoint not found` 表示没有位点行。进程退出后的 `task not found` 表示内存里的任务没了。分段仍在磁盘上。回放命令仍按 7.2：每个序号只传一个文件。files API 把同一序号的封存名和各个 epoch 都列出来，方便核对；不要把同一序号的每一行都塞进命令。
+`checkpoint not found` 表示没有位点行。分段仍在磁盘上。回放命令仍按 7.2：每个序号只传一个文件。files API 把同一序号的封存名和各个 epoch 都列出来，方便核对；不要把同一序号的每一行都塞进命令。
 
 配了 `meta_dsn` 时，files API 仍读 `binlog_files`。该任务有目录行时，默认最多 200 条，按 `sealed_at` 倒序，这个顺序不能直接拿来当 `mysqlbinlog` 的参数顺序。`OPEN` 行的 `file_name` 是源文件名，`file_path` 才是带 `.open.e<epoch>` 的磁盘路径。该任务一条目录都没有时，改用上面的磁盘扫描。checkpoint 的 `file` 和 `pos` 仍是最后一次 `fsync` 的源文件名和位点；没有位点行时仍是 404。选进回放命令的文件仍按 7.2。
 
@@ -562,9 +562,9 @@ Standalone with no `meta_dsn` still keeps tasks and checkpoints in memory. The s
 
 - While the process is up and the task still exists, `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/`. It returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path. An open segment's `file_path` includes `.open.e<epoch>` and is the path to pass to `mysqlbinlog` or `mariadb-binlog`. Order is ascending source index. The same index lists the sealed name first, then open epochs from low to high. `limit` defaults to 200 and, past that, keeps the highest indexes, still ascending inside the window. An empty directory returns `[]`. The disk scan does not know event offsets, so `start_pos` and `end_pos` are 0. Do not treat them as a checkpoint. The Console task files table shows the on-disk name in the file column and these `file_path` values in the on-disk path column.
 - With no checkpoint row, `GET /api/tasks/{id}/checkpoint` stays `404` with body `checkpoint not found`. The disk scan does not invent a checkpoint.
-- After the process exits, the task is gone too. A later request for that id returns `404 task not found`. The directory remains.
+- After the process exits and a new one starts with the same `data_dir`, `GET /api/tasks` and the dashboard list `{data_dir}/<task_id>/` directories that still contain sealed or `.open.e<epoch>` segments. The id is the directory name. `GET /api/tasks/{id}/files` uses the same disk scan. With no checkpoint row, checkpoint stays `404 checkpoint not found`. The row has no source credentials and cannot be started.
 
-`checkpoint not found` means there is no checkpoint row. `task not found` after the process exits means the in-memory task is gone. The segments are still on disk. The replay command still follows section 8.2: one file per index. The files API lists every sealed name and every epoch for that index so you can see them. Do not pass every row for one index.
+`checkpoint not found` means there is no checkpoint row. The segments are still on disk. The replay command still follows section 8.2: one file per index. The files API lists every sealed name and every epoch for that index so you can see them. Do not pass every row for one index.
 
 With `meta_dsn`, the files API still reads `binlog_files` when that task has catalog rows. It returns at most 200 rows by default, ordered by `sealed_at` descending. That order is not the `mysqlbinlog` argument order. An `OPEN` row's `file_name` is the source file name. `file_path` is the on-disk path that includes `.open.e<epoch>`. When the catalog has no rows for that task, the API uses the disk scan above. Checkpoint `file` and `pos` are still the source file name and position of the last `fsync`. A missing checkpoint row is still 404. Choose replay arguments with section 8.2.
 

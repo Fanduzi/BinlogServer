@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, and execution coordination
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, read-only on-disk backup identity, and execution coordination
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -21,6 +21,10 @@ import (
 )
 
 var ErrTaskNotFound = errors.New("task not found")
+
+// ErrDiskBackupReadOnly is a leftover data directory with segments and no task row.
+// It can be listed and its files read. It has no source credentials to start.
+var ErrDiskBackupReadOnly = errors.New("on-disk backup has no task metadata")
 var ErrInvalidSourceConfig = errors.New("invalid source config")
 var ErrRunnerNotConfigured = errors.New("runner is not configured")
 var ErrLeaseNotAcquired = errors.New("lease not acquired")
