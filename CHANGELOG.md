@@ -12,9 +12,19 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.8] - 2026-10-03
+
 ### Fixed
 
-- With `api.auth.enabled=true`, `GET /ui/` and the Console assets load without an `Authorization` header. The Console Settings dialog collects the bearer token. `/api/*`, `/metrics`, and `/swagger/*` still require that credential. `/healthz` stays open.
+- With `api.auth.enabled=true` and a bearer token, `GET /ui/` and the Console assets load without an `Authorization` header. Settings collects the bearer token, and later API calls send `Authorization: Bearer`. `/api/*`, `/metrics`, and `/swagger/*` still require that credential. `/healthz` stays open. Config keys are unchanged.
+
+### Changed
+
+- Operator download examples in README, the landing page, the deployment guide, and the config templates now pin `v0.5.8`.
+
+### Docs
+
+- The admin guide explains replaying on-disk segments with `mysqlbinlog` or `mariadb-binlog`. The path is `{data_dir}/{task_id}/mysql-bin.NNNNNN`. A `.open.e<epoch>` name is a filename suffix; the tool reads that path as-is. Standalone without `meta_dsn` returns `[]` from the files API and 404 for checkpoint, so replay the disk. Object storage keeps only sealed successful uploads. The release tarball does not contain `docs/guide`; this release's tree contains that section.
 
 ## [v0.5.7] - 2026-10-02
 

@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.7
+### 1. Download, verify, and unpack v0.5.8
 
 ```bash
-VER=0.5.7
+VER=0.5.8
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -113,7 +113,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.7_linux_amd64/
+binlog-server_0.5.8_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -233,17 +233,15 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.7)
+## Upgrade Notes (v0.5.8)
 
-Before upgrading existing deployments, review the v0.5.7 operator contract:
+Before upgrading existing deployments, review the v0.5.8 operator contract:
 
-- **Zero Schema Migrations:** `v0.5.7` requires no database migrations (`000001_init_schema` unchanged).
-- **Meta Read Retry:** `GetTask`, task lists, and checkpoints retry transient meta MySQL errors. A missing task is still not found.
-- **MariaDB Flavor:** A `mysql` probe that cannot read `@@server_uuid` stays `SOURCE_IDENTITY_UNAVAILABLE` and tells the operator to set `flavor=mariadb`. `flavor=mariadb` identity is unchanged.
-- **Single-Process Overview:** A heartbeats-less local process is not an offline Worker. Overview reports `worker_count=0` and `single_process=true`, and `GET /api/workers` is empty.
-- **Console Flavor Select:** The create-task Flavor dropdown renders. The hint no longer contains a raw `@@server_uuid` token that vue-i18n rejects.
+- **Zero Schema Migrations:** `v0.5.8` requires no database migrations (`000001_init_schema` unchanged).
+- **Console With Bearer Auth:** `/ui/` and its assets load with no `Authorization` header. Settings asks for the bearer token; later API calls send `Authorization: Bearer`. `/api/*`, `/metrics`, and `/swagger/*` still return 401 without the credential. `/healthz` stays 200. Config keys are unchanged.
+- **Replay On Disk:** The admin guide explains `mysqlbinlog` / `mariadb-binlog` replay of `{data_dir}/{task_id}/mysql-bin.NNNNNN`. A `.open.e<epoch>` suffix stays on the filename; pass that path as-is. Standalone without `meta_dsn` returns `[]` for files and 404 for checkpoint. Object storage has only sealed successful uploads. `docs/guide` is not in the release tarball; this release's tree contains that section.
 
-Full release notes: [docs/releases/release-notes-v0.5.7.md](docs/releases/release-notes-v0.5.7.md) | [docs/releases/v0.5.7.zh-CN.md](docs/releases/v0.5.7.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.8.md](docs/releases/release-notes-v0.5.8.md) | [docs/releases/v0.5.8.zh-CN.md](docs/releases/v0.5.8.zh-CN.md)
 
 ---
 
