@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.8
+### 1. 下载、校验并解压 v0.5.9
 
 ```bash
-VER=0.5.8
+VER=0.5.9
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -112,7 +112,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.8_linux_amd64/
+binlog-server_0.5.9_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -233,15 +233,15 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.8)
+## 升级须知 (v0.5.9)
 
-在将生产环境升级至 `v0.5.8` 之前，请确认以下变更点：
+在将生产环境升级至 `v0.5.9` 之前，请确认以下变更点：
 
-- **无需数据库表结构变更:** `v0.5.8` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。
-- **Bearer 鉴权下的控制台:** `/ui/` 和静态资源不需要 `Authorization` 头。设置框要求填写 bearer token，之后的请求带 `Authorization: Bearer`。`/api/*`、`/metrics`、`/swagger/*` 不带凭证仍返回 401。`/healthz` 仍是 200。配置键没有变化。
-- **磁盘回放:** 管理指南说明用 `mysqlbinlog` / `mariadb-binlog` 回放 `{data_dir}/{task_id}/mysql-bin.NNNNNN`。`.open.e<epoch>` 留在文件名上，路径原样传入。standalone 没配 `meta_dsn` 时，`GET /api/tasks/<id>/files` 按 binlog 序号升序列出这些分段（`file_path` 带 `.open.e<epoch>`）。没有位点行时 checkpoint 仍是 404。对象存储里只有封存且上传成功的文件。`v0.5.7` 的发布包没有 `docs/guide`。`v0.5.8` 的发布包带上了它，解压后就能看到回放这一节。
+- **无需数据库表结构变更:** `v0.5.9` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。配置键没有变化。
+- **磁盘文件列表:** standalone 没配 `meta_dsn`，或 meta 里该任务没有 `binlog_files` 行时，`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`，返回封存文件和 `.open.e<epoch>` 分段。`file_name` 是源文件名。`file_path` 是磁盘路径，open 分段带 `.open.e<epoch>`。顺序按源文件序号升序；同一序号先列封存名，再列 open epoch。`limit` 保留序号最大的那些。磁盘扫描没有位点，`start_pos` 和 `end_pos` 是 0。没有 checkpoint 行时，checkpoint 仍是 404 `checkpoint not found`。`binlog_files` 非空时行为不变（按 `sealed_at` 倒序），不会改成磁盘扫描。store 出错不会退回磁盘。Console 任务文件表显示磁盘文件名和 `file_path`。standalone 进程重启后，该任务 id 是 404 `task not found`，目录还在。
+- **回放客户端:** MySQL 源用官方 MySQL `mysqlbinlog`。MariaDB 源用 `mariadb-binlog`。`mysqlbinlog --version` 印着 MariaDB（Debian `/usr/bin/mysqlbinlog` 经常就是 MariaDB，例如 11.8.6）时，退出码是 0，并注入文件里没有的 `SET @@session.check_constraint_checks=1`。MySQL 8.0 返回 `ERROR 1193`，一条数据都不进。文件没有坏。请用官方 `mysqlbinlog`（例如 `Ver 8.0.46`）。`v0.5.9` 的发布包带 `docs/guide`。
 
-详细版本记录：[docs/releases/v0.5.8.zh-CN.md](docs/releases/v0.5.8.zh-CN.md) | [docs/releases/release-notes-v0.5.8.md](docs/releases/release-notes-v0.5.8.md)
+详细版本记录：[docs/releases/v0.5.9.zh-CN.md](docs/releases/v0.5.9.zh-CN.md) | [docs/releases/release-notes-v0.5.9.md](docs/releases/release-notes-v0.5.9.md)
 
 ---
 
