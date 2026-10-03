@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- A caught-up `FILE_POS` resume, including standalone adopt at the highest segment size, no longer reports `DELAY_EXCEEDS_THRESHOLD` from the dump preamble. MySQL sends the binlog format description before any new event, with `log_pos` 0 or the original end position (126 on MySQL 8). That header time is when the file was created. The preamble is not written and does not move the cursor. If the resume position is already at `SHOW MASTER STATUS`, `delay_seconds` is 0 / `NORMAL` as soon as StartSync succeeds. Catch-up that is still behind the tip still uses `now - last_event_at`.
+
 ## [v0.5.13] - 2026-10-03
 
 ### Added

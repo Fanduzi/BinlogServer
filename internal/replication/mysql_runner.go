@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, idle at-tip only when dump matches master file/pos, sealed-file handoff for upload, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep existing segments while opening the next epoch
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, sealed-file handoff for upload, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep existing segments while opening the next epoch
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -199,7 +199,8 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	// Step 1: 解析源库标识与复制起点（含 checkpoint 接管修正）。
 	// 常见误解：
 	// onReady 只表示“复制连接+writer 已就绪”，不代表已经收到第一条业务事件。
-	// FILE_POS/GTID 追旧事件时 RUNNING 仍可 DELAYED；fresh LATEST 在 StartSync 成功时已在源 tip。
+	// FILE_POS/GTID 追旧事件时 RUNNING 仍可 DELAYED；fresh LATEST，以及 FILE_POS 起点已经不落后于 master 时，StartSync 成功即在源 tip。
+	// dump 在请求位点之前下发的 format description 不是延迟。
 	// source_server_uuid 作为 object key 的稳定维度，避免 cluster_key 相同但源实例切换时冲突。
 	sourceServerUUID, err := r.fetcher.FetchServerUUID(ctx, task.Source)
 	if err != nil {
@@ -380,6 +381,14 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			}
 		}
 
+		// 从文件中部 dump 时，源库仍会先下发文件头的 format description（log_pos 置 0，
+		// 或保留原始 end_log_pos，例如 MySQL 8 的 126）。该事件不在当前位点之后。
+		// 写入会把 open 段撑成“只有文件头”，并用创建时间报 DELAYED；end_log_pos 还会把位点回拨。
+		// synthetic rotate 已在上面处理，这里不能抢在它前面把 log_pos=0 丢掉。
+		if event.Header.LogPos <= currentPos {
+			return nil
+		}
+
 		next := binlog.Checkpoint{
 			File: currentFile,
 			Pos:  event.Header.LogPos,
@@ -431,8 +440,18 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		return classifySourceError(err)
 	}
 
+	// Adopt/resume is FILE_POS at a saved position. If that position is already the
+	// master tip, report at-tip now. Waiting for the 2s idle poll lets the format
+	// description header (binlog create time) cross the delay threshold first.
+	if !atTip && start.Mode == tasks.StartModeFilePos && r.fetcher != nil {
+		status, statusErr := r.fetcher.FetchMasterStatus(ctx, task.Source)
+		if statusErr == nil && dumpAtOrBeyondMaster(currentFile, currentPos, status) {
+			atTip = true
+		}
+	}
+
 	if atTip && r.progressReporter != nil {
-		// LATEST StartSync is already at master file/pos; do not wait for idle or the next event.
+		// StartSync is already at master file/pos; do not wait for idle or the next event.
 		r.progressReporter.ReportReplicationProgress(task.ID, time.Now().UTC(), currentFile, currentPos, true)
 	}
 
