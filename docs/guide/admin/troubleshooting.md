@@ -466,7 +466,7 @@ DELETE FROM task_leases WHERE lease_expire_at < NOW(6);
 
 ### 7.4 源库不可用，回放本地分段
 
-`{data_dir}/{task_id}/` 里的封存文件和 `.open.e<epoch>` 用 `mysqlbinlog`（MariaDB 用 `mariadb-binlog`）按序号回放。`.open.e<epoch>` 原样传入。standalone 没配 `meta_dsn` 时，进程还在则 files API 是 `[]`、checkpoint 是 `404 checkpoint not found`，回放信磁盘。步骤见 [部署指南「源库不可用时，用本地分段回放」](deployment.md#replay-local-segments)（English: [Replay local segments when the source is gone](deployment.md#replay-local-segments-en)）。
+`{data_dir}/{task_id}/` 里的封存文件和 `.open.e<epoch>` 按序号回放。回放 MySQL 源必须用 MySQL 自带的 `mysqlbinlog`，不要用 MariaDB 的。回放 MariaDB 源必须用 `mariadb-binlog`。先执行 `mysqlbinlog --version`：输出印着 MariaDB 时不要拿它回放 MySQL，管道会在 `check_constraint_checks` 处失败，MySQL 返回 `ERROR 1193 (HY000)`，一条数据都不进，文件没有坏。`.open.e<epoch>` 原样传入。standalone 没配 `meta_dsn` 时，进程还在则 files API 是 `[]`、checkpoint 是 `404 checkpoint not found`，回放信磁盘。步骤见 [部署指南「源库不可用时，用本地分段回放」](deployment.md#replay-local-segments)（English: [Replay local segments when the source is gone](deployment.md#replay-local-segments-en)）。
 
 ## 8. 获取支持
 
