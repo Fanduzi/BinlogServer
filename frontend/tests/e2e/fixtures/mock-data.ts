@@ -17,6 +17,7 @@ export type MockScenario =
   | 'lease-risk'
   | 'control-plane-down-worker-running'
   | 'single-process'
+  | 'disk-leftover'
 
 export interface MockTaskRow {
   task: any
