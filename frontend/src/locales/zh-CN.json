@@ -32,6 +32,7 @@
     "cancel": "取消",
     "save": "保存",
     "edit": "编辑",
+    "adopt": "认领",
     "start": "启动",
     "stop": "停止",
     "delete": "删除",
@@ -66,7 +67,10 @@
     "replPassword": "复制密码",
     "serverIdStart": "起始 ServerID",
     "autoStart": "创建后启动",
-    "passwordHint": "编辑时留空=不修改"
+    "passwordHint": "编辑时留空=不修改",
+    "passwordRequiredHint": "认领这个目录必须填写",
+    "startModeDefault": "默认（最高分段末尾）",
+    "adoptHint": "认领只保存源库信息，状态保持已停止。默认起点是最高分段的末尾。认领不会开始复制。"
   },
   "table": {
     "id": "ID",
@@ -122,6 +126,7 @@
     "settingsSaved": "设置已保存",
     "taskCreated": "任务已创建",
     "taskUpdated": "任务已更新",
+    "taskAdopted": "任务已认领",
     "taskStarted": "任务 #{id} 已启动",
     "taskStopped": "任务 #{id} 已停止",
     "taskDeleted": "任务 #{id} 已删除",
@@ -142,6 +147,7 @@
     "clusterKeyEmpty": "cluster_key 不能为空",
     "clusterKeyInvalid": "cluster_key 不合法（仅允许字母数字._-，禁止 / \\ ..）",
     "taskNameInvalid": "任务名不合法（1-255 字符）",
+    "passwordRequired": "source.password 不能为空",
     "hostInvalid": "source.host 不合法",
     "portInvalid": "source.port 不合法（1-65535）",
     "userInvalid": "source.user 不合法",

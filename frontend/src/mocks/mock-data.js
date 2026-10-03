@@ -1,5 +1,5 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
-// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
+// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, a leftover directory beside a catalog task, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -54,6 +54,7 @@ export const mockScenarioNames = [
   "lease-risk",
   "control-plane-down-worker-running",
   "single-process",
+  "disk-leftover",
 ];
 
 export const mockScenarios = {
@@ -101,6 +102,61 @@ export const mockScenarios = {
       running_task_count: 1,
       leased_task_count: 1,
       single_process: true,
+    },
+  },
+  "disk-leftover": {
+    summary: {
+      total: 2,
+      running: 0,
+      retry_backoff: 0,
+      stopped: 2,
+      failed: 0,
+      normal: 0,
+      delayed: 0,
+      abnormal: 0,
+    },
+    tasks: [
+      {
+        task: {
+          id: "4",
+          name: "4",
+          state: "STOPPED",
+          cluster_key: "",
+          updated_at: now,
+          source: { host: "", port: 0, user: "", flavor: "", server_id: 0 },
+          start: { mode: "" },
+          storage: {},
+        },
+        replication: buildReplication({
+          status: "IDLE",
+          has_progress: false,
+          last_event_file: "",
+          last_event_pos: 0,
+        }),
+      },
+      {
+        task: buildTask("5", {
+          name: "catalog-task",
+          state: "STOPPED",
+          cluster_key: "catalog-5",
+          owner_worker_id: "",
+          epoch: 0,
+        }),
+        replication: buildReplication({
+          status: "IDLE",
+          has_progress: false,
+          last_event_file: "",
+          last_event_pos: 0,
+        }),
+      },
+    ],
+    sources: [],
+    workers: [],
+    clusterOverview: {
+      task_count: 2,
+      worker_count: 0,
+      running_task_count: 0,
+      leased_task_count: 0,
     },
   },
   healthy: {
