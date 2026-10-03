@@ -12,6 +12,8 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.17] - 2026-10-04
+
 ### Fixed
 
 - With `meta_dsn`, `GET /api/tasks/{id}/files` and the Console files table list catalog rows in the same order as the standalone disk scan: ascending source index, and for one index the sealed name before `.open.e*` epochs. `limit` keeps the highest indexes. The no-meta disk scan is unchanged. No new API. No new config key. No schema migration.
