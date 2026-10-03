@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -133,6 +133,60 @@ function sanitizeTask(task) {
   const output = deepClone(task);
   if (output.source) output.source.password = "";
   return output;
+}
+
+function isLeftoverDiskTask(task) {
+  const source = task?.source || {};
+  return (
+    String(source.host || "").trim() === "" &&
+    String(source.user || "").trim() === "" &&
+    String(task?.cluster_key || "").trim() === ""
+  );
+}
+
+const DISK_DEFAULT_START = { mode: "FILE_POS", file: "mysql-bin.000004", pos: 128 };
+
+function adoptDiskTask(state, id, payload) {
+  const row = findTaskRow(state, id);
+  if (!row) return ok({ error: "task not found" }, 404);
+  if (!isLeftoverDiskTask(row.task)) return ok({ error: "task already has metadata" }, 400);
+  const source = payload?.source || null;
+  if (!String(payload?.cluster_key || "").trim() || !source?.host || !source?.port || !source?.user || !source?.password) {
+    return ok({ error: "source.host/port/user/password is required" }, 400);
+  }
+  const mode = String(payload.start?.mode || "").trim();
+  let start = { ...DISK_DEFAULT_START };
+  if (mode === "LATEST") {
+    start = { mode: "LATEST" };
+  } else if (mode === "FILE_POS") {
+    if (!payload.start.file || !Number(payload.start.pos)) return ok({ error: "file and pos are required" }, 400);
+    start = { mode: "FILE_POS", file: payload.start.file, pos: Number(payload.start.pos) };
+  } else if (mode === "GTID") {
+    if (!String(payload.start.gtid_set || "").trim()) return ok({ error: "gtid_set is required" }, 400);
+    start = { mode: "GTID", gtid_set: payload.start.gtid_set };
+  } else if (mode) {
+    return ok({ error: "invalid start mode" }, 400);
+  }
+  row.task = {
+    ...row.task,
+    name: payload.name || row.task.name || id,
+    cluster_key: payload.cluster_key,
+    state: "STOPPED",
+    source: {
+      host: source.host,
+      port: Number(source.port),
+      user: source.user,
+      flavor: source.flavor || "mysql",
+      server_id: Number(source.server_id || 0),
+      semi_sync: !!source.semi_sync,
+      password: source.password,
+    },
+    start,
+    storage: { retention_days: Number(payload.storage?.retention_days || 7) },
+    updated_at: DEFAULT_TIMESTAMP,
+  };
+  syncTaskSnapshot(state, id);
+  return ok(sanitizeTask(row.task));
 }
 
 function normalizeScenarioName(name) {
@@ -677,6 +731,9 @@ export function handleMockRequest(input) {
   }
   if (taskMatch && method === "PUT") {
     const id = taskMatch[1];
+    const row = findTaskRow(state, id);
+    if (!row) return ok({ error: "task not found" }, 404);
+    if (isLeftoverDiskTask(row.task)) return ok({ error: "on-disk backup has no task metadata" }, 400);
     const updated = updateTaskRow(state, id, cloneMockValue(input.body || {}));
     return updated ? ok(sanitizeTask(updated)) : ok({ error: "task not found" }, 404);
   }
@@ -728,10 +785,20 @@ export function handleMockRequest(input) {
     return ok({ retried: 0, failed: 0, skipped: 0 });
   }
 
+  const adoptMatch = path.match(/^\/api\/tasks\/([^/]+)\/adopt$/);
+  if (adoptMatch && method === "POST") {
+    return adoptDiskTask(state, adoptMatch[1], cloneMockValue(input.body || {}));
+  }
+
   const actionMatch = path.match(/^\/api\/tasks\/([^/]+)\/(start|stop)$/);
   if (actionMatch && method === "POST") {
     const id = actionMatch[1];
     const action = actionMatch[2];
+    const row = findTaskRow(state, id);
+    if (!row) return ok({ error: "task not found" }, 404);
+    if (action === "start" && isLeftoverDiskTask(row.task)) {
+      return ok({ error: "on-disk backup has no task metadata" }, 400);
+    }
     const updated = setTaskRunningState(state, id, action === "start");
     return updated ? ok({ ok: true }) : ok({ error: "task not found" }, 404);
   }

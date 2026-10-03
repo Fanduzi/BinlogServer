@@ -1,16 +1,30 @@
 // input: refreshAll callback, parseErr, API calls
-// output: form state, form actions (open/submit/edit/start/stop/delete)
-// pos: task CRUD form logic
+// output: form state and actions for create, catalog edit, leftover adopt, start, stop, and delete
+// pos: task form logic; a leftover directory submits POST adopt and does not start replication
+// note: if this file changes, update this header and frontend/src/composables/README.md.
 import { reactive, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
+  adoptTask,
   createTask,
   updateTask,
   startTask,
   stopTask,
   deleteTask,
 } from "../api.js";
+
+// Form-only value. Omitted from POST /adopt so the server keeps FILE_POS at the highest segment.
+export const ADOPT_START_DEFAULT = "DISK_END";
+
+export function isLeftoverDiskTask(task) {
+  const source = task?.source || {};
+  return (
+    String(source.host || "").trim() === "" &&
+    String(source.user || "").trim() === "" &&
+    String(task?.cluster_key || "").trim() === ""
+  );
+}
 
 const NAME_MAX_LENGTH = 255;
 const CLUSTER_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -147,10 +161,124 @@ export function useTaskForm({ refreshAll, parseErr }) {
   }
 
   function openEdit(task) {
+    if (isLeftoverDiskTask(task)) {
+      openAdopt(task);
+      return;
+    }
     formMode.value = "edit";
     Object.assign(form, defaultForm(), JSON.parse(JSON.stringify(task)));
     form.source.password = "";
     formVisible.value = true;
+  }
+
+  function openAdopt(task) {
+    formMode.value = "adopt";
+    form.id = String(task?.id || "");
+    form.name = String(task?.name || task?.id || "");
+    form.cluster_key = "";
+    form.source.host = "";
+    form.source.port = 3306;
+    form.source.user = "";
+    form.source.password = "";
+    form.source.flavor = "mysql";
+    form.source.server_id = 200001;
+    form.source.semi_sync = false;
+    form.start.mode = ADOPT_START_DEFAULT;
+    form.start.file = "";
+    form.start.pos = 0;
+    form.start.gtid_set = "";
+    const retention = Number(task?.storage?.retention_days || 0);
+    form.storage.retention_days =
+      Number.isInteger(retention) && retention >= RETENTION_DAYS_MIN && retention <= RETENTION_DAYS_MAX
+        ? retention
+        : 7;
+    formVisible.value = true;
+  }
+
+  function buildAdoptPayload() {
+    const payload = {
+      cluster_key: form.cluster_key?.trim(),
+      source: {
+        host: form.source.host?.trim() || "",
+        port: Number(form.source.port || 0),
+        user: form.source.user?.trim() || "",
+        password: form.source.password,
+        flavor: form.source.flavor?.trim() || "",
+        server_id: Number(form.source.server_id || 0),
+        semi_sync: !!form.source.semi_sync,
+      },
+    };
+    const name = form.name.trim();
+    if (name) payload.name = name;
+    const mode = String(form.start.mode || "").trim();
+    if (mode && mode !== ADOPT_START_DEFAULT) {
+      payload.start = { mode };
+      if (mode === "FILE_POS") {
+        payload.start.file = form.start.file?.trim() || "";
+        payload.start.pos = Number(form.start.pos || 0);
+      }
+      if (mode === "GTID") {
+        payload.start.gtid_set = form.start.gtid_set?.trim() || "";
+      }
+    }
+    const retentionDays = Number(form.storage.retention_days || 0);
+    if (retentionDays) payload.storage = { retention_days: retentionDays };
+    return payload;
+  }
+
+  function validateAdoptPayload(payload) {
+    const name = String(payload?.name || "").trim();
+    if (name && name.length > NAME_MAX_LENGTH) return t("validation.taskNameInvalid");
+    const clusterKeyErr = validateClusterKey(t, payload?.cluster_key);
+    if (clusterKeyErr) return clusterKeyErr;
+
+    const source = payload?.source || {};
+    const host = String(source.host || "").trim();
+    const user = String(source.user || "").trim();
+    const flavor = String(source.flavor || "").trim() || "mysql";
+    const port = Number(source.port || 0);
+    const serverID = Number(source.server_id || 0);
+    if (!host || host.length > SOURCE_HOST_MAX_LENGTH || hasWhitespace(host)) {
+      return t("validation.hostInvalid");
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return t("validation.portInvalid");
+    if (!user || user.length > SOURCE_USER_MAX_LENGTH || hasWhitespace(user)) {
+      return t("validation.userInvalid");
+    }
+    if (!String(source.password || "")) return t("validation.passwordRequired");
+    if (!flavor || flavor.length > SOURCE_FLAVOR_MAX_LENGTH || !CLUSTER_KEY_PATTERN.test(flavor)) {
+      return t("validation.flavorInvalid");
+    }
+    if (!Number.isInteger(serverID) || serverID < 0 || serverID > 4294967295) {
+      return t("validation.serverIdInvalid");
+    }
+
+    const mode = String(payload?.start?.mode || "").trim();
+    if (mode) {
+      if (!["LATEST", "FILE_POS", "GTID"].includes(mode)) return t("validation.startModeInvalid");
+      if (mode === "FILE_POS") {
+        const file = String(payload.start.file || "").trim();
+        const pos = Number(payload.start.pos || 0);
+        if (!file || file.length > START_FILE_MAX_LENGTH || !Number.isInteger(pos) || pos <= 0) {
+          return t("validation.filePosRequired");
+        }
+      }
+      if (mode === "GTID" && !String(payload.start.gtid_set || "").trim()) {
+        return t("validation.gtidSetRequired");
+      }
+    }
+
+    if (payload?.storage) {
+      const retentionDays = Number(payload.storage.retention_days || 0);
+      if (
+        !Number.isInteger(retentionDays) ||
+        retentionDays < RETENTION_DAYS_MIN ||
+        retentionDays > RETENTION_DAYS_MAX
+      ) {
+        return t("validation.retentionInvalid");
+      }
+    }
+    return "";
   }
 
   function buildPayload() {
@@ -184,8 +312,9 @@ export function useTaskForm({ refreshAll, parseErr }) {
 
   async function submitForm() {
     try {
-      const payload = buildPayload();
-      const validationErr = validateTaskPayload(payload);
+      const adopting = formMode.value === "adopt";
+      const payload = adopting ? buildAdoptPayload() : buildPayload();
+      const validationErr = adopting ? validateAdoptPayload(payload) : validateTaskPayload(payload);
       if (validationErr) {
         ElMessage.error(validationErr);
         return;
@@ -193,6 +322,10 @@ export function useTaskForm({ refreshAll, parseErr }) {
       if (formMode.value === "create") {
         await createTask(payload);
         ElMessage.success(t("msg.taskCreated"));
+      } else if (adopting) {
+        await adoptTask(form.id, payload);
+        form.source.password = "";
+        ElMessage.success(t("msg.taskAdopted"));
       } else {
         await updateTask(form.id, payload);
         ElMessage.success(t("msg.taskUpdated"));
@@ -245,8 +378,11 @@ export function useTaskForm({ refreshAll, parseErr }) {
     form,
     openCreate,
     openEdit,
+    openAdopt,
     buildPayload,
+    buildAdoptPayload,
     validateTaskPayload,
+    validateAdoptPayload,
     resetForm,
     submitForm,
     onStart,

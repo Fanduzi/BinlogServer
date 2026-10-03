@@ -177,3 +177,65 @@ test('shared mock handler loopback identity matches SameSourceHost accept/reject
   expect(countFor('[127.0.0.1]')).toBe(0)
   expect(countFor('db-primary.example')).toBe(1)
 })
+
+test('adopt attaches source to a leftover id, omits the password, and start works only after that', async () => {
+  const moduleUrl = new URL('../../src/mocks/mock-handler.js', import.meta.url).href
+  const { createMockSession } = await import(moduleUrl)
+  const session = createMockSession({ scenario: 'disk-leftover' })
+  const body = {
+    cluster_key: 'adopted-4',
+    source: { host: '10.0.0.8', port: 3306, user: 'repl', password: 's3cret-adopt', flavor: 'mysql' },
+  }
+
+  const blocked = session.request({ method: 'PUT', path: '/api/tasks/4', body })
+  expect(blocked.status).toBe(400)
+  expect(blocked.body.error).toBe('on-disk backup has no task metadata')
+
+  const earlyStart = session.request({ method: 'POST', path: '/api/tasks/4/start' })
+  expect(earlyStart.status).toBe(400)
+  expect(earlyStart.body.error).toBe('on-disk backup has no task metadata')
+
+  const missing = session.request({ method: 'POST', path: '/api/tasks/42/adopt', body })
+  expect(missing.status).toBe(404)
+  expect(missing.body.error).toBe('task not found')
+
+  const adopted = session.request({ method: 'POST', path: '/api/tasks/4/adopt', body })
+  expect(adopted.status).toBe(200)
+  expect(adopted.body).toMatchObject({
+    id: '4',
+    state: 'STOPPED',
+    cluster_key: 'adopted-4',
+    source: { host: '10.0.0.8', user: 'repl', password: '' },
+    start: { mode: 'FILE_POS', file: 'mysql-bin.000004', pos: 128 },
+  })
+  expect(JSON.stringify(adopted.body)).not.toContain('s3cret-adopt')
+
+  const again = session.request({ method: 'POST', path: '/api/tasks/4/adopt', body })
+  expect(again.status).toBe(400)
+  expect(again.body.error).toBe('task already has metadata')
+
+  const started = session.request({ method: 'POST', path: '/api/tasks/4/start' })
+  expect(started.status).toBe(200)
+  const listed = session.request({ method: 'GET', path: '/api/tasks/4' })
+  expect(listed.body.state).toBe('RUNNING')
+  expect(listed.body.source.password).toBe('')
+
+  const explicit = createMockSession({ scenario: 'disk-leftover' })
+  const latest = explicit.request({
+    method: 'POST',
+    path: '/api/tasks/4/adopt',
+    body: { ...body, start: { mode: 'LATEST' } },
+  })
+  expect(latest.status).toBe(200)
+  expect(latest.body.state).toBe('STOPPED')
+  expect(latest.body.start).toEqual({ mode: 'LATEST' })
+
+  const catalog = session.request({
+    method: 'PUT',
+    path: '/api/tasks/5',
+    body: { name: 'catalog-renamed', cluster_key: 'catalog-5' },
+  })
+  expect(catalog.status).toBe(200)
+  expect(catalog.body.name).toBe('catalog-renamed')
+  expect(catalog.body.source.password).toBe('')
+})

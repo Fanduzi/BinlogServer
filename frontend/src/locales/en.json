@@ -32,6 +32,7 @@
     "cancel": "Cancel",
     "save": "Save",
     "edit": "Edit",
+    "adopt": "Adopt",
     "start": "Start",
     "stop": "Stop",
     "delete": "Delete",
@@ -66,7 +67,10 @@
     "replPassword": "Replication Password",
     "serverIdStart": "Starting Server ID",
     "autoStart": "Auto Start After Creation",
-    "passwordHint": "Leave empty to keep unchanged"
+    "passwordHint": "Leave empty to keep unchanged",
+    "passwordRequiredHint": "Required to adopt this directory",
+    "startModeDefault": "Default (end of highest segment)",
+    "adoptHint": "Adopt saves the source and stays stopped. The default start resumes at the end of the highest segment. Adopt does not start replication."
   },
   "table": {
     "id": "ID",
@@ -122,6 +126,7 @@
     "settingsSaved": "Settings saved",
     "taskCreated": "Task created",
     "taskUpdated": "Task updated",
+    "taskAdopted": "Task adopted",
     "taskStarted": "Task #{id} started",
     "taskStopped": "Task #{id} stopped",
     "taskDeleted": "Task #{id} deleted",
@@ -142,6 +147,7 @@
     "clusterKeyEmpty": "cluster_key cannot be empty",
     "clusterKeyInvalid": "cluster_key is invalid (only letters, numbers, ., _, - allowed; /, \\, .. forbidden)",
     "taskNameInvalid": "Task name is invalid (1-255 characters)",
+    "passwordRequired": "source.password is required",
     "hostInvalid": "source.host is invalid",
     "portInvalid": "source.port is invalid (1-65535)",
     "userInvalid": "source.user is invalid",

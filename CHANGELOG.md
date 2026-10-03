@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- The Console task detail has an Adopt action for a leftover standalone directory that is already listed. It submits `POST /api/tasks/{id}/adopt` with `cluster_key` and source, shows `STOPPED`, and does not show the password. Adopt does not start replication. Start remains the existing start action and works after adopt. A catalog task's Edit still uses `PUT`. With `meta_dsn`, directories are not listed and the Console does not create a task from a directory. No new config key. No schema migration.
+
 ## [v0.5.12] - 2026-10-03
 
 ### Changed
