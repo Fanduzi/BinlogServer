@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep existing segments while opening the next epoch
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -684,14 +684,16 @@ func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fil
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, "", err
 	}
-	// An adopted leftover directory keeps sealed and .open.e* segments.
-	// A normal resume renames the open segment onto this epoch when its last
-	// event ends at initialPos, then drops any other epoch. A new worker with
-	// no local segment still starts clean and does not rename anything.
+	// Rename the open segment whose last complete event already ends at
+	// initialPos onto this epoch, then append. Adopt sets KeepLocalSegments
+	// and must still do that rename: a new file would be magic plus the next
+	// source event, with no format description and none of the bytes already
+	// on disk. Unrelated epochs and sealed files stay. A normal resume also
+	// drops other epochs. No matching segment still starts clean.
+	if err := continueDurableOpenSegment(dir, fileName, task.Epoch, initialPos); err != nil {
+		return nil, nil, "", err
+	}
 	if !task.KeepLocalSegments {
-		if err := continueDurableOpenSegment(dir, fileName, task.Epoch, initialPos); err != nil {
-			return nil, nil, "", err
-		}
 		if err := cleanupStaleOpenFiles(dir, task.Epoch); err != nil {
 			return nil, nil, "", err
 		}
