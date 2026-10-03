@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.9
+### 1. Download, verify, and unpack v0.5.10
 
 ```bash
-VER=0.5.9
+VER=0.5.10
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -113,7 +113,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.9_linux_amd64/
+binlog-server_0.5.10_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -234,15 +234,15 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.9)
+## Upgrade Notes (v0.5.10)
 
-Before upgrading existing deployments, review the v0.5.9 operator contract:
+Before upgrading existing deployments, review the v0.5.10 operator contract:
 
-- **Zero Schema Migrations:** `v0.5.9` requires no database migrations (`000001_init_schema` unchanged). Config keys are unchanged.
-- **Disk File List:** Standalone with no `meta_dsn`, or a meta catalog with no `binlog_files` rows for that task, `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/` and returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path and includes `.open.e<epoch>` for an open segment. Order is ascending source index; the same index lists the sealed name, then open epochs. `limit` keeps the highest indexes. `start_pos` and `end_pos` are 0 because the disk scan has no offsets. Checkpoint stays 404 `checkpoint not found` when there is no checkpoint row. A non-empty `binlog_files` catalog is unchanged (`sealed_at` descending) and is not replaced by the disk scan. A store error does not fall back to disk. The Console task files table shows the on-disk name and `file_path`. After a standalone process restarts with the same `data_dir`, `GET /api/tasks` and the dashboard list leftover `{data_dir}/<task_id>/` directories that still contain sealed or `.open.e<epoch>` segments. The id is the directory name, so the files API for that id uses this same disk scan. Checkpoint stays 404 `checkpoint not found`. The row has no source credentials and cannot be started. A configured `meta_dsn` does not discover directories from disk.
-- **Replay Client:** A MySQL source needs official MySQL `mysqlbinlog`. A MariaDB source needs `mariadb-binlog`. `mysqlbinlog --version` that prints MariaDB (Debian `/usr/bin/mysqlbinlog` is often MariaDB, for example 11.8.6) exits 0 and injects `SET @@session.check_constraint_checks=1`, which is not in the file. MySQL 8.0 returns `ERROR 1193` and no rows land. The files are not corrupt. Use official `mysqlbinlog` (for example `Ver 8.0.46`). The v0.5.9 archive includes `docs/guide`.
+- **Zero Schema Migrations:** `v0.5.10` requires no database migrations (`000001_init_schema` unchanged). Config keys are unchanged.
+- **Leftover Directories:** Standalone with no `meta_dsn`, after the process exits and a new process starts on the same `data_dir`, leftover `{data_dir}/{task_id}/` directories that still contain sealed or `.open.e<epoch>` segments show up in `GET /api/tasks` and the Console without a known id. `GET /api/tasks/{id}/files` uses the existing disk-scan contract (`file_name` is the source name, an open `file_path` keeps `.open.e<epoch>`, `start_pos` and `end_pos` are 0, ascending source index). Checkpoint stays 404 `checkpoint not found`. The row has no source credentials. Start returns 400 with body `on-disk backup has no task metadata` and does not start replication. A configured `meta_dsn` does not discover directories from disk. A non-empty `binlog_files` catalog still wins, and extra files on disk are not listed.
+- **Guide Correction:** `configuration.md` no longer says that `GET /api/tasks/{id}/files` returns `[]` when `meta_dsn` is unset. The published v0.5.9 tarball still has that sentence. This is a guide correction, not a behavior change.
 
-Full release notes: [docs/releases/release-notes-v0.5.9.md](docs/releases/release-notes-v0.5.9.md) | [docs/releases/v0.5.9.zh-CN.md](docs/releases/v0.5.9.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.10.md](docs/releases/release-notes-v0.5.10.md) | [docs/releases/v0.5.10.zh-CN.md](docs/releases/v0.5.10.zh-CN.md)
 
 ---
 
