@@ -52,7 +52,7 @@ concepts/01 → admin/deployment → admin/configuration → admin/observability
 ```
 
 1. **确定定位与边界：** 理解系统要解决什么问题（`concepts/01`），明确它与常规 CDC 的本质区别。
-2. **选择拓扑并部署：** 深入阅读 `admin/deployment`，根据规模在 Standalone、Control Plane + Worker、All-in-one 中选定部署拓扑并执行安全基线配置。
+2. **选择拓扑并部署：** 深入阅读 `admin/deployment`，根据规模在 Standalone、Control Plane + Worker、All-in-one 中选定部署拓扑并执行安全基线配置。源库不可用、只剩本地分段时，用同一篇的「源库不可用时，用本地分段回放」按文件顺序做 `mysqlbinlog` / `mariadb-binlog` 回放。
 3. **核对生产参数：** 查阅 `admin/configuration` 确认 `api.auth`、`--encryption-key`、`storage.retention_days` 与 S3 解耦上传配置。
 4. **配置监控告警：** 接入 `admin/observability` 暴露的 Prometheus 指标与 `/healthz` 探针。
 5. **故障应急与自愈：** 参考 `admin/troubleshooting` 处理源库权限变更、Worker 租约切换以及 S3 补传。
