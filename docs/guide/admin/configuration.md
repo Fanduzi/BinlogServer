@@ -133,6 +133,8 @@ log:
 |------|------|--------|------|
 | `meta_dsn` | string | - | MySQL 连接字符串。cluster 模式必需。standalone 为空时控制面只在内存，进程退出后任务元数据丢失；binlog 文件仍落在 `data_dir`。 |
 
+进程还在、且没配 `meta_dsn` 时，`GET /api/tasks/{id}/files` 返回 `[]`，`GET /api/tasks/{id}/checkpoint` 返回 `404`，正文是 `checkpoint not found`。用磁盘分段回放见 [部署指南「源库不可用时，用本地分段回放」](deployment.md#replay-local-segments)。
+
 **DSN 格式：**
 
 ```
