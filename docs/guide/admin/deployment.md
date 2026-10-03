@@ -460,14 +460,15 @@ MariaDB 把 `mysqlbinlog` 换成 `mariadb-binlog`，把 `mysql` 换成 `mariadb`
 
 回放信磁盘上的字节。`{data_dir}/{task_id}/` 里仍保留的封存文件，加上还没封存的 `.open.e<epoch>`，就是已经 `fsync` 的全部分段。
 
-standalone 没配 `meta_dsn` 时，控制面只在内存：
+standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁盘上：
 
-- 进程还在：`GET /api/tasks/{id}/files` 的正文是 `[]`，`GET /api/tasks/{id}/checkpoint` 是 `404`，正文是 `checkpoint not found`。
+- 进程还在、任务还在：`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`。返回封存文件和 `.open.e<epoch>`。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 带 `.open.e<epoch>`，可直接交给 `mysqlbinlog` / `mariadb-binlog`。顺序按源文件序号升序；同一序号先封存名，再按 epoch 从小到大。`limit` 默认 200，超出时保留序号最大的那段，窗口内仍是升序。目录里没有分段时正文是 `[]`。Console 任务文件表的「文件」列是磁盘文件名，「磁盘路径」列是这些 `file_path`。
+- 没有位点行时，`GET /api/tasks/{id}/checkpoint` 仍是 `404`，正文 `checkpoint not found`。磁盘扫描不编造 checkpoint。
 - 进程退出后，任务也不在内存里，再查这个 id 是 `404 task not found`。目录还在。
 
-`[]` 和 `checkpoint not found` 表示没有文件索引、没有位点行。进程退出后的 `task not found` 表示内存里的任务没了。分段仍在磁盘上。
+`checkpoint not found` 表示没有位点行。进程退出后的 `task not found` 表示内存里的任务没了。分段仍在磁盘上。回放命令仍按 7.2：每个序号只传一个文件。files API 把同一序号的封存名和各个 epoch 都列出来，方便核对；不要把同一序号的每一行都塞进命令。
 
-配了 `meta_dsn` 时，files API 读 `binlog_files`，默认最多 200 条，按 `sealed_at` 倒序，这个顺序不能直接拿来当 `mysqlbinlog` 的参数顺序。`OPEN` 行的 `file_name` 是源文件名，`file_path` 才是带 `.open.e<epoch>` 的磁盘路径。checkpoint 的 `file` 和 `pos` 是最后一次 `fsync` 的源文件名和位点。回放清单仍以磁盘上的文件名为准。
+配了 `meta_dsn` 时，files API 仍读 `binlog_files`。该任务有目录行时，默认最多 200 条，按 `sealed_at` 倒序，这个顺序不能直接拿来当 `mysqlbinlog` 的参数顺序。`OPEN` 行的 `file_name` 是源文件名，`file_path` 才是带 `.open.e<epoch>` 的磁盘路径。该任务一条目录都没有时，改用上面的磁盘扫描。checkpoint 的 `file` 和 `pos` 仍是最后一次 `fsync` 的源文件名和位点；没有位点行时仍是 404。选进回放命令的文件仍按 7.2。
 
 对象存储只保存已经封存并且上传成功的文件。对象键是 `{upload.prefix/}{cluster_key}/{source_identity}/{封存文件名}`，没有 `.open.e`。`source_identity` 在 MySQL 上是 `server_uuid`，在 MariaDB 上是 `mariadb:<server_id>:<gtid_domain_id>`。正在写的分段不会出现在桶里。`UPLOAD_FAILED` 的封存文件仍在磁盘上。没配上传时桶是空的。
 
@@ -541,14 +542,15 @@ A `LATEST` task writes events from the moment the subscription is up. The first 
 
 Replay the bytes on disk. Sealed files still under `{data_dir}/{task_id}/`, plus the `.open.e<epoch>` segment that has not been sealed, are the segments that have been `fsync`ed.
 
-Standalone with no `meta_dsn` keeps the control plane in memory:
+Standalone with no `meta_dsn` still keeps tasks and checkpoints in memory. The segments are on disk:
 
-- While the process is still up, `GET /api/tasks/{id}/files` returns `[]`, and `GET /api/tasks/{id}/checkpoint` returns `404` with body `checkpoint not found`.
+- While the process is up and the task still exists, `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/`. It returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path. An open segment's `file_path` includes `.open.e<epoch>` and is the path to pass to `mysqlbinlog` or `mariadb-binlog`. Order is ascending source index. The same index lists the sealed name first, then open epochs from low to high. `limit` defaults to 200 and, past that, keeps the highest indexes, still ascending inside the window. An empty directory returns `[]`. The Console task files table shows the on-disk name in the file column and these `file_path` values in the on-disk path column.
+- With no checkpoint row, `GET /api/tasks/{id}/checkpoint` stays `404` with body `checkpoint not found`. The disk scan does not invent a checkpoint.
 - After the process exits, the task is gone too. A later request for that id returns `404 task not found`. The directory remains.
 
-`[]` and `checkpoint not found` mean there is no file index and no checkpoint row. `task not found` after the process exits means the in-memory task is gone. The segments are still on disk.
+`checkpoint not found` means there is no checkpoint row. `task not found` after the process exits means the in-memory task is gone. The segments are still on disk. The replay command still follows section 8.2: one file per index. The files API lists every sealed name and every epoch for that index so you can see them. Do not pass every row for one index.
 
-With `meta_dsn`, the files API reads `binlog_files`, returns at most 200 rows by default, and orders them by `sealed_at` descending. That order is not the `mysqlbinlog` argument order. An `OPEN` row's `file_name` is the source file name. `file_path` is the on-disk path that includes `.open.e<epoch>`. Checkpoint `file` and `pos` are the source file name and position of the last `fsync`. Build the replay list from the file names on disk.
+With `meta_dsn`, the files API still reads `binlog_files` when that task has catalog rows. It returns at most 200 rows by default, ordered by `sealed_at` descending. That order is not the `mysqlbinlog` argument order. An `OPEN` row's `file_name` is the source file name. `file_path` is the on-disk path that includes `.open.e<epoch>`. When the catalog has no rows for that task, the API uses the disk scan above. Checkpoint `file` and `pos` are still the source file name and position of the last `fsync`. A missing checkpoint row is still 404. Choose replay arguments with section 8.2.
 
 Object storage receives a file only after it is sealed and the upload succeeds. The object key is `{upload.prefix/}{cluster_key}/{source_identity}/{sealed file name}`, with no `.open.e`. `source_identity` is the MySQL `server_uuid`, or `mariadb:<server_id>:<gtid_domain_id>` for MariaDB. The segment still being written is not in the bucket. A sealed file in `UPLOAD_FAILED` is still on disk. With upload unconfigured, the bucket is empty.
 

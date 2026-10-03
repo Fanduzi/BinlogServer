@@ -38,7 +38,7 @@
 - 创建任务：`CreateTaskFromSpec` 整包校验通过后才落库；400 返回 JSON `{"error","code"}`。批量创建复用同一入口，单项错误不阻塞后续项，成功任务脱敏返回。
 - 源身份：`GET /api/sources/lookup` 与 dashboard/summary/list 的 host 过滤共用 `tasks.SameSourceHost`。lookup 任务名单有 store 时走集群观测同一份 `ListClusterObservation` 抄本，不是启动内存快照。回环别名（localhost、127/8、::1，含括号 IPv6）是同一台源，端口仍严格匹配；非回环 host 保持修剪后的原文精确匹配且不做 DNS 解析。
 - 健康检查：`GET /healthz` 文本 `ok`；`GET /api/health` JSON `{"status":"ok"}`
-- 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。
+- 文件观测：`GET /api/tasks/{id}/files` 返回当前 `OPEN` segment 与历史 `SEALED` 文件。配置了 file store 且该任务有目录行时，仍返回元数据结果（`sealed_at` 倒序）。未配置 file store，或该任务目录为空时，扫描 `{data_dir}/{task_id}` 的封存文件和 `.open.e<epoch>`，按源序号升序；`file_name` 是源文件名，`file_path` 是磁盘路径。不从磁盘编造 checkpoint。
 - 状态汇总：summary/dashboard 保留既有计数键，并新增 `starting`；STARTING 不混入 `running`。有元数据 rollup 时计数是 SQL `GROUP BY`。
 - Source 聚合：dashboard source 项保留 `running`，并新增独立 `starting` 状态计数。按源计数同样是 `GROUP BY` 存储的 host/port，回环别名不并成一行。
 - 任务观测：控制台只信 dashboard。任务列表与 dashboard 任务行走 SQL LIMIT/OFFSET；dashboard/summary 不再为计数调用 `Limit=0` 的整表读取。`total`、`summary.total` 与按源计数仍是同一过滤集。非法 state/limit/offset/port 返回 400，limit 超过 500 返回 `invalid limit`。

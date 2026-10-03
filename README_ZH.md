@@ -239,7 +239,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 - **无需数据库表结构变更:** `v0.5.8` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。
 - **Bearer 鉴权下的控制台:** `/ui/` 和静态资源不需要 `Authorization` 头。设置框要求填写 bearer token，之后的请求带 `Authorization: Bearer`。`/api/*`、`/metrics`、`/swagger/*` 不带凭证仍返回 401。`/healthz` 仍是 200。配置键没有变化。
-- **磁盘回放:** 管理指南说明用 `mysqlbinlog` / `mariadb-binlog` 回放 `{data_dir}/{task_id}/mysql-bin.NNNNNN`。`.open.e<epoch>` 留在文件名上，路径原样传入。standalone 没配 `meta_dsn` 时，files 是 `[]`，checkpoint 是 404。对象存储里只有封存且上传成功的文件。`v0.5.7` 的发布包没有 `docs/guide`。`v0.5.8` 的发布包带上了它，解压后就能看到回放这一节。
+- **磁盘回放:** 管理指南说明用 `mysqlbinlog` / `mariadb-binlog` 回放 `{data_dir}/{task_id}/mysql-bin.NNNNNN`。`.open.e<epoch>` 留在文件名上，路径原样传入。standalone 没配 `meta_dsn` 时，`GET /api/tasks/<id>/files` 按 binlog 序号升序列出这些分段（`file_path` 带 `.open.e<epoch>`）。没有位点行时 checkpoint 仍是 404。对象存储里只有封存且上传成功的文件。`v0.5.7` 的发布包没有 `docs/guide`。`v0.5.8` 的发布包带上了它，解压后就能看到回放这一节。
 
 详细版本记录：[docs/releases/v0.5.8.zh-CN.md](docs/releases/v0.5.8.zh-CN.md) | [docs/releases/release-notes-v0.5.8.md](docs/releases/release-notes-v0.5.8.md)
 

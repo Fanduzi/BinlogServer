@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -1881,6 +1881,61 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 	}
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file item, got %d", len(files))
+	}
+}
+
+// TestTaskAPI_ListFilesFromDiskWithoutMeta 验证 standalone 无 meta 时 files 返回磁盘分段，checkpoint 仍 404。
+func TestTaskAPI_ListFilesFromDiskWithoutMeta(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e1"), []byte("open-seg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), []byte("sealed-seg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	scheduler := tasks.NewScheduler(tasks.WithDataDir(dir))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/1/files", nil)
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var files []tasks.BinlogFile
+	if err := json.Unmarshal(resp.Body.Bytes(), &files); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files, got %d body=%s", len(files), resp.Body.String())
+	}
+	if files[0].FileName != "mysql-bin.000003" || files[0].State != "SEALED" || files[0].FilePath != filepath.Join(taskDir, "mysql-bin.000003") {
+		t.Fatalf("sealed file: %+v", files[0])
+	}
+	if files[1].FileName != "mysql-bin.000004" || files[1].State != "OPEN" || filepath.Base(files[1].FilePath) != "mysql-bin.000004.open.e1" {
+		t.Fatalf("open file: %+v", files[1])
+	}
+	if files[1].FilePath != filepath.Join(taskDir, "mysql-bin.000004.open.e1") {
+		t.Fatalf("open path: %s", files[1].FilePath)
+	}
+
+	cp := httptest.NewRecorder()
+	handler.ServeHTTP(cp, httptest.NewRequest(http.MethodGet, "/api/tasks/1/checkpoint", nil))
+	if cp.Code != http.StatusNotFound || !strings.Contains(cp.Body.String(), "checkpoint not found") {
+		t.Fatalf("checkpoint status=%d body=%s", cp.Code, cp.Body.String())
 	}
 }
 

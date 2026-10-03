@@ -83,6 +83,7 @@
     "lineNo": "Line No.",
     "validation": "Validation",
     "file": "File",
+    "filePath": "On-disk path",
     "size": "Size",
     "startPos": "Start Pos",
     "endPos": "End Pos",
