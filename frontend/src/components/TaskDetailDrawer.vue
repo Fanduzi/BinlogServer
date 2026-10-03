@@ -22,7 +22,8 @@
               </div>
             </div>
             <div class="detail-action-row" data-testid="task-drawer-actions">
-              <el-button data-testid="task-action-edit" @click="$emit('edit', task)">{{ $t('btn.edit') }}</el-button>
+              <el-button v-if="isLeftover(task)" data-testid="task-action-adopt" type="primary" @click="$emit('adopt', task)">{{ $t('btn.adopt') }}</el-button>
+              <el-button v-else data-testid="task-action-edit" @click="$emit('edit', task)">{{ $t('btn.edit') }}</el-button>
               <el-button data-testid="task-action-start" type="success" @click="$emit('start', task)">{{ $t('btn.start') }}</el-button>
               <el-button data-testid="task-action-stop" type="warning" @click="$emit('stop', task)">{{ $t('btn.stop') }}</el-button>
               <el-button data-testid="task-action-delete" type="danger" plain @click="$emit('delete', task)">{{ $t('btn.delete') }}</el-button>
@@ -169,9 +170,10 @@ defineProps({
   formatCheckpoint: { type: Function, required: true },
   formatReplicationReason: { type: Function, required: true },
   formatTs: { type: Function, required: true },
+  isLeftover: { type: Function, required: true },
   isMobile: { type: Boolean, default: false },
 });
-defineEmits(['update:visible', 'edit', 'start', 'stop', 'delete', 'retry-upload']);
+defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload']);
 
 function diskBase(row) {
   const path = row && row.file_path ? String(row.file_path) : "";

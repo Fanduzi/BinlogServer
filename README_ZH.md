@@ -239,7 +239,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 - **无需数据库表结构变更:** `v0.5.12` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。配置键没有变化。行为与 `v0.5.11` 相同。
 - **认领并续传（与 v0.5.11 相同）:** standalone 没配 `meta_dsn` 时，`POST /api/tasks/{id}/adopt` 把 `cluster_key` 和 source 接到 `GET /api/tasks` 已经列出的遗留目录上。成功是 200，响应不带密码，状态保持 `STOPPED`，adopt 不会开始复制。adopt 之前，`PUT` 和 `POST` start 仍返回 400，正文是 `on-disk backup has no task metadata`，不会开始复制。没传 `start` 时，保存的位点是最高封存或 `.open.e*` 分段的源文件名和字节大小，模式是 `FILE_POS`。显式 `start.mode` 会覆盖这个默认值。本次 tip `9b4ded4` 的试用：`mysql-bin.000007` pos 477，等于那个 `.open.e1` 的大小。随后 `POST` start 返回 204，任务进入 `STARTING`，epoch 是 2，同一目录写出 `.open.e2`。原有分段还在。`v0.5.10` 已经发布了遗留目录列表。`v0.5.11` 是认领并续传。这一补丁只修正随包指南。行为与 `v0.5.11` 相同。已发布的 v0.5.11 压缩包里仍是旧的中文 7.4，以及漏了 404 的英文句子。
-- **元数据库与控制台:** 配了 `meta_dsn` 时不会从磁盘发现目录。对不是目录任务的目录做 adopt，返回 404 `task not found`（试用目录 `99` 和 `42`）。这种模式下 adopt 不会从磁盘创建任务。Console 没有 adopt 按钮。编辑仍走 `PUT`，在 adopt 之前一直被拦住。
+- **元数据库与控制台:** 配了 `meta_dsn` 时不会从磁盘发现目录。对不是目录任务的目录做 adopt，返回 404 `task not found`（试用目录 `99` 和 `42`）。这种模式下 adopt 不会从磁盘创建任务。Console 任务详情对这条遗留目录有「认领」。它用同一次 POST 提交 `cluster_key` 和 source，显示 `STOPPED`，不回显密码。认领不会开始复制。启动仍是原来的启动操作。目录任务的编辑仍走 `PUT`。
 
 详细版本记录：[docs/releases/v0.5.12.zh-CN.md](docs/releases/v0.5.12.zh-CN.md) | [docs/releases/release-notes-v0.5.12.md](docs/releases/release-notes-v0.5.12.md)
 

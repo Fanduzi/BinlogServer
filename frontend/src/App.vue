@@ -368,7 +368,9 @@ note: if this file changes, update this header and frontend/README.md.
       :format-checkpoint="formatCheckpoint"
       :format-replication-reason="formatReplicationReason"
       :format-ts="formatTs"
+      :is-leftover="isLeftoverDiskTask"
       @edit="openEdit"
+      @adopt="openAdopt"
       @start="onStart"
       @stop="onStop"
       @delete="onDelete"
@@ -396,14 +398,12 @@ import zhCnLocale from "element-plus/dist/locale/zh-cn.mjs";
 import enLocale from "element-plus/dist/locale/en.mjs";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
-  createTask,
   deleteTask,
   listFiles,
   lookupSource,
   retryUpload,
   startTask,
   stopTask,
-  updateTask,
 } from "./api";
 import { getAuthToken, setAuthToken } from "./utils/auth.js";
 import { setLocale, getLocale } from "./locales";
@@ -413,7 +413,7 @@ import { useDashboard } from "./composables/useDashboard.js";
 import { useSourceLookup } from "./composables/useSourceLookup.js";
 import { useTaskFilter } from "./composables/useTaskFilter.js";
 import { useTaskDetail } from "./composables/useTaskDetail.js";
-import { useTaskForm } from "./composables/useTaskForm.js";
+import { isLeftoverDiskTask, useTaskForm } from "./composables/useTaskForm.js";
 import { useBatchCreate } from "./composables/useBatchCreate.js";
 import { useFormatters } from "./composables/useFormatters.js";
 import AlertBanner from "./components/AlertBanner.vue";
@@ -504,7 +504,8 @@ const {
 
 const {
   formVisible, formMode, form,
-  openCreate, openEdit, buildPayload, validateTaskPayload, resetForm,
+  openCreate, openEdit, openAdopt, validateTaskPayload, resetForm,
+  submitForm: submitTaskForm,
 } = useTaskForm({ refreshAll, parseErr });
 
 const {
@@ -705,24 +706,11 @@ function onPageSizeChange(size) {
 }
 
 async function submitForm() {
-  try {
-    const payload = buildPayload();
-    const validationErr = validateTaskPayload(payload);
-    if (validationErr) {
-      ElMessage.error(validationErr);
-      return;
-    }
-    if (formMode.value === "create") {
-      await createTask(payload);
-      ElMessage.success(t("msg.taskCreated"));
-    } else {
-      await updateTask(form.id, payload);
-      ElMessage.success(t("msg.taskUpdated"));
-    }
-    formVisible.value = false;
-    await refreshAll();
-  } catch (err) {
-    ElMessage.error(parseErr(err));
+  const id = form.id;
+  const adopting = formMode.value === "adopt";
+  await submitTaskForm();
+  if (adopting && !formVisible.value && detailVisible.value) {
+    await showDetail(id);
   }
 }
 
@@ -731,6 +719,9 @@ async function onStart(task) {
     await startTask(task.id);
     ElMessage.success(t("msg.taskStarted", { id: task.id }));
     await refreshAll();
+    if (detailVisible.value && String(detailTask.value?.id) === String(task.id)) {
+      await showDetail(task.id);
+    }
   } catch (err) {
     ElMessage.error(parseErr(err));
   }
