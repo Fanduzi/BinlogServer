@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, structured 400 bodies, and 400 on updates of read-only on-disk backups
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay 0/NORMAL, structured 400 bodies, 400 on updates of read-only on-disk backups, and 200 when POST adopt attaches source identity to that same id
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -543,6 +543,9 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	switch action {
+	case "adopt":
+		s.handleAdoptDiskBackup(w, r, taskID)
+		return
 	case "start":
 		err = s.tasks.StartTask(taskID)
 	case "stop":
@@ -978,7 +981,38 @@ func isTaskUpdateBadRequest(err error) bool {
 		errors.Is(err, tasks.ErrGTIDSetRequired) ||
 		errors.Is(err, tasks.ErrInvalidStartMode) ||
 		errors.Is(err, tasks.ErrInvalidRetentionDays) ||
-		errors.Is(err, tasks.ErrDiskBackupReadOnly)
+		errors.Is(err, tasks.ErrDiskBackupReadOnly) ||
+		errors.Is(err, tasks.ErrTaskAlreadyHasMetadata) ||
+		errors.Is(err, tasks.ErrDiskResumePosition)
+}
+
+// handleAdoptDiskBackup attaches source identity to a leftover data directory on the same id.
+func (s *Server) handleAdoptDiskBackup(w http.ResponseWriter, r *http.Request, taskID string) {
+	var req updateTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, tasks.CodeInvalidRequest, "invalid json")
+		return
+	}
+	updated, err := s.tasks.AdoptDiskBackup(taskID, tasks.TaskPatch{
+		Name:       req.Name,
+		ClusterKey: req.ClusterKey,
+		Source:     req.Source,
+		Start:      req.Start,
+		Storage:    req.Storage,
+	})
+	if err != nil {
+		if errors.Is(err, tasks.ErrTaskNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if isTaskUpdateBadRequest(err) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, sanitizeTask(updated))
 }
 
 type apiErrorBody struct {

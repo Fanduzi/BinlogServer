@@ -51,7 +51,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Filter by source host",
+                        "description": "Filter by source host; localhost and explicit loopback literals share one identity, other hosts match exact spelling",
                         "name": "host",
                         "in": "query"
                     },
@@ -183,7 +183,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Filter by source host",
+                        "description": "Filter by source host; localhost and explicit loopback literals share one identity, other hosts match exact spelling",
                         "name": "host",
                         "in": "query"
                     },
@@ -228,7 +228,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Filter by source host",
+                        "description": "Filter by source host; localhost and explicit loopback literals share one identity, other hosts match exact spelling",
                         "name": "host",
                         "in": "query"
                     },
@@ -484,6 +484,59 @@
                         "description": "No Content",
                         "schema": {
                             "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/tasks/{id}/adopt": {
+            "post": {
+                "description": "Attaches cluster_key and source to a standalone disk-discovered task id. Omitted start resumes at FILE_POS at the size of the highest local segment. Does not start replication.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Tasks"
+                ],
+                "summary": "Adopt a leftover on-disk task directory",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "cluster_key and source (host/port/user/password/flavor) are required. name, start, and storage are optional.",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.updateTaskRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.Task"
                         }
                     },
                     "400": {
@@ -1070,8 +1123,7 @@
                     "type": "integer"
                 },
                 "single_process": {
-                    "type": "boolean",
-                    "description": "True when this process pulls tasks and no worker heartbeat exists. worker_count is 0."
+                    "type": "boolean"
                 },
                 "task_count": {
                     "type": "integer"

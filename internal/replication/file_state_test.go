@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: task epoch, file metadata store, local open files, uploader and lease verification
-// output: regression coverage for OPEN visibility/progress, sealing, upload, and lease-safe file publication
+// output: regression coverage for OPEN visibility/progress, sealing, upload, lease-safe file publication, and adopted resume that keeps existing segments
 // pos: data-plane runtime that consumes MySQL binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -44,6 +44,48 @@ type fileStateMetaStore struct {
 func (s *fileStateMetaStore) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
 	s.metas = append(s.metas, meta)
 	return nil
+}
+
+func TestOpenBinlogWriter_KeepLocalSegmentsLeavesExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "4")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sealed := filepath.Join(taskDir, "mysql-bin.000003")
+	openSeg := filepath.Join(taskDir, "mysql-bin.000004.open.e2")
+	if err := os.WriteFile(sealed, []byte("sealed-seg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(openSeg, []byte("open-seg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewMySQLRunner(dir)
+	file, _, path, err := runner.openBinlogWriter(context.Background(), tasks.Task{
+		ID:                "4",
+		Epoch:             3,
+		KeepLocalSegments: true,
+		Storage:           tasks.Storage{RetentionDays: 7},
+	}, "mysql-bin.000004", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	if filepath.Base(path) != "mysql-bin.000004.open.e3" {
+		t.Fatalf("path %s", path)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || len(got) == 0 {
+		t.Fatalf("new epoch bytes: %v %q", err, got)
+	}
+	if sealedGot, err := os.ReadFile(sealed); err != nil || string(sealedGot) != "sealed-seg" {
+		t.Fatalf("sealed: %v %q", err, sealedGot)
+	}
+	if openGot, err := os.ReadFile(openSeg); err != nil || string(openGot) != "open-seg" {
+		t.Fatalf("open: %v %q", err, openGot)
+	}
 }
 
 // TestFileState_OpenFileUsesEpochSuffix 验证相关行为。
@@ -155,8 +197,6 @@ func TestFileState_SealRequiresLeaseAndEpochMatch(t *testing.T) {
 		t.Fatalf("expected open file retained on rejected seal, stat err=%v", err)
 	}
 }
-
-
 
 func TestFileState_SealAsksSameMemoryLeaseDoor(t *testing.T) {
 	dir := t.TempDir()
