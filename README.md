@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.8
+### 1. Download, verify, and unpack v0.5.9
 
 ```bash
-VER=0.5.8
+VER=0.5.9
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -113,7 +113,7 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.8_linux_amd64/
+binlog-server_0.5.9_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -234,15 +234,15 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.8)
+## Upgrade Notes (v0.5.9)
 
-Before upgrading existing deployments, review the v0.5.8 operator contract:
+Before upgrading existing deployments, review the v0.5.9 operator contract:
 
-- **Zero Schema Migrations:** `v0.5.8` requires no database migrations (`000001_init_schema` unchanged).
-- **Console With Bearer Auth:** `/ui/` and its assets load with no `Authorization` header. Settings asks for the bearer token; later API calls send `Authorization: Bearer`. `/api/*`, `/metrics`, and `/swagger/*` still return 401 without the credential. `/healthz` stays 200. Config keys are unchanged.
-- **Replay On Disk:** The admin guide explains `mysqlbinlog` / `mariadb-binlog` replay of `{data_dir}/{task_id}/mysql-bin.NNNNNN`. A `.open.e<epoch>` suffix stays on the filename; pass that path as-is. Standalone without `meta_dsn` lists those on-disk segments from `GET /api/tasks/<id>/files` in ascending binlog index order (`file_path` includes `.open.e<epoch>`). Checkpoint stays 404 when there is no checkpoint row. Object storage has only sealed successful uploads. The v0.5.7 archive omitted `docs/guide`. The v0.5.8 archive includes it, so the replay section is in the unpacked package.
+- **Zero Schema Migrations:** `v0.5.9` requires no database migrations (`000001_init_schema` unchanged). Config keys are unchanged.
+- **Disk File List:** Standalone with no `meta_dsn`, or a meta catalog with no `binlog_files` rows for that task, `GET /api/tasks/{id}/files` scans `{data_dir}/{task_id}/` and returns sealed files and `.open.e<epoch>` segments. `file_name` is the source file name. `file_path` is the on-disk path and includes `.open.e<epoch>` for an open segment. Order is ascending source index; the same index lists the sealed name, then open epochs. `limit` keeps the highest indexes. `start_pos` and `end_pos` are 0 because the disk scan has no offsets. Checkpoint stays 404 `checkpoint not found` when there is no checkpoint row. A non-empty `binlog_files` catalog is unchanged (`sealed_at` descending) and is not replaced by the disk scan. A store error does not fall back to disk. The Console task files table shows the on-disk name and `file_path`. After a standalone process restart the task id is 404 `task not found` and the directory remains.
+- **Replay Client:** A MySQL source needs official MySQL `mysqlbinlog`. A MariaDB source needs `mariadb-binlog`. `mysqlbinlog --version` that prints MariaDB (Debian `/usr/bin/mysqlbinlog` is often MariaDB, for example 11.8.6) exits 0 and injects `SET @@session.check_constraint_checks=1`, which is not in the file. MySQL 8.0 returns `ERROR 1193` and no rows land. The files are not corrupt. Use official `mysqlbinlog` (for example `Ver 8.0.46`). The v0.5.9 archive includes `docs/guide`.
 
-Full release notes: [docs/releases/release-notes-v0.5.8.md](docs/releases/release-notes-v0.5.8.md) | [docs/releases/v0.5.8.zh-CN.md](docs/releases/v0.5.8.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.9.md](docs/releases/release-notes-v0.5.9.md) | [docs/releases/v0.5.9.zh-CN.md](docs/releases/v0.5.9.zh-CN.md)
 
 ---
 
