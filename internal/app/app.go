@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, and shutdown
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -274,6 +274,8 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// 先组装 scheduler，再根据 worker 开关决定是否挂载 runner。
+	// data_dir 与 runner 落盘目录相同，files API 在 binlog_files 为空时扫描这里。
+	opts = append(opts, tasks.WithDataDir(a.cfg.DataDir))
 	scheduler := tasks.NewScheduler(opts...)
 	if workerEnabled {
 		// 将 runner 进度回传给 scheduler，供 API/状态机读取。

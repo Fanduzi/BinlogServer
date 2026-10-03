@@ -89,7 +89,16 @@
             </el-button>
           </div>
           <el-table :data="files" size="small" border>
-            <el-table-column prop="file_name" :label="$t('table.file')" min-width="180" />
+            <el-table-column :label="$t('table.file')" min-width="220">
+              <template #default="{ row }">
+                <span :data-testid="`file-disk-name-${diskBase(row)}`">{{ diskBase(row) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column :label="$t('table.filePath')" min-width="280">
+              <template #default="{ row }">
+                <span data-testid="file-disk-path">{{ row.file_path }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="size_bytes" :label="$t('table.size')" width="100" />
             <el-table-column prop="start_pos" :label="$t('table.startPos')" width="100" />
             <el-table-column prop="end_pos" :label="$t('table.endPos')" width="100" />
@@ -163,4 +172,13 @@ defineProps({
   isMobile: { type: Boolean, default: false },
 });
 defineEmits(['update:visible', 'edit', 'start', 'stop', 'delete', 'retry-upload']);
+
+function diskBase(row) {
+  const path = row && row.file_path ? String(row.file_path) : "";
+  if (!path) {
+    return (row && row.file_name) || "";
+  }
+  const parts = path.split(/[/\\]/);
+  return parts[parts.length - 1] || ((row && row.file_name) || "");
+}
 </script>
