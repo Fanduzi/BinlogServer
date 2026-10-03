@@ -1,4 +1,4 @@
-# BinlogServer v0.5.7 Comprehensive Configuration Reference
+# BinlogServer v0.5.8 Comprehensive Configuration Reference
 #
 # Rule 1 (Auth Fail-Closed):
 #   - Loopback (127.0.0.1/localhost/::1) may stay unauthenticated for local testing.
