@@ -5,7 +5,7 @@
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `tracing_test.go`: OTLP HTTP 默认 traces 路径兼容性回归测试。
 - `http_server_test.go`: HTTP 超时、PRODUCTION 以及非 loopback listen 的 auth fail-closed 校验测试。
-- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由、ClaimRunnableTasks 恢复、以及认领循环回归。
+- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由、未带凭证可打开 Console、ClaimRunnableTasks 恢复、以及认领循环回归。
 - `restart_recovery_test.go`: standalone 重启后安全的持久化 active task 自动恢复、metadata/source 冲突任务保持停止的回归测试。
 - `source_guard_test.go`: 从 `meta_dsn` 到任务 API 的 metadata/source 隔离装配回归测试。
 
@@ -15,7 +15,7 @@
 - control-plane 与 worker-health HTTP server 均应用可配置超时（ReadHeader/Read/Write/Idle）。
 - 通过 `config.meta.timeout.*` 注入 tasks/meta 的内部依赖调用超时（读/写/lease/上传）。
 - 对 TCP `meta_dsn` 提取 host/port 并注入 tasks，同端点 source 在 create/update/start 边界被拒绝。
-- API server 支持从 `config.API.Auth` 注入鉴权策略。
+- API server 支持从 `config.API.Auth` 注入鉴权策略。`/ui/*` 不走这套中间件；`/api/*`、`/metrics`、`/swagger/*` 仍按配置保护。
 - 非空 `PRODUCTION` 用标准布尔值解析；true 时 `EncryptionKey`（`--encryption-key`）为空则拒绝启动。control-plane 在 true 时仍强制 auth 已启用、同时保护 `/api/*` 和 `/metrics`，并复用 `config.ValidateAPIAuthConfig` 校验模式/已解析凭证；worker-only 不暴露该 API 且不套用 auth 约束，但仍拒绝空的 encryption key。
 - control-plane `listen_addr` 非 loopback（含 `:8080`、`0.0.0.0:8080`）时同样强制 `api.auth.enabled` + `protect_api` + `protect_metrics`；`127.0.0.1`/`localhost`/`::1` 可保持未鉴权本地演示。`/healthz` 仍匿名。
 - 创建 meta store 时把 `config.EncryptionKey` 注入，用于 `source_json` 源库密码加解密。
