@@ -402,7 +402,7 @@ sudo systemctl status binlog-server
 
 English: [Replay local segments when the source is gone](#replay-local-segments-en).
 
-源库已经不可用、手里只剩落盘文件时，用这一节把分段交给 `mysqlbinlog` 或 `mariadb-binlog`。下面写的是当前代码的行为。
+源库已经不可用、手里只剩落盘文件时，用这一节按序号回放。回放 MySQL 源必须用 MySQL 自带的 `mysqlbinlog`，不要用 MariaDB 的。回放 MariaDB 源必须用 `mariadb-binlog`。7.3 在管道之前用 `mysqlbinlog --version` 确认客户端。下面写的是当前代码的行为。
 
 ### 7.1 文件在哪
 
@@ -441,6 +441,14 @@ Day-1 已经拉到数据并在源上 `FLUSH LOGS` 之后，常见内容是：
 curl -fsS -X POST http://127.0.0.1:8080/api/tasks/1/stop
 ```
 
+回放 MySQL 源必须用 MySQL 自带的 `mysqlbinlog`，不要用 MariaDB 的。回放 MariaDB 源必须用 `mariadb-binlog`。名叫 `mysqlbinlog` 的程序经常就是 MariaDB。Debian 上 `/usr/bin/mysqlbinlog` 与 `mariadb-binlog` 是同一个文件。管道之前先确认厂商：
+
+```bash
+mysqlbinlog --version
+```
+
+输出印着 MariaDB（例如 `mysqlbinlog from 11.8.6-MariaDB`）时，不要拿它回放 MySQL。这个客户端退出码是 0，并注入 binlog 文件里没有的 `SET @@session.check_constraint_checks=1`。MySQL 8.0 回答 `ERROR 1193 (HY000) Unknown system variable 'check_constraint_checks'`，管道在 `check_constraint_checks` 这里失败，一条数据都不进。文件没有坏。换成 `--version` 印着 MySQL 的官方 `mysqlbinlog`（例如 `Ver 8.0.46`）再执行下面的命令。
+
 然后按源文件名序号从小到大回放。下面就是上一节那两个文件：
 
 ```bash
@@ -450,7 +458,7 @@ mysqlbinlog \
   | mysql -h 127.0.0.1 -u root -p
 ```
 
-MariaDB 把 `mysqlbinlog` 换成 `mariadb-binlog`，把 `mysql` 换成 `mariadb`，文件顺序不变。
+MariaDB 源把 `mysqlbinlog` 换成 `mariadb-binlog`，把 `mysql` 换成 `mariadb`，文件顺序不变。`mariadb-binlog --version` 应印着 MariaDB。
 
 管道右侧是恢复库。生产环境把 `./data` 换成 `data_dir`（部署示例里是 `/data/binlog-server/data`）。文件里已有的 GTID 事件会跟着这段输出执行。整段回放按上面的文件顺序即可。
 
@@ -484,7 +492,7 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 中文：[源库不可用时，用本地分段回放](#replay-local-segments).
 
-Use this section when the source is gone and the only copy is the files on disk. `mysqlbinlog` and `mariadb-binlog` read those files. The behavior below is what the current code does.
+Use this section when the source is gone and the only copy is the files on disk. Replaying a MySQL source requires MySQL's own `mysqlbinlog`, not MariaDB's. Replaying a MariaDB source requires `mariadb-binlog`. Section 8.3 checks the client with `mysqlbinlog --version` before the pipe. The behavior below is what the current code does.
 
 ### 8.1 Where the files are
 
@@ -523,6 +531,14 @@ Stop the task first so the current segment stops growing. Change the listen addr
 curl -fsS -X POST http://127.0.0.1:8080/api/tasks/1/stop
 ```
 
+Replaying a MySQL source requires MySQL's own `mysqlbinlog`, not MariaDB's. Replaying a MariaDB source requires `mariadb-binlog`. The binary named `mysqlbinlog` is often MariaDB. On Debian, `/usr/bin/mysqlbinlog` is the same file as `mariadb-binlog`. Check the client before the pipe:
+
+```bash
+mysqlbinlog --version
+```
+
+If that prints MariaDB (for example `mysqlbinlog from 11.8.6-MariaDB`), do not use it against MySQL. The client exits 0 and injects `SET @@session.check_constraint_checks=1`, which is not in the binlog file. MySQL 8.0 answers `ERROR 1193 (HY000) Unknown system variable 'check_constraint_checks'`. The pipe fails at `check_constraint_checks` with 1193, and no rows land. The files are not corrupt. Use the official MySQL `mysqlbinlog` (`--version` prints MySQL, for example `Ver 8.0.46`), then run the command below.
+
 Replay in source-file index order. These are the two files from the layout above:
 
 ```bash
@@ -532,7 +548,7 @@ mysqlbinlog \
   | mysql -h 127.0.0.1 -u root -p
 ```
 
-On MariaDB, use `mariadb-binlog` and `mariadb` with the same files in the same order.
+On a MariaDB source, use `mariadb-binlog` and `mariadb` with the same files in the same order. `mariadb-binlog --version` should print MariaDB.
 
 The right-hand side is the restore server. In production, replace `./data` with `data_dir` (the deployment samples use `/data/binlog-server/data`). GTID events already stored in the files are part of this output. Replay the files in this order.
 
