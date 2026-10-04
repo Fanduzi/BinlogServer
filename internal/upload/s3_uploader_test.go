@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: object storage upload operations and a reader for one stored object at its size at open
+// output: object storage upload operations, sealed ETag cases, and a reader for one stored object at its size at open
 // pos: outbound storage adapter layer for sealed binlog upload and download
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -8,7 +8,9 @@ package upload
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -408,5 +410,53 @@ func TestNewS3Uploader_AllowsRegionAndSSLCombination(t *testing.T) {
 	}
 	if uploader == nil {
 		t.Fatal("expected uploader instance")
+	}
+}
+
+func TestSealedETag_SinglePartAtBoundaryAndMultipart(t *testing.T) {
+	dir := t.TempDir()
+	small := filepath.Join(dir, "small")
+	if err := os.WriteFile(small, []byte("binlog-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sealedETag(small, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := md5.Sum([]byte("binlog-data"))
+	if got != hex.EncodeToString(sum[:]) {
+		t.Fatalf("single etag %s", got)
+	}
+
+	exact := filepath.Join(dir, "exact")
+	if err := os.WriteFile(exact, []byte("abcd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = sealedETag(exact, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactSum := md5.Sum([]byte("abcd"))
+	if got != hex.EncodeToString(exactSum[:]) {
+		t.Fatalf("boundary etag %s, want single-part md5", got)
+	}
+
+	payload := []byte("abcdefghij")
+	big := filepath.Join(dir, "big")
+	if err := os.WriteFile(big, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = sealedETag(big, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1 := md5.Sum(payload[:4])
+	p2 := md5.Sum(payload[4:8])
+	p3 := md5.Sum(payload[8:])
+	concat := append(append(p1[:], p2[:]...), p3[:]...)
+	all := md5.Sum(concat)
+	want := hex.EncodeToString(all[:]) + "-3"
+	if got != want {
+		t.Fatalf("multipart etag %s, want %s", got, want)
 	}
 }

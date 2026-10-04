@@ -134,6 +134,7 @@ type BinlogFile struct {
     ObjectKey   string    `json:"object_key,omitempty"`
     UploadState string    `json:"upload_state,omitempty"`
     UploadError string    `json:"upload_error,omitempty"`
+    Checksum    string    `json:"checksum,omitempty"` // match / mismatch after a sealed upload
     UploadedAt  time.Time `json:"uploaded_at"`
 }
 ```

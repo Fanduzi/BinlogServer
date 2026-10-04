@@ -138,7 +138,7 @@ type S3Config struct {
 ## 非目标
 
 - 跨进程 UploadID 持久化（M4+ 评估）
-- 远端对象回读校验（已明确不做）
+- 整对象下载后再对比。封存上传后用 HEAD ETag 与本地封存文件对比，结果在文件清单 `checksum`（见 `docs/develop/TODO.md` 第 4 节）。
 - 流式上传 OPEN 文件（不上传未 seal 文件）
 
 ---

@@ -280,6 +280,8 @@ definitions:
     type: object
   tasks.BinlogFile:
     properties:
+      checksum:
+        type: string
       created_at:
         type: string
       end_pos:
