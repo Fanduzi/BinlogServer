@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, and worker heartbeat views
+// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, and the runner's retention-blocked file counts for metrics
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -319,4 +319,23 @@ func (s *Scheduler) ListWorkerHeartbeats(limit int) ([]WorkerHeartbeat, error) {
 	return []WorkerHeartbeat{}, nil
 }
 
-// appendEventLocked 追加事件到内存并 best-effort 写入持久化层。
+// RetentionBlockedFiles returns how many expired sealed files the runner is
+// keeping because they are not uploaded. The count is per task id and drops
+// when a later retention pass purges those files. A runner that does not
+// report the count contributes nothing.
+func (s *Scheduler) RetentionBlockedFiles() map[string]int {
+	s.mu.Lock()
+	runner := s.runner
+	s.mu.Unlock()
+	counter, ok := runner.(interface {
+		RetentionBlockedFiles() map[string]int
+	})
+	if !ok || counter == nil {
+		return map[string]int{}
+	}
+	counts := counter.RetentionBlockedFiles()
+	if counts == nil {
+		return map[string]int{}
+	}
+	return counts
+}
