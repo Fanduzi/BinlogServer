@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/tasks/{id}/replay/archive` returns one `application/x-tar` (ustar) of the same selection as `GET /api/tasks/{id}/replay` for the same `limit`. Each member name is that basename (`mysql-bin.000004` or `mysql-bin.000004.open.e1`), one per source index. A sealed name and `.open.e*` still keep the highest-epoch open segment. Member bytes follow `GET /api/tasks/{id}/files/{name}`: `{data_dir}/{id}/{name}` wins, including an open segment while the task is `RUNNING` or `STOPPED`; when that file is missing, a sealed catalog row with `upload_state=UPLOADED` and a non-empty `object_key` is read from the configured object store. `LOCAL_ONLY`, `UPLOAD_FAILED`, an empty `object_key`, an open segment with no local file, and a process with no object store stay unavailable. `Content-Disposition` is `attachment` with filename `task-{id}-replay.tar`. The route uses the same auth as other `/api/tasks/*` routes. An empty selection (`paths: []`) is 200 and an empty tar. A missing task is 404 `task not found`. If any selected segment cannot be opened, the response is an error and the body is not a partial tar. The Console task detail has Download replay set next to copy. `GET /api/tasks/{id}/replay` and the copy command are unchanged. No new config key. No schema migration.
+
 ## [v0.5.20] - 2026-10-04
 
 ### Added

@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/replay, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/replay, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -159,6 +159,20 @@ func (s *Server) swaggerTaskFileDownloadDoc() {}
 // @Failure 500 {string} string
 // @Router /api/tasks/{id}/replay [get]
 func (s *Server) swaggerTaskReplayDoc() {}
+
+// swaggerTaskReplayArchiveDoc godoc
+// @Summary Download the mysqlbinlog replay set as one tar
+// @Description USTAR archive whose members are the basenames from GET /api/tasks/{id}/replay for the same limit, one per source index. A sealed name and .open.e* still keep the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name} open rules: a local file wins, including *.open.e* while RUNNING or STOPPED; a missing local file is read only for a sealed UPLOADED row with a non-empty object_key. An empty selection is 200 and an empty tar. If any selected segment cannot be opened, the response is an error and the body is not a tar. A missing task is 404 task not found.
+// @Tags Tasks
+// @Produce application/x-tar
+// @Param id path string true "Task ID"
+// @Param limit query int false "Inventory window limit (same as replay)"
+// @Success 200 {file} file "ustar archive task-{id}-replay.tar"
+// @Failure 400 {string} string "invalid segment name"
+// @Failure 404 {string} string "task not found or segment not found on this process"
+// @Failure 500 {string} string
+// @Router /api/tasks/{id}/replay/archive [get]
+func (s *Server) swaggerTaskReplayArchiveDoc() {}
 
 // swaggerTaskRetryUploadDoc godoc
 // @Summary Retry failed upload binlog files

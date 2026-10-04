@@ -84,14 +84,23 @@
                 <strong>{{ $t('detail.replay') }}</strong>
                 <span class="replay-set-hint" data-testid="task-replay-hint">{{ replayHint }}</span>
               </div>
-              <el-button
-                data-testid="task-replay-copy"
-                size="small"
-                :disabled="!replayCommand"
-                @click="copyReplay"
-              >
-                {{ $t('btn.copyReplay') }}
-              </el-button>
+              <div class="replay-set-actions">
+                <el-button
+                  data-testid="task-replay-copy"
+                  size="small"
+                  :disabled="!replayCommand"
+                  @click="copyReplay"
+                >
+                  {{ $t('btn.copyReplay') }}
+                </el-button>
+                <el-button
+                  data-testid="task-replay-download"
+                  size="small"
+                  @click="$emit('download-replay', task)"
+                >
+                  {{ $t('btn.downloadReplay') }}
+                </el-button>
+              </div>
             </div>
             <pre v-if="replayCommand" class="replay-set-command" data-testid="task-replay-command">{{ replayCommand }}</pre>
             <p v-else class="replay-set-empty" data-testid="task-replay-command">{{ $t('detail.replayEmpty') }}</p>
@@ -208,7 +217,7 @@ const props = defineProps({
   isLeftover: { type: Function, required: true },
   isMobile: { type: Boolean, default: false },
 });
-defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload', 'download-file']);
+defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload', 'download-file', 'download-replay']);
 
 const { t } = useI18n();
 

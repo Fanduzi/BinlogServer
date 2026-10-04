@@ -1,6 +1,6 @@
 <!--
 input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, forms, and settings
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, replay-set tar download, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -377,6 +377,7 @@ note: if this file changes, update this header and frontend/README.md.
       @delete="onDelete"
       @retry-upload="retryFailedUploads"
       @download-file="downloadSegmentFile"
+      @download-replay="downloadReplaySet"
       :is-mobile="isMobile"
     />
 
@@ -401,6 +402,7 @@ import enLocale from "element-plus/dist/locale/en.mjs";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   deleteTask,
+  downloadReplayArchive,
   downloadTaskFile,
   listFiles,
   lookupSource,
@@ -415,7 +417,7 @@ import { useAuth } from "./composables/useAuth.js";
 import { useDashboard } from "./composables/useDashboard.js";
 import { useSourceLookup } from "./composables/useSourceLookup.js";
 import { useTaskFilter } from "./composables/useTaskFilter.js";
-import { useTaskDetail } from "./composables/useTaskDetail.js";
+import { taskDetailInventoryLimit, useTaskDetail } from "./composables/useTaskDetail.js";
 import { isLeftoverDiskTask, useTaskForm } from "./composables/useTaskForm.js";
 import { useBatchCreate } from "./composables/useBatchCreate.js";
 import { useFormatters } from "./composables/useFormatters.js";
@@ -774,6 +776,17 @@ async function retryFailedUploads(task) {
     ElMessage.success(t("msg.retryUploadTriggered"));
   } catch (err) {
     ElMessage.error(parseErr(err));
+  }
+}
+
+async function downloadReplaySet(task) {
+  if (!task?.id) return;
+  try {
+    const data = await downloadReplayArchive(task.id, taskDetailInventoryLimit);
+    saveDownloadedSegment(`task-${task.id}-replay.tar`, data);
+    ElMessage.success(t("msg.replayDownloaded"));
+  } catch (err) {
+    ElMessage.error(await downloadErrorText(err));
   }
 }
 
@@ -1731,6 +1744,14 @@ h1 {
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
+}
+
+.replay-set-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .replay-set-label {

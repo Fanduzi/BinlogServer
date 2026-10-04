@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the replay set beside that inventory, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the replay set beside that inventory, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -4332,6 +4332,7 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 		"/api/tasks/{id}/files",
 		"/api/tasks/{id}/files/{name}",
 		"/api/tasks/{id}/replay",
+		"/api/tasks/{id}/replay/archive",
 		"/api/tasks/{id}/upload-failures/reasons",
 		"/api/tasks/{id}/replication",
 		"/api/tasks/{id}/lease",
@@ -4411,4 +4412,10 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 	if !ok || len(produces) != 1 || produces[0] != "application/octet-stream" {
 		t.Fatalf("download produces %#v", download["produces"])
 	}
+	archive := getOperation("/api/tasks/{id}/replay/archive")
+	archiveProduces, ok := archive["produces"].([]any)
+	if !ok || len(archiveProduces) != 1 || archiveProduces[0] != "application/x-tar" {
+		t.Fatalf("replay archive produces %#v", archive["produces"])
+	}
+	assertQueryParams(archive, "limit")
 }

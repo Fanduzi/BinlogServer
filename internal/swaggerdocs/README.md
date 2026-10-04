@@ -5,7 +5,7 @@
 - `swagger.json` / `swagger.yaml`: 生成的 OpenAPI 规范文件。
 
 ## Exports
-- swagger 文档元数据供 API 文档页面消费，包含 `POST /api/tasks/batch` 的 1..100 envelope、逐项有序结果与结构化错误；`POST /api/tasks/{id}/adopt` 把 source 接到剩余磁盘目录的同一 id；`GET /api/tasks/{id}/replay` 返回每个源序号一条磁盘路径和 `source.flavor` 对应的 binlog 客户端；`GET /api/tasks/{id}/files/{name}` 以 `application/octet-stream` 下载清单中的一个分段，本地文件优先，本地没有且封存行已 `UPLOADED` 时从已配置的对象存储读；`BinlogFile` 包含 `OPEN/SEALED` state；summary/dashboard/source 契约包含独立 `starting` 计数，`running` 仅代表 RUNNING；任务列表与 dashboard 暴露 state/host/port 过滤及 `total/limit/offset` 分页字段，limit 超过 500 返回 400；`GET /api/cluster/overview` 与 `GET /api/workers` 文档包含 500。overview 含 `single_process`：无心跳的本进程拉取时 `worker_count` 为 0。
+- swagger 文档元数据供 API 文档页面消费，包含 `POST /api/tasks/batch` 的 1..100 envelope、逐项有序结果与结构化错误；`POST /api/tasks/{id}/adopt` 把 source 接到剩余磁盘目录的同一 id；`GET /api/tasks/{id}/replay` 返回每个源序号一条磁盘路径和 `source.flavor` 对应的 binlog 客户端；`GET /api/tasks/{id}/replay/archive` 以 `application/x-tar` 下载同一窗口的 basename，空窗口是空 tar；`GET /api/tasks/{id}/files/{name}` 以 `application/octet-stream` 下载清单中的一个分段，本地文件优先，本地没有且封存行已 `UPLOADED` 时从已配置的对象存储读；`BinlogFile` 包含 `OPEN/SEALED` state；summary/dashboard/source 契约包含独立 `starting` 计数，`running` 仅代表 RUNNING；任务列表与 dashboard 暴露 state/host/port 过滤及 `total/limit/offset` 分页字段，limit 超过 500 返回 400；`GET /api/cluster/overview` 与 `GET /api/workers` 文档包含 500。overview 含 `single_process`：无心跳的本进程拉取时 `worker_count` 为 0。
 - `/api/sources/lookup` 文档说明 localhost 与显式 loopback literal 共用 host identity，其他 host 按原文字面匹配。
 
 ## Generation Note

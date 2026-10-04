@@ -234,6 +234,12 @@ Do not use permissive development defaults in production. Follow these mandatory
   curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
     "http://localhost:8080/api/tasks/<task-id>/files/mysql-bin.000004.open.e1"
   ```
+- Download that same replay selection as one tar after local retention has purged sealed segments that already live in object storage. `GET /api/tasks/<task-id>/replay/archive` uses the same `limit` as `GET /api/tasks/<task-id>/replay`. The body is `application/x-tar`. Each member is the basename, not a host path. A local file still wins. A missing local sealed file is read from object storage only when that catalog row is `UPLOADED` with a non-empty `object_key`. An empty selection is an empty tar. If one selected segment cannot be opened, the response is an error and not a partial tar. Extract it and pass those basenames to `mysqlbinlog` or `mariadb-binlog`. The JSON replay command is unchanged.
+  ```bash
+  curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
+    "http://localhost:8080/api/tasks/<task-id>/replay/archive?limit=200"
+  tar -xf "task-<task-id>-replay.tar"
+  ```
 
 Start production instances from [`config.production.example.yaml`](config.production.example.yaml).
 

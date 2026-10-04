@@ -228,6 +228,12 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
+- 本地保留清掉已经在对象存储里的封存分段后，用同一个回放窗口下载一个 tar。`GET /api/tasks/<task-id>/replay/archive` 的 `limit` 与 `GET /api/tasks/<task-id>/replay` 相同。响应是 `application/x-tar`，文件名是 `task-<task-id>-replay.tar`。每个成员是 basename，不是主机路径。本地文件优先；本地没有时，只有封存且 `UPLOADED`、`object_key` 非空的行才从对象存储读。没有可选分段时返回空 tar。任一选中分段打不开，响应是错误，不是半个 tar。解压后把这些 basename 交给 `mysqlbinlog` 或 `mariadb-binlog`。JSON 回放命令不变。
+  ```bash
+  curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
+    "http://localhost:8080/api/tasks/<task-id>/replay/archive?limit=200"
+  tar -xf "task-<task-id>-replay.tar"
+  ```
 
 生产部署请直接参考 [`config.production.example.yaml`](config.production.example.yaml)。
 
