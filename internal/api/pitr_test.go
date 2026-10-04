@@ -92,6 +92,13 @@ func TestTaskAPI_PITRReplay(t *testing.T) {
 	if len(empty.Paths) != 0 || empty.Command != "" || empty.Client != "mysqlbinlog" {
 		t.Fatalf("empty %+v", empty)
 	}
+	equal := getPITR(t, handler, "/api/tasks/1/replay", url.Values{
+		"start_datetime": {"2024-01-01T01:20:00Z"},
+		"stop_datetime":  {"2024-01-01 01:20:00"},
+	})
+	if len(equal.Paths) != 0 || equal.Command != "" || equal.Flavor != "mysql" || equal.Client != "mysqlbinlog" || equal.ClientHint != "MySQL mysqlbinlog" {
+		t.Fatalf("equal window %+v", equal)
+	}
 
 	mariaDir := filepath.Join(dir, "2")
 	if err := os.MkdirAll(mariaDir, 0o755); err != nil {
