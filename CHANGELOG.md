@@ -14,6 +14,8 @@ Maintenance rules:
 
 ### Fixed
 
+- After retention fails to delete an object (`OBJECT_PURGE_FAILED`) and a later file open deletes it, replication continues on the next binlog file. The task no longer stays in retry with `sealed file already exists` for a file that was already sealed. The failed delete still leaves the local file and `checksum` unchanged.
+
 - Retention now deletes the bucket object for a sealed segment it purges locally. A segment still inside `storage.retention_days` stays in the bucket. An open segment is not deleted. If the object delete fails, the local file stays, the catalog row stays `UPLOADED`, and `checksum` is left as it was (`match`, `mismatch`, or empty). Empty is not `match` and not `mismatch`. The task retries with `last_error` beginning `OBJECT_PURGE_FAILED`, and the next file open tries the delete again. The object key already stored on the row is the one removed; there is no new config key and no schema migration. A purged segment is removed from the catalog, so replay no longer reads it from the bucket.
 
 ## [v0.5.23] - 2026-10-04
