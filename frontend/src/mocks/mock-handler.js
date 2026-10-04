@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, GET /api/tasks/{id}/replay one path per source index, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, GET /api/tasks/{id}/replay one path per source index, GET /api/tasks/{id}/replay/archive those basenames, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -873,6 +873,22 @@ export function handleMockRequest(input) {
       body: `segment-bytes:${name}`,
       contentType: "application/octet-stream",
       filename: name,
+    };
+  }
+
+  const replayArchiveMatch = path.match(/^\/api\/tasks\/([^/]+)\/replay\/archive$/);
+  if (replayArchiveMatch && method === "GET") {
+    const id = replayArchiveMatch[1];
+    const task = state.detailsByID[id];
+    if (!task) return { status: 404, body: "task not found", contentType: "text/plain" };
+    const files = state.filesByID[id] || [];
+    const paths = selectReplayPaths(windowReplayFiles(files, replayLimit(query)));
+    const names = paths.map((filePath) => fileDiskBase({ file_path: filePath })).filter(Boolean);
+    return {
+      status: 200,
+      body: names.join("\n"),
+      contentType: "application/x-tar",
+      filename: `task-${id}-replay.tar`,
     };
   }
 

@@ -1,5 +1,5 @@
 // input: API calls for task data including single-task GET /lease and GET /replay
-// output: detail drawer state, including the replay set, and showDetail action
+// output: detail drawer state, including the replay set, the inventory limit shared with replay archive download, and showDetail action
 // pos: task detail drawer data management; /lease stays on this single-task path only
 // note: if this file changes, update this header and frontend/src/composables/README.md
 import { ref } from "vue";
@@ -17,6 +17,10 @@ import {
 } from "../api.js";
 
 const RUN_HISTORY_LIMIT = 10;
+
+// taskDetailInventoryLimit is the files/replay window the drawer loads.
+// The replay archive download uses the same limit.
+export const taskDetailInventoryLimit = 80;
 
 export function useTaskDetail() {
   const { t } = useI18n();
@@ -43,8 +47,8 @@ export function useTaskDetail() {
         getTask(id),
         getCheckpoint(id),
         listEvents(id, 120),
-        listFiles(id, 80),
-        listReplay(id, 80),
+        listFiles(id, taskDetailInventoryLimit),
+        listReplay(id, taskDetailInventoryLimit),
         getReplication(id),
       ]);
       const [leaseResult, runsResult] = await Promise.allSettled([
