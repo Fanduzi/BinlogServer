@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/tasks/{id}/files/{name}` streams one inventory segment. `name` is the on-disk basename from `GET /api/tasks/{id}/files` (sealed name or `*.open.e*`). The body is `application/octet-stream`, `Content-Disposition` uses that basename, and the length is the file size at open. A slash, backslash, `..`, or other traversal form is 400 `invalid segment name`. A missing task is 404 `task not found`. A basename that is not under `{data_dir}/{id}/` on this process is 404 `segment not found on this process`. A control plane with no local file does not invent bytes from the catalog path or object storage. An open segment can be downloaded while the task is RUNNING or STOPPED. The Console files table has Download on each row. `GET /api/tasks/{id}/replay` and the copy command are unchanged. No new config key. No schema migration.
+
 ## [v0.5.18] - 2026-10-04
 
 ### Added

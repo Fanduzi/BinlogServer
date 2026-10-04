@@ -34,7 +34,7 @@
 - URL 深链支持：可直接访问 `/#/tasks`、`/#/sources`、`/#/workers`、`/#/alerts` 分享指定运维视图
 - 工具归属拆分：`运维筛选`仅在任务/告警工作区显示，`源库反查`仅在源库工作区显示
 - E2E 回归覆盖：Playwright 用例覆盖分视图导航、深链、空态、详情抽屉、上传重试与 starting 指标 mock 场景
-- 任务文件表：「文件」列显示 `file_path` 的磁盘文件名（open 分段带 `.open.e<epoch>`），「磁盘路径」列显示完整 `file_path`，与 `GET /api/tasks/{id}/files` 相同。详情里的回放区按 `GET /api/tasks/{id}/replay` 显示每个序号一条路径，并一次复制 `mysqlbinlog` 或 `mariadb-binlog` 命令
+- 任务文件表：「文件」列显示 `file_path` 的磁盘文件名（open 分段带 `.open.e<epoch>`），「磁盘路径」列显示完整 `file_path`，与 `GET /api/tasks/{id}/files` 相同。每一行有下载，请求 `GET /api/tasks/{id}/files/{basename}`，保存的文件名就是该磁盘文件名。详情里的回放区按 `GET /api/tasks/{id}/replay` 显示每个序号一条路径，并一次复制 `mysqlbinlog` 或 `mariadb-binlog` 命令
 - 遗留目录：任务详情用「认领」提交 `POST /api/tasks/{id}/adopt`，状态保持 `STOPPED`，不回显密码，也不启动复制。目录任务的编辑仍是 `PUT`
 - 开发态 mock：显式环境变量打开后，前端可直接使用共享场景数据启动，不依赖真实后端
 - 共享 mock 资产：Vite dev 与 Playwright 路由拦截复用同一套 mock 数据与 handler，避免双份漂移
