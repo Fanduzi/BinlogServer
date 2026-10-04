@@ -12,13 +12,15 @@ Maintenance rules:
 
 ## [Unreleased]
 
-### Fixed
-
-- A clean Stop no longer stays `STOPPING` when the run exits in the same window as the stop request, or when the `STOPPING` row is written after `STOPPED`. `GetTask` follows the store, so that late write used to leave the task `STOPPING`.
+## [v0.5.22] - 2026-10-04
 
 ### Added
 
-- Task detail shows the configured start and the position the next Start continues from. 起点 / Start is the saved mode: `FILE_POS` includes `file:pos`, and `GTID` includes `gtid_set`. 续传 / Resume is `file:pos`, plus `GTID` when the stored checkpoint has the same file and pos. `GET /api/tasks/{id}/checkpoint` returns that resume identity. A local open segment with a complete event wins over a different checkpoint row, for both `meta_dsn` and standalone. With no checkpoint row and no complete local event, the response stays 404 `checkpoint not found`. A stopped task whose configured start is still `LATEST` shows the open segment's last complete event, which is the position the next Start uses. File-list `start_pos` / `end_pos` are unchanged. No new config key. No schema migration.
+- A stopped task's Console detail shows two identities. Start (起点) is the configured start: `LATEST`, or `FILE_POS` as `file:pos`, or `GTID` as `gtid_set`. Resume (续传) is the position the next Start continues from. A stopped `LATEST` task still shows `LATEST` as its start. It does not get rewritten to `FILE_POS`. The resume line is the file and position of the last complete event in the highest local open segment. `GET /api/tasks/{id}/checkpoint` returns that same resume the runner uses on Start: `file` and `pos`. `gtid_set` is included only when the stored checkpoint is that same file and position. With neither a checkpoint row nor a complete local event, the response stays 404 `checkpoint not found`. The configured start stays on the task's `start` object, not inside the checkpoint JSON. No new config key. No schema migration.
+
+### Fixed
+
+- A stop that races the run exit no longer leaves the task stuck in `STOPPING`. A later write of an older `STOPPING` snapshot does not overwrite `STOPPED`.
 
 ## [v0.5.21] - 2026-10-04
 
