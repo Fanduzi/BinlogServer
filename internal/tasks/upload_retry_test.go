@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
+// output: task state transitions, scheduling decisions, execution coordination, and background retry of sealed UPLOAD_FAILED rows without the manual API
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -448,5 +448,244 @@ func TestScheduler_ListUploadFailureReasons(t *testing.T) {
 	}
 	if reasons[1].Reason != "permission denied" || reasons[1].Count != 1 {
 		t.Fatalf("unexpected second reason item: %+v", reasons[1])
+	}
+}
+
+// failThenUploader 前几次上传失败，之后成功。用来表示桶恢复后的后台重试。
+type failThenUploader struct {
+	mu        sync.Mutex
+	failsLeft int
+	calls     []string
+}
+
+func (u *failThenUploader) UploadFile(_ context.Context, _ string, localPath, objectKey string) error {
+	u.mu.Lock()
+	u.calls = append(u.calls, objectKey)
+	fail := u.failsLeft > 0
+	if fail {
+		u.failsLeft--
+	}
+	u.mu.Unlock()
+	if fail {
+		return errors.New("bucket unavailable")
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (u *failThenUploader) callObjectKeys() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([]string, len(u.calls))
+	copy(out, u.calls)
+	return out
+}
+
+// TestScheduler_BackgroundUploadRetryFlipsSealedFailureWithoutManualAPI 验证后台循环把已封存的 UPLOAD_FAILED 补成 UPLOADED。
+// 测试本身不调用 RetryFailedUploads，也不走 HTTP。上传失败不改变任务状态。open 分段和本机不存在的文件不上传。
+func TestScheduler_BackgroundUploadRetryFlipsSealedFailureWithoutManualAPI(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := newRetryTestFileStore()
+	uploader := &failThenUploader{failsLeft: 1}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	const (
+		sealedKey  = "prefix/cluster-a/uuid/mysql-bin.000050"
+		openKey    = "prefix/cluster-a/uuid/mysql-bin.000051.open.e1"
+		missingKey = "prefix/cluster-a/uuid/mysql-bin.000052"
+	)
+	store.files[task.ID] = []BinlogFile{
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000050",
+			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000050"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   sealedKey,
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000051.open.e1",
+			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000051.open.e1"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   openKey,
+		},
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000052",
+			FilePath:    filepath.Join(tmpDir, "missing-mysql-bin.000052"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			UploadError: "previous failure",
+			ObjectKey:   missingKey,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.RunBackgroundUploadRetry(ctx, 15*time.Millisecond)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var sealed BinlogFile
+	for {
+		item, ok := store.get(task.ID, "mysql-bin.000050")
+		if ok && item.UploadState == "UPLOADED" {
+			sealed = item
+			break
+		}
+		if time.Now().After(deadline) {
+			state := ""
+			if ok {
+				state = item.UploadState
+			}
+			t.Fatalf("background retry did not reach UPLOADED, state=%q calls=%v", state, uploader.callObjectKeys())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background upload retry did not stop")
+	}
+
+	if sealed.UploadError != "" {
+		t.Fatalf("expected cleared upload error, got %q", sealed.UploadError)
+	}
+	calls := uploader.callObjectKeys()
+	if len(calls) < 2 {
+		t.Fatalf("expected a failed attempt before the bucket recovered, calls=%v", calls)
+	}
+	metricsDeadline := time.Now().Add(2 * time.Second)
+	for {
+		metrics := s.GetUploadRetryMetrics()
+		if metrics.Success >= 1 && metrics.Failed >= 1 {
+			break
+		}
+		if time.Now().After(metricsDeadline) {
+			t.Fatalf("expected background retry metrics, got %+v", metrics)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	openFile, ok := store.get(task.ID, "mysql-bin.000051.open.e1")
+	if !ok || openFile.UploadState != "UPLOAD_FAILED" {
+		t.Fatalf("open segment must stay UPLOAD_FAILED, ok=%v state=%s", ok, openFile.UploadState)
+	}
+	missing, ok := store.get(task.ID, "mysql-bin.000052")
+	if !ok || missing.UploadState != "UPLOAD_FAILED" || missing.UploadError != "previous failure" {
+		t.Fatalf("missing local file must be left unchanged, ok=%v file=%+v", ok, missing)
+	}
+	for _, key := range uploader.callObjectKeys() {
+		if key == openKey || key == missingKey {
+			t.Fatalf("background retry uploaded %s, calls=%v", key, uploader.callObjectKeys())
+		}
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State != StateCreated {
+		t.Fatalf("background retry changed task state to %s", got.State)
+	}
+}
+
+type countingFailedStore struct {
+	*retryTestFileStore
+	total int64
+	err   error
+}
+
+func (s *countingFailedStore) CountUploadFailures(context.Context) (int64, error) {
+	return s.total, s.err
+}
+
+// TestScheduler_BackgroundUploadRetryUsesFailureCount 验证全局失败数为 0 时后台这一轮不上传；计数失败或失败数大于 0 时仍上传。
+func TestScheduler_BackgroundUploadRetryUsesFailureCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := &countingFailedStore{retryTestFileStore: newRetryTestFileStore()}
+	uploader := &retryTestUploader{}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	path := writeRetryTestFile(t, tmpDir, "mysql-bin.000070")
+	store.files[task.ID] = []BinlogFile{{
+		TaskID:      task.ID,
+		FileName:    "mysql-bin.000070",
+		FilePath:    path,
+		SealedAt:    time.Now(),
+		UploadState: "UPLOAD_FAILED",
+		ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000070",
+	}}
+
+	s.retryKnownFailedUploads()
+	if uploader.callCount() != 0 {
+		t.Fatalf("expected no upload when the failure count is 0, calls=%d", uploader.callCount())
+	}
+
+	store.err = errors.New("count failed")
+	s.retryKnownFailedUploads()
+	if uploader.callCount() != 1 {
+		t.Fatalf("expected upload when the failure count cannot be read, calls=%d", uploader.callCount())
+	}
+	item, ok := store.get(task.ID, "mysql-bin.000070")
+	if !ok || item.UploadState != "UPLOADED" {
+		t.Fatalf("expected UPLOADED after the count error, ok=%v state=%s", ok, item.UploadState)
+	}
+
+	item.UploadState = "UPLOAD_FAILED"
+	item.UploadError = "again"
+	if err := store.UpsertBinlogFile(context.Background(), item); err != nil {
+		t.Fatalf("upsert failed: %v", err)
+	}
+	store.err = nil
+	store.total = 1
+	s.retryKnownFailedUploads()
+	if uploader.callCount() != 2 {
+		t.Fatalf("expected upload when the failure count is positive, calls=%d", uploader.callCount())
+	}
+}
+
+// TestScheduler_RetryFailedUploadsStillAttemptsMissingLocalFile 锁定手动补传：本机没有文件时仍尝试上传并记下失败。
+func TestScheduler_RetryFailedUploadsStillAttemptsMissingLocalFile(t *testing.T) {
+	store := newRetryTestFileStore()
+	uploader := &retryTestUploader{}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	store.files[task.ID] = []BinlogFile{
+		{
+			TaskID:      task.ID,
+			FileName:    "mysql-bin.000060",
+			FilePath:    filepath.Join(t.TempDir(), "missing-mysql-bin.000060"),
+			SealedAt:    time.Now(),
+			UploadState: "UPLOAD_FAILED",
+			ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000060",
+		},
+	}
+
+	stats, err := s.RetryFailedUploads(task.ID, 10)
+	if err != nil {
+		t.Fatalf("RetryFailedUploads returned error: %v", err)
+	}
+	if stats.Failed != 1 || uploader.callCount() != 1 {
+		t.Fatalf("expected manual retry to attempt the missing file, stats=%+v calls=%d", stats, uploader.callCount())
+	}
+	item, ok := store.get(task.ID, "mysql-bin.000060")
+	if !ok || item.UploadState != "UPLOAD_FAILED" || item.UploadError == "" {
+		t.Fatalf("expected UPLOAD_FAILED with an error, ok=%v file=%+v", ok, item)
 	}
 }

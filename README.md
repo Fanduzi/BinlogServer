@@ -225,7 +225,7 @@ Do not use permissive development defaults in production. Follow these mandatory
   export BINLOG_SERVER_UPLOAD_ACCESS_KEY="AKIA..."
   export BINLOG_SERVER_UPLOAD_SECRET_KEY="..."
   ```
-- If an upload fails, replication continues uninterrupted. Trigger manual retry anytime:
+- If an upload fails, replication continues uninterrupted. The worker retries sealed `UPLOAD_FAILED` segments in the background; after the bucket is healthy again they become `UPLOADED` without calling the retry API. Open segments are not uploaded. Manual retry still works:
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
