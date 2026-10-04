@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/checkpoint where epoch greater than 1 follows a readable file_path and does not rewind an unreadable tail to position 4, GET /api/tasks/{id}/replay, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/checkpoint where epoch greater than 1 follows a readable file_path and does not rewind an unreadable tail to position 4, GET /api/tasks/{id}/replay, the UTC stop_datetime window on that route, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -150,12 +150,15 @@ func (s *Server) swaggerTaskFileDownloadDoc() {}
 
 // swaggerTaskReplayDoc godoc
 // @Summary List the mysqlbinlog replay set for a task
-// @Description One on-disk file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. limit is the same inventory window as GET /files. client is mysqlbinlog or mariadb-binlog from source.flavor.
+// @Description One on-disk file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. Without stop_datetime, limit is the same inventory window as GET /files and the body omits command. stop_datetime (UTC) selects the point-in-time window instead of limit: paths cover events at or after optional start_datetime and before stop_datetime, and command is the TZ=UTC client invocation. An empty cover is 200 with empty paths and command. Invalid datetimes are 400.
 // @Tags Tasks
 // @Produce json
 // @Param id path string true "Task ID"
-// @Param limit query int false "Inventory window limit (same as files)"
-// @Success 200 {object} tasks.ReplaySet
+// @Param limit query int false "Inventory window limit (same as files). Ignored when stop_datetime is set."
+// @Param stop_datetime query string false "UTC stop time, YYYY-MM-DD HH:MM:SS or RFC3339. Required for the point-in-time window."
+// @Param start_datetime query string false "Optional UTC start time. Requires stop_datetime."
+// @Success 200 {object} tasks.PITRSet
+// @Failure 400 {string} string "invalid stop_datetime, invalid start_datetime, stop_datetime is required, or start_datetime is after stop_datetime"
 // @Failure 404 {string} string
 // @Failure 500 {string} string
 // @Router /api/tasks/{id}/replay [get]
@@ -163,13 +166,15 @@ func (s *Server) swaggerTaskReplayDoc() {}
 
 // swaggerTaskReplayArchiveDoc godoc
 // @Summary Download the mysqlbinlog replay set as one tar
-// @Description USTAR archive whose members are the basenames from GET /api/tasks/{id}/replay for the same limit, one per source index. A sealed name and .open.e* still keep the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name} open rules: a local file wins, including *.open.e* while RUNNING or STOPPED; a missing local file is read only for a sealed UPLOADED row with a non-empty object_key. An empty selection is 200 and an empty tar. If any selected segment cannot be opened, the response is an error and the body is not a tar. A missing task is 404 task not found.
+// @Description USTAR archive whose members are the basenames from GET /api/tasks/{id}/replay for the same limit, one per source index. stop_datetime uses that route's point-in-time window instead of limit. A sealed name and .open.e* still keep the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name} open rules: a local file wins, including *.open.e* while RUNNING or STOPPED; a missing local file is read only for a sealed UPLOADED row with a non-empty object_key. An empty selection is 200 and an empty tar. If any selected segment cannot be opened, the response is an error and the body is not a tar. A missing task is 404 task not found.
 // @Tags Tasks
 // @Produce application/x-tar
 // @Param id path string true "Task ID"
-// @Param limit query int false "Inventory window limit (same as replay)"
+// @Param limit query int false "Inventory window limit (same as replay). Ignored when stop_datetime is set."
+// @Param stop_datetime query string false "UTC stop time. Same window as GET /api/tasks/{id}/replay."
+// @Param start_datetime query string false "Optional UTC start time. Requires stop_datetime."
 // @Success 200 {file} file "ustar archive task-{id}-replay.tar"
-// @Failure 400 {string} string "invalid segment name"
+// @Failure 400 {string} string "invalid segment name or invalid datetime"
 // @Failure 404 {string} string "task not found or segment not found on this process"
 // @Failure 500 {string} string
 // @Router /api/tasks/{id}/replay/archive [get]

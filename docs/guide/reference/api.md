@@ -571,6 +571,59 @@ curl -o task-1-replay.tar "http://localhost:8080/api/tasks/1/replay/archive?limi
 
 HTTP 200 时 `Content-Type` 是 `application/x-tar`，`Content-Disposition` 是 `attachment`，文件名是 `task-{id}-replay.tar`。窗口为空时仍是 HTTP 200，正文是没有成员的 ustar，长度 1024 字节。选出的分段里有一个打不开或读不完时，响应是错误，正文不是半个 tar。任务不存在是 HTTP 404 `task not found`。分段不在本进程上是 HTTP 404 `segment not found on this process`。非法分段名是 HTTP 400 `invalid segment name`。
 
+带 `stop_datetime` 时，这个 tar 的成员是 [5.7](#pitr-replay) 的同一组 basename，不再用 `limit`。
+
+### 5.7 按时间点选取分段
+
+<a id="pitr-replay"></a>
+
+全量备份已经由 DBA 自己恢复。这一节只选出要应用到某个时间点的 binlog 分段，并给出一条可以直接管道到恢复库的命令。
+
+`GET /api/tasks/{id}/replay` 带上 `stop_datetime` 就走这条路径。`start_datetime` 可选。两个参数都不出现时，仍是上一节的 `limit` 窗口，响应里没有 `command`。
+
+```bash
+curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
+  --data-urlencode "stop_datetime=2024-01-01 01:30:00"
+
+curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
+  --data-urlencode "start_datetime=2024-01-01 00:30:00" \
+  --data-urlencode "stop_datetime=2024-01-01 01:30:00"
+```
+
+时间是 UTC。`YYYY-MM-DD HH:MM:SS` 和 `YYYY-MM-DDTHH:MM:SS` 按 UTC 理解。带时区的 RFC3339 先换算成 UTC。命令里的时钟也是 UTC，并且已经带 `TZ=UTC`，这样 `mysqlbinlog` / `mariadb-binlog` 用事件头的时间戳比较这两个参数。
+
+每个源序号仍只留一条路径，规则与 5.5 相同：同一序号既有封存名又有 `.open.e*` 时，留下 epoch 最大的 open 路径。这条路径不再先按 `limit` 裁掉序号较小的分段，而是看整份清单。分段要能在本进程打开：本地文件优先；本地没有时，只读封存且 `UPLOADED`、`object_key` 非空的对象。事件头时间落在窗口里才选中。`stop_datetime` 是开区间的右端，与 `--stop-datetime` 相同：时间戳大于等于停止时间的事件不进这条命令。设置了 `start_datetime` 时，左端含这个时刻，与 `--start-datetime` 相同。没有事件时间的分段不进入窗口。
+
+`source.flavor` 的客户端与 5.5 相同。`paths` 按序号升序。`command` 是一条命令：有客户端时以 `TZ=UTC mysqlbinlog` 或 `TZ=UTC mariadb-binlog` 开头，然后是 `--stop-datetime='<UTC>'`，设置了开始时间时还有 `--start-datetime='<UTC>'`，最后是这些路径。
+
+```json
+{
+  "flavor": "mysql",
+  "client": "mysqlbinlog",
+  "client_hint": "MySQL mysqlbinlog",
+  "paths": [
+    "/data/binlog-server/data/1/mysql-bin.000003",
+    "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
+  ],
+  "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2024-01-01 01:30:00' \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1"
+}
+```
+
+窗口里没有分段时仍是 HTTP 200，`paths` 是 `[]`，`command` 是空字符串，`client` 仍按 flavor 填写。
+
+| 请求 | HTTP | 正文 |
+|------|------|------|
+| `stop_datetime` 无法解析，或参数在但值为空 | 400 | `invalid stop_datetime` |
+| 只给了 `start_datetime` | 400 | `stop_datetime is required` |
+| `start_datetime` 无法解析 | 400 | `invalid start_datetime` |
+| 开始时间晚于停止时间 | 400 | `start_datetime is after stop_datetime` |
+| 任务不存在 | 404 | `task not found` |
+| 某个已选序号的分段打不开 | 404 | `segment not found on this process` |
+
+正文是纯文本句子。`GET /api/tasks/{id}/replay/archive` 接受同一对时间参数，成员是上面的 basename。空窗口仍是空 tar。
+
+Console 任务详情在回放命令下面可以填停止时间（和可选的开始时间），生成并复制定点命令，或下载这个窗口的 tar。
+
 ## 6. 事件查询 API
 
 ### 6.1 列出任务事件
