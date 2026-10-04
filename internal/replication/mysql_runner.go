@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
-// input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS
+// input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the object deleter wired with upload
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -41,6 +41,7 @@ type MySQLRunner struct {
 	checkpointStore  CheckpointStore
 	fileMetaStore    FileMetaStore
 	uploadPrefix     string
+	objectDeleter    objectDeleter
 	leaseVerifier    LeaseVerifier
 	sealedHandler    func(context.Context, tasks.BinlogFile) error
 	progressReporter ProgressReporter
@@ -138,10 +139,20 @@ func (f leaseVerifierFunc) Verify(ctx context.Context, taskID, workerID string, 
 func WithUploader(uploader tasks.FileUploader, prefix string) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.uploadPrefix = prefix
+		if deleter, ok := uploader.(objectDeleter); ok {
+			r.objectDeleter = deleter
+		}
 		r.sealedHandler = func(ctx context.Context, file tasks.BinlogFile) error {
 			_, err := tasks.ApplySealedUpload(ctx, uploader, r.fileMetaStore, file)
 			return err
 		}
+	}
+}
+
+// WithObjectDeleter 注入保留清理时使用的对象删除器。生产与上传客户端是同一个。
+func WithObjectDeleter(deleter objectDeleter) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.objectDeleter = deleter
 	}
 }
 
@@ -256,7 +267,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	writerOpener := r.writerOpener
 	if writerOpener == nil {
 		writerOpener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
-			return r.openBinlogWriter(ctx, task, fileName, initialPos)
+			return r.openBinlogWriter(ctx, task, fileName, initialPos, sourceServerUUID)
 		}
 	}
 
@@ -677,7 +688,7 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 }
 
 // openBinlogWriter 打开（或创建）本地 open 文件并返回带初始 checkpoint 的 writer。
-func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fileName string, initialPos uint32) (*os.File, *binlog.Writer, string, error) {
+func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fileName string, initialPos uint32, sourceServerUUID string) (*os.File, *binlog.Writer, string, error) {
 	// Step 1: 准备目录并清理 stale open / 过期文件。
 	dir := filepath.Join(r.dataDir, task.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -698,7 +709,7 @@ func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fil
 		}
 	}
 	localFileName := openFileName(fileName, task.Epoch)
-	if err := cleanupExpiredBinlogs(dir, task.Storage.RetentionDays, time.Now(), localFileName); err != nil {
+	if err := r.cleanupTaskBinlogs(ctx, task, dir, localFileName, sourceServerUUID, time.Now()); err != nil {
 		return nil, nil, "", err
 	}
 
@@ -995,37 +1006,204 @@ func effectiveStartForTakeover(task tasks.Task, start tasks.StartConfig, checkpo
 	}, true
 }
 
-// cleanupExpiredBinlogs 按保留天数清理过期本地文件（跳过当前活跃 open 文件）。
+// objectDeleter removes one uploaded object. S3Uploader implements it.
+// A missing object is success so a retry after a partial purge can finish.
+type objectDeleter interface {
+	DeleteObject(ctx context.Context, objectKey string) error
+}
+
+// expiredFileCatalog is the binlog_files lookup retention uses.
+// ListBinlogFiles must be called with retentionCatalogLimit: the replay window
+// keeps the newest source indexes, and retention needs the oldest rows.
+type expiredFileCatalog interface {
+	ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error)
+	DeleteBinlogFile(ctx context.Context, taskID, fileName string) error
+}
+
+// retentionCatalogLimit keeps every catalog row. A replay-sized limit would
+// drop the oldest uploaded segments and purge them locally only.
+const retentionCatalogLimit = int(^uint(0) >> 1)
+
+// objectPurgeFailed is the operator-facing prefix when retention cannot delete
+// the bucket object. The task last_error starts with it, and the next file
+// open retries because the local segment is still there.
+const objectPurgeFailed = "OBJECT_PURGE_FAILED"
+
+// retentionObjects decides which expired sealed file has a bucket object.
+// Checksum is not a reason to keep or skip the object: match, mismatch, and
+// an empty checksum are all UPLOADED rows. Empty is not match and not mismatch.
+type retentionObjects struct {
+	byName        map[string]tasks.BinlogFile
+	deleter       objectDeleter
+	standaloneKey func(fileName string) string
+	drop          func(fileName string) error
+	note          func(row tasks.BinlogFile) error
+}
+
+// cleanupExpiredBinlogs 按保留天数清理过期本地文件（跳过当前活跃 open 文件和其它 open 分段）。
 func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeFileName string) error {
+	return purgeExpiredBinlogs(context.Background(), dir, retentionDays, now, activeFileName, func() (*retentionObjects, error) {
+		return nil, nil
+	})
+}
+
+// cleanupTaskBinlogs 在打开本地文件时清理过期分段。
+// 已上传的封存分段先删对象和目录行，再删本地文件。对象删除失败时本地文件留下，
+// 错误以 OBJECT_PURGE_FAILED 返回，下一次打开文件会再试。
+func (r *MySQLRunner) cleanupTaskBinlogs(ctx context.Context, task tasks.Task, dir, activeFileName, sourceServerUUID string, now time.Time) error {
+	return purgeExpiredBinlogs(ctx, dir, task.Storage.RetentionDays, now, activeFileName, func() (*retentionObjects, error) {
+		if r.objectDeleter == nil {
+			return nil, nil
+		}
+		return r.retentionObjects(ctx, task, sourceServerUUID)
+	})
+}
+
+func (r *MySQLRunner) retentionObjects(ctx context.Context, task tasks.Task, sourceServerUUID string) (*retentionObjects, error) {
+	objects := &retentionObjects{deleter: r.objectDeleter}
+	if r.fileMetaStore == nil {
+		objects.standaloneKey = func(name string) string {
+			if strings.TrimSpace(task.ClusterKey) == "" || strings.TrimSpace(sourceServerUUID) == "" {
+				return ""
+			}
+			return buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, name)
+		}
+		return objects, nil
+	}
+	catalog, ok := r.fileMetaStore.(expiredFileCatalog)
+	if !ok {
+		return nil, fmt.Errorf("%s: binlog catalog cannot delete retained objects", objectPurgeFailed)
+	}
+	files, err := catalog.ListBinlogFiles(ctx, task.ID, retentionCatalogLimit)
+	if err != nil {
+		return nil, fmt.Errorf("%s: list binlog files: %w", objectPurgeFailed, err)
+	}
+	objects.byName = make(map[string]tasks.BinlogFile, len(files))
+	for _, file := range files {
+		objects.byName[file.FileName] = file
+	}
+	objects.drop = func(name string) error {
+		return catalog.DeleteBinlogFile(ctx, task.ID, name)
+	}
+	objects.note = func(row tasks.BinlogFile) error {
+		return r.fileMetaStore.UpsertBinlogFile(ctx, row)
+	}
+	return objects, nil
+}
+
+// purgeExpiredBinlogs removes sealed files older than retention.
+// The active open file and every other open segment stay.
+// load runs only after an expired sealed file is found, so a quiet directory
+// does not read the catalog. A nil retentionObjects deletes local files only.
+func purgeExpiredBinlogs(ctx context.Context, dir string, retentionDays int, now time.Time, activeFileName string, load func() (*retentionObjects, error)) error {
 	if retentionDays <= 0 {
 		retentionDays = 7
 	}
-
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
-
 	expireBefore := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	var objects *retentionObjects
+	loaded := false
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if entry.IsDir() {
 			continue
 		}
-		if entry.Name() == activeFileName {
+		name := entry.Name()
+		if name == activeFileName || isOpenSegmentName(name) {
 			continue
 		}
-
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		if info.ModTime().Before(expireBefore) {
-			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+		if !info.ModTime().Before(expireBefore) {
+			continue
+		}
+		if !loaded {
+			loaded = true
+			if load != nil {
+				objects, err = load()
+				if err != nil {
+					return err
+				}
+			}
+		}
+		removeLocal := true
+		if objects != nil && objects.deleter != nil {
+			removeLocal, err = objects.release(ctx, name)
+			if err != nil {
 				return err
 			}
 		}
+		if !removeLocal {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// release deletes the bucket object for one expired sealed file before the
+// local file is removed. removeLocal is false when the file must stay so the
+// next purge can retry. An open catalog row is not deleted.
+func (o *retentionObjects) release(ctx context.Context, name string) (bool, error) {
+	if o == nil || o.deleter == nil {
+		return true, nil
+	}
+	row, ok := o.byName[name]
+	if ok && isOpenCatalogRow(row) {
+		return false, nil
+	}
+	key := ""
+	if ok && isUploadedRow(row) {
+		key = strings.TrimSpace(row.ObjectKey)
+	} else if !ok && o.standaloneKey != nil {
+		key = strings.TrimSpace(o.standaloneKey(name))
+	}
+	if key == "" {
+		return true, nil
+	}
+	if err := o.deleter.DeleteObject(ctx, key); err != nil {
+		if ok && o.note != nil {
+			recorded := row
+			recorded.UploadError = err.Error()
+			if recErr := o.note(recorded); recErr != nil {
+				return false, fmt.Errorf("%s: %s: %w (also failed to record purge error: %v)", objectPurgeFailed, name, err, recErr)
+			}
+		}
+		return false, fmt.Errorf("%s: %s: %w", objectPurgeFailed, name, err)
+	}
+	if ok && o.drop != nil {
+		if err := o.drop(name); err != nil {
+			return false, fmt.Errorf("%s: %s: remove catalog row: %w", objectPurgeFailed, name, err)
+		}
+	}
+	return true, nil
+}
+
+func isOpenSegmentName(name string) bool {
+	return strings.Contains(name, ".open.e")
+}
+
+func isOpenCatalogRow(row tasks.BinlogFile) bool {
+	if strings.EqualFold(strings.TrimSpace(row.State), "OPEN") {
+		return true
+	}
+	return isOpenSegmentName(row.FileName) || isOpenSegmentName(filepath.Base(row.FilePath))
+}
+
+func isUploadedRow(row tasks.BinlogFile) bool {
+	return strings.EqualFold(strings.TrimSpace(row.UploadState), "UPLOADED") && strings.TrimSpace(row.ObjectKey) != ""
 }
 
 // cleanupStaleOpenFiles 清理旧 epoch 遗留的 .open.e* 文件。

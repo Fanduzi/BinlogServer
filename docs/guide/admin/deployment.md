@@ -485,7 +485,7 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 封存分段上传之后，`GET /api/tasks/{id}/files` 和 Console 任务文件表的「校验」列给出 `checksum`。`match` 表示桶里该对象和这份封存文件是同一串字节：对象 HEAD 的 ETag 与本地文件一致（不超过 16MiB 时是整文件 MD5，更大时是与这次上传相同的 16MiB 分片 ETag）。`mismatch` 表示这次核对已经完成且字节不同。`checksum` 写成 `match` 只发生在这次 ETag 核对通过之后。对象 HEAD 失败时 `checksum` 留空，这一行仍是 `UPLOADED`，空值不是已校验。`mismatch` 或 HEAD 失败时拉流继续。
 
-复制循环下次打开文件时，会删掉修改时间早于 `storage.retention_days` 的其他本地文件，当前这个 `.open.e<epoch>` 除外。更早的封存分段如果本地已经删掉、上传曾经成功，就只在对象存储里。
+复制循环下次打开文件时，会删掉修改时间早于 `storage.retention_days` 的其它已封存本地文件。当前这个 `.open.e<epoch>` 不删。保留清理也不删其它 open 分段，也不碰它们的对象。已经上传的封存分段会在同一次清理里从桶中删除，并删掉目录行。还在保留期内的对象不删。对象删除失败时本地文件留下，任务 `last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再试。
 
 源库以后又恢复、任务再次 `start` 并且连上源时，新的 epoch 会删掉其他 epoch 的 `.open.e*`。封存文件还在。要留住当前这段未封存的尾部，先把 `{data_dir}/{task_id}/` 复制出来。源已经连不上时，`start` 在打开本地文件之前失败，不会走到删除这一步。
 
@@ -580,6 +580,6 @@ Object storage receives a file only after it is sealed and the upload succeeds. 
 
 After that upload, `GET /api/tasks/{id}/files` and the Checksum column in the Console task files table show `checksum`. `match` means the object in the bucket is the same bytes as that sealed file: the object HEAD ETag equals the local file (the whole-file MD5 at or under 16MiB, and the same 16MiB multipart ETag as the upload when the file is larger). `mismatch` means that comparison finished and the bytes differ. `checksum` is `match` only after the ETag comparison holds. When the object HEAD fails, `checksum` is empty, the row stays `UPLOADED`, and that empty value is not verified. Replication keeps pulling for `mismatch` and for a failed HEAD.
 
-The next time the replication loop opens a file, it deletes other local files whose modification time is older than `storage.retention_days`. The current `.open.e<epoch>` file stays. An older sealed segment that was deleted locally and had been uploaded exists only in object storage.
+The next time the replication loop opens a file, it deletes other sealed local files whose modification time is older than `storage.retention_days`. The current `.open.e<epoch>` file stays. Retention does not delete other open segments, and it does not delete an object for an open segment. A sealed segment that was uploaded is deleted from the bucket in that same purge, and its catalog row is removed. A segment still inside retention stays in the bucket. If the object delete fails, the local file stays, `last_error` begins with `OBJECT_PURGE_FAILED`, and the next file open tries the delete again.
 
 If the source comes back and a later `start` connects for a task that already has metadata, the new epoch deletes `.open.e*` files from other epochs. Sealed files stay. Copy `{data_dir}/{task_id}/` first when you still need the unsealed tail. A task adopted from a leftover directory does not do that delete: start opens the next `.open.e<epoch>` in the same directory and leaves the existing sealed and open segments in place. When the source is unreachable, `start` fails before it opens a local file, so it does not reach that delete. Files older than `storage.retention_days` can still be removed when a file is opened.
