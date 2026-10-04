@@ -75,4 +75,13 @@ func TestRebuildCurrentFile_UsesCheckpointFileFromPos4OnTakeover(t *testing.T) {
 	if got.Mode != tasks.StartModeFilePos || got.File != "mysql-bin.000123" || got.Pos != 4 {
 		t.Fatalf("unexpected takeover rebuild start: %+v", got)
 	}
+
+	shared, ok := tasks.NextResumePosition(t.TempDir(), tasks.Task{ID: "1", Epoch: 2}, binlog.Checkpoint{
+		File:    cp.File,
+		Pos:     cp.Pos,
+		GTIDSet: "uuid:1-9",
+	}, true)
+	if !ok || shared.File != got.File || shared.Pos != got.Pos || shared.GTIDSet != "uuid:1-9" {
+		t.Fatalf("resume position drifted from takeover start: %+v", shared)
+	}
 }

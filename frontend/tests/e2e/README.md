@@ -18,6 +18,7 @@ Playwright 端到端回归模块，验证运维控制台的首屏、导航、筛
 | `adopt-leftover.spec.ts` | 遗留目录从任务详情认领：POST adopt、状态保持已停止、不回显密码、随后启动；显式 LATEST 仍不启动；目录任务编辑仍是 PUT |
 | `replay-set.spec.ts` | 任务详情在文件表仍列出封存名和每个 epoch 时，回放命令只含最高 epoch 的 open 路径，并复制 `mysqlbinlog` argv；「下载回放集」请求 `GET /api/tasks/{id}/replay/archive?limit=80`，保存 `task-{id}-replay.tar`，正文是这些 basename |
 | `segment-download.spec.ts` | 文件表每一行可下载该磁盘文件名，包含仍打开的 `.open.e1`；回放命令仍是每个序号一条路径 |
+| `resume-identity.spec.ts` | 已停止任务详情同时显示配置起点和续传 `file:pos` / GTID；中英文文案都覆盖 |
 | 其他 `*.spec.ts` | 详情、导航、lease、集群和上传重试场景 |
 | `fixtures/` | 共享场景类型与路由拦截 |
 

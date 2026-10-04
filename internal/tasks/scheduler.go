@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, and execution coordination
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, and task persistence that keeps the newest snapshot when an older write finishes later
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -318,6 +318,7 @@ type Scheduler struct {
 	dataDir          string
 	fileUploader     FileUploader
 	retryUploads     map[string]struct{}
+	persisted        map[string]persistedTask
 	retrySuccess     int64
 	retryFailed      int64
 	retrySkipped     int64
@@ -340,6 +341,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		leaseRenewInterval:    5 * time.Second,
 		leaseGrace:            30 * time.Second,
 		retryUploads:          make(map[string]struct{}),
+		persisted:             make(map[string]persistedTask),
 		internalReadTimeout:   3 * time.Second,
 		internalWriteTimeout:  5 * time.Second,
 		internalLeaseTimeout:  2 * time.Second,
@@ -358,19 +360,43 @@ func (s *Scheduler) SetRunner(runner Runner) {
 	s.runner = runner
 }
 
-// CreateTask 创建任务并写入默认配置（start=LATEST, retention=7）。
+// persistedTask is the newest snapshot handed to the store for one task.
+// gen increases on every persist so a write that started earlier can tell
+// that a later transition already exists.
+type persistedTask struct {
+	gen  uint64
+	task Task
+}
 
 func (s *Scheduler) persistTaskLocked(task Task) error {
 	if s.store == nil {
 		return nil
 	}
 	// 避免持锁执行潜在慢 I/O（DB），降低调度锁的阻塞影响。
-	s.mu.Unlock()
-	ctx, cancel := s.withWriteTimeout(context.Background())
-	err := s.store.UpsertTask(ctx, task)
-	cancel()
-	s.mu.Lock()
-	return err
+	// 放开锁之后，更新的一次转换可能先落库。旧快照写完时如果 gen 已经前进，
+	// 再把当时最新的快照写回去，避免 STOPPING 覆盖已经落库的 STOPPED。
+	current := s.persisted[task.ID]
+	current.gen++
+	current.task = task
+	s.persisted[task.ID] = current
+	gen := current.gen
+	snapshot := task
+	for {
+		s.mu.Unlock()
+		ctx, cancel := s.withWriteTimeout(context.Background())
+		err := s.store.UpsertTask(ctx, snapshot)
+		cancel()
+		s.mu.Lock()
+		if err != nil {
+			return err
+		}
+		latest := s.persisted[task.ID]
+		if latest.gen == gen {
+			return nil
+		}
+		gen = latest.gen
+		snapshot = latest.task
+	}
 }
 
 // retryDelay 计算指数退避时长（有上限）。

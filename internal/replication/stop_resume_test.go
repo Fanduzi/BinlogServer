@@ -111,6 +111,13 @@ func stopThenStart(t *testing.T, catalog bool, masterPos uint32, includeFDE bool
 	case <-time.After(5 * time.Second):
 		t.Fatal("stop did not release the lease")
 	}
+	resume, resumeOK, resumeErr := scheduler.ResumePosition(context.Background(), task.ID)
+	if resumeErr != nil || !resumeOK {
+		t.Fatalf("resume identity ok=%v err=%v", resumeOK, resumeErr)
+	}
+	if resume.File != "mysql-bin.000001" || resume.Pos != endPos {
+		t.Fatalf("resume identity %+v, want mysql-bin.000001:%d", resume, endPos)
+	}
 	reportsBeforeResume := len(reporter.reports)
 
 	firstPath := singleSegment(t, dir, task.ID)

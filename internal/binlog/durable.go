@@ -1,0 +1,157 @@
+// Package binlog provides module-level functionality for binlog.
+// input: a task data directory and on-disk binlog segment bytes
+// output: the source file and end log_pos of the last complete event, plus the cursor that finds where that event ends in a segment
+// pos: shared durable-position reader used by the replication runner and the task resume API
+// note: if this file changes, update this header and module README.md.
+package binlog
+
+import (
+	"encoding/binary"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	goreplication "github.com/go-mysql-org/go-mysql/replication"
+)
+
+var durableMagic = []byte{0xfe, 'b', 'i', 'n'}
+
+type durableSegment struct {
+	source string
+	seq    uint64
+	epoch  int64
+	path   string
+}
+
+// DurableResume is the source file and end log_pos of the last complete event
+// in the highest open segment. Sealed names are not resume points. File size
+// is not that position. A segment with no complete event is skipped.
+// ok is false when none exists.
+func DurableResume(dataDir, taskID string) (file string, pos uint32, ok bool) {
+	dir, okDir := durableTaskDir(dataDir, taskID)
+	if !okDir {
+		return "", 0, false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", 0, false
+	}
+	cands := make([]durableSegment, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		seg, ok := classifyDurableSegment(entry.Name())
+		if !ok || seg.epoch < 0 {
+			continue
+		}
+		seg.path = filepath.Join(dir, entry.Name())
+		cands = append(cands, seg)
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].seq != cands[j].seq {
+			return cands[i].seq > cands[j].seq
+		}
+		return cands[i].epoch > cands[j].epoch
+	})
+	for _, seg := range cands {
+		pos, _, _, ok := DurableCursor(seg.path)
+		if !ok {
+			continue
+		}
+		return seg.source, pos, true
+	}
+	return "", 0, false
+}
+
+// DurableCursor walks complete events. pos is the last event's end log_pos.
+// end is the file offset of the first torn byte, or the file size when the
+// segment ends on an event boundary.
+func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	size = info.Size()
+	if size < 4 {
+		return 0, 0, size, false
+	}
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(f, magic); err != nil || string(magic) != string(durableMagic) {
+		return 0, 0, size, false
+	}
+	offset := int64(4)
+	hdr := make([]byte, goreplication.EventHeaderSize)
+	var lastPos uint32
+	var lastEnd int64
+	found := false
+	for offset+int64(goreplication.EventHeaderSize) <= size {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			break
+		}
+		eventSize := int64(binary.LittleEndian.Uint32(hdr[9:13]))
+		logPos := binary.LittleEndian.Uint32(hdr[13:17])
+		if eventSize < int64(goreplication.EventHeaderSize) || offset+eventSize > size {
+			break
+		}
+		if _, err := f.Seek(eventSize-int64(goreplication.EventHeaderSize), io.SeekCurrent); err != nil {
+			break
+		}
+		offset += eventSize
+		lastPos = logPos
+		lastEnd = offset
+		found = true
+	}
+	if !found || lastPos == 0 {
+		return 0, 0, size, false
+	}
+	return lastPos, lastEnd, size, true
+}
+
+func durableTaskDir(dataDir, taskID string) (string, bool) {
+	dataDir = strings.TrimSpace(dataDir)
+	taskID = strings.TrimSpace(taskID)
+	if dataDir == "" || taskID == "" || taskID != filepath.Base(taskID) || strings.HasPrefix(taskID, ".") {
+		return "", false
+	}
+	return filepath.Join(dataDir, taskID), true
+}
+
+// classifyDurableSegment matches the runner's segment names. epoch -1 is sealed.
+func classifyDurableSegment(name string) (durableSegment, bool) {
+	if name == "" || strings.HasPrefix(name, ".") {
+		return durableSegment{}, false
+	}
+	epoch := int64(-1)
+	source := name
+	const mark = ".open.e"
+	if idx := strings.LastIndex(name, mark); idx > 0 {
+		epochText := name[idx+len(mark):]
+		if epochText == "" || strings.ContainsAny(epochText, "./\\") {
+			return durableSegment{}, false
+		}
+		n, err := strconv.ParseInt(epochText, 10, 64)
+		if err != nil || n < 0 {
+			return durableSegment{}, false
+		}
+		source = name[:idx]
+		epoch = n
+	}
+	dot := strings.LastIndex(source, ".")
+	if dot <= 0 || dot == len(source)-1 {
+		return durableSegment{}, false
+	}
+	seq, err := strconv.ParseUint(source[dot+1:], 10, 64)
+	if err != nil || source[:dot] == "" {
+		return durableSegment{}, false
+	}
+	return durableSegment{source: source, seq: seq, epoch: epoch}, true
+}
