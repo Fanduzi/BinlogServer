@@ -6,8 +6,8 @@
 
 | File | Responsibility |
 |------|---------------|
-| build-ui.sh | 构建 frontend 并同步到 internal/ui/static；先跑 `npm run test:locales` 编译 Console 文案，再给本次产物的 JS 按字节拼上 L3 头，然后跑 `check-ui-bundle.sh`；本地没有 vite 时先 `npm ci` |
-| check-ui-bundle.sh | 把 `internal/ui/static/index.html` 引用的 JS 当 ES module 做 `node --check --input-type=module`；`.js` 路径上的 `node --check` 会按 CommonJS 解析，抓不到 Chrome 拒绝的 import |
+| build-ui.sh | 构建 frontend 并同步到 internal/ui/static；先跑 `npm run test:locales` 编译 Console 文案，再给本次产物的 JS 按字节拼上 L3 头，然后跑 `check-ui-bundle.sh`（ESM 语法和 PITR 标记）；本地没有 vite 时先 `npm ci` |
+| check-ui-bundle.sh | 把 `internal/ui/static/index.html` 引用的 JS，以及这些文件 import 的 chunk，当 ES module 做 `node --check --input-type=module`；并要求 `frontend/src` 里的 PITR 标记（`task-pitr`、停止/开始、生成、复制、下载、`stop_datetime`、`start_datetime`、`停止时间`）出现在这张 bundle 图里。缺标记时退出非 0。`.js` 路径上的 `node --check` 会按 CommonJS 解析，抓不到 Chrome 拒绝的 import |
 | check-linux-compat.sh | 检查 Linux 二进制是否为静态链接且无动态 libc 依赖，防止发布产物绑定构建机 glibc |
 | check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL，并复用 glibc 兼容性检查 |
 | check-landing-assets.sh | 校验落地页 HTML 引用的图片资源真实存在、非空且为有效 PNG 格式，防止部署回退为 HTML 造成图裂 |
@@ -24,7 +24,7 @@
 - `make check-linux-release-archive VERSION=v0.1.0`
 - `make check-landing-assets`
 - `make ui-build`
-- `./scripts/check-ui-bundle.sh`
+- `./scripts/check-ui-bundle.sh`（ESM 语法，以及 frontend PITR 标记必须出现在 `index.html` 加载的 bundle 图里；CI 与 release workflow 在发布前跑这条）
 - `make release-assets VERSION=v0.1.0`
 - `make e2e-quick`
 - `make e2e-full`
