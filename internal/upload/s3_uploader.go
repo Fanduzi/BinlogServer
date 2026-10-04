@@ -1,7 +1,7 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: sealed-file upload, a HEAD ETag comparison against that sealed file, and a reader plus the object size at open for one stored key
-// pos: outbound storage adapter for sealed binlog upload, checksum, and for reading an already uploaded object
+// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, and deletion of one stored key
+// pos: outbound storage adapter for sealed binlog upload, checksum, download, and retention delete
 // note: if this file changes, update this header and module README.md.
 package upload
 
@@ -183,6 +183,24 @@ func (u *S3Uploader) OpenObject(ctx context.Context, objectKey string) (io.ReadC
 		return nil, 0, fmt.Errorf("object size unknown")
 	}
 	return obj, info.Size, nil
+}
+
+// DeleteObject removes one stored object. The key is slash-normalized the same way as UploadFile.
+// A missing object is success so retention can retry after a partial purge.
+// Other storage errors are returned and the caller keeps the local segment.
+func (u *S3Uploader) DeleteObject(ctx context.Context, objectKey string) error {
+	if u == nil || u.client == nil {
+		return fmt.Errorf("object storage is not configured")
+	}
+	key := filepath.ToSlash(strings.TrimSpace(objectKey))
+	if key == "" {
+		return fmt.Errorf("empty object key")
+	}
+	err := u.client.RemoveObject(ctx, u.bucket, key, minio.RemoveObjectOptions{})
+	if err != nil && objectMissing(err) {
+		return nil
+	}
+	return err
 }
 
 func objectMissing(err error) bool {

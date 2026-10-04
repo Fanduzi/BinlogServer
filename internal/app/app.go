@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, and shutdown
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, the upload client also wired as the retention object deleter, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -270,7 +270,7 @@ func (a *App) Run(ctx context.Context) error {
 		runnerOpts = append(runnerOpts, replication.WithSealedHandler(func(ctx context.Context, file tasks.BinlogFile) error {
 			_, err := tasks.ApplySealedUpload(ctx, uploader, store, file)
 			return err
-		}, a.cfg.UploadPrefix))
+		}, a.cfg.UploadPrefix), replication.WithObjectDeleter(uploader))
 	}
 
 	// 先组装 scheduler，再根据 worker 开关决定是否挂载 runner。

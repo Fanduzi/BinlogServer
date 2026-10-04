@@ -555,7 +555,7 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 ### 4.1 创建任务
 
 创建任务通过 `POST /api/tasks` 提交，其中存储与保留策略参数由 `storage` 对象控制：
-- `storage.retention_days`: 本地 binlog 分段文件保留天数（有效范围 `1` 到 `3650` 天，默认 `7` 天）。过期且已封存的分段由后台定期安全清理，正在写入的 `OPEN` 分段绝不会被清理。
+- `storage.retention_days`: 本地 binlog 分段文件保留天数（有效范围 `1` 到 `3650` 天，默认 `7` 天）。过期且已封存的分段由复制循环在打开文件时清理，已经上传的对象会一起从桶里删除。还在保留期内的对象不删。正在写入的 `OPEN` 分段绝不会被清理。对象删除失败时本地文件留下，任务 `last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再试。不新增配置项。
 
 **从最新位置开始（LATEST）：**
 

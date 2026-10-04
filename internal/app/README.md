@@ -23,7 +23,7 @@
 - worker 启动与认领循环都走 `ClaimRunnableTasks`：没人要的 STARTING、过期租约、自己名下空闲的 active 任务。不对别人仍持有未过期租约的 RUNNING 做 Stop。
 - 封文件前验租把 `LeaseManager` 直接交给 runner（`Verify`），不再经 App 适配。
 - standalone worker 注入进程内 `MemoryLease`（worker_id=`standalone`），与集群走同一扇所有权门。
-- 封文件后上传由 App 注入 `ApplySealedUpload`，执行器只 seal。
+- 封文件后上传由 App 注入 `ApplySealedUpload`，执行器只 seal。同一个上传客户端也作为保留清理的对象删除器注入，不新增配置项。
 - `config.DataDir` 注入 scheduler。`binlog_files` 没有该任务的行时，`GET /api/tasks/{id}/files` 扫描这个目录下的本地分段。
 
 ### Minimal Tracing Config Example
