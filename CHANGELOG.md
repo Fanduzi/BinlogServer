@@ -12,11 +12,13 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.24] - 2026-10-04
+
 ### Fixed
 
-- After retention fails to delete an object (`OBJECT_PURGE_FAILED`) and a later file open deletes it, replication continues on the next binlog file. The task no longer stays in retry with `sealed file already exists` for a file that was already sealed. The failed delete still leaves the local file and `checksum` unchanged.
+- When the replication loop opens a file, a sealed segment older than `storage.retention_days` (the local file modification time, not `sealed_at`) that is `UPLOADED` and has an object key is removed from the bucket, then its catalog row is removed, then the local file is removed. A segment still inside the retention window stays. An open segment is not deleted, and retention does not delete an object for one. Without upload configured, local retention is unchanged. The published v0.5.23 package deletes the local file and leaves the object in the bucket. No new config key. No schema migration.
 
-- Retention now deletes the bucket object for a sealed segment it purges locally. A segment still inside `storage.retention_days` stays in the bucket. An open segment is not deleted. If the object delete fails, the local file stays, the catalog row stays `UPLOADED`, and `checksum` is left as it was (`match`, `mismatch`, or empty). Empty is not `match` and not `mismatch`. The task retries with `last_error` beginning `OBJECT_PURGE_FAILED`, and the next file open tries the delete again. The object key already stored on the row is the one removed; there is no new config key and no schema migration. A purged segment is removed from the catalog, so replay no longer reads it from the bucket.
+- If deleting the object fails, the local file stays, `checksum` is left as it was (`match`, `mismatch`, or empty), and the row stays `UPLOADED`. Empty is not `match` and not `mismatch`. The task retries with `last_error` beginning `OBJECT_PURGE_FAILED`. An object that is already gone (HTTP 204 or 404) counts as success so the retry can finish. After a segment is sealed, the checkpoint moves to the next file before retention runs. If opening that next file then fails, the retry continues on the next file. It does not try to seal the file that was just sealed, so it does not stop on `sealed file already exists`. A task already stopped on `sealed file already exists`, with its checkpoint still on that sealed file, is not repaired by this release. Move that sealed file aside once so the next retry can continue.
 
 ## [v0.5.23] - 2026-10-04
 
