@@ -304,6 +304,19 @@ definitions:
       uploaded_at:
         type: string
     type: object
+  tasks.ReplaySet:
+    properties:
+      client:
+        type: string
+      client_hint:
+        type: string
+      flavor:
+        type: string
+      paths:
+        items:
+          type: string
+        type: array
+    type: object
   tasks.SourceConfig:
     properties:
       flavor:
@@ -936,6 +949,40 @@ paths:
       summary: Get task lease info
       tags:
       - Cluster
+  /api/tasks/{id}/replay:
+    get:
+      description: One on-disk file_path per source index, ascending. When a sealed
+        name and .open.e* share an index, the path is the highest-epoch open segment.
+        limit is the same inventory window as GET /files. client is mysqlbinlog or
+        mariadb-binlog from source.flavor.
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Inventory window limit (same as files)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/tasks.ReplaySet'
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: List the mysqlbinlog replay set for a task
+      tags:
+      - Tasks
   /api/tasks/{id}/replication:
     get:
       parameters:

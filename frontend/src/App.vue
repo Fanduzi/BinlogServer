@@ -355,6 +355,7 @@ note: if this file changes, update this header and frontend/README.md.
       :lease="detailLease"
       :checkpoint="checkpoint"
       :files="files"
+      :replay="replay"
       :runs-limited="detailRunsLimited"
       :events="events"
       :run-history-limit="runHistoryLimit"
@@ -515,7 +516,7 @@ const {
 
 const {
   detailVisible, detailTask, detailReplication, detailLease,
-  detailRuns, runHistoryLimit, checkpoint, events, files,
+  detailRuns, runHistoryLimit, checkpoint, events, files, replay,
   showDetail,
 } = useTaskDetail();
 
@@ -1678,6 +1679,53 @@ h1 {
   display: flex;
   justify-content: flex-end;
   margin-bottom: 10px;
+}
+
+.replay-set {
+  margin-bottom: 10px;
+}
+
+.replay-set-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.replay-set-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.replay-set-label strong {
+  font-size: 13px;
+}
+
+.replay-set-hint,
+.replay-set-empty {
+  color: var(--text-secondary, #374151);
+  font-size: 12px;
+}
+
+.replay-set-empty {
+  margin: 0;
+}
+
+.replay-set-command {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #e7e5e4);
+  border-radius: 8px;
+  background: var(--surface-soft, #f8f8f7);
+  color: var(--text, #111827);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .detail-panel .el-table {
