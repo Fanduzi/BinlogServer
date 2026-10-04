@@ -281,6 +281,10 @@ definitions:
   tasks.BinlogFile:
     properties:
       checksum:
+        description: |-
+          Checksum is match when the stored object is the same bytes as the sealed file.
+          mismatch means that comparison finished and the bytes differ.
+          Empty means the object HEAD did not finish. Empty is not verified.
         type: string
       created_at:
         type: string
@@ -309,11 +313,13 @@ definitions:
       uploaded_at:
         type: string
     type: object
-  tasks.ReplaySet:
+  tasks.PITRSet:
     properties:
       client:
         type: string
       client_hint:
+        type: string
+      command:
         type: string
       flavor:
         type: string
@@ -804,11 +810,10 @@ paths:
         gtid_set is included when that stored checkpoint has the same file and pos.
         With no local event, the stored checkpoint is returned. Epoch greater than
         1 rewinds pos to 4 only when the catalog has no row for that tail. A readable
-        binlog_files.file_path continues from the last complete event in that
-        directory. A checkpoint inside a sealed UPLOADED object is not rewound.
-        An unreadable open segment returns the stored checkpoint; Start then fails
-        with SEGMENT_NOT_ON_WORKER and does not open a new directory. 404 when
-        neither exists.
+        binlog_files.file_path continues from the last complete event in that directory.
+        A checkpoint inside a sealed UPLOADED object is not rewound. An unreadable
+        open segment returns the stored checkpoint; Start then fails with SEGMENT_NOT_ON_WORKER
+        and does not open a new directory. 404 when neither exists.
       parameters:
       - description: Task ID
         in: path
@@ -1007,27 +1012,45 @@ paths:
       - Cluster
   /api/tasks/{id}/replay:
     get:
-      description: One on-disk file_path per source index, ascending. When a sealed
+      description: 'One on-disk file_path per source index, ascending. When a sealed
         name and .open.e* share an index, the path is the highest-epoch open segment.
-        limit is the same inventory window as GET /files. client is mysqlbinlog or
-        mariadb-binlog from source.flavor.
+        Without stop_datetime, limit is the same inventory window as GET /files and
+        the body omits command. stop_datetime (UTC) selects the point-in-time window
+        instead of limit: paths cover events at or after optional start_datetime and
+        before stop_datetime, and command is the TZ=UTC client invocation. An empty
+        cover is 200 with empty paths and command. Invalid datetimes are 400.'
       parameters:
       - description: Task ID
         in: path
         name: id
         required: true
         type: string
-      - description: Inventory window limit (same as files)
+      - description: Inventory window limit (same as files). Ignored when stop_datetime
+          is set.
         in: query
         name: limit
         type: integer
+      - description: UTC stop time, YYYY-MM-DD HH:MM:SS or RFC3339. Required for the
+          point-in-time window.
+        in: query
+        name: stop_datetime
+        type: string
+      - description: Optional UTC start time. Requires stop_datetime.
+        in: query
+        name: start_datetime
+        type: string
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/tasks.ReplaySet'
+            $ref: '#/definitions/tasks.PITRSet'
+        "400":
+          description: invalid stop_datetime, invalid start_datetime, stop_datetime
+            is required, or start_datetime is after stop_datetime
+          schema:
+            type: string
         "404":
           description: Not Found
           schema:
@@ -1042,8 +1065,9 @@ paths:
   /api/tasks/{id}/replay/archive:
     get:
       description: 'USTAR archive whose members are the basenames from GET /api/tasks/{id}/replay
-        for the same limit, one per source index. A sealed name and .open.e* still
-        keep the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name}
+        for the same limit, one per source index. stop_datetime uses that route''s
+        point-in-time window instead of limit. A sealed name and .open.e* still keep
+        the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name}
         open rules: a local file wins, including *.open.e* while RUNNING or STOPPED;
         a missing local file is read only for a sealed UPLOADED row with a non-empty
         object_key. An empty selection is 200 and an empty tar. If any selected segment
@@ -1055,10 +1079,19 @@ paths:
         name: id
         required: true
         type: string
-      - description: Inventory window limit (same as replay)
+      - description: Inventory window limit (same as replay). Ignored when stop_datetime
+          is set.
         in: query
         name: limit
         type: integer
+      - description: UTC stop time. Same window as GET /api/tasks/{id}/replay.
+        in: query
+        name: stop_datetime
+        type: string
+      - description: Optional UTC start time. Requires stop_datetime.
+        in: query
+        name: start_datetime
+        type: string
       produces:
       - application/x-tar
       responses:
@@ -1067,7 +1100,7 @@ paths:
           schema:
             type: file
         "400":
-          description: invalid segment name
+          description: invalid segment name or invalid datetime
           schema:
             type: string
         "404":

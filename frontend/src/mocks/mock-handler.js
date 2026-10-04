@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, per-task resume checkpoints, GET /api/tasks/{id}/replay one path per source index, GET /api/tasks/{id}/replay/archive those basenames, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, per-task resume checkpoints, GET /api/tasks/{id}/replay one path per source index, the same route with stop_datetime returning a UTC point-in-time command, GET /api/tasks/{id}/replay/archive those basenames, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -553,6 +553,100 @@ function fileDiskBase(file) {
   return parts[parts.length - 1] || ((file && file.file_name) || "");
 }
 
+// Fixed spans for the healthy inventory. Go reads event headers; this mock only
+// places those two selected names so the Console drill can call the same query.
+const pitrSpanByName = {
+  "mysql-bin.000001": ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"],
+  "mysql-bin.000002.open.e4": ["2024-01-01T01:00:00Z", "2024-01-02T00:00:00Z"],
+};
+
+function parsePITRDatetime(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  const clock = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/);
+  if (clock) {
+    const year = Number(clock[1]);
+    const month = Number(clock[2]);
+    const day = Number(clock[3]);
+    const hour = Number(clock[4]);
+    const minute = Number(clock[5]);
+    const second = Number(clock[6]);
+    if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+    const parsed = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+    if (
+      parsed.getUTCFullYear() !== year ||
+      parsed.getUTCMonth() !== month - 1 ||
+      parsed.getUTCDate() !== day
+    ) {
+      return null;
+    }
+    return parsed;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(text)) {
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed;
+  }
+  return null;
+}
+
+function pitrClock(value) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${value.getUTCFullYear()}-${pad(value.getUTCMonth() + 1)}-${pad(value.getUTCDate())} ${pad(value.getUTCHours())}:${pad(value.getUTCMinutes())}:${pad(value.getUTCSeconds())}`;
+}
+
+function pitrQuery(query) {
+  const stopSet = query.has("stop_datetime");
+  const startSet = query.has("start_datetime");
+  if (!stopSet && !startSet) return { enabled: false };
+  if (!stopSet) return { error: "stop_datetime is required" };
+  const stop = parsePITRDatetime(query.get("stop_datetime"));
+  if (!stop) return { error: "invalid stop_datetime" };
+  let start = null;
+  if (startSet && String(query.get("start_datetime") || "").trim()) {
+    start = parsePITRDatetime(query.get("start_datetime"));
+    if (!start) return { error: "invalid start_datetime" };
+    if (start.getTime() > stop.getTime()) return { error: "start_datetime is after stop_datetime" };
+  }
+  return { enabled: true, start, stop };
+}
+
+function filterPITRPaths(paths, start, stop) {
+  return paths.filter((filePath) => {
+    const span = pitrSpanByName[fileDiskBase({ file_path: filePath })];
+    if (!span) return false;
+    const first = Date.parse(span[0]);
+    const last = Date.parse(span[1]);
+    if (!(first < stop.getTime())) return false;
+    if (start && last < start.getTime()) return false;
+    return true;
+  });
+}
+
+function shellToken(text) {
+  const value = String(text);
+  if (/[^A-Za-z0-9_./:@+-]/.test(value)) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+  }
+  return value;
+}
+
+function formatPITRCommand(client, paths, start, stop) {
+  if (!paths.length) return "";
+  const tokens = [];
+  if (start) tokens.push(`--start-datetime=${shellToken(pitrClock(start))}`);
+  tokens.push(`--stop-datetime=${shellToken(pitrClock(stop))}`);
+  paths.forEach((filePath) => tokens.push(shellToken(filePath)));
+  const lines = [];
+  if (client) lines.push(`TZ=UTC ${client} \\`);
+  tokens.forEach((token, index) => {
+    const indent = client || index > 0 ? "  " : "";
+    const cont = index === tokens.length - 1 ? "" : " \\";
+    lines.push(`${indent}${token}${cont}`);
+  });
+  return lines.join("\n");
+}
+
 function replayClient(flavor) {
   const value = String(flavor || "").trim().toLowerCase();
   if (value === "mysql") return { client: "mysqlbinlog", client_hint: "MySQL mysqlbinlog" };
@@ -883,10 +977,13 @@ export function handleMockRequest(input) {
   const replayArchiveMatch = path.match(/^\/api\/tasks\/([^/]+)\/replay\/archive$/);
   if (replayArchiveMatch && method === "GET") {
     const id = replayArchiveMatch[1];
+    const pitr = pitrQuery(query);
+    if (pitr.error) return { status: 400, body: pitr.error, contentType: "text/plain" };
     const task = state.detailsByID[id];
     if (!task) return { status: 404, body: "task not found", contentType: "text/plain" };
     const files = state.filesByID[id] || [];
-    const paths = selectReplayPaths(windowReplayFiles(files, replayLimit(query)));
+    let paths = selectReplayPaths(windowReplayFiles(files, pitr.enabled ? Number.MAX_SAFE_INTEGER : replayLimit(query)));
+    if (pitr.enabled) paths = filterPITRPaths(paths, pitr.start, pitr.stop);
     const names = paths.map((filePath) => fileDiskBase({ file_path: filePath })).filter(Boolean);
     return {
       status: 200,
@@ -899,12 +996,27 @@ export function handleMockRequest(input) {
   const replayMatch = path.match(/^\/api\/tasks\/([^/]+)\/replay$/);
   if (replayMatch && method === "GET") {
     const id = replayMatch[1];
+    const pitr = pitrQuery(query);
+    if (pitr.error) return { status: 400, body: pitr.error, contentType: "text/plain" };
     const task = state.detailsByID[id];
-    if (!task) return ok({ error: "task not found" }, 404);
+    if (!task) {
+      if (pitr.enabled) return { status: 404, body: "task not found", contentType: "text/plain" };
+      return ok({ error: "task not found" }, 404);
+    }
     const files = state.filesByID[id] || [];
-    const paths = selectReplayPaths(windowReplayFiles(files, replayLimit(query)));
+    let paths = selectReplayPaths(windowReplayFiles(files, pitr.enabled ? Number.MAX_SAFE_INTEGER : replayLimit(query)));
     const flavor = String(task.source?.flavor || "");
     const client = replayClient(flavor);
+    if (pitr.enabled) {
+      paths = filterPITRPaths(paths, pitr.start, pitr.stop);
+      return ok({
+        flavor,
+        client: client.client,
+        client_hint: client.client_hint,
+        paths,
+        command: formatPITRCommand(client.client, paths, pitr.start, pitr.stop),
+      });
+    }
     return ok({
       flavor,
       client: client.client,
