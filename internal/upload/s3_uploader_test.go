@@ -1,11 +1,12 @@
 // Package upload provides module-level functionality for upload.
-// input: local binlog files, object store credentials/config, upload retry context
-// output: object storage upload operations and upload status/error outcomes
-// pos: outbound storage adapter layer for sealed binlog artifact distribution
+// input: local binlog files, object store credentials/config, upload retry context, and an existing object key
+// output: object storage upload operations and a reader for one stored object at its size at open
+// pos: outbound storage adapter layer for sealed binlog upload and download
 // note: if this file changes, update this header and module README.md.
 package upload
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -345,6 +347,49 @@ func TestUploadFile_PropagatesDeadlineExceeded(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("UploadFile did not return after deadline exceeded")
+	}
+}
+
+func TestOpenObject_ReadsSizeAtOpen(t *testing.T) {
+	objectBody := []byte("sealed-object-bytes")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/binlog/prefix/cluster/mysql-bin.000001" {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Resource>` + r.URL.Path + `</Resource></Error>`))
+			return
+		}
+		w.Header().Set("ETag", `"test-etag"`)
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		w.Header().Set("Content-Length", strconv.Itoa(len(objectBody)))
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = w.Write(objectBody)
+	}))
+	defer server.Close()
+
+	uploader := newTestUploader(t, server.URL, false)
+	rc, size, err := uploader.OpenObject(context.Background(), "prefix/cluster/mysql-bin.000001")
+	if err != nil {
+		t.Fatalf("OpenObject returned error: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != int64(len(objectBody)) || !bytes.Equal(got, objectBody) {
+		t.Fatalf("size %d body %q", size, got)
+	}
+
+	_, _, err = uploader.OpenObject(context.Background(), "prefix/cluster/missing")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing object: %v", err)
+	}
+	if _, _, err := uploader.OpenObject(context.Background(), "  "); err == nil {
+		t.Fatal("expected error for empty object key")
 	}
 }
 
