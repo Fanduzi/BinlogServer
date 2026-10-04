@@ -107,7 +107,7 @@ DoD（完成定义）：
 5. 已提供手动补传入口：`POST /api/tasks/{id}/files/retry-upload`（按 `limit` 处理失败文件）。
 6. 已提供失败原因聚合：`GET /api/tasks/{id}/upload-failures/reasons`。
 7. 已提供补传可观测指标：`binlog_server_upload_retry_total`、`binlog_server_upload_retry_last_ts`。
-8. 封存文件上传成功后，用对象 HEAD 的 ETag 与本地封存文件对比（不超过 16MiB 为整文件 MD5，更大为与上传相同的 16MiB 分片 ETag）。结果写在文件清单 `checksum`：`match` 或 `mismatch`。`mismatch` 不是已校验，也不中断拉流。Console 任务文件表的「校验」列展示同一字段。
+8. 封存文件上传成功后，用对象 HEAD 的 ETag 与本地封存文件对比（不超过 16MiB 为整文件 MD5，更大为与上传相同的 16MiB 分片 ETag）。核对完成时 `checksum` 为 `match` 或 `mismatch`。`mismatch` 只表示字节不同，不是已校验，也不中断拉流。对象 HEAD 失败时 `checksum` 留空，行仍是 `UPLOADED`，空值不是 `match` 也不是 `mismatch`。Console 任务文件表的「校验」列展示同一字段。
 
 未完成：
 1. 自动补传队列（后台持续重试）。
