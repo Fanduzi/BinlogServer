@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"binlog_server/internal/binlog"
@@ -48,6 +49,10 @@ type MySQLRunner struct {
 	progressReporter ProgressReporter
 	newSyncer        func(replication.BinlogSyncerConfig) binlogSyncer
 	writerOpener     func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error)
+
+	retentionMu        sync.Mutex
+	retentionSkipNoted map[string]struct{}
+	retentionBlocked   map[string]int
 }
 
 type sourceMetaFetcher interface {
@@ -1144,6 +1149,12 @@ const retentionCatalogLimit = int(^uint(0) >> 1)
 // open retries because the local segment is still there.
 const objectPurgeFailed = "OBJECT_PURGE_FAILED"
 
+// retentionSkippedNotUploaded is the task event written when age retention
+// leaves an expired sealed file that has not been uploaded. The message names
+// the file and its upload_state. One event per file; later opens do not append
+// another for that same file.
+const retentionSkippedNotUploaded = "RETENTION_SKIPPED_NOT_UPLOADED"
+
 // retentionObjects decides which expired sealed file has a bucket object.
 // Checksum is not a reason to keep or skip the object: match, mismatch, and
 // an empty checksum are all UPLOADED rows. Empty is not match and not mismatch.
@@ -1153,6 +1164,8 @@ type retentionObjects struct {
 	standaloneKey func(fileName string) string
 	drop          func(fileName string) error
 	note          func(row tasks.BinlogFile) error
+	noteKept      func(name string)
+	announce      func(name, uploadState string)
 }
 
 // cleanupExpiredBinlogs 按保留天数清理过期本地文件（跳过当前活跃 open 文件和其它 open 分段）。
@@ -1165,13 +1178,34 @@ func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeF
 // cleanupTaskBinlogs 在打开本地文件时清理过期分段。
 // 已上传的封存分段先删对象和目录行，再删本地文件。对象删除失败时本地文件留下，
 // 错误以 OBJECT_PURGE_FAILED 返回，下一次打开文件会再试。
+// 配置了上传且有目录时，过期的 UPLOAD_FAILED / LOCAL_ONLY 封存文件和目录行留下，不返回错误。
 func (r *MySQLRunner) cleanupTaskBinlogs(ctx context.Context, task tasks.Task, dir, activeFileName, sourceServerUUID string, now time.Time) error {
-	return purgeExpiredBinlogs(ctx, dir, task.Storage.RetentionDays, now, activeFileName, func() (*retentionObjects, error) {
+	var kept []string
+	err := purgeExpiredBinlogs(ctx, dir, task.Storage.RetentionDays, now, activeFileName, func() (*retentionObjects, error) {
 		if r.objectDeleter == nil {
 			return nil, nil
 		}
-		return r.retentionObjects(ctx, task, sourceServerUUID)
+		objects, err := r.retentionObjects(ctx, task, sourceServerUUID)
+		if err != nil || objects == nil {
+			return objects, err
+		}
+		objects.noteKept = func(name string) {
+			kept = append(kept, name)
+		}
+		objects.announce = func(name, uploadState string) {
+			r.announceRetentionSkip(ctx, task.ID, name, uploadState)
+		}
+		return objects, nil
 	})
+	if err != nil {
+		return err
+	}
+	// Upload without a catalog still deletes the local file. Only the catalog
+	// path can tell that the sealed file never reached the bucket.
+	if r.objectDeleter != nil && r.fileMetaStore != nil {
+		r.setRetentionBlocked(task.ID, kept)
+	}
+	return nil
 }
 
 func (r *MySQLRunner) retentionObjects(ctx context.Context, task tasks.Task, sourceServerUUID string) (*retentionObjects, error) {
@@ -1270,7 +1304,9 @@ func purgeExpiredBinlogs(ctx context.Context, dir string, retentionDays int, now
 
 // release deletes the bucket object for one expired sealed file before the
 // local file is removed. removeLocal is false when the file must stay so the
-// next purge can retry. An open catalog row is not deleted.
+// next purge can retry. An open catalog row is not deleted. A sealed
+// UPLOAD_FAILED or LOCAL_ONLY catalog row stays too: that local file is the
+// only copy, and keeping it is not an error.
 func (o *retentionObjects) release(ctx context.Context, name string) (bool, error) {
 	if o == nil || o.deleter == nil {
 		return true, nil
@@ -1278,6 +1314,17 @@ func (o *retentionObjects) release(ctx context.Context, name string) (bool, erro
 	row, ok := o.byName[name]
 	if ok && isOpenCatalogRow(row) {
 		return false, nil
+	}
+	if ok {
+		if state, keep := unuploadedSealedState(row); keep {
+			if o.noteKept != nil {
+				o.noteKept(name)
+			}
+			if o.announce != nil {
+				o.announce(name, state)
+			}
+			return false, nil
+		}
 	}
 	key := ""
 	if ok && isUploadedRow(row) {
@@ -1319,6 +1366,86 @@ func isOpenCatalogRow(row tasks.BinlogFile) bool {
 
 func isUploadedRow(row tasks.BinlogFile) bool {
 	return strings.EqualFold(strings.TrimSpace(row.UploadState), "UPLOADED") && strings.TrimSpace(row.ObjectKey) != ""
+}
+
+// unuploadedSealedState reports the catalog upload_state when this sealed row
+// must stay on disk. UPLOADED, including a row with an empty object key, is
+// not in this set. Open rows are not in this set.
+func unuploadedSealedState(row tasks.BinlogFile) (string, bool) {
+	if isOpenCatalogRow(row) {
+		return "", false
+	}
+	state := strings.TrimSpace(row.UploadState)
+	switch strings.ToUpper(state) {
+	case "UPLOAD_FAILED", "LOCAL_ONLY":
+		return state, true
+	default:
+		return "", false
+	}
+}
+
+func (r *MySQLRunner) announceRetentionSkip(ctx context.Context, taskID, name, uploadState string) {
+	if r == nil || taskID == "" || name == "" {
+		return
+	}
+	key := taskID + "\x00" + name
+	r.retentionMu.Lock()
+	if _, ok := r.retentionSkipNoted[key]; ok {
+		r.retentionMu.Unlock()
+		return
+	}
+	r.retentionMu.Unlock()
+
+	writer, ok := r.fileMetaStore.(interface {
+		AppendEvent(context.Context, tasks.TaskEvent) error
+	})
+	if !ok {
+		return
+	}
+	if err := writer.AppendEvent(ctx, tasks.TaskEvent{
+		TaskID:  taskID,
+		Type:    retentionSkippedNotUploaded,
+		Message: name + " upload_state=" + uploadState,
+		Detail:  uploadState,
+		Time:    time.Now(),
+	}); err != nil {
+		return
+	}
+	r.retentionMu.Lock()
+	if r.retentionSkipNoted == nil {
+		r.retentionSkipNoted = map[string]struct{}{}
+	}
+	r.retentionSkipNoted[key] = struct{}{}
+	r.retentionMu.Unlock()
+}
+
+func (r *MySQLRunner) setRetentionBlocked(taskID string, names []string) {
+	if r == nil || taskID == "" {
+		return
+	}
+	r.retentionMu.Lock()
+	defer r.retentionMu.Unlock()
+	if r.retentionBlocked == nil {
+		r.retentionBlocked = map[string]int{}
+	}
+	r.retentionBlocked[taskID] = len(names)
+}
+
+// RetentionBlockedFiles is the current count of expired sealed files this
+// process is keeping because they are not uploaded. The count drops when a
+// later retention pass purges them. A process that has not run that pass
+// reports no entry for the task.
+func (r *MySQLRunner) RetentionBlockedFiles() map[string]int {
+	if r == nil {
+		return map[string]int{}
+	}
+	r.retentionMu.Lock()
+	defer r.retentionMu.Unlock()
+	out := make(map[string]int, len(r.retentionBlocked))
+	for id, n := range r.retentionBlocked {
+		out[id] = n
+	}
+	return out
 }
 
 // cleanupStaleOpenFiles 清理旧 epoch 遗留的 .open.e* 文件。

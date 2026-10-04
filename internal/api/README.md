@@ -6,7 +6,7 @@
 | `server.go` | HTTP server/router 组装、路由注册（含 `/healthz` 与 `/api/health`） |
 | `auth.go` | 路由级鉴权配置与认证中间件、ServerOption 定义 |
 | `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
-| `metrics_prometheus.go` | `/metrics` 采集与输出：一次 scrape 只读一份 `ListClusterObservation`，失败 5xx，不在 Collect 里再读一遍后记日志并吐空计数。`upload_retry` 计数包含后台对已封存失败文件的补传 |
+| `metrics_prometheus.go` | `/metrics` 采集与输出：一次 scrape 只读一份 `ListClusterObservation`，失败 5xx，不在 Collect 里再读一遍后记日志并吐空计数。`upload_retry` 计数包含后台对已封存失败文件的补传。`binlog_server_retention_blocked_files{task_id}` 是 runner 最近一次成功保留清理仍留下的过期未上传封存文件数，清理掉之后变为 0 |
 | `tracing.go` | HTTP 入站 tracing middleware（OTel span） |
 | `handlers_tasks.go` | 任务相关 API 处理（CRUD、批量创建、启动停止、`POST /api/tasks/{id}/adopt`、checkpoint 返回下次 Start 的 file/pos 与匹配时的 gtid_set、`GET /api/tasks/{id}/files/{name}` 分段字节（本地优先，缺失时可读已上传封存对象）、`GET /api/tasks/{id}/replay` 在带 `stop_datetime` 时返回 UTC 定点窗口和命令、`GET /api/tasks/{id}/replay/archive` 把同一回放窗口打成一个 ustar、source lookup 读集群观测同一份 store 抄本再 `SameSourceHost` 过滤、summary/dashboard 用状态与按源 GROUP BY 计数，任务行走 LIMIT/OFFSET） |
 | `handlers_cluster.go` | 集群观测：overview / workers 任务计数读 `ListClusterObservation`（有 store 时全库所有权抄本，不是任务页过滤，也不是启动内存名单）。无心跳的进程内主人 `standalone` 不计入 `worker_count`，overview 置 `single_process` |
