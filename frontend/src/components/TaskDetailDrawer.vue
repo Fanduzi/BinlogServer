@@ -78,6 +78,24 @@
 
         <section class="detail-panel">
           <h3><i class="fa-solid fa-file-lines" /> {{ $t('detail.filesAndUpload') }}</h3>
+          <div class="replay-set" data-testid="task-replay">
+            <div class="replay-set-head">
+              <div class="replay-set-label">
+                <strong>{{ $t('detail.replay') }}</strong>
+                <span class="replay-set-hint" data-testid="task-replay-hint">{{ replayHint }}</span>
+              </div>
+              <el-button
+                data-testid="task-replay-copy"
+                size="small"
+                :disabled="!replayCommand"
+                @click="copyReplay"
+              >
+                {{ $t('btn.copyReplay') }}
+              </el-button>
+            </div>
+            <pre v-if="replayCommand" class="replay-set-command" data-testid="task-replay-command">{{ replayCommand }}</pre>
+            <p v-else class="replay-set-empty" data-testid="task-replay-command">{{ $t('detail.replayEmpty') }}</p>
+          </div>
           <div class="detail-panel-toolbar">
             <el-button
               v-if="files.some((file) => file.upload_state === 'UPLOAD_FAILED')"
@@ -150,13 +168,18 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from "vue";
+import { useI18n } from "vue-i18n";
+import { ElMessage } from "element-plus";
+
+const props = defineProps({
   visible: { type: Boolean, required: true },
   task: { type: Object, default: null },
   replication: { type: Object, default: null },
   lease: { type: Object, default: null },
   checkpoint: { type: Object, default: null },
   files: { type: Array, default: () => [] },
+  replay: { type: Object, default: null },
   runsLimited: { type: Array, default: () => [] },
   events: { type: Array, default: () => [] },
   runHistoryLimit: { type: Number, default: 10 },
@@ -174,6 +197,43 @@ defineProps({
   isMobile: { type: Boolean, default: false },
 });
 defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload']);
+
+const { t } = useI18n();
+
+const replayHint = computed(() => {
+  const hint = String(props.replay?.client_hint || "").trim();
+  return hint || t("detail.replayFlavorUnset");
+});
+
+const replayCommand = computed(() => formatReplayCommand(props.replay));
+
+async function copyReplay() {
+  const text = replayCommand.value;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success(t("msg.replayCopied"));
+  } catch {
+    ElMessage.error(t("msg.replayCopyFailed"));
+  }
+}
+
+function formatReplayCommand(replay) {
+  const paths = Array.isArray(replay?.paths) ? replay.paths.filter(Boolean) : [];
+  if (paths.length === 0) return "";
+  const tokens = paths.map(shellToken);
+  const client = String(replay?.client || "").trim();
+  if (!client) return tokens.join("\n");
+  return `${client} \\\n${tokens.map((token) => `  ${token}`).join(" \\\n")}`;
+}
+
+function shellToken(path) {
+  const text = String(path);
+  if (/[^A-Za-z0-9_./:@+-]/.test(text)) {
+    return `'${text.replace(/'/g, `'\\''`)}'`;
+  }
+  return text;
+}
 
 function diskBase(row) {
   const path = row && row.file_path ? String(row.file_path) : "";

@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs and 5xx on cluster observation store errors
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, and GET /api/tasks/{id}/replay
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -133,6 +133,19 @@ func (s *Server) swaggerTaskEventsDoc() {}
 // @Failure 500 {string} string
 // @Router /api/tasks/{id}/files [get]
 func (s *Server) swaggerTaskFilesDoc() {}
+
+// swaggerTaskReplayDoc godoc
+// @Summary List the mysqlbinlog replay set for a task
+// @Description One on-disk file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. limit is the same inventory window as GET /files. client is mysqlbinlog or mariadb-binlog from source.flavor.
+// @Tags Tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Param limit query int false "Inventory window limit (same as files)"
+// @Success 200 {object} tasks.ReplaySet
+// @Failure 404 {string} string
+// @Failure 500 {string} string
+// @Router /api/tasks/{id}/replay [get]
+func (s *Server) swaggerTaskReplayDoc() {}
 
 // swaggerTaskRetryUploadDoc godoc
 // @Summary Retry failed upload binlog files

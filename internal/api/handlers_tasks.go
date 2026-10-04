@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, and 200 when POST adopt attaches source identity to that same id
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, and GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -509,6 +509,10 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, files)
 			return
 		}
+		if r.Method == http.MethodGet && action == "replay" {
+			s.handleTaskReplay(w, r, taskID)
+			return
+		}
 		if r.Method == http.MethodGet && action == "replication" {
 			task, err := s.tasks.GetTask(taskID)
 			if err != nil {
@@ -566,6 +570,41 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleTaskReplay returns one on-disk path per source index from the files
+// inventory window, plus the binlog client for source.flavor.
+func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID string) {
+	files, err := s.tasks.ListFiles(taskID, parseLimit(r, 200))
+	if err != nil {
+		if errors.Is(err, tasks.ErrTaskNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	task, err := s.tasks.GetTask(taskID)
+	if err != nil {
+		if errors.Is(err, tasks.ErrTaskNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	selected := tasks.SelectReplayFiles(files)
+	paths := make([]string, 0, len(selected))
+	for _, file := range selected {
+		paths = append(paths, file.FilePath)
+	}
+	client, hint := tasks.ReplayClient(task.Source.Flavor)
+	writeJSON(w, http.StatusOK, tasks.ReplaySet{
+		Flavor:     task.Source.Flavor,
+		Client:     client,
+		ClientHint: hint,
+		Paths:      paths,
+	})
 }
 
 // handleTaskRetryUpload 触发指定任务的失败文件重传并返回统计。
