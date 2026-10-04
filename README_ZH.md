@@ -216,7 +216,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ### 3. 本地保留与对象存储归档
 - 本地分段文件保存在 `{data_dir}/{task_id}/`。
-- 复制循环会自动定期清理超过 `storage.retention_days` 的过期已封存分段，正在写入的 `OPEN` 分段绝对不会被误删。
+- 复制循环打开文件时会清理超过 `storage.retention_days` 的过期已封存分段。正在写入的 `OPEN` 分段不会被删除。这次保留清理也不删除其它 open 分段，也不删它们的对象。已经上传的封存分段会在同一次清理里从桶中删除，并删掉对应的目录行。还在保留期内的分段留在桶里。对象删除失败时本地文件留下，任务进入重试，`last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再删一次。这次失败不改 `checksum`：`match`、`mismatch` 和空值都保持原样。空值不是 `match`，也不是 `mismatch`。不新增配置项，也不做 schema migration。
 - 配置对象存储凭据实现远端冷备归档：
   ```bash
   export BINLOG_SERVER_UPLOAD_ENDPOINT="s3.us-east-1.amazonaws.com"
@@ -228,7 +228,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
-- 本地保留清掉已经在对象存储里的封存分段后，用同一个回放窗口下载一个 tar。`GET /api/tasks/<task-id>/replay/archive` 的 `limit` 与 `GET /api/tasks/<task-id>/replay` 相同。响应是 `application/x-tar`，文件名是 `task-<task-id>-replay.tar`。每个成员是 basename，不是主机路径。本地文件优先；本地没有时，只有封存且 `UPLOADED`、`object_key` 非空的行才从对象存储读。没有可选分段时返回空 tar。任一选中分段打不开，响应是错误，不是半个 tar。解压后把这些 basename 交给 `mysqlbinlog` 或 `mariadb-binlog`。JSON 回放命令不变。
+- 用同一个回放窗口下载一个 tar。`GET /api/tasks/<task-id>/replay/archive` 的 `limit` 与 `GET /api/tasks/<task-id>/replay` 相同。响应是 `application/x-tar`，文件名是 `task-<task-id>-replay.tar`。每个成员是 basename，不是主机路径。本地文件优先；本地没有时，只有目录行仍是封存且 `UPLOADED`、`object_key` 非空才从对象存储读。保留清理会同时删掉该行和对象，所以已清理的分段不会出现在这个 tar 里。没有可选分段时返回空 tar。任一选中分段打不开，响应是错误，不是半个 tar。解压后把这些 basename 交给 `mysqlbinlog` 或 `mariadb-binlog`。JSON 回放命令不变。
   ```bash
   curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
     "http://localhost:8080/api/tasks/<task-id>/replay/archive?limit=200"

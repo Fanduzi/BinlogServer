@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: object storage upload operations, sealed ETag cases, and a reader for one stored object at its size at open
+// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, and deletion of one stored key including a missing object
 // pos: outbound storage adapter layer for sealed binlog upload and download
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -458,5 +458,125 @@ func TestSealedETag_SinglePartAtBoundaryAndMultipart(t *testing.T) {
 	want := hex.EncodeToString(all[:]) + "-3"
 	if got != want {
 		t.Fatalf("multipart etag %s, want %s", got, want)
+	}
+}
+
+func TestDeleteObject_RemovesKey(t *testing.T) {
+	var method atomic.Value
+	var requestPath atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method.Store(r.Method)
+		requestPath.Store(r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	uploader := newTestUploader(t, server.URL, false)
+	if err := uploader.DeleteObject(context.Background(), "prefix/cluster/mysql-bin.000001"); err != nil {
+		t.Fatalf("DeleteObject returned error: %v", err)
+	}
+	if method.Load() != http.MethodDelete {
+		t.Fatalf("method = %v", method.Load())
+	}
+	if requestPath.Load() != "/binlog/prefix/cluster/mysql-bin.000001" {
+		t.Fatalf("path = %v", requestPath.Load())
+	}
+}
+
+func TestDeleteObject_MissingObjectIsSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`))
+	}))
+	defer server.Close()
+
+	uploader := newTestUploader(t, server.URL, false)
+	if err := uploader.DeleteObject(context.Background(), "prefix/cluster/missing"); err != nil {
+		t.Fatalf("missing object returned error: %v", err)
+	}
+}
+
+func TestDeleteObject_PropagatesStorageError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	uploader := newTestUploader(t, server.URL, false)
+	err := uploader.DeleteObject(context.Background(), "prefix/cluster/mysql-bin.000001")
+	if err == nil {
+		t.Fatal("expected delete error")
+	}
+	if !strings.Contains(err.Error(), "delete failed") && !strings.Contains(err.Error(), "500") {
+		t.Fatalf("expected storage error, got %v", err)
+	}
+}
+
+func TestDeleteObject_EmptyObjectKeyReturnsError(t *testing.T) {
+	uploader := newTestUploader(t, "http://127.0.0.1:9", false)
+	if err := uploader.DeleteObject(context.Background(), "  "); err == nil {
+		t.Fatal("expected error for empty object key")
+	}
+}
+
+func TestDeleteObject_MinIORemovesObject(t *testing.T) {
+	endpoint := os.Getenv("BINLOG_E2E_MINIO_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("set BINLOG_E2E_MINIO_ENDPOINT to delete a real object")
+	}
+	bucket := os.Getenv("BINLOG_E2E_MINIO_BUCKET")
+	access := os.Getenv("BINLOG_E2E_MINIO_ACCESS_KEY")
+	secret := os.Getenv("BINLOG_E2E_MINIO_SECRET_KEY")
+	if bucket == "" || access == "" || secret == "" {
+		t.Fatal("MinIO endpoint is set but bucket or credentials are empty")
+	}
+	uploader, err := NewS3Uploader(S3Config{
+		Endpoint:  endpoint,
+		Bucket:    bucket,
+		AccessKey: access,
+		SecretKey: secret,
+		Region:    "us-east-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(access, secret, ""),
+		Secure: false,
+		Region: "us-east-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	exists, err := raw.BucketExists(ctx, bucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		if err := raw.MakeBucket(ctx, bucket, minio.MakeBucketOptions{Region: "us-east-1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := "e2e/retention-purge/" + strconv.FormatInt(time.Now().UnixNano(), 10) + "/mysql-bin.000001"
+	body := bytes.NewReader([]byte("sealed-segment-to-purge"))
+	if _, err := raw.PutObject(ctx, bucket, key, body, int64(body.Len()), minio.PutObjectOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := uploader.DeleteObject(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
+	if err == nil {
+		t.Fatal("object still exists after DeleteObject")
+	}
+	resp := minio.ToErrorResponse(err)
+	if resp.Code != "NoSuchKey" && resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("stat after delete: %v", err)
+	}
+	if err := uploader.DeleteObject(ctx, key); err != nil {
+		t.Fatalf("second delete of a missing object: %v", err)
 	}
 }

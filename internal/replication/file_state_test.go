@@ -67,7 +67,7 @@ func TestOpenBinlogWriter_KeepLocalSegmentsLeavesExistingFiles(t *testing.T) {
 		Epoch:             3,
 		KeepLocalSegments: true,
 		Storage:           tasks.Storage{RetentionDays: 7},
-	}, "mysql-bin.000004", 8)
+	}, "mysql-bin.000004", 8, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestOpenBinlogWriter_KeepLocalSegmentsLeavesExistingFiles(t *testing.T) {
 func TestFileState_OpenFileUsesEpochSuffix(t *testing.T) {
 	runner := NewMySQLRunner(t.TempDir())
 
-	file, _, path, err := runner.openBinlogWriter(context.Background(), tasks.Task{ID: "1", Epoch: 42}, "mysql-bin.000123", 4)
+	file, _, path, err := runner.openBinlogWriter(context.Background(), tasks.Task{ID: "1", Epoch: 42}, "mysql-bin.000123", 4, "")
 	if err != nil {
 		t.Fatalf("openBinlogWriter returned error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestFileState_OpenFilePublishesCurrentSegmentMetadata(t *testing.T) {
 	metaStore := &fileStateMetaStore{}
 	runner := NewMySQLRunner(t.TempDir(), WithFileMetaStore(metaStore))
 
-	file, _, path, err := runner.openBinlogWriter(context.Background(), tasks.Task{ID: "19", Epoch: 8}, "mysql-bin.000123", 21790)
+	file, _, path, err := runner.openBinlogWriter(context.Background(), tasks.Task{ID: "19", Epoch: 8}, "mysql-bin.000123", 21790, "")
 	if err != nil {
 		t.Fatalf("openBinlogWriter returned error: %v", err)
 	}
