@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, runs, and worker heartbeat views
+// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, runs, and worker heartbeat views
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -132,6 +132,25 @@ func (s *Scheduler) GetCheckpoint(ctx context.Context, taskID string) (binlog.Ch
 		return binlog.Checkpoint{}, false, nil
 	}
 	return s.checkpointReader.LoadCheckpoint(ctx, taskID)
+}
+
+// ResumePosition is the file, pos, and gtid_set the next Start continues from.
+// It reads the same open-segment cursor the runner uses, then the stored checkpoint.
+// GetCheckpoint stays the stored row and does not invent one from disk.
+func (s *Scheduler) ResumePosition(ctx context.Context, taskID string) (binlog.Checkpoint, bool, error) {
+	task, err := s.GetTask(taskID)
+	if err != nil {
+		return binlog.Checkpoint{}, false, err
+	}
+	stored, ok, err := s.GetCheckpoint(ctx, taskID)
+	if err != nil {
+		return binlog.Checkpoint{}, false, err
+	}
+	s.mu.Lock()
+	dataDir := s.dataDir
+	s.mu.Unlock()
+	resume, found := NextResumePosition(dataDir, task, stored, ok)
+	return resume, found, nil
 }
 
 // ListEvents 列出任务事件，limit<=0 时按默认值处理。

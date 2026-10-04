@@ -8,8 +8,8 @@
 |------|---------------|
 | `index.js` | 创建 i18n 实例并管理当前语言 |
 | `check-messages.js` | 用 `@intlify/message-compiler` 编译全部文案；生产态解析 `form.flavorHint`，拒绝会让嵌入式 `/ui/` 丢控件的 `@` 语法 |
-| `zh-CN.json` | 中文文案，包括启动中、租约降级、文件重建、全局/当前页筛选范围、source starting 计数、遗留目录「认领」，任务详情「复制回放命令」和「下载回放集」，以及文件表「下载」 |
-| `en.json` | 英文文案，包括 Starting Tasks、Lease Degraded、Rebuilding File、global/current-page filter scope、source Starting 文本、Flavor 的 mysql/mariadb 选项和 MariaDB 提示、leftover Adopt、Copy replay、Download replay set，以及文件表 Download |
+| `zh-CN.json` | 中文文案，包括启动中、租约降级、文件重建、全局/当前页筛选范围、source starting 计数、遗留目录「认领」，任务详情「起点」「续传」「复制回放命令」和「下载回放集」，以及文件表「下载」 |
+| `en.json` | 英文文案，包括 Starting Tasks、Lease Degraded、Rebuilding File、global/current-page filter scope、source Starting 文本、Flavor 的 mysql/mariadb 选项和 MariaDB 提示、leftover Adopt、Start、Resume、Copy replay、Download replay set，以及文件表 Download |
 
 ## Interfaces
 
@@ -25,3 +25,4 @@
 ## Update Rule
 
 - 文案键、语言资源或状态显示语义变化时，更新本文件。
+- 任务详情「起点」是配置的 mode，FILE_POS 带 file:pos，GTID 带 gtid_set。「续传」是下次 Start 的 file:pos，有 GTID 时附在后面。

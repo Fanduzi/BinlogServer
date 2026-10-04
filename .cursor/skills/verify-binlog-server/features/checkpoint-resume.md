@@ -33,8 +33,8 @@ Preconditions:
 
 ## Gotchas
 
-- A 404 checkpoint is the absent case only when meta is enabled and the task has never flushed. Without meta, every checkpoint GET is 404 and proves nothing about resume.
+- A 404 checkpoint means there is no stored checkpoint and no local open segment with a complete event. Without meta, a segment that has a complete event returns that source file and end log_pos. That is the position the next Start uses. A directory of non-binlog bytes is still 404.
 - Resume proof needs a source that actually accepts the dump. A closed port never writes `file` and `pos`.
-- A valid checkpoint overrides the create-time mode (`LATEST`, `FILE_POS`, or `GTID`) on the next start. Comparing only the task's `start` object will miss that.
+- A valid checkpoint overrides the create-time mode (`LATEST`, `FILE_POS`, or `GTID`) on the next start when the task directory has no complete open-segment event. A local complete event overrides that checkpoint's file and pos. The task `start` object stays the configured identity. Comparing only `start.mode` misses the resume file:pos, and misses `gtid_set` when the stored checkpoint matches that file and pos.
 - Cluster takeover (epoch greater than 1) rebuilds the current file from position 4. A single-process standalone run does not take that path.
 - `GET /api/tasks/<id>/checkpoint` is GET. POST returns 405.

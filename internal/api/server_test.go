@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the replay set beside that inventory, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the resume file/pos and matching gtid_set, the replay set beside that inventory, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -1021,6 +1021,129 @@ func TestTaskAPI_GetCheckpoint(t *testing.T) {
 	}
 	if _, ok := raw["pos"]; !ok {
 		t.Fatalf("expected lowercase key 'pos', body=%s", resp.Body.String())
+	}
+}
+
+func writeResumeSegment(t *testing.T, path string, logPos byte) {
+	t.Helper()
+	raw := []byte{0xfe, 'b', 'i', 'n'}
+	hdr := make([]byte, 19)
+	hdr[9] = 19
+	hdr[13] = logPos
+	raw = append(raw, hdr...)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTaskAPI_ResumeIdentity 验证停止后的续传位点：本地完整事件优先，checkpoint 的 gtid_set 在 file+pos 一致时一并返回。
+func TestTaskAPI_ResumeIdentity(t *testing.T) {
+	dir := t.TempDir()
+	gtid := "24bc785e-9a61-11e1-8a5d-080027635ef5:1-20"
+	reader := &fakeCheckpointReader{checkpoints: map[string]binlog.Checkpoint{}}
+	handler := NewServer(tasks.NewScheduler(tasks.WithDataDir(dir), tasks.WithCheckpointReader(reader)))
+
+	create := func(body string) tasks.Task {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("create status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		var task tasks.Task
+		if err := json.Unmarshal(resp.Body.Bytes(), &task); err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	latest := create(`{"name":"latest","cluster_key":"latest-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"},"start":{"mode":"LATEST"}}`)
+	filePos := create(`{"name":"filepos","cluster_key":"filepos-key","source":{"host":"127.0.0.1","port":3307,"user":"repl","password":"secret"},"start":{"mode":"FILE_POS","file":"mysql-bin.000008","pos":4}}`)
+	gtidTask := create(`{"name":"gtid","cluster_key":"gtid-key","source":{"host":"127.0.0.1","port":3308,"user":"repl","password":"secret"},"start":{"mode":"GTID","gtid_set":"` + gtid + `"}}`)
+	if filePos.Start.Mode != tasks.StartModeFilePos || filePos.Start.File != "mysql-bin.000008" || filePos.Start.Pos != 4 {
+		t.Fatalf("configured FILE_POS: %+v", filePos.Start)
+	}
+	if gtidTask.Start.Mode != tasks.StartModeGTID || gtidTask.Start.GTIDSet != gtid {
+		t.Fatalf("configured GTID: %+v", gtidTask.Start)
+	}
+
+	taskDir := filepath.Join(dir, latest.ID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeResumeSegment(t, filepath.Join(taskDir, "mysql-bin.000003.open.e1"), 154)
+
+	getCheckpoint := func(id string) *httptest.ResponseRecorder {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/tasks/"+id+"/checkpoint", nil))
+		return resp
+	}
+	decodeCheckpoint := func(resp *httptest.ResponseRecorder) binlog.Checkpoint {
+		t.Helper()
+		if resp.Code != http.StatusOK {
+			t.Fatalf("checkpoint status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		var cp binlog.Checkpoint
+		if err := json.Unmarshal(resp.Body.Bytes(), &cp); err != nil {
+			t.Fatal(err)
+		}
+		return cp
+	}
+
+	cp := decodeCheckpoint(getCheckpoint(latest.ID))
+	if cp.File != "mysql-bin.000003" || cp.Pos != 154 || cp.GTIDSet != "" {
+		t.Fatalf("standalone resume: %+v", cp)
+	}
+	taskResp := httptest.NewRecorder()
+	handler.ServeHTTP(taskResp, httptest.NewRequest(http.MethodGet, "/api/tasks/"+latest.ID, nil))
+	var got tasks.Task
+	if err := json.Unmarshal(taskResp.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Start.Mode != tasks.StartModeLatest || got.Start.File != "" {
+		t.Fatalf("configured start changed: %+v", got.Start)
+	}
+
+	reader.checkpoints[latest.ID] = binlog.Checkpoint{File: "mysql-bin.000003", Pos: 154, GTIDSet: gtid}
+	cp = decodeCheckpoint(getCheckpoint(latest.ID))
+	if cp.File != "mysql-bin.000003" || cp.Pos != 154 || cp.GTIDSet != gtid {
+		t.Fatalf("gtid not attached: %+v", cp)
+	}
+	if !strings.Contains(getCheckpoint(latest.ID).Body.String(), `"gtid_set"`) {
+		t.Fatal("response omitted gtid_set")
+	}
+
+	reader.checkpoints[latest.ID] = binlog.Checkpoint{File: "mysql-bin.000099", Pos: 4, GTIDSet: gtid}
+	cp = decodeCheckpoint(getCheckpoint(latest.ID))
+	if cp.File != "mysql-bin.000003" || cp.Pos != 154 || cp.GTIDSet != "" {
+		t.Fatalf("local event should win: %+v", cp)
+	}
+
+	if err := os.Remove(filepath.Join(taskDir, "mysql-bin.000003.open.e1")); err != nil {
+		t.Fatal(err)
+	}
+	cp = decodeCheckpoint(getCheckpoint(latest.ID))
+	if cp.File != "mysql-bin.000099" || cp.Pos != 4 || cp.GTIDSet != gtid {
+		t.Fatalf("stored checkpoint: %+v", cp)
+	}
+
+	delete(reader.checkpoints, latest.ID)
+	writeResumeSegment(t, filepath.Join(taskDir, "mysql-bin.000003.open.e1"), 0)
+	missing := getCheckpoint(latest.ID)
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), "checkpoint not found") {
+		t.Fatalf("empty event status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	diskDir := filepath.Join(dir, "9")
+	if err := os.MkdirAll(diskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeResumeSegment(t, filepath.Join(diskDir, "mysql-bin.000004.open.e1"), 200)
+	cp = decodeCheckpoint(getCheckpoint("9"))
+	if cp.File != "mysql-bin.000004" || cp.Pos != 200 || cp.GTIDSet != "" {
+		t.Fatalf("disk scan resume: %+v", cp)
 	}
 }
 

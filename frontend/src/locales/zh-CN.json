@@ -231,7 +231,7 @@
     "replicationStatus": "复制状态",
     "delay": "延迟",
     "leaseStatus": "Lease 状态",
-    "checkpoint": "当前 Checkpoint",
+    "checkpoint": "续传",
     "errorReason": "异常原因",
     "alertThreshold": "告警阈值",
     "lastPosition": "最近位点",
@@ -244,11 +244,11 @@
     "objectKey": "对象键",
     "on": "开启",
     "off": "关闭",
-    "noCheckpoint": "暂无",
+    "noCheckpoint": "暂无，下次 Start 使用起点",
     "seconds": "秒",
     "clusterKey": "Cluster Key",
     "source": "源库",
-    "startMode": "起点模式"
+    "startMode": "起点"
   },
   "source": {
     "lookupTitle": "源库反查",

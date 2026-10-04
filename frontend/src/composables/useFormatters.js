@@ -1,5 +1,5 @@
 // input: dashboard time helpers, i18n, locale; optional single-task lease override for the detail drawer
-// output: label/tag/format helper functions used in template
+// output: label/tag/format helper functions used in template, including resume file:pos and GTID
 // pos: presentation utility composable; list lease risk uses the task copy, not GET /lease
 // note: if this file changes, update this header and frontend/src/composables/README.md
 import { useI18n } from "vue-i18n";
@@ -65,9 +65,12 @@ export function useFormatters({ toTimeMs, nowRefMs, currentLocale }) {
 
   function formatCheckpoint(cp) {
     if (!cp) return t("detail.noCheckpoint");
-    const file = cp.file || cp.File || cp.file_name || cp.FileName || cp.binlog_file || cp.BinlogFile || "-";
+    const file = cp.file || cp.File || cp.file_name || cp.FileName || cp.binlog_file || cp.BinlogFile || "";
+    if (!file) return t("detail.noCheckpoint");
     const pos = cp.pos ?? cp.Pos ?? cp.position ?? cp.Position ?? cp.binlog_pos ?? cp.BinlogPos ?? 0;
-    return `${file}:${pos}`;
+    const gtid = String(cp.gtid_set || cp.GTIDSet || cp.gtid || "").trim();
+    const base = `${file}:${pos}`;
+    return gtid ? `${base} GTID ${gtid}` : base;
   }
 
   function formatReplicationReason(rep) {

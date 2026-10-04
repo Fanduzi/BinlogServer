@@ -1,5 +1,5 @@
 // input: shared frontend mock scenario data from src/mocks plus local test type aliases
-// output: backward-compatible scenario exports for Playwright E2E fixtures
+// output: backward-compatible scenario exports for Playwright E2E fixtures, including resume-identity
 // pos: test-side re-export shim for frontend shared mock scenarios
 // note: if this file changes, update this header and frontend/tests/e2e/fixtures/README.md.
 
@@ -18,6 +18,7 @@ export type MockScenario =
   | 'control-plane-down-worker-running'
   | 'single-process'
   | 'disk-leftover'
+  | 'resume-identity'
 
 export interface MockTaskRow {
   task: any

@@ -1,5 +1,5 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
-// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, a leftover directory beside a catalog task, a sealed-plus-open replay inventory, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
+// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, a leftover directory beside a catalog task, a stopped-task resume identity, a sealed-plus-open replay inventory, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -55,6 +55,7 @@ export const mockScenarioNames = [
   "control-plane-down-worker-running",
   "single-process",
   "disk-leftover",
+  "resume-identity",
 ];
 
 export const mockScenarios = {
@@ -810,6 +811,86 @@ export const mockScenarios = {
       worker_count: 5,
       running_task_count: 10,
       leased_task_count: 12,
+    },
+  },
+  "resume-identity": {
+    summary: {
+      total: 3,
+      running: 0,
+      retry_backoff: 0,
+      stopped: 3,
+      failed: 0,
+      normal: 0,
+      delayed: 0,
+      abnormal: 0,
+    },
+    tasks: [
+      {
+        task: buildTask("41", {
+          name: "latest-stopped",
+          state: "STOPPED",
+          owner_worker_id: "",
+          epoch: 0,
+          start: { mode: "LATEST" },
+        }),
+        replication: buildReplication({
+          status: "IDLE",
+          delay_seconds: 0,
+          has_progress: false,
+          last_event_file: "mysql-bin.000003",
+          last_event_pos: 154,
+          reason: "TASK_STOPPED",
+        }),
+        checkpoint: {
+          file: "mysql-bin.000003",
+          pos: 154,
+          gtid_set: "24bc785e-9a61-11e1-8a5d-080027635ef5:1-20",
+        },
+      },
+      {
+        task: buildTask("42", {
+          name: "filepos-stopped",
+          state: "STOPPED",
+          owner_worker_id: "",
+          epoch: 0,
+          start: { mode: "FILE_POS", file: "mysql-bin.000008", pos: 128 },
+        }),
+        replication: buildReplication({
+          status: "IDLE",
+          delay_seconds: 0,
+          has_progress: false,
+          last_event_file: "",
+          last_event_pos: 0,
+          reason: "TASK_STOPPED",
+        }),
+        checkpoint: null,
+      },
+      {
+        task: buildTask("43", {
+          name: "gtid-stopped",
+          state: "STOPPED",
+          owner_worker_id: "",
+          epoch: 0,
+          start: { mode: "GTID", gtid_set: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100" },
+        }),
+        replication: buildReplication({
+          status: "IDLE",
+          delay_seconds: 0,
+          has_progress: false,
+          last_event_file: "mysql-bin.000011",
+          last_event_pos: 88,
+          reason: "TASK_STOPPED",
+        }),
+        checkpoint: { file: "mysql-bin.000011", pos: 88 },
+      },
+    ],
+    sources: [],
+    workers: [],
+    clusterOverview: {
+      task_count: 3,
+      worker_count: 0,
+      running_task_count: 0,
+      leased_task_count: 0,
     },
   },
 };

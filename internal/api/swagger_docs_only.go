@@ -101,6 +101,7 @@ func (s *Server) swaggerTaskStopDoc() {}
 
 // swaggerTaskCheckpointDoc godoc
 // @Summary Get task checkpoint
+// @Description Returns the file, pos, and gtid_set the next Start continues from. A local open segment with a complete event wins over the stored checkpoint. gtid_set is included when that stored checkpoint has the same file and pos. With no local event, the stored checkpoint is returned, and epoch greater than 1 rewinds pos to 4. 404 when neither exists.
 // @Tags Tasks
 // @Produce json
 // @Param id path string true "Task ID"

@@ -8,7 +8,7 @@
 |------|---------------|
 | `MetricGrid.vue` | 渲染任务指标卡；`starting` 与 `running` 使用不同字段和 quick-filter 映射 |
 | `NavPane.vue` | 多工作区导航与数量徽标 |
-| `TaskDetailDrawer.vue` | 任务详情、状态和操作入口。遗留目录显示「认领」，目录任务显示「编辑」。文件区显示回放命令并复制 `replay.paths`，旁边发出 `download-replay`。文件表每一行发出 `download-file`，名字是该行磁盘文件名 |
+| `TaskDetailDrawer.vue` | 任务详情、状态和操作入口。基础信息显示配置起点（`LATEST` / `FILE_POS file:pos` / `GTID gtid_set`）和续传 `file:pos`（checkpoint 的 `gtid_set` 在 file+pos 一致时附上）。遗留目录显示「认领」，目录任务显示「编辑」。文件区显示回放命令并复制 `replay.paths`，旁边发出 `download-replay`。文件表每一行发出 `download-file`，名字是该行磁盘文件名 |
 | `AppHeader.vue` | 页面标题与刷新/创建/设置操作 |
 | `AlertBanner.vue` | 顶层认证/告警提示 |
 | `TaskCreateDialog.vue` / `BatchCreateDialog.vue` | 单任务、目录任务编辑与遗留目录认领表单。Flavor 是 `mysql` / `mariadb` 下拉，默认 mysql；MariaDB 源必须选 mariadb。认领的默认起点不传 `start`，不会启动复制 |
