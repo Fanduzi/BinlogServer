@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, runs, and worker heartbeat views
+// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, and worker heartbeat views
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -150,6 +150,21 @@ func (s *Scheduler) ResumePosition(ctx context.Context, taskID string) (binlog.C
 	dataDir := s.dataDir
 	s.mu.Unlock()
 	resume, found := NextResumePosition(dataDir, task, stored, ok)
+	if task.Epoch > 1 && !task.KeepLocalSegments && s.fileStore != nil {
+		readCtx, cancel := s.withReadTimeout(ctx)
+		files, err := s.fileStore.ListBinlogFiles(readCtx, taskID, segmentInventoryLimit)
+		cancel()
+		if err != nil {
+			return binlog.Checkpoint{}, false, err
+		}
+		decision := ResolveTakeover(dataDir, task, stored, ok, files)
+		if decision.Missing != "" && ok && stored.File != "" && stored.Pos > 0 {
+			return stored, true, nil
+		}
+		if decision.Apply {
+			return decision.Checkpoint, true, nil
+		}
+	}
 	return resume, found, nil
 }
 

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner/source failures and stable operator error codes
-// output: typed permanent/retryable source errors and the SOURCE_UNREACHABLE budget predicate
+// output: typed permanent/retryable source errors, the SOURCE_UNREACHABLE budget predicate, and SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker
 // pos: shared operator-error types used by scheduler retry policy and source probing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -18,6 +18,9 @@ const (
 	CodeSourceIdentityUnavailable = "SOURCE_IDENTITY_UNAVAILABLE"
 	// CodeInvalidRequest is a create/update validation failure.
 	CodeInvalidRequest = "INVALID_REQUEST"
+	// CodeSegmentNotOnWorker means takeover cannot read the previous worker's segment.
+	// The task stays FAILED until that file is readable here.
+	CodeSegmentNotOnWorker = "SEGMENT_NOT_ON_WORKER"
 )
 
 // RetryableSourceError is a source failure that may recover without operator action.

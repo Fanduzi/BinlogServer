@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: scheduler stop/start, in-memory lease, optional checkpoint store, and a scripted binlog stream
-// output: proof that stop then start appends source events from the previous durable end for standalone and catalog tasks, that mysqlbinlog or the binlog parser can read that boundary, that adopt and empty-disk takeover stay on their existing positions, and that kill-equivalent adopt resumes the open segment as one readable binlog
+// output: proof that stop then start appends source events from the previous durable end for standalone and catalog tasks, that mysqlbinlog or the binlog parser can read that boundary, that adopt keeps its saved position, that empty-disk takeover does not rebuild from position 4, and that kill-equivalent adopt resumes the open segment as one readable binlog
 // pos: operator-path regression for contiguous resume after stop and after kill-then-adopt
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -230,7 +231,7 @@ func TestResumeAtTipStillReportsAtTip(t *testing.T) {
 	}
 }
 
-func TestTakeoverWithoutLocalSegmentStillRebuildsFromPos4(t *testing.T) {
+func TestTakeoverWithoutLocalSegmentDoesNotRebuildFromPos4(t *testing.T) {
 	dir := t.TempDir()
 	streamer := &fakeStreamer{results: []streamResult{{err: context.Canceled}}}
 	syncer := &fakeSyncer{streamer: streamer}
@@ -243,11 +244,15 @@ func TestTakeoverWithoutLocalSegmentStillRebuildsFromPos4(t *testing.T) {
 	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
 	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
 	task.Epoch = 2
-	if err := runner.Run(context.Background(), task); err != nil {
-		t.Fatalf("Run: %v", err)
+	err := runner.Run(context.Background(), task)
+	if err == nil || !tasks.IsPermanent(err) || !strings.Contains(err.Error(), "SEGMENT_NOT_ON_WORKER") || !strings.Contains(err.Error(), "mysql-bin.000123") {
+		t.Fatalf("empty-disk takeover err=%v", err)
 	}
-	if syncer.startPos.Name != "mysql-bin.000123" || syncer.startPos.Pos != 4 {
-		t.Fatalf("empty-disk takeover started at %+v, want mysql-bin.000123:4", syncer.startPos)
+	if syncer.startPosCalls != 0 {
+		t.Fatalf("empty-disk takeover started at %+v", syncer.startPos)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, task.ID)); !os.IsNotExist(statErr) {
+		t.Fatalf("fresh directory: %v", statErr)
 	}
 }
 

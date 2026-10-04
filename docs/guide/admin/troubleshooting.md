@@ -54,6 +54,7 @@
 | `server_uuid mismatch` | server_id 冲突 | 检查 server_id 配置 |
 | `lease acquire failed` | 租约被其他 worker 持有 | 正常现象，或检查是否有重复 worker |
 | `checkpoint save failed` | 无法保存位点 | 检查元数据库连接 |
+| `SEGMENT_NOT_ON_WORKER` | 租约已经到这台 worker，分段目录还在死掉的 worker 上。`last_error` 里的路径就是 `binlog_files.file_path`，本机读不到 | 把该路径挂到这台 worker，或把分段拷过来，再 `POST /api/tasks/{id}/start`。不要在新目录上从位置 4 重拉。checkpoint 已在 `UPLOADED` 对象里时任务不会停在这个错误，会从对象续。见部署指南 6.3 第 2 节 |
 | `api.auth.enabled=false cannot protect` | 鉴权未启用但尝试保护路由 | 设置 `api.auth.enabled=true` 或关闭保护 |
 | `bearer_token is required when protection is enabled` | 启用保护但未配置凭证 | 配置 `bearer_token` 或 `api_key` |
 | `http.*.read_timeout_sec must be > 0` | 超时参数配置非法 | 确保所有超时参数 > 0 |

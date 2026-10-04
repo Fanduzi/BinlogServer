@@ -56,32 +56,16 @@ func TestEffectiveStart_NoCheckpoint(t *testing.T) {
 	}
 }
 
-// TestRebuildCurrentFile_UsesCheckpointFileFromPos4OnTakeover 验证相关行为。
-func TestRebuildCurrentFile_UsesCheckpointFileFromPos4OnTakeover(t *testing.T) {
-	start := tasks.StartConfig{
-		Mode: tasks.StartModeFilePos,
-		File: "mysql-bin.000100",
-		Pos:  4,
-	}
+// TestTakeoverWithoutReadableSegmentDoesNotStartAtPos4 验证相关行为。
+func TestTakeoverWithoutReadableSegmentDoesNotStartAtPos4(t *testing.T) {
 	cp := binlog.Checkpoint{
-		File: "mysql-bin.000123",
-		Pos:  456,
-	}
-
-	got, rebuilding := effectiveStartForTakeover(tasks.Task{Epoch: 2}, start, cp, true)
-	if !rebuilding {
-		t.Fatal("expected rebuild_current_file mode for takeover")
-	}
-	if got.Mode != tasks.StartModeFilePos || got.File != "mysql-bin.000123" || got.Pos != 4 {
-		t.Fatalf("unexpected takeover rebuild start: %+v", got)
-	}
-
-	shared, ok := tasks.NextResumePosition(t.TempDir(), tasks.Task{ID: "1", Epoch: 2}, binlog.Checkpoint{
-		File:    cp.File,
-		Pos:     cp.Pos,
+		File:    "mysql-bin.000123",
+		Pos:     456,
 		GTIDSet: "uuid:1-9",
-	}, true)
-	if !ok || shared.File != got.File || shared.Pos != got.Pos || shared.GTIDSet != "uuid:1-9" {
-		t.Fatalf("resume position drifted from takeover start: %+v", shared)
+	}
+	task := tasks.Task{ID: "1", Epoch: 2}
+	decision := tasks.ResolveTakeover(t.TempDir(), task, cp, true, nil)
+	if decision.Apply || decision.Missing != cp.File {
+		t.Fatalf("empty catalog must name the missing file, got %+v", decision)
 	}
 }
