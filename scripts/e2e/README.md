@@ -160,7 +160,7 @@ make e2e-topology-check
 2. 创建并启动任务，确认 checkpoint 已建立。
 3. 停止 minio，写入并 rotate，触发 `UPLOAD_FAILED` 文件记录。
 4. 继续写入源库，确认 checkpoint 仍持续推进（best-effort 语义不变）。
-5. 恢复 minio，不调用补传 API，等待后台重试把已封存的 `UPLOAD_FAILED` 变成 `UPLOADED`。服务日志里要有 `background upload retry`。open 分段不能是 `UPLOADED`。
+5. 恢复 minio，不调用补传 API，等待后台重试把已封存的 `UPLOAD_FAILED` 变成 `UPLOADED`。服务日志里要有 `background upload retry`。`state=OPEN` 或路径里带 `.open.e` 的分段不能是 `UPLOADED`。
 6. 断言封存文件的 `checksum` 为 `match`。
 7. 对同一个 MinIO，把与封存文件等长但内容不同的对象写入后，`TestApplySealedUpload_MinIOChecksum` 断言 `checksum` 为 `mismatch` 且调用方不返回错误；匹配的上传（含大于 16MiB 的分片对象）仍为 `match`。
 8. 再次写入并确认 checkpoint 继续推进。

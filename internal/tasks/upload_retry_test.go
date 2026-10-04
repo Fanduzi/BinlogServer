@@ -510,8 +510,9 @@ func TestScheduler_BackgroundUploadRetryFlipsSealedFailureWithoutManualAPI(t *te
 		},
 		{
 			TaskID:      task.ID,
-			FileName:    "mysql-bin.000051.open.e1",
+			FileName:    "mysql-bin.000051",
 			FilePath:    writeRetryTestFile(t, tmpDir, "mysql-bin.000051.open.e1"),
+			State:       "OPEN",
 			SealedAt:    time.Now(),
 			UploadState: "UPLOAD_FAILED",
 			ObjectKey:   openKey,
@@ -577,7 +578,7 @@ func TestScheduler_BackgroundUploadRetryFlipsSealedFailureWithoutManualAPI(t *te
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	openFile, ok := store.get(task.ID, "mysql-bin.000051.open.e1")
+	openFile, ok := store.get(task.ID, "mysql-bin.000051")
 	if !ok || openFile.UploadState != "UPLOAD_FAILED" {
 		t.Fatalf("open segment must stay UPLOAD_FAILED, ok=%v state=%s", ok, openFile.UploadState)
 	}
