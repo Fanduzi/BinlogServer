@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts; store list errors stay 5xx instead of empty task_state_count
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts and binlog_server_retention_blocked_files; store list errors stay 5xx instead of empty task_state_count
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -31,6 +31,7 @@ type apiMetricsCollector struct {
 	uploadFailuresTotalDesc *prometheus.Desc
 	uploadRetryTotalDesc    *prometheus.Desc
 	uploadRetryLastTsGauge  *prometheus.Desc
+	retentionBlockedDesc    *prometheus.Desc
 }
 
 func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiMetricsCollector {
@@ -79,6 +80,12 @@ func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiM
 			nil,
 			nil,
 		),
+		retentionBlockedDesc: prometheus.NewDesc(
+			"binlog_server_retention_blocked_files",
+			"Expired sealed binlog files kept because they are not uploaded yet.",
+			[]string{"task_id"},
+			nil,
+		),
 	}
 }
 
@@ -90,6 +97,7 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.uploadFailuresTotalDesc
 	ch <- c.uploadRetryTotalDesc
 	ch <- c.uploadRetryLastTsGauge
+	ch <- c.retentionBlockedDesc
 }
 
 func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -173,6 +181,20 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.uploadRetryTotalDesc, prometheus.CounterValue, float64(retryMetrics.Failed), "failed")
 	ch <- prometheus.MustNewConstMetric(c.uploadRetryTotalDesc, prometheus.CounterValue, float64(retryMetrics.Skipped), "skipped")
 	ch <- prometheus.MustNewConstMetric(c.uploadRetryLastTsGauge, prometheus.GaugeValue, float64(retryMetrics.LastTs))
+
+	blocked := map[string]int{}
+	if reporter, ok := c.tasks.(interface{ RetentionBlockedFiles() map[string]int }); ok {
+		if counts := reporter.RetentionBlockedFiles(); counts != nil {
+			blocked = counts
+		}
+	}
+	if len(items) == 0 {
+		ch <- prometheus.MustNewConstMetric(c.retentionBlockedDesc, prometheus.GaugeValue, 0, "")
+		return
+	}
+	for _, task := range items {
+		ch <- prometheus.MustNewConstMetric(c.retentionBlockedDesc, prometheus.GaugeValue, float64(blocked[task.ID]), task.ID)
+	}
 }
 
 func countUploadFailures(taskSvc taskService, items []tasks.Task) int64 {

@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- With object storage configured and a catalog (`meta_dsn`), age retention no longer deletes an expired sealed file whose row is `UPLOAD_FAILED` or `LOCAL_ONLY`. The local file and the catalog row stay. That file is the only copy until it uploads. Replication keeps running. This does not set `last_error` and does not enter `RETRY_BACKOFF`. Each kept file appends one task event `RETENTION_SKIPPED_NOT_UPLOADED`. The message names the file and its `upload_state`. Opening another binlog file does not append that event again for the same file while this process keeps running. `GET /metrics` on the process that runs retention exposes gauge `binlog_server_retention_blocked_files{task_id}`: how many of those expired files the latest successful retention pass is still keeping. The gauge drops when a later pass deletes them. After a restart it stays 0 until the next file open runs retention again. After the row becomes `UPLOADED`, the next retention pass deletes the object, then the catalog row, then the local file, as it does today. `OBJECT_PURGE_FAILED` is unchanged. Already-`UPLOADED` rows are unchanged. With upload not configured, local retention is unchanged. Standalone without `meta_dsn` still deletes the local sealed file by age, because there is no catalog row to show that it never uploaded. A control-plane-only process does not run retention, so that gauge stays 0 there; the task event is still on `GET /api/tasks/{id}/events`. No new config key. No schema migration.
+
 ## [v0.5.27] - 2026-10-05
 
 ### Added

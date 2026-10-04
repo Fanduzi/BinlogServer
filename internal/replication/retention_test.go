@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: local segment files, retention clock, catalog rows, and an object deleter
-// output: proof that retention deletes an expired uploaded object, keeps a segment inside retention and an open segment, and leaves the local file plus OBJECT_PURGE_FAILED when the object delete fails without rewriting checksum
+// output: proof that retention deletes an expired uploaded object, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when the object delete fails without rewriting checksum, and keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured
 // pos: retention purge coverage for the replication file-open path
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -201,8 +201,20 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 	if _, err := os.Stat(emptyChecksumPath); !os.IsNotExist(err) {
 		t.Fatalf("empty-checksum uploaded file still present: %v", err)
 	}
-	if _, err := os.Stat(localOnlyPath); !os.IsNotExist(err) {
-		t.Fatalf("local-only file still present: %v", err)
+	if _, err := os.Stat(localOnlyPath); err != nil {
+		t.Fatalf("expired local-only file removed: %v", err)
+	}
+	if catalog.rows["mysql-bin.000005"].UploadState != "LOCAL_ONLY" {
+		t.Fatalf("local-only catalog row changed: %+v", catalog.rows["mysql-bin.000005"])
+	}
+	if n := countRetentionSkips(catalog.events, "mysql-bin.000005"); n != 1 {
+		t.Fatalf("retention skip events=%d %+v", n, catalog.events)
+	}
+	if !containsAll(catalog.events[0].Message, "mysql-bin.000005", "upload_state=LOCAL_ONLY") || catalog.events[0].Detail != "LOCAL_ONLY" {
+		t.Fatalf("event=%+v", catalog.events)
+	}
+	if got := runner.RetentionBlockedFiles()["task-1"]; got != 1 {
+		t.Fatalf("blocked gauge=%d", got)
 	}
 	for _, keep := range []string{freshPath, openRowPath, openFilePath, activePath} {
 		if _, err := os.Stat(keep); err != nil {
@@ -582,13 +594,209 @@ func TestOpenBinlogWriter_CatalogWithoutDeleteRefusesLocalPurge(t *testing.T) {
 	}
 }
 
+func TestRetentionKeepsExpiredUnuploadedSealedFile(t *testing.T) {
+	for _, uploadState := range []string{"UPLOAD_FAILED", "LOCAL_ONLY"} {
+		t.Run(uploadState, func(t *testing.T) {
+			dir := t.TempDir()
+			taskID := "task-1"
+			taskDir := filepath.Join(dir, taskID)
+			if err := os.MkdirAll(taskDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			old := now.Add(-10 * 24 * time.Hour)
+			sealedPath := filepath.Join(taskDir, "mysql-bin.000001")
+			openPath := filepath.Join(taskDir, "mysql-bin.000002")
+			if err := os.WriteFile(sealedPath, []byte("only-copy"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(openPath, []byte("open"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(sealedPath, old, old); err != nil || os.Chtimes(openPath, old, old) != nil {
+				t.Fatal("chtimes")
+			}
+			catalog := &purgeCatalog{rows: map[string]tasks.BinlogFile{
+				"mysql-bin.000001": {
+					TaskID: taskID, FileName: "mysql-bin.000001", FilePath: sealedPath,
+					State: "SEALED", UploadState: uploadState,
+				},
+				"mysql-bin.000002": {
+					TaskID: taskID, FileName: "mysql-bin.000002", FilePath: openPath,
+					State: "OPEN", UploadState: "LOCAL_ONLY",
+				},
+			}}
+			catalog.appendErr = errors.New("event store down")
+			deleter := &purgeDeleter{}
+			runner := NewMySQLRunner(dir, WithFileMetaStore(catalog), WithObjectDeleter(deleter))
+			task := tasks.Task{ID: taskID, Epoch: 1, Storage: tasks.Storage{RetentionDays: 7}}
+			file, _, _, err := runner.openBinlogWriter(context.Background(), task, "mysql-bin.000009", 4, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			if _, err := os.Stat(sealedPath); err != nil {
+				t.Fatalf("sealed file removed while event append failed: %v", err)
+			}
+			if _, err := os.Stat(openPath); err != nil {
+				t.Fatalf("open row removed: %v", err)
+			}
+			if len(catalog.events) != 0 {
+				t.Fatalf("failed append stored an event: %+v", catalog.events)
+			}
+			if len(deleter.keys) != 0 {
+				t.Fatalf("deleted objects: %v", deleter.keys)
+			}
+
+			catalog.appendErr = nil
+			file, _, _, err = runner.openBinlogWriter(context.Background(), task, "mysql-bin.000010", 4, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			if _, err := os.Stat(sealedPath); err != nil {
+				t.Fatalf("sealed file removed: %v", err)
+			}
+			if catalog.rows["mysql-bin.000001"].UploadState != uploadState {
+				t.Fatalf("row changed: %+v", catalog.rows["mysql-bin.000001"])
+			}
+			if catalog.rows["mysql-bin.000002"].State != "OPEN" {
+				t.Fatal("open catalog row removed")
+			}
+			if n := countRetentionSkips(catalog.events, "mysql-bin.000001"); n != 1 {
+				t.Fatalf("events=%d %+v", n, catalog.events)
+			}
+			ev := catalog.events[0]
+			if ev.Type != retentionSkippedNotUploaded || ev.Detail != uploadState || !containsAll(ev.Message, "mysql-bin.000001", "upload_state="+uploadState) {
+				t.Fatalf("event=%+v", ev)
+			}
+			if got := runner.RetentionBlockedFiles()[taskID]; got != 1 {
+				t.Fatalf("blocked=%d", got)
+			}
+
+			file, _, _, err = runner.openBinlogWriter(context.Background(), task, "mysql-bin.000011", 4, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			if n := countRetentionSkips(catalog.events, "mysql-bin.000001"); n != 1 {
+				t.Fatalf("second open flooded events=%d %+v", n, catalog.events)
+			}
+			if _, err := os.Stat(sealedPath); err != nil {
+				t.Fatal(err)
+			}
+
+			if uploadState != "UPLOAD_FAILED" {
+				return
+			}
+			row := catalog.rows["mysql-bin.000001"]
+			row.UploadState = "UPLOADED"
+			row.ObjectKey = "uploaded-object"
+			row.Checksum = tasks.ChecksumMatch
+			catalog.rows["mysql-bin.000001"] = row
+			file, _, _, err = runner.openBinlogWriter(context.Background(), task, "mysql-bin.000012", 4, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			if _, err := os.Stat(sealedPath); !os.IsNotExist(err) {
+				t.Fatalf("uploaded file still present: %v", err)
+			}
+			if _, ok := catalog.rows["mysql-bin.000001"]; ok {
+				t.Fatal("uploaded catalog row still present")
+			}
+			if len(deleter.keys) != 1 || deleter.keys[0] != "uploaded-object" {
+				t.Fatalf("keys=%v", deleter.keys)
+			}
+			if n := countRetentionSkips(catalog.events, "mysql-bin.000001"); n != 1 {
+				t.Fatalf("purge added a skip event: %+v", catalog.events)
+			}
+			if got := runner.RetentionBlockedFiles()[taskID]; got != 0 {
+				t.Fatalf("blocked after purge=%d", got)
+			}
+		})
+	}
+}
+
+func TestRetentionNoUploaderStillDeletesExpiredLocalFile(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "task-1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * 24 * time.Hour)
+	sealed := filepath.Join(taskDir, "mysql-bin.000001")
+	openPath := filepath.Join(taskDir, "mysql-bin.000002.open.e2")
+	for _, path := range []string{sealed, openPath} {
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalog := &purgeCatalog{rows: map[string]tasks.BinlogFile{
+		"mysql-bin.000001": {
+			TaskID: "task-1", FileName: "mysql-bin.000001", FilePath: sealed,
+			State: "SEALED", UploadState: "LOCAL_ONLY",
+		},
+		"mysql-bin.000002.open.e2": {
+			TaskID: "task-1", FileName: "mysql-bin.000002.open.e2", FilePath: openPath,
+			State: "OPEN", UploadState: "LOCAL_ONLY",
+		},
+	}}
+	runner := NewMySQLRunner(dir, WithFileMetaStore(catalog))
+	file, _, _, err := runner.openBinlogWriter(context.Background(), tasks.Task{
+		ID: "task-1", Epoch: 2, Storage: tasks.Storage{RetentionDays: 7},
+	}, "mysql-bin.000009", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if _, err := os.Stat(sealed); !os.IsNotExist(err) {
+		t.Fatalf("no-uploader retention left the sealed file: %v", err)
+	}
+	if _, err := os.Stat(openPath); err != nil {
+		t.Fatalf("open segment removed: %v", err)
+	}
+	if _, ok := catalog.rows["mysql-bin.000001"]; !ok {
+		t.Fatal("no-uploader path removed the catalog row")
+	}
+	if len(catalog.events) != 0 {
+		t.Fatalf("no-uploader path wrote a skip event: %+v", catalog.events)
+	}
+	if got := runner.RetentionBlockedFiles()["task-1"]; got != 0 {
+		t.Fatalf("blocked=%d", got)
+	}
+}
+
+func countRetentionSkips(events []tasks.TaskEvent, name string) int {
+	n := 0
+	for _, event := range events {
+		if event.Type == retentionSkippedNotUploaded && strings.Contains(event.Message, name) {
+			n++
+		}
+	}
+	return n
+}
+
 type purgeCatalog struct {
 	rows      map[string]tasks.BinlogFile
+	events    []tasks.TaskEvent
 	listCalls int
 	listLimit int
 	listErr   error
 	dropErr   error
 	noteErr   error
+	appendErr error
+}
+
+func (c *purgeCatalog) AppendEvent(_ context.Context, event tasks.TaskEvent) error {
+	if c.appendErr != nil {
+		return c.appendErr
+	}
+	c.events = append(c.events, event)
+	return nil
 }
 
 func (c *purgeCatalog) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {

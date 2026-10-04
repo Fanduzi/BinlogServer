@@ -1289,6 +1289,7 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 		"binlog_server_upload_failures_total",
 		"binlog_server_upload_retry_total",
 		"binlog_server_upload_retry_last_ts",
+		"binlog_server_retention_blocked_files",
 	}
 	for _, name := range required {
 		if !strings.Contains(body, name) {
@@ -1339,6 +1340,7 @@ func TestAPI_MetricsEndpointContainsCoreMetricsWithoutReplicationProgress(t *tes
 		"binlog_server_checkpoint_age_seconds",
 		"binlog_server_worker_online",
 		"binlog_server_upload_failures_total",
+		"binlog_server_retention_blocked_files",
 	}
 	for _, name := range required {
 		if !strings.Contains(body, name) {
@@ -1365,11 +1367,52 @@ func TestAPI_MetricsEndpointCoreMetricsExistOnEmptySystem(t *testing.T) {
 		"binlog_server_checkpoint_age_seconds",
 		"binlog_server_worker_online",
 		"binlog_server_upload_failures_total",
+		"binlog_server_retention_blocked_files",
 	}
 	for _, name := range required {
 		if !strings.Contains(body, name) {
 			t.Fatalf("expected metrics output contains %s, body=%s", name, body)
 		}
+	}
+}
+
+type retentionGaugeRunner struct {
+	counts map[string]int
+}
+
+func (retentionGaugeRunner) Run(context.Context, tasks.Task) error { return nil }
+
+func (r retentionGaugeRunner) RetentionBlockedFiles() map[string]int { return r.counts }
+
+func TestAPI_MetricsRetentionBlockedFilesDropsWhenPurged(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	task, err := scheduler.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{task.ID: 2}
+	scheduler.SetRunner(retentionGaugeRunner{counts: counts})
+	handler := NewServer(scheduler)
+
+	read := func() float64 {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if resp.Code != http.StatusOK {
+			t.Fatalf("metrics status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		got, ok, err := readPromMetricValueWithLabels(resp.Body.String(), "binlog_server_retention_blocked_files", map[string]string{"task_id": task.ID})
+		if err != nil || !ok {
+			t.Fatalf("metric ok=%v err=%v body=%s", ok, err, resp.Body.String())
+		}
+		return got
+	}
+	if got := read(); got != 2 {
+		t.Fatalf("blocked=%v", got)
+	}
+	counts[task.ID] = 0
+	if got := read(); got != 0 {
+		t.Fatalf("blocked after purge=%v", got)
 	}
 }
 
