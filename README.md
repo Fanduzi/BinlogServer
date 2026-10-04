@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.13
+### 1. Download, verify, and unpack v0.5.26
 
 ```bash
-VER=0.5.13
+VER=0.5.26
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,10 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
+Published `v0.5.26` `checksums.txt`:
+
+```text
+d21f62997abd8ba0b97de650802b32c06f565680cde62c0c7b88333c37242f16  binlog-server_0.5.26_darwin_amd64.tar.gz
+5556039d09b98a92e7a81cebc6a374632f72fd3e4762e384d951ab036d3686d1  binlog-server_0.5.26_darwin_arm64.tar.gz
+d6d63163b36994f2ff473be4f9a981c1ef74d304dd5ad1e2327facf4524d4ae8  binlog-server_0.5.26_linux_amd64.tar.gz
+226f2d315e0decc3ab477e295c9c19882d92474cce6885c9fa869bab8aaed933  binlog-server_0.5.26_linux_arm64.tar.gz
+```
+
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.13_linux_amd64/
+binlog-server_0.5.26_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -245,15 +254,15 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.13)
+## Upgrade Notes (v0.5.26)
 
-Before upgrading existing deployments, review the v0.5.13 operator contract:
+Before upgrading existing deployments, review the v0.5.26 operator contract:
 
-- **Zero Schema Migrations:** `v0.5.13` requires no database migrations (`000001_init_schema` unchanged). Config keys are unchanged. The API is unchanged from `v0.5.11`.
-- **Console Adopt:** This is the Console surface on top of the adopt API already in `v0.5.11`. The published v0.5.12 package still has no Console adopt button. Standalone with no `meta_dsn`: a leftover directory is listed. In the Chinese Console, that row's detail actions are 认领, 启动, 停止, and 删除, and there is no 编辑. A task that already has source credentials shows 编辑, 启动, 停止, and 删除, and there is no 认领. 认领 submits `cluster_key` and source through the existing `POST /api/tasks/{id}/adopt`. Leaving the start mode at the default (highest segment end) does not send an override. The success toast is 任务已认领. The task stays 已停止, shows the source and cluster key, does not show the password, and does not start replication. The existing 启动 action then starts it. Dogfood on tip `39981ead` (version string `v0.0.0-20261003150852-39981ead3fd5`, not the published v0.5.12 package) saw `mysql-bin.000005.open.e2` in the same directory while the earlier segment sizes stayed unchanged.
-- **Meta:** With `meta_dsn` configured, leftover directories are not listed. The Console table is empty. Ids `99` and `42` do not appear, and there is no 认领. `POST /api/tasks/99/adopt` returns 404 with body `task not found`. `backup_tasks` stays 0. Adopt does not create a task from a directory.
+- **Zero Schema Migrations:** `v0.5.26` requires no database migrations (`000001_init_schema` unchanged). No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
+- **Background upload retry:** A worker with object storage configured retries sealed `UPLOAD_FAILED` segments in the background, on top of `v0.5.25`. Standalone and all-in-one processes are workers, so they run this loop. A cluster worker runs it too. A control-plane-only process does not. A process with no object storage configured does not. The published v0.5.25 package leaves those rows at `UPLOAD_FAILED` until `POST /api/tasks/{id}/files/retry-upload`. The loop uses the same path as that manual retry. A successful row becomes `UPLOADED`, including checksum. Open segments stay unuploaded. A sealed file that is not on this machine is skipped, and its catalog row is left unchanged. Upload failure still does not stop binlog pull and does not change task state. While a task's background pass is running, a manual retry of that task still returns `upload retry already in progress`. The default cadence is every 15 seconds, up to 100 sealed `UPLOAD_FAILED` rows per task per pass.
+- **Unchanged paths:** Retention, lease takeover, and the v0.5.25 object-read behavior are unchanged.
 
-Full release notes: [docs/releases/release-notes-v0.5.13.md](docs/releases/release-notes-v0.5.13.md) | [docs/releases/v0.5.13.zh-CN.md](docs/releases/v0.5.13.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.26.md](docs/releases/release-notes-v0.5.26.md) | [docs/releases/v0.5.26.zh-CN.md](docs/releases/v0.5.26.zh-CN.md)
 
 ---
 

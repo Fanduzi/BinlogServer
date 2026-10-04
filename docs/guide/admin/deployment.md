@@ -50,12 +50,12 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.13)
+## 3. 安装与产物准备 (v0.5.26)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档：
 
 ```bash
-VER=0.5.13
+VER=0.5.26
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -67,9 +67,18 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
+已发布的 `v0.5.26` `checksums.txt`：
+
+```text
+d21f62997abd8ba0b97de650802b32c06f565680cde62c0c7b88333c37242f16  binlog-server_0.5.26_darwin_amd64.tar.gz
+5556039d09b98a92e7a81cebc6a374632f72fd3e4762e384d951ab036d3686d1  binlog-server_0.5.26_darwin_arm64.tar.gz
+d6d63163b36994f2ff473be4f9a981c1ef74d304dd5ad1e2327facf4524d4ae8  binlog-server_0.5.26_linux_amd64.tar.gz
+226f2d315e0decc3ab477e295c9c19882d92474cce6885c9fa869bab8aaed933  binlog-server_0.5.26_linux_arm64.tar.gz
+```
+
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.13_linux_amd64/
+binlog-server_0.5.26_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema)

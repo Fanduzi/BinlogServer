@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Changed
+
+- Operator download examples in README, README_ZH, the deployment guide, and the landing page now pin `v0.5.26`. The checksum example is the published `v0.5.26` `checksums.txt`.
+
 ## [v0.5.26] - 2026-10-04
 
 ### Added
