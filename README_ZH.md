@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.13
+### 1. 下载、校验并解压 v0.5.26
 
 ```bash
-VER=0.5.13
+VER=0.5.26
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,10 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
+已发布的 `v0.5.26` `checksums.txt`：
+
+```text
+d21f62997abd8ba0b97de650802b32c06f565680cde62c0c7b88333c37242f16  binlog-server_0.5.26_darwin_amd64.tar.gz
+5556039d09b98a92e7a81cebc6a374632f72fd3e4762e384d951ab036d3686d1  binlog-server_0.5.26_darwin_arm64.tar.gz
+d6d63163b36994f2ff473be4f9a981c1ef74d304dd5ad1e2327facf4524d4ae8  binlog-server_0.5.26_linux_amd64.tar.gz
+226f2d315e0decc3ab477e295c9c19882d92474cce6885c9fa869bab8aaed933  binlog-server_0.5.26_linux_arm64.tar.gz
+```
+
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.13_linux_amd64/
+binlog-server_0.5.26_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -239,15 +248,15 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.13)
+## 升级须知 (v0.5.26)
 
-在将生产环境升级至 `v0.5.13` 之前，请确认以下变更点：
+在将生产环境升级至 `v0.5.26` 之前，请确认以下变更点：
 
-- **无需数据库表结构变更:** `v0.5.13` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。配置键没有变化。API 与 `v0.5.11` 相同。
-- **控制台认领:** 这一版是 `v0.5.11` 已有 adopt API 上的 Console 表面。已发布的 v0.5.12 压缩包仍然没有 Console adopt 按钮。standalone 没配 `meta_dsn` 时，遗留目录会列出。中文 Console 里，这一行详情操作是 认领、启动、停止、删除，没有 编辑。已经有源库账号的任务显示 编辑、启动、停止、删除，没有 认领。认领通过已有的 `POST /api/tasks/{id}/adopt` 提交 `cluster_key` 和 source。启动模式留在默认（最高分段末尾）时不发送覆盖。成功提示是 任务已认领。任务保持 已停止，显示源库和 cluster key，不显示密码，不会开始复制。原来的 启动 再把它拉起来。本次 tip `39981ead` 的试用（版本串 `v0.0.0-20261003150852-39981ead3fd5`，不是已发布的 v0.5.12 压缩包）：同一目录出现 `mysql-bin.000005.open.e2`，更早分段的大小不变。
-- **元数据库:** 配了 `meta_dsn` 时，遗留目录不会列出。Console 表格是空的。id `99` 和 `42` 不出现，也没有 认领。`POST /api/tasks/99/adopt` 返回 404，正文是 `task not found`。`backup_tasks` 仍是 0。adopt 不会从目录创建任务。
+- **无需数据库表结构变更:** `v0.5.26` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。没有新的配置项。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
+- **后台补传:** 配置了对象存储的 worker 会在后台重试已封存的 `UPLOAD_FAILED` 分段，这是 `v0.5.25` 之上的变化。单机和 all-in-one 都是 worker，所以会跑这个循环。集群里的 worker 也会跑。只跑控制面的进程不跑。没有配置对象存储的进程不跑。已发布的 v0.5.25 包把这些行留在 `UPLOAD_FAILED`，直到调用 `POST /api/tasks/{id}/files/retry-upload`。这个循环走和手动补传同一条路径。成功的行变成 `UPLOADED`，并写入 checksum。open 分段保持不上传。封存文件不在这台机器上时跳过，目录行保持原样。上传失败仍然不停止 binlog 拉取，也不改变任务状态。某个任务的后台这一轮还在跑时，对该任务的手动补传仍返回 `upload retry already in progress`。默认节奏是每 15 秒一次，每个任务每一轮最多 100 条已封存的 `UPLOAD_FAILED`。
+- **不变的路径:** 保留、租约接管，以及 v0.5.25 从对象读回的行为不变。
 
-详细版本记录：[docs/releases/v0.5.13.zh-CN.md](docs/releases/v0.5.13.zh-CN.md) | [docs/releases/release-notes-v0.5.13.md](docs/releases/release-notes-v0.5.13.md)
+详细版本记录：[docs/releases/v0.5.26.zh-CN.md](docs/releases/v0.5.26.zh-CN.md) | [docs/releases/release-notes-v0.5.26.md](docs/releases/release-notes-v0.5.26.md)
 
 ---
 
