@@ -240,7 +240,7 @@ wait_background_uploaded_record() {
   local task_id="$1"
   # 15s background interval, plus an in-flight attempt that can sit in the upload timeout while MinIO is down.
   for _ in {1..90}; do
-    if curl -fsS "$API/api/tasks/$task_id/files?limit=200" | jq -e 'if type=="array" then any(.[]; (.file_name | contains(".open.e") | not) and .upload_state=="UPLOADED") and all(.[]; (.file_name | contains(".open.e")) or .upload_state != "UPLOAD_FAILED") and all(.[]; ((.file_name | contains(".open.e")) | not) or .upload_state != "UPLOADED") else false end' >/dev/null 2>&1; then
+    if curl -fsS "$API/api/tasks/$task_id/files?limit=200" | jq -e 'def open: (.state == "OPEN") or ((.file_name // "") | contains(".open.e")) or ((.file_path // "") | contains(".open.e")); if type=="array" then any(.[]; (open | not) and .upload_state=="UPLOADED") and all(.[]; open or .upload_state != "UPLOAD_FAILED") and all(.[]; (open | not) or .upload_state != "UPLOADED") else false end' >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
