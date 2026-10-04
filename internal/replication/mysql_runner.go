@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the object deleter wired with upload
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -267,7 +267,13 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	writerOpener := r.writerOpener
 	if writerOpener == nil {
 		writerOpener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
-			return r.openBinlogWriter(ctx, task, fileName, initialPos, sourceServerUUID)
+			f, w, path, err := r.openBinlogWriter(ctx, task, fileName, initialPos, sourceServerUUID)
+			// A nil *os.File becomes a non-nil io.Closer. The deferred close
+			// would then log a failure for a file that was never opened.
+			if f == nil {
+				return nil, w, path, err
+			}
+			return f, w, path, err
 		}
 	}
 
@@ -381,14 +387,12 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 				currentFile = nextFile
 				currentPos = nextPos
-				file, writer, currentPath, err = writerOpener(task, currentFile, currentPos)
-				if err != nil {
-					return err
-				}
-				currentStartPos = currentPos
-				currentCreatedAt = time.Now()
 
-				// rotate 后立即把 checkpoint 切到新文件起点，保证重启从新文件继续。
+				// The rotate is already in the sealed file. Record the next file
+				// before opening it. If that open fails, the retry must start
+				// there. Resuming on the sealed name opens <name>.open.e<epoch>
+				// beside it, and the next rotate stops on
+				// "sealed file already exists".
 				if r.checkpointStore != nil {
 					if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, binlog.Checkpoint{
 						File: currentFile,
@@ -397,6 +401,14 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 						return err
 					}
 				}
+
+				file, writer, currentPath, err = writerOpener(task, currentFile, currentPos)
+				if err != nil {
+					return err
+				}
+				currentStartPos = currentPos
+				currentCreatedAt = time.Now()
+
 				if r.progressReporter != nil {
 					r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
 				}
