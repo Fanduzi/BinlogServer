@@ -4330,6 +4330,7 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 		"/api/tasks/{id}/checkpoint",
 		"/api/tasks/{id}/events",
 		"/api/tasks/{id}/files",
+		"/api/tasks/{id}/files/{name}",
 		"/api/tasks/{id}/replay",
 		"/api/tasks/{id}/upload-failures/reasons",
 		"/api/tasks/{id}/replication",
@@ -4404,5 +4405,10 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 				t.Fatalf("expected %s.%s in swagger definition", definitionName, property)
 			}
 		}
+	}
+	download := getOperation("/api/tasks/{id}/files/{name}")
+	produces, ok := download["produces"].([]any)
+	if !ok || len(produces) != 1 || produces[0] != "application/octet-stream" {
+		t.Fatalf("download produces %#v", download["produces"])
 	}
 }

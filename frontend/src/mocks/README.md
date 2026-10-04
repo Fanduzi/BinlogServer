@@ -7,7 +7,7 @@
 | File | Responsibility |
 |------|---------------|
 | mock-data.js | 定义共享 mock 场景数据（含 starting、single-process 与 disk-leftover 场景）；任务抄本带 owner/epoch，供列表租约风险使用。disk-leftover 里 id `4` 没有 source，id `5` 是目录任务。healthy 的文件表同时有 `mysql-bin.000002` 封存名和 `.open.e1` / `.open.e4` |
-| mock-handler.js | 将 API method/path/query/body 分发到对应 mock 场景，模拟 server pagination/filter、批量任务创建结果，并维护最小状态变化；仅当 worker 列表为空且唯一主人是 standalone 时 overview `single_process` 为 true。`GET /api/tasks/{id}/replay` 在文件窗口里每个序号留一条路径，并按 flavor 给出客户端。`POST /api/tasks/{id}/adopt` 把 source 接到遗留 id，密码脱敏，状态保持 `STOPPED`；没传 `start.mode` 时起点是 `FILE_POS`。遗留行的 `PUT` 和 start 返回 400 |
+| mock-handler.js | 将 API method/path/query/body 分发到对应 mock 场景，模拟 server pagination/filter、批量任务创建结果，并维护最小状态变化；仅当 worker 列表为空且唯一主人是 standalone 时 overview `single_process` 为 true。`GET /api/tasks/{id}/replay` 在文件窗口里每个序号留一条路径，并按 flavor 给出客户端。`GET /api/tasks/{id}/files/{name}` 在同一文件清单里按磁盘文件名返回一段字节；`/`、`\`、`..` 是 400，任务或名字不在清单里是 404。`POST /api/tasks/{id}/adopt` 把 source 接到遗留 id，密码脱敏，状态保持 `STOPPED`；没传 `start.mode` 时起点是 `FILE_POS`。遗留行的 `PUT` 和 start 返回 400 |
 
 ## Exports
 

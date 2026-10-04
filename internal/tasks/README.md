@@ -5,6 +5,7 @@
 - `memory_lease.go`: 进程内 `LeaseManager`，单机与测试走同一扇任务所有权门；`Release` 立刻腾出租约。
 - `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec、`AdoptDiskBackup`）；`GetTask` 按主键刷新，store 失败不退回内存旧抄本；没有 store 时，内存未命中再认 `data_dir` 里仍有分段的目录。`ListClusterObservation` 有 store 时读 `store.ListTasks` 全库所有权抄本；`ListTasksPage` 在有 store 时走 SQL 分页；没有 store 时名单含这些磁盘目录。`DashboardCounters` 在 store 实现 `TaskDashboardRollup` 时走 SQL 计数，否则一次过滤读取。启停不在本文件。
 - `disk_files.go`: `{data_dir}/{task_id}` 的封存名与 `.open.e<epoch>` 扫描，standalone 无 task store 时的剩余目录发现，以及 adopt 默认 `FILE_POS`（最高分段的源文件名和字节大小）和下一个 open epoch。`WindowBinlogFilesForReplay` 把目录行或磁盘行排成同一回放顺序：源序号升序，同序号封存在前，再按 epoch 升序；`limit` 保留序号最大的窗口。`SelectReplayFiles` 在这个窗口里每个序号只留一条：封存名和 `.open.e*` 同时存在时留 epoch 最大的 open 路径。`ReplayClient` 把 `source.flavor` 的 `mysql` 映射成 `mysqlbinlog` / `MySQL mysqlbinlog`，`mariadb` 映射成 `mariadb-binlog`。
+- `segment_download.go`: `OpenTaskSegment` 按文件清单里的磁盘文件名打开本进程 `{data_dir}/{task_id}/{name}`。封存名和当前 `.open.e*` 都可读，读到打开时的字节长度。名字含 `/`、`\` 或 `..` 返回 `invalid segment name`。清单里没有、或本进程目录里没有，返回 `segment not found on this process`。不读对象存储，也不跟 catalog `file_path` 到别的目录。
 - `scheduler_lifecycle.go`: 启停、`ClaimRunnableTasks`（无主 STARTING + 过期租约 + 自己名下空闲）、重试退避、FAILED 立刻放租约。只存在于磁盘上的目录拒绝 start/stop。已 adopt 的目录在 start 时把 epoch 抬到现有 `.open.e*` 之上。
 - `task_list.go`: 数字 id 排序、host/port/state 过滤（host 走 `SameSourceHost`）、内存分页、`SummarizeTaskStates` / `SummarizeTasksBySource` / `RunningRefs`，以及 `FailedUploadFiles` / `StartingUnownedTasks`，供 standalone 与测试 fake 复用。
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
@@ -32,6 +33,7 @@
 - 事件记录、文件元信息、上传补偿。
 - `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
 - `ListFiles`：file store 返回非空时保持元数据结果。MySQL 目录按源序号升序（同序号封存在前，再按 epoch 升序），`limit` 保留序号最大的窗口，与磁盘扫描相同。file store 未配置，或该任务结果为空且设置了 `WithDataDir` 时，扫描 `{data_dir}/{task_id}` 的封存名与 `.open.e<epoch>`，按同一顺序。`file_name` 是源文件名，`file_path` 是磁盘路径。store 查询失败不改扫磁盘。磁盘列表不编造 checkpoint。没有 task store 且内存无此 id 时，目录里仍有分段则用同一扫描；有 task store 时未知 id 仍是 `task not found`。
+- `OpenTaskSegment`：下载用。名字必须是 `ListFiles` 同一份清单里的磁盘文件名（`file_path` 的 base；没有 `file_path` 时用 `file_name`）。只打开本进程 `{data_dir}/{task_id}/` 下的那个文件，长度停在打开时的大小。任务是 RUNNING 或 STOPPED 都不会因为分段仍是 OPEN 而跳过。控制面没有本地目录时不编造字节。
 - `WithInternalCallTimeouts`：注入内部调用超时（read/write/lease/upload），用于 store/lease/uploader 依赖边界治理。
 - `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与源身份共享。
 - `SameSourceHost`：回环别名是同一台源，非回环仍精确匹配；lookup 与任务观测 host 过滤共用。

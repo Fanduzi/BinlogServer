@@ -42,6 +42,7 @@
     "startBatchCreate": "开始批量创建",
     "retryUpload": "重试上传失败文件",
     "copyReplay": "复制回放命令",
+    "download": "下载",
     "collapseMenu": "折叠菜单",
     "expandMenu": "展开菜单",
     "gotIt": "知道了"
@@ -132,6 +133,7 @@
     "taskStopped": "任务 #{id} 已停止",
     "taskDeleted": "任务 #{id} 已删除",
     "retryUploadTriggered": "失败文件已触发重试上传",
+    "segmentDownloaded": "分段已下载",
     "replayCopied": "已复制回放命令",
     "replayCopyFailed": "没能复制回放命令",
     "previewFirst": "请先点击「预览校验」",

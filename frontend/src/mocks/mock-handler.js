@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, GET /api/tasks/{id}/replay one path per source index, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, GET /api/tasks/{id}/replay one path per source index, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -542,6 +542,13 @@ function selectReplayPaths(files) {
   return paths;
 }
 
+function fileDiskBase(file) {
+  const path = file && file.file_path ? String(file.file_path) : "";
+  if (!path) return (file && file.file_name) || "";
+  const parts = path.split(/[/\\]/);
+  return parts[parts.length - 1] || ((file && file.file_name) || "");
+}
+
 function replayClient(flavor) {
   const value = String(flavor || "").trim().toLowerCase();
   if (value === "mysql") return { client: "mysqlbinlog", client_hint: "MySQL mysqlbinlog" };
@@ -840,6 +847,33 @@ export function handleMockRequest(input) {
   const filesMatch = path.match(/^\/api\/tasks\/([^/]+)\/files$/);
   if (filesMatch && method === "GET") {
     return ok(deepClone(state.filesByID[filesMatch[1]] || []));
+  }
+
+  const downloadMatch = path.match(/^\/api\/tasks\/([^/]+)\/files\/([^/]+)$/);
+  if (downloadMatch && method === "GET") {
+    const id = downloadMatch[1];
+    let name = downloadMatch[2];
+    try {
+      name = decodeURIComponent(name);
+    } catch {
+      return { status: 400, body: "invalid segment name", contentType: "text/plain" };
+    }
+    if (!name || name.includes("/") || name.includes("\\") || name.includes("..")) {
+      return { status: 400, body: "invalid segment name", contentType: "text/plain" };
+    }
+    const task = state.detailsByID[id];
+    if (!task) return { status: 404, body: "task not found", contentType: "text/plain" };
+    const files = state.filesByID[id] || [];
+    const known = files.some((file) => fileDiskBase(file) === name);
+    if (!known) {
+      return { status: 404, body: "segment not found on this process", contentType: "text/plain" };
+    }
+    return {
+      status: 200,
+      body: `segment-bytes:${name}`,
+      contentType: "application/octet-stream",
+      filename: name,
+    };
   }
 
   const replayMatch = path.match(/^\/api\/tasks\/([^/]+)\/replay$/);
