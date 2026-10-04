@@ -12,9 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.20] - 2026-10-04
+
 ### Added
 
-- `GET /api/tasks/{id}/files/{name}` and the Console files-table Download stream a sealed segment that is already `UPLOADED` when `{data_dir}/{id}/{name}` is not on this process. The catalog row must include a non-empty `object_key`. `Content-Type` is `application/octet-stream`. `Content-Disposition` uses that basename. The body length is the object size at open. A local file still wins, including `*.open.e*` while the task is `RUNNING` or `STOPPED`. `LOCAL_ONLY`, `UPLOAD_FAILED`, an empty `object_key`, an open segment with no local file, and a process with object upload not configured stay 404 `segment not found on this process`. The response does not follow catalog `file_path` and does not invent open-segment bytes from object storage. Traversal is still 400 `invalid segment name`. A missing task is still 404 `task not found`. `GET /api/tasks/{id}/files` and `GET /api/tasks/{id}/replay` are unchanged. No new config key. No schema migration.
+- `GET /api/tasks/{id}/files/{name}` and the Console files-table Download stream a sealed segment that is already `UPLOADED` when `{data_dir}/{id}/{name}` is not on this process. The catalog row must include a non-empty `object_key`. `{name}` is that basename, not the object key. `Content-Type` is `application/octet-stream`. `Content-Disposition` uses that basename. The body length is the object size at open. A local file still wins, including `*.open.e*` while the task is `RUNNING` or `STOPPED`. `LOCAL_ONLY`, `UPLOAD_FAILED`, an empty `object_key`, an open segment with no local file, and a process with no object store configured stay 404 `segment not found on this process`. The response does not follow catalog `file_path` and does not invent open-segment bytes from object storage. A slash, backslash, `..`, or other traversal form is still 400 `invalid segment name`. A missing task is still 404 `task not found`. `GET /api/tasks/{id}/files` and `GET /api/tasks/{id}/replay` are unchanged: the files list still lists every name, and replay is still one path per source index. No new config key. No schema migration.
 
 ## [v0.5.19] - 2026-10-04
 
