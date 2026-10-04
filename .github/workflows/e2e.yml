@@ -65,7 +65,7 @@ jobs:
           npm ci
           npm run test:locales
 
-      - name: Check embedded Console bundle
+      - name: Check embedded Console bundle and PITR markers
         run: ./scripts/check-ui-bundle.sh
 
       - name: Check landing page image assets
