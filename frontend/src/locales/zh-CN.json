@@ -95,6 +95,7 @@
     "startPos": "起始位点",
     "endPos": "结束位点",
     "uploadState": "上传状态",
+    "checksum": "校验",
     "objectKey": "对象键",
     "runId": "运行 ID",
     "worker": "Worker",

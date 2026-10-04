@@ -483,6 +483,8 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 对象存储只保存已经封存并且上传成功的文件。对象键是 `{upload.prefix/}{cluster_key}/{source_identity}/{封存文件名}`，没有 `.open.e`。`source_identity` 在 MySQL 上是 `server_uuid`，在 MariaDB 上是 `mariadb:<server_id>:<gtid_domain_id>`。正在写的分段不会出现在桶里。`UPLOAD_FAILED` 的封存文件仍在磁盘上。没配上传时桶是空的。
 
+封存分段上传之后，`GET /api/tasks/{id}/files` 和 Console 任务文件表的「校验」列给出 `checksum`。`match` 表示桶里该对象和这份封存文件是同一串字节：对象 HEAD 的 ETag 与本地文件一致（不超过 16MiB 时是整文件 MD5，更大时是与这次上传相同的 16MiB 分片 ETag）。`mismatch` 表示这次核对已经完成且字节不同。`checksum` 写成 `match` 只发生在这次 ETag 核对通过之后。对象 HEAD 失败时 `checksum` 留空，这一行仍是 `UPLOADED`，空值不是已校验。`mismatch` 或 HEAD 失败时拉流继续。
+
 复制循环下次打开文件时，会删掉修改时间早于 `storage.retention_days` 的其他本地文件，当前这个 `.open.e<epoch>` 除外。更早的封存分段如果本地已经删掉、上传曾经成功，就只在对象存储里。
 
 源库以后又恢复、任务再次 `start` 并且连上源时，新的 epoch 会删掉其他 epoch 的 `.open.e*`。封存文件还在。要留住当前这段未封存的尾部，先把 `{data_dir}/{task_id}/` 复制出来。源已经连不上时，`start` 在打开本地文件之前失败，不会走到删除这一步。
@@ -575,6 +577,8 @@ Standalone with no `meta_dsn` still keeps tasks and checkpoints in memory. The s
 With `meta_dsn`, the files API still reads `binlog_files` when that task has catalog rows. Order matches the disk scan above: ascending source index, and for one index the sealed name before open epochs. It returns at most 200 rows by default and, past that, keeps the highest indexes, still ascending inside the window. An `OPEN` row's `file_name` is the source file name. `file_path` is the on-disk path that includes `.open.e<epoch>`. When the catalog has no rows for that task, the API uses the disk scan above. Checkpoint `file` and `pos` are still the source file name and position of the last `fsync`. A missing checkpoint row is still 404. Choose replay arguments with section 8.2. `GET /api/tasks/{id}/replay` uses this same catalog window. The Console files table lists these rows from top to bottom in this order.
 
 Object storage receives a file only after it is sealed and the upload succeeds. The object key is `{upload.prefix/}{cluster_key}/{source_identity}/{sealed file name}`, with no `.open.e`. `source_identity` is the MySQL `server_uuid`, or `mariadb:<server_id>:<gtid_domain_id>` for MariaDB. The segment still being written is not in the bucket. A sealed file in `UPLOAD_FAILED` is still on disk. With upload unconfigured, the bucket is empty.
+
+After that upload, `GET /api/tasks/{id}/files` and the Checksum column in the Console task files table show `checksum`. `match` means the object in the bucket is the same bytes as that sealed file: the object HEAD ETag equals the local file (the whole-file MD5 at or under 16MiB, and the same 16MiB multipart ETag as the upload when the file is larger). `mismatch` means that comparison finished and the bytes differ. `checksum` is `match` only after the ETag comparison holds. When the object HEAD fails, `checksum` is empty, the row stays `UPLOADED`, and that empty value is not verified. Replication keeps pulling for `mismatch` and for a failed HEAD.
 
 The next time the replication loop opens a file, it deletes other local files whose modification time is older than `storage.retention_days`. The current `.open.e<epoch>` file stays. An older sealed segment that was deleted locally and had been uploaded exists only in object storage.
 

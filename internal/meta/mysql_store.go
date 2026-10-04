@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (sealed before open epochs of the same index; limit keeps the highest indexes), and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (sealed before open epochs of the same index; limit keeps the highest indexes) including checksum, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -207,9 +207,9 @@ LIMIT ?;
 const upsertBinlogFileSQL = `
 INSERT INTO binlog_files (
   task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
-  object_key, upload_state, upload_error, uploaded_at
+  object_key, upload_state, upload_error, uploaded_at, checksum
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   file_path = VALUES(file_path),
   state = VALUES(state),
@@ -221,7 +221,8 @@ ON DUPLICATE KEY UPDATE
   object_key = VALUES(object_key),
   upload_state = VALUES(upload_state),
   upload_error = VALUES(upload_error),
-  uploaded_at = VALUES(uploaded_at);
+  uploaded_at = VALUES(uploaded_at),
+  checksum = VALUES(checksum);
 `
 
 // listBinlogFilesSQL loads every catalog row for one task. Replay order and the
@@ -231,7 +232,7 @@ ON DUPLICATE KEY UPDATE
 // The failed-upload query keeps its own sealed_at order.
 const listBinlogFilesSQL = `
 SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
-       object_key, upload_state, upload_error, uploaded_at
+       object_key, upload_state, upload_error, uploaded_at, checksum
 FROM binlog_files
 WHERE task_id = ?
 `
@@ -1182,6 +1183,7 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 			uploadState,
 			meta.UploadError,
 			uploadedAt,
+			meta.Checksum,
 		)
 		return err
 	})
@@ -1208,6 +1210,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 	for rows.Next() {
 		var item tasks.BinlogFile
 		var uploadedAt sql.NullTime
+		var checksum sql.NullString
 		if err := rows.Scan(
 			&item.TaskID,
 			&item.FileName,
@@ -1222,11 +1225,15 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 			&item.UploadState,
 			&item.UploadError,
 			&uploadedAt,
+			&checksum,
 		); err != nil {
 			return nil, err
 		}
 		if uploadedAt.Valid {
 			item.UploadedAt = uploadedAt.Time
+		}
+		if checksum.Valid {
+			item.Checksum = checksum.String
 		}
 		out = append(out, item)
 	}

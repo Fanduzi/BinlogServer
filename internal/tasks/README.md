@@ -15,7 +15,7 @@
 - `scheduler_observability.go`: 复制进度（含 at-tip）、checkpoint、事件/文件/运行历史查询。无 task store 时，剩余目录的 files 走磁盘扫描。`GetCheckpoint` 仍只读已存储的 checkpoint 行，不从磁盘编造。`ResumePosition` 返回下次 Start 会用的 file/pos；本地 open 分段有完整事件时用该事件，file+pos 与存储行一致时带上 `gtid_set`。
 - `resume.go`: `NextResumePosition`。adopt 的 `KeepLocalSegments` 不改用本地事件。没有本地事件时用 checkpoint；epoch 大于 1 时把该 checkpoint 回拨到位置 4。
 - `scheduler_retry_upload.go`: 上传失败补偿重试（只走失败文件查询，缺查询报错）与失败原因聚合。
-- `sealed_upload.go`: 尽力上传的唯一调用方（`ApplySealedUpload`、`ObjectKey`）；首次封文件后与重试共用。
+- `sealed_upload.go`: 尽力上传的唯一调用方（`ApplySealedUpload`、`ObjectKey`）；首次封文件后与重试共用。上传成功后核对完成时 `checksum` 为 `match` 或 `mismatch`。字节不同才是 `mismatch`，且不失败调用方。对象 HEAD 失败或不能读对象时 `checksum` 留空，行仍是 `UPLOADED`，空值不是已校验。
 - `model.go`: 任务领域模型与状态定义（含复制进度 `AtTip`，以及不进 JSON 的 `KeepLocalSegments`）。
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
 - `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试，覆盖 localhost、127/8、::1 与 IPv6 括号表示。
@@ -33,7 +33,7 @@
 - `NewMemoryLease`：无租约表时的进程内所有权门；`LeaseManager.Verify` 供封文件前验租。
 - 仅 `SOURCE_UNREACHABLE` 连续失败最多重试 10 次；runner ready 会清零进程内连续失败计数，服务重启后重新计数，其他 retryable source code 不共享此封顶。
 - 事件记录、文件元信息、上传补偿。
-- `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
+- `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。`BinlogFile.Checksum` 为 `match` 或 `mismatch`；对象 HEAD 未完成时为空，随文件清单返回。
 - `ResumePosition`：`GET /api/tasks/{id}/checkpoint` 使用。与 runner 的 `NextResumePosition` 相同。没有本地完整事件、也没有有效 checkpoint 时返回未命中。`GetCheckpoint` 不因磁盘文件而变成命中。
 - `ListFiles`：file store 返回非空时保持元数据结果。MySQL 目录按源序号升序（同序号封存在前，再按 epoch 升序），`limit` 保留序号最大的窗口，与磁盘扫描相同。file store 未配置，或该任务结果为空且设置了 `WithDataDir` 时，扫描 `{data_dir}/{task_id}` 的封存名与 `.open.e<epoch>`，按同一顺序。`file_name` 是源文件名，`file_path` 是磁盘路径。store 查询失败不改扫磁盘。磁盘列表不编造 checkpoint。没有 task store 且内存无此 id 时，目录里仍有分段则用同一扫描；有 task store 时未知 id 仍是 `task not found`。
 - `OpenTaskSegment`：下载用。名字必须是 `ListFiles` 同一份清单里的磁盘文件名（`file_path` 的 base；没有 `file_path` 时用 `file_name`）。本地 `{data_dir}/{task_id}/{name}` 存在时只读该文件，长度停在打开时的大小。任务是 RUNNING 或 STOPPED 都不会因为分段仍是 OPEN 而跳过。本地没有时，封存且 `UPLOADED`、`object_key` 非空、且已配置对象上传，才从对象存储读，长度是打开对象时的大小；否则 `segment not found on this process`。不跟 catalog `file_path`，也不为 open 分段向对象存储编造字节。未配置上传时与以前一样只认本地。

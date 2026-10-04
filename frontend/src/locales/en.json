@@ -95,6 +95,7 @@
     "startPos": "Start Pos",
     "endPos": "End Pos",
     "uploadState": "Upload State",
+    "checksum": "Checksum",
     "objectKey": "Object Key",
     "runId": "Run ID",
     "worker": "Worker",

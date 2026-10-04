@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: canonical E2E database topology, retry-upload e2e dependencies, and Quay MinIO/mc images
-# output: deterministic e2e orchestration, scenario execution, and verification logs
+# output: deterministic e2e orchestration, scenario execution, checksum match on the files API, MinIO mismatch proof, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -288,6 +288,23 @@ if [[ ! "$SUCCEEDED" =~ ^[0-9]+$ ]] || (( SUCCEEDED < 1 )); then
   exit 1
 fi
 wait_uploaded_record "$TASK_ID"
+
+echo "[retry-upload] uploaded sealed segment reports checksum match"
+if ! curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" | jq -e 'if type=="array" then any(.[]; .upload_state=="UPLOADED" and .checksum=="match" and (.file_name | contains(".open.e") | not)) and all(.[]; .upload_state != "UPLOADED" or .checksum == "match") else false end' >/dev/null; then
+  echo "uploaded file checksum is not match" >&2
+  curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" >&2 || true
+  exit 1
+fi
+
+echo "[retry-upload] real object mismatch is checksum mismatch and does not fail the upload caller"
+(
+  cd "$ROOT_DIR"
+  BINLOG_E2E_MINIO_ENDPOINT="127.0.0.1:${MINIO_PORT}" \
+  BINLOG_E2E_MINIO_BUCKET="$MINIO_BUCKET" \
+  BINLOG_E2E_MINIO_ACCESS_KEY="$MINIO_USER" \
+  BINLOG_E2E_MINIO_SECRET_KEY="$MINIO_PASS" \
+    go test ./internal/tasks -count=1 -timeout 180s -run 'TestApplySealedUpload_MinIOChecksum$'
+)
 
 echo "[retry-upload] verify replication still progresses after retry"
 wait_checkpoint_ready "$TASK_ID"
