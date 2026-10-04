@@ -142,6 +142,11 @@ note: if this file changes, update this header and frontend/src/components/READM
                 <span :data-testid="`file-upload-state-${row.file_name}`">{{ row.upload_state }}</span>
               </template>
             </el-table-column>
+            <el-table-column prop="checksum" :label="$t('table.checksum')" width="110">
+              <template #default="{ row }">
+                <span :data-testid="`file-checksum-${row.file_name}`">{{ row.checksum || "--" }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="object_key" :label="$t('table.objectKey')" min-width="190" />
             <el-table-column :label="$t('table.actions')" width="128">
               <template #default="{ row }">

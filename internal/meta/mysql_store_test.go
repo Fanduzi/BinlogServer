@@ -1075,6 +1075,7 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 		UploadState: "UPLOADED",
 		UploadError: "",
 		UploadedAt:  time.Now(),
+		Checksum:    tasks.ChecksumMatch,
 	}
 
 	mock.ExpectExec(regexp.QuoteMeta(upsertBinlogFileSQL)).
@@ -1092,6 +1093,7 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 			"UPLOADED",
 			"",
 			sqlmock.AnyArg(),
+			tasks.ChecksumMatch,
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	if err := store.UpsertBinlogFile(context.Background(), fileMeta); err != nil {
@@ -1100,10 +1102,10 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 
 	rows := sqlmock.NewRows([]string{
 		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
-		"object_key", "upload_state", "upload_error", "uploaded_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum",
 	}).AddRow(
 		"1", "mysql-bin.000001", "/tmp/mysql-bin.000001", "SEALED", int64(1024), uint32(4), uint32(1200), time.Now().Add(-time.Minute), time.Now(),
-		"prefix/1/mysql-bin.000001", "UPLOADED", "", time.Now(),
+		"prefix/1/mysql-bin.000001", "UPLOADED", "", time.Now(), tasks.ChecksumMatch,
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
 		WithArgs("1").
@@ -1124,6 +1126,9 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 	}
 	if files[0].State != "SEALED" {
 		t.Fatalf("unexpected file state: %s", files[0].State)
+	}
+	if files[0].Checksum != tasks.ChecksumMatch {
+		t.Fatalf("checksum=%q, want %s", files[0].Checksum, tasks.ChecksumMatch)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -1149,16 +1154,16 @@ func TestMySQLTaskStore_ListBinlogFilesReplayOrder(t *testing.T) {
 	oldest := newest.Add(-3 * time.Hour)
 	cols := []string{
 		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
-		"object_key", "upload_state", "upload_error", "uploaded_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum",
 	}
 	// Row order is newest sealed_at first, which used to be the list order.
 	// 000002 sealed is newer than 000003. 000002's open epoch is newer than its seal.
 	catalogRows := func() *sqlmock.Rows {
 		return sqlmock.NewRows(cols).
-			AddRow("1", "mysql-bin.000002", "/data/1/mysql-bin.000002", "SEALED", int64(20), uint32(4), uint32(20), older, newest, "", "LOCAL_ONLY", "", nil).
-			AddRow("1", "mysql-bin.000002.open.e1", "/data/1/mysql-bin.000002.open.e1", "OPEN", int64(8), uint32(4), uint32(8), newest, newest, "", "LOCAL_ONLY", "", nil).
-			AddRow("1", "mysql-bin.000001", "/data/1/mysql-bin.000001", "SEALED", int64(10), uint32(4), uint32(10), oldest, oldest, "", "UPLOADED", "", nil).
-			AddRow("1", "mysql-bin.000003", "/data/1/mysql-bin.000003.open.e4", "OPEN", int64(30), uint32(4), uint32(30), older, older, "", "LOCAL_ONLY", "", nil)
+			AddRow("1", "mysql-bin.000002", "/data/1/mysql-bin.000002", "SEALED", int64(20), uint32(4), uint32(20), older, newest, "", "LOCAL_ONLY", "", nil, nil).
+			AddRow("1", "mysql-bin.000002.open.e1", "/data/1/mysql-bin.000002.open.e1", "OPEN", int64(8), uint32(4), uint32(8), newest, newest, "", "LOCAL_ONLY", "", nil, nil).
+			AddRow("1", "mysql-bin.000001", "/data/1/mysql-bin.000001", "SEALED", int64(10), uint32(4), uint32(10), oldest, oldest, "", "UPLOADED", "", nil, tasks.ChecksumMatch).
+			AddRow("1", "mysql-bin.000003", "/data/1/mysql-bin.000003.open.e4", "OPEN", int64(30), uint32(4), uint32(30), older, older, "", "LOCAL_ONLY", "", nil, nil)
 	}
 
 	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
@@ -1186,6 +1191,9 @@ func TestMySQLTaskStore_ListBinlogFilesReplayOrder(t *testing.T) {
 		if got.FileName != item.name || got.State != item.state || got.FilePath != "/data/1/"+item.base {
 			t.Fatalf("files[%d]=%s %s %s, want %s %s %s", i, got.FileName, got.State, got.FilePath, item.name, item.state, item.base)
 		}
+	}
+	if files[0].Checksum != tasks.ChecksumMatch {
+		t.Fatalf("checksum=%q, want %s", files[0].Checksum, tasks.ChecksumMatch)
 	}
 	if files[0].FileName >= files[len(files)-1].FileName {
 		t.Fatalf("first source index is not lower than last: %s then %s", files[0].FileName, files[len(files)-1].FileName)
