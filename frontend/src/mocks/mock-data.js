@@ -1,5 +1,5 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
-// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, a leftover directory beside a catalog task, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
+// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, a leftover directory beside a catalog task, a sealed-plus-open replay inventory, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -189,11 +189,40 @@ export const mockScenarios = {
     files: [
       {
         file_name: "mysql-bin.000001",
+        file_path: "/data/1/mysql-bin.000001",
         size_bytes: 2048,
         start_pos: 4,
         end_pos: 12345,
         upload_state: "UPLOADED",
         object_key: "bucket/path/mysql-bin.000001",
+      },
+      {
+        file_name: "mysql-bin.000002",
+        file_path: "/data/1/mysql-bin.000002",
+        state: "SEALED",
+        size_bytes: 4096,
+        start_pos: 4,
+        end_pos: 2000,
+        upload_state: "UPLOADED",
+        object_key: "bucket/path/mysql-bin.000002",
+      },
+      {
+        file_name: "mysql-bin.000002",
+        file_path: "/data/1/mysql-bin.000002.open.e1",
+        state: "OPEN",
+        size_bytes: 512,
+        start_pos: 4,
+        end_pos: 512,
+        upload_state: "LOCAL_ONLY",
+      },
+      {
+        file_name: "mysql-bin.000002",
+        file_path: "/data/1/mysql-bin.000002.open.e4",
+        state: "OPEN",
+        size_bytes: 1024,
+        start_pos: 4,
+        end_pos: 1024,
+        upload_state: "LOCAL_ONLY",
       },
     ],
     sources: [

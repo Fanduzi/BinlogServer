@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
+// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for one path per source index, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -83,6 +83,60 @@ func WindowBinlogFilesForReplay(files []BinlogFile, limit int) []BinlogFile {
 	}
 	if len(out) > limit {
 		out = out[len(out)-limit:]
+	}
+	return out
+}
+
+// ReplaySet is the restore argument list for one task.
+// Paths are inventory file_path values, one per source index, ascending.
+// Client is the binary name. ClientHint names which vendor binary to run.
+// source.flavor mysql → client mysqlbinlog, hint "MySQL mysqlbinlog".
+// source.flavor mariadb → client and hint "mariadb-binlog".
+// Any other flavor, including an empty leftover directory, leaves both empty.
+type ReplaySet struct {
+	Flavor     string   `json:"flavor"`
+	Client     string   `json:"client"`
+	ClientHint string   `json:"client_hint"`
+	Paths      []string `json:"paths"`
+}
+
+// ReplayClient maps source.flavor to the binlog client a DBA should run.
+func ReplayClient(flavor string) (client, hint string) {
+	switch strings.ToLower(strings.TrimSpace(flavor)) {
+	case "mysql":
+		return "mysqlbinlog", "MySQL mysqlbinlog"
+	case "mariadb":
+		return "mariadb-binlog", "mariadb-binlog"
+	default:
+		return "", ""
+	}
+}
+
+// SelectReplayFiles keeps one file per source index from an inventory window.
+// The window is the files list: ascending source index, and for one index the
+// sealed name before .open.e* epochs. The kept path is the highest epoch still
+// in that window. A sealed name and one or more .open.e* for the same index
+// keep the highest-epoch open path, not the sealed name and not every epoch.
+// The index is the numeric suffix, the same key the inventory sort uses.
+// Rows that are not a binlog segment, or have an empty file_path, are dropped.
+// An empty window returns an empty slice.
+func SelectReplayFiles(files []BinlogFile) []BinlogFile {
+	out := make([]BinlogFile, 0)
+	for _, file := range files {
+		key := binlogSegmentKey(file)
+		if !key.ok || strings.TrimSpace(file.FilePath) == "" {
+			continue
+		}
+		if n := len(out); n > 0 {
+			prev := binlogSegmentKey(out[n-1])
+			if prev.ok && prev.seq == key.seq {
+				if key.epoch >= prev.epoch {
+					out[n-1] = file
+				}
+				continue
+			}
+		}
+		out = append(out, file)
 	}
 	return out
 }

@@ -10,7 +10,7 @@
 | `useTaskFilter.js` | 任务状态（服务端/全局）与当前页复制状态筛选、排序和 server 分页查询参数 |
 | `useFormatters.js` | 状态、lease、复制信息和时间格式化；列表租约风险只用任务上的主人/epoch 抄本 |
 | `useSourceLookup.js` | source host/port 查询状态 |
-| `useTaskDetail.js` | 任务详情抽屉数据加载；单任务查询仍打 GET `/lease` |
+| `useTaskDetail.js` | 任务详情抽屉数据加载；单任务查询仍打 GET `/lease`，并加载 `GET /api/tasks/{id}/replay` |
 | `useTaskForm.js` / `useBatchCreate.js` | 单任务/批量创建表单状态与动作。遗留目录（空 `cluster_key` 且没有 source host/user）走 `POST /api/tasks/{id}/adopt`，不启动复制；目录任务编辑仍走 `PUT`。批量预览最多 100 个有效行，提交使用一次 `/api/tasks/batch` 请求 |
 | `useAuth.js` / `useWindowState.js` | 认证提示与响应式窗口状态 |
 
