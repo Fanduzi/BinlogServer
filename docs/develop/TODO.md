@@ -108,11 +108,11 @@ DoD（完成定义）：
 6. 已提供失败原因聚合：`GET /api/tasks/{id}/upload-failures/reasons`。
 7. 已提供补传可观测指标：`binlog_server_upload_retry_total`、`binlog_server_upload_retry_last_ts`。
 8. 封存文件上传成功后，用对象 HEAD 的 ETag 与本地封存文件对比（不超过 16MiB 为整文件 MD5，更大为与上传相同的 16MiB 分片 ETag）。核对完成时 `checksum` 为 `match` 或 `mismatch`。`mismatch` 只表示字节不同，不是已校验，也不中断拉流。对象 HEAD 失败时 `checksum` 留空，行仍是 `UPLOADED`，空值不是 `match` 也不是 `mismatch`。Console 任务文件表的「校验」列展示同一字段。
+9. 自动补传队列（后台持续重试）：配置了对象存储的 worker（含单机与 all-in-one）后台重试已封存的 `UPLOAD_FAILED` 行，桶恢复后不必调用补传 API。复用 `RetryFailedUploads` / `ApplySealedUpload`。未封存分段不上传。本机读不到的文件跳过，不把目录行写回失败。手动 `POST /api/tasks/{id}/files/retry-upload` 仍按 `limit` 工作。
 
 未完成：
-1. 自动补传队列（后台持续重试）。
-2. 多云官方 SDK（OBS/COS/OSS）接入实现（当前仅路线已确认）。
-3. 断点续传跨重启恢复（multipart 会话持久化）尚未落地。
+1. 多云官方 SDK（OBS/COS/OSS）接入实现（当前仅路线已确认）。
+2. 断点续传跨重启恢复（multipart 会话持久化）尚未落地。
 
 当前非目标（已明确）：
 1. 不整对象下载后再对比。核对用的是对象 HEAD 的 ETag，见上面第 8 条。

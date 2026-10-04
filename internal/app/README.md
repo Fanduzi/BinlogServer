@@ -1,7 +1,7 @@
 # internal/app Module
 
 ## Files
-- `app.go`: 应用主流程与运行时装配。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。
+- `app.go`: 应用主流程与运行时装配。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。
 - `uploaded_takeover_test.go`: 走 `Run` 的启动接线。checkpoint 只在已上传对象里、本地文件不在时，不报 `SEGMENT_NOT_ON_WORKER`。
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `tracing_test.go`: OTLP HTTP 默认 traces 路径兼容性回归测试。
@@ -25,6 +25,7 @@
 - 封文件前验租把 `LeaseManager` 直接交给 runner（`Verify`），不再经 App 适配。
 - standalone worker 注入进程内 `MemoryLease`（worker_id=`standalone`），与集群走同一扇所有权门。
 - 封文件后上传由 App 注入 `ApplySealedUpload`，执行器只 seal。同一个上传客户端也作为保留清理的对象删除器注入。该客户端能读对象时，接管用它把 checkpoint 已经落在其中的封存 `UPLOADED` 对象读回来。不新增配置项。
+- 同一个上传配置下，worker（含单机和 all-in-one）启动 `RunBackgroundUploadRetry`。桶恢复后，已封存的 `UPLOAD_FAILED` 不必调用补传 API 就会再传。control-plane-only 不跑这个循环。手动 `POST /api/tasks/{id}/files/retry-upload` 仍可用。不新增配置项。
 - `config.DataDir` 注入 scheduler。`binlog_files` 没有该任务的行时，`GET /api/tasks/{id}/files` 扫描这个目录下的本地分段。
 
 ### Minimal Tracing Config Example
