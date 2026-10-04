@@ -1,6 +1,6 @@
 <!--
 input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, forms, and settings
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -376,6 +376,7 @@ note: if this file changes, update this header and frontend/README.md.
       @stop="onStop"
       @delete="onDelete"
       @retry-upload="retryFailedUploads"
+      @download-file="downloadSegmentFile"
       :is-mobile="isMobile"
     />
 
@@ -400,6 +401,7 @@ import enLocale from "element-plus/dist/locale/en.mjs";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   deleteTask,
+  downloadTaskFile,
   listFiles,
   lookupSource,
   retryUpload,
@@ -773,6 +775,44 @@ async function retryFailedUploads(task) {
   } catch (err) {
     ElMessage.error(parseErr(err));
   }
+}
+
+async function downloadSegmentFile(payload) {
+  const task = payload?.task;
+  const name = String(payload?.name || "");
+  if (!task?.id || !name) return;
+  try {
+    const data = await downloadTaskFile(task.id, name);
+    saveDownloadedSegment(name, data);
+    ElMessage.success(t("msg.segmentDownloaded"));
+  } catch (err) {
+    ElMessage.error(await downloadErrorText(err));
+  }
+}
+
+function saveDownloadedSegment(name, data) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function downloadErrorText(err) {
+  const data = err?.response?.data;
+  if (typeof Blob !== "undefined" && data instanceof Blob) {
+    try {
+      const text = (await data.text()).trim();
+      if (text) return text;
+    } catch {
+      // The status text below is enough when the body cannot be read.
+    }
+  }
+  return parseErr(err);
 }
 
 

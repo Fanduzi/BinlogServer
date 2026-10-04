@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, and GET /api/tasks/{id}/replay
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/replay, and GET /api/tasks/{id}/files/{name}
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -133,6 +133,19 @@ func (s *Server) swaggerTaskEventsDoc() {}
 // @Failure 500 {string} string
 // @Router /api/tasks/{id}/files [get]
 func (s *Server) swaggerTaskFilesDoc() {}
+
+// swaggerTaskFileDownloadDoc godoc
+// @Summary Download one inventory binlog segment
+// @Description Streams the raw bytes of one sealed name or .open.e* segment. name is the on-disk basename from GET /api/tasks/{id}/files (the file_path base). Content-Type is application/octet-stream and Content-Disposition filename is that basename. The body length is the file size at open. A slash, backslash, or .. in the name is 400. A missing task is 404. A basename that is not under {data_dir}/{id}/ on this process is 404. Open segments are included while the task is RUNNING or STOPPED.
+// @Tags Tasks
+// @Produce application/octet-stream
+// @Param id path string true "Task ID"
+// @Param name path string true "On-disk basename"
+// @Success 200 {file} file "raw binlog bytes"
+// @Failure 400 {string} string "invalid segment name"
+// @Failure 404 {string} string "task not found or segment not on this process"
+// @Router /api/tasks/{id}/files/{name} [get]
+func (s *Server) swaggerTaskFileDownloadDoc() {}
 
 // swaggerTaskReplayDoc godoc
 // @Summary List the mysqlbinlog replay set for a task

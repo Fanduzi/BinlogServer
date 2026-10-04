@@ -127,6 +127,18 @@
               </template>
             </el-table-column>
             <el-table-column prop="object_key" :label="$t('table.objectKey')" min-width="190" />
+            <el-table-column :label="$t('table.actions')" width="128">
+              <template #default="{ row }">
+                <el-button
+                  v-if="diskBase(row)"
+                  size="small"
+                  :data-testid="`file-download-${diskBase(row)}`"
+                  @click="$emit('download-file', { task, name: diskBase(row) })"
+                >
+                  {{ $t('btn.download') }}
+                </el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </section>
 
@@ -196,7 +208,7 @@ const props = defineProps({
   isLeftover: { type: Function, required: true },
   isMobile: { type: Boolean, default: false },
 });
-defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload']);
+defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload', 'download-file']);
 
 const { t } = useI18n();
 

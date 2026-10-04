@@ -1,12 +1,13 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
+// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, one local inventory segment as raw bytes, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
 
 import (
 	"context"
+	"io"
 	"net/http"
 
 	"binlog_server/internal/binlog"
@@ -35,6 +36,7 @@ type taskService interface {
 	GetCheckpoint(ctx context.Context, id string) (binlog.Checkpoint, bool, error)
 	ListEvents(id string, limit int) ([]tasks.TaskEvent, error)
 	ListFiles(id string, limit int) ([]tasks.BinlogFile, error)
+	OpenTaskSegment(id, name string) (io.ReadCloser, int64, error)
 	RetryFailedUploads(id string, limit int) (tasks.UploadRetryStats, error)
 	GetUploadRetryMetrics() tasks.UploadRetryMetrics
 	ListUploadFailureReasons(id string, limit int) ([]tasks.UploadFailureReason, error)

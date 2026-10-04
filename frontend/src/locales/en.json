@@ -42,6 +42,7 @@
     "startBatchCreate": "Start Batch Create",
     "retryUpload": "Retry Failed Uploads",
     "copyReplay": "Copy replay",
+    "download": "Download",
     "collapseMenu": "Collapse Menu",
     "expandMenu": "Expand Menu",
     "gotIt": "Got it"
@@ -132,6 +133,7 @@
     "taskStopped": "Task #{id} stopped",
     "taskDeleted": "Task #{id} deleted",
     "retryUploadTriggered": "Failed file uploads have been retried",
+    "segmentDownloaded": "Segment downloaded",
     "replayCopied": "Replay command copied",
     "replayCopyFailed": "Could not copy the replay command",
     "previewFirst": "Please click \"Preview & Validate\" first",
