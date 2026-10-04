@@ -12,7 +12,8 @@
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用，以及可重试的 `SOURCE_UNREACHABLE`）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
-- `scheduler_observability.go`: 复制进度（含 at-tip）、checkpoint、事件/文件/运行历史查询。无 task store 时，剩余目录的 files 走磁盘扫描，checkpoint 不编造。
+- `scheduler_observability.go`: 复制进度（含 at-tip）、checkpoint、事件/文件/运行历史查询。无 task store 时，剩余目录的 files 走磁盘扫描。`GetCheckpoint` 仍只读已存储的 checkpoint 行，不从磁盘编造。`ResumePosition` 返回下次 Start 会用的 file/pos；本地 open 分段有完整事件时用该事件，file+pos 与存储行一致时带上 `gtid_set`。
+- `resume.go`: `NextResumePosition`。adopt 的 `KeepLocalSegments` 不改用本地事件。没有本地事件时用 checkpoint；epoch 大于 1 时把该 checkpoint 回拨到位置 4。
 - `scheduler_retry_upload.go`: 上传失败补偿重试（只走失败文件查询，缺查询报错）与失败原因聚合。
 - `sealed_upload.go`: 尽力上传的唯一调用方（`ApplySealedUpload`、`ObjectKey`）；首次封文件后与重试共用。
 - `model.go`: 任务领域模型与状态定义（含复制进度 `AtTip`，以及不进 JSON 的 `KeepLocalSegments`）。
@@ -33,6 +34,7 @@
 - 仅 `SOURCE_UNREACHABLE` 连续失败最多重试 10 次；runner ready 会清零进程内连续失败计数，服务重启后重新计数，其他 retryable source code 不共享此封顶。
 - 事件记录、文件元信息、上传补偿。
 - `BinlogFile.State` 暴露 `OPEN/SEALED` 生命周期，运行中 `/files` 可见当前 segment。
+- `ResumePosition`：`GET /api/tasks/{id}/checkpoint` 使用。与 runner 的 `NextResumePosition` 相同。没有本地完整事件、也没有有效 checkpoint 时返回未命中。`GetCheckpoint` 不因磁盘文件而变成命中。
 - `ListFiles`：file store 返回非空时保持元数据结果。MySQL 目录按源序号升序（同序号封存在前，再按 epoch 升序），`limit` 保留序号最大的窗口，与磁盘扫描相同。file store 未配置，或该任务结果为空且设置了 `WithDataDir` 时，扫描 `{data_dir}/{task_id}` 的封存名与 `.open.e<epoch>`，按同一顺序。`file_name` 是源文件名，`file_path` 是磁盘路径。store 查询失败不改扫磁盘。磁盘列表不编造 checkpoint。没有 task store 且内存无此 id 时，目录里仍有分段则用同一扫描；有 task store 时未知 id 仍是 `task not found`。
 - `OpenTaskSegment`：下载用。名字必须是 `ListFiles` 同一份清单里的磁盘文件名（`file_path` 的 base；没有 `file_path` 时用 `file_name`）。本地 `{data_dir}/{task_id}/{name}` 存在时只读该文件，长度停在打开时的大小。任务是 RUNNING 或 STOPPED 都不会因为分段仍是 OPEN 而跳过。本地没有时，封存且 `UPLOADED`、`object_key` 非空、且已配置对象上传，才从对象存储读，长度是打开对象时的大小；否则 `segment not found on this process`。不跟 catalog `file_path`，也不为 open 分段向对象存储编造字节。未配置上传时与以前一样只认本地。
 - `OpenReplayArchive`：把 `SelectReplayFiles` 在 `ListFiles(limit)` 窗口里留下的 basename 打成一个完整 ustar。字节规则与 `OpenTaskSegment` 相同。没有分段时返回空 tar。任一选中分段打不开或读不完时返回错误，并且不留下临时 tar。
@@ -40,13 +42,13 @@
 - `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与源身份共享。
 - `SameSourceHost`：回环别名是同一台源，非回环仍精确匹配；lookup 与任务观测 host 过滤共用。
 - `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/configure/start 时拒绝同端点 source。
-- Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。
+- Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。run 退出在放下调度锁之前关闭 `done`，所以 StopTask 不会把已经结束的执行留在 `STOPPING`。持久化放开锁之后，如果这次写入的快照已经不是最新一代，会再写当时最新的快照，避免后完成的 `STOPPING` 覆盖先落库的 `STOPPED`。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
 - runner/lease 的自动转换保持 best-effort 持久化语义，并统一记录持久化失败日志。
 
 ## Dependencies
 - Upstream: `internal/api`, `internal/app`。
-- Downstream: `internal/replication` runner, `internal/meta` stores。
+- Downstream: `internal/replication` runner, `internal/binlog` durable resume cursor, `internal/meta` stores。
 
 ## Update Rule
 - 状态机规则、调度策略、外部接口变化时，更新本文件。

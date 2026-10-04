@@ -268,7 +268,7 @@ BinlogServer is structured as a modular control plane with clear separation betw
 | `cmd` | Top-level service startup and migration commands | [cmd/README.md](cmd/README.md) |
 | `internal/api` | HTTP routes, request validation, Swagger, metrics, tracing hooks | [internal/api/README.md](internal/api/README.md) |
 | `internal/app` | Runtime assembly and role lifecycle orchestration | [internal/app/README.md](internal/app/README.md) |
-| `internal/binlog` | Local binlog file writing and checkpoint persistence helpers | [internal/binlog/README.md](internal/binlog/README.md) |
+| `internal/binlog` | Local binlog file writing, the durable resume file:pos, and checkpoint persistence helpers | [internal/binlog/README.md](internal/binlog/README.md) |
 | `internal/config` | YAML and environment-based configuration loading | [internal/config/README.md](internal/config/README.md) |
 | `internal/logging` | Logger setup and log output rotation | [internal/logging/README.md](internal/logging/README.md) |
 | `internal/meta` | Metadata storage, schema checks, lease-backed coordination data | [internal/meta/README.md](internal/meta/README.md) |

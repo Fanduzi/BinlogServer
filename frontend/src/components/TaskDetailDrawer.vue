@@ -1,3 +1,9 @@
+<!--
+input: task, replication, checkpoint, and locale labels
+output: task detail drawer with configured start identity and the resume file:pos / GTID
+pos: operator view of the position the next Start continues from
+note: if this file changes, update this header and frontend/src/components/README.md
+-->
 <template>
   <el-drawer
     :model-value="visible"
@@ -60,7 +66,8 @@
             <div class="detail-item"><span>{{ $t('table.name') }}</span><strong>{{ task.name }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.clusterKey') }}</span><strong>{{ task.cluster_key || "--" }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.source') }}</span><strong>{{ sourceLabel(task) }}</strong></div>
-            <div class="detail-item"><span>{{ $t('detail.startMode') }}</span><strong>{{ task.start?.mode || "--" }}</strong></div>
+            <div class="detail-item"><span>{{ $t('detail.startMode') }}</span><strong data-testid="task-drawer-start">{{ formatStart(task.start) }}</strong></div>
+            <div class="detail-item"><span>{{ $t('detail.checkpoint') }}</span><strong data-testid="task-drawer-resume">{{ formatCheckpoint(checkpoint) }}</strong></div>
             <div class="detail-item"><span>{{ $t('form.semiSync') }}</span><strong>{{ task.source?.semi_sync ? $t('detail.on') : $t('detail.off') }}</strong></div>
             <div class="detail-item"><span>{{ $t('form.retentionDays') }}</span><strong>{{ task.storage?.retention_days || "--" }}</strong></div>
           </div>
@@ -254,6 +261,20 @@ function shellToken(path) {
     return `'${text.replace(/'/g, `'\\''`)}'`;
   }
   return text;
+}
+
+function formatStart(start) {
+  if (!start) return "--";
+  const mode = String(start.mode || "").trim();
+  if (!mode) return "--";
+  if (mode === "FILE_POS") {
+    return `FILE_POS ${start.file || "-"}:${start.pos ?? 0}`;
+  }
+  if (mode === "GTID") {
+    const gtid = String(start.gtid_set || start.gtid || "").trim() || "--";
+    return `GTID ${gtid}`;
+  }
+  return mode;
 }
 
 function diskBase(row) {

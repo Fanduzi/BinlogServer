@@ -1,7 +1,7 @@
 # internal/replication Module
 
 ## Files
-- `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、LATEST 与已在 master file/pos 的 FILE_POS 立即 at-tip、dump preamble 不落盘也不计延迟、idle 仅在 dump 达到 master file/pos 时标 at-tip、heartbeat 跳过落盘）。停止后再启动时，从本地最高 open 分段最后一个完整事件的 `end_log_pos` 续传，不跳到当前 `SHOW MASTER STATUS`，也不把 epoch>1 回拨到位置 4；该分段改名到新 epoch 后继续追加，字节跨停止点连续。没有本地事件的接管仍从位置 4 重建。封文件后把已 seal 文件交给注入的 handler 上传。`KeepLocalSegments` 为真时不改写 adopt 保存的 `FILE_POS`，也不删除其它 epoch 的 `.open.e*`。若某个 open 分段的最后一个完整事件已经结束在该 `FILE_POS`，仍把该分段改名到当前 epoch 后追加，避免新文件只剩 magic 和位点之后的事件。对不上的分段留在原地，新字节写到当前 epoch 的新 open 文件。
+- `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、LATEST 与已在 master file/pos 的 FILE_POS 立即 at-tip、dump preamble 不落盘也不计延迟、idle 仅在 dump 达到 master file/pos 时标 at-tip、heartbeat 跳过落盘）。停止后再启动时调用 `tasks.NextResumePosition`：从本地最高 open 分段最后一个完整事件的 `end_log_pos` 续传，不跳到当前 `SHOW MASTER STATUS`，也不把 epoch>1 回拨到位置 4；该分段改名到新 epoch 后继续追加，字节跨停止点连续。没有本地事件的接管仍从位置 4 重建。封文件后把已 seal 文件交给注入的 handler 上传。`KeepLocalSegments` 为真时不改写 adopt 保存的 `FILE_POS`，也不删除其它 epoch 的 `.open.e*`。若某个 open 分段的最后一个完整事件已经结束在该 `FILE_POS`，仍把该分段改名到当前 epoch 后追加，避免新文件只剩 magic 和位点之后的事件。对不上的分段留在原地，新字节写到当前 epoch 的新 open 文件。
 - `source_identity.go`: MySQL/MariaDB 源库身份，以及永久认证/配置错误与可重试网络错误分类。
 - `resolver.go`: 起点解析，以及 dump 与 SHOW MASTER STATUS file/pos 的保守比较。
 - 其余 `*_test.go`: 复制、恢复、上传等行为测试。

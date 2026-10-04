@@ -1479,3 +1479,91 @@ func TestScheduler_ClaimRunnableTasksSkipsLocalLiveRun(t *testing.T) {
 		t.Fatalf("expected claimed=0 when local run is live, got %d", claimed)
 	}
 }
+
+// stopWriteRaceStore holds the first STOPPING upsert until a later STOPPED
+// upsert has landed, then lets the older write continue.
+type stopWriteRaceStore struct {
+	expiredLeaseTestStore
+	once            sync.Once
+	stoppingEntered chan struct{}
+	releaseStopping chan struct{}
+	stoppedWritten  chan struct{}
+}
+
+func (s *stopWriteRaceStore) UpsertTask(ctx context.Context, task Task) error {
+	if task.State == StateStopping {
+		hold := false
+		s.once.Do(func() { hold = true })
+		if hold {
+			close(s.stoppingEntered)
+			<-s.releaseStopping
+		}
+	}
+	if err := s.expiredLeaseTestStore.UpsertTask(ctx, task); err != nil {
+		return err
+	}
+	if task.State == StateStopped {
+		select {
+		case <-s.stoppedWritten:
+		default:
+			close(s.stoppedWritten)
+		}
+	}
+	return nil
+}
+
+func TestScheduler_StopPersistsStoppedWhenStoppingWriteLandsLater(t *testing.T) {
+	store := &stopWriteRaceStore{
+		expiredLeaseTestStore: expiredLeaseTestStore{tasks: make(map[string]Task)},
+		stoppingEntered:       make(chan struct{}),
+		releaseStopping:       make(chan struct{}),
+		stoppedWritten:        make(chan struct{}),
+	}
+	lease := &fakeLeaseManager{acquireEpoch: 27, acquireOK: true}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+	task := newExpiredOwnedTask("1", "worker-dead", StateLeaseDegraded)
+	store.tasks[task.ID] = task
+	store.expired = []Task{task}
+
+	claimed, err := worker.ClaimExpiredTasks()
+	if err != nil {
+		t.Fatalf("ClaimExpiredTasks returned error: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1, got %d", claimed)
+	}
+	waitRunnerStarted(t, runner)
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateRunning)
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- worker.StopTask(task.ID)
+	}()
+	select {
+	case <-store.stoppingEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("STOPPING persist did not start")
+	}
+	select {
+	case <-store.stoppedWritten:
+	case <-time.After(2 * time.Second):
+		t.Fatal("STOPPED persist did not pass the held STOPPING write")
+	}
+	close(store.releaseStopping)
+
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopTask returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopTask did not return")
+	}
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+}

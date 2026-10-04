@@ -6,9 +6,7 @@
 package replication
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -16,7 +14,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -220,28 +217,30 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	if err != nil {
 		return classifySourceError(err)
 	}
+	var stored binlog.Checkpoint
 	checkpointExists := false
 	if r.checkpointStore != nil {
 		// 持久化 checkpoint 优先级更高，保证重启后的 resumability。
-		checkpoint, ok, err := r.checkpointStore.LoadCheckpoint(ctx, task.ID)
+		var ok bool
+		stored, ok, err = r.checkpointStore.LoadCheckpoint(ctx, task.ID)
 		if err != nil {
 			return err
 		}
-		start, _ = effectiveStartForTakeover(task, start, checkpoint, ok)
 		checkpointExists = ok
 	}
 	// Fresh LATEST has already resolved to SHOW MASTER STATUS, so StartSync is at tip.
-	// A checkpoint means this run may still be catching up.
+	// NextResumePosition is the resume choice shared with GET /api/tasks/{id}/checkpoint.
+	// This call passes the epoch already acquired for this run. A local complete
+	// event wins. With no local event, a stored checkpoint is used, and epoch > 1
+	// rewinds that checkpoint to position 4. Adopt keeps its FILE_POS.
 	atTip := requestedLatest && !checkpointExists
-	// Stop leaves the open segment on disk and the next start gets a new epoch.
-	// Without this, standalone LATEST jumps to the current master (a hole) and an
-	// epoch above 1 rewinds to position 4 and deletes the segment (a re-dump).
-	// Adopt keeps its own FILE_POS and must not take this path.
-	if !task.KeepLocalSegments && strings.TrimSpace(r.dataDir) != "" {
-		if resume, ok := localDurableResume(r.dataDir, task.ID); ok {
-			start = resume
-			atTip = false
+	if resume, ok := tasks.NextResumePosition(r.dataDir, task, stored, checkpointExists); ok {
+		start = tasks.StartConfig{
+			Mode: tasks.StartModeFilePos,
+			File: resume.File,
+			Pos:  resume.Pos,
 		}
+		atTip = false
 	}
 
 	// Step 2: 打开当前 open 文件并构造 writer。
@@ -764,50 +763,6 @@ func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fil
 	return f, writer, path, nil
 }
 
-// localDurableResume is FILE_POS at the last complete event in the highest
-// open segment. File size is not that position when the dump started mid-file.
-// A segment with no complete event is not a resume point.
-func localDurableResume(dataDir, taskID string) (tasks.StartConfig, bool) {
-	dir, ok := safeTaskDir(dataDir, taskID)
-	if !ok {
-		return tasks.StartConfig{}, false
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return tasks.StartConfig{}, false
-	}
-	cands := make([]localSegment, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		seg, ok := classifyLocalSegment(entry.Name())
-		if !ok || seg.epoch < 0 {
-			continue
-		}
-		seg.path = filepath.Join(dir, entry.Name())
-		cands = append(cands, seg)
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].seq != cands[j].seq {
-			return cands[i].seq > cands[j].seq
-		}
-		return cands[i].epoch > cands[j].epoch
-	})
-	for _, seg := range cands {
-		pos, _, _, ok := durableBinlogCursor(seg.path)
-		if !ok {
-			continue
-		}
-		return tasks.StartConfig{
-			Mode: tasks.StartModeFilePos,
-			File: seg.source,
-			Pos:  pos,
-		}, true
-	}
-	return tasks.StartConfig{}, false
-}
-
 // continueDurableOpenSegment moves the open segment that already ends at
 // initialPos onto this epoch so the next append keeps those bytes.
 // A different position is left for cleanup (a new worker rebuilds from pos 4).
@@ -817,7 +772,7 @@ func continueDurableOpenSegment(dir, fileName string, epoch int64, initialPos ui
 	}
 	currentPath := filepath.Join(dir, openFileName(fileName, epoch))
 	if info, err := os.Stat(currentPath); err == nil && info.Size() > 0 {
-		endPos, end, _, ok := durableBinlogCursor(currentPath)
+		endPos, end, _, ok := binlog.DurableCursor(currentPath)
 		if ok && endPos == initialPos && end < info.Size() {
 			return os.Truncate(currentPath, end)
 		}
@@ -865,7 +820,7 @@ func openSegmentEndingAt(dir, fileName string, pos uint32) (localSegment, bool) 
 			continue
 		}
 		seg.path = filepath.Join(dir, entry.Name())
-		endPos, end, _, ok := durableBinlogCursor(seg.path)
+		endPos, end, _, ok := binlog.DurableCursor(seg.path)
 		if !ok || endPos != pos {
 			continue
 		}
@@ -876,64 +831,6 @@ func openSegmentEndingAt(dir, fileName string, pos uint32) (localSegment, bool) 
 		}
 	}
 	return best, found
-}
-
-// durableBinlogCursor walks complete events. pos is the last event's end
-// log_pos. end is the file offset of the first torn byte, or the file size
-// when the segment ends on an event boundary.
-func durableBinlogCursor(path string) (pos uint32, end int64, size int64, ok bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, 0, 0, false
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return 0, 0, 0, false
-	}
-	size = info.Size()
-	if size < 4 {
-		return 0, 0, size, false
-	}
-	magic := make([]byte, 4)
-	if _, err := io.ReadFull(f, magic); err != nil || !bytes.Equal(magic, binlogMagic) {
-		return 0, 0, size, false
-	}
-	offset := int64(4)
-	hdr := make([]byte, replication.EventHeaderSize)
-	var lastPos uint32
-	var lastEnd int64
-	found := false
-	for offset+int64(replication.EventHeaderSize) <= size {
-		if _, err := io.ReadFull(f, hdr); err != nil {
-			break
-		}
-		eventSize := int64(binary.LittleEndian.Uint32(hdr[9:13]))
-		logPos := binary.LittleEndian.Uint32(hdr[13:17])
-		if eventSize < int64(replication.EventHeaderSize) || offset+eventSize > size {
-			break
-		}
-		if _, err := f.Seek(eventSize-int64(replication.EventHeaderSize), io.SeekCurrent); err != nil {
-			break
-		}
-		offset += eventSize
-		lastPos = logPos
-		lastEnd = offset
-		found = true
-	}
-	if !found || lastPos == 0 {
-		return 0, 0, size, false
-	}
-	return lastPos, lastEnd, size, true
-}
-
-func safeTaskDir(dataDir, taskID string) (string, bool) {
-	dataDir = strings.TrimSpace(dataDir)
-	taskID = strings.TrimSpace(taskID)
-	if dataDir == "" || taskID == "" || taskID != filepath.Base(taskID) || strings.HasPrefix(taskID, ".") {
-		return "", false
-	}
-	return filepath.Join(dataDir, taskID), true
 }
 
 // classifyLocalSegment matches tasks.classifyBinlogSegment. epoch -1 is a sealed name.
