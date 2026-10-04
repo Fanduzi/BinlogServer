@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/tasks/{id}/replay` accepts `stop_datetime` (UTC) and an optional `start_datetime`. The response keeps one path per source index, using the same sealed-versus-open rule as the limit replay, and adds `command`: `TZ=UTC mysqlbinlog` or `TZ=UTC mariadb-binlog` with `--stop-datetime` and, when start is set, `--start-datetime`. The window is the events those clients will apply. `limit` is not applied on this path. `GET /api/tasks/{id}/replay/archive` with the same parameters downloads that selection. An empty window is HTTP 200 with empty `paths` and `command`. An unparseable datetime is HTTP 400. A missing task is 404 `task not found`. The Console task detail can enter the times, copy the command, and download the archive. Without `stop_datetime`, replay and the archive stay the limit window. No new config key. No schema migration. Binlog Server still does not restore the full backup.
+
 ### Changed
 
 - Operator download examples in README, README_ZH, the deployment guide, and the landing page now pin `v0.5.26`. The checksum example is the published `v0.5.26` `checksums.txt`.

@@ -1,6 +1,6 @@
 <!--
 input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, replay-set tar download, forms, and settings
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, replay-set tar download, a point-in-time replay command, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -378,6 +378,8 @@ note: if this file changes, update this header and frontend/README.md.
       @retry-upload="retryFailedUploads"
       @download-file="downloadSegmentFile"
       @download-replay="downloadReplaySet"
+      @download-pitr="downloadPitrSet"
+      :load-pitr="loadPitrReplay"
       :is-mobile="isMobile"
     />
 
@@ -404,6 +406,7 @@ import {
   deleteTask,
   downloadReplayArchive,
   downloadTaskFile,
+  listPITRReplay,
   listFiles,
   lookupSource,
   retryUpload,
@@ -776,6 +779,26 @@ async function retryFailedUploads(task) {
     ElMessage.success(t("msg.retryUploadTriggered"));
   } catch (err) {
     ElMessage.error(parseErr(err));
+  }
+}
+
+async function loadPitrReplay(task, stop, start) {
+  return listPITRReplay(task.id, stop, start);
+}
+
+async function downloadPitrSet(payload) {
+  const task = payload?.task;
+  const stop = String(payload?.stop || "").trim();
+  if (!task?.id || !stop) return;
+  try {
+    const data = await downloadReplayArchive(task.id, taskDetailInventoryLimit, {
+      stop,
+      start: String(payload?.start || "").trim(),
+    });
+    saveDownloadedSegment(`task-${task.id}-replay.tar`, data);
+    ElMessage.success(t("msg.pitrDownloaded"));
+  } catch (err) {
+    ElMessage.error(await downloadErrorText(err));
   }
 }
 
@@ -1773,6 +1796,21 @@ h1 {
 
 .replay-set-empty {
   margin: 0;
+}
+
+.pitr-set {
+  margin-top: 12px;
+}
+
+.pitr-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.pitr-fields .el-input {
+  width: 220px;
 }
 
 .replay-set-command {
