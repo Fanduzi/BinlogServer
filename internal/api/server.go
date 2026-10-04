@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, the resume checkpoint the next Start continues from, one inventory segment as raw bytes from local disk or a sealed uploaded object, one ustar of the replay selection, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
+// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, the resume checkpoint the next Start continues from, one inventory segment as raw bytes from local disk or a sealed uploaded object, one ustar of the replay selection, a UTC point-in-time window on that same replay route, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -9,6 +9,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"time"
 
 	"binlog_server/internal/binlog"
 	_ "binlog_server/internal/swaggerdocs"
@@ -39,6 +40,8 @@ type taskService interface {
 	ListFiles(id string, limit int) ([]tasks.BinlogFile, error)
 	OpenTaskSegment(id, name string) (io.ReadCloser, int64, error)
 	OpenReplayArchive(id string, limit int) (io.ReadCloser, int64, error)
+	PITRReplay(id string, start *time.Time, stop time.Time) (tasks.PITRSet, error)
+	OpenPITRArchive(id string, start *time.Time, stop time.Time) (io.ReadCloser, int64, error)
 	RetryFailedUploads(id string, limit int) (tasks.UploadRetryStats, error)
 	GetUploadRetryMetrics() tasks.UploadRetryMetrics
 	ListUploadFailureReasons(id string, limit int) ([]tasks.UploadFailureReason, error)

@@ -504,6 +504,19 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 源库以后又恢复、任务再次 `start` 并且连上源时，新的 epoch 会删掉其他 epoch 的 `.open.e*`。封存文件还在。要留住当前这段未封存的尾部，先把 `{data_dir}/{task_id}/` 复制出来。源已经连不上时，`start` 在打开本地文件之前失败，不会走到删除这一步。
 
+### 7.5 恢复到一个时间点
+
+全量备份由你自己恢复。Binlog Server 只给出从那个备份追到某个时间点所需的分段，以及一条 `mysqlbinlog` / `mariadb-binlog` 命令。
+
+时间是 UTC。`stop_datetime` 必填，`start_datetime` 可选。`YYYY-MM-DD HH:MM:SS` 按 UTC 理解。每个序号仍只传一个文件，规则与 7.2 相同。选中的分段是事件头时间落在这个窗口里的那些：停止时间是开区间右端，与 `--stop-datetime` 相同；给了开始时间时，左端含这个时刻。这条查询看整份清单，不用回放接口的 `limit`。本地文件优先；本地没有时，只读封存且 `UPLOADED`、`object_key` 非空的对象。某个已选序号打不开时，响应是错误。窗口里没有分段时 `paths` 是 `[]`，`command` 是空字符串。
+
+```bash
+curl -G -sS "http://127.0.0.1:8080/api/tasks/1/replay" \
+  --data-urlencode "stop_datetime=2024-01-01 01:30:00"
+```
+
+响应里的 `command` 已经带 `TZ=UTC` 和 `--stop-datetime`。给了开始时间时还有 `--start-datetime`。先恢复你自己的全量备份，再执行这条命令，把输出管道到恢复库。Console 任务详情可以填写这两个时间并复制同一条命令，也可以下载这个窗口的 tar：`GET /api/tasks/1/replay/archive` 使用同一对参数。参数和错误句子见 [API 参考「按时间点选取分段」](../reference/api.md#pitr-replay)。
+
 ---
 
 ## 8. Replay local segments when the source is gone
@@ -598,3 +611,16 @@ After that upload, `GET /api/tasks/{id}/files` and the Checksum column in the Co
 The next time the replication loop opens a file, it deletes other sealed local files whose modification time is older than `storage.retention_days`. The current `.open.e<epoch>` file stays. Retention does not delete other open segments, and it does not delete an object for an open segment. A sealed segment that was uploaded is deleted from the bucket in that same purge, and its catalog row is removed. A segment still inside retention stays in the bucket. If the object delete fails, the local file stays, `last_error` begins with `OBJECT_PURGE_FAILED`, and the next file open tries the delete again. When that delete succeeds, replication continues on the next binlog file. It does not stay in retry with `sealed file already exists` for the file just sealed.
 
 If the source comes back and a later `start` connects for a task that already has metadata, the new epoch deletes `.open.e*` files from other epochs. Sealed files stay. Copy `{data_dir}/{task_id}/` first when you still need the unsealed tail. A task adopted from a leftover directory does not do that delete: start opens the next `.open.e<epoch>` in the same directory and leaves the existing sealed and open segments in place. When the source is unreachable, `start` fails before it opens a local file, so it does not reach that delete. Files older than `storage.retention_days` can still be removed when a file is opened.
+
+### 8.5 Restore to a datetime
+
+You restore the full backup yourself. Binlog Server returns the segments that carry that backup forward to a datetime, and one `mysqlbinlog` or `mariadb-binlog` command.
+
+Times are UTC. `stop_datetime` is required. `start_datetime` is optional. `YYYY-MM-DD HH:MM:SS` is read as UTC. One file per index still follows section 8.2. A segment is included when its event-header times meet the window: the stop time is the exclusive end, the same rule as `--stop-datetime`. When a start time is set, that instant is included, the same rule as `--start-datetime`. This query reads the whole inventory. It does not apply the replay `limit`. A local file wins. A missing local sealed file is read from object storage only when that row is `UPLOADED` and `object_key` is non-empty. If one selected segment cannot be opened, the response is an error. An empty window returns `paths: []` and an empty `command`.
+
+```bash
+curl -G -sS "http://127.0.0.1:8080/api/tasks/1/replay" \
+  --data-urlencode "stop_datetime=2024-01-01 01:30:00"
+```
+
+`command` already includes `TZ=UTC` and `--stop-datetime`. A start time adds `--start-datetime`. Restore your own full backup, then run that command and pipe it into the restore server. The Console task detail accepts both times, copies the same command, and can download that window: `GET /api/tasks/1/replay/archive` takes the same parameters. The parameter list and error sentences are in [API reference section 5.7](../reference/api.md#pitr-replay).

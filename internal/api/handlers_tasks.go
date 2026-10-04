@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -623,7 +623,22 @@ func (s *Server) handleTaskFileDownload(w http.ResponseWriter, r *http.Request, 
 
 // handleTaskReplay returns one on-disk path per source index from the files
 // inventory window, plus the binlog client for source.flavor.
+// stop_datetime switches the same route to the UTC point-in-time window.
 func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID string) {
+	start, stop, enabled, qerr := parsePITRQuery(r)
+	if qerr != nil {
+		http.Error(w, qerr.Error(), http.StatusBadRequest)
+		return
+	}
+	if enabled {
+		set, err := s.tasks.PITRReplay(taskID, start, stop)
+		if err != nil {
+			writeSegmentOpenError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, set)
+		return
+	}
 	files, err := s.tasks.ListFiles(taskID, parseLimit(r, 200))
 	if err != nil {
 		if errors.Is(err, tasks.ErrTaskNotFound) {
@@ -657,27 +672,31 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 }
 
 // handleTaskReplayArchive streams one ustar of the replay selection.
-// limit is the same inventory window as GET /replay. Member names are the
-// basenames of those paths. Bytes follow GET /files/{name}. An empty selection
-// is 200 and an empty tar. A segment that cannot be opened fails the request
-// before any archive byte is written.
+// limit is the same inventory window as GET /replay. stop_datetime uses the
+// point-in-time selection instead. Member names are the basenames of those
+// paths. Bytes follow GET /files/{name}. An empty selection is 200 and an
+// empty tar. A segment that cannot be opened fails the request before any
+// archive byte is written.
 func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	body, size, err := s.tasks.OpenReplayArchive(taskID, parseLimit(r, 200))
+	start, stop, enabled, qerr := parsePITRQuery(r)
+	if qerr != nil {
+		http.Error(w, qerr.Error(), http.StatusBadRequest)
+		return
+	}
+	var body io.ReadCloser
+	var size int64
+	var err error
+	if enabled {
+		body, size, err = s.tasks.OpenPITRArchive(taskID, start, stop)
+	} else {
+		body, size, err = s.tasks.OpenReplayArchive(taskID, parseLimit(r, 200))
+	}
 	if err != nil {
-		switch {
-		case errors.Is(err, tasks.ErrInvalidSegmentName):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		case errors.Is(err, tasks.ErrTaskNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
-		case errors.Is(err, tasks.ErrSegmentNotOnProcess):
-			http.Error(w, err.Error(), http.StatusNotFound)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writeSegmentOpenError(w, err)
 		return
 	}
 	defer body.Close()
@@ -753,6 +772,52 @@ func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+// parsePITRQuery reads the point-in-time window. Neither parameter leaves
+// the limit replay path unchanged. stop_datetime is required once either
+// parameter is present. An empty start_datetime is the stop-only window.
+func parsePITRQuery(r *http.Request) (start *time.Time, stop time.Time, enabled bool, err error) {
+	q := r.URL.Query()
+	_, stopSet := q["stop_datetime"]
+	_, startSet := q["start_datetime"]
+	if !stopSet && !startSet {
+		return nil, time.Time{}, false, nil
+	}
+	if !stopSet || strings.TrimSpace(q.Get("stop_datetime")) == "" {
+		if !stopSet {
+			return nil, time.Time{}, false, errors.New("stop_datetime is required")
+		}
+		return nil, time.Time{}, false, errors.New("invalid stop_datetime")
+	}
+	stop, err = tasks.ParsePITRDatetime(q.Get("stop_datetime"))
+	if err != nil {
+		return nil, time.Time{}, false, errors.New("invalid stop_datetime")
+	}
+	if startSet && strings.TrimSpace(q.Get("start_datetime")) != "" {
+		parsed, serr := tasks.ParsePITRDatetime(q.Get("start_datetime"))
+		if serr != nil {
+			return nil, time.Time{}, false, errors.New("invalid start_datetime")
+		}
+		if parsed.After(stop) {
+			return nil, time.Time{}, false, errors.New("start_datetime is after stop_datetime")
+		}
+		start = &parsed
+	}
+	return start, stop, true, nil
+}
+
+func writeSegmentOpenError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, tasks.ErrInvalidSegmentName):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, tasks.ErrTaskNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, tasks.ErrSegmentNotOnProcess):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // parseLimit 解析通用分页参数 limit，失败时回退默认值。

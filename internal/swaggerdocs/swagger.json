@@ -844,7 +844,7 @@
         },
         "/api/tasks/{id}/replay": {
             "get": {
-                "description": "One on-disk file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. limit is the same inventory window as GET /files. client is mysqlbinlog or mariadb-binlog from source.flavor.",
+                "description": "One on-disk file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. Without stop_datetime, limit is the same inventory window as GET /files and the body omits command. stop_datetime (UTC) selects the point-in-time window instead of limit: paths cover events at or after optional start_datetime and before stop_datetime, and command is the TZ=UTC client invocation. An empty cover is 200 with empty paths and command. Invalid datetimes are 400.",
                 "produces": [
                     "application/json"
                 ],
@@ -862,8 +862,20 @@
                     },
                     {
                         "type": "integer",
-                        "description": "Inventory window limit (same as files)",
+                        "description": "Inventory window limit (same as files). Ignored when stop_datetime is set.",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "UTC stop time, YYYY-MM-DD HH:MM:SS or RFC3339. Required for the point-in-time window.",
+                        "name": "stop_datetime",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional UTC start time. Requires stop_datetime.",
+                        "name": "start_datetime",
                         "in": "query"
                     }
                 ],
@@ -871,7 +883,13 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/tasks.ReplaySet"
+                            "$ref": "#/definitions/tasks.PITRSet"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid stop_datetime, invalid start_datetime, stop_datetime is required, or start_datetime is after stop_datetime",
+                        "schema": {
+                            "type": "string"
                         }
                     },
                     "404": {
@@ -891,7 +909,7 @@
         },
         "/api/tasks/{id}/replay/archive": {
             "get": {
-                "description": "USTAR archive whose members are the basenames from GET /api/tasks/{id}/replay for the same limit, one per source index. A sealed name and .open.e* still keep the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name} open rules: a local file wins, including *.open.e* while RUNNING or STOPPED; a missing local file is read only for a sealed UPLOADED row with a non-empty object_key. An empty selection is 200 and an empty tar. If any selected segment cannot be opened, the response is an error and the body is not a tar. A missing task is 404 task not found.",
+                "description": "USTAR archive whose members are the basenames from GET /api/tasks/{id}/replay for the same limit, one per source index. stop_datetime uses that route's point-in-time window instead of limit. A sealed name and .open.e* still keep the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name} open rules: a local file wins, including *.open.e* while RUNNING or STOPPED; a missing local file is read only for a sealed UPLOADED row with a non-empty object_key. An empty selection is 200 and an empty tar. If any selected segment cannot be opened, the response is an error and the body is not a tar. A missing task is 404 task not found.",
                 "produces": [
                     "application/x-tar"
                 ],
@@ -909,8 +927,20 @@
                     },
                     {
                         "type": "integer",
-                        "description": "Inventory window limit (same as replay)",
+                        "description": "Inventory window limit (same as replay). Ignored when stop_datetime is set.",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "UTC stop time. Same window as GET /api/tasks/{id}/replay.",
+                        "name": "stop_datetime",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional UTC start time. Requires stop_datetime.",
+                        "name": "start_datetime",
                         "in": "query"
                     }
                 ],
@@ -922,7 +952,7 @@
                         }
                     },
                     "400": {
-                        "description": "invalid segment name",
+                        "description": "invalid segment name or invalid datetime",
                         "schema": {
                             "type": "string"
                         }
@@ -1659,6 +1689,7 @@
             "type": "object",
             "properties": {
                 "checksum": {
+                    "description": "Checksum is match when the stored object is the same bytes as the sealed file.\nmismatch means that comparison finished and the bytes differ.\nEmpty means the object HEAD did not finish. Empty is not verified.",
                     "type": "string"
                 },
                 "created_at": {
@@ -1702,13 +1733,16 @@
                 }
             }
         },
-        "tasks.ReplaySet": {
+        "tasks.PITRSet": {
             "type": "object",
             "properties": {
                 "client": {
                     "type": "string"
                 },
                 "client_hint": {
+                    "type": "string"
+                },
+                "command": {
                     "type": "string"
                 },
                 "flavor": {

@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
+// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, the point-in-time replay window, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -276,15 +276,24 @@ export async function listFiles(id, limit = 80) {
   return data;
 }
 
-export async function downloadReplayArchive(id, limit = 80) {
+export async function downloadReplayArchive(id, limit = 80, window) {
   const path = `/api/tasks/${encodeURIComponent(id)}/replay/archive`;
+  const params = {};
+  const stop = String(window?.stop || "").trim();
+  if (stop) {
+    params.stop_datetime = stop;
+    const start = String(window?.start || "").trim();
+    if (start) params.start_datetime = start;
+  } else {
+    params.limit = limit;
+  }
   if (useMockAPI) {
-    const body = await mockRequest("GET", path, { params: { limit } });
+    const body = await mockRequest("GET", path, { params });
     const text = typeof body === "string" ? body : JSON.stringify(body ?? "");
     return new Blob([text], { type: "application/x-tar" });
   }
   const { data } = await http.get(path, {
-    params: { limit },
+    params,
     responseType: "blob",
   });
   return data;
@@ -299,6 +308,17 @@ export async function listReplay(id, limit = 80) {
   const { data } = await http.get(`/api/tasks/${id}/replay`, {
     params: { limit },
   });
+  return data;
+}
+
+export async function listPITRReplay(id, stop, start) {
+  const params = { stop_datetime: stop };
+  const startText = String(start || "").trim();
+  if (startText) params.start_datetime = startText;
+  if (useMockAPI) {
+    return mockRequest("GET", `/api/tasks/${id}/replay`, { params });
+  }
+  const { data } = await http.get(`/api/tasks/${id}/replay`, { params });
   return data;
 }
 

@@ -1,7 +1,7 @@
 <!--
-input: task, replication, checkpoint, and locale labels
-output: task detail drawer with configured start identity and the resume file:pos / GTID
-pos: operator view of the position the next Start continues from
+input: task, replication, checkpoint, locale labels, and loadPitr for the datetime window
+output: task detail drawer with configured start identity, the resume file:pos / GTID, and a point-in-time replay command
+pos: operator view of the position the next Start continues from and the datetime restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
 -->
 <template>
@@ -111,6 +111,53 @@ note: if this file changes, update this header and frontend/src/components/READM
             </div>
             <pre v-if="replayCommand" class="replay-set-command" data-testid="task-replay-command">{{ replayCommand }}</pre>
             <p v-else class="replay-set-empty" data-testid="task-replay-command">{{ $t('detail.replayEmpty') }}</p>
+            <div class="pitr-set" data-testid="task-pitr">
+              <div class="replay-set-label">
+                <strong>{{ $t('detail.pitr') }}</strong>
+                <span class="replay-set-hint">{{ $t('detail.pitrHint') }}</span>
+              </div>
+              <div class="pitr-fields">
+                <el-input
+                  v-model="pitrStop"
+                  data-testid="task-pitr-stop"
+                  size="small"
+                  :placeholder="$t('detail.pitrStop')"
+                />
+                <el-input
+                  v-model="pitrStart"
+                  data-testid="task-pitr-start"
+                  size="small"
+                  :placeholder="$t('detail.pitrStart')"
+                />
+                <el-button
+                  data-testid="task-pitr-build"
+                  size="small"
+                  :disabled="!pitrStop.trim()"
+                  @click="buildPitr"
+                >
+                  {{ $t('btn.buildPitr') }}
+                </el-button>
+                <el-button
+                  data-testid="task-pitr-copy"
+                  size="small"
+                  :disabled="!pitrCommand"
+                  @click="copyPitr"
+                >
+                  {{ $t('btn.copyPitr') }}
+                </el-button>
+                <el-button
+                  data-testid="task-pitr-download"
+                  size="small"
+                  :disabled="!pitrStop.trim()"
+                  @click="$emit('download-pitr', { task, stop: pitrStop.trim(), start: pitrStart.trim() })"
+                >
+                  {{ $t('btn.downloadPitr') }}
+                </el-button>
+              </div>
+              <p v-if="pitrError" class="replay-set-empty" data-testid="task-pitr-error">{{ pitrError }}</p>
+              <pre v-else-if="pitrCommand" class="replay-set-command" data-testid="task-pitr-command">{{ pitrCommand }}</pre>
+              <p v-else-if="pitrResult" class="replay-set-empty" data-testid="task-pitr-command">{{ $t('detail.pitrEmpty') }}</p>
+            </div>
           </div>
           <div class="detail-panel-toolbar">
             <el-button
@@ -201,7 +248,7 @@ note: if this file changes, update this header and frontend/src/components/READM
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 
@@ -227,11 +274,26 @@ const props = defineProps({
   formatReplicationReason: { type: Function, required: true },
   formatTs: { type: Function, required: true },
   isLeftover: { type: Function, required: true },
+  loadPitr: { type: Function, required: true },
   isMobile: { type: Boolean, default: false },
 });
-defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload', 'download-file', 'download-replay']);
+defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retry-upload', 'download-file', 'download-replay', 'download-pitr']);
 
 const { t } = useI18n();
+
+const pitrStop = ref("");
+const pitrStart = ref("");
+const pitrResult = ref(null);
+const pitrError = ref("");
+
+watch(() => props.task?.id, () => {
+  pitrStop.value = "";
+  pitrStart.value = "";
+  pitrResult.value = null;
+  pitrError.value = "";
+});
+
+const pitrCommand = computed(() => String(pitrResult.value?.command || ""));
 
 const replayHint = computed(() => {
   const hint = String(props.replay?.client_hint || "").trim();
@@ -239,6 +301,36 @@ const replayHint = computed(() => {
 });
 
 const replayCommand = computed(() => formatReplayCommand(props.replay));
+
+async function buildPitr() {
+  const stop = pitrStop.value.trim();
+  if (!stop || !props.task) return;
+  pitrError.value = "";
+  pitrResult.value = null;
+  try {
+    pitrResult.value = await props.loadPitr(props.task, stop, pitrStart.value.trim());
+  } catch (err) {
+    pitrError.value = pitrErrorText(err);
+  }
+}
+
+function pitrErrorText(err) {
+  const data = err?.response?.data;
+  if (typeof data === "string" && data.trim()) return data.trim();
+  if (data?.error) return String(data.error);
+  return err?.message || t("msg.unknownError");
+}
+
+async function copyPitr() {
+  const text = pitrCommand.value;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success(t("msg.pitrCopied"));
+  } catch {
+    ElMessage.error(t("msg.pitrCopyFailed"));
+  }
+}
 
 async function copyReplay() {
   const text = replayCommand.value;
