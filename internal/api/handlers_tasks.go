@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -577,8 +577,10 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleTaskFileDownload streams one inventory segment from this process's data_dir.
-// name is the on-disk basename. Replay paths are unchanged.
+// handleTaskFileDownload streams one inventory segment.
+// A local {data_dir}/{id}/{name} file wins, including an open segment.
+// A missing local sealed file with upload_state UPLOADED and a non-empty
+// object_key is read from the configured object store. Replay paths are unchanged.
 func (s *Server) handleTaskFileDownload(w http.ResponseWriter, r *http.Request, taskID, name string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

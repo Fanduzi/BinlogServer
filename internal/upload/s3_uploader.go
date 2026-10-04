@@ -1,14 +1,18 @@
 // Package upload provides module-level functionality for upload.
-// input: local binlog files, object store credentials/config, upload retry context
-// output: object storage upload operations and upload status/error outcomes
-// pos: outbound storage adapter layer for sealed binlog artifact distribution
+// input: local binlog files, object store credentials/config, upload retry context, and an existing object key
+// output: sealed-file upload, and a reader plus the object size at open for one stored key
+// pos: outbound storage adapter for sealed binlog upload and for reading an already uploaded object
 // note: if this file changes, update this header and module README.md.
 package upload
 
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -60,4 +64,42 @@ func NewS3Uploader(cfg S3Config) (*S3Uploader, error) {
 func (u *S3Uploader) UploadFile(ctx context.Context, _ string, localPath, objectKey string) error {
 	_, err := u.client.FPutObject(ctx, u.bucket, filepath.ToSlash(objectKey), localPath, minio.PutObjectOptions{})
 	return err
+}
+
+// OpenObject opens one stored object and reports its size at open.
+// The key is the catalog object_key, slash-normalized the same way as UploadFile.
+// A missing object is os.ErrNotExist. The caller caps the read at the returned size.
+func (u *S3Uploader) OpenObject(ctx context.Context, objectKey string) (io.ReadCloser, int64, error) {
+	if u == nil || u.client == nil {
+		return nil, 0, fmt.Errorf("object storage is not configured")
+	}
+	key := filepath.ToSlash(strings.TrimSpace(objectKey))
+	if key == "" {
+		return nil, 0, fmt.Errorf("empty object key")
+	}
+	obj, err := u.client.GetObject(ctx, u.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		if objectMissing(err) {
+			return nil, 0, os.ErrNotExist
+		}
+		return nil, 0, err
+	}
+	info, err := obj.Stat()
+	if err != nil {
+		_ = obj.Close()
+		if objectMissing(err) {
+			return nil, 0, os.ErrNotExist
+		}
+		return nil, 0, err
+	}
+	if info.Size < 0 {
+		_ = obj.Close()
+		return nil, 0, fmt.Errorf("object size unknown")
+	}
+	return obj, info.Size, nil
+}
+
+func objectMissing(err error) bool {
+	resp := minio.ToErrorResponse(err)
+	return resp.Code == "NoSuchKey" || resp.StatusCode == http.StatusNotFound
 }
