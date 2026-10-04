@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (sealed before open epochs of the same index; limit keeps the highest indexes) including checksum, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (sealed before open epochs of the same index; limit keeps the highest indexes) including checksum, DeleteBinlogFile by task id and file name, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -230,6 +230,11 @@ ON DUPLICATE KEY UPDATE
 // match the disk scan: ascending source index, sealed before open epochs of
 // that index, and the highest indexes when limit is smaller than the total.
 // The failed-upload query keeps its own sealed_at order.
+const deleteBinlogFileSQL = `
+DELETE FROM binlog_files
+WHERE task_id = ? AND file_name = ?
+`
+
 const listBinlogFilesSQL = `
 SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
        object_key, upload_state, upload_error, uploaded_at, checksum
@@ -1185,6 +1190,22 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 			uploadedAt,
 			meta.Checksum,
 		)
+		return err
+	})
+}
+
+// DeleteBinlogFile removes one catalog row. Zero rows is success.
+func (s *MySQLTaskStore) DeleteBinlogFile(ctx context.Context, taskID, fileName string) error {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.delete_binlog_file")
+	defer endMetaSpan(span)
+
+	taskID = strings.TrimSpace(taskID)
+	fileName = strings.TrimSpace(fileName)
+	if taskID == "" || fileName == "" {
+		return fmt.Errorf("task id and file name are required")
+	}
+	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		_, err := s.db.ExecContext(ctx, deleteBinlogFileSQL, taskID, fileName)
 		return err
 	})
 }

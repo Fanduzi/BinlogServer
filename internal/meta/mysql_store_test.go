@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, DeleteBinlogFile by task id and file name, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1657,6 +1657,31 @@ func TestMySQLTaskStore_RenewAndReleaseWorkerRegistration(t *testing.T) {
 	}
 	if err := store.ReleaseWorkerRegistration(context.Background(), "worker-a", "session-a"); err != nil {
 		t.Fatalf("ReleaseWorkerRegistration returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_DeleteBinlogFile(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	if err := store.DeleteBinlogFile(context.Background(), " ", "mysql-bin.000001"); err == nil {
+		t.Fatal("expected empty task id error")
+	}
+	if err := store.DeleteBinlogFile(context.Background(), "1", " "); err == nil {
+		t.Fatal("expected empty file name error")
+	}
+	mock.ExpectExec(regexp.QuoteMeta(deleteBinlogFileSQL)).
+		WithArgs("1", "mysql-bin.000001").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.DeleteBinlogFile(context.Background(), "1", "mysql-bin.000001"); err != nil {
+		t.Fatalf("DeleteBinlogFile returned error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)

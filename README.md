@@ -217,7 +217,7 @@ Do not use permissive development defaults in production. Follow these mandatory
 
 ### 3. Local Retention &amp; Object Storage Upload
 - Local binlogs are stored at `{data_dir}/{task_id}/`.
-- Expired sealed segments older than `storage.retention_days` are automatically purged by the replication loop. The active `OPEN` segment is never deleted.
+- Expired sealed segments older than `storage.retention_days` are purged when the replication loop opens a file. The active `OPEN` segment is not deleted. Retention does not delete an open segment or its object. A sealed segment that was uploaded is deleted from the bucket in that same purge, and its catalog row is removed. A segment still inside retention stays in the bucket. If the object delete fails, the local file stays, the task retries with `last_error` beginning `OBJECT_PURGE_FAILED`, and the next file open tries the delete again. That failure does not change `checksum`: `match`, `mismatch`, and an empty checksum stay as they were. Empty is not `match` and not `mismatch`. No new config key. No schema migration.
 - S3 upload is configured via environment variables or YAML:
   ```bash
   export BINLOG_SERVER_UPLOAD_ENDPOINT="s3.us-east-1.amazonaws.com"
@@ -234,7 +234,7 @@ Do not use permissive development defaults in production. Follow these mandatory
   curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
     "http://localhost:8080/api/tasks/<task-id>/files/mysql-bin.000004.open.e1"
   ```
-- Download that same replay selection as one tar after local retention has purged sealed segments that already live in object storage. `GET /api/tasks/<task-id>/replay/archive` uses the same `limit` as `GET /api/tasks/<task-id>/replay`. The body is `application/x-tar`. Each member is the basename, not a host path. A local file still wins. A missing local sealed file is read from object storage only when that catalog row is `UPLOADED` with a non-empty `object_key`. An empty selection is an empty tar. If one selected segment cannot be opened, the response is an error and not a partial tar. Extract it and pass those basenames to `mysqlbinlog` or `mariadb-binlog`. The JSON replay command is unchanged.
+- Download that replay selection as one tar. `GET /api/tasks/<task-id>/replay/archive` uses the same `limit` as `GET /api/tasks/<task-id>/replay`. The body is `application/x-tar`. Each member is the basename, not a host path. A local file still wins. A missing local sealed file is read from object storage only when that catalog row is still `UPLOADED` with a non-empty `object_key`. Retention removes that row and the object together, so a purged segment is not in the archive. An empty selection is an empty tar. If one selected segment cannot be opened, the response is an error and not a partial tar. Extract it and pass those basenames to `mysqlbinlog` or `mariadb-binlog`. The JSON replay command is unchanged.
   ```bash
   curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
     "http://localhost:8080/api/tasks/<task-id>/replay/archive?limit=200"
@@ -275,7 +275,7 @@ BinlogServer is structured as a modular control plane with clear separation betw
 | `internal/replication` | MySQL replication pull loop and durable local write path | [internal/replication/README.md](internal/replication/README.md) |
 | `internal/tasks` | Task state machine, scheduling, and execution orchestration | [internal/tasks/README.md](internal/tasks/README.md) |
 | `internal/ui` | Embedded UI asset serving | [internal/ui/README.md](internal/ui/README.md) |
-| `internal/upload` | S3-compatible upload integration | [internal/upload/README.md](internal/upload/README.md) |
+| `internal/upload` | S3-compatible upload, checksum, and retention object delete | [internal/upload/README.md](internal/upload/README.md) |
 | `scripts` | Local build helpers, release asset packaging, and E2E entrypoints | [scripts/README.md](scripts/README.md) |
 | `frontend` | Frontend source and build pipeline for the embedded UI | [frontend/README.md](frontend/README.md) |
 
