@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: canonical E2E database topology, retry-upload e2e dependencies, and Quay MinIO/mc images
-# output: deterministic e2e orchestration, scenario execution, checksum match on the files API, MinIO mismatch proof, and verification logs
+# output: deterministic e2e orchestration, background retry of sealed UPLOAD_FAILED rows without the manual API, checksum match on the files API, MinIO mismatch proof, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -236,15 +236,16 @@ wait_failed_upload_record() {
   return 1
 }
 
-wait_uploaded_record() {
+wait_background_uploaded_record() {
   local task_id="$1"
-  for _ in {1..60}; do
-    if curl -fsS "$API/api/tasks/$task_id/files?limit=200" | jq -e 'if type=="array" then any(.[]; .upload_state=="UPLOADED") else false end' >/dev/null 2>&1; then
+  # 15s background interval, plus an in-flight attempt that can sit in the upload timeout while MinIO is down.
+  for _ in {1..90}; do
+    if curl -fsS "$API/api/tasks/$task_id/files?limit=200" | jq -e 'if type=="array" then any(.[]; (.file_name | contains(".open.e") | not) and .upload_state=="UPLOADED") and all(.[]; (.file_name | contains(".open.e")) or .upload_state != "UPLOAD_FAILED") and all(.[]; ((.file_name | contains(".open.e")) | not) or .upload_state != "UPLOADED") else false end' >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
   done
-  echo "uploaded file record not found in time after retry: task_id=$task_id" >&2
+  echo "background retry did not upload sealed UPLOAD_FAILED rows: task_id=$task_id" >&2
   curl -fsS "$API/api/tasks/$task_id/files?limit=200" >&2 || true
   return 1
 }
@@ -275,19 +276,16 @@ echo "[retry-upload] verify checkpoint still progresses while upload fails"
 write_source_data "retry-progress-${RUN_TAG}"
 wait_checkpoint_progress "$TASK_ID" "$BASE_FILE" "$BASE_POS"
 
-echo "[retry-upload] recover minio then trigger manual retry"
+echo "[retry-upload] recover minio and wait for background retry"
 docker start "$MINIO_NAME" >/dev/null
 wait_minio_live
 ensure_minio_bucket
 
-RETRY_RESP="$(curl -fsS -X POST "$API/api/tasks/$TASK_ID/files/retry-upload?limit=100")"
-echo "[retry-upload] retry result: $RETRY_RESP"
-SUCCEEDED="$(printf '%s' "$RETRY_RESP" | jq -r '.succeeded // 0')"
-if [[ ! "$SUCCEEDED" =~ ^[0-9]+$ ]] || (( SUCCEEDED < 1 )); then
-  echo "expected retry succeeded >= 1, got $SUCCEEDED" >&2
+wait_background_uploaded_record "$TASK_ID"
+if ! grep -q "background upload retry" "$SERVER_LOG"; then
+  echo "background upload retry did not run" >&2
   exit 1
 fi
-wait_uploaded_record "$TASK_ID"
 
 echo "[retry-upload] uploaded sealed segment reports checksum match"
 if ! curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" | jq -e 'if type=="array" then any(.[]; .upload_state=="UPLOADED" and .checksum=="match" and (.file_name | contains(".open.e") | not)) and all(.[]; .upload_state != "UPLOADED" or .checksum == "match") else false end' >/dev/null; then
