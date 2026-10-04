@@ -229,6 +229,11 @@ Do not use permissive development defaults in production. Follow these mandatory
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
+- Download one listed segment without SSH. `name` is the basename from `GET /api/tasks/<task-id>/files` (a sealed name or `mysql-bin.000004.open.e1`). The response is the raw bytes, named as that file. Replay on the backup host still uses `GET /api/tasks/<task-id>/replay`.
+  ```bash
+  curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
+    "http://localhost:8080/api/tasks/<task-id>/files/mysql-bin.000004.open.e1"
+  ```
 
 Start production instances from [`config.production.example.yaml`](config.production.example.yaml).
 

@@ -1,5 +1,5 @@
 // input: Playwright Page route interception, shared mock session options, and optional first-start failure injection
-// output: browser request interception with JSON bodies wired to the shared frontend mock handler
+// output: browser request interception wired to the shared frontend mock handler, including raw segment download bytes
 // pos: Playwright adapter layer between browser requests and frontend shared mock responses
 // note: if this file changes, update this header and frontend/README.md
 
@@ -51,13 +51,24 @@ export async function registerMockRoutes(page: Page, options: MockRouteOptions) 
       query: url.searchParams,
       body: request.postData() ? request.postDataJSON() : undefined,
     })
+    const contentType = response.contentType || 'application/json'
+    const headers: Record<string, string> = {}
+    if (response.filename) {
+      headers['content-disposition'] = `attachment; filename="${String(response.filename).replace(/"/g, '')}"`
+    }
+    const body =
+      contentType === 'application/json'
+        ? response.status === 204 && response.body === ''
+          ? ''
+          : JSON.stringify(response.body)
+        : response.body == null
+          ? ''
+          : String(response.body)
     return route.fulfill({
       status: response.status,
-      contentType: 'application/json',
-      body:
-        response.status === 204 && response.body === ''
-          ? ''
-          : JSON.stringify(response.body),
+      contentType,
+      headers,
+      body,
     })
   })
 }

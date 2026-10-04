@@ -9,7 +9,7 @@
 | main.js | Vue 应用入口 |
 | App.vue | 运维控制台主页面，含左侧整列可折叠菜单（左下折叠控件）、多工作区分区（总览/任务/源库/Worker/告警）与 `/#/...` 深链定位、明确的全局/当前页筛选范围、详情抽屉与设置流程；遗留目录在详情里认领；刷新/翻页只走 `useDashboard.refreshAll`，列表租约风险用任务抄本 |
 | components/MetricGrid.vue | 首屏状态指标卡，分别展示 `summary.starting` 与 `summary.running` |
-| api.js | 与后端 `/api` 的请求封装，含 dashboard 任务观测、单/批量任务创建、遗留目录 `POST /api/tasks/{id}/adopt`、`GET /api/tasks/{id}/replay`、认证拦截、设置引导事件与开发态 mock 分发；不再提供 summary / 全量 list 客户端 |
+| api.js | 与后端 `/api` 的请求封装，含 dashboard 任务观测、单/批量任务创建、遗留目录 `POST /api/tasks/{id}/adopt`、`GET /api/tasks/{id}/replay`、`GET /api/tasks/{id}/files/{name}` 分段下载、认证拦截、设置引导事件与开发态 mock 分发；不再提供 summary / 全量 list 客户端 |
 | composables/useBatchCreate.js | 批量创建行预校验（最多 100 个有效行）、单次 batch API 调用及逐项自动启动 |
 | composables/useDashboard.js | Dashboard/cluster 响应状态与唯一刷新编排，只信 dashboard 的 `total/limit/offset`，保留 starting/running 独立计数，保留 overview `single_process`，不按页预取 `/lease` |
 | composables/useTaskFilter.js | 当前页本地筛选和 server pagination 查询参数 |

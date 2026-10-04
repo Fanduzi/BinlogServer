@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, and GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"sort"
 	"strconv"
@@ -449,9 +450,13 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskEntity(w, r, taskID)
 		return
 	}
-	// /api/tasks/{id}/files/retry-upload
-	if len(parts) == 3 && parts[1] == "files" && parts[2] == "retry-upload" {
-		s.handleTaskRetryUpload(w, r, taskID)
+	// /api/tasks/{id}/files/retry-upload and /api/tasks/{id}/files/{name}
+	if len(parts) >= 3 && parts[1] == "files" {
+		if len(parts) == 3 && parts[2] == "retry-upload" {
+			s.handleTaskRetryUpload(w, r, taskID)
+			return
+		}
+		s.handleTaskFileDownload(w, r, taskID, strings.Join(parts[2:], "/"))
 		return
 	}
 	// /api/tasks/{id}/upload-failures/reasons
@@ -570,6 +575,43 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleTaskFileDownload streams one inventory segment from this process's data_dir.
+// name is the on-disk basename. Replay paths are unchanged.
+func (s *Server) handleTaskFileDownload(w http.ResponseWriter, r *http.Request, taskID, name string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, size, err := s.tasks.OpenTaskSegment(taskID, name)
+	if err != nil {
+		switch {
+		case errors.Is(err, tasks.ErrInvalidSegmentName):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, tasks.ErrTaskNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, tasks.ErrSegmentNotOnProcess):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	defer body.Close()
+
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": name})
+	if disposition == "" {
+		http.Error(w, tasks.ErrInvalidSegmentName.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", disposition)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
 }
 
 // handleTaskReplay returns one on-disk path per source index from the files
