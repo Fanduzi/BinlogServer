@@ -20,6 +20,10 @@ Maintenance rules:
 
 - Operator download examples in README, README_ZH, the deployment guide, and the landing page now pin `v0.5.26`. The checksum example is the published `v0.5.26` `checksums.txt`.
 
+### Fixed
+
+- A plain `go build` and a release cut from the point-in-time replay tip still served the previous Console bundle, so task detail had no UTC stop time, optional start time, command copy, or window download. `internal/ui/static` is now the `make ui-build` output of that frontend. CI and the release workflow fail when `frontend/src` PITR markers are missing from the bundles `index.html` loads. GoReleaser still embeds `internal/ui/static` as committed. No new config key. No schema migration.
+
 ## [v0.5.26] - 2026-10-04
 
 ### Added
