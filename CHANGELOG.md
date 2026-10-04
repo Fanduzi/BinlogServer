@@ -12,9 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.18] - 2026-10-04
+
 ### Added
 
-- `GET /api/tasks/{id}/replay` returns the restore set for local segments: ascending source index, one `file_path` per index. When a sealed name and one or more `.open.e*` share an index, the path is the highest-epoch open segment. Paths are the same on-disk paths as `GET /api/tasks/{id}/files` (open paths keep `.open.e*`). `client` is `mysqlbinlog` when `source.flavor` is `mysql` (`client_hint` is `MySQL mysqlbinlog`) and `mariadb-binlog` when it is `mariadb`. An empty directory returns `paths: []`. `limit` uses the same inventory window as the files API, then one path per index inside that window. The files API still lists the sealed name and every epoch. The Console task detail shows that command and copies it. No new config key. No schema migration.
+- `GET /api/tasks/{id}/replay` returns one on-disk path per source index, inside the same inventory window as `GET /api/tasks/{id}/files`. Paths are ascending. When a sealed name and one or more `.open.e*` files share an index, the path is the highest-epoch open segment and keeps the `.open.e*` suffix. A small `limit` keeps the highest indexes, not the newest `sealed_at`. `source.flavor` `mysql` sets `client` to `mysqlbinlog` and `client_hint` to `MySQL mysqlbinlog`. `mariadb` sets both to `mariadb-binlog`. An empty flavor leaves the client empty. An empty directory returns `paths: []`. The files API is unchanged and still lists every name. The Console task detail shows that command and copies it. No new config key. No schema migration. Stop, resume, adopt, and kill-9 resume are unchanged.
 
 ## [v0.5.17] - 2026-10-04
 
