@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -459,6 +459,11 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskFileDownload(w, r, taskID, strings.Join(parts[2:], "/"))
 		return
 	}
+	// /api/tasks/{id}/replay/archive
+	if len(parts) == 3 && parts[1] == "replay" && parts[2] == "archive" {
+		s.handleTaskReplayArchive(w, r, taskID)
+		return
+	}
 	// /api/tasks/{id}/upload-failures/reasons
 	if len(parts) == 3 && parts[1] == "upload-failures" && parts[2] == "reasons" {
 		s.handleTaskUploadFailureReasons(w, r, taskID)
@@ -649,6 +654,47 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 		ClientHint: hint,
 		Paths:      paths,
 	})
+}
+
+// handleTaskReplayArchive streams one ustar of the replay selection.
+// limit is the same inventory window as GET /replay. Member names are the
+// basenames of those paths. Bytes follow GET /files/{name}. An empty selection
+// is 200 and an empty tar. A segment that cannot be opened fails the request
+// before any archive byte is written.
+func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, size, err := s.tasks.OpenReplayArchive(taskID, parseLimit(r, 200))
+	if err != nil {
+		switch {
+		case errors.Is(err, tasks.ErrInvalidSegmentName):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, tasks.ErrTaskNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, tasks.ErrSegmentNotOnProcess):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	defer body.Close()
+
+	filename := "task-" + taskID + "-replay.tar"
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if disposition == "" {
+		http.Error(w, tasks.ErrInvalidSegmentName.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("Content-Disposition", disposition)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
 }
 
 // handleTaskRetryUpload 触发指定任务的失败文件重传并返回统计。
