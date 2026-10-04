@@ -162,7 +162,7 @@ export BINLOG_SERVER_META_DSN="root:pass@tcp(127.0.0.1:3306)/binlog_server_meta?
 | `cluster.lease_ttl_sec` | int | 15 | 租约有效期（秒） |
 | `cluster.lease_renew_interval_sec` | int | 5 | 续租间隔（秒） |
 | `cluster.lease_grace_sec` | int | 30 | 宽限期（秒） |
-| `cluster.failover_policy` | string | rebuild_current_file | 故障恢复策略 |
+| `cluster.failover_policy` | string | rebuild_current_file | 仍接受该值。接管不靠这个键切换。分段目录是 `binlog_files.file_path`，见[部署指南 6.3 第 2 节](deployment.md) |
 
 **角色说明：**
 

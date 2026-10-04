@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the object deleter wired with upload
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, and adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -42,6 +42,7 @@ type MySQLRunner struct {
 	fileMetaStore    FileMetaStore
 	uploadPrefix     string
 	objectDeleter    objectDeleter
+	objectOpener     objectOpener
 	leaseVerifier    LeaseVerifier
 	sealedHandler    func(context.Context, tasks.BinlogFile) error
 	progressReporter ProgressReporter
@@ -142,6 +143,9 @@ func WithUploader(uploader tasks.FileUploader, prefix string) RunnerOption {
 		if deleter, ok := uploader.(objectDeleter); ok {
 			r.objectDeleter = deleter
 		}
+		if opener, ok := uploader.(objectOpener); ok {
+			r.objectOpener = opener
+		}
 		r.sealedHandler = func(ctx context.Context, file tasks.BinlogFile) error {
 			_, err := tasks.ApplySealedUpload(ctx, uploader, r.fileMetaStore, file)
 			return err
@@ -241,10 +245,14 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	}
 	// Fresh LATEST has already resolved to SHOW MASTER STATUS, so StartSync is at tip.
 	// NextResumePosition is the resume choice shared with GET /api/tasks/{id}/checkpoint.
-	// This call passes the epoch already acquired for this run. A local complete
-	// event wins. With no local event, a stored checkpoint is used, and epoch > 1
-	// rewinds that checkpoint to position 4. Adopt keeps its FILE_POS.
+	// A local complete event wins. Adopt keeps its FILE_POS. Epoch > 1 with no
+	// local event used to rewind to position 4. Takeover now follows the catalog
+	// file_path: a readable segment directory continues there, an unreadable
+	// open segment fails, and a checkpoint already in an UPLOADED object resumes
+	// from that object.
 	atTip := requestedLatest && !checkpointExists
+	segmentDir := ""
+	var carried *tasks.BinlogFile
 	if resume, ok := tasks.NextResumePosition(r.dataDir, task, stored, checkpointExists); ok {
 		start = tasks.StartConfig{
 			Mode: tasks.StartModeFilePos,
@@ -252,6 +260,42 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			Pos:  resume.Pos,
 		}
 		atTip = false
+	}
+	if task.Epoch > 1 && !task.KeepLocalSegments {
+		if _, _, local := binlog.DurableResume(r.dataDir, task.ID); !local {
+			files, err := r.listCatalog(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			decision := tasks.ResolveTakeover(r.dataDir, task, stored, checkpointExists, files)
+			if decision.Missing != "" {
+				return segmentNotOnWorker(decision.Missing)
+			}
+			if decision.Covering != nil {
+				carried = decision.Covering
+				dir, err := r.materializeUploaded(ctx, task, *decision.Covering)
+				if err != nil {
+					return err
+				}
+				file, pos, ok := binlog.DurableResumeDir(dir)
+				if !ok {
+					return segmentNotOnWorker(decision.Covering.FileName)
+				}
+				start = tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: pos}
+				segmentDir = dir
+				atTip = false
+			} else if decision.Apply {
+				start = tasks.StartConfig{
+					Mode: tasks.StartModeFilePos,
+					File: decision.Checkpoint.File,
+					Pos:  decision.Checkpoint.Pos,
+				}
+				if decision.Dir != "" {
+					segmentDir = decision.Dir
+				}
+				atTip = false
+			}
+		}
 	}
 
 	// Step 2: 打开当前 open 文件并构造 writer。
@@ -267,7 +311,15 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	writerOpener := r.writerOpener
 	if writerOpener == nil {
 		writerOpener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
-			f, w, path, err := r.openBinlogWriter(ctx, task, fileName, initialPos, sourceServerUUID)
+			var f *os.File
+			var w *binlog.Writer
+			var path string
+			var err error
+			if segmentDir != "" {
+				f, w, path, err = r.openBinlogWriterIn(ctx, segmentDir, task, fileName, initialPos, sourceServerUUID, carried)
+			} else {
+				f, w, path, err = r.openBinlogWriter(ctx, task, fileName, initialPos, sourceServerUUID)
+			}
 			// A nil *os.File becomes a non-nil io.Closer. The deferred close
 			// would then log a failure for a file that was never opened.
 			if f == nil {
@@ -311,7 +363,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			if err != nil {
 				return err
 			}
-			if err := r.fileMetaStore.UpsertBinlogFile(ctx, tasks.BinlogFile{
+			if err := r.fileMetaStore.UpsertBinlogFile(ctx, carryUpload(tasks.BinlogFile{
 				TaskID:      task.ID,
 				FileName:    currentFile,
 				FilePath:    currentPath,
@@ -321,7 +373,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				EndPos:      checkpoint.Pos,
 				CreatedAt:   currentCreatedAt,
 				UploadState: "LOCAL_ONLY",
-			}); err != nil {
+			}, carried)); err != nil {
 				return err
 			}
 		}
@@ -699,10 +751,72 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 	}
 }
 
+func carryUpload(meta tasks.BinlogFile, carried *tasks.BinlogFile) tasks.BinlogFile {
+	if carried == nil || carried.FileName != meta.FileName {
+		return meta
+	}
+	if !strings.EqualFold(strings.TrimSpace(carried.UploadState), "UPLOADED") || strings.TrimSpace(carried.ObjectKey) == "" {
+		return meta
+	}
+	meta.ObjectKey = carried.ObjectKey
+	meta.UploadState = carried.UploadState
+	return meta
+}
+
+func segmentNotOnWorker(label string) error {
+	return tasks.NewPermanentError(tasks.CodeSegmentNotOnWorker, label+" is not on this worker. The lease moved; the segment directory did not. Make that file readable on this worker, then start the task.")
+}
+
+func (r *MySQLRunner) listCatalog(ctx context.Context, taskID string) ([]tasks.BinlogFile, error) {
+	if r.fileMetaStore == nil {
+		return nil, nil
+	}
+	lister, ok := r.fileMetaStore.(interface {
+		ListBinlogFiles(context.Context, string, int) ([]tasks.BinlogFile, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	return lister.ListBinlogFiles(ctx, taskID, retentionCatalogLimit)
+}
+
+// materializeUploaded copies a sealed UPLOADED object into this worker's
+// segment directory so takeover can append after its last complete event.
+func (r *MySQLRunner) materializeUploaded(ctx context.Context, task tasks.Task, row tasks.BinlogFile) (string, error) {
+	label := strings.TrimSpace(row.FileName)
+	if path := strings.TrimSpace(row.FilePath); path != "" {
+		label = path
+	}
+	if r.objectOpener == nil {
+		return "", segmentNotOnWorker(label)
+	}
+	rc, _, err := r.objectOpener.OpenObject(ctx, row.ObjectKey)
+	if err != nil {
+		return "", segmentNotOnWorker(label)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return "", segmentNotOnWorker(label)
+	}
+	dir := filepath.Join(r.dataDir, task.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, openFileName(row.FileName, task.Epoch))
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // openBinlogWriter 打开（或创建）本地 open 文件并返回带初始 checkpoint 的 writer。
 func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fileName string, initialPos uint32, sourceServerUUID string) (*os.File, *binlog.Writer, string, error) {
+	return r.openBinlogWriterIn(ctx, filepath.Join(r.dataDir, task.ID), task, fileName, initialPos, sourceServerUUID, nil)
+}
+
+func (r *MySQLRunner) openBinlogWriterIn(ctx context.Context, dir string, task tasks.Task, fileName string, initialPos uint32, sourceServerUUID string, carried *tasks.BinlogFile) (*os.File, *binlog.Writer, string, error) {
 	// Step 1: 准备目录并清理 stale open / 过期文件。
-	dir := filepath.Join(r.dataDir, task.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, "", err
 	}
@@ -762,7 +876,7 @@ func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fil
 	}
 	if r.fileMetaStore != nil {
 		createdAt := time.Now()
-		if err := r.fileMetaStore.UpsertBinlogFile(ctx, tasks.BinlogFile{
+		if err := r.fileMetaStore.UpsertBinlogFile(ctx, carryUpload(tasks.BinlogFile{
 			TaskID:      task.ID,
 			FileName:    fileName,
 			FilePath:    path,
@@ -772,7 +886,7 @@ func (r *MySQLRunner) openBinlogWriter(ctx context.Context, task tasks.Task, fil
 			EndPos:      initialPos,
 			CreatedAt:   createdAt,
 			UploadState: "LOCAL_ONLY",
-		}); err != nil {
+		}, carried)); err != nil {
 			_ = f.Close()
 			return nil, nil, "", err
 		}
@@ -996,26 +1110,11 @@ func effectiveStartFromCheckpoint(start tasks.StartConfig, checkpoint binlog.Che
 	}
 }
 
-// effectiveStartForTakeover 在 worker 接管时把起点回拨到 file:4 并触发重建当前文件。
-func effectiveStartForTakeover(task tasks.Task, start tasks.StartConfig, checkpoint binlog.Checkpoint, exists bool) (tasks.StartConfig, bool) {
-	// 常见误解：
-	// “接管后直接从 checkpoint.Pos 继续”可能导致当前文件缺头或断裂。
-	// 接管场景回拨到 file:4 的目的，是在新 worker 上重建当前文件的完整单文件字节流。
-	// Step 1: 先按 checkpoint 覆盖起点。
-	effective := effectiveStartFromCheckpoint(start, checkpoint, exists)
-	// Step 2: 非接管场景（epoch<=1）直接返回。
-	if task.Epoch <= 1 {
-		return effective, false
-	}
-	// Step 3: 接管场景仅在有效 FILE_POS 且 pos>4 时回拨到 4，重放当前文件保证单文件完整性。
-	if effective.Mode != tasks.StartModeFilePos || effective.File == "" || effective.Pos <= 4 {
-		return effective, false
-	}
-	return tasks.StartConfig{
-		Mode: tasks.StartModeFilePos,
-		File: effective.File,
-		Pos:  4,
-	}, true
+// objectOpener reads one uploaded object back. S3Uploader implements it.
+// Takeover uses it when the checkpoint is already inside a sealed object and
+// the local file is gone. Download of one segment stays on the tasks API.
+type objectOpener interface {
+	OpenObject(ctx context.Context, objectKey string) (io.ReadCloser, int64, error)
 }
 
 // objectDeleter removes one uploaded object. S3Uploader implements it.

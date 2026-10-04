@@ -18,34 +18,12 @@ import (
 
 // TestRebuildCurrentFile_AfterTakeover 验证相关行为。
 func TestRebuildCurrentFile_AfterTakeover(t *testing.T) {
-	start := tasks.StartConfig{
-		Mode: tasks.StartModeFilePos,
-		File: "mysql-bin.000100",
-		Pos:  4,
-	}
-
-	checkpointStart := effectiveStartFromCheckpoint(start, binlog.Checkpoint{
+	decision := tasks.ResolveTakeover("", tasks.Task{ID: "task-a", Epoch: 3, OwnerWorkerID: "worker-b"}, binlog.Checkpoint{
 		File: "mysql-bin.000123",
 		Pos:  789,
-	}, true)
-	if checkpointStart.Pos != 789 {
-		t.Fatalf("expected checkpoint-resume pos 789, got %d", checkpointStart.Pos)
-	}
-
-	rebuildStart, rebuilding := effectiveStartForTakeover(
-		tasks.Task{ID: "task-a", Epoch: 3, OwnerWorkerID: "worker-b"},
-		start,
-		binlog.Checkpoint{
-			File: "mysql-bin.000123",
-			Pos:  789,
-		},
-		true,
-	)
-	if !rebuilding {
-		t.Fatal("expected takeover to trigger rebuild_current_file")
-	}
-	if rebuildStart.File != "mysql-bin.000123" || rebuildStart.Pos != 4 {
-		t.Fatalf("expected rebuild from file start pos=4, got %+v", rebuildStart)
+	}, true, nil)
+	if decision.Apply || decision.Missing != "mysql-bin.000123" {
+		t.Fatalf("takeover without a readable segment must not rebuild from position 4, got %+v", decision)
 	}
 }
 
