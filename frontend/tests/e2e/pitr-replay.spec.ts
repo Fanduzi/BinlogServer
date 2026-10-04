@@ -15,7 +15,8 @@ test('task drawer builds a point-in-time replay command', async ({ page }) => {
   await expect(page.getByTestId('task-drawer')).toBeVisible()
   await expect(page.getByTestId('task-replay-command')).toContainText('mysql-bin.000002.open.e4')
 
-  await page.getByTestId('task-pitr-stop').locator('input').fill('2024-01-01 00:30:00')
+  await page.getByTestId('task-pitr').scrollIntoViewIfNeeded()
+  await page.getByTestId('task-pitr-stop').fill('2024-01-01 00:30:00')
   const stopRequest = page.waitForRequest(
     (req) => req.method() === 'GET' && req.url().includes('/api/tasks/100/replay?'),
   )
@@ -35,8 +36,8 @@ test('task drawer builds a point-in-time replay command', async ({ page }) => {
   await expect(page.getByText('已复制定点恢复命令')).toBeVisible()
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(stopCommand)
 
-  await page.getByTestId('task-pitr-start').locator('input').fill('2024-01-01 00:30:00')
-  await page.getByTestId('task-pitr-stop').locator('input').fill('2024-01-01 12:00:00')
+  await page.getByTestId('task-pitr-start').fill('2024-01-01 00:30:00')
+  await page.getByTestId('task-pitr-stop').fill('2024-01-01 12:00:00')
   await page.getByTestId('task-pitr-build').click()
   await expect(page.getByTestId('task-pitr-command')).toHaveText(
     [
@@ -48,16 +49,16 @@ test('task drawer builds a point-in-time replay command', async ({ page }) => {
     ].join('\n'),
   )
 
-  await page.getByTestId('task-pitr-stop').locator('input').fill('not-a-time')
-  await page.getByTestId('task-pitr-start').locator('input').fill('')
+  await page.getByTestId('task-pitr-stop').fill('not-a-time')
+  await page.getByTestId('task-pitr-start').fill('')
   await page.getByTestId('task-pitr-build').click()
   await expect(page.getByTestId('task-pitr-error')).toHaveText('invalid stop_datetime')
 
-  await page.getByTestId('task-pitr-stop').locator('input').fill('2020-01-01 00:00:00')
+  await page.getByTestId('task-pitr-stop').fill('2020-01-01 00:00:00')
   await page.getByTestId('task-pitr-build').click()
   await expect(page.getByTestId('task-pitr-command')).toHaveText('这个时间窗口里没有分段。')
 
-  await page.getByTestId('task-pitr-stop').locator('input').fill('2024-01-01 00:30:00')
+  await page.getByTestId('task-pitr-stop').fill('2024-01-01 00:30:00')
   const archiveRequest = page.waitForRequest(
     (req) => req.method() === 'GET' && req.url().includes('/api/tasks/100/replay/archive'),
   )
