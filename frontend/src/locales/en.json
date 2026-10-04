@@ -231,7 +231,7 @@
     "replicationStatus": "Replication Status",
     "delay": "Delay",
     "leaseStatus": "Lease Status",
-    "checkpoint": "Current Checkpoint",
+    "checkpoint": "Resume",
     "errorReason": "Error Reason",
     "alertThreshold": "Alert Threshold",
     "lastPosition": "Last Position",
@@ -244,11 +244,11 @@
     "objectKey": "Object Key",
     "on": "ON",
     "off": "OFF",
-    "noCheckpoint": "None",
+    "noCheckpoint": "None. The next Start uses the configured start.",
     "seconds": "seconds",
     "clusterKey": "Cluster Key",
     "source": "Source",
-    "startMode": "Start Mode"
+    "startMode": "Start"
   },
   "source": {
     "lookupTitle": "Source Lookup",
