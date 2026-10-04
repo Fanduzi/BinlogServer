@@ -12,17 +12,17 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.27] - 2026-10-05
+
 ### Added
 
-- `GET /api/tasks/{id}/replay` accepts `stop_datetime` (UTC) and an optional `start_datetime`. The response keeps one path per source index, using the same sealed-versus-open rule as the limit replay, and adds `command`: `TZ=UTC mysqlbinlog` or `TZ=UTC mariadb-binlog` with `--stop-datetime` and, when start is set, `--start-datetime`. The window is the events those clients will apply. `start_datetime` equal to `stop_datetime` is an empty window and stays HTTP 200. `start_datetime` after `stop_datetime` is plain-text 400. `limit` is not applied on this path. `GET /api/tasks/{id}/replay/archive` with the same parameters downloads that selection. An empty window is HTTP 200 with empty `paths` and `command`. An unparseable datetime is HTTP 400. A missing task is 404 `task not found`. The Console task detail can enter the times, copy the command, and download the archive. Without `stop_datetime`, replay and the archive stay the limit window. No new config key. No schema migration. Binlog Server still does not restore the full backup.
+- An existing backup task can be asked for the binlog window covering a UTC stop time. `GET /api/tasks/{id}/replay` takes `stop_datetime` and an optional `start_datetime`. The window is half-open `[start, stop)`: the stop is excluded, and a start, when set, is included. The same query on `GET /api/tasks/{id}/replay/archive` downloads that selection as `task-{id}-replay.tar`. The response includes `command` only when `stop_datetime` is present. `mysql` uses `mysqlbinlog`, `mariadb` uses `mariadb-binlog`, and the command is prefixed `TZ=UTC`. Omitting both datetimes keeps the limit replay: `flavor`, `client`, `client_hint`, `paths`, and no `command` field. One path per source index still uses the sealed-versus-open rule. `limit` is not applied on the datetime path. `start_datetime` equal to `stop_datetime` is an empty window: HTTP 200, empty `paths`, empty `command`. It is not a 400. A bad datetime or a start after the stop is plain-text 400. A missing task is 404 `task not found`. The published v0.5.26 package has no stop-time window. No new config key. No schema migration. Restore the full backup yourself, then use the printed command. Binlog Server does not restore that backup.
+
+- Console task detail has the same window: a UTC stop time, an optional start time, generate, copy, and download of `task-{id}-replay.tar`. That Console is in the embedded bundle a plain `go build` serves.
 
 ### Changed
 
 - Operator download examples in README, README_ZH, the deployment guide, and the landing page now pin `v0.5.26`. The checksum example is the published `v0.5.26` `checksums.txt`.
-
-### Fixed
-
-- A plain `go build` and a release cut from the point-in-time replay tip still served the previous Console bundle, so task detail had no UTC stop time, optional start time, command copy, or window download. `internal/ui/static` is now the `make ui-build` output of that frontend. CI and the release workflow fail when `frontend/src` PITR markers are missing from the bundles `index.html` loads. GoReleaser still embeds `internal/ui/static` as committed. No new config key. No schema migration.
 
 ## [v0.5.26] - 2026-10-04
 
