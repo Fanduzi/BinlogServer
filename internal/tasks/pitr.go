@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full files inventory, one open segment per source index, and each segment's event-header time span
-// output: the ordered paths that cover a UTC point-in-time window, plus one mysqlbinlog or mariadb-binlog command
+// output: the ordered paths that cover a UTC point-in-time window, plus one mysqlbinlog or mariadb-binlog command; start equal to stop yields no paths and no command
 // pos: point-in-time seek on the existing replay selection; the limit window stays on GET /replay without stop_datetime
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -62,7 +62,8 @@ func ParsePITRDatetime(raw string) (time.Time, error) {
 
 // FilterPITRFiles keeps segments that contain an event in [start, stop).
 // stop is exclusive, matching mysqlbinlog --stop-datetime. start is inclusive
-// when set, matching --start-datetime. files and spans are paired in order.
+// when set, matching --start-datetime. start equal to stop selects nothing:
+// that window contains no instant. files and spans are paired in order.
 // A segment with no timed event is left out. The input order is kept.
 func FilterPITRFiles(files []BinlogFile, spans []EventSpan, start *time.Time, stop time.Time) []BinlogFile {
 	out := make([]BinlogFile, 0)
@@ -181,6 +182,11 @@ func coversPITR(span EventSpan, start *time.Time, stop time.Time) bool {
 	}
 	if last.IsZero() {
 		last = first
+	}
+	// [start, stop) is empty when start is not strictly before stop.
+	// A span that crosses that single instant is not a hit.
+	if start != nil && !start.Before(stop) {
+		return false
 	}
 	if !first.Before(stop) {
 		return false

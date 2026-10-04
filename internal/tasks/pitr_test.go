@@ -62,6 +62,15 @@ func TestFilterPITRFiles(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("early stop %+v", got)
 	}
+	same := clock(t, "2024-01-01 01:20:00")
+	got = FilterPITRFiles(files, spans, &same, same)
+	if len(got) != 0 {
+		t.Fatalf("equal window %s", pathsOf(got))
+	}
+	got = FilterPITRFiles(files, spans, nil, clock(t, "2024-01-01 02:00:00"))
+	if pathsOf(got) != "/data/1/mysql-bin.000001\n/data/1/mysql-bin.000002.open.e8" {
+		t.Fatalf("stop touch %s", pathsOf(got))
+	}
 	got = FilterPITRFiles(files, []EventSpan{{}, {}, {}}, nil, stop)
 	if len(got) != 0 {
 		t.Fatal("untimed segments")
@@ -166,6 +175,11 @@ func TestPITRReplay_DiskSegments(t *testing.T) {
 	empty, err := scheduler.PITRReplay("1", nil, clock(t, "2020-01-01 00:00:00"))
 	if err != nil || len(empty.Paths) != 0 || empty.Command != "" || empty.Client != "mysqlbinlog" {
 		t.Fatalf("empty %+v err %v", empty, err)
+	}
+	same := clock(t, "2024-01-01 01:20:00")
+	equal, err := scheduler.PITRReplay("1", &same, same)
+	if err != nil || len(equal.Paths) != 0 || equal.Command != "" || equal.Client != "mysqlbinlog" || equal.Flavor != "mysql" {
+		t.Fatalf("equal window %+v err %v", equal, err)
 	}
 
 	mariaDir := filepath.Join(dir, "2")
