@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, one local inventory segment as raw bytes, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
+// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, one inventory segment as raw bytes from local disk or a sealed uploaded object, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api

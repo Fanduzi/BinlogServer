@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/replay, and GET /api/tasks/{id}/files/{name}
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/replay, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -136,7 +136,7 @@ func (s *Server) swaggerTaskFilesDoc() {}
 
 // swaggerTaskFileDownloadDoc godoc
 // @Summary Download one inventory binlog segment
-// @Description Streams the raw bytes of one sealed name or .open.e* segment. name is the on-disk basename from GET /api/tasks/{id}/files (the file_path base). Content-Type is application/octet-stream and Content-Disposition filename is that basename. The body length is the file size at open. A slash, backslash, or .. in the name is 400. A missing task is 404. A basename that is not under {data_dir}/{id}/ on this process is 404. Open segments are included while the task is RUNNING or STOPPED.
+// @Description Streams one basename already listed by GET /api/tasks/{id}/files. Content-Type is application/octet-stream and Content-Disposition filename is that basename. A file at {data_dir}/{id}/{name} is served at its size at open, including *.open.e* while the task is RUNNING or STOPPED. When that file is missing, a sealed row with upload_state UPLOADED and a non-empty object_key is read from the configured object store, and the body length is the object size at open. LOCAL_ONLY, UPLOAD_FAILED, an empty object_key, an open segment with no local file, or object upload not configured is 404 segment not found on this process. Catalog file_path is not a byte source. A slash, backslash, or .. is 400. A missing task is 404.
 // @Tags Tasks
 // @Produce application/octet-stream
 // @Param id path string true "Task ID"
