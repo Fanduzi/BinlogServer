@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the replay set beside that inventory, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -1936,6 +1936,211 @@ func TestTaskAPI_ListFilesFromDiskWithoutMeta(t *testing.T) {
 	if cp.Code != http.StatusNotFound || !strings.Contains(cp.Body.String(), "checkpoint not found") {
 		t.Fatalf("checkpoint status=%d body=%s", cp.Code, cp.Body.String())
 	}
+}
+
+func TestTaskAPI_ReplaySet(t *testing.T) {
+	dir := t.TempDir()
+	scheduler := tasks.NewScheduler(tasks.WithDataDir(dir))
+	handler := NewServer(scheduler)
+
+	create := func(body string) {
+		t.Helper()
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("create status=%d body=%s", resp.Code, resp.Body.String())
+		}
+	}
+	create(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql"}}`)
+	create(`{"name":"empty","cluster_key":"empty-key","source":{"host":"127.0.0.1","port":3307,"user":"repl","password":"secret","flavor":"mysql"}}`)
+	create(`{"name":"maria","cluster_key":"maria-key","source":{"host":"127.0.0.1","port":3308,"user":"repl","password":"secret","flavor":"mariadb"}}`)
+
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"mysql-bin.000001",
+		"mysql-bin.000002",
+		"mysql-bin.000002.open.e1",
+		"mysql-bin.000002.open.e8",
+		"mysql-bin.000003",
+		"notes.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(taskDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mariaDir := filepath.Join(dir, "3")
+	if err := os.MkdirAll(mariaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mariaDir, "mysql-bin.000010"), []byte("m"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	leftDir := filepath.Join(dir, "9")
+	if err := os.MkdirAll(leftDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mysql-bin.000007", "mysql-bin.000007.open.e2", "mysql-bin.000007.open.e4"} {
+		if err := os.WriteFile(filepath.Join(leftDir, name), []byte("L"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	filesResp := httptest.NewRecorder()
+	handler.ServeHTTP(filesResp, httptest.NewRequest(http.MethodGet, "/api/tasks/1/files", nil))
+	if filesResp.Code != http.StatusOK {
+		t.Fatalf("files status=%d body=%s", filesResp.Code, filesResp.Body.String())
+	}
+	var files []tasks.BinlogFile
+	if err := json.Unmarshal(filesResp.Body.Bytes(), &files); err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 5 {
+		t.Fatalf("inventory %+v", files)
+	}
+	if filepath.Base(files[1].FilePath) != "mysql-bin.000002" || filepath.Base(files[2].FilePath) != "mysql-bin.000002.open.e1" || filepath.Base(files[3].FilePath) != "mysql-bin.000002.open.e8" {
+		t.Fatalf("inventory order %+v", files)
+	}
+
+	full := getReplay(t, handler, "/api/tasks/1/replay")
+	if full.Flavor != "mysql" || full.Client != "mysqlbinlog" || full.ClientHint != "MySQL mysqlbinlog" {
+		t.Fatalf("hint %+v", full)
+	}
+	wantFull := []string{
+		filepath.Join(taskDir, "mysql-bin.000001"),
+		filepath.Join(taskDir, "mysql-bin.000002.open.e8"),
+		filepath.Join(taskDir, "mysql-bin.000003"),
+	}
+	if strings.Join(full.Paths, "\n") != strings.Join(wantFull, "\n") {
+		t.Fatalf("paths %v want %v", full.Paths, wantFull)
+	}
+
+	window := getReplay(t, handler, "/api/tasks/1/replay?limit=3")
+	wantWindow := []string{
+		filepath.Join(taskDir, "mysql-bin.000002.open.e8"),
+		filepath.Join(taskDir, "mysql-bin.000003"),
+	}
+	if strings.Join(window.Paths, "\n") != strings.Join(wantWindow, "\n") {
+		t.Fatalf("window %v want %v", window.Paths, wantWindow)
+	}
+	filesWindow := httptest.NewRecorder()
+	handler.ServeHTTP(filesWindow, httptest.NewRequest(http.MethodGet, "/api/tasks/1/files?limit=3", nil))
+	var windowFiles []tasks.BinlogFile
+	if err := json.Unmarshal(filesWindow.Body.Bytes(), &windowFiles); err != nil {
+		t.Fatal(err)
+	}
+	if len(windowFiles) != 3 || filepath.Base(windowFiles[0].FilePath) != "mysql-bin.000002.open.e1" {
+		t.Fatalf("files window %+v", windowFiles)
+	}
+
+	empty := getReplay(t, handler, "/api/tasks/2/replay")
+	if empty.Client != "mysqlbinlog" || empty.ClientHint != "MySQL mysqlbinlog" || len(empty.Paths) != 0 {
+		t.Fatalf("empty %+v", empty)
+	}
+
+	maria := getReplay(t, handler, "/api/tasks/3/replay")
+	if maria.Flavor != "mariadb" || maria.Client != "mariadb-binlog" || maria.ClientHint != "mariadb-binlog" {
+		t.Fatalf("maria %+v", maria)
+	}
+	if len(maria.Paths) != 1 || maria.Paths[0] != filepath.Join(mariaDir, "mysql-bin.000010") {
+		t.Fatalf("maria paths %v", maria.Paths)
+	}
+
+	left := getReplay(t, handler, "/api/tasks/9/replay")
+	if left.Flavor != "" || left.Client != "" || left.ClientHint != "" {
+		t.Fatalf("leftover hint %+v", left)
+	}
+	if len(left.Paths) != 1 || left.Paths[0] != filepath.Join(leftDir, "mysql-bin.000007.open.e4") {
+		t.Fatalf("leftover paths %v", left.Paths)
+	}
+	leftFiles := httptest.NewRecorder()
+	handler.ServeHTTP(leftFiles, httptest.NewRequest(http.MethodGet, "/api/tasks/9/files", nil))
+	var leftInventory []tasks.BinlogFile
+	if err := json.Unmarshal(leftFiles.Body.Bytes(), &leftInventory); err != nil {
+		t.Fatal(err)
+	}
+	if len(leftInventory) != 3 {
+		t.Fatalf("leftover inventory %+v", leftInventory)
+	}
+
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/api/tasks/missing/replay", nil))
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), "task not found") {
+		t.Fatalf("missing status=%d body=%s", missing.Code, missing.Body.String())
+	}
+}
+
+func TestTaskAPI_ReplaySetUsesCatalogNotDisk(t *testing.T) {
+	dir := t.TempDir()
+	store := newFakeFileStore()
+	store.files["1"] = []tasks.BinlogFile{
+		{FileName: "mysql-bin.000001", FilePath: "/data/1/mysql-bin.000001", State: "SEALED"},
+		{FileName: "mysql-bin.000002", FilePath: "/data/1/mysql-bin.000002", State: "SEALED"},
+		{FileName: "mysql-bin.000002", FilePath: "/data/1/mysql-bin.000002.open.e1", State: "OPEN"},
+		{FileName: "mysql-bin.000002", FilePath: "/data/1/mysql-bin.000002.open.e3", State: "OPEN"},
+	}
+	scheduler := tasks.NewScheduler(tasks.WithFileStore(store), tasks.WithDataDir(dir))
+	handler := NewServer(scheduler)
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000099"), []byte("extra"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	filesResp := httptest.NewRecorder()
+	handler.ServeHTTP(filesResp, httptest.NewRequest(http.MethodGet, "/api/tasks/1/files", nil))
+	var files []tasks.BinlogFile
+	if err := json.Unmarshal(filesResp.Body.Bytes(), &files); err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 4 {
+		t.Fatalf("catalog inventory %+v", files)
+	}
+	got := getReplay(t, handler, "/api/tasks/1/replay")
+	want := []string{"/data/1/mysql-bin.000001", "/data/1/mysql-bin.000002.open.e3"}
+	if strings.Join(got.Paths, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("paths %v", got.Paths)
+	}
+}
+
+type replayBody struct {
+	Flavor     string   `json:"flavor"`
+	Client     string   `json:"client"`
+	ClientHint string   `json:"client_hint"`
+	Paths      []string `json:"paths"`
+}
+
+func getReplay(t *testing.T, handler http.Handler, path string) replayBody {
+	t.Helper()
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, path, nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"paths":[`)) && !bytes.Contains(resp.Body.Bytes(), []byte(`"paths": [`)) {
+		t.Fatalf("%s paths not an array: %s", path, resp.Body.String())
+	}
+	var body replayBody
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Paths == nil {
+		t.Fatalf("%s paths decoded nil: %s", path, resp.Body.String())
+	}
+	return body
 }
 
 // TestTaskAPI_RestartDiscoversDiskBackups 验证 standalone 重启后，不知道旧 id 也能从 dashboard 找到磁盘目录并列出分段。
@@ -4125,6 +4330,7 @@ func TestAPI_SwaggerDocContainsKeyPaths(t *testing.T) {
 		"/api/tasks/{id}/checkpoint",
 		"/api/tasks/{id}/events",
 		"/api/tasks/{id}/files",
+		"/api/tasks/{id}/replay",
 		"/api/tasks/{id}/upload-failures/reasons",
 		"/api/tasks/{id}/replication",
 		"/api/tasks/{id}/lease",

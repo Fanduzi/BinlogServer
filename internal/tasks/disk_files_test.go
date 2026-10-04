@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: temporary data directories with sealed and open binlog segment names
-// output: assertions for disk listing order, catalog replay window, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
+// output: assertions for disk listing order, catalog replay window, one-path-per-index replay selection, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
 // pos: regression coverage for standalone files listing when meta has no catalog rows
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -129,6 +129,87 @@ func TestWindowBinlogFilesForReplay_CatalogOrderAndLimit(t *testing.T) {
 	window := WindowBinlogFilesForReplay(files, 2)
 	if len(window) != 2 || window[0].FilePath != want[2] || window[1].FilePath != want[3] {
 		t.Fatalf("window = %s, %s", window[0].FilePath, window[1].FilePath)
+	}
+}
+
+func TestSelectReplayFiles_OnePathPerIndex(t *testing.T) {
+	files := []BinlogFile{
+		{FileName: "mysql-bin.000003", FilePath: "/data/1/mysql-bin.000003", State: "SEALED"},
+		{FileName: "mysql-bin.000004", FilePath: "/data/1/mysql-bin.000004", State: "SEALED"},
+		{FileName: "mysql-bin.000004", FilePath: "/data/1/mysql-bin.000004.open.e1", State: "OPEN"},
+		{FileName: "mysql-bin.000004", FilePath: "/data/1/mysql-bin.000004.open.e9", State: "OPEN"},
+		{FileName: "mysql-bin.000005", FilePath: "/data/1/mysql-bin.000005.open.e2", State: "OPEN"},
+		{FileName: "notes", FilePath: "/data/1/notes.txt"},
+		{FileName: "mysql-bin.000006", FilePath: "  "},
+	}
+	original := files[1].FilePath
+	got := SelectReplayFiles(files)
+	if files[1].FilePath != original {
+		t.Fatalf("input replaced: %s", files[1].FilePath)
+	}
+	want := []string{
+		"/data/1/mysql-bin.000003",
+		"/data/1/mysql-bin.000004.open.e9",
+		"/data/1/mysql-bin.000005.open.e2",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d: %+v", len(got), got)
+	}
+	for i, path := range want {
+		if got[i].FilePath != path {
+			t.Fatalf("got[%d]=%s want %s", i, got[i].FilePath, path)
+		}
+	}
+
+	// A later lower epoch does not replace the highest epoch already chosen.
+	reversed := []BinlogFile{
+		{FilePath: "/data/1/mysql-bin.000004.open.e9"},
+		{FilePath: "/data/1/mysql-bin.000004"},
+		{FilePath: "/data/1/mysql-bin.000004.open.e1"},
+	}
+	kept := SelectReplayFiles(reversed)
+	if len(kept) != 1 || kept[0].FilePath != "/data/1/mysql-bin.000004.open.e9" {
+		t.Fatalf("kept %+v", kept)
+	}
+	if len(SelectReplayFiles(nil)) != 0 {
+		t.Fatal("nil input")
+	}
+}
+
+func TestSelectReplayFiles_LimitWindowKeepsHighestIndexes(t *testing.T) {
+	files := []BinlogFile{
+		{FilePath: "/data/1/mysql-bin.000001"},
+		{FilePath: "/data/1/mysql-bin.000002"},
+		{FilePath: "/data/1/mysql-bin.000002.open.e1"},
+		{FilePath: "/data/1/mysql-bin.000002.open.e8"},
+		{FilePath: "/data/1/mysql-bin.000003"},
+	}
+	window := WindowBinlogFilesForReplay(files, 3)
+	if len(window) != 3 || filepath.Base(window[0].FilePath) != "mysql-bin.000002.open.e1" {
+		t.Fatalf("window %+v", window)
+	}
+	got := SelectReplayFiles(window)
+	if len(got) != 2 || got[0].FilePath != "/data/1/mysql-bin.000002.open.e8" || got[1].FilePath != "/data/1/mysql-bin.000003" {
+		t.Fatalf("replay %+v", got)
+	}
+	all := SelectReplayFiles(WindowBinlogFilesForReplay(files, 10))
+	if len(all) != 3 || all[0].FilePath != "/data/1/mysql-bin.000001" || all[1].FilePath != "/data/1/mysql-bin.000002.open.e8" {
+		t.Fatalf("full %+v", all)
+	}
+}
+
+func TestReplayClient(t *testing.T) {
+	client, hint := ReplayClient("mysql")
+	if client != "mysqlbinlog" || hint != "MySQL mysqlbinlog" {
+		t.Fatalf("mysql client=%q hint=%q", client, hint)
+	}
+	client, hint = ReplayClient(" MariaDB ")
+	if client != "mariadb-binlog" || hint != "mariadb-binlog" {
+		t.Fatalf("mariadb client=%q hint=%q", client, hint)
+	}
+	client, hint = ReplayClient("")
+	if client != "" || hint != "" {
+		t.Fatalf("empty client=%q hint=%q", client, hint)
 	}
 }
 

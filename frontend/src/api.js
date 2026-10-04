@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers for dashboard observation, task CRUD/detail, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
+// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -260,6 +260,18 @@ export async function listFiles(id, limit = 80) {
     });
   }
   const { data } = await http.get(`/api/tasks/${id}/files`, {
+    params: { limit },
+  });
+  return data;
+}
+
+export async function listReplay(id, limit = 80) {
+  if (useMockAPI) {
+    return mockRequest("GET", `/api/tasks/${id}/replay`, {
+      params: { limit },
+    });
+  }
+  const { data } = await http.get(`/api/tasks/${id}/replay`, {
     params: { limit },
   });
   return data;

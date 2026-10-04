@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, GET /api/tasks/{id}/replay one path per source index, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -486,6 +486,76 @@ function findTaskRow(state, id) {
   return state.tasks.find((row) => String(row.task.id) === String(id)) || null;
 }
 
+// ponytail: mirrors tasks.SelectReplayFiles / ReplayClient for the dev mock. Go tests lock the rule.
+function replaySegmentKey(file) {
+  const path = String((file && file.file_path) || "");
+  const name = path.split(/[/\\]/).filter(Boolean).pop() || "";
+  const mark = ".open.e";
+  let source = name;
+  let epoch = -1;
+  const idx = name.lastIndexOf(mark);
+  if (idx > 0) {
+    const epochText = name.slice(idx + mark.length);
+    if (!/^\d+$/.test(epochText)) return { ok: false, seq: 0, epoch: 0, name };
+    source = name.slice(0, idx);
+    epoch = Number(epochText);
+  }
+  const dot = source.lastIndexOf(".");
+  if (dot <= 0 || !/^\d+$/.test(source.slice(dot + 1)) || source.slice(0, dot) === "") {
+    return { ok: false, seq: 0, epoch: 0, name };
+  }
+  return { ok: true, seq: Number(source.slice(dot + 1)), epoch, name };
+}
+
+function replayLess(a, b) {
+  const ak = replaySegmentKey(a);
+  const bk = replaySegmentKey(b);
+  if (ak.ok && bk.ok && ak.seq !== bk.seq) return ak.seq < bk.seq;
+  if (ak.ok !== bk.ok) return ak.ok;
+  if (ak.epoch !== bk.epoch) return ak.epoch < bk.epoch;
+  return ak.name < bk.name;
+}
+
+function windowReplayFiles(files, limit) {
+  const sorted = [...files].sort((a, b) => (replayLess(a, b) ? -1 : replayLess(b, a) ? 1 : 0));
+  const n = limit > 0 ? limit : 200;
+  return sorted.length > n ? sorted.slice(sorted.length - n) : sorted;
+}
+
+function selectReplayPaths(files) {
+  const paths = [];
+  let last = null;
+  for (const file of files) {
+    const key = replaySegmentKey(file);
+    const filePath = String((file && file.file_path) || "").trim();
+    if (!key.ok || !filePath) continue;
+    if (last && last.seq === key.seq) {
+      if (key.epoch >= last.epoch) {
+        paths[paths.length - 1] = filePath;
+        last = key;
+      }
+      continue;
+    }
+    paths.push(filePath);
+    last = key;
+  }
+  return paths;
+}
+
+function replayClient(flavor) {
+  const value = String(flavor || "").trim().toLowerCase();
+  if (value === "mysql") return { client: "mysqlbinlog", client_hint: "MySQL mysqlbinlog" };
+  if (value === "mariadb") return { client: "mariadb-binlog", client_hint: "mariadb-binlog" };
+  return { client: "", client_hint: "" };
+}
+
+function replayLimit(query) {
+  if (!query.has("limit")) return 200;
+  const n = parseInteger(query.get("limit"));
+  if (n === null || n < 1) return 200;
+  return n;
+}
+
 function syncTaskSnapshot(state, id) {
   const row = findTaskRow(state, id);
   if (!row) return;
@@ -770,6 +840,23 @@ export function handleMockRequest(input) {
   const filesMatch = path.match(/^\/api\/tasks\/([^/]+)\/files$/);
   if (filesMatch && method === "GET") {
     return ok(deepClone(state.filesByID[filesMatch[1]] || []));
+  }
+
+  const replayMatch = path.match(/^\/api\/tasks\/([^/]+)\/replay$/);
+  if (replayMatch && method === "GET") {
+    const id = replayMatch[1];
+    const task = state.detailsByID[id];
+    if (!task) return ok({ error: "task not found" }, 404);
+    const files = state.filesByID[id] || [];
+    const paths = selectReplayPaths(windowReplayFiles(files, replayLimit(query)));
+    const flavor = String(task.source?.flavor || "");
+    const client = replayClient(flavor);
+    return ok({
+      flavor,
+      client: client.client,
+      client_hint: client.client_hint,
+      paths,
+    });
   }
 
   const retryUploadMatch = path.match(/^\/api\/tasks\/([^/]+)\/files\/retry-upload$/);
