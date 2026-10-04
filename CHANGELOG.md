@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.23] - 2026-10-04
+
+### Added
+
+- After a sealed segment is uploaded, the server HEADs the object once and compares its ETag with the sealed file. At or under 16MiB that is the whole-file MD5. Above that it is the same 16MiB multipart ETag, up to about 160GiB. There is no periodic re-check. The result is stored in the existing `binlog_files.checksum` column as `match` or `mismatch`. `GET /api/tasks/{id}/files` returns that value. The Console file table shows it in 校验. An open segment is not checksummed, so that cell is `--`. `match` means this ETag comparison found the same bytes. `mismatch` means the comparison finished and the bytes differ. `mismatch` stays `UPLOADED`. It is not treated as verified, and it does not stop replication. A failed upload stays `UPLOAD_FAILED` and the checksum is cleared. If the object HEAD fails, checksum stays empty on an `UPLOADED` row. Empty is not `match` and not `mismatch`. `GET /api/tasks/{id}/files` omits `checksum` when it is empty. The Console shows that cell as `--`. An uploader that cannot read the object also leaves checksum empty. Empty is not verified. A blank 校验 cell is neither a pass nor a fail. No new config key. No schema migration.
+
 ## [v0.5.22] - 2026-10-04
 
 ### Added
