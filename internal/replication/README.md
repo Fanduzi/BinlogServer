@@ -1,7 +1,8 @@
 # internal/replication Module
 
 ## Files
-- `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、LATEST 与已在 master file/pos 的 FILE_POS 立即 at-tip、dump preamble 不落盘也不计延迟、idle 仅在 dump 达到 master file/pos 时标 at-tip、heartbeat 跳过落盘）。停止后再启动时调用 `tasks.NextResumePosition`：从本地最高 open 分段最后一个完整事件的 `end_log_pos` 续传，不跳到当前 `SHOW MASTER STATUS`，也不把 epoch>1 回拨到位置 4；该分段改名到新 epoch 后继续追加，字节跨停止点连续。没有本地事件的接管仍从位置 4 重建。封文件后把已 seal 文件交给注入的 handler 上传。打开文件时按 `storage.retention_days` 清理过期封存分段：已上传的对象用目录里的 `object_key` 从桶里删除，并删掉该目录行；没有元数据时用与上传相同的 object key。还在保留期内的分段和任何 open 分段不删。对象删除失败时本地文件留下，任务错误以 `OBJECT_PURGE_FAILED` 开头，下次打开文件再试。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。rotate 在打开下一个文件之前把 checkpoint 记到下一个文件。`checksum` 不参与这个判断，失败时也不改写。`KeepLocalSegments` 为真时不改写 adopt 保存的 `FILE_POS`，也不删除其它 epoch 的 `.open.e*`。若某个 open 分段的最后一个完整事件已经结束在该 `FILE_POS`，仍把该分段改名到当前 epoch 后追加，避免新文件只剩 magic 和位点之后的事件。对不上的分段留在原地，新字节写到当前 epoch 的新 open 文件。
+- `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、LATEST 与已在 master file/pos 的 FILE_POS 立即 at-tip、dump preamble 不落盘也不计延迟、idle 仅在 dump 达到 master file/pos 时标 at-tip、heartbeat 跳过落盘）。停止后再启动时调用 `tasks.NextResumePosition`：从本地最高 open 分段最后一个完整事件的 `end_log_pos` 续传，不跳到当前 `SHOW MASTER STATUS`；该分段改名到新 epoch 后继续追加，字节跨停止点连续。epoch>1 且本机 data dir 没有完整事件时，用目录里的 `file_path`：目录能读就从那里最后一个完整事件续写，不另起目录，也不把同一源文件再封一次；open 分段或未上传的封存分段读不到，并且 checkpoint 还不在已上传对象里，返回永久错误 `SEGMENT_NOT_ON_WORKER`，不建新目录。checkpoint 已经落在 `UPLOADED` 对象里时，从该对象读回字节再续，不从位置 4 重拉。封文件后把已 seal 文件交给注入的 handler 上传。打开文件时按 `storage.retention_days` 清理过期封存分段：已上传的对象用目录里的 `object_key` 从桶里删除，并删掉该目录行；没有元数据时用与上传相同的 object key。还在保留期内的分段和任何 open 分段不删。对象删除失败时本地文件留下，任务错误以 `OBJECT_PURGE_FAILED` 开头，下次打开文件再试。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。rotate 在打开下一个文件之前把 checkpoint 记到下一个文件。`checksum` 不参与这个判断，失败时也不改写。`KeepLocalSegments` 为真时不改写 adopt 保存的 `FILE_POS`，也不删除其它 epoch 的 `.open.e*`。若某个 open 分段的最后一个完整事件已经结束在该 `FILE_POS`，仍把该分段改名到当前 epoch 后追加，避免新文件只剩 magic 和位点之后的事件。对不上的分段留在原地，新字节写到当前 epoch 的新 open 文件。
+- `takeover_segment_test.go`: 死掉 worker 的分段目录能读时接管续写；读不到时失败并点名路径；已上传对象从对象续。
 - `source_identity.go`: MySQL/MariaDB 源库身份，以及永久认证/配置错误与可重试网络错误分类。
 - `resolver.go`: 起点解析，以及 dump 与 SHOW MASTER STATUS file/pos 的保守比较。
 - 其余 `*_test.go`: 复制、恢复、上传等行为测试。
@@ -12,6 +13,7 @@
 - 源网络超时、拒绝、主机不可达及复制流 EOF/UnexpectedEOF 统一暴露 `SOURCE_UNREACHABLE`，本地文件/metadata/lease 错误保持原分类。
 - MariaDB 身份：`mariadb:<server_id>:<gtid_domain_id>`；MySQL 仍用 `server_uuid`。`flavor=mysql` 探测不到 `@@server_uuid`（空结果或 unknown system variable）时，永久错误 `SOURCE_IDENTITY_UNAVAILABLE` 提示这台源像 MariaDB，并要求 `flavor=mariadb`。`flavor=mariadb` 不读 `server_uuid`。
 - 文件落盘、checkpoint 对接、随落盘进度更新的 OPEN/SEALED 生命周期元数据；上传与重试共用 `tasks.ApplySealedUpload`。保留清理在本地文件删除之前删除已上传对象；删除失败不把这次清理报成成功。rotate 在打开下一个文件之前把 checkpoint 记到下一个文件，对象删除后来成功时复制从该文件继续。
+- 租约接管不搬数据目录。能读到 catalog `file_path` 的目录就在那个目录续写。读不到未上传的尾部则任务失败，错误以 `SEGMENT_NOT_ON_WORKER` 开头并带上缺失路径。checkpoint 已在封存且 `UPLOADED` 的对象内时，从对象续，不从位置 4 重建。
 
 ## Dependencies
 - Upstream: `internal/tasks` 调度层。

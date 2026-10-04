@@ -420,8 +420,11 @@ Worker A           MySQL            Worker B
                      ├────────────────►│
                      │                 │
                      │                 │──► Start Runner
-                     │                 │    (from checkpoint)
+                     │                 │    (file_path directory,
+                     │                 │     or FAILED)
 ```
+
+租约转到 Worker B。分段目录不跟着走，路径在 `binlog_files.file_path`。B 能读该目录时，从里面最后一个完整事件续写。读不到未上传的尾部时任务 `FAILED`，`last_error` 以 `SEGMENT_NOT_ON_WORKER` 开头并写出该路径，不另起目录从位置 4 重拉。checkpoint 已在封存 `UPLOADED` 对象里时从对象续。操作步骤见[部署指南 6.3 第 2 节](../admin/deployment.md)。
 
 ## 7. 配置参数
 
@@ -445,7 +448,7 @@ cluster:
 | `cluster.lease_ttl_sec` | 15 | 任务租约有效期（秒），也是 worker registration 的租期 |
 | `cluster.lease_renew_interval_sec` | 5 | 任务续租间隔，worker registration 续租也复用该值 |
 | `cluster.lease_grace_sec` | 30 | 续租失败后的宽限期 |
-| `cluster.failover_policy` | rebuild_current_file | 故障恢复时重建当前 binlog 文件 |
+| `cluster.failover_policy` | rebuild_current_file | 仍接受该值。接管看 `binlog_files.file_path`，不靠这个键从位置 4 重建 |
 
 **推荐配置关系：**
 
