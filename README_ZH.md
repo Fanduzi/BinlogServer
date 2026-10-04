@@ -224,7 +224,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
   export BINLOG_SERVER_UPLOAD_ACCESS_KEY="AKIA..."
   export BINLOG_SERVER_UPLOAD_SECRET_KEY="..."
   ```
-- 上传失败不会阻断复制，可通过 API 或 Web 控制台随时一键触发补传：
+- 上传失败不会阻断复制。worker 会在后台重试已封存的 `UPLOAD_FAILED` 分段，桶恢复后不必调用补传接口就会变成 `UPLOADED`。未封存的 open 分段不会上传。手动补传仍然可用：
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```

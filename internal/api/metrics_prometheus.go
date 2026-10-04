@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot; store list errors stay 5xx instead of empty task_state_count
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts; store list errors stay 5xx instead of empty task_state_count
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -69,13 +69,13 @@ func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiM
 		),
 		uploadRetryTotalDesc: prometheus.NewDesc(
 			"binlog_server_upload_retry_total",
-			"Total retry-upload API result count.",
+			"Total sealed-file retry-upload results, including background retries.",
 			[]string{"result"},
 			nil,
 		),
 		uploadRetryLastTsGauge: prometheus.NewDesc(
 			"binlog_server_upload_retry_last_ts",
-			"Last retry-upload API execution time in unix seconds.",
+			"Last sealed-file retry-upload time in unix seconds, including background retries.",
 			nil,
 			nil,
 		),

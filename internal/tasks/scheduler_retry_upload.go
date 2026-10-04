@@ -1,30 +1,129 @@
 // Package tasks provides module-level functionality for tasks.
-// input: failed upload metadata via failedUploadFileReader, retry requests, and object storage uploader operations
-// output: retry-upload execution results, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
-// pos: scheduler upload-retry compensation and failure-observability logic
+// input: failed upload metadata via failedUploadFileReader, manual and background retry requests, local sealed files, and object storage uploader operations
+// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
+// pos: scheduler upload-retry compensation, background retry loop, and failure-observability logic
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"errors"
+	"log"
+	"os"
 	"sort"
 	"strings"
 	"time"
 )
 
+const (
+	defaultRetryUploadLimit              = 100
+	maxRetryUploadLimit                  = 1000
+	defaultBackgroundUploadRetryInterval = 15 * time.Second
+)
+
+// retryUploadOptions selects store sync and whether a missing local file is left unchanged.
+// The manual API syncs and still attempts a missing file. The background loop skips it.
+type retryUploadOptions struct {
+	syncFromStore    bool
+	skipMissingLocal bool
+}
+
 func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetryStats, error) {
-	const (
-		defaultLimit = 100
-		maxLimit     = 1000
-	)
-	if limit <= 0 {
-		limit = defaultLimit
+	stats, err := s.retryFailedUploads(taskID, limit, retryUploadOptions{syncFromStore: true})
+	if err != nil {
+		return UploadRetryStats{}, err
 	}
-	if limit > maxLimit {
+	s.recordUploadRetryMetrics(stats)
+	return stats, nil
+}
+
+// RunBackgroundUploadRetry retries sealed UPLOAD_FAILED rows until ctx is cancelled.
+// Successful rows become UPLOADED through the same ApplySealedUpload path as RetryFailedUploads.
+// Open segments are not uploaded. A sealed file that is not on this machine is skipped, so its catalog row stays as it was.
+// interval <= 0 uses the default. No config key. The manual retry API is unchanged.
+func (s *Scheduler) RunBackgroundUploadRetry(ctx context.Context, interval time.Duration) {
+	s.mu.Lock()
+	ready := s.fileUploader != nil && s.fileStore != nil
+	if ready {
+		_, ready = s.fileStore.(failedUploadFileReader)
+	}
+	s.mu.Unlock()
+	if !ready {
+		return
+	}
+	if interval <= 0 {
+		interval = defaultBackgroundUploadRetryInterval
+	}
+
+	log.Printf("background upload retry started interval=%s", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		s.retryKnownFailedUploads()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// retryKnownFailedUploads runs one background pass over the tasks loaded in this process.
+func (s *Scheduler) retryKnownFailedUploads() {
+	if err := s.syncTasksFromStore(); err != nil {
+		log.Printf("background upload retry sync tasks: %v", err)
+		return
+	}
+	s.mu.Lock()
+	fileStore := s.fileStore
+	ids := make([]string, 0, len(s.tasks))
+	for id := range s.tasks {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	if counter, ok := fileStore.(uploadFailureCounter); ok {
+		ctx, cancel := s.withReadTimeout(context.Background())
+		total, err := counter.CountUploadFailures(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("background upload retry count failures: %v", err)
+		} else if total == 0 {
+			return
+		}
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		stats, err := s.retryFailedUploads(id, defaultRetryUploadLimit, retryUploadOptions{skipMissingLocal: true})
+		if err != nil {
+			if errors.Is(err, ErrUploadRetryInProgress) || errors.Is(err, ErrTaskNotFound) {
+				continue
+			}
+			log.Printf("background upload retry task=%s err=%v", id, err)
+			continue
+		}
+		if stats.Succeeded == 0 && stats.Failed == 0 {
+			continue
+		}
+		s.recordUploadRetryMetrics(stats)
+		log.Printf("background upload retry task=%s succeeded=%d failed=%d skipped=%d", id, stats.Succeeded, stats.Failed, stats.Skipped)
+	}
+}
+
+func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploadOptions) (UploadRetryStats, error) {
+	if limit <= 0 {
+		limit = defaultRetryUploadLimit
+	}
+	if limit > maxRetryUploadLimit {
 		return UploadRetryStats{}, ErrInvalidRetryUploadLimit
 	}
-	if err := s.syncTasksFromStore(); err != nil {
-		return UploadRetryStats{}, err
+	if opts.syncFromStore {
+		if err := s.syncTasksFromStore(); err != nil {
+			return UploadRetryStats{}, err
+		}
 	}
 
 	// Step 1: 参数归一化 + 任务存在性 + 并发互斥校验。
@@ -81,6 +180,12 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 			_ = s.markRetryUploadFailure(fileStore, file, "retry upload skipped: empty object_key")
 			continue
 		}
+		if opts.skipMissingLocal {
+			if _, statErr := os.Stat(file.FilePath); statErr != nil {
+				stats.Skipped++
+				continue
+			}
+		}
 
 		uploadCtx, cancelUpload := s.withUploadTimeout(context.Background())
 		updated, err := ApplySealedUpload(uploadCtx, uploader, fileStore, file)
@@ -91,9 +196,6 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 		}
 		stats.Succeeded++
 	}
-
-	// Step 3: 汇总到全局 retry metrics。
-	s.recordUploadRetryMetrics(stats)
 
 	return stats, nil
 }
