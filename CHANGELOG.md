@@ -12,9 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.19] - 2026-10-04
+
 ### Added
 
-- `GET /api/tasks/{id}/files/{name}` streams one inventory segment. `name` is the on-disk basename from `GET /api/tasks/{id}/files` (sealed name or `*.open.e*`). The body is `application/octet-stream`, `Content-Disposition` uses that basename, and the length is the file size at open. A slash, backslash, `..`, or other traversal form is 400 `invalid segment name`. A missing task is 404 `task not found`. A basename that is not under `{data_dir}/{id}/` on this process is 404 `segment not found on this process`. A control plane with no local file does not invent bytes from the catalog path or object storage. An open segment can be downloaded while the task is RUNNING or STOPPED. The Console files table has Download on each row. `GET /api/tasks/{id}/replay` and the copy command are unchanged. No new config key. No schema migration.
+- `GET /api/tasks/{id}/files/{name}` streams the raw bytes of one on-disk basename already listed by `GET /api/tasks/{id}/files` (a sealed name or `*.open.e*`), over the authenticated API and the Console, without SSH onto the backup host. `Content-Type` is `application/octet-stream`. `Content-Disposition` uses that basename. The body length is the file size at open. A slash, backslash, `..`, or other traversal form is 400 `invalid segment name`. A missing task is 404 `task not found`. A basename that is not under this process's task directory is 404 `segment not found on this process`. A control plane with no local file does not invent bytes from the catalog path or object storage. An open segment can be downloaded while the task is RUNNING or STOPPED. The Console files table has Download on each row. `GET /api/tasks/{id}/files` still lists every name. `GET /api/tasks/{id}/replay` and the Console copy command are unchanged: one path per source index, and when a sealed name and `.open.e*` share an index the path is the highest-epoch open segment and keeps the `.open.e*` suffix. No new config key. No schema migration.
 
 ## [v0.5.18] - 2026-10-04
 
