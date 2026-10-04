@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- A clean Stop no longer stays `STOPPING` when the run exits in the same window as the stop request, or when the `STOPPING` row is written after `STOPPED`. `GetTask` follows the store, so that late write used to leave the task `STOPPING`.
+
 ### Added
 
 - Task detail shows the configured start and the position the next Start continues from. 起点 / Start is the saved mode: `FILE_POS` includes `file:pos`, and `GTID` includes `gtid_set`. 续传 / Resume is `file:pos`, plus `GTID` when the stored checkpoint has the same file and pos. `GET /api/tasks/{id}/checkpoint` returns that resume identity. A local open segment with a complete event wins over a different checkpoint row, for both `meta_dsn` and standalone. With no checkpoint row and no complete local event, the response stays 404 `checkpoint not found`. A stopped task whose configured start is still `LATEST` shows the open segment's last complete event, which is the position the next Start uses. File-list `start_pos` / `end_pos` are unchanged. No new config key. No schema migration.

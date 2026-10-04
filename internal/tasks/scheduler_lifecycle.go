@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, and cancellation orchestration
+// output: guarded start/stop, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -457,12 +457,12 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 				releaseEpoch = currentTask.Epoch
 			}
 		}
+		// done 不是“任务开始执行”的信号，而是“本轮执行完全结束”的信号。
+		// 必须在放下 s.mu 之前关闭。否则 StopTask 可能已经看过未关闭的 done，
+		// 又赶在这次检查之后才写成 STOPPING，两边都不再把任务收成 STOPPED。
+		close(done)
 		s.mu.Unlock()
 		s.releaseTaskLease(id, releaseOwner, releaseEpoch)
-		// 常见误解：
-		// done 不是“任务开始执行”的信号，而是“本轮执行完全结束”的信号。
-		// StopTask/状态收敛逻辑依赖这个 close 时机判断是否可标记 STOPPED。
-		close(done)
 	}()
 
 	// Step 1: 调用 runRunner 执行一次会话；错误则进入退避重试。
