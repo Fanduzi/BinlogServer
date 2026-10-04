@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, one inventory segment download, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
+// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -272,6 +272,20 @@ export async function listFiles(id, limit = 80) {
   }
   const { data } = await http.get(`/api/tasks/${id}/files`, {
     params: { limit },
+  });
+  return data;
+}
+
+export async function downloadReplayArchive(id, limit = 80) {
+  const path = `/api/tasks/${encodeURIComponent(id)}/replay/archive`;
+  if (useMockAPI) {
+    const body = await mockRequest("GET", path, { params: { limit } });
+    const text = typeof body === "string" ? body : JSON.stringify(body ?? "");
+    return new Blob([text], { type: "application/x-tar" });
+  }
+  const { data } = await http.get(path, {
+    params: { limit },
+    responseType: "blob",
   });
   return data;
 }
