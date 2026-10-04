@@ -1,13 +1,14 @@
 # internal/upload Module
 
 ## Files
-- `s3_uploader.go`: 对象存储上传，以及按已有 object key 打开已上传对象（本进程磁盘上没有该封存分段时供下载）。
+- `s3_uploader.go`: 对象存储上传，上传后用对象 HEAD 的 ETag 与封存文件对比（`SealedObjectMatches`），以及按已有 object key 打开已上传对象（本进程磁盘上没有该封存分段时供下载）。
 - `s3_uploader_test.go`: 上传与按 key 打开对象的测试。
   重点覆盖配置校验、上传成功/失败、空对象 key、本地文件缺失、context cancel/deadline、HTTPS endpoint，以及打开已上传对象时的正文与大小。
 
 ## Exports
 - 上传接口：将 sealed binlog 文件上传到对象存储。
 - `OpenObject`：用同一客户端和同一套上传配置按 object key 打开已上传对象，返回打开时的对象大小。不新增配置项。对象不存在时返回 `os.ErrNotExist`。
+- `SealedObjectMatches`：HEAD 已上传对象，把 ETag 与封存文件比较。不超过 16MiB 用整文件 MD5；更大用与 `FPutObject` 相同的 16MiB 分片 ETag。ETag 为空、大小不一致或 Stat 失败都不是 match。
 
 ## Dependencies
 - Upstream: `internal/replication`, `internal/tasks`。

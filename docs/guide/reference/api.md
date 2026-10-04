@@ -378,6 +378,8 @@ curl -X POST http://localhost:8080/api/tasks/{task_id}/files/retry-upload \
 {"retried": 1, "files": ["mysql-bin.000002"]}
 ```
 
+`GET /api/tasks/{id}/files` 的每个文件对象在封存分段到达对象存储后带 `checksum`。`match` 表示桶里的对象与封存字节一致（对象 HEAD 的 ETag）。`mismatch` 表示这次核对没有通过，拉流继续。没有上传的分段不带该字段。
+
 ### 5.3 查看上传失败原因
 
 ```bash
