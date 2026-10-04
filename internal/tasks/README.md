@@ -13,7 +13,7 @@
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用 / `SEGMENT_NOT_ON_WORKER`，以及可重试的 `SOURCE_UNREACHABLE`）。
 - `scheduler_cluster_lease.go`: cluster lease 续租与降级/失租处理。
-- `scheduler_observability.go`: 复制进度（含 at-tip）、checkpoint、事件/文件/运行历史查询。无 task store 时，剩余目录的 files 走磁盘扫描。`GetCheckpoint` 仍只读已存储的 checkpoint 行，不从磁盘编造。`ResumePosition` 返回下次 Start 会用的 file/pos；本地 open 分段有完整事件时用该事件，file+pos 与存储行一致时带上 `gtid_set`。
+- `scheduler_observability.go`: 复制进度（含 at-tip）、checkpoint、事件/文件/运行历史查询。无 task store 时，剩余目录的 files 走磁盘扫描。`GetCheckpoint` 仍只读已存储的 checkpoint 行，不从磁盘编造。`ResumePosition` 返回下次 Start 会用的 file/pos；本地 open 分段有完整事件时用该事件，file+pos 与存储行一致时带上 `gtid_set`。`RetentionBlockedFiles` 把 runner 的过期未上传封存文件计数交给 `/metrics`；runner 没有这个计数时返回空 map。
 - `resume.go`: `NextResumePosition` 与 `ResolveTakeover`。adopt 的 `KeepLocalSegments` 不改用本地事件。没有本地事件时用 checkpoint；epoch 大于 1 且没有别的分段目录时把该 checkpoint 回拨到位置 4。`ResolveTakeover` 在本机 data dir 没有完整事件时看 catalog `file_path`：目录可读就从那里的最后一个完整事件续；open 分段或未上传封存分段不可读则 `Missing` 点名该路径；checkpoint 已在 `UPLOADED` 封存对象内则不回拨。
 - `scheduler_retry_upload.go`: 上传失败补偿。手动 `RetryFailedUploads` 与 worker 后台循环走同一条 `ApplySealedUpload`。后台只补本机存在的已封存 `UPLOAD_FAILED`；open 分段不上传。失败原因聚合也在这个文件。
 - `sealed_upload.go`: 尽力上传的唯一调用方（`ApplySealedUpload`、`ObjectKey`）；首次封文件后与重试共用。上传成功后核对完成时 `checksum` 为 `match` 或 `mismatch`。字节不同才是 `mismatch`，且不失败调用方。对象 HEAD 失败或不能读对象时 `checksum` 留空，行仍是 `UPLOADED`，空值不是已校验。

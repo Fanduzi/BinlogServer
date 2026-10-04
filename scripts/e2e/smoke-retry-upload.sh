@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: canonical E2E database topology, retry-upload e2e dependencies, and Quay MinIO/mc images
-# output: deterministic e2e orchestration, background retry of sealed UPLOAD_FAILED rows without the manual API, checksum match on the files API, MinIO mismatch proof, and verification logs
+# output: deterministic e2e orchestration, background retry of sealed UPLOAD_FAILED rows without the manual API, retention that keeps an expired unuploaded sealed file until it uploads and is then purged, checksum match on the files API, MinIO mismatch proof, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -97,9 +97,91 @@ wait_minio_live() {
 }
 
 ensure_minio_bucket() {
-  docker run --rm --network host \
-    -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
-    "$MC_IMAGE" mb -p "local/${MINIO_BUCKET}" >/dev/null 2>&1 || true
+  # MinIO can answer /minio/health/live and then reject mc with unauthorized
+  # for a short window. Retry until the bucket is listable. A lasting auth
+  # failure still fails this scenario.
+  local attempt
+  for attempt in $(seq 1 30); do
+    if docker run --rm --network host \
+      -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
+      "$MC_IMAGE" ls "local/${MINIO_BUCKET}" >/dev/null 2>&1; then
+      return 0
+    fi
+    docker run --rm --network host \
+      -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
+      "$MC_IMAGE" mb -p "local/${MINIO_BUCKET}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+  echo "minio bucket not usable after start (unauthorized or not created)" >&2
+  return 1
+}
+
+retention_skip_count() {
+  local name="$1"
+  curl -fsS "$API/api/tasks/$TASK_ID/events?limit=200" | jq --arg n "$name" '[.[] | select(.type=="RETENTION_SKIPPED_NOT_UPLOADED" and ((.message // "") | contains($n)) and ((.message // "") | contains("UPLOAD_FAILED")))] | length'
+}
+
+retention_blocked_gauge() {
+  local id="$1"
+  curl -fsS "$API/metrics" | awk -v id="$id" '
+    index($0, "binlog_server_retention_blocked_files{task_id=\"" id "\"}") { print $NF; found=1 }
+    END { if (!found) print "" }
+  '
+}
+
+wait_retention_kept() {
+  local path="$1"
+  local name="$2"
+  local _
+  for _ in $(seq 1 90); do
+    if [[ ! -e "$path" ]]; then
+      echo "retention deleted the only copy: $path" >&2
+      return 1
+    fi
+    local state
+    state="$(curl -fsS "$API/api/tasks/$TASK_ID" | jq -r '.state // empty')"
+    if [[ "$state" == "RETRY_BACKOFF" || "$state" == "FAILED" ]]; then
+      echo "task entered $state during retention skip" >&2
+      curl -fsS "$API/api/tasks/$TASK_ID" >&2 || true
+      return 1
+    fi
+    if [[ "$(retention_skip_count "$name")" == "1" && "$state" == "RUNNING" ]]; then
+      local gauge
+      gauge="$(retention_blocked_gauge "$TASK_ID")"
+      if [[ "$gauge" =~ ^[0-9]+$ && "$gauge" -ge 1 ]]; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  echo "retention skip was not visible for $name" >&2
+  curl -fsS "$API/api/tasks/$TASK_ID/events?limit=200" >&2 || true
+  curl -fsS "$API/metrics" >&2 || true
+  return 1
+}
+
+wait_retention_purged() {
+  local path="$1"
+  local name="$2"
+  local _
+  for _ in $(seq 1 90); do
+    local listed gauge
+    listed="$(curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" | jq --arg n "$name" 'if type=="array" then any(.[]; .file_name==$n) else true end')"
+    gauge="$(retention_blocked_gauge "$TASK_ID")"
+    if [[ ! -e "$path" && "$listed" == "false" && "$gauge" == "0" ]]; then
+      local state
+      state="$(curl -fsS "$API/api/tasks/$TASK_ID" | jq -r '.state // empty')"
+      if [[ "$state" == "RETRY_BACKOFF" || "$state" == "FAILED" ]]; then
+        echo "task entered $state while purging an uploaded file" >&2
+        return 1
+      fi
+      return 0
+    fi
+    sleep 1
+  done
+  echo "uploaded file was not purged: path=$path exists=$([[ -e "$path" ]] && echo yes || echo no) gauge=$(retention_blocked_gauge "$TASK_ID")" >&2
+  curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" >&2 || true
+  return 1
 }
 
 start_minio() {
@@ -272,6 +354,57 @@ write_source_data "retry-fail-${RUN_TAG}"
 flush_binary_logs
 wait_failed_upload_record "$TASK_ID"
 
+echo "[retry-upload] age the failed sealed file past retention and rotate again"
+FAILED_ROW="$(curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" | jq -r 'if type=="array" then [ .[] | select(.upload_state=="UPLOAD_FAILED" and ((.state // "") != "OPEN") and (((.file_name // "") | contains(".open.e")) | not) and (((.file_path // "") | contains(".open.e")) | not)) ] | .[0] | "\(.file_name)\t\(.file_path)" else empty end')"
+FAILED_NAME="${FAILED_ROW%%$'\t'*}"
+FAILED_PATH="${FAILED_ROW#*$'\t'}"
+if [[ -z "$FAILED_NAME" || "$FAILED_NAME" == "null" ]]; then
+  echo "no sealed UPLOAD_FAILED file to age" >&2
+  exit 1
+fi
+if [[ -z "$FAILED_PATH" || "$FAILED_PATH" == "null" || "$FAILED_PATH" == "$FAILED_NAME" ]]; then
+  FAILED_PATH="$DATA_DIR/$TASK_ID/$FAILED_NAME"
+fi
+if [[ ! -f "$FAILED_PATH" ]]; then
+  echo "sealed file missing before retention: $FAILED_PATH" >&2
+  exit 1
+fi
+touch -d '10 days ago' "$FAILED_PATH"
+flush_binary_logs
+wait_retention_kept "$FAILED_PATH" "$FAILED_NAME"
+
+echo "[retry-upload] another rotate does not repeat the retention event"
+checkpoint_fetch "$TASK_ID"
+DEDUP_FILE="$(checkpoint_file)"
+flush_binary_logs
+rotated=""
+for _ in $(seq 1 90); do
+  checkpoint_fetch "$TASK_ID"
+  current="$(checkpoint_file)"
+  if [[ "$CHECKPOINT_HTTP_CODE" == "200" && -n "$current" && "$current" != "$DEDUP_FILE" ]]; then
+    epoch="$(curl -fsS "$API/api/tasks/$TASK_ID" | jq -r '.epoch // 0')"
+    if [[ -f "$DATA_DIR/$TASK_ID/${current}.open.e${epoch}" ]]; then
+      rotated=1
+      break
+    fi
+  fi
+  sleep 1
+done
+if [[ -z "$rotated" ]]; then
+  echo "second rotate did not open a new file from $DEDUP_FILE" >&2
+  exit 1
+fi
+if [[ ! -f "$FAILED_PATH" ]]; then
+  echo "retention deleted $FAILED_PATH on the second rotate" >&2
+  exit 1
+fi
+SKIP_COUNT="$(retention_skip_count "$FAILED_NAME")"
+if [[ "$SKIP_COUNT" != "1" ]]; then
+  echo "expected one retention skip event, got $SKIP_COUNT" >&2
+  curl -fsS "$API/api/tasks/$TASK_ID/events?limit=200" >&2 || true
+  exit 1
+fi
+
 echo "[retry-upload] verify checkpoint still progresses while upload fails"
 write_source_data "retry-progress-${RUN_TAG}"
 wait_checkpoint_progress "$TASK_ID" "$BASE_FILE" "$BASE_POS"
@@ -286,6 +419,21 @@ if ! grep -q "background upload retry" "$SERVER_LOG"; then
   echo "background upload retry did not run" >&2
   exit 1
 fi
+
+echo "[retry-upload] uploaded expired file is purged on the next retention pass"
+UPLOADED_STATE="$(curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" | jq -r --arg n "$FAILED_NAME" 'if type=="array" then ([.[] | select(.file_name==$n) | .upload_state] | .[0] // "") else "" end')"
+if [[ "$UPLOADED_STATE" != "UPLOADED" ]]; then
+  echo "aged file was not uploaded before purge: state=$UPLOADED_STATE" >&2
+  curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" >&2 || true
+  exit 1
+fi
+if [[ ! -f "$FAILED_PATH" ]]; then
+  echo "aged file disappeared before the uploaded purge: $FAILED_PATH" >&2
+  exit 1
+fi
+touch -d '10 days ago' "$FAILED_PATH"
+flush_binary_logs
+wait_retention_purged "$FAILED_PATH" "$FAILED_NAME"
 
 echo "[retry-upload] uploaded sealed segment reports checksum match"
 if ! curl -fsS "$API/api/tasks/$TASK_ID/files?limit=200" | jq -e 'if type=="array" then any(.[]; .upload_state=="UPLOADED" and .checksum=="match" and (.file_name | contains(".open.e") | not)) and all(.[]; .upload_state != "UPLOADED" or .checksum == "match") else false end' >/dev/null; then

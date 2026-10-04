@@ -82,7 +82,7 @@ make e2e-topology-check
 - `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
 - `smoke-invalid-inputs.sh`: 验证任务 API 对非法输入返回 `400`（cluster_key/source/start/storage）。
-- `smoke-retry-upload.sh`: 验证上传失败不阻断拉流；MinIO 恢复后，已封存的 `UPLOAD_FAILED` 由后台补传变成 `UPLOADED`，场景本身不调用 `/api/tasks/{id}/files/retry-upload`。open 分段不会变成 `UPLOADED`。补传成功的封存文件 `checksum` 为 `match`；同一 MinIO 上内容不同的对象为 `mismatch`，且不让上传调用方失败。
+- `smoke-retry-upload.sh`: 验证上传失败不阻断拉流；MinIO 恢复后，已封存的 `UPLOAD_FAILED` 由后台补传变成 `UPLOADED`，场景本身不调用 `/api/tasks/{id}/files/retry-upload`。open 分段不会变成 `UPLOADED`。补传成功的封存文件 `checksum` 为 `match`；同一 MinIO 上内容不同的对象为 `mismatch`，且不让上传调用方失败。桶不可用时，把已封存失败文件的 mtime 拨到保留期之外再 `FLUSH BINARY LOGS`，文件、目录行和复制都留着，并只记一条 `RETENTION_SKIPPED_NOT_UPLOADED`；桶恢复并上传成功后，下一次打开文件会把它清掉。
 - `smoke-scale.sh`: 可选的 1000 控制面任务/100 实时流规模证据；复用单个 MySQL fixture（不把它当作数百个独立集群），按 100 条 batch 创建、校验分页/聚合、受控启动流，先写 priming marker 再快照每条 checkpoint，第二个 marker 后验证每条流推进及其 checkpoint 精确文件，并写入 JSON 报告。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
@@ -159,11 +159,13 @@ make e2e-topology-check
 1. 从 Quay 启动 minio 与 bucket，并以 upload 配置启动 binlog-server。
 2. 创建并启动任务，确认 checkpoint 已建立。
 3. 停止 minio，写入并 rotate，触发 `UPLOAD_FAILED` 文件记录。
-4. 继续写入源库，确认 checkpoint 仍持续推进（best-effort 语义不变）。
-5. 恢复 minio，不调用补传 API，等待后台重试把已封存的 `UPLOAD_FAILED` 变成 `UPLOADED`。服务日志里要有 `background upload retry`。`state=OPEN` 或路径里带 `.open.e` 的分段不能是 `UPLOADED`。
-6. 断言封存文件的 `checksum` 为 `match`。
-7. 对同一个 MinIO，把与封存文件等长但内容不同的对象写入后，`TestApplySealedUpload_MinIOChecksum` 断言 `checksum` 为 `mismatch` 且调用方不返回错误；匹配的上传（含大于 16MiB 的分片对象）仍为 `match`。
-8. 再次写入并确认 checkpoint 继续推进。
+4. 把这份已封存失败文件的 mtime 拨到 `retention_days` 之外，再 `FLUSH BINARY LOGS`。文件和目录行还在，任务保持 `RUNNING`，事件里有一条 `RETENTION_SKIPPED_NOT_UPLOADED`，`binlog_server_retention_blocked_files{task_id}` 至少为 1。再 rotate 一次，这条事件仍是一条。
+5. 继续写入源库，确认 checkpoint 仍持续推进（best-effort 语义不变）。
+6. 恢复 minio，不调用补传 API，等待后台重试把已封存的 `UPLOAD_FAILED` 变成 `UPLOADED`。服务日志里要有 `background upload retry`。`state=OPEN` 或路径里带 `.open.e` 的分段不能是 `UPLOADED`。
+7. 再 `FLUSH BINARY LOGS`。刚才被拨旧的那份文件在上传成功后被清掉，gauge 变为 0。
+8. 断言仍在的封存文件 `checksum` 为 `match`。
+9. 对同一个 MinIO，把与封存文件等长但内容不同的对象写入后，`TestApplySealedUpload_MinIOChecksum` 断言 `checksum` 为 `mismatch` 且调用方不返回错误；匹配的上传（含大于 16MiB 的分片对象）仍为 `match`。
+10. 再次写入并确认 checkpoint 继续推进。
 
 ## meta-failover 场景说明
 
