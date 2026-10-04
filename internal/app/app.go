@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, the upload client also wired as the retention object deleter, and shutdown
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, and shutdown
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -75,6 +76,18 @@ var newClusterLeaseRuntimeForRun = func(store appMetaStore) tasks.LeaseManager {
 
 var newRunnerForRun = func(cfg config.Config, opts ...replication.RunnerOption) tasks.Runner {
 	return replication.NewMySQLRunner(cfg.DataDir, opts...)
+}
+
+// uploadClient is the object client the process starts with. S3Uploader uploads,
+// deletes, and reads. Takeover reads a sealed object through this same client.
+type uploadClient interface {
+	tasks.FileUploader
+	DeleteObject(context.Context, string) error
+	OpenObject(context.Context, string) (io.ReadCloser, int64, error)
+}
+
+var newUploadClientForRun = func(cfg upload.S3Config) (uploadClient, error) {
+	return upload.NewS3Uploader(cfg)
 }
 
 type App struct {
@@ -254,7 +267,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	if a.cfg.UploadEndpoint != "" && a.cfg.UploadBucket != "" && a.cfg.UploadAccessKey != "" && a.cfg.UploadSecretKey != "" {
 		// upload 是可选能力；启用后 runner 会上传 sealed binlog file。
-		uploader, err := upload.NewS3Uploader(upload.S3Config{
+		uploader, err := newUploadClientForRun(upload.S3Config{
 			Endpoint:  a.cfg.UploadEndpoint,
 			Bucket:    a.cfg.UploadBucket,
 			AccessKey: a.cfg.UploadAccessKey,

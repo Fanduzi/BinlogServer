@@ -1,5 +1,5 @@
 // Package replication provides module-level functionality for replication.
-// input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the object deleter wired with upload
+// input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
 // output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
@@ -153,10 +153,14 @@ func WithUploader(uploader tasks.FileUploader, prefix string) RunnerOption {
 	}
 }
 
-// WithObjectDeleter 注入保留清理时使用的对象删除器。生产与上传客户端是同一个。
+// WithObjectDeleter 注入保留清理时使用的对象删除器。生产启动把上传客户端传进来。
+// 同一个客户端实现了 OpenObject 时，接管用它把已上传的封存对象读回来。
 func WithObjectDeleter(deleter objectDeleter) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.objectDeleter = deleter
+		if opener, ok := deleter.(objectOpener); ok {
+			r.objectOpener = opener
+		}
 	}
 }
 

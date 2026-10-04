@@ -3,6 +3,7 @@
 ## Files
 - `mysql_runner.go`: 复制主执行流程（含 open segment 元数据及进度更新、LATEST 与已在 master file/pos 的 FILE_POS 立即 at-tip、dump preamble 不落盘也不计延迟、idle 仅在 dump 达到 master file/pos 时标 at-tip、heartbeat 跳过落盘）。停止后再启动时调用 `tasks.NextResumePosition`：从本地最高 open 分段最后一个完整事件的 `end_log_pos` 续传，不跳到当前 `SHOW MASTER STATUS`；该分段改名到新 epoch 后继续追加，字节跨停止点连续。epoch>1 且本机 data dir 没有完整事件时，用目录里的 `file_path`：目录能读就从那里最后一个完整事件续写，不另起目录，也不把同一源文件再封一次；open 分段或未上传的封存分段读不到，并且 checkpoint 还不在已上传对象里，返回永久错误 `SEGMENT_NOT_ON_WORKER`，不建新目录。checkpoint 已经落在 `UPLOADED` 对象里时，从该对象读回字节再续，不从位置 4 重拉。封文件后把已 seal 文件交给注入的 handler 上传。打开文件时按 `storage.retention_days` 清理过期封存分段：已上传的对象用目录里的 `object_key` 从桶里删除，并删掉该目录行；没有元数据时用与上传相同的 object key。还在保留期内的分段和任何 open 分段不删。对象删除失败时本地文件留下，任务错误以 `OBJECT_PURGE_FAILED` 开头，下次打开文件再试。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。rotate 在打开下一个文件之前把 checkpoint 记到下一个文件。`checksum` 不参与这个判断，失败时也不改写。`KeepLocalSegments` 为真时不改写 adopt 保存的 `FILE_POS`，也不删除其它 epoch 的 `.open.e*`。若某个 open 分段的最后一个完整事件已经结束在该 `FILE_POS`，仍把该分段改名到当前 epoch 后追加，避免新文件只剩 magic 和位点之后的事件。对不上的分段留在原地，新字节写到当前 epoch 的新 open 文件。
 - `takeover_segment_test.go`: 死掉 worker 的分段目录能读时接管续写；读不到时失败并点名路径；已上传对象从对象续。
+- `uploaded_takeover.go`: 生产启动传进来的 runner 选项。checkpoint 只在封存 `UPLOADED` 对象里、本地文件不在时，从该对象最后一个完整事件续。`WithObjectDeleter` 收到的上传客户端如果能 `OpenObject`，就用它读，不另要配置。
 - `source_identity.go`: MySQL/MariaDB 源库身份，以及永久认证/配置错误与可重试网络错误分类。
 - `resolver.go`: 起点解析，以及 dump 与 SHOW MASTER STATUS file/pos 的保守比较。
 - 其余 `*_test.go`: 复制、恢复、上传等行为测试。
