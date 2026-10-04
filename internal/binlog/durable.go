@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event, plus the cursor that finds where that event ends in a segment
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, plus the cursor that finds where that event ends
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -35,7 +35,17 @@ func DurableResume(dataDir, taskID string) (file string, pos uint32, ok bool) {
 	if !okDir {
 		return "", 0, false
 	}
-	entries, err := os.ReadDir(dir)
+	return DurableResumeDir(dir)
+}
+
+// DurableResumeDir is DurableResume for a segment directory the catalog already
+// recorded. The directory is used as given; it is not joined with a task id.
+func DurableResumeDir(taskDir string) (file string, pos uint32, ok bool) {
+	taskDir = strings.TrimSpace(taskDir)
+	if taskDir == "" {
+		return "", 0, false
+	}
+	entries, err := os.ReadDir(taskDir)
 	if err != nil {
 		return "", 0, false
 	}
@@ -48,7 +58,7 @@ func DurableResume(dataDir, taskID string) (file string, pos uint32, ok bool) {
 		if !ok || seg.epoch < 0 {
 			continue
 		}
-		seg.path = filepath.Join(dir, entry.Name())
+		seg.path = filepath.Join(taskDir, entry.Name())
 		cands = append(cands, seg)
 	}
 	sort.Slice(cands, func(i, j int) bool {

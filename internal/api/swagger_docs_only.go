@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/replay, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/checkpoint where epoch greater than 1 follows a readable file_path and does not rewind an unreadable tail to position 4, GET /api/tasks/{id}/replay, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -101,7 +101,7 @@ func (s *Server) swaggerTaskStopDoc() {}
 
 // swaggerTaskCheckpointDoc godoc
 // @Summary Get task checkpoint
-// @Description Returns the file, pos, and gtid_set the next Start continues from. A local open segment with a complete event wins over the stored checkpoint. gtid_set is included when that stored checkpoint has the same file and pos. With no local event, the stored checkpoint is returned, and epoch greater than 1 rewinds pos to 4. 404 when neither exists.
+// @Description Returns the file, pos, and gtid_set the next Start continues from. A local open segment with a complete event wins over the stored checkpoint. gtid_set is included when that stored checkpoint has the same file and pos. With no local event, the stored checkpoint is returned. Epoch greater than 1 rewinds pos to 4 only when the catalog has no row for that tail. A readable binlog_files.file_path continues from the last complete event in that directory. A checkpoint inside a sealed UPLOADED object is not rewound. An unreadable open segment returns the stored checkpoint; Start then fails with SEGMENT_NOT_ON_WORKER and does not open a new directory. 404 when neither exists.
 // @Tags Tasks
 // @Produce json
 // @Param id path string true "Task ID"
