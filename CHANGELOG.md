@@ -20,10 +20,6 @@ Maintenance rules:
 
 - Console task detail has the same window: a UTC stop time, an optional start time, generate, copy, and download of `task-{id}-replay.tar`. That Console is in the embedded bundle a plain `go build` serves.
 
-### Changed
-
-- Operator download examples in README, README_ZH, the deployment guide, and the landing page now pin `v0.5.26`. The checksum example is the published `v0.5.26` `checksums.txt`.
-
 ## [v0.5.26] - 2026-10-04
 
 ### Added
