@@ -76,7 +76,7 @@ func (u *S3Uploader) UploadFile(ctx context.Context, _ string, localPath, object
 // SealedObjectMatches reports whether the stored object is the same bytes as the sealed local file.
 // It HEADs the object and compares that ETag with the ETag of the local file.
 // A single PUT at or under 16MiB uses the file MD5. A larger upload uses the same 16MiB part boundaries as UploadFile.
-// A missing ETag, a size difference, or a stat error is not a match.
+// A missing ETag or a size difference is not a match. A stat error is returned so the caller can leave checksum empty.
 func (u *S3Uploader) SealedObjectMatches(ctx context.Context, localPath, objectKey string) (bool, error) {
 	if u == nil || u.client == nil {
 		return false, fmt.Errorf("object storage is not configured")

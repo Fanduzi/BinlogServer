@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: ApplySealedUpload with fake uploader and file writer
-// output: UPLOADED on success, UPLOAD_FAILED on upload error without failing the caller, checksum match or mismatch from the stored bytes
+// output: UPLOADED on success, UPLOAD_FAILED on upload error without failing the caller, checksum match or mismatch from the stored bytes, and an empty checksum when the object HEAD returns an error
 // pos: best-effort upload caller tests
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -115,5 +115,38 @@ func TestApplySealedUpload_ChecksumFollowsStoredBytes(t *testing.T) {
 	}
 	if mismatched.UploadState != "UPLOADED" || mismatched.Checksum != ChecksumMismatch {
 		t.Fatalf("mismatch path: state=%s checksum=%s", mismatched.UploadState, mismatched.Checksum)
+	}
+}
+
+// headFailUploader stores the sealed file, then the object HEAD returns an error.
+type headFailUploader struct {
+	storedUploader
+}
+
+func (u *headFailUploader) SealedObjectMatches(context.Context, string, string) (bool, error) {
+	return false, errors.New("head object: connection reset")
+}
+
+func TestApplySealedUpload_HeadErrorLeavesChecksumEmpty(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "mysql-bin.000001")
+	if err := os.WriteFile(local, []byte("sealed-segment-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writer := &sealedUploadWriter{}
+	file := BinlogFile{TaskID: "1", FilePath: local, ObjectKey: "k/mysql-bin.000001"}
+
+	updated, err := ApplySealedUpload(context.Background(), &headFailUploader{}, writer, file)
+	if err != nil {
+		t.Fatalf("HEAD error must not fail the caller, got %v", err)
+	}
+	if updated.UploadState != "UPLOADED" {
+		t.Fatalf("state=%s, want UPLOADED", updated.UploadState)
+	}
+	if updated.Checksum == ChecksumMatch || updated.Checksum == ChecksumMismatch || updated.Checksum != "" {
+		t.Fatalf("checksum=%q, want empty after a failed HEAD", updated.Checksum)
+	}
+	if len(writer.files) != 1 || writer.files[0].Checksum != "" || writer.files[0].UploadState != "UPLOADED" {
+		t.Fatalf("persisted row=%+v", writer.files)
 	}
 }
