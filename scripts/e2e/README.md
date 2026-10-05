@@ -25,7 +25,7 @@
 兼容性说明：
 
 - `run-server.sh` 构建的临时 Linux 测试二进制默认关闭 CGO，用于贴近 release 产物的 `glibc 2.17` 兼容基线。
-- `smoke-retry-upload` 和 `smoke-split-retention` 从 Quay 拉 MinIO / `mc`（`MINIO_IMAGE` / `MC_IMAGE` 可覆盖）。Docker Hub 的 `minio/minio` 与 `minio/mc` 已拒绝匿名拉取。
+- `smoke-retry-upload` 和 `smoke-split-retention` 从 Quay 拉 MinIO / `mc`（`MINIO_IMAGE` / `MC_IMAGE` 可覆盖）。Docker Hub 的 `minio/minio` 与 `minio/mc` 已拒绝匿名拉取。`smoke-split-retention` 在 Quay 返回 401 时改用 GitHub release 的同版本 linux 二进制（`MINIO_RELEASE` / `MC_RELEASE`）。
 
 ## 推荐入口
 
@@ -172,7 +172,7 @@ make e2e-topology-check
 
 该场景证明本地保留和桶保留可以分开，并且只配 `retention_days` 的任务仍按原来的一次清理删掉对象、目录行和本地文件：
 
-1. 从 Quay 启动 minio，并以 upload 和 `meta_dsn` 启动 binlog-server。
+1. 从 Quay 启动 minio；Quay 不可用时改用 GitHub release 二进制。以 upload 和 `meta_dsn` 启动 binlog-server。
 2. 创建桶保留短于本地保留的任务，HTTP 400，正文含 `shorter than local retention`。
 3. 只带 `storage.retention_days` 的任务响应里没有 `local_retention_days` 和 `bucket_retention_days`。把它的一份已上传封存文件的 mtime 拨到 10 天前，再 rotate。本地文件、目录行和对象一起消失。
 4. `local_retention_days=1`、`bucket_retention_days=30` 的任务里，mtime 早于本地、仍在桶保留内的 `UPLOADED` 文件只从磁盘删除。`location` 是 `bucket`，`GET /files/{name}` 的字节与删除前一致，对象还在。`replay` 的 `locations` 对这条路径是 `bucket`，`stop_datetime` 窗口和 `replay/archive` 仍包含它。mtime 早于桶保留的另一份则对象、目录行和本地文件一起消失。

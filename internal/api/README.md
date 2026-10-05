@@ -13,6 +13,7 @@
 | `cluster_observation_test.go` | HTTP 缝测试：过滤后的 dashboard 汇总 ≠ 集群人数；store 主人/状态变化反映到 overview/workers/metrics；单机 + meta 的 overview `worker_count` 与 `/api/workers` 一致；lookup 读同一份 store 抄本；无 store 仍用内存名单；`/metrics` 一次 scrape 只读一份 store 抄本 |
 | `gettask_fail_loud_test.go` | HTTP 缝测试：有 store 时 `GET /api/tasks/{id}` store 未找到 404、其它 store 错误 5xx，不退回内存旧主人/epoch 抄本；没有 store 仍读内存名单 |
 | `swagger_docs_only.go` | swagger 注释占位 |
+| `server_test.go` | HTTP 测试替身。内存 task store 用互斥锁保护，后台 runner 和 HTTP 读可以同时碰到同一份 map |
 
 ## Exports
 - `NewServer(taskService, ...ServerOption) http.Handler` - 创建 API 服务器

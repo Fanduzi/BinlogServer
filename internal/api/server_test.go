@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +78,7 @@ func (m *fakeAPILeaseManager) Verify(_ context.Context, _ string, _ string, _ in
 }
 
 type fakeAPIRunHistoryStore struct {
+	mu        sync.Mutex
 	tasks     map[string]tasks.Task
 	runs      map[string][]tasks.TaskRun
 	workers   []tasks.WorkerHeartbeat
@@ -93,11 +95,15 @@ func newFakeAPIRunHistoryStore() *fakeAPIRunHistoryStore {
 
 // UpsertTask 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) UpsertTask(_ context.Context, task tasks.Task) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.tasks[task.ID] = task
 	return nil
 }
 
 func (s *fakeAPIRunHistoryStore) snapshot() []tasks.Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]tasks.Task, 0, len(s.tasks))
 	for _, task := range s.tasks {
 		out = append(out, task)
@@ -107,6 +113,8 @@ func (s *fakeAPIRunHistoryStore) snapshot() []tasks.Task {
 
 // GetTask 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) GetTask(_ context.Context, taskID string) (tasks.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	task, ok := s.tasks[taskID]
 	if !ok {
 		return tasks.Task{}, tasks.ErrTaskNotFound
@@ -132,6 +140,8 @@ func (s *fakeAPIRunHistoryStore) ListStartingUnownedTasks(_ context.Context) ([]
 
 // DeleteTask 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) DeleteTask(_ context.Context, taskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.tasks, taskID)
 	delete(s.runs, taskID)
 	return nil
@@ -139,6 +149,8 @@ func (s *fakeAPIRunHistoryStore) DeleteTask(_ context.Context, taskID string) er
 
 // ListTaskRuns 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) ListTaskRuns(_ context.Context, taskID string, limit int) ([]tasks.TaskRun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastLimit = limit
 	rows := s.runs[taskID]
 	if limit <= 0 || limit >= len(rows) {
@@ -153,6 +165,8 @@ func (s *fakeAPIRunHistoryStore) ListTaskRuns(_ context.Context, taskID string, 
 
 // UpsertWorkerHeartbeat 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) UpsertWorkerHeartbeat(_ context.Context, hb tasks.WorkerHeartbeat) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i := range s.workers {
 		if s.workers[i].WorkerID == hb.WorkerID {
 			s.workers[i] = hb
@@ -165,6 +179,8 @@ func (s *fakeAPIRunHistoryStore) UpsertWorkerHeartbeat(_ context.Context, hb tas
 
 // ListWorkerHeartbeats 实现对应功能逻辑。
 func (s *fakeAPIRunHistoryStore) ListWorkerHeartbeats(_ context.Context, _ int) ([]tasks.WorkerHeartbeat, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]tasks.WorkerHeartbeat, len(s.workers))
 	copy(out, s.workers)
 	return out, nil
