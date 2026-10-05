@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.36
+### 1. Download, verify, and unpack v0.5.37
 
 ```bash
-VER=0.5.36
+VER=0.5.37
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.36` `checksums.txt`:
+Published `v0.5.37` `checksums.txt`:
 
 ```text
-39a894d91d955507be54a9af1895173459cfa8adf974bb45655c4bc05fe830e6  binlog-server_0.5.36_darwin_amd64.tar.gz
-35d0b9e9436cc2f823e57d8f0eb1a6db5dca801d8f25e1da1e610926261c0565  binlog-server_0.5.36_darwin_arm64.tar.gz
-1e168be5714f9d7fd687c7fb3c177953e77bdfdb890801ca956e38ae5f0f0947  binlog-server_0.5.36_linux_amd64.tar.gz
-4c7918cfc922bdee54c209a3158b4b58f23ada3109a323455c972462380d2638  binlog-server_0.5.36_linux_arm64.tar.gz
+536974d525dac9ecd9297e6b5efbca38e7481718392c02fc3221dd8b8436b591  binlog-server_0.5.37_darwin_amd64.tar.gz
+3d52f5a3a913e2cf53a049d15639960f16e7c2faa54839cca509dedd4d3fa55b  binlog-server_0.5.37_darwin_arm64.tar.gz
+5de35eec4c1d60b536c5ea204b5c4fe7a66a026330af727e46c3f07ebc6c2f72  binlog-server_0.5.37_linux_amd64.tar.gz
+7630b3d60c7a201379bbd9b9d2c90ec45193a00a78fdd07da3883199f71306d9  binlog-server_0.5.37_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.36_linux_amd64/
+binlog-server_0.5.37_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -257,16 +257,16 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.36)
+## Upgrade Notes (v0.5.37)
 
-Before upgrading existing deployments to `v0.5.36`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, `v0.5.32`, `v0.5.33`, `v0.5.34`, and `v0.5.35` stay in the release notes linked below.
+Before upgrading existing deployments to `v0.5.37`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, `v0.5.32`, `v0.5.33`, `v0.5.34`, `v0.5.35`, and `v0.5.36` stay in the release notes linked below.
 
-- **No schema migration:** Rolling upgrade of the binaries from `v0.5.35` is fine. The metadata schema stays at version 2. When `schema_migrations` is already version 2, `./migrate up` is not required. No new config key. A database still on schema 1 must follow the v0.5.34 upgrade first: stop every binlog-server on that database, run `./migrate up`, then start only `v0.5.34` or newer.
-- **GTID checkpoint stays, and a purged binlog resumes by GTID (#175, #197, #198):** A task created with `start.mode=GTID` keeps `gtid_set` on every flushed checkpoint, including the rotate onto the next file. The set grows when the transaction commits (XID, `COMMIT`, `ROLLBACK`, or an autocommit statement). Resume still tries file and position first. If that file has been purged, MySQL 1236 on the first stream read closes that dump and opens `StartSyncGTID`. The task reaches `RUNNING`. Up to `v0.5.35`, the first flush cleared `gtid_set`, and a purged file left the task in `RETRY_BACKOFF`. The published v0.5.35 package still does that. A checkpoint whose `gtid_set` is already empty is not rebuilt from the local file. Before `PURGE BINARY LOGS` on the checkpoint file, compare `GET /api/tasks/{id}/checkpoint` `gtid_set` with the source `GTID_EXECUTED`. With `binlog_transaction_compression=ON`, a compressed transaction is not added to `gtid_set`.
+- **No schema migration:** Rolling upgrade of the binaries from `v0.5.36` is fine. The metadata schema stays at version 2. When `schema_migrations` is already version 2, `./migrate up` is not required. No new config key. A database still on schema 1 must follow the v0.5.34 upgrade first: stop every binlog-server on that database, run `./migrate up`, then start only `v0.5.34` or newer.
+- **A local error that will not clear on its own goes to FAILED (#178):** `sealed file already exists` moves the task to `FAILED`. `last_error` is `SEALED_FILE_EXISTS: sealed file already exists: <path>`. A checkpoint write that is not a transient metadata error moves the task to `FAILED` with `last_error` beginning `CHECKPOINT_WRITE_FAILED`. The lease is released and that runner is not called again. Remove the stray file, or fix the metadata error named in `last_error`, then Start. Up to `v0.5.36`, those conditions stayed in `RETRY_BACKOFF` and kept reconnecting to the source. The published v0.5.36 package still does that. A lease epoch mismatch is a handoff: this process appends `TASK_LEASE_YIELDED` and does not write `FAILED` or `RETRY_BACKOFF`. `SOURCE_UNREACHABLE`, a transient checkpoint error, `OBJECT_PURGE_FAILED`, and MySQL 1236 with no stored GTID stay in `RETRY_BACKOFF`.
 
-Full release notes: [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md) | [docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md) | [docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md)
 
-Notes for v0.5.27 through v0.5.35: [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md) | [docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md), [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md) | [docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md), [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md), [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
+Notes for v0.5.27 through v0.5.36: [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md) | [docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md), [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md) | [docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md), [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md) | [docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md), [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md), [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 
 ---
