@@ -50,12 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.33)
+## 3. 安装与产物准备 (v0.5.34)
 
-生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档：
+生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
+
+> ⚠️ **升级顺序：先停全部进程，再迁移。** 这一版包含 schema migration `000002`。先停掉这一套元数据库上的每一台 binlog-server，再执行 `./migrate up`，然后只启动 `v0.5.34`。`v0.5.33` 对着 schema 2 会拒绝启动。还有旧进程连着这个库时，不要改表。Epoch 分段仍可按名访问（#176）。细节见 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md)。
 
 ```bash
-VER=0.5.33
+VER=0.5.34
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -67,21 +69,21 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.33` `checksums.txt`：
+已发布的 `v0.5.34` `checksums.txt`：
 
 ```text
-f19d7e8071f2ff5e3e9db7c5eedb85b0e19ff70e16a5f5f325b3796d5891fb0a  binlog-server_0.5.33_darwin_amd64.tar.gz
-6ea6039c13e39f570877c6cbc570a02416b2d7cb0d92e954b9348a3014537578  binlog-server_0.5.33_darwin_arm64.tar.gz
-028c47cb8b5fa529afe225fe8586c984f374e00cb86ca307510d977341126f43  binlog-server_0.5.33_linux_amd64.tar.gz
-185091c6a31ebd985a409bba3cd14a60c3f9ea1991f8cab690694fca1445c739  binlog-server_0.5.33_linux_arm64.tar.gz
+6b67b1c2d5a9312e5248a98999d591cfa8e1764eed4694ef8b7925e5bf2699f6  binlog-server_0.5.34_darwin_amd64.tar.gz
+5fed570d862748cc57151a80af4f89d616af3d5dfe0f4a520e160fc390637859  binlog-server_0.5.34_darwin_arm64.tar.gz
+fe64b1fc96320145aa010483db5c640c4a1517be27c04cee017310fcfc29e8de  binlog-server_0.5.34_linux_amd64.tar.gz
+29acbea6532e30de26f8bc6a10d23d82cad8da354967e8d8a1d089cc20a3b45d  binlog-server_0.5.34_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.33_linux_amd64/
+binlog-server_0.5.34_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
-├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema)
+├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key)
 ├── config.example.yaml            # 完整参数参考配置
 ├── config.production.example.yaml # 生产安全基线模板
 ├── README.md                      # 英文说明

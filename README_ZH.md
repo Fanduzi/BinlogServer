@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.33
+### 1. 下载、校验并解压 v0.5.34
 
 ```bash
-VER=0.5.33
+VER=0.5.34
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,19 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.33` `checksums.txt`：
+已发布的 `v0.5.34` `checksums.txt`：
 
 ```text
-f19d7e8071f2ff5e3e9db7c5eedb85b0e19ff70e16a5f5f325b3796d5891fb0a  binlog-server_0.5.33_darwin_amd64.tar.gz
-6ea6039c13e39f570877c6cbc570a02416b2d7cb0d92e954b9348a3014537578  binlog-server_0.5.33_darwin_arm64.tar.gz
-028c47cb8b5fa529afe225fe8586c984f374e00cb86ca307510d977341126f43  binlog-server_0.5.33_linux_amd64.tar.gz
-185091c6a31ebd985a409bba3cd14a60c3f9ea1991f8cab690694fca1445c739  binlog-server_0.5.33_linux_arm64.tar.gz
+6b67b1c2d5a9312e5248a98999d591cfa8e1764eed4694ef8b7925e5bf2699f6  binlog-server_0.5.34_darwin_amd64.tar.gz
+5fed570d862748cc57151a80af4f89d616af3d5dfe0f4a520e160fc390637859  binlog-server_0.5.34_darwin_arm64.tar.gz
+fe64b1fc96320145aa010483db5c640c4a1517be27c04cee017310fcfc29e8de  binlog-server_0.5.34_linux_amd64.tar.gz
+29acbea6532e30de26f8bc6a10d23d82cad8da354967e8d8a1d089cc20a3b45d  binlog-server_0.5.34_linux_arm64.tar.gz
 ```
 
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.33_linux_amd64/
+binlog-server_0.5.34_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -251,18 +251,15 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.33)
+## 升级须知 (v0.5.34)
 
-在将生产环境升级至 `v0.5.33` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31` 与 `v0.5.32` 的记录留在下方链接的发布说明里。
+在将生产环境升级至 `v0.5.34` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32` 与 `v0.5.33` 的记录留在下方链接的发布说明里。
 
-- **无需数据库表结构变更:** `v0.5.33` 不需要 schema migration。迁移仍只有 `000001_init_schema`。没有新的状态。没有新的配置项。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
-- **封存上传中途进程挂了，文件仍然会进桶:** 配了对象存储时，PUT 之前先写目录行。这一行 `state` 是 `SEALED`，`upload_state` 是 `UPLOAD_FAILED`，`upload_error` 是 `upload pending`，对象键已经写上。下一个 binlog 文件的 checkpoint 也在这次 PUT 之前落盘。这次 PUT 用 `meta.timeout.upload_sec` 封顶，默认 30 秒。到点之后这一行仍是 `UPLOAD_FAILED`，复制去打开下一个文件。到 `v0.5.32` 为止，文件刚改完名、上传还没记进目录时，会停在 `LOCAL_ONLY`，或者根本不进补传集合。后台补传不会去传它。租约被别的 worker 接走时，任务可能以 `SEGMENT_NOT_ON_WORKER` 失败。封存之后的上传以前没有截止时间，对象存储一挂，拉流就停在那里，这个 worker 一直占着租约。已发布的 v0.5.32 包仍然这样。复制继续跑。
-- **重启和租约接管会把封存文件补进重试:** 下次启动，包括租约接管，本机磁盘上已经封存、还没变成 `UPLOADED` 的文件，会记成 `UPLOAD_FAILED`，带上对象键，`upload_error` 为 `upload pending`。checkpoint 如果还停在这个封存文件上，并且文件末尾最后一个完整事件是指向下一个文件的 rotate，checkpoint 会挪到下一个文件。rotate 给出的位点是 0 时，按 4 继续。真正拉 binlog 的 worker 会跑后台补传，自己把文件传上去并核对 checksum。只做控制面的进程不跑这个循环。等待期间 `GET /api/tasks/{id}/files` 看到 `upload_state` `UPLOAD_FAILED`、`location` `local`。传完、checksum 为 `match`、文件还在磁盘上时，是 `UPLOADED`，`location` `both`。配了对象存储并且有目录时，checksum 还不是 `match` 之前，保留清理留下本地文件和目录行。文件的修改时间已经超过本地保留天数时，这一轮记一条 `RETENTION_SKIPPED_NOT_UPLOADED`。没配对象存储时，封存仍是 `LOCAL_ONLY`，对象键是空的。`POST /api/tasks/{id}/files/retry-upload` 返回 HTTP 400，正文 `upload retry is not available`。
-- **怎么看:** `meta.timeout.upload_sec` 到点之后，`upload_error` 仍是 `upload pending`。崩溃之后才补进重试集合的文件，`sealed_at` 是本进程打开这个文件的时间。目录把 `sealed_at` 写成和 `created_at` 相同的值。封存后的 PUT 还挂着时，本进程不写新的本地 binlog 事件，到点之后从下一个文件继续写。这段时间里后台补传可能对同一个对象键再 PUT 一次相同的字节。之后某次运行才配上对象存储时，磁盘上还在的封存 `LOCAL_ONLY` 文件会被传上去。checksum 仍是上传之后比对一次。已经比对为 `match` 的对象，之后在桶里被换掉，不会再比对。
+- **schema migration `000002`:** 先停掉这一套元数据库上的每一台 binlog-server，再执行 `./migrate up`，然后只启动 `v0.5.34`。`v0.5.33` 对着 schema 2 会拒绝启动。Epoch 分段仍可按名访问（#176）。细节见下方发布说明。
 
-详细版本记录：[docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md) | [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md)
+详细版本记录：[docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md) | [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md)
 
-v0.5.27 至 v0.5.32 的记录：[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)，[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
+v0.5.27 至 v0.5.33 的记录：[docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md) | [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md)，[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)，[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
 
 
 ---
