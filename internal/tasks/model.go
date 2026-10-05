@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match, mismatch, or empty when the object HEAD fails, files-list location, at-tip replication progress, and the process-local KeepLocalSegments flag for adopted leftover directories
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, and the process-local KeepLocalSegments flag for adopted leftover directories
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -201,6 +201,7 @@ type BinlogFile struct {
 	// Checksum is match when the stored object is the same bytes as the sealed file.
 	// mismatch means that comparison finished and the bytes differ.
 	// Empty means the object HEAD did not finish. Empty is not verified.
+	// Only match is stored on an UPLOADED row. A mismatch or an unfinished check is UPLOAD_FAILED.
 	Checksum   string    `json:"checksum,omitempty"`
 	UploadedAt time.Time `json:"uploaded_at"`
 	// Location is local, bucket, or both. The files list fills it in.
@@ -214,6 +215,12 @@ const (
 	ChecksumMatch = "match"
 	// ChecksumMismatch means the object was compared and is not the sealed bytes.
 	ChecksumMismatch = "mismatch"
+	// ChecksumMismatchError is the upload_error for a finished comparison that differed.
+	// The row is UPLOAD_FAILED so the existing upload retry uploads it again.
+	ChecksumMismatchError = "checksum mismatch"
+	// ChecksumVerifyPrefix prefixes upload_error when the object was stored but the
+	// comparison did not finish. The existing upload retry checks that object again.
+	ChecksumVerifyPrefix = "checksum verify failed: "
 )
 
 // ReplicationProgress 描述任务最近一次复制进度观测值。
