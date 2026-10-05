@@ -602,13 +602,13 @@
     <section class="hero">
       <div class="container" style="position:relative;">
         <div class="hero-badge">
-          <span class="tag tag-new" data-i18n="heroBadge">v0.5.29 — latest release</span>
+          <span class="tag tag-new" data-i18n="heroBadge">v0.5.30 — latest release</span>
         </div>
         <h1 data-i18n="heroTitle">Centralized MySQL Binlog Backup
 Control Plane</h1>
         <p class="hero-sub" data-i18n="heroSub">Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.</p>
         <div class="hero-actions">
-          <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Quick Start (v0.5.29)</a>
+          <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Quick Start (v0.5.30)</a>
           <a href="#console" class="btn-secondary" data-i18n="heroSecondary">Inspect Live Console</a>
         </div>
         <div class="hero-code">
@@ -678,11 +678,11 @@ to verified backup health</h2>
           <div class="step-card">
             <div class="step-header">
               <span class="step-number">1</span>
-              <h3 data-i18n="step1Title">Download &amp; Verify v0.5.29 Release</h3>
+              <h3 data-i18n="step1Title">Download &amp; Verify v0.5.30 Release</h3>
             </div>
             <p data-i18n="step1Body">Fetch the official static binary, verify its SHA256 checksum, unpack the archive, and boot local evaluation.</p>
             <div class="step-code">
-              <code data-i18n="step1Code">VER=0.5.29 OS=linux ARCH=amd64
+              <code data-i18n="step1Code">VER=0.5.30 OS=linux ARCH=amd64
 curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
 sha256sum -c checksums.txt --ignore-missing
@@ -694,10 +694,10 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server</code>
-              <code>802c92e91d8f19a082b2d638fb21cfe7df8a0e94357ae2b4fcd14a8158ab72f4  binlog-server_0.5.29_darwin_amd64.tar.gz
-796c550c53c9e18750795f41e7d1c1eec55b061d5afbe25e381edbb94e4045e6  binlog-server_0.5.29_darwin_arm64.tar.gz
-fd988a3ff588133e618745c2917eb4f1b975bb761cc10e585fe240e0df8d5875  binlog-server_0.5.29_linux_amd64.tar.gz
-54f4255acf5f2b845d0369659ee075f996ffdf91973d7a4b6eec9ee1ddeb6b4c  binlog-server_0.5.29_linux_arm64.tar.gz
+              <code>3002557c23db7d7231673c505764308c4c87c3f9b0f6877f392c4a69860bfa3b  binlog-server_0.5.30_darwin_amd64.tar.gz
+e928468242ec8b57bb5ba660750f998f2fcee8bbc495025178d21c381278f104  binlog-server_0.5.30_darwin_arm64.tar.gz
+65dc7d57e4916e241aa4d23430777994d8f303ab8c2beace69224aea03ed423d  binlog-server_0.5.30_linux_amd64.tar.gz
+ae315da10764f08d5f9a99a4f231c12e88b21f8e88c46852032e4af8a20c78e5  binlog-server_0.5.30_linux_arm64.tar.gz
 </code>
             </div>
           </div>
@@ -998,8 +998,8 @@ production stability and ergonomics</h2>
             <div class="timeline">
               <div class="timeline-item">
                 <div class="timeline-date">2026-10-05</div>
-                <div class="timeline-version">v0.5.29 (Current)</div>
-                <p data-i18n="release1">v0.5.29 lets local disk and the bucket keep a sealed binlog for different numbers of days, on top of v0.5.28. v0.5.27, v0.5.28, and v0.5.29 need no schema migration (000001_init_schema unchanged). storage.retention_days stays required, range 1..3650. Optional storage.local_retention_days and storage.bucket_retention_days default to retention_days when omitted or 0. Those keys are stored in the existing task storage JSON. Create and update reject a bucket window shorter than the local window. A task that sets only retention_days keeps the v0.5.28 purge. The split applies only when the effective bucket window is longer than the local window and this process has object storage and meta_dsn. A sealed UPLOADED file older than the local window and still inside the bucket window loses only the local file. The object and the catalog row stay. GET /api/tasks/{id}/files location is local, bucket, or both. A bucket path is not on this process. With object storage and a catalog, an expired sealed file in UPLOAD_FAILED or LOCAL_ONLY stays on disk with its catalog row (v0.5.28). Background upload retry and POST /api/tasks/{id}/files/retry-upload still pick up sealed UPLOAD_FAILED rows. LOCAL_ONLY is not uploaded by either path. Standalone without meta_dsn still deletes the local sealed file by the local age. v0.5.27 adds stop_datetime and an optional start_datetime on GET /api/tasks/{id}/replay. The window is half-open [start, stop). command is present only when stop_datetime is set. Restore the full backup yourself, then run the printed command. Binlog Server does not restore that backup. Omitting both datetimes keeps the limit replay. v0.5.27 and v0.5.28 add no config key. cluster.failover_policy is still not a switch. PRODUCTION=true still requires a non-empty --encryption-key. The 30-second threshold is unchanged.</p>
+                <div class="timeline-version">v0.5.30 (Current)</div>
+                <p data-i18n="release1">v0.5.30 writes the format description MySQL sends first, once, in front of the first copied event, when a backup starts in the middle of a source binlog. LATEST starts in the middle of the current source file. A FILE_POS start inside a file does the same. Up to v0.5.29 that description was dropped. mysqlbinlog refused the first segment with does not contain any Format_description_log_event, and it could not decode the row events in that segment. The published v0.5.29 package still drops the description. No schema migration (000001_init_schema unchanged). No new config key. Segments written by a LATEST start, or by a FILE_POS start inside a file, on v0.5.29 or earlier still lack the format description. This release does not backfill them and does not repair them. The next start sees that the segment already has events and does not insert a description. To tell, run mysqlbinlog on that first segment. It reports does not contain any Format_description_log_event. A later file opened by a real rotate, starting at position 4, was not affected. Sealing that first segment renames it and leaves the bytes, so mysqlbinlog still reports the missing Format_description_log_event on the sealed name. cluster.failover_policy is still not a switch. PRODUCTION=true still requires a non-empty --encryption-key. The 30-second threshold is unchanged.</p>
               </div>
               <div class="timeline-item">
                 <div class="timeline-date">2026-10-03</div>
@@ -1046,7 +1046,7 @@ production stability and ergonomics</h2>
 into a production control plane</h2>
         <p data-i18n="ctaSub">Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.</p>
         <div class="hero-actions" style="margin-bottom:0;">
-          <a href="#deployment" class="btn-primary" data-i18n="ctaPrimary">Get Started with v0.5.29</a>
+          <a href="#deployment" class="btn-primary" data-i18n="ctaPrimary">Get Started with v0.5.30</a>
           <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/deployment.md" class="btn-secondary" data-i18n="ctaSecondary">Deployment Guide</a>
         </div>
       </div>
@@ -1086,7 +1086,7 @@ into a production control plane</h2>
             <div class="footer-col-title" data-i18n="footerCol3">Project</div>
             <ul>
               <li><a href="https://github.com/Fanduzi/BinlogServer" target="_blank" rel="noopener">GitHub</a></li>
-              <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases (v0.5.29)</a></li>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases (v0.5.30)</a></li>
               <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" data-i18n="footerLink8">Changelog</a></li>
             </ul>
           </div>
@@ -1119,10 +1119,10 @@ into a production control plane</h2>
         navPositioning: 'Positioning',
         navChangelog: 'Changelog',
         navCta: 'Releases',
-        heroBadge: 'v0.5.29 — latest release',
+        heroBadge: 'v0.5.30 — latest release',
         heroTitle: 'Centralized MySQL Binlog Backup\nControl Plane',
         heroSub: 'Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.',
-        heroPrimary: 'Quick Start (v0.5.29)',
+        heroPrimary: 'Quick Start (v0.5.30)',
         heroSecondary: 'Inspect Live Console',
         heroCode: 'DURABILITY    Local fsync precedes checkpoint advance (zero optimistic progress)\nARCHIVE       Decoupled S3 upload (upload failure never stalls binlog capture)\nCLUSTER       Multi-worker lease ownership with automatic failover & zero split-brain\nOBSERVE       True lag vs source binlog tip, Prometheus metrics, and embedded Web UI',
         consoleLabel: 'Operator Console & Interfaces',
@@ -1137,9 +1137,9 @@ into a production control plane</h2>
         deployLabel: 'Install & First Backup Path',
         deployTitle: 'Four disciplined steps from download\nto verified backup health',
         deploySub: 'Packaged release archives contain precompiled statically-linked binaries (binlog-server, migrate), SQL migrations, and production config templates. Operators do not need Go installed.',
-        step1Title: 'Download & Verify v0.5.29 Release',
+        step1Title: 'Download & Verify v0.5.30 Release',
         step1Body: 'Fetch the official static binary, verify its SHA256 checksum, unpack the archive, and boot local evaluation.',
-        step1Code: 'VER=0.5.29 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER=0.5.30 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: 'Verify Health & Create Backup Task',
         step2Body: 'Check health probe status and submit your MySQL source specification with explicit retention and start mode.',
         step2Code: '# Check health probe\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# Submit backup task (start from source tip)\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
@@ -1233,7 +1233,7 @@ into a production control plane</h2>
         changelogTitle: 'Continuous hardening focused on\nproduction stability and ergonomics',
         changelogSub: 'Review recent release highlights designed specifically to eliminate operator surprise in production environments.',
         releaseLeftTitle: 'Recent Releases',
-        release1: 'v0.5.29 lets local disk and the bucket keep a sealed binlog for different numbers of days, on top of v0.5.28. v0.5.27, v0.5.28, and v0.5.29 need no schema migration (000001_init_schema unchanged). storage.retention_days stays required, range 1..3650. Optional storage.local_retention_days and storage.bucket_retention_days default to retention_days when omitted or 0. Those keys are stored in the existing task storage JSON. Create and update reject a bucket window shorter than the local window. A task that sets only retention_days keeps the v0.5.28 purge. The split applies only when the effective bucket window is longer than the local window and this process has object storage and meta_dsn. A sealed UPLOADED file older than the local window and still inside the bucket window loses only the local file. The object and the catalog row stay. GET /api/tasks/{id}/files location is local, bucket, or both. A bucket path is not on this process. With object storage and a catalog, an expired sealed file in UPLOAD_FAILED or LOCAL_ONLY stays on disk with its catalog row (v0.5.28). Background upload retry and POST /api/tasks/{id}/files/retry-upload still pick up sealed UPLOAD_FAILED rows. LOCAL_ONLY is not uploaded by either path. Standalone without meta_dsn still deletes the local sealed file by the local age. v0.5.27 adds stop_datetime and an optional start_datetime on GET /api/tasks/{id}/replay. The window is half-open [start, stop). command is present only when stop_datetime is set. Restore the full backup yourself, then run the printed command. Binlog Server does not restore that backup. Omitting both datetimes keeps the limit replay. v0.5.27 and v0.5.28 add no config key. cluster.failover_policy is still not a switch. PRODUCTION=true still requires a non-empty --encryption-key. The 30-second threshold is unchanged.',
+        release1: 'v0.5.30 writes the format description MySQL sends first, once, in front of the first copied event, when a backup starts in the middle of a source binlog. LATEST starts in the middle of the current source file. A FILE_POS start inside a file does the same. Up to v0.5.29 that description was dropped. mysqlbinlog refused the first segment with does not contain any Format_description_log_event, and it could not decode the row events in that segment. The published v0.5.29 package still drops the description. No schema migration (000001_init_schema unchanged). No new config key. Segments written by a LATEST start, or by a FILE_POS start inside a file, on v0.5.29 or earlier still lack the format description. This release does not backfill them and does not repair them. The next start sees that the segment already has events and does not insert a description. To tell, run mysqlbinlog on that first segment. It reports does not contain any Format_description_log_event. A later file opened by a real rotate, starting at position 4, was not affected. Sealing that first segment renames it and leaves the bytes, so mysqlbinlog still reports the missing Format_description_log_event on the sealed name. cluster.failover_policy is still not a switch. PRODUCTION=true still requires a non-empty --encryption-key. The 30-second threshold is unchanged.',
         release2: 'This patch only corrects the shipped guide. Behavior is unchanged from v0.5.11. The English adopt sentence now says adopting an id that is not a catalog task returns 404 with body task not found. Chinese section 7.4 describes the same path: the leftover directory is listed, adopt before start, 200 and STOPPED, password not returned, omitted start is FILE_POS at the highest segment name and size, and start is 204 in the same directory. With meta_dsn, a directory that is not a catalog task is 404 task not found. The published v0.5.11 tarball still has the old Chinese 7.4 and the English sentence that omits 404. The Console has no adopt button.',
         release3: 'Standalone with no meta_dsn: POST /api/tasks/{id}/adopt attaches cluster_key and source to a leftover directory already listed by GET /api/tasks. Success is 200, the password is omitted, state stays STOPPED, and adopt does not start replication. Before adopt, PUT and POST start still return 400 on-disk backup has no task metadata. If start is omitted, the saved position is FILE_POS at the size of the highest sealed or .open.e segment. POST start then returns 204 and writes the next epoch in the same directory. The Console has no adopt button. With meta_dsn, adopting a directory that is not a catalog task returns 404 task not found.',
         releaseRightTitle: 'DBA Production Checklist',
@@ -1251,7 +1251,7 @@ into a production control plane</h2>
         check3Note: 'Decoupled archive',
         ctaTitle: 'Move MySQL binlog backup\ninto a production control plane',
         ctaSub: 'Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.',
-        ctaPrimary: 'Get Started with v0.5.29',
+        ctaPrimary: 'Get Started with v0.5.30',
         ctaSecondary: 'Deployment Guide',
         footerBrand: 'Centralized MySQL binlog backup control plane with durable local persistence, multi-worker failover, and decoupled S3 archiving. Apache 2.0 licensed.',
         footerCol1: 'Operations',
@@ -1263,7 +1263,7 @@ into a production control plane</h2>
         footerLink5: 'Topologies',
         footerLink6: 'Fit Assessment',
         footerCol3: 'Project',
-        footerLink7: 'Releases (v0.5.29)',
+        footerLink7: 'Releases (v0.5.30)',
         footerLink8: 'Changelog',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.',
         footerBottomRight: 'Bilingual production landing page for MySQL DBAs.'
@@ -1280,10 +1280,10 @@ into a production control plane</h2>
         navPositioning: '产品定位',
         navChangelog: '版本演进',
         navCta: '下载发布包',
-        heroBadge: 'v0.5.29 — 最新发布版本',
+        heroBadge: 'v0.5.30 — 最新发布版本',
         heroTitle: '面向生产环境的集中式\nMySQL Binlog 备份控制平面',
         heroSub: '基于本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档的持续备份服务。专为关注确定性 RPO、状态可见与可靠故障恢复的 MySQL DBA 设计，告别脆弱的散装脚本。',
-        heroPrimary: '快速安装 (v0.5.29)',
+        heroPrimary: '快速安装 (v0.5.30)',
         heroSecondary: '查看控制台界面',
         heroCode: '持久性保障    本地 fsync 成功后方才推进检查点（杜绝虚假乐观进度）\n归档解耦      S3 对象存储异步归档（远端网络抖动绝不阻塞本地实时复制）\n集群高可用    多 Worker 租约竞态与心跳超时自动接管（彻底杜绝双写脑裂）\n生产可观测    对比源库真实位点计算复制延迟，内置 Prometheus 指标与 Web 控制台',
         consoleLabel: '运维控制台与管理接口',
@@ -1298,9 +1298,9 @@ into a production control plane</h2>
         deployLabel: '安装与首条备份链路',
         deployTitle: '从下载解压到验证健康，\n严谨清晰的四步交付路径',
         deploySub: '官方发布包内已打包静态编译二进制（binlog-server、migrate）、数据库迁移脚本与生产配置模板。DBA 在部署机上无需安装 Go 环境。',
-        step1Title: '下载解压并校验 v0.5.29',
+        step1Title: '下载解压并校验 v0.5.30',
         step1Body: '下载官方静态二进制压缩包，执行 SHA256 完整性哈希校验，解压后启动本地评估实例。',
-        step1Code: 'VER=0.5.29 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER=0.5.30 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: '探活与创建首个备份任务',
         step2Body: '探活健康检查端点，提交源库连接参数，显式声明数据保留期与复制起点模式。',
         step2Code: '# 检查健康探活端点\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# 提交备份任务（从源库当前最新位点开始）\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
@@ -1394,7 +1394,7 @@ into a production control plane</h2>
         changelogTitle: '持续打磨生产可靠性与运维体验',
         changelogSub: '近期版本的迭代重点不是无序堆砌功能，而是全面提升控制台稳定度、鉴权防护与底层执行确定性。',
         releaseLeftTitle: '近期发布里程碑',
-        release1: 'v0.5.29 在 v0.5.28 上，本地磁盘和桶可以把一份封存 binlog 保留不同的天数。v0.5.27、v0.5.28、v0.5.29 都不需要 schema migration（迁移仍只有 000001_init_schema）。storage.retention_days 仍是必填，范围 1..3650。可选的 storage.local_retention_days 和 storage.bucket_retention_days 在省略或为 0 时等于 retention_days。这两个键写在已有的任务存储 JSON 里。创建和更新会拒绝桶窗口短于本地窗口。只设置 retention_days 的任务保持 v0.5.28 的清理。有效桶窗口长于有效本地窗口，并且本进程配了对象存储和 meta_dsn 时，才按更长的桶窗口清理。已封存且 UPLOADED 的文件早于本地窗口、仍在桶窗口之内时，只删本地文件。对象和目录行留下。GET /api/tasks/{id}/files 的 location 是 local、bucket 或 both。location 为 bucket 的路径不在本进程上。配了对象存储并且有目录时，过期的 UPLOAD_FAILED 或 LOCAL_ONLY 封存文件和目录行留在磁盘上（v0.5.28）。后台补传和 POST /api/tasks/{id}/files/retry-upload 仍会捡起已封存的 UPLOAD_FAILED。两条路都不会上传 LOCAL_ONLY。没配 meta_dsn 的单机仍按本地年龄删除封存文件。v0.5.27 在 GET /api/tasks/{id}/replay 上增加 stop_datetime 和可选的 start_datetime。窗口是半开区间 [start, stop)。只有带了 stop_datetime 才有 command。先自己恢复全量备份，再执行打印出来的命令。Binlog Server 不恢复那份备份。两个时间都不传时仍是按 limit 的回放。v0.5.27 和 v0.5.28 没有新的配置项。cluster.failover_policy 仍然不是开关。PRODUCTION=true 仍要求非空 --encryption-key。30 秒阈值没有变化。',
+        release1: 'v0.5.30 上，从源 binlog 中部开始的备份会把 MySQL 最先下发的 format description 写一次，放在第一个被复制的事件前面。LATEST 从源上当前文件的中部开始。起点落在文件内部的 FILE_POS 也一样。到 v0.5.29 为止，这条 description 会被丢掉。mysqlbinlog 会拒绝这第一段，报 does not contain any Format_description_log_event，这一段里的行事件无法解析。已发布的 v0.5.29 包仍然丢掉这条 description。不需要 schema migration（迁移仍只有 000001_init_schema）。没有新的配置项。在 v0.5.29 或更早版本上，由 LATEST 或文件内部的 FILE_POS 写出的分段，仍然没有 format description。这个版本不会回填，也不会修复。下次 start 看到分段里已经有事件，就不会插入 description。怎么看：对那第一段跑 mysqlbinlog。它会报 does not contain any Format_description_log_event。真实 rotate 之后、从位置 4 打开的后续文件不受影响。这段被 rotate 封存时只是改名，字节不变，封存名上 mysqlbinlog 仍会报缺少 Format_description_log_event。cluster.failover_policy 仍然不是开关。PRODUCTION=true 仍要求非空 --encryption-key。30 秒阈值没有变化。',
         release2: '这一补丁只修正随包指南。行为与 v0.5.11 相同。英文 adopt 句补上：不是目录任务的 id 做 adopt 返回 404，正文是 task not found。中文 7.4 写成同一条路径：遗留目录会列出，先 adopt 再 start，200 且 STOPPED，不返回密码，没传 start 时是最高分段文件名和大小的 FILE_POS，start 在同一目录返回 204。配了 meta_dsn 时，不是目录任务的目录是 404 task not found。已发布的 v0.5.11 压缩包里仍是旧的中文 7.4，以及漏了 404 的英文句子。Console 没有 adopt 按钮。',
         release3: 'standalone 没配 meta_dsn：POST /api/tasks/{id}/adopt 把 cluster_key 和 source 接到 GET /api/tasks 已经列出的遗留目录上。成功是 200，响应不带密码，状态保持 STOPPED，adopt 不会开始复制。adopt 之前，PUT 和 POST start 仍返回 400，正文是 on-disk backup has no task metadata。没传 start 时，保存的位点是最高封存或 .open.e 分段的 FILE_POS。POST start 随后返回 204，并在同一目录写下一段 epoch。Console 没有 adopt 按钮。配了 meta_dsn 时，对不是目录任务的目录做 adopt 返回 404 task not found。',
         releaseRightTitle: 'DBA 生产上线检查清单',
@@ -1412,7 +1412,7 @@ into a production control plane</h2>
         check3Note: '归档解耦运行',
         ctaTitle: '将 MySQL Binlog 备份\n升级为生产级控制平面',
         ctaSub: '查阅详细部署指南，参考标准的生产配置模板，用专业可靠的控制系统彻底替换摇摇欲坠的定时脚本。',
-        ctaPrimary: '开始使用 v0.5.29',
+        ctaPrimary: '开始使用 v0.5.30',
         ctaSecondary: '查阅部署指南',
         footerBrand: '面向生产环境的集中式 MySQL binlog 备份控制平面，具备本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档能力。基于 Apache 2.0 协议开源。',
         footerCol1: '运维指南',
@@ -1424,7 +1424,7 @@ into a production control plane</h2>
         footerLink5: '架构拓扑',
         footerLink6: '适配建议',
         footerCol3: '开源项目',
-        footerLink7: 'Release 资产 (v0.5.29)',
+        footerLink7: 'Release 资产 (v0.5.30)',
         footerLink8: '更新日志',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer 使用 Apache 2.0 许可证。',
         footerBottomRight: '专为 MySQL DBA 打造的单文件双语落地页。'
