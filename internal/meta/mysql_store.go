@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -151,7 +151,7 @@ const listTasksWithExpiredLeaseSQL = `
 SELECT t.id, t.name, t.cluster_key, t.state, t.last_error, t.owner_worker_id, t.epoch, t.run_id, t.source_json, t.start_json, t.storage_json, t.updated_at
 FROM backup_tasks t
 INNER JOIN task_leases l ON l.task_id = t.id
-WHERE t.state IN ('RUNNING', 'LEASE_DEGRADED', 'RETRY_BACKOFF')
+WHERE t.state IN ('RUNNING', 'LEASE_DEGRADED', 'RETRY_BACKOFF', 'STOPPING')
   AND l.lease_expire_at <= NOW(6)
 ORDER BY CAST(t.id AS UNSIGNED), t.id;
 `
@@ -853,7 +853,9 @@ func (s *MySQLTaskStore) scanBackupTaskRows(rows *sql.Rows) ([]tasks.Task, error
 	return list, nil
 }
 
-// ListTasksWithExpiredLease lists active tasks whose joined lease row is already expired.
+// ListTasksWithExpiredLease lists tasks whose joined lease row is already expired.
+// RUNNING, LEASE_DEGRADED, and RETRY_BACKOFF are takeover candidates.
+// STOPPING is included so a dead owner's stop can be finished; it is not started.
 func (s *MySQLTaskStore) ListTasksWithExpiredLease(ctx context.Context) ([]tasks.Task, error) {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks_with_expired_lease")
 	defer endMetaSpan(span)

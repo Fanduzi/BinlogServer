@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, cluster lease, and expired-lease takeover coverage
+// output: task state transitions, scheduling decisions, cluster lease, expired-lease takeover coverage, and split control-plane/worker stop coverage
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -1566,4 +1566,213 @@ func TestScheduler_StopPersistsStoppedWhenStoppingWriteLandsLater(t *testing.T) 
 		t.Fatal("StopTask did not return")
 	}
 	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+}
+
+// blockingDumpRunner blocks inside Run until the scheduler cancels it.
+type blockingDumpRunner struct {
+	mu        sync.Mutex
+	live      int
+	passwords []string
+	started   chan struct{}
+}
+
+func (r *blockingDumpRunner) Run(ctx context.Context, task Task) error {
+	r.mu.Lock()
+	r.live++
+	r.passwords = append(r.passwords, task.Source.Password)
+	r.mu.Unlock()
+	select {
+	case r.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	r.mu.Lock()
+	r.live--
+	r.mu.Unlock()
+	return context.Canceled
+}
+
+func (r *blockingDumpRunner) snapshot() (live int, passwords []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := append([]string(nil), r.passwords...)
+	return r.live, out
+}
+
+// TestScheduler_ControlPlaneStopCancelsWorkerDump is the split-cluster failure:
+// the API process has no dump, the worker holds the lease, and Stop must still
+// end that dump. The old path wrote STOPPED on the control plane and left the
+// worker blocked in Run, still renewing the lease.
+func TestScheduler_ControlPlaneStopCancelsWorkerDump(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	leases := NewMemoryLease()
+	ttl := time.Hour
+	runner := &blockingDumpRunner{started: make(chan struct{}, 2)}
+	control := NewScheduler(
+		WithStore(store),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("control-plane"),
+		WithClusterLease(ttl, ttl, ttl),
+	)
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(ttl, ttl, ttl),
+	)
+
+	task, err := control.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := control.ConfigureSource(task.ID, SourceConfig{
+		Host: "127.0.0.1", Port: 3306, User: "repl", Password: "old-secret",
+	}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := control.StartTask(task.ID); err != nil {
+		t.Fatalf("control StartTask: %v", err)
+	}
+	if err := worker.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, err := worker.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("worker claim: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker dump did not start")
+	}
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateRunning)
+
+	running, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	held, err := leases.Verify(context.Background(), task.ID, "worker-a", running.Epoch)
+	if err != nil || !held || running.OwnerWorkerID != "worker-a" {
+		t.Fatalf("lease not held by worker-a: held=%v owner=%s epoch=%d err=%v", held, running.OwnerWorkerID, running.Epoch, err)
+	}
+
+	// Control-plane memory is still the dispatch STARTING row. Stop must read the store.
+	if err := control.StopTask(task.ID); err != nil {
+		t.Fatalf("control StopTask: %v", err)
+	}
+	stoppedRow, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask after stop: %v", err)
+	}
+	if stoppedRow.State != StateStopping || stoppedRow.OwnerWorkerID != "worker-a" || stoppedRow.Epoch != running.Epoch {
+		t.Fatalf("store after control stop = state %s owner %q epoch %d, want STOPPING worker-a epoch %d", stoppedRow.State, stoppedRow.OwnerWorkerID, stoppedRow.Epoch, running.Epoch)
+	}
+	if live, _ := runner.snapshot(); live != 1 {
+		t.Fatalf("dump already exited before the worker observed stop, live=%d", live)
+	}
+	stillHeld, err := leases.Verify(context.Background(), task.ID, "worker-a", running.Epoch)
+	if err != nil || !stillHeld {
+		t.Fatalf("lease released before the worker observed stop: held=%v err=%v", stillHeld, err)
+	}
+
+	if err := control.ConfigureSource(task.ID, SourceConfig{
+		Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret",
+	}); err != nil {
+		t.Fatalf("ConfigureSource during STOPPING: %v", err)
+	}
+
+	if _, err := worker.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("worker claim after stop: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		live, _ := runner.snapshot()
+		row, err := store.GetTask(context.Background(), task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		leaseHeld, verifyErr := leases.Verify(context.Background(), task.ID, "worker-a", running.Epoch)
+		if live == 0 && row.State == StateStopped && row.OwnerWorkerID == "" && row.Epoch == 0 && row.Source.Password == "new-secret" && !leaseHeld && verifyErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after worker observe: live=%d state=%s owner=%q epoch=%d password=%q leaseHeld=%v err=%v", live, row.State, row.OwnerWorkerID, row.Epoch, row.Source.Password, leaseHeld, verifyErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := control.StartTask(task.ID); err != nil {
+		t.Fatalf("control StartTask after stop: %v", err)
+	}
+	if _, err := worker.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("worker claim after restart: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restarted dump did not start")
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		live, passwords := runner.snapshot()
+		if live == 1 && len(passwords) >= 2 && passwords[len(passwords)-1] == "new-secret" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("restarted dump live=%d passwords=%v", live, passwords)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := worker.StopTask(task.ID); err != nil {
+		t.Fatalf("worker StopTask: %v", err)
+	}
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+}
+
+func TestScheduler_ExpiredStoppingFinalizesWithoutStartingDump(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireOK: false}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+	task := newExpiredOwnedTask("1", "worker-dead", StateStopping)
+	task.Source.Password = "kept-secret"
+	store.tasks[task.ID] = task
+	store.expired = []Task{task}
+	worker.mu.Lock()
+	stale := task
+	stale.State = StateRunning
+	stale.Source.Password = "stale-secret"
+	worker.tasks[task.ID] = stale
+	worker.mu.Unlock()
+
+	claimed, err := worker.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 0 {
+		t.Fatalf("expected claimed=0, got %d", claimed)
+	}
+	select {
+	case <-runner.started:
+		t.Fatal("expired STOPPING must not start a dump")
+	case <-time.After(50 * time.Millisecond):
+	}
+	got, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateStopped || got.OwnerWorkerID != "" || got.Epoch != 0 || got.Source.Password != "kept-secret" {
+		t.Fatalf("final row state=%s owner=%q epoch=%d password=%q", got.State, got.OwnerWorkerID, got.Epoch, got.Source.Password)
+	}
+	lease.mu.Lock()
+	releases := lease.releaseCalls
+	lease.mu.Unlock()
+	if releases == 0 {
+		t.Fatal("expected lease release for expired STOPPING")
+	}
 }

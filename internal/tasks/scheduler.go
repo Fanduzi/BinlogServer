@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, and task persistence that keeps the newest snapshot when an older write finishes later
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED, and task persistence that keeps the newest snapshot when an older write finishes later
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -104,7 +104,8 @@ type TaskStore interface {
 
 // ExpiredLeaseTaskLister lists active tasks whose cluster lease has expired.
 type ExpiredLeaseTaskLister interface {
-	// ListTasksWithExpiredLease lists RUNNING/LEASE_DEGRADED/RETRY_BACKOFF tasks with lease_expire_at <= NOW(6).
+	// ListTasksWithExpiredLease lists RUNNING/LEASE_DEGRADED/RETRY_BACKOFF tasks, and STOPPING tasks, whose lease_expire_at <= NOW(6).
+	// STOPPING rows are finished as STOPPED. They are not taken over.
 	ListTasksWithExpiredLease(ctx context.Context) ([]Task, error)
 }
 
@@ -473,6 +474,10 @@ func (s *Scheduler) syncTasksFromStore() error {
 	// 1) 兼容本进程刚创建但尚未来得及从 store 读回的任务；
 	// 2) 删除路径由 DeleteTask 显式清理，避免周期 sync 误抹临时态。
 	for _, task := range list {
+		// 共享行已经要求停止时，不能用它覆盖正在跑的抄本，否则 owner/epoch 被清掉，退出时放不掉租约。
+		if s.noteRemoteStopLocked(task) {
+			continue
+		}
 		s.tasks[task.ID] = task
 		if n, convErr := strconv.Atoi(task.ID); convErr == nil && n > s.seq {
 			s.seq = n

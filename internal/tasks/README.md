@@ -8,7 +8,7 @@
 - `segment_download.go`: `OpenTaskSegment` 按文件清单里的磁盘文件名打开本进程 `{data_dir}/{task_id}/{name}`。封存名和当前 `.open.e*` 都可读，读到打开时的字节长度。本地文件存在时只读本地，不读对象存储。本地没有时，封存行 `upload_state=UPLOADED` 且 `object_key` 非空，并且进程已配置上传，则按该 key 读对象，长度是打开对象时的大小。`LOCAL_ONLY`、`UPLOAD_FAILED`、空 key、open 分段、未配置上传仍是 `segment not found on this process`。名字含 `/`、`\` 或 `..` 返回 `invalid segment name`。不跟 catalog `file_path`。
 - `replay_archive.go`: `OpenReplayArchive` 用 `ListFiles` 的同一窗口和 `SelectReplayFiles` 选出全部分封存分段和每个源序号最高的 open，再按 `OpenTaskSegment` 打开。`OpenPITRArchive` 打的是 `PITRReplay` 的同一组路径。成员名是 basename。全部能读完才留下一个 ustar 临时文件；任一打开或读取失败则删除临时文件并返回错误，不留下半个包。窗口为空时是没有成员的空 tar。
 - `pitr.go`: `PITRReplay` 在整份清单上按 `SelectReplayFiles` 留下全部分封存分段和每个序号最高的 open，再按复制事件的事件头时间留下盖住 `[start, stop)` 的路径。格式描述和 previous-GTIDs 的时间戳是源文件创建时间，不拿来判断窗口。`stop` 必填且不含这个时刻，与 `mysqlbinlog --stop-datetime` 相同；`start` 可选且含这个时刻。`start` 与 `stop` 相同时空窗口，不选任何分段。`command` 在有客户端时以 `TZ=UTC` 加 `mysqlbinlog` 或 `mariadb-binlog` 开头。没有分段时 `paths` 为空、`command` 为空。打不开的分段返回 `OpenTaskSegment` 的错误。
-- `scheduler_lifecycle.go`: 启停、`ClaimRunnableTasks`（无主 STARTING + 过期租约 + 自己名下空闲）、重试退避、FAILED 立刻放租约。只存在于磁盘上的目录拒绝 start/stop。已 adopt 的目录在 start 时把 epoch 抬到现有 `.open.e*` 之上。
+- `scheduler_lifecycle.go`: 启停、`ClaimRunnableTasks`（先处理共享行上的停止，再无主 STARTING + 过期租约 + 自己名下空闲）、重试退避、FAILED 立刻放租约。控制面没有本进程执行、且别的 worker 仍占着租约时，Stop 只把行写成 STOPPING，不写成 STOPPED。本进程仍在拉流时，认领或同步看到 STOPPING/STOPPED 会取消这次 dump，退出后再放租约并收成 STOPPED。租约已过期的 STOPPING 收成 STOPPED，不重新拉起。只存在于磁盘上的目录拒绝 start/stop。已 adopt 的目录在 start 时把 epoch 抬到现有 `.open.e*` 之上。
 - `task_list.go`: 数字 id 排序、host/port/state 过滤（host 走 `SameSourceHost`）、内存分页、`SummarizeTaskStates` / `SummarizeTasksBySource` / `RunningRefs`，以及 `FailedUploadFiles` / `StartingUnownedTasks`，供 standalone 与测试 fake 复用。
 - `scheduler_transitions.go`: 私有生命周期转换规则（状态、事件、错误、ownership 与持久化）。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用 / `SEGMENT_NOT_ON_WORKER`，以及可重试的 `SOURCE_UNREACHABLE`）。
@@ -25,7 +25,7 @@
 ## Exports
 - 任务 CRUD、启动停止、状态推进。
 - `GetTask` 走 store 主键查询：store 说没有就是没有，其它错误原样失败，不退回内存里的旧主人/epoch 抄本，也不改扫磁盘。没有 store 时先读内存名单；没有该 id 时，若 `{data_dir}/{id}` 仍有封存或 `.open.e<epoch>` 分段，返回只读身份（`STOPPED`，无 source）。`ListTasks` / `ListTasksPage` / dashboard 在没有 store 时把这些目录并进名单，Console 任务表因此能打开它们的文件。有 store 时不发现磁盘目录。`ListClusterObservation` 返回全库所有权抄本（有 store 读 `store.ListTasks`，失败原样返回；没有 store 时用含磁盘目录的同一份名单），不走任务观测过滤。`ListTasksPage` 返回 `{page, total}`；`DashboardCounters` 忽略 limit/offset，rollup store 用 `GROUP BY`，其它 store 一次过滤读取。`ClaimStartingTasks` 不扫描整表。新建 standalone 任务的数字 id 会跳过已有分段目录，避免复用该目录。
-- `ClaimRunnableTasks`：开机和平时同一条「把该我跑的跑起来」（无主 STARTING + 过期租约 + 自己名下空闲 active）。`ClaimStartingTasks` / `ClaimExpiredTasks` 仍可单独调用。cluster 下 store 必须实现 `ExpiredLeaseTaskLister`，否则返回 `ErrExpiredLeaseLookupNotAvailable`。
+- `ClaimRunnableTasks`：开机和平时同一条「把该我跑的跑起来」（无主 STARTING + 过期租约 + 自己名下空闲 active）。同一轮先看共享行：本进程还在跑、行已经是 STOPPING 或 STOPPED，就取消拉流；租约已经不在的 STOPPING 收成 STOPPED。`ClaimStartingTasks` / `ClaimExpiredTasks` 仍可单独调用。`ClaimExpiredTasks` 对过期 STOPPING 只收尾，不调用 Start。cluster 下 store 必须实现 `ExpiredLeaseTaskLister`，否则返回 `ErrExpiredLeaseLookupNotAvailable`。
 - `RetryFailedUploads` 只走失败文件查询（`ListFailedUploadBinlogFiles`）。file store 未实现该查询时返回 `ErrFailedUploadLookupNotAvailable`，不得用限量 `ListBinlogFiles` 冒充没有失败文件。内存 fake 用 `FailedUploadFiles` 做等价实现。签名仍是 `RetryFailedUploads(taskID string, limit int)`。本机没有该文件时，手动补传仍会尝试上传并把失败写回目录行。
 - `RunBackgroundUploadRetry`：对象存储已配置时，worker 进程每 15 秒（调用方传入 `<=0` 时）对内存里的任务各补最多 100 条。file store 能数失败行且当前是 0 时，这一轮不再逐个任务查询。成功后的目录行与手动补传一样是 `UPLOADED` 且 `checksum` 为 `match`。`checksum mismatch` 会再上传；未完成的校验只再核对。open 分段不上传：目录里的 file_name 仍是源文件名，只要 `state=OPEN` 或路径里带 `.open.e` 就跳过。本机读不到的文件跳过，不改目录行，避免别的 worker 把已上传成功的行写回 `UPLOAD_FAILED`。没有新配置项。某一轮正在补某个任务时，手动调用该任务返回 `ErrUploadRetryInProgress`。上传失败不改变任务状态，也不停止拉流。
 - `StartTask` 允许在 Acquire 成功后接管过期的 RUNNING/LEASE_DEGRADED；仍拒绝抢占未过期租约或本机仍在跑的任务。磁盘剩余目录返回 `ErrDiskBackupReadOnly`，不占租约。`AdoptDiskBackup` 把 source 和 `cluster_key` 接到同一 id 上，状态保持 `STOPPED`，不自动启动。没传 `start.mode` 时起点是最高分段末尾的 `FILE_POS`。显式 `start.mode` 覆盖它。有 task store 时不从磁盘 adopt。adopt 之后的 start 在单机 `MemoryLease` 上把 epoch 抬到目录里最大 `.open.e*` 之上，runner 用这个 epoch 开下一个分段。
@@ -45,7 +45,7 @@
 - `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与源身份共享。
 - `SameSourceHost`：回环别名是同一台源，非回环仍精确匹配；lookup 与任务观测 host 过滤共用。
 - `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/configure/start 时拒绝同端点 source。
-- Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。run 退出在放下调度锁之前关闭 `done`，所以 StopTask 不会把已经结束的执行留在 `STOPPING`。持久化放开锁之后，如果这次写入的快照已经不是最新一代，会再写当时最新的快照，避免后完成的 `STOPPING` 覆盖先落库的 `STOPPED`。
+- 控制面 Stop 在没有本进程 dump、且行上的主人不是自己时停在 STOPPING，主人、epoch 和 source 配置都留着。Worker 认领循环（以及 store 同步、GetTask）看到 STOPPING 或 STOPPED 才取消本进程拉流。STOPPED 的落库用 store 里当时最新的配置，避免把控制面刚改的密码盖回旧值。下次 Start 若内存还停在 STOPPING，会先回读 store，行已经是 STOPPED 才能再派发。Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。run 退出在放下调度锁之前关闭 `done`，所以 StopTask 不会把已经结束的执行留在 `STOPPING`。持久化放开锁之后，如果这次写入的快照已经不是最新一代，会再写当时最新的快照，避免后完成的 `STOPPING` 覆盖先落库的 `STOPPED`。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
 - runner/lease 的自动转换保持 best-effort 持久化语义，并统一记录持久化失败日志。
 
