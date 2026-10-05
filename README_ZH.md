@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.26
+### 1. 下载、校验并解压 v0.5.29
 
 ```bash
-VER=0.5.26
+VER=0.5.29
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,19 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.26` `checksums.txt`：
+已发布的 `v0.5.29` `checksums.txt`：
 
 ```text
-d21f62997abd8ba0b97de650802b32c06f565680cde62c0c7b88333c37242f16  binlog-server_0.5.26_darwin_amd64.tar.gz
-5556039d09b98a92e7a81cebc6a374632f72fd3e4762e384d951ab036d3686d1  binlog-server_0.5.26_darwin_arm64.tar.gz
-d6d63163b36994f2ff473be4f9a981c1ef74d304dd5ad1e2327facf4524d4ae8  binlog-server_0.5.26_linux_amd64.tar.gz
-226f2d315e0decc3ab477e295c9c19882d92474cce6885c9fa869bab8aaed933  binlog-server_0.5.26_linux_arm64.tar.gz
+802c92e91d8f19a082b2d638fb21cfe7df8a0e94357ae2b4fcd14a8158ab72f4  binlog-server_0.5.29_darwin_amd64.tar.gz
+796c550c53c9e18750795f41e7d1c1eec55b061d5afbe25e381edbb94e4045e6  binlog-server_0.5.29_darwin_arm64.tar.gz
+fd988a3ff588133e618745c2917eb4f1b975bb761cc10e585fe240e0df8d5875  binlog-server_0.5.29_linux_amd64.tar.gz
+54f4255acf5f2b845d0369659ee075f996ffdf91973d7a4b6eec9ee1ddeb6b4c  binlog-server_0.5.29_linux_arm64.tar.gz
 ```
 
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.26_linux_amd64/
+binlog-server_0.5.29_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -251,15 +251,18 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.26)
+## 升级须知 (v0.5.29)
 
-在将生产环境升级至 `v0.5.26` 之前，请确认以下变更点：
+在将生产环境升级至 `v0.5.29` 之前，请确认 `v0.5.27`、`v0.5.28` 与 `v0.5.29` 的变更点：
 
-- **无需数据库表结构变更:** `v0.5.26` 不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。没有新的配置项。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
-- **后台补传:** 配置了对象存储的 worker 会在后台重试已封存的 `UPLOAD_FAILED` 分段，这是 `v0.5.25` 之上的变化。单机和 all-in-one 都是 worker，所以会跑这个循环。集群里的 worker 也会跑。只跑控制面的进程不跑。没有配置对象存储的进程不跑。已发布的 v0.5.25 包把这些行留在 `UPLOAD_FAILED`，直到调用 `POST /api/tasks/{id}/files/retry-upload`。这个循环走和手动补传同一条路径。成功的行变成 `UPLOADED`，并写入 checksum。open 分段保持不上传。封存文件不在这台机器上时跳过，目录行保持原样。上传失败仍然不停止 binlog 拉取，也不改变任务状态。某个任务的后台这一轮还在跑时，对该任务的手动补传仍返回 `upload retry already in progress`。默认节奏是每 15 秒一次，每个任务每一轮最多 100 条已封存的 `UPLOAD_FAILED`。
-- **不变的路径:** 保留、租约接管，以及 v0.5.25 从对象读回的行为不变。
+- **无需数据库表结构变更:** `v0.5.27`、`v0.5.28`、`v0.5.29` 都不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。`v0.5.29` 的 `storage.local_retention_days` 和 `storage.bucket_retention_days` 写在已有的任务存储 JSON 里。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
+- **按停止时间的回放窗口 (v0.5.27):** 可以对已有备份任务要一段盖住某个 UTC 停止时间的 binlog 窗口。`GET /api/tasks/{id}/replay` 接受 `stop_datetime` 和可选的 `start_datetime`。窗口是半开区间 `[start, stop)`：停止时间不包含在内，设置了开始时间时该时刻包含在内。同一个查询打在 `GET /api/tasks/{id}/replay/archive` 上下载这组分段。只有带了 `stop_datetime` 时，响应才包含 `command`。`mysql` 用 `mysqlbinlog`，`mariadb` 用 `mariadb-binlog`，命令以 `TZ=UTC` 开头。先自己恢复全量备份，再执行打印出来的命令。Binlog Server 不恢复那份备份。两个时间都不传时，仍是按 `limit` 的回放：`flavor`、`client`、`client_hint`、`paths`，没有 `command` 字段。`start_datetime` 与 `stop_datetime` 相等是空窗口：HTTP 200，`paths` 为空，`command` 为空，这不是 400。时间无法解析，或开始时间晚于停止时间，是纯文本 400。没有新的配置项。按 `limit` 的回放、后台补传、保留和租约接管保持 `v0.5.26` 的行为。
+- **未上传分段不再被保留删除 (v0.5.28):** 配了对象存储并且有目录（`meta_dsn`）时，按年龄做的保留不再删掉还没上传的过期封存 binlog 的唯一一份拷贝。`upload_state` 为 `UPLOAD_FAILED` 或 `LOCAL_ONLY` 时，本地文件和目录行留下。已发布的 v0.5.27 包在本地文件早于 `storage.retention_days` 时仍会删掉这份本地文件。复制继续跑。它不写 `last_error`，也不进入 `RETRY_BACKOFF`。是否过期仍看本地文件的修改时间，对照 `storage.retention_days`。`GET /api/tasks/{id}/events` 里，每个留下的文件有一条 `RETENTION_SKIPPED_NOT_UPLOADED`。消息写明文件名和它的 `upload_state`。本进程还在跑时，再打开另一个 binlog 不会为同一个文件再追加这条事件。进程重启之后，下一次保留清理如果仍留下这个文件，会再追加一次。跑保留清理的进程在 `GET /metrics` 上暴露 `binlog_server_retention_blocked_files{task_id}`。后面某次清理把它们删掉后，这个数下降。这一行变成 `UPLOADED` 之后，下一次保留清理先删对象，再删目录行，再删本地文件。已封存的 `UPLOAD_FAILED` 仍由后台补传捡起，也由 `POST /api/tasks/{id}/files/retry-upload` 捡起。`LOCAL_ONLY` 不会。没配 `meta_dsn` 的单机仍按年龄删除本地封存文件，包括从没进过桶的那一份。没有新的配置项。
+- **磁盘与桶分开保留 (v0.5.29):** `storage.retention_days` 仍是必填。范围仍是 1..3650。两个可选键是 `storage.local_retention_days` 和 `storage.bucket_retention_days`。省略或 `0` 等于 `retention_days`。有效本地天数和有效桶天数相等时，这一个相等的天数就是唯一的截止时间。只设置 `retention_days` 的任务保持 v0.5.28 的清理。`POST /api/tasks` 和 `PUT /api/tasks/{id}` 拒绝桶窗口短于本地窗口。比较的是有效天数，所以 `local_retention_days` 大于 `retention_days` 且省略 `bucket_retention_days` 时也会被拒绝。更长的桶窗口只在同时配了对象存储和 `meta_dsn` 时生效。已封存且 `UPLOADED` 的分段，早于本地窗口、仍在桶窗口之内时，只删本地文件。对象和目录行留下。`GET /api/tasks/{id}/files` 的 `location` 是 `local`、`bucket` 或 `both`。`bucket` 表示这条路径是目录里的 `file_path`，不在本进程上。下载该分段或回放归档之前，不要把这条路径交给 `mysqlbinlog`。本地文件已经删掉之后，并且只有桶窗口长于本地窗口时，桶年龄用 `sealed_at`，没有则用 `uploaded_at`。两个时间都空的行留下。早于本地窗口的 `UPLOAD_FAILED` 和 `LOCAL_ONLY` 仍留在磁盘上。同一条跳过事件和 gauge 以本地保留为年龄截止。没有目录时，更长的 `bucket_retention_days` 不生效：上传仍按本地窗口把对象和本地文件一起删除。没配 `meta_dsn` 的单机仍按本地年龄删除封存文件。
 
-详细版本记录：[docs/releases/v0.5.26.zh-CN.md](docs/releases/v0.5.26.zh-CN.md) | [docs/releases/release-notes-v0.5.26.md](docs/releases/release-notes-v0.5.26.md)
+详细版本记录：[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)
+
+本段涉及的更早记录：[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
 
 ---
 
