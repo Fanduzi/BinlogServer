@@ -150,7 +150,7 @@ func (s *Server) swaggerTaskFileDownloadDoc() {}
 
 // swaggerTaskReplayDoc godoc
 // @Summary List the mysqlbinlog replay set for a task
-// @Description One on-disk file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. Without stop_datetime, limit is the same inventory window as GET /files and the body omits command. stop_datetime (UTC) selects the point-in-time window instead of limit: paths cover events at or after optional start_datetime and before stop_datetime, and command is the TZ=UTC client invocation. An empty cover is 200 with empty paths and command. Invalid datetimes are 400.
+// @Description One file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. locations is the same order: local, bucket, or both. bucket means that path is the catalog file_path and is not on this process; download and replay/archive still read the object. Do not pass a bucket path to mysqlbinlog until the file is downloaded. Without stop_datetime, limit is the same inventory window as GET /files and the body omits command. stop_datetime (UTC) selects the point-in-time window instead of limit: paths cover events at or after optional start_datetime and before stop_datetime, and command is the TZ=UTC client invocation. An empty cover is 200 with empty paths and command. Invalid datetimes are 400.
 // @Tags Tasks
 // @Produce json
 // @Param id path string true "Task ID"

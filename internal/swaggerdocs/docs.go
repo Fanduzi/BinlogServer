@@ -855,7 +855,7 @@ const docTemplate = `{
         },
         "/api/tasks/{id}/replay": {
             "get": {
-                "description": "One on-disk file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. Without stop_datetime, limit is the same inventory window as GET /files and the body omits command. stop_datetime (UTC) selects the point-in-time window instead of limit: paths cover events at or after optional start_datetime and before stop_datetime, and command is the TZ=UTC client invocation. An empty cover is 200 with empty paths and command. Invalid datetimes are 400.",
+                "description": "One file_path per source index, ascending. When a sealed name and .open.e* share an index, the path is the highest-epoch open segment. locations is the same order: local, bucket, or both. bucket means that path is the catalog file_path and is not on this process; download and replay/archive still read the object. Do not pass a bucket path to mysqlbinlog until the file is downloaded. Without stop_datetime, limit is the same inventory window as GET /files and the body omits command. stop_datetime (UTC) selects the point-in-time window instead of limit: paths cover events at or after optional start_datetime and before stop_datetime, and command is the TZ=UTC client invocation. An empty cover is 200 with empty paths and command. Invalid datetimes are 400.",
                 "produces": [
                     "application/json"
                 ],
@@ -1357,7 +1357,7 @@ const docTemplate = `{
                     ]
                 },
                 "storage": {
-                    "description": "Storage 存储策略：retention_days 必须在 1..3650。",
+                    "description": "Storage 存储策略：retention_days 必须在 1..3650。local_retention_days 与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。",
                     "allOf": [
                         {
                             "$ref": "#/definitions/tasks.Storage"
@@ -1632,7 +1632,7 @@ const docTemplate = `{
                     ]
                 },
                 "storage": {
-                    "description": "Storage 存储策略：retention_days 必须在 1..3650。",
+                    "description": "Storage 存储策略：retention_days 必须在 1..3650。local_retention_days 与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。",
                     "allOf": [
                         {
                             "$ref": "#/definitions/tasks.Storage"
@@ -1715,6 +1715,10 @@ const docTemplate = `{
                 "file_path": {
                     "type": "string"
                 },
+                "location": {
+                    "description": "local, bucket, or both. Computed on the files list and not stored. bucket means the sealed UPLOADED object is the only copy and file_path is not on this process.",
+                    "type": "string"
+                },
                 "object_key": {
                     "type": "string"
                 },
@@ -1758,6 +1762,13 @@ const docTemplate = `{
                 },
                 "flavor": {
                     "type": "string"
+                },
+                "locations": {
+                    "description": "Same order as paths. bucket means that path is not on this process.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "paths": {
                     "type": "array",
@@ -1853,8 +1864,14 @@ const docTemplate = `{
         "tasks.Storage": {
             "type": "object",
             "properties": {
+                "bucket_retention_days": {
+                    "type": "integer"
+                },
                 "dir": {
                     "type": "string"
+                },
+                "local_retention_days": {
+                    "type": "integer"
                 },
                 "retention_days": {
                     "type": "integer"

@@ -7,6 +7,7 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -224,6 +225,31 @@ func TestScheduler_ConfigureStorageRejectsInvalidRetentionDays(t *testing.T) {
 	}
 	if err := s.ConfigureStorage(task.ID, Storage{RetentionDays: 3651}); err == nil {
 		t.Fatal("expected invalid retention_days error for upper bound overflow, got nil")
+	}
+	err = s.ConfigureStorage(task.ID, Storage{RetentionDays: 7, LocalRetentionDays: 10, BucketRetentionDays: 3})
+	if err == nil || !errors.Is(err, ErrInvalidRetentionDays) || !strings.Contains(err.Error(), "shorter than local retention") {
+		t.Fatalf("expected shorter bucket retention, got %v", err)
+	}
+	if err := s.ConfigureStorage(task.ID, Storage{RetentionDays: 7, LocalRetentionDays: 2, BucketRetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Storage.EffectiveLocalRetentionDays() != 2 || got.Storage.EffectiveBucketRetentionDays() != 30 {
+		t.Fatalf("storage %+v", got.Storage)
+	}
+	raw, err := json.Marshal(Storage{RetentionDays: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "local_retention_days") || strings.Contains(string(raw), "bucket_retention_days") {
+		t.Fatalf("single-key storage json changed: %s", raw)
+	}
+	only := Storage{RetentionDays: 7}
+	if only.EffectiveLocalRetentionDays() != 7 || only.EffectiveBucketRetentionDays() != 7 {
+		t.Fatalf("effective %+v", only)
 	}
 }
 

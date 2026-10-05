@@ -182,7 +182,9 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
 - `cluster_key`: 集群标识，用于元数据分群和 S3 对象路径路由，仅允许 `[A-Za-z0-9._-]`。
 - `source.flavor`: `mysql` 或 `mariadb`。MariaDB 源库必须写 `"flavor":"mariadb"`。保持 `mysql` 会在启动时以 `SOURCE_IDENTITY_UNAVAILABLE` 失败，因为 MariaDB 没有 `@@server_uuid`。
 - `start.mode`: 启动起点，可选 `LATEST`（从源库最新位点）、`FILE_POS`（需提供 `file` 和 `pos`）或 `GTID`（需提供 `gtid_set`）。
-- `storage.retention_days`: 本地保留天数（有效范围 1..3650 天）。
+- `storage.retention_days`: 保留天数（有效范围 1..3650 天）。省略 `local_retention_days` 和 `bucket_retention_days` 时，这一个数同时是本地磁盘保留和桶保留。
+- `storage.local_retention_days`: 可选。封存文件留在本地磁盘的天数。`0` 或省略时等于 `retention_days`。
+- `storage.bucket_retention_days`: 可选。已上传对象和目录行留下的天数。`0` 或省略时等于 `retention_days`。必须大于或等于本地保留。只有同时配了上传和 `meta_dsn` 才生效。
 
 ### 5. 启动任务开始复制
 
@@ -225,7 +227,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ### 3. 本地保留与对象存储归档
 - 本地分段文件保存在 `{data_dir}/{task_id}/`。
-- 复制循环打开文件时会清理超过 `storage.retention_days` 的过期已封存分段。正在写入的 `OPEN` 分段不会被删除。这次保留清理也不删除其它 open 分段，也不删它们的对象。已经上传的封存分段会在同一次清理里从桶中删除，并删掉对应的目录行。还在保留期内的分段留在桶里。配了对象存储且有目录（`meta_dsn`）时，过期的 `UPLOAD_FAILED` 或 `LOCAL_ONLY` 封存文件和目录行留下，复制继续跑，并记一条 `RETENTION_SKIPPED_NOT_UPLOADED`，写明文件名和 `upload_state`。该行变成 `UPLOADED` 后，下次清理仍先删对象，再删目录行，再删本地文件。`binlog_server_retention_blocked_files{task_id}` 是这次仍留下的过期未上传文件数，清理掉之后变为 0。没配 `meta_dsn` 的单机仍按年龄删除本地封存文件，包括没进桶的那一份。对象删除失败时本地文件留下，任务进入重试，`last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再删一次。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。这次失败不改 `checksum`：`match`、`mismatch` 和空值都保持原样。空值不是 `match`，也不是 `mismatch`。不新增配置项，也不做 schema migration。
+- 复制循环打开文件时会清理超过 `storage.retention_days` 的过期已封存分段。正在写入的 `OPEN` 分段不会被删除。这次保留清理也不删除其它 open 分段，也不删它们的对象。已经上传的封存分段会在同一次清理里从桶中删除，并删掉对应的目录行。还在保留期内的分段留在桶里。配了对象存储且有目录（`meta_dsn`）时，过期的 `UPLOAD_FAILED` 或 `LOCAL_ONLY` 封存文件和目录行留下，复制继续跑，并记一条 `RETENTION_SKIPPED_NOT_UPLOADED`，写明文件名和 `upload_state`。该行变成 `UPLOADED` 后，下次清理仍先删对象，再删目录行，再删本地文件。`binlog_server_retention_blocked_files{task_id}` 是这次仍留下的过期未上传文件数，清理掉之后变为 0。没配 `meta_dsn` 的单机仍按年龄删除本地封存文件，包括没进桶的那一份。对象删除失败时本地文件留下，任务进入重试，`last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再删一次。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。这次失败不改 `checksum`：`match`、`mismatch` 和空值都保持原样。空值不是 `match`，也不是 `mismatch`。只配 `storage.retention_days` 的任务仍用这一个截止时间。`storage.local_retention_days` 和 `storage.bucket_retention_days` 可选，省略时等于 `retention_days`。创建和更新会拒绝桶保留短于本地保留。配了上传和目录时，已封存且 `UPLOADED` 的文件早于本地保留、但仍在桶保留之内，只从本地磁盘删除。对象和目录行留下。`GET /api/tasks/{id}/files` 的 `location` 为 `bucket`（文件还在磁盘上时是 `local` 或 `both`）。`file_path` 仍是目录里的路径，本机已经没有这个文件。`GET /api/tasks/{id}/files/{name}`、`GET /api/tasks/{id}/replay`（`limit` 和 `stop_datetime`）和 `GET /api/tasks/{id}/replay/archive` 仍从对象读字节。回放响应的 `locations` 对这条路径是 `bucket`：下载之前不要把该路径交给 `mysqlbinlog`。文件还在磁盘上时，两个截止时间都看修改时间。本地文件删掉之后，桶年龄用 `sealed_at`，没有则用 `uploaded_at`。两个时间都空的行留下。超过桶保留后，对象、目录行和还在的本地文件一起删。`UPLOAD_FAILED` 和 `LOCAL_ONLY` 仍不会从本地删除。同一条 `RETENTION_SKIPPED_NOT_UPLOADED` 和 `binlog_server_retention_blocked_files` 以本地保留为年龄截止。没配上传的单机仍按这个本地年龄删除封存文件。没有目录时，更长的桶保留不生效：上传仍按本地天数把对象和本地文件一起删。不做 schema migration。
 - 配置对象存储凭据实现远端冷备归档：
   ```bash
   export BINLOG_SERVER_UPLOAD_ENDPOINT="s3.us-east-1.amazonaws.com"

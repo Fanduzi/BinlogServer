@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, and the runner's retention-blocked file counts for metrics
+// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, and the runner's retention-blocked file counts for metrics
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -230,7 +230,7 @@ func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 		if len(files) == 0 {
 			return nil, ErrTaskNotFound
 		}
-		return files, nil
+		return annotateSegmentLocations(dataDir, files), nil
 	}
 	if store != nil {
 		ctx, cancel := s.withReadTimeout(context.Background())
@@ -240,21 +240,25 @@ func (s *Scheduler) ListFiles(taskID string, limit int) ([]BinlogFile, error) {
 			return nil, err
 		}
 		if len(files) > 0 || strings.TrimSpace(dataDir) == "" {
-			return files, nil
+			return annotateSegmentLocations(dataDir, files), nil
 		}
 		disk, err := listTaskBinlogFilesOnDisk(dataDir, taskID, limit)
 		if err != nil {
 			return nil, err
 		}
 		if len(disk) == 0 {
-			return files, nil
+			return annotateSegmentLocations(dataDir, files), nil
 		}
-		return disk, nil
+		return annotateSegmentLocations(dataDir, disk), nil
 	}
 	if strings.TrimSpace(dataDir) == "" {
 		return []BinlogFile{}, nil
 	}
-	return listTaskBinlogFilesOnDisk(dataDir, taskID, limit)
+	files, err := listTaskBinlogFilesOnDisk(dataDir, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return annotateSegmentLocations(dataDir, files), nil
 }
 
 // RetryFailedUploads 手动重试失败上传（仅 sealed 且状态为 UPLOAD_FAILED）。

@@ -127,7 +127,9 @@ curl -X POST http://localhost:8080/api/tasks \
 | start.file | string | 条件 | 文件名（FILE_POS 模式必填） |
 | start.pos | int | 条件 | 位置（FILE_POS 模式必填） |
 | start.gtid_set | string | 条件 | GTID 集合（GTID 模式必填）。也接受别名 `gtid`。 |
-| storage.retention_days | int | 否 | 保留天数（默认 7，范围 1-3650） |
+| storage.retention_days | int | 否 | 保留天数（默认 7，范围 1-3650）。省略下面两键时，本地和桶都用这个数 |
+| storage.local_retention_days | int | 否 | 本地磁盘保留天数。0 或省略等于 retention_days，范围 1-3650 |
+| storage.bucket_retention_days | int | 否 | 桶和目录行保留天数。0 或省略等于 retention_days。短于本地保留时 HTTP 400 |
 
 校验失败返回 HTTP 400 JSON `{"error","code"}`，**不会落库**。`source.host/port/user/password` 必填；`FILE_POS` 必须带 file/pos；`GTID` 必须带 `gtid_set`（或别名 `gtid`）。不要假设 400 之后任务不存在——实现上 400 就是没写入。
 
@@ -352,7 +354,9 @@ curl -X POST http://localhost:8080/api/tasks/4/adopt \
 | source.flavor | string | 否 | 空则 `mysql`。`mariadb` 用于后面的回放客户端 |
 | name | string | 否 | 省略时用路径里的 `id` |
 | start | object | 否 | 省略时起点是 `FILE_POS`：`file` 是序号最大的那个分段的源文件名（不带 `.open.e*`），`pos` 是该分段的字节大小。传入 `start.mode` 则按创建任务的规则校验，并覆盖这个默认起点 |
-| storage.retention_days | int | 否 | 省略时 7，范围 1–3650 |
+| storage.retention_days | int | 否 | 省略时 7，范围 1–3650。省略下面两键时本地和桶都用这个数 |
+| storage.local_retention_days | int | 否 | 0 或省略等于 retention_days |
+| storage.bucket_retention_days | int | 否 | 0 或省略等于 retention_days。短于本地保留时 HTTP 400 |
 
 非法 JSON 是 HTTP 400 `{"error":"invalid json","code":"INVALID_REQUEST"}`。缺字段、`cluster_key` 冲突、目录里没有可做位点的分段，是 HTTP 400 纯文本，例如 `source.password is required`、`cluster_key already exists`、`task already has metadata`、`on-disk segment has no resume position`。`id` 已经有任务行时是 `task already has metadata`。没有 `meta_dsn`、且目录不存在或里面没有 binlog 分段时，也是 HTTP 404 `task not found`。
 
@@ -465,12 +469,13 @@ HTTP 200 的正文是 JSON 数组。顺序按源文件序号升序；同一序�
     "object_key": "prefix/prod-cluster/source-uuid/mysql-bin.000001",
     "upload_state": "UPLOADED",
     "checksum": "match",
-    "uploaded_at": "2024-01-01T10:05:02Z"
+    "uploaded_at": "2024-01-01T10:05:02Z",
+    "location": "both"
   }
 ]
 ```
 
-`state` 是 `OPEN` 或 `SEALED`。`upload_state` 是 `LOCAL_ONLY`、`UPLOADED` 或 `UPLOAD_FAILED`。
+`state` 是 `OPEN` 或 `SEALED`。`upload_state` 是 `LOCAL_ONLY`、`UPLOADED` 或 `UPLOAD_FAILED`。`location` 是列出时算出来的，不入库：`local` 表示字节在本机，`bucket` 表示只有已上传对象（`file_path` 是目录路径，磁盘上已经没有这个文件），`both` 表示两边都有。空则不出现。只在桶里的分段仍能下载，回放的 `locations` 与 `paths` 对齐，值为 `bucket` 时先下载再交给 `mysqlbinlog`。
 
 封存分段到达对象存储并且核对完成时带 `checksum`。`match` 表示桶里的对象与封存字节一致（对象 HEAD 的 ETag）。`mismatch` 表示这次核对已经完成且字节不同，拉流继续，这一行仍是 `UPLOADED`。对象 HEAD 失败时该字段不出现，这一行仍是 `UPLOADED`，不算已校验。没有上传的分段也不带该字段。
 
