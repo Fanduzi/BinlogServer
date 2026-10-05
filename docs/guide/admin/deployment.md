@@ -50,12 +50,12 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.26)
+## 3. 安装与产物准备 (v0.5.29)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档：
 
 ```bash
-VER=0.5.26
+VER=0.5.29
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -67,18 +67,18 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.26` `checksums.txt`：
+已发布的 `v0.5.29` `checksums.txt`：
 
 ```text
-d21f62997abd8ba0b97de650802b32c06f565680cde62c0c7b88333c37242f16  binlog-server_0.5.26_darwin_amd64.tar.gz
-5556039d09b98a92e7a81cebc6a374632f72fd3e4762e384d951ab036d3686d1  binlog-server_0.5.26_darwin_arm64.tar.gz
-d6d63163b36994f2ff473be4f9a981c1ef74d304dd5ad1e2327facf4524d4ae8  binlog-server_0.5.26_linux_amd64.tar.gz
-226f2d315e0decc3ab477e295c9c19882d92474cce6885c9fa869bab8aaed933  binlog-server_0.5.26_linux_arm64.tar.gz
+802c92e91d8f19a082b2d638fb21cfe7df8a0e94357ae2b4fcd14a8158ab72f4  binlog-server_0.5.29_darwin_amd64.tar.gz
+796c550c53c9e18750795f41e7d1c1eec55b061d5afbe25e381edbb94e4045e6  binlog-server_0.5.29_darwin_arm64.tar.gz
+fd988a3ff588133e618745c2917eb4f1b975bb761cc10e585fe240e0df8d5875  binlog-server_0.5.29_linux_amd64.tar.gz
+54f4255acf5f2b845d0369659ee075f996ffdf91973d7a4b6eec9ee1ddeb6b4c  binlog-server_0.5.29_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.26_linux_amd64/
+binlog-server_0.5.29_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema)

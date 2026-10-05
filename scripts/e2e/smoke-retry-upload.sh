@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: canonical E2E database topology, retry-upload e2e dependencies, and Quay MinIO/mc images
+# input: canonical E2E database topology, retry-upload e2e dependencies, Quay MinIO/mc images, and GitHub release binaries when that pull is denied
 # output: deterministic e2e orchestration, background retry of sealed UPLOAD_FAILED rows without the manual API, retention that keeps an expired unuploaded sealed file until it uploads and is then purged, checksum match on the files API, MinIO mismatch proof, and verification logs
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
@@ -20,11 +20,16 @@ MINIO_CONSOLE_PORT=19001
 MINIO_USER="minioadmin"
 MINIO_PASS="minioadmin"
 MINIO_BUCKET="e2e-retry-upload"
-# Docker Hub minio/minio and minio/mc return pull denied (verified 2026-09-21).
-# Official community MinIO is source-only; dl.min.io historical binaries return 410.
-# Quay still serves the last public RELEASE images.
+# Docker Hub minio/minio and minio/mc return pull denied.
+# Quay can return unauthorized. Then use the same GitHub release binaries.
 MINIO_IMAGE="${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}"
 MC_IMAGE="${MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z}"
+MINIO_RELEASE="${MINIO_RELEASE:-RELEASE.2025-09-07T16-13-09Z}"
+MC_RELEASE="${MC_RELEASE:-RELEASE.2025-08-13T08-35-41Z}"
+MINIO_PID=""
+MINIO_BIN=""
+MC_BIN=""
+MINIO_DATA_DIR=""
 
 CHECKPOINT_HTTP_CODE=""
 CHECKPOINT_HTTP_BODY=""
@@ -53,6 +58,11 @@ kill_server() {
 
 cleanup() {
   kill_server
+  if [[ -n "$MINIO_PID" ]]; then
+    kill "$MINIO_PID" >/dev/null 2>&1 || true
+    wait "$MINIO_PID" >/dev/null 2>&1 || true
+    MINIO_PID=""
+  fi
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -96,20 +106,54 @@ wait_minio_live() {
   return 1
 }
 
+mc_cmd() {
+  if [[ -n "$MC_BIN" ]]; then
+    MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" "$MC_BIN" "$@"
+    return
+  fi
+  docker run --rm --network host \
+    -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
+    "$MC_IMAGE" "$@"
+}
+
+linux_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    *)
+      echo "unsupported arch for minio binary: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+}
+
+fetch_host_minio() {
+  local arch dir
+  arch="$(linux_arch)"
+  dir="/tmp/binlog-e2e-minio-bins"
+  mkdir -p "$dir"
+  MINIO_BIN="$dir/minio-${MINIO_RELEASE}"
+  MC_BIN="$dir/mc-${MC_RELEASE}"
+  if [[ ! -x "$MINIO_BIN" ]]; then
+    curl -fsSL -o "$MINIO_BIN" "https://github.com/minio/minio/releases/download/${MINIO_RELEASE}/minio.linux-${arch}.${MINIO_RELEASE}"
+    chmod +x "$MINIO_BIN"
+  fi
+  if [[ ! -x "$MC_BIN" ]]; then
+    curl -fsSL -o "$MC_BIN" "https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.linux-${arch}.${MC_RELEASE}"
+    chmod +x "$MC_BIN"
+  fi
+}
+
 ensure_minio_bucket() {
   # MinIO can answer /minio/health/live and then reject mc with unauthorized
   # for a short window. Retry until the bucket is listable. A lasting auth
   # failure still fails this scenario.
   local attempt
   for attempt in $(seq 1 30); do
-    if docker run --rm --network host \
-      -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
-      "$MC_IMAGE" ls "local/${MINIO_BUCKET}" >/dev/null 2>&1; then
+    if mc_cmd ls "local/${MINIO_BUCKET}" >/dev/null 2>&1; then
       return 0
     fi
-    docker run --rm --network host \
-      -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
-      "$MC_IMAGE" mb -p "local/${MINIO_BUCKET}" >/dev/null 2>&1 || true
+    mc_cmd mb -p "local/${MINIO_BUCKET}" >/dev/null 2>&1 || true
     sleep 1
   done
   echo "minio bucket not usable after start (unauthorized or not created)" >&2
@@ -186,16 +230,48 @@ wait_retention_purged() {
 
 start_minio() {
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
-  docker pull "$MINIO_IMAGE"
-  docker pull "$MC_IMAGE"
-  docker run -d --name "$MINIO_NAME" \
-    -p "${MINIO_PORT}:9000" \
-    -p "${MINIO_CONSOLE_PORT}:9001" \
-    -e "MINIO_ROOT_USER=${MINIO_USER}" \
-    -e "MINIO_ROOT_PASSWORD=${MINIO_PASS}" \
-    "$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
+  if docker pull "$MINIO_IMAGE" >/dev/null 2>&1 && docker pull "$MC_IMAGE" >/dev/null 2>&1; then
+    docker run -d --name "$MINIO_NAME" \
+      -p "${MINIO_PORT}:9000" \
+      -p "${MINIO_CONSOLE_PORT}:9001" \
+      -e "MINIO_ROOT_USER=${MINIO_USER}" \
+      -e "MINIO_ROOT_PASSWORD=${MINIO_PASS}" \
+      "$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
+    wait_minio_live
+    ensure_minio_bucket
+    return
+  fi
+  echo "[retry-upload] quay image unavailable; using GitHub release binaries ${MINIO_RELEASE}"
+  fetch_host_minio
+  MINIO_DATA_DIR="/tmp/binlog-e2e-minio-data-${RUN_TAG}"
+  mkdir -p "$MINIO_DATA_DIR"
+  MINIO_ROOT_USER="$MINIO_USER" MINIO_ROOT_PASSWORD="$MINIO_PASS" \
+    "$MINIO_BIN" server "$MINIO_DATA_DIR" --address "127.0.0.1:${MINIO_PORT}" --console-address "127.0.0.1:${MINIO_CONSOLE_PORT}" \
+    >"/tmp/binlog-e2e-minio-${RUN_TAG}.log" 2>&1 &
+  MINIO_PID=$!
   wait_minio_live
   ensure_minio_bucket
+}
+
+stop_minio() {
+  if [[ -n "$MINIO_PID" ]]; then
+    kill "$MINIO_PID" >/dev/null 2>&1 || true
+    wait "$MINIO_PID" >/dev/null 2>&1 || true
+    MINIO_PID=""
+    return 0
+  fi
+  docker stop "$MINIO_NAME" >/dev/null
+}
+
+resume_minio() {
+  if [[ -n "$MINIO_BIN" ]]; then
+    MINIO_ROOT_USER="$MINIO_USER" MINIO_ROOT_PASSWORD="$MINIO_PASS" \
+      "$MINIO_BIN" server "$MINIO_DATA_DIR" --address "127.0.0.1:${MINIO_PORT}" --console-address "127.0.0.1:${MINIO_CONSOLE_PORT}" \
+      >"/tmp/binlog-e2e-minio-${RUN_TAG}.log" 2>&1 &
+    MINIO_PID=$!
+    return 0
+  fi
+  docker start "$MINIO_NAME" >/dev/null
 }
 
 checkpoint_fetch() {
@@ -341,13 +417,29 @@ start_server_with_upload
 echo "[retry-upload] create and start task"
 TASK_ID="$(create_task)"
 wait_task_running "$TASK_ID"
-wait_checkpoint_ready "$TASK_ID"
+# LATEST on an idle source sits at the binlog tip. The synthetic rotate is not
+# stored, so the checkpoint stays missing until a real event is written.
+echo "[retry-upload] prime the idle source so a durable checkpoint exists"
+primed=""
+for _ in $(seq 1 30); do
+  write_source_data "retry-prime-${RUN_TAG}-${_}"
+  checkpoint_fetch "$TASK_ID"
+  if [[ "$CHECKPOINT_HTTP_CODE" == "200" ]]; then
+    primed=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$primed" ]]; then
+  echo "checkpoint not ready after priming writes: task_id=$TASK_ID body=$CHECKPOINT_HTTP_BODY" >&2
+  exit 1
+fi
 
 BASE_FILE="$(checkpoint_file)"
 BASE_POS="$(checkpoint_pos)"
 
 echo "[retry-upload] stop minio to force upload failure"
-docker stop "$MINIO_NAME" >/dev/null
+stop_minio
 
 echo "[retry-upload] write + rotate to produce UPLOAD_FAILED records"
 write_source_data "retry-fail-${RUN_TAG}"
@@ -410,7 +502,7 @@ write_source_data "retry-progress-${RUN_TAG}"
 wait_checkpoint_progress "$TASK_ID" "$BASE_FILE" "$BASE_POS"
 
 echo "[retry-upload] recover minio and wait for background retry"
-docker start "$MINIO_NAME" >/dev/null
+resume_minio
 wait_minio_live
 ensure_minio_bucket
 

@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.26
+### 1. Download, verify, and unpack v0.5.29
 
 ```bash
-VER=0.5.26
+VER=0.5.29
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.26` `checksums.txt`:
+Published `v0.5.29` `checksums.txt`:
 
 ```text
-d21f62997abd8ba0b97de650802b32c06f565680cde62c0c7b88333c37242f16  binlog-server_0.5.26_darwin_amd64.tar.gz
-5556039d09b98a92e7a81cebc6a374632f72fd3e4762e384d951ab036d3686d1  binlog-server_0.5.26_darwin_arm64.tar.gz
-d6d63163b36994f2ff473be4f9a981c1ef74d304dd5ad1e2327facf4524d4ae8  binlog-server_0.5.26_linux_amd64.tar.gz
-226f2d315e0decc3ab477e295c9c19882d92474cce6885c9fa869bab8aaed933  binlog-server_0.5.26_linux_arm64.tar.gz
+802c92e91d8f19a082b2d638fb21cfe7df8a0e94357ae2b4fcd14a8158ab72f4  binlog-server_0.5.29_darwin_amd64.tar.gz
+796c550c53c9e18750795f41e7d1c1eec55b061d5afbe25e381edbb94e4045e6  binlog-server_0.5.29_darwin_arm64.tar.gz
+fd988a3ff588133e618745c2917eb4f1b975bb761cc10e585fe240e0df8d5875  binlog-server_0.5.29_linux_amd64.tar.gz
+54f4255acf5f2b845d0369659ee075f996ffdf91973d7a4b6eec9ee1ddeb6b4c  binlog-server_0.5.29_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.26_linux_amd64/
+binlog-server_0.5.29_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -257,15 +257,18 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.26)
+## Upgrade Notes (v0.5.29)
 
-Before upgrading existing deployments, review the v0.5.26 operator contract:
+Before upgrading existing deployments to `v0.5.29`, review the operator contract from `v0.5.27`, `v0.5.28`, and `v0.5.29`:
 
-- **Zero Schema Migrations:** `v0.5.26` requires no database migrations (`000001_init_schema` unchanged). No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
-- **Background upload retry:** A worker with object storage configured retries sealed `UPLOAD_FAILED` segments in the background, on top of `v0.5.25`. Standalone and all-in-one processes are workers, so they run this loop. A cluster worker runs it too. A control-plane-only process does not. A process with no object storage configured does not. The published v0.5.25 package leaves those rows at `UPLOAD_FAILED` until `POST /api/tasks/{id}/files/retry-upload`. The loop uses the same path as that manual retry. A successful row becomes `UPLOADED`, including checksum. Open segments stay unuploaded. A sealed file that is not on this machine is skipped, and its catalog row is left unchanged. Upload failure still does not stop binlog pull and does not change task state. While a task's background pass is running, a manual retry of that task still returns `upload retry already in progress`. The default cadence is every 15 seconds, up to 100 sealed `UPLOAD_FAILED` rows per task per pass.
-- **Unchanged paths:** Retention, lease takeover, and the v0.5.25 object-read behavior are unchanged.
+- **Zero Schema Migrations:** `v0.5.27`, `v0.5.28`, and `v0.5.29` require no database migrations (`000001_init_schema` unchanged). `v0.5.29` stores `storage.local_retention_days` and `storage.bucket_retention_days` in the existing task storage JSON. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
+- **Point-in-time window (v0.5.27):** An existing backup task can be asked for the binlog window covering a UTC stop time. `GET /api/tasks/{id}/replay` takes `stop_datetime` and an optional `start_datetime`. The window is half-open `[start, stop)`: the stop is excluded, and a start, when set, is included. The same query on `GET /api/tasks/{id}/replay/archive` downloads that selection. The response includes `command` only when `stop_datetime` is present. `mysql` uses `mysqlbinlog`, `mariadb` uses `mariadb-binlog`, and the command is prefixed `TZ=UTC`. Restore the full backup yourself, then run the printed command. Binlog Server does not restore that backup. Omitting both datetimes keeps the limit replay: `flavor`, `client`, `client_hint`, `paths`, and no `command` field. `start_datetime` equal to `stop_datetime` is an empty window: HTTP 200, empty `paths`, empty `command`. It is not a 400. A bad datetime or a start after the stop is plain-text 400. No new config key. The limit replay, background upload retry, retention, and lease takeover stay as they are in `v0.5.26`.
+- **Un-uploaded segments stay (v0.5.28):** With object storage and a catalog (`meta_dsn`), age retention no longer deletes the only copy of an expired sealed binlog whose `upload_state` is `UPLOAD_FAILED` or `LOCAL_ONLY`. The published v0.5.27 package still deletes that local file once it is older than `storage.retention_days`. The local file and the catalog row stay. Replication keeps running. It does not set `last_error` and does not enter `RETRY_BACKOFF`. Age is the local file modification time, compared with `storage.retention_days`. `GET /api/tasks/{id}/events` gets one `RETENTION_SKIPPED_NOT_UPLOADED` per kept file. The message names the file and its `upload_state`. Opening another binlog does not append that event again for the same file while this process stays up. After a restart, the next retention pass that still keeps the file appends that event once more. The process that runs retention exposes `binlog_server_retention_blocked_files{task_id}` on `GET /metrics`. The gauge drops when a later pass deletes those files. Once the row is `UPLOADED`, the next retention pass deletes the object, then the catalog row, then the local file. A sealed `UPLOAD_FAILED` row is still picked up by the background upload retry and by `POST /api/tasks/{id}/files/retry-upload`. `LOCAL_ONLY` is not. Standalone without `meta_dsn` still deletes the local sealed file by age, including one that never reached the bucket. No new config key.
+- **Separate disk and bucket retention (v0.5.29):** `storage.retention_days` stays required. The range is still 1..3650. Two optional keys are `storage.local_retention_days` and `storage.bucket_retention_days`. Omitted or 0 means the same as `retention_days`. When the effective local days and the effective bucket days are equal, that shared number is the one cutoff. A task that sets only `retention_days` keeps the v0.5.28 purge. `POST /api/tasks` and `PUT /api/tasks/{id}` reject a bucket window shorter than the local window. The comparison uses the effective days, so `local_retention_days` above `retention_days` with `bucket_retention_days` omitted is rejected too. The longer bucket window is applied only when object storage and `meta_dsn` are both configured. A sealed `UPLOADED` segment older than the local window and still inside the bucket window loses only the local file. The object and the catalog row stay. `GET /api/tasks/{id}/files` reports `location` as `local`, `bucket`, or `both`. A `bucket` value means that path is the catalog `file_path` and is not on this process. Download the segment or the replay archive before passing that path to `mysqlbinlog`. After the local file is gone, and only when the bucket window is longer, bucket age is `sealed_at`, or `uploaded_at` when `sealed_at` is empty. A row with neither timestamp is kept. `UPLOAD_FAILED` and `LOCAL_ONLY` older than the local window still stay on disk. The same skip event and gauge use the local retention as the age cutoff. Without a catalog, a longer `bucket_retention_days` is not applied: upload still deletes the object together with the local file at the local window. Standalone without `meta_dsn` still deletes the local sealed file by the local age.
 
-Full release notes: [docs/releases/release-notes-v0.5.26.md](docs/releases/release-notes-v0.5.26.md) | [docs/releases/v0.5.26.zh-CN.md](docs/releases/v0.5.26.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md)
+
+Notes for the versions in this upgrade: [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 ---
 
