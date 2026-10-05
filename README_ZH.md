@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.29
+### 1. 下载、校验并解压 v0.5.30
 
 ```bash
-VER=0.5.29
+VER=0.5.30
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,19 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.29` `checksums.txt`：
+已发布的 `v0.5.30` `checksums.txt`：
 
 ```text
-802c92e91d8f19a082b2d638fb21cfe7df8a0e94357ae2b4fcd14a8158ab72f4  binlog-server_0.5.29_darwin_amd64.tar.gz
-796c550c53c9e18750795f41e7d1c1eec55b061d5afbe25e381edbb94e4045e6  binlog-server_0.5.29_darwin_arm64.tar.gz
-fd988a3ff588133e618745c2917eb4f1b975bb761cc10e585fe240e0df8d5875  binlog-server_0.5.29_linux_amd64.tar.gz
-54f4255acf5f2b845d0369659ee075f996ffdf91973d7a4b6eec9ee1ddeb6b4c  binlog-server_0.5.29_linux_arm64.tar.gz
+3002557c23db7d7231673c505764308c4c87c3f9b0f6877f392c4a69860bfa3b  binlog-server_0.5.30_darwin_amd64.tar.gz
+e928468242ec8b57bb5ba660750f998f2fcee8bbc495025178d21c381278f104  binlog-server_0.5.30_darwin_arm64.tar.gz
+65dc7d57e4916e241aa4d23430777994d8f303ab8c2beace69224aea03ed423d  binlog-server_0.5.30_linux_amd64.tar.gz
+ae315da10764f08d5f9a99a4f231c12e88b21f8e88c46852032e4af8a20c78e5  binlog-server_0.5.30_linux_arm64.tar.gz
 ```
 
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.29_linux_amd64/
+binlog-server_0.5.30_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -251,18 +251,19 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.29)
+## 升级须知 (v0.5.30)
 
-在将生产环境升级至 `v0.5.29` 之前，请确认 `v0.5.27`、`v0.5.28` 与 `v0.5.29` 的变更点：
+在将生产环境升级至 `v0.5.30` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28` 与 `v0.5.29` 的记录留在下方链接的发布说明里。
 
-- **无需数据库表结构变更:** `v0.5.27`、`v0.5.28`、`v0.5.29` 都不需要执行新的 Schema 迁移（版本维持 `000001_init_schema`）。`v0.5.29` 的 `storage.local_retention_days` 和 `storage.bucket_retention_days` 写在已有的任务存储 JSON 里。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
-- **按停止时间的回放窗口 (v0.5.27):** 可以对已有备份任务要一段盖住某个 UTC 停止时间的 binlog 窗口。`GET /api/tasks/{id}/replay` 接受 `stop_datetime` 和可选的 `start_datetime`。窗口是半开区间 `[start, stop)`：停止时间不包含在内，设置了开始时间时该时刻包含在内。同一个查询打在 `GET /api/tasks/{id}/replay/archive` 上下载这组分段。只有带了 `stop_datetime` 时，响应才包含 `command`。`mysql` 用 `mysqlbinlog`，`mariadb` 用 `mariadb-binlog`，命令以 `TZ=UTC` 开头。先自己恢复全量备份，再执行打印出来的命令。Binlog Server 不恢复那份备份。两个时间都不传时，仍是按 `limit` 的回放：`flavor`、`client`、`client_hint`、`paths`，没有 `command` 字段。`start_datetime` 与 `stop_datetime` 相等是空窗口：HTTP 200，`paths` 为空，`command` 为空，这不是 400。时间无法解析，或开始时间晚于停止时间，是纯文本 400。没有新的配置项。按 `limit` 的回放、后台补传、保留和租约接管保持 `v0.5.26` 的行为。
-- **未上传分段不再被保留删除 (v0.5.28):** 配了对象存储并且有目录（`meta_dsn`）时，按年龄做的保留不再删掉还没上传的过期封存 binlog 的唯一一份拷贝。`upload_state` 为 `UPLOAD_FAILED` 或 `LOCAL_ONLY` 时，本地文件和目录行留下。已发布的 v0.5.27 包在本地文件早于 `storage.retention_days` 时仍会删掉这份本地文件。复制继续跑。它不写 `last_error`，也不进入 `RETRY_BACKOFF`。是否过期仍看本地文件的修改时间，对照 `storage.retention_days`。`GET /api/tasks/{id}/events` 里，每个留下的文件有一条 `RETENTION_SKIPPED_NOT_UPLOADED`。消息写明文件名和它的 `upload_state`。本进程还在跑时，再打开另一个 binlog 不会为同一个文件再追加这条事件。进程重启之后，下一次保留清理如果仍留下这个文件，会再追加一次。跑保留清理的进程在 `GET /metrics` 上暴露 `binlog_server_retention_blocked_files{task_id}`。后面某次清理把它们删掉后，这个数下降。这一行变成 `UPLOADED` 之后，下一次保留清理先删对象，再删目录行，再删本地文件。已封存的 `UPLOAD_FAILED` 仍由后台补传捡起，也由 `POST /api/tasks/{id}/files/retry-upload` 捡起。`LOCAL_ONLY` 不会。没配 `meta_dsn` 的单机仍按年龄删除本地封存文件，包括从没进过桶的那一份。没有新的配置项。
-- **磁盘与桶分开保留 (v0.5.29):** `storage.retention_days` 仍是必填。范围仍是 1..3650。两个可选键是 `storage.local_retention_days` 和 `storage.bucket_retention_days`。省略或 `0` 等于 `retention_days`。有效本地天数和有效桶天数相等时，这一个相等的天数就是唯一的截止时间。只设置 `retention_days` 的任务保持 v0.5.28 的清理。`POST /api/tasks` 和 `PUT /api/tasks/{id}` 拒绝桶窗口短于本地窗口。比较的是有效天数，所以 `local_retention_days` 大于 `retention_days` 且省略 `bucket_retention_days` 时也会被拒绝。更长的桶窗口只在同时配了对象存储和 `meta_dsn` 时生效。已封存且 `UPLOADED` 的分段，早于本地窗口、仍在桶窗口之内时，只删本地文件。对象和目录行留下。`GET /api/tasks/{id}/files` 的 `location` 是 `local`、`bucket` 或 `both`。`bucket` 表示这条路径是目录里的 `file_path`，不在本进程上。下载该分段或回放归档之前，不要把这条路径交给 `mysqlbinlog`。本地文件已经删掉之后，并且只有桶窗口长于本地窗口时，桶年龄用 `sealed_at`，没有则用 `uploaded_at`。两个时间都空的行留下。早于本地窗口的 `UPLOAD_FAILED` 和 `LOCAL_ONLY` 仍留在磁盘上。同一条跳过事件和 gauge 以本地保留为年龄截止。没有目录时，更长的 `bucket_retention_days` 不生效：上传仍按本地窗口把对象和本地文件一起删除。没配 `meta_dsn` 的单机仍按本地年龄删除封存文件。
+- **无需数据库表结构变更:** `v0.5.30` 不需要 schema migration。迁移仍只有 `000001_init_schema`。没有新的配置项。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
+- **文件中部起点的 format description:** 从源 binlog 中部开始的备份会把 MySQL 最先下发的 format description 写一次，放在第一个被复制的事件前面。`LATEST` 从源上当前文件的中部开始。起点落在文件内部的 `FILE_POS` 也一样。到 `v0.5.29` 为止，这条 description 会被丢掉。`mysqlbinlog` 会拒绝这第一段，报 `does not contain any Format_description_log_event`，这一段里的行事件无法解析。已发布的 v0.5.29 包仍然丢掉这条 description。
+- **旧分段不回填、不修复:** 在 `v0.5.29` 或更早版本上，由 `LATEST` 或文件内部的 `FILE_POS` 写出的分段，仍然没有 format description。这个版本不会回填，也不会修复。下次 start 看到分段里已经有事件，就不会插入 description。
+- **怎么看:** 对那第一段跑 `mysqlbinlog`。它会报 `does not contain any Format_description_log_event`。真实 rotate 之后、从位置 4 打开的后续文件不受影响。在那个文件里，format description 的结束位置在 4 之后（MySQL 8 上是 126），大于当时的位点，所以 `v0.5.29` 和更早版本会把它和文件里的其它事件一起复制。丢掉 description 只发生在它的结束位置落后于 dump 位点时，也就是从文件中部开始的那第一段。这段被 rotate 封存时只是改名，字节不变，封存名上 `mysqlbinlog` 仍会报缺少 `Format_description_log_event`。
 
-详细版本记录：[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)
+详细版本记录：[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)
 
-本段涉及的更早记录：[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
+v0.5.27 至 v0.5.29 的记录：[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
+
 
 ---
 
