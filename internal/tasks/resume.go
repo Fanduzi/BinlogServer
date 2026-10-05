@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task id, data dir, KeepLocalSegments, epoch, catalog file_path rows, and an optional stored checkpoint
-// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory or the name of a segment this worker cannot read
+// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
 // pos: resume identity shared by the replication runner and GET /api/tasks/{id}/checkpoint
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -21,7 +21,9 @@ import (
 // that checkpoint to position 4. ResolveTakeover replaces that rewind when the
 // catalog file_path is readable, when the segment is missing, or when a sealed
 // UPLOADED object already covers the checkpoint. gtid_set is copied when the
-// file and pos are the stored checkpoint's. This does not contact the source.
+// file and pos are the stored checkpoint's. A rewind to position 4 changes
+// pos, so the gtid_set from the later position is left off. This does not
+// contact the source.
 func NextResumePosition(dataDir string, task Task, checkpoint binlog.Checkpoint, checkpointOK bool) (binlog.Checkpoint, bool) {
 	if !task.KeepLocalSegments {
 		if file, pos, ok := binlog.DurableResume(dataDir, task.ID); ok {
@@ -40,12 +42,16 @@ func NextResumePosition(dataDir string, task Task, checkpoint binlog.Checkpoint,
 	if task.Epoch > 1 && pos > 4 {
 		pos = 4
 	}
-	return binlog.Checkpoint{
+	out := binlog.Checkpoint{
 		File:      checkpoint.File,
 		Pos:       pos,
-		GTIDSet:   checkpoint.GTIDSet,
 		UpdatedAt: checkpoint.UpdatedAt,
-	}, true
+	}
+	// The executed set belongs to the stored position. Position 4 is not that position.
+	if pos == checkpoint.Pos {
+		out.GTIDSet = checkpoint.GTIDSet
+	}
+	return out, true
 }
 
 // TakeoverResume is how an epoch greater than 1 continues when this worker's
