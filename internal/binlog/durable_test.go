@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: temporary segment files with complete and torn binlog events
-// output: proof that DurableResume returns the highest open segment's last end log_pos, and that a trailing rotate names the next file
+// output: proof that DurableResume returns the highest open segment's last end log_pos, that a trailing artificial rotate with log_pos 0 does not hide that position, and that a trailing rotate names the next file
 // pos: regression coverage for the shared resume cursor
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -55,6 +55,63 @@ func TestDurableResume_HighestOpenEvent(t *testing.T) {
 	if _, got, ok := DurableResume(dir, "../7"); ok || got != 0 {
 		t.Fatalf("path escape ok=%v pos=%d", ok, got)
 	}
+}
+
+// TestDurableCursor_ArtificialRotatePosZero is the #214 resume cursor.
+// A source restart sends an artificial Rotate (end_log_pos 0) after the last
+// real event. That event must not make the whole segment look empty: the
+// resume position is the previous event, and the cursor ends before the
+// artificial bytes. A segment whose only event has log_pos 0 is still not a
+// resume point. On current main the last log_pos of 0 makes DurableCursor
+// return ok=false, so DurableResume falls back to an older segment.
+func TestDurableCursor_ArtificialRotatePosZero(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "7")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSegment(t, filepath.Join(taskDir, "mysql-bin.000009.open.e1"), []uint32{40}, false)
+
+	path := filepath.Join(taskDir, "mysql-bin.000010.open.e20")
+	writeSegment(t, path, []uint32{126, 197, 220}, false)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artificial := artificialRotateRaw("mysql-bin.000011")
+	if err := os.WriteFile(path, append(before, artificial...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pos, end, size, ok := DurableCursor(path)
+	if !ok || pos != 220 || end != int64(len(before)) || size != int64(len(before)+len(artificial)) {
+		t.Fatalf("cursor pos=%d end=%d size=%d ok=%v, want pos 220 end %d size %d", pos, end, size, ok, len(before), len(before)+len(artificial))
+	}
+	file, resumePos, resumeOK := DurableResume(dir, "7")
+	if !resumeOK || file != "mysql-bin.000010" || resumePos != 220 {
+		t.Fatalf("resume file=%q pos=%d ok=%v, want mysql-bin.000010:220 (not the older segment)", file, resumePos, resumeOK)
+	}
+
+	only := filepath.Join(taskDir, "only-zero.open.e1")
+	writeSegment(t, only, []uint32{0}, false)
+	if _, _, _, ok := DurableCursor(only); ok {
+		t.Fatal("a segment whose only event has log_pos 0 is not a resume point")
+	}
+}
+
+func artificialRotateRaw(next string) []byte {
+	name := []byte(next)
+	body := make([]byte, 8+len(name)+4) // position, name, crc32 trailer
+	binary.LittleEndian.PutUint64(body[:8], 4)
+	copy(body[8:], name)
+	size := uint32(goreplication.EventHeaderSize + len(body))
+	raw := make([]byte, size)
+	raw[4] = byte(goreplication.ROTATE_EVENT)
+	binary.LittleEndian.PutUint32(raw[9:13], size)
+	binary.LittleEndian.PutUint32(raw[13:17], 0)
+	binary.LittleEndian.PutUint16(raw[17:19], 0x0020) // LOG_EVENT_ARTIFICIAL_F
+	copy(raw[goreplication.EventHeaderSize:], body)
+	return raw
 }
 
 func TestLastRotateTarget_NextFile(t *testing.T) {
