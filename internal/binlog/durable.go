@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, plus the cursor that finds where that event ends
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends, and the next file named by a sealed rotate
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -124,6 +124,113 @@ func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
 		return 0, 0, size, false
 	}
 	return lastPos, lastEnd, size, true
+}
+
+// LastRotateTarget is the next file named by the last complete event when
+// that event is a rotate. endPos is that event's end log_pos. A torn tail
+// is ignored. ok is false when the last complete event is not a rotate.
+// A CRC32 trailer, when the format description says so, is not part of the name.
+func LastRotateTarget(path string) (nextFile string, nextPos uint32, endPos uint32, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, 0, false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", 0, 0, false
+	}
+	size := info.Size()
+	if size < 4 {
+		return "", 0, 0, false
+	}
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(f, magic); err != nil || string(magic) != string(durableMagic) {
+		return "", 0, 0, false
+	}
+	offset := int64(4)
+	hdr := make([]byte, goreplication.EventHeaderSize)
+	crc32 := false
+	var lastType byte
+	var lastBody []byte
+	var lastPos uint32
+	seen := false
+	for offset+int64(goreplication.EventHeaderSize) <= size {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			break
+		}
+		eventSize := int64(binary.LittleEndian.Uint32(hdr[9:13]))
+		logPos := binary.LittleEndian.Uint32(hdr[13:17])
+		if eventSize < int64(goreplication.EventHeaderSize) || offset+eventSize > size {
+			break
+		}
+		bodyLen := eventSize - int64(goreplication.EventHeaderSize)
+		eventType := hdr[4]
+		var body []byte
+		keep := eventType == byte(goreplication.FORMAT_DESCRIPTION_EVENT) || eventType == byte(goreplication.ROTATE_EVENT)
+		if keep && bodyLen > 0 && bodyLen <= 1<<20 {
+			body = make([]byte, bodyLen)
+			if _, err := io.ReadFull(f, body); err != nil {
+				break
+			}
+		} else if _, err := f.Seek(bodyLen, io.SeekCurrent); err != nil {
+			break
+		}
+		if eventType == byte(goreplication.FORMAT_DESCRIPTION_EVENT) && len(body) >= 57 {
+			fde := &goreplication.FormatDescriptionEvent{}
+			if err := fde.Decode(body); err == nil && fde.ChecksumAlgorithm == goreplication.BINLOG_CHECKSUM_ALG_CRC32 {
+				crc32 = true
+			}
+		}
+		offset += eventSize
+		lastType = eventType
+		lastPos = logPos
+		seen = true
+		if eventType == byte(goreplication.ROTATE_EVENT) {
+			lastBody = body
+		} else {
+			lastBody = nil
+		}
+	}
+	if !seen || lastType != byte(goreplication.ROTATE_EVENT) || len(lastBody) < 8 {
+		return "", 0, 0, false
+	}
+	body := lastBody
+	if crc32 && len(body) >= 4 {
+		body = body[:len(body)-goreplication.BinlogChecksumLength]
+	}
+	if len(body) < 8 {
+		return "", 0, 0, false
+	}
+	rot := &goreplication.RotateEvent{}
+	if err := rot.Decode(body); err != nil {
+		return "", 0, 0, false
+	}
+	name := strings.TrimRight(string(rot.NextLogName), "\x00")
+	name = strings.TrimSpace(name)
+	if !rotateNameOK(name) {
+		return "", 0, 0, false
+	}
+	pos := uint32(rot.Position)
+	if pos == 0 {
+		pos = 4
+	}
+	return name, pos, lastPos, true
+}
+
+func rotateNameOK(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\\`) {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func durableTaskDir(dataDir, taskID string) (string, bool) {

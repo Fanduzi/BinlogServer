@@ -24,7 +24,7 @@
 - worker 启动与认领循环都走 `ClaimRunnableTasks`：没人要的 STARTING、过期租约、自己名下空闲的 active 任务。不对别人仍持有未过期租约的 RUNNING 做 Stop。
 - 封文件前验租把 `LeaseManager` 直接交给 runner（`Verify`），不再经 App 适配。
 - standalone worker 注入进程内 `MemoryLease`（worker_id=`standalone`），与集群走同一扇所有权门。
-- 封文件后上传由 App 注入 `ApplySealedUpload`，执行器只 seal。同一个上传客户端也作为保留清理的对象删除器注入。该客户端能读对象时，接管用它把 checkpoint 已经落在其中的封存 `UPLOADED` 对象读回来。不新增配置项。
+- 封文件后上传由 App 注入 `ApplySealedUpload`，执行器只 seal。同一个上传客户端也作为保留清理的对象删除器注入。该客户端能读对象时，接管用它把 checkpoint 已经落在其中的封存 `UPLOADED` 对象读回来。封存后的这次 put 使用 `meta.timeout.upload_sec`，与后台补传的 `withUploadTimeout` 是同一个秒数。不新增配置项。
 - 同一个上传配置下，worker（含单机和 all-in-one）启动 `RunBackgroundUploadRetry`。桶恢复后，已封存的 `UPLOAD_FAILED` 不必调用补传 API 就会再传。control-plane-only 不跑这个循环。手动 `POST /api/tasks/{id}/files/retry-upload` 仍可用。不新增配置项。
 - `config.DataDir` 注入 scheduler。`binlog_files` 没有该任务的行时，`GET /api/tasks/{id}/files` 扫描这个目录下的本地分段。
 
