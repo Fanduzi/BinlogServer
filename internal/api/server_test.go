@@ -1000,7 +1000,7 @@ func newFakeFileStore() *fakeFileStore {
 func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
 	items := f.files[meta.TaskID]
 	for i := range items {
-		if items[i].FileName == meta.FileName {
+		if items[i].FileName == meta.FileName && items[i].Epoch == meta.Epoch {
 			items[i] = meta
 			f.files[meta.TaskID] = items
 			return nil
@@ -2246,6 +2246,7 @@ func TestTaskAPI_ReplaySet(t *testing.T) {
 	}
 	wantFull := []string{
 		filepath.Join(taskDir, "mysql-bin.000001"),
+		filepath.Join(taskDir, "mysql-bin.000002"),
 		filepath.Join(taskDir, "mysql-bin.000002.open.e8"),
 		filepath.Join(taskDir, "mysql-bin.000003"),
 	}
@@ -2288,7 +2289,7 @@ func TestTaskAPI_ReplaySet(t *testing.T) {
 	if left.Flavor != "" || left.Client != "" || left.ClientHint != "" {
 		t.Fatalf("leftover hint %+v", left)
 	}
-	if len(left.Paths) != 1 || left.Paths[0] != filepath.Join(leftDir, "mysql-bin.000007.open.e4") {
+	if len(left.Paths) != 2 || left.Paths[0] != filepath.Join(leftDir, "mysql-bin.000007") || left.Paths[1] != filepath.Join(leftDir, "mysql-bin.000007.open.e4") {
 		t.Fatalf("leftover paths %v", left.Paths)
 	}
 	leftFiles := httptest.NewRecorder()
@@ -2344,7 +2345,7 @@ func TestTaskAPI_ReplaySetUsesCatalogNotDisk(t *testing.T) {
 		t.Fatalf("catalog inventory %+v", files)
 	}
 	got := getReplay(t, handler, "/api/tasks/1/replay")
-	want := []string{"/data/1/mysql-bin.000001", "/data/1/mysql-bin.000002.open.e3"}
+	want := []string{"/data/1/mysql-bin.000001", "/data/1/mysql-bin.000002", "/data/1/mysql-bin.000002.open.e3"}
 	if strings.Join(got.Paths, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("paths %v", got.Paths)
 	}

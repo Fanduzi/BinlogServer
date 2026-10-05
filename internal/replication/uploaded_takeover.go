@@ -112,7 +112,7 @@ type uploadedTakeoverCatalog struct {
 
 func (c *uploadedTakeoverCatalog) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
 	for i := range c.rows {
-		if c.rows[i].FileName == meta.FileName {
+		if c.rows[i].FileName == meta.FileName && c.rows[i].Epoch == meta.Epoch {
 			c.rows[i] = meta
 			return nil
 		}
@@ -134,10 +134,10 @@ func (c *uploadedTakeoverCatalog) ListBinlogFiles(_ context.Context, taskID stri
 	return out, nil
 }
 
-func (c *uploadedTakeoverCatalog) DeleteBinlogFile(_ context.Context, taskID, fileName string) error {
+func (c *uploadedTakeoverCatalog) DeleteBinlogFile(_ context.Context, taskID, fileName string, epoch int64) error {
 	kept := c.rows[:0]
 	for _, row := range c.rows {
-		if row.TaskID == taskID && row.FileName == fileName {
+		if row.TaskID == taskID && row.FileName == fileName && row.Epoch == epoch {
 			continue
 		}
 		kept = append(kept, row)

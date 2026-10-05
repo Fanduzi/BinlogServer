@@ -72,7 +72,7 @@ func (s *retryTestFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile
 	defer s.mu.Unlock()
 	items := s.files[meta.TaskID]
 	for i := range items {
-		if items[i].FileName == meta.FileName {
+		if items[i].FileName == meta.FileName && items[i].Epoch == meta.Epoch {
 			items[i] = meta
 			s.files[meta.TaskID] = items
 			return nil

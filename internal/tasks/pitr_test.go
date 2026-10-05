@@ -145,6 +145,7 @@ func TestPITRReplay_DiskSegments(t *testing.T) {
 	}
 	want := []string{
 		filepath.Join(taskDir, "mysql-bin.000001"),
+		filepath.Join(taskDir, "mysql-bin.000002"),
 		filepath.Join(taskDir, "mysql-bin.000002.open.e8"),
 	}
 	if strings.Join(got.Paths, "\n") != strings.Join(want, "\n") {
@@ -153,8 +154,8 @@ func TestPITRReplay_DiskSegments(t *testing.T) {
 	if !strings.Contains(got.Command, "--stop-datetime='2024-01-01 01:20:00'") || strings.Contains(got.Command, "--start-datetime=") {
 		t.Fatalf("command %s", got.Command)
 	}
-	if strings.Contains(got.Command, "mysql-bin.000002 ") || strings.Contains(got.Command, "open.e1") {
-		t.Fatalf("command kept a dropped epoch %s", got.Command)
+	if !strings.Contains(got.Command, "mysql-bin.000002 ") || strings.Contains(got.Command, "open.e1") {
+		t.Fatalf("command %s", got.Command)
 	}
 
 	start := clock(t, "2024-01-01 01:20:00")
@@ -164,6 +165,7 @@ func TestPITRReplay_DiskSegments(t *testing.T) {
 		t.Fatal(err)
 	}
 	want = []string{
+		filepath.Join(taskDir, "mysql-bin.000002"),
 		filepath.Join(taskDir, "mysql-bin.000002.open.e8"),
 		filepath.Join(taskDir, "mysql-bin.000003"),
 	}

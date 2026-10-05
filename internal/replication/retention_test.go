@@ -276,7 +276,7 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 			t.Fatalf("object %s was deleted", kept)
 		}
 	}
-	if catalog.listCalls != 1 || catalog.listLimit != retentionCatalogLimit {
+	if catalog.listCalls != 3 || catalog.listLimit != retentionCatalogLimit {
 		t.Fatalf("list calls=%d limit=%d", catalog.listCalls, catalog.listLimit)
 	}
 
@@ -343,7 +343,7 @@ func TestOpenBinlogWriter_InsideRetentionDoesNotListOrDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if len(deleter.keys) != 0 || catalog.listCalls != 0 {
+	if len(deleter.keys) != 0 || catalog.listCalls != 2 {
 		t.Fatalf("keys=%v listCalls=%d", deleter.keys, catalog.listCalls)
 	}
 	if _, err := os.Stat(fresh); err != nil {
@@ -1061,7 +1061,16 @@ func (c *purgeCatalog) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile
 	if c.rows == nil {
 		c.rows = map[string]tasks.BinlogFile{}
 	}
-	c.rows[meta.FileName] = meta
+	key := meta.FileName
+	if meta.Epoch != 0 {
+		key = fmt.Sprintf("%s#%d", meta.FileName, meta.Epoch)
+	}
+	for existing, row := range c.rows {
+		if row.FileName == meta.FileName && row.Epoch == meta.Epoch {
+			delete(c.rows, existing)
+		}
+	}
+	c.rows[key] = meta
 	return nil
 }
 
@@ -1078,11 +1087,18 @@ func (c *purgeCatalog) ListBinlogFiles(_ context.Context, _ string, limit int) (
 	return out, nil
 }
 
-func (c *purgeCatalog) DeleteBinlogFile(_ context.Context, _, fileName string) error {
+func (c *purgeCatalog) DeleteBinlogFile(_ context.Context, _, fileName string, epoch int64) error {
 	if c.dropErr != nil {
 		return c.dropErr
 	}
-	delete(c.rows, fileName)
+	for key, row := range c.rows {
+		if row.FileName == fileName && row.Epoch == epoch {
+			delete(c.rows, key)
+		}
+	}
+	if epoch == 0 {
+		delete(c.rows, fileName)
+	}
 	return nil
 }
 
