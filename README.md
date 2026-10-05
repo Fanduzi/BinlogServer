@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.33
+### 1. Download, verify, and unpack v0.5.34
 
 ```bash
-VER=0.5.33
+VER=0.5.34
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.33` `checksums.txt`:
+Published `v0.5.34` `checksums.txt`:
 
 ```text
-f19d7e8071f2ff5e3e9db7c5eedb85b0e19ff70e16a5f5f325b3796d5891fb0a  binlog-server_0.5.33_darwin_amd64.tar.gz
-6ea6039c13e39f570877c6cbc570a02416b2d7cb0d92e954b9348a3014537578  binlog-server_0.5.33_darwin_arm64.tar.gz
-028c47cb8b5fa529afe225fe8586c984f374e00cb86ca307510d977341126f43  binlog-server_0.5.33_linux_amd64.tar.gz
-185091c6a31ebd985a409bba3cd14a60c3f9ea1991f8cab690694fca1445c739  binlog-server_0.5.33_linux_arm64.tar.gz
+6b67b1c2d5a9312e5248a98999d591cfa8e1764eed4694ef8b7925e5bf2699f6  binlog-server_0.5.34_darwin_amd64.tar.gz
+5fed570d862748cc57151a80af4f89d616af3d5dfe0f4a520e160fc390637859  binlog-server_0.5.34_darwin_arm64.tar.gz
+fe64b1fc96320145aa010483db5c640c4a1517be27c04cee017310fcfc29e8de  binlog-server_0.5.34_linux_amd64.tar.gz
+29acbea6532e30de26f8bc6a10d23d82cad8da354967e8d8a1d089cc20a3b45d  binlog-server_0.5.34_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.33_linux_amd64/
+binlog-server_0.5.34_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -257,18 +257,15 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.33)
+## Upgrade Notes (v0.5.34)
 
-Before upgrading existing deployments to `v0.5.33`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, and `v0.5.32` stay in the release notes linked below.
+Before upgrading existing deployments to `v0.5.34`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, `v0.5.32`, and `v0.5.33` stay in the release notes linked below.
 
-- **Zero Schema Migrations:** `v0.5.33` requires no database migration (`000001_init_schema` unchanged). No new state. No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
-- **A crash during the sealed upload still reaches the bucket:** With object storage, the catalog row is written before the PUT. The row is `state` `SEALED`, `upload_state` `UPLOAD_FAILED`, `upload_error` `upload pending`, and the object key is set. The checkpoint for the next binlog file is written before that PUT. The PUT is bounded by `meta.timeout.upload_sec` (30 seconds by default). When the deadline fires, the row stays `UPLOAD_FAILED` and replication opens the next file. Up to `v0.5.32`, a crash after the file was renamed and before the upload was recorded left the file `LOCAL_ONLY` or outside the `UPLOAD_FAILED` set. The background retry left it alone. A lease takeover could fail with `SEGMENT_NOT_ON_WORKER`. The upload right after seal had no deadline, so a hung object store held the dump loop and this worker kept the lease. The published v0.5.32 package still does that. Replication keeps running.
-- **Restart and takeover enroll the sealed file:** On the next start, including a lease takeover, a sealed file on this worker's disk that never became `UPLOADED` is recorded as `UPLOAD_FAILED` with its object key and `upload_error` `upload pending`. When the checkpoint is still on that sealed file and the last complete event is the rotate that names the next file, the checkpoint moves to that next file. A rotate position of 0 is stored as 4. The worker that pulls binlog runs the background retry, which uploads the file and checks the checksum. A control-plane-only process does not. `GET /api/tasks/{id}/files` shows `upload_state` `UPLOAD_FAILED` and `location` `local` while the file is waiting, then `UPLOADED`, checksum `match`, and `location` `both` while the file is still on disk. With object storage and a catalog, retention keeps that local file and its catalog row until the checksum is `match`. Once the file is older than the local retention window, that pass writes one `RETENTION_SKIPPED_NOT_UPLOADED` event. A task with no object storage seals as `LOCAL_ONLY` with an empty object key. `POST /api/tasks/{id}/files/retry-upload` returns HTTP 400, body `upload retry is not available`.
-- **How to tell:** After `meta.timeout.upload_sec` fires, `upload_error` still reads `upload pending`. For a file enrolled after a crash, `sealed_at` is the time this process opened the file. The catalog writes `sealed_at` with the same value as `created_at`. While the post-seal PUT is hanging, this process writes no new local binlog events until the timeout fires, and the background retry may PUT the same object key again with the same sealed bytes. The next run with object storage configured uploads a sealed `LOCAL_ONLY` file that is still on disk. A checksum is still compared once after upload. An object changed in the bucket after it matched is not re-checked.
+- **Schema migration `000002`:** Stop every binlog-server on this metadata DB, then `./migrate up`, then start only `v0.5.34`. `v0.5.33` refuses schema 2. Epoch segments stay addressable (#176). Detail is in the release notes linked below.
 
-Full release notes: [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md) | [docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md)
 
-Notes for v0.5.27 through v0.5.32: [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
+Notes for v0.5.27 through v0.5.33: [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md), [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 
 ---
