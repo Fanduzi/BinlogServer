@@ -56,6 +56,7 @@ func TestTaskAPI_PITRReplay(t *testing.T) {
 	}
 	wantStop := []string{
 		filepath.Join(taskDir, "mysql-bin.000001"),
+		filepath.Join(taskDir, "mysql-bin.000002"),
 		filepath.Join(taskDir, "mysql-bin.000002.open.e8"),
 	}
 	if strings.Join(stopOnly.Paths, "\n") != strings.Join(wantStop, "\n") {
@@ -78,6 +79,7 @@ func TestTaskAPI_PITRReplay(t *testing.T) {
 		"stop_datetime":  {"2024-01-01 02:10:00"},
 	})
 	wantWindow := []string{
+		filepath.Join(taskDir, "mysql-bin.000002"),
 		filepath.Join(taskDir, "mysql-bin.000002.open.e8"),
 		filepath.Join(taskDir, "mysql-bin.000003"),
 	}
@@ -126,7 +128,7 @@ func TestTaskAPI_PITRReplay(t *testing.T) {
 	assertPITRStatus(t, handler, "/api/tasks/missing/replay", url.Values{"stop_datetime": {"2024-01-01 00:00:00"}}, http.StatusNotFound, "task not found")
 
 	archive := getReplayArchive(t, handler, pitrPath(t, "/api/tasks/1/replay/archive", url.Values{"stop_datetime": {"2024-01-01 01:20:00"}}))
-	if strings.Join(archive.order, "\n") != "mysql-bin.000001\nmysql-bin.000002.open.e8" {
+	if strings.Join(archive.order, "\n") != "mysql-bin.000001\nmysql-bin.000002\nmysql-bin.000002.open.e8" {
 		t.Fatalf("archive order %v", archive.order)
 	}
 	early := getReplayArchive(t, handler, pitrPath(t, "/api/tasks/1/replay/archive", url.Values{"stop_datetime": {"2020-01-01 00:00:00"}}))

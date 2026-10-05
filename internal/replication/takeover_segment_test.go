@@ -267,7 +267,7 @@ func (c *takeoverCatalog) UpsertBinlogFile(_ context.Context, meta tasks.BinlogF
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i := range c.rows {
-		if c.rows[i].FileName == meta.FileName {
+		if c.rows[i].FileName == meta.FileName && c.rows[i].Epoch == meta.Epoch {
 			c.rows[i] = meta
 			return nil
 		}
@@ -291,12 +291,12 @@ func (c *takeoverCatalog) ListBinlogFiles(_ context.Context, taskID string, limi
 	return out, nil
 }
 
-func (c *takeoverCatalog) DeleteBinlogFile(_ context.Context, taskID, fileName string) error {
+func (c *takeoverCatalog) DeleteBinlogFile(_ context.Context, taskID, fileName string, epoch int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	kept := c.rows[:0]
 	for _, row := range c.rows {
-		if row.TaskID == taskID && row.FileName == fileName {
+		if row.TaskID == taskID && row.FileName == fileName && row.Epoch == epoch {
 			continue
 		}
 		kept = append(kept, row)

@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
@@ -54,12 +53,16 @@ func DurableResumeDir(taskDir string) (file string, pos uint32, ok bool) {
 		if entry.IsDir() {
 			continue
 		}
-		seg, ok := classifyDurableSegment(entry.Name())
-		if !ok || seg.epoch < 0 {
+		named, ok := ClassifySegment(entry.Name())
+		if !ok || !named.Open {
 			continue
 		}
-		seg.path = filepath.Join(taskDir, entry.Name())
-		cands = append(cands, seg)
+		cands = append(cands, durableSegment{
+			source: named.Source,
+			seq:    named.Seq,
+			epoch:  named.Epoch,
+			path:   filepath.Join(taskDir, entry.Name()),
+		})
 	}
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].seq != cands[j].seq {
@@ -240,35 +243,4 @@ func durableTaskDir(dataDir, taskID string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(dataDir, taskID), true
-}
-
-// classifyDurableSegment matches the runner's segment names. epoch -1 is sealed.
-func classifyDurableSegment(name string) (durableSegment, bool) {
-	if name == "" || strings.HasPrefix(name, ".") {
-		return durableSegment{}, false
-	}
-	epoch := int64(-1)
-	source := name
-	const mark = ".open.e"
-	if idx := strings.LastIndex(name, mark); idx > 0 {
-		epochText := name[idx+len(mark):]
-		if epochText == "" || strings.ContainsAny(epochText, "./\\") {
-			return durableSegment{}, false
-		}
-		n, err := strconv.ParseInt(epochText, 10, 64)
-		if err != nil || n < 0 {
-			return durableSegment{}, false
-		}
-		source = name[:idx]
-		epoch = n
-	}
-	dot := strings.LastIndex(source, ".")
-	if dot <= 0 || dot == len(source)-1 {
-		return durableSegment{}, false
-	}
-	seq, err := strconv.ParseUint(source[dot+1:], 10, 64)
-	if err != nil || source[:dot] == "" {
-		return durableSegment{}, false
-	}
-	return durableSegment{source: source, seq: seq, epoch: epoch}, true
 }

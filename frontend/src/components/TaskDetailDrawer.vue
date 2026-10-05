@@ -189,17 +189,17 @@ note: if this file changes, update this header and frontend/src/components/READM
             <el-table-column prop="end_pos" :label="$t('table.endPos')" width="100" />
             <el-table-column :label="$t('table.location')" width="120">
               <template #default="{ row }">
-                <span :data-testid="`file-location-${row.file_name}`">{{ locationLabel(row.location) }}</span>
+                <span :data-testid="`file-location-${diskBase(row)}`">{{ locationLabel(row.location) }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="upload_state" :label="$t('table.uploadState')" width="130">
               <template #default="{ row }">
-                <span :data-testid="`file-upload-state-${row.file_name}`">{{ row.upload_state }}</span>
+                <span :data-testid="`file-upload-state-${diskBase(row)}`">{{ row.upload_state }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="checksum" :label="$t('table.checksum')" width="110">
               <template #default="{ row }">
-                <span :data-testid="`file-checksum-${row.file_name}`">{{ row.checksum || "--" }}</span>
+                <span :data-testid="`file-checksum-${diskBase(row)}`">{{ row.checksum || "--" }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="object_key" :label="$t('table.objectKey')" min-width="190" />

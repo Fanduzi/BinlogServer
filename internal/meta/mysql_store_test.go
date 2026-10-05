@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, DeleteBinlogFile by task id and file name, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, DeleteBinlogFile by task id, source file name, and epoch, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1082,7 +1082,9 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 		WithArgs(
 			"1",
 			"mysql-bin.000001",
+			"mysql-bin.000001",
 			"/tmp/mysql-bin.000001",
+			int64(0),
 			"SEALED",
 			int64(1024),
 			uint32(4),
@@ -1102,10 +1104,10 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 
 	rows := sqlmock.NewRows([]string{
 		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
-		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum", "epoch",
 	}).AddRow(
 		"1", "mysql-bin.000001", "/tmp/mysql-bin.000001", "SEALED", int64(1024), uint32(4), uint32(1200), time.Now().Add(-time.Minute), time.Now(),
-		"prefix/1/mysql-bin.000001", "UPLOADED", "", time.Now(), tasks.ChecksumMatch,
+		"prefix/1/mysql-bin.000001", "UPLOADED", "", time.Now(), tasks.ChecksumMatch, int64(0),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
 		WithArgs("1").
@@ -1154,16 +1156,16 @@ func TestMySQLTaskStore_ListBinlogFilesReplayOrder(t *testing.T) {
 	oldest := newest.Add(-3 * time.Hour)
 	cols := []string{
 		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
-		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum", "epoch",
 	}
 	// Row order is newest sealed_at first, which used to be the list order.
 	// 000002 sealed is newer than 000003. 000002's open epoch is newer than its seal.
 	catalogRows := func() *sqlmock.Rows {
 		return sqlmock.NewRows(cols).
-			AddRow("1", "mysql-bin.000002", "/data/1/mysql-bin.000002", "SEALED", int64(20), uint32(4), uint32(20), older, newest, "", "LOCAL_ONLY", "", nil, nil).
-			AddRow("1", "mysql-bin.000002.open.e1", "/data/1/mysql-bin.000002.open.e1", "OPEN", int64(8), uint32(4), uint32(8), newest, newest, "", "LOCAL_ONLY", "", nil, nil).
-			AddRow("1", "mysql-bin.000001", "/data/1/mysql-bin.000001", "SEALED", int64(10), uint32(4), uint32(10), oldest, oldest, "", "UPLOADED", "", nil, tasks.ChecksumMatch).
-			AddRow("1", "mysql-bin.000003", "/data/1/mysql-bin.000003.open.e4", "OPEN", int64(30), uint32(4), uint32(30), older, older, "", "LOCAL_ONLY", "", nil, nil)
+			AddRow("1", "mysql-bin.000002", "/data/1/mysql-bin.000002", "SEALED", int64(20), uint32(4), uint32(20), older, newest, "", "LOCAL_ONLY", "", nil, nil, int64(0)).
+			AddRow("1", "mysql-bin.000002.open.e1", "/data/1/mysql-bin.000002.open.e1", "OPEN", int64(8), uint32(4), uint32(8), newest, newest, "", "LOCAL_ONLY", "", nil, nil, int64(1)).
+			AddRow("1", "mysql-bin.000001", "/data/1/mysql-bin.000001", "SEALED", int64(10), uint32(4), uint32(10), oldest, oldest, "", "UPLOADED", "", nil, tasks.ChecksumMatch, int64(0)).
+			AddRow("1", "mysql-bin.000003", "/data/1/mysql-bin.000003.open.e4", "OPEN", int64(30), uint32(4), uint32(30), older, older, "", "LOCAL_ONLY", "", nil, nil, int64(4))
 	}
 
 	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
@@ -1226,10 +1228,10 @@ func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	rows := sqlmock.NewRows([]string{
 		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
-		"object_key", "upload_state", "upload_error", "uploaded_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "epoch",
 	}).AddRow(
 		"1", "mysql-bin.000002", "/tmp/mysql-bin.000002", int64(2048), uint32(4), uint32(2200), time.Now().Add(-time.Minute), time.Now(),
-		"prefix/cluster-a/uuid/mysql-bin.000002", "UPLOAD_FAILED", "network timeout", nil,
+		"prefix/cluster-a/uuid/mysql-bin.000002", "UPLOAD_FAILED", "network timeout", nil, int64(0),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listFailedSealedBinlogFilesSQL)).
 		WithArgs("1", 100).
@@ -1671,16 +1673,16 @@ func TestMySQLTaskStore_DeleteBinlogFile(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
-	if err := store.DeleteBinlogFile(context.Background(), " ", "mysql-bin.000001"); err == nil {
+	if err := store.DeleteBinlogFile(context.Background(), " ", "mysql-bin.000001", 0); err == nil {
 		t.Fatal("expected empty task id error")
 	}
-	if err := store.DeleteBinlogFile(context.Background(), "1", " "); err == nil {
+	if err := store.DeleteBinlogFile(context.Background(), "1", " ", 0); err == nil {
 		t.Fatal("expected empty file name error")
 	}
 	mock.ExpectExec(regexp.QuoteMeta(deleteBinlogFileSQL)).
-		WithArgs("1", "mysql-bin.000001").
+		WithArgs("1", "mysql-bin.000001", int64(0)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	if err := store.DeleteBinlogFile(context.Background(), "1", "mysql-bin.000001"); err != nil {
+	if err := store.DeleteBinlogFile(context.Background(), "1", "mysql-bin.000001", 0); err != nil {
 		t.Fatalf("DeleteBinlogFile returned error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
