@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, retryable/permanent runner callbacks, store/lease/uploader dependencies
-// output: runner invocation, code-specific retry cap/reset, readiness, stop, and permanent-failure assertions
+// output: runner invocation, code-specific retry cap/reset, readiness, stop, and permanent-failure assertions, and a running dump that keeps its password and retention until stop
 // pos: public Scheduler seam tests for runner-driven task lifecycle behavior
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,6 +8,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -665,5 +666,124 @@ func TestScheduler_StopTaskTransitionsStoppingToStopped(t *testing.T) {
 			t.Fatalf("expected eventual state %s, got %s", StateStopped, got.State)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// heldConfigRunner blocks inside Run and keeps every task value that session received.
+type heldConfigRunner struct {
+	mu    sync.Mutex
+	calls []Task
+}
+
+func (r *heldConfigRunner) Run(ctx context.Context, task Task) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, task)
+	r.mu.Unlock()
+	<-ctx.Done()
+	return context.Canceled
+}
+
+func (r *heldConfigRunner) waitCall(t *testing.T, n int) Task {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.mu.Lock()
+		if len(r.calls) >= n {
+			got := r.calls[n-1]
+			r.mu.Unlock()
+			return got
+		}
+		have := len(r.calls)
+		r.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatalf("runner calls=%d, want %d", have, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestScheduler_UpdateTaskDoesNotDivergeFromRunningDump is the #179 repro:
+// a live dump keeps the password and retention from Start until the operator stops it.
+func TestScheduler_UpdateTaskDoesNotDivergeFromRunningDump(t *testing.T) {
+	runner := &heldConfigRunner{}
+	s := NewScheduler(WithRunner(runner))
+	source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "old-secret", Flavor: "mysql"}
+	storage := Storage{RetentionDays: 30}
+	task, err := s.CreateTaskFromSpec("sticky", "sticky-key", &source, nil, &storage)
+	if err != nil {
+		t.Fatalf("CreateTaskFromSpec: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	live := runner.waitCall(t, 1)
+	if live.Source.Password != "old-secret" || live.Storage.RetentionDays != 30 {
+		t.Fatalf("runner started with password=%q retention_days=%d", live.Source.Password, live.Storage.RetentionDays)
+	}
+
+	sameSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Flavor: "mysql"}
+	sameStorage := Storage{RetentionDays: 30}
+	renamed := "sticky-renamed"
+	if _, err := s.UpdateTask(task.ID, TaskPatch{Name: &renamed, ClusterKey: "sticky-key", Source: &sameSource, Storage: &sameStorage}); err != nil {
+		t.Fatalf("name-only update while running: %v", err)
+	}
+
+	nextSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret", Flavor: "mysql"}
+	nextStorage := Storage{RetentionDays: 1}
+	_, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: "sticky-key", Source: &nextSource, Storage: &nextStorage})
+	if !errors.Is(err, ErrTaskDumpConfigLocked) || !strings.Contains(err.Error(), "state RUNNING") {
+		t.Fatalf("UpdateTask err=%v, want ErrTaskDumpConfigLocked state RUNNING", err)
+	}
+
+	still := runner.waitCall(t, 1)
+	if still.Source.Password != "old-secret" || still.Storage.RetentionDays != 30 {
+		t.Fatalf("live runner password=%q retention_days=%d, want old-secret/30", still.Source.Password, still.Storage.RetentionDays)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.Name != "sticky-renamed" || got.Source.Password != still.Source.Password || got.Storage.RetentionDays != still.Storage.RetentionDays {
+		t.Fatalf("Get name=%q password=%q retention_days=%d, live password=%q retention_days=%d", got.Name, got.Source.Password, got.Storage.RetentionDays, still.Source.Password, still.Storage.RetentionDays)
+	}
+
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err = s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state=%s, want STOPPED", got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	updated, err := s.UpdateTask(task.ID, TaskPatch{ClusterKey: "sticky-key", Source: &nextSource, Storage: &nextStorage})
+	if err != nil {
+		t.Fatalf("UpdateTask after stop: %v", err)
+	}
+	if updated.Source.Password != "new-secret" || updated.Storage.RetentionDays != 1 {
+		t.Fatalf("stored after stop password=%q retention_days=%d", updated.Source.Password, updated.Storage.RetentionDays)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask after update: %v", err)
+	}
+	restarted := runner.waitCall(t, 2)
+	got, err = s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if restarted.Source.Password != "new-secret" || restarted.Storage.RetentionDays != 1 || got.Source.Password != restarted.Source.Password || got.Storage.RetentionDays != restarted.Storage.RetentionDays {
+		t.Fatalf("restarted runner password=%q retention_days=%d, Get password=%q retention_days=%d", restarted.Source.Password, restarted.Storage.RetentionDays, got.Source.Password, got.Storage.RetentionDays)
+	}
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask: %v", err)
 	}
 }

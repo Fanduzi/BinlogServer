@@ -389,6 +389,30 @@ curl -X POST http://localhost:8080/api/tasks/4/adopt \
 
 认领前对这个 `id` 调用启动或更新会得到 HTTP 400 `on-disk backup has no task metadata`。认领成功后再 `POST /api/tasks/4/start`。已有分段留在原目录，下一次启动使用更高的 `.open.e*`。
 
+### 3.9 更新任务
+
+```bash
+curl -X PUT http://localhost:8080/api/tasks/{task_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cluster_key": "prod-cluster",
+    "name": "backup-mysql-prod",
+    "storage": {"retention_days": 1}
+  }'
+```
+
+`cluster_key` 必填。`name`、`source`、`start`、`storage` 省略则保持原值。`source.password` 省略或空字符串时保留原密码。成功是 HTTP 200，密码不返回。
+
+任务处于 `RUNNING`、`STARTING`、`LEASE_DEGRADED` 或 `RETRY_BACKOFF` 时，这次拉流用的是启动时抄下的源库、起点、保留和 `cluster_key`。这时如果要改这四项里的任何一项，返回 HTTP 400，正文是纯文本：
+
+```text
+stop the task before changing source, start, storage, or cluster_key: state RUNNING
+```
+
+`state` 后面是当前状态。已经保存的配置不变，`GET /api/tasks/{id}` 仍是这次拉流正在用的值。先 `POST /api/tasks/{id}/stop`，等到 `STOPPED`，再 `PUT`，再 `start`。下次启动从已有 checkpoint 续上，并用新的密码和保留。只改 `name`，或者把源库、起点、保留、`cluster_key` 原样再提交一次，不会被拒绝。`STOPPING`、`STOPPED`、`FAILED`、`CREATED` 可以直接改。`STOPPING` 期间改的密码留给下一次 start。
+
+进程级配置（监听地址、上传端点、租约 TTL、加密密钥）不在这次 `PUT` 里。改那些要重启进程。
+
 ## 4. 复制状态 API
 
 ### 4.1 获取 Checkpoint

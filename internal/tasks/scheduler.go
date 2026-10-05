@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED, and task persistence that keeps the newest snapshot when an older write finishes later
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED, and task persistence that keeps the newest snapshot when an older write finishes later
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -50,6 +50,11 @@ var ErrInvalidStartMode = errors.New("invalid start mode")
 var ErrInvalidRetentionDays = errors.New("invalid retention_days")
 var ErrSourcePasswordRequired = errors.New("source.password is required")
 var ErrSourceRequired = errors.New("source.host/port/user/password is required")
+
+// ErrTaskDumpConfigLocked means a live dump still uses the source, start,
+// storage, and cluster_key captured when that session started.
+// Stop the task before changing them. The next start reads the updated row.
+var ErrTaskDumpConfigLocked = errors.New("stop the task before changing source, start, storage, or cluster_key")
 
 var clusterKeyAllowedPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 

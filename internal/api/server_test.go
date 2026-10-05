@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the resume file/pos and matching gtid_set, the replay set beside that inventory, the point-in-time stop_datetime window, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, and Console bootstrap without a bearer token while /api/* stays protected
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the resume file/pos and matching gtid_set, the replay set beside that inventory, the point-in-time stop_datetime window, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, Console bootstrap without a bearer token while /api/* stays protected, and HTTP 400 when a running dump's password or retention is updated
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -30,6 +30,39 @@ import (
 )
 
 type fakeAPIRunner struct{}
+
+// holdingAPIRunner blocks in Run and records the task value that dump is using.
+type holdingAPIRunner struct {
+	mu    sync.Mutex
+	calls []tasks.Task
+}
+
+func (r *holdingAPIRunner) Run(ctx context.Context, task tasks.Task) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, task)
+	r.mu.Unlock()
+	<-ctx.Done()
+	return context.Canceled
+}
+
+func (r *holdingAPIRunner) waitCall(t *testing.T, n int) tasks.Task {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.mu.Lock()
+		if len(r.calls) >= n {
+			got := r.calls[n-1]
+			r.mu.Unlock()
+			return got
+		}
+		have := len(r.calls)
+		r.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatalf("runner calls=%d, want %d", have, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 // Run 实现对应功能逻辑。
 func (r *fakeAPIRunner) Run(_ context.Context, _ tasks.Task) error {
@@ -884,6 +917,104 @@ func TestTaskAPI_UpdateInvalidStartHasNoSideEffects(t *testing.T) {
 	}
 	if task.Storage != created.Storage {
 		t.Fatalf("storage changed after failed update: got=%+v want=%+v", task.Storage, created.Storage)
+	}
+}
+
+// TestTaskAPI_UpdateRunningDumpRequiresStop 验证正在拉流时改密码或保留会被拒绝，GET 仍是 dump 正在用的值。
+func TestTaskAPI_UpdateRunningDumpRequiresStop(t *testing.T) {
+	runner := &holdingAPIRunner{}
+	scheduler := tasks.NewScheduler(tasks.WithRunner(runner))
+	handler := NewServer(scheduler)
+
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"sticky",
+		"cluster_key":"sticky-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"old-secret","flavor":"mysql"},
+		"storage":{"retention_days":30}
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+
+	startResp := httptest.NewRecorder()
+	startReq := httptest.NewRequest(http.MethodPost, "/api/tasks/1/start", nil)
+	handler.ServeHTTP(startResp, startReq)
+	if startResp.Code != http.StatusNoContent {
+		t.Fatalf("start status=%d body=%s", startResp.Code, startResp.Body.String())
+	}
+	live := runner.waitCall(t, 1)
+
+	updateResp := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(`{
+		"cluster_key":"sticky-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"new-secret","flavor":"mysql"},
+		"storage":{"retention_days":1}
+	}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateResp, updateReq)
+	if updateResp.Code != http.StatusBadRequest || !strings.Contains(updateResp.Body.String(), tasks.ErrTaskDumpConfigLocked.Error()) {
+		t.Fatalf("update status=%d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+
+	getResp := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tasks/1", nil)
+	handler.ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("get status=%d body=%s", getResp.Code, getResp.Body.String())
+	}
+	var visible tasks.Task
+	if err := json.Unmarshal(getResp.Body.Bytes(), &visible); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	stored, err := scheduler.GetTask("1")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if visible.Storage.RetentionDays != 30 || stored.Source.Password != "old-secret" || stored.Storage.RetentionDays != live.Storage.RetentionDays || stored.Source.Password != live.Source.Password {
+		t.Fatalf("GET retention=%d stored password=%q retention=%d live password=%q retention=%d", visible.Storage.RetentionDays, stored.Source.Password, stored.Storage.RetentionDays, live.Source.Password, live.Storage.RetentionDays)
+	}
+
+	stopResp := httptest.NewRecorder()
+	stopReq := httptest.NewRequest(http.MethodPost, "/api/tasks/1/stop", nil)
+	handler.ServeHTTP(stopResp, stopReq)
+	if stopResp.Code != http.StatusNoContent {
+		t.Fatalf("stop status=%d body=%s", stopResp.Code, stopResp.Body.String())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		stored, err = scheduler.GetTask("1")
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if stored.State == tasks.StateStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state=%s, want STOPPED", stored.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	updateResp = httptest.NewRecorder()
+	updateReq = httptest.NewRequest(http.MethodPut, "/api/tasks/1", bytes.NewBufferString(`{
+		"cluster_key":"sticky-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"new-secret","flavor":"mysql"},
+		"storage":{"retention_days":1}
+	}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateResp, updateReq)
+	if updateResp.Code != http.StatusOK {
+		t.Fatalf("update after stop status=%d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+	stored, err = scheduler.GetTask("1")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if stored.Source.Password != "new-secret" || stored.Storage.RetentionDays != 1 {
+		t.Fatalf("after stop password=%q retention=%d", stored.Source.Password, stored.Storage.RetentionDays)
 	}
 }
 

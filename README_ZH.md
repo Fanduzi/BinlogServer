@@ -194,6 +194,8 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
 curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 ```
 
+任务处于 `RUNNING`、`STARTING`、`LEASE_DEGRADED` 或 `RETRY_BACKOFF` 时，这次拉流用的是启动时的源库、起点、保留和 `cluster_key`。`PUT /api/tasks/<task-id>` 要改这四项里的任何一项，会返回 HTTP 400，正文是 `stop the task before changing source, start, storage, or cluster_key`。先停掉，再更新，再启动。下次启动从已有 checkpoint 续上。只改名字可以通过。监听地址这类进程配置不在这次更新里。
+
 ### 6. 查看状态与访问控制台
 
 - **Web 控制台:** 浏览器访问 `http://127.0.0.1:8080/ui/`
