@@ -417,7 +417,23 @@ start_server_with_upload
 echo "[retry-upload] create and start task"
 TASK_ID="$(create_task)"
 wait_task_running "$TASK_ID"
-wait_checkpoint_ready "$TASK_ID"
+# LATEST on an idle source sits at the binlog tip. The synthetic rotate is not
+# stored, so the checkpoint stays missing until a real event is written.
+echo "[retry-upload] prime the idle source so a durable checkpoint exists"
+primed=""
+for _ in $(seq 1 30); do
+  write_source_data "retry-prime-${RUN_TAG}-${_}"
+  checkpoint_fetch "$TASK_ID"
+  if [[ "$CHECKPOINT_HTTP_CODE" == "200" ]]; then
+    primed=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$primed" ]]; then
+  echo "checkpoint not ready after priming writes: task_id=$TASK_ID body=$CHECKPOINT_HTTP_BODY" >&2
+  exit 1
+fi
 
 BASE_FILE="$(checkpoint_file)"
 BASE_POS="$(checkpoint_pos)"

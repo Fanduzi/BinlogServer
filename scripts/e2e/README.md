@@ -158,7 +158,7 @@ make e2e-topology-check
 该场景用于验证上传失败后的后台补传：
 
 1. 从 Quay 启动 minio 与 bucket；Quay 不可用时改用 GitHub release 二进制。以 upload 配置启动 binlog-server。
-2. 创建并启动任务，确认 checkpoint 已建立。
+2. 创建并启动任务。源库空闲停在 binlog 末尾时，先写一行，确认 checkpoint 已建立。这一行还在 open 分段里，随后停桶再 rotate 时才会封存。
 3. 停止 minio，写入并 rotate，触发 `UPLOAD_FAILED` 文件记录。
 4. 把这份已封存失败文件的 mtime 拨到 `retention_days` 之外，再 `FLUSH BINARY LOGS`。文件和目录行还在，任务保持 `RUNNING`，事件里有一条 `RETENTION_SKIPPED_NOT_UPLOADED`，`binlog_server_retention_blocked_files{task_id}` 至少为 1。再 rotate 一次，这条事件仍是一条。
 5. 继续写入源库，确认 checkpoint 仍持续推进（best-effort 语义不变）。
