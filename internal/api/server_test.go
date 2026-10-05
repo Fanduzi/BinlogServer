@@ -375,6 +375,58 @@ func TestTaskAPI_ClusterKeyMustBeUnique(t *testing.T) {
 	}
 }
 
+func TestTaskAPI_SplitRetentionConfig(t *testing.T) {
+	scheduler := tasks.NewScheduler()
+	handler := NewServer(scheduler)
+
+	okBody := `{
+		"name":"split","cluster_key":"split-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200001},
+		"storage":{"retention_days":7,"local_retention_days":2,"bucket_retention_days":30}
+	}`
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(okBody))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create %d %s", resp.Code, resp.Body.String())
+	}
+	var created tasks.Task
+	if err := json.Unmarshal(resp.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Storage.RetentionDays != 7 || created.Storage.LocalRetentionDays != 2 || created.Storage.BucketRetentionDays != 30 {
+		t.Fatalf("storage %+v", created.Storage)
+	}
+
+	legacy := httptest.NewRecorder()
+	legacyReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"legacy","cluster_key":"legacy-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200002},
+		"storage":{"retention_days":7}
+	}`))
+	legacyReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(legacy, legacyReq)
+	if legacy.Code != http.StatusCreated {
+		t.Fatalf("legacy %d %s", legacy.Code, legacy.Body.String())
+	}
+	if strings.Contains(legacy.Body.String(), "local_retention_days") || strings.Contains(legacy.Body.String(), "bucket_retention_days") {
+		t.Fatalf("single-key response changed: %s", legacy.Body.String())
+	}
+
+	bad := httptest.NewRecorder()
+	badReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{
+		"name":"bad","cluster_key":"bad-key",
+		"source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret","flavor":"mysql","server_id":200003},
+		"storage":{"retention_days":7,"local_retention_days":10,"bucket_retention_days":3}
+	}`))
+	badReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(bad, badReq)
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), "shorter than local retention") {
+		t.Fatalf("bad %d %s", bad.Code, bad.Body.String())
+	}
+}
+
 // TestTaskAPI_CreateRejectsInvalidInput 验证相关行为。
 func TestTaskAPI_CreateRejectsInvalidInput(t *testing.T) {
 	scheduler := tasks.NewScheduler()

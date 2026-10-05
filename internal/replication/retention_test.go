@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: local segment files, retention clock, catalog rows, and an object deleter
-// output: proof that retention deletes an expired uploaded object, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when the object delete fails without rewriting checksum, and keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured
+// output: proof that retention deletes an expired uploaded object, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when the object delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, and leaves a single-key config on the old full purge
 // pos: retention purge coverage for the replication file-open path
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -767,6 +767,196 @@ func TestRetentionNoUploaderStillDeletesExpiredLocalFile(t *testing.T) {
 	}
 	if got := runner.RetentionBlockedFiles()["task-1"]; got != 0 {
 		t.Fatalf("blocked=%d", got)
+	}
+}
+
+func TestSplitRetentionRemovesLocalFileKeepsObject(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "task-1"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	mid := now.Add(-2 * 24 * time.Hour)
+	old := now.Add(-10 * 24 * time.Hour)
+	midPath := filepath.Join(taskDir, "mysql-bin.000001")
+	oldPath := filepath.Join(taskDir, "mysql-bin.000002")
+	if err := os.WriteFile(midPath, []byte("mid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(midPath, mid, mid); err != nil || os.Chtimes(oldPath, old, old) != nil {
+		t.Fatal("chtimes")
+	}
+	catalog := &purgeCatalog{rows: map[string]tasks.BinlogFile{
+		"mysql-bin.000001": {
+			TaskID: taskID, FileName: "mysql-bin.000001", FilePath: midPath,
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "mid-object",
+			SealedAt: mid,
+		},
+		"mysql-bin.000002": {
+			TaskID: taskID, FileName: "mysql-bin.000002", FilePath: oldPath,
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "old-object",
+			SealedAt: old,
+		},
+		"mysql-bin.000008": {
+			TaskID: taskID, FileName: "mysql-bin.000008",
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "gone-object",
+			SealedAt: old,
+		},
+		"mysql-bin.000007": {
+			TaskID: taskID, FileName: "mysql-bin.000007",
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "young-object",
+			SealedAt: mid,
+		},
+	}}
+	deleter := &purgeDeleter{}
+	runner := NewMySQLRunner(dir, WithFileMetaStore(catalog), WithObjectDeleter(deleter))
+	task := tasks.Task{ID: taskID, Epoch: 1, Storage: tasks.Storage{
+		RetentionDays: 7, LocalRetentionDays: 1, BucketRetentionDays: 7,
+	}}
+	file, _, _, err := runner.openBinlogWriter(context.Background(), task, "mysql-bin.000009", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if _, err := os.Stat(midPath); !os.IsNotExist(err) {
+		t.Fatalf("local file still present: %v", err)
+	}
+	if _, ok := catalog.rows["mysql-bin.000001"]; !ok {
+		t.Fatal("catalog row removed inside bucket retention")
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("bucket-expired local file still present: %v", err)
+	}
+	if _, ok := catalog.rows["mysql-bin.000002"]; ok {
+		t.Fatal("bucket-expired catalog row still present")
+	}
+	if _, ok := catalog.rows["mysql-bin.000008"]; ok {
+		t.Fatal("bucket-only row past bucket retention still present")
+	}
+	if _, ok := catalog.rows["mysql-bin.000007"]; !ok {
+		t.Fatal("bucket-only row inside bucket retention was removed")
+	}
+	got := map[string]bool{}
+	for _, key := range deleter.keys {
+		got[key] = true
+	}
+	if got["mid-object"] || got["young-object"] || !got["old-object"] || !got["gone-object"] {
+		t.Fatalf("deleted keys=%v", deleter.keys)
+	}
+}
+
+func TestSplitRetentionKeepsUnuploadedAndSingleKeyStillPurges(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "task-1"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * 24 * time.Hour)
+	failedPath := filepath.Join(taskDir, "mysql-bin.000001")
+	onlyPath := filepath.Join(taskDir, "mysql-bin.000002")
+	for _, path := range []string{failedPath, onlyPath} {
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalog := &purgeCatalog{rows: map[string]tasks.BinlogFile{
+		"mysql-bin.000001": {
+			TaskID: taskID, FileName: "mysql-bin.000001", FilePath: failedPath,
+			State: "SEALED", UploadState: "UPLOAD_FAILED",
+		},
+		"mysql-bin.000002": {
+			TaskID: taskID, FileName: "mysql-bin.000002", FilePath: onlyPath,
+			State: "SEALED", UploadState: "LOCAL_ONLY",
+		},
+		"mysql-bin.000003": {
+			TaskID: taskID, FileName: "mysql-bin.000003",
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "no-age",
+		},
+	}}
+	deleter := &purgeDeleter{}
+	runner := NewMySQLRunner(dir, WithFileMetaStore(catalog), WithObjectDeleter(deleter))
+	task := tasks.Task{ID: taskID, Epoch: 1, Storage: tasks.Storage{
+		RetentionDays: 7, LocalRetentionDays: 1, BucketRetentionDays: 30,
+	}}
+	file, _, _, err := runner.openBinlogWriter(context.Background(), task, "mysql-bin.000009", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if _, err := os.Stat(failedPath); err != nil {
+		t.Fatalf("UPLOAD_FAILED removed: %v", err)
+	}
+	if _, err := os.Stat(onlyPath); err != nil {
+		t.Fatalf("LOCAL_ONLY removed: %v", err)
+	}
+	if len(deleter.keys) != 0 {
+		t.Fatalf("deleted objects: %v", deleter.keys)
+	}
+	if _, ok := catalog.rows["mysql-bin.000003"]; !ok {
+		t.Fatal("bucket-only row with no age was purged")
+	}
+	if n := countRetentionSkips(catalog.events, "mysql-bin.000001"); n != 1 {
+		t.Fatalf("skip events=%d %+v", n, catalog.events)
+	}
+	if got := runner.RetentionBlockedFiles()[taskID]; got != 2 {
+		t.Fatalf("blocked=%d", got)
+	}
+
+	singleDir := t.TempDir()
+	singleTaskDir := filepath.Join(singleDir, taskID)
+	if err := os.MkdirAll(singleTaskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	singlePath := filepath.Join(singleTaskDir, "mysql-bin.000004")
+	if err := os.WriteFile(singlePath, []byte("single"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(singlePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	singleCatalog := &purgeCatalog{rows: map[string]tasks.BinlogFile{
+		"mysql-bin.000004": {
+			TaskID: taskID, FileName: "mysql-bin.000004", FilePath: singlePath,
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "single-object",
+		},
+		"mysql-bin.000005": {
+			TaskID: taskID, FileName: "mysql-bin.000005",
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "orphan-object",
+			SealedAt: old,
+		},
+	}}
+	singleDeleter := &purgeDeleter{}
+	singleRunner := NewMySQLRunner(singleDir, WithFileMetaStore(singleCatalog), WithObjectDeleter(singleDeleter))
+	file, _, _, err = singleRunner.openBinlogWriter(context.Background(), tasks.Task{
+		ID: taskID, Epoch: 1, Storage: tasks.Storage{RetentionDays: 7},
+	}, "mysql-bin.000009", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if _, err := os.Stat(singlePath); !os.IsNotExist(err) {
+		t.Fatalf("single-key file still present: %v", err)
+	}
+	if _, ok := singleCatalog.rows["mysql-bin.000004"]; ok {
+		t.Fatal("single-key catalog row still present")
+	}
+	if _, ok := singleCatalog.rows["mysql-bin.000005"]; !ok {
+		t.Fatal("single-key retention purged a catalog-only row")
+	}
+	if len(singleDeleter.keys) != 1 || singleDeleter.keys[0] != "single-object" {
+		t.Fatalf("single-key keys=%v", singleDeleter.keys)
+	}
+	if singleCatalog.listCalls == 0 {
+		t.Fatal("expired local file did not read the catalog")
 	}
 }
 

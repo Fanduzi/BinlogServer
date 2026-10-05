@@ -134,7 +134,7 @@ CREATE TABLE backup_tasks (
 |------|------|
 | `source_json` | `{"host":"...","port":3306,"user":"...","password":"...","flavor":"mysql","server_id":12345,"semi_sync":false}` |
 | `start_json` | `{"mode":"LATEST"}` 或 `{"mode":"FILE_POS","file":"...","pos":123}` 或 `{"mode":"GTID","gtid_set":"..."}` |
-| `storage_json` | `{"dir":"...","retention_days":30}` |
+| `storage_json` | `{"dir":"...","retention_days":30}`；可选 `local_retention_days`、`bucket_retention_days`，省略时等于 `retention_days` |
 
 ### 3.2 backup_checkpoints 表
 

@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of an uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -1170,18 +1170,30 @@ type retentionObjects struct {
 
 // cleanupExpiredBinlogs 按保留天数清理过期本地文件（跳过当前活跃 open 文件和其它 open 分段）。
 func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeFileName string) error {
-	return purgeExpiredBinlogs(context.Background(), dir, retentionDays, now, activeFileName, func() (*retentionObjects, error) {
+	return purgeExpiredBinlogs(context.Background(), dir, retentionDays, retentionDays, now, activeFileName, func() (*retentionObjects, error) {
 		return nil, nil
 	})
 }
 
 // cleanupTaskBinlogs 在打开本地文件时清理过期分段。
-// 已上传的封存分段先删对象和目录行，再删本地文件。对象删除失败时本地文件留下，
-// 错误以 OBJECT_PURGE_FAILED 返回，下一次打开文件会再试。
+// 只配 retention_days，或本地天数与桶天数相同，行为与 v0.5.28 相同：
+// 已上传的封存分段先删对象和目录行，再删本地文件。
+// 配了上传和目录，且桶保留长于本地保留时，介于两者之间的 UPLOADED 封存文件只删本地，
+// 对象和目录行留下。本地文件已经不在时，桶年龄用 sealed_at，没有则用 uploaded_at。
+// 对象删除失败时本地文件留下，错误以 OBJECT_PURGE_FAILED 返回，下一次打开文件会再试。
 // 配置了上传且有目录时，过期的 UPLOAD_FAILED / LOCAL_ONLY 封存文件和目录行留下，不返回错误。
+// 没有目录时桶保留不生效，上传仍按本地天数把对象和本地文件一起删。
 func (r *MySQLRunner) cleanupTaskBinlogs(ctx context.Context, task tasks.Task, dir, activeFileName, sourceServerUUID string, now time.Time) error {
+	localDays := task.Storage.EffectiveLocalRetentionDays()
+	bucketDays := localDays
+	if r.objectDeleter != nil && r.fileMetaStore != nil {
+		bucketDays = task.Storage.EffectiveBucketRetentionDays()
+		if bucketDays < localDays {
+			bucketDays = localDays
+		}
+	}
 	var kept []string
-	err := purgeExpiredBinlogs(ctx, dir, task.Storage.RetentionDays, now, activeFileName, func() (*retentionObjects, error) {
+	err := purgeExpiredBinlogs(ctx, dir, localDays, bucketDays, now, activeFileName, func() (*retentionObjects, error) {
 		if r.objectDeleter == nil {
 			return nil, nil
 		}
@@ -1242,12 +1254,27 @@ func (r *MySQLRunner) retentionObjects(ctx context.Context, task tasks.Task, sou
 
 // purgeExpiredBinlogs removes sealed files older than retention.
 // The active open file and every other open segment stay.
-// load runs only after an expired sealed file is found, so a quiet directory
-// does not read the catalog. A nil retentionObjects deletes local files only.
-func purgeExpiredBinlogs(ctx context.Context, dir string, retentionDays int, now time.Time, activeFileName string, load func() (*retentionObjects, error)) error {
-	if retentionDays <= 0 {
-		retentionDays = 7
+// bucketDays equal to localDays is the single cutoff: load runs only after an
+// expired sealed file is found, so a quiet directory does not read the catalog.
+// bucketDays greater than localDays removes an uploaded local file that is
+// still inside the bucket window without deleting the object or the catalog
+// row, and also purges catalog rows whose local file is already gone once
+// sealed_at (or uploaded_at) is past the bucket window.
+// A nil retentionObjects deletes local files only.
+func purgeExpiredBinlogs(ctx context.Context, dir string, localDays, bucketDays int, now time.Time, activeFileName string, load func() (*retentionObjects, error)) error {
+	if localDays <= 0 {
+		localDays = 7
 	}
+	if bucketDays <= 0 || bucketDays < localDays {
+		bucketDays = localDays
+	}
+	if bucketDays == localDays {
+		return purgeExpiredAt(ctx, dir, localDays, now, activeFileName, load)
+	}
+	return purgeSplitRetention(ctx, dir, localDays, bucketDays, now, activeFileName, load)
+}
+
+func purgeExpiredAt(ctx context.Context, dir string, retentionDays int, now time.Time, activeFileName string, load func() (*retentionObjects, error)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1287,7 +1314,7 @@ func purgeExpiredBinlogs(ctx context.Context, dir string, retentionDays int, now
 		}
 		removeLocal := true
 		if objects != nil && objects.deleter != nil {
-			removeLocal, err = objects.release(ctx, name)
+			removeLocal, err = objects.release(ctx, name, false)
 			if err != nil {
 				return err
 			}
@@ -1302,12 +1329,93 @@ func purgeExpiredBinlogs(ctx context.Context, dir string, retentionDays int, now
 	return nil
 }
 
+// purgeSplitRetention keeps an uploaded object that is still inside the bucket
+// window and deletes only its local file. A file still on disk is aged by
+// mtime for both cutoffs. A catalog row with no local file is aged by
+// sealed_at, then uploaded_at. A row with neither timestamp stays.
+func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays int, now time.Time, activeFileName string, load func() (*retentionObjects, error)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var objects *retentionObjects
+	if load != nil {
+		objects, err = load()
+		if err != nil {
+			return err
+		}
+	}
+	expireLocal := now.Add(-time.Duration(localDays) * 24 * time.Hour)
+	expireBucket := now.Add(-time.Duration(bucketDays) * 24 * time.Hour)
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		seen[name] = struct{}{}
+		if name == activeFileName || isOpenSegmentName(name) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mtime := info.ModTime()
+		if !mtime.Before(expireLocal) {
+			continue
+		}
+		removeLocal := true
+		if objects != nil && objects.deleter != nil {
+			removeLocal, err = objects.release(ctx, name, !mtime.Before(expireBucket))
+			if err != nil {
+				return err
+			}
+		}
+		if !removeLocal {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if objects == nil {
+		return nil
+	}
+	for name, row := range objects.byName {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, ok := seen[name]; ok || isOpenCatalogRow(row) || !isUploadedRow(row) {
+			continue
+		}
+		age := row.SealedAt
+		if age.IsZero() {
+			age = row.UploadedAt
+		}
+		if age.IsZero() || !age.Before(expireBucket) {
+			continue
+		}
+		if _, err := objects.release(ctx, name, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // release deletes the bucket object for one expired sealed file before the
-// local file is removed. removeLocal is false when the file must stay so the
-// next purge can retry. An open catalog row is not deleted. A sealed
-// UPLOAD_FAILED or LOCAL_ONLY catalog row stays too: that local file is the
-// only copy, and keeping it is not an error.
-func (o *retentionObjects) release(ctx context.Context, name string) (bool, error) {
+// local file is removed. localOnly leaves an uploaded object and its catalog
+// row in place and still removes the local file. removeLocal is false when
+// the file must stay so the next purge can retry. An open catalog row is not
+// deleted. A sealed UPLOAD_FAILED or LOCAL_ONLY catalog row stays too: that
+// local file is the only copy, and keeping it is not an error.
+func (o *retentionObjects) release(ctx context.Context, name string, localOnly bool) (bool, error) {
 	if o == nil || o.deleter == nil {
 		return true, nil
 	}
@@ -1325,6 +1433,9 @@ func (o *retentionObjects) release(ctx context.Context, name string) (bool, erro
 			}
 			return false, nil
 		}
+	}
+	if localOnly && ok && isUploadedRow(row) {
+		return true, nil
 	}
 	key := ""
 	if ok && isUploadedRow(row) {

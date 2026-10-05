@@ -276,7 +276,7 @@ type createTaskRequest struct {
 	Source *tasks.SourceConfig `json:"source,omitempty"`
 	// Start 起点策略：LATEST|FILE_POS|GTID。
 	Start *tasks.StartConfig `json:"start,omitempty"`
-	// Storage 存储策略：retention_days 必须在 1..3650。
+	// Storage 存储策略：retention_days 必须在 1..3650。local_retention_days 与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。
 	Storage *tasks.Storage `json:"storage,omitempty"`
 }
 
@@ -304,7 +304,7 @@ type updateTaskRequest struct {
 	Source *tasks.SourceConfig `json:"source,omitempty"`
 	// Start 起点策略：LATEST|FILE_POS|GTID。
 	Start *tasks.StartConfig `json:"start,omitempty"`
-	// Storage 存储策略：retention_days 必须在 1..3650。
+	// Storage 存储策略：retention_days 必须在 1..3650。local_retention_days 与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。
 	Storage *tasks.Storage `json:"storage,omitempty"`
 }
 
@@ -668,6 +668,7 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 		Client:     client,
 		ClientHint: hint,
 		Paths:      paths,
+		Locations:  tasks.ReplayLocations(selected),
 	})
 }
 

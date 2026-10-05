@@ -69,7 +69,9 @@ note: if this file changes, update this header and frontend/src/components/READM
             <div class="detail-item"><span>{{ $t('detail.startMode') }}</span><strong data-testid="task-drawer-start">{{ formatStart(task.start) }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.checkpoint') }}</span><strong data-testid="task-drawer-resume">{{ formatCheckpoint(checkpoint) }}</strong></div>
             <div class="detail-item"><span>{{ $t('form.semiSync') }}</span><strong>{{ task.source?.semi_sync ? $t('detail.on') : $t('detail.off') }}</strong></div>
-            <div class="detail-item"><span>{{ $t('form.retentionDays') }}</span><strong>{{ task.storage?.retention_days || "--" }}</strong></div>
+            <div class="detail-item"><span>{{ $t('form.retentionDays') }}</span><strong data-testid="task-drawer-retention">{{ task.storage?.retention_days || "--" }}</strong></div>
+            <div class="detail-item"><span>{{ $t('form.localRetentionDays') }}</span><strong data-testid="task-drawer-local-retention">{{ effectiveRetention(task.storage, 'local') }}</strong></div>
+            <div class="detail-item"><span>{{ $t('form.bucketRetentionDays') }}</span><strong data-testid="task-drawer-bucket-retention">{{ effectiveRetention(task.storage, 'bucket') }}</strong></div>
           </div>
         </section>
 
@@ -170,6 +172,7 @@ note: if this file changes, update this header and frontend/src/components/READM
               {{ $t('btn.retryUpload') }}
             </el-button>
           </div>
+          <p v-if="showBucketOnly" class="replay-set-empty" data-testid="task-bucket-only-hint">{{ $t('detail.bucketOnly') }}</p>
           <el-table :data="files" size="small" border>
             <el-table-column :label="$t('table.file')" min-width="220">
               <template #default="{ row }">
@@ -184,6 +187,11 @@ note: if this file changes, update this header and frontend/src/components/READM
             <el-table-column prop="size_bytes" :label="$t('table.size')" width="100" />
             <el-table-column prop="start_pos" :label="$t('table.startPos')" width="100" />
             <el-table-column prop="end_pos" :label="$t('table.endPos')" width="100" />
+            <el-table-column :label="$t('table.location')" width="120">
+              <template #default="{ row }">
+                <span :data-testid="`file-location-${row.file_name}`">{{ locationLabel(row.location) }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="upload_state" :label="$t('table.uploadState')" width="130">
               <template #default="{ row }">
                 <span :data-testid="`file-upload-state-${row.file_name}`">{{ row.upload_state }}</span>
@@ -300,6 +308,13 @@ const replayHint = computed(() => {
   return hint || t("detail.replayFlavorUnset");
 });
 
+const showBucketOnly = computed(() => {
+  const rows = Array.isArray(props.files) ? props.files : [];
+  if (rows.some((row) => row && row.location === "bucket")) return true;
+  const sets = [props.replay, pitrResult.value];
+  return sets.some((set) => Array.isArray(set?.locations) && set.locations.includes("bucket"));
+});
+
 const replayCommand = computed(() => formatReplayCommand(props.replay));
 
 async function buildPitr() {
@@ -372,6 +387,20 @@ function formatStart(start) {
     return `GTID ${gtid}`;
   }
   return mode;
+}
+
+function effectiveRetention(storage, which) {
+  const base = Number(storage?.retention_days || 0);
+  const specific = Number(which === "local" ? storage?.local_retention_days : storage?.bucket_retention_days) || 0;
+  const days = specific > 0 ? specific : base;
+  return days > 0 ? String(days) : "--";
+}
+
+function locationLabel(location) {
+  if (location === "bucket") return t("detail.locationBucket");
+  if (location === "both") return t("detail.locationBoth");
+  if (location === "local") return t("detail.locationLocal");
+  return "--";
 }
 
 function diskBase(row) {
