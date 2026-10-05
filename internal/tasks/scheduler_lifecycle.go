@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (starting + expired + owned idle), expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
+// output: guarded start/stop, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle), expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,15 @@ func (s *Scheduler) releaseTaskLease(taskID, owner string, epoch int64) {
 
 func (s *Scheduler) StartTask(id string) error {
 	s.mu.Lock()
+
+	// 控制面把停止留在 STOPPING 后，内存可能还停在那里，而行已经被 worker 收成 STOPPED。
+	// 只在这一态回读，避免把测试里故意领先 store 的内存抄本盖掉。
+	if current, ok := s.tasks[id]; ok && current.State == StateStopping {
+		if err := s.reloadIdleTaskFromStoreLocked(id); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
 
 	// Step 1: 校验任务存在、状态可启动、source 最小配置可用。
 	task, ok := s.tasks[id]
@@ -247,6 +257,7 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 }
 
 // ClaimExpiredTasks 让在线 worker 接管租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF 任务。
+// 租约已过期的 STOPPING 只收成 STOPPED，不在这里重新拉起。
 func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 	s.mu.Lock()
 	store := s.store
@@ -271,6 +282,10 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 
 	claimed := 0
 	for _, item := range list {
+		if item.State == StateStopping {
+			s.completeIdleStop(item)
+			continue
+		}
 		if !isExpiredLeaseTakeoverState(item.State) {
 			continue
 		}
@@ -292,7 +307,9 @@ func isExpiredLeaseTakeoverState(state State) bool {
 }
 
 // ClaimRunnableTasks 把该本 Worker 跑的任务跑起来：没人要的 STARTING、过期租约、以及自己名下还空着的。
+// 同一轮先看共享行：本进程还在拉流时，行已经是 STOPPING 或 STOPPED 就取消这次执行。
 func (s *Scheduler) ClaimRunnableTasks() (int, error) {
+	s.applyRemoteStops()
 	claimed, err := s.ClaimStartingTasks()
 	if err != nil {
 		return claimed, err
@@ -398,6 +415,13 @@ func (s *Scheduler) MarkRetryableError(id, msg string) error {
 func (s *Scheduler) StopTask(id string) error {
 	s.mu.Lock()
 
+	// 控制面内存常常还是 dispatch 时的 STARTING。先按 store 里的主人来停，
+	// 避免用空 owner 的旧抄本把正在跑的行写成 STOPPED。
+	if err := s.reloadIdleTaskFromStoreLocked(id); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
 	task, ok := s.tasks[id]
 	if !ok {
 		err := readOnlyDiskBackup(s.store, s.dataDir, id)
@@ -427,15 +451,198 @@ func (s *Scheduler) StopTask(id string) error {
 		return err
 	}
 
-	// 没有运行中的 goroutine（或已经退出）时，直接收敛到 STOPPED。
+	// 没有本进程的执行时，别人还占着租约就不能写成 STOPPED：dump 还在那个 worker 上。
+	// 行留在 STOPPING，主人下一次认领会取消拉流，再由那边的退出路径收成 STOPPED。
 	if !hasRun || isClosed(done) {
+		if s.leaseManager != nil && task.OwnerWorkerID != "" && task.Epoch > 0 && task.OwnerWorkerID != s.clusterWorkerID {
+			s.mu.Unlock()
+			return nil
+		}
+		owner, epoch := task.OwnerWorkerID, task.Epoch
 		if err := s.markStoppedLocked(id); err != nil {
 			s.mu.Unlock()
 			return err
 		}
+		s.mu.Unlock()
+		s.releaseTaskLease(id, owner, epoch)
+		return nil
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// reloadIdleTaskFromStoreLocked 在本进程没有活着的 run 时，用 store 行替换内存抄本。
+// 调用方持有 s.mu。store 没有这行时保持内存不变。
+func (s *Scheduler) reloadIdleTaskFromStoreLocked(id string) error {
+	if s.store == nil {
+		return nil
+	}
+	if done, ok := s.runs[id]; ok && !isClosed(done) {
+		return nil
+	}
+	store := s.store
+	s.mu.Unlock()
+	item, err := s.readStoredTask(store, id)
+	s.mu.Lock()
+	if err != nil {
+		if errors.Is(err, ErrTaskNotFound) {
+			return nil
+		}
+		return err
+	}
+	if done, ok := s.runs[id]; ok && !isClosed(done) {
+		return nil
+	}
+	s.tasks[id] = item
+	if n, convErr := strconv.Atoi(item.ID); convErr == nil && n > s.seq {
+		s.seq = n
+	}
+	return nil
+}
+
+func (s *Scheduler) readStoredTask(store TaskStore, id string) (Task, error) {
+	ctx, cancel := s.withReadTimeout(context.Background())
+	defer cancel()
+	return store.GetTask(ctx, id)
+}
+
+// applyRemoteStops 让控制面写进共享行的停止落到本进程的 dump 上。
+func (s *Scheduler) applyRemoteStops() {
+	if s.store == nil {
+		return
+	}
+	s.mu.Lock()
+	store := s.store
+	live := make([]string, 0, len(s.runs))
+	for id, done := range s.runs {
+		if !isClosed(done) {
+			live = append(live, id)
+		}
+	}
+	stopping := make([]string, 0)
+	for id, task := range s.tasks {
+		if task.State == StateStopping {
+			stopping = append(stopping, id)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, id := range live {
+		item, err := s.readStoredTask(store, id)
+		if err != nil {
+			log.Printf("remote stop read task=%s err=%v", id, err)
+			continue
+		}
+		s.mu.Lock()
+		s.noteRemoteStopLocked(item)
+		s.mu.Unlock()
+	}
+	for _, id := range stopping {
+		item, err := s.readStoredTask(store, id)
+		if err != nil {
+			if !errors.Is(err, ErrTaskNotFound) {
+				log.Printf("remote stop read task=%s err=%v", id, err)
+			}
+			continue
+		}
+		if item.State != StateStopping {
+			continue
+		}
+		s.completeIdleStop(item)
+	}
+}
+
+// noteRemoteStopLocked 在共享行已经要求停止时取消本进程的 dump。
+// 内存里的 owner/epoch 留着，等 run 退出再放租约。调用方持有 s.mu。
+// 返回 true 表示这行不能覆盖当前执行的内存抄本。
+func (s *Scheduler) noteRemoteStopLocked(stored Task) bool {
+	done, ok := s.runs[stored.ID]
+	if !ok || isClosed(done) {
+		return false
+	}
+	if stored.State != StateStopping && stored.State != StateStopped {
+		return false
+	}
+	current, exists := s.tasks[stored.ID]
+	if !exists {
+		current = stored
+	}
+	if current.State != StateStopping && current.State != StateStopped {
+		current.State = StateStopping
+		current.UpdatedAt = time.Now()
+		s.tasks[stored.ID] = current
+		s.appendEventLocked(stored.ID, "TASK_STOPPING", "stop requested by control plane", "")
+	}
+	if cancel, ok := s.cancels[stored.ID]; ok {
+		cancel()
+		delete(s.cancels, stored.ID)
+		log.Printf("cancelled local dump for remote stop task=%s store_state=%s", stored.ID, stored.State)
+	}
+	return true
+}
+
+// completeIdleStop 把没有本进程执行的 STOPPING 收成 STOPPED。
+// 租约仍被别的 worker 持有时不动，等那个进程自己取消 dump。
+func (s *Scheduler) completeIdleStop(task Task) {
+	if task.State != StateStopping {
+		return
+	}
+	s.mu.Lock()
+	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
+		s.mu.Unlock()
+		return
+	}
+	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
+		s.noteRemoteStopLocked(task)
+		s.mu.Unlock()
+		return
+	}
+	owner := task.OwnerWorkerID
+	epoch := task.Epoch
+	self := s.clusterWorkerID
+	lease := s.leaseManager
+	s.mu.Unlock()
+
+	if owner != "" && epoch > 0 && owner != self {
+		if lease == nil {
+			return
+		}
+		ctx, cancel := s.withLeaseTimeout(context.Background())
+		held, err := lease.Verify(ctx, task.ID, owner, epoch)
+		cancel()
+		if err != nil || held {
+			return
+		}
+	}
+
+	s.mu.Lock()
+	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
+		s.mu.Unlock()
+		return
+	}
+	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
+		s.noteRemoteStopLocked(task)
+		s.mu.Unlock()
+		return
+	}
+	base := task
+	if current, ok := s.tasks[task.ID]; ok {
+		base = current
+	}
+	base.State = StateStopping
+	if base.OwnerWorkerID == "" {
+		base.OwnerWorkerID = owner
+		base.Epoch = epoch
+	}
+	s.tasks[task.ID] = base
+	releaseOwner, releaseEpoch := base.OwnerWorkerID, base.Epoch
+	if err := s.markStoppedLocked(task.ID); err != nil {
+		s.mu.Unlock()
+		log.Printf("persist task transition failed task=%s state=%s err=%v", task.ID, StateStopped, err)
+		return
+	}
+	s.mu.Unlock()
+	s.releaseTaskLease(task.ID, releaseOwner, releaseEpoch)
 }
 
 func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}) {
@@ -450,11 +657,14 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		}
 		// 收到 stop 请求后，直到执行 goroutine 真退出才收敛到 STOPPED。
 		// 这样 API 层的 STOPPED 表示“执行路径已结束”，而不是“仅发出停止请求”。
-		if currentTask, ok := s.tasks[id]; ok && currentTask.State == StateStopping {
-			logTransitionPersistError(id, StateStopped, s.markStoppedLocked(id))
-			if s.leaseManager != nil && currentTask.OwnerWorkerID != "" && currentTask.Epoch > 0 {
-				releaseOwner = currentTask.OwnerWorkerID
-				releaseEpoch = currentTask.Epoch
+		// 租约身份用本轮 run 带进来的 owner/epoch：同步进来的 STOPPED 行会把内存主人清掉。
+		if currentTask, ok := s.tasks[id]; ok && (currentTask.State == StateStopping || currentTask.State == StateStopped) {
+			if currentTask.State == StateStopping {
+				logTransitionPersistError(id, StateStopped, s.markStoppedLocked(id))
+			}
+			if s.leaseManager != nil && task.OwnerWorkerID != "" && task.Epoch > 0 {
+				releaseOwner = task.OwnerWorkerID
+				releaseEpoch = task.Epoch
 			}
 		}
 		// done 不是“任务开始执行”的信号，而是“本轮执行完全结束”的信号。

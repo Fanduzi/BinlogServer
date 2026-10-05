@@ -1,11 +1,12 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
+	"context"
 	"log"
 	"time"
 )
@@ -150,10 +151,33 @@ func (s *Scheduler) markFailedLocked(id, message string) error {
 }
 
 // markStoppedLocked 将任务收敛到最终 STOPPED 并清理运行时 ownership 字段。
+// 有 store 时用最新行上的配置（含密码），只改状态和归属，避免这次收尾把控制面刚写的配置盖回去。
 func (s *Scheduler) markStoppedLocked(id string) error {
 	task, ok := s.tasks[id]
 	if !ok || task.State == StateStopped {
 		return nil
+	}
+	if s.store != nil {
+		store := s.store
+		currentEpoch := task.Epoch
+		s.mu.Unlock()
+		ctx, cancel := s.withReadTimeout(context.Background())
+		fresh, err := store.GetTask(ctx, id)
+		cancel()
+		s.mu.Lock()
+		current, ok := s.tasks[id]
+		if !ok || current.State == StateStopped {
+			return nil
+		}
+		task = current
+		if err == nil {
+			active := fresh.State == StateRunning || fresh.State == StateStarting || fresh.State == StateRetryBackoff || fresh.State == StateLeaseDegraded
+			if active && fresh.Epoch != 0 && currentEpoch != 0 && fresh.Epoch != currentEpoch {
+				s.tasks[id] = fresh
+				return nil
+			}
+			task = fresh
+		}
 	}
 	task.State = StateStopped
 	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。
