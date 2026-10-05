@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failed upload metadata via failedUploadFileReader, manual and background retry requests, local sealed files, and object storage uploader operations
-// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
+// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows including a checksum mismatch re-upload and an unfinished checksum re-check, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
 // pos: scheduler upload-retry compensation, background retry loop, and failure-observability logic
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -38,7 +38,8 @@ func (s *Scheduler) RetryFailedUploads(taskID string, limit int) (UploadRetrySta
 }
 
 // RunBackgroundUploadRetry retries sealed UPLOAD_FAILED rows until ctx is cancelled.
-// Successful rows become UPLOADED through the same ApplySealedUpload path as RetryFailedUploads.
+// A checksum mismatch is uploaded again. An unfinished checksum check is checked again and is not uploaded again.
+// A match becomes UPLOADED through the same path as RetryFailedUploads.
 // Open segments are not uploaded. A sealed file that is not on this machine is skipped, so its catalog row stays as it was.
 // interval <= 0 uses the default. No config key. The manual retry API is unchanged.
 func (s *Scheduler) RunBackgroundUploadRetry(ctx context.Context, interval time.Duration) {
@@ -188,7 +189,13 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 		}
 
 		uploadCtx, cancelUpload := s.withUploadTimeout(context.Background())
-		updated, err := ApplySealedUpload(uploadCtx, uploader, fileStore, file)
+		var updated BinlogFile
+		var err error
+		if checksumVerifyPending(file) {
+			updated, err = verifySealedUpload(uploadCtx, uploader, fileStore, file)
+		} else {
+			updated, err = ApplySealedUpload(uploadCtx, uploader, fileStore, file)
+		}
 		cancelUpload()
 		if err != nil || updated.UploadState != "UPLOADED" {
 			stats.Failed++

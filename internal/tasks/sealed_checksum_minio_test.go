@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a running MinIO endpoint from the retry-upload e2e, a sealed local file, and S3Uploader
-// output: proof that a matching object reports checksum match and a same-size different object reports mismatch without failing the caller
+// output: proof that a matching object reports checksum match and UPLOADED, and a same-size different object reports mismatch as UPLOAD_FAILED without failing the caller
 // pos: object-store checksum test for ApplySealedUpload; skipped unless BINLOG_E2E_MINIO_ENDPOINT is set
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -98,8 +98,8 @@ func TestApplySealedUpload_MinIOChecksum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mismatch must not fail the caller, got %v", err)
 	}
-	if swapped.UploadState != "UPLOADED" || swapped.Checksum != ChecksumMismatch {
-		t.Fatalf("mismatch: state=%s checksum=%s", swapped.UploadState, swapped.Checksum)
+	if swapped.UploadState != "UPLOAD_FAILED" || swapped.Checksum != ChecksumMismatch || swapped.UploadError != ChecksumMismatchError {
+		t.Fatalf("mismatch: state=%s checksum=%s err=%q", swapped.UploadState, swapped.Checksum, swapped.UploadError)
 	}
 }
 

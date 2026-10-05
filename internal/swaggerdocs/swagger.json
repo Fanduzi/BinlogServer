@@ -1689,7 +1689,7 @@
             "type": "object",
             "properties": {
                 "checksum": {
-                    "description": "Checksum is match when the stored object is the same bytes as the sealed file.\nmismatch means that comparison finished and the bytes differ.\nEmpty means the object HEAD did not finish. Empty is not verified.",
+                    "description": "Checksum is match when the stored object is the same bytes as the sealed file.\nmismatch means that comparison finished and the bytes differ.\nEmpty means the object HEAD did not finish. Empty is not verified.\nOnly match is stored on an UPLOADED row. A mismatch or an unfinished check is UPLOAD_FAILED.",
                     "type": "string"
                 },
                 "created_at": {

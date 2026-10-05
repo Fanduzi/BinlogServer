@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- A sealed upload whose stored object does not match the local file, or whose checksum comparison does not finish, is recorded as `UPLOAD_FAILED` instead of a durable `UPLOADED` copy. `upload_error` is `checksum mismatch`, or it begins with `checksum verify failed:`. `checksum` stays `mismatch` or empty. Empty is not `match` and not `mismatch`. Replication keeps running. With object storage and a catalog, retention does not delete that local file or its catalog row, and it writes one `RETENTION_SKIPPED_NOT_UPLOADED` event. The background upload retry and `POST /api/tasks/{id}/files/retry-upload` upload a checksum mismatch again. An unfinished check is compared again and is not uploaded again. When that later check matches, the row becomes `UPLOADED` with checksum `match`, and a later retention pass can delete it. An `UPLOADED` row already stored with `mismatch` or an empty checksum keeps its local file; the next retention pass records it as `UPLOAD_FAILED` so that same retry can verify it. A checksum of `match` is unchanged: retention still deletes the object, the catalog row, and the local file, including the longer bucket window that deletes only the local file. PITR, download, and replay still read a sealed `UPLOADED` object when the local file is already gone. `LOCAL_ONLY` retention is unchanged. A bucket-only `UPLOADED` row is still aged as before. No new upload state. No new config key. No schema migration. The Console already shows `upload_state` and `checksum`, and the existing retry button appears for `UPLOAD_FAILED`.
+
 ## [v0.5.31] - 2026-10-05
 
 ### Fixed

@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: local segment files, retention clock, catalog rows, and an object deleter
-// output: proof that retention deletes an expired uploaded object, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when the object delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, and leaves a single-key config on the old full purge
+// output: proof that retention deletes an expired checksum-matched uploaded object, keeps a mismatched or unchecked uploaded file and records it UPLOAD_FAILED, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when a matched object's delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, and leaves a single-key config on the old full purge
 // pos: retention purge coverage for the replication file-open path
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -105,6 +105,7 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 	fresh := now.Add(-2 * time.Hour)
 
 	expiredPath := filepath.Join(taskDir, "mysql-bin.000001")
+	verifiedPath := filepath.Join(taskDir, "mysql-bin.000010")
 	freshPath := filepath.Join(taskDir, "mysql-bin.000003")
 	openRowPath := filepath.Join(taskDir, "mysql-bin.000004")
 	localOnlyPath := filepath.Join(taskDir, "mysql-bin.000005")
@@ -112,6 +113,7 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 	activePath := filepath.Join(taskDir, "mysql-bin.000009.open.e3")
 	for path, body := range map[string]string{
 		expiredPath:   "expired-uploaded",
+		verifiedPath:  "verified-uploaded",
 		freshPath:     "fresh-uploaded",
 		openRowPath:   "open-row",
 		localOnlyPath: "local-only",
@@ -122,7 +124,7 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, path := range []string{expiredPath, openRowPath, localOnlyPath, openFilePath, activePath} {
+	for _, path := range []string{expiredPath, verifiedPath, openRowPath, localOnlyPath, openFilePath, activePath} {
 		if err := os.Chtimes(path, old, old); err != nil {
 			t.Fatal(err)
 		}
@@ -136,6 +138,11 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 			TaskID: taskID, FileName: "mysql-bin.000001", FilePath: expiredPath,
 			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "old-object",
 			Checksum: tasks.ChecksumMismatch,
+		},
+		"mysql-bin.000010": {
+			TaskID: taskID, FileName: "mysql-bin.000010", FilePath: verifiedPath,
+			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "verified-object",
+			Checksum: tasks.ChecksumMatch,
 		},
 		"mysql-bin.000003": {
 			TaskID: taskID, FileName: "mysql-bin.000003", FilePath: freshPath,
@@ -170,13 +177,13 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 
 	deleter := &purgeDeleter{}
 	deleter.onDelete = func(key string) {
-		if key != "old-object" && key != "empty-checksum-object" {
+		if key != "verified-object" {
 			t.Errorf("deleted unexpected object %s", key)
 		}
-		if _, err := os.Stat(expiredPath); err != nil && key == "old-object" {
-			t.Errorf("local expired file already gone when deleting %s: %v", key, err)
+		if _, err := os.Stat(verifiedPath); err != nil {
+			t.Errorf("local verified file already gone when deleting %s: %v", key, err)
 		}
-		if _, ok := catalog.rows["mysql-bin.000001"]; key == "old-object" && !ok {
+		if _, ok := catalog.rows["mysql-bin.000010"]; !ok {
 			t.Errorf("catalog row removed before object delete")
 		}
 	}
@@ -195,11 +202,22 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 		t.Fatalf("active path %s", path)
 	}
 
-	if _, err := os.Stat(expiredPath); !os.IsNotExist(err) {
-		t.Fatalf("expired uploaded file still present: %v", err)
+	if _, err := os.Stat(expiredPath); err != nil {
+		t.Fatalf("mismatched uploaded file removed: %v", err)
 	}
-	if _, err := os.Stat(emptyChecksumPath); !os.IsNotExist(err) {
-		t.Fatalf("empty-checksum uploaded file still present: %v", err)
+	if _, err := os.Stat(emptyChecksumPath); err != nil {
+		t.Fatalf("empty-checksum uploaded file removed: %v", err)
+	}
+	if _, err := os.Stat(verifiedPath); !os.IsNotExist(err) {
+		t.Fatalf("verified uploaded file still present: %v", err)
+	}
+	mismatchRow := catalog.rows["mysql-bin.000001"]
+	if mismatchRow.UploadState != "UPLOAD_FAILED" || mismatchRow.Checksum != tasks.ChecksumMismatch || mismatchRow.UploadError != tasks.ChecksumMismatchError || mismatchRow.ObjectKey != "old-object" {
+		t.Fatalf("mismatch row: %+v", mismatchRow)
+	}
+	emptyRow := catalog.rows["mysql-bin.000008"]
+	if emptyRow.UploadState != "UPLOAD_FAILED" || emptyRow.Checksum != "" || !strings.HasPrefix(emptyRow.UploadError, tasks.ChecksumVerifyPrefix) || emptyRow.ObjectKey != "empty-checksum-object" {
+		t.Fatalf("empty-checksum row: %+v", emptyRow)
 	}
 	if _, err := os.Stat(localOnlyPath); err != nil {
 		t.Fatalf("expired local-only file removed: %v", err)
@@ -210,10 +228,22 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 	if n := countRetentionSkips(catalog.events, "mysql-bin.000005"); n != 1 {
 		t.Fatalf("retention skip events=%d %+v", n, catalog.events)
 	}
-	if !containsAll(catalog.events[0].Message, "mysql-bin.000005", "upload_state=LOCAL_ONLY") || catalog.events[0].Detail != "LOCAL_ONLY" {
+	var localOnlyEvent tasks.TaskEvent
+	for _, event := range catalog.events {
+		if event.Detail == "LOCAL_ONLY" {
+			localOnlyEvent = event
+		}
+	}
+	if !containsAll(localOnlyEvent.Message, "mysql-bin.000005", "upload_state=LOCAL_ONLY") {
 		t.Fatalf("event=%+v", catalog.events)
 	}
-	if got := runner.RetentionBlockedFiles()["task-1"]; got != 1 {
+	if n := countRetentionSkips(catalog.events, "mysql-bin.000001"); n != 1 {
+		t.Fatalf("mismatch skip events=%d %+v", n, catalog.events)
+	}
+	if n := countRetentionSkips(catalog.events, "mysql-bin.000008"); n != 1 {
+		t.Fatalf("empty-checksum skip events=%d %+v", n, catalog.events)
+	}
+	if got := runner.RetentionBlockedFiles()["task-1"]; got != 3 {
 		t.Fatalf("blocked gauge=%d", got)
 	}
 	for _, keep := range []string{freshPath, openRowPath, openFilePath, activePath} {
@@ -225,11 +255,8 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 	if err != nil || string(body) != "active-open" {
 		t.Fatalf("active open segment changed: %q %v", body, err)
 	}
-	if _, ok := catalog.rows["mysql-bin.000001"]; ok {
-		t.Fatal("expired uploaded catalog row still present")
-	}
-	if _, ok := catalog.rows["mysql-bin.000008"]; ok {
-		t.Fatal("empty-checksum catalog row still present")
+	if _, ok := catalog.rows["mysql-bin.000010"]; ok {
+		t.Fatal("verified uploaded catalog row still present")
 	}
 	if catalog.rows["mysql-bin.000003"].ObjectKey != "fresh-object" || catalog.rows["mysql-bin.000003"].Checksum != tasks.ChecksumMatch {
 		t.Fatalf("fresh row changed: %+v", catalog.rows["mysql-bin.000003"])
@@ -241,7 +268,7 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 	for _, key := range deleter.keys {
 		deleted[key] = true
 	}
-	if !deleted["old-object"] || !deleted["empty-checksum-object"] {
+	if !deleted["verified-object"] || deleted["old-object"] || deleted["empty-checksum-object"] {
 		t.Fatalf("deleted keys = %v", deleter.keys)
 	}
 	for _, kept := range []string{"fresh-object", "open-row-object", "open-file-object"} {
@@ -251,6 +278,43 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 	}
 	if catalog.listCalls != 1 || catalog.listLimit != retentionCatalogLimit {
 		t.Fatalf("list calls=%d limit=%d", catalog.listCalls, catalog.listLimit)
+	}
+
+	file.Close()
+	deleter.onDelete = nil
+	healed := catalog.rows["mysql-bin.000001"]
+	healed.UploadState = "UPLOADED"
+	healed.Checksum = tasks.ChecksumMatch
+	healed.UploadError = ""
+	catalog.rows["mysql-bin.000001"] = healed
+	file, _, _, err = runner.openBinlogWriter(context.Background(), tasks.Task{
+		ID:                taskID,
+		Epoch:             3,
+		KeepLocalSegments: true,
+		Storage:           tasks.Storage{RetentionDays: 7},
+	}, "mysql-bin.000011", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := os.Stat(expiredPath); !os.IsNotExist(err) {
+		t.Fatalf("matched file still present after re-verification: %v", err)
+	}
+	if _, ok := catalog.rows["mysql-bin.000001"]; ok {
+		t.Fatal("matched catalog row still present after re-verification")
+	}
+	if _, err := os.Stat(emptyChecksumPath); err != nil {
+		t.Fatalf("unchecked file removed before it matched: %v", err)
+	}
+	deleted = map[string]bool{}
+	for _, key := range deleter.keys {
+		deleted[key] = true
+	}
+	if !deleted["old-object"] {
+		t.Fatalf("re-verified object was not deleted: %v", deleter.keys)
+	}
+	if got := runner.RetentionBlockedFiles()["task-1"]; got != 2 {
+		t.Fatalf("blocked after re-verification=%d", got)
 	}
 }
 
@@ -288,7 +352,7 @@ func TestOpenBinlogWriter_InsideRetentionDoesNotListOrDelete(t *testing.T) {
 }
 
 func TestOpenBinlogWriter_ObjectDeleteFailureKeepsLocalFileAndChecksum(t *testing.T) {
-	for _, checksum := range []string{tasks.ChecksumMatch, tasks.ChecksumMismatch, ""} {
+	for _, checksum := range []string{tasks.ChecksumMatch} {
 		name := checksum
 		if name == "" {
 			name = "empty"
@@ -422,7 +486,7 @@ func TestOpenBinlogWriter_RecordFailureStillSurfacesPurgeError(t *testing.T) {
 		rows: map[string]tasks.BinlogFile{
 			"mysql-bin.000001": {
 				TaskID: "task-1", FileName: "mysql-bin.000001", State: "SEALED",
-				UploadState: "UPLOADED", ObjectKey: "old-object", Checksum: tasks.ChecksumMismatch,
+				UploadState: "UPLOADED", ObjectKey: "old-object", Checksum: tasks.ChecksumMatch,
 			},
 		},
 		noteErr: errors.New("cannot write"),
@@ -438,7 +502,7 @@ func TestOpenBinlogWriter_RecordFailureStillSurfacesPurgeError(t *testing.T) {
 	if _, statErr := os.Stat(path); statErr != nil {
 		t.Fatal(statErr)
 	}
-	if catalog.rows["mysql-bin.000001"].Checksum != tasks.ChecksumMismatch {
+	if catalog.rows["mysql-bin.000001"].Checksum != tasks.ChecksumMatch {
 		t.Fatalf("checksum rewritten: %+v", catalog.rows["mysql-bin.000001"])
 	}
 }
@@ -795,12 +859,12 @@ func TestSplitRetentionRemovesLocalFileKeepsObject(t *testing.T) {
 		"mysql-bin.000001": {
 			TaskID: taskID, FileName: "mysql-bin.000001", FilePath: midPath,
 			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "mid-object",
-			SealedAt: mid,
+			Checksum: tasks.ChecksumMatch, SealedAt: mid,
 		},
 		"mysql-bin.000002": {
 			TaskID: taskID, FileName: "mysql-bin.000002", FilePath: oldPath,
 			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "old-object",
-			SealedAt: old,
+			Checksum: tasks.ChecksumMatch, SealedAt: old,
 		},
 		"mysql-bin.000008": {
 			TaskID: taskID, FileName: "mysql-bin.000008",
@@ -927,6 +991,7 @@ func TestSplitRetentionKeepsUnuploadedAndSingleKeyStillPurges(t *testing.T) {
 		"mysql-bin.000004": {
 			TaskID: taskID, FileName: "mysql-bin.000004", FilePath: singlePath,
 			State: "SEALED", UploadState: "UPLOADED", ObjectKey: "single-object",
+			Checksum: tasks.ChecksumMatch,
 		},
 		"mysql-bin.000005": {
 			TaskID: taskID, FileName: "mysql-bin.000005",
