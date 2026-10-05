@@ -91,7 +91,7 @@ go run "$ROOT_DIR/scripts/e2e/gen-timed-segment.go" "$sealed_path" \
 sealed_size="$(wc -c <"$sealed_path" | tr -d ' ')"
 
 meta_sql "INSERT INTO backup_checkpoints (task_id, file_name, pos, gtid_set, updated_at) VALUES ('${task_id}', '${SOURCE_FILE}', 44, '', UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE file_name=VALUES(file_name), pos=VALUES(pos), updated_at=VALUES(updated_at)"
-meta_sql "INSERT INTO binlog_files (task_id, file_name, source_file, file_path, epoch, state, checksum, size_bytes, start_pos, end_pos, created_at, sealed_at, object_key, upload_state, uploaded_at) VALUES ('${task_id}', '${SOURCE_FILE}', '${SOURCE_FILE}', '${sealed_path}', 0, 'SEALED', 'match', ${sealed_size}, 4, 44, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 'e2e/legacy/${SOURCE_FILE}', 'UPLOADED', UTC_TIMESTAMP(6))"
+meta_sql "INSERT INTO binlog_files (task_id, file_name, source_file, file_path, epoch, state, checksum, size_bytes, start_pos, end_pos, created_at, sealed_at, object_key, upload_state, upload_error, uploaded_at) VALUES ('${task_id}', '${SOURCE_FILE}', '${SOURCE_FILE}', '${sealed_path}', 0, 'SEALED', 'match', ${sealed_size}, 4, 44, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 'e2e/legacy/${SOURCE_FILE}', 'UPLOADED', '', UTC_TIMESTAMP(6))"
 
 echo "[epoch-segments] restart and open the next epoch"
 start_server
@@ -119,7 +119,23 @@ go run "$ROOT_DIR/scripts/e2e/gen-timed-segment.go" "$open_path" \
 echo "[epoch-segments] catalog and restore command"
 start_server
 
-files="$(curl -fsS "$API/api/tasks/${task_id}/files")"
+api_get() {
+  local url="$1" body_file http_code
+  body_file="$(mktemp)"
+  http_code="$(curl -sS -o "$body_file" -w '%{http_code}' "$url")" || true
+  if [[ "$http_code" != "200" ]]; then
+    echo "GET $url HTTP $http_code" >&2
+    cat "$body_file" >&2 || true
+    echo >&2
+    cat "$SERVER_LOG" >&2 || true
+    rm -f "$body_file"
+    exit 1
+  fi
+  cat "$body_file"
+  rm -f "$body_file"
+}
+
+files="$(api_get "$API/api/tasks/${task_id}/files")"
 sealed_state="$(printf '%s' "$files" | jq -r --arg p "$sealed_path" '.[] | select(.file_path==$p) | "\(.epoch // 0) \(.state) \(.upload_state) \(.checksum) \(.object_key)"')"
 open_state="$(printf '%s' "$files" | jq -r --arg p "$open_path" '.[] | select(.file_path==$p) | "\(.epoch) \(.state) \(.file_name)"')"
 if [[ "$sealed_state" != "0 SEALED UPLOADED match e2e/legacy/${SOURCE_FILE}" ]]; then
@@ -133,15 +149,13 @@ if [[ "$open_state" != "1 OPEN ${SOURCE_FILE}" ]]; then
   exit 1
 fi
 
-replay="$(curl -fsS "$API/api/tasks/${task_id}/replay")"
+replay="$(api_get "$API/api/tasks/${task_id}/replay")"
 printf '%s' "$replay" | jq -e --arg sealed "$sealed_path" --arg open "$open_path" '
   (.paths | index($sealed) != null) and (.paths | index($open) != null) and
   ((.paths | index($sealed)) < (.paths | index($open)))
 ' >/dev/null
 
-pitr="$(curl -fsS -G "$API/api/tasks/${task_id}/replay" \
-  --data-urlencode "start_datetime=2020-01-01 00:05:00" \
-  --data-urlencode "stop_datetime=2020-01-01 00:25:00")"
+pitr="$(api_get "$API/api/tasks/${task_id}/replay?start_datetime=2020-01-01%2000:05:00&stop_datetime=2020-01-01%2000:25:00")"
 printf '%s' "$pitr" | jq -e --arg sealed "$sealed_path" --arg open "$open_path" '
   (.paths | index($sealed) != null) and (.paths | index($open) != null) and
   ((.command | contains($sealed)) and (.command | contains($open)))
