@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), dump preambles excluded from delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of an uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of an uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -28,6 +28,18 @@ import (
 )
 
 var binlogMagic = []byte{0xfe, 'b', 'i', 'n'}
+
+// segmentHasEvents reports whether the open segment already holds an event
+// after the 4-byte magic header. A missing path is treated as empty so a
+// test double that only captures writes still receives the format description.
+func segmentHasEvents(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Size() > int64(len(binlogMagic))
+}
+
 var ErrLeaseEpochMismatch = errors.New("lease/epoch mismatch")
 
 const (
@@ -389,6 +401,27 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		return nil
 	}
 
+	// pendingFormat is the format description MySQL sends before a mid-file
+	// dump. Its end_log_pos is 0 or the original header position (126 on
+	// MySQL 8), which is behind the dump cursor. It is written once, in
+	// front of the first copied event, and does not move currentPos.
+	// An idle dump that never copies an event leaves it unwritten so resume
+	// does not rewind to that header position. A segment that already has
+	// events does not gain a second copy on the next start.
+	var pendingFormat []byte
+	persistRaw := func(raw []byte, next binlog.Checkpoint) error {
+		payload := raw
+		if len(pendingFormat) > 0 {
+			if !segmentHasEvents(currentPath) {
+				payload = make([]byte, 0, len(pendingFormat)+len(raw))
+				payload = append(payload, pendingFormat...)
+				payload = append(payload, raw...)
+			}
+			pendingFormat = nil
+		}
+		return appendAndPersist(payload, next)
+	}
+
 	// Step 3: 定义统一事件处理逻辑（异步/半同步共用）。
 	// 单条事件处理逻辑：异步模式（GetEvent）与半同步模式（SynchronousEventHandler）共用。
 	handleEvent := func(event *replication.BinlogEvent) error {
@@ -425,9 +458,10 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				if rotateCheckpoint.Pos == 0 {
 					rotateCheckpoint.Pos = currentPos
 				}
-				if err := appendAndPersist(event.RawData, rotateCheckpoint); err != nil {
+				if err := persistRaw(event.RawData, rotateCheckpoint); err != nil {
 					return err
 				}
+				pendingFormat = nil
 
 				if err := file.Close(); err != nil {
 					return err
@@ -479,8 +513,15 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 		// 从文件中部 dump 时，源库仍会先下发文件头的 format description（log_pos 置 0，
 		// 或保留原始 end_log_pos，例如 MySQL 8 的 126）。该事件不在当前位点之后。
-		// 写入会把 open 段撑成“只有文件头”，并用创建时间报 DELAYED；end_log_pos 还会把位点回拨。
+		// 单独落盘会把续传位点退回 126，并用文件创建时间报 DELAYED。
+		// 这里只记住原文，等第一个真正复制的事件一起写入，位点停在那个事件上。
 		// synthetic rotate 已在上面处理，这里不能抢在它前面把 log_pos=0 丢掉。
+		if event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT && event.Header.LogPos <= currentPos {
+			if !segmentHasEvents(currentPath) && len(event.RawData) > 0 {
+				pendingFormat = append([]byte(nil), event.RawData...)
+			}
+			return nil
+		}
 		if event.Header.LogPos <= currentPos {
 			return nil
 		}
@@ -493,7 +534,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			next.Pos = currentPos
 		}
 
-		if err := appendAndPersist(event.RawData, next); err != nil {
+		if err := persistRaw(event.RawData, next); err != nil {
 			return err
 		}
 		if r.progressReporter != nil {
