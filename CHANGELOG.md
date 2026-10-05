@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.35] - 2026-10-05
+
+### Fixed
+
+- On a control-plane plus workers deployment, Stop from the API process used to write the task `STOPPED` and clear the owner while the worker kept the dump and the lease. The Console showed Stopped, and the source still had a Binlog Dump thread (#174). When this process is not dumping and another worker owns the lease, Stop writes `STOPPING` and keeps the owner, the epoch, and the source config. `POST /api/tasks/{id}/stop` still returns HTTP 204. The Console shows Stopping. The worker claim loop, about every 2 seconds, cancels a live dump whose row is `STOPPING` or `STOPPED`. When that dump exits, the worker writes `STOPPED` and releases the lease. A store sync and `GetTask` on that worker also cancel the dump and leave the in-memory owner and epoch in place, so the lease can be released. The final `STOPPED` row keeps the latest stored source config. A source password changed while the row is `STOPPING` is the password the next Start uses. A `STOPPING` row whose lease has expired is written `STOPPED`, and that claim does not start a dump. All-in-one and standalone still cancel the local dump and write `STOPPED` when that dump exits. This release has no schema migration. Schema stays at version 2 from v0.5.34. Binaries roll from v0.5.34 with no `./migrate` when the database is already at version 2. A database still on schema 1 still follows the v0.5.34 notes: stop every binlog-server on that database, run `./migrate up`, then start only v0.5.34 or newer. On the split topology, HTTP 204 means Stop was accepted. The row stays `STOPPING` until the worker finishes, and a Start in that state returns HTTP 400 `cannot start from state STOPPING`. After failover, a later sealed segment such as `mysql-bin.NNNNNN.sealed.e1` may still show `end_pos` 0 while `size_bytes` and `UPLOADED` with checksum `match` are correct (#189). After a Stop during which the source password was changed, then Start, the source may briefly show two Binlog Dump threads. A later Stop that reaches `STOPPED` may leave one Binlog Dump thread that needs a manual `KILL` (#193). An ordinary control-plane Stop, and a Stop on an all-in-one process, leave the source process list without that task's Binlog Dump thread.
+
 ## [v0.5.34] - 2026-10-05
 
 ### Fixed
