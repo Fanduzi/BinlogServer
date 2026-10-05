@@ -1,12 +1,13 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors and cancels a live run instead of overwriting it when the row is STOPPING or STOPPED, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, refusal to change source/start/storage/cluster_key while a dump session is live, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors and cancels a live run instead of overwriting it when the row is STOPPING or STOPPED, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -301,6 +302,7 @@ func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (Task, error) {
 }
 
 // UpdateTask 以原子方式应用 patch（先校验，后一次落库）。
+// 拉流还拿着启动时的源库、起点、保留和 cluster_key。要改这几项就先停掉。
 func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	// 先做整包校验，再一次性落库；避免“前几项成功、后几项失败”的部分持久化副作用。
 	validatedClusterKey, err := normalizeAndValidateClusterKey(patch.ClusterKey)
@@ -361,6 +363,11 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	if !s.isClusterKeyUniqueLocked(validatedClusterKey, id) {
 		return Task{}, ErrClusterKeyExists
 	}
+	// run 按值拿着任务。先改行、拉流仍用旧密码和旧保留，GET 就会和正在跑的 dump 不一致。
+	// 换源、换目录或缩短保留也不在一条还开着的分段上做。停掉再改，下次 start 从 checkpoint 续。
+	if dumpConfigLocked(current.State) && dumpConfigChanged(current, validatedClusterKey, validatedSource, validatedStart, validatedStorage) {
+		return Task{}, fmt.Errorf("%w: state %s", ErrTaskDumpConfigLocked, current.State)
+	}
 
 	// 基于 current 构造 next，保证未传字段保持原值（partial update 语义）。
 	next := current
@@ -389,6 +396,41 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	s.tasks[id] = next
 	s.appendEventLocked(id, "TASK_UPDATED", "task updated", "")
 	return next, nil
+}
+
+// dumpConfigLocked 为真时，本任务的拉流会话还拿着启动时的配置抄本。
+// RETRY_BACKOFF 也算：下一轮用的是本进程内存，不是控制面刚写进 store 的行。
+func dumpConfigLocked(state State) bool {
+	switch state {
+	case StateRunning, StateStarting, StateLeaseDegraded, StateRetryBackoff:
+		return true
+	default:
+		return false
+	}
+}
+
+// dumpConfigChanged 判断这次 patch 会不会改拉流正在用的源库、起点、保留或 cluster_key。
+// 空密码表示保留原密码。没传的字段不算改动。
+func dumpConfigChanged(current Task, clusterKey string, source *SourceConfig, start *StartConfig, storage *Storage) bool {
+	if clusterKey != current.ClusterKey {
+		return true
+	}
+	if source != nil {
+		next := *source
+		if next.Password == "" {
+			next.Password = current.Source.Password
+		}
+		if next != current.Source {
+			return true
+		}
+	}
+	if start != nil && *start != current.Start {
+		return true
+	}
+	if storage != nil && *storage != current.Storage {
+		return true
+	}
+	return false
 }
 
 // ConfigureClusterKey 更新任务 cluster_key（要求全局唯一）。

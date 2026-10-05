@@ -410,6 +410,7 @@
                 }
             },
             "put": {
+                "description": "While the task is RUNNING, STARTING, LEASE_DEGRADED, or RETRY_BACKOFF, changing source, start, storage, or cluster_key returns plain-text 400 stop the task before changing source, start, storage, or cluster_key. A name-only change is accepted. Stop the task, update, then start.",
                 "consumes": [
                     "application/json"
                 ],

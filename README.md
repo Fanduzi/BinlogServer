@@ -195,6 +195,8 @@ Replace `<task-id>` with the ID returned by step 4:
 curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 ```
 
+A task in `RUNNING`, `STARTING`, `LEASE_DEGRADED`, or `RETRY_BACKOFF` is already dumping with the source, start, storage, and `cluster_key` from when that session started. `PUT /api/tasks/<task-id>` that changes any of those returns HTTP 400 with the text `stop the task before changing source, start, storage, or cluster_key`. Stop the task, update, then start. The next start resumes from the checkpoint. A name-only change is accepted. Process settings such as the listen address are not part of this update.
+
 ### 6. Inspect state &amp; open the Web Console
 
 - **Web Console:** Open `http://127.0.0.1:8080/ui/` in your browser.

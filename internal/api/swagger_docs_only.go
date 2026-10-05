@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, GET /api/tasks/{id}/checkpoint where epoch greater than 1 follows a readable file_path and does not rewind an unreadable tail to position 4, GET /api/tasks/{id}/replay, the UTC stop_datetime window on that route, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, PUT /api/tasks/{id} plain-text 400 when a live dump's source, start, storage, or cluster_key would change, GET /api/tasks/{id}/checkpoint where epoch greater than 1 follows a readable file_path and does not rewind an unreadable tail to position 4, GET /api/tasks/{id}/replay, the UTC stop_datetime window on that route, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -43,6 +43,7 @@ func (s *Server) swaggerTaskGetDoc() {}
 
 // swaggerTaskUpdateDoc godoc
 // @Summary Update task configuration
+// @Description While the task is RUNNING, STARTING, LEASE_DEGRADED, or RETRY_BACKOFF, changing source, start, storage, or cluster_key returns plain-text 400 stop the task before changing source, start, storage, or cluster_key. A name-only change is accepted. Stop the task, update, then start.
 // @Tags Tasks
 // @Accept json
 // @Produce json
