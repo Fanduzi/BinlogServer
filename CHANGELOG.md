@@ -12,6 +12,8 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.30] - 2026-10-05
+
 ### Fixed
 
 - A backup that starts in the middle of a source binlog, which is what `LATEST` does, writes the format description MySQL sends before the first copied event. `mysqlbinlog --verify-binlog-checksum` can read that file. The description's own end position (126 on MySQL 8, or 0) is not the checkpoint, and its timestamp is not lag. A quiet source that has not sent a later event still leaves the segment as the 4-byte magic header, so stop then start does not rewind to that description. A segment that already has events does not gain a second description on the next start. No new config key. No schema migration.
