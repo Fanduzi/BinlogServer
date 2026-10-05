@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING, and saves a resolved LATEST file and position with an empty gtid_set before the dump so a retry continues from that anchor instead of resolving LATEST again
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -69,6 +69,17 @@ type MySQLRunner struct {
 	retentionMu        sync.Mutex
 	retentionSkipNoted map[string]struct{}
 	retentionBlocked   map[string]int
+
+	// anchorMu guards anchor, the LATEST file/pos resolved by this process.
+	// A retry with no metadata store reads it so it does not resolve LATEST again.
+	anchorMu sync.Mutex
+	anchor   map[string]resolvedPos
+}
+
+// resolvedPos is the file and position a LATEST start already chose.
+type resolvedPos struct {
+	file string
+	pos  uint32
 }
 
 type sourceMetaFetcher interface {
@@ -253,6 +264,39 @@ func finishRun(err error) error {
 	return tasks.NewLeaseHandoff(err)
 }
 
+// latestAnchor is the LATEST file/pos this process already resolved for taskID.
+func (r *MySQLRunner) latestAnchor(taskID string) (string, uint32, bool) {
+	r.anchorMu.Lock()
+	defer r.anchorMu.Unlock()
+	saved, ok := r.anchor[taskID]
+	if !ok || saved.file == "" || saved.pos == 0 {
+		return "", 0, false
+	}
+	return saved.file, saved.pos, true
+}
+
+// persistLatestAnchor records a resolved LATEST file/pos before the dump.
+// gtid_set is empty: a position in the middle of a file is not an executed set.
+func (r *MySQLRunner) persistLatestAnchor(ctx context.Context, taskID, file string, pos uint32) error {
+	if taskID == "" || file == "" || pos == 0 {
+		return nil
+	}
+	r.anchorMu.Lock()
+	if r.anchor == nil {
+		r.anchor = make(map[string]resolvedPos)
+	}
+	r.anchor[taskID] = resolvedPos{file: file, pos: pos}
+	r.anchorMu.Unlock()
+	if r.checkpointStore == nil {
+		return nil
+	}
+	err := r.checkpointStore.UpsertCheckpoint(ctx, taskID, binlog.Checkpoint{File: file, Pos: pos})
+	if err != nil {
+		return checkpointWriteError(err)
+	}
+	return nil
+}
+
 // checkpointWriteError keeps a metadata blip retryable and fails a write that will not clear.
 func checkpointWriteError(err error) error {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -315,6 +359,9 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		}
 	}
 	// Fresh LATEST has already resolved to SHOW MASTER STATUS, so StartSync is at tip.
+	// That file/pos is saved below when nothing older exists, with an empty
+	// gtid_set. A later retry must not resolve LATEST again (#213). A GTID
+	// checkpoint still keeps its set (#175, #199).
 	// NextResumePosition is the resume choice shared with GET /api/tasks/{id}/checkpoint.
 	// A local complete event wins. Adopt keeps its FILE_POS. Epoch > 1 with no
 	// local event used to rewind to position 4. Takeover now follows the catalog
@@ -322,6 +369,9 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	// open segment fails, and a checkpoint already in an UPLOADED object resumes
 	// from that object.
 	atTip := requestedLatest && !checkpointExists
+	// anchorLatest is a first resolution: no stored checkpoint and no local event.
+	// Resume and takeover clear it so this attempt does not overwrite them.
+	anchorLatest := atTip
 	segmentDir := ""
 	var carried *tasks.BinlogFile
 	flavor := task.Source.Flavor
@@ -345,6 +395,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			gtidFallback = g
 		}
 		atTip = false
+		anchorLatest = false
 	}
 	if task.Epoch > 1 && !task.KeepLocalSegments {
 		if _, _, local := binlog.DurableResume(r.dataDir, task.ID); !local {
@@ -369,6 +420,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				start = tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: pos}
 				segmentDir = dir
 				atTip = false
+				anchorLatest = false
 			} else if decision.Apply {
 				start = tasks.StartConfig{
 					Mode: tasks.StartModeFilePos,
@@ -382,7 +434,19 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 					segmentDir = decision.Dir
 				}
 				atTip = false
+				anchorLatest = false
 			}
+		}
+	}
+	if anchorLatest && start.File != "" && start.Pos != 0 {
+		// This process already resolved LATEST and the metadata row was not
+		// written, or there is no metadata store. Keep that file/pos.
+		if file, pos, ok := r.latestAnchor(task.ID); ok {
+			start = tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: pos}
+			atTip = false
+		}
+		if err := r.persistLatestAnchor(ctx, task.ID, start.File, start.Pos); err != nil {
+			return err
 		}
 	}
 
