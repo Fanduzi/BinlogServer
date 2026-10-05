@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: local tooling, canonical E2E database topology, scenarios, and profile selection
-# output: deterministic e2e orchestration, scenario execution, and verification logs
+# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -126,6 +126,7 @@ start_suite_server() {
   fi
   BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$META_DSN" nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
+  export E2E_SERVER_PID="$SERVER_PID"
   wait_server_ready
   echo "[suite] binlog-server ready pid=$SERVER_PID"
 }
