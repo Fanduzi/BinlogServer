@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- A local condition that will not clear on its own no longer stays in `RETRY_BACKOFF`, renews its lease, and reconnects to the source (#178). `sealed file already exists` moves the task to `FAILED`. `last_error` is `SEALED_FILE_EXISTS: sealed file already exists: <path>`. The lease is released and that runner is not called again. A checkpoint write that is not a transient metadata error moves the task to `FAILED` with `last_error` beginning `CHECKPOINT_WRITE_FAILED`, and the lease is released. Transient checkpoint errors stay `RETRY_BACKOFF`. They match the metadata client's list: deadlock, lock wait timeout, connection reset, connection refused, broken pipe, server has gone away, invalid connection, bad connection, read-only, timeout, and eof. `context.Canceled` and `context.DeadlineExceeded` stay retryable.
+
+- A lease epoch mismatch is a handoff. The runner that lost the epoch stops and releases only that epoch. It does not write `FAILED` or `RETRY_BACKOFF`, so it does not replace the task row of the worker that holds the task now. With no metadata store, this process shows `STOPPED` and appends `TASK_LEASE_YIELDED`. Start works again from `STOPPED`. `SOURCE_UNREACHABLE` is unchanged: ten consecutive failures, then `FAILED`, and a ready runner resets that count. Other retryable source errors, `OBJECT_PURGE_FAILED`, and MySQL 1236 with no stored GTID stay in `RETRY_BACKOFF` with no new cap. The metadata client already retries a transient error five times inside one call; the scheduler retry is what lets a task return to `RUNNING` across a metadata failover, and a cap of ten would mark that backup `FAILED` and require a manual start. `OBJECT_PURGE_FAILED` is retried on the next file open, and failing the task would stop capture until the bucket is back and someone starts the task. MySQL 1236 with an empty `gtid_set` remains the v0.5.36 resume gap. A local binlog append or flush error is still returned as-is and retried; it is not the sealed-file conflict or the checkpoint write. No new config key. No schema migration.
+
 ## [v0.5.36] - 2026-10-05
 
 ### Fixed

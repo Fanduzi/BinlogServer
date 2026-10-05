@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle), expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
+// output: guarded start/stop, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle), expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -700,8 +700,28 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 
+		err = classifyRunError(err)
 		errMsg := err.Error()
 		zap.L().Error("runner error", zap.String("task_id", id), zap.Error(err))
+		if IsLeaseHandoff(err) {
+			// This epoch no longer owns the task. Writing FAILED or RETRY_BACKOFF
+			// would persist this worker's row over the new owner. Stop, drop
+			// only this epoch, and leave the shared row.
+			if cancel, ok := s.cancels[id]; ok {
+				cancel()
+				delete(s.cancels, id)
+			}
+			current.State = StateStopped
+			current.OwnerWorkerID = ""
+			current.Epoch = 0
+			current.RunID = ""
+			current.LastError = ""
+			current.UpdatedAt = time.Now()
+			s.tasks[id] = current
+			s.appendEventLocked(id, "TASK_LEASE_YIELDED", "runner stopped; another owner holds the lease", errMsg)
+			s.mu.Unlock()
+			return
+		}
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
 		if IsPermanent(err) {
 			owner, epoch := current.OwnerWorkerID, current.Epoch
