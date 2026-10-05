@@ -25,7 +25,7 @@
 兼容性说明：
 
 - `run-server.sh` 构建的临时 Linux 测试二进制默认关闭 CGO，用于贴近 release 产物的 `glibc 2.17` 兼容基线。
-- `smoke-retry-upload` 和 `smoke-split-retention` 从 Quay 拉 MinIO / `mc`（`MINIO_IMAGE` / `MC_IMAGE` 可覆盖）。Docker Hub 的 `minio/minio` 与 `minio/mc` 已拒绝匿名拉取。`smoke-split-retention` 在 Quay 返回 401 时改用 GitHub release 的同版本 linux 二进制（`MINIO_RELEASE` / `MC_RELEASE`）。
+- `smoke-retry-upload` 和 `smoke-split-retention` 从 Quay 拉 MinIO / `mc`（`MINIO_IMAGE` / `MC_IMAGE` 可覆盖）。Docker Hub 的 `minio/minio` 与 `minio/mc` 已拒绝匿名拉取。Quay 返回 401 时两者都改用 GitHub release 的同版本 linux 二进制（`MINIO_RELEASE` / `MC_RELEASE`）。
 
 ## 推荐入口
 
@@ -157,7 +157,7 @@ make e2e-topology-check
 
 该场景用于验证上传失败后的后台补传：
 
-1. 从 Quay 启动 minio 与 bucket，并以 upload 配置启动 binlog-server。
+1. 从 Quay 启动 minio 与 bucket；Quay 不可用时改用 GitHub release 二进制。以 upload 配置启动 binlog-server。
 2. 创建并启动任务，确认 checkpoint 已建立。
 3. 停止 minio，写入并 rotate，触发 `UPLOAD_FAILED` 文件记录。
 4. 把这份已封存失败文件的 mtime 拨到 `retention_days` 之外，再 `FLUSH BINARY LOGS`。文件和目录行还在，任务保持 `RUNNING`，事件里有一条 `RETENTION_SKIPPED_NOT_UPLOADED`，`binlog_server_retention_blocked_files{task_id}` 至少为 1。再 rotate 一次，这条事件仍是一条。
