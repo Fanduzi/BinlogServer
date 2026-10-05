@@ -235,7 +235,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
   export BINLOG_SERVER_UPLOAD_ACCESS_KEY="AKIA..."
   export BINLOG_SERVER_UPLOAD_SECRET_KEY="..."
   ```
-- 上传失败不会阻断复制。worker 会在后台重试已封存的 `UPLOAD_FAILED` 分段，桶恢复后不必调用补传接口就会变成 `UPLOADED`。未封存的 open 分段不会上传。手动补传仍然可用：
+- 上传失败不会阻断复制。worker 会在后台重试已封存的 `UPLOAD_FAILED` 分段，桶恢复后不必调用补传接口就会变成 `UPLOADED`。上传过程中崩溃，或刚改名还没记下上传状态，下次启动会把这个封存文件记成 `UPLOAD_FAILED`，走同一条补传。封存后的上传使用 `meta.timeout.upload_sec`（默认 30 秒）；超时记为 `UPLOAD_FAILED`，复制继续。未封存的 open 分段不会上传。没配对象存储的任务仍是 `LOCAL_ONLY`。手动补传仍然可用：
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
