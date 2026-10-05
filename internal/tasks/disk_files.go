@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for one path per source index, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
+// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for one path per source index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -89,6 +89,10 @@ func WindowBinlogFilesForReplay(files []BinlogFile, limit int) []BinlogFile {
 
 // ReplaySet is the restore argument list for one task.
 // Paths are inventory file_path values, one per source index, ascending.
+// Locations is the same order: local, bucket, or both. bucket means that
+// path is the catalog file_path and is not on this process; download and
+// replay/archive still read the object. Do not pass a bucket path to
+// mysqlbinlog until the file is downloaded.
 // Client is the binary name. ClientHint names which vendor binary to run.
 // source.flavor mysql → client mysqlbinlog, hint "MySQL mysqlbinlog".
 // source.flavor mariadb → client and hint "mariadb-binlog".
@@ -98,6 +102,7 @@ type ReplaySet struct {
 	Client     string   `json:"client"`
 	ClientHint string   `json:"client_hint"`
 	Paths      []string `json:"paths"`
+	Locations  []string `json:"locations,omitempty"`
 }
 
 // ReplayClient maps source.flavor to the binlog client a DBA should run.
@@ -139,6 +144,66 @@ func SelectReplayFiles(files []BinlogFile) []BinlogFile {
 		out = append(out, file)
 	}
 	return out
+}
+
+// ReplayLocations is one location per selected replay file, same order as paths.
+func ReplayLocations(files []BinlogFile) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]string, len(files))
+	for i, file := range files {
+		out[i] = file.Location
+	}
+	return out
+}
+
+// annotateSegmentLocations sets Location from this process's disk and the row.
+// local: the basename is a regular file under {data_dir}/{task_id}, or file_path
+// itself is that file. bucket: sealed UPLOADED with an object key and no local
+// file. both: the local file and that object. Anything else stays empty.
+func annotateSegmentLocations(dataDir string, files []BinlogFile) []BinlogFile {
+	if len(files) == 0 {
+		return files
+	}
+	out := make([]BinlogFile, len(files))
+	copy(out, files)
+	for i := range out {
+		out[i].Location = segmentLocation(dataDir, out[i])
+	}
+	return out
+}
+
+func segmentLocation(dataDir string, file BinlogFile) string {
+	onDisk := segmentOnDisk(dataDir, file)
+	inBucket := strings.EqualFold(strings.TrimSpace(file.UploadState), "UPLOADED") && strings.TrimSpace(file.ObjectKey) != ""
+	switch {
+	case onDisk && inBucket:
+		return "both"
+	case inBucket:
+		return "bucket"
+	case onDisk:
+		return "local"
+	default:
+		return ""
+	}
+}
+
+func segmentOnDisk(dataDir string, file BinlogFile) bool {
+	name := segmentInventoryBasename(file)
+	if dir, ok := taskBinlogDir(dataDir, file.TaskID); ok && name != "" && regularFile(filepath.Join(dir, name)) {
+		return true
+	}
+	path := strings.TrimSpace(file.FilePath)
+	if path != "" && name != "" && filepath.Base(path) == name && regularFile(path) {
+		return true
+	}
+	return false
+}
+
+func regularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func taskBinlogDir(dataDir, taskID string) (string, bool) {

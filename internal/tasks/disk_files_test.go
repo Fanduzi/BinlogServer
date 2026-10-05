@@ -234,6 +234,27 @@ func TestListTaskBinlogFilesOnDisk_MissingOrUnsafe(t *testing.T) {
 	}
 }
 
+func TestAnnotateSegmentLocations(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "1"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	localName := "mysql-bin.000001"
+	if err := os.WriteFile(filepath.Join(taskDir, localName), []byte("both"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := annotateSegmentLocations(dir, []BinlogFile{
+		{TaskID: taskID, FileName: localName, FilePath: filepath.Join(taskDir, localName), UploadState: "UPLOADED", ObjectKey: "obj-both"},
+		{TaskID: taskID, FileName: "mysql-bin.000002", FilePath: filepath.Join(taskDir, "mysql-bin.000002"), State: "SEALED", UploadState: "UPLOADED", ObjectKey: "obj-bucket"},
+		{TaskID: taskID, FileName: localName, FilePath: filepath.Join(taskDir, localName), UploadState: "LOCAL_ONLY"},
+	})
+	if files[0].Location != "both" || files[1].Location != "bucket" || files[2].Location != "local" {
+		t.Fatalf("%s %s %s", files[0].Location, files[1].Location, files[2].Location)
+	}
+}
+
 func TestScheduler_ListFiles_EmptyCatalogUsesDisk(t *testing.T) {
 	dir := t.TempDir()
 	store := newFakeFileStore()

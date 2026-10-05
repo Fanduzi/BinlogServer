@@ -24,7 +24,14 @@
           </el-form-item>
         </el-col>
         <el-col :span="12"><el-form-item :label="$t('form.semiSync')"><el-switch v-model="form.source.semi_sync" /></el-form-item></el-col>
-        <el-col :span="12"><el-form-item :label="$t('form.retentionDays')"><el-input-number v-model="form.storage.retention_days" :min="1" /></el-form-item></el-col>
+        <el-col :span="8"><el-form-item :label="$t('form.retentionDays')"><el-input-number v-model="form.storage.retention_days" :min="1" :max="3650" /></el-form-item></el-col>
+        <el-col :span="8"><el-form-item :label="$t('form.localRetentionDays')"><el-input-number v-model="form.storage.local_retention_days" :min="0" :max="3650" /></el-form-item></el-col>
+        <el-col :span="8">
+          <el-form-item :label="$t('form.bucketRetentionDays')">
+            <el-input-number v-model="form.storage.bucket_retention_days" :min="0" :max="3650" />
+            <p class="flavor-hint">{{ $t('form.retentionSplitHint') }}</p>
+          </el-form-item>
+        </el-col>
         <el-col :span="8">
           <el-form-item :label="$t('form.startMode')">
             <el-select v-model="form.start.mode" style="width: 100%">

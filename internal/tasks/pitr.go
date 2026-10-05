@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full files inventory, one open segment per source index, and each segment's event-header time span
-// output: the ordered paths that cover a UTC point-in-time window, plus one mysqlbinlog or mariadb-binlog command; start equal to stop yields no paths and no command
+// output: the ordered paths that cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command; start equal to stop yields no paths and no command
 // pos: point-in-time seek on the existing replay selection; the limit window stays on GET /replay without stop_datetime
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -25,7 +25,9 @@ type PITRSet struct {
 	Client     string   `json:"client"`
 	ClientHint string   `json:"client_hint"`
 	Paths      []string `json:"paths"`
-	Command    string   `json:"command"`
+	// Locations matches Paths. bucket means that path is not on this process.
+	Locations []string `json:"locations,omitempty"`
+	Command   string   `json:"command"`
 }
 
 // EventSpan is the first and last non-zero event-header time of one segment.
@@ -133,6 +135,7 @@ func (s *Scheduler) PITRReplay(taskID string, start *time.Time, stop time.Time) 
 		Client:     client,
 		ClientHint: hint,
 		Paths:      paths,
+		Locations:  ReplayLocations(selected),
 		Command:    FormatPITRCommand(client, paths, start, stop),
 	}, nil
 }

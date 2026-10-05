@@ -54,7 +54,7 @@ function defaultForm() {
       semi_sync: false,
     },
     start: { mode: "LATEST", file: "", pos: 0, gtid_set: "" },
-    storage: { retention_days: 7 },
+    storage: { retention_days: 7, local_retention_days: 0, bucket_retention_days: 0 },
   };
 }
 
@@ -132,7 +132,27 @@ function validateTaskPayloadFn(t, payload) {
     if (!gtidSet) return t("validation.gtidSetRequired");
   }
 
-  const retentionDays = Number(payload?.storage?.retention_days || 0);
+  return validateStorage(t, payload?.storage);
+}
+
+function storagePayload(storage) {
+  const out = { retention_days: Number(storage?.retention_days) };
+  const local = Number(storage?.local_retention_days || 0);
+  const bucket = Number(storage?.bucket_retention_days || 0);
+  if (Number.isInteger(local) && local > 0) out.local_retention_days = local;
+  if (Number.isInteger(bucket) && bucket > 0) out.bucket_retention_days = bucket;
+  return out;
+}
+
+function optionalRetentionDays(value) {
+  const days = Number(value || 0);
+  if (!Number.isInteger(days) || days < 0 || days > RETENTION_DAYS_MAX) return false;
+  if (days !== 0 && days < RETENTION_DAYS_MIN) return false;
+  return true;
+}
+
+function validateStorage(t, storage) {
+  const retentionDays = Number(storage?.retention_days || 0);
   if (
     !Number.isInteger(retentionDays) ||
     retentionDays < RETENTION_DAYS_MIN ||
@@ -140,6 +160,15 @@ function validateTaskPayloadFn(t, payload) {
   ) {
     return t("validation.retentionInvalid");
   }
+  if (!optionalRetentionDays(storage?.local_retention_days)) {
+    return t("validation.localRetentionInvalid");
+  }
+  if (!optionalRetentionDays(storage?.bucket_retention_days)) {
+    return t("validation.bucketRetentionInvalid");
+  }
+  const local = Number(storage?.local_retention_days || 0) || retentionDays;
+  const bucket = Number(storage?.bucket_retention_days || 0) || retentionDays;
+  if (bucket < local) return t("validation.bucketRetentionShorter");
   return "";
 }
 
@@ -192,6 +221,8 @@ export function useTaskForm({ refreshAll, parseErr }) {
       Number.isInteger(retention) && retention >= RETENTION_DAYS_MIN && retention <= RETENTION_DAYS_MAX
         ? retention
         : 7;
+    form.storage.local_retention_days = Number(task?.storage?.local_retention_days || 0);
+    form.storage.bucket_retention_days = Number(task?.storage?.bucket_retention_days || 0);
     formVisible.value = true;
   }
 
@@ -222,7 +253,7 @@ export function useTaskForm({ refreshAll, parseErr }) {
       }
     }
     const retentionDays = Number(form.storage.retention_days || 0);
-    if (retentionDays) payload.storage = { retention_days: retentionDays };
+    if (retentionDays) payload.storage = storagePayload(form.storage);
     return payload;
   }
 
@@ -269,14 +300,8 @@ export function useTaskForm({ refreshAll, parseErr }) {
     }
 
     if (payload?.storage) {
-      const retentionDays = Number(payload.storage.retention_days || 0);
-      if (
-        !Number.isInteger(retentionDays) ||
-        retentionDays < RETENTION_DAYS_MIN ||
-        retentionDays > RETENTION_DAYS_MAX
-      ) {
-        return t("validation.retentionInvalid");
-      }
+      const storageErr = validateStorage(t, payload.storage);
+      if (storageErr) return storageErr;
     }
     return "";
   }
@@ -293,7 +318,7 @@ export function useTaskForm({ refreshAll, parseErr }) {
         semi_sync: !!form.source.semi_sync,
       },
       start: { mode: form.start.mode },
-      storage: { retention_days: Number(form.storage.retention_days) },
+      storage: storagePayload(form.storage),
     };
     if (!payload.source.password) delete payload.source.password;
     if (payload.start.mode === "FILE_POS") {

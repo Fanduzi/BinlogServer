@@ -24,6 +24,11 @@ cluster:
   lease_grace_sec: 30
   failover_policy: "rebuild_current_file"
 
+# Per-task retention is not a process setting. POST /api/tasks storage:
+#   retention_days: 7                # required, 1..3650; both retentions when the next two are omitted
+#   local_retention_days: 3          # optional; 0 or omitted = retention_days
+#   bucket_retention_days: 30        # optional; must be >= local retention; needs upload and meta_dsn
+# A bucket retention shorter than the local retention is rejected when the task is created or updated.
 upload:
   endpoint: "" # S3 / MinIO 端点，例如: s3.us-east-1.amazonaws.com
   bucket: ""

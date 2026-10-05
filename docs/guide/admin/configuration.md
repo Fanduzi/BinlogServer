@@ -555,7 +555,11 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 ### 4.1 创建任务
 
 创建任务通过 `POST /api/tasks` 提交，其中存储与保留策略参数由 `storage` 对象控制：
-- `storage.retention_days`: 本地 binlog 分段文件保留天数（有效范围 `1` 到 `3650` 天，默认 `7` 天）。过期且已封存的分段由复制循环在打开文件时清理，已经上传的对象会一起从桶里删除。还在保留期内的对象不删。正在写入的 `OPEN` 分段绝不会被清理。配了对象存储且有目录（`meta_dsn`）时，过期的 `UPLOAD_FAILED` 或 `LOCAL_ONLY` 封存文件和目录行留下，复制不因此进入重试；同一文件只记一次 `RETENTION_SKIPPED_NOT_UPLOADED`。行变成 `UPLOADED` 后，下次清理仍先删对象，再删目录行，再删本地文件。没配 `meta_dsn` 的单机没有目录行，按年龄清理仍会删掉没进桶的本地封存文件。对象删除失败时本地文件留下，任务 `last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再试。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。不新增配置项。
+- `storage.retention_days`: 保留天数（有效范围 `1` 到 `3650` 天，默认 `7` 天）。省略下面两个键时，这一个数同时是本地磁盘保留和桶保留，清理行为与只配这一个键时相同。
+- `storage.local_retention_days`: 可选。封存文件留在本地磁盘的天数。`0` 或省略等于 `retention_days`。范围 `1` 到 `3650`。
+- `storage.bucket_retention_days`: 可选。已上传对象和目录行留下的天数。`0` 或省略等于 `retention_days`。范围 `1` 到 `3650`。有效桶保留短于有效本地保留时，创建和更新返回 HTTP 400，正文含 `shorter than local retention`。桶保留只在同时配了对象存储和 `meta_dsn` 时生效。没有目录时，上传仍按本地天数把对象和本地文件一起删除。
+
+过期且已封存的分段由复制循环在打开文件时清理。正在写入的 `OPEN` 分段绝不会被清理，也不会删它的对象。只配 `retention_days`，或本地天数与桶天数相同：已经上传的封存分段先从桶里删除，再删目录行，再删本地文件。还在这个保留期内的对象不删。配了上传和目录，且桶保留更长时：修改时间早于本地保留、但仍在桶保留之内的 `UPLOADED` 封存文件只删本地磁盘。对象和目录行留下。`GET /api/tasks/{id}/files` 的 `location` 为 `bucket`（还在磁盘上是 `local` 或 `both`）。`file_path` 仍是目录路径，本机已经没有这个文件。分段下载、`GET /api/tasks/{id}/replay`（`limit` 和 `stop_datetime`）和 `replay/archive` 仍从对象读字节。回放 JSON 的 `locations` 与 `paths` 对齐，值为 `bucket` 时不要把该路径交给 `mysqlbinlog`，先下载。文件还在磁盘上时，两个截止时间都看修改时间。本地文件已经删掉之后，桶年龄用 `sealed_at`，没有则用 `uploaded_at`；两个都空则留下。超过桶保留后，对象、目录行和还在的本地文件一起删。配了对象存储且有目录时，过期的 `UPLOAD_FAILED` 或 `LOCAL_ONLY` 封存文件和目录行留下，复制不因此进入重试；同一文件只记一次 `RETENTION_SKIPPED_NOT_UPLOADED`。年龄截止是本地保留。行变成 `UPLOADED` 后，下次清理按上面的规则处理。`binlog_server_retention_blocked_files{task_id}` 仍是这次留下的过期未上传文件数。没配 `meta_dsn` 的单机没有目录行，按本地年龄清理仍会删掉没进桶的本地封存文件。对象删除失败时本地文件留下，任务 `last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再试。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。不做 schema migration。
 
 **从最新位置开始（LATEST）：**
 
@@ -576,7 +580,9 @@ curl -X POST http://localhost:8080/api/tasks \
       "mode": "LATEST"
     },
     "storage": {
-      "retention_days": 30
+      "retention_days": 30,
+      "local_retention_days": 3,
+      "bucket_retention_days": 30
     }
   }'
 ```
@@ -804,6 +810,7 @@ data:
 |------|------|
 | `worker_id is already in use: <worker-id>` | 同一 `worker_id` 被其他活跃实例占用 |
 | `storage.retention_days must be 1-3650` | 保留天数超出范围 |
+| `storage.bucket_retention_days (N) is shorter than local retention (M)` | 创建或更新任务时，有效桶保留短于有效本地保留 |
 | `invalid cluster_key format` | cluster_key 包含非法字符 |
 | `api.auth.enabled=false cannot protect api or metrics routes` | `enabled=false` 但 `protect_api` 或 `protect_metrics` 为 `true` |
 | `api.auth.bearer_token is required when protection is enabled` | 启用保护但未配置 `bearer_token` |
