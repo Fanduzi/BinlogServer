@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a dead worker's segment directory recorded in binlog_files.file_path, and a second worker data dir
-// output: proof that takeover continues in that directory when it is readable, and fails naming the segment when it is not
+// output: proof that takeover continues in that directory when it is readable, fails naming the segment when it is not, and does not fail SEGMENT_NOT_ON_WORKER when a local open segment ends with an artificial rotate whose end_log_pos is 0
 // pos: regression for lease takeover that must not rebuild a fresh directory from position 4
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -8,6 +8,7 @@ package replication
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -256,6 +257,216 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 			t.Fatalf("fresh directory: %v", statErr)
 		}
 	})
+}
+
+// TestTakeover_ArtificialRotatePosZeroStaysOnWorker is #214.
+// The open segment is on this worker and the catalog file_path names it.
+// A trailing artificial Rotate (end_log_pos 0) must not make resume decide
+// the segment is missing. The extra bytes are dropped and the dump continues
+// at the last real event.
+func TestTakeover_ArtificialRotatePosZeroStaysOnWorker(t *testing.T) {
+	dir := t.TempDir()
+	const taskID = "task-1"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	eventAt := time.Unix(1_700_000_000, 0).UTC()
+	const beforeSQL = "INSERT INTO restart_boundary VALUES ('BEFORE-ROTATE')"
+	const afterSQL = "INSERT INTO restart_boundary VALUES ('AFTER-RECLAIM')"
+	first, endPos := chainBinlogEvents(4, eventAt, []namedEvent{
+		{typ: goreplication.FORMAT_DESCRIPTION_EVENT, body: formatDescriptionBody(eventAt)},
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", beforeSQL)},
+	})
+	openPath := filepath.Join(taskDir, "mysql-bin.000010.open.e1")
+	writeBinlogSegment(t, openPath, first)
+	real, err := os.ReadFile(openPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(openPath, append(real, artificialRotateRaw("mysql-bin.000011")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog := &takeoverCatalog{rows: []tasks.BinlogFile{{
+		TaskID: taskID, FileName: "mysql-bin.000010", FilePath: openPath,
+		Epoch: 1, State: "OPEN", EndPos: endPos, UploadState: "LOCAL_ONLY",
+	}}}
+	store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000010", Pos: endPos}, ok: true}
+	next, _ := chainBinlogEvents(endPos, eventAt, []namedEvent{
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", afterSQL)},
+	})
+	syncer := &fakeSyncer{streamer: &fakeStreamer{results: []streamResult{
+		{event: next[0]},
+		{err: context.Canceled},
+	}}}
+	runner := NewMySQLRunner(dir, WithCheckpointStore(store), WithFileMetaStore(catalog))
+	runner.fetcher = &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000099", Pos: 9000},
+		serverUUID: "11111111-1111-1111-1111-111111111111",
+	}
+	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+	task.Epoch = 2
+	task.OwnerWorkerID = "worker-a"
+
+	err = runner.Run(context.Background(), task)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if syncer.startPos.Name != "mysql-bin.000010" || syncer.startPos.Pos != endPos {
+		t.Fatalf("start %+v, want mysql-bin.000010:%d", syncer.startPos, endPos)
+	}
+	continued := filepath.Join(taskDir, "mysql-bin.000010.open.e2")
+	body, err := os.ReadFile(continued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(body, real) || bytes.Contains(body, artificialRotateRaw("mysql-bin.000011")) {
+		t.Fatalf("continued segment kept the artificial rotate or lost the real prefix (%d bytes)", len(body))
+	}
+	if !bytes.Contains(body, []byte(afterSQL)) {
+		t.Fatal("reclaim did not append the next event")
+	}
+	if _, statErr := os.Stat(openPath); !os.IsNotExist(statErr) {
+		t.Fatalf("old epoch still present: %v", statErr)
+	}
+}
+
+// TestArtificialRotate_NotWrittenAndLeaseYieldResumes is the reconnect that
+// sees the invented next-file rotate while the claim loop has already bumped
+// the epoch. The rotate is not appended. Seal fails the lease check. The same
+// worker's next epoch resumes at the last real event.
+func TestArtificialRotate_NotWrittenAndLeaseYieldResumes(t *testing.T) {
+	dir := t.TempDir()
+	eventAt := time.Unix(1_700_000_000, 0).UTC()
+	const sql = "INSERT INTO restart_boundary VALUES ('KEPT')"
+	query := frameBinlogEvent(goreplication.QUERY_EVENT, queryEventBody("t", sql), 4, eventAt)
+	marker := []byte("ARTIFICIAL-ROTATE-POS0")
+	rotate := &goreplication.BinlogEvent{
+		Header:  &goreplication.EventHeader{EventType: goreplication.ROTATE_EVENT, LogPos: 0, Flags: 0x0020},
+		Event:   &goreplication.RotateEvent{Position: 4, NextLogName: []byte("mysql-bin.000011")},
+		RawData: marker,
+	}
+	store := &memCheckpointStore{}
+	syncer := &fakeSyncer{streamer: &fakeStreamer{results: []streamResult{
+		{event: query},
+		{event: rotate},
+	}}}
+	runner := NewMySQLRunner(dir, WithCheckpointStore(store), WithLeaseVerifier(leaseVerifierFunc(func(context.Context, string, string, int64) (bool, error) {
+		return false, nil
+	})))
+	runner.fetcher = &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000010", Pos: 4},
+		serverUUID: "11111111-1111-1111-1111-111111111111",
+	}
+	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+	task.Epoch = 2
+	task.OwnerWorkerID = "worker-a"
+
+	err := runner.Run(context.Background(), task)
+	if !tasks.IsLeaseHandoff(err) || strings.Contains(err.Error(), "SEGMENT_NOT_ON_WORKER") {
+		t.Fatalf("err=%v, want a lease handoff", err)
+	}
+	openPath := filepath.Join(dir, task.ID, "mysql-bin.000010.open.e2")
+	body, err := os.ReadFile(openPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, marker) || !bytes.Contains(body, []byte(sql)) {
+		t.Fatalf("open segment should keep the query and drop the artificial rotate (%d bytes)", len(body))
+	}
+	file, pos, ok := binlog.DurableResume(dir, task.ID)
+	if !ok || file != "mysql-bin.000010" || pos != query.Header.LogPos {
+		t.Fatalf("resume %s:%d ok=%v, want mysql-bin.000010:%d", file, pos, ok, query.Header.LogPos)
+	}
+
+	nextSyncer := &fakeSyncer{streamer: &fakeStreamer{results: []streamResult{{err: context.Canceled}}}}
+	nextRunner := NewMySQLRunner(dir, WithCheckpointStore(store))
+	nextRunner.fetcher = runner.fetcher
+	nextRunner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return nextSyncer }
+	task.Epoch = 3
+	if err := nextRunner.Run(context.Background(), task); err != nil {
+		t.Fatalf("reclaim Run: %v", err)
+	}
+	if nextSyncer.startPos.Name != "mysql-bin.000010" || nextSyncer.startPos.Pos != query.Header.LogPos {
+		t.Fatalf("reclaim start %+v, want :%d", nextSyncer.startPos, query.Header.LogPos)
+	}
+}
+
+// TestArtificialRotate_SwitchesWithoutWriting seals the current file at the
+// last real event and opens the next file. The artificial rotate bytes are
+// not in either file.
+func TestArtificialRotate_SwitchesWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	eventAt := time.Unix(1_700_000_000, 0).UTC()
+	const firstSQL = "INSERT INTO restart_boundary VALUES ('OLD-FILE')"
+	const nextSQL = "INSERT INTO restart_boundary VALUES ('NEW-FILE')"
+	first := frameBinlogEvent(goreplication.QUERY_EVENT, queryEventBody("t", firstSQL), 4, eventAt)
+	marker := []byte("ARTIFICIAL-ROTATE-POS0")
+	rotate := &goreplication.BinlogEvent{
+		Header:  &goreplication.EventHeader{EventType: goreplication.ROTATE_EVENT, LogPos: 0, Flags: 0x0020},
+		Event:   &goreplication.RotateEvent{Position: 4, NextLogName: []byte("mysql-bin.000011")},
+		RawData: marker,
+	}
+	second := frameBinlogEvent(goreplication.QUERY_EVENT, queryEventBody("t", nextSQL), 4, eventAt.Add(time.Second))
+	store := &memCheckpointStore{}
+	syncer := &fakeSyncer{streamer: &fakeStreamer{results: []streamResult{
+		{event: first},
+		{event: rotate},
+		{event: second},
+		{err: context.Canceled},
+	}}}
+	runner := NewMySQLRunner(dir, WithCheckpointStore(store))
+	runner.fetcher = &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000010", Pos: 4},
+		serverUUID: "11111111-1111-1111-1111-111111111111",
+	}
+	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+	task.Epoch = 2
+	task.OwnerWorkerID = "worker-a"
+	if err := runner.Run(context.Background(), task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	sealedPath := filepath.Join(dir, task.ID, "mysql-bin.000010")
+	sealed, err := os.ReadFile(sealedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sealed, marker) || !bytes.Contains(sealed, []byte(firstSQL)) {
+		t.Fatal("sealed file should be the real events only")
+	}
+	pos, _, _, ok := binlog.DurableCursor(sealedPath)
+	if !ok || pos != first.Header.LogPos {
+		t.Fatalf("sealed cursor pos=%d ok=%v, want %d", pos, ok, first.Header.LogPos)
+	}
+	opened, err := os.ReadFile(filepath.Join(dir, task.ID, "mysql-bin.000011.open.e2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(opened, marker) || !bytes.Contains(opened, []byte(nextSQL)) {
+		t.Fatal("next segment should hold the following event and not the artificial rotate")
+	}
+	cp, ok := store.snapshot()
+	if !ok || cp.File != "mysql-bin.000011" || cp.Pos != second.Header.LogPos {
+		t.Fatalf("checkpoint %+v ok=%v", cp, ok)
+	}
+}
+
+func artificialRotateRaw(next string) []byte {
+	name := []byte(next)
+	body := make([]byte, 8+len(name)+4)
+	binary.LittleEndian.PutUint64(body[:8], 4)
+	copy(body[8:], name)
+	size := uint32(goreplication.EventHeaderSize + len(body))
+	raw := make([]byte, size)
+	raw[4] = byte(goreplication.ROTATE_EVENT)
+	binary.LittleEndian.PutUint32(raw[9:13], size)
+	binary.LittleEndian.PutUint32(raw[13:17], 0)
+	binary.LittleEndian.PutUint16(raw[17:19], 0x0020)
+	copy(raw[goreplication.EventHeaderSize:], body)
+	return raw
 }
 
 type takeoverCatalog struct {
