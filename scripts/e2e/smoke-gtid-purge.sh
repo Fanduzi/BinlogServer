@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: mysql80 with GTID on, the suite API, and the task data directory
-# output: a GTID task whose checkpoint gtid_set grows, then resumes to RUNNING after PURGE BINARY LOGS and stores a new event
+# output: a GTID task whose checkpoint gtid_set includes every committed transaction, then resumes to RUNNING after PURGE BINARY LOGS and stores the later events
 # pos: docker coverage for raw-mode GTID checkpoints and a purged-file resume whose 1236 arrives on the event stream
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -30,10 +30,44 @@ restore_compression() {
 }
 trap restore_compression EXIT
 
-interval_end() {
-  local n
-  n="$(printf '%s' "$1" | grep -oE '[0-9]+' | sort -n | tail -1 || true)"
+# uuid_interval_end reads only the intervals that follow server_uuid.
+# The largest digit run in the whole string is inside the UUID
+# (e816d312-...:1-29 → 816) and does not say whether the set grew.
+uuid_interval_end() {
+  local uuid="$1"
+  local set="$2"
+  local flat spec n
+  flat="$(printf '%s' "$set" | tr -d ' \r\n')"
+  case "$flat" in
+    *"${uuid}:"*) ;;
+    *)
+      printf '0'
+      return
+      ;;
+  esac
+  spec="${flat#*"${uuid}:"}"
+  spec="${spec%%,*}"
+  n="$(printf '%s' "$spec" | grep -oE '[0-9]+' | sort -n | tail -1 || true)"
   printf '%s' "${n:-0}"
+}
+
+gtid_subset() {
+  local inner="$1"
+  local outer="$2"
+  inner="$(printf '%s' "$inner" | tr -d ' \r\n')"
+  outer="$(printf '%s' "$outer" | tr -d ' \r\n')"
+  mysql80 "SELECT GTID_SUBSET('${inner}', '${outer}');"
+}
+
+assert_interval_parser() {
+  local uuid="e816d312-c0d0-11f1-8ad5-c6fdaa0395d0"
+  local seed_n ckpt_n
+  seed_n="$(uuid_interval_end "$uuid" "${uuid}:1-28")"
+  ckpt_n="$(uuid_interval_end "$uuid" "${uuid}:1-31")"
+  if [[ "$seed_n" != "28" || "$ckpt_n" != "31" ]]; then
+    echo "gtid interval parser failed: seed=$seed_n checkpoint=$ckpt_n" >&2
+    exit 1
+  fi
 }
 
 task_json() {
@@ -56,11 +90,14 @@ wait_state() {
   return 1
 }
 
+assert_interval_parser
+
 echo "[gtid-purge] compression off so GTID and XID stay outside a transaction payload"
 mysql80 "SET GLOBAL binlog_transaction_compression=OFF;"
 mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('gtid-purge-seed-${RUN_TAG}');"
-seed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;")"
-seed_end="$(interval_end "$seed")"
+server_uuid="$(mysql80 "SELECT @@GLOBAL.server_uuid;")"
+seed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+seed_end="$(uuid_interval_end "$server_uuid" "$seed")"
 if [[ -z "$seed" || "$seed_end" == "0" ]]; then
   echo "empty GTID_EXECUTED: $seed" >&2
   exit 1
@@ -86,21 +123,32 @@ curl -fsS -X POST "$API/api/tasks/$task_id/start" >/dev/null
 wait_state "$task_id" "RUNNING"
 echo "[gtid-purge] task $task_id running"
 
-mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('gtid-purge-grow-${RUN_TAG}');"
+# Three autocommit inserts. A checkpoint that only records the first one
+# is still behind GTID_EXECUTED and must fail.
+for n in 1 2 3; do
+  mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('gtid-purge-grow-${RUN_TAG}-${n}');"
+done
+executed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+exec_end="$(uuid_interval_end "$server_uuid" "$executed")"
+if [[ "$exec_end" -lt $((seed_end + 3)) ]]; then
+  echo "source GTID_EXECUTED did not gain 3 transactions: seed=$seed executed=$executed" >&2
+  exit 1
+fi
 ckpt_file=""
 ckpt_gtid=""
 for _ in $(seq 1 60); do
   cp="$(curl -fsS "$API/api/tasks/$task_id/checkpoint")"
   ckpt_gtid="$(printf '%s' "$cp" | jq -r '.gtid_set // empty')"
   ckpt_file="$(printf '%s' "$cp" | jq -r '.file // empty')"
-  if [[ -n "$ckpt_gtid" && "$(interval_end "$ckpt_gtid")" -gt "$seed_end" ]]; then
+  ckpt_end="$(uuid_interval_end "$server_uuid" "$ckpt_gtid")"
+  if [[ -n "$ckpt_gtid" && "$ckpt_end" -ge "$exec_end" && "$(gtid_subset "$executed" "$ckpt_gtid")" == "1" ]]; then
     break
   fi
   ckpt_gtid=""
   sleep 0.5
 done
 if [[ -z "$ckpt_gtid" ]]; then
-  echo "checkpoint gtid did not grow past $seed: $(curl -fsS "$API/api/tasks/$task_id/checkpoint")" >&2
+  echo "checkpoint gtid does not include executed $executed (seed $seed): $(curl -fsS "$API/api/tasks/$task_id/checkpoint")" >&2
   exit 1
 fi
 echo "[gtid-purge] checkpoint file=$ckpt_file gtid=$ckpt_gtid"
@@ -147,16 +195,28 @@ fi
 echo "[gtid-purge] resumed RUNNING"
 
 mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('${MARKER}');"
+mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('gtid-purge-after-${RUN_TAG}');"
+executed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+exec_end="$(uuid_interval_end "$server_uuid" "$executed")"
+if [[ "$exec_end" -lt $((ckpt_end + 2)) ]]; then
+  echo "source GTID_EXECUTED did not gain the post-resume transactions: before=$ckpt_gtid executed=$executed" >&2
+  exit 1
+fi
 found=0
+resumed_gtid=""
 for _ in $(seq 1 60); do
-  if grep -a -R -F -q "$MARKER" "$DATA_DIR/$task_id" 2>/dev/null; then
-    found=1
-    break
+  cp="$(curl -fsS "$API/api/tasks/$task_id/checkpoint")"
+  resumed_gtid="$(printf '%s' "$cp" | jq -r '.gtid_set // empty')"
+  if [[ -n "$resumed_gtid" && "$(uuid_interval_end "$server_uuid" "$resumed_gtid")" -ge "$exec_end" && "$(gtid_subset "$executed" "$resumed_gtid")" == "1" ]]; then
+    if grep -a -R -F -q "$MARKER" "$DATA_DIR/$task_id" 2>/dev/null; then
+      found=1
+      break
+    fi
   fi
   sleep 0.5
 done
 if [[ "$found" != "1" ]]; then
-  echo "marker $MARKER was not captured under $DATA_DIR/$task_id" >&2
+  echo "post-resume checkpoint does not include $executed or marker $MARKER is missing under $DATA_DIR/$task_id: $(curl -fsS "$API/api/tasks/$task_id/checkpoint")" >&2
   exit 1
 fi
-echo "[gtid-purge] success: gtid advanced and the purged file resumed by GTID"
+echo "[gtid-purge] success: gtid=$resumed_gtid includes every commit, and the purged file resumed by GTID"
