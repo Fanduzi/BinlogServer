@@ -64,7 +64,7 @@ start_server() {
 
 meta_sql() {
   docker compose -f "$COMPOSE_FILE" exec -T meta-primary \
-    mysql -uroot -proot -Nse "$1"
+    mysql -uroot -proot binlog_meta -Nse "$1" | tr -d '\r'
 }
 
 echo "[epoch-segments] start server"
@@ -90,7 +90,6 @@ go run "$ROOT_DIR/scripts/e2e/gen-timed-segment.go" "$sealed_path" \
   "2020-01-01T00:00:00Z" "2020-01-01T00:10:00Z"
 sealed_size="$(wc -c <"$sealed_path" | tr -d ' ')"
 
-meta_sql "UPDATE backup_tasks SET epoch=2, state='STOPPED' WHERE id='${task_id}'"
 meta_sql "INSERT INTO backup_checkpoints (task_id, file_name, pos, gtid_set, updated_at) VALUES ('${task_id}', '${SOURCE_FILE}', 44, '', UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE file_name=VALUES(file_name), pos=VALUES(pos), updated_at=VALUES(updated_at)"
 meta_sql "INSERT INTO binlog_files (task_id, file_name, source_file, file_path, epoch, state, checksum, size_bytes, start_pos, end_pos, created_at, sealed_at, object_key, upload_state, uploaded_at) VALUES ('${task_id}', '${SOURCE_FILE}', '${SOURCE_FILE}', '${sealed_path}', 0, 'SEALED', 'match', ${sealed_size}, 4, 44, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 'e2e/legacy/${SOURCE_FILE}', 'UPLOADED', UTC_TIMESTAMP(6))"
 
@@ -98,7 +97,8 @@ echo "[epoch-segments] restart and open the next epoch"
 start_server
 curl -sS -X POST "$API/api/tasks/${task_id}/start" >/dev/null || true
 
-open_path="$task_dir/${SOURCE_FILE}.open.e2"
+# A fresh standalone lease is epoch 1, so the new segment is name.open.e1.
+open_path="$task_dir/${SOURCE_FILE}.open.e1"
 for _ in {1..60}; do
   if [[ -f "$open_path" ]]; then
     break
@@ -127,7 +127,7 @@ if [[ "$sealed_state" != "0 SEALED UPLOADED match e2e/legacy/${SOURCE_FILE}" ]];
   echo "$files" >&2
   exit 1
 fi
-if [[ "$open_state" != "2 OPEN ${SOURCE_FILE}" ]]; then
+if [[ "$open_state" != "1 OPEN ${SOURCE_FILE}" ]]; then
   echo "open catalog row: $open_state" >&2
   echo "$files" >&2
   exit 1
@@ -154,4 +154,4 @@ if [[ "$rows" != "2" ]]; then
   exit 1
 fi
 
-echo "[epoch-segments] success: sealed epoch 0 and open epoch 2 are both in the restore command"
+echo "[epoch-segments] success: sealed epoch 0 and open epoch 1 are both in the restore command"
