@@ -1,12 +1,13 @@
 // Package replication provides module-level functionality for replication.
-// input: GTID events, a stored checkpoint, and a file/pos dump that returns MySQL 1236
-// output: proof that a flushed checkpoint keeps the executed GTID and that resume uses it when file/pos returns 1236
+// input: raw and parsed GTID events, a stored checkpoint, and a file/pos dump whose MySQL 1236 arrives on GetEvent
+// output: proof that a flushed checkpoint grows the executed GTID under raw mode and that resume uses it when the stream returns 1236
 // pos: regression coverage for GTID checkpoint retention and purged-file resume
 // note: if this file changes, update this header and module README.md.
 package replication
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -57,6 +58,54 @@ func TestExecutedGTID_CommitExtendsSeedAndDoesNotWipe(t *testing.T) {
 	}
 	executed.note(anon)
 	executed.note(xidAt(220))
+	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-12")
+}
+
+func TestExecutedGTID_RawBodyCommitExtendsSeed(t *testing.T) {
+	seed := sampleGTID + ":1-10"
+	executed := newExecutedGTID("mysql", seed)
+	executed.note(&goreplication.BinlogEvent{
+		Header: &goreplication.EventHeader{EventType: goreplication.FORMAT_DESCRIPTION_EVENT},
+		Event:  &goreplication.FormatDescriptionEvent{ChecksumAlgorithm: goreplication.BINLOG_CHECKSUM_ALG_CRC32},
+	})
+	// Event is unset and RawData keeps the CRC, the shape a raw parser leaves
+	// when the body was not decoded.
+	executed.note(rawBinlog(goreplication.GTID_EVENT, 100, gtidBody(11), true, false))
+	executed.note(rawBinlog(goreplication.QUERY_EVENT, 120, queryBody("BEGIN"), true, false))
+	if got := executed.current(); got != seed {
+		t.Fatalf("uncommitted raw gtid changed the set: %s", got)
+	}
+	executed.note(rawBinlog(goreplication.XID_EVENT, 154, []byte{1, 0, 0, 0, 0, 0, 0, 0}, true, false))
+	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-11")
+
+	// Autocommit DDL has no XID. The CRC trailer must be stripped or the
+	// query word is not CREATE and the GTID stays pending.
+	executed.note(rawBinlog(goreplication.GTID_EVENT, 180, gtidBody(12), true, false))
+	executed.note(rawBinlog(goreplication.QUERY_EVENT, 200, queryBody("CREATE TABLE t (id INT)"), true, false))
+	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-12")
+
+	executed.note(&goreplication.BinlogEvent{
+		Header:  &goreplication.EventHeader{EventType: goreplication.GTID_EVENT, LogPos: 300},
+		RawData: []byte{1, 2, 3},
+	})
+	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-12")
+}
+
+func TestExecutedGTID_GenericEventBodyCommitExtendsSeed(t *testing.T) {
+	seed := sampleGTID + ":1-10"
+	executed := newExecutedGTID("mysql", seed)
+	executed.note(&goreplication.BinlogEvent{
+		Header: &goreplication.EventHeader{EventType: goreplication.FORMAT_DESCRIPTION_EVENT},
+		Event:  &goreplication.FormatDescriptionEvent{ChecksumAlgorithm: goreplication.BINLOG_CHECKSUM_ALG_CRC32},
+	})
+	// Production RawMode: GenericEvent.Data is the body with the checksum
+	// already removed, while RawData still has the CRC trailer.
+	executed.note(rawBinlog(goreplication.GTID_EVENT, 100, gtidBody(11), true, true))
+	executed.note(rawBinlog(goreplication.QUERY_EVENT, 120, queryBody("BEGIN"), true, true))
+	executed.note(rawBinlog(goreplication.XID_EVENT, 154, []byte{1, 0, 0, 0, 0, 0, 0, 0}, true, true))
+	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-11")
+	executed.note(rawBinlog(goreplication.GTID_EVENT, 180, gtidBody(12), true, true))
+	executed.note(rawBinlog(goreplication.QUERY_EVENT, 200, queryBody("CREATE TABLE t (id INT)"), true, true))
 	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-12")
 }
 
@@ -173,6 +222,61 @@ func TestMySQLRunnerRun_FilePos1236ResumesByGTID(t *testing.T) {
 			GTIDSet: executed,
 		},
 	}
+	// StartSync returns a stream. The 1236 is the first GetEvent, which is
+	// how go-mysql v1.16 and MySQL 8 deliver a purged file.
+	syncer := &purgeFileSyncer{
+		streamer:     &fakeStreamer{results: []streamResult{{err: purged}}},
+		gtidStreamer: &fakeStreamer{results: []streamResult{{err: context.Canceled}}},
+	}
+	syncerCalls := 0
+	runner := &MySQLRunner{
+		dataDir:         t.TempDir(),
+		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		checkpointStore: store,
+		newSyncer: func(cfg goreplication.BinlogSyncerConfig) binlogSyncer {
+			if !cfg.RawModeEnabled {
+				t.Fatal("RawModeEnabled is off")
+			}
+			syncerCalls++
+			return syncer
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			return &fakeCloser{}, binlog.NewWriter(&fakeSyncFile{}, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+	}
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode:    tasks.StartModeGTID,
+		GTIDSet: startSet,
+	}))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if syncerCalls != 2 {
+		t.Fatalf("expected a new syncer after the stream 1236, calls=%d", syncerCalls)
+	}
+	if syncer.closeCalls < 2 {
+		t.Fatalf("file/pos syncer was not closed before the GTID dump, closes=%d", syncer.closeCalls)
+	}
+	if syncer.posCalls != 1 || syncer.pos.Name != "mysql-bin.000008" || syncer.pos.Pos != 400 {
+		t.Fatalf("file/pos was not tried first: %+v calls=%d", syncer.pos, syncer.posCalls)
+	}
+	if syncer.gtidCalls != 1 || syncer.gtid == nil {
+		t.Fatalf("gtid resume calls=%d set=%v", syncer.gtidCalls, syncer.gtid)
+	}
+	assertGTID(t, "mysql", syncer.gtid.String(), executed)
+}
+
+func TestMySQLRunnerRun_FilePosSync1236ResumesByGTID(t *testing.T) {
+	purged := &gomysql.MyError{Code: 1236, State: "HY000", Message: "Could not find first log file name in binary log index file"}
+	executed := sampleGTID + ":1-20"
+	store := &fakeRunnerCheckpointStore{
+		loadOK: true,
+		loadCheckpoint: binlog.Checkpoint{
+			File:    "mysql-bin.000008",
+			Pos:     400,
+			GTIDSet: executed,
+		},
+	}
 	syncer := &purgeFileSyncer{
 		posErr:   purged,
 		streamer: &fakeStreamer{results: []streamResult{{err: context.Canceled}}},
@@ -190,18 +294,133 @@ func TestMySQLRunnerRun_FilePos1236ResumesByGTID(t *testing.T) {
 	}
 	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
 		Mode:    tasks.StartModeGTID,
-		GTIDSet: startSet,
+		GTIDSet: sampleGTID + ":1-5",
 	}))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if syncer.posCalls != 1 || syncer.pos.Name != "mysql-bin.000008" || syncer.pos.Pos != 400 {
-		t.Fatalf("file/pos was not tried first: %+v calls=%d", syncer.pos, syncer.posCalls)
-	}
-	if syncer.gtidCalls != 1 || syncer.gtid == nil {
-		t.Fatalf("gtid resume calls=%d set=%v", syncer.gtidCalls, syncer.gtid)
+	if syncer.posCalls != 1 || syncer.gtidCalls != 1 {
+		t.Fatalf("pos=%d gtid=%d", syncer.posCalls, syncer.gtidCalls)
 	}
 	assertGTID(t, "mysql", syncer.gtid.String(), executed)
+}
+
+func TestMySQLRunnerRun_GTIDStream1236DoesNotLoop(t *testing.T) {
+	purged := &gomysql.MyError{Code: 1236, State: "HY000", Message: "Could not find first log file name in binary log index file"}
+	store := &fakeRunnerCheckpointStore{
+		loadOK: true,
+		loadCheckpoint: binlog.Checkpoint{
+			File:    "mysql-bin.000008",
+			Pos:     400,
+			GTIDSet: sampleGTID + ":1-20",
+		},
+	}
+	syncer := &purgeFileSyncer{
+		streamer:     &fakeStreamer{results: []streamResult{{err: purged}}},
+		gtidStreamer: &fakeStreamer{results: []streamResult{{err: purged}}},
+	}
+	runner := &MySQLRunner{
+		dataDir:         t.TempDir(),
+		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		checkpointStore: store,
+		newSyncer: func(goreplication.BinlogSyncerConfig) binlogSyncer {
+			return syncer
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			return &fakeCloser{}, binlog.NewWriter(&fakeSyncFile{}, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+	}
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode:    tasks.StartModeGTID,
+		GTIDSet: sampleGTID + ":1-5",
+	}))
+	if !mysqlError1236(err) {
+		t.Fatalf("err=%v", err)
+	}
+	if syncer.gtidCalls != 1 {
+		t.Fatalf("gtid resume looped: %d", syncer.gtidCalls)
+	}
+}
+
+func TestMySQLRunnerRun_RawModeGTIDAdvances(t *testing.T) {
+	seed := sampleGTID + ":1-10"
+	store := &fakeRunnerCheckpointStore{}
+	fde := &goreplication.BinlogEvent{
+		Header: &goreplication.EventHeader{EventType: goreplication.FORMAT_DESCRIPTION_EVENT, LogPos: 0},
+		Event:  &goreplication.FormatDescriptionEvent{ChecksumAlgorithm: goreplication.BINLOG_CHECKSUM_ALG_CRC32},
+	}
+	streamer := &fakeStreamer{results: []streamResult{
+		{event: fde},
+		{event: rawBinlog(goreplication.GTID_EVENT, 100, gtidBody(11), true, true)},
+		{event: rawBinlog(goreplication.QUERY_EVENT, 120, queryBody("BEGIN"), true, true)},
+		{event: rawBinlog(goreplication.XID_EVENT, 154, []byte{1, 0, 0, 0, 0, 0, 0, 0}, true, true)},
+		{err: context.Canceled},
+	}}
+	var raw bool
+	runner := &MySQLRunner{
+		dataDir:         t.TempDir(),
+		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		checkpointStore: store,
+		newSyncer: func(cfg goreplication.BinlogSyncerConfig) binlogSyncer {
+			raw = cfg.RawModeEnabled
+			return &fakeSyncer{streamer: streamer}
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			return &fakeCloser{}, binlog.NewWriter(&fakeSyncFile{}, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+	}
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode:    tasks.StartModeGTID,
+		GTIDSet: seed,
+	}))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !raw {
+		t.Fatal("RawModeEnabled is off")
+	}
+	if len(store.upserts) < 3 {
+		t.Fatalf("upserts: %+v", store.upserts)
+	}
+	assertGTID(t, "mysql", store.upserts[0].GTIDSet, seed)
+	assertGTID(t, "mysql", store.upserts[1].GTIDSet, seed)
+	assertGTID(t, "mysql", store.upserts[2].GTIDSet, sampleGTID+":1-11")
+}
+
+func TestMySQLRunnerRun_FilePosRawDoesNotInventGTID(t *testing.T) {
+	store := &fakeRunnerCheckpointStore{}
+	streamer := &fakeStreamer{results: []streamResult{
+		{event: rawBinlog(goreplication.GTID_EVENT, 100, gtidBody(11), true, true)},
+		{event: rawBinlog(goreplication.XID_EVENT, 154, []byte{1, 0, 0, 0, 0, 0, 0, 0}, true, true)},
+		{err: context.Canceled},
+	}}
+	runner := &MySQLRunner{
+		dataDir:         t.TempDir(),
+		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		checkpointStore: store,
+		newSyncer: func(goreplication.BinlogSyncerConfig) binlogSyncer {
+			return &fakeSyncer{streamer: streamer}
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			return &fakeCloser{}, binlog.NewWriter(&fakeSyncFile{}, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+	}
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode: tasks.StartModeFilePos,
+		File: "mysql-bin.000010",
+		Pos:  4,
+	}))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(store.upserts) == 0 {
+		t.Fatal("no checkpoint")
+	}
+	for i, cp := range store.upserts {
+		if cp.GTIDSet != "" {
+			t.Fatalf("upsert %d invented a gtid: %+v", i, cp)
+		}
+	}
 }
 
 func TestMySQLRunnerRun_FilePosWithoutGTIDStillReturns1236(t *testing.T) {
@@ -210,7 +429,7 @@ func TestMySQLRunnerRun_FilePosWithoutGTIDStillReturns1236(t *testing.T) {
 		loadOK:         true,
 		loadCheckpoint: binlog.Checkpoint{File: "mysql-bin.000008", Pos: 400},
 	}
-	syncer := &purgeFileSyncer{posErr: purged}
+	syncer := &purgeFileSyncer{streamer: &fakeStreamer{results: []streamResult{{err: purged}}}}
 	runner := &MySQLRunner{
 		dataDir:         t.TempDir(),
 		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
@@ -269,12 +488,14 @@ func TestMySQLRunnerRun_FilePosWithGTIDStaysOnFilePos(t *testing.T) {
 }
 
 type purgeFileSyncer struct {
-	posErr    error
-	streamer  binlogStreamer
-	pos       gomysql.Position
-	gtid      gomysql.GTIDSet
-	posCalls  int
-	gtidCalls int
+	posErr       error
+	streamer     binlogStreamer
+	gtidStreamer binlogStreamer
+	pos          gomysql.Position
+	gtid         gomysql.GTIDSet
+	posCalls     int
+	gtidCalls    int
+	closeCalls   int
 }
 
 func (s *purgeFileSyncer) StartSync(pos gomysql.Position) (binlogStreamer, error) {
@@ -289,10 +510,13 @@ func (s *purgeFileSyncer) StartSync(pos gomysql.Position) (binlogStreamer, error
 func (s *purgeFileSyncer) StartSyncGTID(set gomysql.GTIDSet) (binlogStreamer, error) {
 	s.gtidCalls++
 	s.gtid = set
+	if s.gtidStreamer != nil {
+		return s.gtidStreamer, nil
+	}
 	return s.streamer, nil
 }
 
-func (s *purgeFileSyncer) Close() {}
+func (s *purgeFileSyncer) Close() { s.closeCalls++ }
 
 func gtidAt(gno int64, pos uint32) *goreplication.BinlogEvent {
 	return &goreplication.BinlogEvent{
@@ -328,6 +552,40 @@ func xidAt(pos uint32) *goreplication.BinlogEvent {
 		Event:   &goreplication.XIDEvent{XID: 1},
 		RawData: []byte("xid"),
 	}
+}
+
+func gtidBody(gno int64) []byte {
+	body := make([]byte, 1+goreplication.SidLength+8)
+	copy(body[1:], mustSID(nil))
+	binary.LittleEndian.PutUint64(body[1+goreplication.SidLength:], uint64(gno))
+	return body
+}
+
+func queryBody(sql string) []byte {
+	body := make([]byte, 14+len(sql))
+	copy(body[14:], sql)
+	return body
+}
+
+func rawBinlog(typ goreplication.EventType, pos uint32, body []byte, crc, generic bool) *goreplication.BinlogEvent {
+	payload := append([]byte(nil), body...)
+	if crc {
+		payload = append(payload, 0x11, 0x22, 0x33, 0x44)
+	}
+	raw := make([]byte, goreplication.EventHeaderSize+len(payload))
+	copy(raw[goreplication.EventHeaderSize:], payload)
+	ev := &goreplication.BinlogEvent{
+		Header: &goreplication.EventHeader{
+			EventType: typ,
+			LogPos:    pos,
+			Timestamp: uint32(time.Now().Unix()),
+		},
+		RawData: raw,
+	}
+	if generic {
+		ev.Event = &goreplication.GenericEvent{Data: append([]byte(nil), body...)}
+	}
+	return ev
 }
 
 func mustSID(t *testing.T) []byte {
