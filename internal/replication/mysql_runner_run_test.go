@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, and stop cleanup
+// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a resolved LATEST file/pos kept across retry with an empty gtid_set, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, and stop cleanup
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -261,6 +261,102 @@ func TestMySQLRunnerRun_LatestResolvesAndStartsFromMasterStatus(t *testing.T) {
 	if closer.closeCalls != 1 {
 		t.Fatalf("expected writer closer called once, got %d", closer.closeCalls)
 	}
+}
+
+// TestMySQLRunnerRun_LatestRetryKeepsResolvedAnchor 验证 LATEST 一旦解析出 file/pos，
+// 源库宕机后的重试从该位点续，不再按新的 SHOW MASTER STATUS 开拉。gtid_set 保持为空。
+func TestMySQLRunnerRun_LatestRetryKeepsResolvedAnchor(t *testing.T) {
+	const (
+		anchorFile = "mysql-bin.000010"
+		anchorPos  = uint32(197)
+		laterFile  = "mysql-bin.000011"
+		laterPos   = uint32(1193)
+	)
+
+	runTwice := func(t *testing.T, store *memCheckpointStore) *fakeSyncer {
+		t.Helper()
+		fetcher := &fakeSourceMetaFetcher{
+			status:     MasterStatus{File: anchorFile, Pos: anchorPos},
+			serverUUID: "srv-uuid-1",
+		}
+		streamer := &fakeStreamer{results: []streamResult{{err: io.ErrUnexpectedEOF}}}
+		syncer := &fakeSyncer{streamer: streamer}
+		reporter := &fakeRunnerProgressReporter{}
+		runner := newTestRunner(t, fetcher, syncer, reporter)
+		runner.dataDir = t.TempDir()
+		if store != nil {
+			runner.checkpointStore = store
+		}
+		task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+
+		err := runner.Run(context.Background(), task)
+		if err == nil || !tasks.IsSourceUnreachable(err) {
+			t.Fatalf("first run err=%v, want SOURCE_UNREACHABLE before any event", err)
+		}
+		if len(reporter.reports) == 0 || !reporter.reports[0].atTip || reporter.reports[0].file != anchorFile || reporter.reports[0].pos != anchorPos {
+			t.Fatalf("first connect reports %+v, want at-tip %s:%d", reporter.reports, anchorFile, anchorPos)
+		}
+		if syncer.startGTIDCalls != 0 {
+			t.Fatalf("LATEST anchor opened a GTID dump: %+v", syncer.startGTID)
+		}
+
+		fetcher.status = MasterStatus{File: laterFile, Pos: laterPos}
+		streamer.results = []streamResult{{err: context.Canceled}}
+		err = runner.Run(context.Background(), task)
+		if err != nil {
+			t.Fatalf("retry Run: %v", err)
+		}
+		if syncer.startPos.Name != anchorFile || syncer.startPos.Pos != anchorPos {
+			t.Fatalf("retry StartSync %+v, want %s:%d (not %s:%d)", syncer.startPos, anchorFile, anchorPos, laterFile, laterPos)
+		}
+		if syncer.startGTIDCalls != 0 {
+			t.Fatalf("retry opened a GTID dump: %+v", syncer.startGTID)
+		}
+		return syncer
+	}
+
+	t.Run("checkpoint", func(t *testing.T) {
+		store := &memCheckpointStore{}
+		runTwice(t, store)
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if !store.ok || store.cp.File != anchorFile || store.cp.Pos != anchorPos || store.cp.GTIDSet != "" {
+			t.Fatalf("anchor checkpoint %+v ok=%v, want %s:%d with empty gtid_set", store.cp, store.ok, anchorFile, anchorPos)
+		}
+	})
+
+	t.Run("no store", func(t *testing.T) {
+		runTwice(t, nil)
+	})
+
+	t.Run("existing gtid checkpoint stays", func(t *testing.T) {
+		const gtid = "24bc785e-9a61-11e1-8a5d-080027635ef5:1-20"
+		store := &memCheckpointStore{
+			cp: binlog.Checkpoint{File: anchorFile, Pos: anchorPos, GTIDSet: gtid},
+			ok: true,
+		}
+		fetcher := &fakeSourceMetaFetcher{
+			status:     MasterStatus{File: laterFile, Pos: laterPos},
+			serverUUID: "srv-uuid-1",
+		}
+		streamer := &fakeStreamer{results: []streamResult{{err: context.Canceled}}}
+		syncer := &fakeSyncer{streamer: streamer}
+		runner := newTestRunner(t, fetcher, syncer, nil)
+		runner.dataDir = t.TempDir()
+		runner.checkpointStore = store
+		err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest}))
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if syncer.startPos.Name != anchorFile || syncer.startPos.Pos != anchorPos {
+			t.Fatalf("stored checkpoint StartSync %+v, want %s:%d", syncer.startPos, anchorFile, anchorPos)
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if store.cp.File != anchorFile || store.cp.Pos != anchorPos || store.cp.GTIDSet != gtid {
+			t.Fatalf("checkpoint %+v, want gtid_set kept", store.cp)
+		}
+	})
 }
 
 func newTestRunner(t *testing.T, fetcher sourceMetaFetcher, syncer binlogSyncer, reporter *fakeRunnerProgressReporter) *MySQLRunner {
