@@ -23,6 +23,11 @@ MINIO_BUCKET="e2e-split-retention"
 # Docker Hub minio/minio and minio/mc return pull denied. Quay still serves the last public RELEASE images.
 MINIO_IMAGE="${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}"
 MC_IMAGE="${MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z}"
+MINIO_RELEASE="${MINIO_RELEASE:-RELEASE.2025-09-07T16-13-09Z}"
+MC_RELEASE="${MC_RELEASE:-RELEASE.2025-08-13T08-35-41Z}"
+MINIO_PID=""
+MINIO_BIN=""
+MC_BIN=""
 
 source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
 MYSQL57_PORT="$E2E_MYSQL57_PORT"
@@ -49,6 +54,11 @@ kill_server() {
 
 cleanup() {
   kill_server
+  if [[ -n "$MINIO_PID" ]]; then
+    kill "$MINIO_PID" >/dev/null 2>&1 || true
+    wait "$MINIO_PID" >/dev/null 2>&1 || true
+    MINIO_PID=""
+  fi
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -93,9 +103,41 @@ wait_minio_live() {
 }
 
 mc_cmd() {
+  if [[ -n "$MC_BIN" ]]; then
+    MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" "$MC_BIN" "$@"
+    return
+  fi
   docker run --rm --network host \
     -e MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${MINIO_PORT}" \
     "$MC_IMAGE" "$@"
+}
+
+linux_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    *)
+      echo "unsupported arch for minio binary: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+}
+
+fetch_host_minio() {
+  local arch dir
+  arch="$(linux_arch)"
+  dir="/tmp/binlog-e2e-minio-bins"
+  mkdir -p "$dir"
+  MINIO_BIN="$dir/minio-${MINIO_RELEASE}"
+  MC_BIN="$dir/mc-${MC_RELEASE}"
+  if [[ ! -x "$MINIO_BIN" ]]; then
+    curl -fsSL -o "$MINIO_BIN" "https://github.com/minio/minio/releases/download/${MINIO_RELEASE}/minio.linux-${arch}.${MINIO_RELEASE}"
+    chmod +x "$MINIO_BIN"
+  fi
+  if [[ ! -x "$MC_BIN" ]]; then
+    curl -fsSL -o "$MC_BIN" "https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.linux-${arch}.${MC_RELEASE}"
+    chmod +x "$MC_BIN"
+  fi
 }
 
 ensure_minio_bucket() {
@@ -117,14 +159,25 @@ object_exists() {
 
 start_minio() {
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
-  docker pull "$MINIO_IMAGE"
-  docker pull "$MC_IMAGE"
-  docker run -d --name "$MINIO_NAME" \
-    -p "${MINIO_PORT}:9000" \
-    -p "${MINIO_CONSOLE_PORT}:9001" \
-    -e "MINIO_ROOT_USER=${MINIO_USER}" \
-    -e "MINIO_ROOT_PASSWORD=${MINIO_PASS}" \
-    "$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
+  if docker pull "$MINIO_IMAGE" >/dev/null 2>&1 && docker pull "$MC_IMAGE" >/dev/null 2>&1; then
+    docker run -d --name "$MINIO_NAME" \
+      -p "${MINIO_PORT}:9000" \
+      -p "${MINIO_CONSOLE_PORT}:9001" \
+      -e "MINIO_ROOT_USER=${MINIO_USER}" \
+      -e "MINIO_ROOT_PASSWORD=${MINIO_PASS}" \
+      "$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
+    wait_minio_live
+    ensure_minio_bucket
+    return
+  fi
+  echo "[split-retention] quay image unavailable; using GitHub release binaries ${MINIO_RELEASE}"
+  fetch_host_minio
+  local data_dir="/tmp/binlog-e2e-minio-data-${RUN_TAG}"
+  mkdir -p "$data_dir"
+  MINIO_ROOT_USER="$MINIO_USER" MINIO_ROOT_PASSWORD="$MINIO_PASS" \
+    "$MINIO_BIN" server "$data_dir" --address "127.0.0.1:${MINIO_PORT}" --console-address "127.0.0.1:${MINIO_CONSOLE_PORT}" \
+    >"/tmp/binlog-e2e-minio-${RUN_TAG}.log" 2>&1 &
+  MINIO_PID=$!
   wait_minio_live
   ensure_minio_bucket
 }
@@ -175,16 +228,22 @@ wait_task_running() {
   return 1
 }
 
-wait_checkpoint_ready() {
+# An idle source at the binlog tip does not create a checkpoint until an event
+# arrives after the dump position. Keep writing until that row exists.
+wait_dumping() {
   local task_id="$1"
-  for _ in {1..120}; do
-    if curl -fsS "$API/api/tasks/$task_id/checkpoint" | jq -e '.file != null and (.file | tostring | length > 0) and (.pos // 0) >= 0' >/dev/null; then
+  local i
+  for i in $(seq 1 60); do
+    if curl -fsS "$API/api/tasks/$task_id/checkpoint" 2>/dev/null | jq -e '.file != null and (.file | tostring | length > 0) and (.pos // 0) >= 0' >/dev/null; then
       return 0
     fi
+    write_source_data "prime-${task_id}-${i}-${RUN_TAG}"
     sleep 1
   done
-  echo "checkpoint not ready in time: $task_id" >&2
-  curl -fsS "$API/api/tasks/$task_id/checkpoint" >&2 || true
+  echo "dumper did not record a checkpoint: $task_id" >&2
+  curl -sS "$API/api/tasks/$task_id" >&2 || true
+  curl -sS "$API/api/tasks/$task_id/checkpoint" >&2 || true
+  curl -sS "$API/api/tasks/$task_id/events?limit=20" >&2 || true
   return 1
 }
 
@@ -371,7 +430,7 @@ if [[ -z "$LEGACY_ID" || "$LEGACY_ID" == "null" ]]; then
 fi
 start_task "$LEGACY_ID"
 wait_task_running "$LEGACY_ID"
-wait_checkpoint_ready "$LEGACY_ID"
+wait_dumping "$LEGACY_ID"
 write_source_data "legacy-${RUN_TAG}"
 flush_binary_logs
 wait_uploaded_count "$LEGACY_ID" 1
@@ -404,7 +463,7 @@ fi
 SPLIT_ID="$(printf '%s' "$SPLIT_RESP" | jq -r '.id')"
 start_task "$SPLIT_ID"
 wait_task_running "$SPLIT_ID"
-wait_checkpoint_ready "$SPLIT_ID"
+wait_dumping "$SPLIT_ID"
 write_source_data "mid-${RUN_TAG}"
 flush_binary_logs
 wait_uploaded_count "$SPLIT_ID" 1
