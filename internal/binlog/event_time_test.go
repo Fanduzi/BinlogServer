@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: in-memory binlog segments with event-header timestamps
-// output: assertions for the first and last non-zero event time, and for a segment with no timed event
+// output: assertions for the first and last copied-event time, a file-header timestamp that is not coverage, and a segment with no timed event
 // pos: regression coverage for the point-in-time span reader
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -10,6 +10,8 @@ import (
 	"encoding/binary"
 	"testing"
 	"time"
+
+	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
 
 func TestEventTimeSpan(t *testing.T) {
@@ -38,18 +40,55 @@ func TestEventTimeSpan(t *testing.T) {
 	}
 }
 
+func TestEventTimeSpan_SkipsFileHeaderTimestamps(t *testing.T) {
+	created := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	copied := time.Date(2024, 1, 1, 2, 0, 0, 0, time.UTC)
+	raw := typedBinlog(t,
+		typedEvent{goreplication.FORMAT_DESCRIPTION_EVENT, created},
+		typedEvent{goreplication.PREVIOUS_GTIDS_EVENT, created},
+		typedEvent{goreplication.QUERY_EVENT, copied},
+	)
+	first, last, ok, err := EventTimeSpan(bytes.NewReader(raw))
+	if err != nil || !ok || !first.Equal(copied) || !last.Equal(copied) {
+		t.Fatalf("span ok=%v first=%s last=%s err=%v", ok, first, last, err)
+	}
+
+	headerOnly := typedBinlog(t,
+		typedEvent{goreplication.FORMAT_DESCRIPTION_EVENT, created},
+		typedEvent{goreplication.PREVIOUS_GTIDS_EVENT, created},
+	)
+	_, _, ok, err = EventTimeSpan(bytes.NewReader(headerOnly))
+	if err != nil || ok {
+		t.Fatalf("header only ok=%v err=%v", ok, err)
+	}
+}
+
 func timedBinlog(t *testing.T, times ...time.Time) []byte {
+	t.Helper()
+	events := make([]typedEvent, len(times))
+	for i, ts := range times {
+		events[i] = typedEvent{goreplication.QUERY_EVENT, ts}
+	}
+	return typedBinlog(t, events...)
+}
+
+type typedEvent struct {
+	kind goreplication.EventType
+	when time.Time
+}
+
+func typedBinlog(t *testing.T, events ...typedEvent) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	buf.Write(durableMagic)
 	pos := uint32(4)
-	for _, ts := range times {
+	for _, event := range events {
 		const payload = 1
 		size := uint32(19 + payload)
 		pos += size
 		var hdr [19]byte
-		binary.LittleEndian.PutUint32(hdr[0:4], uint32(ts.Unix()))
-		hdr[4] = 2
+		binary.LittleEndian.PutUint32(hdr[0:4], uint32(event.when.Unix()))
+		hdr[4] = byte(event.kind)
 		binary.LittleEndian.PutUint32(hdr[5:9], 1)
 		binary.LittleEndian.PutUint32(hdr[9:13], size)
 		binary.LittleEndian.PutUint32(hdr[13:17], pos)
