@@ -136,30 +136,33 @@ api_get() {
 }
 
 files="$(api_get "$API/api/tasks/${task_id}/files")"
-sealed_state="$(printf '%s' "$files" | jq -r --arg p "$sealed_path" '.[] | select(.file_path==$p) | "\(.epoch // 0) \(.state) \(.upload_state) \(.checksum) \(.object_key)"')"
-open_state="$(printf '%s' "$files" | jq -r --arg p "$open_path" '.[] | select(.file_path==$p) | "\(.epoch) \(.state) \(.file_name)"')"
-if [[ "$sealed_state" != "0 SEALED UPLOADED match e2e/legacy/${SOURCE_FILE}" ]]; then
+# The server stores the open path without a leading ./ even when DATA_DIR has one.
+sealed_state="$(printf '%s' "$files" | jq -r --arg n "$SOURCE_FILE" '.[] | select(.file_name==$n and .state=="SEALED") | "\(.epoch // 0) \(.state) \(.upload_state) \(.checksum) \(.object_key) \(.file_path|split("/")|last)"')"
+open_state="$(printf '%s' "$files" | jq -r --arg n "$SOURCE_FILE" '.[] | select(.file_name==$n and .state=="OPEN") | "\(.epoch) \(.state) \(.file_name) \(.file_path|split("/")|last)"')"
+if [[ "$sealed_state" != "0 SEALED UPLOADED match e2e/legacy/${SOURCE_FILE} ${SOURCE_FILE}" ]]; then
   echo "sealed catalog row changed: $sealed_state" >&2
   echo "$files" >&2
   exit 1
 fi
-if [[ "$open_state" != "1 OPEN ${SOURCE_FILE}" ]]; then
+if [[ "$open_state" != "1 OPEN ${SOURCE_FILE} ${SOURCE_FILE}.open.e1" ]]; then
   echo "open catalog row: $open_state" >&2
   echo "$files" >&2
   exit 1
 fi
+sealed_listed="$(printf '%s' "$files" | jq -r --arg n "$SOURCE_FILE" '.[] | select(.file_name==$n and .state=="SEALED") | .file_path')"
+open_listed="$(printf '%s' "$files" | jq -r --arg n "$SOURCE_FILE" '.[] | select(.file_name==$n and .state=="OPEN") | .file_path')"
 
 replay="$(api_get "$API/api/tasks/${task_id}/replay")"
-printf '%s' "$replay" | jq -e --arg sealed "$sealed_path" --arg open "$open_path" '
+printf '%s' "$replay" | jq -e --arg sealed "$sealed_listed" --arg open "$open_listed" '
   (.paths | index($sealed) != null) and (.paths | index($open) != null) and
   ((.paths | index($sealed)) < (.paths | index($open)))
-' >/dev/null
+' >/dev/null || { echo "replay: $replay" >&2; exit 1; }
 
 pitr="$(api_get "$API/api/tasks/${task_id}/replay?start_datetime=2020-01-01%2000:05:00&stop_datetime=2020-01-01%2000:25:00")"
-printf '%s' "$pitr" | jq -e --arg sealed "$sealed_path" --arg open "$open_path" '
+printf '%s' "$pitr" | jq -e --arg sealed "$sealed_listed" --arg open "$open_listed" '
   (.paths | index($sealed) != null) and (.paths | index($open) != null) and
   ((.command | contains($sealed)) and (.command | contains($open)))
-' >/dev/null
+' >/dev/null || { echo "pitr: $pitr" >&2; exit 1; }
 
 rows="$(meta_sql "SELECT COUNT(*) FROM binlog_files WHERE task_id='${task_id}' AND file_name='${SOURCE_FILE}'")"
 rows="$(printf '%s' "$rows" | tr -d '[:space:]')"
