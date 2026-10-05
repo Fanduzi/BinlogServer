@@ -12,6 +12,8 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.31] - 2026-10-05
+
 ### Fixed
 
 - `GET /api/tasks/{id}/replay` with `stop_datetime`, and the same query on `GET /api/tasks/{id}/replay/archive`, no longer treats the source file's format description or previous-GTIDs timestamp as coverage. Those headers record when the source binlog was created. A `LATEST` backup, and any start in the middle of a file, writes that format description in front of the first copied event. Asking for a UTC time before that first copied event returns an empty window: `paths` is `[]` and `command` is empty. A time that contains a copied event still returns that file. The `mysqlbinlog` flags are unchanged. No new config key. No schema migration.
