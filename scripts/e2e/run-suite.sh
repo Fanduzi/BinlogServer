@@ -195,7 +195,7 @@ run_scenario() {
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-epoch-segments.sh"
       ;;
     smoke-gtid-purge)
-      E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"
+      E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"
       ;;
     smoke-scale)
       E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" "$ROOT_DIR/scripts/e2e/smoke-scale.sh"
