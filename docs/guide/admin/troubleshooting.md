@@ -55,6 +55,9 @@
 | `lease acquire failed` | 租约被其他 worker 持有 | 正常现象，或检查是否有重复 worker |
 | `checkpoint save failed` | 无法保存位点 | 检查元数据库连接 |
 | `SEGMENT_NOT_ON_WORKER` | 租约已经到这台 worker，分段目录还在死掉的 worker 上。`last_error` 里的路径就是 `binlog_files.file_path`，本机读不到 | 把该路径挂到这台 worker，或把分段拷过来，再 `POST /api/tasks/{id}/start`。不要在新目录上从位置 4 重拉。checkpoint 已在 `UPLOADED` 对象里时任务不会停在这个错误，会从对象续。见部署指南 6.3 第 2 节 |
+| `SEALED_FILE_EXISTS` | 轮转要封的文件已经在这块盘上。任务是 `FAILED`，租约已放开，不再连源 | 确认这个封存文件是要留下的那一份。冲突的 open 分段不要再封成同一个名字。处理完再 `POST /api/tasks/{id}/start` |
+| `CHECKPOINT_WRITE_FAILED` | checkpoint 写不进去，而且不是会死锁、断连、锁等待、只读切换这类瞬时错误。任务是 `FAILED`，租约已放开 | 看 `last_error` 里的数据库错误。表、权限或语法问题需要先修元数据库，再 `POST /api/tasks/{id}/start`。瞬时元数据错误仍是 `RETRY_BACKOFF`，不会用这个码 |
+| `lease/epoch mismatch` | 封文件时这台 worker 的租约 epoch 已经不是当前主人。本进程停止，不把任务写成 `FAILED`，也不再连源 | 看任务行上的 `owner_worker_id`。新主人还在跑就不用管。没有 store 时本进程显示 `STOPPED`，事件 `TASK_LEASE_YIELDED`。需要这台机器再跑时再 Start |
 | `api.auth.enabled=false cannot protect` | 鉴权未启用但尝试保护路由 | 设置 `api.auth.enabled=true` 或关闭保护 |
 | `bearer_token is required when protection is enabled` | 启用保护但未配置凭证 | 配置 `bearer_token` 或 `api_key` |
 | `http.*.read_timeout_sec must be > 0` | 超时参数配置非法 | 确保所有超时参数 > 0 |
@@ -203,6 +206,8 @@ curl http://localhost:8080/api/tasks/{task_id}/events?limit=50
 - `TASK_START_DISPATCHED` - 控制面已分发启动
 - `TASK_STARTED` / `TASK_RUNNING` - 任务启动并进入运行
 - `TASK_RUNNER_ERROR` / `TASK_RETRY_BACKOFF` - 执行错误与退避
+- `TASK_FAILED` - 不可恢复错误，租约已放开
+- `TASK_LEASE_YIELDED` - 租约 epoch 已不属于本进程，runner 停止且没有改写新主人的任务行
 - `TASK_LEASE_DEGRADED` / `TASK_LEASE_LOST` / `TASK_LEASE_GRACE_EXCEEDED` - 租约异常链路
 
 ### 3.5 集群状态

@@ -389,8 +389,19 @@ func (s *Scheduler) StopTask(id string) error {
 
 3. 如果错误不可重试
    → 状态: FAILED
+   → 立刻放开租约
    → 等待手动干预
 ```
+
+需要人工处理的本地错误直接进入 `FAILED`，`last_error` 以稳定错误码开头，并且不再连接源库：
+
+- `SEALED_FILE_EXISTS`：封存文件已经在磁盘上（`sealed file already exists`）
+- `CHECKPOINT_WRITE_FAILED`：checkpoint 写入不是瞬时元数据错误
+- 原有的 `SOURCE_ACCESS_DENIED`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`
+
+`SOURCE_UNREACHABLE` 连续 10 次后才 `FAILED`。runner ready 会把这个计数清零。其它可重试源错误、瞬时 checkpoint 写入、`OBJECT_PURGE_FAILED`、以及没有已存 GTID 的 MySQL 1236 保持 `RETRY_BACKOFF`，没有另外的次数上限。
+
+封文件时租约 epoch 已经不属于本进程：这不是 `FAILED`。本进程停止 runner，只放开自己的 epoch，不把共享任务行写成 `FAILED` 或 `RETRY_BACKOFF`。没有元数据库时本进程内存状态是 `STOPPED`，事件为 `TASK_LEASE_YIELDED`。
 
 ## 5. 并发安全
 
