@@ -89,8 +89,10 @@ type StartConfig struct {
 
 ```go
 type Storage struct {
-    Dir           string `json:"dir,omitempty"`            // 本地存储目录
-    RetentionDays int    `json:"retention_days,omitempty"` // 保留天数
+    Dir                 string `json:"dir,omitempty"`
+    RetentionDays       int    `json:"retention_days,omitempty"`        // 1..3650；另外两键省略时本地和桶都用它
+    LocalRetentionDays  int    `json:"local_retention_days,omitempty"`  // 0 或省略 = retention_days
+    BucketRetentionDays int    `json:"bucket_retention_days,omitempty"` // 0 或省略 = retention_days；必须 >= 本地保留
 }
 ```
 

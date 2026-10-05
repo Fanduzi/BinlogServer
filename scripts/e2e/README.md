@@ -25,7 +25,7 @@
 兼容性说明：
 
 - `run-server.sh` 构建的临时 Linux 测试二进制默认关闭 CGO，用于贴近 release 产物的 `glibc 2.17` 兼容基线。
-- `smoke-retry-upload` 从 Quay 拉 MinIO / `mc`（`MINIO_IMAGE` / `MC_IMAGE` 可覆盖）。Docker Hub 的 `minio/minio` 与 `minio/mc` 已拒绝匿名拉取。
+- `smoke-retry-upload` 和 `smoke-split-retention` 从 Quay 拉 MinIO / `mc`（`MINIO_IMAGE` / `MC_IMAGE` 可覆盖）。Docker Hub 的 `minio/minio` 与 `minio/mc` 已拒绝匿名拉取。`smoke-split-retention` 在 Quay 返回 401 时改用 GitHub release 的同版本 linux 二进制（`MINIO_RELEASE` / `MC_RELEASE`）。
 
 ## 推荐入口
 
@@ -83,6 +83,7 @@ make e2e-topology-check
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
 - `smoke-invalid-inputs.sh`: 验证任务 API 对非法输入返回 `400`（cluster_key/source/start/storage）。
 - `smoke-retry-upload.sh`: 验证上传失败不阻断拉流；MinIO 恢复后，已封存的 `UPLOAD_FAILED` 由后台补传变成 `UPLOADED`，场景本身不调用 `/api/tasks/{id}/files/retry-upload`。open 分段不会变成 `UPLOADED`。补传成功的封存文件 `checksum` 为 `match`；同一 MinIO 上内容不同的对象为 `mismatch`，且不让上传调用方失败。桶不可用时，把已封存失败文件的 mtime 拨到保留期之外再 `FLUSH BINARY LOGS`，文件、目录行和复制都留着，并只记一条 `RETENTION_SKIPPED_NOT_UPLOADED`；桶恢复并上传成功后，下一次打开文件会把它清掉。
+- `smoke-split-retention.sh`: 验证桶保留短于本地保留时创建任务返回 400；只配 `storage.retention_days` 的响应不含新字段，过期已上传文件仍同时删对象、目录行和本地文件；`local_retention_days` 短于 `bucket_retention_days` 时，介于两者之间的已上传文件只删本地，`location` 为 `bucket`，下载、`replay`、`stop_datetime` 和 `replay/archive` 仍读到对象。
 - `smoke-scale.sh`: 可选的 1000 控制面任务/100 实时流规模证据；复用单个 MySQL fixture（不把它当作数百个独立集群），按 100 条 batch 创建、校验分页/聚合、受控启动流，先写 priming marker 再快照每条 checkpoint，第二个 marker 后验证每条流推进及其 checkpoint 精确文件，并写入 JSON 报告。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
@@ -166,6 +167,15 @@ make e2e-topology-check
 8. 断言仍在的封存文件 `checksum` 为 `match`。
 9. 对同一个 MinIO，把与封存文件等长但内容不同的对象写入后，`TestApplySealedUpload_MinIOChecksum` 断言 `checksum` 为 `mismatch` 且调用方不返回错误；匹配的上传（含大于 16MiB 的分片对象）仍为 `match`。
 10. 再次写入并确认 checkpoint 继续推进。
+
+## smoke-split-retention 场景说明
+
+该场景证明本地保留和桶保留可以分开，并且只配 `retention_days` 的任务仍按原来的一次清理删掉对象、目录行和本地文件：
+
+1. 从 Quay 启动 minio；Quay 不可用时改用 GitHub release 二进制。以 upload 和 `meta_dsn` 启动 binlog-server。
+2. 创建桶保留短于本地保留的任务，HTTP 400，正文含 `shorter than local retention`。
+3. 只带 `storage.retention_days` 的任务响应里没有 `local_retention_days` 和 `bucket_retention_days`。把它的一份已上传封存文件的 mtime 拨到 10 天前，再 rotate。本地文件、目录行和对象一起消失。
+4. `local_retention_days=1`、`bucket_retention_days=30` 的任务里，mtime 早于本地、仍在桶保留内的 `UPLOADED` 文件只从磁盘删除。`location` 是 `bucket`，`GET /files/{name}` 的字节与删除前一致，对象还在。`replay` 的 `locations` 对这条路径是 `bucket`，`stop_datetime` 窗口和 `replay/archive` 仍包含它。mtime 早于桶保留的另一份则对象、目录行和本地文件一起消失。
 
 ## meta-failover 场景说明
 

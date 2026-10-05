@@ -648,11 +648,47 @@ func normalizeAndValidateStartConfig(start StartConfig) (StartConfig, error) {
 	}
 }
 
+// EffectiveLocalRetentionDays is how long a sealed file stays on local disk.
+// An omitted local_retention_days uses retention_days, then the default.
+func (s Storage) EffectiveLocalRetentionDays() int {
+	if s.LocalRetentionDays > 0 {
+		return s.LocalRetentionDays
+	}
+	if s.RetentionDays > 0 {
+		return s.RetentionDays
+	}
+	return defaultRetentionDays
+}
+
+// EffectiveBucketRetentionDays is how long an uploaded object and its catalog
+// row stay. An omitted bucket_retention_days uses retention_days, then the default.
+func (s Storage) EffectiveBucketRetentionDays() int {
+	if s.BucketRetentionDays > 0 {
+		return s.BucketRetentionDays
+	}
+	if s.RetentionDays > 0 {
+		return s.RetentionDays
+	}
+	return defaultRetentionDays
+}
+
 // normalizeAndValidateStorage 归一化并校验存储策略。
+// 只配 retention_days 时本地和桶的有效天数相同。桶短于本地则拒绝。
 func normalizeAndValidateStorage(storage Storage) (Storage, error) {
 	normalized := storage
 	if normalized.RetentionDays < minRetentionDays || normalized.RetentionDays > maxRetentionDays {
 		return Storage{}, ErrInvalidRetentionDays
+	}
+	if normalized.LocalRetentionDays != 0 && (normalized.LocalRetentionDays < minRetentionDays || normalized.LocalRetentionDays > maxRetentionDays) {
+		return Storage{}, fmt.Errorf("%w: storage.local_retention_days must be 1-3650", ErrInvalidRetentionDays)
+	}
+	if normalized.BucketRetentionDays != 0 && (normalized.BucketRetentionDays < minRetentionDays || normalized.BucketRetentionDays > maxRetentionDays) {
+		return Storage{}, fmt.Errorf("%w: storage.bucket_retention_days must be 1-3650", ErrInvalidRetentionDays)
+	}
+	localDays := normalized.EffectiveLocalRetentionDays()
+	bucketDays := normalized.EffectiveBucketRetentionDays()
+	if bucketDays < localDays {
+		return Storage{}, fmt.Errorf("%w: storage.bucket_retention_days (%d) is shorter than local retention (%d)", ErrInvalidRetentionDays, bucketDays, localDays)
 	}
 	return normalized, nil
 }

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, OPEN/SEALED observability, checksum match, mismatch, or empty when the object HEAD fails, at-tip replication progress, and the process-local KeepLocalSegments flag for adopted leftover directories
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match, mismatch, or empty when the object HEAD fails, files-list location, at-tip replication progress, and the process-local KeepLocalSegments flag for adopted leftover directories
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -144,9 +144,14 @@ func (s *StartConfig) UnmarshalJSON(data []byte) error {
 }
 
 // Storage 描述本地存储策略。
+// retention_days 仍是必填边界。local_retention_days 与 bucket_retention_days
+// 省略或为 0 时都等于 retention_days，清理行为和只配 retention_days 时相同。
+// 桶保留短于本地保留时，创建和更新拒绝。
 type Storage struct {
-	Dir           string `json:"dir,omitempty"`
-	RetentionDays int    `json:"retention_days,omitempty"`
+	Dir                 string `json:"dir,omitempty"`
+	RetentionDays       int    `json:"retention_days,omitempty"`
+	LocalRetentionDays  int    `json:"local_retention_days,omitempty"`
+	BucketRetentionDays int    `json:"bucket_retention_days,omitempty"`
 }
 
 // TaskEvent 是任务事件流中的一条记录。
@@ -198,6 +203,10 @@ type BinlogFile struct {
 	// Empty means the object HEAD did not finish. Empty is not verified.
 	Checksum   string    `json:"checksum,omitempty"`
 	UploadedAt time.Time `json:"uploaded_at"`
+	// Location is local, bucket, or both. The files list fills it in.
+	// It is not stored. bucket means this sealed UPLOADED object is the only
+	// copy: file_path is the catalog path and is not on this process.
+	Location string `json:"location,omitempty"`
 }
 
 const (
