@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends, and the next file named by a sealed rotate
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), and the next file named by a sealed rotate
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -81,8 +81,13 @@ func DurableResumeDir(taskDir string) (file string, pos uint32, ok bool) {
 }
 
 // DurableCursor walks complete events. pos is the last event's end log_pos.
-// end is the file offset of the first torn byte, or the file size when the
-// segment ends on an event boundary.
+// An event whose end log_pos is 0 is artificial (a source restart's Rotate,
+// or a format description that was not given a position). It is not a resume
+// position. When a real event precedes it, pos and end stay on that event so
+// the artificial bytes can be dropped. end is the file offset of the first
+// byte after that event: a torn tail, or a trailing artificial event, sits
+// at or after end. A segment with no event whose end log_pos is greater than
+// 0 is not a resume point.
 func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -119,11 +124,14 @@ func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
 			break
 		}
 		offset += eventSize
+		if logPos == 0 {
+			continue
+		}
 		lastPos = logPos
 		lastEnd = offset
 		found = true
 	}
-	if !found || lastPos == 0 {
+	if !found {
 		return 0, 0, size, false
 	}
 	return lastPos, lastEnd, size, true
