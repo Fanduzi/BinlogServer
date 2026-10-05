@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.32
+### 1. Download, verify, and unpack v0.5.33
 
 ```bash
-VER=0.5.32
+VER=0.5.33
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.32` `checksums.txt`:
+Published `v0.5.33` `checksums.txt`:
 
 ```text
-4447eb25cc3aabba7407db18e536b96c6415e124924c05ecf2caee0bd6ae2230  binlog-server_0.5.32_darwin_amd64.tar.gz
-47aa09934bbae99d37122057f75d84ecffbafa9e2ec830358631403dd5fa89c5  binlog-server_0.5.32_darwin_arm64.tar.gz
-edd73ddc4ce812e58b941e7f4050f6816ff39b8ad1b52037b35d99e206813459  binlog-server_0.5.32_linux_amd64.tar.gz
-7f14960ba5b2bc363f3923a414cfdffb18adb28b4fe6bd625772a4015be20a1b  binlog-server_0.5.32_linux_arm64.tar.gz
+f19d7e8071f2ff5e3e9db7c5eedb85b0e19ff70e16a5f5f325b3796d5891fb0a  binlog-server_0.5.33_darwin_amd64.tar.gz
+6ea6039c13e39f570877c6cbc570a02416b2d7cb0d92e954b9348a3014537578  binlog-server_0.5.33_darwin_arm64.tar.gz
+028c47cb8b5fa529afe225fe8586c984f374e00cb86ca307510d977341126f43  binlog-server_0.5.33_linux_amd64.tar.gz
+185091c6a31ebd985a409bba3cd14a60c3f9ea1991f8cab690694fca1445c739  binlog-server_0.5.33_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.32_linux_amd64/
+binlog-server_0.5.33_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -257,18 +257,18 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.32)
+## Upgrade Notes (v0.5.33)
 
-Before upgrading existing deployments to `v0.5.32`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, and `v0.5.31` stay in the release notes linked below.
+Before upgrading existing deployments to `v0.5.33`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, and `v0.5.32` stay in the release notes linked below.
 
-- **Zero Schema Migrations:** `v0.5.32` requires no database migration (`000001_init_schema` unchanged). No new state. No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
-- **A mismatched object is not a durable upload:** A sealed upload whose stored object does not match the local bytes is `UPLOAD_FAILED`. `upload_error` is `checksum mismatch`. `checksum` stays `mismatch`. A comparison that could not finish, which is an object HEAD error, is `UPLOAD_FAILED` with an empty `checksum`. `upload_error` begins with `checksum verify failed:`. Empty is not `match` and not `mismatch`. Up to `v0.5.31`, that row could stay `UPLOADED`, and retention could delete the local copy. The published v0.5.31 package still does that. Replication keeps running.
-- **Retention keeps the local file until the checksum matches:** With object storage and a catalog, retention does not delete that local file or its catalog row, and it writes one `RETENTION_SKIPPED_NOT_UPLOADED` event. The background upload retry and `POST /api/tasks/{id}/files/retry-upload` upload a checksum mismatch again. An unfinished comparison is checked again and is not uploaded again. Only an `UPLOADED` row whose checksum is `match` lets retention delete the local file. An `UPLOADED` row already stored with `mismatch` or an empty checksum, whose local file is still on disk, is kept. The next retention pass records it as `UPLOAD_FAILED`.
-- **How to tell:** Check `GET /api/tasks/{id}/files` for `UPLOADED` rows whose `checksum` is `mismatch` or empty. If that local file is still on disk, the next retention pass on `v0.5.32` keeps it. If the local file is already gone, this release does not restore it. A checksum is compared once after upload. An object changed in the bucket after it matched is not re-checked.
+- **Zero Schema Migrations:** `v0.5.33` requires no database migration (`000001_init_schema` unchanged). No new state. No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
+- **A crash during the sealed upload still reaches the bucket:** With object storage, the catalog row is written before the PUT. The row is `state` `SEALED`, `upload_state` `UPLOAD_FAILED`, `upload_error` `upload pending`, and the object key is set. The checkpoint for the next binlog file is written before that PUT. The PUT is bounded by `meta.timeout.upload_sec` (30 seconds by default). When the deadline fires, the row stays `UPLOAD_FAILED` and replication opens the next file. Up to `v0.5.32`, a crash after the file was renamed and before the upload was recorded left the file `LOCAL_ONLY` or outside the `UPLOAD_FAILED` set. The background retry left it alone. A lease takeover could fail with `SEGMENT_NOT_ON_WORKER`. The upload right after seal had no deadline, so a hung object store held the dump loop and this worker kept the lease. The published v0.5.32 package still does that. Replication keeps running.
+- **Restart and takeover enroll the sealed file:** On the next start, including a lease takeover, a sealed file on this worker's disk that never became `UPLOADED` is recorded as `UPLOAD_FAILED` with its object key and `upload_error` `upload pending`. When the checkpoint is still on that sealed file and the last complete event is the rotate that names the next file, the checkpoint moves to that next file. A rotate position of 0 is stored as 4. The worker that pulls binlog runs the background retry, which uploads the file and checks the checksum. A control-plane-only process does not. `GET /api/tasks/{id}/files` shows `upload_state` `UPLOAD_FAILED` and `location` `local` while the file is waiting, then `UPLOADED`, checksum `match`, and `location` `both` while the file is still on disk. With object storage and a catalog, retention keeps that local file and its catalog row until the checksum is `match`. Once the file is older than the local retention window, that pass writes one `RETENTION_SKIPPED_NOT_UPLOADED` event. A task with no object storage seals as `LOCAL_ONLY` with an empty object key. `POST /api/tasks/{id}/files/retry-upload` returns HTTP 400, body `upload retry is not available`.
+- **How to tell:** After `meta.timeout.upload_sec` fires, `upload_error` still reads `upload pending`. For a file enrolled after a crash, `sealed_at` is the time this process opened the file. The catalog writes `sealed_at` with the same value as `created_at`. While the post-seal PUT is hanging, this process writes no new local binlog events until the timeout fires, and the background retry may PUT the same object key again with the same sealed bytes. The next run with object storage configured uploads a sealed `LOCAL_ONLY` file that is still on disk. A checksum is still compared once after upload. An object changed in the bucket after it matched is not re-checked.
 
-Full release notes: [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md)
 
-Notes for v0.5.27 through v0.5.31: [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
+Notes for v0.5.27 through v0.5.32: [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 
 ---
