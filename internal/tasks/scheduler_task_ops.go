@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors and cancels a live run instead of overwriting it when the row is STOPPING or STOPPED, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -448,6 +448,7 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 func (s *Scheduler) GetTask(id string) (Task, error) {
 	// 有 store 时按主键读最新值。store 说没有就是没有；其它错误原样失败，
 	// 不把内存里的旧主人/epoch 抄本当成读成功，也不改扫 data_dir。
+	// 行已经是 STOPPING 或 STOPPED、且本进程还在跑时，取消这次执行，不用这行覆盖内存里的 owner/epoch。
 	// 没有 store 时先读内存名单，再认 {data_dir}/{id} 里仍有分段的目录。
 	s.mu.Lock()
 	task, ok := s.tasks[id]
@@ -463,7 +464,9 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 			return Task{}, err
 		}
 		s.mu.Lock()
-		s.tasks[id] = item
+		if !s.noteRemoteStopLocked(item) {
+			s.tasks[id] = item
+		}
 		s.mu.Unlock()
 		return item, nil
 	}
