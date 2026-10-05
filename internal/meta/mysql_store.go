@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (sealed before open epochs of the same index; limit keeps the highest indexes) including checksum, DeleteBinlogFile by task id and file name, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -23,7 +23,7 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-const minRequiredSchemaVersion int64 = 1
+const minRequiredSchemaVersion int64 = 2
 
 const currentSchemaVersionSQL = `
 SELECT version, dirty
@@ -90,7 +90,7 @@ var requiredTableSchemas = []tableSchemaSpec{
 			"size_bytes", "start_pos", "end_pos", "created_at", "sealed_at", "object_key",
 			"upload_state", "upload_error", "uploaded_at",
 		},
-		Indexes: []string{"PRIMARY", "uk_task_file", "idx_task_sealed"},
+		Indexes: []string{"PRIMARY", "uk_task_file_epoch", "idx_task_sealed"},
 	},
 	{
 		Name: "task_leases",
@@ -206,11 +206,12 @@ LIMIT ?;
 
 const upsertBinlogFileSQL = `
 INSERT INTO binlog_files (
-  task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
+  task_id, file_name, source_file, file_path, epoch, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
   object_key, upload_state, upload_error, uploaded_at, checksum
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
+  source_file = VALUES(source_file),
   file_path = VALUES(file_path),
   state = VALUES(state),
   size_bytes = VALUES(size_bytes),
@@ -227,28 +228,29 @@ ON DUPLICATE KEY UPDATE
 
 // listBinlogFilesSQL loads every catalog row for one task. Replay order and the
 // limit window are applied in Go (tasks.WindowBinlogFilesForReplay) so they
-// match the disk scan: ascending source index, sealed before open epochs of
-// that index, and the highest indexes when limit is smaller than the total.
+// match the disk scan: ascending source index, then epoch, and the highest
+// indexes when limit is smaller than the total.
 // The failed-upload query keeps its own sealed_at order.
 const deleteBinlogFileSQL = `
 DELETE FROM binlog_files
-WHERE task_id = ? AND file_name = ?
+WHERE task_id = ? AND file_name = ? AND epoch = ?
 `
 
 const listBinlogFilesSQL = `
 SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
-       object_key, upload_state, upload_error, uploaded_at, checksum
+       object_key, upload_state, upload_error, uploaded_at, checksum, epoch
 FROM binlog_files
 WHERE task_id = ?
 `
 
 const listFailedSealedBinlogFilesSQL = `
 SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
-       object_key, upload_state, upload_error, uploaded_at
+       object_key, upload_state, upload_error, uploaded_at, epoch
 FROM binlog_files
 WHERE task_id = ?
   AND upload_state = 'UPLOAD_FAILED'
   AND file_name NOT LIKE '%.open.e%'
+  AND file_path NOT LIKE '%.open.e%'
 ORDER BY sealed_at DESC
 LIMIT ?;
 `
@@ -1177,7 +1179,9 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 			upsertBinlogFileSQL,
 			meta.TaskID,
 			meta.FileName,
+			meta.FileName,
 			meta.FilePath,
+			meta.Epoch,
 			state,
 			meta.SizeBytes,
 			meta.StartPos,
@@ -1194,8 +1198,8 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	})
 }
 
-// DeleteBinlogFile removes one catalog row. Zero rows is success.
-func (s *MySQLTaskStore) DeleteBinlogFile(ctx context.Context, taskID, fileName string) error {
+// DeleteBinlogFile removes one epoch's catalog row. Zero rows is success.
+func (s *MySQLTaskStore) DeleteBinlogFile(ctx context.Context, taskID, fileName string, epoch int64) error {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.delete_binlog_file")
 	defer endMetaSpan(span)
 
@@ -1205,7 +1209,7 @@ func (s *MySQLTaskStore) DeleteBinlogFile(ctx context.Context, taskID, fileName 
 		return fmt.Errorf("task id and file name are required")
 	}
 	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		_, err := s.db.ExecContext(ctx, deleteBinlogFileSQL, taskID, fileName)
+		_, err := s.db.ExecContext(ctx, deleteBinlogFileSQL, taskID, fileName, epoch)
 		return err
 	})
 }
@@ -1247,6 +1251,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 			&item.UploadError,
 			&uploadedAt,
 			&checksum,
+			&item.Epoch,
 		); err != nil {
 			return nil, err
 		}
@@ -1299,6 +1304,7 @@ func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID
 			&item.UploadState,
 			&item.UploadError,
 			&uploadedAt,
+			&item.Epoch,
 		); err != nil {
 			return nil, err
 		}

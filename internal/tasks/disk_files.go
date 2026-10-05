@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for one path per source index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
+// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"binlog_server/internal/binlog"
 )
 
 const binlogOpenEpochMark = ".open.e"
@@ -40,7 +42,7 @@ func listTaskBinlogFilesOnDisk(dataDir, taskID string, limit int) ([]BinlogFile,
 			continue
 		}
 		name := entry.Name()
-		source, _, _, state, ok := classifyBinlogSegment(name)
+		source, _, epoch, state, ok := classifyBinlogSegment(name)
 		if !ok {
 			continue
 		}
@@ -56,6 +58,9 @@ func listTaskBinlogFilesOnDisk(dataDir, taskID string, limit int) ([]BinlogFile,
 			SizeBytes:   info.Size(),
 			UploadState: "LOCAL_ONLY",
 			CreatedAt:   info.ModTime().UTC(),
+		}
+		if epoch >= 0 {
+			item.Epoch = epoch
 		}
 		if state == "SEALED" {
 			item.SealedAt = item.CreatedAt
@@ -88,7 +93,8 @@ func WindowBinlogFilesForReplay(files []BinlogFile, limit int) []BinlogFile {
 }
 
 // ReplaySet is the restore argument list for one task.
-// Paths are inventory file_path values, one per source index, ascending.
+// Paths are inventory file_path values, ascending: every sealed segment of a
+// source index, then its highest open epoch.
 // Locations is the same order: local, bucket, or both. bucket means that
 // path is the catalog file_path and is not on this process; download and
 // replay/archive still read the object. Do not pass a bucket path to
@@ -117,33 +123,67 @@ func ReplayClient(flavor string) (client, hint string) {
 	}
 }
 
-// SelectReplayFiles keeps one file per source index from an inventory window.
-// The window is the files list: ascending source index, and for one index the
-// sealed name before .open.e* epochs. The kept path is the highest epoch still
-// in that window. A sealed name and one or more .open.e* for the same index
-// keep the highest-epoch open path, not the sealed name and not every epoch.
-// The index is the numeric suffix, the same key the inventory sort uses.
-// Rows that are not a binlog segment, or have an empty file_path, are dropped.
-// An empty window returns an empty slice.
+// SelectReplayFiles keeps every sealed segment and the highest open epoch of
+// each source index. A later .open.e* does not drop an earlier sealed path:
+// events that exist only in that sealed segment stay in the restore list.
+// A lower open epoch of the same index is dropped. A sealed row is omitted
+// only when the kept open row carries the same object key, which means those
+// bytes were copied into the open file. Rows that are not a binlog segment,
+// or have an empty file_path, are dropped. An empty window returns an empty slice.
 func SelectReplayFiles(files []BinlogFile) []BinlogFile {
-	out := make([]BinlogFile, 0)
+	opens := make(map[uint64]BinlogFile)
+	sealed := make([]BinlogFile, 0)
 	for _, file := range files {
 		key := binlogSegmentKey(file)
 		if !key.ok || strings.TrimSpace(file.FilePath) == "" {
 			continue
 		}
-		if n := len(out); n > 0 {
-			prev := binlogSegmentKey(out[n-1])
-			if prev.ok && prev.seq == key.seq {
-				if key.epoch >= prev.epoch {
-					out[n-1] = file
-				}
-				continue
+		if segmentIsOpen(file) {
+			prev, ok := opens[key.seq]
+			if !ok || key.epoch >= binlogSegmentKey(prev).epoch {
+				opens[key.seq] = file
 			}
+			continue
+		}
+		sealed = append(sealed, file)
+	}
+	out := make([]BinlogFile, 0, len(sealed)+len(opens))
+	for _, file := range sealed {
+		if sealedCopiedIntoOpen(file, opens) {
+			continue
 		}
 		out = append(out, file)
 	}
+	for _, file := range opens {
+		out = append(out, file)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return binlogSegmentLess(out[i], out[j])
+	})
 	return out
+}
+
+func segmentIsOpen(file BinlogFile) bool {
+	switch strings.ToUpper(strings.TrimSpace(file.State)) {
+	case "SEALED":
+		return false
+	case "OPEN":
+		return true
+	}
+	_, _, _, state, ok := classifyBinlogSegment(filepath.Base(file.FilePath))
+	return ok && state == "OPEN"
+}
+
+func sealedCopiedIntoOpen(file BinlogFile, opens map[uint64]BinlogFile) bool {
+	key := strings.TrimSpace(file.ObjectKey)
+	if key == "" {
+		return false
+	}
+	open, ok := opens[binlogSegmentKey(file).seq]
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(open.ObjectKey) == key
 }
 
 // ReplayLocations is one location per selected replay file, same order as paths.
@@ -219,42 +259,15 @@ func taskBinlogDir(dataDir, taskID string) (string, bool) {
 }
 
 func classifyBinlogSegment(name string) (source string, seq uint64, epoch int64, state string, ok bool) {
-	if name == "" || strings.HasPrefix(name, ".") {
+	named, ok := binlog.ClassifySegment(name)
+	if !ok {
 		return "", 0, 0, "", false
 	}
 	state = "SEALED"
-	epoch = -1
-	source = name
-	if idx := strings.LastIndex(name, binlogOpenEpochMark); idx > 0 {
-		epochText := name[idx+len(binlogOpenEpochMark):]
-		if epochText == "" || strings.ContainsAny(epochText, "./\\") {
-			return "", 0, 0, "", false
-		}
-		n, err := strconv.ParseInt(epochText, 10, 64)
-		if err != nil || n < 0 {
-			return "", 0, 0, "", false
-		}
-		source = name[:idx]
-		epoch = n
+	if named.Open {
 		state = "OPEN"
 	}
-	prefix, seq, ok := splitBinlogIndex(source)
-	if !ok || prefix == "" {
-		return "", 0, 0, "", false
-	}
-	return source, seq, epoch, state, true
-}
-
-func splitBinlogIndex(name string) (prefix string, seq uint64, ok bool) {
-	i := strings.LastIndex(name, ".")
-	if i <= 0 || i == len(name)-1 {
-		return "", 0, false
-	}
-	seq, err := strconv.ParseUint(name[i+1:], 10, 64)
-	if err != nil {
-		return "", 0, false
-	}
-	return name[:i], seq, true
+	return named.Source, named.Seq, named.Epoch, state, true
 }
 
 func binlogSegmentLess(a, b BinlogFile) bool {

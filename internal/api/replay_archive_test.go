@@ -38,7 +38,7 @@ func TestTaskAPI_ReplayArchiveMatchesReplayWindow(t *testing.T) {
 	bodies := map[string][]byte{
 		"mysql-bin.000001":         []byte("sealed-1"),
 		"mysql-bin.000002":         bytes.Repeat([]byte("b"), 600),
-		"mysql-bin.000003":         []byte("sealed-3-dropped"),
+		"mysql-bin.000003":         []byte("sealed-3"),
 		"mysql-bin.000003.open.e1": []byte("e1-dropped"),
 		"mysql-bin.000003.open.e9": []byte("open-e9"),
 		"notes.txt":                []byte("notes"),
@@ -55,8 +55,8 @@ func TestTaskAPI_ReplayArchiveMatchesReplayWindow(t *testing.T) {
 	if got := string(full.entries["mysql-bin.000003.open.e9"]); got != "open-e9" {
 		t.Fatalf("open bytes %q", got)
 	}
-	if _, ok := full.entries["mysql-bin.000003"]; ok {
-		t.Fatal("sealed name kept beside a higher open epoch")
+	if got := string(full.entries["mysql-bin.000003"]); got != "sealed-3" {
+		t.Fatalf("sealed bytes %q", got)
 	}
 	if _, ok := full.entries["mysql-bin.000003.open.e1"]; ok {
 		t.Fatal("lower open epoch kept")
@@ -173,7 +173,7 @@ func TestTaskAPI_ReplayArchiveObjectBytesAndNoPartial(t *testing.T) {
 	opener := &keyedObjectStore{bodies: map[string][]byte{
 		"prefix/mysql-bin.000001": objectOne,
 		"prefix/mysql-bin.000002": objectTwo,
-		"prefix/mysql-bin.000003": []byte("sealed-not-selected"),
+		"prefix/mysql-bin.000003": []byte("sealed-3-object"),
 	}}
 	scheduler := tasks.NewScheduler(tasks.WithFileStore(store), tasks.WithDataDir(dir), tasks.WithFileUploader(opener))
 	handler := NewServer(scheduler)
@@ -194,6 +194,7 @@ func TestTaskAPI_ReplayArchiveObjectBytesAndNoPartial(t *testing.T) {
 	want := map[string]string{
 		"mysql-bin.000001":         string(objectOne),
 		"mysql-bin.000002":         string(localTwo),
+		"mysql-bin.000003":         "sealed-3-object",
 		"mysql-bin.000003.open.e2": string(openBody),
 	}
 	if len(got.entries) != len(want) {
@@ -204,10 +205,10 @@ func TestTaskAPI_ReplayArchiveObjectBytesAndNoPartial(t *testing.T) {
 			t.Fatalf("%s bytes %q", name, got.entries[name])
 		}
 	}
-	if bytes.Contains(got.raw, secret) || bytes.Contains(got.raw, objectTwo) || bytes.Contains(got.raw, []byte("sealed-not-selected")) {
-		t.Fatal("archive followed catalog path, lost local bytes, or included an unselected object")
+	if bytes.Contains(got.raw, secret) || bytes.Contains(got.raw, objectTwo) || !bytes.Contains(got.raw, []byte("sealed-3-object")) {
+		t.Fatal("archive followed the local catalog path, dropped the sealed object, or included the replaced object")
 	}
-	if strings.Join(opener.keys, ",") != "prefix/mysql-bin.000001" {
+	if strings.Join(opener.keys, ",") != "prefix/mysql-bin.000001,prefix/mysql-bin.000003" {
 		t.Fatalf("object keys %v", opener.keys)
 	}
 

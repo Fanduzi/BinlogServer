@@ -186,9 +186,13 @@ type WorkerHeartbeat struct {
 
 // BinlogFile 描述单个 binlog 文件在本地和上传阶段的元数据。
 type BinlogFile struct {
-	TaskID      string    `json:"task_id"`
-	FileName    string    `json:"file_name"`
-	FilePath    string    `json:"file_path"`
+	TaskID   string `json:"task_id"`
+	FileName string `json:"file_name"`
+	FilePath string `json:"file_path"`
+	// Epoch is the durable segment generation. 0 is a plain sealed name from
+	// this process or from an older release. A later .open.eN or .sealed.eN
+	// uses N. file_name stays the source binlog name.
+	Epoch       int64     `json:"epoch,omitempty"`
 	State       string    `json:"state"`
 	SizeBytes   int64     `json:"size_bytes"`
 	StartPos    uint32    `json:"start_pos"`

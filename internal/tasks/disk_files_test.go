@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: temporary data directories with sealed and open binlog segment names
-// output: assertions for disk listing order, catalog replay window, one-path-per-index replay selection, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
+// output: assertions for disk listing order, catalog replay window, replay selection of every sealed segment plus the highest open epoch, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
 // pos: regression coverage for standalone files listing when meta has no catalog rows
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -32,6 +32,7 @@ func TestListTaskBinlogFilesOnDisk_OrderAndOpenPath(t *testing.T) {
 	write("mysql-bin.000010", "ten")
 	write("notes.txt", "skip")
 	write("mysql-bin.000004.open.e9", "e9")
+	write("mysql-bin.000004.sealed.e7", "e7")
 	write("mysql-bin.000003", "sealed")
 	write("mysql-bin.000004.open.e1", "e1")
 	write("mariadb-bin.000001", "maria")
@@ -48,6 +49,7 @@ func TestListTaskBinlogFilesOnDisk_OrderAndOpenPath(t *testing.T) {
 		{"mariadb-bin.000001", "mariadb-bin.000001", "SEALED"},
 		{"mysql-bin.000003", "mysql-bin.000003", "SEALED"},
 		{"mysql-bin.000004", "mysql-bin.000004.open.e1", "OPEN"},
+		{"mysql-bin.000004", "mysql-bin.000004.sealed.e7", "SEALED"},
 		{"mysql-bin.000004", "mysql-bin.000004.open.e9", "OPEN"},
 		{"mysql-bin.000010", "mysql-bin.000010", "SEALED"},
 	}
@@ -68,6 +70,9 @@ func TestListTaskBinlogFilesOnDisk_OrderAndOpenPath(t *testing.T) {
 	}
 	if files[2].SizeBytes != int64(len("e1")) {
 		t.Fatalf("open size %d", files[2].SizeBytes)
+	}
+	if files[3].Epoch != 7 || files[3].State != "SEALED" {
+		t.Fatalf("sealed epoch %+v", files[3])
 	}
 }
 
@@ -149,6 +154,7 @@ func TestSelectReplayFiles_OnePathPerIndex(t *testing.T) {
 	}
 	want := []string{
 		"/data/1/mysql-bin.000003",
+		"/data/1/mysql-bin.000004",
 		"/data/1/mysql-bin.000004.open.e9",
 		"/data/1/mysql-bin.000005.open.e2",
 	}
@@ -168,11 +174,30 @@ func TestSelectReplayFiles_OnePathPerIndex(t *testing.T) {
 		{FilePath: "/data/1/mysql-bin.000004.open.e1"},
 	}
 	kept := SelectReplayFiles(reversed)
-	if len(kept) != 1 || kept[0].FilePath != "/data/1/mysql-bin.000004.open.e9" {
+	if len(kept) != 2 || kept[0].FilePath != "/data/1/mysql-bin.000004" || kept[1].FilePath != "/data/1/mysql-bin.000004.open.e9" {
 		t.Fatalf("kept %+v", kept)
 	}
 	if len(SelectReplayFiles(nil)) != 0 {
 		t.Fatal("nil input")
+	}
+}
+
+func TestSelectReplayFiles_KeepsSealedWhenOpenHasDifferentObject(t *testing.T) {
+	files := []BinlogFile{
+		{FilePath: "/data/1/mysql-bin.000004", State: "SEALED", ObjectKey: "prefix/mysql-bin.000004", UploadState: "UPLOADED"},
+		{FilePath: "/data/1/mysql-bin.000004.open.e2", State: "OPEN", UploadState: "LOCAL_ONLY"},
+	}
+	got := SelectReplayFiles(files)
+	if len(got) != 2 || got[0].FilePath != "/data/1/mysql-bin.000004" || got[1].FilePath != "/data/1/mysql-bin.000004.open.e2" {
+		t.Fatalf("got %+v", got)
+	}
+	copied := []BinlogFile{
+		{FilePath: "/data/1/mysql-bin.000004", State: "SEALED", ObjectKey: "prefix/mysql-bin.000004"},
+		{FilePath: "/data/1/mysql-bin.000004.open.e2", State: "OPEN", ObjectKey: "prefix/mysql-bin.000004"},
+	}
+	got = SelectReplayFiles(copied)
+	if len(got) != 1 || got[0].FilePath != "/data/1/mysql-bin.000004.open.e2" {
+		t.Fatalf("copied %+v", got)
 	}
 }
 
@@ -193,7 +218,7 @@ func TestSelectReplayFiles_LimitWindowKeepsHighestIndexes(t *testing.T) {
 		t.Fatalf("replay %+v", got)
 	}
 	all := SelectReplayFiles(WindowBinlogFilesForReplay(files, 10))
-	if len(all) != 3 || all[0].FilePath != "/data/1/mysql-bin.000001" || all[1].FilePath != "/data/1/mysql-bin.000002.open.e8" {
+	if len(all) != 4 || all[0].FilePath != "/data/1/mysql-bin.000001" || all[1].FilePath != "/data/1/mysql-bin.000002" || all[2].FilePath != "/data/1/mysql-bin.000002.open.e8" || all[3].FilePath != "/data/1/mysql-bin.000003" {
 		t.Fatalf("full %+v", all)
 	}
 }
