@@ -50,14 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.36)
+## 3. 安装与产物准备 (v0.5.37)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
 
-> ⚠️ **从 v0.5.35 滚动升级即可。** 这一版没有 schema migration。元数据 schema 仍是版本 2。`schema_migrations` 已经是版本 2 时，不用执行 `./migrate up`。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。以 GTID 启动的任务，落盘后 `gtid_set` 留下，并在事务提交时往前扩。源文件被清理后，流上的 MySQL 1236 会再打开 `StartSyncGTID`，任务进入 `RUNNING`（#175、#197、#198）。已经是空的 `gtid_set` 不会从本地文件重建。细节见 [v0.5.36 中文发布说明](../../releases/v0.5.36.zh-CN.md)。
+> ⚠️ **从 v0.5.36 滚动升级即可。** 这一版没有 schema migration。元数据 schema 仍是版本 2。`schema_migrations` 已经是版本 2 时，不用执行 `./migrate up`。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。本地自己消不掉的错误进入 `FAILED`：封存文件已存在是 `SEALED_FILE_EXISTS`，非瞬时 checkpoint 写入是 `CHECKPOINT_WRITE_FAILED`。租约放开，不再连源。处理完原因再 Start（#178）。细节见 [v0.5.37 中文发布说明](../../releases/v0.5.37.zh-CN.md)。
 
 ```bash
-VER=0.5.36
+VER=0.5.37
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,18 +69,18 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.36` `checksums.txt`：
+已发布的 `v0.5.37` `checksums.txt`：
 
 ```text
-39a894d91d955507be54a9af1895173459cfa8adf974bb45655c4bc05fe830e6  binlog-server_0.5.36_darwin_amd64.tar.gz
-35d0b9e9436cc2f823e57d8f0eb1a6db5dca801d8f25e1da1e610926261c0565  binlog-server_0.5.36_darwin_arm64.tar.gz
-1e168be5714f9d7fd687c7fb3c177953e77bdfdb890801ca956e38ae5f0f0947  binlog-server_0.5.36_linux_amd64.tar.gz
-4c7918cfc922bdee54c209a3158b4b58f23ada3109a323455c972462380d2638  binlog-server_0.5.36_linux_arm64.tar.gz
+536974d525dac9ecd9297e6b5efbca38e7481718392c02fc3221dd8b8436b591  binlog-server_0.5.37_darwin_amd64.tar.gz
+3d52f5a3a913e2cf53a049d15639960f16e7c2faa54839cca509dedd4d3fa55b  binlog-server_0.5.37_darwin_arm64.tar.gz
+5de35eec4c1d60b536c5ea204b5c4fe7a66a026330af727e46c3f07ebc6c2f72  binlog-server_0.5.37_linux_amd64.tar.gz
+7630b3d60c7a201379bbd9b9d2c90ec45193a00a78fdd07da3883199f71306d9  binlog-server_0.5.37_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.36_linux_amd64/
+binlog-server_0.5.37_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key)
