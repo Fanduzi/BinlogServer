@@ -255,8 +255,8 @@ func (s *sealFailCatalog) ListBinlogFiles(ctx context.Context, taskID string, li
 	return s.inner.ListBinlogFiles(ctx, taskID, limit)
 }
 
-func (s *sealFailCatalog) DeleteBinlogFile(ctx context.Context, taskID, fileName string) error {
-	return s.inner.DeleteBinlogFile(ctx, taskID, fileName)
+func (s *sealFailCatalog) DeleteBinlogFile(ctx context.Context, taskID, fileName string, epoch int64) error {
+	return s.inner.DeleteBinlogFile(ctx, taskID, fileName, epoch)
 }
 
 type recordingUploader struct {

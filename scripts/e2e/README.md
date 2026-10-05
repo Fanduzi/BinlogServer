@@ -84,6 +84,7 @@ make e2e-topology-check
 - `smoke-invalid-inputs.sh`: 验证任务 API 对非法输入返回 `400`（cluster_key/source/start/storage）。
 - `smoke-retry-upload.sh`: 验证上传失败不阻断拉流；MinIO 恢复后，已封存的 `UPLOAD_FAILED` 由后台补传变成 `UPLOADED`，场景本身不调用 `/api/tasks/{id}/files/retry-upload`。open 分段不会变成 `UPLOADED`。补传成功的封存文件 `checksum` 为 `match`；同一 MinIO 上内容不同的对象为 `mismatch`，且不让上传调用方失败。桶不可用时，把已封存失败文件的 mtime 拨到保留期之外再 `FLUSH BINARY LOGS`，文件、目录行和复制都留着，并只记一条 `RETENTION_SKIPPED_NOT_UPLOADED`；桶恢复并上传成功后，下一次打开文件会把它清掉。
 - `smoke-split-retention.sh`: 验证桶保留短于本地保留时创建任务返回 400；只配 `storage.retention_days` 的响应不含新字段，过期已上传文件仍同时删对象、目录行和本地文件；`local_retention_days` 短于 `bucket_retention_days` 时，介于两者之间的已上传文件只删本地，`location` 为 `bucket`，下载、`replay`、`stop_datetime` 和 `replay/archive` 仍读到对象。
+- `smoke-epoch-segments.sh`: 同一源文件名先有一条已上传的封存分段，再打开下一个 epoch。目录里两条都还在。`GET /files` 各显示一行。`GET /replay` 和带 `start_datetime`/`stop_datetime` 的恢复命令都包含封存路径和 `.open.e2`。旧对象键 `e2e/legacy/mysql-bin.000176` 还在封存行上。
 - `smoke-scale.sh`: 可选的 1000 控制面任务/100 实时流规模证据；复用单个 MySQL fixture（不把它当作数百个独立集群），按 100 条 batch 创建、校验分页/聚合、受控启动流，先写 priming marker 再快照每条 checkpoint，第二个 marker 后验证每条流推进及其 checkpoint 精确文件，并写入 JSON 报告。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 

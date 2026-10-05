@@ -45,6 +45,7 @@ Scenarios:
   smoke-invalid-inputs
   smoke-retry-upload
   smoke-split-retention
+  smoke-epoch-segments
   smoke-scale
 EOF
 }
@@ -138,7 +139,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments)
       return 0
       ;;
     *)
@@ -188,6 +189,9 @@ run_scenario() {
       ;;
     smoke-split-retention)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-split-retention.sh"
+      ;;
+    smoke-epoch-segments)
+      E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-epoch-segments.sh"
       ;;
     smoke-scale)
       E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" "$ROOT_DIR/scripts/e2e/smoke-scale.sh"

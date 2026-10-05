@@ -24,7 +24,7 @@ func newFakeFileStore() *fakeFileStore {
 func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile) error {
 	items := f.files[meta.TaskID]
 	for i := range items {
-		if items[i].FileName == meta.FileName {
+		if items[i].FileName == meta.FileName && items[i].Epoch == meta.Epoch {
 			items[i] = meta
 			f.files[meta.TaskID] = items
 			return nil
