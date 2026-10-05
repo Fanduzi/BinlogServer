@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file, and continues a file/pos resume with that GTID when the source returns MySQL 1236
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -304,11 +304,25 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	atTip := requestedLatest && !checkpointExists
 	segmentDir := ""
 	var carried *tasks.BinlogFile
+	flavor := task.Source.Flavor
+	if flavor == "" {
+		flavor = gomysql.MySQLFlavor
+	}
+	// gtidFallback is the executed set from the last flush. File/pos is tried
+	// first. MySQL 1236 means that file is gone, and this set is how the dump
+	// continues. A rewound position does not carry the set; the stored row does.
+	gtidFallback := ""
+	if checkpointExists {
+		gtidFallback = strings.TrimSpace(stored.GTIDSet)
+	}
 	if resume, ok := tasks.NextResumePosition(r.dataDir, task, stored, checkpointExists); ok {
 		start = tasks.StartConfig{
 			Mode: tasks.StartModeFilePos,
 			File: resume.File,
 			Pos:  resume.Pos,
+		}
+		if g := strings.TrimSpace(resume.GTIDSet); g != "" {
+			gtidFallback = g
 		}
 		atTip = false
 	}
@@ -340,6 +354,9 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 					Mode: tasks.StartModeFilePos,
 					File: decision.Checkpoint.File,
 					Pos:  decision.Checkpoint.Pos,
+				}
+				if g := strings.TrimSpace(decision.Checkpoint.GTIDSet); g != "" {
+					gtidFallback = g
 				}
 				if decision.Dir != "" {
 					segmentDir = decision.Dir
@@ -453,11 +470,28 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 		return appendAndPersist(payload, next)
 	}
 
+	// executed is the GTID set of transactions fully flushed. The seed is the
+	// stored checkpoint when one exists, otherwise the GTID the task was
+	// created with. An empty checkpoint write used to replace that set.
+	executed := newExecutedGTID(flavor, gtidSeed(task.Start.GTIDSet, stored.GTIDSet, checkpointExists))
+	// A file/pos task has no seed. Events in the middle of a file are not an
+	// executed set, and writing them would make the next 1236 resume too short.
+	trackGTID := executed.current() != ""
+	checkpointAt := func(file string, pos uint32) binlog.Checkpoint {
+		if pos == 0 {
+			pos = currentPos
+		}
+		return binlog.Checkpoint{File: file, Pos: pos, GTIDSet: executed.current()}
+	}
+
 	// Step 3: 定义统一事件处理逻辑（异步/半同步共用）。
 	// 单条事件处理逻辑：异步模式（GetEvent）与半同步模式（SynchronousEventHandler）共用。
 	handleEvent := func(event *replication.BinlogEvent) error {
 		if event == nil || event.Header == nil {
 			return nil
+		}
+		if trackGTID {
+			executed.note(event)
 		}
 		sourceEventAt := sourceEventTime(event)
 
@@ -482,13 +516,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				}
 
 				// 真实 rotate 必须先写入旧文件，再封口旧文件并切到新文件。
-				rotateCheckpoint := binlog.Checkpoint{
-					File: currentFile,
-					Pos:  event.Header.LogPos,
-				}
-				if rotateCheckpoint.Pos == 0 {
-					rotateCheckpoint.Pos = currentPos
-				}
+				rotateCheckpoint := checkpointAt(currentFile, event.Header.LogPos)
 				if err := persistRaw(event.RawData, rotateCheckpoint); err != nil {
 					return err
 				}
@@ -525,10 +553,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				// beside it, and the next rotate stops on
 				// "sealed file already exists".
 				if r.checkpointStore != nil {
-					if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, binlog.Checkpoint{
-						File: currentFile,
-						Pos:  currentPos,
-					}); err != nil {
+					if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, checkpointAt(currentFile, currentPos)); err != nil {
 						return err
 					}
 				}
@@ -565,14 +590,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			return nil
 		}
 
-		next := binlog.Checkpoint{
-			File: currentFile,
-			Pos:  event.Header.LogPos,
-		}
-		if next.Pos == 0 {
-			next.Pos = currentPos
-		}
-
+		next := checkpointAt(currentFile, event.Header.LogPos)
 		if err := persistRaw(event.RawData, next); err != nil {
 			return err
 		}
@@ -599,19 +617,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	syncer := newSyncer(cfg)
 	defer syncer.Close()
 
-	var streamer binlogStreamer
-	switch start.Mode {
-	case tasks.StartModeFilePos:
-		streamer, err = syncer.StartSync(gomysql.Position{Name: start.File, Pos: start.Pos})
-	case tasks.StartModeGTID:
-		set, parseErr := gomysql.ParseGTIDSet(cfg.Flavor, start.GTIDSet)
-		if parseErr != nil {
-			return parseErr
-		}
-		streamer, err = syncer.StartSyncGTID(set)
-	default:
-		return fmt.Errorf("unsupported resolved start mode: %s", start.Mode)
-	}
+	streamer, start, err := openDump(syncer, flavor, start, gtidFallback)
 	if err != nil {
 		return classifySourceError(err)
 	}
@@ -1434,6 +1440,42 @@ func queryVariable(conn *sqlclient.Conn, name string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(value), nil
+}
+
+// openDump starts a file/pos dump, or a GTID dump.
+// When file/pos returns MySQL 1236 and gtidFallback is non-empty, the second
+// call is StartSyncGTID and start.Mode becomes GTID so at-tip is not taken
+// from the file the source just said is gone.
+func openDump(syncer binlogSyncer, flavor string, start tasks.StartConfig, gtidFallback string) (binlogStreamer, tasks.StartConfig, error) {
+	if flavor == "" {
+		flavor = gomysql.MySQLFlavor
+	}
+	switch start.Mode {
+	case tasks.StartModeFilePos:
+		streamer, err := syncer.StartSync(gomysql.Position{Name: start.File, Pos: start.Pos})
+		if err == nil || !mysqlError1236(err) || strings.TrimSpace(gtidFallback) == "" {
+			return streamer, start, err
+		}
+		set, parseErr := gomysql.ParseGTIDSet(flavor, strings.TrimSpace(gtidFallback))
+		if parseErr != nil {
+			return nil, start, err
+		}
+		streamer, err = syncer.StartSyncGTID(set)
+		if err != nil {
+			return nil, start, err
+		}
+		start.Mode = tasks.StartModeGTID
+		return streamer, start, nil
+	case tasks.StartModeGTID:
+		set, parseErr := gomysql.ParseGTIDSet(flavor, start.GTIDSet)
+		if parseErr != nil {
+			return nil, start, parseErr
+		}
+		streamer, err := syncer.StartSyncGTID(set)
+		return streamer, start, err
+	default:
+		return nil, start, fmt.Errorf("unsupported resolved start mode: %s", start.Mode)
+	}
 }
 
 // effectiveStartFromCheckpoint 在 checkpoint 可用时覆盖请求起点。

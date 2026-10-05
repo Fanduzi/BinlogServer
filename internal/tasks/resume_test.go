@@ -59,8 +59,8 @@ func TestNextResumePosition_LocalEventAndCheckpointGTID(t *testing.T) {
 	noLocal := Task{ID: "missing", Epoch: 2}
 	cp := binlog.Checkpoint{File: "mysql-bin.000008", Pos: 400, GTIDSet: "uuid:1-2"}
 	got, ok = NextResumePosition(dir, noLocal, cp, true)
-	if !ok || got.File != "mysql-bin.000008" || got.Pos != 4 || got.GTIDSet != "uuid:1-2" {
-		t.Fatalf("takeover rewind: ok=%v %+v", ok, got)
+	if !ok || got.File != "mysql-bin.000008" || got.Pos != 4 || got.GTIDSet != "" {
+		t.Fatalf("takeover rewind drops the later gtid: ok=%v %+v", ok, got)
 	}
 
 	stopped := noLocal
