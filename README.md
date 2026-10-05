@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.35
+### 1. Download, verify, and unpack v0.5.36
 
 ```bash
-VER=0.5.35
+VER=0.5.36
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.35` `checksums.txt`:
+Published `v0.5.36` `checksums.txt`:
 
 ```text
-c304f52d545d6709435f9890c9ef926f98439c5e170072ad4437072a0f0b6926  binlog-server_0.5.35_darwin_amd64.tar.gz
-c12fb16c1718f8a98b66a8ca75d2265af52663f483527eea3147224ec319af7a  binlog-server_0.5.35_darwin_arm64.tar.gz
-76eeba4c8db8f9d4424ed85fb3ef6180a8a28a58298425ed19778d58ad4daf08  binlog-server_0.5.35_linux_amd64.tar.gz
-8c189804f62b0c0ed5f494c10253a7b2f6f66eff525afc13792277f6c2c3dce8  binlog-server_0.5.35_linux_arm64.tar.gz
+39a894d91d955507be54a9af1895173459cfa8adf974bb45655c4bc05fe830e6  binlog-server_0.5.36_darwin_amd64.tar.gz
+35d0b9e9436cc2f823e57d8f0eb1a6db5dca801d8f25e1da1e610926261c0565  binlog-server_0.5.36_darwin_arm64.tar.gz
+1e168be5714f9d7fd687c7fb3c177953e77bdfdb890801ca956e38ae5f0f0947  binlog-server_0.5.36_linux_amd64.tar.gz
+4c7918cfc922bdee54c209a3158b4b58f23ada3109a323455c972462380d2638  binlog-server_0.5.36_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.35_linux_amd64/
+binlog-server_0.5.36_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -257,16 +257,16 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.35)
+## Upgrade Notes (v0.5.36)
 
-Before upgrading existing deployments to `v0.5.35`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, `v0.5.32`, `v0.5.33`, and `v0.5.34` stay in the release notes linked below.
+Before upgrading existing deployments to `v0.5.36`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, `v0.5.32`, `v0.5.33`, `v0.5.34`, and `v0.5.35` stay in the release notes linked below.
 
-- **No schema migration:** Rolling upgrade of the binaries from `v0.5.34` is fine. The metadata schema stays at version 2. When `schema_migrations` is already version 2, `./migrate up` is not required. No new config key. A database still on schema 1 must follow the v0.5.34 upgrade first: stop every binlog-server on that database, run `./migrate up`, then start only `v0.5.34` or newer.
-- **Control-plane Stop reaches the worker that holds the lease (#174):** On a control-plane plus workers deployment, `POST /api/tasks/{id}/stop` still returns HTTP 204. The row is `STOPPING`, the owner and epoch stay set, and the Console shows Stopping. The source Binlog Dump thread stays until that worker cancels the dump and the row becomes `STOPPED` with the owner cleared. Treat the stop as finished when the row is `STOPPED`. A Start while the row is still `STOPPING` returns HTTP 400, body `cannot start from state STOPPING`. All-in-one and standalone are unchanged. Up to `v0.5.34`, Stop from the API process wrote `STOPPED` and cleared the owner while the worker kept the dump and the lease. The published v0.5.34 package still does that.
+- **No schema migration:** Rolling upgrade of the binaries from `v0.5.35` is fine. The metadata schema stays at version 2. When `schema_migrations` is already version 2, `./migrate up` is not required. No new config key. A database still on schema 1 must follow the v0.5.34 upgrade first: stop every binlog-server on that database, run `./migrate up`, then start only `v0.5.34` or newer.
+- **GTID checkpoint stays, and a purged binlog resumes by GTID (#175, #197, #198):** A task created with `start.mode=GTID` keeps `gtid_set` on every flushed checkpoint, including the rotate onto the next file. The set grows when the transaction commits (XID, `COMMIT`, `ROLLBACK`, or an autocommit statement). Resume still tries file and position first. If that file has been purged, MySQL 1236 on the first stream read closes that dump and opens `StartSyncGTID`. The task reaches `RUNNING`. Up to `v0.5.35`, the first flush cleared `gtid_set`, and a purged file left the task in `RETRY_BACKOFF`. The published v0.5.35 package still does that. A checkpoint whose `gtid_set` is already empty is not rebuilt from the local file. Before `PURGE BINARY LOGS` on the checkpoint file, compare `GET /api/tasks/{id}/checkpoint` `gtid_set` with the source `GTID_EXECUTED`. With `binlog_transaction_compression=ON`, a compressed transaction is not added to `gtid_set`.
 
-Full release notes: [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md) | [docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md) | [docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md)
 
-Notes for v0.5.27 through v0.5.34: [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md) | [docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md), [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md), [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
+Notes for v0.5.27 through v0.5.35: [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md) | [docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md), [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md) | [docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md), [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md), [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 
 ---
