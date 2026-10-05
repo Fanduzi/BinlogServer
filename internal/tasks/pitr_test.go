@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: event time spans, UTC datetime text, and on-disk binlog segments
-// output: assertions for the point-in-time path filter, the client command, and flavor mapping
+// output: assertions for the point-in-time path filter, the client command, flavor mapping, and a file-header timestamp that does not select a segment
 // pos: regression coverage for the datetime replay window
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
 
 func TestParsePITRDatetime(t *testing.T) {
@@ -198,6 +200,45 @@ func TestPITRReplay_DiskSegments(t *testing.T) {
 	}
 }
 
+func TestPITRReplay_FileHeaderTimeIsNotCoverage(t *testing.T) {
+	dir := t.TempDir()
+	scheduler := NewScheduler(WithDataDir(dir))
+	if _, err := scheduler.CreateTaskFromSpec("mysql", "mysql-key", &SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "secret", Flavor: "mysql"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	created := clock(t, "2024-01-01 00:00:00")
+	copied := clock(t, "2024-01-01 02:00:00")
+	body := timedTypedSegment(
+		typedSpanEvent{goreplication.FORMAT_DESCRIPTION_EVENT, created},
+		typedSpanEvent{goreplication.PREVIOUS_GTIDS_EVENT, created},
+		typedSpanEvent{goreplication.QUERY_EVENT, copied},
+	)
+	path := filepath.Join(taskDir, "mysql-bin.000007")
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	early, err := scheduler.PITRReplay("1", nil, clock(t, "2024-01-01 01:00:00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(early.Paths) != 0 || early.Command != "" {
+		t.Fatalf("file create time selected the segment: %+v", early)
+	}
+
+	got, err := scheduler.PITRReplay("1", nil, clock(t, "2024-01-01 02:30:00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got.Paths, "\n") != path || !strings.Contains(got.Command, "--stop-datetime='2024-01-01 02:30:00'") {
+		t.Fatalf("copied event %+v", got)
+	}
+}
+
 func clock(t *testing.T, raw string) time.Time {
 	t.Helper()
 	parsed, err := ParsePITRDatetime(raw)
@@ -216,16 +257,29 @@ func pathsOf(files []BinlogFile) string {
 }
 
 func timedSegment(times ...time.Time) []byte {
+	events := make([]typedSpanEvent, len(times))
+	for i, ts := range times {
+		events[i] = typedSpanEvent{goreplication.QUERY_EVENT, ts}
+	}
+	return timedTypedSegment(events...)
+}
+
+type typedSpanEvent struct {
+	kind goreplication.EventType
+	when time.Time
+}
+
+func timedTypedSegment(events ...typedSpanEvent) []byte {
 	var buf bytes.Buffer
 	buf.Write([]byte{0xfe, 'b', 'i', 'n'})
 	pos := uint32(4)
-	for _, ts := range times {
+	for _, event := range events {
 		const payload = 1
 		size := uint32(19 + payload)
 		pos += size
 		var hdr [19]byte
-		binary.LittleEndian.PutUint32(hdr[0:4], uint32(ts.Unix()))
-		hdr[4] = 2
+		binary.LittleEndian.PutUint32(hdr[0:4], uint32(event.when.Unix()))
+		hdr[4] = byte(event.kind)
 		binary.LittleEndian.PutUint32(hdr[5:9], 1)
 		binary.LittleEndian.PutUint32(hdr[9:13], size)
 		binary.LittleEndian.PutUint32(hdr[13:17], pos)
