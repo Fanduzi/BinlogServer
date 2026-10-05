@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.30
+### 1. Download, verify, and unpack v0.5.31
 
 ```bash
-VER=0.5.30
+VER=0.5.31
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.30` `checksums.txt`:
+Published `v0.5.31` `checksums.txt`:
 
 ```text
-3002557c23db7d7231673c505764308c4c87c3f9b0f6877f392c4a69860bfa3b  binlog-server_0.5.30_darwin_amd64.tar.gz
-e928468242ec8b57bb5ba660750f998f2fcee8bbc495025178d21c381278f104  binlog-server_0.5.30_darwin_arm64.tar.gz
-65dc7d57e4916e241aa4d23430777994d8f303ab8c2beace69224aea03ed423d  binlog-server_0.5.30_linux_amd64.tar.gz
-ae315da10764f08d5f9a99a4f231c12e88b21f8e88c46852032e4af8a20c78e5  binlog-server_0.5.30_linux_arm64.tar.gz
+fd2ba474a4fd136d9d5e1b1444e8621c7ec38a1ebe81a722a7ea57fdaebfc611  binlog-server_0.5.31_darwin_amd64.tar.gz
+2ba3ddbd0c581d2114db934c9e672205bbb84326f220138f0b6464038e2fa3cd  binlog-server_0.5.31_darwin_arm64.tar.gz
+2f3106d57f0a71215aff8cb057e67f4beed7ac4454142cc6cba14e8130e808c9  binlog-server_0.5.31_linux_amd64.tar.gz
+02262ba75285a68f06f3c7fa4cc6b079c8504f3898885f193710ee6d0b67f1c0  binlog-server_0.5.31_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.30_linux_amd64/
+binlog-server_0.5.31_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -257,18 +257,18 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.30)
+## Upgrade Notes (v0.5.31)
 
-Before upgrading existing deployments to `v0.5.30`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, and `v0.5.29` stay in the release notes linked below.
+Before upgrading existing deployments to `v0.5.31`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, and `v0.5.30` stay in the release notes linked below.
 
-- **Zero Schema Migrations:** `v0.5.30` requires no database migration (`000001_init_schema` unchanged). No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
-- **Mid-file format description:** A backup that starts in the middle of a source binlog writes the format description MySQL sends first, once, in front of the first copied event. `LATEST` starts in the middle of the current source file. A `FILE_POS` start inside a file does the same. Up to `v0.5.29`, that description was dropped. `mysqlbinlog` then refused the first segment with `does not contain any Format_description_log_event`, and it could not decode the row events in that segment. The published v0.5.29 package still drops the description.
-- **Old segments are not repaired:** Segments written by a `LATEST` start, or by a `FILE_POS` start inside a file, on `v0.5.29` or earlier still lack the format description. This release does not backfill them and does not repair them. The next start sees that the segment already has events and does not insert a description.
-- **How to tell:** Run `mysqlbinlog` on that first segment. It reports `does not contain any Format_description_log_event`. A later file opened by a real rotate, starting at position 4, was not affected. On that file the format description ends after position 4 (126 on MySQL 8), so `v0.5.29` and earlier copied that event with the rest of the file. The description was dropped only when its end position was behind the dump cursor, which is the first segment of a mid-file start. Sealing that first segment renames it and leaves the bytes, so `mysqlbinlog` still reports the missing `Format_description_log_event` on the sealed name.
+- **Zero Schema Migrations:** `v0.5.31` requires no database migration (`000001_init_schema` unchanged). No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
+- **Point-in-time window ignores file-header times:** A point-in-time window no longer treats the format description or the previous-GTIDs event as copied data. Those two events record when the source binlog file was created. A backup that starts in the middle of a source file, which is what `LATEST` does, writes that format description in front of the first copied event. A `FILE_POS` start inside a file does the same. Up to `v0.5.30`, `GET /api/tasks/{id}/replay` with `stop_datetime` counted that creation time, so a stop time before any copied transaction still returned the file and a command. The same query on `GET /api/tasks/{id}/replay/archive` did the same. The published v0.5.30 package still does that.
+- **Empty window before the first copied event:** A UTC stop time before the first copied event returns an empty window: HTTP 200, `paths` is `[]`, and `command` is empty. The archive of that window is an empty tar. It is not a 400. The file is included once `stop_datetime` is after that first copied event, so the half-open window `[start, stop)` contains it. A stop time equal to the first copied event is still empty. A transaction's own GTID event still counts. Only the previous-GTIDs header is skipped. Segments already on disk are not rewritten.
+- **How to tell:** On the published v0.5.30 package, a stop time between the source file's creation and the first copied transaction can still return that first segment. That file did not contain a copied transaction at the requested time.
 
-Full release notes: [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md)
 
-Notes for v0.5.27 through v0.5.29: [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
+Notes for v0.5.27 through v0.5.30: [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 
 ---
