@@ -31,6 +31,7 @@
 - `StartTask` 允许在 Acquire 成功后接管过期的 RUNNING/LEASE_DEGRADED；仍拒绝抢占未过期租约或本机仍在跑的任务。磁盘剩余目录返回 `ErrDiskBackupReadOnly`，不占租约。`AdoptDiskBackup` 把 source 和 `cluster_key` 接到同一 id 上，状态保持 `STOPPED`，不自动启动。没传 `start.mode` 时起点是最高分段末尾的 `FILE_POS`。显式 `start.mode` 覆盖它。有 task store 时不从磁盘 adopt。adopt 之后的 start 在单机 `MemoryLease` 上把 epoch 抬到目录里最大 `.open.e*` 之上，runner 用这个 epoch 开下一个分段。
 - `Restore` 仍通过 `ListTasks()` 加载启动全量快照。
 - `CreateTaskFromSpec`：整包校验后才 persist。
+- `UpdateTask`：`RUNNING`、`STARTING`、`LEASE_DEGRADED`、`RETRY_BACKOFF` 时，改 source、start、storage 或 `cluster_key` 返回 `ErrTaskDumpConfigLocked`，已保存的配置不变。只改名字，或把这四项原样再提交，可以成功。`STOPPING`、`STOPPED`、`FAILED`、`CREATED` 仍可改；`STOPPING` 期间改的密码留给下一次 start。
 - `FAILED` 立刻 `Release` 租约，其他 Worker 不必等 TTL；`RETRY_BACKOFF` 继续占着。可再次 `StartTask`（改完源库配置后）。`sealed file already exists` 记为 `SEALED_FILE_EXISTS` 并走这条 FAILED 路径，runner 不再连源。checkpoint 写入若不是瞬时元数据错误，记为 `CHECKPOINT_WRITE_FAILED`，同样 FAILED 并放租约。
 - 封文件前发现租约 epoch 已经不是本进程时，这是移交而不是失败：本进程停掉 runner、取消续租，defer 只 `Release` 自己的 epoch。不把任务行写成 `FAILED` 或 `RETRY_BACKOFF`，避免盖住新主人。没有 store 时内存状态是 `STOPPED`，事件是 `TASK_LEASE_YIELDED`。有 store 时共享行保持新主人已经写上的内容。
 - `NewMemoryLease`：无租约表时的进程内所有权门；`LeaseManager.Verify` 供封文件前验租。

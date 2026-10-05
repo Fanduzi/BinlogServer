@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, primary-key GetTask/GetCheckpoint refresh, STARTING-unowned claim, and execution coordination
+// output: task state transitions, primary-key GetTask/GetCheckpoint refresh, STARTING-unowned claim, execution coordination, and UpdateTask refusal while a dump still holds its config
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -790,6 +790,117 @@ func TestScheduler_UpdateTaskStoreFailureHasNoMutation(t *testing.T) {
 	}
 	if got.Name != original.Name || got.ClusterKey != original.ClusterKey || got.Source != original.Source || got.Start != original.Start || got.Storage != original.Storage {
 		t.Fatalf("task mutated after store failure, got=%+v want=%+v", got, original)
+	}
+}
+
+func TestScheduler_UpdateTaskDumpConfigLockFollowsState(t *testing.T) {
+	s := NewScheduler()
+	var running Task
+	busy := []State{StateRunning, StateStarting, StateLeaseDegraded, StateRetryBackoff}
+	for _, state := range busy {
+		source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "old-secret", Flavor: "mysql"}
+		storage := Storage{RetentionDays: 30}
+		task, err := s.CreateTaskFromSpec("lock-"+string(state), "lock-"+string(state), &source, nil, &storage)
+		if err != nil {
+			t.Fatalf("create %s: %v", state, err)
+		}
+		s.mu.Lock()
+		current := s.tasks[task.ID]
+		current.State = state
+		s.tasks[task.ID] = current
+		s.mu.Unlock()
+
+		nextSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret", Flavor: "mysql"}
+		nextStorage := Storage{RetentionDays: 1}
+		_, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: task.ClusterKey, Source: &nextSource, Storage: &nextStorage})
+		if !errors.Is(err, ErrTaskDumpConfigLocked) {
+			t.Fatalf("state %s err=%v, want ErrTaskDumpConfigLocked", state, err)
+		}
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask %s: %v", state, err)
+		}
+		if got.Source.Password != "old-secret" || got.Storage.RetentionDays != 30 || got.State != state {
+			t.Fatalf("state %s mutated: password=%q retention=%d state=%s", state, got.Source.Password, got.Storage.RetentionDays, got.State)
+		}
+		if state == StateRunning {
+			running = got
+		}
+	}
+
+	_, err := s.UpdateTask(running.ID, TaskPatch{ClusterKey: "lock-other"})
+	if !errors.Is(err, ErrTaskDumpConfigLocked) {
+		t.Fatalf("cluster_key change err=%v", err)
+	}
+	if got, err := s.GetTask(running.ID); err != nil || got.ClusterKey != running.ClusterKey {
+		t.Fatalf("cluster_key changed: %+v err=%v", got, err)
+	}
+	name := "renamed-while-running"
+	updated, err := s.UpdateTask(running.ID, TaskPatch{Name: &name, ClusterKey: running.ClusterKey})
+	if err != nil {
+		t.Fatalf("name-only: %v", err)
+	}
+	if updated.Name != name || updated.Source.Password != "old-secret" || updated.Storage.RetentionDays != 30 {
+		t.Fatalf("name-only result: %+v", updated)
+	}
+
+	for _, state := range []State{StateCreated, StateStopped, StateFailed, StateStopping} {
+		source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "old-secret", Flavor: "mysql"}
+		storage := Storage{RetentionDays: 30}
+		key := "open-" + string(state)
+		task, err := s.CreateTaskFromSpec(key, key, &source, nil, &storage)
+		if err != nil {
+			t.Fatalf("create %s: %v", state, err)
+		}
+		s.mu.Lock()
+		current := s.tasks[task.ID]
+		current.State = state
+		s.tasks[task.ID] = current
+		s.mu.Unlock()
+		nextSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret", Flavor: "mysql"}
+		nextStorage := Storage{RetentionDays: 1}
+		updated, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: task.ClusterKey, Source: &nextSource, Storage: &nextStorage})
+		if err != nil {
+			t.Fatalf("state %s UpdateTask: %v", state, err)
+		}
+		if updated.Source.Password != "new-secret" || updated.Storage.RetentionDays != 1 || updated.State != state {
+			t.Fatalf("state %s got password=%q retention=%d state=%s", state, updated.Source.Password, updated.Storage.RetentionDays, updated.State)
+		}
+	}
+}
+
+func TestScheduler_UpdateTaskReadsStoredRunningState(t *testing.T) {
+	store := &schedulerTestStore{tasks: make(map[string]Task)}
+	s := NewScheduler(WithStore(store))
+	source := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "old-secret", Flavor: "mysql"}
+	storage := Storage{RetentionDays: 30}
+	task, err := s.CreateTaskFromSpec("stale-mem", "stale-mem", &source, nil, &storage)
+	if err != nil {
+		t.Fatalf("CreateTaskFromSpec: %v", err)
+	}
+	s.mu.Lock()
+	mem := s.tasks[task.ID]
+	mem.State = StateStarting
+	s.tasks[task.ID] = mem
+	s.mu.Unlock()
+	store.mu.Lock()
+	row := store.tasks[task.ID]
+	row.State = StateRunning
+	store.tasks[task.ID] = row
+	store.mu.Unlock()
+
+	nextSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret", Flavor: "mysql"}
+	nextStorage := Storage{RetentionDays: 1}
+	_, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: task.ClusterKey, Source: &nextSource, Storage: &nextStorage})
+	if !errors.Is(err, ErrTaskDumpConfigLocked) || !strings.Contains(err.Error(), "state RUNNING") {
+		t.Fatalf("UpdateTask err=%v", err)
+	}
+	got, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateRunning || got.Source.Password != "old-secret" || got.Storage.RetentionDays != 30 {
+		t.Fatalf("store row changed: state=%s password=%q retention=%d", got.State, got.Source.Password, got.Storage.RetentionDays)
 	}
 }
 
