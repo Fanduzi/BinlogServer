@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.31
+### 1. Download, verify, and unpack v0.5.32
 
 ```bash
-VER=0.5.31
+VER=0.5.32
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.31` `checksums.txt`:
+Published `v0.5.32` `checksums.txt`:
 
 ```text
-fd2ba474a4fd136d9d5e1b1444e8621c7ec38a1ebe81a722a7ea57fdaebfc611  binlog-server_0.5.31_darwin_amd64.tar.gz
-2ba3ddbd0c581d2114db934c9e672205bbb84326f220138f0b6464038e2fa3cd  binlog-server_0.5.31_darwin_arm64.tar.gz
-2f3106d57f0a71215aff8cb057e67f4beed7ac4454142cc6cba14e8130e808c9  binlog-server_0.5.31_linux_amd64.tar.gz
-02262ba75285a68f06f3c7fa4cc6b079c8504f3898885f193710ee6d0b67f1c0  binlog-server_0.5.31_linux_arm64.tar.gz
+4447eb25cc3aabba7407db18e536b96c6415e124924c05ecf2caee0bd6ae2230  binlog-server_0.5.32_darwin_amd64.tar.gz
+47aa09934bbae99d37122057f75d84ecffbafa9e2ec830358631403dd5fa89c5  binlog-server_0.5.32_darwin_arm64.tar.gz
+edd73ddc4ce812e58b941e7f4050f6816ff39b8ad1b52037b35d99e206813459  binlog-server_0.5.32_linux_amd64.tar.gz
+7f14960ba5b2bc363f3923a414cfdffb18adb28b4fe6bd625772a4015be20a1b  binlog-server_0.5.32_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.31_linux_amd64/
+binlog-server_0.5.32_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -257,18 +257,18 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.31)
+## Upgrade Notes (v0.5.32)
 
-Before upgrading existing deployments to `v0.5.31`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, and `v0.5.30` stay in the release notes linked below.
+Before upgrading existing deployments to `v0.5.32`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, and `v0.5.31` stay in the release notes linked below.
 
-- **Zero Schema Migrations:** `v0.5.31` requires no database migration (`000001_init_schema` unchanged). No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
-- **Point-in-time window ignores file-header times:** A point-in-time window no longer treats the format description or the previous-GTIDs event as copied data. Those two events record when the source binlog file was created. A backup that starts in the middle of a source file, which is what `LATEST` does, writes that format description in front of the first copied event. A `FILE_POS` start inside a file does the same. Up to `v0.5.30`, `GET /api/tasks/{id}/replay` with `stop_datetime` counted that creation time, so a stop time before any copied transaction still returned the file and a command. The same query on `GET /api/tasks/{id}/replay/archive` did the same. The published v0.5.30 package still does that.
-- **Empty window before the first copied event:** A UTC stop time before the first copied event returns an empty window: HTTP 200, `paths` is `[]`, and `command` is empty. The archive of that window is an empty tar. It is not a 400. The file is included once `stop_datetime` is after that first copied event, so the half-open window `[start, stop)` contains it. A stop time equal to the first copied event is still empty. A transaction's own GTID event still counts. Only the previous-GTIDs header is skipped. Segments already on disk are not rewritten.
-- **How to tell:** On the published v0.5.30 package, a stop time between the source file's creation and the first copied transaction can still return that first segment. That file did not contain a copied transaction at the requested time.
+- **Zero Schema Migrations:** `v0.5.32` requires no database migration (`000001_init_schema` unchanged). No new state. No new config key. `cluster.failover_policy` is still not a switch. `PRODUCTION=true` still requires a non-empty `--encryption-key`. The 30-second threshold is unchanged.
+- **A mismatched object is not a durable upload:** A sealed upload whose stored object does not match the local bytes is `UPLOAD_FAILED`. `upload_error` is `checksum mismatch`. `checksum` stays `mismatch`. A comparison that could not finish, which is an object HEAD error, is `UPLOAD_FAILED` with an empty `checksum`. `upload_error` begins with `checksum verify failed:`. Empty is not `match` and not `mismatch`. Up to `v0.5.31`, that row could stay `UPLOADED`, and retention could delete the local copy. The published v0.5.31 package still does that. Replication keeps running.
+- **Retention keeps the local file until the checksum matches:** With object storage and a catalog, retention does not delete that local file or its catalog row, and it writes one `RETENTION_SKIPPED_NOT_UPLOADED` event. The background upload retry and `POST /api/tasks/{id}/files/retry-upload` upload a checksum mismatch again. An unfinished comparison is checked again and is not uploaded again. Only an `UPLOADED` row whose checksum is `match` lets retention delete the local file. An `UPLOADED` row already stored with `mismatch` or an empty checksum, whose local file is still on disk, is kept. The next retention pass records it as `UPLOAD_FAILED`.
+- **How to tell:** Check `GET /api/tasks/{id}/files` for `UPLOADED` rows whose `checksum` is `mismatch` or empty. If that local file is still on disk, the next retention pass on `v0.5.32` keeps it. If the local file is already gone, this release does not restore it. A checksum is compared once after upload. An object changed in the bucket after it matched is not re-checked.
 
-Full release notes: [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md)
 
-Notes for v0.5.27 through v0.5.30: [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
+Notes for v0.5.27 through v0.5.31: [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 
 ---
