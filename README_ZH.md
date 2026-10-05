@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.31
+### 1. 下载、校验并解压 v0.5.32
 
 ```bash
-VER=0.5.31
+VER=0.5.32
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,19 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.31` `checksums.txt`：
+已发布的 `v0.5.32` `checksums.txt`：
 
 ```text
-fd2ba474a4fd136d9d5e1b1444e8621c7ec38a1ebe81a722a7ea57fdaebfc611  binlog-server_0.5.31_darwin_amd64.tar.gz
-2ba3ddbd0c581d2114db934c9e672205bbb84326f220138f0b6464038e2fa3cd  binlog-server_0.5.31_darwin_arm64.tar.gz
-2f3106d57f0a71215aff8cb057e67f4beed7ac4454142cc6cba14e8130e808c9  binlog-server_0.5.31_linux_amd64.tar.gz
-02262ba75285a68f06f3c7fa4cc6b079c8504f3898885f193710ee6d0b67f1c0  binlog-server_0.5.31_linux_arm64.tar.gz
+4447eb25cc3aabba7407db18e536b96c6415e124924c05ecf2caee0bd6ae2230  binlog-server_0.5.32_darwin_amd64.tar.gz
+47aa09934bbae99d37122057f75d84ecffbafa9e2ec830358631403dd5fa89c5  binlog-server_0.5.32_darwin_arm64.tar.gz
+edd73ddc4ce812e58b941e7f4050f6816ff39b8ad1b52037b35d99e206813459  binlog-server_0.5.32_linux_amd64.tar.gz
+7f14960ba5b2bc363f3923a414cfdffb18adb28b4fe6bd625772a4015be20a1b  binlog-server_0.5.32_linux_arm64.tar.gz
 ```
 
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.31_linux_amd64/
+binlog-server_0.5.32_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -251,18 +251,18 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.31)
+## 升级须知 (v0.5.32)
 
-在将生产环境升级至 `v0.5.31` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29` 与 `v0.5.30` 的记录留在下方链接的发布说明里。
+在将生产环境升级至 `v0.5.32` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30` 与 `v0.5.31` 的记录留在下方链接的发布说明里。
 
-- **无需数据库表结构变更:** `v0.5.31` 不需要 schema migration。迁移仍只有 `000001_init_schema`。没有新的配置项。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
-- **时间点窗口不再把文件头时间当覆盖:** 按时间点选回放窗口时，不再把 format description 和 previous-GTIDs 当成已复制的数据。这两条事件记录的是源 binlog 文件的创建时间。从源文件中部开始的备份会把这条 format description 写在第一个被复制的事件前面。`LATEST` 就是从当前文件中部开始。起点落在文件内部的 `FILE_POS` 也一样。到 `v0.5.30` 为止，`GET /api/tasks/{id}/replay` 带 `stop_datetime` 时会把这个创建时间算进覆盖范围，所以停止时间早于任何已复制事务时，仍会返回这个文件和一条命令。同一个查询打在 `GET /api/tasks/{id}/replay/archive` 上也一样。已发布的 v0.5.30 包仍然这样。
-- **早于第一个被复制事件的停止时间是空窗口:** UTC 停止时间早于第一个被复制的事件时，窗口是空的：HTTP 200，`paths` 是 `[]`，`command` 是空字符串。这个窗口的归档是空 tar。这不是 400。`stop_datetime` 晚于这第一个被复制的事件时，半开窗口盖住它，文件会被选中。窗口仍是 `[start, stop)`。停止时间等于这第一个被复制事件的时间戳时，窗口仍是空的。事务自己的 GTID 事件仍然计入。跳过的只是 previous-GTIDs 这条文件头。已经在磁盘上的分段不会被改写。
-- **怎么看:** 已发布的 v0.5.30 包上，停止时间落在源文件创建时间和第一个被复制事务之间时，仍可能返回这第一段。那个文件在所要的时间上并没有被复制的事务。
+- **无需数据库表结构变更:** `v0.5.32` 不需要 schema migration。迁移仍只有 `000001_init_schema`。没有新的状态。没有新的配置项。`cluster.failover_policy` 仍然不是开关。`PRODUCTION=true` 仍要求非空 `--encryption-key`。30 秒阈值没有变化。
+- **对不上的对象不是可依赖的已上传副本:** 已封存文件上传后，桶里的对象和本地字节不一致时，状态是 `UPLOAD_FAILED`。`upload_error` 是 `checksum mismatch`。`checksum` 仍是 `mismatch`。比对没有做完时，状态是 `UPLOAD_FAILED`，`checksum` 是空的。这是对象 HEAD 出错。`upload_error` 以 `checksum verify failed:` 开头。空值不是 `match`，也不是 `mismatch`。到 `v0.5.31` 为止，同样的行仍可能是 `UPLOADED`，保留清理可以删掉这份本地拷贝。已发布的 v0.5.31 包仍然这样。复制继续跑。
+- **checksum 一致之前，保留清理留下本地文件:** 配了对象存储并且有目录时，保留清理不删这份本地文件，也不删目录行，并记一条 `RETENTION_SKIPPED_NOT_UPLOADED`。后台补传和 `POST /api/tasks/{id}/files/retry-upload` 会把 checksum 为 `mismatch` 的文件再上传一次。没做完的比对会再比对一次，这次不会再上传。只有 `UPLOADED` 且 `checksum` 为 `match` 时，保留清理才会删本地文件。已经记成 `UPLOADED`、`checksum` 是 `mismatch` 或空、本地文件还在磁盘上的行会留下。下一次保留清理把它记成 `UPLOAD_FAILED`。
+- **怎么看:** 看 `GET /api/tasks/{id}/files`，找出 `UPLOADED` 且 `checksum` 为 `mismatch` 或空的行。本地文件还在磁盘上时，`v0.5.32` 的下一次保留清理会留下它。本地文件已经不在时，这个版本不会把它找回来。checksum 在上传之后比对一次。对象在比对一致之后又在桶里被改过，不会重新核对。
 
-详细版本记录：[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)
+详细版本记录：[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)
 
-v0.5.27 至 v0.5.30 的记录：[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
+v0.5.27 至 v0.5.31 的记录：[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
 
 
 ---
