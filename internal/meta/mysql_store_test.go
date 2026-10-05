@@ -655,7 +655,7 @@ func TestListTasksWithExpiredLeaseSQL_JoinsExpiredActiveStates(t *testing.T) {
 	if !strings.Contains(listTasksWithExpiredLeaseSQL, "lease_expire_at <= NOW(6)") {
 		t.Fatalf("listTasksWithExpiredLeaseSQL must filter expired leases, got %q", listTasksWithExpiredLeaseSQL)
 	}
-	for _, state := range []string{"RUNNING", "LEASE_DEGRADED", "RETRY_BACKOFF"} {
+	for _, state := range []string{"RUNNING", "LEASE_DEGRADED", "RETRY_BACKOFF", "STOPPING"} {
 		if !strings.Contains(listTasksWithExpiredLeaseSQL, state) {
 			t.Fatalf("listTasksWithExpiredLeaseSQL must include state %s, got %q", state, listTasksWithExpiredLeaseSQL)
 		}
