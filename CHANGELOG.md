@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- A source that goes down while a binlog dump is already open no longer stays `RUNNING` for the whole outage (#204). The dump library may reconnect that open connection 5 times, about one second apart. A blip that comes back within those 5 tries leaves the task `RUNNING` and does not change `last_error`. If the source is still down after that, `GET /api/tasks/{id}` and the Console show `RETRY_BACKOFF`, and `last_error` begins with `SOURCE_UNREACHABLE:`. Each of those failures counts toward the same ten-failure `SOURCE_UNREACHABLE` budget as a failed first connect. On standalone, with no metadata store, the tenth consecutive failure is `FAILED` and the lease is released. On all-in-one and cluster, the claim loop still starts an owned `RETRY_BACKOFF` task again about every 2 seconds and resets that count, so the cap of ten still does not fire (#203). This change does not alter that. When the source accepts connections again, the task returns to `RUNNING` and continues from its checkpoint. No new config key. No schema migration.
+
 ## [v0.5.38] - 2026-10-05
 
 ### Fixed

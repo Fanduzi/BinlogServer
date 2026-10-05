@@ -22,7 +22,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke,compression
+  quick  -> smoke,compression,smoke-source-outage
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -47,6 +47,7 @@ Scenarios:
   smoke-split-retention
   smoke-epoch-segments
   smoke-gtid-purge
+  smoke-source-outage
   smoke-scale
 EOF
 }
@@ -92,7 +93,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke compression"
+      echo "smoke compression smoke-source-outage"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -196,6 +197,9 @@ run_scenario() {
       ;;
     smoke-gtid-purge)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"
+      ;;
+    smoke-source-outage)
+      E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-source-outage.sh"
       ;;
     smoke-scale)
       E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" "$ROOT_DIR/scripts/e2e/smoke-scale.sh"

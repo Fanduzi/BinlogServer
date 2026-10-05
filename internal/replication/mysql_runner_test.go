@@ -38,6 +38,12 @@ func TestBuildSyncerConfig_Defaults(t *testing.T) {
 	if cfg.SemiSyncEnabled {
 		t.Fatal("expected semi-sync disabled by default")
 	}
+	if cfg.MaxReconnectAttempts != maxDumpReconnectAttempts {
+		t.Fatalf("expected %d dump reconnects before the scheduler sees the outage, got %d", maxDumpReconnectAttempts, cfg.MaxReconnectAttempts)
+	}
+	if cfg.DisableRetrySync {
+		t.Fatal("a single dropped packet must still reconnect inside the dump library")
+	}
 }
 
 // TestBuildSyncerConfig_UsesTaskServerID 验证相关行为。

@@ -136,6 +136,12 @@ func TestClassifySourceError_UnreachableNetwork(t *testing.T) {
 		}
 	}
 
+	wrappedDial := classifySourceError(fmt.Errorf("retry sync: %w", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}))
+	var wrapped *tasks.RetryableSourceError
+	if !errors.As(wrappedDial, &wrapped) || wrapped.Code != tasks.CodeSourceUnreachable {
+		t.Fatalf("wrapped dial must be SOURCE_UNREACHABLE, got %v", wrappedDial)
+	}
+
 	diskErr := &os.PathError{Op: "write", Path: "/data/binlog", Err: syscall.ENOSPC}
 	if got := classifySourceError(diskErr); got != diskErr {
 		t.Fatalf("local disk error must not be classified as source unreachable: %v", got)
