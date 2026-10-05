@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full files inventory, one open segment per source index, and each segment's event-header time span
-// output: the ordered paths that cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command; start equal to stop yields no paths and no command
+// output: the ordered paths whose copied events cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command; a format description or previous-GTIDs timestamp does not select a path; start equal to stop yields no paths and no command
 // pos: point-in-time seek on the existing replay selection; the limit window stays on GET /replay without stop_datetime
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -116,7 +116,9 @@ func FormatPITRCommand(client string, paths []string, start *time.Time, stop tim
 }
 
 // PITRReplay lists one path per source index across the full inventory, keeps
-// the paths whose event times cover [start, stop), and builds the client command.
+// the paths whose copied-event times cover [start, stop), and builds the client
+// command. A format description or previous-GTIDs timestamp is the source file's
+// create time and does not select a path.
 // A missing task is ErrTaskNotFound. A selected segment that cannot be opened
 // is the same error OpenTaskSegment returns. An empty cover is an empty Paths
 // and Command with the flavor client still set.
