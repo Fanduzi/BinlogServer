@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, execution coordination, background retry of sealed UPLOAD_FAILED rows without the manual API, and checksum mismatch re-upload plus unfinished-checksum re-check becoming UPLOADED match
+// output: task state transitions, scheduling decisions, execution coordination, background retry of sealed UPLOAD_FAILED rows without the manual API, checksum mismatch re-upload plus unfinished-checksum re-check becoming UPLOADED match, and the files list for a sealed file before and after that retry
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -841,5 +841,60 @@ func TestBackgroundUploadRetry_HeadErrorThenMatch(t *testing.T) {
 	uploadsAfter, _ := uploader.counts()
 	if uploadsAfter != uploadsBefore {
 		t.Fatalf("uploads=%d, want %d after a successful check", uploadsAfter, uploadsBefore)
+	}
+}
+
+// TestListFiles_PendingSealedUploadThenVerified is what the files list shows
+// while a sealed file is waiting on the existing retry, and after that retry
+// has checked the object.
+func TestListFiles_PendingSealedUploadThenVerified(t *testing.T) {
+	root := t.TempDir()
+	store := newRetryTestFileStore()
+	uploader := &checksumRetryUploader{}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader), WithDataDir(root))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, task.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "mysql-bin.000003")
+	if err := os.WriteFile(path, []byte("sealed-for-files-list"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store.files[task.ID] = []BinlogFile{{
+		TaskID:      task.ID,
+		FileName:    "mysql-bin.000003",
+		FilePath:    path,
+		State:       "SEALED",
+		SealedAt:    time.Now(),
+		UploadState: "UPLOAD_FAILED",
+		UploadError: "upload pending",
+		ObjectKey:   "prefix/cluster-a/uuid/mysql-bin.000003",
+	}}
+
+	files, err := s.ListFiles(task.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].UploadState != "UPLOAD_FAILED" || files[0].Location != "local" || files[0].Checksum != "" {
+		t.Fatalf("during recovery: %+v", files)
+	}
+
+	stats, err := s.RetryFailedUploads(task.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Succeeded != 1 {
+		t.Fatalf("retry stats: %+v", stats)
+	}
+	files, err = s.ListFiles(task.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].UploadState != "UPLOADED" || files[0].Checksum != ChecksumMatch || files[0].Location != "both" {
+		t.Fatalf("after verify: %+v", files)
 	}
 }

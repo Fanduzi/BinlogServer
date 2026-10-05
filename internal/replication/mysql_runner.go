@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, and bounds the post-seal upload with the same upload timeout the retry path uses
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -49,15 +49,18 @@ const (
 
 // MySQLRunner 负责执行复制协议拉流、文件落盘、checkpoint 与上传流程。
 type MySQLRunner struct {
-	dataDir          string
-	fetcher          sourceMetaFetcher
-	checkpointStore  CheckpointStore
-	fileMetaStore    FileMetaStore
-	uploadPrefix     string
-	objectDeleter    objectDeleter
-	objectOpener     objectOpener
-	leaseVerifier    LeaseVerifier
-	sealedHandler    func(context.Context, tasks.BinlogFile) error
+	dataDir         string
+	fetcher         sourceMetaFetcher
+	checkpointStore CheckpointStore
+	fileMetaStore   FileMetaStore
+	uploadPrefix    string
+	objectDeleter   objectDeleter
+	objectOpener    objectOpener
+	leaseVerifier   LeaseVerifier
+	sealedHandler   func(context.Context, tasks.BinlogFile) error
+	// uploadTimeout bounds the post-seal put. It is the same meta.timeout.upload_sec
+	// value Scheduler.withUploadTimeout uses for background retry. Zero means no extra deadline.
+	uploadTimeout    time.Duration
 	progressReporter ProgressReporter
 	newSyncer        func(replication.BinlogSyncerConfig) binlogSyncer
 	writerOpener     func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error)
@@ -170,6 +173,17 @@ func WithUploader(uploader tasks.FileUploader, prefix string) RunnerOption {
 	}
 }
 
+// WithUploadTimeout bounds the post-seal upload. The duration is meta.timeout.upload_sec,
+// the same value the background retry passes to withUploadTimeout. A timeout becomes
+// UPLOAD_FAILED and the dump continues.
+func WithUploadTimeout(timeout time.Duration) RunnerOption {
+	return func(r *MySQLRunner) {
+		if timeout > 0 {
+			r.uploadTimeout = timeout
+		}
+	}
+}
+
 // WithObjectDeleter 注入保留清理时使用的对象删除器。生产启动把上传客户端传进来。
 // 同一个客户端实现了 OpenObject 时，接管用它把已上传的封存对象读回来。
 func WithObjectDeleter(deleter objectDeleter) RunnerOption {
@@ -263,6 +277,22 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			return err
 		}
 		checkpointExists = ok
+	}
+	// A crash after the rename and before the upload-state write leaves a sealed
+	// file that retry cannot see. Record it as UPLOAD_FAILED first, and if the
+	// checkpoint is still on that sealed rotate, continue on the next file.
+	if r.sealedHandler != nil {
+		if err := r.enrollSealedUploads(ctx, task, sourceServerUUID); err != nil {
+			return err
+		}
+		if checkpointExists && r.checkpointStore != nil {
+			if next, advanced := r.checkpointPastSealedRotate(ctx, task.ID, stored); advanced {
+				if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, next); err != nil {
+					return err
+				}
+				stored = next
+			}
+		}
 	}
 	// Fresh LATEST has already resolved to SHOW MASTER STATUS, so StartSync is at tip.
 	// NextResumePosition is the resume choice shared with GET /api/tasks/{id}/checkpoint.
@@ -467,7 +497,11 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 					return err
 				}
 				file = nil
-				if err := r.finalizeSealedFile(
+				// Record the sealed row before the put. A crash inside the put
+				// leaves UPLOAD_FAILED, which the background retry already uploads.
+				// The next-file checkpoint is written before the put so a hung
+				// upload cannot pin the lease, and a timeout still continues here.
+				sealed, err := r.sealLocalFile(
 					ctx,
 					task,
 					sourceServerUUID,
@@ -476,7 +510,8 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 					rotateCheckpoint.Pos,
 					currentCreatedAt,
 					time.Now(),
-				); err != nil {
+				)
+				if err != nil {
 					return err
 				}
 
@@ -495,6 +530,9 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 					}); err != nil {
 						return err
 					}
+				}
+				if err := r.uploadSealed(ctx, sealed); err != nil {
+					return err
 				}
 
 				file, writer, currentPath, err = writerOpener(task, currentFile, currentPos)
@@ -677,7 +715,12 @@ func (r *MySQLRunner) confirmIdleAtTip(ctx context.Context, source tasks.SourceC
 	return dumpAtOrBeyondMaster(file, pos, status)
 }
 
-// finalizeSealedFile 负责 open 文件 seal、元数据落库以及 best-effort 上传。
+// sealedUploadPending is the upload_error stored before the put.
+// It is not a checksum verify, so the existing retry uploads the file.
+const sealedUploadPending = "upload pending"
+
+// finalizeSealedFile seals the open file, records upload intent, and uploads.
+// Tests and any caller that seals without the rotate loop use this.
 func (r *MySQLRunner) finalizeSealedFile(
 	ctx context.Context,
 	task tasks.Task,
@@ -688,6 +731,26 @@ func (r *MySQLRunner) finalizeSealedFile(
 	createdAt time.Time,
 	sealedAt time.Time,
 ) error {
+	meta, err := r.sealLocalFile(ctx, task, sourceServerUUID, localPath, startPos, endPos, createdAt, sealedAt)
+	if err != nil {
+		return err
+	}
+	return r.uploadSealed(ctx, meta)
+}
+
+// sealLocalFile renames the open segment and writes the catalog row.
+// With an uploader, that row is UPLOAD_FAILED before the put, so a crash
+// during the put is already in the retry set. With no uploader, it stays LOCAL_ONLY.
+func (r *MySQLRunner) sealLocalFile(
+	ctx context.Context,
+	task tasks.Task,
+	sourceServerUUID string,
+	localPath string,
+	startPos uint32,
+	endPos uint32,
+	createdAt time.Time,
+	sealedAt time.Time,
+) (tasks.BinlogFile, error) {
 	// 常见误解：
 	// 1) “上传失败就应该报错退出”不符合本项目策略；这里是 best-effort，失败仅记元数据。
 	// 2) “seal 只是改文件名”不完整；cluster 下 seal/upload 前必须再校验 lease ownership。
@@ -695,84 +758,283 @@ func (r *MySQLRunner) finalizeSealedFile(
 	if task.Epoch > 0 && r.leaseVerifier != nil {
 		ok, err := r.leaseVerifier.Verify(ctx, task.ID, task.OwnerWorkerID, task.Epoch)
 		if err != nil {
-			return err
+			return tasks.BinlogFile{}, err
 		}
 		if !ok {
-			return ErrLeaseEpochMismatch
+			return tasks.BinlogFile{}, ErrLeaseEpochMismatch
 		}
 	}
 
 	// Step 2: open 文件改名为 sealed 文件（并防止覆盖已有 sealed 文件）。
 	sealedPath, sourceFile, err := sealPath(localPath, task.Epoch)
 	if err != nil {
-		return err
+		return tasks.BinlogFile{}, err
 	}
 	if localPath != sealedPath {
 		if _, err := os.Stat(sealedPath); err == nil {
-			return fmt.Errorf("sealed file already exists: %s", sealedPath)
+			return tasks.BinlogFile{}, fmt.Errorf("sealed file already exists: %s", sealedPath)
 		} else if !os.IsNotExist(err) {
-			return err
+			return tasks.BinlogFile{}, err
 		}
 		if err := os.Rename(localPath, sealedPath); err != nil {
-			return err
+			return tasks.BinlogFile{}, err
 		}
 	}
 
-	var fileMeta *tasks.BinlogFile
-
-	// Step 3: 先写 LOCAL_ONLY 元数据，再进行 upload。
-	if r.fileMetaStore != nil {
-		// 先落本地 file metadata；upload state 初始为 LOCAL_ONLY。
-		info, err := os.Stat(sealedPath)
-		if err != nil {
-			return err
-		}
-		meta := tasks.BinlogFile{
-			TaskID:      task.ID,
-			FileName:    sourceFile,
-			FilePath:    sealedPath,
-			State:       "SEALED",
-			SizeBytes:   info.Size(),
-			StartPos:    startPos,
-			EndPos:      endPos,
-			CreatedAt:   createdAt,
-			SealedAt:    sealedAt,
-			UploadState: "LOCAL_ONLY",
-		}
-		if err := r.fileMetaStore.UpsertBinlogFile(ctx, meta); err != nil {
-			return err
-		}
-		fileMeta = &meta
+	info, err := os.Stat(sealedPath)
+	if err != nil {
+		return tasks.BinlogFile{}, err
 	}
-
+	meta := tasks.BinlogFile{
+		TaskID:    task.ID,
+		FileName:  sourceFile,
+		FilePath:  sealedPath,
+		State:     "SEALED",
+		SizeBytes: info.Size(),
+		StartPos:  startPos,
+		EndPos:    endPos,
+		CreatedAt: createdAt,
+		SealedAt:  sealedAt,
+	}
 	if r.sealedHandler == nil {
-		return nil
+		meta.UploadState = "LOCAL_ONLY"
+		if r.fileMetaStore != nil {
+			if err := r.fileMetaStore.UpsertBinlogFile(ctx, meta); err != nil {
+				return tasks.BinlogFile{}, err
+			}
+		}
+		return meta, nil
 	}
 	if strings.TrimSpace(task.ClusterKey) == "" {
-		return errors.New("cluster_key is required")
+		return tasks.BinlogFile{}, errors.New("cluster_key is required")
 	}
 	sourceServerUUID = strings.TrimSpace(sourceServerUUID)
 	if sourceServerUUID == "" {
-		return errors.New("source server_uuid is required")
+		return tasks.BinlogFile{}, errors.New("source server_uuid is required")
 	}
-	objectKey := buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, sourceFile)
-	if fileMeta == nil {
-		fileMeta = &tasks.BinlogFile{
-			TaskID:      task.ID,
-			FileName:    sourceFile,
-			FilePath:    sealedPath,
-			State:       "SEALED",
-			StartPos:    startPos,
-			EndPos:      endPos,
-			CreatedAt:   createdAt,
-			SealedAt:    sealedAt,
-			ObjectKey:   objectKey,
-			UploadState: "LOCAL_ONLY",
+	meta.ObjectKey = buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, sourceFile)
+	meta.UploadState = "UPLOAD_FAILED"
+	meta.UploadError = sealedUploadPending
+	if r.fileMetaStore != nil {
+		if err := r.fileMetaStore.UpsertBinlogFile(ctx, meta); err != nil {
+			return tasks.BinlogFile{}, err
 		}
-	} else {
-		fileMeta.ObjectKey = objectKey
 	}
-	return r.sealedHandler(ctx, *fileMeta)
+	return meta, nil
+}
+
+// uploadSealed runs the post-seal put on a child context bounded by uploadTimeout.
+// The deadline is the retry path's upload timeout. A timeout leaves the
+// UPLOAD_FAILED row in place and does not stop the dump.
+func (r *MySQLRunner) uploadSealed(ctx context.Context, file tasks.BinlogFile) error {
+	if r == nil || r.sealedHandler == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	uploadCtx, cancel := r.boundedUpload(ctx)
+	defer cancel()
+	err := r.sealedHandler(uploadCtx, file)
+	if err == nil || ctx.Err() != nil {
+		return err
+	}
+	if uploadCtx.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+func (r *MySQLRunner) boundedUpload(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if r == nil || r.uploadTimeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, r.uploadTimeout)
+}
+
+// enrollSealedUploads records a sealed file the retry set does not yet name.
+// That is a crash after rename, before the upload-state write, or a sealed
+// LOCAL_ONLY row left while an uploader is configured. No uploader means this
+// is not called, so LOCAL_ONLY stays unuploaded.
+func (r *MySQLRunner) enrollSealedUploads(ctx context.Context, task tasks.Task, sourceServerUUID string) error {
+	if r == nil || r.sealedHandler == nil || r.fileMetaStore == nil {
+		return nil
+	}
+	if strings.TrimSpace(task.ClusterKey) == "" || strings.TrimSpace(sourceServerUUID) == "" {
+		return nil
+	}
+	files, err := r.listCatalog(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	byName := make(map[string]tasks.BinlogFile, len(files))
+	dirs := map[string]struct{}{}
+	if dir := filepath.Join(r.dataDir, task.ID); strings.TrimSpace(r.dataDir) != "" && task.ID != "" {
+		dirs[dir] = struct{}{}
+	}
+	for _, row := range files {
+		byName[row.FileName] = row
+		if path := strings.TrimSpace(row.FilePath); path != "" && path != "." {
+			dirs[filepath.Dir(path)] = struct{}{}
+		}
+	}
+	for dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			seg, ok := classifyLocalSegment(entry.Name())
+			if !ok || seg.epoch >= 0 {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			row, exists := byName[seg.source]
+			if exists && isUploadedRow(row) {
+				continue
+			}
+			if exists && sealedRetryReady(row, path) {
+				continue
+			}
+			if exists && isOpenCatalogRow(row) && sameRegularFile(row.FilePath, path) {
+				continue
+			}
+			if !exists && task.Epoch <= 0 {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			next := tasks.BinlogFile{
+				TaskID:      task.ID,
+				FileName:    seg.source,
+				FilePath:    path,
+				State:       "SEALED",
+				SizeBytes:   info.Size(),
+				StartPos:    4,
+				EndPos:      0,
+				CreatedAt:   info.ModTime(),
+				SealedAt:    info.ModTime(),
+				ObjectKey:   buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, seg.source),
+				UploadState: "UPLOAD_FAILED",
+				UploadError: sealedUploadPending,
+			}
+			if exists {
+				if row.StartPos != 0 {
+					next.StartPos = row.StartPos
+				}
+				if row.EndPos != 0 {
+					next.EndPos = row.EndPos
+				}
+				if !row.CreatedAt.IsZero() {
+					next.CreatedAt = row.CreatedAt
+				}
+				if !row.SealedAt.IsZero() {
+					next.SealedAt = row.SealedAt
+				}
+			}
+			if next.SealedAt.IsZero() {
+				next.SealedAt = time.Now()
+			}
+			if err := r.fileMetaStore.UpsertBinlogFile(ctx, next); err != nil {
+				return err
+			}
+			byName[seg.source] = next
+			log.Printf("sealed upload pending task=%s file=%s", task.ID, seg.source)
+		}
+	}
+	return nil
+}
+
+func sealedRetryReady(row tasks.BinlogFile, path string) bool {
+	if !strings.EqualFold(strings.TrimSpace(row.UploadState), "UPLOAD_FAILED") {
+		return false
+	}
+	if strings.TrimSpace(row.ObjectKey) == "" || row.SealedAt.IsZero() {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(row.State), "SEALED") {
+		return false
+	}
+	return sameRegularFile(row.FilePath, path)
+}
+
+func sameRegularFile(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if filepath.Clean(a) != filepath.Clean(b) {
+		return false
+	}
+	info, err := os.Stat(b)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// checkpointPastSealedRotate moves a checkpoint that still names a sealed
+// rotate onto the next file. Resuming on the sealed name would open a new
+// segment beside it and stop on "sealed file already exists".
+func (r *MySQLRunner) checkpointPastSealedRotate(ctx context.Context, taskID string, cp binlog.Checkpoint) (binlog.Checkpoint, bool) {
+	if cp.File == "" || cp.Pos == 0 {
+		return cp, false
+	}
+	path := r.sealedFilePath(ctx, taskID, cp.File)
+	if path == "" {
+		return cp, false
+	}
+	nextName, nextPos, endPos, ok := binlog.LastRotateTarget(path)
+	if !ok || endPos == 0 || endPos != cp.Pos || nextName == "" || nextName == cp.File {
+		return cp, false
+	}
+	out := cp
+	out.File = nextName
+	out.Pos = nextPos
+	return out, true
+}
+
+func (r *MySQLRunner) sealedFilePath(ctx context.Context, taskID, name string) string {
+	if name == "" || strings.ContainsAny(name, "/\\") {
+		return ""
+	}
+	if strings.TrimSpace(r.dataDir) != "" && taskID != "" {
+		direct := filepath.Join(r.dataDir, taskID, name)
+		if info, err := os.Stat(direct); err == nil && info.Mode().IsRegular() {
+			return direct
+		}
+	}
+	files, err := r.listCatalog(ctx, taskID)
+	if err != nil {
+		return ""
+	}
+	for _, row := range files {
+		if row.FileName != name {
+			continue
+		}
+		path := strings.TrimSpace(row.FilePath)
+		if filepath.Base(path) == name {
+			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+				return path
+			}
+		}
+		if path != "" {
+			sibling := filepath.Join(filepath.Dir(path), name)
+			if info, err := os.Stat(sibling); err == nil && info.Mode().IsRegular() {
+				return sibling
+			}
+		}
+	}
+	return ""
 }
 
 // buildSyncerConfig 基于任务配置构造 go-mysql syncer 参数。

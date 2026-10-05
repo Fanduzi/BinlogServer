@@ -236,7 +236,7 @@ Do not use permissive development defaults in production. Follow these mandatory
   export BINLOG_SERVER_UPLOAD_ACCESS_KEY="AKIA..."
   export BINLOG_SERVER_UPLOAD_SECRET_KEY="..."
   ```
-- If an upload fails, replication continues uninterrupted. The worker retries sealed `UPLOAD_FAILED` segments in the background; after the bucket is healthy again they become `UPLOADED` without calling the retry API. Open segments are not uploaded. Manual retry still works:
+- If an upload fails, replication continues uninterrupted. The worker retries sealed `UPLOAD_FAILED` segments in the background; after the bucket is healthy again they become `UPLOADED` without calling the retry API. A crash during that upload, or just after the file is renamed, is recorded as `UPLOAD_FAILED` on the next start and follows the same retry. The upload right after seal uses `meta.timeout.upload_sec` (30 seconds by default); a timeout is `UPLOAD_FAILED` and replication continues. Open segments are not uploaded. A task with no object storage stays `LOCAL_ONLY`. Manual retry still works:
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
@@ -284,7 +284,7 @@ BinlogServer is structured as a modular control plane with clear separation betw
 | `cmd` | Top-level service startup and migration commands | [cmd/README.md](cmd/README.md) |
 | `internal/api` | HTTP routes, request validation, Swagger, metrics, tracing hooks | [internal/api/README.md](internal/api/README.md) |
 | `internal/app` | Runtime assembly and role lifecycle orchestration | [internal/app/README.md](internal/app/README.md) |
-| `internal/binlog` | Local binlog file writing, the durable resume file:pos, and checkpoint persistence helpers | [internal/binlog/README.md](internal/binlog/README.md) |
+| `internal/binlog` | Local binlog file writing, the durable resume file:pos, the next file named by a sealed rotate, and checkpoint persistence helpers | [internal/binlog/README.md](internal/binlog/README.md) |
 | `internal/config` | YAML and environment-based configuration loading | [internal/config/README.md](internal/config/README.md) |
 | `internal/logging` | Logger setup and log output rotation | [internal/logging/README.md](internal/logging/README.md) |
 | `internal/meta` | Metadata storage, schema checks, lease-backed coordination data | [internal/meta/README.md](internal/meta/README.md) |
