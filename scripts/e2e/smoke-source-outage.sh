@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: mysql80, the suite API, and the task data directory
-# output: proof that a source stop during an open dump leaves RUNNING for RETRY_BACKOFF, then resumes with a continuous binlog
+# output: proof that a source stop during an open dump leaves RUNNING for RETRY_BACKOFF, then resumes with a continuous binlog, including a LATEST task that had no copied event yet
 # pos: docker coverage for a mid-dump source outage
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -13,6 +13,10 @@ DATA_DIR="${E2E_DATA_DIR:-$ROOT_DIR/tmp/e2e/data}"
 RUN_TAG="$(date +%s)"
 BEFORE="outage-before-${RUN_TAG}"
 AFTER="outage-after-${RUN_TAG}"
+GAP1="outage-gap1-${RUN_TAG}"
+GAP2="outage-gap2-${RUN_TAG}"
+GAP3="outage-gap3-${RUN_TAG}"
+PAUSED_PID=""
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }
@@ -39,12 +43,24 @@ wait_mysql80() {
 }
 
 restore_mysql80() {
+  if [[ -n "${PAUSED_PID}" ]]; then
+    kill -CONT "$PAUSED_PID" >/dev/null 2>&1 || true
+    PAUSED_PID=""
+  fi
   docker compose -f "$COMPOSE_FILE" start mysql80 >/dev/null 2>&1 || true
   if wait_mysql80; then
     docker compose -f "$COMPOSE_FILE" exec -T mysql80 mysql -uroot -proot -e "SET GLOBAL binlog_transaction_compression=ON;" >/dev/null 2>&1 || true
   fi
 }
 trap restore_mysql80 EXIT
+
+server_pid() {
+  if [[ -n "${E2E_SERVER_PID:-}" ]] && kill -0 "$E2E_SERVER_PID" 2>/dev/null; then
+    printf '%s' "$E2E_SERVER_PID"
+    return
+  fi
+  pgrep -n -f 'binlog-server-e2e' || true
+}
 
 task_json() {
   curl -fsS "$API/api/tasks/$1"
@@ -136,6 +152,24 @@ before_file="$(printf '%s' "$before_cp" | jq -r '.file // empty')"
 before_pos="$(printf '%s' "$before_cp" | jq -r '.pos // empty')"
 echo "[source-outage] checkpoint before stop file=$before_file pos=$before_pos"
 
+gap_name="e2e-source-outage-gap-${RUN_TAG}"
+gap_body="$(jq -n \
+  --arg name "$gap_name" \
+  --arg host "$E2E_SOURCE_HOST" \
+  --arg user "$E2E_SOURCE_USER" \
+  --arg pass "$E2E_SOURCE_PASS" \
+  --argjson port "$E2E_MYSQL80_PORT" \
+  '{name:$name,cluster_key:$name,source:{host:$host,port:$port,user:$user,password:$pass,flavor:"mysql",server_id:310191},start:{mode:"LATEST"},storage:{retention_days:7}}')"
+gap_resp="$(curl -sS -X POST "$API/api/tasks" -H 'Content-Type: application/json' -d "$gap_body")"
+gap_id="$(printf '%s' "$gap_resp" | jq -r '.id // empty')"
+if [[ -z "$gap_id" || "$gap_id" == "null" ]]; then
+  echo "create gap task failed: $gap_resp" >&2
+  exit 1
+fi
+curl -fsS -X POST "$API/api/tasks/$gap_id/start" >/dev/null
+wait_state "$gap_id" "RUNNING"
+echo "[source-outage] gap task $gap_id running with no copied row yet"
+
 echo "[source-outage] stop mysql80"
 docker compose -f "$COMPOSE_FILE" stop mysql80 >/dev/null
 
@@ -161,6 +195,28 @@ if [[ "$saw_backoff" != "1" ]]; then
   exit 1
 fi
 echo "[source-outage] observed RETRY_BACKOFF: $sample"
+gap_sample=""
+gap_backoff=0
+for _ in $(seq 1 80); do
+  resp="$(task_json "$gap_id")"
+  st="$(printf '%s' "$resp" | jq -r '.state // empty')"
+  err="$(printf '%s' "$resp" | jq -r '.last_error // empty')"
+  if [[ "$st" == "FAILED" ]]; then
+    echo "outage moved the gap task to FAILED: $resp" >&2
+    exit 1
+  fi
+  if [[ "$st" == "RETRY_BACKOFF" && "$err" == SOURCE_UNREACHABLE:* ]]; then
+    gap_backoff=1
+    gap_sample="$resp"
+    break
+  fi
+  sleep 0.25
+done
+if [[ "$gap_backoff" != "1" ]]; then
+  echo "gap task stayed out of RETRY_BACKOFF during the source stop: $(task_json "$gap_id")" >&2
+  exit 1
+fi
+echo "[source-outage] gap task RETRY_BACKOFF: $gap_sample"
 
 events="$(curl -fsS "$API/api/tasks/$task_id/events?limit=200")"
 if ! printf '%s' "$events" | jq -e '[.[] | select(.type=="TASK_RETRY_BACKOFF" and (.detail|tostring|startswith("SOURCE_UNREACHABLE")))] | length > 0' >/dev/null; then
@@ -168,10 +224,39 @@ if ! printf '%s' "$events" | jq -e '[.[] | select(.type=="TASK_RETRY_BACKOFF" an
   exit 1
 fi
 
+PAUSED_PID="$(server_pid)"
+if [[ -z "$PAUSED_PID" ]]; then
+  echo "binlog-server pid not found; cannot insert while the dump is paused" >&2
+  exit 1
+fi
+kill -STOP "$PAUSED_PID"
+echo "[source-outage] paused binlog-server pid=$PAUSED_PID"
+
 echo "[source-outage] start mysql80"
 docker compose -f "$COMPOSE_FILE" start mysql80 >/dev/null
 wait_mysql80
 mysql80 "SET GLOBAL binlog_transaction_compression=OFF;"
+mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('${GAP1}');"
+executed_gap="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+gap1_gtid="$(uuid_interval_end "$server_uuid" "$executed_gap")"
+mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('${GAP2}');"
+executed_gap="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+gap2_gtid="$(uuid_interval_end "$server_uuid" "$executed_gap")"
+mysql80 "INSERT INTO binlog_e2e_80.t1(v) VALUES('${GAP3}');"
+executed_gap="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+gap3_gtid="$(uuid_interval_end "$server_uuid" "$executed_gap")"
+if [[ "$gap1_gtid" == "0" || "$gap2_gtid" == "0" || "$gap3_gtid" == "0" ]]; then
+  echo "gap GTID missing: $gap1_gtid $gap2_gtid $gap3_gtid from $executed_gap" >&2
+  exit 1
+fi
+if [[ "$gap1_gtid" -ge "$gap2_gtid" || "$gap2_gtid" -ge "$gap3_gtid" ]]; then
+  echo "gap GTIDs are not increasing: $gap1_gtid $gap2_gtid $gap3_gtid" >&2
+  exit 1
+fi
+echo "[source-outage] inserted $GAP1 $GAP2 $GAP3 while binlog-server was paused gtid=${server_uuid}:${gap1_gtid},${gap2_gtid},${gap3_gtid}"
+kill -CONT "$PAUSED_PID"
+PAUSED_PID=""
+echo "[source-outage] continued binlog-server"
 
 resumed=""
 for _ in $(seq 1 60); do
@@ -230,8 +315,41 @@ if [[ "$ckpt_file" == "$before_file" && "$ckpt_pos" -lt "$before_pos" ]]; then
   exit 1
 fi
 
+gap_dir="$DATA_DIR/$gap_id"
+found_gap=0
+for _ in $(seq 1 60); do
+  resp="$(task_json "$gap_id")"
+  st="$(printf '%s' "$resp" | jq -r '.state // empty')"
+  if [[ "$st" == "FAILED" ]]; then
+    echo "gap task failed: $resp" >&2
+    exit 1
+  fi
+  if [[ -d "$gap_dir" ]] \
+    && grep -a -q -F "$GAP1" "$gap_dir"/* 2>/dev/null \
+    && grep -a -q -F "$GAP2" "$gap_dir"/* 2>/dev/null \
+    && grep -a -q -F "$GAP3" "$gap_dir"/* 2>/dev/null \
+    && grep -a -q -F "$AFTER" "$gap_dir"/* 2>/dev/null; then
+    found_gap=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$found_gap" != "1" ]]; then
+  echo "gap task did not store $GAP1 $GAP2 $GAP3 $AFTER under $gap_dir: $(task_json "$gap_id")" >&2
+  exit 1
+fi
+gap_cp="$(curl -fsS "$API/api/tasks/$gap_id/checkpoint")"
+gap_gtid_set="$(printf '%s' "$gap_cp" | jq -r '.gtid_set // empty')"
+if [[ -n "$gap_gtid_set" ]]; then
+  echo "LATEST checkpoint stored gtid_set: $gap_cp" >&2
+  exit 1
+fi
+echo "[source-outage] gap task stored the outage rows without gtid_set"
+
 curl -fsS -X POST "$API/api/tasks/$task_id/stop" >/dev/null
 wait_state "$task_id" "STOPPED"
+curl -fsS -X POST "$API/api/tasks/$gap_id/stop" >/dev/null
+wait_state "$gap_id" "STOPPED"
 
 shopt -s nullglob
 segments=("$task_dir"/*)
@@ -266,3 +384,38 @@ if [[ "$before_n" != "1" || "$after_n" != "1" || "$before_gtid_n" != "1" || "$af
   exit 1
 fi
 echo "[source-outage] mysqlbinlog verified; markers and GTIDs once each"
+
+gap_segments=("$gap_dir"/*)
+if [[ "${#gap_segments[@]}" -eq 0 ]]; then
+  echo "no backup segments in $gap_dir" >&2
+  exit 1
+fi
+gap_decoded=""
+for segment in "${gap_segments[@]}"; do
+  [[ -f "$segment" ]] || continue
+  base="$(basename "$segment")"
+  docker compose -f "$COMPOSE_FILE" cp "$segment" "percona80:/tmp/source-outage-gap-${base}"
+  piece="$(docker compose -f "$COMPOSE_FILE" exec -T percona80 mysqlbinlog --verify-binlog-checksum -v "/tmp/source-outage-gap-${base}" | tr -d '\r')"
+  dup="$(printf '%s\n' "$piece" | grep -E '^# at [0-9]+$' | sort | uniq -d || true)"
+  if [[ -n "$dup" ]]; then
+    echo "duplicate event positions in gap $base: $dup" >&2
+    exit 1
+  fi
+  gap_decoded+="$piece"
+done
+count_gap() {
+  printf '%s' "$gap_decoded" | grep -a -o -F "$1" | wc -l | tr -d ' '
+}
+gap1_n="$(count_gap "$GAP1")"
+gap2_n="$(count_gap "$GAP2")"
+gap3_n="$(count_gap "$GAP3")"
+gap_after_n="$(count_gap "$AFTER")"
+gap1_gtid_n="$(count_gap "${server_uuid}:${gap1_gtid}'")"
+gap2_gtid_n="$(count_gap "${server_uuid}:${gap2_gtid}'")"
+gap3_gtid_n="$(count_gap "${server_uuid}:${gap3_gtid}'")"
+after_gtid_gap_n="$(count_gap "${server_uuid}:${after_gtid}'")"
+if [[ "$gap1_n" != "1" || "$gap2_n" != "1" || "$gap3_n" != "1" || "$gap_after_n" != "1" || "$gap1_gtid_n" != "1" || "$gap2_gtid_n" != "1" || "$gap3_gtid_n" != "1" || "$after_gtid_gap_n" != "1" ]]; then
+  echo "gap continuity failed: rows=$gap1_n,$gap2_n,$gap3_n after=$gap_after_n gtid=$gap1_gtid_n,$gap2_gtid_n,$gap3_gtid_n after_gtid=$after_gtid_gap_n (want 1 each)" >&2
+  exit 1
+fi
+echo "[source-outage] gap task mysqlbinlog verified; outage markers and GTIDs once each"
