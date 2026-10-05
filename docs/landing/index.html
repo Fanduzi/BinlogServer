@@ -602,13 +602,13 @@
     <section class="hero">
       <div class="container" style="position:relative;">
         <div class="hero-badge">
-          <span class="tag tag-new" data-i18n="heroBadge">v0.5.38 — latest release</span>
+          <span class="tag tag-new" data-i18n="heroBadge">v0.5.39 — latest release</span>
         </div>
         <h1 data-i18n="heroTitle">Centralized MySQL Binlog Backup
 Control Plane</h1>
         <p class="hero-sub" data-i18n="heroSub">Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.</p>
         <div class="hero-actions">
-          <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Quick Start (v0.5.38)</a>
+          <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Quick Start (v0.5.39)</a>
           <a href="#console" class="btn-secondary" data-i18n="heroSecondary">Inspect Live Console</a>
         </div>
         <div class="hero-code">
@@ -678,11 +678,11 @@ to verified backup health</h2>
           <div class="step-card">
             <div class="step-header">
               <span class="step-number">1</span>
-              <h3 data-i18n="step1Title">Download &amp; Verify v0.5.38 Release</h3>
+              <h3 data-i18n="step1Title">Download &amp; Verify v0.5.39 Release</h3>
             </div>
             <p data-i18n="step1Body">Fetch the official static binary, verify its SHA256 checksum, unpack the archive, and boot local evaluation.</p>
             <div class="step-code">
-              <code data-i18n="step1Code">VER=0.5.38 OS=linux ARCH=amd64
+              <code data-i18n="step1Code">VER=0.5.39 OS=linux ARCH=amd64
 curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
 sha256sum -c checksums.txt --ignore-missing
@@ -694,10 +694,10 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server</code>
-              <code>b7523c78fc1065479fcbbd0178d83513c4ee7106eb73091df9c1e4d379ecf5e7  binlog-server_0.5.38_darwin_amd64.tar.gz
-400caf0ce4cdb62b6f9d28683a733335be59d2916e04f3bf7b30241a039ee373  binlog-server_0.5.38_darwin_arm64.tar.gz
-78336586b61cf5c063dde23d02f21952cc365358c9716b267119fb76a82fbd81  binlog-server_0.5.38_linux_amd64.tar.gz
-e76be4227bb4de469f396f8e56eff245da1bf14aa9cd5ab074dae60bc6d91ff9  binlog-server_0.5.38_linux_arm64.tar.gz
+              <code>65b3089f58ad9e86e5b3828295890ded98c7cedad91f47b2335e750a9af7d0e2  binlog-server_0.5.39_darwin_amd64.tar.gz
+984f9a6cf63ab5c7ee383b7663f88770bd530b6f4ad443b04b34bb9417faa1d9  binlog-server_0.5.39_darwin_arm64.tar.gz
+564c6a7b666cbc36ce7030e7845add8d8184057966f024a77aed460fc8c3a5f7  binlog-server_0.5.39_linux_amd64.tar.gz
+1542f27dcb0da3c3989e6869ccae91cf79419b065a8f644393409069875c5534  binlog-server_0.5.39_linux_arm64.tar.gz
 </code>
             </div>
           </div>
@@ -997,9 +997,9 @@ production stability and ergonomics</h2>
             <h3 data-i18n="releaseLeftTitle">Recent Releases</h3>
             <div class="timeline">
               <div class="timeline-item">
-                <div class="timeline-date">2026-10-05</div>
-                <div class="timeline-version">v0.5.38 (Current)</div>
-                <p data-i18n="release1">v0.5.38 has no schema migration. Rolling upgrade from v0.5.37 is fine when schema_migrations is already version 2. A database still on schema 1 must follow the v0.5.34 upgrade first. A PUT that changes source, start, storage, or cluster_key while the task is RUNNING, STARTING, LEASE_DEGRADED, or RETRY_BACKOFF returns HTTP 400. The body is stop the task before changing source, start, storage, or cluster_key: state &lt;STATE&gt;. The saved row stays as it was. Stop, wait until the row is STOPPED, PUT, then Start (#179). Up to v0.5.37 that PUT saved the new values while the dump kept the copy from start. Detail is in the <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/releases/release-notes-v0.5.38.md">v0.5.38 release notes</a>.</p>
+                <div class="timeline-date">2026-10-06</div>
+                <div class="timeline-version">v0.5.39 (Current)</div>
+                <p data-i18n="release1">v0.5.39 has no schema migration. Rolling upgrade from v0.5.38 is fine when schema_migrations is already version 2. A database still on schema 1 must follow the v0.5.34 upgrade first. A source that dies mid-dump now goes to RETRY_BACKOFF with SOURCE_UNREACHABLE; LATEST tasks no longer skip transactions after an outage; tasks no longer get stuck on SEGMENT_NOT_ON_WORKER after a source restart. Detail is in the <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/releases/release-notes-v0.5.39.md">v0.5.39 release notes</a>.</p>
               </div>
               <div class="timeline-item">
                 <div class="timeline-date">2026-10-03</div>
@@ -1046,7 +1046,7 @@ production stability and ergonomics</h2>
 into a production control plane</h2>
         <p data-i18n="ctaSub">Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.</p>
         <div class="hero-actions" style="margin-bottom:0;">
-          <a href="#deployment" class="btn-primary" data-i18n="ctaPrimary">Get Started with v0.5.38</a>
+          <a href="#deployment" class="btn-primary" data-i18n="ctaPrimary">Get Started with v0.5.39</a>
           <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/guide/admin/deployment.md" class="btn-secondary" data-i18n="ctaSecondary">Deployment Guide</a>
         </div>
       </div>
@@ -1086,7 +1086,7 @@ into a production control plane</h2>
             <div class="footer-col-title" data-i18n="footerCol3">Project</div>
             <ul>
               <li><a href="https://github.com/Fanduzi/BinlogServer" target="_blank" rel="noopener">GitHub</a></li>
-              <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases (v0.5.38)</a></li>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases (v0.5.39)</a></li>
               <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" data-i18n="footerLink8">Changelog</a></li>
             </ul>
           </div>
@@ -1119,10 +1119,10 @@ into a production control plane</h2>
         navPositioning: 'Positioning',
         navChangelog: 'Changelog',
         navCta: 'Releases',
-        heroBadge: 'v0.5.38 — latest release',
+        heroBadge: 'v0.5.39 — latest release',
         heroTitle: 'Centralized MySQL Binlog Backup\nControl Plane',
         heroSub: 'Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.',
-        heroPrimary: 'Quick Start (v0.5.38)',
+        heroPrimary: 'Quick Start (v0.5.39)',
         heroSecondary: 'Inspect Live Console',
         heroCode: 'DURABILITY    Local fsync precedes checkpoint advance (zero optimistic progress)\nARCHIVE       Decoupled S3 upload (upload failure never stalls binlog capture)\nCLUSTER       Multi-worker lease ownership with automatic failover & zero split-brain\nOBSERVE       True lag vs source binlog tip, Prometheus metrics, and embedded Web UI',
         consoleLabel: 'Operator Console & Interfaces',
@@ -1137,9 +1137,9 @@ into a production control plane</h2>
         deployLabel: 'Install & First Backup Path',
         deployTitle: 'Four disciplined steps from download\nto verified backup health',
         deploySub: 'Packaged release archives contain precompiled statically-linked binaries (binlog-server, migrate), SQL migrations, and production config templates. Operators do not need Go installed.',
-        step1Title: 'Download & Verify v0.5.38 Release',
+        step1Title: 'Download & Verify v0.5.39 Release',
         step1Body: 'Fetch the official static binary, verify its SHA256 checksum, unpack the archive, and boot local evaluation.',
-        step1Code: 'VER=0.5.38 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER=0.5.39 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: 'Verify Health & Create Backup Task',
         step2Body: 'Check health probe status and submit your MySQL source specification with explicit retention and start mode.',
         step2Code: '# Check health probe\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# Submit backup task (start from source tip)\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
@@ -1233,7 +1233,7 @@ into a production control plane</h2>
         changelogTitle: 'Continuous hardening focused on\nproduction stability and ergonomics',
         changelogSub: 'Review recent release highlights designed specifically to eliminate operator surprise in production environments.',
         releaseLeftTitle: 'Recent Releases',
-        release1: 'v0.5.38 has no schema migration. Rolling upgrade from v0.5.37 is fine when schema_migrations is already version 2. A database still on schema 1 must follow the v0.5.34 upgrade first. A PUT that changes source, start, storage, or cluster_key while the task is RUNNING, STARTING, LEASE_DEGRADED, or RETRY_BACKOFF returns HTTP 400. The body is stop the task before changing source, start, storage, or cluster_key: state &lt;STATE&gt;. The saved row stays as it was. Stop, wait until the row is STOPPED, PUT, then Start (#179). Up to v0.5.37 that PUT saved the new values while the dump kept the copy from start. Detail is in the <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/releases/release-notes-v0.5.38.md">v0.5.38 release notes</a>.',
+        release1: 'v0.5.39 has no schema migration. Rolling upgrade from v0.5.38 is fine when schema_migrations is already version 2. A database still on schema 1 must follow the v0.5.34 upgrade first. A source that dies mid-dump now goes to RETRY_BACKOFF with SOURCE_UNREACHABLE; LATEST tasks no longer skip transactions after an outage; tasks no longer get stuck on SEGMENT_NOT_ON_WORKER after a source restart. Detail is in the <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/releases/release-notes-v0.5.39.md">v0.5.39 release notes</a>.',
         release2: 'This patch only corrects the shipped guide. Behavior is unchanged from v0.5.11. The English adopt sentence now says adopting an id that is not a catalog task returns 404 with body task not found. Chinese section 7.4 describes the same path: the leftover directory is listed, adopt before start, 200 and STOPPED, password not returned, omitted start is FILE_POS at the highest segment name and size, and start is 204 in the same directory. With meta_dsn, a directory that is not a catalog task is 404 task not found. The published v0.5.11 tarball still has the old Chinese 7.4 and the English sentence that omits 404. The Console has no adopt button.',
         release3: 'Standalone with no meta_dsn: POST /api/tasks/{id}/adopt attaches cluster_key and source to a leftover directory already listed by GET /api/tasks. Success is 200, the password is omitted, state stays STOPPED, and adopt does not start replication. Before adopt, PUT and POST start still return 400 on-disk backup has no task metadata. If start is omitted, the saved position is FILE_POS at the size of the highest sealed or .open.e segment. POST start then returns 204 and writes the next epoch in the same directory. The Console has no adopt button. With meta_dsn, adopting a directory that is not a catalog task returns 404 task not found.',
         releaseRightTitle: 'DBA Production Checklist',
@@ -1251,7 +1251,7 @@ into a production control plane</h2>
         check3Note: 'Decoupled archive',
         ctaTitle: 'Move MySQL binlog backup\ninto a production control plane',
         ctaSub: 'Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.',
-        ctaPrimary: 'Get Started with v0.5.38',
+        ctaPrimary: 'Get Started with v0.5.39',
         ctaSecondary: 'Deployment Guide',
         footerBrand: 'Centralized MySQL binlog backup control plane with durable local persistence, multi-worker failover, and decoupled S3 archiving. Apache 2.0 licensed.',
         footerCol1: 'Operations',
@@ -1263,7 +1263,7 @@ into a production control plane</h2>
         footerLink5: 'Topologies',
         footerLink6: 'Fit Assessment',
         footerCol3: 'Project',
-        footerLink7: 'Releases (v0.5.38)',
+        footerLink7: 'Releases (v0.5.39)',
         footerLink8: 'Changelog',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.',
         footerBottomRight: 'Bilingual production landing page for MySQL DBAs.'
@@ -1280,10 +1280,10 @@ into a production control plane</h2>
         navPositioning: '产品定位',
         navChangelog: '版本演进',
         navCta: '下载发布包',
-        heroBadge: 'v0.5.38 — 最新发布版本',
+        heroBadge: 'v0.5.39 — 最新发布版本',
         heroTitle: '面向生产环境的集中式\nMySQL Binlog 备份控制平面',
         heroSub: '基于本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档的持续备份服务。专为关注确定性 RPO、状态可见与可靠故障恢复的 MySQL DBA 设计，告别脆弱的散装脚本。',
-        heroPrimary: '快速安装 (v0.5.38)',
+        heroPrimary: '快速安装 (v0.5.39)',
         heroSecondary: '查看控制台界面',
         heroCode: '持久性保障    本地 fsync 成功后方才推进检查点（杜绝虚假乐观进度）\n归档解耦      S3 对象存储异步归档（远端网络抖动绝不阻塞本地实时复制）\n集群高可用    多 Worker 租约竞态与心跳超时自动接管（彻底杜绝双写脑裂）\n生产可观测    对比源库真实位点计算复制延迟，内置 Prometheus 指标与 Web 控制台',
         consoleLabel: '运维控制台与管理接口',
@@ -1298,9 +1298,9 @@ into a production control plane</h2>
         deployLabel: '安装与首条备份链路',
         deployTitle: '从下载解压到验证健康，\n严谨清晰的四步交付路径',
         deploySub: '官方发布包内已打包静态编译二进制（binlog-server、migrate）、数据库迁移脚本与生产配置模板。DBA 在部署机上无需安装 Go 环境。',
-        step1Title: '下载解压并校验 v0.5.38',
+        step1Title: '下载解压并校验 v0.5.39',
         step1Body: '下载官方静态二进制压缩包，执行 SHA256 完整性哈希校验，解压后启动本地评估实例。',
-        step1Code: 'VER=0.5.38 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER=0.5.39 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: '探活与创建首个备份任务',
         step2Body: '探活健康检查端点，提交源库连接参数，显式声明数据保留期与复制起点模式。',
         step2Code: '# 检查健康探活端点\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# 提交备份任务（从源库当前最新位点开始）\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
@@ -1394,7 +1394,7 @@ into a production control plane</h2>
         changelogTitle: '持续打磨生产可靠性与运维体验',
         changelogSub: '近期版本的迭代重点不是无序堆砌功能，而是全面提升控制台稳定度、鉴权防护与底层执行确定性。',
         releaseLeftTitle: '近期发布里程碑',
-        release1: 'v0.5.38 没有 schema migration。schema_migrations 已经是版本 2 时，从 v0.5.37 滚动升级即可。还在 schema 1 上的库，先按 v0.5.34 升级。任务处于 RUNNING、STARTING、LEASE_DEGRADED 或 RETRY_BACKOFF 时，改源库、起点、保留或 cluster_key 的 PUT 返回 HTTP 400，正文是 stop the task before changing source, start, storage, or cluster_key: state &lt;STATE&gt;。已保存的行不动。先 Stop，等到 STOPPED，再 PUT，再 Start（#179）。到 v0.5.37 为止，这个 PUT 会写入新值，拉流仍用启动时的那份。细节见 <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/releases/v0.5.38.zh-CN.md">v0.5.38 发布说明</a>。',
+        release1: 'v0.5.39 没有 schema migration。schema_migrations 已经是版本 2 时，从 v0.5.38 滚动升级即可。还在 schema 1 上的库，先按 v0.5.34 升级。源库在 dump 中途挂掉时，任务进入 RETRY_BACKOFF，错误是 SOURCE_UNREACHABLE；LATEST 任务在中断之后不再跳过事务；源库重启后，任务不再卡在 SEGMENT_NOT_ON_WORKER。细节见 <a href="https://github.com/Fanduzi/BinlogServer/blob/main/docs/releases/v0.5.39.zh-CN.md">v0.5.39 发布说明</a>。',
         release2: '这一补丁只修正随包指南。行为与 v0.5.11 相同。英文 adopt 句补上：不是目录任务的 id 做 adopt 返回 404，正文是 task not found。中文 7.4 写成同一条路径：遗留目录会列出，先 adopt 再 start，200 且 STOPPED，不返回密码，没传 start 时是最高分段文件名和大小的 FILE_POS，start 在同一目录返回 204。配了 meta_dsn 时，不是目录任务的目录是 404 task not found。已发布的 v0.5.11 压缩包里仍是旧的中文 7.4，以及漏了 404 的英文句子。Console 没有 adopt 按钮。',
         release3: 'standalone 没配 meta_dsn：POST /api/tasks/{id}/adopt 把 cluster_key 和 source 接到 GET /api/tasks 已经列出的遗留目录上。成功是 200，响应不带密码，状态保持 STOPPED，adopt 不会开始复制。adopt 之前，PUT 和 POST start 仍返回 400，正文是 on-disk backup has no task metadata。没传 start 时，保存的位点是最高封存或 .open.e 分段的 FILE_POS。POST start 随后返回 204，并在同一目录写下一段 epoch。Console 没有 adopt 按钮。配了 meta_dsn 时，对不是目录任务的目录做 adopt 返回 404 task not found。',
         releaseRightTitle: 'DBA 生产上线检查清单',
@@ -1412,7 +1412,7 @@ into a production control plane</h2>
         check3Note: '归档解耦运行',
         ctaTitle: '将 MySQL Binlog 备份\n升级为生产级控制平面',
         ctaSub: '查阅详细部署指南，参考标准的生产配置模板，用专业可靠的控制系统彻底替换摇摇欲坠的定时脚本。',
-        ctaPrimary: '开始使用 v0.5.38',
+        ctaPrimary: '开始使用 v0.5.39',
         ctaSecondary: '查阅部署指南',
         footerBrand: '面向生产环境的集中式 MySQL binlog 备份控制平面，具备本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档能力。基于 Apache 2.0 协议开源。',
         footerCol1: '运维指南',
@@ -1424,7 +1424,7 @@ into a production control plane</h2>
         footerLink5: '架构拓扑',
         footerLink6: '适配建议',
         footerCol3: '开源项目',
-        footerLink7: 'Release 资产 (v0.5.38)',
+        footerLink7: 'Release 资产 (v0.5.39)',
         footerLink8: '更新日志',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer 使用 Apache 2.0 许可证。',
         footerBottomRight: '专为 MySQL DBA 打造的单文件双语落地页。'
