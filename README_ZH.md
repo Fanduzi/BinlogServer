@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.37
+### 1. 下载、校验并解压 v0.5.38
 
 ```bash
-VER=0.5.37
+VER=0.5.38
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,19 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.37` `checksums.txt`：
+已发布的 `v0.5.38` `checksums.txt`：
 
 ```text
-536974d525dac9ecd9297e6b5efbca38e7481718392c02fc3221dd8b8436b591  binlog-server_0.5.37_darwin_amd64.tar.gz
-3d52f5a3a913e2cf53a049d15639960f16e7c2faa54839cca509dedd4d3fa55b  binlog-server_0.5.37_darwin_arm64.tar.gz
-5de35eec4c1d60b536c5ea204b5c4fe7a66a026330af727e46c3f07ebc6c2f72  binlog-server_0.5.37_linux_amd64.tar.gz
-7630b3d60c7a201379bbd9b9d2c90ec45193a00a78fdd07da3883199f71306d9  binlog-server_0.5.37_linux_arm64.tar.gz
+b7523c78fc1065479fcbbd0178d83513c4ee7106eb73091df9c1e4d379ecf5e7  binlog-server_0.5.38_darwin_amd64.tar.gz
+400caf0ce4cdb62b6f9d28683a733335be59d2916e04f3bf7b30241a039ee373  binlog-server_0.5.38_darwin_arm64.tar.gz
+78336586b61cf5c063dde23d02f21952cc365358c9716b267119fb76a82fbd81  binlog-server_0.5.38_linux_amd64.tar.gz
+e76be4227bb4de469f396f8e56eff245da1bf14aa9cd5ab074dae60bc6d91ff9  binlog-server_0.5.38_linux_arm64.tar.gz
 ```
 
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.37_linux_amd64/
+binlog-server_0.5.38_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -253,16 +253,16 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.37)
+## 升级须知 (v0.5.38)
 
-在将生产环境升级至 `v0.5.37` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35` 与 `v0.5.36` 的记录留在下方链接的发布说明里。
+在将生产环境升级至 `v0.5.38` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35`、`v0.5.36` 与 `v0.5.37` 的记录留在下方链接的发布说明里。
 
-- **没有 schema migration:** 二进制从 `v0.5.36` 滚动升级即可。元数据 schema 仍是版本 2。`schema_migrations` 已经是版本 2 时，不用执行 `./migrate up`。没有新的配置项。还在 schema 1 上的库，先按 v0.5.34 升级：停掉这个元数据库上的每一台 binlog-server，执行 `./migrate up`，然后只启动 `v0.5.34` 或更新的二进制。
-- **本地自己消不掉的错误进入 FAILED（#178）:** `sealed file already exists` 把任务写成 `FAILED`。`last_error` 是 `SEALED_FILE_EXISTS: sealed file already exists: <path>`。checkpoint 写入不是瞬时元数据错误时，任务进入 `FAILED`，`last_error` 以 `CHECKPOINT_WRITE_FAILED` 开头。租约放开，这个 runner 不再被调用。把多出来的封存文件移走，或先修 `last_error` 里的元数据库错误，再 Start。到 `v0.5.36` 为止，这些情况停在 `RETRY_BACKOFF`，并继续去连源库。已发布的 v0.5.36 包仍然这样。租约 epoch 对不上是移交：本进程追加 `TASK_LEASE_YIELDED`，不写 `FAILED`，也不写 `RETRY_BACKOFF`。`SOURCE_UNREACHABLE`、瞬时 checkpoint 错误、`OBJECT_PURGE_FAILED`，以及没有存储 GTID 的 MySQL 1236，仍停在 `RETRY_BACKOFF`。
+- **没有 schema migration:** 二进制从 `v0.5.37` 滚动升级即可。元数据 schema 仍是版本 2。`schema_migrations` 已经是版本 2 时，不用执行 `./migrate up`。没有新的配置项。还在 schema 1 上的库，先按 v0.5.34 升级：停掉这个元数据库上的每一台 binlog-server，执行 `./migrate up`，然后只启动 `v0.5.34` 或更新的二进制。
+- **正在拉流时改源库、起点、保留或 cluster_key 的 PUT 返回 HTTP 400（#179）:** 状态是 `RUNNING`、`STARTING`、`LEASE_DEGRADED` 或 `RETRY_BACKOFF`。正文是 `stop the task before changing source, start, storage, or cluster_key: state <STATE>`。已保存的行不动，所以 GET 仍是这次拉流正在用的配置。只改名字仍返回 HTTP 200。先 Stop，等到行是 `STOPPED`，再 PUT，再 Start。下次启动从 checkpoint 续上。到 `v0.5.37` 为止，这个 PUT 会把新值写进去，正在跑的 dump 仍用启动时抄下的那份。已发布的 v0.5.37 包仍然这样。`CREATED`、`STOPPING`、`STOPPED`、`FAILED` 仍接受这次修改。`RETRY_BACKOFF` 里 host 或 port 写错时，不再能靠一次 PUT 改过去。
 
-详细版本记录：[docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md) | [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md)
+详细版本记录：[docs/releases/v0.5.38.zh-CN.md](docs/releases/v0.5.38.zh-CN.md) | [docs/releases/release-notes-v0.5.38.md](docs/releases/release-notes-v0.5.38.md)
 
-v0.5.27 至 v0.5.36 的记录：[docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md) | [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md)，[docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md) | [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md)，[docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md) | [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md)，[docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md) | [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md)，[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)，[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
+v0.5.27 至 v0.5.37 的记录：[docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md) | [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md)，[docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md) | [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md)，[docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md) | [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md)，[docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md) | [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md)，[docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md) | [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md)，[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)，[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
 
 
 ---
