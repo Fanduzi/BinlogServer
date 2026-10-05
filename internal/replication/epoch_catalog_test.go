@@ -193,6 +193,214 @@ func TestFirstSealKeepsHistoricalObjectKey(t *testing.T) {
 	}
 }
 
+// v0533Catalog is the shape left by v0.5.33: every binlog_files.epoch is 0,
+// including the open segment whose path already ends in .open.eN.
+func v0533Catalog(taskID, taskDir string) *epochCatalog {
+	return &epochCatalog{rows: []tasks.BinlogFile{
+		{
+			TaskID: taskID, FileName: "mysql-bin.000001", FilePath: filepath.Join(taskDir, "mysql-bin.000001"),
+			Epoch: 0, State: "SEALED", UploadState: "UPLOADED", ObjectKey: "e2e/legacy/mysql-bin.000001",
+			Checksum: tasks.ChecksumMatch,
+		},
+		{
+			TaskID: taskID, FileName: "mysql-bin.000002", FilePath: filepath.Join(taskDir, "mysql-bin.000002"),
+			Epoch: 0, State: "SEALED", UploadState: "UPLOADED", ObjectKey: "e2e/legacy/mysql-bin.000002",
+			Checksum: tasks.ChecksumMatch,
+		},
+		{
+			TaskID: taskID, FileName: "mysql-bin.000003", FilePath: filepath.Join(taskDir, "mysql-bin.000003"),
+			Epoch: 0, State: "SEALED", UploadState: "UPLOAD_FAILED", ObjectKey: "e2e/legacy/mysql-bin.000003",
+			UploadError: "boom",
+		},
+		{
+			TaskID: taskID, FileName: "mysql-bin.000004",
+			FilePath: filepath.Join(taskDir, "mysql-bin.000004.open.e1"),
+			Epoch:    0, State: "OPEN", UploadState: "LOCAL_ONLY",
+		},
+	}}
+}
+
+// backfillV0533Epoch applies the 000002 path rule: .open.eN and .sealed.eN
+// take that epoch. A plain sealed name stays 0.
+func backfillV0533Epoch(cat *epochCatalog) {
+	for i := range cat.rows {
+		base := filepath.Base(cat.rows[i].FilePath)
+		if n, ok := epochSuffix(base, ".open.e"); ok {
+			cat.rows[i].Epoch = n
+		}
+		if n, ok := epochSuffix(base, ".sealed.e"); ok {
+			cat.rows[i].Epoch = n
+		}
+	}
+}
+
+func epochSuffix(name, mark string) (int64, bool) {
+	idx := strings.LastIndex(name, mark)
+	if idx <= 0 || idx+len(mark) >= len(name) {
+		return 0, false
+	}
+	n := int64(0)
+	for _, r := range name[idx+len(mark):] {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int64(r-'0')
+	}
+	return n, true
+}
+
+func TestUpgradeBackfillRotateKeepsOneRowAndLegacyKeys(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "9"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mysql-bin.000001", "mysql-bin.000002", "mysql-bin.000003", "mysql-bin.000004.open.e1"} {
+		if err := os.WriteFile(filepath.Join(taskDir, name), []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cat := v0533Catalog(taskID, taskDir)
+	backfillV0533Epoch(cat)
+	if row, ok := cat.find("mysql-bin.000004", 1); !ok || row.State != "OPEN" {
+		t.Fatalf("backfill open row %+v ok=%v", row, ok)
+	}
+	if _, ok := cat.find("mysql-bin.000004", 0); ok {
+		t.Fatal("epoch 0 open row still present after backfill")
+	}
+	runner := NewMySQLRunner(dir, WithFileMetaStore(cat))
+	task := tasks.Task{ID: taskID, Epoch: 1, Storage: tasks.Storage{RetentionDays: 7}}
+	file, _, path, err := runner.openBinlogWriter(context.Background(), task, "mysql-bin.000004", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	if err := runner.finalizeSealedFile(context.Background(), task, "", path, 4, 4, time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var current []tasks.BinlogFile
+	for _, row := range cat.rows {
+		if row.FileName == "mysql-bin.000004" {
+			current = append(current, row)
+		}
+	}
+	if len(current) != 1 || current[0].State != "SEALED" || current[0].Epoch != 1 || filepath.Base(current[0].FilePath) != "mysql-bin.000004" {
+		t.Fatalf("current segment %+v", current)
+	}
+	for _, name := range []string{"mysql-bin.000001", "mysql-bin.000002"} {
+		row, ok := cat.find(name, 0)
+		if !ok || row.UploadState != "UPLOADED" || row.Checksum != tasks.ChecksumMatch || row.ObjectKey != "e2e/legacy/"+name {
+			t.Fatalf("legacy %s %+v", name, row)
+		}
+	}
+	failed, ok := cat.find("mysql-bin.000003", 0)
+	if !ok || failed.UploadState != "UPLOAD_FAILED" {
+		t.Fatalf("failed row %+v", failed)
+	}
+	replay := tasks.SelectReplayFiles(cat.rows)
+	for _, row := range replay {
+		if strings.Contains(row.FilePath, ".open.e") {
+			t.Fatalf("replay still names a removed open path: %+v", replay)
+		}
+	}
+	if len(replay) != 4 {
+		t.Fatalf("replay %+v", replay)
+	}
+}
+
+func TestUpgradeDropsOpenRowWhoseFileWasRemoved(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "9"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	openPath := filepath.Join(taskDir, "mysql-bin.000004.open.e1")
+	if err := os.WriteFile(openPath, []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat := &epochCatalog{rows: []tasks.BinlogFile{{
+		TaskID: taskID, FileName: "mysql-bin.000004", FilePath: openPath,
+		Epoch: 0, State: "OPEN", UploadState: "LOCAL_ONLY",
+	}}}
+	backfillV0533Epoch(cat)
+	runner := NewMySQLRunner(dir, WithFileMetaStore(cat))
+	file, _, _, err := runner.openBinlogWriter(context.Background(), tasks.Task{
+		ID: taskID, Epoch: 2, Storage: tasks.Storage{RetentionDays: 7},
+	}, "mysql-bin.000005", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	if _, err := os.Stat(openPath); !os.IsNotExist(err) {
+		t.Fatalf("stale open file: %v", err)
+	}
+	for _, row := range cat.rows {
+		if row.FileName == "mysql-bin.000004" {
+			t.Fatalf("stale open catalog row %+v", row)
+		}
+	}
+	replay := tasks.SelectReplayFiles(cat.rows)
+	for _, row := range replay {
+		if strings.Contains(row.FilePath, "mysql-bin.000004") {
+			t.Fatalf("replay %+v", replay)
+		}
+	}
+}
+
+func TestUpgradeRetentionPurgesUploadedAndKeepsFailed(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "9"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * 24 * time.Hour)
+	for _, name := range []string{"mysql-bin.000001", "mysql-bin.000002", "mysql-bin.000003", "mysql-bin.000004.open.e1"} {
+		path := filepath.Join(taskDir, name)
+		if err := os.WriteFile(path, []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cat := v0533Catalog(taskID, taskDir)
+	backfillV0533Epoch(cat)
+	deleter := &purgeDeleter{}
+	runner := NewMySQLRunner(dir, WithFileMetaStore(cat), WithObjectDeleter(deleter))
+	file, _, _, err := runner.openBinlogWriter(context.Background(), tasks.Task{
+		ID: taskID, Epoch: 1, ClusterKey: "cluster", Storage: tasks.Storage{RetentionDays: 7},
+	}, "mysql-bin.000004", 4, "uuid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	for _, name := range []string{"mysql-bin.000001", "mysql-bin.000002"} {
+		if _, ok := cat.find(name, 0); ok {
+			t.Fatalf("uploaded %s kept", name)
+		}
+		if _, err := os.Stat(filepath.Join(taskDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("uploaded file %s: %v", name, err)
+		}
+	}
+	failed, ok := cat.find("mysql-bin.000003", 0)
+	if !ok || failed.UploadState != "UPLOAD_FAILED" || failed.ObjectKey != "e2e/legacy/mysql-bin.000003" {
+		t.Fatalf("failed row %+v", failed)
+	}
+	if _, err := os.Stat(filepath.Join(taskDir, "mysql-bin.000003")); err != nil {
+		t.Fatalf("failed file: %v", err)
+	}
+	open, ok := cat.find("mysql-bin.000004", 1)
+	if !ok || open.State != "OPEN" || !strings.HasSuffix(open.FilePath, "mysql-bin.000004.open.e1") {
+		t.Fatalf("open row %+v", open)
+	}
+	if len(deleter.keys) != 2 {
+		t.Fatalf("deleted objects %v", deleter.keys)
+	}
+}
+
 func TestRetentionAgesEachEpoch(t *testing.T) {
 	dir := t.TempDir()
 	taskID := "9"

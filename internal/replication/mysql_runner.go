@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -1256,6 +1256,13 @@ func (r *MySQLRunner) openBinlogWriterIn(ctx context.Context, dir string, task t
 			_ = f.Close()
 			return nil, nil, "", err
 		}
+		// An older catalog row can still say OPEN for a segment this process
+		// just removed, or for a path that is already gone. Retention does not
+		// delete OPEN rows, so drop the ones in this directory that have no file.
+		if err := r.retireMissingLocalOpenRows(ctx, task.ID, dir); err != nil {
+			_ = f.Close()
+			return nil, nil, "", err
+		}
 	}
 
 	// Step 4: 返回带初始 checkpoint 的 writer。
@@ -2047,6 +2054,46 @@ func (r *MySQLRunner) sealTarget(ctx context.Context, task tasks.Task, dir, sour
 		return plain, nil
 	}
 	return filepath.Join(dir, fmt.Sprintf("%s.sealed.e%d", sourceFile, task.Epoch)), nil
+}
+
+// retireMissingLocalOpenRows drops OPEN rows in dir whose file is gone.
+// Rows outside dir stay: another worker's segment is not this directory.
+// Sealed rows stay, including a plain name uploaded under the historical key.
+func (r *MySQLRunner) retireMissingLocalOpenRows(ctx context.Context, taskID, dir string) error {
+	if r == nil || r.fileMetaStore == nil {
+		return nil
+	}
+	deleter, ok := r.fileMetaStore.(interface {
+		DeleteBinlogFile(context.Context, string, string, int64) error
+	})
+	if !ok {
+		return nil
+	}
+	files, err := r.listCatalog(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	dir = filepath.Clean(dir)
+	for _, row := range files {
+		if !strings.EqualFold(strings.TrimSpace(row.State), "OPEN") {
+			continue
+		}
+		path := strings.TrimSpace(row.FilePath)
+		if path == "" || filepath.Clean(filepath.Dir(path)) != dir {
+			continue
+		}
+		info, statErr := os.Stat(path)
+		if statErr == nil && info.Mode().IsRegular() {
+			continue
+		}
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return statErr
+		}
+		if err := deleter.DeleteBinlogFile(ctx, taskID, row.FileName, row.Epoch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // retireOtherOpenRows drops OPEN catalog rows for this source name at a
