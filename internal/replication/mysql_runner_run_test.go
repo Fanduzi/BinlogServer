@@ -1,15 +1,19 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, dump-preamble lag, checkpoint semantics, error propagation, and stop cleanup
+// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, and stop cleanup
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -391,7 +395,8 @@ func TestMySQLRunnerRun_FilePosAtTipIgnoresDumpPreamble(t *testing.T) {
 }
 
 // TestMySQLRunnerRun_PreambleDoesNotHideCatchUpLag 验证仍落后 tip 时，preamble 不能
-// 改写位点，真实事件的 header 时间仍然是延迟。
+// 改写位点，真实事件的 header 时间仍然是延迟。format description 要写在第一个
+// 业务事件前面，mysqlbinlog 才读得开，但不能单独成为续传位点。
 func TestMySQLRunnerRun_PreambleDoesNotHideCatchUpLag(t *testing.T) {
 	oldEventAt := time.Date(2026, 8, 27, 4, 47, 20, 0, time.UTC)
 	file := &fakeSyncFile{}
@@ -434,10 +439,93 @@ func TestMySQLRunnerRun_PreambleDoesNotHideCatchUpLag(t *testing.T) {
 	if got.atTip || got.pos != 400 || !got.at.Equal(oldEventAt) {
 		t.Fatalf("catch-up report %+v, want pos=400, old header, not at-tip", got)
 	}
-	for _, chunk := range file.writes {
-		if len(chunk) == 122 {
-			t.Fatalf("wrote format-description preamble during catch-up")
-		}
+	if len(file.writes) != 1 {
+		t.Fatalf("writes=%d, want the format description and the event in one write", len(file.writes))
+	}
+	preamble := preambleEvent(126, oldEventAt).RawData
+	event := newRunnerEventAt(400, oldEventAt).RawData
+	if !bytes.HasPrefix(file.writes[0], preamble) || !bytes.HasSuffix(file.writes[0], event) {
+		t.Fatalf("write %d bytes, want format description then the event", len(file.writes[0]))
+	}
+}
+
+// TestMySQLRunnerRun_MidFileFormatDescriptionDoesNotRewindResume 验证从源文件
+// 中部开始时，format description 落在第一个事件前面，续传位点仍是该事件的
+// end_log_pos，不是 description 原来的 126。下一次 start 不再写第二条。
+func TestMySQLRunnerRun_MidFileFormatDescriptionDoesNotRewindResume(t *testing.T) {
+	dir := t.TempDir()
+	eventAt := time.Unix(1_700_000_000, 0).UTC()
+	headerAt := eventAt.Add(-2 * time.Hour)
+	const sql = "INSERT INTO mid_file_backup VALUES (1)"
+	fde := frameBinlogEvent(goreplication.FORMAT_DESCRIPTION_EVENT, formatDescriptionBody(headerAt), 4, headerAt)
+	binary.LittleEndian.PutUint32(fde.RawData[13:17], 126)
+	fde.Header.LogPos = 126
+	query := frameBinlogEvent(goreplication.QUERY_EVENT, queryEventBody("t", sql), 400, eventAt)
+
+	fetcher := &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000006", Pos: 9000},
+		serverUUID: "11111111-1111-1111-1111-111111111111",
+	}
+	syncer := &fakeSyncer{streamer: &fakeStreamer{results: []streamResult{
+		{event: fde},
+		{event: query},
+		{err: context.Canceled},
+	}}}
+	reporter := &fakeRunnerProgressReporter{}
+	runner := NewMySQLRunner(dir)
+	runner.fetcher = fetcher
+	runner.progressReporter = reporter
+	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeFilePos, File: "mysql-bin.000006", Pos: 400})
+	task.Epoch = 1
+	if err := runner.Run(context.Background(), task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(reporter.reports) != 1 || reporter.reports[0].pos != query.Header.LogPos || !reporter.reports[0].at.Equal(eventAt) {
+		t.Fatalf("reports %+v, want one sample at %d with the query time", reporter.reports, query.Header.LogPos)
+	}
+	path := filepath.Join(dir, task.ID, "mysql-bin.000006.open.e1")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(body, binlogMagic) || !bytes.HasPrefix(body[len(binlogMagic):], fde.RawData) {
+		t.Fatalf("segment does not start with magic plus the format description (%d bytes)", len(body))
+	}
+	if bytes.Count(body, fde.RawData) != 1 {
+		t.Fatalf("format description copies=%d, want 1", bytes.Count(body, fde.RawData))
+	}
+	file, pos, ok := binlog.DurableResume(dir, task.ID)
+	if !ok || file != "mysql-bin.000006" || pos != query.Header.LogPos {
+		t.Fatalf("resume %s:%d ok=%v, want mysql-bin.000006:%d (not 126)", file, pos, ok, query.Header.LogPos)
+	}
+
+	next := frameBinlogEvent(goreplication.QUERY_EVENT, queryEventBody("t", "INSERT INTO mid_file_backup VALUES (2)"), pos, eventAt.Add(time.Second))
+	again := frameBinlogEvent(goreplication.FORMAT_DESCRIPTION_EVENT, formatDescriptionBody(headerAt), 4, headerAt)
+	binary.LittleEndian.PutUint32(again.RawData[13:17], 0)
+	again.Header.LogPos = 0
+	syncer.streamer = &fakeStreamer{results: []streamResult{
+		{event: again},
+		{event: next},
+		{err: context.Canceled},
+	}}
+	syncer.startPosCalls = 0
+	if err := runner.Run(context.Background(), task); err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+	if syncer.startPos.Name != "mysql-bin.000006" || syncer.startPos.Pos != query.Header.LogPos {
+		t.Fatalf("resume StartSync %+v, want %d", syncer.startPos, query.Header.LogPos)
+	}
+	body, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(body, fde.RawData) != 1 || bytes.Contains(body, again.RawData) {
+		t.Fatalf("resume rewrote the format description")
+	}
+	file, pos, ok = binlog.DurableResume(dir, task.ID)
+	if !ok || pos != next.Header.LogPos {
+		t.Fatalf("resume after second start %s:%d ok=%v, want %d", file, pos, ok, next.Header.LogPos)
 	}
 }
 

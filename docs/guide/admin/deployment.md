@@ -442,6 +442,8 @@ Day-1 已经拉到数据并在源上 `FLUSH LOGS` 之后，常见内容是：
 
 `mysqlbinlog` / `mariadb-binlog` 认这 4 个字节，不认文件名。把 `.open.e1` 的路径原样放进命令。`stop` 只关闭文件，不会做这次 `rename`。文件若只有这 4 个字节，说明还没有事件落盘，命令能打开它，输出里没有业务事件。
 
+从源文件中部开始时（常见的 `LATEST`），源库会先下发 format description，它的 `end_log_pos` 常常是 126，小于当时的位点。第一个业务事件落盘时，这条 description 写在它前面，字节是源库下发的原文，所以 `mysqlbinlog --verify-binlog-checksum` 能解析后面的行事件。它不推进 checkpoint，也不拿它的时间算延迟。还没有业务事件时，文件仍只有这 4 个字节，停止后再启动不会退回 126。已经有事件的分段，下次 start 不会再写第二条。
+
 每个序号只传一个文件，按序号从小到大：
 
 - 这个序号只有封存名：传封存名。
@@ -555,6 +557,8 @@ A file with no `.open.e<epoch>` suffix is sealed. After a real rotate from the s
 `mysql-bin.000004.open.e1` is the segment that is still open. The number after `e` is the lease epoch of this run. The first `start` in a standalone process is `1`. The suffix is only on the name. The file starts with the 4-byte magic header `fe 62 69 6e` (`0xfe` + `bin`) and then the raw events that have been `fsync`ed. Sealing does not rewrite them.
 
 `mysqlbinlog` and `mariadb-binlog` accept that header. Pass the `.open.e1` path as it is. `stop` closes the file and leaves the name in place. A file that is only those 4 bytes has no events yet. The tool opens it and prints no row or statement events.
+
+A start in the middle of a source file, which is what `LATEST` does, receives a format description whose `end_log_pos` is often 126 and behind the dump cursor. That description is written in front of the first copied event, using the bytes MySQL sent, so `mysqlbinlog --verify-binlog-checksum` can decode the row events that follow. It does not move the checkpoint, and its timestamp is not lag. Until a later event arrives the file stays those 4 bytes, and stop then start does not rewind to 126. A segment that already has events does not gain a second description on the next start.
 
 Pass one file per index, in ascending index order:
 
