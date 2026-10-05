@@ -1,11 +1,12 @@
 // Package replication provides module-level functionality for replication.
-// input: a flavor-specific GTID seed and binlog events from the dump
+// input: a flavor-specific GTID seed and binlog events from the dump, including raw-mode events whose body is only in RawData or GenericEvent
 // output: the executed GTID set written on a flushed checkpoint, and MySQL 1236 detection for file/pos resume
 // pos: GTID memory for checkpoint writes so a purged source file can resume by GTID
 // note: if this file changes, update this header and module README.md.
 package replication
 
 import (
+	"encoding/binary"
 	"errors"
 	"strings"
 
@@ -25,6 +26,9 @@ type executedGTID struct {
 	set     gomysql.GTIDSet
 	pending gomysql.GTIDSet
 	inTxn   bool
+	// crc32 is set from the format description. RawData still carries the
+	// checksum; GenericEvent.Data from go-mysql already has it removed.
+	crc32 bool
 }
 
 func newExecutedGTID(flavor, seed string) *executedGTID {
@@ -56,6 +60,17 @@ func (t *executedGTID) note(ev *replication.BinlogEvent) {
 	if t == nil || ev == nil || ev.Header == nil {
 		return
 	}
+	if ev.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
+		if fde, ok := ev.Event.(*replication.FormatDescriptionEvent); ok {
+			t.crc32 = fde.ChecksumAlgorithm == replication.BINLOG_CHECKSUM_ALG_CRC32
+		}
+		return
+	}
+	// RawMode parses only the format description and rotate. GTID and query
+	// bodies stay in GenericEvent.Data, or in RawData when Event is unset.
+	if decoded, ok := t.decodeRaw(ev); ok {
+		ev = decoded
+	}
 	switch ev.Header.EventType {
 	case replication.ANONYMOUS_GTID_EVENT:
 		t.pending = nil
@@ -77,6 +92,128 @@ func (t *executedGTID) note(ev *replication.BinlogEvent) {
 	case replication.QUERY_EVENT:
 		t.noteQuery(ev)
 	}
+}
+
+func (t *executedGTID) decodeRaw(ev *replication.BinlogEvent) (*replication.BinlogEvent, bool) {
+	if gtidEventTyped(ev.Event) {
+		return nil, false
+	}
+	switch ev.Header.EventType {
+	case replication.GTID_EVENT, replication.GTID_TAGGED_LOG_EVENT, replication.QUERY_EVENT,
+		replication.PREVIOUS_GTIDS_EVENT, replication.MARIADB_GTID_EVENT, replication.MARIADB_GTID_LIST_EVENT:
+	default:
+		return nil, false
+	}
+	body := t.eventBody(ev)
+	cloned := *ev
+	switch ev.Header.EventType {
+	case replication.GTID_EVENT:
+		if len(body) < 1+replication.SidLength+8 {
+			return ev, true
+		}
+		ge := &replication.GTIDEvent{}
+		if err := ge.Decode(body); err != nil {
+			return ev, true
+		}
+		cloned.Event = ge
+	case replication.GTID_TAGGED_LOG_EVENT:
+		ge := &replication.GtidTaggedLogEvent{}
+		if err := ge.Decode(body); err != nil {
+			return ev, true
+		}
+		cloned.Event = ge
+	case replication.QUERY_EVENT:
+		qe := decodeQueryBody(body)
+		if qe == nil {
+			return ev, true
+		}
+		cloned.Event = qe
+	case replication.PREVIOUS_GTIDS_EVENT:
+		pe := &replication.PreviousGTIDsEvent{}
+		if err := pe.Decode(body); err != nil {
+			return ev, true
+		}
+		cloned.Event = pe
+	case replication.MARIADB_GTID_EVENT:
+		if len(body) < 13 {
+			return ev, true
+		}
+		if body[12]&replication.BINLOG_MARIADB_FL_GROUP_COMMIT_ID != 0 && len(body) < 21 {
+			return ev, true
+		}
+		me := &replication.MariadbGTIDEvent{}
+		me.GTID.ServerID = ev.Header.ServerID
+		if err := me.Decode(body); err != nil {
+			return ev, true
+		}
+		cloned.Event = me
+	case replication.MARIADB_GTID_LIST_EVENT:
+		if !mariadbGTIDListBodyOK(body) {
+			return ev, true
+		}
+		le := &replication.MariadbGTIDListEvent{}
+		if err := le.Decode(body); err != nil {
+			return ev, true
+		}
+		cloned.Event = le
+	default:
+		return ev, true
+	}
+	return &cloned, true
+}
+
+func (t *executedGTID) eventBody(ev *replication.BinlogEvent) []byte {
+	if g, ok := ev.Event.(*replication.GenericEvent); ok && len(g.Data) > 0 {
+		return g.Data
+	}
+	raw := ev.RawData
+	if len(raw) <= replication.EventHeaderSize {
+		return nil
+	}
+	body := raw[replication.EventHeaderSize:]
+	if t.crc32 && len(body) >= replication.BinlogChecksumLength {
+		body = body[:len(body)-replication.BinlogChecksumLength]
+	}
+	return body
+}
+
+func gtidEventTyped(event replication.Event) bool {
+	switch event.(type) {
+	case *replication.GTIDEvent,
+		*replication.GtidTaggedLogEvent,
+		*replication.QueryEvent,
+		*replication.PreviousGTIDsEvent,
+		*replication.MariadbGTIDEvent,
+		*replication.MariadbGTIDListEvent:
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeQueryBody(body []byte) *replication.QueryEvent {
+	if len(body) < 13 {
+		return nil
+	}
+	statusVars := int(binary.LittleEndian.Uint16(body[11:13]))
+	schemaLen := int(body[8])
+	need := 13 + statusVars + schemaLen + 1
+	if len(body) < need {
+		return nil
+	}
+	qe := &replication.QueryEvent{}
+	if err := qe.Decode(body); err != nil {
+		return nil
+	}
+	return qe
+}
+
+func mariadbGTIDListBodyOK(body []byte) bool {
+	if len(body) < 4 {
+		return false
+	}
+	count := binary.LittleEndian.Uint32(body) & ((1 << 28) - 1)
+	return uint64(len(body)-4) >= uint64(count)*16
 }
 
 func (t *executedGTID) noteGTID(ev *replication.BinlogEvent) {
