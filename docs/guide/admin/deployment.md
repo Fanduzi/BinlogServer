@@ -50,14 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.34)
+## 3. 安装与产物准备 (v0.5.35)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
 
-> ⚠️ **升级顺序：先停全部进程，再迁移。** 这一版包含 schema migration `000002`。先停掉这一套元数据库上的每一台 binlog-server，再执行 `./migrate up`，然后只启动 `v0.5.34`。`v0.5.33` 对着 schema 2 会拒绝启动。还有旧进程连着这个库时，不要改表。Epoch 分段仍可按名访问（#176）。细节见 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md)。
+> ⚠️ **从 v0.5.34 滚动升级即可。** 这一版没有 schema migration。元数据 schema 仍是版本 2。`schema_migrations` 已经是版本 2 时，不用执行 `./migrate up`。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。控制面加 worker 时，HTTP 204 只表示停止已被接受，行是 `STOPPING`；源库上的 Binlog Dump 要等行变成 `STOPPED` 才退出（#174）。细节见 [v0.5.35 中文发布说明](../../releases/v0.5.35.zh-CN.md)。
 
 ```bash
-VER=0.5.34
+VER=0.5.35
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,18 +69,18 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.34` `checksums.txt`：
+已发布的 `v0.5.35` `checksums.txt`：
 
 ```text
-6b67b1c2d5a9312e5248a98999d591cfa8e1764eed4694ef8b7925e5bf2699f6  binlog-server_0.5.34_darwin_amd64.tar.gz
-5fed570d862748cc57151a80af4f89d616af3d5dfe0f4a520e160fc390637859  binlog-server_0.5.34_darwin_arm64.tar.gz
-fe64b1fc96320145aa010483db5c640c4a1517be27c04cee017310fcfc29e8de  binlog-server_0.5.34_linux_amd64.tar.gz
-29acbea6532e30de26f8bc6a10d23d82cad8da354967e8d8a1d089cc20a3b45d  binlog-server_0.5.34_linux_arm64.tar.gz
+c304f52d545d6709435f9890c9ef926f98439c5e170072ad4437072a0f0b6926  binlog-server_0.5.35_darwin_amd64.tar.gz
+c12fb16c1718f8a98b66a8ca75d2265af52663f483527eea3147224ec319af7a  binlog-server_0.5.35_darwin_arm64.tar.gz
+76eeba4c8db8f9d4424ed85fb3ef6180a8a28a58298425ed19778d58ad4daf08  binlog-server_0.5.35_linux_amd64.tar.gz
+8c189804f62b0c0ed5f494c10253a7b2f6f66eff525afc13792277f6c2c3dce8  binlog-server_0.5.35_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.34_linux_amd64/
+binlog-server_0.5.35_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key)
