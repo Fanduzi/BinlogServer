@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of an uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -1197,8 +1197,9 @@ const objectPurgeFailed = "OBJECT_PURGE_FAILED"
 const retentionSkippedNotUploaded = "RETENTION_SKIPPED_NOT_UPLOADED"
 
 // retentionObjects decides which expired sealed file has a bucket object.
-// Checksum is not a reason to keep or skip the object: match, mismatch, and
-// an empty checksum are all UPLOADED rows. Empty is not match and not mismatch.
+// A local file is deleted only when that object was verified (checksum match).
+// A mismatch or an unfinished check keeps the local file. A bucket-only
+// UPLOADED row whose local file is already gone is still aged as before.
 type retentionObjects struct {
 	byName        map[string]tasks.BinlogFile
 	deleter       objectDeleter
@@ -1218,11 +1219,12 @@ func cleanupExpiredBinlogs(dir string, retentionDays int, now time.Time, activeF
 
 // cleanupTaskBinlogs 在打开本地文件时清理过期分段。
 // 只配 retention_days，或本地天数与桶天数相同，行为与 v0.5.28 相同：
-// 已上传的封存分段先删对象和目录行，再删本地文件。
-// 配了上传和目录，且桶保留长于本地保留时，介于两者之间的 UPLOADED 封存文件只删本地，
+// checksum 为 match 的已上传封存分段先删对象和目录行，再删本地文件。
+// 配了上传和目录，且桶保留长于本地保留时，介于两者之间且 checksum 为 match 的 UPLOADED 封存文件只删本地，
 // 对象和目录行留下。本地文件已经不在时，桶年龄用 sealed_at，没有则用 uploaded_at。
 // 对象删除失败时本地文件留下，错误以 OBJECT_PURGE_FAILED 返回，下一次打开文件会再试。
 // 配置了上传且有目录时，过期的 UPLOAD_FAILED / LOCAL_ONLY 封存文件和目录行留下，不返回错误。
+// 磁盘上 checksum 不是 match 的 UPLOADED 封存文件同样留下，并记成 UPLOAD_FAILED，供已有的补传再校验。
 // 没有目录时桶保留不生效，上传仍按本地天数把对象和本地文件一起删。
 func (r *MySQLRunner) cleanupTaskBinlogs(ctx context.Context, task tasks.Task, dir, activeFileName, sourceServerUUID string, now time.Time) error {
 	localDays := task.Storage.EffectiveLocalRetentionDays()
@@ -1355,7 +1357,7 @@ func purgeExpiredAt(ctx context.Context, dir string, retentionDays int, now time
 		}
 		removeLocal := true
 		if objects != nil && objects.deleter != nil {
-			removeLocal, err = objects.release(ctx, name, false)
+			removeLocal, err = objects.release(ctx, name, false, true)
 			if err != nil {
 				return err
 			}
@@ -1414,7 +1416,7 @@ func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays 
 		}
 		removeLocal := true
 		if objects != nil && objects.deleter != nil {
-			removeLocal, err = objects.release(ctx, name, !mtime.Before(expireBucket))
+			removeLocal, err = objects.release(ctx, name, !mtime.Before(expireBucket), true)
 			if err != nil {
 				return err
 			}
@@ -1443,7 +1445,7 @@ func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays 
 		if age.IsZero() || !age.Before(expireBucket) {
 			continue
 		}
-		if _, err := objects.release(ctx, name, false); err != nil {
+		if _, err := objects.release(ctx, name, false, false); err != nil {
 			return err
 		}
 	}
@@ -1451,12 +1453,16 @@ func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays 
 }
 
 // release deletes the bucket object for one expired sealed file before the
-// local file is removed. localOnly leaves an uploaded object and its catalog
-// row in place and still removes the local file. removeLocal is false when
+// local file is removed. localOnly leaves a verified uploaded object and its
+// catalog row in place and still removes the local file. onDisk is true when
+// that local file is still in the task directory. removeLocal is false when
 // the file must stay so the next purge can retry. An open catalog row is not
 // deleted. A sealed UPLOAD_FAILED or LOCAL_ONLY catalog row stays too: that
-// local file is the only copy, and keeping it is not an error.
-func (o *retentionObjects) release(ctx context.Context, name string, localOnly bool) (bool, error) {
+// local file is the only copy, and keeping it is not an error. An on-disk
+// UPLOADED row whose checksum is not match stays too, and is recorded as
+// UPLOAD_FAILED so the existing upload retry can check or upload it again.
+// A bucket-only UPLOADED row is still deleted on the old rule.
+func (o *retentionObjects) release(ctx context.Context, name string, localOnly, onDisk bool) (bool, error) {
 	if o == nil || o.deleter == nil {
 		return true, nil
 	}
@@ -1464,8 +1470,27 @@ func (o *retentionObjects) release(ctx context.Context, name string, localOnly b
 	if ok && isOpenCatalogRow(row) {
 		return false, nil
 	}
+	if ok && onDisk && unverifiedSealedUpload(row) {
+		recorded := markUnverifiedUploadFailed(row)
+		if o.note != nil {
+			if err := o.note(recorded); err != nil {
+				log.Printf("retention: record unverified upload %s: %v", name, err)
+			} else {
+				row = recorded
+				o.byName[name] = recorded
+			}
+		} else {
+			row = recorded
+			o.byName[name] = recorded
+		}
+	}
 	if ok {
-		if state, keep := unuploadedSealedState(row); keep {
+		state, keep := unuploadedSealedState(row)
+		if !keep && onDisk && unverifiedSealedUpload(row) {
+			keep = true
+			state = strings.TrimSpace(row.UploadState)
+		}
+		if keep {
 			if o.noteKept != nil {
 				o.noteKept(name)
 			}
@@ -1475,7 +1500,7 @@ func (o *retentionObjects) release(ctx context.Context, name string, localOnly b
 			return false, nil
 		}
 	}
-	if localOnly && ok && isUploadedRow(row) {
+	if localOnly && ok && verifiedUploaded(row) {
 		return true, nil
 	}
 	key := ""
@@ -1518,6 +1543,34 @@ func isOpenCatalogRow(row tasks.BinlogFile) bool {
 
 func isUploadedRow(row tasks.BinlogFile) bool {
 	return strings.EqualFold(strings.TrimSpace(row.UploadState), "UPLOADED") && strings.TrimSpace(row.ObjectKey) != ""
+}
+
+func verifiedUploaded(row tasks.BinlogFile) bool {
+	return isUploadedRow(row) && strings.EqualFold(strings.TrimSpace(row.Checksum), tasks.ChecksumMatch)
+}
+
+// unverifiedSealedUpload is an on-disk UPLOADED object that was not compared
+// equal to the sealed file. Retention must not delete that local file.
+func unverifiedSealedUpload(row tasks.BinlogFile) bool {
+	if isOpenCatalogRow(row) || !isUploadedRow(row) {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(row.Checksum), tasks.ChecksumMatch)
+}
+
+// markUnverifiedUploadFailed records the row so the existing UPLOAD_FAILED
+// retry can upload a mismatch again or check an unfinished checksum again.
+func markUnverifiedUploadFailed(row tasks.BinlogFile) tasks.BinlogFile {
+	row.UploadState = "UPLOAD_FAILED"
+	if strings.EqualFold(strings.TrimSpace(row.Checksum), tasks.ChecksumMismatch) {
+		row.UploadError = tasks.ChecksumMismatchError
+		return row
+	}
+	row.Checksum = ""
+	if !strings.HasPrefix(strings.TrimSpace(row.UploadError), tasks.ChecksumVerifyPrefix) {
+		row.UploadError = tasks.ChecksumVerifyPrefix + "not verified"
+	}
+	return row
 }
 
 // unuploadedSealedState reports the catalog upload_state when this sealed row

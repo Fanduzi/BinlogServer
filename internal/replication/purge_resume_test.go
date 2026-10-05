@@ -34,7 +34,7 @@ func TestRotateAfterObjectPurgeFailureDoesNotReseal(t *testing.T) {
 	expiredName := "mysql-bin.000001"
 	expiredPath := filepath.Join(taskDir, expiredName)
 	const expiredKey = "old-object"
-	const checksum = tasks.ChecksumMismatch
+	const checksum = tasks.ChecksumMatch
 
 	catalog := &purgeCatalog{rows: map[string]tasks.BinlogFile{}}
 	deleter := &purgeDeleter{fail: map[string]error{expiredKey: errors.New("bucket denied")}}

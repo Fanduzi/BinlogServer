@@ -1,15 +1,17 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, execution coordination, and background retry of sealed UPLOAD_FAILED rows without the manual API
+// output: task state transitions, scheduling decisions, execution coordination, background retry of sealed UPLOAD_FAILED rows without the manual API, and checksum mismatch re-upload plus unfinished-checksum re-check becoming UPLOADED match
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -688,5 +690,156 @@ func TestScheduler_RetryFailedUploadsStillAttemptsMissingLocalFile(t *testing.T)
 	item, ok := store.get(task.ID, "mysql-bin.000060")
 	if !ok || item.UploadState != "UPLOAD_FAILED" || item.UploadError == "" {
 		t.Fatalf("expected UPLOAD_FAILED with an error, ok=%v file=%+v", ok, item)
+	}
+}
+
+// checksumRetryUploader stores sealed bytes and can corrupt them or fail the object check.
+type checksumRetryUploader struct {
+	mu      sync.Mutex
+	objects map[string][]byte
+	corrupt bool
+	headErr error
+	uploads int
+	checks  int
+}
+
+func (u *checksumRetryUploader) UploadFile(_ context.Context, _ string, localPath, objectKey string) error {
+	body, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.uploads++
+	if u.corrupt && len(body) > 0 {
+		body[0] ^= 0xff
+	}
+	if u.objects == nil {
+		u.objects = map[string][]byte{}
+	}
+	u.objects[objectKey] = append([]byte(nil), body...)
+	return nil
+}
+
+func (u *checksumRetryUploader) SealedObjectMatches(_ context.Context, localPath, objectKey string) (bool, error) {
+	local, err := os.ReadFile(localPath)
+	if err != nil {
+		return false, err
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.checks++
+	if u.headErr != nil {
+		return false, u.headErr
+	}
+	return bytes.Equal(local, u.objects[objectKey]), nil
+}
+
+func (u *checksumRetryUploader) counts() (uploads, checks int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.uploads, u.checks
+}
+
+// TestBackgroundUploadRetry_ChecksumMismatchThenMatch re-uploads a mismatched object
+// on the existing UPLOAD_FAILED path and records UPLOADED only after the bytes match.
+func TestBackgroundUploadRetry_ChecksumMismatchThenMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mysql-bin.000080")
+	if err := os.WriteFile(path, []byte("sealed-segment-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := newRetryTestFileStore()
+	uploader := &checksumRetryUploader{corrupt: true}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := BinlogFile{
+		TaskID: task.ID, FileName: "mysql-bin.000080", FilePath: path, SealedAt: time.Now(),
+		ObjectKey: "prefix/cluster-a/uuid/mysql-bin.000080", State: "SEALED",
+	}
+	updated, err := ApplySealedUpload(context.Background(), uploader, store, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.UploadState != "UPLOAD_FAILED" || updated.Checksum != ChecksumMismatch || updated.UploadError != ChecksumMismatchError {
+		t.Fatalf("first upload: %+v", updated)
+	}
+
+	s.retryKnownFailedUploads()
+	still, ok := store.get(task.ID, file.FileName)
+	if !ok || still.UploadState != "UPLOAD_FAILED" || still.Checksum != ChecksumMismatch {
+		t.Fatalf("corrupt object retried into %+v", still)
+	}
+	uploads, _ := uploader.counts()
+	if uploads != 2 {
+		t.Fatalf("uploads=%d, want the original put plus one re-upload", uploads)
+	}
+
+	uploader.mu.Lock()
+	uploader.corrupt = false
+	uploader.mu.Unlock()
+	s.retryKnownFailedUploads()
+	matched, ok := store.get(task.ID, file.FileName)
+	if !ok || matched.UploadState != "UPLOADED" || matched.Checksum != ChecksumMatch || matched.UploadError != "" {
+		t.Fatalf("re-verified row: %+v", matched)
+	}
+	uploads, checks := uploader.counts()
+	if uploads != 3 || checks < 3 {
+		t.Fatalf("uploads=%d checks=%d, want a third put that matches", uploads, checks)
+	}
+}
+
+// TestBackgroundUploadRetry_HeadErrorThenMatch checks the stored object again
+// and does not upload it again once the HEAD succeeds.
+func TestBackgroundUploadRetry_HeadErrorThenMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mysql-bin.000081")
+	if err := os.WriteFile(path, []byte("sealed-segment-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := newRetryTestFileStore()
+	uploader := &checksumRetryUploader{headErr: errors.New("head object: connection reset")}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := BinlogFile{
+		TaskID: task.ID, FileName: "mysql-bin.000081", FilePath: path, SealedAt: time.Now(),
+		ObjectKey: "prefix/cluster-a/uuid/mysql-bin.000081", State: "SEALED",
+	}
+	updated, err := ApplySealedUpload(context.Background(), uploader, store, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.UploadState != "UPLOAD_FAILED" || updated.Checksum != "" || !strings.HasPrefix(updated.UploadError, ChecksumVerifyPrefix) {
+		t.Fatalf("head failure row: %+v", updated)
+	}
+	uploadsBefore, _ := uploader.counts()
+
+	s.retryKnownFailedUploads()
+	pending, ok := store.get(task.ID, file.FileName)
+	if !ok || pending.UploadState != "UPLOAD_FAILED" || pending.Checksum != "" {
+		t.Fatalf("unfinished check became %+v", pending)
+	}
+	uploads, _ := uploader.counts()
+	if uploads != uploadsBefore {
+		t.Fatalf("uploads=%d, want %d: a failed check must not upload again", uploads, uploadsBefore)
+	}
+
+	uploader.mu.Lock()
+	uploader.headErr = nil
+	uploader.mu.Unlock()
+	s.retryKnownFailedUploads()
+	matched, ok := store.get(task.ID, file.FileName)
+	if !ok || matched.UploadState != "UPLOADED" || matched.Checksum != ChecksumMatch || matched.UploadError != "" {
+		t.Fatalf("re-verified row: %+v", matched)
+	}
+	uploadsAfter, _ := uploader.counts()
+	if uploadsAfter != uploadsBefore {
+		t.Fatalf("uploads=%d, want %d after a successful check", uploadsAfter, uploadsBefore)
 	}
 }

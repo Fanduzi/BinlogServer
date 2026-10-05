@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: ApplySealedUpload with fake uploader and file writer
-// output: UPLOADED on success, UPLOAD_FAILED on upload error without failing the caller, checksum match or mismatch from the stored bytes, and an empty checksum when the object HEAD returns an error
+// output: UPLOADED on a checksum match, UPLOAD_FAILED on upload error, checksum mismatch, or a failed object HEAD, without failing the caller
 // pos: best-effort upload caller tests
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,12 +110,16 @@ func TestApplySealedUpload_ChecksumFollowsStoredBytes(t *testing.T) {
 		t.Fatalf("match path: state=%s checksum=%s", matched.UploadState, matched.Checksum)
 	}
 
-	mismatched, err := ApplySealedUpload(context.Background(), &storedUploader{swap: true}, &sealedUploadWriter{}, file)
+	writer := &sealedUploadWriter{}
+	mismatched, err := ApplySealedUpload(context.Background(), &storedUploader{swap: true}, writer, file)
 	if err != nil {
 		t.Fatalf("mismatch must not fail the caller, got %v", err)
 	}
-	if mismatched.UploadState != "UPLOADED" || mismatched.Checksum != ChecksumMismatch {
-		t.Fatalf("mismatch path: state=%s checksum=%s", mismatched.UploadState, mismatched.Checksum)
+	if mismatched.UploadState != "UPLOAD_FAILED" || mismatched.Checksum != ChecksumMismatch || mismatched.UploadError != ChecksumMismatchError {
+		t.Fatalf("mismatch path: state=%s checksum=%s err=%q", mismatched.UploadState, mismatched.Checksum, mismatched.UploadError)
+	}
+	if len(writer.files) != 1 || writer.files[0].UploadState != "UPLOAD_FAILED" || writer.files[0].Checksum != ChecksumMismatch {
+		t.Fatalf("persisted mismatch=%+v", writer.files)
 	}
 }
 
@@ -140,13 +145,16 @@ func TestApplySealedUpload_HeadErrorLeavesChecksumEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HEAD error must not fail the caller, got %v", err)
 	}
-	if updated.UploadState != "UPLOADED" {
-		t.Fatalf("state=%s, want UPLOADED", updated.UploadState)
+	if updated.UploadState != "UPLOAD_FAILED" {
+		t.Fatalf("state=%s, want UPLOAD_FAILED", updated.UploadState)
 	}
 	if updated.Checksum == ChecksumMatch || updated.Checksum == ChecksumMismatch || updated.Checksum != "" {
 		t.Fatalf("checksum=%q, want empty after a failed HEAD", updated.Checksum)
 	}
-	if len(writer.files) != 1 || writer.files[0].Checksum != "" || writer.files[0].UploadState != "UPLOADED" {
+	if !strings.HasPrefix(updated.UploadError, ChecksumVerifyPrefix) {
+		t.Fatalf("upload_error=%q, want %s prefix", updated.UploadError, ChecksumVerifyPrefix)
+	}
+	if len(writer.files) != 1 || writer.files[0].Checksum != "" || writer.files[0].UploadState != "UPLOAD_FAILED" {
 		t.Fatalf("persisted row=%+v", writer.files)
 	}
 }
