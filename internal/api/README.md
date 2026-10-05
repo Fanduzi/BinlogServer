@@ -51,7 +51,7 @@
   - `/api/sources/lookup`（`host`/`port` 必填 + 端口格式校验）
   - `/api/tasks/{id}/files/retry-upload`（`limit` 范围 1..1000，默认 100）
   - `/api/tasks/{id}/upload-failures/reasons`（`limit` 范围 1..200，默认 20）
-- task、replication 与 dashboard 响应保留 `FAILED` 状态及稳定的源错误 `last_error`，供管理台直接展示。
+- task、replication 与 dashboard 响应保留 `FAILED` 状态及稳定的 `last_error`，供管理台直接展示。源错误包括 `SOURCE_ACCESS_DENIED`、`SOURCE_UNREACHABLE`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`。本地不可恢复错误是 `SEALED_FILE_EXISTS` 与 `CHECKPOINT_WRITE_FAILED`。租约 epoch 不匹配不会把任务行写成 `FAILED`。
 - RUNNING 且 dump 已在源 tip（`ReplicationProgress.AtTip`）时，`delay_seconds` 是 JSON 数字 0（字段在，不是省略）且 `status` 为 `NORMAL`，即使 `last_event_at` 仍是旧 event header。还没有事件时间样本时省略 `delay_seconds`，Console 继续显示 `--`。仍在追位点的 catch-up 继续按 `now - last_event_at` 计算 DELAYED。阈值仍是 30 秒。
 
 ## Update Rule

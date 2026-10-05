@@ -1,11 +1,15 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner/source failures and stable operator error codes
-// output: typed permanent/retryable source errors, the SOURCE_UNREACHABLE budget predicate, and SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker
+// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, the SOURCE_UNREACHABLE budget predicate, a lease-handoff error that must not be written as FAILED, and SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker
 // pos: shared operator-error types used by scheduler retry policy and source probing
 // note: if this file changes, update this header and module README.md.
 package tasks
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 const (
 	// CodeSourceAccessDenied is MySQL/MariaDB ERROR 1045.
@@ -21,7 +25,37 @@ const (
 	// CodeSegmentNotOnWorker means takeover cannot read the previous worker's segment.
 	// The task stays FAILED until that file is readable here.
 	CodeSegmentNotOnWorker = "SEGMENT_NOT_ON_WORKER"
+	// CodeSealedFileExists means the rotate target is already sealed on this disk.
+	// Another attempt will hit the same file. The task stays FAILED until an operator removes the conflict.
+	CodeSealedFileExists = "SEALED_FILE_EXISTS"
+	// CodeCheckpointWriteFailed means the checkpoint store rejected a write for a reason that will not clear on its own.
+	CodeCheckpointWriteFailed = "CHECKPOINT_WRITE_FAILED"
 )
+
+// ErrLeaseHandoff means this runner's lease epoch is no longer the one that owns the task.
+// The scheduler stops the runner and releases only this epoch. It does not write FAILED or RETRY_BACKOFF.
+var ErrLeaseHandoff = errors.New("lease handed off")
+
+// NewLeaseHandoff marks err as a lease handoff. A nil err is ErrLeaseHandoff itself.
+func NewLeaseHandoff(err error) error {
+	if err == nil || errors.Is(err, ErrLeaseHandoff) {
+		return ErrLeaseHandoff
+	}
+	return fmt.Errorf("%w: %w", ErrLeaseHandoff, err)
+}
+
+// IsLeaseHandoff reports whether this runner must stop without writing the task row.
+// The replication sentinel text is accepted so a runner that has not wrapped it still hands off.
+func IsLeaseHandoff(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrLeaseHandoff) {
+		return true
+	}
+	msg := err.Error()
+	return msg == "lease/epoch mismatch" || strings.HasSuffix(msg, ": lease/epoch mismatch")
+}
 
 // RetryableSourceError is a source failure that may recover without operator action.
 type RetryableSourceError struct {
@@ -75,4 +109,16 @@ func NewPermanentError(code, message string) error {
 func IsPermanent(err error) bool {
 	var pe *PermanentError
 	return errors.As(err, &pe)
+}
+
+// classifyRunError turns local conditions that need an operator into permanent errors.
+// A lease handoff and an already-typed source error are left unchanged.
+func classifyRunError(err error) error {
+	if err == nil || IsPermanent(err) || IsSourceUnreachable(err) || IsLeaseHandoff(err) {
+		return err
+	}
+	if strings.Contains(err.Error(), "sealed file already exists:") {
+		return NewPermanentError(CodeSealedFileExists, err.Error())
+	}
+	return err
 }
