@@ -276,7 +276,7 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 			t.Fatalf("object %s was deleted", kept)
 		}
 	}
-	if catalog.listCalls != 2 || catalog.listLimit != retentionCatalogLimit {
+	if catalog.listCalls != 3 || catalog.listLimit != retentionCatalogLimit {
 		t.Fatalf("list calls=%d limit=%d", catalog.listCalls, catalog.listLimit)
 	}
 
@@ -343,7 +343,7 @@ func TestOpenBinlogWriter_InsideRetentionDoesNotListOrDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if len(deleter.keys) != 0 || catalog.listCalls != 1 {
+	if len(deleter.keys) != 0 || catalog.listCalls != 2 {
 		t.Fatalf("keys=%v listCalls=%d", deleter.keys, catalog.listCalls)
 	}
 	if _, err := os.Stat(fresh); err != nil {

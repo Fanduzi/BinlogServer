@@ -172,3 +172,154 @@ if [[ "$rows" != "2" ]]; then
 fi
 
 echo "[epoch-segments] success: sealed epoch 0 and open epoch 1 are both in the restore command"
+
+upgrade_v0533_catalog() {
+  kill_server
+  echo "[epoch-segments] load a v0.5.33 catalog on schema 1, then migrate up"
+  (
+    cd "$ROOT_DIR"
+    META_DSN="$META_DSN" go run ./cmd/migrate goto 1
+  )
+
+  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -e "FLUSH BINARY LOGS;" >/dev/null
+  local src_file
+  src_file="$(docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -Nse "SHOW MASTER STATUS" | awk '{print $1}' | tr -d '\r')"
+  if [[ -z "$src_file" ]]; then
+    echo "mysql57 master file is empty" >&2
+    exit 1
+  fi
+
+  local upgrade_id="80"
+  local upgrade_dir="$DATA_DIR/$upgrade_id"
+  mkdir -p "$upgrade_dir"
+  local open_legacy="$upgrade_dir/${src_file}.open.e1"
+  printf '\376bin' >"$open_legacy"
+  local sealed_legacy="$upgrade_dir/mysql-bin.000901"
+  local failed_legacy="$upgrade_dir/mysql-bin.000902"
+  go run "$ROOT_DIR/scripts/e2e/gen-timed-segment.go" "$sealed_legacy" \
+    "2020-01-01T00:00:00Z" "2020-01-01T00:10:00Z"
+  go run "$ROOT_DIR/scripts/e2e/gen-timed-segment.go" "$failed_legacy" \
+    "2019-01-01T00:00:00Z" "2019-01-01T00:10:00Z"
+  local sealed_size failed_size
+  sealed_size="$(wc -c <"$sealed_legacy" | tr -d ' ')"
+  failed_size="$(wc -c <"$failed_legacy" | tr -d ' ')"
+
+  local source_json start_json storage_json
+  source_json="{\"host\":\"${E2E_SOURCE_HOST}\",\"port\":${MYSQL57_PORT},\"user\":\"${E2E_SOURCE_USER}\",\"password\":\"${E2E_SOURCE_PASS}\",\"flavor\":\"mysql\",\"server_id\":418080}"
+  start_json="{\"mode\":\"FILE_POS\",\"file\":\"${src_file}\",\"pos\":4}"
+  storage_json='{"retention_days":7}'
+  local sql_file
+  sql_file="$(mktemp)"
+  cat >"$sql_file" <<EOF
+INSERT INTO backup_tasks (id, name, cluster_key, state, epoch, source_json, start_json, storage_json, updated_at)
+VALUES ('${upgrade_id}', 'upgrade-${RUN_TAG}', 'upgrade-${RUN_TAG}', 'STOPPED', 0, '${source_json}', '${start_json}', '${storage_json}', UTC_TIMESTAMP(6));
+INSERT INTO backup_checkpoints (task_id, file_name, pos, gtid_set, updated_at)
+VALUES ('${upgrade_id}', '${src_file}', 4, '', UTC_TIMESTAMP(6));
+INSERT INTO binlog_files (task_id, file_name, file_path, epoch, state, checksum, size_bytes, start_pos, end_pos, created_at, sealed_at, object_key, upload_state, upload_error, uploaded_at)
+VALUES
+('${upgrade_id}', '${src_file}', '${open_legacy}', 0, 'OPEN', '', 4, 4, 4, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), '', 'LOCAL_ONLY', '', NULL),
+('${upgrade_id}', 'mysql-bin.000901', '${sealed_legacy}', 0, 'SEALED', 'match', ${sealed_size}, 4, 44, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 'e2e/legacy/mysql-bin.000901', 'UPLOADED', '', UTC_TIMESTAMP(6)),
+('${upgrade_id}', 'mysql-bin.000902', '${failed_legacy}', 0, 'SEALED', '', ${failed_size}, 4, 44, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 'e2e/legacy/mysql-bin.000902', 'UPLOAD_FAILED', 'boom', NULL);
+EOF
+  docker compose -f "$COMPOSE_FILE" exec -T meta-primary mysql -uroot -proot binlog_meta <"$sql_file"
+  rm -f "$sql_file"
+
+  (
+    cd "$ROOT_DIR"
+    META_DSN="$META_DSN" go run ./cmd/migrate up
+  )
+
+  local open_epoch legacy_row failed_row
+  open_epoch="$(meta_sql "SELECT epoch FROM binlog_files WHERE task_id='${upgrade_id}' AND file_name='${src_file}'")"
+  open_epoch="$(printf '%s' "$open_epoch" | tr -d '[:space:]')"
+  if [[ "$open_epoch" != "1" ]]; then
+    echo "backfill epoch=$open_epoch want 1 for ${src_file}" >&2
+    exit 1
+  fi
+  legacy_row="$(meta_sql "SELECT CONCAT(epoch, ' ', upload_state, ' ', object_key) FROM binlog_files WHERE task_id='${upgrade_id}' AND file_name='mysql-bin.000901'")"
+  legacy_row="$(printf '%s' "$legacy_row" | tr -d '\r')"
+  if [[ "$legacy_row" != "0 UPLOADED e2e/legacy/mysql-bin.000901" ]]; then
+    echo "legacy uploaded row changed: $legacy_row" >&2
+    exit 1
+  fi
+  failed_row="$(meta_sql "SELECT CONCAT(epoch, ' ', upload_state) FROM binlog_files WHERE task_id='${upgrade_id}' AND file_name='mysql-bin.000902'")"
+  failed_row="$(printf '%s' "$failed_row" | tr -d '[:space:]')"
+  if [[ "$failed_row" != "0UPLOAD_FAILED" ]]; then
+    echo "failed row: [$failed_row]" >&2
+    exit 1
+  fi
+
+  echo "[epoch-segments] start upgraded catalog and rotate ${src_file}"
+  start_server
+  curl -sS -X POST "$API/api/tasks/${upgrade_id}/start" >/dev/null || true
+  local running=""
+  for _ in {1..60}; do
+    running="$(curl -sS "$API/api/tasks/${upgrade_id}" | jq -r '.state // empty')"
+    if [[ "$running" == "RUNNING" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$running" != "RUNNING" ]]; then
+    echo "upgrade task state=$running" >&2
+    cat "$SERVER_LOG" >&2 || true
+    exit 1
+  fi
+  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -e "FLUSH BINARY LOGS;" >/dev/null
+  local checkpoint=""
+  for _ in {1..90}; do
+    checkpoint="$(curl -sS "$API/api/tasks/${upgrade_id}/checkpoint" | jq -r '.file // empty')"
+    if [[ -n "$checkpoint" && "$checkpoint" != "$src_file" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "$checkpoint" || "$checkpoint" == "$src_file" ]]; then
+    echo "upgrade task did not rotate from $src_file checkpoint=$checkpoint" >&2
+    cat "$SERVER_LOG" >&2 || true
+    exit 1
+  fi
+
+  local files sealed_n open_stale replay pitr
+  files="$(api_get "$API/api/tasks/${upgrade_id}/files")"
+  sealed_n="$(printf '%s' "$files" | jq -r --arg n "$src_file" '[.[] | select(.file_name==$n)] | length')"
+  if [[ "$sealed_n" != "1" ]]; then
+    echo "rows for $src_file: $sealed_n" >&2
+    echo "$files" >&2
+    exit 1
+  fi
+  printf '%s' "$files" | jq -e --arg n "$src_file" '
+    [.[] | select(.file_name==$n)][0] | (.epoch == 1 and .state == "SEALED" and (.file_path | endswith($n)))
+  ' >/dev/null || { echo "sealed current: $files" >&2; exit 1; }
+  open_stale="$(printf '%s' "$files" | jq -r --arg p "${src_file}.open.e1" '[.[] | select(.file_path | endswith($p))] | length')"
+  if [[ "$open_stale" != "0" ]]; then
+    echo "stale open path still listed" >&2
+    echo "$files" >&2
+    exit 1
+  fi
+  printf '%s' "$files" | jq -e --arg p "$sealed_legacy" '
+    [.[] | select(.file_path==$p)][0] | ((.epoch // 0) == 0 and .upload_state == "UPLOADED" and .checksum == "match" and .object_key == "e2e/legacy/mysql-bin.000901")
+  ' >/dev/null || { echo "legacy files row: $files" >&2; exit 1; }
+  printf '%s' "$files" | jq -e --arg p "$failed_legacy" '
+    [.[] | select(.file_path==$p)][0] | ((.epoch // 0) == 0 and .upload_state == "UPLOAD_FAILED")
+  ' >/dev/null || { echo "failed files row: $files" >&2; exit 1; }
+
+  local sealed_listed legacy_listed
+  sealed_listed="$(printf '%s' "$files" | jq -r --arg n "$src_file" '.[] | select(.file_name==$n and .state=="SEALED") | .file_path')"
+  legacy_listed="$(printf '%s' "$files" | jq -r --arg p "$sealed_legacy" '.[] | select(.file_path==$p or (.file_path | endswith("/mysql-bin.000901"))) | .file_path')"
+  replay="$(api_get "$API/api/tasks/${upgrade_id}/replay")"
+  printf '%s' "$replay" | jq -e --arg sealed "$sealed_listed" --arg legacy "$legacy_listed" --arg stale "${src_file}.open.e1" '
+    (.paths | index($sealed) != null) and (.paths | index($legacy) != null) and
+    ([.paths[] | select(endswith($stale))] | length == 0)
+  ' >/dev/null || { echo "upgrade replay: $replay" >&2; exit 1; }
+
+  pitr="$(api_get "$API/api/tasks/${upgrade_id}/replay?start_datetime=2020-01-01%2000:05:00&stop_datetime=2020-01-01%2000:25:00")"
+  printf '%s' "$pitr" | jq -e --arg legacy "$legacy_listed" --arg stale "${src_file}.open.e1" '
+    (.paths | index($legacy) != null) and
+    ((.command | contains($legacy)) and (.command | contains($stale) | not))
+  ' >/dev/null || { echo "upgrade pitr: $pitr" >&2; exit 1; }
+
+  echo "[epoch-segments] success: v0.5.33 catalog survived migrate, rotate, replay, and PITR"
+}
+
+upgrade_v0533_catalog
