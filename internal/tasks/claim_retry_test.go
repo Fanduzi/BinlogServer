@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: claim-loop ticks, recorded runner errors, and an unreachable or mid-dump source
-// output: proof that an owned RETRY_BACKOFF run keeps its backoff, failure budget, and lease epoch, and that a same-owner re-claim continues that budget
+// output: proof that an owned RETRY_BACKOFF run keeps its backoff, failure budget, and lease epoch, and that a same-owner re-claim and expired-lease takeover continue that budget from an oldest-first event slice
 // pos: scheduler claim/retry regression coverage for source-unreachable give-up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -135,15 +135,14 @@ func TestClaimLoopUnreachableReachesFailedWithoutEpochClimb(t *testing.T) {
 
 func TestClaimCarriesRecordedSourceFailures(t *testing.T) {
 	const already = 9
-	// Newest first, matching the event store. This claim's TASK_STARTED is first and is ignored.
-	events := []TaskEvent{{Type: "TASK_STARTED"}}
-	for i := 0; i < already; i++ {
-		events = append(events,
-			TaskEvent{Type: "TASK_RETRY_BACKOFF", Detail: "SOURCE_UNREACHABLE: dial tcp: connection refused"},
-			TaskEvent{Type: "TASK_RUNNER_ERROR", Detail: "SOURCE_UNREACHABLE: dial tcp: connection refused"},
-		)
+	// Oldest first, matching MySQL ListEvents. A newest-first walk of this slice is 0.
+	events := oldestFirstUnreachableEvents(already)
+	if got := consecutiveUnreachableStreak(events, true); got != 0 {
+		t.Fatalf("newest-first walk of oldest-first events = %d, want 0", got)
 	}
-	events = append(events, TaskEvent{Type: "TASK_STARTED"})
+	if got := consecutiveUnreachableStreak(events, false); got != already {
+		t.Fatalf("oldest-first streak = %d, want %d", got, already)
+	}
 
 	runner := &unreachableRunner{}
 	s := NewScheduler(
@@ -187,6 +186,63 @@ func TestClaimCarriesRecordedSourceFailures(t *testing.T) {
 	if calls := runner.callCount(); calls != 1 {
 		t.Fatalf("calls=%d, want the one failure that exhausts the carried budget", calls)
 	}
+}
+
+func TestClaimExpiredTasksCarriesOldestFirstSourceStreak(t *testing.T) {
+	const already = 9
+	events := oldestFirstUnreachableEvents(already)
+	store := &expiredLeaseTestStore{tasks: map[string]Task{}}
+	task := newExpiredOwnedTask("1", "worker-dead", StateRetryBackoff)
+	task.LastError = "SOURCE_UNREACHABLE: dial tcp: connection refused"
+	store.expired = []Task{task}
+	store.tasks[task.ID] = task
+
+	runner := &unreachableRunner{}
+	s := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithEventStore(&fixedEventStore{events: events}),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Hour, time.Hour),
+	)
+	claimed, err := s.ClaimExpiredTasks()
+	if err != nil {
+		t.Fatalf("ClaimExpiredTasks: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected the expired retry to be claimed, claimed=%d", claimed)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if !strings.HasPrefix(got.LastError, "SOURCE_UNREACHABLE:") {
+		t.Fatalf("last_error=%q", got.LastError)
+	}
+	if calls := runner.callCount(); calls != 1 {
+		t.Fatalf("calls=%d, want the one failure that exhausts the carried budget", calls)
+	}
+}
+
+// oldestFirstUnreachableEvents is a MySQL ListEvents slice: oldest first.
+// TASK_CREATED sits before the first TASK_STARTED, then N SOURCE_UNREACHABLE
+// runner errors, then the TASK_STARTED this claim already flushed.
+func oldestFirstUnreachableEvents(n int) []TaskEvent {
+	events := []TaskEvent{
+		{Type: "TASK_CREATED"},
+		{Type: "TASK_STARTED"},
+	}
+	for i := 0; i < n; i++ {
+		events = append(events, TaskEvent{
+			Type:   "TASK_RUNNER_ERROR",
+			Detail: "SOURCE_UNREACHABLE: dial tcp: connection refused",
+		})
+	}
+	events = append(events, TaskEvent{Type: "TASK_STARTED"})
+	return events
 }
 
 func TestOperatorStartResetsSourceFailureBudget(t *testing.T) {

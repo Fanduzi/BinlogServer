@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, DeleteBinlogFile by task id, source file name, and epoch, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1047,6 +1047,47 @@ func TestMySQLTaskStore_AppendAndListEvents(t *testing.T) {
 		t.Fatalf("unexpected event type: %s", events[0].Type)
 	}
 
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_ListEventsNewestWindowOldestFirst 验证事件窗口是最新行，返回旧的在前。
+func TestMySQLTaskStore_ListEventsNewestWindowOldestFirst(t *testing.T) {
+	if !strings.Contains(listTaskEventsSQL, "ORDER BY id DESC") || !strings.Contains(listTaskEventsSQL, "LIMIT") {
+		t.Fatalf("event window must be the newest rows: %s", listTaskEventsSQL)
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	// Driver order is DESC: newest row first. ListEvents reverses to oldest-first.
+	rows := sqlmock.NewRows([]string{"task_id", "event_type", "message", "detail", "event_time", "event_seq"}).
+		AddRow("1", "TASK_STARTED", "task started", "", now, int64(3)).
+		AddRow("1", "TASK_RUNNER_ERROR", "runner error", "SOURCE_UNREACHABLE: dial tcp: connection refused", now.Add(-time.Second), int64(2)).
+		AddRow("1", "TASK_STARTED", "task started", "", now.Add(-2*time.Second), int64(1))
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskEventsSQL)).
+		WithArgs("1", 200).
+		WillReturnRows(rows)
+
+	events, err := store.ListEvents(context.Background(), "1", 200)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+	if events[0].Sequence != 1 || events[2].Sequence != 3 {
+		t.Fatalf("want oldest-first sequences 1..3, got %d,%d,%d", events[0].Sequence, events[1].Sequence, events[2].Sequence)
+	}
+	if events[1].Type != "TASK_RUNNER_ERROR" {
+		t.Fatalf("middle event = %s", events[1].Type)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
