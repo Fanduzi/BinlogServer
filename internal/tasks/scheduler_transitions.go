@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -56,6 +56,8 @@ func (s *Scheduler) markRunnerReadyLocked(id string) error {
 	}
 	task.State = StateRunning
 	task.LastError = ""
+	task.RetryAttempt = 0
+	task.ConsecutiveSourceFailures = 0
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_RUNNING", "runner is running", "")
@@ -64,6 +66,7 @@ func (s *Scheduler) markRunnerReadyLocked(id string) error {
 
 func (s *Scheduler) markStoppingLocked(task Task) error {
 	task.State = StateStopping
+	task.DesiredRun = TaskDesiredStop
 	task.UpdatedAt = time.Now()
 	s.tasks[task.ID] = task
 	s.appendEventLocked(task.ID, "TASK_STOPPING", "task stopping", "")
@@ -132,10 +135,14 @@ func (s *Scheduler) markFailedLocked(id, message string) error {
 	}
 	if task.State == StateFailed {
 		task.LastError = message
+		task.DesiredRun = TaskDesiredStop
+		task.FailedSpecRevision = task.SpecRevision
 		s.tasks[id] = task
 		return s.persistTaskLocked(task)
 	}
 	task.State = StateFailed
+	task.DesiredRun = TaskDesiredStop
+	task.FailedSpecRevision = task.SpecRevision
 	task.LastError = message
 	task.OwnerWorkerID = ""
 	task.Epoch = 0
@@ -180,6 +187,7 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 		}
 	}
 	task.State = StateStopped
+	task.DesiredRun = TaskDesiredStop
 	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。
 	task.OwnerWorkerID = ""
 	task.Epoch = 0
