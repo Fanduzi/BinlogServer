@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a file/pos dump that seals one source name, a later lease that opens that name again, a third epoch of the same name, a file/pos resume whose first read is MySQL 1236, and a sealed segment left on disk with no catalog row
-// output: proof that each sealed epoch's catalog start_pos and end_pos are the first and last event positions in that file, including after failover and a 1236 GTID fallback, and that an enroll of an unjoined sealed file does not record end_pos 0
+// output: proof that each sealed epoch's catalog start_pos and end_pos are the first and last event positions in that file, including after failover and a 1236 GTID fallback, and that an enroll of an unjoined sealed file does not record end_pos 0; the seal helper writes through any file metadata store
 // pos: regression coverage for issue 189
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -204,7 +204,7 @@ func gtidFallbackTo(file string) *gtidOpen { return &gtidOpen{file: file} }
 func sealEpochFromDump(
 	t *testing.T,
 	base string,
-	catalog *takeoverCatalog,
+	catalog FileMetaStore,
 	uploader *recordingUploader,
 	checkpoints *memCheckpointStore,
 	epoch int64,

@@ -269,7 +269,7 @@ v0.5.27 至 v0.5.48 的记录：[docs/releases/v0.5.48.zh-CN.md](docs/releases/v
 
 ## 架构
 
-BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排、复制执行、元数据持久化、Upload 集成与 UI 交付之间边界清晰。源库不可达时，拉过这条 dump 的进程在 Close 返回后仍写成 `STOPPED`，`pending_dump_cleanup` 记下还没 KILL 掉的 Binlog Dump。别的进程不会把没关上的 dump 写成已经 `STOPPED`。持有者在 Close 返回前一直续租；租约先过期时，打开 dump 时记下的连接号留在这一列里，任何 worker 在任何状态都会重试 KILL，确认线程消失后才开新的 dump。schema 3 时这个标记留在拉过这条 dump 的进程里，runner 拆掉之后还在，单进程行为不变；集群要这些保证需要迁移 `000004`，否则日志和任务错误会要求先 `./migrate up`。迁移之后重启和其它进程也能看到并重试。白名单之外的错误，在任务仍应继续跑的时候第一次就 `FAILED`。同一次 Stop 里的这类错误仍是 `STOPPED`，不会改写成 `FAILED`。
+BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排、复制执行、元数据持久化、Upload 集成与 UI 交付之间边界清晰。源库不可达时，拉过这条 dump 的进程在 Close 返回后仍写成 `STOPPED`，`pending_dump_cleanup` 记下还没 KILL 掉的 Binlog Dump。别的进程不会把没关上的 dump 写成已经 `STOPPED`。持有者在 Close 返回前一直续租；租约先过期时，打开 dump 时记下的连接号留在这一列里，任何 worker 在任何状态都会重试 KILL，确认线程消失后才开新的 dump。迁移 `000004` 把这个标记存下来，重启和其它进程也能看到并重试。从这份源码编译的进程要求 schema 5（`000005_binlog_source_epoch_key`）。`minRequiredSchemaVersion` 是 5。schema 4 上以退出码 1 结束，还没开始监听，提示含 `schema version too old` 和 `./migrate up`。操作顺序是先 `./migrate up`，确认 `schema_migrations` 为 `(5, 0)`，再启动这个二进制。`000005` 在 `source_file` 为 NULL 或空串时回填 `source_file = file_name`，然后把该列设为 `NOT NULL`，加上 `UNIQUE KEY uk_task_source_epoch (task_id, source_file, epoch)`，保留 `uk_task_file_epoch`，并把 `start_pos` 和 `end_pos` 改成可空。SQL 不改已有位点，也不删行。目录写入按 `(task_id, source_file, epoch)` 识别一段，并且 `file_name` 保持等于这个源文件名，所以 v0.5.49 仍能在 schema 5 上启动。下一个迁移号是 `000006`。白名单之外的错误，在任务仍应继续跑的时候第一次就 `FAILED`。同一次 Stop 里的这类错误仍是 `STOPPED`，不会改写成 `FAILED`。
 
 ### 模块
 
