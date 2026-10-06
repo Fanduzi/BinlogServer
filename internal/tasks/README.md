@@ -18,7 +18,9 @@
 - `resume.go`: `NextResumePosition` 与 `ResolveTakeover`。adopt 的 `KeepLocalSegments` 不改用本地事件。没有本地事件时用 checkpoint；epoch 大于 1 且没有别的分段目录时把该 checkpoint 回拨到位置 4，并且不附带回拨前位点上的 `gtid_set`。`ResolveTakeover` 在本机 data dir 没有 `.open.eN` 完整事件时看 catalog `file_path`：目录可读就从那里的最后一个完整事件续；`state=OPEN` 且文件是裸源文件名（epoch 0）并在本机可读时，从该文件的最后一个完整事件续，而不是 `SEGMENT_NOT_ON_WORKER`。封存的裸名不是 open。本机 `.open.eN` 只有 magic，或只有 `end_log_pos` 为 0 的文件头、没有完整事件时，用已保存的 checkpoint 续，而不是 `Missing`。open 分段或未上传封存分段不可读则 `Missing` 点名该路径；checkpoint 已在 `UPLOADED` 封存对象内则不回拨。
 - `scheduler_retry_upload.go`: 上传失败补偿。手动 `RetryFailedUploads` 与 worker 后台循环走同一条补传。`checksum mismatch` 会再上传；`upload_error` 以 `checksum verify failed:` 开头的未完成校验只再核对对象，不重新上传。后台只补本机存在的已封存 `UPLOAD_FAILED`；open 分段不上传。失败原因聚合也在这个文件。
 - `sealed_upload.go`: 尽力上传的唯一调用方（`ApplySealedUpload`、`ObjectKey`）；首次封文件后与重试共用。核对为 `match` 时行是 `UPLOADED`。字节不同是 `mismatch`，行是 `UPLOAD_FAILED`，`upload_error` 为 `checksum mismatch`，且不失败调用方。对象 HEAD 失败时 `checksum` 留空，行是 `UPLOAD_FAILED`，`upload_error` 以 `checksum verify failed:` 开头。不能读对象的上传器仍是 `UPLOADED` 且 `checksum` 留空。空值不是已校验。
-- `model.go`: 任务领域模型与状态定义（含复制进度 `AtTip`，以及不进 JSON 的 `KeepLocalSegments`）。
+- `model.go`: 任务领域模型与状态定义（含复制进度 `AtTip`，不进 JSON 的 `KeepLocalSegments`，以及 `pending_dump_cleanup`）。
+- `dump_cleanup.go`: Stop 时 KILL 连不上源库的状态机。同一连接号的失败只记一次；KILL 成功、线程已不在 processlist、或 `ER_NO_SUCH_THREAD` 清掉标记。
+- `scheduler_dump_cleanup.go`: 把标记写在任务上，发出 `DUMP_CLEANUP_PENDING` / `DUMP_CLEANUP_CLEARED`，并在任务空闲时每 5–30 秒用当前密码再 KILL。任务删除后不再试。`STOPPED` 不等这条 KILL。
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
 - `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试，覆盖 localhost、127/8、::1 与 IPv6 括号表示。
 - `event_store_test.go` 中 fake store 为并发安全实现，用于 `-race` 校验稳定性。

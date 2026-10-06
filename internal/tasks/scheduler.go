@@ -301,6 +301,7 @@ type Scheduler struct {
 	events             map[string][]TaskEvent
 	replica            map[string]ReplicationProgress
 	runner             Runner
+	dumpKiller         func(source SourceConfig, connectionID uint32) error
 	store              TaskStore
 	metadataSourceHost string
 	metadataSourcePort uint16
@@ -387,9 +388,17 @@ func (s *Scheduler) SetRunner(runner Runner) {
 		if binder, ok := runner.(DumpSourceBinder); ok {
 			binder.BindDumpSource(s.dumpSource)
 		}
+		if binder, ok := runner.(DumpCleanupBinder); ok {
+			binder.BindDumpCleanup(s.noteDumpCleanup)
+		}
+	}
+	var killer func(SourceConfig, uint32) error
+	if killerImpl, ok := runner.(DumpThreadKiller); ok {
+		killer = killerImpl.KillDumpThread
 	}
 	s.mu.Lock()
 	s.runner = runner
+	s.dumpKiller = killer
 	s.mu.Unlock()
 }
 
@@ -653,6 +662,9 @@ func (s *Scheduler) syncTasksFromStore() error {
 				mem.FailedSpecRevision = task.FailedSpecRevision
 				mem.RetryAttempt = task.RetryAttempt
 				mem.ConsecutiveSourceFailures = task.ConsecutiveSourceFailures
+				if task.PendingDumpCleanup != nil {
+					mem.PendingDumpCleanup = task.PendingDumpCleanup
+				}
 				s.tasks[task.ID] = mem
 			}
 			s.noteRemoteStopLocked(task)
@@ -662,6 +674,7 @@ func (s *Scheduler) syncTasksFromStore() error {
 		if s.noteRemoteStopLocked(task) {
 			continue
 		}
+		task = s.keepPendingDump(task.ID, task)
 		s.tasks[task.ID] = task
 		if n, convErr := strconv.Atoi(task.ID); convErr == nil && n > s.seq {
 			s.seq = n
