@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 3 that tells the operator to run ./migrate up, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 3 that tells the operator to run ./migrate up, an optional pending_dump_cleanup column when migration 000004 is applied, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -127,6 +128,24 @@ var requiredTableSchemas = []tableSchemaSpec{
 const taskBudgetColumns = `desired_run, spec_revision, applied_spec_revision, failed_spec_revision, retry_attempt, consecutive_source_failures`
 
 const taskSelectColumns = `id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, ` + taskBudgetColumns
+
+const savePendingDumpSQL = `
+UPDATE backup_tasks
+SET pending_dump_cleanup = ?
+WHERE id = ? AND pending_dump_cleanup = ?;
+`
+
+// withPendingColumn adds pending_dump_cleanup when migration 000004 is present.
+// Queries that do not use the column stay valid on schema 3.
+func (s *MySQLTaskStore) withPendingColumn(query string) string {
+	if s == nil || !s.hasPendingDump || strings.Contains(query, "pending_dump_cleanup") {
+		return query
+	}
+	if strings.Contains(query, "t.consecutive_source_failures") {
+		return strings.Replace(query, "t.consecutive_source_failures", "t.consecutive_source_failures, t.pending_dump_cleanup", 1)
+	}
+	return strings.Replace(query, taskSelectColumns, taskSelectColumns+", pending_dump_cleanup", 1)
+}
 
 const upsertTaskSQL = `
 INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, ` + taskBudgetColumns + `)
@@ -415,9 +434,10 @@ WHERE worker_id = ?;
 `
 
 type MySQLTaskStore struct {
-	db            *sql.DB
-	schemaTimeout time.Duration
-	sourceCrypto  *config.Decryptor
+	db             *sql.DB
+	schemaTimeout  time.Duration
+	sourceCrypto   *config.Decryptor
+	hasPendingDump bool
 }
 
 var _ tasks.TaskStore = (*MySQLTaskStore)(nil)
@@ -556,6 +576,14 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		}
 	}
 	if len(missing) == 0 {
+		hasPending, err := s.hasColumn(ctx, "backup_tasks", "pending_dump_cleanup")
+		if err != nil {
+			return err
+		}
+		s.hasPendingDump = hasPending
+		if !hasPending {
+			log.Printf("backup_tasks.pending_dump_cleanup is absent; leftover Binlog Dump cleanup stays in this process until ./migrate up")
+		}
 		return nil
 	}
 	sort.Strings(missing)
@@ -638,6 +666,28 @@ func (s *MySQLTaskStore) ReconcileLegacyDesiredRun(ctx context.Context) (int64, 
 		return 0, err
 	}
 	return n, nil
+}
+
+// PendingDumpColumn reports whether migration 000004 is on this database.
+func (s *MySQLTaskStore) PendingDumpColumn() bool {
+	return s != nil && s.hasPendingDump
+}
+
+// SavePendingDumpCleanup writes the marker only when the stored value is still previous.
+// changed is false when another process already wrote it, or the task is gone.
+func (s *MySQLTaskStore) SavePendingDumpCleanup(ctx context.Context, taskID, previous, next string) (bool, error) {
+	if s == nil || !s.hasPendingDump {
+		return true, nil
+	}
+	res, err := s.db.ExecContext(ctx, savePendingDumpSQL, next, taskID, previous)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // UpsertTask 写入任务最新快照，并在状态收敛时补写 run 终态信息。
@@ -860,8 +910,9 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 		lastError   sql.NullString
 		updatedAt   time.Time
 		desiredRun  string
+		pendingRaw  sql.NullString
 	)
-	if err := src.Scan(
+	dest := []any{
 		&task.ID,
 		&task.Name,
 		&task.ClusterKey,
@@ -880,8 +931,15 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 		&task.FailedSpecRevision,
 		&task.RetryAttempt,
 		&task.ConsecutiveSourceFailures,
-	); err != nil {
+	}
+	if s.hasPendingDump {
+		dest = append(dest, &pendingRaw)
+	}
+	if err := src.Scan(dest...); err != nil {
 		return tasks.Task{}, err
+	}
+	if decoded := tasks.DecodeDumpCleanup(pendingRaw.String); decoded.ConnectionID != 0 {
+		task.PendingDumpCleanup = &decoded
 	}
 
 	task.State = tasks.State(state)
@@ -947,14 +1005,14 @@ func (s *MySQLTaskStore) scanBackupTaskRows(rows *sql.Rows) ([]tasks.Task, error
 func (s *MySQLTaskStore) ListTasksWithExpiredLease(ctx context.Context) ([]tasks.Task, error) {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks_with_expired_lease")
 	defer endMetaSpan(span)
-	return s.queryTasks(ctx, listTasksWithExpiredLeaseSQL)
+	return s.queryTasks(ctx, s.withPendingColumn(listTasksWithExpiredLeaseSQL))
 }
 
 // ListTasks 读取全部任务快照并反序列化配置字段。Restore 仍使用该全量路径。
 func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks")
 	defer endMetaSpan(span)
-	return s.queryTasks(ctx, listTaskSQL)
+	return s.queryTasks(ctx, s.withPendingColumn(listTaskSQL))
 }
 
 // GetTask 按主键读取单个任务。
@@ -964,7 +1022,7 @@ func (s *MySQLTaskStore) GetTask(ctx context.Context, taskID string) (tasks.Task
 
 	var task tasks.Task
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		got, err := s.scanTask(s.db.QueryRowContext(ctx, getTaskSQL, taskID))
+		got, err := s.scanTask(s.db.QueryRowContext(ctx, s.withPendingColumn(getTaskSQL), taskID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return Permanent(tasks.ErrTaskNotFound)
 		}
@@ -989,6 +1047,7 @@ func (s *MySQLTaskStore) ListTasksPage(ctx context.Context, filter tasks.TaskLis
 	defer endMetaSpan(span)
 
 	countSQL, selectSQL, countArgs, selectArgs := listTasksPageSQL(filter)
+	selectSQL = s.withPendingColumn(selectSQL)
 	var total int
 	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		return s.db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total)
@@ -1111,7 +1170,7 @@ func (s *MySQLTaskStore) ListRunningTaskRefs(ctx context.Context, filter tasks.T
 func (s *MySQLTaskStore) ListStartingUnownedTasks(ctx context.Context) ([]tasks.Task, error) {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_starting_unowned_tasks")
 	defer endMetaSpan(span)
-	return s.queryTasks(ctx, listStartingUnownedTaskSQL, string(tasks.StateStarting))
+	return s.queryTasks(ctx, s.withPendingColumn(listStartingUnownedTaskSQL), string(tasks.StateStarting))
 }
 
 // DeleteTask 删除任务及其关联元数据。
