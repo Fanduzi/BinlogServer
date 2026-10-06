@@ -259,7 +259,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 
 **进入条件：** 调用 `StopTask()`
 
-**退出条件：** Runner 退出 → STOPPED
+**退出条件：** Runner 退出 → STOPPED。退出时如果带着比这次 Stop 更旧的 `spec_revision`，元数据库会留下较新的 `STOPPING` 行；收尾按这次 Stop 的 spec 写成 `STOPPED`，库里仍是这次 Stop 时再写一次。
 
 ```go
 func (s *Scheduler) StopTask(id string) error {

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, cluster lease, expired-lease takeover coverage, and split control-plane/worker stop coverage
+// output: task state transitions, scheduling decisions, cluster lease, expired-lease takeover coverage, split control-plane/worker stop coverage, and a Stop that still stores STOPPED when the upsert keeps a newer spec_revision
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -1590,6 +1590,119 @@ func TestScheduler_StopPersistsStoppedWhenStoppingWriteLandsLater(t *testing.T) 
 		t.Fatal("StopTask did not return")
 	}
 	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+}
+
+// specGuardingRaceStore is the metadata upsert: a row with a higher
+// spec_revision keeps its state. The first STOPPING write waits until a
+// later STOPPED write has been attempted, then lands.
+type specGuardingRaceStore struct {
+	expiredLeaseTestStore
+	once            sync.Once
+	stoppingEntered chan struct{}
+	releaseStopping chan struct{}
+	stoppedWritten  chan struct{}
+}
+
+func (s *specGuardingRaceStore) UpsertTask(ctx context.Context, task Task) error {
+	if task.State == StateStopping {
+		hold := false
+		s.once.Do(func() { hold = true })
+		if hold {
+			close(s.stoppingEntered)
+			<-s.releaseStopping
+		}
+	}
+	s.mu.Lock()
+	prev, ok := s.tasks[task.ID]
+	if ok && prev.SpecRevision > task.SpecRevision {
+		s.mu.Unlock()
+		if task.State == StateStopped {
+			select {
+			case <-s.stoppedWritten:
+			default:
+				close(s.stoppedWritten)
+			}
+		}
+		return nil
+	}
+	s.mu.Unlock()
+	if err := s.expiredLeaseTestStore.UpsertTask(ctx, task); err != nil {
+		return err
+	}
+	if task.State == StateStopped {
+		select {
+		case <-s.stoppedWritten:
+		default:
+			close(s.stoppedWritten)
+		}
+	}
+	return nil
+}
+
+func TestScheduler_StopWritesStoppedOnNewerSpecWhenSnapshotIsStale(t *testing.T) {
+	store := &specGuardingRaceStore{
+		expiredLeaseTestStore: expiredLeaseTestStore{tasks: make(map[string]Task)},
+		stoppingEntered:       make(chan struct{}),
+		releaseStopping:       make(chan struct{}),
+		stoppedWritten:        make(chan struct{}),
+	}
+	lease := &fakeLeaseManager{acquireEpoch: 27, acquireOK: true}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+	task := newExpiredOwnedTask("1", "worker-dead", StateLeaseDegraded)
+	task.DesiredRun = TaskDesiredRun
+	task.SpecRevision = 3
+	task.AppliedSpecRevision = 3
+	store.tasks[task.ID] = task
+	store.expired = []Task{task}
+
+	claimed, err := worker.ClaimExpiredTasks()
+	if err != nil {
+		t.Fatalf("ClaimExpiredTasks returned error: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("expected claimed=1, got %d", claimed)
+	}
+	waitRunnerStarted(t, runner)
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateRunning)
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- worker.StopTask(task.ID)
+	}()
+	select {
+	case <-store.stoppingEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("STOPPING persist did not start")
+	}
+	select {
+	case <-store.stoppedWritten:
+	case <-time.After(2 * time.Second):
+		t.Fatal("STOPPED persist did not pass the held STOPPING write")
+	}
+	close(store.releaseStopping)
+
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopTask returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopTask did not return")
+	}
+	waitTaskState(t, worker, task.ID, 2*time.Second, StateStopped)
+	got, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateStopped || got.SpecRevision < 4 || got.OwnerWorkerID != "" || got.Epoch != 0 {
+		t.Fatalf("stored stop = state %s spec %d owner %q epoch %d", got.State, got.SpecRevision, got.OwnerWorkerID, got.Epoch)
+	}
 }
 
 // blockingDumpRunner blocks inside Run until the scheduler cancels it.

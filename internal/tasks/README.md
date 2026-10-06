@@ -52,7 +52,7 @@
 - `IsLoopbackHost`：只用字面规则识别 localhost、显式 loopback literal（127/8、::1）及有效 IPv6 括号表示，不做 DNS 解析，供 metadata guard 与源身份共享。
 - `SameSourceHost`：回环别名是同一台源，非回环仍精确匹配；lookup 与任务观测 host 过滤共用。
 - `WithMetadataSourceEndpoint`：注入 metadata TCP 端点，并在任务 create/update/configure/start 时拒绝同端点 source。
-- 控制面 Stop 在没有本进程 dump、且行上的主人不是自己时停在 STOPPING，主人、epoch 和 source 配置都留着。Worker 认领循环（以及 store 同步、GetTask）看到 STOPPING 或 STOPPED 才取消本进程拉流。STOPPED 的落库用 store 里当时最新的配置，避免把控制面刚改的密码盖回旧值。下次 Start 若内存还停在 STOPPING，会先回读 store，行已经是 STOPPED 才能再派发。Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。run 退出在放下调度锁之前关闭 `done`，所以 StopTask 不会把已经结束的执行留在 `STOPPING`。持久化放开锁之后，如果这次写入的快照已经不是最新一代，会再写当时最新的快照，避免后完成的 `STOPPING` 覆盖先落库的 `STOPPED`。
+- 控制面 Stop 在没有本进程 dump、且行上的主人不是自己时停在 STOPPING，主人、epoch 和 source 配置都留着。Worker 认领循环（以及 store 同步、GetTask）看到 STOPPING 或 STOPPED 才取消本进程拉流。STOPPED 的落库用 store 里当时最新的配置，避免把控制面刚改的密码盖回旧值。下次 Start 若内存还停在 STOPPING，会先回读 store，行已经是 STOPPED 才能再派发。Stop 路径 lease release 使用独立超时上下文（不复用已取消 runner ctx）。run 退出在放下调度锁之前关闭 `done`，所以 StopTask 不会把已经结束的执行留在 `STOPPING`。持久化放开锁之后，如果这次写入的快照已经不是最新一代，会再写当时最新的快照，避免后完成的 `STOPPING` 覆盖先落库的 `STOPPED`。元数据库在 `spec_revision` 更大时会留下那一行：退出路径若带着更旧的 spec 写 `STOPPED`，行会停在 `STOPPING`。收尾改用这次 Stop 已经排队的 spec，并在库里仍是这次 Stop 时再写一次 `STOPPED`。
 - cluster fail-safe stop 一旦进入 `STOPPING/STOPPED`，会拒绝后续正常复制进度上报，避免失租后继续暴露健康运行态进度。
 - runner/lease 的自动转换保持 best-effort 持久化语义，并统一记录持久化失败日志。
 
