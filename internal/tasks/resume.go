@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task id, data dir, KeepLocalSegments, epoch, catalog file_path rows, and an optional stored checkpoint
-// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory, a readable epoch-0 bare OPEN file on this worker, or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
+// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory, a readable epoch-0 bare OPEN file on this worker, a magic-only or header-only open file resumed from the saved checkpoint, or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
 // pos: resume identity shared by the replication runner and GET /api/tasks/{id}/checkpoint
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -19,8 +19,9 @@ import (
 // A local complete event wins unless the task keeps adopted segments. A stored
 // checkpoint is used when that event is absent. Epoch greater than 1 rewinds
 // that checkpoint to position 4. ResolveTakeover replaces that rewind when the
-// catalog file_path is readable, when the segment is missing, or when a sealed
-// UPLOADED object already covers the checkpoint. gtid_set is copied when the
+// catalog file_path is readable, when the open file on this worker has no
+// complete event, when the segment is missing, or when a sealed UPLOADED
+// object already covers the checkpoint. gtid_set is copied when the
 // file and pos are the stored checkpoint's. A rewind to position 4 changes
 // pos, so the gtid_set from the later position is left off. This does not
 // contact the source.
@@ -77,9 +78,11 @@ type TakeoverResume struct {
 // has no complete event in a .open.eN file. A readable catalog file_path
 // continues from the last complete event in that directory. An OPEN row whose
 // file is the bare source name (epoch 0) and is readable here continues from
-// that file. An unreadable open segment, or a sealed segment that is not
-// UPLOADED, sets Missing. A checkpoint already inside a sealed UPLOADED object
-// is Apply without a rewind.
+// that file. A readable .open.eN that is only magic, or only a header of
+// events whose end log_pos is 0, continues from the saved checkpoint. An
+// unreadable open segment, or a sealed segment that is not UPLOADED, sets
+// Missing. A checkpoint already inside a sealed UPLOADED object is Apply
+// without a rewind.
 func ResolveTakeover(dataDir string, task Task, checkpoint binlog.Checkpoint, checkpointOK bool, files []BinlogFile) TakeoverResume {
 	if task.KeepLocalSegments || task.Epoch <= 1 {
 		return TakeoverResume{}
@@ -113,6 +116,9 @@ func ResolveTakeover(dataDir string, task Task, checkpoint binlog.Checkpoint, ch
 		return out
 	}
 	if checkpointOK && checkpoint.File != "" && checkpoint.Pos > 4 {
+		if dir := readablePreambleDir(files, checkpoint.File); dir != "" {
+			return TakeoverResume{Apply: true, Dir: dir, Checkpoint: checkpoint}
+		}
 		return TakeoverResume{Missing: checkpoint.File}
 	}
 	if checkpointOK && checkpoint.File != "" && checkpoint.Pos > 0 {
@@ -187,6 +193,43 @@ func readablePlainOpen(files []BinlogFile) (dir, file string, pos uint32, ok boo
 		return filepath.Dir(path), name, endPos, true
 	}
 	return "", "", 0, false
+}
+
+// readablePreambleDir is the directory of an OPEN .open.eN on this worker for
+// checkpointFile that has no complete event. The highest epoch wins. The
+// saved checkpoint is the resume position; this file is not one.
+func readablePreambleDir(files []BinlogFile, checkpointFile string) string {
+	checkpointFile = strings.TrimSpace(checkpointFile)
+	if checkpointFile == "" {
+		return ""
+	}
+	bestEpoch := int64(-1)
+	best := ""
+	for _, row := range files {
+		if !catalogOpen(row) || segmentSource(row) != checkpointFile {
+			continue
+		}
+		path := strings.TrimSpace(row.FilePath)
+		named, ok := binlog.ClassifySegment(filepath.Base(path))
+		if !ok || !named.Open || named.Source != checkpointFile || !regularSegmentFile(path) || !binlog.PreambleOnly(path) {
+			continue
+		}
+		if named.Epoch >= bestEpoch {
+			bestEpoch = named.Epoch
+			best = filepath.Dir(path)
+		}
+	}
+	return best
+}
+
+func segmentSource(row BinlogFile) string {
+	if named, ok := binlog.ClassifySegment(strings.TrimSpace(row.FileName)); ok {
+		return named.Source
+	}
+	if named, ok := binlog.ClassifySegment(filepath.Base(strings.TrimSpace(row.FilePath))); ok {
+		return named.Source
+	}
+	return strings.TrimSpace(row.FileName)
 }
 
 func readableSegmentDir(files []BinlogFile) string {
