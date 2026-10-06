@@ -1,11 +1,12 @@
 // Package replication provides module-level functionality for replication.
 // input: a dead worker's segment directory recorded in binlog_files.file_path, and a second worker data dir
-// output: proof that takeover continues in that directory when it is readable, fails naming the segment when it is not, continues a readable epoch-0 bare OPEN file on this worker as .open.eN, and does not fail SEGMENT_NOT_ON_WORKER when a local open segment ends with an artificial rotate whose end_log_pos is 0
+// output: proof that takeover continues in that directory when it is readable, fails naming the segment when it is not, continues a readable epoch-0 bare OPEN file on this worker as .open.eN, does not fail SEGMENT_NOT_ON_WORKER when a local open segment ends with an artificial rotate whose end_log_pos is 0, and does not seal or upload an already-uploaded source file again when the dump rotates to the next file
 // pos: regression for lease takeover that must not rebuild a fresh directory from position 4
 // note: if this file changes, update this header and module README.md.
 package replication
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -584,11 +585,201 @@ type takeoverObject struct {
 	key    string
 	body   []byte
 	opened []string
+	keys   []string
 }
 
-func (o *takeoverObject) UploadFile(context.Context, string, string, string) error { return nil }
+func (o *takeoverObject) UploadFile(_ context.Context, _, _, objectKey string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.keys = append(o.keys, objectKey)
+	return nil
+}
 
 func (o *takeoverObject) DeleteObject(context.Context, string) error { return nil }
+
+// TestTakeoverUploadedFile_ReplayListsEachIndexOnce is #223.
+// An uploaded source file is materialized (or already local) and the dump
+// rotates onto the next file. Replay and the archive list each source index
+// once, the GTID stream has no duplicate, and the already-uploaded file is
+// not uploaded again.
+func TestTakeoverUploadedFile_ReplayListsEachIndexOnce(t *testing.T) {
+	t.Run("materialized object", func(t *testing.T) {
+		assertTakeoverReplayOnce(t, false)
+	})
+	t.Run("local file", func(t *testing.T) {
+		assertTakeoverReplayOnce(t, true)
+	})
+}
+
+func assertTakeoverReplayOnce(t *testing.T, local bool) {
+	t.Helper()
+	workerB := t.TempDir()
+	const sourceFile = "mysql-bin.000003"
+	const nextFile = "mysql-bin.000004"
+	const objectKey = "prefix/cluster-a/uuid/mysql-bin.000003"
+	eventAt := time.Unix(1_700_000_000, 0).UTC()
+	const firstSQL = "INSERT INTO replay_once VALUES (1)"
+	const nextSQL = "INSERT INTO replay_once VALUES (2)"
+	first, endPos := chainBinlogEvents(4, eventAt, []namedEvent{
+		{typ: goreplication.FORMAT_DESCRIPTION_EVENT, body: formatDescriptionBody(eventAt)},
+		{typ: goreplication.GTID_EVENT, body: gtidBody(11)},
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", firstSQL)},
+	})
+	var object bytes.Buffer
+	object.Write(binlogMagic)
+	for _, ev := range first {
+		object.Write(ev.RawData)
+	}
+	catalog := &takeoverCatalog{}
+	opener := &takeoverObject{key: objectKey, body: object.Bytes()}
+	sched := tasks.NewScheduler(
+		tasks.WithDataDir(workerB),
+		tasks.WithFileStore(catalog),
+		tasks.WithFileUploader(opener),
+	)
+	created, err := sched.CreateTask("takeover", "cluster-replay-223")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(t.TempDir(), "gone", sourceFile)
+	localPath := filepath.Join(workerB, created.ID, sourceFile)
+	rowPath := gone
+	if local {
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(localPath, object.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rowPath = localPath
+	}
+	catalog.rows = []tasks.BinlogFile{{
+		TaskID: created.ID, FileName: sourceFile, FilePath: rowPath,
+		Epoch: 1, State: "SEALED", StartPos: 4, EndPos: endPos,
+		UploadState: "UPLOADED", ObjectKey: objectKey, Checksum: tasks.ChecksumMatch,
+		SizeBytes: int64(object.Len()),
+	}}
+	next, _ := chainBinlogEvents(4, eventAt.Add(time.Second), []namedEvent{
+		{typ: goreplication.GTID_EVENT, body: gtidBody(12)},
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", nextSQL)},
+	})
+	rotate := &goreplication.BinlogEvent{
+		Header: &goreplication.EventHeader{EventType: goreplication.ROTATE_EVENT, LogPos: 0, Flags: 0x0020},
+		Event:  &goreplication.RotateEvent{Position: 4, NextLogName: []byte(nextFile)},
+	}
+	results := []streamResult{{event: preambleEvent(0, eventAt.Add(-time.Hour))}, {event: rotate}}
+	for _, ev := range next {
+		results = append(results, streamResult{event: ev})
+	}
+	results = append(results, streamResult{err: context.Canceled})
+	syncer := &fakeSyncer{streamer: &fakeStreamer{results: results}}
+	store := &memCheckpointStore{cp: binlog.Checkpoint{File: sourceFile, Pos: endPos}, ok: true}
+	runner := NewMySQLRunner(workerB, WithCheckpointStore(store), WithFileMetaStore(catalog), WithUploader(opener, "prefix"))
+	runner.fetcher = &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000099", Pos: 9000},
+		serverUUID: "11111111-1111-1111-1111-111111111111",
+	}
+	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+	task.ID = created.ID
+	task.Epoch = 3
+	task.OwnerWorkerID = "worker-b"
+	task.Storage.RetentionDays = 7
+	if err := runner.Run(context.Background(), task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(opener.keys) != 0 {
+		t.Fatalf("uploaded %v; the already-uploaded file must not be uploaded again", opener.keys)
+	}
+	for _, row := range catalog.rows {
+		if row.FileName == sourceFile && row.Epoch != 1 {
+			t.Fatalf("extra catalog row for %s: %+v", sourceFile, row)
+		}
+	}
+	rc, _, err := sched.OpenReplayArchive(created.ID, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(rc)
+	if closeErr := rc.Close(); err != nil || closeErr != nil {
+		t.Fatalf("archive read %v close %v", err, closeErr)
+	}
+	members := readTarMembers(t, raw)
+	if len(members) != 2 {
+		names := make([]string, 0, len(members))
+		for name := range members {
+			names = append(names, name)
+		}
+		t.Fatalf("archive members %v", names)
+	}
+	counts := map[uint64]int{}
+	var gnos []int64
+	for name, body := range members {
+		named, ok := binlog.ClassifySegment(name)
+		if !ok {
+			t.Fatalf("member %s", name)
+		}
+		counts[named.Seq]++
+		gnos = append(gnos, gtidGNOs(t, name, body)...)
+		if named.Source == sourceFile && strings.Contains(name, ".sealed.") {
+			t.Fatalf("archive repeated %s as %s", sourceFile, name)
+		}
+	}
+	for seq, n := range counts {
+		if n != 1 {
+			t.Fatalf("source index %d appears %d times", seq, n)
+		}
+	}
+	seen := map[int64]int{}
+	for _, gno := range gnos {
+		seen[gno]++
+	}
+	if seen[11] != 1 || seen[12] != 1 || len(seen) != 2 {
+		t.Fatalf("gtids %v", seen)
+	}
+}
+
+func readTarMembers(t *testing.T, raw []byte) map[string][]byte {
+	t.Helper()
+	tr := tar.NewReader(bytes.NewReader(raw))
+	out := map[string][]byte{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return out
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[hdr.Name] = body
+	}
+}
+
+func gtidGNOs(t *testing.T, name string, body []byte) []int64 {
+	t.Helper()
+	// ParseReader reads event headers from the first byte. A binlog member
+	// starts with the 4-byte magic, and that magic makes the size field look
+	// like 1.
+	if bytes.HasPrefix(body, binlogMagic) {
+		body = body[len(binlogMagic):]
+	}
+	parser := goreplication.NewBinlogParser()
+	var gnos []int64
+	err := parser.ParseReader(bytes.NewReader(body), func(ev *goreplication.BinlogEvent) error {
+		if g, ok := ev.Event.(*goreplication.GTIDEvent); ok {
+			gnos = append(gnos, g.GNO)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("parse %s (%d bytes): %v", name, len(body), err)
+	}
+	return gnos
+}
 
 func (o *takeoverObject) OpenObject(_ context.Context, key string) (io.ReadCloser, int64, error) {
 	o.mu.Lock()

@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- Taking over a task whose checkpoint already sits at the end of an uploaded binlog no longer saves that file a second time (#223). The next worker, or the same worker after the local file is gone, reads the object back and opens it as `mysql-bin.NNNNNN.open.eN`. The following file rotation used to seal that copy as `mysql-bin.NNNNNN.sealed.eN` and upload it again. The new catalog row stored `start_pos` and `end_pos` as the same end position, the bytes matched the object already in the bucket, and `GET /api/tasks/{id}/replay` and `GET /api/tasks/{id}/replay/archive` listed both. A restore then applied those transactions twice when the target was not using GTID, or when the client passed `--skip-gtids`. Replay and the archive now list one path for each source file. A catalog that already has the extra row does the same, without a manual delete. A binlog that is still receiving new events is still sealed and uploaded once. No new config key. No schema migration.
+
 ## [v0.5.40] - 2026-10-06
 
 ### Fixed
