@@ -8,7 +8,7 @@
 - semi-sync ACK/阻塞语义
 - metadata MySQL failover（Percona57 主从 + ProxySQL + orchestrator）
 - cluster 角色分离（control-plane + worker）与 worker heartbeat 在线/离线恢复
-- 控制回路：Stop 过程中改源密码再 Start 只留一条 Binlog Dump；源可达时状态变成 STOPPED 则源上已经没有这条 dump；掐断到源的代理后 Stop 写成 STOPPED 并在 API 上留下 `pending_dump_cleanup`，代理恢复后标记清掉且 dumps 为 0；两个 worker 上把代理握成黑洞再 Stop 然后立刻 Start，源上始终至多一条 Binlog Dump，路径恢复后 pending 清掉且 dumps 为 1（`[dump-fence]`）；v0.5.45 留下的 RUNNING/`desired_run=STOP` 任务升级后继续跑；schema 3（没有 `pending_dump_cleanup` 列）上同样掐断后 Stop 仍是 STOPPED 且 `process_local` 为 true，路径恢复后标记清掉且 dumps 为 0，不手动 KILL
+- 控制回路：Stop 过程中改源密码再 Start 只留一条 Binlog Dump；源可达时状态变成 STOPPED 则源上已经没有这条 dump；掐断到源的代理后 Stop 写成 STOPPED 并在 API 上留下 `pending_dump_cleanup`，代理恢复后标记清掉且 dumps 为 0；两个 worker 上把代理握成黑洞再 Stop 然后立刻 Start，源上始终至多一条 Binlog Dump，路径恢复后 pending 清掉且 dumps 为 1（`[dump-fence]`）；v0.5.45 留下的 RUNNING/`desired_run=STOP` 任务升级后继续跑；`down --steps 1` 从 schema 5 回到 schema 4 时 `pending_dump_cleanup` 仍在，再 down 一次回到 schema 3 且这一列消失，当前二进制在 schema 3 上以退出码 1 结束，日志含 `schema version too old` 和 `./migrate up`
 
 ## 依赖
 
