@@ -130,6 +130,7 @@ func (s *Scheduler) StartTask(id string) error {
 
 	if err := s.prepareDiskResumeEpochLocked(&task); err != nil {
 		owner, epoch := task.OwnerWorkerID, task.Epoch
+		s.flushPendingEventsLocked()
 		s.mu.Unlock()
 		s.releaseTaskLease(id, owner, epoch)
 		return err
@@ -137,6 +138,7 @@ func (s *Scheduler) StartTask(id string) error {
 
 	// 注意：这里仅表示“已发起启动流程”，不是“runner 已 ready”。
 	if err := s.markStartingLocked(task); err != nil {
+		s.flushPendingEventsLocked()
 		s.mu.Unlock()
 		return err
 	}
@@ -535,6 +537,7 @@ func (s *Scheduler) applyRemoteStops() {
 		}
 		s.mu.Lock()
 		s.noteRemoteStopLocked(item)
+		s.flushPendingEventsLocked()
 		s.mu.Unlock()
 	}
 	for _, id := range stopping {
@@ -594,6 +597,7 @@ func (s *Scheduler) completeIdleStop(task Task) {
 	}
 	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
 		s.noteRemoteStopLocked(task)
+		s.flushPendingEventsLocked()
 		s.mu.Unlock()
 		return
 	}
@@ -622,6 +626,7 @@ func (s *Scheduler) completeIdleStop(task Task) {
 	}
 	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
 		s.noteRemoteStopLocked(task)
+		s.flushPendingEventsLocked()
 		s.mu.Unlock()
 		return
 	}
@@ -719,6 +724,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			current.UpdatedAt = time.Now()
 			s.tasks[id] = current
 			s.appendEventLocked(id, "TASK_LEASE_YIELDED", "runner stopped; another owner holds the lease", errMsg)
+			s.flushPendingEventsLocked()
 			s.mu.Unlock()
 			return
 		}

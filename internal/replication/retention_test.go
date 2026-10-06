@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: local segment files, retention clock, catalog rows, and an object deleter
-// output: proof that retention deletes an expired checksum-matched uploaded object, keeps a mismatched or unchecked uploaded file and records it UPLOAD_FAILED, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when a matched object's delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, and leaves a single-key config on the old full purge
+// output: proof that retention deletes an expired checksum-matched uploaded object, keeps a mismatched or unchecked uploaded file and records it UPLOAD_FAILED, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when a matched object's delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, leaves a single-key config on the old full purge, and reads a catalog larger than one page through bounded pages without the unbounded list
 // pos: retention purge coverage for the replication file-open path
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1072,6 +1073,171 @@ func (c *purgeCatalog) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile
 	}
 	c.rows[key] = meta
 	return nil
+}
+
+// pagingPurgeCatalog serves binlog_files in (file_name, epoch) pages.
+// The unbounded list fails so a rotate or retention walk that still loads
+// the whole catalog cannot pass.
+type pagingPurgeCatalog struct {
+	*purgeCatalog
+	pageCalls int
+	maxLimit  int
+	fullLists int
+}
+
+func (c *pagingPurgeCatalog) ListBinlogFiles(context.Context, string, int) ([]tasks.BinlogFile, error) {
+	c.fullLists++
+	return nil, errors.New("unbounded catalog list")
+}
+
+func (c *pagingPurgeCatalog) ListBinlogFilesPage(_ context.Context, taskID, afterName string, afterEpoch int64, first bool, limit int) ([]tasks.BinlogFile, error) {
+	c.pageCalls++
+	if limit > c.maxLimit {
+		c.maxLimit = limit
+	}
+	rows := make([]tasks.BinlogFile, 0, len(c.rows))
+	for _, row := range c.rows {
+		if taskID != "" && row.TaskID != "" && row.TaskID != taskID {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].FileName != rows[j].FileName {
+			return rows[i].FileName < rows[j].FileName
+		}
+		return rows[i].Epoch < rows[j].Epoch
+	})
+	if !first {
+		filtered := rows[:0]
+		for _, row := range rows {
+			if row.FileName > afterName || (row.FileName == afterName && row.Epoch > afterEpoch) {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+func catalogRow(rows map[string]tasks.BinlogFile, name string) (tasks.BinlogFile, bool) {
+	for _, row := range rows {
+		if row.FileName == name {
+			return row, true
+		}
+	}
+	return tasks.BinlogFile{}, false
+}
+
+func TestRetentionPagesCatalogPastFirstPage(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "task-1"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-40 * 24 * time.Hour)
+	writeOld := func(name string) string {
+		t.Helper()
+		path := filepath.Join(taskDir, name)
+		if err := os.WriteFile(path, []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	localPath := writeOld("mysql-bin.900002")
+	matchPath := writeOld("mysql-bin.900003")
+	mismatchPath := writeOld("mysql-bin.900004")
+
+	rows := map[string]tasks.BinlogFile{}
+	for i := 1; i <= catalogPageSize; i++ {
+		name := fmt.Sprintf("mysql-bin.%06d", i)
+		rows[name] = tasks.BinlogFile{
+			TaskID: taskID, FileName: name, Epoch: 1,
+			State: "SEALED", UploadState: "LOCAL_ONLY",
+		}
+	}
+	rows["mysql-bin.900001#1"] = tasks.BinlogFile{
+		TaskID: taskID, FileName: "mysql-bin.900001", Epoch: 1,
+		State: "SEALED", UploadState: "UPLOADED", ObjectKey: "absent-object",
+		Checksum: tasks.ChecksumMatch, SealedAt: old,
+	}
+	rows["mysql-bin.900002#1"] = tasks.BinlogFile{
+		TaskID: taskID, FileName: "mysql-bin.900002", FilePath: localPath, Epoch: 1,
+		State: "SEALED", UploadState: "LOCAL_ONLY",
+	}
+	rows["mysql-bin.900003#1"] = tasks.BinlogFile{
+		TaskID: taskID, FileName: "mysql-bin.900003", FilePath: matchPath, Epoch: 1,
+		State: "SEALED", UploadState: "UPLOADED", ObjectKey: "match-object",
+		Checksum: tasks.ChecksumMatch, SealedAt: old,
+	}
+	rows["mysql-bin.900004#1"] = tasks.BinlogFile{
+		TaskID: taskID, FileName: "mysql-bin.900004", FilePath: mismatchPath, Epoch: 1,
+		State: "SEALED", UploadState: "UPLOADED", ObjectKey: "mismatch-object",
+		Checksum: tasks.ChecksumMismatch, SealedAt: old,
+	}
+	catalog := &pagingPurgeCatalog{purgeCatalog: &purgeCatalog{rows: rows}}
+	deleter := &purgeDeleter{}
+	runner := NewMySQLRunner(dir, WithFileMetaStore(catalog), WithObjectDeleter(deleter))
+	task := tasks.Task{ID: taskID, Epoch: 1, Storage: tasks.Storage{
+		RetentionDays: 7, LocalRetentionDays: 1, BucketRetentionDays: 30,
+	}}
+	file, _, _, err := runner.openBinlogWriter(context.Background(), task, "mysql-bin.999999", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+
+	if catalog.fullLists != 0 || catalog.listCalls != 0 {
+		t.Fatalf("unbounded list calls=%d embedded=%d", catalog.fullLists, catalog.listCalls)
+	}
+	if catalog.pageCalls < 2 || catalog.maxLimit <= 0 || catalog.maxLimit > catalogPageSize {
+		t.Fatalf("pageCalls=%d maxLimit=%d", catalog.pageCalls, catalog.maxLimit)
+	}
+	if _, ok := catalogRow(catalog.rows, "mysql-bin.900001"); ok {
+		t.Fatal("absent uploaded row past bucket retention still present")
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("LOCAL_ONLY removed: %v", err)
+	}
+	if row, ok := catalogRow(catalog.rows, "mysql-bin.900002"); !ok || row.UploadState != "LOCAL_ONLY" {
+		t.Fatalf("LOCAL_ONLY row = %+v ok=%v", row, ok)
+	}
+	if _, err := os.Stat(matchPath); !os.IsNotExist(err) {
+		t.Fatalf("checksum-matched upload still on disk: %v", err)
+	}
+	if _, ok := catalogRow(catalog.rows, "mysql-bin.900003"); ok {
+		t.Fatal("checksum-matched upload row still present")
+	}
+	if _, err := os.Stat(mismatchPath); err != nil {
+		t.Fatalf("checksum mismatch removed: %v", err)
+	}
+	row, ok := catalogRow(catalog.rows, "mysql-bin.900004")
+	if !ok || row.UploadState != "UPLOAD_FAILED" || row.Checksum != tasks.ChecksumMismatch {
+		t.Fatalf("mismatch row = %+v ok=%v", row, ok)
+	}
+	deleted := map[string]bool{}
+	for _, key := range deleter.keys {
+		deleted[key] = true
+	}
+	if !deleted["absent-object"] || !deleted["match-object"] || deleted["mismatch-object"] {
+		t.Fatalf("deleted keys=%v", deleter.keys)
+	}
+	fillers := 0
+	for _, row := range catalog.rows {
+		if strings.HasPrefix(row.FileName, "mysql-bin.0") {
+			fillers++
+		}
+	}
+	if fillers != catalogPageSize {
+		t.Fatalf("filler rows=%d", fillers)
+	}
 }
 
 func (c *purgeCatalog) ListBinlogFiles(_ context.Context, _ string, limit int) ([]tasks.BinlogFile, error) {
