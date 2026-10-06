@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle), expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone, expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry that a same-owner re-claim continues from recorded runner errors, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,12 @@ func (s *Scheduler) releaseTaskLease(taskID, owner string, epoch int64) {
 }
 
 func (s *Scheduler) StartTask(id string) error {
+	return s.startTask(id, false)
+}
+
+// startTask 启动任务。carrySourceFailures 为真时，连续 SOURCE_UNREACHABLE
+// 从已有 runner 错误续上，而不是从 0 开始。操作员 Start 传 false。
+func (s *Scheduler) startTask(id string, carrySourceFailures bool) error {
 	s.mu.Lock()
 
 	// 控制面把停止留在 STOPPING 后，内存可能还停在那里，而行已经被 worker 收成 STOPPED。
@@ -164,7 +171,7 @@ func (s *Scheduler) StartTask(id string) error {
 		go s.renewLeaseLoop(ctx, id, task.OwnerWorkerID, task.Epoch)
 	}
 
-	go s.runTask(ctx, id, task, done)
+	go s.runTask(ctx, id, task, done, carrySourceFailures)
 	return nil
 }
 
@@ -296,7 +303,7 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 		if !s.prepareExpiredTaskClaim(item) {
 			continue
 		}
-		if err := s.StartTask(item.ID); err != nil {
+		if err := s.startTask(item.ID, true); err != nil {
 			// 竞争窗口下可能被其他 worker 先拿到 lease，或本机仍持有有效执行；按 best-effort 跳过。
 			continue
 		}
@@ -331,23 +338,33 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 	s.mu.Lock()
 	leaseManager := s.leaseManager
 	workerID := s.clusterWorkerID
-	snapshot := make([]Task, 0, len(s.tasks))
-	for _, task := range s.tasks {
-		snapshot = append(snapshot, task)
+	ids := make([]string, 0, len(s.tasks))
+	for id := range s.tasks {
+		ids = append(ids, id)
 	}
 	s.mu.Unlock()
 
 	claimed := 0
-	for _, task := range snapshot {
-		if !isClaimableActiveState(task.State) {
+	for _, id := range ids {
+		s.mu.Lock()
+		task, ok := s.tasks[id]
+		if !ok || !isClaimableActiveState(task.State) {
+			s.mu.Unlock()
 			continue
 		}
 		if leaseManager != nil && task.OwnerWorkerID != "" && task.OwnerWorkerID != workerID {
+			s.mu.Unlock()
 			continue
 		}
-		if err := s.StartTask(task.ID); err != nil {
+		if done, running := s.runs[id]; running && !isClosed(done) {
+			// 本进程还在拉流或退避。再 Start 会取消这次执行，把连续失败清零，并停掉续租。
+			s.mu.Unlock()
+			continue
+		}
+		s.mu.Unlock()
+		if err := s.startTask(id, true); err != nil {
 			if errors.Is(err, ErrInvalidSourceConfig) {
-				_ = s.StopTask(task.ID)
+				_ = s.StopTask(id)
 			}
 			continue
 		}
@@ -656,7 +673,7 @@ func (s *Scheduler) completeIdleStop(task Task) {
 	s.releaseTaskLease(task.ID, releaseOwner, releaseEpoch)
 }
 
-func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}) {
+func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}, carrySourceFailures bool) {
 	defer func() {
 		var (
 			releaseOwner string
@@ -689,6 +706,9 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 	// Step 1: 调用 runRunner 执行一次会话；错误则进入退避重试。
 	attempt := 0
 	consecutiveSourceFailures := 0
+	if carrySourceFailures {
+		consecutiveSourceFailures = s.carriedSourceFailures(id)
+	}
 	for {
 		// runRunner 是一次“会话级”执行：内部会一直拉 binlog，直到 stop 或报错才返回。
 		ready, err := s.runRunner(ctx, id, task)
@@ -827,6 +847,73 @@ func isClosed(ch <-chan struct{}) bool {
 	default:
 		return false
 	}
+}
+
+// carriedSourceFailures is the SOURCE_UNREACHABLE streak already recorded for id.
+// This process's runner errors win. After a restart those are only in the event store.
+// ponytail: last 200 stored events. The streak caps at 10 failures.
+func (s *Scheduler) carriedSourceFailures(id string) int {
+	s.mu.Lock()
+	mem := append([]TaskEvent(nil), s.events[id]...)
+	store := s.eventStore
+	s.mu.Unlock()
+	if memoryHasRunnerError(mem) || store == nil {
+		return consecutiveUnreachableStreak(mem, false)
+	}
+	ctx, cancel := s.withReadTimeout(context.Background())
+	stored, err := store.ListEvents(ctx, id, 200)
+	cancel()
+	if err != nil {
+		log.Printf("source failure streak read task=%s err=%v", id, err)
+		return consecutiveUnreachableStreak(mem, false)
+	}
+	if len(stored) == 0 {
+		return consecutiveUnreachableStreak(mem, false)
+	}
+	return consecutiveUnreachableStreak(stored, true)
+}
+
+func memoryHasRunnerError(events []TaskEvent) bool {
+	for _, ev := range events {
+		if ev.Type == "TASK_RUNNER_ERROR" {
+			return true
+		}
+	}
+	return false
+}
+
+// consecutiveUnreachableStreak counts SOURCE_UNREACHABLE runner errors after the
+// latest ready run, operator start, or other runner error.
+// newestFirst is the event-store order. The in-memory slice is oldest first.
+// The newest event is skipped when it is TASK_STARTED: startTask writes that
+// before the run reads the streak, and it is this claim, not an operator reset.
+func consecutiveUnreachableStreak(events []TaskEvent, newestFirst bool) int {
+	n := len(events)
+	count := 0
+	for i := 0; i < n; i++ {
+		ev := events[i]
+		if !newestFirst {
+			ev = events[n-1-i]
+		}
+		if i == 0 && (ev.Type == "TASK_STARTED" || ev.Type == "TASK_START_DISPATCHED") {
+			continue
+		}
+		switch ev.Type {
+		case "TASK_RUNNER_ERROR":
+			if strings.HasPrefix(ev.Detail, CodeSourceUnreachable) {
+				count++
+				continue
+			}
+			return count
+		case "TASK_RETRY_BACKOFF", "TASK_RETRYING":
+			continue
+		case "TASK_RUNNING", "TASK_STARTED", "TASK_FAILED", "TASK_STOPPED", "TASK_START_DISPATCHED":
+			return count
+		default:
+			continue
+		}
+	}
+	return count
 }
 
 // Restore 从持久化层恢复任务到内存视图。
