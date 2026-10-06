@@ -96,6 +96,8 @@ binlog-server_0.5.42_linux_amd64/
 
 ## 4. 拓扑部署实施步骤
 
+> **迁移 `000003_task_desired_and_retry_budget`（ADR 0005 第 2 步）：** 先执行 `./migrate up`，确认 `schema_migrations` 为 version 3、dirty 0。这一步不需要重启进程。
+
 ### 4.1 拓扑一：单机模式 (Standalone)
 
 适合单机评估或节点资源独立的独立备份场景。
