@@ -1,7 +1,7 @@
 # internal/app Module
 
 ## Files
-- `app.go`: 应用主流程与运行时装配。Restore 之前先对齐遗留 `desired_run`。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。
+- `app.go`: 应用主流程与运行时装配。Restore 之前先对齐遗留 `desired_run`。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。worker（含单机和 all-in-one）同时启动残留 Binlog Dump 的 KILL 重试。
 - `uploaded_takeover_test.go`: 走 `Run` 的启动接线。checkpoint 只在已上传对象里、本地文件不在时，不报 `SEGMENT_NOT_ON_WORKER`。
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `tracing_test.go`: OTLP HTTP 默认 traces 路径兼容性回归测试。

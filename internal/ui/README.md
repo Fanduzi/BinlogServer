@@ -2,7 +2,7 @@
 
 ## Files
 - `ui.go`: UI 静态资源路由暴露。
-- `static/`: 前端构建产物。
+- `static/`: 前端构建产物。任务详情在 `pending_dump_cleanup.connection_id` 有值时显示源库 Binlog Dump 仍可能开着的警告。
 
 ## Exports
 - `/ui/` 静态资源服务入口。

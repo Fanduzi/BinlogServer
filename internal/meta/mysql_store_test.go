@@ -1521,9 +1521,56 @@ func TestMySQLTaskStore_EnsureSchemaValid(t *testing.T) {
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	expectSchemaCheckQueries(mock, nil, nil, nil)
+	mock.ExpectQuery(regexp.QuoteMeta(hasColumnSQL)).
+		WithArgs("backup_tasks", "pending_dump_cleanup").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
 	if err := store.ensureSchema(context.Background()); err != nil {
 		t.Fatalf("ensureSchema returned error: %v", err)
+	}
+	if store.PendingDumpColumn() {
+		t.Fatal("schema 3 without 000004 must keep the pending column optional")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_PendingDumpColumnRoundTrip(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	store.hasPendingDump = true
+	now := time.Now()
+	raw := `{"connection_id":42,"host":"10.0.0.8","port":3306}`
+	rows := sqlmock.NewRows(append(taskRowColumns(), "pending_dump_cleanup")).AddRow(
+		"7", "pending", "pending-key", "STOPPED", "", "", int64(0), "",
+		`{"host":"10.0.0.8","port":3306,"user":"repl","password":"secret","flavor":"mysql"}`,
+		`{"mode":"LATEST"}`, `{"retention_days":7}`, now,
+		"STOP", int64(1), int64(1), int64(0), int64(0), int64(0),
+		raw,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(store.withPendingColumn(getTaskSQL))).
+		WithArgs("7").
+		WillReturnRows(rows)
+	got, err := store.GetTask(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 42 || got.PendingDumpCleanup.Warning == "" {
+		t.Fatalf("pending %+v", got.PendingDumpCleanup)
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta(savePendingDumpSQL)).
+		WithArgs("", "7", raw).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	changed, err := store.SavePendingDumpCleanup(context.Background(), "7", raw, "")
+	if err != nil || !changed {
+		t.Fatalf("save changed=%v err=%v", changed, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
