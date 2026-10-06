@@ -1,6 +1,6 @@
 # One authority for task state, one key for a segment
 
-Status: Accepted (2026-10-06). Steps 1–5 of the ordered rollout are on main. Step 5, fail-and-alert, landed in v0.5.47 (PR #250). Steps 6–9 are not done. Schema on main is `000001` through `000004_pending_dump_cleanup`. `minRequiredSchemaVersion` is 3. The next new migration is `000005`, not `000003` or `000004`. #189 and #224 stay open. #205 is fixed in v0.5.48 (PR #261). That release is not step 6, 7, 8, or 9.
+Status: Accepted (2026-10-06). Steps 1–5 of the ordered rollout are on main. Step 5, fail-and-alert, landed in v0.5.47 (PR #250). Steps 6–9 are not done. Schema on main is `000001` through `000004_pending_dump_cleanup`. `minRequiredSchemaVersion` is 3. The next new migration is `000005`, not `000003` or `000004`. #189 is fixed in v0.5.49 (PR #264). #224 stays open. #205 is fixed in v0.5.48 (PR #261). v0.5.48 and v0.5.49 are not step 6, 7, 8, or 9.
 
 The problem section cites `main` at `5373057` (includes the #234 fix for #203). That snapshot is why this record was written. It is not the code after steps 2–5.
 
@@ -26,7 +26,7 @@ An architecture review of v0.5.30 listed eight problems. The fixes landed across
 
 ## Problem
 
-The bullets in this section describe `main` at `5373057`. Steps 2–5 have since changed the runtime. Migration and rollout is the status after v0.5.48. #205 is fixed in that release. Steps 6–9 are still next work.
+The bullets in this section describe `main` at `5373057`. Steps 2–5 have since changed the runtime. Migration and rollout is the status after v0.5.49. #189 is fixed in that release. #205 is fixed in v0.5.48. Steps 6–9 are still next work.
 
 ### A. Task state has more than one writer
 
@@ -95,13 +95,13 @@ Parsers that still disagree:
 | `SelectReplayFiles` / `WindowBinlogFilesForReplay` | `internal/tasks/disk_files.go` | Replay order and which sealed rows are duplicates. `sealedPointCovered` ignores a row whose `end_pos` is 0 |
 | Disk listing | `listTaskBinlogFilesOnDisk` | Uses `ClassifySegment`, and leaves `start_pos` and `end_pos` at 0 because it does not read the file |
 
-#### #189, open
+#### #189, fixed
 
-After failover, `mysql-bin.000009.sealed.e1` was `SEALED`, `UPLOADED`, `checksum=match`, `size_bytes=543`, `start_pos=4`, `end_pos=0`. Download still returned the bytes.
+After failover, `mysql-bin.000009.sealed.e1` was `SEALED`, `UPLOADED`, `checksum=match`, `size_bytes=543`, `start_pos=4`, `end_pos=0`. Download still returned the bytes. A later epoch whose open file already held the events stored `start_pos` and `end_pos` as the resume cursor, while the file held events from position 4 through the last event.
 
-`enrollSealedUploads` runs at the start of `MySQLRunner.run` when an uploader is configured. For a sealed basename on disk that it does not join to a row by `catalogSegmentName`, it upserts `StartPos: 4` and `EndPos: 0`. The unique key is `(task_id, file_name, epoch)`, and the open row for that epoch is the same key. The upsert overwrites `end_pos` with 0. A later upload-state update persists that 0. `sealedPointCovered` then keeps the row (0 is not a point), and a resume check that requires `EndPos >= checkpoint` (`coveringUpload` in `internal/tasks/resume.go`) does not see the span.
+On this `main`, seal and enroll set `start_pos` and `end_pos` from the contiguous event chain in the sealed file. A newly sealed row has `start_pos` equal to the first event position and `end_pos` equal to the last event end log position. That includes epoch 1, a third epoch of the same name, and a segment sealed after a file/pos resume gets MySQL 1236 and continues with GTID. A same-file artificial rotate with position 0 does not clear the position being copied. An already `UPLOADED` row is not rewritten, so a row an older binary stored with `end_pos` 0 stays that way. This shipped in v0.5.49 (PR #264). It is not step 7.
 
-The migration cannot repair this. The bytes are on the worker disk, or in the object, not in a column MySQL can recompute.
+The migration cannot repair a row that is already stored. The bytes are on the worker disk, or in the object, not in a column MySQL can recompute.
 
 #### #224, open
 
@@ -246,7 +246,7 @@ During a rolling restart the new API writes both the old `state` transitions and
 
 Each PR is releasable on its own. Schema that a binary reads is migrated before that binary starts.
 
-Steps 1–5 are on main. Steps 6–9 are not done. #189 and #224 stay open. #205 is fixed in v0.5.48 (PR #261). That release is not an ADR step. Steps 6–9 remain next work.
+Steps 1–5 are on main. Steps 6–9 are not done. #189 is fixed in v0.5.49 (PR #264). #224 stays open. #205 is fixed in v0.5.48 (PR #261). Those releases are not ADR steps. Steps 6–9 remain next work.
 
 1. **This record.** Documentation only. Landed when this file was accepted. Acceptance: the file is in `docs/adr/` and a reviewer can point at a sentence that does not match `main`.
 
@@ -269,7 +269,7 @@ Steps 1–5 are on main. Steps 6–9 are not done. #189 and #224 stay open. #205
    - Down: drop `uk_task_source_epoch`, restore the previous nullability. Do not delete rows.
    - Acceptance: `SELECT COUNT(*) FROM binlog_files WHERE source_file IS NULL OR source_file=''` is 0. `SELECT COUNT(*) FROM binlog_files WHERE source_file <> file_name` is 0. `SHOW INDEX FROM binlog_files` shows both unique keys. A second insert of the same `(task_id, source_file, epoch)` returns duplicate key. A previous-release process still starts, because `uk_task_file_epoch` is still there. Scratch-database down leaves the `binlog_files` count unchanged.
 
-7. **One classifier, and no invented `end_pos`.** Not done. #189 stays open. Enroll, retention, replay, resume, the files API, and the Console call `ClassifySegment`. Enroll fills positions from `DurableCursor` and its upsert omits `end_pos` when it does not know it. The disk scan does the same for standalone listings.
+7. **One classifier, and no invented `end_pos`.** Not done. #189 is fixed in v0.5.49 (PR #264). That release is not this step. Newly sealed rows take `start_pos` and `end_pos` from the events in the file. An already `UPLOADED` row is not rewritten. Still to do: enroll, retention, replay, resume, the files API, and the Console call `ClassifySegment`. Enroll fills positions from `DurableCursor` and its upsert omits `end_pos` when it does not know it. The disk scan does the same for standalone listings. Positions are not nullable yet.
    - Acceptance: fail over so the same source file seals as `mysql-bin.00000N.sealed.e1`. `SELECT start_pos, end_pos, size_bytes, state, upload_state FROM binlog_files WHERE task_id=? AND source_file=? AND epoch=?` shows `end_pos` equal to the last complete event (the same number `DurableCursor` returns), not 0. `GET /api/tasks/{id}/files` and the Console end-position column show that number. Replay for that source index does not list two copies of the same transactions.
 
 8. **Temp files and the placeholder name.** Not done. #224 stays open. #205 is fixed in v0.5.48 (PR #261). That release is not this step. Startup and `materializeUploaded` still do not delete `.takeover-*`. Retention still does not skip every name `ClassifySegment` rejects. Objects already uploaded with a no-CRC artificial Rotate tail are not rewritten.
@@ -280,7 +280,7 @@ Steps 1–5 are on main. Steps 6–9 are not done. #189 and #224 stay open. #205
 
 ## Alternatives
 
-**Keep fixing one symptom per release.** That is what v0.5.31–v0.5.40 and #234 did. #234 is the right patch for the live-run reset, and it is already on `main`. Steps 2–5 then landed the columns, the persisted budget, the control loop, and fail-and-alert. What is still open is the segment key (step 6, migration `000005`), `end_pos` 0 (#189, step 7), and a `.takeover-*` file left after `kill -9` (#224, step 8). The no-CRC Rotate and stray `task-N.binlog` (#205) are fixed in v0.5.48 (PR #261). That release is not step 8. Steps 6–9 are not done.
+**Keep fixing one symptom per release.** That is what v0.5.31–v0.5.40 and #234 did. #234 is the right patch for the live-run reset, and it is already on `main`. Steps 2–5 then landed the columns, the persisted budget, the control loop, and fail-and-alert. What is still open is the segment key (step 6, migration `000005`) and a `.takeover-*` file left after `kill -9` (#224, step 8). A newly sealed row no longer stores `end_pos` 0 (#189, v0.5.49, PR #264). That release is not step 7. An already `UPLOADED` row is not rewritten. The no-CRC Rotate and stray `task-N.binlog` (#205) are fixed in v0.5.48 (PR #261). That release is not step 8. Steps 6–9 are not done.
 
 **Split the scheduler into lifecycle, lease, and upload packages first.** [0003](0003-do-not-split-scheduler-first.md) rejected this. The control loop is a change in who writes the row, inside the scheduler that already owns the claim tick. A package split does not remove the second writer.
 
@@ -298,7 +298,7 @@ Steps 1–5 are on main. Steps 6–9 are not done. #189 and #224 stay open. #205
 
 - Step 5 shipped in v0.5.47. Tasks that used to sit in `RETRY_BACKOFF` on an unclassified error, and a file/pos task that hits MySQL 1236 with no stored GTID, go `FAILED` on the first occurrence and release the lease. `last_error` for that 1236 names 1236 and a purged binlog. The v0.5.47 release note lists the allowlist and this 1236 change. The alert is `FAILED`, `last_error`, and `TASK_FAILED`.
 - Mixed versions: a new API with an old worker is safe only while the new API still writes `state` the way the old worker reads it (`STARTING`, `STOPPING`). PR 4 does that. A new worker with an old API is safe because the old API's `state` writes are still what the compatibility branch of the loop honors.
-- `end_pos` 0 rows (#189) are not fixed by `000004_pending_dump_cleanup`. They stay wrong until step 7. A worker repairs a file it can read. An object-only row stays wrong until a worker materializes it or the operator accepts the old number. The files API should show `NULL` rather than 0 once the column is nullable, including for rows not yet repaired, so the Console stops displaying a fake end position. Step 7 is not done.
+- Newly sealed rows no longer store `end_pos` 0 (#189, v0.5.49, PR #264). That release is not step 7. An already `UPLOADED` row is not rewritten, so a row an older binary stored with `end_pos` 0 stays wrong until a later repair. `000004_pending_dump_cleanup` does not fix those rows. An object-only row stays wrong until a worker materializes it or the operator accepts the old number. The files API should show `NULL` rather than 0 once the column is nullable, including for rows not yet repaired, so the Console stops displaying a fake end position. Step 7 is not done.
 - `000002` down deletes rows. A down written the same way for `000005` would drop epoch segments. The down in step 6 only drops the new index and the nullability change. `000004_pending_dump_cleanup` down drops only that column.
 - Conditional updates in `persistTaskLocked` can return "lost update" under load. The loop treats that as "read the row again", not as a task failure.
 - Standalone positions changing from 0 to a real cursor is a files-API change for leftover directories. Checkpoints stay absent. Start of a leftover directory stays refused.
