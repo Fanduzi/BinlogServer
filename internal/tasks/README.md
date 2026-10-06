@@ -1,7 +1,7 @@
 # internal/tasks Module
 
 ## Files
-- `scheduler.go`: 调度器核心类型、选项注入、`TaskStore`（含 GetTask/ListTasksPage/ListStartingUnownedTasks）与通用辅助函数；`ExpiredLeaseTaskLister` 供 cluster 过期租约查询（缺实现返回 `ErrExpiredLeaseLookupNotAvailable`）。
+- `scheduler.go`: 调度器核心类型、选项注入、`TaskStore`（含 GetTask/ListTasksPage/ListStartingUnownedTasks）与通用辅助函数；`ExpiredLeaseTaskLister` 供 cluster 过期租约查询（缺实现返回 `ErrExpiredLeaseLookupNotAvailable`）。`SetRunner` 把 `DumpSourceBinder` 接到当前行的 source 上，关掉 dump 时可以用库里的新密码 `KILL` 旧线程。
 - `memory_lease.go`: 进程内 `LeaseManager`，单机与测试走同一扇任务所有权门。同一 worker 收回过期租约不增加 epoch；别的 worker 接管过期租约才增加。`Release` 立刻腾出租约并清空 owner。
 - `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec、`AdoptDiskBackup`）；`GetTask` 按主键刷新，store 失败不退回内存旧抄本；没有 store 时，内存未命中再认 `data_dir` 里仍有分段的目录。`ListClusterObservation` 有 store 时读 `store.ListTasks` 全库所有权抄本；`ListTasksPage` 在有 store 时走 SQL 分页；没有 store 时名单含这些磁盘目录。`DashboardCounters` 在 store 实现 `TaskDashboardRollup` 时走 SQL 计数，否则一次过滤读取。启停不在本文件。
 - `disk_files.go`: `{data_dir}/{task_id}` 的封存名与 `.open.e<epoch>` 扫描，standalone 无 task store 时的剩余目录发现，以及 adopt 默认 `FILE_POS`（最高分段的源文件名和字节大小）和下一个 open epoch。`WindowBinlogFilesForReplay` 把目录行或磁盘行排成同一回放顺序：源序号升序，同序号封存在前，再按 epoch 升序；`limit` 保留序号最大的窗口。`SelectReplayFiles` 在这个窗口里留下每个序号的全部分封存分段，再加该序号 epoch 最高的 open。更早的封存路径不会被后一次 `.open.e*` 丢掉。只有当这条 open 行带着和封存行相同的 object key（接管时把对象字节写进了 open 文件）时，回放才省略那条封存路径。同一序号里 `start_pos` 等于 `end_pos` 且都大于 0 的封存行，如果另一条有实际区间的封存行已经盖住这个点，回放也省略它：这是接管时把已上传对象又封了一次，位点记的是续传光标。`end_pos` 为 0 的行仍留下。`.sealed.e<epoch>` 按封存、按它自己的 epoch 排序。`ReplayLocations` 与这些路径对齐，取值 `local` / `bucket` / `both`。`ReplayClient` 把 `source.flavor` 的 `mysql` 映射成 `mysqlbinlog` / `MySQL mysqlbinlog`，`mariadb` 映射成 `mariadb-binlog`。
