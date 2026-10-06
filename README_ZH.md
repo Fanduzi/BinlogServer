@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.50
+### 1. 下载、校验并解压 v0.5.51
 
 ```bash
-VER=0.5.50
+VER=0.5.51
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,19 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.50` `checksums.txt`：
+已发布的 `v0.5.51` `checksums.txt`：
 
 ```text
-6554d9280900dc79744ee1ffb91b705a934b0cc1af6696d03ec81e6702c683fc  binlog-server_0.5.50_darwin_amd64.tar.gz
-3426ebb330ef92ddad1ce1034e6cbf66d676cf0eafc46955244b451db37cf945  binlog-server_0.5.50_darwin_arm64.tar.gz
-c45bb42d913848231fef3635982e522c0089c24ce9377f397c97c51cb652e789  binlog-server_0.5.50_linux_amd64.tar.gz
-7e2040c0b751a2b8827b7aacc6f6a5c61deec16408710fc5444cf75cb9a29926  binlog-server_0.5.50_linux_arm64.tar.gz
+fcf78b3c9af964f15bad8ea9c70a9beef91220601831f1676427dac0d28b0e45  binlog-server_0.5.51_darwin_amd64.tar.gz
+3ef6a5acaacd8aaf00a31e56aee9f0a279b3561abe3772c40aaf015aada5c500  binlog-server_0.5.51_darwin_arm64.tar.gz
+2a6ebec8978324ec0871545c7aec357af54f825047a42f5914f4d20bcb6b4fa9  binlog-server_0.5.51_linux_amd64.tar.gz
+134e21ea7d491537ffc2ad88a1a9433197daeb01bd1bb968a44090e2d626dd4e  binlog-server_0.5.51_linux_arm64.tar.gz
 ```
 
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.50_linux_amd64/
+binlog-server_0.5.51_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -253,16 +253,16 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.50)
+## 升级须知 (v0.5.51)
 
-在将生产环境升级至 `v0.5.50` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35`、`v0.5.36`、`v0.5.37`、`v0.5.38`、`v0.5.39`、`v0.5.40`、`v0.5.41`、`v0.5.42`、`v0.5.43`、`v0.5.44`、`v0.5.45`、`v0.5.46`、`v0.5.47`、`v0.5.48` 与 `v0.5.49` 的记录留在下方链接的发布说明里。
+在将生产环境升级至 `v0.5.51` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35`、`v0.5.36`、`v0.5.37`、`v0.5.38`、`v0.5.39`、`v0.5.40`、`v0.5.41`、`v0.5.42`、`v0.5.43`、`v0.5.44`、`v0.5.45`、`v0.5.46`、`v0.5.47`、`v0.5.48`、`v0.5.49` 与 `v0.5.50` 的记录留在下方链接的发布说明里。
 
-- **schema 5，新迁移 `000005_binlog_source_epoch_key`：** 这一版是 ADR 0005 第 6 步。`minRequiredSchemaVersion` 是 5。启动 v0.5.50 之前必须 `./migrate up` 到 schema 5。`migrations/` 是 `000001`、`000002`、`000003`、`000004` 和 `000005`。v0.5.50 在 schema 4 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。v0.5.49 仍能在 schema 5 上启动，因为 `uk_task_file_epoch` 还在。schema 4（`000004_pending_dump_cleanup`）仍在迁移链上。升级见 v0.5.50 发布说明。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
-- 细节见 [docs/releases/release-notes-v0.5.50.md](docs/releases/release-notes-v0.5.50.md)。
+- **schema 5，没有新迁移：** 这一版是 ADR 0005 第 7 步。`minRequiredSchemaVersion` 仍是 5。没有新的迁移，也没有新的配置项。`migrations/` 仍是 `000001`、`000002`、`000003`、`000004` 和 `000005`。没有 `000006`。还不是 schema 5 时，启动 v0.5.51 之前必须 `./migrate up` 到 schema 5。已经是 v0.5.50 / schema 5 的库，这次不需要 `./migrate`。确认 `schema_migrations` 是 `(5, 0)` 再启动。v0.5.51 在 schema 4 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。v0.5.49 仍能在 schema 5 上启动，因为 `uk_task_file_epoch` 还在。schema 4（`000004_pending_dump_cleanup`）仍在迁移链上。还不是 schema 5 时，先按 v0.5.50 升级，再启动 v0.5.51。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
+- 细节见 [docs/releases/release-notes-v0.5.51.md](docs/releases/release-notes-v0.5.51.md)。
 
-详细版本记录：[docs/releases/v0.5.50.zh-CN.md](docs/releases/v0.5.50.zh-CN.md) | [docs/releases/release-notes-v0.5.50.md](docs/releases/release-notes-v0.5.50.md)
+详细版本记录：[docs/releases/v0.5.51.zh-CN.md](docs/releases/v0.5.51.zh-CN.md) | [docs/releases/release-notes-v0.5.51.md](docs/releases/release-notes-v0.5.51.md)
 
-v0.5.27 至 v0.5.49 的记录：[docs/releases/v0.5.49.zh-CN.md](docs/releases/v0.5.49.zh-CN.md) | [docs/releases/release-notes-v0.5.49.md](docs/releases/release-notes-v0.5.49.md)，[docs/releases/v0.5.48.zh-CN.md](docs/releases/v0.5.48.zh-CN.md) | [docs/releases/release-notes-v0.5.48.md](docs/releases/release-notes-v0.5.48.md)，[docs/releases/v0.5.47.zh-CN.md](docs/releases/v0.5.47.zh-CN.md) | [docs/releases/release-notes-v0.5.47.md](docs/releases/release-notes-v0.5.47.md)，[docs/releases/v0.5.46.zh-CN.md](docs/releases/v0.5.46.zh-CN.md) | [docs/releases/release-notes-v0.5.46.md](docs/releases/release-notes-v0.5.46.md)，[docs/releases/v0.5.45.zh-CN.md](docs/releases/v0.5.45.zh-CN.md) | [docs/releases/release-notes-v0.5.45.md](docs/releases/release-notes-v0.5.45.md)，[docs/releases/v0.5.44.zh-CN.md](docs/releases/v0.5.44.zh-CN.md) | [docs/releases/release-notes-v0.5.44.md](docs/releases/release-notes-v0.5.44.md)，[docs/releases/v0.5.43.zh-CN.md](docs/releases/v0.5.43.zh-CN.md) | [docs/releases/release-notes-v0.5.43.md](docs/releases/release-notes-v0.5.43.md)，[docs/releases/v0.5.42.zh-CN.md](docs/releases/v0.5.42.zh-CN.md) | [docs/releases/release-notes-v0.5.42.md](docs/releases/release-notes-v0.5.42.md)，[docs/releases/v0.5.41.zh-CN.md](docs/releases/v0.5.41.zh-CN.md) | [docs/releases/release-notes-v0.5.41.md](docs/releases/release-notes-v0.5.41.md)，[docs/releases/v0.5.40.zh-CN.md](docs/releases/v0.5.40.zh-CN.md) | [docs/releases/release-notes-v0.5.40.md](docs/releases/release-notes-v0.5.40.md)，[docs/releases/v0.5.39.zh-CN.md](docs/releases/v0.5.39.zh-CN.md) | [docs/releases/release-notes-v0.5.39.md](docs/releases/release-notes-v0.5.39.md)，[docs/releases/v0.5.38.zh-CN.md](docs/releases/v0.5.38.zh-CN.md) | [docs/releases/release-notes-v0.5.38.md](docs/releases/release-notes-v0.5.38.md)，[docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md) | [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md)，[docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md) | [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md)，[docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md) | [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md)，[docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md) | [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md)，[docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md) | [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md)，[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)，[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
+v0.5.27 至 v0.5.50 的记录：[docs/releases/v0.5.50.zh-CN.md](docs/releases/v0.5.50.zh-CN.md) | [docs/releases/release-notes-v0.5.50.md](docs/releases/release-notes-v0.5.50.md)，[docs/releases/v0.5.49.zh-CN.md](docs/releases/v0.5.49.zh-CN.md) | [docs/releases/release-notes-v0.5.49.md](docs/releases/release-notes-v0.5.49.md)，[docs/releases/v0.5.48.zh-CN.md](docs/releases/v0.5.48.zh-CN.md) | [docs/releases/release-notes-v0.5.48.md](docs/releases/release-notes-v0.5.48.md)，[docs/releases/v0.5.47.zh-CN.md](docs/releases/v0.5.47.zh-CN.md) | [docs/releases/release-notes-v0.5.47.md](docs/releases/release-notes-v0.5.47.md)，[docs/releases/v0.5.46.zh-CN.md](docs/releases/v0.5.46.zh-CN.md) | [docs/releases/release-notes-v0.5.46.md](docs/releases/release-notes-v0.5.46.md)，[docs/releases/v0.5.45.zh-CN.md](docs/releases/v0.5.45.zh-CN.md) | [docs/releases/release-notes-v0.5.45.md](docs/releases/release-notes-v0.5.45.md)，[docs/releases/v0.5.44.zh-CN.md](docs/releases/v0.5.44.zh-CN.md) | [docs/releases/release-notes-v0.5.44.md](docs/releases/release-notes-v0.5.44.md)，[docs/releases/v0.5.43.zh-CN.md](docs/releases/v0.5.43.zh-CN.md) | [docs/releases/release-notes-v0.5.43.md](docs/releases/release-notes-v0.5.43.md)，[docs/releases/v0.5.42.zh-CN.md](docs/releases/v0.5.42.zh-CN.md) | [docs/releases/release-notes-v0.5.42.md](docs/releases/release-notes-v0.5.42.md)，[docs/releases/v0.5.41.zh-CN.md](docs/releases/v0.5.41.zh-CN.md) | [docs/releases/release-notes-v0.5.41.md](docs/releases/release-notes-v0.5.41.md)，[docs/releases/v0.5.40.zh-CN.md](docs/releases/v0.5.40.zh-CN.md) | [docs/releases/release-notes-v0.5.40.md](docs/releases/release-notes-v0.5.40.md)，[docs/releases/v0.5.39.zh-CN.md](docs/releases/v0.5.39.zh-CN.md) | [docs/releases/release-notes-v0.5.39.md](docs/releases/release-notes-v0.5.39.md)，[docs/releases/v0.5.38.zh-CN.md](docs/releases/v0.5.38.zh-CN.md) | [docs/releases/release-notes-v0.5.38.md](docs/releases/release-notes-v0.5.38.md)，[docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md) | [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md)，[docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md) | [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md)，[docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md) | [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md)，[docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md) | [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md)，[docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md) | [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md)，[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)，[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
 
 
 ---
