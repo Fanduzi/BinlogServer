@@ -12,6 +12,14 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Changed
+
+- An error that is not on the retry allowlist fails the task on the first occurrence (ADR 0005 step 5). The allowlist, retried inside the same ownership, is: `SOURCE_UNREACHABLE` (still 10 consecutive failures on `consecutive_source_failures`, then `FAILED` and the lease is released), transient metadata errors (`meta.IsTransientMySQLError`: deadlock, lock wait timeout, connection reset, connection refused, broken pipe, server has gone away, invalid connection, bad connection, read-only, read only, timeout, eof; no task-level cap; after metadata recovers the task returns to `RUNNING` without an operator Start and without passing through `FAILED`), and `OBJECT_PURGE_FAILED` (not a task failure; the next file open retries the object delete). Everything else, while the task is still supposed to be running, writes `FAILED` on the first occurrence, sets `last_error`, appends one `TASK_FAILED` event, releases the lease (`owner_worker_id` empty), and sets `desired_run=STOP` with `failed_spec_revision=spec_revision`. That includes `SOURCE_ACCESS_DENIED`, `SOURCE_LOG_BIN_OFF`, `SOURCE_IDENTITY_UNAVAILABLE`, `SEALED_FILE_EXISTS`, a non-transient `CHECKPOINT_WRITE_FAILED`, `SEGMENT_NOT_ON_WORKER`, `EPOCH_NOT_ACQUIRED`, MySQL 1236 when no GTID is stored, and any runner error `classifyRunError` does not recognize, including a local append or flush error. A lease handoff is not a failure and does not write `FAILED`. Tasks that used to sit in `RETRY_BACKOFF` on an unclassified error, or on MySQL 1236 with no stored GTID, now go `FAILED` immediately. For that 1236, `last_error` names 1236 and a purged binlog. Operator Start after `FAILED` still arms the task. A runner error observed while the task is already `STOPPING` or `STOPPED`, or while the stored row is a newer Stop, does not enter this allowlist. The run still finishes as `STOPPED` and does not append `TASK_FAILED`. A Stop whose KILL could not reach the source stays `STOPPED` with `pending_dump_cleanup` (migration `000004`, already on main; this step does not add `000005`). No new metric and no notifier. The operator signal for an allowlist miss is `FAILED`, `last_error`, and `TASK_FAILED`. No new migration and no new config key. `minRequiredSchemaVersion` stays 3.
+
+### Fixed
+
+- An operator Stop no longer stays `STOPPING` when the dump exit writes `STOPPED` from a snapshot older than that Stop's `spec_revision`. The task upsert keeps the row when its `spec_revision` is newer, so the older `STOPPED` did not apply and `GET /api/tasks/{id}` stayed `STOPPING` with the owner and epoch still set. The exit now writes `STOPPED` on the Stop's spec, and writes it again when the stored row is still that Stop. No new migration and no new config key.
+
 ## [v0.5.46] - 2026-10-06
 
 ### Fixed

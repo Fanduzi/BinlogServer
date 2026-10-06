@@ -12,6 +12,18 @@ import (
 	"time"
 )
 
+func TestIsTransientMySQLError_UsesTaskAllowlist(t *testing.T) {
+	if !IsTransientMySQLError(errors.New("Error 1213: Deadlock found when trying to get lock")) {
+		t.Fatal("deadlock")
+	}
+	if !IsTransientMySQLError(errors.New("server has gone away")) {
+		t.Fatal("gone away")
+	}
+	if IsTransientMySQLError(errors.New("append failed")) || IsTransientMySQLError(nil) {
+		t.Fatal("unrelated error looked transient")
+	}
+}
+
 // TestWithRetry_RetryOnTransientErrors 验证相关行为。
 func TestWithRetry_RetryOnTransientErrors(t *testing.T) {
 	var attempts int

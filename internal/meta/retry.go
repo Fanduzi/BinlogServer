@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases, runs, and checkpoints
+// output: persistent metadata retry policy; IsTransientMySQLError uses the task retry allowlist substrings
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -8,8 +8,9 @@ package meta
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
+
+	"binlog_server/internal/tasks"
 
 	"github.com/cenkalti/backoff/v4"
 )
@@ -81,23 +82,9 @@ func DefaultMySQLRetryPolicy() RetryPolicy {
 }
 
 // IsTransientMySQLError 基于错误文本做瞬时错误判定。
+// 名单与任务重试白名单是同一份，见 tasks.IsTransientMetadataError。
 func IsTransientMySQLError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "deadlock") ||
-		strings.Contains(msg, "lock wait timeout") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "server has gone away") ||
-		strings.Contains(msg, "invalid connection") ||
-		strings.Contains(msg, "bad connection") ||
-		strings.Contains(msg, "read-only") ||
-		strings.Contains(msg, "read only") ||
-		strings.Contains(msg, "timeout") ||
-		strings.Contains(msg, "eof")
+	return tasks.IsTransientMetadataError(err)
 }
 
 // isPermanentError 判断错误链上是否包含 permanent 标记。

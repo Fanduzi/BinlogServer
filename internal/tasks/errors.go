@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner/source failures and stable operator error codes
-// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, the SOURCE_UNREACHABLE budget predicate, a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, and SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker
+// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, the SOURCE_UNREACHABLE budget predicate, the retry allowlist (SOURCE_UNREACHABLE, transient metadata text, OBJECT_PURGE_FAILED), a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, and SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker
 // pos: shared operator-error types used by scheduler retry policy and source probing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -82,6 +82,48 @@ func NewRetryableSourceError(code, message string) error {
 func IsSourceUnreachable(err error) bool {
 	var sourceErr *RetryableSourceError
 	return errors.As(err, &sourceErr) && sourceErr.Code == CodeSourceUnreachable
+}
+
+// IsTransientMetadataError reports a metadata blip that must not fail the task.
+// meta.IsTransientMySQLError calls this so the substring list stays in one place:
+// deadlock, lock wait timeout, connection reset, connection refused, broken pipe,
+// server has gone away, invalid connection, bad connection, read-only, read only,
+// timeout, eof. There is no task-level cap.
+func IsTransientMetadataError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "deadlock") ||
+		strings.Contains(msg, "lock wait timeout") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "server has gone away") ||
+		strings.Contains(msg, "invalid connection") ||
+		strings.Contains(msg, "bad connection") ||
+		strings.Contains(msg, "read-only") ||
+		strings.Contains(msg, "read only") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "eof")
+}
+
+// isObjectPurgeFailed reports a retention delete the next file open retries.
+// It is not a task failure.
+func isObjectPurgeFailed(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "OBJECT_PURGE_FAILED")
+}
+
+// retryAllowed is the fail-and-alert allowlist. A lease handoff is not a retry
+// and not a failure. Anything else fails the task on the first occurrence.
+func retryAllowed(err error) bool {
+	if err == nil || IsPermanent(err) || IsLeaseHandoff(err) {
+		return false
+	}
+	return IsSourceUnreachable(err) || IsTransientMetadataError(err) || isObjectPurgeFailed(err)
 }
 
 // PermanentError is an unrecoverable task error that must not enter RETRY_BACKOFF.

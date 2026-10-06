@@ -22,7 +22,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop
+  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -51,6 +51,7 @@ Scenarios:
   smoke-gtid-purge
   smoke-source-outage
   smoke-unreachable-giveup
+  smoke-fail-alert
   smoke-scale
 EOF
 }
@@ -96,7 +97,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop"
+      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -213,6 +214,9 @@ run_scenario() {
       ;;
     smoke-unreachable-giveup)
       E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" BINLOG_SERVER_META_DSN="$META_DSN" bash "$ROOT_DIR/scripts/e2e/smoke-unreachable-giveup.sh"
+      ;;
+    smoke-fail-alert)
+      E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_LOG="$SERVER_LOG" bash "$ROOT_DIR/scripts/e2e/smoke-fail-alert.sh"
       ;;
     smoke-scale)
       E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" "$ROOT_DIR/scripts/e2e/smoke-scale.sh"
