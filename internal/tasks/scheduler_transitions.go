@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -103,7 +103,9 @@ func (s *Scheduler) markLeaseRenewedLocked(id string) error {
 
 func (s *Scheduler) failSafeStopLocked(id, eventType, message string) error {
 	task, ok := s.tasks[id]
-	if !ok || task.State == StateStopping || task.State == StateStopped {
+	// FAILED already released the lease. A renew that observes that release
+	// must not rewrite the row as STOPPING.
+	if !ok || task.State == StateStopping || task.State == StateStopped || task.State == StateFailed {
 		return nil
 	}
 	task.State = StateStopping
