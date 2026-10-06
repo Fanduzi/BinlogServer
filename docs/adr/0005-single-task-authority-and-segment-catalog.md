@@ -1,6 +1,6 @@
 # One authority for task state, one key for a segment
 
-Status: Proposed. This record is for review. It does not change runtime behavior.
+Status: Accepted (2026-10-06). This record does not change runtime behavior. Implementation follows the ordered PRs below.
 
 Code references are `main` at `5373057` (includes the #234 fix for #203).
 
@@ -115,7 +115,7 @@ On this `main`, `handleEvent` does not append a rotate whose `LogPos` is 0. A ro
 
 What this tree still does: when `start.File` is empty, `run` sets `currentFile` to `task-{id}.binlog` and opens it. That happens for a GTID start before any source file name exists, and for the 1236 fallback until the GTID dump names a file. A later rotate seals that current file and uploads it. `ClassifySegment` does not accept `task-1.binlog` (the suffix is not a numeric sequence), so durable resume, the disk scan, and `SelectReplayFiles` ignore it. `UpsertBinlogFile` still records it, and the uploader still puts the object. The files API shows it when the catalog row exists, because `ListFiles` returns catalog rows before it scans disk.
 
-Segments already sealed by an older build keep the no-CRC tail. New runs should stop producing it; this design does not rewrite an object whose checksum is already `match`.
+Accepted: an already-uploaded segment whose tail is that no-CRC Rotate is not rewritten, including when `checksum` is `match`. New seals follow the #214 rule (do not append a rotate whose end log_pos is 0) and never create `task-{id}.binlog`.
 
 ## Target design
 
@@ -171,13 +171,13 @@ All-in-one uses the same loop. The API process and the worker are one process, a
 
 `AcquireTaskLease` already increments `epoch` only when the lease is expired. The change is to stop calling it on any path that is not step 6 above. `Renew` keeps the lease through `RETRY_BACKOFF`. `FAILED` and a finished Stop `Release` immediately, which is the 0001 rule.
 
-A process crash is an ownership change once the lease expires: the next `Acquire` increments epoch, including when the new process has the same `worker_id`. A crash that restarts before the lease expires, same `worker_id`, keeps the epoch. `Acquire` already returns the current epoch in that case. The loop must not `Release` first in order to "start clean".
+A same `worker_id` restart before lease expiry keeps the epoch. A crash alone does not bump it. The epoch changes only when the lease row is missing or `lease_expire_at` has passed and `Acquire` takes it, including when the new process uses the same `worker_id`. The loop does not `Release` first in order to start clean. `Acquire` already returns the current epoch when the same worker still holds an unexpired lease.
 
 `MemoryLease.Acquire` has the same rule (new epoch only when the row is missing, empty, or expired). Standalone uses it, as 0001 requires.
 
 ### Failure policy
 
-Default: an error that is not on the allowlist writes `FAILED`, sets `last_error`, appends `TASK_FAILED`, releases the lease, and sets `desired_run=STOP` with `failed_spec_revision=spec_revision`. The operator sees `FAILED` on the task and in the Console. This record does not add a webhook. The alert is that state.
+Default: an error that is not on the allowlist writes `FAILED`, sets `last_error`, appends `TASK_FAILED`, releases the lease, and sets `desired_run=STOP` with `failed_spec_revision=spec_revision`. The alert is those three facts: observed `FAILED`, `last_error`, and the `TASK_FAILED` event. The Console already shows the task state and `last_error`. This series adds no notifier and no new metric.
 
 Allowlist, retried inside the same ownership:
 
@@ -187,7 +187,9 @@ Allowlist, retried inside the same ownership:
 | Transient metadata errors, `meta.IsTransientMySQLError` (substrings: deadlock, lock wait timeout, connection reset, connection refused, broken pipe, server has gone away, invalid connection, bad connection, read-only, read only, timeout, eof) | No task-level cap. The metadata client already retries inside one call. The outer loop retries so a metadata failover can return the task to `RUNNING` | Failing the backup because the catalog blipped is the wrong page. The dump's lease stays held. |
 | `OBJECT_PURGE_FAILED` | Not a task failure. The next file open retries the object delete, which is the current retention rule | Stopping the dump because the bucket rejected a delete leaves the source unconsumed until an operator notices. |
 
-Not on the allowlist, fail on the first occurrence: `SOURCE_ACCESS_DENIED`, `SOURCE_LOG_BIN_OFF`, `SOURCE_IDENTITY_UNAVAILABLE`, `SEALED_FILE_EXISTS`, non-transient `CHECKPOINT_WRITE_FAILED`, `SEGMENT_NOT_ON_WORKER`, `EPOCH_NOT_ACQUIRED`, a lease handoff (this is not a failure of the task: the worker stops and does not write `FAILED`, which is the current handoff rule), and any error `classifyRunError` does not recognize. That last set includes a local append/flush error and MySQL 1236 when no GTID is stored. Both retry without a cap today. See open questions for 1236.
+Not on the allowlist, fail on the first occurrence: `SOURCE_ACCESS_DENIED`, `SOURCE_LOG_BIN_OFF`, `SOURCE_IDENTITY_UNAVAILABLE`, `SEALED_FILE_EXISTS`, non-transient `CHECKPOINT_WRITE_FAILED`, `SEGMENT_NOT_ON_WORKER`, `EPOCH_NOT_ACQUIRED`, MySQL 1236 when no GTID is stored, a lease handoff (this is not a failure of the task: the worker stops and does not write `FAILED`, which is the current handoff rule), and any error `classifyRunError` does not recognize. That last set includes a local append/flush error, which retries without a cap today.
+
+MySQL 1236 with no stored GTID is not on the allowlist and does not use the budget of 10. Today it stays in `RETRY_BACKOFF` with no cap (the v0.5.36 rule). The first occurrence writes `FAILED`, releases the lease, and sets `last_error` so the text names 1236 and a purged binlog. One `TASK_FAILED` event is appended. The task does not sit in `RETRY_BACKOFF`.
 
 A successful dump ready (`onReady`) sets both counters to 0 in the same write as `RUNNING`.
 
@@ -212,9 +214,9 @@ One row per `(task_id, source_file, epoch)`.
 
 Startup of a worker, and `materializeUploaded` before `CreateTemp`, removes `filepath.Glob(dir, ".takeover-*")` for that task directory. The temp file from a `kill -9` is gone before the next copy. Retention is not the cleaner.
 
-GTID start does not create `task-{id}.binlog`. The runner waits until the dump names a source file, then opens `{source}.open.e{epoch}`. A rotate that arrives before that name does not seal a placeholder and does not upload one. `ClassifySegment` failing closed on `task-N.binlog` is what hides it from resume; the catalog should not have the row either.
+GTID start does not create `task-{id}.binlog`. The runner waits until the dump names a source file, then opens `{source}.open.e{epoch}`. A rotate that arrives before that name does not seal a placeholder and does not upload one. New seals follow #214: a rotate whose end log_pos is 0 is not appended. An object already uploaded with that no-CRC tail is left as stored. This series does not rewrite it and does not truncate it on read.
 
-The files API and the Console render the catalog row: source file, epoch, state, basename, `start_pos`, `end_pos`. They do not parse names again. Standalone disk listing uses the same parser and `DurableCursor`, so a leftover directory no longer returns positions `0` when the file has a complete event.
+The HTTP file object keeps `file_name` (the source name) through this series. `source_file` in SQL equals it. Clients keep reading `file_name`. The Console shows the `epoch` field the file object already returns. This series does not add an HTTP field and does not rename `file_name`. The files API and the Console do not parse names again. Standalone disk listing uses the same parser and `DurableCursor`, so a leftover directory no longer returns positions `0` when the file has a complete event.
 
 ### Standalone
 
@@ -230,7 +232,7 @@ A leftover directory with segments and no task record stays read-only: list and 
 
 ## Migration and rollout
 
-Current version is 2 (`migrations/000002_binlog_file_epoch_key`). The next files are `000003` and `000004`. `ensureSchemaVersion` refuses a version below `minRequiredSchemaVersion`, a dirty `schema_migrations`, or a missing required index. It allows a newer version. A binary that still lists `uk_task_file_epoch` in `requiredTableSchemas` will refuse to start if that index is dropped. Do not drop it in this series.
+Current version is 2 (`migrations/000002_binlog_file_epoch_key`). The next files are `000003` and `000004`. `ensureSchemaVersion` refuses a version below `minRequiredSchemaVersion`, a dirty `schema_migrations`, or a missing required index. It allows a newer version. A binary that still lists `uk_task_file_epoch` in `requiredTableSchemas` will refuse to start if that index is dropped. The release that ships PR 6 and PR 7 keeps the index. PR 9 drops it no earlier than the next release.
 
 `upsertTaskSQL` lists columns. A new column with a default is invisible to an old binary. An old binary keeps writing `state` and does not clear `desired_run`.
 
@@ -255,8 +257,9 @@ Each PR is releasable on its own. Schema that a binary reads is migrated before 
 4. **Control loop.** API Start, Stop, and config update only write the row (and still mirror the old `state` value so a mixed-version worker observes Stop). The worker loop is the only starter. One syncer; `Close` returns before `STOPPED` and before the next open.
    - Acceptance: two processes. Stop on the control plane. `SHOW PROCESSLIST` on the source has no `Binlog Dump` for this task's `server_id` at the moment `state` becomes `STOPPED`, and `owner_worker_id` is empty only then. While the row is `STOPPING`, `PUT` a new password and Start. `spec_revision` increases. `SHOW PROCESSLIST` shows one dump, then after the final Stop shows zero. `epoch` is unchanged when the same worker kept the lease. `GET /api/tasks/{id}` returns the new password's user and that same epoch.
 
-5. **Fail-and-alert default.** Ship only after the allowlist in this record is accepted, including the 1236 question below.
+5. **Fail-and-alert default.** The allowlist above is the one to ship. MySQL 1236 with no stored GTID is not on it.
    - Acceptance: an error that is not on the allowlist (the e2e can use the sealed-file conflict, which is already permanent, plus one unclassified runner error in the existing scheduler test) stores `FAILED` on the first occurrence, one `TASK_FAILED` event, and a released lease. `SOURCE_UNREACHABLE` still takes 10, with the column from PR 3. Kill the metadata database connection once: the task returns to `RUNNING` without an operator Start, and `state` does not pass through `FAILED`.
+   - A file/pos resume that gets MySQL 1236 and has no stored GTID: `state=FAILED` on that first error, not `RETRY_BACKOFF`. `last_error` names 1236 and a purged binlog. `task_events` has one `TASK_FAILED` row. The lease is released (`owner_worker_id` empty). There is no new metric and no notifier. The operator signal is `state`, `last_error`, and that event.
 
 6. **Migration `000004_binlog_source_epoch_key`.** `source_file` `NOT NULL`. Backfill `source_file = file_name` where it is null or empty. Add `UNIQUE KEY uk_task_source_epoch (task_id, source_file, epoch)`. Keep `uk_task_file_epoch`. Make `start_pos` and `end_pos` nullable. Do not `UPDATE` existing positions in SQL. `minRequiredSchemaVersion` stays 3 in this PR if the binary does not require the new index yet; the PR that writes through the new key bumps it to 4, and that bump is this PR if the writer lands here. Prefer landing the key and the writer together so a partial rollout does not have two writers using two keys.
    - Down: drop `uk_task_source_epoch`, restore the previous nullability. Do not delete rows.
@@ -265,11 +268,11 @@ Each PR is releasable on its own. Schema that a binary reads is migrated before 
 7. **One classifier, and no invented `end_pos`.** Enroll, retention, replay, resume, the files API, and the Console call `ClassifySegment`. Enroll fills positions from `DurableCursor` and its upsert omits `end_pos` when it does not know it. The disk scan does the same for standalone listings.
    - Acceptance: fail over so the same source file seals as `mysql-bin.00000N.sealed.e1`. `SELECT start_pos, end_pos, size_bytes, state, upload_state FROM binlog_files WHERE task_id=? AND source_file=? AND epoch=?` shows `end_pos` equal to the last complete event (the same number `DurableCursor` returns), not 0. `GET /api/tasks/{id}/files` and the Console end-position column show that number. Replay for that source index does not list two copies of the same transactions.
 
-8. **Temp files and the placeholder name.** Startup and `materializeUploaded` delete `.takeover-*`. GTID start does not create `task-{id}.binlog`. Retention skips names `ClassifySegment` rejects.
-   - Acceptance: throttle the object GET, `kill -9` the worker while `.takeover-*` is non-empty, start the worker. The task directory has no `.takeover-*`. The catalog has no row whose `file_name` is that temp name. A GTID-mode task after one rotate: `SELECT COUNT(*) FROM binlog_files WHERE file_name LIKE 'task-%.binlog' AND task_id=?` is 0, and the bucket has no such object. `mysqlbinlog --verify-binlog-checksum` on each newly sealed segment exits 0.
+8. **Temp files and the placeholder name.** Startup and `materializeUploaded` delete `.takeover-*`. GTID start does not create `task-{id}.binlog`. New seals follow #214 and do not append a log_pos 0 rotate. Retention skips names `ClassifySegment` rejects. Objects already uploaded with a no-CRC artificial Rotate tail are not rewritten.
+   - Acceptance: throttle the object GET, `kill -9` the worker while `.takeover-*` is non-empty, start the worker. The task directory has no `.takeover-*`. The catalog has no row whose `file_name` is that temp name. A GTID-mode task after one rotate: `SELECT COUNT(*) FROM binlog_files WHERE file_name LIKE 'task-%.binlog' AND task_id=?` is 0, and the bucket has no such object. `mysqlbinlog --verify-binlog-checksum` on each newly sealed segment exits 0. An object that already had the no-CRC tail is unchanged (`checksum` and object bytes the same as before the upgrade).
 
-9. **Drop `uk_task_file_epoch`.** Not in the same release as PR 6. Only after the oldest binary still running no longer lists that index in `requiredTableSchemas`. `file_name` stays as a column so old `SELECT` lists keep working; dropping the column is a later decision.
-   - Acceptance: the operator's inventory is a single version. `SHOW INDEX FROM binlog_files` has `uk_task_source_epoch` and does not have `uk_task_file_epoch`. The new process starts. An old binary, if started on purpose, refuses with missing index `uk_task_file_epoch`. That refusal means the floor was wrong; do not ship this PR while that binary is deployed.
+9. **Drop `uk_task_file_epoch`.** The floor is the first release that ships PR 6 and PR 7 (the new unique key and the writer that uses it). PR 9 ships no earlier than the release after that. The release note tells operators to confirm no older binary is running before they migrate. `file_name` stays as a column so old `SELECT` lists keep working; dropping the column is a later decision.
+   - Acceptance: the release note contains that confirmation step. Operators check the running inventory and proceed only when every process is the floor release or newer. `SHOW INDEX FROM binlog_files` has `uk_task_source_epoch` and does not have `uk_task_file_epoch`. The new process starts. An older binary, if started on purpose, refuses with missing index `uk_task_file_epoch`. That refusal means an older binary is still in the inventory; do not migrate while it is deployed. Do not ship PR 9 in the same release as PR 6 and PR 7.
 
 ## Alternatives
 
@@ -289,18 +292,20 @@ Each PR is releasable on its own. Schema that a binary reads is migrated before 
 
 ## Risks
 
-- PR 5 changes operator-visible behavior. Tasks that today sit in `RETRY_BACKOFF` on an unclassified error will go `FAILED` and release the lease. The release note lists the allowlist. Do not ship PR 5 in the same binary as a surprise.
+- PR 5 changes operator-visible behavior. Tasks that today sit in `RETRY_BACKOFF` on an unclassified error, and a file/pos task that hits MySQL 1236 with no stored GTID, will go `FAILED` on the first occurrence and release the lease. `last_error` for that 1236 names 1236 and a purged binlog. The release note lists the allowlist and this 1236 change. The alert is `FAILED`, `last_error`, and `TASK_FAILED`. Do not ship PR 5 in the same binary as a surprise.
 - Mixed versions: a new API with an old worker is safe only while the new API still writes `state` the way the old worker reads it (`STARTING`, `STOPPING`). PR 4 does that. A new worker with an old API is safe because the old API's `state` writes are still what the compatibility branch of the loop honors.
 - `end_pos` 0 rows are not fixed by `000004`. A worker repairs a file it can read. An object-only row stays wrong until a worker materializes it or the operator accepts the old number. The files API should show `NULL` rather than 0 once the column is nullable, including for rows not yet repaired, so the Console stops displaying a fake end position.
 - `000002` down deletes rows. A down written the same way for `000004` would drop epoch segments. The down in PR 6 only drops the new index and the nullability change.
 - Conditional updates in `persistTaskLocked` can return "lost update" under load. The loop treats that as "read the row again", not as a task failure.
 - Standalone positions changing from 0 to a real cursor is a files-API change for leftover directories. Checkpoints stay absent. Start of a leftover directory stays refused.
 
-## Open questions
+## Resolved questions
 
-1. MySQL 1236 with no stored GTID retries forever today (the v0.5.36 rule in the tasks module README). Recommendation: put it on the persisted budget and `FAILED` at 10, with `last_error` naming 1236, so a purged file pages. Confirm before PR 5.
-2. Is `FAILED` plus `last_error` plus the `TASK_FAILED` event the alert, or do you want a specific metric name in the same PR? This record does not add a notifier.
-3. Segments already uploaded with a no-CRC artificial rotate at the tail: leave them, or truncate on read using the `DurableCursor` rule (a trailing event with end log_pos 0 is not part of the file)? Recommendation: do not rewrite an object whose `checksum` is `match`. New seals follow the #214 "do not append" path and do not create `task-{id}.binlog`.
-4. Which released version is the floor for dropping `uk_task_file_epoch`? PR 9 waits on that answer.
-5. A same-`worker_id` restart before the lease expires keeps the epoch. Confirm that a crash is not, by itself, a reason to bump the epoch. This record says it is not, until the lease is actually expired.
-6. The HTTP field stays `file_name` (the source name) through this series, so the Console column does not rename. `source_file` is the SQL key and is equal to it. Confirm if you want the API to grow an `epoch` field where a client currently has to parse `file_path`. The catalog already returns `epoch` on the file object; the Console should show it.
+Accepted with this record on 2026-10-06. The decisions are in the sections named here.
+
+1. MySQL 1236 with no stored GTID is not on the allowlist. The first occurrence is `FAILED`, and `last_error` names 1236 / purged binlog. Failure policy, PR 5.
+2. The alert is observed `FAILED`, `last_error`, and the `TASK_FAILED` event. No notifier and no new metric in this series. Failure policy.
+3. Already-uploaded segments with a no-CRC artificial Rotate tail are not rewritten. New seals follow #214 and never create `task-{id}.binlog`. Segment identity, PR 8.
+4. A same `worker_id` restart before lease expiry keeps the epoch. A crash alone does not bump it. Lease and epoch.
+5. The floor for dropping `uk_task_file_epoch` is the first release that ships PR 6 and PR 7. PR 9 ships no earlier than the release after that. That release note tells operators to confirm no older binary is running. PR 9.
+6. HTTP keeps `file_name`. The Console shows the existing `epoch` field. Segment identity.
