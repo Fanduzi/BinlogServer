@@ -41,7 +41,16 @@ type taskStart struct {
 }
 
 func (s *Scheduler) StartTask(id string) error {
-	return s.startTask(id, taskStart{resetBudget: true, acquireLease: true})
+	if err := s.writeStartIntent(id); err != nil {
+		return err
+	}
+	// The control plane has no runner. The worker loop is the only starter.
+	// A process that has a runner converges now so all-in-one does not wait for the tick.
+	if s.runner == nil {
+		return nil
+	}
+	_, err := s.convergeTask(id)
+	return err
 }
 
 // resumeHeldTask starts one run at the epoch this worker already holds.
@@ -54,6 +63,11 @@ func (s *Scheduler) resumeHeldTask(id string) error {
 // 认领续跑读 backup_tasks 上的计数，不归零。
 func (s *Scheduler) startTask(id string, opts taskStart) error {
 	s.mu.Lock()
+
+	if done, ok := s.runs[id]; ok && !isClosed(done) {
+		s.mu.Unlock()
+		return errLocalRunOpen
+	}
 
 	// 控制面把停止留在 STOPPING 后，内存可能还停在那里，而行已经被 worker 收成 STOPPED。
 	// 只在这一态回读，避免把测试里故意领先 store 的内存抄本盖掉。
@@ -108,6 +122,11 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	if opts.resetBudget {
 		task.RetryAttempt = 0
 		task.ConsecutiveSourceFailures = 0
+		task.DesiredRun = TaskDesiredRun
+	}
+	// A spec-0 active row still says desired STOP. The loop is starting it
+	// from the observed state. Persist RUN so the next read does not cancel it.
+	if effectiveDesired(task) == TaskDesiredRun {
 		task.DesiredRun = TaskDesiredRun
 	}
 	// Step 2: control-plane dispatch-only 分支（本地无 runner）。
@@ -169,8 +188,10 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	// task 是这次 Acquire 之后的抄本。markStartingLocked 按值接收，不会把
 	// STARTING 写回这里，但 owner/epoch/runID 已经在上面写好。落库会放开锁，
 	// 并发的 GetTask 可能把旧行写进 s.tasks；runner 仍用这一份，不用落库期间的内存。
+	// applied_spec_revision 是这次打开的 spec。下一次 spec 更大才关掉再开一条。
 	task.State = StateStarting
 	task.LastError = ""
+	task.AppliedSpecRevision = task.SpecRevision
 	task.UpdatedAt = time.Now()
 	if err := s.markStartingLocked(task); err != nil {
 		s.flushPendingEventsLocked()
@@ -181,12 +202,17 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	// 世代已经前进而不覆盖 owner/epoch；有 run 时 STOPPED 旧行也不会被当成“还没启动”。
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	if oldCancel, ok := s.cancels[id]; ok {
-		// 防御性处理：task 快速重启时替换旧的 cancel function。
-		oldCancel()
+	if _, open := s.runs[id]; open && !isClosed(s.runs[id]) {
+		cancel()
+		s.mu.Unlock()
+		return errLocalRunOpen
 	}
 	s.cancels[id] = cancel
 	s.runs[id] = done
+	if s.runSpec == nil {
+		s.runSpec = make(map[string]int64)
+	}
+	s.runSpec[id] = task.SpecRevision
 	s.mu.Unlock()
 
 	if s.leaseManager != nil && task.Epoch > 0 {
@@ -280,7 +306,8 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 		if !s.prepareStartingTaskClaim(item) {
 			continue
 		}
-		if err := s.StartTask(item.ID); err != nil {
+		started, err := s.convergeTask(item.ID)
+		if err != nil || !started {
 			// 竞争窗口下可能被其他 worker 先拿到 lease，或状态已变；这里按 best-effort 跳过。
 			continue
 		}
@@ -325,7 +352,8 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 		if !s.prepareExpiredTaskClaim(item) {
 			continue
 		}
-		if err := s.startTask(item.ID, taskStart{resetBudget: false, acquireLease: true}); err != nil {
+		started, err := s.convergeTask(item.ID)
+		if err != nil || !started {
 			// 竞争窗口下可能被其他 worker 先拿到 lease，或本机仍持有有效执行；按 best-effort 跳过。
 			continue
 		}
@@ -342,6 +370,9 @@ func isExpiredLeaseTakeoverState(state State) bool {
 // ClaimRunnableTasks 把该本 Worker 跑的任务跑起来：没人要的 STARTING、过期租约、以及自己名下还空着的。
 // 同一轮先看共享行：本进程还在拉流时，行已经是 STOPPING 或 STOPPED 就取消这次执行。
 func (s *Scheduler) ClaimRunnableTasks() (int, error) {
+	if _, err := s.ReconcileLegacyDesiredRun(context.Background()); err != nil {
+		return 0, err
+	}
 	s.applyRemoteStops()
 	claimed, err := s.ClaimStartingTasks()
 	if err != nil {
@@ -379,33 +410,28 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 			continue
 		}
 		if done, running := s.runs[id]; running && !isClosed(done) {
-			// 本进程还在拉流或退避。再 Start 会取消这次执行，把连续失败清零，并停掉续租。
+			// 本进程还在拉流或退避。再开一条会在上一条 Close 返回之前连上源库。
+			// spec 变化由 applyRemoteIntent 取消，等这条执行退出再开。
+			opened := s.runSpec[id]
+			spec := task.SpecRevision
+			desired := task.DesiredRun
+			state := task.State
 			s.mu.Unlock()
+			if effectiveDesired(Task{DesiredRun: desired, State: state}) == TaskDesiredStop || spec > opened {
+				s.cancelLocal(id)
+			}
 			continue
 		}
-		epoch := task.Epoch
-		owner := task.OwnerWorkerID
 		s.mu.Unlock()
 		// 本 worker 已经持有未过期租约时只把执行拉起来，不走 Acquire。
-		if leaseManager != nil && owner == workerID && epoch > 0 {
-			leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
-			held, err := leaseManager.Verify(leaseCtx, id, workerID, epoch)
-			cancelLease()
-			if err == nil && held {
-				if err := s.resumeHeldTask(id); err != nil {
-					if errors.Is(err, ErrInvalidSourceConfig) {
-						_ = s.StopTask(id)
-					}
-					continue
-				}
-				claimed++
-				continue
-			}
-		}
-		if err := s.startTask(id, taskStart{resetBudget: false, acquireLease: true}); err != nil {
+		started, err := s.convergeTask(id)
+		if err != nil {
 			if errors.Is(err, ErrInvalidSourceConfig) {
 				_ = s.StopTask(id)
 			}
+			continue
+		}
+		if !started {
 			continue
 		}
 		claimed++
@@ -496,6 +522,9 @@ func (s *Scheduler) StopTask(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot stop from state %s", task.State)
 	}
+	task.SpecRevision++
+	task.DesiredRun = TaskDesiredStop
+	s.tasks[id] = task
 
 	done, hasRun := s.runs[id]
 	if cancel, ok := s.cancels[id]; ok {
@@ -599,6 +628,15 @@ func (s *Scheduler) applyRemoteStops() {
 			continue
 		}
 		s.mu.Lock()
+		if item.DesiredRun == TaskDesiredRun && item.SpecRevision > s.runSpec[id] && item.State != StateStopping && item.State != StateStopped {
+			if cancel, ok := s.cancels[id]; ok {
+				cancel()
+				delete(s.cancels, id)
+				log.Printf("cancelled local dump for spec change task=%s spec=%d applied=%d", id, item.SpecRevision, s.runSpec[id])
+			}
+			s.mu.Unlock()
+			continue
+		}
 		s.noteRemoteStopLocked(item)
 		s.flushPendingEventsLocked()
 		s.mu.Unlock()
@@ -626,18 +664,30 @@ func (s *Scheduler) noteRemoteStopLocked(stored Task) bool {
 	if !ok || isClosed(done) {
 		return false
 	}
-	if stored.State != StateStopping && stored.State != StateStopped {
+	stopRequested := stored.DesiredRun == TaskDesiredStop || stored.State == StateStopping || stored.State == StateStopped
+	if !stopRequested {
+		return false
+	}
+	if stored.DesiredRun == TaskDesiredRun && stored.State != StateStopping && stored.State != StateStopped {
 		return false
 	}
 	current, exists := s.tasks[stored.ID]
 	if !exists {
 		current = stored
 	}
+	changed := false
+	if stored.DesiredRun == TaskDesiredStop && current.DesiredRun != TaskDesiredStop {
+		current.DesiredRun = TaskDesiredStop
+		changed = true
+	}
 	if current.State != StateStopping && current.State != StateStopped {
 		current.State = StateStopping
 		current.UpdatedAt = time.Now()
-		s.tasks[stored.ID] = current
+		changed = true
 		s.appendEventLocked(stored.ID, "TASK_STOPPING", "stop requested by control plane", "")
+	}
+	if changed {
+		s.tasks[stored.ID] = current
 	}
 	if cancel, ok := s.cancels[stored.ID]; ok {
 		cancel()
@@ -714,33 +764,54 @@ func (s *Scheduler) completeIdleStop(task Task) {
 }
 
 func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}, resetBudget bool) {
+	openedSpec := task.AppliedSpecRevision
 	defer func() {
 		var (
 			releaseOwner string
 			releaseEpoch int64
+			reopen       bool
 		)
 		s.mu.Lock()
+		// Run 已经返回，同步器的 Close 也已经返回。这里才允许写 STOPPED。
+		fresh, ferr := s.intentLocked(id)
+		if newer, ok := s.wantReopenLocked(fresh, ferr, openedSpec); ok {
+			reopen = true
+			s.keepOwnerForReopenLocked(id, task, newer)
+		} else if mem, ok := s.tasks[id]; ok && mem.State != StateFailed {
+			stop := mem.State == StateStopping || mem.State == StateStopped
+			if ferr == nil && fresh.DesiredRun == TaskDesiredStop && fresh.State != StateFailed {
+				stop = true
+			}
+			// Start 可能在这次读之后才把 desired 写成 RUN。写 STOPPED 前再读一次。
+			if stop && mem.State != StateStopped {
+				fresh, ferr = s.intentLocked(id)
+				if newer, ok := s.wantReopenLocked(fresh, ferr, openedSpec); ok {
+					reopen = true
+					stop = false
+					s.keepOwnerForReopenLocked(id, task, newer)
+				}
+			}
+			if stop {
+				if mem.State != StateStopped {
+					logTransitionPersistError(id, StateStopped, s.markStoppedLocked(id))
+				}
+				if s.leaseManager != nil && task.OwnerWorkerID != "" && task.Epoch > 0 {
+					releaseOwner = task.OwnerWorkerID
+					releaseEpoch = task.Epoch
+				}
+			}
+		}
 		if currentDone, ok := s.runs[id]; ok && currentDone == done {
 			delete(s.runs, id)
+			delete(s.runSpec, id)
 		}
-		// 收到 stop 请求后，直到执行 goroutine 真退出才收敛到 STOPPED。
-		// 这样 API 层的 STOPPED 表示“执行路径已结束”，而不是“仅发出停止请求”。
-		// 租约身份用本轮 run 带进来的 owner/epoch：同步进来的 STOPPED 行会把内存主人清掉。
-		if currentTask, ok := s.tasks[id]; ok && (currentTask.State == StateStopping || currentTask.State == StateStopped) {
-			if currentTask.State == StateStopping {
-				logTransitionPersistError(id, StateStopped, s.markStoppedLocked(id))
-			}
-			if s.leaseManager != nil && task.OwnerWorkerID != "" && task.Epoch > 0 {
-				releaseOwner = task.OwnerWorkerID
-				releaseEpoch = task.Epoch
-			}
-		}
-		// done 不是“任务开始执行”的信号，而是“本轮执行完全结束”的信号。
-		// 必须在放下 s.mu 之前关闭。否则 StopTask 可能已经看过未关闭的 done，
-		// 又赶在这次检查之后才写成 STOPPING，两边都不再把任务收成 STOPPED。
+		// done 在放下锁之前关闭。下一次 StartSync 要等这个 Close 完成。
 		close(done)
 		s.mu.Unlock()
 		s.releaseTaskLease(id, releaseOwner, releaseEpoch)
+		if reopen {
+			_, _ = s.convergeTask(id)
+		}
 	}()
 
 	// Step 1: 调用 runRunner 执行一次会话；错误则进入退避重试。
@@ -751,7 +822,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 	if resetBudget {
 		attempt = 0
 		consecutiveSourceFailures = 0
-	} else if s.store != nil && attempt == 0 && consecutiveSourceFailures == 0 {
+	} else if s.store != nil && task.SpecRevision == 0 && attempt == 0 && consecutiveSourceFailures == 0 {
 		if seeded := s.legacyUnreachableStreak(id); seeded > 0 {
 			consecutiveSourceFailures = seeded
 			s.persistRetryBudget(id, attempt, consecutiveSourceFailures)
@@ -774,7 +845,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			s.mu.Unlock()
 			return
 		}
-		if current.State == StateStopped || current.State == StateStopping {
+		if current.State == StateStopped || current.State == StateStopping || s.runSupersededLocked(id, openedSpec) {
 			s.mu.Unlock()
 			return
 		}
@@ -849,7 +920,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			s.mu.Unlock()
 			return
 		}
-		if current.State == StateStopped || current.State == StateStopping {
+		if current.State == StateStopped || current.State == StateStopping || s.runSupersededLocked(id, openedSpec) {
 			s.mu.Unlock()
 			return
 		}

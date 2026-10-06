@@ -8,7 +8,6 @@ package tasks
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -730,21 +729,23 @@ func TestScheduler_UpdateTaskDoesNotDivergeFromRunningDump(t *testing.T) {
 
 	nextSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret", Flavor: "mysql"}
 	nextStorage := Storage{RetentionDays: 1}
-	_, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: "sticky-key", Source: &nextSource, Storage: &nextStorage})
-	if !errors.Is(err, ErrTaskDumpConfigLocked) || !strings.Contains(err.Error(), "state RUNNING") {
-		t.Fatalf("UpdateTask err=%v, want ErrTaskDumpConfigLocked state RUNNING", err)
+	if _, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: "sticky-key", Source: &nextSource, Storage: &nextStorage}); err != nil {
+		t.Fatalf("UpdateTask while running: %v", err)
 	}
 
-	still := runner.waitCall(t, 1)
-	if still.Source.Password != "old-secret" || still.Storage.RetentionDays != 30 {
-		t.Fatalf("live runner password=%q retention_days=%d, want old-secret/30", still.Source.Password, still.Storage.RetentionDays)
+	restarted := runner.waitCall(t, 2)
+	if live.Source.Password != "old-secret" || live.Storage.RetentionDays != 30 {
+		t.Fatalf("first runner password=%q retention_days=%d, want old-secret/30", live.Source.Password, live.Storage.RetentionDays)
+	}
+	if restarted.Source.Password != "new-secret" || restarted.Storage.RetentionDays != 1 {
+		t.Fatalf("restarted runner password=%q retention_days=%d", restarted.Source.Password, restarted.Storage.RetentionDays)
 	}
 	got, err := s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if got.Name != "sticky-renamed" || got.Source.Password != still.Source.Password || got.Storage.RetentionDays != still.Storage.RetentionDays {
-		t.Fatalf("Get name=%q password=%q retention_days=%d, live password=%q retention_days=%d", got.Name, got.Source.Password, got.Storage.RetentionDays, still.Source.Password, still.Storage.RetentionDays)
+	if got.Name != "sticky-renamed" || got.Source.Password != restarted.Source.Password || got.Storage.RetentionDays != restarted.Storage.RetentionDays {
+		t.Fatalf("Get name=%q password=%q retention_days=%d, live password=%q retention_days=%d", got.Name, got.Source.Password, got.Storage.RetentionDays, restarted.Source.Password, restarted.Storage.RetentionDays)
 	}
 
 	if err := s.StopTask(task.ID); err != nil {
@@ -775,7 +776,7 @@ func TestScheduler_UpdateTaskDoesNotDivergeFromRunningDump(t *testing.T) {
 	if err := s.StartTask(task.ID); err != nil {
 		t.Fatalf("StartTask after update: %v", err)
 	}
-	restarted := runner.waitCall(t, 2)
+	restarted = runner.waitCall(t, 3)
 	got, err = s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)

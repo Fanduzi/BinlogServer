@@ -34,6 +34,10 @@ var ErrDiskResumePosition = errors.New("on-disk segment has no resume position")
 var ErrInvalidSourceConfig = errors.New("invalid source config")
 var ErrRunnerNotConfigured = errors.New("runner is not configured")
 var ErrLeaseNotAcquired = errors.New("lease not acquired")
+
+// ErrStaleTaskWrite means an observed-state write lost to a newer spec_revision.
+// The control loop reads the row again. It is not a task failure.
+var ErrStaleTaskWrite = errors.New("stale task write")
 var ErrClusterWorkerIDRequired = errors.New("cluster worker id is required")
 var ErrClusterKeyRequired = errors.New("cluster_key is required")
 var ErrClusterKeyExists = errors.New("cluster_key already exists")
@@ -51,9 +55,9 @@ var ErrInvalidRetentionDays = errors.New("invalid retention_days")
 var ErrSourcePasswordRequired = errors.New("source.password is required")
 var ErrSourceRequired = errors.New("source.host/port/user/password is required")
 
-// ErrTaskDumpConfigLocked means a live dump still uses the source, start,
-// storage, and cluster_key captured when that session started.
-// Stop the task before changing them. The next start reads the updated row.
+// ErrTaskDumpConfigLocked is the historical refusal to edit a live dump's
+// source, start, storage, or cluster_key. UpdateTask now bumps spec_revision
+// and the control loop restarts one dump after Close returns.
 var ErrTaskDumpConfigLocked = errors.New("stop the task before changing source, start, storage, or cluster_key")
 
 var clusterKeyAllowedPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -302,6 +306,8 @@ type Scheduler struct {
 	metadataSourcePort uint16
 	cancels            map[string]context.CancelFunc
 	runs               map[string]chan struct{}
+	// runSpec is the spec_revision the local dump was opened with.
+	runSpec map[string]int64
 
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
@@ -346,6 +352,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		replica: make(map[string]ReplicationProgress),
 		cancels: make(map[string]context.CancelFunc),
 		runs:    make(map[string]chan struct{}),
+		runSpec: make(map[string]int64),
 
 		retryBaseDelay:        time.Second,
 		retryMaxDelay:         30 * time.Second,
@@ -599,6 +606,24 @@ func (s *Scheduler) syncTasksFromStore() error {
 	for _, task := range list {
 		// 这次 List 跨过了一次落库。内存里已经是刚拿到的 owner/epoch，不能用读到的旧行盖掉。
 		if s.staleStoreReadLocked(task.ID, seen[task.ID]) {
+			continue
+		}
+		// 本进程还有 dump 时，只把配置和修订号并进内存。owner/epoch 留在这次执行上。
+		if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
+			if mem, exists := s.tasks[task.ID]; exists {
+				mem.Name = task.Name
+				mem.Source = task.Source
+				mem.Start = task.Start
+				mem.Storage = task.Storage
+				mem.ClusterKey = task.ClusterKey
+				mem.SpecRevision = task.SpecRevision
+				mem.DesiredRun = task.DesiredRun
+				mem.FailedSpecRevision = task.FailedSpecRevision
+				mem.RetryAttempt = task.RetryAttempt
+				mem.ConsecutiveSourceFailures = task.ConsecutiveSourceFailures
+				s.tasks[task.ID] = mem
+			}
+			s.noteRemoteStopLocked(task)
 			continue
 		}
 		// 共享行已经要求停止时，不能用它覆盖正在跑的抄本，否则 owner/epoch 被清掉，退出时放不掉租约。

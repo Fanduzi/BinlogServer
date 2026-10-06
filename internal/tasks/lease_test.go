@@ -62,7 +62,9 @@ func (f *fakeLeaseManager) Release(ctx context.Context, taskID string, workerID 
 func (f *fakeLeaseManager) Verify(_ context.Context, _ string, _ string, _ int64) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.acquireOK, f.acquireErr
+	// acquireOK means the next Acquire succeeds. It does not mean an expired
+	// owner still holds the lease. Expired-lease claims must be free to Acquire.
+	return false, f.acquireErr
 }
 
 // TestScheduler_ClusterStartRequiresLease 验证相关行为。
@@ -71,8 +73,9 @@ func TestScheduler_ClusterStartRequiresLease(t *testing.T) {
 		acquireEpoch: 7,
 		acquireOK:    false,
 	}
+	runner := &fakeRunner{started: make(chan Task, 1)}
 	s := NewScheduler(
-		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
+		WithRunner(runner),
 		WithClusterLeaseManager(lease),
 		WithClusterWorkerID("worker-a"),
 		WithClusterLease(200*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond),
@@ -95,8 +98,13 @@ func TestScheduler_ClusterStartRequiresLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
-	if got.State != StateCreated {
-		t.Fatalf("expected state %s, got %s", StateCreated, got.State)
+	if got.State != StateStarting || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("expected STARTING desired RUN after a refused acquire, got state=%s desired=%s", got.State, got.DesiredRun)
+	}
+	select {
+	case <-runner.started:
+		t.Fatal("runner started without a lease")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -967,9 +975,14 @@ func TestScheduler_RetryBackoffKeepsLeaseFromOtherWorker(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	before, err := a.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	bRunner := &fakeRunner{started: make(chan Task, 1)}
 	b := NewScheduler(
 		WithStore(store),
-		WithRunner(&fakeRunner{started: make(chan Task, 1)}),
+		WithRunner(bRunner),
 		WithClusterLeaseManager(leases),
 		WithClusterWorkerID("worker-b"),
 		WithClusterLease(ttl, time.Minute, time.Minute),
@@ -977,9 +990,20 @@ func TestScheduler_RetryBackoffKeepsLeaseFromOtherWorker(t *testing.T) {
 	if err := b.Restore(context.Background()); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-	err = b.StartTask(task.ID)
-	if !errors.Is(err, ErrLeaseNotAcquired) {
-		t.Fatalf("expected ErrLeaseNotAcquired during backoff, got %v", err)
+	if err = b.StartTask(task.ID); err != nil {
+		t.Fatalf("operator Start while another worker holds the lease: %v", err)
+	}
+	got, err := b.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.OwnerWorkerID != before.OwnerWorkerID || got.Epoch != before.Epoch {
+		t.Fatalf("lease changed owner=%q epoch=%d, was owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch, before.OwnerWorkerID, before.Epoch)
+	}
+	select {
+	case <-bRunner.started:
+		t.Fatal("other worker started a dump while the lease is held")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -1185,8 +1209,8 @@ func TestScheduler_StartTaskDoesNotStealLiveLease(t *testing.T) {
 	}
 
 	err = s.StartTask(task.ID)
-	if !errors.Is(err, ErrLeaseNotAcquired) {
-		t.Fatalf("expected ErrLeaseNotAcquired, got %v", err)
+	if err == nil || err.Error() != "cannot start from state RUNNING" {
+		t.Fatalf("expected cannot start from state RUNNING, got %v", err)
 	}
 	got, err := s.GetTask(task.ID)
 	if err != nil {
@@ -1461,7 +1485,7 @@ func TestScheduler_ClaimRunnableTasksSkipsLocalLiveRun(t *testing.T) {
 		WithClusterLeaseManager(lease),
 		WithClusterWorkerID("worker-b"),
 	)
-	task := newExpiredOwnedTask("1", "worker-b", StateRunning)
+	task := newExpiredOwnedTask("1", "worker-b", StateStopped)
 	store.tasks[task.ID] = task
 	if err := worker.Restore(context.Background()); err != nil {
 		t.Fatalf("Restore: %v", err)

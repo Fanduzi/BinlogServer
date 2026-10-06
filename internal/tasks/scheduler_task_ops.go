@@ -1,13 +1,12 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, refusal to change source/start/storage/cluster_key while a dump session is live, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors and cancels a live run instead of overwriting it when the row is STOPPING or STOPPED, a GetTask read that started before the latest publish left in memory, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, a spec_revision bump when source/start/storage/cluster_key change so the control loop restarts one dump, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, does not copy a live run's row onto memory, and cancels that run when the row asks to stop, a GetTask read that started before the latest publish left in memory, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -304,7 +303,8 @@ func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (Task, error) {
 }
 
 // UpdateTask 以原子方式应用 patch（先校验，后一次落库）。
-// 拉流还拿着启动时的源库、起点、保留和 cluster_key。要改这几项就先停掉。
+// 改源库、起点、保留或 cluster_key 时 spec_revision 加一。控制回路关掉当前 dump，
+// Close 返回后再开一条。只改名字不增加修订号。
 func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	// 先做整包校验，再一次性落库；避免“前几项成功、后几项失败”的部分持久化副作用。
 	validatedClusterKey, err := normalizeAndValidateClusterKey(patch.ClusterKey)
@@ -353,22 +353,19 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	current, ok := s.tasks[id]
 	if !ok {
 		if err := readOnlyDiskBackup(s.store, s.dataDir, id); err != nil {
+			s.mu.Unlock()
 			return Task{}, err
 		}
+		s.mu.Unlock()
 		return Task{}, ErrTaskNotFound
 	}
 	if !s.isClusterKeyUniqueLocked(validatedClusterKey, id) {
+		s.mu.Unlock()
 		return Task{}, ErrClusterKeyExists
-	}
-	// run 按值拿着任务。先改行、拉流仍用旧密码和旧保留，GET 就会和正在跑的 dump 不一致。
-	// 换源、换目录或缩短保留也不在一条还开着的分段上做。停掉再改，下次 start 从 checkpoint 续。
-	if dumpConfigLocked(current.State) && dumpConfigChanged(current, validatedClusterKey, validatedSource, validatedStart, validatedStorage) {
-		return Task{}, fmt.Errorf("%w: state %s", ErrTaskDumpConfigLocked, current.State)
 	}
 
 	// 基于 current 构造 next，保证未传字段保持原值（partial update 语义）。
@@ -389,27 +386,26 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	if validatedStorage != nil {
 		next.Storage = *validatedStorage
 	}
+	specBumped := false
+	if dumpConfigChanged(current, validatedClusterKey, validatedSource, validatedStart, validatedStorage) {
+		next.SpecRevision++
+		specBumped = true
+	}
 	next.UpdatedAt = time.Now()
 
 	if err := s.persistTaskLocked(next); err != nil {
+		s.mu.Unlock()
 		return Task{}, err
 	}
 
 	s.tasks[id] = next
 	s.appendEventLocked(id, "TASK_UPDATED", "task updated", "")
 	s.flushPendingEventsLocked()
-	return next, nil
-}
-
-// dumpConfigLocked 为真时，本任务的拉流会话还拿着启动时的配置抄本。
-// RETRY_BACKOFF 也算：下一轮用的是本进程内存，不是控制面刚写进 store 的行。
-func dumpConfigLocked(state State) bool {
-	switch state {
-	case StateRunning, StateStarting, StateLeaseDegraded, StateRetryBackoff:
-		return true
-	default:
-		return false
+	s.mu.Unlock()
+	if specBumped && s.runner != nil {
+		_, _ = s.convergeTask(id)
 	}
+	return next, nil
 }
 
 // dumpConfigChanged 判断这次 patch 会不会改拉流正在用的源库、起点、保留或 cluster_key。
@@ -511,8 +507,17 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 		}
 		s.mu.Lock()
 		// 读发生在这次 publish 之前时，行还是 STOPPED / epoch 0。不能把它写回刚 Acquire 的抄本。
-		if !s.staleStoreReadLocked(id, seen) && !s.noteRemoteStopLocked(item) {
-			s.tasks[id] = item
+		// 本进程还有 dump 时，也不把这行抄进内存：owner/epoch 留在这次执行上。
+		liveRun := false
+		if done, ok := s.runs[id]; ok && !isClosed(done) {
+			liveRun = true
+		}
+		if !s.staleStoreReadLocked(id, seen) {
+			if liveRun {
+				s.noteRemoteStopLocked(item)
+			} else if !s.noteRemoteStopLocked(item) {
+				s.tasks[id] = item
+			}
 		}
 		s.flushPendingEventsLocked()
 		s.mu.Unlock()

@@ -1,7 +1,7 @@
 # cmd Module
 
 ## Files
-- `binlog-server/`: 主服务命令入口。
+- `binlog-server/`: 主服务命令入口。启动失败（含 schema 版本过低）在退出前写入配置的日志文件。
 - `migrate/`: 迁移命令入口。
 
 ## Exports
