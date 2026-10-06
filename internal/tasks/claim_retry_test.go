@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: claim-loop ticks, recorded runner errors, and an unreachable or mid-dump source
-// output: proof that an owned RETRY_BACKOFF run keeps its backoff, failure budget, and lease epoch, and that a same-owner re-claim and expired-lease takeover continue that budget from an oldest-first event slice
+// output: proof that an owned RETRY_BACKOFF run keeps its backoff, failure budget, and lease epoch, that the persisted columns survive restart, that operator Start resets them, and that a same-owner reclaim does not bump the epoch
 // pos: scheduler claim/retry regression coverage for source-unreachable give-up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -146,6 +146,7 @@ func TestClaimCarriesRecordedSourceFailures(t *testing.T) {
 
 	runner := &unreachableRunner{}
 	s := NewScheduler(
+		WithStore(&schedulerTestStore{tasks: map[string]Task{}}),
 		WithRunner(runner),
 		WithEventStore(&fixedEventStore{events: events}),
 		WithClusterLeaseManager(NewMemoryLease()),
@@ -288,6 +289,275 @@ func TestOperatorStartResetsSourceFailureBudget(t *testing.T) {
 	}
 }
 
+func TestClaimUsesPersistedBudgetInsteadOfEvents(t *testing.T) {
+	events := oldestFirstUnreachableEvents(1)
+	runner := &unreachableRunner{}
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	s := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithEventStore(&fixedEventStore{events: events}),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Hour, time.Hour),
+	)
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	s.mu.Lock()
+	current := s.tasks[task.ID]
+	current.State = StateRetryBackoff
+	current.OwnerWorkerID = "worker-a"
+	current.DesiredRun = TaskDesiredRun
+	current.RetryAttempt = 9
+	current.ConsecutiveSourceFailures = 9
+	s.tasks[task.ID] = current
+	s.mu.Unlock()
+
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	if calls := runner.callCount(); calls != 1 {
+		t.Fatalf("calls=%d, want the one failure that exhausts the stored budget", calls)
+	}
+	got, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.DesiredRun != TaskDesiredStop || got.FailedSpecRevision != got.SpecRevision {
+		t.Fatalf("FAILED row desired=%s failed_spec=%d spec=%d", got.DesiredRun, got.FailedSpecRevision, got.SpecRevision)
+	}
+	if got.ConsecutiveSourceFailures != 10 {
+		t.Fatalf("consecutive=%d, want 10", got.ConsecutiveSourceFailures)
+	}
+}
+
+func TestOperatorStartResetsPersistedBudget(t *testing.T) {
+	runner := &unreachableRunner{}
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	s := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Hour, time.Hour),
+	)
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	s.mu.Lock()
+	current := s.tasks[task.ID]
+	current.State = StateRetryBackoff
+	current.OwnerWorkerID = "worker-a"
+	current.DesiredRun = TaskDesiredRun
+	current.RetryAttempt = 9
+	current.ConsecutiveSourceFailures = 9
+	current.SpecRevision = 2
+	s.tasks[task.ID] = current
+	s.mu.Unlock()
+
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateRetryBackoff)
+	got, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State == StateFailed {
+		t.Fatal("operator Start kept the old budget")
+	}
+	if got.ConsecutiveSourceFailures != 1 || got.RetryAttempt != 1 {
+		t.Fatalf("after one fresh failure consecutive=%d attempt=%d", got.ConsecutiveSourceFailures, got.RetryAttempt)
+	}
+	if got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("desired_run=%s", got.DesiredRun)
+	}
+}
+
+func TestPersistedRetryAttemptContinuesBackoff(t *testing.T) {
+	runner := &unreachableRunner{}
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	s := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Hour, 32*time.Hour),
+	)
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	s.mu.Lock()
+	current := s.tasks[task.ID]
+	current.State = StateRetryBackoff
+	current.OwnerWorkerID = "worker-a"
+	current.RetryAttempt = 4
+	current.ConsecutiveSourceFailures = 4
+	s.tasks[task.ID] = current
+	s.mu.Unlock()
+
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateRetryBackoff)
+	got, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.RetryAttempt != 5 || got.ConsecutiveSourceFailures != 5 {
+		t.Fatalf("attempt=%d consecutive=%d, want 5 and 5", got.RetryAttempt, got.ConsecutiveSourceFailures)
+	}
+	// attempt 5 is base * 2^4. A restart that forgot the column would sleep base (1h).
+	if s.retryDelay(int(got.RetryAttempt)) != 16*time.Hour {
+		t.Fatalf("delay from stored attempt = %s, want 16h", s.retryDelay(int(got.RetryAttempt)))
+	}
+	cancelRun(t, s, task.ID)
+}
+
+func TestHeldLeaseResumeDoesNotAcquire(t *testing.T) {
+	leases := NewMemoryLease()
+	counter := &countingLease{inner: leases}
+	runner := &unreachableRunner{}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(counter),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Hour, time.Hour),
+	)
+	task := mustStartSourcedTask(t, s)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateRetryBackoff)
+	if counter.acquires != 1 {
+		t.Fatalf("acquires after start=%d, want 1", counter.acquires)
+	}
+	before, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	cancelRun(t, s, task.ID)
+	claimed, err := s.ClaimRunnableTasks()
+	if err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if claimed != 1 {
+		t.Fatalf("claimed=%d, want the idle owned task resumed", claimed)
+	}
+	if counter.acquires != 1 {
+		t.Fatalf("held-lease resume acquired again, acquires=%d", counter.acquires)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateRetryBackoff)
+	after, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if after.Epoch != before.Epoch {
+		t.Fatalf("epoch %d -> %d", before.Epoch, after.Epoch)
+	}
+	if after.ConsecutiveSourceFailures != before.ConsecutiveSourceFailures+1 {
+		t.Fatalf("consecutive %d -> %d", before.ConsecutiveSourceFailures, after.ConsecutiveSourceFailures)
+	}
+}
+
+func TestSameOwnerExpiredReclaimKeepsEpoch(t *testing.T) {
+	leases := NewMemoryLease()
+	runner := &unreachableRunner{}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(leases),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(40*time.Millisecond, time.Hour, time.Hour),
+		WithRetryBackoff(time.Hour, time.Hour),
+	)
+	task := mustStartSourcedTask(t, s)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateRetryBackoff)
+	before, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	cancelRun(t, s, task.ID)
+	time.Sleep(60 * time.Millisecond)
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateRetryBackoff)
+	after, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if after.Epoch != before.Epoch || after.Epoch == 0 {
+		t.Fatalf("same-owner expired reclaim epoch %d -> %d", before.Epoch, after.Epoch)
+	}
+}
+
+func TestTwoRestartsContinuePersistedSourceBudget(t *testing.T) {
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	leases := NewMemoryLease()
+	var runner *gateRunner
+	newSched := func(limit int) *Scheduler {
+		runner = &gateRunner{limit: limit, release: make(chan struct{})}
+		return NewScheduler(
+			WithStore(store),
+			WithRunner(runner),
+			WithClusterLeaseManager(leases),
+			WithClusterWorkerID("worker-a"),
+			WithClusterLease(time.Hour, time.Hour, time.Hour),
+			WithRetryBackoff(time.Millisecond, time.Millisecond),
+		)
+	}
+	s := newSched(3)
+	task := mustStartSourcedTask(t, s)
+	waitGateBlocked(t, runner)
+	cancelRun(t, s, task.ID)
+	assertBudget(t, store, task.ID, 3, 3, 1)
+
+	s = newSched(3)
+	if err := s.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	waitGateBlocked(t, runner)
+	cancelRun(t, s, task.ID)
+	assertBudget(t, store, task.ID, 6, 6, 1)
+
+	s = newSched(100)
+	if err := s.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	got, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.ConsecutiveSourceFailures != 10 || got.DesiredRun != TaskDesiredStop {
+		t.Fatalf("FAILED consecutive=%d desired=%s", got.ConsecutiveSourceFailures, got.DesiredRun)
+	}
+	if got.Epoch != 0 || got.OwnerWorkerID != "" {
+		t.Fatalf("lease not released owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	}
+}
+
 func TestClaimRunnableTasksStartsIdleOwnedRetryBackoff(t *testing.T) {
 	runner := &fakeRunner{started: make(chan Task, 1)}
 	s := NewScheduler(
@@ -399,4 +669,109 @@ func (r *dumpDeathRunner) callCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
+}
+
+type countingLease struct {
+	inner    *MemoryLease
+	mu       sync.Mutex
+	acquires int
+}
+
+func (c *countingLease) Acquire(ctx context.Context, taskID, workerID string, ttl time.Duration) (int64, bool, error) {
+	c.mu.Lock()
+	c.acquires++
+	c.mu.Unlock()
+	return c.inner.Acquire(ctx, taskID, workerID, ttl)
+}
+
+func (c *countingLease) Renew(ctx context.Context, taskID, workerID string, epoch int64, now time.Time, ttl time.Duration) (bool, error) {
+	return c.inner.Renew(ctx, taskID, workerID, epoch, now, ttl)
+}
+
+func (c *countingLease) Release(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
+	return c.inner.Release(ctx, taskID, workerID, epoch)
+}
+
+func (c *countingLease) Verify(ctx context.Context, taskID, workerID string, epoch int64) (bool, error) {
+	return c.inner.Verify(ctx, taskID, workerID, epoch)
+}
+
+type gateRunner struct {
+	mu      sync.Mutex
+	calls   int
+	limit   int
+	release chan struct{}
+}
+
+func (r *gateRunner) Run(ctx context.Context, _ Task) error {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	limit := r.limit
+	r.mu.Unlock()
+	if call > limit {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.release:
+		}
+	}
+	return NewRetryableSourceError(CodeSourceUnreachable, "dial tcp: connection refused")
+}
+
+func (r *gateRunner) RunWithNotify(ctx context.Context, task Task, _ func()) error {
+	return r.Run(ctx, task)
+}
+
+func waitGateBlocked(t *testing.T, r *gateRunner) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.mu.Lock()
+		calls := r.calls
+		limit := r.limit
+		r.mu.Unlock()
+		if calls > limit {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runner calls=%d, want more than %d", calls, limit)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func cancelRun(t *testing.T, s *Scheduler, id string) {
+	t.Helper()
+	s.mu.Lock()
+	cancel, ok := s.cancels[id]
+	s.mu.Unlock()
+	if !ok {
+		t.Fatalf("task %s has no cancel", id)
+	}
+	cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		_, running := s.runs[id]
+		s.mu.Unlock()
+		if !running {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task %s run still active", id)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func assertBudget(t *testing.T, store *schedulerTestStore, id string, attempt, consecutive int, epoch int64) {
+	t.Helper()
+	got, err := store.GetTask(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.RetryAttempt != int64(attempt) || got.ConsecutiveSourceFailures != int64(consecutive) || got.Epoch != epoch {
+		t.Fatalf("attempt=%d consecutive=%d epoch=%d, want %d %d %d (state=%s)", got.RetryAttempt, got.ConsecutiveSourceFailures, got.Epoch, attempt, consecutive, epoch, got.State)
+	}
 }

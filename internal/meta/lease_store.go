@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify), runs, and checkpoints
+// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify; same-owner reclaim keeps epoch), runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -13,8 +13,10 @@ import (
 	"binlog_server/internal/meta/sqlcgen"
 )
 
-const acquireLeaseSQL = `
--- name: AcquireTaskLease :exec
+// acquireLeaseSQL is the statement sqlc executes. Keep it identical to
+// acquireTaskLease in sqlcgen/lease.sql.go. sqlc drops the explanatory
+// comments from the executed text and keeps the -- name line.
+const acquireLeaseSQL = `-- name: AcquireTaskLease :exec
 INSERT INTO task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
 VALUES (
   ?,
@@ -24,8 +26,12 @@ VALUES (
   NOW(6)
 )
 ON DUPLICATE KEY UPDATE
+  epoch = IF(
+    lease_expire_at <= NOW(6) AND owner_worker_id <> ?,
+    epoch + 1,
+    epoch
+  ),
   owner_worker_id = IF(lease_expire_at <= NOW(6), ?, owner_worker_id),
-  epoch = IF(lease_expire_at <= NOW(6), epoch + 1, epoch),
   lease_expire_at = IF(
     lease_expire_at <= NOW(6),
     DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),

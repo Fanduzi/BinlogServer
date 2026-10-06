@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, startup refusal below schema 3 that tells the operator to run ./migrate up, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -23,7 +23,7 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-const minRequiredSchemaVersion int64 = 2
+const minRequiredSchemaVersion int64 = 3
 
 const currentSchemaVersionSQL = `
 SELECT version, dirty
@@ -66,6 +66,8 @@ var requiredTableSchemas = []tableSchemaSpec{
 		Columns: []string{
 			"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id",
 			"source_json", "start_json", "storage_json", "updated_at",
+			"desired_run", "spec_revision", "applied_spec_revision", "failed_spec_revision",
+			"retry_attempt", "consecutive_source_failures",
 		},
 		Indexes: []string{"PRIMARY", "uk_backup_tasks_cluster_key"},
 	},
@@ -122,9 +124,13 @@ var requiredTableSchemas = []tableSchemaSpec{
 	},
 }
 
+const taskBudgetColumns = `desired_run, spec_revision, applied_spec_revision, failed_spec_revision, retry_attempt, consecutive_source_failures`
+
+const taskSelectColumns = `id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, ` + taskBudgetColumns
+
 const upsertTaskSQL = `
-INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, ` + taskBudgetColumns + `)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   cluster_key = VALUES(cluster_key),
@@ -136,19 +142,23 @@ ON DUPLICATE KEY UPDATE
   source_json = VALUES(source_json),
   start_json = VALUES(start_json),
   storage_json = VALUES(storage_json),
-  updated_at = VALUES(updated_at);
+  updated_at = VALUES(updated_at),
+  desired_run = VALUES(desired_run),
+  spec_revision = VALUES(spec_revision),
+  applied_spec_revision = VALUES(applied_spec_revision),
+  failed_spec_revision = VALUES(failed_spec_revision),
+  retry_attempt = VALUES(retry_attempt),
+  consecutive_source_failures = VALUES(consecutive_source_failures);
 `
 
-const taskSelectColumns = `id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at`
-
 const listTaskSQL = `
-SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
+SELECT ` + taskSelectColumns + `
 FROM backup_tasks
 ORDER BY CAST(id AS UNSIGNED), id;
 `
 
 const listTasksWithExpiredLeaseSQL = `
-SELECT t.id, t.name, t.cluster_key, t.state, t.last_error, t.owner_worker_id, t.epoch, t.run_id, t.source_json, t.start_json, t.storage_json, t.updated_at
+SELECT t.id, t.name, t.cluster_key, t.state, t.last_error, t.owner_worker_id, t.epoch, t.run_id, t.source_json, t.start_json, t.storage_json, t.updated_at, t.desired_run, t.spec_revision, t.applied_spec_revision, t.failed_spec_revision, t.retry_attempt, t.consecutive_source_failures
 FROM backup_tasks t
 INNER JOIN task_leases l ON l.task_id = t.id
 WHERE t.state IN ('RUNNING', 'LEASE_DEGRADED', 'RETRY_BACKOFF', 'STOPPING')
@@ -157,13 +167,13 @@ ORDER BY CAST(t.id AS UNSIGNED), t.id;
 `
 
 const getTaskSQL = `
-SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
+SELECT ` + taskSelectColumns + `
 FROM backup_tasks
 WHERE id = ?;
 `
 
 const listStartingUnownedTaskSQL = `
-SELECT id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at
+SELECT ` + taskSelectColumns + `
 FROM backup_tasks
 WHERE state = ?
   AND (owner_worker_id IS NULL OR owner_worker_id = '')
@@ -556,7 +566,7 @@ func (s *MySQLTaskStore) ensureSchemaVersion(ctx context.Context) error {
 		return fmt.Errorf("schema_migrations is dirty at version=%d; repair migration state before startup", version)
 	}
 	if version < minRequiredSchemaVersion {
-		return fmt.Errorf("schema version too old: current=%d required>=%d", version, minRequiredSchemaVersion)
+		return fmt.Errorf("schema version too old: current=%d required>=%d; run ./migrate up before starting this process", version, minRequiredSchemaVersion)
 	}
 	return nil
 }
@@ -631,6 +641,10 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		return err
 	}
 
+	desiredRun := task.DesiredRun
+	if desiredRun == "" {
+		desiredRun = tasks.TaskDesiredStop
+	}
 	if _, err = tx.ExecContext(
 		ctx,
 		upsertTaskSQL,
@@ -646,6 +660,12 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		string(startJSON),
 		string(storageJSON),
 		updatedAt,
+		desiredRun,
+		task.SpecRevision,
+		task.AppliedSpecRevision,
+		task.FailedSpecRevision,
+		task.RetryAttempt,
+		task.ConsecutiveSourceFailures,
 	); err != nil {
 		return err
 	}
@@ -802,6 +822,7 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 		storageJSON string
 		lastError   sql.NullString
 		updatedAt   time.Time
+		desiredRun  string
 	)
 	if err := src.Scan(
 		&task.ID,
@@ -816,6 +837,12 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 		&startJSON,
 		&storageJSON,
 		&updatedAt,
+		&desiredRun,
+		&task.SpecRevision,
+		&task.AppliedSpecRevision,
+		&task.FailedSpecRevision,
+		&task.RetryAttempt,
+		&task.ConsecutiveSourceFailures,
 	); err != nil {
 		return tasks.Task{}, err
 	}
@@ -826,6 +853,7 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 	task.Epoch = epoch
 	task.RunID = runID.String
 	task.UpdatedAt = updatedAt
+	task.DesiredRun = desiredRun
 	source, err := s.unmarshalSource(sourceJSON)
 	if err != nil {
 		return tasks.Task{}, fmt.Errorf("decode source json for task %s: %w", task.ID, err)

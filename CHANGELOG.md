@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- On all-in-one and cluster, `retry_attempt` and `consecutive_source_failures` are stored on `backup_tasks` and written with the task row on each failure and on a successful dump connect (#239). A restart or a takeover continues that streak and the backoff delay from the stored attempt, instead of starting the delay again at 1s. Two restarts inside one `SOURCE_UNREACHABLE` streak, including `SIGTERM` and `kill -9`, still reach `FAILED` on the 10th consecutive failure. `last_error` begins with `SOURCE_UNREACHABLE:`, and the lease is released. Operator Start stores 0. A claim does not. The same worker taking its own lease back, including after the lease has expired, does not increase the epoch. A different worker taking an expired lease still does. The `FAILED` row sets `desired_run` to `STOP` and `failed_spec_revision` to `spec_revision`. This process requires metadata schema 3. Stop every binlog-server on that database, run `./migrate up`, confirm `schema_migrations` is version 3 and dirty 0, then start. A database still on schema 2 is refused at startup with `schema version too old` and `./migrate up`. Standalone with no metadata database keeps the counters in memory. They reset when the process exits. The first start after upgrading from a binary that only had the event streak copies that streak into the column once when the column is still 0. No new config key.
+
 ## [v0.5.44] - 2026-10-06
 
 ### Added

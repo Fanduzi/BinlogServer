@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone, expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry that a same-owner re-claim and expired-lease takeover continue from recorded runner errors in oldest-first order, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -32,13 +32,27 @@ func (s *Scheduler) releaseTaskLease(taskID, owner string, epoch int64) {
 	}
 }
 
-func (s *Scheduler) StartTask(id string) error {
-	return s.startTask(id, false)
+// taskStart distinguishes an operator Start from a claim.
+// resetBudget is true only for operator Start. A claim keeps the counters.
+// acquireLease is false when this worker already holds an unexpired lease.
+type taskStart struct {
+	resetBudget  bool
+	acquireLease bool
 }
 
-// startTask 启动任务。carrySourceFailures 为真时，连续 SOURCE_UNREACHABLE
-// 从已有 runner 错误续上，而不是从 0 开始。操作员 Start 传 false。
-func (s *Scheduler) startTask(id string, carrySourceFailures bool) error {
+func (s *Scheduler) StartTask(id string) error {
+	return s.startTask(id, taskStart{resetBudget: true, acquireLease: true})
+}
+
+// resumeHeldTask starts one run at the epoch this worker already holds.
+// It does not call Acquire, so a claim loop on an owned task does not bump epoch.
+func (s *Scheduler) resumeHeldTask(id string) error {
+	return s.startTask(id, taskStart{resetBudget: false, acquireLease: false})
+}
+
+// startTask 启动任务。resetBudget 仅操作员 Start 为真，计数器归零。
+// 认领续跑读 backup_tasks 上的计数，不归零。
+func (s *Scheduler) startTask(id string, opts taskStart) error {
 	s.mu.Lock()
 
 	// 控制面把停止留在 STOPPING 后，内存可能还停在那里，而行已经被 worker 收成 STOPPED。
@@ -91,6 +105,11 @@ func (s *Scheduler) startTask(id string, carrySourceFailures bool) error {
 		s.mu.Unlock()
 		return err
 	}
+	if opts.resetBudget {
+		task.RetryAttempt = 0
+		task.ConsecutiveSourceFailures = 0
+		task.DesiredRun = TaskDesiredRun
+	}
 	// Step 2: control-plane dispatch-only 分支（本地无 runner）。
 	// cluster control-plane 允许 dispatch-only start：仅写入 STARTING，由 worker 接管执行。
 	if s.runner == nil {
@@ -111,8 +130,9 @@ func (s *Scheduler) startTask(id string, carrySourceFailures bool) error {
 		return ErrClusterWorkerIDRequired
 	}
 
-	// Step 3: worker 执行分支，先 acquire lease，再进入 STARTING。
-	if s.leaseManager != nil {
+	// Step 3: worker 执行分支。只有所有权真正变化时才 Acquire。
+	// 本进程已经持有未过期租约时不调用 Acquire，epoch 保持不变。
+	if s.leaseManager != nil && opts.acquireLease {
 		previousOwner := task.OwnerWorkerID
 		previousState := task.State
 		leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
@@ -133,6 +153,8 @@ func (s *Scheduler) startTask(id string, carrySourceFailures bool) error {
 			s.appendEventLocked(id, "TASK_LEASE_TAKEOVER", "claimed expired lease", previousOwner)
 			log.Printf("claimed expired lease task=%s previous_owner=%s previous_state=%s epoch=%d", id, previousOwner, previousState, epoch)
 		}
+	} else if s.leaseManager != nil {
+		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
 	}
 
 	if err := s.prepareDiskResumeEpochLocked(&task); err != nil {
@@ -171,7 +193,7 @@ func (s *Scheduler) startTask(id string, carrySourceFailures bool) error {
 		go s.renewLeaseLoop(ctx, id, task.OwnerWorkerID, task.Epoch)
 	}
 
-	go s.runTask(ctx, id, task, done, carrySourceFailures)
+	go s.runTask(ctx, id, task, done, opts.resetBudget)
 	return nil
 }
 
@@ -303,7 +325,7 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 		if !s.prepareExpiredTaskClaim(item) {
 			continue
 		}
-		if err := s.startTask(item.ID, true); err != nil {
+		if err := s.startTask(item.ID, taskStart{resetBudget: false, acquireLease: true}); err != nil {
 			// 竞争窗口下可能被其他 worker 先拿到 lease，或本机仍持有有效执行；按 best-effort 跳过。
 			continue
 		}
@@ -361,8 +383,26 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 			s.mu.Unlock()
 			continue
 		}
+		epoch := task.Epoch
+		owner := task.OwnerWorkerID
 		s.mu.Unlock()
-		if err := s.startTask(id, true); err != nil {
+		// 本 worker 已经持有未过期租约时只把执行拉起来，不走 Acquire。
+		if leaseManager != nil && owner == workerID && epoch > 0 {
+			leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
+			held, err := leaseManager.Verify(leaseCtx, id, workerID, epoch)
+			cancelLease()
+			if err == nil && held {
+				if err := s.resumeHeldTask(id); err != nil {
+					if errors.Is(err, ErrInvalidSourceConfig) {
+						_ = s.StopTask(id)
+					}
+					continue
+				}
+				claimed++
+				continue
+			}
+		}
+		if err := s.startTask(id, taskStart{resetBudget: false, acquireLease: true}); err != nil {
 			if errors.Is(err, ErrInvalidSourceConfig) {
 				_ = s.StopTask(id)
 			}
@@ -673,7 +713,7 @@ func (s *Scheduler) completeIdleStop(task Task) {
 	s.releaseTaskLease(task.ID, releaseOwner, releaseEpoch)
 }
 
-func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}, carrySourceFailures bool) {
+func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}, resetBudget bool) {
 	defer func() {
 		var (
 			releaseOwner string
@@ -704,10 +744,18 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 	}()
 
 	// Step 1: 调用 runRunner 执行一次会话；错误则进入退避重试。
-	attempt := 0
-	consecutiveSourceFailures := 0
-	if carrySourceFailures {
-		consecutiveSourceFailures = s.carriedSourceFailures(id)
+	// 计数以任务行上的列为准。操作员 Start 已经把它们写成 0。
+	// 升级后列仍是 0、事件里还有连续失败时，只把那一段抄进列一次。
+	attempt := int(task.RetryAttempt)
+	consecutiveSourceFailures := int(task.ConsecutiveSourceFailures)
+	if resetBudget {
+		attempt = 0
+		consecutiveSourceFailures = 0
+	} else if s.store != nil && attempt == 0 && consecutiveSourceFailures == 0 {
+		if seeded := s.legacyUnreachableStreak(id); seeded > 0 {
+			consecutiveSourceFailures = seeded
+			s.persistRetryBudget(id, attempt, consecutiveSourceFailures)
+		}
 	}
 	for {
 		// runRunner 是一次“会话级”执行：内部会一直拉 binlog，直到 stop 或报错才返回。
@@ -757,6 +805,8 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
 		if IsPermanent(err) {
 			owner, epoch := current.OwnerWorkerID, current.Epoch
+			rememberRetryBudget(&current, attempt, consecutiveSourceFailures)
+			s.tasks[id] = current
 			logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
 			s.mu.Unlock()
 			s.releaseTaskLease(id, owner, epoch)
@@ -766,6 +816,8 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			consecutiveSourceFailures++
 			if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
 				owner, epoch := current.OwnerWorkerID, current.Epoch
+				rememberRetryBudget(&current, attempt, consecutiveSourceFailures)
+				s.tasks[id] = current
 				logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
 				s.mu.Unlock()
 				s.releaseTaskLease(id, owner, epoch)
@@ -775,12 +827,13 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			consecutiveSourceFailures = 0
 		}
 
+		attempt++
+		rememberRetryBudget(&current, attempt, consecutiveSourceFailures)
 		logTransitionPersistError(id, StateRetryBackoff, s.markRetryBackoffLocked(current, errMsg))
 		s.mu.Unlock()
 
 		// Step 2: 指数退避等待，避免瞬时故障导致热重试风暴。
-		attempt++
-		// 使用 exponential backoff，保护 source DB 并避免热重试。
+		// attempt 来自已落库的 retry_attempt，重启后不会从 1 开始。
 		delay := s.retryDelay(attempt)
 		timer := time.NewTimer(delay)
 		select {
@@ -849,10 +902,36 @@ func isClosed(ch <-chan struct{}) bool {
 	}
 }
 
-// carriedSourceFailures is the SOURCE_UNREACHABLE streak already recorded for id.
-// This process's runner errors win. After a restart those are only in the event store.
-// ponytail: last 200 stored events. The streak caps at 10 failures.
-func (s *Scheduler) carriedSourceFailures(id string) int {
+func rememberRetryBudget(task *Task, attempt, consecutive int) {
+	if task == nil {
+		return
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
+	if consecutive < 0 {
+		consecutive = 0
+	}
+	task.RetryAttempt = int64(attempt)
+	task.ConsecutiveSourceFailures = int64(consecutive)
+}
+
+func (s *Scheduler) persistRetryBudget(id string, attempt, consecutive int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.tasks[id]
+	if !ok {
+		return
+	}
+	rememberRetryBudget(&current, attempt, consecutive)
+	s.tasks[id] = current
+	logTransitionPersistError(id, current.State, s.persistTaskLocked(current))
+}
+
+// legacyUnreachableStreak copies a pre-column SOURCE_UNREACHABLE streak once.
+// Call it only when both budget columns are still 0. A non-zero column is the
+// budget; this does not run again. ponytail: last 200 stored events. The cap is 10.
+func (s *Scheduler) legacyUnreachableStreak(id string) int {
 	s.mu.Lock()
 	mem := append([]TaskEvent(nil), s.events[id]...)
 	store := s.eventStore

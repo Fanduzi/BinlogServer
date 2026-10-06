@@ -102,6 +102,7 @@ func (s *Scheduler) createTask(name, clusterKey string, source *SourceConfig, st
 		Name:       validatedName,
 		ClusterKey: validatedClusterKey,
 		State:      StateCreated,
+		DesiredRun: TaskDesiredStop,
 		Source:     validatedSource,
 		Start:      validatedStart,
 		Storage:    validatedStorage,
