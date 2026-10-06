@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a resolved LATEST file/pos kept across retry with an empty gtid_set, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, stop cleanup, and a leftover dump thread killed with the current password before the next StartSync
+// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a resolved LATEST file/pos kept across retry with an empty gtid_set, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, stop cleanup, and a leftover dump thread killed with the current password before the next StartSync An unconfirmed KILL does not call StartSync.
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -1129,6 +1129,41 @@ func TestMySQLRunnerRun_KillsLeftoverDumpBeforeNextStart(t *testing.T) {
 	want := "start,kill:old:77,kill:new:77,start,kill:new:77"
 	if got != want {
 		t.Fatalf("order %s, want %s", got, want)
+	}
+}
+
+func TestMySQLRunnerRun_UnconfirmedKillDoesNotOpenDump(t *testing.T) {
+	starts := 0
+	syncer := &fakeSyncer{
+		streamer: &fakeStreamer{results: []streamResult{{err: context.Canceled}}},
+		connID:   77,
+	}
+	runner := &MySQLRunner{
+		fetcher: &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		newSyncer: func(_ goreplication.BinlogSyncerConfig) binlogSyncer {
+			starts++
+			return syncer
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			file := &fakeSyncFile{}
+			return &fakeCloser{}, binlog.NewWriter(file, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+		killDump: func(tasks.SourceConfig, uint32) error {
+			return errors.New("dial tcp: i/o timeout")
+		},
+	}
+	start := tasks.StartConfig{Mode: tasks.StartModeFilePos, File: "mysql-bin.000010", Pos: 4}
+	first := newRunnerTask(start)
+	if err := runner.Run(context.Background(), first); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	second := newRunnerTask(start)
+	err := runner.Run(context.Background(), second)
+	if err == nil || !strings.Contains(err.Error(), "still open") {
+		t.Fatalf("second run err %v", err)
+	}
+	if starts != 1 {
+		t.Fatalf("StartSync calls %d, want 1", starts)
 	}
 }
 

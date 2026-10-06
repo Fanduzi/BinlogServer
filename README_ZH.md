@@ -269,7 +269,7 @@ v0.5.27 至 v0.5.44 的记录：[docs/releases/v0.5.44.zh-CN.md](docs/releases/v
 
 ## 架构
 
-BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排、复制执行、元数据持久化、Upload 集成与 UI 交付之间边界清晰。源库不可达时 Stop 仍写成 `STOPPED`，`pending_dump_cleanup` 记下还没 KILL 掉的 Binlog Dump，源库恢复后会再试。schema 3 时这个标记留在拉过这条 dump 的进程里，runner 拆掉之后还在；迁移 `000004` 之后重启和其它进程也能看到。
+BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排、复制执行、元数据持久化、Upload 集成与 UI 交付之间边界清晰。源库不可达时，拉过这条 dump 的进程在 Close 返回后仍写成 `STOPPED`，`pending_dump_cleanup` 记下还没 KILL 掉的 Binlog Dump。别的进程不会把没关上的 dump 写成已经 `STOPPED`。持有者在 Close 返回前一直续租；租约先过期时，打开 dump 时记下的连接号留在这一列里，任何 worker 在任何状态都会重试 KILL，确认线程消失后才开新的 dump。schema 3 时这个标记留在拉过这条 dump 的进程里，runner 拆掉之后还在，单进程行为不变；集群要这些保证需要迁移 `000004`，否则日志和任务错误会要求先 `./migrate up`。迁移之后重启和其它进程也能看到并重试。
 
 ### 模块
 

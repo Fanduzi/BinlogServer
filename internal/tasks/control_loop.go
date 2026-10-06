@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: backup_tasks desired_run, spec_revision, applied_spec_revision, failed_spec_revision, lease hold, and whether this process has a live dump
-// output: one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it
+// output: one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
 // pos: the only starter and stopper of a dump; operator Start, Stop, and spec edits write the row and this loop catches up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -248,38 +248,8 @@ func (s *Scheduler) cancelLocal(id string) <-chan struct{} {
 }
 
 func (s *Scheduler) finishIdleStop(task Task) error {
-	if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
-		return nil
-	}
-	s.mu.Lock()
-	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
-		s.noteRemoteStopLocked(task)
-		s.flushPendingEventsLocked()
-		s.mu.Unlock()
-		return nil
-	}
-	current := task
-	if mem, ok := s.tasks[task.ID]; ok {
-		current = mem
-	}
-	current.DesiredRun = TaskDesiredStop
-	current.State = StateStopping
-	s.tasks[task.ID] = current
-	if err := s.markStoppingLocked(current); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	owner, epoch := current.OwnerWorkerID, current.Epoch
-	if mem, ok := s.tasks[task.ID]; ok {
-		owner, epoch = mem.OwnerWorkerID, mem.Epoch
-	}
-	if err := s.markStoppedLocked(task.ID); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	s.mu.Unlock()
-	s.releaseTaskLease(task.ID, owner, epoch)
-	return nil
+	task.DesiredRun = TaskDesiredStop
+	return s.settleForeignStop(task)
 }
 
 // adoptNewerStopLocked copies a stored Stop onto this run.
