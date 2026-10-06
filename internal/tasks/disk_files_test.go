@@ -182,6 +182,41 @@ func TestSelectReplayFiles_OnePathPerIndex(t *testing.T) {
 	}
 }
 
+func TestSelectReplayFiles_DropsCoveredTakeoverReseal(t *testing.T) {
+	const end = uint32(266551305)
+	files := []BinlogFile{
+		{
+			FileName: "mysql-bin.000436", FilePath: "/data/a/6/mysql-bin.000436",
+			State: "SEALED", Epoch: 1, StartPos: 4, EndPos: end,
+			UploadState: "UPLOADED", ObjectKey: "bucket/mysql-bin.000436",
+		},
+		{
+			FileName: "mysql-bin.000436", FilePath: "/data/b/6/mysql-bin.000436.sealed.e3",
+			State: "SEALED", Epoch: 3, StartPos: end, EndPos: end,
+			UploadState: "UPLOADED", ObjectKey: "bucket/mysql-bin.000436.sealed.e3",
+		},
+		{
+			FileName: "mysql-bin.000437", FilePath: "/data/b/6/mysql-bin.000437.open.e3",
+			State: "OPEN", Epoch: 3,
+		},
+	}
+	got := SelectReplayFiles(files)
+	if len(got) != 2 || got[0].FilePath != "/data/a/6/mysql-bin.000436" || got[1].FilePath != "/data/b/6/mysql-bin.000437.open.e3" {
+		t.Fatalf("replay %+v", got)
+	}
+}
+
+func TestSelectReplayFiles_KeepsUnrecordedEndPos(t *testing.T) {
+	files := []BinlogFile{
+		{FilePath: "/data/1/mysql-bin.000004", State: "SEALED", StartPos: 4, EndPos: 1000},
+		{FilePath: "/data/1/mysql-bin.000004.sealed.e1", State: "SEALED", StartPos: 4, EndPos: 0},
+	}
+	got := SelectReplayFiles(files)
+	if len(got) != 2 || got[0].FilePath != "/data/1/mysql-bin.000004" || got[1].FilePath != "/data/1/mysql-bin.000004.sealed.e1" {
+		t.Fatalf("replay %+v", got)
+	}
+}
+
 func TestSelectReplayFiles_KeepsSealedWhenOpenHasDifferentObject(t *testing.T) {
 	files := []BinlogFile{
 		{FilePath: "/data/1/mysql-bin.000004", State: "SEALED", ObjectKey: "prefix/mysql-bin.000004", UploadState: "UPLOADED"},
