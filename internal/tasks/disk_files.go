@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
+// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -128,8 +128,13 @@ func ReplayClient(flavor string) (client, hint string) {
 // events that exist only in that sealed segment stay in the restore list.
 // A lower open epoch of the same index is dropped. A sealed row is omitted
 // only when the kept open row carries the same object key, which means those
-// bytes were copied into the open file. Rows that are not a binlog segment,
-// or have an empty file_path, are dropped. An empty window returns an empty slice.
+// bytes were copied into the open file, or when start_pos equals end_pos
+// (both greater than 0) and another sealed row of the same index has a real
+// span covering that point. That point row is a takeover re-seal: the file
+// bytes repeat an already uploaded epoch, and the catalog recorded the resume
+// cursor instead of a new event range. A row with end_pos 0 is kept.
+// Rows that are not a binlog segment, or have an empty file_path, are dropped.
+// An empty window returns an empty slice.
 func SelectReplayFiles(files []BinlogFile) []BinlogFile {
 	opens := make(map[uint64]BinlogFile)
 	sealed := make([]BinlogFile, 0)
@@ -149,7 +154,7 @@ func SelectReplayFiles(files []BinlogFile) []BinlogFile {
 	}
 	out := make([]BinlogFile, 0, len(sealed)+len(opens))
 	for _, file := range sealed {
-		if sealedCopiedIntoOpen(file, opens) {
+		if sealedCopiedIntoOpen(file, opens) || sealedPointCovered(file, sealed) {
 			continue
 		}
 		out = append(out, file)
@@ -184,6 +189,36 @@ func sealedCopiedIntoOpen(file BinlogFile, opens map[uint64]BinlogFile) bool {
 		return false
 	}
 	return strings.TrimSpace(open.ObjectKey) == key
+}
+
+// sealedPointCovered reports a sealed row that records no event span of its
+// own (start_pos == end_pos > 0) while another sealed row of the same source
+// index already covers that position. end_pos 0 is not a point and is not a
+// cover: the position was not recorded, and replay still returns that segment.
+func sealedPointCovered(file BinlogFile, sealed []BinlogFile) bool {
+	if file.EndPos == 0 || file.StartPos != file.EndPos {
+		return false
+	}
+	key := binlogSegmentKey(file)
+	if !key.ok {
+		return false
+	}
+	for _, other := range sealed {
+		if other.FilePath == file.FilePath && other.Epoch == file.Epoch {
+			continue
+		}
+		otherKey := binlogSegmentKey(other)
+		if !otherKey.ok || otherKey.seq != key.seq {
+			continue
+		}
+		if other.EndPos <= other.StartPos {
+			continue
+		}
+		if other.StartPos <= file.StartPos && other.EndPos >= file.EndPos {
+			return true
+		}
+	}
+	return false
 }
 
 // ReplayLocations is one location per selected replay file, same order as paths.
