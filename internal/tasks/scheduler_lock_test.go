@@ -30,13 +30,18 @@ type gateEventStore struct {
 }
 
 func (g *gateEventStore) AppendEvent(_ context.Context, event TaskEvent) error {
-	if g.appendHold != nil && event.TaskID == g.appendTask {
+	g.mu.Lock()
+	block := g.appendHold != nil && event.TaskID == g.appendTask
+	entered := g.appendEntered
+	hold := g.appendHold
+	g.mu.Unlock()
+	if block {
 		select {
-		case <-g.appendEntered:
+		case <-entered:
 		default:
-			close(g.appendEntered)
+			close(entered)
 		}
-		<-g.appendHold
+		<-hold
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -45,13 +50,18 @@ func (g *gateEventStore) AppendEvent(_ context.Context, event TaskEvent) error {
 }
 
 func (g *gateEventStore) ListEvents(_ context.Context, taskID string, limit int) ([]TaskEvent, error) {
-	if g.listHold != nil && taskID == g.listTask {
+	g.mu.Lock()
+	block := g.listHold != nil && taskID == g.listTask
+	entered := g.listEntered
+	hold := g.listHold
+	g.mu.Unlock()
+	if block {
 		select {
-		case <-g.listEntered:
+		case <-entered:
 		default:
-			close(g.listEntered)
+			close(entered)
 		}
-		<-g.listHold
+		<-hold
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -98,7 +108,9 @@ func TestListEventsDoesNotStallOtherTask(t *testing.T) {
 	)
 	first := startLockedTask(t, s, "cluster-a", "cluster-a-key")
 	second := startLockedTask(t, s, "cluster-b", "cluster-b-key")
+	store.mu.Lock()
 	store.listTask = second.ID
+	store.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -175,7 +187,9 @@ func TestEventInsertDoesNotStallOtherTask(t *testing.T) {
 	)
 	first := startLockedTask(t, s, "cluster-a", "cluster-a-key")
 	second := startLockedTask(t, s, "cluster-b", "cluster-b-key")
+	store.mu.Lock()
 	store.appendTask = second.ID
+	store.mu.Unlock()
 
 	stopDone := make(chan error, 1)
 	go func() {
