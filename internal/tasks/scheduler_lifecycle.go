@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle), expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle), expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -137,32 +137,34 @@ func (s *Scheduler) StartTask(id string) error {
 	}
 
 	// 注意：这里仅表示“已发起启动流程”，不是“runner 已 ready”。
+	// task 是这次 Acquire 之后的抄本。markStartingLocked 按值接收，不会把
+	// STARTING 写回这里，但 owner/epoch/runID 已经在上面写好。落库会放开锁，
+	// 并发的 GetTask 可能把旧行写进 s.tasks；runner 仍用这一份，不用落库期间的内存。
+	task.State = StateStarting
+	task.LastError = ""
+	task.UpdatedAt = time.Now()
 	if err := s.markStartingLocked(task); err != nil {
 		s.flushPendingEventsLocked()
 		s.mu.Unlock()
 		return err
 	}
-	s.mu.Unlock()
-
-	// Step 4: 启动 run/renew goroutine，进入真实执行期。
+	// 先登记 run 再放开锁。之后的 store 读要么看到这次 publish，要么因 publish
+	// 世代已经前进而不覆盖 owner/epoch；有 run 时 STOPPED 旧行也不会被当成“还没启动”。
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-
-	s.mu.Lock()
 	if oldCancel, ok := s.cancels[id]; ok {
 		// 防御性处理：task 快速重启时替换旧的 cancel function。
 		oldCancel()
 	}
 	s.cancels[id] = cancel
 	s.runs[id] = done
-	taskForRun := s.tasks[id]
 	s.mu.Unlock()
 
-	if s.leaseManager != nil && taskForRun.Epoch > 0 {
-		go s.renewLeaseLoop(ctx, id, taskForRun.OwnerWorkerID, taskForRun.Epoch)
+	if s.leaseManager != nil && task.Epoch > 0 {
+		go s.renewLeaseLoop(ctx, id, task.OwnerWorkerID, task.Epoch)
 	}
 
-	go s.runTask(ctx, id, taskForRun, done)
+	go s.runTask(ctx, id, task, done)
 	return nil
 }
 
@@ -482,6 +484,7 @@ func (s *Scheduler) reloadIdleTaskFromStoreLocked(id string) error {
 	if done, ok := s.runs[id]; ok && !isClosed(done) {
 		return nil
 	}
+	seen := s.persisted[id].published
 	store := s.store
 	s.mu.Unlock()
 	item, err := s.readStoredTask(store, id)
@@ -491,6 +494,9 @@ func (s *Scheduler) reloadIdleTaskFromStoreLocked(id string) error {
 			return nil
 		}
 		return err
+	}
+	if s.staleStoreReadLocked(id, seen) {
+		return nil
 	}
 	if done, ok := s.runs[id]; ok && !isClosed(done) {
 		return nil
@@ -784,6 +790,9 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 
 // runRunner 负责把 Scheduler 状态机与 Runner 生命周期对齐。
 func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) (bool, error) {
+	if s.leaseManager != nil && task.Epoch <= 0 {
+		return false, NewPermanentError(CodeEpochNotAcquired, "this start did not keep its lease epoch. Start the task again")
+	}
 	var ready atomic.Bool
 	// Step 1: 定义 ready 回调，把任务状态收敛到 RUNNING。
 	onReady := func() {

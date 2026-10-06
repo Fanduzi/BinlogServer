@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task id, data dir, KeepLocalSegments, epoch, catalog file_path rows, and an optional stored checkpoint
-// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
+// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory, a readable epoch-0 bare OPEN file on this worker, or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
 // pos: resume identity shared by the replication runner and GET /api/tasks/{id}/checkpoint
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -74,10 +74,12 @@ type TakeoverResume struct {
 }
 
 // ResolveTakeover decides a lease takeover when this worker's data directory
-// has no complete event. A readable catalog file_path continues from the last
-// complete event in that directory. An unreadable open segment, or a sealed
-// segment that is not UPLOADED, sets Missing. A checkpoint already inside a
-// sealed UPLOADED object is Apply without a rewind.
+// has no complete event in a .open.eN file. A readable catalog file_path
+// continues from the last complete event in that directory. An OPEN row whose
+// file is the bare source name (epoch 0) and is readable here continues from
+// that file. An unreadable open segment, or a sealed segment that is not
+// UPLOADED, sets Missing. A checkpoint already inside a sealed UPLOADED object
+// is Apply without a rewind.
 func ResolveTakeover(dataDir string, task Task, checkpoint binlog.Checkpoint, checkpointOK bool, files []BinlogFile) TakeoverResume {
 	if task.KeepLocalSegments || task.Epoch <= 1 {
 		return TakeoverResume{}
@@ -92,6 +94,9 @@ func ResolveTakeover(dataDir string, task Task, checkpoint binlog.Checkpoint, ch
 		if file, pos, ok := binlog.DurableResumeDir(dir); ok {
 			return TakeoverResume{Apply: true, Dir: dir, Checkpoint: resumeCheckpoint(file, pos, checkpoint, checkpointOK)}
 		}
+	}
+	if dir, file, pos, ok := readablePlainOpen(files); ok {
+		return TakeoverResume{Apply: true, Dir: dir, Checkpoint: resumeCheckpoint(file, pos, checkpoint, checkpointOK)}
 	}
 	if row, hasRow, covered := coveringUpload(files, checkpoint, checkpointOK); covered {
 		if hasRow {
@@ -154,6 +159,34 @@ func unreadableTail(files []BinlogFile) string {
 		}
 	}
 	return sealed
+}
+
+// readablePlainOpen is an OPEN catalog row stored under the bare source name.
+// Epoch 0 writes that name. A sealed row with the same spelling is not open.
+func readablePlainOpen(files []BinlogFile) (dir, file string, pos uint32, ok bool) {
+	for _, row := range files {
+		if !strings.EqualFold(strings.TrimSpace(row.State), "OPEN") {
+			continue
+		}
+		path := strings.TrimSpace(row.FilePath)
+		base := filepath.Base(path)
+		if path == "" || base == "." || base == ".." || strings.Contains(base, ".open.e") || strings.Contains(base, ".sealed.e") {
+			continue
+		}
+		if !regularSegmentFile(path) {
+			continue
+		}
+		endPos, _, _, found := binlog.DurableCursor(path)
+		if !found {
+			continue
+		}
+		name := strings.TrimSpace(row.FileName)
+		if name == "" {
+			name = base
+		}
+		return filepath.Dir(path), name, endPos, true
+	}
+	return "", "", 0, false
 }
 
 func readableSegmentDir(files []BinlogFile) string {

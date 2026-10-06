@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a dead worker's segment directory recorded in binlog_files.file_path, and a second worker data dir
-// output: proof that takeover continues in that directory when it is readable, fails naming the segment when it is not, and does not fail SEGMENT_NOT_ON_WORKER when a local open segment ends with an artificial rotate whose end_log_pos is 0
+// output: proof that takeover continues in that directory when it is readable, fails naming the segment when it is not, continues a readable epoch-0 bare OPEN file on this worker as .open.eN, and does not fail SEGMENT_NOT_ON_WORKER when a local open segment ends with an artificial rotate whose end_log_pos is 0
 // pos: regression for lease takeover that must not rebuild a fresh directory from position 4
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -133,6 +133,69 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 		}
 		if _, statErr := os.Stat(filepath.Join(workerB, task.ID)); !os.IsNotExist(statErr) {
 			t.Fatalf("fresh directory: %v", statErr)
+		}
+	})
+
+	t.Run("epoch 0 bare open on this worker continues", func(t *testing.T) {
+		worker := t.TempDir()
+		const taskID = "task-1"
+		taskDir := filepath.Join(worker, taskID)
+		if err := os.MkdirAll(taskDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		eventAt := time.Unix(1_700_000_000, 0).UTC()
+		const beforeSQL = "INSERT INTO takeover_boundary VALUES ('BARE')"
+		const afterSQL = "INSERT INTO takeover_boundary VALUES ('RECOVERED')"
+		first, endPos := chainBinlogEvents(4, eventAt, []namedEvent{
+			{typ: goreplication.FORMAT_DESCRIPTION_EVENT, body: formatDescriptionBody(eventAt)},
+			{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", beforeSQL)},
+		})
+		barePath := filepath.Join(taskDir, "mysql-bin.000003")
+		writeBinlogSegment(t, barePath, first)
+		next, _ := chainBinlogEvents(endPos, eventAt, []namedEvent{
+			{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", afterSQL)},
+		})
+		phase := append([]*goreplication.BinlogEvent{preambleEvent(0, eventAt.Add(-time.Hour))}, next...)
+
+		catalog := &takeoverCatalog{rows: []tasks.BinlogFile{{
+			TaskID: taskID, FileName: "mysql-bin.000003", FilePath: barePath,
+			Epoch: 0, State: "OPEN", EndPos: endPos, UploadState: "LOCAL_ONLY",
+		}}}
+		store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000003", Pos: endPos}, ok: true}
+		syncer := &stopResumeSyncer{phases: [][]*goreplication.BinlogEvent{phase}}
+		runner := NewMySQLRunner(worker, WithCheckpointStore(store), WithFileMetaStore(catalog))
+		runner.fetcher = &fakeSourceMetaFetcher{
+			status:     MasterStatus{File: "mysql-bin.000099", Pos: 9000},
+			serverUUID: "11111111-1111-1111-1111-111111111111",
+		}
+		runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+		task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+		task.Epoch = 2
+		task.OwnerWorkerID = "worker-b"
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- runner.Run(ctx, task) }()
+		waitForMarker(t, worker, taskID, afterSQL)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		starts := syncer.positions()
+		if len(starts) != 1 || starts[0].Name != "mysql-bin.000003" || starts[0].Pos != endPos {
+			t.Fatalf("resume start %+v, want mysql-bin.000003:%d", starts, endPos)
+		}
+		continued := filepath.Join(taskDir, "mysql-bin.000003.open.e2")
+		body, err := os.ReadFile(continued)
+		if err != nil {
+			t.Fatalf("continued segment: %v", err)
+		}
+		if !strings.Contains(string(body), beforeSQL) || !strings.Contains(string(body), afterSQL) {
+			t.Fatalf("segment lost the boundary: %q", body)
+		}
+		if _, err := os.Stat(barePath); !os.IsNotExist(err) {
+			t.Fatalf("bare epoch-0 file still present: %v", err)
 		}
 	})
 

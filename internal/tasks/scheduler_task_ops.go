@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, refusal to change source/start/storage/cluster_key while a dump session is live, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors and cancels a live run instead of overwriting it when the row is STOPPING or STOPPED, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, refusal to change source/start/storage/cluster_key while a dump session is live, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors and cancels a live run instead of overwriting it when the row is STOPPING or STOPPED, a GetTask read that started before the latest publish left in memory, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -498,6 +498,7 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 	task, ok := s.tasks[id]
 	store := s.store
 	dataDir := s.dataDir
+	seen := s.persisted[id].published
 	s.mu.Unlock()
 
 	if store != nil {
@@ -508,7 +509,8 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 			return Task{}, err
 		}
 		s.mu.Lock()
-		if !s.noteRemoteStopLocked(item) {
+		// 读发生在这次 publish 之前时，行还是 STOPPED / epoch 0。不能把它写回刚 Acquire 的抄本。
+		if !s.staleStoreReadLocked(id, seen) && !s.noteRemoteStopLocked(item) {
 			s.tasks[id] = item
 		}
 		s.flushPendingEventsLocked()
