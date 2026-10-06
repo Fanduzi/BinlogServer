@@ -1,12 +1,15 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, and pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, and pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, and FilePos as JSON null and SQL NULL when a binlog position is unknown
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
+	"database/sql/driver"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -212,6 +215,92 @@ type WorkerHeartbeat struct {
 	Status     string    `json:"status"`
 }
 
+// FilePos is a binlog file position. Zero means the position is not known.
+// JSON null and SQL NULL are that unknown value. A writer does not store 0.
+type FilePos uint32
+
+// MarshalJSON encodes an unknown position as null.
+func (p FilePos) MarshalJSON() ([]byte, error) {
+	if p == 0 {
+		return []byte("null"), nil
+	}
+	return json.Marshal(uint32(p))
+}
+
+// UnmarshalJSON accepts null and a JSON number. Null is unknown.
+func (p *FilePos) UnmarshalJSON(data []byte) error {
+	if p == nil {
+		return fmt.Errorf("nil file position")
+	}
+	if string(data) == "null" {
+		*p = 0
+		return nil
+	}
+	var n uint32
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*p = FilePos(n)
+	return nil
+}
+
+// Value stores unknown as NULL. A known position is a positive integer.
+func (p FilePos) Value() (driver.Value, error) {
+	if p == 0 {
+		return nil, nil
+	}
+	return int64(p), nil
+}
+
+// Scan reads a nullable catalog position. NULL and 0 are unknown.
+func (p *FilePos) Scan(src any) error {
+	if p == nil {
+		return fmt.Errorf("nil file position")
+	}
+	if src == nil {
+		*p = 0
+		return nil
+	}
+	switch v := src.(type) {
+	case int64:
+		*p = filePosFromInt(v)
+	case int32:
+		*p = filePosFromInt(int64(v))
+	case int:
+		*p = filePosFromInt(int64(v))
+	case uint32:
+		*p = FilePos(v)
+	case uint64:
+		if v == 0 || v > uint64(^uint32(0)) {
+			*p = 0
+			return nil
+		}
+		*p = FilePos(v)
+	case []byte:
+		n, err := strconv.ParseInt(string(v), 10, 64)
+		if err != nil {
+			return err
+		}
+		*p = filePosFromInt(n)
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return err
+		}
+		*p = filePosFromInt(n)
+	default:
+		return fmt.Errorf("unsupported file position type %T", src)
+	}
+	return nil
+}
+
+func filePosFromInt(n int64) FilePos {
+	if n <= 0 || n > int64(^uint32(0)) {
+		return 0
+	}
+	return FilePos(n)
+}
+
 // BinlogFile 描述单个 binlog 文件在本地和上传阶段的元数据。
 type BinlogFile struct {
 	TaskID   string `json:"task_id"`
@@ -220,11 +309,16 @@ type BinlogFile struct {
 	// Epoch is the durable segment generation. 0 is a plain sealed name from
 	// this process or from an older release. A later .open.eN or .sealed.eN
 	// uses N. file_name stays the source binlog name.
-	Epoch       int64     `json:"epoch,omitempty"`
-	State       string    `json:"state"`
-	SizeBytes   int64     `json:"size_bytes"`
-	StartPos    uint32    `json:"start_pos"`
-	EndPos      uint32    `json:"end_pos"`
+	Epoch     int64  `json:"epoch,omitempty"`
+	State     string `json:"state"`
+	SizeBytes int64  `json:"size_bytes"`
+	// StartPos is the first event position in the segment. Zero is unknown:
+	// JSON null, and the catalog writer stores NULL rather than 0.
+	StartPos FilePos `json:"start_pos"`
+	// EndPos is the last complete event's end log position. Zero is unknown:
+	// JSON null. An upsert that does not know it does not assign end_pos.
+	// The value 0 is never stored.
+	EndPos      FilePos   `json:"end_pos"`
 	CreatedAt   time.Time `json:"created_at"`
 	SealedAt    time.Time `json:"sealed_at"`
 	ObjectKey   string    `json:"object_key,omitempty"`

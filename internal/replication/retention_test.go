@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: local segment files, retention clock, catalog rows, and an object deleter
-// output: proof that retention deletes an expired checksum-matched uploaded object, keeps a mismatched or unchecked uploaded file and records it UPLOAD_FAILED, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when a matched object's delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, drops the catalog row and records RETENTION_REMOVED when no uploader deletes a sealed file that has no remote copy, leaves a single-key config on the old full purge, and reads a catalog larger than one page through bounded pages without the unbounded list
+// output: proof that retention deletes an expired checksum-matched uploaded object, keeps a mismatched or unchecked uploaded file and records it UPLOAD_FAILED, keeps a segment inside retention and an open segment, leaves a name ClassifySegment rejects including .takeover-* and task-N.binlog, leaves the local file plus OBJECT_PURGE_FAILED when a matched object's delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, drops the catalog row and records RETENTION_REMOVED when no uploader deletes a sealed file that has no remote copy, leaves a single-key config on the old full purge, and reads a catalog larger than one page through bounded pages without the unbounded list
 // pos: retention purge coverage for the replication file-open path
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -73,6 +73,44 @@ func TestCleanupExpiredBinlogs_DefaultRetention(t *testing.T) {
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("expected file deleted under default retention, stat err=%v", err)
+	}
+}
+
+func TestCleanupExpiredBinlogs_IgnoresRejectedNames(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	old := now.Add(-10 * 24 * time.Hour)
+	writeOld := func(name string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	sealed := writeOld("mysql-bin.000001")
+	laterSeal := writeOld("mysql-bin.000008.sealed.e2")
+	openSeg := writeOld("mysql-bin.000002.open.e3")
+	takeover := writeOld(".takeover-abc")
+	notes := writeOld("notes.txt")
+	placeholder := writeOld("task-1.binlog")
+	active := writeOld("mysql-bin.000009")
+
+	if err := cleanupExpiredBinlogs(dir, 7, now, "mysql-bin.000009"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{sealed, laterSeal} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("sealed segment %s still present: %v", path, err)
+		}
+	}
+	for _, path := range []string{openSeg, takeover, notes, placeholder, active} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("non-binlog or active file %s deleted: %v", path, err)
+		}
 	}
 }
 
@@ -277,7 +315,8 @@ func TestOpenBinlogWriter_PurgesExpiredUploadedObject(t *testing.T) {
 			t.Fatalf("object %s was deleted", kept)
 		}
 	}
-	if catalog.listCalls != 3 || catalog.listLimit != retentionCatalogLimit {
+	// One extra list is the historical end_pos repair walk at open.
+	if catalog.listCalls != 4 || catalog.listLimit != retentionCatalogLimit {
 		t.Fatalf("list calls=%d limit=%d", catalog.listCalls, catalog.listLimit)
 	}
 
@@ -344,7 +383,8 @@ func TestOpenBinlogWriter_InsideRetentionDoesNotListOrDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if len(deleter.keys) != 0 || catalog.listCalls != 2 {
+	// One extra list is the historical end_pos repair walk at open.
+	if len(deleter.keys) != 0 || catalog.listCalls != 3 {
 		t.Fatalf("keys=%v listCalls=%d", deleter.keys, catalog.listCalls)
 	}
 	if _, err := os.Stat(fresh); err != nil {
@@ -620,7 +660,9 @@ func TestOpenBinlogWriter_CatalogListFailureDeletesNothing(t *testing.T) {
 	_, _, _, err := runner.openBinlogWriter(context.Background(), tasks.Task{
 		ID: "task-1", Epoch: 1, Storage: tasks.Storage{RetentionDays: 7},
 	}, "mysql-bin.000009", 4, "")
-	if err == nil || !errors.Is(err, catalog.listErr) || !containsAll(err.Error(), objectPurgeFailed, "list binlog files") {
+	// The repair walk reads the catalog before retention. A list failure stops
+	// the open before any local file is removed.
+	if err == nil || !errors.Is(err, catalog.listErr) {
 		t.Fatalf("err=%v", err)
 	}
 	for _, path := range []string{uploaded, localOnly} {

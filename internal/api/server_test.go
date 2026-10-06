@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing, the resume file/pos and matching gtid_set, the replay set beside that inventory, the point-in-time stop_datetime window, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, Console bootstrap without a bearer token while /api/* stays protected, and HTTP 400 when a running dump's password or retention is updated
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing with DurableCursor positions and JSON null for an unknown end, the resume file/pos and matching gtid_set, the replay set beside that inventory, the point-in-time stop_datetime window, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, Console bootstrap without a bearer token while /api/* stays protected, and HTTP 400 when a running dump's password or retention is updated
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -2251,6 +2251,99 @@ func TestTaskAPI_ListFiles(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file item, got %d", len(files))
 	}
+	if strings.Contains(resp.Body.String(), `"end_pos":0`) || strings.Contains(resp.Body.String(), `"start_pos":0`) {
+		t.Fatalf("unknown position encoded as 0: %s", resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"end_pos":null`) {
+		t.Fatalf("unknown end_pos is not null: %s", resp.Body.String())
+	}
+}
+
+func TestTaskAPI_ListFiles_NullEndAndLocalSpan(t *testing.T) {
+	dir := t.TempDir()
+	readable := filepath.Join(dir, "mysql-bin.000003")
+	writeResumeSegment(t, readable, 23)
+	magic := filepath.Join(dir, "mysql-bin.000004")
+	if err := os.WriteFile(magic, []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileStore := newFakeFileStore()
+	fileStore.files["1"] = []tasks.BinlogFile{
+		{TaskID: "1", FileName: "mysql-bin.000003", FilePath: readable, State: "SEALED"},
+		{TaskID: "1", FileName: "mysql-bin.000004", FilePath: magic, State: "SEALED", StartPos: 4, EndPos: 4},
+		{TaskID: "1", FileName: "mysql-bin.000005", FilePath: filepath.Join(dir, "missing"), State: "SEALED", StartPos: 4, EndPos: 1200},
+	}
+	handler := NewServer(tasks.NewScheduler(tasks.WithFileStore(fileStore)))
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createResp.Code)
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/tasks/1/files", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if strings.Contains(body, `"end_pos":0`) || strings.Contains(body, `"start_pos":0`) {
+		t.Fatalf("fabricated zero: %s", body)
+	}
+	if !strings.Contains(body, `"file_name"`) {
+		t.Fatalf("file_name renamed: %s", body)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]map[string]any{}
+	for _, row := range rows {
+		byName[row["file_name"].(string)] = row
+	}
+	if byName["mysql-bin.000003"]["start_pos"] != float64(4) || byName["mysql-bin.000003"]["end_pos"] != float64(23) {
+		t.Fatalf("readable span %+v", byName["mysql-bin.000003"])
+	}
+	if byName["mysql-bin.000004"]["start_pos"] != nil || byName["mysql-bin.000004"]["end_pos"] != nil {
+		t.Fatalf("resume cursor shown %+v", byName["mysql-bin.000004"])
+	}
+	if byName["mysql-bin.000005"]["end_pos"] != float64(1200) {
+		t.Fatalf("object-only span %+v", byName["mysql-bin.000005"])
+	}
+}
+
+func TestTaskAPI_ListFilesFromDisk_UsesDurableCursor(t *testing.T) {
+	dir := t.TempDir()
+	handler := NewServer(tasks.NewScheduler(tasks.WithDataDir(dir)))
+	createResp := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewBufferString(`{"name":"cluster-a","cluster_key":"cluster-a-key","source":{"host":"127.0.0.1","port":3306,"user":"repl","password":"secret"}}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createResp.Code)
+	}
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeResumeSegment(t, filepath.Join(taskDir, "mysql-bin.000003"), 23)
+	if err := os.WriteFile(filepath.Join(taskDir, ".takeover-abc"), []byte("temp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/api/tasks/1/files", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["file_name"] != "mysql-bin.000003" || rows[0]["start_pos"] != float64(4) || rows[0]["end_pos"] != float64(23) {
+		t.Fatalf("standalone listing %+v body=%s", rows, resp.Body.String())
+	}
 }
 
 // TestTaskAPI_ListFilesFromDiskWithoutMeta 验证 standalone 无 meta 时 files 返回磁盘分段，checkpoint 仍 404。
@@ -2298,6 +2391,12 @@ func TestTaskAPI_ListFilesFromDiskWithoutMeta(t *testing.T) {
 	}
 	if files[1].FilePath != filepath.Join(taskDir, "mysql-bin.000004.open.e1") {
 		t.Fatalf("open path: %s", files[1].FilePath)
+	}
+	if strings.Contains(resp.Body.String(), `"end_pos":0`) || strings.Contains(resp.Body.String(), `"start_pos":0`) {
+		t.Fatalf("unreadable standalone positions encoded as 0: %s", resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"end_pos":null`) {
+		t.Fatalf("unreadable standalone end is not null: %s", resp.Body.String())
 	}
 
 	cp := httptest.NewRecorder()

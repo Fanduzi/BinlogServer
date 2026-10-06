@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a file/pos dump that seals one source name, a later lease that opens that name again, a third epoch of the same name, a file/pos resume whose first read is MySQL 1236, and a sealed segment left on disk with no catalog row
-// output: proof that each sealed epoch's catalog start_pos and end_pos are the first and last event positions in that file, including after failover and a 1236 GTID fallback, and that an enroll of an unjoined sealed file does not record end_pos 0; the seal helper writes through any file metadata store
+// output: proof that each sealed epoch's catalog start_pos and end_pos are the first and last event positions in that file, including after failover and a 1236 GTID fallback, that an enroll of a readable sealed file stores that DurableCursor span, that an enroll of a magic-only or torn file leaves both positions unknown and does not enroll a rejected name, and that opening the task directory repairs a historical end_pos of 0 from local events without uploading the object again; the seal helper writes through any file metadata store
 // pos: regression coverage for issue 189
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func TestIssue189_LaterEpochSealedPositions(t *testing.T) {
 	assertSealedPositions(t, catalog, 2, issue189Source+".sealed.e2", 4, epoch2End)
 	assertEpochUnchanged(t, catalog, epoch0)
 	row1 := sealedEpochRow(t, catalog, issue189Source, 1)
-	if row1.StartPos != 4 || row1.EndPos != epoch1End {
+	if row1.StartPos != 4 || uint32(row1.EndPos) != epoch1End {
 		t.Fatalf("epoch 1 changed while sealing epoch 2: %+v", row1)
 	}
 }
@@ -187,11 +188,144 @@ func TestIssue189_EnrollSealedSegmentUsesEventPositions(t *testing.T) {
 	if row.State != "SEALED" || row.UploadState != "UPLOAD_FAILED" {
 		t.Fatalf("enroll row %+v", row)
 	}
-	if row.StartPos != 4 || row.EndPos != end || row.EndPos == 0 {
+	if row.StartPos != 4 || uint32(row.EndPos) != end || row.EndPos == 0 {
 		t.Fatalf("enroll positions start=%d end=%d, want 4..%d", row.StartPos, row.EndPos, end)
+	}
+	cursor, _, _, cursorOK := binlog.DurableCursor(row.FilePath)
+	if !cursorOK || uint32(row.EndPos) != cursor {
+		t.Fatalf("enroll end %d, DurableCursor %d ok=%v", row.EndPos, cursor, cursorOK)
 	}
 	if filepath.Base(row.FilePath) != name {
 		t.Fatalf("enroll path %s", row.FilePath)
+	}
+}
+
+// TestEnrollPartialFileLeavesUnknownEnd is a sealed name whose bytes have no
+// complete event. Enroll records the row and leaves both positions unknown.
+// A rejected name in the same directory is not a binlog row.
+func TestEnrollPartialFileLeavesUnknownEnd(t *testing.T) {
+	base := t.TempDir()
+	const taskID = "task-1"
+	taskDir := filepath.Join(base, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	magicName := "mysql-bin.000008.sealed.e1"
+	if err := os.WriteFile(filepath.Join(taskDir, magicName), []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	torn := filepath.Join(taskDir, "mysql-bin.000007")
+	if err := os.WriteFile(torn, append([]byte{0xfe, 'b', 'i', 'n'}, 1, 2, 3, 4), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".takeover-dead", "notes.txt", "mysql-bin.000014.open.e1"} {
+		if err := os.WriteFile(filepath.Join(taskDir, name), []byte("skip"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalog := &takeoverCatalog{}
+	uploader := &recordingUploader{}
+	checkpoints := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000012", Pos: 4}, ok: true}
+	sealEpochFromDump(t, base, catalog, uploader, checkpoints, 1, tasks.StartConfig{
+		Mode: tasks.StartModeFilePos, File: "mysql-bin.000012", Pos: 4,
+	}, "mysql-bin.000013", nil, 0, false)
+
+	magic := sealedEpochRow(t, catalog, "mysql-bin.000008", 1)
+	if magic.State != "SEALED" || magic.StartPos != 0 || magic.EndPos != 0 {
+		t.Fatalf("partial enroll %+v", magic)
+	}
+	plain := sealedEpochRow(t, catalog, "mysql-bin.000007", 1)
+	if plain.StartPos != 0 || plain.EndPos != 0 {
+		t.Fatalf("torn enroll %+v", plain)
+	}
+	files, err := catalog.ListBinlogFiles(context.Background(), taskID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range files {
+		baseName := filepath.Base(row.FilePath)
+		if baseName == ".takeover-dead" || baseName == "notes.txt" || strings.HasSuffix(baseName, ".open.e1") && row.FileName == "mysql-bin.000014" {
+			t.Fatalf("rejected or open name enrolled: %+v", row)
+		}
+	}
+}
+
+// TestRepairHistoricalEndPosOnOpen fills a stored end of 0 from local events
+// when the worker opens the task directory. An object-only row and a magic-only
+// uploaded file stay unknown. The object is not uploaded again.
+func TestRepairHistoricalEndPosOnOpen(t *testing.T) {
+	base := t.TempDir()
+	const taskID = "task-1"
+	taskDir := filepath.Join(base, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readable := filepath.Join(taskDir, "mysql-bin.000009")
+	_, end := writeSealedBinlog(t, readable, "INSERT INTO pitr VALUES ('REPAIR')")
+	magic := filepath.Join(taskDir, "mysql-bin.000010")
+	if err := os.WriteFile(magic, []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pointPath := filepath.Join(taskDir, "mysql-bin.000011")
+	writeSealedBinlog(t, pointPath, "INSERT INTO pitr VALUES ('POINT')")
+	const objectKey = "prefix/cluster-a/uuid/mysql-bin.000009"
+	const magicKey = "prefix/cluster-a/uuid/mysql-bin.000010"
+	const remoteKey = "prefix/cluster-a/uuid/mysql-bin.000012"
+	catalog := &takeoverCatalog{rows: []tasks.BinlogFile{
+		{
+			TaskID: taskID, FileName: "mysql-bin.000009", FilePath: readable,
+			Epoch: 0, State: "SEALED", StartPos: 0, EndPos: 0,
+			SizeBytes: 4, UploadState: "UPLOADED", ObjectKey: objectKey, Checksum: tasks.ChecksumMatch,
+		},
+		{
+			TaskID: taskID, FileName: "mysql-bin.000010", FilePath: magic,
+			Epoch: 0, State: "SEALED", EndPos: 0,
+			UploadState: "UPLOADED", ObjectKey: magicKey, Checksum: tasks.ChecksumMatch,
+		},
+		{
+			TaskID: taskID, FileName: "mysql-bin.000011", FilePath: pointPath,
+			Epoch: 0, State: "SEALED", StartPos: 4, EndPos: 4,
+			UploadState: "UPLOADED", ObjectKey: "prefix/point", Checksum: tasks.ChecksumMatch,
+		},
+		{
+			TaskID: taskID, FileName: "mysql-bin.000012",
+			FilePath: filepath.Join(t.TempDir(), "other-worker", "mysql-bin.000012"),
+			Epoch:    0, State: "SEALED", EndPos: 0,
+			UploadState: "UPLOADED", ObjectKey: remoteKey, Checksum: tasks.ChecksumMatch,
+		},
+	}}
+	uploader := &recordingUploader{}
+	runner := NewMySQLRunner(base, WithFileMetaStore(catalog), WithUploader(uploader, "prefix"))
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeFilePos, File: "mysql-bin.000099", Pos: 4})
+	task.Epoch = 1
+	f, _, _, err := runner.openBinlogWriter(context.Background(), task, "mysql-bin.000099", 4, "11111111-1111-1111-1111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f != nil {
+		f.Close()
+	}
+	repaired := sealedEpochRow(t, catalog, "mysql-bin.000009", 0)
+	if repaired.StartPos != 4 || uint32(repaired.EndPos) != end {
+		t.Fatalf("repaired positions %+v, want 4..%d", repaired, end)
+	}
+	if repaired.UploadState != "UPLOADED" || repaired.ObjectKey != objectKey || repaired.Checksum != tasks.ChecksumMatch || repaired.FilePath != readable {
+		t.Fatalf("uploaded row rewritten: %+v", repaired)
+	}
+	if uploader.callCount() != 0 {
+		t.Fatalf("repair uploaded the object %d times", uploader.callCount())
+	}
+	keptMagic := sealedEpochRow(t, catalog, "mysql-bin.000010", 0)
+	if keptMagic.EndPos != 0 || keptMagic.UploadState != "UPLOADED" || keptMagic.ObjectKey != magicKey {
+		t.Fatalf("magic-only row changed: %+v", keptMagic)
+	}
+	point := sealedEpochRow(t, catalog, "mysql-bin.000011", 0)
+	if point.StartPos != 4 || point.EndPos != 4 {
+		t.Fatalf("resume-cursor point repaired: %+v", point)
+	}
+	remote := sealedEpochRow(t, catalog, "mysql-bin.000012", 0)
+	if remote.EndPos != 0 || remote.ObjectKey != remoteKey {
+		t.Fatalf("object-only row changed: %+v", remote)
 	}
 }
 
@@ -327,7 +461,7 @@ func assertSealedPositions(t *testing.T, catalog *takeoverCatalog, epoch int64, 
 	if filepath.Base(row.FilePath) != baseName {
 		t.Fatalf("epoch %d path %s, want %s", epoch, row.FilePath, baseName)
 	}
-	if row.StartPos != start || row.EndPos != end {
+	if uint32(row.StartPos) != start || uint32(row.EndPos) != end {
 		t.Fatalf("epoch %d start_pos=%d end_pos=%d size=%d, want %d..%d", epoch, row.StartPos, row.EndPos, row.SizeBytes, start, end)
 	}
 	body, err := os.ReadFile(row.FilePath)

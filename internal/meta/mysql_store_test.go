@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, the legacy desired_run reconcile update, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, an unknown end_pos bound as NULL without assigning end_pos, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, the legacy desired_run reconcile update, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1130,8 +1130,8 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 			int64(0),
 			"SEALED",
 			int64(1024),
-			uint32(4),
-			uint32(1200),
+			int64(4),
+			int64(1200),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			"prefix/1/mysql-bin.000001",
@@ -1178,6 +1178,59 @@ func TestMySQLTaskStore_UpsertAndListBinlogFiles(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestMySQLTaskStore_UpsertUnknownEndOmitsEndPos binds NULL and does not assign
+// end_pos when the caller does not know it. A scanned NULL or 0 is unknown.
+func TestMySQLTaskStore_UpsertUnknownEndOmitsEndPos(t *testing.T) {
+	if strings.Contains(upsertBinlogFileUnknownEndSQL, "end_pos = VALUES(end_pos)") {
+		t.Fatal("unknown-end upsert assigns end_pos")
+	}
+	if !strings.Contains(upsertBinlogFileSQL, "end_pos = VALUES(end_pos)") {
+		t.Fatal("known-end upsert does not assign end_pos")
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	unknown := tasks.BinlogFile{
+		TaskID: "1", FileName: "mysql-bin.000008", FilePath: "/tmp/mysql-bin.000008",
+		State: "SEALED", SizeBytes: 4, StartPos: 4,
+	}
+	mock.ExpectExec(regexp.QuoteMeta(upsertBinlogFileUnknownEndSQL)).
+		WithArgs(
+			"1", "mysql-bin.000008", "mysql-bin.000008", "/tmp/mysql-bin.000008",
+			int64(0), "SEALED", int64(4), int64(4), nil,
+			sqlmock.AnyArg(), sqlmock.AnyArg(), "", "LOCAL_ONLY", "", sqlmock.AnyArg(), "",
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	if err := store.UpsertBinlogFile(context.Background(), unknown); err != nil {
+		t.Fatal(err)
+	}
+
+	cols := []string{
+		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum", "epoch",
+	}
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows(cols).
+			AddRow("1", "mysql-bin.000008", "/tmp/mysql-bin.000008", "SEALED", int64(4), nil, nil, now, now, "", "LOCAL_ONLY", "", nil, nil, int64(0)).
+			AddRow("1", "mysql-bin.000009", "/tmp/mysql-bin.000009", "SEALED", int64(4), int64(0), int64(0), now, now, "", "UPLOADED", "", nil, tasks.ChecksumMatch, int64(0)))
+	files, err := store.ListBinlogFiles(context.Background(), "1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || files[0].StartPos != 0 || files[0].EndPos != 0 || files[1].StartPos != 0 || files[1].EndPos != 0 {
+		t.Fatalf("scanned positions %+v", files)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
