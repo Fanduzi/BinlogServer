@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, startup refusal below schema 3 that tells the operator to run ./migrate up, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 3 that tells the operator to run ./migrate up, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -164,6 +164,24 @@ INNER JOIN task_leases l ON l.task_id = t.id
 WHERE t.state IN ('RUNNING', 'LEASE_DEGRADED', 'RETRY_BACKOFF', 'STOPPING')
   AND l.lease_expire_at <= NOW(6)
 ORDER BY CAST(t.id AS UNSIGNED), t.id;
+`
+
+// reconcileLegacyDesiredRunSQL rewrites desired_run for rows no step-4 writer
+// has touched. spec_revision stays 0. A later operator Start or Stop moves
+// spec_revision off 0, so this UPDATE does not cover that ask. Repeating it
+// changes zero rows once desired_run already matches the state.
+const reconcileLegacyDesiredRunSQL = `
+UPDATE backup_tasks
+SET desired_run = CASE
+  WHEN state IN ('RUNNING', 'STARTING', 'RETRY_BACKOFF', 'LEASE_DEGRADED', 'REBUILDING_FILE') THEN 'RUN'
+  ELSE 'STOP'
+END
+WHERE spec_revision = 0
+  AND applied_spec_revision = 0
+  AND desired_run <> CASE
+    WHEN state IN ('RUNNING', 'STARTING', 'RETRY_BACKOFF', 'LEASE_DEGRADED', 'REBUILDING_FILE') THEN 'RUN'
+    ELSE 'STOP'
+  END
 `
 
 const getTaskSQL = `
@@ -601,6 +619,25 @@ func (s *MySQLTaskStore) hasIndex(ctx context.Context, tableName, indexName stri
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// ReconcileLegacyDesiredRun sets desired_run from state for rows a step-4
+// process has not written. v0.5.44 and v0.5.45 leave desired_run at STOP
+// while the task is RUNNING. The control loop must not stop those tasks.
+// Rows a step-4 Start, Stop, or spec edit has touched have spec_revision > 0
+// and are left alone. The call is safe to repeat.
+func (s *MySQLTaskStore) ReconcileLegacyDesiredRun(ctx context.Context) (int64, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.reconcile_legacy_desired_run")
+	defer endMetaSpan(span)
+	res, err := s.db.ExecContext(ctx, reconcileLegacyDesiredRunSQL)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // UpsertTask 写入任务最新快照，并在状态收敛时补写 run 终态信息。

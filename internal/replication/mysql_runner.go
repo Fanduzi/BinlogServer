@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, drops a sealed catalog row in this task directory that has no remote copy when no uploader is configured and that local file is gone and records one RETENTION_REMOVED event naming the file, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, renames a readable epoch-0 bare OPEN file on this worker to .open.eN and continues it, renames a magic-only or header-only .open.eN already on this worker onto the new epoch and continues from the saved checkpoint instead of SEGMENT_NOT_ON_WORKER, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, does not append an artificial rotate whose end_log_pos is 0 and still seals the current file and continues on the next file when that rotate names one, resumes a readable open segment that already ends with that rotate from the last event whose end_log_pos is not 0 instead of SEGMENT_NOT_ON_WORKER, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING, and saves a resolved LATEST file and position with an empty gtid_set before the dump so a retry continues from that anchor instead of resolving LATEST again. Rotate and retention read binlog_files in bounded (file_name, epoch) pages. Takeover of an UPLOADED segment streams the object to a temp file and renames it only after the full body is copied, so a failed download does not leave a truncated segment. A later rotate that does not extend that segment past a verified UPLOADED epoch of the same source file does not seal or upload another copy
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, drops a sealed catalog row in this task directory that has no remote copy when no uploader is configured and that local file is gone and records one RETENTION_REMOVED event naming the file, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, renames a readable epoch-0 bare OPEN file on this worker to .open.eN and continues it, renames a magic-only or header-only .open.eN already on this worker onto the new epoch and continues from the saved checkpoint instead of SEGMENT_NOT_ON_WORKER, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, does not append an artificial rotate whose end_log_pos is 0 and still seals the current file and continues on the next file when that rotate names one, resumes a readable open segment that already ends with that rotate from the last event whose end_log_pos is not 0 instead of SEGMENT_NOT_ON_WORKER, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING, and saves a resolved LATEST file and position with an empty gtid_set before the dump so a retry continues from that anchor instead of resolving LATEST again. Rotate and retention read binlog_files in bounded (file_name, epoch) pages. Takeover of an UPLOADED segment streams the object to a temp file and renames it only after the full body is copied, so a failed download does not leave a truncated segment. A later rotate that does not extend that segment past a verified UPLOADED epoch of the same source file does not seal or upload another copy. Closing a dump records its MySQL connection id and KILL that Binlog Dump thread with the current source password before Run returns; the next run KILL that same id again before StartSync, so a password change during Stop does not leave the old thread beside the new one.
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -68,7 +68,13 @@ type MySQLRunner struct {
 
 	retentionMu        sync.Mutex
 	retentionSkipNoted map[string]struct{}
-	retentionBlocked   map[string]int
+
+	dumpMu       sync.Mutex
+	dumpConn     map[string]uint32
+	latestSource func(taskID string) (tasks.SourceConfig, bool)
+	// killDump is set by tests. Production uses killMySQLDumpThread.
+	killDump         func(source tasks.SourceConfig, connectionID uint32) error
+	retentionBlocked map[string]int
 
 	// anchorMu guards anchor, the LATEST file/pos resolved by this process.
 	// A retry with no metadata store reads it so it does not resolve LATEST again.
@@ -113,6 +119,134 @@ func (s *liveBinlogSyncer) StartSyncGTID(set gomysql.GTIDSet) (binlogStreamer, e
 
 func (s *liveBinlogSyncer) Close() {
 	s.inner.Close()
+}
+
+func (s *liveBinlogSyncer) LastConnectionID() uint32 {
+	if s == nil || s.inner == nil {
+		return 0
+	}
+	return s.inner.LastConnectionID()
+}
+
+// BindDumpSource stores the lookup the scheduler uses for the password
+// currently saved on the task. Close KILL uses it when the dump was opened
+// with an older password.
+func (r *MySQLRunner) BindDumpSource(fn func(taskID string) (tasks.SourceConfig, bool)) {
+	r.dumpMu.Lock()
+	r.latestSource = fn
+	r.dumpMu.Unlock()
+}
+
+func (r *MySQLRunner) notedDumpConn(taskID string) uint32 {
+	r.dumpMu.Lock()
+	defer r.dumpMu.Unlock()
+	return r.dumpConn[taskID]
+}
+
+func (r *MySQLRunner) noteDumpConn(taskID string, id uint32) {
+	r.dumpMu.Lock()
+	defer r.dumpMu.Unlock()
+	if r.dumpConn == nil {
+		r.dumpConn = make(map[string]uint32)
+	}
+	r.dumpConn[taskID] = id
+}
+
+func (r *MySQLRunner) clearDumpConn(taskID string, id uint32) {
+	r.dumpMu.Lock()
+	defer r.dumpMu.Unlock()
+	if r.dumpConn[taskID] == id {
+		delete(r.dumpConn, taskID)
+	}
+}
+
+func (r *MySQLRunner) sourceForKill(task tasks.Task) tasks.SourceConfig {
+	r.dumpMu.Lock()
+	fn := r.latestSource
+	r.dumpMu.Unlock()
+	if fn != nil {
+		if latest, ok := fn(task.ID); ok && latest.Host != "" && latest.User != "" && latest.Password != "" {
+			return latest
+		}
+	}
+	return task.Source
+}
+
+func (r *MySQLRunner) releaseDumpConn(task tasks.Task, id uint32) {
+	if id == 0 {
+		return
+	}
+	r.noteDumpConn(task.ID, id)
+	if err := r.killDumpThread(r.sourceForKill(task), id); err != nil {
+		log.Printf("binlog dump thread still open task=%s conn=%d err=%v", task.ID, id, err)
+		return
+	}
+	r.clearDumpConn(task.ID, id)
+}
+
+func (r *MySQLRunner) closeDump(task tasks.Task, syncer binlogSyncer) {
+	if syncer == nil {
+		return
+	}
+	id := dumpConnectionID(syncer)
+	syncer.Close()
+	r.releaseDumpConn(task, id)
+}
+
+func dumpConnectionID(syncer binlogSyncer) uint32 {
+	identified, ok := syncer.(interface{ LastConnectionID() uint32 })
+	if !ok || identified == nil {
+		return 0
+	}
+	return identified.LastConnectionID()
+}
+
+func (r *MySQLRunner) killDumpThread(source tasks.SourceConfig, connectionID uint32) error {
+	if connectionID == 0 {
+		return nil
+	}
+	if r.killDump != nil {
+		return r.killDump(source, connectionID)
+	}
+	return killMySQLDumpThread(source, connectionID)
+}
+
+// killMySQLDumpThread KILL a Binlog Dump thread left behind when Close could
+// not log in with the password the dump used. A reused connection id that is
+// no longer a Binlog Dump for this user is left alone.
+func killMySQLDumpThread(source tasks.SourceConfig, connectionID uint32) error {
+	if connectionID == 0 || source.Host == "" || source.Port == 0 || source.User == "" {
+		return nil
+	}
+	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
+	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	user := strings.ReplaceAll(source.User, "'", "''")
+	result, err := conn.Execute(fmt.Sprintf("SELECT COMMAND FROM information_schema.processlist WHERE ID=%d AND USER='%s'", connectionID, user))
+	if err != nil {
+		return err
+	}
+	if result == nil || result.Resultset == nil || result.Resultset.RowNumber() == 0 {
+		return nil
+	}
+	command, err := result.GetString(0, 0)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(command, "Binlog Dump") {
+		return nil
+	}
+	if _, err = conn.Execute(fmt.Sprintf("KILL %d", connectionID)); err != nil {
+		if gomysql.ErrorCode(err.Error()) == gomysql.ER_NO_SUCH_THREAD {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // HandleEvent 让函数类型实现 go-mysql 的事件处理接口。
@@ -748,12 +882,17 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			return &liveBinlogSyncer{inner: replication.NewBinlogSyncer(cfg)}
 		}
 	}
+	if id := r.notedDumpConn(task.ID); id > 0 {
+		// The previous Close tried KILL with the password from that dump.
+		// A password change during Stop makes that KILL fail and leaves the
+		// thread up. Kill it with the password this run is about to use
+		// before opening another dump.
+		r.releaseDumpConn(task, id)
+	}
 	syncer := newSyncer(cfg)
-	// Close is a method value. Reassigning syncer after a 1236 fallback must
-	// not leave the new syncer unclosed, and must not close it twice via the
-	// original method value.
-	closeSyncer := syncer.Close
-	defer func() { closeSyncer() }()
+	// The defer closes whatever syncer is current. A 1236 fallback closes the
+	// old one itself, then replaces syncer, so the defer closes the new one once.
+	defer func() { r.closeDump(task, syncer) }()
 
 	streamer, start, err := openDump(syncer, flavor, start, gtidFallback)
 	if err != nil {
@@ -795,9 +934,8 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				if !sawDumpEvent && !gtidFallbackUsed && start.Mode == tasks.StartModeFilePos && mysqlError1236(err) && strings.TrimSpace(gtidFallback) != "" {
 					gtidFallbackUsed = true
 					log.Printf("file/pos resume hit MySQL 1236 before any event; opening GTID dump task=%s file=%s pos=%d", task.ID, start.File, start.Pos)
-					syncer.Close()
+					r.closeDump(task, syncer)
 					syncer = newSyncer(cfg)
-					closeSyncer = syncer.Close
 					gtidStart := tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: strings.TrimSpace(gtidFallback)}
 					var dumpErr error
 					streamer, start, dumpErr = openDump(syncer, flavor, gtidStart, "")

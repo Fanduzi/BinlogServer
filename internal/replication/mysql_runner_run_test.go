@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a resolved LATEST file/pos kept across retry with an empty gtid_set, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, and stop cleanup
+// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a resolved LATEST file/pos kept across retry with an empty gtid_set, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, stop cleanup, and a leftover dump thread killed with the current password before the next StartSync
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -172,6 +172,7 @@ type fakeSyncer struct {
 	startGTIDCalls int
 	startErr       error
 	closeCalls     int
+	connID         uint32
 }
 
 func (f *fakeSyncer) StartSync(pos gomysql.Position) (binlogStreamer, error) {
@@ -194,6 +195,10 @@ func (f *fakeSyncer) StartSyncGTID(set gomysql.GTIDSet) (binlogStreamer, error) 
 
 func (f *fakeSyncer) Close() {
 	f.closeCalls++
+}
+
+func (f *fakeSyncer) LastConnectionID() uint32 {
+	return f.connID
 }
 
 func newRunnerEvent(logPos uint32) *goreplication.BinlogEvent {
@@ -1080,5 +1085,84 @@ func TestMySQLRunnerRun_EmptyEventDoesNotAdvanceCheckpoint(t *testing.T) {
 	}
 	if len(reporter.reports) != 0 {
 		t.Fatalf("expected no progress report, got %d", len(reporter.reports))
+	}
+}
+
+// TestMySQLRunnerRun_KillsLeftoverDumpBeforeNextStart 验证上一次 Close 用旧密码
+// KILL 失败后，下一次 StartSync 之前会用新密码杀掉那个连接号。
+func TestMySQLRunnerRun_KillsLeftoverDumpBeforeNextStart(t *testing.T) {
+	var order []string
+	syncer := &fakeSyncer{
+		streamer: &fakeStreamer{results: []streamResult{{err: context.Canceled}, {err: context.Canceled}}},
+		connID:   77,
+	}
+	runner := &MySQLRunner{
+		fetcher: &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		newSyncer: func(_ goreplication.BinlogSyncerConfig) binlogSyncer {
+			order = append(order, "start")
+			return syncer
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			file := &fakeSyncFile{}
+			return &fakeCloser{}, binlog.NewWriter(file, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+		killDump: func(source tasks.SourceConfig, id uint32) error {
+			order = append(order, fmt.Sprintf("kill:%s:%d", source.Password, id))
+			if source.Password != "new" {
+				return errors.New("access denied")
+			}
+			return nil
+		},
+	}
+	start := tasks.StartConfig{Mode: tasks.StartModeFilePos, File: "mysql-bin.000010", Pos: 4}
+	first := newRunnerTask(start)
+	first.Source.Password = "old"
+	if err := runner.Run(context.Background(), first); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	second := newRunnerTask(start)
+	second.Source.Password = "new"
+	if err := runner.Run(context.Background(), second); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	got := strings.Join(order, ",")
+	want := "start,kill:old:77,kill:new:77,start,kill:new:77"
+	if got != want {
+		t.Fatalf("order %s, want %s", got, want)
+	}
+}
+
+// TestMySQLRunnerRun_CloseKillsDumpWithBoundPassword 验证 Close 用调度器绑上的当前密码，
+// 而不是打开 dump 时的旧密码。
+func TestMySQLRunnerRun_CloseKillsDumpWithBoundPassword(t *testing.T) {
+	var killed string
+	syncer := &fakeSyncer{
+		streamer: &fakeStreamer{results: []streamResult{{err: context.Canceled}}},
+		connID:   88,
+	}
+	runner := &MySQLRunner{
+		fetcher: &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		newSyncer: func(_ goreplication.BinlogSyncerConfig) binlogSyncer {
+			return syncer
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			file := &fakeSyncFile{}
+			return &fakeCloser{}, binlog.NewWriter(file, binlog.Checkpoint{File: fileName, Pos: initialPos}), t.TempDir() + "/" + fileName, nil
+		},
+		killDump: func(source tasks.SourceConfig, id uint32) error {
+			killed = fmt.Sprintf("%s:%d", source.Password, id)
+			return nil
+		},
+	}
+	runner.BindDumpSource(func(string) (tasks.SourceConfig, bool) {
+		return tasks.SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "current"}, true
+	})
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeFilePos, File: "mysql-bin.000010", Pos: 4})
+	task.Source.Password = "opened-with"
+	if err := runner.Run(context.Background(), task); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if killed != "current:88" {
+		t.Fatalf("killed %s, want current:88", killed)
 	}
 }

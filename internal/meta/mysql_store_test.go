@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, the legacy desired_run reconcile update, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1336,6 +1336,29 @@ func TestMySQLTaskStore_ListUploadFailureReasons(t *testing.T) {
 		t.Fatalf("unexpected second row latest_time: %v", items[1].LatestTime)
 	}
 
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ReconcileLegacyDesiredRun(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, time.Second)
+	mock.ExpectExec(regexp.QuoteMeta(reconcileLegacyDesiredRunSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	n, err := store.ReconcileLegacyDesiredRun(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileLegacyDesiredRun: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("rows=%d, want 2", n)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}

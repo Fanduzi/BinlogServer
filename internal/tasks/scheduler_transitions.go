@@ -179,7 +179,14 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 			return nil
 		}
 		task = current
+		if current.DesiredRun == TaskDesiredRun && current.SpecRevision > current.AppliedSpecRevision {
+			return nil
+		}
 		if err == nil {
+			// A newer operator Start already asked for another dump. Do not cover that row with STOPPED.
+			if fresh.DesiredRun == TaskDesiredRun && fresh.SpecRevision > task.AppliedSpecRevision {
+				return nil
+			}
 			active := fresh.State == StateRunning || fresh.State == StateStarting || fresh.State == StateRetryBackoff || fresh.State == StateLeaseDegraded
 			if active && fresh.Epoch != 0 && currentEpoch != 0 && fresh.Epoch != currentEpoch {
 				s.tasks[id] = fresh

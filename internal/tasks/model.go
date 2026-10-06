@@ -62,8 +62,8 @@ type Task struct {
 	// DesiredRun is RUN or STOP. Metadata mode persists it on backup_tasks.
 	// Standalone keeps it on this struct until the process exits.
 	DesiredRun string `json:"-"`
-	// SpecRevision increases when a later change records a new operator ask.
-	// This step writes it through; the control loop that compares it is later.
+	// SpecRevision increases when the operator Starts, Stops, or edits the dump spec.
+	// The control loop restarts one dump when this is ahead of the open dump.
 	SpecRevision int64 `json:"-"`
 	// AppliedSpecRevision is the revision whose dump this worker opened.
 	AppliedSpecRevision int64 `json:"-"`
