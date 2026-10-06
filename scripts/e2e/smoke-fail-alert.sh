@@ -93,14 +93,15 @@ create_latest() {
 }
 
 task_row() {
-  meta_sql "SELECT CONCAT_WS('\t', state, desired_run, spec_revision, failed_spec_revision, IFNULL(owner_worker_id,''), epoch, retry_attempt, consecutive_source_failures) FROM backup_tasks WHERE id=${1}"
+  # Pipe-separated. A tab escape is not reliable with this server's sql_mode.
+  meta_sql "SELECT CONCAT_WS('|', state, desired_run, spec_revision, failed_spec_revision, IFNULL(owner_worker_id,''), epoch, retry_attempt, consecutive_source_failures) FROM backup_tasks WHERE id=${1}"
 }
 
 assert_failed_row() {
   local id="$1"
   local row state desired spec failed owner epoch attempt consecutive lease_owner
   row="$(task_row "$id")"
-  IFS=$'\t' read -r state desired spec failed owner epoch attempt consecutive <<<"$row"
+  IFS='|' read -r state desired spec failed owner epoch attempt consecutive <<<"$row"
   [[ "$state" == "FAILED" ]] || fail "meta state=$state want FAILED row=$row"
   [[ "$desired" == "STOP" ]] || fail "desired_run=$desired want STOP"
   [[ "$spec" == "$failed" && "$spec" != "0" ]] || fail "failed_spec_revision=$failed spec_revision=$spec"
@@ -170,7 +171,7 @@ start_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/tasks/$s
 [[ "$start_code" == "204" ]] || fail "restart after FAILED http=$start_code"
 wait_state "$sealed_id" "RUNNING"
 armed="$(task_row "$sealed_id")"
-IFS=$'\t' read -r armed_state armed_desired armed_spec armed_failed _ _ armed_attempt armed_consecutive <<<"$armed"
+IFS='|' read -r armed_state armed_desired armed_spec armed_failed _ _ armed_attempt armed_consecutive <<<"$armed"
 [[ "$armed_state" == "RUNNING" && "$armed_desired" == "RUN" ]] || fail "Start did not arm row=$armed"
 [[ "$armed_spec" -gt "$armed_failed" ]] || fail "spec_revision did not advance past failed_spec_revision row=$armed"
 [[ "$armed_attempt" == "0" && "$armed_consecutive" == "0" ]] || fail "counters not cleared row=$armed"
