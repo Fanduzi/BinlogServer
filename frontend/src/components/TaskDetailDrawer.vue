@@ -1,6 +1,6 @@
 <!--
 input: task, replication, checkpoint, locale labels, and loadPitr for the datetime window
-output: task detail drawer with configured start identity, the resume file:pos / GTID, and a point-in-time replay command
+output: task detail drawer with configured start identity, the resume file:pos / GTID, a point-in-time replay command, and a warning when a source Binlog Dump connection is still pending KILL
 pos: operator view of the position the next Start continues from and the datetime restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
 -->
@@ -41,6 +41,15 @@ note: if this file changes, update this header and frontend/src/components/READM
             <div class="detail-item"><span>{{ $t('detail.delay') }}</span><strong>{{ replication ? `${formatDelay(replication.delay_seconds, replication.has_progress)} ${$t('detail.seconds')}` : "--" }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(task, lease) }}</strong></div>
           </div>
+          <el-alert
+            v-if="task.pending_dump_cleanup && task.pending_dump_cleanup.connection_id"
+            data-testid="task-pending-dump-cleanup"
+            class="detail-pending-dump"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="$t('detail.pendingDumpCleanup', { id: task.pending_dump_cleanup.connection_id })"
+          />
         </section>
 
         <section v-if="replication" class="detail-panel">

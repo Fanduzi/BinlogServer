@@ -515,8 +515,18 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 		if !s.staleStoreReadLocked(id, seen) {
 			if liveRun {
 				s.noteRemoteStopLocked(item)
+				if mem, ok := s.tasks[id]; ok && item.PendingDumpCleanup != nil {
+					mem.PendingDumpCleanup = item.PendingDumpCleanup
+					s.tasks[id] = mem
+				}
 			} else if !s.noteRemoteStopLocked(item) {
+				item = s.keepPendingDump(id, item)
 				s.tasks[id] = item
+			}
+		}
+		if !s.persistsPendingDumpLocked() {
+			if mem, ok := s.tasks[id]; ok {
+				item.PendingDumpCleanup = mem.PendingDumpCleanup
 			}
 		}
 		s.flushPendingEventsLocked()
