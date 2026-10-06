@@ -12,9 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.48] - 2026-10-07
+
 ### Fixed
 
-- A backup that starts in GTID mode, and a file/pos backup that gets MySQL 1236 and continues from the stored GTID, no longer seals a segment that `mysqlbinlog --verify-binlog-checksum` rejects (#205). The dump's artificial Rotate (flags `0x20`, timestamp 0, no CRC) is not written into the segment. The runner does not create `task-<id>.binlog`. The source file name from that Rotate is the segment name. A file that still has only the 4-byte magic header is not sealed, not cataloged, and not uploaded. A file/pos task that is not on this path still writes a real Rotate into the segment it seals. A source restart still seals the previous file at the last real event and continues on the next file. Business events already in a segment stay there. No new config key. No schema migration.
+- A backup that starts in GTID mode, and a file/pos backup that gets MySQL 1236 before any event and continues from the stored GTID, no longer seals or uploads a magic-only placeholder or an empty `task-<id>.binlog` (#205, PR #261). The dump's artificial Rotate (flags `0x20`, timestamp 0, no CRC) is not written into the sealed segment. The runner waits for that Rotate to learn the real source file name before it opens the segment file, and does not create `task-<id>.binlog`. A segment that still has only the 4-byte magic header is deleted. It is not sealed, not cataloged, and not uploaded. A file/pos task that is not on this path still writes a real Rotate into the segment it seals. A source restart still seals the previous file at the last real event and continues on the next file. Business events already in a segment stay there. A segment sealed by this binary passes `mysqlbinlog --verify-binlog-checksum`. A segment an older binary already sealed with that no-CRC Rotate is not rewritten. Tip dogfood by BinlogServerQA passed. This release is not an ADR 0005 step. Steps 6–9 are still next work. No new config key. No schema migration. `minRequiredSchemaVersion` stays 3. `migrations/` is still `000001`, `000002`, `000003`, and `000004`. #189 and #224 were already present before this release. #205 is fixed in this release.
 
 ## [v0.5.47] - 2026-10-06
 
