@@ -83,7 +83,7 @@ aedd6aa8f99beae6de67d04ffd07f8c11c91b240bf2ff12fbcfa68ca0fb3f2d3  binlog-server_
 binlog-server_0.5.43_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
-├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key)
+├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key, 000003_task_desired_and_retry_budget)
 ├── config.example.yaml            # 完整参数参考配置
 ├── config.production.example.yaml # 生产安全基线模板
 ├── README.md                      # 英文说明
@@ -96,7 +96,13 @@ binlog-server_0.5.43_linux_amd64/
 
 ## 4. 拓扑部署实施步骤
 
-> **迁移 `000003_task_desired_and_retry_budget`（ADR 0005 第 2 步）：** 先执行 `./migrate up`，确认 `schema_migrations` 为 version 3、dirty 0。这一步不需要重启进程。
+> **迁移 `000003_task_desired_and_retry_budget`（ADR 0005 第 2 步，一共 9 步）：** 给 `backup_tasks` 增加六列，都是 `NOT NULL` 且带默认值：`desired_run`、`spec_revision`、`applied_spec_revision`、`failed_spec_revision`、`retry_attempt`、`consecutive_source_failures`。回填：`RUNNING`、`STARTING`、`RETRY_BACKOFF`、`LEASE_DEGRADED`、`REBUILDING_FILE` 的 `desired_run` 为 `RUN`；`CREATED`、`STOPPING`、`STOPPED`、`FAILED` 为 `STOP`；修订号和计数器为 0。运行时还不读、不写这些列。`minRequiredSchemaVersion` 仍是 2：v0.5.44 在 schema 2 或 3 上都能跑，v0.5.43 在 schema 3 上继续跑。建议现在就做这次迁移。下一步（第 3 步，持久化重试预算）会把 `minRequiredSchemaVersion` 提到 3。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md)。没有新的配置项。运行时行为不变。细节见 [docs/releases/release-notes-v0.5.44.md](../../releases/release-notes-v0.5.44.md)。
+
+1. 进程保持运行时执行 `./migrate up`。不需要重启。这一点已在 v0.5.43 仍在跑时核对过。
+2. `SELECT version, dirty FROM schema_migrations` 为 `(3, 0)`。
+3. `SHOW COLUMNS FROM backup_tasks` 列出上面六列。
+4. 按任意顺序替换二进制。
+5. 回滚：`./migrate down --steps 1` 回到版本 2，只删这六列。`backup_tasks` 与 `binlog_files` 行数不变。
 
 ### 4.1 拓扑一：单机模式 (Standalone)
 
