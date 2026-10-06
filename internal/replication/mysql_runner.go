@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, does not append an artificial rotate whose end_log_pos is 0 and still seals the current file and continues on the next file when that rotate names one, resumes a readable open segment that already ends with that rotate from the last event whose end_log_pos is not 0 instead of SEGMENT_NOT_ON_WORKER, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING, and saves a resolved LATEST file and position with an empty gtid_set before the dump so a retry continues from that anchor instead of resolving LATEST again
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, does not append an artificial rotate whose end_log_pos is 0 and still seals the current file and continues on the next file when that rotate names one, resumes a readable open segment that already ends with that rotate from the last event whose end_log_pos is not 0 instead of SEGMENT_NOT_ON_WORKER, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING, and saves a resolved LATEST file and position with an empty gtid_set before the dump so a retry continues from that anchor instead of resolving LATEST again. Rotate and retention read binlog_files in bounded (file_name, epoch) pages. Takeover of an UPLOADED segment streams the object to a temp file and renames it only after the full body is copied, so a failed download does not leave a truncated segment
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -1020,21 +1020,31 @@ func (r *MySQLRunner) enrollSealedUploads(ctx context.Context, task tasks.Task, 
 	if strings.TrimSpace(task.ClusterKey) == "" || strings.TrimSpace(sourceServerUUID) == "" {
 		return nil
 	}
-	files, err := r.listCatalog(ctx, task.ID)
-	if err != nil {
-		return err
-	}
-	byName := make(map[string]tasks.BinlogFile, len(files))
 	dirs := map[string]struct{}{}
 	if dir := filepath.Join(r.dataDir, task.ID); strings.TrimSpace(r.dataDir) != "" && task.ID != "" {
 		dirs[dir] = struct{}{}
 	}
-	for _, row := range files {
-		byName[catalogSegmentName(row)] = row
-		if path := strings.TrimSpace(row.FilePath); path != "" && path != "." {
-			dirs[filepath.Dir(path)] = struct{}{}
+	var openRows []tasks.BinlogFile
+	if err := r.forEachCatalogPage(ctx, task.ID, func(page []tasks.BinlogFile) error {
+		for _, row := range page {
+			if path := strings.TrimSpace(row.FilePath); path != "" && path != "." {
+				dirs[filepath.Dir(path)] = struct{}{}
+			}
+			if isOpenCatalogRow(row) {
+				openRows = append(openRows, row)
+			}
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
+	type localSealed struct {
+		dir   string
+		name  string
+		entry os.DirEntry
+	}
+	var locals []localSealed
+	need := map[string]struct{}{}
 	for dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -1051,69 +1061,91 @@ func (r *MySQLRunner) enrollSealedUploads(ctx context.Context, task tasks.Task, 
 			if !ok || named.Open {
 				continue
 			}
-			path := filepath.Join(dir, entry.Name())
-			row, exists := byName[entry.Name()]
-			if !exists {
-				row, exists = missingOpenRow(files, named)
-			}
-			if exists && isUploadedRow(row) {
-				continue
-			}
-			if exists && sealedRetryReady(row, path) {
-				continue
-			}
-			if exists && isOpenCatalogRow(row) && sameRegularFile(row.FilePath, path) {
-				continue
-			}
-			if !exists && task.Epoch <= 0 {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			next := tasks.BinlogFile{
-				TaskID:      task.ID,
-				FileName:    named.Source,
-				FilePath:    path,
-				Epoch:       catalogEpoch(path, task.Epoch),
-				State:       "SEALED",
-				SizeBytes:   info.Size(),
-				StartPos:    4,
-				EndPos:      0,
-				CreatedAt:   info.ModTime(),
-				SealedAt:    info.ModTime(),
-				ObjectKey:   buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, entry.Name()),
-				UploadState: "UPLOAD_FAILED",
-				UploadError: sealedUploadPending,
-			}
-			if exists {
-				next.Epoch = row.Epoch
-				if strings.TrimSpace(row.ObjectKey) != "" {
-					next.ObjectKey = row.ObjectKey
-				}
-				if row.StartPos != 0 {
-					next.StartPos = row.StartPos
-				}
-				if row.EndPos != 0 {
-					next.EndPos = row.EndPos
-				}
-				if !row.CreatedAt.IsZero() {
-					next.CreatedAt = row.CreatedAt
-				}
-				if !row.SealedAt.IsZero() {
-					next.SealedAt = row.SealedAt
-				}
-			}
-			if next.SealedAt.IsZero() {
-				next.SealedAt = time.Now()
-			}
-			if err := r.fileMetaStore.UpsertBinlogFile(ctx, next); err != nil {
-				return err
-			}
-			byName[entry.Name()] = next
-			log.Printf("sealed upload pending task=%s file=%s", task.ID, named.Source)
+			locals = append(locals, localSealed{dir: dir, name: entry.Name(), entry: entry})
+			need[entry.Name()] = struct{}{}
 		}
+	}
+	byName := map[string]tasks.BinlogFile{}
+	if err := r.forEachCatalogPage(ctx, task.ID, func(page []tasks.BinlogFile) error {
+		for _, row := range page {
+			name := catalogSegmentName(row)
+			if _, ok := need[name]; ok {
+				byName[name] = row
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, local := range locals {
+		dir := local.dir
+		entry := local.entry
+		named, ok := binlog.ClassifySegment(entry.Name())
+		if !ok || named.Open {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		row, exists := byName[entry.Name()]
+		if !exists {
+			row, exists = missingOpenRow(openRows, named)
+		}
+		if exists && isUploadedRow(row) {
+			continue
+		}
+		if exists && sealedRetryReady(row, path) {
+			continue
+		}
+		if exists && isOpenCatalogRow(row) && sameRegularFile(row.FilePath, path) {
+			continue
+		}
+		if !exists && task.Epoch <= 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		next := tasks.BinlogFile{
+			TaskID:      task.ID,
+			FileName:    named.Source,
+			FilePath:    path,
+			Epoch:       catalogEpoch(path, task.Epoch),
+			State:       "SEALED",
+			SizeBytes:   info.Size(),
+			StartPos:    4,
+			EndPos:      0,
+			CreatedAt:   info.ModTime(),
+			SealedAt:    info.ModTime(),
+			ObjectKey:   buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, entry.Name()),
+			UploadState: "UPLOAD_FAILED",
+			UploadError: sealedUploadPending,
+		}
+		if exists {
+			next.Epoch = row.Epoch
+			if strings.TrimSpace(row.ObjectKey) != "" {
+				next.ObjectKey = row.ObjectKey
+			}
+			if row.StartPos != 0 {
+				next.StartPos = row.StartPos
+			}
+			if row.EndPos != 0 {
+				next.EndPos = row.EndPos
+			}
+			if !row.CreatedAt.IsZero() {
+				next.CreatedAt = row.CreatedAt
+			}
+			if !row.SealedAt.IsZero() {
+				next.SealedAt = row.SealedAt
+			}
+		}
+		if next.SealedAt.IsZero() {
+			next.SealedAt = time.Now()
+		}
+		if err := r.fileMetaStore.UpsertBinlogFile(ctx, next); err != nil {
+			return err
+		}
+		byName[entry.Name()] = next
+		log.Printf("sealed upload pending task=%s file=%s", task.ID, named.Source)
 	}
 	return nil
 }
@@ -1205,28 +1237,32 @@ func (r *MySQLRunner) sealedFilePath(ctx context.Context, taskID, name string) s
 			return direct
 		}
 	}
-	files, err := r.listCatalog(ctx, taskID)
-	if err != nil {
+	var found string
+	if err := r.forEachCatalogPage(ctx, taskID, func(page []tasks.BinlogFile) error {
+		for _, row := range page {
+			if row.FileName != name {
+				continue
+			}
+			path := strings.TrimSpace(row.FilePath)
+			if filepath.Base(path) == name {
+				if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
+					found = path
+					return errCatalogDone
+				}
+			}
+			if path != "" {
+				sibling := filepath.Join(filepath.Dir(path), name)
+				if info, statErr := os.Stat(sibling); statErr == nil && info.Mode().IsRegular() {
+					found = sibling
+					return errCatalogDone
+				}
+			}
+		}
+		return nil
+	}); err != nil {
 		return ""
 	}
-	for _, row := range files {
-		if row.FileName != name {
-			continue
-		}
-		path := strings.TrimSpace(row.FilePath)
-		if filepath.Base(path) == name {
-			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-				return path
-			}
-		}
-		if path != "" {
-			sibling := filepath.Join(filepath.Dir(path), name)
-			if info, err := os.Stat(sibling); err == nil && info.Mode().IsRegular() {
-				return sibling
-			}
-		}
-	}
-	return ""
+	return found
 }
 
 // maxDumpReconnectAttempts is how many times go-mysql may reconnect a dump
@@ -1292,8 +1328,75 @@ func (r *MySQLRunner) listCatalog(ctx context.Context, taskID string) ([]tasks.B
 	return lister.ListBinlogFiles(ctx, taskID, retentionCatalogLimit)
 }
 
+// errCatalogDone stops a paged catalog walk after the caller has what it needs.
+var errCatalogDone = errors.New("catalog page done")
+
+// forEachCatalogPage visits one task's binlog_files without holding the whole
+// catalog. A store that can page is read catalogPageSize rows at a time, in
+// (file_name, epoch) order. A store that cannot page is still read in one
+// ListBinlogFiles call so tests keep working.
+func (r *MySQLRunner) forEachCatalogPage(ctx context.Context, taskID string, fn func([]tasks.BinlogFile) error) error {
+	if r == nil || r.fileMetaStore == nil || fn == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if pager, ok := r.fileMetaStore.(interface {
+		ListBinlogFilesPage(context.Context, string, string, int64, bool, int) ([]tasks.BinlogFile, error)
+	}); ok {
+		first := true
+		var afterName string
+		var afterEpoch int64
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			page, err := pager.ListBinlogFilesPage(ctx, taskID, afterName, afterEpoch, first, catalogPageSize)
+			if err != nil {
+				return err
+			}
+			if len(page) == 0 {
+				return nil
+			}
+			if err := fn(page); err != nil {
+				if errors.Is(err, errCatalogDone) {
+					return nil
+				}
+				return err
+			}
+			last := page[len(page)-1]
+			if !first && last.FileName == afterName && last.Epoch == afterEpoch {
+				return fmt.Errorf("binlog catalog page did not advance")
+			}
+			if len(page) < catalogPageSize {
+				return nil
+			}
+			first = false
+			afterName = last.FileName
+			afterEpoch = last.Epoch
+		}
+	}
+	files, err := r.listCatalog(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	if err := fn(files); err != nil && !errors.Is(err, errCatalogDone) {
+		return err
+	}
+	return nil
+}
+
 // materializeUploaded copies a sealed UPLOADED object into this worker's
 // segment directory so takeover can append after its last complete event.
+// The body is streamed to a temp file. The open segment name appears only
+// after the copy finishes and matches the size reported at open. A short
+// read or a write error removes the temp file and does not leave a truncated
+// segment that resume would treat as valid. The catalog checksum is the
+// upload comparison flag, not a content hash, and this copy does not change it.
 func (r *MySQLRunner) materializeUploaded(ctx context.Context, task tasks.Task, row tasks.BinlogFile) (string, error) {
 	label := strings.TrimSpace(row.FileName)
 	if path := strings.TrimSpace(row.FilePath); path != "" {
@@ -1302,24 +1405,63 @@ func (r *MySQLRunner) materializeUploaded(ctx context.Context, task tasks.Task, 
 	if r.objectOpener == nil {
 		return "", segmentNotOnWorker(label)
 	}
-	rc, _, err := r.objectOpener.OpenObject(ctx, row.ObjectKey)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rc, size, err := r.objectOpener.OpenObject(ctx, row.ObjectKey)
 	if err != nil {
 		return "", segmentNotOnWorker(label)
 	}
 	defer rc.Close()
-	body, err := io.ReadAll(rc)
-	if err != nil {
-		return "", segmentNotOnWorker(label)
-	}
 	dir := filepath.Join(r.dataDir, task.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, openFileName(row.FileName, task.Epoch))
-	if err := os.WriteFile(path, body, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".takeover-*")
+	if err != nil {
 		return "", err
 	}
+	tmpName := tmp.Name()
+	installed := false
+	defer func() {
+		if !installed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	reader := io.Reader(ctxReader{ctx: ctx, r: rc})
+	if size > 0 {
+		reader = io.LimitReader(reader, size)
+	}
+	written, err := io.Copy(tmp, reader)
+	if err != nil || (size > 0 && written != size) {
+		_ = tmp.Close()
+		return "", segmentNotOnWorker(label)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, openFileName(row.FileName, task.Epoch))
+	if err := os.Rename(tmpName, path); err != nil {
+		return "", err
+	}
+	installed = true
 	return dir, nil
+}
+
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // openBinlogWriter 打开（或创建）本地 open 文件并返回带初始 checkpoint 的 writer。
@@ -1657,16 +1799,20 @@ type objectDeleter interface {
 }
 
 // expiredFileCatalog is the binlog_files lookup retention uses.
-// ListBinlogFiles must be called with retentionCatalogLimit: the replay window
-// keeps the newest source indexes, and retention needs the oldest rows.
+// Delete is required. Listing may be the full replay window or a page.
 type expiredFileCatalog interface {
 	ListBinlogFiles(ctx context.Context, taskID string, limit int) ([]tasks.BinlogFile, error)
 	DeleteBinlogFile(ctx context.Context, taskID, fileName string, epoch int64) error
 }
 
-// retentionCatalogLimit keeps every catalog row. A replay-sized limit would
-// drop the oldest uploaded segments and purge them locally only.
+// retentionCatalogLimit keeps every catalog row for callers that still
+// materialize one task's catalog in one slice (lease takeover). A replay-sized
+// limit would drop the oldest uploaded segments. Retention and rotate page
+// instead of passing this limit.
 const retentionCatalogLimit = int(^uint(0) >> 1)
+
+// catalogPageSize is how many binlog_files rows rotate and retention hold at once.
+const catalogPageSize = 200
 
 // objectPurgeFailed is the operator-facing prefix when retention cannot delete
 // the bucket object. The task last_error starts with it, and the next file
@@ -1685,12 +1831,40 @@ const retentionSkippedNotUploaded = "RETENTION_SKIPPED_NOT_UPLOADED"
 // UPLOADED row whose local file is already gone is still aged as before.
 type retentionObjects struct {
 	byName        map[string]tasks.BinlogFile
+	walk          func(func([]tasks.BinlogFile) error) error
 	deleter       objectDeleter
 	standaloneKey func(fileName string) string
 	drop          func(row tasks.BinlogFile) error
 	note          func(row tasks.BinlogFile) error
 	noteKept      func(name string)
 	announce      func(name, uploadState string)
+}
+
+// collect keeps catalog rows whose segment name is in keep, and reports every
+// other row to onAbsent. Pages are not accumulated. onAbsent may be nil.
+func (o *retentionObjects) collect(keep map[string]struct{}, onAbsent func(string, tasks.BinlogFile) error) error {
+	if o == nil || o.walk == nil {
+		return nil
+	}
+	if o.byName == nil {
+		o.byName = map[string]tasks.BinlogFile{}
+	}
+	return o.walk(func(page []tasks.BinlogFile) error {
+		for _, row := range page {
+			name := catalogSegmentName(row)
+			if _, ok := keep[name]; ok {
+				o.byName[name] = row
+				continue
+			}
+			if onAbsent == nil {
+				continue
+			}
+			if err := onAbsent(name, row); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // cleanupExpiredBinlogs 按保留天数清理过期本地文件（跳过当前活跃 open 文件和其它 open 分段）。
@@ -1761,13 +1935,12 @@ func (r *MySQLRunner) retentionObjects(ctx context.Context, task tasks.Task, sou
 	if !ok {
 		return nil, fmt.Errorf("%s: binlog catalog cannot delete retained objects", objectPurgeFailed)
 	}
-	files, err := catalog.ListBinlogFiles(ctx, task.ID, retentionCatalogLimit)
-	if err != nil {
-		return nil, fmt.Errorf("%s: list binlog files: %w", objectPurgeFailed, err)
-	}
-	objects.byName = make(map[string]tasks.BinlogFile, len(files))
-	for _, file := range files {
-		objects.byName[catalogSegmentName(file)] = file
+	objects.byName = map[string]tasks.BinlogFile{}
+	objects.walk = func(fn func([]tasks.BinlogFile) error) error {
+		if err := r.forEachCatalogPage(ctx, task.ID, fn); err != nil {
+			return fmt.Errorf("%s: list binlog files: %w", objectPurgeFailed, err)
+		}
+		return nil
 	}
 	objects.drop = func(row tasks.BinlogFile) error {
 		return catalog.DeleteBinlogFile(ctx, task.ID, row.FileName, row.Epoch)
@@ -1809,8 +1982,7 @@ func purgeExpiredAt(ctx context.Context, dir string, retentionDays int, now time
 		return err
 	}
 	expireBefore := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
-	var objects *retentionObjects
-	loaded := false
+	var expired []string
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1829,14 +2001,27 @@ func purgeExpiredAt(ctx context.Context, dir string, retentionDays int, now time
 		if !info.ModTime().Before(expireBefore) {
 			continue
 		}
-		if !loaded {
-			loaded = true
-			if load != nil {
-				objects, err = load()
-				if err != nil {
-					return err
-				}
+		expired = append(expired, name)
+	}
+	var objects *retentionObjects
+	if len(expired) > 0 && load != nil {
+		objects, err = load()
+		if err != nil {
+			return err
+		}
+		if objects != nil {
+			keep := make(map[string]struct{}, len(expired))
+			for _, name := range expired {
+				keep[name] = struct{}{}
 			}
+			if err := objects.collect(keep, nil); err != nil {
+				return err
+			}
+		}
+	}
+	for _, name := range expired {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		removeLocal := true
 		if objects != nil && objects.deleter != nil {
@@ -1877,6 +2062,11 @@ func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays 
 	expireLocal := now.Add(-time.Duration(localDays) * 24 * time.Hour)
 	expireBucket := now.Add(-time.Duration(bucketDays) * 24 * time.Hour)
 	seen := make(map[string]struct{}, len(entries))
+	type agedLocal struct {
+		name  string
+		mtime time.Time
+	}
+	var expired []agedLocal
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1897,9 +2087,42 @@ func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays 
 		if !mtime.Before(expireLocal) {
 			continue
 		}
+		expired = append(expired, agedLocal{name: name, mtime: mtime})
+	}
+	if objects != nil {
+		keep := make(map[string]struct{}, len(expired))
+		for _, item := range expired {
+			keep[item.name] = struct{}{}
+		}
+		if err := objects.collect(keep, func(name string, row tasks.BinlogFile) error {
+			if _, onDisk := seen[name]; onDisk || isOpenCatalogRow(row) || !isUploadedRow(row) {
+				return nil
+			}
+			age := row.SealedAt
+			if age.IsZero() {
+				age = row.UploadedAt
+			}
+			if age.IsZero() || !age.Before(expireBucket) {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			objects.byName[name] = row
+			_, err := objects.release(ctx, name, false, false)
+			delete(objects.byName, name)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
+	for _, item := range expired {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		removeLocal := true
 		if objects != nil && objects.deleter != nil {
-			removeLocal, err = objects.release(ctx, name, !mtime.Before(expireBucket), true)
+			removeLocal, err = objects.release(ctx, item.name, !item.mtime.Before(expireBucket), true)
 			if err != nil {
 				return err
 			}
@@ -1907,28 +2130,7 @@ func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays 
 		if !removeLocal {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	if objects == nil {
-		return nil
-	}
-	for name, row := range objects.byName {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if _, ok := seen[name]; ok || isOpenCatalogRow(row) || !isUploadedRow(row) {
-			continue
-		}
-		age := row.SealedAt
-		if age.IsZero() {
-			age = row.UploadedAt
-		}
-		if age.IsZero() || !age.Before(expireBucket) {
-			continue
-		}
-		if _, err := objects.release(ctx, name, false, false); err != nil {
+		if err := os.Remove(filepath.Join(dir, item.name)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
@@ -2229,15 +2431,16 @@ func (r *MySQLRunner) sealTarget(ctx context.Context, task tasks.Task, dir, sour
 	}
 	distinct := err == nil && info.Mode().IsRegular()
 	if !distinct {
-		files, listErr := r.listCatalog(ctx, task.ID)
-		if listErr != nil {
-			return "", listErr
-		}
-		for _, row := range files {
-			if row.FileName == sourceFile && row.Epoch != task.Epoch {
-				distinct = true
-				break
+		if err := r.forEachCatalogPage(ctx, task.ID, func(page []tasks.BinlogFile) error {
+			for _, row := range page {
+				if row.FileName == sourceFile && row.Epoch != task.Epoch {
+					distinct = true
+					return errCatalogDone
+				}
 			}
+			return nil
+		}); err != nil {
+			return "", err
 		}
 	}
 	if !distinct {
@@ -2259,31 +2462,29 @@ func (r *MySQLRunner) retireMissingLocalOpenRows(ctx context.Context, taskID, di
 	if !ok {
 		return nil
 	}
-	files, err := r.listCatalog(ctx, taskID)
-	if err != nil {
-		return err
-	}
 	dir = filepath.Clean(dir)
-	for _, row := range files {
-		if !strings.EqualFold(strings.TrimSpace(row.State), "OPEN") {
-			continue
+	return r.forEachCatalogPage(ctx, taskID, func(page []tasks.BinlogFile) error {
+		for _, row := range page {
+			if !strings.EqualFold(strings.TrimSpace(row.State), "OPEN") {
+				continue
+			}
+			path := strings.TrimSpace(row.FilePath)
+			if path == "" || filepath.Clean(filepath.Dir(path)) != dir {
+				continue
+			}
+			info, statErr := os.Stat(path)
+			if statErr == nil && info.Mode().IsRegular() {
+				continue
+			}
+			if statErr != nil && !os.IsNotExist(statErr) {
+				return statErr
+			}
+			if err := deleter.DeleteBinlogFile(ctx, taskID, row.FileName, row.Epoch); err != nil {
+				return err
+			}
 		}
-		path := strings.TrimSpace(row.FilePath)
-		if path == "" || filepath.Clean(filepath.Dir(path)) != dir {
-			continue
-		}
-		info, statErr := os.Stat(path)
-		if statErr == nil && info.Mode().IsRegular() {
-			continue
-		}
-		if statErr != nil && !os.IsNotExist(statErr) {
-			return statErr
-		}
-		if err := deleter.DeleteBinlogFile(ctx, taskID, row.FileName, row.Epoch); err != nil {
-			return err
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // retireOtherOpenRows drops OPEN catalog rows for this source name at a
@@ -2298,19 +2499,17 @@ func (r *MySQLRunner) retireOtherOpenRows(ctx context.Context, taskID, source st
 	if !ok {
 		return nil
 	}
-	files, err := r.listCatalog(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	for _, row := range files {
-		if row.FileName != source || row.Epoch == epoch || !isOpenCatalogRow(row) {
-			continue
+	return r.forEachCatalogPage(ctx, taskID, func(page []tasks.BinlogFile) error {
+		for _, row := range page {
+			if row.FileName != source || row.Epoch == epoch || !isOpenCatalogRow(row) {
+				continue
+			}
+			if err := deleter.DeleteBinlogFile(ctx, taskID, row.FileName, row.Epoch); err != nil {
+				return err
+			}
 		}
-		if err := deleter.DeleteBinlogFile(ctx, taskID, row.FileName, row.Epoch); err != nil {
-			return err
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // sealPath 把 .open.e<epoch> 文件映射到 sealed 文件路径，并返回源文件名。

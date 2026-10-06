@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED, and task persistence that keeps the newest snapshot when an older write finishes later
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED, task persistence that keeps the newest snapshot when an older write finishes later, and event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -330,6 +330,12 @@ type Scheduler struct {
 	retrySkipped     int64
 	retryLastTS      int64
 	eventSeq         int64
+	// pendingEvents are in-memory events waiting for the event store.
+	// The scheduler lock is not held while they are written.
+	pendingEvents []queuedEvent
+	// eventLanes orders event-store writes per task. A slow insert on one
+	// task does not block another task's Stop, Start, or progress.
+	eventLanes map[string]*eventLane
 }
 
 // NewScheduler 创建调度器并应用可选项。
@@ -352,6 +358,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		internalWriteTimeout:  5 * time.Second,
 		internalLeaseTimeout:  2 * time.Second,
 		internalUploadTimeout: 30 * time.Second,
+		eventLanes:            make(map[string]*eventLane),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -376,6 +383,7 @@ type persistedTask struct {
 
 func (s *Scheduler) persistTaskLocked(task Task) error {
 	if s.store == nil {
+		s.flushPendingEventsLocked()
 		return nil
 	}
 	// 避免持锁执行潜在慢 I/O（DB），降低调度锁的阻塞影响。
@@ -388,7 +396,9 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 	gen := current.gen
 	snapshot := task
 	for {
+		batch := s.detachPendingEventsLocked()
 		s.mu.Unlock()
+		s.writeEventBatch(batch)
 		ctx, cancel := s.withWriteTimeout(context.Background())
 		err := s.store.UpsertTask(ctx, snapshot)
 		cancel()
@@ -420,9 +430,27 @@ func (s *Scheduler) retryDelay(attempt int) time.Duration {
 
 // GetCheckpoint 读取任务 checkpoint（优先 reader，不可用时返回未命中）。
 
+// queuedEvent is one event-store write. ticket is that task's write order.
+type queuedEvent struct {
+	event  TaskEvent
+	ticket uint64
+	lane   *eventLane
+}
+
+// eventLane serializes event-store inserts for one task.
+// Different tasks use different lanes, so one slow insert does not block another task.
+type eventLane struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	next   uint64
+	issued uint64
+}
+
 func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string) {
 	// 函数名里的 Locked 表示：调用方必须已经持有 s.mu。
 	// 这里会修改 eventSeq 和 events map，需要同一把锁保护。
+	// 事件库写入不在这把锁里。调用方在放开 s.mu 之前要 flush，
+	// 或者接着走 persistTaskLocked，由它在放开锁之后写入。
 	s.eventSeq++
 	event := TaskEvent{
 		TaskID:   taskID,
@@ -433,12 +461,73 @@ func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string)
 		Sequence: s.eventSeq,
 	}
 	s.events[taskID] = append(s.events[taskID], event)
-	if s.eventStore != nil {
+	if s.eventStore == nil {
+		return
+	}
+	lane, ticket := s.issueEventTicketLocked(taskID)
+	s.pendingEvents = append(s.pendingEvents, queuedEvent{event: event, ticket: ticket, lane: lane})
+}
+
+func (s *Scheduler) issueEventTicketLocked(taskID string) (*eventLane, uint64) {
+	if s.eventLanes == nil {
+		s.eventLanes = make(map[string]*eventLane)
+	}
+	lane := s.eventLanes[taskID]
+	if lane == nil {
+		lane = &eventLane{}
+		lane.cond = sync.NewCond(&lane.mu)
+		s.eventLanes[taskID] = lane
+	}
+	lane.issued++
+	return lane, lane.issued
+}
+
+func (s *Scheduler) detachPendingEventsLocked() []queuedEvent {
+	if len(s.pendingEvents) == 0 {
+		return nil
+	}
+	batch := s.pendingEvents
+	s.pendingEvents = nil
+	return batch
+}
+
+// flushPendingEventsLocked writes queued events without holding s.mu.
+// Caller holds s.mu and still holds it when this returns.
+func (s *Scheduler) flushPendingEventsLocked() {
+	batch := s.detachPendingEventsLocked()
+	if len(batch) == 0 {
+		return
+	}
+	s.mu.Unlock()
+	s.writeEventBatch(batch)
+	s.mu.Lock()
+}
+
+func (s *Scheduler) writeEventBatch(batch []queuedEvent) {
+	store := s.eventStore
+	timeout := s.internalWriteTimeout
+	for _, item := range batch {
+		if item.lane == nil {
+			continue
+		}
+		item.lane.write(store, item.event, item.ticket, timeout)
+	}
+}
+
+func (lane *eventLane) write(store EventStore, event TaskEvent, ticket uint64, timeout time.Duration) {
+	lane.mu.Lock()
+	defer lane.mu.Unlock()
+	for lane.next+1 != ticket {
+		lane.cond.Wait()
+	}
+	if store != nil {
 		// 事件落库失败不阻断主流程，保证调度与拉流优先可用。
-		ctx, cancel := s.withWriteTimeout(context.Background())
-		_ = s.eventStore.AppendEvent(ctx, event)
+		ctx, cancel := withTimeout(context.Background(), timeout)
+		_ = store.AppendEvent(ctx, event)
 		cancel()
 	}
+	lane.next = ticket
+	lane.cond.Broadcast()
 }
 
 // isClusterKeyUniqueLocked 校验 cluster_key 在任务集合中是否唯一。
@@ -488,6 +577,7 @@ func (s *Scheduler) syncTasksFromStore() error {
 			s.seq = n
 		}
 	}
+	s.flushPendingEventsLocked()
 	return nil
 }
 

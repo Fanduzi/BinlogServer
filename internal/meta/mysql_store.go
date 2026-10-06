@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -241,6 +241,27 @@ SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, cre
        object_key, upload_state, upload_error, uploaded_at, checksum, epoch
 FROM binlog_files
 WHERE task_id = ?
+`
+
+// listBinlogFilesPageSQL is one page of a task's catalog in unique-key order.
+// The caller walks with an exclusive (file_name, epoch) cursor. LIMIT is required
+// so retention and rotate do not load every row for the task.
+const listBinlogFilesPageFirstSQL = `
+SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
+       object_key, upload_state, upload_error, uploaded_at, checksum, epoch
+FROM binlog_files
+WHERE task_id = ?
+ORDER BY file_name, epoch
+LIMIT ?
+`
+
+const listBinlogFilesPageSQL = `
+SELECT task_id, file_name, file_path, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
+       object_key, upload_state, upload_error, uploaded_at, checksum, epoch
+FROM binlog_files
+WHERE task_id = ? AND (file_name > ? OR (file_name = ? AND epoch > ?))
+ORDER BY file_name, epoch
+LIMIT ?
 `
 
 const listFailedSealedBinlogFilesSQL = `
@@ -1231,8 +1252,41 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	out, err := scanBinlogFiles(rows)
+	if err != nil {
+		return nil, err
+	}
+	return tasks.WindowBinlogFilesForReplay(out, limit), nil
+}
 
+// ListBinlogFilesPage returns at most limit rows for one task, ordered by
+// (file_name, epoch), which is the unique key. first ignores the cursor and
+// starts at the beginning. Later pages are exclusive of (afterName, afterEpoch).
+// limit above 10000 is clamped so a caller cannot request the whole catalog.
+func (s *MySQLTaskStore) ListBinlogFilesPage(ctx context.Context, taskID, afterName string, afterEpoch int64, first bool, limit int) ([]tasks.BinlogFile, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_binlog_files_page")
+	defer endMetaSpan(span)
+
+	if limit <= 0 || limit > 10000 {
+		limit = 200
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if first {
+		rows, err = s.db.QueryContext(ctx, listBinlogFilesPageFirstSQL, taskID, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, listBinlogFilesPageSQL, taskID, afterName, afterName, afterEpoch, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return scanBinlogFiles(rows)
+}
+
+func scanBinlogFiles(rows *sql.Rows) ([]tasks.BinlogFile, error) {
+	defer rows.Close()
 	var out []tasks.BinlogFile
 	for rows.Next() {
 		var item tasks.BinlogFile
@@ -1268,7 +1322,7 @@ func (s *MySQLTaskStore) ListBinlogFiles(ctx context.Context, taskID string, lim
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return tasks.WindowBinlogFilesForReplay(out, limit), nil
+	return out, nil
 }
 
 // ListFailedUploadBinlogFiles 列出上传失败的 sealed 文件。
