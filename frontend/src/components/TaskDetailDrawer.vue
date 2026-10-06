@@ -48,7 +48,7 @@ note: if this file changes, update this header and frontend/src/components/READM
             type="warning"
             :closable="false"
             show-icon
-            :title="$t('detail.pendingDumpCleanup', { id: task.pending_dump_cleanup.connection_id })"
+            :title="pendingDumpTitle(task)"
           />
         </section>
 
@@ -382,6 +382,15 @@ function shellToken(path) {
     return `'${text.replace(/'/g, `'\\''`)}'`;
   }
   return text;
+}
+
+function pendingDumpTitle(task) {
+  const id = task?.pending_dump_cleanup?.connection_id;
+  const base = t("detail.pendingDumpCleanup", { id });
+  if (task?.pending_dump_cleanup?.process_local) {
+    return `${base} ${t("detail.pendingDumpCleanupProcessLocal")}`;
+  }
+  return base;
 }
 
 function formatStart(start) {

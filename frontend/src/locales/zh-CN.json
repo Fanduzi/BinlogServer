@@ -272,7 +272,8 @@
     "clusterKey": "Cluster Key",
     "source": "源库",
     "startMode": "起点",
-    "pendingDumpCleanup": "源库 Binlog Dump 连接 {id} 可能仍开着；源库可达后会 KILL"
+    "pendingDumpCleanup": "源库 Binlog Dump 连接 {id} 可能仍开着；源库可达后会 KILL",
+    "pendingDumpCleanupProcessLocal": "只有本进程（当时拉着这条 dump 的 worker）能看到这条警告。重启后消失。其它进程要等迁移 000004。"
   },
   "source": {
     "lookupTitle": "源库反查",

@@ -8,6 +8,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -163,6 +164,294 @@ func TestRunDumpCleanupRetryStops(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("retry loop did not stop")
 	}
+}
+
+func TestSchema3PendingDumpSurvivesStopped(t *testing.T) {
+	store := newColumnlessStore()
+	s := NewScheduler(WithStore(store))
+	task := s.mustTask(t)
+	s.mu.Lock()
+	item := s.tasks[task.ID]
+	item.State = StateRetryBackoff
+	s.tasks[task.ID] = item
+	done := make(chan struct{})
+	s.runs[task.ID] = done
+	s.mu.Unlock()
+
+	src := SourceConfig{Host: "10.0.0.8", Port: 3306, User: "repl", Password: "secret"}
+	refused := errors.New("dial tcp 10.0.0.8:3306: connect: connection refused")
+	s.noteDumpCleanup(task.ID, src, 1101, refused)
+
+	s.mu.Lock()
+	if err := s.markStoppedLocked(task.ID); err != nil {
+		s.mu.Unlock()
+		t.Fatalf("markStopped: %v", err)
+	}
+	if currentDone, ok := s.runs[task.ID]; ok && currentDone == done {
+		delete(s.runs, task.ID)
+	}
+	close(done)
+	if err := s.reloadIdleTaskFromStoreLocked(task.ID); err != nil {
+		s.mu.Unlock()
+		t.Fatalf("reload: %v", err)
+	}
+	wiped := s.tasks[task.ID]
+	wiped.PendingDumpCleanup = nil
+	s.tasks[task.ID] = wiped
+	s.mu.Unlock()
+
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateStopped {
+		t.Fatalf("state %s", got.State)
+	}
+	if got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 1101 {
+		t.Fatalf("pending %+v", got.PendingDumpCleanup)
+	}
+	if !got.PendingDumpCleanup.ProcessLocal || !strings.Contains(got.PendingDumpCleanup.Warning, "this process") {
+		t.Fatalf("warning %+v", got.PendingDumpCleanup)
+	}
+	if !strings.Contains(got.PendingDumpCleanup.Warning, "may still be open") {
+		t.Fatalf("warning %q", got.PendingDumpCleanup.Warning)
+	}
+
+	other := NewScheduler(WithStore(store))
+	if err := other.Restore(context.Background()); err != nil {
+		t.Fatalf("other restore: %v", err)
+	}
+	otherGot, err := other.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("other GetTask: %v", err)
+	}
+	if otherGot.PendingDumpCleanup != nil {
+		t.Fatalf("schema 3 marker leaked to another process: %+v", otherGot.PendingDumpCleanup)
+	}
+	otherCalled := false
+	other.dumpKiller = func(SourceConfig, uint32) error {
+		otherCalled = true
+		return nil
+	}
+	if other.retryPendingDumpCleanups() || otherCalled {
+		t.Fatal("another process must not KILL a schema 3 marker")
+	}
+
+	s.mu.Lock()
+	s.runs[task.ID] = make(chan struct{})
+	s.mu.Unlock()
+	killedWhileOpen := false
+	s.dumpKiller = func(SourceConfig, uint32) error {
+		killedWhileOpen = true
+		return nil
+	}
+	if s.retryPendingDumpCleanups() || killedWhileOpen {
+		t.Fatal("open runner must not be killed by the pending retry")
+	}
+	s.mu.Lock()
+	close(s.runs[task.ID])
+	delete(s.runs, task.ID)
+	s.mu.Unlock()
+
+	var passwords []string
+	s.dumpKiller = func(source SourceConfig, id uint32) error {
+		if id != 1101 || source.Host != "10.0.0.8" || source.Port != 3306 {
+			t.Fatalf("kill target %+v id %d", source, id)
+		}
+		passwords = append(passwords, source.Password)
+		if source.Password != "rotated" {
+			return errors.New("access denied")
+		}
+		return nil
+	}
+	if !s.retryPendingDumpCleanups() {
+		t.Fatal("old password should stay pending after STOPPED")
+	}
+	stored, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("stored task: %v", err)
+	}
+	stored.Source.Password = "rotated"
+	if err := store.UpsertTask(context.Background(), stored); err != nil {
+		t.Fatalf("rotate password: %v", err)
+	}
+	if s.retryPendingDumpCleanups() {
+		t.Fatal("rotated password should clear")
+	}
+	got, err = s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask after clear: %v", err)
+	}
+	if got.PendingDumpCleanup != nil {
+		t.Fatalf("still pending %+v", got.PendingDumpCleanup)
+	}
+	if len(passwords) != 2 || passwords[0] != "secret" || passwords[1] != "rotated" {
+		t.Fatalf("passwords %v", passwords)
+	}
+	assertDumpCleanupEvents(t, s, task.ID, 1, 1)
+}
+
+func TestSchema4PendingDumpSurvivesRestart(t *testing.T) {
+	store := newPendingColumnStore()
+	s := NewScheduler(WithStore(store))
+	task := s.mustTask(t)
+	s.mu.Lock()
+	item := s.tasks[task.ID]
+	item.State = StateRunning
+	s.tasks[task.ID] = item
+	s.mu.Unlock()
+
+	src := SourceConfig{Host: "10.0.0.8", Port: 3306, User: "repl", Password: "secret"}
+	refused := errors.New("dial tcp 10.0.0.8:3306: connect: connection refused")
+	s.noteDumpCleanup(task.ID, src, 42, refused)
+	s.mu.Lock()
+	if err := s.markStoppedLocked(task.ID); err != nil {
+		s.mu.Unlock()
+		t.Fatalf("markStopped: %v", err)
+	}
+	s.mu.Unlock()
+
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateStopped || got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 42 || got.PendingDumpCleanup.ProcessLocal {
+		t.Fatalf("before restart %+v state %s", got.PendingDumpCleanup, got.State)
+	}
+
+	restarted := NewScheduler(WithStore(store))
+	if err := restarted.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	got, err = restarted.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("restored GetTask: %v", err)
+	}
+	if got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 42 || got.PendingDumpCleanup.ProcessLocal {
+		t.Fatalf("restored pending %+v", got.PendingDumpCleanup)
+	}
+	restarted.dumpKiller = func(source SourceConfig, id uint32) error {
+		if id != 42 || source.Password != "secret" {
+			t.Fatalf("kill %+v id %d", source, id)
+		}
+		return nil
+	}
+	if restarted.retryPendingDumpCleanups() {
+		t.Fatal("schema 4 restart should clear on KILL")
+	}
+	got, err = restarted.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("cleared GetTask: %v", err)
+	}
+	if got.PendingDumpCleanup != nil {
+		t.Fatalf("still pending %+v", got.PendingDumpCleanup)
+	}
+}
+
+func TestSchema4ClearDropsAnotherProcessRegistry(t *testing.T) {
+	store := newPendingColumnStore()
+	holder := NewScheduler(WithStore(store))
+	task := holder.mustTask(t)
+	src := SourceConfig{Host: "10.0.0.8", Port: 3306, User: "repl", Password: "secret"}
+	refused := errors.New("dial tcp 10.0.0.8:3306: connect: connection refused")
+	holder.noteDumpCleanup(task.ID, src, 178, refused)
+
+	reader := NewScheduler(WithStore(store))
+	got, err := reader.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("reader GetTask: %v", err)
+	}
+	if got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 178 || got.PendingDumpCleanup.ProcessLocal {
+		t.Fatalf("reader pending %+v", got.PendingDumpCleanup)
+	}
+
+	holder.noteDumpCleanup(task.ID, src, 178, nil)
+	got, err = reader.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("reader after clear: %v", err)
+	}
+	if got.PendingDumpCleanup != nil {
+		t.Fatalf("stale registry %+v", got.PendingDumpCleanup)
+	}
+}
+
+type columnlessStore struct {
+	*fakeStore
+}
+
+func newColumnlessStore() *columnlessStore {
+	return &columnlessStore{fakeStore: newFakeStore()}
+}
+
+func (s *columnlessStore) UpsertTask(ctx context.Context, task Task) error {
+	task.PendingDumpCleanup = nil
+	return s.fakeStore.UpsertTask(ctx, task)
+}
+
+func (s *columnlessStore) GetTask(ctx context.Context, taskID string) (Task, error) {
+	task, err := s.fakeStore.GetTask(ctx, taskID)
+	if err != nil {
+		return Task{}, err
+	}
+	task.PendingDumpCleanup = nil
+	return task, nil
+}
+
+func (s *columnlessStore) ListTasks(ctx context.Context) ([]Task, error) {
+	list, err := s.fakeStore.ListTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		list[i].PendingDumpCleanup = nil
+	}
+	return list, nil
+}
+
+type pendingColumnStore struct {
+	*fakeStore
+	pending map[string]string
+}
+
+func newPendingColumnStore() *pendingColumnStore {
+	return &pendingColumnStore{fakeStore: newFakeStore(), pending: map[string]string{}}
+}
+
+func (s *pendingColumnStore) PendingDumpColumn() bool { return true }
+
+func (s *pendingColumnStore) SavePendingDumpCleanup(_ context.Context, taskID, previous, next string) (bool, error) {
+	if s.pending[taskID] != previous {
+		return false, nil
+	}
+	s.pending[taskID] = next
+	return true, nil
+}
+
+func (s *pendingColumnStore) decorate(task Task) Task {
+	task.PendingDumpCleanup = nil
+	if decoded := DecodeDumpCleanup(s.pending[task.ID]); decoded.ConnectionID != 0 {
+		task.PendingDumpCleanup = &decoded
+	}
+	return task
+}
+
+func (s *pendingColumnStore) GetTask(ctx context.Context, taskID string) (Task, error) {
+	task, err := s.fakeStore.GetTask(ctx, taskID)
+	if err != nil {
+		return Task{}, err
+	}
+	return s.decorate(task), nil
+}
+
+func (s *pendingColumnStore) ListTasks(ctx context.Context) ([]Task, error) {
+	list, err := s.fakeStore.ListTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		list[i] = s.decorate(list[i])
+	}
+	return list, nil
 }
 
 func (s *Scheduler) mustTask(t *testing.T) Task {
