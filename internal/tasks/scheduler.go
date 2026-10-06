@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, and SetRunner binding DumpSourceBinder to the stored source so a closing dump can KILL its thread with the current password
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder to the stored source so a closing dump can KILL its thread with the current password, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -340,6 +340,11 @@ type Scheduler struct {
 	// pendingEvents are in-memory events waiting for the event store.
 	// The scheduler lock is not held while they are written.
 	pendingEvents []queuedEvent
+	// pendingDumps is this process's leftover Binlog Dump ids.
+	// Runner exit and a store reload do not clear it. Schema 4 also writes
+	// the marker to backup_tasks.pending_dump_cleanup, so a restart loads it.
+	// Schema 3 has no column: only the process that held the dump has it.
+	pendingDumps map[string]DumpCleanup
 	// eventLanes orders event-store writes per task. A slow insert on one
 	// task does not block another task's Stop, Start, or progress.
 	eventLanes map[string]*eventLane
@@ -367,6 +372,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		internalLeaseTimeout:  2 * time.Second,
 		internalUploadTimeout: 30 * time.Second,
 		eventLanes:            make(map[string]*eventLane),
+		pendingDumps:          make(map[string]DumpCleanup),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -485,7 +491,7 @@ func (s *Scheduler) restorePublishedTaskLocked(snapshot Task) {
 	if mem.State == snapshot.State && mem.OwnerWorkerID == snapshot.OwnerWorkerID && mem.Epoch == snapshot.Epoch && mem.RunID == snapshot.RunID {
 		return
 	}
-	s.tasks[snapshot.ID] = snapshot
+	s.tasks[snapshot.ID] = s.overlayPendingDumpLocked(snapshot)
 }
 
 // retryDelay 计算指数退避时长（有上限）。
@@ -665,7 +671,7 @@ func (s *Scheduler) syncTasksFromStore() error {
 				if task.PendingDumpCleanup != nil {
 					mem.PendingDumpCleanup = task.PendingDumpCleanup
 				}
-				s.tasks[task.ID] = mem
+				s.tasks[task.ID] = s.overlayPendingDumpLocked(mem)
 			}
 			s.noteRemoteStopLocked(task)
 			continue
