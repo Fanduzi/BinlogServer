@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: temporary segment files with complete and torn binlog events
-// output: proof that DurableResume returns the highest open segment's last end log_pos, that a trailing artificial rotate with log_pos 0 does not hide that position, and that a trailing rotate names the next file
+// output: proof that DurableResume returns the highest open segment's last end log_pos, that a trailing artificial rotate with log_pos 0 does not hide that position, that magic and a log_pos 0 header are not resume points, and that a trailing rotate names the next file
 // pos: regression coverage for the shared resume cursor
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -96,6 +96,36 @@ func TestDurableCursor_ArtificialRotatePosZero(t *testing.T) {
 	writeSegment(t, only, []uint32{0}, false)
 	if _, _, _, ok := DurableCursor(only); ok {
 		t.Fatal("a segment whose only event has log_pos 0 is not a resume point")
+	}
+	if !PreambleOnly(only) {
+		t.Fatal("log_pos 0 header should be adoptable")
+	}
+}
+
+func TestPreambleOnly(t *testing.T) {
+	dir := t.TempDir()
+	magic := filepath.Join(dir, "mysql-bin.000001.open.e1")
+	writeSegment(t, magic, nil, false)
+	if !PreambleOnly(magic) {
+		t.Fatal("magic-only")
+	}
+	header := filepath.Join(dir, "mysql-bin.000002.open.e1")
+	writeSegment(t, header, []uint32{0, 0}, false)
+	if !PreambleOnly(header) {
+		t.Fatal("header-only")
+	}
+	real := filepath.Join(dir, "mysql-bin.000003.open.e1")
+	writeSegment(t, real, []uint32{0, 197}, false)
+	if PreambleOnly(real) {
+		t.Fatal("durable event")
+	}
+	torn := filepath.Join(dir, "mysql-bin.000004.open.e1")
+	writeSegment(t, torn, nil, true)
+	if PreambleOnly(torn) {
+		t.Fatal("torn tail")
+	}
+	if PreambleOnly(filepath.Join(dir, "missing")) {
+		t.Fatal("missing file")
 	}
 }
 

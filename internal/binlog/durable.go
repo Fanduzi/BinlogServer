@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), and the next file named by a sealed rotate
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -135,6 +135,50 @@ func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
 		return 0, 0, size, false
 	}
 	return lastPos, lastEnd, size, true
+}
+
+// PreambleOnly reports that path has no resume event. DurableResume skips it.
+// The 4-byte magic header alone qualifies. A header of complete events whose
+// end log_pos is 0 also qualifies when the file ends on an event boundary.
+// A torn tail does not. An event whose end log_pos is greater than 0 does not.
+func PreambleOnly(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	size := info.Size()
+	if size < 4 {
+		return false
+	}
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(f, magic); err != nil || string(magic) != string(durableMagic) {
+		return false
+	}
+	if size == 4 {
+		return true
+	}
+	offset := int64(4)
+	hdr := make([]byte, goreplication.EventHeaderSize)
+	for offset+int64(goreplication.EventHeaderSize) <= size {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			return false
+		}
+		eventSize := int64(binary.LittleEndian.Uint32(hdr[9:13]))
+		logPos := binary.LittleEndian.Uint32(hdr[13:17])
+		if eventSize < int64(goreplication.EventHeaderSize) || offset+eventSize > size || logPos != 0 {
+			return false
+		}
+		if _, err := f.Seek(eventSize-int64(goreplication.EventHeaderSize), io.SeekCurrent); err != nil {
+			return false
+		}
+		offset += eventSize
+	}
+	return offset == size
 }
 
 // LastRotateTarget is the next file named by the last complete event when
