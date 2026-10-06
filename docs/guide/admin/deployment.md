@@ -50,14 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.40)
+## 3. 安装与产物准备 (v0.5.41)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
 
-> ⚠️ **从 v0.5.39 滚动升级即可。** 这一版没有 schema migration。元数据 schema 仍是版本 2。`schema_migrations` 已经是版本 2 时，不用执行 `./migrate up`。没有新的配置项。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。细节见 [docs/releases/release-notes-v0.5.40.md](../../releases/release-notes-v0.5.40.md)。
+> ⚠️ **从 v0.5.40 滚动升级即可。** 这一版没有 schema migration。元数据 schema 仍是版本 2。`schema_migrations` 已经是版本 2 时，不用执行 `./migrate up`。没有新的配置项。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。细节见 [docs/releases/release-notes-v0.5.41.md](../../releases/release-notes-v0.5.41.md)。
 
 ```bash
-VER=0.5.40
+VER=0.5.41
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,18 +69,18 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.40` `checksums.txt`：
+已发布的 `v0.5.41` `checksums.txt`：
 
 ```text
-4afac871bd12c4fbb4d6de0cf096745b09fddfb276d9fdeb5c6fcc8afcfef5b6  binlog-server_0.5.40_darwin_amd64.tar.gz
-09e6b656ecf9dd824f312305d72c598f84da6066c662dac629b37449138cc532  binlog-server_0.5.40_darwin_arm64.tar.gz
-07cecc03c1f7c688a4e924428c95aec76646b8fd7a6b055dd30b409c6bf6f28d  binlog-server_0.5.40_linux_amd64.tar.gz
-587aba51ac24faed2eca687d80658368ef86167245cd07ed9b3ee92caa20180b  binlog-server_0.5.40_linux_arm64.tar.gz
+7fd7fe9824b723d6568bd6418eff63ca3e29adec0076263613a6d2d472b4cb17  binlog-server_0.5.41_darwin_amd64.tar.gz
+e4a9dcb1d418b3da44439169eecbcdfefbc9ef0f9ee566e114bfe41c8853d50e  binlog-server_0.5.41_darwin_arm64.tar.gz
+30578017dad1185dba0c2003a5cdcdab027483e3b6bd84ea79f3dc0f886850c5  binlog-server_0.5.41_linux_amd64.tar.gz
+892158a71cf38fb3232fc68578870f849a37317b3a387dbd71106884a534d8e7  binlog-server_0.5.41_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.40_linux_amd64/
+binlog-server_0.5.41_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key)
