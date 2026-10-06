@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments
+// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -15,8 +15,6 @@ import (
 
 	"binlog_server/internal/binlog"
 )
-
-const binlogOpenEpochMark = ".open.e"
 
 // listTaskBinlogFilesOnDisk reads {dataDir}/{taskID} for sealed binlog names
 // and name.open.e<epoch> segments. file_name is the source name. file_path is
@@ -64,6 +62,10 @@ func listTaskBinlogFilesOnDisk(dataDir, taskID string, limit int) ([]BinlogFile,
 		}
 		if state == "SEALED" {
 			item.SealedAt = item.CreatedAt
+		}
+		if start, end, ok := binlog.SegmentPositions(item.FilePath); ok {
+			item.StartPos = FilePos(start)
+			item.EndPos = FilePos(end)
 		}
 		files = append(files, item)
 	}
@@ -291,6 +293,62 @@ func taskBinlogDir(dataDir, taskID string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(dataDir, taskID), true
+}
+
+// CatalogRowOpen is true when the catalog state is OPEN.
+// An empty state uses ClassifySegment on the name. A SEALED row is not open.
+func CatalogRowOpen(row BinlogFile) bool {
+	switch strings.ToUpper(strings.TrimSpace(row.State)) {
+	case "OPEN":
+		return true
+	case "SEALED":
+		return false
+	default:
+		return binlog.OpenName(row.FileName) || binlog.OpenName(filepath.Base(row.FilePath))
+	}
+}
+
+// FilePositionsForAPI is the files-list view of start_pos and end_pos.
+// A local file whose catalog end is unknown or a resume-cursor point shows the
+// event span when DurableCursor can read it, and null when it cannot.
+// A stored span (end greater than start) is left as stored. An object-only
+// row is left as stored, including a historical 0, which JSON encodes as null.
+func FilePositionsForAPI(files []BinlogFile) []BinlogFile {
+	if len(files) == 0 {
+		return files
+	}
+	out := make([]BinlogFile, len(files))
+	copy(out, files)
+	for i := range out {
+		out[i] = filePositionForAPI(out[i])
+	}
+	return out
+}
+
+func filePositionForAPI(file BinlogFile) BinlogFile {
+	path := strings.TrimSpace(file.FilePath)
+	if path == "" || !regularFile(path) {
+		return file
+	}
+	if !binlog.SealedName(filepath.Base(path)) && !binlog.OpenName(filepath.Base(path)) {
+		file.EndPos = 0
+		return file
+	}
+	if file.EndPos > file.StartPos {
+		return file
+	}
+	point := file.EndPos > 0 && file.StartPos == file.EndPos
+	start, end, ok := binlog.SegmentPositions(path)
+	if !ok {
+		file.EndPos = 0
+		if point {
+			file.StartPos = 0
+		}
+		return file
+	}
+	file.StartPos = FilePos(start)
+	file.EndPos = FilePos(end)
+	return file
 }
 
 func classifyBinlogSegment(name string) (source string, seq uint64, epoch int64, state string, ok bool) {

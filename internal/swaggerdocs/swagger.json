@@ -1697,7 +1697,9 @@
                     "type": "string"
                 },
                 "end_pos": {
-                    "type": "integer"
+                    "description": "Last complete event end log position. JSON null means the end is not known. The value 0 is not stored.",
+                    "type": "integer",
+                    "x-nullable": true
                 },
                 "file_name": {
                     "type": "string"
@@ -1719,7 +1721,9 @@
                     "type": "integer"
                 },
                 "start_pos": {
-                    "type": "integer"
+                    "description": "First event position in the segment. JSON null means the start is not known. The value 0 is not stored.",
+                    "type": "integer",
+                    "x-nullable": true
                 },
                 "state": {
                     "type": "string"

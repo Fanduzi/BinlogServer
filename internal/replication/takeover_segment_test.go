@@ -53,7 +53,7 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 
 		catalog := &takeoverCatalog{rows: []tasks.BinlogFile{{
 			TaskID: taskID, FileName: "mysql-bin.000003", FilePath: openPath,
-			State: "OPEN", EndPos: endPos, UploadState: "LOCAL_ONLY",
+			State: "OPEN", EndPos: tasks.FilePos(endPos), UploadState: "LOCAL_ONLY",
 		}}}
 		store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000003", Pos: endPos}, ok: true}
 		syncer := &stopResumeSyncer{phases: [][]*goreplication.BinlogEvent{phase}}
@@ -160,7 +160,7 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 
 		catalog := &takeoverCatalog{rows: []tasks.BinlogFile{{
 			TaskID: taskID, FileName: "mysql-bin.000003", FilePath: barePath,
-			Epoch: 0, State: "OPEN", EndPos: endPos, UploadState: "LOCAL_ONLY",
+			Epoch: 0, State: "OPEN", EndPos: tasks.FilePos(endPos), UploadState: "LOCAL_ONLY",
 		}}}
 		store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000003", Pos: endPos}, ok: true}
 		syncer := &stopResumeSyncer{phases: [][]*goreplication.BinlogEvent{phase}}
@@ -219,7 +219,7 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 			TaskID: "task-1", FileName: "mysql-bin.000003",
 			FilePath:    filepath.Join(t.TempDir(), "gone", "mysql-bin.000003"),
 			State:       "SEALED",
-			EndPos:      endPos,
+			EndPos:      tasks.FilePos(endPos),
 			UploadState: "UPLOADED",
 			ObjectKey:   objectKey,
 		}}}
@@ -353,7 +353,7 @@ func TestTakeover_ArtificialRotatePosZeroStaysOnWorker(t *testing.T) {
 	}
 	catalog := &takeoverCatalog{rows: []tasks.BinlogFile{{
 		TaskID: taskID, FileName: "mysql-bin.000010", FilePath: openPath,
-		Epoch: 1, State: "OPEN", EndPos: endPos, UploadState: "LOCAL_ONLY",
+		Epoch: 1, State: "OPEN", EndPos: tasks.FilePos(endPos), UploadState: "LOCAL_ONLY",
 	}}}
 	store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000010", Pos: endPos}, ok: true}
 	next, _ := chainBinlogEvents(endPos, eventAt, []namedEvent{
@@ -655,7 +655,7 @@ func assertTakeoverReplayOnce(t *testing.T, local bool) {
 	}
 	catalog.rows = []tasks.BinlogFile{{
 		TaskID: created.ID, FileName: sourceFile, FilePath: rowPath,
-		Epoch: 1, State: "SEALED", StartPos: 4, EndPos: endPos,
+		Epoch: 1, State: "SEALED", StartPos: 4, EndPos: tasks.FilePos(endPos),
 		UploadState: "UPLOADED", ObjectKey: objectKey, Checksum: tasks.ChecksumMatch,
 		SizeBytes: int64(object.Len()),
 	}}

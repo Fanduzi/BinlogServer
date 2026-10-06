@@ -290,7 +290,9 @@ definitions:
       created_at:
         type: string
       end_pos:
+        description: Last complete event end log position. JSON null means the end is not known. The value 0 is not stored.
         type: integer
+        x-nullable: true
       file_name:
         type: string
       file_path:
@@ -305,7 +307,9 @@ definitions:
       size_bytes:
         type: integer
       start_pos:
+        description: First event position in the segment. JSON null means the start is not known. The value 0 is not stored.
         type: integer
+        x-nullable: true
       state:
         type: string
       task_id:

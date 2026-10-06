@@ -1,12 +1,13 @@
 // Package tasks provides module-level functionality for tasks.
 // input: temporary data directories with sealed and open binlog segment names
-// output: assertions for disk listing order, catalog replay window, replay selection of every sealed segment plus the highest open epoch, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
+// output: assertions for disk listing order, standalone positions from SegmentPositions, the files-list projection of an unknown end and a local event span, catalog replay window, replay selection of every sealed segment plus the highest open epoch, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
 // pos: regression coverage for standalone files listing when meta has no catalog rows
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -187,12 +188,12 @@ func TestSelectReplayFiles_DropsCoveredTakeoverReseal(t *testing.T) {
 	files := []BinlogFile{
 		{
 			FileName: "mysql-bin.000436", FilePath: "/data/a/6/mysql-bin.000436",
-			State: "SEALED", Epoch: 1, StartPos: 4, EndPos: end,
+			State: "SEALED", Epoch: 1, StartPos: 4, EndPos: FilePos(end),
 			UploadState: "UPLOADED", ObjectKey: "bucket/mysql-bin.000436",
 		},
 		{
 			FileName: "mysql-bin.000436", FilePath: "/data/b/6/mysql-bin.000436.sealed.e3",
-			State: "SEALED", Epoch: 3, StartPos: end, EndPos: end,
+			State: "SEALED", Epoch: 3, StartPos: FilePos(end), EndPos: FilePos(end),
 			UploadState: "UPLOADED", ObjectKey: "bucket/mysql-bin.000436.sealed.e3",
 		},
 		{
@@ -729,4 +730,101 @@ func (r *adoptFileRunner) Run(ctx context.Context, task Task) error {
 	}
 	<-ctx.Done()
 	return context.Canceled
+}
+
+func writeDiskSegment(t *testing.T, path string, logPos uint32) {
+	t.Helper()
+	raw := []byte{0xfe, 'b', 'i', 'n'}
+	hdr := make([]byte, 19)
+	binary.LittleEndian.PutUint32(hdr[9:13], 19)
+	binary.LittleEndian.PutUint32(hdr[13:17], logPos)
+	if err := os.WriteFile(path, append(raw, hdr...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListTaskBinlogFilesOnDisk_PositionsFromDurableCursor(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readable := filepath.Join(taskDir, "mysql-bin.000003")
+	writeDiskSegment(t, readable, 23)
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004"), []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, ".takeover-abc"), []byte("temp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "notes.txt"), []byte("skip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := listTaskBinlogFilesOnDisk(dir, "1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("got %+v", files)
+	}
+	cursor, _, _, ok := binlog.DurableCursor(readable)
+	start, end, spanOK := binlog.SegmentPositions(readable)
+	if !ok || !spanOK || files[0].FileName != "mysql-bin.000003" || files[0].StartPos != FilePos(start) || files[0].EndPos != FilePos(end) || uint32(files[0].EndPos) != cursor {
+		t.Fatalf("readable %+v cursor=%d ok=%v span=%d..%d", files[0], cursor, ok, start, end)
+	}
+	if files[1].FileName != "mysql-bin.000004" || files[1].StartPos != 0 || files[1].EndPos != 0 {
+		t.Fatalf("magic-only listing %+v", files[1])
+	}
+}
+
+func TestFilePositionsForAPI_NullAndLocalSpan(t *testing.T) {
+	dir := t.TempDir()
+	readable := filepath.Join(dir, "mysql-bin.000003")
+	writeDiskSegment(t, readable, 23)
+	start, end, ok := binlog.SegmentPositions(readable)
+	if !ok {
+		t.Fatal("segment positions")
+	}
+	magic := filepath.Join(dir, "mysql-bin.000004")
+	if err := os.WriteFile(magic, []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := []BinlogFile{
+		{FileName: "mysql-bin.000003", FilePath: readable, State: "SEALED", EndPos: 0},
+		{FileName: "mysql-bin.000004", FilePath: magic, State: "SEALED", StartPos: 4, EndPos: 4},
+		{FileName: "mysql-bin.000005", FilePath: filepath.Join(dir, "missing"), State: "SEALED", EndPos: 0},
+		{FileName: "mysql-bin.000006", FilePath: filepath.Join(dir, "remote-only"), State: "SEALED", StartPos: 4, EndPos: 1200},
+		{FileName: "mysql-bin.000003", FilePath: readable, State: "SEALED", StartPos: 4, EndPos: 1000},
+	}
+	got := FilePositionsForAPI(in)
+	if got[0].StartPos != FilePos(start) || got[0].EndPos != FilePos(end) {
+		t.Fatalf("local span %+v, want %d..%d", got[0], start, end)
+	}
+	if got[1].StartPos != 0 || got[1].EndPos != 0 {
+		t.Fatalf("resume cursor still shown: %+v", got[1])
+	}
+	if got[2].EndPos != 0 || got[3].EndPos != 1200 || got[3].StartPos != 4 {
+		t.Fatalf("object-only rows %+v %+v", got[2], got[3])
+	}
+	if got[4].StartPos != 4 || got[4].EndPos != 1000 {
+		t.Fatalf("stored span replaced: %+v", got[4])
+	}
+	if in[0].EndPos != 0 || in[1].EndPos != 4 {
+		t.Fatalf("projection mutated catalog rows %+v", in[:2])
+	}
+}
+
+func TestRejectedNameIsNotABinlog(t *testing.T) {
+	for _, name := range []string{".takeover-abc", "notes.txt", "task-1.binlog"} {
+		if binlog.SealedName(name) || binlog.OpenName(name) {
+			t.Fatalf("%s classified as a binlog", name)
+		}
+		if isSealedFileForRetry(BinlogFile{
+			FileName: name, FilePath: filepath.Join("/data", name),
+			State: "SEALED", SealedAt: time.Now(),
+		}) {
+			t.Fatalf("retry treated %s as a binlog", name)
+		}
+	}
 }

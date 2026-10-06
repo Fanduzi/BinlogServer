@@ -4,7 +4,7 @@
 - `writer.go`: binlog 文件写入与旋转。
 - `checkpoint.go`: checkpoint 数据结构。
 - `durable.go`: 最高 open 分段里最后一个完整事件的源文件名和 end log_pos。封存名和没有完整事件的分段不是续传点。`end_log_pos` 为 0 的事件（源库重启后的 artificial rotate）不是续传位点；前面还有完整事件时用那个事件的 end log_pos，并把字节偏移停在它后面，后面的 artificial 字节可以丢掉。只有 log_pos 0 的分段仍然不是续传点。`PreambleOnly` 表示这段没有续传事件：只有 4 字节 magic，或只有 `end_log_pos` 为 0 的完整事件且文件停在事件边界上。撕掉的尾部、以及 `end_log_pos` 大于 0 的事件，都不是。它不是续传位点。`DurableResumeDir` 直接扫 catalog `file_path` 所在目录。`LastRotateTarget` 在最后一个完整事件是 rotate 时给出下一个文件和位点；格式描述标明 CRC32 时，校验和的 4 个字节不算进文件名。`EventSpan` 给出这段里、结束在最后一个 `end_log_pos` 大于 0 的事件上的连续事件链的起点和终点；中间有空隙时链从空隙后重算，文件头的 format description 不会把中部复制段的 `start_pos` 拉回 4。
-- `segment.go`: `ClassifySegment` 是 runner、durable resume 和 tasks 磁盘扫描共用的分段名解析。`mysql-bin.000001` 是封存、epoch -1。`name.open.eN` 是打开的第 N 代。`name.sealed.eN` 是同一源文件名的后一次封存，epoch N，不是续传点。
+- `segment.go`: `ClassifySegment` 是 runner、durable resume 和 tasks 磁盘扫描共用的分段名解析。`mysql-bin.000001` 是封存、epoch -1。`name.open.eN` 是打开的第 N 代。`name.sealed.eN` 是同一源文件名的后一次封存，epoch N，不是续传点。`OpenName` / `SealedName` 是这个解析结果上的谓词。被拒绝的名字（含 `.takeover-*`、`notes.txt`、`task-N.binlog`）两者都为假，保留清理不会把它们当 binlog 删掉。
 - `event_time.go`: 读一个分段的事件头，给出复制流里第一个和最后一个非 0 时间戳。时间戳 0 跳过。格式描述（format description）和 previous-GTIDs 的时间是源文件创建时间，不计入覆盖。没有 magic 或没有剩余计时事件时不算覆盖。尾部撕掉的字节保留已经读完的事件时间。
 
 ## Exports
@@ -12,7 +12,7 @@
 - `DurableResume` / `DurableResumeDir` / `DurableCursor`：runner 下次 Start 和 `GET /api/tasks/{id}/checkpoint` 共用的本地续传位点。不使用文件大小。末尾 `end_log_pos` 为 0 的 artificial 事件不把整段判成没有位点。`DurableResumeDir` 扫接管时 catalog 记下的分段目录。`PreambleOnly` 只判断这段是不是 magic 或 log_pos 0 的文件头，调用方用已保存的 checkpoint 续，不用这里的位点。
 - `LastRotateTarget`：封存文件末尾的 rotate 指向的下一个文件。runner 在 checkpoint 仍停在刚封存的文件上时用它继续，避免在封存名旁边再开一段。
 - `EventTimeSpan`：定点恢复用来判断一个分段的复制事件时间是否盖住窗口。格式描述和 previous-GTIDs 不参与。调用方持有 reader。
-- `EventSpan`：封存目录行的 `start_pos` / `end_pos`。起点是连续链里第一个事件的位置，终点是最后一个 `end_log_pos` 大于 0 的事件。`end_log_pos` 为 0 的事件和撕掉的尾部不算。
+- `EventSpan`：封存目录行的 `start_pos` / `end_pos`。起点是连续链里第一个事件的位置，终点是最后一个 `end_log_pos` 大于 0 的事件。`end_log_pos` 为 0 的事件和撕掉的尾部不算。`SegmentPositions` 先过 `DurableCursor`：游标不成功（缺失、只有 magic、撕掉的尾部、只有 log_pos 0）时 ok 为 false；成功时终点就是该游标，起点用 `EventSpan`。
 
 ## Dependencies
 - Upstream: `internal/replication`。
