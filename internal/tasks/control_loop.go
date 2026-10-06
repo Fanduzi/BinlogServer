@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: backup_tasks desired_run, spec_revision, applied_spec_revision, failed_spec_revision, lease hold, and whether this process has a live dump
-// output: one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start) and the scheduler methods that apply it
+// output: one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it
 // pos: the only starter and stopper of a dump; operator Start, Stop, and spec edits write the row and this loop catches up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -280,6 +280,43 @@ func (s *Scheduler) finishIdleStop(task Task) error {
 	s.mu.Unlock()
 	s.releaseTaskLease(task.ID, owner, epoch)
 	return nil
+}
+
+// adoptNewerStopLocked copies a stored Stop onto this run.
+// A retry snapshot still has the spec it opened. Writing that snapshot
+// would cover the operator Stop. Caller holds s.mu. The store read releases it.
+func (s *Scheduler) adoptNewerStopLocked(id string, openedSpec int64) bool {
+	if s.store == nil {
+		return false
+	}
+	fresh, err := s.intentLocked(id)
+	if err != nil {
+		return false
+	}
+	// A newer Start or password change stays a run. Only a stored Stop ends this retry.
+	stop := fresh.DesiredRun == TaskDesiredStop || fresh.State == StateStopping || fresh.State == StateStopped
+	if !stop || fresh.SpecRevision < openedSpec {
+		return false
+	}
+	mem, ok := s.tasks[id]
+	if !ok {
+		return true
+	}
+	if fresh.DesiredRun == TaskDesiredStop {
+		mem.DesiredRun = TaskDesiredStop
+	}
+	if fresh.SpecRevision > mem.SpecRevision {
+		mem.SpecRevision = fresh.SpecRevision
+	}
+	if mem.State != StateStopped && mem.State != StateFailed {
+		mem.State = StateStopping
+	}
+	s.tasks[id] = mem
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
+	}
+	return true
 }
 
 func (s *Scheduler) runSupersededLocked(id string, openedSpec int64) bool {

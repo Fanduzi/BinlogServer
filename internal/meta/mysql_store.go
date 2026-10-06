@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 3 that tells the operator to run ./migrate up, an optional pending_dump_cleanup column when migration 000004 is applied, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 3 that tells the operator to run ./migrate up, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -151,23 +151,23 @@ const upsertTaskSQL = `
 INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, ` + taskBudgetColumns + `)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
-  name = VALUES(name),
-  cluster_key = VALUES(cluster_key),
-  state = VALUES(state),
-  last_error = VALUES(last_error),
-  owner_worker_id = VALUES(owner_worker_id),
-  epoch = VALUES(epoch),
-  run_id = VALUES(run_id),
-  source_json = VALUES(source_json),
-  start_json = VALUES(start_json),
-  storage_json = VALUES(storage_json),
-  updated_at = VALUES(updated_at),
-  desired_run = VALUES(desired_run),
-  spec_revision = VALUES(spec_revision),
-  applied_spec_revision = VALUES(applied_spec_revision),
-  failed_spec_revision = VALUES(failed_spec_revision),
-  retry_attempt = VALUES(retry_attempt),
-  consecutive_source_failures = VALUES(consecutive_source_failures);
+  name = IF(spec_revision > VALUES(spec_revision), name, VALUES(name)),
+  cluster_key = IF(spec_revision > VALUES(spec_revision), cluster_key, VALUES(cluster_key)),
+  state = IF(spec_revision > VALUES(spec_revision), state, VALUES(state)),
+  last_error = IF(spec_revision > VALUES(spec_revision), last_error, VALUES(last_error)),
+  owner_worker_id = IF(spec_revision > VALUES(spec_revision), owner_worker_id, VALUES(owner_worker_id)),
+  epoch = IF(spec_revision > VALUES(spec_revision), epoch, VALUES(epoch)),
+  run_id = IF(spec_revision > VALUES(spec_revision), run_id, VALUES(run_id)),
+  source_json = IF(spec_revision > VALUES(spec_revision), source_json, VALUES(source_json)),
+  start_json = IF(spec_revision > VALUES(spec_revision), start_json, VALUES(start_json)),
+  storage_json = IF(spec_revision > VALUES(spec_revision), storage_json, VALUES(storage_json)),
+  updated_at = IF(spec_revision > VALUES(spec_revision), updated_at, VALUES(updated_at)),
+  desired_run = IF(spec_revision > VALUES(spec_revision), desired_run, VALUES(desired_run)),
+  applied_spec_revision = IF(spec_revision > VALUES(spec_revision), applied_spec_revision, VALUES(applied_spec_revision)),
+  failed_spec_revision = IF(spec_revision > VALUES(spec_revision), failed_spec_revision, VALUES(failed_spec_revision)),
+  retry_attempt = IF(spec_revision > VALUES(spec_revision), retry_attempt, VALUES(retry_attempt)),
+  consecutive_source_failures = IF(spec_revision > VALUES(spec_revision), consecutive_source_failures, VALUES(consecutive_source_failures)),
+  spec_revision = IF(spec_revision > VALUES(spec_revision), spec_revision, VALUES(spec_revision));
 `
 
 const listTaskSQL = `
