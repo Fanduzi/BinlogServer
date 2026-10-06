@@ -1,5 +1,5 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task id, data dir, KeepLocalSegments, epoch, catalog file_path rows, and an optional stored checkpoint
+// input: task id, data dir, KeepLocalSegments, epoch, catalog file_path rows, ClassifySegment when state is empty, and an optional stored checkpoint
 // output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory, a readable epoch-0 bare OPEN file on this worker, a magic-only or header-only open file resumed from the saved checkpoint, or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
 // pos: resume identity shared by the replication runner and GET /api/tasks/{id}/checkpoint
 // note: if this file changes, update this header and module README.md.
@@ -8,7 +8,6 @@ package tasks
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"binlog_server/internal/binlog"
@@ -176,7 +175,8 @@ func readablePlainOpen(files []BinlogFile) (dir, file string, pos uint32, ok boo
 		}
 		path := strings.TrimSpace(row.FilePath)
 		base := filepath.Base(path)
-		if path == "" || base == "." || base == ".." || strings.Contains(base, ".open.e") || strings.Contains(base, ".sealed.e") {
+		named, classOK := binlog.ClassifySegment(base)
+		if path == "" || !classOK || named.Open || named.Epoch >= 0 {
 			continue
 		}
 		if !regularSegmentFile(path) {
@@ -248,9 +248,12 @@ func readableSegmentDir(files []BinlogFile) string {
 		if !catalogOpen(row) {
 			continue
 		}
-		epoch := openEpoch(filepath.Base(path))
-		if epoch >= bestEpoch {
-			bestEpoch = epoch
+		named, classOK := binlog.ClassifySegment(filepath.Base(path))
+		if !classOK || !named.Open {
+			continue
+		}
+		if named.Epoch >= bestEpoch {
+			bestEpoch = named.Epoch
 			best = dir
 		}
 	}
@@ -273,7 +276,7 @@ func coveringUpload(files []BinlogFile, checkpoint binlog.Checkpoint, checkpoint
 		return BinlogFile{}, false, true
 	}
 	for _, row := range files {
-		if row.FileName == checkpoint.File && row.EndPos >= checkpoint.Pos {
+		if row.FileName == checkpoint.File && uint32(row.EndPos) >= checkpoint.Pos {
 			return row, true, true
 		}
 	}
@@ -285,10 +288,7 @@ func catalogUploaded(row BinlogFile) bool {
 }
 
 func catalogOpen(row BinlogFile) bool {
-	if strings.EqualFold(strings.TrimSpace(row.State), "OPEN") {
-		return true
-	}
-	return strings.Contains(row.FileName, ".open.e") || strings.Contains(filepath.Base(row.FilePath), ".open.e")
+	return CatalogRowOpen(row)
 }
 
 func regularSegmentFile(path string) bool {
@@ -297,17 +297,4 @@ func regularSegmentFile(path string) bool {
 	}
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
-}
-
-func openEpoch(name string) int64 {
-	const mark = ".open.e"
-	idx := strings.LastIndex(name, mark)
-	if idx <= 0 {
-		return 0
-	}
-	n, err := strconv.ParseInt(name[idx+len(mark):], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
 }

@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: source replication config, flavor-aware identity, checkpoint/file metadata store dependencies, and the upload client wired as object deleter and object reader
-// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, drops a sealed catalog row in this task directory that has no remote copy when no uploader is configured and that local file is gone and records one RETENTION_REMOVED event naming the file, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, renames a readable epoch-0 bare OPEN file on this worker to .open.eN and continues it, renames a magic-only or header-only .open.eN already on this worker onto the new epoch and continues from the saved checkpoint instead of SEGMENT_NOT_ON_WORKER, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, records that sealed file's start_pos and end_pos from the first and last events in the file, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, does not append an artificial rotate whose end_log_pos is 0 and still seals the current file and continues on the next file when that rotate names one, does not seal or upload that file when it still has only the magic header, and does not create task-{id}.binlog when the start file is empty: the dump rotate names the source file and that name is the segment, resumes a readable open segment that already ends with that rotate from the last event whose end_log_pos is not 0 instead of SEGMENT_NOT_ON_WORKER, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and when that file/pos resume has no stored GTID returns text that names 1236 and a purged binlog, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING, and saves a resolved LATEST file and position with an empty gtid_set before the dump so a retry continues from that anchor instead of resolving LATEST again. Rotate and retention read binlog_files in bounded (file_name, epoch) pages. Takeover of an UPLOADED segment streams the object to a temp file and renames it only after the full body is copied, so a failed download does not leave a truncated segment. A later rotate that does not extend that segment past a verified UPLOADED epoch of the same source file does not seal or upload another copy. Closing a dump records its MySQL connection id and KILL that Binlog Dump thread with the current source password before Run returns; the next run KILL that same id again before StartSync, so a password change during Stop does not leave the old thread beside the new one. A KILL that cannot reach the source is reported so the task can stay STOPPED with that connection id pending. The dump sets master_heartbeat_period to 15s. A clean close is about that period. A half-open path waits on the source TCP retransmission timeout, not net_write_timeout. The open connection id is published as soon as the dump is up. An unconfirmed KILL does not open another dump.
+// output: replication run control, observable OPEN/SEALED artifacts, at-tip as soon as dump file/pos matches master (fresh LATEST or FILE_POS already there), a mid-file format description written once ahead of the first copied event without moving the checkpoint or the delay sample, a later description of a segment that already has events left out of the file and the delay, idle at-tip only when dump matches master file/pos, stop/start and kill-then-adopt resume from the last durable event in the local open segment (not SHOW MASTER STATUS and not position 4) while keeping those bytes, sealed-file handoff for upload, retention purge that deletes the bucket object for a sealed uploaded segment whose checksum is match and returns OBJECT_PURGE_FAILED without removing the local file when that delete fails, a longer bucket retention that deletes only the local file of a checksum-matched uploaded segment still inside that window, retention that keeps an expired sealed UPLOAD_FAILED or LOCAL_ONLY file and an on-disk uploaded file whose checksum is not match, recording that file as UPLOAD_FAILED, and its catalog row when upload and a catalog are configured and records one RETENTION_SKIPPED_NOT_UPLOADED event per file plus the binlog_server_retention_blocked_files count until a later pass purges the uploaded copy, drops a sealed catalog row in this task directory that has no remote copy when no uploader is configured and that local file is gone and records one RETENTION_REMOVED event naming the file, a rotate checkpoint on the next file before that file is opened so a failed purge resumes there instead of resealing the file just sealed, permanent source errors including the MariaDB flavor hint when @@server_uuid is missing, adopted leftover directories that keep unrelated segments while continuing an open segment that already ends at the adopted FILE_POS, and lease takeover that continues in a readable catalog file_path directory from its last complete event, resumes a checkpoint already inside a sealed UPLOADED object from that object, or returns permanent SEGMENT_NOT_ON_WORKER naming the missing segment without creating a new directory when that unuploaded tail is not readable, renames a readable epoch-0 bare OPEN file on this worker to .open.eN and continues it, renames a magic-only or header-only .open.eN already on this worker onto the new epoch and continues from the saved checkpoint instead of SEGMENT_NOT_ON_WORKER, records a sealed file whose upload did not finish as UPLOAD_FAILED so the existing retry uploads and verifies it, records that sealed file's start_pos and end_pos from the first and last events in the file, returns permanent SEALED_FILE_EXISTS when that sealed file is already on disk, returns permanent CHECKPOINT_WRITE_FAILED for a checkpoint write that is not a transient metadata error, returns a lease handoff when the seal-time epoch no longer matches, does not append an artificial rotate whose end_log_pos is 0 and still seals the current file and continues on the next file when that rotate names one, does not seal or upload that file when it still has only the magic header, and does not create task-{id}.binlog when the start file is empty: the dump rotate names the source file and that name is the segment, resumes a readable open segment that already ends with that rotate from the last event whose end_log_pos is not 0 instead of SEGMENT_NOT_ON_WORKER, and bounds the post-seal upload with the same upload timeout the retry path uses, and keeps one catalog row per durable epoch so a later open segment does not erase an earlier sealed path, upload state, checksum, or object key, and drops an OPEN catalog row in this segment directory when that file is no longer there, keeps the executed GTID on every flushed checkpoint including the rotate onto the next file by decoding raw-mode GTID and query bodies, and continues a file/pos resume with that GTID when MySQL 1236 is returned by StartSync or by the first stream read, closing that syncer and opening StartSyncGTID, and when that file/pos resume has no stored GTID returns text that names 1236 and a purged binlog, and returns an already-open dump to the scheduler as SOURCE_UNREACHABLE after 5 library reconnects (about 5s) so a longer source outage leaves RUNNING, and saves a resolved LATEST file and position with an empty gtid_set before the dump so a retry continues from that anchor instead of resolving LATEST again. Rotate and retention read binlog_files in bounded (file_name, epoch) pages. Takeover of an UPLOADED segment streams the object to a temp file and renames it only after the full body is copied, so a failed download does not leave a truncated segment. A later rotate that does not extend that segment past a verified UPLOADED epoch of the same source file does not seal or upload another copy. Closing a dump records its MySQL connection id and KILL that Binlog Dump thread with the current source password before Run returns; the next run KILL that same id again before StartSync, so a password change during Stop does not leave the old thread beside the new one. A KILL that cannot reach the source is reported so the task can stay STOPPED with that connection id pending. The dump sets master_heartbeat_period to 15s. A clean close is about that period. A half-open path waits on the source TCP retransmission timeout, not net_write_timeout. The open connection id is published as soon as the dump is up. An unconfirmed KILL does not open another dump. Retention deletes only a name ClassifySegment calls a sealed segment, so a rejected name including .takeover-* stays. Enroll sets start_pos and end_pos from SegmentPositions and leaves them unknown when that cursor is not ok. Opening the task directory repairs a stored end_pos of 0 from a readable local segment without uploading that object again.
 // pos: data-plane runtime that consumes MySQL/MariaDB binlog stream and emits durable outputs
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -712,8 +712,8 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 				Epoch:       catalogEpoch(currentPath, task.Epoch),
 				State:       "OPEN",
 				SizeBytes:   info.Size(),
-				StartPos:    currentStartPos,
-				EndPos:      checkpoint.Pos,
+				StartPos:    tasks.FilePos(currentStartPos),
+				EndPos:      tasks.FilePos(checkpoint.Pos),
 				CreatedAt:   currentCreatedAt,
 				UploadState: "LOCAL_ONLY",
 			}, carried)); err != nil {
@@ -1226,8 +1226,8 @@ func (r *MySQLRunner) sealLocalFile(
 		Epoch:     catalogEpoch(sealedPath, task.Epoch),
 		State:     "SEALED",
 		SizeBytes: info.Size(),
-		StartPos:  startPos,
-		EndPos:    endPos,
+		StartPos:  tasks.FilePos(startPos),
+		EndPos:    tasks.FilePos(endPos),
 		CreatedAt: createdAt,
 		SealedAt:  sealedAt,
 	}
@@ -1288,6 +1288,56 @@ func (r *MySQLRunner) boundedUpload(parent context.Context) (context.Context, co
 		return context.WithCancel(parent)
 	}
 	return context.WithTimeout(parent, r.uploadTimeout)
+}
+
+// readableSegmentInDir is the catalog file when it is a segment in dir and this
+// process can stat it. An object-only path, or a name ClassifySegment rejects, is empty.
+func readableSegmentInDir(dir string, row tasks.BinlogFile) string {
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	path := strings.TrimSpace(row.FilePath)
+	if dir == "" || dir == "." || path == "" || filepath.Clean(filepath.Dir(path)) != dir {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	base := filepath.Base(path)
+	if !binlog.SealedName(base) && !binlog.OpenName(base) {
+		return ""
+	}
+	return path
+}
+
+// repairHistoricalEndPos fills a stored end_pos of 0 from the local file when
+// this worker can read a complete event. An object-only row is left as stored.
+// The object itself is not uploaded again: only the catalog positions change.
+func (r *MySQLRunner) repairHistoricalEndPos(ctx context.Context, taskID, dir string) error {
+	if r == nil || r.fileMetaStore == nil || strings.TrimSpace(taskID) == "" {
+		return nil
+	}
+	return r.forEachCatalogPage(ctx, taskID, func(page []tasks.BinlogFile) error {
+		for _, row := range page {
+			if row.EndPos != 0 {
+				continue
+			}
+			path := readableSegmentInDir(dir, row)
+			if path == "" {
+				continue
+			}
+			start, end, ok := binlog.SegmentPositions(path)
+			if !ok || end == 0 {
+				continue
+			}
+			next := row
+			next.StartPos = tasks.FilePos(start)
+			next.EndPos = tasks.FilePos(end)
+			if err := r.fileMetaStore.UpsertBinlogFile(ctx, next); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // enrollSealedUploads records a sealed file the retry set does not yet name.
@@ -1388,7 +1438,7 @@ func (r *MySQLRunner) enrollSealedUploads(ctx context.Context, task tasks.Task, 
 		}
 		startPos := uint32(0)
 		endPos := uint32(0)
-		spanStart, spanEnd, spanOK := binlog.EventSpan(path)
+		spanStart, spanEnd, spanOK := binlog.SegmentPositions(path)
 		if spanOK {
 			startPos = spanStart
 			endPos = spanEnd
@@ -1400,8 +1450,8 @@ func (r *MySQLRunner) enrollSealedUploads(ctx context.Context, task tasks.Task, 
 			Epoch:       catalogEpoch(path, task.Epoch),
 			State:       "SEALED",
 			SizeBytes:   info.Size(),
-			StartPos:    startPos,
-			EndPos:      endPos,
+			StartPos:    tasks.FilePos(startPos),
+			EndPos:      tasks.FilePos(endPos),
 			CreatedAt:   info.ModTime(),
 			SealedAt:    info.ModTime(),
 			ObjectKey:   buildObjectKey(r.uploadPrefix, task.ClusterKey, sourceServerUUID, entry.Name()),
@@ -1456,8 +1506,11 @@ func missingOpenRow(files []tasks.BinlogFile, named binlog.SegmentName) (tasks.B
 		if path == "" {
 			continue
 		}
-		if named.Epoch < 0 && filepath.Base(path) != fmt.Sprintf("%s.open.e%d", named.Source, row.Epoch) {
-			continue
+		if named.Epoch < 0 {
+			got, classOK := binlog.ClassifySegment(filepath.Base(path))
+			if !classOK || !got.Open || got.Source != named.Source || got.Epoch != row.Epoch {
+				continue
+			}
 		}
 		info, err := os.Stat(path)
 		if err == nil && info.Mode().IsRegular() {
@@ -1710,7 +1763,7 @@ func (r *MySQLRunner) coveredByUploadedEpoch(ctx context.Context, taskID, source
 			if !verifiedUploaded(row) || row.EndPos <= row.StartPos {
 				continue
 			}
-			if row.StartPos <= probe && row.EndPos >= probe {
+			if uint32(row.StartPos) <= probe && uint32(row.EndPos) >= probe {
 				covered = true
 				return errCatalogDone
 			}
@@ -1825,6 +1878,9 @@ func (r *MySQLRunner) openBinlogWriterIn(ctx context.Context, dir string, task t
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, "", err
 	}
+	if err := r.repairHistoricalEndPos(ctx, task.ID, dir); err != nil {
+		return nil, nil, "", err
+	}
 	// Rename the open segment whose last complete event already ends at
 	// initialPos onto this epoch, then append. A magic-only or header-only
 	// open file of this source is renamed too. Adopt sets KeepLocalSegments
@@ -1893,8 +1949,8 @@ func (r *MySQLRunner) openBinlogWriterIn(ctx context.Context, dir string, task t
 			Epoch:       catalogEpoch(path, task.Epoch),
 			State:       "OPEN",
 			SizeBytes:   info.Size(),
-			StartPos:    initialPos,
-			EndPos:      initialPos,
+			StartPos:    tasks.FilePos(initialPos),
+			EndPos:      tasks.FilePos(initialPos),
 			CreatedAt:   createdAt,
 			UploadState: "LOCAL_ONLY",
 		}, carried)); err != nil {
@@ -1956,7 +2012,8 @@ func plainOpenRow(files []tasks.BinlogFile, plain string) bool {
 			continue
 		}
 		path := strings.TrimSpace(row.FilePath)
-		if path == "" || strings.Contains(filepath.Base(path), ".open.e") {
+		named, classOK := binlog.ClassifySegment(filepath.Base(path))
+		if path == "" || !classOK || named.Open || named.Epoch >= 0 {
 			continue
 		}
 		if filepath.Clean(path) == clean {
@@ -2467,7 +2524,7 @@ func purgeExpiredAt(ctx context.Context, dir string, retentionDays int, now time
 			continue
 		}
 		name := entry.Name()
-		if name == activeFileName || isOpenSegmentName(name) {
+		if name == activeFileName || !binlog.SealedName(name) {
 			continue
 		}
 		info, err := entry.Info()
@@ -2552,7 +2609,7 @@ func purgeSplitRetention(ctx context.Context, dir string, localDays, bucketDays 
 		}
 		name := entry.Name()
 		seen[name] = struct{}{}
-		if name == activeFileName || isOpenSegmentName(name) {
+		if name == activeFileName || !binlog.SealedName(name) {
 			continue
 		}
 		info, err := entry.Info()
@@ -2691,15 +2748,8 @@ func (o *retentionObjects) release(ctx context.Context, name string, localOnly, 
 	return true, nil
 }
 
-func isOpenSegmentName(name string) bool {
-	return strings.Contains(name, ".open.e")
-}
-
 func isOpenCatalogRow(row tasks.BinlogFile) bool {
-	if strings.EqualFold(strings.TrimSpace(row.State), "OPEN") {
-		return true
-	}
-	return isOpenSegmentName(row.FileName) || isOpenSegmentName(filepath.Base(row.FilePath))
+	return tasks.CatalogRowOpen(row)
 }
 
 func isUploadedRow(row tasks.BinlogFile) bool {
@@ -2899,20 +2949,11 @@ func cleanupStaleOpenFiles(dir string, currentEpoch int64) error {
 		if entry.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		idx := strings.LastIndex(name, ".open.e")
-		if idx <= 0 {
+		named, ok := binlog.ClassifySegment(entry.Name())
+		if !ok || !named.Open || named.Epoch == currentEpoch {
 			continue
 		}
-		epochText := name[idx+len(".open.e"):]
-		epoch, err := strconv.ParseInt(epochText, 10, 64)
-		if err != nil {
-			continue
-		}
-		if epoch == currentEpoch {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
 			return err
 		}
 	}
@@ -3065,12 +3106,11 @@ func sealPath(localPath string, epoch int64) (string, string, error) {
 		return localPath, base, nil
 	}
 
-	expectedSuffix := fmt.Sprintf(".open.e%d", epoch)
-	sourceFile := strings.TrimSuffix(base, expectedSuffix)
-	if sourceFile == base {
+	named, ok := binlog.ClassifySegment(base)
+	if !ok || !named.Open || named.Epoch != epoch {
 		return "", "", fmt.Errorf("open file %s does not match epoch %d", base, epoch)
 	}
-	return filepath.Join(filepath.Dir(localPath), sourceFile), sourceFile, nil
+	return filepath.Join(filepath.Dir(localPath), named.Source), named.Source, nil
 }
 
 // sourceEventTime 提取 binlog 事件头时间戳（UTC）。

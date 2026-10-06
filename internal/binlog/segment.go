@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: an on-disk binlog segment basename
-// output: the source file, numeric index, epoch, and whether the name is an open segment
+// output: the source file, numeric index, epoch, and whether the name is an open segment, plus OpenName and SealedName; a rejected name including .takeover-* is neither
 // pos: the one segment-name classifier shared by the runner, durable resume, and the tasks disk scan
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -60,6 +60,20 @@ func ClassifySegment(name string) (SegmentName, bool) {
 		return SegmentName{}, false
 	}
 	return SegmentName{Source: source, Seq: seq, Epoch: epoch, Open: open}, true
+}
+
+// OpenName reports that basename is an open segment.
+// A name ClassifySegment rejects is not open.
+func OpenName(name string) bool {
+	named, ok := ClassifySegment(name)
+	return ok && named.Open
+}
+
+// SealedName reports that basename is a sealed segment.
+// A name ClassifySegment rejects, including .takeover-*, is not a binlog.
+func SealedName(name string) bool {
+	named, ok := ClassifySegment(name)
+	return ok && !named.Open
 }
 
 func parseEpochSuffix(text string) (int64, bool) {

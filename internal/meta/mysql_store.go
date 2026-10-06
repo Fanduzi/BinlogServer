@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 5 that tells the operator to run ./migrate up, required indexes uk_task_file_epoch and uk_task_source_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 5 that tells the operator to run ./migrate up, required indexes uk_task_file_epoch and uk_task_source_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -258,6 +258,9 @@ LIMIT ?;
 // uk_task_file_epoch matches that same row. A v0.5.49 upsert still binds both
 // columns to the source name and updates this row instead of inserting another.
 // Seal, enroll, and the open-segment upsert all pass that source basename as FileName.
+// A known end_pos is assigned. Zero in Go is unknown and is not this statement:
+// the writer binds NULL and uses upsertBinlogFileUnknownEndSQL, which does not
+// assign end_pos. start_pos NULL keeps the stored start.
 const upsertBinlogFileSQL = `
 INSERT INTO binlog_files (
   task_id, file_name, source_file, file_path, epoch, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
@@ -270,8 +273,32 @@ ON DUPLICATE KEY UPDATE
   file_path = VALUES(file_path),
   state = VALUES(state),
   size_bytes = VALUES(size_bytes),
-  start_pos = VALUES(start_pos),
+  start_pos = IF(VALUES(start_pos) IS NULL, start_pos, VALUES(start_pos)),
   end_pos = VALUES(end_pos),
+  created_at = VALUES(created_at),
+  sealed_at = VALUES(sealed_at),
+  object_key = VALUES(object_key),
+  upload_state = VALUES(upload_state),
+  upload_error = VALUES(upload_error),
+  uploaded_at = VALUES(uploaded_at),
+  checksum = VALUES(checksum);
+`
+
+// upsertBinlogFileUnknownEndSQL is the same insert when the caller does not
+// know end_pos. The update does not assign end_pos, so a stored end stays.
+const upsertBinlogFileUnknownEndSQL = `
+INSERT INTO binlog_files (
+  task_id, file_name, source_file, file_path, epoch, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
+  object_key, upload_state, upload_error, uploaded_at, checksum
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  file_name = VALUES(file_name),
+  source_file = VALUES(source_file),
+  file_path = VALUES(file_path),
+  state = VALUES(state),
+  size_bytes = VALUES(size_bytes),
+  start_pos = IF(VALUES(start_pos) IS NULL, start_pos, VALUES(start_pos)),
   created_at = VALUES(created_at),
   sealed_at = VALUES(sealed_at),
   object_key = VALUES(object_key),
@@ -325,8 +352,7 @@ SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at
 FROM binlog_files
 WHERE task_id = ?
   AND upload_state = 'UPLOAD_FAILED'
-  AND file_name NOT LIKE '%.open.e%'
-  AND file_path NOT LIKE '%.open.e%'
+  AND state = 'SEALED'
 ORDER BY sealed_at DESC
 LIMIT ?;
 `
@@ -1331,11 +1357,15 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	// (task_id, source_file, epoch). Callers do not pass the on-disk .open.eN
 	// or .sealed.eN basename here.
 	sourceFile := meta.FileName
+	query := upsertBinlogFileSQL
+	if meta.EndPos == 0 {
+		query = upsertBinlogFileUnknownEndSQL
+	}
 
 	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		_, err := s.db.ExecContext(
 			ctx,
-			upsertBinlogFileSQL,
+			query,
 			meta.TaskID,
 			sourceFile,
 			sourceFile,

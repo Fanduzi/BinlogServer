@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failed upload metadata via failedUploadFileReader, manual and background retry requests, local sealed files, and object storage uploader operations
-// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows including a checksum mismatch re-upload and an unfinished checksum re-check, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
+// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows including a checksum mismatch re-upload and an unfinished checksum re-check, refusal of a name ClassifySegment rejects, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
 // pos: scheduler upload-retry compensation, background retry loop, and failure-observability logic
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,9 +10,12 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"binlog_server/internal/binlog"
 )
 
 const (
@@ -231,12 +234,14 @@ func (s *Scheduler) markRetryUploadFailure(fileStore FileStore, file BinlogFile,
 
 // isSealedFileForRetry 判定文件是否满足补传前提（已 seal 且非 open 文件）。
 func isSealedFileForRetry(file BinlogFile) bool {
-	name := strings.ToLower(strings.TrimSpace(file.FileName))
-	path := strings.ToLower(strings.TrimSpace(file.FilePath))
-	if strings.Contains(name, ".open.e") || strings.Contains(path, ".open.e") {
+	if CatalogRowOpen(file) || file.SealedAt.IsZero() {
 		return false
 	}
-	return !file.SealedAt.IsZero()
+	name := filepath.Base(strings.TrimSpace(file.FilePath))
+	if name == "" || name == "." || name == ".." {
+		name = strings.TrimSpace(file.FileName)
+	}
+	return binlog.SealedName(name) || binlog.SealedName(strings.TrimSpace(file.FileName))
 }
 
 // CountUploadFailures 统计全局上传失败记录数（metrics 使用）。
