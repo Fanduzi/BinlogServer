@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: mysql57 source, a scratch metadata database, and the current binlog-server binary
-# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, a held proxy path where Stop then Start never has two Binlog Dumps and ends with pending cleared and dumps=1, a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile, and the same unreachable Stop on schema 3 (no pending_dump_cleanup column) that stays pending after STOPPED and clears with zero dumps after the path returns without a manual KILL
+# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, a held proxy path where Stop then Start never has two Binlog Dumps and ends with pending cleared and dumps=1, a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile, schema 4 still has pending_dump_cleanup after dropping 000005, and schema 3 (column absent) is refused by this binary with schema version too old and ./migrate up
 # pos: acceptance check for the desired-run control loop, issue 193, issue 249, issue 252, and the spec_revision=0 upgrade reconcile
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -22,7 +22,6 @@ SCRATCH_DB="binlog_meta_ctlloop"
 DUMP_USER="e2ectl${RUN_TAG: -6}"
 UPG_USER="e2eupg${RUN_TAG: -6}"
 CUT_USER="e2ecut${RUN_TAG: -6}"
-S3_USER="e2es3${RUN_TAG: -6}"
 FENCE_USER="e2efc${RUN_TAG: -6}"
 PASS1="ctlpass1"
 PASS2="ctlpass2"
@@ -642,9 +641,10 @@ fi
 
 echo "[control-loop] upgraded RUNNING task stayed running"
 
-# Schema 3 has no pending_dump_cleanup column. The marker must stay on this
-# all-in-one process after STOPPED, then clear when the path returns.
-# No manual KILL is issued.
+# Schema 5 includes pending_dump_cleanup. Dropping 000005 returns to schema 4
+# and keeps that column. One more down reaches schema 3, where the column is
+# gone. This binary requires schema 5, so it refuses schema 3 instead of
+# keeping a process-local marker.
 kill_pid "$ALL_PID"
 ALL_PID=""
 (
@@ -653,8 +653,24 @@ ALL_PID=""
 )
 SCHEMA="$(meta_exec "SELECT version, dirty FROM schema_migrations")"
 SCHEMA="$(printf '%s' "$SCHEMA" | tr -d '[:space:]')"
+if [[ "$SCHEMA" != "40" ]]; then
+  echo "schema after dropping 000005: [$SCHEMA] want 4 0" >&2
+  exit 1
+fi
+PENDING_COL="$(meta_exec "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_tasks' AND COLUMN_NAME = 'pending_dump_cleanup'")"
+if [[ "$PENDING_COL" != "1" ]]; then
+  echo "schema 4 lost pending_dump_cleanup: $PENDING_COL" >&2
+  exit 1
+fi
+echo "[control-loop] schema 4 keeps pending_dump_cleanup"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
+)
+SCHEMA="$(meta_exec "SELECT version, dirty FROM schema_migrations")"
+SCHEMA="$(printf '%s' "$SCHEMA" | tr -d '[:space:]')"
 if [[ "$SCHEMA" != "30" ]]; then
-  echo "schema after down: [$SCHEMA] want 3 0" >&2
+  echo "schema after dropping 000004: [$SCHEMA] want 3 0" >&2
   exit 1
 fi
 PENDING_COL="$(meta_exec "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_tasks' AND COLUMN_NAME = 'pending_dump_cleanup'")"
@@ -664,77 +680,46 @@ if [[ "$PENDING_COL" != "0" ]]; then
 fi
 echo "[control-loop] schema 3 column absent"
 
-source_exec "CREATE USER IF NOT EXISTS '${S3_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${S3_USER}'@'%'; FLUSH PRIVILEGES;"
-start_all_in_one
-start_proxy "$MYSQL57_PORT"
-S3_SID=$((SID + 3))
-S3_BODY="$(jq -n \
-  --arg name "e2e-s3-${RUN_TAG}" \
-  --arg user "$S3_USER" \
-  --arg pass "$PASS1" \
-  --argjson port "$PROXY_PORT" \
-  --argjson sid "$S3_SID" \
-  '{name:$name,cluster_key:$name,source:{host:"127.0.0.1",port:$port,user:$user,password:$pass,flavor:"mysql",server_id:$sid},start:{mode:"LATEST"},storage:{retention_days:7}}')"
-S3_CREATED="$(curl -fsS -X POST "$API/api/tasks" -H 'Content-Type: application/json' -d "$S3_BODY")"
-S3_ID="$(printf '%s' "$S3_CREATED" | jq -r '.id // empty')"
-if [[ -z "$S3_ID" || "$S3_ID" == "null" ]]; then
-  echo "schema 3 create failed: $S3_CREATED" >&2
-  exit 1
-fi
-HTTP="$(curl -sS -o /tmp/e2e-ctl-s3-start.resp -w '%{http_code}' -X POST "$API/api/tasks/$S3_ID/start")"
-if [[ "$HTTP" != "204" ]]; then
-  echo "schema 3 start failed http=$HTTP body=$(cat /tmp/e2e-ctl-s3-start.resp)" >&2
-  exit 1
-fi
-wait_state "$S3_ID" "RUNNING"
-wait_dumps "$S3_USER" 1
-stop_proxy
-wait_state "$S3_ID" "RETRY_BACKOFF"
-HTTP="$(curl -sS -o /tmp/e2e-ctl-s3-stop.resp -w '%{http_code}' -X POST "$API/api/tasks/$S3_ID/stop")"
-if [[ "$HTTP" != "204" ]]; then
-  echo "schema 3 stop failed http=$HTTP body=$(cat /tmp/e2e-ctl-s3-stop.resp) state=$(task_state "$S3_ID")" >&2
-  exit 1
-fi
-S3_CONN=""
-S3_WARN=""
-S3_LOCAL=""
-for _ in {1..90}; do
-  BODY="$(task_json "$S3_ID")"
-  STATE="$(printf '%s' "$BODY" | jq -r '.state // empty')"
-  if [[ "$STATE" == "STOPPED" ]]; then
-    S3_CONN="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
-    S3_WARN="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.warning // empty')"
-    S3_LOCAL="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.process_local // false')"
+mkdir -p "$DATA_DIR/schema3"
+: >"$ALL_LOG"
+BINLOG_SERVER_MODE="cluster" \
+BINLOG_SERVER_CLUSTER_ROLE="all-in-one" \
+BINLOG_SERVER_CLUSTER_WORKER_ID="e2e-ctl-all" \
+BINLOG_SERVER_LISTEN_ADDR="127.0.0.1:18080" \
+BINLOG_SERVER_DATA_DIR="$DATA_DIR/schema3" \
+BINLOG_SERVER_META_DSN="$SCRATCH_DSN" \
+  nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$ALL_LOG" 2>&1 &
+ALL_PID=$!
+refused=0
+for _ in $(seq 1 60); do
+  if ! kill -0 "$ALL_PID" >/dev/null 2>&1; then
+    refused=1
     break
   fi
-  sleep 0.5
-done
-if [[ "$(task_state "$S3_ID")" != "STOPPED" || "$S3_CONN" == "0" || "$S3_CONN" == "null" || "$S3_CONN" == "" ]]; then
-  echo "schema 3 unreachable stop did not stay pending; state=$(task_state "$S3_ID") conn=$S3_CONN body=$(task_json "$S3_ID")" >&2
-  cat "$ALL_LOG" >&2 || true
-  exit 1
-fi
-if [[ "$S3_LOCAL" != "true" || "$S3_WARN" != *"this process"* || "$S3_WARN" != *"may still be open"* ]]; then
-  echo "schema 3 pending warning=$S3_WARN process_local=$S3_LOCAL" >&2
-  exit 1
-fi
-echo "[control-loop] schema 3 unreachable stop STOPPED pending conn=$S3_CONN process_local=$S3_LOCAL warning=$S3_WARN"
-start_proxy "$MYSQL57_PORT"
-S3_CLEARED=""
-for _ in {1..90}; do
-  BODY="$(task_json "$S3_ID")"
-  LEFT="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
-  DUMPS="$(dump_count "$S3_USER")"
-  if [[ ("$LEFT" == "0" || "$LEFT" == "null") && "$DUMPS" == "0" ]]; then
-    S3_CLEARED=1
-    break
+  if curl -fsS "$API/healthz" >/dev/null 2>&1; then
+    echo "schema 3 passed healthz" >&2
+    exit 1
   fi
   sleep 1
 done
-if [[ -z "$S3_CLEARED" ]]; then
-  echo "schema 3 path restored but pending=$(task_json "$S3_ID" | jq -c '.pending_dump_cleanup // empty') dumps=$(dump_count "$S3_USER")" >&2
+if [[ "$refused" != "1" ]]; then
+  echo "schema 3 process still running" >&2
   cat "$ALL_LOG" >&2 || true
   exit 1
 fi
-echo "[control-loop] schema 3 path restored pending cleared dumps=0 no manual KILL"
-stop_proxy
+set +e
+wait "$ALL_PID"
+rc=$?
+set -e
+ALL_PID=""
+if [[ "$rc" != "1" ]]; then
+  echo "schema 3 exit $rc, want 1" >&2
+  cat "$ALL_LOG" >&2 || true
+  exit 1
+fi
+if ! grep -q 'schema version too old' "$ALL_LOG" || ! grep -q '\./migrate up' "$ALL_LOG"; then
+  echo "schema 3 log missing schema version too old or ./migrate up" >&2
+  cat "$ALL_LOG" >&2 || true
+  exit 1
+fi
+echo "[control-loop] schema 3 refused; this binary requires schema 5"

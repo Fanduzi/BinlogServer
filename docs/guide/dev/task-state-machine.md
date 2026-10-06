@@ -401,7 +401,7 @@ func (s *Scheduler) StopTask(id string) error {
 
 只有白名单里的错误留在同一次所有权里重试。`SOURCE_UNREACHABLE` 连续 10 次后才 `FAILED`，runner ready 会把这个计数清零。瞬时元数据错误（与 `meta.IsTransientMySQLError` 同一组文本）没有任务级次数上限，恢复后回到 `RUNNING`，不经过 `FAILED`。`OBJECT_PURGE_FAILED` 不是任务失败。除此之外，包括没有已存 GTID 的 MySQL 1236 和未分类的 runner 错误，在任务仍应继续跑的时候第一次就 `FAILED`，写一条 `TASK_FAILED`，放开租约。1236 且没有 GTID 时 `last_error` 写明 1236 和 purged binlog。
 
-内存已经是 `STOPPING` 或 `STOPPED`，或者库里的行已经是更新的一次 Stop 时，这次 runner 错误不进白名单。任务收成 `STOPPED`，不写 `TASK_FAILED`。Stop 时 KILL 连不上源库也走这条：行仍是 `STOPPED`，`pending_dump_cleanup` 记下那个连接号（migration `000004`，`minRequiredSchemaVersion` 仍是 3），后台再试 KILL。这不是 `FAILED`。重试循环在库里已经是这次 Stop 时退出，不再把旧的 `RETRY_BACKOFF` 快照盖回去。
+内存已经是 `STOPPING` 或 `STOPPED`，或者库里的行已经是更新的一次 Stop 时，这次 runner 错误不进白名单。任务收成 `STOPPED`，不写 `TASK_FAILED`。Stop 时 KILL 连不上源库也走这条：行仍是 `STOPPED`，`pending_dump_cleanup` 记下那个连接号（migration `000004`；这一份代码的 `minRequiredSchemaVersion` 是 5，schema 5 已包含这一列），后台再试 KILL。这不是 `FAILED`。重试循环在库里已经是这次 Stop 时退出，不再把旧的 `RETRY_BACKOFF` 快照盖回去。
 
 封文件时租约 epoch 已经不属于本进程：这不是 `FAILED`。本进程停止 runner，只放开自己的 epoch，不把共享任务行写成 `FAILED` 或 `RETRY_BACKOFF`。没有元数据库时本进程内存状态是 `STOPPED`，事件为 `TASK_LEASE_YIELDED`。
 

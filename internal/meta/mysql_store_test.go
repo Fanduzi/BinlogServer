@@ -1414,7 +1414,7 @@ func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
-		WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(int64(2), false))
+		WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(int64(4), false))
 
 	err = store.ensureSchema(context.Background())
 	if err == nil {
@@ -1423,7 +1423,10 @@ func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
 	if !strings.Contains(err.Error(), "./migrate up") {
 		t.Fatalf("error should tell the operator to run ./migrate up, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "current=2") || !strings.Contains(err.Error(), "required>=3") {
+	if !strings.Contains(err.Error(), "schema version too old") {
+		t.Fatalf("error should say schema version too old, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "current=4") || !strings.Contains(err.Error(), "required>=5") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -1529,7 +1532,7 @@ func TestMySQLTaskStore_EnsureSchemaValid(t *testing.T) {
 		t.Fatalf("ensureSchema returned error: %v", err)
 	}
 	if store.PendingDumpColumn() {
-		t.Fatal("schema 3 without 000004 must keep the pending column optional")
+		t.Fatal("a missing pending_dump_cleanup column stays optional")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
