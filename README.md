@@ -275,7 +275,7 @@ Notes for v0.5.27 through v0.5.44: [docs/releases/release-notes-v0.5.44.md](docs
 
 ## Architecture
 
-BinlogServer is structured as a modular control plane with clear separation between API ingestion, state scheduling, replication execution, metadata coordination, and UI delivery. In metadata mode, `backup_tasks.desired_run` and `spec_revision` are the operator intent, and the worker control loop opens or closes one dump until the row matches. `STOPPED` is written after the dump connection closes. If that close cannot KILL the old Binlog Dump because the source is unreachable, the task is still STOPPED and `pending_dump_cleanup` stays until a later KILL succeeds.
+BinlogServer is structured as a modular control plane with clear separation between API ingestion, state scheduling, replication execution, metadata coordination, and UI delivery. In metadata mode, `backup_tasks.desired_run` and `spec_revision` are the operator intent, and the worker control loop opens or closes one dump until the row matches. `STOPPED` is written after the dump connection closes. If that close cannot KILL the old Binlog Dump because the source is unreachable, the task is still STOPPED and `pending_dump_cleanup` stays until a later KILL succeeds. On schema 3 that marker stays in the process that held the dump, including after the runner exits. Migration `000004` stores it so a restart and other processes can see it.
 
 ### Modules
 

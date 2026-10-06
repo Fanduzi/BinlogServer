@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the last pending Binlog Dump cleanup and the result of one KILL attempt
-// output: the next pending marker and whether that transition emits one pending or cleared event
+// output: the next pending marker, a process-local warning when the metadata column is absent, and whether that transition emits one pending or cleared event
 // pos: state machine for a Stop whose KILL could not reach the source
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -18,16 +18,24 @@ const (
 
 // DumpCleanup is one Binlog Dump connection Stop could not KILL.
 // Warning is filled in for the API. It is not stored.
+// ProcessLocal is true when this process is the only copy (schema 3). It is not stored.
 type DumpCleanup struct {
 	ConnectionID uint32 `json:"connection_id"`
 	Host         string `json:"host,omitempty"`
 	Port         uint16 `json:"port,omitempty"`
 	Warning      string `json:"warning,omitempty"`
+	ProcessLocal bool   `json:"process_local,omitempty"`
 }
 
 // DumpCleanupWarning is the operator sentence for one leftover connection.
 func DumpCleanupWarning(connectionID uint32) string {
 	return fmt.Sprintf("source Binlog Dump connection %d may still be open; will KILL when source is reachable", connectionID)
+}
+
+// DumpCleanupProcessLocalWarning is DumpCleanupWarning plus the schema-3 limit.
+// Cluster mode: only the worker that held the dump has this copy.
+func DumpCleanupProcessLocalWarning(connectionID uint32) string {
+	return DumpCleanupWarning(connectionID) + ". Only this process, the worker that held the dump, keeps this warning; another process or a restart does not, until migration 000004"
 }
 
 // DumpCleanupClearedMessage is the event text once that connection is gone.
