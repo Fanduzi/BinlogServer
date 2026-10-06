@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# input: meta-primary MySQL, migration 000003, and the current binlog-server binary
-# output: proof that up lands on schema (3,0), backfills desired_run, the current binary starts on schema 3, refuses schema 2 with ./migrate up, and down returns to version 2 without deleting rows
-# pos: acceptance check for the task-desired migration and the schema 3 startup gate
+# input: meta-primary MySQL, migrations 000003 and 000004, and the current binlog-server binary
+# output: proof that up lands on schema (4,0), backfills desired_run, 000004 adds pending_dump_cleanup with default empty, one down returns to schema 3 and the current binary starts, the next down returns to version 2 without deleting rows, and schema 2 is refused with ./migrate up
+# pos: acceptance check for the task-desired migration, the optional pending-dump column, and the schema 3 startup gate
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -98,12 +98,12 @@ fi
 
 version_row="$(meta_sql "SELECT version, dirty FROM schema_migrations")"
 version_row="$(printf '%s' "$version_row" | tr -d '[:space:]')"
-if [[ "$version_row" != "30" ]]; then
-  fail "schema_migrations after up: [$version_row] want 3 0"
+if [[ "$version_row" != "40" ]]; then
+  fail "schema_migrations after up: [$version_row] want 4 0"
 fi
 
 show_columns="$(meta_sql "SHOW COLUMNS FROM backup_tasks")"
-for col in desired_run spec_revision applied_spec_revision failed_spec_revision retry_attempt consecutive_source_failures; do
+for col in desired_run spec_revision applied_spec_revision failed_spec_revision retry_attempt consecutive_source_failures pending_dump_cleanup; do
   if ! printf '%s\n' "$show_columns" | awk -F'\t' -v c="$col" '$1==c { found=1 } END { exit found ? 0 : 1 }'; then
     echo "$show_columns" >&2
     fail "SHOW COLUMNS missing $col"
@@ -146,9 +146,32 @@ old_row="$(sql_one "SELECT CONCAT(desired_run, spec_revision, applied_spec_revis
 if [[ "$old_row" != "STOP00000" ]]; then
   fail "old insert defaults: $old_row"
 fi
+pending_default="$(sql_one "SELECT pending_dump_cleanup FROM backup_tasks WHERE id='m3-old-binary'")"
+if [[ -n "$pending_default" ]]; then
+  fail "pending_dump_cleanup default: [$pending_default]"
+fi
 
 count_before_down="$(sql_one "SELECT COUNT(*) FROM backup_tasks")"
 files_before_down="$(sql_one "SELECT COUNT(*) FROM binlog_files")"
+
+echo "[task-desired] down 000004 only; schema 3 still has the desired-run columns"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
+)
+version_pending="$(meta_sql "SELECT version, dirty FROM schema_migrations")"
+version_pending="$(printf '%s' "$version_pending" | tr -d '[:space:]')"
+if [[ "$version_pending" != "30" ]]; then
+  fail "schema_migrations after dropping 000004: [$version_pending] want 3 0"
+fi
+pending_left="$(sql_one "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_tasks' AND COLUMN_NAME = 'pending_dump_cleanup'")"
+desired_left="$(sql_one "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_tasks' AND COLUMN_NAME = 'desired_run'")"
+if [[ "$pending_left" != "0" || "$desired_left" != "1" ]]; then
+  fail "000004 down pending=$pending_left desired_run=$desired_left"
+fi
+if [[ "$(sql_one "SELECT COUNT(*) FROM backup_tasks")" != "$count_before_down" || "$(sql_one "SELECT COUNT(*) FROM binlog_files")" != "$files_before_down" ]]; then
+  fail "000004 down changed row counts"
+fi
 
 echo "[task-desired] start current binary against schema 3"
 mkdir -p "$DATA_DIR"

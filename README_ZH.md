@@ -269,7 +269,7 @@ v0.5.27 至 v0.5.44 的记录：[docs/releases/v0.5.44.zh-CN.md](docs/releases/v
 
 ## 架构
 
-BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排、复制执行、元数据持久化、Upload 集成与 UI 交付之间边界清晰。
+BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排、复制执行、元数据持久化、Upload 集成与 UI 交付之间边界清晰。源库不可达时 Stop 仍写成 `STOPPED`，`pending_dump_cleanup` 记下还没 KILL 掉的 Binlog Dump，源库恢复后会再试。
 
 ### 模块
 

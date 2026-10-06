@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# input: mysql57 source, a scratch metadata database at schema 3, and the current binlog-server binary
-# output: one Binlog Dump after a password change during Stop then Start, zero dumps when state is STOPPED, and a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile
-# pos: acceptance check for the desired-run control loop, issue 193, and the spec_revision=0 upgrade reconcile
+# input: mysql57 source, a scratch metadata database, and the current binlog-server binary
+# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, and a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile
+# pos: acceptance check for the desired-run control loop, issue 193, issue 249, and the spec_revision=0 upgrade reconcile
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -18,8 +18,11 @@ WORKER_HEALTH_ADDR="${E2E_WORKER_HEALTH_ADDR:-127.0.0.1:18081}"
 SCRATCH_DB="binlog_meta_ctlloop"
 DUMP_USER="e2ectl${RUN_TAG: -6}"
 UPG_USER="e2eupg${RUN_TAG: -6}"
+CUT_USER="e2ecut${RUN_TAG: -6}"
 PASS1="ctlpass1"
 PASS2="ctlpass2"
+PROXY_PORT=""
+PROXY_PID=""
 
 CONTROL_PID=""
 WORKER_PID=""
@@ -38,6 +41,7 @@ need_cmd curl
 need_cmd docker
 need_cmd jq
 need_cmd go
+need_cmd python3
 
 kill_pid() {
   local pid="$1"
@@ -48,6 +52,7 @@ kill_pid() {
 }
 
 cleanup() {
+  stop_proxy
   kill_pid "$ALL_PID"
   kill_pid "$WORKER_PID"
   kill_pid "$CONTROL_PID"
@@ -118,6 +123,83 @@ stop_pair() {
   CONTROL_PID=""
 }
 
+port_open() {
+  (echo >/dev/tcp/127.0.0.1/"$1") >/dev/null 2>&1
+}
+
+start_proxy() {
+  local target="$1"
+  PROXY_PORT=$((19000 + RUN_TAG % 1000))
+  while port_open "$PROXY_PORT"; do
+    PROXY_PORT=$((PROXY_PORT + 1))
+  done
+  # One process, same cut as killing socat: the dump's TCP path disappears.
+  cat >/tmp/e2e-ctl-proxy-"${RUN_TAG}".py <<'PY'
+import socket, sys, threading
+listen_port, target_port = int(sys.argv[1]), int(sys.argv[2])
+ls = socket.socket()
+ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+ls.bind(("127.0.0.1", listen_port))
+ls.listen(32)
+def pipe(a, b):
+    try:
+        while True:
+            data = a.recv(65536)
+            if not data:
+                break
+            b.sendall(data)
+    except Exception:
+        pass
+    finally:
+        for s in (a, b):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+def handle(client):
+    try:
+        upstream = socket.create_connection(("127.0.0.1", target_port))
+    except Exception:
+        client.close()
+        return
+    threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
+    pipe(upstream, client)
+    client.close()
+    upstream.close()
+while True:
+    client, _ = ls.accept()
+    threading.Thread(target=handle, args=(client,), daemon=True).start()
+PY
+  python3 /tmp/e2e-ctl-proxy-"${RUN_TAG}".py "$PROXY_PORT" "$target" \
+    >/tmp/e2e-ctl-proxy-"${RUN_TAG}".log 2>&1 &
+  PROXY_PID=$!
+  for _ in {1..50}; do
+    if port_open "$PROXY_PORT"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "proxy not listening on $PROXY_PORT" >&2
+  cat /tmp/e2e-ctl-proxy-"${RUN_TAG}".log >&2 || true
+  return 1
+}
+
+stop_proxy() {
+  if [[ -n "${PROXY_PID:-}" ]]; then
+    kill "$PROXY_PID" >/dev/null 2>&1 || true
+    wait "$PROXY_PID" >/dev/null 2>&1 || true
+    PROXY_PID=""
+  fi
+  if [[ -n "${PROXY_PORT:-}" ]]; then
+    for _ in {1..50}; do
+      if ! port_open "$PROXY_PORT"; then
+        return 0
+      fi
+      sleep 0.1
+    done
+  fi
+}
+
 start_all_in_one() {
   mkdir -p "$DATA_DIR/all"
   BINLOG_SERVER_MODE="cluster" \
@@ -171,7 +253,7 @@ docker compose -f "$COMPOSE_FILE" exec -T meta-primary \
   META_DSN="$SCRATCH_DSN" go run ./cmd/migrate up
 )
 
-source_exec "CREATE USER IF NOT EXISTS '${DUMP_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${DUMP_USER}'@'%'; CREATE USER IF NOT EXISTS '${UPG_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${UPG_USER}'@'%'; FLUSH PRIVILEGES;"
+source_exec "CREATE USER IF NOT EXISTS '${DUMP_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${DUMP_USER}'@'%'; CREATE USER IF NOT EXISTS '${UPG_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${UPG_USER}'@'%'; CREATE USER IF NOT EXISTS '${CUT_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${CUT_USER}'@'%'; FLUSH PRIVILEGES;"
 
 start_control_plane
 start_worker
@@ -268,8 +350,9 @@ for _ in {1..90}; do
   if [[ "$STATE" == "STOPPED" ]]; then
     DUMPS="$(dump_count "$DUMP_USER")"
     OWNER="$(printf '%s' "$BODY" | jq -r '.owner_worker_id // empty')"
-    if [[ "$DUMPS" != "0" || -n "$OWNER" ]]; then
-      echo "STOPPED with dumps=$DUMPS owner=$OWNER" >&2
+    PENDING="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
+    if [[ "$DUMPS" != "0" || -n "$OWNER" || "$PENDING" != "0" ]]; then
+      echo "STOPPED with dumps=$DUMPS owner=$OWNER pending=$PENDING" >&2
       exit 1
     fi
     break
@@ -282,6 +365,92 @@ if [[ "$(task_state "$TASK_ID")" != "STOPPED" ]]; then
 fi
 
 echo "[control-loop] password change during stop left one dump, then zero"
+
+# Cut the path to the source while a dump is open. Stop must still become
+# STOPPED, name the leftover connection, and clear it after the path returns
+# without a manual KILL on the source.
+start_proxy "$MYSQL57_PORT"
+CUT_SID=$((SID + 2))
+CUT_BODY="$(jq -n \
+  --arg name "e2e-cut-${RUN_TAG}" \
+  --arg user "$CUT_USER" \
+  --arg pass "$PASS1" \
+  --argjson port "$PROXY_PORT" \
+  --argjson sid "$CUT_SID" \
+  '{name:$name,cluster_key:$name,source:{host:"127.0.0.1",port:$port,user:$user,password:$pass,flavor:"mysql",server_id:$sid},start:{mode:"LATEST"},storage:{retention_days:7}}')"
+CUT_CREATED="$(curl -fsS -X POST "$API/api/tasks" -H 'Content-Type: application/json' -d "$CUT_BODY")"
+CUT_ID="$(printf '%s' "$CUT_CREATED" | jq -r '.id // empty')"
+if [[ -z "$CUT_ID" || "$CUT_ID" == "null" ]]; then
+  echo "cut create failed: $CUT_CREATED" >&2
+  exit 1
+fi
+HTTP="$(curl -sS -o /tmp/e2e-ctl-cut-start.resp -w '%{http_code}' -X POST "$API/api/tasks/$CUT_ID/start")"
+if [[ "$HTTP" != "204" ]]; then
+  echo "cut start failed http=$HTTP body=$(cat /tmp/e2e-ctl-cut-start.resp)" >&2
+  exit 1
+fi
+wait_state "$CUT_ID" "RUNNING"
+wait_dumps "$CUT_USER" 1
+stop_proxy
+if port_open "$PROXY_PORT"; then
+  echo "proxy still listening on $PROXY_PORT" >&2
+  exit 1
+fi
+wait_state "$CUT_ID" "RETRY_BACKOFF"
+HTTP="$(curl -sS -o /tmp/e2e-ctl-cut-stop.resp -w '%{http_code}' -X POST "$API/api/tasks/$CUT_ID/stop")"
+if [[ "$HTTP" != "204" ]]; then
+  echo "cut stop failed http=$HTTP body=$(cat /tmp/e2e-ctl-cut-stop.resp) state=$(task_state "$CUT_ID")" >&2
+  exit 1
+fi
+CONN=""
+WARN=""
+for _ in {1..90}; do
+  BODY="$(task_json "$CUT_ID")"
+  STATE="$(printf '%s' "$BODY" | jq -r '.state // empty')"
+  if [[ "$STATE" == "STOPPED" ]]; then
+    CONN="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
+    WARN="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.warning // empty')"
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$(task_state "$CUT_ID")" != "STOPPED" || "$CONN" == "0" || "$CONN" == "null" || "$CONN" == "" ]]; then
+  echo "unreachable stop did not stay pending; state=$(task_state "$CUT_ID") conn=$CONN body=$(task_json "$CUT_ID")" >&2
+  cat "$WORKER_LOG" >&2 || true
+  exit 1
+fi
+if [[ "$WARN" != *"may still be open"* ]]; then
+  echo "pending warning=$WARN" >&2
+  exit 1
+fi
+echo "[control-loop] unreachable stop STOPPED pending conn=$CONN warning=$WARN"
+start_proxy "$MYSQL57_PORT"
+CLEARED=""
+for _ in {1..90}; do
+  BODY="$(task_json "$CUT_ID")"
+  LEFT="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
+  DUMPS="$(dump_count "$CUT_USER")"
+  if [[ ("$LEFT" == "0" || "$LEFT" == "null") && "$DUMPS" == "0" ]]; then
+    CLEARED=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$CLEARED" ]]; then
+  echo "path restored but pending=$(task_json "$CUT_ID" | jq -c '.pending_dump_cleanup // empty') dumps=$(dump_count "$CUT_USER")" >&2
+  cat "$WORKER_LOG" >&2 || true
+  exit 1
+fi
+EVENTS="$(curl -fsS "$API/api/tasks/$CUT_ID/events")"
+PENDING_N="$(printf '%s' "$EVENTS" | jq '[.[] | select(.type=="DUMP_CLEANUP_PENDING")] | length')"
+CLEARED_N="$(printf '%s' "$EVENTS" | jq '[.[] | select(.type=="DUMP_CLEANUP_CLEARED")] | length')"
+if [[ "$PENDING_N" != "1" || "$CLEARED_N" != "1" ]]; then
+  echo "cleanup events pending=$PENDING_N cleared=$CLEARED_N" >&2
+  printf '%s\n' "$EVENTS" >&2
+  exit 1
+fi
+echo "[control-loop] path restored pending cleared dumps=0"
+stop_proxy
 
 stop_pair
 

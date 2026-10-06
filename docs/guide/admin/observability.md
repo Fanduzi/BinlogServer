@@ -323,6 +323,8 @@ curl "http://localhost:8080/api/tasks/{task_id}/events?event_type=TASK_ERROR"
 | `TASK_CREATED` | 任务创建 |
 | `TASK_STARTED` | 任务启动 |
 | `TASK_STOPPED` | 任务停止 |
+| `DUMP_CLEANUP_PENDING` | Stop 没能 KILL 掉的源库 Binlog Dump。`message` 说明连接号还可能开着，源库可达后会 KILL |
+| `DUMP_CLEANUP_CLEARED` | 该连接已 KILL，或源库 processlist 里已经没有这个号 |
 | `TASK_ERROR` | 任务错误 |
 | `TASK_LEASE_ACQUIRED` | 获取租约 |
 | `TASK_LEASE_LOST` | 租约丢失 |
