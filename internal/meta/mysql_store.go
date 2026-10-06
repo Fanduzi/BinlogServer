@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 3 that tells the operator to run ./migrate up, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 5 that tells the operator to run ./migrate up, required indexes uk_task_file_epoch and uk_task_source_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -24,7 +24,7 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-const minRequiredSchemaVersion int64 = 3
+const minRequiredSchemaVersion int64 = 5
 
 const currentSchemaVersionSQL = `
 SELECT version, dirty
@@ -93,7 +93,7 @@ var requiredTableSchemas = []tableSchemaSpec{
 			"size_bytes", "start_pos", "end_pos", "created_at", "sealed_at", "object_key",
 			"upload_state", "upload_error", "uploaded_at",
 		},
-		Indexes: []string{"PRIMARY", "uk_task_file_epoch", "idx_task_sealed"},
+		Indexes: []string{"PRIMARY", "uk_task_file_epoch", "uk_task_source_epoch", "idx_task_sealed"},
 	},
 	{
 		Name: "task_leases",
@@ -253,6 +253,11 @@ ORDER BY id DESC
 LIMIT ?;
 `
 
+// upsertBinlogFileSQL writes one segment identified by (task_id, source_file, epoch),
+// which is uk_task_source_epoch. file_name stays the same source basename, so
+// uk_task_file_epoch matches that same row. A v0.5.49 upsert still binds both
+// columns to the source name and updates this row instead of inserting another.
+// Seal, enroll, and the open-segment upsert all pass that source basename as FileName.
 const upsertBinlogFileSQL = `
 INSERT INTO binlog_files (
   task_id, file_name, source_file, file_path, epoch, state, size_bytes, start_pos, end_pos, created_at, sealed_at,
@@ -260,6 +265,7 @@ INSERT INTO binlog_files (
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
+  file_name = VALUES(file_name),
   source_file = VALUES(source_file),
   file_path = VALUES(file_path),
   state = VALUES(state),
@@ -1321,14 +1327,18 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	if state == "" {
 		state = "SEALED"
 	}
+	// file_name and source_file are the source basename. The segment key is
+	// (task_id, source_file, epoch). Callers do not pass the on-disk .open.eN
+	// or .sealed.eN basename here.
+	sourceFile := meta.FileName
 
 	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		_, err := s.db.ExecContext(
 			ctx,
 			upsertBinlogFileSQL,
 			meta.TaskID,
-			meta.FileName,
-			meta.FileName,
+			sourceFile,
+			sourceFile,
 			meta.FilePath,
 			meta.Epoch,
 			state,
