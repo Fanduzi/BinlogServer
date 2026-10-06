@@ -132,7 +132,7 @@ type CheckpointReader interface {
 type EventStore interface {
 	// AppendEvent 追加任务事件。
 	AppendEvent(ctx context.Context, event TaskEvent) error
-	// ListEvents 按倒序读取任务事件。
+	// ListEvents 读取任务事件，旧的在前。limit 保留最新的若干条。
 	ListEvents(ctx context.Context, taskID string, limit int) ([]TaskEvent, error)
 }
 
