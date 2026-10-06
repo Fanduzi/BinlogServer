@@ -50,14 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.45)
+## 3. 安装与产物准备 (v0.5.46)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
 
-> ⚠️ **v0.5.45 启动前元数据必须是 schema 3。先执行 `./migrate up`。** 如果还不是 schema 3，schema 2 到 3 可以在进程保持运行时做，不需要为这次迁移重启。确认 `SELECT version, dirty FROM schema_migrations` 为 `(3, 0)`，然后再替换二进制。v0.5.45 还在跑时不要 `./migrate down` 回到 schema 2。没有新的配置项。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。细节见 [docs/releases/release-notes-v0.5.45.md](../../releases/release-notes-v0.5.45.md)。
+> ⚠️ **v0.5.46 启动前先停掉全部 v0.5.44 / v0.5.45。元数据至少是 schema 3。** `minRequiredSchemaVersion` 仍是 3。如果还不是 schema 3，schema 2 到 3 可以在旧进程保持运行时做，不需要为这次迁移重启。确认 `SELECT version, dirty FROM schema_migrations` 为 `(3, 0)`。迁移 `000004_pending_dump_cleanup` 只加一列，在线。单进程可以不跑。集群必须跑，跑完是 `(4, 0)`。不要和 v0.5.44、v0.5.45 混跑。v0.5.46 还在跑时不要 `./migrate down` 回到 schema 2。没有新的配置项。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。细节见 [docs/releases/release-notes-v0.5.46.md](../../releases/release-notes-v0.5.46.md)。
 
 ```bash
-VER=0.5.45
+VER=0.5.46
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,21 +69,21 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.45` `checksums.txt`：
+已发布的 `v0.5.46` `checksums.txt`：
 
 ```text
-2e0fcd0371c3f663ef8ef860d89016e09916c6db712f46eabadd00eb97b6f75b  binlog-server_0.5.45_darwin_amd64.tar.gz
-35035d3668bf5fed6df812bf2c26218a3bc0d2a56aadbb35549b655b3e27d32c  binlog-server_0.5.45_darwin_arm64.tar.gz
-6133477cdca9d09b12e2ae6e71a2067228c5f6d75a20dc4834f52e975e0b0cbd  binlog-server_0.5.45_linux_amd64.tar.gz
-1b1f9140b3f617c527851b8a790392dda871d95d652861a57b3ad63b2fa1aa85  binlog-server_0.5.45_linux_arm64.tar.gz
+3a33cee3584e6a560937121c0abc80d27f8ef8341b49fa169023c605d4a44d53  binlog-server_0.5.46_darwin_amd64.tar.gz
+bb80ea2319aa156a4542d8654b89d747905a4a25fba24c0f71613a6e747003ad  binlog-server_0.5.46_darwin_arm64.tar.gz
+340ad5260cd7986345888c4643033e084011364386e12006aa6c569b6ada78dc  binlog-server_0.5.46_linux_amd64.tar.gz
+76b31ede29fae804e7c71e433800176fc44af5bf2dce70d13dbaac81ab440465  binlog-server_0.5.46_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.45_linux_amd64/
+binlog-server_0.5.46_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
-├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key, 000003_task_desired_and_retry_budget)
+├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key, 000003_task_desired_and_retry_budget, 000004_pending_dump_cleanup)
 ├── config.example.yaml            # 完整参数参考配置
 ├── config.production.example.yaml # 生产安全基线模板
 ├── README.md                      # 英文说明
