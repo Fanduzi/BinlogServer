@@ -259,7 +259,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 
 **进入条件：** 调用 `StopTask()`
 
-**退出条件：** Runner 退出 → STOPPED
+**退出条件：** Runner 退出 → STOPPED。退出时如果带着比这次 Stop 更旧的 `spec_revision`，元数据库会留下较新的 `STOPPING` 行；收尾按这次 Stop 的 spec 写成 `STOPPED`，库里仍是这次 Stop 时再写一次。
 
 ```go
 func (s *Scheduler) StopTask(id string) error {
@@ -399,7 +399,9 @@ func (s *Scheduler) StopTask(id string) error {
 - `CHECKPOINT_WRITE_FAILED`：checkpoint 写入不是瞬时元数据错误
 - 原有的 `SOURCE_ACCESS_DENIED`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`
 
-`SOURCE_UNREACHABLE` 连续 10 次后才 `FAILED`。runner ready 会把这个计数清零。其它可重试源错误、瞬时 checkpoint 写入、`OBJECT_PURGE_FAILED`、以及没有已存 GTID 的 MySQL 1236 保持 `RETRY_BACKOFF`，没有另外的次数上限。
+只有白名单里的错误留在同一次所有权里重试。`SOURCE_UNREACHABLE` 连续 10 次后才 `FAILED`，runner ready 会把这个计数清零。瞬时元数据错误（与 `meta.IsTransientMySQLError` 同一组文本）没有任务级次数上限，恢复后回到 `RUNNING`，不经过 `FAILED`。`OBJECT_PURGE_FAILED` 不是任务失败。除此之外，包括没有已存 GTID 的 MySQL 1236 和未分类的 runner 错误，在任务仍应继续跑的时候第一次就 `FAILED`，写一条 `TASK_FAILED`，放开租约。1236 且没有 GTID 时 `last_error` 写明 1236 和 purged binlog。
+
+内存已经是 `STOPPING` 或 `STOPPED`，或者库里的行已经是更新的一次 Stop 时，这次 runner 错误不进白名单。任务收成 `STOPPED`，不写 `TASK_FAILED`。Stop 时 KILL 连不上源库也走这条：行仍是 `STOPPED`，`pending_dump_cleanup` 记下那个连接号（migration `000004`，`minRequiredSchemaVersion` 仍是 3），后台再试 KILL。这不是 `FAILED`。重试循环在库里已经是这次 Stop 时退出，不再把旧的 `RETRY_BACKOFF` 快照盖回去。
 
 封文件时租约 epoch 已经不属于本进程：这不是 `FAILED`。本进程停止 runner，只放开自己的 epoch，不把共享任务行写成 `FAILED` 或 `RETRY_BACKOFF`。没有元数据库时本进程内存状态是 `STOPPED`，事件为 `TASK_LEASE_YIELDED`。
 

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump.
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump.
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -1054,6 +1054,10 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			s.mu.Unlock()
 			return
 		}
+		// Stop wins over the allowlist. A stored newer Stop, or STOPPING/STOPPED
+		// already in memory, ends this run as STOPPED. That includes a Stop
+		// whose KILL could not reach the source: the runner may also return an
+		// error that is not SOURCE_UNREACHABLE, and that error must not write FAILED.
 		if current.State == StateStopped || current.State == StateStopping || s.runSupersededLocked(id, openedSpec) || s.adoptNewerStopLocked(id, openedSpec) {
 			s.mu.Unlock()
 			return
@@ -1083,24 +1087,16 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
-		if IsPermanent(err) {
-			owner, epoch := current.OwnerWorkerID, current.Epoch
-			rememberRetryBudget(&current, attempt, consecutiveSourceFailures)
-			s.tasks[id] = current
-			logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
-			s.mu.Unlock()
-			s.releaseTaskLease(id, owner, epoch)
+		// Allowlist only: SOURCE_UNREACHABLE (budget 10), transient metadata
+		// text, and OBJECT_PURGE_FAILED. Anything else fails once.
+		if !retryAllowed(err) {
+			s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
 			return
 		}
 		if IsSourceUnreachable(err) {
 			consecutiveSourceFailures++
 			if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
-				owner, epoch := current.OwnerWorkerID, current.Epoch
-				rememberRetryBudget(&current, attempt, consecutiveSourceFailures)
-				s.tasks[id] = current
-				logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
-				s.mu.Unlock()
-				s.releaseTaskLease(id, owner, epoch)
+				s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
 				return
 			}
 		} else {
@@ -1180,6 +1176,17 @@ func isClosed(ch <-chan struct{}) bool {
 	default:
 		return false
 	}
+}
+
+// failRunLocked writes FAILED for this run, releases the lease, and unlocks s.mu.
+// Caller holds s.mu. One TASK_FAILED is appended by markFailedLocked.
+func (s *Scheduler) failRunLocked(id string, current *Task, attempt, consecutive int, errMsg string) {
+	owner, epoch := current.OwnerWorkerID, current.Epoch
+	rememberRetryBudget(current, attempt, consecutive)
+	s.tasks[id] = *current
+	logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
+	s.mu.Unlock()
+	s.releaseTaskLease(id, owner, epoch)
 }
 
 func rememberRetryBudget(task *Task, attempt, consecutive int) {

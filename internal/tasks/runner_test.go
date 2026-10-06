@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, retryable/permanent runner callbacks, store/lease/uploader dependencies
-// output: runner invocation, code-specific retry cap/reset, readiness, stop, and permanent-failure assertions, and a running dump that keeps its password and retention until stop
+// output: runner invocation, the retry allowlist (SOURCE_UNREACHABLE cap, uncapped OBJECT_PURGE_FAILED and transient metadata), readiness, stop, and first-occurrence failure assertions, and a running dump that keeps its password and retention until stop
 // pos: public Scheduler seam tests for runner-driven task lifecycle behavior
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -51,13 +51,14 @@ type readyResetRunner struct {
 	resumed chan struct{}
 }
 
-type otherRetryableSourceRunner struct {
+type uncappedAllowlistRunner struct {
 	mu       sync.Mutex
 	calls    int
+	err      error
 	eleventh chan struct{}
 }
 
-func (r *otherRetryableSourceRunner) Run(ctx context.Context, _ Task) error {
+func (r *uncappedAllowlistRunner) Run(ctx context.Context, _ Task) error {
 	r.mu.Lock()
 	r.calls++
 	call := r.calls
@@ -67,7 +68,7 @@ func (r *otherRetryableSourceRunner) Run(ctx context.Context, _ Task) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	return NewRetryableSourceError("SOURCE_THROTTLED", "source busy")
+	return r.err
 }
 
 func (r *readyResetRunner) Run(context.Context, Task) error {
@@ -140,7 +141,7 @@ func (r *failOnceRunner) Run(ctx context.Context, _ Task) error {
 	r.mu.Unlock()
 
 	if call == 1 {
-		return errors.New("temporary network failure")
+		return errors.New("invalid connection")
 	}
 
 	select {
@@ -345,6 +346,15 @@ func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 	if got.LastError != "" {
 		t.Fatalf("expected last error cleared after retry, got %q", got.LastError)
 	}
+	events, err := s.ListEvents(task.ID, 0)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == "TASK_FAILED" {
+			t.Fatalf("transient metadata error must not fail the task: %#v", events)
+		}
+	}
 
 	if err := s.StopTask(task.ID); err != nil {
 		t.Fatalf("StopTask returned error: %v", err)
@@ -534,8 +544,11 @@ func TestScheduler_RunnerReadyResetsConsecutiveSourceFailures(t *testing.T) {
 	}
 }
 
-func TestScheduler_OtherRetryableSourceCodeIsNotCapped(t *testing.T) {
-	runner := &otherRetryableSourceRunner{eleventh: make(chan struct{})}
+func TestScheduler_ObjectPurgeFailedIsNotATaskFailure(t *testing.T) {
+	runner := &uncappedAllowlistRunner{
+		err:      errors.New("OBJECT_PURGE_FAILED: mysql-bin.000001: bucket rejected the delete"),
+		eleventh: make(chan struct{}),
+	}
 	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
 
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
@@ -553,10 +566,103 @@ func TestScheduler_OtherRetryableSourceCodeIsNotCapped(t *testing.T) {
 	case <-runner.eleventh:
 	case <-time.After(2 * time.Second):
 		got, _ := s.GetTask(task.ID)
-		t.Fatalf("expected non-SOURCE_UNREACHABLE retries to continue, state=%s", got.State)
+		t.Fatalf("expected OBJECT_PURGE_FAILED to keep retrying, state=%s last_error=%q", got.State, got.LastError)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State == StateFailed {
+		t.Fatalf("OBJECT_PURGE_FAILED failed the task: %s", got.LastError)
 	}
 	if err := s.StopTask(task.ID); err != nil {
 		t.Fatalf("StopTask returned error: %v", err)
+	}
+}
+
+func TestScheduler_TransientMetadataErrorIsNotCapped(t *testing.T) {
+	runner := &uncappedAllowlistRunner{
+		err:      errors.New("Error 1213: Deadlock found when trying to get lock"),
+		eleventh: make(chan struct{}),
+	}
+	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
+
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	select {
+	case <-runner.eleventh:
+	case <-time.After(2 * time.Second):
+		got, _ := s.GetTask(task.ID)
+		t.Fatalf("expected a metadata blip to keep retrying, state=%s last_error=%q", got.State, got.LastError)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if got.State == StateFailed {
+		t.Fatalf("transient metadata error failed the task: %s", got.LastError)
+	}
+	events, err := s.ListEvents(task.ID, 0)
+	if err != nil {
+		t.Fatalf("ListEvents returned error: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == "TASK_FAILED" {
+			t.Fatal("transient metadata error wrote TASK_FAILED")
+		}
+	}
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask returned error: %v", err)
+	}
+}
+
+func TestScheduler_UnlistedSourceCodeFailsOnce(t *testing.T) {
+	runner := &scriptedRunner{fn: func(context.Context, Task, int) error {
+		return NewRetryableSourceError("SOURCE_THROTTLED", "source busy")
+	}}
+	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource returned error: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateFailed {
+			if got.LastError != "SOURCE_THROTTLED: source busy" {
+				t.Fatalf("last_error=%q", got.LastError)
+			}
+			break
+		}
+		if got.State == StateRetryBackoff {
+			t.Fatalf("unlisted source code entered RETRY_BACKOFF: %s", got.LastError)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected FAILED, state=%s", got.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if calls := runner.callCount(); calls != 1 {
+		t.Fatalf("calls=%d, want 1", calls)
 	}
 }
 

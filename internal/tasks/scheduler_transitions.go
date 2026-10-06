@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -161,6 +161,8 @@ func (s *Scheduler) markFailedLocked(id, message string) error {
 
 // markStoppedLocked 将任务收敛到最终 STOPPED 并清理运行时 ownership 字段。
 // 有 store 时用最新行上的配置（含密码），只改状态和归属，避免这次收尾把控制面刚写的配置盖回去。
+// 正在落库的 Stop 可能已经把 spec_revision 加一。读到的旧行 spec 更小，不能拿它写 STOPPED：
+// 元数据库在 spec 更小时会留下那次 Stop 的 STOPPING。
 func (s *Scheduler) markStoppedLocked(id string) error {
 	task, ok := s.tasks[id]
 	if !ok || task.State == StateStopped {
@@ -178,11 +180,11 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 		if !ok || current.State == StateStopped {
 			return nil
 		}
-		task = current
-		if current.DesiredRun == TaskDesiredRun && current.SpecRevision > current.AppliedSpecRevision {
+		task = s.keepNewerStopSpecLocked(id, current)
+		if task.DesiredRun == TaskDesiredRun && task.SpecRevision > task.AppliedSpecRevision {
 			return nil
 		}
-		if err == nil {
+		if err == nil && fresh.SpecRevision >= task.SpecRevision {
 			// A newer operator Start already asked for another dump. Do not cover that row with STOPPED.
 			if fresh.DesiredRun == TaskDesiredRun && fresh.SpecRevision > task.AppliedSpecRevision {
 				return nil
@@ -207,6 +209,30 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 			task = s.overlayPendingDumpLocked(task)
 		}
 	}
+	if err := s.writeStoppedLocked(id, task); err != nil {
+		return err
+	}
+	return s.finishStoredStopLocked(id)
+}
+
+// keepNewerStopSpecLocked copies a Stop spec that is already queued for the
+// store. Caller holds s.mu. A GetTask that started earlier still has the
+// previous spec; writing STOPPED at that spec does not apply.
+func (s *Scheduler) keepNewerStopSpecLocked(id string, task Task) Task {
+	pending := s.persisted[id].task
+	if pending.ID != id || pending.SpecRevision <= task.SpecRevision {
+		return task
+	}
+	stop := pending.DesiredRun == TaskDesiredStop || pending.State == StateStopping || pending.State == StateStopped
+	if !stop {
+		return task
+	}
+	task.SpecRevision = pending.SpecRevision
+	task.DesiredRun = TaskDesiredStop
+	return task
+}
+
+func (s *Scheduler) writeStoppedLocked(id string, task Task) error {
 	task.State = StateStopped
 	task.DesiredRun = TaskDesiredStop
 	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。
@@ -217,4 +243,51 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_STOPPED", "task stopped", "")
 	return s.persistTaskLocked(task)
+}
+
+// finishStoredStopLocked writes STOPPED again when the store still has the
+// Stop row. The upsert keeps a newer spec, so the first snapshot can land
+// without changing that row. Caller holds s.mu. One stored Stop is enough;
+// a newer Start is left alone.
+func (s *Scheduler) finishStoredStopLocked(id string) error {
+	if s.store == nil {
+		return nil
+	}
+	store := s.store
+	for range 2 {
+		s.mu.Unlock()
+		ctx, cancel := s.withReadTimeout(context.Background())
+		fresh, err := store.GetTask(ctx, id)
+		cancel()
+		s.mu.Lock()
+		if err != nil {
+			return err
+		}
+		if fresh.State == StateStopped {
+			return nil
+		}
+		if mem, ok := s.tasks[id]; ok && mem.DesiredRun == TaskDesiredRun && mem.SpecRevision > fresh.SpecRevision && mem.SpecRevision > mem.AppliedSpecRevision {
+			return nil
+		}
+		if fresh.DesiredRun == TaskDesiredRun && fresh.State != StateStopping && fresh.State != StateStopped {
+			return nil
+		}
+		if fresh.DesiredRun != TaskDesiredStop && fresh.State != StateStopping {
+			return nil
+		}
+		fresh.State = StateStopped
+		fresh.DesiredRun = TaskDesiredStop
+		fresh.OwnerWorkerID = ""
+		fresh.Epoch = 0
+		fresh.RunID = ""
+		fresh.UpdatedAt = time.Now()
+		// Schema 3 reads this row without pending_dump_cleanup. Overlay keeps
+		// this process's marker. An empty schema-4 column still drops it.
+		fresh = s.overlayPendingDumpLocked(fresh)
+		s.tasks[id] = fresh
+		if err := s.persistTaskLocked(fresh); err != nil {
+			return err
+		}
+	}
+	return nil
 }

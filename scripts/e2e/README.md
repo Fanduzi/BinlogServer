@@ -33,7 +33,7 @@
 优先使用统一入口脚本 `run-suite.sh`：
 
 ```bash
-# 日常回归（默认）：smoke-task-desired-migration + smoke + compression + smoke-source-outage + smoke-unreachable-giveup
+# 日常回归（默认）：smoke-task-desired-migration + smoke + compression + smoke-source-outage + smoke-unreachable-giveup + smoke-control-loop + smoke-fail-alert
 ./scripts/e2e/run-suite.sh
 
 # 全量回归：smoke + compression + orchestrator + semisync + meta-failover
@@ -92,6 +92,7 @@ make e2e-topology-check
 - `smoke-task-desired-migration.sh`: 在独立元数据库上执行 migration `000003` 和 `000004`。`goto 2` 后按状态写入 `backup_tasks`，`migrate up` 后 `schema_migrations` 为 version 4、dirty 0，`SHOW COLUMNS` 含 desired-run 列和 `pending_dump_cleanup`，`desired_run` 无 NULL，RUN/STOP 回填与修订号、计数器 0 符合状态映射。不列出新列的旧 `INSERT` 仍能写入，`pending_dump_cleanup` 是空串，重复 upsert 不改已回填的 `desired_run`。`migrate down --steps 1` 只丢掉 `pending_dump_cleanup`，回到 version 3。当前二进制（`minRequiredSchemaVersion` 为 3）对版本 3 启动并通过 `/healthz`。再 `down --steps 1` 回到 version 2、dirty 0，`backup_tasks` 与 `binlog_files` 行数不变。同一二进制在版本 2 上起不来，日志里有 `./migrate up`。
 - `smoke-epoch-segments.sh`: 同一源文件名先有一条已上传的封存分段，再由 standalone 启动打开 `.open.e1`。目录里两条都还在。`GET /files` 各显示一行。`GET /replay` 和带 `start_datetime`/`stop_datetime` 的恢复命令都包含封存路径和 `.open.e1`。旧对象键 `e2e/legacy/mysql-bin.000176` 还在封存行上。后半段把元数据库退回 schema 1，写入 v0.5.33 那种 epoch 0 的打开行和封存行，再 `migrate up`，确认打开行的 epoch 已从路径回填，然后启动任务并在源上 `FLUSH BINARY LOGS` 完成一次 rotate。回放命令里有封存后的路径，没有已经消失的 `.open.e1`。
 - `smoke-unreachable-giveup.sh`: 套件进程是 all-in-one（有 meta）。任务指向 `127.0.0.1:1`。认领循环大约每 2 秒跑一次。`RETRY_BACKOFF` 且 `SOURCE_UNREACHABLE` 的 runner 错误至少 4 条时 `SIGTERM` 套件进程，再用同一 meta 和 data dir 拉起。至少 7 条时再 `kill -9` 一次。两次重启都在同一次连续失败里。`backup_tasks.retry_attempt` 在重启后接着涨，不会回到 1。仍是 `RETRY_BACKOFF` 时 API 上的 `epoch` 与重启前相同。`FAILED` 时这类 runner 错误一共 10 条。`last_error` 以 `SOURCE_UNREACHABLE:` 开头，租约放开（`epoch` 为 0、没有 owner）。
+- `smoke-fail-alert.sh`: 套件进程是 all-in-one。放在 quick 最后，因为中间会 `kill` `meta-primary` 一次，结束时把它拉起来。三条 MySQL 8.0 `LATEST` 任务：封存冲突在第一次 rotate 就 `FAILED`（`SEALED_FILE_EXISTS`，一条 `TASK_FAILED`，没有 `TASK_RETRY_BACKOFF`，租约放开，`desired_run=STOP` 且 `failed_spec_revision=spec_revision`），删掉冲突文件后 Start 回到 `RUNNING` 且 `spec_revision` 大于失败时的修订号、计数器为 0。文件位点且 checkpoint 没有 `gtid_set` 时，停任务、`FLUSH` 再 `PURGE` 掉 checkpoint 文件，Start 后第一次就是 `FAILED` 而不是 `RETRY_BACKOFF`，`last_error` 含 1236、purged、binlog，一条 `TASK_FAILED`，租约放开。第三条任务在已有 checkpoint 后 `kill` 元数据库，日志里出现这条任务的 `runner error` 再启动元数据库；状态回到 `RUNNING`，不调用 Start，API 和日志都不出现 `FAILED`，`TASK_FAILED` 为 0，之后 checkpoint 继续推进。
 - `smoke-scale.sh`: 可选的 1000 控制面任务/100 实时流规模证据；复用单个 MySQL fixture（不把它当作数百个独立集群），按 100 条 batch 创建、校验分页/聚合、受控启动流，先写 priming marker 再快照每条 checkpoint，第二个 marker 后验证每条流推进及其 checkpoint 精确文件，并写入 JSON 报告。
 - `run-suite.sh`: 统一编排入口（自动 `up -> 启动服务 -> 跑场景 -> down`）。
 
