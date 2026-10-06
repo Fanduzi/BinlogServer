@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, DeleteBinlogFile by task id, source file name, and epoch, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, DeleteBinlogFile by task id, source file name, and epoch, and source_json password encryption
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1687,5 +1687,52 @@ func TestMySQLTaskStore_DeleteBinlogFile(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListBinlogFilesPageIsBounded(t *testing.T) {
+	if !strings.Contains(listBinlogFilesPageFirstSQL, "LIMIT") || !strings.Contains(listBinlogFilesPageSQL, "LIMIT") {
+		t.Fatal("binlog file page queries must LIMIT")
+	}
+	if strings.Contains(listBinlogFilesSQL, "LIMIT") {
+		t.Fatal("replay window query must stay unlimited so Go can order by source index")
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	cols := []string{
+		"task_id", "file_name", "file_path", "state", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "checksum", "epoch",
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesPageFirstSQL)).
+		WithArgs("1", 2).
+		WillReturnRows(sqlmock.NewRows(cols).
+			AddRow("1", "mysql-bin.000001", "/data/1/mysql-bin.000001", "SEALED", int64(10), uint32(4), uint32(10), time.Now(), time.Now(), "", "LOCAL_ONLY", "", nil, nil, int64(0)).
+			AddRow("1", "mysql-bin.000002", "/data/1/mysql-bin.000002", "SEALED", int64(10), uint32(4), uint32(10), time.Now(), time.Now(), "", "UPLOADED", "", nil, tasks.ChecksumMatch, int64(1)))
+	page, err := store.ListBinlogFilesPage(context.Background(), "1", "", 0, true, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].FileName != "mysql-bin.000001" || page[1].Epoch != 1 || page[1].Checksum != tasks.ChecksumMatch {
+		t.Fatalf("first page = %+v", page)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(listBinlogFilesPageSQL)).
+		WithArgs("1", "mysql-bin.000002", "mysql-bin.000002", int64(1), 2).
+		WillReturnRows(sqlmock.NewRows(cols).
+			AddRow("1", "mysql-bin.000003", "/data/1/mysql-bin.000003", "SEALED", int64(10), uint32(4), uint32(10), time.Now(), time.Now(), "", "LOCAL_ONLY", "", nil, nil, int64(0)))
+	next, err := store.ListBinlogFilesPage(context.Background(), "1", page[1].FileName, page[1].Epoch, false, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next) != 1 || next[0].FileName != "mysql-bin.000003" {
+		t.Fatalf("second page = %+v", next)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

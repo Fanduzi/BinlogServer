@@ -298,6 +298,7 @@ func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (Task, error) {
 	}
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_ADOPTED", "on-disk backup adopted", validatedClusterKey)
+	s.flushPendingEventsLocked()
 	return task, nil
 }
 
@@ -395,6 +396,7 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 
 	s.tasks[id] = next
 	s.appendEventLocked(id, "TASK_UPDATED", "task updated", "")
+	s.flushPendingEventsLocked()
 	return next, nil
 }
 
@@ -509,6 +511,7 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 		if !s.noteRemoteStopLocked(item) {
 			s.tasks[id] = item
 		}
+		s.flushPendingEventsLocked()
 		s.mu.Unlock()
 		return item, nil
 	}
