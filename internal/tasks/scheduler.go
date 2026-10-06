@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED, task persistence that keeps the newest snapshot when an older write finishes later, and event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, and event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -376,9 +376,12 @@ func (s *Scheduler) SetRunner(runner Runner) {
 // persistedTask is the newest snapshot handed to the store for one task.
 // gen increases on every persist so a write that started earlier can tell
 // that a later transition already exists.
+// published is the gen whose snapshot is already in the store. A read that
+// sampled an older published value raced that write and must not replace memory.
 type persistedTask struct {
-	gen  uint64
-	task Task
+	gen       uint64
+	published uint64
+	task      Task
 }
 
 func (s *Scheduler) persistTaskLocked(task Task) error {
@@ -408,11 +411,33 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 		}
 		latest := s.persisted[task.ID]
 		if latest.gen == gen {
+			latest.published = gen
+			s.persisted[task.ID] = latest
+			s.restorePublishedTaskLocked(snapshot)
 			return nil
 		}
 		gen = latest.gen
 		snapshot = latest.task
 	}
+}
+
+// staleStoreReadLocked reports that a store snapshot was read across a publish.
+// seen is persisted[id].published sampled before the read. Caller holds s.mu.
+func (s *Scheduler) staleStoreReadLocked(id string, seen uint64) bool {
+	return s.persisted[id].published != seen
+}
+
+// restorePublishedTaskLocked puts the snapshot just written back when a store
+// read applied an older row while s.mu was released. Caller holds s.mu.
+func (s *Scheduler) restorePublishedTaskLocked(snapshot Task) {
+	mem, ok := s.tasks[snapshot.ID]
+	if !ok {
+		return
+	}
+	if mem.State == snapshot.State && mem.OwnerWorkerID == snapshot.OwnerWorkerID && mem.Epoch == snapshot.Epoch && mem.RunID == snapshot.RunID {
+		return
+	}
+	s.tasks[snapshot.ID] = snapshot
 }
 
 // retryDelay 计算指数退避时长（有上限）。
@@ -550,6 +575,10 @@ func (s *Scheduler) syncTasksFromStore() error {
 	// 删除语义仍由 DeleteTask 控制，避免把临时运行态误删。
 	s.mu.Lock()
 	store := s.store
+	seen := make(map[string]uint64, len(s.persisted))
+	for id, row := range s.persisted {
+		seen[id] = row.published
+	}
 	s.mu.Unlock()
 	if store == nil {
 		return nil
@@ -568,6 +597,10 @@ func (s *Scheduler) syncTasksFromStore() error {
 	// 1) 兼容本进程刚创建但尚未来得及从 store 读回的任务；
 	// 2) 删除路径由 DeleteTask 显式清理，避免周期 sync 误抹临时态。
 	for _, task := range list {
+		// 这次 List 跨过了一次落库。内存里已经是刚拿到的 owner/epoch，不能用读到的旧行盖掉。
+		if s.staleStoreReadLocked(task.ID, seen[task.ID]) {
+			continue
+		}
 		// 共享行已经要求停止时，不能用它覆盖正在跑的抄本，否则 owner/epoch 被清掉，退出时放不掉租约。
 		if s.noteRemoteStopLocked(task) {
 			continue

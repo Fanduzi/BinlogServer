@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- On all-in-one and cluster (`meta_dsn` set), polling `GET /api/tasks/{id}` while you Stop and Start no longer starts the new run at epoch 0 (#220). Before this, a refresh during Start could put the previous `STOPPED` row back in memory. The dump then wrote a bare `mysql-bin.NNNNNN` file, did not renew the lease, and `GET /api/tasks/{id}` stayed `STARTING`. The next Stop and Start went `FAILED` with `SEGMENT_NOT_ON_WORKER` even though that file was already on this machine, and Start could not pick it up. Start now keeps the owner and epoch it just acquired. The open file is `mysql-bin.NNNNNN.open.eN`, the lease keeps renewing, and the task reaches `RUNNING`. A task already left on the bare file by an older binary starts again from that file when the catalog row is still `OPEN` and the file is on this worker. A file that is actually missing still fails with `SEGMENT_NOT_ON_WORKER` and the path to mount or copy. A cluster start that has no lease epoch fails with `EPOCH_NOT_ACQUIRED` instead of dumping at epoch 0; start the task again. No new config key. No schema migration.
+
 ## [v0.5.39] - 2026-10-06
 
 ### Fixed
