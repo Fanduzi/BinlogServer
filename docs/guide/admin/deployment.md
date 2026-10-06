@@ -50,16 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.49)
+## 3. 安装与产物准备 (v0.5.50)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
 
-> 从这份源码编译的进程要求 schema 5。迁移 `000005_binlog_source_epoch_key` 在 `source_file` 为 NULL 或空串时回填 `source_file = file_name`，然后把该列设为 `NOT NULL`，加上 `uk_task_source_epoch (task_id, source_file, epoch)`，保留 `uk_task_file_epoch`，并把 `start_pos` 和 `end_pos` 改成可空。SQL 不改已有位点，也不删行。`minRequiredSchemaVersion` 是 5。schema 4 上这个二进制以退出码 1 结束，提示含 `schema version too old` 和 `./migrate up`。先 `./migrate up`，确认 `schema_migrations` 是 `(5, 0)`，再启动。v0.5.49 仍能在 schema 5 上启动，因为 `uk_task_file_epoch` 还在。下一个迁移号是 `000006`。下面的 v0.5.49 安装包说明不变：已发布的 v0.5.49 没有这次迁移。
->
-> ⚠️ **v0.5.49 没有新的迁移。元数据至少是 schema 3。** `minRequiredSchemaVersion` 仍是 3。v0.5.49 在 schema 3 上可以启动。schema 4（`000004_pending_dump_cleanup`）仍是单进程可选、集群必须，规则和 v0.5.48 一样。`migrations/` 仍是 `000001` 到 `000004`。v0.5.49 在 schema 2 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。如果还不是 schema 3，按 [v0.5.46 中文发布说明](../../releases/v0.5.46.zh-CN.md)。schema 2 到 3 可以在线做。v0.5.49 还在跑时不要 `./migrate down` 回到 schema 2。schema 4 上 `./migrate down --steps 1` 只丢掉 `pending_dump_cleanup`，回到 version 3。没有新的配置项。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉每一台进程再 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。细节见 [docs/releases/release-notes-v0.5.49.md](../../releases/release-notes-v0.5.49.md)。
+> ⚠️ **v0.5.50 是 ADR 0005 第 6 步。新迁移 `000005_binlog_source_epoch_key`。启动前必须 `./migrate up` 到 schema 5。** `minRequiredSchemaVersion` 是 5。`migrations/` 是 `000001` 到 `000005`。确认 `schema_migrations` 是 `(5, 0)` 再启动。v0.5.50 在 schema 4 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。v0.5.49 仍能在 schema 5 上启动，因为 `uk_task_file_epoch` 还在。schema 4（`000004_pending_dump_cleanup`）仍在迁移链上。升级按 [v0.5.50 发布说明](../../releases/release-notes-v0.5.50.md)。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
 
 ```bash
-VER=0.5.49
+VER=0.5.50
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -71,21 +69,21 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.49` `checksums.txt`：
+已发布的 `v0.5.50` `checksums.txt`：
 
 ```text
-03e3fa75c6408ee7d135f70c274e56f3c1cecd8d177d7e847cb1c917a838b3c2  binlog-server_0.5.49_darwin_amd64.tar.gz
-4882f5443e9fe91b87ce8eb6a9df752ea00e3187f32da80705ed9b86682c795a  binlog-server_0.5.49_darwin_arm64.tar.gz
-97814e573ac6f8b5f95e5c9d4a6a2c1cf451a5589adbc43aaefef5382077a6a2  binlog-server_0.5.49_linux_amd64.tar.gz
-ff31a15dcf48f6a08be28b2dc537056d7c15c1112c2d0f48fc749dd3a9e25d69  binlog-server_0.5.49_linux_arm64.tar.gz
+6554d9280900dc79744ee1ffb91b705a934b0cc1af6696d03ec81e6702c683fc  binlog-server_0.5.50_darwin_amd64.tar.gz
+3426ebb330ef92ddad1ce1034e6cbf66d676cf0eafc46955244b451db37cf945  binlog-server_0.5.50_darwin_arm64.tar.gz
+c45bb42d913848231fef3635982e522c0089c24ce9377f397c97c51cb652e789  binlog-server_0.5.50_linux_amd64.tar.gz
+7e2040c0b751a2b8827b7aacc6f6a5c61deec16408710fc5444cf75cb9a29926  binlog-server_0.5.50_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.49_linux_amd64/
+binlog-server_0.5.50_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
-├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key, 000003_task_desired_and_retry_budget, 000004_pending_dump_cleanup)
+├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key, 000003_task_desired_and_retry_budget, 000004_pending_dump_cleanup, 000005_binlog_source_epoch_key)
 ├── config.example.yaml            # 完整参数参考配置
 ├── config.production.example.yaml # 生产安全基线模板
 ├── README.md                      # 英文说明
