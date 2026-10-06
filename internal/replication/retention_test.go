@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: local segment files, retention clock, catalog rows, and an object deleter
-// output: proof that retention deletes an expired checksum-matched uploaded object, keeps a mismatched or unchecked uploaded file and records it UPLOAD_FAILED, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when a matched object's delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, leaves a single-key config on the old full purge, and reads a catalog larger than one page through bounded pages without the unbounded list
+// output: proof that retention deletes an expired checksum-matched uploaded object, keeps a mismatched or unchecked uploaded file and records it UPLOAD_FAILED, keeps a segment inside retention and an open segment, leaves the local file plus OBJECT_PURGE_FAILED when a matched object's delete fails without rewriting checksum, keeps an expired UPLOAD_FAILED or LOCAL_ONLY file and its catalog row when upload and a catalog are configured, removes only the local file when bucket retention is longer, drops the catalog row and records RETENTION_REMOVED when no uploader deletes a sealed file that has no remote copy, leaves a single-key config on the old full purge, and reads a catalog larger than one page through bounded pages without the unbounded list
 // pos: retention purge coverage for the replication file-open path
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -824,11 +824,17 @@ func TestRetentionNoUploaderStillDeletesExpiredLocalFile(t *testing.T) {
 	if _, err := os.Stat(openPath); err != nil {
 		t.Fatalf("open segment removed: %v", err)
 	}
-	if _, ok := catalog.rows["mysql-bin.000001"]; !ok {
-		t.Fatal("no-uploader path removed the catalog row")
+	if _, ok := catalog.rows["mysql-bin.000001"]; ok {
+		t.Fatal("no-uploader retention left the catalog row")
 	}
-	if len(catalog.events) != 0 {
+	if _, ok := catalog.rows["mysql-bin.000002.open.e2"]; !ok {
+		t.Fatal("open catalog row removed")
+	}
+	if n := countRetentionSkips(catalog.events, "mysql-bin.000001"); n != 0 {
 		t.Fatalf("no-uploader path wrote a skip event: %+v", catalog.events)
+	}
+	if n := countRetentionRemoved(catalog.events, "mysql-bin.000001"); n != 1 {
+		t.Fatalf("removed events=%d %+v", n, catalog.events)
 	}
 	if got := runner.RetentionBlockedFiles()["task-1"]; got != 0 {
 		t.Fatalf("blocked=%d", got)
@@ -1036,6 +1042,16 @@ func countRetentionSkips(events []tasks.TaskEvent, name string) int {
 	return n
 }
 
+func countRetentionRemoved(events []tasks.TaskEvent, name string) int {
+	n := 0
+	for _, event := range events {
+		if event.Type == retentionRemoved && strings.Contains(event.Message, name) {
+			n++
+		}
+	}
+	return n
+}
+
 type purgeCatalog struct {
 	rows      map[string]tasks.BinlogFile
 	events    []tasks.TaskEvent
@@ -1053,6 +1069,19 @@ func (c *purgeCatalog) AppendEvent(_ context.Context, event tasks.TaskEvent) err
 	}
 	c.events = append(c.events, event)
 	return nil
+}
+
+func (c *purgeCatalog) ListEvents(_ context.Context, taskID string, limit int) ([]tasks.TaskEvent, error) {
+	out := make([]tasks.TaskEvent, 0, len(c.events))
+	for _, event := range c.events {
+		if taskID == "" || event.TaskID == taskID {
+			out = append(out, event)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, nil
 }
 
 func (c *purgeCatalog) UpsertBinlogFile(_ context.Context, meta tasks.BinlogFile) error {
