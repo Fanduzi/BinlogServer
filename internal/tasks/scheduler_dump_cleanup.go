@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a failed or successful KILL of one Binlog Dump connection id, the task row, and the current source password
-// output: a process-local pending-dump registry, pending_dump_cleanup on the task, one DUMP_CLEANUP_PENDING event, one DUMP_CLEANUP_CLEARED event, and a 5s-30s KILL retry that continues after the runner is gone until the thread is gone or the task is deleted
+// output: a process-local pending-dump registry, pending_dump_cleanup on the task, one DUMP_CLEANUP_PENDING event, one DUMP_CLEANUP_CLEARED event, and a 5s-30s KILL retry that continues after the runner is gone until the thread is gone or the task is deleted; a schema-4 empty column drops this process's copy so another process does not keep a cleared warning
 // pos: scheduler side of an operator Stop that could not reach the source
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -297,14 +297,15 @@ func (s *Scheduler) overlayPendingDumpLocked(task Task) Task {
 		return task
 	}
 	if s.persistsPendingDumpLocked() {
+		// The column is shared. An empty read means this process's copy is stale:
+		// another process already cleared it.
 		if task.PendingDumpCleanup != nil && task.PendingDumpCleanup.ConnectionID != 0 {
 			s.rememberPendingDumpLocked(task.ID, *task.PendingDumpCleanup)
 			task.PendingDumpCleanup = s.showPendingLocked(*task.PendingDumpCleanup)
 			return task
 		}
-		if marker, ok := s.pendingDumps[task.ID]; ok && marker.ConnectionID != 0 {
-			task.PendingDumpCleanup = s.showPendingLocked(marker)
-		}
+		s.forgetPendingDumpLocked(task.ID)
+		task.PendingDumpCleanup = nil
 		return task
 	}
 	if marker, ok := s.pendingDumps[task.ID]; ok && marker.ConnectionID != 0 {
