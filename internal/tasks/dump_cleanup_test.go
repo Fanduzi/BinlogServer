@@ -348,6 +348,33 @@ func TestSchema4PendingDumpSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestSchema4ClearDropsAnotherProcessRegistry(t *testing.T) {
+	store := newPendingColumnStore()
+	holder := NewScheduler(WithStore(store))
+	task := holder.mustTask(t)
+	src := SourceConfig{Host: "10.0.0.8", Port: 3306, User: "repl", Password: "secret"}
+	refused := errors.New("dial tcp 10.0.0.8:3306: connect: connection refused")
+	holder.noteDumpCleanup(task.ID, src, 178, refused)
+
+	reader := NewScheduler(WithStore(store))
+	got, err := reader.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("reader GetTask: %v", err)
+	}
+	if got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 178 || got.PendingDumpCleanup.ProcessLocal {
+		t.Fatalf("reader pending %+v", got.PendingDumpCleanup)
+	}
+
+	holder.noteDumpCleanup(task.ID, src, 178, nil)
+	got, err = reader.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("reader after clear: %v", err)
+	}
+	if got.PendingDumpCleanup != nil {
+		t.Fatalf("stale registry %+v", got.PendingDumpCleanup)
+	}
+}
+
 type columnlessStore struct {
 	*fakeStore
 }
