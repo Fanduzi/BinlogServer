@@ -810,38 +810,36 @@ func TestScheduler_UpdateTaskDumpConfigLockFollowsState(t *testing.T) {
 		s.tasks[task.ID] = current
 		s.mu.Unlock()
 
+		before := current.SpecRevision
 		nextSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret", Flavor: "mysql"}
 		nextStorage := Storage{RetentionDays: 1}
-		_, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: task.ClusterKey, Source: &nextSource, Storage: &nextStorage})
-		if !errors.Is(err, ErrTaskDumpConfigLocked) {
-			t.Fatalf("state %s err=%v, want ErrTaskDumpConfigLocked", state, err)
-		}
-		got, err := s.GetTask(task.ID)
+		updated, err := s.UpdateTask(task.ID, TaskPatch{ClusterKey: task.ClusterKey, Source: &nextSource, Storage: &nextStorage})
 		if err != nil {
-			t.Fatalf("GetTask %s: %v", state, err)
+			t.Fatalf("state %s UpdateTask: %v", state, err)
 		}
-		if got.Source.Password != "old-secret" || got.Storage.RetentionDays != 30 || got.State != state {
-			t.Fatalf("state %s mutated: password=%q retention=%d state=%s", state, got.Source.Password, got.Storage.RetentionDays, got.State)
+		if updated.Source.Password != "new-secret" || updated.Storage.RetentionDays != 1 || updated.State != state || updated.SpecRevision != before+1 {
+			t.Fatalf("state %s got password=%q retention=%d state=%s spec=%d", state, updated.Source.Password, updated.Storage.RetentionDays, updated.State, updated.SpecRevision)
 		}
 		if state == StateRunning {
-			running = got
+			running = updated
 		}
 	}
 
-	_, err := s.UpdateTask(running.ID, TaskPatch{ClusterKey: "lock-other"})
-	if !errors.Is(err, ErrTaskDumpConfigLocked) {
+	updated, err := s.UpdateTask(running.ID, TaskPatch{ClusterKey: "lock-other"})
+	if err != nil {
 		t.Fatalf("cluster_key change err=%v", err)
 	}
-	if got, err := s.GetTask(running.ID); err != nil || got.ClusterKey != running.ClusterKey {
-		t.Fatalf("cluster_key changed: %+v err=%v", got, err)
+	if updated.ClusterKey != "lock-other" || updated.SpecRevision != running.SpecRevision+1 {
+		t.Fatalf("cluster_key spec: key=%s spec=%d previous=%d", updated.ClusterKey, updated.SpecRevision, running.SpecRevision)
 	}
+	running = updated
 	name := "renamed-while-running"
-	updated, err := s.UpdateTask(running.ID, TaskPatch{Name: &name, ClusterKey: running.ClusterKey})
+	updated, err = s.UpdateTask(running.ID, TaskPatch{Name: &name, ClusterKey: running.ClusterKey})
 	if err != nil {
 		t.Fatalf("name-only: %v", err)
 	}
-	if updated.Name != name || updated.Source.Password != "old-secret" || updated.Storage.RetentionDays != 30 {
-		t.Fatalf("name-only result: %+v", updated)
+	if updated.Name != name || updated.Source.Password != "new-secret" || updated.SpecRevision != running.SpecRevision {
+		t.Fatalf("name-only result: name=%s password=%s spec=%d want spec=%d", updated.Name, updated.Source.Password, updated.SpecRevision, running.SpecRevision)
 	}
 
 	for _, state := range []State{StateCreated, StateStopped, StateFailed, StateStopping} {
@@ -889,18 +887,19 @@ func TestScheduler_UpdateTaskReadsStoredRunningState(t *testing.T) {
 	store.tasks[task.ID] = row
 	store.mu.Unlock()
 
+	before := row.SpecRevision
 	nextSource := SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "new-secret", Flavor: "mysql"}
 	nextStorage := Storage{RetentionDays: 1}
-	_, err = s.UpdateTask(task.ID, TaskPatch{ClusterKey: task.ClusterKey, Source: &nextSource, Storage: &nextStorage})
-	if !errors.Is(err, ErrTaskDumpConfigLocked) || !strings.Contains(err.Error(), "state RUNNING") {
+	updated, err := s.UpdateTask(task.ID, TaskPatch{ClusterKey: task.ClusterKey, Source: &nextSource, Storage: &nextStorage})
+	if err != nil {
 		t.Fatalf("UpdateTask err=%v", err)
 	}
 	got, err := store.GetTask(context.Background(), task.ID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if got.State != StateRunning || got.Source.Password != "old-secret" || got.Storage.RetentionDays != 30 {
-		t.Fatalf("store row changed: state=%s password=%q retention=%d", got.State, got.Source.Password, got.Storage.RetentionDays)
+	if got.State != StateRunning || got.Source.Password != "new-secret" || got.Storage.RetentionDays != 1 || got.SpecRevision != before+1 || updated.SpecRevision != got.SpecRevision {
+		t.Fatalf("store row: state=%s password=%q retention=%d spec=%d", got.State, got.Source.Password, got.Storage.RetentionDays, got.SpecRevision)
 	}
 }
 

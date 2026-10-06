@@ -955,8 +955,12 @@ func TestTaskAPI_UpdateRunningDumpRequiresStop(t *testing.T) {
 	}`))
 	updateReq.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(updateResp, updateReq)
-	if updateResp.Code != http.StatusBadRequest || !strings.Contains(updateResp.Body.String(), tasks.ErrTaskDumpConfigLocked.Error()) {
+	if updateResp.Code != http.StatusOK {
 		t.Fatalf("update status=%d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+	restarted := runner.waitCall(t, 2)
+	if live.Source.Password != "old-secret" || restarted.Source.Password != "new-secret" || restarted.Storage.RetentionDays != 1 {
+		t.Fatalf("first password=%q restarted password=%q retention=%d", live.Source.Password, restarted.Source.Password, restarted.Storage.RetentionDays)
 	}
 
 	getResp := httptest.NewRecorder()
@@ -973,8 +977,8 @@ func TestTaskAPI_UpdateRunningDumpRequiresStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if visible.Storage.RetentionDays != 30 || stored.Source.Password != "old-secret" || stored.Storage.RetentionDays != live.Storage.RetentionDays || stored.Source.Password != live.Source.Password {
-		t.Fatalf("GET retention=%d stored password=%q retention=%d live password=%q retention=%d", visible.Storage.RetentionDays, stored.Source.Password, stored.Storage.RetentionDays, live.Source.Password, live.Storage.RetentionDays)
+	if visible.Storage.RetentionDays != 1 || stored.Source.Password != "new-secret" || stored.Storage.RetentionDays != restarted.Storage.RetentionDays || stored.Source.Password != restarted.Source.Password {
+		t.Fatalf("GET retention=%d stored password=%q retention=%d live password=%q retention=%d", visible.Storage.RetentionDays, stored.Source.Password, stored.Storage.RetentionDays, restarted.Source.Password, restarted.Storage.RetentionDays)
 	}
 
 	stopResp := httptest.NewRecorder()

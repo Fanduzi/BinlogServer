@@ -1,6 +1,6 @@
 // Package cmd provides module-level functionality for cmd.
 // input: build metadata, root cobra command wiring, process startup dependencies
-// output: version banner rendering, version-only output, and default app startup hook
+// output: version banner rendering, version-only output, default app startup hook, and a startup failure written to the configured logger before the process exits
 // pos: CLI support layer separating user-facing version queries from runtime boot
 // note: if this file changes, update this header and module README.md.
 package cmd
@@ -18,6 +18,7 @@ import (
 	"binlog_server/internal/logging"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var (
@@ -59,7 +60,10 @@ func defaultRunRootApp(configPath, encryptionKey string) error {
 	defer cleanupLogger()
 
 	if err := app.New(cfg).Run(ctx); err != nil {
-		return fmt.Errorf("run app: %w", err)
+		wrapped := fmt.Errorf("run app: %w", err)
+		// cleanupLogger undoes the std-log redirect. Log while zap still owns the file.
+		zap.L().Error("binlog-server exiting", zap.Error(wrapped))
+		return wrapped
 	}
 	return nil
 }

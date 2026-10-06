@@ -8,6 +8,7 @@
 - semi-sync ACK/阻塞语义
 - metadata MySQL failover（Percona57 主从 + ProxySQL + orchestrator）
 - cluster 角色分离（control-plane + worker）与 worker heartbeat 在线/离线恢复
+- 控制回路：Stop 过程中改源密码再 Start 只留一条 Binlog Dump；状态变成 STOPPED 时源上已经没有这条 dump；v0.5.45 留下的 RUNNING/`desired_run=STOP` 任务升级后继续跑
 
 ## 依赖
 
