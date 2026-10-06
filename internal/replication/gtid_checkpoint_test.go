@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: raw and parsed GTID events, a stored checkpoint, and a file/pos dump whose MySQL 1236 arrives on GetEvent
-// output: proof that a flushed checkpoint grows the executed GTID under raw mode, that resume uses it when the stream returns 1236, and that a file/pos 1236 with no stored GTID names 1236 and a purged binlog
+// output: proof that a flushed checkpoint grows the executed GTID under raw mode after the dump names a source file, that resume uses it when the stream returns 1236, and that a file/pos 1236 with no stored GTID names 1236 and a purged binlog
 // pos: regression coverage for GTID checkpoint retention and purged-file resume
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -126,6 +126,7 @@ func TestMySQLRunnerRun_GTIDCheckpointSurvivesFlush(t *testing.T) {
 	seed := sampleGTID + ":1-10"
 	store := &fakeRunnerCheckpointStore{}
 	streamer := &fakeStreamer{results: []streamResult{
+		{event: artificialSourceRotate("mysql-bin.000010")},
 		{event: gtidAt(11, 100)},
 		{event: sqlAt("BEGIN", 120)},
 		{event: xidAt(154)},
@@ -350,6 +351,7 @@ func TestMySQLRunnerRun_RawModeGTIDAdvances(t *testing.T) {
 		Event:  &goreplication.FormatDescriptionEvent{ChecksumAlgorithm: goreplication.BINLOG_CHECKSUM_ALG_CRC32},
 	}
 	streamer := &fakeStreamer{results: []streamResult{
+		{event: artificialSourceRotate("mysql-bin.000010")},
 		{event: fde},
 		{event: rawBinlog(goreplication.GTID_EVENT, 100, gtidBody(11), true, true)},
 		{event: rawBinlog(goreplication.QUERY_EVENT, 120, queryBody("BEGIN"), true, true)},
@@ -521,6 +523,16 @@ func (s *purgeFileSyncer) StartSyncGTID(set gomysql.GTIDSet) (binlogStreamer, er
 }
 
 func (s *purgeFileSyncer) Close() { s.closeCalls++ }
+
+// artificialSourceRotate is the rotate a GTID dump sends before any event.
+// LogPos 0 names the source file. It is not a task-{id}.binlog placeholder.
+func artificialSourceRotate(next string) *goreplication.BinlogEvent {
+	return &goreplication.BinlogEvent{
+		Header:  &goreplication.EventHeader{EventType: goreplication.ROTATE_EVENT, LogPos: 0, Flags: 0x0020},
+		Event:   &goreplication.RotateEvent{Position: 4, NextLogName: []byte(next)},
+		RawData: []byte("rotate"),
+	}
+}
 
 func gtidAt(gno int64, pos uint32) *goreplication.BinlogEvent {
 	return &goreplication.BinlogEvent{
