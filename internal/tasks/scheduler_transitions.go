@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -189,10 +189,22 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 			}
 			active := fresh.State == StateRunning || fresh.State == StateStarting || fresh.State == StateRetryBackoff || fresh.State == StateLeaseDegraded
 			if active && fresh.Epoch != 0 && currentEpoch != 0 && fresh.Epoch != currentEpoch {
-				s.tasks[id] = fresh
+				s.tasks[id] = s.overlayPendingDumpLocked(fresh)
 				return nil
 			}
+			kept := DumpCleanup{}
+			if current.PendingDumpCleanup != nil {
+				kept = *current.PendingDumpCleanup
+			}
 			task = fresh
+			// Schema 3 reads this row without the column. Keep the marker the
+			// runner recorded before this STOPPED write replaced the struct.
+			if kept.ConnectionID != 0 && !s.persistsPendingDumpLocked() {
+				if marker, ok := s.pendingDumps[id]; !ok || marker.ConnectionID == 0 {
+					s.rememberPendingDumpLocked(id, kept)
+				}
+			}
+			task = s.overlayPendingDumpLocked(task)
 		}
 	}
 	task.State = StateStopped

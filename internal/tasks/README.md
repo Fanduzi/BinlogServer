@@ -20,7 +20,7 @@
 - `sealed_upload.go`: 尽力上传的唯一调用方（`ApplySealedUpload`、`ObjectKey`）；首次封文件后与重试共用。核对为 `match` 时行是 `UPLOADED`。字节不同是 `mismatch`，行是 `UPLOAD_FAILED`，`upload_error` 为 `checksum mismatch`，且不失败调用方。对象 HEAD 失败时 `checksum` 留空，行是 `UPLOAD_FAILED`，`upload_error` 以 `checksum verify failed:` 开头。不能读对象的上传器仍是 `UPLOADED` 且 `checksum` 留空。空值不是已校验。
 - `model.go`: 任务领域模型与状态定义（含复制进度 `AtTip`，不进 JSON 的 `KeepLocalSegments`，以及 `pending_dump_cleanup`）。
 - `dump_cleanup.go`: Stop 时 KILL 连不上源库的状态机。同一连接号的失败只记一次；KILL 成功、线程已不在 processlist、或 `ER_NO_SUCH_THREAD` 清掉标记。
-- `scheduler_dump_cleanup.go`: 把标记写在任务上，发出 `DUMP_CLEANUP_PENDING` / `DUMP_CLEANUP_CLEARED`，并在任务空闲时每 5–30 秒用当前密码再 KILL。任务删除后不再试。`STOPPED` 不等这条 KILL。
+- `scheduler_dump_cleanup.go`: 本进程的残留连接登记不跟 runner 一起拆。`STOPPED` 之后仍用任务当前密码每 5–30 秒 KILL，直到成功、`ER_NO_SUCH_THREAD`、processlist 里已经没有这条 Binlog Dump，或任务被删。发出 `DUMP_CLEANUP_PENDING` / `DUMP_CLEANUP_CLEARED`。schema 4 同时写 `pending_dump_cleanup`，重启后还能读到。schema 3 没有这一列，标记只在拉过这条 dump 的进程里，`process_local` 为 true。`STOPPED` 不等这条 KILL。
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
 - `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试，覆盖 localhost、127/8、::1 与 IPv6 括号表示。
 - `event_store_test.go` 中 fake store 为并发安全实现，用于 `-race` 校验稳定性。
