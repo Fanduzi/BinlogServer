@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: temporary segment files with complete and torn binlog events
-// output: proof that DurableResume returns the highest open segment's last end log_pos, that a trailing artificial rotate with log_pos 0 does not hide that position, that magic and a log_pos 0 header are not resume points, and that a trailing rotate names the next file
+// output: proof that DurableResume returns the highest open segment's last end log_pos, that a trailing artificial rotate with log_pos 0 does not hide that position, that magic and a log_pos 0 header are not resume points, that a trailing rotate names the next file, and that EventSpan is the contiguous event chain in the file
 // pos: regression coverage for the shared resume cursor
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -193,5 +193,38 @@ func writeRawSegment(t *testing.T, path string, raw []byte) {
 	buf.Write(raw)
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEventSpan_ContiguousChainAndGap(t *testing.T) {
+	dir := t.TempDir()
+	first := framedEvent(byte(goreplication.QUERY_EVENT), []byte("a"), 4)
+	second := framedEvent(byte(goreplication.QUERY_EVENT), []byte("bb"), uint32(4+len(first)))
+	zero := framedEvent(byte(goreplication.ROTATE_EVENT), []byte("mysql-bin.000010"), 0)
+	binary.LittleEndian.PutUint32(zero[13:17], 0)
+	full := filepath.Join(dir, "full")
+	writeRawSegment(t, full, append(append(first, second...), append(zero, 1, 2, 3)...))
+	start, end, ok := EventSpan(full)
+	wantEnd := uint32(4 + len(first) + len(second))
+	if !ok || start != 4 || end != wantEnd {
+		t.Fatalf("contiguous span %d..%d ok=%v, want 4..%d", start, end, ok, wantEnd)
+	}
+
+	fde := framedEvent(byte(goreplication.FORMAT_DESCRIPTION_EVENT), bytes.Repeat([]byte{0}, 103), 4)
+	if len(fde) != 122 {
+		t.Fatalf("format description size %d", len(fde))
+	}
+	data := framedEvent(byte(goreplication.QUERY_EVENT), []byte("mid"), 543)
+	gapped := filepath.Join(dir, "gap")
+	writeRawSegment(t, gapped, append(fde, data...))
+	start, end, ok = EventSpan(gapped)
+	if !ok || start != 543 || end != uint32(543+len(data)) {
+		t.Fatalf("gapped span %d..%d ok=%v, want 543..%d", start, end, ok, 543+len(data))
+	}
+
+	magic := filepath.Join(dir, "magic")
+	writeRawSegment(t, magic, nil)
+	if _, _, ok := EventSpan(magic); ok {
+		t.Fatal("magic-only segment has no event span")
 	}
 }

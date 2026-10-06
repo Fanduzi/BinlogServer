@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -135,6 +135,71 @@ func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
 		return 0, 0, size, false
 	}
 	return lastPos, lastEnd, size, true
+}
+
+// EventSpan is the binlog position span of the contiguous event chain that ends
+// at the last complete event whose end log_pos is greater than 0. start is
+// that chain's first event position (end log_pos minus the event size). end is
+// the last event's end log_pos. An event whose end log_pos is 0 is ignored.
+// When the next event starts after the chain, the chain restarts there, so a
+// leading format description does not pull start back across a gap. ok is
+// false when the file has no such event.
+func EventSpan(path string) (start, end uint32, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, 0, false
+	}
+	size := info.Size()
+	if size < 4 {
+		return 0, 0, false
+	}
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(f, magic); err != nil || string(magic) != string(durableMagic) {
+		return 0, 0, false
+	}
+	offset := int64(4)
+	hdr := make([]byte, goreplication.EventHeaderSize)
+	var chainStart, chainEnd uint32
+	found := false
+	for offset+int64(goreplication.EventHeaderSize) <= size {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			break
+		}
+		eventSize := int64(binary.LittleEndian.Uint32(hdr[9:13]))
+		logPos := binary.LittleEndian.Uint32(hdr[13:17])
+		if eventSize < int64(goreplication.EventHeaderSize) || offset+eventSize > size {
+			break
+		}
+		if _, err := f.Seek(eventSize-int64(goreplication.EventHeaderSize), io.SeekCurrent); err != nil {
+			break
+		}
+		offset += eventSize
+		if logPos == 0 || int64(logPos) < eventSize {
+			continue
+		}
+		evStart := logPos - uint32(eventSize)
+		if !found || evStart > chainEnd {
+			chainStart = evStart
+			chainEnd = logPos
+			found = true
+			continue
+		}
+		if evStart < chainStart {
+			chainStart = evStart
+		}
+		if logPos > chainEnd {
+			chainEnd = logPos
+		}
+	}
+	if !found {
+		return 0, 0, false
+	}
+	return chainStart, chainEnd, true
 }
 
 // PreambleOnly reports that path has no resume event. DurableResume skips it.
