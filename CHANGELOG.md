@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.49] - 2026-10-07
+
+### Fixed
+
+- After failover, a sealed segment of a source file the catalog already had stores `start_pos` and `end_pos` from the events in that file (#189, PR #264). `start_pos` is the first event position. `end_pos` is the last event end log position. Before this, the row could be `end_pos` 0, or `start_pos` and `end_pos` both equal to the resume cursor, while the file held events from position 4 through the last event. This includes epoch 1, a third epoch of the same name, and a segment sealed after a file/pos resume gets MySQL 1236 and continues from the stored GTID. A same-file artificial Rotate with position 0 no longer clears the position being copied. An already `UPLOADED` row is not rewritten. A segment sealed by this binary still does not create `task-<id>.binlog`, and `mysqlbinlog --verify-binlog-checksum` on that segment still exits 0 (#205, already fixed in v0.5.48). Tip dogfood by BinlogServerQA passed on `e690c438`. That run did not open a new issue. This release is not an ADR 0005 step. Steps 6–9 are still next work. No new config key. No schema migration. `minRequiredSchemaVersion` stays 3. `migrations/` is still `000001`, `000002`, `000003`, and `000004`. #224 was already present before this release. #189 is fixed in this release.
+
 ## [v0.5.48] - 2026-10-07
 
 ### Fixed
