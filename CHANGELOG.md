@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- A backup that starts in GTID mode, and a file/pos backup that gets MySQL 1236 and continues from the stored GTID, no longer seals a segment that `mysqlbinlog --verify-binlog-checksum` rejects (#205). The dump's artificial Rotate (flags `0x20`, timestamp 0, no CRC) is not written into the segment. The runner does not create `task-<id>.binlog`. The source file name from that Rotate is the segment name. A file that still has only the 4-byte magic header is not sealed, not cataloged, and not uploaded. A file/pos task that is not on this path still writes a real Rotate into the segment it seals. A source restart still seals the previous file at the last real event and continues on the next file. Business events already in a segment stay there. No new config key. No schema migration.
+
 ## [v0.5.47] - 2026-10-06
 
 ### Changed
