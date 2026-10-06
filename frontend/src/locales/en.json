@@ -271,7 +271,8 @@
     "seconds": "seconds",
     "clusterKey": "Cluster Key",
     "source": "Source",
-    "startMode": "Start"
+    "startMode": "Start",
+    "pendingDumpCleanup": "source Binlog Dump connection {id} may still be open; will KILL when source is reachable"
   },
   "source": {
     "lookupTitle": "Source Lookup",

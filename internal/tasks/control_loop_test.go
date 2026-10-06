@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: desired_run, observed state, spec revisions, lease hold, and a local dump
-// output: converge decisions for the desired/observed matrix, a spec bump that restarts one dump, an idempotent second pass, a legacy desired_run reconcile that keeps an active task running, and SetRunner binding the stored source for a dump-thread KILL
+// output: converge decisions for the desired/observed matrix, a spec bump that restarts one dump, an idempotent second pass, a legacy desired_run reconcile that keeps an active task running, a retry that adopts a stored Stop and leaves a newer Run alone, and SetRunner binding the stored source for a dump-thread KILL
 // pos: control-loop and upgrade-reconcile tests
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -442,5 +442,65 @@ func TestSetRunnerBindsStoredDumpSource(t *testing.T) {
 	got, ok := runner.lookup("9")
 	if !ok || got.Password != "from-memory" {
 		t.Fatalf("source password=%q ok=%v", got.Password, ok)
+	}
+}
+
+func TestAdoptNewerStopCopiesStoredStopAndLeavesNewerRun(t *testing.T) {
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	s := NewScheduler(WithStore(store))
+	const id = "7"
+
+	s.mu.Lock()
+	s.tasks[id] = Task{
+		ID: id, State: StateRetryBackoff, DesiredRun: TaskDesiredRun,
+		SpecRevision: 1, AppliedSpecRevision: 1,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancels[id] = cancel
+	s.mu.Unlock()
+	store.tasks[id] = Task{
+		ID: id, State: StateStopping, DesiredRun: TaskDesiredStop, SpecRevision: 2,
+	}
+
+	s.mu.Lock()
+	adopted := s.adoptNewerStopLocked(id, 1)
+	mem := s.tasks[id]
+	_, stillCancel := s.cancels[id]
+	s.mu.Unlock()
+	if !adopted || mem.DesiredRun != TaskDesiredStop || mem.State != StateStopping || mem.SpecRevision != 2 || stillCancel {
+		t.Fatalf("stored stop adopted=%v desired=%s state=%s spec=%d cancel=%v", adopted, mem.DesiredRun, mem.State, mem.SpecRevision, stillCancel)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("adopt did not cancel the local run")
+	}
+
+	s.mu.Lock()
+	s.tasks[id] = Task{
+		ID: id, State: StateRetryBackoff, DesiredRun: TaskDesiredRun,
+		SpecRevision: 2, AppliedSpecRevision: 2,
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	s.cancels[id] = cancel2
+	defer cancel2()
+	s.mu.Unlock()
+	store.tasks[id] = Task{
+		ID: id, State: StateStarting, DesiredRun: TaskDesiredRun, SpecRevision: 3,
+		Source: SourceConfig{Password: "new"},
+	}
+
+	s.mu.Lock()
+	adopted = s.adoptNewerStopLocked(id, 2)
+	mem = s.tasks[id]
+	_, stillCancel = s.cancels[id]
+	s.mu.Unlock()
+	if adopted || mem.State != StateRetryBackoff || mem.DesiredRun != TaskDesiredRun || mem.SpecRevision != 2 || !stillCancel {
+		t.Fatalf("newer run adopted=%v desired=%s state=%s spec=%d cancel=%v", adopted, mem.DesiredRun, mem.State, mem.SpecRevision, stillCancel)
+	}
+	select {
+	case <-ctx2.Done():
+		t.Fatal("newer run was cancelled")
+	default:
 	}
 }

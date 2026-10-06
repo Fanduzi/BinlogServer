@@ -1166,3 +1166,32 @@ func TestMySQLRunnerRun_CloseKillsDumpWithBoundPassword(t *testing.T) {
 		t.Fatalf("killed %s, want current:88", killed)
 	}
 }
+
+func TestBuildSyncerConfigRequestsHeartbeat(t *testing.T) {
+	cfg := buildSyncerConfig(newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest}))
+	if cfg.HeartbeatPeriod != dumpHeartbeatPeriod || dumpHeartbeatPeriod != 15*time.Second {
+		t.Fatalf("heartbeat %s", cfg.HeartbeatPeriod)
+	}
+}
+
+func TestReleaseDumpConnReportsUnreachableKill(t *testing.T) {
+	var got error
+	var id uint32
+	runner := &MySQLRunner{
+		killDump: func(tasks.SourceConfig, uint32) error {
+			return errors.New("dial tcp 127.0.0.1:3306: connect: connection refused")
+		},
+	}
+	runner.BindDumpCleanup(func(_ string, _ tasks.SourceConfig, connectionID uint32, killErr error) {
+		id = connectionID
+		got = killErr
+	})
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+	runner.releaseDumpConn(task, 42)
+	if id != 42 || got == nil {
+		t.Fatalf("id=%d err=%v", id, got)
+	}
+	if runner.notedDumpConn(task.ID) != 42 {
+		t.Fatal("unreachable kill must keep the connection id for the next start")
+	}
+}

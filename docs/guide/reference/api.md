@@ -272,6 +272,8 @@ curl http://localhost:8080/api/tasks/{task_id}
 
 HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。`last_error`、`owner_worker_id`、`epoch`、`run_id` 为空时不出现。任务不存在是 HTTP 404，正文 `task not found`。
 
+源库不可达的 Stop 仍返回这条 `STOPPED` 任务，并多一个 `pending_dump_cleanup`：`connection_id`、`host`、`port`、`warning`。`warning` 是 `source Binlog Dump connection <id> may still be open; will KILL when source is reachable`。没有残留连接时这个字段不出现。源库恢复后进程会 `KILL` 该连接号，成功或该号已不在 processlist（含 `ER_NO_SUCH_THREAD`）后字段消失。
+
 **响应示例：**
 
 ```json
@@ -699,6 +701,8 @@ curl "http://localhost:8080/api/tasks/{task_id}/events?event_type=TASK_ERROR"
 | TASK_CREATED | 任务创建 |
 | TASK_STARTED | 任务启动 |
 | TASK_STOPPED | 任务停止 |
+| DUMP_CLEANUP_PENDING | Stop 没能 KILL 掉的源库 Binlog Dump，连接号还可能开着 |
+| DUMP_CLEANUP_CLEARED | 该连接已 KILL，或源库上已经没有这个号 |
 | TASK_ERROR | 任务错误 |
 | TASK_FILE_ROTATED | 文件切换 |
 | TASK_FILE_UPLOADED | 文件上传成功 |

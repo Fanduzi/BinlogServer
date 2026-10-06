@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: runner errors for a sealed local file, a lease epoch mismatch, and a retryable source failure
-// output: proof that a sealed file and an unclassified runner error fail once and release the lease, a lease mismatch hands the task off, a retryable source error stays in RETRY_BACKOFF, and Start after FAILED arms the task again
+// input: runner errors for a sealed local file, a lease epoch mismatch, a retryable source failure, and a non-allowlisted error during Stop
+// output: proof that a sealed file and an unclassified runner error fail once and release the lease, a lease mismatch hands the task off, a retryable source error stays in RETRY_BACKOFF, Start after FAILED arms the task again, and a non-allowlisted error during Stop (in memory, or a newer stored Stop whose KILL could not reach the source) stays STOPPED with pending_dump_cleanup and does not write TASK_FAILED
 // pos: scheduler retry-policy regression coverage for permanent local errors and source retry
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -344,6 +344,124 @@ func assertEventTypes(t *testing.T, s *Scheduler, id string, want map[string]int
 			t.Fatalf("event %s count=%d, want %d; events=%v", eventType, got[eventType], n, events)
 		}
 	}
+}
+
+// unreachableKillError is a source error that is not on the retry allowlist.
+// A net.OpError would be SOURCE_UNREACHABLE. This string is what a KILL or a
+// dump close can return when the address is simply unreachable.
+const unreachableKillError = "dial tcp 10.0.0.1:3306: connect: network is unreachable"
+
+// stopThenErrorRunner lets Stop cancel the run, reports the failed KILL, then
+// returns an error the allowlist would otherwise fail on the first occurrence.
+type stopThenErrorRunner struct {
+	mu      sync.Mutex
+	notify  func(taskID string, source SourceConfig, connectionID uint32, killErr error)
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (r *stopThenErrorRunner) BindDumpCleanup(fn func(string, SourceConfig, uint32, error)) {
+	r.mu.Lock()
+	r.notify = fn
+	r.mu.Unlock()
+}
+
+func (r *stopThenErrorRunner) Run(ctx context.Context, task Task) error {
+	r.once.Do(func() { close(r.entered) })
+	<-ctx.Done()
+	r.mu.Lock()
+	notify := r.notify
+	r.mu.Unlock()
+	if notify != nil {
+		notify(task.ID, SourceConfig{Host: "10.0.0.1", Port: 3306, User: "repl", Password: "secret"}, 42, errors.New(unreachableKillError))
+	}
+	return errors.New(unreachableKillError)
+}
+
+func TestScheduler_UnclassifiedErrorDuringStopStaysStopped(t *testing.T) {
+	if retryAllowed(errors.New(unreachableKillError)) {
+		t.Fatal("test error must sit outside the retry allowlist")
+	}
+	runner := &stopThenErrorRunner{entered: make(chan struct{})}
+	s := NewScheduler(WithRetryBackoff(time.Millisecond, time.Millisecond))
+	s.SetRunner(runner)
+	task := mustStartSourcedTask(t, s)
+	select {
+	case <-runner.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not start")
+	}
+	if err := s.StopTask(task.ID); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State == StateFailed {
+		t.Fatalf("stop became FAILED: %s", got.LastError)
+	}
+	if got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 42 {
+		t.Fatalf("pending=%+v", got.PendingDumpCleanup)
+	}
+	if got.DesiredRun != TaskDesiredStop {
+		t.Fatalf("desired=%s", got.DesiredRun)
+	}
+	assertEventTypes(t, s, task.ID, map[string]int{"TASK_FAILED": 0, "TASK_RETRY_BACKOFF": 0, "DUMP_CLEANUP_PENDING": 1})
+}
+
+func TestScheduler_StoredStopBeatsUnclassifiedError(t *testing.T) {
+	if retryAllowed(errors.New(unreachableKillError)) {
+		t.Fatal("test error must sit outside the retry allowlist")
+	}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	runner := &scriptedRunner{fn: func(context.Context, Task, int) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return errors.New(unreachableKillError)
+	}}
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	s := NewScheduler(WithRunner(runner), WithStore(store), WithRetryBackoff(time.Hour, time.Hour))
+	task := mustStartSourcedTask(t, s)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not start")
+	}
+
+	store.mu.Lock()
+	row, ok := store.tasks[task.ID]
+	if !ok {
+		store.mu.Unlock()
+		t.Fatal("task was not stored")
+	}
+	row.DesiredRun = TaskDesiredStop
+	row.State = StateStopping
+	row.SpecRevision++
+	warned := DumpCleanup{ConnectionID: 77, Host: "10.0.0.1", Port: 3306}.warned()
+	row.PendingDumpCleanup = &warned
+	store.tasks[task.ID] = row
+	store.mu.Unlock()
+	close(release)
+
+	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State == StateFailed {
+		t.Fatalf("stored stop became FAILED: %s", got.LastError)
+	}
+	if got.PendingDumpCleanup == nil || got.PendingDumpCleanup.ConnectionID != 77 {
+		t.Fatalf("pending=%+v", got.PendingDumpCleanup)
+	}
+	if got.DesiredRun != TaskDesiredStop {
+		t.Fatalf("desired=%s", got.DesiredRun)
+	}
+	assertEventTypes(t, s, task.ID, map[string]int{"TASK_FAILED": 0, "TASK_RETRY_BACKOFF": 0})
 }
 
 func mustStartSourcedTask(t *testing.T, s *Scheduler) Task {
