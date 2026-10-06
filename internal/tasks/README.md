@@ -21,6 +21,7 @@
 - 各 `*_test.go`: 状态机、租约、上传重试、事件等测试。
 - `source_guard_test.go`: metadata/source 同端点拒绝策略的公开任务接口回归测试，覆盖 localhost、127/8、::1 与 IPv6 括号表示。
 - `event_store_test.go` 中 fake store 为并发安全实现，用于 `-race` 校验稳定性。
+- `scheduler_lock_test.go`: 一个任务的事件读取或插入被堵住时，另一个任务的 Stop、Start、续租和进度仍能返回。
 
 ## Exports
 - 任务 CRUD、启动停止、状态推进。
