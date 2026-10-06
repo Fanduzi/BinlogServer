@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -200,6 +200,21 @@ func EventSpan(path string) (start, end uint32, ok bool) {
 		return 0, 0, false
 	}
 	return chainStart, chainEnd, true
+}
+
+// SegmentPositions is the event span of one local segment.
+// end is the last complete event's end log_pos, the same number DurableCursor
+// returns. start is that chain's first event position. ok is false when
+// DurableCursor is not ok: the file is missing, partial, or has no complete event.
+func SegmentPositions(path string) (start, end uint32, ok bool) {
+	endPos, _, _, cursorOK := DurableCursor(path)
+	if !cursorOK || endPos == 0 {
+		return 0, 0, false
+	}
+	if spanStart, spanEnd, spanOK := EventSpan(path); spanOK && spanEnd != 0 {
+		return spanStart, spanEnd, true
+	}
+	return 0, endPos, true
 }
 
 // PreambleOnly reports that path has no resume event. DurableResume skips it.

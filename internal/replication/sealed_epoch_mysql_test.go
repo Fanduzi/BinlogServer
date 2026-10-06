@@ -81,10 +81,10 @@ func TestIssue189_SealedEpochsOnMySQL(t *testing.T) {
 	if epoch0 == nil || epoch1 == nil {
 		t.Fatalf("catalog rows %+v, want epoch 0 and epoch 1 of %s", files, issue189Source)
 	}
-	if epoch0.State != "SEALED" || epoch0.StartPos != 4 || epoch0.EndPos != epoch0End {
+	if epoch0.State != "SEALED" || epoch0.StartPos != 4 || uint32(epoch0.EndPos) != epoch0End {
 		t.Fatalf("epoch 0 %+v, want SEALED 4..%d", epoch0, epoch0End)
 	}
-	if epoch1.State != "SEALED" || epoch1.StartPos != 4 || epoch1.EndPos != epoch1End {
+	if epoch1.State != "SEALED" || epoch1.StartPos != 4 || uint32(epoch1.EndPos) != epoch1End {
 		t.Fatalf("epoch 1 %+v, want SEALED 4..%d", epoch1, epoch1End)
 	}
 	if epoch0.EndPos == epoch1.EndPos {

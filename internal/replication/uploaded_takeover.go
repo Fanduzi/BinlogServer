@@ -45,7 +45,7 @@ func ContinueUploadedTakeover(ctx context.Context, dataDir string, opts ...Runne
 	const taskID = "2"
 	catalog := &uploadedTakeoverCatalog{rows: []tasks.BinlogFile{{
 		TaskID: taskID, FileName: file, FilePath: missing,
-		State: "SEALED", EndPos: endPos, UploadState: "UPLOADED", ObjectKey: objectKey,
+		State: "SEALED", EndPos: tasks.FilePos(endPos), UploadState: "UPLOADED", ObjectKey: objectKey,
 	}}}
 	store := &uploadedTakeoverCheckpoint{cp: binlog.Checkpoint{File: file, Pos: endPos}, ok: true}
 	all := append(append([]RunnerOption{}, opts...), WithCheckpointStore(store), WithFileMetaStore(catalog))

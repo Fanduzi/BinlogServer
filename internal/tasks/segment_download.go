@@ -1,5 +1,5 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task id, on-disk basename, the files inventory, this process data_dir, and the configured object uploader when a sealed row is already UPLOADED
+// input: task id, on-disk basename, the files inventory, ClassifySegment, this process data_dir, and the configured object uploader when a sealed row is already UPLOADED
 // output: a size-capped reader for one inventory segment from local disk, or from object storage when the local file is missing and the sealed row is UPLOADED with an object key
 // pos: segment open for the authenticated download route; replay path selection stays in disk_files.go
 // note: if this file changes, update this header and module README.md.
@@ -13,6 +13,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"binlog_server/internal/binlog"
 )
 
 // ErrInvalidSegmentName rejects a download name that is not a single basename.
@@ -154,7 +156,7 @@ func (s *Scheduler) openUploadedTaskSegment(files []BinlogFile, name string) (io
 // whose inventory basename is name. Open segments are refused even when a row
 // carries UPLOADED and an object key. An empty key is refused.
 func sealedUploadedObjectKey(files []BinlogFile, name string) (string, bool) {
-	if strings.Contains(name, binlogOpenEpochMark) {
+	if !binlog.SealedName(name) {
 		return "", false
 	}
 	for _, file := range files {
@@ -177,13 +179,7 @@ func sealedUploadedObjectKey(files []BinlogFile, name string) (string, bool) {
 }
 
 func rowIsOpenSegment(file BinlogFile) bool {
-	if strings.EqualFold(strings.TrimSpace(file.State), "OPEN") {
-		return true
-	}
-	if strings.Contains(segmentInventoryBasename(file), binlogOpenEpochMark) {
-		return true
-	}
-	return strings.Contains(file.FileName, binlogOpenEpochMark)
+	return CatalogRowOpen(file)
 }
 
 type limitReadCloser struct {
