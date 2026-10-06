@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, and event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, and SetRunner binding DumpSourceBinder to the stored source so a closing dump can KILL its thread with the current password
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -373,11 +373,43 @@ func NewScheduler(opts ...Option) *Scheduler {
 	return s
 }
 
+// DumpSourceBinder is the runner hook that KILL a leftover Binlog Dump with
+// the password currently stored for the task. A dump opened before a password
+// change cannot KILL itself.
+type DumpSourceBinder interface {
+	BindDumpSource(func(taskID string) (SourceConfig, bool))
+}
+
 // SetRunner 动态替换 runner 实现（测试和运行时装配会用到）。
+// A binder receives the store lookup so Close can KILL with the current password.
 func (s *Scheduler) SetRunner(runner Runner) {
+	if runner != nil {
+		if binder, ok := runner.(DumpSourceBinder); ok {
+			binder.BindDumpSource(s.dumpSource)
+		}
+	}
+	s.mu.Lock()
+	s.runner = runner
+	s.mu.Unlock()
+}
+
+// dumpSource is the source row to use when killing a dump thread.
+// The worker's memory copy can still have the password from when the dump
+// opened. The store has the password the operator just saved.
+func (s *Scheduler) dumpSource(id string) (SourceConfig, bool) {
+	if s.store != nil {
+		item, err := s.readStoredTask(s.store, id)
+		if err == nil {
+			return item.Source, true
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.runner = runner
+	task, ok := s.tasks[id]
+	if !ok {
+		return SourceConfig{}, false
+	}
+	return task.Source, true
 }
 
 // persistedTask is the newest snapshot handed to the store for one task.

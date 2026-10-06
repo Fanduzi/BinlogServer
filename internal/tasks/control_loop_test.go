@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: desired_run, observed state, spec revisions, lease hold, and a local dump
-// output: converge decisions for the desired/observed matrix, a spec bump that restarts one dump, an idempotent second pass, and a legacy desired_run reconcile that keeps an active task running
+// output: converge decisions for the desired/observed matrix, a spec bump that restarts one dump, an idempotent second pass, a legacy desired_run reconcile that keeps an active task running, and SetRunner binding the stored source for a dump-thread KILL
 // pos: control-loop and upgrade-reconcile tests
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -411,5 +411,36 @@ func TestSpecBumpRestartsOneDump(t *testing.T) {
 	s.mu.Unlock()
 	if gotEpoch != epoch {
 		t.Fatalf("epoch changed %d -> %d", epoch, gotEpoch)
+	}
+}
+
+type bindSourceRunner struct {
+	lookup func(string) (SourceConfig, bool)
+}
+
+func (r *bindSourceRunner) Run(context.Context, Task) error { return nil }
+
+func (r *bindSourceRunner) BindDumpSource(fn func(string) (SourceConfig, bool)) {
+	r.lookup = fn
+}
+
+func TestSetRunnerBindsStoredDumpSource(t *testing.T) {
+	s := NewScheduler()
+	s.mu.Lock()
+	s.tasks["9"] = Task{
+		ID: "9",
+		Source: SourceConfig{
+			Host: "127.0.0.1", Port: 3306, User: "repl", Password: "from-memory", Flavor: "mysql",
+		},
+	}
+	s.mu.Unlock()
+	runner := &bindSourceRunner{}
+	s.SetRunner(runner)
+	if runner.lookup == nil {
+		t.Fatal("dump source lookup was not bound")
+	}
+	got, ok := runner.lookup("9")
+	if !ok || got.Password != "from-memory" {
+		t.Fatalf("source password=%q ok=%v", got.Password, ok)
 	}
 }
