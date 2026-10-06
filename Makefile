@@ -118,6 +118,7 @@ sqlc-generate:
 	GOSUMDB=$${GOSUMDB:-sum.golang.org} \
 	CGO_ENABLED=0 \
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.28.0 generate -f sqlc.yaml
+	bash internal/meta/stamp_sqlc_headers.sh
 
 sqlc-verify:
 	@$(MAKE) sqlc-generate

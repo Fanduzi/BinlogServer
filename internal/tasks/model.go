@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, and the process-local KeepLocalSegments flag for adopted leftover directories
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, and the persisted desired-run and retry-budget fields omitted from the API JSON
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -34,6 +34,13 @@ const (
 	StateStopped State = "STOPPED"
 )
 
+const (
+	// TaskDesiredRun is operator intent to keep the task running.
+	TaskDesiredRun = "RUN"
+	// TaskDesiredStop is operator intent to leave the task stopped.
+	TaskDesiredStop = "STOP"
+)
+
 // Task 是任务的核心元数据模型（配置 + 运行时状态）。
 type Task struct {
 	ID            string       `json:"id"`
@@ -52,6 +59,22 @@ type Task struct {
 	// Start then opens the next .open.e<epoch> and does not delete segments already there.
 	// It is process-local and omitted from API and metadata JSON.
 	KeepLocalSegments bool `json:"-"`
+	// DesiredRun is RUN or STOP. Metadata mode persists it on backup_tasks.
+	// Standalone keeps it on this struct until the process exits.
+	DesiredRun string `json:"-"`
+	// SpecRevision increases when a later change records a new operator ask.
+	// This step writes it through; the control loop that compares it is later.
+	SpecRevision int64 `json:"-"`
+	// AppliedSpecRevision is the revision whose dump this worker opened.
+	AppliedSpecRevision int64 `json:"-"`
+	// FailedSpecRevision is the revision that reached FAILED. 0 means the
+	// current ask has not failed.
+	FailedSpecRevision int64 `json:"-"`
+	// RetryAttempt is the exponential backoff step. The next delay uses this
+	// value plus one, so a restart does not start again at the base delay.
+	RetryAttempt int64 `json:"-"`
+	// ConsecutiveSourceFailures is the SOURCE_UNREACHABLE streak. The cap is 10.
+	ConsecutiveSourceFailures int64 `json:"-"`
 }
 
 // TaskPatch 是任务更新接口使用的部分字段 patch。

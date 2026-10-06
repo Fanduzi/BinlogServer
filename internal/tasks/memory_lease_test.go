@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: MemoryLease Acquire/Release sequences between two workers
-// output: exclusive grant, immediate free after Release, hold during unexpired ownership
+// output: exclusive grant, same-owner reclaim keeps the epoch after expiry, a different worker increases it, immediate free after Release, hold during unexpired ownership
 // pos: in-process ownership-door tests without MySQL
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -58,6 +58,50 @@ func TestMemoryLease_SameWorkerCanReacquireWithoutRelease(t *testing.T) {
 	}
 	if again != epoch {
 		t.Fatalf("same-worker reacquire changed epoch %d -> %d", epoch, again)
+	}
+}
+
+func TestMemoryLease_SameWorkerExpiredReclaimKeepsEpoch(t *testing.T) {
+	leases := NewMemoryLease()
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	leases.now = func() time.Time { return now }
+
+	epoch, ok, err := leases.Acquire(ctx, "1", "worker-a", time.Second)
+	if err != nil || !ok || epoch != 1 {
+		t.Fatalf("acquire: epoch=%d ok=%v err=%v", epoch, ok, err)
+	}
+	now = now.Add(2 * time.Second)
+	again, ok, err := leases.Acquire(ctx, "1", "worker-a", time.Second)
+	if err != nil || !ok {
+		t.Fatalf("same-owner reclaim: ok=%v err=%v", ok, err)
+	}
+	if again != epoch {
+		t.Fatalf("same-owner expired reclaim changed epoch %d -> %d", epoch, again)
+	}
+	held, err := leases.Verify(ctx, "1", "worker-a", epoch)
+	if err != nil || !held {
+		t.Fatalf("reclaim should refresh the lease, held=%v err=%v", held, err)
+	}
+}
+
+func TestMemoryLease_OtherWorkerExpiredTakeoverBumpsEpoch(t *testing.T) {
+	leases := NewMemoryLease()
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	leases.now = func() time.Time { return now }
+
+	epoch, ok, err := leases.Acquire(ctx, "1", "worker-a", time.Second)
+	if err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+	now = now.Add(2 * time.Second)
+	next, ok, err := leases.Acquire(ctx, "1", "worker-b", time.Second)
+	if err != nil || !ok {
+		t.Fatalf("takeover: ok=%v err=%v", ok, err)
+	}
+	if next != epoch+1 {
+		t.Fatalf("different worker takeover epoch=%d, want %d", next, epoch+1)
 	}
 }
 

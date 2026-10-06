@@ -56,7 +56,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "cluster-a-key", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("1", "cluster-a", "cluster-a-key", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(insertTaskRunSQL)).
 		WithArgs("run-1", "1", "worker-a", int64(7), sqlmock.AnyArg()).
@@ -106,7 +106,7 @@ func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}).AddRow("run-1"))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(finishTaskRunSQL)).
 		WithArgs(sqlmock.AnyArg(), "NORMAL_STOP", "run-1").
@@ -132,9 +132,7 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
 
-	rows := sqlmock.NewRows([]string{
-		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
-	}).AddRow(
+	rows := sqlmock.NewRows(taskRowColumns()).AddRow(
 		"7",
 		"cluster-restored",
 		"cluster-restored-key",
@@ -147,6 +145,7 @@ func TestMySQLTaskStore_ListTasks(t *testing.T) {
 		`{"mode":"LATEST"}`,
 		`{"dir":"./data"}`,
 		now,
+		"STOP", int64(0), int64(0), int64(0), int64(0), int64(0),
 	)
 
 	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(rows)
@@ -191,6 +190,7 @@ func toDriverValues(args []any) []driver.Value {
 func taskRowColumns() []string {
 	return []string{
 		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
+		"desired_run", "spec_revision", "applied_spec_revision", "failed_spec_revision", "retry_attempt", "consecutive_source_failures",
 	}
 }
 
@@ -208,6 +208,12 @@ func addTaskRow(rows *sqlmock.Rows, id, name, clusterKey, state, sourceJSON stri
 		`{"mode":"LATEST"}`,
 		`{"dir":"./data"}`,
 		now,
+		"STOP",
+		int64(0),
+		int64(0),
+		int64(0),
+		int64(0),
+		int64(0),
 	)
 }
 
@@ -675,9 +681,7 @@ func TestMySQLTaskStore_ListTasksWithExpiredLease(t *testing.T) {
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
-	rows := sqlmock.NewRows([]string{
-		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
-	}).AddRow(
+	rows := sqlmock.NewRows(taskRowColumns()).AddRow(
 		"7",
 		"cluster-expired",
 		"cluster-expired-key",
@@ -690,6 +694,7 @@ func TestMySQLTaskStore_ListTasksWithExpiredLease(t *testing.T) {
 		`{"mode":"LATEST"}`,
 		`{"dir":"./data"}`,
 		now,
+		"RUN", int64(0), int64(0), int64(0), int64(0), int64(0),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listTasksWithExpiredLeaseSQL)).WillReturnRows(rows)
 
@@ -779,7 +784,7 @@ func TestMySQLTaskStore_EncryptsSourcePasswordWhenKeySet(t *testing.T) {
 			key:      testSourcePasswordKey,
 			password: "secret",
 			host:     "127.0.0.1",
-		}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -826,11 +831,10 @@ func TestMySQLTaskStore_ListTasksDecryptsSourcePassword(t *testing.T) {
 	}
 
 	now := time.Now()
-	rows := sqlmock.NewRows([]string{
-		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
-	}).AddRow(
+	rows := sqlmock.NewRows(taskRowColumns()).AddRow(
 		"1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "",
 		string(sourceJSON), `{"mode":"LATEST"}`, `{"dir":"./data"}`, now,
+		"STOP", int64(0), int64(0), int64(0), int64(0), int64(0),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(rows)
 
@@ -864,12 +868,11 @@ func TestMySQLTaskStore_ListTasksLoadsPlaintextSourcePasswordWithoutPrefix(t *te
 		t.Fatalf("setSourcePasswordKey: %v", err)
 	}
 	now := time.Now()
-	rows := sqlmock.NewRows([]string{
-		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
-	}).AddRow(
+	rows := sqlmock.NewRows(taskRowColumns()).AddRow(
 		"1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "",
 		`{"host":"127.0.0.1","port":3306,"user":"repl","password":"legacy-secret","flavor":"mysql","server_id":200001}`,
 		`{"mode":"LATEST"}`, `{"dir":"./data"}`, now,
+		"STOP", int64(0), int64(0), int64(0), int64(0), int64(0),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(rows)
 
@@ -894,12 +897,11 @@ func TestMySQLTaskStore_ListTasksLoadsPlaintextWithoutKey(t *testing.T) {
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	now := time.Now()
-	rows := sqlmock.NewRows([]string{
-		"id", "name", "cluster_key", "state", "last_error", "owner_worker_id", "epoch", "run_id", "source_json", "start_json", "storage_json", "updated_at",
-	}).AddRow(
+	rows := sqlmock.NewRows(taskRowColumns()).AddRow(
 		"1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "",
 		`{"host":"127.0.0.1","port":3306,"user":"repl","password":"legacy-secret","flavor":"mysql","server_id":200001}`,
 		`{"mode":"LATEST"}`, `{"dir":"./data"}`, now,
+		"STOP", int64(0), int64(0), int64(0), int64(0), int64(0),
 	)
 	mock.ExpectQuery(regexp.QuoteMeta(listTaskSQL)).WillReturnRows(rows)
 
@@ -1377,6 +1379,64 @@ func expectSchemaCheckQueries(
 				WithArgs(table.Name, index).
 				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(indexCount))
 		}
+	}
+}
+
+func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(int64(2), false))
+
+	err = store.ensureSchema(context.Background())
+	if err == nil {
+		t.Fatal("expected schema version error")
+	}
+	if !strings.Contains(err.Error(), "./migrate up") {
+		t.Fatalf("error should tell the operator to run ./migrate up, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "current=2") || !strings.Contains(err.Error(), "required>=3") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_GetTaskReadsRetryBudget(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	rows := sqlmock.NewRows(taskRowColumns()).AddRow(
+		"7", "budget", "budget-key", "RETRY_BACKOFF", "SOURCE_UNREACHABLE: dial", "worker-a", int64(3), "run-3",
+		`{"host":"127.0.0.1","port":3306,"user":"repl","flavor":"mysql","server_id":200001}`,
+		`{"mode":"LATEST"}`, `{"dir":"./data"}`, now,
+		"RUN", int64(4), int64(2), int64(0), int64(6), int64(6),
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(getTaskSQL)).WithArgs("7").WillReturnRows(rows)
+
+	got, err := store.GetTask(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.DesiredRun != "RUN" || got.SpecRevision != 4 || got.AppliedSpecRevision != 2 || got.FailedSpecRevision != 0 {
+		t.Fatalf("revisions: desired=%s spec=%d applied=%d failed=%d", got.DesiredRun, got.SpecRevision, got.AppliedSpecRevision, got.FailedSpecRevision)
+	}
+	if got.RetryAttempt != 6 || got.ConsecutiveSourceFailures != 6 {
+		t.Fatalf("budget attempt=%d consecutive=%d", got.RetryAttempt, got.ConsecutiveSourceFailures)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
 

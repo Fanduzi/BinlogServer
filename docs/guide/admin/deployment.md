@@ -104,6 +104,8 @@ binlog-server_0.5.44_linux_amd64/
 4. 按任意顺序替换二进制。
 5. 回滚：`./migrate down --steps 1` 回到版本 2，只删这六列。`backup_tasks` 与 `binlog_files` 行数不变。
 
+> **元数据 schema 3 起才能启动当前进程。** 停掉连着这套元数据库的全部 binlog-server，执行 `./migrate up`，确认 `schema_migrations` 为 version 3、dirty 0，然后再启动。版本低于 3 时进程不会监听端口，日志里写 `schema version too old`，并告诉操作员执行 `./migrate up`。`000003_task_desired_and_retry_budget` 增加 `desired_run`、修订号和 `retry_attempt` / `consecutive_source_failures`。没有元数据库的 standalone 不跑这次迁移；它的重试计数只在进程内存里，进程退出就没了。
+
 ### 4.1 拓扑一：单机模式 (Standalone)
 
 适合单机评估或节点资源独立的独立备份场景。
