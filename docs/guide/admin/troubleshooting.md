@@ -50,7 +50,7 @@
 | 错误信息 | 原因 | 解决方案 |
 |----------|------|----------|
 | `connection refused` | 无法连接源 MySQL | 检查网络、防火墙、MySQL 状态 |
-| `binlog dump thread still open` | Stop 时源库不可达，`KILL` 没打到。任务已经是 `STOPPED`。`GET /api/tasks/{id}` 的 `pending_dump_cleanup.connection_id` 是还可能开着的 Binlog Dump | 不用在源库上手动 `KILL`。源库恢复后，worker 用当前密码重试，先等 5 秒，失败则加倍，最长 30 秒。连接不在 processlist，或 MySQL 返回 `ER_NO_SUCH_THREAD`，标记会清掉。没人 `KILL` 时，源库发现死连接的上限是 dump 心跳 15 秒加上源库 `net_write_timeout`（默认 60 秒，合计 75 秒） |
+| `binlog dump thread still open` | Stop 时源库不可达，`KILL` 没打到。拉过这条 dump 的进程在 Close 返回后任务是 `STOPPED`。`GET /api/tasks/{id}` 的 `pending_dump_cleanup.connection_id` 是还可能开着的 Binlog Dump。这个字段在 `RUNNING` 上也会出现：新的 dump 要等 KILL 确认，确认不了就停在 `RETRY_BACKOFF` 并留下同样的警告。schema 3 没有 `pending_dump_cleanup` 列时，这条警告只在拉过这条 dump 的那个进程上（`process_local: true`）；集群控制面看不到，重启也没了。集群 schema 3 的日志或 `last_error` 若写着 migration `000004`，先 `./migrate up` 再重启 | 任何认领到这行的 worker 都会重试 `KILL`，用任务当前密码，先等 5 秒，失败则加倍，最长 30 秒，直到成功、`ER_NO_SUCH_THREAD`、processlist 里已经没有这条 Binlog Dump，或任务被删。不想等的话，在源库上 `KILL` 这个 `connection_id`。对端收到 FIN/RST 时大约一个心跳周期（15 秒，FIN 实测约 26–29 秒）拆掉。半开路径（没有 FIN/RST）上心跳写不阻塞，`net_write_timeout` 不触发；源库要等多久取决于它自己的 TCP 重传（Linux `tcp_retries2` 默认约 15 分钟，实测约 957 秒）。本进程在路径仍不通时缩短不了这段等待 |
 | `access denied` | 认证失败 | 检查用户名密码、权限 |
 | `server_uuid mismatch` | server_id 冲突 | 检查 server_id 配置 |
 | `lease acquire failed` | 租约被其他 worker 持有 | 正常现象，或检查是否有重复 worker |

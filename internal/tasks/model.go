@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, and pending_dump_cleanup when Stop could not KILL a Binlog Dump
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, and pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -77,6 +77,7 @@ type Task struct {
 	ConsecutiveSourceFailures int64 `json:"-"`
 	// PendingDumpCleanup is set when Stop could not KILL the old Binlog Dump.
 	// Metadata mode stores it on backup_tasks when migration 000004 has been applied.
+	// Without that column it stays in the process that held the dump, including after STOPPED.
 	// Standalone keeps it on this struct. Empty means the source thread is gone.
 	PendingDumpCleanup *DumpCleanup `json:"pending_dump_cleanup,omitempty"`
 }

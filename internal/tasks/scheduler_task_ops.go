@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, a spec_revision bump when source/start/storage/cluster_key change so the control loop restarts one dump, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, does not copy a live run's row onto memory, and cancels that run when the row asks to stop, a GetTask read that started before the latest publish left in memory, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, a spec_revision bump when source/start/storage/cluster_key change so the control loop restarts one dump, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, does not copy a live run's row onto memory, and cancels that run when the row asks to stop, a GetTask read that started before the latest publish left in memory, GetTask that still returns this process's pending dump after STOPPED when the column is absent, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -524,10 +524,10 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 				s.tasks[id] = item
 			}
 		}
-		if !s.persistsPendingDumpLocked() {
-			if mem, ok := s.tasks[id]; ok {
-				item.PendingDumpCleanup = mem.PendingDumpCleanup
-			}
+		item = s.overlayPendingDumpLocked(item)
+		if mem, exists := s.tasks[id]; exists {
+			mem.PendingDumpCleanup = item.PendingDumpCleanup
+			s.tasks[id] = mem
 		}
 		s.flushPendingEventsLocked()
 		s.mu.Unlock()
@@ -535,6 +535,13 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 	}
 
 	if ok {
+		s.mu.Lock()
+		task = s.overlayPendingDumpLocked(task)
+		if mem, exists := s.tasks[id]; exists {
+			mem.PendingDumpCleanup = task.PendingDumpCleanup
+			s.tasks[id] = mem
+		}
+		s.mu.Unlock()
 		return task, nil
 	}
 	disk, found, err := lookupDiskBackupTask(dataDir, id)
@@ -573,6 +580,7 @@ func (s *Scheduler) DeleteTask(id string) error {
 	delete(s.tasks, id)
 	delete(s.events, id)
 	delete(s.replica, id)
+	s.forgetPendingDumpLocked(id)
 	if s.store != nil {
 		ctx, cancel := s.withWriteTimeout(context.Background())
 		if err := s.store.DeleteTask(ctx, id); err != nil {

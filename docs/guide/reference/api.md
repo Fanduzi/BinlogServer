@@ -272,7 +272,7 @@ curl http://localhost:8080/api/tasks/{task_id}
 
 HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。`last_error`、`owner_worker_id`、`epoch`、`run_id` 为空时不出现。任务不存在是 HTTP 404，正文 `task not found`。
 
-源库不可达的 Stop 仍返回这条 `STOPPED` 任务，并多一个 `pending_dump_cleanup`：`connection_id`、`host`、`port`、`warning`。`warning` 是 `source Binlog Dump connection <id> may still be open; will KILL when source is reachable`。没有残留连接时这个字段不出现。源库恢复后进程会 `KILL` 该连接号，成功或该号已不在 processlist（含 `ER_NO_SUCH_THREAD`）后字段消失。
+源库不可达的 Stop 仍返回这条 `STOPPED` 任务，并多一个 `pending_dump_cleanup`：`connection_id`、`host`、`port`、`warning`，schema 3 再加 `process_local: true`。`warning` 是 `source Binlog Dump connection <id> may still be open; will KILL when source is reachable`。`process_local` 为 true 时后面还有一句：只有拉过这条 dump 的那个进程看得到，别的进程和重启都看不到，直到迁移 `000004`。没有残留连接时这个字段不出现。正在拉的 dump 把连接号记成 `held`，这个字段不出现。`RUNNING` 上若还有没确认的残留，字段会出现，任务停在 `RETRY_BACKOFF` 时 `last_error` 是同一句警告，并且不会再开一条 dump。`STOPPED` 之后字段还在。源库恢复后，任何认领到这行的 worker 会 `KILL` 该连接号，成功或该号已不在 processlist（含 `ER_NO_SUCH_THREAD`）后字段消失。集群还在 schema 3 时，别的 worker 不能替这条 dump 收尾或接管，`last_error` 要求先跑迁移 `000004`。半开路径上源库线程能留多久不由这个字段保证，见部署指南里的 TCP 重传说明。DBA 可以按 `connection_id` 手动 `KILL`。
 
 **响应示例：**
 

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events read from the event store without holding the scheduler lock, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, and the runner's retention-blocked file counts for metrics
+// output: observability-facing task progress including at-tip lag, events read from the event store without holding the scheduler lock, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, the runner's retention-blocked file counts for metrics, and a Restore that loads a stored pending dump into this process
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -86,7 +86,7 @@ func (s *Scheduler) Restore(ctx context.Context) error {
 	s.events = make(map[string][]TaskEvent, len(list))
 	maxSeq := 0
 	for _, task := range list {
-		s.tasks[task.ID] = task
+		s.tasks[task.ID] = s.overlayPendingDumpLocked(task)
 
 		// 根据持久化 ID 重建内存中的自增基线。
 		if n, err := strconv.Atoi(task.ID); err == nil && n > maxSeq {

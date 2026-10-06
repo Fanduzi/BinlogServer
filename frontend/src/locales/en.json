@@ -272,7 +272,8 @@
     "clusterKey": "Cluster Key",
     "source": "Source",
     "startMode": "Start",
-    "pendingDumpCleanup": "source Binlog Dump connection {id} may still be open; will KILL when source is reachable"
+    "pendingDumpCleanup": "source Binlog Dump connection {id} may still be open; will KILL when source is reachable",
+    "pendingDumpCleanupProcessLocal": "Only this process (the worker that held the dump) shows this warning. A restart clears it. Other processes see it after migration 000004."
   },
   "source": {
     "lookupTitle": "Source Lookup",

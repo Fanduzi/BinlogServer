@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # input: mysql57 source, a scratch metadata database, and the current binlog-server binary
-# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, and a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile
-# pos: acceptance check for the desired-run control loop, issue 193, issue 249, and the spec_revision=0 upgrade reconcile
+# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, a held proxy path where Stop then Start never has two Binlog Dumps and ends with pending cleared and dumps=1, a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile, and the same unreachable Stop on schema 3 (no pending_dump_cleanup column) that stays pending after STOPPED and clears with zero dumps after the path returns without a manual KILL
+# pos: acceptance check for the desired-run control loop, issue 193, issue 249, issue 252, and the spec_revision=0 upgrade reconcile
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -15,10 +15,15 @@ WORKER_LOG="${E2E_WORKER_LOG:-/tmp/binlog-server-e2e-ctl-loop-worker-${RUN_TAG}.
 ALL_LOG="${E2E_ALL_LOG:-/tmp/binlog-server-e2e-ctl-loop-all-${RUN_TAG}.log}"
 WORKER_ID="${E2E_WORKER_ID:-e2e-ctl-worker}"
 WORKER_HEALTH_ADDR="${E2E_WORKER_HEALTH_ADDR:-127.0.0.1:18081}"
+WORKER_B_ID="${E2E_WORKER_B_ID:-e2e-ctl-worker-b}"
+WORKER_B_HEALTH_ADDR="${E2E_WORKER_B_HEALTH_ADDR:-127.0.0.1:18082}"
+WORKER_B_LOG="${E2E_WORKER_B_LOG:-/tmp/binlog-server-e2e-ctl-loop-worker-b-${RUN_TAG}.log}"
 SCRATCH_DB="binlog_meta_ctlloop"
 DUMP_USER="e2ectl${RUN_TAG: -6}"
 UPG_USER="e2eupg${RUN_TAG: -6}"
 CUT_USER="e2ecut${RUN_TAG: -6}"
+S3_USER="e2es3${RUN_TAG: -6}"
+FENCE_USER="e2efc${RUN_TAG: -6}"
 PASS1="ctlpass1"
 PASS2="ctlpass2"
 PROXY_PORT=""
@@ -26,6 +31,7 @@ PROXY_PID=""
 
 CONTROL_PID=""
 WORKER_PID=""
+WORKER_B_PID=""
 ALL_PID=""
 
 source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
@@ -54,6 +60,7 @@ kill_pid() {
 cleanup() {
   stop_proxy
   kill_pid "$ALL_PID"
+  kill_pid "$WORKER_B_PID"
   kill_pid "$WORKER_PID"
   kill_pid "$CONTROL_PID"
   docker compose -f "$COMPOSE_FILE" exec -T meta-primary \
@@ -116,6 +123,19 @@ start_worker() {
   wait_http "http://$WORKER_HEALTH_ADDR/healthz" "$WORKER_LOG"
 }
 
+start_worker_b() {
+  mkdir -p "$DATA_DIR/worker-b"
+  BINLOG_SERVER_MODE="cluster" \
+  BINLOG_SERVER_CLUSTER_ROLE="worker" \
+  BINLOG_SERVER_CLUSTER_WORKER_ID="$WORKER_B_ID" \
+  BINLOG_SERVER_CLUSTER_WORKER_HEALTH_LISTEN_ADDR="$WORKER_B_HEALTH_ADDR" \
+  BINLOG_SERVER_DATA_DIR="$DATA_DIR/worker-b" \
+  BINLOG_SERVER_META_DSN="$SCRATCH_DSN" \
+  nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$WORKER_B_LOG" 2>&1 &
+  WORKER_B_PID=$!
+  wait_http "http://$WORKER_B_HEALTH_ADDR/healthz" "$WORKER_B_LOG"
+}
+
 stop_pair() {
   kill_pid "$WORKER_PID"
   WORKER_PID=""
@@ -135,37 +155,66 @@ start_proxy() {
   done
   # One process, same cut as killing socat: the dump's TCP path disappears.
   cat >/tmp/e2e-ctl-proxy-"${RUN_TAG}".py <<'PY'
-import socket, sys, threading
+import signal, socket, sys, threading, time
 listen_port, target_port = int(sys.argv[1]), int(sys.argv[2])
+holding = threading.Event()
+def usr1(signum, frame):
+    holding.set()
+def usr2(signum, frame):
+    holding.clear()
+signal.signal(signal.SIGUSR1, usr1)
+signal.signal(signal.SIGUSR2, usr2)
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 ls = socket.socket()
 ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 ls.bind(("127.0.0.1", listen_port))
 ls.listen(32)
 def pipe(a, b):
     try:
-        while True:
-            data = a.recv(65536)
+        while not holding.is_set():
+            a.settimeout(0.2)
+            try:
+                data = a.recv(65536)
+            except socket.timeout:
+                continue
             if not data:
-                break
+                return False
+            while holding.is_set():
+                time.sleep(0.05)
             b.sendall(data)
     except Exception:
-        pass
-    finally:
-        for s in (a, b):
+        return False
+    return True
+def handle(client):
+    if holding.is_set():
+        try:
+            while holding.is_set():
+                time.sleep(0.05)
+        finally:
             try:
-                s.shutdown(socket.SHUT_RDWR)
+                client.close()
             except Exception:
                 pass
-def handle(client):
+        return
     try:
         upstream = socket.create_connection(("127.0.0.1", target_port))
     except Exception:
         client.close()
         return
-    threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
-    pipe(upstream, client)
-    client.close()
-    upstream.close()
+    leaked = threading.Event()
+    def one_way(src, dst):
+        if pipe(src, dst):
+            leaked.set()
+    threading.Thread(target=one_way, args=(client, upstream), daemon=True).start()
+    if pipe(upstream, client):
+        leaked.set()
+    if leaked.is_set() or holding.is_set():
+        return
+    for s in (client, upstream):
+        try:
+            s.close()
+        except Exception:
+            pass
 while True:
     client, _ = ls.accept()
     threading.Thread(target=handle, args=(client,), daemon=True).start()
@@ -182,6 +231,22 @@ PY
   echo "proxy not listening on $PROXY_PORT" >&2
   cat /tmp/e2e-ctl-proxy-"${RUN_TAG}".log >&2 || true
   return 1
+}
+
+hold_proxy() {
+  if [[ -z "${PROXY_PID:-}" ]]; then
+    echo "proxy is not running" >&2
+    return 1
+  fi
+  kill -USR1 "$PROXY_PID"
+}
+
+resume_proxy() {
+  if [[ -z "${PROXY_PID:-}" ]]; then
+    echo "proxy is not running" >&2
+    return 1
+  fi
+  kill -USR2 "$PROXY_PID"
 }
 
 stop_proxy() {
@@ -452,6 +517,101 @@ fi
 echo "[control-loop] path restored pending cleared dumps=0"
 stop_proxy
 
+# Case 5 (#255): hold the TCP path so the old Binlog Dump stays up, Stop, then
+# Start before that thread is gone. Two workers, schema 4. At most one dump
+# the whole time. After the path forwards again, pending is clear and dumps=1.
+start_worker_b
+source_exec "CREATE USER IF NOT EXISTS '${FENCE_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${FENCE_USER}'@'%'; FLUSH PRIVILEGES;"
+start_proxy "$MYSQL57_PORT"
+FENCE_SID=$((SID + 4))
+FENCE_BODY="$(jq -n \
+  --arg name "e2e-fence-${RUN_TAG}" \
+  --arg user "$FENCE_USER" \
+  --arg pass "$PASS1" \
+  --argjson port "$PROXY_PORT" \
+  --argjson sid "$FENCE_SID" \
+  '{name:$name,cluster_key:$name,source:{host:"127.0.0.1",port:$port,user:$user,password:$pass,flavor:"mysql",server_id:$sid},start:{mode:"LATEST"},storage:{retention_days:7}}')"
+FENCE_CREATED="$(curl -fsS -X POST "$API/api/tasks" -H 'Content-Type: application/json' -d "$FENCE_BODY")"
+FENCE_ID="$(printf '%s' "$FENCE_CREATED" | jq -r '.id // empty')"
+if [[ -z "$FENCE_ID" || "$FENCE_ID" == "null" ]]; then
+  echo "fence create failed: $FENCE_CREATED" >&2
+  exit 1
+fi
+HTTP="$(curl -sS -o /tmp/e2e-ctl-fence-start.resp -w '%{http_code}' -X POST "$API/api/tasks/$FENCE_ID/start")"
+if [[ "$HTTP" != "204" ]]; then
+  echo "fence start failed http=$HTTP body=$(cat /tmp/e2e-ctl-fence-start.resp)" >&2
+  exit 1
+fi
+wait_state "$FENCE_ID" "RUNNING"
+wait_dumps "$FENCE_USER" 1
+hold_proxy
+for _ in {1..20}; do
+  if [[ "$(dump_count "$FENCE_USER")" == "1" ]]; then
+    break
+  fi
+  sleep 0.2
+done
+if [[ "$(dump_count "$FENCE_USER")" != "1" ]]; then
+  echo "held path dropped the dump before stop; dumps=$(dump_count "$FENCE_USER")" >&2
+  exit 1
+fi
+HTTP="$(curl -sS -o /tmp/e2e-ctl-fence-stop.resp -w '%{http_code}' -X POST "$API/api/tasks/$FENCE_ID/stop")"
+if [[ "$HTTP" != "204" ]]; then
+  echo "fence stop failed http=$HTTP body=$(cat /tmp/e2e-ctl-fence-stop.resp)" >&2
+  exit 1
+fi
+HTTP="$(curl -sS -o /tmp/e2e-ctl-fence-restart.resp -w '%{http_code}' -X POST "$API/api/tasks/$FENCE_ID/start")"
+if [[ "$HTTP" != "204" ]]; then
+  echo "fence restart failed http=$HTTP body=$(cat /tmp/e2e-ctl-fence-restart.resp) state=$(task_state "$FENCE_ID")" >&2
+  exit 1
+fi
+FENCE_MAX=1
+# Close of a reset connection would drop the source thread within a few seconds.
+# The held path must still show that one dump after Stop and Start.
+sleep 5
+NOW="$(dump_count "$FENCE_USER")"
+if [[ "$NOW" != "1" ]]; then
+  echo "old dump was gone while the path was held; dumps=$NOW state=$(task_state "$FENCE_ID") body=$(task_json "$FENCE_ID")" >&2
+  exit 1
+fi
+for _ in {1..60}; do
+  NOW="$(dump_count "$FENCE_USER")"
+  if [[ "$NOW" -gt "$FENCE_MAX" ]]; then
+    FENCE_MAX="$NOW"
+  fi
+  if [[ "$NOW" != "1" ]]; then
+    echo "during hold dumps=$NOW max_dumps=$FENCE_MAX state=$(task_state "$FENCE_ID") body=$(task_json "$FENCE_ID")" >&2
+    exit 1
+  fi
+  sleep 0.25
+done
+resume_proxy
+FENCE_DONE=""
+for _ in {1..90}; do
+  NOW="$(dump_count "$FENCE_USER")"
+  if [[ "$NOW" -gt "$FENCE_MAX" ]]; then
+    FENCE_MAX="$NOW"
+  fi
+  BODY="$(task_json "$FENCE_ID")"
+  LEFT="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
+  STATE="$(printf '%s' "$BODY" | jq -r '.state // empty')"
+  if [[ "$STATE" == "RUNNING" && ("$LEFT" == "0" || "$LEFT" == "null") && "$NOW" == "1" ]]; then
+    FENCE_DONE=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$FENCE_DONE" || "$FENCE_MAX" != "1" ]]; then
+  echo "fence end max_dumps=$FENCE_MAX state=$(task_state "$FENCE_ID") pending=$(task_json "$FENCE_ID" | jq -c '.pending_dump_cleanup // empty') dumps=$(dump_count "$FENCE_USER")" >&2
+  cat "$WORKER_LOG" >&2 || true
+  cat "$WORKER_B_LOG" >&2 || true
+  exit 1
+fi
+echo "[dump-fence] max_dumps=${FENCE_MAX} pending_cleared dumps=1"
+stop_proxy
+kill_pid "$WORKER_B_PID"
+WORKER_B_PID=""
+
 stop_pair
 
 UPG_SID=$((SID + 1))
@@ -481,3 +641,100 @@ if [[ "$(task_state "900001")" == "STOPPED" ]]; then
 fi
 
 echo "[control-loop] upgraded RUNNING task stayed running"
+
+# Schema 3 has no pending_dump_cleanup column. The marker must stay on this
+# all-in-one process after STOPPED, then clear when the path returns.
+# No manual KILL is issued.
+kill_pid "$ALL_PID"
+ALL_PID=""
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
+)
+SCHEMA="$(meta_exec "SELECT version, dirty FROM schema_migrations")"
+SCHEMA="$(printf '%s' "$SCHEMA" | tr -d '[:space:]')"
+if [[ "$SCHEMA" != "30" ]]; then
+  echo "schema after down: [$SCHEMA] want 3 0" >&2
+  exit 1
+fi
+PENDING_COL="$(meta_exec "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_tasks' AND COLUMN_NAME = 'pending_dump_cleanup'")"
+if [[ "$PENDING_COL" != "0" ]]; then
+  echo "schema 3 still has pending_dump_cleanup column: $PENDING_COL" >&2
+  exit 1
+fi
+echo "[control-loop] schema 3 column absent"
+
+source_exec "CREATE USER IF NOT EXISTS '${S3_USER}'@'%' IDENTIFIED BY '${PASS1}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${S3_USER}'@'%'; FLUSH PRIVILEGES;"
+start_all_in_one
+start_proxy "$MYSQL57_PORT"
+S3_SID=$((SID + 3))
+S3_BODY="$(jq -n \
+  --arg name "e2e-s3-${RUN_TAG}" \
+  --arg user "$S3_USER" \
+  --arg pass "$PASS1" \
+  --argjson port "$PROXY_PORT" \
+  --argjson sid "$S3_SID" \
+  '{name:$name,cluster_key:$name,source:{host:"127.0.0.1",port:$port,user:$user,password:$pass,flavor:"mysql",server_id:$sid},start:{mode:"LATEST"},storage:{retention_days:7}}')"
+S3_CREATED="$(curl -fsS -X POST "$API/api/tasks" -H 'Content-Type: application/json' -d "$S3_BODY")"
+S3_ID="$(printf '%s' "$S3_CREATED" | jq -r '.id // empty')"
+if [[ -z "$S3_ID" || "$S3_ID" == "null" ]]; then
+  echo "schema 3 create failed: $S3_CREATED" >&2
+  exit 1
+fi
+HTTP="$(curl -sS -o /tmp/e2e-ctl-s3-start.resp -w '%{http_code}' -X POST "$API/api/tasks/$S3_ID/start")"
+if [[ "$HTTP" != "204" ]]; then
+  echo "schema 3 start failed http=$HTTP body=$(cat /tmp/e2e-ctl-s3-start.resp)" >&2
+  exit 1
+fi
+wait_state "$S3_ID" "RUNNING"
+wait_dumps "$S3_USER" 1
+stop_proxy
+wait_state "$S3_ID" "RETRY_BACKOFF"
+HTTP="$(curl -sS -o /tmp/e2e-ctl-s3-stop.resp -w '%{http_code}' -X POST "$API/api/tasks/$S3_ID/stop")"
+if [[ "$HTTP" != "204" ]]; then
+  echo "schema 3 stop failed http=$HTTP body=$(cat /tmp/e2e-ctl-s3-stop.resp) state=$(task_state "$S3_ID")" >&2
+  exit 1
+fi
+S3_CONN=""
+S3_WARN=""
+S3_LOCAL=""
+for _ in {1..90}; do
+  BODY="$(task_json "$S3_ID")"
+  STATE="$(printf '%s' "$BODY" | jq -r '.state // empty')"
+  if [[ "$STATE" == "STOPPED" ]]; then
+    S3_CONN="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
+    S3_WARN="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.warning // empty')"
+    S3_LOCAL="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.process_local // false')"
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$(task_state "$S3_ID")" != "STOPPED" || "$S3_CONN" == "0" || "$S3_CONN" == "null" || "$S3_CONN" == "" ]]; then
+  echo "schema 3 unreachable stop did not stay pending; state=$(task_state "$S3_ID") conn=$S3_CONN body=$(task_json "$S3_ID")" >&2
+  cat "$ALL_LOG" >&2 || true
+  exit 1
+fi
+if [[ "$S3_LOCAL" != "true" || "$S3_WARN" != *"this process"* || "$S3_WARN" != *"may still be open"* ]]; then
+  echo "schema 3 pending warning=$S3_WARN process_local=$S3_LOCAL" >&2
+  exit 1
+fi
+echo "[control-loop] schema 3 unreachable stop STOPPED pending conn=$S3_CONN process_local=$S3_LOCAL warning=$S3_WARN"
+start_proxy "$MYSQL57_PORT"
+S3_CLEARED=""
+for _ in {1..90}; do
+  BODY="$(task_json "$S3_ID")"
+  LEFT="$(printf '%s' "$BODY" | jq -r '.pending_dump_cleanup.connection_id // 0')"
+  DUMPS="$(dump_count "$S3_USER")"
+  if [[ ("$LEFT" == "0" || "$LEFT" == "null") && "$DUMPS" == "0" ]]; then
+    S3_CLEARED=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$S3_CLEARED" ]]; then
+  echo "schema 3 path restored but pending=$(task_json "$S3_ID" | jq -c '.pending_dump_cleanup // empty') dumps=$(dump_count "$S3_USER")" >&2
+  cat "$ALL_LOG" >&2 || true
+  exit 1
+fi
+echo "[control-loop] schema 3 path restored pending cleared dumps=0 no manual KILL"
+stop_proxy

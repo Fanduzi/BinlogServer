@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump.
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -151,6 +151,41 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 
 	// Step 3: worker 执行分支。只有所有权真正变化时才 Acquire。
 	// 本进程已经持有未过期租约时不调用 Acquire，epoch 保持不变。
+	if opts.acquireLease && s.refusesUnfencedTakeoverLocked(task) {
+		owner, epoch := task.OwnerWorkerID, task.Epoch
+		lease := s.leaseManager
+		s.mu.Unlock()
+		if lease != nil && owner != "" && epoch > 0 {
+			leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
+			held, err := lease.Verify(leaseCtx, id, owner, epoch)
+			cancelLease()
+			if err != nil || held {
+				return ErrLeaseNotAcquired
+			}
+		}
+		s.mu.Lock()
+		task, ok = s.tasks[id]
+		if !ok {
+			s.mu.Unlock()
+			return ErrTaskNotFound
+		}
+		if !s.refusesUnfencedTakeoverLocked(task) {
+			s.mu.Unlock()
+			return s.startTask(id, opts)
+		}
+		if task.State == StateRetryBackoff && task.LastError == ClusterDumpFenceSchemaMessage && task.DesiredRun == TaskDesiredRun {
+			s.mu.Unlock()
+			return nil
+		}
+		log.Printf("task=%s %s", id, ClusterDumpFenceSchemaMessage)
+		task.DesiredRun = TaskDesiredRun
+		if err := s.markRetryBackoffLocked(task, ClusterDumpFenceSchemaMessage); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.mu.Unlock()
+		return nil
+	}
 	if s.leaseManager != nil && opts.acquireLease {
 		previousOwner := task.OwnerWorkerID
 		previousState := task.State
@@ -174,6 +209,59 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		}
 	} else if s.leaseManager != nil {
 		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
+	}
+
+	pending := s.leftoverDumpLocked(id, task)
+	killer := s.dumpKiller
+	if pending.ConnectionID == 0 && s.persistsPendingDumpLocked() {
+		store := s.store
+		s.mu.Unlock()
+		readCtx, cancelRead := s.withReadTimeout(context.Background())
+		fresh, readErr := store.GetTask(readCtx, id)
+		cancelRead()
+		s.mu.Lock()
+		if current, ok := s.tasks[id]; ok {
+			current.OwnerWorkerID = task.OwnerWorkerID
+			current.Epoch = task.Epoch
+			current.RunID = task.RunID
+			current.DesiredRun = task.DesiredRun
+			current.SpecRevision = task.SpecRevision
+			current.Source = task.Source
+			task = current
+		}
+		if readErr == nil && fresh.PendingDumpCleanup != nil && fresh.PendingDumpCleanup.ConnectionID != 0 {
+			pending = *fresh.PendingDumpCleanup
+			s.rememberPendingDumpLocked(id, pending)
+		} else if again := s.leftoverDumpLocked(id, task); again.ConnectionID != 0 {
+			pending = again
+		}
+	}
+	if pending.ConnectionID != 0 {
+		s.mu.Unlock()
+		killErr := s.killLeftover(task, pending, killer)
+		s.mu.Lock()
+		if current, ok := s.tasks[id]; ok {
+			current.OwnerWorkerID = task.OwnerWorkerID
+			current.Epoch = task.Epoch
+			current.RunID = task.RunID
+			current.DesiredRun = task.DesiredRun
+			current.SpecRevision = task.SpecRevision
+			current.Source = task.Source
+			task = current
+		}
+		if done, open := s.runs[id]; open && !isClosed(done) {
+			s.mu.Unlock()
+			return errLocalRunOpen
+		}
+		if killErr != nil {
+			task.DesiredRun = TaskDesiredRun
+			if err := s.markRetryBackoffLocked(task, DumpCleanupWarning(pending.ConnectionID)); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			s.mu.Unlock()
+			return nil
+		}
 	}
 
 	if err := s.prepareDiskResumeEpochLocked(&task); err != nil {
@@ -215,12 +303,39 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	s.runSpec[id] = task.SpecRevision
 	s.mu.Unlock()
 
+	var stopRenew func()
 	if s.leaseManager != nil && task.Epoch > 0 {
-		go s.renewLeaseLoop(ctx, id, task.OwnerWorkerID, task.Epoch)
+		renewCtx, renewCancel := context.WithCancel(context.Background())
+		renewStopped := make(chan struct{})
+		go func() {
+			defer close(renewStopped)
+			s.renewLeaseLoop(renewCtx, id, task.OwnerWorkerID, task.Epoch)
+		}()
+		stopRenew = func() {
+			renewCancel()
+			select {
+			case <-renewStopped:
+			case <-time.After(s.internalLeaseTimeout + time.Second):
+				log.Printf("lease renew did not stop task=%s", id)
+			}
+		}
 	}
 
-	go s.runTask(ctx, id, task, done, opts.resetBudget)
+	go s.runTask(ctx, id, task, done, opts.resetBudget, stopRenew)
 	return nil
+}
+
+// refusesUnfencedTakeoverLocked reports a cluster start that would open a dump
+// another worker may still hold, with no shared connection id to KILL first.
+// Caller holds s.mu. Single-process schema 3 does not set dumpFenceRequired.
+func (s *Scheduler) refusesUnfencedTakeoverLocked(task Task) bool {
+	if !s.dumpFenceRequired || s.persistsPendingDumpLocked() {
+		return false
+	}
+	if task.OwnerWorkerID == "" || task.OwnerWorkerID == s.clusterWorkerID {
+		return false
+	}
+	return true
 }
 
 // prepareDiskResumeEpochLocked raises an adopted task's epoch above every
@@ -562,6 +677,7 @@ func (s *Scheduler) StopTask(id string) error {
 }
 
 // reloadIdleTaskFromStoreLocked 在本进程没有活着的 run 时，用 store 行替换内存抄本。
+// 没有 pending_dump_cleanup 列时，本进程登记的残留连接号留在抄本上。
 // 调用方持有 s.mu。store 没有这行时保持内存不变。
 func (s *Scheduler) reloadIdleTaskFromStoreLocked(id string) error {
 	if s.store == nil {
@@ -587,7 +703,7 @@ func (s *Scheduler) reloadIdleTaskFromStoreLocked(id string) error {
 	if done, ok := s.runs[id]; ok && !isClosed(done) {
 		return nil
 	}
-	s.tasks[id] = item
+	s.tasks[id] = s.overlayPendingDumpLocked(item)
 	if n, convErr := strconv.Atoi(item.ID); convErr == nil && n > s.seq {
 		s.seq = n
 	}
@@ -698,55 +814,144 @@ func (s *Scheduler) noteRemoteStopLocked(stored Task) bool {
 }
 
 // completeIdleStop 把没有本进程执行的 STOPPING 收成 STOPPED。
-// 租约仍被别的 worker 持有时不动，等那个进程自己取消 dump。
+// 租约仍被别的 worker 持有时不动。没关上的 dump 先记成 pending，不写成已经 Close。
 func (s *Scheduler) completeIdleStop(task Task) {
 	if task.State != StateStopping {
 		return
 	}
+	_ = s.settleForeignStop(task)
+}
+
+// settleForeignStop writes STOPPED only when this process is not leaving a
+// dump behind. A held connection is fenced into pending cleanup. A cluster
+// without migration 000004 does not finish another worker's dump.
+func (s *Scheduler) settleForeignStop(task Task) error {
+	if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
+		return nil
+	}
 	s.mu.Lock()
 	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
 		s.mu.Unlock()
-		return
+		return nil
 	}
 	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
 		s.noteRemoteStopLocked(task)
 		s.flushPendingEventsLocked()
 		s.mu.Unlock()
-		return
+		return nil
 	}
 	owner := task.OwnerWorkerID
 	epoch := task.Epoch
+	if current, ok := s.tasks[task.ID]; ok {
+		if current.OwnerWorkerID != "" {
+			owner = current.OwnerWorkerID
+			epoch = current.Epoch
+		}
+		if marker := s.leftoverDumpLocked(task.ID, current); marker.ConnectionID != 0 {
+			copied := marker
+			task.PendingDumpCleanup = &copied
+		}
+	}
+	if task.PendingDumpCleanup == nil || task.PendingDumpCleanup.ConnectionID == 0 {
+		if marker := s.leftoverDumpLocked(task.ID, task); marker.ConnectionID != 0 {
+			copied := marker
+			task.PendingDumpCleanup = &copied
+		}
+	}
 	self := s.clusterWorkerID
 	lease := s.leaseManager
 	s.mu.Unlock()
 
-	if owner != "" && epoch > 0 && owner != self {
-		if lease == nil {
-			return
-		}
+	if owner != "" && epoch > 0 && owner != self && lease != nil {
 		ctx, cancel := s.withLeaseTimeout(context.Background())
 		held, err := lease.Verify(ctx, task.ID, owner, epoch)
 		cancel()
 		if err != nil || held {
-			return
+			return nil
 		}
 	}
 
 	s.mu.Lock()
 	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
 		s.mu.Unlock()
-		return
+		return nil
 	}
 	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
 		s.noteRemoteStopLocked(task)
 		s.flushPendingEventsLocked()
 		s.mu.Unlock()
-		return
+		return nil
+	}
+	marker := DumpCleanup{}
+	if task.PendingDumpCleanup != nil {
+		marker = *task.PendingDumpCleanup
+	}
+	if current, ok := s.tasks[task.ID]; ok {
+		if again := s.leftoverDumpLocked(task.ID, current); again.ConnectionID != 0 {
+			marker = again
+		}
+	}
+	s.mu.Unlock()
+
+	if marker.Held && marker.ConnectionID != 0 {
+		s.mu.Lock()
+		current := task
+		if mem, ok := s.tasks[task.ID]; ok {
+			current = mem
+		}
+		copied := marker
+		current.PendingDumpCleanup = &copied
+		s.tasks[task.ID] = current
+		s.rememberPendingDumpLocked(task.ID, marker)
+		s.mu.Unlock()
+		src := task.Source
+		if marker.Host != "" {
+			src.Host = marker.Host
+			src.Port = marker.Port
+		}
+		s.noteDumpCleanup(task.ID, src, marker.ConnectionID, errors.New("lease expired before dump close"))
+		return nil
+	}
+	if marker.ConnectionID != 0 && owner != "" && owner != self {
+		return nil
+	}
+	if marker.ConnectionID == 0 && s.dumpFenceRequired && !s.persistsPendingDumpLocked() && owner != "" && owner != self {
+		log.Printf("task=%s %s", task.ID, ClusterDumpFenceSchemaMessage)
+		s.mu.Lock()
+		current := task
+		if mem, ok := s.tasks[task.ID]; ok {
+			current = mem
+		}
+		if current.State != StateStopped && current.State != StateFailed {
+			current.LastError = ClusterDumpFenceSchemaMessage
+			current.DesiredRun = TaskDesiredStop
+			current.State = StateStopping
+			current.UpdatedAt = time.Now()
+			s.tasks[task.ID] = current
+			if err := s.persistTaskLocked(current); err != nil {
+				log.Printf("persist task transition failed task=%s state=%s err=%v", task.ID, StateStopping, err)
+			}
+		}
+		s.mu.Unlock()
+		return nil
+	}
+
+	s.mu.Lock()
+	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
+		s.mu.Unlock()
+		return nil
+	}
+	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
+		s.noteRemoteStopLocked(task)
+		s.flushPendingEventsLocked()
+		s.mu.Unlock()
+		return nil
 	}
 	base := task
 	if current, ok := s.tasks[task.ID]; ok {
 		base = current
 	}
+	base.DesiredRun = TaskDesiredStop
 	base.State = StateStopping
 	if base.OwnerWorkerID == "" {
 		base.OwnerWorkerID = owner
@@ -757,15 +962,19 @@ func (s *Scheduler) completeIdleStop(task Task) {
 	if err := s.markStoppedLocked(task.ID); err != nil {
 		s.mu.Unlock()
 		log.Printf("persist task transition failed task=%s state=%s err=%v", task.ID, StateStopped, err)
-		return
+		return err
 	}
 	s.mu.Unlock()
 	s.releaseTaskLease(task.ID, releaseOwner, releaseEpoch)
+	return nil
 }
 
-func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}, resetBudget bool) {
+func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}, resetBudget bool, stopRenew func()) {
 	openedSpec := task.AppliedSpecRevision
 	defer func() {
+		if stopRenew != nil {
+			stopRenew()
+		}
 		var (
 			releaseOwner string
 			releaseEpoch int64
