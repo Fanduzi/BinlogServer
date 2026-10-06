@@ -968,6 +968,11 @@ func (s *schedulerTestStore) ListStartingUnownedTasks(_ context.Context) ([]Task
 	return StartingUnownedTasks(s.snapshotLocked()), nil
 }
 
+// ListTasksWithExpiredLease 实现对应功能逻辑。测试里的租约在 MemoryLease，不在这张表。
+func (s *schedulerTestStore) ListTasksWithExpiredLease(context.Context) ([]Task, error) {
+	return nil, nil
+}
+
 // DeleteTask 实现对应功能逻辑。
 func (s *schedulerTestStore) DeleteTask(_ context.Context, taskID string) error {
 	s.mu.Lock()

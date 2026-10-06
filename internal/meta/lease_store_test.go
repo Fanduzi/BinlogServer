@@ -9,11 +9,21 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestAcquireLeaseSQLSameOwnerDoesNotBumpEpoch(t *testing.T) {
+	if !strings.Contains(acquireLeaseSQL, "lease_expire_at <= NOW(6) AND owner_worker_id <> ?") {
+		t.Fatalf("same-owner reclaim must not bump epoch: %s", acquireLeaseSQL)
+	}
+	if !strings.Contains(acquireLeaseSQL, "epoch + 1") {
+		t.Fatal("a different worker taking an expired lease must still bump epoch")
+	}
+}
 
 // TestLeaseStore_AcquireRenewRelease 验证相关行为。
 func TestLeaseStore_AcquireRenewRelease(t *testing.T) {
@@ -29,7 +39,7 @@ func TestLeaseStore_AcquireRenewRelease(t *testing.T) {
 	ttlMicros := ttl.Microseconds()
 
 	mock.ExpectExec(regexp.QuoteMeta(acquireLeaseSQL)).
-		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", ttlMicros).
+		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", "worker-a", ttlMicros).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(getLeaseSQL)).
 		WithArgs("task-1").
@@ -93,7 +103,7 @@ func TestLeaseStore_FencingByEpoch(t *testing.T) {
 	ttlMicros := ttl.Microseconds()
 
 	mock.ExpectExec(regexp.QuoteMeta(acquireLeaseSQL)).
-		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", ttlMicros).
+		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", "worker-a", ttlMicros).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(getLeaseSQL)).
 		WithArgs("task-1").
@@ -155,7 +165,7 @@ func TestLeaseStore_ReleaseThenAcquireKeepsEpochMonotonic(t *testing.T) {
 	ttlMicros := ttl.Microseconds()
 
 	mock.ExpectExec(regexp.QuoteMeta(acquireLeaseSQL)).
-		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", ttlMicros).
+		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", "worker-a", ttlMicros).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(getLeaseSQL)).
 		WithArgs("task-1").
@@ -188,7 +198,7 @@ func TestLeaseStore_ReleaseThenAcquireKeepsEpochMonotonic(t *testing.T) {
 	}
 
 	mock.ExpectExec(regexp.QuoteMeta(acquireLeaseSQL)).
-		WithArgs("task-1", "worker-b", ttlMicros, "worker-b", ttlMicros).
+		WithArgs("task-1", "worker-b", ttlMicros, "worker-b", "worker-b", ttlMicros).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(getLeaseSQL)).
 		WithArgs("task-1").
@@ -255,10 +265,10 @@ func TestLeaseStore_AcquireRetriesTransientError(t *testing.T) {
 	transientErr := errors.New("connection reset by peer")
 
 	mock.ExpectExec(regexp.QuoteMeta(acquireLeaseSQL)).
-		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", ttlMicros).
+		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", "worker-a", ttlMicros).
 		WillReturnError(transientErr)
 	mock.ExpectExec(regexp.QuoteMeta(acquireLeaseSQL)).
-		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", ttlMicros).
+		WithArgs("task-1", "worker-a", ttlMicros, "worker-a", "worker-a", ttlMicros).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(getLeaseSQL)).
 		WithArgs("task-1").

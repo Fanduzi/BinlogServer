@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # input: meta-primary MySQL, migration 000003, and the current binlog-server binary
-# output: proof that up lands on schema (3,0), backfills desired_run, down returns to version 2 without deleting rows, and a binary that still requires only schema 2 starts
-# pos: acceptance check for ADR 0005 step 2 on a scratch metadata database
+# output: proof that up lands on schema (3,0), backfills desired_run, the current binary starts on schema 3, refuses schema 2 with ./migrate up, and down returns to version 2 without deleting rows
+# pos: acceptance check for the task-desired migration and the schema 3 startup gate
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -56,11 +56,8 @@ fail() {
   exit 1
 }
 
-if ! grep -q 'const minRequiredSchemaVersion int64 = 2' "$ROOT_DIR/internal/meta/mysql_store.go"; then
-  fail "minRequiredSchemaVersion must stay 2 in this step"
-fi
-if grep -q 'desired_run' "$ROOT_DIR/internal/meta/mysql_store.go"; then
-  fail "this step must not read or write desired_run"
+if ! grep -q 'const minRequiredSchemaVersion int64 = 3' "$ROOT_DIR/internal/meta/mysql_store.go"; then
+  fail "minRequiredSchemaVersion must be 3"
 fi
 
 echo "[task-desired] scratch database $SCRATCH_DB"
@@ -209,5 +206,37 @@ if [[ "$gone" != "0" ]]; then
   fail "down left $gone new columns"
 fi
 
+echo "[task-desired] current binary must refuse schema 2"
+REFUSE_DIR="${DATA_DIR}-schema2"
+REFUSE_LOG="${SERVER_LOG}.schema2"
+mkdir -p "$REFUSE_DIR"
+: >"$REFUSE_LOG"
+BINLOG_SERVER_DATA_DIR="$REFUSE_DIR" \
+BINLOG_SERVER_META_DSN="$SCRATCH_DSN" \
+BINLOG_SERVER_MODE=cluster \
+BINLOG_SERVER_CLUSTER_ROLE=control-plane \
+  nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$REFUSE_LOG" 2>&1 &
+SERVER_PID=$!
+refused=0
+for _ in $(seq 1 30); do
+  if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    refused=1
+    break
+  fi
+  if curl -fsS "$API/healthz" >/dev/null 2>&1; then
+    fail "schema 2 passed healthz"
+  fi
+  sleep 1
+done
+kill_server
+if [[ "$refused" != "1" ]]; then
+  cat "$REFUSE_LOG" >&2 || true
+  fail "schema 2 process still running"
+fi
+if ! grep -q '\./migrate up' "$REFUSE_LOG"; then
+  cat "$REFUSE_LOG" >&2 || true
+  fail "schema 2 log did not tell the operator to run ./migrate up"
+fi
+
 meta_exec -e "DROP DATABASE IF EXISTS ${SCRATCH_DB};" >/dev/null
-echo "[task-desired] success: schema 3 backfill, previous binary healthz, down keeps rows"
+echo "[task-desired] success: schema 3 backfill, healthz on schema 3, refuse schema 2, down keeps rows"
