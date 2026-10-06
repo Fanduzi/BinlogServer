@@ -22,7 +22,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup
+  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -47,6 +47,7 @@ Scenarios:
   smoke-split-retention
   smoke-epoch-segments
   smoke-task-desired-migration
+  smoke-control-loop
   smoke-gtid-purge
   smoke-source-outage
   smoke-unreachable-giveup
@@ -95,7 +96,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup"
+      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -144,7 +145,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop)
       return 0
       ;;
     *)
@@ -200,6 +201,9 @@ run_scenario() {
       ;;
     smoke-task-desired-migration)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-task-desired-migration.sh"
+      ;;
+    smoke-control-loop)
+      E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-control-loop.sh"
       ;;
     smoke-gtid-purge)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"

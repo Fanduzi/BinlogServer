@@ -104,6 +104,10 @@ binlog-server_0.5.45_linux_amd64/
 
 没有元数据库的 standalone 不跑这次迁移。重试计数只在进程内存里，进程退出就没了。
 
+> **ADR 0005 第 4 步（当前进程，没有新迁移）：** `desired_run`（`RUN` / `STOP`）和 `spec_revision` 是操作意图。Start 写 `RUN` 并让 `spec_revision` 加一，Stop 写 `STOP` 并加一，改源、起点、保留或 `cluster_key` 也加一。Worker 的控制回路对比期望和现状，负责拉起、停止，以及规格变化后关掉再开一条 dump。只有所有权真正变化才 `Acquire`；同一个 worker 续租不增加 epoch。`STOPPED` 只在 dump 连接 `Close()` 返回之后写入，这时源库上不应再留下这条任务的 Binlog Dump，`owner_worker_id` 也是空的。没有元数据库的 standalone 以内存任务为准，同样等 Close 返回再写 `STOPPED`。schema 仍是 3。不要为这一步添加 `000004`。没有新的配置项。版本低于 3 时进程不会监听端口。拒绝原因写在配置的日志文件里，也包含 `schema version too old` 和 `./migrate up`。
+>
+> **不能和 v0.5.44 / v0.5.45 同时连同一套元数据库。** 那两个版本不维护 `desired_run`。混跑会让任务被一边拉起、另一边停掉。先停掉连着这套库的全部旧进程，再只启动当前版本。启动时（认领循环也会再跑一次）只改 `spec_revision=0` 且 `applied_spec_revision=0` 的行：`RUNNING`、`STARTING`、`RETRY_BACKOFF`、`LEASE_DEGRADED`、`REBUILDING_FILE` 的 `desired_run` 写成 `RUN`，其余写成 `STOP`。修订号保持 0。已经对齐的行再跑一次不会被改。本版本 Start、Stop 或改规格之后 `spec_revision>0`，不会被这次对齐盖掉。这样，旧二进制留下的、状态仍是 `RUNNING` 但 `desired_run=STOP` 的任务在升级后继续跑，而不会被控制回路停掉。
+
 ### 4.1 拓扑一：单机模式 (Standalone)
 
 适合单机评估或节点资源独立的独立备份场景。

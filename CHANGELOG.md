@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- Metadata mode treats `backup_tasks.desired_run` (`RUN` or `STOP`) and `spec_revision` as the operator intent (ADR 0005 step 4, #193). Start writes `desired_run=RUN` and increments `spec_revision`. Stop writes `desired_run=STOP` and increments `spec_revision`. A change to source, start position, storage, or `cluster_key` increments `spec_revision` while the task is running. The worker control loop is the only starter and stopper: it starts a dump, stops one, restarts one dump after a spec change, and leaves a row alone when desired state and the open dump already match. The claim and lease rules from the persisted retry budget stay: `Acquire` runs only when ownership actually changes, and the same worker keeping its lease does not increase the epoch. `STOPPED` is written only after the dump connection `Close()` has returned, and `owner_worker_id` is cleared then. A Stop that reaches `STOPPED` does not leave a Binlog Dump thread. Stop, change the source password while the task is stopping, then Start: the source shows one Binlog Dump thread for that task. A later Stop shows zero. Standalone with no metadata database uses the in-memory task the same way. No new migration and no new config key. Schema stays at 3. Do not add migration `000004` for this step.
+- v0.5.44 and v0.5.45 do not keep `desired_run` aligned with state, so a task they created or started can be `RUNNING` with `desired_run=STOP`. On startup, and on each claim pass, this process rewrites `desired_run` from state only for rows where `spec_revision=0` and `applied_spec_revision=0` (`RUNNING`, `STARTING`, `RETRY_BACKOFF`, `LEASE_DEGRADED`, and `REBUILDING_FILE` become `RUN`; every other state becomes `STOP`). The revision columns stay 0. Repeating the update changes zero rows once they match. A row this process has started, stopped, or edited has `spec_revision>0` and is left alone. Do not run a v0.5.44 or v0.5.45 worker against the same metadata database as this binary. Stop every one of those processes, then start only this version. A mixed cluster flaps tasks because the older binary does not maintain `desired_run`.
+- A startup refusal because the metadata schema is below 3 is written to the configured log file before the process exits with the same `schema version too old` and `./migrate up` message (#245).
+
 ## [v0.5.45] - 2026-10-06
 
 ### Fixed

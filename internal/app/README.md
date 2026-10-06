@@ -1,7 +1,7 @@
 # internal/app Module
 
 ## Files
-- `app.go`: 应用主流程与运行时装配。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。
+- `app.go`: 应用主流程与运行时装配。Restore 之前先对齐遗留 `desired_run`。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。
 - `uploaded_takeover_test.go`: 走 `Run` 的启动接线。checkpoint 只在已上传对象里、本地文件不在时，不报 `SEGMENT_NOT_ON_WORKER`。
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `tracing_test.go`: OTLP HTTP 默认 traces 路径兼容性回归测试。
@@ -21,7 +21,7 @@
 - control-plane `listen_addr` 非 loopback（含 `:8080`、`0.0.0.0:8080`）时同样强制 `api.auth.enabled` + `protect_api` + `protect_metrics`；`127.0.0.1`/`localhost`/`::1` 可保持未鉴权本地演示。`/healthz` 仍匿名。
 - 创建 meta store 时把 `config.EncryptionKey` 注入，用于 `source_json` 源库密码加解密。
 - tracing：默认关闭；启用时装配 HTTP 入站 span 与元数据存储调用 span；无路径的 OTLP HTTP endpoint 沿用 `/v1/traces` 默认路径。
-- worker 启动与认领循环都走 `ClaimRunnableTasks`：没人要的 STARTING、过期租约、自己名下空闲的 active 任务。本进程正在跑的任务如果共享行已经是 STOPPING 或 STOPPED，这一轮会取消拉流并放开租约。租约已过期的 STOPPING 会收成 STOPPED。不对别人仍持有未过期租约的 RUNNING 做 Stop。
+- worker 启动与认领循环都走 `ClaimRunnableTasks`：先对齐遗留 `desired_run`，再没人要的 STARTING、过期租约、自己名下空闲的 active 任务。本进程正在跑的任务如果期望是 STOP，或共享行已经是 STOPPING 或 STOPPED，这一轮会取消拉流；STOPPED 要等 Close 返回后才写。租约已过期的 STOPPING 会收成 STOPPED。不对别人仍持有未过期租约的 RUNNING 做 Stop。
 - 封文件前验租把 `LeaseManager` 直接交给 runner（`Verify`），不再经 App 适配。
 - standalone worker 注入进程内 `MemoryLease`（worker_id=`standalone`），与集群走同一扇所有权门。
 - 封文件后上传由 App 注入 `ApplySealedUpload`，执行器只 seal。同一个上传客户端也作为保留清理的对象删除器注入。该客户端能读对象时，接管用它把 checkpoint 已经落在其中的封存 `UPLOADED` 对象读回来。封存后的这次 put 使用 `meta.timeout.upload_sec`，与后台补传的 `withUploadTimeout` 是同一个秒数。不新增配置项。

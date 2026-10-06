@@ -145,8 +145,9 @@ func TestClaimCarriesRecordedSourceFailures(t *testing.T) {
 	}
 
 	runner := &unreachableRunner{}
+	store := &schedulerTestStore{tasks: map[string]Task{}}
 	s := NewScheduler(
-		WithStore(&schedulerTestStore{tasks: map[string]Task{}}),
+		WithStore(store),
 		WithRunner(runner),
 		WithEventStore(&fixedEventStore{events: events}),
 		WithClusterLeaseManager(NewMemoryLease()),
@@ -168,6 +169,9 @@ func TestClaimCarriesRecordedSourceFailures(t *testing.T) {
 	current.LastError = "SOURCE_UNREACHABLE: dial tcp: connection refused"
 	s.tasks[task.ID] = current
 	s.mu.Unlock()
+	if err := store.UpsertTask(context.Background(), current); err != nil {
+		t.Fatalf("UpsertTask: %v", err)
+	}
 
 	claimed, err := s.ClaimRunnableTasks()
 	if err != nil {
@@ -318,6 +322,9 @@ func TestClaimUsesPersistedBudgetInsteadOfEvents(t *testing.T) {
 	current.ConsecutiveSourceFailures = 9
 	s.tasks[task.ID] = current
 	s.mu.Unlock()
+	if err := store.UpsertTask(context.Background(), current); err != nil {
+		t.Fatalf("UpsertTask: %v", err)
+	}
 
 	if _, err := s.ClaimRunnableTasks(); err != nil {
 		t.Fatalf("ClaimRunnableTasks: %v", err)
@@ -412,6 +419,9 @@ func TestPersistedRetryAttemptContinuesBackoff(t *testing.T) {
 	current.ConsecutiveSourceFailures = 4
 	s.tasks[task.ID] = current
 	s.mu.Unlock()
+	if err := store.UpsertTask(context.Background(), current); err != nil {
+		t.Fatalf("UpsertTask: %v", err)
+	}
 
 	if _, err := s.ClaimRunnableTasks(); err != nil {
 		t.Fatalf("ClaimRunnableTasks: %v", err)
