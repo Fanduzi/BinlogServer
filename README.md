@@ -95,10 +95,10 @@ Deploy official precompiled binaries without needing Go installed.
 
 > ⚠️ **Metadata Isolation Rule:** When `meta_dsn` is configured, its MySQL instance must be dedicated and NEVER added to the backup task set. The server strictly rejects identical TCP `host:port` targets and loopback aliases (`localhost`, `127/8`, `::1`).
 
-### 1. Download, verify, and unpack v0.5.48
+### 1. Download, verify, and unpack v0.5.49
 
 ```bash
-VER=0.5.48
+VER=0.5.49
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -110,19 +110,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-Published `v0.5.48` `checksums.txt`:
+Published `v0.5.49` `checksums.txt`:
 
 ```text
-8c78ff946fc1703acdacb2912ee0a736aac7bf4df46ff7480fdbaed393dd8fc7  binlog-server_0.5.48_darwin_amd64.tar.gz
-07014105b31cc0e0b8d03edf629d0d4c47a46e01bfc68a5d975b362ecaf1fe6e  binlog-server_0.5.48_darwin_arm64.tar.gz
-273af998a0499a336139ffb1d289c142893665236f7c361c81c7e18a38234683  binlog-server_0.5.48_linux_amd64.tar.gz
-bc3916dae83df150ffe3d88056bb096b8bbb1cf8ee09182b4f9869d5577d208a  binlog-server_0.5.48_linux_arm64.tar.gz
+03e3fa75c6408ee7d135f70c274e56f3c1cecd8d177d7e847cb1c917a838b3c2  binlog-server_0.5.49_darwin_amd64.tar.gz
+4882f5443e9fe91b87ce8eb6a9df752ea00e3187f32da80705ed9b86682c795a  binlog-server_0.5.49_darwin_arm64.tar.gz
+97814e573ac6f8b5f95e5c9d4a6a2c1cf451a5589adbc43aaefef5382077a6a2  binlog-server_0.5.49_linux_amd64.tar.gz
+ff31a15dcf48f6a08be28b2dc537056d7c15c1112c2d0f48fc749dd3a9e25d69  binlog-server_0.5.49_linux_arm64.tar.gz
 ```
 
 The release tarball contains everything required for operation:
 
 ```text
-binlog-server_0.5.48_linux_amd64/
+binlog-server_0.5.49_linux_amd64/
   binlog-server                  # Main application executable
   migrate                        # Schema migration utility
   migrations/                    # SQL migrations
@@ -259,16 +259,16 @@ Start production instances from [`config.production.example.yaml`](config.produc
 
 ---
 
-## Upgrade Notes (v0.5.48)
+## Upgrade Notes (v0.5.49)
 
-Before upgrading existing deployments to `v0.5.48`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, `v0.5.32`, `v0.5.33`, `v0.5.34`, `v0.5.35`, `v0.5.36`, `v0.5.37`, `v0.5.38`, `v0.5.39`, `v0.5.40`, `v0.5.41`, `v0.5.42`, `v0.5.43`, `v0.5.44`, `v0.5.45`, `v0.5.46`, and `v0.5.47` stay in the release notes linked below.
+Before upgrading existing deployments to `v0.5.49`, review this operator contract. Notes for `v0.5.27`, `v0.5.28`, `v0.5.29`, `v0.5.30`, `v0.5.31`, `v0.5.32`, `v0.5.33`, `v0.5.34`, `v0.5.35`, `v0.5.36`, `v0.5.37`, `v0.5.38`, `v0.5.39`, `v0.5.40`, `v0.5.41`, `v0.5.42`, `v0.5.43`, `v0.5.44`, `v0.5.45`, `v0.5.46`, `v0.5.47`, and `v0.5.48` stay in the release notes linked below.
 
-- **Schema 3, no new migration:** v0.5.48 starts on schema 3. There is no new migration. `minRequiredSchemaVersion` stays 3. Schema 4 (`000004_pending_dump_cleanup`) stays optional for one process and required for cluster mode, the same rule as v0.5.47. `migrations/` is still `000001`, `000002`, `000003`, and `000004`. v0.5.48 does not start on schema 2. It exits with code 1 before it listens. The message contains `schema version too old` and `./migrate up`. If the database is not already schema 3, follow the v0.5.46 upgrade. Schema 2 to schema 3 stays online. Do not run `./migrate down` to schema 2 while v0.5.48 is running. `./migrate down --steps 1` from schema 4 drops only `pending_dump_cleanup` and returns to version 3. Stop the cluster workers before that down migration. A single process can keep running on schema 3. No new config key. A database still on schema 1 must follow the v0.5.34 upgrade first: stop every binlog-server on that database, run `./migrate up`, then start only `v0.5.34` or newer. A GTID start, and a file and position resume that gets MySQL 1236 and then continues from the stored GTID, does not seal an empty or magic-only segment. A sealed file passes `mysqlbinlog --verify-binlog-checksum`.
-- Detail is in [docs/releases/release-notes-v0.5.48.md](docs/releases/release-notes-v0.5.48.md).
+- **Schema 3, no new migration:** v0.5.49 starts on schema 3. There is no new migration. `minRequiredSchemaVersion` stays 3. Schema 4 (`000004_pending_dump_cleanup`) stays optional for one process and required for cluster mode, the same rule as v0.5.48. `migrations/` is still `000001`, `000002`, `000003`, and `000004`. v0.5.49 does not start on schema 2. It exits with code 1 before it listens. The message contains `schema version too old` and `./migrate up`. If the database is not already schema 3, follow the v0.5.46 upgrade. Schema 2 to schema 3 stays online. Do not run `./migrate down` to schema 2 while v0.5.49 is running. `./migrate down --steps 1` from schema 4 drops only `pending_dump_cleanup` and returns to version 3. Stop the cluster workers before that down migration. A single process can keep running on schema 3. No new config key. A database still on schema 1 must follow the v0.5.34 upgrade first: stop every binlog-server on that database, run `./migrate up`, then start only `v0.5.34` or newer. After failover, a sealed segment of a source file the catalog already had stores `start_pos` and `end_pos` from the first and last events in that file. An already `UPLOADED` row is left as it is.
+- Detail is in [docs/releases/release-notes-v0.5.49.md](docs/releases/release-notes-v0.5.49.md).
 
-Full release notes: [docs/releases/release-notes-v0.5.48.md](docs/releases/release-notes-v0.5.48.md) | [docs/releases/v0.5.48.zh-CN.md](docs/releases/v0.5.48.zh-CN.md)
+Full release notes: [docs/releases/release-notes-v0.5.49.md](docs/releases/release-notes-v0.5.49.md) | [docs/releases/v0.5.49.zh-CN.md](docs/releases/v0.5.49.zh-CN.md)
 
-Notes for v0.5.27 through v0.5.47: [docs/releases/release-notes-v0.5.47.md](docs/releases/release-notes-v0.5.47.md) | [docs/releases/v0.5.47.zh-CN.md](docs/releases/v0.5.47.zh-CN.md), [docs/releases/release-notes-v0.5.46.md](docs/releases/release-notes-v0.5.46.md) | [docs/releases/v0.5.46.zh-CN.md](docs/releases/v0.5.46.zh-CN.md), [docs/releases/release-notes-v0.5.45.md](docs/releases/release-notes-v0.5.45.md) | [docs/releases/v0.5.45.zh-CN.md](docs/releases/v0.5.45.zh-CN.md), [docs/releases/release-notes-v0.5.44.md](docs/releases/release-notes-v0.5.44.md) | [docs/releases/v0.5.44.zh-CN.md](docs/releases/v0.5.44.zh-CN.md), [docs/releases/release-notes-v0.5.43.md](docs/releases/release-notes-v0.5.43.md) | [docs/releases/v0.5.43.zh-CN.md](docs/releases/v0.5.43.zh-CN.md), [docs/releases/release-notes-v0.5.42.md](docs/releases/release-notes-v0.5.42.md) | [docs/releases/v0.5.42.zh-CN.md](docs/releases/v0.5.42.zh-CN.md), [docs/releases/release-notes-v0.5.41.md](docs/releases/release-notes-v0.5.41.md) | [docs/releases/v0.5.41.zh-CN.md](docs/releases/v0.5.41.zh-CN.md), [docs/releases/release-notes-v0.5.40.md](docs/releases/release-notes-v0.5.40.md) | [docs/releases/v0.5.40.zh-CN.md](docs/releases/v0.5.40.zh-CN.md), [docs/releases/release-notes-v0.5.39.md](docs/releases/release-notes-v0.5.39.md) | [docs/releases/v0.5.39.zh-CN.md](docs/releases/v0.5.39.zh-CN.md), [docs/releases/release-notes-v0.5.38.md](docs/releases/release-notes-v0.5.38.md) | [docs/releases/v0.5.38.zh-CN.md](docs/releases/v0.5.38.zh-CN.md), [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md) | [docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md), [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md) | [docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md), [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md) | [docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md), [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md) | [docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md), [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md), [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
+Notes for v0.5.27 through v0.5.48: [docs/releases/release-notes-v0.5.48.md](docs/releases/release-notes-v0.5.48.md) | [docs/releases/v0.5.48.zh-CN.md](docs/releases/v0.5.48.zh-CN.md), [docs/releases/release-notes-v0.5.47.md](docs/releases/release-notes-v0.5.47.md) | [docs/releases/v0.5.47.zh-CN.md](docs/releases/v0.5.47.zh-CN.md), [docs/releases/release-notes-v0.5.46.md](docs/releases/release-notes-v0.5.46.md) | [docs/releases/v0.5.46.zh-CN.md](docs/releases/v0.5.46.zh-CN.md), [docs/releases/release-notes-v0.5.45.md](docs/releases/release-notes-v0.5.45.md) | [docs/releases/v0.5.45.zh-CN.md](docs/releases/v0.5.45.zh-CN.md), [docs/releases/release-notes-v0.5.44.md](docs/releases/release-notes-v0.5.44.md) | [docs/releases/v0.5.44.zh-CN.md](docs/releases/v0.5.44.zh-CN.md), [docs/releases/release-notes-v0.5.43.md](docs/releases/release-notes-v0.5.43.md) | [docs/releases/v0.5.43.zh-CN.md](docs/releases/v0.5.43.zh-CN.md), [docs/releases/release-notes-v0.5.42.md](docs/releases/release-notes-v0.5.42.md) | [docs/releases/v0.5.42.zh-CN.md](docs/releases/v0.5.42.zh-CN.md), [docs/releases/release-notes-v0.5.41.md](docs/releases/release-notes-v0.5.41.md) | [docs/releases/v0.5.41.zh-CN.md](docs/releases/v0.5.41.zh-CN.md), [docs/releases/release-notes-v0.5.40.md](docs/releases/release-notes-v0.5.40.md) | [docs/releases/v0.5.40.zh-CN.md](docs/releases/v0.5.40.zh-CN.md), [docs/releases/release-notes-v0.5.39.md](docs/releases/release-notes-v0.5.39.md) | [docs/releases/v0.5.39.zh-CN.md](docs/releases/v0.5.39.zh-CN.md), [docs/releases/release-notes-v0.5.38.md](docs/releases/release-notes-v0.5.38.md) | [docs/releases/v0.5.38.zh-CN.md](docs/releases/v0.5.38.zh-CN.md), [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md) | [docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md), [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md) | [docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md), [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md) | [docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md), [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md) | [docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md), [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md) | [docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md), [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md) | [docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md), [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md) | [docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md), [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md) | [docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md), [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md) | [docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md), [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md) | [docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md), and [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md) | [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md)
 
 
 ---
