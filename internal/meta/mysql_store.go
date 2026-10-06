@@ -196,6 +196,8 @@ INSERT INTO task_events (task_id, event_type, message, detail, event_time, event
 VALUES (?, ?, ?, ?, ?, ?);
 `
 
+// Newest `limit` rows. ListEvents reverses this DESC result to oldest-first.
+// ORDER BY id ASC LIMIT would keep the oldest rows and drop a long streak.
 const listTaskEventsSQL = `
 SELECT task_id, event_type, message, detail, event_time, event_seq
 FROM task_events
@@ -1136,7 +1138,7 @@ func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent)
 	return err
 }
 
-// ListEvents 按时间倒序读取任务事件，并限制返回条数。
+// ListEvents 返回最新的 limit 条事件，旧的在前。
 func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit int) ([]tasks.TaskEvent, error) {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_events")
 	defer endMetaSpan(span)

@@ -14,6 +14,7 @@ Maintenance rules:
 
 ### Fixed
 
+- Restarting all-in-one or a cluster worker during a `SOURCE_UNREACHABLE` streak no longer starts the count over (#237). Four stored failures, then a restart, still reach `FAILED` on the tenth failure total. The same-owner claim and an expired-lease takeover both read stored events oldest-first. The 200-event window stays the newest rows. No new config key. No schema migration.
 - On all-in-one and cluster, an owned task whose source cannot be reached now stays in `RETRY_BACKOFF` for the backoff interval and reaches `FAILED` after ten consecutive `SOURCE_UNREACHABLE` failures, the same budget as standalone (#203). `GET /api/tasks/{id}` shows `last_error` beginning with `SOURCE_UNREACHABLE:`, and the lease is released. The claim loop, about every 2 seconds, no longer starts that task again while this process is already waiting to retry, so the failure count is not cleared and the lease epoch does not climb. Epoch still changes when a different worker takes over an expired lease. A same-owner claim with no local run (including after this process restarts) continues the count from `TASK_RUNNER_ERROR` events already stored for that task. The count resets when the dump connects, or when an operator Starts the task. A source that dies after the dump is open still uses this same budget. No new config key. No schema migration.
 
 ## [v0.5.42] - 2026-10-06

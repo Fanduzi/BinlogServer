@@ -204,7 +204,7 @@ run_scenario() {
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-source-outage.sh"
       ;;
     smoke-unreachable-giveup)
-      bash "$ROOT_DIR/scripts/e2e/smoke-unreachable-giveup.sh"
+      E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" BINLOG_SERVER_META_DSN="$META_DSN" bash "$ROOT_DIR/scripts/e2e/smoke-unreachable-giveup.sh"
       ;;
     smoke-scale)
       E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" "$ROOT_DIR/scripts/e2e/smoke-scale.sh"
@@ -278,6 +278,9 @@ main() {
     fi
     echo "[suite] scenario=$s"
     run_scenario "$s"
+    if [[ -n "$SERVER_PID" ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      SERVER_PID=""
+    fi
     echo "[suite] scenario=$s done"
   done
 

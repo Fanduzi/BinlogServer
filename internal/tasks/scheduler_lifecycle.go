@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone, expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry that a same-owner re-claim continues from recorded runner errors, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone, expired STOPPING finalized without takeover, expired-lease takeover that errors when lookup is missing, FAILED lease release for permanent local errors including a sealed file and a non-transient checkpoint write, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry that a same-owner re-claim and expired-lease takeover continue from recorded runner errors in oldest-first order, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -870,7 +870,10 @@ func (s *Scheduler) carriedSourceFailures(id string) int {
 	if len(stored) == 0 {
 		return consecutiveUnreachableStreak(mem, false)
 	}
-	return consecutiveUnreachableStreak(stored, true)
+	// ListEvents is oldest-first. The 200-row window is the newest rows
+	// (ORDER BY id DESC LIMIT), then reversed. Walking that slice newest-first
+	// hits the earliest TASK_STARTED and returns 0.
+	return consecutiveUnreachableStreak(stored, false)
 }
 
 func memoryHasRunnerError(events []TaskEvent) bool {
@@ -884,7 +887,8 @@ func memoryHasRunnerError(events []TaskEvent) bool {
 
 // consecutiveUnreachableStreak counts SOURCE_UNREACHABLE runner errors after the
 // latest ready run, operator start, or other runner error.
-// newestFirst is the event-store order. The in-memory slice is oldest first.
+// newestFirst is true when index 0 is the newest event. The in-memory log and
+// MySQL ListEvents are both oldest-first, so callers pass false.
 // The newest event is skipped when it is TASK_STARTED: startTask writes that
 // before the run reads the streak, and it is this claim, not an operator reset.
 func consecutiveUnreachableStreak(events []TaskEvent, newestFirst bool) int {
