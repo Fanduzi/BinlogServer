@@ -96,15 +96,13 @@ binlog-server_0.5.44_linux_amd64/
 
 ## 4. 拓扑部署实施步骤
 
-> **迁移 `000003_task_desired_and_retry_budget`（ADR 0005 第 2 步，一共 9 步）：** 给 `backup_tasks` 增加六列，都是 `NOT NULL` 且带默认值：`desired_run`、`spec_revision`、`applied_spec_revision`、`failed_spec_revision`、`retry_attempt`、`consecutive_source_failures`。回填：`RUNNING`、`STARTING`、`RETRY_BACKOFF`、`LEASE_DEGRADED`、`REBUILDING_FILE` 的 `desired_run` 为 `RUN`；`CREATED`、`STOPPING`、`STOPPED`、`FAILED` 为 `STOP`；修订号和计数器为 0。运行时还不读、不写这些列。`minRequiredSchemaVersion` 仍是 2：v0.5.44 在 schema 2 或 3 上都能跑，v0.5.43 在 schema 3 上继续跑。建议现在就做这次迁移。下一步（第 3 步，持久化重试预算）会把 `minRequiredSchemaVersion` 提到 3。还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md)。没有新的配置项。运行时行为不变。细节见 [docs/releases/release-notes-v0.5.44.md](../../releases/release-notes-v0.5.44.md)。
+> **v0.5.45 启动前元数据必须是 schema 3（ADR 0005 第 3 步，一共 9 步）。** `minRequiredSchemaVersion` 是 3。schema 2 上这个二进制以退出码 1 结束，不会监听端口。提示含 `schema version too old`，并告诉操作员执行 `./migrate up`。这句话只打到 stderr，不写日志文件。没有新的配置项。这一版不新增迁移。细节见 [docs/releases/release-notes-v0.5.45.md](../../releases/release-notes-v0.5.45.md)。
 
-1. 进程保持运行时执行 `./migrate up`。不需要重启。这一点已在 v0.5.43 仍在跑时核对过。
-2. `SELECT version, dirty FROM schema_migrations` 为 `(3, 0)`。
-3. `SHOW COLUMNS FROM backup_tasks` 列出上面六列。
-4. 按任意顺序替换二进制。
-5. 回滚：`./migrate down --steps 1` 回到版本 2，只删这六列。`backup_tasks` 与 `binlog_files` 行数不变。
+1. **schema 1 → 2（v0.5.34）要停进程。** 还在 schema 1 上的库，先按 [v0.5.34 中文发布说明](../../releases/v0.5.34.zh-CN.md) 停掉连着这套元数据库的每一台 binlog-server，再执行 `./migrate up`，然后只启动 v0.5.34 或更新的二进制。
+2. **schema 2 → 3（`000003_task_desired_and_retry_budget`）在线。** v0.5.44 还没做过时，进程保持运行，执行 `./migrate up`。这次迁移不需要重启。确认 `SELECT version, dirty FROM schema_migrations` 为 `(3, 0)`。`SHOW COLUMNS FROM backup_tasks` 列出 `desired_run`、`spec_revision`、`applied_spec_revision`、`failed_spec_revision`、`retry_attempt`、`consecutive_source_failures`。
+3. **确认 `(3, 0)` 之后再换 v0.5.45。** 已经是 schema 3 的库直接替换二进制。v0.5.45 在 schema 3 之前不会启动。二进制回退到 v0.5.44 可以留在 schema 3。v0.5.45 还在跑时不要 `./migrate down` 回到 schema 2。
 
-> **元数据 schema 3 起才能启动当前进程。** 停掉连着这套元数据库的全部 binlog-server，执行 `./migrate up`，确认 `schema_migrations` 为 version 3、dirty 0，然后再启动。版本低于 3 时进程不会监听端口，日志里写 `schema version too old`，并告诉操作员执行 `./migrate up`。`000003_task_desired_and_retry_budget` 增加 `desired_run`、修订号和 `retry_attempt` / `consecutive_source_failures`。没有元数据库的 standalone 不跑这次迁移；它的重试计数只在进程内存里，进程退出就没了。
+没有元数据库的 standalone 不跑这次迁移。重试计数只在进程内存里，进程退出就没了。
 
 ### 4.1 拓扑一：单机模式 (Standalone)
 
