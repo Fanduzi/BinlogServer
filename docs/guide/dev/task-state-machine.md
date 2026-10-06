@@ -399,7 +399,7 @@ func (s *Scheduler) StopTask(id string) error {
 - `CHECKPOINT_WRITE_FAILED`：checkpoint 写入不是瞬时元数据错误
 - 原有的 `SOURCE_ACCESS_DENIED`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`
 
-`SOURCE_UNREACHABLE` 连续 10 次后才 `FAILED`。runner ready 会把这个计数清零。其它可重试源错误、瞬时 checkpoint 写入、`OBJECT_PURGE_FAILED`、以及没有已存 GTID 的 MySQL 1236 保持 `RETRY_BACKOFF`，没有另外的次数上限。
+只有白名单里的错误留在同一次所有权里重试。`SOURCE_UNREACHABLE` 连续 10 次后才 `FAILED`，runner ready 会把这个计数清零。瞬时元数据错误（与 `meta.IsTransientMySQLError` 同一组文本）没有任务级次数上限，恢复后回到 `RUNNING`，不经过 `FAILED`。`OBJECT_PURGE_FAILED` 不是任务失败。除此之外，包括没有已存 GTID 的 MySQL 1236 和未分类的 runner 错误，第一次就 `FAILED`，写一条 `TASK_FAILED`，放开租约。1236 且没有 GTID 时 `last_error` 写明 1236 和 purged binlog。
 
 封文件时租约 epoch 已经不属于本进程：这不是 `FAILED`。本进程停止 runner，只放开自己的 epoch，不把共享任务行写成 `FAILED` 或 `RETRY_BACKOFF`。没有元数据库时本进程内存状态是 `STOPPED`，事件为 `TASK_LEASE_YIELDED`。
 

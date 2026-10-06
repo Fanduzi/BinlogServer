@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: raw and parsed GTID events, a stored checkpoint, and a file/pos dump whose MySQL 1236 arrives on GetEvent
-// output: proof that a flushed checkpoint grows the executed GTID under raw mode and that resume uses it when the stream returns 1236
+// output: proof that a flushed checkpoint grows the executed GTID under raw mode, that resume uses it when the stream returns 1236, and that a file/pos 1236 with no stored GTID names 1236 and a purged binlog
 // pos: regression coverage for GTID checkpoint retention and purged-file resume
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -448,6 +448,10 @@ func TestMySQLRunnerRun_FilePosWithoutGTIDStillReturns1236(t *testing.T) {
 	}))
 	if !mysqlError1236(err) {
 		t.Fatalf("err=%v", err)
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(err.Error(), "1236") || !strings.Contains(lower, "purged") || !strings.Contains(lower, "binlog") {
+		t.Fatalf("err=%v, want 1236 and a purged binlog", err)
 	}
 	if syncer.gtidCalls != 0 {
 		t.Fatalf("gtid resume without a set: %d", syncer.gtidCalls)

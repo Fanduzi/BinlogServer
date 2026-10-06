@@ -16,7 +16,7 @@ help:
 	@echo "  make ui-build                   # build frontend, sync to internal/ui/static, and check embedded ESM plus PITR markers"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
 	@echo "  make e2e-topology-check         # validate E2E database topology without Docker"
-	@echo "  make e2e-quick                  # run quick e2e (smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop)"
+	@echo "  make e2e-quick                  # run quick e2e (smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
 	@echo "  make e2e-observability          # run observability e2e (smoke-observability)"
 	@echo "  make e2e-scale                  # opt-in 1000-control-task / 100-live-stream scale evidence"
