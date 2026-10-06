@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, and the runner's retention-blocked file counts for metrics
+// output: observability-facing task progress including at-tip lag, events read from the event store without holding the scheduler lock, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, and the runner's retention-blocked file counts for metrics
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -169,14 +169,29 @@ func (s *Scheduler) ResumePosition(ctx context.Context, taskID string) (binlog.C
 }
 
 // ListEvents 列出任务事件，limit<=0 时按默认值处理。
+// 任务是否存在在调度锁里看一眼。事件库查询在放开锁之后做，
+// 所以 Console 拉一个任务的事件不会挡住其它任务的 Stop、Start、续租和进度。
 func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 	s.mu.Lock()
 	_, ok := s.tasks[taskID]
+	store := s.eventStore
+	taskStore := s.store
+	dataDir := s.dataDir
+	var events []TaskEvent
+	if ok && store == nil {
+		src := s.events[taskID]
+		if limit <= 0 || limit >= len(src) {
+			events = make([]TaskEvent, len(src))
+			copy(events, src)
+		} else {
+			events = make([]TaskEvent, limit)
+			copy(events, src[len(src)-limit:])
+		}
+	}
+	s.mu.Unlock()
+
 	if !ok {
-		store := s.store
-		dataDir := s.dataDir
-		s.mu.Unlock()
-		if store != nil {
+		if taskStore != nil {
 			return nil, ErrTaskNotFound
 		}
 		_, found, err := lookupDiskBackupTask(dataDir, taskID)
@@ -188,24 +203,12 @@ func (s *Scheduler) ListEvents(taskID string, limit int) ([]TaskEvent, error) {
 		}
 		return []TaskEvent{}, nil
 	}
-	defer s.mu.Unlock()
-
-	if s.eventStore != nil {
-		// 优先读持久化事件，避免重启后只看到内存中的事件片段。
+	if store != nil {
 		ctx, cancel := s.withReadTimeout(context.Background())
-		events, err := s.eventStore.ListEvents(ctx, taskID, limit)
-		cancel()
-		return events, err
+		defer cancel()
+		return store.ListEvents(ctx, taskID, limit)
 	}
-	events := s.events[taskID]
-	if limit <= 0 || limit >= len(events) {
-		out := make([]TaskEvent, len(events))
-		copy(out, events)
-		return out, nil
-	}
-	out := make([]TaskEvent, limit)
-	copy(out, events[len(events)-limit:])
-	return out, nil
+	return events, nil
 }
 
 // ListFiles 列出任务文件。元数据目录非空时返回目录结果。
