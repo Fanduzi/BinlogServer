@@ -1,6 +1,6 @@
 # One authority for task state, one key for a segment
 
-Status: Accepted (2026-10-06). Steps 1–5 of the ordered rollout are on main. Step 5, fail-and-alert, landed in v0.5.47 (PR #250). Steps 6–9 are not done. Schema on main is `000001` through `000004_pending_dump_cleanup`. `minRequiredSchemaVersion` is 3. The next new migration is `000005`, not `000003` or `000004`. #189, #205, and #224 stay open.
+Status: Accepted (2026-10-06). Steps 1–5 of the ordered rollout are on main. Step 5, fail-and-alert, landed in v0.5.47 (PR #250). Steps 6–9 are not done. Schema on main is `000001` through `000004_pending_dump_cleanup`. `minRequiredSchemaVersion` is 3. The next new migration is `000005`, not `000003` or `000004`. #189 and #224 stay open. #205 is fixed.
 
 The problem section cites `main` at `5373057` (includes the #234 fix for #203). That snapshot is why this record was written. It is not the code after steps 2–5.
 
@@ -109,15 +109,13 @@ The migration cannot repair this. The bytes are on the worker disk, or in the ob
 
 `ClassifySegment` rejects a name that starts with `.`, so the files API and the disk scan do not list it. Retention does not use that parser. `purgeExpiredAt` skips the active file and any name for which `isOpenSegmentName` is true, then deletes other entries whose mtime is past local retention. A fresh `.takeover-*` (the #224 report was about 98MB of a 266MB object) is younger than retention, so it stays. An old one is deleted only because it is an unrecognized file that aged out, not because a segment policy owns it. The cap in the report is the segment size, up to 1GB.
 
-#### #205, open
+#### #205, fixed
 
 Reported on `9c350c07`: a sealed segment ended with a manual Rotate (flags `0x20`, timestamp 0, about 43 bytes, no CRC). `mysqlbinlog --verify-binlog-checksum` failed at that offset. GTID start also sealed and uploaded a `task-N.binlog` of about 47 bytes (magic plus that Rotate).
 
 On this `main`, `handleEvent` does not append a rotate whose `LogPos` is 0. A rotate that names the current file only updates the position. A rotate that names the next file seals the current file and does not write the artificial event. That is the #214 rule, and it is in the tree. This record does not propose writing that event again.
 
-What this tree still does: when `start.File` is empty, `run` sets `currentFile` to `task-{id}.binlog` and opens it. That happens for a GTID start before any source file name exists, and for the 1236 fallback until the GTID dump names a file. A later rotate seals that current file and uploads it. `ClassifySegment` does not accept `task-1.binlog` (the suffix is not a numeric sequence), so durable resume, the disk scan, and `SelectReplayFiles` ignore it. `UpsertBinlogFile` still records it, and the uploader still puts the object. The files API shows it when the catalog row exists, because `ListFiles` returns catalog rows before it scans disk.
-
-Accepted: an already-uploaded segment whose tail is that no-CRC Rotate is not rewritten, including when `checksum` is `match`. New seals follow the #214 rule (do not append a rotate whose end log_pos is 0) and never create `task-{id}.binlog`.
+A GTID start does not create `task-{id}.binlog`. `run` waits until the dump names a source file, then opens that name. A rotate that arrives before any copied event does not seal a magic-only file and does not upload one. The same discard applies when a file/pos resume gets MySQL 1236 before any event and the GTID dump then names a different file: the magic-only file opened for the purged name is removed, not sealed. An already-uploaded segment whose tail is that no-CRC Rotate is not rewritten, including when `checksum` is `match`.
 
 ## Target design
 
@@ -248,7 +246,7 @@ During a rolling restart the new API writes both the old `state` transitions and
 
 Each PR is releasable on its own. Schema that a binary reads is migrated before that binary starts.
 
-Steps 1–5 are on main. Steps 6–9 are not. #189, #205, and #224 stay open. Steps 7 and 8 are those fixes. This record does not mark them done.
+Steps 1–5 are on main. Steps 6–9 are not. #189 and #224 stay open. #205 is fixed. Steps 7 and 8 are those fixes. This record does not mark step 7 or the #224 part of step 8 done.
 
 1. **This record.** Documentation only. Landed when this file was accepted. Acceptance: the file is in `docs/adr/` and a reviewer can point at a sentence that does not match `main`.
 
@@ -274,7 +272,7 @@ Steps 1–5 are on main. Steps 6–9 are not. #189, #205, and #224 stay open. St
 7. **One classifier, and no invented `end_pos`.** Not done. #189 stays open. Enroll, retention, replay, resume, the files API, and the Console call `ClassifySegment`. Enroll fills positions from `DurableCursor` and its upsert omits `end_pos` when it does not know it. The disk scan does the same for standalone listings.
    - Acceptance: fail over so the same source file seals as `mysql-bin.00000N.sealed.e1`. `SELECT start_pos, end_pos, size_bytes, state, upload_state FROM binlog_files WHERE task_id=? AND source_file=? AND epoch=?` shows `end_pos` equal to the last complete event (the same number `DurableCursor` returns), not 0. `GET /api/tasks/{id}/files` and the Console end-position column show that number. Replay for that source index does not list two copies of the same transactions.
 
-8. **Temp files and the placeholder name.** Not done. #205 and #224 stay open. Startup and `materializeUploaded` delete `.takeover-*`. GTID start does not create `task-{id}.binlog`. New seals follow #214 and do not append a log_pos 0 rotate. Retention skips names `ClassifySegment` rejects. Objects already uploaded with a no-CRC artificial Rotate tail are not rewritten.
+8. **Temp files and the placeholder name.** #224 is not done. #205 is done: GTID start does not create `task-{id}.binlog`, a magic-only file is not sealed or uploaded, and a log_pos 0 rotate is not appended. Startup and `materializeUploaded` still do not delete `.takeover-*`. Retention still does not skip every name `ClassifySegment` rejects. Objects already uploaded with a no-CRC artificial Rotate tail are not rewritten.
    - Acceptance: throttle the object GET, `kill -9` the worker while `.takeover-*` is non-empty, start the worker. The task directory has no `.takeover-*`. The catalog has no row whose `file_name` is that temp name. A GTID-mode task after one rotate: `SELECT COUNT(*) FROM binlog_files WHERE file_name LIKE 'task-%.binlog' AND task_id=?` is 0, and the bucket has no such object. `mysqlbinlog --verify-binlog-checksum` on each newly sealed segment exits 0. An object that already had the no-CRC tail is unchanged (`checksum` and object bytes the same as before the upgrade).
 
 9. **Drop `uk_task_file_epoch`.** Not done. The floor is the first release that ships steps 6 and 7 (the new unique key and the writer that uses it). PR 9 ships no earlier than the release after that. The release note tells operators to confirm no older binary is running before they migrate. `file_name` stays as a column so old `SELECT` lists keep working; dropping the column is a later decision.
@@ -282,7 +280,7 @@ Steps 1–5 are on main. Steps 6–9 are not. #189, #205, and #224 stay open. St
 
 ## Alternatives
 
-**Keep fixing one symptom per release.** That is what v0.5.31–v0.5.40 and #234 did. #234 is the right patch for the live-run reset, and it is already on `main`. Steps 2–5 then landed the columns, the persisted budget, the control loop, and fail-and-alert. What is still open is the segment key (step 6, migration `000005`), `end_pos` 0 (#189, step 7), the no-CRC Rotate and stray `task-N.binlog` (#205, step 8), and a `.takeover-*` file left after `kill -9` (#224, step 8). Steps 6–9 are not done.
+**Keep fixing one symptom per release.** That is what v0.5.31–v0.5.40 and #234 did. #234 is the right patch for the live-run reset, and it is already on `main`. Steps 2–5 then landed the columns, the persisted budget, the control loop, and fail-and-alert. What is still open is the segment key (step 6, migration `000005`), `end_pos` 0 (#189, step 7), and a `.takeover-*` file left after `kill -9` (#224, step 8). The no-CRC Rotate and stray `task-N.binlog` (#205) are fixed. Steps 6, 7, and 9 are not done. Step 8 is only done for #205.
 
 **Split the scheduler into lifecycle, lease, and upload packages first.** [0003](0003-do-not-split-scheduler-first.md) rejected this. The control loop is a change in who writes the row, inside the scheduler that already owns the claim tick. A package split does not remove the second writer.
 
