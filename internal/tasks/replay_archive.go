@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
-// input: the files inventory window, SelectReplayFiles, the point-in-time selection, the GTID stop selection, and OpenTaskSegment for each selected basename
+// input: the files inventory window, SelectReplayFiles, the point-in-time selection, the GTID stop selection, the executed-GTID selection, and OpenTaskSegment for each selected basename
 // output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read
-// pos: replay-set archive for the authenticated download route, including the same datetime window and the same GTID stop as the replay JSON
+// pos: replay-set archive for the authenticated download route, including the same datetime window, the same GTID stop, and the same executed-GTID roll-forward as the replay JSON
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -45,6 +45,20 @@ func (s *Scheduler) OpenPITRArchive(taskID string, start *time.Time, stop time.T
 // Member bytes follow OpenTaskSegment. The stop position stays in the JSON command.
 func (s *Scheduler) OpenGTIDArchive(taskID string, raw string, start *time.Time) (io.ReadCloser, int64, error) {
 	selected, _, _, err := s.selectGTIDFiles(taskID, raw, start)
+	if err != nil {
+		return nil, 0, err
+	}
+	members, err := s.openSelectedReplayMembers(taskID, selected)
+	if err != nil {
+		return nil, 0, err
+	}
+	return materializeReplayTar(members)
+}
+
+// OpenExecutedGTIDArchive is the ustar of the same paths ExecutedGTIDReplay returns.
+// A set that already covers every transaction up to the stop is an empty tar.
+func (s *Scheduler) OpenExecutedGTIDArchive(taskID, executedRaw, stopGTIDRaw string, stop *time.Time) (io.ReadCloser, int64, error) {
+	selected, _, _, _, _, _, _, err := s.selectExecutedGTID(taskID, executedRaw, stopGTIDRaw, stop)
 	if err != nil {
 		return nil, 0, err
 	}

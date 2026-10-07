@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos and the local event span when this process can read that segment.
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos and the local event span when this process can read that segment.
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -625,10 +625,20 @@ func (s *Server) handleTaskFileDownload(w http.ResponseWriter, r *http.Request, 
 // inventory window, plus the binlog client for source.flavor.
 // stop_datetime switches the same route to the UTC point-in-time window.
 // stop_gtid switches it to the transaction before that MySQL GTID.
+// start_gtid_set switches it to the transactions a restored backup does not have.
 func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID string) {
 	seek, qerr := parseReplaySeek(r)
 	if qerr != nil {
 		http.Error(w, qerr.Error(), http.StatusBadRequest)
+		return
+	}
+	if seek.executed {
+		set, err := s.tasks.ExecutedGTIDReplay(taskID, seek.executedRaw, seek.stopGTID(), seek.stopTime())
+		if err != nil {
+			writeSegmentOpenError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, set)
 		return
 	}
 	if seek.gtid {
@@ -702,6 +712,8 @@ func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request,
 	var size int64
 	var err error
 	switch {
+	case seek.executed:
+		body, size, err = s.tasks.OpenExecutedGTIDArchive(taskID, seek.executedRaw, seek.stopGTID(), seek.stopTime())
 	case seek.gtid:
 		body, size, err = s.tasks.OpenGTIDArchive(taskID, seek.gtidRaw, seek.start)
 	case seek.datetime:
@@ -790,27 +802,59 @@ func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.R
 
 // replaySeek chooses the replay route. No stop parameter leaves the limit
 // window. stop_datetime is the UTC window. stop_gtid is the MySQL transaction
-// stop. The two stops together are rejected.
+// stop. start_gtid_set is the restored backup's executed set. The two stops
+// together are rejected. start_gtid_set together with start_datetime is rejected.
 type replaySeek struct {
-	datetime bool
-	gtid     bool
-	gtidRaw  string
-	start    *time.Time
-	stop     time.Time
+	datetime    bool
+	gtid        bool
+	executed    bool
+	gtidRaw     string
+	executedRaw string
+	start       *time.Time
+	stop        time.Time
 }
 
-// parseReplaySeek reads stop_datetime, start_datetime, and stop_gtid.
+func (seek replaySeek) stopGTID() string {
+	if seek.gtid {
+		return seek.gtidRaw
+	}
+	return ""
+}
+
+func (seek replaySeek) stopTime() *time.Time {
+	if seek.datetime {
+		return &seek.stop
+	}
+	return nil
+}
+
+// parseReplaySeek reads stop_datetime, start_datetime, stop_gtid, and start_gtid_set.
 // Neither stop leaves the limit replay path unchanged. stop_datetime is
 // required once start_datetime is present without stop_gtid. An empty
 // start_datetime is omitted. stop_datetime and stop_gtid together are
-// ErrStopBoundsExclusive.
+// ErrStopBoundsExclusive. start_gtid_set requires one of those stops and
+// cannot be combined with a non-empty start_datetime.
 func parseReplaySeek(r *http.Request) (replaySeek, error) {
 	q := r.URL.Query()
 	_, stopSet := q["stop_datetime"]
 	_, startSet := q["start_datetime"]
 	_, gtidSet := q["stop_gtid"]
+	_, executedSet := q["start_gtid_set"]
 	if gtidSet && stopSet {
 		return replaySeek{}, tasks.ErrStopBoundsExclusive
+	}
+	if executedSet && startSet && strings.TrimSpace(firstQuery(q, "start_datetime")) != "" {
+		return replaySeek{}, tasks.ErrStartBoundsExclusive
+	}
+	executedRaw := ""
+	if executedSet {
+		executedRaw = firstQuery(q, "start_gtid_set")
+		if _, err := tasks.ParseStartGTIDSet(executedRaw); err != nil {
+			return replaySeek{}, err
+		}
+		if !gtidSet && !stopSet {
+			return replaySeek{}, tasks.ErrStartGTIDSetNeedsStop
+		}
 	}
 	if gtidSet {
 		raw := strings.TrimSpace(q.Get("stop_gtid"))
@@ -819,6 +863,9 @@ func parseReplaySeek(r *http.Request) (replaySeek, error) {
 		}
 		if _, err := tasks.ParseMySQLStopGTID(raw); err != nil && !tasks.MariaDBStopGTID(raw) {
 			return replaySeek{}, tasks.ErrInvalidStopGTID
+		}
+		if executedSet {
+			return replaySeek{executed: true, executedRaw: executedRaw, gtid: true, gtidRaw: raw}, nil
 		}
 		start, err := parseOptionalStart(q, startSet)
 		if err != nil {
@@ -838,6 +885,9 @@ func parseReplaySeek(r *http.Request) (replaySeek, error) {
 	stop, err := tasks.ParsePITRDatetime(q.Get("stop_datetime"))
 	if err != nil {
 		return replaySeek{}, errors.New("invalid stop_datetime")
+	}
+	if executedSet {
+		return replaySeek{executed: true, executedRaw: executedRaw, datetime: true, stop: stop}, nil
 	}
 	start, err := parseOptionalStart(q, startSet)
 	if err != nil {
@@ -879,7 +929,13 @@ func writeSegmentOpenError(w http.ResponseWriter, err error) {
 	case errors.Is(err, tasks.ErrInvalidStopGTID),
 		errors.Is(err, tasks.ErrStopGTIDNotInRange),
 		errors.Is(err, tasks.ErrStopGTIDUnsupported),
-		errors.Is(err, tasks.ErrStartAfterStopGTID):
+		errors.Is(err, tasks.ErrStartAfterStopGTID),
+		errors.Is(err, tasks.ErrInvalidStartGTIDSet),
+		errors.Is(err, tasks.ErrStartGTIDSetUnsupported),
+		errors.Is(err, tasks.ErrStartBoundsExclusive),
+		errors.Is(err, tasks.ErrStartGTIDSetNeedsStop),
+		errors.Is(err, tasks.ErrStartGTIDSetGap),
+		errors.Is(err, tasks.ErrStopBoundsExclusive):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

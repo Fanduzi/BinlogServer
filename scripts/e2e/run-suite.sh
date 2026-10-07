@@ -50,6 +50,7 @@ Scenarios:
   smoke-control-loop
   smoke-gtid-purge
   smoke-gtid-pitr
+  smoke-gtid-executed
   smoke-source-outage
   smoke-unreachable-giveup
   smoke-fail-alert
@@ -212,6 +213,9 @@ run_scenario() {
       ;;
     smoke-gtid-pitr)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-pitr.sh"
+      ;;
+    smoke-gtid-executed)
+      E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-executed.sh"
       ;;
     smoke-source-outage)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-source-outage.sh"

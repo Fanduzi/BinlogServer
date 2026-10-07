@@ -782,8 +782,8 @@ async function retryFailedUploads(task) {
   }
 }
 
-async function loadPitrReplay(task, stop, start, gtid) {
-  return listPITRReplay(task.id, stop, start, gtid);
+async function loadPitrReplay(task, stop, start, gtid, executed) {
+  return listPITRReplay(task.id, stop, start, gtid, executed);
 }
 
 async function downloadPitrSet(payload) {
@@ -796,6 +796,7 @@ async function downloadPitrSet(payload) {
       stop,
       start: String(payload?.start || "").trim(),
       gtid,
+      executed: String(payload?.executed || "").trim(),
     });
     saveDownloadedSegment(`task-${task.id}-replay.tar`, data);
     ElMessage.success(t("msg.pitrDownloaded"));
