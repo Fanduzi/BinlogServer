@@ -1,7 +1,7 @@
 <!--
-input: task, replication, checkpoint, locale labels, and loadPitr for the datetime window
-output: task detail drawer with configured start identity, the resume file:pos / GTID, a point-in-time replay command, and a warning when a source Binlog Dump connection is still pending KILL
-pos: operator view of the position the next Start continues from and the datetime restore drill
+input: task, replication, checkpoint, locale labels, and loadPitr for the datetime window and stop_gtid
+output: task detail drawer with configured start identity, the resume file:pos / GTID, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
+pos: operator view of the position the next Start continues from and the datetime or GTID restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
 -->
 <template>
@@ -135,6 +135,13 @@ note: if this file changes, update this header and frontend/src/components/READM
                   :placeholder="$t('detail.pitrStop')"
                 />
                 <el-input
+                  v-model="pitrGtid"
+                  class="pitr-gtid"
+                  data-testid="task-pitr-gtid"
+                  size="small"
+                  :placeholder="$t('detail.pitrGtid')"
+                />
+                <el-input
                   v-model="pitrStart"
                   data-testid="task-pitr-start"
                   size="small"
@@ -143,7 +150,7 @@ note: if this file changes, update this header and frontend/src/components/READM
                 <el-button
                   data-testid="task-pitr-build"
                   size="small"
-                  :disabled="!pitrStop.trim()"
+                  :disabled="!canBuildPitr"
                   @click="buildPitr"
                 >
                   {{ $t('btn.buildPitr') }}
@@ -159,8 +166,8 @@ note: if this file changes, update this header and frontend/src/components/READM
                 <el-button
                   data-testid="task-pitr-download"
                   size="small"
-                  :disabled="!pitrStop.trim()"
-                  @click="$emit('download-pitr', { task, stop: pitrStop.trim(), start: pitrStart.trim() })"
+                  :disabled="!canBuildPitr"
+                  @click="$emit('download-pitr', { task, stop: pitrStop.trim(), start: pitrStart.trim(), gtid: pitrGtid.trim() })"
                 >
                   {{ $t('btn.downloadPitr') }}
                 </el-button>
@@ -299,16 +306,20 @@ defineEmits(['update:visible', 'edit', 'adopt', 'start', 'stop', 'delete', 'retr
 const { t } = useI18n();
 
 const pitrStop = ref("");
+const pitrGtid = ref("");
 const pitrStart = ref("");
 const pitrResult = ref(null);
 const pitrError = ref("");
 
 watch(() => props.task?.id, () => {
   pitrStop.value = "";
+  pitrGtid.value = "";
   pitrStart.value = "";
   pitrResult.value = null;
   pitrError.value = "";
 });
+
+const canBuildPitr = computed(() => Boolean(pitrStop.value.trim() || pitrGtid.value.trim()));
 
 const pitrCommand = computed(() => String(pitrResult.value?.command || ""));
 
@@ -328,11 +339,12 @@ const replayCommand = computed(() => formatReplayCommand(props.replay));
 
 async function buildPitr() {
   const stop = pitrStop.value.trim();
-  if (!stop || !props.task) return;
+  const gtid = pitrGtid.value.trim();
+  if ((!stop && !gtid) || !props.task) return;
   pitrError.value = "";
   pitrResult.value = null;
   try {
-    pitrResult.value = await props.loadPitr(props.task, stop, pitrStart.value.trim());
+    pitrResult.value = await props.loadPitr(props.task, stop, pitrStart.value.trim(), gtid);
   } catch (err) {
     pitrError.value = pitrErrorText(err);
   }

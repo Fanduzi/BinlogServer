@@ -180,6 +180,7 @@ type pitrBody struct {
 	Client     string   `json:"client"`
 	ClientHint string   `json:"client_hint"`
 	Paths      []string `json:"paths"`
+	Locations  []string `json:"locations"`
 	Command    string   `json:"command"`
 }
 

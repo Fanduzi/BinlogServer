@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, per-task resume checkpoints, GET /api/tasks/{id}/replay one path per source index, the same route with stop_datetime returning a UTC point-in-time command, GET /api/tasks/{id}/replay/archive those basenames, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, per-task resume checkpoints, GET /api/tasks/{id}/replay one path per source index, the same route with stop_datetime returning a UTC point-in-time command, the same route with stop_gtid returning a stop-position command, GET /api/tasks/{id}/replay/archive those basenames, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -595,9 +595,28 @@ function pitrClock(value) {
   return `${value.getUTCFullYear()}-${pad(value.getUTCMonth() + 1)}-${pad(value.getUTCDate())} ${pad(value.getUTCHours())}:${pad(value.getUTCMinutes())}:${pad(value.getUTCSeconds())}`;
 }
 
+const mysqlStopGTID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$/i;
+const mariaStopGTID = /^[0-9]+-[0-9]+-[0-9]+$/;
+const fixtureStopGTID = "3e11fa47-71ca-11e1-9e33-c80aa9429562:8";
+const fixtureStopGTIDAt = Date.parse("2024-01-01T01:20:00Z");
+
 function pitrQuery(query) {
   const stopSet = query.has("stop_datetime");
   const startSet = query.has("start_datetime");
+  const gtidSet = query.has("stop_gtid");
+  if (gtidSet && stopSet) return { error: "stop_datetime and stop_gtid cannot both be set" };
+  if (gtidSet) {
+    const raw = String(query.get("stop_gtid") || "").trim();
+    const mysql = mysqlStopGTID.test(raw);
+    const maria = mariaStopGTID.test(raw);
+    if (!raw || (!mysql && !maria)) return { error: "invalid stop_gtid" };
+    let start = null;
+    if (startSet && String(query.get("start_datetime") || "").trim()) {
+      start = parsePITRDatetime(query.get("start_datetime"));
+      if (!start) return { error: "invalid start_datetime" };
+    }
+    return { enabled: true, gtid: true, raw, mysql, start };
+  }
   if (!stopSet && !startSet) return { enabled: false };
   if (!stopSet) return { error: "stop_datetime is required" };
   const stop = parsePITRDatetime(query.get("stop_datetime"));
@@ -629,6 +648,54 @@ function shellToken(text) {
     return `'${value.replace(/'/g, `'\\''`)}'`;
   }
   return value;
+}
+
+function formatGTIDCommand(client, paths, start, stopPos) {
+  if (!paths.length) return "";
+  const tokens = [];
+  if (start) tokens.push(`--start-datetime=${shellToken(pitrClock(start))}`);
+  tokens.push(`--stop-position=${stopPos}`);
+  paths.forEach((filePath) => tokens.push(shellToken(filePath)));
+  const lines = [];
+  if (client) lines.push(`TZ=UTC ${client} \\`);
+  tokens.forEach((token, index) => {
+    const indent = client || index > 0 ? "  " : "";
+    const cont = index === tokens.length - 1 ? "" : " \\";
+    lines.push(`${indent}${token}${cont}`);
+  });
+  return lines.join("\n");
+}
+
+function gtidStopResult(task, files, pitr) {
+  const flavor = String(task.source?.flavor || "");
+  if (flavor.trim().toLowerCase() !== "mysql") {
+    return { status: 400, error: "stop_gtid is not supported for this flavor" };
+  }
+  if (!pitr.mysql) return { status: 400, error: "invalid stop_gtid" };
+  if (pitr.raw.toLowerCase() !== fixtureStopGTID) {
+    return { status: 400, error: "stop_gtid is not in this task's backed-up range" };
+  }
+  if (pitr.start && pitr.start.getTime() > fixtureStopGTIDAt) {
+    return { status: 400, error: "start_datetime is after stop_gtid" };
+  }
+  let paths = selectReplayPaths(windowReplayFiles(files, Number.MAX_SAFE_INTEGER));
+  if (pitr.start) {
+    const startMs = pitr.start.getTime();
+    paths = paths.filter((filePath, index) => {
+      if (index === paths.length - 1) return true;
+      const span = pitrSpanByName[fileDiskBase({ file_path: filePath })];
+      if (!span) return false;
+      return Date.parse(span[1]) >= startMs;
+    });
+  }
+  const client = replayClient(flavor);
+  return {
+    flavor,
+    client: client.client,
+    client_hint: client.client_hint,
+    paths,
+    command: formatGTIDCommand(client.client, paths, pitr.start, 154),
+  };
 }
 
 function formatPITRCommand(client, paths, start, stop) {
@@ -982,6 +1049,17 @@ export function handleMockRequest(input) {
     const task = state.detailsByID[id];
     if (!task) return { status: 404, body: "task not found", contentType: "text/plain" };
     const files = state.filesByID[id] || [];
+    if (pitr.gtid) {
+      const gtid = gtidStopResult(task, files, pitr);
+      if (gtid.error) return { status: gtid.status, body: gtid.error, contentType: "text/plain" };
+      const names = gtid.paths.map((filePath) => fileDiskBase({ file_path: filePath })).filter(Boolean);
+      return {
+        status: 200,
+        body: names.join("\n"),
+        contentType: "application/x-tar",
+        filename: `task-${id}-replay.tar`,
+      };
+    }
     let paths = selectReplayPaths(windowReplayFiles(files, pitr.enabled ? Number.MAX_SAFE_INTEGER : replayLimit(query)));
     if (pitr.enabled) paths = filterPITRPaths(paths, pitr.start, pitr.stop);
     const names = paths.map((filePath) => fileDiskBase({ file_path: filePath })).filter(Boolean);
@@ -1004,6 +1082,17 @@ export function handleMockRequest(input) {
       return ok({ error: "task not found" }, 404);
     }
     const files = state.filesByID[id] || [];
+    if (pitr.gtid) {
+      const gtid = gtidStopResult(task, files, pitr);
+      if (gtid.error) return { status: gtid.status, body: gtid.error, contentType: "text/plain" };
+      return ok({
+        flavor: gtid.flavor,
+        client: gtid.client,
+        client_hint: gtid.client_hint,
+        paths: gtid.paths,
+        command: gtid.command,
+      });
+    }
     let paths = selectReplayPaths(windowReplayFiles(files, pitr.enabled ? Number.MAX_SAFE_INTEGER : replayLimit(query)));
     const flavor = String(task.source?.flavor || "");
     const client = replayClient(flavor);
