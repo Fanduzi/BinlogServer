@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP GET /api/tasks/{id}/replay and /replay/archive with stop_datetime and start_datetime
-// output: assertions for the point-in-time paths, command flags, 400 datetime errors, flavor client, and the matching tar
+// output: assertions for the point-in-time paths, command flags, 400 datetime errors, flavor client, the matching tar, and the executed-GTID note field on the same JSON body
 // pos: HTTP coverage for the datetime restore window on the existing replay routes
 // note: if this file changes, update this header and module README.md.
 package api
@@ -182,6 +182,7 @@ type pitrBody struct {
 	Paths      []string `json:"paths"`
 	Locations  []string `json:"locations"`
 	Command    string   `json:"command"`
+	Note       string   `json:"note"`
 }
 
 func getPITR(t *testing.T, handler http.Handler, path string, query url.Values) pitrBody {

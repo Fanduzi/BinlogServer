@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full files inventory, every sealed segment plus the highest open epoch per source index, and each segment's event-header time span
-// output: the ordered paths whose copied events cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command; a format description or previous-GTIDs timestamp does not select a path; start equal to stop yields no paths and no command
+// output: the ordered paths whose copied events cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command; a format description or previous-GTIDs timestamp does not select a path; start equal to stop yields no paths and no command; Note explains an executed-GTID window that already contains every transaction up to the stop
 // pos: point-in-time seek on the existing replay selection; the limit window stays on GET /replay without stop_datetime
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -29,6 +29,8 @@ type PITRSet struct {
 	// Locations matches Paths. bucket means that path is not on this process.
 	Locations []string `json:"locations,omitempty"`
 	Command   string   `json:"command"`
+	// Note is set when start_gtid_set already contains every transaction up to the stop.
+	Note string `json:"note,omitempty"`
 }
 
 // EventSpan is the first and last non-zero event-header time of one segment.

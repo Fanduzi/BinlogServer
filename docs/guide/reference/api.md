@@ -602,7 +602,7 @@ curl -o task-1-replay.tar "http://localhost:8080/api/tasks/1/replay/archive?limi
 
 HTTP 200 时 `Content-Type` 是 `application/x-tar`，`Content-Disposition` 是 `attachment`，文件名是 `task-{id}-replay.tar`。窗口为空时仍是 HTTP 200，正文是没有成员的 ustar，长度 1024 字节。选出的分段里有一个打不开或读不完时，响应是错误，正文不是半个 tar。任务不存在是 HTTP 404 `task not found`。分段不在本进程上是 HTTP 404 `segment not found on this process`。非法分段名是 HTTP 400 `invalid segment name`。
 
-带 `stop_datetime` 时，这个 tar 的成员是 [5.7](#pitr-replay) 的同一组 basename，不再用 `limit`。带 `stop_gtid` 时，成员是 [5.8](#gtid-replay) 的同一组 basename，不再用 `limit`。停止位置只写在 JSON 的 `command` 里。
+带 `stop_datetime` 时，这个 tar 的成员是 [5.7](#pitr-replay) 的同一组 basename，不再用 `limit`。带 `stop_gtid` 时，成员是 [5.8](#gtid-replay) 的同一组 basename，不再用 `limit`。带 `start_gtid_set` 时，成员是 [5.9](#executed-gtid-replay) 的同一组 basename，不再用 `limit`。停止位置和 `--exclude-gtids` 只写在 JSON 的 `command` 里。
 
 ### 5.7 按时间点选取分段
 
@@ -655,7 +655,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
 
 Console 任务详情在回放命令下面可以填停止时间（和可选的开始时间），生成并复制定点命令，或下载这个窗口的 tar。
 
-要停在某一条事务之前，用 [5.8](#gtid-replay) 的 `stop_gtid`。`stop_datetime` 和 `stop_gtid` 不能同时出现。
+要停在某一条事务之前，用 [5.8](#gtid-replay) 的 `stop_gtid`。`stop_datetime` 和 `stop_gtid` 不能同时出现。恢复库已经执行过的 GTID 集合用 [5.9](#executed-gtid-replay) 的 `start_gtid_set`，它和 `start_datetime` 不能同时出现。
 
 ### 5.8 停在某个 GTID 之前
 
@@ -713,6 +713,66 @@ MariaDB 的形状是 `domain-server-seq`，例如 `0-1-10`。`source.flavor` 为
 正文是纯文本句子。`GET /api/tasks/{id}/replay/archive` 接受同一个 `stop_gtid` 和可选的 `start_datetime`。成员是上面的 basename。停止位置不在 tar 里。
 
 Console 任务详情的定点恢复可以填停止 GTID。停止时间和停止 GTID 至少填一个就可以生成命令，也可以下载这个 tar。两个都填时，请求同时带上 `stop_datetime` 和 `stop_gtid`，页面显示 `stop_datetime and stop_gtid cannot both be set`。
+
+已经恢复的全量备份带有已执行 GTID 集合时，用 [5.9](#executed-gtid-replay) 的 `start_gtid_set` 代替 `start_datetime`。`stop_gtid` 的停止语义不变。
+
+### 5.9 从已执行 GTID 集合续上
+
+<a id="executed-gtid-replay"></a>
+
+全量备份（xtrabackup、mysqldump 或 clone）已经在恢复库上还原。备份告诉你它已经包含哪些事务：`xtrabackup_binlog_info` 里的 GTID 集合、mysqldump 里的 `SET @@GLOBAL.GTID_PURGED`，或恢复实例上的 `SELECT @@gtid_executed`。把这个集合交给 `start_gtid_set`，再带上 [5.7](#pitr-replay) 的 `stop_datetime` 或 [5.8](#gtid-replay) 的 `stop_gtid`。返回的分段和命令只应用这个集合里还没有的事务，停在原来的停止点。
+
+`GET /api/tasks/{id}/replay` 带上 `start_gtid_set` 就走这条路径。必须同时给出 `stop_datetime` 或 `stop_gtid`。`limit` 被忽略。`start_datetime` 不能一起出现。只适用于 `source.flavor` 为 `mysql`。
+
+```bash
+curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
+  --data-urlencode "start_gtid_set=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20" \
+  --data-urlencode "stop_gtid=3e11fa47-71ca-11e1-9e33-c80aa9429562:40"
+
+curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
+  --data-urlencode "start_gtid_set=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20" \
+  --data-urlencode "stop_datetime=2024-01-01 01:30:00"
+```
+
+集合可以含空格和换行，服务端会收成规范形式。MariaDB 的 `domain-server-seq` 不是 MySQL 集合。
+
+服务端按 binlog 顺序读每个分段里的 `GTID_EVENT`。停止规则与 5.7、5.8 相同：`stop_datetime` 不含这个时刻，`stop_gtid` 停在该事件的起始字节。窗口里的事务如果已经在 `start_gtid_set` 中，不算还要应用。一个分段里、停止点之前的事务全都已经在集合里时，这个分段不进入 `paths`，也不进 tar。还剩事务要应用的分段留下。`location` 为 `bucket` 的对象与本地文件同一条规则。
+
+`command` 以 `TZ=UTC mysqlbinlog` 开头。先写 `--exclude-gtids=<规范集合>`，所以 mysqlbinlog 跳过集合里已有的事务，只放进还没有的事务。`stop_datetime` 时接着写 `--stop-datetime='<UTC>'`。`stop_gtid` 落在最后一个路径所在的文件里时，再写 `--stop-position=<N>`，`N` 仍是该事件的起始字节。停止点所在的文件因为停止点之前没有新事务而被省略时，命令不写 `--stop-position`，前面留下的文件整段应用。不写 `--start-datetime`。
+
+停止点之前的每一条事务都已经在集合里时，仍是 HTTP 200。`paths` 是 `[]`，`command` 是空字符串，`note` 是 `every transaction up to the stop is already in start_gtid_set`。这不是错误，也不会给出一条会重复应用的命令。停止点落在第一条事务上、窗口里本来就没有事务时，`paths` 和 `command` 仍为空，不带这条 `note`。
+
+要应用的第一段，如果带有 previous-GTIDs，这个集合必须是 `start_gtid_set` 的子集。没有 previous-GTIDs 时，按该段里每个 UUID 的最小序号推断此前的 `1` 到 `N-1`，并要求这些事务已经在集合里，或出现在更早的保留分段中。不满足时是 400，正文 `start_gtid_set has a gap before this task's backed-up range`。备份比保留的 binlog 更老、中间缺了事务时必须拒绝，不能静默跳过。集合与段内事务没有交集、但 previous-GTIDs 已经被集合盖住时，这是从保留范围的开头续上，仍返回这些分段。
+
+```json
+{
+  "flavor": "mysql",
+  "client": "mysqlbinlog",
+  "client_hint": "MySQL mysqlbinlog",
+  "paths": [
+    "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
+  ],
+  "command": "TZ=UTC mysqlbinlog \\\n  --exclude-gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20 \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1"
+}
+```
+
+| 请求 | HTTP | 正文 |
+|------|------|------|
+| `start_gtid_set` 为空、只有空白，或不是 MySQL GTID 集合 | 400 | `invalid start_gtid_set` |
+| `source.flavor` 不是 `mysql` | 400 | `start_gtid_set is not supported for this flavor` |
+| `start_gtid_set` 和 `start_datetime` 都有非空值 | 400 | `start_gtid_set and start_datetime cannot both be set` |
+| 给了 `start_gtid_set`，没有 `stop_datetime` 也没有 `stop_gtid` | 400 | `stop_datetime or stop_gtid is required` |
+| 集合盖不住要应用的第一段之前的事务 | 400 | `start_gtid_set has a gap before this task's backed-up range` |
+| `stop_datetime` 和 `stop_gtid` 都出现 | 400 | `stop_datetime and stop_gtid cannot both be set` |
+| `stop_gtid` 无法解析，或不在这份备份里 | 400 | 与 [5.8](#gtid-replay) 相同 |
+| 任务不存在，且 `start_gtid_set` 是合法的 MySQL 集合 | 404 | `task not found` |
+| 已选分段打不开 | 404 | `segment not found on this process` |
+
+`stop_datetime` 和 `stop_gtid` 同时出现时，先返回 `stop_datetime and stop_gtid cannot both be set`，即使 `start_gtid_set` 也无法解析。`start_gtid_set` 与非空 `start_datetime` 同时出现时，先返回互斥那一句。集合无法解析、并且停止参数也有问题时，返回 `invalid start_gtid_set`。`stop_gtid` 不在备份范围内时，仍返回 `stop_gtid is not in this task's backed-up range`，不先报缺口。
+
+正文是纯文本句子。`GET /api/tasks/{id}/replay/archive` 接受同一个 `start_gtid_set` 和同一个停止参数。成员是上面的 basename。已经全部包含的窗口是空 tar。
+
+Console 任务详情的定点恢复可以填已执行 GTID。停止时间或停止 GTID 仍至少填一个才能生成命令。已执行 GTID 和开始时间都填时，页面显示 `start_gtid_set and start_datetime cannot both be set`。`note` 有文字而 `command` 为空时，页面显示这句说明。
 
 ## 6. 事件查询 API
 
