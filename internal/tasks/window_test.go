@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: on-disk and catalog segments, including a chain that exists only as uploaded objects, plus mysql and mariadb flavors
-// output: assertions for a continuous recoverable window, a missing source index, a GTID hole, checksum mismatch, a segment that is not durable off-host, and agreement with PITR replay
+// output: assertions for a continuous recoverable window, a missing source index, a GTID hole, checksum mismatch, a segment that is not durable off-host, a source switch that does not invent a missing index, and agreement with PITR replay
 // pos: regression coverage for the retained-chain window and its breaks
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -402,6 +402,24 @@ type windowObjects struct {
 }
 
 func (windowObjects) UploadFile(context.Context, string, string, string) error { return nil }
+
+func TestRecoveryWindow_SwitchDoesNotInventMissingIndex(t *testing.T) {
+	const newID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	oldAt := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	newAt := oldAt.Add(time.Hour)
+	old := BinlogFile{FileName: "mysql-bin.000009", FilePath: "/data/mysql-bin.000009", State: "SEALED", CreatedAt: oldAt}
+	neu := BinlogFile{FileName: newID + ".mysql-bin.000001", FilePath: "/data/" + newID + ".mysql-bin.000001", State: "SEALED", CreatedAt: newAt}
+	got, err := assessRecovery([]segmentView{
+		{File: old, Readable: true},
+		{File: neu, Readable: true},
+	}, "mysql", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Continuous || len(got.Breaks) != 0 {
+		t.Fatalf("window %+v", got)
+	}
+}
 
 func (o windowObjects) OpenObject(_ context.Context, key string) (io.ReadCloser, int64, error) {
 	body, ok := o.bodies[key]

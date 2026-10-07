@@ -51,6 +51,7 @@ Scenarios:
   smoke-gtid-purge
   smoke-gtid-pitr
   smoke-gtid-executed
+  smoke-source-switchover
   smoke-recovery-window
   smoke-source-outage
   smoke-unreachable-giveup
@@ -220,6 +221,9 @@ run_scenario() {
       ;;
     smoke-gtid-executed)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-executed.sh"
+      ;;
+    smoke-source-switchover)
+      E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-source-switchover.sh"
       ;;
     smoke-source-outage)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-source-outage.sh"

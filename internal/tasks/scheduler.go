@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder to the stored source so a closing dump can KILL its thread with the current password, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder and SourceSwitchBinder so a closing dump can KILL its thread with the current password and a VIP switch appends one SOURCE_SWITCHOVER event, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -398,6 +398,11 @@ type DumpSourceBinder interface {
 	BindDumpSource(func(taskID string) (SourceConfig, bool))
 }
 
+// SourceSwitchBinder records a VIP switch on the task event list.
+type SourceSwitchBinder interface {
+	BindSourceSwitch(func(taskID string, notice SourceSwitchNotice))
+}
+
 // SetRunner 动态替换 runner 实现（测试和运行时装配会用到）。
 // A binder receives the store lookup so Close can KILL with the current password.
 func (s *Scheduler) SetRunner(runner Runner) {
@@ -410,6 +415,9 @@ func (s *Scheduler) SetRunner(runner Runner) {
 		}
 		if binder, ok := runner.(DumpHeldBinder); ok {
 			binder.BindDumpHeld(s.noteDumpHeld)
+		}
+		if binder, ok := runner.(SourceSwitchBinder); ok {
+			binder.BindSourceSwitch(s.noteSourceSwitch)
 		}
 	}
 	var killer func(SourceConfig, uint32) error
@@ -537,6 +545,18 @@ type eventLane struct {
 	cond   *sync.Cond
 	next   uint64
 	issued uint64
+}
+
+// noteSourceSwitch writes SOURCE_SWITCHOVER before the runner returns.
+// The event store flush happens here so a following GET /events sees it.
+func (s *Scheduler) noteSourceSwitch(taskID string, notice SourceSwitchNotice) {
+	if s == nil || strings.TrimSpace(taskID) == "" || notice.Message == "" {
+		return
+	}
+	s.mu.Lock()
+	s.appendEventLocked(taskID, "SOURCE_SWITCHOVER", notice.Message, notice.Detail)
+	s.flushPendingEventsLocked()
+	s.mu.Unlock()
 }
 
 func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string) {
