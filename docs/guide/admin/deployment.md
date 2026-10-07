@@ -50,14 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.55)
+## 3. 安装与产物准备 (v0.5.56)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
 
-> ⚠️ **v0.5.55 没有新迁移。schema 仍是 6。已经是 v0.5.54 / schema 6 的库，这次没有 `./migrate`。还不是 schema 6 时，先按 v0.5.54 升级。** `minRequiredSchemaVersion` 仍是 6。`migrations/` 仍是 `000001` 到 `000006`。没有 `000007`。没有新的配置项。确认 `schema_migrations` 是 `(6, 0)` 再启动。v0.5.55 在 schema 5 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.54 的拒绝相同。地板仍是 v0.5.51。v0.5.51 是第一版同时带上第 6 步和第 7 步的发布。v0.5.50 只有第 6 步。v0.5.51 和 v0.5.52 在 schema 6 上拒绝启动。日志含 `missing index` 和 `uk_task_file_epoch`。`./migrate up` 到 schema 6 之前先停掉它们。这一版不是新的 ADR 步骤。第 9 步在 v0.5.53 发出。定点恢复可以传 `start_gtid_set`。细节见 [v0.5.55 发布说明](../../releases/release-notes-v0.5.55.md)。schema 4（`000004_pending_dump_cleanup`）仍在迁移链上。旧二进制留在任务目录里的 `.takeover-*`，会在跑这一版的 worker 启动时删掉。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
+> ⚠️ **v0.5.56 没有新迁移。schema 仍是 6。已经是 v0.5.55 / schema 6 的库，这次没有 `./migrate`。还不是 schema 6 时，先按 v0.5.55 升级。** `minRequiredSchemaVersion` 仍是 6。`migrations/` 仍是 `000001` 到 `000006`。没有 `000007`。没有新的配置项。确认 `schema_migrations` 是 `(6, 0)` 再启动。v0.5.56 在 schema 5 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.55 的拒绝相同。地板仍是 v0.5.51。v0.5.51 是第一版同时带上第 6 步和第 7 步的发布。v0.5.50 只有第 6 步。v0.5.51 和 v0.5.52 在 schema 6 上拒绝启动。日志含 `missing index` 和 `uk_task_file_epoch`。`./migrate up` 到 schema 6 之前先停掉它们。这一版不是新的 ADR 步骤。第 9 步在 v0.5.53 发出。出事前可以先看 `GET /api/tasks/{id}/window`。v0.5.55 的 `start_gtid_set` 和 v0.5.54 的 `stop_gtid` 仍成立。细节见 [v0.5.56 发布说明](../../releases/release-notes-v0.5.56.md)。schema 4（`000004_pending_dump_cleanup`）仍在迁移链上。旧二进制留在任务目录里的 `.takeover-*`，会在跑这一版的 worker 启动时删掉。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
 
 ```bash
-VER=0.5.55
+VER=0.5.56
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,18 +69,18 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.55` `checksums.txt`：
+已发布的 `v0.5.56` `checksums.txt`：
 
 ```text
-159a4c4a8cc999061469137dceaa66bdbee3e2dcfd20d04d7f368cffb5ad2740  binlog-server_0.5.55_darwin_amd64.tar.gz
-ba0b7441858bd7abb185466e6611ca63d1f15da46aeb0174c0c17200b4022fbc  binlog-server_0.5.55_darwin_arm64.tar.gz
-2d3c9c276582a47ebf6f9e767a1c44c3cac6f2fe955306cc1560e25538f6a782  binlog-server_0.5.55_linux_amd64.tar.gz
-faf1272d55458085bb0f302d64bc971e904e00807f3406e92e0857161c96fb71  binlog-server_0.5.55_linux_arm64.tar.gz
+9cce150b1ffd19669e58f79bb0097889e63aba3fcb230a3069dcd72b42fef249  binlog-server_0.5.56_darwin_amd64.tar.gz
+dc9ce716edd9d3c7820c01b8f0438e0796fc1be41dcf585163eaefc519c51660  binlog-server_0.5.56_darwin_arm64.tar.gz
+5d99c9601a6885bc33bb89ae1c2813caa3ce5641f354ff6e41de2bd44bc46983  binlog-server_0.5.56_linux_amd64.tar.gz
+da9577cdcada24785a0a94c9d5b1231c205fc50ace535e67194a528a13c6252a  binlog-server_0.5.56_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.55_linux_amd64/
+binlog-server_0.5.56_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key, 000003_task_desired_and_retry_budget, 000004_pending_dump_cleanup, 000005_binlog_source_epoch_key, 000006_drop_task_file_epoch_key)
@@ -102,9 +102,9 @@ binlog-server_0.5.55_linux_amd64/
 2. **schema 2 → 3（`000003_task_desired_and_retry_budget`）在线。** v0.5.44 还没做过时，进程保持运行，执行 `./migrate up`。这次迁移不需要重启。确认 `SELECT version, dirty FROM schema_migrations` 为 `(3, 0)`。`SHOW COLUMNS FROM backup_tasks` 列出 `desired_run`、`spec_revision`、`applied_spec_revision`、`failed_spec_revision`、`retry_attempt`、`consecutive_source_failures`。
 3. **停掉全部 v0.5.44 / v0.5.45。** 不要和 v0.5.46 混跑。v0.5.46 在 schema 3 之前不会启动。v0.5.46 还在跑时不要 `./migrate down` 回到 schema 2。
 4. **`000004_pending_dump_cleanup` 只加一列，在线。单进程可选，集群必做。** 集群在启动 v0.5.46 之前执行 `./migrate up`。它给 `backup_tasks` 加 `pending_dump_cleanup VARCHAR(512) NOT NULL DEFAULT ''`。确认 `SELECT version, dirty FROM schema_migrations` 为 `(4, 0)`。已经在跑的 v0.5.46，迁移之后重启，才会读这一列。然后只启动 v0.5.46。集群还停在 schema 3 时也能启动，日志写明需要 `000004`，不会接管别的 worker 的 dump。单进程停在 schema 3 仍能启动，标记只在本进程，`process_local` 为 true。
-5. **schema 6，没有新迁移。** v0.5.55 要求 schema 6。已经是 v0.5.54 / schema 6 时，没有 `./migrate`，确认 `(6, 0)` 后只启动 v0.5.55。schema 5 上以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.54 的拒绝相同。还不是 schema 6 时，执行 `./migrate up` 到 6 之前，确认每一台还在跑的进程都是 v0.5.51 或更新。v0.5.51 是第一版同时带上 ADR 0005 第 6 步和第 7 步的发布（v0.5.50 只有第 6 步）。v0.5.51 和 v0.5.52 仍要求索引 `uk_task_file_epoch`。删掉这个索引之后，这两个二进制启动失败，日志含 `missing index` 和 `uk_task_file_epoch`。先停掉它们，再 `./migrate up`。确认 `SELECT version, dirty FROM schema_migrations` 为 `(6, 0)`。`SHOW INDEX FROM binlog_files` 有 `uk_task_source_epoch`，没有 `uk_task_file_epoch`。`file_name` 列还在。然后只启动 v0.5.55。没有新的配置项。没有 `000007`。临时库上 `./migrate down --steps 1` 仍是 v0.5.53 的那次 down，把 `uk_task_file_epoch` 加回来，`binlog_files` 行数不变。生产环境的 down 仍要 `ALLOW_DESTRUCTIVE_MIGRATE=1`。
+5. **schema 6，没有新迁移。** v0.5.56 要求 schema 6。已经是 v0.5.55 / schema 6 时，没有 `./migrate`，确认 `(6, 0)` 后只启动 v0.5.56。schema 5 上以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.55 的拒绝相同。还不是 schema 6 时，执行 `./migrate up` 到 6 之前，确认每一台还在跑的进程都是 v0.5.51 或更新。v0.5.51 是第一版同时带上 ADR 0005 第 6 步和第 7 步的发布（v0.5.50 只有第 6 步）。v0.5.51 和 v0.5.52 仍要求索引 `uk_task_file_epoch`。删掉这个索引之后，这两个二进制启动失败，日志含 `missing index` 和 `uk_task_file_epoch`。先停掉它们，再 `./migrate up`。确认 `SELECT version, dirty FROM schema_migrations` 为 `(6, 0)`。`SHOW INDEX FROM binlog_files` 有 `uk_task_source_epoch`，没有 `uk_task_file_epoch`。`file_name` 列还在。然后只启动 v0.5.56。没有新的配置项。没有 `000007`。临时库上 `./migrate down --steps 1` 仍是 v0.5.53 的那次 down，把 `uk_task_file_epoch` 加回来，`binlog_files` 行数不变。生产环境的 down 仍要 `ALLOW_DESTRUCTIVE_MIGRATE=1`。
 
-   English: v0.5.55 requires schema 6. A database already on schema 6 from v0.5.54 needs no `./migrate` step. Confirm `(6, 0)`, then start only v0.5.55. Schema 5 exits 1 before it listens. The message contains `schema version too old` and `./migrate up`. That is the same refusal as v0.5.54. Before `./migrate up` to 6, confirm every running process is v0.5.51 or newer. v0.5.51 is the first release that ships both ADR 0005 step 6 and step 7. v0.5.50 shipped step 6 only. v0.5.51 and v0.5.52 still require `uk_task_file_epoch` and refuse to start after it is dropped. The log contains `missing index` and `uk_task_file_epoch`. Stop those processes, run `./migrate up`, confirm `schema_migrations` is `(6, 0)`, then start only v0.5.55. `SHOW INDEX FROM binlog_files` lists `uk_task_source_epoch` and does not list `uk_task_file_epoch`. The `file_name` column stays. No new config key. There is no `000007`.
+   English: v0.5.56 requires schema 6. A database already on schema 6 from v0.5.55 needs no `./migrate` step. Confirm `(6, 0)`, then start only v0.5.56. Schema 5 exits 1 before it listens. The message contains `schema version too old` and `./migrate up`. That is the same refusal as v0.5.55. Before `./migrate up` to 6, confirm every running process is v0.5.51 or newer. v0.5.51 is the first release that ships both ADR 0005 step 6 and step 7. v0.5.50 shipped step 6 only. v0.5.51 and v0.5.52 still require `uk_task_file_epoch` and refuse to start after it is dropped. The log contains `missing index` and `uk_task_file_epoch`. Stop those processes, run `./migrate up`, confirm `schema_migrations` is `(6, 0)`, then start only v0.5.56. `SHOW INDEX FROM binlog_files` lists `uk_task_source_epoch` and does not list `uk_task_file_epoch`. The `file_name` column stays. No new config key. There is no `000007`.
 
 没有元数据库的 standalone 不跑这次迁移。重试计数只在进程内存里，进程退出就没了。
 
