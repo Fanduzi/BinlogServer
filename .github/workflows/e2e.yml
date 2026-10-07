@@ -22,6 +22,7 @@ on:
           - split-retention
           - epoch-segments
           - gtid-purge
+          - gtid-pitr
           - meta-failover
 
 permissions:
@@ -41,7 +42,7 @@ jobs:
           go-package: ./...
 
   unit-and-e2e:
-    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge') }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -335,6 +336,36 @@ jobs:
         if: failure()
         run: |
           cat /tmp/binlog-server-gtid-purge.log || true
+          docker compose -f deploy/e2e/docker-compose.yml logs || true
+
+      - name: Cleanup
+        if: always()
+        run: ./scripts/e2e/down.sh
+
+  e2e-gtid-pitr:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'gtid-pitr' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: E2E GTID Point-in-time Scenario
+        run: |
+          E2E_DIR="./tmp/e2e/data-ci-gtid-pitr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          E2E_SERVER_LOG="/tmp/binlog-server-gtid-pitr.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --scenarios smoke-gtid-pitr
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          cat /tmp/binlog-server-gtid-pitr.log || true
           docker compose -f deploy/e2e/docker-compose.yml logs || true
 
       - name: Cleanup

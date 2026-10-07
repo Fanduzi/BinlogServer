@@ -84,17 +84,21 @@ const rels = fs.readFileSync(process.env.UI_LIST, "utf8").split("\n").filter(Boo
 const bundle = rels.map((rel) => fs.readFileSync(path.join(staticDir, rel), "utf8")).join("\n");
 
 // Quoted test ids must match the attribute value, not a longer id that shares the prefix.
-// stop_datetime / start_datetime are the query keys in api.js. 停止时间 is the zh-CN stop label.
+// stop_datetime / start_datetime / stop_gtid are the query keys in api.js.
+// 停止时间 and 停止 GTID are the zh-CN labels.
 const markers = [
   { text: '"task-pitr"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: '"task-pitr-stop"', source: "frontend/src/components/TaskDetailDrawer.vue" },
+  { text: '"task-pitr-gtid"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: '"task-pitr-start"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: '"task-pitr-build"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: '"task-pitr-copy"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: '"task-pitr-download"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: "stop_datetime", source: "frontend/src/api.js" },
   { text: "start_datetime", source: "frontend/src/api.js" },
+  { text: "stop_gtid", source: "frontend/src/api.js" },
   { text: "停止时间", source: "frontend/src/locales/zh-CN.json" },
+  { text: "停止 GTID", source: "frontend/src/locales/zh-CN.json" },
 ];
 
 function present(haystack, text) {

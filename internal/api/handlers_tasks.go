@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos and the local event span when this process can read that segment.
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos and the local event span when this process can read that segment.
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -624,14 +624,24 @@ func (s *Server) handleTaskFileDownload(w http.ResponseWriter, r *http.Request, 
 // handleTaskReplay returns one on-disk path per source index from the files
 // inventory window, plus the binlog client for source.flavor.
 // stop_datetime switches the same route to the UTC point-in-time window.
+// stop_gtid switches it to the transaction before that MySQL GTID.
 func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID string) {
-	start, stop, enabled, qerr := parsePITRQuery(r)
+	seek, qerr := parseReplaySeek(r)
 	if qerr != nil {
 		http.Error(w, qerr.Error(), http.StatusBadRequest)
 		return
 	}
-	if enabled {
-		set, err := s.tasks.PITRReplay(taskID, start, stop)
+	if seek.gtid {
+		set, err := s.tasks.GTIDReplay(taskID, seek.gtidRaw, seek.start)
+		if err != nil {
+			writeSegmentOpenError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, set)
+		return
+	}
+	if seek.datetime {
+		set, err := s.tasks.PITRReplay(taskID, seek.start, seek.stop)
 		if err != nil {
 			writeSegmentOpenError(w, err)
 			return
@@ -674,16 +684,16 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 
 // handleTaskReplayArchive streams one ustar of the replay selection.
 // limit is the same inventory window as GET /replay. stop_datetime uses the
-// point-in-time selection instead. Member names are the basenames of those
-// paths. Bytes follow GET /files/{name}. An empty selection is 200 and an
-// empty tar. A segment that cannot be opened fails the request before any
-// archive byte is written.
+// point-in-time selection instead. stop_gtid uses that route's GTID stop.
+// Member names are the basenames of those paths. Bytes follow GET /files/{name}.
+// An empty selection is 200 and an empty tar. A segment that cannot be opened
+// fails the request before any archive byte is written.
 func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	start, stop, enabled, qerr := parsePITRQuery(r)
+	seek, qerr := parseReplaySeek(r)
 	if qerr != nil {
 		http.Error(w, qerr.Error(), http.StatusBadRequest)
 		return
@@ -691,9 +701,12 @@ func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request,
 	var body io.ReadCloser
 	var size int64
 	var err error
-	if enabled {
-		body, size, err = s.tasks.OpenPITRArchive(taskID, start, stop)
-	} else {
+	switch {
+	case seek.gtid:
+		body, size, err = s.tasks.OpenGTIDArchive(taskID, seek.gtidRaw, seek.start)
+	case seek.datetime:
+		body, size, err = s.tasks.OpenPITRArchive(taskID, seek.start, seek.stop)
+	default:
 		body, size, err = s.tasks.OpenReplayArchive(taskID, parseLimit(r, 200))
 	}
 	if err != nil {
@@ -775,37 +788,84 @@ func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, items)
 }
 
-// parsePITRQuery reads the point-in-time window. Neither parameter leaves
-// the limit replay path unchanged. stop_datetime is required once either
-// parameter is present. An empty start_datetime is the stop-only window.
-func parsePITRQuery(r *http.Request) (start *time.Time, stop time.Time, enabled bool, err error) {
+// replaySeek chooses the replay route. No stop parameter leaves the limit
+// window. stop_datetime is the UTC window. stop_gtid is the MySQL transaction
+// stop. The two stops together are rejected.
+type replaySeek struct {
+	datetime bool
+	gtid     bool
+	gtidRaw  string
+	start    *time.Time
+	stop     time.Time
+}
+
+// parseReplaySeek reads stop_datetime, start_datetime, and stop_gtid.
+// Neither stop leaves the limit replay path unchanged. stop_datetime is
+// required once start_datetime is present without stop_gtid. An empty
+// start_datetime is omitted. stop_datetime and stop_gtid together are
+// ErrStopBoundsExclusive.
+func parseReplaySeek(r *http.Request) (replaySeek, error) {
 	q := r.URL.Query()
 	_, stopSet := q["stop_datetime"]
 	_, startSet := q["start_datetime"]
+	_, gtidSet := q["stop_gtid"]
+	if gtidSet && stopSet {
+		return replaySeek{}, tasks.ErrStopBoundsExclusive
+	}
+	if gtidSet {
+		raw := strings.TrimSpace(q.Get("stop_gtid"))
+		if raw == "" {
+			return replaySeek{}, tasks.ErrInvalidStopGTID
+		}
+		if _, err := tasks.ParseMySQLStopGTID(raw); err != nil && !tasks.MariaDBStopGTID(raw) {
+			return replaySeek{}, tasks.ErrInvalidStopGTID
+		}
+		start, err := parseOptionalStart(q, startSet)
+		if err != nil {
+			return replaySeek{}, err
+		}
+		return replaySeek{gtid: true, gtidRaw: raw, start: start}, nil
+	}
 	if !stopSet && !startSet {
-		return nil, time.Time{}, false, nil
+		return replaySeek{}, nil
 	}
 	if !stopSet || strings.TrimSpace(q.Get("stop_datetime")) == "" {
 		if !stopSet {
-			return nil, time.Time{}, false, errors.New("stop_datetime is required")
+			return replaySeek{}, errors.New("stop_datetime is required")
 		}
-		return nil, time.Time{}, false, errors.New("invalid stop_datetime")
+		return replaySeek{}, errors.New("invalid stop_datetime")
 	}
-	stop, err = tasks.ParsePITRDatetime(q.Get("stop_datetime"))
+	stop, err := tasks.ParsePITRDatetime(q.Get("stop_datetime"))
 	if err != nil {
-		return nil, time.Time{}, false, errors.New("invalid stop_datetime")
+		return replaySeek{}, errors.New("invalid stop_datetime")
 	}
-	if startSet && strings.TrimSpace(q.Get("start_datetime")) != "" {
-		parsed, serr := tasks.ParsePITRDatetime(q.Get("start_datetime"))
-		if serr != nil {
-			return nil, time.Time{}, false, errors.New("invalid start_datetime")
-		}
-		if parsed.After(stop) {
-			return nil, time.Time{}, false, errors.New("start_datetime is after stop_datetime")
-		}
-		start = &parsed
+	start, err := parseOptionalStart(q, startSet)
+	if err != nil {
+		return replaySeek{}, err
 	}
-	return start, stop, true, nil
+	if start != nil && start.After(stop) {
+		return replaySeek{}, errors.New("start_datetime is after stop_datetime")
+	}
+	return replaySeek{datetime: true, start: start, stop: stop}, nil
+}
+
+func parseOptionalStart(q map[string][]string, startSet bool) (*time.Time, error) {
+	if !startSet || strings.TrimSpace(firstQuery(q, "start_datetime")) == "" {
+		return nil, nil
+	}
+	parsed, err := tasks.ParsePITRDatetime(firstQuery(q, "start_datetime"))
+	if err != nil {
+		return nil, errors.New("invalid start_datetime")
+	}
+	return &parsed, nil
+}
+
+func firstQuery(q map[string][]string, key string) string {
+	values := q[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func writeSegmentOpenError(w http.ResponseWriter, err error) {
@@ -816,6 +876,11 @@ func writeSegmentOpenError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, tasks.ErrSegmentNotOnProcess):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, tasks.ErrInvalidStopGTID),
+		errors.Is(err, tasks.ErrStopGTIDNotInRange),
+		errors.Is(err, tasks.ErrStopGTIDUnsupported),
+		errors.Is(err, tasks.ErrStartAfterStopGTID):
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
