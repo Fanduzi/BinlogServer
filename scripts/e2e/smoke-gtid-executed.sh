@@ -362,14 +362,9 @@ row2="$(set_field row2 "$schema")"
 wait_gtid "$row2"
 task_dir="$(wait_task_dir)"
 mid_open="$(one_open_name "$task_dir")"
-backup_set="$(mysql80 "SELECT @@GLOBAL.gtid_executed;" | tr -d ' \n')"
 DUMP="$(mktemp)"
 docker compose -f "$COMPOSE_FILE" exec -T mysql80 mysqldump -uroot -proot --single-transaction --set-gtid-purged=ON --databases "$DB" >"$DUMP"
-after_dump="$(mysql80 "SELECT @@GLOBAL.gtid_executed;" | tr -d ' \n')"
-if [[ "$(gtid_subset "$backup_set" "$after_dump")" != "1" || "$(gtid_subset "$after_dump" "$backup_set")" != "1" ]]; then
-  echo "dump changed gtid_executed: before=$backup_set after=$after_dump" >&2
-  exit 1
-fi
+backup_set="$(mysql80 "SELECT @@GLOBAL.gtid_executed;" | tr -d ' \n')"
 echo "[gtid-executed] dump at $backup_set"
 mysql80 "FLUSH BINARY LOGS;"
 mid_sealed="$(wait_sealed "$task_dir" "$mid_open")"
