@@ -1,5 +1,5 @@
 // input: healthy dashboard mock whose selected replay names have fixed UTC event spans
-// output: proof the task drawer builds a stop-only and a start+stop mysqlbinlog command, rejects a bad datetime, and downloads that window
+// output: proof the task drawer builds a stop-only and a start+stop mysqlbinlog command, rejects a bad datetime, downloads that window, and builds a stop_gtid command that stops before one transaction
 // pos: Playwright coverage for the Console point-in-time restore drill
 // note: if this file changes, update this header and frontend/tests/e2e/README.md
 
@@ -72,6 +72,60 @@ test('task drawer builds a point-in-time replay command', async ({ page }) => {
   expect(download.suggestedFilename()).toBe('task-100-replay.tar')
   expect(await readDownload(download)).toBe('mysql-bin.000001')
   await expect(page.getByText('定点恢复分段已下载')).toBeVisible()
+})
+
+test('task drawer stops replay before one GTID', async ({ page }) => {
+  await registerMockRoutes(page, { scenario: 'healthy' })
+  await page.goto('/#/tasks')
+  await page.getByTestId('task-detail-trigger-100').click()
+  await expect(page.getByTestId('task-drawer')).toBeVisible()
+  await page.getByTestId('task-pitr').scrollIntoViewIfNeeded()
+
+  const gtid = '3e11fa47-71ca-11e1-9e33-c80aa9429562:8'
+  await page.getByTestId('task-pitr-gtid').fill(gtid)
+  const stopRequest = page.waitForRequest(
+    (req) => req.method() === 'GET' && req.url().includes('/api/tasks/100/replay?'),
+  )
+  await page.getByTestId('task-pitr-build').click()
+  const stopURL = new URL((await stopRequest).url())
+  expect(stopURL.searchParams.get('stop_gtid')).toBe(gtid)
+  expect(stopURL.searchParams.get('stop_datetime')).toBeNull()
+  expect(stopURL.searchParams.has('limit')).toBe(false)
+  const stopCommand = [
+    'TZ=UTC mysqlbinlog \\',
+    '  --stop-position=154 \\',
+    '  /data/1/mysql-bin.000001 \\',
+    '  /data/1/mysql-bin.000002.open.e4',
+  ].join('\n')
+  await expect(page.getByTestId('task-pitr-command')).toHaveText(stopCommand)
+
+  await page.getByTestId('task-pitr-stop').fill('2024-01-01 01:20:00')
+  await page.getByTestId('task-pitr-build').click()
+  await expect(page.getByTestId('task-pitr-error')).toHaveText('stop_datetime and stop_gtid cannot both be set')
+
+  await page.getByTestId('task-pitr-stop').fill('')
+  await page.getByTestId('task-pitr-gtid').fill('not-a-gtid')
+  await page.getByTestId('task-pitr-build').click()
+  await expect(page.getByTestId('task-pitr-error')).toHaveText('invalid stop_gtid')
+
+  await page.getByTestId('task-pitr-gtid').fill('3e11fa47-71ca-11e1-9e33-c80aa9429562:99')
+  await page.getByTestId('task-pitr-build').click()
+  await expect(page.getByTestId('task-pitr-error')).toHaveText("stop_gtid is not in this task's backed-up range")
+
+  await page.getByTestId('task-pitr-gtid').fill(gtid)
+  const archiveRequest = page.waitForRequest(
+    (req) => req.method() === 'GET' && req.url().includes('/api/tasks/100/replay/archive'),
+  )
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByTestId('task-pitr-download').click(),
+  ])
+  const archiveURL = new URL((await archiveRequest).url())
+  expect(archiveURL.searchParams.get('stop_gtid')).toBe(gtid)
+  expect(archiveURL.searchParams.has('stop_datetime')).toBe(false)
+  expect(archiveURL.searchParams.has('limit')).toBe(false)
+  expect(download.suggestedFilename()).toBe('task-100-replay.tar')
+  expect(await readDownload(download)).toBe('mysql-bin.000001\nmysql-bin.000002.open.e4')
 })
 
 async function readDownload(download: Download) {

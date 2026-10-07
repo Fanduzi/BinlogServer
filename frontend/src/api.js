@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, the point-in-time replay window, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
+// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, the point-in-time replay window, stop_gtid on that window, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -280,8 +280,10 @@ export async function downloadReplayArchive(id, limit = 80, window) {
   const path = `/api/tasks/${encodeURIComponent(id)}/replay/archive`;
   const params = {};
   const stop = String(window?.stop || "").trim();
-  if (stop) {
-    params.stop_datetime = stop;
+  const gtid = String(window?.gtid || "").trim();
+  if (stop || gtid) {
+    if (stop) params.stop_datetime = stop;
+    if (gtid) params.stop_gtid = gtid;
     const start = String(window?.start || "").trim();
     if (start) params.start_datetime = start;
   } else {
@@ -311,8 +313,12 @@ export async function listReplay(id, limit = 80) {
   return data;
 }
 
-export async function listPITRReplay(id, stop, start) {
-  const params = { stop_datetime: stop };
+export async function listPITRReplay(id, stop, start, gtid) {
+  const params = {};
+  const stopText = String(stop || "").trim();
+  const gtidText = String(gtid || "").trim();
+  if (stopText) params.stop_datetime = stopText;
+  if (gtidText) params.stop_gtid = gtidText;
   const startText = String(start || "").trim();
   if (startText) params.start_datetime = startText;
   if (useMockAPI) {
