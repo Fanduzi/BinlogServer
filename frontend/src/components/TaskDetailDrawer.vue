@@ -1,6 +1,6 @@
 <!--
-input: task, replication, checkpoint, locale labels, and loadPitr for the datetime window and stop_gtid
-output: task detail drawer with configured start identity, the resume file:pos / GTID, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
+input: task, replication, checkpoint, the recoverable window, locale labels, and loadPitr for the datetime window and stop_gtid
+output: task detail drawer with configured start identity, the resume file:pos / GTID, the retained chain's earliest and latest UTC times, a warning when that chain has a break, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
 pos: operator view of the position the next Start continues from and the datetime or GTID restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
 -->
@@ -96,6 +96,44 @@ note: if this file changes, update this header and frontend/src/components/READM
 
         <section class="detail-panel">
           <h3><i class="fa-solid fa-file-lines" /> {{ $t('detail.filesAndUpload') }}</h3>
+          <div class="recovery-window" data-testid="task-recovery-window">
+            <div class="replay-set-head">
+              <div class="replay-set-label">
+                <strong>{{ $t('detail.recoveryWindow') }}</strong>
+                <span class="replay-set-hint">{{ $t('detail.recoveryHint') }}</span>
+              </div>
+              <el-tag
+                v-if="recovery"
+                size="small"
+                :type="recovery.continuous ? 'success' : 'warning'"
+                data-testid="task-recovery-continuous"
+              >
+                {{ recovery.continuous ? $t('detail.recoveryContinuous') : $t('detail.recoveryBroken') }}
+              </el-tag>
+            </div>
+            <p class="recovery-range" data-testid="task-recovery-range">{{ recoveryRange }}</p>
+            <p v-if="recoveryGtid" class="replay-set-hint" data-testid="task-recovery-gtid">
+              {{ $t('detail.recoveryGtid') }}: {{ recoveryGtid }}
+            </p>
+            <el-alert
+              v-if="recoveryBreaks.length"
+              type="warning"
+              :closable="false"
+              show-icon
+              data-testid="task-recovery-breaks"
+              :title="$t('detail.recoveryBreaks')"
+            >
+              <ul class="recovery-breaks">
+                <li
+                  v-for="(item, index) in recoveryBreaks"
+                  :key="index"
+                  data-testid="task-recovery-break"
+                >
+                  {{ formatBreak(item) }}
+                </li>
+              </ul>
+            </el-alert>
+          </div>
           <div class="replay-set" data-testid="task-replay">
             <div class="replay-set-head">
               <div class="replay-set-label">
@@ -292,6 +330,7 @@ const props = defineProps({
   checkpoint: { type: Object, default: null },
   files: { type: Array, default: () => [] },
   replay: { type: Object, default: null },
+  recovery: { type: Object, default: null },
   runsLimited: { type: Array, default: () => [] },
   events: { type: Array, default: () => [] },
   runHistoryLimit: { type: Number, default: 10 },
@@ -333,6 +372,33 @@ const canBuildPitr = computed(() => Boolean(pitrStop.value.trim() || pitrGtid.va
 
 const pitrCommand = computed(() => String(pitrResult.value?.command || ""));
 const pitrNote = computed(() => String(pitrResult.value?.note || "").trim());
+
+function formatRecoveryInstant(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.replace("T", " ").replace(/\.\d+/, "").replace(/Z$/, " UTC");
+}
+
+const recoveryRange = computed(() => {
+  const earliest = formatRecoveryInstant(props.recovery?.earliest);
+  const latest = formatRecoveryInstant(props.recovery?.latest);
+  if (!earliest && !latest) return t("detail.recoveryEmpty");
+  return `${earliest || "--"} → ${latest || "--"}`;
+});
+
+const recoveryGtid = computed(() => String(props.recovery?.gtid_set || "").trim());
+
+const recoveryBreaks = computed(() => {
+  const items = props.recovery?.breaks;
+  return Array.isArray(items) ? items : [];
+});
+
+function formatBreak(item) {
+  const files = Array.isArray(item?.files) ? item.files.filter(Boolean).join(", ") : "";
+  const reason = String(item?.reason || "").trim();
+  if (files && reason) return `${files}: ${reason}`;
+  return reason || files;
+}
 
 const replayHint = computed(() => {
   const hint = String(props.replay?.client_hint || "").trim();

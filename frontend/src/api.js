@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, the point-in-time replay window, stop_gtid on that window, start_gtid_set on that window, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
+// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, the point-in-time replay window, stop_gtid on that window, start_gtid_set on that window, GET /api/tasks/{id}/window, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -300,6 +300,14 @@ export async function downloadReplayArchive(id, limit = 80, window) {
     params,
     responseType: "blob",
   });
+  return data;
+}
+
+export async function getRecoveryWindow(id) {
+  if (useMockAPI) {
+    return mockRequest("GET", `/api/tasks/${id}/window`);
+  }
+  const { data } = await http.get(`/api/tasks/${id}/window`);
   return data;
 }
 
