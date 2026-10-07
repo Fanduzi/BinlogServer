@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.54] - 2026-10-07
+
+### Added
+
+- Point-in-time restore can stop immediately before one MySQL transaction by GTID (PR #279). `GET /api/tasks/{id}/replay` and `GET /api/tasks/{id}/replay/archive` accept `stop_gtid=<server_uuid>:<seq>`. The response lists segments through the one that contains that `GTID_EVENT`. `command` is `TZ=UTC mysqlbinlog` with `--stop-position` at that event's starting byte in the last file. Everything before that byte applies. That transaction and everything after it do not. `stop-position` is the event's starting byte, not the header `end_log_pos`. A mid-file copy prepends a format description, so those two numbers differ. `mysqlbinlog` applies `--stop-position` only to the last file. Optional `start_datetime` is still an inclusive lower bound, including the same second as the GTID event. A later start is plain-text 400 `start_datetime is after stop_gtid`. `stop_datetime` and `stop_gtid` cannot both be set. That body is `stop_datetime and stop_gtid cannot both be set`. `limit` is unchanged when neither stop is set, and that response still has no `command`. `limit` is ignored when either stop is set. The UUID match ignores case. The sequence is a positive integer with no leading zero, not a range, and not a GTID set. An empty or unparseable value is `invalid stop_gtid`. A UUID or sequence that is not a `GTID_EVENT` in this task is `stop_gtid is not in this task's backed-up range`. Previous-GTIDs is not that transaction. MariaDB `domain-server-seq` on flavor `mysql` is `invalid stop_gtid`. Any other flavor is `stop_gtid is not supported for this flavor`. The archive members are those basenames. The stop position stays in the JSON `command`. The Console point-in-time form has a stop GTID field. Docs are in `docs/guide/reference/api.md` section 5.8. Swagger was regenerated. No new config key. No schema migration. Schema stays 6. `minRequiredSchemaVersion` stays 6. `migrations/` is still `000001` through `000006`. There is no `000007`. ADR 0005 is unchanged. The floor stays v0.5.51. Tip dogfood by BinlogServerQA passed on `8646266e1b9ac99abd620a9e9df241dd51899d5f`. That run did not open a new issue. The v0.5.53 drop of `uk_task_file_epoch` still holds. The v0.5.52 `.takeover-*` cleanup still holds. The v0.5.51 unknown-`end_pos` rule still holds. #189 was fixed in v0.5.49. #205 was fixed in v0.5.48. #224 was fixed in v0.5.52.
+
 ## [v0.5.53] - 2026-10-07
 
 ### Changed
