@@ -147,6 +147,13 @@ note: if this file changes, update this header and frontend/src/components/READM
                   size="small"
                   :placeholder="$t('detail.pitrStart')"
                 />
+                <el-input
+                  v-model="pitrExecuted"
+                  class="pitr-gtid"
+                  data-testid="task-pitr-executed"
+                  size="small"
+                  :placeholder="$t('detail.pitrExecuted')"
+                />
                 <el-button
                   data-testid="task-pitr-build"
                   size="small"
@@ -167,13 +174,14 @@ note: if this file changes, update this header and frontend/src/components/READM
                   data-testid="task-pitr-download"
                   size="small"
                   :disabled="!canBuildPitr"
-                  @click="$emit('download-pitr', { task, stop: pitrStop.trim(), start: pitrStart.trim(), gtid: pitrGtid.trim() })"
+                  @click="$emit('download-pitr', { task, stop: pitrStop.trim(), start: pitrStart.trim(), gtid: pitrGtid.trim(), executed: pitrExecuted.trim() })"
                 >
                   {{ $t('btn.downloadPitr') }}
                 </el-button>
               </div>
               <p v-if="pitrError" class="replay-set-empty" data-testid="task-pitr-error">{{ pitrError }}</p>
               <pre v-else-if="pitrCommand" class="replay-set-command" data-testid="task-pitr-command">{{ pitrCommand }}</pre>
+              <p v-else-if="pitrNote" class="replay-set-empty" data-testid="task-pitr-command">{{ pitrNote }}</p>
               <p v-else-if="pitrResult" class="replay-set-empty" data-testid="task-pitr-command">{{ $t('detail.pitrEmpty') }}</p>
             </div>
           </div>
@@ -308,6 +316,7 @@ const { t } = useI18n();
 const pitrStop = ref("");
 const pitrGtid = ref("");
 const pitrStart = ref("");
+const pitrExecuted = ref("");
 const pitrResult = ref(null);
 const pitrError = ref("");
 
@@ -315,6 +324,7 @@ watch(() => props.task?.id, () => {
   pitrStop.value = "";
   pitrGtid.value = "";
   pitrStart.value = "";
+  pitrExecuted.value = "";
   pitrResult.value = null;
   pitrError.value = "";
 });
@@ -322,6 +332,7 @@ watch(() => props.task?.id, () => {
 const canBuildPitr = computed(() => Boolean(pitrStop.value.trim() || pitrGtid.value.trim()));
 
 const pitrCommand = computed(() => String(pitrResult.value?.command || ""));
+const pitrNote = computed(() => String(pitrResult.value?.note || "").trim());
 
 const replayHint = computed(() => {
   const hint = String(props.replay?.client_hint || "").trim();
@@ -344,7 +355,7 @@ async function buildPitr() {
   pitrError.value = "";
   pitrResult.value = null;
   try {
-    pitrResult.value = await props.loadPitr(props.task, stop, pitrStart.value.trim(), gtid);
+    pitrResult.value = await props.loadPitr(props.task, stop, pitrStart.value.trim(), gtid, pitrExecuted.value.trim());
   } catch (err) {
     pitrError.value = pitrErrorText(err);
   }
