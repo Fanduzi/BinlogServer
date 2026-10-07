@@ -6,7 +6,7 @@
 | `src/main.js` | Vue 应用入口 |
 | `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、全局/当前页筛选范围、任务详情与设置对话框；遗留目录详情走认领；`single_process` 时总览与 Worker 页写明本进程拉取；刷新只走 `useDashboard.refreshAll` |
 | `src/components/MetricGrid.vue` | 首屏任务指标卡，分别展示 starting 与 running |
-| `src/api.js` | API 调用封装，含 dashboard 任务观测、真实后端请求、单/批量任务创建、遗留目录 adopt、`stop_datetime` / `stop_gtid` / `start_gtid_set` 定点回放、401 处理与开发态 mock 分发；不提供 summary / 全量 list 客户端 |
+| `src/api.js` | API 调用封装，含 dashboard 任务观测、真实后端请求、单/批量任务创建、遗留目录 adopt、`GET /api/tasks/{id}/window` 可恢复窗口、`stop_datetime` / `stop_gtid` / `start_gtid_set` 定点回放、401 处理与开发态 mock 分发；不提供 summary / 全量 list 客户端 |
 | `src/composables/useBatchCreate.js` | 批量任务表单预校验（最多 100 个有效行）、单次 `/api/tasks/batch` 创建请求与逐成功项自动启动 |
 | `src/composables/useDashboard.js` | Dashboard/cluster 响应状态与唯一刷新编排，只信 dashboard 的 `total/limit/offset`，保留 starting 与 running 独立计数 |
 | `src/composables/useTaskFilter.js` | 任务本地筛选与 server page 查询参数编排 |
@@ -34,7 +34,7 @@
 - URL 深链支持：可直接访问 `/#/tasks`、`/#/sources`、`/#/workers`、`/#/alerts` 分享指定运维视图
 - 工具归属拆分：`运维筛选`仅在任务/告警工作区显示，`源库反查`仅在源库工作区显示
 - E2E 回归覆盖：Playwright 用例覆盖分视图导航、深链、空态、详情抽屉、上传重试与 starting 指标 mock 场景
-- 任务文件表：「文件」列显示 `file_path` 的磁盘文件名（open 分段带 `.open.e<epoch>`），「磁盘路径」列显示完整 `file_path`，与 `GET /api/tasks/{id}/files` 相同。位置列是 `location`（`local` / `bucket` / `both`）。详情显示有效本地保留和桶保留。每一行有下载，请求 `GET /api/tasks/{id}/files/{basename}`，保存的文件名就是该磁盘文件名。详情里的回放区按 `GET /api/tasks/{id}/replay` 显示每个序号一条路径，并一次复制 `mysqlbinlog` 或 `mariadb-binlog` 命令。`location` 或 `locations` 含 `bucket` 时提示该路径不在磁盘上，先下载。旁边的「下载回放集」请求 `GET /api/tasks/{id}/replay/archive`，`limit` 与这次详情加载的 replay 窗口相同，保存 `task-{id}-replay.tar`。同一区域可以填写 UTC 停止时间（和可选开始时间），生成带 `--stop-datetime` 的定点命令，并下载这个窗口的 tar
+- 任务文件表：「文件」列显示 `file_path` 的磁盘文件名（open 分段带 `.open.e<epoch>`），「磁盘路径」列显示完整 `file_path`，与 `GET /api/tasks/{id}/files` 相同。位置列是 `location`（`local` / `bucket` / `both`）。详情显示有效本地保留和桶保留。每一行有下载，请求 `GET /api/tasks/{id}/files/{basename}`，保存的文件名就是该磁盘文件名。详情先按 `GET /api/tasks/{id}/window` 显示可恢复窗口，有缺口时给出警告。回放区按 `GET /api/tasks/{id}/replay` 显示每个序号一条路径，并一次复制 `mysqlbinlog` 或 `mariadb-binlog` 命令。`location` 或 `locations` 含 `bucket` 时提示该路径不在磁盘上，先下载。旁边的「下载回放集」请求 `GET /api/tasks/{id}/replay/archive`，`limit` 与这次详情加载的 replay 窗口相同，保存 `task-{id}-replay.tar`。同一区域可以填写 UTC 停止时间（和可选开始时间），生成带 `--stop-datetime` 的定点命令，并下载这个窗口的 tar
 - 遗留目录：任务详情用「认领」提交 `POST /api/tasks/{id}/adopt`，状态保持 `STOPPED`，不回显密码，也不启动复制。目录任务的编辑仍是 `PUT`
 - 开发态 mock：显式环境变量打开后，前端可直接使用共享场景数据启动，不依赖真实后端
 - 共享 mock 资产：Vite dev 与 Playwright 路由拦截复用同一套 mock 数据与 handler，避免双份漂移

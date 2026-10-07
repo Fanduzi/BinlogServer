@@ -1218,6 +1218,47 @@
                 }
             }
         },
+        "/api/tasks/{id}/window": {
+            "get": {
+                "description": "Read-only view of the retained chain. earliest and latest are UTC event-header times (RFC3339), omitted when the chain has no timed event. gtid_set is present for a mysql task and is the transactions stored in the chain. continuous is true when breaks is empty. A break names the files involved. Reasons cover a missing source file index between two retained segments, a sealed segment that is UPLOAD_FAILED or LOCAL_ONLY when object storage is configured, checksum mismatch, a segment whose bytes are not on this process, and, for mysql, a GTID hole between one segment and the next. An open segment is not a durability break. Replay routes are unchanged.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Tasks"
+                ],
+                "summary": "Recoverable window for one task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.RecoveryWindow"
+                        }
+                    },
+                    "404": {
+                        "description": "task not found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/api/workers": {
             "get": {
                 "produces": [
@@ -1825,6 +1866,43 @@
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "tasks.RecoveryBreak": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "tasks.RecoveryWindow": {
+            "type": "object",
+            "properties": {
+                "breaks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/tasks.RecoveryBreak"
+                    }
+                },
+                "continuous": {
+                    "type": "boolean"
+                },
+                "earliest": {
+                    "type": "string"
+                },
+                "gtid_set": {
+                    "type": "string"
+                },
+                "latest": {
+                    "type": "string"
                 }
             }
         },

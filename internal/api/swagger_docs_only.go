@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces
-// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, PUT /api/tasks/{id} plain-text 400 when a live dump's source, start, storage, or cluster_key would change, GET /api/tasks/{id}/checkpoint where epoch greater than 1 follows a readable file_path and does not rewind an unreadable tail to position 4, GET /api/tasks/{id}/replay, the UTC stop_datetime window on that route, stop_gtid on that route, start_gtid_set on that route, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
+// output: REST API responses/status codes and generated Swagger declarations for task/cluster operations, including SameSourceHost host-filter docs, 5xx on cluster observation store errors, PUT /api/tasks/{id} plain-text 400 when a live dump's source, start, storage, or cluster_key would change, GET /api/tasks/{id}/checkpoint where epoch greater than 1 follows a readable file_path and does not rewind an unreadable tail to position 4, GET /api/tasks/{id}/replay, the UTC stop_datetime window on that route, stop_gtid on that route, start_gtid_set on that route, GET /api/tasks/{id}/window, GET /api/tasks/{id}/replay/archive, and GET /api/tasks/{id}/files/{name} from local disk or a sealed uploaded object
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -148,6 +148,18 @@ func (s *Server) swaggerTaskFilesDoc() {}
 // @Failure 404 {string} string "task not found or segment not on this process"
 // @Router /api/tasks/{id}/files/{name} [get]
 func (s *Server) swaggerTaskFileDownloadDoc() {}
+
+// swaggerTaskWindowDoc godoc
+// @Summary Recoverable window for one task
+// @Description Read-only view of the retained chain. earliest and latest are UTC event-header times (RFC3339), omitted when the chain has no timed event. gtid_set is present for a mysql task and is the transactions stored in the chain. continuous is true when breaks is empty. A break names the files involved. Reasons cover a missing source file index between two retained segments, a sealed segment that is UPLOAD_FAILED or LOCAL_ONLY when object storage is configured, checksum mismatch, a segment whose bytes are not on this process, and, for mysql, a GTID hole between one segment and the next. An open segment is not a durability break. Replay routes are unchanged.
+// @Tags Tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Success 200 {object} tasks.RecoveryWindow
+// @Failure 404 {string} string "task not found"
+// @Failure 500 {string} string
+// @Router /api/tasks/{id}/window [get]
+func (s *Server) swaggerTaskWindowDoc() {}
 
 // swaggerTaskReplayDoc godoc
 // @Summary List the mysqlbinlog replay set for a task
