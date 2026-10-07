@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: the identity recorded for a task directory, the identity now reached at the task host:port, and that server's GTID executed and purged sets
-// output: a plan that seals the old server's open segment and continues with COM_BINLOG_DUMP_GTID, or a permanent SOURCE_SWITCHOVER error naming both identities
+// output: a plan that seals the old server's open segment and continues with COM_BINLOG_DUMP_GTID, or a permanent SOURCE_SWITCHOVER error naming both identities; a dump error before the next event, including MySQL 1236, uses the same plan
 // pos: VIP switch decision used by the replication runner before a byte from the new server is written
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -432,6 +432,29 @@ func (r *MySQLRunner) noteDumpIdentity(ctx context.Context, task tasks.Task, ses
 		session.seenConn = id
 		return nil
 	}
+	return r.applySwitch(ctx, task, session, next, ours, file, pos, seal)
+}
+
+// noteStreamErrorIdentity runs when the dump returns an error before the next
+// event. MySQL 1236 from a new primary is a source switch, not a purged binlog
+// on the server that wrote the open segment. The same identity, an empty
+// answer, or a failed read leaves the original error unchanged.
+func (r *MySQLRunner) noteStreamErrorIdentity(ctx context.Context, task tasks.Task, session *sourceSession, ours, file string, pos uint32, seal func(owner string) error) error {
+	if session == nil || r.fetcher == nil {
+		return nil
+	}
+	next, err := r.fetcher.FetchServerUUID(ctx, task.Source)
+	if err != nil {
+		return nil
+	}
+	next = strings.TrimSpace(next)
+	if next == "" || next == session.active {
+		return nil
+	}
+	return r.applySwitch(ctx, task, session, next, ours, file, pos, seal)
+}
+
+func (r *MySQLRunner) applySwitch(ctx context.Context, task tasks.Task, session *sourceSession, next, ours, file string, pos uint32, seal func(owner string) error) error {
 	plan, err := r.decideSwitch(ctx, task, session.active, next, ours, true, file, pos)
 	if err != nil {
 		return err
