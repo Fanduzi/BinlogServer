@@ -678,11 +678,11 @@ to verified backup health</h2>
           <div class="step-card">
             <div class="step-header">
               <span class="step-number">1</span>
-              <h3 data-i18n="step1Title">Download &amp; Verify v0.5.54 Release</h3>
+              <h3 data-i18n="step1Title">Download &amp; Verify v0.5.55 Release</h3>
             </div>
             <p data-i18n="step1Body">Fetch the official static binary, verify its SHA256 checksum, unpack the archive, and boot local evaluation.</p>
             <div class="step-code">
-              <code data-i18n="step1Code">VER=0.5.54 OS=linux ARCH=amd64
+              <code data-i18n="step1Code">VER=0.5.55 OS=linux ARCH=amd64
 curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 curl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"
 sha256sum -c checksums.txt --ignore-missing
@@ -694,10 +694,10 @@ cd "binlog-server_${VER}_${OS}_${ARCH}"
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server</code>
-              <code>297e8a28a97b89735de750fe0ab2684461e250e2bc56ad6b5d4d29c96b630dbe  binlog-server_0.5.54_darwin_amd64.tar.gz
-a243082af07393add8fc715bf8c6153b15136f5ba1c3f10056a4b789f973c541  binlog-server_0.5.54_darwin_arm64.tar.gz
-f2b066aa507c201ceac9df67df0e8b52428eb26b8121d930e443e9be7f0c0bf2  binlog-server_0.5.54_linux_amd64.tar.gz
-efeea0a3e5547d84ed2c9ab532284844af0e949bf60741561e1ea68ffc898e55  binlog-server_0.5.54_linux_arm64.tar.gz
+              <code>159a4c4a8cc999061469137dceaa66bdbee3e2dcfd20d04d7f368cffb5ad2740  binlog-server_0.5.55_darwin_amd64.tar.gz
+ba0b7441858bd7abb185466e6611ca63d1f15da46aeb0174c0c17200b4022fbc  binlog-server_0.5.55_darwin_arm64.tar.gz
+2d3c9c276582a47ebf6f9e767a1c44c3cac6f2fe955306cc1560e25538f6a782  binlog-server_0.5.55_linux_amd64.tar.gz
+faf1272d55458085bb0f302d64bc971e904e00807f3406e92e0857161c96fb71  binlog-server_0.5.55_linux_arm64.tar.gz
 </code>
             </div>
           </div>
@@ -1137,9 +1137,9 @@ into a production control plane</h2>
         deployLabel: 'Install & First Backup Path',
         deployTitle: 'Four disciplined steps from download\nto verified backup health',
         deploySub: 'Packaged release archives contain precompiled statically-linked binaries (binlog-server, migrate), SQL migrations, and production config templates. Operators do not need Go installed.',
-        step1Title: 'Download & Verify v0.5.54 Release',
+        step1Title: 'Download & Verify v0.5.55 Release',
         step1Body: 'Fetch the official static binary, verify its SHA256 checksum, unpack the archive, and boot local evaluation.',
-        step1Code: 'VER=0.5.54 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER=0.5.55 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: 'Verify Health & Create Backup Task',
         step2Body: 'Check health probe status and submit your MySQL source specification with explicit retention and start mode.',
         step2Code: '# Check health probe\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# Submit backup task (start from source tip)\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
@@ -1298,9 +1298,9 @@ into a production control plane</h2>
         deployLabel: '安装与首条备份链路',
         deployTitle: '从下载解压到验证健康，\n严谨清晰的四步交付路径',
         deploySub: '官方发布包内已打包静态编译二进制（binlog-server、migrate）、数据库迁移脚本与生产配置模板。DBA 在部署机上无需安装 Go 环境。',
-        step1Title: '下载解压并校验 v0.5.54',
+        step1Title: '下载解压并校验 v0.5.55',
         step1Body: '下载官方静态二进制压缩包，执行 SHA256 完整性哈希校验，解压后启动本地评估实例。',
-        step1Code: 'VER=0.5.54 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER=0.5.55 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: '探活与创建首个备份任务',
         step2Body: '探活健康检查端点，提交源库连接参数，显式声明数据保留期与复制起点模式。',
         step2Code: '# 检查健康探活端点\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# 提交备份任务（从源库当前最新位点开始）\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
