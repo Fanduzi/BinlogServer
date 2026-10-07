@@ -742,7 +742,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
 
 停止点之前的每一条事务都已经在集合里时，仍是 HTTP 200。`paths` 是 `[]`，`command` 是空字符串，`note` 是 `every transaction up to the stop is already in start_gtid_set`。这不是错误，也不会给出一条会重复应用的命令。停止点落在第一条事务上、窗口里本来就没有事务时，`paths` 和 `command` 仍为空，不带这条 `note`。
 
-要应用的第一段，如果带有 previous-GTIDs，这个集合必须是 `start_gtid_set` 的子集。没有 previous-GTIDs 时，按该段里每个 UUID 的最小序号推断此前的 `1` 到 `N-1`，并要求这些事务已经在集合里，或出现在更早的保留分段中。不满足时是 400，正文 `start_gtid_set has a gap before this task's backed-up range`。备份比保留的 binlog 更老、中间缺了事务时必须拒绝，不能静默跳过。集合与段内事务没有交集、但 previous-GTIDs 已经被集合盖住时，这是从保留范围的开头续上，仍返回这些分段。
+要应用的第一段如果带有 previous-GTIDs，这个集合必须是 `start_gtid_set` 的子集。无论有没有 previous-GTIDs，该段里每个 UUID 的最小序号 `N` 还要求 `1` 到 `N-1` 已经被 previous-GTIDs、`start_gtid_set` 和更早保留分段里的事务合起来盖住。GTID 拉流会留下源文件开头的 previous-GTIDs，并跳过任务启动前、仍写在同一个源文件里的事务；这些序号不在分段里，必须已经在集合中。盖不住时是 400，正文 `start_gtid_set has a gap before this task's backed-up range`。备份比保留的 binlog 更老、中间缺了事务时必须拒绝，不能静默跳过。集合与段内事务没有交集、但 `1` 到 `N-1` 已经被盖住时，这是从保留范围的开头续上，仍返回这些分段。
 
 ```json
 {

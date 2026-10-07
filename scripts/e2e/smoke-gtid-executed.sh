@@ -13,8 +13,8 @@ DATA_DIR="${E2E_DATA_DIR:-$ROOT_DIR/tmp/e2e/data}"
 RUN_TAG="$(date +%s)"
 DB="binlog_exec_${RUN_TAG}"
 JUNK="binlog_exec_junk_${RUN_TAG}"
-STAMP=1704067200
-STOP_CLOCK="2024-01-01 00:00:01"
+STAMP=0
+STOP_CLOCK=""
 RESTORE_GTID="binlog-e2e-gtid-exec-gtid"
 RESTORE_TIME="binlog-e2e-gtid-exec-time"
 DUMP=""
@@ -323,6 +323,7 @@ SELECT CONCAT('old\t', @@GLOBAL.gtid_executed);
 INSERT INTO ${JUNK}.t VALUES (2);
 INSERT INTO ${JUNK}.t VALUES (3);
 INSERT INTO ${JUNK}.t VALUES (4);
+FLUSH BINARY LOGS;
 SELECT CONCAT('start\t', @@GLOBAL.gtid_executed);
 ")"
 old_set="$(set_field old "$history")"
@@ -369,6 +370,12 @@ echo "[gtid-executed] dump at $backup_set"
 mysql80 "FLUSH BINARY LOGS;"
 mid_sealed="$(wait_sealed "$task_dir" "$mid_open")"
 echo "[gtid-executed] midpoint sealed $mid_sealed"
+# The segment header is stamped when the file opens. A stop second before that
+# header makes mysqlbinlog stop on the format description and drop the rows.
+base="$(mysql80 "SELECT UNIX_TIMESTAMP();")"
+STAMP=$((base + 120))
+STOP_CLOCK="$(date -u -d "@$((STAMP + 1))" '+%Y-%m-%d %H:%M:%S')"
+echo "[gtid-executed] stop clock $STOP_CLOCK"
 
 dml="$(mysql80_script "
 SET TIMESTAMP=${STAMP};

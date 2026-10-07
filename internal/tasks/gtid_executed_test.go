@@ -144,6 +144,23 @@ func TestExecutedGTIDReplay_GapAndContinuation(t *testing.T) {
 	if _, err := scheduler.ExecutedGTIDReplay("1", gtidPITRUUID+":1-5,"+gtidPITRUUID+":10", gtidPITRUUID+":12", nil); err != ErrStartGTIDSetGap {
 		t.Fatalf("hole %v", err)
 	}
+
+	os.Remove(filepath.Join(taskDir, "mysql-bin.000002"))
+	os.Remove(filepath.Join(taskDir, "mysql-bin.000003"))
+	spliced, _ := executedSegmentAt(t, when, gtidPITRUUID+":1-5", 10, 11, 12)
+	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004"), spliced, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.ExecutedGTIDReplay("1", gtidPITRUUID+":1-7", gtidPITRUUID+":12", nil); err != ErrStartGTIDSetGap {
+		t.Fatalf("previous header hole %v", err)
+	}
+	filled, err := scheduler.ExecutedGTIDReplay("1", gtidPITRUUID+":1-9", gtidPITRUUID+":11", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filled.Paths) != 1 || !strings.Contains(filled.Command, "--exclude-gtids="+gtidPITRUUID+":1-9") {
+		t.Fatalf("filled hole %+v", filled)
+	}
 }
 
 func TestExecutedGTIDReplay_StopDatetimeAndDroppedStopFile(t *testing.T) {

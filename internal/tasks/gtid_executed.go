@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: one restored backup's MySQL executed GTID set, one existing stop (stop_datetime or stop_gtid), and each selected segment's GTID events
-// output: the segments that still contain a transaction the backup does not have, a mysqlbinlog command that skips the executed set, an explanatory note when nothing remains to apply, and plain-text errors for a bad set, a non-mysql flavor, a missing stop, or a gap before the retained range
+// output: the segments that still contain a transaction the backup does not have, a mysqlbinlog command that skips the executed set, an explanatory note when nothing remains to apply, and plain-text errors for a bad set, a non-mysql flavor, a missing stop, or a gap before the retained range including sequences a GTID dump skipped between previous-GTIDs and the first copied event
 // pos: roll forward from a restored full backup to an existing stop, on the same replay selection as stop_datetime and stop_gtid
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -279,9 +279,23 @@ func executedEventInWindow(fileIndex int, ev binlog.GTIDEventRef, hit int, stopP
 func executedGap(executed mysql.GTIDSet, logs []executedFile, first int) error {
 	log := logs[first].log
 	if log.HasPrevious {
-		return executedPreviousCovered(executed, log.Previous)
+		if err := executedPreviousCovered(executed, log.Previous); err != nil {
+			return err
+		}
 	}
+	// A GTID dump keeps the source file's previous-GTIDs and then the first
+	// transaction that was not already executed at task start. The numbers
+	// between that header and the first copied event are not in the segment.
+	// They have to be in the backup set, or in an earlier retained segment.
 	covered := executed.Clone()
+	if log.HasPrevious {
+		text := strings.TrimSpace(log.Previous)
+		if text != "" {
+			if err := covered.Update(text); err != nil {
+				return err
+			}
+		}
+	}
 	for i := 0; i < first; i++ {
 		for _, ev := range logs[i].log.Events {
 			if err := covered.Update(ev.UUID + ":" + strconv.FormatInt(ev.Seq, 10)); err != nil {
@@ -289,8 +303,12 @@ func executedGap(executed mysql.GTIDSet, logs []executedFile, first int) error {
 			}
 		}
 	}
+	return executedPrefixCovered(covered, log.Events)
+}
+
+func executedPrefixCovered(covered mysql.GTIDSet, events []binlog.GTIDEventRef) error {
 	minSeq := map[string]int64{}
-	for _, ev := range log.Events {
+	for _, ev := range events {
 		cur, ok := minSeq[ev.UUID]
 		if !ok || ev.Seq < cur {
 			minSeq[ev.UUID] = ev.Seq
