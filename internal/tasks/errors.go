@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner/source failures and stable operator error codes
-// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, the SOURCE_UNREACHABLE budget predicate, the retry allowlist (SOURCE_UNREACHABLE, transient metadata text, OBJECT_PURGE_FAILED), a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, and SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker
+// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, the SOURCE_UNREACHABLE budget predicate, the retry allowlist (SOURCE_UNREACHABLE, transient metadata text, OBJECT_PURGE_FAILED), a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker, and permanent SOURCE_SWITCHOVER when a VIP reaches a different server and the backup cannot continue
 // pos: shared operator-error types used by scheduler retry policy and source probing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -33,6 +33,9 @@ const (
 	// CodeEpochNotAcquired means a cluster runner was handed epoch 0.
 	// The dump does not start. Start the task again.
 	CodeEpochNotAcquired = "EPOCH_NOT_ACQUIRED"
+	// CodeSourceSwitchover means the task host:port now reaches a different server
+	// and this backup cannot continue without mixing the two binlogs.
+	CodeSourceSwitchover = "SOURCE_SWITCHOVER"
 )
 
 // ErrLeaseHandoff means this runner's lease epoch is no longer the one that owns the task.

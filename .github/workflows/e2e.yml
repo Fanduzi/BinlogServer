@@ -23,6 +23,7 @@ on:
           - epoch-segments
           - gtid-purge
           - gtid-pitr
+          - source-switchover
           - meta-failover
 
 permissions:
@@ -42,7 +43,7 @@ jobs:
           go-package: ./...
 
   unit-and-e2e:
-    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr') }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -366,6 +367,36 @@ jobs:
         if: failure()
         run: |
           cat /tmp/binlog-server-gtid-pitr.log || true
+          docker compose -f deploy/e2e/docker-compose.yml logs || true
+
+      - name: Cleanup
+        if: always()
+        run: ./scripts/e2e/down.sh
+
+  e2e-source-switchover:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'source-switchover' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: E2E VIP Source Switchover Scenario
+        run: |
+          E2E_DIR="./tmp/e2e/data-ci-source-switchover-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          E2E_SERVER_LOG="/tmp/binlog-server-source-switchover.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --scenarios smoke-source-switchover
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          cat /tmp/binlog-server-source-switchover.log || true
           docker compose -f deploy/e2e/docker-compose.yml logs || true
 
       - name: Cleanup

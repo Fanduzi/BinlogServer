@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: temporary data directories with sealed and open binlog segment names
-// output: assertions for disk listing order, standalone positions from SegmentPositions, the files-list projection of an unknown end and a local event span, catalog replay window, replay selection of every sealed segment plus the highest open epoch, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
+// output: assertions for disk listing order, standalone positions from SegmentPositions, the files-list projection of an unknown end and a local event span, catalog replay window, replay selection of every sealed segment plus the highest open epoch, an earlier source ordered before a later source's lower index, catalog fallback, checkpoint absence, standalone restart discovery, and adopt-then-start of a leftover directory
 // pos: regression coverage for standalone files listing when meta has no catalog rows
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -135,6 +135,28 @@ func TestWindowBinlogFilesForReplay_CatalogOrderAndLimit(t *testing.T) {
 	window := WindowBinlogFilesForReplay(files, 2)
 	if len(window) != 2 || window[0].FilePath != want[2] || window[1].FilePath != want[3] {
 		t.Fatalf("window = %s, %s", window[0].FilePath, window[1].FilePath)
+	}
+}
+
+func TestSelectReplayFiles_SwitchOrdersEarlierSourceFirst(t *testing.T) {
+	oldAt := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	newAt := oldAt.Add(time.Hour)
+	const newID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	files := []BinlogFile{
+		{FileName: newID + ".mysql-bin.000001", FilePath: "/data/" + newID + ".mysql-bin.000001", State: "SEALED", CreatedAt: newAt},
+		{FileName: "mysql-bin.000009", FilePath: "/data/mysql-bin.000009", State: "SEALED", CreatedAt: oldAt},
+		{FileName: "mysql-bin.000003", FilePath: "/data/mysql-bin.000003", State: "SEALED", CreatedAt: oldAt},
+		{FileName: newID + ".mysql-bin.000003", FilePath: "/data/" + newID + ".mysql-bin.000003", State: "OPEN", CreatedAt: newAt},
+	}
+	got := SelectReplayFiles(files)
+	want := []string{"mysql-bin.000003", "mysql-bin.000009", newID + ".mysql-bin.000001", newID + ".mysql-bin.000003"}
+	if len(got) != len(want) {
+		t.Fatalf("len %d %+v", len(got), got)
+	}
+	for i, name := range want {
+		if got[i].FileName != name {
+			t.Fatalf("index %d got %s want %s", i, got[i].FileName, name)
+		}
 	}
 }
 

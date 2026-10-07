@@ -182,6 +182,7 @@ curl -fsS -X POST http://127.0.0.1:8080/api/tasks \
 - `cluster_key`: 集群标识，用于元数据分群和 S3 对象路径路由，仅允许 `[A-Za-z0-9._-]`。
 - `source.flavor`: `mysql` 或 `mariadb`。MariaDB 源库必须写 `"flavor":"mariadb"`。保持 `mysql` 会在启动时以 `SOURCE_IDENTITY_UNAVAILABLE` 失败，因为 MariaDB 没有 `@@server_uuid`。
 - `start.mode`: 启动起点，可选 `LATEST`（从源库最新位点）、`FILE_POS`（需提供 `file` 和 `pos`）或 `GTID`（需提供 `gtid_set`）。
+- 任务地址是 VIP、DNS 或代理时，这个地址切到另一台 MySQL 主库后可以继续备份，条件是 GTID 已打开，并且新主库仍持有这份任务已经存下的每一个事务。旧主库的 open 分段会被封存。之后的文件名是 `{server_uuid}.{binlog 文件名}`，两台服务器不会写进同一个文件。`GET /api/tasks/<task-id>/events` 有一条 `SOURCE_SWITCHOVER`，写出两台身份和切换时的 GTID 集合。GTID 链没有缺口时，`GET /api/tasks/<task-id>/window` 仍是连续的。`LATEST`、`FILE_POS`、新主库缺少备份里已有的事务、这些事务已经被 purge，以及 MariaDB，都会停掉任务。`last_error` 以 `SOURCE_SWITCHOVER` 开头，并说明要对新主库新建任务、保留这份备份。再次启动同一条任务也不会把两台服务器混在一起。没有新的迁移。升级后第一次启动会把当时这个地址连上的服务器记成磁盘上已有文件的主人，升级前请确认这个地址仍指向写下这些文件的那台服务器。
 - `storage.retention_days`: 保留天数（有效范围 1..3650 天）。省略 `local_retention_days` 和 `bucket_retention_days` 时，这一个数同时是本地磁盘保留和桶保留。
 - `storage.local_retention_days`: 可选。封存文件留在本地磁盘的天数。`0` 或省略时等于 `retention_days`。
 - `storage.bucket_retention_days`: 可选。已上传对象和目录行留下的天数。`0` 或省略时等于 `retention_days`。必须大于或等于本地保留。只有同时配了上传和 `meta_dsn` 才生效。
@@ -258,6 +259,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 在将生产环境升级至 `v0.5.56` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35`、`v0.5.36`、`v0.5.37`、`v0.5.38`、`v0.5.39`、`v0.5.40`、`v0.5.41`、`v0.5.42`、`v0.5.43`、`v0.5.44`、`v0.5.45`、`v0.5.46`、`v0.5.47`、`v0.5.48`、`v0.5.49`、`v0.5.50`、`v0.5.51`、`v0.5.52`、`v0.5.53`、`v0.5.54` 与 `v0.5.55` 的记录留在下方链接的发布说明里。
 
+- **VIP 换主，没有新迁移：** 任务的 host:port 是 VIP 时，这个地址改指向另一台 MySQL 主库后，只要 GTID 能证明新主库持有这份备份已经存下的每一个事务，任务就继续拉。否则任务以 `SOURCE_SWITCHOVER` 停止。升级后第一次启动把当时这个地址连上的服务器记成已有、未加前缀文件的主人。升级前确认这个地址仍指向写下这些文件的那台服务器。仍然没有新迁移，`minRequiredSchemaVersion` 仍是 6。
 - **schema 6，没有新迁移：** 这一版不是 ADR 0005 的步骤。`minRequiredSchemaVersion` 仍是 6。没有新迁移，也没有新的配置项。`migrations/` 仍是 `000001`、`000002`、`000003`、`000004`、`000005` 和 `000006`。没有 `000007`。已经是 v0.5.55 / schema 6 的库，这次没有 `./migrate`。确认 `schema_migrations` 是 `(6, 0)`，再启动 v0.5.56。v0.5.56 在 schema 5 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.55 的拒绝相同。还不是 schema 6 时，先按 v0.5.55 升级，再启动 v0.5.56。地板仍是 v0.5.51。v0.5.51 是第一版同时带上 ADR 0005 第 6 步和第 7 步的发布。v0.5.50 只发了第 6 步。v0.5.51 和 v0.5.52 仍要求 `uk_task_file_epoch`，schema 6 上拒绝启动。日志含 `missing index` 和 `uk_task_file_epoch`。`./migrate up` 到 6 之前先停掉它们。出事前先看保留链能恢复到哪。`GET /api/tasks/{id}/window` 只读，返回 `earliest`、`latest`、`continuous` 和 `breaks`。v0.5.55 的 `start_gtid_set` 规则仍成立。v0.5.54 的 `stop_gtid` 规则仍成立。v0.5.53 丢掉 `uk_task_file_epoch` 的规则仍成立。旧二进制留在任务目录里的 `.takeover-*`，会在跑这一版的 worker 启动时删掉。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
 - 细节见 [docs/releases/release-notes-v0.5.56.md](docs/releases/release-notes-v0.5.56.md)。
 

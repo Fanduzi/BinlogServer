@@ -424,7 +424,15 @@ sudo systemctl status binlog-server
 
 English: The lease moves to a live worker. The segment directory stays where the dead worker wrote it. That path is `binlog_files.file_path`. There is no new config key and no schema change. If this worker can read that directory, it continues from the last complete event there, keeps one file per source name, and does not open a fresh directory or seal the same file again. If the open segment, or a sealed segment that is not `UPLOADED`, is not readable and the checkpoint is not already inside a sealed `UPLOADED` object, the task stays `FAILED`. `last_error` starts with `SEGMENT_NOT_ON_WORKER` and names the missing path. Mount or copy that path here, then `POST /api/tasks/{id}/start`. A checkpoint already covered by a sealed `UPLOADED` object is read back by the running process, using the upload client already configured for deletes, and continued from its last complete event. The task does not fail only because the local file is gone. Same-host kill -9, adopt, then start still uses this worker's own directory. Retention is unchanged.
 
-#### 3. 远端对象存储抖动导致上传堆积
+#### 3. 任务地址是 VIP，切换后指向了另一台 MySQL
+
+- **能继续：** 源是 MySQL，GTID 已打开，新主库的 `@@gtid_executed` 包含这份任务已经存下的每一个事务，并且新主库多出来、备份还没有的事务仍在 binlog 里，而不只在 `@@gtid_purged`。任务封存旧主库的 open 分段，再用已执行 GTID 集合继续。旧主库的文件名不变。新主库的文件名是 `{server_uuid}.{原文件名}`。对象键里的身份也是写下该文件的那台服务器。`GET /api/tasks/{id}/events` 有一条 `SOURCE_SWITCHOVER`，`message` 写出旧身份、新身份，以及从已执行 GTID 集合继续。`GET /api/tasks/{id}/window` 在 GTID 链没有缺口时 `continuous` 为 true。`stop_datetime` 或 `stop_gtid` 跨过这次切换时，回放命令先列出旧主库的文件，再列出新主库的文件。
+- **必须停下：** 没有 GTID（`LATEST` 或 `FILE_POS`）、新主库缺少备份里已经有的事务、这些事务已经被 purge，或源是 MariaDB。任务变成 `FAILED`。`last_error` 以 `SOURCE_SWITCHOVER` 开头，同时写出两台身份，并说明要对新主库新建任务、保留这份备份。不会把两台服务器的字节写进同一个文件。再次 `POST /api/tasks/{id}/start` 仍是这个错误。
+- **升级：** 没有新迁移，schema 仍是 6。升级后第一次启动把当时这个地址连上的 `server_uuid` 记成磁盘上已有文件的主人。升级前确认 VIP 仍指向写下这些文件的那台服务器。VIP 已经切走时，新建任务，不要让旧任务在新主库上续。
+
+English: A VIP that moves to a new MySQL primary keeps this task copying when GTID shows the new primary still has every stored transaction and has not purged the rest. The old open segment is sealed. New files are named `{server_uuid}.{binlog file}`. One `SOURCE_SWITCHOVER` event names both servers. `GET /window` reports whether the chain is continuous across that point. Without GTID, when the new primary is missing or has purged transactions, or on MariaDB, the task fails with `SOURCE_SWITCHOVER` and does not mix the files. Start a new task and keep this backup. No schema change. Before upgrading, confirm the address still reaches the server that wrote the files on disk.
+
+#### 4. 远端对象存储抖动导致上传堆积
 - **现象：** `binlog_server_upload_failures_total` 指标上涨。
 - **说明：** 本地 binlog 复制流**不受任何影响**，仍在持续写入本地磁盘。
 - **处理：** 待 S3 服务恢复后，调用补传接口重试：
@@ -445,7 +453,7 @@ English: [Replay local segments when the source is gone](#replay-local-segments-
 
 ### 7.1 文件在哪
 
-分段在 `{data_dir}/{task_id}/`。`data_dir` 默认是进程工作目录下的 `./data`，对应环境变量 `BINLOG_SERVER_DATA_DIR`。`task_id` 是创建任务返回的 id，Quick Start 的第一个任务是 `1`。
+分段在 `{data_dir}/{task_id}/`。`data_dir` 默认是进程工作目录下的 `./data`，对应环境变量 `BINLOG_SERVER_DATA_DIR`。`task_id` 是创建任务返回的 id，Quick Start 的第一个任务是 `1`。VIP 换到新主库之后，新主库的文件名是 `{server_uuid}.mysql-bin.NNNNNN`，不会覆盖旧主库的 `mysql-bin.NNNNNN`。回放先放旧主库的文件，再放新主库的文件。
 
 单机模式下目录就在这个进程所在的机器上。集群模式下目录在执行该任务的 worker 本机，不在 control plane 上。
 
@@ -563,7 +571,7 @@ Use this section when the source is gone and the only copy is the files on disk.
 
 ### 8.1 Where the files are
 
-Segments live in `{data_dir}/{task_id}/`. `data_dir` defaults to `./data` under the process working directory (`BINLOG_SERVER_DATA_DIR`). `task_id` is the id returned when the task was created. The first Quick Start task is `1`.
+Segments live in `{data_dir}/{task_id}/`. `data_dir` defaults to `./data` under the process working directory (`BINLOG_SERVER_DATA_DIR`). `task_id` is the id returned when the task was created. The first Quick Start task is `1`. After a VIP moves to a new primary, that server's files are named `{server_uuid}.mysql-bin.NNNNNN` and do not replace the old server's `mysql-bin.NNNNNN`. Replay lists the old server's files first.
 
 On a standalone process the directory is on that machine. In cluster mode it is on the worker that is running the task, not on the control plane.
 
