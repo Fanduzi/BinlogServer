@@ -277,6 +277,47 @@ func TestRecoveryWindow_OpenSegmentIsNotADurabilityBreak(t *testing.T) {
 	}
 }
 
+func TestRecoveryWindow_MidFileStartIsContinuous(t *testing.T) {
+	dir := t.TempDir()
+	scheduler := NewScheduler(WithDataDir(dir))
+	if _, err := scheduler.CreateTaskFromSpec("mysql", "mysql-key", &SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "secret", Flavor: "mysql"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	when := clock(t, "2024-01-01 07:00:00")
+	// The first retained file is a source file the task joined in the middle.
+	// Its previous-GTIDs header is from the start of that file, and the first
+	// stored event skips the transactions that committed before capture.
+	writeWindowSegment(t, filepath.Join(taskDir, "mysql-bin.000003"), when, gtidPITRUUID+":1-27", 30)
+	writeWindowSegment(t, filepath.Join(taskDir, "mysql-bin.000004"), when.Add(time.Second), gtidPITRUUID+":1-30", 31)
+	writeWindowSegment(t, filepath.Join(taskDir, "mysql-bin.000005"), when.Add(2*time.Second), gtidPITRUUID+":1-31", 32)
+
+	got, err := scheduler.RecoveryWindow("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Continuous || len(got.Breaks) != 0 {
+		t.Fatalf("mid-file start %+v", got)
+	}
+	if !gtidContains(t, got.GTIDSet, gtidPITRUUID+":30-32") || gtidContains(t, got.GTIDSet, gtidPITRUUID+":29") {
+		t.Fatalf("gtid_set %s", got.GTIDSet)
+	}
+
+	if err := os.Remove(filepath.Join(taskDir, "mysql-bin.000004")); err != nil {
+		t.Fatal(err)
+	}
+	broken, err := scheduler.RecoveryWindow("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken.Continuous || !breakMentions(broken, "missing source file mysql-bin.000004") || !breakMentions(broken, "gtid hole between mysql-bin.000003 and mysql-bin.000005") {
+		t.Fatalf("removed middle %+v", broken)
+	}
+}
+
 func TestRecoveryWindow_MissingTask(t *testing.T) {
 	scheduler := NewScheduler()
 	if _, err := scheduler.RecoveryWindow("missing"); !errorsIsNotFound(err) {
