@@ -10,7 +10,7 @@
 | `useTaskFilter.js` | 任务状态（服务端/全局）与当前页复制状态筛选、排序和 server 分页查询参数 |
 | `useFormatters.js` | 状态、lease、复制信息和时间格式化；checkpoint 显示 `file:pos`，有 `gtid_set` 时再加 GTID；列表租约风险只用任务上的主人/epoch 抄本 |
 | `useSourceLookup.js` | source host/port 查询状态 |
-| `useTaskDetail.js` | 任务详情抽屉数据加载；单任务查询仍打 GET `/lease`，并加载 `GET /api/tasks/{id}/replay`。导出 `taskDetailInventoryLimit`（80），文件表、回放命令和回放集 tar 用同一个窗口 |
+| `useTaskDetail.js` | 任务详情抽屉数据加载；单任务查询仍打 GET `/lease`，并加载 `GET /api/tasks/{id}/replay` 和 `GET /api/tasks/{id}/window`。导出 `taskDetailInventoryLimit`（80），文件表、回放命令和回放集 tar 用同一个窗口；可恢复窗口读整条保留链 |
 | `useTaskForm.js` / `useBatchCreate.js` | 单任务/批量创建表单状态与动作。遗留目录（空 `cluster_key` 且没有 source host/user）走 `POST /api/tasks/{id}/adopt`，不启动复制；目录任务编辑仍走 `PUT`。`local_retention_days` 与 `bucket_retention_days` 为 0 时不提交，表示等于 `retention_days`；桶短于本地则表单拒绝。批量预览最多 100 个有效行，提交使用一次 `/api/tasks/batch` 请求 |
 | `useAuth.js` / `useWindowState.js` | 认证提示与响应式窗口状态 |
 

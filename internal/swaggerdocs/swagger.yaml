@@ -377,6 +377,30 @@ definitions:
           type: string
         type: array
     type: object
+  tasks.RecoveryBreak:
+    properties:
+      files:
+        items:
+          type: string
+        type: array
+      reason:
+        type: string
+    type: object
+  tasks.RecoveryWindow:
+    properties:
+      breaks:
+        items:
+          $ref: '#/definitions/tasks.RecoveryBreak'
+        type: array
+      continuous:
+        type: boolean
+      earliest:
+        type: string
+      gtid_set:
+        type: string
+      latest:
+        type: string
+    type: object
   tasks.SourceConfig:
     properties:
       flavor:
@@ -1372,6 +1396,41 @@ paths:
           schema:
             type: string
       summary: Aggregate upload failure reasons
+      tags:
+      - Tasks
+  /api/tasks/{id}/window:
+    get:
+      description: Read-only view of the retained chain. earliest and latest are UTC
+        event-header times (RFC3339), omitted when the chain has no timed event. gtid_set
+        is present for a mysql task and is the transactions stored in the chain. continuous
+        is true when breaks is empty. A break names the files involved. Reasons cover
+        a missing source file index between two retained segments, a sealed segment
+        that is UPLOAD_FAILED or LOCAL_ONLY when object storage is configured, checksum
+        mismatch, a segment whose bytes are not on this process, and, for mysql, a
+        GTID hole between one segment and the next. An open segment is not a durability
+        break. Replay routes are unchanged.
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/tasks.RecoveryWindow'
+        "404":
+          description: task not found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      summary: Recoverable window for one task
       tags:
       - Tasks
   /api/tasks/batch:

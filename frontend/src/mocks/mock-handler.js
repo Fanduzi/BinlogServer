@@ -1,5 +1,5 @@
 // input: mock scenario name plus normalized API request method/path/query/body tuples
-// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, per-task resume checkpoints, GET /api/tasks/{id}/replay one path per source index, the same route with stop_datetime returning a UTC point-in-time command, the same route with stop_gtid returning a stop-position command, the same route with start_gtid_set returning an exclude-gtids command, GET /api/tasks/{id}/replay/archive those basenames, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
+// output: deterministic mock API responses including batch task results, numeric-id-ordered dashboard pagination/filter validation, lookup/dashboard SameSourceHost filtering (same accept/reject set as Go ParseIP loopback), single-process overview when the only owner is standalone and workers are empty, independent STARTING counters, per-task resume checkpoints, GET /api/tasks/{id}/window a continuous recoverable span, GET /api/tasks/{id}/replay one path per source index, the same route with stop_datetime returning a UTC point-in-time command, the same route with stop_gtid returning a stop-position command, the same route with start_gtid_set returning an exclude-gtids command, GET /api/tasks/{id}/replay/archive those basenames, GET /api/tasks/{id}/files/{name} for one inventory basename, and POST adopt of a leftover directory for frontend dev mode and Playwright route interception
 // pos: shared frontend mock request handler between api.js and test route adapters
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -1095,6 +1095,22 @@ export function handleMockRequest(input) {
   const eventsMatch = path.match(/^\/api\/tasks\/([^/]+)\/events$/);
   if (eventsMatch && method === "GET") {
     return ok(deepClone(state.eventsByID[eventsMatch[1]] || []));
+  }
+
+  const windowMatch = path.match(/^\/api\/tasks\/([^/]+)\/window$/);
+  if (windowMatch && method === "GET") {
+    const id = windowMatch[1];
+    const task = state.detailsByID[id];
+    if (!task) return { status: 404, body: "task not found", contentType: "text/plain" };
+    const flavor = String(task.source?.flavor || "");
+    const body = {
+      continuous: true,
+      earliest: "2024-01-01T00:30:00Z",
+      latest: "2024-01-01T02:30:00Z",
+      breaks: [],
+    };
+    if (flavor === "mysql") body.gtid_set = `${fixtureGTIDUUID}:1-8`;
+    return ok(body);
   }
 
   const filesMatch = path.match(/^\/api\/tasks\/([^/]+)\/files$/);

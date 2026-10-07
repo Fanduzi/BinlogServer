@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: internal/ui/static/index.html, the JS bundle graph it loads, and PITR markers in frontend/src
-# output: non-zero exit when a loaded Console bundle is not valid ESM, or when a frontend/src PITR marker is missing from that graph
+# output: non-zero exit when a loaded Console bundle is not valid ESM, or when a frontend/src PITR or recoverable-window marker is missing from that graph
 # pos: release gate for the JS that Chrome loads from /ui/; CI and the tag workflow both run this before publish
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -87,6 +87,8 @@ const bundle = rels.map((rel) => fs.readFileSync(path.join(staticDir, rel), "utf
 // stop_datetime / start_datetime / stop_gtid / start_gtid_set are the query keys in api.js.
 // 停止时间, 停止 GTID, and 已执行 GTID are the zh-CN labels.
 const markers = [
+  { text: '"task-recovery-window"', source: "frontend/src/components/TaskDetailDrawer.vue" },
+  { text: "这条备份链有缺口", source: "frontend/src/locales/zh-CN.json" },
   { text: '"task-pitr"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: '"task-pitr-stop"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: '"task-pitr-gtid"', source: "frontend/src/components/TaskDetailDrawer.vue" },

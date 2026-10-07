@@ -248,6 +248,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
     "http://localhost:8080/api/tasks/<task-id>/replay/archive?limit=200"
   tar -xf "task-<task-id>-replay.tar"
   ```
+- 出事前先看这条任务现在能恢复到哪。`GET /api/tasks/<task-id>/window` 只读。`earliest` 和 `latest` 是保留链上的 UTC 事件时间；没有可恢复事件时是 `null`。`continuous` 为 true 表示这条链没有缺口。`breaks` 里每一项写出涉及的 `files` 和一句英文 `reason`：两段保留分段之间缺了源文件、校验和 `mismatch`、配了对象存储时封存分段还不是 `UPLOADED`（`UPLOAD_FAILED` 或 `LOCAL_ONLY`）、分段读不到，或两段 MySQL GTID 之间有洞。任务从源文件中部接入时，第一件已捕获事务之前的序号不是洞。有 `gtid_set` 时，它是这条链里实际存下的 MySQL 事务。连续窗口里的一个时刻可以作为 `stop_datetime` 交给 `GET /api/tasks/<task-id>/replay`，得到一条命令。停在 `earliest` 或更早会得到空命令，因为 `--stop-datetime` 不含这个时刻。即使 replay 仍返回它看得到的分段，缺口也留在 `breaks` 里。`binlog_server_recovery_breaks{task_id}` 是缺口个数。`binlog_server_recovery_earliest_age_seconds{task_id}` 是 `earliest` 距离现在的秒数。Console 任务详情显示同一段窗口，链有缺口时给出警告。
 
 生产部署请直接参考 [`config.production.example.yaml`](config.production.example.yaml)。
 

@@ -1,6 +1,6 @@
 <!--
 input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, replay-set tar download, a point-in-time replay command, a stop_gtid replay command, forms, and settings
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, replay-set tar download, a recoverable window, a point-in-time replay command, a stop_gtid replay command, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -356,6 +356,7 @@ note: if this file changes, update this header and frontend/README.md.
       :checkpoint="checkpoint"
       :files="files"
       :replay="replay"
+      :recovery="recovery"
       :runs-limited="detailRunsLimited"
       :events="events"
       :run-history-limit="runHistoryLimit"
@@ -523,7 +524,7 @@ const {
 
 const {
   detailVisible, detailTask, detailReplication, detailLease,
-  detailRuns, runHistoryLimit, checkpoint, events, files, replay,
+  detailRuns, runHistoryLimit, checkpoint, events, files, replay, recovery,
   showDetail,
 } = useTaskDetail();
 
@@ -1758,6 +1759,21 @@ h1 {
   display: flex;
   justify-content: flex-end;
   margin-bottom: 10px;
+}
+
+.recovery-window {
+  margin-bottom: 12px;
+}
+
+.recovery-range {
+  margin: 0 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.recovery-breaks {
+  margin: 6px 0 0;
+  padding-left: 18px;
 }
 
 .replay-set {
