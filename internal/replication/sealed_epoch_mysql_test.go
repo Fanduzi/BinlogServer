@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: BINLOG_TEST_META_DSN pointing at a migrated metadata database, and the same sealed-epoch dump used by the in-memory issue 189 tests
-// output: two binlog_files rows for one source name at epoch 0 and epoch 1, with start_pos and end_pos taken from the events in each sealed file
+// output: two binlog_files rows for one source name at epoch 0 and epoch 1, with start_pos and end_pos taken from the events in each sealed file and upload_state UPLOADED
 // pos: real-MySQL proof that the catalog writer keeps the v0.5.49 failover positions when the segment key is (task_id, source_file, epoch)
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -22,8 +22,8 @@ import (
 
 // TestIssue189_SealedEpochsOnMySQL seals one source file as epoch 0 and epoch 1
 // through MySQLTaskStore. Unit tests skip it. The migration e2e sets
-// BINLOG_TEST_META_DSN to a schema 5 database and then lists the rows with
-// GET /api/tasks/{id}/files.
+// BINLOG_TEST_META_DSN to a schema 6 database and then lists the rows with
+// GET /api/tasks/{id}/files. The segment key is uk_task_source_epoch.
 func TestIssue189_SealedEpochsOnMySQL(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("BINLOG_TEST_META_DSN"))
 	if dsn == "" {
@@ -86,6 +86,9 @@ func TestIssue189_SealedEpochsOnMySQL(t *testing.T) {
 	}
 	if epoch1.State != "SEALED" || epoch1.StartPos != 4 || uint32(epoch1.EndPos) != epoch1End {
 		t.Fatalf("epoch 1 %+v, want SEALED 4..%d", epoch1, epoch1End)
+	}
+	if epoch0.UploadState != "UPLOADED" || epoch1.UploadState != "UPLOADED" {
+		t.Fatalf("upload epoch0=%s epoch1=%s", epoch0.UploadState, epoch1.UploadState)
 	}
 	if epoch0.EndPos == epoch1.EndPos {
 		t.Fatalf("epoch ends are equal (%d); epoch 1 must keep its own span", epoch0.EndPos)

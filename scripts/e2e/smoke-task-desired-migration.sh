@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# input: meta-primary MySQL, a MySQL 8 server, migrations through 000005, and the current binlog-server binary
-# output: proof that 000003 and 000004 still land on schema 4, 000005 backfills source_file and adds uk_task_source_epoch without changing positions or deleting rows, the current binary starts on schema 5 and refuses schema 4, and down from 5 returns to 4 with the binlog_files count unchanged
-# pos: acceptance check for the task-desired migrations and ADR 0005 step 6 on a real metadata database
+# input: meta-primary MySQL, a MySQL 8 server, migrations through 000006, the current binlog-server binary, and the published v0.5.49 and v0.5.52 binaries
+# output: proof that 000005 still adds both unique keys, the current binary refuses schema 5, 000006 drops uk_task_file_epoch without deleting rows, the current binary starts on schema 6 and seals a task, v0.5.52 refuses schema 6 with missing index uk_task_file_epoch, and down restores that index with the binlog_files count unchanged
+# pos: acceptance check for ADR 0005 step 9 on a real metadata database
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -246,16 +246,17 @@ expect_refuse() {
   fi
 }
 
-download_v0549() {
-  local dest="/tmp/binlog-server-v0.5.49-linux-amd64"
-  local archive="/tmp/binlog-server_0.5.49_linux_amd64.tar.gz"
+download_release() {
+  local ver="$1"
+  local dest="/tmp/binlog-server-v${ver}-linux-amd64"
+  local archive="/tmp/binlog-server_${ver}_linux_amd64.tar.gz"
   if [[ -x "$dest/binlog-server" ]]; then
     printf '%s\n' "$dest/binlog-server"
     return 0
   fi
   rm -rf "$dest"
   mkdir -p "$dest"
-  curl -fsSL -o "$archive" "https://github.com/Fanduzi/BinlogServer/releases/download/v0.5.49/binlog-server_0.5.49_linux_amd64.tar.gz"
+  curl -fsSL -o "$archive" "https://github.com/Fanduzi/BinlogServer/releases/download/v${ver}/binlog-server_${ver}_linux_amd64.tar.gz"
   tar -xzf "$archive" -C "$dest" --strip-components=1
   if [[ ! -x "$dest/binlog-server" ]]; then
     chmod +x "$dest/binlog-server"
@@ -263,8 +264,118 @@ download_v0549() {
   printf '%s\n' "$dest/binlog-server"
 }
 
-if ! grep -q 'const minRequiredSchemaVersion int64 = 5' "$ROOT_DIR/internal/meta/mysql_store.go"; then
-  fail "minRequiredSchemaVersion must be 5"
+assert_schema6_catalog() {
+  local label="$1" service="$2" db="$3" before_count="$4"
+  local version count indexes show_index file_col dup_err
+  version="$(service_one "$service" "$db" "SELECT version, dirty FROM schema_migrations")"
+  if [[ "$version" != "60" ]]; then
+    fail "$label schema_migrations after 000006: [$version] want 6 0"
+  fi
+  count="$(service_one "$service" "$db" "SELECT COUNT(*) FROM binlog_files")"
+  if [[ "$count" != "$before_count" ]]; then
+    fail "$label 000006 changed binlog_files count $before_count -> $count"
+  fi
+  file_col="$(service_one "$service" "$db" "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_files' AND COLUMN_NAME = 'file_name'")"
+  if [[ "$file_col" != "1" ]]; then
+    fail "$label file_name column count $file_col"
+  fi
+  indexes="$(service_sql "$service" "$db" "SELECT INDEX_NAME, NON_UNIQUE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_files' AND INDEX_NAME IN ('uk_task_file_epoch','uk_task_source_epoch') GROUP BY INDEX_NAME, NON_UNIQUE ORDER BY INDEX_NAME")"
+  if [[ "$indexes" != $'uk_task_source_epoch\t0' ]]; then
+    printf '%s indexes:\n%s\n' "$label" "$indexes" >&2
+    fail "$label SHOW-equivalent indexes are not only uk_task_source_epoch"
+  fi
+  show_index="$(service_sql "$service" "$db" "SHOW INDEX FROM binlog_files")"
+  if printf '%s\n' "$show_index" | awk -F'\t' '$3=="uk_task_file_epoch" { found=1 } END { exit found ? 0 : 1 }'; then
+    printf '%s SHOW INDEX:\n%s\n' "$label" "$show_index" >&2
+    fail "$label SHOW INDEX still has uk_task_file_epoch"
+  fi
+  if ! printf '%s\n' "$show_index" | awk -F'\t' '$3=="uk_task_source_epoch" && $2=="0" { found=1 } END { exit found ? 0 : 1 }'; then
+    printf '%s SHOW INDEX:\n%s\n' "$label" "$show_index" >&2
+    fail "$label SHOW INDEX missing uk_task_source_epoch"
+  fi
+  dup_err="$(mktemp)"
+  if compose_mysql "$service" "$db" -e "INSERT INTO binlog_files (task_id, file_name, source_file, file_path, epoch, state, size_bytes, start_pos, end_pos, created_at, sealed_at, upload_state) VALUES ('seg-plain', 'mysql-bin.OTHER', 'mysql-bin.000001', '/data/other', 0, 'SEALED', 1, 4, 9, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 'LOCAL_ONLY')" >"$dup_err" 2>&1; then
+    cat "$dup_err" >&2
+    rm -f "$dup_err"
+    fail "$label duplicate (task_id, source_file, epoch) insert succeeded"
+  fi
+  if ! grep -Eq 'Duplicate entry|ERROR 1062' "$dup_err"; then
+    cat "$dup_err" >&2
+    rm -f "$dup_err"
+    fail "$label duplicate insert was not a duplicate key"
+  fi
+  rm -f "$dup_err"
+  count="$(service_one "$service" "$db" "SELECT COUNT(*) FROM binlog_files")"
+  if [[ "$count" != "$before_count" ]]; then
+    fail "$label duplicate insert changed count $before_count -> $count"
+  fi
+}
+
+assert_file_epoch_restored() {
+  local label="$1" service="$2" db="$3" before_count="$4"
+  local version count indexes file_col
+  version="$(service_one "$service" "$db" "SELECT version, dirty FROM schema_migrations")"
+  if [[ "$version" != "50" ]]; then
+    fail "$label schema_migrations after down 000006: [$version] want 5 0"
+  fi
+  count="$(service_one "$service" "$db" "SELECT COUNT(*) FROM binlog_files")"
+  if [[ "$count" != "$before_count" ]]; then
+    fail "$label down 000006 changed binlog_files count $before_count -> $count"
+  fi
+  file_col="$(service_one "$service" "$db" "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_files' AND COLUMN_NAME = 'file_name'")"
+  if [[ "$file_col" != "1" ]]; then
+    fail "$label down dropped file_name"
+  fi
+  indexes="$(service_sql "$service" "$db" "SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_files' AND INDEX_NAME IN ('uk_task_file_epoch','uk_task_source_epoch') GROUP BY INDEX_NAME ORDER BY INDEX_NAME")"
+  if [[ "$indexes" != $'uk_task_file_epoch\nuk_task_source_epoch' ]]; then
+    printf '%s indexes after down 000006:\n%s\n' "$label" "$indexes" >&2
+    fail "$label down did not restore uk_task_file_epoch"
+  fi
+}
+
+expect_missing_file_epoch() {
+  local bin="$1" dsn="$2" data_dir="$3" log="$4" label="$5"
+  local refused=0 rc=0
+  mkdir -p "$data_dir"
+  : >"$log"
+  BINLOG_SERVER_DATA_DIR="$data_dir" \
+  BINLOG_SERVER_META_DSN="$dsn" \
+  BINLOG_SERVER_MODE=cluster \
+  BINLOG_SERVER_CLUSTER_ROLE=control-plane \
+    nohup "$bin" --config "$ROOT_DIR/deploy/e2e/config.yaml" >"$log" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+      refused=1
+      break
+    fi
+    if curl -fsS "$API/healthz" >/dev/null 2>&1; then
+      fail "$label passed healthz"
+    fi
+    sleep 1
+  done
+  if [[ "$refused" != "1" ]]; then
+    kill_server
+    cat "$log" >&2 || true
+    fail "$label process still running"
+  fi
+  set +e
+  wait "$SERVER_PID"
+  rc=$?
+  set -e
+  SERVER_PID=""
+  if [[ "$rc" != "1" ]]; then
+    cat "$log" >&2 || true
+    fail "$label exit $rc, want 1"
+  fi
+  if ! grep -q 'missing index' "$log" || ! grep -q 'uk_task_file_epoch' "$log"; then
+    cat "$log" >&2 || true
+    fail "$label log missing index uk_task_file_epoch"
+  fi
+}
+
+if ! grep -q 'const minRequiredSchemaVersion int64 = 6' "$ROOT_DIR/internal/meta/mysql_store.go"; then
+  fail "minRequiredSchemaVersion must be 6"
 fi
 
 echo "[task-desired] scratch database $SCRATCH_DB"
@@ -370,17 +481,36 @@ if [[ "$positions_before" != $'seg-empty:1:4:0\nseg-epoch:2:4:543\nseg-null:0:4:
   fail "binlog seed positions"
 fi
 
-echo "[task-desired] migrate up 000005 on Percona 5.7"
+echo "[task-desired] goto 5 on Percona 5.7"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate goto 5
+)
+assert_schema5_catalog percona meta-primary "$SCRATCH_DB" "$files_before_000005" "$positions_before"
+
+echo "[task-desired] current binary must refuse schema 5"
+expect_refuse "$SCRATCH_DSN" "${DATA_DIR}-schema5" "${SERVER_LOG}.schema5" "schema 5"
+
+echo "[task-desired] migrate up 000006 on Percona 5.7"
+files_before_000006="$(sql_one "SELECT COUNT(*) FROM binlog_files")"
 (
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate up
 )
-assert_schema5_catalog percona meta-primary "$SCRATCH_DB" "$files_before_000005" "$positions_before"
+assert_schema6_catalog percona meta-primary "$SCRATCH_DB" "$files_before_000006"
 
-echo "[task-desired] start current binary against schema 5"
+echo "[task-desired] start current binary against schema 6"
 start_current "$SCRATCH_DSN" "$DATA_DIR" "$SERVER_LOG"
-wait_healthz "$SERVER_LOG" "schema 5"
+wait_healthz "$SERVER_LOG" "schema 6"
 kill_server
+
+echo "[task-desired] down 000006; uk_task_file_epoch returns and binlog_files count stays"
+files_before_down006="$(sql_one "SELECT COUNT(*) FROM binlog_files")"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
+)
+assert_file_epoch_restored percona meta-primary "$SCRATCH_DB" "$files_before_down006"
 
 echo "[task-desired] down 000005; binlog_files count stays"
 files_before_down005="$(sql_one "SELECT COUNT(*) FROM binlog_files")"
@@ -448,7 +578,7 @@ meta_exec -e "DROP DATABASE IF EXISTS ${SCRATCH_DB};" >/dev/null
 MYSQL80_DB="binlog_meta_m000005"
 MYSQL80_PORT="${E2E_MYSQL80_PORT:-13307}"
 MYSQL80_DSN="root:root@tcp(127.0.0.1:${MYSQL80_PORT})/${MYSQL80_DB}?parseTime=true"
-echo "[task-desired] MySQL 8 schema-4 seed then 000005"
+echo "[task-desired] MySQL 8 schema-4 seed then 000005 and 000006"
 compose_mysql mysql80 -e "DROP DATABASE IF EXISTS ${MYSQL80_DB}; CREATE DATABASE ${MYSQL80_DB} DEFAULT CHARACTER SET utf8mb4;"
 (
   cd "$ROOT_DIR"
@@ -463,33 +593,12 @@ if [[ "$mysql80_before" != "4" || "$mysql80_positions" != "$positions_before" ]]
 fi
 (
   cd "$ROOT_DIR"
-  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate up
+  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate goto 5
 )
 assert_schema5_catalog mysql80 mysql80 "$MYSQL80_DB" "$mysql80_before" "$mysql80_positions"
 
-echo "[task-desired] seal epoch 0 and epoch 1 through MySQLTaskStore"
-(
-  cd "$ROOT_DIR"
-  BINLOG_TEST_META_DSN="$MYSQL80_DSN" go test -count=1 -timeout 300s -run 'TestIssue189_SealedEpochsOnMySQL$' ./internal/replication/
-)
-
-echo "[task-desired] current binary on MySQL 8 schema 5 lists both epochs"
-MYSQL80_DATA="${DATA_DIR}-mysql80"
-MYSQL80_LOG="${SERVER_LOG}.mysql80"
-start_current "$MYSQL80_DSN" "$MYSQL80_DATA" "$MYSQL80_LOG"
-wait_healthz "$MYSQL80_LOG" "mysql80 schema 5"
-files_json="$(curl -fsS "$API/api/tasks/task-1/files")"
-printf '%s\n' "$files_json" | jq -e '
-  ([.[] | select(.file_name=="mysql-bin.000009")] | length) == 2
-  and ([.[] | select(.file_name=="mysql-bin.000009" and ((.epoch // 0) == 0) and .start_pos == 4 and .end_pos > 0 and .state == "SEALED")] | length) == 1
-  and ([.[] | select(.file_name=="mysql-bin.000009" and .epoch == 1 and .start_pos == 4 and .end_pos > 0 and .state == "SEALED")] | length) == 1
-  and (([.[] | select(.file_name=="mysql-bin.000009") | .end_pos] | unique | length) == 2)
-' >/dev/null
-printf '%s\n' "$files_json" | jq -r '.[] | select(.file_name=="mysql-bin.000009") | "\(.epoch // 0) \(.start_pos) \(.end_pos) \(.state)"'
-kill_server
-
 echo "[task-desired] v0.5.49 still starts on schema 5"
-V0549_BIN="$(download_v0549)"
+V0549_BIN="$(download_release 0.5.49)"
 V0549_LOG="${SERVER_LOG}.v0549"
 V0549_DATA="${DATA_DIR}-v0549"
 mkdir -p "$V0549_DATA"
@@ -503,6 +612,46 @@ SERVER_PID=$!
 wait_healthz "$V0549_LOG" "v0.5.49 schema 5"
 kill_server
 
+echo "[task-desired] migrate up 000006 on MySQL 8"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate up
+)
+assert_schema6_catalog mysql80 mysql80 "$MYSQL80_DB" "$mysql80_before"
+
+echo "[task-desired] seal, enroll, and upload epoch 0 and epoch 1 on schema 6"
+(
+  cd "$ROOT_DIR"
+  BINLOG_TEST_META_DSN="$MYSQL80_DSN" go test -count=1 -timeout 300s -run 'TestIssue189_SealedEpochsOnMySQL$' ./internal/replication/
+)
+
+echo "[task-desired] current binary on MySQL 8 schema 6 lists both epochs"
+MYSQL80_DATA="${DATA_DIR}-mysql80"
+MYSQL80_LOG="${SERVER_LOG}.mysql80"
+start_current "$MYSQL80_DSN" "$MYSQL80_DATA" "$MYSQL80_LOG"
+wait_healthz "$MYSQL80_LOG" "mysql80 schema 6"
+files_json="$(curl -fsS "$API/api/tasks/task-1/files")"
+printf '%s\n' "$files_json" | jq -e '
+  ([.[] | select(.file_name=="mysql-bin.000009")] | length) == 2
+  and ([.[] | select(.file_name=="mysql-bin.000009" and ((.epoch // 0) == 0) and .start_pos == 4 and .end_pos > 0 and .state == "SEALED")] | length) == 1
+  and ([.[] | select(.file_name=="mysql-bin.000009" and .epoch == 1 and .start_pos == 4 and .end_pos > 0 and .state == "SEALED")] | length) == 1
+  and ([.[] | select(.file_name=="mysql-bin.000009" and .upload_state == "UPLOADED")] | length) == 2
+  and (([.[] | select(.file_name=="mysql-bin.000009") | .end_pos] | unique | length) == 2)
+' >/dev/null
+printf '%s\n' "$files_json" | jq -r '.[] | select(.file_name=="mysql-bin.000009") | "\(.epoch // 0) \(.start_pos) \(.end_pos) \(.state)"'
+kill_server
+
+echo "[task-desired] v0.5.52 refuses schema 6 with missing index uk_task_file_epoch"
+V0552_BIN="$(download_release 0.5.52)"
+expect_missing_file_epoch "$V0552_BIN" "$MYSQL80_DSN" "${DATA_DIR}-v0552" "${SERVER_LOG}.v0552" "v0.5.52 schema 6"
+
+mysql80_before_down006="$(service_one mysql80 "$MYSQL80_DB" "SELECT COUNT(*) FROM binlog_files")"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate down --steps 1
+)
+assert_file_epoch_restored mysql80 mysql80 "$MYSQL80_DB" "$mysql80_before_down006"
+
 mysql80_before_down="$(service_one mysql80 "$MYSQL80_DB" "SELECT COUNT(*) FROM binlog_files")"
 (
   cd "$ROOT_DIR"
@@ -514,4 +663,4 @@ echo "[task-desired] current binary must refuse MySQL 8 schema 4"
 expect_refuse "$MYSQL80_DSN" "${DATA_DIR}-mysql80-schema4" "${SERVER_LOG}.mysql80.schema4" "mysql80 schema 4"
 
 compose_mysql mysql80 -e "DROP DATABASE IF EXISTS ${MYSQL80_DB};" >/dev/null
-echo "[task-desired] success: 000005 backfill on Percona 5.7 and MySQL 8, both unique keys, healthz on schema 5, v0.5.49 healthz on schema 5, refuse schema 4, down keeps rows"
+echo "[task-desired] success: 000006 drops uk_task_file_epoch on Percona 5.7 and MySQL 8, schema 6 healthz, seal and files API, v0.5.49 healthz on schema 5, v0.5.52 missing index on schema 6, down keeps rows"

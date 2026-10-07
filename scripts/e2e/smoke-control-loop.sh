@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: mysql57 source, a scratch metadata database, and the current binlog-server binary
-# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, a held proxy path where Stop then Start never has two Binlog Dumps and ends with pending cleared and dumps=1, a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile, schema 4 still has pending_dump_cleanup after dropping 000005, and schema 3 (column absent) is refused by this binary with schema version too old and ./migrate up
+# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, a held proxy path where Stop then Start never has two Binlog Dumps and ends with pending cleared and dumps=1, a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile, dropping 000006 restores uk_task_file_epoch on schema 5, schema 4 still has pending_dump_cleanup after dropping 000005, and schema 3 (column absent) is refused by this binary with schema version too old and ./migrate up
 # pos: acceptance check for the desired-run control loop, issue 193, issue 249, issue 252, and the spec_revision=0 upgrade reconcile
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -641,12 +641,29 @@ fi
 
 echo "[control-loop] upgraded RUNNING task stayed running"
 
-# Schema 5 includes pending_dump_cleanup. Dropping 000005 returns to schema 4
-# and keeps that column. One more down reaches schema 3, where the column is
-# gone. This binary requires schema 5, so it refuses schema 3 instead of
-# keeping a process-local marker.
+# Schema 6 drops uk_task_file_epoch. One down restores that index and stays on
+# schema 5, which still has pending_dump_cleanup. Dropping 000005 returns to
+# schema 4 and keeps that column. One more down reaches schema 3, where the
+# column is gone. This binary requires schema 6, so it refuses schema 3.
 kill_pid "$ALL_PID"
 ALL_PID=""
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
+)
+SCHEMA="$(meta_exec "SELECT version, dirty FROM schema_migrations")"
+SCHEMA="$(printf '%s' "$SCHEMA" | tr -d '[:space:]')"
+if [[ "$SCHEMA" != "50" ]]; then
+  echo "schema after dropping 000006: [$SCHEMA] want 5 0" >&2
+  exit 1
+fi
+FILE_EPOCH="$(meta_exec "SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_files' AND INDEX_NAME = 'uk_task_file_epoch'")"
+SOURCE_EPOCH="$(meta_exec "SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_files' AND INDEX_NAME = 'uk_task_source_epoch'")"
+if [[ "$FILE_EPOCH" == "0" || "$SOURCE_EPOCH" == "0" ]]; then
+  echo "schema 5 indexes file_epoch=$FILE_EPOCH source_epoch=$SOURCE_EPOCH" >&2
+  exit 1
+fi
+echo "[control-loop] schema 5 restored uk_task_file_epoch"
 (
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
@@ -722,4 +739,4 @@ if ! grep -q 'schema version too old' "$ALL_LOG" || ! grep -q '\./migrate up' "$
   cat "$ALL_LOG" >&2 || true
   exit 1
 fi
-echo "[control-loop] schema 3 refused; this binary requires schema 5"
+echo "[control-loop] schema 3 refused; this binary requires schema 6"

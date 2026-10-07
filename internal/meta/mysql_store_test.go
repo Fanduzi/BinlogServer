@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, an unknown end_pos bound as NULL without assigning end_pos, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, the legacy desired_run reconcile update, and source_json password encryption
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, an unknown end_pos bound as NULL without assigning end_pos, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, the legacy desired_run reconcile update, source_json password encryption, schema 5 refusal that names ./migrate up, schema 6 acceptance without uk_task_file_epoch, and the pre-step-9 index list refusing schema 6 with missing index uk_task_file_epoch
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -10,6 +10,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -1459,6 +1460,95 @@ func expectSchemaCheckQueries(
 }
 
 func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
+	for _, version := range []int64{4, 5} {
+		t.Run(fmt.Sprintf("schema%d", version), func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New returned error: %v", err)
+			}
+			defer db.Close()
+
+			store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+			mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
+				WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(version, false))
+
+			err = store.ensureSchema(context.Background())
+			if err == nil {
+				t.Fatal("expected schema version error")
+			}
+			if !strings.Contains(err.Error(), "./migrate up") {
+				t.Fatalf("error should tell the operator to run ./migrate up, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "schema version too old") {
+				t.Fatalf("error should say schema version too old, got %v", err)
+			}
+			wantCurrent := fmt.Sprintf("current=%d", version)
+			if !strings.Contains(err.Error(), wantCurrent) || !strings.Contains(err.Error(), "required>=6") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
+	}
+}
+
+func TestMySQLTaskStore_Schema6DropsFileEpochIndex(t *testing.T) {
+	if minRequiredSchemaVersion != 6 {
+		t.Fatalf("minRequiredSchemaVersion=%d, want 6", minRequiredSchemaVersion)
+	}
+	var indexes, columns []string
+	for _, table := range requiredTableSchemas {
+		if table.Name != "binlog_files" {
+			continue
+		}
+		indexes = table.Indexes
+		columns = table.Columns
+	}
+	if indexes == nil {
+		t.Fatal("binlog_files is not a required table")
+	}
+	hasFileName := false
+	for _, column := range columns {
+		if column == "file_name" {
+			hasFileName = true
+		}
+	}
+	if !hasFileName {
+		t.Fatal("file_name column must stay")
+	}
+	hasSourceEpoch := false
+	for _, index := range indexes {
+		if index == "uk_task_file_epoch" {
+			t.Fatal("schema 6 must not require uk_task_file_epoch")
+		}
+		if index == "uk_task_source_epoch" {
+			hasSourceEpoch = true
+		}
+	}
+	if !hasSourceEpoch {
+		t.Fatalf("required indexes %v missing uk_task_source_epoch", indexes)
+	}
+}
+
+// TestMySQLTaskStore_LegacyFileEpochIndexRefusesSchema6 keeps the pre-step-9
+// required-index list in the checker. Schema 6 has no uk_task_file_epoch, so
+// that older list refuses with missing index uk_task_file_epoch. The production
+// list no longer includes the index; this test does not put it back.
+func TestMySQLTaskStore_LegacyFileEpochIndexRefusesSchema6(t *testing.T) {
+	prev := requiredTableSchemas
+	t.Cleanup(func() { requiredTableSchemas = prev })
+	legacy := make([]tableSchemaSpec, len(prev))
+	for i, spec := range prev {
+		legacy[i] = spec
+		legacy[i].Columns = append([]string(nil), spec.Columns...)
+		legacy[i].Indexes = append([]string(nil), spec.Indexes...)
+		if spec.Name == "binlog_files" {
+			legacy[i].Indexes = append(legacy[i].Indexes, "uk_task_file_epoch")
+		}
+	}
+	requiredTableSchemas = legacy
+
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New returned error: %v", err)
@@ -1466,20 +1556,15 @@ func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
-	mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
-		WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(int64(4), false))
+	expectSchemaCheckQueries(mock, nil, nil, map[string]map[string]bool{
+		"binlog_files": {"uk_task_file_epoch": true},
+	})
 
 	err = store.ensureSchema(context.Background())
 	if err == nil {
-		t.Fatal("expected schema version error")
+		t.Fatal("expected missing uk_task_file_epoch")
 	}
-	if !strings.Contains(err.Error(), "./migrate up") {
-		t.Fatalf("error should tell the operator to run ./migrate up, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "schema version too old") {
-		t.Fatalf("error should say schema version too old, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "current=4") || !strings.Contains(err.Error(), "required>=5") {
+	if !strings.Contains(err.Error(), "missing index binlog_files.uk_task_file_epoch") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

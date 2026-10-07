@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 5 that tells the operator to run ./migrate up, required indexes uk_task_file_epoch and uk_task_source_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -24,7 +24,7 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-const minRequiredSchemaVersion int64 = 5
+const minRequiredSchemaVersion int64 = 6
 
 const currentSchemaVersionSQL = `
 SELECT version, dirty
@@ -93,7 +93,10 @@ var requiredTableSchemas = []tableSchemaSpec{
 			"size_bytes", "start_pos", "end_pos", "created_at", "sealed_at", "object_key",
 			"upload_state", "upload_error", "uploaded_at",
 		},
-		Indexes: []string{"PRIMARY", "uk_task_file_epoch", "uk_task_source_epoch", "idx_task_sealed"},
+		// uk_task_file_epoch is not in this list. Migration 000006 drops it.
+		// A binary that still lists that index refuses schema 6. The message
+		// contains "missing index" and "uk_task_file_epoch". Leave that check as it is.
+		Indexes: []string{"PRIMARY", "uk_task_source_epoch", "idx_task_sealed"},
 	},
 	{
 		Name: "task_leases",
@@ -254,9 +257,8 @@ LIMIT ?;
 `
 
 // upsertBinlogFileSQL writes one segment identified by (task_id, source_file, epoch),
-// which is uk_task_source_epoch. file_name stays the same source basename, so
-// uk_task_file_epoch matches that same row. A v0.5.49 upsert still binds both
-// columns to the source name and updates this row instead of inserting another.
+// which is uk_task_source_epoch. file_name stays that source basename.
+// Migration 000006 dropped uk_task_file_epoch. The duplicate key is uk_task_source_epoch.
 // Seal, enroll, and the open-segment upsert all pass that source basename as FileName.
 // A known end_pos is assigned. Zero in Go is unknown and is not this statement:
 // the writer binds NULL and uses upsertBinlogFileUnknownEndSQL, which does not
