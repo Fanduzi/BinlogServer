@@ -1,5 +1,5 @@
-// input: API calls for task data including single-task GET /lease and GET /replay
-// output: detail drawer state, including the replay set, the inventory limit shared with replay archive download, and showDetail action
+// input: API calls for task data including single-task GET /lease, GET /replay, and GET /window
+// output: detail drawer state, including the recoverable window, the replay set, the inventory limit shared with replay archive download, and showDetail action
 // pos: task detail drawer data management; /lease stays on this single-task path only
 // note: if this file changes, update this header and frontend/src/composables/README.md
 import { ref } from "vue";
@@ -11,6 +11,7 @@ import {
   listEvents,
   listFiles,
   listReplay,
+  getRecoveryWindow,
   getReplication,
   getTaskLease,
   listTaskRuns,
@@ -35,6 +36,7 @@ export function useTaskDetail() {
   const events = ref([]);
   const files = ref([]);
   const replay = ref(null);
+  const recovery = ref(null);
 
   function parseErr(err) {
     return err?.response?.data?.error || err?.message || t("msg.unknownError");
@@ -43,13 +45,14 @@ export function useTaskDetail() {
   async function showDetail(taskOrID) {
     try {
       const id = typeof taskOrID === "string" ? taskOrID : taskOrID.id;
-      const [task, cp, evs, fs, replaySet, replication] = await Promise.all([
+      const [task, cp, evs, fs, replaySet, replication, recoveryWindow] = await Promise.all([
         getTask(id),
         getCheckpoint(id),
         listEvents(id, 120),
         listFiles(id, taskDetailInventoryLimit),
         listReplay(id, taskDetailInventoryLimit),
         getReplication(id),
+        getRecoveryWindow(id),
       ]);
       const [leaseResult, runsResult] = await Promise.allSettled([
         getTaskLease(id),
@@ -67,6 +70,7 @@ export function useTaskDetail() {
       events.value = evs || [];
       files.value = fs || [];
       replay.value = replaySet || { paths: [] };
+      recovery.value = recoveryWindow || { continuous: true, breaks: [] };
       detailVisible.value = true;
     } catch (err) {
       ElMessage.error(parseErr(err));
@@ -84,6 +88,7 @@ export function useTaskDetail() {
     events,
     files,
     replay,
+    recovery,
     showDetail,
   };
 }

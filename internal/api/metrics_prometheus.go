@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts and binlog_server_retention_blocked_files; store list errors stay 5xx instead of empty task_state_count
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, and binlog_server_recovery_earliest_age_seconds; store list errors stay 5xx instead of empty task_state_count
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -32,6 +32,8 @@ type apiMetricsCollector struct {
 	uploadRetryTotalDesc    *prometheus.Desc
 	uploadRetryLastTsGauge  *prometheus.Desc
 	retentionBlockedDesc    *prometheus.Desc
+	recoveryBreaksDesc      *prometheus.Desc
+	recoveryEarliestDesc    *prometheus.Desc
 }
 
 func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiMetricsCollector {
@@ -86,6 +88,18 @@ func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiM
 			[]string{"task_id"},
 			nil,
 		),
+		recoveryBreaksDesc: prometheus.NewDesc(
+			"binlog_server_recovery_breaks",
+			"Breaks in the task's retained binlog chain.",
+			[]string{"task_id"},
+			nil,
+		),
+		recoveryEarliestDesc: prometheus.NewDesc(
+			"binlog_server_recovery_earliest_age_seconds",
+			"Age in seconds of the earliest restorable event in the retained chain.",
+			[]string{"task_id"},
+			nil,
+		),
 	}
 }
 
@@ -98,6 +112,8 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.uploadRetryTotalDesc
 	ch <- c.uploadRetryLastTsGauge
 	ch <- c.retentionBlockedDesc
+	ch <- c.recoveryBreaksDesc
+	ch <- c.recoveryEarliestDesc
 }
 
 func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -190,10 +206,41 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	if len(items) == 0 {
 		ch <- prometheus.MustNewConstMetric(c.retentionBlockedDesc, prometheus.GaugeValue, 0, "")
+		ch <- prometheus.MustNewConstMetric(c.recoveryBreaksDesc, prometheus.GaugeValue, 0, "")
+		ch <- prometheus.MustNewConstMetric(c.recoveryEarliestDesc, prometheus.GaugeValue, 0, "")
 		return
 	}
 	for _, task := range items {
 		ch <- prometheus.MustNewConstMetric(c.retentionBlockedDesc, prometheus.GaugeValue, float64(blocked[task.ID]), task.ID)
+	}
+	c.collectRecovery(ch, items, now)
+}
+
+func (c *apiMetricsCollector) collectRecovery(ch chan<- prometheus.Metric, items []tasks.Task, now time.Time) {
+	breaksEmitted := false
+	ageEmitted := false
+	for _, task := range items {
+		window, err := c.tasks.RecoveryWindow(task.ID)
+		if err != nil {
+			continue
+		}
+		ch <- prometheus.MustNewConstMetric(c.recoveryBreaksDesc, prometheus.GaugeValue, float64(len(window.Breaks)), task.ID)
+		breaksEmitted = true
+		if window.Earliest == nil {
+			continue
+		}
+		age := now.Sub(*window.Earliest).Seconds()
+		if age < 0 {
+			age = 0
+		}
+		ch <- prometheus.MustNewConstMetric(c.recoveryEarliestDesc, prometheus.GaugeValue, age, task.ID)
+		ageEmitted = true
+	}
+	if !breaksEmitted {
+		ch <- prometheus.MustNewConstMetric(c.recoveryBreaksDesc, prometheus.GaugeValue, 0, "")
+	}
+	if !ageEmitted {
+		ch <- prometheus.MustNewConstMetric(c.recoveryEarliestDesc, prometheus.GaugeValue, 0, "")
 	}
 }
 

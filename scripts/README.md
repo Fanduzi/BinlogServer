@@ -7,7 +7,7 @@
 | File | Responsibility |
 |------|---------------|
 | build-ui.sh | 构建 frontend 并同步到 internal/ui/static；先跑 `npm run test:locales` 编译 Console 文案，再给本次产物的 JS 按字节拼上 L3 头，然后跑 `check-ui-bundle.sh`（ESM 语法和 PITR 标记）；本地没有 vite 时先 `npm ci` |
-| check-ui-bundle.sh | 把 `internal/ui/static/index.html` 引用的 JS，以及这些文件 import 的 chunk，当 ES module 做 `node --check --input-type=module`；并要求 `frontend/src` 里的 PITR 标记（`task-pitr`、停止/开始/GTID/已执行 GTID、生成、复制、下载、`stop_datetime`、`start_datetime`、`stop_gtid`、`start_gtid_set`、`停止时间`、`停止 GTID`、`已执行 GTID`）出现在这张 bundle 图里。缺标记时退出非 0。`.js` 路径上的 `node --check` 会按 CommonJS 解析，抓不到 Chrome 拒绝的 import |
+| check-ui-bundle.sh | 把 `internal/ui/static/index.html` 引用的 JS，以及这些文件 import 的 chunk，当 ES module 做 `node --check --input-type=module`；并要求 `frontend/src` 里的可恢复窗口标记（`task-recovery-window`、`这条备份链有缺口`）和 PITR 标记（`task-pitr`、停止/开始/GTID/已执行 GTID、生成、复制、下载、`stop_datetime`、`start_datetime`、`stop_gtid`、`start_gtid_set`、`停止时间`、`停止 GTID`、`已执行 GTID`）出现在这张 bundle 图里。缺标记时退出非 0。`.js` 路径上的 `node --check` 会按 CommonJS 解析，抓不到 Chrome 拒绝的 import |
 | check-linux-compat.sh | 检查 Linux 二进制是否为静态链接且无动态 libc 依赖，防止发布产物绑定构建机 glibc |
 | check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL，并复用 glibc 兼容性检查 |
 | check-landing-assets.sh | 校验落地页 HTML 引用的图片资源真实存在、非空且为有效 PNG 格式，防止部署回退为 HTML 造成图裂 |
