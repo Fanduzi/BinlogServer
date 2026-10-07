@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.53] - 2026-10-07
+
+### Changed
+
+- Migration `000006_drop_task_file_epoch_key` drops `binlog_files.uk_task_file_epoch` (PR #276, ADR 0005 step 9 of 9). A segment is only `(task_id, source_file, epoch)`, which is `uk_task_source_epoch`. The `file_name` column stays. The SQL does not delete rows. `minRequiredSchemaVersion` is 6. v0.5.53 does not start on schema 5. It exits with code 1 before it listens. The message contains `schema version too old` and `./migrate up`. v0.5.51 and v0.5.52 still require `uk_task_file_epoch`. On schema 6 they refuse to start. The log contains `missing index` and `uk_task_file_epoch`. Stop those processes before `./migrate up`. The floor stays v0.5.51, the first release that ships both step 6 and step 7. v0.5.50 shipped step 6 only. This release is the first that ships step 9. A second insert of the same `(task_id, source_file, epoch)` fails. `./migrate down --steps 1` from schema 6 adds `uk_task_file_epoch` back and does not delete rows. No new config key. `migrations/` is `000001` through `000006`. Tip dogfood by BinlogServerQA passed on `59a5e1e7efa55393e5a1227ac48b9f625a622d68`. That run did not open a new issue. The v0.5.52 `.takeover-*` cleanup still holds. The v0.5.51 unknown-`end_pos` rule still holds. #189 was fixed in v0.5.49. #205 was fixed in v0.5.48. #224 was fixed in v0.5.52.
+
 ## [v0.5.52] - 2026-10-07
 
 ### Fixed
