@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -298,6 +298,11 @@ func (a *App) Run(ctx context.Context) error {
 		// 将 runner 进度回传给 scheduler，供 API/状态机读取。
 		runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))
 		runner := newRunnerForRun(a.cfg, runnerOpts...)
+		if cleaner, ok := runner.(interface{ RemoveStaleTakeoverTemps() error }); ok {
+			if err := cleaner.RemoveStaleTakeoverTemps(); err != nil {
+				return fmt.Errorf("remove stale takeover temps: %w", err)
+			}
+		}
 		scheduler.SetRunner(runner)
 	}
 	// Restore 必须在对外服务前执行，保证 API 看到的是恢复后的稳定状态。
