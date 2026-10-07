@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments in ascending binlog index order, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions
+// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -19,8 +19,9 @@ import (
 // listTaskBinlogFilesOnDisk reads {dataDir}/{taskID} for sealed binlog names
 // and name.open.e<epoch> segments. file_name is the source name. file_path is
 // the on-disk path, including .open.e<epoch> while the segment is open.
-// Results are ascending by source index. The same index lists the sealed name
-// first, then open epochs ascending. limit keeps the highest indexes.
+// Results follow WindowBinlogFilesForReplay: an earlier source, then index
+// order inside that source. The same index lists the sealed name first, then
+// open epochs ascending. limit keeps the tail of that order.
 func listTaskBinlogFilesOnDisk(dataDir, taskID string, limit int) ([]BinlogFile, error) {
 	dir, ok := taskBinlogDir(dataDir, taskID)
 	if !ok {
@@ -72,19 +73,19 @@ func listTaskBinlogFilesOnDisk(dataDir, taskID string, limit int) ([]BinlogFile,
 	return WindowBinlogFilesForReplay(files, limit), nil
 }
 
-// WindowBinlogFilesForReplay orders rows the way listTaskBinlogFilesOnDisk does.
-// Lower source indexes come first. The same index lists the sealed name, then
-// open epochs from low to high. limit keeps the tail of that order, the highest
-// indexes. The key is the on-disk file name. An empty input is returned as-is.
+// WindowBinlogFilesForReplay orders one source by index, and puts an earlier
+// source before a later one. The earlier source is the one whose earliest
+// CreatedAt is older, so a new primary's mysql-bin.000001 stays after the old
+// primary's higher index. The same index lists the sealed name, then open
+// epochs from low to high. limit keeps the tail of that order. An empty input
+// is returned as-is.
 func WindowBinlogFilesForReplay(files []BinlogFile, limit int) []BinlogFile {
 	if len(files) == 0 {
 		return files
 	}
 	out := make([]BinlogFile, len(files))
 	copy(out, files)
-	sort.SliceStable(out, func(i, j int) bool {
-		return binlogSegmentLess(out[i], out[j])
-	})
+	orderBinlogSegments(out)
 	if limit <= 0 {
 		limit = 200
 	}
@@ -138,7 +139,7 @@ func ReplayClient(flavor string) (client, hint string) {
 // Rows that are not a binlog segment, or have an empty file_path, are dropped.
 // An empty window returns an empty slice.
 func SelectReplayFiles(files []BinlogFile) []BinlogFile {
-	opens := make(map[uint64]BinlogFile)
+	opens := make(map[string]BinlogFile)
 	sealed := make([]BinlogFile, 0)
 	for _, file := range files {
 		key := binlogSegmentKey(file)
@@ -146,9 +147,10 @@ func SelectReplayFiles(files []BinlogFile) []BinlogFile {
 			continue
 		}
 		if segmentIsOpen(file) {
-			prev, ok := opens[key.seq]
+			id := segmentIndexKey(key)
+			prev, ok := opens[id]
 			if !ok || key.epoch >= binlogSegmentKey(prev).epoch {
-				opens[key.seq] = file
+				opens[id] = file
 			}
 			continue
 		}
@@ -164,9 +166,7 @@ func SelectReplayFiles(files []BinlogFile) []BinlogFile {
 	for _, file := range opens {
 		out = append(out, file)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return binlogSegmentLess(out[i], out[j])
-	})
+	orderBinlogSegments(out)
 	return out
 }
 
@@ -181,12 +181,12 @@ func segmentIsOpen(file BinlogFile) bool {
 	return ok && state == "OPEN"
 }
 
-func sealedCopiedIntoOpen(file BinlogFile, opens map[uint64]BinlogFile) bool {
+func sealedCopiedIntoOpen(file BinlogFile, opens map[string]BinlogFile) bool {
 	key := strings.TrimSpace(file.ObjectKey)
 	if key == "" {
 		return false
 	}
-	open, ok := opens[binlogSegmentKey(file).seq]
+	open, ok := opens[segmentIndexKey(binlogSegmentKey(file))]
 	if !ok {
 		return false
 	}
@@ -210,7 +210,7 @@ func sealedPointCovered(file BinlogFile, sealed []BinlogFile) bool {
 			continue
 		}
 		otherKey := binlogSegmentKey(other)
-		if !otherKey.ok || otherKey.seq != key.seq {
+		if !otherKey.ok || otherKey.prefix != key.prefix || otherKey.seq != key.seq {
 			continue
 		}
 		if other.EndPos <= other.StartPos {
@@ -378,20 +378,72 @@ func binlogSegmentLess(a, b BinlogFile) bool {
 	return ak.name < bk.name
 }
 
+// orderBinlogSegments sorts one source's files by index, and puts an earlier
+// source before a later one. The earlier source is the one whose earliest
+// CreatedAt is older. A VIP switch keeps the old server's mysql-bin.000009
+// ahead of the new server's mysql-bin.000001.
+func orderBinlogSegments(files []BinlogFile) {
+	gen := segmentGenerations(files)
+	sort.SliceStable(files, func(i, j int) bool {
+		return segmentGenerationLess(files[i], files[j], gen)
+	})
+}
+
+func segmentGenerations(files []BinlogFile) map[string]time.Time {
+	gen := make(map[string]time.Time)
+	for _, file := range files {
+		key := binlogSegmentKey(file)
+		if !key.ok || file.CreatedAt.IsZero() {
+			continue
+		}
+		prev, ok := gen[key.prefix]
+		if !ok || file.CreatedAt.Before(prev) {
+			gen[key.prefix] = file.CreatedAt
+		}
+	}
+	return gen
+}
+
+func segmentGenerationLess(a, b BinlogFile, gen map[string]time.Time) bool {
+	ak := binlogSegmentKey(a)
+	bk := binlogSegmentKey(b)
+	if ak.ok && bk.ok && ak.prefix != bk.prefix {
+		ag, aOK := gen[ak.prefix]
+		bg, bOK := gen[bk.prefix]
+		if aOK && bOK && !ag.Equal(bg) {
+			return ag.Before(bg)
+		}
+		if aOK != bOK {
+			return aOK
+		}
+		return ak.prefix < bk.prefix
+	}
+	return binlogSegmentLess(a, b)
+}
+
+func segmentIndexKey(key segmentSortKey) string {
+	return key.prefix + "\x00" + strconv.FormatUint(key.seq, 10)
+}
+
 type segmentSortKey struct {
-	seq   uint64
-	epoch int64
-	name  string
-	ok    bool
+	prefix string
+	seq    uint64
+	epoch  int64
+	name   string
+	ok     bool
 }
 
 func binlogSegmentKey(file BinlogFile) segmentSortKey {
 	name := filepath.Base(file.FilePath)
-	_, seq, epoch, _, ok := classifyBinlogSegment(name)
+	source, seq, epoch, _, ok := classifyBinlogSegment(name)
 	if !ok {
 		return segmentSortKey{name: name}
 	}
-	return segmentSortKey{seq: seq, epoch: epoch, name: name, ok: true}
+	prefix, _, splitOK := splitSourceIndex(source)
+	if !splitOK {
+		prefix = source
+	}
+	return segmentSortKey{prefix: prefix, seq: seq, epoch: epoch, name: name, ok: true}
 }
 
 // listDiskBackupTasks returns data_dir children that still contain sealed or

@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: fake source metadata, fake streamer/syncer, and injected writer/checkpoint doubles
-// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a resolved LATEST file/pos kept across retry with an empty gtid_set, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, stop cleanup, and a leftover dump thread killed with the current password before the next StartSync An unconfirmed KILL does not call StartSync.
+// output: runner-level tests for start selection, LATEST and caught-up FILE_POS at-tip vs catch-up/idle-behind progress, a resolved LATEST file/pos kept across retry with an empty gtid_set, a mid-file format description kept ahead of the first copied event without moving the cursor or the delay sample, checkpoint semantics, error propagation, stop cleanup, a leftover dump thread killed with the current password before the next StartSync, and a fake source whose uuid and GTID probe can change between dump connections An unconfirmed KILL does not call StartSync.
 // pos: replication runtime test boundary around mysql runner orchestration
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -32,6 +32,11 @@ type fakeSourceMetaFetcher struct {
 	serverUUIDErr   error
 	fetchStatusCall int
 	fetchUUIDCall   int
+	// uuidSeq, when set, is consumed one identity per FetchServerUUID call.
+	// The last identity stays so a later call still has an answer.
+	uuidSeq []string
+	// switchProbe is the GTID subset answer. Nil means the probe is unavailable.
+	switchProbe func(ours string) (haveOurs bool, missing string, missingPurged bool, err error)
 }
 
 func (f *fakeSourceMetaFetcher) FetchMasterStatus(_ context.Context, _ tasks.SourceConfig) (MasterStatus, error) {
@@ -47,7 +52,21 @@ func (f *fakeSourceMetaFetcher) FetchServerUUID(_ context.Context, _ tasks.Sourc
 	if f.serverUUIDErr != nil {
 		return "", f.serverUUIDErr
 	}
+	if len(f.uuidSeq) > 0 {
+		next := f.uuidSeq[0]
+		if len(f.uuidSeq) > 1 {
+			f.uuidSeq = f.uuidSeq[1:]
+		}
+		return next, nil
+	}
 	return f.serverUUID, nil
+}
+
+func (f *fakeSourceMetaFetcher) ProbeSwitchGTID(_ context.Context, _ tasks.SourceConfig, ours string) (bool, string, bool, error) {
+	if f.switchProbe == nil {
+		return false, "", false, errors.New("probe not set")
+	}
+	return f.switchProbe(ours)
 }
 
 type fakeRunnerCheckpointStore struct {
@@ -139,10 +158,14 @@ type fakeStreamer struct {
 	calls            int
 	blockUntilCtx    bool
 	getEventReturned chan struct{}
+	onCall           func(call int)
 }
 
 func (f *fakeStreamer) GetEvent(ctx context.Context) (*goreplication.BinlogEvent, error) {
 	f.calls++
+	if f.onCall != nil {
+		f.onCall(f.calls)
+	}
 	defer func() {
 		if f.getEventReturned != nil {
 			select {
