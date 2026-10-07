@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
-// input: a fake source whose identity changes between dump connections, and the GTID subset answer for that new source
-// output: assertions that a MySQL GTID backup continues on the new server without appending into the old segment, and that a backup with no GTID stops
+// input: a fake source whose identity changes between dump connections or on a MySQL 1236 before the next event, and the GTID subset answer for that new source
+// output: assertions that a MySQL GTID backup continues on the new server without appending into the old segment, that a backup with no GTID stops, including when the new server answers 1236 for the old file name, and that a GTID redump of an earlier file does not open a second copy
 // pos: runner-level coverage for a VIP source switch
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -18,6 +18,7 @@ import (
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
 
@@ -151,6 +152,49 @@ func TestRun_GTIDSwitchContinuesOnNewFile(t *testing.T) {
 	}
 }
 
+func TestRun_GTIDRedumpDoesNotCopyEarlierFile(t *testing.T) {
+	dir := t.TempDir()
+	const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	var names []string
+	writes := 0
+	streamer := &fakeStreamer{results: []streamResult{
+		{event: rotateDumpEvent("mysql-bin.000003", 4)},
+		{event: newRunnerEvent(200)},
+		{event: rotateDumpEvent("mysql-bin.000004", 4)},
+		{event: newRunnerEvent(120)},
+		{event: rotateDumpEvent("mysql-bin.000002", 4)},
+		{event: newRunnerEvent(900)},
+		{event: rotateDumpEvent("mysql-bin.000004", 4)},
+		{event: newRunnerEvent(400)},
+		{err: context.Canceled},
+	}}
+	syncer := &fakeSyncer{connID: 11, streamer: streamer}
+	runner := &MySQLRunner{
+		dataDir:   dir,
+		fetcher:   &fakeSourceMetaFetcher{serverUUID: id},
+		newSyncer: func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer },
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			names = append(names, fileName)
+			buf := &fakeSyncFile{}
+			w := binlog.NewWriter(buf, binlog.Checkpoint{File: fileName, Pos: initialPos})
+			return &countingCloser{writes: &writes, buf: buf}, w, filepath.Join(dir, "task-1", fileName), nil
+		},
+		killDump: func(tasks.SourceConfig, uint32) error { return nil },
+	}
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: id + ":1-3"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 2 || names[0] != "mysql-bin.000003" || names[1] != "mysql-bin.000004" {
+		t.Fatalf("files %v", names)
+	}
+	// 200 on 000003, 120 on 000004, and 400 after the redump catches up.
+	// The event at 900 belongs to the earlier file and is not stored again.
+	if writes != 3 {
+		t.Fatalf("writes %d", writes)
+	}
+}
+
 func TestRun_LatestSwitchStopsWithoutMixing(t *testing.T) {
 	const oldID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	const newID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -205,6 +249,106 @@ func TestRun_LatestSwitchStopsWithoutMixing(t *testing.T) {
 	}
 	if syncer.startGTIDCalls != 0 {
 		t.Fatalf("latest switch started a gtid dump")
+	}
+}
+
+func TestRun_Latest1236OnNewServerStops(t *testing.T) {
+	const oldID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const newID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	dir := t.TempDir()
+	fetcher := &fakeSourceMetaFetcher{
+		status:  MasterStatus{File: "mysql-bin.000003", Pos: 100},
+		uuidSeq: []string{oldID, newID},
+	}
+	purged := &gomysql.MyError{Code: 1236, State: "HY000", Message: "Could not find first log file name in binary log index file"}
+	syncer := &fakeSyncer{connID: 11}
+	writes := 0
+	syncer.streamer = &fakeStreamer{results: []streamResult{
+		{event: newRunnerEvent(200)},
+		{err: purged},
+	}}
+	var notices []tasks.SourceSwitchNotice
+	runner := &MySQLRunner{
+		dataDir:   dir,
+		fetcher:   fetcher,
+		newSyncer: func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer },
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			buf := &fakeSyncFile{}
+			w := binlog.NewWriter(buf, binlog.Checkpoint{File: fileName, Pos: initialPos})
+			return &countingCloser{writes: &writes, buf: buf}, w, filepath.Join(dir, "task-1", fileName), nil
+		},
+		killDump: func(tasks.SourceConfig, uint32) error { return nil },
+	}
+	runner.BindSourceSwitch(func(_ string, notice tasks.SourceSwitchNotice) {
+		notices = append(notices, notice)
+	})
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest}))
+	var pe *tasks.PermanentError
+	if !asPermanent(err, &pe) || pe.Code != tasks.CodeSourceSwitchover {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Contains(strings.ToLower(pe.Message), "purged") {
+		t.Fatalf("1236 on a new server was reported as a purged binlog: %s", pe.Message)
+	}
+	if !strings.Contains(pe.Message, oldID) || !strings.Contains(pe.Message, newID) || !strings.Contains(pe.Message, "no GTID set") || !strings.Contains(pe.Message, "Start a new task") {
+		t.Fatalf("message %s", pe.Message)
+	}
+	if writes != 1 {
+		t.Fatalf("writes %d", writes)
+	}
+	if len(notices) != 1 || notices[0].Continued {
+		t.Fatalf("notices %+v", notices)
+	}
+	if syncer.startGTIDCalls != 0 {
+		t.Fatalf("latest 1236 started a gtid dump")
+	}
+}
+
+func TestRun_FilePos1236OnNewServerContinuesByGTID(t *testing.T) {
+	const oldID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const newID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	dir := t.TempDir()
+	ours := oldID + ":1-4"
+	fetcher := &fakeSourceMetaFetcher{uuidSeq: []string{oldID, newID}}
+	fetcher.switchProbe = func(string) (bool, string, bool, error) {
+		return true, "", false, nil
+	}
+	purged := &gomysql.MyError{Code: 1236, State: "HY000", Message: "Could not find first log file name in binary log index file"}
+	syncer := &fakeSyncer{connID: 11, streamer: &fakeStreamer{results: []streamResult{
+		{err: purged},
+		{err: context.Canceled},
+	}}}
+	var notices []tasks.SourceSwitchNotice
+	runner := &MySQLRunner{
+		dataDir: dir,
+		fetcher: fetcher,
+		checkpointStore: &fakeRunnerCheckpointStore{loadOK: true, loadCheckpoint: binlog.Checkpoint{
+			File: "mysql-bin.000003", Pos: 100, GTIDSet: ours,
+		}},
+		newSyncer: func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer },
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			return &fakeCloser{}, binlog.NewWriter(&fakeSyncFile{}, binlog.Checkpoint{File: fileName, Pos: initialPos}), filepath.Join(dir, "task-1", fileName), nil
+		},
+		killDump: func(tasks.SourceConfig, uint32) error { return nil },
+	}
+	runner.BindSourceSwitch(func(_ string, notice tasks.SourceSwitchNotice) {
+		notices = append(notices, notice)
+	})
+	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{
+		Mode: tasks.StartModeFilePos, File: "mysql-bin.000003", Pos: 100, GTIDSet: ours,
+	}))
+	if err != nil {
+		t.Fatalf("err %v", err)
+	}
+	if len(notices) != 1 || !notices[0].Continued || !strings.Contains(notices[0].Message, oldID) || !strings.Contains(notices[0].Message, newID) {
+		t.Fatalf("notices %+v", notices)
+	}
+	if syncer.startPosCalls != 1 || syncer.startGTIDCalls != 1 {
+		t.Fatalf("pos=%d gtid=%d", syncer.startPosCalls, syncer.startGTIDCalls)
+	}
+	body, readErr := os.ReadFile(filepath.Join(dir, "task-1", sourceChainFile))
+	if readErr != nil || !strings.Contains(string(body), oldID) || !strings.Contains(string(body), newID) {
+		t.Fatalf("chain %s err %v", body, readErr)
 	}
 }
 

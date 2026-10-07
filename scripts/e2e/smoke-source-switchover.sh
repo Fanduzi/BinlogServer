@@ -347,7 +347,10 @@ apply_replay() {
   if printf '%s\n' "$cmd" | grep -q -- '--stop-datetime='; then
     local raw
     raw="$(printf '%s\n' "$cmd" | grep -oE -- "--stop-datetime='[^']*'" | head -1)"
-    extra+=("$raw")
+    raw="${raw#--stop-datetime=}"
+    raw="${raw#\'}"
+    raw="${raw%\'}"
+    extra+=(--stop-datetime="$raw")
   fi
   local i=0 p dest
   while IFS= read -r p; do
@@ -564,16 +567,19 @@ files_json="$(curl -fsS "$API/api/tasks/$gtid_id/files?limit=50")"
 old_path=""
 new_path=""
 saw_before=0
+saw_after=0
 while IFS= read -r path; do
   [[ -z "$path" ]] && continue
   path="$(abs_path "$path")"
   [[ -f "$path" ]] || continue
   base="$(basename "$path")"
   if [[ "$base" == "$NEW_UUID".* ]]; then
-    new_path="$path"
-    if ! grep -a -q 'after-1' "$path"; then
-      echo "new segment missing after-switch rows: $path" >&2
-      exit 1
+    if [[ -z "$new_path" ]]; then
+      new_path="$path"
+    fi
+    if grep -a -q 'after-1' "$path"; then
+      saw_after=1
+      new_path="$path"
     fi
   else
     old_path="$path"
@@ -586,7 +592,7 @@ while IFS= read -r path; do
     fi
   fi
 done < <(printf '%s' "$files_json" | jq -r '.[] | .file_path // empty')
-if [[ -z "$old_path" || -z "$new_path" || "$saw_before" != 1 ]]; then
+if [[ -z "$old_path" || -z "$new_path" || "$saw_before" != 1 || "$saw_after" != 1 ]]; then
   echo "expected old and new server files: $files_json" >&2
   exit 1
 fi
@@ -665,12 +671,21 @@ if [[ "$back_err" != SOURCE_SWITCHOVER:* ]] || [[ "$back_err" != *"$OLD_UUID"* ]
   echo "missing-transaction last_error [$back_err]" >&2
   exit 1
 fi
-after_mix="$(md5sum "$new_path" | awk '{print $1}')"
-if [[ "$before_mix" != "$after_mix" ]]; then
-  echo "new segment changed after the unsafe switch" >&2
+# Sealing the new server's open segment renames it. The bytes that held
+# after-1 stay the same.
+after_mix=""
+while IFS= read -r path; do
+  [[ -z "$path" || ! -f "$path" ]] && continue
+  if grep -a -q 'after-1' "$path"; then
+    after_mix="$(md5sum "$path" | awk '{print $1}')"
+    break
+  fi
+done < <(find "$(abs_path "$DATA_DIR/$gtid_id")" -maxdepth 1 -type f -print)
+if [[ -z "$before_mix" || "$before_mix" != "$after_mix" ]]; then
+  echo "new segment changed after the unsafe switch before=$before_mix after=$after_mix" >&2
   exit 1
 fi
-if grep -a -q 'only-on-a' "$new_path" || grep -a -q 'only-on-a' "$old_path"; then
+if find "$(abs_path "$DATA_DIR/$gtid_id")" -maxdepth 1 -type f -exec grep -a -l 'only-on-a' {} + | grep -q .; then
   echo "old primary bytes landed in the backup" >&2
   exit 1
 fi
