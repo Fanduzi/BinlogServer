@@ -549,6 +549,8 @@ curl -G -sS "http://127.0.0.1:8080/api/tasks/1/replay" \
 
 响应里的 `command` 已经带 `TZ=UTC` 和 `--stop-datetime`。给了开始时间时还有 `--start-datetime`。先恢复你自己的全量备份，再执行这条命令，把输出管道到恢复库。Console 任务详情可以填写这两个时间并复制同一条命令，也可以下载这个窗口的 tar：`GET /api/tasks/1/replay/archive` 使用同一对参数。参数和错误句子见 [API 参考「按时间点选取分段」](../reference/api.md#pitr-replay)。
 
+同一秒里有多条事务时，用 `stop_gtid=<server_uuid>:<序号>` 停在那条事务之前。`command` 带 `--stop-position`，列出的分段收到这条 GTID 所在的文件为止。这条事务和它后面的事务都不放进去。`start_datetime` 可以和 `stop_gtid` 一起用。`stop_datetime` 与 `stop_gtid` 同时出现是 HTTP 400，正文 `stop_datetime and stop_gtid cannot both be set`。参数和错误句子见 [API 参考「停在某个 GTID 之前」](../reference/api.md#gtid-replay)。
+
 ---
 
 ## 8. Replay local segments when the source is gone
@@ -664,3 +666,5 @@ curl -G -sS "http://127.0.0.1:8080/api/tasks/1/replay" \
 ```
 
 `command` already includes `TZ=UTC` and `--stop-datetime`. A start time adds `--start-datetime`. Restore your own full backup, then run that command and pipe it into the restore server. The Console task detail accepts both times, copies the same command, and can download that window: `GET /api/tasks/1/replay/archive` takes the same parameters. The parameter list and error sentences are in [API reference section 5.7](../reference/api.md#pitr-replay).
+
+When several transactions share that second, pass `stop_gtid=<server_uuid>:<n>` to stop before that one transaction. The command uses `--stop-position` and lists segments through the file that contains the GTID. That transaction and everything after it stay out. `start_datetime` can be combined with `stop_gtid`. Sending `stop_datetime` and `stop_gtid` together is HTTP 400 with the body `stop_datetime and stop_gtid cannot both be set`. The parameter list and error sentences are in [API reference section 5.8](../reference/api.md#gtid-replay).

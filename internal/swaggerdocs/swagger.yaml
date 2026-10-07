@@ -61,7 +61,8 @@ definitions:
       storage:
         allOf:
         - $ref: '#/definitions/tasks.Storage'
-        description: Storage 存储策略：retention_days 必须在 1..3650。local_retention_days 与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。
+        description: Storage 存储策略：retention_days 必须在 1..3650。local_retention_days
+          与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。
     type: object
   api.dashboardResponse:
     properties:
@@ -240,7 +241,8 @@ definitions:
       storage:
         allOf:
         - $ref: '#/definitions/tasks.Storage'
-        description: Storage 存储策略：retention_days 必须在 1..3650。local_retention_days 与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。
+        description: Storage 存储策略：retention_days 必须在 1..3650。local_retention_days
+          与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。
     type: object
   api.workerItem:
     properties:
@@ -290,15 +292,26 @@ definitions:
       created_at:
         type: string
       end_pos:
-        description: Last complete event end log position. JSON null means the end is not known. The value 0 is not stored.
+        description: |-
+          EndPos is the last complete event's end log position. Zero is unknown:
+          JSON null. An upsert that does not know it does not assign end_pos.
+          The value 0 is never stored.
         type: integer
-        x-nullable: true
+      epoch:
+        description: |-
+          Epoch is the durable segment generation. 0 is a plain sealed name from
+          this process or from an older release. A later .open.eN or .sealed.eN
+          uses N. file_name stays the source binlog name.
+        type: integer
       file_name:
         type: string
       file_path:
         type: string
       location:
-        description: local, bucket, or both. Computed on the files list and not stored. bucket means the sealed UPLOADED object is the only copy and file_path is not on this process.
+        description: |-
+          Location is local, bucket, or both. The files list fills it in.
+          It is not stored. bucket means this sealed UPLOADED object is the only
+          copy: file_path is the catalog path and is not on this process.
         type: string
       object_key:
         type: string
@@ -307,9 +320,10 @@ definitions:
       size_bytes:
         type: integer
       start_pos:
-        description: First event position in the segment. JSON null means the start is not known. The value 0 is not stored.
+        description: |-
+          StartPos is the first event position in the segment. Zero is unknown:
+          JSON null, and the catalog writer stores NULL rather than 0.
         type: integer
-        x-nullable: true
       state:
         type: string
       task_id:
@@ -319,6 +333,23 @@ definitions:
       upload_state:
         type: string
       uploaded_at:
+        type: string
+    type: object
+  tasks.DumpCleanup:
+    properties:
+      connection_id:
+        type: integer
+      epoch:
+        type: integer
+      held:
+        type: boolean
+      host:
+        type: string
+      port:
+        type: integer
+      process_local:
+        type: boolean
+      warning:
         type: string
     type: object
   tasks.PITRSet:
@@ -332,7 +363,8 @@ definitions:
       flavor:
         type: string
       locations:
-        description: Same order as paths. bucket means that path is not on this process.
+        description: Locations matches Paths. bucket means that path is not on this
+          process.
         items:
           type: string
         type: array
@@ -428,6 +460,14 @@ definitions:
         type: string
       owner_worker_id:
         type: string
+      pending_dump_cleanup:
+        allOf:
+        - $ref: '#/definitions/tasks.DumpCleanup'
+        description: |-
+          PendingDumpCleanup is set when Stop could not KILL the old Binlog Dump.
+          Metadata mode stores it on backup_tasks when migration 000004 has been applied.
+          Without that column it stays in the process that held the dump, including after STOPPED.
+          Standalone keeps it on this struct. Empty means the source thread is gone.
       run_id:
         type: string
       source:
@@ -1034,16 +1074,20 @@ paths:
   /api/tasks/{id}/replay:
     get:
       description: 'One file_path per source index, ascending. When a sealed name
-        and .open.e* share an index, the path is the highest-epoch open segment.
-        locations is the same order: local, bucket, or both. bucket means that path
-        is the catalog file_path and is not on this process; download and replay/archive
-        still read the object. Do not pass a bucket path to mysqlbinlog until the
-        file is downloaded. Without stop_datetime, limit is the same inventory window
-        as GET /files and the body omits command. stop_datetime (UTC) selects the
-        point-in-time window instead of limit: paths cover events at or after optional
-        start_datetime and before stop_datetime, and command is the TZ=UTC client
-        invocation. An empty cover is 200 with empty paths and command. Invalid
-        datetimes are 400.'
+        and .open.e* share an index, the path is the highest-epoch open segment. locations
+        is the same order: local, bucket, or both. bucket means that path is the catalog
+        file_path and is not on this process; download and replay/archive still read
+        the object. Do not pass a bucket path to mysqlbinlog until the file is downloaded.
+        Without stop_datetime or stop_gtid, limit is the same inventory window as
+        GET /files and the body omits command. stop_datetime (UTC) selects the point-in-time
+        window instead of limit: paths cover events at or after optional start_datetime
+        and before stop_datetime, and command is the TZ=UTC client invocation. stop_gtid
+        (MySQL server_uuid:seq) selects the segments through the GTID event and a
+        command whose --stop-position is that event''s first byte in the last file,
+        so that transaction and everything after it are excluded. limit is ignored.
+        start_datetime may be combined with stop_gtid. stop_datetime and stop_gtid
+        together are 400. An empty datetime cover is 200 with empty paths and command.
+        Invalid datetimes and an unparseable or out-of-range GTID are 400.'
       parameters:
       - description: Task ID
         in: path
@@ -1051,7 +1095,7 @@ paths:
         required: true
         type: string
       - description: Inventory window limit (same as files). Ignored when stop_datetime
-          is set.
+          or stop_gtid is set.
         in: query
         name: limit
         type: integer
@@ -1060,7 +1104,12 @@ paths:
         in: query
         name: stop_datetime
         type: string
-      - description: Optional UTC start time. Requires stop_datetime.
+      - description: MySQL GTID server_uuid:seq. Stop before that transaction. Cannot
+          be combined with stop_datetime.
+        in: query
+        name: stop_gtid
+        type: string
+      - description: Optional UTC start time. Requires stop_datetime or stop_gtid.
         in: query
         name: start_datetime
         type: string
@@ -1073,7 +1122,10 @@ paths:
             $ref: '#/definitions/tasks.PITRSet'
         "400":
           description: invalid stop_datetime, invalid start_datetime, stop_datetime
-            is required, or start_datetime is after stop_datetime
+            is required, start_datetime is after stop_datetime, invalid stop_gtid,
+            stop_gtid is not in this task's backed-up range, stop_gtid is not supported
+            for this flavor, stop_datetime and stop_gtid cannot both be set, or start_datetime
+            is after stop_gtid
           schema:
             type: string
         "404":
@@ -1091,13 +1143,15 @@ paths:
     get:
       description: 'USTAR archive whose members are the basenames from GET /api/tasks/{id}/replay
         for the same limit, one per source index. stop_datetime uses that route''s
-        point-in-time window instead of limit. A sealed name and .open.e* still keep
-        the highest-epoch open segment. Each member uses the GET /api/tasks/{id}/files/{name}
-        open rules: a local file wins, including *.open.e* while RUNNING or STOPPED;
-        a missing local file is read only for a sealed UPLOADED row with a non-empty
-        object_key. An empty selection is 200 and an empty tar. If any selected segment
-        cannot be opened, the response is an error and the body is not a tar. A missing
-        task is 404 task not found.'
+        point-in-time window instead of limit. stop_gtid uses that route''s GTID stop
+        instead of limit. The stop position stays in the JSON command and is not a
+        tar member. A sealed name and .open.e* still keep the highest-epoch open segment.
+        Each member uses the GET /api/tasks/{id}/files/{name} open rules: a local
+        file wins, including *.open.e* while RUNNING or STOPPED; a missing local file
+        is read only for a sealed UPLOADED row with a non-empty object_key. An empty
+        selection is 200 and an empty tar. If any selected segment cannot be opened,
+        the response is an error and the body is not a tar. A missing task is 404
+        task not found.'
       parameters:
       - description: Task ID
         in: path
@@ -1105,7 +1159,7 @@ paths:
         required: true
         type: string
       - description: Inventory window limit (same as replay). Ignored when stop_datetime
-          is set.
+          or stop_gtid is set.
         in: query
         name: limit
         type: integer
@@ -1113,7 +1167,11 @@ paths:
         in: query
         name: stop_datetime
         type: string
-      - description: Optional UTC start time. Requires stop_datetime.
+      - description: MySQL GTID server_uuid:seq. Same selection as GET /api/tasks/{id}/replay.
+        in: query
+        name: stop_gtid
+        type: string
+      - description: Optional UTC start time. Requires stop_datetime or stop_gtid.
         in: query
         name: start_datetime
         type: string
@@ -1125,7 +1183,10 @@ paths:
           schema:
             type: file
         "400":
-          description: invalid segment name or invalid datetime
+          description: invalid segment name, invalid datetime, invalid stop_gtid,
+            stop_gtid is not in this task's backed-up range, stop_gtid is not supported
+            for this flavor, stop_datetime and stop_gtid cannot both be set, or start_datetime
+            is after stop_gtid
           schema:
             type: string
         "404":
