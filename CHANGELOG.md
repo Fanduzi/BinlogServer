@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.52] - 2026-10-07
+
+### Fixed
+
+- A worker removes a `.takeover-*` temp left when a process crashes while takeover is downloading an `UPLOADED` object (#224, PR #273, ADR 0005 step 8 of 9). The sweep runs at worker startup, before tasks are claimed, in every task directory under the data dir. `materializeUploaded` runs it again in that task directory before the next download and before `CreateTemp`. A temp this process is still writing stays. A crashed leftover beside that download is removed. A sealed segment, an open segment, the active file, `task-<id>.binlog`, `notes.txt`, and every other name stay. A file in the data dir itself stays, including `.worker-id`. Another task's `.takeover-*` stays until a worker starts or that task materializes. Only a regular file is removed. The log line is `takeover: removed stale temp <name> task=<id> size=<bytes>`. A download that fails while the process is still alive still removes the temp it created. `kill -9` still skips that removal. The next worker start removes the file. Retention still skips every name `ClassifySegment` rejects, including `.takeover-*`. A control-plane-only process does not run this sweep. A delete error at startup exits before the process listens. The message contains `remove stale takeover temps`. Tip dogfood by BinlogServerQA passed on `dbf9f5c62a08a2868a1b6d2545b2d7cdac7bb7ab`. That run did not open a new issue. This release is ADR 0005 step 8. Step 9, dropping `uk_task_file_epoch`, is still next work. No new config key. No schema migration. `minRequiredSchemaVersion` stays 5. `migrations/` is still `000001` through `000005`. There is no `000006`. `uk_task_file_epoch` stays. `file_name` is unchanged. The v0.5.51 unknown-`end_pos` rule still holds. #189 was fixed in v0.5.49. #205 was fixed in v0.5.48. #224 is fixed in this release.
+
 ## [v0.5.49] - 2026-10-07
 
 ### Fixed
