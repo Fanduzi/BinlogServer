@@ -231,19 +231,30 @@ start_restore() {
     --log-bin=mysql-bin \
     --binlog-format=ROW \
     --default-time-zone=+00:00 >/dev/null
-  local i
+  # The official image first starts a temporary init server with --skip-networking.
+  # After it sets the root password it shuts that server down and execs the real
+  # mysqld. A socket SELECT 1 can succeed in that window; the following RESET then
+  # fails with ERROR 2002 because the socket is already gone, and giving up there
+  # aborts the scenario. TCP never reaches the temporary server. Retry until the
+  # final server accepts RESET and gtid_executed is empty (init leaves uuid:1-N).
+  local i got errf
+  errf="$(mktemp)"
   for i in $(seq 1 90); do
-    if docker exec "$name" mysql -uroot -proot -Nse "SELECT 1" >/dev/null 2>&1; then
-      if ! docker exec "$name" mysql -uroot -proot -e "RESET MASTER;" >/dev/null 2>&1 \
-        && ! docker exec "$name" mysql -uroot -proot -e "RESET BINARY LOGS AND GTIDS;" >/dev/null 2>&1; then
-        echo "restore $name could not reset gtid state" >&2
-        return 1
+    if docker exec "$name" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "SELECT 1" >/dev/null 2>"$errf"; then
+      if docker exec "$name" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET MASTER;" >/dev/null 2>"$errf" \
+        || docker exec "$name" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET BINARY LOGS AND GTIDS;" >/dev/null 2>"$errf"; then
+        got="$(docker exec "$name" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "SELECT @@port = 3306 AND @@GLOBAL.gtid_executed = ''" 2>>"$errf" | tr -d '[:space:]' || true)"
+        if [[ "$got" == "1" ]]; then
+          rm -f "$errf"
+          return 0
+        fi
       fi
-      return 0
     fi
     sleep 1
   done
-  echo "restore $name not ready" >&2
+  echo "restore $name could not reset gtid state" >&2
+  cat "$errf" >&2 || true
+  rm -f "$errf"
   docker logs "$name" >&2 || true
   return 1
 }
