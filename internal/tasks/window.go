@@ -324,6 +324,12 @@ func mergeGTID(views []segmentView) binlog.SegmentGTIDLog {
 	return out
 }
 
+// gtidHole is a transaction that committed after the last event stored in
+// prev and before next. A capture that starts in the middle of a source file
+// keeps that file's original previous-GTIDs header, so sequences between the
+// header and the first stored event are before the chain. They are not a break.
+// The next previous-GTIDs set must contain every event prev stored, and must
+// not already contain the sequence after the last of those events.
 func gtidHole(prev, next binlog.SegmentGTIDLog) (bool, error) {
 	if !prev.HasPrevious && len(prev.Events) == 0 && !next.HasPrevious && len(next.Events) == 0 {
 		return false, nil
@@ -332,13 +338,6 @@ func gtidHole(prev, next binlog.SegmentGTIDLog) (bool, error) {
 		nextSet, err := parseGTIDText(next.Previous)
 		if err != nil {
 			return false, err
-		}
-		if prev.HasPrevious {
-			covered, err := coveredGTIDSet(prev)
-			if err != nil {
-				return false, err
-			}
-			return !gtidEqual(covered, nextSet), nil
 		}
 		contained, err := eventsContained(nextSet, prev.Events)
 		if err != nil {
@@ -350,17 +349,6 @@ func gtidHole(prev, next binlog.SegmentGTIDLog) (bool, error) {
 		return previousContainsBeyond(nextSet, prev.Events)
 	}
 	return eventSeqHole(prev.Events, next.Events), nil
-}
-
-func coveredGTIDSet(log binlog.SegmentGTIDLog) (mysql.GTIDSet, error) {
-	set, err := parseGTIDText(log.Previous)
-	if err != nil {
-		return nil, err
-	}
-	if err := addGTIDEvents(set, log.Events); err != nil {
-		return nil, err
-	}
-	return set, nil
 }
 
 func eventGTIDSet(events []binlog.GTIDEventRef) (mysql.GTIDSet, error) {
@@ -392,13 +380,6 @@ func addGTIDEvents(set mysql.GTIDSet, events []binlog.GTIDEventRef) error {
 		}
 	}
 	return nil
-}
-
-func gtidEqual(a, b mysql.GTIDSet) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.Contain(b) && b.Contain(a)
 }
 
 func eventsContained(set mysql.GTIDSet, events []binlog.GTIDEventRef) (bool, error) {
