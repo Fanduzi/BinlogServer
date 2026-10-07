@@ -226,7 +226,7 @@ curl "http://localhost:8080/api/tasks?host=10.0.0.1&port=3306&state=FAILED"
 | LEASE_DEGRADED | 租约续约异常，仍在 grace 窗口内 |
 | REBUILDING_FILE | failover 后正在重建当前 binlog 文件 |
 | RETRY_BACKOFF | 可重试错误，退避等待，租约仍由当前 worker 持有。源不可达连续 10 次后变为 FAILED。瞬时元数据错误、`OBJECT_PURGE_FAILED`、没有已存 GTID 的 MySQL 1236 留在此状态 |
-| FAILED | 不可恢复错误，已停止，租约已放开。`last_error` 以稳定错误码开头，例如 `SOURCE_ACCESS_DENIED`、`SOURCE_UNREACHABLE`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`、`SEALED_FILE_EXISTS`、`CHECKPOINT_WRITE_FAILED` |
+| FAILED | 不可恢复错误，已停止，租约已放开。`last_error` 以稳定错误码开头，例如 `SOURCE_ACCESS_DENIED`、`SOURCE_UNREACHABLE`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`、`SEALED_FILE_EXISTS`、`CHECKPOINT_WRITE_FAILED`、`SOURCE_SWITCHOVER` |
 | STOPPING | 已收到停止请求，等待退出 |
 | STOPPED | 执行路径已退出 |
 
@@ -566,7 +566,7 @@ curl "http://localhost:8080/api/tasks/1/upload-failures/reasons?limit=20"
 
 ### 5.5 回放窗口
 
-`GET /api/tasks/{id}/replay` 用和文件清单相同的 `limit` 窗口，每个源文件序号只返回一条 `file_path`，按序号升序。同一序号既有封存名又有 `.open.e*` 时，留下 epoch 最大的那条 open 路径，不返回封存名，也不返回其余 epoch。
+`GET /api/tasks/{id}/replay` 用和文件清单相同的 `limit` 窗口。同一台源上按 binlog 序号升序。VIP 切到另一台服务器之后，先列出更早那台源的文件（按该源最早的 `created_at`），再列出新源的文件；新源自己的 `mysql-bin.000001` 不会排到旧源更高序号的前面。同一序号既有封存名又有 `.open.e*` 时，留下 epoch 最大的那条 open 路径，不返回封存名，也不返回其余 epoch。跨过切换的 `stop_datetime` 或 `stop_gtid` 也按这个顺序给出 `paths` 和 `command`。
 
 ```bash
 curl http://localhost:8080/api/tasks/1/replay
@@ -828,6 +828,7 @@ curl "http://localhost:8080/api/tasks/{task_id}/events?event_type=TASK_ERROR"
 | TASK_FILE_UPLOAD_FAILED | 文件上传失败 |
 | TASK_LEASE_ACQUIRED | 获取租约 |
 | TASK_LEASE_LOST | 租约丢失 |
+| SOURCE_SWITCHOVER | 任务地址换到了另一台源。`message` 写出旧身份和新身份。能继续时说明从已执行 GTID 集合继续。不能继续时说明原因，并告诉 DBA 对新主库新建任务、保留这份备份。`detail` 是 `old=<旧身份> new=<新身份> gtid_set=<集合> file=<文件> pos=<位点>` |
 
 ## 7. 集群管理 API
 

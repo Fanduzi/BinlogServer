@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, and pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, and FilePos as JSON null and SQL NULL when a binlog position is unknown
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, and SourceSwitchNotice for a VIP source switch event
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -183,6 +183,14 @@ type Storage struct {
 	RetentionDays       int    `json:"retention_days,omitempty"`
 	LocalRetentionDays  int    `json:"local_retention_days,omitempty"`
 	BucketRetentionDays int    `json:"bucket_retention_days,omitempty"`
+}
+
+// SourceSwitchNotice is the DBA-facing record of a VIP reaching a different server.
+// Message names the old and new identity. Continued is false when the task stops.
+type SourceSwitchNotice struct {
+	Message   string
+	Detail    string
+	Continued bool
 }
 
 // TaskEvent 是任务事件流中的一条记录。

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the replay inventory (sealed segments and the highest open epoch), each segment's event-header times and MySQL GTID log, and whether object storage is configured
-// output: the retained chain's earliest and latest UTC event times, the MySQL GTID set those segments contain, and the breaks that keep the chain from being one continuous restore
+// output: the retained chain's earliest and latest UTC event times, the MySQL GTID set those segments contain, and the breaks that keep the chain from being one continuous restore; a missing index is a break only inside one source-name prefix, while a GTID hole is still reported across a source switch
 // pos: read-only recoverable window a DBA can check before choosing a replay stop; replay selection is unchanged
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -139,7 +139,7 @@ func assessRecovery(views []segmentView, flavor string, objectStorage bool) (Rec
 			break
 		}
 		next := parts[i+1]
-		if next.seq > part.seq+1 {
+		if part.prefix == next.prefix && next.seq > part.seq+1 {
 			out.Breaks = append(out.Breaks, missingIndexBreak(part, next))
 		}
 		if mysqlFlavor {
@@ -171,8 +171,9 @@ func assessRecovery(views []segmentView, flavor string, objectStorage bool) (Rec
 }
 
 type chainPart struct {
-	seq   uint64
-	views []segmentView
+	seq    uint64
+	prefix string
+	views  []segmentView
 }
 
 func (p chainPart) sourceName() string {
@@ -200,8 +201,8 @@ func groupChain(views []segmentView) []chainPart {
 		if !key.ok {
 			continue
 		}
-		if len(parts) == 0 || parts[len(parts)-1].seq != key.seq {
-			parts = append(parts, chainPart{seq: key.seq})
+		if len(parts) == 0 || parts[len(parts)-1].seq != key.seq || parts[len(parts)-1].prefix != key.prefix {
+			parts = append(parts, chainPart{seq: key.seq, prefix: key.prefix})
 		}
 		last := &parts[len(parts)-1]
 		last.views = append(last.views, view)
