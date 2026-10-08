@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: mysql80 with GTID on, the suite API, and the task data directory
+# input: mysql80 with GTID on, the suite API, the task data directory, and the Percona 8.0 mysqlbinlog client
 # output: GTID and LATEST tasks that survive several Binlog Dump kills and one rotation, with every new transaction stored once, a window that matches the files, and a replay checksum that matches the source
 # pos: CI coverage for a dump reconnect that must resume from the flushed GTID set or file position
 # note: if this file changes, update this header and scripts/e2e/README.md.
@@ -210,8 +210,11 @@ apply_replay() {
   json="$(curl -fsS "$API/api/tasks/$id/replay")"
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
+    if [[ "$p" != /* ]]; then
+      p="$ROOT_DIR/${p#./}"
+    fi
     dest="/tmp/redump-${id}-${i}.bin"
-    docker cp "$p" "$RESTORE:${dest}"
+    docker compose -f "$COMPOSE_FILE" cp "$p" "percona80:${dest}" </dev/null
     paths+=("$dest")
     i=$((i + 1))
   done < <(jq -r '.paths[]' <<<"$json")
@@ -221,11 +224,17 @@ apply_replay() {
   fi
   docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET MASTER;" >/dev/null 2>&1 \
     || docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET BINARY LOGS AND GTIDS;" >/dev/null
-  # bash so pipefail is available; a mysqlbinlog error must fail the scenario.
-  if ! docker exec "$RESTORE" bash -c "set -o pipefail; mysqlbinlog ${paths[*]} | mysql -uroot -proot -h127.0.0.1 --protocol=tcp"; then
+  # mysql:8.0 has no mysqlbinlog. The suite's pipefail makes either side fail the scenario.
+  local log
+  log="$(mktemp)"
+  if ! docker compose -f "$COMPOSE_FILE" exec -T percona80 mysqlbinlog "${paths[@]}" \
+    | docker exec -i "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp --binary-mode >"$log" 2>&1; then
     echo "replay of task $id failed" >&2
+    cat "$log" >&2 || true
+    rm -f "$log"
     return 1
   fi
+  rm -f "$log"
 }
 
 echo "[gtid-redump] compression off so GTID and XID stay outside a transaction payload"
