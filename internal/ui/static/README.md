@@ -14,7 +14,7 @@
 ## Exports
 
 - 被 `internal/ui` 挂载并通过 `/ui/` 提供访问。
-- 当前构建产物包含回放集 tar 下载、UTC 定点恢复（停止时间、停止 GTID `stop_gtid`、可选开始时间、复制 `TZ=UTC` 命令、下载该窗口）、遗留目录「认领」、独立 starting 指标卡、只信 dashboard 一次物化的任务页、一次刷新编排、列表租约风险用任务抄本、全局/当前页筛选范围提示、source 状态计数、单请求批量任务创建，以及 `single_process` 时「本进程拉取」文案，使用 `make ui-build` 同步。`scripts/check-ui-bundle.sh` 要求这些 PITR 标记出现在 `index.html` 加载的 bundle 里。
+- 当前构建产物包含 `storage_alert`（任务行和详情里的 `task-storage-alert`）、回放集 tar 下载、UTC 定点恢复（停止时间、停止 GTID `stop_gtid`、可选开始时间、复制 `TZ=UTC` 命令、下载该窗口）、遗留目录「认领」、独立 starting 指标卡、只信 dashboard 一次物化的任务页、一次刷新编排、列表租约风险用任务抄本、全局/当前页筛选范围提示、source 状态计数、单请求批量任务创建，以及 `single_process` 时「本进程拉取」文案，使用 `make ui-build` 同步。`scripts/check-ui-bundle.sh` 要求这些 PITR 标记和 `task-storage-alert` 出现在 `index.html` 加载的 bundle 里。
 
 ## Dependencies
 

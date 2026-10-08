@@ -8,6 +8,7 @@
 - `event_time.go`: 读一个分段的事件头，给出复制流里第一个和最后一个非 0 时间戳。时间戳 0 跳过。格式描述（format description）和 previous-GTIDs 的时间是源文件创建时间，不计入覆盖。没有 magic 或没有剩余计时事件时不算覆盖。尾部撕掉的字节保留已经读完的事件时间。
 - `gtid_pos.go`: `ScanSegmentForGTID` 在一个分段里找第一个 MySQL `GTID_EVENT`（UUID 不区分大小写，序号相等）。返回的偏移是该事件的起始字节，给 `mysqlbinlog --stop-position` 用，不是事件头里的 `end_log_pos`。previous-GTIDs 不算。没有 magic 时返回空结果。尾部撕掉时保留已经读完的命中。
 - `gtid_set_scan.go`: `ScanSegmentGTIDs` 读同一个分段里的 previous-GTIDs 文本，以及每一条 MySQL `GTID_EVENT` 的 UUID、序号、起始字节和事件头时间。格式描述标明 CRC32 时，previous-GTIDs 的校验和尾部先剥掉再解码。尾部撕掉时保留已经读完的事件。previous-GTIDs 解不出来是错误。
+- `storage_consistency.go`: `DetectStorageProblem` 扫任务目录。分段里的 Rotate 指向自己或更早的同名 binlog（身份前缀 `uuid.` 先剥掉）是一条问题。checkpoint 的 MySQL `gtid_set` 若包含某个已出现 UUID 里、大于等于该 UUID 最小已存序号、但事件里没有的序号，也是一条问题。比最小已存序号更小的起点集合不算。没有任何 GTID 事件的 UUID 不算。MariaDB 不做这组区间比较。空 flavor 能按 MySQL 解析时按 MySQL 比较。目录不存在不是问题。
 
 ## Exports
 - 文件写入、rotate 与 checkpoint 推进基础能力。

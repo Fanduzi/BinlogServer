@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: internal/ui/static/index.html, the JS bundle graph it loads, and Console markers in frontend/src
-# output: non-zero exit when a loaded Console bundle is not valid ESM, or when a frontend/src PITR, recoverable-window, or source-switch marker is missing from that graph
+# output: non-zero exit when a loaded Console bundle is not valid ESM, or when a frontend/src PITR, recoverable-window, source-switch, or storage-alert marker is missing from that graph
 # pos: release gate for the JS that Chrome loads from /ui/; CI and the tag workflow both run this before publish
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -110,6 +110,7 @@ const markers = [
   { text: '"task-source-next"', source: "frontend/src/components/TaskDetailDrawer.vue" },
   { text: "保留这份备份", source: "frontend/src/locales/zh-CN.json" },
   { text: "kept copying", source: "frontend/src/locales/en.json" },
+  { text: '"task-storage-alert"', source: "frontend/src/components/TaskDetailDrawer.vue" },
 ];
 
 function present(haystack, text) {

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner/source failures and stable operator error codes
-// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, the SOURCE_UNREACHABLE budget predicate, the retry allowlist (SOURCE_UNREACHABLE, transient metadata text, OBJECT_PURGE_FAILED), a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker, and permanent SOURCE_SWITCHOVER when a VIP reaches a different server and the backup cannot continue
+// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, STREAM_REGRESSION when a dump contradicts stored bytes, STORAGE_INCONSISTENT when a checkpoint or segment already does, the SOURCE_UNREACHABLE budget predicate, the retry allowlist (SOURCE_UNREACHABLE, transient metadata text, OBJECT_PURGE_FAILED), a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker, and permanent SOURCE_SWITCHOVER when a VIP reaches a different server and the backup cannot continue
 // pos: shared operator-error types used by scheduler retry policy and source probing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -36,6 +36,14 @@ const (
 	// CodeSourceSwitchover means the task host:port now reaches a different server
 	// and this backup cannot continue without mixing the two binlogs.
 	CodeSourceSwitchover = "SOURCE_SWITCHOVER"
+	// CodeStreamRegression means the dump contradicted bytes already stored:
+	// a rotate to an older or current file, a position behind the cursor, or a GTID gap.
+	// Another start hits the same stream. The task stays FAILED.
+	CodeStreamRegression = "STREAM_REGRESSION"
+	// CodeStorageInconsistent means a checkpoint gtid_set or a segment on disk
+	// already disagrees with the transactions those files contain.
+	// Starting again would drop more transactions. The task stays FAILED.
+	CodeStorageInconsistent = "STORAGE_INCONSISTENT"
 )
 
 // ErrLeaseHandoff means this runner's lease epoch is no longer the one that owns the task.

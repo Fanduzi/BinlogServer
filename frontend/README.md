@@ -4,7 +4,7 @@
 | File | Responsibility |
 |------|---------------|
 | `src/main.js` | Vue 应用入口 |
-| `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、全局/当前页筛选范围、任务详情与设置对话框；遗留目录详情走认领；`single_process` 时总览与 Worker 页写明本进程拉取；刷新只走 `useDashboard.refreshAll` |
+| `src/App.vue` | 主组件，含左侧功能菜单、多视图分区（总览/任务/源库/Worker/告警）、全局/当前页筛选范围、任务详情与设置对话框；任务行在 `storage_alert` 出现时显示不一致标记；遗留目录详情走认领；`single_process` 时总览与 Worker 页写明本进程拉取；刷新只走 `useDashboard.refreshAll` |
 | `src/components/MetricGrid.vue` | 首屏任务指标卡，分别展示 starting 与 running |
 | `src/api.js` | API 调用封装，含 dashboard 任务观测、真实后端请求、单/批量任务创建、遗留目录 adopt、`GET /api/tasks/{id}/window` 可恢复窗口、`stop_datetime` / `stop_gtid` / `start_gtid_set` 定点回放、401 处理与开发态 mock 分发；不提供 summary / 全量 list 客户端 |
 | `src/composables/useBatchCreate.js` | 批量任务表单预校验（最多 100 个有效行）、单次 `/api/tasks/batch` 创建请求与逐成功项自动启动 |
