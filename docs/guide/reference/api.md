@@ -272,7 +272,7 @@ curl http://localhost:8080/api/tasks/{task_id}
 
 HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。`last_error`、`owner_worker_id`、`epoch`、`run_id` 为空时不出现。任务不存在是 HTTP 404，正文 `task not found`。
 
-列表、dashboard 的 `tasks[].task` 和这条详情在发现不一致时多一个 `storage_alert`：`code` 是 `STORAGE_INCONSISTENT`，`message` 说明 checkpoint 声称了文件里没有的事务，或分段里有一条指向自己或更早文件的 Rotate，并写明恢复步骤。没有这个问题时该字段不出现。它是读目录和 checkpoint 算出来的，不入库，也没有新的迁移。`/window` 的 `continuous: true` 只说明相邻文件接得上；同一个文件内部的 GTID 序号空洞会让 `continuous` 为 false。checkpoint 的 `gtid_set` 不能当作“这些事务已经在文件里”的证明。
+列表、dashboard 的 `tasks[].task` 和这条详情在发现分段内部损坏时多一个 `storage_alert`：`code` 是 `STORAGE_INCONSISTENT`，`message` 说明某一个分段里有指向自己或更早文件的 Rotate、位点或 GTID 倒退，或 checkpoint 声称了这个分段中间缺掉的事务，并写明恢复步骤。保留、过期、换主或起点空洞造成的文件间缺口不设置该字段，这类缺口看 `/window` 的 `breaks`。没有这个问题时该字段不出现。它是读目录和 checkpoint 算出来的，不入库，也没有新的迁移。`/window` 的 `continuous: true` 只说明相邻文件接得上；同一个文件内部的 GTID 序号空洞会让 `continuous` 为 false。checkpoint 的 `gtid_set` 不能当作“这些事务已经在文件里”的证明。
 
 这条任务有 `.source-chain`，或有 `SOURCE_SWITCHOVER` 事件时，多一个 `source_chain`。没有这两样时该字段不出现，已有字段仍在顶层。列表和 `PUT` 不带这个字段。没有新的表，也没有新的配置项。
 
