@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task directory and a checkpoint reader
-// output: assertions that AttachStorageAlert reports a checkpoint ahead of the files and leaves the stored task unchanged
+// output: assertions that AttachStorageAlert reports an intra-file hole the checkpoint claims and leaves the stored task unchanged
 // pos: list and get surface a backup damaged by a stale GTID re-dump
 // note: if this file changes, update this header and module README.md.
 package tasks

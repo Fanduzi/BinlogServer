@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task id, the scheduler data directory, and the stored checkpoint gtid_set
-// output: a copy of the task with storage_alert set when the on-disk segments disagree with that checkpoint; the scheduler's stored task is left unchanged
+// output: a copy of the task with storage_alert set when one segment shows a stale re-dump; a gap between files leaves the task unchanged
 // pos: surface an already-damaged backup on list and get without a schema change
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -12,10 +12,12 @@ import (
 	"binlog_server/internal/binlog"
 )
 
-// AttachStorageAlert returns a copy of task with StorageAlert set when the
-// task directory has a stray rotate or a checkpoint gtid_set that names a
-// transaction the files do not contain. The scheduler's stored task is not
-// written. A directory that cannot be read leaves the alert unset.
+// AttachStorageAlert returns a copy of task with StorageAlert set when one
+// segment rotates to its own or an older file, a position or GTID goes
+// backwards inside a segment, or a GTID hole inside a segment is claimed by
+// the checkpoint. A gap left by retention or expiry does not set it. The
+// scheduler's stored task is not written. A directory that cannot be read
+// leaves the alert unset.
 func (s *Scheduler) AttachStorageAlert(ctx context.Context, task Task) Task {
 	if s == nil {
 		return task

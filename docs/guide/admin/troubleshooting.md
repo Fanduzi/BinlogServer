@@ -58,16 +58,23 @@
 | `SEGMENT_NOT_ON_WORKER` | 租约已经到这台 worker，分段目录还在死掉的 worker 上。`last_error` 里的路径就是 `binlog_files.file_path`，本机读不到 | 把该路径挂到这台 worker，或把分段拷过来，再 `POST /api/tasks/{id}/start`。不要在新目录上从位置 4 重拉。checkpoint 已在 `UPLOADED` 对象里时任务不会停在这个错误，会从对象续。见部署指南 6.3 第 2 节 |
 | `SEALED_FILE_EXISTS` | 轮转要封的文件已经在这块盘上。任务是 `FAILED`，租约已放开，不再连源 | 确认这个封存文件是要留下的那一份。冲突的 open 分段不要再封成同一个名字。处理完再 `POST /api/tasks/{id}/start`。若 `last_error` 或 `storage_alert` 同时写着 Rotate 被追加进了已经打开的文件，这是下面的 `STORAGE_INCONSISTENT`，不要再 Start |
 | `STREAM_REGRESSION` | 拉流和已经落盘的内容对不上：Rotate 指向更早的文件，Rotate 带着真实 end_log_pos 又指向当前文件，事件位点比已落盘位点小，或 GTID 跳过了已落盘集合。任务是 `FAILED`，不会把这条流继续写成“已经写过” | 不要从这份文件恢复。对源上仍有的 GTID 新建一个任务。旧任务留着供核对 |
-| `STORAGE_INCONSISTENT` | 任务目录里的 checkpoint `gtid_set` 声称了分段里没有的事务，或某个分段里有指向自己或更早文件的 Rotate。列表、dashboard 和 `GET /api/tasks/{id}` 带 `storage_alert`。再 Start 会直接 `FAILED`，不会变成 `RUNNING` 后把新事务丢掉 | 见下文「checkpoint 比文件多声称了事务」 |
+| `STORAGE_INCONSISTENT` | 某一个分段里有指向自己或更早文件的 Rotate，或位点、GTID 在这个分段里倒退，或 checkpoint 声称了这个分段内部缺掉的事务。列表、dashboard 和 `GET /api/tasks/{id}` 带 `storage_alert`。再 Start 会直接 `FAILED`，不会变成 `RUNNING` 后把新事务丢掉。保留删文件、从前过期、换主后的另一个 UUID、起点集合里原有的空洞，都不是这个错误 | 见下文「分段里的 Rotate 回卷或段内丢事务」 |
 | `CHECKPOINT_WRITE_FAILED` | checkpoint 写不进去，而且不是会死锁、断连、锁等待、只读切换这类瞬时错误。任务是 `FAILED`，租约已放开 | 看 `last_error` 里的数据库错误。表、权限或语法问题需要先修元数据库，再 `POST /api/tasks/{id}/start`。瞬时元数据错误仍是 `RETRY_BACKOFF`，不会用这个码 |
 | `lease/epoch mismatch` | 封文件时这台 worker 的租约 epoch 已经不是当前主人。本进程停止，不把任务写成 `FAILED`，也不再连源 | 看任务行上的 `owner_worker_id`。新主人还在跑就不用管。没有 store 时本进程显示 `STOPPED`，事件 `TASK_LEASE_YIELDED`。需要这台机器再跑时再 Start |
 | `api.auth.enabled=false cannot protect` | 鉴权未启用但尝试保护路由 | 设置 `api.auth.enabled=true` 或关闭保护 |
 | `bearer_token is required when protection is enabled` | 启用保护但未配置凭证 | 配置 `bearer_token` 或 `api_key` |
 | `http.*.read_timeout_sec must be > 0` | 超时参数配置非法 | 确保所有超时参数 > 0 |
 
-### 2.3.1 checkpoint 比文件多声称了事务
+### 2.3.1 分段里的 Rotate 回卷或段内丢事务
 
-v0.5.57 以及该版本之前，GTID 任务的 dump 连接一旦断开重连，可能把上一个 binlog 文件末尾的 Rotate 追加进当前打开的分段，随后把新事务当成“已经写过”丢掉。任务可以显示 `RUNNING`、延迟 0，checkpoint 的 `gtid_set` 仍包含被丢掉的事务，`/window` 也可以是 `continuous: true`。
+v0.5.57 以及该版本之前，GTID 任务的 dump 连接一旦断开重连，可能把上一个 binlog 文件末尾的 Rotate 追加进当前打开的分段，随后把新事务当成“已经写过”丢掉。任务可以显示 `RUNNING`、延迟 0，checkpoint 的 `gtid_set` 仍包含被丢掉的事务。
+
+`STORAGE_INCONSISTENT` 只认这种损坏在**一个分段里面**的痕迹：Rotate 指向自己或更早的文件，位点或 GTID 序号倒退，或 checkpoint 声称了这个分段中间缺掉的序号。下面这些不是损坏，任务照常启动。缺了哪些文件由 `GET /api/tasks/{id}/window` 的 `breaks` 说明，不拒绝 Start：
+
+- 本地保留删掉了较新的已上传文件，或删掉了中间文件，剩下的分段各自仍然连续。
+- 较旧的文件从前面过期，checkpoint 仍含有那些已经不在盘上的序号。
+- 换主之后多了一个 server UUID。
+- 任务的起点 GTID 集合本身有空洞。
 
 出现 `STORAGE_INCONSISTENT` 或 `storage_alert` 时：
 
