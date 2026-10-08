@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: mysql80 with GTID on, the suite API, and the task data directory
-# output: GTID and LATEST tasks that survive several Binlog Dump kills and one rotation, with every new transaction stored once and a window that matches the files
+# output: GTID and LATEST tasks that survive several Binlog Dump kills and one rotation, with every new transaction stored once, a window that matches the files, and a replay checksum that matches the source
 # pos: CI coverage for a dump reconnect that must resume from the flushed GTID set or file position
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -13,6 +13,8 @@ RUN_TAG="$(date +%s)"
 DB="redump_${RUN_TAG}"
 RESTORE="binlog-e2e-redump-${RUN_TAG}"
 ROWS=40
+REPL_USER="rd${RUN_TAG}"
+REPL_PASS="redumppass"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }
@@ -39,6 +41,7 @@ cleanup() {
   if [[ -n "${LATEST_TASK:-}" ]]; then
     curl -fsS -X POST "$API/api/tasks/$LATEST_TASK/stop" >/dev/null 2>&1 || true
   fi
+  mysql80 "DROP USER IF EXISTS '${REPL_USER}'@'%';" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -67,7 +70,7 @@ wait_state() {
 }
 
 dump_count() {
-  mysql80 "SELECT COUNT(*) FROM information_schema.processlist WHERE USER='repl' AND COMMAND LIKE 'Binlog Dump%';"
+  mysql80 "SELECT COUNT(*) FROM information_schema.processlist WHERE USER='${REPL_USER}' AND COMMAND LIKE 'Binlog Dump%';"
 }
 
 wait_dumps() {
@@ -86,7 +89,7 @@ wait_dumps() {
 
 kill_dumps() {
   local ids id n=0
-  ids="$(mysql80 "SELECT ID FROM information_schema.processlist WHERE USER='repl' AND COMMAND LIKE 'Binlog Dump%';")"
+  ids="$(mysql80 "SELECT ID FROM information_schema.processlist WHERE USER='${REPL_USER}' AND COMMAND LIKE 'Binlog Dump%';")"
   for id in $ids; do
     [[ -z "$id" ]] && continue
     mysql80 "KILL ${id};" >/dev/null || true
@@ -165,24 +168,37 @@ assert_checkpoint_matches_window() {
 
 start_restore() {
   docker rm -f "$RESTORE" >/dev/null 2>&1 || true
+  # Own network namespace so this server does not bind the host's 3306.
+  # MYSQL_ROOT_HOST=% is what lets docker exec reach it over TCP as root@127.0.0.1.
   docker run -d --name "$RESTORE" \
-    --network host \
     -e MYSQL_ROOT_PASSWORD=root \
-    -e MYSQL_ALLOW_EMPTY_PASSWORD=no \
+    -e MYSQL_ROOT_HOST=% \
     mysql:8.0 \
     --gtid-mode=ON \
     --enforce-gtid-consistency=ON \
     --server-id=19080 \
     --log-bin=mysql-bin \
     --binlog-format=ROW >/dev/null
-  local i
+  # The image answers SELECT 1 on a temporary init server, then restarts.
+  # Wait until RESET sticks and gtid_executed is empty.
+  local i got errf
+  errf="$(mktemp)"
   for i in $(seq 1 90); do
-    if docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "SELECT 1" >/dev/null 2>&1; then
-      return 0
+    if docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "SELECT 1" >/dev/null 2>"$errf"; then
+      if docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET MASTER;" >/dev/null 2>"$errf" \
+        || docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET BINARY LOGS AND GTIDS;" >/dev/null 2>"$errf"; then
+        got="$(docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "SELECT @@port = 3306 AND @@GLOBAL.gtid_executed = ''" 2>>"$errf" | tr -d '[:space:]' || true)"
+        if [[ "$got" == "1" ]]; then
+          rm -f "$errf"
+          return 0
+        fi
+      fi
     fi
     sleep 1
   done
   echo "restore $RESTORE did not become ready" >&2
+  cat "$errf" >&2 || true
+  rm -f "$errf"
   docker logs "$RESTORE" >&2 || true
   return 1
 }
@@ -205,7 +221,8 @@ apply_replay() {
   fi
   docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET MASTER;" >/dev/null 2>&1 \
     || docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET BINARY LOGS AND GTIDS;" >/dev/null
-  if ! docker exec "$RESTORE" sh -c "mysqlbinlog ${paths[*]} | mysql -uroot -proot -h127.0.0.1 --protocol=tcp"; then
+  # bash so pipefail is available; a mysqlbinlog error must fail the scenario.
+  if ! docker exec "$RESTORE" bash -c "set -o pipefail; mysqlbinlog ${paths[*]} | mysql -uroot -proot -h127.0.0.1 --protocol=tcp"; then
     echo "replay of task $id failed" >&2
     return 1
   fi
@@ -213,6 +230,8 @@ apply_replay() {
 
 echo "[gtid-redump] compression off so GTID and XID stay outside a transaction payload"
 mysql80 "SET GLOBAL binlog_transaction_compression=OFF;"
+mysql80 "CREATE USER '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';"
+mysql80 "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${REPL_USER}'@'%';"
 
 seed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
 if [[ -z "$seed" ]]; then
@@ -230,8 +249,8 @@ create_body() {
       --arg name "$name" \
       --arg gtid "$gtid" \
       --arg host "$E2E_SOURCE_HOST" \
-      --arg user "$E2E_SOURCE_USER" \
-      --arg pass "$E2E_SOURCE_PASS" \
+      --arg user "$REPL_USER" \
+      --arg pass "$REPL_PASS" \
       --argjson port "$E2E_MYSQL80_PORT" \
       --argjson sid "$sid" \
       '{name:$name,cluster_key:$name,source:{host:$host,port:$port,user:$user,password:$pass,flavor:"mysql",server_id:$sid},start:{mode:"GTID",gtid_set:$gtid},storage:{retention_days:7}}'
@@ -239,8 +258,8 @@ create_body() {
     jq -n \
       --arg name "$name" \
       --arg host "$E2E_SOURCE_HOST" \
-      --arg user "$E2E_SOURCE_USER" \
-      --arg pass "$E2E_SOURCE_PASS" \
+      --arg user "$REPL_USER" \
+      --arg pass "$REPL_PASS" \
       --argjson port "$E2E_MYSQL80_PORT" \
       --argjson sid "$sid" \
       '{name:$name,cluster_key:$name,source:{host:$host,port:$port,user:$user,password:$pass,flavor:"mysql",server_id:$sid},start:{mode:"LATEST"},storage:{retention_days:7}}'
@@ -267,7 +286,8 @@ wait_state "$LATEST_TASK" RUNNING
 wait_dumps
 echo "[gtid-redump] gtid=$GTID_TASK latest=$LATEST_TASK running"
 
-mysql80 "CREATE DATABASE ${DB}; CREATE TABLE ${DB}.t (id INT PRIMARY KEY, v VARCHAR(64) NOT NULL);"
+mysql80 "CREATE DATABASE ${DB};"
+mysql80 "CREATE TABLE ${DB}.t (id INT PRIMARY KEY, v VARCHAR(64) NOT NULL);"
 
 killed=0
 n=1
