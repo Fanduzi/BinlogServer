@@ -12,8 +12,8 @@
 ## Exports
 
 - 作为 `/ui/` 资源子路径被浏览器按需加载。
-- 当前 `index-pG5IVqps.js` 与 `internal/ui/static/index.html` 成对发布；起点、续传、回放集 tar、分段下载、可恢复窗口（`task-recovery-window`、`这条备份链有缺口`）、回放命令、UTC 定点恢复（`task-pitr`、`task-pitr-gtid`、`stop_datetime`、`stop_gtid`、`停止时间`、`停止 GTID`）、认领、任务文件路径、`checksum` 列、`location` 列、本地/桶保留天数、Flavor 下拉、任务观测、单机 `single_process` 文案，或源库 Binlog Dump 残留警告变更后由 `make ui-build` 更新。仅删除被新 index 直接替代的旧 entry。
-- `make ui-build` 用字节拼接写入 L3 头，不改 minified 正文；随后 `scripts/check-ui-bundle.sh` 用 `node --check --input-type=module` 检查 `index.html` 加载的 JS 图，并要求 `frontend/src` 的可恢复窗口标记和 PITR 标记出现在这些 bundle 里。语法错误或标记缺失则构建失败。
+- 当前 `index-BasSG5NR.js` 与 `internal/ui/static/index.html` 成对发布；起点、续传、回放集 tar、分段下载、可恢复窗口（`task-recovery-window`、`这条备份链有缺口`）、回放命令、UTC 定点恢复（`task-pitr`、`task-pitr-gtid`、`stop_datetime`、`stop_gtid`、`停止时间`、`停止 GTID`）、源服务器链（`task-source-chain`、`task-source-continued`、`task-source-stopped`、`task-source-next`）、认领、任务文件路径、`checksum` 列、`location` 列、本地/桶保留天数、Flavor 下拉、任务观测、单机 `single_process` 文案，或源库 Binlog Dump 残留警告变更后由 `make ui-build` 更新。仅删除被新 index 直接替代的旧 entry。
+- `make ui-build` 用字节拼接写入 L3 头，不改 minified 正文；随后 `scripts/check-ui-bundle.sh` 用 `node --check --input-type=module` 检查 `index.html` 加载的 JS 图，并要求 `frontend/src` 的可恢复窗口标记、PITR 标记和换主标记出现在这些 bundle 里。语法错误或标记缺失则构建失败。
 
 ## Dependencies
 
