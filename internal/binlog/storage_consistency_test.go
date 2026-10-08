@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: segment bytes and a checkpoint gtid_set
-// output: assertions that a stray rotate, an intra-file regression, and the case-8 re-dump layout are reported, and that a retention gap, front expiry, a switch, and a holed start set are not
+// output: assertions that a stray rotate, a backwards event position, and the case-8 re-dump layout are reported, and that out-of-order commits, interleaved UUIDs, and a holed start set are not
 // pos: unit coverage for detecting a backup damaged by a stale GTID re-dump
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -26,12 +26,33 @@ func TestDetectStorageProblem(t *testing.T) {
 			t.Fatal("start set below the first stored event is not a problem")
 		}
 	})
-	t.Run("checkpoint ahead", func(t *testing.T) {
+	t.Run("out of order across segments", func(t *testing.T) {
 		dir := t.TempDir()
-		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000006"), nil, 37, 38, 39, 43, 44)
-		problem, found := DetectStorageProblem(dir, storageUUID+":1-44", "")
-		if !found || !strings.Contains(problem.Message, storageUUID+":40") || !strings.Contains(problem.Message, "Create a new task") {
-			t.Fatalf("problem %+v found=%v", problem, found)
+		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000001"), storageUUID, nil, []int64{39, 41}, []uint32{200, 400})
+		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000002"), storageUUID, nil, []int64{40}, []uint32{300})
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-41", "mysql"); found {
+			t.Fatal("A:40 committing in the next file is replica commit order, not a re-dump")
+		}
+	})
+	t.Run("interleaved uuids", func(t *testing.T) {
+		dir := t.TempDir()
+		const other = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+		writeMixedGTIDs(t, filepath.Join(dir, "mysql-bin.000001"), []mixedGTID{
+			{storageUUID, 5, 200},
+			{other, 1, 300},
+			{storageUUID, 4, 400},
+			{other, 2, 500},
+		})
+		checkpoint := storageUUID + ":1-5," + other + ":1-2"
+		if _, found := DetectStorageProblem(dir, checkpoint, "mysql"); found {
+			t.Fatal("interleaved UUIDs and an out-of-order commit are not a re-dump")
+		}
+	})
+	t.Run("start set hole inside range", func(t *testing.T) {
+		dir := t.TempDir()
+		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000001"), storageUUID, nil, []int64{10, 11, 12, 14, 15}, nil)
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-12:14-15", "mysql"); found {
+			t.Fatal("a start-set hole inside the segment range is not a dropped transaction")
 		}
 	})
 	t.Run("checkpoint past last event", func(t *testing.T) {
@@ -87,12 +108,11 @@ func TestDetectStorageProblem(t *testing.T) {
 			t.Fatalf("problem %+v found=%v", problem, found)
 		}
 	})
-	t.Run("gtid regresses", func(t *testing.T) {
+	t.Run("gtid order alone", func(t *testing.T) {
 		dir := t.TempDir()
 		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000006"), storageUUID, nil, []int64{39, 37}, []uint32{200, 300})
-		problem, found := DetectStorageProblem(dir, storageUUID+":1-39", "mysql")
-		if !found || !strings.Contains(problem.Message, "goes backwards") {
-			t.Fatalf("problem %+v found=%v", problem, found)
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-39", "mysql"); found {
+			t.Fatal("a GTID sequence that goes backwards without a rotate or a position regression is replica commit order")
 		}
 	})
 	t.Run("position regresses", func(t *testing.T) {
@@ -167,6 +187,31 @@ func TestDetectStorageProblem(t *testing.T) {
 			t.Fatal("a non-segment file is not a problem")
 		}
 	})
+}
+
+type mixedGTID struct {
+	uuid string
+	seq  int64
+	pos  uint32
+}
+
+func writeMixedGTIDs(t *testing.T, path string, events []mixedGTID) {
+	t.Helper()
+	var buf []byte
+	buf = append(buf, 0xfe, 'b', 'i', 'n')
+	for _, ev := range events {
+		sid, err := hex.DecodeString(strings.ReplaceAll(ev.uuid, "-", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := make([]byte, 1+goreplication.SidLength+8)
+		copy(payload[1:], sid)
+		binary.LittleEndian.PutUint64(payload[1+goreplication.SidLength:], uint64(ev.seq))
+		buf = append(buf, eventBytes(byte(goreplication.GTID_EVENT), ev.pos, payload)...)
+	}
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeGTIDSegment(t *testing.T, path string, rotates []string, seqs ...int64) {
