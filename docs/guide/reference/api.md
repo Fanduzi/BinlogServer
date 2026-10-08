@@ -272,6 +272,12 @@ curl http://localhost:8080/api/tasks/{task_id}
 
 HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。`last_error`、`owner_worker_id`、`epoch`、`run_id` 为空时不出现。任务不存在是 HTTP 404，正文 `task not found`。
 
+这条任务有 `.source-chain`，或有 `SOURCE_SWITCHOVER` 事件时，多一个 `source_chain`。没有这两样时该字段不出现，已有字段仍在顶层。列表和 `PUT` 不带这个字段。没有新的表，也没有新的配置项。
+
+`source_chain.servers` 按写下文件的顺序。第一台的文件没有身份前缀。后面每一台的文件名是 `{identity}.{binlog 文件名}`。`current` 为 true 的是最后一台，也是 `source_chain.current`。磁盘上的 `.source-chain` 存在时，服务器顺序以它为准。停下来的那次切换不会把新身份追加进这个文件。没有这个文件时，服务器从继续复制的切换里还原：第一条的 `old`，然后每一次 `continued` 为 true 的 `new`。停下的 `new` 不拥有文件。
+
+`source_chain.switches` 是 `SOURCE_SWITCHOVER` 事件，旧的在前。`old`、`new` 是两台身份。`file` 是源 binlog 名，不是磁盘前缀。`pos` 为 0 时不出现。`gtid_set` 为空时不出现。`continued` 总是出现：true 表示任务继续复制，false 表示任务停下。`reason` 只在停下时出现，取值 `no_gtid`、`missing_transactions`、`purged`、`mariadb`、`gtid_unreadable`。认不出原因时不出现。`outcome` 是最近一次切换的 `continued` 或 `stopped`。还没切换时不出现。最多返回最早的 1000 条这类事件。
+
 源库不可达的 Stop 仍返回这条 `STOPPED` 任务，并多一个 `pending_dump_cleanup`：`connection_id`、`host`、`port`、`warning`，schema 3 再加 `process_local: true`。`warning` 是 `source Binlog Dump connection <id> may still be open; will KILL when source is reachable`。`process_local` 为 true 时后面还有一句：只有拉过这条 dump 的那个进程看得到，别的进程和重启都看不到，直到迁移 `000004`。没有残留连接时这个字段不出现。正在拉的 dump 把连接号记成 `held`，这个字段不出现。`RUNNING` 上若还有没确认的残留，字段会出现，任务停在 `RETRY_BACKOFF` 时 `last_error` 是同一句警告，并且不会再开一条 dump。`STOPPED` 之后字段还在。源库恢复后，任何认领到这行的 worker 会 `KILL` 该连接号，成功或该号已不在 processlist（含 `ER_NO_SUCH_THREAD`）后字段消失。集群还在 schema 3 时，别的 worker 不能替这条 dump 收尾或接管，`last_error` 要求先跑迁移 `000004`。半开路径上源库线程能留多久不由这个字段保证，见部署指南里的 TCP 重传说明。DBA 可以按 `connection_id` 手动 `KILL`。
 
 **响应示例：**
@@ -297,9 +303,30 @@ HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。
   "storage": {
     "retention_days": 30
   },
-  "updated_at": "2024-01-01T10:05:00Z"
+  "updated_at": "2024-01-01T10:05:00Z",
+  "source_chain": {
+    "current": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "outcome": "continued",
+    "servers": [
+      {"identity": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "current": false},
+      {"identity": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "current": true}
+    ],
+    "switches": [
+      {
+        "time": "2024-01-01T10:04:00Z",
+        "old": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "new": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "file": "mysql-bin.000003",
+        "pos": 154,
+        "gtid_set": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-20",
+        "continued": true
+      }
+    ]
+  }
 }
 ```
+
+没有换过服务器时，响应里没有 `source_chain`。
 
 ### 3.5 启动任务
 
@@ -502,6 +529,8 @@ HTTP 200 的正文是 JSON 数组。顺序按源文件序号升序；同一序�
 ```
 
 `state` 是 `OPEN` 或 `SEALED`。`upload_state` 是 `LOCAL_ONLY`、`UPLOADED` 或 `UPLOAD_FAILED`。`location` 是列出时算出来的，不入库：`local` 表示字节在本机，`bucket` 表示只有已上传对象（`file_path` 是目录路径，磁盘上已经没有这个文件），`both` 表示两边都有。空则不出现。只在桶里的分段仍能下载，回放的 `locations` 与 `paths` 对齐，值为 `bucket` 时先下载再交给 `mysqlbinlog`。
+
+`source_identity` 也是列出时算出来的，不入库。任务还没有服务器链时不出现。第一台身份拥有没有前缀的文件名。后面某一台身份拥有以 `{identity}.` 开头的文件名。`.open.e*` 和 `.sealed.e*` 先去掉再比较。空则不出现。
 
 封存分段到达对象存储并且核对完成时带 `checksum`。`match` 表示桶里的对象与封存字节一致（对象 HEAD 的 ETag）。`mismatch` 表示这次核对已经完成且字节不同，拉流继续，这一行仍是 `UPLOADED`。对象 HEAD 失败时该字段不出现，这一行仍是 `UPLOADED`，不算已校验。没有上传的分段也不带该字段。
 
@@ -971,7 +1000,7 @@ curl "http://localhost:8080/api/sources/lookup?host=10.0.0.1&port=3306"
 curl http://localhost:8080/metrics
 ```
 
-返回 Prometheus 格式的指标。
+返回 Prometheus 格式的指标。`binlog_server_source_switchovers{task_id,outcome}` 是 gauge。`outcome` 是 `continued` 或 `stopped`。值是该任务已保存的 `SOURCE_SWITCHOVER` 事件里，这种结果的条数。每次采集重算。读到的任务两个序列都有，包含 0。没有任务时 `task_id=""` 的两个序列为 0。某一条任务的链读失败时，这一条不发出 0，避免把已经发生的切换盖成没有。告警示例见 [可观测性](../admin/observability.md)。
 
 ## 9. 错误响应
 

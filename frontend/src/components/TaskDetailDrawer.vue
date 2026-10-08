@@ -1,6 +1,6 @@
 <!--
-input: task, replication, checkpoint, the recoverable window, locale labels, and loadPitr for the datetime window and stop_gtid
-output: task detail drawer with configured start identity, the resume file:pos / GTID, the retained chain's earliest and latest UTC times, a warning when that chain has a break, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
+input: task, replication, checkpoint, the recoverable window, source_chain on the task, source_identity on each file, locale labels, and loadPitr for the datetime window and stop_gtid
+output: task detail drawer with configured start identity, the resume file:pos / GTID, the retained chain's earliest and latest UTC times, a warning when that chain has a break, the source-server chain and a continued or stopped switchover notice, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
 pos: operator view of the position the next Start continues from and the datetime or GTID restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
 -->
@@ -50,6 +50,29 @@ note: if this file changes, update this header and frontend/src/components/READM
             show-icon
             :title="pendingDumpTitle(task)"
           />
+          <el-alert
+            v-if="showContinuedBanner"
+            data-testid="task-source-continued"
+            class="detail-pending-dump"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="$t('detail.sourceContinuedTitle')"
+          >
+            {{ $t('detail.sourceContinuedBody') }}
+          </el-alert>
+          <el-alert
+            v-if="showStoppedBanner"
+            data-testid="task-source-stopped"
+            class="detail-pending-dump"
+            type="error"
+            :closable="false"
+            show-icon
+            :title="stoppedReasonText"
+          >
+            <p v-if="stoppedMove" data-testid="task-source-stopped-move">{{ stoppedMove }}</p>
+            <p data-testid="task-source-next">{{ $t('detail.sourceStoppedNext') }}</p>
+          </el-alert>
         </section>
 
         <section v-if="replication" class="detail-panel">
@@ -92,6 +115,28 @@ note: if this file changes, update this header and frontend/src/components/READM
             <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(task, lease) }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.updatedAt') }}</span><strong>{{ formatTs(lease.updated_at) }}</strong></div>
           </div>
+        </section>
+
+        <section v-if="showSourceChain" class="detail-panel" data-testid="task-source-chain">
+          <h3><i class="fa-solid fa-link" /> {{ $t('detail.sourceChain') }}</h3>
+          <p class="replay-set-hint">{{ $t('detail.sourceChainHint') }}</p>
+          <ul class="source-chain-list">
+            <li v-for="(server, index) in sourceServers" :key="`${server.identity}-${index}`" data-testid="task-source-server">
+              {{ $t('detail.serverOrdinal', { n: index + 1 }) }}
+              <code>{{ server.identity }}</code>
+              <el-tag v-if="server.current" size="small" type="success" data-testid="task-source-current">{{ $t('detail.serverCurrent') }}</el-tag>
+            </li>
+          </ul>
+          <ul v-if="sourceSwitches.length" class="source-chain-list">
+            <li v-for="(sw, index) in sourceSwitches" :key="`${sw.old}-${sw.new}-${index}`" data-testid="task-source-switch">
+              <span>{{ formatTs(sw.time) }}</span>
+              <strong>{{ sw.old }} → {{ sw.new }}</strong>
+              <span v-if="switchWhere(sw)">{{ switchWhere(sw) }}</span>
+              <el-tag size="small" :type="sw.continued ? 'success' : 'danger'">
+                {{ sw.continued ? $t('detail.switchContinued') : $t('detail.switchStopped') }}
+              </el-tag>
+            </li>
+          </ul>
         </section>
 
         <section class="detail-panel">
@@ -239,6 +284,11 @@ note: if this file changes, update this header and frontend/src/components/READM
             <el-table-column :label="$t('table.file')" min-width="220">
               <template #default="{ row }">
                 <span :data-testid="`file-disk-name-${diskBase(row)}`">{{ diskBase(row) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column :label="$t('table.server')" min-width="240">
+              <template #default="{ row }">
+                <span :data-testid="`file-source-${diskBase(row)}`">{{ fileServerLabel(row) }}</span>
               </template>
             </el-table-column>
             <el-table-column :label="$t('table.filePath')" min-width="280">
@@ -508,6 +558,66 @@ function locationLabel(location) {
   if (location === "both") return t("detail.locationBoth");
   if (location === "local") return t("detail.locationLocal");
   return "--";
+}
+
+const sourceServers = computed(() => {
+  const items = props.task?.source_chain?.servers;
+  return Array.isArray(items) ? items : [];
+});
+
+const sourceSwitches = computed(() => {
+  const items = props.task?.source_chain?.switches;
+  return Array.isArray(items) ? items : [];
+});
+
+const showSourceChain = computed(() => sourceServers.value.length > 0 || sourceSwitches.value.length > 0);
+
+const showStoppedBanner = computed(() => {
+  if (props.task?.source_chain?.outcome === "stopped") return true;
+  return String(props.task?.last_error || "").startsWith("SOURCE_SWITCHOVER");
+});
+
+const showContinuedBanner = computed(() => {
+  return props.task?.source_chain?.outcome === "continued"
+    && props.task?.state === "RUNNING"
+    && !showStoppedBanner.value;
+});
+
+const latestStop = computed(() => {
+  const stopped = sourceSwitches.value.filter((item) => item && item.continued === false);
+  return stopped.length ? stopped[stopped.length - 1] : null;
+});
+
+const stoppedReasonText = computed(() => {
+  const reason = String(latestStop.value?.reason || "").trim();
+  if (!reason) return t("detail.switchReason.unknown");
+  return t(`detail.switchReason.${reason}`);
+});
+
+const stoppedMove = computed(() => {
+  const sw = latestStop.value;
+  if (!sw?.old || !sw?.new) return "";
+  return t("detail.switchFromTo", { old: sw.old, new: sw.new });
+});
+
+function switchWhere(sw) {
+  const file = String(sw?.file || "").trim();
+  const pos = Number(sw?.pos || 0);
+  const gtid = String(sw?.gtid_set || "").trim();
+  const parts = [];
+  if (file && pos) parts.push(`${file}:${pos}`);
+  else if (file) parts.push(file);
+  if (gtid) parts.push(gtid);
+  return parts.join(" · ");
+}
+
+function fileServerLabel(row) {
+  const id = String(row?.source_identity || "").trim();
+  if (!id) return "--";
+  const index = sourceServers.value.findIndex((server) => server && server.identity === id);
+  const ordinal = index >= 0 ? t("detail.serverOrdinal", { n: index + 1 }) : "";
+  const current = index >= 0 && sourceServers.value[index].current ? t("detail.serverCurrent") : "";
+  return [ordinal, id, current].filter(Boolean).join(" · ");
 }
 
 function diskBase(row) {

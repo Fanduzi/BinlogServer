@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- A DBA can see a VIP source switch without reading the raw event list (no new config key, no schema migration, schema stays 6). `GET /api/tasks/{id}` adds optional `source_chain` when `{data_dir}/{task_id}/.source-chain` or a `SOURCE_SWITCHOVER` event exists. It lists each server identity, which one is current, and each switch (`old`, `new`, `file`, `pos`, `gtid_set`, `continued`, and a stop `reason` of `no_gtid`, `missing_transactions`, `purged`, `mariadb`, or `gtid_unreadable`). Existing task fields stay at the top level. The field is omitted when there is no chain and no switch. `GET /api/tasks/{id}/files` adds optional `source_identity` on each row. It is computed, not stored. The first identity owns unprefixed names. A later identity owns `{identity}.{binlog file}`. `GET /metrics` adds gauge `binlog_server_source_switchovers{task_id,outcome}` where `outcome` is `continued` or `stopped`. The value is how many stored `SOURCE_SWITCHOVER` events had that outcome. Both series are present for a task that was read, including 0. The Console task view shows the chain, marks a continued `RUNNING` task as still copying, and for a stopped switch states the reason and the next step: start a new task against the new primary, keep this backup, and do not delete `.source-chain`. The files table names the server that wrote each file. Switch, window, replay, and `stop_gtid` / `stop_datetime` behavior is unchanged. `smoke-source-switchover` also checks this surface. It stays opt-in and is not in the quick profile.
+
 ## [v0.5.57] - 2026-10-07
 
 ### Added

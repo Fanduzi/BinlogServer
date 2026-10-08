@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, an unknown end_pos bound as NULL without assigning end_pos, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, the legacy desired_run reconcile update, source_json password encryption, schema 5 refusal that names ./migrate up, schema 6 acceptance without uk_task_file_epoch, and the pre-step-9 index list refusing schema 6 with missing index uk_task_file_epoch
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, an unknown end_pos bound as NULL without assigning end_pos, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, ListSourceSwitchEvents oldest SOURCE_SWITCHOVER rows, the legacy desired_run reconcile update, source_json password encryption, schema 5 refusal that names ./migrate up, schema 6 acceptance without uk_task_file_epoch, and the pre-step-9 index list refusing schema 6 with missing index uk_task_file_epoch
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1050,6 +1050,36 @@ func TestMySQLTaskStore_AppendAndListEvents(t *testing.T) {
 		t.Fatalf("unexpected event type: %s", events[0].Type)
 	}
 
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListSourceSwitchEvents(t *testing.T) {
+	if !strings.Contains(listSourceSwitchEventsSQL, "event_type = 'SOURCE_SWITCHOVER'") || !strings.Contains(listSourceSwitchEventsSQL, "ORDER BY id ASC") {
+		t.Fatalf("switch query: %s", listSourceSwitchEventsSQL)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{"task_id", "event_type", "message", "detail", "event_time", "event_seq"}).
+		AddRow("1", "SOURCE_SWITCHOVER", "source switched from a to b at mysql-bin.000001:4 gtid_set=a:1; continuing from the executed GTID set", "old=a new=b gtid_set=a:1 file=mysql-bin.000001 pos=4", now, int64(8))
+	mock.ExpectQuery(regexp.QuoteMeta(listSourceSwitchEventsSQL)).
+		WithArgs("1").
+		WillReturnRows(rows)
+
+	events, err := store.ListSourceSwitchEvents(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("ListSourceSwitchEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "SOURCE_SWITCHOVER" || events[0].Sequence != 8 {
+		t.Fatalf("%+v", events)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}

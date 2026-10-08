@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, and binlog_server_recovery_earliest_age_seconds; store list errors stay 5xx instead of empty task_state_count
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers; store list errors stay 5xx instead of empty task_state_count
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -34,6 +34,7 @@ type apiMetricsCollector struct {
 	retentionBlockedDesc    *prometheus.Desc
 	recoveryBreaksDesc      *prometheus.Desc
 	recoveryEarliestDesc    *prometheus.Desc
+	sourceSwitchDesc        *prometheus.Desc
 }
 
 func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiMetricsCollector {
@@ -100,6 +101,12 @@ func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiM
 			[]string{"task_id"},
 			nil,
 		),
+		sourceSwitchDesc: prometheus.NewDesc(
+			"binlog_server_source_switchovers",
+			"SOURCE_SWITCHOVER events for a task. outcome is continued or stopped.",
+			[]string{"task_id", "outcome"},
+			nil,
+		),
 	}
 }
 
@@ -114,6 +121,7 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.retentionBlockedDesc
 	ch <- c.recoveryBreaksDesc
 	ch <- c.recoveryEarliestDesc
+	ch <- c.sourceSwitchDesc
 }
 
 func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -208,12 +216,14 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.retentionBlockedDesc, prometheus.GaugeValue, 0, "")
 		ch <- prometheus.MustNewConstMetric(c.recoveryBreaksDesc, prometheus.GaugeValue, 0, "")
 		ch <- prometheus.MustNewConstMetric(c.recoveryEarliestDesc, prometheus.GaugeValue, 0, "")
+		c.collectSourceSwitchovers(ch, items)
 		return
 	}
 	for _, task := range items {
 		ch <- prometheus.MustNewConstMetric(c.retentionBlockedDesc, prometheus.GaugeValue, float64(blocked[task.ID]), task.ID)
 	}
 	c.collectRecovery(ch, items, now)
+	c.collectSourceSwitchovers(ch, items)
 }
 
 func (c *apiMetricsCollector) collectRecovery(ch chan<- prometheus.Metric, items []tasks.Task, now time.Time) {
@@ -241,6 +251,39 @@ func (c *apiMetricsCollector) collectRecovery(ch chan<- prometheus.Metric, items
 	}
 	if !ageEmitted {
 		ch <- prometheus.MustNewConstMetric(c.recoveryEarliestDesc, prometheus.GaugeValue, 0, "")
+	}
+}
+
+func (c *apiMetricsCollector) collectSourceSwitchovers(ch chan<- prometheus.Metric, items []tasks.Task) {
+	reader, ok := c.tasks.(interface {
+		SourceChain(string) (tasks.SourceChain, error)
+	})
+	if !ok || len(items) == 0 {
+		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, 0, "", tasks.SwitchOutcomeContinued)
+		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, 0, "", tasks.SwitchOutcomeStopped)
+		return
+	}
+	emitted := false
+	for _, task := range items {
+		chain, err := reader.SourceChain(task.ID)
+		if err != nil {
+			continue
+		}
+		continued, stopped := 0, 0
+		for _, sw := range chain.Switches {
+			if sw.Continued {
+				continued++
+			} else {
+				stopped++
+			}
+		}
+		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, float64(continued), task.ID, tasks.SwitchOutcomeContinued)
+		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, float64(stopped), task.ID, tasks.SwitchOutcomeStopped)
+		emitted = true
+	}
+	if !emitted {
+		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, 0, "", tasks.SwitchOutcomeContinued)
+		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, 0, "", tasks.SwitchOutcomeStopped)
 	}
 }
 

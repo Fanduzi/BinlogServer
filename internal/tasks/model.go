@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, and SourceSwitchNotice for a VIP source switch event
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, and SourceSwitchNotice for a VIP source switch event
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -342,6 +342,9 @@ type BinlogFile struct {
 	// It is not stored. bucket means this sealed UPLOADED object is the only
 	// copy: file_path is the catalog path and is not on this process.
 	Location string `json:"location,omitempty"`
+	// SourceIdentity is the server that wrote this file. The files list fills
+	// it in from the source chain. It is not stored. Empty when the chain is unknown.
+	SourceIdentity string `json:"source_identity,omitempty"`
 }
 
 const (

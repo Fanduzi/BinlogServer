@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: two MySQL 8.0 servers in a GTID pair behind one TCP address, the suite API, and the Percona 8.0 mysqlbinlog client
-# output: proof that a GTID task follows the new primary without mixing files, that a LATEST task stops with SOURCE_SWITCHOVER, and that pointing the address back at the old primary stops instead of mixing
+# output: proof that a GTID task follows the new primary without mixing files, that a LATEST task stops with SOURCE_SWITCHOVER, that source_chain, source_identity, and binlog_server_source_switchovers describe both paths, that the embedded Console contains the chain view, and that pointing the address back at the old primary stops instead of mixing
 # pos: docker coverage for a VIP source switch
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -208,6 +208,57 @@ point_vip() {
 
 task_json() {
   curl -fsS "$API/api/tasks/$1"
+}
+
+switch_metric() {
+  local id="$1"
+  local outcome="$2"
+  curl -fsS "$API/metrics" | awk -v id="$id" -v outcome="$outcome" '
+    $1 ~ /^binlog_server_source_switchovers\{/ && index($0, "task_id=\"" id "\"") && index($0, "outcome=\"" outcome "\"") {
+      print $2
+      exit
+    }
+  '
+}
+
+assert_switch_metric() {
+  local id="$1"
+  local outcome="$2"
+  local op="$3"
+  local want="$4"
+  local got
+  got="$(switch_metric "$id" "$outcome")"
+  if [[ -z "$got" ]]; then
+    echo "missing binlog_server_source_switchovers task=$id outcome=$outcome" >&2
+    curl -fsS "$API/metrics" | grep source_switchovers >&2 || true
+    exit 1
+  fi
+  if ! awk -v got="$got" -v want="$want" -v op="$op" 'BEGIN { exit !(op == "ge" ? (got+0 >= want+0) : (got+0 == want+0)) }'; then
+    echo "source_switchovers task=$id outcome=$outcome got=$got want $op $want" >&2
+    exit 1
+  fi
+}
+
+assert_console_chain() {
+  local html src found=0
+  html="$(curl -fsS "$API/ui/")"
+  while IFS= read -r src; do
+    [[ -z "$src" ]] && continue
+    case "$src" in
+      http*) ;;
+      /*) ;;
+      *) src="/ui/${src#./}" ;;
+    esac
+    if curl -fsS "$API$src" | grep -q 'task-source-chain'; then
+      found=1
+      break
+    fi
+  done < <(printf '%s\n' "$html" | grep -oE 'src="[^"]+\.js"' | sed -e 's/^src="//' -e 's/"$//')
+  if [[ "$found" != 1 ]]; then
+    echo "embedded console is missing task-source-chain" >&2
+    exit 1
+  fi
+  echo "[switch] console bundle has task-source-chain"
 }
 
 wait_state() {
@@ -550,6 +601,19 @@ if [[ "$latest_err" != SOURCE_SWITCHOVER:* ]] || [[ "$latest_err" != *"$OLD_UUID
   exit 1
 fi
 echo "[switch] LATEST stopped: $latest_err"
+latest_json="$(task_json "$latest_id")"
+if [[ "$(jq -r '.source_chain.outcome // empty' <<<"$latest_json")" != "stopped" ]] \
+  || [[ "$(jq -r '.source_chain.current // empty' <<<"$latest_json")" != "$OLD_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].continued' <<<"$latest_json")" != "false" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].reason // empty' <<<"$latest_json")" != "no_gtid" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].old // empty' <<<"$latest_json")" != "$OLD_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].new // empty' <<<"$latest_json")" != "$NEW_UUID" ]]; then
+  echo "LATEST source_chain [$latest_json]" >&2
+  exit 1
+fi
+assert_switch_metric "$latest_id" stopped ge 1
+assert_switch_metric "$latest_id" continued eq 0
+echo "[switch] LATEST source_chain stopped no_gtid"
 
 switch_msg="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r '.[] | select(.type=="SOURCE_SWITCHOVER") | .message' | head -n 1)"
 switch_detail="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r '.[] | select(.type=="SOURCE_SWITCHOVER") | .detail' | head -n 1)"
@@ -562,6 +626,28 @@ if [[ "$switch_detail" != *"old=$OLD_UUID"* || "$switch_detail" != *"new=$NEW_UU
   exit 1
 fi
 echo "[switch] event $switch_msg"
+gtid_json_task="$(task_json "$gtid_id")"
+if [[ "$(jq -r '.source_chain.outcome // empty' <<<"$gtid_json_task")" != "continued" ]] \
+  || [[ "$(jq -r '.source_chain.current // empty' <<<"$gtid_json_task")" != "$NEW_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.servers[0].identity // empty' <<<"$gtid_json_task")" != "$OLD_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.servers[0].current' <<<"$gtid_json_task")" != "false" ]] \
+  || [[ "$(jq -r '.source_chain.servers[1].identity // empty' <<<"$gtid_json_task")" != "$NEW_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.servers[1].current' <<<"$gtid_json_task")" != "true" ]] \
+  || [[ "$(jq -r '.source_chain.switches[0].old // empty' <<<"$gtid_json_task")" != "$OLD_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.switches[0].new // empty' <<<"$gtid_json_task")" != "$NEW_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.switches[0].continued' <<<"$gtid_json_task")" != "true" ]]; then
+  echo "continued source_chain [$gtid_json_task]" >&2
+  exit 1
+fi
+switch_where="$(jq -r '.source_chain.switches[0] | (.file // "") + (.gtid_set // "")' <<<"$gtid_json_task")"
+if [[ -z "$switch_where" ]]; then
+  echo "continued switch has no file or gtid_set [$gtid_json_task]" >&2
+  exit 1
+fi
+assert_switch_metric "$gtid_id" continued ge 1
+assert_switch_metric "$gtid_id" stopped eq 0
+assert_console_chain
+echo "[switch] source_chain continued current $NEW_UUID"
 
 files_json="$(curl -fsS "$API/api/tasks/$gtid_id/files?limit=50")"
 old_path=""
@@ -596,6 +682,20 @@ if [[ -z "$old_path" || -z "$new_path" || "$saw_before" != 1 || "$saw_after" != 
   echo "expected old and new server files: $files_json" >&2
   exit 1
 fi
+bad_ident="$(printf '%s' "$files_json" | jq -r --arg new "$NEW_UUID" --arg old "$OLD_UUID" '
+  .[] | select((.file_name // "") != "") |
+  if (.file_name | startswith($new + ".")) then
+    select(.source_identity != $new) | .file_name
+  else
+    select(.source_identity != $old) | .file_name
+  end
+')"
+if [[ -n "$bad_ident" ]]; then
+  echo "source_identity mismatch: $bad_ident" >&2
+  echo "$files_json" >&2
+  exit 1
+fi
+echo "[switch] files name the server that wrote them"
 latest_dir="$(abs_path "$DATA_DIR/$latest_id")"
 if find "$latest_dir" -maxdepth 1 -type f -exec grep -a -l 'after-1' {} + | grep -q .; then
   echo "LATEST files contain after-switch rows" >&2
@@ -671,6 +771,24 @@ if [[ "$back_err" != SOURCE_SWITCHOVER:* ]] || [[ "$back_err" != *"$OLD_UUID"* ]
   echo "missing-transaction last_error [$back_err]" >&2
   exit 1
 fi
+back_json="$(task_json "$gtid_id")"
+if [[ "$(jq -r '.source_chain.outcome // empty' <<<"$back_json")" != "stopped" ]] \
+  || [[ "$(jq -r '.source_chain.current // empty' <<<"$back_json")" != "$NEW_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].continued' <<<"$back_json")" != "false" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].reason // empty' <<<"$back_json")" != "missing_transactions" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].old // empty' <<<"$back_json")" != "$NEW_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].new // empty' <<<"$back_json")" != "$OLD_UUID" ]]; then
+  echo "failback source_chain [$back_json]" >&2
+  exit 1
+fi
+chain_file="$(abs_path "$DATA_DIR/$gtid_id/.source-chain")"
+if [[ "$(sed -n '1p' "$chain_file" | tr -d '[:space:]')" != "$OLD_UUID" ]] || [[ "$(sed -n '2p' "$chain_file" | tr -d '[:space:]')" != "$NEW_UUID" ]]; then
+  echo ".source-chain changed after failback: $(cat "$chain_file")" >&2
+  exit 1
+fi
+assert_switch_metric "$gtid_id" continued ge 1
+assert_switch_metric "$gtid_id" stopped ge 1
+echo "[switch] failback stopped missing_transactions; chain file still $OLD_UUID then $NEW_UUID"
 # Sealing the new server's open segment renames it. The bytes that held
 # after-1 stay the same.
 after_mix=""
