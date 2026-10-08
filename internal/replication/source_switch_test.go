@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a fake source whose identity changes between dump connections or on a MySQL 1236 before the next event, and the GTID subset answer for that new source
-// output: assertions that a MySQL GTID backup continues on the new server without appending into the old segment, that a backup with no GTID stops, including when the new server answers 1236 for the old file name, and that a GTID redump of an earlier file does not open a second copy
+// output: assertions that a MySQL GTID backup continues on the new server without appending into the old segment, that a backup with no GTID stops, including when the new server answers 1236 for the old file name, and that a rotate back to an earlier file fails with STREAM_REGRESSION instead of opening a second copy
 // pos: runner-level coverage for a VIP source switch
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -182,15 +182,16 @@ func TestRun_GTIDRedumpDoesNotCopyEarlierFile(t *testing.T) {
 		killDump: func(tasks.SourceConfig, uint32) error { return nil },
 	}
 	err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: id + ":1-3"}))
-	if err != nil {
-		t.Fatal(err)
+	var pe *tasks.PermanentError
+	if !asPermanent(err, &pe) || pe.Code != tasks.CodeStreamRegression || !strings.Contains(pe.Message, "mysql-bin.000002") {
+		t.Fatalf("err %v", err)
 	}
 	if len(names) != 2 || names[0] != "mysql-bin.000003" || names[1] != "mysql-bin.000004" {
 		t.Fatalf("files %v", names)
 	}
-	// 200 on 000003, 120 on 000004, and 400 after the redump catches up.
-	// The event at 900 belongs to the earlier file and is not stored again.
-	if writes != 3 {
+	// 200 on 000003 and 120 on 000004. The rotate back to 000002 stops the
+	// task before the event at 900 or the later event at 400 is stored.
+	if writes != 2 {
 		t.Fatalf("writes %d", writes)
 	}
 }

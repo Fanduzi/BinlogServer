@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the replay inventory (sealed segments and the highest open epoch), each segment's event-header times and MySQL GTID log, and whether object storage is configured
-// output: the retained chain's earliest and latest UTC event times, the MySQL GTID set those segments contain, and the breaks that keep the chain from being one continuous restore; a missing index is a break only inside one source-name prefix, while a GTID hole is still reported across a source switch
+// output: the retained chain's earliest and latest UTC event times, the MySQL GTID set those segments contain, and the breaks that keep the chain from being one continuous restore; a missing index is a break only inside one source-name prefix, a GTID hole inside one segment is a break, and a GTID hole is still reported across a source switch
 // pos: read-only recoverable window a DBA can check before choosing a replay stop; replay selection is unchanged
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ const (
 	breakChecksum    = "checksum mismatch"
 	breakNotDurable  = "segment is not durable off-host (%s)"
 	breakGTIDHole    = "gtid hole between %s and %s"
+	breakIntraGTID   = "gtid hole in %s at %s:%d"
 	breakUnreadable  = "segment is not readable"
 )
 
@@ -133,6 +135,18 @@ func assessRecovery(views []segmentView, flavor string, objectStorage bool) (Rec
 			}
 			if view.Readable {
 				events = append(events, view.Log.Events...)
+				if mysqlFlavor {
+					if uuid, seq, hole := intraSegmentHole(view.Log.Events); hole {
+						name := segmentBase(view.File)
+						if name == "" {
+							name = strings.TrimSpace(view.File.FileName)
+						}
+						out.Breaks = append(out.Breaks, RecoveryBreak{
+							Files:  []string{name},
+							Reason: fmt.Sprintf(breakIntraGTID, name, uuid, seq),
+						})
+					}
+				}
 			}
 		}
 		if i == len(parts)-1 {
@@ -413,6 +427,35 @@ func previousContainsBeyond(prev mysql.GTIDSet, events []binlog.GTIDEventRef) (b
 		}
 	}
 	return false, nil
+}
+
+func intraSegmentHole(events []binlog.GTIDEventRef) (string, int64, bool) {
+	byUUID := map[string][]int64{}
+	for _, ev := range events {
+		if ev.UUID == "" || ev.Seq <= 0 {
+			continue
+		}
+		byUUID[ev.UUID] = append(byUUID[ev.UUID], ev.Seq)
+	}
+	var foundUUID string
+	var foundSeq int64
+	found := false
+	for uuid, seqs := range byUUID {
+		sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+		for i := 1; i < len(seqs); i++ {
+			if seqs[i] <= seqs[i-1]+1 {
+				continue
+			}
+			missing := seqs[i-1] + 1
+			if !found || missing < foundSeq {
+				found = true
+				foundUUID = uuid
+				foundSeq = missing
+			}
+			break
+		}
+	}
+	return foundUUID, foundSeq, found
 }
 
 func eventSeqHole(prev, next []binlog.GTIDEventRef) bool {
