@@ -102,6 +102,7 @@
     "endPos": "结束位点",
     "uploadState": "上传状态",
     "checksum": "校验",
+    "server": "服务器",
     "objectKey": "对象键",
     "location": "位置",
     "runId": "运行 ID",
@@ -282,7 +283,25 @@
     "source": "源库",
     "startMode": "起点",
     "pendingDumpCleanup": "源库 Binlog Dump 连接 {id} 可能仍开着；源库可达后会 KILL",
-    "pendingDumpCleanupProcessLocal": "只有本进程（当时拉着这条 dump 的 worker）能看到这条警告。重启后消失。其它进程要等迁移 000004。"
+    "pendingDumpCleanupProcessLocal": "只有本进程（当时拉着这条 dump 的 worker）能看到这条警告。重启后消失。其它进程要等迁移 000004。",
+    "sourceChain": "源服务器",
+    "sourceChainHint": "每一台服务器写下自己的 binlog 文件。标成当前的那一台是任务正在复制的服务器。第一台仍用源文件名。后面每一台的文件名以那台服务器的身份开头。",
+    "sourceContinuedTitle": "任务地址换到了另一台服务器，这份备份仍在复制",
+    "sourceContinuedBody": "任务仍是运行中。请核对可恢复窗口是否连续，以及回放是否先列出旧服务器的文件、再列出新服务器的文件。",
+    "sourceStoppedNext": "对新主库新建任务，并保留这份备份。不要删除任务目录里的 .source-chain。再次启动这条任务也不会把两台服务器混在一起。",
+    "switchFromTo": "{old} → {new}",
+    "switchContinued": "已继续",
+    "switchStopped": "已停止",
+    "serverCurrent": "当前",
+    "serverOrdinal": "第 {n} 台",
+    "switchReason": {
+      "no_gtid": "这份备份没有 GTID 集合，旧的文件和位点不能用到新服务器上。",
+      "missing_transactions": "新主库缺少这份备份里已经有的事务。",
+      "purged": "新主库已经清掉了这份备份还没有的事务，所以补不回来。",
+      "mariadb": "MariaDB 没有可以换主继续的 GTID 路径。",
+      "gtid_unreadable": "读不到新服务器的 GTID 状态。",
+      "unknown": "继续复制会把两台服务器混进同一份备份，所以任务停了。"
+    }
   },
   "source": {
     "lookupTitle": "源库反查",

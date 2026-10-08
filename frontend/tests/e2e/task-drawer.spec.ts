@@ -23,4 +23,7 @@ test('task drawer shows operator details and action area', async ({ page }) => {
   await expect(page.getByTestId('task-action-start')).toBeVisible()
   await expect(page.getByTestId('task-action-stop')).toBeVisible()
   await expect(page.getByTestId('task-action-delete')).toBeVisible()
+  await expect(page.getByTestId('task-source-continued')).toHaveCount(0)
+  await expect(page.getByTestId('task-source-stopped')).toHaveCount(0)
+  await expect(page.getByTestId('task-source-chain')).toHaveCount(0)
 })
