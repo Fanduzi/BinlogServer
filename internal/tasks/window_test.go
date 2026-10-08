@@ -318,6 +318,27 @@ func TestRecoveryWindow_MidFileStartIsContinuous(t *testing.T) {
 	}
 }
 
+func TestRecoveryWindow_IntraFileGTIDHole(t *testing.T) {
+	dir := t.TempDir()
+	scheduler := NewScheduler(WithDataDir(dir))
+	if _, err := scheduler.CreateTaskFromSpec("mysql", "mysql-key", &SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "secret", Flavor: "mysql"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	taskDir := filepath.Join(dir, "1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	when := clock(t, "2024-01-01 08:00:00")
+	writeWindowSegment(t, filepath.Join(taskDir, "mysql-bin.000001"), when, "", 1, 2, 4)
+	got, err := scheduler.RecoveryWindow("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Continuous || !breakMentions(got, "gtid hole in mysql-bin.000001") {
+		t.Fatalf("window %+v", got)
+	}
+}
+
 func TestRecoveryWindow_MissingTask(t *testing.T) {
 	scheduler := NewScheduler()
 	if _, err := scheduler.RecoveryWindow("missing"); !errorsIsNotFound(err) {

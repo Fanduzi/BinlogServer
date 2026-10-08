@@ -1,6 +1,6 @@
 <!--
-input: task, replication, checkpoint, the recoverable window, source_chain on the task, source_identity on each file, locale labels, and loadPitr for the datetime window and stop_gtid
-output: task detail drawer with configured start identity, the resume file:pos / GTID, the retained chain's earliest and latest UTC times, a warning when that chain has a break, the source-server chain and a continued or stopped switchover notice, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
+input: task, replication, checkpoint, the recoverable window, storage_alert, source_chain on the task, source_identity on each file, locale labels, and loadPitr for the datetime window and stop_gtid
+output: task detail drawer with configured start identity, the resume file:pos / GTID, a storage_alert when the checkpoint or a segment disagrees with the stored transactions, the retained chain's earliest and latest UTC times, a warning when that chain has a break, the source-server chain and a continued or stopped switchover notice, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
 pos: operator view of the position the next Start continues from and the datetime or GTID restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
 -->
@@ -41,6 +41,15 @@ note: if this file changes, update this header and frontend/src/components/READM
             <div class="detail-item"><span>{{ $t('detail.delay') }}</span><strong>{{ replication ? `${formatDelay(replication.delay_seconds, replication.has_progress)} ${$t('detail.seconds')}` : "--" }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(task, lease) }}</strong></div>
           </div>
+          <el-alert
+            v-if="task.storage_alert"
+            data-testid="task-storage-alert"
+            type="error"
+            :closable="false"
+            show-icon
+            :title="$t('detail.storageAlert')"
+            :description="task.storage_alert.message"
+          />
           <el-alert
             v-if="task.pending_dump_cleanup && task.pending_dump_cleanup.connection_id"
             data-testid="task-pending-dump-cleanup"

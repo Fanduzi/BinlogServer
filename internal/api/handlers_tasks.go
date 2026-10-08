@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id} source_chain when a VIP identity list or SOURCE_SWITCHOVER event exists, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object, and GET /api/tasks/{id}/window the retained chain's earliest and latest UTC event times, MySQL GTID coverage, and breaks. A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos, the local event span when this process can read that segment, and source_identity for the server that wrote each file.
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id} source_chain when a VIP identity list or SOURCE_SWITCHOVER event exists, storage_alert on list, dashboard, and GET when a checkpoint or segment disagrees with the stored transactions, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object, and GET /api/tasks/{id}/window the retained chain's earliest and latest UTC event times, MySQL GTID coverage, and breaks. A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos, the local event span when this process can read that segment, and source_identity for the server that wrote each file.
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -259,7 +259,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, task := range page {
 		progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
 		resp.Tasks = append(resp.Tasks, dashboardTaskItem{
-			Task:        sanitizeTask(task),
+			Task:        s.presentTask(r.Context(), task),
 			Replication: buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds),
 		})
 	}
@@ -345,7 +345,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, taskListResponse{
-			Items:  sanitizeTaskList(page),
+			Items:  s.presentTasks(r.Context(), page),
 			Total:  total,
 			Limit:  query.Limit,
 			Offset: query.Offset,
@@ -1286,7 +1286,7 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		view := taskDetailView{Task: sanitizeTask(task)}
+		view := taskDetailView{Task: s.presentTask(r.Context(), task)}
 		if chain, ok := s.taskSourceChain(taskID); ok {
 			view.SourceChain = &chain
 		}
@@ -1417,6 +1417,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// presentTask strips the password and attaches a computed storage alert.
+// The alert is not written back onto the scheduler's stored task.
+func (s *Server) presentTask(ctx context.Context, task tasks.Task) tasks.Task {
+	task = sanitizeTask(task)
+	if s == nil || s.tasks == nil {
+		return task
+	}
+	alerter, ok := s.tasks.(interface {
+		AttachStorageAlert(context.Context, tasks.Task) tasks.Task
+	})
+	if !ok {
+		return task
+	}
+	return alerter.AttachStorageAlert(ctx, task)
+}
+
+func (s *Server) presentTasks(ctx context.Context, items []tasks.Task) []tasks.Task {
+	out := make([]tasks.Task, len(items))
+	for i := range items {
+		out[i] = s.presentTask(ctx, items[i])
+	}
+	return out
 }
 
 // sanitizeTask 对任务输出做脱敏处理（如密码字段）。

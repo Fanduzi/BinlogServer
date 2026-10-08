@@ -272,6 +272,8 @@ curl http://localhost:8080/api/tasks/{task_id}
 
 HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。`last_error`、`owner_worker_id`、`epoch`、`run_id` 为空时不出现。任务不存在是 HTTP 404，正文 `task not found`。
 
+列表、dashboard 的 `tasks[].task` 和这条详情在发现重拉损坏时多一个 `storage_alert`：`code` 是 `STORAGE_INCONSISTENT`，`message` 说明某一个分段里有指向自己或更早文件的 Rotate，或事件位点在这个分段里变小，并写明恢复步骤。GTID 乱序、多个 UUID 交错、序号在别的分段或起点集合里、以及保留造成的文件间缺口，都不设置该字段。缺文件看 `/window` 的 `breaks`。没有这个问题时该字段不出现。它是读目录算出来的，不入库，也没有新的迁移。`/window` 的 `continuous: true` 只说明相邻文件接得上；同一个文件内部的 GTID 序号空洞会让 `continuous` 为 false。checkpoint 的 `gtid_set` 不能当作“这些事务已经在文件里”的证明。
+
 这条任务有 `.source-chain`，或有 `SOURCE_SWITCHOVER` 事件时，多一个 `source_chain`。没有这两样时该字段不出现，已有字段仍在顶层。列表和 `PUT` 不带这个字段。没有新的表，也没有新的配置项。
 
 `source_chain.servers` 按写下文件的顺序。第一台的文件没有身份前缀。后面每一台的文件名是 `{identity}.{binlog 文件名}`。`current` 为 true 的是最后一台，也是 `source_chain.current`。磁盘上的 `.source-chain` 存在时，服务器顺序以它为准。停下来的那次切换不会把新身份追加进这个文件。没有这个文件时，服务器从继续复制的切换里还原：第一条的 `old`，然后每一次 `continued` 为 true 的 `new`。停下的 `new` 不拥有文件。

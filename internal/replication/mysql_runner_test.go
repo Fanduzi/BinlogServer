@@ -41,8 +41,8 @@ func TestBuildSyncerConfig_Defaults(t *testing.T) {
 	if cfg.MaxReconnectAttempts != maxDumpReconnectAttempts {
 		t.Fatalf("expected %d dump reconnects before the scheduler sees the outage, got %d", maxDumpReconnectAttempts, cfg.MaxReconnectAttempts)
 	}
-	if cfg.DisableRetrySync {
-		t.Fatal("a single dropped packet must still reconnect inside the dump library")
+	if !cfg.DisableRetrySync {
+		t.Fatal("library auto-reconnect must stay off so a GTID dump resumes from the flushed set")
 	}
 }
 

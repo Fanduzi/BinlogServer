@@ -241,6 +241,7 @@
     "recoveryHint": "Earliest and latest are UTC event times. A break means you cannot treat this chain as one continuous restore.",
     "recoveryContinuous": "Continuous",
     "recoveryBroken": "Broken",
+    "storageAlert": "Stored binlog does not match the checkpoint",
     "recoveryBreaks": "This backup chain has a break",
     "recoveryEmpty": "No restorable events yet.",
     "recoveryGtid": "GTID covered",
