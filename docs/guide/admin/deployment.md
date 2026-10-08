@@ -407,6 +407,8 @@ sudo systemctl status binlog-server
 - `binlog_server_task_state_count{state="FAILED"}`: 失败任务计数。大于 0 应立即触发 P1/P2 告警介入排查。
 - `binlog_server_worker_online{worker_id="..."}`: Worker 在线状态（1 在线，0 离线）。
 - `binlog_server_upload_failures_total`: 上传失败待补传的文件累计数。
+- `binlog_server_source_switchovers{task_id="...",outcome="stopped"}`: 任务地址换到另一台后停了。大于 0 先看 Console 任务详情里的原因，再按故障处理第 3 节处理。不要删 `.source-chain`。
+- `binlog_server_source_switchovers{task_id="...",outcome="continued"}`: 同一地址换到另一台后，这条任务还在复制。大于 0 时核对可恢复窗口是否连续，回放是否先旧服务器、再新服务器。
 
 ### 6.3 常见运维故障自愈与处理
 
@@ -428,9 +430,10 @@ English: The lease moves to a live worker. The segment directory stays where the
 
 - **能继续：** 源是 MySQL，GTID 已打开，新主库的 `@@gtid_executed` 包含这份任务已经存下的每一个事务，并且新主库多出来、备份还没有的事务仍在 binlog 里，而不只在 `@@gtid_purged`。任务封存旧主库的 open 分段，再用已执行 GTID 集合继续。旧主库的文件名不变。新主库的文件名是 `{server_uuid}.{原文件名}`。对象键里的身份也是写下该文件的那台服务器。`GET /api/tasks/{id}/events` 有一条 `SOURCE_SWITCHOVER`，`message` 写出旧身份、新身份，以及从已执行 GTID 集合继续。`GET /api/tasks/{id}/window` 在 GTID 链没有缺口时 `continuous` 为 true。`stop_datetime` 或 `stop_gtid` 跨过这次切换时，回放命令先列出旧主库的文件，再列出新主库的文件。
 - **必须停下：** 没有 GTID（`LATEST` 或 `FILE_POS`）、新主库缺少备份里已经有的事务、这些事务已经被 purge，或源是 MariaDB。任务变成 `FAILED`。`last_error` 以 `SOURCE_SWITCHOVER` 开头，同时写出两台身份，并说明要对新主库新建任务、保留这份备份。不会把两台服务器的字节写进同一个文件。再次 `POST /api/tasks/{id}/start` 仍是这个错误。
+- **Console 和指标：** 任务详情列出每一台服务器、哪一台是当前的，以及每次切换的旧身份、新身份、`file:pos` 和 GTID 集合。继续复制的运行中任务有一条说明，和普通运行中任务分开。停下的任务用白话写出原因，以及下一步：对新主库新建任务，保留这份备份，不要删除 `.source-chain`。文件表的「服务器」列写出第几台和完整身份，不只有文件名前缀。`GET /metrics` 的 `binlog_server_source_switchovers{task_id,outcome}` 里，`outcome` 是 `continued` 或 `stopped`。每种原因怎么处理、以及指回旧主库时不要做什么，见 [故障排查 5.4](troubleshooting.md#54-vip-换到了另一台-mysql)。
 - **升级：** 没有新迁移，schema 仍是 6。升级后第一次启动把当时这个地址连上的 `server_uuid` 记成磁盘上已有文件的主人。升级前确认 VIP 仍指向写下这些文件的那台服务器。VIP 已经切走时，新建任务，不要让旧任务在新主库上续。
 
-English: A VIP that moves to a new MySQL primary keeps this task copying when GTID shows the new primary still has every stored transaction and has not purged the rest. The old open segment is sealed. New files are named `{server_uuid}.{binlog file}`. One `SOURCE_SWITCHOVER` event names both servers. `GET /window` reports whether the chain is continuous across that point. Without GTID, when the new primary is missing or has purged transactions, or on MariaDB, the task fails with `SOURCE_SWITCHOVER` and does not mix the files. Start a new task and keep this backup. No schema change. Before upgrading, confirm the address still reaches the server that wrote the files on disk.
+English: A VIP that moves to a new MySQL primary keeps this task copying when GTID shows the new primary still has every stored transaction and has not purged the rest. The old open segment is sealed. New files are named `{server_uuid}.{binlog file}`. One `SOURCE_SWITCHOVER` event names both servers. `GET /window` reports whether the chain is continuous across that point. The Console task view lists each server, which one is current, and the switch file:pos and GTID set. A continued running task is marked as still copying. A stopped task states the reason and the next step: start a new task against the new primary, keep this backup, and do not delete `.source-chain`. The files table names the server that wrote each file. `binlog_server_source_switchovers{task_id,outcome}` is `continued` or `stopped`. The runbook for each stop reason and for failing back to the old primary is in troubleshooting section 5.4. Without GTID, when the new primary is missing or has purged transactions, or on MariaDB, the task fails with `SOURCE_SWITCHOVER` and does not mix the files. No schema change. Before upgrading, confirm the address still reaches the server that wrote the files on disk.
 
 #### 4. 远端对象存储抖动导致上传堆积
 - **现象：** `binlog_server_upload_failures_total` 指标上涨。

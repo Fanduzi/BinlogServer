@@ -406,6 +406,47 @@ WHERE id = '{task_id}';
 - 若任务陷入错误重试且位点不前进，可执行 `stop` / `start` 触发新 run，并观察 `/runs` 与 `/events` 是否恢复推进。
 - 若只见 `.open.e*` 文件且未 seal，先确认任务是否仍持有有效 lease，避免失租后继续误操作文件。
 
+### 5.4 VIP 换到了另一台 MySQL
+
+任务地址是 VIP、DNS 或代理。它连上的 `@@server_uuid`（MariaDB 是 `mariadb:<server_id>:<gtid_domain_id>`）和上次不同。Console 任务详情的「源服务器」列出每一台、哪一台是当前的，以及每次切换的旧身份、新身份、`file:pos` 和 GTID 集合。文件表的「服务器」列写出第几台和完整身份。`GET /metrics` 的 `binlog_server_source_switchovers{task_id,outcome}` 里，`outcome` 是 `continued` 或 `stopped`。`GET /api/tasks/{id}` 的 `source_chain` 是同一份内容。没有切换时这个字段不出现。
+
+不要删除 `{data_dir}/{task_id}/.source-chain`。第一行是没有身份前缀的那些文件的主人。后面每一行是 `{身份}.{binlog 文件名}` 的主人。删掉它之后，文件表无法再说清每一份文件是谁写的。
+
+**地址换了，任务仍是运行中**
+
+Console 有一条说明：这份备份仍在复制。这和没有换过服务器的运行中任务不同。`source_chain.outcome` 是 `continued`。`current` 是新身份。指标 `outcome="continued"` 增加，`outcome="stopped"` 仍是 0。
+
+要核对的两件事：
+
+1. `GET /api/tasks/{id}/window` 的 `continuous`。不是 true 时先看 `breaks`，不要拿这份备份做恢复。
+2. 回放顺序。`stop_datetime` 或 `stop_gtid` 的 `paths` 先是旧服务器的文件，再是新服务器的文件。Console 回放命令是同一个顺序。旧服务器的文件名没有前缀。新服务器的文件名以新身份开头。
+
+不要为了“看起来像一台服务器”去改文件名，也不要删掉旧服务器的分段。
+
+**地址换了，任务变成 FAILED**
+
+`last_error` 以 `SOURCE_SWITCHOVER:` 开头。Console 用白话写出原因，以及下一步：对新主库新建任务，保留这份备份。不要删除 `.source-chain`。再次 `POST /api/tasks/{id}/start` 也不会把两台服务器写进同一份备份。指标 `outcome="stopped"` 大于 0。
+
+| `source_chain` 的 `reason` | 含义 | 怎么做 | 不要做 |
+|---|---|---|---|
+| `no_gtid` | 这份备份没有已执行 GTID 集合。`LATEST`，以及没有存下 GTID 的 `FILE_POS`，都是这个原因 | 对新主库新建任务。这份备份留到切换前的位点 | 不要把旧的 file:pos 指到新主库上再启动这条任务 |
+| `missing_transactions` | 现在连上的服务器缺少这份备份里已经有的事务 | 保留这份备份。需要新主库上更新的写入时，另建任务 | 不要删分段，也不要指望再次启动能把缺口补上 |
+| `purged` | 新主库已经清掉了这份备份还没有的事务 | 保留这份备份。新任务只能从新主库仍保留的位点开始，或先用这份备份恢复再追 | 不要在这条任务上继续拉，缺口补不回来 |
+| `mariadb` | MariaDB 没有可以换主继续的 GTID 路径 | 对新主库新建任务，保留这份备份 | 不要把两台 MariaDB 的文件并进这一条任务 |
+| `gtid_unreadable` | 读不到新服务器的 GTID 状态 | 先恢复到这台服务器的连接和权限，再新建任务 | 不要删 `.source-chain` 之后重试这条任务，期望它把两台拼在一起 |
+
+**再指回旧主库**
+
+任务已经从 A 继续到 B 之后，把 VIP 指回 A。A 没有 B 上新写入的事务，所以任务停在 `missing_transactions`。`.source-chain` 不改。`current` 仍是 B，因为最后写下文件的是 B。最新一条切换是 old=B、new=A、`continued` 为 false。指标上 `continued` 和 `stopped` 都大于 0。已经写下的分段字节不变。A 上这次切换之后的新写入不在这份备份里。需要那些写入时另建任务。不要删 `.source-chain`，也不要删 B 的分段来“回到只有 A”。
+
+English: The task address is a VIP, DNS name, or proxy, and it reached a different server identity. The Console task view lists each server, which one is current, and each switch (old, new, file:pos, GTID set). The files table names the server, not only the filename prefix. `binlog_server_source_switchovers{task_id,outcome}` is `continued` or `stopped`. `GET /api/tasks/{id}` returns the same view as `source_chain` when a chain or a switch exists. Do not delete `{data_dir}/{task_id}/.source-chain`. The first line owns the unprefixed files.
+
+When the task stays `RUNNING`, the Console says this backup is still copying. Check that `GET /window` is continuous before you restore, and that a replay lists the older server's files before the newer server's files. Do not rename files so they look like one server.
+
+When the task is `FAILED` and `last_error` starts with `SOURCE_SWITCHOVER:`, the Console states the reason and the next step: start a new task against the new primary and keep this backup. `no_gtid` means this backup has no executed GTID set, so do not point the old file:pos at the new primary. `missing_transactions` means the server now reached lacks transactions already stored. `purged` means the new primary has purged transactions this backup still needs. `mariadb` means there is no GTID path. `gtid_unreadable` means the new server's GTID state could not be read; fix connectivity, then start a new task. Do not delete `.source-chain` and start this same task hoping it will mix the two servers.
+
+Failing back to the old primary after a continued switch stops with `missing_transactions`. `.source-chain` stays as it was, so current remains the server that wrote the latest files. Both metric outcomes are greater than 0. Bytes already stored do not change. Writes that exist only on the old primary after the failback are not in this backup. Start a new task for those writes. Do not delete `.source-chain` or the newer server's segments.
+
 ## 6. 性能问题
 
 ### 6.1 CPU 使用率高

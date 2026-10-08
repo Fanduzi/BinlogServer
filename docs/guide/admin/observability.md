@@ -40,6 +40,7 @@ curl http://localhost:8080/metrics
 |--------|------|------|------|
 | `binlog_server_replication_lag_seconds` | gauge | `task_id` | 复制延迟（秒） |
 | `binlog_server_checkpoint_age_seconds` | gauge | `task_id` | Checkpoint 年龄（秒） |
+| `binlog_server_source_switchovers` | gauge | `task_id`, `outcome` | 该任务已记录的 `SOURCE_SWITCHOVER` 次数。`outcome="continued"` 是地址换到另一台后任务仍在复制。`outcome="stopped"` 是这次切换把任务停成 `FAILED`。每次采集按已保存的事件重算。读到的任务两个序列都有，包含 0。没有任务时 `task_id=""` 的两个序列为 0 |
 
 **Worker 指标：**
 
@@ -113,6 +114,18 @@ binlog_server_replication_lag_seconds
 binlog_server_checkpoint_age_seconds
 ```
 
+**源地址换到了另一台，任务仍在复制：**
+
+```promql
+binlog_server_source_switchovers{outcome="continued"} > 0
+```
+
+**源地址换到了另一台，任务已停止：**
+
+```promql
+binlog_server_source_switchovers{outcome="stopped"} > 0
+```
+
 **Worker 在线状态：**
 
 ```promql
@@ -144,6 +157,22 @@ groups:
           severity: warning
         annotations:
           summary: "Task {{ $labels.task_id }} has high replication lag"
+
+      - alert: SourceSwitchStopped
+        expr: binlog_server_source_switchovers{outcome="stopped"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Task {{ $labels.task_id }} stopped on a source switchover"
+
+      - alert: SourceSwitchContinued
+        expr: binlog_server_source_switchovers{outcome="continued"} > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task {{ $labels.task_id }} continued after a source switchover"
 
       - alert: TaskCheckpointStale
         expr: binlog_server_checkpoint_age_seconds > 300

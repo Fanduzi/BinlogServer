@@ -2,7 +2,7 @@
 
 ## Files
 - `ui.go`: UI 静态资源路由暴露。
-- `static/`: 前端构建产物。任务详情在 `pending_dump_cleanup.connection_id` 有值时显示源库 Binlog Dump 仍可能开着的警告。`process_local` 为 true 时说明只有当时那个 worker 进程看得到。
+- `static/`: 前端构建产物。任务详情在 `pending_dump_cleanup.connection_id` 有值时显示源库 Binlog Dump 仍可能开着的警告。`process_local` 为 true 时说明只有当时那个 worker 进程看得到。有 `source_chain` 时显示源服务器、当前身份，以及继续或停止的换主说明。
 
 ## Exports
 - `/ui/` 静态资源服务入口。

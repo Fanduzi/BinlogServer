@@ -102,6 +102,7 @@
     "endPos": "End Pos",
     "uploadState": "Upload State",
     "checksum": "Checksum",
+    "server": "Server",
     "objectKey": "Object Key",
     "location": "Location",
     "runId": "Run ID",
@@ -282,7 +283,25 @@
     "source": "Source",
     "startMode": "Start",
     "pendingDumpCleanup": "source Binlog Dump connection {id} may still be open; will KILL when source is reachable",
-    "pendingDumpCleanupProcessLocal": "Only this process (the worker that held the dump) shows this warning. A restart clears it. Other processes see it after migration 000004."
+    "pendingDumpCleanupProcessLocal": "Only this process (the worker that held the dump) shows this warning. A restart clears it. Other processes see it after migration 000004.",
+    "sourceChain": "Source servers",
+    "sourceChainHint": "Each server wrote its own binlog files. The current server is the one this task is copying now. The first server keeps the source file name. A later server's files start with that server's identity.",
+    "sourceContinuedTitle": "This task kept copying after the address moved to another server",
+    "sourceContinuedBody": "The task is still running. Check that the recoverable window is continuous, and that a replay lists the older server's files before the newer server's files.",
+    "sourceStoppedNext": "Start a new task against the new primary and keep this backup. Leave the .source-chain file in the task directory. Starting this task again will not mix the two servers.",
+    "switchFromTo": "{old} → {new}",
+    "switchContinued": "continued",
+    "switchStopped": "stopped",
+    "serverCurrent": "current",
+    "serverOrdinal": "server {n}",
+    "switchReason": {
+      "no_gtid": "This backup has no GTID set, so the old file and position cannot be applied on the new server.",
+      "missing_transactions": "The new primary is missing transactions this backup already has.",
+      "purged": "The new primary has purged transactions this backup does not have yet, so they cannot be copied.",
+      "mariadb": "MariaDB has no usable GTID path for a source switch.",
+      "gtid_unreadable": "The new source GTID state could not be read.",
+      "unknown": "This backup cannot continue on the new server without mixing the two servers."
+    }
   },
   "source": {
     "lookupTitle": "Source Lookup",
