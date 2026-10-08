@@ -20,6 +20,7 @@ Playwright 端到端回归模块，验证运维控制台的首屏、导航、筛
 | `pitr-replay.spec.ts` | 任务详情填写 UTC 停止时间后复制带 `--stop-datetime` 的命令；再填开始时间后命令同时带 `--start-datetime`；非法时间显示 400 正文；空窗口有说明；下载请求带 `stop_datetime` 且不带 `limit`。另一条用例填写 `stop_gtid`，命令带 `--stop-position=154`；同时填写停止时间时显示 `stop_datetime and stop_gtid cannot both be set`；非法 GTID 和序号不在夹具里时显示对应 400 正文；下载请求带 `stop_gtid` 且不带 `limit`。第三条用例填写已执行 GTID `start_gtid_set` 和停止 GTID，命令带 `--exclude-gtids` 且不含第一条路径；集合盖住停止点时显示 note；缺口、非法集合、以及和开始时间同时填写，显示对应 400 正文。停止/开始/GTID/已执行 GTID 框的 `data-testid` 在输入框上 |
 | `segment-download.spec.ts` | 文件表每一行可下载该磁盘文件名，包含仍打开的 `.open.e1`；回放命令仍是每个序号一条路径 |
 | `resume-identity.spec.ts` | 已停止任务详情同时显示配置起点和续传 `file:pos` / GTID；中英文文案都覆盖 |
+| `source-switchover.spec.ts` | 继续复制的任务显示源服务器链和仍在复制；停下的任务显示原因、旧到新，以及新建任务并保留备份 |
 | 其他 `*.spec.ts` | 详情、导航、lease、集群和上传重试场景 |
 | `fixtures/` | 共享场景类型与路由拦截 |
 

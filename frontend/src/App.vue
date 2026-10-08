@@ -1,6 +1,6 @@
 <!--
 input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer, per-file segment download, replay-set tar download, a recoverable window, a point-in-time replay command, a stop_gtid replay command, forms, and settings
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer including the source-server chain, per-file segment download, replay-set tar download, a recoverable window, a point-in-time replay command, a stop_gtid replay command, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -1763,6 +1763,24 @@ h1 {
 
 .recovery-window {
   margin-bottom: 12px;
+}
+
+.source-chain-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.source-chain-list li {
+  margin: 4px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-chain-list code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
 }
 
 .recovery-range {

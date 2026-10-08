@@ -1,5 +1,5 @@
 // input: frontend mock scenario definitions for dashboard, cluster, task detail, and auth states
-// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, a leftover directory beside a catalog task, a stopped-task resume identity, a sealed-plus-open replay inventory, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
+// output: reusable mock datasets, including server-pagination/current-page filter scenarios, the single-process owner, a leftover directory beside a catalog task, a stopped-task resume identity, a source-switch chain for a continued task and a stopped task, a sealed-plus-open replay inventory, and task owner/epoch copies, shared by Vite dev mode and Playwright E2E adapters
 // pos: shared frontend mock scenario source of truth under the API abstraction layer
 // note: if this file changes, update this header and frontend/src/mocks/README.md.
 
@@ -56,6 +56,7 @@ export const mockScenarioNames = [
   "single-process",
   "disk-leftover",
   "resume-identity",
+  "source-switch",
 ];
 
 export const mockScenarios = {
@@ -891,6 +892,107 @@ export const mockScenarios = {
       worker_count: 0,
       running_task_count: 0,
       leased_task_count: 0,
+    },
+  },
+  "source-switch": {
+    summary: {
+      total: 2,
+      running: 1,
+      retry_backoff: 0,
+      stopped: 0,
+      failed: 1,
+      normal: 1,
+      delayed: 0,
+      abnormal: 0,
+    },
+    tasks: [
+      {
+        task: buildTask("710", {
+          name: "vip-continued",
+          state: "RUNNING",
+          source_chain: {
+            current: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            outcome: "continued",
+            servers: [
+              { identity: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", current: false },
+              { identity: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", current: true },
+            ],
+            switches: [
+              {
+                time: now,
+                old: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                new: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                file: "mysql-bin.000001",
+                pos: 154,
+                gtid_set: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3",
+                continued: true,
+              },
+            ],
+          },
+        }),
+        replication: buildReplication(),
+        checkpoint: { file: "mysql-bin.000002", pos: 200 },
+      },
+      {
+        task: buildTask("711", {
+          name: "vip-stopped",
+          state: "FAILED",
+          last_error: "SOURCE_SWITCHOVER: source switched from aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa to bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb. This backup has no GTID set.",
+          source_chain: {
+            current: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            outcome: "stopped",
+            servers: [
+              { identity: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", current: true },
+            ],
+            switches: [
+              {
+                time: now,
+                old: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                new: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                file: "mysql-bin.000009",
+                pos: 4,
+                continued: false,
+                reason: "no_gtid",
+              },
+            ],
+          },
+        }),
+        replication: buildReplication({
+          status: "ABNORMAL",
+          has_progress: false,
+          reason: "SOURCE_SWITCHOVER",
+        }),
+      },
+    ],
+    files: [
+      {
+        file_name: "mysql-bin.000001",
+        file_path: "/data/710/mysql-bin.000001",
+        source_identity: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        state: "SEALED",
+        size_bytes: 2048,
+        start_pos: 4,
+        end_pos: 154,
+        upload_state: "UPLOADED",
+      },
+      {
+        file_name: "mysql-bin.000002",
+        file_path: "/data/710/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.mysql-bin.000002",
+        source_identity: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        state: "SEALED",
+        size_bytes: 4096,
+        start_pos: 4,
+        end_pos: 200,
+        upload_state: "LOCAL_ONLY",
+      },
+    ],
+    sources: [],
+    workers: [],
+    clusterOverview: {
+      task_count: 2,
+      worker_count: 0,
+      running_task_count: 1,
+      leased_task_count: 1,
     },
   },
 };

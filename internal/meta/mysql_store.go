@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -254,6 +254,16 @@ FROM task_events
 WHERE task_id = ?
 ORDER BY id DESC
 LIMIT ?;
+`
+
+// Oldest SOURCE_SWITCHOVER rows first, capped so a scrape does not read the
+// whole event table. A task does not switch often enough to pass this cap.
+const listSourceSwitchEventsSQL = `
+SELECT task_id, event_type, message, detail, event_time, event_seq
+FROM task_events
+WHERE task_id = ? AND event_type = 'SOURCE_SWITCHOVER'
+ORDER BY id ASC
+LIMIT 1000;
 `
 
 // upsertBinlogFileSQL writes one segment identified by (task_id, source_file, epoch),
@@ -1325,6 +1335,32 @@ func (s *MySQLTaskStore) ListEvents(ctx context.Context, taskID string, limit in
 	// Return events in ascending order for stable timeline.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// ListSourceSwitchEvents returns SOURCE_SWITCHOVER rows, oldest first.
+// The query is capped at 1000 rows. A task that has not switched returns an empty slice.
+func (s *MySQLTaskStore) ListSourceSwitchEvents(ctx context.Context, taskID string) ([]tasks.TaskEvent, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_source_switch_events")
+	defer endMetaSpan(span)
+
+	rows, err := s.db.QueryContext(ctx, listSourceSwitchEventsSQL, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]tasks.TaskEvent, 0)
+	for rows.Next() {
+		var e tasks.TaskEvent
+		if err := rows.Scan(&e.TaskID, &e.Type, &e.Message, &e.Detail, &e.Time, &e.Sequence); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

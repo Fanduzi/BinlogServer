@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object, and GET /api/tasks/{id}/window the retained chain's earliest and latest UTC event times, MySQL GTID coverage, and breaks. A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos and the local event span when this process can read that segment.
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id} source_chain when a VIP identity list or SOURCE_SWITCHOVER event exists, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object, and GET /api/tasks/{id}/window the retained chain's earliest and latest UTC event times, MySQL GTID coverage, and breaks. A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos, the local event span when this process can read that segment, and source_identity for the server that wrote each file.
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -516,7 +516,11 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			writeJSON(w, http.StatusOK, tasks.FilePositionsForAPI(files))
+			files = tasks.FilePositionsForAPI(files)
+			if chain, ok := s.taskSourceChain(taskID); ok {
+				files = tasks.AnnotateFileSources(files, chain)
+			}
+			writeJSON(w, http.StatusOK, files)
 			return
 		}
 		if r.Method == http.MethodGet && action == "replay" {
@@ -1247,6 +1251,28 @@ func buildReplicationResponse(task tasks.Task, progress tasks.ReplicationProgres
 	return resp
 }
 
+// taskDetailView is one task plus the optional source chain.
+// Existing task fields stay at the top level. source_chain is omitted when
+// this process has no identity list and no SOURCE_SWITCHOVER event.
+type taskDetailView struct {
+	tasks.Task
+	SourceChain *tasks.SourceChain `json:"source_chain,omitempty"`
+}
+
+func (s *Server) taskSourceChain(taskID string) (tasks.SourceChain, bool) {
+	reader, ok := s.tasks.(interface {
+		SourceChain(string) (tasks.SourceChain, error)
+	})
+	if !ok || s == nil {
+		return tasks.SourceChain{}, false
+	}
+	chain, err := reader.SourceChain(taskID)
+	if err != nil || chain.Empty() {
+		return tasks.SourceChain{}, false
+	}
+	return chain, true
+}
+
 // handleTaskEntity 处理单任务详情、更新与删除请求。
 func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID string) {
 	switch r.Method {
@@ -1260,7 +1286,11 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, sanitizeTask(task))
+		view := taskDetailView{Task: sanitizeTask(task)}
+		if chain, ok := s.taskSourceChain(taskID); ok {
+			view.SourceChain = &chain
+		}
+		writeJSON(w, http.StatusOK, view)
 	case http.MethodPut:
 		var req updateTaskRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
