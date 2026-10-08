@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, and SourceSwitchNotice for a VIP source switch event
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -83,6 +83,18 @@ type Task struct {
 	// Without that column it stays in the process that held the dump, including after STOPPED.
 	// Standalone keeps it on this struct. Empty means the source thread is gone.
 	PendingDumpCleanup *DumpCleanup `json:"pending_dump_cleanup,omitempty"`
+	// StorageAlert is computed when a task is listed or fetched.
+	// It is not stored. A nil alert means this response did not find a
+	// checkpoint or segment that disagrees with the files on disk.
+	StorageAlert *StorageAlert `json:"storage_alert,omitempty"`
+}
+
+// StorageAlert is a checkpoint or segment that cannot be continued safely.
+// Code is STORAGE_INCONSISTENT. Message tells the DBA what was found and
+// how to recover without restoring from the damaged files.
+type StorageAlert struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // TaskPatch 是任务更新接口使用的部分字段 patch。

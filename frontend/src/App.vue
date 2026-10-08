@@ -1,6 +1,6 @@
 <!--
 input: useDashboard.refreshAll orchestration, dashboard task copy (owner/epoch), local current-page filter state, auth-required browser event
-output: operator-focused console UI with server-paged task list, list lease risk from the task copy, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer including the source-server chain, per-file segment download, replay-set tar download, a recoverable window, a point-in-time replay command, a stop_gtid replay command, forms, and settings
+output: operator-focused console UI with server-paged task list, list lease risk from the task copy, a storage-inconsistency tag when storage_alert is set, explicit global/current-page filter scopes, single-process pull copy when overview.single_process, status KPIs, detail drawer including the source-server chain, per-file segment download, replay-set tar download, a recoverable window, a point-in-time replay command, a stop_gtid replay command, forms, and settings
 pos: single-page frontend entry for Binlog Server operations console; page change does not GET /lease
 note: if this file changes, update this header and frontend/README.md.
 -->
@@ -261,6 +261,7 @@ note: if this file changes, update this header and frontend/README.md.
             <el-table-column :label="$t('table.taskState')" width="140">
               <template #default="{ row }">
                 <el-tag size="small" :type="stateTagType(row.task.state)">{{ stateLabel(row.task.state) }}</el-tag>
+                <el-tag v-if="row.task.storage_alert" size="small" type="danger" data-testid="task-storage-alert-row">{{ $t('detail.storageAlert') }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column :label="$t('table.ownerWorker')" min-width="130">

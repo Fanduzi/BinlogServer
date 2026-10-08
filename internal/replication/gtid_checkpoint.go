@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a flavor-specific GTID seed and binlog events from the dump, including raw-mode events whose body is only in RawData or GenericEvent
-// output: the executed GTID set written on a flushed checkpoint, and MySQL 1236 detection for file/pos resume
+// output: the executed GTID set written on a flushed checkpoint, a read-only peek of an event GTID, containment and forward-gap checks against that set, and MySQL 1236 detection for file/pos resume
 // pos: GTID memory for checkpoint writes so a purged source file can resume by GTID
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -8,6 +8,7 @@ package replication
 import (
 	"encoding/binary"
 	"errors"
+	"strconv"
 	"strings"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
@@ -54,6 +55,154 @@ func (t *executedGTID) current() string {
 		return ""
 	}
 	return t.set.String()
+}
+
+// peekGTID returns the GTID carried by ev without changing the executed set.
+// A raw-mode event is decoded from its body. Events that are not GTID events
+// return false.
+func (t *executedGTID) peekGTID(ev *replication.BinlogEvent) (string, bool) {
+	if t == nil || ev == nil || ev.Header == nil {
+		return "", false
+	}
+	decoded := ev
+	if next, ok := t.decodeRaw(ev); ok && next != nil {
+		decoded = next
+	}
+	switch decoded.Header.EventType {
+	case replication.GTID_EVENT, replication.GTID_TAGGED_LOG_EVENT, replication.MARIADB_GTID_EVENT:
+	default:
+		return "", false
+	}
+	gtidEvent, ok := decoded.Event.(gomysql.BinlogGTIDEvent)
+	if !ok || gtidEvent == nil {
+		return "", false
+	}
+	gtid, err := gtidEvent.GTIDNext()
+	if err != nil || gtid == nil {
+		return "", false
+	}
+	text := strings.TrimSpace(gtid.String())
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// contains reports whether gtid is already inside the flushed set.
+func (t *executedGTID) contains(gtid string) bool {
+	if t == nil || t.set == nil {
+		return false
+	}
+	gtid = strings.TrimSpace(gtid)
+	if gtid == "" {
+		return false
+	}
+	one, err := gomysql.ParseGTIDSet(t.flavor, gtid)
+	if err != nil {
+		return false
+	}
+	return t.set.Contain(one)
+}
+
+// forwardGap reports a MySQL GTID whose sequence skips past the flushed set
+// for a UUID that set already contains. The next sequence is not a gap.
+// A UUID the set does not contain is not a gap. MariaDB sets are not compared
+// this way.
+func (t *executedGTID) forwardGap(gtid string) bool {
+	if t == nil || t.set == nil || isMariaDBFlavor(t.flavor) {
+		return false
+	}
+	uuid, gno, ok := splitMysqlGTID(gtid)
+	if !ok {
+		return false
+	}
+	max, known := mysqlMaxGNO(t.set, uuid)
+	if !known {
+		return false
+	}
+	return gno > max+1
+}
+
+// endsTransaction reports a commit or rollback that finishes the current transaction.
+func (t *executedGTID) endsTransaction(ev *replication.BinlogEvent) bool {
+	if t == nil || ev == nil || ev.Header == nil {
+		return false
+	}
+	if ev.Header.EventType == replication.XID_EVENT {
+		return true
+	}
+	if ev.Header.EventType != replication.QUERY_EVENT {
+		return false
+	}
+	decoded := ev
+	if next, ok := t.decodeRaw(ev); ok && next != nil {
+		decoded = next
+	}
+	qe, ok := decoded.Event.(*replication.QueryEvent)
+	if !ok {
+		return false
+	}
+	upper := strings.ToUpper(strings.TrimSpace(string(qe.Query)))
+	switch queryWord(upper) {
+	case "COMMIT":
+		return true
+	case "ROLLBACK":
+		return !strings.HasPrefix(upper, "ROLLBACK TO")
+	case "XA":
+		return strings.HasPrefix(upper, "XA COMMIT") || strings.HasPrefix(upper, "XA ROLLBACK")
+	default:
+		return false
+	}
+}
+
+func splitMysqlGTID(gtid string) (string, int64, bool) {
+	gtid = strings.TrimSpace(gtid)
+	colon := strings.LastIndex(gtid, ":")
+	if colon <= 0 || colon == len(gtid)-1 {
+		return "", 0, false
+	}
+	gno, err := strconv.ParseInt(gtid[colon+1:], 10, 64)
+	if err != nil || gno <= 0 {
+		return "", 0, false
+	}
+	return gtid[:colon], gno, true
+}
+
+// mysqlMaxGNO is the highest sequence stored for uuid.
+// The interval list is read from GTIDSet.String because the MySQL set's
+// intervals are not exported. A UUID that is absent returns false.
+func mysqlMaxGNO(set gomysql.GTIDSet, uuid string) (int64, bool) {
+	if set == nil {
+		return 0, false
+	}
+	var max int64
+	found := false
+	for _, part := range strings.Split(set.String(), ",") {
+		part = strings.TrimSpace(part)
+		colon := strings.Index(part, ":")
+		if colon <= 0 || !strings.EqualFold(part[:colon], uuid) {
+			continue
+		}
+		for _, iv := range strings.Split(part[colon+1:], ":") {
+			iv = strings.TrimSpace(iv)
+			if iv == "" {
+				continue
+			}
+			end := iv
+			if dash := strings.Index(iv, "-"); dash >= 0 {
+				end = iv[dash+1:]
+			}
+			n, err := strconv.ParseInt(end, 10, 64)
+			if err != nil || n <= 0 {
+				continue
+			}
+			if !found || n > max {
+				max = n
+				found = true
+			}
+		}
+	}
+	return max, found
 }
 
 func (t *executedGTID) note(ev *replication.BinlogEvent) {
