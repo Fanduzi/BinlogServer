@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task directory of binlog segments and the checkpoint gtid_set
-// output: a storage problem when one segment rotates to its own or an older file, when a position or GTID goes backwards inside that segment, or when a GTID hole inside that segment is claimed by the checkpoint; a missing file, a holed start set, and another server UUID are not a problem
+// output: a storage problem when one segment rotates to its own or an older file, or when an event position goes backwards inside that segment; out-of-order GTIDs, a hole in one UUID, and a missing file are not a problem
 // pos: detect a backup already damaged by a stale GTID re-dump before another start drops more transactions
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
 
@@ -26,13 +25,14 @@ type StorageProblem struct {
 	Message string
 }
 
-// DetectStorageProblem scans taskDir for damage inside a single segment.
-// A stray rotate, a position or GTID that goes backwards, or a GTID hole
-// inside that segment which the checkpoint claims, is a problem.
-// Gaps between files are not. Retention, expiry, a second server UUID, and a
-// start set that already has holes leave those gaps. A missing directory is
-// not a problem. MariaDB skips the GTID compare. An empty flavor is read as
-// MySQL when the checkpoint parses as a MySQL set.
+// DetectStorageProblem scans taskDir for the re-dump damage signature.
+// A rotate to the segment's own file or an older one, or an event position
+// that goes backwards inside one segment, is a problem.
+// GTID order is not. A replica can commit out of order, interleave several
+// UUIDs, or omit a number that lives in a later segment, the start set, or
+// gtid_purged. checkpointGTID and flavor stay in the signature so callers
+// can pass the stored set; they do not change this result. A missing
+// directory is not a problem.
 func DetectStorageProblem(taskDir, checkpointGTID, flavor string) (StorageProblem, bool) {
 	taskDir = strings.TrimSpace(taskDir)
 	if taskDir == "" {
@@ -51,31 +51,19 @@ func DetectStorageProblem(taskDir, checkpointGTID, flavor string) (StorageProble
 			continue
 		}
 		path := filepath.Join(taskDir, entry.Name())
-		if msg, bad := segmentDamage(path, entry.Name(), named.Source, checkpointGTID, flavor); bad {
+		if msg, bad := segmentDamage(path, entry.Name(), named.Source); bad {
 			return StorageProblem{Message: msg}, true
 		}
 	}
 	return StorageProblem{}, false
 }
 
-func segmentDamage(path, diskName, segmentSource, checkpointGTID, flavor string) (string, bool) {
+func segmentDamage(path, diskName, segmentSource string) (string, bool) {
 	if next, stray := strayRotate(path, segmentSource); stray {
 		return "segment " + diskName + " contains a rotate to " + next + ", which is not a newer binlog file. " + storageRecoveryText, true
 	}
 	if pos, prev, back := positionRegresses(path); back {
 		return "event end pos " + strconv.FormatUint(uint64(pos), 10) + " is behind earlier end pos " + strconv.FormatUint(uint64(prev), 10) + " in " + diskName + ". " + storageRecoveryText, true
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", false
-	}
-	log, scanErr := ScanSegmentGTIDs(f)
-	_ = f.Close()
-	if scanErr != nil {
-		return "", false
-	}
-	if msg, bad := intraFileGTIDProblem(diskName, checkpointGTID, flavor, log.Events); bad {
-		return msg, true
 	}
 	return "", false
 }
@@ -237,88 +225,4 @@ func looksUUID(s string) bool {
 		}
 	}
 	return true
-}
-
-func intraFileGTIDProblem(diskName, checkpointGTID, flavor string, events []GTIDEventRef) (string, bool) {
-	if strings.EqualFold(strings.TrimSpace(flavor), "mariadb") || len(events) == 0 {
-		return "", false
-	}
-	var set gomysql.GTIDSet
-	checkpointGTID = strings.TrimSpace(checkpointGTID)
-	if checkpointGTID != "" {
-		parsed, err := gomysql.ParseGTIDSet(gomysql.MySQLFlavor, checkpointGTID)
-		if err == nil {
-			set = parsed
-		}
-	}
-	last := map[string]int64{}
-	for _, ev := range events {
-		if ev.UUID == "" || ev.Seq <= 0 {
-			continue
-		}
-		prev, seen := last[ev.UUID]
-		if !seen {
-			last[ev.UUID] = ev.Seq
-			continue
-		}
-		if ev.Seq < prev {
-			return "gtid " + ev.UUID + ":" + strconv.FormatInt(ev.Seq, 10) + " goes backwards inside " + diskName + " after " + ev.UUID + ":" + strconv.FormatInt(prev, 10) + ". " + storageRecoveryText, true
-		}
-		if ev.Seq > prev+1 && set != nil && overlaps(uuidIntervals(set, ev.UUID), prev+1, ev.Seq-1) {
-			return "checkpoint gtid_set includes " + ev.UUID + ":" + strconv.FormatInt(prev+1, 10) + ", which is not stored in " + diskName + ". " + storageRecoveryText, true
-		}
-		if ev.Seq > prev {
-			last[ev.UUID] = ev.Seq
-		}
-	}
-	return "", false
-}
-
-func uuidIntervals(set gomysql.GTIDSet, uuid string) [][2]int64 {
-	if set == nil {
-		return nil
-	}
-	var out [][2]int64
-	for _, part := range strings.Split(set.String(), ",") {
-		part = strings.TrimSpace(part)
-		colon := strings.Index(part, ":")
-		if colon <= 0 || !strings.EqualFold(part[:colon], uuid) {
-			continue
-		}
-		for _, iv := range strings.Split(part[colon+1:], ":") {
-			iv = strings.TrimSpace(iv)
-			if iv == "" {
-				continue
-			}
-			var start, end int64
-			var err error
-			if dash := strings.Index(iv, "-"); dash >= 0 {
-				start, err = strconv.ParseInt(iv[:dash], 10, 64)
-				if err != nil {
-					continue
-				}
-				end, err = strconv.ParseInt(iv[dash+1:], 10, 64)
-			} else {
-				start, err = strconv.ParseInt(iv, 10, 64)
-				end = start
-			}
-			if err != nil || start <= 0 || end < start {
-				continue
-			}
-			out = append(out, [2]int64{start, end})
-		}
-	}
-	return out
-}
-
-func overlaps(intervals [][2]int64, from, to int64) bool {
-	if to < from {
-		return false
-	}
-	for _, iv := range intervals {
-		if iv[1] >= from && iv[0] <= to {
-			return true
-		}
-	}
-	return false
 }
