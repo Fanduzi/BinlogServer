@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: mysql80 with GTID on, the suite API, the task data directory, and the Percona 8.0 mysqlbinlog client
-# output: GTID and LATEST tasks that survive several Binlog Dump kills and one rotation, with every new transaction stored once, a window that matches the files, and a replay checksum that matches the source
+# output: GTID and LATEST tasks that survive several Binlog Dump kills and one rotation, with every new transaction stored once, a window that matches the files, and a replay of each task from an empty database whose checksum matches the source
 # pos: CI coverage for a dump reconnect that must resume from the flushed GTID set or file position
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -222,6 +222,8 @@ apply_replay() {
     echo "replay has no paths: $json" >&2
     return 1
   fi
+  # RESET clears GTIDs and leaves user databases. Drop first so the next replay can create it again.
+  docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "DROP DATABASE IF EXISTS ${DB};" >/dev/null
   docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET MASTER;" >/dev/null 2>&1 \
     || docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -e "RESET BINARY LOGS AND GTIDS;" >/dev/null
   # mysql:8.0 has no mysqlbinlog. The suite's pipefail makes either side fail the scenario.
