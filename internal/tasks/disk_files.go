@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions
+// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -112,6 +112,8 @@ type ReplaySet struct {
 	ClientHint string   `json:"client_hint"`
 	Paths      []string `json:"paths"`
 	Locations  []string `json:"locations,omitempty"`
+	// Warning is set when a damaged segment and every later one were left out.
+	Warning string `json:"warning,omitempty"`
 }
 
 // ReplayClient maps source.flavor to the binlog client a DBA should run.

@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the replay inventory (sealed segments and the highest open epoch), each segment's event-header times and MySQL GTID log, and whether object storage is configured
 // output: the retained chain's earliest and latest UTC event times, the MySQL GTID set those segments contain, and the breaks that keep the chain from being one continuous restore; a missing index is a break only inside one source-name prefix, a GTID hole inside one segment is a break, and a GTID hole is still reported across a source switch
-// pos: read-only recoverable window a DBA can check before choosing a replay stop; replay selection is unchanged
+// pos: read-only recoverable window a DBA can check before choosing a replay stop; a task with a damaged segment (storage_alert) stops before it, the same cutoff /replay uses, and reports one damaged-segment break
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -27,6 +27,7 @@ const (
 	breakGTIDHole    = "gtid hole between %s and %s"
 	breakIntraGTID   = "gtid hole in %s at %s:%d"
 	breakUnreadable  = "segment is not readable"
+	breakDamaged     = "segment %s is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
 )
 
 // RecoveryBreak is one place the retained chain cannot be restored straight through.
@@ -73,7 +74,15 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 	if err != nil {
 		return RecoveryWindow{}, err
 	}
+	// A damaged task keeps only the segments before the damage, the same
+	// cutoff /replay uses, and reports the damage as a break.
 	chosen := SelectReplayFiles(files)
+	var damage *RecoveryBreak
+	if problem, found := s.storageProblem(task); found {
+		kept := excludeDamagedSegments(files, chosen, problem.Segment)
+		damage = damagedSegmentBreak(problem.Segment, chosen, kept)
+		chosen = kept
+	}
 	s.mu.Lock()
 	objectStorage := s.fileUploader != nil
 	s.mu.Unlock()
@@ -116,7 +125,31 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 		view.Log = log
 		views = append(views, view)
 	}
-	return assessRecovery(views, task.Source.Flavor, objectStorage)
+	out, err := assessRecovery(views, task.Source.Flavor, objectStorage)
+	if err != nil || damage == nil {
+		return out, err
+	}
+	out.Breaks = append(out.Breaks, *damage)
+	out.Continuous = false
+	return out, nil
+}
+
+// damagedSegmentBreak names the damaged segment and every later segment the
+// window left out. kept is a prefix of chosen.
+func damagedSegmentBreak(damaged string, chosen, kept []BinlogFile) *RecoveryBreak {
+	keptSet := make(map[string]bool, len(kept))
+	for _, file := range kept {
+		keptSet[segmentBase(file)] = true
+	}
+	files := []string{damaged}
+	for _, file := range chosen {
+		name := segmentBase(file)
+		if name == "" || name == damaged || keptSet[name] {
+			continue
+		}
+		files = append(files, name)
+	}
+	return &RecoveryBreak{Files: files, Reason: fmt.Sprintf(breakDamaged, damaged)}
 }
 
 func assessRecovery(views []segmentView, flavor string, objectStorage bool) (RecoveryWindow, error) {

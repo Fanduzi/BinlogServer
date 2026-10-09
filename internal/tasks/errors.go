@@ -37,8 +37,9 @@ const (
 	// and this backup cannot continue without mixing the two binlogs.
 	CodeSourceSwitchover = "SOURCE_SWITCHOVER"
 	// CodeStreamRegression means the dump contradicted bytes already stored:
-	// a rotate to an older or current file, a position behind the cursor, or a GTID gap.
-	// Another start hits the same stream. The task stays FAILED.
+	// a rotate to an older or current file, or a transaction event behind the
+	// cursor. A GTID hole or out-of-order GTIDs are legal on a replica and
+	// never raise it. Another start hits the same stream. The task stays FAILED.
 	CodeStreamRegression = "STREAM_REGRESSION"
 	// CodeStorageInconsistent means a checkpoint gtid_set or a segment on disk
 	// already disagrees with the transactions those files contain.

@@ -272,7 +272,7 @@ curl http://localhost:8080/api/tasks/{task_id}
 
 HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。`last_error`、`owner_worker_id`、`epoch`、`run_id` 为空时不出现。任务不存在是 HTTP 404，正文 `task not found`。
 
-列表、dashboard 的 `tasks[].task` 和这条详情在发现重拉损坏时多一个 `storage_alert`：`code` 是 `STORAGE_INCONSISTENT`，`message` 说明某一个分段里有指向自己或更早文件的 Rotate，或事件位点在这个分段里变小，并写明恢复步骤。GTID 乱序、多个 UUID 交错、序号在别的分段或起点集合里、以及保留造成的文件间缺口，都不设置该字段。缺文件看 `/window` 的 `breaks`。没有这个问题时该字段不出现。它是读目录算出来的，不入库，也没有新的迁移。`/window` 的 `continuous: true` 只说明相邻文件接得上；同一个文件内部的 GTID 序号空洞会让 `continuous` 为 false。checkpoint 的 `gtid_set` 不能当作“这些事务已经在文件里”的证明。
+列表、dashboard 的 `tasks[].task` 和这条详情在发现重拉损坏时多一个 `storage_alert`：`code` 是 `STORAGE_INCONSISTENT`，`message` 说明某一个分段里有指向自己或更早文件的 Rotate，或事件位点在这个分段里变小，并写明恢复步骤。`segment` 是第一个损坏的分段文件名。`detail` 是在这个分段里发现了什么（英文）。`missing_gtids` 是 checkpoint 里有、起点集合和任何分段都没有的 MySQL GTID。`valid_segments` 是损坏分段之前的分段，写于损坏之前，仍可恢复。`restart_gtid_set` 是新任务的 GTID 起点（起点集合或第一个分段的 Previous_GTIDs，加上 `valid_segments` 里的事务）。这三个字段算不出来时不出现。GTID 乱序、多个 UUID 交错、序号在别的分段或起点集合里、以及保留造成的文件间缺口，都不设置该字段。缺文件看 `/window` 的 `breaks`。没有这个问题时该字段不出现。它是读目录算出来的，不入库，也没有新的迁移。带 `storage_alert` 时，`/window` 与 `/replay` 用同一个截断点：只统计损坏分段之前的分段，`continuous` 为 false，`breaks` 里多一条 `segment <名字> is damaged (STORAGE_INCONSISTENT) ...`，`files` 列出损坏分段和之后被排除的分段；`earliest`、`latest`、`gtid_set` 也只覆盖这些有效分段。`FAILED` 任务的 `last_error` 若还是旧版本写下的 `STORAGE_INCONSISTENT` 文本，读取时显示为当前 `storage_alert.message`。`/window` 的 `continuous: true` 只说明相邻文件接得上；同一个文件内部的 GTID 序号空洞会让 `continuous` 为 false。checkpoint 的 `gtid_set` 不能当作“这些事务已经在文件里”的证明。
 
 这条任务有 `.source-chain`，或有 `SOURCE_SWITCHOVER` 事件时，多一个 `source_chain`。没有这两样时该字段不出现，已有字段仍在顶层。列表和 `PUT` 不带这个字段。没有新的表，也没有新的配置项。
 
@@ -464,6 +464,8 @@ curl http://localhost:8080/api/tasks/{task_id}/checkpoint
 }
 ```
 
+`file` 和 `pos` 是下一次 Start 续传的位置。GTID 任务的 `gtid_set` 是存下的集合（还没有 checkpoint 行时是起点集合），加上打开分段里已经完整的事务，和 Start 时 runner 用的集合相同。打开分段末尾有没写完的事务、Start 会截掉它时，`pos` 是截断点。这个 GET 只读文件，不截断。存下的行指向别的文件或在本地位置之后时，不附 `gtid_set`。还没有写过 checkpoint 行、但打开分段里已有完整事件时（例如升级上来的任务），返回由分段推出的位置，不返回 `updated_at`。既没有 checkpoint 行、本地也没有可续的分段（例如从未启动过的任务）时是 HTTP 404，正文 `checkpoint not found`；这表示还没有续传位置，Start 会从任务的起点开始。
+
 ### 4.2 获取复制状态
 
 ```bash
@@ -604,6 +606,8 @@ curl http://localhost:8080/api/tasks/1/replay
 
 curl "http://localhost:8080/api/tasks/1/replay?limit=3"
 ```
+
+任务带 `storage_alert` 时，回放停在损坏分段之前：损坏分段、同一 binlog 序号的其它副本、以及之后的分段都不在 `paths` 里，响应多一个 `warning` 写明排除了哪个分段和新任务的 `gtid_set`。定点恢复（`stop_datetime`）、`stop_gtid`、`start_gtid_set` 和 `/replay/archive` 用同一个排除规则，前三者的响应同样带 `warning`。没有损坏时该字段不出现。
 
 `limit` 与文件清单相同：省略、小于 1 或不是整数时按 200 处理，不返回 400。`paths` 是清单里的 `file_path`，不是 basename。窗口为空时 `paths` 是 `[]`，HTTP 仍是 200。任务不存在是 HTTP 404，正文 `task not found`。
 

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the files inventory window, SelectReplayFiles, the point-in-time selection, the GTID stop selection, the executed-GTID selection, and OpenTaskSegment for each selected basename
-// output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read
+// output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read; a damaged segment and every later one are not archived
 // pos: replay-set archive for the authenticated download route, including the same datetime window, the same GTID stop, and the same executed-GTID roll-forward as the replay JSON
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -111,10 +111,12 @@ func (s *Scheduler) openReplayMembers(taskID string, limit int) ([]replayMember,
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.GetTask(taskID); err != nil {
+	task, err := s.GetTask(taskID)
+	if err != nil {
 		return nil, err
 	}
-	return s.openSelectedReplayMembers(taskID, SelectReplayFiles(files))
+	chosen, _ := s.SelectReplayFilesFor(task, files)
+	return s.openSelectedReplayMembers(taskID, chosen)
 }
 
 func (s *Scheduler) openSelectedReplayMembers(taskID string, selected []BinlogFile) ([]replayMember, error) {
