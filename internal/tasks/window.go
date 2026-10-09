@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the replay inventory (sealed segments and the highest open epoch), each segment's event-header times and MySQL GTID log, and whether object storage is configured
-// output: the retained chain's earliest and latest UTC event times, the MySQL GTID set those segments contain, and the breaks that keep the chain from being one continuous restore; a missing index is a break only inside one source-name prefix, a GTID hole inside one segment is a break, and a GTID hole is still reported across a source switch
+// output: the retained chain's earliest and latest UTC event times, the MySQL GTID set those segments contain, and the breaks that keep the chain from being one continuous restore; a missing index is a break only inside one source-name prefix, a GTID hole inside one segment is a break, and across a source switch a hole is a transaction the new server's first header lists that the chain does not store anywhere (that header predates the transactions the GTID dump skipped); a GTID task's start set counts as stored, so a mysqldump seed inside the first file is not a hole at a failback; a sequence missing between stored sequences of one source (not in the start set) is always a break, and a stored GTID hole (stored_hole.go) stops the window like damage
 // pos: read-only recoverable window a DBA can check before choosing a replay stop; a task with a damaged segment (storage_alert) stops before it, the same cutoff /replay uses, and reports one damaged-segment break
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -28,6 +28,8 @@ const (
 	breakIntraGTID   = "gtid hole in %s at %s:%d"
 	breakUnreadable  = "segment is not readable"
 	breakDamaged     = "segment %s is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+	breakStoredHole  = "gtid hole: a source switch recorded %s as stored, but no segment holds it (STORAGE_INCONSISTENT); the window stops before %s and leaves out it and every later segment"
+	breakInterior    = "gtid hole: %s is stored in no segment between %s and %s"
 )
 
 // RecoveryBreak is one place the retained chain cannot be restored straight through.
@@ -80,7 +82,13 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 	var damage *RecoveryBreak
 	if problem, found := s.storageProblem(task); found {
 		kept := excludeDamagedSegments(files, chosen, problem.Segment)
+		if strings.TrimSpace(problem.Segment) == "" {
+			kept = []BinlogFile{}
+		}
 		damage = damagedSegmentBreak(problem.Segment, chosen, kept)
+		if strings.HasPrefix(problem.Detail, storedHoleDetailPrefix) {
+			damage.Reason = fmt.Sprintf(breakStoredHole, problem.Missing, problem.Segment)
+		}
 		chosen = kept
 	}
 	s.mu.Lock()
@@ -125,7 +133,7 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 		view.Log = log
 		views = append(views, view)
 	}
-	out, err := assessRecovery(views, task.Source.Flavor, objectStorage)
+	out, err := assessRecoveryFrom(views, task.Source.Flavor, objectStorage, StartGTIDText(task))
 	if err != nil || damage == nil {
 		return out, err
 	}
@@ -153,12 +161,27 @@ func damagedSegmentBreak(damaged string, chosen, kept []BinlogFile) *RecoveryBre
 }
 
 func assessRecovery(views []segmentView, flavor string, objectStorage bool) (RecoveryWindow, error) {
+	return assessRecoveryFrom(views, flavor, objectStorage, "")
+}
+
+// assessRecoveryFrom is assessRecovery for a task whose GTID start set is
+// startGTID. A restore applies that set first (a mysqldump or xtrabackup
+// seed), so a later server's header that names part of it is not a hole.
+func assessRecoveryFrom(views []segmentView, flavor string, objectStorage bool, startGTID string) (RecoveryWindow, error) {
 	out := RecoveryWindow{Continuous: true, Breaks: []RecoveryBreak{}}
 	mysqlFlavor := strings.EqualFold(strings.TrimSpace(flavor), "mysql")
 	var earliest, latest *time.Time
 	var events []binlog.GTIDEventRef
 
 	parts := groupChain(views)
+	var stored mysql.GTIDSet
+	if mysqlFlavor {
+		var err error
+		if stored, err = chainStoredSet(views, startGTID); err != nil {
+			return RecoveryWindow{}, err
+		}
+	}
+	var before []binlog.GTIDEventRef
 	for i, part := range parts {
 		for _, view := range part.views {
 			out.Breaks = append(out.Breaks, segmentBreaks(view, objectStorage)...)
@@ -189,8 +212,18 @@ func assessRecovery(views []segmentView, flavor string, objectStorage bool) (Rec
 		if part.prefix == next.prefix && next.seq > part.seq+1 {
 			out.Breaks = append(out.Breaks, missingIndexBreak(part, next))
 		}
+		before = append(before, mergeGTID(part.views).Events...)
 		if mysqlFlavor {
-			hole, err := gtidHole(mergeGTID(part.views), mergeGTID(next.views))
+			var hole bool
+			var err error
+			if part.prefix != next.prefix {
+				// A server switch. The new server's file header was written
+				// before the last transactions replicated into that file, and
+				// the GTID dump skipped those because this backup has them.
+				hole, err = switchHole(stored, before, mergeGTID(next.views))
+			} else {
+				hole, err = gtidHole(mergeGTID(part.views), mergeGTID(next.views))
+			}
 			if err != nil {
 				return RecoveryWindow{}, err
 			}
@@ -200,6 +233,11 @@ func assessRecovery(views []segmentView, flavor string, objectStorage bool) (Rec
 					Reason: fmt.Sprintf(breakGTIDHole, part.sourceName(), next.sourceName()),
 				})
 			}
+		}
+	}
+	if mysqlFlavor {
+		if b, ok := interiorHoleBreak(views, startGTID, out.Breaks); ok {
+			out.Breaks = append(out.Breaks, b)
 		}
 	}
 	out.Earliest = earliest
@@ -399,6 +437,55 @@ func gtidHole(prev, next binlog.SegmentGTIDLog) (bool, error) {
 	return eventSeqHole(prev.Events, next.Events), nil
 }
 
+// chainStoredSet is the history before the chain (the first previous-GTIDs
+// header) plus every transaction a readable segment stores.
+func chainStoredSet(views []segmentView, startGTID string) (mysql.GTIDSet, error) {
+	start := ""
+	var events []binlog.GTIDEventRef
+	for _, view := range views {
+		if !view.Readable {
+			continue
+		}
+		if start == "" && view.Log.HasPrevious {
+			start = view.Log.Previous
+		}
+		events = append(events, view.Log.Events...)
+	}
+	set, err := parseGTIDText(start)
+	if err != nil {
+		return nil, err
+	}
+	// The task's start set: a GTID dump skips those transactions even when
+	// they sit in the first file after its header, and a restore applies them
+	// from the seed. Without it a later server's header that names them looks
+	// like a hole at every failback.
+	if seed := strings.TrimSpace(startGTID); seed != "" {
+		if seeded, err := parseGTIDText(seed); err == nil {
+			if err := set.Update(seeded.String()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := addGTIDEvents(set, events); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
+// switchHole is a transaction the new server had before its first stored
+// file that this chain does not hold anywhere. Without a header, a sequence
+// gap after the transactions stored before the switch is a hole.
+func switchHole(stored mysql.GTIDSet, before []binlog.GTIDEventRef, next binlog.SegmentGTIDLog) (bool, error) {
+	if !next.HasPrevious {
+		return eventSeqHole(before, next.Events), nil
+	}
+	header, err := parseGTIDText(next.Previous)
+	if err != nil {
+		return false, err
+	}
+	return !stored.Contain(header), nil
+}
+
 func eventGTIDSet(events []binlog.GTIDEventRef) (mysql.GTIDSet, error) {
 	set, err := parseGTIDText("")
 	if err != nil {
@@ -515,4 +602,66 @@ func eventSeqHole(prev, next []binlog.GTIDEventRef) bool {
 		}
 	}
 	return false
+}
+
+// interiorHoleBreak is a break for sequences missing between the lowest and
+// highest stored sequence of one source, when the start set does not cover
+// them and no GTID-hole break already names the place. The chain's GTID set
+// is never reported continuous with a hole inside it.
+func interiorHoleBreak(views []segmentView, startGTID string, breaks []RecoveryBreak) (RecoveryBreak, bool) {
+	for _, b := range breaks {
+		if strings.HasPrefix(b.Reason, "gtid hole") || b.Reason == breakUnreadable {
+			return RecoveryBreak{}, false
+		}
+	}
+	stored := gtidRanges{}
+	type viewSet struct {
+		name string
+		set  gtidRanges
+	}
+	sets := make([]viewSet, 0, len(views))
+	for _, view := range views {
+		if !view.Readable {
+			continue
+		}
+		one := gtidRanges{}
+		one.addEvents(view.Log.Events)
+		one.normalize()
+		name := segmentBase(view.File)
+		if name == "" {
+			name = strings.TrimSpace(view.File.FileName)
+		}
+		sets = append(sets, viewSet{name: name, set: one})
+		stored.addAll(one)
+	}
+	stored.normalize()
+	gaps := interiorGaps(stored)
+	if seed, err := parseGTIDRanges(startGTID); err == nil {
+		gaps = gaps.minus(seed)
+	}
+	if len(gaps) == 0 {
+		return RecoveryBreak{}, false
+	}
+	keys := make([]string, 0, len(gaps))
+	for k := range gaps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	k := keys[0]
+	iv := gaps[k][0]
+	left, right := "", ""
+	for _, vs := range sets {
+		for _, r := range vs.set[k] {
+			if r[1] < iv[0] {
+				left = vs.name
+			}
+			if r[0] > iv[1] && right == "" {
+				right = vs.name
+			}
+		}
+	}
+	return RecoveryBreak{
+		Files:  []string{left, right},
+		Reason: fmt.Sprintf(breakInterior, gaps.String(), left, right),
+	}, true
 }

@@ -816,7 +816,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			pos = currentPos
 		}
 		cp := binlog.Checkpoint{File: session.diskName(file), Pos: pos, GTIDSet: executed.current()}
-		if session.resumeGTID != "" && nameBelongs(cp.File, session.original, session.active) {
+		if session.resumeGTID != "" && session.owns(cp.File) {
 			clearResumeGTID(session.dir)
 			session.resumeGTID = ""
 		}
