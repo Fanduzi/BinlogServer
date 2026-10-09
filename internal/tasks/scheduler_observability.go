@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events read from the event store without holding the scheduler lock, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, the runner's retention-blocked file counts for metrics, and a Restore that loads a stored pending dump into this process
+// output: observability-facing task progress including at-tip lag, events read from the event store without holding the scheduler lock, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, the runner's retention-blocked file counts for metrics, and a Restore that loads a stored pending dump into this process; ResumePosition adds the open segment's complete transactions to a GTID task's gtid_set, reports the cut of an unfinished trailing transaction, and keeps the stored updated_at, without touching the file
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -165,7 +165,57 @@ func (s *Scheduler) ResumePosition(ctx context.Context, taskID string) (binlog.C
 			return decision.Checkpoint, true, nil
 		}
 	}
+	if found {
+		resume = withOpenTailGTID(dataDir, task, stored, ok, resume)
+	}
 	return resume, found, nil
+}
+
+// withOpenTailGTID fills gtid_set and updated_at the way the runner resumes.
+// A GTID task's set is the stored set (or, before the first checkpoint row,
+// the start set) plus every complete transaction already in the open
+// segment. A stored row for another file or past the local cursor is left
+// out, as NextResumePosition does. When the open segment ends inside
+// a transaction that Start would cut, pos is that cut. The open segment is
+// read, never truncated. Adopted directories and tasks without a GTID seed
+// are left as NextResumePosition returned them.
+func withOpenTailGTID(dataDir string, task Task, stored binlog.Checkpoint, storedOK bool, resume binlog.Checkpoint) binlog.Checkpoint {
+	if resume.UpdatedAt.IsZero() && storedOK {
+		resume.UpdatedAt = stored.UpdatedAt
+	}
+	if task.KeepLocalSegments || strings.TrimSpace(dataDir) == "" {
+		return resume
+	}
+	seed := ""
+	if storedOK {
+		// A stored row for another file, or one past the local cursor, does
+		// not describe these bytes. NextResumePosition already chose them.
+		if stored.File != resume.File || stored.Pos > resume.Pos {
+			return resume
+		}
+		seed = strings.TrimSpace(stored.GTIDSet)
+	} else {
+		seed = StartGTIDText(task)
+	}
+	if seed == "" {
+		return resume
+	}
+	dir, ok := taskBinlogDir(dataDir, task.ID)
+	if !ok {
+		return resume
+	}
+	if strings.TrimSpace(resume.GTIDSet) == "" {
+		resume.GTIDSet = seed
+	}
+	tail, ok := binlog.ReconcileOpenTail(dir)
+	if !ok || (resume.File != "" && tail.File != resume.File) {
+		return resume
+	}
+	resume.GTIDSet = binlog.UnionGTIDText(task.Source.Flavor, resume.GTIDSet, tail)
+	if tail.Truncate && tail.Pos > 0 && tail.Pos < resume.Pos {
+		resume.Pos = tail.Pos
+	}
+	return resume
 }
 
 // ListEvents 列出任务事件，limit<=0 时按默认值处理。

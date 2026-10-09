@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
-// input: segment bytes and a checkpoint gtid_set
-// output: assertions that a stray rotate, a backwards event position, and the case-8 re-dump layout are reported, and that out-of-order commits, interleaved UUIDs, and a holed start set are not
+// input: segment bytes, a checkpoint gtid_set, and a start gtid_set
+// output: assertions that a stray rotate, a backwards event position, and the case-8 re-dump layout are reported, and that out-of-order commits, interleaved UUIDs, and a holed start set are not; the case-8 report names the damaged segment, the missing GTIDs, the earlier valid segment, and the restart set
 // pos: unit coverage for detecting a backup damaged by a stale GTID re-dump
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -22,7 +22,7 @@ func TestDetectStorageProblem(t *testing.T) {
 	t.Run("healthy", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000006"), nil, 37, 38, 39)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-39", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-39", "", "mysql"); found {
 			t.Fatal("start set below the first stored event is not a problem")
 		}
 	})
@@ -30,7 +30,7 @@ func TestDetectStorageProblem(t *testing.T) {
 		dir := t.TempDir()
 		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000001"), storageUUID, nil, []int64{39, 41}, []uint32{200, 400})
 		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000002"), storageUUID, nil, []int64{40}, []uint32{300})
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-41", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-41", "", "mysql"); found {
 			t.Fatal("A:40 committing in the next file is replica commit order, not a re-dump")
 		}
 	})
@@ -44,21 +44,21 @@ func TestDetectStorageProblem(t *testing.T) {
 			{other, 2, 500},
 		})
 		checkpoint := storageUUID + ":1-5," + other + ":1-2"
-		if _, found := DetectStorageProblem(dir, checkpoint, "mysql"); found {
+		if _, found := DetectStorageProblem(dir, checkpoint, "", "mysql"); found {
 			t.Fatal("interleaved UUIDs and an out-of-order commit are not a re-dump")
 		}
 	})
 	t.Run("start set hole inside range", func(t *testing.T) {
 		dir := t.TempDir()
 		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000001"), storageUUID, nil, []int64{10, 11, 12, 14, 15}, nil)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-12:14-15", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-12:14-15", "", "mysql"); found {
 			t.Fatal("a start-set hole inside the segment range is not a dropped transaction")
 		}
 	})
 	t.Run("checkpoint past last event", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000001"), nil, 1, 2, 3)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-9", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-9", "", "mysql"); found {
 			t.Fatal("a checkpoint past the last stored event is a deleted newer file, not this corruption")
 		}
 	})
@@ -66,21 +66,21 @@ func TestDetectStorageProblem(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000001"), nil, 1, 2, 3)
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000003"), nil, 7, 8, 9)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-9", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-9", "", "mysql"); found {
 			t.Fatal("000002 is gone; the hole between the files that remain is not this corruption")
 		}
 	})
 	t.Run("front expiry", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000003"), nil, 7, 8, 9)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-9", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-9", "", "mysql"); found {
 			t.Fatal("events expired from the front are still in the checkpoint and are not this corruption")
 		}
 	})
 	t.Run("start set has a hole", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000001"), nil, 1, 2, 3, 5, 6, 7, 8, 9)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-3:5-9", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-3:5-9", "", "mysql"); found {
 			t.Fatal("a hole the checkpoint also omits is the start set, not a dropped transaction")
 		}
 	})
@@ -91,7 +91,7 @@ func TestDetectStorageProblem(t *testing.T) {
 		writeNamedGTIDs(t, filepath.Join(dir, oldServer+".mysql-bin.000010"), oldServer, nil, []int64{10, 11, 12}, nil)
 		writeNamedGTIDs(t, filepath.Join(dir, newServer+".mysql-bin.000003"), newServer, nil, []int64{1, 2, 3}, nil)
 		checkpoint := oldServer + ":1-12," + newServer + ":1-3"
-		if _, found := DetectStorageProblem(dir, checkpoint, "mysql"); found {
+		if _, found := DetectStorageProblem(dir, checkpoint, "", "mysql"); found {
 			t.Fatal("a second server uuid and the previous server's unstored prefix are not this corruption")
 		}
 	})
@@ -103,15 +103,53 @@ func TestDetectStorageProblem(t *testing.T) {
 		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000006"), stored, []string{"mysql-bin.000006"}, []int64{38}, nil)
 		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000006.open.e2"), stored, []string{"mysql-bin.000006"}, []int64{38, 39, 43, 44}, nil)
 		checkpoint := other + ":1-13," + stored + ":1-44"
-		problem, found := DetectStorageProblem(dir, checkpoint, "mysql")
+		problem, found := DetectStorageProblem(dir, checkpoint, "", "mysql")
 		if !found || !strings.Contains(problem.Message, "mysql-bin.000006") || !strings.Contains(problem.Message, "Create a new task") {
+			t.Fatalf("problem %+v found=%v", problem, found)
+		}
+	})
+	t.Run("case-8 names segment, missing gtids, and valid segments", func(t *testing.T) {
+		dir := t.TempDir()
+		const stored = "51ca62d9-c2c4-11f1-a149-822b383dbcd0"
+		const other = "4bf78e6c-c2c4-11f1-bd7c-822b383dbcd0"
+		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000005"), stored, []string{"mysql-bin.000006"}, []int64{37}, nil)
+		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000006"), stored, []string{"mysql-bin.000006"}, []int64{38}, nil)
+		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000006.open.e2"), stored, []string{"mysql-bin.000006"}, []int64{38, 39, 43, 44}, nil)
+		checkpoint := other + ":1-13," + stored + ":1-44"
+		problem, found := DetectStorageProblem(dir, checkpoint, stored+":1-36", "mysql")
+		if !found {
+			t.Fatal("damage not found")
+		}
+		if problem.Segment != "mysql-bin.000006" {
+			t.Fatalf("segment %q", problem.Segment)
+		}
+		if len(problem.Valid) != 1 || problem.Valid[0] != "mysql-bin.000005" {
+			t.Fatalf("valid %v", problem.Valid)
+		}
+		if want := other + ":1-13," + stored + ":40-42"; problem.Missing != want {
+			t.Fatalf("missing %q want %q", problem.Missing, want)
+		}
+		if want := stored + ":1-37"; problem.Restart != want {
+			t.Fatalf("restart %q want %q", problem.Restart, want)
+		}
+		for _, part := range []string{"mysql-bin.000006", stored + ":40-42", "(mysql-bin.000005)", "still restores", "Create a new task from a GTID the source still has", "gtid_set " + stored + ":1-37"} {
+			if !strings.Contains(problem.Message, part) {
+				t.Fatalf("message lacks %q: %s", part, problem.Message)
+			}
+		}
+	})
+	t.Run("restart unknown without a start set or header", func(t *testing.T) {
+		dir := t.TempDir()
+		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000006"), []string{"mysql-bin.000006"}, 37, 38, 39)
+		problem, found := DetectStorageProblem(dir, "", "", "mysql")
+		if !found || problem.Restart != "" || len(problem.Valid) != 0 || !strings.Contains(problem.Message, "No segment before mysql-bin.000006") {
 			t.Fatalf("problem %+v found=%v", problem, found)
 		}
 	})
 	t.Run("gtid order alone", func(t *testing.T) {
 		dir := t.TempDir()
 		writeNamedGTIDs(t, filepath.Join(dir, "mysql-bin.000006"), storageUUID, nil, []int64{39, 37}, []uint32{200, 300})
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-39", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-39", "", "mysql"); found {
 			t.Fatal("a GTID sequence that goes backwards without a rotate or a position regression is replica commit order")
 		}
 	})
@@ -124,7 +162,7 @@ func TestDetectStorageProblem(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "mysql-bin.000006"), buf, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		problem, found := DetectStorageProblem(dir, "", "mysql")
+		problem, found := DetectStorageProblem(dir, "", "", "mysql")
 		if !found || !strings.Contains(problem.Message, "end pos 120") {
 			t.Fatalf("problem %+v found=%v", problem, found)
 		}
@@ -136,28 +174,28 @@ func TestDetectStorageProblem(t *testing.T) {
 			seqs = append(seqs, n)
 		}
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000001"), nil, seqs...)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-39", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-39", "", "mysql"); found {
 			t.Fatal("sequences below the first stored event are the previous-GTIDs header, not a hole")
 		}
 	})
 	t.Run("no events", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000001"), nil)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-36", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-36", "", "mysql"); found {
 			t.Fatal("a uuid with no stored events is not a phantom")
 		}
 	})
 	t.Run("mariadb skips gtid compare", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000006"), nil, 37, 38, 39)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-44", "mariadb"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-44", "", "mariadb"); found {
 			t.Fatal("mariadb does not compare mysql gtid intervals")
 		}
 	})
 	t.Run("stray rotate", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000006"), []string{"mysql-bin.000006"}, 37, 38, 39)
-		problem, found := DetectStorageProblem(dir, storageUUID+":1-39", "mysql")
+		problem, found := DetectStorageProblem(dir, storageUUID+":1-39", "", "mysql")
 		if !found || !strings.Contains(problem.Message, "rotate to mysql-bin.000006") {
 			t.Fatalf("problem %+v found=%v", problem, found)
 		}
@@ -165,7 +203,7 @@ func TestDetectStorageProblem(t *testing.T) {
 	t.Run("forward rotate", func(t *testing.T) {
 		dir := t.TempDir()
 		writeGTIDSegment(t, filepath.Join(dir, "mysql-bin.000005"), []string{"mysql-bin.000006"}, 37)
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-37", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-37", "", "mysql"); found {
 			t.Fatal("a rotate to the next file is not stray")
 		}
 	})
@@ -173,7 +211,7 @@ func TestDetectStorageProblem(t *testing.T) {
 		dir := t.TempDir()
 		const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 		writeGTIDSegment(t, filepath.Join(dir, id+".mysql-bin.000006"), []string{"mysql-bin.000006"})
-		if _, found := DetectStorageProblem(dir, "", "mysql"); !found {
+		if _, found := DetectStorageProblem(dir, "", "", "mysql"); !found {
 			t.Fatal("a prefixed segment that rotates to its own file is stray")
 		}
 	})
@@ -183,7 +221,7 @@ func TestDetectStorageProblem(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, found := DetectStorageProblem(dir, storageUUID+":1-37", "mysql"); found {
+		if _, found := DetectStorageProblem(dir, storageUUID+":1-37", "", "mysql"); found {
 			t.Fatal("a non-segment file is not a problem")
 		}
 	})
