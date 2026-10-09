@@ -315,7 +315,7 @@ BinlogServer is structured as a modular control plane with clear separation betw
 
 ## Source Build &amp; Verification
 
-Building from source requires Go `1.26.7+`. Docker is required only for automated E2E tests.
+Building from source requires Go `1.26.9+`. Docker is required only for automated E2E tests.
 
 ```bash
 # Compile local binaries
