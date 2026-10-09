@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: one restored backup's MySQL executed GTID set, one existing stop (stop_datetime or stop_gtid), and each selected segment's GTID events
-// output: the segments that still contain a transaction the backup does not have, a mysqlbinlog command that skips the executed set, an explanatory note when nothing remains to apply, and plain-text errors for a bad set, a non-mysql flavor, a missing stop, or a gap before the retained range including sequences a GTID dump skipped between previous-GTIDs and the first copied event
+// output: the segments that still contain a transaction the backup does not have, a mysqlbinlog command that skips the executed set, an explanatory note when nothing remains to apply, and plain-text errors for a bad set, a non-mysql flavor, a missing stop, or a gap before the retained range including sequences a GTID dump skipped between previous-GTIDs and the first copied event; the damaged segment and every later one are left out and warning says so
 // pos: roll forward from a restored full backup to an existing stop, on the same replay selection as stop_datetime and stop_gtid
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -99,6 +99,7 @@ func (s *Scheduler) ExecutedGTIDReplay(taskID, executedRaw, stopGTIDRaw string, 
 		Locations:  ReplayLocations(selected),
 		Command:    FormatExecutedGTIDCommand(client, paths, exclude, stopPos, useStopPos, stopTime),
 		Note:       note,
+		Warning:    s.ReplayWarning(task),
 	}, nil
 }
 
@@ -172,7 +173,7 @@ func (s *Scheduler) selectExecutedGTID(taskID, executedRaw, stopGTIDRaw string, 
 	if err != nil {
 		return nil, Task{}, "", "", 0, false, nil, err
 	}
-	chosen := SelectReplayFiles(files)
+	chosen, _ := s.SelectReplayFilesFor(task, files)
 	logs := make([]executedFile, 0, len(chosen))
 	hit := -1
 	var stopPos uint64

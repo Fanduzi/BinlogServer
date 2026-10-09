@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# input: mysql80 with GTID on, the suite API, the task data directory, and the Percona 8.0 mysqlbinlog client
-# output: GTID and LATEST tasks that survive several Binlog Dump kills and one rotation, with every new transaction stored once, a window that matches the files, and a replay of each task from an empty database whose checksum matches the source
-# pos: CI coverage for a dump reconnect that must resume from the flushed GTID set or file position
+# input: mysql80 with GTID on, the suite API, the task data directory, the Percona 8.0 mysqlbinlog client, and E2E_SERVER_PID, E2E_SERVER_LOG, and BINLOG_SERVER_META_DSN to restart the suite server
+# output: GTID and LATEST tasks that survive several Binlog Dump kills, a kill storm during large multi-event transactions, one rotation, a kill -9 of the server mid-load and a restart on the same data dir, and an out-of-order GTID_NEXT hole plus a second UUID, without ever reaching FAILED or STREAM_REGRESSION, with every new transaction stored once, a window that matches the files, and a replay of each task from an empty database whose checksum matches the source
+# pos: CI coverage for a dump reconnect, process restart, or upgrade that must resume from what the open segment already holds, and for legal GTID holes and order
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
 
@@ -13,6 +13,11 @@ RUN_TAG="$(date +%s)"
 DB="redump_${RUN_TAG}"
 RESTORE="binlog-e2e-redump-${RUN_TAG}"
 ROWS=40
+# Large transactions span many row events, so a dump kill or a kill -9 is
+# likely to land inside one.
+BIG_ROWS=3000
+SERVER_PID_NOW="${E2E_SERVER_PID:-}"
+RESTARTED_PID=""
 REPL_USER="rd${RUN_TAG}"
 REPL_PASS="redumppass"
 
@@ -34,7 +39,7 @@ restore_compression() {
 
 cleanup() {
   restore_compression
-  docker rm -f "$RESTORE" >/dev/null 2>&1 || true
+  docker rm -f -v "$RESTORE" >/dev/null 2>&1 || true
   if [[ -n "${GTID_TASK:-}" ]]; then
     curl -fsS -X POST "$API/api/tasks/$GTID_TASK/stop" >/dev/null 2>&1 || true
   fi
@@ -42,6 +47,10 @@ cleanup() {
     curl -fsS -X POST "$API/api/tasks/$LATEST_TASK/stop" >/dev/null 2>&1 || true
   fi
   mysql80 "DROP USER IF EXISTS '${REPL_USER}'@'%';" >/dev/null 2>&1 || true
+  if [[ -n "$RESTARTED_PID" ]]; then
+    kill "$RESTARTED_PID" >/dev/null 2>&1 || true
+    wait "$RESTARTED_PID" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -52,9 +61,13 @@ task_json() {
 wait_state() {
   local id="$1"
   local want="$2"
+  local tries="${3:-60}"
   local i resp st
-  for i in $(seq 1 60); do
-    resp="$(task_json "$id")"
+  for i in $(seq 1 "$tries"); do
+    if ! resp="$(task_json "$id" 2>/dev/null)"; then
+      sleep 0.5
+      continue
+    fi
     st="$(printf '%s' "$resp" | jq -r '.state // empty')"
     if [[ "$st" == "$want" ]]; then
       return 0
@@ -96,6 +109,107 @@ kill_dumps() {
     n=$((n + 1))
   done
   printf '%s' "$n"
+}
+
+# big_txn commits BIG_ROWS rows and one update as one transaction.
+big_txn() {
+  local k="$1"
+  local base=$((100000 + k * 10000))
+  mysql80 "SET SESSION cte_max_recursion_depth=$((BIG_ROWS + 10)); BEGIN; INSERT INTO ${DB}.t(id,v) WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n<${BIG_ROWS}) SELECT ${base}+n, CONCAT('big-${RUN_TAG}-', ${base}+n) FROM s; UPDATE ${DB}.t SET v=CONCAT(v,'-u') WHERE id=${base}+1; COMMIT;" >/dev/null
+}
+
+# kill_storm kills every dump of this scenario a few times while big
+# transactions stream, so some reconnects start inside a transaction.
+kill_storm() {
+  local i got total=0
+  for i in 1 2 3 4; do
+    sleep 0.4
+    got="$(kill_dumps)"
+    total=$((total + got))
+  done
+  echo "$total" >"$1"
+}
+
+# restart_server kill -9s the suite server and starts it again on the same
+# data dir and metadata DSN. Flushed bytes ahead of the checkpoint stay in
+# the open segment, as after a crash or an upgrade.
+restart_server() {
+  local pid="$SERVER_PID_NOW"
+  local meta="${BINLOG_SERVER_META_DSN:-}"
+  local log="${E2E_SERVER_LOG:-/tmp/binlog-server-e2e-suite.log}"
+  kill -9 "$pid" >/dev/null 2>&1 || { echo "kill -9 $pid failed" >&2; return 1; }
+  local gone=0
+  for _ in $(seq 1 30); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      gone=1
+      break
+    fi
+    sleep 1
+  done
+  [[ "$gone" == "1" ]] || { echo "server $pid still running after kill -9" >&2; return 1; }
+  for _ in $(seq 1 30); do
+    if ! curl -fsS "$API/healthz" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  echo "[gtid-redump] killed server pid=$pid mid-load"
+  # Transactions committed while the server is down must arrive after the restart.
+  mysql80 "INSERT INTO ${DB}.t(id,v) VALUES (900001, 'down-${RUN_TAG}-1');"
+  big_txn 7
+  mysql80 "INSERT INTO ${DB}.t(id,v) VALUES (900002, 'down-${RUN_TAG}-2');"
+  BINLOG_SERVER_DATA_DIR="$DATA_DIR" BINLOG_SERVER_META_DSN="$meta" \
+    nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >>"$log" 2>&1 &
+  RESTARTED_PID=$!
+  SERVER_PID_NOW="$RESTARTED_PID"
+  for _ in $(seq 1 120); do
+    if curl -fsS "$API/healthz" >/dev/null 2>&1; then
+      echo "[gtid-redump] restarted server pid=$RESTARTED_PID"
+      return 0
+    fi
+    if ! kill -0 "$RESTARTED_PID" 2>/dev/null; then
+      echo "restarted server exited early" >&2
+      tail -n 50 "$log" >&2 || true
+      return 1
+    fi
+    sleep 1
+  done
+  echo "restarted server not ready" >&2
+  return 1
+}
+
+# gtid_next_gap commits uuid:max+3 before max+1 and max+2, and one
+# transaction under a UUID this source never generated. A replica with
+# parallel workers and replica_preserve_commit_order=OFF writes the same
+# order. Neither is a regression.
+gtid_next_gap() {
+  local uuid executed max k foreign
+  uuid="$(mysql80 "SELECT @@server_uuid;")"
+  executed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+  max="$(printf '%s' "$executed" | tr ',' '\n' | grep -i "^${uuid}:" | sed -E 's/.*[-:]([0-9]+)$/\1/')"
+  if [[ -z "$max" ]]; then
+    echo "cannot read the last GNO of $uuid from $executed" >&2
+    return 1
+  fi
+  k=$((max + 3))
+  mysql80 "SET GTID_NEXT='${uuid}:${k}'; INSERT INTO ${DB}.t(id,v) VALUES (800001, 'gap-${RUN_TAG}-${k}'); SET GTID_NEXT='AUTOMATIC';"
+  mysql80 "INSERT INTO ${DB}.t(id,v) VALUES (800002, 'gap-${RUN_TAG}-fill1');"
+  mysql80 "INSERT INTO ${DB}.t(id,v) VALUES (800003, 'gap-${RUN_TAG}-fill2');"
+  mysql80 "INSERT INTO ${DB}.t(id,v) VALUES (800004, 'gap-${RUN_TAG}-after');"
+  foreign="$(printf 'f0e1d2c3-0000-4000-8000-%012d' "$RUN_TAG")"
+  mysql80 "SET GTID_NEXT='${foreign}:1'; INSERT INTO ${DB}.t(id,v) VALUES (800005, 'uuid-${RUN_TAG}'); SET GTID_NEXT='AUTOMATIC';"
+  echo "[gtid-redump] committed ${uuid}:${k} before $((max + 1))-$((max + 2)), and ${foreign}:1"
+}
+
+assert_never_regressed() {
+  local id="$1"
+  local n
+  n="$(curl -fsS "$API/api/tasks/$id/events?limit=500" | jq '[.[] | select(((.detail // "") + " " + (.message // "")) | test("STREAM_REGRESSION|STORAGE_INCONSISTENT"))] | length')"
+  if [[ "$n" != "0" ]]; then
+    echo "task $id recorded $n STREAM_REGRESSION or STORAGE_INCONSISTENT events" >&2
+    curl -fsS "$API/api/tasks/$id/events?limit=500" >&2 || true
+    return 1
+  fi
 }
 
 signature() {
@@ -167,7 +281,7 @@ assert_checkpoint_matches_window() {
 }
 
 start_restore() {
-  docker rm -f "$RESTORE" >/dev/null 2>&1 || true
+  docker rm -f -v "$RESTORE" >/dev/null 2>&1 || true
   # Own network namespace so this server does not bind the host's 3306.
   # MYSQL_ROOT_HOST=% is what lets docker exec reach it over TCP as root@127.0.0.1.
   docker run -d --name "$RESTORE" \
@@ -301,6 +415,7 @@ mysql80 "CREATE DATABASE ${DB};"
 mysql80 "CREATE TABLE ${DB}.t (id INT PRIMARY KEY, v VARCHAR(64) NOT NULL);"
 
 killed=0
+restarted=0
 n=1
 while [[ "$n" -le "$ROWS" ]]; do
   mysql80 "INSERT INTO ${DB}.t(id,v) VALUES (${n}, 'redump-${RUN_TAG}-${n}');"
@@ -315,6 +430,44 @@ while [[ "$n" -le "$ROWS" ]]; do
     echo "[gtid-redump] killed $got dump threads at row $n (total $killed)"
     wait_state "$GTID_TASK" RUNNING
     wait_state "$LATEST_TASK" RUNNING
+  fi
+  if [[ "$n" == 20 ]]; then
+    wait_dumps
+    storm_out="$(mktemp)"
+    kill_storm "$storm_out" &
+    storm_pid=$!
+    for k in 1 2 3 4; do
+      big_txn "$k"
+    done
+    wait "$storm_pid"
+    got="$(cat "$storm_out")"
+    rm -f "$storm_out"
+    killed=$((killed + got))
+    echo "[gtid-redump] killed $got dump threads during 4 transactions of ${BIG_ROWS} rows (total $killed)"
+    wait_state "$GTID_TASK" RUNNING 240
+    wait_state "$LATEST_TASK" RUNNING 240
+  fi
+  if [[ "$n" == 24 ]]; then
+    if [[ -z "$SERVER_PID_NOW" || -z "${BINLOG_SERVER_META_DSN:-}" ]]; then
+      echo "[gtid-redump] E2E_SERVER_PID and BINLOG_SERVER_META_DSN are required for the restart step; run it through run-suite.sh" >&2
+      exit 1
+    fi
+    wait_dumps
+    big_txn 5 &
+    loader=$!
+    sleep 0.3
+    restart_server
+    wait "$loader"
+    big_txn 6
+    restarted=1
+    # A new process may wait for the old lease before it runs the tasks again.
+    wait_state "$GTID_TASK" RUNNING 360
+    wait_state "$LATEST_TASK" RUNNING 360
+    wait_dumps
+    echo "[gtid-redump] both tasks running again after kill -9"
+  fi
+  if [[ "$n" == 32 ]]; then
+    gtid_next_gap
   fi
   n=$((n + 1))
 done
@@ -348,6 +501,12 @@ for id in "$GTID_TASK" "$LATEST_TASK"; do
     exit 1
   fi
   assert_window "$id" "$seed" "$executed"
+  assert_never_regressed "$id"
+  st="$(task_json "$id" | jq -r '.state // empty')"
+  if [[ "$st" != "RUNNING" ]]; then
+    echo "task $id is $st after the run: $(task_json "$id")" >&2
+    exit 1
+  fi
 done
 assert_checkpoint_matches_window "$GTID_TASK" "$seed"
 echo "[gtid-redump] both tasks stored every row; window matches the source"
@@ -363,4 +522,7 @@ for id in "$GTID_TASK" "$LATEST_TASK"; do
   fi
   echo "[gtid-redump] replay $id matches $source_sig"
 done
-echo "[gtid-redump] success: $killed dump kills, one rotation, both modes replay once"
+if [[ -n "${E2E_SERVER_LOG:-}" ]]; then
+  grep -a -F "open tail" "$E2E_SERVER_LOG" | grep -a -F "task=${GTID_TASK} " | tail -n 3 | sed 's/^/[gtid-redump] evidence: /' || true
+fi
+echo "[gtid-redump] success: $killed dump kills, a kill storm during ${BIG_ROWS}-row transactions, $restarted kill -9 restart, one rotation, an out-of-order GTID_NEXT hole and a second UUID, both modes replay once"

@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
-// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id} source_chain when a VIP identity list or SOURCE_SWITCHOVER event exists, storage_alert on list, dashboard, and GET when a checkpoint or segment disagrees with the stored transactions, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object, and GET /api/tasks/{id}/window the retained chain's earliest and latest UTC event times, MySQL GTID coverage, and breaks. A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos, the local event span when this process can read that segment, and source_identity for the server that wrote each file.
+// output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id} source_chain when a VIP identity list or SOURCE_SWITCHOVER event exists, storage_alert on list, dashboard, and GET when a checkpoint or segment disagrees with the stored transactions, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object, and GET /api/tasks/{id}/window the retained chain's earliest and latest UTC event times, MySQL GTID coverage, and breaks. A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos, the local event span when this process can read that segment, and source_identity for the server that wrote each file.; GET /checkpoint omits updated_at before the first checkpoint row; GET /replay drops a damaged segment and every later one and adds warning
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
 
 	"github.com/gin-gonic/gin/binding"
@@ -490,7 +491,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "checkpoint not found", http.StatusNotFound)
 				return
 			}
-			writeJSON(w, http.StatusOK, checkpoint)
+			writeJSON(w, http.StatusOK, checkpointResponseOf(checkpoint))
 			return
 		}
 		if r.Method == http.MethodGet && action == "events" {
@@ -700,7 +701,10 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	selected := tasks.SelectReplayFiles(files)
+	selected, warning := tasks.SelectReplayFiles(files), ""
+	if cut, ok := s.tasks.(replayDamageCutter); ok {
+		selected, warning = cut.SelectReplayFilesFor(task, files)
+	}
 	paths := make([]string, 0, len(selected))
 	for _, file := range selected {
 		paths = append(paths, file.FilePath)
@@ -712,7 +716,14 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 		ClientHint: hint,
 		Paths:      paths,
 		Locations:  tasks.ReplayLocations(selected),
+		Warning:    warning,
 	})
+}
+
+// replayDamageCutter drops a damaged segment and every later one from the
+// replay choice. The scheduler implements it; test doubles may not.
+type replayDamageCutter interface {
+	SelectReplayFilesFor(task tasks.Task, files []tasks.BinlogFile) ([]tasks.BinlogFile, string)
 }
 
 // handleTaskReplayArchive streams one ustar of the replay selection.
@@ -1457,6 +1468,24 @@ func sanitizeTaskList(items []tasks.Task) []tasks.Task {
 	out := make([]tasks.Task, len(items))
 	for i := range items {
 		out[i] = sanitizeTask(items[i])
+	}
+	return out
+}
+
+// checkpointResponse is GET /checkpoint. updated_at is left out when no
+// checkpoint row has been written yet, instead of 0001-01-01.
+type checkpointResponse struct {
+	File      string     `json:"file"`
+	Pos       uint32     `json:"pos"`
+	GTIDSet   string     `json:"gtid_set,omitempty"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+func checkpointResponseOf(cp binlog.Checkpoint) checkpointResponse {
+	out := checkpointResponse{File: cp.File, Pos: cp.Pos, GTIDSet: cp.GTIDSet}
+	if !cp.UpdatedAt.IsZero() {
+		at := cp.UpdatedAt
+		out.UpdatedAt = &at
 	}
 	return out
 }

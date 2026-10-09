@@ -57,7 +57,7 @@
 | `checkpoint save failed` | 无法保存位点 | 检查元数据库连接 |
 | `SEGMENT_NOT_ON_WORKER` | 租约已经到这台 worker，分段目录还在死掉的 worker 上。`last_error` 里的路径就是 `binlog_files.file_path`，本机读不到 | 把该路径挂到这台 worker，或把分段拷过来，再 `POST /api/tasks/{id}/start`。不要在新目录上从位置 4 重拉。checkpoint 已在 `UPLOADED` 对象里时任务不会停在这个错误，会从对象续。见部署指南 6.3 第 2 节 |
 | `SEALED_FILE_EXISTS` | 轮转要封的文件已经在这块盘上。任务是 `FAILED`，租约已放开，不再连源 | 确认这个封存文件是要留下的那一份。冲突的 open 分段不要再封成同一个名字。处理完再 `POST /api/tasks/{id}/start`。若 `last_error` 或 `storage_alert` 同时写着 Rotate 被追加进了已经打开的文件，这是下面的 `STORAGE_INCONSISTENT`，不要再 Start |
-| `STREAM_REGRESSION` | 拉流和已经落盘的内容对不上：Rotate 指向更早的文件，Rotate 带着真实 end_log_pos 又指向当前文件，事件位点比已落盘位点小，或 GTID 跳过了已落盘集合。任务是 `FAILED`，不会把这条流继续写成“已经写过” | 不要从这份文件恢复。对源上仍有的 GTID 新建一个任务。旧任务留着供核对 |
+| `STREAM_REGRESSION` | 拉流和已经落盘的内容对不上：Rotate 指向更早的文件，Rotate 带着真实 end_log_pos 又指向当前文件，或事务事件的位点比已落盘位点小。GTID 序号有空洞、乱序、或多个 UUID 交错都不是这个错误（副本多线程复制、手工 `GTID_NEXT` 都会这样）。重连时源重发的文件头（FDE、Previous_GTIDs）落在已落盘位点之前也不算。任务是 `FAILED`，不会把这条流继续写成“已经写过” | 不要从这份文件恢复。对源上仍有的 GTID 新建一个任务。旧任务留着供核对 |
 | `STORAGE_INCONSISTENT` | 某一个分段里有指向自己或更早文件的 Rotate，或事件位点在这个分段里倒退。列表、dashboard 和 `GET /api/tasks/{id}` 带 `storage_alert`。再 Start 会直接 `FAILED`，不会变成 `RUNNING` 后把新事务丢掉。副本上 GTID 乱序提交、多个 UUID 交错、序号出现在下一个文件、起点集合或 `gtid_purged` 里的空洞、以及保留删掉的文件，都不是这个错误 | 见下文「分段里的 Rotate 回卷」 |
 | `CHECKPOINT_WRITE_FAILED` | checkpoint 写不进去，而且不是会死锁、断连、锁等待、只读切换这类瞬时错误。任务是 `FAILED`，租约已放开 | 看 `last_error` 里的数据库错误。表、权限或语法问题需要先修元数据库，再 `POST /api/tasks/{id}/start`。瞬时元数据错误仍是 `RETRY_BACKOFF`，不会用这个码 |
 | `lease/epoch mismatch` | 封文件时这台 worker 的租约 epoch 已经不是当前主人。本进程停止，不把任务写成 `FAILED`，也不再连源 | 看任务行上的 `owner_worker_id`。新主人还在跑就不用管。没有 store 时本进程显示 `STOPPED`，事件 `TASK_LEASE_YIELDED`。需要这台机器再跑时再 Start |
@@ -84,7 +84,15 @@ v0.5.57 以及该版本之前，GTID 任务的 dump 连接一旦断开重连，�
 3. 在源上确认它还留着你需要的 GTID（`SHOW BINARY LOGS` 和 `@@gtid_purged`）。从那个 GTID 新建一个任务。
 4. 留下原来的任务目录和 checkpoint，供事后核对。不要在原地改写出一份“看起来连续”的文件。
 
+`storage_alert` 和 `last_error` 会写出损坏的分段名、checkpoint 里有但任何分段都没有保存的 GTID（MySQL），以及损坏分段之前仍然可以恢复的分段。这些较早的分段写于损坏之前，可以照常回放。`GET /api/tasks/{id}/replay`、定点恢复和回放 tar 自动停在损坏分段之前，并在 `warning` 里说明；Console 的回放区也会显示这条警告。`GET /api/tasks/{id}/window` 和 Console 的「可恢复窗口」也停在同一处：只覆盖损坏分段之前的分段，显示有缺口，缺口原因写明损坏分段和之后被排除的分段。`storage_alert.restart_gtid_set` 是新任务的 GTID 起点：起点集合加上这些较早分段里的事务，新任务会紧接着它们继续，并重新拉取缺失的事务。要在源库 purge 这些 binlog 之前建好。
+
 `STREAM_REGRESSION` 是同一种不一致出现在正在拉的流上。处理方式相同：停在这份备份，对新的 GTID 另建任务。
+
+#### 未发布的 main 构建（PR #293 之后，如 0a84917a）误判的 `STREAM_REGRESSION`
+
+只有 PR #293 合入之后、本修复之前的未发布 main 构建（例如 0a84917a）会出现这个误判。v0.5.57 没有 `STREAM_REGRESSION` 这个错误码，v0.5.57 上的任务不会这样失败，从 v0.5.57 直接升级不需要做下面的事。在这些 main 构建上，GTID 任务在重连、进程重启或升级后可能误报 `STREAM_REGRESSION`，`last_error` 形如 `STREAM_REGRESSION: gtid <uuid>:N is ahead of stored set <集合>`。原因是 checkpoint 比已经写进打开分段的内容落后：分段刷盘后、checkpoint 写入前进程退出，或者重连发生在一个事务中间。下一条事务的 GTID 不在存下的集合里，任务就被判成 `FAILED`。文件本身没有坏。
+
+新版本在每次 Start 时先读打开分段的末尾（dump 被 `KILL`、代理或空闲超时断开时，本次运行以 runner error 结束，由调度器重试并完整 Start 一次，所以每次重连都会走这一步；只有运行中被判为 `SOURCE_UNREACHABLE` 的错误才在进程内重开 dump，日志是 `dump reconnect`，按已刷盘的 file/pos 续传）：把分段里已经完整的事务补进 checkpoint 的 GTID 集合；末尾没写完的事务在它开始的位置截掉，从那里重新拉。GTID 空洞和乱序不再让任务失败。升级后直接 `POST /api/tasks/{id}/start` 这些任务即可，不需要改 schema（仍是 6），也不需要新建任务。每次恢复时日志里会有一行 `open tail reconciled ... changed=true|false`（`changed=true` 表示补了 GTID）；截掉半个事务时另有一行 `open tail cut unfinished transaction`。如果同一个任务还带着 `storage_alert`（`STORAGE_INCONSISTENT`），那是真的损坏，按上面的步骤处理，不要再 Start。
 
 ### 2.4 API 鉴权错误
 

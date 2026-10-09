@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full replay inventory, each segment's bytes, one MySQL stop_gtid, and an optional UTC start_datetime
-// output: the segments through the GTID event and one mysqlbinlog command that stops at that event's start offset; plain-text errors for a bad GTID, a GTID outside the backup, an unsupported flavor, and a start time after that event
+// output: the segments through the GTID event and one mysqlbinlog command that stops at that event's start offset; plain-text errors for a bad GTID, a GTID outside the backup, an unsupported flavor, and a start time after that event; the damaged segment and every later one are left out and warning says so
 // pos: GTID stop on the same replay selection as the datetime window; the limit window stays when neither stop is set
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -92,6 +92,7 @@ func (s *Scheduler) GTIDReplay(taskID string, raw string, start *time.Time) (PIT
 		Paths:      paths,
 		Locations:  ReplayLocations(selected),
 		Command:    FormatGTIDCommand(client, paths, start, stopPos),
+		Warning:    s.ReplayWarning(task),
 	}, nil
 }
 
@@ -144,7 +145,7 @@ func (s *Scheduler) selectGTIDFiles(taskID, raw string, start *time.Time) ([]Bin
 	if err != nil {
 		return nil, 0, Task{}, err
 	}
-	chosen := SelectReplayFiles(files)
+	chosen, _ := s.SelectReplayFilesFor(task, files)
 	spans := make([]binlog.SegmentGTIDScan, len(chosen))
 	hit := -1
 	var stopPos uint64

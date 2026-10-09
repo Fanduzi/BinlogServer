@@ -1,6 +1,6 @@
 <!--
 input: task, replication, checkpoint, the recoverable window, storage_alert, source_chain on the task, source_identity on each file, locale labels, and loadPitr for the datetime window and stop_gtid
-output: task detail drawer with configured start identity, the resume file:pos / GTID, a storage_alert when the checkpoint or a segment disagrees with the stored transactions, the retained chain's earliest and latest UTC times, a warning when that chain has a break, the source-server chain and a continued or stopped switchover notice, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
+output: task detail drawer with configured start identity, the resume file:pos / GTID, a localized storage_alert (damaged segment, missing GTIDs, segments that still restore, restart gtid_set) when the checkpoint or a segment disagrees with the stored transactions, a warning on replay and point-in-time results that left the damaged segment out, the retained chain's earliest and latest UTC times, a warning when that chain has a break, the source-server chain and a continued or stopped switchover notice, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
 pos: operator view of the position the next Start continues from and the datetime or GTID restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
 -->
@@ -48,8 +48,11 @@ note: if this file changes, update this header and frontend/src/components/READM
             :closable="false"
             show-icon
             :title="$t('detail.storageAlert')"
-            :description="task.storage_alert.message"
-          />
+          >
+            <div class="storage-alert-body">
+              <p v-for="(line, i) in storageAlertLines" :key="i" data-testid="task-storage-alert-line">{{ line }}</p>
+            </div>
+          </el-alert>
           <el-alert
             v-if="task.pending_dump_cleanup && task.pending_dump_cleanup.connection_id"
             data-testid="task-pending-dump-cleanup"
@@ -212,6 +215,14 @@ note: if this file changes, update this header and frontend/src/components/READM
                 </el-button>
               </div>
             </div>
+            <el-alert
+              v-if="replayWarning"
+              data-testid="task-replay-damaged"
+              type="warning"
+              :closable="false"
+              show-icon
+              :title="replayWarning"
+            />
             <pre v-if="replayCommand" class="replay-set-command" data-testid="task-replay-command">{{ replayCommand }}</pre>
             <p v-else class="replay-set-empty" data-testid="task-replay-command">{{ $t('detail.replayEmpty') }}</p>
             <div class="pitr-set" data-testid="task-pitr">
@@ -271,6 +282,7 @@ note: if this file changes, update this header and frontend/src/components/READM
                   {{ $t('btn.downloadPitr') }}
                 </el-button>
               </div>
+              <p v-if="pitrWarning" class="replay-set-empty" data-testid="task-pitr-damaged">{{ pitrWarning }}</p>
               <p v-if="pitrError" class="replay-set-empty" data-testid="task-pitr-error">{{ pitrError }}</p>
               <pre v-else-if="pitrCommand" class="replay-set-command" data-testid="task-pitr-command">{{ pitrCommand }}</pre>
               <p v-else-if="pitrNote" class="replay-set-empty" data-testid="task-pitr-command">{{ pitrNote }}</p>
@@ -431,6 +443,42 @@ const canBuildPitr = computed(() => Boolean(pitrStop.value.trim() || pitrGtid.va
 
 const pitrCommand = computed(() => String(pitrResult.value?.command || ""));
 const pitrNote = computed(() => String(pitrResult.value?.note || "").trim());
+
+// storageAlertLines renders storage_alert in the Console language from its
+// fields. An older server without segment falls back to its English message.
+const storageAlertLines = computed(() => {
+  const alert = props.task?.storage_alert;
+  if (!alert) return [];
+  const segment = String(alert.segment || "").trim();
+  if (!segment) return [String(alert.message || "").trim()].filter(Boolean);
+  const lines = [t("detail.storageAlertSegment", { segment })];
+  const missing = String(alert.missing_gtids || "").trim();
+  if (missing) lines.push(t("detail.storageAlertMissing", { gtids: missing }));
+  const valid = Array.isArray(alert.valid_segments) ? alert.valid_segments : [];
+  if (valid.length === 0) {
+    lines.push(t("detail.storageAlertNoValid", { segment }));
+  } else if (valid.length === 1) {
+    lines.push(t("detail.storageAlertValidOne", { segment, first: valid[0] }));
+  } else {
+    lines.push(t("detail.storageAlertValid", { segment, count: valid.length, first: valid[0], last: valid[valid.length - 1] }));
+  }
+  lines.push(t("detail.storageAlertNext"));
+  const restart = String(alert.restart_gtid_set || "").trim();
+  if (restart) lines.push(t("detail.storageAlertRestart", { gtids: restart }));
+  return lines;
+});
+
+// damagedReplayText is the localized replay warning when the server left a
+// damaged segment out, or the server's text when the segment is unknown.
+function damagedReplayText(warning) {
+  const text = String(warning || "").trim();
+  if (!text) return "";
+  const segment = String(props.task?.storage_alert?.segment || "").trim();
+  return segment ? t("detail.replayDamaged", { segment }) : text;
+}
+
+const replayWarning = computed(() => damagedReplayText(props.replay?.warning));
+const pitrWarning = computed(() => damagedReplayText(pitrResult.value?.warning));
 
 function formatRecoveryInstant(value) {
   const text = String(value || "").trim();
