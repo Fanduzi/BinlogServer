@@ -40,7 +40,7 @@ curl http://localhost:8080/metrics
 |--------|------|------|------|
 | `binlog_server_replication_lag_seconds` | gauge | `task_id` | 复制延迟（秒） |
 | `binlog_server_checkpoint_age_seconds` | gauge | `task_id` | Checkpoint 年龄（秒） |
-| `binlog_server_source_switchovers` | gauge | `task_id`, `outcome` | 该任务已记录的 `SOURCE_SWITCHOVER` 次数。`outcome="continued"` 是地址换到另一台后任务仍在复制。`outcome="stopped"` 是这次切换把任务停成 `FAILED`。每次采集按已保存的事件重算。读到的任务两个序列都有，包含 0。没有任务时 `task_id=""` 的两个序列为 0 |
+| `binlog_server_source_switchovers` | gauge | `task_id`, `outcome` | 该任务的切换次数，同一次切换被重复检查（停下的任务每点一次 Start 都会再记一条同样的事件）只算一次。`outcome="continued"` 是地址换到另一台后任务仍在复制，回切 A→B→A 计 2。`outcome="stopped"` 是任务现在仍停在这次切换上（`FAILED`，`last_error` 是 `SOURCE_SWITCHOVER`）；任务回到运行后它回到 0，告警会恢复；之后普通 Stop 或进程重启也保持 0，因为判断依据是停止事件之后有没有 `TASK_RUNNING`。每次采集按已保存的事件重算。读到的任务两个序列都有，包含 0。没有任务时 `task_id=""` 的两个序列为 0 |
 
 **Worker 指标：**
 

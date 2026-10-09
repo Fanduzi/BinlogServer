@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failed upload metadata via failedUploadFileReader, manual and background retry requests, local sealed files, and object storage uploader operations
-// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows including a checksum mismatch re-upload and an unfinished checksum re-check, refusal of a name ClassifySegment rejects, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
+// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows (a row of an unrepaired earlier-build failback is held until the repair) including a checksum mismatch re-upload and an unfinished checksum re-check, refusal of a name ClassifySegment rejects, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
 // pos: scheduler upload-retry compensation, background retry loop, and failure-observability logic
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -163,10 +163,18 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 		return UploadRetryStats{}, err
 	}
 
+	held := s.legacyHeldSources(taskID)
 	var stats UploadRetryStats
 	for _, file := range files {
 		stats.Scanned++
 		if !strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
+			stats.Skipped++
+			continue
+		}
+		// A row an earlier build pointed at the wrong failback file keeps
+		// its state until the repair rewrites it: uploading it now would put
+		// the later stint's bytes under the old key.
+		if held[strings.TrimSpace(file.FileName)] {
 			stats.Skipped++
 			continue
 		}
@@ -394,4 +402,30 @@ func NormalizeUploadFailureReason(reason string) string {
 	return normalized
 }
 
-// ListRuns 返回任务运行历史（按 started_at 倒序）。
+// legacyHeldSources is the source names of an unrepaired earlier-build
+// failback in taskID (legacy_failback.go): every catalog row with one of
+// these names waits for the repair. Empty when there is nothing to repair.
+func (s *Scheduler) legacyHeldSources(taskID string) map[string]bool {
+	s.mu.Lock()
+	task, ok := s.tasks[taskID]
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	plan := s.legacyFailbackFor(task)
+	if !plan.found() {
+		return nil
+	}
+	out := make(map[string]bool)
+	for _, name := range plan.Affected {
+		if named, ok := binlog.ClassifySegment(name); ok {
+			out[named.Source] = true
+		}
+	}
+	for _, mv := range plan.Moves {
+		if named, ok := binlog.ClassifySegment(mv.From); ok {
+			out[named.Source] = true
+		}
+	}
+	return out
+}

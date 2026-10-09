@@ -293,3 +293,16 @@ func eventBytes(kind byte, logPos uint32, body []byte) []byte {
 	binary.LittleEndian.PutUint32(hdr[13:17], logPos)
 	return append(hdr, body...)
 }
+
+func TestPlainBinlogStripsStintPrefix(t *testing.T) {
+	const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	for _, name := range []string{"mysql-bin.000004", id + ".mysql-bin.000004", id + "~2.mysql-bin.000004", id + "~13.mysql-bin.000004"} {
+		base, seq, ok := plainBinlog(name)
+		if !ok || base != "mysql-bin" || seq != 4 {
+			t.Fatalf("%s: %s %d %v", name, base, seq, ok)
+		}
+	}
+	if base, _, ok := plainBinlog(id + "~x.mysql-bin.000004"); ok && base == "mysql-bin" {
+		t.Fatal("~x is not a stint number")
+	}
+}

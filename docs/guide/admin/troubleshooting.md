@@ -439,9 +439,9 @@ WHERE id = '{task_id}';
 
 ### 5.4 VIP 换到了另一台 MySQL
 
-任务地址是 VIP、DNS 或代理。它连上的 `@@server_uuid`（MariaDB 是 `mariadb:<server_id>:<gtid_domain_id>`）和上次不同。Console 任务详情的「源服务器」列出每一台、哪一台是当前的，以及每次切换的旧身份、新身份、`file:pos` 和 GTID 集合。文件表的「服务器」列写出第几台和完整身份。`GET /metrics` 的 `binlog_server_source_switchovers{task_id,outcome}` 里，`outcome` 是 `continued` 或 `stopped`。`GET /api/tasks/{id}` 的 `source_chain` 是同一份内容。没有切换时这个字段不出现。
+任务地址是 VIP、DNS 或代理。它连上的 `@@server_uuid`（MariaDB 是 `mariadb:<server_id>:<gtid_domain_id>`）和上次不同。Console 任务详情的「源服务器」列出每一台、哪一台是当前的，以及每次切换的旧身份、新身份、`file:pos` 和 GTID 集合。文件表的「服务器」列写出第几台和完整身份。`GET /metrics` 的 `binlog_server_source_switchovers{task_id,outcome}` 里，`outcome` 是 `continued` 或 `stopped`。`GET /api/tasks/{id}` 的 `source_chain` 是同一份内容。任务连上过源库就有这个字段；没有切换时 `servers` 只有一段、`switches` 是 `[]`、没有 `outcome`。
 
-不要删除 `{data_dir}/{task_id}/.source-chain`。第一行是没有身份前缀的那些文件的主人。后面每一行是 `{身份}.{binlog 文件名}` 的主人。删掉它之后，文件表无法再说清每一份文件是谁写的。
+不要删除 `{data_dir}/{task_id}/.source-chain`。每一行是一段：第一行是没有前缀的那些文件的主人，后面每一行是 `{前缀}.{binlog 文件名}` 的主人。前缀在这台服务器第一次出现时是它的身份，回切到之前出现过的服务器时是 `{身份}~{n}`（A、B、A 的第三行前缀是 `A~2`）。「标成当前」的是最后写下文件的那一段；任务停下时它不一定是正在被复制的服务器。删掉它之后，文件表无法再说清每一份文件是谁写的。
 
 **地址换了，任务仍是运行中**
 
@@ -456,7 +456,7 @@ Console 有一条说明：这份备份仍在复制。这和没有换过服务器
 
 **地址换了，任务变成 FAILED**
 
-`last_error` 以 `SOURCE_SWITCHOVER:` 开头。Console 用白话写出原因，以及下一步：对新主库新建任务，保留这份备份。不要删除 `.source-chain`。再次 `POST /api/tasks/{id}/start` 也不会把两台服务器写进同一份备份。指标 `outcome="stopped"` 大于 0。
+`last_error` 以 `SOURCE_SWITCHOVER:` 开头。Console 用白话写出原因，以及下一步：对新主库新建任务，保留这份备份。不要删除 `.source-chain`。再次 `POST /api/tasks/{id}/start` 也不会把两台服务器写进同一份备份；每次 Start 检查的是同一次切换，「源服务器」里和指标里都只算一次。指标 `outcome="stopped"` 是 1。把 VIP 指回原来那台、再 Start 后任务回到运行时，`outcome` 变成 `resumed`，停止横幅消失，那条停止标成“曾停止，任务已恢复运行”，指标 `outcome="stopped"` 回到 0。之后普通 Stop 或进程重启不会把它变回“停止”：只要停止事件之后任务跑起来过（有 `TASK_RUNNING` 事件），这次停止就一直算已恢复。
 
 | `source_chain` 的 `reason` | 含义 | 怎么做 | 不要做 |
 |---|---|---|---|
@@ -470,13 +470,59 @@ Console 有一条说明：这份备份仍在复制。这和没有换过服务器
 
 任务已经从 A 继续到 B 之后，把 VIP 指回 A。A 没有 B 上新写入的事务，所以任务停在 `missing_transactions`。`.source-chain` 不改。`current` 仍是 B，因为最后写下文件的是 B。最新一条切换是 old=B、new=A、`continued` 为 false。指标上 `continued` 和 `stopped` 都大于 0。已经写下的分段字节不变。A 上这次切换之后的新写入不在这份备份里。需要那些写入时另建任务。不要删 `.source-chain`，也不要删 B 的分段来“回到只有 A”。
 
+**旧主库追平之后再回切（A→B→A）**
+
+DBA 的正常回切：A 以 B 为源 `AUTO_POSITION=1` 追平 B，再提升 A、VIP 指回 A。A 追平前任务会像上面一样停在 `missing_transactions`。A 追平后再 `POST /api/tasks/{id}/start`，这时 A 已经有这份备份的全部事务，任务按“继续”处理：`.source-chain` 追加第三行 A，变成 A、B、A；A 的新文件写成 `{A 的身份}~2.{binlog 文件名}`，不会和 A 切走前写下的 `mysql-bin.00000N` 重名。`source_chain.current` 是 A，文件表里这些新文件标“第 3 台”。回放 `paths` 的顺序是 A 切走前的文件、B 的文件、A 回切后的文件。`/window` 不会因为 B 或 A 的文件头不含刚复制进去的事务而报假的 `gtid hole`；GTID 任务的起点集合（例如 mysqldump 种子里、首个文件头之后被 dump 跳过的事务）也算已存下。之后进程重启或再 Start 不会再记一次切换。B 最后那个 open 分段在回切时按 B 封存，不会丢。A 上只有 A 有、B 没有的事务（例如回切前在 A 上写的行）也会被拉进来，因为它们是 A 的历史。
+
+**早期版本写下的回切目录**
+
+v0.5.57 和 0a84917a 在真实回切（A→B→A，A 先追平 B）后继续复制，但 A 回切后的文件沿用了 A 切走前的名字（例如第一段的 `mysql-bin.000004` 和第三段的 `mysql-bin.000004.open.e1` 或 `.sealed.e1`），`.source-chain` 仍是 A、B，目录行 `mysql-bin.000004` 被改指到后一份文件。早于本版本的 build 上，`/files` 和 `/replay` 会漏掉第一段那份文件，恢复报 ERROR 1032 或静默少事务。
+
+怎么认：同一个 binlog 序号有几份文件（无后缀加 `.sealed.eN` / `.open.eN`），`.source-chain` 只有 A、B，而事件里有 B→A 的继续复制切换（重启时旧版本还会多记几条同样的 B→A）。
+
+本版本的处理：
+
+1. 读接口（任务列表、详情）给出 `storage_alert`，`code` 是 `STORAGE_INCONSISTENT`，`detail` 以 `legacy failback:` 开头并列出文件；`/replay` 和 `/window` 停在第一份有问题的文件之前，`warning` 说明原因。
+2. Start（含升级后进程启动时自动续跑）先修：按每次切换事件里记下的 GTID 集合，核对每份文件里的事务属于哪一段。能唯一确定时，把后一段改名为 `{A 的身份}~2.{binlog 文件名}`（没有事务的空 open 文件跟着同名的那份走），补回第一段的目录行并标成待重新上传（后台补传会按原对象键重传并核对校验和），把 checkpoint 的文件名改成新名字，`.source-chain` 写成 A、B、A，记一条 `STORAGE_REPAIRED` 事件。不删任何文件。修复先写 `{data_dir}/{task_id}/.legacy-failback-repair` 计划，进程中途退出后下次 Start 接着做完。修复完成前，后台补传不碰这些文件的目录行（旧 build 把它们的对象键写成了错误的目录，提前补传会把第三段的字节传到旧键下）。
+3. 第一段那份文件本地已经没有（例如按 `local_retention_days` 清掉，只剩对象）：`storage_alert.detail` 带 `not on disk: mysql-bin.00000N`。Start 先从对象存储里 A 的目录取回 `{prefix}/{cluster}/{A 的身份}/mysql-bin.00000N`，核对其中的事务确实属于第一段（不含 A 进入这一段之前已存的事务，并且都在切到 B 时记下的集合里），放回任务目录，再按上面修复。取不到、对象里的事务不对，或没有配对象存储时，Start 拒绝，什么都不改，见下面“手工取回”。
+4. 不能证明时（某份文件的事务不属于任何一段、属于多段、改名目标已存在，或读不了文件）：Start 拒绝，任务 `FAILED`，`last_error` 以 `STORAGE_INCONSISTENT` 开头并写出原因和文件；文件、目录行、checkpoint、对象存储都不改。切换事件里的 `gtid_set` 解析不了时，`segment` 是会回来的服务器离开时那个文件，`/replay` 停在它之前。
+
+拒绝后怎么做：
+
+- 不要按 `/replay` 恢复过 `storage_alert.segment` 这一点。它之前的文件（`valid_segments`）仍可用。
+- 对现在的主库按它的 `@@gtid_executed` 新建任务，旧任务保留做取证。
+- 需要旧任务里那段时间的数据时，用 `mysqlbinlog --include-gtids`/`--exclude-gtids` 按 GTID 从这些文件里手工拼：先第一段（A 切走前的 GTID），再 B 的文件，再 A 回切后的 GTID。
+- 不要删 `.source-chain`，不要手工改文件名或删分段；保留目录和对象存储里的对象。
+
+手工取回第一段（Start 因为取不到或对不上而拒绝时）：
+
+1. 任务保持 `FAILED`，不要删任何东西。从 `storage_alert.detail` 的 `not on disk:` 读出文件名，例如 `mysql-bin.000008`。
+2. 在对象存储里找它：`mc ls -r <别名>/<bucket>/<prefix>/<cluster>/<A 的身份>/`，要的是不带 `.sealed.eN` 后缀、也不带 `~n.` 前缀的那个对象。别的副本（异地备份、旧主库上还没 purge 的同名 binlog）也可以。
+3. 先核对：`mysqlbinlog <文件> | grep GTID_NEXT` 里应是 A 的、在切到 B 那条 `SOURCE_SWITCHOVER` 的 `gtid_set` 之内、并且晚于前一个文件的事务。
+4. 复制到 `{data_dir}/{task_id}/<文件名>`（同属主、同权限），再 Start。Start 会再核对一遍，然后修复。
+5. 对象和别的副本都没有时，这些事务已不在这份备份里：按上面“拒绝后怎么做”处理。
+
+修复后的对象：改名的文件按新名字上传到新对象键（`{A 的身份}/{A 的身份}~2.{文件名}`）。旧 build 写下的对象（例如 `{A}/mysql-bin.00000N.sealed.e1`，或被错放在 B 目录下的 `{B}/mysql-bin.00000N.sealed.e1`）不再被任何目录行引用，保留策略也不会清理它们。`STORAGE_REPAIRED` 事件的 `detail` 在 `orphaned_objects=` 后面列出这些键（可能有的已不存在）。确认按 `/replay` 恢复无误后，可以按这个清单手工删除；服务不会自动删。
+
+GTID 缺口兜底：任务换过服务器时，读接口还会核对每次继续复制的切换里记下的“已存下”集合。某些事务被记成已存下，本机却没有任何分段存着，而它们前后的事务都在（或任务的第一个文件还在、缺口紧接在起点集合之后；例如手工删过一个文件），`storage_alert.detail` 以 `stored gtid hole:` 开头，`missing_gtids` 写出缺的事务，`/replay` 和 `/window` 停在缺口后的第一个分段之前。按上面手工取回的办法把那个文件放回去即可；它不影响 Start。缺口之前有目录行是 `UPLOADED`、只在对象存储里的文件时不报（回放会从对象存储读它）。`/window` 另外保证：同一个来源的已存 GTID 序号中间有空缺（且不在起点集合里）时，`continuous` 一定是 false，`breaks` 写出缺的序号和两边的文件。
+
+已知限制：
+
+- 检测靠 `SOURCE_SWITCHOVER` 事件。meta 库从较早的备份恢复、或这些事件被人工清理过时，本版本认不出这种目录，也不会拒绝；这时 `/window` 仍会因为 GTID 空缺报不连续，但 `/replay` 不截断。不要清理 `task_events`；meta 从备份恢复过的任务，按“拒绝后怎么做”处理。
+- MariaDB 和没有 GTID 的任务不会继续复制到另一台，所以没有这种目录。
+- 旧版本重启时多记的 B→A 切换不算新的一段，但仍计入 `binlog_server_source_switchovers{outcome="continued"}`。
+
 English: The task address is a VIP, DNS name, or proxy, and it reached a different server identity. The Console task view lists each server, which one is current, and each switch (old, new, file:pos, GTID set). The files table names the server, not only the filename prefix. `binlog_server_source_switchovers{task_id,outcome}` is `continued` or `stopped`. `GET /api/tasks/{id}` returns the same view as `source_chain` when a chain or a switch exists. Do not delete `{data_dir}/{task_id}/.source-chain`. The first line owns the unprefixed files.
 
 When the task stays `RUNNING`, the Console says this backup is still copying. Check that `GET /window` is continuous before you restore, and that a replay lists the older server's files before the newer server's files. Do not rename files so they look like one server.
 
 When the task is `FAILED` and `last_error` starts with `SOURCE_SWITCHOVER:`, the Console states the reason and the next step: start a new task against the new primary and keep this backup. `no_gtid` means this backup has no executed GTID set, so do not point the old file:pos at the new primary. `missing_transactions` means the server now reached lacks transactions already stored. `purged` means the new primary has purged transactions this backup still needs. `mariadb` means there is no GTID path. `gtid_unreadable` means the new server's GTID state could not be read; fix connectivity, then start a new task. Do not delete `.source-chain` and start this same task hoping it will mix the two servers.
 
-Failing back to the old primary after a continued switch stops with `missing_transactions`. `.source-chain` stays as it was, so current remains the server that wrote the latest files. Both metric outcomes are greater than 0. Bytes already stored do not change. Writes that exist only on the old primary after the failback are not in this backup. Start a new task for those writes. Do not delete `.source-chain` or the newer server's segments.
+Failing back to the old primary after a continued switch stops with `missing_transactions` while the old primary lacks the newer server's transactions. `.source-chain` stays as it was, so current remains the server that wrote the latest files. Bytes already stored do not change. Do not delete `.source-chain` or the newer server's segments.
+
+A proper failback re-syncs A from B first (`AUTO_POSITION=1`), then points the VIP back at A. Start the task after A has caught up: it continues, `.source-chain` gains a third line (A, B, A), and A's new files are named `{A identity}~2.{binlog file}` so they never reuse a name A wrote before the switch. `source_chain.current` is A, the files table names stint 3, replay lists A's old files, then B's, then A's new files, and `/window` does not report a false hole at either switch. A restart or another Start on A records no new switch. Each line of `.source-chain` is one stint; current is the stint that wrote the newest files, not necessarily the server a stopped task is copying. `GET /api/tasks/{id}` has `source_chain` for every task that has reached its source once; with no switch it has one server and an empty `switches` list. Repeated Starts of a stopped task check the same switch and count once. When the task runs again after a stop, `outcome` is `resumed`, the stop is `resolved`, and `outcome="stopped"` on the metric returns to 0. A later normal Stop or a process restart keeps it resolved, because the check is whether a `TASK_RUNNING` event follows the stop. A GTID task's start set (for example transactions in a mysqldump seed that the dump skipped in the first file) counts as stored for `/window`.
+
+Task directory from an earlier build after a failback: v0.5.57 and 0a84917a kept copying after a real failback (A→B→A with A re-synced first) but wrote A's third stint under the names A used before the switch (for example the first stint's `mysql-bin.000004` and the third stint's `mysql-bin.000004.open.e1` or `.sealed.e1`), left `.source-chain` as A,B, and pointed the `mysql-bin.000004` catalog row at the later file. On builds before this one `/files` and `/replay` leave out the first-stint file, and a restore fails with ERROR 1032 or silently loses rows. Recognize it by several files for one binlog index, `.source-chain` with only A,B, and a continued B→A switch in the events (an old build adds more identical B→A on restart). This build reports it on reads: `storage_alert` with code `STORAGE_INCONSISTENT` and a `detail` starting `legacy failback:` that names the files, and `/replay` and `/window` stop before the first affected file with a warning. On Start, including the automatic resume after an upgrade, it checks every file's transactions against the GTID sets recorded at each switch. When each file fits exactly one stint, it renames the later stint to `{A identity}~2.{binlog file}` (an empty open file follows the file of the same name), lists the first-stint file in the catalog again and marks it for re-upload and checksum verification, fixes the checkpoint file name, writes `.source-chain` as A, B, A, and records `STORAGE_REPAIRED`. It deletes nothing, and a plan in `.legacy-failback-repair` lets the next Start finish a repair interrupted by a crash. Until the repair completes, the background upload retry leaves those files' catalog rows alone (the old build gave them a key in the wrong server's directory). When the first-stint file is no longer on disk (for example removed by `local_retention_days`, kept only as an object), `detail` adds `not on disk: mysql-bin.00000N`; Start first fetches `{prefix}/{cluster}/{A identity}/mysql-bin.00000N` back, checks that its transactions belong to the first stint (none stored before that stint began, all within the set recorded at the switch to B), puts it back in the task directory, and then repairs. If the object cannot be read, holds other transactions, or no object storage is configured, Start refuses and changes nothing. When the order cannot be proven (a file fits no stint or more than one, the target name exists, or a file cannot be read), Start refuses with `STORAGE_INCONSISTENT` naming the files and changes nothing: not the files, the catalog, the checkpoint, or object storage. An unparseable switch `gtid_set` still names a segment (the file the returning server left at) and `/replay` stops before it. Then do not restore past `storage_alert.segment` (`valid_segments` still restore), start a new task from the current primary's `@@gtid_executed`, keep the old task for evidence, and if you need its data assemble it by GTID with `mysqlbinlog --include-gtids`/`--exclude-gtids`: first stint, then B, then A's later GTIDs. Do not delete `.source-chain`, rename files by hand, or delete segments or objects. To fetch a first-stint file by hand after such a refusal: keep the task `FAILED`; take the name from `not on disk:`; find the object with `mc ls -r <alias>/<bucket>/<prefix>/<cluster>/<A identity>/` (the one without a `.sealed.eN` suffix or `~n.` prefix), or another copy of that binlog; check with `mysqlbinlog <file> | grep GTID_NEXT` that it holds A's transactions within the switch-to-B `gtid_set`; copy it to `{data_dir}/{task_id}/<name>` and Start again, which checks it again and repairs. If no copy exists, those transactions are not in this backup: follow the refusal steps above. After a repair, renamed files upload under new keys (`{A identity}/{A identity}~2.{file}`). Objects the old build wrote (for example `{A}/mysql-bin.00000N.sealed.e1`, or `{B}/mysql-bin.00000N.sealed.e1` filed under the wrong server) are no longer referenced and retention does not remove them; `STORAGE_REPAIRED` lists them after `orphaned_objects=` (some may not exist). Delete them by hand once a restore from `/replay` is verified; the server never deletes them. Safety net: on a task that switched servers, reads also compare the stored set each continued switch recorded with the local segments. Transactions recorded as stored that no segment holds, with stored transactions on both sides (or the start set before them while the task's first file is still on disk; for example a file removed by hand), set `storage_alert` with `detail` `stored gtid hole: ...` and `missing_gtids`, and `/replay` and `/window` stop before the first segment after the hole; put the file back as above. It does not block Start, and it is not reported while a file before the cut is `UPLOADED` and only in object storage (replay reads it from there). `/window` is never `continuous` when the stored sequences of one source have a gap inside them that the start set does not cover; the break names the missing GTIDs and the files on both sides. Known limits: detection relies on the `SOURCE_SWITCHOVER` events, so if the meta database is restored from an older backup or those events are cleaned up, this build cannot recognize the directory and does not refuse it (`/window` still reports the GTID gap, but `/replay` does not cut); do not clean up `task_events`, and treat a task whose meta was restored as refused. The extra B→A events an old build recorded on restart do not start a stint but still count in `binlog_server_source_switchovers{outcome="continued"}`.
 
 ## 6. 性能问题
 

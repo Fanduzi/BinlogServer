@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: GET /api/tasks/{id}, GET /api/tasks/{id}/files, and GET /metrics for a task with a source chain
-// output: assertions that source_chain and source_identity appear for a continued switch and a stopped switch, and that binlog_server_source_switchovers counts both outcomes
+// output: assertions that source_chain, source_identity, and source_server appear for a continued switch and a stopped switch, that a stop checked three times is one switch, and that binlog_server_source_switchovers counts both outcomes once
 // pos: HTTP coverage for the VIP source-chain view and its gauge
 // note: if this file changes, update this header and module README.md.
 package api
@@ -84,12 +84,16 @@ func TestTaskAPI_SourceChainMetricAndFiles(t *testing.T) {
 		Message: "source switched from " + oldID + " to " + newID + " at mysql-bin.000001:20 gtid_set=" + oldID + ":1-3; continuing from the executed GTID set",
 		Detail:  "old=" + oldID + " new=" + newID + " gtid_set=" + oldID + ":1-3 file=mysql-bin.000001 pos=20",
 	})
-	events.add(tasks.TaskEvent{
-		TaskID:  "2",
-		Type:    "SOURCE_SWITCHOVER",
-		Message: "source switched from " + oldID + " to " + newID + ". This backup has no GTID set, so the old source file and position cannot be applied to the new source. Start a new task against the new primary and keep this backup. This task will not mix the two servers.",
-		Detail:  "old=" + oldID + " new=" + newID + " gtid_set= file=mysql-bin.000009 pos=4",
-	})
+	// Each Start of the stopped task checks the same move again and appends
+	// the same event. It is one switch.
+	for i := 0; i < 3; i++ {
+		events.add(tasks.TaskEvent{
+			TaskID:  "2",
+			Type:    "SOURCE_SWITCHOVER",
+			Message: "source switched from " + oldID + " to " + newID + ". This backup has no GTID set, so the old source file and position cannot be applied to the new source. Start a new task against the new primary and keep this backup. This task will not mix the two servers.",
+			Detail:  "old=" + oldID + " new=" + newID + " gtid_set= file=mysql-bin.000009 pos=4",
+		})
+	}
 
 	missing := httptest.NewRecorder()
 	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/api/tasks/9", nil))
@@ -139,11 +143,23 @@ func TestTaskAPI_SourceChainMetricAndFiles(t *testing.T) {
 	if seen["mysql-bin.000001"] != oldID || seen[newID+".mysql-bin.000001"] != newID {
 		t.Fatalf("file identities %#v", seen)
 	}
+	for _, file := range files {
+		want := float64(1)
+		if file["file_name"] == newID+".mysql-bin.000001" {
+			want = 2
+		}
+		if file["source_server"] != want {
+			t.Fatalf("source_server %#v", file)
+		}
+	}
 
 	stopped := decodeTaskJSON(t, handler, "/api/tasks/2")
 	stoppedChain := stopped["source_chain"].(map[string]any)
 	if stoppedChain["outcome"] != "stopped" || stoppedChain["current"] != oldID {
 		t.Fatalf("stopped %#v", stoppedChain)
+	}
+	if n := len(stoppedChain["switches"].([]any)); n != 1 {
+		t.Fatalf("repeated check listed %d switches", n)
 	}
 	stoppedSwitch := stoppedChain["switches"].([]any)[0].(map[string]any)
 	if stoppedSwitch["continued"] != false || stoppedSwitch["reason"] != "no_gtid" {

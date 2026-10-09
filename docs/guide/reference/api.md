@@ -274,11 +274,15 @@ HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。
 
 列表、dashboard 的 `tasks[].task` 和这条详情在发现重拉损坏时多一个 `storage_alert`：`code` 是 `STORAGE_INCONSISTENT`，`message` 说明某一个分段里有指向自己或更早文件的 Rotate，或事件位点在这个分段里变小，并写明恢复步骤。`segment` 是第一个损坏的分段文件名。`detail` 是在这个分段里发现了什么（英文）。`missing_gtids` 是 checkpoint 里有、起点集合和任何分段都没有的 MySQL GTID。`valid_segments` 是损坏分段之前的分段，写于损坏之前，仍可恢复。`restart_gtid_set` 是新任务的 GTID 起点（起点集合或第一个分段的 Previous_GTIDs，加上 `valid_segments` 里的事务）。这三个字段算不出来时不出现。GTID 乱序、多个 UUID 交错、序号在别的分段或起点集合里、以及保留造成的文件间缺口，都不设置该字段。缺文件看 `/window` 的 `breaks`。没有这个问题时该字段不出现。它是读目录算出来的，不入库，也没有新的迁移。带 `storage_alert` 时，`/window` 与 `/replay` 用同一个截断点：只统计损坏分段之前的分段，`continuous` 为 false，`breaks` 里多一条 `segment <名字> is damaged (STORAGE_INCONSISTENT) ...`，`files` 列出损坏分段和之后被排除的分段；`earliest`、`latest`、`gtid_set` 也只覆盖这些有效分段。`FAILED` 任务的 `last_error` 若还是旧版本写下的 `STORAGE_INCONSISTENT` 文本，读取时显示为当前 `storage_alert.message`。`/window` 的 `continuous: true` 只说明相邻文件接得上；同一个文件内部的 GTID 序号空洞会让 `continuous` 为 false。checkpoint 的 `gtid_set` 不能当作“这些事务已经在文件里”的证明。
 
-这条任务有 `.source-chain`，或有 `SOURCE_SWITCHOVER` 事件时，多一个 `source_chain`。没有这两样时该字段不出现，已有字段仍在顶层。列表和 `PUT` 不带这个字段。没有新的表，也没有新的配置项。
+早期版本（v0.5.57、0a84917a）在真实回切 A→B→A 后写下的任务目录也带 `storage_alert`：`code` 同样是 `STORAGE_INCONSISTENT`，`detail` 以 `legacy failback:` 开头，列出涉及的文件，并写明 Start 会修复（`Start repairs`）还是无法修复（`cannot repair: ...`）。`segment` 是其中回放顺序最早的文件，`valid_segments` 是它之前仍可回放的文件。能修复时，下一次 Start 把后一段改名为 `{身份}~{n}.{binlog 文件名}`、补回目录行、修 checkpoint 文件名和 `.source-chain`，记一条 `STORAGE_REPAIRED` 事件（`detail` 里 `orphaned_objects=` 列出不再被引用的旧对象键），之后这个字段消失；不能修复时 Start 以 `STORAGE_INCONSISTENT` 失败，不改文件、目录行和对象存储。第一段文件本地已没有时 `detail` 带 `not on disk: <文件>`，Start 先从对象存储取回并核对。切换事件的 `gtid_set` 解析不了时 `segment` 仍有值。见故障排查 5.4。
 
-`source_chain.servers` 按写下文件的顺序。第一台的文件没有身份前缀。后面每一台的文件名是 `{identity}.{binlog 文件名}`。`current` 为 true 的是最后一台，也是 `source_chain.current`。磁盘上的 `.source-chain` 存在时，服务器顺序以它为准。停下来的那次切换不会把新身份追加进这个文件。没有这个文件时，服务器从继续复制的切换里还原：第一条的 `old`，然后每一次 `continued` 为 true 的 `new`。停下的 `new` 不拥有文件。
+换过服务器的任务还核对切换事件里记下的已存集合：某些事务被记成已存下，本机没有任何分段存着，而前后的事务都在时，`storage_alert.detail` 以 `stored gtid hole:` 开头，`missing_gtids` 是缺的事务，`segment` 是缺口后的第一个分段；`/replay` 停在它之前并带 `warning`，`/window` 的 `breaks` 多一条 `gtid hole: a source switch recorded ...`。它不影响 Start。另外，`/window` 在同一来源的已存 GTID 序号中间有空缺（且不在起点集合里）时，`continuous` 一定是 false，`breaks` 里是 `gtid hole: <缺的 GTID> is stored in no segment between <文件> and <文件>`。`storage_alert` 的 `segment` 为空时，`/replay` 不返回任何文件，只给 `warning`。
 
-`source_chain.switches` 是 `SOURCE_SWITCHOVER` 事件，旧的在前。`old`、`new` 是两台身份。`file` 是源 binlog 名，不是磁盘前缀。`pos` 为 0 时不出现。`gtid_set` 为空时不出现。`continued` 总是出现：true 表示任务继续复制，false 表示任务停下。`reason` 只在停下时出现，取值 `no_gtid`、`missing_transactions`、`purged`、`mariadb`、`gtid_unreadable`。认不出原因时不出现。`outcome` 是最近一次切换的 `continued` 或 `stopped`。还没切换时不出现。最多返回最早的 1000 条这类事件。
+这条任务有 `.source-chain`，或有 `SOURCE_SWITCHOVER` 事件时，多一个 `source_chain`。任务连上过一次源库就会写 `.source-chain`，所以跑过的 MySQL/MariaDB 任务都有这个字段（没换过服务器时 `servers` 只有一段、`switches` 是 `[]`、没有 `outcome`）。没有这两样（从未连上过源库）时该字段不出现，已有字段仍在顶层。列表和 `PUT` 不带这个字段。没有新的表，也没有新的配置项。
+
+`source_chain.servers` 按写下文件的顺序，一项是一段（同一台服务器连续写的一段文件）。回切 A→B→A 是三段：A、B、A。第一段的文件没有前缀。后面每一段的文件名是 `{prefix}.{binlog 文件名}`，`prefix` 字段给出这个前缀：这台服务器第一次出现时是它的身份，第 n 次出现时是 `{identity}~{n}`（例如第三段是 `A~2`）。所以回切后的新文件不会和 A 切走前写下的同名文件重名，回放也排在 B 的文件之后。`current` 为 true 的是最后一段，也是 `source_chain.current`：最后写下文件的那台。任务停下时它不一定是正在被复制的服务器。磁盘上的 `.source-chain` 存在时，服务器顺序以它为准。停下来的那次切换不会把新身份追加进这个文件。没有这个文件时，服务器从继续复制的切换里还原：第一条的 `old`，然后每一次 `continued` 为 true 的 `new`。停下的 `new` 不拥有文件。
+
+`source_chain.switches` 是 `SOURCE_SWITCHOVER` 事件，旧的在前。`old`、`new` 是两台身份。`file` 是源 binlog 名，不带磁盘上的段前缀。`pos` 为 0 时不出现。`gtid_set` 为空时不出现。`continued` 总是出现：true 表示任务继续复制，false 表示任务停下。`reason` 只在停下时出现，取值 `no_gtid`、`missing_transactions`、`purged`、`mariadb`、`gtid_unreadable`。认不出原因时不出现。`outcome` 是最近一次切换的 `continued` 或 `stopped`；最近一次是停下、但任务已经不在这次停止上（回到 `RUNNING`、`STARTING` 或 `RETRY_BACKOFF`，且 `last_error` 不是 `SOURCE_SWITCHOVER`）时是 `resumed`，那条停止带 `resolved: true`，之后被一次继续复制的切换接上的停止也带 `resolved: true`。停止事件之后任务跑起来过（之后有 `TASK_RUNNING` 事件）的停止也带 `resolved: true`，之后普通 Stop 或进程重启不会把它变回停下。还没切换时不出现。停下的任务每次 Start 都会再检查一次同一个切换；old、new、`file`、`pos`、`gtid_set`、结果和原因都相同的相邻事件只列一次，时间取第一次。最多返回最早的 1000 条这类事件。
 
 源库不可达的 Stop 仍返回这条 `STOPPED` 任务，并多一个 `pending_dump_cleanup`：`connection_id`、`host`、`port`、`warning`，schema 3 再加 `process_local: true`。`warning` 是 `source Binlog Dump connection <id> may still be open; will KILL when source is reachable`。`process_local` 为 true 时后面还有一句：只有拉过这条 dump 的那个进程看得到，别的进程和重启都看不到，直到迁移 `000004`。没有残留连接时这个字段不出现。正在拉的 dump 把连接号记成 `held`，这个字段不出现。`RUNNING` 上若还有没确认的残留，字段会出现，任务停在 `RETRY_BACKOFF` 时 `last_error` 是同一句警告，并且不会再开一条 dump。`STOPPED` 之后字段还在。源库恢复后，任何认领到这行的 worker 会 `KILL` 该连接号，成功或该号已不在 processlist（含 `ER_NO_SUCH_THREAD`）后字段消失。集群还在 schema 3 时，别的 worker 不能替这条 dump 收尾或接管，`last_error` 要求先跑迁移 `000004`。半开路径上源库线程能留多久不由这个字段保证，见部署指南里的 TCP 重传说明。DBA 可以按 `connection_id` 手动 `KILL`。
 
@@ -328,7 +332,7 @@ HTTP 200，正文与列表里的单个 `items` 元素相同。密码不返回。
 }
 ```
 
-没有换过服务器时，响应里没有 `source_chain`。
+从未连上过源库时，响应里没有 `source_chain`。连上过、但没换过服务器时，`servers` 只有一段，`switches` 是 `[]`。
 
 ### 3.5 启动任务
 
@@ -534,7 +538,7 @@ HTTP 200 的正文是 JSON 数组。顺序按源文件序号升序；同一序�
 
 `state` 是 `OPEN` 或 `SEALED`。`upload_state` 是 `LOCAL_ONLY`、`UPLOADED` 或 `UPLOAD_FAILED`。`location` 是列出时算出来的，不入库：`local` 表示字节在本机，`bucket` 表示只有已上传对象（`file_path` 是目录路径，磁盘上已经没有这个文件），`both` 表示两边都有。空则不出现。只在桶里的分段仍能下载，回放的 `locations` 与 `paths` 对齐，值为 `bucket` 时先下载再交给 `mysqlbinlog`。
 
-`source_identity` 也是列出时算出来的，不入库。任务还没有服务器链时不出现。第一台身份拥有没有前缀的文件名。后面某一台身份拥有以 `{identity}.` 开头的文件名。`.open.e*` 和 `.sealed.e*` 先去掉再比较。空则不出现。
+`source_identity` 和 `source_server` 也是列出时算出来的，不入库。任务还没有服务器链时不出现。第一段拥有没有前缀的文件名。后面某一段拥有以它的 `{prefix}.` 开头的文件名（最长的前缀优先）。`source_identity` 是那一段的服务器身份，`source_server` 是从 1 开始的段号，和 `source_chain.servers` 的顺序一致；回切 A→B→A 后 A 的新文件是 `source_server: 3`，不是第 1 台。`.open.e*` 和 `.sealed.e*` 先去掉再比较。空则不出现。
 
 封存分段到达对象存储并且核对完成时带 `checksum`。`match` 表示桶里的对象与封存字节一致（对象 HEAD 的 ETag）。`mismatch` 表示这次核对已经完成且字节不同，拉流继续，这一行仍是 `UPLOADED`。对象 HEAD 失败时该字段不出现，这一行仍是 `UPLOADED`，不算已校验。没有上传的分段也不带该字段。
 
@@ -1006,7 +1010,7 @@ curl "http://localhost:8080/api/sources/lookup?host=10.0.0.1&port=3306"
 curl http://localhost:8080/metrics
 ```
 
-返回 Prometheus 格式的指标。`binlog_server_source_switchovers{task_id,outcome}` 是 gauge。`outcome` 是 `continued` 或 `stopped`。值是该任务已保存的 `SOURCE_SWITCHOVER` 事件里，这种结果的条数。每次采集重算。读到的任务两个序列都有，包含 0。没有任务时 `task_id=""` 的两个序列为 0。某一条任务的链读失败时，这一条不发出 0，避免把已经发生的切换盖成没有。告警示例见 [可观测性](../admin/observability.md)。
+返回 Prometheus 格式的指标。`binlog_server_source_switchovers{task_id,outcome}` 是 gauge。`outcome` 是 `continued` 或 `stopped`。值是该任务的切换次数，与 [可观测性](../admin/observability.md) 的说明一致：同一次切换被重复检查（停下的任务每次 Start 都会再记一条同样的事件）只算一次；`continued` 是继续复制的切换，回切 A→B→A 计 2；`stopped` 只算任务现在仍停在上面的那一次，任务之后跑起来过（停止事件之后有 `TASK_RUNNING`）就回到 0，之后普通 Stop 或进程重启也不会再变回 1。每次采集按已保存的事件重算。读到的任务两个序列都有，包含 0。没有任务时 `task_id=""` 的两个序列为 0。某一条任务的链读失败时，这一条不发出 0，避免把已经发生的切换盖成没有。告警示例见 [可观测性](../admin/observability.md)。
 
 ## 9. 错误响应
 

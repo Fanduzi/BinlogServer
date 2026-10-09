@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
-// input: the identity recorded for a task directory, the identity now reached at the task host:port, and that server's GTID executed and purged sets
-// output: a plan that seals the old server's open segment and continues with COM_BINLOG_DUMP_GTID, or a permanent SOURCE_SWITCHOVER error naming both identities; a dump error before the next event, including MySQL 1236, uses the same plan
+// input: the stint chain recorded for a task directory (one line per stint; a failback A, B, A is three lines), the identity now reached at the task host:port, and that server's GTID executed and purged sets
+// output: a plan that seals the previous stint's open segment (moved onto the current epoch first) and continues with COM_BINLOG_DUMP_GTID under a new stint prefix ({identity}, or {identity}~{n} when the chain returns to that server), or a permanent SOURCE_SWITCHOVER error naming both identities that leaves the open segment open so a later Start resumes or decides again; a dump error before the next event, including MySQL 1236, uses the same plan
 // pos: VIP switch decision used by the replication runner before a byte from the new server is written
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -36,8 +36,11 @@ type switchGTIDProbe interface {
 
 // sourceSession is the identity this dump is allowed to append to.
 // original is the first server, whose files keep the source basename.
-// active is the server the open segment belongs to. A later server's files
-// are named {identity}.{source basename} so they cannot replace the earlier file.
+// active is the server the open segment belongs to. chain is one line per
+// stint: a failback A, B, A has three lines. A later stint's files are named
+// {prefix}.{source basename}, where the prefix is tasks.SourceStintPrefixes:
+// the identity on that server's first stint, {identity}~{n} on its n-th, so a
+// failback never reuses a name the server wrote before the switch.
 type sourceSession struct {
 	// dir is the directory that holds this task's segments. Takeover keeps
 	// writing there, so the identity chain lives next to those files and
@@ -50,50 +53,69 @@ type sourceSession struct {
 	resumeGTID string
 }
 
+// activePrefix is the file-name prefix of the last stint. The first stint has none.
+func (s *sourceSession) activePrefix() string {
+	return chainActivePrefix(s.chain)
+}
+
 func (s *sourceSession) diskName(serverFile string) string {
-	return diskSourceName(s.original, s.active, serverFile)
+	return diskSourceName(s.activePrefix(), serverFile)
 }
 
 func (s *sourceSession) serverName(name string) string {
-	return serverBinlogName(name, s.original, s.chain)
+	return serverBinlogName(name, s.chain)
 }
 
-func diskSourceName(original, active, serverFile string) string {
+func (s *sourceSession) owns(name string) bool {
+	return nameBelongs(name, s.chain, s.activePrefix())
+}
+
+func chainActivePrefix(chain []string) string {
+	if len(chain) == 0 {
+		return ""
+	}
+	prefixes := tasks.SourceStintPrefixes(chain)
+	return prefixes[len(prefixes)-1]
+}
+
+// diskSourceName adds the stint prefix to a source binlog name. An empty
+// prefix (the first stint) keeps the name.
+func diskSourceName(prefix, serverFile string) string {
 	serverFile = strings.TrimSpace(serverFile)
-	if serverFile == "" || active == "" || original == "" || active == original {
+	if serverFile == "" || prefix == "" {
 		return serverFile
 	}
-	prefix := active + "."
-	if strings.HasPrefix(serverFile, prefix) {
+	if strings.HasPrefix(serverFile, prefix+".") {
 		return serverFile
 	}
-	return prefix + serverFile
+	return prefix + "." + serverFile
 }
 
-func serverBinlogName(name, original string, ids []string) string {
+// serverBinlogName removes the longest stint prefix of chain from name.
+func serverBinlogName(name string, chain []string) string {
 	name = strings.TrimSpace(name)
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" || id == original {
-			continue
-		}
-		prefix := id + "."
-		if strings.HasPrefix(name, prefix) {
-			return strings.TrimPrefix(name, prefix)
+	best := ""
+	for _, prefix := range tasks.SourceStintPrefixes(chain) {
+		if prefix != "" && strings.HasPrefix(name, prefix+".") && len(prefix) > len(best) {
+			best = prefix
 		}
 	}
-	return name
+	if best == "" {
+		return name
+	}
+	return strings.TrimPrefix(name, best+".")
 }
 
-func nameBelongs(name, original, active string) bool {
+// nameBelongs reports that name was written on the stint with this prefix.
+func nameBelongs(name string, chain []string, prefix string) bool {
 	name = strings.TrimSpace(name)
-	if name == "" || active == "" {
+	if name == "" {
 		return false
 	}
-	if active == original || original == "" {
-		return serverBinlogName(name, original, []string{active}) == name
+	if prefix == "" {
+		return serverBinlogName(name, chain) == name
 	}
-	return strings.HasPrefix(name, active+".")
+	return strings.HasPrefix(name, prefix+".") && serverBinlogName(name, chain) == strings.TrimPrefix(name, prefix+".")
 }
 
 type switchAction int
@@ -272,6 +294,9 @@ func writeAtomic(path, body string) error {
 	return os.Rename(tmp, path)
 }
 
+// appendIdentity starts a new stint. A server already earlier in the chain
+// (a failback) is a new stint with its own prefix. Only the current server
+// again is not a new stint.
 func appendIdentity(chain []string, id string) []string {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -280,12 +305,9 @@ func appendIdentity(chain []string, id string) []string {
 	if len(chain) > 0 && chain[len(chain)-1] == id {
 		return chain
 	}
-	for _, existing := range chain {
-		if existing == id {
-			return chain
-		}
-	}
-	return append(chain, id)
+	out := make([]string, 0, len(chain)+1)
+	out = append(out, chain...)
+	return append(out, id)
 }
 
 // prepareSourceIdentity records the first server, or decides a switch before
@@ -315,14 +337,14 @@ func (r *MySQLRunner) prepareSourceIdentity(ctx context.Context, task tasks.Task
 	if recorded == connected {
 		marker := loadResumeGTID(dir)
 		session.resumeGTID = marker
-		if marker != "" && !nameBelongs(start.File, session.original, recorded) {
-			if err := r.sealForeignOpens(ctx, task, dir, session.original, recorded); err != nil {
+		if marker != "" && !session.owns(start.File) {
+			if err := r.sealForeignOpens(ctx, task, dir, session.chain); err != nil {
 				return nil, start, err
 			}
 			start = tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: marker}
 			return session, start, nil
 		}
-		if marker != "" && nameBelongs(start.File, session.original, recorded) {
+		if marker != "" && session.owns(start.File) {
 			clearResumeGTID(dir)
 			session.resumeGTID = ""
 		}
@@ -340,6 +362,8 @@ func (r *MySQLRunner) prepareSourceIdentity(ctx context.Context, task tasks.Task
 	if file == "" {
 		file, pos = start.File, start.Pos
 	}
+	// The switch event names the source binlog, not the stint prefix on disk.
+	file = serverBinlogName(file, chain)
 	if !captured && ours == "" && freshLatest {
 		plan := planSourceSwitch(task.Source.Flavor, recorded, connected, "", false, false, false, "", false, file, pos)
 		session.chain = appendIdentity(chain, connected)
@@ -356,16 +380,21 @@ func (r *MySQLRunner) prepareSourceIdentity(ctx context.Context, task tasks.Task
 		return nil, start, err
 	}
 	if plan.action == switchStop {
-		if sealErr := r.sealForeignOpens(ctx, task, dir, session.original, recorded); sealErr != nil {
+		if sealErr := r.sealForeignOpens(ctx, task, dir, chain); sealErr != nil {
 			return nil, start, sealErr
 		}
 		r.emitSwitch(task.ID, plan)
 		return nil, start, tasks.NewPermanentError(tasks.CodeSourceSwitchover, plan.message)
 	}
-	if err := r.sealForeignOpens(ctx, task, dir, session.original, recorded); err != nil {
+	// Seal against the chain with the new stint: the previous stint's open
+	// segment (left open by a stop, or by a crash) is sealed under its owner.
+	// Keeping it open lost it, because the new stint opens a new epoch and
+	// cleanupStaleOpenFiles drops every other epoch's open file.
+	next := appendIdentity(chain, connected)
+	if err := r.sealForeignOpens(ctx, task, dir, next); err != nil {
 		return nil, start, err
 	}
-	session.chain = appendIdentity(chain, connected)
+	session.chain = next
 	session.original = session.chain[0]
 	session.active = connected
 	session.resumeGTID = ours
@@ -459,6 +488,15 @@ func (r *MySQLRunner) applySwitch(ctx context.Context, task tasks.Task, session 
 	if err != nil {
 		return err
 	}
+	if plan.action == switchStop {
+		// A stop keeps the open segment open, like a stop found at connect
+		// time. The checkpoint still names it, so a later Start can resume it
+		// (the address points back at this server) or decide again; sealing it
+		// here left that checkpoint on a file that is no longer open, and every
+		// later Start failed with SEGMENT_NOT_ON_WORKER.
+		r.emitSwitch(task.ID, plan)
+		return tasks.NewPermanentError(tasks.CodeSourceSwitchover, plan.message)
+	}
 	owner := session.active
 	if owner == "" {
 		owner = session.original
@@ -467,10 +505,6 @@ func (r *MySQLRunner) applySwitch(ctx context.Context, task tasks.Task, session 
 		if err := seal(owner); err != nil {
 			return err
 		}
-	}
-	if plan.action == switchStop {
-		r.emitSwitch(task.ID, plan)
-		return tasks.NewPermanentError(tasks.CodeSourceSwitchover, plan.message)
 	}
 	dir := session.dir
 	if dir == "" {
@@ -493,9 +527,9 @@ func (r *MySQLRunner) applySwitch(ctx context.Context, task tasks.Task, session 
 	return errSwitchRestart
 }
 
-// sealForeignOpens seals open segments that do not belong to active.
-// The object key uses the identity that wrote the file.
-func (r *MySQLRunner) sealForeignOpens(ctx context.Context, task tasks.Task, dir, original, active string) error {
+// sealForeignOpens seals open segments that do not belong to the last stint
+// of chain. The object key uses the identity of the stint that wrote the file.
+func (r *MySQLRunner) sealForeignOpens(ctx context.Context, task tasks.Task, dir string, chain []string) error {
 	if dir == "" {
 		return nil
 	}
@@ -506,6 +540,7 @@ func (r *MySQLRunner) sealForeignOpens(ctx context.Context, task tasks.Task, dir
 		}
 		return err
 	}
+	active := chainActivePrefix(chain)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -514,32 +549,34 @@ func (r *MySQLRunner) sealForeignOpens(ctx context.Context, task tasks.Task, dir
 		if !ok || !named.Open {
 			continue
 		}
-		if nameBelongs(named.Source, original, active) {
+		if len(chain) > 0 && nameBelongs(named.Source, chain, active) {
 			continue
 		}
-		owner := original
-		if prefix := identityPrefix(named.Source, loadSourceChain(dir)); prefix != "" {
-			owner = prefix
+		owner := ""
+		if i := tasks.SourceStintOf(named.Source, chain); i >= 0 {
+			owner = chain[i]
 		}
-		if err := r.sealOpenSegmentFile(ctx, task, filepath.Join(dir, entry.Name()), owner); err != nil {
+		path := filepath.Join(dir, entry.Name())
+		// A stop leaves the open segment on the epoch that wrote it; a later
+		// Start runs on a new epoch. Move it onto this epoch first, as a
+		// resume does, so the seal (and the lease check) uses this epoch.
+		if task.Epoch > 0 && named.Epoch != task.Epoch {
+			moved := filepath.Join(dir, openFileName(named.Source, task.Epoch))
+			if _, err := os.Stat(moved); err == nil {
+				return fmt.Errorf("open segment %s and %s both exist", entry.Name(), filepath.Base(moved))
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			if err := os.Rename(path, moved); err != nil {
+				return err
+			}
+			path = moved
+		}
+		if err := r.sealOpenSegmentFile(ctx, task, path, owner); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func identityPrefix(name string, ids []string) string {
-	var best string
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if strings.HasPrefix(name, id+".") && len(id) > len(best) {
-			best = id
-		}
-	}
-	return best
 }
 
 func (r *MySQLRunner) sealOpenSegmentFile(ctx context.Context, task tasks.Task, path, owner string) error {
