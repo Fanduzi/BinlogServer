@@ -368,6 +368,10 @@ type BinlogFile struct {
 	// SourceIdentity is the server that wrote this file. The files list fills
 	// it in from the source chain. It is not stored. Empty when the chain is unknown.
 	SourceIdentity string `json:"source_identity,omitempty"`
+	// SourceServer is the 1-based stint in source_chain.servers that wrote
+	// this file. A failback A, B, A names stint 3 for A's new files.
+	// It is not stored. 0 (omitted) when the chain is unknown.
+	SourceServer int `json:"source_server,omitempty"`
 }
 
 const (

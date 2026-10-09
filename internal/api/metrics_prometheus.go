@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers; store list errors stay 5xx instead of empty task_state_count
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers (continued switches, and stops the task still sits on, each move counted once); store list errors stay 5xx instead of empty task_state_count
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -269,14 +269,9 @@ func (c *apiMetricsCollector) collectSourceSwitchovers(ch chan<- prometheus.Metr
 		if err != nil {
 			continue
 		}
-		continued, stopped := 0, 0
-		for _, sw := range chain.Switches {
-			if sw.Continued {
-				continued++
-			} else {
-				stopped++
-			}
-		}
+		// A repeated check of one move counts once, and a stop the task
+		// has left (it runs again) no longer counts as stopped.
+		continued, stopped := chain.OutcomeCounts()
 		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, float64(continued), task.ID, tasks.SwitchOutcomeContinued)
 		ch <- prometheus.MustNewConstMetric(c.sourceSwitchDesc, prometheus.GaugeValue, float64(stopped), task.ID, tasks.SwitchOutcomeStopped)
 		emitted = true

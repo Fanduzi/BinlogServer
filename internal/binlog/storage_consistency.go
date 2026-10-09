@@ -326,7 +326,7 @@ func sameBinlogStream(segmentSource, rotateNext string) (uint64, uint64, bool) {
 
 func plainBinlog(name string) (string, uint64, bool) {
 	name = strings.TrimRight(strings.TrimSpace(name), "\x00")
-	if i := strings.Index(name, "."); i > 0 && looksUUID(name[:i]) {
+	if i := strings.Index(name, "."); i > 0 && looksStintPrefix(name[:i]) {
 		name = name[i+1:]
 	}
 	dot := strings.LastIndex(name, ".")
@@ -338,6 +338,24 @@ func plainBinlog(name string) (string, uint64, bool) {
 		return "", 0, false
 	}
 	return name[:dot], seq, true
+}
+
+// looksStintPrefix is a server identity prefix on a later stint's file:
+// {uuid}, or {uuid}~{n} when the chain returned to that server.
+func looksStintPrefix(s string) bool {
+	if i := strings.Index(s, "~"); i > 0 {
+		n := s[i+1:]
+		if n == "" {
+			return false
+		}
+		for _, c := range n {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		s = s[:i]
+	}
+	return looksUUID(s)
 }
 
 func looksUUID(s string) bool {

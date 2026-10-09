@@ -10,7 +10,7 @@
 - `gtid_set_scan.go`: `ScanSegmentGTIDs` 读同一个分段里的 previous-GTIDs 文本，以及每一条 MySQL `GTID_EVENT` 的 UUID、序号、起始字节和事件头时间。格式描述标明 CRC32 时，previous-GTIDs 的校验和尾部先剥掉再解码。尾部撕掉时保留已经读完的事件。previous-GTIDs 解不出来是错误。
 - `open_tail.go`: `ReconcileOpenTail` / `ScanOpenTail` 读最高打开分段：每个完整事务的 GTID（MySQL、带 tag 的 GTID、MariaDB）、previous-GTIDs，以及续传截断点。末尾的事务没写完、且它前面正好是一个完整事务结束处时给出截断偏移和位点；否则给出这个事务的 GTID，续传在它里面接着拉。XID、XA_PREPARE、压缩的 TRANSACTION_PAYLOAD、DDL 和 `COMMIT`/`ROLLBACK`/`XA COMMIT` 算提交（`TransactionQueryEffect`）。`UnionGTIDText` 把种子集合和这些 GTID 合起来。只读，不改文件。
 - `gtid_intervals.go`: MySQL GTID 集合的区间加、减和输出，给 `storage_consistency.go` 算缺失的 GTID 和新任务起点。
-- `storage_consistency.go`: `DetectStorageProblem(dir, checkpoint, start, flavor)` 只认重拉损坏的硬痕迹，并返回第一个损坏分段 `Segment`、它之前仍可恢复的分段 `Valid`、checkpoint 里有但起点集合和任何分段都没有的 MySQL GTID `Missing`，以及新任务起点 `Restart`（起点集合或第一个分段的 previous-GTIDs，加上 `Valid` 的事务；未知时为空）。Rotate 指向自己或更早的同名 binlog（身份前缀 `uuid.` 先剥掉），或 `end_log_pos` 在该分段里倒退，才是问题。GTID 序号乱序、多个 UUID 交错、某个序号在下一个分段里、起点集合或 `gtid_purged` 里的空洞，都不是。文件之间的缺口也不拒绝启动。目录不存在不是问题。checkpoint 和 flavor 仍传进来，不参与判断。
+- `storage_consistency.go`: `DetectStorageProblem(dir, checkpoint, start, flavor)` 只认重拉损坏的硬痕迹，并返回第一个损坏分段 `Segment`、它之前仍可恢复的分段 `Valid`、checkpoint 里有但起点集合和任何分段都没有的 MySQL GTID `Missing`，以及新任务起点 `Restart`（起点集合或第一个分段的 previous-GTIDs，加上 `Valid` 的事务；未知时为空）。Rotate 指向自己或更早的同名 binlog（身份前缀 `uuid.` 或回切段前缀 `uuid~n.` 先剥掉），或 `end_log_pos` 在该分段里倒退，才是问题。GTID 序号乱序、多个 UUID 交错、某个序号在下一个分段里、起点集合或 `gtid_purged` 里的空洞，都不是。文件之间的缺口也不拒绝启动。目录不存在不是问题。checkpoint 和 flavor 仍传进来，不参与判断。
 
 ## Exports
 - 文件写入、rotate 与 checkpoint 推进基础能力。

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: two MySQL 8.0 servers in a GTID pair behind one TCP address, the suite API, and the Percona 8.0 mysqlbinlog client
-# output: proof that a GTID task follows the new primary without mixing files, that a LATEST task stops with SOURCE_SWITCHOVER, that source_chain, source_identity, and binlog_server_source_switchovers describe both paths, that the embedded Console contains the chain view, and that pointing the address back at the old primary stops instead of mixing
+# output: proof that a GTID task follows the new primary without mixing files, that a LATEST task stops with SOURCE_SWITCHOVER, that source_chain, source_identity, and binlog_server_source_switchovers describe both paths, that the embedded Console contains the chain view, and that pointing the address back at the old primary stops instead of mixing, that repeated Starts of a stopped task count one stop and do not fail with SEGMENT_NOT_ON_WORKER, that a proper failback (old primary re-synced from the new one) continues as a third stint {identity}~2 with a continuous window, A,B,A~2 replay order, a matching restore checksum and no phantom switch on restart, with the earlier stop resolved and stopped back at 0, and that the stopped LATEST task resumes on the old primary with outcome resumed and stays resumed (stopped 0) after a normal Stop
 # pos: docker coverage for a VIP source switch
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -17,6 +17,7 @@ PRIMARY="e2e-switch-a"
 REPLICA="e2e-switch-b"
 RESTORE_FULL="e2e-switch-restore-full"
 RESTORE_GTID="e2e-switch-restore-gtid"
+RESTORE_FB="e2e-switch-restore-fb"
 CLIENT="e2e-switch-client"
 PORT_VIP=13470
 PORT_A=13471
@@ -49,7 +50,7 @@ cleanup() {
     kill "$PROXY_PID" >/dev/null 2>&1 || true
     wait "$PROXY_PID" >/dev/null 2>&1 || true
   fi
-  docker rm -f "$PRIMARY" "$REPLICA" "$RESTORE_FULL" "$RESTORE_GTID" "$CLIENT" >/dev/null 2>&1 || true
+  docker rm -f "$PRIMARY" "$REPLICA" "$RESTORE_FULL" "$RESTORE_GTID" "$RESTORE_FB" "$CLIENT" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -208,6 +209,10 @@ point_vip() {
 
 task_json() {
   curl -fsS "$API/api/tasks/$1"
+}
+
+switch_event_count() {
+  curl -fsS "$API/api/tasks/$1/events?limit=500" | jq '[.[] | select(.type=="SOURCE_SWITCHOVER")] | length'
 }
 
 switch_metric() {
@@ -615,6 +620,36 @@ assert_switch_metric "$latest_id" stopped ge 1
 assert_switch_metric "$latest_id" continued eq 0
 echo "[switch] LATEST source_chain stopped no_gtid"
 
+echo "[switch] Start the stopped LATEST task twice: one switch, stopped stays 1"
+for round in 1 2; do
+  raw_before="$(switch_event_count "$latest_id")"
+  curl -fsS -X POST "$API/api/tasks/$latest_id/start" >/dev/null
+  for i in $(seq 1 60); do
+    raw_now="$(switch_event_count "$latest_id")"
+    st="$(task_json "$latest_id" | jq -r '.state // empty')"
+    if [[ "$raw_now" -gt "$raw_before" && "$st" == "FAILED" ]]; then
+      break
+    fi
+    if [[ "$i" == 60 ]]; then
+      echo "LATEST Start $round did not re-check the switch raw=$raw_now state=$st last_error=$(task_json "$latest_id" | jq -r '.last_error // empty')" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+done
+latest_json="$(task_json "$latest_id")"
+latest_raw="$(switch_event_count "$latest_id")"
+if [[ "$latest_raw" -lt 3 ]] \
+  || [[ "$(jq -r '.source_chain.switches | length' <<<"$latest_json")" != "1" ]] \
+  || [[ "$(jq -r '.source_chain.outcome // empty' <<<"$latest_json")" != "stopped" ]] \
+  || [[ "$(jq -r '.last_error // empty' <<<"$latest_json")" != SOURCE_SWITCHOVER:* ]]; then
+  echo "repeated stop listed more than once raw=$latest_raw [$latest_json]" >&2
+  exit 1
+fi
+assert_switch_metric "$latest_id" stopped eq 1
+echo "[switch] evidence: LATEST raw SOURCE_SWITCHOVER events=$latest_raw source_chain.switches=1 metric stopped=1"
+
+
 switch_msg="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r '.[] | select(.type=="SOURCE_SWITCHOVER") | .message' | head -n 1)"
 switch_detail="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r '.[] | select(.type=="SOURCE_SWITCHOVER") | .detail' | head -n 1)"
 if [[ "$switch_msg" != *"$OLD_UUID"* || "$switch_msg" != *"$NEW_UUID"* || "$switch_msg" != *"continuing from the executed GTID set"* ]]; then
@@ -808,4 +843,213 @@ if find "$(abs_path "$DATA_DIR/$gtid_id")" -maxdepth 1 -type f -exec grep -a -l 
   exit 1
 fi
 echo "[switch] unsafe switch stopped: $back_err"
+
+assert_order3() {
+  local json="$1"
+  local stage=0 base want
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    base="$(basename "$p")"
+    if [[ "$base" == "$OLD_UUID~2".* ]]; then want=2
+    elif [[ "$base" == "$NEW_UUID".* ]]; then want=1
+    else want=0
+    fi
+    if [[ "$want" -lt "$stage" ]]; then
+      echo "failback replay out of order at $base: $json" >&2
+      exit 1
+    fi
+    stage="$want"
+  done < <(jq -r '.paths[]' <<<"$json")
+  if [[ "$stage" != 2 ]]; then
+    echo "failback replay never reaches the second $OLD_UUID stint: $json" >&2
+    exit 1
+  fi
+}
+
+echo "[failback] Start the stopped GTID task twice while A still lacks B's rows: one stop, stopped stays 1"
+for round in 1 2; do
+  raw_before="$(switch_event_count "$gtid_id")"
+  curl -fsS -X POST "$API/api/tasks/$gtid_id/start" >/dev/null
+  for i in $(seq 1 60); do
+    raw_now="$(switch_event_count "$gtid_id")"
+    st="$(task_json "$gtid_id" | jq -r '.state // empty')"
+    if [[ "$raw_now" -gt "$raw_before" && "$st" == "FAILED" ]]; then
+      break
+    fi
+    if [[ "$i" == 60 ]]; then
+      echo "Start $round did not re-check the switch raw=$raw_now state=$st last_error=$(task_json "$gtid_id" | jq -r '.last_error // empty')" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+done
+rep_json="$(task_json "$gtid_id")"
+rep_raw="$(switch_event_count "$gtid_id")"
+if [[ "$rep_raw" -lt 4 ]] \
+  || [[ "$(jq -r '.source_chain.switches | length' <<<"$rep_json")" != "2" ]] \
+  || [[ "$(jq -r '.source_chain.outcome // empty' <<<"$rep_json")" != "stopped" ]] \
+  || [[ "$(jq -r '.last_error // empty' <<<"$rep_json")" != SOURCE_SWITCHOVER:* ]]; then
+  echo "repeated stop listed more than once raw=$rep_raw [$rep_json]" >&2
+  exit 1
+fi
+assert_switch_metric "$gtid_id" stopped eq 1
+assert_switch_metric "$gtid_id" continued eq 1
+echo "[failback] evidence: raw SOURCE_SWITCHOVER events=$rep_raw source_chain.switches=2 metric continued=1 stopped=1"
+
+echo "[failback] re-sync the old primary from the new one, then fail back"
+mysql_exec "$REPLICA" "SET GLOBAL read_only=1;" >/dev/null
+b_gtid="$(mysql_exec "$REPLICA" "SELECT REPLACE(@@GLOBAL.gtid_executed, CHAR(10), '')" | tr -d ' \n')"
+mysql_script "$PRIMARY" "
+CHANGE REPLICATION SOURCE TO SOURCE_HOST='${REPLICA}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='replpass', SOURCE_AUTO_POSITION=1, GET_SOURCE_PUBLIC_KEY=1;
+START REPLICA;
+" >/dev/null
+caught="$(mysql_exec "$PRIMARY" "SELECT WAIT_FOR_EXECUTED_GTID_SET('${b_gtid}', 60)")"
+if [[ "$caught" != "0" ]]; then
+  echo "old primary did not catch up: $caught" >&2
+  mysql_exec "$PRIMARY" "SHOW REPLICA STATUS\G" >&2 || true
+  exit 1
+fi
+mysql_script "$PRIMARY" "
+STOP REPLICA;
+RESET REPLICA ALL;
+" >/dev/null
+vip_uuid="$(point_vip "$PORT_A")"
+if [[ "$vip_uuid" != "$OLD_UUID" ]]; then
+  echo "VIP failback is $vip_uuid want $OLD_UUID" >&2
+  exit 1
+fi
+curl -fsS -X POST "$API/api/tasks/$gtid_id/start" >/dev/null
+wait_state "$gtid_id" "RUNNING"
+mysql_script "$PRIMARY" "
+UPDATE ${DB}.t SET v='failback-upd' WHERE id=4;
+INSERT INTO ${DB}.t VALUES (10, 'failback-1');
+" >/dev/null
+a_gtid="$(mysql_exec "$PRIMARY" "SELECT REPLACE(@@GLOBAL.gtid_executed, CHAR(10), '')" | tr -d ' \n')"
+wait_gtid "$gtid_id" "$a_gtid" "$PRIMARY"
+wait_marker "$gtid_id" "failback-1"
+fb_json="$(task_json "$gtid_id")"
+if [[ "$(jq -r '.state' <<<"$fb_json")" != "RUNNING" ]] \
+  || [[ "$(jq -r '.source_chain.servers | length' <<<"$fb_json")" != "3" ]] \
+  || [[ "$(jq -r '[.source_chain.servers[].identity] | join(",")' <<<"$fb_json")" != "$OLD_UUID,$NEW_UUID,$OLD_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.servers[2].prefix // empty' <<<"$fb_json")" != "$OLD_UUID~2" ]] \
+  || [[ "$(jq -r '.source_chain.servers[2].current' <<<"$fb_json")" != "true" ]] \
+  || [[ "$(jq -r '.source_chain.current // empty' <<<"$fb_json")" != "$OLD_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.outcome // empty' <<<"$fb_json")" != "continued" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].old + ">" + .source_chain.switches[-1].new' <<<"$fb_json")" != "$NEW_UUID>$OLD_UUID" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].continued' <<<"$fb_json")" != "true" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].file // ""' <<<"$fb_json")" == "$NEW_UUID".* ]] \
+  || [[ "$(jq -r '[.source_chain.switches[] | select(.continued == false)] | all(.resolved == true)' <<<"$fb_json")" != "true" ]]; then
+  echo "failback source_chain [$fb_json]" >&2
+  exit 1
+fi
+if [[ "$(grep -c . "$chain_file")" != 3 ]] || [[ "$(sed -n '3p' "$chain_file" | tr -d '[:space:]')" != "$OLD_UUID" ]]; then
+  echo ".source-chain after failback: $(cat "$chain_file")" >&2
+  exit 1
+fi
+assert_switch_metric "$gtid_id" continued eq 2
+assert_switch_metric "$gtid_id" stopped eq 0
+echo "[failback] evidence: chain $(paste -sd, "$chain_file") current $OLD_UUID prefix $OLD_UUID~2 metric continued=2 stopped=0"
+
+task_dir="$(abs_path "$DATA_DIR/$gtid_id")"
+stint_files="$(find "$task_dir" -maxdepth 1 -type f -name "$OLD_UUID~2.*" -printf '%f\n' | sort)"
+if [[ -z "$stint_files" ]]; then
+  echo "no $OLD_UUID~2 files: $(ls "$task_dir")" >&2
+  exit 1
+fi
+while IFS= read -r path; do
+  base="$(basename "$path")"
+  if [[ "$base" != "$OLD_UUID~2".* ]]; then
+    echo "failback rows landed in $base, not the new stint" >&2
+    exit 1
+  fi
+done < <(find "$task_dir" -maxdepth 1 -type f -exec grep -a -l 'failback-1' {} +)
+if [[ "$before_mix" != "$after_mix" ]]; then
+  echo "B segment changed" >&2
+  exit 1
+fi
+fb_files="$(curl -fsS "$API/api/tasks/$gtid_id/files?limit=100")"
+bad_stint="$(jq -r --arg p "$OLD_UUID~2." --arg old "$OLD_UUID" '.[] | select((.file_name // "") | startswith($p)) | select(.source_identity != $old or .source_server != 3) | .file_name' <<<"$fb_files")"
+if [[ -n "$bad_stint" ]]; then
+  echo "stint files not labelled server 3: $bad_stint" >&2
+  exit 1
+fi
+echo "[failback] evidence: stint files $(printf '%s' "$stint_files" | paste -sd, -) source_server=3"
+
+window="$(curl -fsS "$API/api/tasks/$gtid_id/window")"
+if [[ "$(jq -r '.continuous' <<<"$window")" != "true" ]]; then
+  echo "failback window is not continuous: $window" >&2
+  exit 1
+fi
+echo "[failback] evidence: window continuous=true gtid $(jq -r '.gtid_set // empty' <<<"$window")"
+
+stop_at="$(mysql_exec "$PRIMARY" "SELECT DATE_FORMAT(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 1 DAY), '%Y-%m-%d %H:%i:%s')")"
+fb_replay="$(curl -fsS -G "$API/api/tasks/$gtid_id/replay" --data-urlencode "stop_datetime=${stop_at}")"
+assert_order3 "$fb_replay"
+echo "[failback] evidence: replay order $(jq -r '[.paths[] | split("/")[-1]] | join(" ")' <<<"$fb_replay")"
+start_restore "$RESTORE_FB" 205
+apply_replay "$fb_replay" "$RESTORE_FB"
+want_rows="$(rows_of "$PRIMARY")"
+got_rows="$(rows_of "$RESTORE_FB")"
+want_sum="$(mysql_exec "$PRIMARY" "CHECKSUM TABLE ${DB}.t" | awk '{print $2}')"
+got_sum="$(docker exec "$RESTORE_FB" mysql -uroot -proot -Nse "CHECKSUM TABLE ${DB}.t" 2>/dev/null | awk '{print $2}' | tr -d '\r')"
+if [[ "$got_rows" != "$want_rows" || -z "$want_sum" || "$want_sum" != "$got_sum" ]]; then
+  echo "failback restore rows [$got_rows] want [$want_rows] sum [$got_sum] want [$want_sum]" >&2
+  exit 1
+fi
+echo "[failback] evidence: restore checksum $got_sum matches $OLD_UUID"
+
+echo "[failback] Stop and Start twice on the old primary: no new switch"
+raw_fb="$(switch_event_count "$gtid_id")"
+for round in 1 2; do
+  curl -fsS -X POST "$API/api/tasks/$gtid_id/stop" >/dev/null
+  wait_state "$gtid_id" "STOPPED"
+  curl -fsS -X POST "$API/api/tasks/$gtid_id/start" >/dev/null
+  wait_state "$gtid_id" "RUNNING"
+done
+mysql_exec "$PRIMARY" "INSERT INTO ${DB}.t VALUES (11, 'failback-2');" >/dev/null
+wait_marker "$gtid_id" "failback-2"
+raw_after="$(switch_event_count "$gtid_id")"
+fb_json="$(task_json "$gtid_id")"
+if [[ "$raw_after" != "$raw_fb" ]] \
+  || [[ "$(jq -r '.state' <<<"$fb_json")" != "RUNNING" ]] \
+  || [[ "$(jq -r '.source_chain.servers | length' <<<"$fb_json")" != "3" ]] \
+  || [[ "$(grep -c . "$chain_file")" != 3 ]]; then
+  echo "restart on the old primary changed the chain raw=$raw_fb->$raw_after [$fb_json]" >&2
+  exit 1
+fi
+if curl -fsS "$API/api/tasks/$gtid_id/events?limit=500" | jq -r '.[] | .message // ""' | grep -q 'SEALED_FILE_EXISTS'; then
+  echo "restart hit SEALED_FILE_EXISTS" >&2
+  exit 1
+fi
+echo "[failback] evidence: 2x Stop/Start raw SOURCE_SWITCHOVER events $raw_fb->$raw_after, chain lines 3, state RUNNING"
+
+
+echo "[failback] Start the stopped LATEST task on the old primary"
+curl -fsS -X POST "$API/api/tasks/$latest_id/start" >/dev/null
+wait_state "$latest_id" "RUNNING"
+mysql_exec "$PRIMARY" "INSERT INTO ${DB}.t VALUES (12, 'latest-back');" >/dev/null
+wait_marker "$latest_id" "latest-back"
+latest_json="$(task_json "$latest_id")"
+if [[ "$(jq -r '.state' <<<"$latest_json")" != "RUNNING" ]] \
+  || [[ "$(jq -r '.source_chain.outcome // empty' <<<"$latest_json")" != "resumed" ]] \
+  || [[ "$(jq -r '.source_chain.switches | length' <<<"$latest_json")" != "1" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].resolved' <<<"$latest_json")" != "true" ]]; then
+  echo "LATEST after resume [$latest_json]" >&2
+  exit 1
+fi
+assert_switch_metric "$latest_id" stopped eq 0
+echo "[failback] evidence: LATEST state RUNNING outcome resumed metric stopped=0"
+
+# QA 6c88ad5b P2: a normal Stop of the resumed task must not bring the stop back.
+echo "[failback] Stop the resumed LATEST task normally"
+curl -fsS -X POST "$API/api/tasks/$latest_id/stop" >/dev/null
+wait_state "$latest_id" "STOPPED"
+latest_json="$(task_json "$latest_id")"
+if [[ "$(jq -r '.source_chain.outcome // empty' <<<"$latest_json")" != "resumed" ]] \
+  || [[ "$(jq -r '.source_chain.switches[-1].resolved' <<<"$latest_json")" != "true" ]]; then
+  echo "LATEST stop after resume brought the switch stop back [$latest_json]" >&2
+  exit 1
+fi
+assert_switch_metric "$latest_id" stopped eq 0
+echo "[failback] evidence: LATEST state STOPPED outcome resumed metric stopped=0"
 echo "[switch] passed"

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task id, the scheduler data directory, and the stored checkpoint gtid_set
-// output: a copy of the task with storage_alert set when one segment has a stray rotate or a backwards event position (the segment, the earlier segments that still restore, the missing GTIDs, and the restart gtid_set); the replay file choice without the damaged segment and later ones plus a warning; out-of-order GTIDs leave the task unchanged
+// output: a copy of the task with storage_alert set when one segment has a stray rotate or a backwards event position (the segment, the earlier segments that still restore, the missing GTIDs, and the restart gtid_set), or when an earlier build wrote a failback under the first stint's names (legacy_failback.go: the files, and whether Start repairs it), or when a source switch recorded transactions as stored that no local segment holds between segments that do (stored_hole.go); the replay file choice without the damaged segment and later ones plus a warning (no files when a problem names no segment); out-of-order GTIDs leave the task unchanged
 // pos: surface an already-damaged backup on list and get without a schema change
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -34,6 +34,15 @@ func (s *Scheduler) AttachStorageAlert(ctx context.Context, task Task) Task {
 	}
 	problem, found := binlog.DetectStorageProblem(dir, claimed, StartGTIDText(task), task.Source.Flavor)
 	if !found {
+		if legacy := s.legacyFailbackFor(task); legacy.found() {
+			problem = legacyProblem(legacy)
+			problem.Valid = s.validBefore(task, problem.Segment)
+			task.StorageAlert = storageAlertOf(problem)
+			return task
+		}
+		if hole, ok := s.storedHoleFor(task); ok {
+			task.StorageAlert = storageAlertOf(hole)
+		}
 		return task
 	}
 	task.StorageAlert = storageAlertOf(problem)
@@ -75,7 +84,31 @@ func (s *Scheduler) storageProblem(task Task) (binlog.StorageProblem, bool) {
 	if !ok {
 		return binlog.StorageProblem{}, false
 	}
-	return binlog.DetectStorageProblem(dir, "", StartGTIDText(task), task.Source.Flavor)
+	if problem, found := binlog.DetectStorageProblem(dir, "", StartGTIDText(task), task.Source.Flavor); found {
+		return problem, true
+	}
+	// A directory an earlier build wrote across a failback: replay stops
+	// before the first file whose stint is wrong or cannot be proven.
+	if legacy := s.legacyFailbackFor(task); legacy.found() {
+		return legacyProblem(legacy), true
+	}
+	// Transactions a switch recorded as stored that no segment holds,
+	// between segments that do: replay stops before the hole.
+	return s.storedHoleFor(task)
+}
+
+// validBefore lists the replay files of task before segment, from disk.
+func (s *Scheduler) validBefore(task Task, segment string) []string {
+	files, err := listTaskBinlogFilesOnDisk(s.dataDir, task.ID, segmentInventoryLimit)
+	if err != nil {
+		return nil
+	}
+	kept := excludeDamagedSegments(files, SelectReplayFiles(files), segment)
+	out := make([]string, 0, len(kept))
+	for _, file := range kept {
+		out = append(out, segmentInventoryBasename(file))
+	}
+	return out
 }
 
 // SelectReplayFilesFor is SelectReplayFiles without the damaged segment and
@@ -86,6 +119,10 @@ func (s *Scheduler) SelectReplayFilesFor(task Task, files []BinlogFile) ([]Binlo
 	problem, found := s.storageProblem(task)
 	if !found {
 		return chosen, ""
+	}
+	if strings.TrimSpace(problem.Segment) == "" {
+		// A problem without a cut point: replay nothing rather than everything.
+		return []BinlogFile{}, replayDamageWarning(problem)
 	}
 	return excludeDamagedSegments(files, chosen, problem.Segment), replayDamageWarning(problem)
 }
@@ -131,6 +168,12 @@ func (s *Scheduler) ReplayWarning(task Task) string {
 }
 
 func replayDamageWarning(problem binlog.StorageProblem) string {
+	if strings.HasPrefix(problem.Detail, storedHoleDetailPrefix) {
+		return "Segment " + problem.Segment + " follows a GTID hole (STORAGE_INCONSISTENT): " + problem.Missing + " is stored in no segment. Replay stops before it: that segment and every later one are left out. " + problem.Message
+	}
+	if strings.HasPrefix(problem.Detail, "legacy failback:") {
+		return "Segment " + problem.Segment + " is in a failback written by an earlier build (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. " + problem.Message
+	}
 	msg := "Segment " + problem.Segment + " is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out."
 	if problem.Restart != "" {
 		msg += " Take the transactions after these files from a new task started with gtid_set " + problem.Restart + "."
