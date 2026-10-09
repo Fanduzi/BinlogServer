@@ -6,13 +6,13 @@
 | `server.go` | HTTP server/router 组装、路由注册（含 `/healthz` 与 `/api/health`） |
 | `auth.go` | 路由级鉴权配置与认证中间件、ServerOption 定义 |
 | `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
-| `metrics_prometheus.go` | `/metrics` 采集与输出：一次 scrape 只读一份 `ListClusterObservation`，失败 5xx，不在 Collect 里再读一遍后记日志并吐空计数。`upload_retry` 计数包含后台对已封存失败文件的补传。`binlog_server_retention_blocked_files{task_id}` 是 runner 最近一次成功保留清理仍留下的过期未上传封存文件数，清理掉之后变为 0。`binlog_server_recovery_breaks{task_id}` 是该任务保留链的缺口数。`binlog_server_recovery_earliest_age_seconds{task_id}` 是最早可恢复事件距现在的秒数。`binlog_server_source_switchovers{task_id,outcome}` 是该任务 `SOURCE_SWITCHOVER` 里 `continued` 或 `stopped` 的条数，读到的任务两个序列都有 |
+| `metrics_prometheus.go` | `/metrics` 采集与输出：一次 scrape 只读一份 `ListClusterObservation`，失败 5xx，不在 Collect 里再读一遍后记日志并吐空计数。`upload_retry` 计数包含后台对已封存失败文件的补传。`binlog_server_retention_blocked_files{task_id}` 是 runner 最近一次成功保留清理仍留下的过期未上传封存文件数，清理掉之后变为 0。`binlog_server_recovery_breaks{task_id}` 是该任务保留链的缺口数。`binlog_server_recovery_earliest_age_seconds{task_id}` 是最早可恢复事件距现在的秒数。`binlog_server_source_switchovers{task_id,outcome}` 按 `source_chain` 计：`continued` 是继续复制的切换数（相同的相邻事件只算一次），`stopped` 是仍未解决的停止数，任务恢复运行后回到 0；读到的任务两个序列都有 |
 | `tracing.go` | HTTP 入站 tracing middleware（OTel span） |
 | `handlers_tasks.go` | 任务相关 API 处理（CRUD、批量创建、启动停止、`POST /api/tasks/{id}/adopt`、checkpoint 返回下次 Start 的 file/pos 与匹配时的 gtid_set（GTID 任务含打开分段里已完整的事务，还没有 checkpoint 行时不返回 `updated_at`）、`/replay` 在有损坏分段时停在它之前并带 `warning`、`GET /api/tasks/{id}/files` 带 `location` 和算出的 `source_identity`、`GET /api/tasks/{id}/files/{name}` 分段字节（本地优先，缺失时可读已上传封存对象）、`GET /api/tasks/{id}/replay` 的 `locations` 与 `paths` 对齐，在带 `stop_datetime` 时返回 UTC 定点窗口和命令，在带 `stop_gtid` 时停在该 MySQL GTID 事件之前，在带 `start_gtid_set` 时从恢复库已执行集合续上并跳过已包含事务、`storage_alert` 在列表、dashboard 和 `GET /api/tasks/{id}` 上出现：checkpoint 或分段与已落盘事务不一致时 `code` 为 `STORAGE_INCONSISTENT`。`GET /api/tasks/{id}/window` 返回保留链最早/最晚 UTC 事件时间、连续性和缺口，同一个分段里的 GTID 序号空洞也是缺口、`GET /api/tasks/{id}/replay/archive` 把同一回放窗口打成一个 ustar、source lookup 读集群观测同一份 store 抄本再 `SameSourceHost` 过滤、summary/dashboard 用状态与按源 GROUP BY 计数，任务行走 LIMIT/OFFSET） |
 | `handlers_cluster.go` | 集群观测：overview / workers 任务计数读 `ListClusterObservation`（有 store 时全库所有权抄本，不是任务页过滤，也不是启动内存名单）。无心跳的进程内主人 `standalone` 不计入 `worker_count`，overview 置 `single_process` |
 | `cluster_observation_test.go` | HTTP 缝测试：过滤后的 dashboard 汇总 ≠ 集群人数；store 主人/状态变化反映到 overview/workers/metrics；单机 + meta 的 overview `worker_count` 与 `/api/workers` 一致；lookup 读同一份 store 抄本；无 store 仍用内存名单；`/metrics` 一次 scrape 只读一份 store 抄本 |
 | `gettask_fail_loud_test.go` | HTTP 缝测试：有 store 时 `GET /api/tasks/{id}` store 未找到 404、其它 store 错误 5xx，不退回内存旧主人/epoch 抄本；没有 store 仍读内存名单 |
-| `source_chain_test.go` | HTTP 缝测试：继续和停止的 `source_chain`、文件 `source_identity`，以及 `binlog_server_source_switchovers` 的两个 outcome；没有任务时空 `task_id` 为 0 |
+| `source_chain_test.go` | HTTP 缝测试：继续和停止的 `source_chain`、重复停止只算一次、文件 `source_identity` 与 `source_server`，以及 `binlog_server_source_switchovers` 的两个 outcome；没有任务时空 `task_id` 为 0 |
 | `swagger_docs_only.go` | swagger 注释占位 |
 | `server_test.go` | HTTP 测试替身。内存 task store 用互斥锁保护，后台 runner 和 HTTP 读可以同时碰到同一份 map |
 

@@ -1,5 +1,5 @@
 <!--
-input: task, replication, checkpoint, the recoverable window, storage_alert, source_chain on the task, source_identity on each file, locale labels, and loadPitr for the datetime window and stop_gtid
+input: task, replication, checkpoint, the recoverable window, storage_alert, source_chain on the task (stints with prefix, switches with resolved), source_identity and source_server on each file, locale labels, and loadPitr for the datetime window and stop_gtid
 output: task detail drawer with configured start identity, the resume file:pos / GTID, a localized storage_alert (damaged segment, missing GTIDs, segments that still restore, restart gtid_set) when the checkpoint or a segment disagrees with the stored transactions, a warning on replay and point-in-time results that left the damaged segment out, the retained chain's earliest and latest UTC times, a warning when that chain has a break, the source-server chain and a continued or stopped switchover notice, a point-in-time replay command, a stop_gtid replay command, and a warning when a source Binlog Dump connection is still pending KILL
 pos: operator view of the position the next Start continues from and the datetime or GTID restore drill
 note: if this file changes, update this header and frontend/src/components/README.md
@@ -136,6 +136,7 @@ note: if this file changes, update this header and frontend/src/components/READM
             <li v-for="(server, index) in sourceServers" :key="`${server.identity}-${index}`" data-testid="task-source-server">
               {{ $t('detail.serverOrdinal', { n: index + 1 }) }}
               <code>{{ server.identity }}</code>
+              <span v-if="server.prefix && server.prefix !== server.identity" class="replay-set-hint" data-testid="task-source-stint">{{ $t('detail.serverPrefix', { prefix: server.prefix }) }}</span>
               <el-tag v-if="server.current" size="small" type="success" data-testid="task-source-current">{{ $t('detail.serverCurrent') }}</el-tag>
             </li>
           </ul>
@@ -144,8 +145,8 @@ note: if this file changes, update this header and frontend/src/components/READM
               <span>{{ formatTs(sw.time) }}</span>
               <strong>{{ sw.old }} → {{ sw.new }}</strong>
               <span v-if="switchWhere(sw)">{{ switchWhere(sw) }}</span>
-              <el-tag size="small" :type="sw.continued ? 'success' : 'danger'">
-                {{ sw.continued ? $t('detail.switchContinued') : $t('detail.switchStopped') }}
+              <el-tag size="small" :type="sw.continued ? 'success' : (sw.resolved ? 'info' : 'danger')">
+                {{ sw.continued ? $t('detail.switchContinued') : (sw.resolved ? $t('detail.switchResumed') : $t('detail.switchStopped')) }}
               </el-tag>
             </li>
           </ul>
@@ -629,6 +630,7 @@ const sourceSwitches = computed(() => {
 
 const showSourceChain = computed(() => sourceServers.value.length > 0 || sourceSwitches.value.length > 0);
 
+// "resumed" means the task left that stop (it runs again): no banner.
 const showStoppedBanner = computed(() => {
   if (props.task?.source_chain?.outcome === "stopped") return true;
   return String(props.task?.last_error || "").startsWith("SOURCE_SWITCHOVER");
@@ -641,7 +643,7 @@ const showContinuedBanner = computed(() => {
 });
 
 const latestStop = computed(() => {
-  const stopped = sourceSwitches.value.filter((item) => item && item.continued === false);
+  const stopped = sourceSwitches.value.filter((item) => item && item.continued === false && !item.resolved);
   return stopped.length ? stopped[stopped.length - 1] : null;
 });
 
@@ -671,7 +673,11 @@ function switchWhere(sw) {
 function fileServerLabel(row) {
   const id = String(row?.source_identity || "").trim();
   if (!id) return "--";
-  const index = sourceServers.value.findIndex((server) => server && server.identity === id);
+  // source_server is the stint: a failback A, B, A writes stint 3, not server 1.
+  const stint = Number(row?.source_server || 0);
+  const index = stint > 0 && stint <= sourceServers.value.length
+    ? stint - 1
+    : sourceServers.value.findIndex((server) => server && server.identity === id);
   const ordinal = index >= 0 ? t("detail.serverOrdinal", { n: index + 1 }) : "";
   const current = index >= 0 && sourceServers.value[index].current ? t("detail.serverCurrent") : "";
   return [ordinal, id, current].filter(Boolean).join(" · ");

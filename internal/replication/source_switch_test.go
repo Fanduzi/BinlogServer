@@ -68,18 +68,40 @@ func TestPlanSourceSwitch(t *testing.T) {
 func TestDiskSourceNameKeepsOriginalUnprefixed(t *testing.T) {
 	const oldID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	const newID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-	if got := diskSourceName(oldID, oldID, "mysql-bin.000003"); got != "mysql-bin.000003" {
+	if got := diskSourceName(chainActivePrefix([]string{oldID}), "mysql-bin.000003"); got != "mysql-bin.000003" {
 		t.Fatalf("original %s", got)
 	}
 	want := newID + ".mysql-bin.000003"
-	if got := diskSourceName(oldID, newID, "mysql-bin.000003"); got != want {
+	if got := diskSourceName(chainActivePrefix([]string{oldID, newID}), "mysql-bin.000003"); got != want {
 		t.Fatalf("switched %s", got)
 	}
-	if got := diskSourceName(oldID, newID, want); got != want {
+	if got := diskSourceName(newID, want); got != want {
 		t.Fatalf("already prefixed %s", got)
 	}
-	if got := serverBinlogName(want, oldID, []string{oldID, newID}); got != "mysql-bin.000003" {
+	if got := serverBinlogName(want, []string{oldID, newID}); got != "mysql-bin.000003" {
 		t.Fatalf("strip %s", got)
+	}
+	// Failback: A, B, A. The third stint has its own prefix, and the names
+	// A wrote on the first stint stay with the first stint.
+	failback := []string{oldID, newID, oldID}
+	stint := oldID + "~2.mysql-bin.000004"
+	if got := diskSourceName(chainActivePrefix(failback), "mysql-bin.000004"); got != stint {
+		t.Fatalf("failback %s", got)
+	}
+	if got := serverBinlogName(stint, failback); got != "mysql-bin.000004" {
+		t.Fatalf("strip failback %s", got)
+	}
+	if nameBelongs("mysql-bin.000004", failback, chainActivePrefix(failback)) {
+		t.Fatal("first-stint name claimed by the failback stint")
+	}
+	if !nameBelongs(stint, failback, chainActivePrefix(failback)) || nameBelongs(stint, failback, "") {
+		t.Fatal("failback name ownership")
+	}
+	if got := appendIdentity([]string{oldID, newID}, oldID); len(got) != 3 {
+		t.Fatalf("failback chain %v", got)
+	}
+	if got := appendIdentity(failback, oldID); len(got) != 3 {
+		t.Fatalf("same server again %v", got)
 	}
 }
 
