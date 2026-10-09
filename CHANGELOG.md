@@ -12,6 +12,8 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.59] - 2026-10-09
+
 ### Fixed
 
 - A legacy failback directory whose first-stint segment is kept only in object storage no longer restores with a silent gap (QA bbc2c88b). Before, Start repaired the names, `/window` reported `continuous: true` although its own `gtid_set` lacked the first stint's last transactions, `/replay` had no warning, and a restore applied with rc 0 while those transactions were missing. Now the plan notices the missing file (`detail` adds `not on disk: <file>`), and Start fetches `{prefix}/{cluster}/{identity}/<file>` back from object storage, checks that its transactions belong to that stint, and only then repairs; when the object is missing or holds other transactions Start refuses and changes nothing. As a safety net, on any task that switched servers, transactions a continued switch recorded as stored that no local segment holds, between stored ones, set `storage_alert` (`detail` `stored gtid hole: ...`, `missing_gtids`), and `/replay` and `/window` stop before the first segment after them. `/window` is never `continuous` when the stored GTIDs of one source have an interior gap the start set does not cover. Also: the background upload retry no longer uploads a legacy row under its old (wrong-server) key before the repair, so a refusal changes neither the catalog nor object storage; `STORAGE_REPAIRED` lists the old build's now unreferenced object keys after `orphaned_objects=` (they are not deleted); an unparseable switch `gtid_set` names a cut segment instead of an empty one, and a problem without a segment makes `/replay` return no files. Troubleshooting 5.4 documents fetching the file by hand, the orphaned objects, and that detection relies on the switch events (a meta restore from an older backup loses it). `scripts/e2e/upgrade-legacy-failback.sh` adds `FBUP_CASE=object-only` and `object-gone`.
@@ -22,6 +24,12 @@ Maintenance rules:
 - A task stopped by a source switch in the middle of a dump can be started again (found while adding the failback smoke). Before, the stop sealed the open segment while the checkpoint still named it, so every later Start failed with `SEGMENT_NOT_ON_WORKER: ... is not on this worker`: the task could not re-check the switch, resume when the VIP pointed back, or continue after the old primary caught up. A stop now leaves the open segment open, as a stop found at connect time already did. When a later Start continues on another server, the previous server's open segment is sealed under that server first (moved onto the current epoch); before, a switch found at connect time left it open and the new epoch's cleanup deleted it, losing that server's last transactions.
 - `GET /api/tasks/{id}/window` and the Console window no longer report a false `gtid hole` where the next server's first file header lacks transactions the backup already holds from the previous server (#292 QA P2). Across a server switch the header is compared with the whole stored set; a real hole is still reported.
 - Starting a task that is stopped on a source switch again no longer adds another switch to `source_chain` and to `binlog_server_source_switchovers{outcome="stopped"}` (#292 QA P2): identical consecutive switches count once. When the task runs again (VIP pointed back), `source_chain.outcome` is `resumed`, the stop carries `resolved: true`, the Console drops the stop banner, and `outcome="stopped"` returns to 0. A stop followed by a continued switch is also `resolved`.
+
+### Known issues
+
+- After Start refuses a legacy failback directory because the first-stint object cannot be read, `storage_alert.detail` still says `(Start repairs)`; `last_error` is correct (QA 297 P3).
+- Troubleshooting 5.4 "manual fetch": the old primary's same-named binlog must first be cut at the A→B switch position (`head -c <pos>`), or Start refuses it (QA 297 P3).
+- `/replay` still lists a middle segment whose local file and object are both gone, without a `warning`; `/window` reports `segment is not readable`, the download returns 404, and `mysqlbinlog` stops there (QA 297 P3).
 
 ## [v0.5.58] - 2026-10-09
 
