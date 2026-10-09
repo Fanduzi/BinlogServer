@@ -37,6 +37,14 @@ func TestListTaskBinlogFilesOnDisk_OrderAndOpenPath(t *testing.T) {
 	write("mysql-bin.000003", "sealed")
 	write("mysql-bin.000004.open.e1", "e1")
 	write("mariadb-bin.000001", "maria")
+	// Two source prefixes order by their oldest file time. Give every file
+	// the same time so the order is the prefix tie-break, not write timing.
+	same := time.Unix(1700000000, 0)
+	for _, name := range []string{"mysql-bin.000010", "mysql-bin.000004.open.e9", "mysql-bin.000004.sealed.e7", "mysql-bin.000003", "mysql-bin.000004.open.e1", "mariadb-bin.000001"} {
+		if err := os.Chtimes(filepath.Join(taskDir, name), same, same); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	files, err := listTaskBinlogFilesOnDisk(dir, "1", 10)
 	if err != nil {

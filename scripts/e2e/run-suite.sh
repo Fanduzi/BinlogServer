@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: local tooling, canonical E2E database topology, scenarios, and profile selection
-# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process
+# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process (also passed with the server log and metadata DSN to the scenarios that restart it: smoke-unreachable-giveup and smoke-gtid-redump)
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -214,7 +214,7 @@ run_scenario() {
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"
       ;;
     smoke-gtid-redump)
-      E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-redump.sh"
+      E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" BINLOG_SERVER_META_DSN="$META_DSN" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-redump.sh"
       ;;
     smoke-gtid-pitr)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-pitr.sh"

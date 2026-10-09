@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces, task/error states, and shared source endpoint identity
-// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing with DurableCursor positions and JSON null for an unknown end, the resume file/pos and matching gtid_set, the replay set beside that inventory, the point-in-time stop_datetime window, the stop_gtid query, the start_gtid_set query, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, Console bootstrap without a bearer token while /api/* stays protected, and HTTP 400 when a running dump's password or retention is updated
+// output: REST/dashboard responses, SQL rollup dashboard counters with LIMIT/OFFSET pages, SQL-paged list guards, task pagination/filter validation and numeric task-id page order coverage, batch task creation contracts, operator error visibility, independent STARTING/RUNNING status counters, task/cluster status codes, lookup/dashboard shared source-identity coverage, standalone on-disk task file listing with DurableCursor positions and JSON null for an unknown end, the resume file/pos and matching gtid_set, the replay set beside that inventory, the point-in-time stop_datetime window, the stop_gtid query, the start_gtid_set query, the replay ustar archive in swagger, restart discovery of leftover data directories, adopt-then-start of those directories, omission of delay_seconds when RUNNING has no event-time sample, Console bootstrap without a bearer token while /api/* stays protected, and HTTP 400 when a running dump's password or retention is updated; GET /checkpoint omits a zero updated_at
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -1298,6 +1298,9 @@ func TestTaskAPI_ResumeIdentity(t *testing.T) {
 	cp := decodeCheckpoint(getCheckpoint(latest.ID))
 	if cp.File != "mysql-bin.000003" || cp.Pos != 154 || cp.GTIDSet != "" {
 		t.Fatalf("standalone resume: %+v", cp)
+	}
+	if body := getCheckpoint(latest.ID).Body.String(); strings.Contains(body, "updated_at") {
+		t.Fatalf("no checkpoint row yet, updated_at must be omitted, not 0001-01-01: %s", body)
 	}
 	taskResp := httptest.NewRecorder()
 	handler.ServeHTTP(taskResp, httptest.NewRequest(http.MethodGet, "/api/tasks/"+latest.ID, nil))

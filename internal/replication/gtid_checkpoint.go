@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a flavor-specific GTID seed and binlog events from the dump, including raw-mode events whose body is only in RawData or GenericEvent
-// output: the executed GTID set written on a flushed checkpoint, a read-only peek of an event GTID, containment and forward-gap checks against that set, and MySQL 1236 detection for file/pos resume
+// output: the executed GTID set written on a flushed checkpoint, seeded from the stored set plus the complete transactions already in the open segment, a read-only peek of an event GTID, a containment check against that set, and MySQL 1236 detection for file/pos resume; a GTID gap or out-of-order GTID is never an error
 // pos: GTID memory for checkpoint writes so a purged source file can resume by GTID
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -8,8 +8,9 @@ package replication
 import (
 	"encoding/binary"
 	"errors"
-	"strconv"
 	"strings"
+
+	"binlog_server/internal/binlog"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -104,34 +105,17 @@ func (t *executedGTID) contains(gtid string) bool {
 	return t.set.Contain(one)
 }
 
-// forwardGap reports a MySQL GTID whose sequence skips past the flushed set
-// for a UUID that set already contains. The next sequence is not a gap.
-// A UUID the set does not contain is not a gap. MariaDB sets are not compared
-// this way.
-func (t *executedGTID) forwardGap(gtid string) bool {
-	if t == nil || t.set == nil || isMariaDBFlavor(t.flavor) {
-		return false
-	}
-	uuid, gno, ok := splitMysqlGTID(gtid)
-	if !ok {
-		return false
-	}
-	max, known := mysqlMaxGNO(t.set, uuid)
-	if !known {
-		return false
-	}
-	return gno > max+1
-}
-
 // endsTransaction reports a commit or rollback that finishes the current transaction.
+// A compressed transaction payload and an XA PREPARE end it too.
 func (t *executedGTID) endsTransaction(ev *replication.BinlogEvent) bool {
 	if t == nil || ev == nil || ev.Header == nil {
 		return false
 	}
-	if ev.Header.EventType == replication.XID_EVENT {
+	switch ev.Header.EventType {
+	case replication.XID_EVENT, replication.XA_PREPARE_LOG_EVENT, replication.TRANSACTION_PAYLOAD_EVENT:
 		return true
-	}
-	if ev.Header.EventType != replication.QUERY_EVENT {
+	case replication.QUERY_EVENT:
+	default:
 		return false
 	}
 	decoded := ev
@@ -142,67 +126,32 @@ func (t *executedGTID) endsTransaction(ev *replication.BinlogEvent) bool {
 	if !ok {
 		return false
 	}
-	upper := strings.ToUpper(strings.TrimSpace(string(qe.Query)))
-	switch queryWord(upper) {
-	case "COMMIT":
-		return true
-	case "ROLLBACK":
-		return !strings.HasPrefix(upper, "ROLLBACK TO")
-	case "XA":
-		return strings.HasPrefix(upper, "XA COMMIT") || strings.HasPrefix(upper, "XA ROLLBACK")
-	default:
-		return false
-	}
+	// Inside the transaction only an explicit COMMIT, ROLLBACK, XA COMMIT,
+	// or XA ROLLBACK ends it.
+	return binlog.TransactionQueryEffect(string(qe.Query), true) == binlog.QueryCommits
 }
 
-func splitMysqlGTID(gtid string) (string, int64, bool) {
-	gtid = strings.TrimSpace(gtid)
-	colon := strings.LastIndex(gtid, ":")
-	if colon <= 0 || colon == len(gtid)-1 {
-		return "", 0, false
+// absorbTail adds what the open segment already holds: its previous-GTIDs
+// text and every complete transaction. A trailing transaction the resume
+// continues inside stays pending so its commit records it.
+func (t *executedGTID) absorbTail(tail binlog.OpenTail) {
+	if t == nil {
+		return
 	}
-	gno, err := strconv.ParseInt(gtid[colon+1:], 10, 64)
-	if err != nil || gno <= 0 {
-		return "", 0, false
+	for _, p := range tail.Previous {
+		t.union(p)
 	}
-	return gtid[:colon], gno, true
-}
-
-// mysqlMaxGNO is the highest sequence stored for uuid.
-// The interval list is read from GTIDSet.String because the MySQL set's
-// intervals are not exported. A UUID that is absent returns false.
-func mysqlMaxGNO(set gomysql.GTIDSet, uuid string) (int64, bool) {
-	if set == nil {
-		return 0, false
+	for _, g := range tail.GTIDs {
+		t.union(g)
 	}
-	var max int64
-	found := false
-	for _, part := range strings.Split(set.String(), ",") {
-		part = strings.TrimSpace(part)
-		colon := strings.Index(part, ":")
-		if colon <= 0 || !strings.EqualFold(part[:colon], uuid) {
-			continue
-		}
-		for _, iv := range strings.Split(part[colon+1:], ":") {
-			iv = strings.TrimSpace(iv)
-			if iv == "" {
-				continue
-			}
-			end := iv
-			if dash := strings.Index(iv, "-"); dash >= 0 {
-				end = iv[dash+1:]
-			}
-			n, err := strconv.ParseInt(end, 10, 64)
-			if err != nil || n <= 0 {
-				continue
-			}
-			if !found || n > max {
-				max = n
-				found = true
-			}
+	t.pending = nil
+	t.inTxn = false
+	if gtid := strings.TrimSpace(tail.PartialGTID); gtid != "" && !tail.Truncate {
+		if set, err := gomysql.ParseGTIDSet(t.flavor, gtid); err == nil {
+			t.pending = set
+			t.inTxn = tail.PartialInTxn
 		}
 	}
-	return max, found
 }
 
 func (t *executedGTID) note(ev *replication.BinlogEvent) {
@@ -236,7 +185,9 @@ func (t *executedGTID) note(ev *replication.BinlogEvent) {
 				t.union(g.String())
 			}
 		}
-	case replication.XID_EVENT:
+	case replication.XID_EVENT, replication.XA_PREPARE_LOG_EVENT, replication.TRANSACTION_PAYLOAD_EVENT:
+		// A compressed payload holds the whole transaction including its
+		// commit. XA PREPARE records the prepared part's GTID.
 		t.commit()
 	case replication.QUERY_EVENT:
 		t.noteQuery(ev)
@@ -385,7 +336,9 @@ func (t *executedGTID) noteGTID(ev *replication.BinlogEvent) {
 		return
 	}
 	t.pending = gtid
-	t.inTxn = false
+	// A MariaDB GTID event opens its transaction; there is no BEGIN query.
+	_, maria := ev.Event.(*replication.MariadbGTIDEvent)
+	t.inTxn = maria
 }
 
 func (t *executedGTID) noteQuery(ev *replication.BinlogEvent) {
@@ -393,39 +346,12 @@ func (t *executedGTID) noteQuery(ev *replication.BinlogEvent) {
 	if !ok || t.pending == nil {
 		return
 	}
-	upper := strings.ToUpper(strings.TrimSpace(string(qe.Query)))
-	head := queryWord(upper)
-	if head == "" {
-		return
-	}
-	switch head {
-	case "BEGIN":
+	switch binlog.TransactionQueryEffect(string(qe.Query), t.inTxn) {
+	case binlog.QueryBegins:
 		t.inTxn = true
-		return
-	case "START":
-		if strings.HasPrefix(upper, "START TRANSACTION") {
-			t.inTxn = true
-		}
-		return
-	case "COMMIT":
+	case binlog.QueryCommits:
 		t.commit()
-		return
-	case "ROLLBACK":
-		if strings.HasPrefix(upper, "ROLLBACK TO") {
-			return
-		}
-		t.commit()
-		return
-	case "XA":
-		if strings.HasPrefix(upper, "XA COMMIT") || strings.HasPrefix(upper, "XA ROLLBACK") {
-			t.commit()
-		}
-		return
 	}
-	if t.inTxn {
-		return
-	}
-	t.commit()
 }
 
 func (t *executedGTID) commit() {
@@ -452,13 +378,6 @@ func (t *executedGTID) union(gtid string) {
 		return
 	}
 	_ = t.set.Update(gtid)
-}
-
-func queryWord(upper string) string {
-	if i := strings.IndexAny(upper, " \t\r\n"); i >= 0 {
-		return upper[:i]
-	}
-	return upper
 }
 
 func mysqlError1236(err error) bool {

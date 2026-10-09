@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start; the highest open segment chosen for resume, shared with the open-tail scan
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -23,6 +23,7 @@ type durableSegment struct {
 	seq    uint64
 	epoch  int64
 	path   string
+	pos    uint32
 }
 
 // DurableResume is the source file and end log_pos of the last complete event
@@ -40,13 +41,23 @@ func DurableResume(dataDir, taskID string) (file string, pos uint32, ok bool) {
 // DurableResumeDir is DurableResume for a segment directory the catalog already
 // recorded. The directory is used as given; it is not joined with a task id.
 func DurableResumeDir(taskDir string) (file string, pos uint32, ok bool) {
+	seg, ok := durableOpenSegment(taskDir)
+	if !ok {
+		return "", 0, false
+	}
+	return seg.source, seg.pos, true
+}
+
+// durableOpenSegment is the highest open segment in taskDir that has a
+// complete event, with that event's end log_pos.
+func durableOpenSegment(taskDir string) (durableSegment, bool) {
 	taskDir = strings.TrimSpace(taskDir)
 	if taskDir == "" {
-		return "", 0, false
+		return durableSegment{}, false
 	}
 	entries, err := os.ReadDir(taskDir)
 	if err != nil {
-		return "", 0, false
+		return durableSegment{}, false
 	}
 	cands := make([]durableSegment, 0, len(entries))
 	for _, entry := range entries {
@@ -75,9 +86,10 @@ func DurableResumeDir(taskDir string) (file string, pos uint32, ok bool) {
 		if !ok {
 			continue
 		}
-		return seg.source, pos, true
+		seg.pos = pos
+		return seg, true
 	}
-	return "", 0, false
+	return durableSegment{}, false
 }
 
 // DurableCursor walks complete events. pos is the last event's end log_pos.

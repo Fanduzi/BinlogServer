@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a fake dump that ends with EOF or a contradictory rotate, GTID, or position
-// output: assertions that a reconnect resumes from the flushed GTID set or file position, and that a contradictory stream fails with STREAM_REGRESSION without recording the dropped GTID
+// output: assertions that a reconnect resumes from the flushed file position with the flushed GTID set as its 1236 fallback, and that a rotate to the open or an older file or a position behind the cursor fails with STREAM_REGRESSION without recording the dropped GTID
 // pos: unit coverage for the stale GTID re-dump that dropped transactions after a dump reconnect
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -22,20 +22,10 @@ import (
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
 
-func TestExecutedGTID_ContainsAndForwardGap(t *testing.T) {
+func TestExecutedGTID_ContainsAndPeek(t *testing.T) {
 	ex := newExecutedGTID("mysql", sampleGTID+":1-10")
-	if !ex.contains(sampleGTID+":10") || ex.contains(sampleGTID+":11") {
+	if !ex.contains(sampleGTID+":10") || ex.contains(sampleGTID+":11") || ex.contains(sampleGTID+":12") {
 		t.Fatalf("contains %s", ex.current())
-	}
-	if ex.forwardGap(sampleGTID+":11") || !ex.forwardGap(sampleGTID+":12") {
-		t.Fatalf("gap against %s", ex.current())
-	}
-	if ex.forwardGap("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:6") {
-		t.Fatal("a new uuid is not a gap")
-	}
-	maria := newExecutedGTID("mariadb", "0-1-10")
-	if maria.forwardGap("0-1-20") {
-		t.Fatal("mariadb sequences are not compared as mysql gaps")
 	}
 	text, ok := ex.peekGTID(gtidAt(11, 100))
 	if !ok || text != sampleGTID+":11" {
@@ -43,11 +33,15 @@ func TestExecutedGTID_ContainsAndForwardGap(t *testing.T) {
 	}
 }
 
-func TestRun_GTIDReconnectResumesFromFlushedSet(t *testing.T) {
+// A GTID task's dump that drops reopens at the flushed file position. A
+// GTID dump from the flushed set would send the file header and any
+// unfinished transaction again behind the cursor.
+func TestRun_GTIDReconnectResumesFromFlushedPosition(t *testing.T) {
 	dumpReconnectDelay = 0
 	t.Cleanup(func() { dumpReconnectDelay = time.Second })
 
 	dir := t.TempDir()
+	store := &fakeRunnerCheckpointStore{}
 	syncer := &fakeSyncer{connID: 41, streamer: &fakeStreamer{results: []streamResult{
 		{event: artificialSourceRotate("mysql-bin.000001")},
 		{event: gtidAt(11, 100)},
@@ -59,8 +53,9 @@ func TestRun_GTIDReconnectResumesFromFlushedSet(t *testing.T) {
 	}}}
 	var names []string
 	runner := &MySQLRunner{
-		dataDir: dir,
-		fetcher: &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		dataDir:         dir,
+		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		checkpointStore: store,
 		newSyncer: func(goreplication.BinlogSyncerConfig) binlogSyncer {
 			return syncer
 		},
@@ -79,22 +74,19 @@ func TestRun_GTIDReconnectResumesFromFlushedSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if syncer.startGTIDCalls != 2 {
-		t.Fatalf("gtid dumps %d, want the start and one reconnect", syncer.startGTIDCalls)
+	if syncer.startGTIDCalls != 1 {
+		t.Fatalf("gtid dumps %d, want only the start", syncer.startGTIDCalls)
 	}
-	want, err := gomysql.ParseGTIDSet("mysql", sampleGTID+":11")
+	if syncer.startPosCalls != 1 || syncer.startPos.Name != "mysql-bin.000001" || syncer.startPos.Pos != 200 {
+		t.Fatalf("reconnect %+v calls %d, want mysql-bin.000001:200", syncer.startPos, syncer.startPosCalls)
+	}
+	want, err := gomysql.ParseGTIDSet("mysql", sampleGTID+":1-12")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if syncer.startGTID == nil || !syncer.startGTID.Contain(want) {
-		t.Fatalf("reconnect set %v, want it to contain %s:11", syncer.startGTID, sampleGTID)
-	}
-	seed, err := gomysql.ParseGTIDSet("mysql", sampleGTID+":1-10")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if syncer.startGTID.Equal(seed) {
-		t.Fatalf("reconnect used the start set %s", seed)
+	got, err := gomysql.ParseGTIDSet("mysql", store.upserts[len(store.upserts)-1].GTIDSet)
+	if err != nil || !got.Equal(want) {
+		t.Fatalf("checkpoint %v, want %s", got, want)
 	}
 	if len(names) != 1 || names[0] != "mysql-bin.000001" {
 		t.Fatalf("files %v", names)
@@ -151,13 +143,23 @@ func TestRun_StreamRegressionDoesNotRecordTheGTID(t *testing.T) {
 		writes int
 	}{
 		{
-			name:  "gtid gap",
+			name:  "older file rotate",
 			start: tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: sampleGTID + ":1-10"},
 			events: []streamResult{
-				{event: artificialSourceRotate("mysql-bin.000001")},
-				{event: gtidAt(12, 100)},
+				{event: artificialSourceRotate("mysql-bin.000006")},
+				{event: newRunnerEvent(200)},
+				{event: rotateAt("mysql-bin.000005", 4, 0)},
 			},
-			want: "ahead of stored set",
+			want:   "is behind open file",
+			writes: 1,
+		},
+		{
+			name:  "transaction behind cursor",
+			start: tasks.StartConfig{Mode: tasks.StartModeFilePos, File: "mysql-bin.000001", Pos: 500},
+			events: []streamResult{
+				{event: gtidAt(11, 300)},
+			},
+			want: "behind stored pos",
 		},
 		{
 			name:  "same file rotate",

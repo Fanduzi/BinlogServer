@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions; storage_alert also carries segment, detail, missing_gtids, valid_segments, and restart_gtid_set
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -95,6 +95,17 @@ type Task struct {
 type StorageAlert struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Segment is the first damaged segment on disk.
+	Segment string `json:"segment,omitempty"`
+	// Detail is what was found in Segment, in English.
+	Detail string `json:"detail,omitempty"`
+	// MissingGTIDs is what the checkpoint lists that no segment holds (MySQL).
+	MissingGTIDs string `json:"missing_gtids,omitempty"`
+	// ValidSegments were written before the damage and still restore.
+	ValidSegments []string `json:"valid_segments,omitempty"`
+	// RestartGTIDSet is the gtid_set a new task starts from to continue
+	// right after ValidSegments. Empty when it cannot be computed.
+	RestartGTIDSet string `json:"restart_gtid_set,omitempty"`
 }
 
 // TaskPatch 是任务更新接口使用的部分字段 patch。
