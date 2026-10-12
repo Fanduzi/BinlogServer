@@ -36,7 +36,7 @@ test('flavor is a mysql/mariadb select and submit sends mariadb', async ({ page 
   await dialog.getByRole('textbox', { name: '任务名' }).fill('prod-mariadb-01')
   await dialog.getByRole('textbox', { name: 'Cluster Key' }).fill('prod-cluster-main')
   await dialog.getByRole('textbox', { name: '密码' }).fill('replpass')
-  await page.screenshot({ path: '/opt/cursor/artifacts/flavor-select.png', fullPage: false })
+  await page.screenshot({ path: 'test-results/flavor-select.png', fullPage: false })
   await dialog.getByRole('button', { name: '保存' }).click()
 
   await expect.poll(() => posts.length).toBe(1)

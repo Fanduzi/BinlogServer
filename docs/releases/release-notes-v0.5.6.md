@@ -10,7 +10,7 @@ Binlog Server `v0.5.6` is an operator-facing console, production fail-closed, an
 - `PRODUCTION=true` with an empty `--encryption-key` returns before the process listens. When `api.auth.enabled=true`, `/ui/*` and `/swagger/*` use the same auth middleware. `/healthz` stays open. The console lock follows `api.auth.enabled`, not `protect_api`.
 - `GET /api/dashboard` and `GET /api/summary` count states and source rollups with SQL `GROUP BY` and page dashboard rows with `LIMIT/OFFSET`. Delay classification reads RUNNING task ids. They no longer set `Limit=0` and scan every matching task row. `total`, `summary.total`, and per-source `task_count` stay the filtered set.
 - `scripts/failover-dogfood.sh` and the verify-binlog-server failover-lease skill prove dual-worker lease takeover against one meta MySQL. The lease state machine is unchanged.
-- A project-local verify-binlog-server Cursor skill drives a released binary through the HTTP API and the embedded Console.
+- A project-local verify-binlog-server agent skill drives a released binary through the HTTP API and the embedded Console.
 - Go modules: validator `v10.30.5`.
 - Quick Start, landing-page, and deployment download examples now point at `v0.5.6`.
 
