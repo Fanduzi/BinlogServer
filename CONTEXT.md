@@ -61,3 +61,7 @@ _Avoid_: 同一界面里 lookup 当一台、过滤当两台
 **段账本 (Segment Ledger)**:
 一个任务目录此刻真正落盘了什么：按 binlog 顺序的分段、每段的 GTID 区间和 previous-GTIDs 头、已存 GTID 集合、集合里的空洞、第一个损坏分段及恢复集合、可续传的打开尾部（完整事务和末尾半截事务）。`binlog.LedgerAt(dir)` 每次问答读一次目录。GTID 区间只有一种类型 `binlog.GTIDSet`。
 _Avoid_: 调用方自己 `ReadDir` 再扫分段；自己把 previous-GTIDs 和事务并成「已存集合」；再写一份区间类型
+
+**存储健康 (Storage Health)**:
+一个任务目录能不能放心回放的唯一结论：正常、损坏（Start 拒绝）、旧版回切（Start 修复）、已存缺口（只读），按这个顺序第一个命中的胜出，带同一个 `StorageProblem` 和截断分段。`Scheduler.storageHealth` 每次问答建一个段账本。见 ADR 0007。
+_Avoid_: 调用方自己串检测器；用 `detail` 前缀倒推问题类别；为同一请求多次列目录

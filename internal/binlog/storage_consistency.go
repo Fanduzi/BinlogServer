@@ -70,6 +70,21 @@ func (l *Ledger) Damage(checkpointGTID, startGTID, flavor string) (StorageProble
 	return StorageProblem{}, false
 }
 
+// IsDamaged reports that Damage would find a segment, without computing the
+// recovery sets.
+func (l *Ledger) IsDamaged() bool {
+	segs, err := l.Segments()
+	if err != nil {
+		return false
+	}
+	for _, seg := range segs {
+		if _, bad := segmentDamage(seg.Path, seg.Name, seg.Named.Source); bad {
+			return true
+		}
+	}
+	return false
+}
+
 func isMariaDBStorage(flavor string) bool {
 	return strings.EqualFold(strings.TrimSpace(flavor), "mariadb")
 }
