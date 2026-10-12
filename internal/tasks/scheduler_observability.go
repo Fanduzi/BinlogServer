@@ -207,11 +207,11 @@ func withOpenTailGTID(dataDir string, task Task, stored binlog.Checkpoint, store
 	if strings.TrimSpace(resume.GTIDSet) == "" {
 		resume.GTIDSet = seed
 	}
-	tail, ok := binlog.ReconcileOpenTail(dir)
+	tail, union, ok := binlog.LedgerAt(dir).ResumeGTID(task.Source.Flavor, resume.GTIDSet)
 	if !ok || (resume.File != "" && tail.File != resume.File) {
 		return resume
 	}
-	resume.GTIDSet = binlog.UnionGTIDText(task.Source.Flavor, resume.GTIDSet, tail)
+	resume.GTIDSet = union
 	if tail.Truncate && tail.Pos > 0 && tail.Pos < resume.Pos {
 		resume.Pos = tail.Pos
 	}
