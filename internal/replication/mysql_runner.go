@@ -2651,7 +2651,7 @@ func fileHeaderEvent(t replication.EventType) bool {
 func (r *MySQLRunner) reconcileOpenTail(task tasks.Task, executed *executedGTID) (string, bool) {
 	dir := filepath.Join(r.dataDir, task.ID)
 	ledger := binlog.LedgerAt(dir)
-	if _, damaged := ledger.Damage("", "", task.Source.Flavor); damaged {
+	if ledger.IsDamaged() {
 		return "", false
 	}
 	tail, ok := ledger.Tail()

@@ -77,13 +77,11 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 	// cutoff /replay uses, and reports the damage as a break.
 	chosen := SelectReplayFiles(files)
 	var damage *RecoveryBreak
-	if problem, found := s.storageProblem(task); found {
-		kept := excludeDamagedSegments(files, chosen, problem.Segment)
-		if strings.TrimSpace(problem.Segment) == "" {
-			kept = []BinlogFile{}
-		}
+	if health := s.storageHealth(task, ""); health.Found() {
+		problem := health.Problem
+		kept := health.replayCut(files, chosen)
 		damage = damagedSegmentBreak(problem.Segment, chosen, kept)
-		if strings.HasPrefix(problem.Detail, storedHoleDetailPrefix) {
+		if health.Kind == StorageStoredHole {
 			damage.Reason = fmt.Sprintf(breakStoredHole, problem.Missing, problem.Segment)
 		}
 		chosen = kept
