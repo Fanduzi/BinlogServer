@@ -500,225 +500,45 @@ func checkpointWriteError(err error) error {
 }
 
 // run 执行一次任务复制会话，包含 checkpoint 恢复、拉流、落盘与收尾流程。
+// run is one replication attempt, in five phases (ADR 0008):
+// resolveRunStart (run_start.go) decides where the dump begins; the open
+// segment (run_segment.go) is opened; the dump connects (run_dump.go);
+// handleEvent (run_events.go) applies each event; pump (run_dump.go)
+// reconnects and classifies how a stream error ends the run.
 func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) error {
-	// Step 1: 解析源库标识与复制起点（含 checkpoint 接管修正）。
-	// 常见误解：
-	// onReady 只表示“复制连接+writer 已就绪”，不代表已经收到第一条业务事件。
-	// FILE_POS/GTID 追旧事件时 RUNNING 仍可 DELAYED；fresh LATEST，以及 FILE_POS 起点已经不落后于 master 时，StartSync 成功即在源 tip。
-	// dump 在请求位点之前下发的 format description 不是延迟。
-	// source_server_uuid 作为 object key 的稳定维度，避免 cluster_key 相同但源实例切换时冲突。
-	sourceServerUUID, err := r.fetcher.FetchServerUUID(ctx, task.Source)
-	if err != nil {
-		return classifySourceError(err)
-	}
-	sourceServerUUID = strings.TrimSpace(sourceServerUUID)
-	if sourceServerUUID == "" {
-		return tasks.NewPermanentError(tasks.CodeSourceIdentityUnavailable, "empty source server_uuid")
-	}
-
-	// 先解析请求的 start strategy（LATEST/FILE_POS/GTID）。
-	requestedLatest := task.Start.Mode == tasks.StartModeLatest || task.Start.Mode == ""
-	start, err := ResolveStart(ctx, task, r.fetcher)
-	if err != nil {
-		return classifySourceError(err)
-	}
-	var stored binlog.Checkpoint
-	checkpointExists := false
-	if r.checkpointStore != nil {
-		// 持久化 checkpoint 优先级更高，保证重启后的 resumability。
-		var ok bool
-		stored, ok, err = r.checkpointStore.LoadCheckpoint(ctx, task.ID)
-		if err != nil {
-			return err
-		}
-		checkpointExists = ok
-	}
-	// A crash after the rename and before the upload-state write leaves a sealed
-	// file that retry cannot see. Record it as UPLOAD_FAILED first, and if the
-	// checkpoint is still on that sealed rotate, continue on the next file.
-	if r.sealedHandler != nil {
-		// Existing files belong to the identity already recorded. A VIP that
-		// has moved is not that identity; prepareSourceIdentity decides the switch.
-		enrollUUID := sourceServerUUID
-		if chain := loadSourceChain(r.sourceDir(task.ID)); len(chain) > 0 {
-			enrollUUID = chain[len(chain)-1]
-		}
-		if err := r.enrollSealedUploads(ctx, task, enrollUUID); err != nil {
-			return err
-		}
-		if checkpointExists && r.checkpointStore != nil {
-			if next, advanced := r.checkpointPastSealedRotate(ctx, task.ID, stored); advanced {
-				if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, next); err != nil {
-					return checkpointWriteError(err)
-				}
-				stored = next
-			}
-		}
-	}
-	// Fresh LATEST has already resolved to SHOW MASTER STATUS, so StartSync is at tip.
-	// That file/pos is saved below when nothing older exists, with an empty
-	// gtid_set. A later retry must not resolve LATEST again (#213). A GTID
-	// checkpoint still keeps its set (#175, #199).
-	// NextResumePosition is the resume choice shared with GET /api/tasks/{id}/checkpoint.
-	// A local complete event wins. Adopt keeps its FILE_POS. Epoch > 1 with no
-	// local event used to rewind to position 4. Takeover now follows the catalog
-	// file_path: a readable segment directory continues there, an unreadable
-	// open segment fails, and a checkpoint already in an UPLOADED object resumes
-	// from that object. A readable open file that is only magic, or only a
-	// header of events whose end log_pos is 0, continues from the saved
-	// checkpoint and is renamed onto this epoch.
-	atTip := requestedLatest && !checkpointExists
-	// anchorLatest is a first resolution: no stored checkpoint and no local event.
-	// Resume and takeover clear it so this attempt does not overwrite them.
-	anchorLatest := atTip
-	segmentDir := ""
-	var carried *tasks.BinlogFile
-	flavor := task.Source.Flavor
-	if flavor == "" {
-		flavor = gomysql.MySQLFlavor
-	}
-	// gtidFallback is the executed set from the last flush. File/pos is tried
-	// first. MySQL 1236 means that file is gone, and this set is how the dump
-	// continues. A rewound position does not carry the set; the stored row does.
-	gtidFallback := ""
-	if checkpointExists {
-		gtidFallback = strings.TrimSpace(stored.GTIDSet)
-	}
-	// executed is the GTID set of transactions fully flushed. The seed is the
-	// stored checkpoint when one exists, otherwise the GTID the task was
-	// created with. An empty checkpoint write used to replace that set.
-	executed := newExecutedGTID(flavor, gtidSeed(task.Start.GTIDSet, stored.GTIDSet, checkpointExists))
-	// A file/pos task has no seed. Events in the middle of a file are not an
-	// executed set, and writing them would make the next 1236 resume too short.
-	trackGTID := executed.current() != ""
-	// The segment is flushed before the checkpoint row is written, and a
-	// resume inside a transaction never saw that transaction's GTID event.
-	// Either way the open segment can hold complete transactions the stored
-	// gtid_set does not list. Read them back from the file before anything
-	// compares GTIDs, and cut a trailing unfinished transaction so the source
-	// sends it again whole.
-	if trackGTID && !task.KeepLocalSegments {
-		if reconciled, ok := r.reconcileOpenTail(task, executed); ok {
-			gtidFallback = reconciled
-		}
-	}
-	if resume, ok := tasks.NextResumePosition(r.dataDir, task, stored, checkpointExists); ok {
-		start = tasks.StartConfig{
-			Mode: tasks.StartModeFilePos,
-			File: resume.File,
-			Pos:  resume.Pos,
-		}
-		if g := strings.TrimSpace(resume.GTIDSet); g != "" && !trackGTID {
-			gtidFallback = g
-		}
-		atTip = false
-		anchorLatest = false
-	}
-	if task.Epoch > 1 && !task.KeepLocalSegments {
-		if _, _, local := binlog.DurableResume(r.dataDir, task.ID); !local {
-			files, err := r.listCatalog(ctx, task.ID)
-			if err != nil {
-				return err
-			}
-			decision := tasks.ResolveTakeover(r.dataDir, task, stored, checkpointExists, files)
-			if decision.Missing != "" {
-				return segmentNotOnWorker(decision.Missing)
-			}
-			if decision.Covering != nil {
-				carried = decision.Covering
-				dir, err := r.materializeUploaded(ctx, task, *decision.Covering)
-				if err != nil {
-					return err
-				}
-				file, pos, ok := binlog.DurableResumeDir(dir)
-				if !ok {
-					return segmentNotOnWorker(decision.Covering.FileName)
-				}
-				start = tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: pos}
-				segmentDir = dir
-				atTip = false
-				anchorLatest = false
-			} else if decision.Apply {
-				start = tasks.StartConfig{
-					Mode: tasks.StartModeFilePos,
-					File: decision.Checkpoint.File,
-					Pos:  decision.Checkpoint.Pos,
-				}
-				if g := strings.TrimSpace(decision.Checkpoint.GTIDSet); g != "" {
-					gtidFallback = g
-				}
-				dir := decision.Dir
-				if dir == "" {
-					dir = filepath.Join(r.dataDir, task.ID)
-				}
-				if err := promoteEpochZeroOpen(dir, decision.Checkpoint.File, task.Epoch, decision.Checkpoint.Pos, files); err != nil {
-					return err
-				}
-				if decision.Dir != "" {
-					segmentDir = decision.Dir
-				}
-				atTip = false
-				anchorLatest = false
-			}
-		}
-	}
-	if anchorLatest && start.File != "" && start.Pos != 0 {
-		// This process already resolved LATEST and the metadata row was not
-		// written, or there is no metadata store. Keep that file/pos.
-		if file, pos, ok := r.latestAnchor(task.ID); ok {
-			start = tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: pos}
-			atTip = false
-		}
-		if err := r.persistLatestAnchor(ctx, task.ID, start.File, start.Pos); err != nil {
-			return err
-		}
-	}
-
-	session, start, err := r.prepareSourceIdentity(ctx, task, sourceServerUUID, start, stored, checkpointExists, gtidFallback, requestedLatest && !checkpointExists, segmentDir)
+	plan, err := r.resolveRunStart(ctx, task)
 	if err != nil {
 		return err
 	}
-	sourceServerUUID = session.active
+	l := &runLoop{r: r, ctx: ctx, task: task, runStart: plan}
 
-	// Step 2: 打开当前 open 文件并构造 writer。
+	// 打开当前 open 文件并构造 writer。
 	// GTID 启动还没有源文件名。等 dump 的 Rotate 给出名字再打开，
 	// 不创建 task-{id}.binlog，也不把只有 magic 的占位文件封存上传。
-	currentFile := session.serverName(start.File)
-	currentPos := start.Pos
-	currentStartPos := start.Pos
-	currentCreatedAt := time.Now()
-	// A task already damaged by a stale GTID re-dump has a segment that
-	// rotates to its own or an older file, or an event position that goes
-	// backwards inside one segment. Out-of-order GTIDs are normal on a
-	// replica and are not that damage. Starting again would drop more
-	// transactions. Refuse before opening another dump.
-	scanDir := segmentDir
-	if scanDir == "" {
-		scanDir = filepath.Join(r.dataDir, task.ID)
+	seg := &openSegment{
+		r:         r,
+		ctx:       ctx,
+		task:      task,
+		session:   plan.session,
+		executed:  plan.executed,
+		carried:   plan.carried,
+		name:      plan.session.serverName(plan.start.File),
+		pos:       plan.start.Pos,
+		startPos:  plan.start.Pos,
+		createdAt: time.Now(),
 	}
-	claimedGTID := ""
-	if checkpointExists {
-		claimedGTID = strings.TrimSpace(stored.GTIDSet)
-	}
-	if problem, found := binlog.LedgerAt(scanDir).Damage(claimedGTID, tasks.StartGTIDText(task), flavor); found {
-		return tasks.NewPermanentError(tasks.CodeStorageInconsistent, problem.Message)
-	}
-	// skipStoredTxn drops the rest of a transaction whose GTID is already
-	// in the flushed set. The commit of that transaction clears it.
-	skipStoredTxn := false
-
-	currentPath := ""
-	writerOpener := r.writerOpener
-	if writerOpener == nil {
-		writerOpener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+	l.seg = seg
+	base := r.writerOpener
+	if base == nil {
+		base = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
 			var f *os.File
 			var w *binlog.Writer
 			var path string
 			var err error
-			if segmentDir != "" {
-				f, w, path, err = r.openBinlogWriterIn(ctx, segmentDir, task, fileName, initialPos, sourceServerUUID, carried)
+			if l.segmentDir != "" {
+				f, w, path, err = r.openBinlogWriterIn(ctx, l.segmentDir, task, fileName, initialPos, l.sourceServerUUID, l.carried)
 			} else {
-				f, w, path, err = r.openBinlogWriter(ctx, task, fileName, initialPos, sourceServerUUID)
+				f, w, path, err = r.openBinlogWriter(ctx, task, fileName, initialPos, l.sourceServerUUID)
 			}
 			// A nil *os.File becomes a non-nil io.Closer. The deferred close
 			// would then log a failure for a file that was never opened.
@@ -728,620 +548,64 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 			return f, w, path, err
 		}
 	}
-	baseOpener := writerOpener
-	writerOpener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
-		return baseOpener(task, session.diskName(fileName), initialPos)
+	seg.opener = func(task tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+		return base(task, l.session.diskName(fileName), initialPos)
 	}
-
-	var file io.Closer
-	var writer *binlog.Writer
-	if currentFile != "" {
-		var openErr error
-		file, writer, currentPath, openErr = writerOpener(task, currentFile, currentPos)
-		if openErr != nil {
-			return openErr
-		}
-	}
-	defer func() {
-		if file != nil {
-			if err := file.Close(); err != nil {
-				log.Printf("close binlog file failed path=%s err=%v", currentPath, err)
-			}
-		}
-	}()
-
-	appendAndPersist := func(raw []byte, next binlog.Checkpoint) error {
-		if err := writer.Append(raw, next); err != nil {
+	if seg.name != "" {
+		if err := seg.openAt(seg.name, seg.pos); err != nil {
 			return err
 		}
-		// 只有 writer flush 成功后才推进 checkpoint：
-		// “已推进 checkpoint” 在语义上等价于“数据已安全落盘”。
-		if err := writer.FlushAndCheckpoint(); err != nil {
-			return err
-		}
-
-		checkpoint := writer.CurrentCheckpoint()
-		currentPos = checkpoint.Pos
-		if r.checkpointStore != nil {
-			if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, checkpoint); err != nil {
-				return checkpointWriteError(err)
-			}
-		}
-		if r.fileMetaStore != nil {
-			info, err := os.Stat(currentPath)
-			if err != nil {
-				return err
-			}
-			if err := r.fileMetaStore.UpsertBinlogFile(ctx, carryUpload(tasks.BinlogFile{
-				TaskID:      task.ID,
-				FileName:    session.diskName(currentFile),
-				FilePath:    currentPath,
-				Epoch:       catalogEpoch(currentPath, task.Epoch),
-				State:       "OPEN",
-				SizeBytes:   info.Size(),
-				StartPos:    tasks.FilePos(currentStartPos),
-				EndPos:      tasks.FilePos(checkpoint.Pos),
-				CreatedAt:   currentCreatedAt,
-				UploadState: "LOCAL_ONLY",
-			}, carried)); err != nil {
-				return err
-			}
-		}
-		return nil
 	}
+	defer seg.close()
 
-	// pendingFormat is the format description MySQL sends before a mid-file
-	// dump. Its end_log_pos is 0 or the original header position (126 on
-	// MySQL 8), which is behind the dump cursor. It is written once, in
-	// front of the first copied event, and does not move currentPos.
-	// An idle dump that never copies an event leaves it unwritten so resume
-	// does not rewind to that header position. A segment that already has
-	// events does not gain a second copy on the next start.
-	var pendingFormat []byte
-	persistRaw := func(raw []byte, next binlog.Checkpoint) error {
-		payload := raw
-		if len(pendingFormat) > 0 {
-			if !segmentHasEvents(currentPath) {
-				payload = make([]byte, 0, len(pendingFormat)+len(raw))
-				payload = append(payload, pendingFormat...)
-				payload = append(payload, raw...)
-			}
-			pendingFormat = nil
-		}
-		return appendAndPersist(payload, next)
-	}
-
-	checkpointAt := func(file string, pos uint32) binlog.Checkpoint {
-		if pos == 0 {
-			pos = currentPos
-		}
-		cp := binlog.Checkpoint{File: session.diskName(file), Pos: pos, GTIDSet: executed.current()}
-		if session.resumeGTID != "" && session.owns(cp.File) {
-			clearResumeGTID(session.dir)
-			session.resumeGTID = ""
-		}
-		return cp
-	}
-
-	var activeSyncer binlogSyncer
-	sealCurrent := func(owner string) error {
-		pendingFormat = nil
-		if file == nil {
-			return nil
-		}
-		path := currentPath
-		if err := file.Close(); err != nil {
-			return err
-		}
-		file = nil
-		writer = nil
-		currentPath = ""
-		return r.sealOpenSegmentFile(ctx, task, path, owner)
-	}
-
-	// Step 3: 定义统一事件处理逻辑（异步/半同步共用）。
-	// 单条事件处理逻辑：异步模式（GetEvent）与半同步模式（SynchronousEventHandler）共用。
-	handleEvent := func(event *replication.BinlogEvent) error {
-		if event == nil || event.Header == nil {
-			return nil
-		}
-		// A reconnect that lands on a different server must not append this event.
-		if err := r.noteDumpIdentity(ctx, task, session, activeSyncer, executed.current(), currentFile, currentPos, sealCurrent); err != nil {
-			return err
-		}
-		sourceServerUUID = session.active
-		// The format description sets the checksum flag used to decode later
-		// raw GTID bodies. Noting it does not add a transaction.
-		if trackGTID && event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
-			executed.note(event)
-		}
-		sourceEventAt := sourceEventTime(event)
-
-		if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
-			if r.progressReporter != nil {
-				r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
-			}
-			return nil
-		}
-
-		if event.Header.EventType == replication.ROTATE_EVENT {
-			rotate, ok := event.Event.(*replication.RotateEvent)
-			if ok && len(rotate.NextLogName) > 0 {
-				nextFile := strings.TrimSpace(strings.TrimRight(string(rotate.NextLogName), "\x00"))
-				nextPos := uint32(rotate.Position)
-				// A rotate to an older file, or a real rotate that names the
-				// file already open, is an earlier file being appended again.
-				if file != nil && sourceFileBehind(currentFile, nextFile) {
-					return streamRegression(fmt.Sprintf("rotate to %s is behind open file %s", nextFile, currentFile))
-				}
-				if file != nil && sameSourceFile(currentFile, nextFile) && event.Header.LogPos != 0 {
-					return streamRegression(fmt.Sprintf("rotate to %s repeats open file %s at pos %d", nextFile, currentFile, event.Header.LogPos))
-				}
-				skipStoredTxn = false
-
-				// Artificial rotate（end_log_pos 0）不在源 binlog 文件里。
-				// 指向当前文件的是 dump 开头的 synthetic rotate，只更新位点。
-				// 指向下一个文件的是源库重启后 sender 补的 rotate：不落盘，
-				// 按最后一个真实事件封口并切到下一个文件。写进 open 分段会让
-				// 最后一个 log_pos 变成 0，同机接管会把它当成分段不在本机。
-				if event.Header.LogPos == 0 && nextFile == currentFile {
-					// Position 0 is not a binlog position. Assigning it cleared
-					// the cursor, and the next rotate sealed the copied events
-					// with end_pos 0. A redump's synthetic rotate also names
-					// position 4; moving the cursor backward would append the
-					// same events again.
-					if nextPos > currentPos {
-						currentPos = nextPos
-					}
-					return nil
-				}
-				artificial := event.Header.LogPos == 0
-				if artificial && nextPos == 0 {
-					nextPos = 4
-				}
-				// No segment is open until the dump names a source file.
-				// This rotate is that name. It is not written, and nothing
-				// is sealed: there is no task-{id}.binlog to close.
-				if file == nil {
-					currentFile = nextFile
-					currentPos = nextPos
-					var openErr error
-					file, writer, currentPath, openErr = writerOpener(task, currentFile, currentPos)
-					if openErr != nil {
-						return openErr
-					}
-					currentStartPos = currentPos
-					currentCreatedAt = time.Now()
-					if r.progressReporter != nil {
-						r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
-					}
-					return nil
-				}
-
-				// 真实 rotate 必须先写入旧文件，再封口旧文件并切到新文件。
-				// artificial rotate 不写入：它的 CRC 能通过 mysqlbinlog，但字节
-				// 不属于源文件，留下后 DurableCursor 会丢掉整段的续传位点。
-				sealPos := currentPos
-				if !artificial {
-					rotateCheckpoint := checkpointAt(currentFile, event.Header.LogPos)
-					if err := persistRaw(event.RawData, rotateCheckpoint); err != nil {
-						return err
-					}
-					sealPos = rotateCheckpoint.Pos
-				}
-				pendingFormat = nil
-
-				if err := file.Close(); err != nil {
-					return err
-				}
-				file = nil
-				// Magic only: the file/pos name opened before a 1236 fallback,
-				// or a rotate that arrived before any copied event. Sealing it
-				// catalogs a segment mysqlbinlog --verify-binlog-checksum rejects.
-				discardEmpty := currentPath != "" && !segmentHasEvents(currentPath)
-				var sealed tasks.BinlogFile
-				covered := false
-				if discardEmpty {
-					if err := os.Remove(currentPath); err != nil && !os.IsNotExist(err) {
-						return err
-					}
-				} else {
-					// A takeover copy of an already uploaded epoch ends at the
-					// resume cursor. start_pos and end_pos are both that position,
-					// and the bytes are the object already in the bucket. Sealing
-					// it uploads a second copy and replay lists the source file twice.
-					coveredEpoch := catalogEpoch(currentPath, task.Epoch)
-					var err error
-					covered, err = r.coveredByUploadedEpoch(ctx, task.ID, session.diskName(currentFile), coveredEpoch, currentPath, sealPos)
-					if err != nil {
-						return err
-					}
-					if covered {
-						if task.Epoch > 0 && r.leaseVerifier != nil {
-							ok, err := r.leaseVerifier.Verify(ctx, task.ID, task.OwnerWorkerID, task.Epoch)
-							if err != nil {
-								return err
-							}
-							if !ok {
-								return ErrLeaseEpochMismatch
-							}
-						}
-						if err := r.releaseCoveredOpen(ctx, task.ID, session.diskName(currentFile), currentPath, coveredEpoch); err != nil {
-							return err
-						}
-					} else {
-						// Record the sealed row before the put. A crash inside the put
-						// leaves UPLOAD_FAILED, which the background retry already uploads.
-						// The next-file checkpoint is written before the put so a hung
-						// upload cannot pin the lease, and a timeout still continues here.
-						sealed, err = r.sealLocalFile(
-							ctx,
-							task,
-							sourceServerUUID,
-							currentPath,
-							currentStartPos,
-							sealPos,
-							currentCreatedAt,
-							time.Now(),
-						)
-						if err != nil {
-							return err
-						}
-					}
-				}
-
-				currentFile = nextFile
-				currentPos = nextPos
-
-				// Record the next file before opening it. A real rotate is already
-				// in the sealed file. An artificial one is not, because it is
-				// not part of the source binlog. If that open fails, the retry
-				// must start on the next file. Resuming on the sealed name
-				// opens <name>.open.e<epoch> beside it, and the next rotate
-				// stops on "sealed file already exists".
-				if r.checkpointStore != nil {
-					if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, checkpointAt(currentFile, currentPos)); err != nil {
-						return checkpointWriteError(err)
-					}
-				}
-				if !discardEmpty && !covered {
-					if err := r.uploadSealed(ctx, sealed); err != nil {
-						return err
-					}
-				}
-
-				file, writer, currentPath, err = writerOpener(task, currentFile, currentPos)
-				if err != nil {
-					return err
-				}
-				currentStartPos = currentPos
-				currentCreatedAt = time.Now()
-
-				if r.progressReporter != nil {
-					r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
-				}
-				return nil
-			}
-		}
-
-		// A GTID dump names the file with Rotate before any copied event.
-		// Until that name exists there is nowhere to write, and the name is
-		// not invented as task-{id}.binlog.
-		if file == nil {
-			if event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT && len(event.RawData) > 0 {
-				pendingFormat = append([]byte(nil), event.RawData...)
-			}
-			return nil
-		}
-
-		// 从文件中部 dump 时，源库仍会先下发文件头的 format description（log_pos 置 0，
-		// 或保留原始 end_log_pos，例如 MySQL 8 的 126）。该事件不在当前位点之后。
-		// 单独落盘会把续传位点退回 126，并用文件创建时间报 DELAYED。
-		// 这里只记住原文，等第一个真正复制的事件一起写入，位点停在那个事件上。
-		// synthetic rotate 已在上面处理，这里不能抢在它前面把 log_pos=0 丢掉。
-		if event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT && event.Header.LogPos <= currentPos {
-			if !segmentHasEvents(currentPath) && len(event.RawData) > 0 {
-				pendingFormat = append([]byte(nil), event.RawData...)
-			}
-			return nil
-		}
-		// GTID numbers are not compared for order or gaps. A multi-threaded
-		// replica with replica_preserve_commit_order=OFF, SET GTID_NEXT, and
-		// group replication blocks all write legal holes and out-of-order
-		// numbers. Only a GTID already stored is dropped, with the rest of
-		// its transaction.
-		if trackGTID {
-			if event.Header.EventType == replication.ANONYMOUS_GTID_EVENT {
-				skipStoredTxn = false
-			}
-			if gtid, ok := executed.peekGTID(event); ok {
-				if executed.contains(gtid) {
-					skipStoredTxn = true
-					return nil
-				}
-				skipStoredTxn = false
-			} else if skipStoredTxn {
-				if executed.endsTransaction(event) {
-					skipStoredTxn = false
-				}
-				return nil
-			}
-		}
-		// A dump that starts at the top of a file the segment already holds
-		// sends that file's header again. Those events are not transactions.
-		if event.Header.LogPos <= currentPos && fileHeaderEvent(event.Header.EventType) {
-			return nil
-		}
-		if event.Header.LogPos != 0 && event.Header.LogPos < currentPos {
-			return streamRegression(fmt.Sprintf("event end pos %d is behind stored pos %d in %s", event.Header.LogPos, currentPos, currentFile))
-		}
-		if event.Header.LogPos <= currentPos {
-			return nil
-		}
-		if trackGTID {
-			executed.note(event)
-		}
-
-		next := checkpointAt(currentFile, event.Header.LogPos)
-		if err := persistRaw(event.RawData, next); err != nil {
-			return err
-		}
-		if r.progressReporter != nil {
-			r.progressReporter.ReportReplicationProgress(task.ID, sourceEventAt, currentFile, currentPos, atTip)
-		}
-		return nil
-	}
-
-	// Step 4: 建立复制连接并启动拉流循环。
+	// 建立复制连接。
 	semiSyncRequested := task.Source.SemiSync
-	cfg := buildSyncerConfig(task)
+	l.dump = &dumpConn{cfg: buildSyncerConfig(task), newSyncer: r.newSyncer}
 	if semiSyncRequested {
 		// 半同步模式使用同步处理器：只有 HandleEvent 成功返回后才会 ACK。
 		// 这样可保证 ACK 发生在本地 fsync/checkpoint 成功之后（防止 ACK 早于持久化）。
-		cfg.SynchronousEventHandler = eventHandlerFunc(handleEvent)
+		l.dump.cfg.SynchronousEventHandler = eventHandlerFunc(l.handleEvent)
 	}
-	newSyncer := r.newSyncer
-	if newSyncer == nil {
-		newSyncer = func(cfg replication.BinlogSyncerConfig) binlogSyncer {
+	if l.dump.newSyncer == nil {
+		l.dump.newSyncer = func(cfg replication.BinlogSyncerConfig) binlogSyncer {
 			return &liveBinlogSyncer{inner: replication.NewBinlogSyncer(cfg)}
 		}
 	}
-	if id := r.notedDumpConn(task.ID); id > 0 {
-		// The previous Close tried KILL with the password from that dump.
-		// A password change during Stop makes that KILL fail and leaves the
-		// thread up. Kill it with the password this run is about to use
-		// before opening another dump. An unconfirmed KILL does not open one.
-		r.releaseDumpConn(task, id)
-		if left := r.notedDumpConn(task.ID); left > 0 {
-			return tasks.NewRetryableSourceError(tasks.CodeSourceUnreachable, fmt.Sprintf("binlog dump connection %d still open", left))
-		}
+	if err := l.releaseNotedDump(); err != nil {
+		return err
 	}
-	syncer := newSyncer(cfg)
-	activeSyncer = syncer
+	l.dump.syncer = l.dump.newSyncer(l.dump.cfg)
 	// The defer closes whatever syncer is current. A 1236 fallback closes the
 	// old one itself, then replaces syncer, so the defer closes the new one once.
-	defer func() { r.closeDump(task, syncer) }()
-
-	dumpStart := start
-	dumpStart.File = session.serverName(start.File)
-	streamer, start, err := openDump(syncer, flavor, dumpStart, gtidFallback)
-	if err != nil {
-		if ctx.Err() == nil && !errors.Is(err, context.Canceled) {
-			if switched := r.noteStreamErrorIdentity(ctx, task, session, executed.current(), currentFile, currentPos, sealCurrent); switched != nil {
-				return switched
-			}
-		}
-		return resumePurgedWithoutGTID(classifySourceError(err), start.Mode, gtidFallback)
+	defer func() { r.closeDump(task, l.dump.syncer) }()
+	if err := l.openFirstDump(); err != nil {
+		return err
 	}
-	r.publishDumpConn(task, syncer)
-	session.seenConn = dumpConnectionID(syncer)
 
 	// Adopt/resume is FILE_POS at a saved position. If that position is already the
 	// master tip, report at-tip now. Waiting for the 2s idle poll lets the format
 	// description header (binlog create time) cross the delay threshold first.
-	if !atTip && start.Mode == tasks.StartModeFilePos && r.fetcher != nil {
+	if !l.atTip && l.start.Mode == tasks.StartModeFilePos && r.fetcher != nil {
 		status, statusErr := r.fetcher.FetchMasterStatus(ctx, task.Source)
-		if statusErr == nil && dumpAtOrBeyondMaster(currentFile, currentPos, status) {
-			atTip = true
+		if statusErr == nil && dumpAtOrBeyondMaster(seg.name, seg.pos, status) {
+			l.atTip = true
 		}
 	}
-
-	if atTip && r.progressReporter != nil {
+	if l.atTip && r.progressReporter != nil {
 		// StartSync is already at master file/pos; do not wait for idle or the next event.
-		r.progressReporter.ReportReplicationProgress(task.ID, time.Now().UTC(), currentFile, currentPos, true)
+		r.progressReporter.ReportReplicationProgress(task.ID, time.Now().UTC(), seg.name, seg.pos, true)
 	}
-
 	if onReady != nil {
 		// 到这里说明“连接 + 起点 + writer”都已 ready，Scheduler 可安全切 RUNNING。
 		onReady()
 	}
 
-	// sawDumpEvent is the first event from this dump. MySQL 1236 for a purged
-	// file arrives on GetEvent after StartSync has already returned nil.
-	// Falling back later would skip events already written.
-	sawDumpEvent := false
-	gtidFallbackUsed := false
-	dumpReconnects := 0
-	// durableDumpStart is the flushed position. A GTID dump resumes from the
-	// executed set, never the set this run started with. A file/pos dump
-	// resumes from the file and position last flushed.
-	durableDumpStart := func() tasks.StartConfig {
-		// The open segment's file and flushed position come first, in either
-		// mode. A GTID dump would send that file's header and any
-		// unfinished transaction again from its GTID event, both behind the
-		// cursor. The executed set is the 1236 fallback.
-		if trackGTID {
-			if g := strings.TrimSpace(executed.current()); g != "" {
-				gtidFallback = g
-			}
-		}
-		if file != nil && currentFile != "" && currentPos != 0 {
-			return tasks.StartConfig{Mode: tasks.StartModeFilePos, File: session.serverName(currentFile), Pos: currentPos}
-		}
-		if start.Mode == tasks.StartModeGTID {
-			gtid := strings.TrimSpace(executed.current())
-			if gtid == "" {
-				gtid = strings.TrimSpace(gtidFallback)
-			}
-			if gtid == "" {
-				gtid = strings.TrimSpace(start.GTIDSet)
-			}
-			return tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: gtid}
-		}
-		if currentFile != "" && currentPos != 0 {
-			return tasks.StartConfig{Mode: tasks.StartModeFilePos, File: session.serverName(currentFile), Pos: currentPos}
-		}
-		out := start
-		out.File = session.serverName(out.File)
-		return out
-	}
-	reopenDurableDump := func() error {
-		next := durableDumpStart()
-		log.Printf("dump reconnect %d/%d task=%s mode=%s file=%s pos=%d", dumpReconnects, maxDumpReconnectAttempts, task.ID, next.Mode, next.File, next.Pos)
-		r.closeDump(task, syncer)
-		if left := r.notedDumpConn(task.ID); left > 0 {
-			return tasks.NewRetryableSourceError(tasks.CodeSourceUnreachable, fmt.Sprintf("binlog dump connection %d still open", left))
-		}
-		syncer = newSyncer(cfg)
-		activeSyncer = syncer
-		var dumpErr error
-		streamer, start, dumpErr = openDump(syncer, flavor, next, gtidFallback)
-		if dumpErr != nil {
-			return classifySourceError(dumpErr)
-		}
-		r.publishDumpConn(task, syncer)
-		session.seenConn = dumpConnectionID(syncer)
-		sawDumpEvent = false
-		gtidFallbackUsed = false
-		return nil
-	}
-	readEvent := func() (*replication.BinlogEvent, error) {
-		for {
-			event, err := r.nextEvent(ctx, streamer, task.ID, task.Source, currentFile, currentPos, &atTip)
-			if err != nil {
-				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-					return nil, err
-				}
-				// 1236 from a server the VIP just moved to is not a purge of the
-				// file this task was reading. Check identity before the GTID
-				// fallback, which would keep writing the old file name.
-				if switched := r.noteStreamErrorIdentity(ctx, task, session, executed.current(), currentFile, currentPos, sealCurrent); switched != nil {
-					return nil, switched
-				}
-				if !sawDumpEvent && !gtidFallbackUsed && start.Mode == tasks.StartModeFilePos && mysqlError1236(err) && strings.TrimSpace(gtidFallback) != "" {
-					gtidFallbackUsed = true
-					log.Printf("file/pos resume hit MySQL 1236 before any event; opening GTID dump task=%s file=%s pos=%d", task.ID, start.File, start.Pos)
-					r.closeDump(task, syncer)
-					if left := r.notedDumpConn(task.ID); left > 0 {
-						return nil, tasks.NewRetryableSourceError(tasks.CodeSourceUnreachable, fmt.Sprintf("binlog dump connection %d still open", left))
-					}
-					syncer = newSyncer(cfg)
-					activeSyncer = syncer
-					gtidStart := tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: strings.TrimSpace(gtidFallback)}
-					var dumpErr error
-					streamer, start, dumpErr = openDump(syncer, flavor, gtidStart, "")
-					if dumpErr != nil {
-						return nil, classifySourceError(dumpErr)
-					}
-					r.publishDumpConn(task, syncer)
-					session.seenConn = 0
-					continue
-				}
-				if tasks.IsSourceUnreachable(err) && dumpReconnects < maxDumpReconnectAttempts {
-					dumpReconnects++
-					if waitErr := waitDumpReconnect(ctx); waitErr != nil {
-						return nil, waitErr
-					}
-					if reopenErr := reopenDurableDump(); reopenErr != nil {
-						return nil, reopenErr
-					}
-					continue
-				}
-				return nil, resumePurgedWithoutGTID(err, start.Mode, gtidFallback)
-			}
-			dumpReconnects = 0
-			if event != nil {
-				sawDumpEvent = true
-			}
-			return event, nil
-		}
-	}
+	// 拉流循环：半同步由 syncer 的 goroutine 调 handleEvent，这里只等错误或取消。
+	return l.pump(!semiSyncRequested)
+}
 
-	reopenGTID := func() error {
-		gtid := strings.TrimSpace(session.resumeGTID)
-		if gtid == "" {
-			return tasks.NewPermanentError(tasks.CodeSourceSwitchover, "source switched and the executed GTID set is empty")
-		}
-		r.closeDump(task, syncer)
-		if left := r.notedDumpConn(task.ID); left > 0 {
-			return tasks.NewRetryableSourceError(tasks.CodeSourceUnreachable, fmt.Sprintf("binlog dump connection %d still open", left))
-		}
-		syncer = newSyncer(cfg)
-		activeSyncer = syncer
-		gtidStart := tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: gtid}
-		var dumpErr error
-		streamer, start, dumpErr = openDump(syncer, flavor, gtidStart, "")
-		if dumpErr != nil {
-			return classifySourceError(dumpErr)
-		}
-		r.publishDumpConn(task, syncer)
-		session.seenConn = dumpConnectionID(syncer)
-		atTip = false
-		sawDumpEvent = false
-		return nil
-	}
-
-	if semiSyncRequested {
-		// SynchronousEventHandler 模式下，事件由 syncer 内部 goroutine 推送到 handler。
-		// 这里阻塞等待错误或取消，保持任务生命周期。
-		for {
-			event, err := readEvent()
-			if errors.Is(err, errSwitchRestart) {
-				if err := reopenGTID(); err != nil {
-					return err
-				}
-				continue
-			}
-			if err != nil {
-				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-					return nil
-				}
-				return err
-			}
-			if event == nil {
-				continue
-			}
-		}
-	}
-
-	// Step 5: 异步模式主循环（逐条拉取并处理事件）。
-	for {
-		event, err := readEvent()
-		if errors.Is(err, errSwitchRestart) {
-			if err := reopenGTID(); err != nil {
-				return err
-			}
-			continue
-		}
-		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return err
-		}
-		if event == nil {
-			continue
-		}
-		if err := handleEvent(event); err != nil {
-			if errors.Is(err, errSwitchRestart) {
-				if err := reopenGTID(); err != nil {
-					return err
-				}
-				continue
-			}
-			return err
-		}
-	}
+func logCloseFailed(path string, err error) {
+	log.Printf("close binlog file failed path=%s err=%v", path, err)
 }
 
 const idlePollInterval = 2 * time.Second

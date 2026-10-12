@@ -65,3 +65,7 @@ _Avoid_: 调用方自己 `ReadDir` 再扫分段；自己把 previous-GTIDs 和�
 **存储健康 (Storage Health)**:
 一个任务目录能不能放心回放的唯一结论：正常、损坏（Start 拒绝）、旧版回切（Start 修复）、已存缺口（只读），按这个顺序第一个命中的胜出，带同一个 `StorageProblem` 和截断分段。`Scheduler.storageHealth` 每次问答建一个段账本。见 ADR 0007。
 _Avoid_: 调用方自己串检测器；用 `detail` 前缀倒推问题类别；为同一请求多次列目录
+
+**一次运行 (Run)**:
+`MySQLRunner.run` 的一次复制尝试，分五个阶段：续传起点（`resolveRunStart`）、连接/握手（`openFirstDump`）、分段追加与 rotate/封存（`openSegment`）、事件处理（`handleEvent`）、重连与错误分类（`pump`/`readEvent`/`streamEnded`）。见 ADR 0008。
+_Avoid_: 在阶段之外改游标、起点或 syncer；为半同步再写一个拉流循环；新增跨阶段的闭包共享局部变量
