@@ -490,6 +490,14 @@ AFTER_FILE="$(checkpoint_file)"
 AFTER_POS="$(checkpoint_pos)"
 echo "[worker-crash] checkpoint after takeover: ${AFTER_FILE}:${AFTER_POS}"
 
+# One more rotate after takeover so at least two sealed files hold a whole
+# source binlog besides the task's first file (see the md5 check below).
+echo "[worker-crash] write and rotate once more so two whole files are sealed"
+write_source_data "worker-crash-extra-rotate-${RUN_TAG}"
+flush_binary_logs
+wait_checkpoint_file_changed "$TASK_ID" "$AFTER_FILE"
+wait_checkpoint_ready "$TASK_ID"
+
 echo "[worker-crash] stop task and wait settle for strict file checks"
 stop_task "$TASK_ID"
 wait_task_state "$TASK_ID" "STOPPED"
@@ -512,15 +520,23 @@ assert_no_abnormal_sealed_files "${SEALED_FILES[@]}"
 verify_unique_sealed_files "${SEALED_FILES[@]}"
 echo "[worker-crash] sealed files count=${#SEALED_FILES[@]} files=${SEALED_FILES[*]}"
 
-SAMPLE_COUNT=2
-if [[ "${#SEALED_FILES[@]}" -lt 2 ]]; then
-  SAMPLE_COUNT=1
+# The task's first file is where LATEST started, in the middle of a source
+# binlog. Its backup is magic + the dump's format description + the source
+# bytes after the start position, so it never equals the source file and is
+# not compared. Every later sealed file is a whole source binlog.
+FIRST_FILE="${SEALED_FILES[0]}"
+WHOLE_FILES=("${SEALED_FILES[@]:1}")
+echo "[worker-crash] skip md5 of first file=$FIRST_FILE (LATEST start mid-file)"
+if [[ "${#WHOLE_FILES[@]}" -lt 2 ]]; then
+  echo "expected at least 2 whole sealed files after $FIRST_FILE, got ${#WHOLE_FILES[@]}: ${WHOLE_FILES[*]:-none}" >&2
+  exit 1
 fi
+SAMPLE_COUNT=2
 
 echo "[worker-crash] md5 compare source vs backup (sample_count=$SAMPLE_COUNT)"
 for ((i=0; i<SAMPLE_COUNT; i++)); do
-  idx=$((${#SEALED_FILES[@]} - 1 - i))
-  file="${SEALED_FILES[$idx]}"
+  idx=$((${#WHOLE_FILES[@]} - 1 - i))
+  file="${WHOLE_FILES[$idx]}"
   src_md5="$(md5_in_container "$file")"
   bak_md5="$(md5_local "$TASK_DIR/$file")"
   echo "[worker-crash] md5 file=$file src=$src_md5 bak=$bak_md5"

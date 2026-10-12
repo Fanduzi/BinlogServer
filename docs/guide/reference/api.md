@@ -603,7 +603,7 @@ curl "http://localhost:8080/api/tasks/1/upload-failures/reasons?limit=20"
 
 ### 5.5 回放窗口
 
-`GET /api/tasks/{id}/replay` 用和文件清单相同的 `limit` 窗口。同一台源上按 binlog 序号升序。VIP 切到另一台服务器之后，先列出更早那台源的文件（按该源最早的 `created_at`），再列出新源的文件；新源自己的 `mysql-bin.000001` 不会排到旧源更高序号的前面。同一序号既有封存名又有 `.open.e*` 时，留下 epoch 最大的那条 open 路径，不返回封存名，也不返回其余 epoch。跨过切换的 `stop_datetime` 或 `stop_gtid` 也按这个顺序给出 `paths` 和 `command`。
+`GET /api/tasks/{id}/replay` 不带 `limit` 时返回恢复需要的每个文件，不套用文件清单的 200 默认上限（#305），与 `/window` 读的是同一条完整保留链。同一台源上按 binlog 序号升序。VIP 切到另一台服务器之后，先列出更早那台源的文件（按该源最早的 `created_at`），再列出新源的文件；新源自己的 `mysql-bin.000001` 不会排到旧源更高序号的前面。同一序号既有封存名又有 `.open.e*` 时，留下 epoch 最大的那条 open 路径，不返回封存名，也不返回其余 epoch。跨过切换的 `stop_datetime` 或 `stop_gtid` 也按这个顺序给出 `paths` 和 `command`。
 
 ```bash
 curl http://localhost:8080/api/tasks/1/replay
@@ -613,7 +613,7 @@ curl "http://localhost:8080/api/tasks/1/replay?limit=3"
 
 任务带 `storage_alert` 时，回放停在损坏分段之前：损坏分段、同一 binlog 序号的其它副本、以及之后的分段都不在 `paths` 里，响应多一个 `warning` 写明排除了哪个分段和新任务的 `gtid_set`。定点恢复（`stop_datetime`）、`stop_gtid`、`start_gtid_set` 和 `/replay/archive` 用同一个排除规则，前三者的响应同样带 `warning`。没有损坏时该字段不出现。
 
-`limit` 与文件清单相同：省略、小于 1 或不是整数时按 200 处理，不返回 400。`paths` 是清单里的 `file_path`，不是 basename。窗口为空时 `paths` 是 `[]`，HTTP 仍是 200。任务不存在是 HTTP 404，正文 `task not found`。
+显式给出 `limit` 时只保留序号最大的那个窗口；窗口比完整回放集少文件时，响应带 `omitted_files`（少了几个更早的文件）和 `warning`（写明从哪个文件起被省略、这一组单独回放不能从备份开头恢复），不会悄悄截断。`limit` 小于 1 或不是整数时按不带 `limit` 处理，不返回 400。`paths` 是清单里的 `file_path`，不是 basename。窗口为空时 `paths` 是 `[]`，HTTP 仍是 200。任务不存在是 HTTP 404，正文 `task not found`。
 
 `source.flavor` 为 `mysql` 时，`client` 是 `mysqlbinlog`，`client_hint` 是 `MySQL mysqlbinlog`。`mariadb` 时 `client` 和 `client_hint` 都是 `mariadb-binlog`。其它 flavor（含空字符串）这两个字段是空字符串。
 
@@ -631,7 +631,7 @@ curl "http://localhost:8080/api/tasks/1/replay?limit=3"
 
 ### 5.6 回放窗口的 tar
 
-`GET /api/tasks/{id}/replay/archive` 打包的是上一节同一 `limit` 选出的那些分段，每个源序号一个成员。成员名是 basename，按 `paths` 的顺序，不是主机路径。每个成员的字节与单段下载相同：本机文件优先，包括 `RUNNING` 或 `STOPPED` 时的 `.open.e*`；本机没有时，只读已封存、`UPLOADED`、且 `object_key` 非空的对象。
+`GET /api/tasks/{id}/replay/archive` 打包的是上一节同一规则选出的那些分段（不带 `limit` 时是全部；带 `limit` 且省略了更早文件时，响应头 `X-Replay-Omitted-Files` 和 `X-Replay-Warning` 写明），每个源序号一个成员。成员名是 basename，按 `paths` 的顺序，不是主机路径。每个成员的字节与单段下载相同：本机文件优先，包括 `RUNNING` 或 `STOPPED` 时的 `.open.e*`；本机没有时，只读已封存、`UPLOADED`、且 `object_key` 非空的对象。
 
 ```bash
 curl -o task-1-replay.tar http://localhost:8080/api/tasks/1/replay/archive

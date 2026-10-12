@@ -1,5 +1,5 @@
 // input: API calls for task data including single-task GET /lease, GET /replay, and GET /window
-// output: detail drawer state, including the recoverable window, the replay set, the inventory limit shared with replay archive download, and showDetail action
+// output: detail drawer state, including the recoverable window, the replay set, the files inventory limit (replay and its archive are never windowed), and showDetail action
 // pos: task detail drawer data management; /lease stays on this single-task path only
 // note: if this file changes, update this header and frontend/src/composables/README.md
 import { ref } from "vue";
@@ -19,8 +19,8 @@ import {
 
 const RUN_HISTORY_LIMIT = 10;
 
-// taskDetailInventoryLimit is the files/replay window the drawer loads.
-// The replay archive download uses the same limit.
+// taskDetailInventoryLimit is the files window the drawer loads. Replay and
+// the replay archive take no limit: they list every file a restore needs (#305).
 export const taskDetailInventoryLimit = 80;
 
 export function useTaskDetail() {
@@ -50,7 +50,7 @@ export function useTaskDetail() {
         getCheckpoint(id),
         listEvents(id, 120),
         listFiles(id, taskDetailInventoryLimit),
-        listReplay(id, taskDetailInventoryLimit),
+        listReplay(id),
         getReplication(id),
         getRecoveryWindow(id),
       ]);

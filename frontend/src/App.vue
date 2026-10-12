@@ -422,7 +422,7 @@ import { useAuth } from "./composables/useAuth.js";
 import { useDashboard } from "./composables/useDashboard.js";
 import { useSourceLookup } from "./composables/useSourceLookup.js";
 import { useTaskFilter } from "./composables/useTaskFilter.js";
-import { taskDetailInventoryLimit, useTaskDetail } from "./composables/useTaskDetail.js";
+import { useTaskDetail } from "./composables/useTaskDetail.js";
 import { isLeftoverDiskTask, useTaskForm } from "./composables/useTaskForm.js";
 import { useBatchCreate } from "./composables/useBatchCreate.js";
 import { useFormatters } from "./composables/useFormatters.js";
@@ -794,7 +794,7 @@ async function downloadPitrSet(payload) {
   const gtid = String(payload?.gtid || "").trim();
   if (!task?.id || (!stop && !gtid)) return;
   try {
-    const data = await downloadReplayArchive(task.id, taskDetailInventoryLimit, {
+    const data = await downloadReplayArchive(task.id, undefined, {
       stop,
       start: String(payload?.start || "").trim(),
       gtid,
@@ -810,7 +810,7 @@ async function downloadPitrSet(payload) {
 async function downloadReplaySet(task) {
   if (!task?.id) return;
   try {
-    const data = await downloadReplayArchive(task.id, taskDetailInventoryLimit);
+    const data = await downloadReplayArchive(task.id);
     saveDownloadedSegment(`task-${task.id}-replay.tar`, data);
     ElMessage.success(t("msg.replayDownloaded"));
   } catch (err) {

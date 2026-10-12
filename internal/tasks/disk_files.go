@@ -114,6 +114,9 @@ type ReplaySet struct {
 	Locations  []string `json:"locations,omitempty"`
 	// Warning is set when a damaged segment and every later one were left out.
 	Warning string `json:"warning,omitempty"`
+	// OmittedFiles is how many earlier replay files a limit window left out.
+	// Without limit it is 0: replay lists every file (#305).
+	OmittedFiles int `json:"omitted_files,omitempty"`
 }
 
 // ReplayClient maps source.flavor to the binlog client a DBA should run.

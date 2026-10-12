@@ -46,7 +46,7 @@ func TestTaskAPI_PITRReplay(t *testing.T) {
 
 	plain := httptest.NewRecorder()
 	handler.ServeHTTP(plain, httptest.NewRequest(http.MethodGet, "/api/tasks/1/replay?limit=1", nil))
-	if plain.Code != http.StatusOK || strings.Contains(plain.Body.String(), `"command"`) || !strings.Contains(plain.Body.String(), "mysql-bin.000003") || strings.Contains(plain.Body.String(), "mysql-bin.000001") {
+	if plain.Code != http.StatusOK || strings.Contains(plain.Body.String(), `"command"`) || !strings.Contains(plain.Body.String(), `"paths":["`+filepath.Join(taskDir, "mysql-bin.000003")+`"]`) || !strings.Contains(plain.Body.String(), `"omitted_files":3`) {
 		t.Fatalf("limit replay status=%d body=%s", plain.Code, plain.Body.String())
 	}
 
