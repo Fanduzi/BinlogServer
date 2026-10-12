@@ -185,7 +185,7 @@ func (s *Scheduler) selectExecutedGTID(taskID, executedRaw, stopGTIDRaw string, 
 			if openErr != nil {
 				return nil, Task{}, "", "", 0, false, nil, openErr
 			}
-			log, scanErr := binlog.ScanSegmentGTIDs(body)
+			contents, scanErr := binlog.ReadSegmentContents(body)
 			closeErr := body.Close()
 			if scanErr != nil {
 				return nil, Task{}, "", "", 0, false, nil, scanErr
@@ -193,7 +193,7 @@ func (s *Scheduler) selectExecutedGTID(taskID, executedRaw, stopGTIDRaw string, 
 			if closeErr != nil {
 				return nil, Task{}, "", "", 0, false, nil, closeErr
 			}
-			seg.log = log
+			seg.log = contents.Log
 		}
 		logs = append(logs, seg)
 		if stop == nil && hit < 0 {

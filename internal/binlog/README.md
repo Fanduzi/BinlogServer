@@ -7,10 +7,11 @@
 - `segment.go`: `ClassifySegment` 是 runner、durable resume 和 tasks 磁盘扫描共用的分段名解析。`mysql-bin.000001` 是封存、epoch -1。`name.open.eN` 是打开的第 N 代。`name.sealed.eN` 是同一源文件名的后一次封存，epoch N，不是续传点。`OpenName` / `SealedName` 是这个解析结果上的谓词。被拒绝的名字（含 `.takeover-*`、`notes.txt`、`task-N.binlog`）两者都为假，保留清理不会把它们当 binlog 删掉。
 - `event_time.go`: 读一个分段的事件头，给出复制流里第一个和最后一个非 0 时间戳。时间戳 0 跳过。格式描述（format description）和 previous-GTIDs 的时间是源文件创建时间，不计入覆盖。没有 magic 或没有剩余计时事件时不算覆盖。尾部撕掉的字节保留已经读完的事件时间。
 - `gtid_pos.go`: `ScanSegmentForGTID` 在一个分段里找第一个 MySQL `GTID_EVENT`（UUID 不区分大小写，序号相等）。返回的偏移是该事件的起始字节，给 `mysqlbinlog --stop-position` 用，不是事件头里的 `end_log_pos`。previous-GTIDs 不算。没有 magic 时返回空结果。尾部撕掉时保留已经读完的命中。
-- `gtid_set_scan.go`: `ScanSegmentGTIDs` 读同一个分段里的 previous-GTIDs 文本，以及每一条 MySQL `GTID_EVENT` 的 UUID、序号、起始字节和事件头时间。格式描述标明 CRC32 时，previous-GTIDs 的校验和尾部先剥掉再解码。尾部撕掉时保留已经读完的事件。previous-GTIDs 解不出来是错误。
-- `open_tail.go`: `ReconcileOpenTail` / `ScanOpenTail` 读最高打开分段：每个完整事务的 GTID（MySQL、带 tag 的 GTID、MariaDB）、previous-GTIDs，以及续传截断点。末尾的事务没写完、且它前面正好是一个完整事务结束处时给出截断偏移和位点；否则给出这个事务的 GTID，续传在它里面接着拉。XID、XA_PREPARE、压缩的 TRANSACTION_PAYLOAD、DDL 和 `COMMIT`/`ROLLBACK`/`XA COMMIT` 算提交（`TransactionQueryEffect`）。`UnionGTIDText` 把种子集合和这些 GTID 合起来。只读，不改文件。
-- `gtid_intervals.go`: MySQL GTID 集合的区间加、减和输出，给 `storage_consistency.go` 算缺失的 GTID 和新任务起点。
-- `storage_consistency.go`: `DetectStorageProblem(dir, checkpoint, start, flavor)` 只认重拉损坏的硬痕迹，并返回第一个损坏分段 `Segment`、它之前仍可恢复的分段 `Valid`、checkpoint 里有但起点集合和任何分段都没有的 MySQL GTID `Missing`，以及新任务起点 `Restart`（起点集合或第一个分段的 previous-GTIDs，加上 `Valid` 的事务；未知时为空）。Rotate 指向自己或更早的同名 binlog（身份前缀 `uuid.` 或回切段前缀 `uuid~n.` 先剥掉），或 `end_log_pos` 在该分段里倒退，才是问题。GTID 序号乱序、多个 UUID 交错、某个序号在下一个分段里、起点集合或 `gtid_purged` 里的空洞，都不是。文件之间的缺口也不拒绝启动。目录不存在不是问题。checkpoint 和 flavor 仍传进来，不参与判断。
+- `gtid_set_scan.go`: `scanSegmentGTIDs` 读同一个分段里的 previous-GTIDs 文本，以及每一条 MySQL `GTID_EVENT` 的 UUID、序号、起始字节和事件头时间。格式描述标明 CRC32 时，previous-GTIDs 的校验和尾部先剥掉再解码。尾部撕掉时保留已经读完的事件。previous-GTIDs 解不出来是错误。
+- `open_tail.go`: `ScanOpenTail` 读最高打开分段（`Ledger.Tail` 选段后调用它）：每个完整事务的 GTID（MySQL、带 tag 的 GTID、MariaDB）、previous-GTIDs，以及续传截断点。末尾的事务没写完、且它前面正好是一个完整事务结束处时给出截断偏移和位点；否则给出这个事务的 GTID，续传在它里面接着拉。XID、XA_PREPARE、压缩的 TRANSACTION_PAYLOAD、DDL 和 `COMMIT`/`ROLLBACK`/`XA COMMIT` 算提交（`TransactionQueryEffect`）。`OpenTail.Durable` 是尾部已落盘的 GTID 文本，`Ledger.ResumeGTID` 把种子集合和它们合起来。只读，不改文件。
+- `gtid_set.go`: `GTIDSet`，仓库里唯一的 GTID 区间类型：加、并、减、包含、内部空洞和规范文本。`ParseGTIDSet` 走 go-mysql 校验，`ParseGTIDSetLenient` 不走（坏串返回 false）。
+- `ledger.go`: 段账本（ADR 0006）。`LedgerAt(dir)` 读一次目录，回答分段顺序、每段 GTID 区间和 previous-GTIDs（`Contents`，按 size+mtime 缓存）、已存集合 `Stored`、空洞 `Holes`、损坏 `Damage`、续传尾部 `Tail` 和续传集合 `ResumeGTID`。不在本地目录的字节用 `ReadSegmentContents`。
+- `storage_consistency.go`: `Ledger.Damage(checkpoint, start, flavor)` 只认重拉损坏的硬痕迹，并返回第一个损坏分段 `Segment`、它之前仍可恢复的分段 `Valid`、checkpoint 里有但起点集合和任何分段都没有的 MySQL GTID `Missing`，以及新任务起点 `Restart`（起点集合或第一个分段的 previous-GTIDs，加上 `Valid` 的事务；未知时为空）。Rotate 指向自己或更早的同名 binlog（身份前缀 `uuid.` 或回切段前缀 `uuid~n.` 先剥掉），或 `end_log_pos` 在该分段里倒退，才是问题。GTID 序号乱序、多个 UUID 交错、某个序号在下一个分段里、起点集合或 `gtid_purged` 里的空洞，都不是。文件之间的缺口也不拒绝启动。目录不存在不是问题。checkpoint 和 flavor 仍传进来，不参与判断。
 
 ## Exports
 - 文件写入、rotate 与 checkpoint 推进基础能力。
@@ -18,7 +19,7 @@
 - `LastRotateTarget`：封存文件末尾的 rotate 指向的下一个文件。runner 在 checkpoint 仍停在刚封存的文件上时用它继续，避免在封存名旁边再开一段。
 - `EventTimeSpan`：定点恢复用来判断一个分段的复制事件时间是否盖住窗口。格式描述和 previous-GTIDs 不参与。调用方持有 reader。
 - `ScanSegmentForGTID`：在分段字节里定位一条 MySQL GTID。偏移是事件起始字节。调用方持有 reader。
-- `ScanSegmentGTIDs`：列出分段里的 previous-GTIDs 和全部 MySQL GTID 事件。调用方持有 reader。
+- `scanSegmentGTIDs`：列出分段里的 previous-GTIDs 和全部 MySQL GTID 事件。调用方持有 reader。
 - `EventSpan`：封存目录行的 `start_pos` / `end_pos`。起点是连续链里第一个事件的位置，终点是最后一个 `end_log_pos` 大于 0 的事件。`end_log_pos` 为 0 的事件和撕掉的尾部不算。`SegmentPositions` 先过 `DurableCursor`：游标不成功（缺失、只有 magic、撕掉的尾部、只有 log_pos 0）时 ok 为 false；成功时终点就是该游标，起点用 `EventSpan`。
 
 ## Dependencies

@@ -1,15 +1,13 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task directory of binlog segments, the checkpoint gtid_set, and the task's start gtid_set
 // output: a storage problem when one segment rotates to its own or an older file, or when an event position goes backwards inside that segment, naming that segment, the segments before it that still restore, the MySQL GTIDs the checkpoint lists that no segment holds, and the GTID set a new task starts from; out-of-order GTIDs, a hole in one UUID, and a missing file are not a problem
-// pos: detect a backup already damaged by a stale GTID re-dump before another start drops more transactions
+// pos: the ledger's damage question (Ledger.Damage); detect a backup already damaged by a stale GTID re-dump before another start drops more transactions
 // note: if this file changes, update this header and module README.md.
 package binlog
 
 import (
 	"encoding/binary"
 	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -36,58 +34,35 @@ type StorageProblem struct {
 	Restart string
 }
 
-// DetectStorageProblem scans taskDir for the re-dump damage signature.
-// A rotate to the segment's own file or an older one, or an event position
-// that goes backwards inside one segment, is a problem.
-// GTID order is not. A replica can commit out of order, interleave several
-// UUIDs, or omit a number that lives in a later segment, the start set, or
-// gtid_purged. checkpointGTID and startGTID only describe a problem already
-// found: the transactions the checkpoint lists that no segment holds, and
-// the set a new task starts from. A missing directory is not a problem.
-func DetectStorageProblem(taskDir, checkpointGTID, startGTID, flavor string) (StorageProblem, bool) {
-	taskDir = strings.TrimSpace(taskDir)
-	if taskDir == "" {
-		return StorageProblem{}, false
-	}
-	entries, err := os.ReadDir(taskDir)
+// Damage is the first segment in binlog order with the re-dump damage
+// signature: a rotate to the segment's own file or an older one, or an
+// event position that goes backwards. Valid lists the segments before it.
+// For MySQL, Missing is checkpointGTID minus the start set, the first
+// segment's previous-GTIDs header and every stored GTID, and Restart is
+// that base plus the GTIDs of Valid (empty when the base is unknown,
+// because the valid segments alone would re-dump the source's whole
+// history). Out-of-order GTIDs, a hole in one UUID and a missing file are
+// not damage. An unreadable or missing directory is not damage.
+func (l *Ledger) Damage(checkpointGTID, startGTID, flavor string) (StorageProblem, bool) {
+	segs, err := l.Segments()
 	if err != nil {
 		return StorageProblem{}, false
 	}
-	segs := make([]storageSegment, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		named, ok := ClassifySegment(entry.Name())
-		if !ok {
-			continue
-		}
-		segs = append(segs, storageSegment{name: entry.Name(), named: named, path: filepath.Join(taskDir, entry.Name())})
-	}
-	sort.SliceStable(segs, func(i, j int) bool {
-		if segs[i].named.Seq != segs[j].named.Seq {
-			return segs[i].named.Seq < segs[j].named.Seq
-		}
-		if segs[i].named.Epoch != segs[j].named.Epoch {
-			return segs[i].named.Epoch < segs[j].named.Epoch
-		}
-		return segs[i].name < segs[j].name
-	})
 	for i, seg := range segs {
-		detail, bad := segmentDamage(seg.path, seg.name, seg.named.Source)
+		detail, bad := segmentDamage(seg.Path, seg.Name, seg.Named.Source)
 		if !bad {
 			continue
 		}
-		problem := StorageProblem{Segment: seg.name, Detail: detail}
-		var valid []storageSegment
+		problem := StorageProblem{Segment: seg.Name, Detail: detail}
+		var valid []LedgerSegment
 		for _, prev := range segs[:i] {
-			if prev.named.Seq < seg.named.Seq {
+			if prev.Named.Seq < seg.Named.Seq {
 				valid = append(valid, prev)
-				problem.Valid = append(problem.Valid, prev.name)
+				problem.Valid = append(problem.Valid, prev.Name)
 			}
 		}
 		if !isMariaDBStorage(flavor) {
-			problem.Missing, problem.Restart = storageRecoverySets(segs, valid, checkpointGTID, startGTID)
+			problem.Missing, problem.Restart = l.recoverySets(segs, valid, checkpointGTID, startGTID)
 		}
 		problem.Message = storageMessage(problem)
 		return problem, true
@@ -95,68 +70,45 @@ func DetectStorageProblem(taskDir, checkpointGTID, startGTID, flavor string) (St
 	return StorageProblem{}, false
 }
 
-type storageSegment struct {
-	name  string
-	named SegmentName
-	path  string
-}
-
 func isMariaDBStorage(flavor string) bool {
 	return strings.EqualFold(strings.TrimSpace(flavor), "mariadb")
 }
 
-// storageRecoverySets is checkpoint minus base minus every stored GTID, and
-// base plus the GTIDs of the valid segments. base is the task's start set
-// plus the previous-GTIDs header of the first segment, which is what the
-// source had executed before the first stored transaction. Restart is empty
-// when base is unknown, because the valid segments alone would re-dump the
-// source's whole history.
-func storageRecoverySets(all, valid []storageSegment, checkpointGTID, startGTID string) (string, string) {
-	base := newGTIDIntervals()
-	if start, ok := parseGTIDIntervals(startGTID); ok {
-		base.addAll(start)
+// recoverySets is checkpoint minus base minus every stored GTID, and base
+// plus the GTIDs of the valid segments. base is the task's start set plus
+// the previous-GTIDs header of the first segment.
+func (l *Ledger) recoverySets(all, valid []LedgerSegment, checkpointGTID, startGTID string) (string, string) {
+	base := GTIDSet{}
+	if start, ok := ParseGTIDSetLenient(startGTID); ok {
+		base.AddAll(start)
 	}
-	stored := newGTIDIntervals()
+	stored := GTIDSet{}
 	for i, seg := range all {
-		if previous := addSegmentGTIDs(stored, seg.path); i == 0 {
-			if prev, ok := parseGTIDIntervals(previous); ok {
-				base.addAll(prev)
+		c, err := l.Contents(seg.Name)
+		if err != nil {
+			continue
+		}
+		stored.AddAll(c.GTIDs)
+		if i == 0 {
+			if prev, ok := ParseGTIDSetLenient(c.Log.Previous); ok {
+				base.AddAll(prev)
 			}
 		}
 	}
 	missing := ""
-	if claimed, ok := parseGTIDIntervals(checkpointGTID); ok {
-		claimed.subtract(base)
-		claimed.subtract(stored)
-		missing = claimed.String()
+	if claimed, ok := ParseGTIDSetLenient(checkpointGTID); ok {
+		missing = claimed.Minus(base).Minus(stored).String()
 	}
 	if len(base) == 0 {
 		return missing, ""
 	}
-	restart := newGTIDIntervals()
-	restart.addAll(base)
+	restart := base.Clone()
 	for _, seg := range valid {
-		addSegmentGTIDs(restart, seg.path)
+		if c, err := l.Contents(seg.Name); err == nil {
+			restart.AddAll(c.GTIDs)
+		}
 	}
 	return missing, restart.String()
-}
-
-// addSegmentGTIDs adds every GTID event of one segment and returns its
-// previous-GTIDs header text.
-func addSegmentGTIDs(set gtidIntervals, path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	log, err := ScanSegmentGTIDs(f)
-	if err != nil {
-		return ""
-	}
-	for _, ev := range log.Events {
-		set.add(ev.UUID, ev.Seq, ev.Seq)
-	}
-	return log.Previous
 }
 
 // storageRecoveryText is the operator step for a backup that already lost transactions.

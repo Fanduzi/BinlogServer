@@ -38,10 +38,10 @@ type SegmentGTIDLog struct {
 	Events      []GTIDEventRef
 }
 
-// ScanSegmentGTIDs walks one segment and records each GTID event.
+// scanSegmentGTIDs walks one segment and records each GTID event.
 // A previous-GTIDs event is recorded once and is not a transaction.
 // A segment without the binlog magic returns an empty log.
-func ScanSegmentGTIDs(r io.Reader) (SegmentGTIDLog, error) {
+func scanSegmentGTIDs(r io.Reader) (SegmentGTIDLog, error) {
 	var out SegmentGTIDLog
 	magic := make([]byte, 4)
 	if _, err := io.ReadFull(r, magic); err != nil {

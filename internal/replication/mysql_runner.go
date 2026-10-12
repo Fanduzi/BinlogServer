@@ -700,7 +700,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	if checkpointExists {
 		claimedGTID = strings.TrimSpace(stored.GTIDSet)
 	}
-	if problem, found := binlog.DetectStorageProblem(scanDir, claimedGTID, tasks.StartGTIDText(task), flavor); found {
+	if problem, found := binlog.LedgerAt(scanDir).Damage(claimedGTID, tasks.StartGTIDText(task), flavor); found {
 		return tasks.NewPermanentError(tasks.CodeStorageInconsistent, problem.Message)
 	}
 	// skipStoredTxn drops the rest of a transaction whose GTID is already
@@ -2650,10 +2650,11 @@ func fileHeaderEvent(t replication.EventType) bool {
 // the start. Nothing happens when the directory has no open segment.
 func (r *MySQLRunner) reconcileOpenTail(task tasks.Task, executed *executedGTID) (string, bool) {
 	dir := filepath.Join(r.dataDir, task.ID)
-	if _, damaged := binlog.DetectStorageProblem(dir, "", "", task.Source.Flavor); damaged {
+	ledger := binlog.LedgerAt(dir)
+	if _, damaged := ledger.Damage("", "", task.Source.Flavor); damaged {
 		return "", false
 	}
-	tail, ok := binlog.ReconcileOpenTail(dir)
+	tail, ok := ledger.Tail()
 	if !ok {
 		return "", false
 	}
