@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a MySQL task directory that switched source at least once, its SOURCE_SWITCHOVER events (the gtid_set each continued switch recorded as stored), the task's start gtid_set, and the GTIDs of its local segments
 // output: a storage problem when a switch recorded transactions as stored that no local segment holds, between transactions the segments do hold, or right after the task's start set while the task's first file is still on disk (a stored GTID hole), naming the first segment after the hole so /replay and /window stop before it; segment GTID ranges come from the segment ledger (binlog.Ledger.Contents, ADR 0006)
-// pos: safety net for a failback chain whose segment was lost (a hole is not reported while a sealed UPLOADED catalog row before the cut is only in object storage: replay reads it from there) (an earlier build's first-stint file kept only in object storage, or a file deleted by hand); read-only, Start is not refused by it
+// pos: safety net for a failback chain whose segment was lost (a hole is not reported while a sealed UPLOADED catalog row before the cut is only in object storage: replay reads it from there) (an earlier build's first-stint file kept only in object storage, or a file deleted by hand); read-only, Start is not refused by it; the third class of storageHealth, sharing its ledger (ADR 0007)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -33,12 +33,12 @@ type holeCacheEntry struct {
 
 var storedHoleCache sync.Map // task dir -> holeCacheEntry
 
-// storedHoleFor finds transactions a continued switch recorded as stored that
+// storedHoleIn finds transactions a continued switch recorded as stored that
 // no local segment holds, with stored transactions of the same source both
 // before and after them (or the start set before them, while the task's
 // first file is still on disk). Retention removes the oldest files first,
 // so it never makes such a hole. A task that never switched is not read.
-func (s *Scheduler) storedHoleFor(task Task) (binlog.StorageProblem, bool) {
+func (s *Scheduler) storedHoleIn(task Task, dir string, ledger *binlog.Ledger) (binlog.StorageProblem, bool) {
 	if s == nil {
 		return binlog.StorageProblem{}, false
 	}
@@ -49,10 +49,6 @@ func (s *Scheduler) storedHoleFor(task Task) (binlog.StorageProblem, bool) {
 	dataDir := s.dataDir
 	store := s.eventStore
 	s.mu.Unlock()
-	dir, ok := taskBinlogDir(dataDir, task.ID)
-	if !ok {
-		return binlog.StorageProblem{}, false
-	}
 	chainFile := readSourceChainFile(dir)
 	if len(chainFile) < 2 {
 		return binlog.StorageProblem{}, false
@@ -80,7 +76,7 @@ func (s *Scheduler) storedHoleFor(task Task) (binlog.StorageProblem, bool) {
 	if err != nil {
 		return binlog.StorageProblem{}, false
 	}
-	problem, found := planStoredHole(dir, chainFile, events, StartGTIDText(task), chosen)
+	problem, found := planStoredHole(ledger, chainFile, events, StartGTIDText(task), chosen)
 	if found && s.uploadedOnlyBefore(task.ID, dir, problem.Segment) {
 		// A catalog row whose bytes are only in object storage sits before
 		// the cut: replay reads it from there and it may hold the
@@ -115,7 +111,7 @@ func (s *Scheduler) uploadedOnlyBefore(taskID, dir, segment string) bool {
 }
 
 // planStoredHole is storedHoleFor on a listing: chosen is the replay order.
-func planStoredHole(dir string, chainFile []string, events []TaskEvent, startGTID string, chosen []BinlogFile) (binlog.StorageProblem, bool) {
+func planStoredHole(ledger *binlog.Ledger, chainFile []string, events []TaskEvent, startGTID string, chosen []BinlogFile) (binlog.StorageProblem, bool) {
 	chainFile = cleanIdents(chainFile)
 	if len(chainFile) == 0 {
 		return binlog.StorageProblem{}, false
@@ -142,7 +138,6 @@ func planStoredHole(dir string, chainFile []string, events []TaskEvent, startGTI
 	if err != nil {
 		held = binlog.GTIDSet{}
 	}
-	ledger := binlog.LedgerAt(dir)
 	parts := make([]holeFile, 0, len(chosen))
 	for _, f := range chosen {
 		name := segmentInventoryBasename(f)

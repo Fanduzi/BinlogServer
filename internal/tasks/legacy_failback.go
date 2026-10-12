@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task directory, its .source-chain, and its SOURCE_SWITCHOVER events (a builds before the failback fix wrote a failback A, B, A without a third chain line and with A's first-stint names)
 // output: a plan that moves each segment of a later stint back to that stint's name ({identity}~{n}.{binlog}), proven by the GTID sets recorded at each switch; or a refusal naming the files when the order cannot be proven; the storage alert and replay cutoff for both; and the repair itself (a journal, the renames, the catalog rows, the checkpoint file name, the chain) run before the runner starts
-// pos: upgrade path for task directories written by v0.5.57 / 0a84917a after a real failback
+// pos: upgrade path for task directories written by v0.5.57 / 0a84917a after a real failback; the second class of storageHealth (legacyFailbackIn shares its ledger, ADR 0007)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -126,7 +126,7 @@ type legacySegment struct {
 // chain that returns to an earlier server, with a chain file that is the
 // start of that chain, is checked. Only the segments of a stint whose server
 // comes back later, from the file it left at onward, are read.
-func planLegacyFailback(dir string, chainFile []string, events []TaskEvent) legacyFailback {
+func planLegacyFailback(ledger *binlog.Ledger, chainFile []string, events []TaskEvent) legacyFailback {
 	chainFile = cleanIdents(chainFile)
 	if len(chainFile) == 0 {
 		return legacyFailback{}
@@ -156,7 +156,6 @@ func planLegacyFailback(dir string, chainFile []string, events []TaskEvent) lega
 	if len(later) == 0 {
 		return legacyFailback{}
 	}
-	ledger := binlog.LedgerAt(dir)
 	segs, err := ledger.Segments()
 	if err != nil {
 		return legacyFailback{}
@@ -287,7 +286,7 @@ func planLegacyFailback(dir string, chainFile []string, events []TaskEvent) lega
 		if prefixes[j] == "" {
 			to = seg.server + seg.suffix
 		}
-		if _, err := os.Lstat(filepath.Join(dir, to)); err == nil {
+		if _, err := os.Lstat(filepath.Join(ledger.Dir(), to)); err == nil {
 			problems = append(problems, fmt.Sprintf("%s belongs to stint %d but %s already exists", seg.name, j+1, to))
 			continue
 		}
@@ -445,17 +444,28 @@ var legacyCache sync.Map // task dir -> legacyCacheEntry
 // segment is added, renamed, or removed, or the chain file changes, so a
 // repeated read does not reread the switch events or the segments.
 func (s *Scheduler) legacyFailbackFor(task Task) legacyFailback {
-	if s == nil || !strings.EqualFold(strings.TrimSpace(task.Source.Flavor), "mysql") && strings.TrimSpace(task.Source.Flavor) != "" {
+	if s == nil {
 		return legacyFailback{}
 	}
 	s.mu.Lock()
 	dataDir := s.dataDir
-	store := s.eventStore
 	s.mu.Unlock()
 	dir, ok := taskBinlogDir(dataDir, task.ID)
 	if !ok {
 		return legacyFailback{}
 	}
+	return s.legacyFailbackIn(task, dir, binlog.LedgerAt(dir))
+}
+
+// legacyFailbackIn is legacyFailbackFor on a ledger of the task directory
+// the caller already holds, so one storage-health question lists it once.
+func (s *Scheduler) legacyFailbackIn(task Task, dir string, ledger *binlog.Ledger) legacyFailback {
+	if s == nil || !strings.EqualFold(strings.TrimSpace(task.Source.Flavor), "mysql") && strings.TrimSpace(task.Source.Flavor) != "" {
+		return legacyFailback{}
+	}
+	s.mu.Lock()
+	store := s.eventStore
+	s.mu.Unlock()
 	if j, ok := readLegacyJournal(dir); ok {
 		return j
 	}
@@ -465,7 +475,7 @@ func (s *Scheduler) legacyFailbackFor(task Task) legacyFailback {
 	if len(chainFile) < 2 {
 		return legacyFailback{}
 	}
-	sig := legacySignature(dir, chainFile)
+	sig := legacySignature(ledger, chainFile)
 	if v, ok := legacyCache.Load(dir); ok {
 		if entry := v.(legacyCacheEntry); entry.sig == sig {
 			return entry.result
@@ -475,23 +485,21 @@ func (s *Scheduler) legacyFailbackFor(task Task) legacyFailback {
 	if err != nil {
 		return legacyFailback{}
 	}
-	result := planLegacyFailback(dir, chainFile, events)
+	result := planLegacyFailback(ledger, chainFile, events)
 	legacyCache.Store(dir, legacyCacheEntry{sig: sig, result: result})
 	return result
 }
 
-func legacySignature(dir string, chainFile []string) string {
-	entries, err := os.ReadDir(dir)
+func legacySignature(ledger *binlog.Ledger, chainFile []string) string {
+	segs, err := ledger.Segments()
 	if err != nil {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString(strings.Join(chainFile, ","))
-	for _, entry := range entries {
-		if _, ok := binlog.ClassifySegment(entry.Name()); ok {
-			b.WriteByte('|')
-			b.WriteString(entry.Name())
-		}
+	for _, seg := range segs {
+		b.WriteByte('|')
+		b.WriteString(seg.Name)
 	}
 	return b.String()
 }

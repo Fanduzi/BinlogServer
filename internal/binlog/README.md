@@ -11,7 +11,7 @@
 - `open_tail.go`: `ScanOpenTail` 读最高打开分段（`Ledger.Tail` 选段后调用它）：每个完整事务的 GTID（MySQL、带 tag 的 GTID、MariaDB）、previous-GTIDs，以及续传截断点。末尾的事务没写完、且它前面正好是一个完整事务结束处时给出截断偏移和位点；否则给出这个事务的 GTID，续传在它里面接着拉。XID、XA_PREPARE、压缩的 TRANSACTION_PAYLOAD、DDL 和 `COMMIT`/`ROLLBACK`/`XA COMMIT` 算提交（`TransactionQueryEffect`）。`OpenTail.Durable` 是尾部已落盘的 GTID 文本，`Ledger.ResumeGTID` 把种子集合和它们合起来。只读，不改文件。
 - `gtid_set.go`: `GTIDSet`，仓库里唯一的 GTID 区间类型：加、并、减、包含、内部空洞和规范文本。`ParseGTIDSet` 走 go-mysql 校验，`ParseGTIDSetLenient` 不走（坏串返回 false）。
 - `ledger.go`: 段账本（ADR 0006）。`LedgerAt(dir)` 读一次目录，回答分段顺序、每段 GTID 区间和 previous-GTIDs（`Contents`，按 size+mtime 缓存）、已存集合 `Stored`、空洞 `Holes`、损坏 `Damage`、续传尾部 `Tail` 和续传集合 `ResumeGTID`。不在本地目录的字节用 `ReadSegmentContents`。
-- `storage_consistency.go`: `Ledger.Damage(checkpoint, start, flavor)` 只认重拉损坏的硬痕迹，并返回第一个损坏分段 `Segment`、它之前仍可恢复的分段 `Valid`、checkpoint 里有但起点集合和任何分段都没有的 MySQL GTID `Missing`，以及新任务起点 `Restart`（起点集合或第一个分段的 previous-GTIDs，加上 `Valid` 的事务；未知时为空）。Rotate 指向自己或更早的同名 binlog（身份前缀 `uuid.` 或回切段前缀 `uuid~n.` 先剥掉），或 `end_log_pos` 在该分段里倒退，才是问题。GTID 序号乱序、多个 UUID 交错、某个序号在下一个分段里、起点集合或 `gtid_purged` 里的空洞，都不是。文件之间的缺口也不拒绝启动。目录不存在不是问题。checkpoint 和 flavor 仍传进来，不参与判断。
+- `storage_consistency.go`: `Ledger.Damage(checkpoint, start, flavor)` 只认重拉损坏的硬痕迹，并返回第一个损坏分段 `Segment`、它之前仍可恢复的分段 `Valid`、checkpoint 里有但起点集合和任何分段都没有的 MySQL GTID `Missing`，以及新任务起点 `Restart`（起点集合或第一个分段的 previous-GTIDs，加上 `Valid` 的事务；未知时为空）。Rotate 指向自己或更早的同名 binlog（身份前缀 `uuid.` 或回切段前缀 `uuid~n.` 先剥掉），或 `end_log_pos` 在该分段里倒退，才是问题。GTID 序号乱序、多个 UUID 交错、某个序号在下一个分段里、起点集合或 `gtid_purged` 里的空洞，都不是。文件之间的缺口也不拒绝启动。目录不存在不是问题。checkpoint 和 flavor 仍传进来，不参与判断。 `Ledger.IsDamaged()` 只回答有没有损坏分段，不算恢复集合；runner 启动前的拒绝用它。
 
 ## Exports
 - 文件写入、rotate 与 checkpoint 推进基础能力。
