@@ -276,7 +276,8 @@ export async function listFiles(id, limit = 80) {
   return data;
 }
 
-export async function downloadReplayArchive(id, limit = 80, window) {
+// limit is optional: without it the archive holds every replay file (#305).
+export async function downloadReplayArchive(id, limit, window) {
   const path = `/api/tasks/${encodeURIComponent(id)}/replay/archive`;
   const params = {};
   const stop = String(window?.stop || "").trim();
@@ -288,7 +289,7 @@ export async function downloadReplayArchive(id, limit = 80, window) {
     if (executed) params.start_gtid_set = executed;
     const start = String(window?.start || "").trim();
     if (start) params.start_datetime = start;
-  } else {
+  } else if (limit) {
     params.limit = limit;
   }
   if (useMockAPI) {
@@ -311,15 +312,14 @@ export async function getRecoveryWindow(id) {
   return data;
 }
 
-export async function listReplay(id, limit = 80) {
+// listReplay without limit is every file replay needs (#305). A limit
+// window answers omitted_files and a warning when it leaves files out.
+export async function listReplay(id, limit) {
+  const params = limit ? { limit } : {};
   if (useMockAPI) {
-    return mockRequest("GET", `/api/tasks/${id}/replay`, {
-      params: { limit },
-    });
+    return mockRequest("GET", `/api/tasks/${id}/replay`, { params });
   }
-  const { data } = await http.get(`/api/tasks/${id}/replay`, {
-    params: { limit },
-  });
+  const { data } = await http.get(`/api/tasks/${id}/replay`, { params });
   return data;
 }
 

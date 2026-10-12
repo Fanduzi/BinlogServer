@@ -810,9 +810,9 @@ function replayClient(flavor) {
 }
 
 function replayLimit(query) {
-  if (!query.has("limit")) return 200;
+  if (!query.has("limit")) return Number.MAX_SAFE_INTEGER;
   const n = parseInteger(query.get("limit"));
-  if (n === null || n < 1) return 200;
+  if (n === null || n < 1) return Number.MAX_SAFE_INTEGER;
   return n;
 }
 

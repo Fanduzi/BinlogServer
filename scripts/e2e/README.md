@@ -163,10 +163,10 @@ make e2e-topology-check
 1. 启动 control-plane + worker1，创建并启动任务到 `RUNNING`。
 2. 写入 source 数据并触发 rotate。
 3. 在检测到 `OPEN` 文件后强制 kill worker1（模拟崩溃）。
-4. 启动 worker2（复用同一数据目录）接管任务，确认 `epoch` 增长且 checkpoint 持续推进。
+4. 启动 worker2（复用同一数据目录）接管任务，确认 `epoch` 增长且 checkpoint 持续推进；再写入并 rotate 一次，保证除第一个文件外至少有两个完整封存文件。
 5. 停任务并到 `STOPPED` 后，校验旧 epoch `OPEN` 文件已清理；若仍有 `OPEN` 文件，必须全部属于 current epoch（允许存在，不计为异常）。
 6. 仅对 sealed 文件集合做命名校验与唯一性校验（`mysql-bin.######`，无异常后缀）。
-7. 抽样对比主库与备份 sealed 文件 md5（1-2 个文件）一致。
+7. 对比主库与备份最新两个完整 sealed 文件的 md5 一致。任务的第一个文件不比：LATEST 从源文件中部开始，备份是 magic + dump 的 format description + 起点之后的源字节，本来就不等于源文件（不是数据损坏）。完整文件少于两个时失败。
 
 ## smoke-retry-upload 场景说明
 

@@ -56,7 +56,7 @@ test('task drawer copies the highest-epoch replay command', async ({ page }) => 
   const request = await requestPromise
   const archiveURL = new URL(request.url())
   expect(archiveURL.pathname).toBe('/api/tasks/100/replay/archive')
-  expect(archiveURL.searchParams.get('limit')).toBe('80')
+  expect(archiveURL.searchParams.get('limit')).toBeNull()
   expect(download.suggestedFilename()).toBe('task-100-replay.tar')
   expect(await readReplayDownload(download)).toBe(
     ['mysql-bin.000001', 'mysql-bin.000002.open.e4'].join('\n'),

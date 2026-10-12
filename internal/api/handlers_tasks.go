@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -683,7 +685,8 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 		writeJSON(w, http.StatusOK, set)
 		return
 	}
-	files, err := s.tasks.ListFiles(taskID, parseLimit(r, 200))
+	limit := replayLimit(r)
+	files, err := s.tasks.ListFiles(taskID, limit)
 	if err != nil {
 		if errors.Is(err, tasks.ErrTaskNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -701,9 +704,11 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	selected, warning := tasks.SelectReplayFiles(files), ""
-	if cut, ok := s.tasks.(replayDamageCutter); ok {
-		selected, warning = cut.SelectReplayFilesFor(task, files)
+	selected, warning := s.selectReplay(task, files)
+	omitted, omitWarning, err := s.replayOmitted(task, limit, selected)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	paths := make([]string, 0, len(selected))
 	for _, file := range selected {
@@ -711,13 +716,80 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 	}
 	client, hint := tasks.ReplayClient(task.Source.Flavor)
 	writeJSON(w, http.StatusOK, tasks.ReplaySet{
-		Flavor:     task.Source.Flavor,
-		Client:     client,
-		ClientHint: hint,
-		Paths:      paths,
-		Locations:  tasks.ReplayLocations(selected),
-		Warning:    warning,
+		Flavor:       task.Source.Flavor,
+		Client:       client,
+		ClientHint:   hint,
+		Paths:        paths,
+		Locations:    tasks.ReplayLocations(selected),
+		Warning:      joinWarnings(warning, omitWarning),
+		OmittedFiles: omitted,
 	})
+}
+
+// selectReplay is the replay choice for files: the damage cut when the
+// task service has one, SelectReplayFiles otherwise.
+func (s *Server) selectReplay(task tasks.Task, files []tasks.BinlogFile) ([]tasks.BinlogFile, string) {
+	if cut, ok := s.tasks.(replayDamageCutter); ok {
+		return cut.SelectReplayFilesFor(task, files)
+	}
+	return tasks.SelectReplayFiles(files), ""
+}
+
+// replayOmitted counts the files the whole inventory would replay before
+// the first file of a limit window (#305). Without limit the window is the
+// whole inventory and nothing is left out. A window that leaves files out
+// says so: the set does not restore from the start of the backup.
+func (s *Server) replayOmitted(task tasks.Task, limit int, selected []tasks.BinlogFile) (int, string, error) {
+	if limit >= allFilesLimit {
+		return 0, "", nil
+	}
+	all, err := s.tasks.ListFiles(task.ID, allFilesLimit)
+	if err != nil {
+		return 0, "", err
+	}
+	full, _ := s.selectReplay(task, all)
+	kept := make(map[string]bool, len(selected))
+	for _, file := range selected {
+		kept[file.FilePath] = true
+	}
+	omitted := 0
+	earliest := ""
+	for _, file := range full {
+		if !kept[file.FilePath] {
+			if omitted == 0 {
+				earliest = filepath.Base(file.FilePath)
+			}
+			omitted++
+		}
+	}
+	if omitted == 0 {
+		return 0, "", nil
+	}
+	first := ""
+	if len(selected) > 0 {
+		first = " The set starts at " + filepath.Base(selected[0].FilePath) + "."
+	}
+	return omitted, fmt.Sprintf("limit=%d leaves out %d earlier replay file(s), starting at %s.%s Replaying this set alone does not restore from the start of the backup; request it without limit for every file.", limit, omitted, earliest, first), nil
+}
+
+// replayLimit is the inventory window of /replay and /replay/archive: the
+// whole inventory unless the caller asks for a window (#305).
+func replayLimit(r *http.Request) int {
+	limit := parseLimit(r, allFilesLimit)
+	if limit < 1 {
+		return allFilesLimit
+	}
+	return limit
+}
+
+func joinWarnings(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 // replayDamageCutter drops a damaged segment and every later one from the
@@ -753,7 +825,22 @@ func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request,
 	case seek.datetime:
 		body, size, err = s.tasks.OpenPITRArchive(taskID, seek.start, seek.stop)
 	default:
-		body, size, err = s.tasks.OpenReplayArchive(taskID, parseLimit(r, 200))
+		limit := replayLimit(r)
+		body, size, err = s.tasks.OpenReplayArchive(taskID, limit)
+		if err == nil && limit < allFilesLimit {
+			// The tar has no room for a warning. A window that leaves files
+			// out says so in headers (#305).
+			omitted, warning, oerr := s.archiveOmitted(taskID, limit)
+			if oerr != nil {
+				_ = body.Close()
+				http.Error(w, oerr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if omitted > 0 {
+				w.Header().Set("X-Replay-Omitted-Files", strconv.Itoa(omitted))
+				w.Header().Set("X-Replay-Warning", warning)
+			}
+		}
 	}
 	if err != nil {
 		writeSegmentOpenError(w, err)
@@ -774,6 +861,20 @@ func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, body)
+}
+
+// archiveOmitted is replayOmitted for the archive's limit window.
+func (s *Server) archiveOmitted(taskID string, limit int) (int, string, error) {
+	task, err := s.tasks.GetTask(taskID)
+	if err != nil {
+		return 0, "", err
+	}
+	files, err := s.tasks.ListFiles(taskID, limit)
+	if err != nil {
+		return 0, "", err
+	}
+	selected, _ := s.selectReplay(task, files)
+	return s.replayOmitted(task, limit, selected)
 }
 
 // handleTaskRetryUpload 触发指定任务的失败文件重传并返回统计。
