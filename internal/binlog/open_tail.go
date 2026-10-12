@@ -1,7 +1,7 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task segment directory and the bytes of its highest open segment
 // output: the GTIDs of every complete transaction in that segment, its previous-GTIDs text, and the resume cut: the end of the last complete transaction when the segment ends inside one that can be cut cleanly, otherwise the GTID of that unfinished transaction
-// pos: reconcile a checkpoint written after the segment flush with what the open segment really holds, so a resume never treats its own tail as a gap
+// pos: the per-file scanner behind Ledger.Tail and Ledger.ResumeGTID (ledger.go); reconcile a checkpoint written after the segment flush with what the open segment really holds, so a resume never treats its own tail as a gap
 // note: if this file changes, update this header and module README.md.
 package binlog
 
@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
 
@@ -51,22 +50,6 @@ type OpenTail struct {
 	// record this GTID. PartialInTxn reports that BEGIN was already seen.
 	PartialGTID  string
 	PartialInTxn bool
-}
-
-// ReconcileOpenTail reads the open segment DurableResumeDir would resume
-// from. ok is false when the directory has no open segment with a complete
-// event. The file is not changed; the caller applies Truncate.
-func ReconcileOpenTail(taskDir string) (OpenTail, bool) {
-	seg, ok := durableOpenSegment(taskDir)
-	if !ok {
-		return OpenTail{}, false
-	}
-	tail, ok := ScanOpenTail(seg.path)
-	if !ok {
-		return OpenTail{}, false
-	}
-	tail.File = seg.source
-	return tail, true
 }
 
 // ScanOpenTail reads one segment. ok is false when the file is unreadable or
@@ -358,40 +341,4 @@ func mariadbGTIDList(body []byte) (string, bool) {
 		parts = append(parts, g.String())
 	}
 	return strings.Join(parts, ","), true
-}
-
-// UnionGTIDText adds the open tail's transactions and previous-GTIDs text to
-// seed and returns the combined set. A text that does not parse for flavor
-// is skipped. An empty seed and an empty tail return "".
-func UnionGTIDText(flavor, seed string, tail OpenTail) string {
-	if strings.TrimSpace(flavor) == "" {
-		flavor = gomysql.MySQLFlavor
-	}
-	var set gomysql.GTIDSet
-	add := func(text string) {
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return
-		}
-		if set == nil {
-			parsed, err := gomysql.ParseGTIDSet(flavor, text)
-			if err != nil {
-				return
-			}
-			set = parsed
-			return
-		}
-		_ = set.Update(text)
-	}
-	add(seed)
-	for _, p := range tail.Previous {
-		add(p)
-	}
-	for _, g := range tail.GTIDs {
-		add(g)
-	}
-	if set == nil || set.IsEmpty() {
-		return ""
-	}
-	return set.String()
 }

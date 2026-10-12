@@ -114,7 +114,7 @@ func TestScanOpenTail_CompleteTransactionsPastCheckpoint(t *testing.T) {
 		seg.txn(tailUUID, 11)
 		dir := t.TempDir()
 		seg.write(dir, "mysql-bin.000003.open.e1")
-		tail, ok := ReconcileOpenTail(dir)
+		tail, ok := LedgerAt(dir).Tail()
 		if !ok {
 			t.Fatal("no tail")
 		}
@@ -125,7 +125,7 @@ func TestScanOpenTail_CompleteTransactionsPastCheckpoint(t *testing.T) {
 			t.Fatalf("crc=%v tail %+v want pos %d", crc, tail, seg.pos)
 		}
 		// The checkpoint was written before :11 reached the row.
-		if got := UnionGTIDText("mysql", tailUUID+":1-10", tail); got != tailUUID+":1-11" {
+		if got := unionDurable("mysql", tailUUID+":1-10", tail); got != tailUUID+":1-11" {
 			t.Fatalf("union %s", got)
 		}
 	}
@@ -142,7 +142,7 @@ func TestScanOpenTail_CutsUnfinishedTransactionAtCommit(t *testing.T) {
 	seg.rows()
 	dir := t.TempDir()
 	path := seg.write(dir, "mysql-bin.000003.open.e1")
-	tail, ok := ReconcileOpenTail(dir)
+	tail, ok := LedgerAt(dir).Tail()
 	if !ok || !tail.Truncate || tail.CutOffset != cut || tail.Pos != commitEnd {
 		t.Fatalf("tail %+v want cut %d pos %d", tail, cut, commitEnd)
 	}
@@ -158,7 +158,7 @@ func TestScanOpenTail_CutsUnfinishedTransactionAtCommit(t *testing.T) {
 	if _, pos, ok := DurableResumeDir(dir); !ok || pos != commitEnd {
 		t.Fatalf("resume after cut %d ok=%v want %d", pos, ok, commitEnd)
 	}
-	again, ok := ReconcileOpenTail(dir)
+	again, ok := LedgerAt(dir).Tail()
 	if !ok || again.Truncate || again.PartialGTID != "" || again.Pos != commitEnd {
 		t.Fatalf("second scan %+v", again)
 	}
@@ -175,7 +175,7 @@ func TestScanOpenTail_UnfinishedFirstTransactionAfterMidFileHeader(t *testing.T)
 	seg.rows()
 	dir := t.TempDir()
 	seg.write(dir, "mysql-bin.000007.open.e2")
-	tail, ok := ReconcileOpenTail(dir)
+	tail, ok := LedgerAt(dir).Tail()
 	if !ok || tail.Truncate || tail.PartialGTID != tailUUID+":40" || !tail.PartialInTxn || tail.Pos != seg.pos {
 		t.Fatalf("tail %+v", tail)
 	}
@@ -193,11 +193,11 @@ func TestScanOpenTail_GapsOrderAndUUIDsAreAllKept(t *testing.T) {
 	seg.txn(tailUUID, 13)
 	dir := t.TempDir()
 	seg.write(dir, "mysql-bin.000003.open.e1")
-	tail, ok := ReconcileOpenTail(dir)
+	tail, ok := LedgerAt(dir).Tail()
 	if !ok || tail.Truncate || tail.PartialGTID != "" {
 		t.Fatalf("tail %+v", tail)
 	}
-	got := UnionGTIDText("mysql", tailUUID+":1-10", tail)
+	got := unionDurable("mysql", tailUUID+":1-10", tail)
 	want := tailUUID + ":1-13:100," + tailUUID2 + ":5"
 	if !sameGTIDText(t, got, want) {
 		t.Fatalf("union %s want %s", got, want)
@@ -224,7 +224,7 @@ func TestScanOpenTail_DDLXAAndCompressedPayloadCommit(t *testing.T) {
 	seg.query("ROLLBACK")
 	dir := t.TempDir()
 	seg.write(dir, "mysql-bin.000003.open.e1")
-	tail, ok := ReconcileOpenTail(dir)
+	tail, ok := LedgerAt(dir).Tail()
 	if !ok || tail.Truncate || tail.PartialGTID != "" {
 		t.Fatalf("tail %+v", tail)
 	}
@@ -247,7 +247,7 @@ func TestScanOpenTail_MariaDB(t *testing.T) {
 	seg.query("INSERT INTO t VALUES (2)")
 	dir := t.TempDir()
 	seg.write(dir, "mariadb-bin.000002.open.e1")
-	tail, ok := ReconcileOpenTail(dir)
+	tail, ok := LedgerAt(dir).Tail()
 	if !ok {
 		t.Fatal("no tail")
 	}
@@ -257,20 +257,20 @@ func TestScanOpenTail_MariaDB(t *testing.T) {
 	if !tail.Truncate || tail.CutOffset != cut || tail.Pos != commitEnd || tail.PartialGTID != "0-1-9" {
 		t.Fatalf("tail %+v want cut %d pos %d", tail, cut, commitEnd)
 	}
-	if got := UnionGTIDText("mariadb", "0-1-6", tail); got != "0-1-8" {
+	if got := unionDurable("mariadb", "0-1-6", tail); got != "0-1-8" {
 		t.Fatalf("union %s", got)
 	}
 }
 
-func TestReconcileOpenTail_NoOpenSegment(t *testing.T) {
+func TestLedgerTail_NoOpenSegment(t *testing.T) {
 	dir := t.TempDir()
 	seg := newTailSegment(t, false)
 	seg.txn(tailUUID, 1)
 	seg.write(dir, "mysql-bin.000001")
-	if _, ok := ReconcileOpenTail(dir); ok {
+	if _, ok := LedgerAt(dir).Tail(); ok {
 		t.Fatal("a sealed segment is not a resume tail")
 	}
-	if _, ok := ReconcileOpenTail(filepath.Join(dir, "missing")); ok {
+	if _, ok := LedgerAt(filepath.Join(dir, "missing")).Tail(); ok {
 		t.Fatal("missing directory")
 	}
 }
@@ -303,7 +303,7 @@ func TestTransactionQueryEffect(t *testing.T) {
 
 func sameGTIDText(t *testing.T, a, b string) bool {
 	t.Helper()
-	x := UnionGTIDText("mysql", a, OpenTail{})
-	y := UnionGTIDText("mysql", b, OpenTail{})
+	x := unionDurable("mysql", a, OpenTail{})
+	y := unionDurable("mysql", b, OpenTail{})
 	return x == y && x != ""
 }

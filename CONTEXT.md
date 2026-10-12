@@ -57,3 +57,7 @@ _Avoid_: 用任务观测的过滤结果冒充集群人数；用进程里还没�
 **源身份**:
 一台源是 host 加 port。回环地址的不同写法是同一台源。
 _Avoid_: 同一界面里 lookup 当一台、过滤当两台
+
+**段账本 (Segment Ledger)**:
+一个任务目录此刻真正落盘了什么：按 binlog 顺序的分段、每段的 GTID 区间和 previous-GTIDs 头、已存 GTID 集合、集合里的空洞、第一个损坏分段及恢复集合、可续传的打开尾部（完整事务和末尾半截事务）。`binlog.LedgerAt(dir)` 每次问答读一次目录。GTID 区间只有一种类型 `binlog.GTIDSet`。
+_Avoid_: 调用方自己 `ReadDir` 再扫分段；自己把 previous-GTIDs 和事务并成「已存集合」；再写一份区间类型
