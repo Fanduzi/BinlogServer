@@ -138,10 +138,7 @@ func (t *executedGTID) absorbTail(tail binlog.OpenTail) {
 	if t == nil {
 		return
 	}
-	for _, p := range tail.Previous {
-		t.union(p)
-	}
-	for _, g := range tail.GTIDs {
+	for _, g := range tail.Durable() {
 		t.union(g)
 	}
 	t.pending = nil

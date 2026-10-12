@@ -20,8 +20,6 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
-
-	"github.com/go-mysql-org/go-mysql/mysql"
 )
 
 const legacyRepairJournal = ".legacy-failback-repair"
@@ -158,42 +156,27 @@ func planLegacyFailback(dir string, chainFile []string, events []TaskEvent) lega
 	if len(later) == 0 {
 		return legacyFailback{}
 	}
-	entries, err := os.ReadDir(dir)
+	ledger := binlog.LedgerAt(dir)
+	segs, err := ledger.Segments()
 	if err != nil {
 		return legacyFailback{}
 	}
 	prefixes := SourceStintPrefixes(ids)
-	var all []legacySegment
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		named, ok := binlog.ClassifySegment(entry.Name())
-		if !ok {
-			continue
-		}
-		stint := SourceStintOf(named.Source, ids)
-		server := named.Source
+	all := make([]legacySegment, 0, len(segs))
+	for _, seg := range segs {
+		stint := SourceStintOf(seg.Named.Source, ids)
+		server := seg.Named.Source
 		if p := prefixes[stint]; p != "" {
-			server = strings.TrimPrefix(named.Source, p+".")
+			server = strings.TrimPrefix(seg.Named.Source, p+".")
 		}
 		all = append(all, legacySegment{
-			name:   entry.Name(),
-			named:  named,
+			name:   seg.Name,
+			named:  seg.Named,
 			stint:  stint,
 			server: server,
-			suffix: strings.TrimPrefix(entry.Name(), named.Source),
+			suffix: strings.TrimPrefix(seg.Name, seg.Named.Source),
 		})
 	}
-	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].named.Seq != all[j].named.Seq {
-			return all[i].named.Seq < all[j].named.Seq
-		}
-		if all[i].named.Epoch != all[j].named.Epoch {
-			return all[i].named.Epoch < all[j].named.Epoch
-		}
-		return all[i].name < all[j].name
-	})
 	out := legacyFailback{Chain: ids}
 	var problems []string
 	// Read only what can be misnamed.
@@ -208,18 +191,18 @@ func planLegacyFailback(dir string, chainFile []string, events []TaskEvent) lega
 				continue
 			}
 		}
-		log, err := scanSegmentFile(filepath.Join(dir, seg.name))
+		contents, err := ledger.Contents(seg.name)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("%s cannot be read (%v)", seg.name, err))
 			out.Affected = append(out.Affected, seg.name)
 			continue
 		}
-		seg.txns = log.Events
+		seg.txns = contents.Log.Events
 		checked = append(checked, seg)
 	}
-	ins := make([]mysql.GTIDSet, len(stints))
+	ins := make([]binlog.GTIDSet, len(stints))
 	for k, st := range stints {
-		set, err := parseGTIDText(st.in)
+		set, err := binlog.ParseGTIDSet(st.in)
 		if err != nil {
 			// Nothing can be proven. Replay stops before the first file
 			// that could be misnamed: the earliest file read above.
@@ -241,12 +224,12 @@ func planLegacyFailback(dir string, chainFile []string, events []TaskEvent) lega
 	}
 	fits := func(txns []binlog.GTIDEventRef, k int) bool {
 		if k > 0 {
-			if disjoint, err := eventsDisjoint(ins[k], txns); err != nil || !disjoint {
+			if !eventsDisjoint(ins[k], txns) {
 				return false
 			}
 		}
 		if k < len(stints)-1 {
-			if contained, err := eventsContained(ins[k+1], txns); err != nil || !contained {
+			if !eventsContained(ins[k+1], txns) {
 				return false
 			}
 		}
@@ -401,33 +384,17 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
-func scanSegmentFile(p string) (binlog.SegmentGTIDLog, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return binlog.SegmentGTIDLog{}, err
-	}
-	defer f.Close()
-	return binlog.ScanSegmentGTIDs(f)
-}
-
 // eventsDisjoint reports that set holds none of the events' GTIDs.
-func eventsDisjoint(set mysql.GTIDSet, events []binlog.GTIDEventRef) (bool, error) {
-	if set == nil || set.String() == "" {
-		return true, nil
-	}
+func eventsDisjoint(set binlog.GTIDSet, events []binlog.GTIDEventRef) bool {
 	for _, ev := range events {
 		if ev.UUID == "" || ev.Seq <= 0 {
 			continue
 		}
-		one, err := parseGTIDText(fmt.Sprintf("%s:%d", ev.UUID, ev.Seq))
-		if err != nil {
-			return false, err
-		}
-		if set.Contain(one) {
-			return false, nil
+		if set.HasEvent(ev) {
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
 // legacyMessage is the operator text for a found plan.
@@ -996,27 +963,28 @@ func fetchLegacySegment(ctx context.Context, opener objectOpener, dir string, m 
 	if size >= 0 && n != size {
 		return fail(fmt.Errorf("object %s was cut short (%d of %d bytes).", key, n, size))
 	}
-	log, err := scanSegmentFile(tmp)
+	fetched, err := binlog.LedgerAt(filepath.Dir(tmp)).Contents(filepath.Base(tmp))
 	if err != nil {
 		return fail(fmt.Errorf("object %s is not a readable binlog segment (%v).", key, err))
 	}
+	log := fetched.Log
 	if !log.HasPrevious {
 		return fail(fmt.Errorf("object %s has no binlog header, so it is not %s.", key, m.Name))
 	}
-	in, err := parseGTIDText(m.In)
+	in, err := binlog.ParseGTIDSet(m.In)
 	if err != nil {
 		return fail(err)
 	}
-	outSet, err := parseGTIDText(m.Out)
+	outSet, err := binlog.ParseGTIDSet(m.Out)
 	if err != nil {
 		return fail(err)
 	}
 	if m.Stint > 0 {
-		if disjoint, err := eventsDisjoint(in, log.Events); err != nil || !disjoint {
+		if !eventsDisjoint(in, log.Events) {
 			return fail(fmt.Errorf("object %s holds transactions stored before stint %d began, so it is not that stint's %s.", key, m.Stint+1, m.Name))
 		}
 	}
-	if contained, err := eventsContained(outSet, log.Events); err != nil || !contained {
+	if !eventsContained(outSet, log.Events) {
 		return fail(fmt.Errorf("object %s holds transactions stint %d had not stored when it left, so it is not that stint's %s (a later stint may have overwritten it).", key, m.Stint+1, m.Name))
 	}
 	if _, err := os.Lstat(target); err == nil {

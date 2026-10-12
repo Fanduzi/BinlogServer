@@ -21,7 +21,7 @@ func TestScanSegmentGTIDs_PreviousAndEvents(t *testing.T) {
 	const uuid = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
 	when := time.Date(2024, 1, 1, 1, 20, 0, 0, time.UTC)
 	body, offsets := testGTIDSegment(t, when, uuid+":1-2", true, uuid, 3, 4)
-	log, err := ScanSegmentGTIDs(bytes.NewReader(body))
+	log, err := scanSegmentGTIDs(bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestScanSegmentGTIDs_UnreadablePrevious(t *testing.T) {
 	binary.LittleEndian.PutUint32(hdr[9:13], uint32(goreplication.EventHeaderSize+1))
 	buf.Write(hdr[:])
 	buf.WriteByte(0xff)
-	if _, err := ScanSegmentGTIDs(&buf); err == nil || !strings.Contains(err.Error(), "unreadable previous gtid event") {
+	if _, err := scanSegmentGTIDs(&buf); err == nil || !strings.Contains(err.Error(), "unreadable previous gtid event") {
 		t.Fatalf("err %v", err)
 	}
 }

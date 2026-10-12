@@ -11,13 +11,10 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"binlog_server/internal/binlog"
-
-	"github.com/go-mysql-org/go-mysql/mysql"
 )
 
 const (
@@ -123,14 +120,14 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 		if spanErr != nil {
 			return RecoveryWindow{}, spanErr
 		}
-		log, scanErr := binlog.ScanSegmentGTIDs(bytes.NewReader(raw))
+		contents, scanErr := binlog.ReadSegmentContents(bytes.NewReader(raw))
 		if scanErr != nil {
 			return RecoveryWindow{}, scanErr
 		}
 		view.Readable = true
 		view.SpanOK = ok
 		view.Span = EventSpan{First: first, Last: last}
-		view.Log = log
+		view.Log = contents.Log
 		views = append(views, view)
 	}
 	out, err := assessRecoveryFrom(views, task.Source.Flavor, objectStorage, StartGTIDText(task))
@@ -174,7 +171,7 @@ func assessRecoveryFrom(views []segmentView, flavor string, objectStorage bool, 
 	var events []binlog.GTIDEventRef
 
 	parts := groupChain(views)
-	var stored mysql.GTIDSet
+	var stored binlog.GTIDSet
 	if mysqlFlavor {
 		var err error
 		if stored, err = chainStoredSet(views, startGTID); err != nil {
@@ -244,11 +241,9 @@ func assessRecoveryFrom(views []segmentView, flavor string, objectStorage bool, 
 	out.Latest = latest
 	out.Continuous = len(out.Breaks) == 0
 	if mysqlFlavor && len(events) > 0 {
-		set, err := eventGTIDSet(events)
-		if err != nil {
-			return RecoveryWindow{}, err
-		}
-		if set != nil && !set.IsEmpty() {
+		set := binlog.GTIDSet{}
+		set.AddEvents(events)
+		if !set.IsEmpty() {
 			out.GTIDSet = set.String()
 		}
 	}
@@ -421,37 +416,29 @@ func gtidHole(prev, next binlog.SegmentGTIDLog) (bool, error) {
 		return false, nil
 	}
 	if next.HasPrevious {
-		nextSet, err := parseGTIDText(next.Previous)
+		nextSet, err := binlog.ParseGTIDSet(next.Previous)
 		if err != nil {
 			return false, err
 		}
-		contained, err := eventsContained(nextSet, prev.Events)
-		if err != nil {
-			return false, err
-		}
-		if !contained {
+		if !eventsContained(nextSet, prev.Events) {
 			return true, nil
 		}
-		return previousContainsBeyond(nextSet, prev.Events)
+		return previousContainsBeyond(nextSet, prev.Events), nil
 	}
 	return eventSeqHole(prev.Events, next.Events), nil
 }
 
 // chainStoredSet is the history before the chain (the first previous-GTIDs
 // header) plus every transaction a readable segment stores.
-func chainStoredSet(views []segmentView, startGTID string) (mysql.GTIDSet, error) {
+func chainStoredSet(views []segmentView, startGTID string) (binlog.GTIDSet, error) {
 	start := ""
-	var events []binlog.GTIDEventRef
 	for _, view := range views {
-		if !view.Readable {
-			continue
-		}
-		if start == "" && view.Log.HasPrevious {
+		if view.Readable && view.Log.HasPrevious {
 			start = view.Log.Previous
+			break
 		}
-		events = append(events, view.Log.Events...)
 	}
-	set, err := parseGTIDText(start)
+	set, err := binlog.ParseGTIDSet(start)
 	if err != nil {
 		return nil, err
 	}
@@ -459,15 +446,13 @@ func chainStoredSet(views []segmentView, startGTID string) (mysql.GTIDSet, error
 	// they sit in the first file after its header, and a restore applies them
 	// from the seed. Without it a later server's header that names them looks
 	// like a hole at every failback.
-	if seed := strings.TrimSpace(startGTID); seed != "" {
-		if seeded, err := parseGTIDText(seed); err == nil {
-			if err := set.Update(seeded.String()); err != nil {
-				return nil, err
-			}
-		}
+	if seeded, err := binlog.ParseGTIDSet(startGTID); err == nil {
+		set.AddAll(seeded)
 	}
-	if err := addGTIDEvents(set, events); err != nil {
-		return nil, err
+	for _, view := range views {
+		if view.Readable {
+			set.AddEvents(view.Log.Events)
+		}
 	}
 	return set, nil
 }
@@ -475,62 +460,28 @@ func chainStoredSet(views []segmentView, startGTID string) (mysql.GTIDSet, error
 // switchHole is a transaction the new server had before its first stored
 // file that this chain does not hold anywhere. Without a header, a sequence
 // gap after the transactions stored before the switch is a hole.
-func switchHole(stored mysql.GTIDSet, before []binlog.GTIDEventRef, next binlog.SegmentGTIDLog) (bool, error) {
+func switchHole(stored binlog.GTIDSet, before []binlog.GTIDEventRef, next binlog.SegmentGTIDLog) (bool, error) {
 	if !next.HasPrevious {
 		return eventSeqHole(before, next.Events), nil
 	}
-	header, err := parseGTIDText(next.Previous)
+	header, err := binlog.ParseGTIDSet(next.Previous)
 	if err != nil {
 		return false, err
 	}
-	return !stored.Contain(header), nil
+	return !stored.Contains(header), nil
 }
 
-func eventGTIDSet(events []binlog.GTIDEventRef) (mysql.GTIDSet, error) {
-	set, err := parseGTIDText("")
-	if err != nil {
-		return nil, err
-	}
-	if err := addGTIDEvents(set, events); err != nil {
-		return nil, err
-	}
-	return set, nil
-}
-
-func parseGTIDText(text string) (mysql.GTIDSet, error) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return &mysql.MysqlGTIDSet{}, nil
-	}
-	return mysql.ParseGTIDSet(mysql.MySQLFlavor, text)
-}
-
-func addGTIDEvents(set mysql.GTIDSet, events []binlog.GTIDEventRef) error {
+// eventsContained reports that set holds every event's GTID.
+func eventsContained(set binlog.GTIDSet, events []binlog.GTIDEventRef) bool {
 	for _, ev := range events {
-		if ev.UUID == "" || ev.Seq <= 0 {
-			continue
-		}
-		if err := set.Update(ev.UUID + ":" + strconv.FormatInt(ev.Seq, 10)); err != nil {
-			return err
+		if !set.HasEvent(ev) {
+			return false
 		}
 	}
-	return nil
+	return true
 }
 
-func eventsContained(set mysql.GTIDSet, events []binlog.GTIDEventRef) (bool, error) {
-	for _, ev := range events {
-		one, err := mysql.ParseGTIDSet(mysql.MySQLFlavor, ev.UUID+":"+strconv.FormatInt(ev.Seq, 10))
-		if err != nil {
-			return false, err
-		}
-		if !set.Contain(one) {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func previousContainsBeyond(prev mysql.GTIDSet, events []binlog.GTIDEventRef) (bool, error) {
+func previousContainsBeyond(prev binlog.GTIDSet, events []binlog.GTIDEventRef) bool {
 	maxSeq := map[string]int64{}
 	for _, ev := range events {
 		if ev.Seq > maxSeq[ev.UUID] {
@@ -538,15 +489,11 @@ func previousContainsBeyond(prev mysql.GTIDSet, events []binlog.GTIDEventRef) (b
 		}
 	}
 	for uuid, max := range maxSeq {
-		one, err := mysql.ParseGTIDSet(mysql.MySQLFlavor, uuid+":"+strconv.FormatInt(max+1, 10))
-		if err != nil {
-			return false, err
-		}
-		if prev.Contain(one) {
-			return true, nil
+		if prev.Has(strings.ToLower(uuid), max+1) {
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 func intraSegmentHole(events []binlog.GTIDEventRef) (string, int64, bool) {
@@ -614,31 +561,30 @@ func interiorHoleBreak(views []segmentView, startGTID string, breaks []RecoveryB
 			return RecoveryBreak{}, false
 		}
 	}
-	stored := gtidRanges{}
+	stored := binlog.GTIDSet{}
 	type viewSet struct {
 		name string
-		set  gtidRanges
+		set  binlog.GTIDSet
 	}
 	sets := make([]viewSet, 0, len(views))
 	for _, view := range views {
 		if !view.Readable {
 			continue
 		}
-		one := gtidRanges{}
-		one.addEvents(view.Log.Events)
-		one.normalize()
 		name := segmentBase(view.File)
 		if name == "" {
 			name = strings.TrimSpace(view.File.FileName)
 		}
+		one := binlog.GTIDSet{}
+		one.AddEvents(view.Log.Events)
 		sets = append(sets, viewSet{name: name, set: one})
-		stored.addAll(one)
+		stored.AddAll(one)
 	}
-	stored.normalize()
-	gaps := interiorGaps(stored)
-	if seed, err := parseGTIDRanges(startGTID); err == nil {
-		gaps = gaps.minus(seed)
+	seed, err := binlog.ParseGTIDSet(startGTID)
+	if err != nil {
+		seed = nil
 	}
+	gaps := binlog.StoredHoles(stored, seed)
 	if len(gaps) == 0 {
 		return RecoveryBreak{}, false
 	}
@@ -652,10 +598,10 @@ func interiorHoleBreak(views []segmentView, startGTID string, breaks []RecoveryB
 	left, right := "", ""
 	for _, vs := range sets {
 		for _, r := range vs.set[k] {
-			if r[1] < iv[0] {
+			if r.Hi < iv.Lo {
 				left = vs.name
 			}
-			if r[0] > iv[1] && right == "" {
+			if r.Lo > iv.Hi && right == "" {
 				right = vs.name
 			}
 		}

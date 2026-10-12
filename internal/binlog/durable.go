@@ -59,6 +59,11 @@ func durableOpenSegment(taskDir string) (durableSegment, bool) {
 	if err != nil {
 		return durableSegment{}, false
 	}
+	return durableOpenSegmentIn(taskDir, entries)
+}
+
+// durableOpenSegmentIn is durableOpenSegment on a listing already read.
+func durableOpenSegmentIn(taskDir string, entries []os.DirEntry) (durableSegment, bool) {
 	cands := make([]durableSegment, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {

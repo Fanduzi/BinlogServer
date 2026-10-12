@@ -32,7 +32,7 @@ func (s *Scheduler) AttachStorageAlert(ctx context.Context, task Task) Task {
 			claimed = strings.TrimSpace(cp.GTIDSet)
 		}
 	}
-	problem, found := binlog.DetectStorageProblem(dir, claimed, StartGTIDText(task), task.Source.Flavor)
+	problem, found := binlog.LedgerAt(dir).Damage(claimed, StartGTIDText(task), task.Source.Flavor)
 	if !found {
 		if legacy := s.legacyFailbackFor(task); legacy.found() {
 			problem = legacyProblem(legacy)
@@ -84,7 +84,7 @@ func (s *Scheduler) storageProblem(task Task) (binlog.StorageProblem, bool) {
 	if !ok {
 		return binlog.StorageProblem{}, false
 	}
-	if problem, found := binlog.DetectStorageProblem(dir, "", StartGTIDText(task), task.Source.Flavor); found {
+	if problem, found := binlog.LedgerAt(dir).Damage("", StartGTIDText(task), task.Source.Flavor); found {
 		return problem, true
 	}
 	// A directory an earlier build wrote across a failback: replay stops
