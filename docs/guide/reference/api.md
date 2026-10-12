@@ -613,7 +613,7 @@ curl "http://localhost:8080/api/tasks/1/replay?limit=3"
 
 任务带 `storage_alert` 时，回放停在损坏分段之前：损坏分段、同一 binlog 序号的其它副本、以及之后的分段都不在 `paths` 里，响应多一个 `warning` 写明排除了哪个分段和新任务的 `gtid_set`。定点恢复（`stop_datetime`）、`stop_gtid`、`start_gtid_set` 和 `/replay/archive` 用同一个排除规则，前三者的响应同样带 `warning`。没有损坏时该字段不出现。
 
-显式给出 `limit` 时只保留序号最大的那个窗口；窗口比完整回放集少文件时，响应带 `omitted_files`（少了几个更早的文件）和 `warning`（写明从哪个文件起被省略、这一组单独回放不能从备份开头恢复），不会悄悄截断。`limit` 小于 1 或不是整数时按不带 `limit` 处理，不返回 400。`paths` 是清单里的 `file_path`，不是 basename。窗口为空时 `paths` 是 `[]`，HTTP 仍是 200。任务不存在是 HTTP 404，正文 `task not found`。
+显式给出 `limit` 时只保留序号最大的那个窗口；窗口比完整回放集少文件时，响应带 `omitted_files`（少了几个更早的文件）和 `warning`（写明从哪个文件起被省略、这一组单独回放不能从备份开头恢复），不会悄悄截断。`limit` 必须是正整数：0、负数、空值、小数或非数字是 HTTP 400，正文 `invalid limit: must be a positive integer`，不会悄悄当成不带 `limit`（#307）。`limit` 只作用于这种普通回放集；和 `stop_datetime`、`stop_gtid` 或 `start_gtid_set` 一起给时不生效，定点集合总是列出它需要的每个文件，响应的 `warning` 写明 `limit is ignored with stop_datetime, stop_gtid or start_gtid_set: ...`（不合法的 `limit` 在这些路径上同样是 400）。`paths` 是清单里的 `file_path`，不是 basename。窗口为空时 `paths` 是 `[]`，HTTP 仍是 200。任务不存在是 HTTP 404，正文 `task not found`。
 
 `source.flavor` 为 `mysql` 时，`client` 是 `mysqlbinlog`，`client_hint` 是 `MySQL mysqlbinlog`。`mariadb` 时 `client` 和 `client_hint` 都是 `mariadb-binlog`。其它 flavor（含空字符串）这两个字段是空字符串。
 
@@ -641,7 +641,7 @@ curl -o task-1-replay.tar "http://localhost:8080/api/tasks/1/replay/archive?limi
 
 HTTP 200 时 `Content-Type` 是 `application/x-tar`，`Content-Disposition` 是 `attachment`，文件名是 `task-{id}-replay.tar`。窗口为空时仍是 HTTP 200，正文是没有成员的 ustar，长度 1024 字节。选出的分段里有一个打不开或读不完时，响应是错误，正文不是半个 tar。任务不存在是 HTTP 404 `task not found`。分段不在本进程上是 HTTP 404 `segment not found on this process`。非法分段名是 HTTP 400 `invalid segment name`。
 
-带 `stop_datetime` 时，这个 tar 的成员是 [5.7](#pitr-replay) 的同一组 basename，不再用 `limit`。带 `stop_gtid` 时，成员是 [5.8](#gtid-replay) 的同一组 basename，不再用 `limit`。带 `start_gtid_set` 时，成员是 [5.9](#executed-gtid-replay) 的同一组 basename，不再用 `limit`。停止位置和 `--exclude-gtids` 只写在 JSON 的 `command` 里。
+带 `stop_datetime` 时，这个 tar 的成员是 [5.7](#pitr-replay) 的同一组 basename，不再用 `limit`。带 `stop_gtid` 时，成员是 [5.8](#gtid-replay) 的同一组 basename，不再用 `limit`。带 `start_gtid_set` 时，成员是 [5.9](#executed-gtid-replay) 的同一组 basename，不再用 `limit`。这三种情况下如果同时给了 `limit`，响应头 `X-Replay-Warning` 写明 `limit` 被忽略；不合法的 `limit` 在 archive 上同样是 HTTP 400。停止位置和 `--exclude-gtids` 只写在 JSON 的 `command` 里。
 
 ### 5.7 按时间点选取分段
 

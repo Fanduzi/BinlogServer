@@ -183,6 +183,7 @@ type pitrBody struct {
 	Locations  []string `json:"locations"`
 	Command    string   `json:"command"`
 	Note       string   `json:"note"`
+	Warning    string   `json:"warning"`
 }
 
 func getPITR(t *testing.T, handler http.Handler, path string, query url.Values) pitrBody {

@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /api/tasks/{id}/replay` and `/replay/archive` reject a `limit` that is not a positive integer (0, negative, empty, decimal, non-numeric) with HTTP 400 `invalid limit: must be a positive integer` instead of silently returning the full set (#307). A `limit` sent with `stop_datetime`, `stop_gtid` or `start_gtid_set` is still ignored (point-in-time sets list every file they need), and the response now says so: `warning` in JSON, `X-Replay-Warning` on the archive. The API reference documents both. Server messages are English only (the API has no i18n); the Console does not send `limit`.
+
 ## [v0.5.60] - 2026-10-13
 
 ### Fixed
