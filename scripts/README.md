@@ -38,7 +38,7 @@
 
 - Upstream: Makefile / 开发者本地命令 / GitHub Actions release workflow。
 - Downstream: frontend 构建工具链、Docker、Go 服务进程、GitHub Release 资产发布。
-- `failover-dogfood.sh` 额外依赖本机 `mysqld`、`mysql`、已发布的 `binlog-server` 与旁边的 `migrate`，以及 `.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh`。
+- `failover-dogfood.sh` 额外依赖本机 `mysqld`、`mysql`、已发布的 `binlog-server` 与旁边的 `migrate`，以及 `.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh`。
 
 ## Release Notes
 

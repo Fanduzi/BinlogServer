@@ -19,7 +19,7 @@ export BINLOG_VERIFY_LISTEN="${BINLOG_VERIFY_LISTEN:-127.0.0.1:18080}"
 export BINLOG_VERIFY_BASE="${BINLOG_VERIFY_BASE:-/tmp/binlog-server-verify-$BINLOG_VERIFY_RUN_ID}"
 export BINLOG_VERIFY_EVIDENCE="${BINLOG_VERIFY_EVIDENCE:-/tmp/binlog-server-verify-evidence-$BINLOG_VERIFY_RUN_ID}"
 export BINLOG_SERVER_BIN="/absolute/path/to/release/binlog-server"
-.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh launch
+.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh launch
 ```
 
 Ready means launch exits 0: the pid file exists and `GET /healthz` returned `ok`. The helper creates `$BINLOG_VERIFY_BASE`, `$BINLOG_VERIFY_BASE/data`, and `$BINLOG_VERIFY_BASE/logs`, writes `$BINLOG_VERIFY_BASE/start.env`, starts the binary with `nohup` from that base directory, and records `$BINLOG_VERIFY_BASE/binlog-server.pid`.
@@ -33,7 +33,7 @@ Loopback listen (`127.0.0.1`) matches the quick start: API auth stays off. The c
 Run doctor before driving, and again when a call looks wrong. It is read-only.
 
 ```bash
-.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh doctor
+.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh doctor
 ```
 
 Doctor passes only when all of these hold:
@@ -77,7 +77,7 @@ Create-task JSON:
 `start.mode` is `LATEST`, `FILE_POS` (requires `file` and `pos`), or `GTID` (requires `gtid_set`, or the `gtid` alias). `cluster_key` is `[A-Za-z0-9._-]`. `storage.retention_days` is 1..3650. Responses omit `source.password`.
 
 ```bash
-HELPER=.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh
+HELPER=.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh
 "$HELPER" curl GET /healthz
 "$HELPER" curl POST /api/tasks -H 'Content-Type: application/json' -d @/path/to/task.json
 "$HELPER" curl POST /api/tasks/<id>/start
@@ -91,9 +91,9 @@ Write proof under `BINLOG_VERIFY_EVIDENCE`. Capture the request and the resultin
 
 ```bash
 mkdir -p "$BINLOG_VERIFY_EVIDENCE/health-console"
-.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh doctor \
+.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh doctor \
   | tee "$BINLOG_VERIFY_EVIDENCE/health-console/doctor.txt"
-.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /healthz \
+.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh curl GET /healthz \
   | tee "$BINLOG_VERIFY_EVIDENCE/health-console/healthz.txt"
 ```
 
@@ -102,7 +102,7 @@ Cleanup deletes the instance directory and leaves this evidence directory in pla
 ## Cleanup
 
 ```bash
-.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh cleanup
+.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh cleanup
 test -d "$BINLOG_VERIFY_EVIDENCE"
 ```
 
@@ -113,7 +113,7 @@ Cleanup signals only the pid stored in `$BINLOG_VERIFY_BASE/binlog-server.pid`, 
 `helpers/control-binlog-server.sh` is the only helper. Invoke it as shown above. `env-print` shows the resolved run id, listen address, base, evidence, binary, meta DSN, base URL, and pid file:
 
 ```bash
-.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh env-print
+.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh env-print
 ```
 
 Subcommands: `launch`, `doctor`, `curl`, `cleanup`, `env-print`.

@@ -433,7 +433,7 @@ Maintenance rules:
 ### Added
 
 - `scripts/failover-dogfood.sh` and the verify-binlog-server failover-lease skill prove dual-worker lease takeover. The lease state machine is unchanged.
-- A project-local verify-binlog-server Cursor skill drives a released binary through the HTTP API and the embedded Console.
+- A project-local verify-binlog-server agent skill drives a released binary through the HTTP API and the embedded Console.
 
 ### Changed
 

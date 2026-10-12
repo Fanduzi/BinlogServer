@@ -6,7 +6,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER="${REPO_ROOT}/.cursor/skills/verify-binlog-server/helpers/control-binlog-server.sh"
+HELPER="${REPO_ROOT}/.agents/skills/verify-binlog-server/helpers/control-binlog-server.sh"
 export PATH="/usr/sbin:/usr/bin:${PATH:-/usr/bin}"
 
 FAILOVER_ROOT="${FAILOVER_ROOT:-/tmp/binlog-failover-dogfood}"
