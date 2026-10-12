@@ -12,6 +12,19 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.60] - 2026-10-13
+
+### Fixed
+
+- `GET /api/tasks/{id}/replay` and `/replay/archive` without `limit` no longer return only the newest 200 segment files with no warning (#305, PR #306, P1). They list every file of the retained chain, the same chain `/window` reads. An explicit `limit` window adds `omitted_files` and a `warning` (archive: `X-Replay-Omitted-Files`, `X-Replay-Warning`) when it leaves earlier files out. A `limit` of 0, negative, or non-numeric means no limit. The Console replay command and 下载回放集 no longer send `limit=80`.
+- `smoke-worker-crash-recovery` no longer md5-compares the task's first file, which a LATEST start begins mid-binlog. It rotates once more and compares the newest two whole files.
+
+### Changed
+
+- Internal refactors with no behavior change: segment ledger (PR #300, ADR 0006), storage health (PR #301, ADR 0007), replication run phases (PR #304, ADR 0008).
+- The `verify-binlog-server` agent skill moved to `.agents/skills` (PR #303).
+- The repository history was rewritten on 2026-10-12. Commit hashes from before that date changed; release tags point at the rewritten commits.
+
 ## [v0.5.59] - 2026-10-09
 
 ### Fixed
