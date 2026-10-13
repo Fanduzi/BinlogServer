@@ -286,6 +286,12 @@ export async function downloadReplayArchive(id: string | number, w?: PitrWindow)
   return data
 }
 
+// POST /api/tasks/batch: one result per item, {index, task} or {index, error}.
+export async function createTasksBatch(payload: { items: AnyRecord[] }): Promise<AnyRecord[]> {
+  const { data } = await http.post('/api/tasks/batch', payload)
+  return data
+}
+
 export async function createTask(payload: AnyRecord): Promise<Task> {
   const { data } = await http.post('/api/tasks', payload)
   return data

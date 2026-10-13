@@ -36,7 +36,7 @@ Rules for every migration PR:
 | Tasks, Alerts | migrated |
 | Task detail drawer (`#/tasks/:id`, `#/alerts/:id`) | migrated; after Start/Stop it polls `GET /api/tasks/{id}` until the state leaves STARTING/STOPPING, then reloads |
 | Create (header), edit, adopt (drawer) | migrated: `POST /api/tasks`, `PUT /api/tasks/{id}`, `POST /api/tasks/{id}/adopt` |
-| Batch create | pending |
+| Batch create (header) | migrated: local preview, one `POST /api/tasks/batch`, Auto Start then `POST /api/tasks/{id}/start` per created task |
 | Overview, Sources, Workers | pending |
 | Cutover (embed in `internal/ui/static`) | pending |
 

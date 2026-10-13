@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { setAuthToken } from "@/lib/auth";
 import { setLocale, useI18n } from "@/lib/i18n";
+import { BatchCreateProvider } from "@/features/batch-create/batch-create-dialog";
 import { TaskFormProvider } from "@/features/task-form/task-form-dialog";
 import { AppSidebar } from "./app-sidebar";
 import { Header } from "./header";
@@ -37,6 +38,7 @@ export function AuthenticatedLayout() {
 
   return (
     <TaskFormProvider>
+    <BatchCreateProvider>
       <SidebarProvider>
         <AppSidebar />
         <SidebarInset className="min-w-0">
@@ -74,6 +76,7 @@ export function AuthenticatedLayout() {
           }}
         />
       </SidebarProvider>
+    </BatchCreateProvider>
     </TaskFormProvider>
   );
 }
