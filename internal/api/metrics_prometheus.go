@@ -35,12 +35,19 @@ type apiMetricsCollector struct {
 	recoveryBreaksDesc      *prometheus.Desc
 	recoveryEarliestDesc    *prometheus.Desc
 	sourceSwitchDesc        *prometheus.Desc
+	sourceUpDesc            *prometheus.Desc
 }
 
 func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiMetricsCollector {
 	return &apiMetricsCollector{
 		tasks:       taskSvc,
 		observation: observation,
+		sourceUpDesc: prometheus.NewDesc(
+			"binlog_server_metric_source_up",
+			"0 for each (task_id, source) whose read failed in this scrape, so the series it feeds is missing for a reason; task_id _cluster for worker_heartbeats. One {task_id=\"\",source=\"\"} 1 series is always present.",
+			[]string{"task_id", "source"},
+			nil,
+		),
 		taskStateCountDesc: prometheus.NewDesc(
 			"binlog_server_task_state_count",
 			"Number of tasks by state.",
@@ -122,6 +129,30 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.recoveryBreaksDesc
 	ch <- c.recoveryEarliestDesc
 	ch <- c.sourceSwitchDesc
+	ch <- c.sourceUpDesc
+}
+
+type findingSinkAPI interface {
+	Report(tasks.Finding)
+	Resolve(taskID string, kind tasks.FindingKind, subject string)
+}
+
+// sourceRead records one metric source read (S10): a failure is an explicit
+// 0 series and a METRIC_SOURCE_FAILED finding; a success resolves it.
+func (c *apiMetricsCollector) sourceRead(ch chan<- prometheus.Metric, taskID, source string, err error) bool {
+	sink, _ := c.tasks.(findingSinkAPI)
+	if err == nil {
+		if sink != nil {
+			sink.Resolve(taskID, tasks.FindingMetricSourceFailed, source)
+		}
+		return true
+	}
+	ch <- prometheus.MustNewConstMetric(c.sourceUpDesc, prometheus.GaugeValue, 0, taskID, source)
+	if sink != nil {
+		sink.Report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingMetricSourceFailed, Subject: source, Severity: tasks.FindingWarning,
+			Detail: "metric read failed, series omitted from /metrics: " + err.Error()})
+	}
+	return false
 }
 
 func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -144,10 +175,11 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.taskStateCountDesc, prometheus.GaugeValue, float64(stateCount[state]), state)
 	}
 
+	ch <- prometheus.MustNewConstMetric(c.sourceUpDesc, prometheus.GaugeValue, 1, "", "")
 	replicationLagEmitted := false
 	for _, task := range items {
 		progress, ok, err := c.tasks.GetReplicationProgress(task.ID)
-		if err != nil || !ok || progress.LastEventAt.IsZero() {
+		if !c.sourceRead(ch, task.ID, "progress", err) || !ok || progress.LastEventAt.IsZero() {
 			continue
 		}
 		lag := now.Sub(progress.LastEventAt).Seconds()
@@ -164,7 +196,7 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	checkpointAgeEmitted := false
 	for _, task := range items {
 		checkpoint, ok, err := c.tasks.GetCheckpoint(context.Background(), task.ID)
-		if err != nil || !ok || checkpoint.UpdatedAt.IsZero() {
+		if !c.sourceRead(ch, task.ID, "checkpoint", err) || !ok || checkpoint.UpdatedAt.IsZero() {
 			continue
 		}
 		age := now.Sub(checkpoint.UpdatedAt).Seconds()
@@ -179,7 +211,7 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	heartbeats, err := c.tasks.ListWorkerHeartbeats(200)
-	if err == nil {
+	if c.sourceRead(ch, tasks.ClusterFindingTask, "worker_heartbeats", err) {
 		workerOnlineEmitted := false
 		sort.Slice(heartbeats, func(i, j int) bool {
 			return heartbeats[i].WorkerID < heartbeats[j].WorkerID
@@ -231,7 +263,7 @@ func (c *apiMetricsCollector) collectRecovery(ch chan<- prometheus.Metric, items
 	ageEmitted := false
 	for _, task := range items {
 		window, err := c.tasks.RecoveryWindow(task.ID)
-		if err != nil {
+		if !c.sourceRead(ch, task.ID, "recovery_window", err) {
 			continue
 		}
 		ch <- prometheus.MustNewConstMetric(c.recoveryBreaksDesc, prometheus.GaugeValue, float64(len(window.Breaks)), task.ID)

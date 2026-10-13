@@ -129,6 +129,7 @@
     "ABNORMAL": "异常",
     "IDLE": "空闲",
     "noProgress": "未收到复制事件",
+    "progressUnavailable": "无法读取复制进度",
     "delayExceedsThreshold": "延迟超过阈值",
     "runnerError": "复制错误",
     "taskStateError": "任务状态异常",

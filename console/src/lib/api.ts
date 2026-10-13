@@ -111,6 +111,8 @@ export interface Replication {
 export interface DashboardRow {
   task: Task
   replication: Replication
+  /** Open findings for the task (ADR 0009); absent when there are none. */
+  open_findings?: number
 }
 
 export interface DashboardSummary {

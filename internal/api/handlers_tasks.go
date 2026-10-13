@@ -67,6 +67,8 @@ type taskReplicationResponse struct {
 type dashboardTaskItem struct {
 	Task        tasks.Task              `json:"task"`
 	Replication taskReplicationResponse `json:"replication"`
+	// OpenFindings counts the task's open findings (ADR 0009); omitted at 0.
+	OpenFindings int `json:"open_findings,omitempty"`
 }
 
 type sourceOverview struct {
@@ -259,10 +261,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Tasks:            make([]dashboardTaskItem, 0, len(page)),
 		Sources:          sources,
 	}
+	openByTask := s.openFindingCounts(r.Context())
 	for _, task := range page {
 		resp.Tasks = append(resp.Tasks, dashboardTaskItem{
-			Task:        s.presentTask(r.Context(), task),
-			Replication: s.replicationFor(task, now),
+			Task:         s.presentTask(r.Context(), task),
+			Replication:  s.replicationFor(task, now),
+			OpenFindings: openByTask[task.ID],
 		})
 	}
 
@@ -1612,6 +1616,33 @@ func checkpointResponseOf(cp binlog.Checkpoint) checkpointResponse {
 
 // replicationFor builds the replication view of one task from its progress.
 func (s *Server) replicationFor(task tasks.Task, now time.Time) taskReplicationResponse {
-	progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
-	return buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds)
+	progress, ok, err := s.tasks.GetReplicationProgress(task.ID)
+	resp := buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds)
+	if err != nil && task.State == tasks.StateRunning {
+		// S11: a failed read is not "no progress"; say why the lag is unknown.
+		resp.Status = "ABNORMAL"
+		resp.Reason = "PROGRESS_UNAVAILABLE"
+		resp.LastError = "replication progress read failed: " + err.Error()
+	}
+	return resp
+}
+
+// openFindingCounts counts open findings per task for the dashboard page. A
+// read error leaves the counts empty; /api/findings and /metrics still show them.
+func (s *Server) openFindingCounts(ctx context.Context) map[string]int {
+	src, ok := s.tasks.(interface {
+		OpenFindings(ctx context.Context, limit int) ([]tasks.Finding, error)
+	})
+	if !ok {
+		return nil
+	}
+	open, err := src.OpenFindings(ctx, 1000)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]int, len(open))
+	for _, f := range open {
+		out[f.TaskID]++
+	}
+	return out
 }
