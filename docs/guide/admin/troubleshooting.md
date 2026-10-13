@@ -102,8 +102,10 @@ v0.5.57 以及该版本之前，GTID 任务的 dump 连接一旦断开重连，�
 |------------|------|------|----------|
 | 401 Unauthorized | Bearer 模式 | 缺少 `Authorization` 头 | 添加 `Authorization: Bearer <token>` |
 | 401 Unauthorized | API Key 模式 | 缺少 API Key 头 | 添加对应的请求头（如 `X-API-Key: <key>`） |
-| 403 Forbidden | Bearer 模式 | Token 格式错误（无 `Bearer ` 前缀） | 确保格式为 `Bearer <token>` |
-| 403 Forbidden | 任意模式 | 凭证不匹配 | 检查 Token/API Key 是否正确 |
+| 401 Unauthorized | Bearer 模式 | Token 格式错误（无 `Bearer ` 前缀） | 确保格式为 `Bearer <token>` |
+| 401 Unauthorized | 任意模式 | 凭证不匹配 | 检查 Token/API Key 是否正确 |
+
+鉴权失败一律返回 401（Bearer 模式带 `WWW-Authenticate: Bearer realm="binlog-server"`），Console 收到 401 会打开设置让你重新填 Token。旧版本对格式错误和凭证不匹配返回 403。
 
 **排查步骤：**
 
