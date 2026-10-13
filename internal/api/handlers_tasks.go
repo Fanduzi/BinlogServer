@@ -658,34 +658,32 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 		http.Error(w, qerr.Error(), http.StatusBadRequest)
 		return
 	}
-	if seek.executed {
-		set, err := s.tasks.ExecutedGTIDReplay(taskID, seek.executedRaw, seek.stopGTID(), seek.stopTime())
+	limit, given, lerr := replayLimit(r)
+	if lerr != nil {
+		http.Error(w, lerr.Error(), http.StatusBadRequest)
+		return
+	}
+	if seek.executed || seek.gtid || seek.datetime {
+		var set tasks.PITRSet
+		var err error
+		switch {
+		case seek.executed:
+			set, err = s.tasks.ExecutedGTIDReplay(taskID, seek.executedRaw, seek.stopGTID(), seek.stopTime())
+		case seek.gtid:
+			set, err = s.tasks.GTIDReplay(taskID, seek.gtidRaw, seek.start)
+		default:
+			set, err = s.tasks.PITRReplay(taskID, seek.start, seek.stop)
+		}
 		if err != nil {
 			writeSegmentOpenError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, set)
-		return
-	}
-	if seek.gtid {
-		set, err := s.tasks.GTIDReplay(taskID, seek.gtidRaw, seek.start)
-		if err != nil {
-			writeSegmentOpenError(w, err)
-			return
+		if given {
+			set.Warning = joinWarnings(set.Warning, replayLimitIgnoredWarning)
 		}
 		writeJSON(w, http.StatusOK, set)
 		return
 	}
-	if seek.datetime {
-		set, err := s.tasks.PITRReplay(taskID, seek.start, seek.stop)
-		if err != nil {
-			writeSegmentOpenError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, set)
-		return
-	}
-	limit := replayLimit(r)
 	files, err := s.tasks.ListFiles(taskID, limit)
 	if err != nil {
 		if errors.Is(err, tasks.ErrTaskNotFound) {
@@ -773,14 +771,25 @@ func (s *Server) replayOmitted(task tasks.Task, limit int, selected []tasks.Binl
 }
 
 // replayLimit is the inventory window of /replay and /replay/archive: the
-// whole inventory unless the caller asks for a window (#305).
-func replayLimit(r *http.Request) int {
-	limit := parseLimit(r, allFilesLimit)
-	if limit < 1 {
-		return allFilesLimit
+// whole inventory unless the caller asks for a window (#305). given reports
+// that the caller sent limit. A limit that is not a positive integer
+// (0, negative, empty, not a number) is an error, so a typo is a 400 and
+// not a silent full set (#307).
+func replayLimit(r *http.Request) (limit int, given bool, err error) {
+	values := r.URL.Query()
+	if _, ok := values["limit"]; !ok {
+		return allFilesLimit, false, nil
 	}
-	return limit
+	limit, perr := strconv.Atoi(strings.TrimSpace(values.Get("limit")))
+	if perr != nil || limit < 1 {
+		return 0, true, errors.New("invalid limit: must be a positive integer")
+	}
+	return limit, true, nil
 }
+
+// replayLimitIgnoredWarning is added when limit comes with a point-in-time
+// parameter: those sets always list every file they need (#307).
+const replayLimitIgnoredWarning = "limit is ignored with stop_datetime, stop_gtid or start_gtid_set: a point-in-time set always lists every file it needs."
 
 func joinWarnings(parts ...string) string {
 	out := make([]string, 0, len(parts))
@@ -814,6 +823,11 @@ func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request,
 		http.Error(w, qerr.Error(), http.StatusBadRequest)
 		return
 	}
+	limit, given, lerr := replayLimit(r)
+	if lerr != nil {
+		http.Error(w, lerr.Error(), http.StatusBadRequest)
+		return
+	}
 	var body io.ReadCloser
 	var size int64
 	var err error
@@ -825,7 +839,6 @@ func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request,
 	case seek.datetime:
 		body, size, err = s.tasks.OpenPITRArchive(taskID, seek.start, seek.stop)
 	default:
-		limit := replayLimit(r)
 		body, size, err = s.tasks.OpenReplayArchive(taskID, limit)
 		if err == nil && limit < allFilesLimit {
 			// The tar has no room for a warning. A window that leaves files
@@ -847,6 +860,9 @@ func (s *Server) handleTaskReplayArchive(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	defer body.Close()
+	if given && (seek.executed || seek.gtid || seek.datetime) {
+		w.Header().Set("X-Replay-Warning", replayLimitIgnoredWarning)
+	}
 
 	filename := "task-" + taskID + "-replay.tar"
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})

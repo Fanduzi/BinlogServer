@@ -31,7 +31,8 @@ type PITRSet struct {
 	Command   string   `json:"command"`
 	// Note is set when start_gtid_set already contains every transaction up to the stop.
 	Note string `json:"note,omitempty"`
-	// Warning is set when a damaged segment and every later one were left out.
+	// Warning is set when a damaged segment and every later one were left
+	// out, or when the request also sent limit, which this set ignores.
 	Warning string `json:"warning,omitempty"`
 }
 
