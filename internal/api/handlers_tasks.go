@@ -534,6 +534,10 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			s.handleTaskRecoveryWindow(w, r, taskID)
 			return
 		}
+		if r.Method == http.MethodGet && action == "findings" {
+			s.handleTaskFindings(w, r, taskID)
+			return
+		}
 		if r.Method == http.MethodGet && action == "replication" {
 			task, err := s.tasks.GetTask(taskID)
 			if err != nil {

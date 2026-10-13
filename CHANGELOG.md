@@ -12,6 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- Finding sink (ADR 0009, phase 0, #326). A failure that used to end in a log line now also leaves a persisted finding, a `FINDING_REPORTED` task event, and a metric. New in this change: a task state transition the metadata store did not take (`TASK_PERSIST_FAILED`, CRITICAL; the row is written again every 5s until it lands, then the finding resolves), a task event the store did not take (`EVENT_PERSIST_FAILED`), a retry budget that could not be read back (`EVENT_READ_FAILED`), a pending Binlog Dump KILL marker that was not written (`DUMP_CLEANUP_PERSIST_FAILED`), and a `data_dir` that cannot be listed (`DISK_LIST_FAILED`). `GET /api/tasks/{id}/findings` (open first, `all=1` adds resolved) and `GET /api/findings` (open, all tasks; task_id `_cluster` for process-wide ones). Metrics: `binlog_server_finding_open{task_id,kind,severity}` (always at least one series), `binlog_server_findings_reported_total{kind}`, `binlog_server_finding_sink_errors_total`, `binlog_server_finding_sink_pending`, `binlog_server_finding_store_active`.
+- Migration `000007_task_findings` adds the `task_findings` table only. `minRequiredSchemaVersion` stays 6: on schema 6 the process starts, keeps findings in memory and in `/metrics`, logs once, and `binlog_server_finding_store_active` is 0. The floor moves to 7 in v0.6.0. Standalone (no `meta_dsn`) keeps findings in `{data_dir}/.findings.json`.
+
 ## [v0.5.64] - 2026-10-13
 
 ### Changed

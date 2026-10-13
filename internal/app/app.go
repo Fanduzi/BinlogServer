@@ -180,6 +180,9 @@ func (a *App) Run(ctx context.Context) error {
 		opts = append(opts, tasks.WithCheckpointReader(mysqlStore))
 		opts = append(opts, tasks.WithEventStore(mysqlStore))
 		opts = append(opts, tasks.WithFileStore(mysqlStore))
+		if findingStore, ok := mysqlStore.(tasks.FindingStore); ok {
+			opts = append(opts, tasks.WithFindingStore(findingStore))
+		}
 		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
 		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
 		if isClusterMode(a.cfg) {
@@ -293,7 +296,18 @@ func (a *App) Run(ctx context.Context) error {
 	// 先组装 scheduler，再根据 worker 开关决定是否挂载 runner。
 	// data_dir 与 runner 落盘目录相同，files API 在 binlog_files 为空时扫描这里。
 	opts = append(opts, tasks.WithDataDir(a.cfg.DataDir))
+	if a.cfg.MetaDSN == "" && strings.TrimSpace(a.cfg.DataDir) != "" {
+		// Standalone: findings live next to the backups and survive a restart.
+		opts = append(opts, tasks.WithFindingStore(tasks.NewFileFindingStore(filepath.Join(a.cfg.DataDir, tasks.FindingFileName))))
+	}
 	scheduler := tasks.NewScheduler(opts...)
+	if a.cfg.MetaDSN == "" {
+		if err := scheduler.LoadOpenFindings(runCtx); err != nil {
+			return fmt.Errorf("load findings: %w", err)
+		}
+	}
+	// ADR 0009: one writer for findings; retries failed writes and task rows.
+	scheduler.StartFindingSink(runCtx, 5*time.Second)
 	if workerEnabled {
 		// 将 runner 进度回传给 scheduler，供 API/状态机读取。
 		runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))

@@ -314,6 +314,9 @@ func newMetricsHandler(taskSvc taskService) http.Handler {
 		}
 		registry := prometheus.NewRegistry()
 		registry.MustRegister(newAPIMetricsCollector(taskSvc, items))
+		if source, ok := taskSvc.(findingMetricsSource); ok {
+			registry.MustRegister(newFindingCollector(source, r.Context()))
+		}
 		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
 	})
 }

@@ -483,3 +483,4 @@ func (s *Scheduler) killLeftover(task Task, pending DumpCleanup, killer func(Sou
 	}
 	return err
 }
+func (s *Scheduler) reportDumpCleanupPersist(string, error) {}

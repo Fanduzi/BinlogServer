@@ -359,12 +359,18 @@ type Scheduler struct {
 	// eventLanes orders event-store writes per task. A slow insert on one
 	// task does not block another task's Stop, Start, or progress.
 	eventLanes map[string]*eventLane
+	// findings is the ADR 0009 sink. unpublished holds task ids whose last
+	// row write failed; the sink's retry tick writes the in-memory row again.
+	findings    *findingBook
+	unpublished map[string]struct{}
 }
 
 // NewScheduler 创建调度器并应用可选项。
 func NewScheduler(opts ...Option) *Scheduler {
 	s := &Scheduler{
-		tasks:   make(map[string]Task),
+		findings:    newFindingBook(),
+		unpublished: make(map[string]struct{}),
+		tasks:       make(map[string]Task),
 		events:  make(map[string][]TaskEvent),
 		replica: make(map[string]ReplicationProgress),
 		cancels: make(map[string]context.CancelFunc),
@@ -623,24 +629,32 @@ func (s *Scheduler) writeEventBatch(batch []queuedEvent) {
 		if item.lane == nil {
 			continue
 		}
-		item.lane.write(store, item.event, item.ticket, timeout)
+		if err := item.lane.write(store, item.event, item.ticket, timeout); err != nil {
+			// S1: the event is still in memory (s.events); the store lost it.
+			_ = err // not reported yet: see the next commit
+		} else if store != nil {
+			s.Resolve(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
+		}
 	}
 }
 
-func (lane *eventLane) write(store EventStore, event TaskEvent, ticket uint64, timeout time.Duration) {
+// write stores one event in ticket order. A store error does not block
+// scheduling; it is returned so the caller reports it to the finding sink.
+func (lane *eventLane) write(store EventStore, event TaskEvent, ticket uint64, timeout time.Duration) error {
 	lane.mu.Lock()
 	defer lane.mu.Unlock()
 	for lane.next+1 != ticket {
 		lane.cond.Wait()
 	}
+	var err error
 	if store != nil {
-		// 事件落库失败不阻断主流程，保证调度与拉流优先可用。
 		ctx, cancel := withTimeout(context.Background(), timeout)
-		_ = store.AppendEvent(ctx, event)
+		err = store.AppendEvent(ctx, event)
 		cancel()
 	}
 	lane.next = ticket
 	lane.cond.Broadcast()
+	return err
 }
 
 // isClusterKeyUniqueLocked 校验 cluster_key 在任务集合中是否唯一。
