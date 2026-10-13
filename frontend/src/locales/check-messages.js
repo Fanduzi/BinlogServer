@@ -1,4 +1,4 @@
-// input: locale JSON catalogs next to this file, vue-i18n, and @intlify/message-compiler
+// input: locale JSON catalogs in console/src/locales, vue-i18n, and @intlify/message-compiler
 // output: non-zero exit when a catalog message fails production compile, or form.flavorHint does not render @@server_uuid
 // pos: build-time gate for embedded /ui/ copy; Vite dev only warns on the same @ syntax
 // note: if this file changes, update this header and module README.md.
@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { baseCompile } from "@intlify/message-compiler";
 
-const dir = dirname(fileURLToPath(import.meta.url));
+const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../console/src/locales");
 
 function compileErrors(message) {
   const errors = [];

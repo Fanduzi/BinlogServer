@@ -56,7 +56,7 @@ import {
   stopTask,
   type AnyRecord,
 } from '@/lib/api'
-import { errorText } from '@/lib/errors'
+import { inlineErrorText } from '@/lib/errors'
 import { createLatest } from '@/lib/latest'
 import { pollUntil } from '@/lib/poll'
 import { useI18n } from '@/lib/i18n'
@@ -104,7 +104,7 @@ import { RUN_HISTORY_LIMIT, TASK_DETAIL_INVENTORY_LIMIT, useTaskDetail } from '.
 export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const { t, locale } = useI18n()
   const { refresh, nowRefMs } = useObservation()
-  const { detail, error, loading, reload, setFiles } = useTaskDetail(taskId)
+  const { detail, error, loading, needsAuth, reload, setFiles } = useTaskDetail(taskId)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const task = detail?.task ?? null
 
@@ -193,8 +193,9 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
     }
   }
 
+  // Without a valid token only the auth dialog shows; the drawer opens once the token is saved.
   return (
-    <Sheet open onOpenChange={(open) => !open && onClose()}>
+    <Sheet open={!needsAuth} onOpenChange={(open) => !open && onClose()}>
       <SheetContent
         data-testid='task-drawer'
         className='w-full gap-0 overflow-y-auto p-0 sm:max-w-[min(66vw,1200px)]'
@@ -384,7 +385,7 @@ function DetailBody({
         }),
       )
     } catch (err) {
-      setPitrError(errorText(err, t('msg.unknownError')))
+      setPitrError(inlineErrorText(err, t('msg.unknownError')))
     }
   }
 

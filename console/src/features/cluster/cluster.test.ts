@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { t } from '@/test/t'
-import { clusterSummary, overviewNote, sourceKey, sourceStats } from './format'
+import { clusterSummary, overviewNote, sourceKey, sourceStats, workerCount } from './format'
 
 const overview = {
   task_count: 3,
@@ -24,4 +24,11 @@ it('source key and stats default starting to 0', () => {
   expect(sourceStats(t, s)).toBe(
     t('source.stats', { tasks: 4, starting: 0, running: 2, normal: 1, delayed: 1, abnormal: 0 }),
   )
+})
+
+it('worker count follows the registered list, not the owners-only overview count', () => {
+  const ov = { ...overview, worker_count: 1 }
+  expect(workerCount(ov, [{}, {}])).toBe(2)
+  expect(workerCount(ov, [])).toBe(1)
+  expect(clusterSummary(t, ov, [{}, {}])).toBe(t('cluster.workerCount', { count: 2 }))
 })

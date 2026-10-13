@@ -1,0 +1,28 @@
+# internal/ui/classic Module
+
+经典 Vue 控制台（`frontend/`）构建产物目录，由后端以静态资源方式对外提供 `/ui-classic/`。#302 切换后 `/ui/` 是新 Console，这里保留一个版本，之后随 `frontend/` 一起删除。
+
+## Files
+
+| File | Responsibility |
+|------|---------------|
+| index.html | 管理台入口页面，引用当前 Vite hashed bundles |
+| assets/ | 构建资源（图标、字体、chunk 等） |
+
+## Exports
+
+- 被 `internal/ui` 的 `ClassicHandler()` 挂载并通过 `/ui-classic/` 提供访问（base `/ui-classic/`）。
+- 当前构建产物包含 `storage_alert`（任务行和详情里的 `task-storage-alert`）、回放集 tar 下载、UTC 定点恢复（停止时间、停止 GTID `stop_gtid`、可选开始时间、复制 `TZ=UTC` 命令、下载该窗口）、遗留目录「认领」、独立 starting 指标卡、只信 dashboard 一次物化的任务页、一次刷新编排、列表租约风险用任务抄本、全局/当前页筛选范围提示、source 状态计数、单请求批量任务创建，以及 `single_process` 时「本进程拉取」文案，使用 `make ui-build` 同步。`scripts/check-ui-bundle.sh` 检查 `index.html` 加载的 bundle 图是合法 ESM；Console 标记只对 `/ui/` 检查。
+
+## Dependencies
+
+- Upstream: `frontend` 构建流程（文案来自 `console/src/locales`）。
+- Downstream: 浏览器静态资源加载。
+
+## Update Rule
+
+- 构建产物布局或挂载约定变化时，更新本文件。
+
+## Package Comment Rule
+
+- Go 文件的软件包注释采用 `Package [package name] ...` 形式。

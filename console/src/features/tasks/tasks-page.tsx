@@ -300,8 +300,13 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
             emptyTestid='task-table-empty'
           />
 
-          <div className='mt-3 flex flex-wrap items-center justify-end gap-2 text-sm'>
-            <span className='text-muted-foreground'>{t('pagination.total', { total })}</span>
+          <div
+            className='mt-3 flex flex-wrap items-center justify-end gap-2 text-sm'
+            data-testid='task-pager'
+          >
+            <span className='text-muted-foreground' data-testid='pager-total'>
+              {t('pagination.total', { total })}
+            </span>
             <Select
               value={String(pager.pageSize)}
               onValueChange={(v) => setPager({ page: 1, pageSize: Number(v) })}
@@ -338,6 +343,7 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
                   size='sm'
                   variant={n === pager.page ? 'default' : 'outline'}
                   className='h-8 min-w-8 px-2'
+                  data-testid={`pager-page-${n}`}
                   onClick={() => setPager((p) => ({ ...p, page: n }))}
                 >
                   {n}

@@ -42,3 +42,8 @@ it('falls back to last_seen_at, then updated_at, within 45s', () => {
 it('null list', () => {
   expect(workerRows(null, now)).toEqual([])
 })
+
+it('missing counts read 0', () => {
+  const [r] = workerRows([{ worker_id: 'x', online: true }], now)
+  expect([r.task_count, r.running, r.leased]).toEqual([0, 0, 0])
+})

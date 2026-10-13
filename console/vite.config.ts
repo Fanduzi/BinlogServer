@@ -5,8 +5,8 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { tanstackRouter } from '@tanstack/router-plugin/vite'
 
-// The new Console is not embedded yet: internal/ui/static still serves the
-// Vue console. Develop against a running binlog-server via the /api proxy.
+// The Console is embedded at /ui/ (scripts/build-ui.sh builds with VITE_BASE=/ui/
+// into internal/ui/static). Develop against a running binlog-server via the /api proxy.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const apiTarget = env.VITE_API_TARGET || 'http://127.0.0.1:8080'
@@ -34,15 +34,13 @@ export default defineConfig(({ mode }) => {
     resolve: { alias: { '@': path.resolve(__dirname, './src') } },
     server: {
       port: 5174,
-      // i18n reuses ../frontend/src/locales (see src/lib/i18n.tsx).
-      fs: { allow: [path.resolve(__dirname, '..')] },
       proxy: {
         '/api': { target: apiTarget, changeOrigin: true },
         '/healthz': { target: apiTarget, changeOrigin: true },
         // Auth discovery (GET /auth/config, anonymous).
         '/auth': { target: apiTarget, changeOrigin: true },
-        // "Open current console" links for views not moved yet.
-        '/ui': { target: apiTarget, changeOrigin: true },
+        // The classic console, for side-by-side checks.
+        '/ui-classic': { target: apiTarget, changeOrigin: true },
       },
     },
   }

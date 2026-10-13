@@ -1875,6 +1875,11 @@ func TestAPI_AuthEnabledServesConsoleWithoutBearer(t *testing.T) {
 
 func consoleScriptPath(t *testing.T, html string) string {
 	t.Helper()
+	return scriptPathWithPrefix(t, html, "/ui/")
+}
+
+func scriptPathWithPrefix(t *testing.T, html, prefix string) string {
+	t.Helper()
 	const marker = `src="`
 	idx := strings.Index(html, marker)
 	if idx < 0 {
@@ -1886,8 +1891,8 @@ func consoleScriptPath(t *testing.T, html string) string {
 		t.Fatalf("console script src is truncated: %s", rest)
 	}
 	src := rest[:end]
-	if !strings.HasPrefix(src, "/ui/") {
-		t.Fatalf("console script src %q is not served under /ui/", src)
+	if !strings.HasPrefix(src, prefix) {
+		t.Fatalf("console script src %q is not served under %s", src, prefix)
 	}
 	return src
 }
@@ -3095,8 +3100,24 @@ func TestUI_RootRedirectAndDashboardPage(t *testing.T) {
 	if !bytes.Contains(uiResp.Body.Bytes(), []byte("Binlog Server Console")) {
 		t.Fatalf("expected ui html to contain console title, got body=%s", uiResp.Body.String())
 	}
-	if !bytes.Contains(uiResp.Body.Bytes(), []byte(`id="app"`)) {
-		t.Fatalf("expected ui html to contain vue mount root, got body=%s", uiResp.Body.String())
+	if !bytes.Contains(uiResp.Body.Bytes(), []byte(`id="root"`)) {
+		t.Fatalf("expected /ui/ to serve the Console (React mount root), got body=%s", uiResp.Body.String())
+	}
+	if src := consoleScriptPath(t, uiResp.Body.String()); !strings.HasPrefix(src, "/ui/assets/") {
+		t.Fatalf("console entry %q is not under /ui/assets/", src)
+	}
+
+	// The classic Vue console stays at /ui-classic/ for one release.
+	classicResp := httptest.NewRecorder()
+	handler.ServeHTTP(classicResp, httptest.NewRequest(http.MethodGet, "/ui-classic/", nil))
+	if classicResp.Code != http.StatusOK || !bytes.Contains(classicResp.Body.Bytes(), []byte(`id="app"`)) {
+		t.Fatalf("expected /ui-classic/ 200 with the Vue mount root, got %d body=%s", classicResp.Code, classicResp.Body.String())
+	}
+	classicSrc := scriptPathWithPrefix(t, classicResp.Body.String(), "/ui-classic/")
+	assetResp := httptest.NewRecorder()
+	handler.ServeHTTP(assetResp, httptest.NewRequest(http.MethodGet, classicSrc, nil))
+	if assetResp.Code != http.StatusOK || assetResp.Body.Len() == 0 {
+		t.Fatalf("expected classic asset %s 200 with a body, got %d", classicSrc, assetResp.Code)
 	}
 }
 

@@ -5,6 +5,12 @@ import axios from 'axios'
 import { clearAuthToken, getAuthToken } from './auth'
 
 export const AUTH_REQUIRED_EVENT = 'auth-required'
+/** Fired after a new credential is saved, so views that hit a 401 load again. */
+export const AUTH_RESTORED_EVENT = 'auth-restored'
+
+export function announceAuthRestored() {
+  window.dispatchEvent(new CustomEvent(AUTH_RESTORED_EVENT))
+}
 
 const http = axios.create({ baseURL: '/', timeout: 10000 })
 

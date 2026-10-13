@@ -9,12 +9,14 @@ import { clusterSummary } from './format'
 
 export function ClusterPanel({ children }: { children?: ReactNode }) {
   const { t } = useI18n()
-  const { overview } = useObservation()
+  const { overview, workers } = useObservation()
   return (
     <Panel
       icon={Network}
       title={t('cluster.title')}
-      hint={<span data-testid='cluster-worker-summary'>{clusterSummary(t, overview)}</span>}
+      hint={
+        <span data-testid='cluster-worker-summary'>{clusterSummary(t, overview, workers)}</span>
+      }
       testid='cluster-panel'
     >
       <div className='grid grid-cols-1 gap-2 sm:grid-cols-3'>

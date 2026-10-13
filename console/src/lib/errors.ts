@@ -38,6 +38,14 @@ export function errorText(err: unknown, fallback = ''): string {
   return fallback || String(err)
 }
 
+/**
+ * Text to show inline (drawer, form). A 401 shows nothing inline: the API
+ * layer opens the auth dialog, and the view reloads once a token is saved.
+ */
+export function inlineErrorText(err: unknown, fallback = ''): string {
+  return isUnauthorized(err) ? '' : errorText(err, fallback)
+}
+
 /** Same as errorText, but reads a Blob body (responseType: 'blob' downloads). */
 export async function errorTextAsync(err: unknown, fallback = ''): Promise<string> {
   const data = response(err)?.data

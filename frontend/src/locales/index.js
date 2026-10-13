@@ -1,6 +1,7 @@
 import { createI18n } from "vue-i18n";
-import zhCN from "./zh-CN.json";
-import en from "./en.json";
+// Catalogs live with the Console (console/src/locales); the classic Vue console reads the same files.
+import zhCN from "../../../console/src/locales/zh-CN.json";
+import en from "../../../console/src/locales/en.json";
 
 const SAVED_LOCALE_KEY = "locale";
 

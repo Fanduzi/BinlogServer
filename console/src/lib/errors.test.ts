@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bodyText, errorText, errorTextAsync, isUnauthorized } from './errors'
+import { bodyText, errorText, errorTextAsync, inlineErrorText, isUnauthorized } from './errors'
 
 const httpErr = (
   status: number,
@@ -57,4 +57,9 @@ it('isUnauthorized', () => {
   expect(isUnauthorized(httpErr(401, ''))).toBe(true)
   expect(isUnauthorized(httpErr(403, ''))).toBe(false)
   expect(isUnauthorized(new Error('x'))).toBe(false)
+})
+
+it('inlineErrorText hides a 401 and keeps other errors', () => {
+  expect(inlineErrorText({ response: { status: 401, data: 'unauthorized' } }, 'x')).toBe('')
+  expect(inlineErrorText({ response: { status: 500, data: 'boom' } }, 'x')).toBe('boom')
 })

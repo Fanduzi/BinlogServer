@@ -1,24 +1,22 @@
 # internal/ui/static Module
 
-前端构建产物目录，由后端以静态资源方式对外提供 `/ui/`。
+Console（`console/`，React）构建产物目录，由后端以静态资源方式对外提供 `/ui/`。
 
 ## Files
 
 | File | Responsibility |
 |------|---------------|
-| index.html | 管理台入口页面，引用当前 Vite hashed bundles |
-| app.js | 打包后的前端脚本 |
-| styles.css | 打包后的样式文件 |
-| assets/ | 构建资源（图标、字体、chunk 等） |
+| index.html | Console 入口页面，引用当前 Vite hashed bundles（base `/ui/`） |
+| assets/ | 构建资源：entry、vendor chunk、按路由拆分的页面 chunk 和样式 |
 
 ## Exports
 
-- 被 `internal/ui` 挂载并通过 `/ui/` 提供访问。
-- 当前构建产物包含 `storage_alert`（任务行和详情里的 `task-storage-alert`）、回放集 tar 下载、UTC 定点恢复（停止时间、停止 GTID `stop_gtid`、可选开始时间、复制 `TZ=UTC` 命令、下载该窗口）、遗留目录「认领」、独立 starting 指标卡、只信 dashboard 一次物化的任务页、一次刷新编排、列表租约风险用任务抄本、全局/当前页筛选范围提示、source 状态计数、单请求批量任务创建，以及 `single_process` 时「本进程拉取」文案，使用 `make ui-build` 同步。`scripts/check-ui-bundle.sh` 要求这些 PITR 标记和 `task-storage-alert` 出现在 `index.html` 加载的 bundle 里。
+- 被 `internal/ui` 的 `Handler()` 挂载并通过 `/ui/` 提供访问。
+- 由 `make ui-build`（`scripts/build-ui.sh`）整目录替换（保留 README）。`scripts/check-ui-bundle.sh` 沿 `index.html` 的静态和动态 import 走完整个 bundle 图，要求每个 chunk 是合法 ESM，且 `console/src` 里的 PITR、可恢复窗口、换主、`task-storage-alert`、`task-replay-damaged` 标记都在图里。
 
 ## Dependencies
 
-- Upstream: `frontend` 构建流程。
+- Upstream: `console` 构建流程。
 - Downstream: 浏览器静态资源加载。
 
 ## Update Rule
