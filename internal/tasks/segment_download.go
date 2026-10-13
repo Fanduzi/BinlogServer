@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task id, on-disk basename, the files inventory, ClassifySegment, this process data_dir, and the configured object uploader when a sealed row is already UPLOADED
-// output: a size-capped reader for one inventory segment from local disk, or from object storage when the local file is missing and the sealed row is UPLOADED with an object key
+// output: a size-capped reader (also under io.Copy) for one inventory segment from local disk, or from object storage when the local file is missing and the sealed row is UPLOADED with an object key
 // pos: segment open for the authenticated download route; replay path selection stays in disk_files.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -56,6 +56,15 @@ func (s *Scheduler) OpenTaskSegment(taskID, name string) (io.ReadCloser, int64, 
 	files, err := s.ListFiles(taskID, segmentInventoryLimit)
 	if err != nil {
 		return nil, 0, err
+	}
+	return s.openInventorySegment(taskID, files, name)
+}
+
+// openInventorySegment is OpenTaskSegment against an inventory the caller
+// already listed. name must be in files.
+func (s *Scheduler) openInventorySegment(taskID string, files []BinlogFile, name string) (io.ReadCloser, int64, error) {
+	if !validSegmentBasename(name) {
+		return nil, 0, ErrInvalidSegmentName
 	}
 	if !inventoryIncludesBasename(files, name) {
 		return nil, 0, ErrSegmentNotOnProcess
@@ -198,6 +207,13 @@ type limitedFile struct {
 
 func (f *limitedFile) Read(p []byte) (int, error) {
 	return f.Reader.Read(p)
+}
+
+// WriteTo keeps io.Copy on the size cap. Without it io.Copy uses the
+// promoted (*os.File).WriteTo and copies the whole file, which is longer
+// than the cap when an open segment grew after it was opened (#322).
+func (f *limitedFile) WriteTo(w io.Writer) (int64, error) {
+	return io.Copy(w, f.Reader)
 }
 
 func validSegmentBasename(name string) bool {
