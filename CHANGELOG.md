@@ -12,6 +12,16 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.64] - 2026-10-13
+
+### Changed
+
+- `/ui/` now serves the new React + shadcn/ui Console (#302; PR #315, #317, #319, #320, #321, #327, #328, #329, #332): Tasks/Alerts, the task drawer, the create/edit/adopt form, batch create, Overview, Sources and Workers, with `api_key` mode from the UI. Bookmarks and deep links under `/ui/` still work.
+
+### Added
+
+- `/ui-classic/` serves the previous Vue console for this one release (PR #332). It will be removed in a later release. Path-filtering proxies should allow it.
+
 ## [v0.5.63] - 2026-10-13
 
 ### Fixed
