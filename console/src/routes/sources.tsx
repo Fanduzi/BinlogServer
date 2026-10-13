@@ -1,6 +1,4 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { PendingPage } from '@/components/pending-page'
+import { SourcesPage } from '@/features/sources/sources-page'
 
-export const Route = createFileRoute('/sources')({
-  component: () => <PendingPage view='sources' />,
-})
+export const Route = createFileRoute('/sources')({ component: SourcesPage })

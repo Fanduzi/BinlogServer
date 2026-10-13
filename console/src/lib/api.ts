@@ -172,6 +172,16 @@ export async function getDashboard(params: DashboardParams = {}) {
   return data
 }
 
+export interface SourceLookup {
+  exists?: boolean
+  count?: number
+}
+
+export async function lookupSource(params: { host: string; port: number }): Promise<SourceLookup> {
+  const { data } = await http.get('/api/sources/lookup', { params })
+  return data
+}
+
 export async function getClusterOverview() {
   const { data } = await http.get('/api/cluster/overview')
   return data
