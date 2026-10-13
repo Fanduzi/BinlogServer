@@ -25,7 +25,10 @@ export function parseErr(err: unknown) {
 /** useTaskDetail.parseErr: used when loading the drawer fails. */
 export function detailLoadErr(t: TFunction, err: unknown) {
   const e = err as AnyRecord
-  return e?.response?.data?.error || e?.message || t('msg.unknownError')
+  const data = e?.response?.data
+  // The server answers some errors as plain text (404 "task not found").
+  if (typeof data === 'string' && data.trim()) return data.trim()
+  return data?.error || e?.message || t('msg.unknownError')
 }
 
 export function pitrErrorText(t: TFunction, err: unknown) {

@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, the resume checkpoint the next Start continues from, one inventory segment as raw bytes from local disk or a sealed uploaded object, one ustar of the replay selection, a UTC point-in-time window on that same replay route, a stop_gtid selection on that route, a start_gtid_set roll-forward from a restored backup, GET /api/tasks/{id}/window for the retained chain's earliest and latest UTC event times and breaks, /metrics 5xx on store list errors, /healthz, /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
+// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, the resume checkpoint the next Start continues from, one inventory segment as raw bytes from local disk or a sealed uploaded object, one ustar of the replay selection, a UTC point-in-time window on that same replay route, a stop_gtid selection on that route, a start_gtid_set roll-forward from a restored backup, GET /api/tasks/{id}/window for the retained chain's earliest and latest UTC event times and breaks, /metrics 5xx on store list errors, /healthz, anonymous GET /auth/config (auth mode and header name for the Consoles), /api/health, anonymous /ui/* so the Console can load, and the API auth middleware on /swagger/* when auth is enabled
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -109,6 +109,8 @@ func (s *Server) routes() {
 	}
 
 	s.gin.GET("/healthz", gin.WrapF(s.handleHealth))
+	// Anonymous: names the auth header only, never a credential.
+	s.gin.GET("/auth/config", s.handleAuthConfig)
 	metricsHandlers := []gin.HandlerFunc{}
 	if s.auth.Enabled && s.auth.ProtectMetrics {
 		metricsHandlers = append(metricsHandlers, s.authMiddleware())

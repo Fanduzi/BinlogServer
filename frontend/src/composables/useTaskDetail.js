@@ -38,8 +38,11 @@ export function useTaskDetail() {
   const replay = ref(null);
   const recovery = ref(null);
 
+  // The server answers some errors as plain text (404 "task not found").
   function parseErr(err) {
-    return err?.response?.data?.error || err?.message || t("msg.unknownError");
+    const data = err?.response?.data;
+    if (typeof data === "string" && data.trim()) return data.trim();
+    return data?.error || err?.message || t("msg.unknownError");
   }
 
   async function showDetail(taskOrID) {

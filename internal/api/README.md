@@ -3,7 +3,7 @@
 ## Files
 | File | Responsibility |
 |------|---------------|
-| `server.go` | HTTP server/router 组装、路由注册（含 `/healthz` 与 `/api/health`） |
+| `server.go` | HTTP server/router 组装、路由注册（含 `/healthz`、`/auth/config` 与 `/api/health`） |
 | `auth.go` | 路由级鉴权配置与认证中间件、ServerOption 定义 |
 | `auth_status_test.go` | 鉴权失败状态码回归测试（一律 401） |
 | `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
@@ -37,7 +37,7 @@
 - Tracing: `go.opentelemetry.io/otel`
 
 ## Features
-- 认证：支持 Bearer Token 或 API Key；凭证缺失、格式错误或不匹配一律 401（Bearer 模式带 `WWW-Authenticate`），不返回 403；`/healthz` 与 `/ui/*` 默认匿名，`/metrics` 与 `/api/*` 可配置保护。`/ui/*` 不挂鉴权中间件，浏览器可以打开 Console，在设置里粘贴 bearer token。`api.auth.enabled=true` 时 `/swagger/*` 使用保护 `/api/*` 的同一鉴权中间件（跟 `enabled`，不跟 `protect_api`）。`sanitizeTask` 在响应中清空 `source.password`（解密仅供内部使用）。
+- 认证：支持 Bearer Token 或 API Key；凭证缺失、格式错误或不匹配一律 401（Bearer 模式带 `WWW-Authenticate`），不返回 403；`/healthz` 与 `/ui/*` 默认匿名，`/metrics` 与 `/api/*` 可配置保护。`/ui/*` 不挂鉴权中间件，浏览器可以打开 Console，在设置里粘贴凭证；Console 先读匿名的 `GET /auth/config`（`enabled`/`mode`/`header`/`scheme`，不含凭证）决定发哪个头。Bearer scheme 不区分大小写（RFC 7235），scheme 与 token 之间可用空格或 tab。`api.auth.enabled=true` 时 `/swagger/*` 使用保护 `/api/*` 的同一鉴权中间件（跟 `enabled`，不跟 `protect_api`）。`sanitizeTask` 在响应中清空 `source.password`（解密仅供内部使用）。
 - 创建任务：`CreateTaskFromSpec` 整包校验通过后才落库；400 返回 JSON `{"error","code"}`。批量创建复用同一入口，单项错误不阻塞后续项，成功任务脱敏返回。
 - 更新任务：`PUT /api/tasks/{id}` 改 source、start、storage 或 `cluster_key` 时返回 200，并让 `spec_revision` 加一。正在拉流的那一条仍用旧配置，直到 Close 返回；控制回路再用新配置开一条。只改 `name` 不增加修订号。响应里的 `source.password` 仍被清空。
 - 源身份：`GET /api/sources/lookup` 与 dashboard/summary/list 的 host 过滤共用 `tasks.SameSourceHost`。lookup 任务名单有 store 时走集群观测同一份 `ListClusterObservation` 抄本，不是启动内存快照。回环别名（localhost、127/8、::1，含括号 IPv6）是同一台源，端口仍严格匹配；非回环 host 保持修剪后的原文精确匹配且不做 DNS 解析。

@@ -333,7 +333,7 @@ export BINLOG_SERVER_LOG_ROTATE_INTERVAL="12h"
 | `/swagger/*` | 开放 | **受保护** (跟从 `api.auth.enabled` 拦截，不跟 `protect_api`) |
 | `/ui/*` | 开放 | **开放**（页面和静态资源不鉴权；页面里的 `/api/*` 仍要 Token） |
 
-> 浏览器打开 `/ui/` 不需要事先带 `Authorization`。`/api/*` 返回 401 时，控制台弹出设置框，填入 bearer token。Swagger 没有这个输入框，`/swagger/*` 仍用 curl 或反向代理注入请求头。`/healthz` 始终开放。设置框发送的是 `Authorization: Bearer`，不是 API Key 头。
+> 浏览器打开 `/ui/` 不需要事先带 `Authorization`。`/api/*` 返回 401 时，控制台弹出设置框，填入 bearer token。Swagger 没有这个输入框，`/swagger/*` 仍用 curl 或反向代理注入请求头。`/healthz` 始终开放。控制台启动时读一次匿名的 `GET /auth/config`（返回 `enabled`、`mode`、请求头名和 scheme，不含任何凭证）：bearer 模式发 `Authorization: Bearer <token>`，api_key 模式把设置框里的值放进 `api_key_header` 配置的头。服务端按 RFC 7235 不区分大小写匹配 `Bearer` scheme（`bearer`、`BEARER` 都可以）。
 
 **开发环境配置（默认，无鉴权）：**
 

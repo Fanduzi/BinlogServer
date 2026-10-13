@@ -160,7 +160,8 @@
     "batchPartialSuccess": "{success} succeeded, {failed} failed",
     "previewComplete": "Preview complete: {valid} valid, {errors} errors",
     "previewPassed": "Preview passed: {count} items",
-    "batchCreateFailedDetail": "Batch Create Failed Details"
+    "batchCreateFailedDetail": "Batch Create Failed Details",
+    "unknownError": "Unknown error"
   },
   "validation": {
     "clusterKeyEmpty": "cluster_key cannot be empty",

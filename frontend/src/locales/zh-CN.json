@@ -160,7 +160,8 @@
     "batchPartialSuccess": "成功 {success} 个，失败 {failed} 个",
     "previewComplete": "预览完成：有效 {valid}，错误 {errors}",
     "previewPassed": "预览通过：共 {count} 条",
-    "batchCreateFailedDetail": "批量创建失败明细"
+    "batchCreateFailedDetail": "批量创建失败明细",
+    "unknownError": "未知错误"
   },
   "validation": {
     "clusterKeyEmpty": "cluster_key 不能为空",

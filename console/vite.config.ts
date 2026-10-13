@@ -37,6 +37,8 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api': { target: apiTarget, changeOrigin: true },
         '/healthz': { target: apiTarget, changeOrigin: true },
+        // Auth discovery (GET /auth/config, anonymous).
+        '/auth': { target: apiTarget, changeOrigin: true },
         // "Open current console" links for views not moved yet.
         '/ui': { target: apiTarget, changeOrigin: true },
       },

@@ -1783,12 +1783,12 @@ func TestAPI_AuthMiddlewareProtectsMetricsAndAPIRoutes(t *testing.T) {
 		t.Fatalf("expected /metrics 401 without auth, got %d body=%s", metricsNoAuthResp.Code, metricsNoAuthResp.Body.String())
 	}
 
-	metricsForbiddenResp := httptest.NewRecorder()
-	metricsForbiddenReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	metricsForbiddenReq.Header.Set("Authorization", "Bearer wrong-token")
-	handler.ServeHTTP(metricsForbiddenResp, metricsForbiddenReq)
-	if metricsForbiddenResp.Code != http.StatusUnauthorized {
-		t.Fatalf("expected /metrics 401 with bad token, got %d body=%s", metricsForbiddenResp.Code, metricsForbiddenResp.Body.String())
+	metricsBadTokenResp := httptest.NewRecorder()
+	metricsBadTokenReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsBadTokenReq.Header.Set("Authorization", "Bearer wrong-token")
+	handler.ServeHTTP(metricsBadTokenResp, metricsBadTokenReq)
+	if metricsBadTokenResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected /metrics 401 with bad token, got %d body=%s", metricsBadTokenResp.Code, metricsBadTokenResp.Body.String())
 	}
 
 	metricsOKResp := httptest.NewRecorder()
@@ -1806,12 +1806,12 @@ func TestAPI_AuthMiddlewareProtectsMetricsAndAPIRoutes(t *testing.T) {
 		t.Fatalf("expected /api/tasks 401 without auth, got %d body=%s", apiNoAuthResp.Code, apiNoAuthResp.Body.String())
 	}
 
-	apiForbiddenResp := httptest.NewRecorder()
-	apiForbiddenReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
-	apiForbiddenReq.Header.Set("Authorization", "Bearer wrong-token")
-	handler.ServeHTTP(apiForbiddenResp, apiForbiddenReq)
-	if apiForbiddenResp.Code != http.StatusUnauthorized {
-		t.Fatalf("expected /api/tasks 401 with bad token, got %d body=%s", apiForbiddenResp.Code, apiForbiddenResp.Body.String())
+	apiBadTokenResp := httptest.NewRecorder()
+	apiBadTokenReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	apiBadTokenReq.Header.Set("Authorization", "Bearer wrong-token")
+	handler.ServeHTTP(apiBadTokenResp, apiBadTokenReq)
+	if apiBadTokenResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected /api/tasks 401 with bad token, got %d body=%s", apiBadTokenResp.Code, apiBadTokenResp.Body.String())
 	}
 
 	apiOKResp := httptest.NewRecorder()
