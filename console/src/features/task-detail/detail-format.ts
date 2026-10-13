@@ -17,8 +17,12 @@ export function formatCheckpoint(t: TFunction, cp: AnyRecord | null) {
 /** useFormatters.parseErr: used for start/stop/delete/retry toasts. */
 export function parseErr(err: unknown) {
   const e = err as AnyRecord
-  if (typeof e?.response?.data === 'string') return e.response.data
-  if (e?.response?.data) return JSON.stringify(e.response.data)
+  const data = e?.response?.data
+  if (typeof data === 'string') return data
+  // Structured 400s ({error, code}, e.g. "source.password is required") read as their message.
+  if (typeof data?.error === 'string' && data.error.trim()) return data.error.trim()
+  if (typeof data?.message === 'string' && data.message.trim()) return data.message.trim()
+  if (data) return JSON.stringify(data)
   return e?.message || String(err)
 }
 

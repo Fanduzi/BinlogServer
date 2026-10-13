@@ -20,7 +20,8 @@ const mockSession = useMockAPI ? createMockSession({ scenario: mockScenario }) :
 // authHeaderPromise resolves once, from the anonymous GET /auth/config, to
 // the header the server reads the credential from: Authorization with the
 // Bearer scheme, or the configured API key header. A server without the
-// route (or any failure) keeps the old Bearer behavior.
+// route (404) keeps the old Bearer behavior; other failures fall back to
+// Bearer for that request and retry the lookup on the next one.
 let authHeaderPromise = null;
 function loadAuthHeader() {
   if (!authHeaderPromise) {
@@ -32,7 +33,12 @@ function loadAuthHeader() {
         }
         return { name: "Authorization", scheme: "Bearer" };
       })
-      .catch(() => ({ name: "Authorization", scheme: "Bearer" }));
+      .catch((err) => {
+        // 404: older server without the route; keep Bearer for the session.
+        // Timeouts, network errors and 5xx are not cached; the next request asks again.
+        if (err?.response?.status !== 404) authHeaderPromise = null;
+        return { name: "Authorization", scheme: "Bearer" };
+      });
   }
   return authHeaderPromise;
 }

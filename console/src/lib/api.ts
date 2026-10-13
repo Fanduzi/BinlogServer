@@ -22,7 +22,8 @@ export function resetAuthDialogShown() {
 
 // The header the server reads the credential from, learned once from the
 // anonymous GET /auth/config: Authorization with the Bearer scheme, or the
-// configured API key header. Failure keeps Bearer (older servers).
+// configured API key header. 404 (older servers) keeps Bearer for the session;
+// any other failure sends Bearer for that request only and retries the lookup next time.
 interface AuthHeader {
   name: string
   scheme: string
@@ -39,7 +40,12 @@ function loadAuthHeader(): Promise<AuthHeader> {
           ? { name: String(data.header), scheme: '' }
           : BEARER,
       )
-      .catch(() => BEARER)
+      .catch((err) => {
+        // 404: an older server without the route, so Bearer is the answer.
+        // Timeouts, network errors and 5xx are not cached; the next request asks again.
+        if (err?.response?.status !== 404) authHeaderPromise = null
+        return BEARER
+      })
   }
   return authHeaderPromise
 }
@@ -286,12 +292,12 @@ export async function createTask(payload: AnyRecord): Promise<Task> {
 }
 
 export async function updateTask(id: string | number, payload: AnyRecord): Promise<Task> {
-  const { data } = await http.put(`/api/tasks/${id}`, payload)
+  const { data } = await http.put(`/api/tasks/${enc(id)}`, payload)
   return data
 }
 
 export async function adoptTask(id: string | number, payload: AnyRecord): Promise<Task> {
-  const { data } = await http.post(`/api/tasks/${id}/adopt`, payload)
+  const { data } = await http.post(`/api/tasks/${enc(id)}/adopt`, payload)
   return data
 }
 

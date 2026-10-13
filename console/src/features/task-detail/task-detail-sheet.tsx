@@ -117,14 +117,19 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
   async function settle() {
     const run = ++settleRun.current
     await reload()
+    let failures = 0
     for (let i = 0; i < SETTLE_MAX_POLLS; i++) {
       await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
       if (run !== settleRun.current) return
       let state = ''
       try {
         state = String((await getTask(taskId))?.state || '')
+        failures = 0
       } catch {
-        return
+        // A blip (network, 5xx) is retried a few times; after that stop polling
+        // but still do the final reload below so the drawer is not left on STARTING/STOPPING.
+        if (++failures >= SETTLE_MAX_FAILURES) break
+        continue
       }
       if (run !== settleRun.current) return
       if (!TRANSITIONAL_STATES.has(state)) break
@@ -307,6 +312,7 @@ const pre = 'bg-muted mt-2 max-w-full overflow-x-auto rounded-md p-3 font-mono t
 const TRANSITIONAL_STATES = new Set(['STARTING', 'STOPPING'])
 const SETTLE_POLL_MS = 1500
 const SETTLE_MAX_POLLS = 20
+const SETTLE_MAX_FAILURES = 3
 
 function DetailBody({
   detail,

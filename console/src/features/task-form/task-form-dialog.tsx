@@ -201,6 +201,9 @@ function Field({
 }
 
 const num = (v: string) => (v.trim() === "" ? 0 : Number(v));
+// el-input-number clamps to [min, max] when the field loses focus; so do we.
+const clamp = (v: number, min: number, max = Number.MAX_SAFE_INTEGER) =>
+  Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : min;
 
 function FormFields({
   mode,
@@ -252,6 +255,7 @@ function FormFields({
           max={65535}
           value={form.source.port}
           onChange={(e) => src({ port: num(e.target.value) })}
+          onBlur={() => src({ port: clamp(form.source.port, 1, 65535) })}
         />
       </Field>
       <Field label={t("form.user")}>
@@ -269,7 +273,9 @@ function FormFields({
           placeholder={
             mode === "adopt"
               ? t("form.passwordRequiredHint")
-              : t("form.passwordHint")
+              : mode === "edit"
+                ? t("form.passwordHint")
+                : undefined
           }
           value={form.source.password ?? ""}
           onChange={(e) => src({ password: e.target.value })}
@@ -282,6 +288,7 @@ function FormFields({
           min={1}
           value={form.source.server_id}
           onChange={(e) => src({ server_id: num(e.target.value) })}
+          onBlur={() => src({ server_id: clamp(form.source.server_id, 1) })}
         />
       </Field>
       <Field label={t("form.flavor")} hint={t("form.flavorHint")}>
@@ -314,6 +321,15 @@ function FormFields({
             max={RETENTION_DAYS_MAX}
             value={form.storage.retention_days}
             onChange={(e) => store({ retention_days: num(e.target.value) })}
+            onBlur={() =>
+              store({
+                retention_days: clamp(
+                  form.storage.retention_days,
+                  1,
+                  RETENTION_DAYS_MAX,
+                ),
+              })
+            }
           />
         </Field>
         <Field label={t("form.localRetentionDays")}>
@@ -325,6 +341,15 @@ function FormFields({
             value={form.storage.local_retention_days ?? 0}
             onChange={(e) =>
               store({ local_retention_days: num(e.target.value) })
+            }
+            onBlur={() =>
+              store({
+                local_retention_days: clamp(
+                  form.storage.local_retention_days ?? 0,
+                  0,
+                  RETENTION_DAYS_MAX,
+                ),
+              })
             }
           />
         </Field>
@@ -340,6 +365,15 @@ function FormFields({
             value={form.storage.bucket_retention_days ?? 0}
             onChange={(e) =>
               store({ bucket_retention_days: num(e.target.value) })
+            }
+            onBlur={() =>
+              store({
+                bucket_retention_days: clamp(
+                  form.storage.bucket_retention_days ?? 0,
+                  0,
+                  RETENTION_DAYS_MAX,
+                ),
+              })
             }
           />
         </Field>
@@ -383,6 +417,7 @@ function FormFields({
             min={0}
             value={form.start.pos ?? 0}
             onChange={(e) => start({ pos: num(e.target.value) })}
+            onBlur={() => start({ pos: clamp(form.start.pos ?? 0, 0) })}
           />
         </Field>
       </div>
