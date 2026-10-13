@@ -1787,8 +1787,8 @@ func TestAPI_AuthMiddlewareProtectsMetricsAndAPIRoutes(t *testing.T) {
 	metricsForbiddenReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	metricsForbiddenReq.Header.Set("Authorization", "Bearer wrong-token")
 	handler.ServeHTTP(metricsForbiddenResp, metricsForbiddenReq)
-	if metricsForbiddenResp.Code != http.StatusForbidden {
-		t.Fatalf("expected /metrics 403 with bad token, got %d body=%s", metricsForbiddenResp.Code, metricsForbiddenResp.Body.String())
+	if metricsForbiddenResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected /metrics 401 with bad token, got %d body=%s", metricsForbiddenResp.Code, metricsForbiddenResp.Body.String())
 	}
 
 	metricsOKResp := httptest.NewRecorder()
@@ -1810,8 +1810,8 @@ func TestAPI_AuthMiddlewareProtectsMetricsAndAPIRoutes(t *testing.T) {
 	apiForbiddenReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
 	apiForbiddenReq.Header.Set("Authorization", "Bearer wrong-token")
 	handler.ServeHTTP(apiForbiddenResp, apiForbiddenReq)
-	if apiForbiddenResp.Code != http.StatusForbidden {
-		t.Fatalf("expected /api/tasks 403 with bad token, got %d body=%s", apiForbiddenResp.Code, apiForbiddenResp.Body.String())
+	if apiForbiddenResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected /api/tasks 401 with bad token, got %d body=%s", apiForbiddenResp.Code, apiForbiddenResp.Body.String())
 	}
 
 	apiOKResp := httptest.NewRecorder()
@@ -1941,8 +1941,8 @@ func TestAPI_AuthMiddlewareAPIKeyMode(t *testing.T) {
 	wrongKeyReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
 	wrongKeyReq.Header.Set("X-Custom-API-Key", "wrong-key")
 	handler.ServeHTTP(wrongKeyResp, wrongKeyReq)
-	if wrongKeyResp.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 when api key is wrong, got %d body=%s", wrongKeyResp.Code, wrongKeyResp.Body.String())
+	if wrongKeyResp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when api key is wrong, got %d body=%s", wrongKeyResp.Code, wrongKeyResp.Body.String())
 	}
 
 	wrongHeaderResp := httptest.NewRecorder()

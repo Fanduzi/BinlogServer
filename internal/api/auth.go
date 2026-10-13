@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP authorization headers and auth config for protected routes
-// output: request allow/deny decisions with consistent HTTP auth status codes
+// output: request allow/deny decisions; every missing, malformed or wrong credential is 401 (bearer mode adds WWW-Authenticate)
 // pos: API security boundary enforcing auth policy before business handlers
 // note: if this file changes, update this header and module README.md.
 package api
@@ -108,17 +108,18 @@ func normalizeAuthConfig(cfg AuthConfig) AuthConfig {
 	return cfg
 }
 
+// authMiddleware rejects every missing, malformed or wrong credential with
+// 401. The server has one shared credential and no per-caller permissions,
+// so a failed check always means "not authenticated", which is 401 in
+// RFC 9110; 403 stays free for a real "authenticated but not allowed" once
+// users and roles exist. Both Consoles reopen Settings on 401 only.
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		switch s.auth.Mode {
 		case AuthModeAPIKey:
 			presented := strings.TrimSpace(c.GetHeader(s.auth.APIKeyHeader))
-			if presented == "" {
+			if presented == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(s.auth.APIKey)) != 1 {
 				c.AbortWithStatus(http.StatusUnauthorized)
-				return
-			}
-			if subtle.ConstantTimeCompare([]byte(presented), []byte(s.auth.APIKey)) != 1 {
-				c.AbortWithStatus(http.StatusForbidden)
 				return
 			}
 			c.Next()
@@ -127,22 +128,14 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			fallthrough
 		default:
 			raw := strings.TrimSpace(c.GetHeader("Authorization"))
-			if raw == "" {
-				c.AbortWithStatus(http.StatusUnauthorized)
-				return
-			}
 			const prefix = "Bearer "
-			if !strings.HasPrefix(raw, prefix) {
-				c.AbortWithStatus(http.StatusForbidden)
-				return
+			token := ""
+			if strings.HasPrefix(raw, prefix) {
+				token = strings.TrimSpace(strings.TrimPrefix(raw, prefix))
 			}
-			token := strings.TrimSpace(strings.TrimPrefix(raw, prefix))
-			if token == "" {
+			if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.auth.BearerToken)) != 1 {
+				c.Header("WWW-Authenticate", `Bearer realm="binlog-server"`)
 				c.AbortWithStatus(http.StatusUnauthorized)
-				return
-			}
-			if subtle.ConstantTimeCompare([]byte(token), []byte(s.auth.BearerToken)) != 1 {
-				c.AbortWithStatus(http.StatusForbidden)
 				return
 			}
 			c.Next()
