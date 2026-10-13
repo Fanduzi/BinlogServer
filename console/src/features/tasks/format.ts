@@ -53,11 +53,18 @@ export function replicationTone(status?: string): Tone {
   return 'info'
 }
 
-function leaseStale(task: Task, nowMs: number): boolean | null {
-  const owner = task?.owner_worker_id
-  const epoch = Number(task?.epoch ?? 0)
+/** Single-task GET /lease result; only the detail drawer passes one. */
+export interface LeaseOverride {
+  owner_worker_id?: string
+  epoch?: number
+  updated_at?: string
+}
+
+function leaseStale(task: Task, nowMs: number, lease?: LeaseOverride | null): boolean | null {
+  const owner = lease?.owner_worker_id || task?.owner_worker_id
+  const epoch = Number(lease?.epoch ?? task?.epoch ?? 0)
   if (!owner || epoch <= 0) return null
-  const updatedMs = toTimeMs(task?.updated_at)
+  const updatedMs = toTimeMs(lease?.updated_at || task?.updated_at)
   if (updatedMs <= 0) return true
   return nowMs - updatedMs > LEASE_RISK_SECONDS * 1000
 }
@@ -68,8 +75,13 @@ export function leaseRiskTone(task: Task, nowMs: number): Tone {
   return stale ? 'warning' : 'success'
 }
 
-export function leaseRiskLabel(t: TFunction, task: Task, nowMs: number) {
-  const stale = leaseStale(task, nowMs)
+export function leaseRiskLabel(
+  t: TFunction,
+  task: Task,
+  nowMs: number,
+  lease?: LeaseOverride | null,
+) {
+  const stale = leaseStale(task, nowMs, lease)
   if (stale === null) return '--'
   return stale ? t('lease.risk') : t('lease.normal')
 }

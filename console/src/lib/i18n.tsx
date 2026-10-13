@@ -1,7 +1,7 @@
 // Reuses the Vue console's message catalogs so wording stays identical
 // during the migration (issue #302). Interpolation follows vue-i18n's
 // named "{name}" form; a missing key returns the key, as vue-i18n does.
-import { createContext, useContext, type ReactNode } from 'react'
+import { createContext, useContext, useMemo, type ReactNode } from 'react'
 import en from '../../../frontend/src/locales/en.json'
 import zhCN from '../../../frontend/src/locales/zh-CN.json'
 
@@ -16,7 +16,10 @@ const consoleOnly = {
       pendingTitle: '此页面尚未迁移',
       pendingBody: '新版控制台正按页迁移（#302）。请先在现有控制台中使用此页面。',
       openClassic: '打开现有控制台',
-      detailPending: '任务详情将在下一个迁移 PR 中提供，请暂用现有控制台。',
+      formPending: '编辑和接管表单将在后续迁移 PR 中提供，请暂用现有控制台。',
+      notFoundTitle: '页面不存在',
+      notFoundBody: '这个地址没有对应的页面。',
+      backToTasks: '返回任务列表',
     },
   },
   en: {
@@ -25,7 +28,10 @@ const consoleOnly = {
       pendingTitle: 'This page has not moved yet',
       pendingBody: 'The new Console is moving over page by page (#302). Use this page in the current console for now.',
       openClassic: 'Open current console',
-      detailPending: 'Task details move over in the next migration PR; use the current console for now.',
+      formPending: 'The edit and adopt forms move over in a later migration PR; use the current console for now.',
+      notFoundTitle: 'Page not found',
+      notFoundBody: 'Nothing lives at this address.',
+      backToTasks: 'Back to tasks',
     },
   },
 }
@@ -77,8 +83,10 @@ const I18nContext = createContext<{ locale: Locale; t: TFunction }>({
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const locale = getLocale()
+  // Stable across renders so hooks can depend on t without refetch loops.
+  const value = useMemo(() => ({ locale, t: makeT(locale) }), [locale])
   return (
-    <I18nContext.Provider value={{ locale, t: makeT(locale) }}>
+    <I18nContext.Provider value={value}>
       {children}
     </I18nContext.Provider>
   )

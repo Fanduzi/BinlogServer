@@ -1,6 +1,6 @@
 // Tasks / Alerts view, ported from the tasks|alerts branch of App.vue:
 // KPI cards, current-page filter panel, server-paged task table.
-import { useMemo } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Info, SlidersHorizontal, Table2, Bell, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -47,7 +47,7 @@ import { MetricGrid } from './metric-grid'
 import { ToneBadge } from './tone-badge'
 import { useDebounced } from './use-debounced'
 
-export function TasksPage({ view }: { view: 'tasks' | 'alerts' }) {
+export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; children?: ReactNode }) {
   const { t, locale } = useI18n()
   const navigate = useNavigate()
   const { dashboard, nowRefMs } = useObservation()
@@ -69,6 +69,13 @@ export function TasksPage({ view }: { view: 'tasks' | 'alerts' }) {
     setActiveQuick(kind)
     setFilter((f) => quickFilterState(kind, f))
     void navigate({ to: kind === 'alert' ? '/alerts' : '/tasks' })
+  }
+
+  function openDetail(id: string | number) {
+    void navigate({
+      to: view === 'alerts' ? '/alerts/$taskId' : '/tasks/$taskId',
+      params: { taskId: String(id) },
+    })
   }
 
   const pageCount = Math.max(1, Math.ceil(total / pager.pageSize))
@@ -223,7 +230,19 @@ export function TasksPage({ view }: { view: 'tasks' | 'alerts' }) {
                   {rows.map((row) => {
                     const reason = formatReplicationReason(t, row.replication)
                     return (
-                      <TableRow key={String(row.task.id)} className={`task-row task-row-${row.task.id}`}>
+                      <TableRow
+                        key={String(row.task.id)}
+                        className={`task-row task-row-${row.task.id} cursor-pointer`}
+                        tabIndex={0}
+                        onClick={() => openDetail(row.task.id)}
+                        onKeyDown={(e) => {
+                          if (e.key !== 'Enter' || e.target !== e.currentTarget) return
+                          // Otherwise the same Enter press lands on the drawer's
+                          // close button once the drawer takes focus.
+                          e.preventDefault()
+                          openDetail(row.task.id)
+                        }}
+                      >
                         <TableCell>
                           <span data-testid={`task-row-${row.task.id}`}>{row.task.id}</span>
                         </TableCell>
@@ -270,21 +289,17 @@ export function TasksPage({ view }: { view: 'tasks' | 'alerts' }) {
                           {row.task.source?.semi_sync ? t('detail.on') : t('detail.off')}
                         </TableCell>
                         <TableCell className='bg-background sticky right-0'>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span tabIndex={0}>
-                                <Button
-                                  size='sm'
-                                  variant='outline'
-                                  disabled
-                                  data-testid={`task-detail-trigger-${row.task.id}`}
-                                >
-                                  {t('btn.detail')}
-                                </Button>
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>{t('migration.detailPending')}</TooltipContent>
-                          </Tooltip>
+                          <Button
+                            size='sm'
+                            variant='outline'
+                            data-testid={`task-detail-trigger-${row.task.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openDetail(row.task.id)
+                            }}
+                          >
+                            {t('btn.detail')}
+                          </Button>
                         </TableCell>
                       </TableRow>
                     )
@@ -359,6 +374,7 @@ export function TasksPage({ view }: { view: 'tasks' | 'alerts' }) {
           </CardContent>
         </Card>
       </div>
+      {children}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { createFileRoute, redirect } from '@tanstack/react-router'
+import { Outlet, createFileRoute, redirect } from '@tanstack/react-router'
 import { TasksPage } from '@/features/tasks/tasks-page'
 
 export const Route = createFileRoute('/tasks')({
@@ -8,5 +8,9 @@ export const Route = createFileRoute('/tasks')({
   beforeLoad: ({ search }) => {
     if ((search as { mode?: string }).mode === 'alerts') throw redirect({ to: '/alerts' })
   },
-  component: () => <TasksPage view='tasks' />,
+  component: () => (
+    <TasksPage view='tasks'>
+      <Outlet />
+    </TasksPage>
+  ),
 })
