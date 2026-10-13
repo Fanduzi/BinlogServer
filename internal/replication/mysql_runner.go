@@ -1946,6 +1946,9 @@ func fileHeaderEvent(t replication.EventType) bool {
 // starts right after a complete one. It returns the combined set. A task
 // directory with re-dump damage is left untouched; the storage check refuses
 // the start. Nothing happens when the directory has no open segment.
+// truncateFile is os.Truncate; tests swap it to inject a failed cut.
+var truncateFile = os.Truncate
+
 func (r *MySQLRunner) reconcileOpenTail(task tasks.Task, executed *executedGTID) (string, bool) {
 	dir := filepath.Join(r.dataDir, task.ID)
 	ledger := binlog.LedgerAt(dir)
@@ -1962,7 +1965,7 @@ func (r *MySQLRunner) reconcileOpenTail(task tasks.Task, executed *executedGTID)
 		switch {
 		case err != nil || tail.CutOffset <= 0 || tail.CutOffset > info.Size():
 			tail.Truncate = false
-		case os.Truncate(tail.Path, tail.CutOffset) != nil:
+		case truncateFile(tail.Path, tail.CutOffset) != nil:
 			log.Printf("open tail truncate failed task=%s path=%s offset=%d", task.ID, tail.Path, tail.CutOffset)
 			tail.Truncate = false
 		default:
