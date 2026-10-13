@@ -1,6 +1,6 @@
 // Label and tag helpers ported from frontend/src/composables/useFormatters.js
 // and useTaskFilter.js. List lease risk uses the task copy, never GET /lease.
-import type { TFunction } from '@/lib/i18n'
+import { tKnown, type TFunction } from '@/lib/i18n'
 import type { Replication, Task } from '@/lib/api'
 import { toTimeMs } from '@/context/observation'
 
@@ -24,11 +24,11 @@ export const REPLICATION_STATUSES = ['NORMAL', 'DELAYED', 'ABNORMAL', 'IDLE'] as
 export type Tone = 'success' | 'warning' | 'danger' | 'info'
 
 export function stateLabel(t: TFunction, state?: string) {
-  return t(`state.${state}`) || state || '--'
+  return tKnown(t, `state.${state}`, state || '--')
 }
 
 export function replicationStatusLabel(t: TFunction, status?: string) {
-  return t(`replication.${status}`) || status || '--'
+  return tKnown(t, `replication.${status}`, status || '--')
 }
 
 export function sourceLabel(task?: Task) {

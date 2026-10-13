@@ -12,6 +12,7 @@ import { setAuthToken } from '@/lib/auth'
 import { setLocale, useI18n } from '@/lib/i18n'
 import { BatchCreateProvider } from '@/features/batch-create/batch-create-dialog'
 import { TaskFormProvider } from '@/features/task-form/task-form-dialog'
+import { ShellMetricGrid } from '@/features/tasks/metric-grid'
 import { AppSidebar } from './app-sidebar'
 import { Header } from './header'
 
@@ -39,6 +40,7 @@ export function AuthenticatedLayout() {
           <SidebarInset className='min-w-0'>
             <Header onSettings={() => setSettingsOpen(true)} />
             <main className='flex min-w-0 flex-1 flex-col gap-4 p-4'>
+              <ShellMetricGrid />
               {authMessage && (
                 <div
                   role='alert'

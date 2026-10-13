@@ -4,7 +4,7 @@ import { useMemo, type ReactNode } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Info, SlidersHorizontal, Table2, Bell, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Panel } from '@/components/panel'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -15,16 +15,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { DataTable, type Column } from '@/components/data-table'
 import { useObservation } from '@/context/observation'
+import type { DashboardRow } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import {
   REPLICATION_STATUSES,
@@ -41,17 +35,16 @@ import {
   stateLabel,
   stateTone,
 } from './format'
-import { PAGE_SIZES, filterRows, quickFilterState, type QuickFilter, type UiFilter } from './filter'
-import { useTaskFilter } from './filter-context'
-import { MetricGrid } from './metric-grid'
+import { PAGE_SIZES, filterRows, quickFilterState, type UiFilter } from './filter'
+import { useApplyQuickFilter, useTaskFilter } from './filter-context'
 import { ToneBadge } from './tone-badge'
-import { useDebounced } from './use-debounced'
+import { useDebounced } from '@/hooks/use-debounced'
 
 export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; children?: ReactNode }) {
   const { t, locale } = useI18n()
   const navigate = useNavigate()
   const { dashboard, nowRefMs } = useObservation()
-  const { filter, setFilter, pager, setPager, activeQuick, setActiveQuick } = useTaskFilter()
+  const { filter, setFilter, pager, setPager, setActiveQuick } = useTaskFilter()
   const kw = useDebounced(filter.keyword, 300)
   const skw = useDebounced(filter.sourceKeyword, 300)
   const rows = useMemo(
@@ -65,11 +58,7 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
     setFilter((f) => ({ ...f, ...patch }))
   }
 
-  function applyQuick(kind: QuickFilter) {
-    setActiveQuick(kind)
-    setFilter((f) => quickFilterState(kind, f))
-    void navigate({ to: kind === 'alert' ? '/alerts' : '/tasks' })
-  }
+  const applyQuick = useApplyQuickFilter()
 
   function openDetail(id: string | number) {
     void navigate({
@@ -80,20 +69,114 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
 
   const pageCount = Math.max(1, Math.ceil(total / pager.pageSize))
 
+  const sticky = 'bg-background sticky right-0'
+  const columns: Column<DashboardRow>[] = [
+    {
+      key: 'id',
+      header: t('table.id'),
+      headClassName: 'w-[70px]',
+      cell: (row) => <span data-testid={`task-row-${row.task.id}`}>{row.task.id}</span>,
+    },
+    {
+      key: 'name',
+      header: t('table.name'),
+      headClassName: 'min-w-[180px]',
+      className: 'font-medium',
+      cell: (row) => row.task.name,
+    },
+    {
+      key: 'state',
+      header: t('table.taskState'),
+      cell: (row) => (
+        <div className='flex flex-wrap gap-1'>
+          <ToneBadge tone={stateTone(row.task.state)}>{stateLabel(t, row.task.state)}</ToneBadge>
+          {row.task.storage_alert && (
+            <ToneBadge tone='danger' data-testid='task-storage-alert-row'>
+              {t('detail.storageAlert')}
+            </ToneBadge>
+          )}
+        </div>
+      ),
+    },
+    { key: 'owner', header: t('table.ownerWorker'), cell: (row) => ownerWorkerLabel(row.task) },
+    {
+      key: 'lease',
+      header: t('table.leaseRisk'),
+      cell: (row) => (
+        <ToneBadge tone={leaseRiskTone(row.task, now)}>
+          {leaseRiskLabel(t, row.task, now)}
+        </ToneBadge>
+      ),
+    },
+    {
+      key: 'replication',
+      header: t('table.replicationStatus'),
+      cell: (row) => {
+        const reason = formatReplicationReason(t, row.replication)
+        return (
+          <div className='flex items-center gap-1'>
+            <ToneBadge tone={replicationTone(row.replication?.status)}>
+              {replicationStatusLabel(t, row.replication?.status)}
+            </ToneBadge>
+            {reason !== '--' && (
+              <Tooltip>
+                <TooltipTrigger aria-label={reason}>
+                  <Info className='text-muted-foreground size-3.5' />
+                </TooltipTrigger>
+                <TooltipContent className='max-w-sm'>{reason}</TooltipContent>
+              </Tooltip>
+            )}
+          </div>
+        )
+      },
+    },
+    {
+      key: 'delay',
+      header: t('table.delay'),
+      className: 'tabular-nums',
+      cell: (row) => formatDelay(row.replication?.delay_seconds, row.replication?.has_progress),
+    },
+    { key: 'source', header: t('table.source'), cell: (row) => sourceLabel(row.task) },
+    {
+      key: 'lastEvent',
+      header: t('table.lastEventTime'),
+      cell: (row) => formatTs(locale, row.replication?.last_event_at),
+    },
+    {
+      key: 'semi',
+      header: t('table.semiSync'),
+      cell: (row) => (row.task.source?.semi_sync ? t('detail.on') : t('detail.off')),
+    },
+    {
+      key: 'actions',
+      header: t('table.actions'),
+      className: sticky,
+      cell: (row) => (
+        <Button
+          size='sm'
+          variant='outline'
+          data-testid={`task-detail-trigger-${row.task.id}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            openDetail(row.task.id)
+          }}
+        >
+          {t('btn.detail')}
+        </Button>
+      ),
+    },
+  ]
+
   return (
     <div className='flex flex-col gap-4'>
-      <MetricGrid summary={dashboard.summary} active={activeQuick} onFilter={applyQuick} />
-
       <div className='grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]'>
-        <Card className='gap-3 self-start py-4'>
-          <CardHeader className='px-4'>
-            <CardTitle className='flex items-center gap-2 text-sm'>
-              <SlidersHorizontal className='size-4' />
-              {t('filter.title')}
-            </CardTitle>
-            <p className='text-muted-foreground text-xs'>{t('filter.hint')}</p>
-          </CardHeader>
-          <CardContent className='flex flex-col gap-3 px-4'>
+        <Panel
+          icon={SlidersHorizontal}
+          title={t('filter.title')}
+          hint={t('filter.hint')}
+          className='self-start'
+        >
+          <div className='flex flex-col gap-3'>
             <div className='flex flex-wrap gap-1.5'>
               <Button
                 size='sm'
@@ -193,191 +276,86 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
             >
               {t('btn.resetFilter')}
             </Button>
-          </CardContent>
-        </Card>
+          </div>
+        </Panel>
 
-        <Card className='min-w-0 gap-3 py-4'>
-          <CardHeader className='flex flex-row items-center justify-between gap-2 px-4'>
-            <CardTitle className='flex items-center gap-2 text-sm'>
-              {view === 'alerts' ? <Bell className='size-4' /> : <Table2 className='size-4' />}
-              {view === 'alerts' ? t('nav.alerts') : t('nav.tasks')}
-            </CardTitle>
-            <span className='text-muted-foreground text-xs' data-testid='task-filter-count'>
+        <Panel
+          icon={view === 'alerts' ? Bell : Table2}
+          title={view === 'alerts' ? t('nav.alerts') : t('nav.tasks')}
+          hint={
+            <span data-testid='task-filter-count'>
               {view === 'alerts'
                 ? t('filter.alertFilteredCount', { filtered: rows.length, total })
                 : t('filter.filteredCount', { filtered: rows.length, total })}
             </span>
-          </CardHeader>
-          <CardContent className='px-4'>
-            <div className='overflow-x-auto rounded-md border'>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className='w-[70px]'>{t('table.id')}</TableHead>
-                    <TableHead className='min-w-[180px]'>{t('table.name')}</TableHead>
-                    <TableHead>{t('table.taskState')}</TableHead>
-                    <TableHead>{t('table.ownerWorker')}</TableHead>
-                    <TableHead>{t('table.leaseRisk')}</TableHead>
-                    <TableHead>{t('table.replicationStatus')}</TableHead>
-                    <TableHead>{t('table.delay')}</TableHead>
-                    <TableHead>{t('table.source')}</TableHead>
-                    <TableHead>{t('table.lastEventTime')}</TableHead>
-                    <TableHead>{t('table.semiSync')}</TableHead>
-                    <TableHead className='bg-background sticky right-0'>
-                      {t('table.actions')}
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.map((row) => {
-                    const reason = formatReplicationReason(t, row.replication)
-                    return (
-                      <TableRow
-                        key={String(row.task.id)}
-                        className={`task-row task-row-${row.task.id} cursor-pointer`}
-                        tabIndex={0}
-                        onClick={() => openDetail(row.task.id)}
-                        onKeyDown={(e) => {
-                          if (e.key !== 'Enter' || e.target !== e.currentTarget) return
-                          // Otherwise the same Enter press lands on the drawer's
-                          // close button once the drawer takes focus.
-                          e.preventDefault()
-                          openDetail(row.task.id)
-                        }}
-                      >
-                        <TableCell>
-                          <span data-testid={`task-row-${row.task.id}`}>{row.task.id}</span>
-                        </TableCell>
-                        <TableCell className='font-medium'>{row.task.name}</TableCell>
-                        <TableCell>
-                          <div className='flex flex-wrap gap-1'>
-                            <ToneBadge tone={stateTone(row.task.state)}>
-                              {stateLabel(t, row.task.state)}
-                            </ToneBadge>
-                            {row.task.storage_alert && (
-                              <ToneBadge tone='danger' data-testid='task-storage-alert-row'>
-                                {t('detail.storageAlert')}
-                              </ToneBadge>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell>{ownerWorkerLabel(row.task)}</TableCell>
-                        <TableCell>
-                          <ToneBadge tone={leaseRiskTone(row.task, now)}>
-                            {leaseRiskLabel(t, row.task, now)}
-                          </ToneBadge>
-                        </TableCell>
-                        <TableCell>
-                          <div className='flex items-center gap-1'>
-                            <ToneBadge tone={replicationTone(row.replication?.status)}>
-                              {replicationStatusLabel(t, row.replication?.status)}
-                            </ToneBadge>
-                            {reason !== '--' && (
-                              <Tooltip>
-                                <TooltipTrigger aria-label={reason}>
-                                  <Info className='text-muted-foreground size-3.5' />
-                                </TooltipTrigger>
-                                <TooltipContent className='max-w-sm'>{reason}</TooltipContent>
-                              </Tooltip>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell className='tabular-nums'>
-                          {formatDelay(
-                            row.replication?.delay_seconds,
-                            row.replication?.has_progress,
-                          )}
-                        </TableCell>
-                        <TableCell>{sourceLabel(row.task)}</TableCell>
-                        <TableCell>{formatTs(locale, row.replication?.last_event_at)}</TableCell>
-                        <TableCell>
-                          {row.task.source?.semi_sync ? t('detail.on') : t('detail.off')}
-                        </TableCell>
-                        <TableCell className='bg-background sticky right-0'>
-                          <Button
-                            size='sm'
-                            variant='outline'
-                            data-testid={`task-detail-trigger-${row.task.id}`}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              openDetail(row.task.id)
-                            }}
-                          >
-                            {t('btn.detail')}
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
-              {rows.length === 0 && (
-                <p
-                  className='text-muted-foreground py-10 text-center text-sm'
-                  data-testid='task-table-empty'
-                >
-                  {t('empty.noTasks')}
-                </p>
-              )}
-            </div>
+          }
+        >
+          <DataTable
+            columns={columns}
+            rows={rows}
+            rowKey={(row) => String(row.task.id)}
+            rowClassName={(row) => `task-row task-row-${row.task.id}`}
+            onRowActivate={(row) => openDetail(row.task.id)}
+            empty={t('empty.noTasks')}
+            emptyTestid='task-table-empty'
+          />
 
-            <div className='mt-3 flex flex-wrap items-center justify-end gap-2 text-sm'>
-              <span className='text-muted-foreground'>{t('pagination.total', { total })}</span>
-              <Select
-                value={String(pager.pageSize)}
-                onValueChange={(v) => setPager({ page: 1, pageSize: Number(v) })}
-              >
-                <SelectTrigger size='sm' className='w-[110px]' data-testid='pager-size'>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PAGE_SIZES.map((s) => (
-                    <SelectItem key={s} value={String(s)}>
-                      {t('pagination.perPage', { size: s })}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                size='icon'
-                variant='outline'
-                className='size-8'
-                aria-label={t('pagination.prev')}
-                disabled={pager.page <= 1}
-                onClick={() => setPager((p) => ({ ...p, page: p.page - 1 }))}
-              >
-                <ChevronLeft />
-              </Button>
-              {pageWindow(pager.page, pageCount).map((n, i) =>
-                n === null ? (
-                  <span key={`gap-${i}`} className='text-muted-foreground px-1'>
-                    …
-                  </span>
-                ) : (
-                  <Button
-                    key={n}
-                    size='sm'
-                    variant={n === pager.page ? 'default' : 'outline'}
-                    className='h-8 min-w-8 px-2'
-                    onClick={() => setPager((p) => ({ ...p, page: n }))}
-                  >
-                    {n}
-                  </Button>
-                ),
-              )}
-              <Button
-                size='icon'
-                variant='outline'
-                className='size-8'
-                aria-label={t('pagination.next')}
-                disabled={pager.page >= pageCount}
-                onClick={() => setPager((p) => ({ ...p, page: p.page + 1 }))}
-              >
-                <ChevronRight />
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+          <div className='mt-3 flex flex-wrap items-center justify-end gap-2 text-sm'>
+            <span className='text-muted-foreground'>{t('pagination.total', { total })}</span>
+            <Select
+              value={String(pager.pageSize)}
+              onValueChange={(v) => setPager({ page: 1, pageSize: Number(v) })}
+            >
+              <SelectTrigger size='sm' className='w-[110px]' data-testid='pager-size'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PAGE_SIZES.map((s) => (
+                  <SelectItem key={s} value={String(s)}>
+                    {t('pagination.perPage', { size: s })}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              size='icon'
+              variant='outline'
+              className='size-8'
+              aria-label={t('pagination.prev')}
+              disabled={pager.page <= 1}
+              onClick={() => setPager((p) => ({ ...p, page: p.page - 1 }))}
+            >
+              <ChevronLeft />
+            </Button>
+            {pageWindow(pager.page, pageCount).map((n, i) =>
+              n === null ? (
+                <span key={`gap-${i}`} className='text-muted-foreground px-1'>
+                  …
+                </span>
+              ) : (
+                <Button
+                  key={n}
+                  size='sm'
+                  variant={n === pager.page ? 'default' : 'outline'}
+                  className='h-8 min-w-8 px-2'
+                  onClick={() => setPager((p) => ({ ...p, page: n }))}
+                >
+                  {n}
+                </Button>
+              ),
+            )}
+            <Button
+              size='icon'
+              variant='outline'
+              className='size-8'
+              aria-label={t('pagination.next')}
+              disabled={pager.page >= pageCount}
+              onClick={() => setPager((p) => ({ ...p, page: p.page + 1 }))}
+            >
+              <ChevronRight />
+            </Button>
+          </div>
+        </Panel>
       </div>
       {children}
     </div>

@@ -56,7 +56,11 @@ import {
   stopTask,
   type AnyRecord,
 } from '@/lib/api'
+import { errorText } from '@/lib/errors'
+import { createLatest } from '@/lib/latest'
+import { pollUntil } from '@/lib/poll'
 import { useI18n } from '@/lib/i18n'
+import { notifyError, notifyErrorAsync } from '@/lib/notify'
 import { cn } from '@/lib/utils'
 import {
   formatDelay,
@@ -73,7 +77,6 @@ import { ToneBadge } from '../tasks/tone-badge'
 import {
   damagedReplayText,
   diskBase,
-  downloadErrorText,
   effectiveRetention,
   fileServerLabel,
   formatBreak,
@@ -82,9 +85,7 @@ import {
   formatStart,
   isLeftoverDiskTask,
   locationLabel,
-  parseErr,
   pendingDumpTitle,
-  pitrErrorText,
   recoveryRange,
   replayHint,
   saveBlob,
@@ -112,29 +113,22 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
   // After Start/Stop the task passes through STARTING/STOPPING. Poll the task
   // (GET /api/tasks/{id} only) until it settles, then reload the whole drawer
   // and the list once, so the drawer no longer sticks on "Starting".
-  const settleRun = useRef(0)
-  useEffect(() => () => void settleRun.current++, [taskId])
+  const settleGate = useRef(createLatest()).current
+  useEffect(() => () => settleGate.cancel(), [taskId, settleGate])
   async function settle() {
-    const run = ++settleRun.current
+    const run = settleGate.begin()
+    const current = () => settleGate.isLatest(run)
     await reload()
-    let failures = 0
-    for (let i = 0; i < SETTLE_MAX_POLLS; i++) {
-      await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
-      if (run !== settleRun.current) return
-      let state = ''
-      try {
-        state = String((await getTask(taskId))?.state || '')
-        failures = 0
-      } catch {
-        // A blip (network, 5xx) is retried a few times; after that stop polling
-        // but still do the final reload below so the drawer is not left on STARTING/STOPPING.
-        if (++failures >= SETTLE_MAX_FAILURES) break
-        continue
-      }
-      if (run !== settleRun.current) return
-      if (!TRANSITIONAL_STATES.has(state)) break
-    }
-    if (run !== settleRun.current) return
+    const outcome = await pollUntil({
+      fetch: () => getTask(taskId),
+      done: (t: AnyRecord) => !TRANSITIONAL_STATES.has(String(t?.state || '')),
+      intervalMs: SETTLE_POLL_MS,
+      maxPolls: SETTLE_MAX_POLLS,
+      maxFailures: SETTLE_MAX_FAILURES,
+      cancelled: () => !current(),
+    })
+    // settled, exhausted or failed: one final refresh so the drawer never stays on STARTING/STOPPING.
+    if (outcome === 'cancelled' || !current()) return
     await refresh()
     await reload()
   }
@@ -146,7 +140,7 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
       toast.success(t('msg.taskStarted', { id: task.id }))
       await refresh()
     } catch (err) {
-      toast.error(parseErr(err))
+      notifyError(err)
       return
     }
     await settle()
@@ -159,7 +153,7 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
       toast.success(t('msg.taskStopped', { id: task.id }))
       await refresh()
     } catch (err) {
-      toast.error(parseErr(err))
+      notifyError(err)
       return
     }
     await settle()
@@ -168,14 +162,14 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
   async function onDelete() {
     if (!task) return
     setConfirmDelete(false)
-    settleRun.current++
+    settleGate.cancel()
     try {
       await deleteTask(task.id)
       toast.success(t('msg.taskDeleted', { id: task.id }))
       await refresh()
       onClose()
     } catch (err) {
-      toast.error(parseErr(err))
+      notifyError(err)
     }
   }
 
@@ -186,7 +180,7 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
       setFiles(await listFiles(task.id, TASK_DETAIL_INVENTORY_LIMIT))
       toast.success(t('msg.retryUploadTriggered'))
     } catch (err) {
-      toast.error(parseErr(err))
+      notifyError(err)
     }
   }
 
@@ -195,7 +189,7 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
       saveBlob(name, await fetcher())
       toast.success(t(okKey))
     } catch (err) {
-      toast.error(await downloadErrorText(err))
+      await notifyErrorAsync(err)
     }
   }
 
@@ -390,7 +384,7 @@ function DetailBody({
         }),
       )
     } catch (err) {
-      setPitrError(pitrErrorText(t, err))
+      setPitrError(errorText(err, t('msg.unknownError')))
     }
   }
 

@@ -9,7 +9,7 @@ import { useEffect, useRef } from 'react'
 import { useObservation } from '@/context/observation'
 import { paginationParams } from './filter'
 import { useTaskFilter } from './filter-context'
-import { useDebounced } from './use-debounced'
+import { useDebounced } from '@/hooks/use-debounced'
 
 export function TaskObservationSync() {
   const { refresh, dashboard } = useObservation()
@@ -23,7 +23,7 @@ export function TaskObservationSync() {
       setPager((x) => ({ ...x, page: 1 }))
       return
     }
-    void refresh(paginationParams(pager.page, pager.pageSize, filter.taskState))
+    void refresh({ paging: paginationParams(pager.page, pager.pageSize, filter.taskState) })
   }, [filter.taskState, pager.page, pager.pageSize, refresh, setPager])
 
   const kw = useDebounced(filter.keyword, 300)

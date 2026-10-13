@@ -2,7 +2,7 @@
 // frontend/src/components/TaskDetailDrawer.vue and the drawer handlers in
 // App.vue / useTaskDetail.js / useFormatters.js.
 import type { AnyRecord } from '@/lib/api'
-import type { TFunction } from '@/lib/i18n'
+import { tKnown, type TFunction } from '@/lib/i18n'
 
 export function formatCheckpoint(t: TFunction, cp: AnyRecord | null) {
   if (!cp) return t('detail.noCheckpoint')
@@ -13,47 +13,6 @@ export function formatCheckpoint(t: TFunction, cp: AnyRecord | null) {
   const gtid = String(cp.gtid_set || cp.GTIDSet || cp.gtid || '').trim()
   const base = `${file}:${pos}`
   return gtid ? `${base} GTID ${gtid}` : base
-}
-
-/** useFormatters.parseErr: used for start/stop/delete/retry toasts. */
-export function parseErr(err: unknown) {
-  const e = err as AnyRecord
-  const data = e?.response?.data
-  if (typeof data === 'string') return data
-  // Structured 400s ({error, code}, e.g. "source.password is required") read as their message.
-  if (typeof data?.error === 'string' && data.error.trim()) return data.error.trim()
-  if (typeof data?.message === 'string' && data.message.trim()) return data.message.trim()
-  if (data) return JSON.stringify(data)
-  return e?.message || String(err)
-}
-
-/** useTaskDetail.parseErr: used when loading the drawer fails. */
-export function detailLoadErr(t: TFunction, err: unknown) {
-  const e = err as AnyRecord
-  const data = e?.response?.data
-  // The server answers some errors as plain text (404 "task not found").
-  if (typeof data === 'string' && data.trim()) return data.trim()
-  return data?.error || e?.message || t('msg.unknownError')
-}
-
-export function pitrErrorText(t: TFunction, err: unknown) {
-  const data = (err as AnyRecord)?.response?.data
-  if (typeof data === 'string' && data.trim()) return data.trim()
-  if (data?.error) return String(data.error)
-  return (err as AnyRecord)?.message || t('msg.unknownError')
-}
-
-export async function downloadErrorText(err: unknown) {
-  const data = (err as AnyRecord)?.response?.data
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
-    try {
-      const text = (await data.text()).trim()
-      if (text) return text
-    } catch {
-      // Fall back to the status text below.
-    }
-  }
-  return parseErr(err)
 }
 
 export function saveBlob(name: string, data: Blob | BlobPart) {
@@ -226,7 +185,7 @@ function latestStop(task: AnyRecord | null) {
 export function stoppedReasonText(t: TFunction, task: AnyRecord | null) {
   const reason = String(latestStop(task)?.reason || '').trim()
   if (!reason) return t('detail.switchReason.unknown')
-  return t(`detail.switchReason.${reason}`)
+  return tKnown(t, `detail.switchReason.${reason}`, reason)
 }
 
 export function stoppedMove(t: TFunction, task: AnyRecord | null) {

@@ -21,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { NumberInput } from '@/components/number-input'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -34,7 +35,8 @@ import { Switch } from '@/components/ui/switch'
 import { useObservation } from '@/context/observation'
 import { adoptTask, createTask, updateTask, type AnyRecord } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
-import { isLeftoverDiskTask, parseErr } from '../task-detail/detail-format'
+import { notifyError } from '@/lib/notify'
+import { isLeftoverDiskTask } from '../task-detail/detail-format'
 import {
   ADOPT_START_DEFAULT,
   RETENTION_DAYS_MAX,
@@ -121,7 +123,7 @@ export function TaskFormProvider({ children }: { children: ReactNode }) {
       await refresh()
       await doneRef.current?.()
     } catch (err) {
-      toast.error(parseErr(err))
+      notifyError(err)
     } finally {
       setSaving(false)
     }
@@ -190,11 +192,6 @@ function Field({
   )
 }
 
-const num = (v: string) => (v.trim() === '' ? 0 : Number(v))
-// el-input-number clamps to [min, max] when the field loses focus; so do we.
-const clamp = (v: number, min: number, max = Number.MAX_SAFE_INTEGER) =>
-  Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : min
-
 function FormFields({
   mode,
   form,
@@ -237,14 +234,12 @@ function FormFields({
         />
       </Field>
       <Field label={t('form.port')}>
-        <Input
+        <NumberInput
           data-testid='task-form-port'
-          type='number'
           min={1}
           max={65535}
           value={form.source.port}
-          onChange={(e) => src({ port: num(e.target.value) })}
-          onBlur={() => src({ port: clamp(form.source.port, 1, 65535) })}
+          onValueChange={(v) => src({ port: v ?? 0 })}
         />
       </Field>
       <Field label={t('form.user')}>
@@ -271,13 +266,11 @@ function FormFields({
         />
       </Field>
       <Field label={t('form.serverId')}>
-        <Input
+        <NumberInput
           data-testid='task-form-server-id'
-          type='number'
           min={1}
           value={form.source.server_id}
-          onChange={(e) => src({ server_id: num(e.target.value) })}
-          onBlur={() => src({ server_id: clamp(form.source.server_id, 1) })}
+          onValueChange={(v) => src({ server_id: v ?? 0 })}
         />
       </Field>
       <Field label={t('form.flavor')} hint={t('form.flavorHint')}>
@@ -300,56 +293,30 @@ function FormFields({
       </Field>
       <div className='grid grid-cols-1 gap-3 sm:col-span-2 sm:grid-cols-3'>
         <Field label={t('form.retentionDays')}>
-          <Input
+          <NumberInput
             data-testid='task-form-retention'
-            type='number'
             min={1}
             max={RETENTION_DAYS_MAX}
             value={form.storage.retention_days}
-            onChange={(e) => store({ retention_days: num(e.target.value) })}
-            onBlur={() =>
-              store({
-                retention_days: clamp(form.storage.retention_days, 1, RETENTION_DAYS_MAX),
-              })
-            }
+            onValueChange={(v) => store({ retention_days: v ?? 0 })}
           />
         </Field>
         <Field label={t('form.localRetentionDays')}>
-          <Input
+          <NumberInput
             data-testid='task-form-local-retention'
-            type='number'
             min={0}
             max={RETENTION_DAYS_MAX}
             value={form.storage.local_retention_days ?? 0}
-            onChange={(e) => store({ local_retention_days: num(e.target.value) })}
-            onBlur={() =>
-              store({
-                local_retention_days: clamp(
-                  form.storage.local_retention_days ?? 0,
-                  0,
-                  RETENTION_DAYS_MAX,
-                ),
-              })
-            }
+            onValueChange={(v) => store({ local_retention_days: v ?? 0 })}
           />
         </Field>
         <Field label={t('form.bucketRetentionDays')} hint={t('form.retentionSplitHint')}>
-          <Input
+          <NumberInput
             data-testid='task-form-bucket-retention'
-            type='number'
             min={0}
             max={RETENTION_DAYS_MAX}
             value={form.storage.bucket_retention_days ?? 0}
-            onChange={(e) => store({ bucket_retention_days: num(e.target.value) })}
-            onBlur={() =>
-              store({
-                bucket_retention_days: clamp(
-                  form.storage.bucket_retention_days ?? 0,
-                  0,
-                  RETENTION_DAYS_MAX,
-                ),
-              })
-            }
+            onValueChange={(v) => store({ bucket_retention_days: v ?? 0 })}
           />
         </Field>
         <Field
@@ -378,13 +345,11 @@ function FormFields({
           />
         </Field>
         <Field label={t('form.position')}>
-          <Input
+          <NumberInput
             data-testid='task-form-pos'
-            type='number'
             min={0}
             value={form.start.pos ?? 0}
-            onChange={(e) => start({ pos: num(e.target.value) })}
-            onBlur={() => start({ pos: clamp(form.start.pos ?? 0, 0) })}
+            onValueChange={(v) => start({ pos: v ?? 0 })}
           />
         </Field>
       </div>

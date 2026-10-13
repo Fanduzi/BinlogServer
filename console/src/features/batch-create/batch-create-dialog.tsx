@@ -22,6 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { NumberInput } from '@/components/number-input'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -32,18 +33,12 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import { DataTable } from '@/components/data-table'
 import { useObservation } from '@/context/observation'
 import { createTasksBatch, startTask } from '@/lib/api'
+import { errorText } from '@/lib/errors'
 import { useI18n } from '@/lib/i18n'
-import { parseErr } from '../task-detail/detail-format'
+import { notifyError } from '@/lib/notify'
 import { ToneBadge } from '../tasks/tone-badge'
 import {
   batchItemError,
@@ -61,9 +56,6 @@ export function useBatchCreate() {
   if (!ctx) throw new Error('useBatchCreate outside BatchCreateProvider')
   return ctx
 }
-
-const num = (v: string) => (v.trim() === '' ? 0 : Number(v))
-const atLeast = (v: number, min: number) => (Number.isFinite(v) ? Math.max(min, v) : min)
 
 export function BatchCreateProvider({ children }: { children: ReactNode }) {
   const { t } = useI18n()
@@ -121,7 +113,7 @@ export function BatchCreateProvider({ children }: { children: ReactNode }) {
               if (form.autoStart) await startTask(result.task.id)
               success += 1
             } catch (err) {
-              errors.push(`${label} -> ${parseErr(err)}`)
+              errors.push(`${label} -> ${errorText(err)}`)
             }
             continue
           }
@@ -137,7 +129,7 @@ export function BatchCreateProvider({ children }: { children: ReactNode }) {
       toast.warning(t('msg.batchPartialSuccess', { success, failed: errors.length }))
       setFailures(errors)
     } catch (err) {
-      toast.error(parseErr(err))
+      notifyError(err)
     } finally {
       setBusy(false)
     }
@@ -188,23 +180,19 @@ export function BatchCreateProvider({ children }: { children: ReactNode }) {
                 </Select>
               </Field>
               <Field label={t('form.serverIdStart')}>
-                <Input
+                <NumberInput
                   data-testid='batch-server-id-start'
-                  type='number'
                   min={1}
                   value={form.serverIdStart}
-                  onChange={(e) => set({ serverIdStart: num(e.target.value) })}
-                  onBlur={() => set({ serverIdStart: atLeast(form.serverIdStart, 1) })}
+                  onValueChange={(v) => set({ serverIdStart: v ?? 0 })}
                 />
               </Field>
               <Field label={t('form.retentionDays')}>
-                <Input
+                <NumberInput
                   data-testid='batch-retention'
-                  type='number'
                   min={1}
                   value={form.retentionDays}
-                  onChange={(e) => set({ retentionDays: num(e.target.value) })}
-                  onBlur={() => set({ retentionDays: atLeast(form.retentionDays, 1) })}
+                  onValueChange={(v) => set({ retentionDays: v ?? 0 })}
                 />
               </Field>
               <div className='flex flex-wrap gap-6'>
@@ -261,36 +249,44 @@ export function BatchCreateProvider({ children }: { children: ReactNode }) {
               </Button>
             </div>
             {preview.rows.length > 0 && (
-              <div className='max-h-72 min-w-0 overflow-auto rounded-md border'>
-                <Table data-testid='batch-preview-table'>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>{t('table.lineNo')}</TableHead>
-                      <TableHead>{t('form.taskName')}</TableHead>
-                      <TableHead>{t('batch.host')}</TableHead>
-                      <TableHead>{t('batch.port')}</TableHead>
-                      <TableHead>{t('table.validation')}</TableHead>
-                      <TableHead>{t('batch.reason')}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {preview.rows.map((row) => (
-                      <TableRow key={row.lineNo} data-valid={row.valid ? 'true' : 'false'}>
-                        <TableCell>{row.lineNo}</TableCell>
-                        <TableCell className='break-all whitespace-normal'>{row.name}</TableCell>
-                        <TableCell className='break-all whitespace-normal'>{row.host}</TableCell>
-                        <TableCell>{row.port}</TableCell>
-                        <TableCell>
-                          <ToneBadge tone={row.valid ? 'success' : 'danger'}>
-                            {row.valid ? t('batch.passed') : t('batch.failed')}
-                          </ToneBadge>
-                        </TableCell>
-                        <TableCell className='min-w-48 whitespace-normal'>{row.error}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
+              <DataTable
+                testid='batch-preview-table'
+                className='max-h-72 overflow-auto'
+                rows={preview.rows}
+                rowKey={(row) => String(row.lineNo)}
+                rowProps={(row) => ({ 'data-valid': row.valid ? 'true' : 'false' })}
+                columns={[
+                  { key: 'line', header: t('table.lineNo'), cell: (row) => row.lineNo },
+                  {
+                    key: 'name',
+                    header: t('form.taskName'),
+                    className: 'break-all whitespace-normal',
+                    cell: (row) => row.name,
+                  },
+                  {
+                    key: 'host',
+                    header: t('batch.host'),
+                    className: 'break-all whitespace-normal',
+                    cell: (row) => row.host,
+                  },
+                  { key: 'port', header: t('batch.port'), cell: (row) => row.port },
+                  {
+                    key: 'valid',
+                    header: t('table.validation'),
+                    cell: (row) => (
+                      <ToneBadge tone={row.valid ? 'success' : 'danger'}>
+                        {row.valid ? t('batch.passed') : t('batch.failed')}
+                      </ToneBadge>
+                    ),
+                  },
+                  {
+                    key: 'reason',
+                    header: t('batch.reason'),
+                    className: 'min-w-48 whitespace-normal',
+                    cell: (row) => row.error,
+                  },
+                ]}
+              />
             )}
           </div>
           <DialogFooter>

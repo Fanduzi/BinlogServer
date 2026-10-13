@@ -2,6 +2,7 @@
 // Same line formats (name,host,port / host,port / host:port / name-less), same
 // duplicate checks, cluster_key derivation, 100-item cap and POST /api/tasks/batch body.
 import type { AnyRecord } from '@/lib/api'
+import { bodyText } from '@/lib/errors'
 import type { TFunction } from '@/lib/i18n'
 import { validateTaskPayload } from '../task-form/task-form'
 
@@ -227,7 +228,5 @@ export function buildBatchPayloads(t: TFunction, form: BatchForm, rows: BatchRow
 }
 
 export function batchItemError(itemError: unknown) {
-  if (typeof itemError === 'string') return itemError
-  const e = itemError as AnyRecord | null
-  return e?.error || JSON.stringify(itemError || 'unknown error')
+  return bodyText(itemError) || 'unknown error'
 }

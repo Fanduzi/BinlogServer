@@ -79,6 +79,21 @@ export function makeT(locale: Locale): TFunction {
   }
 }
 
+/**
+ * Translate a key built from server data (a state, status or reason). When the
+ * catalog has no such key, return the fallback instead of the raw key, so an
+ * unknown value never shows as "state.FOO".
+ */
+export function tKnown(
+  t: TFunction,
+  key: string,
+  fallback: string,
+  params?: Record<string, unknown>,
+) {
+  const text = t(key, params)
+  return text === key ? fallback : text
+}
+
 const I18nContext = createContext<{ locale: Locale; t: TFunction }>({
   locale: 'zh-CN',
   t: makeT('zh-CN'),

@@ -1,7 +1,9 @@
 // KPI cards, as frontend/src/components/MetricGrid.vue: each card applies its
 // quick filter.
 import { Bug, CircleCheck, Hourglass, Layers, Loader, Play, TriangleAlert } from 'lucide-react'
+import { useObservation } from '@/context/observation'
 import type { DashboardSummary } from '@/lib/api'
+import { useApplyQuickFilter, useTaskFilter } from './filter-context'
 import { useI18n } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 import type { QuickFilter } from './filter'
@@ -86,4 +88,12 @@ export function MetricGrid({
       ))}
     </section>
   )
+}
+
+/** The KPI strip the shell shows above every page, as App.vue does. */
+export function ShellMetricGrid() {
+  const { dashboard } = useObservation()
+  const { activeQuick } = useTaskFilter()
+  const applyQuick = useApplyQuickFilter()
+  return <MetricGrid summary={dashboard.summary} active={activeQuick} onFilter={applyQuick} />
 }
