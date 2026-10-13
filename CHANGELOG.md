@@ -12,6 +12,27 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.62] - 2026-10-13
+
+### Changed
+
+- **Compatibility:** every missing, malformed or wrong credential now returns HTTP 401 instead of 403 (PR #316). Before, a bearer header without the `Bearer ` prefix, a wrong token, or a wrong API key got 403. Bearer mode adds `WWW-Authenticate: Bearer realm="binlog-server"`. Update probes or scripts that expect 403.
+- The `Bearer` scheme is matched case-insensitively, with spaces or tabs before the token (PR #318).
+
+### Added
+
+- `GET /auth/config` (no credential needed) returns `enabled`, `mode`, `header` and `scheme`, never the credential (PR #318).
+- New React console in `console/` (shell, Tasks/Alerts, task detail drawer, create/edit/adopt dialog; PR #315, #317, #319, #302). Not embedded yet: `/ui/` still serves the Vue console.
+
+### Fixed
+
+- The Vue console works in `api_key` mode: it reads `/auth/config` and sends the configured header (PR #318).
+- The task detail drawer shows the server's error text (e.g. `task not found`) for an unknown task (PR #318).
+
+### Known behavior
+
+- #322 (P2, also on v0.5.61): `/replay/archive` can return 500 `lstat …open.eN` while a rotation seals the open segment. A retry succeeds.
+
 ## [v0.5.61] - 2026-10-13
 
 ### Fixed
