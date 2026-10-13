@@ -13,18 +13,19 @@ import {
   SidebarRail,
 } from '@/components/ui/sidebar'
 import { useObservation } from '@/context/observation'
+import { workerCount } from '@/features/cluster/format'
 import { useI18n } from '@/lib/i18n'
 
 export function AppSidebar() {
   const { t } = useI18n()
-  const { dashboard, overview } = useObservation()
+  const { dashboard, overview, workers } = useObservation()
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const s = dashboard.summary
   const items = [
     { to: '/overview', key: 'overview', icon: LayoutGrid, badge: s.total },
     { to: '/tasks', key: 'tasks', icon: Table2, badge: dashboard.total },
     { to: '/sources', key: 'sources', icon: Database, badge: dashboard.sources.length },
-    { to: '/workers', key: 'workers', icon: Network, badge: overview.worker_count },
+    { to: '/workers', key: 'workers', icon: Network, badge: workerCount(overview, workers) },
     { to: '/alerts', key: 'alerts', icon: Bell, badge: s.abnormal + s.failed + s.delayed },
   ] as const
 
@@ -57,7 +58,9 @@ export function AppSidebar() {
                     <span>{t(`nav.${item.key}`)}</span>
                   </Link>
                 </SidebarMenuButton>
-                <SidebarMenuBadge>{item.badge}</SidebarMenuBadge>
+                <SidebarMenuBadge data-testid={`view-nav-badge-${item.key}`}>
+                  {item.badge}
+                </SidebarMenuBadge>
               </SidebarMenuItem>
             ))}
           </SidebarMenu>

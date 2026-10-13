@@ -1,9 +1,9 @@
-// Reuses the Vue console's message catalogs so wording stays identical
-// during the migration (issue #302). Interpolation follows vue-i18n's
+// Message catalogs live in src/locales (the classic Vue console at
+// /ui-classic/ reads the same files, so wording stays identical). Interpolation follows vue-i18n's
 // named "{name}" form; a missing key returns the key, as vue-i18n does.
 import { createContext, useContext, useMemo, type ReactNode } from 'react'
-import en from '../../../frontend/src/locales/en.json'
-import zhCN from '../../../frontend/src/locales/zh-CN.json'
+import en from '../locales/en.json'
+import zhCN from '../locales/zh-CN.json'
 
 export type Locale = 'zh-CN' | 'en'
 const SAVED_LOCALE_KEY = 'locale'

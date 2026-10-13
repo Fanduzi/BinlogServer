@@ -7,7 +7,12 @@ import { toast } from 'sonner'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { SettingsDialog } from '@/components/settings-dialog'
 import { useObservation } from '@/context/observation'
-import { AUTH_REQUIRED_EVENT, isAuthDialogPending, resetAuthDialogShown } from '@/lib/api'
+import {
+  announceAuthRestored,
+  AUTH_REQUIRED_EVENT,
+  isAuthDialogPending,
+  resetAuthDialogShown,
+} from '@/lib/api'
 import { setAuthToken } from '@/lib/auth'
 import { setLocale, useI18n } from '@/lib/i18n'
 import { BatchCreateProvider } from '@/features/batch-create/batch-create-dialog'
@@ -44,6 +49,7 @@ export function AuthenticatedLayout() {
               {authMessage && (
                 <div
                   role='alert'
+                  data-testid='auth-required-banner'
                   className='border-destructive/40 bg-destructive/5 text-destructive flex items-start gap-2 rounded-lg border p-3 text-sm'
                 >
                   <TriangleAlert className='mt-0.5 size-4 shrink-0' />
@@ -70,6 +76,7 @@ export function AuthenticatedLayout() {
               resetAuthDialogShown()
               toast.success(t('msg.settingsSaved'))
               void refresh()
+              announceAuthRestored()
             }}
           />
         </SidebarProvider>

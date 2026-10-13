@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# input: internal/ui/static/index.html, the JS bundle graph it loads, and Console markers in frontend/src
-# output: non-zero exit when a loaded Console bundle is not valid ESM, or when a frontend/src PITR, recoverable-window, source-switch, storage-alert, or damaged-replay marker is missing from that graph
-# pos: release gate for the JS that Chrome loads from /ui/; CI and the tag workflow both run this before publish
+# input: internal/ui/static/index.html (Console, /ui/) and internal/ui/classic/index.html (classic console, /ui-classic/), the JS bundle graphs they load (static and dynamic imports), and Console markers in console/src
+# output: non-zero exit when a loaded bundle in either graph is not valid ESM, or when a console/src PITR, recoverable-window, source-switch, storage-alert, or damaged-replay marker is missing from the /ui/ graph
+# pos: release gate for the JS that Chrome loads from /ui/ and /ui-classic/; CI and the tag workflow both run this before publish
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -13,25 +13,26 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -f "$HTML" ]]; then
-  echo "[ui] missing $HTML" >&2
-  exit 1
-fi
-
-list="$(mktemp)"
-trap 'rm -f "$list"' EXIT
-
-ROOT_DIR="$ROOT_DIR" node >"$list" <<'JS'
+# bundle_graph <static dir> <url prefix> <list file>
+# Writes every JS file index.html loads, plus the chunks those import
+# (static and dynamic), and ESM-checks each one.
+bundle_graph() {
+  local dir="$1" prefix="$2" out="$3"
+  if [[ ! -f "$dir/index.html" ]]; then
+    echo "[ui] missing $dir/index.html" >&2
+    exit 1
+  fi
+  UI_DIR="$dir" UI_PREFIX="$prefix" node >"$out" <<'JS'
 const fs = require("fs");
 const path = require("path");
 
-const root = process.env.ROOT_DIR;
-const htmlPath = path.join(root, "internal/ui/static/index.html");
-const staticDir = path.join(root, "internal/ui/static");
-const html = fs.readFileSync(htmlPath, "utf8");
-const roots = [...html.matchAll(/(?:src|href)="(\/ui\/[^"]+\.js)"/g)].map((m) => m[1]);
+const staticDir = process.env.UI_DIR;
+const prefix = process.env.UI_PREFIX;
+const html = fs.readFileSync(path.join(staticDir, "index.html"), "utf8");
+const esc = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const roots = [...html.matchAll(new RegExp(`(?:src|href)="(${esc}[^"]+\\.js)"`, "g"))].map((m) => m[1]);
 if (roots.length === 0) {
-  console.error("[ui] index.html references no /ui/*.js bundles");
+  console.error(`[ui] index.html references no ${prefix}*.js bundles`);
   process.exit(1);
 }
 
@@ -41,11 +42,11 @@ while (queue.length) {
   const urlPath = queue.shift();
   if (seen.has(urlPath)) continue;
   seen.add(urlPath);
-  if (!urlPath.startsWith("/ui/")) {
-    console.error(`[ui] bundle graph escaped /ui/: ${urlPath}`);
+  if (!urlPath.startsWith(prefix)) {
+    console.error(`[ui] bundle graph escaped ${prefix}: ${urlPath}`);
     process.exit(1);
   }
-  const rel = urlPath.slice("/ui/".length);
+  const rel = urlPath.slice(prefix.length);
   const file = path.join(staticDir, rel);
   if (!fs.existsSync(file)) {
     console.error(`[ui] missing bundle referenced by index.html: ${rel}`);
@@ -62,17 +63,25 @@ while (queue.length) {
 }
 JS
 
-while IFS= read -r rel; do
-  [[ -n "$rel" ]] || continue
-  f="$ROOT_DIR/internal/ui/static/$rel"
-  # node --check on a .js path parses as CommonJS and accepts the broken import
-  # that Chrome rejects. The bundles are <script type="module">, so check ESM.
-  if ! node --check --input-type=module < "$f"; then
-    echo "[ui] embedded bundle is not valid ESM: $rel" >&2
-    exit 1
-  fi
-  echo "[ui] esm ok: $rel"
-done < "$list"
+  local rel
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    # node --check on a .js path parses as CommonJS and accepts the broken import
+    # that Chrome rejects. The bundles are <script type="module">, so check ESM.
+    if ! node --check --input-type=module < "$dir/$rel"; then
+      echo "[ui] embedded bundle is not valid ESM: $prefix$rel" >&2
+      exit 1
+    fi
+    echo "[ui] esm ok: $prefix$rel"
+  done < "$out"
+}
+
+list="$(mktemp)"
+classic_list="$(mktemp)"
+trap 'rm -f "$list" "$classic_list"' EXIT
+
+bundle_graph "$ROOT_DIR/internal/ui/static" /ui/ "$list"
+bundle_graph "$ROOT_DIR/internal/ui/classic" /ui-classic/ "$classic_list"
 
 ROOT_DIR="$ROOT_DIR" UI_LIST="$list" node <<'JS'
 const fs = require("fs");
@@ -84,35 +93,35 @@ const rels = fs.readFileSync(process.env.UI_LIST, "utf8").split("\n").filter(Boo
 const bundle = rels.map((rel) => fs.readFileSync(path.join(staticDir, rel), "utf8")).join("\n");
 
 // Quoted test ids must match the attribute value, not a longer id that shares the prefix.
-// stop_datetime / start_datetime / stop_gtid / start_gtid_set are the query keys in api.js.
+// stop_datetime / start_datetime / stop_gtid / start_gtid_set are the query keys in console/src/lib/api.ts.
 // 停止时间, 停止 GTID, and 已执行 GTID are the zh-CN labels.
 const markers = [
-  { text: '"task-recovery-window"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: "这条备份链有缺口", source: "frontend/src/locales/zh-CN.json" },
-  { text: '"task-pitr"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-pitr-stop"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-pitr-gtid"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-pitr-start"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-pitr-executed"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-pitr-build"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-pitr-copy"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-pitr-download"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: "stop_datetime", source: "frontend/src/api.js" },
-  { text: "start_datetime", source: "frontend/src/api.js" },
-  { text: "stop_gtid", source: "frontend/src/api.js" },
-  { text: "start_gtid_set", source: "frontend/src/api.js" },
-  { text: "停止时间", source: "frontend/src/locales/zh-CN.json" },
-  { text: "停止 GTID", source: "frontend/src/locales/zh-CN.json" },
-  { text: "已执行 GTID", source: "frontend/src/locales/zh-CN.json" },
-  { text: '"task-source-chain"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-source-continued"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-source-stopped"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-source-next"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: "保留这份备份", source: "frontend/src/locales/zh-CN.json" },
-  { text: "kept copying", source: "frontend/src/locales/en.json" },
-  { text: '"task-storage-alert"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: '"task-replay-damaged"', source: "frontend/src/components/TaskDetailDrawer.vue" },
-  { text: "损坏的分段", source: "frontend/src/locales/zh-CN.json" },
+  { text: '"task-recovery-window"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: "这条备份链有缺口", source: "console/src/locales/zh-CN.json" },
+  { text: '"task-pitr"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-pitr-stop"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-pitr-gtid"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-pitr-start"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-pitr-executed"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-pitr-build"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-pitr-copy"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-pitr-download"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: "stop_datetime", source: "console/src/lib/api.ts" },
+  { text: "start_datetime", source: "console/src/lib/api.ts" },
+  { text: "stop_gtid", source: "console/src/lib/api.ts" },
+  { text: "start_gtid_set", source: "console/src/lib/api.ts" },
+  { text: "停止时间", source: "console/src/locales/zh-CN.json" },
+  { text: "停止 GTID", source: "console/src/locales/zh-CN.json" },
+  { text: "已执行 GTID", source: "console/src/locales/zh-CN.json" },
+  { text: '"task-source-chain"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-source-continued"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-source-stopped"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-source-next"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: "保留这份备份", source: "console/src/locales/zh-CN.json" },
+  { text: "kept copying", source: "console/src/locales/en.json" },
+  { text: '"task-storage-alert"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: '"task-replay-damaged"', source: "console/src/features/task-detail/task-detail-sheet.tsx" },
+  { text: "损坏的分段", source: "console/src/locales/zh-CN.json" },
 ];
 
 function present(haystack, text) {
@@ -138,12 +147,14 @@ for (const marker of markers) {
   try {
     source = fs.readFileSync(sourcePath, "utf8");
   } catch (err) {
-    console.error(`[ui] missing PITR source ${marker.source}: ${err.message}`);
+    console.error(`[ui] missing marker source ${marker.source}: ${err.message}`);
     failed = true;
     continue;
   }
-  if (!source.includes(marker.text)) {
-    console.error(`[ui] frontend source lost PITR marker ${marker.text} (${marker.source})`);
+  // A quoted test id is single-quoted in console/src (prettier) and double-quoted in the bundle.
+  const singleQuoted = marker.text.replace(/^"(.*)"$/, "'$1'");
+  if (!source.includes(marker.text) && !source.includes(singleQuoted)) {
+    console.error(`[ui] console source lost marker ${marker.text} (${marker.source})`);
     failed = true;
     continue;
   }

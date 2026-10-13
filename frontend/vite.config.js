@@ -4,7 +4,7 @@ import vue from "@vitejs/plugin-vue";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiTarget = env.VITE_API_TARGET || "http://127.0.0.1:8080";
-  const uiBase = env.VITE_BASE || (mode === "production" ? "/ui/" : "/");
+  const uiBase = env.VITE_BASE || (mode === "production" ? "/ui-classic/" : "/");
 
   return {
     base: uiBase,
@@ -39,6 +39,8 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 5173,
+      // Locale catalogs live in ../console/src/locales.
+      fs: { allow: [".."] },
       proxy: {
         "/api": {
           target: apiTarget,

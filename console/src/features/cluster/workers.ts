@@ -7,7 +7,12 @@ import { LEASE_RISK_SECONDS } from '../tasks/format'
 
 export interface WorkerRow extends Worker {
   online: boolean
+  task_count: number
+  running: number
+  leased: number
 }
+
+const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 
 export function workerRows(workers: Worker[] | null | undefined, nowMs: number): WorkerRow[] {
   return (workers || []).map((w) => {
@@ -18,6 +23,10 @@ export function workerRows(workers: Worker[] | null | undefined, nowMs: number):
       ...w,
       last_seen_at: seenAt,
       online: typeof w.online === 'boolean' ? w.online : fallback,
+      // A missing count reads 0, not "undefined".
+      task_count: count(w.task_count),
+      running: count(w.running),
+      leased: count(w.leased),
     }
   })
 }

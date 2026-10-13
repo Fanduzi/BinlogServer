@@ -245,20 +245,33 @@ assert_switch_metric() {
 }
 
 assert_console_chain() {
-  local html src found=0
+  # The drawer is a lazy route chunk, so walk index.html's scripts and every
+  # chunk they import (static and dynamic), not only the entry.
+  local html src body found=0
+  local -a queue=()
+  local -A seen=()
   html="$(curl -fsS "$API/ui/")"
   while IFS= read -r src; do
-    [[ -z "$src" ]] && continue
+    [[ -n "$src" ]] && queue+=("$src")
+  done < <(printf '%s\n' "$html" | grep -oE 'src="[^"]+\.js"' | sed -e 's/^src="//' -e 's/"$//')
+  while ((${#queue[@]})); do
+    src="${queue[0]}"
+    queue=("${queue[@]:1}")
     case "$src" in
-      http*) ;;
-      /*) ;;
+      http*|/*) ;;
       *) src="/ui/${src#./}" ;;
     esac
-    if curl -fsS "$API$src" | grep -q 'task-source-chain'; then
+    [[ -n "${seen[$src]:-}" ]] && continue
+    seen[$src]=1
+    body="$(curl -fsS "$API$src")"
+    if grep -q 'task-source-chain' <<<"$body"; then
       found=1
       break
     fi
-  done < <(printf '%s\n' "$html" | grep -oE 'src="[^"]+\.js"' | sed -e 's/^src="//' -e 's/"$//')
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] && queue+=("${src%/*}/${rel#./}")
+    done < <(grep -oE '(from|import\()"\./[^"]+\.js"' <<<"$body" | sed -E 's/^(from|import\()"//; s/"$//')
+  done
   if [[ "$found" != 1 ]]; then
     echo "embedded console is missing task-source-chain" >&2
     exit 1

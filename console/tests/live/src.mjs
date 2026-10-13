@@ -1,0 +1,55 @@
+import { chromium } from '@playwright/test'
+import { BASE, CLASSIC, OUT } from './env.mjs'
+const b = await chromium.launch(); const ctx = await b.newContext({ viewport: { width: 1440, height: 1000 } })
+await ctx.addInitScript(() => { localStorage.setItem('binlog_server_token', 'ui302-test-token'); localStorage.setItem('locale', 'en') })
+const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1 }
+const p = await ctx.newPage(); const errs = []; p.on('pageerror', e => errs.push(e.message))
+const calls = []; p.on('request', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api')) calls.push(`${r.method()} ${u.pathname}${u.search}`) })
+// Vue reference
+await p.goto(CLASSIC + '/#/sources'); await p.waitForTimeout(2000)
+await p.locator('.lookup-form input').first().fill('127.0.0.1'); await p.locator('.lookup-form .el-input-number input').fill('23499')
+calls.length = 0; await p.getByRole('button', { name: 'Query' }).click(); await p.waitForTimeout(1500)
+const vueCalls = [...calls].sort(); const vueText = (await p.locator('.lookup-state').innerText()).replace(/\s+/g, ' ')
+const vueSources = await p.locator('body').innerText()
+await p.screenshot({ path: OUT + '/src-classic.png', fullPage: true })
+// React
+await p.goto(BASE + '/#/sources'); await p.waitForSelector('[data-testid=source-lookup]'); await p.waitForTimeout(1000)
+calls.length = 0; await p.getByTestId('source-query').click(); await p.waitForTimeout(600)
+ok(calls.length === 0 && await p.getByText('Please enter host and port to query').isVisible(), 'empty query -> hostPortRequired toast, no calls')
+await p.getByTestId('source-host-input').fill(' 127.0.0.1 '); await p.getByTestId('source-port-input').fill('23499')
+calls.length = 0; await p.getByTestId('source-query').click(); await p.waitForTimeout(1500)
+const reCalls = [...calls].sort()
+console.log('vue', vueCalls); console.log('react', reCalls)
+ok(JSON.stringify(vueCalls) === JSON.stringify(reCalls), 'same API calls as Vue on Query')
+const reText = (await p.getByTestId('source-lookup-result').innerText()).replace(/\s+/g, ' ')
+ok(reText === vueText, `lookup result same as Vue: "${reText}" vs "${vueText}"`)
+ok(await p.getByTestId('source-cell').count() === 1, 'coverage narrowed to 1 source')
+await p.screenshot({ path: OUT + '/src-console.png', fullPage: true })
+// filter applies globally: Tasks shows 1 row
+await p.click('[data-testid=view-nav-tasks]'); await p.waitForTimeout(1200)
+ok(await p.locator('tbody tr').count() === 1, 'tasks view filtered to the source (global, as Vue)')
+await p.click('[data-testid=view-nav-sources]'); await p.waitForTimeout(500)
+ok(await p.getByTestId('source-host-input').inputValue() === ' 127.0.0.1 ' && await p.getByTestId('source-lookup-result').isVisible(), 'lookup state survives view switch')
+// not found
+await p.getByTestId('source-port-input').fill('1'); calls.length = 0; await p.getByTestId('source-query').click(); await p.waitForTimeout(1200)
+ok((await p.getByTestId('source-lookup-result').innerText()).includes('No collection task found'), 'not-found tag')
+ok(await p.getByTestId('sources-empty').isVisible(), 'empty coverage')
+// port clamp
+await p.getByTestId('source-port-input').fill('70000'); await p.getByTestId('source-host-input').click()
+ok(await p.getByTestId('source-port-input').inputValue() === '65535', 'port clamps to 65535 on blur')
+// clear
+calls.length = 0; await p.getByTestId('source-clear').click(); await p.waitForTimeout(1200)
+console.log('clear', calls)
+ok(!calls.some(c => c.includes('host=')) && calls.length === 3, 'clear: one refresh without host/port')
+ok(await p.getByTestId('source-cell').count() === 2 && !(await p.getByTestId('source-lookup-result').count()), 'clear restores coverage and hides result')
+ok(await p.getByTestId('source-host-input').inputValue() === '', 'inputs cleared')
+// page reset: go to page 2, then query
+await p.click('[data-testid=view-nav-tasks]'); await p.waitForTimeout(800)
+await p.getByRole('button', { name: /next|下一页/i }).click(); await p.waitForTimeout(800)
+await p.click('[data-testid=view-nav-sources]'); await p.getByTestId('source-host-input').fill('127.0.0.1'); await p.getByTestId('source-port-input').fill('23418')
+calls.length = 0; await p.getByTestId('source-query').click(); await p.waitForTimeout(1500)
+console.log('page-reset', calls)
+ok(calls.filter(c => c.startsWith('GET /api/dashboard')).length === 1 && calls.some(c => c.includes('offset=0') && c.includes('host=127.0.0.1')), 'query from page 2: one dashboard call, offset=0 with host/port')
+ok(errs.length === 0, 'no page errors ' + errs.join(';'))
+console.log('VUE body has 23499 tasks 1:', vueSources.includes('127.0.0.1:23499'))
+await b.close()

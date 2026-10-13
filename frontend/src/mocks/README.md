@@ -19,7 +19,7 @@
 
 ## Dependencies
 
-- Upstream: `frontend/src/api.js`、`frontend/tests/e2e/fixtures/mock-routes.ts`
+- Upstream: `frontend/src/api.js`、`console/tests/e2e/fixtures/mock-routes.ts`
 - Downstream: 无外部网络依赖，仅向调用方返回内存中的 mock 响应
 
 ## Update Rule

@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "test": "vitest run",
     "format": "prettier --write src",
-    "format:check": "prettier --check src"
+    "format:check": "prettier --check src",
+    "test:live": "node tests/live/run.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
     "@tanstack/react-router": "^1.170.44",
@@ -25,6 +28,7 @@
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/router-plugin": "^1.168.45",
     "@types/node": "^22.20.5",

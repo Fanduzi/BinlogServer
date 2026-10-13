@@ -27,7 +27,7 @@ make e2e SCENARIOS=smoke,compression              # 自定义场景
 
 # 前端开发
 cd frontend && npm install && npm run dev         # 开发服务器 :5173
-make ui-build                                     # 构建并同步到 internal/ui/static
+make ui-build                                     # 构建 console 到 internal/ui/static（/ui/），frontend 到 internal/ui/classic（/ui-classic/）
 
 # 重新生成 Swagger 文档
 go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go -o internal/swaggerdocs --parseInternal

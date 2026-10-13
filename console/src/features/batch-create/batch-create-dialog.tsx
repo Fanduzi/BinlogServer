@@ -229,6 +229,11 @@ export function BatchCreateProvider({ children }: { children: ReactNode }) {
               >
                 <span>{t('batch.previewStatus')}</span>
                 {!preview.ready && <ToneBadge tone='info'>{t('batch.notPreviewed')}</ToneBadge>}
+                {preview.ready && preview.rows.length > 0 && (
+                  <ToneBadge tone='info' data-testid='batch-total-rows'>
+                    {t('batch.totalRows', { n: preview.rows.length })}
+                  </ToneBadge>
+                )}
                 {preview.ready && (
                   <ToneBadge tone='info'>
                     {t('batch.validErrorCount', {
@@ -238,10 +243,10 @@ export function BatchCreateProvider({ children }: { children: ReactNode }) {
                   </ToneBadge>
                 )}
                 {preview.ready && preview.canSubmit && (
-                  <ToneBadge tone='success'>{t('batch.submittable')}</ToneBadge>
+                  <ToneBadge tone='success'>{t('batch.allPassed')}</ToneBadge>
                 )}
                 {preview.ready && !preview.canSubmit && (
-                  <ToneBadge tone='danger'>{t('batch.hasErrors')}</ToneBadge>
+                  <ToneBadge tone='danger'>{t('batch.hasFailed')}</ToneBadge>
                 )}
               </div>
               <Button variant='outline' size='sm' data-testid='batch-preview' onClick={onPreview}>

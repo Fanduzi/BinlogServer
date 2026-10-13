@@ -14,7 +14,8 @@ import {
   type AnyRecord,
   type Task,
 } from '@/lib/api'
-import { errorText } from '@/lib/errors'
+import { useOnAuthRestored } from '@/hooks/use-auth-restored'
+import { inlineErrorText, isUnauthorized } from '@/lib/errors'
 import { createLatest } from '@/lib/latest'
 import { useI18n } from '@/lib/i18n'
 import { notifyError } from '@/lib/notify'
@@ -40,6 +41,8 @@ export function useTaskDetail(taskId: string) {
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  // A 401 shows only the auth dialog; the drawer loads again once a token is saved.
+  const [needsAuth, setNeedsAuth] = useState(false)
 
   // A reload for an older task (or an older reload) must not overwrite a newer one.
   const latest = useRef(createLatest()).current
@@ -77,10 +80,12 @@ export function useTaskDetail(taskId: string) {
         recovery: recoveryWindow || { continuous: true, breaks: [] },
       })
       setError('')
+      setNeedsAuth(false)
     } catch (err) {
       if (!latest.isLatest(token)) return
       const fallback = t('msg.unknownError')
-      setError(errorText(err, fallback))
+      setNeedsAuth(isUnauthorized(err))
+      setError(inlineErrorText(err, fallback))
       notifyError(err, fallback)
     } finally {
       if (latest.isLatest(token)) setLoading(false)
@@ -94,9 +99,13 @@ export function useTaskDetail(taskId: string) {
     return () => latest.cancel()
   }, [load, latest])
 
+  useOnAuthRestored(() => {
+    if (needsAuth) void load()
+  })
+
   const setFiles = useCallback((files: AnyRecord[]) => {
     setDetail((d) => (d ? { ...d, files } : d))
   }, [])
 
-  return { detail, error, loading, reload: load, setFiles }
+  return { detail, error, loading, needsAuth, reload: load, setFiles }
 }

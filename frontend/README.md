@@ -1,5 +1,7 @@
 # frontend Module
 
+经典 Vue 控制台。#302 切换后 `/ui/` 是 `console/`（React）；本目录构建到 `internal/ui/classic`，在 `/ui-classic/` 保留一个版本，之后删除。文案在 `console/src/locales`。
+
 ## Files
 | File | Responsibility |
 |------|---------------|
@@ -17,8 +19,8 @@
 ## Exports
 - 本地开发：`npm run dev`
 - 开发态 mock：`VITE_USE_MOCK=true VITE_MOCK_SCENARIO=healthy npm run dev`
-- 构建产物：`npm run build`，供后端 `internal/ui/static/` 使用
-- 文案编译：`npm run test:locales`，用 vue-i18n 生产编译检查 `src/locales/*.json`（嵌入式 `/ui/` 会因非法 `@` 直接抛错）
+- 构建产物：`npm run build`（生产 base `/ui-classic/`），供后端 `internal/ui/classic/` 使用
+- 文案编译：`npm run test:locales`，用 vue-i18n 生产编译检查 `console/src/locales/*.json`（两个控制台共用；嵌入式 `/ui-classic/` 会因非法 `@` 直接抛错）
 
 ## Dependencies
 - Upstream: 浏览器与开发者操作
@@ -33,7 +35,7 @@
 - 任务观测：控制台任务页只走 `/api/dashboard` 一次读取。页、汇总、按源计数同一物化；缺少 `total/limit/offset` 时拒绝应用，不再当旧包本地切页。state/host/port 过滤随请求发送，关键词/源库文本/复制状态/告警/排序明确仅作用于当前页。刷新/翻页只在 `useDashboard.refreshAll` 并行拉任务观测、集群观测和 workers；列表租约风险用任务抄本，不再按行打 `/lease`。
 - URL 深链支持：可直接访问 `/#/tasks`、`/#/sources`、`/#/workers`、`/#/alerts` 分享指定运维视图
 - 工具归属拆分：`运维筛选`仅在任务/告警工作区显示，`源库反查`仅在源库工作区显示
-- E2E 回归覆盖：Playwright 用例覆盖分视图导航、深链、空态、详情抽屉、上传重试与 starting 指标 mock 场景
+- E2E 回归覆盖：Playwright 用例已移到 `console/tests/e2e`（`cd console && npm run test:e2e`），针对新 Console；mock 数据仍在 `src/mocks`，两边共用
 - 任务文件表：「文件」列显示 `file_path` 的磁盘文件名（open 分段带 `.open.e<epoch>`），「服务器」列显示第几台、完整身份和是否当前，「磁盘路径」列显示完整 `file_path`，与 `GET /api/tasks/{id}/files` 相同。`source_chain` 在详情里列出每一台源服务器和每次切换。继续复制的运行中任务，以及 `SOURCE_SWITCHOVER` 停下的任务，各有一条说明。位置列是 `location`（`local` / `bucket` / `both`）。详情显示有效本地保留和桶保留。每一行有下载，请求 `GET /api/tasks/{id}/files/{basename}`，保存的文件名就是该磁盘文件名。详情先按 `GET /api/tasks/{id}/window` 显示可恢复窗口，有缺口时给出警告。回放区按 `GET /api/tasks/{id}/replay` 显示每个序号一条路径，并一次复制 `mysqlbinlog` 或 `mariadb-binlog` 命令。`location` 或 `locations` 含 `bucket` 时提示该路径不在磁盘上，先下载。旁边的「下载回放集」请求 `GET /api/tasks/{id}/replay/archive`，`limit` 与这次详情加载的 replay 窗口相同，保存 `task-{id}-replay.tar`。同一区域可以填写 UTC 停止时间（和可选开始时间），生成带 `--stop-datetime` 的定点命令，并下载这个窗口的 tar
 - 遗留目录：任务详情用「认领」提交 `POST /api/tasks/{id}/adopt`，状态保持 `STOPPED`，不回显密码，也不启动复制。目录任务的编辑仍是 `PUT`
 - 开发态 mock：显式环境变量打开后，前端可直接使用共享场景数据启动，不依赖真实后端
