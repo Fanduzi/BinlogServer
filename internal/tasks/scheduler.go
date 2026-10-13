@@ -489,8 +489,10 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 		cancel()
 		s.mu.Lock()
 		if err != nil {
+			s.notePersistFailureLocked(task.ID, snapshot.State, err)
 			return err
 		}
+		s.notePersistedLocked(task.ID)
 		latest := s.persisted[task.ID]
 		if latest.gen == gen {
 			latest.published = gen
@@ -631,7 +633,7 @@ func (s *Scheduler) writeEventBatch(batch []queuedEvent) {
 		}
 		if err := item.lane.write(store, item.event, item.ticket, timeout); err != nil {
 			// S1: the event is still in memory (s.events); the store lost it.
-			_ = err // not reported yet: see the next commit
+			s.Report(Finding{TaskID: item.event.TaskID, Kind: FindingEventPersistFailed, Subject: item.event.Type, Severity: FindingWarning, Detail: err.Error()})
 		} else if store != nil {
 			s.Resolve(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
 		}

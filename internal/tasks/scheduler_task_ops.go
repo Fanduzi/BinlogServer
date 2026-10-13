@@ -609,6 +609,10 @@ func (s *Scheduler) ListTasks() []Task {
 	items, err := s.listMemoryAndDiskTasks()
 	if err != nil {
 		log.Printf("list on-disk backups: %v", err)
+		// S15: leftover directories are missing from this list.
+		s.Report(Finding{TaskID: ClusterFindingTask, Kind: FindingDiskListFailed, Subject: s.dataDir, Severity: FindingWarning, Detail: "on-disk backups under data_dir are not listed: " + err.Error()})
+	} else {
+		s.Resolve(ClusterFindingTask, FindingDiskListFailed, s.dataDir)
 	}
 	return items
 }

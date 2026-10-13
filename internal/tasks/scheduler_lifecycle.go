@@ -1236,8 +1236,12 @@ func (s *Scheduler) legacyUnreachableStreak(id string) int {
 	cancel()
 	if err != nil {
 		log.Printf("source failure streak read task=%s err=%v", id, err)
+		// S13: the budget falls back to this process's memory, which a new
+		// process does not have. Make that visible instead of silently 0.
+		s.Report(Finding{TaskID: id, Kind: FindingEventReadFailed, Severity: FindingWarning, Detail: "retry budget read from task events failed; using this process's in-memory streak: " + err.Error()})
 		return consecutiveUnreachableStreak(mem, false)
 	}
+	s.Resolve(id, FindingEventReadFailed, "")
 	if len(stored) == 0 {
 		return consecutiveUnreachableStreak(mem, false)
 	}
