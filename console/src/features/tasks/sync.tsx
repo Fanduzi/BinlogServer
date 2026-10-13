@@ -7,12 +7,19 @@
 //  - server total shrinks below the page -> clamp to the last page.
 import { useEffect, useRef } from 'react'
 import { useObservation } from '@/context/observation'
+import type { DashboardParams } from '@/lib/api'
 import { paginationParams } from './filter'
 import { useTaskFilter } from './filter-context'
 import { useDebounced } from '@/hooks/use-debounced'
 
+function samePaging(a: DashboardParams, b: DashboardParams) {
+  return a.limit === b.limit && a.offset === b.offset && a.state === b.state
+}
+
 export function TaskObservationSync() {
-  const { refresh, dashboard } = useObservation()
+  const { refresh, dashboard, query } = useObservation()
+  const pagingRef = useRef(query.paging)
+  pagingRef.current = query.paging
   const { filter, pager, setPager } = useTaskFilter()
   const prev = useRef<[string, number, number] | null>(null)
 
@@ -23,7 +30,10 @@ export function TaskObservationSync() {
       setPager((x) => ({ ...x, page: 1 }))
       return
     }
-    void refresh({ paging: paginationParams(pager.page, pager.pageSize, filter.taskState) })
+    const paging = paginationParams(pager.page, pager.pageSize, filter.taskState)
+    // Another caller (Sources Query) already refreshed with this paging.
+    if (p && samePaging(paging, pagingRef.current)) return
+    void refresh({ paging })
   }, [filter.taskState, pager.page, pager.pageSize, refresh, setPager])
 
   const kw = useDebounced(filter.keyword, 300)

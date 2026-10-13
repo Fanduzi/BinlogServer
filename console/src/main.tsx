@@ -5,6 +5,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { ObservationProvider } from '@/context/observation'
 import { TaskFilterProvider } from '@/features/tasks/filter-context'
+import { SourceLookupProvider } from '@/features/sources/lookup-context'
 import { TaskObservationSync } from '@/features/tasks/sync'
 import { I18nProvider } from '@/lib/i18n'
 import { routeTree } from './routeTree.gen'
@@ -25,8 +26,10 @@ createRoot(document.getElementById('root')!).render(
       <TooltipProvider>
         <ObservationProvider>
           <TaskFilterProvider>
-            <TaskObservationSync />
-            <RouterProvider router={router} />
+            <SourceLookupProvider>
+              <TaskObservationSync />
+              <RouterProvider router={router} />
+            </SourceLookupProvider>
           </TaskFilterProvider>
         </ObservationProvider>
       </TooltipProvider>
