@@ -12,6 +12,17 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.63] - 2026-10-13
+
+### Fixed
+
+- `GET /api/tasks/{id}/replay/archive` (and its `stop_datetime` / `stop_gtid` / `start_gtid_set` variants) and the JSON `/replay` routes no longer return 500 (`lstat …open.eN: no such file`, `tar: write too long`) when a RUNNING task seals its open segment during rotation. The disk listing rereads until stable, members open against the inventory they were selected from, and an open member still missing after retries returns the existing 404 (#322, PR #325).
+- Vue console: a failed `/auth/config` lookup no longer caches the Bearer fallback (only a 404 does), so `api_key` mode recovers without a reload; the keep-password hint shows only when editing (PR #320).
+
+### Changed
+
+- New React console in `console/`: batch create dialog with preview, and the PR #320 fixes (PR #321, #320, #302). Still not embedded: `/ui/` serves the Vue console.
+
 ## [v0.5.62] - 2026-10-13
 
 ### Changed
