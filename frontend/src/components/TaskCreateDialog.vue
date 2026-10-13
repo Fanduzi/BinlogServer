@@ -12,7 +12,7 @@
         <el-col :span="12"><el-form-item :label="$t('form.host')"><el-input v-model="form.source.host" /></el-form-item></el-col>
         <el-col :span="12"><el-form-item :label="$t('form.port')"><el-input-number v-model="form.source.port" :min="1" :max="65535" /></el-form-item></el-col>
         <el-col :span="12"><el-form-item :label="$t('form.user')"><el-input v-model="form.source.user" /></el-form-item></el-col>
-        <el-col :span="12"><el-form-item :label="$t('form.password')"><el-input v-model="form.source.password" show-password :placeholder="mode === 'adopt' ? $t('form.passwordRequiredHint') : $t('form.passwordHint')" /></el-form-item></el-col>
+        <el-col :span="12"><el-form-item :label="$t('form.password')"><el-input v-model="form.source.password" show-password :placeholder="mode === 'adopt' ? $t('form.passwordRequiredHint') : mode === 'edit' ? $t('form.passwordHint') : ''" /></el-form-item></el-col>
         <el-col :span="12"><el-form-item :label="$t('form.serverId')"><el-input-number v-model="form.source.server_id" :min="1" /></el-form-item></el-col>
         <el-col :span="12">
           <el-form-item :label="$t('form.flavor')">
