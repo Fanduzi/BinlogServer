@@ -6,7 +6,8 @@ import type { TFunction } from '@/lib/i18n'
 
 export function formatCheckpoint(t: TFunction, cp: AnyRecord | null) {
   if (!cp) return t('detail.noCheckpoint')
-  const file = cp.file || cp.File || cp.file_name || cp.FileName || cp.binlog_file || cp.BinlogFile || ''
+  const file =
+    cp.file || cp.File || cp.file_name || cp.FileName || cp.binlog_file || cp.BinlogFile || ''
   if (!file) return t('detail.noCheckpoint')
   const pos = cp.pos ?? cp.Pos ?? cp.position ?? cp.Position ?? cp.binlog_pos ?? cp.BinlogPos ?? 0
   const gtid = String(cp.gtid_set || cp.GTIDSet || cp.gtid || '').trim()
@@ -128,7 +129,11 @@ export function replayHint(t: TFunction, replay: AnyRecord | null) {
   return hint || t('detail.replayFlavorUnset')
 }
 
-export function showBucketOnly(files: AnyRecord[], replay: AnyRecord | null, pitr: AnyRecord | null) {
+export function showBucketOnly(
+  files: AnyRecord[],
+  replay: AnyRecord | null,
+  pitr: AnyRecord | null,
+) {
   const rows = Array.isArray(files) ? files : []
   if (rows.some((row) => row && row.location === 'bucket')) return true
   return [replay, pitr].some(

@@ -35,7 +35,15 @@ export function TaskObservationSync() {
       return
     }
     setPager((x) => (x.page === 1 ? x : { ...x, page: 1 }))
-  }, [kw, skw, filter.taskState, filter.replicationStatus, filter.sortBy, filter.onlyAlert, setPager])
+  }, [
+    kw,
+    skw,
+    filter.taskState,
+    filter.replicationStatus,
+    filter.sortBy,
+    filter.onlyAlert,
+    setPager,
+  ])
 
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(dashboard.total / pager.pageSize))

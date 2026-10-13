@@ -1,14 +1,7 @@
 // Shared observation state for every Console page: one refresh runs
 // GET /api/dashboard, GET /api/cluster/overview and GET /api/workers together,
 // the same trio frontend/src/composables/useDashboard.js refreshAll issues.
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react'
+import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import {
   getClusterOverview,
@@ -54,7 +47,8 @@ function applyDashboard(prev: Dashboard, data: Partial<Dashboard> | null): Dashb
   const { total, limit, offset } = data
   if (!Number.isInteger(total) || (total as number) < 0) throw new Error('invalid dashboard total')
   if (!Number.isInteger(limit) || (limit as number) <= 0) throw new Error('invalid dashboard limit')
-  if (!Number.isInteger(offset) || (offset as number) < 0) throw new Error('invalid dashboard offset')
+  if (!Number.isInteger(offset) || (offset as number) < 0)
+    throw new Error('invalid dashboard offset')
   return {
     generated_at: data.generated_at || '',
     threshold_seconds: data.threshold_seconds || 30,

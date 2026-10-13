@@ -220,7 +220,9 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
           <div className='p-4'>
             <Alert variant='destructive' data-testid='task-drawer-error'>
               <CircleAlert />
-              <AlertTitle>{t('detail.center')} #{taskId}</AlertTitle>
+              <AlertTitle>
+                {t('detail.center')} #{taskId}
+              </AlertTitle>
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           </div>
@@ -295,7 +297,11 @@ function Panel({
   )
 }
 
-function Item({ label, children, ...rest }: { label: ReactNode; children: ReactNode } & Record<`data-${string}`, string>) {
+function Item({
+  label,
+  children,
+  ...rest
+}: { label: ReactNode; children: ReactNode } & Record<`data-${string}`, string>) {
   return (
     <div className='bg-muted/40 min-w-0 rounded-md px-3 py-2'>
       <span className='text-muted-foreground block text-xs'>{label}</span>
@@ -307,7 +313,8 @@ function Item({ label, children, ...rest }: { label: ReactNode; children: ReactN
 }
 
 const grid = 'grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4'
-const pre = 'bg-muted mt-2 max-w-full overflow-x-auto rounded-md p-3 font-mono text-xs whitespace-pre'
+const pre =
+  'bg-muted mt-2 max-w-full overflow-x-auto rounded-md p-3 font-mono text-xs whitespace-pre'
 
 const TRANSITIONAL_STATES = new Set(['STARTING', 'STOPPING'])
 const SETTLE_POLL_MS = 1500
@@ -412,7 +419,10 @@ function DetailBody({
                 {stateLabel(t, task.state)}
               </ToneBadge>
               {replication && (
-                <ToneBadge tone={replicationTone(replication.status)} data-testid='task-drawer-replication'>
+                <ToneBadge
+                  tone={replicationTone(replication.status)}
+                  data-testid='task-drawer-replication'
+                >
                   {replicationStatusLabel(t, replication.status)}
                 </ToneBadge>
               )}
@@ -487,13 +497,19 @@ function DetailBody({
           </Alert>
         )}
         {task.pending_dump_cleanup?.connection_id && (
-          <Alert className='mt-3 border-amber-300 text-amber-800' data-testid='task-pending-dump-cleanup'>
+          <Alert
+            className='mt-3 border-amber-300 text-amber-800'
+            data-testid='task-pending-dump-cleanup'
+          >
             <TriangleAlert />
             <AlertTitle className='line-clamp-none'>{pendingDumpTitle(t, task)}</AlertTitle>
           </Alert>
         )}
         {continued && (
-          <Alert className='mt-3 border-amber-300 text-amber-800' data-testid='task-source-continued'>
+          <Alert
+            className='mt-3 border-amber-300 text-amber-800'
+            data-testid='task-source-continued'
+          >
             <TriangleAlert />
             <AlertTitle className='line-clamp-none'>{t('detail.sourceContinuedTitle')}</AlertTitle>
             <AlertDescription>{t('detail.sourceContinuedBody')}</AlertDescription>
@@ -520,7 +536,8 @@ function DetailBody({
               </ToneBadge>
             </Item>
             <Item label={t('detail.delay')}>
-              {formatDelay(replication.delay_seconds, replication.has_progress)} {t('detail.seconds')}
+              {formatDelay(replication.delay_seconds, replication.has_progress)}{' '}
+              {t('detail.seconds')}
             </Item>
             <Item label={t('detail.checkpoint')} data-testid='task-drawer-checkpoint'>
               {formatCheckpoint(t, checkpoint)}
@@ -578,11 +595,19 @@ function DetailBody({
       )}
 
       {(servers.length > 0 || switches.length > 0) && (
-        <Panel icon={<Link2 className='size-4' />} title={t('detail.sourceChain')} data-testid='task-source-chain'>
+        <Panel
+          icon={<Link2 className='size-4' />}
+          title={t('detail.sourceChain')}
+          data-testid='task-source-chain'
+        >
           <p className='text-muted-foreground mb-2 text-xs'>{t('detail.sourceChainHint')}</p>
           <ul className='flex flex-col gap-1 text-sm'>
             {servers.map((server, index) => (
-              <li key={`${server.identity}-${index}`} data-testid='task-source-server' className='flex flex-wrap items-center gap-2'>
+              <li
+                key={`${server.identity}-${index}`}
+                data-testid='task-source-server'
+                className='flex flex-wrap items-center gap-2'
+              >
                 {t('detail.serverOrdinal', { n: index + 1 })}
                 <code className='bg-muted rounded px-1 break-all'>{server.identity}</code>
                 {server.prefix && server.prefix !== server.identity && (
@@ -601,7 +626,11 @@ function DetailBody({
           {switches.length > 0 && (
             <ul className='mt-2 flex flex-col gap-1 text-sm'>
               {switches.map((sw, index) => (
-                <li key={`${sw.old}-${sw.new}-${index}`} data-testid='task-source-switch' className='flex flex-wrap items-center gap-2'>
+                <li
+                  key={`${sw.old}-${sw.new}-${index}`}
+                  data-testid='task-source-switch'
+                  className='flex flex-wrap items-center gap-2'
+                >
                   <span>{fmt(sw.time)}</span>
                   <strong className='break-all'>
                     {sw.old} → {sw.new}
@@ -629,7 +658,10 @@ function DetailBody({
               <p className='text-muted-foreground text-xs'>{t('detail.recoveryHint')}</p>
             </div>
             {recovery && (
-              <ToneBadge tone={recovery.continuous ? 'success' : 'warning'} data-testid='task-recovery-continuous'>
+              <ToneBadge
+                tone={recovery.continuous ? 'success' : 'warning'}
+                data-testid='task-recovery-continuous'
+              >
                 {recovery.continuous ? t('detail.recoveryContinuous') : t('detail.recoveryBroken')}
               </ToneBadge>
             )}
@@ -643,7 +675,10 @@ function DetailBody({
             </p>
           )}
           {breaks.length > 0 && (
-            <Alert className='mt-2 border-amber-300 text-amber-800' data-testid='task-recovery-breaks'>
+            <Alert
+              className='mt-2 border-amber-300 text-amber-800'
+              data-testid='task-recovery-breaks'
+            >
               <TriangleAlert />
               <AlertTitle>{t('detail.recoveryBreaks')}</AlertTitle>
               <AlertDescription>
@@ -677,13 +712,21 @@ function DetailBody({
               >
                 {t('btn.copyReplay')}
               </Button>
-              <Button size='sm' variant='outline' data-testid='task-replay-download' onClick={onDownloadReplay}>
+              <Button
+                size='sm'
+                variant='outline'
+                data-testid='task-replay-download'
+                onClick={onDownloadReplay}
+              >
                 {t('btn.downloadReplay')}
               </Button>
             </div>
           </div>
           {replayWarning && (
-            <Alert className='mt-2 border-amber-300 text-amber-800' data-testid='task-replay-damaged'>
+            <Alert
+              className='mt-2 border-amber-300 text-amber-800'
+              data-testid='task-replay-damaged'
+            >
               <TriangleAlert />
               <AlertTitle className='line-clamp-none'>{replayWarning}</AlertTitle>
             </Alert>
@@ -728,7 +771,13 @@ function DetailBody({
               />
             </div>
             <div className='mt-2 flex flex-wrap gap-2'>
-              <Button size='sm' variant='outline' data-testid='task-pitr-build' disabled={!canBuildPitr} onClick={() => void buildPitr()}>
+              <Button
+                size='sm'
+                variant='outline'
+                data-testid='task-pitr-build'
+                disabled={!canBuildPitr}
+                onClick={() => void buildPitr()}
+              >
                 {t('btn.buildPitr')}
               </Button>
               <Button
@@ -822,18 +871,31 @@ function DetailBody({
                 return (
                   <TableRow key={`${base}-${i}`}>
                     <TableCell data-testid={`file-disk-name-${base}`}>{base}</TableCell>
-                    <TableCell data-testid={`file-source-${base}`}>{fileServerLabel(t, row, servers)}</TableCell>
+                    <TableCell data-testid={`file-source-${base}`}>
+                      {fileServerLabel(t, row, servers)}
+                    </TableCell>
                     <TableCell data-testid='file-disk-path'>{row.file_path}</TableCell>
                     <TableCell>{row.size_bytes}</TableCell>
                     <TableCell>{row.start_pos}</TableCell>
                     <TableCell>{row.end_pos}</TableCell>
-                    <TableCell data-testid={`file-location-${base}`}>{locationLabel(t, row.location)}</TableCell>
-                    <TableCell data-testid={`file-upload-state-${base}`}>{row.upload_state}</TableCell>
-                    <TableCell data-testid={`file-checksum-${base}`}>{row.checksum || '--'}</TableCell>
+                    <TableCell data-testid={`file-location-${base}`}>
+                      {locationLabel(t, row.location)}
+                    </TableCell>
+                    <TableCell data-testid={`file-upload-state-${base}`}>
+                      {row.upload_state}
+                    </TableCell>
+                    <TableCell data-testid={`file-checksum-${base}`}>
+                      {row.checksum || '--'}
+                    </TableCell>
                     <TableCell>{row.object_key}</TableCell>
                     <TableCell>
                       {base && (
-                        <Button size='sm' variant='outline' data-testid={`file-download-${base}`} onClick={() => onDownloadFile(base)}>
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          data-testid={`file-download-${base}`}
+                          onClick={() => onDownloadFile(base)}
+                        >
                           {t('btn.download')}
                         </Button>
                       )}
@@ -846,7 +908,11 @@ function DetailBody({
         </div>
       </Panel>
 
-      <Panel icon={<Clock className='size-4' />} title={t('detail.runHistory', { limit: RUN_HISTORY_LIMIT })} data-testid='task-drawer-runs'>
+      <Panel
+        icon={<Clock className='size-4' />}
+        title={t('detail.runHistory', { limit: RUN_HISTORY_LIMIT })}
+        data-testid='task-drawer-runs'
+      >
         <div className='overflow-x-auto rounded-md border'>
           <Table>
             <TableHeader>
@@ -873,12 +939,18 @@ function DetailBody({
             </TableBody>
           </Table>
           {runs.length === 0 && (
-            <p className='text-muted-foreground py-6 text-center text-sm'>{t('empty.noRunHistory')}</p>
+            <p className='text-muted-foreground py-6 text-center text-sm'>
+              {t('empty.noRunHistory')}
+            </p>
           )}
         </div>
       </Panel>
 
-      <Panel icon={<Clock className='size-4' />} title={t('detail.eventTimeline')} data-testid='task-drawer-events'>
+      <Panel
+        icon={<Clock className='size-4' />}
+        title={t('detail.eventTimeline')}
+        data-testid='task-drawer-events'
+      >
         <ol className='border-muted relative ml-2 border-l'>
           {events.map((ev) => (
             <li key={`${ev.sequence}-${ev.type}`} className='mb-3 ml-4'>

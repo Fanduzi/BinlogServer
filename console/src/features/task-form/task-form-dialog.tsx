@@ -9,10 +9,10 @@ import {
   useRef,
   useState,
   type ReactNode,
-} from "react";
-import { Loader2 } from "lucide-react";
-import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
+} from 'react'
+import { Loader2 } from 'lucide-react'
+import { toast } from 'sonner'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -20,21 +20,21 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
-import { useObservation } from "@/context/observation";
-import { adoptTask, createTask, updateTask, type AnyRecord } from "@/lib/api";
-import { useI18n } from "@/lib/i18n";
-import { isLeftoverDiskTask, parseErr } from "../task-detail/detail-format";
+} from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+import { useObservation } from '@/context/observation'
+import { adoptTask, createTask, updateTask, type AnyRecord } from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
+import { isLeftoverDiskTask, parseErr } from '../task-detail/detail-format'
 import {
   ADOPT_START_DEFAULT,
   RETENTION_DAYS_MAX,
@@ -47,135 +47,127 @@ import {
   validateTaskPayload,
   type FormMode,
   type TaskForm,
-} from "./task-form";
+} from './task-form'
 
-type Done = () => void | Promise<void>;
+type Done = () => void | Promise<void>
 
 interface TaskFormApi {
-  openCreate: () => void;
+  openCreate: () => void
   // Edit, or adopt when the task is a leftover directory. onDone runs after a successful save.
-  openEdit: (task: AnyRecord, onDone?: Done) => void;
+  openEdit: (task: AnyRecord, onDone?: Done) => void
 }
 
-const TaskFormContext = createContext<TaskFormApi | null>(null);
+const TaskFormContext = createContext<TaskFormApi | null>(null)
 
 export function useTaskForm() {
-  const ctx = useContext(TaskFormContext);
-  if (!ctx) throw new Error("useTaskForm outside TaskFormProvider");
-  return ctx;
+  const ctx = useContext(TaskFormContext)
+  if (!ctx) throw new Error('useTaskForm outside TaskFormProvider')
+  return ctx
 }
 
 export function TaskFormProvider({ children }: { children: ReactNode }) {
-  const { t } = useI18n();
-  const { refresh } = useObservation();
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<FormMode>("create");
-  const [form, setForm] = useState<TaskForm>(defaultForm);
-  const [saving, setSaving] = useState(false);
-  const doneRef = useRef<Done | undefined>(undefined);
+  const { t } = useI18n()
+  const { refresh } = useObservation()
+  const [open, setOpen] = useState(false)
+  const [mode, setMode] = useState<FormMode>('create')
+  const [form, setForm] = useState<TaskForm>(defaultForm)
+  const [saving, setSaving] = useState(false)
+  const doneRef = useRef<Done | undefined>(undefined)
 
   const openCreate = useCallback(() => {
-    doneRef.current = undefined;
-    setMode("create");
-    setForm(defaultForm());
-    setOpen(true);
-  }, []);
+    doneRef.current = undefined
+    setMode('create')
+    setForm(defaultForm())
+    setOpen(true)
+  }, [])
 
   const openEdit = useCallback((task: AnyRecord, onDone?: Done) => {
-    doneRef.current = onDone;
+    doneRef.current = onDone
     if (isLeftoverDiskTask(task)) {
-      setMode("adopt");
-      setForm(adoptForm(task));
+      setMode('adopt')
+      setForm(adoptForm(task))
     } else {
-      setMode("edit");
-      setForm(editForm(task));
+      setMode('edit')
+      setForm(editForm(task))
     }
-    setOpen(true);
-  }, []);
+    setOpen(true)
+  }, [])
 
   async function submit() {
-    if (saving) return;
-    const adopting = mode === "adopt";
-    const payload = adopting ? buildAdoptPayload(form) : buildPayload(form);
+    if (saving) return
+    const adopting = mode === 'adopt'
+    const payload = adopting ? buildAdoptPayload(form) : buildPayload(form)
     const validationErr = adopting
       ? validateAdoptPayload(t, payload)
-      : validateTaskPayload(t, payload);
+      : validateTaskPayload(t, payload)
     if (validationErr) {
-      toast.error(validationErr);
-      return;
+      toast.error(validationErr)
+      return
     }
-    setSaving(true);
+    setSaving(true)
     try {
-      if (mode === "create") {
-        await createTask(payload);
-        toast.success(t("msg.taskCreated"));
+      if (mode === 'create') {
+        await createTask(payload)
+        toast.success(t('msg.taskCreated'))
       } else if (adopting) {
-        await adoptTask(form.id, payload);
-        toast.success(t("msg.taskAdopted"));
+        await adoptTask(form.id, payload)
+        toast.success(t('msg.taskAdopted'))
       } else {
-        await updateTask(form.id, payload);
-        toast.success(t("msg.taskUpdated"));
+        await updateTask(form.id, payload)
+        toast.success(t('msg.taskUpdated'))
       }
-      setForm((f) => ({ ...f, source: { ...f.source, password: "" } }));
-      setOpen(false);
-      await refresh();
-      await doneRef.current?.();
+      setForm((f) => ({ ...f, source: { ...f.source, password: '' } }))
+      setOpen(false)
+      await refresh()
+      await doneRef.current?.()
     } catch (err) {
-      toast.error(parseErr(err));
+      toast.error(parseErr(err))
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
   }
 
-  const api = useMemo(() => ({ openCreate, openEdit }), [openCreate, openEdit]);
+  const api = useMemo(() => ({ openCreate, openEdit }), [openCreate, openEdit])
   const title =
-    mode === "create"
-      ? t("btn.createTask")
-      : `${mode === "adopt" ? t("btn.adopt") : t("btn.edit")} #${form.id}`;
+    mode === 'create'
+      ? t('btn.createTask')
+      : `${mode === 'adopt' ? t('btn.adopt') : t('btn.edit')} #${form.id}`
 
   return (
     <TaskFormContext.Provider value={api}>
       {children}
       <Dialog open={open} onOpenChange={(v) => !saving && setOpen(v)}>
         <DialogContent
-          data-testid="task-form"
-          className="max-h-[90vh] overflow-y-auto sm:max-w-[860px]"
+          data-testid='task-form'
+          className='max-h-[90vh] overflow-y-auto sm:max-w-[860px]'
         >
           <DialogHeader>
-            <DialogTitle data-testid="task-form-title">{title}</DialogTitle>
-            <DialogDescription className="sr-only">{title}</DialogDescription>
+            <DialogTitle data-testid='task-form-title'>{title}</DialogTitle>
+            <DialogDescription className='sr-only'>{title}</DialogDescription>
           </DialogHeader>
           <form
-            className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+            className='grid grid-cols-1 gap-3 sm:grid-cols-2'
             onSubmit={(e) => {
-              e.preventDefault();
-              void submit();
+              e.preventDefault()
+              void submit()
             }}
           >
             <FormFields mode={mode} form={form} setForm={setForm} />
-            <button type="submit" hidden />
+            <button type='submit' hidden />
           </form>
           <DialogFooter>
-            <Button
-              variant="outline"
-              disabled={saving}
-              onClick={() => setOpen(false)}
-            >
-              {t("btn.cancel")}
+            <Button variant='outline' disabled={saving} onClick={() => setOpen(false)}>
+              {t('btn.cancel')}
             </Button>
-            <Button
-              data-testid="task-form-submit"
-              disabled={saving}
-              onClick={() => void submit()}
-            >
-              {saving && <Loader2 className="animate-spin" />}
-              {mode === "adopt" ? t("btn.adopt") : t("btn.save")}
+            <Button data-testid='task-form-submit' disabled={saving} onClick={() => void submit()}>
+              {saving && <Loader2 className='animate-spin' />}
+              {mode === 'adopt' ? t('btn.adopt') : t('btn.save')}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </TaskFormContext.Provider>
-  );
+  )
 }
 
 function Field({
@@ -184,73 +176,70 @@ function Field({
   className,
   children,
 }: {
-  label: string;
-  hint?: string;
-  className?: string;
-  children: ReactNode;
+  label: string
+  hint?: string
+  className?: string
+  children: ReactNode
 }) {
   return (
-    <div className={`flex min-w-0 flex-col gap-1.5 ${className ?? ""}`}>
+    <div className={`flex min-w-0 flex-col gap-1.5 ${className ?? ''}`}>
       <Label>{label}</Label>
       {children}
-      {hint && (
-        <p className="text-muted-foreground text-xs leading-snug">{hint}</p>
-      )}
+      {hint && <p className='text-muted-foreground text-xs leading-snug'>{hint}</p>}
     </div>
-  );
+  )
 }
 
-const num = (v: string) => (v.trim() === "" ? 0 : Number(v));
+const num = (v: string) => (v.trim() === '' ? 0 : Number(v))
 // el-input-number clamps to [min, max] when the field loses focus; so do we.
 const clamp = (v: number, min: number, max = Number.MAX_SAFE_INTEGER) =>
-  Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : min;
+  Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : min
 
 function FormFields({
   mode,
   form,
   setForm,
 }: {
-  mode: FormMode;
-  form: TaskForm;
-  setForm: React.Dispatch<React.SetStateAction<TaskForm>>;
+  mode: FormMode
+  form: TaskForm
+  setForm: React.Dispatch<React.SetStateAction<TaskForm>>
 }) {
-  const { t } = useI18n();
-  const top = (patch: Partial<TaskForm>) =>
-    setForm((f) => ({ ...f, ...patch }));
-  const src = (patch: Partial<TaskForm["source"]>) =>
-    setForm((f) => ({ ...f, source: { ...f.source, ...patch } }));
-  const start = (patch: Partial<TaskForm["start"]>) =>
-    setForm((f) => ({ ...f, start: { ...f.start, ...patch } }));
-  const store = (patch: Partial<TaskForm["storage"]>) =>
-    setForm((f) => ({ ...f, storage: { ...f.storage, ...patch } }));
+  const { t } = useI18n()
+  const top = (patch: Partial<TaskForm>) => setForm((f) => ({ ...f, ...patch }))
+  const src = (patch: Partial<TaskForm['source']>) =>
+    setForm((f) => ({ ...f, source: { ...f.source, ...patch } }))
+  const start = (patch: Partial<TaskForm['start']>) =>
+    setForm((f) => ({ ...f, start: { ...f.start, ...patch } }))
+  const store = (patch: Partial<TaskForm['storage']>) =>
+    setForm((f) => ({ ...f, storage: { ...f.storage, ...patch } }))
 
   return (
     <>
-      <Field label={t("form.taskName")}>
+      <Field label={t('form.taskName')}>
         <Input
-          data-testid="task-form-name"
+          data-testid='task-form-name'
           value={form.name}
           onChange={(e) => top({ name: e.target.value })}
         />
       </Field>
-      <Field label={t("form.clusterKey")}>
+      <Field label={t('form.clusterKey')}>
         <Input
-          data-testid="task-form-cluster-key"
-          value={form.cluster_key ?? ""}
+          data-testid='task-form-cluster-key'
+          value={form.cluster_key ?? ''}
           onChange={(e) => top({ cluster_key: e.target.value })}
         />
       </Field>
-      <Field label={t("form.host")}>
+      <Field label={t('form.host')}>
         <Input
-          data-testid="task-form-host"
-          value={form.source.host ?? ""}
+          data-testid='task-form-host'
+          value={form.source.host ?? ''}
           onChange={(e) => src({ host: e.target.value })}
         />
       </Field>
-      <Field label={t("form.port")}>
+      <Field label={t('form.port')}>
         <Input
-          data-testid="task-form-port"
-          type="number"
+          data-testid='task-form-port'
+          type='number'
           min={1}
           max={65535}
           value={form.source.port}
@@ -258,90 +247,81 @@ function FormFields({
           onBlur={() => src({ port: clamp(form.source.port, 1, 65535) })}
         />
       </Field>
-      <Field label={t("form.user")}>
+      <Field label={t('form.user')}>
         <Input
-          data-testid="task-form-user"
-          value={form.source.user ?? ""}
+          data-testid='task-form-user'
+          value={form.source.user ?? ''}
           onChange={(e) => src({ user: e.target.value })}
         />
       </Field>
-      <Field label={t("form.password")}>
+      <Field label={t('form.password')}>
         <Input
-          data-testid="task-form-password"
-          type="password"
-          autoComplete="new-password"
+          data-testid='task-form-password'
+          type='password'
+          autoComplete='new-password'
           placeholder={
-            mode === "adopt"
-              ? t("form.passwordRequiredHint")
-              : mode === "edit"
-                ? t("form.passwordHint")
+            mode === 'adopt'
+              ? t('form.passwordRequiredHint')
+              : mode === 'edit'
+                ? t('form.passwordHint')
                 : undefined
           }
-          value={form.source.password ?? ""}
+          value={form.source.password ?? ''}
           onChange={(e) => src({ password: e.target.value })}
         />
       </Field>
-      <Field label={t("form.serverId")}>
+      <Field label={t('form.serverId')}>
         <Input
-          data-testid="task-form-server-id"
-          type="number"
+          data-testid='task-form-server-id'
+          type='number'
           min={1}
           value={form.source.server_id}
           onChange={(e) => src({ server_id: num(e.target.value) })}
           onBlur={() => src({ server_id: clamp(form.source.server_id, 1) })}
         />
       </Field>
-      <Field label={t("form.flavor")} hint={t("form.flavorHint")}>
-        <Select
-          value={form.source.flavor || "mysql"}
-          onValueChange={(v) => src({ flavor: v })}
-        >
-          <SelectTrigger data-testid="task-form-flavor" className="w-full">
+      <Field label={t('form.flavor')} hint={t('form.flavorHint')}>
+        <Select value={form.source.flavor || 'mysql'} onValueChange={(v) => src({ flavor: v })}>
+          <SelectTrigger data-testid='task-form-flavor' className='w-full'>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="mysql">{t("form.flavorMysql")}</SelectItem>
-            <SelectItem value="mariadb">{t("form.flavorMariaDB")}</SelectItem>
+            <SelectItem value='mysql'>{t('form.flavorMysql')}</SelectItem>
+            <SelectItem value='mariadb'>{t('form.flavorMariaDB')}</SelectItem>
           </SelectContent>
         </Select>
       </Field>
-      <Field label={t("form.semiSync")}>
+      <Field label={t('form.semiSync')}>
         <Switch
-          data-testid="task-form-semi-sync"
+          data-testid='task-form-semi-sync'
           checked={!!form.source.semi_sync}
           onCheckedChange={(v) => src({ semi_sync: v })}
         />
       </Field>
-      <div className="grid grid-cols-1 gap-3 sm:col-span-2 sm:grid-cols-3">
-        <Field label={t("form.retentionDays")}>
+      <div className='grid grid-cols-1 gap-3 sm:col-span-2 sm:grid-cols-3'>
+        <Field label={t('form.retentionDays')}>
           <Input
-            data-testid="task-form-retention"
-            type="number"
+            data-testid='task-form-retention'
+            type='number'
             min={1}
             max={RETENTION_DAYS_MAX}
             value={form.storage.retention_days}
             onChange={(e) => store({ retention_days: num(e.target.value) })}
             onBlur={() =>
               store({
-                retention_days: clamp(
-                  form.storage.retention_days,
-                  1,
-                  RETENTION_DAYS_MAX,
-                ),
+                retention_days: clamp(form.storage.retention_days, 1, RETENTION_DAYS_MAX),
               })
             }
           />
         </Field>
-        <Field label={t("form.localRetentionDays")}>
+        <Field label={t('form.localRetentionDays')}>
           <Input
-            data-testid="task-form-local-retention"
-            type="number"
+            data-testid='task-form-local-retention'
+            type='number'
             min={0}
             max={RETENTION_DAYS_MAX}
             value={form.storage.local_retention_days ?? 0}
-            onChange={(e) =>
-              store({ local_retention_days: num(e.target.value) })
-            }
+            onChange={(e) => store({ local_retention_days: num(e.target.value) })}
             onBlur={() =>
               store({
                 local_retention_days: clamp(
@@ -353,19 +333,14 @@ function FormFields({
             }
           />
         </Field>
-        <Field
-          label={t("form.bucketRetentionDays")}
-          hint={t("form.retentionSplitHint")}
-        >
+        <Field label={t('form.bucketRetentionDays')} hint={t('form.retentionSplitHint')}>
           <Input
-            data-testid="task-form-bucket-retention"
-            type="number"
+            data-testid='task-form-bucket-retention'
+            type='number'
             min={0}
             max={RETENTION_DAYS_MAX}
             value={form.storage.bucket_retention_days ?? 0}
-            onChange={(e) =>
-              store({ bucket_retention_days: num(e.target.value) })
-            }
+            onChange={(e) => store({ bucket_retention_days: num(e.target.value) })}
             onBlur={() =>
               store({
                 bucket_retention_days: clamp(
@@ -378,42 +353,34 @@ function FormFields({
           />
         </Field>
         <Field
-          label={t("form.startMode")}
-          hint={mode === "adopt" ? t("form.adoptHint") : undefined}
+          label={t('form.startMode')}
+          hint={mode === 'adopt' ? t('form.adoptHint') : undefined}
         >
-          <Select
-            value={form.start.mode}
-            onValueChange={(v) => start({ mode: v })}
-          >
-            <SelectTrigger
-              data-testid="task-form-start-mode"
-              className="w-full"
-            >
+          <Select value={form.start.mode} onValueChange={(v) => start({ mode: v })}>
+            <SelectTrigger data-testid='task-form-start-mode' className='w-full'>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {mode === "adopt" && (
-                <SelectItem value={ADOPT_START_DEFAULT}>
-                  {t("form.startModeDefault")}
-                </SelectItem>
+              {mode === 'adopt' && (
+                <SelectItem value={ADOPT_START_DEFAULT}>{t('form.startModeDefault')}</SelectItem>
               )}
-              <SelectItem value="LATEST">LATEST</SelectItem>
-              <SelectItem value="FILE_POS">FILE_POS</SelectItem>
-              <SelectItem value="GTID">GTID</SelectItem>
+              <SelectItem value='LATEST'>LATEST</SelectItem>
+              <SelectItem value='FILE_POS'>FILE_POS</SelectItem>
+              <SelectItem value='GTID'>GTID</SelectItem>
             </SelectContent>
           </Select>
         </Field>
-        <Field label={t("form.file")}>
+        <Field label={t('form.file')}>
           <Input
-            data-testid="task-form-file"
-            value={form.start.file ?? ""}
+            data-testid='task-form-file'
+            value={form.start.file ?? ''}
             onChange={(e) => start({ file: e.target.value })}
           />
         </Field>
-        <Field label={t("form.position")}>
+        <Field label={t('form.position')}>
           <Input
-            data-testid="task-form-pos"
-            type="number"
+            data-testid='task-form-pos'
+            type='number'
             min={0}
             value={form.start.pos ?? 0}
             onChange={(e) => start({ pos: num(e.target.value) })}
@@ -421,13 +388,13 @@ function FormFields({
           />
         </Field>
       </div>
-      <Field label={t("form.gtidSet")} className="sm:col-span-2">
+      <Field label={t('form.gtidSet')} className='sm:col-span-2'>
         <Input
-          data-testid="task-form-gtid"
-          value={form.start.gtid_set ?? ""}
+          data-testid='task-form-gtid'
+          value={form.start.gtid_set ?? ''}
           onChange={(e) => start({ gtid_set: e.target.value })}
         />
       </Field>
     </>
-  );
+  )
 }

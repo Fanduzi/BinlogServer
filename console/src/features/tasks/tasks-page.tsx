@@ -223,7 +223,9 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
                     <TableHead>{t('table.source')}</TableHead>
                     <TableHead>{t('table.lastEventTime')}</TableHead>
                     <TableHead>{t('table.semiSync')}</TableHead>
-                    <TableHead className='bg-background sticky right-0'>{t('table.actions')}</TableHead>
+                    <TableHead className='bg-background sticky right-0'>
+                      {t('table.actions')}
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -281,7 +283,10 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
                           </div>
                         </TableCell>
                         <TableCell className='tabular-nums'>
-                          {formatDelay(row.replication?.delay_seconds, row.replication?.has_progress)}
+                          {formatDelay(
+                            row.replication?.delay_seconds,
+                            row.replication?.has_progress,
+                          )}
                         </TableCell>
                         <TableCell>{sourceLabel(row.task)}</TableCell>
                         <TableCell>{formatTs(locale, row.replication?.last_event_at)}</TableCell>

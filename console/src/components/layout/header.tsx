@@ -22,7 +22,12 @@ export function Header({ onSettings }: { onSettings: () => void }) {
           {t('app.description')}
         </p>
       </div>
-      <Button size='sm' data-testid='create-task' aria-label={t('btn.createTask')} onClick={openCreate}>
+      <Button
+        size='sm'
+        data-testid='create-task'
+        aria-label={t('btn.createTask')}
+        onClick={openCreate}
+      >
         <Plus />
         <span className='hidden sm:inline'>{t('btn.createTask')}</span>
       </Button>

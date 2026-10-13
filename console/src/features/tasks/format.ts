@@ -108,7 +108,8 @@ export function formatReplicationReason(t: TFunction, rep?: Replication) {
   }
   const rawErr = rep.last_error || rep.error || rep.err || rep.message || ''
   if (rawErr) {
-    const label = (rep.reason && reasonMap[rep.reason]) || rep.reason || t('replication.runnerError')
+    const label =
+      (rep.reason && reasonMap[rep.reason]) || rep.reason || t('replication.runnerError')
     return `${label}: ${rawErr}`
   }
   if (rep.reason) return reasonMap[rep.reason] || rep.reason

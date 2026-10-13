@@ -81,14 +81,7 @@ export function paginationParams(
 
 /** Quick filters from the KPI cards and chips (App.vue applyQuickFilter). */
 export type QuickFilter =
-  | 'all'
-  | 'alert'
-  | 'abnormal'
-  | 'failed'
-  | 'delayed'
-  | 'starting'
-  | 'running'
-  | 'normal'
+  'all' | 'alert' | 'abnormal' | 'failed' | 'delayed' | 'starting' | 'running' | 'normal'
 
 export function quickFilterState(kind: QuickFilter, current: UiFilter): UiFilter {
   if (kind === 'all') return { ...defaultUiFilter }
