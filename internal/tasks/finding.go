@@ -453,3 +453,47 @@ func sortFindings(items []Finding) {
 		return string(items[i].Kind)+items[i].Subject < string(items[j].Kind)+items[j].Subject
 	})
 }
+
+// FindingBinder is the runner hook into the finding sink. The runner reports
+// failures it handles itself (upload records, retention records, stalls).
+type FindingBinder interface {
+	BindFindings(report func(Finding), resolve func(taskID string, kind FindingKind, subject string))
+}
+
+// UploadOutcomeFinding is S9: an object that was stored but could not be read
+// back to compare is UPLOADED with an empty checksum. It looks done and is
+// not verified. ok is false when the outcome needs no finding.
+func UploadOutcomeFinding(file BinlogFile) (Finding, bool) {
+	if !strings.EqualFold(strings.TrimSpace(file.UploadState), "UPLOADED") || strings.TrimSpace(file.Checksum) != "" {
+		return Finding{}, false
+	}
+	return Finding{
+		TaskID:   file.TaskID,
+		Kind:     FindingUploadUnverified,
+		Subject:  file.FileName,
+		Severity: FindingWarning,
+		Detail:   "object " + file.ObjectKey + " was stored but the uploader cannot read it back; it is not verified against the local file",
+	}, true
+}
+
+// NoteUploadOutcome reports or resolves the per-file upload findings after a
+// sealed upload or verify: S8 when the catalog write failed, S9 when the
+// object is not verified.
+func NoteUploadOutcome(report func(Finding), resolve func(string, FindingKind, string), file BinlogFile, recordErr error) {
+	if report == nil || resolve == nil {
+		return
+	}
+	if recordErr != nil {
+		// The row keeps its previous state (seal writes UPLOAD_FAILED before
+		// the put), so the retry still sees it; the outcome itself is lost.
+		report(Finding{TaskID: file.TaskID, Kind: FindingUploadRecordFailed, Subject: file.FileName, Severity: FindingWarning,
+			Detail: "upload result (" + strings.TrimSpace(file.UploadState) + ") not written to the binlog catalog; the row keeps its previous state: " + recordErr.Error()})
+	} else {
+		resolve(file.TaskID, FindingUploadRecordFailed, file.FileName)
+	}
+	if f, ok := UploadOutcomeFinding(file); ok {
+		report(f)
+	} else if strings.EqualFold(strings.TrimSpace(file.UploadState), "UPLOADED") {
+		resolve(file.TaskID, FindingUploadUnverified, file.FileName)
+	}
+}

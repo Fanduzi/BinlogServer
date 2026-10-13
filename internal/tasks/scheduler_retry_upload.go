@@ -107,8 +107,15 @@ func (s *Scheduler) retryKnownFailedUploads() {
 				continue
 			}
 			log.Printf("background upload retry task=%s err=%v", id, err)
+			if errors.Is(err, ErrUploadRetryNotAvailable) || errors.Is(err, ErrFailedUploadLookupNotAvailable) {
+				// A configuration gap, not a per-task failure: one finding for the process.
+				s.Report(Finding{Kind: FindingRetryLoopFailed, Subject: "unavailable", Severity: FindingWarning, Detail: "background upload retry cannot run: " + err.Error() + "; a failed upload is not retried"})
+				continue
+			}
+			s.Report(Finding{TaskID: id, Kind: FindingRetryLoopFailed, Subject: "task", Severity: FindingCritical, Detail: "background upload retry for this task failed: " + err.Error()})
 			continue
 		}
+		s.Resolve(id, FindingRetryLoopFailed, "task")
 		if stats.Succeeded == 0 && stats.Failed == 0 {
 			continue
 		}
@@ -184,12 +191,12 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 		}
 		if strings.TrimSpace(file.FilePath) == "" {
 			stats.Failed++
-			_ = s.markRetryUploadFailure(fileStore, file, "retry upload skipped: empty file_path")
+			s.noteRetryUploadFailure(fileStore, file, "retry upload skipped: empty file_path")
 			continue
 		}
 		if strings.TrimSpace(file.ObjectKey) == "" {
 			stats.Failed++
-			_ = s.markRetryUploadFailure(fileStore, file, "retry upload skipped: empty object_key")
+			s.noteRetryUploadFailure(fileStore, file, "retry upload skipped: empty object_key")
 			continue
 		}
 		if opts.skipMissingLocal {
@@ -231,6 +238,12 @@ func (s *Scheduler) listRetryUploadCandidates(taskID string, limit int, fileStor
 }
 
 // markRetryUploadFailure 记录单文件补传失败状态和错误原因。
+// noteRetryUploadFailure records a row the retry cannot use (S8). When even
+// that record fails, the finding is the only trace.
+func (s *Scheduler) noteRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) {
+	_ = s.markRetryUploadFailure(fileStore, file, reason)
+}
+
 func (s *Scheduler) markRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) error {
 	file.UploadState = "UPLOAD_FAILED"
 	file.UploadError = reason
@@ -288,6 +301,22 @@ func (s *Scheduler) CountUploadFailures() (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+// noteRetryPass is the background retry loop's own heartbeat (S7): it moves
+// on every pass, also when nothing needed a retry, so a stopped loop shows as
+// a growing binlog_server_upload_retry_pass_age_seconds.
+func (s *Scheduler) noteRetryPass() {
+	s.mu.Lock()
+	s.retryPassTS = time.Now().Unix()
+	s.mu.Unlock()
+}
+
+// UploadRetryPassTS is the unix time of the last background retry pass (0 when none ran).
+func (s *Scheduler) UploadRetryPassTS() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retryPassTS
 }
 
 // GetUploadRetryMetrics 返回 retry-upload 的累计观测指标。

@@ -89,6 +89,9 @@ type MySQLRunner struct {
 	takeoverLive map[string]struct{}
 
 	onSourceSwitch func(taskID string, notice tasks.SourceSwitchNotice)
+	// findingReport/findingResolve are the scheduler's finding sink (ADR 0009).
+	findingReport  func(tasks.Finding)
+	findingResolve func(taskID string, kind tasks.FindingKind, subject string)
 }
 
 // resolvedPos is the file and position a LATEST start already chose.
@@ -151,6 +154,35 @@ func (r *MySQLRunner) BindDumpCleanup(fn func(taskID string, source tasks.Source
 	r.dumpMu.Lock()
 	r.dumpCleanup = fn
 	r.dumpMu.Unlock()
+}
+
+// BindFindings connects the runner to the scheduler's finding sink.
+func (r *MySQLRunner) BindFindings(report func(tasks.Finding), resolve func(string, tasks.FindingKind, string)) {
+	r.dumpMu.Lock()
+	r.findingReport = report
+	r.findingResolve = resolve
+	r.dumpMu.Unlock()
+}
+
+func (r *MySQLRunner) findingSink() (func(tasks.Finding), func(string, tasks.FindingKind, string)) {
+	if r == nil {
+		return nil, nil
+	}
+	r.dumpMu.Lock()
+	defer r.dumpMu.Unlock()
+	return r.findingReport, r.findingResolve
+}
+
+func (r *MySQLRunner) report(f tasks.Finding) {
+	if report, _ := r.findingSink(); report != nil {
+		report(f)
+	}
+}
+
+func (r *MySQLRunner) resolve(taskID string, kind tasks.FindingKind, subject string) {
+	if _, resolve := r.findingSink(); resolve != nil {
+		resolve(taskID, kind, subject)
+	}
 }
 
 // BindSourceSwitch records a VIP source switch on the scheduler event list.
