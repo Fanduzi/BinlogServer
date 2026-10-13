@@ -1,7 +1,7 @@
 // Task detail drawer, ported from frontend/src/components/TaskDetailDrawer.vue
 // plus its handlers in App.vue. Rendered by the /tasks/$taskId and
 // /alerts/$taskId routes, so a detail link opens directly.
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   CircleAlert,
   Clock,
@@ -42,12 +42,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useObservation } from '@/context/observation'
+import { useTaskForm } from '@/features/task-form/task-form-dialog'
 import {
   deleteTask,
   downloadReplayArchive,
   downloadTaskFile,
+  getTask,
   listFiles,
   listPITRReplay,
   retryUpload,
@@ -106,16 +107,44 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
   const [confirmDelete, setConfirmDelete] = useState(false)
   const task = detail?.task ?? null
 
+  const { openEdit } = useTaskForm()
+
+  // After Start/Stop the task passes through STARTING/STOPPING. Poll the task
+  // (GET /api/tasks/{id} only) until it settles, then reload the whole drawer
+  // and the list once, so the drawer no longer sticks on "Starting".
+  const settleRun = useRef(0)
+  useEffect(() => () => void settleRun.current++, [taskId])
+  async function settle() {
+    const run = ++settleRun.current
+    await reload()
+    for (let i = 0; i < SETTLE_MAX_POLLS; i++) {
+      await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
+      if (run !== settleRun.current) return
+      let state = ''
+      try {
+        state = String((await getTask(taskId))?.state || '')
+      } catch {
+        return
+      }
+      if (run !== settleRun.current) return
+      if (!TRANSITIONAL_STATES.has(state)) break
+    }
+    if (run !== settleRun.current) return
+    await refresh()
+    await reload()
+  }
+
   async function onStart() {
     if (!task) return
     try {
       await startTask(task.id)
       toast.success(t('msg.taskStarted', { id: task.id }))
       await refresh()
-      await reload()
     } catch (err) {
       toast.error(parseErr(err))
+      return
     }
+    await settle()
   }
 
   async function onStop() {
@@ -126,12 +155,15 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
       await refresh()
     } catch (err) {
       toast.error(parseErr(err))
+      return
     }
+    await settle()
   }
 
   async function onDelete() {
     if (!task) return
     setConfirmDelete(false)
+    settleRun.current++
     try {
       await deleteTask(task.id)
       toast.success(t('msg.taskDeleted', { id: task.id }))
@@ -193,6 +225,7 @@ export function TaskDetailSheet({ taskId, onClose }: { taskId: string; onClose: 
             detail={detail}
             now={nowRefMs()}
             locale={locale}
+            onEdit={() => openEdit(task, reload)}
             onStart={onStart}
             onStop={onStop}
             onDelete={() => setConfirmDelete(true)}
@@ -271,26 +304,15 @@ function Item({ label, children, ...rest }: { label: ReactNode; children: ReactN
 const grid = 'grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4'
 const pre = 'bg-muted mt-2 max-w-full overflow-x-auto rounded-md p-3 font-mono text-xs whitespace-pre'
 
-function PendingButton({ label, testid }: { label: string; testid: string }) {
-  const { t } = useI18n()
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span tabIndex={0}>
-          <Button size='sm' variant='outline' disabled data-testid={testid}>
-            {label}
-          </Button>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{t('migration.formPending')}</TooltipContent>
-    </Tooltip>
-  )
-}
+const TRANSITIONAL_STATES = new Set(['STARTING', 'STOPPING'])
+const SETTLE_POLL_MS = 1500
+const SETTLE_MAX_POLLS = 20
 
 function DetailBody({
   detail,
   now,
   locale,
+  onEdit,
   onStart,
   onStop,
   onDelete,
@@ -302,6 +324,7 @@ function DetailBody({
   detail: NonNullable<ReturnType<typeof useTaskDetail>['detail']>
   now: number
   locale: string
+  onEdit: () => void
   onStart: () => void
   onStop: () => void
   onDelete: () => void
@@ -397,9 +420,13 @@ function DetailBody({
           </div>
           <div className='flex flex-wrap gap-2' data-testid='task-drawer-actions'>
             {isLeftoverDiskTask(task) ? (
-              <PendingButton label={t('btn.adopt')} testid='task-action-adopt' />
+              <Button size='sm' variant='outline' data-testid='task-action-adopt' onClick={onEdit}>
+                {t('btn.adopt')}
+              </Button>
             ) : (
-              <PendingButton label={t('btn.edit')} testid='task-action-edit' />
+              <Button size='sm' variant='outline' data-testid='task-action-edit' onClick={onEdit}>
+                {t('btn.edit')}
+              </Button>
             )}
             <Button
               size='sm'

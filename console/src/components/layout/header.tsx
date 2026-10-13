@@ -1,13 +1,15 @@
-import { RotateCw, Settings } from 'lucide-react'
+import { Plus, RotateCw, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { SidebarTrigger } from '@/components/ui/sidebar'
 import { useObservation } from '@/context/observation'
+import { useTaskForm } from '@/features/task-form/task-form-dialog'
 import { useI18n } from '@/lib/i18n'
 
 export function Header({ onSettings }: { onSettings: () => void }) {
   const { t } = useI18n()
   const { loading, refresh } = useObservation()
+  const { openCreate } = useTaskForm()
   return (
     <header className='bg-background sticky top-0 z-10 flex h-16 shrink-0 items-center gap-3 border-b px-4'>
       <SidebarTrigger className='-ml-1' />
@@ -18,13 +20,23 @@ export function Header({ onSettings }: { onSettings: () => void }) {
           {t('app.description')}
         </p>
       </div>
-      <Button variant='outline' size='sm' disabled={loading} onClick={() => void refresh()}>
-        <RotateCw className={loading ? 'animate-spin' : ''} />
-        {t('btn.refresh')}
+      <Button size='sm' data-testid='create-task' aria-label={t('btn.createTask')} onClick={openCreate}>
+        <Plus />
+        <span className='hidden sm:inline'>{t('btn.createTask')}</span>
       </Button>
-      <Button variant='outline' size='sm' onClick={onSettings}>
+      <Button
+        variant='outline'
+        size='sm'
+        aria-label={t('btn.refresh')}
+        disabled={loading}
+        onClick={() => void refresh()}
+      >
+        <RotateCw className={loading ? 'animate-spin' : ''} />
+        <span className='hidden sm:inline'>{t('btn.refresh')}</span>
+      </Button>
+      <Button variant='outline' size='sm' aria-label={t('btn.settings')} onClick={onSettings}>
         <Settings />
-        {t('btn.settings')}
+        <span className='hidden sm:inline'>{t('btn.settings')}</span>
       </Button>
     </header>
   )

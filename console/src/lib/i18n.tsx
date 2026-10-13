@@ -16,7 +16,6 @@ const consoleOnly = {
       pendingTitle: '此页面尚未迁移',
       pendingBody: '新版控制台正按页迁移（#302）。请先在现有控制台中使用此页面。',
       openClassic: '打开现有控制台',
-      formPending: '编辑和接管表单将在后续迁移 PR 中提供，请暂用现有控制台。',
       notFoundTitle: '页面不存在',
       notFoundBody: '这个地址没有对应的页面。',
       backToTasks: '返回任务列表',
@@ -28,7 +27,6 @@ const consoleOnly = {
       pendingTitle: 'This page has not moved yet',
       pendingBody: 'The new Console is moving over page by page (#302). Use this page in the current console for now.',
       openClassic: 'Open current console',
-      formPending: 'The edit and adopt forms move over in a later migration PR; use the current console for now.',
       notFoundTitle: 'Page not found',
       notFoundBody: 'Nothing lives at this address.',
       backToTasks: 'Back to tasks',
@@ -69,10 +67,11 @@ export type TFunction = (key: string, params?: Record<string, unknown>) => strin
 export function makeT(locale: Locale): TFunction {
   return (key, params) => {
     const msg = lookup(catalogs[locale], key) ?? lookup(catalogs.en, key) ?? key
-    if (!params) return msg
-    return msg.replace(/\{(\w+)\}/g, (m, name: string) =>
-      name in params ? String(params[name]) : m,
-    )
+    // vue-i18n literal interpolation: {'@@server_uuid'} renders @@server_uuid.
+    return msg.replace(/\{'([^']*)'\}|\{(\w+)\}/g, (m, literal: string | undefined, name: string) => {
+      if (literal !== undefined) return literal
+      return params && name in params ? String(params[name]) : m
+    })
   }
 }
 
