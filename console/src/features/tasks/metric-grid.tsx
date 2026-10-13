@@ -1,27 +1,51 @@
 // KPI cards, as frontend/src/components/MetricGrid.vue: each card applies its
 // quick filter.
-import {
-  Bug,
-  CircleCheck,
-  Hourglass,
-  Layers,
-  Loader,
-  Play,
-  TriangleAlert,
-} from 'lucide-react'
+import { Bug, CircleCheck, Hourglass, Layers, Loader, Play, TriangleAlert } from 'lucide-react'
+import { useObservation } from '@/context/observation'
 import type { DashboardSummary } from '@/lib/api'
+import { useApplyQuickFilter, useTaskFilter } from './filter-context'
 import { useI18n } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 import type { QuickFilter } from './filter'
 
 const cards = [
-  { filter: 'abnormal', variant: 'danger', icon: TriangleAlert, field: 'abnormal', valueTestid: 'kpi-abnormal-value' },
-  { filter: 'failed', variant: 'danger', icon: Bug, field: 'failed', valueTestid: 'kpi-failed-value' },
-  { filter: 'delayed', variant: 'warning', icon: Hourglass, field: 'delayed', valueTestid: 'kpi-delayed-value' },
-  { filter: 'starting', variant: 'warning', icon: Loader, field: 'starting', valueTestid: 'kpi-starting-value' },
+  {
+    filter: 'abnormal',
+    variant: 'danger',
+    icon: TriangleAlert,
+    field: 'abnormal',
+    valueTestid: 'kpi-abnormal-value',
+  },
+  {
+    filter: 'failed',
+    variant: 'danger',
+    icon: Bug,
+    field: 'failed',
+    valueTestid: 'kpi-failed-value',
+  },
+  {
+    filter: 'delayed',
+    variant: 'warning',
+    icon: Hourglass,
+    field: 'delayed',
+    valueTestid: 'kpi-delayed-value',
+  },
+  {
+    filter: 'starting',
+    variant: 'warning',
+    icon: Loader,
+    field: 'starting',
+    valueTestid: 'kpi-starting-value',
+  },
   { filter: 'running', variant: '', icon: Play, field: 'running', valueTestid: undefined },
   { filter: 'all', variant: '', icon: Layers, field: 'total', valueTestid: undefined },
-  { filter: 'normal', variant: 'success', icon: CircleCheck, field: 'normal', valueTestid: undefined },
+  {
+    filter: 'normal',
+    variant: 'success',
+    icon: CircleCheck,
+    field: 'normal',
+    valueTestid: undefined,
+  },
 ] as const
 
 const labelKey: Record<string, string> = { all: 'metrics.total' }
@@ -64,4 +88,12 @@ export function MetricGrid({
       ))}
     </section>
   )
+}
+
+/** The KPI strip the shell shows above every page, as App.vue does. */
+export function ShellMetricGrid() {
+  const { dashboard } = useObservation()
+  const { activeQuick } = useTaskFilter()
+  const applyQuick = useApplyQuickFilter()
+  return <MetricGrid summary={dashboard.summary} active={activeQuick} onFilter={applyQuick} />
 }

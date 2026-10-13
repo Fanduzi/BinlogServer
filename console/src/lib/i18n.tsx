@@ -25,7 +25,8 @@ const consoleOnly = {
     pagination: { total: 'Total {total}', perPage: '{size}/page', prev: 'Previous', next: 'Next' },
     migration: {
       pendingTitle: 'This page has not moved yet',
-      pendingBody: 'The new Console is moving over page by page (#302). Use this page in the current console for now.',
+      pendingBody:
+        'The new Console is moving over page by page (#302). Use this page in the current console for now.',
       openClassic: 'Open current console',
       notFoundTitle: 'Page not found',
       notFoundBody: 'Nothing lives at this address.',
@@ -68,11 +69,29 @@ export function makeT(locale: Locale): TFunction {
   return (key, params) => {
     const msg = lookup(catalogs[locale], key) ?? lookup(catalogs.en, key) ?? key
     // vue-i18n literal interpolation: {'@@server_uuid'} renders @@server_uuid.
-    return msg.replace(/\{'([^']*)'\}|\{(\w+)\}/g, (m, literal: string | undefined, name: string) => {
-      if (literal !== undefined) return literal
-      return params && name in params ? String(params[name]) : m
-    })
+    return msg.replace(
+      /\{'([^']*)'\}|\{(\w+)\}/g,
+      (m, literal: string | undefined, name: string) => {
+        if (literal !== undefined) return literal
+        return params && name in params ? String(params[name]) : m
+      },
+    )
   }
+}
+
+/**
+ * Translate a key built from server data (a state, status or reason). When the
+ * catalog has no such key, return the fallback instead of the raw key, so an
+ * unknown value never shows as "state.FOO".
+ */
+export function tKnown(
+  t: TFunction,
+  key: string,
+  fallback: string,
+  params?: Record<string, unknown>,
+) {
+  const text = t(key, params)
+  return text === key ? fallback : text
 }
 
 const I18nContext = createContext<{ locale: Locale; t: TFunction }>({
@@ -84,11 +103,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const locale = getLocale()
   // Stable across renders so hooks can depend on t without refetch loops.
   const value = useMemo(() => ({ locale, t: makeT(locale) }), [locale])
-  return (
-    <I18nContext.Provider value={value}>
-      {children}
-    </I18nContext.Provider>
-  )
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>
 }
 
 export function useI18n() {

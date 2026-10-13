@@ -9,7 +9,7 @@ import { useEffect, useRef } from 'react'
 import { useObservation } from '@/context/observation'
 import { paginationParams } from './filter'
 import { useTaskFilter } from './filter-context'
-import { useDebounced } from './use-debounced'
+import { useDebounced } from '@/hooks/use-debounced'
 
 export function TaskObservationSync() {
   const { refresh, dashboard } = useObservation()
@@ -23,7 +23,7 @@ export function TaskObservationSync() {
       setPager((x) => ({ ...x, page: 1 }))
       return
     }
-    void refresh(paginationParams(pager.page, pager.pageSize, filter.taskState))
+    void refresh({ paging: paginationParams(pager.page, pager.pageSize, filter.taskState) })
   }, [filter.taskState, pager.page, pager.pageSize, refresh, setPager])
 
   const kw = useDebounced(filter.keyword, 300)
@@ -35,7 +35,15 @@ export function TaskObservationSync() {
       return
     }
     setPager((x) => (x.page === 1 ? x : { ...x, page: 1 }))
-  }, [kw, skw, filter.taskState, filter.replicationStatus, filter.sortBy, filter.onlyAlert, setPager])
+  }, [
+    kw,
+    skw,
+    filter.taskState,
+    filter.replicationStatus,
+    filter.sortBy,
+    filter.onlyAlert,
+    setPager,
+  ])
 
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(dashboard.total / pager.pageSize))
