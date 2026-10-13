@@ -80,6 +80,14 @@ it('isAlertRow', () => {
   expect(rows.map(isAlertRow)).toEqual([false, true, true, false, true])
 })
 
+it('isAlertRow flags storage alerts and open findings on a healthy-looking row (S14)', () => {
+  const healthy = row(6, 'quiet', 'RUNNING', 'NORMAL', 0)
+  expect(isAlertRow(healthy)).toBe(false)
+  expect(isAlertRow({ ...healthy, task: { ...healthy.task, storage_alert: true } })).toBe(true)
+  expect(isAlertRow({ ...healthy, open_findings: 2 })).toBe(true)
+  expect(isAlertRow({ ...healthy, open_findings: 0 })).toBe(false)
+})
+
 it('paginationParams sends state only when filtered', () => {
   expect(paginationParams(1, 20, 'ALL')).toEqual({ limit: 20, offset: 0 })
   expect(paginationParams(3, 50, 'FAILED')).toEqual({ limit: 50, offset: 100, state: 'FAILED' })

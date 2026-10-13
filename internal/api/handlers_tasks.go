@@ -260,10 +260,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Sources:          sources,
 	}
 	for _, task := range page {
-		progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
 		resp.Tasks = append(resp.Tasks, dashboardTaskItem{
 			Task:        s.presentTask(r.Context(), task),
-			Replication: buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds),
+			Replication: s.replicationFor(task, now),
 		})
 	}
 
@@ -1609,4 +1608,10 @@ func checkpointResponseOf(cp binlog.Checkpoint) checkpointResponse {
 		out.UpdatedAt = &at
 	}
 	return out
+}
+
+// replicationFor builds the replication view of one task from its progress.
+func (s *Server) replicationFor(task tasks.Task, now time.Time) taskReplicationResponse {
+	progress, ok, _ := s.tasks.GetReplicationProgress(task.ID)
+	return buildReplicationResponse(task, progress, ok, now, defaultDelayThresholdSeconds)
 }
