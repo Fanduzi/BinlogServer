@@ -34,8 +34,9 @@ Rules for every migration PR:
 | --- | --- |
 | Shell, settings (token + language) | migrated |
 | Tasks, Alerts | migrated |
-| Task detail drawer (`#/tasks/:id`, `#/alerts/:id`) | migrated (edit/adopt buttons wait for the form PR) |
-| Create, edit, adopt, batch create | pending |
+| Task detail drawer (`#/tasks/:id`, `#/alerts/:id`) | migrated; after Start/Stop it polls `GET /api/tasks/{id}` until the state leaves STARTING/STOPPING, then reloads |
+| Create (header), edit, adopt (drawer) | migrated: `POST /api/tasks`, `PUT /api/tasks/{id}`, `POST /api/tasks/{id}/adopt` |
+| Batch create | pending |
 | Overview, Sources, Workers | pending |
 | Cutover (embed in `internal/ui/static`) | pending |
 

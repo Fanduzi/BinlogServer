@@ -280,6 +280,21 @@ export async function downloadReplayArchive(id: string | number, w?: PitrWindow)
   return data
 }
 
+export async function createTask(payload: AnyRecord): Promise<Task> {
+  const { data } = await http.post('/api/tasks', payload)
+  return data
+}
+
+export async function updateTask(id: string | number, payload: AnyRecord): Promise<Task> {
+  const { data } = await http.put(`/api/tasks/${id}`, payload)
+  return data
+}
+
+export async function adoptTask(id: string | number, payload: AnyRecord): Promise<Task> {
+  const { data } = await http.post(`/api/tasks/${id}/adopt`, payload)
+  return data
+}
+
 export async function startTask(id: string | number) {
   await http.post(`/api/tasks/${enc(id)}/start`)
 }
