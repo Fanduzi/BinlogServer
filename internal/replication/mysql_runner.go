@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,6 +51,9 @@ const (
 
 // MySQLRunner 负责执行复制协议拉流、文件落盘、checkpoint 与上传流程。
 type MySQLRunner struct {
+	// stalled holds task IDs with an open DUMP_STALLED finding, so the event
+	// hot path resolves only after a stall.
+	stalled         sync.Map
 	dataDir         string
 	fetcher         sourceMetaFetcher
 	checkpointStore CheckpointStore
@@ -671,7 +675,16 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 			}
 			return nil, nil
 		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			r.stalled.Store(taskID, struct{}{})
+			r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
+				Detail: fmt.Sprintf("dump read nothing, not even a heartbeat, for %s at %s:%d; reconnecting", dumpReadTimeout, file, pos)})
+		}
 		return nil, classifySourceError(err)
+	}
+	if _, was := r.stalled.LoadAndDelete(taskID); was {
+		r.resolve(taskID, tasks.FindingDumpStalled, "")
 	}
 	return event, nil
 }
@@ -1207,6 +1220,10 @@ func waitDumpReconnect(ctx context.Context) error {
 // This process cannot shorten that wait while the path stays blackholed.
 const dumpHeartbeatPeriod = 15 * time.Second
 
+// dumpReadTimeout bounds a dump read. Three missed heartbeats (ADR 0009:
+// 45s) mean the connection is dead, so the read fails and the dump reconnects.
+const dumpReadTimeout = 45 * time.Second
+
 // buildSyncerConfig 基于任务配置构造 go-mysql syncer 参数。
 func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 	// 常见误解：
@@ -1233,6 +1250,7 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 		DisableRetrySync:     true,
 		MaxReconnectAttempts: maxDumpReconnectAttempts,
 		HeartbeatPeriod:      dumpHeartbeatPeriod,
+		ReadTimeout:          dumpReadTimeout,
 	}
 }
 
@@ -1967,8 +1985,11 @@ func (r *MySQLRunner) reconcileOpenTail(task tasks.Task, executed *executedGTID)
 			tail.Truncate = false
 		case truncateFile(tail.Path, tail.CutOffset) != nil:
 			log.Printf("open tail truncate failed task=%s path=%s offset=%d", task.ID, tail.Path, tail.CutOffset)
+			r.report(tasks.Finding{TaskID: task.ID, Kind: tasks.FindingOpenTailCutFailed, Subject: tail.File, Severity: tasks.FindingCritical,
+				Detail: fmt.Sprintf("could not cut unfinished transaction %s at offset %d of %s; resuming inside it", tail.PartialGTID, tail.CutOffset, tail.Path)})
 			tail.Truncate = false
 		default:
+			r.resolve(task.ID, tasks.FindingOpenTailCutFailed, tail.File)
 			log.Printf("open tail cut unfinished transaction task=%s path=%s gtid=%s offset=%d resume=%s:%d", task.ID, tail.Path, tail.PartialGTID, tail.CutOffset, tail.File, tail.Pos)
 		}
 	}
