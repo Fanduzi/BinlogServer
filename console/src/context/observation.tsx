@@ -18,6 +18,7 @@ import {
   type Worker,
 } from '@/lib/api'
 import { createLatest } from '@/lib/latest'
+import { toTimeMs } from '@/lib/time'
 import { notifyError } from '@/lib/notify'
 
 const emptyDashboard: Dashboard = {
@@ -72,11 +73,7 @@ function applyDashboard(prev: Dashboard, data: Partial<Dashboard> | null): Dashb
   }
 }
 
-export function toTimeMs(ts?: string) {
-  if (!ts) return 0
-  const ms = new Date(ts).getTime()
-  return Number.isNaN(ms) ? 0 : ms
-}
+export { toTimeMs }
 
 export interface DashboardQuery {
   /** limit/offset/state from the task pager (features/tasks/sync.tsx). */

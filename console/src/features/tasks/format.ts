@@ -2,7 +2,7 @@
 // and useTaskFilter.js. List lease risk uses the task copy, never GET /lease.
 import { tKnown, type TFunction } from '@/lib/i18n'
 import type { Replication, Task } from '@/lib/api'
-import { toTimeMs } from '@/context/observation'
+import { toTimeMs } from '@/lib/time'
 
 export const LEASE_RISK_SECONDS = 45
 

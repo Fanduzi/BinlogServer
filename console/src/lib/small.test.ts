@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { tKnown } from './i18n'
+import { mergeCatalog, tKnown } from './i18n'
+import { toTimeMs } from './time'
 import { createLatest } from './latest'
 import { clampNumber, parseNumberInput } from './number'
 import { t } from '@/test/t'
@@ -44,4 +45,20 @@ describe('i18n', () => {
     expect(tKnown(t, 'state.NOPE', 'NOPE')).toBe('NOPE')
     expect(tKnown(t, 'state.RUNNING', 'x')).toBe(t('state.RUNNING'))
   })
+})
+
+describe('mergeCatalog', () => {
+  it('adds console keys inside a shared namespace without dropping the rest', () => {
+    const merged = mergeCatalog(
+      { cluster: { a: 'A', b: 'B' }, x: 'X' },
+      { cluster: { c: 'C' }, y: 'Y' },
+    )
+    expect(merged).toEqual({ cluster: { a: 'A', b: 'B', c: 'C' }, x: 'X', y: 'Y' })
+  })
+})
+
+it('toTimeMs', () => {
+  expect(toTimeMs(undefined)).toBe(0)
+  expect(toTimeMs('nope')).toBe(0)
+  expect(toTimeMs('2026-10-13T00:00:00Z')).toBe(Date.UTC(2026, 9, 13))
 })

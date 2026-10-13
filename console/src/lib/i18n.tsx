@@ -9,25 +9,32 @@ export type Locale = 'zh-CN' | 'en'
 const SAVED_LOCALE_KEY = 'locale'
 // Strings the Vue console got from Element Plus or that only the new Console
 // needs. Everything else comes from the shared catalogs above.
+type Tree = { [k: string]: unknown }
+const isTree = (v: unknown): v is Tree => !!v && typeof v === 'object' && !Array.isArray(v)
+
+/** Deep merge, so a console-only key never replaces a whole shared namespace. */
+export function mergeCatalog(base: Tree, extra: Tree): Tree {
+  const out: Tree = { ...base }
+  for (const [k, v] of Object.entries(extra)) {
+    out[k] = isTree(v) && isTree(out[k]) ? mergeCatalog(out[k] as Tree, v) : v
+  }
+  return out
+}
+
 const consoleOnly = {
   'zh-CN': {
+    workersView: { status: '状态', load: '任务', heartbeat: '心跳' },
     pagination: { total: '共 {total} 条', perPage: '{size}条/页', prev: '上一页', next: '下一页' },
     migration: {
-      pendingTitle: '此页面尚未迁移',
-      pendingBody: '新版控制台正按页迁移（#302）。请先在现有控制台中使用此页面。',
-      openClassic: '打开现有控制台',
       notFoundTitle: '页面不存在',
       notFoundBody: '这个地址没有对应的页面。',
       backToTasks: '返回任务列表',
     },
   },
   en: {
+    workersView: { status: 'Status', load: 'Tasks', heartbeat: 'Heartbeat' },
     pagination: { total: 'Total {total}', perPage: '{size}/page', prev: 'Previous', next: 'Next' },
     migration: {
-      pendingTitle: 'This page has not moved yet',
-      pendingBody:
-        'The new Console is moving over page by page (#302). Use this page in the current console for now.',
-      openClassic: 'Open current console',
       notFoundTitle: 'Page not found',
       notFoundBody: 'Nothing lives at this address.',
       backToTasks: 'Back to tasks',
@@ -36,8 +43,8 @@ const consoleOnly = {
 }
 
 const catalogs: Record<Locale, unknown> = {
-  'zh-CN': { ...zhCN, ...consoleOnly['zh-CN'] },
-  en: { ...en, ...consoleOnly.en },
+  'zh-CN': mergeCatalog(zhCN, consoleOnly['zh-CN']),
+  en: mergeCatalog(en, consoleOnly.en),
 }
 
 export function getLocale(): Locale {
