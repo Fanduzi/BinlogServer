@@ -1,6 +1,6 @@
 # 备份保障：一条备份链、一个结论汇、零静默失败
 
-Status: Proposed (2026-10-13)。只有设计，没有实现代码。Epic #326。
+Status: Accepted (2026-10-14)。只有设计，没有实现代码。Epic #326。决定见文末「决定记录」。
 
 相关记录：[0002](0002-best-effort-upload-one-caller.md)（尽力上传一个调用方）、[0005](0005-single-task-authority-and-segment-catalog.md)（任务状态一个权威、段一个键）、[0006](0006-segment-ledger.md)（段账本）、[0007](0007-storage-health.md)（存储健康）、[0008](0008-run-phases.md)（一次运行五个阶段）。这些决定都保留；本记录在它们之上回答三个问题：**备份是不是完整的**、**出了问题有没有人知道**、**要用的时候能不能找到并还原**。
 
@@ -249,11 +249,15 @@ RestorePlan {
 5. **巡检全量下载对象。** 最强，但出网流量和费用随数据量线性增长。默认抽样 + 新上传全量 + 记录 SHA-256，可配置为全量。
 6. **结论放进现有 `task_events`，不建新表。** 事件是追加的，没有「未解决」状态，告警页需要扫描并推断——这正是 F 类问题。拒绝。
 
-## 需要 Adrian 决定的事
+## 决定记录（2026-10-13 22:26 定稿，Adrian 无异议）
 
-1. **告警通知出口**：只提供 Prometheus 指标 + 推荐告警规则（用户自己接 Alertmanager），还是内置 webhook（钉钉/飞书/Slack/邮件）？建议：先只做指标 + 通用 webhook 一种。
-2. **默认阈值**：`stall_after` 45s、`upload_grace` 15min、`verify_every` 24h、SLO 99.9%、对象 RPO p99 20min 是否合适。
-3. **还原演练**需要一个专用 MySQL 实例并由服务器写入它；是否接受这个能力（默认关闭）。
-4. **巡检对象抽样比例**（出网费用）默认 5% + 新上传全量。
-5. **迁移 `000007`** 会把 `minRequiredSchemaVersion` 抬到 7；是否接受在一个 v0.6.0 里发（建议用 v0.6.0 标示这一能力边界）。
-6. 是否需要「meta 库丢失也能还原」（方案 3 的 sidecar manifest）。
+1. **告警通知**：Prometheus 指标 + 推荐告警规则，外加**一个通用 webhook**（JSON POST）。不做各家 IM 的专用集成。
+2. **默认阈值**：`stall_after` 45s、`upload_grace` 15min、`verify_every` 24h、健康分钟占比 SLO 99.9%（30 天）、对象存储 RPO p99 20min。全部可配置。
+3. **还原演练**：保留为可选功能，默认关闭；只有配置了 `verify.drill.dsn` 才启用。
+4. **巡检对象抽样**：默认 5%，加上最近一轮之后新上传的全部对象；可配置为全量。
+5. **发布**：迁移 `000007` 与 `minRequiredSchemaVersion = 7` 随 **v0.6.0** 发布。
+6. **meta 库丢失后还原 / sidecar manifest（方案 3）**：本期不做。
+
+### 后续工作（不在本 ADR 范围内）
+
+- meta 库丢失时仅凭对象存储重建目录与还原：需要每段一个 sidecar manifest 对象。等阶段 4 覆盖查询稳定后再单独写 ADR 评估。
