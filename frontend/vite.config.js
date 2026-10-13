@@ -48,6 +48,10 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
+        "/auth": {
+          target: apiTarget,
+          changeOrigin: true,
+        },
       },
     },
   };

@@ -1,5 +1,5 @@
 // input: axios HTTP client, utils/auth.js token storage, shared frontend mock handler, backend 401 responses
-// output: API request helpers for dashboard observation, task CRUD/detail, the replay set, the point-in-time replay window, stop_gtid on that window, start_gtid_set on that window, GET /api/tasks/{id}/window, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
+// output: auth header chosen from GET /auth/config (Bearer or the api_key header), API request helpers for dashboard observation, task CRUD/detail, the replay set, the point-in-time replay window, stop_gtid on that window, start_gtid_set on that window, GET /api/tasks/{id}/window, one inventory segment download, the replay-set tar, adopt of a leftover directory, batch task creation, plus auth-required event dispatch for real and mock-backed settings flows
 // pos: frontend API layer with auth interceptors and opt-in dev mock dispatch for backend communication
 // note: keep 401 handling aligned with in-app settings guidance; update frontend/README.md if responsibilities change
 
@@ -17,12 +17,33 @@ const useMockAPI = devEnv.VITE_USE_MOCK === "true";
 const mockScenario = devEnv.VITE_MOCK_SCENARIO || "healthy";
 const mockSession = useMockAPI ? createMockSession({ scenario: mockScenario }) : null;
 
-// Request interceptor: add auth header if token is configured.
+// authHeaderPromise resolves once, from the anonymous GET /auth/config, to
+// the header the server reads the credential from: Authorization with the
+// Bearer scheme, or the configured API key header. A server without the
+// route (or any failure) keeps the old Bearer behavior.
+let authHeaderPromise = null;
+function loadAuthHeader() {
+  if (!authHeaderPromise) {
+    authHeaderPromise = axios
+      .get("/auth/config", { timeout: 5000 })
+      .then(({ data }) => {
+        if (data?.mode === "api_key" && data?.header) {
+          return { name: String(data.header), scheme: "" };
+        }
+        return { name: "Authorization", scheme: "Bearer" };
+      })
+      .catch(() => ({ name: "Authorization", scheme: "Bearer" }));
+  }
+  return authHeaderPromise;
+}
+
+// Request interceptor: add the auth header if a token is configured.
 http.interceptors.request.use(
-  (config) => {
+  async (config) => {
     const token = getAuthToken();
     if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+      const header = await loadAuthHeader();
+      config.headers[header.name] = header.scheme ? `${header.scheme} ${token}` : token;
     }
     return config;
   },

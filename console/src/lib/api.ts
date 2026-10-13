@@ -20,9 +20,36 @@ export function resetAuthDialogShown() {
   authDialogShown = false
 }
 
-http.interceptors.request.use((config) => {
+// The header the server reads the credential from, learned once from the
+// anonymous GET /auth/config: Authorization with the Bearer scheme, or the
+// configured API key header. Failure keeps Bearer (older servers).
+interface AuthHeader {
+  name: string
+  scheme: string
+}
+const BEARER: AuthHeader = { name: 'Authorization', scheme: 'Bearer' }
+let authHeaderPromise: Promise<AuthHeader> | null = null
+
+function loadAuthHeader(): Promise<AuthHeader> {
+  if (!authHeaderPromise) {
+    authHeaderPromise = axios
+      .get('/auth/config', { timeout: 5000 })
+      .then(({ data }) =>
+        data?.mode === 'api_key' && data?.header
+          ? { name: String(data.header), scheme: '' }
+          : BEARER,
+      )
+      .catch(() => BEARER)
+  }
+  return authHeaderPromise
+}
+
+http.interceptors.request.use(async (config) => {
   const token = getAuthToken()
-  if (token) config.headers.Authorization = `Bearer ${token}`
+  if (token) {
+    const header = await loadAuthHeader()
+    config.headers.set(header.name, header.scheme ? `${header.scheme} ${token}` : token)
+  }
   return config
 })
 
@@ -149,18 +176,21 @@ export async function listWorkers() {
   return data
 }
 
+// Route params reach the API path, so encode them (#317 QA).
+const enc = (id: string | number) => encodeURIComponent(String(id))
+
 // ---- Task detail drawer (frontend/src/api.js, useTaskDetail.js, App.vue) ----
 
 export type AnyRecord = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export async function getTask(id: string | number) {
-  const { data } = await http.get(`/api/tasks/${id}`)
+  const { data } = await http.get(`/api/tasks/${enc(id)}`)
   return data
 }
 
 export async function getCheckpoint(id: string | number) {
   try {
-    const { data } = await http.get(`/api/tasks/${id}/checkpoint`)
+    const { data } = await http.get(`/api/tasks/${enc(id)}/checkpoint`)
     return data
   } catch (err) {
     if ((err as AnyRecord)?.response?.status === 404) return null
@@ -169,39 +199,39 @@ export async function getCheckpoint(id: string | number) {
 }
 
 export async function getReplication(id: string | number) {
-  const { data } = await http.get(`/api/tasks/${id}/replication`)
+  const { data } = await http.get(`/api/tasks/${enc(id)}/replication`)
   return data
 }
 
 export async function getTaskLease(id: string | number) {
-  const { data } = await http.get(`/api/tasks/${id}/lease`)
+  const { data } = await http.get(`/api/tasks/${enc(id)}/lease`)
   return data
 }
 
 export async function listTaskRuns(id: string | number, limit = 10) {
-  const { data } = await http.get(`/api/tasks/${id}/runs`, { params: { limit } })
+  const { data } = await http.get(`/api/tasks/${enc(id)}/runs`, { params: { limit } })
   return data
 }
 
 export async function listEvents(id: string | number, limit = 120) {
-  const { data } = await http.get(`/api/tasks/${id}/events`, { params: { limit } })
+  const { data } = await http.get(`/api/tasks/${enc(id)}/events`, { params: { limit } })
   return data
 }
 
 export async function listFiles(id: string | number, limit = 80) {
-  const { data } = await http.get(`/api/tasks/${id}/files`, { params: { limit } })
+  const { data } = await http.get(`/api/tasks/${enc(id)}/files`, { params: { limit } })
   return data
 }
 
 // Without a limit replay lists every file a restore needs (#305).
 export async function listReplay(id: string | number, limit?: number) {
   const params = limit ? { limit } : {}
-  const { data } = await http.get(`/api/tasks/${id}/replay`, { params })
+  const { data } = await http.get(`/api/tasks/${enc(id)}/replay`, { params })
   return data
 }
 
 export async function getRecoveryWindow(id: string | number) {
-  const { data } = await http.get(`/api/tasks/${id}/window`)
+  const { data } = await http.get(`/api/tasks/${enc(id)}/window`)
   return data
 }
 
@@ -222,7 +252,7 @@ export async function listPITRReplay(id: string | number, w: PitrWindow) {
   if (start) params.start_datetime = start
   const executed = String(w.executed || '').trim()
   if (executed) params.start_gtid_set = executed
-  const { data } = await http.get(`/api/tasks/${id}/replay`, { params })
+  const { data } = await http.get(`/api/tasks/${enc(id)}/replay`, { params })
   return data
 }
 
@@ -251,19 +281,19 @@ export async function downloadReplayArchive(id: string | number, w?: PitrWindow)
 }
 
 export async function startTask(id: string | number) {
-  await http.post(`/api/tasks/${id}/start`)
+  await http.post(`/api/tasks/${enc(id)}/start`)
 }
 
 export async function stopTask(id: string | number) {
-  await http.post(`/api/tasks/${id}/stop`)
+  await http.post(`/api/tasks/${enc(id)}/stop`)
 }
 
 export async function deleteTask(id: string | number) {
-  await http.delete(`/api/tasks/${id}`)
+  await http.delete(`/api/tasks/${enc(id)}`)
 }
 
 export async function retryUpload(id: string | number, limit = 100) {
-  const { data } = await http.post(`/api/tasks/${id}/files/retry-upload`, null, {
+  const { data } = await http.post(`/api/tasks/${enc(id)}/files/retry-upload`, null, {
     params: { limit },
   })
   return data
