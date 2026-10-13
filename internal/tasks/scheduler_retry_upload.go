@@ -77,10 +77,13 @@ func (s *Scheduler) RunBackgroundUploadRetry(ctx context.Context, interval time.
 
 // retryKnownFailedUploads runs one background pass over the tasks loaded in this process.
 func (s *Scheduler) retryKnownFailedUploads() {
+	s.noteRetryPass()
 	if err := s.syncTasksFromStore(); err != nil {
 		log.Printf("background upload retry sync tasks: %v", err)
+		s.Report(Finding{Kind: FindingRetryLoopFailed, Subject: "sync", Severity: FindingCritical, Detail: "background upload retry pass skipped: task list read failed: " + err.Error()})
 		return
 	}
+	s.Resolve(ClusterFindingTask, FindingRetryLoopFailed, "sync")
 	s.mu.Lock()
 	fileStore := s.fileStore
 	ids := make([]string, 0, len(s.tasks))
@@ -94,8 +97,12 @@ func (s *Scheduler) retryKnownFailedUploads() {
 		cancel()
 		if err != nil {
 			log.Printf("background upload retry count failures: %v", err)
-		} else if total == 0 {
-			return
+			s.Report(Finding{Kind: FindingRetryLoopFailed, Subject: "count", Severity: FindingWarning, Detail: "background upload retry could not count failed uploads; scanning every task: " + err.Error()})
+		} else {
+			s.Resolve(ClusterFindingTask, FindingRetryLoopFailed, "count")
+			if total == 0 {
+				return
+			}
 		}
 	}
 	sort.Strings(ids)
@@ -215,6 +222,7 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 			updated, err = ApplySealedUpload(uploadCtx, uploader, fileStore, file)
 		}
 		cancelUpload()
+		NoteUploadOutcome(s.Report, s.Resolve, updated, err)
 		if err != nil || updated.UploadState != "UPLOADED" {
 			stats.Failed++
 			continue
@@ -241,7 +249,10 @@ func (s *Scheduler) listRetryUploadCandidates(taskID string, limit int, fileStor
 // noteRetryUploadFailure records a row the retry cannot use (S8). When even
 // that record fails, the finding is the only trace.
 func (s *Scheduler) noteRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) {
-	_ = s.markRetryUploadFailure(fileStore, file, reason)
+	err := s.markRetryUploadFailure(fileStore, file, reason)
+	failed := file
+	failed.UploadState = "UPLOAD_FAILED"
+	NoteUploadOutcome(s.Report, s.Resolve, failed, err)
 }
 
 func (s *Scheduler) markRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) error {

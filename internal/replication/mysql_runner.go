@@ -402,7 +402,9 @@ func WithUploader(uploader tasks.FileUploader, prefix string) RunnerOption {
 			r.objectOpener = opener
 		}
 		r.sealedHandler = func(ctx context.Context, file tasks.BinlogFile) error {
-			_, err := tasks.ApplySealedUpload(ctx, uploader, r.fileMetaStore, file)
+			updated, err := tasks.ApplySealedUpload(ctx, uploader, r.fileMetaStore, file)
+			report, resolve := r.findingSink()
+			tasks.NoteUploadOutcome(report, resolve, updated, err)
 			return err
 		}
 	}
@@ -2255,7 +2257,14 @@ func (r *MySQLRunner) retentionObjects(ctx context.Context, task tasks.Task, sou
 		return catalog.DeleteBinlogFile(ctx, task.ID, row.FileName, row.Epoch)
 	}
 	objects.note = func(row tasks.BinlogFile) error {
-		return r.fileMetaStore.UpsertBinlogFile(ctx, row)
+		err := r.fileMetaStore.UpsertBinlogFile(ctx, row)
+		if err != nil {
+			r.report(tasks.Finding{TaskID: task.ID, Kind: tasks.FindingRetentionRecordFailed, Subject: row.FileName, Severity: tasks.FindingWarning,
+				Detail: "retention could not record " + strings.TrimSpace(row.UploadState) + " on the catalog row; the file stays on disk but the upload retry will not re-check it: " + err.Error()})
+		} else {
+			r.resolve(task.ID, tasks.FindingRetentionRecordFailed, row.FileName)
+		}
+		return err
 	}
 	return objects, nil
 }
@@ -2637,13 +2646,17 @@ func (r *MySQLRunner) announceRetentionRemoved(ctx context.Context, taskID, name
 	if !ok {
 		return
 	}
-	_ = writer.AppendEvent(ctx, tasks.TaskEvent{
+	if err := writer.AppendEvent(ctx, tasks.TaskEvent{
 		TaskID:  taskID,
 		Type:    retentionRemoved,
 		Message: name + " removed by local retention",
 		Detail:  uploadState,
 		Time:    time.Now(),
-	})
+	}); err != nil {
+		// S6: the deletion has no audit row; the recoverable window got shorter with no event.
+		r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingRetentionRecordFailed, Subject: name, Severity: tasks.FindingWarning,
+			Detail: "local retention removed this file but the RETENTION_REMOVED event was not written: " + err.Error()})
+	}
 }
 
 func (r *MySQLRunner) announceRetentionSkip(ctx context.Context, taskID, name, uploadState string) {
