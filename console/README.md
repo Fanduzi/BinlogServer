@@ -33,8 +33,8 @@ Rules for every migration PR:
 | View | Status |
 | --- | --- |
 | Shell, settings (token + language) | migrated |
-| Tasks, Alerts | migrated (detail drawer pending) |
-| Task detail drawer | pending |
+| Tasks, Alerts | migrated |
+| Task detail drawer (`#/tasks/:id`, `#/alerts/:id`) | migrated (edit/adopt buttons wait for the form PR) |
 | Create, edit, adopt, batch create | pending |
 | Overview, Sources, Workers | pending |
 | Cutover (embed in `internal/ui/static`) | pending |

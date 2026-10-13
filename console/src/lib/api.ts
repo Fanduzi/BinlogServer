@@ -148,3 +148,123 @@ export async function listWorkers() {
   const { data } = await http.get('/api/workers')
   return data
 }
+
+// ---- Task detail drawer (frontend/src/api.js, useTaskDetail.js, App.vue) ----
+
+export type AnyRecord = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+
+export async function getTask(id: string | number) {
+  const { data } = await http.get(`/api/tasks/${id}`)
+  return data
+}
+
+export async function getCheckpoint(id: string | number) {
+  try {
+    const { data } = await http.get(`/api/tasks/${id}/checkpoint`)
+    return data
+  } catch (err) {
+    if ((err as AnyRecord)?.response?.status === 404) return null
+    throw err
+  }
+}
+
+export async function getReplication(id: string | number) {
+  const { data } = await http.get(`/api/tasks/${id}/replication`)
+  return data
+}
+
+export async function getTaskLease(id: string | number) {
+  const { data } = await http.get(`/api/tasks/${id}/lease`)
+  return data
+}
+
+export async function listTaskRuns(id: string | number, limit = 10) {
+  const { data } = await http.get(`/api/tasks/${id}/runs`, { params: { limit } })
+  return data
+}
+
+export async function listEvents(id: string | number, limit = 120) {
+  const { data } = await http.get(`/api/tasks/${id}/events`, { params: { limit } })
+  return data
+}
+
+export async function listFiles(id: string | number, limit = 80) {
+  const { data } = await http.get(`/api/tasks/${id}/files`, { params: { limit } })
+  return data
+}
+
+// Without a limit replay lists every file a restore needs (#305).
+export async function listReplay(id: string | number, limit?: number) {
+  const params = limit ? { limit } : {}
+  const { data } = await http.get(`/api/tasks/${id}/replay`, { params })
+  return data
+}
+
+export async function getRecoveryWindow(id: string | number) {
+  const { data } = await http.get(`/api/tasks/${id}/window`)
+  return data
+}
+
+export interface PitrWindow {
+  stop?: string
+  start?: string
+  gtid?: string
+  executed?: string
+}
+
+export async function listPITRReplay(id: string | number, w: PitrWindow) {
+  const params: Record<string, string> = {}
+  const stop = String(w.stop || '').trim()
+  const gtid = String(w.gtid || '').trim()
+  if (stop) params.stop_datetime = stop
+  if (gtid) params.stop_gtid = gtid
+  const start = String(w.start || '').trim()
+  if (start) params.start_datetime = start
+  const executed = String(w.executed || '').trim()
+  if (executed) params.start_gtid_set = executed
+  const { data } = await http.get(`/api/tasks/${id}/replay`, { params })
+  return data
+}
+
+export async function downloadTaskFile(id: string | number, name: string): Promise<Blob> {
+  const path = `/api/tasks/${encodeURIComponent(String(id))}/files/${encodeURIComponent(name)}`
+  const { data } = await http.get(path, { responseType: 'blob' })
+  return data
+}
+
+// No limit: the archive holds every replay file (#305).
+export async function downloadReplayArchive(id: string | number, w?: PitrWindow): Promise<Blob> {
+  const path = `/api/tasks/${encodeURIComponent(String(id))}/replay/archive`
+  const params: Record<string, string> = {}
+  const stop = String(w?.stop || '').trim()
+  const gtid = String(w?.gtid || '').trim()
+  const executed = String(w?.executed || '').trim()
+  if (stop || gtid || executed) {
+    if (stop) params.stop_datetime = stop
+    if (gtid) params.stop_gtid = gtid
+    if (executed) params.start_gtid_set = executed
+    const start = String(w?.start || '').trim()
+    if (start) params.start_datetime = start
+  }
+  const { data } = await http.get(path, { params, responseType: 'blob' })
+  return data
+}
+
+export async function startTask(id: string | number) {
+  await http.post(`/api/tasks/${id}/start`)
+}
+
+export async function stopTask(id: string | number) {
+  await http.post(`/api/tasks/${id}/stop`)
+}
+
+export async function deleteTask(id: string | number) {
+  await http.delete(`/api/tasks/${id}`)
+}
+
+export async function retryUpload(id: string | number, limit = 100) {
+  const { data } = await http.post(`/api/tasks/${id}/files/retry-upload`, null, {
+    params: { limit },
+  })
+  return data
+}

@@ -15,6 +15,8 @@ import { Route as OverviewRouteImport } from './routes/overview'
 import { Route as SourcesRouteImport } from './routes/sources'
 import { Route as TasksRouteImport } from './routes/tasks'
 import { Route as WorkersRouteImport } from './routes/workers'
+import { Route as AlertsTaskIdRouteImport } from './routes/alerts.$taskId'
+import { Route as TasksTaskIdRouteImport } from './routes/tasks.$taskId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -46,37 +48,69 @@ const WorkersRoute = WorkersRouteImport.update({
   path: '/workers',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AlertsTaskIdRoute = AlertsTaskIdRouteImport.update({
+  id: '/$taskId',
+  path: '/$taskId',
+  getParentRoute: () => AlertsRoute,
+} as any)
+const TasksTaskIdRoute = TasksTaskIdRouteImport.update({
+  id: '/$taskId',
+  path: '/$taskId',
+  getParentRoute: () => TasksRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/alerts': typeof AlertsRoute
+  '/alerts': typeof AlertsRouteWithChildren
   '/overview': typeof OverviewRoute
   '/sources': typeof SourcesRoute
-  '/tasks': typeof TasksRoute
+  '/tasks': typeof TasksRouteWithChildren
   '/workers': typeof WorkersRoute
+  '/alerts/$taskId': typeof AlertsTaskIdRoute
+  '/tasks/$taskId': typeof TasksTaskIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/alerts': typeof AlertsRoute
+  '/alerts': typeof AlertsRouteWithChildren
   '/overview': typeof OverviewRoute
   '/sources': typeof SourcesRoute
-  '/tasks': typeof TasksRoute
+  '/tasks': typeof TasksRouteWithChildren
   '/workers': typeof WorkersRoute
+  '/alerts/$taskId': typeof AlertsTaskIdRoute
+  '/tasks/$taskId': typeof TasksTaskIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/alerts': typeof AlertsRoute
+  '/alerts': typeof AlertsRouteWithChildren
   '/overview': typeof OverviewRoute
   '/sources': typeof SourcesRoute
-  '/tasks': typeof TasksRoute
+  '/tasks': typeof TasksRouteWithChildren
   '/workers': typeof WorkersRoute
+  '/alerts/$taskId': typeof AlertsTaskIdRoute
+  '/tasks/$taskId': typeof TasksTaskIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/alerts' | '/overview' | '/sources' | '/tasks' | '/workers'
+  fullPaths:
+    | '/'
+    | '/alerts'
+    | '/overview'
+    | '/sources'
+    | '/tasks'
+    | '/workers'
+    | '/alerts/$taskId'
+    | '/tasks/$taskId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/alerts' | '/overview' | '/sources' | '/tasks' | '/workers'
+  to:
+    | '/'
+    | '/alerts'
+    | '/overview'
+    | '/sources'
+    | '/tasks'
+    | '/workers'
+    | '/alerts/$taskId'
+    | '/tasks/$taskId'
   id:
     | '__root__'
     | '/'
@@ -85,14 +119,16 @@ export interface FileRouteTypes {
     | '/sources'
     | '/tasks'
     | '/workers'
+    | '/alerts/$taskId'
+    | '/tasks/$taskId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AlertsRoute: typeof AlertsRoute
+  AlertsRoute: typeof AlertsRouteWithChildren
   OverviewRoute: typeof OverviewRoute
   SourcesRoute: typeof SourcesRoute
-  TasksRoute: typeof TasksRoute
+  TasksRoute: typeof TasksRouteWithChildren
   WorkersRoute: typeof WorkersRoute
 }
 
@@ -140,15 +176,50 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkersRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/alerts/$taskId': {
+      id: '/alerts/$taskId'
+      path: '/$taskId'
+      fullPath: '/alerts/$taskId'
+      preLoaderRoute: typeof AlertsTaskIdRouteImport
+      parentRoute: typeof AlertsRoute
+    }
+    '/tasks/$taskId': {
+      id: '/tasks/$taskId'
+      path: '/$taskId'
+      fullPath: '/tasks/$taskId'
+      preLoaderRoute: typeof TasksTaskIdRouteImport
+      parentRoute: typeof TasksRoute
+    }
   }
 }
 
+interface AlertsRouteChildren {
+  AlertsTaskIdRoute: typeof AlertsTaskIdRoute
+}
+
+const AlertsRouteChildren: AlertsRouteChildren = {
+  AlertsTaskIdRoute: AlertsTaskIdRoute,
+}
+
+const AlertsRouteWithChildren =
+  AlertsRoute._addFileChildren(AlertsRouteChildren)
+
+interface TasksRouteChildren {
+  TasksTaskIdRoute: typeof TasksTaskIdRoute
+}
+
+const TasksRouteChildren: TasksRouteChildren = {
+  TasksTaskIdRoute: TasksTaskIdRoute,
+}
+
+const TasksRouteWithChildren = TasksRoute._addFileChildren(TasksRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AlertsRoute: AlertsRoute,
+  AlertsRoute: AlertsRouteWithChildren,
   OverviewRoute: OverviewRoute,
   SourcesRoute: SourcesRoute,
-  TasksRoute: TasksRoute,
+  TasksRoute: TasksRouteWithChildren,
   WorkersRoute: WorkersRoute,
 }
 export const routeTree = rootRouteImport

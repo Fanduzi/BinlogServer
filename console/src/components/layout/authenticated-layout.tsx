@@ -32,9 +32,9 @@ export function AuthenticatedLayout() {
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset>
+      <SidebarInset className='min-w-0'>
         <Header onSettings={() => setSettingsOpen(true)} />
-        <main className='flex flex-1 flex-col gap-4 p-4'>
+        <main className='flex min-w-0 flex-1 flex-col gap-4 p-4'>
           {authMessage && (
             <div
               role='alert'
