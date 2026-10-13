@@ -181,7 +181,7 @@ func (s *Scheduler) selectExecutedGTID(taskID, executedRaw, stopGTIDRaw string, 
 		name := segmentInventoryBasename(file)
 		seg := executedFile{file: file}
 		if name != "" {
-			body, _, openErr := s.OpenTaskSegment(taskID, name)
+			_, body, _, openErr := s.openSelectedSegment(taskID, files, file)
 			if openErr != nil {
 				return nil, Task{}, "", "", 0, false, nil, openErr
 			}

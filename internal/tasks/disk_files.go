@@ -1,11 +1,13 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out
+// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out; a listing that re-reads the directory until segments stop being renamed or removed under it (#322)
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,55 +24,145 @@ import (
 // Results follow WindowBinlogFilesForReplay: an earlier source, then index
 // order inside that source. The same index lists the sealed name first, then
 // open epochs ascending. limit keeps the tail of that order.
+//
+// A RUNNING task seals its open segment by renaming name.open.eN to the
+// sealed name, and retention removes old sealed names. Reading every segment
+// takes a while on a long chain, so the directory is read again afterwards:
+// names that are gone are dropped, names that appeared (the sealed name of a
+// renamed open segment, the next open segment) are read, and this repeats
+// until two reads agree (#322). A name that vanished between ReadDir and
+// stat is left for the next read instead of failing the listing, and the
+// listing never keeps the open name without the sealed name it became.
 func listTaskBinlogFilesOnDisk(dataDir, taskID string, limit int) ([]BinlogFile, error) {
 	dir, ok := taskBinlogDir(dataDir, taskID)
 	if !ok {
 		return []BinlogFile{}, nil
 	}
+	names, err := readSegmentNames(dir)
+	if err != nil {
+		return nil, err
+	}
+	items := make(map[string]BinlogFile, len(names))
+	for attempt := 0; ; attempt++ {
+		if hook := diskListAfterReadDir; hook != nil {
+			hook(dir)
+		}
+		vanished := false
+		for _, name := range names {
+			if _, done := items[name]; done {
+				continue
+			}
+			item, ok, err := readSegmentEntry(dir, taskID, name)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				vanished = true
+				continue
+			}
+			items[name] = item
+		}
+		again, err := readSegmentNames(dir)
+		if err != nil {
+			return nil, err
+		}
+		present := make(map[string]struct{}, len(again))
+		for _, name := range again {
+			present[name] = struct{}{}
+		}
+		for name := range items {
+			if _, ok := present[name]; !ok {
+				delete(items, name)
+			}
+		}
+		stable := !vanished && len(items) == len(again)
+		if stable {
+			break
+		}
+		if attempt+1 >= diskListAttempts {
+			return nil, fmt.Errorf("%w in %s", errSegmentVanished, dir)
+		}
+		names = again
+	}
+	files := make([]BinlogFile, 0, len(items))
+	for _, item := range items {
+		files = append(files, item)
+	}
+	return WindowBinlogFilesForReplay(files, limit), nil
+}
+
+// diskListAttempts bounds how often one listing reads the directory again
+// because segments were renamed or removed under it. Each round only reads
+// the names that changed, so it is short; the bound only matters when
+// rotations never pause.
+const diskListAttempts = 50
+
+// errSegmentVanished means the directory kept changing for diskListAttempts
+// rounds.
+var errSegmentVanished = errors.New("segments kept changing while listing")
+
+// diskListAfterReadDir runs after each directory read, before the segments
+// are read. Tests set it to rename a segment at that point; it is nil otherwise.
+var diskListAfterReadDir func(dir string)
+
+// readSegmentNames is the segment basenames in dir. A missing dir is empty.
+func readSegmentNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []BinlogFile{}, nil
+			return nil, nil
 		}
 		return nil, err
 	}
-
-	files := make([]BinlogFile, 0)
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		source, _, epoch, state, ok := classifyBinlogSegment(name)
-		if !ok {
-			continue
+		if _, _, _, _, ok := classifyBinlogSegment(entry.Name()); ok {
+			names = append(names, entry.Name())
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil, err
-		}
-		item := BinlogFile{
-			TaskID:      taskID,
-			FileName:    source,
-			FilePath:    filepath.Join(dir, name),
-			State:       state,
-			SizeBytes:   info.Size(),
-			UploadState: "LOCAL_ONLY",
-			CreatedAt:   info.ModTime().UTC(),
-		}
-		if epoch >= 0 {
-			item.Epoch = epoch
-		}
-		if state == "SEALED" {
-			item.SealedAt = item.CreatedAt
-		}
-		if start, end, ok := binlog.SegmentPositions(item.FilePath); ok {
-			item.StartPos = FilePos(start)
-			item.EndPos = FilePos(end)
-		}
-		files = append(files, item)
 	}
-	return WindowBinlogFilesForReplay(files, limit), nil
+	return names, nil
+}
+
+// readSegmentEntry stats and reads one segment. ok is false when the name is
+// gone (renamed by a seal or removed by retention).
+func readSegmentEntry(dir, taskID, name string) (BinlogFile, bool, error) {
+	source, _, epoch, state, _ := classifyBinlogSegment(name)
+	full := filepath.Join(dir, name)
+	info, err := os.Lstat(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return BinlogFile{}, false, nil
+		}
+		return BinlogFile{}, false, err
+	}
+	if info.IsDir() {
+		return BinlogFile{}, false, nil
+	}
+	item := BinlogFile{
+		TaskID:      taskID,
+		FileName:    source,
+		FilePath:    full,
+		State:       state,
+		SizeBytes:   info.Size(),
+		UploadState: "LOCAL_ONLY",
+		CreatedAt:   info.ModTime().UTC(),
+	}
+	if epoch >= 0 {
+		item.Epoch = epoch
+	}
+	if state == "SEALED" {
+		item.SealedAt = item.CreatedAt
+	}
+	if start, end, ok := binlog.SegmentPositions(full); ok {
+		item.StartPos = FilePos(start)
+		item.EndPos = FilePos(end)
+	} else if _, err := os.Lstat(full); os.IsNotExist(err) {
+		return BinlogFile{}, false, nil
+	}
+	return item, true, nil
 }
 
 // WindowBinlogFilesForReplay orders one source by index, and puts an earlier

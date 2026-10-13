@@ -161,11 +161,10 @@ func (s *Scheduler) selectPITRFiles(taskID string, start *time.Time, stop time.T
 	chosen, _ := s.SelectReplayFilesFor(task, files)
 	spans := make([]EventSpan, len(chosen))
 	for i, file := range chosen {
-		name := segmentInventoryBasename(file)
-		if name == "" {
+		if segmentInventoryBasename(file) == "" {
 			continue
 		}
-		body, _, err := s.OpenTaskSegment(taskID, name)
+		_, body, _, err := s.openSelectedSegment(taskID, files, file)
 		if err != nil {
 			return nil, Task{}, err
 		}

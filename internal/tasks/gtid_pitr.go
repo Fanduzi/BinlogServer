@@ -151,11 +151,10 @@ func (s *Scheduler) selectGTIDFiles(taskID, raw string, start *time.Time) ([]Bin
 	var stopPos uint64
 	var hitWhen time.Time
 	for i, file := range chosen {
-		name := segmentInventoryBasename(file)
-		if name == "" {
+		if segmentInventoryBasename(file) == "" {
 			continue
 		}
-		body, _, err := s.OpenTaskSegment(taskID, name)
+		_, body, _, err := s.openSelectedSegment(taskID, files, file)
 		if err != nil {
 			return nil, 0, Task{}, err
 		}
