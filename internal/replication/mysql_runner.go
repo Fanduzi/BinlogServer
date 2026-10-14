@@ -952,6 +952,7 @@ func (r *MySQLRunner) sealLocalFile(
 		CreatedAt: createdAt,
 		SealedAt:  sealedAt,
 	}
+	meta = withSealFacts(meta)
 	if r.sealedHandler == nil {
 		meta.UploadState = "LOCAL_ONLY"
 		if r.fileMetaStore != nil {
@@ -1216,6 +1217,7 @@ func (r *MySQLRunner) enrollSealedUploads(ctx context.Context, task tasks.Task, 
 		if next.SealedAt.IsZero() {
 			next.SealedAt = time.Now()
 		}
+		next = withSealFacts(next)
 		if err := r.fileMetaStore.UpsertBinlogFile(ctx, next); err != nil {
 			err = tasks.NewMetadataStoreError("upsert binlog file", err)
 			return err
@@ -3094,4 +3096,21 @@ func sourceEventTime(event *replication.BinlogEvent) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(int64(event.Header.Timestamp), 0).UTC()
+}
+
+// withSealFacts adds the sealed file's event-time span and SHA-256 to row
+// (ADR 0009 P1-4). A file that cannot be read leaves them unknown; the seal
+// itself does not depend on them.
+func withSealFacts(row tasks.BinlogFile) tasks.BinlogFile {
+	facts, err := binlog.ReadSealFacts(row.FilePath)
+	if err != nil {
+		log.Printf("seal facts unavailable task=%s file=%s: %v", row.TaskID, row.FilePath, err)
+		return row
+	}
+	row.SHA256 = facts.SHA256
+	if facts.HasSpan {
+		first, last := facts.First, facts.Last
+		row.FirstEventAt, row.LastEventAt = &first, &last
+	}
+	return row
 }

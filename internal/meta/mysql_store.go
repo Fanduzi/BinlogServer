@@ -14,6 +14,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"binlog_server/internal/binlog"
@@ -482,6 +483,8 @@ type MySQLTaskStore struct {
 	schemaTimeout  time.Duration
 	sourceCrypto   *config.Decryptor
 	hasPendingDump bool
+	// sealFactsAbsent: binlog_files has no 000008 columns (schema 6 or 7).
+	sealFactsAbsent atomic.Bool
 }
 
 var _ tasks.TaskStore = (*MySQLTaskStore)(nil)
@@ -1400,7 +1403,7 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 		query = upsertBinlogFileUnknownEndSQL
 	}
 
-	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+	if err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
 		_, err := s.db.ExecContext(
 			ctx,
 			query,
@@ -1422,7 +1425,10 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 			meta.Checksum,
 		)
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error { return s.writeSealFacts(ctx, meta) })
 }
 
 // DeleteBinlogFile removes one epoch's catalog row. Zero rows is success.

@@ -7,6 +7,10 @@ package meta
 
 import (
 	"context"
+	"errors"
+	"strings"
+
+	mysqlDriver "github.com/go-sql-driver/mysql"
 
 	"binlog_server/internal/tasks"
 )
@@ -17,5 +21,35 @@ WHERE task_id = ? AND source_file = ? AND epoch = ?;
 `
 
 func (s *MySQLTaskStore) writeSealFacts(ctx context.Context, f tasks.BinlogFile) error {
-	return nil
+	if state := strings.TrimSpace(f.State); state != "" && !strings.EqualFold(state, "SEALED") {
+		return nil
+	}
+	if f.FirstEventAt == nil && f.LastEventAt == nil && strings.TrimSpace(f.SHA256) == "" {
+		return nil
+	}
+	if s.sealFactsAbsent.Load() {
+		return nil
+	}
+	var first, last, sum any
+	if f.FirstEventAt != nil {
+		first = f.FirstEventAt.UTC()
+	}
+	if f.LastEventAt != nil {
+		last = f.LastEventAt.UTC()
+	}
+	if v := strings.TrimSpace(f.SHA256); v != "" {
+		sum = v
+	}
+	_, err := s.db.ExecContext(ctx, upsertSealFactsSQL, first, last, sum, f.TaskID, f.FileName, f.Epoch)
+	if isMySQLUnknownColumnError(err) {
+		// Schema 6 or 7: 000008 is optional. Stop asking until restart.
+		s.sealFactsAbsent.Store(true)
+		return nil
+	}
+	return err
+}
+
+func isMySQLUnknownColumnError(err error) bool {
+	var mysqlErr *mysqlDriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1054
 }

@@ -5,7 +5,13 @@
 // note: if this file changes, update this header and module README.md.
 package binlog
 
-import "time"
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"time"
+)
 
 // SealFacts is what a seal records about a sealed segment's bytes.
 type SealFacts struct {
@@ -19,5 +25,18 @@ type SealFacts struct {
 
 // ReadSealFacts reads path once.
 func ReadSealFacts(path string) (SealFacts, error) {
-	return SealFacts{}, nil
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return SealFacts{}, err
+	}
+	sum := sha256.Sum256(raw)
+	out := SealFacts{SHA256: hex.EncodeToString(sum[:])}
+	first, last, ok, err := EventTimeSpan(bytes.NewReader(raw))
+	if err != nil {
+		return SealFacts{}, err
+	}
+	if ok {
+		out.First, out.Last, out.HasSpan = first.UTC(), last.UTC(), true
+	}
+	return out, nil
 }
