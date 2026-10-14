@@ -1108,7 +1108,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
-		if IsTransientMetadataError(err) && !IsSourceUnreachable(err) && !isObjectPurgeFailed(err) {
+		if IsMetadataWriteBlocked(err) && !isObjectPurgeFailed(err) {
 			// Deliberate: a dump whose progress cannot be recorded stops and
 			// retries with backoff instead of writing binlog the metadata
 			// store does not know about. It is a CRITICAL finding, and the

@@ -29,6 +29,9 @@ type dumpConn struct {
 	sawEvent         bool
 	gtidFallbackUsed bool
 	reconnects       int
+	// stalled is set when the dump went silent past the read timeout; the
+	// run ends at once and the dead dump is not waited for.
+	stalled bool
 }
 
 // dumpStillOpen is the retryable error for a dump whose KILL is unconfirmed.
@@ -165,6 +168,13 @@ func (l *runLoop) readEvent() (*replication.BinlogEvent, error) {
 		event, err := l.r.nextEvent(l.ctx, l.dump.streamer, l.task.ID, l.task.Source, l.seg.name, l.seg.pos, &l.atTip)
 		if err != nil {
 			if l.ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+			// A stall ends the run: the scheduler leaves RUNNING, backs off
+			// and reconnects. Probing identity or reopening here would wait on
+			// the same silent path (#338 re-QA-2).
+			if errors.Is(err, errDumpStalled) {
+				l.dump.stalled = true
 				return nil, err
 			}
 			// 1236 from a server the VIP just moved to is not a purge of the

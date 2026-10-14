@@ -69,7 +69,7 @@ func (r *MySQLRunner) resolveRunStart(ctx context.Context, task tasks.Task) (*ru
 		var ok bool
 		stored, ok, err = r.checkpointStore.LoadCheckpoint(ctx, task.ID)
 		if err != nil {
-			return nil, err
+			return nil, tasks.NewMetadataStoreError("load checkpoint", err)
 		}
 		checkpointExists = ok
 	}

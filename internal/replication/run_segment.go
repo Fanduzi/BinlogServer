@@ -98,6 +98,7 @@ func (s *openSegment) appendAndPersist(raw []byte, next binlog.Checkpoint) error
 			CreatedAt:   s.createdAt,
 			UploadState: "LOCAL_ONLY",
 		}, s.carried)); err != nil {
+			err = tasks.NewMetadataStoreError("upsert binlog file", err)
 			return err
 		}
 	}
