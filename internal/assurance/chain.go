@@ -315,12 +315,14 @@ func (c *Chain) Check(now time.Time) []Violation {
 
 // sameBytesSpan reports that two sealed segments of one source file may
 // hold the same events: either is unreadable (nothing proves otherwise), or
-// their GTIDs intersect (MySQL), or their event position ranges overlap.
+// their GTIDs intersect (MySQL, both sides with GTIDs), or their event
+// position ranges overlap. A side with no GTIDs (junk, magic-only,
+// header-only, zeros) is judged by positions, never by an empty intersection.
 func (c *Chain) sameBytesSpan(a, b *Segment) bool {
 	if a.Contents == nil || b.Contents == nil {
 		return true
 	}
-	if c.mysql() && (!a.Contents.GTIDs.IsEmpty() || !b.Contents.GTIDs.IsEmpty()) {
+	if c.mysql() && !a.Contents.GTIDs.IsEmpty() && !b.Contents.GTIDs.IsEmpty() {
 		both := a.Contents.GTIDs.Minus(a.Contents.GTIDs.Minus(b.Contents.GTIDs))
 		return !both.IsEmpty()
 	}

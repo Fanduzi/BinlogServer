@@ -127,8 +127,9 @@ ADR 枚举之外新增三个子类，原因：`I2_SWITCH_UNRECORDED`（跨源身
 | 只在桶里的段 | 没有本地字节，`Contents` 为空：不做 I1、段内/相邻 I3、GTID 版 I4；I4 只能按名字判定（同一源序号的两个封存段一律视为重叠）；内部洞照常计算，但该段的 GTID 不算已存 | 阶段 2（用 000008 的 sha256/首尾时间，或按需读对象） |
 | 读不到的本地段 | 没有任何证据：`checkInteriorHole` 直接跳过，Health 不看它；`/window` 报 `segment is not readable` | 阶段 2（单独的 Kind，带读错误） |
 | 单源任务的 GTID 内部空洞 | 已存缺口告警只对换过服务器的任务生效（与 v0.5.64 相同），单源任务的空洞（例如源库 `gtid_next` 跳号 363-381）只出现在 `/window` 的缺口里，没有告警或 finding | 阶段 3（评估器把内部洞记成 finding），见 #352 |
+| 没有 GTID 的第二个封存副本 | MySQL 上只有两段都带 GTID 时才用 GTID 相交判 I4；任一段没有 GTID（垃圾字节、只有 magic、只有文件头、全零）时改比事件位点，读不出位点就按名字报 I4（#354 QA 第 2 轮的 P2 回归）。不判定这样的副本本身是否损坏，那是 I1 | — |
 
-同一源文件的多个 epoch 首尾相接（failback fixture 里 `mysql-bin.000003` 存 1156-1255、`.sealed.e1` 存 1256-1555、`.open.e1` 存 1556-1605）不是 I4。两段都可读时，只有 GTID 相交（MySQL）或事件位点区间重叠时才报 I4；有一段读不到时仍按名字报。`SelectReplayFiles` 有意丢弃的低 epoch `.open` 段，不算「不在顺序上」。
+同一源文件的多个 epoch 首尾相接（failback fixture 里 `mysql-bin.000003` 存 1156-1255、`.sealed.e1` 存 1256-1555、`.open.e1` 存 1556-1605）不是 I4。两段都可读时，只有 GTID 相交（MySQL，且两段都有 GTID）或事件位点区间重叠时才报 I4；有一段读不到时仍按名字报。`SelectReplayFiles` 有意丢弃的低 epoch `.open` 段，不算「不在顺序上」。
 
 调用方给出的顺序在阶段 1 被当作事实，但 `I2_ORDER_INVALID` 会自检两件事：本地账本里的每一段都在顺序上，同一前缀内序号不后退。
 
