@@ -69,6 +69,7 @@ const (
 	I1Regression       Kind = "I1_REGRESSION"
 	I2IndexGap         Kind = "I2_INDEX_GAP"
 	I2SwitchUnrecorded Kind = "I2_SWITCH_UNRECORDED"
+	I2OrderInvalid     Kind = "I2_ORDER_INVALID"
 	I3GTIDHole         Kind = "I3_GTID_HOLE"
 	I3StoredHole       Kind = "I3_STORED_HOLE"
 	I3LegacyFailback   Kind = "I3_LEGACY_FAILBACK"
