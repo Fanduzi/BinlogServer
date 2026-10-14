@@ -1,0 +1,2402 @@
+{
+  "failback": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback-damaged": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    }
+  },
+  "failback-damaged/objects": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    }
+  },
+  "failback-damaged/objects/start": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    }
+  },
+  "failback-damaged/start": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904. This is the re-dump damage that loses transactions. No segment before 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "Detail": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 has event end pos 126 behind earlier end pos 995904.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set 5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-404."
+    }
+  },
+  "failback-hole": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002"
+    }
+  },
+  "failback-hole/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002"
+    }
+  },
+  "failback-hole/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002"
+    }
+  },
+  "failback-hole/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002"
+    }
+  },
+  "failback-tail-partial": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback-tail-partial/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback-tail-partial/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback-tail-partial/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback/mariadb": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mariadb",
+      "client": "mariadb-binlog",
+      "client_hint": "mariadb-binlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mariadb-binlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mariadb",
+      "client": "mariadb-binlog",
+      "client_hint": "mariadb-binlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mariadb-binlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "failback/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000003.open.e1",
+        "$DATA/1/mysql-bin.000003.sealed.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+        "$DATA/1/mysql-bin.000002",
+        "$DATA/1/mysql-bin.000003"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003"
+    }
+  },
+  "live": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-damaged": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89."
+    }
+  },
+  "live-damaged-first": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5."
+    }
+  },
+  "live-damaged-first/objects": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5."
+    }
+  },
+  "live-damaged-first/objects/start": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9."
+    }
+  },
+  "live-damaged-first/start": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774. This is the re-dump damage that loses transactions. No segment before mysql-bin.000003 is left to restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000003",
+        "Detail": "Segment mysql-bin.000003 has event end pos 126 behind earlier end pos 16774.",
+        "Missing": "",
+        "Valid": null,
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-9."
+    }
+  },
+  "live-damaged/objects": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89."
+    }
+  },
+  "live-damaged/objects/start": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89."
+    }
+  },
+  "live-damaged/start": {
+    "health": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89"
+      }
+    },
+    "health_checkpoint": {
+      "kind": 1,
+      "problem": {
+        "Message": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764. This is the re-dump damage that loses transactions. The 2 segments before mysql-bin.000005 (mysql-bin.000003 to mysql-bin.000004) were written before the damage and still restore. Do not start this task again and do not restore the damaged segment or any later one; replay from this task stops before it. Create a new task from a GTID the source still has: start mode GTID with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89 continues right after those segments and fetches the missing transactions again. Do it before the source purges them. Leave these files for forensics.",
+        "Segment": "mysql-bin.000005",
+        "Detail": "Segment mysql-bin.000005 has event end pos 126 behind earlier end pos 15764.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004"
+        ],
+        "Restart": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89"
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004"
+      ],
+      "locations": [
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89."
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": "",
+      "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89."
+    }
+  },
+  "live-hole": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-hole/mariadb": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mariadb",
+      "client": "mariadb-binlog",
+      "client_hint": "mariadb-binlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mariadb-binlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mariadb",
+      "client": "mariadb-binlog",
+      "client_hint": "mariadb-binlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-hole/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-hole/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-hole/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-no-open": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-no-open/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-no-open/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-no-open/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-header": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-header/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-header/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-header/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-partial": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-partial/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-partial/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live-tail-partial/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live/mariadb": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mariadb",
+      "client": "mariadb-binlog",
+      "client_hint": "mariadb-binlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mariadb-binlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mariadb",
+      "client": "mariadb-binlog",
+      "client_hint": "mariadb-binlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live/objects": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live/objects/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  },
+  "live/start": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "health_checkpoint": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    },
+    "replay_mid": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [],
+      "command": ""
+    }
+  }
+}
