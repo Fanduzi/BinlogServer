@@ -6,6 +6,7 @@
 package tasks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -118,6 +119,46 @@ func IsTransientMetadataError(err error) bool {
 		strings.Contains(msg, "read only") ||
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "eof")
+}
+
+// ErrMetadataStore marks an error returned by the metadata store (checkpoint,
+// binlog catalog, task rows). It is attached at the store boundary with
+// NewMetadataStoreError, so classification never depends on error text from
+// the source connection, whose go-mysql errors also say "timeout" or "EOF".
+var ErrMetadataStore = errors.New("metadata store")
+
+// MetadataStoreError is an error from the metadata store for operation Op.
+type MetadataStoreError struct {
+	Op  string
+	Err error
+}
+
+func (e *MetadataStoreError) Error() string {
+	if e.Op == "" {
+		return e.Err.Error()
+	}
+	return e.Op + ": " + e.Err.Error()
+}
+
+func (e *MetadataStoreError) Unwrap() error { return e.Err }
+
+// Is makes errors.Is(err, ErrMetadataStore) true.
+func (e *MetadataStoreError) Is(target error) bool { return target == ErrMetadataStore }
+
+// NewMetadataStoreError tags err as coming from the metadata store. A
+// cancellation, a permanent error and an already tagged error pass through.
+func NewMetadataStoreError(op string, err error) error {
+	if err == nil || errors.Is(err, ErrMetadataStore) || IsPermanent(err) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &MetadataStoreError{Op: op, Err: err}
+}
+
+// IsMetadataWriteBlocked reports a transient failure that the metadata store
+// itself returned: only errors tagged at the store boundary qualify.
+func IsMetadataWriteBlocked(err error) bool {
+	return errors.Is(err, ErrMetadataStore) && IsTransientMetadataError(err) && !IsSourceUnreachable(err)
 }
 
 // isObjectPurgeFailed reports a retention delete the next file open retries.

@@ -31,7 +31,7 @@ func (r *metaBlockedRunner) RunWithNotify(ctx context.Context, _ Task, onReady f
 	call := r.calls
 	r.mu.Unlock()
 	if call == 1 {
-		return errors.New("save checkpoint: Error 1290 (HY000): The MySQL server is running with the --super-read-only option")
+		return NewMetadataStoreError("save checkpoint", errors.New("Error 1290 (HY000): The MySQL server is running with the --super-read-only option"))
 	}
 	onReady()
 	select {

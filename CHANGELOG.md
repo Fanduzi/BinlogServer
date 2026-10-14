@@ -14,6 +14,8 @@ Maintenance rules:
 
 ### Added
 
+- #338 复测 2 修复：半同步任务的事件经 SynchronousEventHandler 送达，现在同样重置静默计时，不再每约 50s 误判停滞重连；dump 静默达到读超时即出 DUMP_STALLED 并立即结束本次运行（SOURCE_UNREACHABLE，任务离开 RUNNING，退避后重连），不再在已失联的路径上探测身份、重开 dump 或等待 Close/KILL，旧连接 id 由下一次启动先 KILL；METADATA_WRITE_BLOCKED 只认在元数据存储边界打上 `tasks.ErrMetadataStore` 标记的错误，源端 timeout/EOF/bad connection 不再误报；残留 Binlog Dump 的 KILL 重试不再因任务有活跃运行而暂停。
+
 - 所有到源库的 SQL 连接（空闲位点探测 SHOW MASTER STATUS、server_uuid 探测、GTID 切换探测、KILL 残留 dump 线程）统一走 `connectSource`：拨号 5s、每次读/写 5s 超时；空闲探测不超过距读超时的剩余时间。源库被黑洞时，45s 左右出 DUMP_STALLED，约 50s 内重连，不再卡死 dump 循环。新增测试禁止绕过 `connectSource` 打开源库连接。
 
 - Finding sink (ADR 0009, phase 0, #326). A failure that used to end in a log line now also leaves a persisted finding, a `FINDING_REPORTED` task event, and a metric. New in this change: a task state transition the metadata store did not take (`TASK_PERSIST_FAILED`, CRITICAL; the row is written again every 5s until it lands, then the finding resolves), a task event the store did not take (`EVENT_PERSIST_FAILED`), a retry budget that could not be read back (`EVENT_READ_FAILED`), a pending Binlog Dump KILL marker that was not written (`DUMP_CLEANUP_PERSIST_FAILED`), and a `data_dir` that cannot be listed (`DISK_LIST_FAILED`). `GET /api/tasks/{id}/findings` (open first, `all=1` adds resolved) and `GET /api/findings` (open, all tasks; task_id `_cluster` for process-wide ones). Metrics: `binlog_server_finding_open{task_id,kind,severity}` (always at least one series), `binlog_server_findings_reported_total{kind}`, `binlog_server_finding_sink_errors_total`, `binlog_server_finding_sink_pending`, `binlog_server_finding_store_active`.

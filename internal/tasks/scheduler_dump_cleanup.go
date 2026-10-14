@@ -76,7 +76,8 @@ func (s *Scheduler) RunDumpCleanupRetry(ctx context.Context) {
 }
 
 // retryPendingDumpCleanups tries each leftover connection once, whatever the
-// task state is. A connection this process still has open is left alone.
+// task state is and whether or not a run is live. A held connection of a live
+// run in this process is left alone.
 // A held connection whose lease is still valid is the live dump. It returns
 // true when a KILL still could not reach the source.
 func (s *Scheduler) retryPendingDumpCleanups() bool {
@@ -100,7 +101,11 @@ func (s *Scheduler) retryPendingDumpCleanups() bool {
 			delete(s.pendingDumps, id)
 			continue
 		}
-		if done, ok := s.runs[id]; ok && !isClosed(done) {
+		// A live run does not pause the retry of a leftover connection:
+		// only a Held marker can be the run's own dump, and heldDumpAbandoned
+		// checks that below. Skipping on any live run left a leftover
+		// un-KILLed for minutes while the new run waited on the source.
+		if done, ok := s.runs[id]; ok && !isClosed(done) && marker.Held {
 			continue
 		}
 		batch = append(batch, pendingKill{id: id, marker: marker, task: task})
