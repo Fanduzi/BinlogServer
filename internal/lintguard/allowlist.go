@@ -40,6 +40,7 @@ var allowlist = map[string]Allowed{
 	"internal/tasks/scheduler_lifecycle.go:Scheduler.runTask:blank-call":                   {1, "convergeTask errors land on the task (state/last_error) and are retried by the lifecycle loop"},
 	"internal/tasks/scheduler_lifecycle.go:Scheduler.settleForeignStop:log-only":           {1, persistReported},
 	"internal/tasks/scheduler_task_ops.go:Scheduler.DeleteTask:log-only":                   {1, "follow-up: the task row is gone; an unreleased lease expires by TTL"},
+	"internal/tasks/scheduler_task_ops.go:Scheduler.ListTasks:log-only":                    {1, "listMemoryAndDiskTasks reports DISK_LIST_FAILED (S15) for every list path; ListTasks still returns the memory tasks"},
 	"internal/tasks/scheduler_task_ops.go:Scheduler.UpdateTask:blank-call":                 {1, "convergeTask errors land on the task (state/last_error) and are retried by the lifecycle loop"},
 	"internal/tasks/scheduler_transitions.go:logTransitionPersistError:log-only":           {1, persistReported},
 	"internal/tasks/segment_download.go:Scheduler.openLocalTaskSegment:blank-call":         {2, cleanupOnErrorPath + "; read-only file"},
