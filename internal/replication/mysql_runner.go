@@ -53,7 +53,9 @@ const (
 type MySQLRunner struct {
 	// stalled holds task IDs with an open DUMP_STALLED finding, so the event
 	// hot path resolves only after a stall.
-	stalled         sync.Map
+	stalled sync.Map
+	// clock is time.Now; tests step it.
+	clock           func() time.Time
 	dataDir         string
 	fetcher         sourceMetaFetcher
 	checkpointStore CheckpointStore
@@ -1219,6 +1221,13 @@ func waitDumpReconnect(ctx context.Context) error {
 // retransmission limit (Linux tcp_retries2, about 15 minutes by default).
 // This process cannot shorten that wait while the path stays blackholed.
 const dumpHeartbeatPeriod = 15 * time.Second
+
+// dumpCloseTimeout bounds syncer.Close and killConnectTimeout bounds our own
+// KILL connection; tests shorten them.
+var (
+	dumpCloseTimeout   = 5 * time.Second
+	killConnectTimeout = 5 * time.Second
+)
 
 // dumpReadTimeout bounds a dump read. Three missed heartbeats (ADR 0009:
 // 45s) mean the connection is dead, so the read fails and the dump reconnects.
