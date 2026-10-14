@@ -158,9 +158,9 @@ func TestCloseDumpIsBounded(t *testing.T) {
 
 // #338 QA P2: our own KILL of a leftover dump thread is bounded too.
 func TestKillDumpThreadIsBounded(t *testing.T) {
-	orig := killConnectTimeout
-	killConnectTimeout = 100 * time.Millisecond
-	defer func() { killConnectTimeout = orig }()
+	origC, origIO := sourceConnectTimeout, sourceIOTimeout
+	sourceConnectTimeout, sourceIOTimeout = 100*time.Millisecond, 100*time.Millisecond
+	defer func() { sourceConnectTimeout, sourceIOTimeout = origC, origIO }()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +177,9 @@ func TestKillDumpThreadIsBounded(t *testing.T) {
 	}()
 	port := ln.Addr().(*net.TCPAddr).Port
 	done := make(chan error, 1)
-	go func() { done <- killMySQLDumpThread(tasks.SourceConfig{Host: "127.0.0.1", Port: uint16(port), User: "u"}, 42) }()
+	go func() {
+		done <- killMySQLDumpThread(tasks.SourceConfig{Host: "127.0.0.1", Port: uint16(port), User: "u"}, 42)
+	}()
 	select {
 	case err := <-done:
 		if err == nil {

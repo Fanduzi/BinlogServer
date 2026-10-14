@@ -15,8 +15,6 @@ import (
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/tasks"
-
-	sqlclient "github.com/go-mysql-org/go-mysql/client"
 )
 
 const (
@@ -606,13 +604,12 @@ func (r *MySQLRunner) sealOpenSegmentFile(ctx context.Context, task tasks.Task, 
 
 // ProbeSwitchGTID reports whether ours is contained in @@gtid_executed and
 // whether every transaction the server has that ours does not is still in the binlogs.
-func (f *mysqlStatusFetcher) ProbeSwitchGTID(_ context.Context, source tasks.SourceConfig, ours string) (bool, string, bool, error) {
+func (f *mysqlStatusFetcher) ProbeSwitchGTID(ctx context.Context, source tasks.SourceConfig, ours string) (bool, string, bool, error) {
 	ours = strings.TrimSpace(ours)
 	if !safeGTIDText(ours) {
 		return false, "", false, fmt.Errorf("invalid gtid set")
 	}
-	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
+	conn, err := connectSource(ctx, source)
 	if err != nil {
 		return false, "", false, classifySourceError(err)
 	}
