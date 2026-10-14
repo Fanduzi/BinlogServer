@@ -1,11 +1,13 @@
 // Package assurance provides module-level functionality for assurance.
 // input: the live ledger fixture, with and without a regressed segment, and stub planner conclusions
-// output: assertions for Health priority (damage before planners, planners in their order, other kinds ignored), that Plan is not asked when damaged and is asked once, and for KeepBefore
+// output: assertions for Health priority (damage before planners, planners in their order, then a sealed source file held twice on the order, other kinds ignored), that Plan is not asked when damaged and is asked once, and for KeepBefore
 // pos: unit coverage for the storage verdict and replay cut (ADR 0009 phase 1, P1-3)
 // note: if this file changes, update this header and module README.md.
 package assurance
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -62,5 +64,42 @@ func TestKeepBefore(t *testing.T) {
 	}
 	if got := KeepBefore(chain, " "); len(got) != 0 || got == nil {
 		t.Fatalf("blank segment keeps %v", got)
+	}
+}
+
+// #370: a sealed source file held twice on the chain order is a verdict
+// after the planners, naming the later copy; an object-only copy is not.
+func TestHealthSealedTwice(t *testing.T) {
+	for _, tc := range []struct{ src, dup string }{
+		{"mysql-bin.000004", "mysql-bin.000004.sealed.e1"},
+		{"mysql-bin.000006", "mysql-bin.000006.sealed.e3"},
+	} {
+		f := live(t)
+		f.duplicate(t, tc.src, tc.dup)
+		f.in.Local = binlog.LedgerAt(f.dir)
+		v, ok := ChainOf(f.in).Health()
+		if !ok || v.Kind != I4Overlap || v.Problem == nil || v.Problem.Segment != tc.dup {
+			t.Fatalf("%s: %+v %v, want I4_OVERLAP at %s", tc.dup, v, ok, tc.dup)
+		}
+		for _, name := range v.Problem.Valid {
+			if name == tc.src || name == tc.dup {
+				t.Fatalf("%s: a copy is listed as valid: %v", tc.dup, v.Problem.Valid)
+			}
+		}
+
+		legacy := binlog.StorageProblem{Segment: "mysql-bin.000002"}
+		f.in.Plan = func() []Violation { return []Violation{{Kind: I3LegacyFailback, Problem: &legacy}} }
+		if v, _ := ChainOf(f.in).Health(); v.Kind != I3LegacyFailback {
+			t.Fatalf("%s: planner verdict did not win over the overlap: %+v", tc.dup, v)
+		}
+		f.in.Plan = nil
+
+		if err := os.Remove(filepath.Join(f.dir, tc.dup)); err != nil {
+			t.Fatal(err)
+		}
+		f.in.Local = binlog.LedgerAt(f.dir)
+		if v, found := ChainOf(f.in).Health(); found {
+			t.Fatalf("%s: object-only second copy became a verdict: %+v", tc.dup, v)
+		}
 	}
 }
