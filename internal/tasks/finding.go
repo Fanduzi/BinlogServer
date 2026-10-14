@@ -46,6 +46,8 @@ const (
 	FindingOpenTailCutFailed FindingKind = "OPEN_TAIL_CUT_FAILED"
 	// FindingMetricSourceFailed: a per-task metric could not be computed (S10/S11).
 	FindingMetricSourceFailed FindingKind = "METRIC_SOURCE_FAILED"
+	// FindingSegmentUnreadable: a sealed segment has a corrupt event size; /replay and /window stop before it (#358).
+	FindingSegmentUnreadable FindingKind = "SEGMENT_UNREADABLE"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.

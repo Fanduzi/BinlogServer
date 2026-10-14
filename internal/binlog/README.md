@@ -33,3 +33,4 @@
 
 - Go 文件的软件包注释采用 `Package [package name] ...` 形式。
 - `seal_facts.go`: `ReadSealFacts(path)` 流式读取封存分段一次（字节经 TeeReader 进 SHA-256，内存不随段大小增长），给出首尾事件头 UTC 时间（无定时事件时 `HasSpan=false`）和整文件 SHA-256，供封存写入目录行（ADR 0009 P1-4）。
+- #361：事件 size 按读取器的真实剩余长度校验（文件或内存读取器），不再按 -1 放行；`Ledger.Unreadable` / `SegmentUnreadable` 把封存段里 >1GiB 或超出文件末尾的 size 报为读不了（`Contents` 对超出末尾仍按撕裂尾处理）。

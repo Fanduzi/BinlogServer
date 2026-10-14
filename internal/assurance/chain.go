@@ -71,6 +71,7 @@ type Kind string
 
 const (
 	I1Regression       Kind = "I1_REGRESSION"
+	I1Unreadable       Kind = "I1_UNREADABLE"
 	I2IndexGap         Kind = "I2_INDEX_GAP"
 	I2SwitchUnrecorded Kind = "I2_SWITCH_UNRECORDED"
 	I2OrderInvalid     Kind = "I2_ORDER_INVALID"
@@ -90,7 +91,7 @@ const (
 
 // AllKinds lists every Kind.
 func AllKinds() []Kind {
-	return []Kind{I1Regression, I2IndexGap, I2SwitchUnrecorded, I2OrderInvalid, I3GTIDHole, I3StoredHole, I3LegacyFailback,
+	return []Kind{I1Regression, I1Unreadable, I2IndexGap, I2SwitchUnrecorded, I2OrderInvalid, I3GTIDHole, I3StoredHole, I3LegacyFailback,
 		I4Overlap, I5CheckpointAhead, I6MissingLocal, I6MissingObject, I6OrphanRow, I6MissingRow,
 		I6SizeMismatch, I7UploadLate, I7Unverified}
 }
@@ -218,6 +219,9 @@ func (c *Chain) Check(now time.Time) []Violation {
 		if seg.Local && c.in.Local != nil {
 			if detail, bad := c.in.Local.SegmentDamage(seg.Name); bad {
 				add(I1Regression, detail, detail, seg.Name)
+			} else if c.in.Local.SegmentUnreadable(seg.Name) {
+				detail := "segment " + seg.Name + " is not readable: " + binlog.ErrCorruptEventSize.Error()
+				add(I1Unreadable, detail, detail, seg.Name)
 			}
 		}
 		prefix, idOK := sourcePrefix(seg.Named.Source)
