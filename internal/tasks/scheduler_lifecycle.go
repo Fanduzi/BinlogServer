@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump., and a legacy failback directory repaired or refused (RepairLegacyFailback) before the runner starts
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump, then proves and renews its lease at that epoch before the dump opens (#346)., and a legacy failback directory repaired or refused (RepairLegacyFailback) before the runner starts
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -186,6 +186,8 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		s.mu.Unlock()
 		return nil
 	}
+	acquiredNow := false
+	killedLeftover := false
 	if s.leaseManager != nil && opts.acquireLease {
 		previousOwner := task.OwnerWorkerID
 		previousState := task.State
@@ -203,6 +205,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		task.OwnerWorkerID = s.clusterWorkerID
 		task.Epoch = epoch
 		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
+		acquiredNow = true
 		if previousState == StateRunning || previousState == StateLeaseDegraded {
 			s.appendEventLocked(id, "TASK_LEASE_TAKEOVER", "claimed expired lease", previousOwner)
 			log.Printf("claimed expired lease task=%s previous_owner=%s previous_state=%s epoch=%d", id, previousOwner, previousState, epoch)
@@ -239,6 +242,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	if pending.ConnectionID != 0 {
 		s.mu.Unlock()
 		killErr := s.killLeftover(task, pending, killer)
+		killedLeftover = true
 		s.mu.Lock()
 		if current, ok := s.tasks[id]; ok {
 			current.OwnerWorkerID = task.OwnerWorkerID
@@ -261,6 +265,31 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 			}
 			s.mu.Unlock()
 			return nil
+		}
+	}
+
+	// #346: prove an unexpired lease at this epoch after the leftover KILL and
+	// right before the dump opens, and renew it so KILL time counts against it.
+	if s.leaseManager != nil && task.Epoch > 0 && (killedLeftover || !acquiredNow) {
+		proved, err := s.proveLeaseBeforeDumpLocked(&task)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if !proved {
+			if current, ok := s.tasks[id]; ok && current.OwnerWorkerID == task.OwnerWorkerID && current.Epoch == task.Epoch {
+				current.OwnerWorkerID = ""
+				current.Epoch = 0
+				current.RunID = ""
+				s.tasks[id] = current
+			}
+			s.mu.Unlock()
+			log.Printf("dump not opened: lease not held task=%s owner=%s epoch=%d", id, task.OwnerWorkerID, task.Epoch)
+			return ErrLeaseNotAcquired
+		}
+		if done, open := s.runs[id]; open && !isClosed(done) {
+			s.mu.Unlock()
+			return errLocalRunOpen
 		}
 	}
 
@@ -1021,6 +1050,11 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 					s.keepOwnerForReopenLocked(id, task, newer)
 				}
 			}
+			if stop && mem.State != StateStopped && rowTakenOver(fresh, task.OwnerWorkerID, task.Epoch) {
+				// #346: the row has a new owner or epoch. Stop here in memory only.
+				s.yieldLostLeaseLocked(id, task.Epoch)
+				stop = false
+			}
 			if stop {
 				if mem.State != StateStopped {
 					logTransitionPersistError(id, StateStopped, s.markStoppedLocked(id))
@@ -1331,3 +1365,48 @@ func consecutiveUnreachableStreak(events []TaskEvent, newestFirst bool) int {
 }
 
 // Restore 从持久化层恢复任务到内存视图。
+
+// proveLeaseBeforeDumpLocked is the #346 gate. Caller holds s.mu; it is
+// released during lease calls and held again on return. It reports whether
+// this worker holds an unexpired lease at task.Epoch, renewed from now.
+// An expired lease nobody else took is reclaimed at the same epoch.
+func (s *Scheduler) proveLeaseBeforeDumpLocked(task *Task) (bool, error) {
+	owner, epoch, id := task.OwnerWorkerID, task.Epoch, task.ID
+	if owner == "" {
+		owner = s.clusterWorkerID
+	}
+	if owner != s.clusterWorkerID {
+		return false, nil
+	}
+	lease := s.leaseManager
+	s.mu.Unlock()
+	defer s.mu.Lock()
+	ctx, cancel := s.withLeaseTimeout(context.Background())
+	defer cancel()
+	held, err := lease.Verify(ctx, id, owner, epoch)
+	if err != nil {
+		return false, err
+	}
+	if !held {
+		got, acquired, err := lease.Acquire(ctx, id, owner, s.leaseTTL)
+		if err != nil {
+			return false, err
+		}
+		if !acquired {
+			return false, nil
+		}
+		if got != epoch {
+			// Someone held it in between. Give the new epoch back; the next
+			// pass starts over and re-checks the leftover dump.
+			if _, err := lease.Release(ctx, id, owner, got); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+	}
+	renewed, err := lease.Renew(ctx, id, owner, epoch, time.Time{}, s.leaseTTL) // zero: the lease store uses its own clock
+	if err != nil {
+		return false, err
+	}
+	return renewed, nil
+}
