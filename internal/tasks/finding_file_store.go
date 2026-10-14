@@ -160,3 +160,16 @@ func (s *Scheduler) LoadOpenFindings(ctx context.Context) error {
 	}
 	return nil
 }
+
+// CountOpenFindings counts open findings per task (FindingCounter).
+func (f *fileFindingStore) CountOpenFindings(context.Context) (map[string]int, error) {
+	open, err := f.list(Finding.Open, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int)
+	for _, it := range open {
+		out[it.TaskID]++
+	}
+	return out, nil
+}

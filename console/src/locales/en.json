@@ -129,6 +129,7 @@
     "ABNORMAL": "Abnormal",
     "IDLE": "Idle",
     "noProgress": "No replication events received",
+    "progressUnavailable": "Replication progress could not be read",
     "delayExceedsThreshold": "Delay exceeds threshold",
     "runnerError": "Replication error",
     "taskStateError": "Task state error",

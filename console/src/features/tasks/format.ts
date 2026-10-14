@@ -102,6 +102,7 @@ export function formatReplicationReason(t: TFunction, rep?: Replication) {
   if (!rep) return '--'
   const reasonMap: Record<string, string> = {
     NO_PROGRESS: t('replication.noProgress'),
+    PROGRESS_UNAVAILABLE: t('replication.progressUnavailable'),
     DELAY_EXCEEDS_THRESHOLD: t('replication.delayExceedsThreshold'),
     RUNNER_ERROR: t('replication.runnerError'),
     TASK_STATE_ERROR: t('replication.taskStateError'),

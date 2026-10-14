@@ -8,11 +8,14 @@ package api
 import (
 	"context"
 	"sort"
+	"time"
 
 	"binlog_server/internal/tasks"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+const findingScrapeReadTimeout = 2 * time.Second
 
 type findingMetricsSource interface {
 	FindingStats() tasks.FindingStats
@@ -69,7 +72,11 @@ func (c *findingCollector) Collect(ch chan<- prometheus.Metric) {
 	// Store rows (every process) merged with this process's unwritten ones.
 	// A store read error still exports this process's open findings, so the
 	// gauge never goes silent.
-	open, err := c.src.OpenFindings(c.ctx, 1000)
+	// Bounded: with the metadata store down the scrape must still answer
+	// within a Prometheus scrape timeout.
+	ctx, cancel := context.WithTimeout(c.ctx, findingScrapeReadTimeout)
+	open, err := c.src.OpenFindings(ctx, 1000)
+	cancel()
 	if err != nil {
 		open = stats.Open
 	}

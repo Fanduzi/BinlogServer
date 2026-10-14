@@ -28,7 +28,14 @@ export const PAGE_SIZES = [20, 50, 100]
 export function isAlertRow(row: DashboardRow) {
   const rep = row.replication?.status
   const state = row.task?.state
-  return rep === 'ABNORMAL' || rep === 'DELAYED' || state === 'FAILED' || state === 'RETRY_BACKOFF'
+  return (
+    rep === 'ABNORMAL' ||
+    rep === 'DELAYED' ||
+    state === 'FAILED' ||
+    state === 'RETRY_BACKOFF' ||
+    row.task?.storage_alert === true ||
+    (row.open_findings ?? 0) > 0
+  )
 }
 
 export function filterRows(
