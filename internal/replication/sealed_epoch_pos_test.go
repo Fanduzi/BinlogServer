@@ -42,6 +42,7 @@ func TestIssue189_LaterEpochSealedPositions(t *testing.T) {
 	}, next, []string{"INSERT INTO pitr VALUES ('EPOCH0')"}, 1_700_000_000, false)
 	assertSealedPositions(t, catalog, 0, issue189Source, 4, epoch0End)
 	epoch0 := sealedEpochRow(t, catalog, issue189Source, 0)
+	assertSealFacts(t, epoch0)
 
 	// The new lease's checkpoint is still on this source file, so the dump
 	// opens mysql-bin.000009.open.e1 beside the uploaded epoch 0 segment.
@@ -579,4 +580,21 @@ func containedEventSpan(path string) (start, end uint32, ok bool) {
 		}
 	}
 	return start, last.end, true
+}
+
+// assertSealFacts checks the ADR 0009 P1-4 seal facts on a sealed row: the
+// sealed file's event-time span and SHA-256.
+func assertSealFacts(t *testing.T, row tasks.BinlogFile) {
+	t.Helper()
+	want, err := binlog.ReadSealFacts(row.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want.SHA256 == "" || row.SHA256 != want.SHA256 {
+		t.Fatalf("sealed row sha256 %q, file %q", row.SHA256, want.SHA256)
+	}
+	if !want.HasSpan || row.FirstEventAt == nil || row.LastEventAt == nil ||
+		!row.FirstEventAt.Equal(want.First) || !row.LastEventAt.Equal(want.Last) {
+		t.Fatalf("sealed row span %v..%v, file %+v", row.FirstEventAt, row.LastEventAt, want)
+	}
 }

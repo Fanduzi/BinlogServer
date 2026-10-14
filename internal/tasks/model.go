@@ -361,6 +361,13 @@ type BinlogFile struct {
 	// Only match is stored on an UPLOADED row. A mismatch or an unfinished check is UPLOAD_FAILED.
 	Checksum   string    `json:"checksum,omitempty"`
 	UploadedAt time.Time `json:"uploaded_at"`
+	// FirstEventAt and LastEventAt are the sealed file's first and last
+	// event-header times, SHA256 its digest (migration 000008, written at
+	// seal). nil and "" are unknown: an older row, or a catalog without the
+	// columns.
+	FirstEventAt *time.Time `json:"first_event_at,omitempty"`
+	LastEventAt  *time.Time `json:"last_event_at,omitempty"`
+	SHA256       string     `json:"sha256,omitempty"`
 	// Location is local, bucket, or both. The files list fills it in.
 	// It is not stored. bucket means this sealed UPLOADED object is the only
 	// copy: file_path is the catalog path and is not on this process.
