@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.65] - 2026-10-14
+
+See [docs/releases/release-notes-v0.5.65.md](docs/releases/release-notes-v0.5.65.md). Highlights: ADR 0009 phase 0/1 findings and invariants, `DUMP_STALLED`, `METADATA_WRITE_BLOCKED`, `SEGMENT_UNREADABLE`, seal facts (000008), dump lease fence (#355), MariaDB 11.4+ row events (#362), persist-first transitions and `TASK_TRANSITION_STALLED` (#364).
+
 ### Added
 
 - #338 复测 2 修复：半同步任务的事件经 SynchronousEventHandler 送达，现在同样重置静默计时，不再每约 50s 误判停滞重连；dump 静默达到读超时即出 DUMP_STALLED 并立即结束本次运行（SOURCE_UNREACHABLE，任务离开 RUNNING，退避后重连），不再在已失联的路径上探测身份、重开 dump 或等待 Close/KILL，旧连接 id 由下一次启动先 KILL；METADATA_WRITE_BLOCKED 只认在元数据存储边界打上 `tasks.ErrMetadataStore` 标记的错误，源端 timeout/EOF/bad connection 不再误报；残留 Binlog Dump 的 KILL 重试不再因任务有活跃运行而暂停。
