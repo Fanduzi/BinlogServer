@@ -359,12 +359,22 @@ type Scheduler struct {
 	// eventLanes orders event-store writes per task. A slow insert on one
 	// task does not block another task's Stop, Start, or progress.
 	eventLanes map[string]*eventLane
+	// findings is the ADR 0009 sink. unpublished holds task ids whose last
+	// row write failed; the sink's retry tick writes the in-memory row again.
+	findings    *findingBook
+	unpublished map[string]struct{}
+	// refusedEvents are task events the event store refused, oldest first.
+	// The sink tick writes them again (replayRefusedEvents).
+	refusedMu     sync.Mutex
+	refusedEvents []TaskEvent
 }
 
 // NewScheduler 创建调度器并应用可选项。
 func NewScheduler(opts ...Option) *Scheduler {
 	s := &Scheduler{
-		tasks:   make(map[string]Task),
+		findings:    newFindingBook(),
+		unpublished: make(map[string]struct{}),
+		tasks:       make(map[string]Task),
 		events:  make(map[string][]TaskEvent),
 		replica: make(map[string]ReplicationProgress),
 		cancels: make(map[string]context.CancelFunc),
@@ -483,8 +493,10 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 		cancel()
 		s.mu.Lock()
 		if err != nil {
+			s.notePersistFailureLocked(task.ID, snapshot.State, err)
 			return err
 		}
+		s.notePersistedLocked(task.ID)
 		latest := s.persisted[task.ID]
 		if latest.gen == gen {
 			latest.published = gen
@@ -499,7 +511,14 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 
 // staleStoreReadLocked reports that a store snapshot was read across a publish.
 // seen is persisted[id].published sampled before the read. Caller holds s.mu.
+//
+// A task whose last write failed (s.unpublished) also counts as stale: the
+// memory row is newer than anything the store can return, and copying the
+// store row over it would undo the transition the retry is about to write.
 func (s *Scheduler) staleStoreReadLocked(id string, seen uint64) bool {
+	if _, pending := s.unpublished[id]; pending {
+		return true
+	}
 	return s.persisted[id].published != seen
 }
 
@@ -623,24 +642,33 @@ func (s *Scheduler) writeEventBatch(batch []queuedEvent) {
 		if item.lane == nil {
 			continue
 		}
-		item.lane.write(store, item.event, item.ticket, timeout)
+		if err := item.lane.write(store, item.event, item.ticket, timeout); err != nil {
+			// S1: kept for replay; the finding stays open until it lands.
+			s.keepRefusedEvent(item.event)
+			s.Report(Finding{TaskID: item.event.TaskID, Kind: FindingEventPersistFailed, Subject: item.event.Type, Severity: FindingWarning, Detail: err.Error()})
+		} else if store != nil {
+			s.Resolve(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
+		}
 	}
 }
 
-func (lane *eventLane) write(store EventStore, event TaskEvent, ticket uint64, timeout time.Duration) {
+// write stores one event in ticket order. A store error does not block
+// scheduling; it is returned so the caller reports it to the finding sink.
+func (lane *eventLane) write(store EventStore, event TaskEvent, ticket uint64, timeout time.Duration) error {
 	lane.mu.Lock()
 	defer lane.mu.Unlock()
 	for lane.next+1 != ticket {
 		lane.cond.Wait()
 	}
+	var err error
 	if store != nil {
-		// 事件落库失败不阻断主流程，保证调度与拉流优先可用。
 		ctx, cancel := withTimeout(context.Background(), timeout)
-		_ = store.AppendEvent(ctx, event)
+		err = store.AppendEvent(ctx, event)
 		cancel()
 	}
 	lane.next = ticket
 	lane.cond.Broadcast()
+	return err
 }
 
 // isClusterKeyUniqueLocked 校验 cluster_key 在任务集合中是否唯一。

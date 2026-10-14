@@ -129,6 +129,7 @@ func (s *Server) routes() {
 	apiGroup.GET("/sources/lookup", gin.WrapF(s.handleSourceLookup))
 	apiGroup.GET("/workers", gin.WrapF(s.handleWorkers))
 	apiGroup.GET("/cluster/overview", gin.WrapF(s.handleClusterOverview))
+	apiGroup.GET("/findings", gin.WrapF(s.handleOpenFindings))
 	apiGroup.POST("/tasks", gin.WrapF(s.handleTasks))
 	apiGroup.GET("/tasks", gin.WrapF(s.handleTasks))
 	apiGroup.Any("/tasks/*path", gin.WrapF(s.handleTaskAction))

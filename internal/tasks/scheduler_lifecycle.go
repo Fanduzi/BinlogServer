@@ -637,23 +637,44 @@ func (s *Scheduler) StopTask(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot stop from state %s", task.State)
 	}
+	prev := task
+	_, wasUnpublished := s.unpublished[id]
 	task.SpecRevision++
 	task.DesiredRun = TaskDesiredStop
 	s.tasks[id] = task
-
-	done, hasRun := s.runs[id]
-	if cancel, ok := s.cancels[id]; ok {
-		cancel()
-		delete(s.cancels, id)
-	}
 
 	// 常见误解：
 	// “调用 StopTask 后应立刻看到 STOPPED”并不成立。这里先写 STOPPING，
 	// 只有 run goroutine 真正退出后才会转为 STOPPED，确保状态语义等于“执行已结束”。
 	// 两阶段停止：先对外可见 STOPPING，再等待 run goroutine defer 收敛到 STOPPED。
+	//
+	// The stop intent is made durable before the dump is cancelled. When the
+	// store refuses the STOPPING row, the Stop is refused as a whole: the
+	// memory row goes back to what the store holds and the stop is not
+	// applied, so the dump and the stored state never disagree (#336 QA P1).
+	// With a read-only store the dump stops anyway on its next checkpoint
+	// write; that is METADATA_WRITE_BLOCKED (ADR 0009 §2.4).
 	if err := s.markStoppingLocked(task); err != nil {
+		if errors.Is(err, ErrStaleTaskWrite) {
+			s.mu.Unlock()
+			return err
+		}
+		if cur, ok := s.tasks[id]; ok && cur.State == StateStopping && cur.SpecRevision == task.SpecRevision {
+			s.tasks[id] = prev
+			if !wasUnpublished {
+				delete(s.unpublished, id)
+				s.Resolve(id, FindingTaskPersistFailed, "")
+			}
+			s.appendEventLocked(id, "TASK_STOP_REJECTED", "stop not recorded; the stop is not applied", err.Error())
+		}
 		s.mu.Unlock()
-		return err
+		return fmt.Errorf("stop not recorded; the stop is not applied and the task state is unchanged: %w", err)
+	}
+
+	done, hasRun := s.runs[id]
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
 	}
 
 	// 没有本进程的执行时，别人还占着租约就不能写成 STOPPED：dump 还在那个 worker 上。
@@ -1087,6 +1108,15 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
+		if IsTransientMetadataError(err) && !IsSourceUnreachable(err) && !isObjectPurgeFailed(err) {
+			// Deliberate: a dump whose progress cannot be recorded stops and
+			// retries with backoff instead of writing binlog the metadata
+			// store does not know about. It is a CRITICAL finding, and the
+			// task shows RETRY_BACKOFF/STARTING, never a healthy RUNNING
+			// (ADR 0009). The source keeps the binlog; the retry catches up.
+			s.Report(Finding{TaskID: id, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical,
+				Detail: "replication paused: the metadata store refused a write; the dump stopped and retries with backoff until the store accepts writes: " + errMsg})
+		}
 		// Allowlist only: SOURCE_UNREACHABLE (budget 10), transient metadata
 		// text, and OBJECT_PURGE_FAILED. Anything else fails once.
 		if !retryAllowed(err) {
@@ -1154,7 +1184,12 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) (bool, 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		logTransitionPersistError(id, StateRunning, s.markRunnerReadyLocked(id))
+		err := s.markRunnerReadyLocked(id)
+		logTransitionPersistError(id, StateRunning, err)
+		if cur, ok := s.tasks[id]; err == nil && ok && cur.State == StateRunning {
+			// The RUNNING row was written, so the metadata store takes writes again.
+			s.Resolve(id, FindingMetadataWriteBlocked, "")
+		}
 	}
 
 	if n, ok := s.runner.(runnerWithNotify); ok {
@@ -1236,8 +1271,12 @@ func (s *Scheduler) legacyUnreachableStreak(id string) int {
 	cancel()
 	if err != nil {
 		log.Printf("source failure streak read task=%s err=%v", id, err)
+		// S13: the budget falls back to this process's memory, which a new
+		// process does not have. Make that visible instead of silently 0.
+		s.Report(Finding{TaskID: id, Kind: FindingEventReadFailed, Severity: FindingWarning, Detail: "retry budget read from task events failed; using this process's in-memory streak: " + err.Error()})
 		return consecutiveUnreachableStreak(mem, false)
 	}
+	s.Resolve(id, FindingEventReadFailed, "")
 	if len(stored) == 0 {
 		return consecutiveUnreachableStreak(mem, false)
 	}

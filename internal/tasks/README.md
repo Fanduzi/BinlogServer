@@ -1,6 +1,9 @@
 # internal/tasks Module
 
 ## Files
+- `finding.go`: ADR 0009 结论汇。`Report`/`Resolve` 只改进程内账本并唤醒唯一的写入协程，从不阻塞在 I/O 上，持锁或不持锁都能调；写失败的结论留在队列里每 5s 重试，`FindingStats` 给 `/metrics`。`FindingKind` 是封闭集合，每个种类都有故障注入测试。
+- `finding_task.go`: 任务行写库失败（S2/S3）记 CRITICAL `TASK_PERSIST_FAILED`，结论汇每次重试时把内存里的最新行再写一遍，写成功即解决。`ErrStaleTaskWrite` 不算失败。
+- `finding_file_store.go`: 单机模式的 `FindingStore`，`{data_dir}/.findings.json` 原子写；`LoadOpenFindings` 只在单机启动时载入。
 - `scheduler.go`: 调度器核心类型、选项注入、`TaskStore`（含 GetTask/ListTasksPage/ListStartingUnownedTasks）与通用辅助函数；`ExpiredLeaseTaskLister` 供 cluster 过期租约查询（缺实现返回 `ErrExpiredLeaseLookupNotAvailable`）。`SetRunner` 把 `DumpSourceBinder` 接到当前行的 source 上，关掉 dump 时可以用库里的新密码 `KILL` 旧线程。`SourceSwitchBinder` 把 VIP 换主记成一条 `SOURCE_SWITCHOVER` 事件。
 - `memory_lease.go`: 进程内 `LeaseManager`，单机与测试走同一扇任务所有权门。同一 worker 收回过期租约不增加 epoch；别的 worker 接管过期租约才增加。`Release` 立刻腾出租约并清空 owner。
 - `scheduler_task_ops.go`: 任务 CRUD 与配置更新（含整包 CreateTaskFromSpec、`AdoptDiskBackup`）；`GetTask` 按主键刷新，store 失败不退回内存旧抄本；没有 store 时，内存未命中再认 `data_dir` 里仍有分段的目录。`ListClusterObservation` 有 store 时读 `store.ListTasks` 全库所有权抄本；`ListTasksPage` 在有 store 时走 SQL 分页；没有 store 时名单含这些磁盘目录。`DashboardCounters` 在 store 实现 `TaskDashboardRollup` 时走 SQL 计数，否则一次过滤读取。启停不在本文件。
