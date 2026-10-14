@@ -301,6 +301,19 @@ func (r *MySQLRunner) closeDump(task tasks.Task, syncer binlogSyncer) {
 	r.releaseDumpConn(task, id)
 }
 
+// abandonStalledDump leaves a dump that went silent without waiting for it.
+// Close and KILL would wait on the same dead path, which kept the task
+// RUNNING for ~15s after DUMP_STALLED (#338 re-QA-2). The connection id stays
+// noted, so the next run KILLs it (releaseNotedDump) before it opens a new
+// dump, and an unconfirmed KILL still does not open one.
+func (r *MySQLRunner) abandonStalledDump(task tasks.Task, syncer binlogSyncer) {
+	if syncer == nil {
+		return
+	}
+	log.Printf("binlog dump stalled task=%s conn=%d; closing in the background, the next start KILLs it first", task.ID, dumpConnectionID(syncer))
+	go syncer.Close()
+}
+
 func dumpConnectionID(syncer binlogSyncer) uint32 {
 	identified, ok := syncer.(interface{ LastConnectionID() uint32 })
 	if !ok || identified == nil {
@@ -546,7 +559,7 @@ func checkpointWriteError(err error) error {
 		return err
 	}
 	if meta.IsTransientMySQLError(err) {
-		return err
+		return tasks.NewMetadataStoreError("save checkpoint", err)
 	}
 	return tasks.NewPermanentError(tasks.CodeCheckpointWriteFailed, err.Error())
 }
@@ -616,7 +629,7 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	if semiSyncRequested {
 		// 半同步模式使用同步处理器：只有 HandleEvent 成功返回后才会 ACK。
 		// 这样可保证 ACK 发生在本地 fsync/checkpoint 成功之后（防止 ACK 早于持久化）。
-		l.dump.cfg.SynchronousEventHandler = eventHandlerFunc(l.handleEvent)
+		l.dump.cfg.SynchronousEventHandler = r.semiSyncHandler(task.ID, l.handleEvent)
 	}
 	if l.dump.newSyncer == nil {
 		l.dump.newSyncer = func(cfg replication.BinlogSyncerConfig) binlogSyncer {
@@ -629,7 +642,13 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 	l.dump.syncer = l.dump.newSyncer(l.dump.cfg)
 	// The defer closes whatever syncer is current. A 1236 fallback closes the
 	// old one itself, then replaces syncer, so the defer closes the new one once.
-	defer func() { r.closeDump(task, l.dump.syncer) }()
+	defer func() {
+		if l.dump.stalled {
+			r.abandonStalledDump(task, l.dump.syncer)
+			return
+		}
+		r.closeDump(task, l.dump.syncer)
+	}()
 	if err := l.openFirstDump(); err != nil {
 		return err
 	}
@@ -677,17 +696,17 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 		if errors.Is(err, context.DeadlineExceeded) {
 			// No byte, not even a heartbeat, for the read timeout: a stall,
 			// whatever go-mysql's own read deadline has done so far.
-			if silent := r.now().Sub(mark.at); silent >= dumpReadTimeout {
+			if silent := r.now().Sub(mark.last()); silent >= dumpReadTimeout {
 				r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
 					Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting", silent.Truncate(time.Second), file, pos)})
-				return nil, classifySourceError(fmt.Errorf("dump silent for %s: %w", silent.Truncate(time.Second), errDumpSilent))
+				return nil, dumpStalled(fmt.Sprintf("dump silent for %s at %s:%d", silent.Truncate(time.Second), file, pos))
 			}
 			// Quiet dump wait is not at-tip by itself: FILE_POS/GTID catch-up can
 			// idle while still behind SHOW MASTER STATUS. Confirm file then pos.
 			// The probe never runs past the point where silence becomes a
 			// stall, so a black-holed source is reported at the read timeout.
 			budget := tipProbeTimeout
-			if left := dumpReadTimeout - r.now().Sub(mark.at); left < budget {
+			if left := dumpReadTimeout - r.now().Sub(mark.last()); left < budget {
 				budget = max(left, 100*time.Millisecond)
 			}
 			tip := r.confirmIdleAtTip(ctx, source, file, pos, budget)
@@ -705,17 +724,16 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 		}
 		// go-mysql turns the read timeout into ErrBadConn with the net.Error
 		// as text, so the error type cannot tell a stall. The silence can.
-		if silent := r.now().Sub(mark.at); silent >= dumpReadTimeout-dumpStallSlack {
+		if silent := r.now().Sub(mark.last()); silent >= dumpReadTimeout-dumpStallSlack {
 			r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
 				Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting: %v", silent.Truncate(time.Second), file, pos, err)})
+			return nil, dumpStalled(fmt.Sprintf("dump silent for %s at %s:%d: %v", silent.Truncate(time.Second), file, pos, err))
 		}
 		return nil, classifySourceError(err)
 	}
-	mark.at = r.now()
-	if !mark.resolved {
-		// Once per dump session, so a stall loaded from the store after a
-		// restart also resolves when the new session receives data.
-		mark.resolved = true
+	// Once per dump session, so a stall loaded from the store after a
+	// restart also resolves when the new session receives data.
+	if mark.touch(r.now()) {
 		r.resolve(taskID, tasks.FindingDumpStalled, "")
 	}
 	return event, nil
@@ -727,12 +745,70 @@ const dumpStallSlack = 2 * time.Second
 // tipProbeTimeout bounds the idle SHOW MASTER STATUS probe as a whole.
 const tipProbeTimeout = 5 * time.Second
 
-var errDumpSilent = errors.New("dump connection silent past the read timeout")
+// errDumpStalled marks a dump that received nothing for the read timeout.
+var errDumpStalled = errors.New("dump connection silent past the read timeout")
 
+// stallError is SOURCE_UNREACHABLE (the scheduler backs off and reconnects)
+// and errDumpStalled (the run ends at once, without probing or reopening a
+// dump through a path that just went silent).
+type stallError struct{ err error }
+
+func (e *stallError) Error() string        { return e.err.Error() }
+func (e *stallError) Unwrap() error        { return e.err }
+func (e *stallError) Is(target error) bool { return target == errDumpStalled }
+
+func dumpStalled(msg string) error {
+	return &stallError{err: tasks.NewRetryableSourceError(tasks.CodeSourceUnreachable, msg+": "+errDumpStalled.Error())}
+}
+
+// recvMark is touched by the async read loop and, for semi-sync, by the
+// syncer's own goroutine through SynchronousEventHandler; mu guards it.
 type recvMark struct {
 	session  binlogStreamer
+	mu       sync.Mutex
 	at       time.Time
 	resolved bool
+}
+
+func (m *recvMark) last() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.at
+}
+
+// touch records that the dump received something; it reports true the first
+// time in this session, when an open DUMP_STALLED is resolved.
+func (m *recvMark) touch(now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.at = now
+	if m.resolved {
+		return false
+	}
+	m.resolved = true
+	return true
+}
+
+// noteReceived is every event path's receive mark. The async loop reaches it
+// through nextEvent; a semi-sync dump hands events to SynchronousEventHandler
+// and never returns them from GetEvent, so its handler calls this directly.
+func (r *MySQLRunner) noteReceived(taskID string) {
+	v, ok := r.recv.Load(taskID)
+	if !ok {
+		return
+	}
+	if v.(*recvMark).touch(r.now()) {
+		r.resolve(taskID, tasks.FindingDumpStalled, "")
+	}
+}
+
+// semiSyncHandler wraps the semi-sync event handler so each event resets the
+// silence timer before it is applied and ACKed.
+func (r *MySQLRunner) semiSyncHandler(taskID string, handle func(*replication.BinlogEvent) error) eventHandlerFunc {
+	return func(event *replication.BinlogEvent) error {
+		r.noteReceived(taskID)
+		return handle(event)
+	}
 }
 
 func (r *MySQLRunner) now() time.Time {
@@ -880,6 +956,7 @@ func (r *MySQLRunner) sealLocalFile(
 		meta.UploadState = "LOCAL_ONLY"
 		if r.fileMetaStore != nil {
 			if err := r.fileMetaStore.UpsertBinlogFile(ctx, meta); err != nil {
+				err = tasks.NewMetadataStoreError("upsert binlog file", err)
 				return tasks.BinlogFile{}, err
 			}
 		}
@@ -897,6 +974,7 @@ func (r *MySQLRunner) sealLocalFile(
 	meta.UploadError = sealedUploadPending
 	if r.fileMetaStore != nil {
 		if err := r.fileMetaStore.UpsertBinlogFile(ctx, meta); err != nil {
+			err = tasks.NewMetadataStoreError("upsert binlog file", err)
 			return tasks.BinlogFile{}, err
 		}
 	}
@@ -978,6 +1056,7 @@ func (r *MySQLRunner) repairHistoricalEndPos(ctx context.Context, taskID, dir st
 			next.StartPos = tasks.FilePos(start)
 			next.EndPos = tasks.FilePos(end)
 			if err := r.fileMetaStore.UpsertBinlogFile(ctx, next); err != nil {
+				err = tasks.NewMetadataStoreError("upsert binlog file", err)
 				return err
 			}
 		}
@@ -1138,6 +1217,7 @@ func (r *MySQLRunner) enrollSealedUploads(ctx context.Context, task tasks.Task, 
 			next.SealedAt = time.Now()
 		}
 		if err := r.fileMetaStore.UpsertBinlogFile(ctx, next); err != nil {
+			err = tasks.NewMetadataStoreError("upsert binlog file", err)
 			return err
 		}
 		byName[entry.Name()] = next
@@ -1741,6 +1821,7 @@ func (r *MySQLRunner) openBinlogWriterIn(ctx context.Context, dir string, task t
 			CreatedAt:   createdAt,
 			UploadState: "LOCAL_ONLY",
 		}, carried)); err != nil {
+			err = tasks.NewMetadataStoreError("upsert binlog file", err)
 			_ = f.Close()
 			return nil, nil, "", err
 		}

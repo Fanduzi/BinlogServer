@@ -157,6 +157,8 @@ healthy(t) ⇔ state ∈ {RUNNING}
 
 代价：元数据库不可写期间是备份空窗，RPO 会随之增长；告警依据是这条 CRITICAL 结论加上 `binlog_server_finding_open`。
 
+- 判定方式（2026-10-14 补充）：只有在元数据存储边界（checkpoint、binlog 目录写入）被 `tasks.NewMetadataStoreError` 打上 `tasks.ErrMetadataStore` 标记、且属于瞬时错误的失败，才会开 METADATA_WRITE_BLOCKED。源库 dump 的 timeout / EOF / bad connection 文本不再被当成元数据错误。
+
 ## 3. 周期性校验巡检与还原演练
 
 **巡检器 (Verifier)** 是 worker 上的周期任务（只在持有租约的 worker 上跑该任务，复用 ADR 0001 的所有权），每 `verify_every`（默认 24h，分批平摊，每任务每轮上限 `verify_budget` 字节/秒）：
