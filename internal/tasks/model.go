@@ -368,6 +368,9 @@ type BinlogFile struct {
 	FirstEventAt *time.Time `json:"first_event_at,omitempty"`
 	LastEventAt  *time.Time `json:"last_event_at,omitempty"`
 	SHA256       string     `json:"sha256,omitempty"`
+	// ResetSealFacts asks the catalog to clear the seal facts: the row now
+	// names a file whose facts could not be read, so the old ones are stale.
+	ResetSealFacts bool `json:"-"`
 	// Location is local, bucket, or both. The files list fills it in.
 	// It is not stored. bucket means this sealed UPLOADED object is the only
 	// copy: file_path is the catalog path and is not on this process.

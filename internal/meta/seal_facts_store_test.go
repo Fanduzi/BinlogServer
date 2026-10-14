@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock for the binlog_files upsert and the seal-facts update
-// output: assertions that a sealed row with facts writes them after the upsert (UTC times, NULL for an unknown span), that a row without facts or not sealed writes nothing more, and that a catalog without the 000008 columns (1054) is skipped once and then never asked again
+// output: assertions that a ResetSealFacts row clears the facts, that a sealed row with facts writes them after the upsert (UTC times, NULL for an unknown span), that a row without facts or not sealed writes nothing more, and that a catalog without the 000008 columns (1054) is skipped once and then never asked again
 // pos: persistence coverage for ADR 0009 phase 1, P1-4
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -68,6 +68,27 @@ func TestUpsertBinlogFile_WritesSealFacts(t *testing.T) {
 	}
 	mock.ExpectExec(regexp.QuoteMeta(upsertBinlogFileSQL)).WillReturnResult(sqlmock.NewResult(1, 1))
 	if err := store.UpsertBinlogFile(ctx, sealed); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpsertBinlogFile_ResetSealFactsClearsThem(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, time.Second)
+	row := tasks.BinlogFile{TaskID: "1", FileName: "mysql-bin.000003", FilePath: "/d/1/mysql-bin.000003", State: "SEALED",
+		SizeBytes: 10, StartPos: 4, EndPos: 10, ResetSealFacts: true}
+	mock.ExpectExec(regexp.QuoteMeta(upsertBinlogFileSQL)).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(upsertSealFactsSQL)).
+		WithArgs(nil, nil, nil, "1", "mysql-bin.000003", int64(0)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.UpsertBinlogFile(context.Background(), row); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
