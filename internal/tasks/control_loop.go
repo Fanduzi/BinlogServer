@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: backup_tasks desired_run, spec_revision, applied_spec_revision, failed_spec_revision, lease hold, and whether this process has a live dump
-// output: one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
+// output: (writeStartIntent records Start through commitTransitionLocked: persist first, and only a recorded Start cancels a RETRY_BACKOFF loop) one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
 // pos: the only starter and stopper of a dump; operator Start, Stop, and spec edits write the row and this loop catches up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -380,21 +380,28 @@ func (s *Scheduler) writeStartIntent(id string) error {
 	task.ConsecutiveSourceFailures = 0
 	task.LastError = ""
 	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	if cancel, ok := s.cancels[id]; ok {
-		cancel()
-		delete(s.cancels, id)
-	}
 
+	// Persist first (commitTransitionLocked). A refused write leaves the task
+	// as it was, including a RETRY_BACKOFF loop that still drives it: only a
+	// recorded Start cancels that loop (tip 53a9 P1).
+	rec := transitionRecord{Action: "start", Type: "TASK_START_REQUESTED", Message: "operator start recorded"}
 	if s.runner == nil {
 		if s.leaseManager == nil {
 			return ErrRunnerNotConfigured
 		}
-		return s.markStartDispatchedLocked(task)
+		task.OwnerWorkerID = ""
+		task.Epoch = 0
+		task.RunID = ""
+		rec.Type, rec.Message = "TASK_START_DISPATCHED", "task start dispatched to worker"
 	}
-	task.State = StateStarting
-	s.tasks[id] = task
-	return s.persistTaskLocked(task)
+	if err := s.commitTransitionLocked(task, StateStarting, rec); err != nil {
+		return err
+	}
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
+	}
+	return nil
 }
 
 // intentLocked reads the operator ask. The caller holds s.mu.

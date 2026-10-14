@@ -265,7 +265,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	openByTask := s.openFindingCounts(r.Context())
 	for _, task := range page {
 		resp.Tasks = append(resp.Tasks, dashboardTaskItem{
-			Task:         s.presentTask(r.Context(), task),
+			Task:         s.presentTaskWith(r.Context(), task, openByTask),
 			Replication:  s.replicationFor(task, now),
 			OpenFindings: openByTask[task.ID],
 		})
@@ -1558,7 +1558,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // presentTask strips the password and attaches a computed storage alert.
 // The alert is not written back onto the scheduler's stored task.
 func (s *Server) presentTask(ctx context.Context, task tasks.Task) tasks.Task {
+	return s.presentTaskWith(ctx, task, s.openFindingCounts(ctx))
+}
+
+// presentTaskWith is presentTask with the open finding counts already read
+// (one read per page). A nil map means findings cannot be counted here.
+func (s *Server) presentTaskWith(ctx context.Context, task tasks.Task, open map[string]int) tasks.Task {
 	task = sanitizeTask(task)
+	if open != nil {
+		n := open[task.ID]
+		task.OpenFindings = &n
+	}
 	if s == nil || s.tasks == nil {
 		return task
 	}
@@ -1573,8 +1583,9 @@ func (s *Server) presentTask(ctx context.Context, task tasks.Task) tasks.Task {
 
 func (s *Server) presentTasks(ctx context.Context, items []tasks.Task) []tasks.Task {
 	out := make([]tasks.Task, len(items))
+	open := s.openFindingCounts(ctx)
 	for i := range items {
-		out[i] = s.presentTask(ctx, items[i])
+		out[i] = s.presentTaskWith(ctx, items[i], open)
 	}
 	return out
 }
@@ -1639,7 +1650,7 @@ func (s *Server) openFindingCounts(ctx context.Context) map[string]int {
 	}
 	counts, err := src.OpenFindingCounts(ctx)
 	if err != nil {
-		log.Printf("dashboard open finding counts: %v", err)
+		log.Printf("open finding counts: %v", err)
 	}
 	return counts
 }

@@ -87,6 +87,10 @@ type Task struct {
 	// It is not stored. A nil alert means this response did not find a
 	// checkpoint or segment that disagrees with the files on disk.
 	StorageAlert *StorageAlert `json:"storage_alert,omitempty"`
+	// OpenFindings is the task's open finding count, filled by the API on
+	// GET /api/tasks, /api/tasks/{id} and /api/dashboard. It is not stored;
+	// nil (omitted) only when this process cannot count findings.
+	OpenFindings *int `json:"open_findings,omitempty"`
 }
 
 // StorageAlert is a checkpoint or segment that cannot be continued safely.

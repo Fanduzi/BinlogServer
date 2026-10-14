@@ -46,6 +46,8 @@ const (
 	FindingOpenTailCutFailed FindingKind = "OPEN_TAIL_CUT_FAILED"
 	// FindingMetricSourceFailed: a per-task metric could not be computed (S10/S11).
 	FindingMetricSourceFailed FindingKind = "METRIC_SOURCE_FAILED"
+	// FindingTransitionStalled: a task sat in STARTING or STOPPING with no dump driving it; the watchdog handed it to the control loop.
+	FindingTransitionStalled FindingKind = "TASK_TRANSITION_STALLED"
 	// FindingSegmentUnreadable: a sealed segment has a corrupt event size; /replay and /window stop before it (#358).
 	FindingSegmentUnreadable FindingKind = "SEGMENT_UNREADABLE"
 )
@@ -327,6 +329,7 @@ func (s *Scheduler) StartFindingSink(ctx context.Context, interval time.Duration
 				b.flush(ctx)
 			case <-ticker.C:
 				s.republishUnpublished()
+				s.reconcileStalledTransitions()
 				b.flush(ctx)
 			}
 		}

@@ -666,11 +666,9 @@ func (s *Scheduler) StopTask(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot stop from state %s", task.State)
 	}
-	prev := task
-	_, wasUnpublished := s.unpublished[id]
 	task.SpecRevision++
 	task.DesiredRun = TaskDesiredStop
-	s.tasks[id] = task
+	task.UpdatedAt = time.Now()
 
 	// 常见误解：
 	// “调用 StopTask 后应立刻看到 STOPPED”并不成立。这里先写 STOPPING，
@@ -683,21 +681,9 @@ func (s *Scheduler) StopTask(id string) error {
 	// applied, so the dump and the stored state never disagree (#336 QA P1).
 	// With a read-only store the dump stops anyway on its next checkpoint
 	// write; that is METADATA_WRITE_BLOCKED (ADR 0009 §2.4).
-	if err := s.markStoppingLocked(task); err != nil {
-		if errors.Is(err, ErrStaleTaskWrite) {
-			s.mu.Unlock()
-			return err
-		}
-		if cur, ok := s.tasks[id]; ok && cur.State == StateStopping && cur.SpecRevision == task.SpecRevision {
-			s.tasks[id] = prev
-			if !wasUnpublished {
-				delete(s.unpublished, id)
-				s.Resolve(id, FindingTaskPersistFailed, "")
-			}
-			s.appendEventLocked(id, "TASK_STOP_REJECTED", "stop not recorded; the stop is not applied", err.Error())
-		}
+	if err := s.commitTransitionLocked(task, StateStopping, transitionRecord{Action: "stop", Type: "TASK_STOPPING", Message: "task stopping"}); err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("stop not recorded; the stop is not applied and the task state is unchanged: %w", err)
+		return err
 	}
 
 	done, hasRun := s.runs[id]

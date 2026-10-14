@@ -340,12 +340,15 @@ type Scheduler struct {
 	fileUploader     FileUploader
 	retryUploads     map[string]struct{}
 	persisted        map[string]persistedTask
-	retrySuccess     int64
-	retryFailed      int64
-	retrySkipped     int64
-	retryLastTS      int64
-	retryPassTS      int64
-	eventSeq         int64
+	// stalledAfter is how long STARTING or STOPPING may last with no run
+	// before reconcileStalledTransitions takes the task on.
+	stalledAfter time.Duration
+	retrySuccess int64
+	retryFailed  int64
+	retrySkipped int64
+	retryLastTS  int64
+	retryPassTS  int64
+	eventSeq     int64
 	// pendingEvents are in-memory events waiting for the event store.
 	// The scheduler lock is not held while they are written.
 	pendingEvents []queuedEvent
@@ -376,11 +379,11 @@ func NewScheduler(opts ...Option) *Scheduler {
 		findings:    newFindingBook(),
 		unpublished: make(map[string]struct{}),
 		tasks:       make(map[string]Task),
-		events:  make(map[string][]TaskEvent),
-		replica: make(map[string]ReplicationProgress),
-		cancels: make(map[string]context.CancelFunc),
-		runs:    make(map[string]chan struct{}),
-		runSpec: make(map[string]int64),
+		events:      make(map[string][]TaskEvent),
+		replica:     make(map[string]ReplicationProgress),
+		cancels:     make(map[string]context.CancelFunc),
+		runs:        make(map[string]chan struct{}),
+		runSpec:     make(map[string]int64),
 
 		retryBaseDelay:        time.Second,
 		retryMaxDelay:         30 * time.Second,
@@ -389,6 +392,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		leaseGrace:            30 * time.Second,
 		retryUploads:          make(map[string]struct{}),
 		persisted:             make(map[string]persistedTask),
+		stalledAfter:          defaultStalledAfter,
 		internalReadTimeout:   3 * time.Second,
 		internalWriteTimeout:  5 * time.Second,
 		internalLeaseTimeout:  2 * time.Second,
