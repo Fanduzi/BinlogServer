@@ -44,7 +44,7 @@ type Inputs struct {
     Local      *binlog.Ledger   // 任务目录；nil = 本进程没有该目录
     Objects    map[string]int64 // 对象 key → 大小；nil = 未列举
     ObjectStorage bool
-    UploadGrace   time.Duration // 默认 15min（ADR 决定 2）
+    UploadGrace   time.Duration // ≤0 时取 DefaultUploadGrace = 15min（ADR 决定 2）
     Switches   []Switch         // 每次继续的换源：新身份与记录的已存集合
 }
 
@@ -66,7 +66,7 @@ type Segment struct {        // 链上一段
 type Kind string             // 封闭枚举，调用方按种类判断，不看 Detail 前缀
 const (
     I1Regression Kind = "I1_REGRESSION"
-    I2IndexGap = "I2_INDEX_GAP"; I2SwitchUnrecorded = "I2_SWITCH_UNRECORDED"
+    I2IndexGap = "I2_INDEX_GAP"; I2SwitchUnrecorded = "I2_SWITCH_UNRECORDED"; I2OrderInvalid = "I2_ORDER_INVALID"
     I3GTIDHole = "I3_GTID_HOLE"; I3StoredHole = "I3_STORED_HOLE"; I3LegacyFailback = "I3_LEGACY_FAILBACK"
     I4Overlap = "I4_OVERLAP"
     I5CheckpointAhead = "I5_CHECKPOINT_AHEAD"
@@ -95,10 +95,10 @@ ADR 枚举之外新增三个子类，原因：`I2_SWITCH_UNRECORDED`（跨源身
 | # | 判定 | 证据 | 首个违反点 |
 |---|---|---|---|
 | I1 | 段内 `end_log_pos` 倒退或 Rotate 指向自己/更早文件（`binlog.Ledger.SegmentDamage`，即今天的 `segmentDamage`） | 倒退的两个位点或 Rotate 目标 | 该段 |
-| I2 | 同一源前缀相邻两段序号不相邻（`missingIndexBreak`）；前缀变化处没有对应 `Switch` | 缺的文件名 | 后一段 |
+| I2 | 同一源前缀相邻两段序号不相邻（`missingIndexBreak`）；前缀变化处没有对应 `Switch`；`I2_ORDER_INVALID`：调用方给的顺序漏掉本地账本里的段（例如整段回切 stint），或同一前缀内序号后退 | 缺的文件名 / 漏掉或后退的段 | 后一段 / 漏掉的段 |
 | I3 | 段内洞（`intraSegmentHole`）、相邻段洞（`gtidHole`）、切换洞（`switchHole`）、链内部洞（`StoredHoles(B ∪ Stored)`）；已存缺口与旧版回切由 tasks 的现有规划器给出结论后作为输入（阶段 1 不搬这两个规划器，见 §6） | 缺的 GTID 集合 | 洞之后第一段 |
 | I4 | 两段 GTID 集合相交；同一 `(源, 序号)` 有两个封存段都在 `Order` 上 | 交集 | 后一段 |
-| I5 | `C.gtid_set ⊄ B ∪ Stored ∪ 头部历史`；`C.file` 是打开尾部且 `C.pos` > 尾部落盘截断点 | 超前的集合 / 位点 | 打开尾部 |
+| I5 | `C.gtid_set ⊄ B ∪ Stored ∪ 头部历史`（仅 MySQL）；`C.file` 是打开尾部且 `C.pos` > 尾部落盘截断点；`C.file` 是链上封存段且 `C.pos` > 该段末尾（本地大小，否则行大小）；`C.file` 是链上同前缀最后一个源文件之后的文件 | 超前的集合 / 位点 | 打开尾部 / 所指封存段 / 链上最后一段 |
 | I6 | 封存段无行（MISSING_ROW）；行在、本地无、对象无（ORPHAN_ROW）；行说 LOCAL/UPLOAD_FAILED 但本地无（MISSING_LOCAL）；行说 UPLOADED 但对象清单里没有（MISSING_OBJECT）；对象大小或本地大小 ≠ 行大小（SIZE_MISMATCH）。`Objects == nil` 时对象相关判定跳过 | 行与实物 | 该段 |
 | I7 | 配置了对象存储时，封存早于 `now − UploadGrace` 且不是 `UPLOADED+match`（UPLOAD_LATE）；`UPLOADED` 但 `checksum ≠ match`，或本地已删而不是 `UPLOADED+match`（UNVERIFIED） | 状态与年龄 | 该段 |
 
@@ -106,6 +106,20 @@ ADR 枚举之外新增三个子类，原因：`I2_SWITCH_UNRECORDED`（跨源身
 - `Check` 是纯函数：同样的 `Inputs` 与 `now` 给出同样的、按链顺序排列的结果。
 - 不可读的段不产生 I1/I3/I4 违反（没有证据），只影响窗口（今天的 `breakUnreadable` 语义不变）。
 - MariaDB：I3/I4/I5 的 GTID 判定跳过（今天 window 只对 mysql 做 GTID 判定，保持一致）。
+
+### 4.1 阶段 1 没有覆盖的部分（如实记录）
+
+阶段 1 的 `Check` 比 ADR 0009 的不变量窄。下表列出缺口和补上的阶段：
+
+| 不变量 | 阶段 1 不判定的内容 | 由哪个阶段补上 |
+|---|---|---|
+| I2 | 不检查前一段是否以 `Rotate(name(S_{i+1}), 4)` 结尾、后一段是否以 FDE 开头；跨身份只看「有没有该身份的 `Switch` 记录」，不比对切换记录的 GTID 集合与切换位置；普通前缀改变（如 `mysql-bin` → `other-bin`）不算切换 | 阶段 2（链顺序由 assurance 自己从目录行与 `.source-chain` 推导时，一并读 Rotate/FDE 并核对切换记录） |
+| I4 | 被替换的旧 epoch 在目录行上没有「已替换」标记，所以只能按 GTID 相交和同一 `(源, 序号)` 两个封存段报告；段不可读时只能按名字查重 | 阶段 2（目录行加替换标记，与链顺序一起落地） |
+| I5 | 阶段 1 已覆盖 ADR 的「C.file/pos 不超过截断点」：打开尾部、封存段末尾、链之后的文件（#348 QA 后补上）；仍不判定 checkpoint 落在链之前的文件（落后不是超前，属于恢复点目标），也不判定 MariaDB 的 GTID 位置 | 阶段 3（评估器的 RPO 与 MariaDB GTID） |
+| I6 | 「已按保留期删除」没有标记，未上链的行只按「本地无且对象无」报孤行；`Objects == nil` 时跳过链外行 | 阶段 2（保留期删除写标记） |
+| I7 | 默认 grace 15min（`DefaultUploadGrace`，未设置即取它） | — |
+
+调用方给出的顺序在阶段 1 被当作事实，但 `I2_ORDER_INVALID` 会自检两件事：本地账本里的每一段都在顺序上，同一前缀内序号不后退。
 
 ## 5. 不变式与行为冻结
 
@@ -130,6 +144,6 @@ P1-4 的 schema 下限（Adrian 已决定，2026-10-14）：不提到 8。`00000
 - **顺序**：链顺序今天由 `SelectReplayFiles`（按源前缀的最早创建时间排序）决定，`Ledger.Segments()` 只按序号排序。阶段 1 让 `Order` 由调用方给出，`assurance` 不重新排序，避免在冻结重构里引入第二个顺序。把选择与排序收进链是 P1-3 之后的工作。
 - **成本**：`Check` 读每段内容一次（账本缓存）；对象清单是快照，`assurance` 不列举。
 
-## 7. 补记（P1-2 实现时的调整）
+## 8. 补记（P1-2 实现时的调整）
 
 原计划是 `Chain.Window()` 从 `Inputs` 读字节。实现时发现 `/window` 经 `OpenTaskSegment` 读分段，字节可能来自持有该任务的另一个进程，而 `Chain` 的 `Local` 只是本机 `Ledger`。为了保证 golden 逐字节不变、又不给 `Inputs` 再加一个只有一个实现的读取接口，P1-2 把推导做成纯函数 `assurance.WindowOf([]WindowSegment, ...)`：tasks 负责读字节、投影行，并在之后附加损坏截断；assurance 负责全部规则。`Chain` 在 P1-3 拿到回放顺序后，可以用同一个 `WindowOf` 提供 `Chain.Window()`，不会出现第二份推导。

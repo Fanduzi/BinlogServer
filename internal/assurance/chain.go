@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
 // input: Inputs: the task's chain order, catalog rows, task directory ledger, object listing snapshot, checkpoint, start set and recorded source switches
-// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009, each a closed Kind with the segments involved and the evidence
+// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes
 // pos: the one answer to "is this backup complete, and where is each part" (ADR 0009 phase 1); depends on binlog only
 // note: if this file changes, update this header and module README.md.
 package assurance
@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,7 @@ const (
 	I1Regression       Kind = "I1_REGRESSION"
 	I2IndexGap         Kind = "I2_INDEX_GAP"
 	I2SwitchUnrecorded Kind = "I2_SWITCH_UNRECORDED"
+	I2OrderInvalid     Kind = "I2_ORDER_INVALID"
 	I3GTIDHole         Kind = "I3_GTID_HOLE"
 	I3StoredHole       Kind = "I3_STORED_HOLE"
 	I3LegacyFailback   Kind = "I3_LEGACY_FAILBACK"
@@ -85,7 +87,7 @@ const (
 
 // AllKinds lists every Kind.
 func AllKinds() []Kind {
-	return []Kind{I1Regression, I2IndexGap, I2SwitchUnrecorded, I3GTIDHole, I3StoredHole, I3LegacyFailback,
+	return []Kind{I1Regression, I2IndexGap, I2SwitchUnrecorded, I2OrderInvalid, I3GTIDHole, I3StoredHole, I3LegacyFailback,
 		I4Overlap, I5CheckpointAhead, I6MissingLocal, I6MissingObject, I6OrphanRow, I6MissingRow,
 		I6SizeMismatch, I7UploadLate, I7Unverified}
 }
@@ -123,8 +125,18 @@ type Chain struct {
 	read bool
 }
 
+// DefaultUploadGrace is the upload grace when Inputs leaves it unset (ADR
+// 0009 decision 2).
+const DefaultUploadGrace = 15 * time.Minute
+
 // ChainOf is the chain for in. Nothing is read until a question is asked.
-func ChainOf(in Inputs) *Chain { return &Chain{in: in} }
+// An unset UploadGrace is DefaultUploadGrace.
+func ChainOf(in Inputs) *Chain {
+	if in.UploadGrace <= 0 {
+		in.UploadGrace = DefaultUploadGrace
+	}
+	return &Chain{in: in}
+}
 
 func (c *Chain) mysql() bool {
 	f := strings.TrimSpace(c.in.Flavor)
@@ -263,8 +275,10 @@ func (c *Chain) Check(now time.Time) []Violation {
 	}
 	if c.mysql() {
 		c.checkInteriorHole(segs, &out, add)
-		c.checkCheckpoint(segs, stored, add)
+		c.checkCheckpointGTID(segs, stored, add)
 	}
+	c.checkCheckpointPos(segs, add)
+	c.checkOrder(segs, add)
 	c.checkOffChainRows(add)
 	out = append(out, c.in.Planned...)
 	pos := map[string]int{}
@@ -292,6 +306,8 @@ func (c *Chain) checkCopies(seg *Segment, now time.Time, add func(Kind, string, 
 	if row == nil {
 		if seg.Local {
 			add(I6MissingRow, seg.Name, fmt.Sprintf("sealed segment %s has no catalog row", seg.Name), seg.Name)
+		} else {
+			add(I6MissingRow, seg.Name, fmt.Sprintf("chain segment %s has no catalog row and no local file", seg.Name), seg.Name)
 		}
 		return
 	}
@@ -305,9 +321,13 @@ func (c *Chain) checkCopies(seg *Segment, now time.Time, add func(Kind, string, 
 	case seg.Local && uploaded && seg.ObjectListed && seg.Object == nil:
 		add(I6MissingObject, row.ObjectKey, fmt.Sprintf("segment %s is UPLOADED but object %s is missing", seg.Name, row.ObjectKey), seg.Name)
 	}
+	if uploaded && strings.TrimSpace(row.ObjectKey) == "" && (c.in.Objects != nil || c.in.ObjectStorage) {
+		add(I6MissingObject, "object_key=", fmt.Sprintf("segment %s is UPLOADED but its row has no object key", seg.Name), seg.Name)
+	}
 	if seg.Local && row.Size > 0 && seg.LocalSize != row.Size {
 		add(I6SizeMismatch, fmt.Sprintf("local=%d row=%d", seg.LocalSize, row.Size), fmt.Sprintf("segment %s is %d bytes on disk, the catalog says %d", seg.Name, seg.LocalSize, row.Size), seg.Name)
-	} else if seg.Object != nil && row.Size > 0 && *seg.Object != row.Size {
+	}
+	if seg.Object != nil && row.Size > 0 && *seg.Object != row.Size {
 		add(I6SizeMismatch, fmt.Sprintf("object=%d row=%d", *seg.Object, row.Size), fmt.Sprintf("object %s is %d bytes, the catalog says %d", row.ObjectKey, *seg.Object, row.Size), seg.Name)
 	}
 	if !c.in.ObjectStorage {
@@ -372,9 +392,10 @@ func (c *Chain) storedSet(segs []Segment) binlog.GTIDSet {
 // checkInteriorHole is I3 for sequences missing between stored ones that no
 // neighbour check already named.
 func (c *Chain) checkInteriorHole(segs []Segment, out *[]Violation, add func(Kind, string, string, ...string)) {
+	named := map[string]bool{}
 	for _, v := range *out {
-		if v.Kind == I3GTIDHole {
-			return
+		if v.Kind == I3GTIDHole && len(v.Segments) > 0 {
+			named[v.Segments[0]] = true
 		}
 	}
 	stored := binlog.GTIDSet{}
@@ -392,32 +413,37 @@ func (c *Chain) checkInteriorHole(segs []Segment, out *[]Violation, add func(Kin
 		start = nil
 	}
 	gaps := binlog.StoredHoles(stored, start)
-	if len(gaps) == 0 {
-		return
-	}
 	keys := make([]string, 0, len(gaps))
 	for k := range gaps {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	k := keys[0]
-	iv := gaps[k][0]
-	after := ""
-	for _, s := range segs {
-		if s.Contents == nil {
-			continue
-		}
-		for _, r := range s.Contents.GTIDs[k] {
-			if r.Lo > iv.Hi && after == "" {
-				after = s.Name
+	for _, k := range keys {
+		for _, iv := range gaps[k] {
+			after := ""
+			for _, s := range segs {
+				if s.Contents == nil || after != "" {
+					continue
+				}
+				for _, r := range s.Contents.GTIDs[k] {
+					if r.Lo > iv.Hi {
+						after = s.Name
+						break
+					}
+				}
 			}
+			// A neighbour check already named the hole before this segment.
+			if named[after] {
+				continue
+			}
+			ev := fmt.Sprintf("%s:%d-%d", k, iv.Lo, iv.Hi)
+			add(I3GTIDHole, ev, fmt.Sprintf("gtid hole: %s is stored in no segment", ev), after)
 		}
 	}
-	add(I3GTIDHole, gaps.String(), fmt.Sprintf("gtid hole: %s is stored in no segment", gaps.String()), after)
 }
 
-// checkCheckpoint is I5.
-func (c *Chain) checkCheckpoint(segs []Segment, stored binlog.GTIDSet, add func(Kind, string, string, ...string)) {
+// checkCheckpointGTID is I5 for the checkpoint's GTID set.
+func (c *Chain) checkCheckpointGTID(segs []Segment, stored binlog.GTIDSet, add func(Kind, string, string, ...string)) {
 	last := ""
 	if len(segs) > 0 {
 		last = segs[len(segs)-1].Name
@@ -429,13 +455,104 @@ func (c *Chain) checkCheckpoint(segs []Segment, stored binlog.GTIDSet, add func(
 			}
 		}
 	}
-	if c.in.Local == nil || c.in.Checkpoint.File == "" {
+}
+
+// checkCheckpointPos is I5 for the checkpoint's file and position: past the
+// durable end of the open tail, past the end of the sealed file it names, or
+// at a source file after the last one on the chain.
+func (c *Chain) checkCheckpointPos(segs []Segment, add func(Kind, string, string, ...string)) {
+	file, pos := strings.TrimSpace(c.in.Checkpoint.File), c.in.Checkpoint.Pos
+	if file == "" {
 		return
 	}
-	if tail, ok := c.in.Local.Tail(); ok && tail.File == c.in.Checkpoint.File && c.in.Checkpoint.Pos > tail.Pos {
-		add(I5CheckpointAhead, fmt.Sprintf("%s:%d > %d", tail.File, c.in.Checkpoint.Pos, tail.Pos),
-			fmt.Sprintf("checkpoint %s:%d is past the durable end %d of the open segment", tail.File, c.in.Checkpoint.Pos, tail.Pos), filepath.Base(tail.Path))
+	if c.in.Local != nil {
+		if tail, ok := c.in.Local.Tail(); ok && tail.File == file {
+			if pos > tail.Pos {
+				add(I5CheckpointAhead, fmt.Sprintf("%s:%d > %d", tail.File, pos, tail.Pos),
+					fmt.Sprintf("checkpoint %s:%d is past the durable end %d of the open segment", tail.File, pos, tail.Pos), filepath.Base(tail.Path))
+			}
+			return
+		}
 	}
+	var sealed *Segment
+	for i := range segs {
+		if segs[i].Named.Source == file && !segs[i].Named.Open {
+			sealed = &segs[i]
+		}
+	}
+	if sealed != nil {
+		size := int64(0)
+		switch {
+		case sealed.Local:
+			size = sealed.LocalSize
+		case sealed.Row != nil:
+			size = sealed.Row.Size
+		}
+		if size > 0 && int64(pos) > size {
+			add(I5CheckpointAhead, fmt.Sprintf("%s:%d > %d", file, pos, size),
+				fmt.Sprintf("checkpoint %s:%d is past the end %d of sealed segment %s", file, pos, size, sealed.Name), sealed.Name)
+		}
+		return
+	}
+	prefix, seq, ok := sourceIndex(file)
+	if !ok {
+		return
+	}
+	lastName, lastSeq, found := "", uint64(0), false
+	for _, s := range segs {
+		if p, _ := sourcePrefix(s.Named.Source); p == prefix && s.Named.Seq >= lastSeq {
+			lastName, lastSeq, found = s.Name, s.Named.Seq, true
+		}
+	}
+	if found && seq > lastSeq {
+		add(I5CheckpointAhead, fmt.Sprintf("%s:%d after %s", file, pos, lastName),
+			fmt.Sprintf("checkpoint %s:%d is at a source file after the last chain segment %s", file, pos, lastName), lastName)
+	}
+}
+
+// checkOrder is the chain order's self-check (I2): every local segment is
+// on it, and the source index never goes back inside one prefix.
+func (c *Chain) checkOrder(segs []Segment, add func(Kind, string, string, ...string)) {
+	on := map[string]bool{}
+	last := map[string]uint64{}
+	for _, s := range segs {
+		on[s.Name] = true
+		prefix, ok := sourcePrefix(s.Named.Source)
+		if !ok {
+			continue
+		}
+		if prev, seen := last[prefix]; seen && s.Named.Seq < prev {
+			add(I2OrderInvalid, fmt.Sprintf("%d after %d", s.Named.Seq, prev),
+				fmt.Sprintf("chain order puts %s after index %d of %s", s.Name, prev, prefix), s.Name)
+			continue
+		}
+		last[prefix] = s.Named.Seq
+	}
+	if c.in.Local == nil {
+		return
+	}
+	local, err := c.in.Local.Segments()
+	if err != nil {
+		return
+	}
+	for _, ls := range local {
+		if !on[ls.Name] {
+			add(I2OrderInvalid, ls.Name, fmt.Sprintf("local segment %s is not on the chain order", ls.Name), ls.Name)
+		}
+	}
+}
+
+// sourceIndex splits a source file name into prefix and index.
+func sourceIndex(source string) (string, uint64, bool) {
+	prefix, ok := sourcePrefix(source)
+	if !ok {
+		return "", 0, false
+	}
+	n, err := strconv.ParseUint(source[len(prefix)+1:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return prefix, n, true
 }
 
 // sourcePrefix is the source name without its numeric index.

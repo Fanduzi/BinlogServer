@@ -249,6 +249,12 @@ func violationCases() []violationCase {
 		{"I1/regress-into-next", I1Regression, "mysql-bin.000005", func(t *testing.T, f *fixture) {
 			f.regress(t, "mysql-bin.000005", "mysql-bin.000004", 2000)
 		}},
+		{"I2/order-leaves-out-local", I2OrderInvalid, "mysql-bin.000005", func(t *testing.T, f *fixture) {
+			f.dropOrder("mysql-bin.000005")
+		}},
+		{"I2/order-goes-back", I2OrderInvalid, "mysql-bin.000005", func(t *testing.T, f *fixture) {
+			f.in.Order = []string{"mysql-bin.000003", "mysql-bin.000004", "mysql-bin.000006", "mysql-bin.000005", "mysql-bin.000007.open.e1"}
+		}},
 		{"I1/regress-into-self", I1Regression, "mysql-bin.000003", func(t *testing.T, f *fixture) {
 			f.regress(t, "mysql-bin.000003", "mysql-bin.000003", 5000)
 		}},
