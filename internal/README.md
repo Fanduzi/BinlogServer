@@ -1,7 +1,7 @@
 # internal Module
 
 ## Files
-- `api`, `app`, `binlog`, `config`, `logging`, `meta`, `replication`, `tasks`, `upload`, `ui`, `swaggerdocs`。
+- `api`, `app`, `assurance`, `binlog`, `config`, `logging`, `meta`, `replication`, `tasks`, `upload`, `ui`, `swaggerdocs`。
 
 ## Exports
 - 对外由 `cmd/*` 调用，不直接暴露给仓库外部导入。
