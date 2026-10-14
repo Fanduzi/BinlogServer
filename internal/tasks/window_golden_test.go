@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 type goldenUploader struct{}
@@ -50,6 +51,24 @@ func windowCopyDir(t *testing.T, src, dst string) {
 		}
 		in.Close()
 		out.Close()
+	}
+}
+
+// windowPinTimes gives the files of dir fixed, name-ordered times. Chain
+// order sorts source prefixes by file time, and checkout, copy and the
+// mutations would otherwise decide it.
+func windowPinTimes(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 9, 7, 0, 0, 0, time.UTC)
+	for i, e := range entries {
+		at := base.Add(time.Duration(i) * time.Second)
+		if err := os.Chtimes(filepath.Join(dir, e.Name()), at, at); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -166,6 +185,7 @@ func TestRecoveryWindowGolden(t *testing.T) {
 		if c.mutate != nil {
 			c.mutate(t, dir)
 		}
+		windowPinTimes(t, dir)
 		w, err := s.RecoveryWindow(task.ID)
 		var raw []byte
 		if err != nil {
