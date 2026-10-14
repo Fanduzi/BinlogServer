@@ -1,0 +1,1005 @@
+{
+  "failback": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      }
+    ]
+  },
+  "failback-damaged": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002",
+          "mysql-bin.000003",
+          "mysql-bin.000003.open.e1",
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "failback-damaged/objects": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002",
+          "mysql-bin.000003",
+          "mysql-bin.000003.open.e1",
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "failback-damaged/objects/start": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002",
+          "mysql-bin.000003",
+          "mysql-bin.000003.open.e1",
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "failback-damaged/start": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002",
+          "mysql-bin.000003",
+          "mysql-bin.000003.open.e1",
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "failback-hole": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1155:1256-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      }
+    ]
+  },
+  "failback-hole/objects": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1155:1256-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      },
+      {
+        "files": [
+          "mysql-bin.000002"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "failback-hole/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1155:1256-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      },
+      {
+        "files": [
+          "mysql-bin.000002"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "failback-hole/start": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1155:1256-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      }
+    ]
+  },
+  "failback-tail-partial": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      }
+    ]
+  },
+  "failback-tail-partial/objects": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      },
+      {
+        "files": [
+          "mysql-bin.000002"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "failback-tail-partial/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      },
+      {
+        "files": [
+          "mysql-bin.000002"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "failback-tail-partial/start": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      }
+    ]
+  },
+  "failback/mariadb": {
+    "continuous": true,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "breaks": []
+  },
+  "failback/objects": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      },
+      {
+        "files": [
+          "mysql-bin.000002"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "failback/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      },
+      {
+        "files": [
+          "mysql-bin.000002"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000003.sealed.e1"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "failback/start": {
+    "continuous": false,
+    "earliest": "2026-10-09T07:48:11Z",
+    "latest": "2026-10-09T07:48:51Z",
+    "gtid_set": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:856-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:301-600",
+    "breaks": [
+      {
+        "files": [
+          "5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001",
+          "mysql-bin.000002"
+        ],
+        "reason": "gtid hole between 5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 and mysql-bin.000002"
+      }
+    ]
+  },
+  "live": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": []
+  },
+  "live-damaged": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:29Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-89",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-damaged-first": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000004",
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-damaged-first/objects": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000004",
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-damaged-first/objects/start": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000004",
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-damaged-first/start": {
+    "continuous": false,
+    "earliest": null,
+    "latest": null,
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000004",
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000003 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-damaged/objects": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:29Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-89",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-damaged/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:29Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-89",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-damaged/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:29Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-89",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000005",
+          "mysql-bin.000006",
+          "mysql-bin.000007.open.e1"
+        ],
+        "reason": "segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+      }
+    ]
+  },
+  "live-hole": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-49:90-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000004",
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "missing source file mysql-bin.000004 between mysql-bin.000003 and mysql-bin.000005"
+      },
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "gtid hole between mysql-bin.000003 and mysql-bin.000005"
+      }
+    ]
+  },
+  "live-hole/mariadb": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000004",
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "missing source file mysql-bin.000004 between mysql-bin.000003 and mysql-bin.000005"
+      }
+    ]
+  },
+  "live-hole/objects": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-49:90-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004",
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "missing source file mysql-bin.000004 between mysql-bin.000003 and mysql-bin.000005"
+      },
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "gtid hole between mysql-bin.000003 and mysql-bin.000005"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-hole/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-49:90-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004",
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "missing source file mysql-bin.000004 between mysql-bin.000003 and mysql-bin.000005"
+      },
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "gtid hole between mysql-bin.000003 and mysql-bin.000005"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-hole/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-49:90-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000004",
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "missing source file mysql-bin.000004 between mysql-bin.000003 and mysql-bin.000005"
+      },
+      {
+        "files": [
+          "mysql-bin.000003",
+          "mysql-bin.000005"
+        ],
+        "reason": "gtid hole between mysql-bin.000003 and mysql-bin.000005"
+      }
+    ]
+  },
+  "live-no-open": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-169",
+    "breaks": []
+  },
+  "live-no-open/objects": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-169",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-no-open/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-169",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-no-open/start": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-169",
+    "breaks": []
+  },
+  "live-tail-header": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-170",
+    "breaks": []
+  },
+  "live-tail-header/objects": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-170",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-tail-header/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-170",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-tail-header/start": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:32Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-170",
+    "breaks": []
+  },
+  "live-tail-partial": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": []
+  },
+  "live-tail-partial/objects": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-tail-partial/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live-tail-partial/start": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": []
+  },
+  "live/mariadb": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "breaks": []
+  },
+  "live/objects": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live/objects/start": {
+    "continuous": false,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": [
+      {
+        "files": [
+          "mysql-bin.000003"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000004"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000005"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      },
+      {
+        "files": [
+          "mysql-bin.000006"
+        ],
+        "reason": "segment is not durable off-host (LOCAL_ONLY)"
+      }
+    ]
+  },
+  "live/start": {
+    "continuous": true,
+    "earliest": "2026-10-12T05:08:25Z",
+    "latest": "2026-10-12T05:08:33Z",
+    "gtid_set": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:10-184",
+    "breaks": []
+  }
+}
