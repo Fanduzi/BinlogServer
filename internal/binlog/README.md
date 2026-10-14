@@ -32,4 +32,4 @@
 ## Package Comment Rule
 
 - Go 文件的软件包注释采用 `Package [package name] ...` 形式。
-- `seal_facts.go`: `ReadSealFacts(path)` 一次读取封存分段，给出首尾事件头 UTC 时间（无定时事件时 `HasSpan=false`）和整文件 SHA-256，供封存写入目录行（ADR 0009 P1-4）。
+- `seal_facts.go`: `ReadSealFacts(path)` 流式读取封存分段一次（字节经 TeeReader 进 SHA-256，内存不随段大小增长），给出首尾事件头 UTC 时间（无定时事件时 `HasSpan=false`）和整文件 SHA-256，供封存写入目录行（ADR 0009 P1-4）。

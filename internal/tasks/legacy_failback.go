@@ -780,7 +780,26 @@ func diskCatalogRow(taskID, dir, name string) BinlogFile {
 		row.StartPos = FilePos(start)
 		row.EndPos = FilePos(end)
 	}
+	if !named.Open {
+		withDiskSealFacts(&row)
+	}
 	return row
+}
+
+// withDiskSealFacts gives a sealed row the seal facts of the file it names
+// (ADR 0009 P1-4). When the file cannot be read, the row asks the catalog to
+// clear facts it may hold for a file it no longer names.
+func withDiskSealFacts(row *BinlogFile) {
+	facts, err := binlog.ReadSealFacts(row.FilePath)
+	if err != nil {
+		row.ResetSealFacts = true
+		return
+	}
+	row.SHA256 = facts.SHA256
+	if facts.HasSpan {
+		first, last := facts.First, facts.Last
+		row.FirstEventAt, row.LastEventAt = &first, &last
+	}
 }
 
 // markForUpload makes a sealed row with an object key upload again under

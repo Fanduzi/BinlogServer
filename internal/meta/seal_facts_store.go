@@ -1,5 +1,5 @@
 // Package meta provides module-level functionality for meta.
-// input: a SEALED tasks.BinlogFile that carries seal facts (first/last event time, sha256)
+// input: a SEALED tasks.BinlogFile that carries seal facts (first/last event time, sha256), or asks to reset them
 // output: the facts written to binlog_files (migration 000008) after the row upsert; on a catalog without the columns (MySQL 1054) the write is skipped and remembered, so schema 6 and 7 keep working
 // pos: ADR 0009 phase 1, P1-4; the schema floor stays 6
 // note: if this file changes, update this header and module README.md.
@@ -24,7 +24,7 @@ func (s *MySQLTaskStore) writeSealFacts(ctx context.Context, f tasks.BinlogFile)
 	if state := strings.TrimSpace(f.State); state != "" && !strings.EqualFold(state, "SEALED") {
 		return nil
 	}
-	if f.FirstEventAt == nil && f.LastEventAt == nil && strings.TrimSpace(f.SHA256) == "" {
+	if f.FirstEventAt == nil && f.LastEventAt == nil && strings.TrimSpace(f.SHA256) == "" && !f.ResetSealFacts {
 		return nil
 	}
 	if s.sealFactsAbsent.Load() {

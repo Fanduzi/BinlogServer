@@ -1,14 +1,15 @@
 // Package binlog provides module-level functionality for binlog.
 // input: the path of a sealed segment
-// output: SealFacts: the first and last event-header time and the SHA-256 of the file bytes, from one read
+// output: SealFacts: the first and last event-header time and the SHA-256 of the file bytes, from one streaming read (memory does not grow with the segment)
 // pos: what a seal writes into the catalog row (ADR 0009 phase 1, P1-4: first_event_at, last_event_at, sha256)
 // note: if this file changes, update this header and module README.md.
 package binlog
 
 import (
-	"bytes"
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"time"
 )
@@ -23,18 +24,25 @@ type SealFacts struct {
 	SHA256 string
 }
 
-// ReadSealFacts reads path once.
+// ReadSealFacts reads path once, streaming: the bytes go through the hash
+// while the event headers are read, so memory does not grow with the file.
 func ReadSealFacts(path string) (SealFacts, error) {
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return SealFacts{}, err
 	}
-	sum := sha256.Sum256(raw)
-	out := SealFacts{SHA256: hex.EncodeToString(sum[:])}
-	first, last, ok, err := EventTimeSpan(bytes.NewReader(raw))
+	defer f.Close()
+	h := sha256.New()
+	r := io.TeeReader(bufio.NewReaderSize(f, 256<<10), h)
+	first, last, ok, err := EventTimeSpan(r)
 	if err != nil {
 		return SealFacts{}, err
 	}
+	// A torn tail stops the event walk early; the digest covers every byte.
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return SealFacts{}, err
+	}
+	out := SealFacts{SHA256: hex.EncodeToString(h.Sum(nil))}
 	if ok {
 		out.First, out.Last, out.HasSpan = first.UTC(), last.UTC(), true
 	}
