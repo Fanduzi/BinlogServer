@@ -507,7 +507,14 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 
 // staleStoreReadLocked reports that a store snapshot was read across a publish.
 // seen is persisted[id].published sampled before the read. Caller holds s.mu.
+//
+// A task whose last write failed (s.unpublished) also counts as stale: the
+// memory row is newer than anything the store can return, and copying the
+// store row over it would undo the transition the retry is about to write.
 func (s *Scheduler) staleStoreReadLocked(id string, seen uint64) bool {
+	if _, pending := s.unpublished[id]; pending {
+		return true
+	}
 	return s.persisted[id].published != seen
 }
 

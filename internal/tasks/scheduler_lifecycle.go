@@ -637,23 +637,42 @@ func (s *Scheduler) StopTask(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("cannot stop from state %s", task.State)
 	}
+	prev := task
+	_, wasUnpublished := s.unpublished[id]
 	task.SpecRevision++
 	task.DesiredRun = TaskDesiredStop
 	s.tasks[id] = task
-
-	done, hasRun := s.runs[id]
-	if cancel, ok := s.cancels[id]; ok {
-		cancel()
-		delete(s.cancels, id)
-	}
 
 	// 常见误解：
 	// “调用 StopTask 后应立刻看到 STOPPED”并不成立。这里先写 STOPPING，
 	// 只有 run goroutine 真正退出后才会转为 STOPPED，确保状态语义等于“执行已结束”。
 	// 两阶段停止：先对外可见 STOPPING，再等待 run goroutine defer 收敛到 STOPPED。
+	//
+	// The stop intent is made durable before the dump is cancelled. When the
+	// store refuses the STOPPING row, the Stop is refused as a whole: the
+	// memory row goes back to what the store holds and the dump keeps running,
+	// so the running dump and the stored state never disagree (#336 QA P1).
 	if err := s.markStoppingLocked(task); err != nil {
+		if errors.Is(err, ErrStaleTaskWrite) {
+			s.mu.Unlock()
+			return err
+		}
+		if cur, ok := s.tasks[id]; ok && cur.State == StateStopping && cur.SpecRevision == task.SpecRevision {
+			s.tasks[id] = prev
+			if !wasUnpublished {
+				delete(s.unpublished, id)
+				s.Resolve(id, FindingTaskPersistFailed, "")
+			}
+			s.appendEventLocked(id, "TASK_STOP_REJECTED", "stop not recorded; task keeps running", err.Error())
+		}
 		s.mu.Unlock()
-		return err
+		return fmt.Errorf("stop not recorded, task keeps running: %w", err)
+	}
+
+	done, hasRun := s.runs[id]
+	if cancel, ok := s.cancels[id]; ok {
+		cancel()
+		delete(s.cancels, id)
 	}
 
 	// 没有本进程的执行时，别人还占着租约就不能写成 STOPPED：dump 还在那个 worker 上。

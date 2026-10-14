@@ -13,7 +13,16 @@ import (
 // notePersistFailureLocked records that the store does not hold this task's
 // latest state. Caller holds s.mu.
 func (s *Scheduler) notePersistFailureLocked(id string, state State, err error) {
-	if err == nil || errors.Is(err, ErrStaleTaskWrite) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, ErrStaleTaskWrite) {
+		// The store's fence says another epoch owns the row now; its row wins
+		// and there is nothing of ours left to republish.
+		if _, ok := s.unpublished[id]; ok {
+			delete(s.unpublished, id)
+			s.Resolve(id, FindingTaskPersistFailed, "")
+		}
 		return
 	}
 	s.unpublished[id] = struct{}{}
