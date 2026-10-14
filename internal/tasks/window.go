@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the replay inventory (sealed segments and the highest open epoch), each segment's bytes through OpenTaskSegment, the storage-health damage cut, and whether object storage is configured
-// output: GET /window: the window internal/assurance derives (WindowOf), plus one damaged-segment or stored-hole break when storage health stops the chain early, the same cutoff /replay uses
+// output: GET /window: the window internal/assurance derives (WindowOf), plus one damaged-segment, stored-hole, unreadable-segment or duplicated-source-file break when storage health stops the chain early, the same cutoff /replay uses
 // pos: adapter only (ADR 0009 phase 1, P1-2): reads bytes and projects rows; the derivation lives in internal/assurance/window.go
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -19,6 +19,7 @@ import (
 
 const (
 	breakUnreadableSegment = "segment %s is not readable (corrupt binlog event size); the window stops before it and leaves out it and every later segment"
+	breakOverlapSegment    = "source file %s is stored twice (%s is a second copy, STORAGE_INCONSISTENT); the window stops before both copies and leaves out them and every later segment"
 	breakDamaged           = "segment %s is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
 	breakStoredHole        = "gtid hole: a source switch recorded %s as stored, but no segment holds it (STORAGE_INCONSISTENT); the window stops before %s and leaves out it and every later segment"
 )
@@ -73,6 +74,9 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 			damage.Reason = fmt.Sprintf(breakStoredHole, problem.Missing, problem.Segment)
 		case StorageUnreadable:
 			damage.Reason = fmt.Sprintf(breakUnreadableSegment, problem.Segment)
+		case StorageOverlap:
+			named, _ := binlog.ClassifySegment(problem.Segment)
+			damage.Reason = fmt.Sprintf(breakOverlapSegment, named.Source, problem.Segment)
 		}
 		chosen = kept
 	}

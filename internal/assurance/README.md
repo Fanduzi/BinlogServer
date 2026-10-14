@@ -20,3 +20,4 @@
 - `health.go`: `Chain.Health()` 是存储健康结论：先看 `Ledger.Damage`（I1，带检查点、起点集合和 flavor），再按 `Inputs.Plan` 给出的顺序取第一个 `I3_LEGACY_FAILBACK` / `I3_STORED_HOLE`；分段已损坏时不调用 `Plan`，`Plan` 最多调用一次（`Check` 也会把它的结论附上）。其它 Kind 不构成结论，保持 ADR 0009 之前的行为。`KeepBefore(links, segment)` 是 /replay 和 /window 的截断：保留排在问题分段之前、且不是同一源序号副本的分段；问题不指名分段时什么也不保留。链顺序和代际比较仍由调用方给出（阶段 1）。
   - #348 QA 第 2 轮：顺序自检跳过同一源文件里低于最高 open epoch 的 `.open` 段（`SelectReplayFiles` 有意丢弃）；同一源序号的两个封存段只有在一段读不到、GTID 相交（MySQL）或事件位点区间重叠时才报 `I4_OVERLAP`，首尾相接的 epoch 不算。
 - `I1_UNREADABLE`：封存段事件 size 损坏，`Check` 报出，`Health` 在损坏（I1）之后、规划类之前给出该判定，回放和窗口截在它之前（#361）。
+- `Health` 的 I4（#370）：在规划类之后，按 `Inputs.Order`（tasks 给的回放顺序）找同一源文件的第二个封存副本，判定与 `Check` 共用 `sealedRepeats`，只算两份都在本地目录的情形；问题段是后一个副本，`KeepBefore` 把两份及其后的分段都截掉。

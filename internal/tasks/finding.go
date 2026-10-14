@@ -50,6 +50,8 @@ const (
 	FindingTransitionStalled FindingKind = "TASK_TRANSITION_STALLED"
 	// FindingSegmentUnreadable: a sealed segment has a corrupt event size; /replay and /window stop before it (#358).
 	FindingSegmentUnreadable FindingKind = "SEGMENT_UNREADABLE"
+	// FindingSegmentOverlap: a sealed source file is in the task directory twice with the same events, or one copy cannot be read; /replay and /window stop before both (#370).
+	FindingSegmentOverlap FindingKind = "SEGMENT_OVERLAP"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.
