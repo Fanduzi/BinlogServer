@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -118,5 +119,99 @@ func TestS14_DashboardRowCarriesOpenFindings(t *testing.T) {
 	}
 	if len(out.Tasks) != 1 || out.Tasks[0].OpenFindings != 1 {
 		t.Fatalf("dashboard rows %+v, want open_findings 1", out.Tasks)
+	}
+}
+
+type listDown struct{ *tasks.Scheduler }
+
+func (listDown) ListClusterObservation(context.Context) ([]tasks.Task, error) {
+	return nil, errors.New("context deadline exceeded")
+}
+
+// #339 QA P2: with the metadata store down, /metrics still answers, says the
+// task list is unavailable, and shows the finding in the same scrape.
+func TestMetricsAnswerWhenTaskListFails(t *testing.T) {
+	sched := tasks.NewScheduler()
+	rec := httptest.NewRecorder()
+	NewServer(listDown{sched}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`binlog_server_metric_source_up{source="task_list",task_id="_cluster"} 0`,
+		`binlog_server_finding_open{kind="METRIC_SOURCE_FAILED",severity="WARNING",task_id="_cluster"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in\n%s", want, body)
+		}
+	}
+}
+
+// Partial source failures show in finding_open in the same scrape too.
+func TestMetricSourceFindingInSameScrape(t *testing.T) {
+	sched := tasks.NewScheduler()
+	if _, err := sched.CreateTask("a", "a"); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	NewServer(brokenSources{sched}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(rec.Body.String(), `binlog_server_finding_open{kind="METRIC_SOURCE_FAILED",severity="WARNING",task_id="_cluster"} 1`) {
+		t.Fatalf("first scrape has no METRIC_SOURCE_FAILED in finding_open:\n%s", rec.Body.String())
+	}
+}
+
+// cappedFindingStore returns open findings newest first under a limit, like task_findings.
+type cappedFindingStore struct{ open []tasks.Finding }
+
+func (c *cappedFindingStore) UpsertFinding(context.Context, tasks.Finding) error { return nil }
+func (c *cappedFindingStore) ListFindings(context.Context, string, bool, int) ([]tasks.Finding, error) {
+	return nil, nil
+}
+func (c *cappedFindingStore) ListOpenFindings(_ context.Context, limit int) ([]tasks.Finding, error) {
+	if limit > len(c.open) {
+		limit = len(c.open)
+	}
+	return c.open[:limit], nil
+}
+func (c *cappedFindingStore) CountOpenFindings(context.Context) (map[string]int, error) {
+	out := map[string]int{}
+	for _, f := range c.open {
+		out[f.TaskID]++
+	}
+	return out, nil
+}
+
+// #339 QA P2: open_findings is counted per task, not from the newest 1000 overall.
+func TestS14_OpenFindingsCountedPerTask(t *testing.T) {
+	store := &cappedFindingStore{}
+	now := time.Now()
+	for i := 0; i < 1500; i++ {
+		store.open = append(store.open, tasks.Finding{TaskID: "1", Kind: tasks.FindingUploadUnverified, Subject: fmt.Sprint(i), Severity: tasks.FindingWarning, LastSeen: now})
+	}
+	store.open = append(store.open, tasks.Finding{TaskID: "2", Kind: tasks.FindingUploadUnverified, Subject: "old", Severity: tasks.FindingWarning, LastSeen: now.Add(-time.Hour)})
+	sched := tasks.NewScheduler(tasks.WithFindingStore(store))
+	for _, n := range []string{"a", "b"} {
+		if _, err := sched.CreateTask(n, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	NewServer(sched).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/dashboard", nil))
+	var out struct {
+		Tasks []struct {
+			Task         tasks.Task `json:"task"`
+			OpenFindings int        `json:"open_findings"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, row := range out.Tasks {
+		got[row.Task.ID] = row.OpenFindings
+	}
+	if got["1"] != 1500 || got["2"] != 1 {
+		t.Fatalf("open_findings %v, want 1:1500 2:1", got)
 	}
 }

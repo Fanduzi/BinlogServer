@@ -300,10 +300,13 @@ func (a *App) Run(ctx context.Context) error {
 		opts = append(opts, tasks.WithFindingStore(tasks.NewFileFindingStore(filepath.Join(a.cfg.DataDir, tasks.FindingFileName))))
 	}
 	scheduler := tasks.NewScheduler(opts...)
-	if a.cfg.MetaDSN == "" {
-		if err := scheduler.LoadOpenFindings(runCtx); err != nil {
+	// Seed the open findings in both modes: a restarted process shows them in
+	// /metrics, and schema 6 (no task_findings) turns the store off up front.
+	if err := scheduler.LoadOpenFindings(runCtx); err != nil {
+		if a.cfg.MetaDSN == "" {
 			return fmt.Errorf("load findings: %w", err)
 		}
+		log.Printf("load open findings from metadata store: %v", err)
 	}
 	// ADR 0009: one writer for findings; retries failed writes and task rows.
 	scheduler.StartFindingSink(runCtx, 5*time.Second)

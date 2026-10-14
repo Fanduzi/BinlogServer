@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -1631,18 +1632,14 @@ func (s *Server) replicationFor(task tasks.Task, now time.Time) taskReplicationR
 // read error leaves the counts empty; /api/findings and /metrics still show them.
 func (s *Server) openFindingCounts(ctx context.Context) map[string]int {
 	src, ok := s.tasks.(interface {
-		OpenFindings(ctx context.Context, limit int) ([]tasks.Finding, error)
+		OpenFindingCounts(ctx context.Context) (map[string]int, error)
 	})
 	if !ok {
 		return nil
 	}
-	open, err := src.OpenFindings(ctx, 1000)
+	counts, err := src.OpenFindingCounts(ctx)
 	if err != nil {
-		return nil
+		log.Printf("dashboard open finding counts: %v", err)
 	}
-	out := make(map[string]int, len(open))
-	for _, f := range open {
-		out[f.TaskID]++
-	}
-	return out
+	return counts
 }

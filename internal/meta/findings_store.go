@@ -100,3 +100,29 @@ func scanFindings(rows *sql.Rows) ([]tasks.Finding, error) {
 	}
 	return out, rows.Err()
 }
+
+const countOpenFindingsSQL = `
+SELECT task_id, COUNT(*)
+FROM task_findings
+WHERE resolved_at IS NULL
+GROUP BY task_id;
+`
+
+// CountOpenFindings returns open findings per task (tasks.FindingCounter).
+func (s *MySQLTaskStore) CountOpenFindings(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, countOpenFindingsSQL)
+	if err != nil {
+		return nil, findingErr(err)
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var task string
+		var n int
+		if err := rows.Scan(&task, &n); err != nil {
+			return nil, err
+		}
+		out[task] = n
+	}
+	return out, rows.Err()
+}

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -139,6 +140,11 @@ func (s *Scheduler) LoadOpenFindings(ctx context.Context) error {
 	}
 	items, err := store.ListOpenFindings(ctx, 1000)
 	if errors.Is(err, ErrFindingStoreAbsent) {
+		// Schema 6: findings stay in memory, and finding_store_active is 0 from now on.
+		log.Printf("%v", err)
+		b.mu.Lock()
+		b.store = nil
+		b.mu.Unlock()
 		return nil
 	}
 	if err != nil {
@@ -153,4 +159,17 @@ func (s *Scheduler) LoadOpenFindings(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// CountOpenFindings counts open findings per task (FindingCounter).
+func (f *fileFindingStore) CountOpenFindings(context.Context) (map[string]int, error) {
+	open, err := f.list(Finding.Open, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int)
+	for _, it := range open {
+		out[it.TaskID]++
+	}
+	return out, nil
 }
