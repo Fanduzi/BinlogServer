@@ -147,3 +147,53 @@ func TestSecondInteriorHole(t *testing.T) {
 		t.Fatalf("interior hole before %s missed: %s", qs5, kinds(vs))
 	}
 }
+
+// SelectReplayFiles keeps only the highest open epoch of a source file; the
+// lower one it drops on purpose is not missing from the order.
+func TestOrderSkipsSupersededOpenEpoch(t *testing.T) {
+	f := live(t)
+	raw, err := os.ReadFile(filepath.Join(f.dir, qs7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2 := "mysql-bin.000007.open.e2"
+	if err := os.WriteFile(filepath.Join(f.dir, e2), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.in.Order = []string{qs3, qs4, qs5, qs6, e2}
+	if vs := f.check(t); has(vs, I2OrderInvalid, "") {
+		t.Fatalf("lower open epoch reported: %s", kinds(vs))
+	}
+	f.in.Order = []string{qs3, qs4, qs5, qs6, qs7}
+	if vs := f.check(t); !has(vs, I2OrderInvalid, e2) {
+		t.Fatalf("highest open epoch left out of the order: %s", kinds(vs))
+	}
+}
+
+// The failback fixture's mysql-bin.000003 and mysql-bin.000003.sealed.e1 are
+// two epochs of one source file that continue each other (GTIDs 1156-1255,
+// then 1256-1555): not an overlap. A copy of the same bytes still is.
+func TestEpochContinuationIsNotOverlap(t *testing.T) {
+	dir := copyDir(t, filepath.Join("..", "binlog", "testdata", "ledger", "failback"))
+	order := []string{"mysql-bin.000002", "mysql-bin.000003", "mysql-bin.000003.sealed.e1", "mysql-bin.000003.open.e1", failbackB + ".mysql-bin.000001"}
+	for _, flavor := range []string{"mysql", "mariadb"} {
+		in := Inputs{Flavor: flavor, Order: order, Local: binlog.LedgerAt(dir), Switches: []Switch{{Identity: failbackB}}}
+		if vs := ChainOf(in).Check(testNow); has(vs, I4Overlap, "") {
+			t.Errorf("%s: epoch continuation reported as overlap: %s", flavor, kinds(vs))
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "mysql-bin.000003.sealed.e1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mysql-bin.000003.sealed.e2"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dup := []string{"mysql-bin.000002", "mysql-bin.000003", "mysql-bin.000003.sealed.e1", "mysql-bin.000003.sealed.e2", "mysql-bin.000003.open.e1", failbackB + ".mysql-bin.000001"}
+	for _, flavor := range []string{"mysql", "mariadb"} {
+		in := Inputs{Flavor: flavor, Order: dup, Local: binlog.LedgerAt(dir), Switches: []Switch{{Identity: failbackB}}}
+		if vs := ChainOf(in).Check(testNow); !has(vs, I4Overlap, "mysql-bin.000003.sealed.e2") {
+			t.Errorf("%s: a copy of the same epoch bytes is an overlap: %s", flavor, kinds(vs))
+		}
+	}
+}
