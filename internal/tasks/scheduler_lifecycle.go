@@ -650,8 +650,10 @@ func (s *Scheduler) StopTask(id string) error {
 	//
 	// The stop intent is made durable before the dump is cancelled. When the
 	// store refuses the STOPPING row, the Stop is refused as a whole: the
-	// memory row goes back to what the store holds and the dump keeps running,
-	// so the running dump and the stored state never disagree (#336 QA P1).
+	// memory row goes back to what the store holds and the stop is not
+	// applied, so the dump and the stored state never disagree (#336 QA P1).
+	// With a read-only store the dump stops anyway on its next checkpoint
+	// write; that is METADATA_WRITE_BLOCKED (ADR 0009 §2.4).
 	if err := s.markStoppingLocked(task); err != nil {
 		if errors.Is(err, ErrStaleTaskWrite) {
 			s.mu.Unlock()
@@ -663,10 +665,10 @@ func (s *Scheduler) StopTask(id string) error {
 				delete(s.unpublished, id)
 				s.Resolve(id, FindingTaskPersistFailed, "")
 			}
-			s.appendEventLocked(id, "TASK_STOP_REJECTED", "stop not recorded; task keeps running", err.Error())
+			s.appendEventLocked(id, "TASK_STOP_REJECTED", "stop not recorded; the stop is not applied", err.Error())
 		}
 		s.mu.Unlock()
-		return fmt.Errorf("stop not recorded, task keeps running: %w", err)
+		return fmt.Errorf("stop not recorded; the stop is not applied and the task state is unchanged: %w", err)
 	}
 
 	done, hasRun := s.runs[id]
@@ -1106,6 +1108,15 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			return
 		}
 		s.appendEventLocked(id, "TASK_RUNNER_ERROR", "runner error", errMsg)
+		if IsTransientMetadataError(err) && !IsSourceUnreachable(err) && !isObjectPurgeFailed(err) {
+			// Deliberate: a dump whose progress cannot be recorded stops and
+			// retries with backoff instead of writing binlog the metadata
+			// store does not know about. It is a CRITICAL finding, and the
+			// task shows RETRY_BACKOFF/STARTING, never a healthy RUNNING
+			// (ADR 0009). The source keeps the binlog; the retry catches up.
+			s.Report(Finding{TaskID: id, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical,
+				Detail: "replication paused: the metadata store refused a write; the dump stopped and retries with backoff until the store accepts writes: " + errMsg})
+		}
 		// Allowlist only: SOURCE_UNREACHABLE (budget 10), transient metadata
 		// text, and OBJECT_PURGE_FAILED. Anything else fails once.
 		if !retryAllowed(err) {
@@ -1173,7 +1184,12 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) (bool, 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		logTransitionPersistError(id, StateRunning, s.markRunnerReadyLocked(id))
+		err := s.markRunnerReadyLocked(id)
+		logTransitionPersistError(id, StateRunning, err)
+		if cur, ok := s.tasks[id]; err == nil && ok && cur.State == StateRunning {
+			// The RUNNING row was written, so the metadata store takes writes again.
+			s.Resolve(id, FindingMetadataWriteBlocked, "")
+		}
 	}
 
 	if n, ok := s.runner.(runnerWithNotify); ok {

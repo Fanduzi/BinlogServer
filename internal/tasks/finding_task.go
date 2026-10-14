@@ -6,6 +6,7 @@
 package tasks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -48,6 +49,7 @@ func (s *Scheduler) notePersistedLocked(id string) {
 // last write failed. persistTaskLocked keeps the newest snapshot, so this
 // never writes an older state over a newer one from this process.
 func (s *Scheduler) republishUnpublished() {
+	s.replayRefusedEvents()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.store == nil || len(s.unpublished) == 0 {
@@ -67,6 +69,54 @@ func (s *Scheduler) republishUnpublished() {
 		// Errors are recorded by persistTaskLocked itself.
 		if err := s.persistTaskLocked(task); err != nil {
 			continue
+		}
+	}
+}
+
+// maxRefusedEvents bounds the replay buffer; older events beyond it are
+// dropped and their EVENT_PERSIST_FAILED finding stays open.
+const maxRefusedEvents = 10000
+
+func (s *Scheduler) keepRefusedEvent(e TaskEvent) {
+	s.refusedMu.Lock()
+	defer s.refusedMu.Unlock()
+	if len(s.refusedEvents) >= maxRefusedEvents {
+		s.refusedEvents = s.refusedEvents[1:]
+	}
+	s.refusedEvents = append(s.refusedEvents, e)
+}
+
+// replayRefusedEvents writes refused events again, oldest first, and stops at
+// the first refusal so they keep their order. A finding resolves once no
+// refused event of that task and type is left.
+func (s *Scheduler) replayRefusedEvents() {
+	store := s.eventStore
+	if store == nil {
+		return
+	}
+	// Held for the pass (each write is bounded) so a concurrent refusal or a
+	// full-buffer trim cannot shift what was written.
+	s.refusedMu.Lock()
+	written := 0
+	for _, e := range s.refusedEvents {
+		ctx, cancel := withTimeout(context.Background(), s.internalWriteTimeout)
+		err := store.AppendEvent(ctx, e)
+		cancel()
+		if err != nil {
+			break
+		}
+		written++
+	}
+	done := append([]TaskEvent(nil), s.refusedEvents[:written]...)
+	s.refusedEvents = s.refusedEvents[written:]
+	left := make(map[[2]string]bool, len(s.refusedEvents))
+	for _, e := range s.refusedEvents {
+		left[[2]string{e.TaskID, e.Type}] = true
+	}
+	s.refusedMu.Unlock()
+	for _, e := range done {
+		if !left[[2]string{e.TaskID, e.Type}] {
+			s.Resolve(e.TaskID, FindingEventPersistFailed, e.Type)
 		}
 	}
 }

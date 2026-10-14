@@ -326,14 +326,7 @@ func killMySQLDumpThread(source tasks.SourceConfig, connectionID uint32) error {
 	if connectionID == 0 || source.Host == "" || source.Port == 0 || source.User == "" {
 		return nil
 	}
-	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-	ctx, cancel := context.WithTimeout(context.Background(), killConnectTimeout)
-	defer cancel()
-	conn, err := sqlclient.ConnectWithContext(ctx, addr, source.User, source.Password, "", killConnectTimeout, func(c *sqlclient.Conn) error {
-		c.ReadTimeout = killConnectTimeout
-		c.WriteTimeout = killConnectTimeout
-		return nil
-	})
+	conn, err := connectSource(context.Background(), source)
 	if err != nil {
 		return err
 	}
@@ -682,9 +675,22 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 			return nil, err
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
+			// No byte, not even a heartbeat, for the read timeout: a stall,
+			// whatever go-mysql's own read deadline has done so far.
+			if silent := r.now().Sub(mark.at); silent >= dumpReadTimeout {
+				r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
+					Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting", silent.Truncate(time.Second), file, pos)})
+				return nil, classifySourceError(fmt.Errorf("dump silent for %s: %w", silent.Truncate(time.Second), errDumpSilent))
+			}
 			// Quiet dump wait is not at-tip by itself: FILE_POS/GTID catch-up can
 			// idle while still behind SHOW MASTER STATUS. Confirm file then pos.
-			tip := r.confirmIdleAtTip(ctx, source, file, pos)
+			// The probe never runs past the point where silence becomes a
+			// stall, so a black-holed source is reported at the read timeout.
+			budget := tipProbeTimeout
+			if left := dumpReadTimeout - r.now().Sub(mark.at); left < budget {
+				budget = max(left, 100*time.Millisecond)
+			}
+			tip := r.confirmIdleAtTip(ctx, source, file, pos, budget)
 			if atTip != nil {
 				*atTip = tip
 			}
@@ -717,6 +723,11 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 
 // dumpStallSlack absorbs scheduling jitter around the read timeout.
 const dumpStallSlack = 2 * time.Second
+
+// tipProbeTimeout bounds the idle SHOW MASTER STATUS probe as a whole.
+const tipProbeTimeout = 5 * time.Second
+
+var errDumpSilent = errors.New("dump connection silent past the read timeout")
 
 type recvMark struct {
 	session  binlogStreamer
@@ -753,11 +764,14 @@ func sameSession(a, b binlogStreamer) (same bool) {
 	return a == b
 }
 
-func (r *MySQLRunner) confirmIdleAtTip(ctx context.Context, source tasks.SourceConfig, file string, pos uint32) bool {
+func (r *MySQLRunner) confirmIdleAtTip(ctx context.Context, source tasks.SourceConfig, file string, pos uint32, budget time.Duration) bool {
 	if r.fetcher == nil {
 		return false
 	}
-	status, err := r.fetcher.FetchMasterStatus(ctx, source)
+	// Bounded so a black-holed source cannot freeze the dump loop.
+	probeCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	status, err := r.fetcher.FetchMasterStatus(probeCtx, source)
 	if err != nil {
 		return false
 	}
@@ -1284,12 +1298,9 @@ func waitDumpReconnect(ctx context.Context) error {
 // This process cannot shorten that wait while the path stays blackholed.
 const dumpHeartbeatPeriod = 15 * time.Second
 
-// dumpCloseTimeout bounds syncer.Close and killConnectTimeout bounds our own
-// KILL connection; tests shorten them.
-var (
-	dumpCloseTimeout   = 5 * time.Second
-	killConnectTimeout = 5 * time.Second
-)
+// dumpCloseTimeout bounds syncer.Close; tests shorten it. Our own KILL
+// connection is bounded by connectSource.
+var dumpCloseTimeout = 5 * time.Second
 
 // dumpReadTimeout bounds a dump read. Three missed heartbeats (ADR 0009:
 // 45s) mean the connection is dead, so the read fails and the dump reconnects.
@@ -1928,9 +1939,8 @@ func defaultServerID(taskID string) uint32 {
 type mysqlStatusFetcher struct{}
 
 // FetchMasterStatus 读取主库当前 binlog file/pos。
-func (f *mysqlStatusFetcher) FetchMasterStatus(_ context.Context, source tasks.SourceConfig) (MasterStatus, error) {
-	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
+func (f *mysqlStatusFetcher) FetchMasterStatus(ctx context.Context, source tasks.SourceConfig) (MasterStatus, error) {
+	conn, err := connectSource(ctx, source)
 	if err != nil {
 		return MasterStatus{}, classifySourceError(err)
 	}
@@ -1964,9 +1974,8 @@ func (f *mysqlStatusFetcher) FetchMasterStatus(_ context.Context, source tasks.S
 
 // FetchServerUUID 读取源库身份（MySQL server_uuid；MariaDB 使用 server_id+gtid_domain_id）。
 // server_uuid 为空或 unknown system variable 时，非 mariadb flavor 返回要求改 flavor 的永久错误。
-func (f *mysqlStatusFetcher) FetchServerUUID(_ context.Context, source tasks.SourceConfig) (string, error) {
-	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
+func (f *mysqlStatusFetcher) FetchServerUUID(ctx context.Context, source tasks.SourceConfig) (string, error) {
+	conn, err := connectSource(ctx, source)
 	if err != nil {
 		return "", classifySourceError(err)
 	}
