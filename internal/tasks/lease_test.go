@@ -1574,12 +1574,19 @@ func TestScheduler_StopPersistsStoppedWhenStoppingWriteLandsLater(t *testing.T) 
 	case <-time.After(2 * time.Second):
 		t.Fatal("STOPPING persist did not start")
 	}
+	// The stop intent is made durable before the dump is cancelled (#336 QA
+	// P1), so no STOPPED write can overtake the held STOPPING write.
+	select {
+	case <-store.stoppedWritten:
+		t.Fatal("STOPPED was written before the STOPPING intent landed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(store.releaseStopping)
 	select {
 	case <-store.stoppedWritten:
 	case <-time.After(2 * time.Second):
-		t.Fatal("STOPPED persist did not pass the held STOPPING write")
+		t.Fatal("STOPPED was not written after the STOPPING intent landed")
 	}
-	close(store.releaseStopping)
 
 	select {
 	case err := <-stopDone:
@@ -1680,12 +1687,19 @@ func TestScheduler_StopWritesStoppedOnNewerSpecWhenSnapshotIsStale(t *testing.T)
 	case <-time.After(2 * time.Second):
 		t.Fatal("STOPPING persist did not start")
 	}
+	// The stop intent is made durable before the dump is cancelled (#336 QA
+	// P1), so no STOPPED write can overtake the held STOPPING write.
+	select {
+	case <-store.stoppedWritten:
+		t.Fatal("STOPPED was written before the STOPPING intent landed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(store.releaseStopping)
 	select {
 	case <-store.stoppedWritten:
 	case <-time.After(2 * time.Second):
-		t.Fatal("STOPPED persist did not pass the held STOPPING write")
+		t.Fatal("STOPPED was not written after the STOPPING intent landed")
 	}
-	close(store.releaseStopping)
 
 	select {
 	case err := <-stopDone:
