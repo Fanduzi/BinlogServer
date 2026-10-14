@@ -598,11 +598,13 @@ func TestAdoptDiskBackup_DefaultFilePosThenStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	sealedBody := []byte("sealed-seg")
-	openBody := []byte("open-seg")
 	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), sealedBody, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000004.open.e2"), openBody, 0o644); err != nil {
+	// #356: the resume point is the last event's end log_pos, not the size.
+	writeDiskSegment(t, filepath.Join(taskDir, "mysql-bin.000004.open.e2"), 777)
+	openBody, err := os.ReadFile(filepath.Join(taskDir, "mysql-bin.000004.open.e2"))
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -644,7 +646,7 @@ func TestAdoptDiskBackup_DefaultFilePosThenStart(t *testing.T) {
 	if adopted.Source.Host != "127.0.0.1" || adopted.Source.User != "repl" || adopted.Source.Password != "s3cret-adopt" || adopted.Source.Flavor != "mysql" {
 		t.Fatalf("source %+v", adopted.Source)
 	}
-	if adopted.Start.Mode != StartModeFilePos || adopted.Start.File != "mysql-bin.000004" || adopted.Start.Pos != uint32(len(openBody)) {
+	if adopted.Start.Mode != StartModeFilePos || adopted.Start.File != "mysql-bin.000004" || adopted.Start.Pos != 777 {
 		t.Fatalf("start %+v", adopted.Start)
 	}
 	if !adopted.KeepLocalSegments {
@@ -666,7 +668,7 @@ func TestAdoptDiskBackup_DefaultFilePosThenStart(t *testing.T) {
 		if got.ID != "4" || got.Epoch != 3 || !got.KeepLocalSegments {
 			t.Fatalf("runner task %+v", got)
 		}
-		if got.Start.File != "mysql-bin.000004" || got.Start.Pos != uint32(len(openBody)) {
+		if got.Start.File != "mysql-bin.000004" || got.Start.Pos != 777 {
 			t.Fatalf("runner start %+v", got.Start)
 		}
 	case <-time.After(2 * time.Second):
