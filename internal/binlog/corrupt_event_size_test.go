@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,4 +119,48 @@ func findNthEventHeader(t *testing.T, body []byte, n int) int {
 	}
 	t.Fatal("unreachable")
 	return 0
+}
+
+// A size under 1 GiB that runs past the end of a sealed file makes it
+// unreadable, and is refused against the file length without allocating it.
+// The same bytes in an open segment are a torn tail.
+func TestLedgerContents_SizePastSealedEOFIsCorrupt(t *testing.T) {
+	const uuid = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	when := time.Date(2024, 1, 1, 1, 20, 0, 0, time.UTC)
+	body, _ := testGTIDSegment(t, when, uuid+":1-2", true, uuid, 3)
+	corrupt := append([]byte(nil), body...)
+	hdrAt := findNthEventHeader(t, corrupt, 2)
+	corrupt[hdrAt+9+3] = 0x3f
+	dir := t.TempDir()
+	for _, name := range []string{"mysql-bin.000001", "mysql-bin.000002.open.e1"} {
+		if err := os.WriteFile(filepath.Join(dir, name), corrupt, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := makeEventBody
+	makeEventBody = func(n int) []byte {
+		if n > 1<<20 {
+			t.Fatalf("would allocate %d bytes past the file end", n)
+		}
+		return make([]byte, n)
+	}
+	t.Cleanup(func() { makeEventBody = old })
+	l := LedgerAt(dir)
+	if _, err := l.Contents("mysql-bin.000001"); err != nil {
+		t.Fatalf("sealed contents keep the torn-tail reading: err=%v", err)
+	}
+	if _, err := l.Contents("mysql-bin.000002.open.e1"); err != nil {
+		t.Fatalf("open segment torn tail: err=%v", err)
+	}
+	p, ok := l.Unreadable()
+	if !ok || p.Segment != "mysql-bin.000001" || len(p.Valid) != 0 || !strings.Contains(p.Detail, "mysql-bin.000001") {
+		t.Fatalf("Unreadable = %+v %v", p, ok)
+	}
+	// A plain reader is bounded by its real length too: no 1 GiB allocation.
+	if _, err := ReadSegmentContents(bytes.NewReader(corrupt)); err != nil {
+		t.Fatalf("unsealed bytes: err=%v, want torn tail", err)
+	}
+	if _, err := ReadSealedSegmentContents(bytes.NewReader(corrupt)); !errors.Is(err, ErrCorruptEventSize) {
+		t.Fatalf("sealed bytes: err=%v, want ErrCorruptEventSize", err)
+	}
 }

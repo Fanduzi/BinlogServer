@@ -6,6 +6,7 @@
 package assurance
 
 import (
+	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -133,6 +134,21 @@ func (f *fixture) removeFile(t *testing.T, name string) {
 	}
 }
 
+// corruptSize sets the high byte of the second event's size in name.
+func (f *fixture) corruptSize(t *testing.T, name string, high byte) {
+	t.Helper()
+	p := filepath.Join(f.dir, name)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := 4 + int(binary.LittleEndian.Uint32(raw[4+9:4+13]))
+	raw[off+12] = high
+	if err := os.WriteFile(p, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // regress appends the body of src to dst: the v0.5.57 re-dump signature.
 func (f *fixture) regress(t *testing.T, dst, src string, n int64) {
 	t.Helper()
@@ -248,6 +264,13 @@ func violationCases() []violationCase {
 		// I1: the v0.5.57 re-dump signature inside a sealed segment.
 		{"I1/regress-into-next", I1Regression, "mysql-bin.000005", func(t *testing.T, f *fixture) {
 			f.regress(t, "mysql-bin.000005", "mysql-bin.000004", 2000)
+		}},
+		// I1: a corrupt event size in a sealed segment (#358/#361).
+		{"I1/unreadable-size-4GiB", I1Unreadable, "mysql-bin.000004", func(t *testing.T, f *fixture) {
+			f.corruptSize(t, "mysql-bin.000004", 0xff)
+		}},
+		{"I1/unreadable-size-past-eof", I1Unreadable, "mysql-bin.000005", func(t *testing.T, f *fixture) {
+			f.corruptSize(t, "mysql-bin.000005", 0x3f)
 		}},
 		{"I2/order-leaves-out-local", I2OrderInvalid, "mysql-bin.000005", func(t *testing.T, f *fixture) {
 			f.dropOrder("mysql-bin.000005")
