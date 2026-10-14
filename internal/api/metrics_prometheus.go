@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers (continued switches, and stops the task still sits on, each move counted once); store list errors stay 5xx instead of empty task_state_count
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers (continued switches, and stops the task still sits on, each move counted once); a store list error answers 200 with metric_source_up{_cluster,task_list} 0 and no task series instead of 5xx
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -23,6 +23,10 @@ const allFilesLimit = int(^uint(0) >> 1)
 type apiMetricsCollector struct {
 	tasks       taskService
 	observation []tasks.Task
+	// listErr is the task list read error. The scrape still answers: it says
+	// the list is unavailable (metric_source_up task_list 0 plus a finding)
+	// instead of a 5xx that drops every series, the finding gauges included.
+	listErr error
 
 	taskStateCountDesc      *prometheus.Desc
 	replicationLagSeconds   *prometheus.Desc
@@ -156,6 +160,12 @@ func (c *apiMetricsCollector) sourceRead(ch chan<- prometheus.Metric, taskID, so
 }
 
 func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
+	if !c.sourceRead(ch, tasks.ClusterFindingTask, "task_list", c.listErr) {
+		// No task list: per-task series cannot be produced, and the other
+		// store reads would only wait for the same outage.
+		ch <- prometheus.MustNewConstMetric(c.sourceUpDesc, prometheus.GaugeValue, 1, "", "")
+		return
+	}
 	now := time.Now()
 	items := append([]tasks.Task(nil), c.observation...)
 	sort.Slice(items, func(i, j int) bool {
@@ -340,15 +350,48 @@ func countUploadFailures(taskSvc taskService, items []tasks.Task) int64 {
 func newMetricsHandler(taskSvc taskService) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		items, err := taskSvc.ListClusterObservation(r.Context())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		collector := newAPIMetricsCollector(taskSvc, items)
+		collector.listErr = err
+		// Collect the task metrics first: their source reads report findings,
+		// and finding_open below must show them in this same scrape.
 		registry := prometheus.NewRegistry()
-		registry.MustRegister(newAPIMetricsCollector(taskSvc, items))
+		registry.MustRegister(precollect(collector))
 		if source, ok := taskSvc.(findingMetricsSource); ok {
 			registry.MustRegister(newFindingCollector(source, r.Context()))
 		}
 		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
 	})
+}
+
+// precollected replays metrics gathered once, up front.
+type precollected struct {
+	descs   []*prometheus.Desc
+	metrics []prometheus.Metric
+}
+
+func precollect(c prometheus.Collector) *precollected {
+	out := &precollected{}
+	dch := make(chan *prometheus.Desc, 64)
+	go func() { c.Describe(dch); close(dch) }()
+	for d := range dch {
+		out.descs = append(out.descs, d)
+	}
+	mch := make(chan prometheus.Metric, 256)
+	go func() { c.Collect(mch); close(mch) }()
+	for m := range mch {
+		out.metrics = append(out.metrics, m)
+	}
+	return out
+}
+
+func (p *precollected) Describe(ch chan<- *prometheus.Desc) {
+	for _, d := range p.descs {
+		ch <- d
+	}
+}
+
+func (p *precollected) Collect(ch chan<- prometheus.Metric) {
+	for _, m := range p.metrics {
+		ch <- m
+	}
 }

@@ -419,7 +419,17 @@ func TestClusterObservation_StoreErrorDoesNotReturnMemoryCopy(t *testing.T) {
 	handler := NewServer(restoreSchedulerWithStore(t, store))
 	store.err = errors.New("store unavailable")
 
-	for _, path := range []string{"/api/cluster/overview", "/api/workers", "/metrics", "/api/sources/lookup?host=127.0.0.1&port=3306"} {
+	// /metrics answers (#339 QA P2) but serves no task series from the
+	// memory copy: it says the task list is unavailable instead.
+	metrics := getJSON(handler, "/metrics")
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("/metrics %d body=%s", metrics.Code, metrics.Body.String())
+	}
+	if body := metrics.Body.String(); strings.Contains(body, "binlog_server_task_state_count{") ||
+		!strings.Contains(body, `binlog_server_metric_source_up{source="task_list",task_id="_cluster"} 0`) {
+		t.Fatalf("/metrics after store list error:\n%s", body)
+	}
+	for _, path := range []string{"/api/cluster/overview", "/api/workers", "/api/sources/lookup?host=127.0.0.1&port=3306"} {
 		resp := getJSON(handler, path)
 		if resp.Code == http.StatusOK {
 			t.Fatalf("%s returned 200 after store list error; body=%s", path, resp.Body.String())

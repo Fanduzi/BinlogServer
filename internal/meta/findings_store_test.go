@@ -97,3 +97,22 @@ func TestFindingsOnMySQL(t *testing.T) {
 		}
 	}
 }
+
+func TestCountOpenFindings_GroupsByTask(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, time.Second)
+	mock.ExpectQuery(regexp.QuoteMeta(countOpenFindingsSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"task_id", "COUNT(*)"}).AddRow("1", 5000).AddRow("2", 1))
+	got, err := store.CountOpenFindings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["1"] != 5000 || got["2"] != 1 {
+		t.Fatalf("counts %v", got)
+	}
+	var _ tasks.FindingCounter = store
+}

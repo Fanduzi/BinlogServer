@@ -497,3 +497,49 @@ func NoteUploadOutcome(report func(Finding), resolve func(string, FindingKind, s
 		resolve(file.TaskID, FindingUploadUnverified, file.FileName)
 	}
 }
+
+// FindingCounter is an optional FindingStore method: open findings per task,
+// counted in the store (GROUP BY), not from a capped list.
+type FindingCounter interface {
+	CountOpenFindings(ctx context.Context) (map[string]int, error)
+}
+
+// OpenFindingCounts returns the number of open findings per task. The store
+// count covers every process; this process's open findings cover writes the
+// store has not taken yet. Per task the larger of the two is used, so a
+// finding is not counted twice. A store read error still returns this
+// process's counts.
+func (s *Scheduler) OpenFindingCounts(ctx context.Context) (map[string]int, error) {
+	b := s.findings
+	b.mu.Lock()
+	store := b.store
+	out := make(map[string]int)
+	for key := range b.open {
+		out[key.task]++
+	}
+	b.mu.Unlock()
+	if store == nil {
+		return out, nil
+	}
+	var stored map[string]int
+	var err error
+	if counter, ok := store.(FindingCounter); ok {
+		stored, err = counter.CountOpenFindings(ctx)
+	} else {
+		var open []Finding
+		open, err = store.ListOpenFindings(ctx, 0)
+		stored = make(map[string]int, len(open))
+		for _, f := range open {
+			stored[f.TaskID]++
+		}
+	}
+	if errors.Is(err, ErrFindingStoreAbsent) {
+		return out, nil
+	}
+	for task, n := range stored {
+		if n > out[task] {
+			out[task] = n
+		}
+	}
+	return out, err
+}
