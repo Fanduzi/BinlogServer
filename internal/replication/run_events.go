@@ -28,6 +28,7 @@ type runLoop struct {
 	// skipStoredTxn drops the rest of a transaction whose GTID is already
 	// in the flushed set. The commit of that transaction clears it.
 	skipStoredTxn bool
+	streamCRC     bool
 }
 
 func (l *runLoop) reportProgress(at time.Time) {
@@ -48,8 +49,11 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 	l.sourceServerUUID = l.session.active
 	// The format description sets the checksum flag used to decode later
 	// raw GTID bodies. Noting it does not add a transaction.
-	if l.trackGTID && event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
-		l.executed.note(event)
+	if event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
+		if l.trackGTID {
+			l.executed.note(event)
+		}
+		l.streamCRC = formatDescriptionHasCRC(event)
 	}
 	sourceEventAt := sourceEventTime(event)
 
@@ -107,6 +111,12 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 			}
 			return nil
 		}
+	}
+	// MariaDB 11.4+ row events arrive with LogPos=0. A data event gets our
+	// cursor plus its size; header and control events are never filled.
+	if end := filledEndPos(l.flavor, event.Header, seg.pos); end != 0 {
+		event.Header.LogPos = end
+		event.RawData = stampLogPosInRaw(event.RawData, end, l.streamCRC)
 	}
 	// A dump that starts at the top of a file the segment already holds
 	// sends that file's header again. Those events are not transactions.
