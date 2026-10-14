@@ -43,9 +43,15 @@ func EventTimeSpan(r io.Reader) (first, last time.Time, ok bool, err error) {
 		if eventSize < int64(goreplication.EventHeaderSize) {
 			return first, last, ok, nil
 		}
-		rest := eventSize - int64(goreplication.EventHeaderSize)
+		rest, boundErr := eventBodyBytes(uint64(eventSize), -1)
+		if boundErr != nil {
+			return first, last, ok, boundErr
+		}
+		if rest < 0 {
+			return first, last, ok, nil
+		}
 		if rest > 0 {
-			if _, err := io.CopyN(io.Discard, r, rest); err != nil {
+			if _, err := io.CopyN(io.Discard, r, int64(rest)); err != nil {
 				return first, last, ok, nil
 			}
 		}

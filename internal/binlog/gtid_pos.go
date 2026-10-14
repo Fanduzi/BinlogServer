@@ -69,10 +69,16 @@ func ScanSegmentForGTID(r io.Reader, uuid string, seq int64) (SegmentGTIDScan, e
 		if eventSize < uint64(goreplication.EventHeaderSize) {
 			return out, nil
 		}
-		rest := eventSize - uint64(goreplication.EventHeaderSize)
+		rest, err := eventBodyBytes(eventSize, -1)
+		if err != nil {
+			return SegmentGTIDScan{}, err
+		}
+		if rest < 0 {
+			return out, nil
+		}
 		var body []byte
 		if rest > 0 {
-			body = makeEventBody(int(rest))
+			body = makeEventBody(rest)
 			if _, err := io.ReadFull(r, body); err != nil {
 				return out, nil
 			}
