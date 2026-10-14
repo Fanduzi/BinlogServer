@@ -497,11 +497,12 @@ files_before_000006="$(sql_one "SELECT COUNT(*) FROM binlog_files")"
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate up
 )
-# 000007 (task_findings) is add-table-only and the floor stays 6. Step back to
-# 6 so the 000006 assertions below see the schema they were written for.
+# 000007 (task_findings) and 000008 (binlog_files seal facts) are additive and
+# the floor stays 6. Step back to 6 so the 000006 assertions below see the
+# schema they were written for.
 (
   cd "$ROOT_DIR"
-  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 2
 )
 assert_schema6_catalog percona meta-primary "$SCRATCH_DB" "$files_before_000006"
 
@@ -623,11 +624,12 @@ echo "[task-desired] migrate up 000006 on MySQL 8"
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate up
 )
-# 000007 (task_findings) is add-table-only and the floor stays 6. Step back to
-# 6 so the 000006 assertions below see the schema they were written for.
+# 000007 (task_findings) and 000008 (binlog_files seal facts) are additive and
+# the floor stays 6. Step back to 6 so the 000006 assertions below see the
+# schema they were written for.
 (
   cd "$ROOT_DIR"
-  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate down --steps 1
+  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate down --steps 2
 )
 assert_schema6_catalog mysql80 mysql80 "$MYSQL80_DB" "$mysql80_before"
 
