@@ -1,7 +1,7 @@
 // Package assurance provides module-level functionality for assurance.
 // input: MySQL GTID logs of segments (binlog.SegmentGTIDLog)
 // output: the GTID hole judgements I3 uses: inside one segment, between neighbouring source files, and across a source switch
-// pos: moved here from tasks/window.go (ADR 0009 phase 1); window.go keeps its copy until P1-2 removes it
+// pos: the only copy (moved from tasks/window.go in ADR 0009 phase 1); Check and WindowOf both use it
 // note: if this file changes, update this header and module README.md.
 package assurance
 
