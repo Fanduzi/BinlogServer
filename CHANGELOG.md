@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- #370：任务目录里同一源文件存在第二个封存副本（如 `mysql-bin.000006` 与 `mysql-bin.000006.sealed.e3`，整份拷贝或全零）时，运行时现在会发现：任务带 `storage_alert`（STORAGE_INCONSISTENT，点名后一个副本），打开 CRITICAL `SEGMENT_OVERLAP` finding，`/window` 在两份之前断开并点名，`/replay` 只返回两份之前的分段并带 warning，不再把两份都交给还原（全零副本会让 `mysqlbinlog` 报 bad magic，整份副本会重复应用）。首尾相接的 epoch 不受影响。
+
 ## [v0.5.65] - 2026-10-14
 
 See [docs/releases/release-notes-v0.5.65.md](docs/releases/release-notes-v0.5.65.md). Highlights: ADR 0009 phase 0/1 findings and invariants, `DUMP_STALLED`, `METADATA_WRITE_BLOCKED`, `SEGMENT_UNREADABLE`, seal facts (000008), dump lease fence (#355), MariaDB 11.4+ row events (#362), persist-first transitions and `TASK_TRANSITION_STALLED` (#364).

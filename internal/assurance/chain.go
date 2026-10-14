@@ -212,7 +212,7 @@ func (c *Chain) Check(now time.Time) []Violation {
 	var prev *group
 	var before []binlog.GTIDEventRef
 	stored := c.storedSet(segs)
-	seen := map[string][]int{} // prefix\x00seq of a sealed segment -> chain positions
+	repeats := c.sealedRepeats(segs, nil)
 	for i := range segs {
 		seg := &segs[i]
 		// I1
@@ -230,20 +230,10 @@ func (c *Chain) Check(now time.Time) []Violation {
 			unrecorded[id] = true
 			add(I2SwitchUnrecorded, id, fmt.Sprintf("segment %s is from server %s but no source switch to it is recorded", seg.Name, id), seg.Name)
 		}
-		// I4: the same source file sealed twice on the chain. Epochs of one
-		// source file that continue each other are not an overlap; only a
-		// pair that cannot be told apart, or whose GTIDs (MySQL) or event
-		// positions overlap, is.
-		if !seg.Named.Open && idOK {
-			key := fmt.Sprintf("%s\x00%d", prefix, seg.Named.Seq)
-			for _, oi := range seen[key] {
-				other := &segs[oi]
-				if c.sameBytesSpan(other, seg) {
-					add(I4Overlap, other.Name+" "+seg.Name, fmt.Sprintf("source file %s is on the chain twice: %s and %s", seg.Named.Source, other.Name, seg.Name), seg.Name, other.Name)
-					break
-				}
-			}
-			seen[key] = append(seen[key], i)
+		// I4: the same source file sealed twice on the chain.
+		if oi, ok := repeats[i]; ok {
+			other := &segs[oi]
+			add(I4Overlap, other.Name+" "+seg.Name, sealedTwiceDetail(other, seg), seg.Name, other.Name)
 		}
 		if seg.Contents != nil && c.mysql() {
 			log := seg.Contents.Log
@@ -315,6 +305,37 @@ func (c *Chain) Check(now time.Time) []Violation {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
 	return out
+}
+
+// sealedRepeats maps the chain position of each sealed segment that repeats
+// an earlier sealed segment of the same source file (I4) to the position of
+// the first such earlier segment. Epochs of one source file that continue
+// each other are not a repeat; only a pair that cannot be told apart, or
+// whose GTIDs (MySQL) or event positions overlap, is. A non-nil counts
+// narrows which pairs count.
+func (c *Chain) sealedRepeats(segs []Segment, counts func(earlier, later *Segment) bool) map[int]int {
+	out := map[int]int{}
+	seen := map[string][]int{} // prefix\x00seq of a sealed segment -> chain positions
+	for i := range segs {
+		seg := &segs[i]
+		prefix, ok := sourcePrefix(seg.Named.Source)
+		if seg.Named.Open || !ok {
+			continue
+		}
+		key := fmt.Sprintf("%s\x00%d", prefix, seg.Named.Seq)
+		for _, oi := range seen[key] {
+			if (counts == nil || counts(&segs[oi], seg)) && c.sameBytesSpan(&segs[oi], seg) {
+				out[i] = oi
+				break
+			}
+		}
+		seen[key] = append(seen[key], i)
+	}
+	return out
+}
+
+func sealedTwiceDetail(earlier, later *Segment) string {
+	return fmt.Sprintf("source file %s is on the chain twice: %s and %s", later.Named.Source, earlier.Name, later.Name)
 }
 
 // sameBytesSpan reports that two sealed segments of one source file may

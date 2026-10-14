@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task, the checkpoint gtid_set it claims (or "" when the caller does not need the missing set), the scheduler data directory and the task's source-switch events
-// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), unreadable (a sealed segment with a corrupt event size; reported as a SEGMENT_UNREADABLE finding), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning
-// pos: adapter over assurance.Chain.Health (ADR 0009 phase 1, P1-3): tasks supplies the ledger, checkpoint, start set and its planners (legacy failback, then stored hole) as lazy Plan; list/get alerts, /replay, /window and the replay warning all ask it; the replay cut is assurance.KeepBefore
+// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), unreadable (a sealed segment with a corrupt event size; reported as a SEGMENT_UNREADABLE finding), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go), or a sealed source file held twice in the directory (a SEGMENT_OVERLAP finding, #370); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning
+// pos: adapter over assurance.Chain.Health (ADR 0009 phase 1, P1-3): tasks supplies the ledger, checkpoint, start set, the replay order (SelectReplayFiles over ListFiles, for I4) and its planners (legacy failback, then stored hole) as lazy Plan; list/get alerts, /replay, /window and the replay warning all ask it; the replay cut is assurance.KeepBefore
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -31,6 +31,11 @@ const (
 	// 1 GiB or past the end of the file; binlog.Ledger.Unreadable). Replay
 	// and the window stop before it. Read-only; Start is not refused.
 	StorageUnreadable
+	// StorageOverlap: the task directory holds a sealed source file twice
+	// (for example mysql-bin.000006 and mysql-bin.000006.sealed.e3) with the
+	// same events, or one copy cannot be read (I4_OVERLAP, #370). Replay and
+	// the window stop before both copies. Read-only; Start is not refused.
+	StorageOverlap
 )
 
 // StorageHealth is the verdict for one task directory. Problem is set for
@@ -62,6 +67,7 @@ func (s *Scheduler) storageHealth(task Task, checkpointGTID string) StorageHealt
 		StartGTID:  StartGTIDText(task),
 		Checkpoint: assurance.Checkpoint{GTIDSet: checkpointGTID},
 		Local:      ledger,
+		Order:      s.replayOrder(task.ID),
 		Plan:       func() []assurance.Violation { return s.plannedProblems(task, dir, ledger) },
 	})
 	v, found := chain.Health()
@@ -77,8 +83,30 @@ func (s *Scheduler) storageHealth(task Task, checkpointGTID string) StorageHealt
 	case assurance.I1Unreadable:
 		kind = StorageUnreadable
 		s.Report(Finding{TaskID: task.ID, Kind: FindingSegmentUnreadable, Subject: v.Problem.Segment, Severity: FindingCritical, Detail: v.Problem.Message})
+	case assurance.I4Overlap:
+		kind = StorageOverlap
+		s.Report(Finding{TaskID: task.ID, Kind: FindingSegmentOverlap, Subject: v.Problem.Segment, Severity: FindingCritical, Detail: v.Problem.Message})
 	}
 	return StorageHealth{Kind: kind, Problem: *v.Problem}
+}
+
+// replayOrder is the base names of the segments /replay would return for
+// the task before any storage cut (SelectReplayFiles over ListFiles), the
+// chain order the I4 check reads. A listing error leaves it empty; /replay
+// and /window fail on the same listing themselves.
+func (s *Scheduler) replayOrder(taskID string) []string {
+	files, err := s.ListFiles(taskID, segmentInventoryLimit)
+	if err != nil {
+		return nil
+	}
+	chosen := SelectReplayFiles(files)
+	out := make([]string, 0, len(chosen))
+	for _, file := range chosen {
+		if name := segmentInventoryBasename(file); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // plannedProblems is what the tasks planners conclude, in verdict order: a
@@ -103,6 +131,8 @@ func (h StorageHealth) ReplayWarning() string {
 		return "Segment " + p.Segment + " follows a GTID hole (STORAGE_INCONSISTENT): " + p.Missing + " is stored in no segment. Replay stops before it: that segment and every later one are left out. " + p.Message
 	case StorageLegacyFailback:
 		return "Segment " + p.Segment + " is in a failback written by an earlier build (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. " + p.Message
+	case StorageOverlap:
+		return p.Message + " (STORAGE_INCONSISTENT)"
 	case StorageUnreadable:
 		return "Segment " + p.Segment + " is not readable (" + binlog.ErrCorruptEventSize.Error() + "). Replay stops before it: that segment and every later one are left out. " + p.Message
 	case StorageDamaged:

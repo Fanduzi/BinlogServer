@@ -94,3 +94,4 @@
 - `transition_commit.go`：操作员动作（Create、Start、Stop、Delete、Update、Adopt、Configure*）唯一的状态变更入口。`commitTransitionLocked` 先写 store，写入被拒时内存、store 行和 dump 都不变，记 `*_REJECTED` 事件并返回 `ErrTransitionNotRecorded`；`commitDeleteLocked` 先删 store 行再取消 dump。`internal/lintguard/task_state_test.go` 禁止在它之外改任务状态（tip 53a9 P1，与 #336 同类）。
 - `stalled_transition.go`：看门狗。每个 finding sink tick 检查 STARTING/STOPPING 超过 60 秒且本进程没有 run 驱动的任务，打开 `TASK_TRANSITION_STALLED`（WARNING）并交给 `convergeTask`；离开该状态后自动关闭。
 - `operator_readonly_test.go`：meta 只读时每个操作员动作（Start 从 RETRY_BACKOFF/STOPPED、Stop、Delete、Update、Configure*、Create）被拒后内存/store/dump 不变，恢复后可用；看门狗测试。
+- `overlap_segment_test.go`：#370 回归。目录里同一源文件有第二个封存副本（整份拷贝或全零）时，`storageHealth` 判为 `StorageOverlap` 并点名后一个副本，`storage_alert` 置上，`/window` 给出点名的「存了两份」断点，`/replay` 只保留两份之前的分段并带 warning，同时打开 CRITICAL `SEGMENT_OVERLAP` finding；首尾相接的 epoch 不算。回放顺序由 `replayOrder`（`SelectReplayFiles` over `ListFiles`）交给 `assurance.Inputs.Order`。
