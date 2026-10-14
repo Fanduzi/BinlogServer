@@ -143,6 +143,20 @@ healthy(t) ⇔ state ∈ {RUNNING}
 - CI 加 `errcheck`（排除 `Close` on read-only、`Remove` on temp 等白名单，白名单在仓库里列明）和一个自定义 `go vet` 分析器：在 `internal/{tasks,replication,binlog}` 中，`log.Printf` 的参数含 `err` 且同一个块里没有 `return` 或 `Report` 时报错。
 - 每个 `Finding` 种类必须有一条测试：注入该失败 → 断言结论行、事件、指标三者都出现。种类枚举与测试表在同一文件里，新增种类没有测试就编译不过（表驱动 + `exhaustive` 检查）。
 
+### 2.4 元数据库不可写时：安全停下，并且明确可见（刻意决定，2026-10-14）
+
+元数据库只读（`super_read_only`）或拒绝写入时，dump 无法记录进度（checkpoint、状态行、目录行）。我们**刻意选择让 dump 停下并按退避重试**，而不是继续落盘、只报结论。理由：
+- 继续写 binlog 而 checkpoint 和目录行不更新，会让磁盘上的分段和元数据库对不上。恢复后要靠重建 open tail 才能对齐，这正是 I1–I3 要避免的状态。
+- 源库仍保留 binlog，元数据库恢复后重试会从最后落库的位置追平。只要源库保留期长于元数据库的不可写时长，就不会丢数据。
+
+这个停下必须可见，不能看起来健康：
+- 打开一条 CRITICAL `METADATA_WRITE_BLOCKED` 结论（detail 带原始错误），任务显示 `RETRY_BACKOFF` 或 `STARTING` 并带 `last_error`，不会显示 `RUNNING`。
+- 任务再次就绪、并且 `RUNNING` 状态行成功落库后，结论才 resolve。
+- 期间 Stop 会被拒绝（"the stop is not applied and the task state is unchanged"），任务状态不变。
+- 写不进的任务事件进入重放缓冲（上限 10000 条），由 sink 每 5s 按顺序重写；写入成功后对应的 `EVENT_PERSIST_FAILED` 自动 resolve。
+
+代价：元数据库不可写期间是备份空窗，RPO 会随之增长；告警依据是这条 CRITICAL 结论加上 `binlog_server_finding_open`。
+
 ## 3. 周期性校验巡检与还原演练
 
 **巡检器 (Verifier)** 是 worker 上的周期任务（只在持有租约的 worker 上跑该任务，复用 ADR 0001 的所有权），每 `verify_every`（默认 24h，分批平摊，每任务每轮上限 `verify_budget` 字节/秒）：
