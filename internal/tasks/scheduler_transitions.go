@@ -12,15 +12,12 @@ import (
 )
 
 func (s *Scheduler) markStartDispatchedLocked(task Task) error {
-	task.State = StateStarting
 	task.LastError = ""
 	task.OwnerWorkerID = ""
 	task.Epoch = 0
 	task.RunID = ""
 	task.UpdatedAt = time.Now()
-	s.tasks[task.ID] = task
-	s.appendEventLocked(task.ID, "TASK_START_DISPATCHED", "task start dispatched to worker", "")
-	return s.persistTaskLocked(task)
+	return s.commitTransitionLocked(task, StateStarting, transitionRecord{Action: "start", Type: "TASK_START_DISPATCHED", Message: "task start dispatched to worker"})
 }
 
 func (s *Scheduler) markStartingLocked(task Task) error {
@@ -61,15 +58,6 @@ func (s *Scheduler) markRunnerReadyLocked(id string) error {
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_RUNNING", "runner is running", "")
-	return s.persistTaskLocked(task)
-}
-
-func (s *Scheduler) markStoppingLocked(task Task) error {
-	task.State = StateStopping
-	task.DesiredRun = TaskDesiredStop
-	task.UpdatedAt = time.Now()
-	s.tasks[task.ID] = task
-	s.appendEventLocked(task.ID, "TASK_STOPPING", "task stopping", "")
 	return s.persistTaskLocked(task)
 }
 

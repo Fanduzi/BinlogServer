@@ -100,21 +100,17 @@ func (s *Scheduler) createTask(name, clusterKey string, source *SourceConfig, st
 		ID:         id,
 		Name:       validatedName,
 		ClusterKey: validatedClusterKey,
-		State:      StateCreated,
 		DesiredRun: TaskDesiredStop,
 		Source:     validatedSource,
 		Start:      validatedStart,
 		Storage:    validatedStorage,
 		UpdatedAt:  now,
 	}
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_CREATED", "task created", "")
-	if err := s.persistTaskLocked(task); err != nil {
-		delete(s.tasks, id)
+	if err := s.commitTransitionLocked(task, StateCreated, transitionRecord{Action: "create", Type: "TASK_CREATED", Message: "task created"}); err != nil {
 		s.seq--
 		return Task{}, err
 	}
-	return task, nil
+	return s.tasks[id], nil
 }
 
 // ConfigureSource 更新任务源库配置。
@@ -136,12 +132,7 @@ func (s *Scheduler) ConfigureSource(id string, source SourceConfig) error {
 	}
 	task.Source = normalized
 	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_SOURCE_CONFIGURED", "source configured", normalized.Host)
-	if err := s.persistTaskLocked(task); err != nil {
-		return err
-	}
-	return nil
+	return s.commitTransitionLocked(task, task.State, transitionRecord{Action: "source change", Type: "TASK_SOURCE_CONFIGURED", Message: "source configured", Detail: normalized.Host})
 }
 
 // ConfigureStart 更新任务拉流起点配置。
@@ -160,12 +151,7 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 	}
 	task.Start = normalized
 	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_START_CONFIGURED", "start strategy configured", string(normalized.Mode))
-	if err := s.persistTaskLocked(task); err != nil {
-		return err
-	}
-	return nil
+	return s.commitTransitionLocked(task, task.State, transitionRecord{Action: "start change", Type: "TASK_START_CONFIGURED", Message: "start strategy configured", Detail: string(normalized.Mode)})
 }
 
 // ConfigureStorage 更新任务存储策略。
@@ -184,12 +170,7 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 	}
 	task.Storage = normalized
 	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_STORAGE_CONFIGURED", "storage configured", "")
-	if err := s.persistTaskLocked(task); err != nil {
-		return err
-	}
-	return nil
+	return s.commitTransitionLocked(task, task.State, transitionRecord{Action: "storage change", Type: "TASK_STORAGE_CONFIGURED", Message: "storage configured", Detail: ""})
 }
 
 // AdoptDiskBackup attaches source identity to a leftover {data_dir}/{id} directory.
@@ -286,20 +267,16 @@ func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (Task, error) {
 		ID:                id,
 		Name:              validatedName,
 		ClusterKey:        validatedClusterKey,
-		State:             StateStopped,
 		Source:            validatedSource,
 		Start:             validatedStart,
 		Storage:           validatedStorage,
 		KeepLocalSegments: true,
 		UpdatedAt:         time.Now(),
 	}
-	if err := s.persistTaskLocked(task); err != nil {
+	if err := s.commitTransitionLocked(task, StateStopped, transitionRecord{Action: "adopt", Type: "TASK_ADOPTED", Message: "on-disk backup adopted", Detail: validatedClusterKey}); err != nil {
 		return Task{}, err
 	}
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_ADOPTED", "on-disk backup adopted", validatedClusterKey)
-	s.flushPendingEventsLocked()
-	return task, nil
+	return s.tasks[id], nil
 }
 
 // UpdateTask 以原子方式应用 patch（先校验，后一次落库）。
@@ -393,14 +370,10 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	}
 	next.UpdatedAt = time.Now()
 
-	if err := s.persistTaskLocked(next); err != nil {
+	if err := s.commitTransitionLocked(next, next.State, transitionRecord{Action: "update", Type: "TASK_UPDATED", Message: "task updated"}); err != nil {
 		s.mu.Unlock()
 		return Task{}, err
 	}
-
-	s.tasks[id] = next
-	s.appendEventLocked(id, "TASK_UPDATED", "task updated", "")
-	s.flushPendingEventsLocked()
 	s.mu.Unlock()
 	if specBumped && s.runner != nil {
 		_, _ = s.convergeTask(id)
@@ -454,12 +427,7 @@ func (s *Scheduler) ConfigureClusterKey(id, clusterKey string) error {
 	}
 	task.ClusterKey = validatedClusterKey
 	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_CLUSTER_KEY_CONFIGURED", "cluster key configured", validatedClusterKey)
-	if err := s.persistTaskLocked(task); err != nil {
-		return err
-	}
-	return nil
+	return s.commitTransitionLocked(task, task.State, transitionRecord{Action: "cluster_key change", Type: "TASK_CLUSTER_KEY_CONFIGURED", Message: "cluster key configured", Detail: validatedClusterKey})
 }
 
 // ConfigureName 更新任务名。
@@ -478,12 +446,7 @@ func (s *Scheduler) ConfigureName(id, name string) error {
 	}
 	task.Name = validatedName
 	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_RENAMED", "task renamed", validatedName)
-	if err := s.persistTaskLocked(task); err != nil {
-		return err
-	}
-	return nil
+	return s.commitTransitionLocked(task, task.State, transitionRecord{Action: "rename", Type: "TASK_RENAMED", Message: "task renamed", Detail: validatedName})
 }
 
 func (s *Scheduler) GetTask(id string) (Task, error) {
@@ -581,23 +544,9 @@ func (s *Scheduler) DeleteTask(id string) error {
 		}
 		return ErrTaskNotFound
 	}
-	if cancel, ok := s.cancels[id]; ok {
-		cancel()
-		delete(s.cancels, id)
-	}
-	delete(s.runs, id)
-	delete(s.tasks, id)
-	delete(s.events, id)
-	delete(s.replica, id)
-	s.forgetPendingDumpLocked(id)
-	if s.store != nil {
-		ctx, cancel := s.withWriteTimeout(context.Background())
-		if err := s.store.DeleteTask(ctx, id); err != nil {
-			cancel()
-			s.mu.Unlock()
-			return err
-		}
-		cancel()
+	if err := s.commitDeleteLocked(id); err != nil {
+		s.mu.Unlock()
+		return err
 	}
 	s.mu.Unlock()
 

@@ -91,3 +91,6 @@
 - `BinlogFile` 的 `first_event_at`、`last_event_at`、`sha256`（ADR 0009 P1-4）：封存时由复制写入，未知时为空且 JSON 省略；目录列表暂不读回。
 - 遗留回切修复（`legacy_failback.go`）从磁盘重写封存行时经 `withDiskSealFacts` 带上该文件的封存事实；文件读不到时设 `ResetSealFacts`，目录把旧的事实清成 NULL，改指向别的文件的行不会留下过期的 sha256。
 - `unreadable_segment_test.go`：#361 回归。封存段里事件 size 损坏（>1GiB 或超出文件末尾）时，`storageHealth` 判为 `StorageUnreadable` 并点名该段，`/window` 给出点名的「段读不了」断点而不是 500，`/replay` 截在它之前并带 warning，同时打开 `SEGMENT_UNREADABLE` finding。
+- `transition_commit.go`：操作员动作（Create、Start、Stop、Delete、Update、Adopt、Configure*）唯一的状态变更入口。`commitTransitionLocked` 先写 store，写入被拒时内存、store 行和 dump 都不变，记 `*_REJECTED` 事件并返回 `ErrTransitionNotRecorded`；`commitDeleteLocked` 先删 store 行再取消 dump。`internal/lintguard/task_state_test.go` 禁止在它之外改任务状态（tip 53a9 P1，与 #336 同类）。
+- `stalled_transition.go`：看门狗。每个 finding sink tick 检查 STARTING/STOPPING 超过 60 秒且本进程没有 run 驱动的任务，打开 `TASK_TRANSITION_STALLED`（WARNING）并交给 `convergeTask`；离开该状态后自动关闭。
+- `operator_readonly_test.go`：meta 只读时每个操作员动作（Start 从 RETRY_BACKOFF/STOPPED、Stop、Delete、Update、Configure*、Create）被拒后内存/store/dump 不变，恢复后可用；看门狗测试。

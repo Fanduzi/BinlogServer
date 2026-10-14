@@ -62,3 +62,4 @@
 
 ## Update Rule
 - 路由、请求/响应结构、认证/限流配置变化时，更新本文件。
+- GET /api/tasks 和 /api/tasks/{id} 的任务带 `open_findings`（与 /api/dashboard 相同的计数，0 也显示）。
