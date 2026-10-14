@@ -112,6 +112,12 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 			return nil
 		}
 	}
+	// MariaDB 11.4+ row events arrive with LogPos=0. A data event gets our
+	// cursor plus its size; header and control events are never filled.
+	if end := filledEndPos(l.flavor, event.Header, seg.pos); end != 0 {
+		event.Header.LogPos = end
+		event.RawData = stampLogPosInRaw(event.RawData, end, l.streamCRC)
+	}
 	// A dump that starts at the top of a file the segment already holds
 	// sends that file's header again. Those events are not transactions.
 	if event.Header.LogPos <= seg.pos && fileHeaderEvent(event.Header.EventType) {
@@ -128,8 +134,7 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 	}
 
 	next := seg.checkpointAt(seg.name, event.Header.LogPos)
-	raw := stampLogPosInRaw(event.RawData, event.Header.LogPos, l.streamCRC)
-	if err := seg.persistRaw(raw, next); err != nil {
+	if err := seg.persistRaw(event.RawData, next); err != nil {
 		return err
 	}
 	l.reportProgress(sourceEventAt)

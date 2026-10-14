@@ -44,4 +44,4 @@
 - Go 文件的软件包注释采用 `Package [package name] ...` 形式。
 - 封存（`sealFile` 与磁盘上无目录行的封存分段补登）经 `withSealFacts` 在目录行上带首尾事件时间和 SHA-256（ADR 0009 P1-4）；读不到文件只记日志，不影响封存。
 
-- MariaDB 11.4+：`buildSyncerConfig` 打开 `FillZeroLogPos`（go-mysql 会要 ANNOTATE_ROWS 并回填 LogPos）；写入前 `stampLogPosInRaw` 把 end_log_pos 写进 RawData（#359）。
+- MariaDB 11.4+ 行事件 LogPos=0（#359）：`buildSyncerConfig` 只加 `BINLOG_SEND_ANNOTATE_ROWS_EVENT`，不用 go-mysql 的 `FillZeroLogPos`（它也会给文件中间起点的 FDE 填 start+252，导致 STREAM_REGRESSION）。`handleEvent` 用 `filledEndPos`（我们自己的游标 + 事件大小）给数据事件补位置，FDE/Rotate/心跳/GTID list/checkpoint 等头部和控制事件、ARTIFICIAL 事件和 MySQL 都不补；`stampLogPosInRaw` 把它写进落盘字节并重算 CRC。`mariadb11_dump_test.go` 覆盖 10.11、11.4 的 pos 4、LATEST、文件中间 FILE_POS、Stop/Start。

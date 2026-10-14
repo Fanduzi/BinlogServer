@@ -1416,11 +1416,14 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 		HeartbeatPeriod:      dumpHeartbeatPeriod,
 		ReadTimeout:          dumpReadTimeout,
 	}
-	// MariaDB 11.4+ sends LogPos=0 on row events. FillZeroLogPos asks for
-	// ANNOTATE_ROWS and recomputes LogPos so we do not drop those events
-	// (#359). Without it the stored segment has only GTID and XID.
+	// MariaDB 11.4+ sends LogPos=0 on row events (#359). We ask for
+	// ANNOTATE_ROWS so the stream has no position holes and fill those
+	// positions ourselves in handleEvent (filledEndPos). go-mysql's
+	// FillZeroLogPos is not used: it also fills the mid-file format
+	// description (log_pos=0, not ARTIFICIAL) with start+252, which moved
+	// the stored cursor past the next event (STREAM_REGRESSION, #362 QA).
 	if isMariaDBFlavor(flavor) {
-		cfg.FillZeroLogPos = true
+		cfg.DumpCommandFlag |= replication.BINLOG_SEND_ANNOTATE_ROWS_EVENT
 	}
 	return cfg
 }
