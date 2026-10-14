@@ -7,6 +7,7 @@ package binlog
 
 import (
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -80,6 +81,53 @@ func (l *Ledger) SegmentDamage(name string) (string, bool) {
 		return "", false
 	}
 	return segmentDamage(filepath.Join(l.dir, name), name, named.Source)
+}
+
+// Unreadable is the first sealed segment in binlog order whose bytes cannot
+// be read because an event size is corrupt (ErrCorruptEventSize: above 1 GiB
+// or past the end of the file). Valid lists the readable segments before it.
+// Replay and the window stop before it. A missing directory is not unreadable.
+func (l *Ledger) Unreadable() (StorageProblem, bool) {
+	segs, err := l.Segments()
+	if err != nil {
+		return StorageProblem{}, false
+	}
+	for i, seg := range segs {
+		if seg.Named.Open {
+			continue
+		}
+		if !l.SegmentUnreadable(seg.Name) {
+			continue
+		}
+		problem := StorageProblem{Segment: seg.Name, Detail: "Segment " + seg.Name + " is not readable: " + ErrCorruptEventSize.Error() + "."}
+		for _, prev := range segs[:i] {
+			if prev.Named.Seq < seg.Named.Seq {
+				problem.Valid = append(problem.Valid, prev.Name)
+			}
+		}
+		problem.Message = problem.Detail + " Its bytes on disk are damaged; replay and the recovery window stop before it, and it and every later segment are left out. Restore it from object storage or the source if either still has it, and leave the file for forensics."
+		return problem, true
+	}
+	return StorageProblem{}, false
+}
+
+// SegmentUnreadable reports that the sealed segment called name has a
+// corrupt event size (ErrCorruptEventSize). An open segment, a file that
+// cannot be opened, and a segment with the re-dump damage signature (which
+// Damage already reports) are not unreadable.
+func (l *Ledger) SegmentUnreadable(name string) bool {
+	named, ok := ClassifySegment(name)
+	if !ok || named.Open {
+		return false
+	}
+	path := filepath.Join(l.dir, name)
+	if _, damaged := segmentDamage(path, name, named.Source); damaged {
+		return false
+	}
+	if _, err := l.Contents(name); errors.Is(err, ErrCorruptEventSize) {
+		return true
+	}
+	return sealedSegmentCorrupt(path)
 }
 
 // IsDamaged reports that Damage would find a segment, without computing the

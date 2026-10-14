@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: one binlog segment reader, beginning with the 4-byte magic header
-// output: the previous-GTIDs set and every MySQL GTID event in that segment, with the byte offset and event-header time of each event
+// output: the previous-GTIDs set and every MySQL GTID event in that segment, with the byte offset and event-header time of each event; a damaged event size past the file or above 1 GiB returns ErrCorruptEventSize without allocating (#358)
 // pos: read the transactions a segment actually contains so replay can exclude ones a restored backup already has
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"os"
 	"time"
 
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
@@ -16,6 +17,42 @@ import (
 
 // errPreviousGTIDs is a previous-GTIDs event whose body did not decode.
 var errPreviousGTIDs = errors.New("unreadable previous gtid event")
+
+// ErrCorruptEventSize means an event header's size is larger than maxEventBody,
+// or runs past the end of a sealed segment. Callers must not allocate that
+// size. A size past the end of an open segment is a torn tail, not this error.
+var ErrCorruptEventSize = errors.New("corrupt binlog event size")
+
+// maxEventBody is 1 GiB: above MySQL's maximum max_allowed_packet, and far
+// above any real binlog event. A damaged size field used to ask for ~4 GiB
+// and crash the process (#358).
+const maxEventBody = 1 << 30
+
+// makeEventBody allocates an event body. Tests replace it to refuse huge sizes
+// without OOMing the host.
+var makeEventBody = func(n int) []byte { return make([]byte, n) }
+
+// eventBodyBytes is the body length after the 19-byte header. -1 is a torn
+// tail (size below the header, or past remaining in an unsealed segment).
+// ErrCorruptEventSize is a size above maxEventBody, or past remaining in a
+// sealed segment. remaining < 0 means the length is unknown.
+func eventBodyBytes(eventSize uint64, remaining int64, sealed bool) (int, error) {
+	hdr := uint64(goreplication.EventHeaderSize)
+	if eventSize < hdr {
+		return -1, nil // torn tail: caller stops with what it has
+	}
+	rest := eventSize - hdr
+	if rest > maxEventBody {
+		return 0, ErrCorruptEventSize
+	}
+	if remaining >= 0 && int64(rest) > remaining {
+		if sealed {
+			return 0, ErrCorruptEventSize
+		}
+		return -1, nil // torn: stop quietly
+	}
+	return int(rest), nil
+}
 
 // GTIDEventRef is one MySQL GTID event inside a segment.
 // Offset is the byte where that event starts, the same position
@@ -42,6 +79,33 @@ type SegmentGTIDLog struct {
 // A previous-GTIDs event is recorded once and is not a transaction.
 // A segment without the binlog magic returns an empty log.
 func scanSegmentGTIDs(r io.Reader) (SegmentGTIDLog, error) {
+	return scanSegmentGTIDsBounded(r, readerRemaining(r), false)
+}
+
+// readerRemaining is how many bytes r still holds when r can say (a file or
+// an in-memory reader), else -1. Event sizes are checked against it so a
+// wrong size is never allocated past the data that exists.
+func readerRemaining(r io.Reader) int64 {
+	switch v := r.(type) {
+	case interface{ Len() int }:
+		return int64(v.Len())
+	case *os.File:
+		info, err := v.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			return -1
+		}
+		at, err := v.Seek(0, io.SeekCurrent)
+		if err != nil || at > info.Size() {
+			return -1
+		}
+		return info.Size() - at
+	}
+	return -1
+}
+
+// scanSegmentGTIDsBounded scans with remaining bytes left in r (-1 unknown).
+// sealed makes a size past remaining ErrCorruptEventSize instead of a torn tail.
+func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (SegmentGTIDLog, error) {
 	var out SegmentGTIDLog
 	magic := make([]byte, 4)
 	if _, err := io.ReadFull(r, magic); err != nil {
@@ -53,6 +117,9 @@ func scanSegmentGTIDs(r io.Reader) (SegmentGTIDLog, error) {
 	if string(magic) != string(durableMagic) {
 		return out, nil
 	}
+	if remaining >= 0 {
+		remaining -= 4 // magic already read
+	}
 	offset := uint64(4)
 	hdr := make([]byte, goreplication.EventHeaderSize)
 	crc32 := false
@@ -63,17 +130,29 @@ func scanSegmentGTIDs(r io.Reader) (SegmentGTIDLog, error) {
 			}
 			return SegmentGTIDLog{}, err
 		}
+		if remaining >= 0 {
+			remaining -= int64(goreplication.EventHeaderSize)
+		}
 		eventSize := uint64(binary.LittleEndian.Uint32(hdr[9:13]))
 		if eventSize < uint64(goreplication.EventHeaderSize) {
 			return out, nil
 		}
-		rest := eventSize - uint64(goreplication.EventHeaderSize)
+		rest, err := eventBodyBytes(eventSize, remaining, sealed)
+		if err != nil {
+			return out, err
+		}
+		if rest < 0 {
+			return out, nil
+		}
 		var body []byte
 		if rest > 0 {
-			body = make([]byte, rest)
+			body = makeEventBody(rest)
 			if _, err := io.ReadFull(r, body); err != nil {
 				return out, nil
 			}
+		}
+		if remaining >= 0 {
+			remaining -= int64(rest)
 		}
 		eventType := goreplication.EventType(hdr[4])
 		switch eventType {

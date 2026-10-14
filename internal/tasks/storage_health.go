@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task, the checkpoint gtid_set it claims (or "" when the caller does not need the missing set), the scheduler data directory and the task's source-switch events
-// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning
+// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), unreadable (a sealed segment with a corrupt event size; reported as a SEGMENT_UNREADABLE finding), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning
 // pos: adapter over assurance.Chain.Health (ADR 0009 phase 1, P1-3): tasks supplies the ledger, checkpoint, start set and its planners (legacy failback, then stored hole) as lazy Plan; list/get alerts, /replay, /window and the replay warning all ask it; the replay cut is assurance.KeepBefore
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -27,6 +27,10 @@ const (
 	// StorageStoredHole: a source switch recorded transactions as stored
 	// that no local segment holds, between segments that do. Read-only.
 	StorageStoredHole
+	// StorageUnreadable: a sealed segment has a corrupt event size (above
+	// 1 GiB or past the end of the file; binlog.Ledger.Unreadable). Replay
+	// and the window stop before it. Read-only; Start is not refused.
+	StorageUnreadable
 )
 
 // StorageHealth is the verdict for one task directory. Problem is set for
@@ -70,6 +74,9 @@ func (s *Scheduler) storageHealth(task Task, checkpointGTID string) StorageHealt
 		kind = StorageLegacyFailback
 	case assurance.I3StoredHole:
 		kind = StorageStoredHole
+	case assurance.I1Unreadable:
+		kind = StorageUnreadable
+		s.Report(Finding{TaskID: task.ID, Kind: FindingSegmentUnreadable, Subject: v.Problem.Segment, Severity: FindingCritical, Detail: v.Problem.Message})
 	}
 	return StorageHealth{Kind: kind, Problem: *v.Problem}
 }
@@ -96,6 +103,8 @@ func (h StorageHealth) ReplayWarning() string {
 		return "Segment " + p.Segment + " follows a GTID hole (STORAGE_INCONSISTENT): " + p.Missing + " is stored in no segment. Replay stops before it: that segment and every later one are left out. " + p.Message
 	case StorageLegacyFailback:
 		return "Segment " + p.Segment + " is in a failback written by an earlier build (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. " + p.Message
+	case StorageUnreadable:
+		return "Segment " + p.Segment + " is not readable (" + binlog.ErrCorruptEventSize.Error() + "). Replay stops before it: that segment and every later one are left out. " + p.Message
 	case StorageDamaged:
 		msg := "Segment " + p.Segment + " is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out."
 		if p.Restart != "" {

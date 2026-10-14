@@ -90,3 +90,4 @@
 - `storage_health.go` / `storage_alert.go`（ADR 0009 P1-3）: 存储健康结论来自 `assurance.Chain.Health()`，tasks 只把遗留回切和已存缺口两个规划器作为惰性 `Plan` 交进去；回放截断 `keepBeforeSegment` 只计算代际先后和同序号，规则在 `assurance.KeepBefore`。`replay_golden_test.go` 是在 v0.5.64 上录下的 47 个目录用例的 /replay（链尾和链中两个 stop）与存储健康结论 golden（`REPLAY_GOLDEN_RECORD=1` 重录）；`health_seam_test.go` 断言 tasks 不再调用 `.Damage` 也不定义 `excludeDamagedSegments`。
 - `BinlogFile` 的 `first_event_at`、`last_event_at`、`sha256`（ADR 0009 P1-4）：封存时由复制写入，未知时为空且 JSON 省略；目录列表暂不读回。
 - 遗留回切修复（`legacy_failback.go`）从磁盘重写封存行时经 `withDiskSealFacts` 带上该文件的封存事实；文件读不到时设 `ResetSealFacts`，目录把旧的事实清成 NULL，改指向别的文件的行不会留下过期的 sha256。
+- `unreadable_segment_test.go`：#361 回归。封存段里事件 size 损坏（>1GiB 或超出文件末尾）时，`storageHealth` 判为 `StorageUnreadable` 并点名该段，`/window` 给出点名的「段读不了」断点而不是 500，`/replay` 截在它之前并带 warning，同时打开 `SEGMENT_UNREADABLE` finding。

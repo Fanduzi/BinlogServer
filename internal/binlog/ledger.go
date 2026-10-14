@@ -6,6 +6,7 @@
 package binlog
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -221,7 +222,17 @@ func unionDurable(flavor, seed string, tail OpenTail) string {
 // ReadSegmentContents is Contents for segment bytes that are not in a
 // local task directory. The caller owns r.
 func ReadSegmentContents(r io.Reader) (SegmentContents, error) {
-	log, err := scanSegmentGTIDs(r)
+	return readSegmentContents(r, false)
+}
+
+// ReadSealedSegmentContents is ReadSegmentContents for a sealed segment: an
+// event size past the end of r is ErrCorruptEventSize, not a torn tail.
+func ReadSealedSegmentContents(r io.Reader) (SegmentContents, error) {
+	return readSegmentContents(r, true)
+}
+
+func readSegmentContents(r io.Reader, sealed bool) (SegmentContents, error) {
+	log, err := scanSegmentGTIDsBounded(r, readerRemaining(r), sealed)
 	if err != nil {
 		return SegmentContents{}, err
 	}
@@ -237,6 +248,41 @@ type contentsCacheEntry struct {
 }
 
 var contentsCache sync.Map // segment path -> contentsCacheEntry
+
+type corruptCacheEntry struct {
+	size    int64
+	mtime   time.Time
+	corrupt bool
+}
+
+var sealedCorruptCache sync.Map // path -> corruptCacheEntry
+
+// sealedSegmentCorrupt reports that the sealed segment at p has an event size
+// above 1 GiB or past the end of the file. Contents keeps reading such a
+// file as a torn tail (the re-dump damage fixtures end that way); this is
+// the stricter check for a file that was sealed whole. Cached per size and
+// mtime. A file that cannot be opened is not corrupt.
+func sealedSegmentCorrupt(p string) bool {
+	info, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	if v, ok := sealedCorruptCache.Load(p); ok {
+		e := v.(corruptCacheEntry)
+		if e.size == info.Size() && e.mtime.Equal(info.ModTime()) {
+			return e.corrupt
+		}
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	_, scanErr := scanSegmentGTIDsBounded(f, info.Size(), true)
+	corrupt := errors.Is(scanErr, ErrCorruptEventSize)
+	sealedCorruptCache.Store(p, corruptCacheEntry{size: info.Size(), mtime: info.ModTime(), corrupt: corrupt})
+	return corrupt
+}
 
 // segmentContentsAt reads one segment file once per size and mtime.
 func segmentContentsAt(p string) (SegmentContents, error) {

@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	breakDamaged    = "segment %s is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
-	breakStoredHole = "gtid hole: a source switch recorded %s as stored, but no segment holds it (STORAGE_INCONSISTENT); the window stops before %s and leaves out it and every later segment"
+	breakUnreadableSegment = "segment %s is not readable (corrupt binlog event size); the window stops before it and leaves out it and every later segment"
+	breakDamaged           = "segment %s is damaged (STORAGE_INCONSISTENT); the window stops before it and leaves out it and every later segment"
+	breakStoredHole        = "gtid hole: a source switch recorded %s as stored, but no segment holds it (STORAGE_INCONSISTENT); the window stops before %s and leaves out it and every later segment"
 )
 
 // RecoveryBreak is one place the retained chain cannot be restored straight through.
@@ -48,7 +49,8 @@ type RecoveryWindow struct {
 // can go, and where it is broken. A missing task is ErrTaskNotFound.
 // A segment listed in the inventory whose bytes are not on this process is a
 // break, not an error. A segment that cannot be read for any other reason
-// fails the call.
+// fails the call, except a corrupt event size, which is a not-readable break
+// naming the segment.
 func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 	task, err := s.GetTask(taskID)
 	if err != nil {
@@ -66,8 +68,11 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 		problem := health.Problem
 		kept := health.replayCut(files, chosen)
 		damage = damagedSegmentBreak(problem.Segment, chosen, kept)
-		if health.Kind == StorageStoredHole {
+		switch health.Kind {
+		case StorageStoredHole:
 			damage.Reason = fmt.Sprintf(breakStoredHole, problem.Missing, problem.Segment)
+		case StorageUnreadable:
+			damage.Reason = fmt.Sprintf(breakUnreadableSegment, problem.Segment)
 		}
 		chosen = kept
 	}
@@ -98,13 +103,21 @@ func (s *Scheduler) RecoveryWindow(taskID string) (RecoveryWindow, error) {
 		if closeErr != nil {
 			return RecoveryWindow{}, closeErr
 		}
+		read := binlog.ReadSegmentContents
+		if !seg.Open {
+			read = binlog.ReadSealedSegmentContents
+		}
+		contents, scanErr := read(bytes.NewReader(raw))
+		if errors.Is(scanErr, binlog.ErrCorruptEventSize) {
+			segs = append(segs, seg) // not readable: a named break, not a failed call
+			continue
+		}
+		if scanErr != nil {
+			return RecoveryWindow{}, scanErr
+		}
 		first, last, ok, spanErr := binlog.EventTimeSpan(bytes.NewReader(raw))
 		if spanErr != nil {
 			return RecoveryWindow{}, spanErr
-		}
-		contents, scanErr := binlog.ReadSegmentContents(bytes.NewReader(raw))
-		if scanErr != nil {
-			return RecoveryWindow{}, scanErr
 		}
 		seg.Readable = true
 		seg.SpanOK = ok

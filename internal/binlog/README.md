@@ -7,7 +7,7 @@
 - `segment.go`: `ClassifySegment` 是 runner、durable resume 和 tasks 磁盘扫描共用的分段名解析。`mysql-bin.000001` 是封存、epoch -1。`name.open.eN` 是打开的第 N 代。`name.sealed.eN` 是同一源文件名的后一次封存，epoch N，不是续传点。`OpenName` / `SealedName` 是这个解析结果上的谓词。被拒绝的名字（含 `.takeover-*`、`notes.txt`、`task-N.binlog`）两者都为假，保留清理不会把它们当 binlog 删掉。
 - `event_time.go`: 读一个分段的事件头，给出复制流里第一个和最后一个非 0 时间戳。时间戳 0 跳过。格式描述（format description）和 previous-GTIDs 的时间是源文件创建时间，不计入覆盖。没有 magic 或没有剩余计时事件时不算覆盖。尾部撕掉的字节保留已经读完的事件时间。
 - `gtid_pos.go`: `ScanSegmentForGTID` 在一个分段里找第一个 MySQL `GTID_EVENT`（UUID 不区分大小写，序号相等）。返回的偏移是该事件的起始字节，给 `mysqlbinlog --stop-position` 用，不是事件头里的 `end_log_pos`。previous-GTIDs 不算。没有 magic 时返回空结果。尾部撕掉时保留已经读完的命中。
-- `gtid_set_scan.go`: `scanSegmentGTIDs` 读同一个分段里的 previous-GTIDs 文本，以及每一条 MySQL `GTID_EVENT` 的 UUID、序号、起始字节和事件头时间。格式描述标明 CRC32 时，previous-GTIDs 的校验和尾部先剥掉再解码。尾部撕掉时保留已经读完的事件。previous-GTIDs 解不出来是错误。
+- `gtid_set_scan.go`: `scanSegmentGTIDs` 读同一个分段里的 previous-GTIDs 文本，以及每一条 MySQL `GTID_EVENT` 的 UUID、序号、起始字节和事件头时间。格式描述标明 CRC32 时，previous-GTIDs 的校验和尾部先剥掉再解码。尾部撕掉时保留已经读完的事件。previous-GTIDs 解不出来是错误。事件 size 超过 1GiB 返回 ErrCorruptEventSize，不分配该长度（#358）。
 - `open_tail.go`: `ScanOpenTail` 读最高打开分段（`Ledger.Tail` 选段后调用它）：每个完整事务的 GTID（MySQL、带 tag 的 GTID、MariaDB）、previous-GTIDs，以及续传截断点。末尾的事务没写完、且它前面正好是一个完整事务结束处时给出截断偏移和位点；否则给出这个事务的 GTID，续传在它里面接着拉。XID、XA_PREPARE、压缩的 TRANSACTION_PAYLOAD、DDL 和 `COMMIT`/`ROLLBACK`/`XA COMMIT` 算提交（`TransactionQueryEffect`）。`OpenTail.Durable` 是尾部已落盘的 GTID 文本，`Ledger.ResumeGTID` 把种子集合和它们合起来。只读，不改文件。
 - `gtid_set.go`: `GTIDSet`，仓库里唯一的 GTID 区间类型：加、并、减、包含、内部空洞和规范文本。`ParseGTIDSet` 走 go-mysql 校验，`ParseGTIDSetLenient` 不走（坏串返回 false）。
 - `ledger.go`: 段账本（ADR 0006）。`LedgerAt(dir)` 读一次目录，回答分段顺序、每段 GTID 区间和 previous-GTIDs（`Contents`，按 size+mtime 缓存）、已存集合 `Stored`、空洞 `Holes`、损坏 `Damage`、续传尾部 `Tail` 和续传集合 `ResumeGTID`。不在本地目录的字节用 `ReadSegmentContents`。
@@ -33,3 +33,4 @@
 
 - Go 文件的软件包注释采用 `Package [package name] ...` 形式。
 - `seal_facts.go`: `ReadSealFacts(path)` 流式读取封存分段一次（字节经 TeeReader 进 SHA-256，内存不随段大小增长），给出首尾事件头 UTC 时间（无定时事件时 `HasSpan=false`）和整文件 SHA-256，供封存写入目录行（ADR 0009 P1-4）。
+- #361：事件 size 按读取器的真实剩余长度校验（文件或内存读取器），不再按 -1 放行；`Ledger.Unreadable` / `SegmentUnreadable` 把封存段里 >1GiB 或超出文件末尾的 size 报为读不了（`Contents` 对超出末尾仍按撕裂尾处理）。
