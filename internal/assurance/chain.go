@@ -61,6 +61,9 @@ type Inputs struct {
 	// GTID hole, legacy failback; I3 subclasses). Check returns them in
 	// chain order with its own.
 	Planned []Violation
+	// Plan, when set, is asked once, lazily, for more planner conclusions in
+	// priority order. Health only asks it when no segment is damaged.
+	Plan func() []Violation
 }
 
 // Kind is a closed set of invariant violations.
@@ -98,6 +101,9 @@ type Violation struct {
 	Segments []string
 	Evidence string
 	Detail   string
+	// Problem is the full storage problem for the kinds storage health
+	// reports (I1 from Ledger.Damage, the planner I3 subclasses).
+	Problem *binlog.StorageProblem
 }
 
 // Segment is one segment on the chain and where it can be read.
@@ -123,6 +129,9 @@ type Chain struct {
 	in   Inputs
 	segs []Segment
 	read bool
+
+	planned  []Violation
+	planDone bool
 }
 
 // DefaultUploadGrace is the upload grace when Inputs leaves it unset (ADR
@@ -281,6 +290,7 @@ func (c *Chain) Check(now time.Time) []Violation {
 	c.checkOrder(segs, add)
 	c.checkOffChainRows(add)
 	out = append(out, c.in.Planned...)
+	out = append(out, c.plan()...)
 	pos := map[string]int{}
 	for i, s := range segs {
 		pos[s.Name] = i
