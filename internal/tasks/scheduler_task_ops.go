@@ -506,6 +506,15 @@ func (s *Scheduler) GetTask(id string) (Task, error) {
 			return Task{}, err
 		}
 		s.mu.Lock()
+		if _, pending := s.unpublished[id]; pending {
+			// The store has not taken this task's latest transition yet; the
+			// memory row is the truth until the retry lands.
+			if mem, exists := s.tasks[id]; exists {
+				mem = s.overlayPendingDumpLocked(mem)
+				s.mu.Unlock()
+				return mem, nil
+			}
+		}
 		// 读发生在这次 publish 之前时，行还是 STOPPED / epoch 0。不能把它写回刚 Acquire 的抄本。
 		// 本进程还有 dump 时，也不把这行抄进内存：owner/epoch 留在这次执行上。
 		liveRun := false
@@ -609,10 +618,6 @@ func (s *Scheduler) ListTasks() []Task {
 	items, err := s.listMemoryAndDiskTasks()
 	if err != nil {
 		log.Printf("list on-disk backups: %v", err)
-		// S15: leftover directories are missing from this list.
-		s.Report(Finding{TaskID: ClusterFindingTask, Kind: FindingDiskListFailed, Subject: s.dataDir, Severity: FindingWarning, Detail: "on-disk backups under data_dir are not listed: " + err.Error()})
-	} else {
-		s.Resolve(ClusterFindingTask, FindingDiskListFailed, s.dataDir)
 	}
 	return items
 }
@@ -631,9 +636,13 @@ func (s *Scheduler) listMemoryAndDiskTasks() ([]Task, error) {
 		return out, nil
 	}
 	disk, err := listDiskBackupTasks(s.dataDir, known)
+	// S15: every list path (ListTasks, API pages, observation) goes through
+	// here, so a data_dir that cannot be listed is a finding wherever it shows.
 	if err != nil {
+		s.Report(Finding{TaskID: ClusterFindingTask, Kind: FindingDiskListFailed, Subject: s.dataDir, Severity: FindingWarning, Detail: "on-disk backups under data_dir are not listed: " + err.Error()})
 		return out, err
 	}
+	s.Resolve(ClusterFindingTask, FindingDiskListFailed, s.dataDir)
 	return append(out, disk...), nil
 }
 
