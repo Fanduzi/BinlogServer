@@ -8,6 +8,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2783,7 +2784,10 @@ func TestTaskAPI_AdoptDiskBackupThenStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	sealedBody := []byte("sealed-seg")
-	openBody := []byte("open-seg")
+	// #356: a real event; adopt resumes at its end log_pos (777), not the file size.
+	openBody := append([]byte{0xfe, 'b', 'i', 'n'}, make([]byte, 19)...)
+	binary.LittleEndian.PutUint32(openBody[4+9:4+13], 19)
+	binary.LittleEndian.PutUint32(openBody[4+13:4+17], 777)
 	if err := os.WriteFile(filepath.Join(taskDir, "mysql-bin.000003"), sealedBody, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2836,7 +2840,7 @@ func TestTaskAPI_AdoptDiskBackupThenStart(t *testing.T) {
 	if adopted.Source.Host != "127.0.0.1" || adopted.Source.Port != 3306 || adopted.Source.User != "repl" || adopted.Source.Password != "" || adopted.Source.Flavor != "mysql" {
 		t.Fatalf("source %+v", adopted.Source)
 	}
-	if adopted.Start.Mode != tasks.StartModeFilePos || adopted.Start.File != "mysql-bin.000004" || adopted.Start.Pos != uint32(len(openBody)) {
+	if adopted.Start.Mode != tasks.StartModeFilePos || adopted.Start.File != "mysql-bin.000004" || adopted.Start.Pos != 777 {
 		t.Fatalf("start %+v", adopted.Start)
 	}
 

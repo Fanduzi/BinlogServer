@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out; a listing that re-reads the directory until segments stop being renamed or removed under it (#322)
+// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out; a listing that re-reads the directory until segments stop being renamed or removed under it (#322) The adopt resume point is the last complete event end (DurableResume), then a sealed file's Rotate target, never a file size (#356).
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -662,6 +662,14 @@ func readOnlyDiskBackup(store TaskStore, dataDir, id string) error {
 // diskResumeStart is FILE_POS at the byte size of the highest sealed or
 // .open.e* segment. The file is the source name, not the .open.e suffix.
 func diskResumeStart(dataDir, taskID string) (StartConfig, error) {
+	// #356: resume from the end log_pos of the last complete event, never
+	// from a file size. A segment that continues a source file mid-way
+	// (a FILE_POS start, or an .open.e2 continuation) has a size that is not
+	// a source offset; a torn tail or a magic-only epoch left by a failed
+	// Start is skipped.
+	if file, pos, ok := binlog.DurableResume(dataDir, taskID); ok {
+		return StartConfig{Mode: StartModeFilePos, File: file, Pos: pos}, nil
+	}
 	files, err := listTaskBinlogFilesOnDisk(dataDir, taskID, 1)
 	if err != nil {
 		return StartConfig{}, err
@@ -670,14 +678,18 @@ func diskResumeStart(dataDir, taskID string) (StartConfig, error) {
 		return StartConfig{}, ErrTaskNotFound
 	}
 	file := files[len(files)-1]
-	if file.FileName == "" || file.SizeBytes <= 0 || file.SizeBytes > int64(^uint32(0)) {
+	if file.FileName == "" || file.FilePath == "" {
 		return StartConfig{}, ErrDiskResumePosition
 	}
-	return StartConfig{
-		Mode: StartModeFilePos,
-		File: file.FileName,
-		Pos:  uint32(file.SizeBytes),
-	}, nil
+	// A sealed last file: continue where its Rotate points, else after its
+	// last complete event.
+	if next, nextPos, _, ok := binlog.LastRotateTarget(file.FilePath); ok && next != "" && nextPos >= 4 {
+		return StartConfig{Mode: StartModeFilePos, File: next, Pos: nextPos}, nil
+	}
+	if pos, _, _, ok := binlog.DurableCursor(file.FilePath); ok {
+		return StartConfig{Mode: StartModeFilePos, File: file.FileName, Pos: pos}, nil
+	}
+	return StartConfig{}, ErrDiskResumePosition
 }
 
 // diskNextOpenEpoch is one higher than any .open.e* epoch in the task directory, and at least 1.
