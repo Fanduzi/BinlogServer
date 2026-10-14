@@ -22,6 +22,8 @@ type FindingKind string
 const (
 	// FindingTaskPersistFailed: a task state transition was not written to the store (S2/S3).
 	FindingTaskPersistFailed FindingKind = "TASK_PERSIST_FAILED"
+	// FindingMetadataWriteBlocked: the dump stopped because the metadata store refused a write; it retries with backoff.
+	FindingMetadataWriteBlocked FindingKind = "METADATA_WRITE_BLOCKED"
 	// FindingEventPersistFailed: a task event was not written to the event store (S1).
 	FindingEventPersistFailed FindingKind = "EVENT_PERSIST_FAILED"
 	// FindingEventReadFailed: the retry budget could not be read back from events (S13).
