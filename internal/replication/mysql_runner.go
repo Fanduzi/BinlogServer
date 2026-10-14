@@ -12,7 +12,6 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,9 +50,10 @@ const (
 
 // MySQLRunner 负责执行复制协议拉流、文件落盘、checkpoint 与上传流程。
 type MySQLRunner struct {
-	// stalled holds task IDs with an open DUMP_STALLED finding, so the event
-	// hot path resolves only after a stall.
-	stalled sync.Map
+	// recv holds one *recvMark per task: the dump session and when it last
+	// received anything. A read error after a silence as long as the read
+	// timeout is a stall, however go-mysql words the error.
+	recv sync.Map
 	// clock is time.Now; tests step it.
 	clock           func() time.Time
 	dataDir         string
@@ -284,7 +284,20 @@ func (r *MySQLRunner) closeDump(task tasks.Task, syncer binlogSyncer) {
 		return
 	}
 	id := dumpConnectionID(syncer)
-	syncer.Close()
+	// go-mysql's Close dials the source to KILL the old thread and waits for
+	// it; on a dead network that takes minutes. Bound it: the thread id is
+	// kept and releaseDumpConn KILLs it (bounded) or leaves it to the pending
+	// dump cleanup, so the reconnect is not held (#338 QA P2).
+	closed := make(chan struct{})
+	go func() {
+		syncer.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(dumpCloseTimeout):
+		log.Printf("binlog syncer close still running after %s task=%s conn=%d; continuing", dumpCloseTimeout, task.ID, id)
+	}
 	r.releaseDumpConn(task, id)
 }
 
@@ -314,7 +327,13 @@ func killMySQLDumpThread(source tasks.SourceConfig, connectionID uint32) error {
 		return nil
 	}
 	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-	conn, err := sqlclient.Connect(addr, source.User, source.Password, "")
+	ctx, cancel := context.WithTimeout(context.Background(), killConnectTimeout)
+	defer cancel()
+	conn, err := sqlclient.ConnectWithContext(ctx, addr, source.User, source.Password, "", killConnectTimeout, func(c *sqlclient.Conn) error {
+		c.ReadTimeout = killConnectTimeout
+		c.WriteTimeout = killConnectTimeout
+		return nil
+	})
 	if err != nil {
 		return err
 	}
@@ -652,6 +671,7 @@ const idlePollInterval = 2 * time.Second
 
 func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID string, source tasks.SourceConfig, file string, pos uint32, atTip *bool) (*replication.BinlogEvent, error) {
 	eventCtx, cancel := context.WithTimeout(ctx, idlePollInterval)
+	mark := r.recvMark(taskID, streamer)
 	event, err := streamer.GetEvent(eventCtx)
 	cancel()
 	if err != nil {
@@ -677,18 +697,60 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 			}
 			return nil, nil
 		}
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
-			r.stalled.Store(taskID, struct{}{})
+		// go-mysql turns the read timeout into ErrBadConn with the net.Error
+		// as text, so the error type cannot tell a stall. The silence can.
+		if silent := r.now().Sub(mark.at); silent >= dumpReadTimeout-dumpStallSlack {
 			r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
-				Detail: fmt.Sprintf("dump read nothing, not even a heartbeat, for %s at %s:%d; reconnecting", dumpReadTimeout, file, pos)})
+				Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting: %v", silent.Truncate(time.Second), file, pos, err)})
 		}
 		return nil, classifySourceError(err)
 	}
-	if _, was := r.stalled.LoadAndDelete(taskID); was {
+	mark.at = r.now()
+	if !mark.resolved {
+		// Once per dump session, so a stall loaded from the store after a
+		// restart also resolves when the new session receives data.
+		mark.resolved = true
 		r.resolve(taskID, tasks.FindingDumpStalled, "")
 	}
 	return event, nil
+}
+
+// dumpStallSlack absorbs scheduling jitter around the read timeout.
+const dumpStallSlack = 2 * time.Second
+
+type recvMark struct {
+	session  binlogStreamer
+	at       time.Time
+	resolved bool
+}
+
+func (r *MySQLRunner) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
+
+// recvMark returns the task's mark for this dump session; a new streamer
+// starts a new session whose silence counts from now.
+func (r *MySQLRunner) recvMark(taskID string, streamer binlogStreamer) *recvMark {
+	if v, ok := r.recv.Load(taskID); ok {
+		if m := v.(*recvMark); sameSession(m.session, streamer) {
+			return m
+		}
+	}
+	m := &recvMark{session: streamer, at: r.now()}
+	r.recv.Store(taskID, m)
+	return m
+}
+
+func sameSession(a, b binlogStreamer) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
 }
 
 func (r *MySQLRunner) confirmIdleAtTip(ctx context.Context, source tasks.SourceConfig, file string, pos uint32) bool {
@@ -1987,15 +2049,16 @@ func (r *MySQLRunner) reconcileOpenTail(task tasks.Task, executed *executedGTID)
 		return "", false
 	}
 	before := executed.current()
+	var cutErr error
 	if tail.Truncate {
 		info, err := os.Stat(tail.Path)
 		switch {
 		case err != nil || tail.CutOffset <= 0 || tail.CutOffset > info.Size():
 			tail.Truncate = false
-		case truncateFile(tail.Path, tail.CutOffset) != nil:
-			log.Printf("open tail truncate failed task=%s path=%s offset=%d", task.ID, tail.Path, tail.CutOffset)
+		case func() bool { cutErr = truncateFile(tail.Path, tail.CutOffset); return cutErr != nil }():
+			log.Printf("open tail truncate failed task=%s path=%s offset=%d err=%v", task.ID, tail.Path, tail.CutOffset, cutErr)
 			r.report(tasks.Finding{TaskID: task.ID, Kind: tasks.FindingOpenTailCutFailed, Subject: tail.File, Severity: tasks.FindingCritical,
-				Detail: fmt.Sprintf("could not cut unfinished transaction %s at offset %d of %s; resuming inside it", tail.PartialGTID, tail.CutOffset, tail.Path)})
+				Detail: fmt.Sprintf("could not cut unfinished transaction %s at offset %d of %s: %v; the start continues inside it only if the segment can still be appended, otherwise the task fails", tail.PartialGTID, tail.CutOffset, tail.Path, cutErr)})
 			tail.Truncate = false
 		default:
 			r.resolve(task.ID, tasks.FindingOpenTailCutFailed, tail.File)
