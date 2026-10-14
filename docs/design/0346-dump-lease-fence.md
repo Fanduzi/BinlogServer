@@ -38,14 +38,18 @@ R2. If the proof fails: if the lease is free or expired and still ours, the
     returns `ErrLeaseNotAcquired`, opens nothing, and writes nothing to the
     task row; the in-memory copy drops ownership.
 R3. A worker whose Renew reports the lease lost cancels its dump on that tick
-    (at most one renew interval) and yields in memory only, like
-    `ErrLeaseHandoff`: no STOPPING/STOPPED/FAILED write, no release of a
-    newer epoch. The row belongs to the new owner.
+    (at most one renew interval). It then reads the task row. If the row
+    names another owner or a newer epoch, it yields in memory only, like
+    `ErrLeaseHandoff`: no STOPPING/STOPPED write and no release. The row
+    belongs to the new owner. If the row is still its own (lease released or
+    expired with no new owner), the old STOPPING -> STOPPED path is kept. The
+    run-exit path makes the same check before it writes STOPPED.
 R4. The epoch is the fencing token. Writes that matter already check it:
     seal-time `Verify` in the runner (`ErrLeaseEpochMismatch`), the
     pending-dump marker's epoch (`heldDumpAbandoned`), and Release/Renew,
-    which are conditional on (owner, epoch). R3 removes the one unconditional
-    task-row write on the lease-lost path. Making every `UpsertTask`
+    which are conditional on (owner, epoch). R3 fences the task-row writes on the
+    lease-lost and run-exit paths by comparing the row's owner and epoch. A
+    narrow window remains between that read and the write. Making every `UpsertTask`
     conditional on epoch is a larger schema-level change and is left as a
     follow-up; it is not needed for #346.
 
@@ -65,4 +69,4 @@ R4. The epoch is the fencing token. Writes that matter already check it:
   cannot claim it right after.
 - Lease lost while the dump runs: B stops the dump and A's row is untouched.
 
-The control-loop e2e runs 20 times in a loop in CI for this PR.
+The control-loop e2e (`smoke-control-loop`) was run 20 times in a loop against this branch.

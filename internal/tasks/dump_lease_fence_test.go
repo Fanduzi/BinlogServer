@@ -183,7 +183,7 @@ func TestStartTask_SlowKillWithinLeaseRenewsBeforeDump(t *testing.T) {
 // stop its dump promptly and must not write STOPPING/STOPPED over A's row.
 func TestRenewLeaseLoop_LostLeaseStopsDumpWithoutWritingRow(t *testing.T) {
 	leases := NewMemoryLease()
-	store := newPendingColumnStore()
+	store := &lockedFakeStore{fakeStore: newFakeStore()}
 	runner := &countingRunner{started: make(chan struct{}, 4), stopped: make(chan struct{}, 4)}
 	s := NewScheduler(
 		WithStore(store),
@@ -242,4 +242,29 @@ func TestRenewLeaseLoop_LostLeaseStopsDumpWithoutWritingRow(t *testing.T) {
 	if got.State != StateRunning || got.OwnerWorkerID != "worker-a" || got.Epoch != 2 {
 		t.Fatalf("stale worker-b wrote the shared row: state=%s owner=%q epoch=%d last_error=%q", got.State, got.OwnerWorkerID, got.Epoch, got.LastError)
 	}
+}
+
+// lockedFakeStore lets the test write worker A's row while worker B's renew
+// loop reads it.
+type lockedFakeStore struct {
+	*fakeStore
+	mu sync.Mutex
+}
+
+func (s *lockedFakeStore) UpsertTask(ctx context.Context, task Task) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.UpsertTask(ctx, task)
+}
+
+func (s *lockedFakeStore) GetTask(ctx context.Context, taskID string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.GetTask(ctx, taskID)
+}
+
+func (s *lockedFakeStore) ListTasks(ctx context.Context) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.ListTasks(ctx)
 }
