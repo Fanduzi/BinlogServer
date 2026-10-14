@@ -85,7 +85,7 @@ type Violation struct {
 func ChainOf(in Inputs) *Chain                 // 不做 I/O 以外的工作；读取延迟到问题被问时
 func (c *Chain) Segments() ([]Segment, error)  // 只有任务目录不可读才是错误
 func (c *Chain) Check(now time.Time) []Violation
-func WindowOf(segs []WindowSegment, flavor string, objectStorage bool, startGTID string) (Window, error) // PR P1-2，见 §7
+func WindowOf(segs []WindowSegment, flavor string, objectStorage bool, startGTID string) (Window, error) // PR P1-2，见 §8
 ```
 
 ADR 枚举之外新增三个子类，原因：`I2_SWITCH_UNRECORDED`（跨源身份但没有切换记录，ADR I2 的第二句）、`I3_LEGACY_FAILBACK`/`I3_STORED_HOLE`（ADR：「旧版回切与已存缺口 = I3 的两个子类」）、`I6_MISSING_ROW`（ADR I6「`row(S)` 存在」的反面；与 `I6_ORPHAN_ROW` 方向相反）。
