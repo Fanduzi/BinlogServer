@@ -21,7 +21,9 @@ type metaBlockedRunner struct {
 	running chan struct{}
 }
 
-func (r *metaBlockedRunner) Run(context.Context, Task) error { return errors.New("RunWithNotify required") }
+func (r *metaBlockedRunner) Run(context.Context, Task) error {
+	return errors.New("RunWithNotify required")
+}
 
 func (r *metaBlockedRunner) RunWithNotify(ctx context.Context, _ Task, onReady func()) error {
 	r.mu.Lock()
