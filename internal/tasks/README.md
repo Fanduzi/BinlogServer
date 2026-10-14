@@ -87,3 +87,4 @@
 ## Package Comment Rule
 
 - Go 文件的软件包注释采用 `Package [package name] ...` 形式。
+- `storage_health.go` / `storage_alert.go`（ADR 0009 P1-3）: 存储健康结论来自 `assurance.Chain.Health()`，tasks 只把遗留回切和已存缺口两个规划器作为惰性 `Plan` 交进去；回放截断 `keepBeforeSegment` 只计算代际先后和同序号，规则在 `assurance.KeepBefore`。`replay_golden_test.go` 是在 v0.5.64 上录下的 47 个目录用例的 /replay（链尾和链中两个 stop）与存储健康结论 golden（`REPLAY_GOLDEN_RECORD=1` 重录）；`health_seam_test.go` 断言 tasks 不再调用 `.Damage` 也不定义 `excludeDamagedSegments`。

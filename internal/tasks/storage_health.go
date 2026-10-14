@@ -1,13 +1,14 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task, the checkpoint gtid_set it claims (or "" when the caller does not need the missing set), the scheduler data directory and the task's source-switch events
 // output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning
-// pos: the one storage detector: list/get alerts, /replay, /window and the replay warning all ask it; one segment-ledger listing per question (ADR 0007)
+// pos: adapter over assurance.Chain.Health (ADR 0009 phase 1, P1-3): tasks supplies the ledger, checkpoint, start set and its planners (legacy failback, then stored hole) as lazy Plan; list/get alerts, /replay, /window and the replay warning all ask it; the replay cut is assurance.KeepBefore
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"strings"
 
+	"binlog_server/internal/assurance"
 	"binlog_server/internal/binlog"
 )
 
@@ -52,16 +53,39 @@ func (s *Scheduler) storageHealth(task Task, checkpointGTID string) StorageHealt
 		return StorageHealth{}
 	}
 	ledger := binlog.LedgerAt(dir)
-	if problem, found := ledger.Damage(checkpointGTID, StartGTIDText(task), task.Source.Flavor); found {
-		return StorageHealth{Kind: StorageDamaged, Problem: problem}
+	chain := assurance.ChainOf(assurance.Inputs{
+		Flavor:     task.Source.Flavor,
+		StartGTID:  StartGTIDText(task),
+		Checkpoint: assurance.Checkpoint{GTIDSet: checkpointGTID},
+		Local:      ledger,
+		Plan:       func() []assurance.Violation { return s.plannedProblems(task, dir, ledger) },
+	})
+	v, found := chain.Health()
+	if !found || v.Problem == nil {
+		return StorageHealth{}
 	}
+	kind := StorageDamaged
+	switch v.Kind {
+	case assurance.I3LegacyFailback:
+		kind = StorageLegacyFailback
+	case assurance.I3StoredHole:
+		kind = StorageStoredHole
+	}
+	return StorageHealth{Kind: kind, Problem: *v.Problem}
+}
+
+// plannedProblems is what the tasks planners conclude, in verdict order: a
+// legacy failback, else a stored GTID hole. The stored-hole planner only
+// runs when there is no legacy failback.
+func (s *Scheduler) plannedProblems(task Task, dir string, ledger *binlog.Ledger) []assurance.Violation {
 	if legacy := s.legacyFailbackIn(task, dir, ledger); legacy.found() {
-		return StorageHealth{Kind: StorageLegacyFailback, Problem: legacyProblem(legacy)}
+		p := legacyProblem(legacy)
+		return []assurance.Violation{{Kind: assurance.I3LegacyFailback, Segments: []string{p.Segment}, Detail: p.Message, Problem: &p}}
 	}
-	if problem, found := s.storedHoleIn(task, dir, ledger); found {
-		return StorageHealth{Kind: StorageStoredHole, Problem: problem}
+	if p, found := s.storedHoleIn(task, dir, ledger); found {
+		return []assurance.Violation{{Kind: assurance.I3StoredHole, Segments: []string{p.Segment}, Evidence: p.Missing, Detail: p.Message, Problem: &p}}
 	}
-	return StorageHealth{}
+	return nil
 }
 
 // ReplayWarning is what /replay says about the verdict, "" when it is ok.
@@ -92,5 +116,5 @@ func (h StorageHealth) replayCut(files, chosen []BinlogFile) []BinlogFile {
 	if strings.TrimSpace(h.Problem.Segment) == "" {
 		return []BinlogFile{}
 	}
-	return excludeDamagedSegments(files, chosen, h.Problem.Segment)
+	return keepBeforeSegment(files, chosen, h.Problem.Segment)
 }

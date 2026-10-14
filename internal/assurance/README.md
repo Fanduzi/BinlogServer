@@ -16,3 +16,4 @@
 
 ## Update Rule
 - 新增或改变一种 `Kind` 的判定时，更新本文件、设计文档 §4，并在 `chain_test.go` 加至少两个构造目录用例。
+- `health.go`: `Chain.Health()` 是存储健康结论：先看 `Ledger.Damage`（I1，带检查点、起点集合和 flavor），再按 `Inputs.Plan` 给出的顺序取第一个 `I3_LEGACY_FAILBACK` / `I3_STORED_HOLE`；分段已损坏时不调用 `Plan`，`Plan` 最多调用一次（`Check` 也会把它的结论附上）。其它 Kind 不构成结论，保持 ADR 0009 之前的行为。`KeepBefore(links, segment)` 是 /replay 和 /window 的截断：保留排在问题分段之前、且不是同一源序号副本的分段；问题不指名分段时什么也不保留。链顺序和代际比较仍由调用方给出（阶段 1）。

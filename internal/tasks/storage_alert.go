@@ -9,6 +9,7 @@ import (
 	"context"
 	"strings"
 
+	"binlog_server/internal/assurance"
 	"binlog_server/internal/binlog"
 )
 
@@ -75,7 +76,7 @@ func (s *Scheduler) validBefore(task Task, segment string) []string {
 	if err != nil {
 		return nil
 	}
-	kept := excludeDamagedSegments(files, SelectReplayFiles(files), segment)
+	kept := keepBeforeSegment(files, SelectReplayFiles(files), segment)
 	out := make([]string, 0, len(kept))
 	for _, file := range kept {
 		out = append(out, segmentInventoryBasename(file))
@@ -91,10 +92,10 @@ func (s *Scheduler) SelectReplayFilesFor(task Task, files []BinlogFile) ([]Binlo
 	return health.replayCut(files, SelectReplayFiles(files)), health.ReplayWarning()
 }
 
-// excludeDamagedSegments keeps the chosen files that sort before the damaged
-// segment in replay order. Any copy of the damaged binlog index, open or
-// sealed, is dropped too.
-func excludeDamagedSegments(inventory, chosen []BinlogFile, damaged string) []BinlogFile {
+// keepBeforeSegment is assurance.KeepBefore over chosen: the files that sort
+// before the damaged segment in replay order, without any copy of its
+// binlog index. An empty damaged keeps chosen unchanged.
+func keepBeforeSegment(inventory, chosen []BinlogFile, damaged string) []BinlogFile {
 	if damaged == "" {
 		return chosen
 	}
@@ -107,16 +108,19 @@ func excludeDamagedSegments(inventory, chosen []BinlogFile, damaged string) []Bi
 	}
 	gen := segmentGenerations(inventory)
 	markKey := binlogSegmentKey(mark)
-	out := make([]BinlogFile, 0, len(chosen))
-	for _, file := range chosen {
+	links := make([]assurance.Link, len(chosen))
+	for i, file := range chosen {
 		key := binlogSegmentKey(file)
-		if key.ok && markKey.ok && segmentIndexKey(key) == segmentIndexKey(markKey) {
-			continue
+		links[i] = assurance.Link{
+			Name:      segmentInventoryBasename(file),
+			SameIndex: key.ok && markKey.ok && segmentIndexKey(key) == segmentIndexKey(markKey),
+			Before:    segmentGenerationLess(file, mark, gen),
 		}
-		if !segmentGenerationLess(file, mark, gen) {
-			continue
-		}
-		out = append(out, file)
+	}
+	keep := assurance.KeepBefore(links, damaged)
+	out := make([]BinlogFile, 0, len(keep))
+	for _, i := range keep {
+		out = append(out, chosen[i])
 	}
 	return out
 }
