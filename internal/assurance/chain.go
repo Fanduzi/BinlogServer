@@ -211,7 +211,7 @@ func (c *Chain) Check(now time.Time) []Violation {
 	var prev *group
 	var before []binlog.GTIDEventRef
 	stored := c.storedSet(segs)
-	seen := map[string]string{} // prefix\x00seq of a sealed segment -> name
+	seen := map[string][]int{} // prefix\x00seq of a sealed segment -> chain positions
 	for i := range segs {
 		seg := &segs[i]
 		// I1
@@ -226,14 +226,20 @@ func (c *Chain) Check(now time.Time) []Violation {
 			unrecorded[id] = true
 			add(I2SwitchUnrecorded, id, fmt.Sprintf("segment %s is from server %s but no source switch to it is recorded", seg.Name, id), seg.Name)
 		}
-		// I4: the same source file sealed twice on the chain.
+		// I4: the same source file sealed twice on the chain. Epochs of one
+		// source file that continue each other are not an overlap; only a
+		// pair that cannot be told apart, or whose GTIDs (MySQL) or event
+		// positions overlap, is.
 		if !seg.Named.Open && idOK {
 			key := fmt.Sprintf("%s\x00%d", prefix, seg.Named.Seq)
-			if other, dup := seen[key]; dup {
-				add(I4Overlap, other+" "+seg.Name, fmt.Sprintf("source file %s is on the chain twice: %s and %s", seg.Named.Source, other, seg.Name), seg.Name, other)
-			} else {
-				seen[key] = seg.Name
+			for _, oi := range seen[key] {
+				other := &segs[oi]
+				if c.sameBytesSpan(other, seg) {
+					add(I4Overlap, other.Name+" "+seg.Name, fmt.Sprintf("source file %s is on the chain twice: %s and %s", seg.Named.Source, other.Name, seg.Name), seg.Name, other.Name)
+					break
+				}
 			}
+			seen[key] = append(seen[key], i)
 		}
 		if seg.Contents != nil && c.mysql() {
 			log := seg.Contents.Log
@@ -305,6 +311,28 @@ func (c *Chain) Check(now time.Time) []Violation {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
 	return out
+}
+
+// sameBytesSpan reports that two sealed segments of one source file may
+// hold the same events: either is unreadable (nothing proves otherwise), or
+// their GTIDs intersect (MySQL), or their event position ranges overlap.
+func (c *Chain) sameBytesSpan(a, b *Segment) bool {
+	if a.Contents == nil || b.Contents == nil {
+		return true
+	}
+	if c.mysql() && (!a.Contents.GTIDs.IsEmpty() || !b.Contents.GTIDs.IsEmpty()) {
+		both := a.Contents.GTIDs.Minus(a.Contents.GTIDs.Minus(b.Contents.GTIDs))
+		return !both.IsEmpty()
+	}
+	if c.in.Local == nil {
+		return true
+	}
+	as, ae, aok := binlog.SegmentPositions(filepath.Join(c.in.Local.Dir(), a.Name))
+	bs, be, bok := binlog.SegmentPositions(filepath.Join(c.in.Local.Dir(), b.Name))
+	if !aok || !bok {
+		return true
+	}
+	return as < be && bs < ae
 }
 
 // checkCopies is I6 and I7 for one segment.
@@ -545,7 +573,17 @@ func (c *Chain) checkOrder(segs []Segment, add func(Kind, string, string, ...str
 	if err != nil {
 		return
 	}
+	// SelectReplayFiles keeps only the highest open epoch of a source file.
+	topOpen := map[string]int64{}
 	for _, ls := range local {
+		if ls.Named.Open && ls.Named.Epoch > topOpen[ls.Named.Source] {
+			topOpen[ls.Named.Source] = ls.Named.Epoch
+		}
+	}
+	for _, ls := range local {
+		if ls.Named.Open && ls.Named.Epoch < topOpen[ls.Named.Source] {
+			continue
+		}
 		if !on[ls.Name] {
 			add(I2OrderInvalid, ls.Name, fmt.Sprintf("local segment %s is not on the chain order", ls.Name), ls.Name)
 		}
