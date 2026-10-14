@@ -7,6 +7,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -101,5 +102,17 @@ func TestDumpStallEndsRunAtOnce(t *testing.T) {
 	}
 	if _, ok := rec.has(task.ID, tasks.FindingDumpStalled, ""); !ok {
 		t.Fatalf("no DUMP_STALLED: %v", rec.open)
+	}
+}
+
+// #338 re-QA-2 P2: a transient checkpoint write failure is tagged at the
+// metadata-store boundary; a source dump error with the same words is not.
+func TestMetadataErrorsAreTaggedAtTheStoreBoundary(t *testing.T) {
+	ro := errors.New("Error 1290 (HY000): The MySQL server is running with the --super-read-only option")
+	if err := checkpointWriteError(ro); !tasks.IsMetadataWriteBlocked(err) {
+		t.Fatalf("checkpoint write %v is not METADATA_WRITE_BLOCKED", err)
+	}
+	if tasks.IsMetadataWriteBlocked(classifySourceError(errors.New("io.ReadFull(header) failed. err EOF: connection was bad"))) {
+		t.Fatal("a source dump error is not a metadata write")
 	}
 }

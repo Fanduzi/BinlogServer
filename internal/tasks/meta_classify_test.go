@@ -21,7 +21,9 @@ type sourceOutageRunner struct {
 	running chan struct{}
 }
 
-func (r *sourceOutageRunner) Run(context.Context, Task) error { return errors.New("RunWithNotify required") }
+func (r *sourceOutageRunner) Run(context.Context, Task) error {
+	return errors.New("RunWithNotify required")
+}
 
 func (r *sourceOutageRunner) RunWithNotify(ctx context.Context, _ Task, onReady func()) error {
 	r.mu.Lock()

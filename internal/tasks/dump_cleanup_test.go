@@ -240,13 +240,15 @@ func TestSchema3PendingDumpSurvivesStopped(t *testing.T) {
 	s.mu.Lock()
 	s.runs[task.ID] = make(chan struct{})
 	s.mu.Unlock()
+	// #338 re-QA-2: a live run no longer pauses the retry of a leftover
+	// (non-held) connection; only a held live dump is left alone.
 	killedWhileOpen := false
 	s.dumpKiller = func(SourceConfig, uint32) error {
 		killedWhileOpen = true
-		return nil
+		return errors.New("source unreachable")
 	}
-	if s.retryPendingDumpCleanups() || killedWhileOpen {
-		t.Fatal("open runner must not be killed by the pending retry")
+	if !s.retryPendingDumpCleanups() || !killedWhileOpen {
+		t.Fatal("a leftover must still be retried while a run is live")
 	}
 	s.mu.Lock()
 	close(s.runs[task.ID])
