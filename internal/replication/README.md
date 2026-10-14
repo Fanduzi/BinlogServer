@@ -42,3 +42,4 @@
 ## Package Comment Rule
 
 - Go 文件的软件包注释采用 `Package [package name] ...` 形式。
+- 封存（`sealFile` 与磁盘上无目录行的封存分段补登）经 `withSealFacts` 在目录行上带首尾事件时间和 SHA-256（ADR 0009 P1-4）；读不到文件只记日志，不影响封存。

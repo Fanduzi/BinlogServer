@@ -641,18 +641,19 @@ fi
 
 echo "[control-loop] upgraded RUNNING task stayed running"
 
-# 000007 adds task_findings only. Dropping it returns to schema 6 and the
-# table is gone; the rest of this walk starts from schema 6 as before.
+# 000007 adds task_findings only and 000008 adds nullable binlog_files
+# columns. Dropping both returns to schema 6 and the table is gone; the rest
+# of this walk starts from schema 6 as before.
 kill_pid "$ALL_PID"
 ALL_PID=""
 (
   cd "$ROOT_DIR"
-  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 1
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate down --steps 2
 )
 SCHEMA="$(meta_exec "SELECT version, dirty FROM schema_migrations")"
 SCHEMA="$(printf '%s' "$SCHEMA" | tr -d '[:space:]')"
 if [[ "$SCHEMA" != "60" ]]; then
-  echo "schema after dropping 000007: $SCHEMA, want 60" >&2
+  echo "schema after dropping 000008 and 000007: $SCHEMA, want 60" >&2
   exit 1
 fi
 FINDINGS_TABLE="$(meta_exec "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'task_findings'")"
@@ -660,7 +661,7 @@ if [[ "$(printf '%s' "$FINDINGS_TABLE" | tr -d '[:space:]')" != "0" ]]; then
   echo "task_findings still present on schema 6" >&2
   exit 1
 fi
-echo "[control-loop] schema 6 after dropping 000007"
+echo "[control-loop] schema 6 after dropping 000008 and 000007"
 
 # Schema 6 drops uk_task_file_epoch. One down restores that index and stays on
 # schema 5, which still has pending_dump_cleanup. Dropping 000005 returns to
