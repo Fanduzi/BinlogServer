@@ -6,6 +6,7 @@
 package assurance
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -194,6 +195,37 @@ func TestEpochContinuationIsNotOverlap(t *testing.T) {
 		in := Inputs{Flavor: flavor, Order: dup, Local: binlog.LedgerAt(dir), Switches: []Switch{{Identity: failbackB}}}
 		if vs := ChainOf(in).Check(testNow); !has(vs, I4Overlap, "mysql-bin.000003.sealed.e2") {
 			t.Errorf("%s: a copy of the same epoch bytes is an overlap: %s", flavor, kinds(vs))
+		}
+	}
+}
+
+// A second sealed copy of a source file that carries no GTIDs (junk,
+// magic-only, header-only, all zeros) next to one that does is still an
+// overlap on MySQL: an empty GTID set intersects nothing, so positions decide.
+func TestNoGTIDSecondCopyIsOverlap(t *testing.T) {
+	src := filepath.Join("..", "binlog", "testdata", "ledger", "failback")
+	raw, err := os.ReadFile(filepath.Join(src, "mysql-bin.000003.sealed.e1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fdeEnd := 4 + int(binary.LittleEndian.Uint32(raw[4+9:4+13]))
+	shapes := map[string][]byte{
+		"junk":        []byte("this is not a binlog file at all"),
+		"magic-only":  append([]byte(nil), raw[:4]...),
+		"header-only": append([]byte(nil), raw[:fdeEnd]...),
+		"all-zeros":   make([]byte, 4096),
+	}
+	order := []string{"mysql-bin.000002", "mysql-bin.000003", "mysql-bin.000003.sealed.e1", "mysql-bin.000003.sealed.e2", "mysql-bin.000003.open.e1", failbackB + ".mysql-bin.000001"}
+	for name, body := range shapes {
+		dir := copyDir(t, src)
+		if err := os.WriteFile(filepath.Join(dir, "mysql-bin.000003.sealed.e2"), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, flavor := range []string{"mysql", "mariadb"} {
+			in := Inputs{Flavor: flavor, Order: order, Local: binlog.LedgerAt(dir), Switches: []Switch{{Identity: failbackB}}}
+			if vs := ChainOf(in).Check(testNow); !has(vs, I4Overlap, "mysql-bin.000003.sealed.e2") {
+				t.Errorf("%s/%s: no-GTID second copy not reported as overlap: %s", name, flavor, kinds(vs))
+			}
 		}
 	}
 }
