@@ -17,6 +17,37 @@ import (
 // errPreviousGTIDs is a previous-GTIDs event whose body did not decode.
 var errPreviousGTIDs = errors.New("unreadable previous gtid event")
 
+// ErrCorruptEventSize means an event header's size is larger than the rest of
+// the file or larger than maxEventBody. Callers must not allocate that size.
+var ErrCorruptEventSize = errors.New("corrupt binlog event size")
+
+// maxEventBody is 1 GiB: above MySQL's maximum max_allowed_packet, and far
+// above any real binlog event. A damaged size field used to ask for ~4 GiB
+// and crash the process (#358).
+const maxEventBody = 1 << 30
+
+// makeEventBody allocates an event body. Tests replace it to refuse huge sizes
+// without OOMing the host.
+var makeEventBody = func(n int) []byte { return make([]byte, n) }
+
+// eventBodyBytes is the body length after the 19-byte header, or an error when
+// the claimed size is below the header, above maxEventBody, or past remaining
+// when remaining >= 0 (file-backed scans).
+func eventBodyBytes(eventSize uint64, remaining int64) (int, error) {
+	hdr := uint64(goreplication.EventHeaderSize)
+	if eventSize < hdr {
+		return 0, ErrCorruptEventSize
+	}
+	rest := eventSize - hdr
+	if rest > maxEventBody {
+		return 0, ErrCorruptEventSize
+	}
+	if remaining >= 0 && int64(rest) > remaining {
+		return 0, ErrCorruptEventSize
+	}
+	return int(rest), nil
+}
+
 // GTIDEventRef is one MySQL GTID event inside a segment.
 // Offset is the byte where that event starts, the same position
 // mysqlbinlog --stop-position excludes. UUID is lowercase.
@@ -70,7 +101,7 @@ func scanSegmentGTIDs(r io.Reader) (SegmentGTIDLog, error) {
 		rest := eventSize - uint64(goreplication.EventHeaderSize)
 		var body []byte
 		if rest > 0 {
-			body = make([]byte, rest)
+			body = makeEventBody(int(rest))
 			if _, err := io.ReadFull(r, body); err != nil {
 				return out, nil
 			}
