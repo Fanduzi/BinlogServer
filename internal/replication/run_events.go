@@ -28,6 +28,7 @@ type runLoop struct {
 	// skipStoredTxn drops the rest of a transaction whose GTID is already
 	// in the flushed set. The commit of that transaction clears it.
 	skipStoredTxn bool
+	streamCRC     bool
 }
 
 func (l *runLoop) reportProgress(at time.Time) {
@@ -48,8 +49,11 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 	l.sourceServerUUID = l.session.active
 	// The format description sets the checksum flag used to decode later
 	// raw GTID bodies. Noting it does not add a transaction.
-	if l.trackGTID && event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
-		l.executed.note(event)
+	if event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
+		if l.trackGTID {
+			l.executed.note(event)
+		}
+		l.streamCRC = formatDescriptionHasCRC(event)
 	}
 	sourceEventAt := sourceEventTime(event)
 
@@ -124,7 +128,8 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 	}
 
 	next := seg.checkpointAt(seg.name, event.Header.LogPos)
-	if err := seg.persistRaw(event.RawData, next); err != nil {
+	raw := stampLogPosInRaw(event.RawData, event.Header.LogPos, l.streamCRC)
+	if err := seg.persistRaw(raw, next); err != nil {
 		return err
 	}
 	l.reportProgress(sourceEventAt)

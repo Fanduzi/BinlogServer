@@ -1402,7 +1402,7 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 		serverID = defaultServerID(task.ID)
 	}
 
-	return replication.BinlogSyncerConfig{
+	cfg := replication.BinlogSyncerConfig{
 		ServerID:             serverID,
 		Flavor:               flavor,
 		Host:                 task.Source.Host,
@@ -1416,6 +1416,13 @@ func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
 		HeartbeatPeriod:      dumpHeartbeatPeriod,
 		ReadTimeout:          dumpReadTimeout,
 	}
+	// MariaDB 11.4+ sends LogPos=0 on row events. FillZeroLogPos asks for
+	// ANNOTATE_ROWS and recomputes LogPos so we do not drop those events
+	// (#359). Without it the stored segment has only GTID and XID.
+	if isMariaDBFlavor(flavor) {
+		cfg.FillZeroLogPos = true
+	}
+	return cfg
 }
 
 func carryUpload(meta tasks.BinlogFile, carried *tasks.BinlogFile) tasks.BinlogFile {
