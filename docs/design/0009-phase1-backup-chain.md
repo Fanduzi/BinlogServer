@@ -85,7 +85,7 @@ type Violation struct {
 func ChainOf(in Inputs) *Chain                 // 不做 I/O 以外的工作；读取延迟到问题被问时
 func (c *Chain) Segments() ([]Segment, error)  // 只有任务目录不可读才是错误
 func (c *Chain) Check(now time.Time) []Violation
-func (c *Chain) Window() (Window, error)       // PR P1-2
+func WindowOf(segs []WindowSegment, flavor string, objectStorage bool, startGTID string) (Window, error) // PR P1-2，见 §8
 ```
 
 ADR 枚举之外新增三个子类，原因：`I2_SWITCH_UNRECORDED`（跨源身份但没有切换记录，ADR I2 的第二句）、`I3_LEGACY_FAILBACK`/`I3_STORED_HOLE`（ADR：「旧版回切与已存缺口 = I3 的两个子类」）、`I6_MISSING_ROW`（ADR I6「`row(S)` 存在」的反面；与 `I6_ORPHAN_ROW` 方向相反）。
@@ -143,3 +143,7 @@ P1-4 的 schema 下限（Adrian 已决定，2026-10-14）：不提到 8。`00000
 
 - **顺序**：链顺序今天由 `SelectReplayFiles`（按源前缀的最早创建时间排序）决定，`Ledger.Segments()` 只按序号排序。阶段 1 让 `Order` 由调用方给出，`assurance` 不重新排序，避免在冻结重构里引入第二个顺序。把选择与排序收进链是 P1-3 之后的工作。
 - **成本**：`Check` 读每段内容一次（账本缓存）；对象清单是快照，`assurance` 不列举。
+
+## 8. 补记（P1-2 实现时的调整）
+
+原计划是 `Chain.Window()` 从 `Inputs` 读字节。实现时发现 `/window` 经 `OpenTaskSegment` 读分段，字节可能来自持有该任务的另一个进程，而 `Chain` 的 `Local` 只是本机 `Ledger`。为了保证 golden 逐字节不变、又不给 `Inputs` 再加一个只有一个实现的读取接口，P1-2 把推导做成纯函数 `assurance.WindowOf([]WindowSegment, ...)`：tasks 负责读字节、投影行，并在之后附加损坏截断；assurance 负责全部规则。`Chain` 在 P1-3 拿到回放顺序后，可以用同一个 `WindowOf` 提供 `Chain.Window()`，不会出现第二份推导。
