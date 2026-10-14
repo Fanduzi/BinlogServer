@@ -286,11 +286,10 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 		opts = append(opts, tasks.WithFileUploader(uploader))
-		store := mysqlStore
-		runnerOpts = append(runnerOpts, replication.WithSealedHandler(func(ctx context.Context, file tasks.BinlogFile) error {
-			_, err := tasks.ApplySealedUpload(ctx, uploader, store, file)
-			return err
-		}, a.cfg.UploadPrefix), replication.WithObjectDeleter(uploader), replication.WithUploadTimeout(time.Duration(a.cfg.Meta.Timeout.UploadSec)*time.Second))
+		// WithUploader is the one post-seal upload caller (ADR 0002). It writes
+		// through the runner's file metadata store and reports the upload
+		// outcome to the finding sink (ADR 0009 S8/S9).
+		runnerOpts = append(runnerOpts, replication.WithUploader(uploader, a.cfg.UploadPrefix), replication.WithObjectDeleter(uploader), replication.WithUploadTimeout(time.Duration(a.cfg.Meta.Timeout.UploadSec)*time.Second))
 	}
 
 	// 先组装 scheduler，再根据 worker 开关决定是否挂载 runner。

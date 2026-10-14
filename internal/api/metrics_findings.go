@@ -27,6 +27,7 @@ type findingCollector struct {
 	sinkErr   *prometheus.Desc
 	pending   *prometheus.Desc
 	storeLive *prometheus.Desc
+	retryPass *prometheus.Desc
 }
 
 func newFindingCollector(src findingMetricsSource, ctx context.Context) *findingCollector {
@@ -48,6 +49,9 @@ func newFindingCollector(src findingMetricsSource, ctx context.Context) *finding
 		storeLive: prometheus.NewDesc("binlog_server_finding_store_active",
 			"1 when findings are persisted (task_findings table or the standalone file), 0 when they are kept in memory only.",
 			nil, nil),
+		retryPass: prometheus.NewDesc("binlog_server_upload_retry_pass_last_ts",
+			"Unix time of the last background upload retry pass in this process, also when nothing needed a retry. 0 when the loop has not run here (control-plane-only, or upload not configured).",
+			nil, nil),
 	}
 }
 
@@ -57,6 +61,7 @@ func (c *findingCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.sinkErr
 	ch <- c.pending
 	ch <- c.storeLive
+	ch <- c.retryPass
 }
 
 func (c *findingCollector) Collect(ch chan<- prometheus.Metric) {
@@ -105,4 +110,9 @@ func (c *findingCollector) Collect(ch chan<- prometheus.Metric) {
 		active = 1
 	}
 	ch <- prometheus.MustNewConstMetric(c.storeLive, prometheus.GaugeValue, active)
+	passTS := int64(0)
+	if pass, ok := c.src.(interface{ UploadRetryPassTS() int64 }); ok {
+		passTS = pass.UploadRetryPassTS()
+	}
+	ch <- prometheus.MustNewConstMetric(c.retryPass, prometheus.GaugeValue, float64(passTS))
 }

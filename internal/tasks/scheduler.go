@@ -344,6 +344,7 @@ type Scheduler struct {
 	retryFailed      int64
 	retrySkipped     int64
 	retryLastTS      int64
+	retryPassTS      int64
 	eventSeq         int64
 	// pendingEvents are in-memory events waiting for the event store.
 	// The scheduler lock is not held while they are written.
@@ -428,6 +429,9 @@ func (s *Scheduler) SetRunner(runner Runner) {
 		}
 		if binder, ok := runner.(SourceSwitchBinder); ok {
 			binder.BindSourceSwitch(s.noteSourceSwitch)
+		}
+		if binder, ok := runner.(FindingBinder); ok {
+			binder.BindFindings(s.Report, s.Resolve)
 		}
 	}
 	var killer func(SourceConfig, uint32) error
