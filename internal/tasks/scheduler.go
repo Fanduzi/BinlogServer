@@ -364,6 +364,10 @@ type Scheduler struct {
 	// row write failed; the sink's retry tick writes the in-memory row again.
 	findings    *findingBook
 	unpublished map[string]struct{}
+	// refusedEvents are task events the event store refused, oldest first.
+	// The sink tick writes them again (replayRefusedEvents).
+	refusedMu     sync.Mutex
+	refusedEvents []TaskEvent
 }
 
 // NewScheduler 创建调度器并应用可选项。
@@ -643,7 +647,8 @@ func (s *Scheduler) writeEventBatch(batch []queuedEvent) {
 			continue
 		}
 		if err := item.lane.write(store, item.event, item.ticket, timeout); err != nil {
-			// S1: the event is still in memory (s.events); the store lost it.
+			// S1: kept for replay; the finding stays open until it lands.
+			s.keepRefusedEvent(item.event)
 			s.Report(Finding{TaskID: item.event.TaskID, Kind: FindingEventPersistFailed, Subject: item.event.Type, Severity: FindingWarning, Detail: err.Error()})
 		} else if store != nil {
 			s.Resolve(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
