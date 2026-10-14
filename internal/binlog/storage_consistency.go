@@ -8,6 +8,7 @@ package binlog
 import (
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -68,6 +69,17 @@ func (l *Ledger) Damage(checkpointGTID, startGTID, flavor string) (StorageProble
 		return problem, true
 	}
 	return StorageProblem{}, false
+}
+
+// SegmentDamage is the re-dump damage signature of the segment called name
+// (a rotate to its own or an older file, or an event position that goes
+// backwards), with what was found. A file that cannot be read is not damage.
+func (l *Ledger) SegmentDamage(name string) (string, bool) {
+	named, ok := ClassifySegment(name)
+	if !ok {
+		return "", false
+	}
+	return segmentDamage(filepath.Join(l.dir, name), name, named.Source)
 }
 
 // IsDamaged reports that Damage would find a segment, without computing the
