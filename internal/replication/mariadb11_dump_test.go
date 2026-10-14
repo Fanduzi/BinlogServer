@@ -1,7 +1,7 @@
 // Package replication provides module-level functionality for replication.
-// input: a live MariaDB 11.4 source with binlog_format=ROW and a few inserted rows
-// output: proof the stored open segment contains at least one Table_map or Write_rows event
-// pos: regression for issue 359 (MariaDB 11.x dumps that stored only GTID+XID)
+// input: live MariaDB 10.11 and 11.4 sources with binlog_format=ROW, started at pos 4, LATEST, FILE_POS mid-file, and Stop/Start
+// output: proof each run keeps running, stores row events, and writes end_log_pos values that chain
+// pos: regression for issue 359 (MariaDB 11.x dumps that stored only GTID+XID) and the #362 QA STREAM_REGRESSION on mid-file starts
 // note: if this file changes, update this header and module README.md.
 package replication
 
@@ -22,108 +22,206 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-func TestMariaDB11DumpWritesRowEvents(t *testing.T) {
+// TestMariaDBDumpMatrix runs MariaDB 10.11 and 11.4 sources through every
+// way a dump starts: file start (pos 4), LATEST, FILE_POS in the middle of a
+// file, and Stop then Start (which resumes mid-file). Each must keep running,
+// store row events, and write a segment whose end_log_pos values chain
+// (end - size == previous end). Issues 359 and the #362 QA regression.
+func TestMariaDBDumpMatrix(t *testing.T) {
 	if testing.Short() {
 		t.Skip("docker")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")
 	}
-	name := fmt.Sprintf("bs-mdb11-%d", time.Now().UnixNano())
-	port := "23317"
-	ctx := context.Background()
-	run := exec.CommandContext(ctx, "docker", "run", "-d", "--rm",
-		"--name", name,
-		"-e", "MARIADB_ROOT_PASSWORD=root",
-		"-e", "MARIADB_DATABASE=d",
-		"-p", port+":3306",
-		"mariadb:11.4",
-		"--log-bin=mysql-bin",
-		"--binlog-format=ROW",
-		"--server-id=11",
-		"--gtid-strict-mode=1",
-	)
-	if out, err := run.CombinedOutput(); err != nil {
-		t.Skipf("docker run mariadb:11.4: %v %s", err, out)
+	for i, image := range []string{"mariadb:10.11", "mariadb:11.4"} {
+		image, port := image, 23317+i
+		t.Run(image, func(t *testing.T) {
+			db := startMariaDB(t, image, port)
+			scenarios := []string{"pos4", "latest", "midfile", "stopstart"}
+			for _, sc := range scenarios {
+				sc := sc
+				t.Run(sc, func(t *testing.T) { runMariaDBScenario(t, db, port, sc) })
+			}
+		})
 	}
-	t.Cleanup(func() {
-		_ = exec.Command("docker", "rm", "-f", name).Run()
-	})
+}
 
-	dsn := fmt.Sprintf("root:root@tcp(127.0.0.1:%s)/d", port)
-	var db *sql.DB
-	deadline := time.Now().Add(60 * time.Second)
+func startMariaDB(t *testing.T, image string, port int) *sql.DB {
+	t.Helper()
+	name := fmt.Sprintf("bs-mdb-%d", time.Now().UnixNano())
+	run := exec.Command("docker", "run", "-d", "--rm", "--name", name,
+		"-e", "MARIADB_ROOT_PASSWORD=root", "-e", "MARIADB_DATABASE=d",
+		"-p", fmt.Sprintf("%d:3306", port), image,
+		"--log-bin=mysql-bin", "--binlog-format=ROW", "--server-id=11", "--gtid-strict-mode=1")
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Skipf("docker run %s: %v %s", image, err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+	dsn := fmt.Sprintf("root:root@tcp(127.0.0.1:%d)/d", port)
+	deadline := time.Now().Add(90 * time.Second)
 	for {
-		var err error
-		db, err = sql.Open("mysql", dsn)
+		db, err := sql.Open("mysql", dsn)
 		if err == nil {
 			if err = db.Ping(); err == nil {
-				break
+				t.Cleanup(func() { _ = db.Close() })
+				if _, err := db.Exec(`CREATE TABLE t (id INT PRIMARY KEY, v INT)`); err != nil {
+					t.Fatal(err)
+				}
+				return db
 			}
 			_ = db.Close()
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("mariadb not ready: %v", err)
+			t.Fatalf("%s not ready: %v", image, err)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	defer db.Close()
+}
+
+var mdbRowID int64
+
+func writeMariaDBRows(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		mdbRowID++
+		if _, err := db.Exec(`INSERT INTO t VALUES (?, 1)`, mdbRowID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE t SET v = v + 1 WHERE id = ?`, mdbRowID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type mdbRun struct {
+	cancel context.CancelFunc
+	done   chan error
+}
+
+func startMariaDBRun(runner *MySQLRunner, task tasks.Task) *mdbRun {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &mdbRun{cancel: cancel, done: make(chan error, 1)}
+	go func() { r.done <- runner.Run(ctx, task) }()
+	return r
+}
+
+// stop cancels the run; a run that already ended with an error fails.
+func (r *mdbRun) stop(t *testing.T) {
+	t.Helper()
+	select {
+	case err := <-r.done:
+		r.cancel()
+		t.Fatalf("dump ended before stop: %v", err)
+	default:
+	}
+	r.cancel()
+	select {
+	case <-r.done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not stop")
+	}
+}
+
+func runMariaDBScenario(t *testing.T, db *sql.DB, port int, scenario string) {
+	writeMariaDBRows(t, db, 3)
 	var file string
 	var pos uint32
 	if err := masterStatus(db, &file, &pos); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE t (id INT PRIMARY KEY, v INT)`); err != nil {
-		t.Fatal(err)
+	start := tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: 4}
+	switch scenario {
+	case "latest":
+		start = tasks.StartConfig{Mode: tasks.StartModeLatest}
+	case "midfile":
+		start = tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: pos}
 	}
-	if _, err := db.Exec(`INSERT INTO t VALUES (1,10),(2,20),(3,30)`); err != nil {
-		t.Fatal(err)
-	}
-	startPos := uint32(4)
-
 	dir := t.TempDir()
 	runner := NewMySQLRunner(dir)
 	task := tasks.Task{
-		ID:    "mdb11",
-		Epoch: 1,
-		Source: tasks.SourceConfig{
-			Host: "127.0.0.1", Port: 23317, User: "root", Password: "root",
-			Flavor: "mariadb", ServerID: 91011,
-		},
-		Start: tasks.StartConfig{Mode: tasks.StartModeFilePos, File: file, Pos: startPos},
+		ID: "mdb-" + scenario, Epoch: 1,
+		Source: tasks.SourceConfig{Host: "127.0.0.1", Port: uint16(port), User: "root", Password: "root", Flavor: "mariadb", ServerID: uint32(91000 + port)},
+		Start:  start,
 	}
-	runCtx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- runner.Run(runCtx, task) }()
+	run := startMariaDBRun(runner, task)
+	time.Sleep(2 * time.Second) // LATEST resolves its start before these rows
+	writeMariaDBRows(t, db, 5)
+	segPath := waitRowEvents(t, dir, task.ID, run, 1)
+	run.stop(t)
+	if scenario == "stopstart" {
+		before := rowEventCount(t, segPath)
+		writeMariaDBRows(t, db, 5)
+		run = startMariaDBRun(runner, task)
+		waitRowEvents(t, dir, task.ID, run, before+1)
+		time.Sleep(time.Second)
+		writeMariaDBRows(t, db, 2)
+		waitRowEvents(t, dir, task.ID, run, before+2)
+		run.stop(t)
+	}
+	checkEndPosChain(t, segPath)
+}
 
-	deadline = time.Now().Add(30 * time.Second)
-	var openPath string
+func rowEventCount(t *testing.T, path string) int {
+	c := countEventTypes(t, path)
+	return c[goreplication.TABLE_MAP_EVENT] + c[goreplication.WRITE_ROWS_EVENTv1] + c[goreplication.WRITE_ROWS_EVENTv2] +
+		c[goreplication.UPDATE_ROWS_EVENTv1] + c[goreplication.UPDATE_ROWS_EVENTv2]
+}
+
+// waitRowEvents waits until the open segment holds at least want row events.
+// The dump ending first (STREAM_REGRESSION) fails at once.
+func waitRowEvents(t *testing.T, dir, id string, run *mdbRun, want int) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
 	for {
-		matches, _ := filepath.Glob(filepath.Join(dir, "mdb11", "*.open.e1"))
-		if len(matches) > 0 {
-			if info, err := os.Stat(matches[0]); err == nil && info.Size() > 100 {
-				openPath = matches[0]
-				break
+		select {
+		case err := <-run.done:
+			t.Fatalf("dump ended: %v", err)
+		default:
+		}
+		matches, _ := filepath.Glob(filepath.Join(dir, id, "*.open.e*"))
+		for _, m := range matches {
+			if rowEventCount(t, m) >= want {
+				return m
 			}
 		}
 		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("no open segment with data")
+			for _, m := range matches {
+				t.Logf("%s types=%v", m, countEventTypes(t, m))
+			}
+			run.cancel()
+			t.Fatalf("no segment with %d row events (issue 359)", want)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-	}
+}
 
-	counts := countEventTypes(t, openPath)
-	rows := counts[goreplication.TABLE_MAP_EVENT] + counts[goreplication.WRITE_ROWS_EVENTv1] +
-		counts[goreplication.WRITE_ROWS_EVENTv2] + counts[goreplication.UPDATE_ROWS_EVENTv1] +
-		counts[goreplication.UPDATE_ROWS_EVENTv2]
-	if rows == 0 {
-		t.Fatalf("MariaDB 11.4 dump stored no row events; types=%v (issue 359)", counts)
+// checkEndPosChain: after the format description, every stored event's
+// end_log_pos is non-zero and equals the previous end plus its size.
+func checkEndPosChain(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prev uint32
+	for off := 4; off+19 <= len(raw); {
+		sz := binary.LittleEndian.Uint32(raw[off+9 : off+13])
+		end := binary.LittleEndian.Uint32(raw[off+13 : off+17])
+		kind := goreplication.EventType(raw[off+4])
+		if int(sz) < 19 || off+int(sz) > len(raw) {
+			break
+		}
+		if kind != goreplication.FORMAT_DESCRIPTION_EVENT {
+			if end == 0 {
+				t.Fatalf("%s at %d stored with end_log_pos 0", kind, off)
+			}
+			if prev != 0 && end-sz != prev {
+				t.Fatalf("%s at %d: end %d - size %d != previous end %d", kind, off, end, sz, prev)
+			}
+			prev = end
+		}
+		off += int(sz)
 	}
 }
 
