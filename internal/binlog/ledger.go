@@ -241,31 +241,35 @@ func readSegmentContents(r io.Reader, sealed bool) (SegmentContents, error) {
 
 var contentsCache stampCache[SegmentContents] // segment path -> contents
 
-var sealedCorruptCache stampCache[bool] // path -> corrupt
+var sealedCorruptCache stampCache[string] // path -> UnreadableReason, "" when readable
 
-// sealedSegmentCorrupt reports that the sealed segment at p has an event size
-// above 1 GiB or past the end of the file. Contents keeps reading such a
+// sealedSegmentCorrupt is why the sealed segment at p is not readable: an
+// event size above 1 GiB or past the end of the file, a CRC32 mismatch, or
+// a file cut short (ErrSegmentTruncated). Contents keeps reading such a
 // file as a torn tail (the re-dump damage fixtures end that way); this is
 // the stricter check for a file that was sealed whole. Cached per size and
 // mtime. A file that cannot be opened is not corrupt.
-func sealedSegmentCorrupt(p string) bool {
+func sealedSegmentCorrupt(p string) (string, bool) {
 	info, err := os.Stat(p)
 	if err != nil {
-		return false
+		return "", false
 	}
 	st := StampOf(info)
-	if corrupt, ok := sealedCorruptCache.get(p, st); ok {
-		return corrupt
+	if reason, ok := sealedCorruptCache.get(p, st); ok {
+		return reason, reason != ""
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		return false
+		return "", false
 	}
 	defer f.Close()
 	_, scanErr := scanSegmentGTIDsBounded(f, info.Size(), true)
-	corrupt := errors.Is(scanErr, ErrCorruptEventSize)
-	sealedCorruptCache.put(p, st, corrupt)
-	return corrupt
+	reason := ""
+	if errors.Is(scanErr, ErrCorruptEventSize) {
+		reason = UnreadableReason(scanErr)
+	}
+	sealedCorruptCache.put(p, st, reason)
+	return reason, reason != ""
 }
 
 // segmentContentsAt reads one segment file once per size and mtime.

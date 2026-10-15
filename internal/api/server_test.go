@@ -2446,7 +2446,8 @@ func TestTaskAPI_ReplaySet(t *testing.T) {
 		"mysql-bin.000003",
 		"notes.txt",
 	} {
-		if err := os.WriteFile(filepath.Join(taskDir, name), []byte("x"), 0o644); err != nil {
+		// Four bytes: a sealed file under four bytes is cut short (#381).
+		if err := os.WriteFile(filepath.Join(taskDir, name), []byte("xxxx"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2454,7 +2455,7 @@ func TestTaskAPI_ReplaySet(t *testing.T) {
 	if err := os.MkdirAll(mariaDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(mariaDir, "mysql-bin.000010"), []byte("m"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(mariaDir, "mysql-bin.000010"), []byte("mmmm"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	leftDir := filepath.Join(dir, "9")
@@ -2462,7 +2463,7 @@ func TestTaskAPI_ReplaySet(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"mysql-bin.000007", "mysql-bin.000007.open.e2", "mysql-bin.000007.open.e4"} {
-		if err := os.WriteFile(filepath.Join(leftDir, name), []byte("L"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(leftDir, name), []byte("LLLL"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -721,6 +721,13 @@ P2-3 按 §5、§5.7、§6 落地（`internal/tasks/evaluator.go`、`rehash.go`�
 - **半截 `.open.e3` 的「误关闭」**：不是评估器的问题。运行中的任务每次打开新文件时 `cleanupStaleOpenFiles` 会删掉其它 epoch 的 open 文件，所以在高频轮转（256KiB binlog）的 RUNNING 任务上，手工放的 `.open.e3` 几秒内就被删掉，CLOSE 是真实的；STOPPED 任务上它一直 open。`TestEvaluator_HalfOpenCopyStaysOpen` 固定了「文件在就一直 open」。
 - 仍未做（P3，可选）：只有 magic+FDE 的残留不标 SEGMENT_EMPTY_LEFTOVER；无 meta 时任务的 `open_findings` 不含评估器的行。
 
+### 17.2 #381：截短的封存段（QA 第二轮 #380）
+
+- **归哪个 kind**：本地大小与封存时不同的封存段算 `SEGMENT_UNREADABLE`（I1），不算 `SEGMENT_MISSING`。理由：磁盘上的字节已经不是封存时的字节，与复核器的哈希不符同类；I6 在 P2-5 前不是 Managed kind，放进 I6 会在 P2-5 前没有写者。P2-5 翻转 I6 时不改这条：I6 判「段/对象不在」，I1 判「段在但不是封存时的字节」。
+- **「不可读」的定义补两条**，仍是同一个读法（`/window`、`/replay`、I1 一致）：封存段不足 4 字节（含 0 字节）或断在事件头中间，返回包着 `ErrSegmentTruncated` 的 `ErrCorruptEventSize`；本地大小不等于 `.seal-sha256` 里该名字最后一行的大小（截在事件边界上，读法看不出来）。没有 magic 的封存段仍不由读法判定：§17 的零填充副本是 `SEGMENT_OVERLAP` 的证据，同大小的原地改写由复核器判定。
+- **证据文本**：原有「事件 size 损坏」的段 evidence 不变（`corrupt binlog event size`），新原因（截短、封存时大小）各有自己的文本；`/window` 断点和 `/replay` 警告带同一个原因。
+- **仍未做（P2-5）**：只有目录行 `size_bytes`、没有账本行的旧段不做大小比较（目录行在 legacy failback 重写后可能是旧大小，P2-5 的 I6 一起处理）。
+
 ## 18. P2-4 实现说明（2026-10-15）
 
 P2-4 按 §5.5、§5.6、§6 落地（`internal/health/signals.go`、`internal/tasks/signals.go`、`internal/lintguard/managed_writer.go`）。16 种旧 kind 中除 SEGMENT_* 外的信号与任务状态 kind 都是 Managed，新增 SOURCE_UNREACHABLE、TASK_FAILED。

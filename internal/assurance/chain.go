@@ -228,8 +228,8 @@ func (c *Chain) Check(now time.Time) []Violation {
 		if seg.Local && c.in.Local != nil {
 			if detail, bad := c.in.Local.SegmentDamage(seg.Name); bad {
 				add(I1Regression, detail, detail, seg.Name)
-			} else if c.in.Local.SegmentUnreadable(seg.Name) {
-				detail := "segment " + seg.Name + " is not readable: " + binlog.ErrCorruptEventSize.Error()
+			} else if reason, unreadable := c.in.Local.SegmentUnreadable(seg.Name); unreadable {
+				detail := "segment " + seg.Name + " is not readable: " + reason
 				add(I1Unreadable, detail, detail, seg.Name)
 			}
 		}

@@ -1,5 +1,5 @@
 // Package binlog provides module-level functionality for binlog.
-// input: sealed segment bytes cut short (0 bytes, inside the magic, no magic, inside an event header) and a sealed file truncated at an event boundary whose size at seal is in the .seal-sha256 ledger
+// input: sealed segment bytes cut short (0 bytes, inside the magic, inside an event header) and a sealed file truncated at an event boundary whose size at seal is in the .seal-sha256 ledger
 // output: the sealed reader returns ErrCorruptEventSize (wrapping ErrSegmentTruncated) for each, the open reader keeps the torn-tail reading, and Ledger.Unreadable names the segment with the reason
 // pos: regression for issue 381 (a 0-byte sealed segment was readable and empty)
 // note: if this file changes, update this header and module README.md.
@@ -23,7 +23,6 @@ func TestReadSealedSegmentContents_CutShortIsUnreadable(t *testing.T) {
 	for name, b := range map[string][]byte{
 		"empty":         {},
 		"inside-magic":  body[:3],
-		"no-magic":      append([]byte("xbin"), body[4:]...),
 		"inside-header": body[:fde+10],
 	} {
 		if _, err := ReadSealedSegmentContents(bytes.NewReader(b)); !errors.Is(err, ErrCorruptEventSize) || !errors.Is(err, ErrSegmentTruncated) {
