@@ -438,7 +438,7 @@ func (s *Scheduler) SetRunner(runner Runner) {
 			binder.BindSourceSwitch(s.noteSourceSwitch)
 		}
 		if binder, ok := runner.(FindingBinder); ok {
-			binder.BindFindings(s.Report, s.Resolve)
+			binder.BindFindings(s.SignalFailure, s.SignalSuccess)
 		}
 	}
 	var killer func(SourceConfig, uint32) error
@@ -656,9 +656,9 @@ func (s *Scheduler) writeEventBatch(batch []queuedEvent) {
 		if err := item.lane.write(store, item.event, item.ticket, timeout); err != nil {
 			// S1: kept for replay; the finding stays open until it lands.
 			s.keepRefusedEvent(item.event)
-			s.Report(Finding{TaskID: item.event.TaskID, Kind: FindingEventPersistFailed, Subject: item.event.Type, Severity: FindingWarning, Detail: err.Error()})
+			s.SignalFailure(Finding{TaskID: item.event.TaskID, Kind: FindingEventPersistFailed, Subject: item.event.Type, Severity: FindingWarning, Detail: err.Error()})
 		} else if store != nil {
-			s.Resolve(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
+			s.SignalSuccess(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
 		}
 	}
 }

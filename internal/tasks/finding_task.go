@@ -22,12 +22,12 @@ func (s *Scheduler) notePersistFailureLocked(id string, state State, err error) 
 		// and there is nothing of ours left to republish.
 		if _, ok := s.unpublished[id]; ok {
 			delete(s.unpublished, id)
-			s.Resolve(id, FindingTaskPersistFailed, "")
+			s.SignalSuccess(id, FindingTaskPersistFailed, "")
 		}
 		return
 	}
 	s.unpublished[id] = struct{}{}
-	s.Report(Finding{
+	s.SignalFailure(Finding{
 		TaskID:   id,
 		Kind:     FindingTaskPersistFailed,
 		Severity: FindingCritical,
@@ -42,7 +42,7 @@ func (s *Scheduler) notePersistedLocked(id string) {
 		return
 	}
 	delete(s.unpublished, id)
-	s.Resolve(id, FindingTaskPersistFailed, "")
+	s.SignalSuccess(id, FindingTaskPersistFailed, "")
 }
 
 // republishUnpublished writes the current in-memory row of every task whose
@@ -63,7 +63,7 @@ func (s *Scheduler) republishUnpublished() {
 		task, ok := s.tasks[id]
 		if !ok {
 			delete(s.unpublished, id)
-			s.Resolve(id, FindingTaskPersistFailed, "")
+			s.SignalSuccess(id, FindingTaskPersistFailed, "")
 			continue
 		}
 		// Errors are recorded by persistTaskLocked itself.
@@ -116,7 +116,7 @@ func (s *Scheduler) replayRefusedEvents() {
 	s.refusedMu.Unlock()
 	for _, e := range done {
 		if !left[[2]string{e.TaskID, e.Type}] {
-			s.Resolve(e.TaskID, FindingEventPersistFailed, e.Type)
+			s.SignalSuccess(e.TaskID, FindingEventPersistFailed, e.Type)
 		}
 	}
 }

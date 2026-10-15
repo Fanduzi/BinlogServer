@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json)
+// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -155,13 +155,29 @@ func WithFindingStore(store FindingStore) Option {
 
 // Report records a failure. It never blocks on I/O and is safe with or
 // without s.mu held: the store write happens on the sink's writer.
+//
+// A kind the health evaluator manages has one writer (design §5.6): while
+// the evaluator owns it, a signal kind becomes a SignalFailure and a
+// derived kind is dropped. New code calls SignalFailure (lintguard).
 func (s *Scheduler) Report(f Finding) {
+	if s.healthEval.Load().manages(f.Kind) {
+		if isSignalKind(f.Kind) {
+			s.SignalFailure(f)
+		}
+		return
+	}
 	s.findings.report(f)
 }
 
 // Resolve marks a finding resolved when this process has it open. Resolving a
 // finding this process never saw is a no-op, so success paths stay cheap.
 func (s *Scheduler) Resolve(taskID string, kind FindingKind, subject string) {
+	if s.healthEval.Load().manages(kind) {
+		if isSignalKind(kind) {
+			s.SignalSuccess(taskID, kind, subject)
+		}
+		return
+	}
 	s.findings.resolve(taskID, kind, subject)
 }
 
@@ -511,22 +527,22 @@ func UploadOutcomeFinding(file BinlogFile) (Finding, bool) {
 // NoteUploadOutcome reports or resolves the per-file upload findings after a
 // sealed upload or verify: S8 when the catalog write failed, S9 when the
 // object is not verified.
-func NoteUploadOutcome(report func(Finding), resolve func(string, FindingKind, string), file BinlogFile, recordErr error) {
-	if report == nil || resolve == nil {
+func NoteUploadOutcome(signalFail func(Finding), signalOK func(string, FindingKind, string), file BinlogFile, recordErr error) {
+	if signalFail == nil || signalOK == nil {
 		return
 	}
 	if recordErr != nil {
 		// The row keeps its previous state (seal writes UPLOAD_FAILED before
 		// the put), so the retry still sees it; the outcome itself is lost.
-		report(Finding{TaskID: file.TaskID, Kind: FindingUploadRecordFailed, Subject: file.FileName, Severity: FindingWarning,
+		signalFail(Finding{TaskID: file.TaskID, Kind: FindingUploadRecordFailed, Subject: file.FileName, Severity: FindingWarning,
 			Detail: "upload result (" + strings.TrimSpace(file.UploadState) + ") not written to the binlog catalog; the row keeps its previous state: " + recordErr.Error()})
 	} else {
-		resolve(file.TaskID, FindingUploadRecordFailed, file.FileName)
+		signalOK(file.TaskID, FindingUploadRecordFailed, file.FileName)
 	}
 	if f, ok := UploadOutcomeFinding(file); ok {
-		report(f)
+		signalFail(f)
 	} else if strings.EqualFold(strings.TrimSpace(file.UploadState), "UPLOADED") {
-		resolve(file.TaskID, FindingUploadUnverified, file.FileName)
+		signalOK(file.TaskID, FindingUploadUnverified, file.FileName)
 	}
 }
 

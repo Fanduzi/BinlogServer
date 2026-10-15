@@ -1078,7 +1078,15 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 	if mode == tasks.EvaluatorOff {
 		return nil
 	}
-	ecfg := tasks.EvaluatorConfig{Mode: mode, Sweep: time.Duration(cfg.Health.SweepIntervalSec) * time.Second, Cluster: isClusterMode(cfg)}
+	ecfg := tasks.EvaluatorConfig{Mode: mode, Sweep: time.Duration(cfg.Health.SweepIntervalSec) * time.Second, Cluster: isClusterMode(cfg),
+		UnreachableAfter: time.Duration(cfg.Health.UnreachableAfterSec) * time.Second,
+		SignalStaleAfter: time.Duration(cfg.Health.SignalStaleAfterSec) * time.Second}
+	if len(cfg.Health.UnreachableAfterTaskSec) > 0 {
+		ecfg.UnreachableAfterTask = map[string]time.Duration{}
+		for id, sec := range cfg.Health.UnreachableAfterTaskSec {
+			ecfg.UnreachableAfterTask[id] = time.Duration(sec) * time.Second
+		}
+	}
 	if ecfg.Instance, err = tasks.RandomID(); err != nil {
 		return err
 	}

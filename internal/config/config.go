@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -131,10 +132,16 @@ type HealthConfig struct {
 	// SweepIntervalSec is the period of the sweep that marks every task dirty.
 	SweepIntervalSec int
 	// RehashBytesPerSec is the global byte budget of the sha256 re-checker.
-	RehashBytesPerSec       int64
-	UnreachableAfterSec     int
+	RehashBytesPerSec int64
+	// UnreachableAfterSec: SOURCE_UNREACHABLE opens once a task with
+	// desired RUN stays in STARTING/RETRY_BACKOFF this long (P2-4, default 90).
+	UnreachableAfterSec int
+	// UnreachableAfterTaskSec overrides UnreachableAfterSec per task id
+	// (health.unreachable_after_task_sec: {"<task id>": seconds}).
 	UnreachableAfterTaskSec map[string]int
-	SignalStaleAfterSec     int
+	// SignalStaleAfterSec: an open signal row with no failure seen by this
+	// process for this long is shown as INFO (P2-4, default 86400).
+	SignalStaleAfterSec int
 }
 
 // MetaConfig 定义内部调用边界配置。
@@ -221,6 +228,8 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("health.evaluator", "off")
 	v.SetDefault("health.sweep_interval_sec", 60)
 	v.SetDefault("health.rehash_bytes_per_sec", 4<<20)
+	v.SetDefault("health.unreachable_after_sec", 90)
+	v.SetDefault("health.signal_stale_after_sec", 86400)
 	v.SetDefault("meta.timeout.write_sec", 5)
 	v.SetDefault("meta.timeout.lease_sec", 2)
 	v.SetDefault("meta.timeout.upload_sec", 30)
@@ -367,9 +376,12 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			},
 		},
 		Health: HealthConfig{
-			Evaluator:         strings.ToLower(strings.TrimSpace(getString(v, decryptor, "health.evaluator", "health_evaluator"))),
-			SweepIntervalSec:  getInt(v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
-			RehashBytesPerSec: int64(getInt(v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
+			Evaluator:               strings.ToLower(strings.TrimSpace(getString(v, decryptor, "health.evaluator", "health_evaluator"))),
+			SweepIntervalSec:        getInt(v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
+			RehashBytesPerSec:       int64(getInt(v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
+			UnreachableAfterSec:     getInt(v, "health.unreachable_after_sec", "health_unreachable_after_sec"),
+			UnreachableAfterTaskSec: healthTaskOverrides(v.GetStringMap("health.unreachable_after_task_sec")),
+			SignalStaleAfterSec:     getInt(v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
 		},
 		Tracing: TracingConfig{
 			Enabled:     getBool(v, "tracing.enabled", "tracing_enabled"),
@@ -620,5 +632,41 @@ func validateHealthConfig(h HealthConfig) error {
 	if h.SweepIntervalSec < 0 || h.RehashBytesPerSec < 0 {
 		return fmt.Errorf("health.sweep_interval_sec and health.rehash_bytes_per_sec must not be negative")
 	}
+	if h.UnreachableAfterSec < 0 || h.SignalStaleAfterSec < 0 {
+		return fmt.Errorf("health.unreachable_after_sec and health.signal_stale_after_sec must not be negative")
+	}
+	for id, sec := range h.UnreachableAfterTaskSec {
+		if sec <= 0 {
+			return fmt.Errorf("health.unreachable_after_task_sec[%s] must be positive, got %d", id, sec)
+		}
+	}
 	return nil
+}
+
+// healthTaskOverrides reads health.unreachable_after_task_sec; a value
+// that is not a whole number becomes -1 so validation names it.
+func healthTaskOverrides(raw map[string]any) map[string]int {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(raw))
+	for id, val := range raw {
+		n := -1
+		switch x := val.(type) {
+		case int:
+			n = x
+		case int64:
+			n = int(x)
+		case float64:
+			if x == float64(int(x)) {
+				n = int(x)
+			}
+		case string:
+			if v, err := strconv.Atoi(strings.TrimSpace(x)); err == nil {
+				n = v
+			}
+		}
+		out[id] = n
+	}
+	return out
 }

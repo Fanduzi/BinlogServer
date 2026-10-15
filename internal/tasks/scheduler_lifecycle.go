@@ -1134,7 +1134,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			// store does not know about. It is a CRITICAL finding, and the
 			// task shows RETRY_BACKOFF/STARTING, never a healthy RUNNING
 			// (ADR 0009). The source keeps the binlog; the retry catches up.
-			s.Report(Finding{TaskID: id, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical,
+			s.SignalFailure(Finding{TaskID: id, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical,
 				Detail: "replication paused: the metadata store refused a write; the dump stopped and retries with backoff until the store accepts writes: " + errMsg})
 		}
 		// Allowlist only: SOURCE_UNREACHABLE (budget 10), transient metadata
@@ -1208,7 +1208,7 @@ func (s *Scheduler) runRunner(ctx context.Context, id string, task Task) (bool, 
 		logTransitionPersistError(id, StateRunning, err)
 		if cur, ok := s.tasks[id]; err == nil && ok && cur.State == StateRunning {
 			// The RUNNING row was written, so the metadata store takes writes again.
-			s.Resolve(id, FindingMetadataWriteBlocked, "")
+			s.SignalSuccess(id, FindingMetadataWriteBlocked, "")
 		}
 	}
 
@@ -1293,10 +1293,10 @@ func (s *Scheduler) legacyUnreachableStreak(id string) int {
 		log.Printf("source failure streak read task=%s err=%v", id, err)
 		// S13: the budget falls back to this process's memory, which a new
 		// process does not have. Make that visible instead of silently 0.
-		s.Report(Finding{TaskID: id, Kind: FindingEventReadFailed, Severity: FindingWarning, Detail: "retry budget read from task events failed; using this process's in-memory streak: " + err.Error()})
+		s.SignalFailure(Finding{TaskID: id, Kind: FindingEventReadFailed, Severity: FindingWarning, Detail: "retry budget read from task events failed; using this process's in-memory streak: " + err.Error()})
 		return consecutiveUnreachableStreak(mem, false)
 	}
-	s.Resolve(id, FindingEventReadFailed, "")
+	s.SignalSuccess(id, FindingEventReadFailed, "")
 	if len(stored) == 0 {
 		return consecutiveUnreachableStreak(mem, false)
 	}

@@ -720,3 +720,17 @@ P2-3 按 §5、§5.7、§6 落地（`internal/tasks/evaluator.go`、`rehash.go`�
 - **有 meta 时的链顺序**：目录行与磁盘列表对账，磁盘上没有行的段（手工放进来的 `.sealed.e3`）进入顺序，是 I4 证据；目录行传给链，登记过的段不再报 I6_MISSING_ROW。无 meta 时不判 I6_MISSING_ROW（`NoCatalog`）。I6 在 P2-5 前仍不是 Managed kind。
 - **半截 `.open.e3` 的「误关闭」**：不是评估器的问题。运行中的任务每次打开新文件时 `cleanupStaleOpenFiles` 会删掉其它 epoch 的 open 文件，所以在高频轮转（256KiB binlog）的 RUNNING 任务上，手工放的 `.open.e3` 几秒内就被删掉，CLOSE 是真实的；STOPPED 任务上它一直 open。`TestEvaluator_HalfOpenCopyStaysOpen` 固定了「文件在就一直 open」。
 - 仍未做（P3，可选）：只有 magic+FDE 的残留不标 SEGMENT_EMPTY_LEFTOVER；无 meta 时任务的 `open_findings` 不含评估器的行。
+
+## 18. P2-4 实现说明（2026-10-15）
+
+P2-4 按 §5.5、§5.6、§6 落地（`internal/health/signals.go`、`internal/tasks/signals.go`、`internal/lintguard/managed_writer.go`）。16 种旧 kind 中除 SEGMENT_* 外的信号与任务状态 kind 都是 Managed，新增 SOURCE_UNREACHABLE、TASK_FAILED。
+
+- **单一写入者**：热路径调用 `SignalFailure` / `SignalSuccess`。评估器拥有 Managed kind 时（`on` 且 store 有 000009）只进评估器的信号账本（进程内全局单调 seq，失败后第一轮评估时盖上任务的 lease epoch）并标脏 `SIGNAL`；否则（off、shadow、缺 000009）走旧 `Report/Resolve`，off 模式行为不变。旧 `Report/Resolve` 对 Managed 信号 kind 自动转成信号，对派生 kind 直接丢弃。lintguard `TestNoReportOfManagedKinds` 禁止任何名为 `Report/Resolve/report/resolve` 的调用（含 logger 方法和函数值，#342）在参数里提到 Managed kind。
+- **信号的关闭**：只在本进程看到失败之后的成功（`SuccessSeq > FailureSeq`，或进程启动后只有成功）或探针证明时关闭；重启后 meta 仍只读则一直 open、不重复 OPEN。探针：UPLOAD_RECORD_FAILED（目录行已 UPLOADED，或未配置上传）、OPEN_TAIL_CUT_FAILED（该 open 段已不在）、DISK_LIST_FAILED（`ReadDir(subject)` 成功）、EVENT_READ_FAILED（`ListEvents(limit 1)` 成功）。本进程从未看到失败且 LastSeen 超过 `health.signal_stale_after_sec`（默认 24h）的 open 信号行降为 INFO。
+- **DUMP_STALLED**：STARTING/RETRY_BACKOFF 来回不关闭；数据到达、主动停止（desired STOP 且 STOPPED）、lease epoch 变化（#366）时关闭；SOURCE_UNREACHABLE 已 open 时的下一轮以 `HANDED_OFF` 关闭（黑洞期间始终至少一条 finding open）。
+- **SOURCE_UNREACHABLE**：desired RUN 且处于 STARTING/RETRY_BACKOFF，持续时间（评估器时钟）≥ `health.unreachable_after_sec`（默认 90，`health.unreachable_after_task_sec` 按任务覆盖）**且**连续两轮，避免一次 60s 的计划内重启打开它；dump 再次收到数据或停止时关闭。
+- **TASK_FAILED**：FAILED 会把 desired 置 STOP，所以用 `FailedSpecRevision == SpecRevision` 判断「当前请求失败」；subject 是失败类别（STREAM_REGRESSION、SOURCE_ERROR_1236、PERMISSION_DENIED、STORAGE_INCONSISTENT、SOURCE_SWITCHOVER、SOURCE_UNREACHABLE、CONFIG、OTHER）；重启、停止或新的请求时关闭。
+- **TASK_TRANSITION_STALLED** 改为从任务行派生（STARTING/STOPPING 超过阈值、本进程没有 run、不是别的节点持有）；watchdog 仍调用 `convergeTask`，但评估器拥有时不再写 finding。
+- **`_cluster`**：standalone 下评估器在有失败信号或有 open 行时评估 `_cluster`（所有 scope 视为完整）；集群模式下仍走旧路径，直到 P2-6 的 `_health` 持有者。
+- **留给后续**：任务级 mute（P2-7/P2-9）；集群模式下 TASK_FAILED 要等 P2-6（FAILED 任务会释放 lease，持有者评估不到它）。
+

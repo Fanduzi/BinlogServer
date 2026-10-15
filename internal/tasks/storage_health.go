@@ -98,7 +98,15 @@ func (s *Scheduler) reportUnmanaged(f Finding) {
 	if s.healthEval.Load().ownsManaged() {
 		return
 	}
-	s.Report(f)
+	s.findings.report(f)
+}
+
+// resolveUnmanaged is the matching legacy Resolve.
+func (s *Scheduler) resolveUnmanaged(taskID string, kind FindingKind, subject string) {
+	if s.healthEval.Load().ownsManaged() {
+		return
+	}
+	s.findings.resolve(taskID, kind, subject)
 }
 
 // markHealthDirty tells the evaluator, when there is one, that the task's

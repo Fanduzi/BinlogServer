@@ -80,10 +80,10 @@ func (s *Scheduler) retryKnownFailedUploads() {
 	s.noteRetryPass()
 	if err := s.syncTasksFromStore(); err != nil {
 		log.Printf("background upload retry sync tasks: %v", err)
-		s.Report(Finding{Kind: FindingRetryLoopFailed, Subject: "sync", Severity: FindingCritical, Detail: "background upload retry pass skipped: task list read failed: " + err.Error()})
+		s.SignalFailure(Finding{Kind: FindingRetryLoopFailed, Subject: "sync", Severity: FindingCritical, Detail: "background upload retry pass skipped: task list read failed: " + err.Error()})
 		return
 	}
-	s.Resolve(ClusterFindingTask, FindingRetryLoopFailed, "sync")
+	s.SignalSuccess(ClusterFindingTask, FindingRetryLoopFailed, "sync")
 	s.mu.Lock()
 	fileStore := s.fileStore
 	ids := make([]string, 0, len(s.tasks))
@@ -97,9 +97,9 @@ func (s *Scheduler) retryKnownFailedUploads() {
 		cancel()
 		if err != nil {
 			log.Printf("background upload retry count failures: %v", err)
-			s.Report(Finding{Kind: FindingRetryLoopFailed, Subject: "count", Severity: FindingWarning, Detail: "background upload retry could not count failed uploads; scanning every task: " + err.Error()})
+			s.SignalFailure(Finding{Kind: FindingRetryLoopFailed, Subject: "count", Severity: FindingWarning, Detail: "background upload retry could not count failed uploads; scanning every task: " + err.Error()})
 		} else {
-			s.Resolve(ClusterFindingTask, FindingRetryLoopFailed, "count")
+			s.SignalSuccess(ClusterFindingTask, FindingRetryLoopFailed, "count")
 			if total == 0 {
 				return
 			}
@@ -116,13 +116,13 @@ func (s *Scheduler) retryKnownFailedUploads() {
 			log.Printf("background upload retry task=%s err=%v", id, err)
 			if errors.Is(err, ErrUploadRetryNotAvailable) || errors.Is(err, ErrFailedUploadLookupNotAvailable) {
 				// A configuration gap, not a per-task failure: one finding for the process.
-				s.Report(Finding{Kind: FindingRetryLoopFailed, Subject: "unavailable", Severity: FindingWarning, Detail: "background upload retry cannot run: " + err.Error() + "; a failed upload is not retried"})
+				s.SignalFailure(Finding{Kind: FindingRetryLoopFailed, Subject: "unavailable", Severity: FindingWarning, Detail: "background upload retry cannot run: " + err.Error() + "; a failed upload is not retried"})
 				continue
 			}
-			s.Report(Finding{TaskID: id, Kind: FindingRetryLoopFailed, Subject: "task", Severity: FindingCritical, Detail: "background upload retry for this task failed: " + err.Error()})
+			s.SignalFailure(Finding{TaskID: id, Kind: FindingRetryLoopFailed, Subject: "task", Severity: FindingCritical, Detail: "background upload retry for this task failed: " + err.Error()})
 			continue
 		}
-		s.Resolve(id, FindingRetryLoopFailed, "task")
+		s.SignalSuccess(id, FindingRetryLoopFailed, "task")
 		if stats.Succeeded == 0 && stats.Failed == 0 {
 			continue
 		}
@@ -223,7 +223,7 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 			updated, err = ApplySealedUpload(uploadCtx, uploader, fileStore, file)
 		}
 		cancelUpload()
-		NoteUploadOutcome(s.Report, s.Resolve, updated, err)
+		NoteUploadOutcome(s.SignalFailure, s.SignalSuccess, updated, err)
 		if err != nil || updated.UploadState != "UPLOADED" {
 			stats.Failed++
 			continue
@@ -253,7 +253,7 @@ func (s *Scheduler) noteRetryUploadFailure(fileStore FileStore, file BinlogFile,
 	err := s.markRetryUploadFailure(fileStore, file, reason)
 	failed := file
 	failed.UploadState = "UPLOAD_FAILED"
-	NoteUploadOutcome(s.Report, s.Resolve, failed, err)
+	NoteUploadOutcome(s.SignalFailure, s.SignalSuccess, failed, err)
 }
 
 func (s *Scheduler) markRetryUploadFailure(fileStore FileStore, file BinlogFile, reason string) error {

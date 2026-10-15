@@ -588,10 +588,10 @@ func (s *Scheduler) listMemoryAndDiskTasks() ([]Task, error) {
 	// S15: every list path (ListTasks, API pages, observation) goes through
 	// here, so a data_dir that cannot be listed is a finding wherever it shows.
 	if err != nil {
-		s.Report(Finding{TaskID: ClusterFindingTask, Kind: FindingDiskListFailed, Subject: s.dataDir, Severity: FindingWarning, Detail: "on-disk backups under data_dir are not listed: " + err.Error()})
+		s.SignalFailure(Finding{TaskID: ClusterFindingTask, Kind: FindingDiskListFailed, Subject: s.dataDir, Severity: FindingWarning, Detail: "on-disk backups under data_dir are not listed: " + err.Error()})
 		return out, err
 	}
-	s.Resolve(ClusterFindingTask, FindingDiskListFailed, s.dataDir)
+	s.SignalSuccess(ClusterFindingTask, FindingDiskListFailed, s.dataDir)
 	return append(out, disk...), nil
 }
 

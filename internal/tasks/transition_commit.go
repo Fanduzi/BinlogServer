@@ -57,7 +57,7 @@ func (s *Scheduler) commitTransitionLocked(next Task, to State, rec transitionRe
 		}
 		if !wasUnpublished {
 			delete(s.unpublished, id)
-			s.Resolve(id, FindingTaskPersistFailed, "")
+			s.SignalSuccess(id, FindingTaskPersistFailed, "")
 		}
 		if _, known := s.tasks[id]; known {
 			s.appendEventLocked(id, rec.Type+"_REJECTED", rec.Action+" not recorded; the "+rec.Action+" is not applied", err.Error())

@@ -137,8 +137,8 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 type findingSinkAPI interface {
-	Report(tasks.Finding)
-	Resolve(taskID string, kind tasks.FindingKind, subject string)
+	SignalFailure(tasks.Finding)
+	SignalSuccess(taskID string, kind tasks.FindingKind, subject string)
 }
 
 // sourceRead records one metric source read (S10): a failure is an explicit
@@ -147,13 +147,13 @@ func (c *apiMetricsCollector) sourceRead(ch chan<- prometheus.Metric, taskID, so
 	sink, _ := c.tasks.(findingSinkAPI)
 	if err == nil {
 		if sink != nil {
-			sink.Resolve(taskID, tasks.FindingMetricSourceFailed, source)
+			sink.SignalSuccess(taskID, tasks.FindingMetricSourceFailed, source)
 		}
 		return true
 	}
 	ch <- prometheus.MustNewConstMetric(c.sourceUpDesc, prometheus.GaugeValue, 0, taskID, source)
 	if sink != nil {
-		sink.Report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingMetricSourceFailed, Subject: source, Severity: tasks.FindingWarning,
+		sink.SignalFailure(tasks.Finding{TaskID: taskID, Kind: tasks.FindingMetricSourceFailed, Subject: source, Severity: tasks.FindingWarning,
 			Detail: "metric read failed, series omitted from /metrics: " + err.Error()})
 	}
 	return false

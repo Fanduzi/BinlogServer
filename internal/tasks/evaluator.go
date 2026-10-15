@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
-// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009)
+// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, and the pseudo task _cluster in standalone
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -88,12 +88,16 @@ type EvaluatorConfig struct {
 	// Instance is this process's id (standalone fence).
 	Instance string
 	// RehashCursor, when set, persists the rehasher's cursor (rehash_cursor).
-	RehashCursor         RehashCursorStore
+	RehashCursor RehashCursorStore
+	// UnreachableAfter is health.unreachable_after_sec (default 90s);
+	// UnreachableAfterTask overrides it per task id.
 	UnreachableAfter     time.Duration
 	UnreachableAfterTask map[string]time.Duration
-	SignalStaleAfter     time.Duration
-	StalledAfter         time.Duration
-	Now                  func() time.Time
+	// SignalStaleAfter is health.signal_stale_after (default 24h).
+	SignalStaleAfter time.Duration
+	// StalledAfter is the TASK_TRANSITION_STALLED threshold (default: the scheduler's).
+	StalledAfter time.Duration
+	Now          func() time.Time
 }
 
 // EvaluatorStats counts what the evaluator did.
@@ -132,6 +136,8 @@ type Evaluator struct {
 	fingerprints map[string]string
 	rehash       map[string]map[string]rehashResult
 	chainCache   map[string]chainCacheEntry
+	signals      map[string]map[health.SignalKey]*signalEntry
+	unreach      map[string]unreachTrack
 
 	// schemaAbsent: the store has no 000009 (ErrSchemaAbsent on the last
 	// write); the legacy Report path keeps writing the managed kinds.
@@ -321,8 +327,41 @@ func (e *Evaluator) responsible() []Task {
 			out = append(out, t)
 		}
 	}
+	if !e.cfg.Cluster && e.clusterHasWork() {
+		out = append(out, Task{ID: ClusterFindingTask})
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// clusterHasWork: standalone evaluates _cluster while it has a failing
+// signal, a success and an open row in the store, or a legacy open row of
+// a managed kind.
+func (e *Evaluator) clusterHasWork() bool {
+	e.mu.Lock()
+	for _, en := range e.signals[ClusterFindingTask] {
+		if en.st.FailureSeq > 0 {
+			e.mu.Unlock()
+			return true
+		}
+	}
+	successes := len(e.signals[ClusterFindingTask]) > 0
+	e.mu.Unlock()
+	if successes && e.cfg.Store != nil {
+		// A success may close a row an earlier process left open.
+		if open, err := e.cfg.Store.ListOpenFindingsForTask(context.Background(), ClusterFindingTask); err == nil && len(open) > 0 {
+			return true
+		}
+	}
+	b := e.s.findings
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k := range b.open {
+		if k.task == ClusterFindingTask && e.reg[health.Kind(k.kind)].Managed {
+			return true
+		}
+	}
+	return false
 }
 
 // markResponsible marks every responsible task dirty: CATALOG when its
@@ -410,9 +449,18 @@ func (e *Evaluator) fenceFor(t Task) (health.Fence, bool) {
 }
 
 func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth, error) {
-	task, err := e.s.GetTask(id)
-	if err != nil {
-		return health.TaskHealth{}, err
+	isCluster := id == ClusterFindingTask
+	var task Task
+	if isCluster {
+		if e.cfg.Cluster || !e.clusterHasWork() {
+			return health.TaskHealth{}, errNotResponsible
+		}
+		task = Task{ID: id}
+	} else {
+		var err error
+		if task, err = e.s.GetTask(id); err != nil {
+			return health.TaskHealth{}, err
+		}
 	}
 	fence, ok := e.fenceFor(task)
 	if !ok {
@@ -428,10 +476,13 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	e.evaluations.Add(1)
 	now := e.cfg.Now()
 	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}}
-	if chain := e.chainFacts(task, now); chain != nil {
+	if isCluster {
+		facts.Complete[health.ScopeChainLocal] = true // _cluster has no chain
+	} else if chain := e.chainFacts(task, now); chain != nil {
 		facts.Chain = chain
 		facts.Complete[health.ScopeChainLocal] = true
 	}
+	e.signalFacts(ctx, task, isCluster, facts)
 	store := e.cfg.Store
 	unknown := func(h health.TaskHealth, err error) (health.TaskHealth, error) {
 		e.errs.Add(1)
@@ -462,6 +513,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	if err != nil {
 		return unknown(health.TaskHealth{}, err)
 	}
+	e.openAndProbes(ctx, id, open, facts)
 	ts, _ := e.reg.Reconcile(open, facts)
 	h := e.reg.HealthOf(afterTransitions(open, ts), facts)
 	if e.cfg.Mode == EvaluatorShadow {
