@@ -18,6 +18,8 @@ The retry budget is two columns on `backup_tasks`, updated in the same write as 
 
 Standalone (no metadata DSN) has one process. The in-memory task is the record. The same loop runs against that struct. There is no second copy synced from a database that is not there.
 
+Amended by [0010](0010-standalone-task-records.md) (#385): standalone also writes an encrypted, write-through record of operator intent (spec, source password, desired state, terminal failure) to `{data_dir}/.tasks.enc` and reads it once at startup, so a restart resumes replication. Memory stays the runtime authority; the record never holds a position, a counter or catalog state.
+
 ## Context
 
 An architecture review of v0.5.30 listed eight problems. The fixes landed across v0.5.31–v0.5.40 as separate issues: #172, #173, #174, #175, #176, #177, #178, #179, and the follow-ups #204, #209, #213, #214, #220, #222, #223. Each fix made one symptom match the operator's expectation. The two structures below are still in the code, and the issues that are still open sit on them.
