@@ -80,3 +80,87 @@ func TestRun_LargeTransactionCheckpointsAtCommitOnly(t *testing.T) {
 		t.Fatalf("last checkpoint %+v, want the commit at %d with :1-11", last, xidPos)
 	}
 }
+
+func TestTxnBoundary_FramingAndLongWarning(t *testing.T) {
+	var b txnBoundary
+	now := time.Now()
+	steps := []struct {
+		ev   *goreplication.BinlogEvent
+		want bool
+	}{
+		{gtidAt(1, 10), false},
+		{sqlAt("BEGIN", 20), false},
+		{rowsEventAt(30), false},
+		{sqlAt("ROLLBACK TO SAVEPOINT s", 40), false},
+		{xidAt(50), true},
+		{gtidAt(2, 60), false},
+		{sqlAt("CREATE TABLE t (id INT)", 70), true},
+		{sqlAt("BEGIN", 80), false},
+		{rowsEventAt(90), false},
+		{sqlAt("COMMIT", 100), true},
+		{queryAt(110), true},
+	}
+	for i, s := range steps {
+		if got := b.observe(s.ev, nil, now); got != s.want {
+			t.Fatalf("step %d (%v): boundary %v want %v", i, s.ev.Header.EventType, got, s.want)
+		}
+	}
+	orig := longTxnWarnAfter
+	longTxnWarnAfter = time.Minute
+	defer func() { longTxnWarnAfter = orig }()
+	b.observe(gtidAt(3, 120), nil, now)
+	if b.warnLong("t", "f", 1, now.Add(30*time.Second)) {
+		t.Fatal("warned before the threshold")
+	}
+	if !b.warnLong("t", "f", 1, now.Add(61*time.Second)) || b.warnLong("t", "f", 1, now.Add(90*time.Second)) {
+		t.Fatal("want one warning per interval")
+	}
+	if !b.warnLong("t", "f", 1, now.Add(122*time.Second)) {
+		t.Fatal("no repeat warning after another interval")
+	}
+	b.observe(xidAt(130), nil, now)
+	if b.warnLong("t", "f", 1, now.Add(time.Hour)) {
+		t.Fatal("warned with no open transaction")
+	}
+}
+
+// Many small transactions within the batch window cost one write, and the
+// held commit is still written when the run ends.
+func TestRun_SmallCommitsAreBatched(t *testing.T) {
+	orig := checkpointBatchWindow
+	checkpointBatchWindow = time.Hour
+	defer func() { checkpointBatchWindow = orig }()
+	results := []streamResult{{event: artificialSourceRotate("mysql-bin.000001")}}
+	pos := uint32(100)
+	for gno := int64(11); gno <= 60; gno++ {
+		results = append(results, streamResult{event: gtidAt(gno, pos)}, streamResult{event: xidAt(pos + 30)})
+		pos += 50
+	}
+	results = append(results, streamResult{err: context.Canceled})
+	dir := t.TempDir()
+	store := &fakeRunnerCheckpointStore{}
+	runner := &MySQLRunner{
+		dataDir:         dir,
+		checkpointStore: store,
+		fetcher:         &fakeSourceMetaFetcher{serverUUID: "srv-uuid-1"},
+		newSyncer: func(goreplication.BinlogSyncerConfig) binlogSyncer {
+			return &fakeSyncer{connID: 44, streamer: &fakeStreamer{results: results}}
+		},
+		writerOpener: func(_ tasks.Task, fileName string, initialPos uint32) (io.Closer, *binlog.Writer, string, error) {
+			buf := &fakeSyncFile{}
+			w := binlog.NewWriter(buf, binlog.Checkpoint{File: fileName, Pos: initialPos})
+			return &countingCloser{writes: new(int), buf: buf}, w, filepath.Join(dir, "task-1", fileName), nil
+		},
+		killDump: func(tasks.SourceConfig, uint32) error { return nil },
+	}
+	if err := runner.Run(context.Background(), newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeGTID, GTIDSet: sampleGTID + ":1-10"})); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.upserts) != 2 {
+		t.Fatalf("upserts %+v, want the first commit and the held last one", store.upserts)
+	}
+	last := store.upserts[1]
+	if last.Pos != pos-50+30 || last.GTIDSet != sampleGTID+":1-60" {
+		t.Fatalf("held checkpoint %+v", last)
+	}
+}

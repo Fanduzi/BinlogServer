@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: the run's writer opener, the source session (disk names, resume GTID), the executed GTID set, the checkpoint and catalog stores
-// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes before the checkpoint and the OPEN row are written; a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint before the put, uploads, and opens the next file
+// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes every event but writes the checkpoint and the OPEN row only at a transaction boundary, batched by checkpointBatchWindow (a held commit is written by the next commit past the window, a heartbeat, a rotate, a seal, or the run exit; #391); a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint before the put, uploads, and opens the next file
 // pos: phase 3 of MySQLRunner.run (ADR 0008): segment append, rotate and seal
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -8,6 +8,7 @@ package replication
 import (
 	"context"
 	"io"
+	"log"
 	"os"
 	"time"
 
@@ -44,7 +45,17 @@ type openSegment struct {
 	// does not rewind to that header position. A segment that already has
 	// events does not gain a second copy on the next start.
 	pendingFormat []byte
+	// unsaved is the flushed checkpoint not yet written to the store: the
+	// events after the last transaction boundary, or a commit held by the
+	// batch window. It is never ahead of the flushed bytes.
+	unsaved     *binlog.Checkpoint
+	lastSavedAt time.Time
 }
+
+// checkpointBatchWindow bounds checkpoint writes on a busy source: a commit
+// within this long of the last write is held and written by the next commit
+// past the window, a heartbeat, or a rotate. Tests set it to 0.
+var checkpointBatchWindow = 200 * time.Millisecond
 
 // openAt opens name at pos through the opener. The handle is kept even on
 // error so the run's deferred close sees it.
@@ -56,6 +67,19 @@ func (s *openSegment) openAt(name string, pos uint32) error {
 
 // close is the run's deferred close of whatever file is still open.
 func (s *openSegment) close() {
+	// A commit the batch window held is written before the run lets go,
+	// on a context the run's cancel does not end. It is a flushed
+	// boundary, so it is never ahead of the file.
+	if s.file != nil && s.unsaved != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
+		runCtx := s.ctx
+		s.ctx = ctx
+		if err := s.flushCheckpoint(); err != nil {
+			log.Printf("held checkpoint not written task=%s file=%s pos=%d err=%v", s.task.ID, s.unsaved.File, s.unsaved.Pos, err)
+		}
+		s.ctx = runCtx
+		cancel()
+	}
 	if s.file != nil {
 		if err := s.file.Close(); err != nil {
 			logCloseFailed(s.path, err)
@@ -63,7 +87,12 @@ func (s *openSegment) close() {
 	}
 }
 
-func (s *openSegment) appendAndPersist(raw []byte, next binlog.Checkpoint) error {
+// appendAndPersist appends and flushes raw. The checkpoint and the OPEN
+// catalog row are written only when commit is true (a transaction boundary)
+// and the batch window has passed; otherwise the flushed checkpoint is held
+// in unsaved. Every event used to write both, so a 20k-event transaction did
+// ~28k meta INSERTs (#391).
+func (s *openSegment) appendAndPersist(raw []byte, next binlog.Checkpoint, commit bool) error {
 	if err := s.writer.Append(raw, next); err != nil {
 		return err
 	}
@@ -75,6 +104,24 @@ func (s *openSegment) appendAndPersist(raw []byte, next binlog.Checkpoint) error
 
 	checkpoint := s.writer.CurrentCheckpoint()
 	s.pos = checkpoint.Pos
+	if !commit {
+		// Inside a transaction: keep the last saved checkpoint, which is
+		// behind these bytes. The open-tail reconcile reads them back.
+		return nil
+	}
+	s.unsaved = &checkpoint
+	if checkpointBatchWindow > 0 && !s.lastSavedAt.IsZero() && time.Since(s.lastSavedAt) < checkpointBatchWindow {
+		return nil
+	}
+	return s.flushCheckpoint()
+}
+
+// flushCheckpoint writes the held boundary checkpoint and the OPEN row.
+func (s *openSegment) flushCheckpoint() error {
+	if s.unsaved == nil || s.writer == nil {
+		return nil
+	}
+	checkpoint := *s.unsaved
 	r := s.r
 	if r.checkpointStore != nil {
 		if err := r.checkpointStore.UpsertCheckpoint(s.ctx, s.task.ID, checkpoint); err != nil {
@@ -102,12 +149,14 @@ func (s *openSegment) appendAndPersist(raw []byte, next binlog.Checkpoint) error
 			return err
 		}
 	}
+	s.unsaved = nil
+	s.lastSavedAt = time.Now()
 	return nil
 }
 
 // persistRaw appends raw, preceded by a held format description when the
 // segment has no events yet.
-func (s *openSegment) persistRaw(raw []byte, next binlog.Checkpoint) error {
+func (s *openSegment) persistRaw(raw []byte, next binlog.Checkpoint, commit bool) error {
 	payload := raw
 	if len(s.pendingFormat) > 0 {
 		if !segmentHasEvents(s.path) {
@@ -117,7 +166,7 @@ func (s *openSegment) persistRaw(raw []byte, next binlog.Checkpoint) error {
 		}
 		s.pendingFormat = nil
 	}
-	return s.appendAndPersist(payload, next)
+	return s.appendAndPersist(payload, next, commit)
 }
 
 // checkpointAt is the checkpoint for file at pos (0 keeps the cursor) with
@@ -141,6 +190,11 @@ func (s *openSegment) seal(owner string) error {
 	if s.file == nil {
 		return nil
 	}
+	// The last commit held by the batch window was in the store before
+	// per-event writes stopped (#391); keep it there before sealing.
+	if err := s.flushCheckpoint(); err != nil {
+		return err
+	}
 	path := s.path
 	if err := s.file.Close(); err != nil {
 		return err
@@ -162,9 +216,18 @@ func (s *openSegment) rotate(logPos uint32, raw []byte, nextFile string, nextPos
 	// artificial rotate 不写入：它的 CRC 能通过 mysqlbinlog，但字节
 	// 不属于源文件，留下后 DurableCursor 会丢掉整段的续传位点。
 	sealPos := s.pos
+	if artificial {
+		if err := s.flushCheckpoint(); err != nil {
+			return err
+		}
+	}
 	if !artificial {
 		rotateCheckpoint := s.checkpointAt(s.name, logPos)
-		if err := s.persistRaw(raw, rotateCheckpoint); err != nil {
+		// A rotate is outside any transaction; write it at once.
+		lastSaved := s.lastSavedAt
+		s.lastSavedAt = time.Time{}
+		if err := s.persistRaw(raw, rotateCheckpoint, true); err != nil {
+			s.lastSavedAt = lastSaved
 			return err
 		}
 		sealPos = rotateCheckpoint.Pos

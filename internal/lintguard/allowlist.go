@@ -25,6 +25,7 @@ var allowlist = map[string]Allowed{
 	"internal/replication/mysql_runner.go:MySQLRunner.openBinlogWriterIn:blank-call":       {4, cleanupOnErrorPath},
 	"internal/replication/mysql_runner.go:MySQLRunner.openBinlogWriterIn:log-only":         {3, cleanupOnErrorPath},
 	"internal/replication/mysql_runner.go:withSealFacts:log-only":                          {1, "the seal checksum ledger is the rehasher's source without a catalog sha; a failed append leaves that segment unavailable to the rehasher, as before P2-3, and the seal itself does not depend on it"},
+	"internal/replication/run_segment.go:openSegment.close:log-only":                       {1, "a held boundary checkpoint not written at run exit only leaves the stored checkpoint behind the flushed file; the next start reads the open tail back (ADR 0005, #391)"},
 	"internal/replication/mysql_runner.go:defaultServerID:blank-call":                      {1, "hash.Hash.Write never returns an error"},
 	"internal/replication/source_switch.go:clearResumeGTID:blank-call":                     {1, "follow-up: a resume-GTID file that cannot be removed is read again on the next start; should report a finding"},
 	"internal/tasks/legacy_failback.go:fetchLegacySegment:blank-call":                      {1, cleanupOnErrorPath},
