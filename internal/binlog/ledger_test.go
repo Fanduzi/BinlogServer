@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: the real GTID task directory in testdata/ledger/live and temporary copies with a segment removed, rewritten or added
-// output: assertions on the ledger interface: binlog order, per-segment GTID ranges and headers, the stored set, holes with and without the start set, a missing directory, a rewritten file read again, the open tail and the resume set
+// output: assertions on the ledger interface: binlog order, per-segment GTID ranges and headers, the stored set, holes with and without the start set, a missing directory, a rewritten file read again, the open tail, the sealed set and the resume set
 // pos: unit coverage at the segment ledger's interface (ADR 0006)
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -154,5 +154,25 @@ func TestReadSegmentContentsMatchesLedger(t *testing.T) {
 	}
 	if fromBytes.GTIDs.String() != fromDir.GTIDs.String() || fromBytes.Log.Previous != fromDir.Log.Previous {
 		t.Fatalf("bytes %q dir %q", fromBytes.GTIDs.String(), fromDir.GTIDs.String())
+	}
+}
+
+// #391: the sealed set leaves the open tail out and skips other flavors.
+func TestLedgerSealedStored(t *testing.T) {
+	dir := copyLedgerDir(t, filepath.Join("testdata", "ledger", "live"))
+	l := LedgerAt(dir)
+	tail, ok := l.Tail()
+	if !ok || len(tail.GTIDs) == 0 {
+		t.Fatalf("tail %+v", tail)
+	}
+	sealed := l.SealedStored()
+	if sealed.IsEmpty() || sealed.String() == l.Stored().String() {
+		t.Fatalf("sealed %q stored %q", sealed.String(), l.Stored().String())
+	}
+	if l.SealedText("mariadb") != "" {
+		t.Fatal("sealed text for mariadb")
+	}
+	if l.SealedText("mysql") != sealed.String() {
+		t.Fatalf("sealed text %q", l.SealedText("mysql"))
 	}
 }
