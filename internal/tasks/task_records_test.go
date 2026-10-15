@@ -94,6 +94,32 @@ func recordProcess(t *testing.T, data string, file RecordFile, keyErr error, ext
 	return s, r
 }
 
+// recordDir is t.TempDir for a scheduler data_dir. A cancelled worker exits
+// on its own goroutine and may still write .tasks.enc after the test body
+// returns, so removal is retried briefly instead of failing on a
+// "directory not empty" race (seen in CI on LogsHoldNoSecrets).
+func recordDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "task-records-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := os.RemoveAll(dir)
+			if err == nil || time.Now().After(deadline) {
+				if err != nil {
+					t.Errorf("remove %s: %v", dir, err)
+				}
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func recordSourceCfg() *SourceConfig {
 	return &SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: recordPassword, Flavor: "mysql", ServerID: 4242}
 }
@@ -126,7 +152,7 @@ func loadRecordSnapshot(t *testing.T, store *taskrecords.Store) recordSnapshot {
 }
 
 func TestTaskRecords_RestartResumesFromDiskWithPassword(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	store := taskrecords.Open(data, key, nil)
 	s1, r1 := recordProcess(t, data, store, nil)
@@ -192,7 +218,7 @@ func TestTaskRecords_RestartResumesFromDiskWithPassword(t *testing.T) {
 // ADR 0010 rule 3 after #393 QA gap (b): no segment means no stored
 // history, so LATEST resumes as LATEST, with an event saying so.
 func TestTaskRecords_LatestWithNothingOnDiskResumesAtLatest(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	task, err := s1.CreateTaskFromSpec("idle", "idle-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil)
@@ -228,7 +254,7 @@ func TestTaskRecords_LatestWithNothingOnDiskResumesAtLatest(t *testing.T) {
 // A directory with history never jumps to a new tip: segments that hold
 // events but no resume point stay FAILED even for a LATEST task.
 func TestTaskRecords_LatestWithUnreadableSegmentsStaysFailed(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	task, err := s1.CreateTaskFromSpec("hist", "hist-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil)
@@ -254,7 +280,7 @@ func TestTaskRecords_LatestWithUnreadableSegmentsStaysFailed(t *testing.T) {
 }
 
 func TestTaskRecords_GTIDStartWithNothingOnDiskResumes(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	start := &StartConfig{Mode: StartModeGTID, GTIDSet: gtidPITRUUID + ":1-5"}
@@ -273,7 +299,7 @@ func TestTaskRecords_GTIDStartWithNothingOnDiskResumes(t *testing.T) {
 }
 
 func TestTaskRecords_StoppedTaskStaysStopped(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	created, err := s1.CreateTaskFromSpec("c", "c-key", recordSourceCfg(), nil, nil)
@@ -302,7 +328,7 @@ func TestTaskRecords_StoppedTaskStaysStopped(t *testing.T) {
 }
 
 func TestTaskRecords_WorkerFailureSurvivesRestart(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	task, err := s1.CreateTaskFromSpec("f", "f-key", recordSourceCfg(), &StartConfig{Mode: StartModeGTID, GTIDSet: gtidPITRUUID + ":1"}, nil)
@@ -328,7 +354,7 @@ func TestTaskRecords_WorkerFailureSurvivesRestart(t *testing.T) {
 }
 
 func TestTaskRecords_DeleteLeavesTombstoneNotUnadopted(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, _ := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	task, err := s1.CreateTaskFromSpec("d", "d-key", recordSourceCfg(), nil, nil)
@@ -388,7 +414,7 @@ func TestTaskRecords_DeleteLeavesTombstoneNotUnadopted(t *testing.T) {
 }
 
 func TestTaskRecords_IDsNotReusedAfterDirectoryRemoved(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, _ := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	a, _ := s1.CreateTaskFromSpec("a", "a-key", recordSourceCfg(), nil, nil)
@@ -436,7 +462,7 @@ func TestTaskRecords_UnusableFileIsLoudAndUntouched(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			data := t.TempDir()
+			data := recordDir(t)
 			key := recordKey(t, 1)
 			s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 			task, err := s1.CreateTaskFromSpec("w", "w-key", recordSourceCfg(), &StartConfig{Mode: StartModeGTID, GTIDSet: gtidPITRUUID + ":1"}, nil)
@@ -505,7 +531,7 @@ func TestTaskRecords_UnusableFileIsLoudAndUntouched(t *testing.T) {
 }
 
 func TestTaskRecords_MissingKeyWithoutFileIsVolatileAndLoud(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	s, _ := recordProcess(t, data, taskrecords.Open(data, nil, nil), taskrecords.ErrKeyMissing)
 	if _, ok := clusterFinding(t, s, RecordsKeyMissing); !ok {
 		t.Fatal("no key and no file: no finding")
@@ -519,7 +545,7 @@ func TestTaskRecords_MissingKeyWithoutFileIsVolatileAndLoud(t *testing.T) {
 }
 
 func TestTaskRecords_InvalidKeyIsKeyInvalid(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	keyErr := errors.Join(taskrecords.ErrKeyInvalid, errors.New("key file mode 0644"))
 	s, _ := recordProcess(t, data, taskrecords.Open(data, nil, nil), keyErr)
 	if _, ok := clusterFinding(t, s, RecordsKeyInvalid); !ok {
@@ -540,7 +566,7 @@ func (f *failingRecordFile) Save(plain []byte) error {
 }
 
 func TestTaskRecords_FailedSaveRefusesCreate(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	file := &failingRecordFile{Store: taskrecords.Open(data, recordKey(t, 1), nil)}
 	s, _ := recordProcess(t, data, file, nil)
 	if _, err := s.CreateTaskFromSpec("ok", "ok-key", recordSourceCfg(), nil, nil); err != nil {
@@ -576,7 +602,7 @@ func TestTaskRecords_FailedSaveRefusesCreate(t *testing.T) {
 
 // #393 QA P2-1: a full data_dir must never block Stop or Delete.
 func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	file := &failingRecordFile{Store: taskrecords.Open(data, key, nil)}
 	s, r := recordProcess(t, data, file, nil)
@@ -629,7 +655,7 @@ func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
 }
 
 func TestTaskRecords_RotationResavesOnCurrentKey(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	old, cur := recordKey(t, 1), recordKey(t, 2)
 	s1, _ := recordProcess(t, data, taskrecords.Open(data, old, nil), nil)
 	task, err := s1.CreateTaskFromSpec("r", "r-key", recordSourceCfg(), nil, nil)
@@ -648,7 +674,7 @@ func TestTaskRecords_RotationResavesOnCurrentKey(t *testing.T) {
 // #393 QA P3: a rotation whose re-save fails keeps running on the old
 // file, says so, and the retry moves it to the current key later.
 func TestTaskRecords_RotationResaveFailureKeepsOldFile(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	old, cur := recordKey(t, 1), recordKey(t, 2)
 	s1, _ := recordProcess(t, data, taskrecords.Open(data, old, nil), nil)
 	task, err := s1.CreateTaskFromSpec("r", "r-key", recordSourceCfg(), nil, nil)
@@ -679,7 +705,7 @@ func TestTaskRecords_RotationResaveFailureKeepsOldFile(t *testing.T) {
 // #393 QA P2-3: a GTID task resumes with the executed set built from the
 // stored bytes (seed, sealed segments, open tail), not an empty one.
 func TestTaskRecords_GTIDTaskResumesWithStoredSet(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	key := recordKey(t, 1)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	task, err := s1.CreateTaskFromSpec("g", "g-key", recordSourceCfg(), &StartConfig{Mode: StartModeGTID, GTIDSet: gtidPITRUUID + ":1-36"}, nil)
@@ -707,7 +733,7 @@ func TestTaskRecords_GTIDTaskResumesWithStoredSet(t *testing.T) {
 }
 
 func TestTaskRecords_OffIsTodaysBehaviour(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	s := NewScheduler(WithDataDir(data))
 	if _, err := s.CreateTaskFromSpec("o", "o-key", recordSourceCfg(), nil, nil); err != nil {
 		t.Fatal(err)
@@ -723,7 +749,7 @@ func TestTaskRecords_LogsHoldNoSecrets(t *testing.T) {
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
 
-	data := t.TempDir()
+	data := recordDir(t)
 	old, cur := recordKey(t, 1), recordKey(t, 2)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, old, nil), nil)
 	task, err := s1.CreateTaskFromSpec("l", "l-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil)
@@ -739,8 +765,8 @@ func TestTaskRecords_LogsHoldNoSecrets(t *testing.T) {
 	r3.next(t)
 	// A refused write and a Stop applied without a save: their error text,
 	// finding detail and log lines (#393 QA P3).
-	fail := &failingRecordFile{Store: taskrecords.Open(t.TempDir(), cur, nil), fail: true}
-	s4, _ := recordProcess(t, t.TempDir(), fail, nil)
+	fail := &failingRecordFile{Store: taskrecords.Open(recordDir(t), cur, nil), fail: true}
+	s4, _ := recordProcess(t, recordDir(t), fail, nil)
 	_, refused := s4.CreateTaskFromSpec("x", "x-key", recordSourceCfg(), nil, nil)
 	if refused == nil {
 		t.Fatal("create with a failing save was accepted")
@@ -763,7 +789,7 @@ func TestTaskRecords_LogsHoldNoSecrets(t *testing.T) {
 // Restore runs before app builds the evaluator; a lock raised then must still
 // reach the evaluator's signal book (found by the e2e wrong-key case).
 func TestTaskRecords_LockReachesLaterEvaluator(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	s1, _ := recordProcess(t, data, taskrecords.Open(data, recordKey(t, 1), nil), nil)
 	if _, err := s1.CreateTaskFromSpec("e", "e-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil); err != nil {
 		t.Fatal(err)
@@ -779,7 +805,7 @@ func TestTaskRecords_LockReachesLaterEvaluator(t *testing.T) {
 }
 
 func TestTaskRecords_WrongKeyOpensClusterFinding(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	s1, _ := recordProcess(t, data, taskrecords.Open(data, recordKey(t, 1), nil), nil)
 	if _, err := s1.CreateTaskFromSpec("w", "w-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil); err != nil {
 		t.Fatal(err)
@@ -813,7 +839,7 @@ func TestTaskRecords_WrongKeyOpensClusterFinding(t *testing.T) {
 
 // A row an earlier process left open closes once the right key reads the file.
 func TestTaskRecords_RightKeyClosesEarlierLockFinding(t *testing.T) {
-	data := t.TempDir()
+	data := recordDir(t)
 	good := recordKey(t, 1)
 	s1, _ := recordProcess(t, data, taskrecords.Open(data, good, nil), nil)
 	if _, err := s1.CreateTaskFromSpec("c", "c-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil); err != nil {
