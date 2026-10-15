@@ -55,6 +55,13 @@ func TestEvaluator_StandaloneLeftoverOpensTaskUnadopted(t *testing.T) {
 	if !strings.Contains(f.Detail, "POST /api/tasks/7/adopt") || !strings.Contains(f.Detail, "replication") {
 		t.Fatalf("detail does not say replication stopped and how to adopt: %q", f.Detail)
 	}
+	api, err := s.ListFindings(ctx, "7", false, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(api) != 1 || string(api[0].Kind) != string(health.TaskUnadopted) {
+		t.Fatalf("/findings shows %+v, want the one TASK_UNADOPTED", api)
+	}
 	h, err := e.EvaluateNow(ctx, "7")
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +69,7 @@ func TestEvaluator_StandaloneLeftoverOpensTaskUnadopted(t *testing.T) {
 	if h.Status == health.StatusHealthy {
 		t.Fatalf("leftover task is HEALTHY: %+v", h)
 	}
-	if _, err := s.AdoptDiskBackup("7", TaskPatch{Source: adoptSource()}); err != nil {
+	if _, err := s.AdoptDiskBackup("7", TaskPatch{ClusterKey: "adopted-7", Source: adoptSource(), Start: &StartConfig{Mode: StartModeFilePos, File: "mysql-bin.000002", Pos: 4}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.SweepNow(ctx); err != nil {

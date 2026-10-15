@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a task's signal book, task row facts with the source liveness clock, the stored open keys and this pass's probes
-// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED (45s with no byte read, any state) and SOURCE_UNREACHABLE (a failed attempt 90s after the last read) from the one source liveness clock, with a same-pass HANDED_OFF; TASK_FAILED by failure class; TASK_TRANSITION_STALLED; ClassifyFailure
+// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED (45s with no byte read, any state) and SOURCE_UNREACHABLE (a failed attempt 90s after the last read) from the one source liveness clock, with a same-pass HANDED_OFF; TASK_FAILED by failure class; TASK_TRANSITION_STALLED; TASK_UNADOPTED for a standalone leftover directory (#385); ClassifyFailure
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §6); pure
 // note: if this file changes, update this header and module README.md.
 package health
@@ -202,6 +202,18 @@ func taskFailedDerive(f *Facts) []Instance {
 		return nil
 	}
 	return []Instance{{Key: Key{Subject: ClassifyFailure(t.LastError)}, Detail: "task FAILED: " + t.LastError}}
+}
+
+// taskUnadoptedDerive: a standalone leftover directory that no task record
+// drives (#385). Replication for it is stopped until the operator adopts it.
+func taskUnadoptedDerive(f *Facts) []Instance {
+	t := f.Task
+	if t == nil || !t.Unadopted {
+		return nil
+	}
+	return []Instance{{Detail: "data_dir/" + f.TaskID + " holds a backup with no task metadata (standalone, after a restart or a delete): " +
+		"replication for it is stopped and the backup falls behind the source; POST /api/tasks/" + f.TaskID +
+		"/adopt with the source to resume it, or move the directory out of data_dir"}}
 }
 
 func stalledAfter(f *Facts) time.Duration {

@@ -382,6 +382,7 @@ evaluate(task):
 | `SEGMENT_EMPTY_LEFTOVER`（新，#357） | INFO | chain.local | `.open.eN` 只有 magic（4 字节）、只有 FDE 头、或小于最小事件大小（19 字节头）且无完整事件；不参与 I4，**永不截断 replay**（/replay 仍按阶段 1 行为列出或丢弃） | 文件被移除，或被封存成有事件的段 |
 | `TASK_FAILED`（新） | C | task.state | desired=RUN 且 state=FAILED，subject=失败类别（`STREAM_REGRESSION` #362、`SOURCE_ERROR_1236` #354、`PERMISSION_DENIED` #338、`CONFIG`、`OTHER` 等，由 `last_error` 分类；类别表封闭，未知归 `OTHER`） | 任务离开 FAILED（重启成功进入 RUNNING 并收到事件，或进入 STARTING 后由 SOURCE_UNREACHABLE 等承接），或 desired=STOP；类别变化 = 旧 subject 关闭、新 subject 打开 |
 | `SOURCE_UNREACHABLE`（新） | C | task.state + signals | desired=RUN 且 last_error 类别为不可达（连接拒绝/超时/读超时），或在 RETRY_BACKOFF/STARTING 间循环累计 > `health.unreachable_after`（默认 90s，可按任务覆盖）；连续两轮评估都满足才打开（去抖）；计划重启用任务级 mute（`kind=*`，§7.1）：finding 照常打开、健康照常下降，只是不通知 | 一次 dump 成功建立且收到事件或心跳（成功信号）；或 desired=STOP 且 STOPPED |
+| `TASK_UNADOPTED`（新，#385，见 §19） | C | task.state | 无任务库的 standalone，任务只存在于 `{data_dir}/{id}`（有分段），本进程没有它的记录 | adopt；或目录不再有分段（移出 data_dir） |
 | `METADATA_WRITE_BLOCKED` | C | signals | 信号 | S2：之后一次 checkpoint/任务行写成功 |
 | `TASK_PERSIST_FAILED` | C | signals | 信号 | S2/S3：同任务后续任务行写成功 |
 | `EVENT_PERSIST_FAILED` | W | signals | 信号，subject=事件类型 | S1：同类型事件后续写成功 |
@@ -743,3 +744,18 @@ P2-4 按 §5.5、§5.6、§6 落地（`internal/health/signals.go`、`internal/t
 - **F3 63s 计划重启打开 CRITICAL**：旧模型用「不在 RUNNING 的时长」，退避对齐把它拉到 92s；现在用最后读到字节到最近一次失败的间隔，退避不计入；不存在一轮内打开又关闭。
 - **测试**：`internal/replication/liveness_e2e_test.go`（真实 MySQL + 进程内 TCP 代理，可黑洞/kill，负载与空闲；阈值与退避按 1/15 缩放）断言首个 finding 与 SOURCE_UNREACHABLE 的时间界、死源期间无空档、runner 以 stall 结束运行、50/63/80s 计划重启不打开 SOURCE_UNREACHABLE、恢复后全部关闭；CI 无源时跳过。`liveness_test.go`、`internal/tasks/p24_signals_test.go`、`internal/health/signals_test.go` 在 CI 覆盖同一模型。
 
+
+## 19. #385：standalone 残留目录（TASK_UNADOPTED，2026-10-15）
+
+**问题**：无 `meta_dsn` 时任务只在内存里（ADR 0005 §Standalone）。进程重启（部署、崩溃、主机重启）后，每个任务都变成 data_dir 里的残留目录：`STOPPED`、source 为空，`start` 返回 400，复制静默停止，没有 finding、没有告警，备份一直落后于源，直到有人 adopt。
+
+**本节的决定（不改 ADR 0005）**：先做 #385「至少」的那一半：让它不再静默。
+
+| Kind | Sev | Scope | 打开条件（Derive） | 清除规则 |
+|---|---|---|---|---|
+| `TASK_UNADOPTED`（新，#385） | C | task.state | 无任务库的 standalone，任务只存在于 `{data_dir}/{id}`（目录里有分段），本进程没有它的记录（`TaskFacts.Unadopted`）；subject 为空；detail 写明复制已停、`POST /api/tasks/{id}/adopt` 恢复，或把目录移出 data_dir | adopt（有任务记录驱动它）；或目录不再有分段（移出 data_dir）。目录移走后任务不再出现在任务列表里，评估器按存储健康（`ListHealth`）里仍挂着 TASK_UNADOPTED 的任务再评估一次，只有 task.state 完整，所以只关闭任务状态类 kind；重启前移走的目录同样关闭 |
+
+- 只在评估器 `on` 时写（与 P2-4 的 SOURCE_UNREACHABLE、TASK_FAILED 一样，旧 Report 路径不写）。有 meta（任务库）时永不派生。
+- **删除也会打开**：standalone 的 `DELETE` 不删目录，删掉后目录仍有分段，就和重启后的残留目录一样，打开 TASK_UNADOPTED。处理方式一样：adopt，或把目录移出 data_dir。之所以不区分，是因为重启后两者无法区分（standalone 不落盘任务记录）。
+- **没有做的另一半**：重启后自动恢复复制。这需要把任务规格（含源密码）落在 data_dir 下，改变 ADR 0005「不用本地库代替元数据 MySQL」，留给 Adrian 决定。
+- 已知（§17.1 遗留的 P3）：无 meta 时任务列表的 `open_findings` 不含评估器的行；`/api/findings` 与任务健康已包含 TASK_UNADOPTED。

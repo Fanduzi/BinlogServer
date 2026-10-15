@@ -1,7 +1,7 @@
 // Package health provides module-level functionality for health.
 // input: assurance violation kinds
 // output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
-// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED
+// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385)
 // note: if this file changes, update this header and module README.md.
 package health
 
@@ -98,6 +98,7 @@ var p24Managed = map[Kind]bool{
 	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
 	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
 	MetricSourceFailed: true, TransitionStalled: true, SourceUnreachable: true, TaskFailed: true,
+	TaskUnadopted: true, // #385, design §19
 }
 
 // ManagedKinds is every kind the evaluator owns in this release.
@@ -155,6 +156,8 @@ func DefaultRegistry() Registry {
 			Clear: ClearRule{Invariant: "lease", Text: "the task leaves STARTING/STOPPING, or a run drives it"}},
 		{Kind: TaskFailed, Severity: Critical, Scopes: []Scope{ScopeTaskState}, Version: 1, Derive: taskFailedDerive,
 			Clear: ClearRule{Invariant: "task", Text: "the task leaves FAILED for its current ask (restarted, or stopped); a new failure class closes the old subject and opens the new one"}},
+		{Kind: TaskUnadopted, Severity: Critical, Scopes: []Scope{ScopeTaskState}, Version: 1, Derive: taskUnadoptedDerive,
+			Clear: ClearRule{Invariant: "task", Text: "the task is adopted (a task record drives it again), or the directory no longer holds segments under data_dir"}},
 		{Kind: SourceUnreachable, Severity: Critical, Scopes: []Scope{ScopeTaskState, ScopeSignals}, Version: 2, Derive: sourceUnreachableDerive,
 			Clear: ClearRule{Invariant: "S12", Holds: sourceUnreachableCleared,
 				Text: "a byte is read from the source (dump or probe) after the latest failed attempt, or the task is stopped, FAILED (TASK_FAILED takes over) or owned elsewhere"}},
