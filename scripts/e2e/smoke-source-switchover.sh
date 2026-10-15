@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # input: two MySQL 8.0 servers in a GTID pair behind one TCP address, the suite API, and the Percona 8.0 mysqlbinlog client
-# output: proof that a GTID task follows the new primary without mixing files, that a LATEST task stops with SOURCE_SWITCHOVER, that source_chain, source_identity, and binlog_server_source_switchovers describe both paths, that the embedded Console contains the chain view, and that pointing the address back at the old primary stops instead of mixing, that repeated Starts of a stopped task count one stop and do not fail with SEGMENT_NOT_ON_WORKER, that a proper failback (old primary re-synced from the new one) continues as a third stint {identity}~2 with a continuous window, A,B,A~2 replay order, a matching restore checksum and no phantom switch on restart, with the earlier stop resolved and stopped back at 0, and that the stopped LATEST task resumes on the old primary with outcome resumed and stays resumed (stopped 0) after a normal Stop
+# output: with the VIP proxy's connect timeout cleared after connect so idle dumps are not cut, an ERR trap that names the failing line, and mysql helper stderr kept (password warning dropped); proof that a GTID task follows the new primary without mixing files, that a LATEST task stops with SOURCE_SWITCHOVER, that source_chain, source_identity, and binlog_server_source_switchovers describe both paths, that the embedded Console contains the chain view, and that pointing the address back at the old primary stops instead of mixing, that repeated Starts of a stopped task count one stop and do not fail with SEGMENT_NOT_ON_WORKER, that a proper failback (old primary re-synced from the new one) continues as a third stint {identity}~2 with a continuous window, A,B,A~2 replay order, a matching restore checksum and no phantom switch on restart, with the earlier stop resolved and stopped back at 0, and that the stopped LATEST task resumes on the old primary with outcome resumed and stays resumed (stopped 0) after a normal Stop
 # pos: docker coverage for a VIP source switch
 # note: if this file changes, update this header and scripts/e2e/README.md.
-set -euo pipefail
+set -Eeuo pipefail
+# #392: name the failing line and command instead of exiting silently.
+trap 'echo "[trace] exit=$? line=$LINENO cmd=$BASH_COMMAND funcs=${FUNCNAME[*]:-main}" >&2' ERR
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/deploy/e2e/docker-compose.yml"
@@ -34,15 +36,20 @@ need_cmd docker
 need_cmd jq
 need_cmd python3
 
+# mysql stderr is kept (#392); only the command-line password warning is dropped.
+mysql_stderr() {
+  grep -v 'Using a password on the command line' >&2 || true
+}
+
 mysql_exec() {
   local name="$1"
   local sql="$2"
-  docker exec "$name" mysql -uroot -proot --batch --raw -Nse "$sql" 2>/dev/null | tr -d '\r'
+  docker exec "$name" mysql -uroot -proot --batch --raw -Nse "$sql" 2> >(mysql_stderr) | tr -d '\r'
 }
 
 mysql_script() {
   local name="$1"
-  docker exec -i "$name" mysql -uroot -proot --batch --raw -N <<<"$2" 2>/dev/null | tr -d '\r'
+  docker exec -i "$name" mysql -uroot -proot --batch --raw -N <<<"$2" 2> >(mysql_stderr) | tr -d '\r'
 }
 
 cleanup() {
@@ -102,6 +109,10 @@ def handle(client):
     except Exception:
         client.close()
         return
+    # The 10s is for the connect only. Left on the socket it ends an idle
+    # binlog dump every 10s (recv timeout), which looks like a source drop.
+    upstream.settimeout(None)
+    client.settimeout(None)
     with lock:
         pairs.append((client, upstream))
     t1 = threading.Thread(target=pipe, args=(client, upstream), daemon=True)
@@ -174,7 +185,7 @@ PY
 mysql_exec_host() {
   local port="$1"
   local sql="$2"
-  docker exec "$CLIENT" mysql -urepl -preplpass -h127.0.0.1 -P"$port" --protocol=tcp --connect-timeout=3 -Nse "$sql" 2>/dev/null | tr -d '\r'
+  docker exec "$CLIENT" mysql -urepl -preplpass -h127.0.0.1 -P"$port" --protocol=tcp --connect-timeout=3 -Nse "$sql" 2> >(mysql_stderr) | tr -d '\r'
 }
 
 abs_path() {
@@ -362,7 +373,7 @@ create_task() {
 
 rows_of() {
   local name="$1"
-  docker exec "$name" mysql -uroot -proot --batch --raw -Nse "SELECT id, v FROM ${DB}.t ORDER BY id" 2>/dev/null | tr -d '\r'
+  docker exec "$name" mysql -uroot -proot --batch --raw -Nse "SELECT id, v FROM ${DB}.t ORDER BY id" 2> >(mysql_stderr) | tr -d '\r'
 }
 
 start_restore() {

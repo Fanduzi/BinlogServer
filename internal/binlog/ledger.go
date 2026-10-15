@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: one task segment directory (or, for bytes that are not in one, a single segment reader)
-// output: the segment ledger: the segments in binlog order, each segment's GTID ranges and previous-GTIDs header, the stored GTID set, holes inside it, the first damaged segment with its recovery sets, and the resumable open tail with the GTID set a resume continues from
+// output: the segment ledger: the segments in binlog order, each segment's GTID ranges and previous-GTIDs header, the stored GTID set and the sealed segments' set, holes inside it, the first damaged segment with its recovery sets, and the resumable open tail with the GTID set a resume continues from (seed, sealed segments and tail, #391)
 // pos: the one answer to "what does this task directory durably hold"; the runner's resume, /window, /replay, storage alerts, stored-hole detection, legacy failback repair and observability all ask it (ADR 0006)
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -135,6 +135,26 @@ func (l *Ledger) Stored() GTIDSet {
 	return out
 }
 
+// SealedStored is every transaction a sealed segment holds. The open tail
+// is left out: its trailing transaction may be unfinished, and Tail reads
+// only its complete ones. A resume unions this with the tail so a checkpoint
+// row that lags the segments (for example after a source switchover sealed
+// the old source's file) does not make the source send stored GTIDs again
+// (ADR 0005, #391).
+func (l *Ledger) SealedStored() GTIDSet {
+	out := GTIDSet{}
+	segs, _ := l.Segments()
+	for _, seg := range segs {
+		if seg.Named.Open {
+			continue
+		}
+		if c, err := l.Contents(seg.Name); err == nil {
+			out.AddAll(c.GTIDs)
+		}
+	}
+	return out
+}
+
 // Holes is every sequence missing between the lowest and highest stored
 // sequence of one source that start does not cover.
 func (l *Ledger) Holes(start GTIDSet) GTIDSet {
@@ -166,8 +186,9 @@ func (l *Ledger) Tail() (OpenTail, bool) {
 	return tail, true
 }
 
-// ResumeGTID is seed plus everything the open tail durably holds (its
-// previous-GTIDs text and its complete transactions), in flavor's GTID
+// ResumeGTID is seed plus every sealed segment's transactions plus
+// everything the open tail durably holds (its previous-GTIDs text and its
+// complete transactions), in flavor's GTID
 // syntax. A text that does not parse for flavor is skipped. ok is false when
 // there is no open tail; then the set is "".
 func (l *Ledger) ResumeGTID(flavor, seed string) (OpenTail, string, bool) {
@@ -175,7 +196,17 @@ func (l *Ledger) ResumeGTID(flavor, seed string) (OpenTail, string, bool) {
 	if !ok {
 		return OpenTail{}, "", false
 	}
-	return tail, unionDurable(flavor, seed, tail), true
+	union := unionDurable(flavor, seed, OpenTail{Previous: []string{l.SealedText(flavor)}})
+	return tail, unionDurable(flavor, union, tail), true
+}
+
+// SealedText is SealedStored as text, or "" for a flavor other than MySQL
+// (the segment scan reads MySQL GTID events only).
+func (l *Ledger) SealedText(flavor string) string {
+	if f := strings.TrimSpace(flavor); f != "" && f != gomysql.MySQLFlavor {
+		return ""
+	}
+	return l.SealedStored().String()
 }
 
 // Durable is every GTID text the tail durably holds, in the order a resume
