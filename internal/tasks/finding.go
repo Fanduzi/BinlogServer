@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O
+// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -213,6 +213,23 @@ func (b *findingBook) resolve(taskID string, kind FindingKind, subject string) {
 	b.kick()
 }
 
+// forget drops a key the health evaluator closed: from the open book and
+// from the pending writes, so a queued legacy upsert cannot reopen it.
+func (b *findingBook) forget(taskID string, kind FindingKind, subject string) {
+	key := findingKey{strings.TrimSpace(taskID), kind, subject}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.open, key)
+	kept := b.pending[:0]
+	for _, op := range b.pending {
+		if (findingKey{op.finding.TaskID, op.finding.Kind, op.finding.Subject}) == key && !op.resolve {
+			continue
+		}
+		kept = append(kept, op)
+	}
+	b.pending = kept
+}
+
 // enqueueLocked keeps the newest op per key and drops the oldest op beyond the cap.
 func (b *findingBook) enqueueLocked(op findingOp) {
 	key := findingKey{op.finding.TaskID, op.finding.Kind, op.finding.Subject}
@@ -398,6 +415,7 @@ func (s *Scheduler) ListFindings(ctx context.Context, taskID string, includeReso
 			return nil, err
 		}
 	}
+	local = append(local, s.healthEval.Load().openManagedFindings(ctx, taskID)...)
 	return mergeFindings(stored, local, limit), nil
 }
 
@@ -420,6 +438,11 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		stored, err = store.ListOpenFindings(ctx, limit)
 		if errors.Is(err, ErrFindingStoreAbsent) {
 			stored, err = nil, nil
+		}
+	}
+	if e := s.healthEval.Load(); e != nil {
+		for _, t := range s.ListTasks() {
+			local = append(local, e.openManagedFindings(ctx, t.ID)...)
 		}
 	}
 	return mergeFindings(stored, local, limit), err

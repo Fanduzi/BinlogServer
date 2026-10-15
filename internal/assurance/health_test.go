@@ -103,3 +103,25 @@ func TestHealthSealedTwice(t *testing.T) {
 		}
 	}
 }
+
+// P2-3: I4 judges the replay order with its open copies, except an empty
+// leftover open file, which is never a verdict and never cuts replay.
+func TestHealthOpenCopyAndEmptyLeftover(t *testing.T) {
+	f := live(t)
+	f.duplicate(t, "mysql-bin.000006", "mysql-bin.000006.open.e4")
+	f.in.Local = binlog.LedgerAt(f.dir)
+	v, ok := ChainOf(f.in).Health()
+	if !ok || v.Kind != I4Overlap || v.Problem == nil || v.Problem.Segment != "mysql-bin.000006.open.e4" {
+		t.Fatalf("open copy ≡ sealed: %+v %v", v, ok)
+	}
+	g := live(t)
+	g.leftover(t, "mysql-bin.000006", "mysql-bin.000006.open.e3", []byte{0xfe, 'b', 'i', 'n'})
+	g.in.Local = binlog.LedgerAt(g.dir)
+	if v, found := ChainOf(g.in).Health(); found {
+		t.Fatalf("empty leftover became a verdict: %+v", v)
+	}
+	vs := ChainOf(g.in).Check(testNow)
+	if has(vs, I4Overlap, "") || !has(vs, I4EmptyLeftover, "mysql-bin.000006.open.e3") {
+		t.Fatalf("check %s", kinds(vs))
+	}
+}

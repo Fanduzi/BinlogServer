@@ -1,12 +1,14 @@
 // Package assurance provides module-level functionality for assurance.
 // input: Inputs: the task's chain order, catalog rows, task directory ledger, object listing snapshot, checkpoint, start set and recorded source switches
-// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes
+// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER
 // pos: the one answer to "is this backup complete, and where is each part" (ADR 0009 phase 1); depends on binlog only
 // note: if this file changes, update this header and module README.md.
 package assurance
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,11 +49,14 @@ type Switch struct {
 
 // Inputs is everything the chain knows; see docs/design/0009-phase1-backup-chain.md.
 type Inputs struct {
-	Flavor        string
-	StartGTID     string
-	Checkpoint    Checkpoint
-	Order         []string
-	Rows          []Row
+	Flavor     string
+	StartGTID  string
+	Checkpoint Checkpoint
+	Order      []string
+	Rows       []Row
+	// NoCatalog says there is no catalog at all (standalone without meta):
+	// a segment without a row is then not I6_MISSING_ROW.
+	NoCatalog     bool
 	Local         *binlog.Ledger
 	Objects       map[string]int64
 	ObjectStorage bool
@@ -79,20 +84,24 @@ const (
 	I3StoredHole       Kind = "I3_STORED_HOLE"
 	I3LegacyFailback   Kind = "I3_LEGACY_FAILBACK"
 	I4Overlap          Kind = "I4_OVERLAP"
-	I5CheckpointAhead  Kind = "I5_CHECKPOINT_AHEAD"
-	I6MissingLocal     Kind = "I6_MISSING_LOCAL"
-	I6MissingObject    Kind = "I6_MISSING_OBJECT"
-	I6OrphanRow        Kind = "I6_ORPHAN_ROW"
-	I6MissingRow       Kind = "I6_MISSING_ROW"
-	I6SizeMismatch     Kind = "I6_SIZE_MISMATCH"
-	I7UploadLate       Kind = "I7_UPLOAD_LATE"
-	I7Unverified       Kind = "I7_UNVERIFIED"
+	// I4EmptyLeftover: an open file with only the magic, only a header, or
+	// less than one event header and no complete event (#357). INFO, never a
+	// verdict, never cuts replay.
+	I4EmptyLeftover   Kind = "I4_EMPTY_LEFTOVER"
+	I5CheckpointAhead Kind = "I5_CHECKPOINT_AHEAD"
+	I6MissingLocal    Kind = "I6_MISSING_LOCAL"
+	I6MissingObject   Kind = "I6_MISSING_OBJECT"
+	I6OrphanRow       Kind = "I6_ORPHAN_ROW"
+	I6MissingRow      Kind = "I6_MISSING_ROW"
+	I6SizeMismatch    Kind = "I6_SIZE_MISMATCH"
+	I7UploadLate      Kind = "I7_UPLOAD_LATE"
+	I7Unverified      Kind = "I7_UNVERIFIED"
 )
 
 // AllKinds lists every Kind.
 func AllKinds() []Kind {
 	return []Kind{I1Regression, I1Unreadable, I2IndexGap, I2SwitchUnrecorded, I2OrderInvalid, I3GTIDHole, I3StoredHole, I3LegacyFailback,
-		I4Overlap, I5CheckpointAhead, I6MissingLocal, I6MissingObject, I6OrphanRow, I6MissingRow,
+		I4Overlap, I4EmptyLeftover, I5CheckpointAhead, I6MissingLocal, I6MissingObject, I6OrphanRow, I6MissingRow,
 		I6SizeMismatch, I7UploadLate, I7Unverified}
 }
 
@@ -230,7 +239,12 @@ func (c *Chain) Check(now time.Time) []Violation {
 			unrecorded[id] = true
 			add(I2SwitchUnrecorded, id, fmt.Sprintf("segment %s is from server %s but no source switch to it is recorded", seg.Name, id), seg.Name)
 		}
-		// I4: the same source file sealed twice on the chain.
+		// I4: an empty leftover open file (#357) is INFO and takes no part in I4.
+		if c.emptyLeftover(segs, i) {
+			detail := "open segment " + seg.Name + " holds no complete event; it is a leftover and replay is not cut for it"
+			add(I4EmptyLeftover, seg.Name, detail, seg.Name)
+		}
+		// I4: the same source file twice on the chain (sealed or open copies).
 		if oi, ok := repeats[i]; ok {
 			other := &segs[oi]
 			add(I4Overlap, other.Name+" "+seg.Name, sealedTwiceDetail(other, seg), seg.Name, other.Name)
@@ -307,8 +321,26 @@ func (c *Chain) Check(now time.Time) []Violation {
 	return out
 }
 
-// sealedRepeats maps the chain position of each sealed segment that repeats
-// an earlier sealed segment of the same source file (I4) to the position of
+// emptyLeftover: a local open segment with only the magic, only header
+// events, or fewer bytes than the magic plus one event header and no
+// complete event (#357, SEGMENT_EMPTY_LEFTOVER). The last segment on the
+// order is the live open file right after a rotate, never a leftover.
+func (c *Chain) emptyLeftover(segs []Segment, i int) bool {
+	seg := &segs[i]
+	if !seg.Named.Open || !seg.Local || c.in.Local == nil || i == len(segs)-1 {
+		return false
+	}
+	if seg.LocalSize < 4+19 {
+		return true
+	}
+	if seg.Contents != nil && (!seg.Contents.GTIDs.IsEmpty() || len(seg.Contents.Log.Events) > 0) {
+		return false
+	}
+	return binlog.PreambleOnly(filepath.Join(c.in.Local.Dir(), seg.Name))
+}
+
+// sealedRepeats maps the chain position of each segment that repeats an
+// earlier segment of the same source file (I4) to the position of
 // the first such earlier segment. Epochs of one source file that continue
 // each other are not a repeat; only a pair that cannot be told apart, or
 // whose GTIDs (MySQL) or event positions overlap, is. A non-nil counts
@@ -319,12 +351,18 @@ func (c *Chain) sealedRepeats(segs []Segment, counts func(earlier, later *Segmen
 	for i := range segs {
 		seg := &segs[i]
 		prefix, ok := sourcePrefix(seg.Named.Source)
-		if seg.Named.Open || !ok {
+		// P2-3: open copies count too (#372 openstale/openhand), except an
+		// empty leftover, which holds nothing to apply twice.
+		if !ok || c.emptyLeftover(segs, i) {
 			continue
 		}
 		key := fmt.Sprintf("%s\x00%d", prefix, seg.Named.Seq)
 		for _, oi := range seen[key] {
-			if (counts == nil || counts(&segs[oi], seg)) && c.sameBytesSpan(&segs[oi], seg) {
+			same := c.sameBytesSpan
+			if segs[oi].Named.Open || seg.Named.Open {
+				same = c.sameOpenCopy // P2-3: an open copy counts only when it holds the same content
+			}
+			if (counts == nil || counts(&segs[oi], seg)) && same(&segs[oi], seg) {
 				out[i] = oi
 				break
 			}
@@ -362,12 +400,76 @@ func (c *Chain) sameBytesSpan(a, b *Segment) bool {
 	return as < be && bs < ae
 }
 
+// sameOpenCopy reports that a pair with an open member holds the same
+// content (#372 openstale/openhand): their GTIDs intersect (MySQL, both
+// sides with GTIDs), or one file's bytes are a prefix of the other's. An
+// open file of a later epoch that continues the sealed one is not a copy.
+func (c *Chain) sameOpenCopy(a, b *Segment) bool {
+	if a.Contents != nil && b.Contents != nil && c.mysql() && !a.Contents.GTIDs.IsEmpty() && !b.Contents.GTIDs.IsEmpty() {
+		both := a.Contents.GTIDs.Minus(a.Contents.GTIDs.Minus(b.Contents.GTIDs))
+		return !both.IsEmpty()
+	}
+	if c.in.Local == nil || !a.Local || !b.Local {
+		return false
+	}
+	return bytePrefix(filepath.Join(c.in.Local.Dir(), a.Name), filepath.Join(c.in.Local.Dir(), b.Name))
+}
+
+// bytePrefix: the shorter file's bytes are the start of the longer one.
+// minCopyBytes is the magic plus one v4 event header.
+const minCopyBytes = 4 + 19
+
+var binlogMagic = []byte{0xfe, 'b', 'i', 'n'}
+
+func bytePrefix(pa, pb string) bool {
+	fa, err := os.Open(pa)
+	if err != nil {
+		return false
+	}
+	defer fa.Close()
+	fb, err := os.Open(pb)
+	if err != nil {
+		return false
+	}
+	defer fb.Close()
+	// Both files must hold the magic and at least one event header: anything
+	// shorter is an empty leftover or not a binlog, never a copy.
+	for _, f := range []*os.File{fa, fb} {
+		st, err := f.Stat()
+		if err != nil || st.Size() < minCopyBytes {
+			return false
+		}
+	}
+	magic := make([]byte, 4)
+	if _, err := fa.ReadAt(magic, 0); err != nil || !bytes.Equal(magic, binlogMagic) {
+		return false
+	}
+	ba, bb := make([]byte, 64<<10), make([]byte, 64<<10)
+	for {
+		na, ea := io.ReadFull(fa, ba)
+		nb, eb := io.ReadFull(fb, bb)
+		n := na
+		if nb < n {
+			n = nb
+		}
+		if !bytes.Equal(ba[:n], bb[:n]) {
+			return false
+		}
+		if ea != nil || eb != nil {
+			return n > 0 || (na == 0 && nb == 0)
+		}
+	}
+}
+
 // checkCopies is I6 and I7 for one segment.
 func (c *Chain) checkCopies(seg *Segment, now time.Time, add func(Kind, string, string, ...string)) {
 	if seg.Named.Open {
 		return
 	}
 	row := seg.Row
+	if row == nil && c.in.NoCatalog {
+		return
+	}
 	if row == nil {
 		if seg.Local {
 			add(I6MissingRow, seg.Name, fmt.Sprintf("sealed segment %s has no catalog row", seg.Name), seg.Name)

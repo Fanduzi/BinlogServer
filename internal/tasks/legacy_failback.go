@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -799,6 +800,9 @@ func withDiskSealFacts(row *BinlogFile) {
 	if facts.HasSpan {
 		first, last := facts.First, facts.Last
 		row.FirstEventAt, row.LastEventAt = &first, &last
+	}
+	if err := binlog.RecordSealFacts(row.FilePath, facts); err != nil {
+		log.Printf("seal checksum ledger task=%s file=%s: %v", row.TaskID, row.FilePath, err)
 	}
 }
 

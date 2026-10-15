@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -16,12 +16,14 @@ import (
 
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
+	"binlog_server/internal/tasks"
 
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 var _ healthstore.Store = (*MySQLTaskStore)(nil)
 var _ healthstore.TransitionLister = (*MySQLTaskStore)(nil)
+var _ tasks.RehashCursorStore = (*MySQLTaskStore)(nil)
 
 // openFindingsPage is the keyset page size of ListOpenFindingsForTask.
 const openFindingsPage = 1000
@@ -322,4 +324,31 @@ func upsertWithAlias(version string) bool {
 		return minor > 0 || patch >= 20
 	}
 	return false
+}
+
+// LoadRehashCursor implements tasks.RehashCursorStore: the one rehash_cursor
+// row, ("", "") when there is none yet.
+func (s *MySQLTaskStore) LoadRehashCursor(ctx context.Context) (string, string, error) {
+	var task, seg string
+	err := s.db.QueryRowContext(ctx, "SELECT task_id, segment FROM rehash_cursor WHERE id = 1").Scan(&task, &seg)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	return task, seg, healthErr(err)
+}
+
+// SaveRehashCursor implements tasks.RehashCursorStore.
+func (s *MySQLTaskStore) SaveRehashCursor(ctx context.Context, taskID, segment string) error {
+	alias, err := s.useAlias(ctx)
+	if err != nil {
+		return err
+	}
+	q := "INSERT INTO rehash_cursor (id, task_id, segment, updated_at) VALUES (1, ?, ?, NOW(6)) " +
+		"ON DUPLICATE KEY UPDATE task_id = VALUES(task_id), segment = VALUES(segment), updated_at = VALUES(updated_at)"
+	if alias {
+		q = "INSERT INTO rehash_cursor (id, task_id, segment, updated_at) VALUES (1, ?, ?, NOW(6)) AS new " +
+			"ON DUPLICATE KEY UPDATE task_id = new.task_id, segment = new.segment, updated_at = new.updated_at"
+	}
+	_, err = s.db.ExecContext(ctx, q, taskID, segment)
+	return healthErr(err)
 }

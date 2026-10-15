@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task, the checkpoint gtid_set it claims (or "" when the caller does not need the missing set), the scheduler data directory and the task's source-switch events
-// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), unreadable (a sealed segment with a corrupt event size; reported as a SEGMENT_UNREADABLE finding), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go), or a sealed source file held twice in the directory (a SEGMENT_OVERLAP finding, #370); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning
+// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), unreadable (a sealed segment with a corrupt event size; reported as a SEGMENT_UNREADABLE finding), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go), or a sealed source file held twice in the directory (a SEGMENT_OVERLAP finding, #370); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning; the two managed kinds are reported only while the health evaluator does not own them (reportUnmanaged, P2-3), and markHealthDirty is the trigger entry for the evaluator
 // pos: adapter over assurance.Chain.Health (ADR 0009 phase 1, P1-3): tasks supplies the ledger, checkpoint, start set, the replay order (SelectReplayFiles over ListFiles, for I4) and its planners (legacy failback, then stored hole) as lazy Plan; list/get alerts, /replay, /window and the replay warning all ask it; the replay cut is assurance.KeepBefore
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -82,12 +82,32 @@ func (s *Scheduler) storageHealth(task Task, checkpointGTID string) StorageHealt
 		kind = StorageStoredHole
 	case assurance.I1Unreadable:
 		kind = StorageUnreadable
-		s.Report(Finding{TaskID: task.ID, Kind: FindingSegmentUnreadable, Subject: v.Problem.Segment, Severity: FindingCritical, Detail: v.Problem.Message})
+		s.reportUnmanaged(Finding{TaskID: task.ID, Kind: FindingSegmentUnreadable, Subject: v.Problem.Segment, Severity: FindingCritical, Detail: v.Problem.Message})
 	case assurance.I4Overlap:
 		kind = StorageOverlap
-		s.Report(Finding{TaskID: task.ID, Kind: FindingSegmentOverlap, Subject: v.Problem.Segment, Severity: FindingCritical, Detail: v.Problem.Message})
+		s.reportUnmanaged(Finding{TaskID: task.ID, Kind: FindingSegmentOverlap, Subject: v.Problem.Segment, Severity: FindingCritical, Detail: v.Problem.Message})
 	}
 	return StorageHealth{Kind: kind, Problem: *v.Problem}
+}
+
+// reportUnmanaged is the legacy Report for a kind the health evaluator
+// manages since P2-3: it writes only while the evaluator does not own the
+// kind (off, shadow, or a store without migration 000009), so a row has one
+// writer (design §5.6).
+func (s *Scheduler) reportUnmanaged(f Finding) {
+	if s.healthEval.Load().ownsManaged() {
+		return
+	}
+	s.Report(f)
+}
+
+// markHealthDirty tells the evaluator, when there is one, that the task's
+// facts changed. Never blocks; safe with s.mu held.
+func (s *Scheduler) markHealthDirty(taskID string, r EvalReason) {
+	if s == nil {
+		return
+	}
+	s.healthEval.Load().MarkDirty(taskID, r)
 }
 
 // replayOrder is the base names of the segments /replay would return for

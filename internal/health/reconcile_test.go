@@ -270,14 +270,29 @@ func TestHealthOf(t *testing.T) {
 	}
 }
 
+var wantManagedP23 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true}
+
+func TestEmptyLeftoverDerivesFromChain(t *testing.T) {
+	f := &Facts{TaskID: "t", Complete: map[Scope]bool{ScopeChainLocal: true},
+		Chain: &ChainFacts{Violations: []assurance.Violation{{Kind: assurance.I4EmptyLeftover, Segments: []string{"mysql-bin.000002.open.e3"}, Detail: "empty"}}}}
+	d := DefaultRegistry().Desire(f)
+	in, ok := d[Key{TaskID: "t", Kind: SegmentEmptyLeftover, Subject: "mysql-bin.000002.open.e3"}]
+	if !ok || in.Severity != Info {
+		t.Fatalf("desired %+v", d)
+	}
+	if h := DefaultRegistry().HealthOf([]Finding{{TaskID: "t", Kind: SegmentEmptyLeftover, Subject: "x", Severity: Info}}, f); h.Status != StatusHealthy {
+		t.Fatalf("INFO leftover made the task %s", h.Status)
+	}
+}
+
 func TestRegistryComplete(t *testing.T) {
 	reg := DefaultRegistry()
 	for k, spec := range reg {
 		if spec.Kind != k || spec.Severity == "" || len(spec.Scopes) == 0 || spec.Clear.Invariant == "" || spec.Clear.Text == "" || spec.Version < 1 {
 			t.Errorf("incomplete spec %s: %+v", k, spec)
 		}
-		if spec.Managed {
-			t.Errorf("%s is managed in P2-1; kinds are taken over one PR at a time", k)
+		if want := wantManagedP23[k]; spec.Managed != want {
+			t.Errorf("%s managed=%v; P2-3 takes over exactly SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER", k, spec.Managed)
 		}
 	}
 	for _, k := range LegacyKinds() {

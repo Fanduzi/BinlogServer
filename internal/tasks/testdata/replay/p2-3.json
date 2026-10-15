@@ -1,0 +1,69 @@
+{
+  "empty-open-e3-leftover": {
+    "health": {
+      "kind": 0,
+      "problem": {
+        "Message": "",
+        "Segment": "",
+        "Detail": "",
+        "Missing": "",
+        "Valid": null,
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005",
+        "$DATA/1/mysql-bin.000006",
+        "$DATA/1/mysql-bin.000007.open.e1"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1"
+    }
+  },
+  "open-e4-equals-sealed-e5": {
+    "health": {
+      "kind": 5,
+      "problem": {
+        "Message": "Source file mysql-bin.000006 is stored twice: mysql-bin.000006.open.e4 and mysql-bin.000006.sealed.e5 hold the same events, or one of them cannot be read. A restore over both would apply the same transactions twice or fail on the bad copy, so replay and the recovery window stop before them, and they and every later segment are left out. Keep the copy that matches the catalog row or object storage, move the other out of the task directory, and the window comes back.",
+        "Segment": "mysql-bin.000006.sealed.e5",
+        "Detail": "Source file mysql-bin.000006 is stored twice: mysql-bin.000006.open.e4 and mysql-bin.000006.sealed.e5 hold the same events, or one of them cannot be read.",
+        "Missing": "",
+        "Valid": [
+          "mysql-bin.000003",
+          "mysql-bin.000004",
+          "mysql-bin.000005"
+        ],
+        "Restart": ""
+      }
+    },
+    "replay_end": {
+      "flavor": "mysql",
+      "client": "mysqlbinlog",
+      "client_hint": "MySQL mysqlbinlog",
+      "paths": [
+        "$DATA/1/mysql-bin.000003",
+        "$DATA/1/mysql-bin.000004",
+        "$DATA/1/mysql-bin.000005"
+      ],
+      "locations": [
+        "local",
+        "local",
+        "local"
+      ],
+      "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005",
+      "warning": "Source file mysql-bin.000006 is stored twice: mysql-bin.000006.open.e4 and mysql-bin.000006.sealed.e5 hold the same events, or one of them cannot be read. A restore over both would apply the same transactions twice or fail on the bad copy, so replay and the recovery window stop before them, and they and every later segment are left out. Keep the copy that matches the catalog row or object storage, move the other out of the task directory, and the window comes back. (STORAGE_INCONSISTENT)"
+    }
+  }
+}

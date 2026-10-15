@@ -699,3 +699,24 @@ R2-1 至 R2-7 与第 2 轮 P3 全部关闭；D1–D5 同意。
 | P2 维护窗口抑制事实、无存储无审计、与 mute 重叠 | 删除维护窗口；改为任务级 mute（`kind=*`，≤24h，源恢复自动 END_EARLY）；与 key 级 mute（7d）共用 API 与 `task_mutes` 表；MUTE/RENEW/EXPIRE/END_EARLY 带 reason/actor 入 `finding_transitions`；`_notify` 持有者判断，换 owner 不影响；`task_muted` 指标与 `unless` 规则；健康/finding/预检照实 | §6、§7.1–7.4、§9、D3a、P2-4/P2-7/P2-9 QA |
 | P3 `rehash_cursor` 按任务存 | 改为单行表 `rehash_cursor` | §5.7、§9 |
 | P3 standalone `node_id` 来源与迁移 | `{data_dir}/.node_id` 持久化 id；显式 `health takeover` 命令/API | §8、P2-7 QA |
+
+## 17. P2-3 实现说明（2026-10-15）
+
+P2-3 按 §5、§5.7、§6 落地（`internal/tasks/evaluator.go`、`rehash.go`，`health.evaluator` 默认 `off`）。与正文的差异和留给后续 PR 的部分：
+
+- **open 副本的 I4 判定只认「内容相同」**：GTID 相交（MySQL，两边都有 GTID），或一个文件的字节是另一个的前缀（#372 openstale/openhand；两边都要有 binlog magic 且不短于 23 字节）。正文写的「区间相交也算」对 sealed↔sealed 保持不变；对含 open 的一对不采用位点区间相交，因为阶段 1 的回放用例里，新 epoch 的 open 段与 sealed 段在合成数据上位点从 4 起算，按区间会被误判并截断 `/replay`，违反 §13「除 open≡sealed 那条 golden 外不改变 /replay 字节」。
+- **空残留**不包括 replay 顺序上的最后一段：轮转后刚开的 open 文件只有头事件，它是正在写的段，不是残留。
+- **新增 golden** 放在 `internal/tasks/testdata/replay/p2-3.json`（open≡sealed、#357 空残留），阶段 1 的 golden 不变。
+- **性能**：评估路径不哈希；目录指纹与 replay 顺序不变时复用上一轮 `Check` 结论，`SegmentPositions` 与单段损坏检查按大小+mtime 缓存。1500 段热路径一轮约 3–4ms，冷启动一轮约 40ms。
+- **standalone 无 meta**：评估器写 `.health.json`；`.findings.json` 里旧版本写下的 Managed 行并入评估器的 open 集合，关闭时同时在旧文件里关闭；`/api/findings` 合并评估器的 open 行。
+- **meta 缺 000009**：`ApplyTransitions` 返回 `ErrSchemaAbsent` 时旧 `Report` 路径继续写 Managed kind（不出现无人写的窗口），下一次写成功后评估器重新接管。
+- **留给后续 PR**：`_health` 代写与委派（P2-6，集群模式下 P2-3 只评估本节点持有 lease 的任务）；`health_eval_*` 指标与 `POST /api/tasks/{id}/health/evaluate`（P2-7）；`health takeover`（P2-7）；QA 中「100 任务时源延迟不升高」需要 e2e 环境，P2-3 只以单元测试证明复核带宽在预算 ±10% 内。BinlogServerQA 对 #378 的四条 P3 记在 #379。
+
+### 17.1 QA 第一轮（#380 @ba1bd375）后的修正
+
+- **复核器真正读字节**：预期校验和来自目录行的 000008 `sha256`（`ListSealedChecksums`，缺列时为空）；没有时来自任务目录的 `.seal-sha256` 账本，由封存时的 `withSealFacts`（以及 legacy failback 重写）追加。当前大小不等于封存时大小的段计 unavailable，交给链自己的检查。一个周期是一次目标快照，每步不再列目录行。
+- **「不可读」只有一个定义**：封存段的读法（`ReadSealedSegmentContents` / 账本的 sealed 检查）在格式描述标明 CRC32 时校验每个事件的 CRC32，事件 size 小于头或事件体读不全也算不可读；`/window`、`/replay` 和链的 I1 都走这个读法。段中间写 0x3f 或 0xff 时，`/window` 的「不可读」与 SEGMENT_UNREADABLE 同时出现或同时不出现。
+- **缓存与指纹带 ctime**：账本内容、封存损坏、损坏检查、`SegmentPositions` 的缓存和评估器的目录指纹按大小+mtime+ctime 判定，`touch -r` 式的原地改写会重新读；缓存有上限。真正的位翻转不改 ctime，由复核器发现。
+- **有 meta 时的链顺序**：目录行与磁盘列表对账，磁盘上没有行的段（手工放进来的 `.sealed.e3`）进入顺序，是 I4 证据；目录行传给链，登记过的段不再报 I6_MISSING_ROW。无 meta 时不判 I6_MISSING_ROW（`NoCatalog`）。I6 在 P2-5 前仍不是 Managed kind。
+- **半截 `.open.e3` 的「误关闭」**：不是评估器的问题。运行中的任务每次打开新文件时 `cleanupStaleOpenFiles` 会删掉其它 epoch 的 open 文件，所以在高频轮转（256KiB binlog）的 RUNNING 任务上，手工放的 `.open.e3` 几秒内就被删掉，CLOSE 是真实的；STOPPED 任务上它一直 open。`TestEvaluator_HalfOpenCopyStaysOpen` 固定了「文件在就一直 open」。
+- 仍未做（P3，可选）：只有 magic+FDE 的残留不标 SEGMENT_EMPTY_LEFTOVER；无 meta 时任务的 `open_findings` 不含评估器的行。

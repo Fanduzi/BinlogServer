@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a SEALED tasks.BinlogFile that carries seal facts (first/last event time, sha256), or asks to reset them
-// output: the facts written to binlog_files (migration 000008) after the row upsert; on a catalog without the columns (MySQL 1054) the write is skipped and remembered, so schema 6 and 7 keep working
+// output: the facts written to binlog_files (migration 000008) after the row upsert; on a catalog without the columns (MySQL 1054) the write is skipped and remembered, so schema 6 and 7 keep working; ListSealedChecksums reads the sha256 of each sealed row back for the health rehasher (P2-3), empty on schema 6 and 7
 // pos: ADR 0009 phase 1, P1-4; the schema floor stays 6
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -52,4 +52,38 @@ func (s *MySQLTaskStore) writeSealFacts(ctx context.Context, f tasks.BinlogFile)
 func isMySQLUnknownColumnError(err error) bool {
 	var mysqlErr *mysqlDriver.MySQLError
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1054
+}
+
+// listSealedChecksumsSQL is the sha256 recorded at seal for each sealed row
+// of one task, the health rehasher's expected checksum (ADR 0009 P2-3).
+const listSealedChecksumsSQL = `
+SELECT file_name, epoch, size_bytes, sha256 FROM binlog_files
+WHERE task_id = ? AND state = 'SEALED' AND sha256 IS NOT NULL AND sha256 <> ''
+`
+
+// ListSealedChecksums returns the sealed rows of taskID that carry a sha256,
+// with FileName, Epoch, SizeBytes and SHA256 set. Without migration 000008
+// it returns nothing, like the seal fact writes.
+func (s *MySQLTaskStore) ListSealedChecksums(ctx context.Context, taskID string) ([]tasks.BinlogFile, error) {
+	if s.sealFactsAbsent.Load() {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, listSealedChecksumsSQL, taskID)
+	if isMySQLUnknownColumnError(err) {
+		s.sealFactsAbsent.Store(true)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []tasks.BinlogFile
+	for rows.Next() {
+		f := tasks.BinlogFile{TaskID: taskID, State: "SEALED"}
+		if err := rows.Scan(&f.FileName, &f.Epoch, &f.SizeBytes, &f.SHA256); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }

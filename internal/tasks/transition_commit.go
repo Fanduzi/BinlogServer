@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the next task row an operator action (Create, Start, Stop, Delete, Update, Adopt, Configure*) wants, the state it moves to, and the event that records it
-// output: commitTransitionLocked and commitDeleteLocked, the only way an operator action changes a task: the store write happens first and memory, events and the dump are touched only after it lands; a refused write leaves memory, the stored row and findings as they were, records a *_REJECTED event, and returns ErrTransitionNotRecorded
+// output: commitTransitionLocked and commitDeleteLocked, the only way an operator action changes a task: the store write happens first and memory, events and the dump are touched only after it lands; a refused write leaves memory, the stored row and findings as they were, records a *_REJECTED event, and returns ErrTransitionNotRecorded; every commit marks the task dirty for the health evaluator (TRANSITION)
 // pos: tip 53a9 dogfood P1 (Start in RETRY_BACKOFF on read-only meta left a STARTING zombie) and #336 (Stop zombie); lintguard's task-state test keeps every operator path on these helpers
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -33,6 +33,7 @@ type transitionRecord struct {
 func (s *Scheduler) commitTransitionLocked(next Task, to State, rec transitionRecord) error {
 	next.State = to
 	id := next.ID
+	s.markHealthDirty(id, ReasonTransition)
 	if s.store == nil {
 		s.tasks[id] = next
 		s.appendEventLocked(id, rec.Type, rec.Message, rec.Detail)

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: lease renew ticks and lease manager renew responses/errors
-// output: lease renewal decisions delegated to centralized lifecycle transitions; a lost lease whose row has a new owner or newer epoch stops the dump and yields in memory without writing the row (#346)
+// output: lease renewal decisions delegated to centralized lifecycle transitions; a lost lease whose row has a new owner or newer epoch stops the dump and yields in memory without writing the row (#346); the renew loop start marks LEASE_ACQUIRED and a yield marks LEASE_LOST for the health evaluator
 // pos: scheduler cluster lease-maintenance loop separated from transition recipes
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -23,6 +23,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		}
 	}()
 
+	s.markHealthDirty(id, ReasonLeaseAcquired) // the holder evaluates its task (design §5.2)
 	ticker := time.NewTicker(s.leaseRenewInterval)
 	defer ticker.Stop()
 
@@ -91,6 +92,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 // yieldLostLeaseLocked stops this worker's run after its lease epoch was lost.
 // Only memory changes; the task row belongs to the new owner. Caller holds s.mu.
 func (s *Scheduler) yieldLostLeaseLocked(id string, epoch int64) {
+	s.markHealthDirty(id, ReasonLeaseLost)
 	task, ok := s.tasks[id]
 	if !ok {
 		return

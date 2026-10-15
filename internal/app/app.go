@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -28,6 +28,7 @@ import (
 
 	"binlog_server/internal/api"
 	"binlog_server/internal/config"
+	"binlog_server/internal/healthstore"
 	"binlog_server/internal/meta"
 	"binlog_server/internal/replication"
 	"binlog_server/internal/tasks"
@@ -310,6 +311,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	// ADR 0009: one writer for findings; retries failed writes and task rows.
 	scheduler.StartFindingSink(runCtx, 5*time.Second)
+	if err := startHealthEvaluator(runCtx, a.cfg, scheduler, mysqlStore, resolvedWorkerID); err != nil {
+		return err
+	}
 	if workerEnabled {
 		// 将 runner 进度回传给 scheduler，供 API/状态机读取。
 		runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))
@@ -1059,4 +1063,45 @@ func isNonNilInterface(v any) bool {
 	default:
 		return true
 	}
+}
+
+// startHealthEvaluator wires the ADR 0009 phase 2 evaluator and rehasher
+// (P2-3) when health.evaluator is shadow or on. Meta mode writes through
+// the metadata store (migration 000009; without it the legacy finding path
+// keeps the managed kinds); standalone writes {data_dir}/.health.json. The
+// fence is the task lease in cluster mode, else the persisted node id.
+func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tasks.Scheduler, metaStore appMetaStore, workerID string) error {
+	mode, err := tasks.ParseEvaluatorMode(cfg.Health.Evaluator)
+	if err != nil {
+		return err
+	}
+	if mode == tasks.EvaluatorOff {
+		return nil
+	}
+	ecfg := tasks.EvaluatorConfig{Mode: mode, Sweep: time.Duration(cfg.Health.SweepIntervalSec) * time.Second, Cluster: isClusterMode(cfg)}
+	if ecfg.Instance, err = tasks.RandomID(); err != nil {
+		return err
+	}
+	if metaStore != nil {
+		hs, ok := metaStore.(healthstore.Store)
+		if !ok {
+			return fmt.Errorf("health.evaluator=%s: the metadata store has no health store", mode)
+		}
+		ecfg.Store = hs
+		if cs, ok := metaStore.(tasks.RehashCursorStore); ok {
+			ecfg.RehashCursor = cs
+		}
+	} else {
+		ecfg.Store = healthstore.NewFileStore(filepath.Join(cfg.DataDir, healthstore.HealthFileName))
+	}
+	if ecfg.Cluster {
+		ecfg.NodeID = workerID
+	} else if ecfg.NodeID, err = tasks.LoadOrCreateNodeID(cfg.DataDir); err != nil {
+		return fmt.Errorf("health node id: %w", err)
+	}
+	e := tasks.NewEvaluator(scheduler, ecfg)
+	go e.Run(ctx)
+	go tasks.NewRehasher(e, cfg.Health.RehashBytesPerSec).Run(ctx)
+	log.Printf("health evaluator %s (sweep %s, rehash %d B/s, node %s)", mode, ecfg.Sweep, cfg.Health.RehashBytesPerSec, ecfg.NodeID)
+	return nil
 }
