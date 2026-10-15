@@ -115,6 +115,9 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			case want.Severity != o.Severity || want.Detail != o.Detail || want.Evidence != o.Evidence || strings.Join(want.Segments, "\x00") != strings.Join(o.Segments, "\x00"):
 				op = OpUpdate
 			}
+			if (op == OpUpdate || op == OpDowngrade) && !f.allComplete(spec.Scopes) {
+				op = "" // a pass missing one of the kind's scopes may raise severity, never rewrite or lower it
+			}
 			if op != "" {
 				out = append(out, Transition{Key: key, Op: op, Reason: ReasonEval, At: f.Now, FactAt: factAt(want, f), KindVersion: spec.Version, Instance: want})
 			}

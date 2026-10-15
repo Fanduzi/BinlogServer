@@ -155,18 +155,21 @@ func DefaultRegistry() Registry {
 }
 
 // CanonicalGTIDRanges normalizes a waiver's GTID range list (design §7.1).
-// Input: MySQL sets "uuid:a-b[:c-d...]" (single points allowed) and
+// Input: MySQL sets "uuid:a-b[:c-d...]" (hex uuid, single points allowed,
+// MySQL 8.4 tags "uuid:tag:a-b" applying to the intervals after them) and
 // MariaDB GTIDs "domain-server-seq" or ranges "domain-server:a-b",
 // comma separated; one flavor per string. Canonical form: one
 // "uuid:a-b" (lowercase uuid) or "domain-server:a-b" (decimal) per merged
-// interval, sorted by uuid, or by domain then server numerically, intervals
+// interval, tagged ones as "uuid:tag:a-b" (lowercase tag), sorted by uuid
+// then tag (untagged first), or by domain then server numerically, intervals
 // ascending, adjacent or overlapping intervals merged, single points as
 // a-a, joined by commas with no spaces. "" stays "".
 func CanonicalGTIDRanges(s string) (string, error) {
 	type rng struct{ a, b uint64 }
 	type src struct {
-		name   string
-		d, srv uint64
+		name      string
+		uuid, tag string
+		d, srv    uint64
 	}
 	by := map[src][]rng{}
 	flavor := ""
@@ -197,20 +200,41 @@ func CanonicalGTIDRanges(s string) (string, error) {
 		fields := strings.Split(part, ":")
 		head := strings.TrimSpace(fields[0])
 		if dash := strings.Split(head, "-"); len(dash) == 5 {
-			// MySQL: uuid:interval[:interval...]
-			if len(fields) < 2 || len(head) != 36 {
-				return "", fmt.Errorf("gtid set %q: want uuid:a-b[:c-d...]", part)
+			// MySQL: uuid:interval[:interval...], with MySQL 8.4 tags
+			// (uuid:tag:interval...) applying to the intervals after them.
+			if len(fields) < 2 || !isUUID(head) {
+				return "", fmt.Errorf("gtid set %q: want uuid:a-b[:c-d...] with a hex uuid", part)
 			}
 			if err := setFlavor("mysql", part); err != nil {
 				return "", err
 			}
-			key := src{name: strings.ToLower(head)}
-			for _, span := range fields[1:] {
-				rg, err := parseRange(span, part)
+			uuid, tag, pendingTag := strings.ToLower(head), "", false
+			for _, field := range fields[1:] {
+				field = strings.TrimSpace(field)
+				if field != "" && !isDigit(field[0]) {
+					if !isGTIDTag(field) {
+						return "", fmt.Errorf("gtid set %q: tag %q must match [a-z_][a-z0-9_]{0,31}", part, field)
+					}
+					if pendingTag {
+						return "", fmt.Errorf("gtid set %q: tag with no interval", part)
+					}
+					tag, pendingTag = strings.ToLower(field), true
+					continue
+				}
+				rg, err := parseRange(field, part)
 				if err != nil {
 					return "", err
 				}
+				name := uuid
+				if tag != "" {
+					name = uuid + ":" + tag
+				}
+				key := src{name: name, uuid: uuid, tag: tag}
 				by[key] = append(by[key], rg)
+				pendingTag = false
+			}
+			if pendingTag {
+				return "", fmt.Errorf("gtid set %q: tag with no interval", part)
 			}
 			continue
 		}
@@ -260,7 +284,10 @@ func CanonicalGTIDRanges(s string) (string, error) {
 			}
 			return keys[i].srv < keys[j].srv
 		}
-		return keys[i].name < keys[j].name
+		if keys[i].uuid != keys[j].uuid {
+			return keys[i].uuid < keys[j].uuid
+		}
+		return keys[i].tag < keys[j].tag
 	})
 	var out []string
 	for _, k := range keys {
@@ -281,4 +308,42 @@ func CanonicalGTIDRanges(s string) (string, error) {
 		flush()
 	}
 	return strings.Join(out, ","), nil
+}
+
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
+
+// isUUID: 8-4-4-4-12 hex digits.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isGTIDTag: a MySQL 8.4 GTID tag, [a-z_][a-z0-9_]{0,31}, case-insensitive.
+func isGTIDTag(s string) bool {
+	if len(s) == 0 || len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i] | 0x20
+		if s[i] == '_' || (c >= 'a' && c <= 'z') || (i > 0 && isDigit(s[i])) {
+			continue
+		}
+		return false
+	}
+	return true
 }
