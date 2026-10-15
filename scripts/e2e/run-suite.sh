@@ -22,7 +22,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart
+  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -58,6 +58,7 @@ Scenarios:
   smoke-fail-alert
   smoke-scale
   smoke-standalone-restart
+  smoke-standalone-full-disk
 EOF
 }
 
@@ -102,7 +103,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart"
+      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -151,7 +152,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk)
       return 0
       ;;
     *)
@@ -214,6 +215,10 @@ run_scenario() {
     smoke-standalone-restart)
       # Own containers (MySQL 8.0, MariaDB 11.4) and its own server on 18090.
       "$ROOT_DIR/scripts/e2e/smoke-standalone-restart.sh"
+      ;;
+    smoke-standalone-full-disk)
+      # A 30MB tmpfs data_dir (sudo mount; skips without it), server on 18112.
+      "$ROOT_DIR/scripts/e2e/smoke-standalone-full-disk.sh"
       ;;
     smoke-gtid-purge)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"

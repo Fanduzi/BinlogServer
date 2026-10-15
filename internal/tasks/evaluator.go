@@ -665,8 +665,22 @@ func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) 
 		return nil, nil, time.Time{}
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	all := make(map[string]unsavedHealth, len(e.unsaved))
 	for id, u := range e.unsaved {
+		all[id] = u
+	}
+	e.mu.Unlock()
+	for id, u := range all {
+		if id != ClusterFindingTask && e.s != nil {
+			if _, gerr := e.s.GetTask(id); gerr != nil {
+				// The task is gone (or was never created: a refused create
+				// still marks its id dirty); nothing will write its row again.
+				e.mu.Lock()
+				delete(e.unsaved, id)
+				e.mu.Unlock()
+				continue
+			}
+		}
 		ids = append(ids, id)
 		if err == nil || u.since.Before(since) {
 			err, since = u.err, u.since
