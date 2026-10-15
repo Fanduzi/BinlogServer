@@ -38,5 +38,6 @@ func NewRootCommand() *cobra.Command {
 	root.Flags().StringVar(&encryptionKey, "encryption-key", "", "AES-256 key (32 bytes) for enc:aes256: config values and source passwords in meta")
 	root.Flags().BoolVar(&versionOnly, "version", false, "Print version and exit")
 	root.AddCommand(newVersionCommand())
+	root.AddCommand(newTaskKeyCommand())
 	return root
 }

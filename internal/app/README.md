@@ -3,6 +3,8 @@
 ## Files
 - `app.go`: 应用主流程与运行时装配。Restore 之前先对齐遗留 `desired_run`。worker 启动、认领任务之前，删掉 data_dir 下每个任务目录里崩溃留下的 `.takeover-*`；本进程正在写的那份不删。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。worker（含单机和 all-in-one）同时启动残留 Binlog Dump 的 KILL 重试，任何任务状态都会试。集群模式打开 dump fence；schema 还没有 `pending_dump_cleanup` 列时启动日志写明要先跑迁移 `000004`。
 - `app.go` / `startHealthEvaluator`（ADR 0009 P2-3）: `health.evaluator` 为 shadow/on 时装配评估器与复核器：有 meta 时写元数据库（000009），否则写 `{data_dir}/.health.json`；集群模式的 fence 是任务 lease（node = worker id），否则用持久化的 `{data_dir}/.node_id`；实例 id 每次启动随机生成。
+- `app.go` / `standaloneTaskRecords`（ADR 0010）: 没有 `meta_dsn` 且 `standalone.task_records=on`（默认）时装配 `{data_dir}/.tasks.enc`，密钥取 `BINLOG_SERVER_TASK_KEY` 或 `standalone.task_key_file`（上一把密钥用于轮换）；Restore 和认领之后调用 `ResumeRecordedTasks`。off 或设了 `meta_dsn` 而文件存在时只记日志。
+- `task_records_test.go`: standalone 进程重启后任务自动恢复；`standalone.task_records=off` 时重启不恢复任何任务。
 - `health_evaluator_test.go`: off 不装配；shadow 在 standalone 下持久化 node id；未知模式拒绝启动。
 - `uploaded_takeover_test.go`: 走 `Run` 的启动接线。checkpoint 只在已上传对象里、本地文件不在时，不报 `SEGMENT_NOT_ON_WORKER`。worker 启动会删掉崩溃留下的 `.takeover-*`，其它名字留下。
 - `tracing.go`: tracing provider 初始化与生命周期管理。

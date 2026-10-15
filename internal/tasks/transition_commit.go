@@ -35,6 +35,13 @@ func (s *Scheduler) commitTransitionLocked(next Task, to State, rec transitionRe
 	id := next.ID
 	s.markHealthDirty(id, ReasonTransition)
 	if s.store == nil {
+		if err := s.recordPutLocked(next); err != nil {
+			if _, known := s.tasks[id]; known {
+				s.appendEventLocked(id, rec.Type+"_REJECTED", rec.Action+" not recorded; the "+rec.Action+" is not applied", err.Error())
+				s.flushPendingEventsLocked()
+			}
+			return fmt.Errorf("%s %w; the %s is not applied and the task state is unchanged: %w", rec.Action, ErrTransitionNotRecorded, rec.Action, err)
+		}
 		s.tasks[id] = next
 		s.appendEventLocked(id, rec.Type, rec.Message, rec.Detail)
 		s.flushPendingEventsLocked()
@@ -91,6 +98,15 @@ func (s *Scheduler) commitDeleteLocked(id string) error {
 		cancel()
 		s.mu.Lock()
 		if err != nil {
+			if _, known := s.tasks[id]; known {
+				s.appendEventLocked(id, "TASK_DELETE_REJECTED", "delete not recorded; the delete is not applied", err.Error())
+				s.flushPendingEventsLocked()
+			}
+			return fmt.Errorf("delete %w; the delete is not applied and the task state is unchanged: %w", ErrTransitionNotRecorded, err)
+		}
+	}
+	if s.store == nil {
+		if err := s.recordDeleteLocked(id); err != nil {
 			if _, known := s.tasks[id]; known {
 				s.appendEventLocked(id, "TASK_DELETE_REJECTED", "delete not recorded; the delete is not applied", err.Error())
 				s.flushPendingEventsLocked()

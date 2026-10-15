@@ -31,6 +31,7 @@ import (
 	"binlog_server/internal/healthstore"
 	"binlog_server/internal/meta"
 	"binlog_server/internal/replication"
+	"binlog_server/internal/taskrecords"
 	"binlog_server/internal/tasks"
 	"binlog_server/internal/upload"
 
@@ -299,6 +300,15 @@ func (a *App) Run(ctx context.Context) error {
 	if a.cfg.MetaDSN == "" && strings.TrimSpace(a.cfg.DataDir) != "" {
 		// Standalone: findings live next to the backups and survive a restart.
 		opts = append(opts, tasks.WithFindingStore(tasks.NewFileFindingStore(filepath.Join(a.cfg.DataDir, tasks.FindingFileName))))
+		if a.cfg.Standalone.TaskRecords != "off" {
+			opts = append(opts, standaloneTaskRecords(a.cfg))
+		} else {
+			log.Printf("task records: standalone.task_records=off; tasks are kept in memory only and leftover directories need adopt after a restart")
+		}
+	} else if a.cfg.MetaDSN != "" && strings.TrimSpace(a.cfg.DataDir) != "" {
+		if _, err := os.Stat(filepath.Join(a.cfg.DataDir, taskrecords.FileName)); err == nil {
+			log.Printf("task records: %s exists but meta_dsn is set; metadata MySQL is the task authority and the file is not used", filepath.Join(a.cfg.DataDir, taskrecords.FileName))
+		}
 	}
 	scheduler := tasks.NewScheduler(opts...)
 	// Seed the open findings in both modes: a restarted process shows them in
@@ -341,6 +351,12 @@ func (a *App) Run(ctx context.Context) error {
 			log.Printf("task claim on start failed err=%v claimed=%d", err, claimed)
 		} else if claimed > 0 {
 			log.Printf("task claim on start claimed=%d", claimed)
+		}
+	}
+	if workerEnabled && a.cfg.MetaDSN == "" {
+		// ADR 0010: Start every task the standalone record says should run.
+		if n := scheduler.ResumeRecordedTasks(); n > 0 {
+			log.Printf("task records: resumed %d task(s) after restart", n)
 		}
 	}
 	if workerEnabled {
@@ -463,6 +479,31 @@ func validateControlPlaneAuth(listenAddr string, auth config.APIAuthConfig, prod
 		return nil
 	}
 	return validateNonLoopbackAuth(auth)
+}
+
+// standaloneTaskRecords opens {data_dir}/.tasks.enc with the key from
+// BINLOG_SERVER_TASK_KEY or standalone.task_key_file (ADR 0010). A missing
+// or unusable key is handed to the scheduler, which raises
+// TASK_RECORDS_FAILED; it does not stop the process.
+func standaloneTaskRecords(cfg config.Config) tasks.Option {
+	key, keyErr := taskrecords.LoadKey(os.Getenv(taskrecords.KeyEnv), cfg.Standalone.TaskKeyFile)
+	if keyErr != nil {
+		key = nil
+		log.Printf("task records: %v", keyErr)
+	}
+	var prev *taskrecords.Key
+	if os.Getenv(taskrecords.PreviousKeyEnv) != "" || cfg.Standalone.TaskKeyPreviousFile != "" {
+		p, err := taskrecords.LoadKey(os.Getenv(taskrecords.PreviousKeyEnv), cfg.Standalone.TaskKeyPreviousFile)
+		if err != nil {
+			log.Printf("task records: previous key not usable, rotation from it is off: %v", err)
+		} else {
+			prev = p
+		}
+	}
+	if key != nil {
+		log.Printf("task records: on; key id %s, previous key id %q", key.ID(), prev.ID())
+	}
+	return tasks.WithTaskRecords(taskrecords.Open(cfg.DataDir, key, prev), keyErr)
 }
 
 func requireProductionEncryptionKey(key string, production bool) error {

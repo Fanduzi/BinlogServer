@@ -12,6 +12,16 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- #385 / ADR 0010：standalone（无 `meta_dsn`）重启后任务自动恢复。任务配置（含源库密码）、期望状态、失败和删除墓碑以 AES-256-GCM 加密存于 `{data_dir}/.tasks.enc`（0600，原子写）。密钥来自 `BINLOG_SERVER_TASK_KEY` 或 `standalone.task_key_file`，`binlog-server task-key generate --out <path>` 生成；`standalone.task_key_previous_file` / `BINLOG_SERVER_TASK_KEY_PREVIOUS` 用于轮换。文件不存位置，续传位置总是从磁盘算；磁盘上无位置的 LATEST 任务以 `RESUME_POSITION_UNKNOWN` 失败。新配置 `standalone.task_records`（on 默认 / off）。
+- 新 finding `TASK_RECORDS_FAILED`（CRITICAL，`_cluster`，subject `key_missing`/`key_invalid`/`wrong_key`/`corrupt`/`write`）。文件存在但无法读取时不恢复任务、拒绝改动任务的操作且不覆盖文件，目录报 `TASK_UNADOPTED`。没有记录的目录仍报 `TASK_UNADOPTED`（#388）。
+- e2e `smoke-standalone-restart.sh`（MySQL 8.0、MariaDB 11.4），进入 `run-suite.sh` quick 档。
+
+### Fixed
+
+- standalone 下 `GET /api/findings` 现在列出评估器管理的 `_cluster` 结论；评估器建立前产生的信号 kind 失败会移交给评估器，不再停留在旧账本里不落盘。
+
 ## [v0.5.66] - 2026-10-15
 
 ### Fixed

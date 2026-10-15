@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
-// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes
+// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -181,8 +181,33 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}}
 	if s != nil {
 		s.healthEval.Store(e)
+		e.adoptEarlySignals()
+		s.replayRecordSignals()
 	}
 	return e
+}
+
+// adoptEarlySignals moves signal-kind failures raised before the evaluator
+// was attached (they went to the legacy book because nothing owned the
+// kind yet, e.g. a standalone Restore) into the signal book. Left in the
+// legacy book they would read as already open and never be written.
+func (e *Evaluator) adoptEarlySignals() {
+	if !e.ownsManaged() {
+		return
+	}
+	b := e.s.findings
+	b.mu.Lock()
+	var early []Finding
+	for k, f := range b.open {
+		if isSignalKind(k.kind) && e.ownsSignal(k.task, k.kind) {
+			early = append(early, f)
+		}
+	}
+	b.mu.Unlock()
+	for _, f := range early {
+		b.forget(f.TaskID, f.Kind, f.Subject)
+		e.Signal(f.TaskID, f.Kind, f.Subject, false, f.Detail)
+	}
 }
 
 // Mode is the feature flag.

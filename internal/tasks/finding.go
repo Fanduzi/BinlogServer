@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -52,6 +52,8 @@ const (
 	FindingSegmentUnreadable FindingKind = "SEGMENT_UNREADABLE"
 	// FindingSegmentOverlap: a sealed source file is in the task directory twice with the same events, or one copy cannot be read; /replay and /window stop before both (#370).
 	FindingSegmentOverlap FindingKind = "SEGMENT_OVERLAP"
+	// FindingTaskRecordsFailed: the standalone task record file cannot be read or written (ADR 0010); subject key_missing, key_invalid, wrong_key, corrupt or write.
+	FindingTaskRecordsFailed FindingKind = "TASK_RECORDS_FAILED"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.
@@ -459,6 +461,11 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 	if e := s.healthEval.Load(); e != nil {
 		for _, t := range s.ListTasks() {
 			local = append(local, e.openManagedFindings(ctx, t.ID)...)
+		}
+		if !e.cfg.Cluster {
+			// Standalone evaluates _cluster itself (RETRY_LOOP_FAILED,
+			// TASK_RECORDS_FAILED); it has no task row to be listed by.
+			local = append(local, e.openManagedFindings(ctx, ClusterFindingTask)...)
 		}
 	}
 	return mergeFindings(stored, local, limit), err
