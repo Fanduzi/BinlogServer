@@ -368,7 +368,9 @@ type Scheduler struct {
 	// row write failed; the sink's retry tick writes the in-memory row again.
 	findings *findingBook
 	// healthEval is the ADR 0009 phase 2 evaluator, nil until NewEvaluator.
-	healthEval  atomic.Pointer[Evaluator]
+	healthEval atomic.Pointer[Evaluator]
+	// liveness is the per-task source liveness clock (liveness.go).
+	liveness    *livenessBook
 	unpublished map[string]struct{}
 	// refusedEvents are task events the event store refused, oldest first.
 	// The sink tick writes them again (replayRefusedEvents).
@@ -402,6 +404,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		internalUploadTimeout: 30 * time.Second,
 		eventLanes:            make(map[string]*eventLane),
 		pendingDumps:          make(map[string]DumpCleanup),
+		liveness:              newLivenessBook(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -438,7 +441,15 @@ func (s *Scheduler) SetRunner(runner Runner) {
 			binder.BindSourceSwitch(s.noteSourceSwitch)
 		}
 		if binder, ok := runner.(FindingBinder); ok {
-			binder.BindFindings(s.Report, s.Resolve)
+			binder.BindFindings(s.SignalFailure, s.SignalSuccess)
+		}
+		if binder, ok := runner.(LivenessBinder); ok {
+			binder.BindLiveness(s.SourceLiveness)
+		}
+		if prober, ok := runner.(SourceProber); ok {
+			s.liveness.mu.Lock()
+			s.liveness.prober = prober
+			s.liveness.mu.Unlock()
 		}
 	}
 	var killer func(SourceConfig, uint32) error
@@ -656,9 +667,9 @@ func (s *Scheduler) writeEventBatch(batch []queuedEvent) {
 		if err := item.lane.write(store, item.event, item.ticket, timeout); err != nil {
 			// S1: kept for replay; the finding stays open until it lands.
 			s.keepRefusedEvent(item.event)
-			s.Report(Finding{TaskID: item.event.TaskID, Kind: FindingEventPersistFailed, Subject: item.event.Type, Severity: FindingWarning, Detail: err.Error()})
+			s.SignalFailure(Finding{TaskID: item.event.TaskID, Kind: FindingEventPersistFailed, Subject: item.event.Type, Severity: FindingWarning, Detail: err.Error()})
 		} else if store != nil {
-			s.Resolve(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
+			s.SignalSuccess(item.event.TaskID, FindingEventPersistFailed, item.event.Type)
 		}
 	}
 }

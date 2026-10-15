@@ -137,7 +137,11 @@ func TestQA_SignalFlapAndClose(t *testing.T) {
 		t.Errorf("first success should close: %+v", ts)
 	}
 	// unmanaged: nothing ever
-	ts, _ = DefaultRegistry().Reconcile(open, &Facts{TaskID: "1", Now: qt0, Signals: map[SignalKey]SignalState{sk: {SuccessSeq: 9}}, Complete: qall()})
+	un := DefaultRegistry()
+	spec := un[MetadataWriteBlocked]
+	spec.Managed = false
+	un[MetadataWriteBlocked] = spec
+	ts, _ = un.Reconcile(open, &Facts{TaskID: "1", Now: qt0, Signals: map[SignalKey]SignalState{sk: {SuccessSeq: 9}}, Complete: qall()})
 	if len(ts) != 0 {
 		t.Errorf("unmanaged produced %+v", ts)
 	}

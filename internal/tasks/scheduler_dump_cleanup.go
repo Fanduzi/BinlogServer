@@ -243,7 +243,7 @@ func (s *Scheduler) noteDumpCleanup(taskID string, source SourceConfig, connecti
 			s.reportDumpCleanupPersist(taskID, err)
 			changed = true
 		} else {
-			s.Resolve(taskID, FindingDumpCleanupPersistFailed, "")
+			s.SignalSuccess(taskID, FindingDumpCleanupPersistFailed, "")
 		}
 	}
 
@@ -466,7 +466,7 @@ func (s *Scheduler) noteDumpHeld(taskID string, source SourceConfig, connectionI
 			log.Printf("held dump write task=%s err=%v", taskID, err)
 			s.reportDumpCleanupPersist(taskID, err)
 		} else {
-			s.Resolve(taskID, FindingDumpCleanupPersistFailed, "")
+			s.SignalSuccess(taskID, FindingDumpCleanupPersistFailed, "")
 		}
 	}
 }
@@ -498,5 +498,5 @@ func (s *Scheduler) killLeftover(task Task, pending DumpCleanup, killer func(Sou
 // reportDumpCleanupPersist (S3): the marker that a Binlog Dump still has to be
 // KILLed lives only in this process now; another worker or a restart cannot see it.
 func (s *Scheduler) reportDumpCleanupPersist(taskID string, err error) {
-	s.Report(Finding{TaskID: taskID, Kind: FindingDumpCleanupPersistFailed, Severity: FindingCritical, Detail: "pending_dump_cleanup not written; leftover Binlog Dump KILL is tracked only in this process: " + err.Error()})
+	s.SignalFailure(Finding{TaskID: taskID, Kind: FindingDumpCleanupPersistFailed, Severity: FindingCritical, Detail: "pending_dump_cleanup not written; leftover Binlog Dump KILL is tracked only in this process: " + err.Error()})
 }

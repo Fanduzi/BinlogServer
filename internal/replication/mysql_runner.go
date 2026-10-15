@@ -54,6 +54,14 @@ type MySQLRunner struct {
 	// received anything. A read error after a silence as long as the read
 	// timeout is a stall, however go-mysql words the error.
 	recv sync.Map
+	// liveness is the scheduler's per-task source liveness clock
+	// (BindLiveness); sockets holds each task's current *socketClock.
+	livenessMu sync.Mutex
+	liveness   func(taskID string) *tasks.SourceLiveness
+	sockets    sync.Map
+	// heartbeat and readTimeout override dumpHeartbeatPeriod and
+	// dumpReadTimeout (WithDumpTimeouts; zero is the default).
+	heartbeat, readTimeout time.Duration
 	// clock is time.Now; tests step it.
 	clock           func() time.Time
 	dataDir         string
@@ -179,13 +187,13 @@ func (r *MySQLRunner) findingSink() (func(tasks.Finding), func(string, tasks.Fin
 	return r.findingReport, r.findingResolve
 }
 
-func (r *MySQLRunner) report(f tasks.Finding) {
+func (r *MySQLRunner) signalFail(f tasks.Finding) {
 	if report, _ := r.findingSink(); report != nil {
 		report(f)
 	}
 }
 
-func (r *MySQLRunner) resolve(taskID string, kind tasks.FindingKind, subject string) {
+func (r *MySQLRunner) signalOK(taskID string, kind tasks.FindingKind, subject string) {
 	if _, resolve := r.findingSink(); resolve != nil {
 		resolve(taskID, kind, subject)
 	}
@@ -625,7 +633,10 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 	// 建立复制连接。
 	semiSyncRequested := task.Source.SemiSync
-	l.dump = &dumpConn{cfg: buildSyncerConfig(task), newSyncer: r.newSyncer}
+	cfg := buildSyncerConfig(task)
+	cfg.HeartbeatPeriod, cfg.ReadTimeout = r.heartbeatPeriod(), r.dumpReadTimeout()
+	cfg.Dialer = r.dumpDialer(task.ID)
+	l.dump = &dumpConn{cfg: cfg, newSyncer: r.newSyncer}
 	if semiSyncRequested {
 		// 半同步模式使用同步处理器：只有 HandleEvent 成功返回后才会 ACK。
 		// 这样可保证 ACK 发生在本地 fsync/checkpoint 成功之后（防止 ACK 早于持久化）。
@@ -684,6 +695,17 @@ const idlePollInterval = 2 * time.Second
 func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID string, source tasks.SourceConfig, file string, pos uint32, atTip *bool) (*replication.BinlogEvent, error) {
 	eventCtx, cancel := context.WithTimeout(ctx, idlePollInterval)
 	mark := r.recvMark(taskID, streamer)
+	// Silence is measured at the socket: go-mysql reads ahead into a deep
+	// channel, so under load the last consumed event can be far newer than
+	// the last byte, and a dead source looked alive until the read timeout
+	// failed as a plain error (#383 QA F1). Without a dialed connection (a
+	// fake syncer) the consumption mark is all there is.
+	lastRead := func() time.Time {
+		if at := r.socketLast(taskID); !at.IsZero() {
+			return at
+		}
+		return mark.last()
+	}
 	event, err := streamer.GetEvent(eventCtx)
 	cancel()
 	if err != nil {
@@ -696,8 +718,8 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 		if errors.Is(err, context.DeadlineExceeded) {
 			// No byte, not even a heartbeat, for the read timeout: a stall,
 			// whatever go-mysql's own read deadline has done so far.
-			if silent := r.now().Sub(mark.last()); silent >= dumpReadTimeout {
-				r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
+			if silent := r.now().Sub(lastRead()); silent >= r.dumpReadTimeout() {
+				r.signalFail(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
 					Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting", silent.Truncate(time.Second), file, pos)})
 				return nil, dumpStalled(fmt.Sprintf("dump silent for %s at %s:%d", silent.Truncate(time.Second), file, pos))
 			}
@@ -706,7 +728,7 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 			// The probe never runs past the point where silence becomes a
 			// stall, so a black-holed source is reported at the read timeout.
 			budget := tipProbeTimeout
-			if left := dumpReadTimeout - r.now().Sub(mark.last()); left < budget {
+			if left := r.dumpReadTimeout() - r.now().Sub(lastRead()); left < budget {
 				budget = max(left, 100*time.Millisecond)
 			}
 			tip := r.confirmIdleAtTip(ctx, source, file, pos, budget)
@@ -724,8 +746,8 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 		}
 		// go-mysql turns the read timeout into ErrBadConn with the net.Error
 		// as text, so the error type cannot tell a stall. The silence can.
-		if silent := r.now().Sub(mark.last()); silent >= dumpReadTimeout-dumpStallSlack {
-			r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
+		if silent := r.now().Sub(lastRead()); silent >= r.dumpReadTimeout()-r.stallSlack() {
+			r.signalFail(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
 				Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting: %v", silent.Truncate(time.Second), file, pos, err)})
 			return nil, dumpStalled(fmt.Sprintf("dump silent for %s at %s:%d: %v", silent.Truncate(time.Second), file, pos, err))
 		}
@@ -734,7 +756,7 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 	// Once per dump session, so a stall loaded from the store after a
 	// restart also resolves when the new session receives data.
 	if mark.touch(r.now()) {
-		r.resolve(taskID, tasks.FindingDumpStalled, "")
+		r.signalOK(taskID, tasks.FindingDumpStalled, "")
 	}
 	return event, nil
 }
@@ -798,7 +820,7 @@ func (r *MySQLRunner) noteReceived(taskID string) {
 		return
 	}
 	if v.(*recvMark).touch(r.now()) {
-		r.resolve(taskID, tasks.FindingDumpStalled, "")
+		r.signalOK(taskID, tasks.FindingDumpStalled, "")
 	}
 }
 
@@ -1387,6 +1409,31 @@ var dumpCloseTimeout = 5 * time.Second
 // dumpReadTimeout bounds a dump read. Three missed heartbeats (ADR 0009:
 // 45s) mean the connection is dead, so the read fails and the dump reconnects.
 const dumpReadTimeout = 45 * time.Second
+
+// WithDumpTimeouts sets the dump heartbeat period and read timeout (tests
+// scale them down; production keeps 15s and 45s).
+func WithDumpTimeouts(heartbeat, readTimeout time.Duration) RunnerOption {
+	return func(r *MySQLRunner) { r.heartbeat, r.readTimeout = heartbeat, readTimeout }
+}
+
+func (r *MySQLRunner) heartbeatPeriod() time.Duration {
+	if r.heartbeat > 0 {
+		return r.heartbeat
+	}
+	return dumpHeartbeatPeriod
+}
+
+func (r *MySQLRunner) dumpReadTimeout() time.Duration {
+	if r.readTimeout > 0 {
+		return r.readTimeout
+	}
+	return dumpReadTimeout
+}
+
+// stallSlack is dumpStallSlack, at most a third of the read timeout.
+func (r *MySQLRunner) stallSlack() time.Duration {
+	return min(dumpStallSlack, r.dumpReadTimeout()/3)
+}
 
 // buildSyncerConfig 基于任务配置构造 go-mysql syncer 参数。
 func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {
@@ -2159,11 +2206,11 @@ func (r *MySQLRunner) reconcileOpenTail(task tasks.Task, executed *executedGTID)
 			tail.Truncate = false
 		case func() bool { cutErr = truncateFile(tail.Path, tail.CutOffset); return cutErr != nil }():
 			log.Printf("open tail truncate failed task=%s path=%s offset=%d err=%v", task.ID, tail.Path, tail.CutOffset, cutErr)
-			r.report(tasks.Finding{TaskID: task.ID, Kind: tasks.FindingOpenTailCutFailed, Subject: tail.File, Severity: tasks.FindingCritical,
+			r.signalFail(tasks.Finding{TaskID: task.ID, Kind: tasks.FindingOpenTailCutFailed, Subject: tail.File, Severity: tasks.FindingCritical,
 				Detail: fmt.Sprintf("could not cut unfinished transaction %s at offset %d of %s: %v; the start continues inside it only if the segment can still be appended, otherwise the task fails", tail.PartialGTID, tail.CutOffset, tail.Path, cutErr)})
 			tail.Truncate = false
 		default:
-			r.resolve(task.ID, tasks.FindingOpenTailCutFailed, tail.File)
+			r.signalOK(task.ID, tasks.FindingOpenTailCutFailed, tail.File)
 			log.Printf("open tail cut unfinished transaction task=%s path=%s gtid=%s offset=%d resume=%s:%d", task.ID, tail.Path, tail.PartialGTID, tail.CutOffset, tail.File, tail.Pos)
 		}
 	}
@@ -2457,10 +2504,10 @@ func (r *MySQLRunner) retentionObjects(ctx context.Context, task tasks.Task, sou
 	objects.note = func(row tasks.BinlogFile) error {
 		err := r.fileMetaStore.UpsertBinlogFile(ctx, row)
 		if err != nil {
-			r.report(tasks.Finding{TaskID: task.ID, Kind: tasks.FindingRetentionRecordFailed, Subject: row.FileName, Severity: tasks.FindingWarning,
+			r.signalFail(tasks.Finding{TaskID: task.ID, Kind: tasks.FindingRetentionRecordFailed, Subject: row.FileName, Severity: tasks.FindingWarning,
 				Detail: "retention could not record " + strings.TrimSpace(row.UploadState) + " on the catalog row; the file stays on disk but the upload retry will not re-check it: " + err.Error()})
 		} else {
-			r.resolve(task.ID, tasks.FindingRetentionRecordFailed, row.FileName)
+			r.signalOK(task.ID, tasks.FindingRetentionRecordFailed, row.FileName)
 		}
 		return err
 	}
@@ -2852,7 +2899,7 @@ func (r *MySQLRunner) announceRetentionRemoved(ctx context.Context, taskID, name
 		Time:    time.Now(),
 	}); err != nil {
 		// S6: the deletion has no audit row; the recoverable window got shorter with no event.
-		r.report(tasks.Finding{TaskID: taskID, Kind: tasks.FindingRetentionRecordFailed, Subject: name, Severity: tasks.FindingWarning,
+		r.signalFail(tasks.Finding{TaskID: taskID, Kind: tasks.FindingRetentionRecordFailed, Subject: name, Severity: tasks.FindingWarning,
 			Detail: "local retention removed this file but the RETENTION_REMOVED event was not written: " + err.Error()})
 	}
 }

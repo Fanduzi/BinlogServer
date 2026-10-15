@@ -1,7 +1,7 @@
 // Package health provides module-level functionality for health.
 // input: assurance violation kinds
 // output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
-// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed
+// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED
 // note: if this file changes, update this header and module README.md.
 package health
 
@@ -71,30 +71,6 @@ func chainDerive(kind Kind) func(f *Facts) []Instance {
 	}
 }
 
-// signalDerive opens one instance per signal of kind whose latest
-// observation is a failure.
-func signalDerive(kind Kind) func(f *Facts) []Instance {
-	return func(f *Facts) []Instance {
-		var out []Instance
-		for k, st := range f.Signals {
-			if k.Kind == kind && st.FailureSeq > st.SuccessSeq {
-				out = append(out, Instance{Key: Key{Subject: k.Subject}, Detail: st.Detail, FactAt: st.FactAt})
-			}
-		}
-		return out
-	}
-}
-
-// signalCleared: a success observed since start that is later than any
-// failure this process saw. With no success since start the open row stays
-// (the internal unknown of §5.5).
-func signalCleared(kind Kind) func(f *Facts, key Key) bool {
-	return func(f *Facts, key Key) bool {
-		st, ok := f.Signals[SignalKey{Kind: kind, Subject: key.Subject}]
-		return ok && st.SuccessSeq > 0 && st.SuccessSeq > st.FailureSeq
-	}
-}
-
 func signalSpec(kind Kind, sev Severity, inv, text string) KindSpec {
 	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{ScopeSignals}, Version: 1, Derive: signalDerive(kind),
 		Clear: ClearRule{Invariant: inv, Holds: signalCleared(kind), Text: text}}
@@ -115,8 +91,39 @@ func stateSpec(kind Kind, sev Severity, scope Scope, inv, text string, more ...S
 // the legacy Report path no longer writes them when the evaluator is on.
 var p23Managed = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true}
 
+// p24Managed adds every signal and task-state kind of the sixteen shipped
+// ones, plus SOURCE_UNREACHABLE and TASK_FAILED (design §13 P2-4).
+var p24Managed = map[Kind]bool{
+	TaskPersistFailed: true, MetadataWriteBlocked: true, EventPersistFailed: true, EventReadFailed: true,
+	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
+	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
+	MetricSourceFailed: true, TransitionStalled: true, SourceUnreachable: true, TaskFailed: true,
+}
+
+// ManagedKinds is every kind the evaluator owns in this release.
+func ManagedKinds() map[Kind]bool {
+	out := map[Kind]bool{}
+	for k := range p23Managed {
+		out[k] = true
+	}
+	for k := range p24Managed {
+		out[k] = true
+	}
+	return out
+}
+
+// uploadUnverifiedSpec: S9 signal (the uploader could not read the object
+// back) or I7_UNVERIFIED from the chain once objects are judged (P2-5).
+func uploadUnverifiedSpec() KindSpec {
+	sig, chain := signalDerive(UploadUnverified), chainDerive(UploadUnverified)
+	return KindSpec{Kind: UploadUnverified, Severity: Critical, Scopes: []Scope{ScopeSignals, ScopeChainLocal}, Version: 2, SegmentScoped: true,
+		Derive: func(f *Facts) []Instance { return append(sig(f), chain(f)...) },
+		Clear:  ClearRule{Invariant: "I7", Holds: signalCleared(UploadUnverified), Text: "the segment's checksum is match"}}
+}
+
 // DefaultRegistry is the kind table of design §6. P2-3 manages the three
-// local segment kinds; each later PR flips the kinds it takes over.
+// local segment kinds, P2-4 the signal and task-state kinds; P2-5 and
+// P2-6 flip the rest.
 func DefaultRegistry() Registry {
 	specs := []KindSpec{
 		chainSpec(SegmentUnreadable, Critical, ScopeChainLocal, "I1", "the segment reads cleanly again, or is no longer on the chain"),
@@ -128,7 +135,7 @@ func DefaultRegistry() Registry {
 		chainSpec(SegmentMissing, Critical, ScopeChainLocal, "I6", "catalog row, local file and object agree, or a retention marker explains the absence", ScopeChainObjects),
 		chainSpec(OrphanRow, Warning, ScopeChainLocal, "I6", "the row has its bytes again, or carries a retention marker", ScopeChainObjects),
 		chainSpec(UploadLate, Warning, ScopeChainLocal, "I7", "the segment is UPLOADED with checksum match"),
-		chainSpec(UploadUnverified, Critical, ScopeChainLocal, "I7", "the segment's checksum is match", ScopeSignals),
+		uploadUnverifiedSpec(),
 		chainSpec(SegmentEmptyLeftover, Info, ScopeChainLocal, "I4", "the leftover open file is removed, or sealed with events"),
 		signalSpec(UploadRecordFailed, Critical, "S8", "a later upload record for the segment is written, or its row is already UPLOADED"),
 		signalSpec(MetadataWriteBlocked, Critical, "S2", "a later checkpoint or task row write succeeds"),
@@ -141,10 +148,16 @@ func DefaultRegistry() Registry {
 		signalSpec(RetryLoopFailed, Warning, "S7", "the next upload retry pass runs to the end"),
 		signalSpec(OpenTailCutFailed, Critical, "S4", "the next cut succeeds, or the segment is sealed or gone"),
 		signalSpec(MetricSourceFailed, Warning, "S10/S11", "the next scrape computes the source"),
-		stateSpec(DumpStalled, Warning, ScopeTaskState, "S12", "events or heartbeats arrive again; or the task was deliberately stopped; or the lease moved to another epoch", ScopeSignals),
-		stateSpec(TransitionStalled, Warning, ScopeTaskState, "lease", "the task leaves STARTING/STOPPING, or a run drives it"),
-		stateSpec(TaskFailed, Critical, ScopeTaskState, "task", "the task leaves FAILED, or desired becomes STOP"),
-		stateSpec(SourceUnreachable, Critical, ScopeTaskState, "S12", "a dump is established and receives events or heartbeats, or the task is deliberately stopped", ScopeSignals),
+		{Kind: DumpStalled, Severity: Warning, Scopes: []Scope{ScopeSignals, ScopeTaskState}, Version: 3, Derive: dumpStalledDerive,
+			Clear: ClearRule{Invariant: "S12", Holds: dumpStalledCleared, Reason: dumpStalledReason,
+				Text: "a byte (event or heartbeat) is read from the source again; or the task is stopped or owned elsewhere; or SOURCE_UNREACHABLE opens in the same pass (HANDED_OFF)"}},
+		{Kind: TransitionStalled, Severity: Warning, Scopes: []Scope{ScopeTaskState}, Version: 2, Derive: transitionStalledDerive,
+			Clear: ClearRule{Invariant: "lease", Text: "the task leaves STARTING/STOPPING, or a run drives it"}},
+		{Kind: TaskFailed, Severity: Critical, Scopes: []Scope{ScopeTaskState}, Version: 1, Derive: taskFailedDerive,
+			Clear: ClearRule{Invariant: "task", Text: "the task leaves FAILED for its current ask (restarted, or stopped); a new failure class closes the old subject and opens the new one"}},
+		{Kind: SourceUnreachable, Severity: Critical, Scopes: []Scope{ScopeTaskState, ScopeSignals}, Version: 2, Derive: sourceUnreachableDerive,
+			Clear: ClearRule{Invariant: "S12", Holds: sourceUnreachableCleared,
+				Text: "a byte is read from the source (dump or probe) after the latest failed attempt, or the task is stopped, FAILED (TASK_FAILED takes over) or owned elsewhere"}},
 		stateSpec(SealFactsAbsent, Warning, ScopeStore, "store", "the seal fact columns are found again on the next probe"),
 		stateSpec(HealthStale, Warning, ScopeTaskState, "F", "the task is evaluated"),
 		stateSpec(HealthStoreDegraded, Warning, ScopeStore, "F", "health writes succeed with migration 000009 present and versions not mixed"),
@@ -154,7 +167,7 @@ func DefaultRegistry() Registry {
 	specs = append(specs, gh)
 	r := Registry{}
 	for _, s := range specs {
-		s.Managed = p23Managed[s.Kind]
+		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind]
 		r[s.Kind] = s
 	}
 	return r
