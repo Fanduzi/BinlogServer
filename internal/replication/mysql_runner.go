@@ -50,11 +50,18 @@ const (
 
 // MySQLRunner 负责执行复制协议拉流、文件落盘、checkpoint 与上传流程。
 type MySQLRunner struct {
-	sockets sync.Map // stub (#383 red commit): taskID -> *socketClock
 	// recv holds one *recvMark per task: the dump session and when it last
 	// received anything. A read error after a silence as long as the read
 	// timeout is a stall, however go-mysql words the error.
 	recv sync.Map
+	// liveness is the scheduler's per-task source liveness clock
+	// (BindLiveness); sockets holds each task's current *socketClock.
+	livenessMu sync.Mutex
+	liveness   func(taskID string) *tasks.SourceLiveness
+	sockets    sync.Map
+	// heartbeat and readTimeout override dumpHeartbeatPeriod and
+	// dumpReadTimeout (WithDumpTimeouts; zero is the default).
+	heartbeat, readTimeout time.Duration
 	// clock is time.Now; tests step it.
 	clock           func() time.Time
 	dataDir         string
@@ -626,7 +633,10 @@ func (r *MySQLRunner) run(ctx context.Context, task tasks.Task, onReady func()) 
 
 	// 建立复制连接。
 	semiSyncRequested := task.Source.SemiSync
-	l.dump = &dumpConn{cfg: buildSyncerConfig(task), newSyncer: r.newSyncer}
+	cfg := buildSyncerConfig(task)
+	cfg.HeartbeatPeriod, cfg.ReadTimeout = r.heartbeatPeriod(), r.dumpReadTimeout()
+	cfg.Dialer = r.dumpDialer(task.ID)
+	l.dump = &dumpConn{cfg: cfg, newSyncer: r.newSyncer}
 	if semiSyncRequested {
 		// 半同步模式使用同步处理器：只有 HandleEvent 成功返回后才会 ACK。
 		// 这样可保证 ACK 发生在本地 fsync/checkpoint 成功之后（防止 ACK 早于持久化）。
@@ -685,6 +695,17 @@ const idlePollInterval = 2 * time.Second
 func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, taskID string, source tasks.SourceConfig, file string, pos uint32, atTip *bool) (*replication.BinlogEvent, error) {
 	eventCtx, cancel := context.WithTimeout(ctx, idlePollInterval)
 	mark := r.recvMark(taskID, streamer)
+	// Silence is measured at the socket: go-mysql reads ahead into a deep
+	// channel, so under load the last consumed event can be far newer than
+	// the last byte, and a dead source looked alive until the read timeout
+	// failed as a plain error (#383 QA F1). Without a dialed connection (a
+	// fake syncer) the consumption mark is all there is.
+	lastRead := func() time.Time {
+		if at := r.socketLast(taskID); !at.IsZero() {
+			return at
+		}
+		return mark.last()
+	}
 	event, err := streamer.GetEvent(eventCtx)
 	cancel()
 	if err != nil {
@@ -697,7 +718,7 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 		if errors.Is(err, context.DeadlineExceeded) {
 			// No byte, not even a heartbeat, for the read timeout: a stall,
 			// whatever go-mysql's own read deadline has done so far.
-			if silent := r.now().Sub(mark.last()); silent >= dumpReadTimeout {
+			if silent := r.now().Sub(lastRead()); silent >= r.dumpReadTimeout() {
 				r.signalFail(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
 					Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting", silent.Truncate(time.Second), file, pos)})
 				return nil, dumpStalled(fmt.Sprintf("dump silent for %s at %s:%d", silent.Truncate(time.Second), file, pos))
@@ -707,7 +728,7 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 			// The probe never runs past the point where silence becomes a
 			// stall, so a black-holed source is reported at the read timeout.
 			budget := tipProbeTimeout
-			if left := dumpReadTimeout - r.now().Sub(mark.last()); left < budget {
+			if left := r.dumpReadTimeout() - r.now().Sub(lastRead()); left < budget {
 				budget = max(left, 100*time.Millisecond)
 			}
 			tip := r.confirmIdleAtTip(ctx, source, file, pos, budget)
@@ -725,7 +746,7 @@ func (r *MySQLRunner) nextEvent(ctx context.Context, streamer binlogStreamer, ta
 		}
 		// go-mysql turns the read timeout into ErrBadConn with the net.Error
 		// as text, so the error type cannot tell a stall. The silence can.
-		if silent := r.now().Sub(mark.last()); silent >= dumpReadTimeout-dumpStallSlack {
+		if silent := r.now().Sub(lastRead()); silent >= r.dumpReadTimeout()-r.stallSlack() {
 			r.signalFail(tasks.Finding{TaskID: taskID, Kind: tasks.FindingDumpStalled, Severity: tasks.FindingWarning,
 				Detail: fmt.Sprintf("dump received nothing, not even a heartbeat, for %s at %s:%d; reconnecting: %v", silent.Truncate(time.Second), file, pos, err)})
 			return nil, dumpStalled(fmt.Sprintf("dump silent for %s at %s:%d: %v", silent.Truncate(time.Second), file, pos, err))
@@ -1388,6 +1409,31 @@ var dumpCloseTimeout = 5 * time.Second
 // dumpReadTimeout bounds a dump read. Three missed heartbeats (ADR 0009:
 // 45s) mean the connection is dead, so the read fails and the dump reconnects.
 const dumpReadTimeout = 45 * time.Second
+
+// WithDumpTimeouts sets the dump heartbeat period and read timeout (tests
+// scale them down; production keeps 15s and 45s).
+func WithDumpTimeouts(heartbeat, readTimeout time.Duration) RunnerOption {
+	return func(r *MySQLRunner) { r.heartbeat, r.readTimeout = heartbeat, readTimeout }
+}
+
+func (r *MySQLRunner) heartbeatPeriod() time.Duration {
+	if r.heartbeat > 0 {
+		return r.heartbeat
+	}
+	return dumpHeartbeatPeriod
+}
+
+func (r *MySQLRunner) dumpReadTimeout() time.Duration {
+	if r.readTimeout > 0 {
+		return r.readTimeout
+	}
+	return dumpReadTimeout
+}
+
+// stallSlack is dumpStallSlack, at most a third of the read timeout.
+func (r *MySQLRunner) stallSlack() time.Duration {
+	return min(dumpStallSlack, r.dumpReadTimeout()/3)
+}
 
 // buildSyncerConfig 基于任务配置构造 go-mysql syncer 参数。
 func buildSyncerConfig(task tasks.Task) replication.BinlogSyncerConfig {

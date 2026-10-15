@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
-// input: a task's signal book, task row facts, the stored open keys and this pass's probes
-// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED with its #366 rules and HANDED_OFF to SOURCE_UNREACHABLE; SOURCE_UNREACHABLE (threshold + two-pass debounce); TASK_FAILED by failure class; TASK_TRANSITION_STALLED; ClassifyFailure
+// input: a task's signal book, task row facts with the source liveness clock, the stored open keys and this pass's probes
+// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED (45s with no byte read, any state) and SOURCE_UNREACHABLE (a failed attempt 90s after the last read) from the one source liveness clock, with a same-pass HANDED_OFF; TASK_FAILED by failure class; TASK_TRANSITION_STALLED; ClassifyFailure
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §6); pure
 // note: if this file changes, update this header and module README.md.
 package health
@@ -25,6 +25,7 @@ const (
 // DefaultUnreachableAfter and DefaultStalledAfter are the §6 thresholds.
 const (
 	DefaultUnreachableAfter = 90 * time.Second
+	DefaultDumpStalledAfter = 45 * time.Second
 	DefaultStalledAfter     = 60 * time.Second
 )
 
@@ -116,47 +117,21 @@ func deliberatelyStopped(t *TaskFacts) bool {
 	return t != nil && t.Desired == desiredStop && t.State == stateStopped
 }
 
-// dumpStalledGone: the stall no longer speaks for the task (S12, #366):
-// data arrived, the task was deliberately stopped, or the lease moved on.
-func dumpStalledGone(f *Facts, st SignalState, ok bool) bool {
-	if succeeded(st, ok) || deliberatelyStopped(f.Task) {
-		return true
+// liveness is the task's clock when this node drives the task with desired
+// RUN; nil otherwise (stopped, FAILED, owned elsewhere, or no clock).
+func liveness(f *Facts) *Liveness {
+	t := f.Task
+	if !desiresRun(t) || t.OwnedElsewhere || t.Liveness == nil || t.Liveness.LastRead.IsZero() {
+		return nil
 	}
-	return f.Task != nil && st.Epoch > 0 && f.Task.Epoch > 0 && f.Task.Epoch != st.Epoch
+	return t.Liveness
 }
 
-func handedOff(f *Facts) bool {
-	return f.Task != nil && f.Open[Key{TaskID: f.TaskID, Kind: SourceUnreachable}]
-}
-
-func dumpStalledDerive(f *Facts) []Instance {
-	var out []Instance
-	for k, st := range f.Signals {
-		if k.Kind != DumpStalled || !failing(st) || dumpStalledGone(f, st, true) || handedOff(f) {
-			continue
-		}
-		if f.Task != nil && !desiresRun(f.Task) && f.Task.State != stateFailed {
-			continue
-		}
-		out = append(out, Instance{Key: Key{Subject: k.Subject}, Detail: st.Detail, FactAt: st.FactAt})
+func dumpStalledAfter(f *Facts) time.Duration {
+	if f.DumpStalledAfter > 0 {
+		return f.DumpStalledAfter
 	}
-	return out
-}
-
-// DUMP_STALLED leaving RUNNING for STARTING/RETRY_BACKOFF does not close it;
-// it closes on data, a deliberate stop, a newer lease epoch, or once
-// SOURCE_UNREACHABLE is open (HANDED_OFF: one of the two is always open).
-func dumpStalledCleared(f *Facts, key Key) bool {
-	st, ok := f.Signals[SignalKey{Kind: DumpStalled, Subject: key.Subject}]
-	return dumpStalledGone(f, st, ok) || handedOff(f)
-}
-
-func dumpStalledReason(f *Facts, key Key) string {
-	st, ok := f.Signals[SignalKey{Kind: DumpStalled, Subject: key.Subject}]
-	if !dumpStalledGone(f, st, ok) && handedOff(f) {
-		return ReasonHandedOff
-	}
-	return ""
+	return DefaultDumpStalledAfter
 }
 
 func unreachableAfter(f *Facts) time.Duration {
@@ -166,39 +141,60 @@ func unreachableAfter(f *Facts) time.Duration {
 	return DefaultUnreachableAfter
 }
 
-func sourceUnreachableDerive(f *Facts) []Instance {
-	t := f.Task
-	if !desiresRun(t) || t.UnreachablePasses < 2 || t.UnreachableFor < unreachableAfter(f) {
+// silenceOf is how long the source has sent nothing, rounded for details.
+func silenceOf(f *Facts, l *Liveness) time.Duration { return f.Now.Sub(l.LastRead).Round(time.Second) }
+
+// unreachable: a connection attempt failed at least unreachable_after after
+// the last byte read, and nothing was read since. Measured between two
+// observed facts, never from a task state, so backoff that keeps the task
+// out of RUNNING after the source is back does not count (#383 QA F3).
+func unreachable(f *Facts) bool {
+	l := liveness(f)
+	return l != nil && l.LastFailure.After(l.LastRead) && l.LastFailure.Sub(l.LastRead) >= unreachableAfter(f)
+}
+
+// stalled: nothing read for dump_stalled_after, whatever the task state,
+// and SOURCE_UNREACHABLE does not already speak for it.
+func stalled(f *Facts) bool {
+	l := liveness(f)
+	return l != nil && f.Now.Sub(l.LastRead) >= dumpStalledAfter(f) && !unreachable(f)
+}
+
+func dumpStalledDerive(f *Facts) []Instance {
+	if !stalled(f) {
 		return nil
 	}
-	detail := "task has been in STARTING/RETRY_BACKOFF for " + t.UnreachableFor.Truncate(time.Second).String() + " with desired RUN"
-	if strings.TrimSpace(t.LastError) != "" {
-		detail += ": " + t.LastError
+	return []Instance{{Detail: "no byte or heartbeat read from the source for " + silenceOf(f, liveness(f)).String() +
+		" (dump_stalled_after " + dumpStalledAfter(f).String() + "); the task is " + f.Task.State}}
+}
+
+// DUMP_STALLED closes when a byte is read again, the task is stopped or
+// owned elsewhere, or SOURCE_UNREACHABLE opens in the same pass (HANDED_OFF).
+func dumpStalledCleared(f *Facts, key Key) bool { return !stalled(f) }
+
+func dumpStalledReason(f *Facts, key Key) string {
+	if unreachable(f) {
+		return ReasonHandedOff
+	}
+	return ""
+}
+
+func sourceUnreachableDerive(f *Facts) []Instance {
+	if !unreachable(f) {
+		return nil
+	}
+	l := liveness(f)
+	detail := "no byte or heartbeat read from the source for " + silenceOf(f, l).String() +
+		"; the latest connection attempt failed " + f.Now.Sub(l.LastFailure).Truncate(time.Second).String() + " ago"
+	if strings.TrimSpace(l.FailureDetail) != "" {
+		detail += ": " + l.FailureDetail
 	}
 	return []Instance{{Detail: detail}}
 }
 
-// SOURCE_UNREACHABLE closes once a dump receives data again (the
-// DUMP_STALLED success signal) and the task is RUNNING, on a deliberate
-// stop, or when the task FAILED (TASK_FAILED takes over).
-func sourceUnreachableCleared(f *Facts, key Key) bool {
-	t := f.Task
-	if t == nil {
-		return false
-	}
-	if deliberatelyStopped(t) || t.State == stateFailed {
-		return true
-	}
-	if t.State != stateRunning {
-		return false
-	}
-	for k, st := range f.Signals {
-		if k.Kind == DumpStalled && succeeded(st, true) {
-			return true
-		}
-	}
-	return false
-}
+// SOURCE_UNREACHABLE closes once a byte is read after the latest failure,
+// or the task is stopped, FAILED (TASK_FAILED takes over) or owned elsewhere.
+func sourceUnreachableCleared(f *Facts, key Key) bool { return !unreachable(f) }
 
 func taskFailedDerive(f *Facts) []Instance {
 	t := f.Task

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
-// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, and the pseudo task _cluster in standalone
+// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS)
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -69,10 +69,8 @@ const (
 
 // EvaluatorConfig configures NewEvaluator.
 type EvaluatorConfig struct {
-	// LivenessTick and DumpStalledAfter: stub fields (#383 red commit).
-	LivenessTick, DumpStalledAfter time.Duration
-	Mode                           EvaluatorMode
-	Store                          healthstore.Store
+	Mode  EvaluatorMode
+	Store healthstore.Store
 	// Registry defaults to health.DefaultRegistry().
 	Registry health.Registry
 	// Sweep is the period that marks every responsible task dirty (default 60s).
@@ -99,6 +97,11 @@ type EvaluatorConfig struct {
 	SignalStaleAfter time.Duration
 	// StalledAfter is the TASK_TRANSITION_STALLED threshold (default: the scheduler's).
 	StalledAfter time.Duration
+	// DumpStalledAfter is the DUMP_STALLED silence threshold (default 45s).
+	DumpStalledAfter time.Duration
+	// LivenessTick is how often the source liveness clocks are checked for
+	// a threshold crossing (default 5s); a crossing marks the task dirty.
+	LivenessTick time.Duration
 	Now          func() time.Time
 }
 
@@ -139,7 +142,7 @@ type Evaluator struct {
 	rehash       map[string]map[string]rehashResult
 	chainCache   map[string]chainCacheEntry
 	signals      map[string]map[health.SignalKey]*signalEntry
-	unreach      map[string]unreachTrack
+	phase        map[string]string
 
 	// schemaAbsent: the store has no 000009 (ErrSchemaAbsent on the last
 	// write); the legacy Report path keeps writing the managed kinds.
@@ -159,6 +162,9 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	}
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = time.Second
+	}
+	if cfg.LivenessTick <= 0 {
+		cfg.LivenessTick = 5 * time.Second
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
@@ -243,6 +249,8 @@ func (e *Evaluator) Run(ctx context.Context) {
 	e.markResponsible(ReasonStartup)
 	t := time.NewTicker(e.cfg.Sweep)
 	defer t.Stop()
+	lt := time.NewTicker(e.cfg.LivenessTick)
+	defer lt.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -250,6 +258,8 @@ func (e *Evaluator) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			e.markResponsible(ReasonSweep)
+		case <-lt.C:
+			e.markLivenessCrossings()
 		}
 	}
 }

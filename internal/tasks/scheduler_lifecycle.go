@@ -44,6 +44,8 @@ func (s *Scheduler) StartTask(id string) error {
 	if err := s.writeStartIntent(id); err != nil {
 		return err
 	}
+	// A new ask: the source's silence counts from now, not from before it.
+	s.forgetLiveness(id)
 	// The control plane has no runner. The worker loop is the only starter.
 	// A process that has a runner converges now so all-in-one does not wait for the tick.
 	if s.runner == nil {
@@ -1107,6 +1109,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		err = classifyRunError(err)
 		errMsg := err.Error()
 		zap.L().Error("runner error", zap.String("task_id", id), zap.Error(err))
+		s.noteRunnerError(id, err)
 		if IsLeaseHandoff(err) {
 			// This epoch no longer owns the task. Writing FAILED or RETRY_BACKOFF
 			// would persist this worker's row over the new owner. Stop, drop

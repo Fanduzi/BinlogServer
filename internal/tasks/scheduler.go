@@ -368,7 +368,9 @@ type Scheduler struct {
 	// row write failed; the sink's retry tick writes the in-memory row again.
 	findings *findingBook
 	// healthEval is the ADR 0009 phase 2 evaluator, nil until NewEvaluator.
-	healthEval  atomic.Pointer[Evaluator]
+	healthEval atomic.Pointer[Evaluator]
+	// liveness is the per-task source liveness clock (liveness.go).
+	liveness    *livenessBook
 	unpublished map[string]struct{}
 	// refusedEvents are task events the event store refused, oldest first.
 	// The sink tick writes them again (replayRefusedEvents).
@@ -402,6 +404,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		internalUploadTimeout: 30 * time.Second,
 		eventLanes:            make(map[string]*eventLane),
 		pendingDumps:          make(map[string]DumpCleanup),
+		liveness:              newLivenessBook(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -439,6 +442,14 @@ func (s *Scheduler) SetRunner(runner Runner) {
 		}
 		if binder, ok := runner.(FindingBinder); ok {
 			binder.BindFindings(s.SignalFailure, s.SignalSuccess)
+		}
+		if binder, ok := runner.(LivenessBinder); ok {
+			binder.BindLiveness(s.SourceLiveness)
+		}
+		if prober, ok := runner.(SourceProber); ok {
+			s.liveness.mu.Lock()
+			s.liveness.prober = prober
+			s.liveness.mu.Unlock()
 		}
 	}
 	var killer func(SourceConfig, uint32) error

@@ -1109,6 +1109,10 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 	}
 	e := tasks.NewEvaluator(scheduler, ecfg)
 	go e.Run(ctx)
+	// The source liveness clock keeps running while the task is out of
+	// RUNNING: a silent source is probed (P2-4, design §18). Off mode stays
+	// as before, without probes.
+	scheduler.StartSourceLiveness(ctx)
 	go tasks.NewRehasher(e, cfg.Health.RehashBytesPerSec).Run(ctx)
 	log.Printf("health evaluator %s (sweep %s, rehash %d B/s, node %s)", mode, ecfg.Sweep, cfg.Health.RehashBytesPerSec, ecfg.NodeID)
 	return nil

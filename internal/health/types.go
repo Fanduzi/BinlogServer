@@ -112,16 +112,17 @@ type TaskFacts struct {
 	FailedCurrent bool
 	// OwnedElsewhere: another node owns the row (it drives the transition).
 	OwnedElsewhere bool
-	// UnreachableFor is how long, on the evaluator's clock, the task has
-	// stayed in STARTING/RETRY_BACKOFF with desired RUN; UnreachablePasses
-	// is how many consecutive passes saw that (the two-pass debounce).
-	UnreachableFor    time.Duration
-	UnreachablePasses int
-	// Liveness: the source liveness clock (stub field, #383 red commit).
+	// Liveness is the task's source liveness clock (nil: this node keeps
+	// none for the task, so DUMP_STALLED and SOURCE_UNREACHABLE are not
+	// derived here).
 	Liveness *Liveness
 }
 
-// Liveness is a task's source liveness clock (stub, #383 red commit).
+// Liveness is the one source liveness clock (§18): when a byte (event or
+// heartbeat) was last read from the source at the socket, by the dump or a
+// probe, and the latest failed connection attempt. It keeps running
+// through STARTING and RETRY_BACKOFF. LastRead is never before the time the
+// clock started (process start, or the task's latest Start).
 type Liveness struct {
 	LastRead, LastFailure time.Time
 	FailureDetail         string
@@ -179,16 +180,14 @@ type StoreFacts struct {
 // Facts is everything known about one task at one moment. A nil source is
 // unavailable this pass; Complete says which scopes may close findings.
 type Facts struct {
-	// DumpStalledAfter: stub field (#383 red commit).
-	DumpStalledAfter time.Duration
-	TaskID           string
-	Now              time.Time
-	Task             *TaskFacts
-	Chain            *ChainFacts
-	Signals          map[SignalKey]SignalState
-	Store            *StoreFacts
-	Waivers          []Waiver
-	Complete         map[Scope]bool
+	TaskID   string
+	Now      time.Time
+	Task     *TaskFacts
+	Chain    *ChainFacts
+	Signals  map[SignalKey]SignalState
+	Store    *StoreFacts
+	Waivers  []Waiver
+	Complete map[Scope]bool
 	// AbsentSince is when the evaluator (on its own injected clock) first saw
 	// each open finding's condition absent; hold-down runs from it, never from
 	// a stored wall-clock time. A missing entry means "just now".
@@ -206,6 +205,8 @@ type Facts struct {
 	UnreachableAfter time.Duration
 	// StalledAfter is the TASK_TRANSITION_STALLED threshold; 0 = 60s.
 	StalledAfter time.Duration
+	// DumpStalledAfter is the DUMP_STALLED silence threshold; 0 = 45s.
+	DumpStalledAfter time.Duration
 }
 
 // Finding is a stored finding row as the evaluator sees it.

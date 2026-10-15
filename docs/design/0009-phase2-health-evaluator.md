@@ -727,10 +727,19 @@ P2-4 按 §5.5、§5.6、§6 落地（`internal/health/signals.go`、`internal/t
 
 - **单一写入者**：热路径调用 `SignalFailure` / `SignalSuccess`。评估器拥有 Managed kind 时（`on` 且 store 有 000009）只进评估器的信号账本（进程内全局单调 seq，失败后第一轮评估时盖上任务的 lease epoch）并标脏 `SIGNAL`；否则（off、shadow、缺 000009）走旧 `Report/Resolve`，off 模式行为不变。旧 `Report/Resolve` 对 Managed 信号 kind 自动转成信号，对派生 kind 直接丢弃。lintguard `TestNoReportOfManagedKinds` 禁止任何名为 `Report/Resolve/report/resolve` 的调用（含 logger 方法和函数值，#342）在参数里提到 Managed kind。
 - **信号的关闭**：只在本进程看到失败之后的成功（`SuccessSeq > FailureSeq`，或进程启动后只有成功）或探针证明时关闭；重启后 meta 仍只读则一直 open、不重复 OPEN。探针：UPLOAD_RECORD_FAILED（目录行已 UPLOADED，或未配置上传）、OPEN_TAIL_CUT_FAILED（该 open 段已不在）、DISK_LIST_FAILED（`ReadDir(subject)` 成功）、EVENT_READ_FAILED（`ListEvents(limit 1)` 成功）。本进程从未看到失败且 LastSeen 超过 `health.signal_stale_after_sec`（默认 24h）的 open 信号行降为 INFO。
-- **DUMP_STALLED**：STARTING/RETRY_BACKOFF 来回不关闭；数据到达、主动停止（desired STOP 且 STOPPED）、lease epoch 变化（#366）时关闭；SOURCE_UNREACHABLE 已 open 时的下一轮以 `HANDED_OFF` 关闭（黑洞期间始终至少一条 finding open）。
-- **SOURCE_UNREACHABLE**：desired RUN 且处于 STARTING/RETRY_BACKOFF，持续时间（评估器时钟）≥ `health.unreachable_after_sec`（默认 90，`health.unreachable_after_task_sec` 按任务覆盖）**且**连续两轮，避免一次 60s 的计划内重启打开它；dump 再次收到数据或停止时关闭。
+- **源存活时钟（一个模型）**：每个任务一只时钟，记录「最近一次从源**在 socket 上**读到字节（事件或心跳）」的时间，以及最近一次失败的连接尝试（时间与原因）。dump 连接经自定义 Dialer 包装，每次 `Read` 返回字节就推进时钟——不是按事件被消费的时间（go-mysql 会把事件预读进很深的通道，负载下最后被消费的事件可能远比最后一个字节新）。任务 desired RUN、本节点驱动、且一个探测周期内没读到字节时，调度器每 10s 探测一次源（TCP 连接并读问候包首字节，5s 超时）：读到即推进时钟；失败（被黑洞接受连接但不回字节、拒绝连接）记为失败尝试；runner 返回 SOURCE_UNREACHABLE 错误也记为失败尝试。时钟在 STARTING、RETRY_BACKOFF 中照常走；Start 或 desired 变为 STOP 时重置。DUMP_STALLED 与 SOURCE_UNREACHABLE 只由这只时钟派生；评估器接管时 runner 的 DUMP_STALLED 信号被丢弃（off/shadow 下旧路径不变，off 下也不探测）。
+- **DUMP_STALLED**：静默（现在 − 最后读到字节）≥ 45s（= dump 读超时，3 个心跳）且 SOURCE_UNREACHABLE 不成立，任何状态都成立；读到字节、停止、被别的节点持有时关闭。评估器每 5s 检查时钟是否越过阈值，越过即标脏（`LIVENESS`），首个 finding 的界是 45s + 5s + 一轮评估。runner 结束本次运行（"dump silent"）也按 socket 时钟判定，负载下读超时不再变成普通错误。
+- **SOURCE_UNREACHABLE**：有一次失败尝试发生在最后读到字节之后至少 `health.unreachable_after_sec`（默认 90，可按任务覆盖），且之后没再读到字节。它度量两次观测到的事实之间的间隔，不看任务状态，所以退避让任务在源恢复后仍停在 RUNNING 之外并不计入：源 63s 后恢复，探测在约 73s 内读到问候，失败都在 63s 内，永远不会打开。界：90s + 探测周期 10s + 探测超时 5s + 5s ≈ 110s。detail 给出真实静默时长（自最后一个字节，不是自第一次重试）与最近一次失败的原因。关闭：失败后又读到字节，或停止、FAILED（TASK_FAILED 接管）、被别的节点持有。
+- **交接与抖动**：两者在同一轮里互斥派生：SOURCE_UNREACHABLE 成立的那一轮在同一个 `ApplyTransitions` 里关闭 DUMP_STALLED（`HANDED_OFF`）并打开 SOURCE_UNREACHABLE，死源任何时刻至少有一条 finding open。评估只读一份时钟快照：两轮之间已恢复的中断（失败之后已读到字节）不产生任何转移，不存在一轮内打开又关闭；打开后的关闭只在后续一轮，且只有中断确实超过阈值时才会打开。
 - **TASK_FAILED**：FAILED 会把 desired 置 STOP，所以用 `FailedSpecRevision == SpecRevision` 判断「当前请求失败」；subject 是失败类别（STREAM_REGRESSION、SOURCE_ERROR_1236、PERMISSION_DENIED、STORAGE_INCONSISTENT、SOURCE_SWITCHOVER、SOURCE_UNREACHABLE、CONFIG、OTHER）；重启、停止或新的请求时关闭。
 - **TASK_TRANSITION_STALLED** 改为从任务行派生（STARTING/STOPPING 超过阈值、本进程没有 run、不是别的节点持有）；watchdog 仍调用 `convergeTask`，但评估器拥有时不再写 finding。
 - **`_cluster`**：standalone 下评估器在有失败信号或有 open 行时评估 `_cluster`（所有 scope 视为完整）；集群模式下仍走旧路径，直到 P2-6 的 `_health` 持有者。
 - **留给后续**：任务级 mute（P2-7/P2-9）；集群模式下 TASK_FAILED 要等 P2-6（FAILED 任务会释放 lease，持有者评估不到它）。
+
+### 18.1 QA（#383 @1c267146）后的修正
+
+- **F1 黑洞源无 DUMP_STALLED**：根因是用「事件被消费」度量静默。(a) runner 的 stall 判定用消费标记，负载下 go-mysql 预读通道里还有事件，读超时到点时标记仍新，读超时成了普通错误，进入 run 内重连，新会话又把标记重置；(b) P2-4 让 DUMP_STALLED 只能来自 runner 信号，runner 判不出 stall 就永远没有。与 main e4e2620 相比 runner 没变，tip-2c04/b5c9 的约 50s 来自旧 `Report` 路径在 runner 判出 stall 时的行为；回归在于 P2-4 让 finding 依赖那条信号。现在 runner 与评估器都用 socket 时钟。
+- **F2 kill 后约 153s 才报、时长少算**：旧 SOURCE_UNREACHABLE 从评估器第一次看到 STARTING/RETRY_BACKOFF 起算且要两轮；现在从最后一个字节起算，探测保证失败证据最晚在阈值后约 15s 出现。
+- **F3 63s 计划重启打开 CRITICAL**：旧模型用「不在 RUNNING 的时长」，退避对齐把它拉到 92s；现在用最后读到字节到最近一次失败的间隔，退避不计入；不存在一轮内打开又关闭。
+- **测试**：`internal/replication/liveness_e2e_test.go`（真实 MySQL + 进程内 TCP 代理，可黑洞/kill，负载与空闲；阈值与退避按 1/15 缩放）断言首个 finding 与 SOURCE_UNREACHABLE 的时间界、死源期间无空档、runner 以 stall 结束运行、50/63/80s 计划重启不打开 SOURCE_UNREACHABLE、恢复后全部关闭；CI 无源时跳过。`liveness_test.go`、`internal/tasks/p24_signals_test.go`、`internal/health/signals_test.go` 在 CI 覆盖同一模型。
 

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: hot-path failure and success reports (SignalFailure/SignalSuccess, and Report/Resolve for a kind the evaluator manages), the task rows, the task directory, the catalog, and the event store
-// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, the SOURCE_UNREACHABLE streak and duration), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
+// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §5.6, §6); the only way a signal kind reaches task_findings while the evaluator is on
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -18,6 +18,9 @@ import (
 
 // ReasonSignal marks a task dirty because a hot-path signal arrived.
 const ReasonSignal EvalReason = "SIGNAL"
+
+// ReasonLiveness marks a task dirty because its source liveness clock crossed a threshold.
+const ReasonLiveness EvalReason = "LIVENESS"
 
 // Kinds added by P2-4; both are derived from the task row, nothing reports them.
 const (
@@ -40,18 +43,13 @@ type signalEntry struct {
 	stamped     uint64 // FailureSeq whose epoch was stamped
 }
 
-type unreachTrack struct {
-	since  time.Time
-	passes int
-}
-
 // isSignalKind: a managed kind fed by hot-path signals (not derived from
 // the task row or the chain).
 func isSignalKind(k FindingKind) bool {
 	switch health.Kind(k) {
 	case health.TaskPersistFailed, health.MetadataWriteBlocked, health.EventPersistFailed, health.EventReadFailed,
 		health.DumpCleanupPersistFailed, health.DiskListFailed, health.UploadUnverified, health.UploadRecordFailed,
-		health.RetentionRecordFailed, health.RetryLoopFailed, health.DumpStalled, health.OpenTailCutFailed, health.MetricSourceFailed:
+		health.RetentionRecordFailed, health.RetryLoopFailed, health.OpenTailCutFailed, health.MetricSourceFailed:
 		return true
 	}
 	return false
@@ -124,7 +122,9 @@ func (s *Scheduler) SignalFailure(f Finding) {
 	e := s.healthEval.Load()
 	f.TaskID = normTask(f.TaskID)
 	if e.ownsSignal(f.TaskID, f.Kind) {
-		e.Signal(f.TaskID, f.Kind, f.Subject, false, f.Detail)
+		if isSignalKind(f.Kind) { // a derived kind (DUMP_STALLED) has no signal
+			e.Signal(f.TaskID, f.Kind, f.Subject, false, f.Detail)
+		}
 		return
 	}
 	e.Signal(f.TaskID, f.Kind, f.Subject, false, f.Detail) // shadow mode counts it
@@ -136,7 +136,9 @@ func (s *Scheduler) SignalSuccess(taskID string, kind FindingKind, subject strin
 	e := s.healthEval.Load()
 	taskID = normTask(taskID)
 	if e.ownsSignal(taskID, kind) {
-		e.Signal(taskID, kind, subject, true, "")
+		if isSignalKind(kind) {
+			e.Signal(taskID, kind, subject, true, "")
+		}
 		return
 	}
 	e.Signal(taskID, kind, subject, true, "")
@@ -151,6 +153,7 @@ func (e *Evaluator) signalFacts(ctx context.Context, task Task, isCluster bool, 
 	if d, ok := e.cfg.UnreachableAfterTask[task.ID]; ok && d > 0 {
 		facts.UnreachableAfter = d
 	}
+	facts.DumpStalledAfter = e.cfg.DumpStalledAfter
 	facts.StalledAfter = e.cfg.StalledAfter
 	if facts.StalledAfter <= 0 && e.s != nil {
 		e.s.mu.Lock()
@@ -195,22 +198,17 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 		tf.OwnedElsewhere = s.leaseManager != nil && task.OwnerWorkerID != "" && task.OwnerWorkerID != s.clusterWorkerID
 		s.mu.Unlock()
 	}
-	e.mu.Lock()
-	if e.unreach == nil {
-		e.unreach = map[string]unreachTrack{}
-	}
-	tr := e.unreach[task.ID]
-	if tf.Desired == TaskDesiredRun && (task.State == StateStarting || task.State == StateRetryBackoff) {
-		if tr.since.IsZero() {
-			tr.since = now
+	if e.s != nil {
+		if tf.Desired != TaskDesiredRun {
+			e.s.forgetLiveness(task.ID) // the next Start counts silence from then
+		} else if snap, ok := e.s.LivenessSnapshot(task.ID); ok || e.s.hasRunner() {
+			if !ok {
+				e.s.SourceLiveness(task.ID) // the clock starts now
+				snap, _ = e.s.LivenessSnapshot(task.ID)
+			}
+			tf.Liveness = &health.Liveness{LastRead: snap.LastRead, LastFailure: snap.LastFailure, FailureDetail: snap.FailureDetail}
 		}
-		tr.passes++
-		e.unreach[task.ID] = tr
-		tf.UnreachableFor, tf.UnreachablePasses = now.Sub(tr.since), tr.passes
-	} else {
-		delete(e.unreach, task.ID)
 	}
-	e.mu.Unlock()
 	return tf
 }
 
