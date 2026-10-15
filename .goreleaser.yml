@@ -53,6 +53,7 @@ archives:
       - config.example.yaml
       - config.production.example.yaml
       - migrations/*.sql
+      - scripts/adopt-leftovers.sh
       - docs/guide/*.md
       - docs/guide/**/*
 

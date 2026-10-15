@@ -12,9 +12,9 @@ Maintenance rules:
 
 ## [Unreleased]
 
-### Fixed
+## [v0.5.67] - 2026-10-15
 
-- Tip QA b4c52f4 P1：`health.evaluator=off`（默认）时 standalone 遗留目录（从 v0.5.66 升级的任务、未配置密钥时建的任务在加密钥重启后）不报任何 finding、`/api/health` 仍 200，备份静默停止。现在任何评估器模式下都打开 CRITICAL `TASK_UNADOPTED`（off/shadow 走旧 sink），`/api/health` 降级；adopt 后立即关闭，目录移出 data_dir 后 5s 内关闭。新增 `scripts/adopt-leftovers.sh` 按 JSON 映射批量 adopt（可选 start）。design 0009 §9 删去未实现的混版本自动退回 `shadow`。
+发布说明：`docs/releases/v0.5.67.md`。新配置项：`standalone.task_records`、`standalone.task_key_file`、`standalone.task_key_previous_file`、`health.evaluator`（默认 `off`）、`health.sweep_interval_sec`、`health.rehash_bytes_per_sec`、`health.unreachable_after_sec`、`health.unreachable_after_task_sec`、`health.signal_stale_after_sec`。新迁移 `000009`（只增不改、可选，`minRequiredSchemaVersion` 仍为 6）。存活探针请用 `/healthz`：`/api/health` 在有打开的 CRITICAL finding 时返回 503。
 
 ### Added
 
@@ -22,10 +22,15 @@ Maintenance rules:
 
 - #385 / ADR 0010：standalone（无 `meta_dsn`）重启后任务自动恢复。任务配置（含源库密码）、期望状态、失败和删除墓碑以 AES-256-GCM 加密存于 `{data_dir}/.tasks.enc`（0600，原子写）。密钥来自 `BINLOG_SERVER_TASK_KEY` 或 `standalone.task_key_file`，`binlog-server task-key generate --out <path>` 生成；`standalone.task_key_previous_file` / `BINLOG_SERVER_TASK_KEY_PREVIOUS` 用于轮换。文件不存位置，续传位置总是从磁盘算；磁盘上一个段都没有的 LATEST 任务按 LATEST 续跑并记 `TASK_RESUMED_AT_LATEST` 事件（有段但读不出位置仍以 `RESUME_POSITION_UNKNOWN` 失败）；GTID 任务续传的 GTID 集合 = 起始集 ∪ `Ledger.SealedStored` ∪ 打开段尾（MySQL）。新配置 `standalone.task_records`（on 默认 / off）。
 - 新 finding `TASK_RECORDS_FAILED`（CRITICAL，`_cluster`，subject `key_missing`/`key_invalid`/`wrong_key`/`corrupt`/`write`）。文件存在但无法读取时不恢复任务、拒绝改动任务的操作且不覆盖文件，目录报 `TASK_UNADOPTED`。没有记录的目录仍报 `TASK_UNADOPTED`（#388）。
+- ADR 0009 健康评估器第二阶段 P2-1..P2-4（#375、#376、#377、#378、#380、#383），`health.evaluator` 默认 `off`：健康类型与 kind 注册表、迁移 000009 与健康存储（standalone 用 `.health.json`）、评估器与 rehasher、信号类 kind（socket 层源活性时钟驱动 `DUMP_STALLED` 与新增的 `SOURCE_UNREACHABLE`）。
 - e2e `smoke-standalone-restart.sh`（MySQL 8.0、MariaDB 11.4），进入 `run-suite.sh` quick 档。
 
 ### Fixed
 
+- Tip QA b4c52f4 P1：`health.evaluator=off`（默认）时 standalone 遗留目录（从 v0.5.66 升级的任务、未配置密钥时建的任务在加密钥重启后）不报任何 finding、`/api/health` 仍 200，备份静默停止。现在任何评估器模式下都打开 CRITICAL `TASK_UNADOPTED`（off/shadow 走旧 sink），`/api/health` 降级；adopt 后立即关闭，目录移出 data_dir 后 5s 内关闭。新增 `scripts/adopt-leftovers.sh` 按 JSON 映射批量 adopt（可选 start）。design 0009 §9 删去未实现的混版本自动退回 `shadow`。
+- #381：被截断或比封存时短的封存段判为不可读（`SEGMENT_UNREADABLE`），`/window`、`/replay` 在它之前停下。
+- #389：run 写 FAILED 与退出之间的 GET 不再把 FAILED 变成无声的 STOPPED。
+- #391：切换源后续传集合包含所有封存段的 GTID（不再重复存储、误报 `SEGMENT_OVERLAP`）；checkpoint 与 OPEN 行在事务边界合并写入，不再每个事件写一次。
 - standalone 下 `GET /api/findings` 现在列出评估器管理的 `_cluster` 结论；评估器建立前产生的信号 kind 失败会移交给评估器，不再停留在旧账本里不落盘。
 
 ## [v0.5.66] - 2026-10-15
