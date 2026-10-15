@@ -764,5 +764,5 @@ P2-4 按 §5.5、§5.6、§6 落地（`internal/health/signals.go`、`internal/t
 
 - 只在评估器 `on` 时写（与 P2-4 的 SOURCE_UNREACHABLE、TASK_FAILED 一样，旧 Report 路径不写）。有 meta（任务库）时永不派生。
 - **删除也会打开**：standalone 的 `DELETE` 不删目录，删掉后目录仍有分段，就和重启后的残留目录一样，打开 TASK_UNADOPTED。处理方式一样：adopt，或把目录移出 data_dir。之所以不区分，是因为重启后两者无法区分（standalone 不落盘任务记录）。
-- **没有做的另一半**：重启后自动恢复复制。这需要把任务规格（含源密码）落在 data_dir 下，改变 ADR 0005「不用本地库代替元数据 MySQL」，留给 Adrian 决定。
+- **没有做的另一半**：重启后自动恢复复制。Adrian 已决定做（#385），见 [ADR 0010](../adr/0010-standalone-task-records.md)：任务规格与源密码加密存于 `{data_dir}/.tasks.enc`，重启后按磁盘位点自动续传。TASK_UNADOPTED 仍用于没有记录的目录；records 开启时，删除的任务留墓碑，不再打开 TASK_UNADOPTED。
 - 已知（§17.1 遗留的 P3）：无 meta 时任务列表的 `open_findings` 不含评估器的行；`/api/findings` 与任务健康已包含 TASK_UNADOPTED。
