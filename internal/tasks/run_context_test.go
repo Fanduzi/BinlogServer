@@ -72,7 +72,12 @@ func TestScheduler_RunContextOwnsRunners(t *testing.T) {
 	if got.DesiredRun != TaskDesiredRun || got.State == StateStopped {
 		t.Fatalf("shutdown must not record a Stop: desired=%s state=%s", got.DesiredRun, got.State)
 	}
-	if err := s.StartTask(task.ID); !errors.Is(err, ErrShuttingDown) {
+	fresh, err := s.CreateTask("cluster-b", "cluster-b-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.ConfigureSource(fresh.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl", Password: "x", Flavor: "mysql"})
+	if err := s.StartTask(fresh.ID); !errors.Is(err, ErrShuttingDown) {
 		t.Fatalf("start after the run context ended: %v, want ErrShuttingDown", err)
 	}
 }

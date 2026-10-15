@@ -167,18 +167,21 @@ func (s *Scheduler) noteRunnerError(taskID string, err error) {
 
 // StartSourceLiveness runs the probe loop until ctx ends.
 func (s *Scheduler) StartSourceLiveness(ctx context.Context) {
-	go func() {
-		t := time.NewTicker(s.liveness.probeEvery / 2)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				s.probeSilentSources(ctx)
-			}
+	go s.RunSourceLiveness(ctx)
+}
+
+// RunSourceLiveness is the probe loop; it returns when ctx ends.
+func (s *Scheduler) RunSourceLiveness(ctx context.Context) {
+	t := time.NewTicker(s.liveness.probeEvery / 2)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.probeSilentSources(ctx)
 		}
-	}()
+	}
 }
 
 // probeSilentSources probes, at most once at a time per task, every task

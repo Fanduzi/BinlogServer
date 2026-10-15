@@ -1,7 +1,7 @@
 # internal/app Module
 
 ## Files
-- `app.go`: 应用主流程与运行时装配。Restore 之前先对齐遗留 `desired_run`。worker 启动、认领任务之前，删掉 data_dir 下每个任务目录里崩溃留下的 `.takeover-*`；本进程正在写的那份不删。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。worker（含单机和 all-in-one）同时启动残留 Binlog Dump 的 KILL 重试，任何任务状态都会试。集群模式打开 dump fence；schema 还没有 `pending_dump_cleanup` 列时启动日志写明要先跑迁移 `000004`。 关停时等待 finding sink 最后一次 flush 写完再返回。
+- `app.go`: 应用主流程与运行时装配。Restore 之前先对齐遗留 `desired_run`。worker 启动、认领任务之前，删掉 data_dir 下每个任务目录里崩溃留下的 `.takeover-*`；本进程正在写的那份不删。同一个上传客户端既删对象，也在接管时把封存 `UPLOADED` 对象读回来。配置了上传且本进程是 worker 时，启动已封存 `UPLOAD_FAILED` 的后台补传。worker（含单机和 all-in-one）同时启动残留 Binlog Dump 的 KILL 重试，任何任务状态都会试。集群模式打开 dump fence；schema 还没有 `pending_dump_cleanup` 列时启动日志写明要先跑迁移 `000004`。 关停有界且有序：取消 runCtx → `WaitRuns`（10s，runner 都从 runCtx 派生）→ 等后台 goroutine（HTTP 优雅关闭 5s、评估器、复核器、存活探测、补传、记录重试等，5s）→ 再试一次欠下的记录保存 → 结束 finding sink 并等它最后一次 flush（5s）。Run 返回后本次运行启动的任何东西都不再写 data_dir。
 - `app.go` / `startHealthEvaluator`（ADR 0009 P2-3）: `health.evaluator` 为 shadow/on 时装配评估器与复核器：有 meta 时写元数据库（000009），否则写 `{data_dir}/.health.json`；集群模式的 fence 是任务 lease（node = worker id），否则用持久化的 `{data_dir}/.node_id`；实例 id 每次启动随机生成。
 - `app.go` / `standaloneTaskRecords`（ADR 0010）: 没有 `meta_dsn` 且 `standalone.task_records=on`（默认）时装配 `{data_dir}/.tasks.enc`，密钥取 `BINLOG_SERVER_TASK_KEY` 或 `standalone.task_key_file`（上一把密钥用于轮换）；Restore 和认领之后调用 `ResumeRecordedTasks`。off 或设了 `meta_dsn` 而文件存在时只记日志。
 - `datadir_lock_unix.go` / `datadir_lock_other.go`: standalone 启动时对 `{data_dir}/.tasks.lock` 取 flock（写入 pid），取不到报错退出；非 unix 为空操作。

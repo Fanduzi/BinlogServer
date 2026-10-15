@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, shutdown waiting for the finding sink's last flush (WaitFindingSink), and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -137,6 +137,16 @@ func (a *App) Run(ctx context.Context) error {
 	// 上游取消或内部致命事件（如注册所有权丢失）都会触发全链路退出。
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
+	// bg counts the goroutines this run starts that may write data_dir or
+	// the metadata store; shutdown joins them (bounded).
+	var bg sync.WaitGroup
+	spawn := func(f func()) {
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			f()
+		}()
+	}
 
 	tracerProvider, shutdownTracing, err := initTracing(a.cfg.Tracing)
 	if err != nil {
@@ -319,6 +329,9 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 	scheduler := tasks.NewScheduler(opts...)
+	// Task runners belong to this run: runCtx ending cancels them, and the
+	// shutdown below joins them before Run returns.
+	scheduler.SetRunContext(runCtx)
 	// Seed the open findings in both modes: a restarted process shows them in
 	// /metrics, and schema 6 (no task_findings) turns the store off up front.
 	if err := scheduler.LoadOpenFindings(runCtx); err != nil {
@@ -328,16 +341,29 @@ func (a *App) Run(ctx context.Context) error {
 		log.Printf("load open findings from metadata store: %v", err)
 	}
 	// ADR 0009: one writer for findings; retries failed writes and task rows.
-	scheduler.StartFindingSink(runCtx, 5*time.Second)
+	// The sink outlives runCtx: runners report their last findings while
+	// they shut down, and the sink's final flush must come after that.
+	sinkCtx, sinkCancel := context.WithCancel(context.Background())
+	scheduler.StartFindingSink(sinkCtx, 5*time.Second)
 	defer func() {
-		// The sink flushes once more after runCtx ends; let that write land
-		// in data_dir before Run returns.
+		// Bounded, ordered shutdown. Nothing this run started may touch
+		// data_dir after Run returns (the data_dir lock and the metadata
+		// store are released by earlier defers, which run after this one).
 		runCancel()
-		if !scheduler.WaitFindingSink(10 * time.Second) {
-			log.Printf("shutdown: findings writer did not finish its last flush in 10s")
+		if !scheduler.WaitRuns(shutdownRunnersTimeout) {
+			log.Printf("shutdown: task runners did not stop in %s", shutdownRunnersTimeout)
+		}
+		if !waitGroupTimeout(&bg, shutdownBackgroundTimeout) {
+			log.Printf("shutdown: background workers did not stop in %s", shutdownBackgroundTimeout)
+		}
+		// A record save that failed is owed; try once more from memory.
+		scheduler.RetryRecordSave()
+		sinkCancel()
+		if !scheduler.WaitFindingSink(shutdownFindingsTimeout) {
+			log.Printf("shutdown: findings writer did not finish its last flush in %s", shutdownFindingsTimeout)
 		}
 	}()
-	if err := startHealthEvaluator(runCtx, a.cfg, scheduler, mysqlStore, resolvedWorkerID); err != nil {
+	if err := startHealthEvaluator(runCtx, a.cfg, scheduler, mysqlStore, resolvedWorkerID, spawn); err != nil {
 		return err
 	}
 	if workerEnabled {
@@ -377,30 +403,32 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.cfg.MetaDSN == "" && a.cfg.Standalone.TaskRecords != "off" {
 		// A save that failed (TASK_RECORDS_FAILED/write) is retried from memory.
-		go runRecordSaveRetry(runCtx, scheduler, 30*time.Second)
+		spawn(func() { runRecordSaveRetry(runCtx, scheduler, 30*time.Second) })
 	}
 	if workerEnabled {
-		go scheduler.RunDumpCleanupRetry(runCtx)
+		spawn(func() { scheduler.RunDumpCleanupRetry(runCtx) })
 	}
 	if workerEnabled && uploadConfigured {
 		// 封存文件在本进程磁盘上。后台补传复用 RetryFailedUploads，不新增上传实现。
 		// control-plane-only 不跑：它没有这些本地文件。手动补传 API 仍在控制面。
-		go scheduler.RunBackgroundUploadRetry(runCtx, 0)
+		spawn(func() { scheduler.RunBackgroundUploadRetry(runCtx, 0) })
 	}
 	if workerEnabled && isClusterMode(a.cfg) {
 		if mysqlStore != nil {
 			// worker 在线状态通过心跳写入元数据表供 control-plane 观测。
 			sink := workerHeartbeatSink(mysqlStore)
-			go startWorkerHeartbeatLoop(
-				runCtx,
-				sink,
-				resolvedWorkerID,
-				effectiveHostname(resolvedWorkerID),
-				effectiveBinaryVersion(),
-				5*time.Second,
-			)
+			spawn(func() {
+				startWorkerHeartbeatLoop(
+					runCtx,
+					sink,
+					resolvedWorkerID,
+					effectiveHostname(resolvedWorkerID),
+					effectiveBinaryVersion(),
+					5*time.Second,
+				)
+			})
 			// 定期认领 STARTING 与租约已过期任务，驱动分发后的任务进入真实执行。
-			go startWorkerClaimLoop(runCtx, scheduler, 2*time.Second)
+			spawn(func() { startWorkerClaimLoop(runCtx, scheduler, 2*time.Second) })
 		}
 	}
 
@@ -462,11 +490,17 @@ func (a *App) Run(ctx context.Context) error {
 	// readyCh 只在 listener 绑定成功后关闭。
 	a.readyOnce.Do(func() { close(a.readyCh) })
 
-	go func() {
+	spawn(func() {
 		<-runCtx.Done()
-		// graceful shutdown 允许 in-flight request 尽量完成。
-		_ = server.Shutdown(context.Background())
-	}()
+		// graceful shutdown lets in-flight requests finish (an Adopt or Start
+		// may be writing the task record), bounded so SIGTERM cannot hang.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: http server: %v", err)
+			_ = server.Close()
+		}
+	})
 
 	// Serve 返回 http.ErrServerClosed 表示预期关闭，不应视为错误。
 	err = server.Serve(ln)
@@ -528,6 +562,30 @@ func standaloneTaskRecords(cfg config.Config) tasks.Option {
 		log.Printf("task records: on; key id %s, previous key id %q", key.ID(), prev.ID())
 	}
 	return tasks.WithTaskRecords(taskrecords.Open(cfg.DataDir, key, prev), keyErr)
+}
+
+// Shutdown bounds. Their sum stays under shutdownHardLimit in cmd, so a
+// SIGTERM ends the process cleanly well before an orchestrator's kill.
+const (
+	shutdownHTTPTimeout       = 5 * time.Second
+	shutdownRunnersTimeout    = 10 * time.Second
+	shutdownBackgroundTimeout = 5 * time.Second
+	shutdownFindingsTimeout   = 5 * time.Second
+)
+
+// waitGroupTimeout waits for wg up to d and reports whether it finished.
+func waitGroupTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 func runRecordSaveRetry(ctx context.Context, scheduler *tasks.Scheduler, every time.Duration) {
@@ -1148,7 +1206,7 @@ func isNonNilInterface(v any) bool {
 // the metadata store (migration 000009; without it the legacy finding path
 // keeps the managed kinds); standalone writes {data_dir}/.health.json. The
 // fence is the task lease in cluster mode, else the persisted node id.
-func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tasks.Scheduler, metaStore appMetaStore, workerID string) error {
+func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tasks.Scheduler, metaStore appMetaStore, workerID string, spawn func(func())) error {
 	mode, err := tasks.ParseEvaluatorMode(cfg.Health.Evaluator)
 	if err != nil {
 		return err
@@ -1186,12 +1244,13 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 		return fmt.Errorf("health node id: %w", err)
 	}
 	e := tasks.NewEvaluator(scheduler, ecfg)
-	go e.Run(ctx)
+	spawn(func() { e.Run(ctx) })
 	// The source liveness clock keeps running while the task is out of
 	// RUNNING: a silent source is probed (P2-4, design §18). Off mode stays
 	// as before, without probes.
-	scheduler.StartSourceLiveness(ctx)
-	go tasks.NewRehasher(e, cfg.Health.RehashBytesPerSec).Run(ctx)
+	spawn(func() { scheduler.RunSourceLiveness(ctx) })
+	rehasher := tasks.NewRehasher(e, cfg.Health.RehashBytesPerSec)
+	spawn(func() { rehasher.Run(ctx) })
 	log.Printf("health evaluator %s (sweep %s, rehash %d B/s, node %s)", mode, ecfg.Sweep, cfg.Health.RehashBytesPerSec, ecfg.NodeID)
 	return nil
 }

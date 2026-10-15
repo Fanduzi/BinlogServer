@@ -65,6 +65,12 @@ func (s *Scheduler) resumeHeldTask(id string) error {
 // 认领续跑读 backup_tasks 上的计数，不归零。
 func (s *Scheduler) startTask(id string, opts taskStart) error {
 	s.mu.Lock()
+	// Shutdown: no new run once the process run context ended, before any
+	// state is written.
+	if s.runBase != nil && s.runBase.Err() != nil {
+		s.mu.Unlock()
+		return ErrShuttingDown
+	}
 
 	if done, ok := s.runs[id]; ok && !isClosed(done) {
 		s.mu.Unlock()
@@ -319,7 +325,16 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	}
 	// 先登记 run 再放开锁。之后的 store 读要么看到这次 publish，要么因 publish
 	// 世代已经前进而不覆盖 owner/epoch；有 run 时 STOPPED 旧行也不会被当成“还没启动”。
-	ctx, cancel := context.WithCancel(context.Background())
+	base := s.runBase
+	if base == nil {
+		base = context.Background()
+	}
+	if base.Err() != nil {
+		s.flushPendingEventsLocked()
+		s.mu.Unlock()
+		return ErrShuttingDown
+	}
+	ctx, cancel := context.WithCancel(base)
 	done := make(chan struct{})
 	if _, open := s.runs[id]; open && !isClosed(s.runs[id]) {
 		cancel()
@@ -352,6 +367,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		}
 	}
 
+	s.runWG.Add(1)
 	go s.runTask(ctx, id, task, done, opts.resetBudget, stopRenew)
 	return nil
 }
@@ -1016,6 +1032,8 @@ func (s *Scheduler) settleForeignStop(task Task) error {
 
 func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan struct{}, resetBudget bool, stopRenew func()) {
 	openedSpec := task.AppliedSpecRevision
+	// Done runs last, after the STOPPED write, the lease release and any reopen.
+	defer s.runWG.Done()
 	defer func() {
 		if stopRenew != nil {
 			stopRenew()

@@ -1,6 +1,6 @@
 // Package cmd provides module-level functionality for cmd.
 // input: build metadata, root cobra command wiring, process startup dependencies
-// output: version banner rendering, version-only output, default app startup hook, and a startup failure written to the configured logger before the process exits
+// output: version banner rendering, version-only output, default app startup hook, a startup failure written to the configured logger before the process exits, and a bounded SIGINT/SIGTERM shutdown (shutdownWatchdog: second signal exits at once, exit 2 after 30s)
 // pos: CLI support layer separating user-facing version queries from runtime boot
 // note: if this file changes, update this header and module README.md.
 package cmd
@@ -8,10 +8,13 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"os/signal"
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"binlog_server/internal/app"
 	"binlog_server/internal/config"
@@ -53,6 +56,9 @@ func defaultRunRootApp(configPath, encryptionKey string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	runDone := make(chan struct{})
+	defer close(runDone)
+	go shutdownWatchdog(ctx, stop, runDone, shutdownHardLimit, os.Exit)
 	_, cleanupLogger, err := logging.Setup(ctx, cfg.Log)
 	if err != nil {
 		return fmt.Errorf("setup logger: %w", err)
@@ -66,6 +72,31 @@ func defaultRunRootApp(configPath, encryptionKey string) error {
 		return wrapped
 	}
 	return nil
+}
+
+// shutdownHardLimit caps a SIGINT/SIGTERM shutdown. App.Run's own bounds
+// (HTTP 5s, runners 10s, background 5s, findings 5s) fit inside it.
+const shutdownHardLimit = 30 * time.Second
+
+// shutdownWatchdog: after the first signal it restores the default
+// handlers, so a second SIGINT/SIGTERM kills the process at once, and it
+// exits with code 2 if Run has not returned within limit.
+func shutdownWatchdog(ctx context.Context, stop func(), runDone <-chan struct{}, limit time.Duration, exit func(int)) {
+	select {
+	case <-runDone:
+		return
+	case <-ctx.Done():
+	}
+	stop()
+	log.Printf("shutdown: signal received; stopping tasks (limit %s, send the signal again to exit now)", limit)
+	t := time.NewTimer(limit)
+	defer t.Stop()
+	select {
+	case <-runDone:
+	case <-t.C:
+		log.Printf("shutdown: did not finish in %s; exiting", limit)
+		exit(2)
+	}
 }
 
 func effectiveVersionInfo() versionInfo {
