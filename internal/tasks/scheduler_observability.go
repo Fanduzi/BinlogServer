@@ -75,10 +75,13 @@ func (s *Scheduler) GetReplicationProgress(taskID string) (ReplicationProgress, 
 func (s *Scheduler) Restore(ctx context.Context) error {
 	if s.store == nil {
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		if s.records != nil {
 			s.restoreRecordsLocked()
 		}
+		s.mu.Unlock()
+		// Leftover directories are reported in every evaluator mode (tip QA
+		// b4c52f4 P1); with the evaluator off this is the only report.
+		s.reconcileUnadoptedLegacy()
 		return nil
 	}
 

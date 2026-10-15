@@ -212,6 +212,19 @@ func (e *Evaluator) adoptEarlySignals() {
 		b.forget(f.TaskID, f.Kind, f.Subject)
 		e.Signal(f.TaskID, f.Kind, f.Subject, false, f.Detail)
 	}
+	// TASK_UNADOPTED the legacy sink raised before the evaluator took over
+	// (reconcileUnadoptedLegacy) is handed over: resolved in the legacy
+	// store, then derived and stored by the evaluator on its first pass.
+	if e.s != nil {
+		e.s.mu.Lock()
+		handed := e.s.unadoptedOpen
+		e.s.unadoptedOpen = nil
+		e.s.mu.Unlock()
+		for id := range handed {
+			b.resolve(id, findingTaskUnadopted, "")
+			e.MarkDirty(id, ReasonStartup)
+		}
+	}
 }
 
 // Mode is the feature flag.

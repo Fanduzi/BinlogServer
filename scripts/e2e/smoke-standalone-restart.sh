@@ -83,7 +83,7 @@ write_rows() { # flavor src db from to
 # ---- server helpers --------------------------------------------------------
 start_server() { # data_dir key_file(or empty) log
   local -a env=(BINLOG_SERVER_MODE=standalone BINLOG_SERVER_LISTEN_ADDR="$LISTEN" BINLOG_SERVER_DATA_DIR="$1"
-    BINLOG_SERVER_META_DSN= BINLOG_SERVER_HEALTH_EVALUATOR=on)
+    BINLOG_SERVER_META_DSN= BINLOG_SERVER_HEALTH_EVALUATOR="${EVALUATOR:-on}")
   [[ -n "$2" ]] && env+=(BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$2")
   env -u BINLOG_SERVER_TASK_KEY "${env[@]}" "$BIN" --config "$ROOT_DIR/deploy/e2e/config.yaml" >>"$3" 2>&1 &
   SERVER_PID=$!
@@ -272,6 +272,7 @@ run_flavor() {
 
   if [[ "$flavor" == mysql80 ]]; then
     locked_cases "$flavor" "$src" "$id" "$data" "$slog" "$db"
+    key_after_tasks_case "$flavor" "$src" "$db"
   fi
   stop_server
 }
@@ -308,6 +309,40 @@ locked_cases() { # flavor src id data log db
   write_rows "$flavor" "$src" "$6" 151 160
   wait_caught_up "$flavor" "$src" "$id"
   log "right key again: task resumed"
+}
+
+# Tip QA b4c52f4 P1, with the default evaluator off: a task created while
+# no key was configured is a leftover after the restart that adds the key.
+# It must raise TASK_UNADOPTED and degrade /api/health (it was silent), and
+# scripts/adopt-leftovers.sh must bring it back.
+key_after_tasks_case() { # flavor src db
+  local flavor="$1" src="$2" db="$3" port data="$WORK/$1/nokey-data" slog="$WORK/$1/nokey.log" id code
+  port="$(docker port "$src" 3306/tcp | awk -F: '{print $NF; exit}')"
+  stop_server
+  mkdir -p "$data"
+  EVALUATOR=off start_server "$data" "" "$slog"
+  id="$(curl -fsS -XPOST "$API/api/tasks" -d "$(create_body "$flavor" "$port" nokey)" | jq -r .id)"
+  curl -fsS -o /dev/null -XPOST "$API/api/tasks/$id/start"
+  wait_state "$id" RUNNING
+  write_rows "$flavor" "$src" "$db" 161 165
+  wait_caught_up "$flavor" "$src" "$id"
+  stop_server
+  EVALUATOR=off start_server "$data" "$WORK/task.key" "$slog"
+  wait_finding TASK_UNADOPTED ""
+  code="$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")"
+  [[ "$code" == 503 ]] || { echo "health $code with a leftover and the evaluator off, want 503" >&2; return 1; }
+  log "evaluator off: task $id created without a key is TASK_UNADOPTED after the key restart, /api/health 503"
+  jq -n --arg id "$id" --arg pass "$SECRET" --arg fl "$(flavor_name "$flavor")" --argjson port "$port" \
+    '{($id): {name: "nokey", cluster_key: "nokey", source: {host: "127.0.0.1", port: $port, user: "root", password: $pass, flavor: $fl, server_id: 431999}}}' >"$WORK/adopt-map.json"
+  chmod 600 "$WORK/adopt-map.json"
+  "$ROOT_DIR/scripts/adopt-leftovers.sh" --api "$API" --map "$WORK/adopt-map.json" --start
+  wait_state "$id" RUNNING
+  assert_no_finding_kind TASK_UNADOPTED
+  write_rows "$flavor" "$src" "$db" 166 170
+  wait_caught_up "$flavor" "$src" "$id"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")"
+  [[ "$code" == 200 ]] || { echo "health $code after bulk adopt, want 200: $(curl -sS "$API/api/health")" >&2; return 1; }
+  log "adopt-leftovers.sh: task $id adopted and running, /api/health 200"
 }
 
 port=23390

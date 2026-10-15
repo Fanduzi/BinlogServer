@@ -14,6 +14,7 @@
 | release-assets.sh | 构建含服务端、migrate、migration SQL、`docs/guide` 与 checksums 的多平台 release 归档；作为本地/手工发版兜底入口。`docs/guide` 与 GoReleaser 归档一致 |
 | verify-phase-acceptance.sh | 统一执行阶段验收命令（test/race/vet/e2e-quick）并输出耗时摘要 |
 | failover-dogfood.sh | 一个 meta MySQL 上的双 worker 租约接管复跑；控制面走 verify-binlog-server helper |
+| adopt-leftovers.sh | standalone 批量 adopt：列出打开的 `TASK_UNADOPTED`，按 `--map`（0600 JSON：任务 id → name、cluster_key、source）逐个 adopt，`--start` 同时启动；有未 adopt 的遗留目录时非零退出 |
 | e2e/ | E2E 套件与场景脚本 |
 
 ## Exports

@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- Tip QA b4c52f4 P1：`health.evaluator=off`（默认）时 standalone 遗留目录（从 v0.5.66 升级的任务、未配置密钥时建的任务在加密钥重启后）不报任何 finding、`/api/health` 仍 200，备份静默停止。现在任何评估器模式下都打开 CRITICAL `TASK_UNADOPTED`（off/shadow 走旧 sink），`/api/health` 降级；adopt 后立即关闭，目录移出 data_dir 后 5s 内关闭。新增 `scripts/adopt-leftovers.sh` 按 JSON 映射批量 adopt（可选 start）。design 0009 §9 删去未实现的混版本自动退回 `shadow`。
+
 ### Added
 
 > 升级须知（#385 / ADR 0010）：standalone 升级后首次启动若未配置密钥，`TASK_RECORDS_FAILED/key_missing` 打开，用 `binlog-server task-key generate --out <path>` 生成并配置 `standalone.task_key_file`。`GET /api/health` 在有打开的 CRITICAL finding 时返回 503 `degraded`（`/healthz` 不变）；data_dir 写满时 finding 以内存为准继续由 `/api/findings` 返回，并出现合成的 CRITICAL `FINDINGS_PERSIST_FAILED`。同一 `data_dir` 只允许一个 standalone 进程：启动时对 `{data_dir}/.tasks.lock` 取 flock，取不到直接报错退出（NFS 上 flock 不可靠）。记录不可用时改动任务的请求返回 503 `TASK_RECORDS_UNAVAILABLE`（原为 500）；Stop/Delete 从不被拒绝，保存失败时只改内存、打开 `TASK_RECORDS_FAILED/write`（每 30s 重试保存），重启后任务会被恢复。环境变量中的密钥加载后即 unset。
