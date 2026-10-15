@@ -8,9 +8,20 @@ package health
 import (
 	"sort"
 	"strings"
+	"time"
 )
 
 func (f *Facts) complete(s Scope) bool { return f != nil && f.Complete[s] }
+
+// allComplete: every scope the kind needs is complete (close and update).
+func (f *Facts) allComplete(scopes []Scope) bool {
+	for _, s := range scopes {
+		if !f.complete(s) {
+			return false
+		}
+	}
+	return len(scopes) > 0
+}
 
 // waived reports the instance's evidence is exactly waived.
 func waived(f *Facts, in Instance, spec KindSpec) bool {
@@ -38,7 +49,7 @@ func (r Registry) derive(f *Facts) (Desired, map[Key]bool) {
 	out, waivedKeys := Desired{}, map[Key]bool{}
 	for _, k := range r.kinds() {
 		spec := r[k]
-		if !spec.Managed || spec.Derive == nil || !f.complete(spec.Scopes[0]) {
+		if !spec.Managed || spec.Derive == nil || len(spec.Scopes) == 0 || !f.complete(spec.Scopes[0]) {
 			continue
 		}
 		for _, in := range spec.Derive(f) {
@@ -90,21 +101,26 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			continue
 		}
 		key := o.Key()
+		if seen[key] {
+			continue // a duplicate stored row for the same key: one transition per key
+		}
 		seen[key] = true
 		if want, ok := desired[key]; ok {
 			op := Op("")
 			switch {
 			case want.Severity.rank() > o.Severity.rank():
 				op = OpEscalate
+			case want.Severity.rank() < o.Severity.rank():
+				op = OpDowngrade
 			case want.Severity != o.Severity || want.Detail != o.Detail || want.Evidence != o.Evidence || strings.Join(want.Segments, "\x00") != strings.Join(o.Segments, "\x00"):
 				op = OpUpdate
 			}
 			if op != "" {
-				out = append(out, Transition{Key: key, Op: op, Reason: ReasonEval, At: f.Now, KindVersion: spec.Version, Instance: want})
+				out = append(out, Transition{Key: key, Op: op, Reason: ReasonEval, At: f.Now, FactAt: factAt(want, f), KindVersion: spec.Version, Instance: want})
 			}
 			continue
 		}
-		if !f.complete(spec.Scopes[0]) {
+		if !f.allComplete(spec.Scopes) {
 			continue
 		}
 		if waivedKeys[key] {
@@ -114,14 +130,17 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 		if spec.Clear.Holds != nil && !spec.Clear.Holds(f, key) {
 			continue
 		}
-		if spec.Clear.HoldDown > 0 && f.Now.Sub(o.LastSeen) < spec.Clear.HoldDown {
-			continue
+		if spec.Clear.HoldDown > 0 {
+			since, ok := f.AbsentSince[key]
+			if !ok || f.Now.Sub(since) < spec.Clear.HoldDown {
+				continue
+			}
 		}
 		out = append(out, closeOf(o, spec, ReasonEval, f))
 	}
 	for key, want := range desired {
 		if !seen[key] {
-			out = append(out, Transition{Key: key, Op: OpOpen, Reason: ReasonEval, At: f.Now, KindVersion: r[key.Kind].Version, Instance: want})
+			out = append(out, Transition{Key: key, Op: OpOpen, Reason: ReasonEval, At: f.Now, FactAt: factAt(want, f), KindVersion: r[key.Kind].Version, Instance: want})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return lessKey(out[i].Key, out[j].Key) })
@@ -129,8 +148,16 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 }
 
 func closeOf(o Finding, spec KindSpec, reason string, f *Facts) Transition {
-	return Transition{Key: o.Key(), Op: OpClose, Reason: reason, At: f.Now, KindVersion: spec.Version,
+	return Transition{Key: o.Key(), Op: OpClose, Reason: reason, At: f.Now, FactAt: f.Now, KindVersion: spec.Version,
 		Instance: Instance{Key: o.Key(), Severity: o.Severity, Detail: o.Detail, Evidence: o.Evidence, Segments: o.Segments}}
+}
+
+// factAt is the instance's fact time, or the evaluation time.
+func factAt(in Instance, f *Facts) time.Time {
+	if in.FactAt.IsZero() {
+		return f.Now
+	}
+	return in.FactAt
 }
 
 func lessKey(a, b Key) bool {
@@ -146,7 +173,8 @@ func lessKey(a, b Key) bool {
 // HealthOf is the task's health given its open findings (after applying
 // this pass's transitions): any CRITICAL is UNHEALTHY, any WARNING is
 // DEGRADED (INFO counts for neither), otherwise an incomplete scope that a
-// managed kind is judged from is UNKNOWN. The signal scope's internal
+// managed kind is judged from is UNKNOWN; a scope no evaluator produces
+// yet (Produced) never is. The signal scope's internal
 // unknown (open row, no success since start) is never a reason: the open
 // row already decides.
 func (r Registry) HealthOf(open []Finding, f *Facts) TaskHealth {
@@ -164,8 +192,13 @@ func (r Registry) HealthOf(open []Finding, f *Facts) TaskHealth {
 	}
 	scopes := map[Scope]bool{}
 	for _, spec := range r {
-		if spec.Managed && spec.Scopes[0] != ScopeSignals && !f.complete(spec.Scopes[0]) {
-			scopes[spec.Scopes[0]] = true
+		if !spec.Managed {
+			continue
+		}
+		for _, s := range spec.Scopes {
+			if s != ScopeSignals && Produced[s] && !f.complete(s) {
+				scopes[s] = true
+			}
 		}
 	}
 	for s := range scopes {

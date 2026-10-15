@@ -277,4 +277,4 @@ const (
 // Produced lists the scopes some evaluator produces in this phase. HealthOf
 // never reports UNKNOWN for a scope that is not produced (chain.objects and
 // verify arrive with the phase 3 Verifier).
-var Produced = map[Scope]bool{ScopeChainLocal: true, ScopeChainObjects: true, ScopeTaskState: true, ScopeSignals: true, ScopeStore: true, ScopeVerify: true}
+var Produced = map[Scope]bool{ScopeChainLocal: true, ScopeTaskState: true, ScopeSignals: true, ScopeStore: true}

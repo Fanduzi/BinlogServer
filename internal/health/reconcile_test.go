@@ -236,9 +236,9 @@ func TestWaiverExactEvidenceOnly(t *testing.T) {
 
 func TestCanonicalGTIDRanges(t *testing.T) {
 	cases := map[string]string{
-		"B:5-6,a:3-4,A:1-2": "a:1-4,b:5-6",
-		"a:7, a:1-3,a:4-5":  "a:1-5,a:7-7",
-		"":                  "",
+		"BBBBBBBB-0000-0000-0000-000000000002:5-6,aaaaaaaa-0000-0000-0000-000000000001:3-4,AAAAAAAA-0000-0000-0000-000000000001:1-2": "aaaaaaaa-0000-0000-0000-000000000001:1-4,bbbbbbbb-0000-0000-0000-000000000002:5-6",
+		"aaaaaaaa-0000-0000-0000-000000000001:7, aaaaaaaa-0000-0000-0000-000000000001:1-3,aaaaaaaa-0000-0000-0000-000000000001:4-5":  "aaaaaaaa-0000-0000-0000-000000000001:1-5,aaaaaaaa-0000-0000-0000-000000000001:7-7",
+		"": "",
 	}
 	for in, want := range cases {
 		got, err := CanonicalGTIDRanges(in)
@@ -246,7 +246,7 @@ func TestCanonicalGTIDRanges(t *testing.T) {
 			t.Fatalf("%q: got %q %v, want %q", in, got, err, want)
 		}
 	}
-	if _, err := CanonicalGTIDRanges("a:9-3"); err == nil {
+	if _, err := CanonicalGTIDRanges("aaaaaaaa-0000-0000-0000-000000000001:9-3"); err == nil {
 		t.Fatal("reversed range accepted")
 	}
 }

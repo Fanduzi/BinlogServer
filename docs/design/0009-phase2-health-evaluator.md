@@ -74,14 +74,18 @@ type ClearRule struct {
     // 对条件型 kind，Holds 通常就是「Desired 里没有」，对信号型 kind 是「成功事实晚于失败事实」。
     Holds func(f *Facts, key Key) bool
     Text  string // 一句话：什么时候会自动关闭（API 的 clears_when）
-    // HoldDown: 条件消失后至少持续这么久才关闭（去抖），默认 0。
+    // HoldDown: 条件消失后至少持续这么久才关闭（去抖），默认 0。从 Facts.AbsentSince[key]
+    // （评估器自己的注入时钟）起算，从不使用库里的 last_seen 墙钟。
     HoldDown time.Duration
 }
 
 type KindSpec struct {
     Kind     Kind
     Severity Severity
-    Scope    Scope
+    // Scopes: 该 kind 依赖的全部 scope。关闭/更新要求全部 complete；Derive 在第一个 complete 时运行。
+    // 例：SEGMENT_MISSING/ORPHAN_ROW = {chain.local, chain.objects}；DUMP_STALLED、SOURCE_UNREACHABLE =
+    // {task.state, signals}；UPLOAD_UNVERIFIED = {chain.local, signals}（P2-1 的 TestRegistryScopesMatchDesign 对照 §6）。
+    Scopes   []Scope
     Clear    ClearRule
     // Derive 从事实算出该 kind 此刻应当 open 的实例（subject → detail/evidence）。
     Derive func(f *Facts) []Instance
@@ -110,6 +114,7 @@ type Instance struct {
     Detail   string
     Evidence string   // 机器可比；变化本身不产生转移，只更新行
     Segments []string // 涉及的段（来自 assurance.Violation.Segments）
+    FactAt   time.Time // 事实时间（信号发生时刻）；零值 = Facts.Now
 }
 
 // Facts 是一个任务在一个时刻的全部输入。字段为 nil 表示该来源本轮不可得。
@@ -124,6 +129,7 @@ type Facts struct {
     Signals    map[SignalKey]SignalState
     Store      *StoreFacts         // schema 版本、可选列/表是否存在、是否只读
     Complete   map[Scope]bool
+    AbsentSince map[Key]time.Time // 评估器首次看到条件消失的时间（注入时钟），HoldDown 从此起算；缺失 = 刚刚
 }
 
 type ChainFacts struct {
@@ -137,9 +143,10 @@ type SignalKey struct {
     Subject string
 }
 type SignalState struct {
-    LastFailure time.Time
-    LastSuccess time.Time // 零值 = 本进程启动后还没成功过 → 该信号 Unknown，不关闭
+    FailureSeq  uint64    // 进程内单调序号，不用墙钟（§5.5）
+    SuccessSeq  uint64    // 零值 = 本进程启动后还没成功过 → 已有 open 行时内部 Unknown，不关闭
     Failures    int64
+    FactAt      time.Time // 最近一次失败的事实时间，只用于展示与通知
     Detail      string
 }
 
@@ -159,7 +166,7 @@ type Waiver struct {
 
 type Transition struct {
     Key
-    Op         Op       // OPEN | UPDATE | ESCALATE | CLOSE | WAIVE
+    Op         Op       // OPEN | UPDATE | ESCALATE | DOWNGRADE | CLOSE（豁免关闭 = CLOSE + Reason WAIVED）
     Reason     string   // EVAL | UPGRADE | OWNER_CHANGED | WAIVED | NODE_GONE；UPGRADE 不投递通知（§9）
     FactAt     time.Time // 事实发生时间（信号失败/成功时刻），通知与时间线按它排序（§7.4）
     KindVersion int
@@ -172,7 +179,9 @@ type Transition struct {
 //   - Desired 有、open 没有          → OPEN
 //   - 两边都有，severity 升高        → ESCALATE；detail/evidence 变化 → UPDATE（不通知）
 //   - open 有、Desired 没有、scope Complete、Clear.Holds 且已过 HoldDown → CLOSE
-//   - scope 不 Complete              → 不动（并计入 Health.Unknown）
+//   - 所需 scope 不全 Complete       → 不动（Produced 中的非信号 scope 计入 Health.Unknown）
+//   - 严重度降低                     → DOWNGRADE（显式，不是静默 UPDATE）
+//   - 同一 key 的重复已存行         → 只产生一条转移
 //   - kind 不是 Managed              → 永不产生转移（open 行原样保留，由旧路径负责）
 //   - open 必须是该任务的完整 open 集合（调用方分页读完，§5.6）
 // 同样的 (open, facts) 给出同样的转移；对上一轮输出再调用一次给出空列表。
@@ -190,6 +199,10 @@ type TaskHealth struct {
     Owner       string
     OwnerEpoch  int64
 }
+// Produced：本阶段有评估器产生的 scope（阶段 2 = chain.local、task.state、signals、store）；
+// chain.objects、verify 在阶段 3 Verifier 落地前不使 HealthOf 变 UNKNOWN。
+var Produced map[Scope]bool
+
 func HealthOf(open []Finding, f *Facts) TaskHealth
 ```
 
@@ -402,7 +415,7 @@ evaluate(task):
 | `GET /api/tasks`、`/api/dashboard` | `open_findings` 保留；新增 `health`（status、evaluated_at） |
 | `POST /api/alerts/mute` `{task_id,kind,subject,reason,until?}` | **静音**（D3a）：只抑制通知，**不**改变事实、finding、健康、`/api/alerts`、Console 与阶段 5 预检。两种粒度、一个 API、一张表 `task_mutes`：<br>• **key 级**：`kind`+`subject` 指定一条 finding，默认且最长 7 天；<br>• **任务级**（维护静音）：`kind=*`，覆盖该任务全部 kind，默认且最长 24h；任务的 dump 重新建立并收到事件（源恢复）后**自动提前结束**（op=END_EARLY，actor=`system`），恢复后的新故障不会被静音。<br>两者都总会过期、可续期（同键再提交，不超过各自上限），`reason` 必填。MUTE / RENEW / EXPIRE / END_EARLY（含 `DELETE` 手动结束）写入 `finding_transitions`，带 reason 与 actor。mute 存在 meta，由 `_notify` 持有者判断，与评估权、栅栏无关，换 owner 不影响 |
 | `GET /api/alerts/mutes?task_id=` | 当前与最近 7 天的 mute 记录 |
-| `POST /api/alerts/waive` `{task_id,kind,subject,evidence,reason}` | **豁免**：仅 `Waivable` kind（目前 `GTID_HOLE`）。绑定确切 evidence + 原因 + 操作者。evidence 规范格式：洞本身（不是已存集合）的 GTID 区间，`uuid:a-b[,uuid:c-d…]`，uuid 小写、按 uuid 排序、同 uuid 区间升序合并，单点写成 `uuid:a-a`；服务端对提交值规范化后再比较，例如 `3e11fa47-71ca-11e1-9e33-c80aa9429562:363-381`，对该确切区间永久有效；Derive 跳过 evidence 完全相同的洞，finding 以 reason=WAIVED 关闭，健康恢复。洞的区间一旦变化（变大、移动、出现新洞）就是新的 evidence，重新打开。`DELETE` 撤销，所有操作记入 `finding_transitions`（op=WAIVE/UNWAIVE）（§15 D3b） |
+| `POST /api/alerts/waive` `{task_id,kind,subject,evidence,reason}` | **豁免**：仅 `Waivable` kind（目前 `GTID_HOLE`）。绑定确切 evidence + 原因 + 操作者。evidence 规范格式：洞本身（不是已存集合）的 GTID 区间。MySQL：每个合并后的区间一项 `uuid:a-b`，uuid 小写、按 uuid 排序、同 uuid 区间升序合并，单点写成 `uuid:a-a`；输入也接受 MySQL 多区间写法 `uuid:1-5:7-9`。MariaDB：每个 domain-server 一组，`domain-server:a-b`（十进制，按 domain 再按 server 数值排序，区间合并），输入接受单个 GTID `domain-server-seq` 与 `domain-server:a-b`；同一串里不能混用两种 flavor；服务端对提交值规范化后再比较，例如 `3e11fa47-71ca-11e1-9e33-c80aa9429562:363-381`，对该确切区间永久有效；Derive 跳过 evidence 完全相同的洞，finding 以 reason=WAIVED 关闭，健康恢复。洞的区间一旦变化（变大、移动、出现新洞）就是新的 evidence，重新打开。`DELETE` 撤销，所有操作记入 `finding_transitions`（op=WAIVE/UNWAIVE）（§15 D3b） |
 | `POST /api/tasks/{id}/health/evaluate` | 立即评估一次，返回结果（受同一 lease 规则约束；非 owner 返回 409 + owner） |
 
 ### 7.2 指标

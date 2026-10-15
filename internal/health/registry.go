@@ -7,6 +7,7 @@ package health
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,7 +77,7 @@ func signalDerive(kind Kind) func(f *Facts) []Instance {
 		var out []Instance
 		for k, st := range f.Signals {
 			if k.Kind == kind && st.FailureSeq > st.SuccessSeq {
-				out = append(out, Instance{Key: Key{Subject: k.Subject}, Detail: st.Detail})
+				out = append(out, Instance{Key: Key{Subject: k.Subject}, Detail: st.Detail, FactAt: st.FactAt})
 			}
 		}
 		return out
@@ -98,15 +99,15 @@ func signalSpec(kind Kind, sev Severity, inv, text string) KindSpec {
 		Clear: ClearRule{Invariant: inv, Holds: signalCleared(kind), Text: text}}
 }
 
-func chainSpec(kind Kind, sev Severity, scope Scope, inv, text string) KindSpec {
-	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{scope}, Version: 1, SegmentScoped: true, Derive: chainDerive(kind),
+func chainSpec(kind Kind, sev Severity, scope Scope, inv, text string, more ...Scope) KindSpec {
+	return KindSpec{Kind: kind, Severity: sev, Scopes: append([]Scope{scope}, more...), Version: 1, SegmentScoped: true, Derive: chainDerive(kind),
 		Clear: ClearRule{Invariant: inv, Text: text}}
 }
 
 // stateSpec: kinds derived from task state; their Derive lands with the
 // PR that takes them over (P2-4/P2-6), so they never open before then.
-func stateSpec(kind Kind, sev Severity, scope Scope, inv, text string) KindSpec {
-	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{scope}, Version: 1, Clear: ClearRule{Invariant: inv, Text: text}}
+func stateSpec(kind Kind, sev Severity, scope Scope, inv, text string, more ...Scope) KindSpec {
+	return KindSpec{Kind: kind, Severity: sev, Scopes: append([]Scope{scope}, more...), Version: 1, Clear: ClearRule{Invariant: inv, Text: text}}
 }
 
 // DefaultRegistry is the kind table of design §6. No kind is Managed yet:
@@ -119,10 +120,10 @@ func DefaultRegistry() Registry {
 		chainSpec(ChainIndexGap, Critical, ScopeChainLocal, "I2", "indexes are contiguous and every source switch is recorded"),
 		chainSpec(LegacyFailback, Critical, ScopeChainLocal, "I3", "the planner no longer reports a legacy failback"),
 		chainSpec(CheckpointAhead, Critical, ScopeChainLocal, "I5", "the checkpoint is at or before the chain's cut point"),
-		chainSpec(SegmentMissing, Critical, ScopeChainLocal, "I6", "catalog row, local file and object agree, or a retention marker explains the absence"),
-		chainSpec(OrphanRow, Warning, ScopeChainObjects, "I6", "the row has its bytes again, or carries a retention marker"),
+		chainSpec(SegmentMissing, Critical, ScopeChainLocal, "I6", "catalog row, local file and object agree, or a retention marker explains the absence", ScopeChainObjects),
+		chainSpec(OrphanRow, Warning, ScopeChainLocal, "I6", "the row has its bytes again, or carries a retention marker", ScopeChainObjects),
 		chainSpec(UploadLate, Warning, ScopeChainLocal, "I7", "the segment is UPLOADED with checksum match"),
-		chainSpec(UploadUnverified, Critical, ScopeChainLocal, "I7", "the segment's checksum is match"),
+		chainSpec(UploadUnverified, Critical, ScopeChainLocal, "I7", "the segment's checksum is match", ScopeSignals),
 		stateSpec(SegmentEmptyLeftover, Info, ScopeChainLocal, "I4", "the leftover open file is removed, or sealed with events"),
 		signalSpec(UploadRecordFailed, Critical, "S8", "a later upload record for the segment is written, or its row is already UPLOADED"),
 		signalSpec(MetadataWriteBlocked, Critical, "S2", "a later checkpoint or task row write succeeds"),
@@ -135,10 +136,10 @@ func DefaultRegistry() Registry {
 		signalSpec(RetryLoopFailed, Warning, "S7", "the next upload retry pass runs to the end"),
 		signalSpec(OpenTailCutFailed, Critical, "S4", "the next cut succeeds, or the segment is sealed or gone"),
 		signalSpec(MetricSourceFailed, Warning, "S10/S11", "the next scrape computes the source"),
-		stateSpec(DumpStalled, Warning, ScopeSignals, "S12", "events or heartbeats arrive again; or the task was deliberately stopped; or the lease moved to another epoch"),
+		stateSpec(DumpStalled, Warning, ScopeTaskState, "S12", "events or heartbeats arrive again; or the task was deliberately stopped; or the lease moved to another epoch", ScopeSignals),
 		stateSpec(TransitionStalled, Warning, ScopeTaskState, "lease", "the task leaves STARTING/STOPPING, or a run drives it"),
 		stateSpec(TaskFailed, Critical, ScopeTaskState, "task", "the task leaves FAILED, or desired becomes STOP"),
-		stateSpec(SourceUnreachable, Critical, ScopeTaskState, "S12", "a dump is established and receives events or heartbeats, or the task is deliberately stopped"),
+		stateSpec(SourceUnreachable, Critical, ScopeTaskState, "S12", "a dump is established and receives events or heartbeats, or the task is deliberately stopped", ScopeSignals),
 		stateSpec(SealFactsAbsent, Warning, ScopeStore, "store", "the seal fact columns are found again on the next probe"),
 		stateSpec(HealthStale, Warning, ScopeTaskState, "F", "the task is evaluated"),
 		stateSpec(HealthStoreDegraded, Warning, ScopeStore, "F", "health writes succeed with migration 000009 present and versions not mixed"),
@@ -153,47 +154,122 @@ func DefaultRegistry() Registry {
 	return r
 }
 
-// CanonicalGTIDRanges normalizes a waiver's GTID range list: lowercase
-// uuid, sorted by uuid, ranges of one uuid ascending and merged when
-// adjacent or overlapping, single points as a-a, joined by commas.
+// CanonicalGTIDRanges normalizes a waiver's GTID range list (design §7.1).
+// Input: MySQL sets "uuid:a-b[:c-d...]" (single points allowed) and
+// MariaDB GTIDs "domain-server-seq" or ranges "domain-server:a-b",
+// comma separated; one flavor per string. Canonical form: one
+// "uuid:a-b" (lowercase uuid) or "domain-server:a-b" (decimal) per merged
+// interval, sorted by uuid, or by domain then server numerically, intervals
+// ascending, adjacent or overlapping intervals merged, single points as
+// a-a, joined by commas with no spaces. "" stays "".
 func CanonicalGTIDRanges(s string) (string, error) {
 	type rng struct{ a, b uint64 }
-	by := map[string][]rng{}
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	type src struct {
+		name   string
+		d, srv uint64
+	}
+	by := map[src][]rng{}
+	flavor := ""
+	setFlavor := func(f, part string) error {
+		if flavor != "" && flavor != f {
+			return fmt.Errorf("gtid %q: MySQL and MariaDB GTIDs mixed", part)
 		}
-		i := strings.LastIndex(part, ":")
-		if i <= 0 {
-			return "", fmt.Errorf("gtid range %q: want uuid:a-b", part)
-		}
-		uuid := strings.ToLower(strings.TrimSpace(part[:i]))
-		span := strings.TrimSpace(part[i+1:])
-		lo, hi, found := strings.Cut(span, "-")
+		flavor = f
+		return nil
+	}
+	parseRange := func(span, part string) (rng, error) {
+		lo, hi, found := strings.Cut(strings.TrimSpace(span), "-")
 		if !found {
 			hi = lo
 		}
 		a, err1 := strconv.ParseUint(lo, 10, 64)
 		b, err2 := strconv.ParseUint(hi, 10, 64)
 		if err1 != nil || err2 != nil || a == 0 || b < a {
-			return "", fmt.Errorf("gtid range %q: want uuid:a-b with 0 < a <= b", part)
+			return rng{}, fmt.Errorf("gtid range %q: want a-b with 0 < a <= b", part)
 		}
-		by[uuid] = append(by[uuid], rng{a, b})
+		return rng{a, b}, nil
 	}
-	uuids := make([]string, 0, len(by))
-	for u := range by {
-		uuids = append(uuids, u)
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		fields := strings.Split(part, ":")
+		head := strings.TrimSpace(fields[0])
+		if dash := strings.Split(head, "-"); len(dash) == 5 {
+			// MySQL: uuid:interval[:interval...]
+			if len(fields) < 2 || len(head) != 36 {
+				return "", fmt.Errorf("gtid set %q: want uuid:a-b[:c-d...]", part)
+			}
+			if err := setFlavor("mysql", part); err != nil {
+				return "", err
+			}
+			key := src{name: strings.ToLower(head)}
+			for _, span := range fields[1:] {
+				rg, err := parseRange(span, part)
+				if err != nil {
+					return "", err
+				}
+				by[key] = append(by[key], rg)
+			}
+			continue
+		}
+		// MariaDB: domain-server-seq, or domain-server:a-b
+		var d, srv uint64
+		var rg rng
+		var err error
+		switch {
+		case len(fields) == 1 && len(strings.Split(head, "-")) == 3:
+			p := strings.Split(head, "-")
+			d, err = strconv.ParseUint(p[0], 10, 32)
+			if err == nil {
+				srv, err = strconv.ParseUint(p[1], 10, 32)
+			}
+			if err == nil {
+				rg, err = parseRange(p[2], part)
+			}
+		case len(fields) == 2 && len(strings.Split(head, "-")) == 2:
+			p := strings.Split(head, "-")
+			d, err = strconv.ParseUint(p[0], 10, 32)
+			if err == nil {
+				srv, err = strconv.ParseUint(p[1], 10, 32)
+			}
+			if err == nil {
+				rg, err = parseRange(fields[1], part)
+			}
+		default:
+			err = fmt.Errorf("gtid %q: want uuid:a-b, domain-server-seq or domain-server:a-b", part)
+		}
+		if err != nil {
+			return "", fmt.Errorf("gtid %q: %v", part, err)
+		}
+		if err := setFlavor("mariadb", part); err != nil {
+			return "", err
+		}
+		key := src{name: fmt.Sprintf("%d-%d", d, srv), d: d, srv: srv}
+		by[key] = append(by[key], rg)
 	}
-	sort.Strings(uuids)
+	keys := make([]src, 0, len(by))
+	for k := range by {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if flavor == "mariadb" {
+			if keys[i].d != keys[j].d {
+				return keys[i].d < keys[j].d
+			}
+			return keys[i].srv < keys[j].srv
+		}
+		return keys[i].name < keys[j].name
+	})
 	var out []string
-	for _, u := range uuids {
-		rs := by[u]
+	for _, k := range keys {
+		rs := by[k]
 		sort.Slice(rs, func(i, j int) bool { return rs[i].a < rs[j].a })
 		cur := rs[0]
-		flush := func() { out = append(out, fmt.Sprintf("%s:%d-%d", u, cur.a, cur.b)) }
+		flush := func() { out = append(out, fmt.Sprintf("%s:%d-%d", k.name, cur.a, cur.b)) }
 		for _, r := range rs[1:] {
-			if r.a <= cur.b+1 {
+			if cur.b == math.MaxUint64 || r.a <= cur.b+1 {
 				if r.b > cur.b {
 					cur.b = r.b
 				}
