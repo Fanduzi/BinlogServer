@@ -1,6 +1,6 @@
 # ADR 0009 阶段 2 设计：健康评估器 (Health Evaluator)
 
-状态：设计（2026-10-15），未实现；开放问题按建议默认值处理，见 §15（Adrian 可推翻）。上位决定：[ADR 0009](../adr/0009-backup-assurance.md)「分阶段实施」第 2 行，epic #326。前置：[阶段 1 备份链](0009-phase1-backup-chain.md)（已发布于 v0.5.64–v0.5.66）。本文回答阶段 2 的**类型、生命周期、触发与清除规则、集群语义、迁移**和 PR 切分；不改变 ADR 的任何决定，只在 §12 记录与 ADR 草图的差异。
+状态：设计（2026-10-15，按 BinlogServerQA 对 b8530d01 的评审修订，见 §16），未实现；开放问题按建议默认值处理，见 §15（Adrian 可推翻）。上位决定：[ADR 0009](../adr/0009-backup-assurance.md)「分阶段实施」第 2 行，epic #326。前置：[阶段 1 备份链](0009-phase1-backup-chain.md)（已发布于 v0.5.64–v0.5.66）。本文回答阶段 2 的**类型、生命周期、触发与清除规则、集群语义、迁移**和 PR 切分；不改变 ADR 的任何决定，只在 §12 记录与 ADR 草图的差异。
 
 ## 1. 要解决什么
 
@@ -19,15 +19,15 @@
 
 ## 2. 核心决定（摘要）
 
-1. **一个评估器，期望状态调和（desired-state reconcile）**。评估器对一个任务算出「此刻应当 open 的 finding 集合」`Desired`，与已存的 open 集合比较，差集产生 `Open`/`Close` 转移。没有任何代码路径直接写 finding 行。
+1. **一个评估器，期望状态调和（desired-state reconcile）**。评估器对一个任务算出「此刻应当 open 的 finding 集合」`Desired`，与已存的 open 集合比较，差集产生 `Open`/`Close` 转移。**只对标为 `Managed` 的 kind 生效**：各 PR 逐个接管 kind，未接管的 kind 保持 v0.5.66 的 `Report`/`Resolve` 生命周期，评估器不碰（§4、§5.6）。全部接管后没有代码路径直接写 finding 行。
 2. **两类输入，同一个出口**。条件型（链、任务状态、lease）由评估器自己读；事件型（一次写失败、一次读超时）由热路径调用 `Signal`（非阻塞，只记事实，不写 finding），评估器把事实变成 finding。现有 `Report`/`Resolve` 降为 `Signal` 的包装，最后在 P2-4 改为包内私有，并由 lintguard 禁止新调用。
-3. **作用域（scope）防误关**。一次评估只关闭它**本轮有完整输入**的 kind；输入不可得（对象清单未列举、目录读失败、meta 不可读）时这些 kind 的状态是 `Unknown`，保持原样并让任务健康变为 `UNKNOWN`。
+3. **作用域（scope）防误关**。一次评估只关闭它**本轮有完整输入**的 kind；输入不可得（对象清单未列举、目录读失败、meta 不可读、任务行与 lease 表不一致）时这些 kind 的状态是 `Unknown`，保持原样并让任务健康变为 `UNKNOWN`。信号型 kind 在本进程启动后**第一次观察到成功之前**也是 `Unknown`（§5.5）。
 4. **触发 = 标脏 + 合并**，周期 sweep 只是兜底：所有触发点只把任务标脏并附原因，单 worker 按任务合并执行；sweep 每 60s 把本节点负责的任务全部标脏。触发与 sweep 走同一个 `evaluate(task)`，不存在两套逻辑。
 5. **幂等键 (task_id, kind, subject)** 不变；转移带单调 `generation`，存储写入是条件写（新 generation 或同 generation 才覆盖），重复、乱序、重放都收敛到同一行。
 6. **每种 kind 绑定一条清除规则**（§6 表）：kind 注册表是封闭的，注册项里写明 invariant、severity、scope 和 `ClearRule`；没有清除规则的 kind 不能注册（编译期表 + 单测）。
-7. **集群：评估权跟随任务 lease**。只有持有 `(owner, epoch)` 的节点评估该任务，finding 写入带 `owner_epoch` 条件；换 owner 后新 owner 的第一轮评估接管所有已存 open 行（含旧 owner 的）。无人持有的任务（STOPPED、未分配）由持有 `_health` 集群 lease 的一个节点评估。
-8. **健康是 finding 的视图**：`task_health` 表 + `binlog_server_task_healthy{task_id}` 每个任务总有序列；评估超过 3 个周期没跑 = `UNKNOWN` = 不健康。
-9. **通知 = 转移的 outbox**：只在转移（打开、升级、关闭）时通知，带去抖；单节点（`_notify` lease）至少一次投递 webhook，按 `(key, generation, transition)` 去重。
+7. **集群：评估权跟随任务 lease**。只有持有 `(owner, epoch)` 的节点评估该任务；栅栏只比较**任务 lease epoch**（`_health` 的 epoch 是另一个计数器，从不与之比较），写入前在同一事务里 `SELECT … FOR UPDATE` 显式比较并与 `task_leases` 交叉校验（§8）。#360 作为 P2-6 的前置一并修掉。无人持有的任务由 `_health` 持有者评估 `task.state`/`store`；非共享存储下链 scope 委派给最后 owner，委派绑定**任务最后一个 lease epoch + 节点 id**。
+8. **健康是 finding 的视图**：`task_health` 表 + `binlog_server_task_healthy{task_id}` 每个任务总有序列；评估超过 `health.stale_after`（默认 5×sweep）没跑 = `UNKNOWN` = 不健康；meta 不可用时指标层用缓存输出 0（§7.2）。
+9. **通知 = 转移的 outbox**：只在转移（打开、升级、关闭）时通知，带去抖与静音（mute），升级首轮合并为摘要；单节点（`_notify` lease）至少一次投递 webhook，按 `(key, generation, transition)` 去重。
 10. **迁移只加不改**：`000009` 给 `task_findings` 加可空列、新建 `task_health` 和 `finding_transitions`；v0.5.x 中 `minRequiredSchemaVersion` 保持 6，缺表缺列时退回 v0.5.66 行为并报 `HEALTH_STORE_DEGRADED`；**v0.6.0 把下限提到 9 并删除无栅栏回退**（§15 D1）。
 
 ## 3. 模块与接缝
@@ -63,7 +63,7 @@ const (
     ScopeChainLocal   Scope = "chain.local"   // 任务目录 + 目录行（账本可读）
     ScopeChainObjects Scope = "chain.objects" // 对象清单快照（Objects != nil）
     ScopeTaskState    Scope = "task.state"    // 任务行、run、lease
-    ScopeSignals      Scope = "signals"       // 热路径事实（总是 complete）
+    ScopeSignals      Scope = "signals"       // 热路径事实；每个信号在本进程首次成功后才 complete（§5.5）
     ScopeStore        Scope = "store"         // 元数据库能力（schema、只读）
     ScopeVerify       Scope = "verify"        // 阶段 3 巡检器，阶段 2 预留
 )
@@ -87,6 +87,13 @@ type KindSpec struct {
     Derive func(f *Facts) []Instance
     // Segments 为真表示 subject 是段名，阶段 4/5 可按段与时间窗求交。
     SegmentScoped bool
+    // Managed 为真时评估器拥有该 kind 的打开与关闭；为假时 Reconcile 对它不产生任何转移，
+    // 生命周期仍是旧的 Report/Resolve。每个 PR 只翻转自己接管的 kind（§13）。
+    Managed bool
+    // Version 随 Derive/Clear 语义变化递增；写进 finding_transitions，审计时可还原当时的 clears_when。
+    Version int
+    // Waivable 为真时允许按 evidence 豁免（目前只有 GTID_HOLE，§7.1）。
+    Waivable bool
 }
 
 var Registry = map[Kind]KindSpec{ /* §6 */ }
@@ -109,7 +116,9 @@ type Instance struct {
 type Facts struct {
     TaskID     string
     Now        time.Time
-    Task       *TaskFacts          // 状态、desired、owner、epoch、run 是否在跑、进入当前状态的时间
+    Task       *TaskFacts          // 状态、desired、owner、epoch、run 是否在跑、进入当前状态的时间、last_error 类别；
+                                   // 任务行 (owner, epoch) 与 task_leases 不一致时为 nil（task.state 不完整）
+    Waivers    []Waiver            // 按 evidence 的豁免（§7.1）
     Chain      *ChainFacts         // assurance.Check 与 Health 的结果；nil = 目录或账本不可读
     Objects    bool                // Chain 里的对象判定是否基于已列举清单
     Signals    map[SignalKey]SignalState
@@ -129,14 +138,25 @@ type SignalKey struct {
 }
 type SignalState struct {
     LastFailure time.Time
-    LastSuccess time.Time
+    LastSuccess time.Time // 零值 = 本进程启动后还没成功过 → 该信号 Unknown，不关闭
     Failures    int64
     Detail      string
 }
 
+type Waiver struct {
+    Key
+    Evidence string    // 豁免的确切证据，例如 GTID 区间 "uuid:363-381"
+    Reason   string
+    Actor    string
+    At       time.Time
+}
+
 type Transition struct {
     Key
-    Op         Op       // OPEN | UPDATE | ESCALATE | CLOSE
+    Op         Op       // OPEN | UPDATE | ESCALATE | CLOSE | WAIVE
+    Reason     string   // EVAL | UPGRADE | OWNER_CHANGED | WAIVED | NODE_GONE；UPGRADE 不投递通知（§9）
+    FactAt     time.Time // 事实发生时间（信号失败/成功时刻），通知与时间线按它排序（§7.4）
+    KindVersion int
     Generation int64
     At         time.Time
     Instance   Instance // CLOSE 时为最后一次 open 的内容
@@ -147,6 +167,8 @@ type Transition struct {
 //   - 两边都有，severity 升高        → ESCALATE；detail/evidence 变化 → UPDATE（不通知）
 //   - open 有、Desired 没有、scope Complete、Clear.Holds 且已过 HoldDown → CLOSE
 //   - scope 不 Complete              → 不动（并计入 Health.Unknown）
+//   - kind 不是 Managed              → 永不产生转移（open 行原样保留，由旧路径负责）
+//   - open 必须是该任务的完整 open 集合（调用方分页读完，§5.6）
 // 同样的 (open, facts) 给出同样的转移；对上一轮输出再调用一次给出空列表。
 func Reconcile(open []Finding, f *Facts) ([]Transition, Desired)
 
@@ -175,9 +197,11 @@ type Finding struct {
     Generation  int64     `json:"generation"`
     OwnerEpoch  int64     `json:"owner_epoch"`
     EvaluatedAt time.Time `json:"evaluated_at"`   // 最近一次评估确认它仍 open 的时间
-    Invariant   string    `json:"invariant"`      // 由 Registry 填，不存库
-    ClearsWhen  string    `json:"clears_when"`    // 由 Registry 填，不存库
-    AckedBy     string    `json:"acked_by,omitempty"`
+    Invariant   string    `json:"invariant"`      // 由 Registry 填；finding_transitions 存 kind_version 以便审计
+    ClearsWhen  string    `json:"clears_when"`    // 由 Registry 填
+    Waived      *Waiver   `json:"waiver,omitempty"`
+    MutedUntil  *time.Time `json:"muted_until,omitempty"`
+    AckedBy     string    `json:"acked_by,omitempty"` // 静音操作者（§7.1）
     AckedAt     *time.Time `json:"acked_at,omitempty"`
 }
 ```
@@ -196,16 +220,28 @@ func (e *Evaluator) EvaluateNow(ctx context.Context, taskID string) (health.Task
 func (e *Evaluator) Run(ctx context.Context, sweep time.Duration)
 
 type HealthStore interface {
-    // ApplyTransitions 在一个事务里：条件 upsert finding 行、追加 finding_transitions、写 task_health。
-    // 条件：stored.owner_epoch <= t.OwnerEpoch AND stored.generation <= t.Generation。
-    // 返回 ErrFenced 表示更新的 owner 已写过，本节点应停止评估该任务。
-    ApplyTransitions(ctx context.Context, taskID string, ownerEpoch int64, ts []health.Transition, h health.TaskHealth) error
+    // ApplyTransitions 在一个事务里（§8.3）：
+    //   1. SELECT owner, epoch FROM task_leases WHERE task_id=? FOR UPDATE，必须等于 fence；
+    //   2. SELECT fence_epoch, fence_node, generation FROM task_health WHERE task_id=? FOR UPDATE，
+    //      stored.fence_epoch > fence.Epoch → ErrFenced；相等但 fence_node 不同 → ErrFenced；
+    //   3. upsert finding 行（同 generation 重放是成功的空操作，不看 affected rows）、追加 finding_transitions、写 task_health。
+    ApplyTransitions(ctx context.Context, taskID string, fence Fence, ts []health.Transition, h health.TaskHealth) error
+    // ListOpenFindingsForTask 分页读完该任务的全部 open 行（keyset 分页，无上限），只给评估器用。
+    ListOpenFindingsForTask(ctx context.Context, taskID string) ([]health.Finding, error)
     ListFindings(ctx context.Context, q FindingQuery) ([]health.Finding, error)
     ListHealth(ctx context.Context) ([]health.TaskHealth, error)
     PendingNotifications(ctx context.Context, after int64, limit int) ([]TransitionRow, error)
     AckNotification(ctx context.Context, id int64) error
 }
 var ErrFenced = errors.New("health write fenced by a newer owner epoch")
+
+// Fence 永远是任务 lease 的 (epoch, node)。_health lease 只决定「谁来评估无主任务」，
+// 它的 epoch 不写进 finding 行，也不参与比较。
+type Fence struct {
+    TaskEpoch int64  // 任务 lease epoch；无主任务取最后一次的 lease epoch
+    Node      string // 持有者或被委派的最后 owner
+    Delegated bool   // 非共享存储下最后 owner 评估 chain.*（§8.2）；只能写 chain.* kind
+}
 ```
 
 ## 5. 生命周期与触发
@@ -214,12 +250,12 @@ var ErrFenced = errors.New("health write fenced by a newer owner epoch")
 
 ```
 evaluate(task):
-  1. 读 lease 视图：本节点不是 (owner, epoch) 持有者且不是 _health 持有者（对无主任务）→ 跳过
+  1. 读 lease 视图得到 Fence（§8）；本节点既不是任务 lease 持有者、也不是无主任务的评估者或被委派者 → 跳过
   2. 收集 Facts（Task、Chain=ChainOf(Inputs).Check/Health、Signals 快照、Store 能力），标记 Complete
-  3. open := store 里该任务的 open 行（进程内缓存，写成功才更新；缓存缺失时读库）
+  3. open := ListOpenFindingsForTask（分页读完，无上限；进程内缓存只在写成功后更新，缓存缺失时读库，§5.6）
   4. ts, _ := health.Reconcile(open, facts)；h := health.HealthOf(...)
-  5. store.ApplyTransitions(epoch, ts, h)；ErrFenced → 丢弃本轮并停止评估该任务直到下一次 LEASE_ACQUIRED
-  6. 写失败 → 转移留在进程内 pending（沿用 findingBook 的合并与重试），健康标 UNKNOWN(store)
+  5. store.ApplyTransitions(fence, ts, h)；ErrFenced（显式比较得出，§8.3）→ 丢弃本轮并停止评估该任务，直到本节点再次获得该任务 lease 或被重新委派
+  6. 写失败 → 转移留在 pending，按 (task, generation) 有序重放，健康标 UNKNOWN(store)；standalone 下 pending 持久化进 `.findings.json`，meta 模式下进程重启会丢 pending，由下一轮调和从事实重算补齐（§7.4）
 ```
 
 步骤 2 的读取（账本有 size+mtime 缓存）每轮 O(段数)；`Chain.Check` 在 1500 段的任务上 < 50ms（P2-3 有基准测试作为 QA 条件）。
@@ -255,6 +291,22 @@ evaluate(task):
 - CLOSE 写 `resolved_at=now`；对已关闭的行再 CLOSE 是空操作（条件 `resolved_at IS NULL`）。
 - 信号型 kind 的 `Count` 是失败次数（`SignalState.Failures`），条件型 kind 的 `Count` 是确认 open 的评估轮数。
 
+### 5.5 信号的完整性（重启不误关）
+
+- 信号 kind 的 scope 只有在本进程启动后**观察到该信号的第一次成功**（`LastSuccess` 非零）后才算 complete。
+- 在那之前：已存的 open 行原样保留，计入 `Health.Unknown`（任务健康 UNKNOWN 或保持 UNHEALTHY，不会变 HEALTHY），不产生 CLOSE。
+- 关闭规则是「`LastSuccess` 晚于失败事实」，失败事实取 `max(本进程 LastFailure, 已存行的 last_seen)`。所以 meta 仍只读时重启，第一次写仍失败 → 只更新原行，不 CLOSE 再 OPEN，不翻转、不通知。
+
+### 5.6 Managed 与旧路径共存
+
+- `KindSpec.Managed=false` 的 kind：Reconcile 不读也不写它们，`Report`/`Resolve` 照旧。P2-3 只把 `SEGMENT_UNREADABLE`、`SEGMENT_OVERLAP` 设为 Managed；P2-4/P2-5 逐个翻转。一个 kind 一旦 Managed，对它的 `Report`/`Resolve` 调用在同一 PR 里改为 `Signal`，lintguard 按 Managed 表检查，保证同一行只有一个写者。
+- 评估器读 open 集合时**按任务分页读完**（keyset：`(task_id, kind, subject) > ?`，每页 500），不共用 `/api/alerts` 的 `limit`，也不按 `last_seen` 截断（#339 教训）。
+
+### 5.7 读缓存与静默损坏
+
+- 账本的 size+mtime 缓存只缓存「不可读」和事件索引，**不把「可读」当成证明**：段的 I1 判定在缓存命中时也会读事件头。
+- 原地 bitrot 不改 size/mtime。阶段 2 加一个低速 sha256 复核：sweep 每轮按 `health.rehash_budget`（默认每任务每轮 64 MiB，轮转覆盖）重算封存段 sha256，与 000008 的 `sha256` 比较；不一致 → `SEGMENT_UNREADABLE`（evidence=两个哈希）。`sha256` 为 NULL 的旧段跳过（计入 `chain.local` 不完整原因中的 `rehash_unavailable`，不影响健康）。对象侧的复核仍属阶段 3 Verifier。
+
 ## 6. Kind → 清除规则
 
 所有已发布的 16 种 kind 加阶段 2 新增的链 kind。Scope 决定何时有资格关闭。
@@ -262,18 +314,19 @@ evaluate(task):
 | Kind | Sev | Scope | 打开条件（Derive） | 清除规则（invariant） |
 |---|---|---|---|---|
 | `SEGMENT_UNREADABLE` | C | chain.local | `Check` 有 `I1_UNREADABLE`，subject=段 | I1：该段可读，或已不在链上（被挪走/替换） |
-| `SEGMENT_OVERLAP` | C | chain.local | `Health()`/`Check` 有 `I4_OVERLAP`，subject=后一副本 | I4：同一源文件在链上只剩一个封存副本，且无 GTID/位点相交 |
+| `SEGMENT_OVERLAP` | C | chain.local | 在 **replay 顺序**（`Inputs.Order`，即 /replay 实际会返回的段）上判定 I4，不按 open/sealed 过滤：`.open.eN` 与 `.sealed.eM` 内容相同或区间相交也算（#372 openstale/openhand），subject=后一副本 | I4：replay 顺序上同一源文件只剩一份，且无 GTID/位点相交 |
 | `SEGMENT_DAMAGED`（新，原 storage_alert 损坏） | C | chain.local | `I1_REGRESSION` | I1：位点不倒退 |
 | `CHAIN_INDEX_GAP`（新） | C | chain.local | `I2_INDEX_GAP` / `I2_SWITCH_UNRECORDED` / `I2_ORDER_INVALID` | I2：序号连续且每次换源有记录 |
-| `GTID_HOLE`（新，**#352**） | C | chain.local | `I3_GTID_HOLE`（含单源任务内部洞）/ `I3_STORED_HOLE`，subject=洞后首段 | I3：`B ∪ Stored` 在该点连续（源补齐或洞被确认为源侧跳号并经 ack 豁免，见 §7.4） |
+| `GTID_HOLE`（新，**#352**） | C | chain.local | `I3_GTID_HOLE`（含单源任务内部洞）/ `I3_STORED_HOLE`，subject=洞后首段 | I3：`B ∪ Stored` 在该点连续；或存在 evidence 完全等于该洞区间的 **waiver**（§7.1，Derive 不再产生，健康恢复）。静音（mute）不关闭也不改变健康 |
 | `LEGACY_FAILBACK`（新） | C | chain.local | `I3_LEGACY_FAILBACK` | I3：规划器不再给出该结论 |
 | `CHECKPOINT_AHEAD`（新） | C | chain.local | `I5_CHECKPOINT_AHEAD` | I5：C ≤ 链截断点 |
 | `SEGMENT_MISSING`（新） | C | chain.local / chain.objects | `I6_MISSING_LOCAL` / `I6_MISSING_ROW` / `I6_MISSING_OBJECT`(objects) / `I6_SIZE_MISMATCH` | I6：行、本地、对象三处一致；保留期删除标记（**#341**）视为一致 |
 | `ORPHAN_ROW`（新） | W | chain.objects | `I6_ORPHAN_ROW` | I6：行有实物，或行带保留期删除标记 |
-| `UPLOAD_LATE`（新） | W→C(>阈值，默认 24h，§15 D5) | chain.local | `I7_UPLOAD_LATE` | I7：`UPLOADED+match` |
+| `UPLOAD_LATE`（新） | W→C(>阈值，默认 24h，§15 D5) | chain.local | `I7_UPLOAD_LATE`，封存后 `UploadGrace`（默认 15min，tasks 必须显式传入，P2-5a）之内不判定 | I7：`UPLOADED+match` |
 | `UPLOAD_UNVERIFIED` | C | chain.local + signals | 信号失败，或 `I7_UNVERIFIED` | I7：`checksum=match` |
 | `UPLOAD_RECORD_FAILED` | C | signals | 信号 | S8：同一段后续上传记录写成功 |
-| `DUMP_STALLED` | W | signals + task.state | 信号失败且任务 RUNNING 且本节点有 run | S12：之后收到事件/心跳；**或任务不再 RUNNING / run 不在本节点（#366）** |
+| `DUMP_STALLED` | W | signals + task.state | 信号失败且 desired=RUN | S12：之后收到事件/心跳；**或** desired=STOP 且任务已 STOPPED（有意停止）；**或** 任务 lease 已到另一个 epoch（#366，旧 run 不再代表该任务）。因 STARTING/RETRY_BACKOFF 循环离开 RUNNING **不**关闭；若同时 `SOURCE_UNREACHABLE` 打开，则在其 OPEN 之后交接关闭（reason=HANDED_OFF），任何时刻至少一条 open |
+| `SOURCE_UNREACHABLE`（新） | C | task.state + signals | desired=RUN 且 last_error 类别为不可达（连接拒绝/超时/读超时），或在 RETRY_BACKOFF/STARTING 间循环累计 > `health.unreachable_after`（默认 90s） | 一次 dump 成功建立且收到事件或心跳（成功信号）；或 desired=STOP 且 STOPPED |
 | `METADATA_WRITE_BLOCKED` | C | signals | 信号 | S2：之后一次 checkpoint/任务行写成功 |
 | `TASK_PERSIST_FAILED` | C | signals | 信号 | S2/S3：同任务后续任务行写成功 |
 | `EVENT_PERSIST_FAILED` | W | signals | 信号，subject=事件类型 | S1：同类型事件后续写成功 |
@@ -286,7 +339,7 @@ evaluate(task):
 | `METRIC_SOURCE_FAILED` | W | signals | 信号，subject=指标源 | S10/S11：下一次计算成功 |
 | `TASK_TRANSITION_STALLED` | W | task.state | STARTING/STOPPING 超过 60s 且无 run 驱动 | 任务离开该状态或有 run 驱动 |
 | `SEAL_FACTS_ABSENT`（新，**#353**） | W | store | `000008` 列缺失而 schema 记录 ≥8，或进程内「列缺失」记忆与库不符 | 每轮 sweep 重新探测列；列存在即清除记忆并关闭 |
-| `HEALTH_STALE`（新，集群级） | C | task.state | 某任务 `task_health.evaluated_at` 超过 3×sweep 未更新且该任务应有评估者 | 该任务被评估 |
+| `HEALTH_STALE`（新，集群级） | W | task.state | 某任务 `task_health.evaluated_at` 超过 `health.stale_after`（默认 5×sweep，可配）未更新且该任务应有评估者 | 该任务被评估 |
 | `HEALTH_STORE_DEGRADED`（新，集群级） | W | store | `000009` 缺失或 ApplyTransitions 连续失败 | 写成功 |
 
 规则：
@@ -305,7 +358,8 @@ evaluate(task):
 | `GET /api/tasks/{id}/findings` | 不变（兼容），新增字段只增不删 |
 | `GET /api/findings` | 不变，标记为 `/api/alerts` 的别名，一个版本后在文档里废弃 |
 | `GET /api/tasks`、`/api/dashboard` | `open_findings` 保留；新增 `health`（status、evaluated_at） |
-| `POST /api/alerts/ack` `{task_id,kind,subject,reason,until?}` | 确认：不关闭、不改变健康，只抑制重复通知；**所有 ack 都会过期**：默认 7 天，`until` 最长 7 天，可续期（`POST /api/alerts/ack` 同键再次提交）；`reason` 必填，操作者与原因记入 `acked_by`/`ack_reason` 和 `finding_transitions`（op=ACK/RENEW/EXPIRE）。I3 源侧跳号（`GTID_HOLE`）的豁免就是这种 ack，带 evidence 快照，evidence 变化时提前失效；**没有永久豁免**（§15 D3） |
+| `POST /api/alerts/mute` `{task_id,kind,subject,reason,until?}` | **静音**：只抑制通知，不关闭、不改变健康；总会过期，默认且最长 7 天，可续期（同键再提交）；`reason` 必填，操作者与原因记入 `acked_by`/`ack_reason`/`ack_until` 和 `finding_transitions`（op=MUTE/RENEW/EXPIRE）（§15 D3a） |
+| `POST /api/alerts/waive` `{task_id,kind,subject,evidence,reason}` | **豁免**：仅 `Waivable` kind（目前 `GTID_HOLE`）。绑定确切 evidence（例如 `uuid:363-381`）+ 原因 + 操作者，对该确切区间永久有效；Derive 跳过 evidence 完全相同的洞，finding 以 reason=WAIVED 关闭，健康恢复。洞的区间一旦变化（变大、移动、出现新洞）就是新的 evidence，重新打开。`DELETE` 撤销，所有操作记入 `finding_transitions`（op=WAIVE/UNWAIVE）（§15 D3b） |
 | `POST /api/tasks/{id}/health/evaluate` | 立即评估一次，返回结果（受同一 lease 规则约束；非 owner 返回 409 + owner） |
 
 ### 7.2 指标
@@ -317,7 +371,7 @@ evaluate(task):
   - `binlog_server_finding_transitions_total{kind,op}`。
   - `binlog_server_health_eval_duration_seconds`（histogram）、`binlog_server_health_eval_lag_seconds{reason}`、`binlog_server_health_eval_errors_total{scope}`。
   - `binlog_server_notify_pending`、`binlog_server_notify_failures_total`。
-- 指标从 `task_health` 表读（每次 scrape 一条查询，2s 超时），叠加本进程未写成功的结果；与今天 finding 指标的「store + 进程内」合并方式相同。
+- 指标从 `task_health` 表读（每次 scrape 一条查询），叠加本进程未写成功的结果。meta 不可用时：指标层缓存最近一次成功读取的任务列表与健康，**对缓存里的每个任务输出 `task_healthy=0`、status=UNKNOWN**（序列不消失），并输出 `binlog_server_health_store_up=0`。2s 上限必须真实生效：scrape 查询走单独的连接池，DSN 带 `readTimeout=2s,timeout=2s`，且 driver 遵守 ctx（#339 re-QA 的 5.0s 问题）。
 - `docs/` 提供推荐 Prometheus 规则：`task_healthy == 0 for 2m`、`time() - task_health_evaluated_ts > 300`。
 
 ### 7.3 Console 告警页
@@ -329,9 +383,10 @@ evaluate(task):
 ### 7.4 通知
 
 - `finding_transitions` 是 outbox：每个 OPEN / ESCALATE / CLOSE 一行（UPDATE 不写），与 finding 行同一事务写入。
-- 通知器：持有 `_notify` 集群 lease 的节点（单机模式即本进程）按 id 递增读 outbox，投递到配置的 sink；阶段 2 只做 **webhook**（JSON，含 key、op、severity、detail、clears_when、链接），格式兼容 Alertmanager webhook 接收端；其他通道（邮件、IM）通过 webhook 桥接，不进二进制。
+- 通知器：持有 `_notify` 集群 lease 的节点（单机模式即本进程）按 id 递增读 outbox，投递到配置的 sink；阶段 2 只做 **webhook**。格式说明：BinlogServer **以 Alertmanager 发给接收端的 webhook 格式**（`version: "4"`、`status`、`alerts[]` 带 `labels`/`annotations`/`startsAt`/`endsAt`/`fingerprint`）POST 到配置的 URL，所以任何 Alertmanager webhook 接收端（钉钉/飞书桥接等）可直接接。**另一种**部署是把 BinlogServer 当告警源推给 Alertmanager：设 `notify.mode=alertmanager`，按 Alertmanager `POST /api/v2/alerts` 格式发送，由 Alertmanager 路由（邮件用 `email_configs`）。两种格式不同，配置项二选一，文档分别给示例。其他通道不进二进制。
+- 顺序：每条转移带 `FactAt`（事实时间）与 `generation`；outbox 写入顺序就是 generation 顺序（pending 按 generation 有序重放，§5.1 第 6 步）。接收端按 `(key, generation)` 去重、按 generation 排序（文档写明）；`startsAt/endsAt` 取 `FactAt`，而不是写库时间（#364 第 6 项）。
 - 至少一次：投递成功才前移游标（`notify_cursor` 存在 `task_health` 同库的单行表里）；接收端用 `X-BinlogServer-Delivery: <task>/<kind>/<subject>/<generation>/<op>` 去重。
-- 去抖：OPEN 默认立即（CRITICAL）或持续 1 个 sweep（WARNING）后通知；CLOSE 受 `ClearRule.HoldDown`；1 小时内同 key 翻转 >3 次合并为一条「flapping」通知。已 ack 的 key 不再通知 OPEN/ESCALATE，仍通知 CLOSE。
+- 去抖：OPEN 默认立即（CRITICAL）或持续 1 个 sweep（WARNING）后通知；CLOSE 受 `ClearRule.HoldDown`；1 小时内同 key 翻转 >3 次合并为一条「flapping」通知。已静音的 key 不再通知 OPEN/ESCALATE，仍通知 CLOSE。`reason=UPGRADE` 的转移（升级后首轮，§9）不逐条投递，合并为一条摘要通知（「升级后关闭了 N 条过期告警」）。UNKNOWN 引起的健康变化只发 WARNING 级通知。
 - **只有 webhook，没有内建发送器**（§15 D4）。路由到钉钉、飞书、邮件的方式写进 `docs/notifications.md`（P2-9 交付）：
   - Alertmanager：webhook 指向 Alertmanager 的 `/api/v2/alerts` 适配（或 BinlogServer 以 Alertmanager webhook 格式发往接收端），由 Alertmanager 的 `email_configs` 发邮件；钉钉/飞书经社区桥接（如 `prometheus-webhook-dingtalk`、飞书机器人 webhook relay）作为 `webhook_configs` 接收端。
   - 不用 Alertmanager：任意 HTTP relay 把 JSON 转为钉钉/飞书机器人消息或 SMTP；文档给出字段映射与一个最小示例。
@@ -339,20 +394,28 @@ evaluate(task):
 
 ## 8. 集群模式与 lease 栅栏
 
-基于 [0346](0346-dump-lease-fence.md) 的 lease（`(owner, epoch)`，CAS Renew）：
+基于 [0346](0346-dump-lease-fence.md) 的 lease（`(owner, epoch)`，CAS Renew）。**只有一种栅栏计数器：任务 lease epoch。** `_health` lease 有自己的 epoch，只用来选出「谁评估无主任务」，从不写进 finding/health 行，也从不与任务 epoch 比较。
 
-1. **评估权**：任务被某节点持有（RUNNING/STARTING/STOPPING 且 lease 未过期）→ 只有该节点评估，`ownerEpoch = lease.epoch`。理由：链的本地字节只在 owner 节点上（阶段 1 §8 已知），Signals 也只在 owner 进程里产生。
-2. **无主任务**（STOPPED、无 lease、lease 过期且无人接手）：持有集群 lease `_health`（复用 lease 表，task id `_health`）的节点评估 `task.state` 与 `store` scope，`ownerEpoch = _health.epoch`。链 scope 按存储部署分（§15 D2）：
-   - 共享存储：`_health` 持有者直接读目录，评估 `chain.*`。
-   - 非共享存储：任务的**最后 owner**（`tasks.owner` 最后一次写入的节点）继续评估自己本地目录的 `chain.*`。这是 `_health` lease 的**按节点 scope**：`_health` 持有者把 `(task, chain.*)` 委派给最后 owner，委派记录在 `task_health.owner` 与 `chain_owner` 字段；最后 owner 的写入带 `ownerEpoch = _health.epoch` 和节点 id 条件，只能写该任务的 `chain.*` kind。
-   - 只有最后 owner 已消失（`worker_heartbeats` 过期 3 个周期）时，`chain.*` 才为不完整，链 finding 保持原样（不误关），健康为 UNKNOWN(chain, node gone)。任务再次启动后由新 owner 接管。
-3. **栅栏写**：`ApplyTransitions` 的每条 upsert 带 `WHERE owner_epoch <= ? AND generation <= ?`（MySQL 用 `INSERT … ON DUPLICATE KEY UPDATE col = IF(VALUES(owner_epoch) >= owner_epoch, VALUES(col), col)`），`task_health` 同理。影响行数显示被拒 → `ErrFenced`。栅栏只依赖库里单调的 epoch，不依赖时钟，主机冻结（#360 的场景）后醒来的旧 owner 写不进去。
-4. **接管**：`LEASE_ACQUIRED` → 读该任务全部 open 行（不论谁写的）作为 `open`，下一轮评估 generation = max+1；旧 owner 的信号型 finding（例如 `DUMP_STALLED`）因为新 owner 的 Signals 里没有失败且任务状态/run 归属已变，按清除规则关闭——修复 #366。
-5. **丢失**：`LEASE_LOST` → 立即从调度中移除该任务，丢弃 pending 转移（不重试旧 epoch 的写），进程内缓存清空。
-6. **集群级 finding**（`_cluster`）：subject 带节点 id，由产生它的节点评估；节点消失后由 `_health` 持有者在节点心跳（`worker_heartbeats`）过期 3 个周期后关闭并记 `NODE_GONE` detail。
-7. **HEALTH_STALE**：`_health` 持有者每个 sweep 检查所有任务的 `evaluated_at`，补上「评估者死了但 lease 还没过期」的窗口。
+1. **评估权**：任务被某节点持有（lease 未过期）→ 只有该节点评估，`Fence{TaskEpoch: lease.epoch, Node: self}`。理由：链的本地字节只在 owner 节点上（阶段 1 §8），Signals 也只在 owner 进程里产生。
+2. **无主任务**（STOPPED、无 lease、lease 过期且无人接手）：
+   - `task.state`、`store` scope 由 `_health` 持有者评估，`Fence{TaskEpoch: 最后一次任务 lease epoch, Node: 最后 owner}` 由 `_health` 持有者**代为**使用：它在事务里校验 `task_leases` 仍是那个 (owner, epoch) 且已过期/释放，才可写这些 kind。
+   - 链 scope（§15 D2）：共享存储时 `_health` 持有者直接读目录；非共享存储时委派给**最后 owner 本身**，`Fence{TaskEpoch: 最后 lease epoch, Node: 最后 owner, Delegated: true}`，只能写 `chain.*` kind。委派是按节点的 `_health` scope：`_health` 持有者在 `task_health.chain_owner` 记录被委派节点，最后 owner 看到自己被委派才评估。
+   - **一旦任务产生新 lease（任何节点、更高 epoch），委派自动失效**：最后 owner 的下一次写在步骤 1/2 的比较中得 ErrFenced，因为库里 `fence_epoch` 已被新 owner 推高。
+   - 新 owner 在另一个节点起新目录时，旧目录的链 finding 在新 owner 第一轮评估中统一以 `reason=OWNER_CHANGED` 关闭（它们描述的是旧节点上的目录，不再是该任务的链）；同一 subject 之后由新目录的事实决定是否重开。
+   - 只有最后 owner 已消失（`worker_heartbeats` 过期 `health.node_gone_after`，默认 3 个 sweep）时，`chain.*` 为不完整，链 finding 保持原样，健康为 UNKNOWN(chain, node gone)。
+3. **栅栏写（显式比较，不看 affected rows）**：`ApplyTransitions` 在一个事务里：
+   1. `SELECT owner, epoch FROM task_leases WHERE task_id=? FOR UPDATE`：持有者模式要求等于 `(Fence.Node, Fence.TaskEpoch)` 且未过期；无主/委派模式要求 epoch 仍等于 `Fence.TaskEpoch`（没人获得更新的 lease）。不符 → ErrFenced。
+   2. `SELECT fence_epoch, fence_node, generation FROM task_health WHERE task_id=? FOR UPDATE`：`fence_epoch > Fence.TaskEpoch` → ErrFenced；相等而 `fence_node` 不同且非同一 lease 的代写 → ErrFenced；`generation > t.Generation` → 本转移已被更新的覆盖，**丢弃但不是 ErrFenced**；`generation == t.Generation` → 幂等重放，成功空操作。
+   3. upsert 用 `INSERT … AS new ON DUPLICATE KEY UPDATE col = new.col`（MySQL 8.0.20+ 废弃 `VALUES()`；MariaDB 与 5.7 走 `VALUES()` 分支，按 flavor 选择），写 `finding_transitions` 与 `task_health`。
+   这样同 generation 重放返回 0 affected rows 也不会被误判（go-sql-driver 默认 `clientFoundRows=false`）。
+4. **#360 作为 P2-6 的前置（P2-6a）**：任务行的 STOPPED/STOPPING 写（`failSafeStopLocked` 等）改为同样的条件写 `meta.fencedExec(taskID, owner, epoch, stmt)`：事务内先 `SELECT … FROM task_leases … FOR UPDATE` 校验 (owner, epoch)，不符则不写。并且评估器的 `TaskFacts` 与 `task_leases` 交叉校验：任务行的 owner/epoch 与 lease 表不一致时 `Facts.Task = nil`（task.state 不完整，健康 UNKNOWN），DUMP_STALLED/TASK_TRANSITION_STALLED 不会因读到错误的 STOPPED 而关闭（#355 run 3、#336）。
+5. **接管**：`LEASE_ACQUIRED` → 分页读该任务全部 open 行作为 `open`，generation = max+1；第一轮按清除规则调和。旧 owner 的 `DUMP_STALLED` 因任务 lease 已到新 epoch 而关闭（#366）；`SOURCE_UNREACHABLE` 等条件型 kind 按新 owner 的事实重算。
+6. **丢失**：`LEASE_LOST` → 立即停止评估该任务，丢弃 pending 转移（不重试旧 epoch 的写），进程内缓存清空。
+7. **冻结的 owner**（#364：SIGSTOP 约 60s；#355 run 3：宿主机停顿约 2 分钟）：醒来的旧 owner 持有的 Fence 是旧 epoch；步骤 1 在 `task_leases` 上就失败，步骤 2 兜底，它的 finding 写、健康写、任务行写（P2-6a）全部被拒，且它只在自己被拒后停止，不会把新 owner 锁死——新 owner 的写只与 `task_leases` 当前值比较，从不与 `_health` epoch 比较。
+8. **集群级 finding**（`_cluster`）：subject 带节点 id，由产生它的节点评估；集群模式下节点消失后由 `_health` 持有者在心跳过期 `node_gone_after` 后关闭（reason=NODE_GONE）。**standalone** 没有心跳表：只有本进程，`_cluster` finding 由本进程评估，进程重启后按 §5.5 在首次成功后关闭。
+9. **HEALTH_STALE**：`_health` 持有者每个 sweep 检查所有任务的 `evaluated_at`，超过 `health.stale_after`（默认 5×sweep，负载高时可调大）记 WARNING；TRANSITION 触发保留在热路径，TASK_TRANSITION_STALLED 不只依赖 sweep。
 
-单机模式（无 meta DSN）：lease 视图恒为本进程，`.findings.json` 扩展为同时存 `task_health` 与 outbox（原子写不变）。
+单机模式（无 meta DSN）：lease 视图恒为本进程，`.findings.json` 扩展为同时存 `task_health`、pending 转移与 outbox（原子写不变）。
 
 ## 9. 迁移与兼容
 
@@ -368,6 +431,10 @@ ALTER TABLE task_findings
   ADD COLUMN acked_by VARCHAR(128) NULL,
   ADD COLUMN acked_at DATETIME(6) NULL,
   ADD COLUMN ack_reason VARCHAR(512) NULL,
+  ADD COLUMN waiver_evidence TEXT NULL,
+  ADD COLUMN waiver_reason VARCHAR(512) NULL,
+  ADD COLUMN waiver_actor VARCHAR(128) NULL,
+  ADD COLUMN waived_at DATETIME(6) NULL,
   ADD COLUMN ack_until DATETIME(6) NULL;
 
 CREATE TABLE task_health (
@@ -378,13 +445,16 @@ CREATE TABLE task_health (
   generation BIGINT NOT NULL,
   owner VARCHAR(128) NOT NULL DEFAULT '',
   owner_epoch BIGINT NOT NULL DEFAULT 0,
+  fence_epoch BIGINT NOT NULL DEFAULT 0,       -- 只存任务 lease epoch（§8.3）
+  fence_node VARCHAR(128) NOT NULL DEFAULT '',
   chain_owner VARCHAR(128) NOT NULL DEFAULT ''  -- 非共享存储下评估 chain.* 的节点（§8.2）
 );
 
 CREATE TABLE finding_transitions (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   task_id VARCHAR(64) NOT NULL, kind VARCHAR(64) NOT NULL, subject VARCHAR(255) NOT NULL,
-  op VARCHAR(16) NOT NULL, generation BIGINT NOT NULL, severity VARCHAR(16) NOT NULL,
+  op VARCHAR(16) NOT NULL, reason VARCHAR(32) NOT NULL DEFAULT 'EVAL', generation BIGINT NOT NULL,
+  kind_version INT NOT NULL DEFAULT 1, fact_at DATETIME(6) NOT NULL, severity VARCHAR(16) NOT NULL,
   detail TEXT NULL, at DATETIME(6) NOT NULL,
   INDEX idx_ft_key (task_id, kind, subject), INDEX idx_ft_at (at)
 );
@@ -393,10 +463,11 @@ CREATE TABLE notify_cursor (id TINYINT PRIMARY KEY, last_id BIGINT NOT NULL);
 
 兼容规则（与 `000007`/`000008` 同一套路）：
 - **v0.5.x**：`minRequiredSchemaVersion` 保持 6。缺 `task_findings` → 今天的内存模式；缺 `000009` 的列/表（1054/1146）→ 评估器仍运行、仍做调和，但写入回退到 v0.5.66 的 upsert（无栅栏、无 outbox），报 `HEALTH_STORE_DEGRADED`，每个 sweep 重新探测（**不**像 #353 那样记到重启）。集群模式下缺 `000009` 时在启动日志与 `/api/alerts` 显式说明「栅栏不可用」。
-- 已存的 v0.5.66 open 行：`generation=0, owner_epoch=0`，任何新转移都能覆盖；评估器第一轮把它们当作 `open` 调和——条件已清除的 `SEGMENT_*` 在升级后第一轮关闭（发布说明写明「升级后会批量关闭过期告警」）。
+- 已存的 v0.5.66 open 行：`generation=0`，任何新转移都能覆盖；每个 kind 被翻成 Managed 后的第一轮把它们当作 `open` 调和，条件已清除的行关闭，转移标 `reason=UPGRADE`：写入 `finding_transitions` 便于审计，但**不逐条通知**，合并为一条摘要（§7.4）。v0.5.66 中「永不 resolve」的 `EVENT_PERSIST_FAILED` 积压按 §5.5 在首次成功后以 UPGRADE 关闭。
+- **feature flag** `health.evaluator`（`off|shadow|on`，v0.5.x 默认 `off`）：`shadow` 只计算并写 `finding_transitions`（reason=SHADOW，不改 finding 行、不通知），用于升级前比对；`on` 才接管 Managed kind。滚动升级时先升级全部节点、保持 `off`，全部到新版本后再切 `on`；评估器启动时若 `worker_heartbeats` 中有节点报告旧版本，拒绝进入 `on` 并报 `HEALTH_STORE_DEGRADED`（detail=mixed versions）。这样混跑期间不存在旧节点对 Managed kind 的写。
 - 旧二进制读写跑过 `000009` 的库：新列有默认值或可空，旧 upsert 语句不涉及它们；旧二进制写的行 `owner_epoch` 不变，会被新二进制的下一轮覆盖。混跑集群（滚动升级）期间旧节点无栅栏，发布说明要求滚动升级窗口内不做手工迁移任务。
 - `down`：删三张表和新增列；行为回到 v0.5.66。
-- **v0.6.0**（§15 D1）：`minRequiredSchemaVersion = 9`，低于 9 拒绝启动并提示 `./migrate up`；删除无栅栏回退代码路径与 `HEALTH_STORE_DEGRADED` 的「缺 000009」分支（保留「写入连续失败」分支）。v0.5.x 的回退只存在到 v0.6.0 为止。
+- **v0.6.0**（§15 D1）：`minRequiredSchemaVersion = 9`，低于 9 拒绝启动并给出明确提示（当前版本、所需版本、`./migrate up` 命令）；`health.evaluator` 默认 `on`；6→9、7→9、8→9 直接升级各有迁移测试（P2-2）；删除无栅栏回退代码路径与 `HEALTH_STORE_DEGRADED` 的「缺 000009」分支（保留「写入连续失败」分支）。v0.5.x 的回退只存在到 v0.6.0 为止。
 - Go API：`tasks.Finding`/`FindingKind` 保留为别名到 v0.6.0；`Scheduler.Report/Resolve` 在 P2-4 后变为 `Signal` 的包装并标 Deprecated，lintguard 禁止 `internal/tasks` 外新增调用。
 
 ## 10. 吸收哪些 P3
@@ -405,13 +476,14 @@ CREATE TABLE notify_cursor (id TINYINT PRIMARY KEY, last_id BIGINT NOT NULL);
 |---|---|---|
 | #352 单源 GTID 洞无 finding | **吸收**：`GTID_HOLE` 由 `I3_GTID_HOLE`/内部洞导出，不分单源多源 | P2-5 |
 | #353 000008 down/up 后封存事实写 NULL 无日志 | **吸收**：`SEAL_FACTS_ABSENT` + 每 sweep 重新探测列（Store scope） | P2-5 |
-| #366 STOPPED 任务的 DUMP_STALLED 挂 40s+ | **吸收**：清除规则含「任务不 RUNNING / run 不在本节点」，接管时调和 | P2-4 / P2-6 |
+| #366 STOPPED 任务的 DUMP_STALLED 挂 40s+ | **吸收**：只对「desired=STOP 且 STOPPED」或「lease 已到另一 epoch」豁免；重试循环由 `SOURCE_UNREACHABLE` 承接 | P2-4 / P2-6 |
 | #341 上传模式保留期删除不写 RETENTION_REMOVED | **吸收**：I6 需要保留期删除标记（阶段 1 §4.1 已排到阶段 2）；同一 PR 写事件、失败走 `RETENTION_RECORD_FAILED` 信号 | P2-5 |
 | #342 lintguard 覆盖面 | **部分吸收**：新增「`Report/Resolve` 只能在 evaluator 内」规则时一并识别 logger 实例方法；其余条目不在本阶段 | P2-4 |
 | #368 事件时间线按写入时间排序 | **部分吸收**：告警页与时间线中的 finding 事件按事件时间排；时间线整体排序随 Console 修 | P2-8 |
-| #360 lease 丢失后 STOPPED 覆盖新 owner 行 | **不吸收**，但 P2-2 的「epoch 条件写」原语（`meta.fencedExec`）可供 #360 的任务行写复用；建议紧随 P2-6 单独修 | — |
+| #360 lease 丢失后 STOPPED 覆盖新 owner 行 | **吸收，作为 P2-6 的前置 P2-6a**：任务行写走 `meta.fencedExec`（事务内校验 `task_leases`）；评估器另外交叉校验任务行与 lease 表（§8.4） | P2-6a |
 | #343 只读 meta 下 RUNNING 显示 1–3s | 不吸收（任务状态，不是健康）；健康会在首次写失败信号后 1 轮内变 UNHEALTHY，缩小但不消除该窗口 | — |
 | #345 DUMP_STALLED 48–49s 才报 | 不吸收（runner 检测阈值）；评估器不改变检测时机 | — |
+| #348 UploadGrace 默认值 | **吸收为 P2-5 的前置 P2-5a**：`assurance.DefaultUploadGrace`（15min）已有，但 tasks 侧未传入配置；P2-5a 加 `upload.grace` 配置并显式传入，Registry Derive 单测覆盖 | P2-5a |
 | #344、#365、#367、#363 | 不吸收（操作接口、Console、回放列表，与 finding 生命周期无关） | — |
 
 ## 11. 阶段 3–6 草图（只证明类型够用）
@@ -429,51 +501,83 @@ CREATE TABLE notify_cursor (id TINYINT PRIMARY KEY, last_id BIGINT NOT NULL);
 
 ## 13. PR 切分
 
-每个 PR 第一提交是失败测试；每个 PR 独立过 QA 才合并；P2-1 起每个 PR 都不改变 `/window`、`/replay`、`storage_alert` 的字节输出（沿用阶段 1 golden）。
+每个 PR 第一提交是失败测试；每个 PR 独立过 QA 才合并；P2-1 起每个 PR 都不改变 `/window`、`/replay`、`storage_alert` 的字节输出（沿用阶段 1 golden），除 P2-3 对「open 与 sealed 相同」新增的一条 golden 外。`health.evaluator` 在 P2-3 之前默认 `off`，每个 PR 的 QA 在 `on` 下跑。
 
-| PR | 内容 | 第一提交（红） | 不做 |
-|---|---|---|---|
-| P2-0 | 本设计文档 | — | — |
-| P2-1 | `internal/health`：`Kind`/`KindSpec`/`Registry`（现有 16 种 + 新 kind，Derive 先只实现现有两种 SEGMENT_*）、`Facts`、`Reconcile`、`Desire`、`HealthOf`；`tasks` 类型别名 | 表驱动：OPEN/UPDATE/ESCALATE/CLOSE/不完整 scope 不关/HoldDown/幂等（对输出再调和得空）；`assurance.AllKinds` 每项有映射 | 不接线 |
-| P2-2 | 迁移 `000009` + `meta` 的 `ApplyTransitions`（事务、epoch/generation 条件写、outbox）、`ListHealth`；缺表缺列回退与每轮重探；standalone 文件存储扩展 | 「旧 epoch 写不覆盖新 epoch」「缺 000009 时回退且不记到重启」测试红 | 不接线评估器 |
-| P2-3 | `tasks.Evaluator`：脏集合、per-task 串行、sweep、目录指纹、触发点接线（SEAL/UPLOAD/RETENTION/TRANSITION/CATALOG/STARTUP/API）；接管 `SEGMENT_UNREADABLE`/`SEGMENT_OVERLAP`，`storageHealthOf` 不再 `Report` | 「挪走重复副本后 ≤1 sweep finding 关闭」「修好不可读段后关闭」红 | 其他 kind |
-| P2-4 | 所有信号型 kind 改走 `Signal`；`TASK_TRANSITION_STALLED`、`DUMP_STALLED` 改为评估器 Derive；`Report/Resolve` 私有化 + lintguard 规则（含 #342 的 logger 方法） | 每种信号 kind：失败→OPEN、成功→CLOSE、重启后由存储行调和关闭；#366 场景（单机版） | 新链 kind |
-| P2-5 | `UPLOAD_LATE` 升级阈值配置（全局 `health.upload_late_critical_after`，默认 24h；任务级覆盖 `upload_late_critical_after`，经任务 PUT 设置）；新链 kind：`SEGMENT_DAMAGED`、`CHAIN_INDEX_GAP`、`GTID_HOLE`(#352)、`LEGACY_FAILBACK`、`CHECKPOINT_AHEAD`、`SEGMENT_MISSING`、`ORPHAN_ROW`、`UPLOAD_LATE`、`UPLOAD_UNVERIFIED` 条件化；保留期删除标记 + 事件(#341)；`SEAL_FACTS_ABSENT`(#353) | 每种 kind ≥2 个构造目录用例：打开一次、修复后关闭一次 | 集群 |
-| P2-6 | 集群：评估权跟随 lease、`_health` lease 评估无主任务（含非共享存储下委派最后 owner 评估本地目录）、`ErrFenced` 处理、接管调和、`HEALTH_STALE`、节点消失清理 | 两节点：旧 owner 冻结后写被拒；接管后旧 `DUMP_STALLED` 关闭（#366 集群版） | — |
-| P2-7 | API（`/api/alerts`、`/tasks/{id}/health`、ack、evaluate）+ 指标（`task_healthy` 总有序列等）+ 推荐规则文件；swagger | 「新建任务即有 task_healthy 序列」「评估停 3 周期 → UNKNOWN=0」红 | Console |
-| P2-8 | Console 告警页、健康徽标、finding 事件按事件时间排序 | UI 测试：告警页数据与 `/api/alerts` 一致 | — |
-| P2-9 | 通知器：`_notify` lease、outbox 游标、webhook、去抖、flapping、ack 抑制；配置项与文档 | 「投递失败重试且不丢」「切换 `_notify` 持有者不重复也不丢（按 delivery id）」红 | 非 webhook 通道 |
+| PR | 内容 | 第一提交（红） | Managed 变化 | 依赖 |
+|---|---|---|---|---|
+| P2-0 | 本设计文档 | — | — | — |
+| P2-1 | `internal/health`：`Kind`/`KindSpec`（含 `Managed`、`Version`、`Waivable`）/`Registry`、`Facts`、`Waiver`、`Reconcile`、`Desire`、`HealthOf`；`tasks` 类型别名 | 表驱动：OPEN/UPDATE/ESCALATE/CLOSE/WAIVE、不完整 scope 不关、HoldDown、幂等；**非 Managed kind 永不产生转移**；**信号在首次成功前 Unknown 不关闭**；`assurance.AllKinds` 每项有映射 | 全部 false | — |
+| P2-2 | 迁移 `000009` + `meta.ApplyTransitions`（显式 `SELECT … FOR UPDATE` 比较 `task_leases` 与 `task_health.fence_*`、`AS new` upsert、outbox）、`ListOpenFindingsForTask`（keyset 分页）、`ListHealth`；缺表缺列回退与每轮重探；standalone 文件存储扩展（含 pending） | 「旧 epoch 不覆盖新 epoch」「同 generation 重放不是 ErrFenced」「`_health` 代写与任务 epoch 交替写」「缺 000009 回退且不记到重启」红 | — | P2-1 |
+| P2-3 | `tasks.Evaluator`：脏集合、per-task 串行、sweep、目录指纹、触发点接线、feature flag `off/shadow/on`；sha256 轮转复核（§5.7）；I4 按 replay 顺序判定（含 open 副本） | 「挪走重复副本后 ≤1 sweep 关闭」「`.open.e4`≡`.sealed.e5` 打开 SEGMENT_OVERLAP」「原地改一个字节 ≤N 轮打开 SEGMENT_UNREADABLE」「meta 只读时 legacy finding 不被关」红 | `SEGMENT_UNREADABLE`、`SEGMENT_OVERLAP` | P2-2 |
+| P2-4 | 信号型 kind 逐个改走 `Signal` 并翻 Managed；新 kind `SOURCE_UNREACHABLE`；`DUMP_STALLED` 新清除规则；`TASK_TRANSITION_STALLED` 改 Derive（保留 TRANSITION 触发）；`Report/Resolve` 对 Managed kind 禁用 + lintguard（含 #342 logger 方法） | 每种信号 kind：失败→OPEN、首次成功→CLOSE；「meta 仍只读时重启不关闭」；「黑洞 3 分钟内任何时刻至少一条 open」红 | 16 种中除 SEGMENT_* 外的信号/状态 kind + `SOURCE_UNREACHABLE` | P2-3 |
+| P2-5a | #348：`upload.grace` 配置（默认 15min）由 tasks 显式传入 `assurance.Inputs.UploadGrace` | 「封存 1s 的段不报 I7_UPLOAD_LATE」红 | — | P2-3 |
+| P2-5 | `UPLOAD_LATE` 升级阈值（全局 `health.upload_late_critical_after` 默认 24h，任务级覆盖）；新链 kind：`SEGMENT_DAMAGED`、`CHAIN_INDEX_GAP`、`GTID_HOLE`(#352，Waivable)、`LEGACY_FAILBACK`、`CHECKPOINT_AHEAD`、`SEGMENT_MISSING`、`ORPHAN_ROW`、`UPLOAD_LATE`、`UPLOAD_UNVERIFIED` 条件化；waiver 存取；保留期删除标记 + 事件(#341)；`SEAL_FACTS_ABSENT`(#353) | 每种 kind ≥2 个构造目录用例：打开一次、修复后关闭一次；waiver 精确匹配 | 上述新 kind | P2-4、P2-5a |
+| P2-6a | #360：任务行写走 `meta.fencedExec`；TaskFacts 与 `task_leases` 交叉校验 | 「#355 run 3 复现后旧 owner 的 STOPPED 写被拒」「行与 lease 不一致时 task.state 不完整」红 | — | P2-2 |
+| P2-6 | 集群：评估权跟随任务 lease、`_health` 选评估者、非共享存储委派最后 owner（绑定最后 lease epoch + 节点）、OWNER_CHANGED、ErrFenced 处理、接管调和、`HEALTH_STALE`、节点消失清理 | 两/三节点：冻结 owner 写被拒且新 owner 不被锁死；委派在新 lease 后失效 | `HEALTH_STALE` | P2-4、P2-5、P2-6a |
+| P2-7 | API（`/api/alerts` 分页、`/tasks/{id}/health`、mute、waive、evaluate）+ 指标（`task_healthy` 总有序列、meta 宕机缓存、真实 2s）+ 推荐规则文件；swagger | 「新建任务即有序列」「meta 暂停时 2s 内返回且序列为 0」「评估停 `stale_after` → UNKNOWN」红 | — | P2-6 |
+| P2-8 | Console 告警页（静音、豁免操作）、健康徽标、finding 事件按事实时间排序 | UI 测试：告警页数据与 `/api/alerts` 一致 | — | P2-7 |
+| P2-9 | 通知器：`_notify` lease、outbox 游标、两种格式（AM webhook 格式 / AM `/api/v2/alerts`）、去抖、flapping、静音、UPGRADE 摘要；`docs/notifications.md`（钉钉、飞书、邮件路由） | 「投递失败重试且不丢」「`_notify` 切换不重复也不丢」「升级首轮只发一条摘要」红 | — | P2-6、P2-7 |
 
-依赖：P2-1 → P2-2 → P2-3 → {P2-4, P2-5} → P2-6 → P2-7 → {P2-8, P2-9}。阶段 2 完成后发 v0.6.0，schema 下限提到 9（§15 D1）。
+依赖图：P2-1 → P2-2 → P2-3 → P2-4 → P2-5（另需 P2-5a ← P2-3）；P2-2 → P2-6a；{P2-4, P2-5, P2-6a} → P2-6 → P2-7 → {P2-8, P2-9}。阶段 2 完成后发 v0.6.0，schema 下限提到 9，`health.evaluator` 默认 `on`（§15 D1）。
 
 ## 14. QA 计划（每个 PR）
 
-通用：`go vet`、`go test ./...`、阶段 1 golden（window/replay/health）逐字节一致、e2e quick 全绿；MySQL 8.0 + MariaDB 11.4（链相关 PR 加 10.11）。
+通用：`go vet`、`go test ./...`、阶段 1 golden（window/replay/health）逐字节一致、e2e quick 全绿；MySQL 8.0 + MariaDB 11.4（链相关 PR 加 10.11）；集群用例在 box 上用 3 节点 + SIGSTOP 复现（#355/#364 的做法）。
 
 | PR | QA 通过条件 |
 |---|---|
-| P2-1 | 单测覆盖 Reconcile 全部分支；随机性质测试：任意 (open, facts) 序列重放两次结果相同、对输出再调和为空；不完整 scope 下从不产生 CLOSE |
-| P2-2 | 在 schema 6/7/8/9 上各跑一次：读写正常、回退路径报 `HEALTH_STORE_DEGRADED`；在线 `migrate down 1` / `up` 后 1 个 sweep 内恢复栅栏写（#353 同型场景）；并发两个写者不同 epoch，库里只留高 epoch；`down` 后 v0.5.66 二进制可读写 |
-| P2-3 | 复现 #372 QA：零填充/完整副本 → OPEN；挪走副本 → finding 在 ≤60s（1 sweep）关闭并有 `finding_transitions` CLOSE；改坏一段 → `SEGMENT_UNREADABLE` OPEN，恢复 → CLOSE；重启后状态一致；1500 段任务单轮评估 <50ms（基准）；`storage_alert` 字节不变 |
-| P2-4 | 阶段 0 的 S1–S15 注入测试全部改为断言「失败→OPEN，恢复→CLOSE」，且重启进程后由新进程关闭；meta 只读 60s：`METADATA_WRITE_BLOCKED` OPEN→恢复后 CLOSE；`DUMP_STALLED` 在 Stop 后 ≤1 sweep 关闭；lintguard 在 `internal/tasks` 外调用 `Report` 时 CI 失败 |
-| P2-5 | #352 复现（`gtid_next` 跳号 363–381，单源）→ `GTID_HOLE` OPEN；MinIO 删对象（Objects 已列举）→ `SEGMENT_MISSING`，未列举时**不**关闭也不打开；上传关闭 >grace → `UPLOAD_LATE`（WARNING），超过阈值升级 CRITICAL，任务级阈值覆盖全局；保留期删除后无 `ORPHAN_ROW` 且有 `RETENTION_REMOVED` 事件；#353 复现后 1 sweep 内 `SEAL_FACTS_ABSENT` OPEN，`up` 后关闭且封存事实恢复写入；ADR 0006/0007 的 47 个目录用例无误报 |
-| P2-6 | 3 节点：kill -9 owner、SIGSTOP owner 2min（#360 场景）后恢复——旧 owner 的 finding 写全部 `ErrFenced`，库里无旧 epoch 覆盖；接管后 ≤1 sweep 调和完成；STOPPED 任务由唯一 `_health` 节点评估；非共享存储下 STOPPED 任务的链 finding 由最后 owner 打开/关闭、健康不为 UNKNOWN，kill 最后 owner 3 周期后变 UNKNOWN(node gone)；杀 `_health` 持有者后另一节点接手；`HEALTH_STALE` 在评估者冻结时出现、恢复后关闭 |
-| P2-7 | 每个健康条件单独破坏一次，`/api/alerts`、`task_healthy`、`task_health_status` 在 1 个评估周期内变化（ADR 阶段 2 QA 条件）；`task_healthy` 对每个任务总有序列（含 STOPPED、从未启动）；停掉评估 3 周期 → UNKNOWN；ack 不改变健康；meta 不可用时 scrape 2s 内返回 |
-| P2-8 | Console 告警页与 `/api/alerts` 数据一致（20 个构造 finding）；徽标四态；关闭的 finding 7 天内可见；浏览器控制台无错误；中英文 |
-| P2-9 | webhook 接收端停 10 分钟后恢复：全部转移按序到达、按 delivery id 无重复；`_notify` 持有者切换时不丢；flapping 合并；ack 抑制 OPEN 但不抑制 CLOSE；ack 7 天到期恢复通知、续期生效、无 reason 被拒；按文档经 Alertmanager 投递到邮件、经 relay 投递到钉钉/飞书各验证一次；未配置 webhook 时 outbox 30 天清理 |
+| P2-1 | 单测覆盖 Reconcile 全部分支；性质测试：任意 (open, facts) 序列重放两次结果相同、对输出再调和为空；不完整 scope 下从不 CLOSE；非 Managed kind 在任意输入下零转移；`LastSuccess` 为零的信号零 CLOSE；waiver evidence 不完全相等时不豁免 |
+| P2-2 | 在 schema 6/7/8/9 上各跑：读写正常、回退报 `HEALTH_STORE_DEGRADED`；**6→9、7→9、8→9 直接升级**与 `down` 后 v0.5.66 可读写；在线 `migrate down 1`/`up` 后 1 个 sweep 内恢复栅栏写（#353/#351 同型）；两写者不同任务 epoch 只留高 epoch；同 generation 重放（affected rows=0）不被判 ErrFenced；`_health` 代写与任务 epoch 写交替 100 次，结果只由任务 epoch 决定；MySQL 8.0 用 `AS new`、MariaDB/5.7 用 `VALUES()`；5000 条 open 分页读完无遗漏 |
+| P2-3 | 复现 #372：零填充/完整副本 → OPEN；挪走 → ≤1 sweep CLOSE 并有 transition；`.open.e4`≡`.sealed.e5`（openstale）与 openhand → SEGMENT_OVERLAP OPEN，新增 golden；corrupt.py 原地改一字节、保持 mtime → 在 `rehash_budget` 覆盖周期内 SEGMENT_UNREADABLE OPEN；meta 只读 60s 期间 tip-2c04 那 8 条 legacy finding 一条不被评估器关；`shadow` 模式不改 finding 行；1500 段单轮 <50ms；多任务 + 5000 条 open 无漏关 |
+| P2-4 | S1–S15 注入测试改为「失败→OPEN，恢复后首次成功→CLOSE」；**meta 仍只读时重启进程不关闭、不翻转、不通知**；meta 只读 60s：`METADATA_WRITE_BLOCKED` OPEN→恢复 CLOSE；**黑洞源 3 分钟（STARTING/RETRY_BACKOFF 循环）期间每秒采样至少一条 open finding**，`SOURCE_UNREACHABLE` 在 90s 内打开，SIGCONT 后两者关闭；有意 Stop 后 `DUMP_STALLED` ≤1 sweep 关闭；lintguard 对 Managed kind 的 `Report` 调用 CI 失败 |
+| P2-5a | 封存 1s 的段无 `I7_UPLOAD_LATE`；15min 后才出现；MinIO 暂停 5min 再恢复（#351 retry）期间无 UPLOAD_LATE、无通知 |
+| P2-5 | #352 复现（`gtid_next` 跳号 363–381，单源）→ `GTID_HOLE` OPEN；对 `uuid:363-381` waive → CLOSE(WAIVED)、健康恢复；再跳号 400–410 → 新洞重新 OPEN；MinIO 删对象（已列举）→ `SEGMENT_MISSING`，未列举时不开不关；UPLOAD_LATE WARNING→超阈值 CRITICAL，任务级覆盖生效；保留期删除后无 `ORPHAN_ROW` 且有 `RETENTION_REMOVED`；#353 复现 1 sweep 内 `SEAL_FACTS_ABSENT` OPEN，`up` 后关闭且封存事实恢复；ADR 0006/0007 的 47 个目录用例无误报 |
+| P2-6a | #355 run 3 复现（宿主机停顿 2 分钟）：旧 owner 的 STOPPED 写被拒，任务行保持新 owner 的状态；人为制造行/lease 不一致 → 健康 UNKNOWN 而非 HEALTHY；36 次重复无覆盖 |
+| P2-6 | 3 节点：kill -9 owner；SIGSTOP owner 60s（#364）与 2min（#355）后恢复——旧 owner 的 finding/health/任务行写全部被拒，新 owner 不出现 ErrFenced、≤1 sweep 调和完成；STOPPED 任务只由一个 `_health` 节点评估；非共享存储下 STOPPED 任务的链 finding 由最后 owner 打开/关闭、健康不为 UNKNOWN；任务在另一节点重启后旧目录 finding 以 OWNER_CHANGED 关闭、旧 owner 的委派写被拒；kill 最后 owner `node_gone_after` 后 UNKNOWN(node gone)；杀 `_health` 持有者后另一节点接手；load ~120 时 `HEALTH_STALE` 不误报（默认 5×sweep） |
+| P2-7 | 每个健康条件单独破坏一次，`/api/alerts`、`task_healthy`、`task_health_status` 在 1 个评估周期内变化；`task_healthy` 对每个任务总有序列（含 STOPPED、从未启动）；**meta 暂停（SIGSTOP mysqld）时 scrape ≤2s 返回、每个缓存任务 `task_healthy=0`**；mute 不改变健康、waive 改变健康；`/api/alerts` 分页可读完 5000 条 |
+| P2-8 | 告警页与 `/api/alerts` 一致（20 个构造 finding）；徽标四态；静音/豁免操作需填原因并显示操作者；关闭的 finding 7 天内可见；#364 第 6 项复现：被拒事件按事实时间排在 FINDING 事件之前；浏览器控制台无错误；中英文 |
+| P2-9 | 全部用**本地 mock 接收端**（离线可跑）：一个记录请求的 mock webhook（AM webhook 格式）、一个 mock Alertmanager（`/api/v2/alerts`）、mailpit 作为 mock SMTP（经真实 Alertmanager 容器的 `email_configs`）、一个 mock 钉钉/飞书 relay（校验转换后的机器人消息体）。接收端停 10 分钟后恢复：全部转移按 generation 到达、按 delivery id 无重复；meta 只读期间产生的转移在恢复后以 `FactAt` 排序；`_notify` 切换不丢不重；flapping 合并；静音抑制 OPEN 不抑制 CLOSE、7 天到期恢复、续期生效、无 reason 被拒；升级首轮只发一条摘要；真实钉钉/飞书/邮件账号验证列为可选 |
 
-阶段 2 收尾：BinlogServerQA 在 tip 上做全量回归（DBA 还原、failback、只读 meta、kill -9 + adopt、升级自 v0.5.66：已存过期 `SEGMENT_*` 在第一轮关闭）后发版。
+阶段 2 收尾：BinlogServerQA 在 tip 上做全量回归（DBA 还原、failback、只读 meta、kill -9 + adopt、升级自 v0.5.66：已存过期行以 UPGRADE 关闭且只有一条摘要通知）后发版。
 
 ## 15. Decisions (proposed defaults, 2026-10-15; Adrian may override)
 
-原「开放问题」五条的建议默认值如下，Adrian 尚未批准，可推翻；正文已按此修改。
+以下是建议默认值，Adrian 尚未批准，可推翻；正文已按此修改（按 BinlogServerQA 评审修订）。
 
-| # | 问题 | 决定 |
+| # | 问题 | 建议默认值 |
 |---|---|---|
-| D1 | schema 下限 | v0.6.0 把 `minRequiredSchemaVersion` 提到 **9**，并删除无栅栏的集群回退；v0.5.x 中的回退只保留到 v0.6.0（§9） |
-| D2 | 非共享存储下 STOPPED 任务的链评估 | 最后 owner 继续评估自己本地目录，作为 `_health` lease 的按节点 scope；链健康不因停止而 UNKNOWN，只有该节点消失时才 UNKNOWN（§8.2） |
-| D3 | GTID 洞豁免 | ack **总会过期**：默认 7 天，可续期，记录原因与操作者；没有永久豁免（§7.1） |
-| D4 | 通知通道 | 只做 webhook（Alertmanager 兼容格式）；文档说明经 Alertmanager 或 relay 路由到钉钉、飞书、邮件；阶段 2 无内建发送器（§7.4） |
-| D5 | `UPLOAD_LATE` 升级 | 默认 24h 后升级为 CRITICAL；全局默认可配，任务级可覆盖（§6、P2-5） |
+| D1 | schema 下限 | v0.6.0 把 `minRequiredSchemaVersion` 提到 **9**，删除无栅栏的集群回退；v0.5.x 的回退只保留到 v0.6.0。附加：feature flag `health.evaluator`（`off|shadow|on`，v0.5.x 默认 off，v0.6.0 默认 on），6→9、7→9、8→9 直接升级有测试，拒绝启动时给出明确的 `./migrate up` 提示（§9） |
+| D2 | 非共享存储下 STOPPED 任务的链评估 | 最后 owner 继续评估自己本地目录，作为 `_health` lease 的按节点 scope；**委派绑定任务最后一个 lease epoch + 节点 id**，任务一获得新 lease 委派即失效；旧目录 finding 由新 owner 以 OWNER_CHANGED 关闭；只有最后 owner 消失时才 UNKNOWN（§8.2–8.3） |
+| D3a | 通知静音（mute） | 有时限：默认且最长 7 天，可续期，记录原因与操作者；只抑制通知，不改变健康（§7.1） |
+| D3b | 事实豁免（waiver） | 绑定 evidence（确切 GTID 区间 + 原因 + 操作者），对该确切区间永久有效；Derive 不再产生该洞，健康恢复；区间变化即失效、重新打开。只有 `Waivable` kind（目前 `GTID_HOLE`）可豁免（§7.1、§6） |
+| D4 | 通知通道 | 只做 webhook（Alertmanager 兼容格式，两种模式见 §7.4）；文档说明经 Alertmanager 或 relay 路由到钉钉、飞书、邮件；阶段 2 无内建发送器 |
+| D5 | `UPLOAD_LATE` 升级 | 默认 24h 后升级为 CRITICAL，全局默认可配，任务级可覆盖；**依赖 P2-5a 先落实 #348 的 15min grace**（§6、§13） |
 
-开放问题：无。
+开放问题：无（以上默认值待 Adrian 确认）。
+
+## 16. 评审修订对照（BinlogServerQA @ b8530d01，FAIL）
+
+评审原文：`/workspace/binlog-server-verify-evidence-375/review.md`（box 上）。
+
+| 评审项 | 处理 | 位置 |
+|---|---|---|
+| P1-1 DUMP_STALLED 在重试循环中误关 | 只对有意 STOPPED / 另一 epoch 豁免；新增 `SOURCE_UNREACHABLE` 并交接；QA 黑洞 3 分钟不间断 | §6、§10、P2-4、§14 |
+| P1-2 两个 epoch 计数器 | 栅栏只用任务 lease epoch；委派绑定最后 lease epoch + 节点；冻结 owner 场景（#364/#355）复核 | §4 `Fence`、§8.2/8.3/8.7、D2、P2-2/P2-6 QA |
+| P1-3 Reconcile 误关未接管 kind | `KindSpec.Managed`，逐 PR 接管 | §2.1、§4、§5.6、§13 Managed 列、P2-1/P2-3 QA |
+| P1-4 重启后信号误关 | 首次成功前 Unknown | §2.3、§4、§5.5、P2-4 QA |
+| P1-5 #360 未吸收 | P2-6a 前置：`fencedExec` + 与 `task_leases` 交叉校验 | §8.4、§10、§13、P2-6a QA |
+| P2-1 open≡sealed 不可见 | I4 按 replay 顺序判定，含 open；新增 golden | §6、P2-3 |
+| P2-2 分页导致漏关 | 评估器按任务 keyset 分页读完 | §4 `ListOpenFindingsForTask`、§5.1、§5.6、P2-2/P2-3 QA |
+| P2-3 meta 宕机时指标 | 缓存任务列表输出 0/UNKNOWN；真实 2s | §7.2、P2-7 QA |
+| P2-4 UPLOAD_LATE 无 grace | P2-5a 先落实 #348 15min grace | §6、§10、§13、D5 |
+| P2-5 升级通知风暴 / 混跑翻转 | reason=UPGRADE 摘要；feature flag，混版本拒绝 on | §7.4、§9、D1 |
+| P2-6 affected rows 判 ErrFenced | 显式 `SELECT … FOR UPDATE` 比较；`AS new` | §4、§8.3、P2-2 QA |
+| P2-7 通知顺序 / pending | `FactAt` + generation 有序；standalone 持久化 pending，meta 模式由调和补齐 | §4、§5.1、§7.4、P2-9 QA |
+| P2-8 ack 与 §6 矛盾 | 拆成 mute（限时）与 waiver（evidence 绑定） | §6、§7.1、D3a/D3b |
+| P2-9 缓存不能证明可读 / bitrot | 只缓存「不可读」；sha256 轮转复核 | §5.7、P2-3 QA |
+| P3 负载下 HEALTH_STALE | 阈值可配，默认 5×sweep，WARNING；UNKNOWN 只发 WARNING 通知 | §6、§7.4、§8.9 |
+| P3 watchdog 时延 | 保留 TRANSITION 触发 | §8.9、P2-4 |
+| P3 Alertmanager 格式 | 区分 AM webhook 格式与 `/api/v2/alerts`，二选一 | §7.4 |
+| P3 P2-9 依赖外部账号 | mock webhook / mock AM / mailpit / mock relay，真实通道可选 | P2-9 QA |
+| P3 `_cluster` standalone 规则 | 写明 standalone 规则 | §8.8 |
+| 小处：clears_when 审计 | `kind_version` 存进 `finding_transitions` | §4、§9 |
