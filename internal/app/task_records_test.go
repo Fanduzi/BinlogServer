@@ -8,7 +8,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,5 +94,47 @@ func TestApp_StandaloneTaskRecordsOffStartsNothing(t *testing.T) {
 	case task := <-started:
 		t.Fatalf("records off started task %s", task.ID)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// #393 QA P2-2: a second standalone process on one data_dir must not start.
+func TestApp_SecondStandaloneOnSameDataDirFailsToStart(t *testing.T) {
+	data := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "task.key")
+	writeRecordedTask(t, data, keyFile)
+	cfg := config.Config{
+		DataDir: data, Mode: "standalone", ListenAddr: "127.0.0.1:0",
+		Standalone: config.StandaloneConfig{TaskRecords: "on", TaskKeyFile: keyFile},
+	}
+	runStandaloneWithRecords(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := New(cfg).Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), ".tasks.lock") || !strings.Contains(err.Error(), strconv.Itoa(os.Getpid())) {
+		t.Fatalf("second process on the same data_dir: %v, want a refusal naming .tasks.lock and the holder pid", err)
+	}
+}
+
+// #393 QA P3: the key is not left in the process environment.
+func TestApp_TaskKeyEnvUnsetAfterLoad(t *testing.T) {
+	data := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "task.key")
+	writeRecordedTask(t, data, keyFile)
+	raw, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(taskrecords.KeyEnv, strings.TrimSpace(string(raw)))
+	started := runStandaloneWithRecords(t, config.Config{
+		DataDir: data, Mode: "standalone", ListenAddr: "127.0.0.1:0",
+		Standalone: config.StandaloneConfig{TaskRecords: "on"},
+	})
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recorded task was not resumed with the env key")
+	}
+	if v, ok := os.LookupEnv(taskrecords.KeyEnv); ok {
+		t.Fatalf("%s still set after load (len %d)", taskrecords.KeyEnv, len(v))
 	}
 }

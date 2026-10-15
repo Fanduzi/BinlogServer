@@ -51,6 +51,8 @@ start_db() {
   local -a args=(--server-id="$sid" --binlog-format=ROW)
   [[ "$binlog" == 1 ]] && args+=(--log-bin=mysql-bin)
   [[ "$binlog" == 0 && "$flavor" == mysql80 ]] && args+=(--skip-log-bin)
+  # MySQL runs with GTIDs so the GTID task keeps its executed set across a restart (#393 QA P2-3).
+  [[ "$flavor" == mysql80 ]] && args+=(--gtid-mode=ON --enforce-gtid-consistency=ON)
   docker rm -f "$name" >/dev/null 2>&1 || true
   CONTAINERS+=("$name")
   docker run -d --name "$name" -p "127.0.0.1:${port}:3306" \
@@ -117,10 +119,45 @@ assert_no_finding_kind() {
   fi
 }
 
-create_body() { # flavor port name
+create_body() { # flavor port name [gtid_set]
+  local start='{"mode":"LATEST"}'
+  [[ -n "${4:-}" ]] && start="$(jq -cn --arg g "$4" '{mode:"GTID",gtid_set:$g}')"
   jq -n --arg name "$3" --arg pass "$SECRET" --arg fl "$(flavor_name "$1")" --argjson port "$2" \
-    --argjson sid $((420000 + RANDOM % 10000)) \
-    '{name:$name,cluster_key:$name,source:{host:"127.0.0.1",port:$port,user:"root",password:$pass,flavor:$fl,server_id:$sid},start:{mode:"LATEST"},storage:{retention_days:7}}'
+    --argjson sid $((420000 + RANDOM % 10000)) --argjson start "$start" \
+    '{name:$name,cluster_key:$name,source:{host:"127.0.0.1",port:$port,user:"root",password:$pass,flavor:$fl,server_id:$sid},start:$start,storage:{retention_days:7}}'
+}
+
+# After a restart the GTID task's run must start from a GTID set rebuilt
+# from the stored segments (seed, sealed, open tail), which equals what the
+# source had executed when the server was killed (#393 QA P2-3; before it
+# the restored run had no set at all). Standalone has no checkpoint row, so
+# the restored start on GET /api/tasks/{id} is what the run was given.
+assert_restored_gtid_set() { # flavor src task want
+  local got
+  got="$(curl -fsS "$API/api/tasks/$3" | jq -r '.start.gtid_set // empty' | tr -d ' \n')"
+  [[ -n "$got" ]] || { echo "GTID task $3 restored without a GTID set: $(curl -sS "$API/api/tasks/$3" | jq -c .start)" >&2; return 1; }
+  if [[ "$(sql "$1" "$2" "SELECT GTID_SUBSET('$4', '$got') AND GTID_SUBSET('$got', '$4')")" != 1 ]]; then
+    echo "GTID task $3 restored set [$got], want the stored set [$4]" >&2; return 1
+  fi
+}
+
+# A second process on the same data_dir must refuse to start (#393 QA P2-2).
+assert_second_process_refused() { # data_dir key_file
+  local out="$WORK/second.log" pid i
+  BINLOG_SERVER_MODE=standalone BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18099 BINLOG_SERVER_DATA_DIR="$1" \
+    BINLOG_SERVER_META_DSN= BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$2" \
+    "$BIN" --config "$ROOT_DIR/deploy/e2e/config.yaml" >"$out" 2>&1 &
+  pid=$!
+  for i in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid"; echo "a second process on $1 kept running" >&2; return 1
+  fi
+  if wait "$pid"; then echo "a second process on $1 exited 0" >&2; return 1; fi
+  grep -q '.tasks.lock' "$out" || { echo "second process did not name .tasks.lock:" >&2; cat "$out" >&2; return 1; }
+  log "second process on the same data_dir refused: $(grep -o 'another binlog-server process holds[^"]*' "$out" | head -1)"
 }
 
 wait_caught_up() { # flavor src task
@@ -189,9 +226,24 @@ run_flavor() {
   wait_state "$id" RUNNING
   [[ -f "$data/.tasks.enc" ]] || { echo "no $data/.tasks.enc after start" >&2; return 1; }
 
+  local gid=""
+  if [[ "$flavor" == mysql80 ]]; then
+    local seed
+    seed="$(sql "$flavor" "$src" "SELECT @@GLOBAL.gtid_executed" | tr -d ' \n')"
+    resp="$(curl -sS -X POST "$API/api/tasks" -H 'Content-Type: application/json' -d "$(create_body "$flavor" "$base" "sa-gtid-$RUN_TAG" "$seed")")"
+    gid="$(jq -r '.id // empty' <<<"$resp")"
+    [[ -n "$gid" ]] || { echo "create GTID task failed: $resp" >&2; return 1; }
+    curl -fsS -X POST "$API/api/tasks/$gid/start" >/dev/null
+    wait_state "$gid" RUNNING
+  fi
   sql "$flavor" "$src" "CREATE DATABASE $db; CREATE TABLE $db.t (id INT PRIMARY KEY, v VARCHAR(200) NOT NULL)"
   write_rows "$flavor" "$src" "$db" 1 50
   wait_caught_up "$flavor" "$src" "$id"
+  local at_kill=""
+  if [[ -n "$gid" ]]; then
+    wait_caught_up "$flavor" "$src" "$gid"
+    at_kill="$(sql "$flavor" "$src" "SELECT @@GLOBAL.gtid_executed" | tr -d ' \n')"
+  fi
 
   log "$flavor: kill -9 while RUNNING, then write while down"
   kill9_server
@@ -205,8 +257,15 @@ run_flavor() {
     || { echo "task $id not listed once after restart: $(curl -sS "$API/api/tasks")" >&2; return 1; }
   assert_no_finding_kind TASK_UNADOPTED
   assert_no_finding_kind TASK_RECORDS_FAILED
+  assert_second_process_refused "$data" "$WORK/task.key"
   write_rows "$flavor" "$src" "$db" 101 150
   wait_caught_up "$flavor" "$src" "$id"
+  if [[ -n "$gid" ]]; then
+    wait_state "$gid" RUNNING
+    assert_restored_gtid_set "$flavor" "$src" "$gid" "$at_kill"
+    wait_caught_up "$flavor" "$src" "$gid"
+    log "$flavor: GTID task $gid resumed with the stored GTID set $at_kill and caught up"
+  fi
   restore_and_compare "$flavor" "$src" "$rst" "$id" "$db"
   assert_secret_safe "$data" "$slog"
   log "$flavor: auto-resumed after kill -9 with no operator action"

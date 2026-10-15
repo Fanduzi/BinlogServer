@@ -189,7 +189,9 @@ func TestTaskRecords_RestartResumesFromDiskWithPassword(t *testing.T) {
 	}
 }
 
-func TestTaskRecords_LatestWithNothingOnDiskFailsLoudly(t *testing.T) {
+// ADR 0010 rule 3 after #393 QA gap (b): no segment means no stored
+// history, so LATEST resumes as LATEST, with an event saying so.
+func TestTaskRecords_LatestWithNothingOnDiskResumesAtLatest(t *testing.T) {
 	data := t.TempDir()
 	key := recordKey(t, 1)
 	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
@@ -202,29 +204,52 @@ func TestTaskRecords_LatestWithNothingOnDiskFailsLoudly(t *testing.T) {
 	}
 	r1.next(t)
 	s2, r2 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
-	r2.none(t)
-	got, err := s2.GetTask(task.ID)
+	got := r2.next(t)
+	if got.ID != task.ID || got.Start.Mode != StartModeLatest || got.KeepLocalSegments {
+		t.Fatalf("resumed %+v keep=%v, want a LATEST run", got.Start, got.KeepLocalSegments)
+	}
+	cur, _ := s2.GetTask(task.ID)
+	if cur.State == StateFailed || cur.LastError != "" {
+		t.Fatalf("state %s last_error %q", cur.State, cur.LastError)
+	}
+	evs, err := s2.ListEvents(task.ID, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != StateFailed || !strings.HasPrefix(got.LastError, ResumePositionUnknown) {
-		t.Fatalf("state %s last_error %q, want FAILED %s", got.State, got.LastError, ResumePositionUnknown)
+	found := false
+	for _, e := range evs {
+		found = found || e.Type == "TASK_RESUMED_AT_LATEST"
 	}
-	if got.FailedSpecRevision == 0 || got.FailedSpecRevision != got.SpecRevision {
-		t.Fatalf("failure not current: failed=%d spec=%d", got.FailedSpecRevision, got.SpecRevision)
+	if !found {
+		t.Fatalf("no TASK_RESUMED_AT_LATEST event: %+v", evs)
 	}
-	// A later restart keeps it FAILED and does not start it.
-	s3, r3 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
-	r3.none(t)
-	if got, _ := s3.GetTask(task.ID); got.State != StateFailed || !strings.HasPrefix(got.LastError, ResumePositionUnknown) {
-		t.Fatalf("after a second restart: %s %q", got.State, got.LastError)
-	}
-	// The operator Start accepts the tip.
-	if err := s3.StartTask(task.ID); err != nil {
+}
+
+// A directory with history never jumps to a new tip: segments that hold
+// events but no resume point stay FAILED even for a LATEST task.
+func TestTaskRecords_LatestWithUnreadableSegmentsStaysFailed(t *testing.T) {
+	data := t.TempDir()
+	key := recordKey(t, 1)
+	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
+	task, err := s1.CreateTaskFromSpec("hist", "hist-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r3.next(t); got.Start.Mode != StartModeLatest {
-		t.Fatalf("operator start %+v", got.Start)
+	if err := s1.StartTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	r1.next(t)
+	dir := filepath.Join(data, task.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mysql-bin.000001.open.e1"), append([]byte{0xfe, 'b', 'i', 'n'}, bytes.Repeat([]byte{0xab}, 200)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s2, r2 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
+	r2.none(t)
+	if got, _ := s2.GetTask(task.ID); got.State != StateFailed || !strings.HasPrefix(got.LastError, ResumePositionUnknown) {
+		t.Fatalf("state %s last_error %q, want FAILED %s", got.State, got.LastError, ResumePositionUnknown)
 	}
 }
 
@@ -514,26 +539,31 @@ func (f *failingRecordFile) Save(plain []byte) error {
 	return f.Store.Save(plain)
 }
 
-func TestTaskRecords_FailedSaveRefusesTheAction(t *testing.T) {
+func TestTaskRecords_FailedSaveRefusesCreate(t *testing.T) {
 	data := t.TempDir()
 	file := &failingRecordFile{Store: taskrecords.Open(data, recordKey(t, 1), nil)}
 	s, _ := recordProcess(t, data, file, nil)
-	task, err := s.CreateTaskFromSpec("ok", "ok-key", recordSourceCfg(), nil, nil)
-	if err != nil {
+	if _, err := s.CreateTaskFromSpec("ok", "ok-key", recordSourceCfg(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	file.fail = true
-	if _, err := s.CreateTaskFromSpec("no", "no-key", recordSourceCfg(), nil, nil); !errors.Is(err, ErrTransitionNotRecorded) {
+	_, err := s.CreateTaskFromSpec("no", "no-key", recordSourceCfg(), nil, nil)
+	if !errors.Is(err, ErrTransitionNotRecorded) || !errors.Is(err, ErrTaskRecordsNotSaved) {
 		t.Fatalf("create with a failing save: %v", err)
 	}
-	if err := s.DeleteTask(task.ID); !errors.Is(err, ErrTransitionNotRecorded) {
-		t.Fatalf("delete with a failing save: %v", err)
+	if strings.Contains(err.Error(), recordPassword) {
+		t.Fatal("refusal text holds the source password")
 	}
 	if len(s.ListTasks()) != 1 {
-		t.Fatalf("memory changed by refused actions: %+v", s.ListTasks())
+		t.Fatalf("memory changed by a refused create: %+v", s.ListTasks())
 	}
-	if f, ok := clusterFinding(t, s, RecordsWrite); !ok || f.Severity != FindingCritical {
+	f, ok := clusterFinding(t, s, RecordsWrite)
+	if !ok || f.Severity != FindingCritical {
 		t.Fatal("failed save: no TASK_RECORDS_FAILED/write")
+	}
+	// The detail says how stale the file is (#393 QA P3).
+	if !strings.Contains(f.Detail, "seq 1") || !strings.Contains(f.Detail, "saved_at") {
+		t.Fatalf("write detail lacks the last good seq/saved_at: %q", f.Detail)
 	}
 	file.fail = false
 	if _, err := s.CreateTaskFromSpec("again", "again-key", recordSourceCfg(), nil, nil); err != nil {
@@ -541,6 +571,60 @@ func TestTaskRecords_FailedSaveRefusesTheAction(t *testing.T) {
 	}
 	if _, ok := clusterFinding(t, s, RecordsWrite); ok {
 		t.Fatal("write finding still open after a successful save")
+	}
+}
+
+// #393 QA P2-1: a full data_dir must never block Stop or Delete.
+func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
+	data := t.TempDir()
+	key := recordKey(t, 1)
+	file := &failingRecordFile{Store: taskrecords.Open(data, key, nil)}
+	s, r := recordProcess(t, data, file, nil)
+	run, err := s.CreateTaskFromSpec("run", "run-key", recordSourceCfg(), &StartConfig{Mode: StartModeFilePos, File: "mysql-bin.000001", Pos: 4}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, err := s.CreateTaskFromSpec("gone", "gone-key", recordSourceCfg(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StartTask(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.next(t)
+	file.fail = true
+	if err := s.StopTask(run.ID); err != nil {
+		t.Fatalf("stop refused by a failing save: %v", err)
+	}
+	if got, _ := s.GetTask(run.ID); got.DesiredRun != TaskDesiredStop {
+		t.Fatalf("stop not applied in memory: desired %s state %s", got.DesiredRun, got.State)
+	}
+	f, ok := clusterFinding(t, s, RecordsWrite)
+	if !ok || !strings.Contains(f.Detail, "task "+run.ID) || !strings.Contains(f.Detail, "restart") || !strings.Contains(f.Detail, "resume") {
+		t.Fatalf("write detail does not say a restart resumes task %s: %+v %v", run.ID, f, ok)
+	}
+	if err := s.DeleteTask(gone.ID); err != nil {
+		t.Fatalf("delete refused by a failing save: %v", err)
+	}
+	if _, err := s.GetTask(gone.ID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("delete not applied in memory: %v", err)
+	}
+	// Still failing: the retry keeps the finding open.
+	s.RetryRecordSave()
+	if _, ok := clusterFinding(t, s, RecordsWrite); !ok {
+		t.Fatal("write finding closed while the save still fails")
+	}
+	file.fail = false
+	s.RetryRecordSave()
+	if _, ok := clusterFinding(t, s, RecordsWrite); ok {
+		t.Fatal("write finding still open after a successful retry")
+	}
+	snap := loadRecordSnapshot(t, taskrecords.Open(data, key, nil))
+	if len(snap.Tasks) != 1 || snap.Tasks[0].ID != run.ID || snap.Tasks[0].DesiredRun != TaskDesiredStop {
+		t.Fatalf("retried snapshot tasks %+v", snap.Tasks)
+	}
+	if len(snap.Deleted) != 1 || snap.Deleted[0].ID != gone.ID {
+		t.Fatalf("retried snapshot tombstones %+v", snap.Deleted)
 	}
 }
 
@@ -558,6 +642,67 @@ func TestTaskRecords_RotationResavesOnCurrentKey(t *testing.T) {
 	}
 	if _, info, err := taskrecords.Open(data, cur, nil).Load(); err != nil || info.KeyID != cur.ID() {
 		t.Fatalf("file not moved to the current key: %+v %v", info, err)
+	}
+}
+
+// #393 QA P3: a rotation whose re-save fails keeps running on the old
+// file, says so, and the retry moves it to the current key later.
+func TestTaskRecords_RotationResaveFailureKeepsOldFile(t *testing.T) {
+	data := t.TempDir()
+	old, cur := recordKey(t, 1), recordKey(t, 2)
+	s1, _ := recordProcess(t, data, taskrecords.Open(data, old, nil), nil)
+	task, err := s1.CreateTaskFromSpec("r", "r-key", recordSourceCfg(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(data, taskrecords.FileName))
+	file := &failingRecordFile{Store: taskrecords.Open(data, cur, old), fail: true}
+	s2, _ := recordProcess(t, data, file, nil)
+	if got, err := s2.GetTask(task.ID); err != nil || got.Source.Password != recordPassword {
+		t.Fatalf("restore on the previous key with a failing re-save: %+v %v", got, err)
+	}
+	after, _ := os.ReadFile(filepath.Join(data, taskrecords.FileName))
+	if !bytes.Equal(before, after) {
+		t.Fatal("failed rotation changed the file")
+	}
+	f, ok := clusterFinding(t, s2, RecordsWrite)
+	if !ok || !strings.Contains(f.Detail, old.ID()) {
+		t.Fatalf("failed rotation: write finding %+v %v, want the previous key id", f, ok)
+	}
+	file.fail = false
+	s2.RetryRecordSave()
+	if _, info, err := taskrecords.Open(data, cur, nil).Load(); err != nil || info.KeyID != cur.ID() {
+		t.Fatalf("retry did not move the file to the current key: %+v %v", info, err)
+	}
+}
+
+// #393 QA P2-3: a GTID task resumes with the executed set built from the
+// stored bytes (seed, sealed segments, open tail), not an empty one.
+func TestTaskRecords_GTIDTaskResumesWithStoredSet(t *testing.T) {
+	data := t.TempDir()
+	key := recordKey(t, 1)
+	s1, r1 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
+	task, err := s1.CreateTaskFromSpec("g", "g-key", recordSourceCfg(), &StartConfig{Mode: StartModeGTID, GTIDSet: gtidPITRUUID + ":1-36"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.StartTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	r1.next(t)
+	dir := filepath.Join(data, task.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
+	writeDiskSegment(t, filepath.Join(dir, "mysql-bin.000002.open.e3"), 369367)
+	_, r2 := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
+	got := r2.next(t)
+	if got.Start.Mode != StartModeFilePos || got.Start.File != "mysql-bin.000002" || got.Start.Pos != 369367 {
+		t.Fatalf("position must still come from disk: %+v", got.Start)
+	}
+	if got.Start.GTIDSet != gtidPITRUUID+":1-38" {
+		t.Fatalf("resumed GTID set %q, want seed + sealed %s:1-38", got.Start.GTIDSet, gtidPITRUUID)
 	}
 }
 
@@ -590,10 +735,23 @@ func TestTaskRecords_LogsHoldNoSecrets(t *testing.T) {
 	}
 	r1.next(t)
 	recordProcess(t, data, taskrecords.Open(data, recordKey(t, 9), nil), nil) // wrong key
-	recordProcess(t, data, taskrecords.Open(data, cur, old), nil)             // rotation + failed restore
-	out := buf.String()
-	if !strings.Contains(out, "rotated") || !strings.Contains(out, ResumePositionUnknown) {
-		t.Fatalf("expected rotation and restore failure in logs:\n%s", out)
+	s3, r3 := recordProcess(t, data, taskrecords.Open(data, cur, old), nil)   // rotation + LATEST resume
+	r3.next(t)
+	// A refused write and a Stop applied without a save: their error text,
+	// finding detail and log lines (#393 QA P3).
+	fail := &failingRecordFile{Store: taskrecords.Open(t.TempDir(), cur, nil), fail: true}
+	s4, _ := recordProcess(t, t.TempDir(), fail, nil)
+	_, refused := s4.CreateTaskFromSpec("x", "x-key", recordSourceCfg(), nil, nil)
+	if refused == nil {
+		t.Fatal("create with a failing save was accepted")
+	}
+	if err := s3.StopTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := clusterFinding(t, s4, RecordsWrite)
+	out := buf.String() + "\n" + refused.Error() + "\n" + f.Detail
+	if !strings.Contains(out, "rotated") || !strings.Contains(out, "resuming at LATEST") || !strings.Contains(out, "key id "+cur.ID()) {
+		t.Fatalf("expected rotation, the key-id line and the LATEST resume in logs:\n%s", out)
 	}
 	for _, secret := range []string{recordPassword, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))} {
 		if strings.Contains(out, secret) {
