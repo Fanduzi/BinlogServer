@@ -4,7 +4,7 @@ Release date: 2026-10-15 (pending tip QA)
 
 v0.5.67 brings automatic task resume to standalone, using task records encrypted at rest (#385, ADR 0010). It also lands phase 2 of the ADR 0009 health evaluator (P2-1..P2-4), which **defaults to `off`**. It fixes truncated sealed segments (#381), a lost FAILED state (#389), and resume and checkpoint problems after a switchover or a large transaction (#391). It adds migration `000009`, which is additive and optional: `minRequiredSchemaVersion` stays 6 and the floor stays v0.5.51.
 
-**Read the upgrade notes before upgrading a standalone server.** By default it shows degraded until a task key is configured.
+**Read the upgrade notes before upgrading a standalone server.** Configure the task key before the upgrade restart. Every task carried over from v0.5.66 must then be adopted once (bulk: `scripts/adopt-leftovers.sh`).
 
 ## Upgrade Notes
 
@@ -14,26 +14,36 @@ v0.5.67 brings automatic task resume to standalone, using task records encrypted
 
 **Liveness probes must use `GET /healthz`**, which is unchanged (200 `ok`). If a probe points at `/api/health`, any CRITICAL finding will get the process restarted. Use `/api/health` for alerting or readiness only.
 
-### Standalone task records are on by default: configure a key
+### Standalone: configure the key BEFORE the upgrade restart, then adopt every task once
 
-`standalone.task_records` defaults to `on`. After an upgrade, a standalone server (no `meta_dsn`) with **no key configured opens CRITICAL `TASK_RECORDS_FAILED/key_missing`, and `/api/health` reports degraded.** Tasks keep running, but they will not survive a restart until a key is set.
+`standalone.task_records` defaults to `on`. A standalone server (no `meta_dsn`) with **no key configured opens CRITICAL `TASK_RECORDS_FAILED/key_missing`, and `/api/health` reports degraded.** Tasks keep running only until the next restart. Any restart without a key turns every task into a STOPPED leftover directory.
 
-Key setup:
+**Every standalone upgrade from v0.5.66 turns all its tasks into leftovers, key or not.** v0.5.66 kept no record. After the upgrade restart, each task lists as STOPPED with an empty source, replication for it is stopped, and it raises CRITICAL `TASK_UNADOPTED`, which degrades `/api/health` in every `health.evaluator` mode (#399). **Every task directory must be adopted once.** After that, restarts resume the tasks automatically.
 
-1. Generate a key file. The command writes the file with mode `0600`, refuses to overwrite an existing path, and prints only the path and key id:
+Upgrade steps:
+
+1. **Before stopping v0.5.66**, generate a key with the new binary (it works while the old server is still running). The command writes the file with mode `0600`, refuses to overwrite an existing path, and prints only the path and key id:
    ```bash
-   binlog-server task-key generate --out /etc/binlog-server/task.key
+   ./binlog-server-v0.5.67 task-key generate --out /etc/binlog-server/task.key
    ```
    Keep the file outside `data_dir`, and back it up separately. Without the key, `.tasks.enc` cannot be read.
-2. Point the server at the key. Use **one** of:
+2. **Before the restart**, point the config at the key. Use **one** of:
    - **Key file (recommended):** `standalone.task_key_file: /etc/binlog-server/task.key` in the config, or `BINLOG_SERVER_STANDALONE_TASK_KEY_FILE=/etc/binlog-server/task.key`. The file must be a regular file with mode `0600` or `0400`. Wider permissions refuse the key with `TASK_RECORDS_FAILED/key_invalid`; the mode is never changed for you.
    - **Environment:** `BINLOG_SERVER_TASK_KEY=<base64 or 64 hex chars, 32 bytes>`, for container secrets. The process unsets the variable right after reading it. A file is still preferred, because the environment of a running process is visible to the same user and root.
    - A key in the YAML file itself is never accepted.
-3. Restart. `key_missing` closes, `/api/health` returns to ok once no other CRITICAL finding is open, and from then on every restart resumes the tasks automatically.
+3. Replace the binary and restart. No `key_missing` opens, and every task directory raises `TASK_UNADOPTED`.
+4. **Adopt every directory.** Adopt needs the source (including the password) **and `cluster_key`**: without it the API answers 400 `cluster_key is required`. `name` and `storage` are optional. To adopt them in bulk:
+   ```bash
+   scripts/adopt-leftovers.sh --api http://127.0.0.1:8080              # lists the leftovers and prints a map template
+   # fill in name, cluster_key and source for each id; chmod 600 the file (it holds passwords)
+   scripts/adopt-leftovers.sh --api http://127.0.0.1:8080 --map adopt-map.json --start
+   ```
+   The script adopts every task with an open `TASK_UNADOPTED` and starts it with `--start`. It exits non-zero while any directory is left unadopted. Auth: `BINLOG_SERVER_API_KEY` or `BINLOG_SERVER_BEARER_TOKEN`. A single directory can also be adopted by hand: `POST /api/tasks/{id}/adopt` with `{"name":"...","cluster_key":"...","source":{...}}`, then `POST /api/tasks/{id}/start`.
+5. Check that `/api/findings` has no `TASK_UNADOPTED` and that `/api/health` is 200. From now on, every restart resumes the tasks automatically.
 
-To run without records, set `standalone.task_records: off`. Behaviour is then as in v0.5.66: tasks are kept in memory only and leftover directories need adopt after a restart.
+If the key was skipped and added later, every task created in the meantime is a leftover after the restart that adds the key. It raises `TASK_UNADOPTED`, so adopt it as in step 4.
 
-**Migrating existing leftover directories.** A task directory left from before the upgrade has no record. With the evaluator `on`, it raises `TASK_UNADOPTED` (#388). Migrate each directory once with the existing `POST /api/tasks/{id}/adopt` (source including password, optional name/cluster_key/storage). With records on, adopt is persisted, so the next restart resumes the task without further action. To migrate several directories, script the adopt calls against the API.
+To run without records, set `standalone.task_records: off`. Behaviour is then as in v0.5.66: tasks are kept in memory only and leftover directories need adopt after every restart. Leftovers still raise `TASK_UNADOPTED`.
 
 Other standalone changes to know about:
 
@@ -59,6 +69,9 @@ Other standalone changes to know about:
 
 - Migration `000009` (health columns on `task_findings`, plus `task_health`, `finding_transitions`, `notify_cursor`, `rehash_cursor` and `task_mutes`) is additive and optional. It is needed only for `health.evaluator` `shadow`/`on` with a metadata DSN; standalone writes `{data_dir}/.health.json` instead. `./migrate up` is recommended.
 - Cluster: keep `health.evaluator: off` until every node runs v0.5.67, then switch to `shadow` and later `on`. This release has no automatic fallback while older nodes are present, so do not switch during a rolling upgrade.
+- **Rollback to v0.5.66:**
+  - meta: works on schema 9.
+  - standalone: v0.5.66 ignores `.tasks.enc` and `.tasks.lock`. That means no auto-resume (every task is a leftover again and needs adopt) and no single-writer guard: nothing stops two processes on one `data_dir`. Going forward to v0.5.67 again resumes from the record.
 - The v0.5.66 notes still apply. Coming from v0.5.61 or older, read the [v0.5.62 notes](release-notes-v0.5.62.md) first.
 
 ## Highlights
@@ -75,7 +88,7 @@ Other standalone changes to know about:
   - P2-3: the evaluator and the rehasher. The rehasher re-checks sealed segments from their seal checksums, shares CRC-checked readability with `/window`, and reconciles catalog and disk.
   - P2-4: signal kinds. One source liveness clock, measured at the socket, drives `DUMP_STALLED` (silent ≥ 45 s) and the new `SOURCE_UNREACHABLE` (≥ `health.unreachable_after_sec`), including through STARTING and RETRY_BACKOFF.
   - With `on`, the evaluator owns the managed kinds and closes them when their condition clears. `shadow` evaluates and logs only.
-- **Standalone leftover directory finding (#388).** With the evaluator `on`, a directory only `data_dir` knows opens CRITICAL `TASK_UNADOPTED`, with the adopt call in its detail. Adopt closes it, and so does moving the directory out of `data_dir`.
+- **Standalone leftover directory finding (#388, #399).** In every `health.evaluator` mode, a directory only `data_dir` knows opens CRITICAL `TASK_UNADOPTED`, with the adopt call in its detail, and `/api/health` degrades. With the evaluator off it goes through the legacy sink. Adopt closes it, and so does moving the directory out of `data_dir`. `scripts/adopt-leftovers.sh` adopts leftovers in bulk.
 
 ## Fixes
 
@@ -88,7 +101,7 @@ Other standalone changes to know about:
 
 ## Changes since v0.5.66
 
-`git log --oneline --first-parent v0.5.66..b4c52f4`:
+`git log --oneline --first-parent v0.5.66..main` (to be updated to the tagged commit):
 
 | Commit | Change |
 |---|---|
@@ -106,6 +119,7 @@ Other standalone changes to know about:
 | `ed36c91` | PR #396: checkpoint at transaction boundaries, batched (#391) |
 | `69a45cc` | PR #393: ADR 0010 standalone encrypted task records |
 | `b4c52f4` | PR #395: standalone task records, auto-resume, full-disk findings, `/api/health` degraded |
+| (pending) | PR #399: `TASK_UNADOPTED` in every evaluator mode, `scripts/adopt-leftovers.sh` |
 
 ## Known behavior
 
@@ -115,7 +129,7 @@ Other standalone changes to know about:
 
 ## QA summary
 
-Pending: BinlogServerQA tip dogfood of main `b4c52f4`.
+Pending: BinlogServerQA tip dogfood. The first tip QA, of `b4c52f4`, passed the binary but found a silent stop that following these notes caused (fixed in #399 and in these notes).
 
 ## Chinese Release Notes
 
