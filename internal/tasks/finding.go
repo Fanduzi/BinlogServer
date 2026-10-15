@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,6 +8,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -26,6 +27,11 @@ const (
 	FindingMetadataWriteBlocked FindingKind = "METADATA_WRITE_BLOCKED"
 	// FindingEventPersistFailed: a task event was not written to the event store (S1).
 	FindingEventPersistFailed FindingKind = "EVENT_PERSIST_FAILED"
+	// FindingFindingsPersistFailed (#395 QA P2) is synthesized, never stored:
+	// the health or findings file could not be written (typically a full
+	// data_dir). The findings are then served from memory; it closes on its
+	// own once writes land again.
+	FindingFindingsPersistFailed FindingKind = "FINDINGS_PERSIST_FAILED"
 	// FindingEventReadFailed: the retry budget could not be read back from events (S13).
 	FindingEventReadFailed FindingKind = "EVENT_READ_FAILED"
 	// FindingDumpCleanupPersistFailed: the pending Binlog Dump KILL marker was not written (S3).
@@ -52,6 +58,8 @@ const (
 	FindingSegmentUnreadable FindingKind = "SEGMENT_UNREADABLE"
 	// FindingSegmentOverlap: a sealed source file is in the task directory twice with the same events, or one copy cannot be read; /replay and /window stop before both (#370).
 	FindingSegmentOverlap FindingKind = "SEGMENT_OVERLAP"
+	// FindingTaskRecordsFailed: the standalone task record file cannot be read or written (ADR 0010); subject key_missing, key_invalid, wrong_key, corrupt or write.
+	FindingTaskRecordsFailed FindingKind = "TASK_RECORDS_FAILED"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.
@@ -132,6 +140,9 @@ type findingBook struct {
 	events     EventStore
 	timeout    time.Duration
 	started    bool
+	sinkDone   chan struct{} // closed when the writer has made its last flush
+	lastErr    error         // the last failed write, cleared when nothing is left pending
+	lastErrAt  time.Time
 	now        func() time.Time
 }
 
@@ -281,6 +292,7 @@ func (b *findingBook) flush(ctx context.Context) {
 		return
 	}
 	var failed []findingOp
+	var failedErr error
 	for _, op := range batch {
 		wctx, cancel := context.WithTimeout(ctx, b.timeout)
 		err := store.UpsertFinding(wctx, op.finding)
@@ -310,13 +322,23 @@ func (b *findingBook) flush(ctx context.Context) {
 		cancel()
 		if err != nil {
 			failed = append(failed, op)
+			failedErr = err
 		}
 	}
 	if len(failed) == 0 {
+		b.mu.Lock()
+		if len(b.pending) == 0 {
+			b.lastErr = nil
+		}
+		b.mu.Unlock()
 		return
 	}
 	b.mu.Lock()
 	b.sinkErrors += int64(len(failed))
+	if b.lastErr == nil {
+		b.lastErrAt = b.now()
+	}
+	b.lastErr = failedErr
 	newer := make(map[findingKey]bool, len(b.pending))
 	for _, op := range b.pending {
 		newer[findingKey{op.finding.TaskID, op.finding.Kind, op.finding.Subject}] = true
@@ -337,6 +359,26 @@ func (b *findingBook) flush(ctx context.Context) {
 // StartFindingSink runs the sink writer until ctx ends. It writes on every
 // Report/Resolve and retries failed writes every interval. Each retry tick
 // also republishes task rows whose last write failed (S2).
+// WaitFindingSink blocks until the writer started by StartFindingSink has
+// made its final flush after its context ended, or until timeout. Shutdown
+// calls it so the last findings land before the process (or a test's
+// data_dir cleanup) goes away. It returns at once when no writer started.
+func (s *Scheduler) WaitFindingSink(timeout time.Duration) bool {
+	b := s.findings
+	b.mu.Lock()
+	done := b.sinkDone
+	b.mu.Unlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 func (s *Scheduler) StartFindingSink(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -348,11 +390,14 @@ func (s *Scheduler) StartFindingSink(ctx context.Context, interval time.Duration
 		return
 	}
 	b.started = true
+	b.sinkDone = make(chan struct{})
+	done := b.sinkDone
 	if b.events == nil {
 		b.events = s.eventStore
 	}
 	b.mu.Unlock()
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -432,6 +477,11 @@ func (s *Scheduler) ListFindings(ctx context.Context, taskID string, includeReso
 		}
 	}
 	local = append(local, s.healthEval.Load().openManagedFindings(ctx, taskID)...)
+	if taskID == ClusterFindingTask {
+		if f, ok := s.persistFailureFinding(); ok {
+			local = append(local, f)
+		}
+	}
 	return mergeFindings(stored, local, limit), nil
 }
 
@@ -460,6 +510,14 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		for _, t := range s.ListTasks() {
 			local = append(local, e.openManagedFindings(ctx, t.ID)...)
 		}
+		if !e.cfg.Cluster {
+			// Standalone evaluates _cluster itself (RETRY_LOOP_FAILED,
+			// TASK_RECORDS_FAILED); it has no task row to be listed by.
+			local = append(local, e.openManagedFindings(ctx, ClusterFindingTask)...)
+		}
+	}
+	if f, ok := s.persistFailureFinding(); ok {
+		local = append(local, f)
 	}
 	return mergeFindings(stored, local, limit), err
 }
@@ -590,4 +648,70 @@ func (s *Scheduler) OpenFindingCounts(ctx context.Context) (map[string]int, erro
 		}
 	}
 	return out, err
+}
+
+// persistFailureFinding is FINDINGS_PERSIST_FAILED while the evaluator's
+// health store or the findings file is failing to write (#395 QA P2).
+func (s *Scheduler) persistFailureFinding() (Finding, bool) {
+	var parts []string
+	var first time.Time
+	ids, herr, hsince := s.healthEval.Load().persistFailure()
+	if herr != nil {
+		parts = append(parts, fmt.Sprintf("health state for %s could not be saved: %v", strings.Join(ids, ", "), herr))
+		first = hsince
+	}
+	b := s.findings
+	b.mu.Lock()
+	ferr, fsince, pending := b.lastErr, b.lastErrAt, len(b.pending)
+	b.mu.Unlock()
+	if ferr != nil {
+		parts = append(parts, fmt.Sprintf("%d finding write(s) could not be saved: %v", pending, ferr))
+		if first.IsZero() || fsince.Before(first) {
+			first = fsince
+		}
+	}
+	if len(parts) == 0 {
+		return Finding{}, false
+	}
+	now := time.Now()
+	return Finding{TaskID: ClusterFindingTask, Kind: FindingFindingsPersistFailed, Severity: FindingCritical, FirstSeen: first, LastSeen: now, Count: 1,
+		Detail: strings.Join(parts, "; ") + ". Findings and health are served from memory and are lost on a restart until a write lands; free space in data_dir"}, true
+}
+
+// Health summary states for GET /api/health.
+const (
+	HealthOK       = "ok"
+	HealthDegraded = "degraded"
+)
+
+// HealthSummary is the process health GET /api/health serves.
+type HealthSummary struct {
+	Status  string   `json:"status"`
+	Reasons []string `json:"reasons,omitempty"`
+}
+
+// HealthSummary is degraded while any CRITICAL finding is open, read from
+// memory as GET /api/findings is, so a finding that could not be persisted
+// still counts (#395 QA P2).
+func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
+	open, err := s.OpenFindings(ctx, 1000)
+	var reasons []string
+	for _, f := range open {
+		if f.Severity != FindingCritical || !f.Open() {
+			continue
+		}
+		r := string(f.Kind)
+		if f.Subject != "" {
+			r += "/" + f.Subject
+		}
+		reasons = append(reasons, r+" (task "+f.TaskID+")")
+	}
+	if err != nil {
+		reasons = append(reasons, "findings store unreadable: "+err.Error())
+	}
+	if len(reasons) == 0 {
+		return HealthSummary{Status: HealthOK}
+	}
+	sort.Strings(reasons)
+	return HealthSummary{Status: HealthDegraded, Reasons: reasons}
 }

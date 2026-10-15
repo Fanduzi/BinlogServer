@@ -74,6 +74,11 @@ func (s *Scheduler) GetReplicationProgress(taskID string) (ReplicationProgress, 
 
 func (s *Scheduler) Restore(ctx context.Context) error {
 	if s.store == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.records != nil {
+			s.restoreRecordsLocked()
+		}
 		return nil
 	}
 

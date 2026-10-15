@@ -150,6 +150,7 @@ func (s *Scheduler) ConfigureStart(id string, start StartConfig) error {
 		return ErrTaskNotFound
 	}
 	task.Start = normalized
+	task.StartFromDisk, task.OperatorStart = false, nil
 	task.UpdatedAt = time.Now()
 	return s.commitTransitionLocked(task, task.State, transitionRecord{Action: "start change", Type: "TASK_START_CONFIGURED", Message: "start strategy configured", Detail: string(normalized.Mode)})
 }
@@ -271,6 +272,7 @@ func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (Task, error) {
 		Start:             validatedStart,
 		Storage:           validatedStorage,
 		KeepLocalSegments: true,
+		StartFromDisk:     !explicitStart,
 		UpdatedAt:         time.Now(),
 	}
 	if err := s.commitTransitionLocked(task, StateStopped, transitionRecord{Action: "adopt", Type: "TASK_ADOPTED", Message: "on-disk backup adopted", Detail: validatedClusterKey}); err != nil {
@@ -359,6 +361,7 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	}
 	if validatedStart != nil {
 		next.Start = *validatedStart
+		next.StartFromDisk, next.OperatorStart = false, nil
 	}
 	if validatedStorage != nil {
 		next.Storage = *validatedStorage

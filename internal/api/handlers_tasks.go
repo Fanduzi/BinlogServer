@@ -157,7 +157,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	summary, _, err := s.dashboardObservation(r.Context(), query, time.Now())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
@@ -197,7 +197,7 @@ func (s *Server) handleSourceLookup(w http.ResponseWriter, r *http.Request) {
 
 	items, err := s.tasks.ListClusterObservation(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 
@@ -244,12 +244,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	summary, sources, err := s.dashboardObservation(r.Context(), query, now)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	page, _, err := s.tasks.ListTasksPage(r.Context(), query.toFilter())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	resp := dashboardResponse{
@@ -348,7 +348,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		page, total, err := s.tasks.ListTasksPage(r.Context(), query.toFilter())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, taskListResponse{
@@ -490,7 +490,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeServerError(w, err)
 				return
 			}
 			if !ok {
@@ -507,7 +507,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeServerError(w, err)
 				return
 			}
 			writeJSON(w, http.StatusOK, events)
@@ -520,7 +520,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeServerError(w, err)
 				return
 			}
 			files = tasks.FilePositionsForAPI(files)
@@ -549,7 +549,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeServerError(w, err)
 				return
 			}
 			progress, ok, err := s.tasks.GetReplicationProgress(taskID)
@@ -558,7 +558,7 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeServerError(w, err)
 				return
 			}
 			writeJSON(w, http.StatusOK, buildReplicationResponse(task, progress, ok, time.Now(), defaultDelayThresholdSeconds))
@@ -595,6 +595,11 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		if taskRecordsUnavailable(err) {
+			// A Start the record could not save is retryable (#395 QA P3).
+			writeTaskRecordsUnavailable(w, err)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -620,7 +625,7 @@ func (s *Server) handleTaskFileDownload(w http.ResponseWriter, r *http.Request, 
 		case errors.Is(err, tasks.ErrSegmentNotOnProcess):
 			http.Error(w, err.Error(), http.StatusNotFound)
 		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, err)
 		}
 		return
 	}
@@ -649,7 +654,7 @@ func (s *Server) handleTaskRecoveryWindow(w http.ResponseWriter, r *http.Request
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, window)
@@ -698,7 +703,7 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	task, err := s.tasks.GetTask(taskID)
@@ -707,13 +712,13 @@ func (s *Server) handleTaskReplay(w http.ResponseWriter, r *http.Request, taskID
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	selected, warning := s.selectReplay(task, files)
 	omitted, omitWarning, err := s.replayOmitted(task, limit, selected)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	paths := make([]string, 0, len(selected))
@@ -926,7 +931,7 @@ func (s *Server) handleTaskRetryUpload(w http.ResponseWriter, r *http.Request, t
 		case errors.Is(err, tasks.ErrUploadRetryNotAvailable):
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		default:
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			writeHiddenServerError(w, err)
 		}
 		return
 	}
@@ -953,7 +958,7 @@ func (s *Server) handleTaskUploadFailureReasons(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -1097,7 +1102,7 @@ func writeSegmentOpenError(w http.ResponseWriter, err error) {
 		errors.Is(err, tasks.ErrStopBoundsExclusive):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, err)
 	}
 }
 
@@ -1419,7 +1424,7 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, err)
 			return
 		}
 		view := taskDetailView{Task: s.presentTask(r.Context(), task)}
@@ -1451,7 +1456,7 @@ func (s *Server) handleTaskEntity(w http.ResponseWriter, r *http.Request, taskID
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			writeHiddenServerError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, sanitizeTask(updated))
@@ -1512,7 +1517,7 @@ func (s *Server) handleAdoptDiskBackup(w http.ResponseWriter, r *http.Request, t
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeHiddenServerError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sanitizeTask(updated))
@@ -1527,7 +1532,41 @@ func writeAPIError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, apiErrorBody{Error: msg, Code: code})
 }
 
+// taskRecordsUnavailable: a write refused because the standalone task
+// record is locked or could not be saved (ADR 0010 §API status): 503, the
+// request was valid and can be retried once the key, file or disk is fixed.
+func taskRecordsUnavailable(err error) bool {
+	return errors.Is(err, tasks.ErrTaskRecordsLocked) || errors.Is(err, tasks.ErrTaskRecordsNotSaved)
+}
+
+func writeTaskRecordsUnavailable(w http.ResponseWriter, err error) {
+	writeAPIError(w, http.StatusServiceUnavailable, "TASK_RECORDS_UNAVAILABLE", err.Error())
+}
+
+// writeServerError is the 500 of a task handler, or 503 for a record refusal.
+func writeServerError(w http.ResponseWriter, err error) {
+	if taskRecordsUnavailable(err) {
+		writeTaskRecordsUnavailable(w, err)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// writeHiddenServerError is writeServerError for handlers whose 500 hides
+// the error text; a record refusal still says why (it holds no secret).
+func writeHiddenServerError(w http.ResponseWriter, err error) {
+	if taskRecordsUnavailable(err) {
+		writeTaskRecordsUnavailable(w, err)
+		return
+	}
+	http.Error(w, "internal server error", http.StatusInternalServerError)
+}
+
 func writeTaskError(w http.ResponseWriter, err error) {
+	if taskRecordsUnavailable(err) {
+		writeTaskRecordsUnavailable(w, err)
+		return
+	}
 	body := taskErrorBody(err)
 	status := http.StatusInternalServerError
 	if body.Code == "TASK_NOT_FOUND" {

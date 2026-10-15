@@ -49,7 +49,8 @@ func isSignalKind(k FindingKind) bool {
 	switch health.Kind(k) {
 	case health.TaskPersistFailed, health.MetadataWriteBlocked, health.EventPersistFailed, health.EventReadFailed,
 		health.DumpCleanupPersistFailed, health.DiskListFailed, health.UploadUnverified, health.UploadRecordFailed,
-		health.RetentionRecordFailed, health.RetryLoopFailed, health.OpenTailCutFailed, health.MetricSourceFailed:
+		health.RetentionRecordFailed, health.RetryLoopFailed, health.OpenTailCutFailed, health.MetricSourceFailed,
+		health.TaskRecordsFailed:
 		return true
 	}
 	return false
@@ -197,7 +198,7 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 		}
 		tf.OwnedElsewhere = s.leaseManager != nil && task.OwnerWorkerID != "" && task.OwnerWorkerID != s.clusterWorkerID
 		_, known := s.tasks[task.ID]
-		tf.Unadopted = s.store == nil && !known // only data_dir knows the task (#385)
+		tf.Unadopted = s.store == nil && !known && !s.recordTombstonedLocked(task.ID) // only data_dir knows the task (#385); a tombstone is a deliberate delete (ADR 0010)
 		s.mu.Unlock()
 	}
 	if e.s != nil {

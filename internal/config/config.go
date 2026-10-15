@@ -56,6 +56,8 @@ type Config struct {
 	Health HealthConfig
 	// Tracing 是 OpenTelemetry tracing 配置（默认关闭）。
 	Tracing TracingConfig
+	// Standalone is the no-meta_dsn task record (ADR 0010).
+	Standalone StandaloneConfig
 
 	// EncryptionKey 来自 --encryption-key / LoadConfigWithEncryption，不从 YAML 读取。
 	// 空值表示不加密 backup_tasks.source_json 中的源库密码。
@@ -144,6 +146,18 @@ type HealthConfig struct {
 	SignalStaleAfterSec int
 }
 
+// StandaloneConfig configures the encrypted standalone task record
+// (ADR 0010, #385). The key itself is never read from YAML: it comes from
+// BINLOG_SERVER_TASK_KEY or the key file named here.
+type StandaloneConfig struct {
+	// TaskRecords is on (default) or off.
+	TaskRecords string
+	// TaskKeyFile is a 0600/0400 file holding the 32-byte key (base64 or hex).
+	TaskKeyFile string
+	// TaskKeyPreviousFile holds the key a record file may still be on during rotation.
+	TaskKeyPreviousFile string
+}
+
 // MetaConfig 定义内部调用边界配置。
 type MetaConfig struct {
 	Timeout MetaTimeoutConfig
@@ -225,6 +239,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("http.worker_health.write_timeout_sec", 10)
 	v.SetDefault("http.worker_health.idle_timeout_sec", 30)
 	v.SetDefault("meta.timeout.read_sec", 3)
+	v.SetDefault("standalone.task_records", "on")
 	v.SetDefault("health.evaluator", "off")
 	v.SetDefault("health.sweep_interval_sec", 60)
 	v.SetDefault("health.rehash_bytes_per_sec", 4<<20)
@@ -383,6 +398,11 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			UnreachableAfterTaskSec: healthTaskOverrides(v.GetStringMap("health.unreachable_after_task_sec")),
 			SignalStaleAfterSec:     getInt(v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
 		},
+		Standalone: StandaloneConfig{
+			TaskRecords:         strings.ToLower(strings.TrimSpace(v.GetString("standalone.task_records"))),
+			TaskKeyFile:         strings.TrimSpace(v.GetString("standalone.task_key_file")),
+			TaskKeyPreviousFile: strings.TrimSpace(v.GetString("standalone.task_key_previous_file")),
+		},
 		Tracing: TracingConfig{
 			Enabled:     getBool(v, "tracing.enabled", "tracing_enabled"),
 			Exporter:    strings.ToLower(getString(v, decryptor, "tracing.exporter", "tracing_exporter")),
@@ -397,6 +417,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		return Config{}, err
 	}
 	if err := validateHealthConfig(cfg.Health); err != nil {
+		return Config{}, err
+	}
+	if err := validateStandaloneConfig(cfg.Standalone); err != nil {
 		return Config{}, err
 	}
 	warnSensitivePlaintextInConfig(v)
@@ -620,6 +643,16 @@ func validateTracingConfig(cfg TracingConfig) error {
 		return errors.New("tracing.endpoint must not be empty when tracing is enabled")
 	}
 	return nil
+}
+
+// validateStandaloneConfig checks standalone.task_records.
+func validateStandaloneConfig(c StandaloneConfig) error {
+	switch c.TaskRecords {
+	case "", "on", "off":
+		return nil
+	default:
+		return fmt.Errorf("standalone.task_records must be on or off, got %q", c.TaskRecords)
+	}
 }
 
 // validateHealthConfig checks the P2-3 evaluator keys.

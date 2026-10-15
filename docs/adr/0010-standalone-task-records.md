@@ -101,7 +101,7 @@ The record never carries a position. At startup, for each record:
 
 After restore, every desired-RUN task is started through the normal Start path (the one-shot boot claim in standalone), so it gets the same validation, lease and alerts as an operator Start. A start that cannot even be attempted (for example an invalid source in the record) becomes `FAILED` with that error, never `STOPPED`.
 
-Known limit: a record with desired RUN whose directory was moved out of `data_dir` (how 0009 §19 retires a directory) falls into rule 3 and re-dumps from the operator start into a new directory. The record does not know that segments once existed. The operator who retires a directory should Delete the task first (a tombstone keeps it retired); a "directory missing" finding is a possible follow-up (#393 QA P3).
+Known limit: a record with desired RUN whose directory was moved out of `data_dir` (how 0009 §19 retires a directory) falls into rule 3 and re-dumps from the operator start into a new directory. The record does not know that segments once existed. The operator who retires a directory should Delete the task first (a tombstone keeps it retired); a "directory missing" finding is tracked in #397.
 
 ## Deleted tasks
 
@@ -136,11 +136,25 @@ A directory left by a binary without records (or created while records were off)
 | `corrupt` | not JSON, unknown format/version, or GCM authentication fails with a matching key id | nothing restored; writes refused; file untouched. Detail names the path and that a copy should be taken before repair | file restored from backup (or moved away to start empty), restart |
 | `write` | a save failed (disk full, permissions, fsync) | Create/Adopt/Update/Start refused; Stop/Delete applied in memory, the detail says what a restart would do | the next save (action or 30 s retry) succeeds |
 
+Startup subjects (`key_missing`, `key_invalid`, `wrong_key`, `corrupt`) hold one at a time: when a start finds one, the others an earlier start left open in `.health.json` are closed (#395 QA P3).
+
 "Writes refused" uses the same `ErrTransitionNotRecorded` path: Create/Adopt/Update/Start return an error saying the records are locked and why; Stop and Delete are applied in memory (§What is written); read paths keep working. Error texts and finding details never contain the password or key (tested).
 
 ## API status
 
-A refusal caused by the record (locked, or a save that failed) returns **503 Service Unavailable** with code `TASK_RECORDS_UNAVAILABLE` and the reason, not a generic 500: the request was valid, the server cannot persist it right now, and it can be retried once the cause (key, file, disk) is fixed. 409 was considered and rejected: nothing about the request conflicts with the task's state. Other refused metadata writes keep their existing status.
+A refusal caused by the record (locked, or a save that failed) returns **503 Service Unavailable** with code `TASK_RECORDS_UNAVAILABLE` and the reason, not a generic 500: the request was valid, the server cannot persist it right now, and it can be retried once the cause (key, file, disk) is fixed. 409 was considered and rejected: nothing about the request conflicts with the task's state. This includes Start, which earlier answered 400 for every error (#395 QA P3). Other refused metadata writes keep their existing status.
+
+## Findings when data_dir is full
+
+*Follow-up from the #395 QA review (P2).* The health store (`.health.json`), the legacy findings file (`.findings.json`) and `.tasks.enc` share `data_dir`. When the disk is full, the store write that would open `TASK_RECORDS_FAILED/write` fails with ENOSPC too. Before this follow-up, `GET /api/findings` read only the store, so it stayed empty, and `GET /api/health` returned a static `ok`. A full disk is exactly the case `write` exists for.
+
+Decision: **the in-memory finding state is authoritative; persistence is best-effort.**
+- When the evaluator's store write fails (any error except fenced), it keeps the open set that write would have produced, per task, and keeps evaluating on top of it. `GET /api/findings` and the task findings route serve that set until a write lands; the store's copy is used again after a write succeeds. The legacy book already kept its open findings in memory.
+- A synthesized CRITICAL finding `FINDINGS_PERSIST_FAILED` (task `_cluster`, never stored) is listed while either the health store or the findings file is failing. Its detail names the failing write and its error (ENOSPC), and the tasks whose health is unsaved, and says the state is lost on a restart until a write lands. It closes on its own once writes succeed. An unsaved entry for a task that no longer exists (a refused create still marks its id) is dropped.
+- `GET /api/health` is **503 `{"status":"degraded","reasons":[...]}`** while any CRITICAL finding is open, read from the same in-memory view; otherwise 200 `{"status":"ok"}`. `/healthz` stays the liveness probe and is unaffected, so a full disk does not get the process restarted in a loop.
+- Reserving space (a preallocated ballast file in `data_dir`, released on ENOSPC) was considered and not done. It only postpones the failure by its size, a binlog dump would consume the freed space within seconds, and it adds a file the operator must know not to delete. Serving from memory covers the case without it; the operator frees space, and the record retry (30 s) and the next sweep persist the state.
+
+Tested with a fake store returning ENOSPC (unit) and a 30 MB tmpfs `data_dir` (`smoke-standalone-full-disk.sh`). With the disk full, a create gets 503, the findings list `TASK_RECORDS_FAILED/write` and `FINDINGS_PERSIST_FAILED`, and health is 503 degraded. After space is freed, both findings close and health is ok.
 
 ## Single writer of data_dir
 

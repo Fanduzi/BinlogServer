@@ -98,7 +98,8 @@ var p24Managed = map[Kind]bool{
 	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
 	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
 	MetricSourceFailed: true, TransitionStalled: true, SourceUnreachable: true, TaskFailed: true,
-	TaskUnadopted: true, // #385, design §19
+	TaskUnadopted:     true, // #385, design §19
+	TaskRecordsFailed: true, // #385, ADR 0010
 }
 
 // ManagedKinds is every kind the evaluator owns in this release.
@@ -149,6 +150,7 @@ func DefaultRegistry() Registry {
 		signalSpec(RetryLoopFailed, Warning, "S7", "the next upload retry pass runs to the end"),
 		signalSpec(OpenTailCutFailed, Critical, "S4", "the next cut succeeds, or the segment is sealed or gone"),
 		signalSpec(MetricSourceFailed, Warning, "S10/S11", "the next scrape computes the source"),
+		signalSpec(TaskRecordsFailed, Critical, "S16", "the standalone task record file is read at startup with the right key, or the next save succeeds"),
 		{Kind: DumpStalled, Severity: Warning, Scopes: []Scope{ScopeSignals, ScopeTaskState}, Version: 3, Derive: dumpStalledDerive,
 			Clear: ClearRule{Invariant: "S12", Holds: dumpStalledCleared, Reason: dumpStalledReason,
 				Text: "a byte (event or heartbeat) is read from the source again; or the task is stopped or owned elsewhere; or SOURCE_UNREACHABLE opens in the same pass (HANDED_OFF)"}},

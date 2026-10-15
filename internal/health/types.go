@@ -315,6 +315,7 @@ const (
 	TaskFailed           Kind = "TASK_FAILED"
 	SourceUnreachable    Kind = "SOURCE_UNREACHABLE"
 	TaskUnadopted        Kind = "TASK_UNADOPTED"
+	TaskRecordsFailed    Kind = "TASK_RECORDS_FAILED"
 	SealFactsAbsent      Kind = "SEAL_FACTS_ABSENT"
 	HealthStale          Kind = "HEALTH_STALE"
 	HealthStoreDegraded  Kind = "HEALTH_STORE_DEGRADED"

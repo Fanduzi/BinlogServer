@@ -48,6 +48,8 @@ var stateWriters = map[string]bool{
 	"scheduler_cluster_lease.go:yieldLostLeaseLocked":  true,
 	"control_loop.go:adoptNewerStopLocked":             true,
 	"control_loop.go:intentLocked":                     true,
+	// standalone startup read of the task record (ADR 0010), as Restore reads backup_tasks
+	"task_records.go:restoredTask": true,
 	// Task values built only to be read, never stored or persisted.
 	"disk_files.go:diskBackupTask":               true, // read-only view of an on-disk backup with no metadata
 	"scheduler_lifecycle.go:claimOwnedIdleTasks": true, // effectiveDesired probe

@@ -304,14 +304,16 @@ func WithInternalCallTimeouts(timeout InternalCallTimeouts) Option {
 
 // Scheduler 负责任务配置管理、状态机推进和运行编排。
 type Scheduler struct {
-	mu                 sync.Mutex
-	seq                int
-	tasks              map[string]Task
-	events             map[string][]TaskEvent
-	replica            map[string]ReplicationProgress
-	runner             Runner
-	dumpKiller         func(source SourceConfig, connectionID uint32) error
-	store              TaskStore
+	mu         sync.Mutex
+	seq        int
+	tasks      map[string]Task
+	events     map[string][]TaskEvent
+	replica    map[string]ReplicationProgress
+	runner     Runner
+	dumpKiller func(source SourceConfig, connectionID uint32) error
+	store      TaskStore
+	// records is the standalone task record (ADR 0010); nil when off.
+	records            *recordState
 	metadataSourceHost string
 	metadataSourcePort uint16
 	cancels            map[string]context.CancelFunc
@@ -494,6 +496,7 @@ type persistedTask struct {
 
 func (s *Scheduler) persistTaskLocked(task Task) error {
 	if s.store == nil {
+		s.recordFollowLocked(task)
 		s.flushPendingEventsLocked()
 		return nil
 	}

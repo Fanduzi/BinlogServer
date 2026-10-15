@@ -62,6 +62,13 @@ type Task struct {
 	// Start then opens the next .open.e<epoch> and does not delete segments already there.
 	// It is process-local and omitted from API and metadata JSON.
 	KeepLocalSegments bool `json:"-"`
+	// StartFromDisk: Start was computed from the task directory (adopt, or a
+	// standalone restore, ADR 0010), not asked for by the operator. The
+	// standalone task record then keeps OperatorStart, never this position.
+	StartFromDisk bool `json:"-"`
+	// OperatorStart is the operator's start while StartFromDisk is set (nil:
+	// the operator gave none). Process-local.
+	OperatorStart *StartConfig `json:"-"`
 	// DesiredRun is RUN or STOP. Metadata mode persists it on backup_tasks.
 	// Standalone keeps it on this struct until the process exits.
 	DesiredRun string `json:"-"`
