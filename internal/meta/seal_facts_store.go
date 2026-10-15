@@ -53,3 +53,10 @@ func isMySQLUnknownColumnError(err error) bool {
 	var mysqlErr *mysqlDriver.MySQLError
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1054
 }
+
+const listSealedChecksumsSQL = `SELECT 1`
+
+// ListSealedChecksums is not implemented yet (P2-3 QA red commit).
+func (s *MySQLTaskStore) ListSealedChecksums(ctx context.Context, taskID string) ([]tasks.BinlogFile, error) {
+	return nil, nil
+}

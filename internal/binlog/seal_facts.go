@@ -22,6 +22,8 @@ type SealFacts struct {
 	HasSpan     bool
 	// SHA256 is the lowercase hex digest of the whole file.
 	SHA256 string
+	// Size is the number of bytes the digest covers (not set yet).
+	Size int64
 }
 
 // ReadSealFacts reads path once, streaming: the bytes go through the hash
