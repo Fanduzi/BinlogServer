@@ -304,7 +304,12 @@ func WithInternalCallTimeouts(timeout InternalCallTimeouts) Option {
 
 // Scheduler 负责任务配置管理、状态机推进和运行编排。
 type Scheduler struct {
-	mu         sync.Mutex
+	mu sync.Mutex
+	// runBase is the process run context (SetRunContext). Every runner
+	// context derives from it; runWG counts runTask goroutines so shutdown
+	// can join them (WaitRuns).
+	runBase    context.Context
+	runWG      sync.WaitGroup
 	seq        int
 	tasks      map[string]Task
 	events     map[string][]TaskEvent
