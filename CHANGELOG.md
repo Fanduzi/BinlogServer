@@ -12,6 +12,14 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.68] - 2026-10-16
+
+发布说明：`docs/releases/v0.5.68.md`。没有新迁移，没有新配置项。
+
+### Fixed
+
+- #401：任务 runner 归 `App.Run` 所有。runner 的 context 从 `App.Run` 派生（原为 `context.Background()`，关停时不取消，`Run` 返回后仍可能写 `data_dir`）。关停有界且有序：取消 → 等 runner（10s）→ 等后台 goroutine（含 5s 的 HTTP 优雅关闭）→ 补存欠下的任务记录 → 最后 flush finding（5s）。关停不改期望状态，下次启动自动恢复；关停中的 Start 返回 `ErrShuttingDown`。SIGINT/SIGTERM 后恢复默认信号处理（再发一次立即退出），30s 内未退出则以退出码 2 结束。修掉 `TestApp_SecondStandaloneOnSameDataDirFailsToStart` 偶发 "directory not empty" 的根因。
+
 ## [v0.5.67] - 2026-10-15
 
 发布说明：`docs/releases/v0.5.67.md`。新配置项：`standalone.task_records`、`standalone.task_key_file`、`standalone.task_key_previous_file`、`health.evaluator`（默认 `off`）、`health.sweep_interval_sec`、`health.rehash_bytes_per_sec`、`health.unreachable_after_sec`、`health.unreachable_after_task_sec`、`health.signal_stale_after_sec`。新迁移 `000009`（只增不改、可选，`minRequiredSchemaVersion` 仍为 6）。存活探针请用 `/healthz`：`/api/health` 在有打开的 CRITICAL finding 时返回 503。
