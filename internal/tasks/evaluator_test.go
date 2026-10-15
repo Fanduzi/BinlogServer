@@ -352,8 +352,9 @@ func TestEvaluator_ReadOnlyMetaNeverClosesLegacyFindings(t *testing.T) {
 		_ = e.SweepNow(ctx)
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
-	for _, ts := range store.applied {
+	applied := append([][]health.Transition(nil), store.applied...)
+	store.mu.Unlock()
+	for _, ts := range applied {
 		for _, tr := range ts {
 			spec := health.DefaultRegistry()[tr.Kind]
 			if !spec.Managed {
@@ -590,6 +591,7 @@ func TestEvaluator_1500SegmentsUnder50ms(t *testing.T) {
 			best = d
 		}
 	}
+	t.Logf("best pass over 1500 segments: %s", best)
 	if best > 50*time.Millisecond {
 		t.Fatalf("one pass over 1500 segments took %s, want < 50ms", best)
 	}

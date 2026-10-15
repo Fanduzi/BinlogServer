@@ -1,7 +1,7 @@
 // Package health provides module-level functionality for health.
 // input: assurance violation kinds
 // output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
-// pos: the closed kind table of ADR 0009 phase 2 §6; in P2-1 no kind is Managed
+// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed
 // note: if this file changes, update this header and module README.md.
 package health
 
@@ -25,6 +25,7 @@ var fromAssurance = map[assurance.Kind]Kind{
 	assurance.I3StoredHole:       GTIDHole,
 	assurance.I3LegacyFailback:   LegacyFailback,
 	assurance.I4Overlap:          SegmentOverlap,
+	assurance.I4EmptyLeftover:    SegmentEmptyLeftover,
 	assurance.I5CheckpointAhead:  CheckpointAhead,
 	assurance.I6MissingLocal:     SegmentMissing,
 	assurance.I6MissingObject:    SegmentMissing,
@@ -110,8 +111,12 @@ func stateSpec(kind Kind, sev Severity, scope Scope, inv, text string, more ...S
 	return KindSpec{Kind: kind, Severity: sev, Scopes: append([]Scope{scope}, more...), Version: 1, Clear: ClearRule{Invariant: inv, Text: text}}
 }
 
-// DefaultRegistry is the kind table of design §6. No kind is Managed yet:
-// each later PR flips the kinds it takes over.
+// p23Managed are the kinds the evaluator owns since P2-3 (design §5.6):
+// the legacy Report path no longer writes them when the evaluator is on.
+var p23Managed = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true}
+
+// DefaultRegistry is the kind table of design §6. P2-3 manages the three
+// local segment kinds; each later PR flips the kinds it takes over.
 func DefaultRegistry() Registry {
 	specs := []KindSpec{
 		chainSpec(SegmentUnreadable, Critical, ScopeChainLocal, "I1", "the segment reads cleanly again, or is no longer on the chain"),
@@ -124,7 +129,7 @@ func DefaultRegistry() Registry {
 		chainSpec(OrphanRow, Warning, ScopeChainLocal, "I6", "the row has its bytes again, or carries a retention marker", ScopeChainObjects),
 		chainSpec(UploadLate, Warning, ScopeChainLocal, "I7", "the segment is UPLOADED with checksum match"),
 		chainSpec(UploadUnverified, Critical, ScopeChainLocal, "I7", "the segment's checksum is match", ScopeSignals),
-		stateSpec(SegmentEmptyLeftover, Info, ScopeChainLocal, "I4", "the leftover open file is removed, or sealed with events"),
+		chainSpec(SegmentEmptyLeftover, Info, ScopeChainLocal, "I4", "the leftover open file is removed, or sealed with events"),
 		signalSpec(UploadRecordFailed, Critical, "S8", "a later upload record for the segment is written, or its row is already UPLOADED"),
 		signalSpec(MetadataWriteBlocked, Critical, "S2", "a later checkpoint or task row write succeeds"),
 		signalSpec(TaskPersistFailed, Critical, "S2/S3", "a later task row write succeeds"),
@@ -149,6 +154,7 @@ func DefaultRegistry() Registry {
 	specs = append(specs, gh)
 	r := Registry{}
 	for _, s := range specs {
+		s.Managed = p23Managed[s.Kind]
 		r[s.Kind] = s
 	}
 	return r

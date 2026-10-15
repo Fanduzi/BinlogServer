@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
 // input: a Chain (its Local ledger, checkpoint, start set, flavor and lazy planner conclusions) and, for the cut, the chain's segments in order with each one's place relative to the problem segment
-// output: the storage-health verdict (the first of: damaged segment, unreadable segment, legacy failback, stored GTID hole, a sealed source file held twice on the chain order) with its StorageProblem, and the segments /replay and /window keep before it
+// output: the storage-health verdict (the first of: damaged segment, unreadable segment, legacy failback, stored GTID hole, a sealed source file held twice on the chain order) with its StorageProblem, and the segments /replay and /window keep before it; since P2-3 the overlap verdict counts an open copy with the same content, never an empty leftover
 // pos: the one storage verdict and replay cut (ADR 0009 phase 1, P1-3); tasks only supplies planners, chain order and the generation comparison
 // note: if this file changes, update this header and module README.md.
 package assurance

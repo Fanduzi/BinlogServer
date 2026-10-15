@@ -1,0 +1,241 @@
+// Package tasks provides module-level functionality for tasks.
+// input: the sealed segments (with the 000008 sha256 from the catalog) of every task the evaluator is responsible for, a global byte budget
+// output: Rehasher: an asynchronous sha256 re-check, one segment at a time on a cross-task cursor (persisted in rehash_cursor when the store has it), token-bucket limited to health.rehash_bytes_per_sec, idle I/O priority and no page-cache pollution on Linux; results go to the evaluator as facts and mark the task dirty (REHASH); a segment without a recorded sha256 is skipped and counted unavailable
+// pos: ADR 0009 phase 2 P2-3 (design §5.7); never on the evaluation path, so a pass hashes nothing
+// note: if this file changes, update this header and module README.md.
+package tasks
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+// RehashCursorStore persists the rehasher's cursor (one row, rehash_cursor).
+type RehashCursorStore interface {
+	LoadRehashCursor(ctx context.Context) (taskID, segment string, err error)
+	SaveRehashCursor(ctx context.Context, taskID, segment string) error
+}
+
+// RehashStats counts the rehasher's work.
+type RehashStats struct {
+	Bytes, Segments, Mismatches, Unavailable int64
+}
+
+// Rehasher re-reads sealed segments and compares them with the sha256
+// recorded at seal (bit rot does not change size or mtime).
+type Rehasher struct {
+	e       *Evaluator
+	limiter *rate.Limiter
+	chunk   int
+
+	mu         sync.Mutex
+	cursorTask string
+	cursorSeg  string
+	loaded     bool
+
+	bytes, segments, mismatches, unavailable atomic.Int64
+}
+
+// NewRehasher limits reads to bytesPerSec (default 4 MiB/s) across all tasks.
+func NewRehasher(e *Evaluator, bytesPerSec int64) *Rehasher {
+	if bytesPerSec <= 0 {
+		bytesPerSec = 4 << 20
+	}
+	chunk := int(bytesPerSec / 8)
+	if chunk < 4<<10 {
+		chunk = 4 << 10
+	}
+	if chunk > 64<<10 {
+		chunk = 64 << 10
+	}
+	return &Rehasher{e: e, limiter: rate.NewLimiter(rate.Limit(bytesPerSec), chunk), chunk: chunk}
+}
+
+// Stats is a snapshot of the counters.
+func (r *Rehasher) Stats() RehashStats {
+	return RehashStats{Bytes: r.bytes.Load(), Segments: r.segments.Load(), Mismatches: r.mismatches.Load(), Unavailable: r.unavailable.Load()}
+}
+
+type rehashTarget struct {
+	taskID, name, path, sha string
+}
+
+// next is the first sealed segment after the cursor in (task, segment)
+// order, wrapping around; ok is false when no task has a sealed segment.
+func (r *Rehasher) next() (rehashTarget, bool) {
+	var all []rehashTarget
+	for _, t := range r.e.responsible() {
+		files, err := r.e.s.ListFiles(t.ID, segmentInventoryLimit)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if segmentIsOpen(f) || strings.TrimSpace(f.FilePath) == "" {
+				continue
+			}
+			name := segmentInventoryBasename(f)
+			if name == "" {
+				name = filepath.Base(f.FilePath)
+			}
+			all = append(all, rehashTarget{taskID: t.ID, name: name, path: f.FilePath, sha: strings.ToLower(strings.TrimSpace(f.SHA256))})
+		}
+	}
+	if len(all) == 0 {
+		return rehashTarget{}, false
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].taskID != all[j].taskID {
+			return all[i].taskID < all[j].taskID
+		}
+		return all[i].name < all[j].name
+	})
+	r.mu.Lock()
+	ct, cs := r.cursorTask, r.cursorSeg
+	r.mu.Unlock()
+	for _, t := range all {
+		if t.taskID > ct || (t.taskID == ct && t.name > cs) {
+			return t, true
+		}
+	}
+	return all[0], true // a full cycle: back to the start
+}
+
+func (r *Rehasher) loadCursor(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.loaded {
+		return
+	}
+	r.loaded = true
+	if cs := r.e.cfg.RehashCursor; cs != nil {
+		if task, seg, err := cs.LoadRehashCursor(ctx); err == nil {
+			r.cursorTask, r.cursorSeg = task, seg
+		}
+	}
+}
+
+func (r *Rehasher) advance(ctx context.Context, t rehashTarget) {
+	r.mu.Lock()
+	r.cursorTask, r.cursorSeg = t.taskID, t.name
+	r.mu.Unlock()
+	if cs := r.e.cfg.RehashCursor; cs != nil {
+		if err := cs.SaveRehashCursor(ctx, t.taskID, t.name); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("rehash cursor save: %v", err)
+		}
+	}
+}
+
+// Step re-checks the next segment and returns the bytes it read.
+func (r *Rehasher) Step(ctx context.Context) (int64, error) {
+	r.loadCursor(ctx)
+	t, ok := r.next()
+	if !ok {
+		return 0, nil
+	}
+	if t.sha == "" {
+		r.unavailable.Add(1)
+		r.advance(ctx, t)
+		return 0, nil
+	}
+	info, err := os.Stat(t.path)
+	if err != nil {
+		r.advance(ctx, t) // gone: the chain's own checks judge that
+		return 0, nil
+	}
+	sum, n, err := r.hashFile(ctx, t.path)
+	if err != nil {
+		if ctx.Err() != nil {
+			return n, ctx.Err()
+		}
+		r.advance(ctx, t)
+		return n, nil
+	}
+	after, err := os.Stat(t.path)
+	if err != nil || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+		r.advance(ctx, t) // changed while read: judged next cycle
+		return n, nil
+	}
+	r.segments.Add(1)
+	res := rehashResult{size: info.Size(), mtime: info.ModTime(), ok: sum == t.sha}
+	if !res.ok {
+		r.mismatches.Add(1)
+		res.evidence = "sha256 recorded=" + t.sha + " local=" + sum
+	}
+	if r.e.setRehash(t.taskID, t.name, res) {
+		r.e.MarkDirty(t.taskID, ReasonRehash)
+	}
+	r.advance(ctx, t)
+	return n, nil
+}
+
+func (r *Rehasher) hashFile(ctx context.Context, path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	defer dropPageCache(f)
+	h := sha256.New()
+	buf := make([]byte, r.chunk)
+	var total int64
+	for {
+		n, err := io.ReadFull(f, buf)
+		if n > 0 {
+			if werr := r.limiter.WaitN(ctx, n); werr != nil {
+				return "", total, werr
+			}
+		}
+		if n > 0 {
+			h.Write(buf[:n])
+			total += int64(n)
+			r.bytes.Add(int64(n))
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return hex.EncodeToString(h.Sum(nil)), total, nil
+		}
+		if err != nil {
+			return "", total, err
+		}
+	}
+}
+
+// Run re-checks segments until ctx ends, on one goroutine at idle I/O
+// priority where the OS allows it.
+func (r *Rehasher) Run(ctx context.Context) {
+	if r.e.cfg.Mode == EvaluatorOff {
+		return
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	setIdleIOPriority()
+	for ctx.Err() == nil {
+		r.loadCursor(ctx)
+		if _, ok := r.next(); !ok {
+			t := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+			continue
+		}
+		if _, err := r.Step(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("rehash: %v", err)
+		}
+	}
+}

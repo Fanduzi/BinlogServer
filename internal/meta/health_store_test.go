@@ -203,3 +203,25 @@ func TestMigrateTo9FromEachVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestRehashCursorOnMySQL(t *testing.T) {
+	ctx := context.Background()
+	for i, root := range rootDSNs(t) {
+		db, m := scratchDB(t, root, fmt.Sprintf("p23_rehash_%d", i))
+		if err := m.Up(); err != nil {
+			t.Fatal(err)
+		}
+		store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+		if task, seg, err := store.LoadRehashCursor(ctx); err != nil || task != "" || seg != "" {
+			t.Fatalf("empty cursor %q %q %v", task, seg, err)
+		}
+		for _, c := range [][2]string{{"1", "mysql-bin.000001"}, {"2", "mysql-bin.000009"}} {
+			if err := store.SaveRehashCursor(ctx, c[0], c[1]); err != nil {
+				t.Fatal(err)
+			}
+			if task, seg, err := store.LoadRehashCursor(ctx); err != nil || task != c[0] || seg != c[1] {
+				t.Fatalf("cursor %q %q %v, want %v", task, seg, err, c)
+			}
+		}
+	}
+}

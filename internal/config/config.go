@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -215,6 +215,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("http.worker_health.write_timeout_sec", 10)
 	v.SetDefault("http.worker_health.idle_timeout_sec", 30)
 	v.SetDefault("meta.timeout.read_sec", 3)
+	v.SetDefault("health.evaluator", "off")
+	v.SetDefault("health.sweep_interval_sec", 60)
+	v.SetDefault("health.rehash_bytes_per_sec", 4<<20)
 	v.SetDefault("meta.timeout.write_sec", 5)
 	v.SetDefault("meta.timeout.lease_sec", 2)
 	v.SetDefault("meta.timeout.upload_sec", 30)
@@ -360,6 +363,11 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 				),
 			},
 		},
+		Health: HealthConfig{
+			Evaluator:         strings.ToLower(strings.TrimSpace(getString(v, decryptor, "health.evaluator", "health_evaluator"))),
+			SweepIntervalSec:  getInt(v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
+			RehashBytesPerSec: int64(getInt(v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
+		},
 		Tracing: TracingConfig{
 			Enabled:     getBool(v, "tracing.enabled", "tracing_enabled"),
 			Exporter:    strings.ToLower(getString(v, decryptor, "tracing.exporter", "tracing_exporter")),
@@ -371,6 +379,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	}
 	applyEnabledAuthProtectDefaults(v, &cfg.API.Auth)
 	if err := validateConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateHealthConfig(cfg.Health); err != nil {
 		return Config{}, err
 	}
 	warnSensitivePlaintextInConfig(v)
@@ -592,6 +603,19 @@ func validateTracingConfig(cfg TracingConfig) error {
 	}
 	if cfg.Enabled && cfg.Exporter != "disabled" && strings.TrimSpace(cfg.Endpoint) == "" {
 		return errors.New("tracing.endpoint must not be empty when tracing is enabled")
+	}
+	return nil
+}
+
+// validateHealthConfig checks the P2-3 evaluator keys.
+func validateHealthConfig(h HealthConfig) error {
+	switch h.Evaluator {
+	case "", "off", "shadow", "on":
+	default:
+		return fmt.Errorf("health.evaluator must be off, shadow or on, got %q", h.Evaluator)
+	}
+	if h.SweepIntervalSec < 0 || h.RehashBytesPerSec < 0 {
+		return fmt.Errorf("health.sweep_interval_sec and health.rehash_bytes_per_sec must not be negative")
 	}
 	return nil
 }

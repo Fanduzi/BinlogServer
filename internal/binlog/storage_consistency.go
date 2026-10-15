@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task directory of binlog segments, the checkpoint gtid_set, and the task's start gtid_set
-// output: a storage problem when one segment rotates to its own or an older file, or when an event position goes backwards inside that segment, naming that segment, the segments before it that still restore, the MySQL GTIDs the checkpoint lists that no segment holds, and the GTID set a new task starts from; out-of-order GTIDs, a hole in one UUID, and a missing file are not a problem
+// output: a storage problem when one segment rotates to its own or an older file, or when an event position goes backwards inside that segment, naming that segment, the segments before it that still restore, the MySQL GTIDs the checkpoint lists that no segment holds, and the GTID set a new task starts from; out-of-order GTIDs, a hole in one UUID, and a missing file are not a problem; the per-segment damage check is cached per path, source, size and mtime
 // pos: the ledger's damage question (Ledger.Damage); detect a backup already damaged by a stale GTID re-dump before another start drops more transactions
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
@@ -217,7 +219,36 @@ func storageMessage(p StorageProblem) string {
 	return b.String()
 }
 
+// segmentDamage is cached per (path, source) and the file's size and
+// mtime, like the ledger's contents: a sweep over a large directory reads
+// each unchanged segment once.
 func segmentDamage(path, diskName, segmentSource string) (string, bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false
+	}
+	key := path + "\x00" + segmentSource
+	if v, ok := damageCache.Load(key); ok {
+		e := v.(damageCacheEntry)
+		if e.size == info.Size() && e.mtime.Equal(info.ModTime()) {
+			return e.detail, e.damaged
+		}
+	}
+	detail, damaged := segmentDamageUncached(path, diskName, segmentSource)
+	damageCache.Store(key, damageCacheEntry{size: info.Size(), mtime: info.ModTime(), detail: detail, damaged: damaged})
+	return detail, damaged
+}
+
+type damageCacheEntry struct {
+	size    int64
+	mtime   time.Time
+	detail  string
+	damaged bool
+}
+
+var damageCache sync.Map // path\x00source -> damageCacheEntry
+
+func segmentDamageUncached(path, diskName, segmentSource string) (string, bool) {
 	if next, stray := strayRotate(path, segmentSource); stray {
 		return "Segment " + diskName + " contains a rotate to " + next + ", which is not a newer binlog file.", true
 	}

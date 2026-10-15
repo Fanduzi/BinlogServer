@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failed upload metadata via failedUploadFileReader, manual and background retry requests, local sealed files, and object storage uploader operations
-// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows (a row of an unrepaired earlier-build failback is held until the repair) including a checksum mismatch re-upload and an unfinished checksum re-check, refusal of a name ClassifySegment rejects, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots
+// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows (a row of an unrepaired earlier-build failback is held until the repair) including a checksum mismatch re-upload and an unfinished checksum re-check, refusal of a name ClassifySegment rejects, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots; a retry pass marks the task dirty (UPLOAD) for the health evaluator
 // pos: scheduler upload-retry compensation, background retry loop, and failure-observability logic
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -143,6 +143,7 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 			return UploadRetryStats{}, err
 		}
 	}
+	defer s.markHealthDirty(taskID, ReasonUpload)
 
 	// Step 1: 参数归一化 + 任务存在性 + 并发互斥校验。
 	s.mu.Lock()

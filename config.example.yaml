@@ -66,6 +66,15 @@ meta:
     lease_sec: 2
     upload_sec: 30
 
+# ADR 0009 phase 2 health evaluator (P2-3). off: legacy findings only;
+# shadow: evaluate and log, write nothing; on: the evaluator owns
+# SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER (needs
+# migration 000009 with a metadata DSN; standalone writes .health.json).
+health:
+  evaluator: "off" # off | shadow | on
+  sweep_interval_sec: 60
+  rehash_bytes_per_sec: 4194304 # global sha256 re-check budget (4 MiB/s)
+
 tracing:
   enabled: false
   exporter: "disabled" # disabled | otlp-http | otlp-grpc | jaeger

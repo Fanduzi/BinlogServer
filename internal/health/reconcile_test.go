@@ -270,7 +270,7 @@ func TestHealthOf(t *testing.T) {
 	}
 }
 
-var p23Managed = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true}
+var wantManagedP23 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true}
 
 func TestEmptyLeftoverDerivesFromChain(t *testing.T) {
 	f := &Facts{TaskID: "t", Complete: map[Scope]bool{ScopeChainLocal: true},
@@ -291,7 +291,7 @@ func TestRegistryComplete(t *testing.T) {
 		if spec.Kind != k || spec.Severity == "" || len(spec.Scopes) == 0 || spec.Clear.Invariant == "" || spec.Clear.Text == "" || spec.Version < 1 {
 			t.Errorf("incomplete spec %s: %+v", k, spec)
 		}
-		if want := p23Managed[k]; spec.Managed != want {
+		if want := wantManagedP23[k]; spec.Managed != want {
 			t.Errorf("%s managed=%v; P2-3 takes over exactly SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER", k, spec.Managed)
 		}
 	}
