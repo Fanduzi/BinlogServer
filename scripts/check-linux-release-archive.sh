@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: Linux release tar.gz archive path plus local tar/mktemp tooling and the binary compatibility checker script
-# output: archive asset checks plus non-zero exit when required binaries/migrations or Linux compatibility are missing
+# output: archive asset checks plus non-zero exit when required binaries/migrations/scripts/adopt-leftovers.sh or Linux compatibility are missing
 # pos: release artifact guardrail verifying packaged Linux archives are operationally complete and glibc-safe
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -58,6 +58,12 @@ fi
 down_migration="$(find "$work_dir" -type f -path '*/migrations/*.down.sql' -print -quit)"
 if [[ -z "$down_migration" ]]; then
   echo "[compat-archive] error: down migration SQL not found in archive" >&2
+  exit 1
+fi
+
+adopt_script="$(find "$work_dir" -type f -path '*/scripts/adopt-leftovers.sh' -print -quit)"
+if [[ -z "$adopt_script" || ! -x "$adopt_script" ]]; then
+  echo "[compat-archive] error: executable scripts/adopt-leftovers.sh not found in archive" >&2
   exit 1
 fi
 
