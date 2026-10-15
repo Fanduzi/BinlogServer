@@ -656,3 +656,28 @@ func TestLoadConfigWithEncryption_RetainsKey(t *testing.T) {
 		t.Fatalf("expected encryption key to be retained for meta wiring, got %q", cfg.EncryptionKey)
 	}
 }
+
+func TestLoadConfig_StandaloneTaskRecords(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Standalone.TaskRecords != "on" || cfg.Standalone.TaskKeyFile != "" {
+		t.Fatalf("defaults %+v, want task_records on", cfg.Standalone)
+	}
+	t.Setenv("BINLOG_SERVER_STANDALONE_TASK_RECORDS", "OFF")
+	t.Setenv("BINLOG_SERVER_STANDALONE_TASK_KEY_FILE", "/etc/binlog-server/task.key")
+	t.Setenv("BINLOG_SERVER_STANDALONE_TASK_KEY_PREVIOUS_FILE", "/etc/binlog-server/task.key.old")
+	cfg, err = LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Standalone.TaskRecords != "off" || cfg.Standalone.TaskKeyFile != "/etc/binlog-server/task.key" || cfg.Standalone.TaskKeyPreviousFile != "/etc/binlog-server/task.key.old" {
+		t.Fatalf("env %+v", cfg.Standalone)
+	}
+	t.Setenv("BINLOG_SERVER_STANDALONE_TASK_RECORDS", "maybe")
+	if _, err := LoadConfig(""); err == nil || !strings.Contains(err.Error(), "standalone.task_records") {
+		t.Fatalf("invalid value: %v", err)
+	}
+}

@@ -22,7 +22,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert
+  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -57,6 +57,7 @@ Scenarios:
   smoke-unreachable-giveup
   smoke-fail-alert
   smoke-scale
+  smoke-standalone-restart
 EOF
 }
 
@@ -101,7 +102,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump"
+      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -150,7 +151,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart)
       return 0
       ;;
     *)
@@ -209,6 +210,10 @@ run_scenario() {
       ;;
     smoke-control-loop)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-control-loop.sh"
+      ;;
+    smoke-standalone-restart)
+      # Own containers (MySQL 8.0, MariaDB 11.4) and its own server on 18090.
+      "$ROOT_DIR/scripts/e2e/smoke-standalone-restart.sh"
       ;;
     smoke-gtid-purge)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"

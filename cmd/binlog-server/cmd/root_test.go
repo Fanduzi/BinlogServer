@@ -8,6 +8,8 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -161,5 +163,33 @@ func TestRootCommandRunErrorOmitsUsage(t *testing.T) {
 	output := stdout.String()
 	if strings.Contains(output, "Usage:") {
 		t.Fatalf("expected no cobra Usage dump, got %q", output)
+	}
+}
+
+func TestTaskKeyGenerate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task.key")
+	root := NewRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"task-key", "generate", "--out", path})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("key file %v %v", info, err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(out.String(), strings.TrimSpace(string(raw))) {
+		t.Fatal("generate printed the key")
+	}
+	if !strings.Contains(out.String(), "key id ") {
+		t.Fatalf("output %q", out.String())
+	}
+	again := NewRootCommand()
+	again.SetOut(&out)
+	again.SetArgs([]string{"task-key", "generate", "--out", path})
+	if err := again.Execute(); err == nil {
+		t.Fatal("generate overwrote an existing key file")
 	}
 }
