@@ -42,7 +42,7 @@ restore_compression() {
 }
 
 cleanup() {
-  docker rm -f "$RESTORE_GTID" "$RESTORE_TIME" >/dev/null 2>&1 || true
+  docker rm -f -v "$RESTORE_GTID" "$RESTORE_TIME" >/dev/null 2>&1 || true
   if [[ -n "$DUMP" ]]; then
     rm -f "$DUMP"
   fi
@@ -220,7 +220,7 @@ exclude_of() {
 start_restore() {
   local name="$1"
   local sid="$2"
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" \
     -e MYSQL_ROOT_PASSWORD=root \
     -e MYSQL_ROOT_HOST=% \

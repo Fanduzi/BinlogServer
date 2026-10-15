@@ -59,7 +59,7 @@ cleanup() {
     wait "$MINIO_PID" >/dev/null 2>&1 || true
     MINIO_PID=""
   fi
-  docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
+  docker rm -f -v "$MINIO_NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -158,7 +158,7 @@ object_exists() {
 }
 
 start_minio() {
-  docker rm -f "$MINIO_NAME" >/dev/null 2>&1 || true
+  docker rm -f -v "$MINIO_NAME" >/dev/null 2>&1 || true
   if docker pull "$MINIO_IMAGE" >/dev/null 2>&1 && docker pull "$MC_IMAGE" >/dev/null 2>&1; then
     docker run -d --name "$MINIO_NAME" \
       -p "${MINIO_PORT}:9000" \
