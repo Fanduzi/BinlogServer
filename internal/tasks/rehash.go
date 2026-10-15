@@ -199,7 +199,8 @@ func (r *Rehasher) check(ctx context.Context, t rehashTarget) (int64, error) {
 	}
 	if t.size >= 0 && info.Size() != t.size {
 		// Not the file that was sealed (a legacy rewrite, a truncation):
-		// the chain's own checks judge it; a checksum says nothing here.
+		// a checksum says nothing here. The chain's I1 judges it: a size
+		// that is not the one in .seal-sha256 is not readable (#381).
 		r.unavailable.Add(1)
 		r.advance(ctx, t)
 		return 0, nil

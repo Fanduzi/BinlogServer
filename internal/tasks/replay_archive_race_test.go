@@ -228,8 +228,13 @@ func TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess(t *testing.T) {
 // open file the listing saw, so it is not read in its place.
 func TestOpenSelectedReplayMembers_EarlierPlainEpochIsNotSuccessor(t *testing.T) {
 	s, taskID, dir := newSealRaceTask(t)
+	// Four bytes, still shorter than the open file: a sealed file under
+	// four bytes is cut short (#381) and would stop the selection.
+	if err := os.WriteFile(filepath.Join(dir, "mysql-bin.000002.open.e1"), []byte("open-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	earlier := filepath.Join(dir, "mysql-bin.000002")
-	if err := os.WriteFile(earlier, []byte("e0"), 0o644); err != nil {
+	if err := os.WriteFile(earlier, []byte("e0e0"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-time.Hour)

@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: one binlog segment reader, beginning with the 4-byte magic header
-// output: the previous-GTIDs set and every MySQL GTID event in that segment, with the byte offset and event-header time of each event; a damaged event size past the file or above 1 GiB returns ErrCorruptEventSize without allocating (#358); in a sealed segment a short event size, a short body or a CRC32 trailer that does not match (ErrEventChecksum, wrapped in ErrCorruptEventSize) is also not readable (#380 QA)
+// output: the previous-GTIDs set and every MySQL GTID event in that segment, with the byte offset and event-header time of each event; a damaged event size past the file or above 1 GiB returns ErrCorruptEventSize without allocating (#358); in a sealed segment a short event size, a short body or a CRC32 trailer that does not match (ErrEventChecksum, wrapped in ErrCorruptEventSize) is also not readable (#380 QA), and so is a sealed segment cut short: under 4 bytes or ending inside an event header (ErrSegmentTruncated, wrapped in ErrCorruptEventSize, #381)
 // pos: read the transactions a segment actually contains so replay can exclude ones a restored backup already has
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -12,6 +12,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
@@ -24,6 +25,12 @@ var errPreviousGTIDs = errors.New("unreadable previous gtid event")
 // or runs past the end of a sealed segment. Callers must not allocate that
 // size. A size past the end of an open segment is a torn tail, not this error.
 var ErrCorruptEventSize = errors.New("corrupt binlog event size")
+
+// ErrSegmentTruncated is a sealed segment that ends before a whole binlog:
+// shorter than the magic, or inside an event header. It is
+// always wrapped in ErrCorruptEventSize, so every reader that treats a corrupt
+// sealed segment as not readable treats this one the same way.
+var ErrSegmentTruncated = errors.New("sealed segment is cut short")
 
 // maxEventBody is 1 GiB: above MySQL's maximum max_allowed_packet, and far
 // above any real binlog event. A damaged size field used to ask for ~4 GiB
@@ -110,8 +117,11 @@ func readerRemaining(r io.Reader) int64 {
 func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (SegmentGTIDLog, error) {
 	var out SegmentGTIDLog
 	magic := make([]byte, 4)
-	if _, err := io.ReadFull(r, magic); err != nil {
+	if n, err := io.ReadFull(r, magic); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if sealed {
+				return SegmentGTIDLog{}, segmentCutShort("it holds %d bytes, fewer than the binlog magic", n)
+			}
 			return out, nil
 		}
 		return out, err
@@ -127,6 +137,9 @@ func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (Segment
 	hasCRC := false
 	for {
 		if _, err := io.ReadFull(r, hdr); err != nil {
+			if err == io.ErrUnexpectedEOF && sealed {
+				return SegmentGTIDLog{}, segmentCutShort("it ends inside an event header at offset %d", offset)
+			}
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				return out, nil
 			}
@@ -185,6 +198,24 @@ func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (Segment
 		}
 		offset += eventSize
 	}
+}
+
+// segmentCutShort is ErrSegmentTruncated, wrapped in ErrCorruptEventSize,
+// with what was found.
+func segmentCutShort(format string, args ...any) error {
+	return fmt.Errorf("%w: %w: "+format, append([]any{ErrCorruptEventSize, ErrSegmentTruncated}, args...)...)
+}
+
+// UnreadableReason is what a not-readable error says about the segment, for
+// a finding, a /window break or a /replay warning: the truncation found
+// (ErrSegmentTruncated) when that is the cause, else ErrCorruptEventSize's
+// own text, which every earlier verdict carried and the finding evidence
+// keeps.
+func UnreadableReason(err error) string {
+	if errors.Is(err, ErrSegmentTruncated) {
+		return strings.TrimPrefix(err.Error(), ErrCorruptEventSize.Error()+": ")
+	}
+	return ErrCorruptEventSize.Error()
 }
 
 // ErrEventChecksum is a sealed segment event whose CRC32 trailer does not

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task, the checkpoint gtid_set it claims (or "" when the caller does not need the missing set), the scheduler data directory and the task's source-switch events
-// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), unreadable (a sealed segment with a corrupt event size; reported as a SEGMENT_UNREADABLE finding), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go), or a sealed source file held twice in the directory (a SEGMENT_OVERLAP finding, #370); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning; the two managed kinds are reported only while the health evaluator does not own them (reportUnmanaged, P2-3), and markHealthDirty is the trigger entry for the evaluator
+// output: one storage-health verdict per task directory: ok, damaged (a stray rotate or a backwards event position, from the segment ledger), unreadable (a sealed segment with a corrupt event size, cut short, or not its size at seal, #381; reported as a SEGMENT_UNREADABLE finding), a failback an earlier build wrote under the first stint's names (legacy_failback.go), or a GTID hole a source switch recorded as stored (stored_hole.go), or a sealed source file held twice in the directory (a SEGMENT_OVERLAP finding, #370); the classes are checked in that order and the first one found wins; the verdict carries the StorageProblem every consumer shows and its replay warning; the two managed kinds are reported only while the health evaluator does not own them (reportUnmanaged, P2-3), and markHealthDirty is the trigger entry for the evaluator
 // pos: adapter over assurance.Chain.Health (ADR 0009 phase 1, P1-3): tasks supplies the ledger, checkpoint, start set, the replay order (SelectReplayFiles over ListFiles, for I4) and its planners (legacy failback, then stored hole) as lazy Plan; list/get alerts, /replay, /window and the replay warning all ask it; the replay cut is assurance.KeepBefore
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -162,7 +162,7 @@ func (h StorageHealth) ReplayWarning() string {
 	case StorageOverlap:
 		return p.Message + " (STORAGE_INCONSISTENT)"
 	case StorageUnreadable:
-		return "Segment " + p.Segment + " is not readable (" + binlog.ErrCorruptEventSize.Error() + "). Replay stops before it: that segment and every later one are left out. " + p.Message
+		return "Segment " + p.Segment + " is not readable (" + p.Reason + "). Replay stops before it: that segment and every later one are left out. " + p.Message
 	case StorageDamaged:
 		msg := "Segment " + p.Segment + " is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out."
 		if p.Restart != "" {

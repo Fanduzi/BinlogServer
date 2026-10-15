@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task directory of binlog segments, the checkpoint gtid_set, and the task's start gtid_set
-// output: a storage problem when one segment rotates to its own or an older file, or when an event position goes backwards inside that segment, naming that segment, the segments before it that still restore, the MySQL GTIDs the checkpoint lists that no segment holds, and the GTID set a new task starts from; out-of-order GTIDs, a hole in one UUID, and a missing file are not a problem; the per-segment damage check is cached per path, source and file stamp (size, mtime, ctime), bounded
+// output: a storage problem when one segment rotates to its own or an older file, or when an event position goes backwards inside that segment, naming that segment, the segments before it that still restore, the MySQL GTIDs the checkpoint lists that no segment holds, and the GTID set a new task starts from; out-of-order GTIDs, a hole in one UUID, and a missing file are not a problem; the first sealed segment that is not readable (a corrupt event size, a file cut short, or a local size that differs from its size at seal in .seal-sha256, #381) with the reason; the per-segment damage check is cached per path, source and file stamp (size, mtime, ctime), bounded
 // pos: the ledger's damage question (Ledger.Damage); detect a backup already damaged by a stale GTID re-dump before another start drops more transactions
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -8,6 +8,7 @@ package binlog
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,9 @@ type StorageProblem struct {
 	Segment string
 	// Detail is what was found in that segment, without the recovery text.
 	Detail string
+	// Reason is why an unreadable segment is not readable (what
+	// SegmentUnreadable says); empty for every other problem.
+	Reason string `json:"-"`
 	// Missing is the MySQL GTID set the checkpoint lists that no segment
 	// holds and the task's start set does not cover. Empty when unknown.
 	Missing string
@@ -96,10 +100,11 @@ func (l *Ledger) Unreadable() (StorageProblem, bool) {
 		if seg.Named.Open {
 			continue
 		}
-		if !l.SegmentUnreadable(seg.Name) {
+		reason, unreadable := l.SegmentUnreadable(seg.Name)
+		if !unreadable {
 			continue
 		}
-		problem := StorageProblem{Segment: seg.Name, Detail: "Segment " + seg.Name + " is not readable: " + ErrCorruptEventSize.Error() + "."}
+		problem := StorageProblem{Segment: seg.Name, Reason: reason, Detail: "Segment " + seg.Name + " is not readable: " + reason + "."}
 		for _, prev := range segs[:i] {
 			if prev.Named.Seq < seg.Named.Seq {
 				problem.Valid = append(problem.Valid, prev.Name)
@@ -111,23 +116,35 @@ func (l *Ledger) Unreadable() (StorageProblem, bool) {
 	return StorageProblem{}, false
 }
 
-// SegmentUnreadable reports that the sealed segment called name has a
-// corrupt event size (ErrCorruptEventSize). An open segment, a file that
-// cannot be opened, and a segment with the re-dump damage signature (which
+// SegmentUnreadable is why the sealed segment called name is not readable:
+// a corrupt event size (ErrCorruptEventSize), a file cut short
+// (ErrSegmentTruncated: 0 bytes, inside the magic or an event header), or a
+// local size that is not its size at seal in the task directory's
+// .seal-sha256 ledger (a cut at an event boundary reads as a whole
+// segment). An open segment, a file that cannot be opened, a segment with
+// no size at seal, and a segment with the re-dump damage signature (which
 // Damage already reports) are not unreadable.
-func (l *Ledger) SegmentUnreadable(name string) bool {
+func (l *Ledger) SegmentUnreadable(name string) (string, bool) {
 	named, ok := ClassifySegment(name)
 	if !ok || named.Open {
-		return false
+		return "", false
 	}
 	path := filepath.Join(l.dir, name)
 	if _, damaged := segmentDamage(path, name, named.Source); damaged {
-		return false
+		return "", false
 	}
 	if _, err := l.Contents(name); errors.Is(err, ErrCorruptEventSize) {
-		return true
+		return UnreadableReason(err), true
 	}
-	return sealedSegmentCorrupt(path)
+	if reason, corrupt := sealedSegmentCorrupt(path); corrupt {
+		return reason, true
+	}
+	if sum, ok := sealSumAt(l.dir, name); ok && sum.Size >= 0 {
+		if info, err := os.Stat(path); err == nil && info.Size() != sum.Size {
+			return fmt.Sprintf("it is %d bytes on disk, but it was %d bytes at seal (%s)", info.Size(), sum.Size, SealSumsFileName), true
+		}
+	}
+	return "", false
 }
 
 // IsDamaged reports that Damage would find a segment, without computing the
