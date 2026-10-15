@@ -29,7 +29,7 @@ cleanup() {
     done
   fi
   if [[ -n "$SERVER_PID" ]]; then kill -9 "$SERVER_PID" >/dev/null 2>&1 || true; fi
-  for c in "${CONTAINERS[@]}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+  for c in "${CONTAINERS[@]}"; do docker rm -f -v "$c" >/dev/null 2>&1 || true; done
 }
 trap cleanup EXIT
 
@@ -53,7 +53,7 @@ start_db() {
   [[ "$binlog" == 0 && "$flavor" == mysql80 ]] && args+=(--skip-log-bin)
   # MySQL runs with GTIDs so the GTID task keeps its executed set across a restart (#393 QA P2-3).
   [[ "$flavor" == mysql80 ]] && args+=(--gtid-mode=ON --enforce-gtid-consistency=ON)
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" >/dev/null 2>&1 || true
   CONTAINERS+=("$name")
   docker run -d --name "$name" -p "127.0.0.1:${port}:3306" \
     -e MYSQL_ROOT_PASSWORD="$SECRET" -e MYSQL_ROOT_HOST=% \

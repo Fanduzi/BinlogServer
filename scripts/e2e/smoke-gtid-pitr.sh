@@ -39,7 +39,7 @@ restore_compression() {
 }
 
 cleanup() {
-  docker rm -f "$RESTORE_OPEN" "$RESTORE_SEALED" >/dev/null 2>&1 || true
+  docker rm -f -v "$RESTORE_OPEN" "$RESTORE_SEALED" >/dev/null 2>&1 || true
   restore_compression
 }
 trap cleanup EXIT
@@ -201,7 +201,7 @@ stop_pos_of() {
 start_restore() {
   local name="$1"
   local sid="$2"
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" \
     -e MYSQL_ROOT_PASSWORD=root \
     -e MYSQL_ROOT_HOST=% \

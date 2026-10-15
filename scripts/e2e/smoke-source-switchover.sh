@@ -57,7 +57,7 @@ cleanup() {
     kill "$PROXY_PID" >/dev/null 2>&1 || true
     wait "$PROXY_PID" >/dev/null 2>&1 || true
   fi
-  docker rm -f "$PRIMARY" "$REPLICA" "$RESTORE_FULL" "$RESTORE_GTID" "$RESTORE_FB" "$CLIENT" >/dev/null 2>&1 || true
+  docker rm -f -v "$PRIMARY" "$REPLICA" "$RESTORE_FULL" "$RESTORE_GTID" "$RESTORE_FB" "$CLIENT" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -379,7 +379,7 @@ rows_of() {
 start_restore() {
   local name="$1"
   local sid="$2"
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" \
     -e MYSQL_ROOT_PASSWORD=root \
     -e MYSQL_ROOT_HOST=% \
@@ -482,7 +482,7 @@ assert_order() {
   fi
 }
 
-docker rm -f "$PRIMARY" "$REPLICA" "$CLIENT" >/dev/null 2>&1 || true
+docker rm -f -v "$PRIMARY" "$REPLICA" "$CLIENT" >/dev/null 2>&1 || true
 docker network rm "$NET" >/dev/null 2>&1 || true
 docker network create "$NET" >/dev/null
 
