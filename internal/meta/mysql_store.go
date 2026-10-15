@@ -485,6 +485,8 @@ type MySQLTaskStore struct {
 	hasPendingDump bool
 	// sealFactsAbsent: binlog_files has no 000008 columns (schema 6 or 7).
 	sealFactsAbsent atomic.Bool
+	// healthUpsertAlias caches the upsert dialect: 0 unknown, 1 alias, 2 VALUES().
+	healthUpsertAlias atomic.Int32
 }
 
 var _ tasks.TaskStore = (*MySQLTaskStore)(nil)
