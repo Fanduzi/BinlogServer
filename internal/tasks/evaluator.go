@@ -69,8 +69,10 @@ const (
 
 // EvaluatorConfig configures NewEvaluator.
 type EvaluatorConfig struct {
-	Mode  EvaluatorMode
-	Store healthstore.Store
+	// LivenessTick and DumpStalledAfter: stub fields (#383 red commit).
+	LivenessTick, DumpStalledAfter time.Duration
+	Mode                           EvaluatorMode
+	Store                          healthstore.Store
 	// Registry defaults to health.DefaultRegistry().
 	Registry health.Registry
 	// Sweep is the period that marks every responsible task dirty (default 60s).

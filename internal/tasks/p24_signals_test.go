@@ -1,14 +1,17 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a real Scheduler with a task directory, a healthstore.FileStore, a settable clock, and hot-path signals through SignalFailure/SignalSuccess and the legacy Report/Resolve
-// output: the P2-4 QA plan (design §14) end to end: a restart with meta still read-only never closes the open signal rows; a black-holed source keeps at least one finding open (DUMP_STALLED, then SOURCE_UNREACHABLE with DUMP_STALLED handed off) and RETRY_BACKOFF cycling does not close it; a deliberate Stop closes DUMP_STALLED; no findings is HEALTHY on the first pass; a FAILED task opens TASK_FAILED and is not HEALTHY; a _cluster signal is evaluated in standalone; the legacy sink never writes a managed kind while the evaluator owns it, and still does when the evaluator is off
+// output: the P2-4 QA plan (design §14) end to end: a restart with meta still read-only never closes the open signal rows; a black-holed source raises DUMP_STALLED from the liveness clock 45s after the last read in any state, keeps a finding open through the retry loop and hands off to SOURCE_UNREACHABLE in the same pass with the real silence in the detail; a 63s planned restart with 92s of backoff never opens SOURCE_UNREACHABLE; a deliberate Stop closes DUMP_STALLED and a restart starts the clock over; the scheduler probes a silent source and counts runner SOURCE_UNREACHABLE errors as failed attempts; no findings is HEALTHY on the first pass; a FAILED task opens TASK_FAILED and is not HEALTHY; a _cluster signal is evaluated in standalone; the legacy sink never writes a managed kind while the evaluator owns it, and still does when the evaluator is off
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §5.6, §14)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,54 +136,179 @@ func TestP24_RestartWithMetaStillReadOnlyKeepsTheRowOpen(t *testing.T) {
 	}
 }
 
+func (p *p24Env) at() time.Time { p.mu.Lock(); defer p.mu.Unlock(); return p.now }
+
+// #383 QA F1: a black-holed source raises DUMP_STALLED from the liveness
+// clock 45s after the last byte, in any state, keeps a finding open through
+// the retry loop, and hands off to SOURCE_UNREACHABLE in the same pass.
 func TestP24_BlackHoleKeepsAFindingOpenAndHandsOff(t *testing.T) {
 	p := newP24(t, EvaluatorOn)
 	p.setTask(t, StateRunning, TaskDesiredRun, func(t *Task) { t.Epoch = 3 })
-	p.s.SignalFailure(Finding{TaskID: p.task.ID, Kind: FindingDumpStalled, Severity: FindingWarning, Detail: "no event for 30s"})
+	p.s.noteSourceRead(p.task.ID, p.at())
+	p.eval(t)
+	if len(p.open(t)) != 0 {
+		t.Fatalf("healthy source: %+v", p.open(t))
+	}
+	p.advance(46 * time.Second) // nothing read: not even a heartbeat
 	p.eval(t)
 	if _, ok := p.open(t)["DUMP_STALLED/"]; !ok {
-		t.Fatalf("stall not open: %+v", p.open(t))
+		t.Fatalf("no DUMP_STALLED after 46s of silence while RUNNING: %+v", p.open(t))
 	}
-	for i, st := range []State{StateRetryBackoff, StateStarting, StateRetryBackoff, StateStarting, StateRetryBackoff} {
-		p.setTask(t, st, TaskDesiredRun, func(t *Task) { t.Epoch = 3; t.LastError = "SOURCE_UNREACHABLE: dial tcp 10.0.0.9:3306: i/o timeout" })
-		p.advance(25 * time.Second)
-		if h := p.eval(t); h.Status == health.StatusHealthy {
-			t.Fatalf("step %d (%s): black hole reported HEALTHY", i, st)
-		}
-		if len(p.open(t)) == 0 {
-			t.Fatalf("step %d (%s): no finding open", i, st)
+	for i, st := range []State{StateRetryBackoff, StateStarting, StateRetryBackoff, StateStarting} {
+		p.setTask(t, st, TaskDesiredRun, func(t *Task) { t.Epoch = 3; t.LastError = "SOURCE_UNREACHABLE: i/o timeout" })
+		p.advance(10 * time.Second)
+		p.s.noteSourceFailure(p.task.ID, p.at(), errors.New("readInitialHandshake: i/o timeout"))
+		if h := p.eval(t); h.Status == health.StatusHealthy || len(p.open(t)) == 0 {
+			t.Fatalf("step %d (%s): no finding open for a dead source: %+v", i, st, h)
 		}
 	}
-	p.eval(t) // the pass after SOURCE_UNREACHABLE opened hands DUMP_STALLED off
-	open := p.open(t)
-	if _, ok := open["SOURCE_UNREACHABLE/"]; !ok {
-		t.Fatalf("SOURCE_UNREACHABLE not open after 125s: %+v", open)
+	open := p.open(t) // 86s: still DUMP_STALLED
+	if _, ok := open["DUMP_STALLED/"]; !ok {
+		t.Fatalf("at 86s: %+v", open)
 	}
-	if _, ok := open["DUMP_STALLED/"]; ok {
-		t.Fatal("DUMP_STALLED not handed off")
+	p.advance(5 * time.Second)
+	p.s.noteSourceFailure(p.task.ID, p.at(), errors.New("readInitialHandshake: i/o timeout"))
+	p.eval(t) // 91s: the same pass opens SOURCE_UNREACHABLE and hands DUMP_STALLED off
+	open = p.open(t)
+	if _, ok := open["SOURCE_UNREACHABLE/"]; !ok || len(open) != 1 {
+		t.Fatalf("at 91s: %+v", open)
 	}
 	if r := p.store.closeReason(health.DumpStalled); r != health.ReasonHandedOff {
 		t.Fatalf("DUMP_STALLED close reason %q", r)
 	}
-	// Data again: the dump's first event closes SOURCE_UNREACHABLE.
-	p.setTask(t, StateRunning, TaskDesiredRun, func(t *Task) { t.Epoch = 3 })
-	p.s.SignalSuccess(p.task.ID, FindingDumpStalled, "")
-	if h := p.eval(t); h.Status != health.StatusHealthy || len(p.open(t)) != 0 {
+	if d := open["SOURCE_UNREACHABLE/"].Detail; !strings.Contains(d, "for 1m31s") {
+		t.Fatalf("detail %q does not tell the 91s since the last read", d)
+	}
+	// The source answers again (a probe or the dump reads a byte).
+	p.advance(time.Second)
+	p.s.noteSourceRead(p.task.ID, p.at())
+	if h := p.eval(t); len(p.open(t)) != 0 {
 		t.Fatalf("recovered: %+v %+v", h, p.open(t))
+	}
+}
+
+// #383 QA F3: a 63s planned restart whose backoff keeps the task out of
+// RUNNING for 92s never opens SOURCE_UNREACHABLE: the source answered a
+// probe at 70s, and every failure was within 63s of the last read.
+func TestP24_PlannedRestartWithLongBackoffNeverOpensUnreachable(t *testing.T) {
+	p := newP24(t, EvaluatorOn)
+	p.setTask(t, StateRunning, TaskDesiredRun, nil)
+	p.s.noteSourceRead(p.task.ID, p.at())
+	for sec := 1; sec <= 92; sec++ {
+		p.advance(time.Second)
+		switch {
+		case sec <= 63 && sec%5 == 0:
+			p.setTask(t, StateRetryBackoff, TaskDesiredRun, nil)
+			p.s.noteSourceFailure(p.task.ID, p.at(), errors.New("connect: connection refused"))
+		case sec == 70:
+			p.s.noteSourceRead(p.task.ID, p.at()) // a probe read the greeting
+		}
+		p.eval(t)
+		if _, ok := p.open(t)["SOURCE_UNREACHABLE/"]; ok {
+			t.Fatalf("SOURCE_UNREACHABLE opened at %ds of a 63s restart", sec)
+		}
+	}
+	p.setTask(t, StateRunning, TaskDesiredRun, nil)
+	p.s.noteSourceRead(p.task.ID, p.at())
+	p.eval(t)
+	if len(p.open(t)) != 0 {
+		t.Fatalf("after the restart: %+v", p.open(t))
 	}
 }
 
 func TestP24_StopClosesDumpStalled(t *testing.T) {
 	p := newP24(t, EvaluatorOn)
 	p.setTask(t, StateRunning, TaskDesiredRun, func(t *Task) { t.Epoch = 3 })
-	p.s.SignalFailure(Finding{TaskID: p.task.ID, Kind: FindingDumpStalled, Severity: FindingWarning, Detail: "silent"})
+	p.s.noteSourceRead(p.task.ID, p.at())
+	p.advance(time.Minute)
 	p.eval(t)
+	if _, ok := p.open(t)["DUMP_STALLED/"]; !ok {
+		t.Fatalf("no stall: %+v", p.open(t))
+	}
 	p.setTask(t, StateStopped, TaskDesiredStop, nil)
 	p.eval(t)
 	if _, ok := p.open(t)["DUMP_STALLED/"]; ok {
 		t.Fatalf("Stop did not close DUMP_STALLED: %+v", p.open(t))
 	}
+	// Start again: the clock starts over, no stale stall.
+	p.setTask(t, StateStarting, TaskDesiredRun, nil)
+	p.eval(t)
+	if len(p.open(t)) != 0 {
+		t.Fatalf("restart reused the old silence: %+v", p.open(t))
+	}
 }
+
+// The scheduler probes a silent task's source on its own (a TCP connect
+// and the server greeting, bounded), and a runner SOURCE_UNREACHABLE error
+// is a failed attempt; a probe that reads the greeting is a read.
+func TestP24_SchedulerProbesASilentSource(t *testing.T) {
+	prober := &fakeProber{err: errors.New("dial tcp: i/o timeout")}
+	s := NewScheduler(WithDataDir(t.TempDir()), WithSourceLiveness(20*time.Millisecond, 50*time.Millisecond))
+	s.SetRunner(&proberRunner{fakeProber: prober})
+	task, err := s.CreateTaskFromSpec("p", "p", &SourceConfig{Host: "127.0.0.1", Port: 3306, User: "u", Password: "p", Flavor: "mysql"}, &StartConfig{Mode: StartModeLatest}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	row := s.tasks[task.ID]
+	row.DesiredRun, row.State = TaskDesiredRun, StateRetryBackoff
+	s.tasks[task.ID] = row
+	s.mu.Unlock()
+	s.noteSourceRead(task.ID, time.Now().Add(-time.Minute))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.StartSourceLiveness(ctx)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snap, _ := s.LivenessSnapshot(task.ID)
+		if !snap.LastFailure.IsZero() && strings.Contains(snap.FailureDetail, "i/o timeout") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no failed probe recorded: %+v (probes %d)", snap, prober.calls.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	prober.setErr(nil)
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		snap, _ := s.LivenessSnapshot(task.ID)
+		if time.Since(snap.LastRead) < time.Second {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a probe that reads the greeting is not a read: %+v", snap)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	before, _ := s.LivenessSnapshot(task.ID)
+	s.noteRunnerError(task.ID, NewRetryableSourceError(CodeSourceUnreachable, "dial tcp: connection refused"))
+	after, _ := s.LivenessSnapshot(task.ID)
+	if !after.LastFailure.After(before.LastFailure) && !after.LastFailure.Equal(before.LastFailure) || !strings.Contains(after.FailureDetail, "connection refused") {
+		t.Fatalf("runner SOURCE_UNREACHABLE is not a failed attempt: %+v", after)
+	}
+}
+
+type fakeProber struct {
+	mu    sync.Mutex
+	err   error
+	calls atomic.Int64
+}
+
+func (f *fakeProber) setErr(err error) { f.mu.Lock(); f.err = err; f.mu.Unlock() }
+
+func (f *fakeProber) ProbeSource(ctx context.Context, src SourceConfig) error {
+	f.calls.Add(1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err
+}
+
+type proberRunner struct {
+	*fakeProber
+}
+
+func (proberRunner) Run(ctx context.Context, task Task) error { <-ctx.Done(); return nil }
 
 func TestP24_FailedTaskOpensTaskFailedAndIsNotHealthy(t *testing.T) {
 	p := newP24(t, EvaluatorOn)

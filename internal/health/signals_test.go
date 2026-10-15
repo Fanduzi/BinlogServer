@@ -1,11 +1,12 @@
 // Package health provides module-level functionality for health.
 // input: hand-built Facts for every P2-4 signal and task-state kind
-// output: the P2-4 QA plan at the pure layer: each signal kind opens on failure and closes on the first later success; an open row with no success since start never closes or flaps (meta still read-only); a probe closes a rarely-succeeding signal; a stale open signal is shown as INFO; DUMP_STALLED survives the retry loop and closes on data, a deliberate stop, a newer lease epoch, or HANDED_OFF once SOURCE_UNREACHABLE is open; SOURCE_UNREACHABLE needs the threshold and two passes; TASK_FAILED opens per failure class and closes on restart or stop; TASK_TRANSITION_STALLED derives from the task row; no findings after a restart is HEALTHY and a FAILED task never is
+// output: the P2-4 QA plan at the pure layer: each signal kind opens on failure and closes on the first later success; an open row with no success since start never closes or flaps (meta still read-only); a probe closes a rarely-succeeding signal; a stale open signal is shown as INFO; DUMP_STALLED and SOURCE_UNREACHABLE follow the one source liveness clock (the last byte read at the socket): DUMP_STALLED after 45s of silence in any state, SOURCE_UNREACHABLE once an attempt failed 90s after the last read (backoff does not count), with a same-pass HANDED_OFF and no open-and-close in one pass; TASK_FAILED opens per failure class and closes on restart or stop; TASK_TRANSITION_STALLED derives from the task row; no findings after a restart is HEALTHY and a FAILED task never is
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §6, §14)
 // note: if this file changes, update this header and module README.md.
 package health
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,7 +48,7 @@ var signalKinds = []Kind{TaskPersistFailed, MetadataWriteBlocked, EventPersistFa
 
 func TestP24_EverySignalKindOpensOnFailureAndClosesOnFirstSuccess(t *testing.T) {
 	r := DefaultRegistry()
-	for _, k := range append(signalKinds, DumpStalled) {
+	for _, k := range signalKinds {
 		sk := SignalKey{Kind: k, Subject: "s"}
 		key := Key{TaskID: "1", Kind: k, Subject: "s"}
 		ts, _ := r.Reconcile(nil, sigFacts(runningTask(), map[SignalKey]SignalState{sk: {FailureSeq: 1, Failures: 1, Detail: "boom"}}))
@@ -121,76 +122,168 @@ func TestP24_StaleOpenSignalIsShownAsInfo(t *testing.T) {
 	}
 }
 
-func TestP24_DumpStalledSurvivesTheRetryLoop(t *testing.T) {
+// live is a task with desired RUN whose last byte from the source was
+// readAgo ago and whose latest failed connection attempt was failAgo ago
+// (negative: none).
+func live(state string, readAgo, failAgo time.Duration) *TaskFacts {
+	t := &TaskFacts{State: state, Desired: desiredRun, Epoch: 3, StateSince: st0.Add(-time.Hour), RunHere: true,
+		Liveness: &Liveness{LastRead: st0.Add(-readAgo)}}
+	if failAgo >= 0 {
+		t.Liveness.LastFailure = st0.Add(-failAgo)
+		t.Liveness.FailureDetail = "dial tcp 127.0.0.1:3306: i/o timeout"
+	}
+	return t
+}
+
+// #383 QA F1: DUMP_STALLED comes from the one liveness clock (the last byte
+// or heartbeat read at the socket), in RUNNING, STARTING and RETRY_BACKOFF
+// alike, never from a runner signal.
+func TestP24_DumpStalledFollowsTheLivenessClock(t *testing.T) {
 	r := DefaultRegistry()
-	sk := SignalKey{Kind: DumpStalled}
 	key := Key{TaskID: "1", Kind: DumpStalled}
-	open := []Finding{{TaskID: "1", Kind: DumpStalled, Severity: Warning, Detail: "silent"}}
-	failing := map[SignalKey]SignalState{sk: {FailureSeq: 5, Failures: 1, Detail: "silent", Epoch: 3}}
-	for _, state := range []string{stateStarting, stateRetryBackoff, stateStarting} {
-		task := runningTask()
-		task.State = state
-		if ts, _ := r.Reconcile(open, sigFacts(task, failing)); len(ts) != 0 {
-			t.Fatalf("%s closed or changed DUMP_STALLED: %+v", state, ts)
+	for _, state := range []string{stateRunning, stateStarting, stateRetryBackoff} {
+		if _, ok := r.Desire(sigFacts(live(state, 44*time.Second, -1), nil))[key]; ok {
+			t.Fatalf("%s: 44s of silence is not a stall", state)
+		}
+		d := r.Desire(sigFacts(live(state, 46*time.Second, -1), nil))
+		in, ok := d[key]
+		if !ok || silence(in.Detail) < 45*time.Second {
+			t.Fatalf("%s: 46s of silence: %+v", state, d)
 		}
 	}
-	stopped := &TaskFacts{State: stateStopped, Desired: desiredStop, Epoch: 3}
-	if ts, _ := r.Reconcile(open, sigFacts(stopped, failing)); len(ts) != 1 || ts[0].Op != OpClose {
-		t.Fatalf("deliberate stop did not close: %+v", ts)
+	open := []Finding{{TaskID: "1", Kind: DumpStalled, Severity: Warning}}
+	for _, c := range []struct {
+		name string
+		task *TaskFacts
+	}{
+		{"a byte arrived", live(stateRunning, time.Second, -1)},
+		{"deliberate stop", &TaskFacts{State: stateStopped, Desired: desiredStop, Liveness: &Liveness{LastRead: st0.Add(-time.Hour)}}},
+		{"lease moved", func() *TaskFacts { t := live(stateStarting, time.Hour, -1); t.OwnedElsewhere = true; return t }()},
+	} {
+		ts, _ := r.Reconcile(open, sigFacts(c.task, nil))
+		if len(ts) != 1 || ts[0].Op != OpClose || ts[0].Reason == ReasonHandedOff {
+			t.Fatalf("%s: %+v", c.name, ts)
+		}
 	}
-	moved := runningTask()
-	moved.State, moved.Epoch = stateStarting, 4
-	if ts, _ := r.Reconcile(open, sigFacts(moved, failing)); len(ts) != 1 || ts[0].Op != OpClose {
-		t.Fatalf("a newer lease epoch did not close (#366): %+v", ts)
-	}
-	loop := runningTask()
-	loop.State = stateRetryBackoff
-	f := sigFacts(loop, failing)
-	f.Open = map[Key]bool{key: true, {TaskID: "1", Kind: SourceUnreachable}: true}
-	ts, _ := r.Reconcile(open, f)
-	if len(ts) != 1 || ts[0].Op != OpClose || ts[0].Reason != ReasonHandedOff {
-		t.Fatalf("SOURCE_UNREACHABLE open: want HANDED_OFF close, got %+v", ts)
+	// No liveness facts (no runner here): nothing is derived.
+	if d := r.Desire(sigFacts(&TaskFacts{State: stateRunning, Desired: desiredRun}, nil)); len(d) != 0 {
+		t.Fatalf("no clock, no stall: %+v", d)
 	}
 }
 
-func TestP24_SourceUnreachableNeedsThresholdAndTwoPasses(t *testing.T) {
+// #383 QA F2/F3: SOURCE_UNREACHABLE needs a failed attempt at least
+// unreachable_after after the last byte read; the detail tells the real
+// silence; backoff that keeps the task out of RUNNING longer than the
+// outage does not count.
+func TestP24_SourceUnreachableCountsFromTheLastRead(t *testing.T) {
 	r := DefaultRegistry()
-	key := Key{TaskID: "1", Kind: SourceUnreachable}
+	su := Key{TaskID: "1", Kind: SourceUnreachable}
+	ds := Key{TaskID: "1", Kind: DumpStalled}
+	// Killed 274s ago, the latest attempt failed 1s ago.
+	d := r.Desire(sigFacts(live(stateRetryBackoff, 274*time.Second, time.Second), nil))
+	in, ok := d[su]
+	if !ok || silence(in.Detail) != 274*time.Second {
+		t.Fatalf("4m34s outage: %+v", d)
+	}
+	if _, both := d[ds]; both {
+		t.Fatal("DUMP_STALLED and SOURCE_UNREACHABLE desired together")
+	}
 	for _, c := range []struct {
-		state  string
-		for_   time.Duration
-		passes int
-		open   bool
+		name             string
+		readAgo, failAgo time.Duration
 	}{
-		{stateRetryBackoff, 60 * time.Second, 5, false}, // a planned 60s restart
-		{stateRetryBackoff, 95 * time.Second, 1, false}, // one pass is not enough
-		{stateStarting, 95 * time.Second, 2, true},
+		{"no failed attempt yet", 120 * time.Second, -1},
+		{"last failure only 70s after the last read", 95 * time.Second, 25 * time.Second},
+		// A 63s planned restart: out of RUNNING for 92s because of backoff,
+		// but the source answered 29s ago and the last failure was at 63s.
+		{"63s restart, 92s out of RUNNING", 29 * time.Second, 30 * time.Second},
+		{"read after the failure", 2 * time.Second, 3 * time.Second},
 	} {
-		task := &TaskFacts{State: c.state, Desired: desiredRun, Epoch: 3, UnreachableFor: c.for_, UnreachablePasses: c.passes, LastError: "SOURCE_UNREACHABLE: dial tcp: i/o timeout"}
-		_, ok := r.Desire(sigFacts(task, nil))[key]
-		if ok != c.open {
-			t.Fatalf("%+v: open=%v", c, ok)
+		if _, ok := r.Desire(sigFacts(live(stateRetryBackoff, c.readAgo, c.failAgo), nil))[su]; ok {
+			t.Fatalf("%s: SOURCE_UNREACHABLE opened", c.name)
 		}
 	}
-	f := sigFacts(&TaskFacts{State: stateRetryBackoff, Desired: desiredRun, UnreachableFor: time.Second}, nil)
-	f.UnreachableAfter = time.Millisecond
-	f.Task.UnreachablePasses = 2
-	if _, ok := r.Desire(f)[key]; !ok {
-		t.Fatal("the task override threshold is not used")
+	f := sigFacts(live(stateRetryBackoff, 100*time.Second, 5*time.Second), nil)
+	f.UnreachableAfter = 120 * time.Second
+	if _, ok := r.Desire(f)[su]; ok {
+		t.Fatal("the per-task threshold is not used")
 	}
 	open := []Finding{{TaskID: "1", Kind: SourceUnreachable, Severity: Critical}}
-	still := &TaskFacts{State: stateStarting, Desired: desiredRun}
-	if ts, _ := r.Reconcile(open, sigFacts(still, nil)); len(ts) != 0 {
-		t.Fatalf("closed without a dump receiving data: %+v", ts)
+	for _, c := range []struct {
+		name string
+		task *TaskFacts
+	}{
+		{"source answered", live(stateStarting, time.Second, 4*time.Second)},
+		{"deliberate stop", &TaskFacts{State: stateStopped, Desired: desiredStop}},
+		{"task FAILED", &TaskFacts{State: stateFailed, Desired: desiredStop, FailedCurrent: true, LastError: "SOURCE_UNREACHABLE: x"}},
+	} {
+		ts, _ := r.Reconcile(open, sigFacts(c.task, nil))
+		if tr, ok := opsOf(ts)[su]; !ok || tr.Op != OpClose {
+			t.Fatalf("%s did not close: %+v", c.name, ts)
+		}
 	}
-	back := sigFacts(runningTask(), map[SignalKey]SignalState{{Kind: DumpStalled}: {FailureSeq: 1, SuccessSeq: 7}})
-	if ts, _ := r.Reconcile(open, back); len(ts) != 1 || ts[0].Op != OpClose {
-		t.Fatalf("data again did not close: %+v", ts)
+}
+
+// DUMP_STALLED hands off to SOURCE_UNREACHABLE in the same pass: one
+// ApplyTransitions closes one and opens the other, so a dead source never
+// shows zero findings.
+func TestP24_DumpStalledHandsOffInTheSamePass(t *testing.T) {
+	r := DefaultRegistry()
+	open := []Finding{{TaskID: "1", Kind: DumpStalled, Severity: Warning}}
+	ts, _ := r.Reconcile(open, sigFacts(live(stateRetryBackoff, 100*time.Second, time.Second), nil))
+	got := opsOf(ts)
+	if got[Key{TaskID: "1", Kind: DumpStalled}].Op != OpClose || got[Key{TaskID: "1", Kind: DumpStalled}].Reason != ReasonHandedOff ||
+		got[Key{TaskID: "1", Kind: SourceUnreachable}].Op != OpOpen {
+		t.Fatalf("handoff: %+v", ts)
 	}
-	stop := sigFacts(&TaskFacts{State: stateStopped, Desired: desiredStop}, nil)
-	if ts, _ := r.Reconcile(open, stop); len(ts) != 1 || ts[0].Op != OpClose {
-		t.Fatalf("stop did not close: %+v", ts)
+	if after := afterOps(open, ts); len(after) != 1 || after[0].Kind != SourceUnreachable {
+		t.Fatalf("after the handoff: %+v", after)
 	}
+}
+
+// A flap cannot open and close in one pass: the evaluator reads one
+// snapshot of the clock, so an outage that already recovered (a read after
+// the failure) opens nothing, and an open row closes only on a later pass.
+func TestP24_NoOpenAndCloseInOnePass(t *testing.T) {
+	r := DefaultRegistry()
+	f := sigFacts(live(stateStarting, time.Second, 2*time.Second), nil)
+	f.Task.Liveness.LastFailure = st0.Add(-2 * time.Second)
+	ts, _ := r.Reconcile(nil, f)
+	for _, tr := range ts {
+		t.Fatalf("recovered outage produced %+v", tr)
+	}
+}
+
+func silence(detail string) time.Duration {
+	i := strings.Index(detail, " for ")
+	if i < 0 {
+		return 0
+	}
+	rest := detail[i+5:]
+	if j := strings.IndexAny(rest, " ;,("); j >= 0 {
+		rest = rest[:j]
+	}
+	d, _ := time.ParseDuration(rest)
+	return d
+}
+
+func afterOps(open []Finding, ts []Transition) []Finding {
+	by := map[Key]Finding{}
+	for _, f := range open {
+		by[f.Key()] = f
+	}
+	for _, t := range ts {
+		if t.Op == OpClose {
+			delete(by, t.Key)
+			continue
+		}
+		by[t.Key] = Finding{TaskID: t.TaskID, Kind: t.Kind, Subject: t.Subject, Severity: t.Instance.Severity}
+	}
+	var out []Finding
+	for _, f := range by {
+		out = append(out, f)
+	}
+	return out
 }
 
 func TestP24_TaskFailedPerClassAndNeverHealthy(t *testing.T) {

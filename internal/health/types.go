@@ -117,6 +117,14 @@ type TaskFacts struct {
 	// is how many consecutive passes saw that (the two-pass debounce).
 	UnreachableFor    time.Duration
 	UnreachablePasses int
+	// Liveness: the source liveness clock (stub field, #383 red commit).
+	Liveness *Liveness
+}
+
+// Liveness is a task's source liveness clock (stub, #383 red commit).
+type Liveness struct {
+	LastRead, LastFailure time.Time
+	FailureDetail         string
 }
 
 // ChainFacts is assurance's view of the chain.
@@ -171,14 +179,16 @@ type StoreFacts struct {
 // Facts is everything known about one task at one moment. A nil source is
 // unavailable this pass; Complete says which scopes may close findings.
 type Facts struct {
-	TaskID   string
-	Now      time.Time
-	Task     *TaskFacts
-	Chain    *ChainFacts
-	Signals  map[SignalKey]SignalState
-	Store    *StoreFacts
-	Waivers  []Waiver
-	Complete map[Scope]bool
+	// DumpStalledAfter: stub field (#383 red commit).
+	DumpStalledAfter time.Duration
+	TaskID           string
+	Now              time.Time
+	Task             *TaskFacts
+	Chain            *ChainFacts
+	Signals          map[SignalKey]SignalState
+	Store            *StoreFacts
+	Waivers          []Waiver
+	Complete         map[Scope]bool
 	// AbsentSince is when the evaluator (on its own injected clock) first saw
 	// each open finding's condition absent; hold-down runs from it, never from
 	// a stored wall-clock time. A missing entry means "just now".

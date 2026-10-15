@@ -50,6 +50,7 @@ const (
 
 // MySQLRunner 负责执行复制协议拉流、文件落盘、checkpoint 与上传流程。
 type MySQLRunner struct {
+	sockets sync.Map // stub (#383 red commit): taskID -> *socketClock
 	// recv holds one *recvMark per task: the dump session and when it last
 	// received anything. A read error after a silence as long as the read
 	// timeout is a stall, however go-mysql words the error.
