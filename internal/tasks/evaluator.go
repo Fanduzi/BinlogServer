@@ -132,12 +132,16 @@ type Evaluator struct {
 	reg  health.Registry
 	wake chan struct{}
 
-	mu           sync.Mutex
-	dirty        map[string]map[EvalReason]time.Time
-	running      map[string]bool
-	lastRun      map[string]time.Time
-	fenced       map[string]int64
-	pending      map[string][]health.Transition
+	mu      sync.Mutex
+	dirty   map[string]map[EvalReason]time.Time
+	running map[string]bool
+	lastRun map[string]time.Time
+	fenced  map[string]int64
+	pending map[string][]health.Transition
+	// unsaved (#395 QA P2): the open set a failed store write left behind,
+	// per task. It is what GET /api/findings and /api/health serve until a
+	// write lands, so a full data_dir cannot hide a finding.
+	unsaved      map[string]unsavedHealth
 	fingerprints map[string]string
 	rehash       map[string]map[string]rehashResult
 	chainCache   map[string]chainCacheEntry
@@ -177,7 +181,7 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	}
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
-		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, fingerprints: map[string]string{},
+		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
 		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}}
 	if s != nil {
 		s.healthEval.Store(e)
@@ -595,6 +599,11 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 			}
 			h := e.reg.HealthOf(afterTransitions(open, pending), facts)
 			if err := e.write(ctx, id, fence, pending, h); err != nil {
+				// Keep evaluating in memory on top of the unsaved transitions so
+				// a finding raised while the store is failing is still served.
+				open2 := afterTransitions(open, pending)
+				ts2, _ := e.reg.Reconcile(open2, facts)
+				e.noteUnsaved(id, afterTransitions(open2, ts2), err)
 				return unknown(h, err)
 			}
 		}
@@ -614,9 +623,57 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		return h, nil
 	}
 	if err := e.write(ctx, id, fence, ts, h); err != nil {
+		e.noteUnsaved(id, afterTransitions(open, ts), err)
 		return unknown(h, err)
 	}
 	return h, nil
+}
+
+// unsavedHealth is one task's in-memory open set after a failed write.
+type unsavedHealth struct {
+	open  []health.Finding
+	err   error
+	since time.Time
+}
+
+// noteUnsaved keeps the open set a failed write could not store (a fenced
+// write is not kept: another owner has the task).
+func (e *Evaluator) noteUnsaved(id string, open []health.Finding, err error) {
+	if errors.Is(err, healthstore.ErrFenced) {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	since := e.cfg.Now()
+	if prev, ok := e.unsaved[id]; ok {
+		since = prev.since
+	}
+	e.unsaved[id] = unsavedHealth{open: open, err: err, since: since}
+}
+
+// unsavedOpen returns the in-memory open set for id when its last write failed.
+func (e *Evaluator) unsavedOpen(id string) ([]health.Finding, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	u, ok := e.unsaved[id]
+	return u.open, ok
+}
+
+// persistFailure summarises the tasks whose health could not be stored.
+func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) {
+	if e == nil {
+		return nil, nil, time.Time{}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id, u := range e.unsaved {
+		ids = append(ids, id)
+		if err == nil || u.since.Before(since) {
+			err, since = u.err, u.since
+		}
+	}
+	sort.Strings(ids)
+	return ids, err, since
 }
 
 // write applies ts under fence. Success clears the pending list; a fenced
@@ -630,6 +687,7 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 		e.applied.Add(int64(len(ts)))
 		e.mu.Lock()
 		delete(e.pending, id)
+		delete(e.unsaved, id)
 		e.mu.Unlock()
 		e.afterApply(ts)
 		return nil
@@ -883,9 +941,12 @@ func (e *Evaluator) openManagedFindings(ctx context.Context, taskID string) []Fi
 	if e == nil || e.cfg.Mode != EvaluatorOn || !e.separateLegacyStore() {
 		return nil
 	}
-	open, err := e.cfg.Store.ListOpenFindingsForTask(ctx, taskID)
-	if err != nil {
-		return nil
+	open, ok := e.unsavedOpen(taskID)
+	if !ok {
+		var err error
+		if open, err = e.cfg.Store.ListOpenFindingsForTask(ctx, taskID); err != nil {
+			return nil
+		}
 	}
 	out := make([]Finding, 0, len(open))
 	for _, f := range open {

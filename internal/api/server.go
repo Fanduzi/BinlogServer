@@ -175,6 +175,20 @@ func (s *Server) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Degraded while a CRITICAL finding is open, read from memory so one
+	// that could not be persisted (a full data_dir) still counts (#395 QA
+	// P2). /healthz stays the liveness probe.
+	if hs, ok := s.tasks.(interface {
+		HealthSummary(context.Context) tasks.HealthSummary
+	}); ok {
+		sum := hs.HealthSummary(r.Context())
+		code := http.StatusOK
+		if sum.Status != tasks.HealthOK {
+			code = http.StatusServiceUnavailable
+		}
+		writeJSON(w, code, sum)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

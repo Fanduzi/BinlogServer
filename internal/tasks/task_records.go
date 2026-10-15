@@ -570,9 +570,31 @@ func (s *Scheduler) failRestoredLocked(id, msg string) {
 	log.Printf("task records: task %s FAILED on restore: %s", id, strings.TrimSpace(msg))
 }
 
+// startupRecordSubjects are the TASK_RECORDS_FAILED reasons found when the
+// file is loaded; at most one holds at a time.
+var startupRecordSubjects = []string{RecordsKeyMissing, RecordsKeyInvalid, RecordsWrongKey, RecordsCorrupt}
+
+func isStartupRecordSubject(subject string) bool {
+	for _, s := range startupRecordSubjects {
+		if s == subject {
+			return true
+		}
+	}
+	return false
+}
+
 // recordSignalLocked raises TASK_RECORDS_FAILED/subject and remembers it.
 // Caller holds s.mu.
 func (s *Scheduler) recordSignalLocked(subject, detail string) {
+	if isStartupRecordSubject(subject) {
+		// One startup reason at a time: a different one found on this start
+		// closes whatever an earlier start left open (#395 QA P3).
+		for _, other := range startupRecordSubjects {
+			if other != subject {
+				s.recordClearLocked(other)
+			}
+		}
+	}
 	if s.records.open == nil {
 		s.records.open = map[string]string{}
 	}
@@ -594,7 +616,7 @@ func (s *Scheduler) recordClearLocked(subject string) {
 // recordReadableLocked: the file was read with a configured key (or there
 // is none and a key is configured), so every startup subject holds again.
 func (s *Scheduler) recordReadableLocked() {
-	for _, subject := range []string{RecordsKeyMissing, RecordsKeyInvalid, RecordsWrongKey, RecordsCorrupt} {
+	for _, subject := range startupRecordSubjects {
 		s.recordClearLocked(subject)
 	}
 }

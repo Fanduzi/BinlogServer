@@ -595,6 +595,11 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		if taskRecordsUnavailable(err) {
+			// A Start the record could not save is retryable (#395 QA P3).
+			writeTaskRecordsUnavailable(w, err)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
