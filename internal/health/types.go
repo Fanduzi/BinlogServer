@@ -74,6 +74,8 @@ type ClearRule struct {
 	Holds    func(f *Facts, key Key) bool
 	Text     string
 	HoldDown time.Duration
+	// Reason, when set, names the close (for example HANDED_OFF); "" = EVAL.
+	Reason func(f *Facts, key Key) string
 }
 
 // KindSpec is a kind's registry entry.
@@ -104,6 +106,17 @@ type TaskFacts struct {
 	RunHere        bool
 	StateSince     time.Time
 	LastError      string
+	// FailedCurrent: the task is FAILED for the operator's current ask (its
+	// failed spec revision is the current one). FAILED sets desired STOP, so
+	// desired alone cannot tell a failed run from a deliberate stop.
+	FailedCurrent bool
+	// OwnedElsewhere: another node owns the row (it drives the transition).
+	OwnedElsewhere bool
+	// UnreachableFor is how long, on the evaluator's clock, the task has
+	// stayed in STARTING/RETRY_BACKOFF with desired RUN; UnreachablePasses
+	// is how many consecutive passes saw that (the two-pass debounce).
+	UnreachableFor    time.Duration
+	UnreachablePasses int
 }
 
 // ChainFacts is assurance's view of the chain.
@@ -127,6 +140,9 @@ type SignalState struct {
 	Failures   int64
 	Detail     string
 	FactAt     time.Time
+	// Epoch is the task lease epoch the latest failure belongs to (0 =
+	// unknown); a failure of an older epoch no longer speaks for the task.
+	Epoch int64
 }
 
 // Waiver exempts one exact piece of evidence (a canonical GTID range).
@@ -167,6 +183,19 @@ type Facts struct {
 	// each open finding's condition absent; hold-down runs from it, never from
 	// a stored wall-clock time. A missing entry means "just now".
 	AbsentSince map[Key]time.Time
+	// Open is the stored open set's keys (handoff rules read it).
+	Open map[Key]bool
+	// Probes are the alternative success proofs of §5.5 that held this
+	// pass, by open key (a signal that rarely succeeds can still close).
+	Probes map[Key]bool
+	// StaleSignals are open signal rows with no failure seen by this
+	// process and no update for health.signal_stale_after: shown as INFO.
+	StaleSignals map[Key]bool
+	// UnreachableAfter is the SOURCE_UNREACHABLE threshold for this task
+	// (health.unreachable_after or the task's override); 0 = 90s.
+	UnreachableAfter time.Duration
+	// StalledAfter is the TASK_TRANSITION_STALLED threshold; 0 = 60s.
+	StalledAfter time.Duration
 }
 
 // Finding is a stored finding row as the evaluator sees it.
@@ -199,9 +228,10 @@ const (
 
 // Transition reasons.
 const (
-	ReasonEval    = "EVAL"
-	ReasonWaived  = "WAIVED"
-	ReasonUpgrade = "UPGRADE"
+	ReasonEval      = "EVAL"
+	ReasonWaived    = "WAIVED"
+	ReasonUpgrade   = "UPGRADE"
+	ReasonHandedOff = "HANDED_OFF"
 )
 
 // Transition is one change to a finding. Generation is allocated by the

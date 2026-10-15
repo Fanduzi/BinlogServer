@@ -270,10 +270,16 @@ func TestHealthOf(t *testing.T) {
 	}
 }
 
-var wantManagedP23 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true}
+// wantManagedP24: P2-3's three segment kinds, and since P2-4 every signal
+// and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED.
+var wantManagedP24 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true,
+	TaskPersistFailed: true, MetadataWriteBlocked: true, EventPersistFailed: true, EventReadFailed: true,
+	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
+	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
+	MetricSourceFailed: true, TransitionStalled: true, SourceUnreachable: true, TaskFailed: true}
 
 func TestEmptyLeftoverDerivesFromChain(t *testing.T) {
-	f := &Facts{TaskID: "t", Complete: map[Scope]bool{ScopeChainLocal: true},
+	f := &Facts{TaskID: "t", Complete: map[Scope]bool{ScopeChainLocal: true, ScopeTaskState: true, ScopeSignals: true, ScopeStore: true},
 		Chain: &ChainFacts{Violations: []assurance.Violation{{Kind: assurance.I4EmptyLeftover, Segments: []string{"mysql-bin.000002.open.e3"}, Detail: "empty"}}}}
 	d := DefaultRegistry().Desire(f)
 	in, ok := d[Key{TaskID: "t", Kind: SegmentEmptyLeftover, Subject: "mysql-bin.000002.open.e3"}]
@@ -291,8 +297,8 @@ func TestRegistryComplete(t *testing.T) {
 		if spec.Kind != k || spec.Severity == "" || len(spec.Scopes) == 0 || spec.Clear.Invariant == "" || spec.Clear.Text == "" || spec.Version < 1 {
 			t.Errorf("incomplete spec %s: %+v", k, spec)
 		}
-		if want := wantManagedP23[k]; spec.Managed != want {
-			t.Errorf("%s managed=%v; P2-3 takes over exactly SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER", k, spec.Managed)
+		if want := wantManagedP24[k]; spec.Managed != want {
+			t.Errorf("%s managed=%v, want %v (P2-3 segment kinds plus the P2-4 signal and task-state kinds)", k, spec.Managed, want)
 		}
 	}
 	for _, k := range LegacyKinds() {

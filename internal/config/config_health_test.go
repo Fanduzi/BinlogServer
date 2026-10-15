@@ -35,3 +35,35 @@ func TestLoadConfig_HealthDefaultsAndOverrides(t *testing.T) {
 		t.Fatal("unknown health.evaluator accepted")
 	}
 }
+
+// P2-4: health.unreachable_after_sec (default 90), a per-task override map,
+// and health.signal_stale_after_sec (default 24h).
+func TestLoadConfig_HealthSignalKeys(t *testing.T) {
+	setRequiredAuthEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.UnreachableAfterSec != 90 || cfg.Health.SignalStaleAfterSec != 86400 || len(cfg.Health.UnreachableAfterTaskSec) != 0 {
+		t.Fatalf("defaults %+v", cfg.Health)
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("health:\n  unreachable_after_sec: 120\n  signal_stale_after_sec: 3600\n  unreachable_after_task_sec:\n    \"7\": 300\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.UnreachableAfterSec != 120 || cfg.Health.SignalStaleAfterSec != 3600 || cfg.Health.UnreachableAfterTaskSec["7"] != 300 {
+		t.Fatalf("overrides %+v", cfg.Health)
+	}
+	for _, bad := range []string{"health:\n  unreachable_after_sec: -1\n", "health:\n  unreachable_after_task_sec:\n    \"7\": 0\n", "health:\n  unreachable_after_task_sec:\n    \"7\": soon\n"} {
+		if err := os.WriteFile(path, []byte(bad), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+}

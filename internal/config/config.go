@@ -131,7 +131,10 @@ type HealthConfig struct {
 	// SweepIntervalSec is the period of the sweep that marks every task dirty.
 	SweepIntervalSec int
 	// RehashBytesPerSec is the global byte budget of the sha256 re-checker.
-	RehashBytesPerSec int64
+	RehashBytesPerSec       int64
+	UnreachableAfterSec     int
+	UnreachableAfterTaskSec map[string]int
+	SignalStaleAfterSec     int
 }
 
 // MetaConfig 定义内部调用边界配置。

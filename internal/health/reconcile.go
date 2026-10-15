@@ -139,7 +139,13 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 				continue
 			}
 		}
-		out = append(out, closeOf(o, spec, ReasonEval, f))
+		reason := ReasonEval
+		if spec.Clear.Reason != nil {
+			if r := spec.Clear.Reason(f, key); r != "" {
+				reason = r
+			}
+		}
+		out = append(out, closeOf(o, spec, reason, f))
 	}
 	for key, want := range desired {
 		if !seen[key] {

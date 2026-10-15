@@ -88,8 +88,12 @@ type EvaluatorConfig struct {
 	// Instance is this process's id (standalone fence).
 	Instance string
 	// RehashCursor, when set, persists the rehasher's cursor (rehash_cursor).
-	RehashCursor RehashCursorStore
-	Now          func() time.Time
+	RehashCursor         RehashCursorStore
+	UnreachableAfter     time.Duration
+	UnreachableAfterTask map[string]time.Duration
+	SignalStaleAfter     time.Duration
+	StalledAfter         time.Duration
+	Now                  func() time.Time
 }
 
 // EvaluatorStats counts what the evaluator did.
