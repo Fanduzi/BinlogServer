@@ -121,7 +121,7 @@ S12 和 S14 不是「错误被吞掉」，而是「失败没有被定义」：�
 
 ### 2.2 「正在健康备份」心跳与 SLO
 
-每个 `desired_run = true` 的任务，评估器每 `assess_interval`（默认 30s）计算一次，写入 `task_health`（随 `task_findings` 一起在 `000007`）：
+每个 `desired_run = true` 的任务，评估器每 `assess_interval`（默认 30s）计算一次，写入 `task_health`（迁移 `000009`，见[阶段 2 设计](../design/0009-phase2-health-evaluator.md)；`000007` 只建 `task_findings`）：
 
 ```
 healthy(t) ⇔ state ∈ {RUNNING}
@@ -246,7 +246,7 @@ RestorePlan {
 
 | 阶段 | 内容 | QA 通过条件 |
 |---|---|---|
-| 0 结论汇与静默清零 | 迁移 `000007`（`task_findings`、`task_health`）；`Report` 实现；S1–S15 逐条改为上报；`errcheck` 与 vet 分析器进 CI；runner 读超时（S12） | 每个 S# 一个注入测试，断言结论行 + 事件 + 指标；meta 只读 60s 时 S2 产生 CRITICAL 且恢复后 resolved；半开连接 ≤ 60s 内报 `DUMP_STALLED` 并重连；现有 e2e quick 全绿 |
+| 0 结论汇与静默清零 | 迁移 `000007`（`task_findings`；`task_health` 在阶段 2 的 `000009`）；`Report` 实现；S1–S15 逐条改为上报；`errcheck` 与 vet 分析器进 CI；runner 读超时（S12） | 每个 S# 一个注入测试，断言结论行 + 事件 + 指标；meta 只读 60s 时 S2 产生 CRITICAL 且恢复后 resolved；半开连接 ≤ 60s 内报 `DUMP_STALLED` 并重连；现有 e2e quick 全绿 |
 | 1 备份链 | `internal/assurance` 的 `Chain`、`Check`（I1–I7）、`Window`；`window.go`、`storage_health.go`、`/replay` 选文件改为读链；行为冻结的 golden（ADR 0006/0007 的 47 个目录用例）逐字节一致；目录行增加首尾事件时间与 SHA-256 | golden 一致；构造目录覆盖 7 种违反各 ≥ 2 例（含 #223 重叠、#209 孤行、#173 未验证）；`/window`、`/replay` 输出与 v0.5.64 一致 |
 | 2 健康与告警 | 评估器、健康定义、SLO 指标；Console 告警页改读结论与健康；任务列表健康徽标 | 每个健康条件单独破坏一次，告警页与指标在 1 个评估周期内变化；`binlog_server_task_healthy` 对每个任务总有序列 |
 | 3 巡检与演练 | Verifier（结构、对象、链）；限速；演练（默认关） | MinIO 中删一个对象、改一个字节、本地改一个字节，下一轮全部发现；演练在独立 MySQL 上 3 个时间点通过；限速下源延迟不升高 |
@@ -271,7 +271,7 @@ RestorePlan {
 2. **默认阈值**：`stall_after` 45s、`upload_grace` 15min、`verify_every` 24h、健康分钟占比 SLO 99.9%（30 天）、对象存储 RPO p99 20min。全部可配置。
 3. **还原演练**：保留为可选功能，默认关闭；只有配置了 `verify.drill.dsn` 才启用。
 4. **巡检对象抽样**：默认 5%，加上最近一轮之后新上传的全部对象；可配置为全量。
-5. **发布**：迁移 `000007` 与 `minRequiredSchemaVersion = 7` 随 **v0.6.0** 发布。
+5. **发布**：`000007`–`000009` 均为只加迁移，随 v0.5.x 可选；**v0.6.0** 把 `minRequiredSchemaVersion` 提到 9（阶段 2 设计 §15 D1，建议默认值，待 Adrian 确认；原 2026-10-13 定稿为「v0.6.0 提到 7」）。
 6. **meta 库丢失后还原 / sidecar manifest（方案 3）**：本期不做。
 
 ### 后续工作（不在本 ADR 范围内）
