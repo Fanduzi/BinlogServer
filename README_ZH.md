@@ -94,10 +94,10 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 
-### 1. 下载、校验并解压 v0.5.66
+### 1. 下载、校验并解压 v0.5.67
 
 ```bash
-VER=0.5.66
+VER=0.5.67
 OS=linux          # linux | darwin
 ARCH=amd64        # amd64 | arm64
 
@@ -109,19 +109,19 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.66` `checksums.txt`：
+已发布的 `v0.5.67` `checksums.txt`：
 
 ```text
-466f1ad97f704125f6198c6750c8c41ea471fe6fe157b2d202e052df100fd8e3  binlog-server_0.5.66_darwin_amd64.tar.gz
-382a4f7da19d5a33050de1fa2d036155bfce2d4249426dde515147c41af8f9d1  binlog-server_0.5.66_darwin_arm64.tar.gz
-b3c87fa55e35e5922738c94b3f88f051fa11b2d88e33e67ef7ef3724430f0048  binlog-server_0.5.66_linux_amd64.tar.gz
-668d7a95ffffc9dddadfad3f14a60861adc87a18b0f3a937aa038b214dd97f21  binlog-server_0.5.66_linux_arm64.tar.gz
+59b91e6676c5fa7112d8326a339fa37615d77dc191c12402797f27b3f509b7c3  binlog-server_0.5.67_darwin_amd64.tar.gz
+768f3b3176abf749e09d0ca4ffa3634f702dd3b2816ced85ba7c7050b66cbefa  binlog-server_0.5.67_darwin_arm64.tar.gz
+e7c345f57a02e0c77e14ce30970072f4176446388bae74acf5ecc2a60cf476ef  binlog-server_0.5.67_linux_amd64.tar.gz
+7823174b932f1fedd34f75df152fe1e56c3db3a3b87957a34b693c022b0d2cc9  binlog-server_0.5.67_linux_arm64.tar.gz
 ```
 
 发布包解压后的真实目录结构如下：
 
 ```text
-binlog-server_0.5.66_linux_amd64/
+binlog-server_0.5.67_linux_amd64/
   binlog-server                  # 服务主二进制程序
   migrate                        # 数据库 Schema 迁移工具
   migrations/                    # SQL 结构迁移脚本
@@ -255,11 +255,14 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 ---
 
-## 升级须知 (v0.5.66)
+## 升级须知 (v0.5.67)
 
-在将生产环境升级至 `v0.5.66` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35`、`v0.5.36`、`v0.5.37`、`v0.5.38`、`v0.5.39`、`v0.5.40`、`v0.5.41`、`v0.5.42`、`v0.5.43`、`v0.5.44`、`v0.5.45`、`v0.5.46`、`v0.5.47`、`v0.5.48`、`v0.5.49`、`v0.5.50`、`v0.5.51`、`v0.5.52`、`v0.5.53`、`v0.5.54`、`v0.5.55`、`v0.5.56`、`v0.5.57`、`v0.5.58`、`v0.5.59`、`v0.5.60`、`v0.5.61`、`v0.5.62`、`v0.5.63`、`v0.5.64` 与 `v0.5.65` 的记录留在下方链接的发布说明里。
+在将生产环境升级至 `v0.5.67` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35`、`v0.5.36`、`v0.5.37`、`v0.5.38`、`v0.5.39`、`v0.5.40`、`v0.5.41`、`v0.5.42`、`v0.5.43`、`v0.5.44`、`v0.5.45`、`v0.5.46`、`v0.5.47`、`v0.5.48`、`v0.5.49`、`v0.5.50`、`v0.5.51`、`v0.5.52`、`v0.5.53`、`v0.5.54`、`v0.5.55`、`v0.5.56`、`v0.5.57`、`v0.5.58`、`v0.5.59`、`v0.5.60`、`v0.5.61`、`v0.5.62`、`v0.5.63`、`v0.5.64`、`v0.5.65` 与 `v0.5.66` 的记录留在下方链接的发布说明里。
 
-- **能发现重复封存段，没有新迁移：** 同一封存源文件的第二份本地副本（如 `mysql-bin.000006` 与 `mysql-bin.000006.sealed.e3`）现在会打开 CRITICAL `SEGMENT_OVERLAP` finding 和 `STORAGE_INCONSISTENT` `storage_alert`；`/window` 断开，`/replay` 截到两份之前（#370）。升级后检查任务有没有 `SEGMENT_OVERLAP`，保留与源一致的那份，把另一份移出任务目录。API 和配置没有变化。
+- **存活探针必须用 `/healthz`：** 有打开的 CRITICAL finding 时，`GET /api/health` 现在返回 503 `degraded`（`data_dir` 写满、finding 无法落盘时也一样，`FINDINGS_PERSIST_FAILED`）。`/healthz` 不变。存活探针指向 `/healthz`，`/api/health` 只用于告警或就绪检查。
+- **standalone：升级重启之前配置任务密钥，之后每个任务 adopt 一次：** standalone 任务记录（ADR 0010，`{data_dir}/.tasks.enc`）默认开启，重启后自动恢复任务。停 v0.5.66 之前先用新二进制生成密钥（`./binlog-server task-key generate --out /etc/binlog-server/task.key`），并配置 `standalone.task_key_file`（或 `BINLOG_SERVER_TASK_KEY`）。没有密钥会打开 CRITICAL `TASK_RECORDS_FAILED/key_missing`。v0.5.66 不保存记录，所以升级重启后每个任务目录都是 STOPPED 的遗留目录，并打开 CRITICAL `TASK_UNADOPTED`（任何 `health.evaluator` 模式）。每个目录 adopt 一次，需要 `cluster_key` 和 source：批量用 `scripts/adopt-leftovers.sh`（在 release 压缩包里，需要 `curl` 和 `jq`），或 `POST /api/tasks/{id}/adopt`。之后重启会自动恢复。每个 `data_dir` 只能有一个 standalone 进程（`.tasks.lock` 上的 `flock`）。回滚到 v0.5.66 会忽略记录（任务又变成遗留目录）。
+- **健康评估器，可选迁移 000009：** 新增 `health.*` 配置项；`health.evaluator` 默认 `off`。集群里所有节点升级到 v0.5.67 之前保持 `off`（滚动升级期间没有自动回退）。`000009` 只增且可选，只有带元数据 DSN 且为 `shadow`/`on` 时才需要。`minRequiredSchemaVersion` 仍是 6。
+- **v0.5.66：能发现重复封存段，没有新迁移：** 同一封存源文件的第二份本地副本（如 `mysql-bin.000006` 与 `mysql-bin.000006.sealed.e3`）现在会打开 CRITICAL `SEGMENT_OVERLAP` finding 和 `STORAGE_INCONSISTENT` `storage_alert`；`/window` 断开，`/replay` 截到两份之前（#370）。升级后检查任务有没有 `SEGMENT_OVERLAP`，保留与源一致的那份，把另一份移出任务目录。API 和配置没有变化。
 - **v0.5.65：ADR 0009 备份可信，两个可选迁移：** 失败现在会留下持久化 finding（`GET /api/findings`、`open_findings`、`binlog_server_finding_open`），包括 `DUMP_STALLED`、CRITICAL `METADATA_WRITE_BLOCKED`（元数据库只读：任务退避重试，绝不显示 `RUNNING`）、`SEGMENT_UNREADABLE` 和 `TASK_TRANSITION_STALLED`（STARTING/STOPPING 超过 60s）。操作先落库：元数据库只读时 Start/Stop/Delete 返回 400 且不做任何改变。dump 受租约约束。`000007_task_findings` 和 `000008_binlog_files_seal_facts` 只增且可选，建议 `./migrate up` 到 8。`minRequiredSchemaVersion` 仍是 6，地板仍是 v0.5.51。**MariaDB 11.4+：之前版本没有保存行事件（#359），升级后请重新全量备份。**
 - **v0.5.64：新 Console 上线 `/ui/`，经典 Vue 在 `/ui-classic/`，没有新迁移：** `/ui/` 现在是 React + shadcn/ui 的新 Console（任务/告警、任务抽屉、新建/编辑/接管、批量创建、概览、数据源、Worker；界面里能用 `api_key` 模式）。`/ui/` 下的书签和深链接仍然可用。依赖 Vue 界面的用户请改用 `/ui-classic/`，它只保留这一个版本，之后会移除。按路径过滤的代理也要放行 `/ui-classic/`。API 和配置没有变化。
 - **v0.5.63：轮转期间 replay archive 不再失败，没有新迁移：** RUNNING 任务封存 open 分段时，`/replay/archive`（以及带 `stop_datetime` / `stop_gtid` / `start_gtid_set` 的变体）和 JSON `/replay` 不再返回 500（`lstat …open.eN: no such file`、`tar: write too long`）（#322）。重试后 open 分段仍不在本进程时返回原来的 404。`/ui/` 的 Vue 控制台在 `/auth/config` 查询失败后会重新查询，「留空不修改」的密码提示只在编辑时显示。API 和配置没有变化。从 v0.5.61 或更早版本升级，还要看下面 v0.5.62 的 401 取代 403。
@@ -269,10 +272,10 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 - **早期版本的回切目录，没有新迁移：** 在 v0.5.57 或 0a84917a 上做过真实回切（A→B→A）的任务会显示 `storage_alert`（`STORAGE_INCONSISTENT`，`detail` 为 `legacy failback: ...`），`/replay` 和 `/window` 停在第一份有问题的文件之前。第一次 Start（包括升级后的自动续跑）在每份文件都能确定只属于一段时修复目录（后一段改名为 `{身份}~{n}.`，记 `STORAGE_REPAIRED`，不删任何文件）；否则以 `STORAGE_INCONSISTENT` 拒绝，磁盘、目录、对象存储都不改，这时对现在的主库新建任务，保留旧任务。`STORAGE_REPAIRED` 的 `orphaned_objects=` 列出服务不会删除的对象键，确认能恢复之后再手工删。见 [docs/guide/admin/troubleshooting.md](docs/guide/admin/troubleshooting.md) 5.4。
 - **dump 重连后不再静默丢事务，没有新迁移：** 在 v0.5.57 上，GTID 任务的 dump 连接断开后（代理或空闲超时断开、网络闪断、`KILL` dump 线程），任务可能保持 `RUNNING`、延迟 0，新事务却被丢掉。v0.5.58 从真正落盘的内容续传。从 v0.5.57 升级后，检查每个 GTID 任务有没有 `storage_alert`。显示它的任务已经损坏：不要再 Start，恢复时不要越过它的 `valid_segments`，在源清掉缺失事务之前从 `restart_gtid_set` 新建 GTID 任务。没有 `storage_alert` 的任务不需要处理。见 [docs/guide/admin/troubleshooting.md](docs/guide/admin/troubleshooting.md)。
 - **VIP 换主，没有新迁移：** 任务的 host:port 是 VIP 时，这个地址改指向另一台 MySQL 主库后，只要 GTID 能证明新主库持有这份备份已经存下的每一个事务，任务就继续拉。否则任务以 `SOURCE_SWITCHOVER` 停止。升级后第一次启动把当时这个地址连上的服务器记成已有、未加前缀文件的主人。升级前确认这个地址仍指向写下这些文件的那台服务器。仍然没有新迁移，`minRequiredSchemaVersion` 仍是 6。
-- **地板仍是 schema 6，000007/000008 可选：** 这一版不是 ADR 0005 的步骤。`minRequiredSchemaVersion` 仍是 6。没有新的配置项。`migrations/` 新增 `000007_task_findings` 和 `000008_binlog_files_seal_facts`，都只增且可选。schema 6 的库可以直接启动 v0.5.66；`./migrate up` 到 8 后 finding 和封存事实才会持久化。v0.5.66 在 schema 5 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.58 的拒绝相同。还不是 schema 6 时，先按 v0.5.58 升级，再启动 v0.5.66。地板仍是 v0.5.51。v0.5.51 是第一版同时带上 ADR 0005 第 6 步和第 7 步的发布。v0.5.50 只发了第 6 步。v0.5.51 和 v0.5.52 仍要求 `uk_task_file_epoch`，schema 6 上拒绝启动。日志含 `missing index` 和 `uk_task_file_epoch`。`./migrate up` 到 6 之前先停掉它们。v0.5.56 的可恢复窗口仍成立。v0.5.55 的 `start_gtid_set` 规则仍成立。v0.5.54 的 `stop_gtid` 规则仍成立。v0.5.53 丢掉 `uk_task_file_epoch` 的规则仍成立。旧二进制留在任务目录里的 `.takeover-*`，会在跑这一版的 worker 启动时删掉。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
-- 细节见 [docs/releases/release-notes-v0.5.66.md](docs/releases/release-notes-v0.5.66.md)。
+- **地板仍是 schema 6，000007/000008/000009 可选：** 这一版不是 ADR 0005 的步骤。`minRequiredSchemaVersion` 仍是 6。`migrations/` 有 `000007_task_findings`、`000008_binlog_files_seal_facts` 和 `000009`（健康评估器），都只增且可选。schema 6 的库可以直接启动 v0.5.67；`./migrate up` 到 9 后 finding、封存事实和评估器状态才会持久化。v0.5.67 在 schema 5 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.58 的拒绝相同。还不是 schema 6 时，先按 v0.5.58 升级，再启动 v0.5.67。地板仍是 v0.5.51。v0.5.51 是第一版同时带上 ADR 0005 第 6 步和第 7 步的发布。v0.5.50 只发了第 6 步。v0.5.51 和 v0.5.52 仍要求 `uk_task_file_epoch`，schema 6 上拒绝启动。日志含 `missing index` 和 `uk_task_file_epoch`。`./migrate up` 到 6 之前先停掉它们。v0.5.56 的可恢复窗口仍成立。v0.5.55 的 `start_gtid_set` 规则仍成立。v0.5.54 的 `stop_gtid` 规则仍成立。v0.5.53 丢掉 `uk_task_file_epoch` 的规则仍成立。旧二进制留在任务目录里的 `.takeover-*`，会在跑这一版的 worker 启动时删掉。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
+- 细节见 [docs/releases/release-notes-v0.5.67.md](docs/releases/release-notes-v0.5.67.md)。
 
-详细版本记录：[docs/releases/v0.5.66.zh-CN.md](docs/releases/v0.5.66.zh-CN.md) | [docs/releases/release-notes-v0.5.66.md](docs/releases/release-notes-v0.5.66.md)
+详细版本记录：[docs/releases/v0.5.67.zh-CN.md](docs/releases/v0.5.67.zh-CN.md) | [docs/releases/release-notes-v0.5.67.md](docs/releases/release-notes-v0.5.67.md)
 
 v0.5.27 至 v0.5.58 的记录：[docs/releases/v0.5.58.zh-CN.md](docs/releases/v0.5.58.zh-CN.md) | [docs/releases/release-notes-v0.5.58.md](docs/releases/release-notes-v0.5.58.md)，[docs/releases/v0.5.57.zh-CN.md](docs/releases/v0.5.57.zh-CN.md) | [docs/releases/release-notes-v0.5.57.md](docs/releases/release-notes-v0.5.57.md)，[docs/releases/v0.5.56.zh-CN.md](docs/releases/v0.5.56.zh-CN.md) | [docs/releases/release-notes-v0.5.56.md](docs/releases/release-notes-v0.5.56.md)，[docs/releases/v0.5.55.zh-CN.md](docs/releases/v0.5.55.zh-CN.md) | [docs/releases/release-notes-v0.5.55.md](docs/releases/release-notes-v0.5.55.md)，[docs/releases/v0.5.54.zh-CN.md](docs/releases/v0.5.54.zh-CN.md) | [docs/releases/release-notes-v0.5.54.md](docs/releases/release-notes-v0.5.54.md)，[docs/releases/v0.5.53.zh-CN.md](docs/releases/v0.5.53.zh-CN.md) | [docs/releases/release-notes-v0.5.53.md](docs/releases/release-notes-v0.5.53.md)，[docs/releases/v0.5.52.zh-CN.md](docs/releases/v0.5.52.zh-CN.md) | [docs/releases/release-notes-v0.5.52.md](docs/releases/release-notes-v0.5.52.md)，[docs/releases/v0.5.51.zh-CN.md](docs/releases/v0.5.51.zh-CN.md) | [docs/releases/release-notes-v0.5.51.md](docs/releases/release-notes-v0.5.51.md)，[docs/releases/v0.5.50.zh-CN.md](docs/releases/v0.5.50.zh-CN.md) | [docs/releases/release-notes-v0.5.50.md](docs/releases/release-notes-v0.5.50.md)，[docs/releases/v0.5.49.zh-CN.md](docs/releases/v0.5.49.zh-CN.md) | [docs/releases/release-notes-v0.5.49.md](docs/releases/release-notes-v0.5.49.md)，[docs/releases/v0.5.48.zh-CN.md](docs/releases/v0.5.48.zh-CN.md) | [docs/releases/release-notes-v0.5.48.md](docs/releases/release-notes-v0.5.48.md)，[docs/releases/v0.5.47.zh-CN.md](docs/releases/v0.5.47.zh-CN.md) | [docs/releases/release-notes-v0.5.47.md](docs/releases/release-notes-v0.5.47.md)，[docs/releases/v0.5.46.zh-CN.md](docs/releases/v0.5.46.zh-CN.md) | [docs/releases/release-notes-v0.5.46.md](docs/releases/release-notes-v0.5.46.md)，[docs/releases/v0.5.45.zh-CN.md](docs/releases/v0.5.45.zh-CN.md) | [docs/releases/release-notes-v0.5.45.md](docs/releases/release-notes-v0.5.45.md)，[docs/releases/v0.5.44.zh-CN.md](docs/releases/v0.5.44.zh-CN.md) | [docs/releases/release-notes-v0.5.44.md](docs/releases/release-notes-v0.5.44.md)，[docs/releases/v0.5.43.zh-CN.md](docs/releases/v0.5.43.zh-CN.md) | [docs/releases/release-notes-v0.5.43.md](docs/releases/release-notes-v0.5.43.md)，[docs/releases/v0.5.42.zh-CN.md](docs/releases/v0.5.42.zh-CN.md) | [docs/releases/release-notes-v0.5.42.md](docs/releases/release-notes-v0.5.42.md)，[docs/releases/v0.5.41.zh-CN.md](docs/releases/v0.5.41.zh-CN.md) | [docs/releases/release-notes-v0.5.41.md](docs/releases/release-notes-v0.5.41.md)，[docs/releases/v0.5.40.zh-CN.md](docs/releases/v0.5.40.zh-CN.md) | [docs/releases/release-notes-v0.5.40.md](docs/releases/release-notes-v0.5.40.md)，[docs/releases/v0.5.39.zh-CN.md](docs/releases/v0.5.39.zh-CN.md) | [docs/releases/release-notes-v0.5.39.md](docs/releases/release-notes-v0.5.39.md)，[docs/releases/v0.5.38.zh-CN.md](docs/releases/v0.5.38.zh-CN.md) | [docs/releases/release-notes-v0.5.38.md](docs/releases/release-notes-v0.5.38.md)，[docs/releases/v0.5.37.zh-CN.md](docs/releases/v0.5.37.zh-CN.md) | [docs/releases/release-notes-v0.5.37.md](docs/releases/release-notes-v0.5.37.md)，[docs/releases/v0.5.36.zh-CN.md](docs/releases/v0.5.36.zh-CN.md) | [docs/releases/release-notes-v0.5.36.md](docs/releases/release-notes-v0.5.36.md)，[docs/releases/v0.5.35.zh-CN.md](docs/releases/v0.5.35.zh-CN.md) | [docs/releases/release-notes-v0.5.35.md](docs/releases/release-notes-v0.5.35.md)，[docs/releases/v0.5.34.zh-CN.md](docs/releases/v0.5.34.zh-CN.md) | [docs/releases/release-notes-v0.5.34.md](docs/releases/release-notes-v0.5.34.md)，[docs/releases/v0.5.33.zh-CN.md](docs/releases/v0.5.33.zh-CN.md) | [docs/releases/release-notes-v0.5.33.md](docs/releases/release-notes-v0.5.33.md)，[docs/releases/v0.5.32.zh-CN.md](docs/releases/v0.5.32.zh-CN.md) | [docs/releases/release-notes-v0.5.32.md](docs/releases/release-notes-v0.5.32.md)，[docs/releases/v0.5.31.zh-CN.md](docs/releases/v0.5.31.zh-CN.md) | [docs/releases/release-notes-v0.5.31.md](docs/releases/release-notes-v0.5.31.md)，[docs/releases/v0.5.30.zh-CN.md](docs/releases/v0.5.30.zh-CN.md) | [docs/releases/release-notes-v0.5.30.md](docs/releases/release-notes-v0.5.30.md)，[docs/releases/v0.5.29.zh-CN.md](docs/releases/v0.5.29.zh-CN.md) | [docs/releases/release-notes-v0.5.29.md](docs/releases/release-notes-v0.5.29.md)，[docs/releases/v0.5.28.zh-CN.md](docs/releases/v0.5.28.zh-CN.md) | [docs/releases/release-notes-v0.5.28.md](docs/releases/release-notes-v0.5.28.md)，以及 [docs/releases/v0.5.27.zh-CN.md](docs/releases/v0.5.27.zh-CN.md) | [docs/releases/release-notes-v0.5.27.md](docs/releases/release-notes-v0.5.27.md)
 
