@@ -8,7 +8,7 @@
 
 | 现状 | 后果 |
 |---|---|
-| 17 种 `FindingKind`，`Report`/`Resolve` 散落在 14 个调用点（scheduler、runner、metrics、storage_health、watchdog） | 每加一种 kind 就要再找一个「成功路径」去 `Resolve`；漏了就永远 open |
+| 16 种 `FindingKind`，`Report`/`Resolve` 散落在十几个调用点（scheduler、runner、metrics、storage_health、watchdog） | 每加一种 kind 就要再找一个「成功路径」去 `Resolve`；漏了就永远 open |
 | `SEGMENT_UNREADABLE`、`SEGMENT_OVERLAP` 只在 `storageHealthOf` 里 `Report`，从不 `Resolve` | 条件清除后告警清了，finding 仍 OPEN（#370/#372 QA 已知缺口） |
 | `Resolve` 只对「本进程 book 里 open 的 key」生效 | 重启或换 owner 后，存储里的 open 行没人能关（#366：STOPPED 任务的 `DUMP_STALLED` 挂 40s+） |
 | `Check` 的 I2/I3/I5/I6/I7 违反没有 finding | 单源 GTID 洞只在 `/window`（#352）；对象丢失、上传迟到无告警 |
@@ -42,7 +42,7 @@ binlog ◀── assurance (Chain, Check)          纯，阶段 1
      api (alerts、health、metrics)   notify (outbox → webhook)   ui (告警页)
 ```
 
-- **`internal/health` 是深模块**：输入是「一个任务此刻的事实」，输出是期望 finding 集合、转移列表和健康结论。不做 I/O，不 import `tasks`/`meta`。删掉它，清除规则会重新散回 14 个调用点——这正是要消灭的状态。
+- **`internal/health` 是深模块**：输入是「一个任务此刻的事实」，输出是期望 finding 集合、转移列表和健康结论。不做 I/O，不 import `tasks`/`meta`。删掉它，清除规则会重新散回十几个调用点——这正是要消灭的状态。
 - `tasks.FindingKind`/`Finding` 类型**搬到 `health`**，`tasks` 保留类型别名一个版本（`type FindingKind = health.Kind`），避免一次改动 api/meta/replication。
 - `assurance` 不变；评估器把 `Chain.Check(now)` 与 `Chain.Health()` 的结果作为 `Facts.Chain` 交给 `health`。
 
@@ -257,7 +257,7 @@ evaluate(task):
 
 ## 6. Kind → 清除规则
 
-所有已发布的 17 种 kind 加阶段 2 新增的链 kind。Scope 决定何时有资格关闭。
+所有已发布的 16 种 kind 加阶段 2 新增的链 kind。Scope 决定何时有资格关闭。
 
 | Kind | Sev | Scope | 打开条件（Derive） | 清除规则（invariant） |
 |---|---|---|---|---|
@@ -425,7 +425,7 @@ CREATE TABLE notify_cursor (id TINYINT PRIMARY KEY, last_id BIGINT NOT NULL);
 | PR | 内容 | 第一提交（红） | 不做 |
 |---|---|---|---|
 | P2-0 | 本设计文档 | — | — |
-| P2-1 | `internal/health`：`Kind`/`KindSpec`/`Registry`（现有 17 种 + 新 kind，Derive 先只实现现有两种 SEGMENT_*）、`Facts`、`Reconcile`、`Desire`、`HealthOf`；`tasks` 类型别名 | 表驱动：OPEN/UPDATE/ESCALATE/CLOSE/不完整 scope 不关/HoldDown/幂等（对输出再调和得空）；`assurance.AllKinds` 每项有映射 | 不接线 |
+| P2-1 | `internal/health`：`Kind`/`KindSpec`/`Registry`（现有 16 种 + 新 kind，Derive 先只实现现有两种 SEGMENT_*）、`Facts`、`Reconcile`、`Desire`、`HealthOf`；`tasks` 类型别名 | 表驱动：OPEN/UPDATE/ESCALATE/CLOSE/不完整 scope 不关/HoldDown/幂等（对输出再调和得空）；`assurance.AllKinds` 每项有映射 | 不接线 |
 | P2-2 | 迁移 `000009` + `meta` 的 `ApplyTransitions`（事务、epoch/generation 条件写、outbox）、`ListHealth`；缺表缺列回退与每轮重探；standalone 文件存储扩展 | 「旧 epoch 写不覆盖新 epoch」「缺 000009 时回退且不记到重启」测试红 | 不接线评估器 |
 | P2-3 | `tasks.Evaluator`：脏集合、per-task 串行、sweep、目录指纹、触发点接线（SEAL/UPLOAD/RETENTION/TRANSITION/CATALOG/STARTUP/API）；接管 `SEGMENT_UNREADABLE`/`SEGMENT_OVERLAP`，`storageHealthOf` 不再 `Report` | 「挪走重复副本后 ≤1 sweep finding 关闭」「修好不可读段后关闭」红 | 其他 kind |
 | P2-4 | 所有信号型 kind 改走 `Signal`；`TASK_TRANSITION_STALLED`、`DUMP_STALLED` 改为评估器 Derive；`Report/Resolve` 私有化 + lintguard 规则（含 #342 的 logger 方法） | 每种信号 kind：失败→OPEN、成功→CLOSE、重启后由存储行调和关闭；#366 场景（单机版） | 新链 kind |
