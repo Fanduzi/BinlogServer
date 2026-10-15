@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -134,6 +134,7 @@ type findingBook struct {
 	events     EventStore
 	timeout    time.Duration
 	started    bool
+	sinkDone   chan struct{} // closed when the writer has made its last flush
 	now        func() time.Time
 }
 
@@ -339,6 +340,26 @@ func (b *findingBook) flush(ctx context.Context) {
 // StartFindingSink runs the sink writer until ctx ends. It writes on every
 // Report/Resolve and retries failed writes every interval. Each retry tick
 // also republishes task rows whose last write failed (S2).
+// WaitFindingSink blocks until the writer started by StartFindingSink has
+// made its final flush after its context ended, or until timeout. Shutdown
+// calls it so the last findings land before the process (or a test's
+// data_dir cleanup) goes away. It returns at once when no writer started.
+func (s *Scheduler) WaitFindingSink(timeout time.Duration) bool {
+	b := s.findings
+	b.mu.Lock()
+	done := b.sinkDone
+	b.mu.Unlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 func (s *Scheduler) StartFindingSink(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -350,11 +371,14 @@ func (s *Scheduler) StartFindingSink(ctx context.Context, interval time.Duration
 		return
 	}
 	b.started = true
+	b.sinkDone = make(chan struct{})
+	done := b.sinkDone
 	if b.events == nil {
 		b.events = s.eventStore
 	}
 	b.mu.Unlock()
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

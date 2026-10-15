@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, shutdown waiting for the finding sink's last flush (WaitFindingSink), and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -329,6 +329,14 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	// ADR 0009: one writer for findings; retries failed writes and task rows.
 	scheduler.StartFindingSink(runCtx, 5*time.Second)
+	defer func() {
+		// The sink flushes once more after runCtx ends; let that write land
+		// in data_dir before Run returns.
+		runCancel()
+		if !scheduler.WaitFindingSink(10 * time.Second) {
+			log.Printf("shutdown: findings writer did not finish its last flush in 10s")
+		}
+	}()
 	if err := startHealthEvaluator(runCtx, a.cfg, scheduler, mysqlStore, resolvedWorkerID); err != nil {
 		return err
 	}
