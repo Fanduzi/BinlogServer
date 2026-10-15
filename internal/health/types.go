@@ -62,6 +62,8 @@ type Instance struct {
 	Detail   string
 	Evidence string
 	Segments []string
+	// FactAt is when the fact happened (signal time); zero = Facts.Now.
+	FactAt time.Time
 }
 
 // ClearRule says when an open finding of a kind closes by itself.
@@ -76,9 +78,11 @@ type ClearRule struct {
 
 // KindSpec is a kind's registry entry.
 type KindSpec struct {
-	Kind          Kind
-	Severity      Severity
-	Scope         Scope
+	Kind     Kind
+	Severity Severity
+	// Scopes: every scope the kind is judged from. A finding closes only
+	// when all of them are complete; Derive runs when the first is.
+	Scopes        []Scope
 	Clear         ClearRule
 	Derive        func(f *Facts) []Instance
 	SegmentScoped bool
@@ -122,6 +126,7 @@ type SignalState struct {
 	SuccessSeq uint64
 	Failures   int64
 	Detail     string
+	FactAt     time.Time
 }
 
 // Waiver exempts one exact piece of evidence (a canonical GTID range).
@@ -158,6 +163,10 @@ type Facts struct {
 	Store    *StoreFacts
 	Waivers  []Waiver
 	Complete map[Scope]bool
+	// AbsentSince is when the evaluator (on its own injected clock) first saw
+	// each open finding's condition absent; hold-down runs from it, never from
+	// a stored wall-clock time. A missing entry means "just now".
+	AbsentSince map[Key]time.Time
 }
 
 // Finding is a stored finding row as the evaluator sees it.
@@ -181,10 +190,11 @@ func (f Finding) Key() Key { return Key{f.TaskID, f.Kind, f.Subject} }
 type Op string
 
 const (
-	OpOpen     Op = "OPEN"
-	OpUpdate   Op = "UPDATE"
-	OpEscalate Op = "ESCALATE"
-	OpClose    Op = "CLOSE"
+	OpOpen      Op = "OPEN"
+	OpUpdate    Op = "UPDATE"
+	OpEscalate  Op = "ESCALATE"
+	OpClose     Op = "CLOSE"
+	OpDowngrade Op = "DOWNGRADE"
 )
 
 // Transition reasons.
@@ -201,6 +211,7 @@ type Transition struct {
 	Op          Op
 	Reason      string
 	At          time.Time
+	FactAt      time.Time
 	Generation  int64
 	KindVersion int
 	Instance    Instance
@@ -262,3 +273,8 @@ const (
 	HealthStale          Kind = "HEALTH_STALE"
 	HealthStoreDegraded  Kind = "HEALTH_STORE_DEGRADED"
 )
+
+// Produced lists the scopes some evaluator produces in this phase. HealthOf
+// never reports UNKNOWN for a scope that is not produced (chain.objects and
+// verify arrive with the phase 3 Verifier).
+var Produced = map[Scope]bool{ScopeChainLocal: true, ScopeChainObjects: true, ScopeTaskState: true, ScopeSignals: true, ScopeStore: true, ScopeVerify: true}

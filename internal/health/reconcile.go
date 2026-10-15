@@ -38,7 +38,7 @@ func (r Registry) derive(f *Facts) (Desired, map[Key]bool) {
 	out, waivedKeys := Desired{}, map[Key]bool{}
 	for _, k := range r.kinds() {
 		spec := r[k]
-		if !spec.Managed || spec.Derive == nil || !f.complete(spec.Scope) {
+		if !spec.Managed || spec.Derive == nil || !f.complete(spec.Scopes[0]) {
 			continue
 		}
 		for _, in := range spec.Derive(f) {
@@ -104,7 +104,7 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			}
 			continue
 		}
-		if !f.complete(spec.Scope) {
+		if !f.complete(spec.Scopes[0]) {
 			continue
 		}
 		if waivedKeys[key] {
@@ -164,8 +164,8 @@ func (r Registry) HealthOf(open []Finding, f *Facts) TaskHealth {
 	}
 	scopes := map[Scope]bool{}
 	for _, spec := range r {
-		if spec.Managed && spec.Scope != ScopeSignals && !f.complete(spec.Scope) {
-			scopes[spec.Scope] = true
+		if spec.Managed && spec.Scopes[0] != ScopeSignals && !f.complete(spec.Scopes[0]) {
+			scopes[spec.Scopes[0]] = true
 		}
 	}
 	for s := range scopes {

@@ -94,19 +94,19 @@ func signalCleared(kind Kind) func(f *Facts, key Key) bool {
 }
 
 func signalSpec(kind Kind, sev Severity, inv, text string) KindSpec {
-	return KindSpec{Kind: kind, Severity: sev, Scope: ScopeSignals, Version: 1, Derive: signalDerive(kind),
+	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{ScopeSignals}, Version: 1, Derive: signalDerive(kind),
 		Clear: ClearRule{Invariant: inv, Holds: signalCleared(kind), Text: text}}
 }
 
 func chainSpec(kind Kind, sev Severity, scope Scope, inv, text string) KindSpec {
-	return KindSpec{Kind: kind, Severity: sev, Scope: scope, Version: 1, SegmentScoped: true, Derive: chainDerive(kind),
+	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{scope}, Version: 1, SegmentScoped: true, Derive: chainDerive(kind),
 		Clear: ClearRule{Invariant: inv, Text: text}}
 }
 
 // stateSpec: kinds derived from task state; their Derive lands with the
 // PR that takes them over (P2-4/P2-6), so they never open before then.
 func stateSpec(kind Kind, sev Severity, scope Scope, inv, text string) KindSpec {
-	return KindSpec{Kind: kind, Severity: sev, Scope: scope, Version: 1, Clear: ClearRule{Invariant: inv, Text: text}}
+	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{scope}, Version: 1, Clear: ClearRule{Invariant: inv, Text: text}}
 }
 
 // DefaultRegistry is the kind table of design §6. No kind is Managed yet:

@@ -1,7 +1,9 @@
 package health
 
 import (
+	"fmt"
 	"math/rand"
+	"sort"
 	"testing"
 	"time"
 
@@ -153,11 +155,20 @@ func TestReconcileHoldDown(t *testing.T) {
 	spec := r[SegmentOverlap]
 	spec.Clear.HoldDown = 2 * time.Minute
 	r[SegmentOverlap] = spec
-	open := []Finding{{TaskID: "1", Kind: SegmentOverlap, Subject: "a", Severity: Critical, Detail: "twice", LastSeen: t0}}
-	if ts, _ := r.Reconcile(open, overlapFacts(t0.Add(time.Minute))); len(ts) != 0 {
+	// LastSeen is a stored wall-clock time from some node: it must not matter.
+	open := []Finding{{TaskID: "1", Kind: SegmentOverlap, Subject: "a", Severity: Critical, Detail: "twice", LastSeen: t0.Add(-time.Hour)}}
+	key := Key{"1", SegmentOverlap, "a"}
+	f := overlapFacts(t0.Add(time.Minute))
+	if ts, _ := r.Reconcile(open, f); len(ts) != 0 {
+		t.Fatalf("closed with no AbsentSince (just now): %+v", ts)
+	}
+	f.AbsentSince = map[Key]time.Time{key: t0}
+	if ts, _ := r.Reconcile(open, f); len(ts) != 0 {
 		t.Fatalf("closed inside hold-down: %+v", ts)
 	}
-	if ts, _ := r.Reconcile(open, overlapFacts(t0.Add(3*time.Minute))); ops(ts)[OpClose] != 1 {
+	f = overlapFacts(t0.Add(3 * time.Minute))
+	f.AbsentSince = map[Key]time.Time{key: t0}
+	if ts, _ := r.Reconcile(open, f); ops(ts)[OpClose] != 1 {
 		t.Fatalf("not closed after hold-down: %+v", ts)
 	}
 }
@@ -262,7 +273,7 @@ func TestHealthOf(t *testing.T) {
 func TestRegistryComplete(t *testing.T) {
 	reg := DefaultRegistry()
 	for k, spec := range reg {
-		if spec.Kind != k || spec.Severity == "" || spec.Scope == "" || spec.Clear.Invariant == "" || spec.Clear.Text == "" || spec.Version < 1 {
+		if spec.Kind != k || spec.Severity == "" || len(spec.Scopes) == 0 || spec.Clear.Invariant == "" || spec.Clear.Text == "" || spec.Version < 1 {
 			t.Errorf("incomplete spec %s: %+v", k, spec)
 		}
 		if spec.Managed {
@@ -290,4 +301,113 @@ func mustReconcile(t *testing.T, r Registry, open []Finding, f *Facts) []Transit
 	t.Helper()
 	ts, _ := r.Reconcile(open, f)
 	return ts
+}
+
+func TestReconcileDowngradeIsExplicit(t *testing.T) {
+	r := testRegistry(true)
+	f := overlapFacts(t0, "a")
+	f.Chain.Violations[0].Detail = "twice"
+	open := []Finding{{TaskID: "1", Kind: SegmentOverlap, Subject: "a", Severity: Critical, Detail: "twice", Segments: []string{"a"}}}
+	spec := r[SegmentOverlap]
+	spec.Severity = Warning
+	r[SegmentOverlap] = spec
+	ts, _ := r.Reconcile(open, f)
+	if len(ts) != 1 || ts[0].Op != OpDowngrade {
+		t.Fatalf("lowered severity: %+v, want one DOWNGRADE", ts)
+	}
+}
+
+func TestTransitionFactAt(t *testing.T) {
+	r := testRegistry(true)
+	at := t0.Add(-30 * time.Second)
+	f := signalFacts(SignalState{FailureSeq: 2, FactAt: at})
+	ts, _ := r.Reconcile(nil, f)
+	if len(ts) != 1 || !ts[0].FactAt.Equal(at) || !ts[0].At.Equal(t0) {
+		t.Fatalf("signal FactAt: %+v", ts)
+	}
+	ts, _ = r.Reconcile(nil, overlapFacts(t0, "a"))
+	if len(ts) != 1 || !ts[0].FactAt.Equal(t0) {
+		t.Fatalf("FactAt defaults to Now: %+v", ts)
+	}
+}
+
+// designScopes is design §6 (and §8.4): the scopes each kind needs complete before it may close.
+var designScopes = map[Kind][]Scope{
+	SegmentUnreadable:        {ScopeChainLocal},
+	SegmentOverlap:           {ScopeChainLocal},
+	SegmentEmptyLeftover:     {ScopeChainLocal},
+	SegmentDamaged:           {ScopeChainLocal},
+	ChainIndexGap:            {ScopeChainLocal},
+	GTIDHole:                 {ScopeChainLocal},
+	LegacyFailback:           {ScopeChainLocal},
+	CheckpointAhead:          {ScopeChainLocal},
+	SegmentMissing:           {ScopeChainLocal, ScopeChainObjects},
+	OrphanRow:                {ScopeChainLocal, ScopeChainObjects},
+	UploadLate:               {ScopeChainLocal},
+	UploadUnverified:         {ScopeChainLocal, ScopeSignals},
+	UploadRecordFailed:       {ScopeSignals},
+	DumpStalled:              {ScopeTaskState, ScopeSignals},
+	MetadataWriteBlocked:     {ScopeSignals},
+	TaskPersistFailed:        {ScopeSignals},
+	EventPersistFailed:       {ScopeSignals},
+	EventReadFailed:          {ScopeSignals},
+	DumpCleanupPersistFailed: {ScopeSignals},
+	DiskListFailed:           {ScopeSignals},
+	RetentionRecordFailed:    {ScopeSignals},
+	RetryLoopFailed:          {ScopeSignals},
+	OpenTailCutFailed:        {ScopeSignals},
+	MetricSourceFailed:       {ScopeSignals},
+	TransitionStalled:        {ScopeTaskState},
+	TaskFailed:               {ScopeTaskState},
+	SourceUnreachable:        {ScopeTaskState, ScopeSignals},
+	SealFactsAbsent:          {ScopeStore},
+	HealthStale:              {ScopeTaskState},
+	HealthStoreDegraded:      {ScopeStore},
+}
+
+func TestRegistryScopesMatchDesign(t *testing.T) {
+	reg := DefaultRegistry()
+	if len(reg) != len(designScopes) {
+		t.Errorf("registry has %d kinds, design table %d", len(reg), len(designScopes))
+	}
+	for k, want := range designScopes {
+		got := append([]Scope(nil), reg[k].Scopes...)
+		sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+		w := append([]Scope(nil), want...)
+		sort.Slice(w, func(i, j int) bool { return w[i] < w[j] })
+		if fmt.Sprint(got) != fmt.Sprint(w) {
+			t.Errorf("%s scopes %v, design %v", k, got, w)
+		}
+	}
+}
+
+func TestCloseNeedsEveryScope(t *testing.T) {
+	for k, scopes := range designScopes {
+		if len(scopes) < 2 {
+			continue
+		}
+		r := qmanaged(DefaultRegistry(), k)
+		open := []Finding{{TaskID: "1", Kind: k, Subject: "s", Severity: Critical}}
+		for _, missing := range scopes {
+			c := qall()
+			c[missing] = false
+			f := &Facts{TaskID: "1", Now: t0, Chain: &ChainFacts{}, Task: &TaskFacts{}, Complete: c,
+				Signals: map[SignalKey]SignalState{{Kind: k, Subject: "s"}: {FailureSeq: 1, SuccessSeq: 2}}}
+			if ts, _ := r.Reconcile(open, f); ops(ts)[OpClose] != 0 {
+				t.Errorf("%s closed with %s incomplete: %+v", k, missing, ts)
+			}
+		}
+	}
+}
+
+func TestHealthIgnoresScopesNotProduced(t *testing.T) {
+	if Produced[ScopeChainObjects] || Produced[ScopeVerify] {
+		t.Fatalf("chain.objects and verify are produced only from phase 3: %v", Produced)
+	}
+	r := qmanaged(DefaultRegistry(), SegmentUnreadable)
+	c := qall()
+	c[ScopeChainLocal] = false
+	if h := r.HealthOf(nil, &Facts{TaskID: "1", Now: t0, Complete: c}); h.Status != StatusUnknown {
+		t.Fatalf("a produced scope incomplete must still be UNKNOWN: %s", h.Status)
+	}
 }
