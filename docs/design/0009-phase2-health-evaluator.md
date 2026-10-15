@@ -1,6 +1,6 @@
 # ADR 0009 阶段 2 设计：健康评估器 (Health Evaluator)
 
-状态：设计（2026-10-15），未实现；开放问题已由 Adrian 于 2026-10-15 决定，见 §15。上位决定：[ADR 0009](../adr/0009-backup-assurance.md)「分阶段实施」第 2 行，epic #326。前置：[阶段 1 备份链](0009-phase1-backup-chain.md)（已发布于 v0.5.64–v0.5.66）。本文回答阶段 2 的**类型、生命周期、触发与清除规则、集群语义、迁移**和 PR 切分；不改变 ADR 的任何决定，只在 §12 记录与 ADR 草图的差异。
+状态：设计（2026-10-15），未实现；开放问题按建议默认值处理，见 §15（Adrian 可推翻）。上位决定：[ADR 0009](../adr/0009-backup-assurance.md)「分阶段实施」第 2 行，epic #326。前置：[阶段 1 备份链](0009-phase1-backup-chain.md)（已发布于 v0.5.64–v0.5.66）。本文回答阶段 2 的**类型、生命周期、触发与清除规则、集群语义、迁移**和 PR 切分；不改变 ADR 的任何决定，只在 §12 记录与 ADR 草图的差异。
 
 ## 1. 要解决什么
 
@@ -464,9 +464,9 @@ CREATE TABLE notify_cursor (id TINYINT PRIMARY KEY, last_id BIGINT NOT NULL);
 
 阶段 2 收尾：BinlogServerQA 在 tip 上做全量回归（DBA 还原、failback、只读 meta、kill -9 + adopt、升级自 v0.5.66：已存过期 `SEGMENT_*` 在第一轮关闭）后发版。
 
-## 15. 决定（Adrian，2026-10-15）
+## 15. Decisions (proposed defaults, 2026-10-15; Adrian may override)
 
-原「开放问题」五条已决定，正文已按此修改。
+原「开放问题」五条的建议默认值如下，Adrian 尚未批准，可推翻；正文已按此修改。
 
 | # | 问题 | 决定 |
 |---|---|---|
