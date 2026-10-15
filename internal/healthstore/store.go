@@ -47,6 +47,48 @@ type Stored struct {
 // CheckFence is the one fence rule (design §8.3). lease is nil when the
 // task has no task_leases row; stored is nil before the first write.
 func CheckFence(f health.Fence, lease *Lease, stored *Stored) error {
+	switch f.Mode {
+	case health.FenceStandalone:
+		if stored != nil && stored.Mode != "" && stored.Mode != health.FenceStandalone {
+			return ErrFenced // a cluster wrote this task; a standalone node must not
+		}
+		if stored != nil && stored.Node != "" && stored.Node != f.Node {
+			return ErrFenced // another node on the same meta; take over explicitly
+		}
+		return nil
+	case health.FenceNeverLeased:
+		if lease != nil {
+			return ErrFenced // the task has a lease now: its holder writes
+		}
+		if stored != nil && stored.Mode == health.FenceCluster {
+			return ErrFenced
+		}
+		return nil
+	case health.FenceCluster:
+	default:
+		return ErrModeUnsupported
+	}
+	if lease == nil {
+		return ErrFenced
+	}
+	if f.Proxy || f.Delegated {
+		// On behalf of the last (owner, epoch): only while nobody holds it.
+		if lease.Epoch != f.TaskEpoch || (!lease.Expired && lease.Owner != "") {
+			return ErrFenced
+		}
+	} else {
+		if lease.Owner != f.Node || lease.Epoch != f.TaskEpoch {
+			return ErrFenced
+		}
+		if lease.Expired {
+			return ErrLeaseLagging
+		}
+	}
+	if stored != nil && stored.Mode == health.FenceCluster {
+		if stored.Epoch > f.TaskEpoch || (stored.Epoch == f.TaskEpoch && stored.Node != "" && stored.Node != f.Node) {
+			return ErrFenced
+		}
+	}
 	return nil
 }
 
@@ -72,9 +114,9 @@ type Store interface {
 // Transition is one stored finding_transitions row.
 type Transition struct {
 	TaskID, Kind, Subject, Op, Reason, Severity, Digest string
-	Generation                                         int64
-	KindVersion                                        int
-	FactAt                                             time.Time
+	Generation                                          int64
+	KindVersion                                         int
+	FactAt                                              time.Time
 }
 
 // TransitionLister lists stored transitions in generation order (tests,
