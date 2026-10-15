@@ -112,6 +112,10 @@ type TaskFacts struct {
 	FailedCurrent bool
 	// OwnedElsewhere: another node owns the row (it drives the transition).
 	OwnedElsewhere bool
+	// Unadopted: standalone with no task store, and the task is only a
+	// directory under data_dir that holds segments; no record of the task
+	// exists in this process, so nothing replicates it until adopt (#385).
+	Unadopted bool
 	// Liveness is the task's source liveness clock (nil: this node keeps
 	// none for the task, so DUMP_STALLED and SOURCE_UNREACHABLE are not
 	// derived here).
@@ -310,6 +314,7 @@ const (
 	UploadLate           Kind = "UPLOAD_LATE"
 	TaskFailed           Kind = "TASK_FAILED"
 	SourceUnreachable    Kind = "SOURCE_UNREACHABLE"
+	TaskUnadopted        Kind = "TASK_UNADOPTED"
 	SealFactsAbsent      Kind = "SEAL_FACTS_ABSENT"
 	HealthStale          Kind = "HEALTH_STALE"
 	HealthStoreDegraded  Kind = "HEALTH_STORE_DEGRADED"

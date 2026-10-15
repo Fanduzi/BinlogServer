@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
-// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS)
+// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -342,8 +342,47 @@ func (e *Evaluator) responsible() []Task {
 	if !e.cfg.Cluster && e.clusterHasWork() {
 		out = append(out, Task{ID: ClusterFindingTask})
 	}
+	out = append(out, e.goneUnadopted(out)...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// goneUnadopted (#385): standalone with no task store, the tasks whose
+// stored health still names TASK_UNADOPTED but that are no longer listed
+// (the directory was moved out of data_dir, in this process or before a
+// restart). Evaluating them once closes the row.
+func (e *Evaluator) goneUnadopted(listed []Task) []Task {
+	if e.cfg.Cluster || e.cfg.Store == nil || e.s == nil || e.s.hasTaskStore() {
+		return nil
+	}
+	hs, err := e.cfg.Store.ListHealth(context.Background())
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, t := range listed {
+		seen[t.ID] = true
+	}
+	var out []Task
+	for _, h := range hs {
+		if seen[h.TaskID] || h.TaskID == ClusterFindingTask {
+			continue
+		}
+		for _, k := range h.Reasons {
+			if k.Kind == health.TaskUnadopted {
+				out = append(out, Task{ID: h.TaskID})
+				seen[h.TaskID] = true
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (s *Scheduler) hasTaskStore() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store != nil
 }
 
 // clusterHasWork: standalone evaluates _cluster while it has a failing
@@ -463,6 +502,7 @@ func (e *Evaluator) fenceFor(t Task) (health.Fence, bool) {
 func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth, error) {
 	isCluster := id == ClusterFindingTask
 	var task Task
+	gone := false
 	if isCluster {
 		if e.cfg.Cluster || !e.clusterHasWork() {
 			return health.TaskHealth{}, errNotResponsible
@@ -471,7 +511,12 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	} else {
 		var err error
 		if task, err = e.s.GetTask(id); err != nil {
-			return health.TaskHealth{}, err
+			if !errors.Is(err, ErrTaskNotFound) || e.cfg.Cluster || e.s.hasTaskStore() {
+				return health.TaskHealth{}, err
+			}
+			// #385: a standalone leftover directory that is gone. Its
+			// task-state kinds no longer hold; nothing else is judged.
+			task, gone = Task{ID: id}, true
 		}
 	}
 	fence, ok := e.fenceFor(task)
@@ -488,13 +533,21 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	e.evaluations.Add(1)
 	now := e.cfg.Now()
 	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}}
-	if isCluster {
+	switch {
+	case gone:
+		facts.Task = &health.TaskFacts{State: string(StateStopped), Desired: TaskDesiredStop, RunHere: true}
+		facts.Complete[health.ScopeTaskState] = true
+	case isCluster:
 		facts.Complete[health.ScopeChainLocal] = true // _cluster has no chain
-	} else if chain := e.chainFacts(task, now); chain != nil {
-		facts.Chain = chain
-		facts.Complete[health.ScopeChainLocal] = true
+	default:
+		if chain := e.chainFacts(task, now); chain != nil {
+			facts.Chain = chain
+			facts.Complete[health.ScopeChainLocal] = true
+		}
 	}
-	e.signalFacts(ctx, task, isCluster, facts)
+	if !gone {
+		e.signalFacts(ctx, task, isCluster, facts)
+	}
 	store := e.cfg.Store
 	unknown := func(h health.TaskHealth, err error) (health.TaskHealth, error) {
 		e.errs.Add(1)

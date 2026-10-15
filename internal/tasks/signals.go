@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: hot-path failure and success reports (SignalFailure/SignalSuccess, and Report/Resolve for a kind the evaluator manages), the task rows, the task directory, the catalog, and the event store
-// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
+// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, Unadopted for a standalone leftover directory (#385), and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §5.6, §6); the only way a signal kind reaches task_findings while the evaluator is on
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -196,6 +196,8 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 			tf.RunHere = true
 		}
 		tf.OwnedElsewhere = s.leaseManager != nil && task.OwnerWorkerID != "" && task.OwnerWorkerID != s.clusterWorkerID
+		_, known := s.tasks[task.ID]
+		tf.Unadopted = s.store == nil && !known // only data_dir knows the task (#385)
 		s.mu.Unlock()
 	}
 	if e.s != nil {
