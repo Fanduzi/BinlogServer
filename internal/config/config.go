@@ -51,6 +51,8 @@ type Config struct {
 	HTTP HTTPConfig
 	// Meta 是内部依赖调用（存储/lease/上传）的超时配置。
 	Meta MetaConfig
+	// Health is the ADR 0009 phase 2 evaluator (P2-3).
+	Health HealthConfig
 	// Tracing 是 OpenTelemetry tracing 配置（默认关闭）。
 	Tracing TracingConfig
 
@@ -120,6 +122,16 @@ type HTTPServerTimeoutConfig struct {
 	ReadTimeoutSec       int
 	WriteTimeoutSec      int
 	IdleTimeoutSec       int
+}
+
+// HealthConfig configures the health evaluator (ADR 0009 phase 2, P2-3).
+type HealthConfig struct {
+	// Evaluator is off, shadow (compute and log, write nothing) or on.
+	Evaluator string
+	// SweepIntervalSec is the period of the sweep that marks every task dirty.
+	SweepIntervalSec int
+	// RehashBytesPerSec is the global byte budget of the sha256 re-checker.
+	RehashBytesPerSec int64
 }
 
 // MetaConfig 定义内部调用边界配置。

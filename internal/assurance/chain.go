@@ -79,14 +79,18 @@ const (
 	I3StoredHole       Kind = "I3_STORED_HOLE"
 	I3LegacyFailback   Kind = "I3_LEGACY_FAILBACK"
 	I4Overlap          Kind = "I4_OVERLAP"
-	I5CheckpointAhead  Kind = "I5_CHECKPOINT_AHEAD"
-	I6MissingLocal     Kind = "I6_MISSING_LOCAL"
-	I6MissingObject    Kind = "I6_MISSING_OBJECT"
-	I6OrphanRow        Kind = "I6_ORPHAN_ROW"
-	I6MissingRow       Kind = "I6_MISSING_ROW"
-	I6SizeMismatch     Kind = "I6_SIZE_MISMATCH"
-	I7UploadLate       Kind = "I7_UPLOAD_LATE"
-	I7Unverified       Kind = "I7_UNVERIFIED"
+	// I4EmptyLeftover: an open file with only the magic, only a header, or
+	// less than one event header and no complete event (#357). INFO, never a
+	// verdict, never cuts replay.
+	I4EmptyLeftover   Kind = "I4_EMPTY_LEFTOVER"
+	I5CheckpointAhead Kind = "I5_CHECKPOINT_AHEAD"
+	I6MissingLocal    Kind = "I6_MISSING_LOCAL"
+	I6MissingObject   Kind = "I6_MISSING_OBJECT"
+	I6OrphanRow       Kind = "I6_ORPHAN_ROW"
+	I6MissingRow      Kind = "I6_MISSING_ROW"
+	I6SizeMismatch    Kind = "I6_SIZE_MISMATCH"
+	I7UploadLate      Kind = "I7_UPLOAD_LATE"
+	I7Unverified      Kind = "I7_UNVERIFIED"
 )
 
 // AllKinds lists every Kind.

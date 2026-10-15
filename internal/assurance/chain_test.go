@@ -259,8 +259,35 @@ type violationCase struct {
 	mutate  func(*testing.T, *fixture)
 }
 
+// leftover writes an open segment of raw bytes after src on the order.
+func (f *fixture) leftover(t *testing.T, src, name string, raw []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.dir, name), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, n := range f.in.Order {
+		order = append(order, n)
+		if n == src {
+			order = append(order, name)
+		}
+	}
+	f.in.Order = order
+}
+
 func violationCases() []violationCase {
 	return []violationCase{
+		// I4 (P2-3): a stale open copy holding the same events as a sealed one (#372 openstale).
+		{"I4/open-copy-of-sealed-000006", I4Overlap, "mysql-bin.000006.open.e4", func(t *testing.T, f *fixture) {
+			f.duplicate(t, "mysql-bin.000006", "mysql-bin.000006.open.e4")
+		}},
+		// I4 (P2-3, #357): an open leftover with only the magic, or shorter than one event header.
+		{"I4/empty-leftover-magic", I4EmptyLeftover, "mysql-bin.000005.open.e3", func(t *testing.T, f *fixture) {
+			f.leftover(t, "mysql-bin.000005", "mysql-bin.000005.open.e3", []byte{0xfe, 'b', 'i', 'n'})
+		}},
+		{"I4/empty-leftover-short", I4EmptyLeftover, "mysql-bin.000004.open.e2", func(t *testing.T, f *fixture) {
+			f.leftover(t, "mysql-bin.000004", "mysql-bin.000004.open.e2", []byte{0xfe, 'b', 'i', 'n', 1, 2, 3, 4, 5, 6})
+		}},
 		// I1: the v0.5.57 re-dump signature inside a sealed segment.
 		{"I1/regress-into-next", I1Regression, "mysql-bin.000005", func(t *testing.T, f *fixture) {
 			f.regress(t, "mysql-bin.000005", "mysql-bin.000004", 2000)
