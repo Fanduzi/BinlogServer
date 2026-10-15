@@ -298,6 +298,14 @@ func (a *App) Run(ctx context.Context) error {
 	// data_dir 与 runner 落盘目录相同，files API 在 binlog_files 为空时扫描这里。
 	opts = append(opts, tasks.WithDataDir(a.cfg.DataDir))
 	if a.cfg.MetaDSN == "" && strings.TrimSpace(a.cfg.DataDir) != "" {
+		// ADR 0010 §Single writer: one standalone process per data_dir, before
+		// anything in it is read or written.
+		unlock, err := lockDataDir(a.cfg.DataDir)
+		if err != nil {
+			log.Printf("startup refused: %v", err)
+			return err
+		}
+		defer unlock()
 		// Standalone: findings live next to the backups and survive a restart.
 		opts = append(opts, tasks.WithFindingStore(tasks.NewFileFindingStore(filepath.Join(a.cfg.DataDir, tasks.FindingFileName))))
 		if a.cfg.Standalone.TaskRecords != "off" {
@@ -358,6 +366,10 @@ func (a *App) Run(ctx context.Context) error {
 		if n := scheduler.ResumeRecordedTasks(); n > 0 {
 			log.Printf("task records: resumed %d task(s) after restart", n)
 		}
+	}
+	if a.cfg.MetaDSN == "" && a.cfg.Standalone.TaskRecords != "off" {
+		// A save that failed (TASK_RECORDS_FAILED/write) is retried from memory.
+		go runRecordSaveRetry(runCtx, scheduler, 30*time.Second)
 	}
 	if workerEnabled {
 		go scheduler.RunDumpCleanupRetry(runCtx)
@@ -500,10 +512,27 @@ func standaloneTaskRecords(cfg config.Config) tasks.Option {
 			prev = p
 		}
 	}
+	// The key file is the recommended source; an env key is not left in the
+	// process environment once read (#393 QA P3).
+	_ = os.Unsetenv(taskrecords.KeyEnv)
+	_ = os.Unsetenv(taskrecords.PreviousKeyEnv)
 	if key != nil {
 		log.Printf("task records: on; key id %s, previous key id %q", key.ID(), prev.ID())
 	}
 	return tasks.WithTaskRecords(taskrecords.Open(cfg.DataDir, key, prev), keyErr)
+}
+
+func runRecordSaveRetry(ctx context.Context, scheduler *tasks.Scheduler, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			scheduler.RetryRecordSave()
+		}
+	}
 }
 
 func requireProductionEncryptionKey(key string, production bool) error {

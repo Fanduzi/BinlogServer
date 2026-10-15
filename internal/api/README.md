@@ -5,6 +5,7 @@
 |------|---------------|
 | `server.go` | HTTP server/router 组装、路由注册（含 `/healthz`、`/auth/config` 与 `/api/health`） |
 | `auth.go` | 路由级鉴权配置与认证中间件、ServerOption 定义 |
+| `task_records_status_test.go` | 任务记录不可用时改动请求返回 503 `TASK_RECORDS_UNAVAILABLE`、状态冲突返回 409，不再 500 |
 | `findings.go` | `GET /api/tasks/{id}/findings` 与 `GET /api/findings`（ADR 0009 结论汇的读取面） |
 | `metrics_findings.go` | 结论汇指标：`binlog_server_finding_open` 始终至少一条序列，另有 reported/sink_errors/sink_pending/store_active |
 | `auth_status_test.go` | 鉴权失败状态码回归测试（一律 401） |

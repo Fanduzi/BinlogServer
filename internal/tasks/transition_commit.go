@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the next task row an operator action (Create, Start, Stop, Delete, Update, Adopt, Configure*) wants, the state it moves to, and the event that records it
-// output: commitTransitionLocked and commitDeleteLocked, the only way an operator action changes a task: the store write happens first and memory, events and the dump are touched only after it lands; a refused write leaves memory, the stored row and findings as they were, records a *_REJECTED event, and returns ErrTransitionNotRecorded; every commit marks the task dirty for the health evaluator (TRANSITION)
+// output: commitTransitionLocked and commitDeleteLocked, the only way an operator action changes a task: the store write happens first and memory, events and the dump are touched only after it lands; a refused write leaves memory, the stored row and findings as they were (standalone records: a Stop or Delete whose record save fails is applied in memory and opens TASK_RECORDS_FAILED/write, ADR 0010), records a *_REJECTED event, and returns ErrTransitionNotRecorded; every commit marks the task dirty for the health evaluator (TRANSITION)
 // pos: tip 53a9 dogfood P1 (Start in RETRY_BACKOFF on read-only meta left a STARTING zombie) and #336 (Stop zombie); lintguard's task-state test keeps every operator path on these helpers
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -35,7 +35,16 @@ func (s *Scheduler) commitTransitionLocked(next Task, to State, rec transitionRe
 	id := next.ID
 	s.markHealthDirty(id, ReasonTransition)
 	if s.store == nil {
-		if err := s.recordPutLocked(next); err != nil {
+		if err := s.recordPutLocked(next); err != nil && rec.Action == "stop" {
+			// #393 QA P2-1: a Stop is never refused by the record; it stands
+			// in memory and the write finding says a restart would resume.
+			s.recordAppliedUnsavedLocked(id, "stop", err)
+			s.tasks[id] = next
+			s.appendEventLocked(id, rec.Type, rec.Message, rec.Detail)
+			s.appendEventLocked(id, "TASK_RECORD_NOT_SAVED", "stop applied in memory; the task record was not saved, so a restart now would resume this task", err.Error())
+			s.flushPendingEventsLocked()
+			return nil
+		} else if err != nil {
 			if _, known := s.tasks[id]; known {
 				s.appendEventLocked(id, rec.Type+"_REJECTED", rec.Action+" not recorded; the "+rec.Action+" is not applied", err.Error())
 				s.flushPendingEventsLocked()
@@ -107,11 +116,10 @@ func (s *Scheduler) commitDeleteLocked(id string) error {
 	}
 	if s.store == nil {
 		if err := s.recordDeleteLocked(id); err != nil {
-			if _, known := s.tasks[id]; known {
-				s.appendEventLocked(id, "TASK_DELETE_REJECTED", "delete not recorded; the delete is not applied", err.Error())
-				s.flushPendingEventsLocked()
-			}
-			return fmt.Errorf("delete %w; the delete is not applied and the task state is unchanged: %w", ErrTransitionNotRecorded, err)
+			// #393 QA P2-1: a Delete is never refused by the record. The
+			// tombstone is kept in memory so the next save carries it.
+			s.recordAppliedUnsavedLocked(id, "delete", err)
+			s.recordTombstoneLocked(id)
 		}
 	}
 	if cancel, ok := s.cancels[id]; ok {

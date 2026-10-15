@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"log"
 	"os"
 	"path/filepath"
@@ -33,6 +34,11 @@ const (
 // ErrTaskRecordsLocked: the record file exists but cannot be read, so a
 // change that would overwrite it is refused.
 var ErrTaskRecordsLocked = errors.New("standalone task records are locked")
+
+// ErrTaskRecordsNotSaved: the record file could not be written (a full
+// data_dir, permissions, fsync). The API answers 503 for it and for
+// ErrTaskRecordsLocked (ADR 0010 §API status).
+var ErrTaskRecordsNotSaved = errors.New("standalone task records were not saved")
 
 // ResumePositionUnknown prefixes last_error when a restored task has no
 // position on disk to continue from and its start would skip events.
@@ -82,6 +88,16 @@ type recordState struct {
 	// cleared holds the subjects this process found healthy, replayed as
 	// successes so a row left open by an earlier process closes.
 	cleared map[string]bool
+	// lastSeq and lastSavedAt describe the last snapshot that is on disk
+	// (loaded or saved); the write detail names them (#393 QA P3).
+	lastSeq     int
+	lastSavedAt time.Time
+	// rotating: the file is still on the previous key id; the next
+	// successful save moves it to the current key.
+	rotating string
+	// latest lists restored LATEST tasks with nothing on disk (rule 3) and
+	// the saved_at of the snapshot they came from, for TASK_RESUMED_AT_LATEST.
+	latest map[string]time.Time
 }
 
 type recordSource struct {
@@ -230,9 +246,15 @@ func (s *Scheduler) saveRecordsLocked(snap recordSnapshot) error {
 		return err
 	}
 	if err := r.file.Save(plain); err != nil {
-		s.recordSignalLocked(RecordsWrite, "the standalone task record "+r.file.Path()+" was not saved: "+err.Error()+"; the change was not applied, and tasks changed since the last save will not survive a restart")
-		return fmt.Errorf("save task records: %w", err)
+		s.recordSignalLocked(RecordsWrite, "the standalone task record "+r.file.Path()+" was not saved: "+err.Error()+
+			"; a refused create/update/start was not applied, and tasks changed since the last save will not survive a restart"+s.recordStaleNoteLocked()+"; the save is retried every 30s")
+		return fmt.Errorf("%w: %w", ErrTaskRecordsNotSaved, err)
 	}
+	if r.rotating != "" {
+		log.Printf("task records: rotated %s from key id %s to key id %s", r.file.Path(), r.rotating, r.file.KeyID())
+		r.rotating = ""
+	}
+	r.lastSeq, r.lastSavedAt = snap.Seq, snap.SavedAt
 	s.recordClearLocked(RecordsWrite)
 	r.saved = map[string]string{}
 	for _, t := range snap.Tasks {
@@ -353,13 +375,17 @@ func (s *Scheduler) restoreRecordsLocked() {
 		return
 	}
 	s.recordReadableLocked()
-	log.Printf("task records: loaded %s key_id=%s saved_at=%s tasks=%d tombstones=%d", path, info.KeyID, snap.SavedAt.Format(time.RFC3339), len(snap.Tasks), len(snap.Deleted))
+	r.lastSeq, r.lastSavedAt = snap.Seq, snap.SavedAt
+	log.Printf("task records: loaded %s seq=%d key_id=%s saved_at=%s tasks=%d tombstones=%d", path, snap.Seq, info.KeyID, snap.SavedAt.Format(time.RFC3339), len(snap.Tasks), len(snap.Deleted))
 	s.applySnapshotLocked(snap)
 	if info.Previous {
+		// The atomic write never touches the old file, so a failed re-save
+		// keeps running from it; the 30s retry finishes the rotation.
+		r.rotating = info.KeyID
 		if err := s.saveRecordsLocked(s.snapshotLocked(nil, "")); err != nil {
+			s.recordSignalLocked(RecordsWrite, "key rotation: "+path+" could not be re-saved on the current key id "+r.file.KeyID()+": "+err.Error()+
+				"; the file is still on the previous key id "+info.KeyID+" and the tasks run from it. Keep the previous key configured; the save is retried every 30s"+s.recordStaleNoteLocked())
 			log.Printf("task records: re-save on the current key id %s failed: %v (the file stays on key id %s)", r.file.KeyID(), err, info.KeyID)
-		} else {
-			log.Printf("task records: rotated %s from key id %s to key id %s", path, info.KeyID, r.file.KeyID())
 		}
 	}
 }
@@ -377,8 +403,12 @@ func (s *Scheduler) applySnapshotLocked(snap recordSnapshot) {
 			}
 		}
 	}
+	r.latest = map[string]time.Time{}
 	for _, rec := range snap.Tasks {
 		t, failure := s.restoredTask(rec)
+		if failure == "" && t.DesiredRun == TaskDesiredRun && t.Start.Mode == StartModeLatest && !t.StartFromDisk {
+			r.latest[t.ID] = snap.SavedAt
+		}
 		s.tasks[t.ID] = t
 		r.saved[t.ID] = recordJSON(rec)
 		if n := idNumber(t.ID); n > s.seq {
@@ -431,9 +461,14 @@ func (s *Scheduler) restoredTask(rec taskRecord) (Task, string) {
 		t.StartFromDisk, t.OperatorStart = true, opStart
 		if start, err := diskResumeStart(s.dataDir, t.ID); err == nil {
 			t.Start = start
+			if opStart != nil && opStart.Mode == StartModeGTID {
+				// #393 QA P2-3: the executed set comes from the same stored
+				// bytes as the position (seed, sealed segments, open tail).
+				t.Start.GTIDSet = storedResumeGTID(s.dataDir, t.ID, t.Source.Flavor, opStart.GTIDSet)
+			}
 			return t, ""
 		}
-		if opStart != nil && opStart.Mode != StartModeLatest && opStart.Mode != "" && preambleOnlyDir(s.dataDir, t.ID) {
+		if opStart != nil && preambleOnlyDir(s.dataDir, t.ID) {
 			// Nothing was ever stored: the operator start re-reads from its point.
 			t.Start, t.StartFromDisk, t.OperatorStart = *opStart, false, nil
 			return t, ""
@@ -444,8 +479,11 @@ func (s *Scheduler) restoredTask(rec taskRecord) (Task, string) {
 		}
 		return t, ""
 	}
-	if t.DesiredRun == TaskDesiredRun && (opStart == nil || opStart.Mode == StartModeLatest || opStart.Mode == "") {
-		return t, ResumePositionUnknown + ": the task was running but data_dir holds no segment for it, and its start is LATEST: resolving LATEST again would skip every transaction written while the server was down. Start the task to accept the current tip"
+	// Rule 3 (#393 QA gap (b)): no segment means no stored history, so a
+	// LATEST task resumes at a fresh tip; ResumeRecordedTasks records
+	// TASK_RESUMED_AT_LATEST. A directory with history never gets here.
+	if t.DesiredRun == TaskDesiredRun && opStart == nil {
+		t.Start = StartConfig{Mode: StartModeLatest}
 	}
 	if t.State != StateFailed && t.SpecRevision == 0 && t.DesiredRun != TaskDesiredRun {
 		t.State = StateCreated
@@ -483,7 +521,16 @@ func (s *Scheduler) ResumeRecordedTasks() int {
 	}
 	resume := append([]string(nil), s.records.resume...)
 	failed := s.records.failed
-	s.records.resume, s.records.failed = nil, nil
+	latest := s.records.latest
+	s.records.resume, s.records.failed, s.records.latest = nil, nil, nil
+	for _, id := range resume {
+		if at, ok := latest[id]; ok {
+			s.appendEventLocked(id, "TASK_RESUMED_AT_LATEST", "resumed at the source's current tip after a restart: the task directory holds no segment, so there is no stored history to continue",
+				"transactions committed while the server was down are not in the backup; last record save "+at.UTC().Format(time.RFC3339))
+			log.Printf("task records: task %s had no segment on disk; resuming at LATEST (last record save %s)", id, at.UTC().Format(time.RFC3339))
+		}
+	}
+	s.flushPendingEventsLocked()
 	for id, msg := range failed {
 		s.failRestoredLocked(id, msg)
 	}
@@ -568,4 +615,113 @@ func (s *Scheduler) replayRecordSignals() {
 	for subject, detail := range s.records.open {
 		s.SignalFailure(Finding{TaskID: ClusterFindingTask, Kind: FindingTaskRecordsFailed, Subject: subject, Severity: FindingCritical, Detail: detail})
 	}
+}
+
+// recordStaleNoteLocked names the last snapshot that is on disk, so a
+// TASK_RECORDS_FAILED/write detail shows how stale the file is.
+func (s *Scheduler) recordStaleNoteLocked() string {
+	r := s.records
+	if r.lastSavedAt.IsZero() {
+		return "; no snapshot has been saved yet"
+	}
+	return fmt.Sprintf("; the file on disk is seq %d, saved_at %s", r.lastSeq, r.lastSavedAt.UTC().Format(time.RFC3339))
+}
+
+// recordAppliedUnsavedLocked is the Stop/Delete path when the save failed
+// (#393 QA P2-1): the action stands in memory, and the write detail says
+// what a restart would do with the older file. Caller holds s.mu.
+func (s *Scheduler) recordAppliedUnsavedLocked(id, action string, cause error) {
+	var what string
+	switch action {
+	case "delete":
+		what = "task " + id + " was deleted in memory but the record file still has it: a restart now brings task " + id + " back (and may resume it)"
+	default:
+		what = "task " + id + " was stopped in memory but the record file still has desired RUN: a restart now would resume it"
+	}
+	where := "the standalone task record"
+	if s.records.file != nil {
+		where = s.records.file.Path()
+	}
+	s.recordSignalLocked(RecordsWrite, what+". "+where+" was not saved: "+cause.Error()+s.recordStaleNoteLocked()+"; the save is retried every 30s, and the first one that lands carries this "+action)
+	log.Printf("task records: %s of task %s applied in memory, record not saved: %v", action, id, cause)
+}
+
+// RetryRecordSave saves the current memory projection while a save is
+// owed (TASK_RECORDS_FAILED/write open). The app calls it every 30s.
+func (s *Scheduler) RetryRecordSave() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.recordsActiveLocked() || s.records.locked || s.records.volatile {
+		return
+	}
+	if _, owed := s.records.open[RecordsWrite]; !owed {
+		return
+	}
+	if err := s.saveRecordsLocked(s.snapshotLocked(nil, "")); err != nil {
+		log.Printf("task records: retry save failed: %v", err)
+		return
+	}
+	log.Printf("task records: retry save landed (seq %d)", s.records.lastSeq)
+}
+
+// storedResumeGTID is the GTID set a restored GTID task continues from:
+// the operator seed, every sealed segment's transactions and the open
+// tail's complete ones (binlog.Ledger, #394). MySQL only for the sealed
+// part (SealedText); MariaDB keeps the seed plus the tail's header.
+func storedResumeGTID(dataDir, id, flavor, seed string) string {
+	dir, ok := taskBinlogDir(dataDir, id)
+	if !ok {
+		return seed
+	}
+	if flavor == "" {
+		flavor = "mysql"
+	}
+	ledger := binlog.LedgerAt(dir)
+	if ledger.IsDamaged() {
+		return seed
+	}
+	if _, set, ok := ledger.ResumeGTID(flavor, seed); ok && set != "" {
+		return set
+	}
+	return unionGTIDText(flavor, seed, ledger.SealedText(flavor))
+}
+
+// unionGTIDText unions GTID texts in flavor's syntax; a text that does not
+// parse is skipped, and "" stays "".
+func unionGTIDText(flavor string, texts ...string) string {
+	var set gomysql.GTIDSet
+	for _, text := range texts {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		if set == nil {
+			parsed, err := gomysql.ParseGTIDSet(flavor, text)
+			if err != nil {
+				continue
+			}
+			set = parsed
+			continue
+		}
+		if err := set.Update(text); err != nil {
+			// An unparsable part is left out, as an unparsable first part is.
+			continue
+		}
+	}
+	if set == nil || set.IsEmpty() {
+		return ""
+	}
+	return set.String()
+}
+
+// recordTombstoneLocked keeps a tombstone for id in memory after a Delete
+// whose save failed; the next snapshot carries it. Caller holds s.mu.
+func (s *Scheduler) recordTombstoneLocked(id string) {
+	if !s.recordsActiveLocked() {
+		return
+	}
+	if s.records.tombstones == nil {
+		s.records.tombstones = map[string]time.Time{}
+	}
+	s.records.tombstones[id] = time.Now().UTC()
 }
