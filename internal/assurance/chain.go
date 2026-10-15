@@ -49,11 +49,14 @@ type Switch struct {
 
 // Inputs is everything the chain knows; see docs/design/0009-phase1-backup-chain.md.
 type Inputs struct {
-	Flavor        string
-	StartGTID     string
-	Checkpoint    Checkpoint
-	Order         []string
-	Rows          []Row
+	Flavor     string
+	StartGTID  string
+	Checkpoint Checkpoint
+	Order      []string
+	Rows       []Row
+	// NoCatalog says there is no catalog at all (standalone without meta):
+	// a segment without a row is then not I6_MISSING_ROW.
+	NoCatalog     bool
 	Local         *binlog.Ledger
 	Objects       map[string]int64
 	ObjectStorage bool
@@ -464,6 +467,9 @@ func (c *Chain) checkCopies(seg *Segment, now time.Time, add func(Kind, string, 
 		return
 	}
 	row := seg.Row
+	if row == nil && c.in.NoCatalog {
+		return
+	}
 	if row == nil {
 		if seg.Local {
 			add(I6MissingRow, seg.Name, fmt.Sprintf("sealed segment %s has no catalog row", seg.Name), seg.Name)

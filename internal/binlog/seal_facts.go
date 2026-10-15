@@ -22,7 +22,7 @@ type SealFacts struct {
 	HasSpan     bool
 	// SHA256 is the lowercase hex digest of the whole file.
 	SHA256 string
-	// Size is the number of bytes the digest covers (not set yet).
+	// Size is the number of bytes the digest covers.
 	Size int64
 }
 
@@ -44,7 +44,11 @@ func ReadSealFacts(path string) (SealFacts, error) {
 	if _, err := io.Copy(io.Discard, r); err != nil {
 		return SealFacts{}, err
 	}
-	out := SealFacts{SHA256: hex.EncodeToString(h.Sum(nil))}
+	info, err := f.Stat()
+	if err != nil {
+		return SealFacts{}, err
+	}
+	out := SealFacts{SHA256: hex.EncodeToString(h.Sum(nil)), Size: info.Size()}
 	if ok {
 		out.First, out.Last, out.HasSpan = first.UTC(), last.UTC(), true
 	}

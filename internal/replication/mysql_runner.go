@@ -3109,7 +3109,8 @@ func sourceEventTime(event *replication.BinlogEvent) time.Time {
 }
 
 // withSealFacts adds the sealed file's event-time span and SHA-256 to row
-// (ADR 0009 P1-4). A file that cannot be read leaves them unknown; the seal
+// (ADR 0009 P1-4) and records the checksum in the task directory's seal
+// checksum ledger, the rehasher's source without a catalog sha (P2-3). A file that cannot be read leaves them unknown; the seal
 // itself does not depend on them.
 func withSealFacts(row tasks.BinlogFile) tasks.BinlogFile {
 	facts, err := binlog.ReadSealFacts(row.FilePath)
@@ -3121,6 +3122,11 @@ func withSealFacts(row tasks.BinlogFile) tasks.BinlogFile {
 	if facts.HasSpan {
 		first, last := facts.First, facts.Last
 		row.FirstEventAt, row.LastEventAt = &first, &last
+	}
+	if err := binlog.RecordSealFacts(row.FilePath, facts); err != nil {
+		// The rehasher counts the segment unavailable, as it did before the
+		// ledger existed; the seal does not depend on it.
+		log.Printf("seal checksum ledger task=%s file=%s: %v", row.TaskID, row.FilePath, err)
 	}
 	return row
 }

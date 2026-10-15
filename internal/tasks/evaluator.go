@@ -107,8 +107,7 @@ type chainCacheEntry struct {
 }
 
 type rehashResult struct {
-	size     int64
-	mtime    time.Time
+	stamp    binlog.FileStamp
 	ok       bool
 	evidence string
 }
@@ -597,13 +596,16 @@ func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 	e.mu.Lock()
 	cached, hit := e.chainCache[task.ID]
 	e.mu.Unlock()
-	var order []string
+	var (
+		order []string
+		rows  []assurance.Row
+	)
 	if hit && cached.fp == fp && !catalog {
 		order = cached.order // a disk-only order is a function of the directory
 	} else {
-		order = e.s.replayOrder(task.ID)
+		order, rows = e.s.chainOrder(task.ID, dataDir, catalog)
 	}
-	orderKey := strings.Join(order, "\x00")
+	orderKey := strings.Join(order, "\x00") + "\x01" + rowsKey(rows)
 	var violations []assurance.Violation
 	if hit && cached.fp == fp && cached.orderKey == orderKey {
 		violations = cached.violations
@@ -613,6 +615,8 @@ func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 			StartGTID: StartGTIDText(task),
 			Local:     binlog.LedgerAt(dir),
 			Order:     order,
+			Rows:      rows,
+			NoCatalog: !catalog,
 		})
 		violations = chain.Check(now)
 		e.mu.Lock()
@@ -629,7 +633,7 @@ func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 			continue
 		}
 		info, err := os.Stat(filepath.Join(dir, name))
-		if err != nil || info.Size() != r.size || !info.ModTime().Equal(r.mtime) {
+		if err != nil || !binlog.StampOf(info).Equal(r.stamp) {
 			continue // changed since it was hashed: the next cycle judges it
 		}
 		detail := "segment " + name + " no longer matches the sha256 recorded at seal: " + r.evidence
@@ -651,7 +655,8 @@ func (e *Evaluator) setRehash(taskID, segment string, r rehashResult) (changed b
 	return !had && !r.ok || had && prev.ok != r.ok
 }
 
-// fingerprint hashes the task directory's names, sizes and mtimes.
+// fingerprint hashes the task directory's names and file stamps (size,
+// mtime, ctime): an in-place edit that keeps the mtime still changes it.
 func (e *Evaluator) fingerprint(taskID string) string {
 	e.s.mu.Lock()
 	dataDir := e.s.dataDir
@@ -670,7 +675,8 @@ func (e *Evaluator) fingerprint(taskID string) string {
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(h, "%s\x00%d\x00%d\n", en.Name(), info.Size(), info.ModTime().UnixNano())
+		st := binlog.StampOf(info)
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\n", en.Name(), st.Size, st.MTime.UnixNano(), st.CTime)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

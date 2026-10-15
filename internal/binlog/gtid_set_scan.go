@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: one binlog segment reader, beginning with the 4-byte magic header
-// output: the previous-GTIDs set and every MySQL GTID event in that segment, with the byte offset and event-header time of each event; a damaged event size past the file or above 1 GiB returns ErrCorruptEventSize without allocating (#358)
+// output: the previous-GTIDs set and every MySQL GTID event in that segment, with the byte offset and event-header time of each event; a damaged event size past the file or above 1 GiB returns ErrCorruptEventSize without allocating (#358); in a sealed segment a short event size, a short body or a CRC32 trailer that does not match (ErrEventChecksum, wrapped in ErrCorruptEventSize) is also not readable (#380 QA)
 // pos: read the transactions a segment actually contains so replay can exclude ones a restored backup already has
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -8,6 +8,8 @@ package binlog
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"time"
@@ -122,7 +124,7 @@ func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (Segment
 	}
 	offset := uint64(4)
 	hdr := make([]byte, goreplication.EventHeaderSize)
-	crc32 := false
+	hasCRC := false
 	for {
 		if _, err := io.ReadFull(r, hdr); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -135,6 +137,9 @@ func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (Segment
 		}
 		eventSize := uint64(binary.LittleEndian.Uint32(hdr[9:13]))
 		if eventSize < uint64(goreplication.EventHeaderSize) {
+			if sealed {
+				return SegmentGTIDLog{}, ErrCorruptEventSize
+			}
 			return out, nil
 		}
 		rest, err := eventBodyBytes(eventSize, remaining, sealed)
@@ -148,6 +153,9 @@ func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (Segment
 		if rest > 0 {
 			body = makeEventBody(rest)
 			if _, err := io.ReadFull(r, body); err != nil {
+				if sealed {
+					return SegmentGTIDLog{}, ErrCorruptEventSize
+				}
 				return out, nil
 			}
 		}
@@ -155,13 +163,16 @@ func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (Segment
 			remaining -= int64(rest)
 		}
 		eventType := goreplication.EventType(hdr[4])
+		if sealed && (hasCRC || (eventType == goreplication.FORMAT_DESCRIPTION_EVENT && fdChecksum(body))) && !eventCRCOK(hdr, body) {
+			return SegmentGTIDLog{}, fmt.Errorf("%w: %w at offset %d", ErrCorruptEventSize, ErrEventChecksum, offset)
+		}
 		switch eventType {
 		case goreplication.FORMAT_DESCRIPTION_EVENT:
 			if fdChecksum(body) {
-				crc32 = true
+				hasCRC = true
 			}
 		case goreplication.PREVIOUS_GTIDS_EVENT:
-			text, ok := decodePreviousGTIDs(body, crc32)
+			text, ok := decodePreviousGTIDs(body, hasCRC)
 			if !ok {
 				return SegmentGTIDLog{}, errPreviousGTIDs
 			}
@@ -174,6 +185,23 @@ func scanSegmentGTIDsBounded(r io.Reader, remaining int64, sealed bool) (Segment
 		}
 		offset += eventSize
 	}
+}
+
+// ErrEventChecksum is a sealed segment event whose CRC32 trailer does not
+// match its bytes (binlog_checksum=CRC32). It is always wrapped in
+// ErrCorruptEventSize, so every reader that treats that error as "not
+// readable" (/window, /replay, the chain's I1) agrees on it.
+var ErrEventChecksum = errors.New("binlog event checksum mismatch")
+
+// eventCRCOK checks the CRC32 trailer of one event: the IEEE CRC of the
+// header and body without the last four bytes.
+func eventCRCOK(hdr, body []byte) bool {
+	if len(body) < goreplication.BinlogChecksumLength {
+		return false
+	}
+	n := len(body) - goreplication.BinlogChecksumLength
+	sum := crc32.Update(crc32.ChecksumIEEE(hdr), crc32.IEEETable, body[:n])
+	return sum == binary.LittleEndian.Uint32(body[n:])
 }
 
 func fdChecksum(body []byte) bool {

@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start; the highest open segment chosen for resume, shared with the open-tail scan; SegmentPositions is cached per path, size and mtime
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start; the highest open segment chosen for resume, shared with the open-tail scan; SegmentPositions is cached per path and file stamp (size, mtime, ctime), bounded
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -12,8 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
 	goreplication "github.com/go-mysql-org/go-mysql/replication"
 )
@@ -225,31 +223,27 @@ func EventSpan(path string) (start, end uint32, ok bool) {
 // end is the last complete event's end log_pos, the same number DurableCursor
 // returns. start is that chain's first event position. ok is false when
 // DurableCursor is not ok: the file is missing, partial, or has no complete event.
-// Cached per path, size and mtime (an open file that grows is read again).
+// Cached per path and FileStamp (an open file that grows is read again).
 func SegmentPositions(path string) (start, end uint32, ok bool) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return 0, 0, false
 	}
-	if v, hit := positionsCache.Load(path); hit {
-		e := v.(positionsCacheEntry)
-		if e.size == info.Size() && e.mtime.Equal(info.ModTime()) {
-			return e.start, e.end, e.ok
-		}
+	st := StampOf(info)
+	if e, hit := positionsCache.get(path, st); hit {
+		return e.start, e.end, e.ok
 	}
 	start, end, ok = segmentPositionsUncached(path)
-	positionsCache.Store(path, positionsCacheEntry{size: info.Size(), mtime: info.ModTime(), start: start, end: end, ok: ok})
+	positionsCache.put(path, st, positionsCacheEntry{start: start, end: end, ok: ok})
 	return start, end, ok
 }
 
 type positionsCacheEntry struct {
-	size       int64
-	mtime      time.Time
 	start, end uint32
 	ok         bool
 }
 
-var positionsCache sync.Map // path -> positionsCacheEntry
+var positionsCache stampCache[positionsCacheEntry] // path -> span
 
 func segmentPositionsUncached(path string) (start, end uint32, ok bool) {
 	endPos, _, _, cursorOK := DurableCursor(path)
