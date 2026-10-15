@@ -25,6 +25,12 @@ var errPreviousGTIDs = errors.New("unreadable previous gtid event")
 // size. A size past the end of an open segment is a torn tail, not this error.
 var ErrCorruptEventSize = errors.New("corrupt binlog event size")
 
+// ErrSegmentTruncated is a sealed segment that ends before a whole binlog:
+// shorter than the magic, without the magic, or inside an event header. It is
+// always wrapped in ErrCorruptEventSize, so every reader that treats a corrupt
+// sealed segment as not readable treats this one the same way.
+var ErrSegmentTruncated = errors.New("sealed segment is cut short")
+
 // maxEventBody is 1 GiB: above MySQL's maximum max_allowed_packet, and far
 // above any real binlog event. A damaged size field used to ask for ~4 GiB
 // and crash the process (#358).
