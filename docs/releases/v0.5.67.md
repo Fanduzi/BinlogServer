@@ -1,6 +1,6 @@
 # Binlog Server v0.5.67
 
-Release date: 2026-10-15 (pending tip QA)
+Release date: 2026-10-15
 
 v0.5.67 brings automatic task resume to standalone, using task records encrypted at rest (#385, ADR 0010). It also lands phase 2 of the ADR 0009 health evaluator (P2-1..P2-4), which **defaults to `off`**. It fixes truncated sealed segments (#381), a lost FAILED state (#389), and resume and checkpoint problems after a switchover or a large transaction (#391). It adds migration `000009`, which is additive and optional: `minRequiredSchemaVersion` stays 6 and the floor stays v0.5.51.
 
@@ -32,7 +32,7 @@ Upgrade steps:
    - **Environment:** `BINLOG_SERVER_TASK_KEY=<base64 or 64 hex chars, 32 bytes>`, for container secrets. The process unsets the variable right after reading it. A file is still preferred, because the environment of a running process is visible to the same user and root.
    - A key in the YAML file itself is never accepted.
 3. Replace the binary and restart. No `key_missing` opens, and every task directory raises `TASK_UNADOPTED`.
-4. **Adopt every directory.** Adopt needs the source (including the password) **and `cluster_key`**: without it the API answers 400 `cluster_key is required`. `name` and `storage` are optional. To adopt them in bulk:
+4. **Adopt every directory.** Adopt needs the source (including the password) **and `cluster_key`**: without it the API answers 400 `cluster_key is required`. `name` and `storage` are optional. To adopt them in bulk with `scripts/adopt-leftovers.sh`, which ships in the release tarball (needs `curl` and `jq`):
    ```bash
    scripts/adopt-leftovers.sh --api http://127.0.0.1:8080              # lists the leftovers and prints a map template
    # fill in name, cluster_key and source for each id; chmod 600 the file (it holds passwords)
@@ -101,7 +101,7 @@ Other standalone changes to know about:
 
 ## Changes since v0.5.66
 
-`git log --oneline --first-parent v0.5.66..main` (to be updated to the tagged commit):
+`git log --oneline --first-parent v0.5.66..91d60d5`, plus the merge of this notes PR (#398), which v0.5.67 is tagged on:
 
 | Commit | Change |
 |---|---|
@@ -119,7 +119,7 @@ Other standalone changes to know about:
 | `ed36c91` | PR #396: checkpoint at transaction boundaries, batched (#391) |
 | `69a45cc` | PR #393: ADR 0010 standalone encrypted task records |
 | `b4c52f4` | PR #395: standalone task records, auto-resume, full-disk findings, `/api/health` degraded |
-| (pending) | PR #399: `TASK_UNADOPTED` in every evaluator mode, `scripts/adopt-leftovers.sh` |
+| `91d60d5` | PR #399: `TASK_UNADOPTED` in every evaluator mode, `scripts/adopt-leftovers.sh` |
 
 ## Known behavior
 
@@ -129,7 +129,15 @@ Other standalone changes to know about:
 
 ## QA summary
 
-Pending: BinlogServerQA tip dogfood. The first tip QA, of `b4c52f4`, passed the binary but found a silent stop that following these notes caused (fixed in #399 and in these notes).
+Tip QA b4c52f4 + #399 PASS (BinlogServerQA), 2026-10-15.
+
+- Tip QA of main `b4c52f4` passed on the binary. `go vet`, `go test -race` and all CI checks are green.
+  - Upgrades from the real v0.5.66 binary: meta (schema 8 then `migrate up` to 9) and standalone (adopt, then a restore match).
+  - Standalone with no key and with a key: `key_invalid` on a 0644 key, auto-resume after `kill -9` with matching restores.
+  - Rollbacks to v0.5.66 for meta and standalone.
+  - Evaluator `on` regressions: `SEGMENT_UNREADABLE`, `SEGMENT_OVERLAP`, `DUMP_STALLED`/`SOURCE_UNREACHABLE`, and LATEST plus switchover under GET load.
+  - A mixed v0.5.66 + v0.5.67 cluster with takeover.
+- The same QA found a P1 that following the notes caused: with the default evaluator off, a leftover directory was silent. It was fixed in PR #399, which QA passed at `7aebcaf`: `TASK_UNADOPTED` is raised in every evaluator mode and `/api/health` degrades, and `scripts/adopt-leftovers.sh` adopts leftovers in bulk. These notes were corrected in the same round.
 
 ## Chinese Release Notes
 
