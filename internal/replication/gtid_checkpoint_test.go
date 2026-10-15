@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: raw and parsed GTID events, a stored checkpoint, and a file/pos dump whose MySQL 1236 arrives on GetEvent
-// output: proof that a flushed checkpoint grows the executed GTID under raw mode after the dump names a source file, that resume uses it when the stream returns 1236, and that a file/pos 1236 with no stored GTID names 1236 and a purged binlog
+// output: proof that a flushed checkpoint grows the executed GTID under raw mode after the dump names a source file, that resume uses it when the stream returns 1236, and that a file/pos 1236 with no stored GTID names 1236 and a purged binlog; the checkpoint is written at the commit, not for the GTID or BEGIN event (#391)
 // pos: regression coverage for GTID checkpoint retention and purged-file resume
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -157,7 +157,8 @@ func TestMySQLRunnerRun_GTIDCheckpointSurvivesFlush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(store.upserts) < 4 {
+	// #391: commit, rotate and next file; GTID and BEGIN write nothing.
+	if len(store.upserts) != 3 {
 		t.Fatalf("upserts: %+v", store.upserts)
 	}
 	for i, cp := range store.upserts {
@@ -165,9 +166,11 @@ func TestMySQLRunnerRun_GTIDCheckpointSurvivesFlush(t *testing.T) {
 			t.Fatalf("upsert %d wiped gtid: %+v", i, cp)
 		}
 	}
-	assertGTID(t, "mysql", store.upserts[0].GTIDSet, seed)
-	assertGTID(t, "mysql", store.upserts[1].GTIDSet, seed)
-	assertGTID(t, "mysql", store.upserts[2].GTIDSet, sampleGTID+":1-11")
+	if store.upserts[0].Pos != 154 {
+		t.Fatalf("first checkpoint is not the commit: %+v", store.upserts[0])
+	}
+	assertGTID(t, "mysql", store.upserts[0].GTIDSet, sampleGTID+":1-11")
+	assertGTID(t, "mysql", store.upserts[1].GTIDSet, sampleGTID+":1-11")
 	last := store.upserts[len(store.upserts)-1]
 	if last.File != "mysql-bin.000011" || last.Pos != 4 {
 		t.Fatalf("rotate checkpoint: %+v", last)
@@ -381,12 +384,11 @@ func TestMySQLRunnerRun_RawModeGTIDAdvances(t *testing.T) {
 	if !raw {
 		t.Fatal("RawModeEnabled is off")
 	}
-	if len(store.upserts) < 3 {
+	// #391: only the commit writes a checkpoint, and it carries the GTID.
+	if len(store.upserts) != 1 || store.upserts[0].Pos != 154 {
 		t.Fatalf("upserts: %+v", store.upserts)
 	}
-	assertGTID(t, "mysql", store.upserts[0].GTIDSet, seed)
-	assertGTID(t, "mysql", store.upserts[1].GTIDSet, seed)
-	assertGTID(t, "mysql", store.upserts[2].GTIDSet, sampleGTID+":1-11")
+	assertGTID(t, "mysql", store.upserts[0].GTIDSet, sampleGTID+":1-11")
 }
 
 func TestMySQLRunnerRun_FilePosRawDoesNotInventGTID(t *testing.T) {

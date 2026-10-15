@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: one binlog event from the dump, the open segment, the executed GTID set, and the source session
-// output: what that event does to the backup: an identity check before anything is appended, heartbeats reported as progress, the dump's synthetic rotate moving only the cursor, a first rotate opening the named file, a real or artificial rotate sealing and moving on (openSegment.rotate), a mid-file format description held for the first copied event, a stored GTID skipped with the rest of its transaction, a re-sent file header ignored, an event behind the flushed cursor returned as STREAM_REGRESSION, and every other event flushed with its checkpoint
+// output: what that event does to the backup: an identity check before anything is appended, heartbeats reported as progress, the dump's synthetic rotate moving only the cursor, a first rotate opening the named file, a real or artificial rotate sealing and moving on (openSegment.rotate), a mid-file format description held for the first copied event, a stored GTID skipped with the rest of its transaction, a re-sent file header ignored, an event behind the flushed cursor returned as STREAM_REGRESSION, and every other event flushed, with the checkpoint written only at a transaction boundary (txn_boundary.go) and a log line when a transaction streams past longTxnWarnAfter with no commit (#391)
 // pos: phase 4 of MySQLRunner.run (ADR 0008): the event handler shared by the async loop and the semi-sync SynchronousEventHandler
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -29,6 +29,9 @@ type runLoop struct {
 	// in the flushed set. The commit of that transaction clears it.
 	skipStoredTxn bool
 	streamCRC     bool
+	// txn is the transaction framing of copied events; the checkpoint is
+	// written only at a boundary (#391).
+	txn txnBoundary
 }
 
 func (l *runLoop) reportProgress(at time.Time) {
@@ -50,14 +53,20 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 	// The format description sets the checksum flag used to decode later
 	// raw GTID bodies. Noting it does not add a transaction.
 	if event.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
-		if l.trackGTID {
-			l.executed.note(event)
-		}
+		// Always noted: the checksum flag also decodes raw query bodies
+		// for the transaction boundary. A description adds no transaction.
+		l.executed.note(event)
 		l.streamCRC = formatDescriptionHasCRC(event)
 	}
 	sourceEventAt := sourceEventTime(event)
 
 	if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
+		// An idle source: write a checkpoint held back by the batch window.
+		if !l.txn.inTxn {
+			if err := seg.flushCheckpoint(); err != nil {
+				return err
+			}
+		}
 		l.reportProgress(sourceEventAt)
 		return nil
 	}
@@ -133,10 +142,13 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 		l.executed.note(event)
 	}
 
+	now := time.Now()
+	boundary := l.txn.observe(event, l.executed.decodeRaw, now)
 	next := seg.checkpointAt(seg.name, event.Header.LogPos)
-	if err := seg.persistRaw(event.RawData, next); err != nil {
+	if err := seg.persistRaw(event.RawData, next, boundary); err != nil {
 		return err
 	}
+	l.txn.warnLong(l.task.ID, seg.name, seg.pos, now)
 	l.reportProgress(sourceEventAt)
 	return nil
 }
