@@ -358,6 +358,9 @@ type Scheduler struct {
 	// dumpFenceRequired is set for cluster mode. Schema 3 then refuses a
 	// cross-worker finish or takeover that cannot share the connection id.
 	dumpFenceRequired bool
+	// unadoptedOpen: leftover directories this process reported as
+	// TASK_UNADOPTED through the legacy sink (reconcileUnadoptedLegacy).
+	unadoptedOpen map[string]bool
 	// pendingDumps is this process's leftover Binlog Dump ids.
 	// Runner exit and a store reload do not clear it. Schema 4 also writes
 	// the marker to backup_tasks.pending_dump_cleanup, so a restart loads it.

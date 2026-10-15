@@ -124,6 +124,21 @@ A directory left by a binary without records (or created while records were off)
 - A directory with no record and no tombstone raises `TASK_UNADOPTED` as in #388, including when the record file cannot be read (no key / wrong key / corrupt): then every directory is unadopted **and** `TASK_RECORDS_FAILED` names the cause. The detail of both says what to fix.
 - Records `off`: #388 behaviour exactly.
 
+### In every evaluator mode (tip QA b4c52f4 P1)
+
+#388 derived `TASK_UNADOPTED` in the evaluator only. With the default `health.evaluator: off`, a leftover directory raised nothing and `/api/health` stayed 200. Two kinds of task end up as leftovers: every task upgraded from v0.5.66, which kept no record, and every task created while no key was configured, once the restart that adds the key happens. So following the release notes stopped backups silently.
+
+Decision:
+- **Raised in every mode.** While the evaluator does not own the kind (`off`, `shadow`, or before it is built), the scheduler raises CRITICAL `TASK_UNADOPTED` through the legacy sink, using the same detail text as the derivation. It does this for each directory that data_dir knows and that has neither a task nor a tombstone.
+  - When: after Restore, after adopt (which closes it at once), and on every finding-sink tick, which runs every 5 s and catches a directory moved out of data_dir.
+  - Handover: when an `on` evaluator is built, the legacy rows are resolved and the evaluator derives and stores them itself.
+  - `TASK_RECORDS_FAILED` already took the legacy path when the evaluator was off. Both findings are CRITICAL, so both degrade `/api/health` in every mode.
+- **Bulk adopt: a script, not a binary subcommand.** `scripts/adopt-leftovers.sh` lists the open `TASK_UNADOPTED` findings. With `--map` (a 0600 JSON map from task id to name, cluster_key and source), it adopts each listed task, and with `--start` it also starts it. It exits non-zero while any leftover is left unadopted. A v0.5.66 directory holds no source identity, so the operator has to supply the source, password and `cluster_key` (adopt requires `cluster_key`) whatever the tool. A `task adopt-all` subcommand would need exactly the same map. It would also be a second client of the API with its own auth handling, so the script keeps adopt as the one door.
+- **No automatic record when a key first appears.** The key is read only at startup, so by the time it is configured the tasks created without it exist only in the memory of a process that is gone. Hot-loading a key file that appears later was considered and rejected: it adds a file-watch path to the most sensitive input, for one upgrade step that ordering already solves. Instead:
+  - the release notes have operators generate the key and set `task_key_file` **before** the upgrade restart;
+  - the `key_missing` detail says that tasks will not survive a restart;
+  - any task that is still orphaned raises `TASK_UNADOPTED` and degrades `/api/health`. It is never silent.
+
 ## New finding kind
 
 `TASK_RECORDS_FAILED` — CRITICAL, task `_cluster`, signal kind (works with the evaluator off, shadow and on; Managed like the other P2-4 signal kinds). Subject:

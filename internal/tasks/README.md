@@ -2,6 +2,8 @@
 
 ## Files
 - `task_records.go`: ADR 0010（#385）standalone 任务记录。没有 meta DB 时，任务规格（含源库密码）、期望状态、当前失败、id 序号和删除墓碑写入加密的 `{data_dir}/.tasks.enc`（`internal/taskrecords`）；两个操作提交点先存文件再改内存，存失败返回 `ErrTransitionNotRecorded`，worker 失败改期望状态时尽力保存。文件从不存位置：Restore 时起点按 adopt 语义从磁盘算（`diskResumeStart`），磁盘上一个段都没有的 LATEST 任务按 LATEST 续跑（`TASK_RESUMED_AT_LATEST` 事件），有段但读不出位置以 `RESUME_POSITION_UNKNOWN` 失败；GTID 任务的起始 GTID 集由 `storedResumeGTID` 用 `binlog.LedgerAt` 的 `ResumeGTID` 补全；Stop/Delete 存失败时仍改内存（`recordAppliedUnsavedLocked`），打开 write 并由 `RetryRecordSave` 每 30s 重试；`ResumeRecordedTasks` 启动每个期望 RUN 的任务，不需要 adopt/start。文件无法读取（缺密钥、错密钥、损坏）时锁定：不恢复、拒绝改记录的操作、不覆盖文件，目录都报 `TASK_UNADOPTED`；墓碑目录不报。`TASK_RECORDS_FAILED`（`_cluster`，subject key_missing/key_invalid/wrong_key/corrupt/write）在评估器建立前产生时由 `replayRecordSignals` 补交，正确密钥读到文件后关闭启动类 subject。
+- `unadopted_legacy.go`: 评估器不拥有 `TASK_UNADOPTED` 时（off、shadow、建立前）经旧 sink 为每个遗留目录打开 CRITICAL `TASK_UNADOPTED`，adopt、删除或目录移出时关闭；`on` 评估器建立时由 `adoptEarlySignals` 接手。
+- `unadopted_legacy_test.go`: 评估器 off/shadow 时遗留目录打开 TASK_UNADOPTED 并使 health degraded；adopt 后关闭；目录移出后关闭；无密钥建的任务在加密钥重启后不静默。
 - `task_records_test.go`: 记录保存/恢复、kill 后从磁盘续传、LATEST 无段按 LATEST 续跑、有坏段仍失败、Stop/Delete 存失败仍生效、轮换重存失败保留旧文件、GTID 任务续传集合、墓碑、锁定拒绝写入且文件不变、密钥轮换、日志不含密码和密钥、评估器晚于 Restore 建立仍能打开并在正确密钥后关闭告警。
 - `finding.go`: ADR 0009 结论汇。`Report`/`Resolve` 只改进程内账本并唤醒唯一的写入协程，从不阻塞在 I/O 上，持锁或不持锁都能调；写失败的结论留在队列里每 5s 重试，`FindingStats` 给 `/metrics`。`FindingKind` 是封闭集合，每个种类都有故障注入测试。 关停时 `WaitFindingSink` 等待写入者在 ctx 结束后的最后一次 flush。 存储写失败（如 data_dir 满）时开放 finding 以内存为准：评估器保留未保存的打开集（`unsaved`），合成 CRITICAL `FINDINGS_PERSIST_FAILED`（不落盘，写入恢复后自动消失）；`HealthSummary` 有打开的 CRITICAL finding 时为 degraded。
 - `finding_sink_wait_test.go`: 关停时 `WaitFindingSink` 覆盖 ctx 结束后的最后一次 flush。

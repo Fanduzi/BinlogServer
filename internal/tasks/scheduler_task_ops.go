@@ -177,7 +177,14 @@ func (s *Scheduler) ConfigureStorage(id string, storage Storage) error {
 // AdoptDiskBackup attaches source identity to a leftover {data_dir}/{id} directory.
 // The id stays the directory name. Replication is not started.
 // With a task store configured, directories are not adopted from disk.
-func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (Task, error) {
+func (s *Scheduler) AdoptDiskBackup(id string, patch TaskPatch) (adopted Task, adoptErr error) {
+	defer func() {
+		// Runs after the lock below is released: closes the legacy
+		// TASK_UNADOPTED at once (tip QA b4c52f4 P1).
+		if adoptErr == nil {
+			s.reconcileUnadoptedLegacy()
+		}
+	}()
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return Task{}, ErrTaskNotFound

@@ -551,7 +551,7 @@ CREATE TABLE task_mutes (
 兼容规则（与 `000007`/`000008` 同一套路）：
 - **v0.5.x**：`minRequiredSchemaVersion` 保持 6。缺 `task_findings` → 今天的内存模式；缺 `000009` 的列/表（1054/1146）→ 评估器仍运行、仍做调和，但写入回退到 v0.5.66 的 upsert（无栅栏、无 outbox），报 `HEALTH_STORE_DEGRADED`，每个 sweep 重新探测（**不**像 #353 那样记到重启）。集群模式下缺 `000009` 时在启动日志与 `/api/alerts` 显式说明「栅栏不可用」。
 - 已存的 v0.5.66 open 行：`generation=0`，任何新转移都能覆盖；每个 kind 被翻成 Managed 后的第一轮把它们当作 `open` 调和，条件已清除的行关闭，转移标 `reason=UPGRADE`：写入 `finding_transitions` 便于审计，但**不逐条通知**，合并为一条摘要（§7.4）。v0.5.66 中「永不 resolve」的 `EVENT_PERSIST_FAILED` 积压按 §5.5 在首次成功后以 UPGRADE 关闭。
-- **feature flag** `health.evaluator`（`off|shadow|on`，v0.5.x 默认 `off`）：`shadow` 只计算并写 `finding_transitions`（reason=SHADOW，不改 finding 行、不通知），用于升级前比对；`on` 才接管 Managed kind。滚动升级时先升级全部节点、保持 `off`，全部到新版本后再切 `on`；`worker_heartbeats` 中**没有版本字段的心跳一律视为 v0.5.66（旧版本）**。评估器不只在启动时检查：每个 sweep 都检查，`on` 期间若有旧版本节点加入，立即退回 `shadow` 并报 `HEALTH_STORE_DEGRADED`（detail=mixed versions，列出节点），旧节点离开后自动回到 `on`。这样混跑期间不存在旧节点对 Managed kind 的写。
+- **feature flag** `health.evaluator`（`off|shadow|on`，v0.5.x 默认 `off`）：`shadow` 只计算并写 `finding_transitions`（reason=SHADOW，不改 finding 行、不通知），用于升级前比对；`on` 才接管 Managed kind。滚动升级时先升级全部节点、保持 `off`，全部到新版本后再切 `on`；`worker_heartbeats` 中**没有版本字段的心跳一律视为 v0.5.66（旧版本）**。**v0.5.67 没有混版本自动退回**（tip QA b4c52f4 核实代码中不存在）：`on` 期间有旧版本节点在线时，评估器不会退回 `shadow`、也不报 `HEALTH_STORE_DEGRADED`、不记警告。混跑期间不切 `shadow`/`on` 由运维保证（发布说明已写明）。按心跳版本自动退回列为 P2-6 计划项，实现前本节不作承诺。
 - 旧二进制读写跑过 `000009` 的库：新列有默认值或可空，旧 upsert 语句不涉及它们；旧二进制写的行 `owner_epoch` 不变，会被新二进制的下一轮覆盖。混跑集群（滚动升级）期间旧节点无栅栏，发布说明要求滚动升级窗口内不做手工迁移任务。
 - `down`：删三张表和新增列；行为回到 v0.5.66。
 - **v0.6.0**（§15 D1）：`minRequiredSchemaVersion = 9`，低于 9 拒绝启动并给出明确提示（当前版本、所需版本、`./migrate up` 命令）；`health.evaluator` 默认 `on`；6→9、7→9、8→9 直接升级各有迁移测试（P2-2）；删除无栅栏回退代码路径与 `HEALTH_STORE_DEGRADED` 的「缺 000009」分支（保留「写入连续失败」分支）。v0.5.x 的回退只存在到 v0.6.0 为止。
@@ -685,7 +685,7 @@ CREATE TABLE task_mutes (
 | R2-6 同 owner 过期 lease 卡死评估 | `ErrLeaseLagging` 可重试；renew/reclaim 触发 MarkDirty；sweep 每轮重读 lease | §4、§5.1、§5.2、§8.3、§8.6、P2-2/P2-6 QA |
 | R2-7 FAILED 无 finding | `TASK_FAILED`（CRITICAL，按失败类别分 subject，含 #362、#354 1236、#338 权限）及清除条件，放进 P2-4 | §6、§13、P2-4 QA |
 | P3 时钟偏差 | 时间列用库 `NOW(6)`，关闭判定按 generation/单调序号，不比较跨节点墙钟 | §5.5、§8.8 |
-| P3 心跳无版本字段 | 视为 v0.5.66；每个 sweep 检查，`on` 期间旧节点加入退回 `shadow` | §9、P2-6 QA |
+| P3 心跳无版本字段 | 计划（P2-6，未实现）：视为 v0.5.66，`on` 期间旧节点加入退回 `shadow`；v0.5.67 靠运维在混跑期间保持 `off` | §9、P2-6 QA |
 | P3 §7.4 残留 Alertmanager 旧说法 | 删除，改为 `notify.mode=alertmanager` 一句 | §7.4 |
 | P3 waiver evidence 规范 | 规范化洞区间格式（小写 uuid、排序、合并） | §7.1、D3b、P2-5 QA |
 | P3 SOURCE_UNREACHABLE 计划重启 | 两轮去抖、任务级阈值；文档提示 mute（第 3 轮改为任务级 mute，见 §16.3） | §6、§7.4、P2-4 QA |

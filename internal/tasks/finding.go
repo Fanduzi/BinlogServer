@@ -410,6 +410,7 @@ func (s *Scheduler) StartFindingSink(ctx context.Context, interval time.Duration
 			case <-ticker.C:
 				s.republishUnpublished()
 				s.reconcileStalledTransitions()
+				s.reconcileUnadoptedLegacy()
 				b.flush(ctx)
 			}
 		}

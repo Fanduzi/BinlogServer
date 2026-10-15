@@ -211,9 +211,15 @@ func taskUnadoptedDerive(f *Facts) []Instance {
 	if t == nil || !t.Unadopted {
 		return nil
 	}
-	return []Instance{{Detail: "data_dir/" + f.TaskID + " holds a backup with no task metadata (standalone, after a restart or a delete): " +
-		"replication for it is stopped and the backup falls behind the source; POST /api/tasks/" + f.TaskID +
-		"/adopt with the source to resume it, or move the directory out of data_dir"}}
+	return []Instance{{Detail: TaskUnadoptedDetail(f.TaskID)}}
+}
+
+// TaskUnadoptedDetail is the TASK_UNADOPTED detail for a leftover task
+// directory; the legacy sink uses the same text while the evaluator is off.
+func TaskUnadoptedDetail(taskID string) string {
+	return "data_dir/" + taskID + " holds a backup with no task metadata (standalone, after a restart or a delete): " +
+		"replication for it is stopped and the backup falls behind the source; POST /api/tasks/" + taskID +
+		"/adopt with the source and cluster_key to resume it, or move the directory out of data_dir"
 }
 
 func stalledAfter(f *Facts) time.Duration {
