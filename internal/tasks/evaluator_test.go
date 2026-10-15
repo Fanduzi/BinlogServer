@@ -601,19 +601,28 @@ func TestRehasher_KeepsToByteBudgetOver100Tasks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing")
 	}
+	// The budget is what must bind, not the per-segment overhead (listing
+	// 100 tasks, stat, open): ~1 KiB segments keep the rehasher at ~32
+	// segments/s, far below what a loaded CI runner manages, where 180 B
+	// segments (~180/s) left it CPU-bound under the floor. The 4s window
+	// still cycles every task and halves the start-up burst's share.
 	data := t.TempDir()
 	cat := &shaFileStore{}
 	s := NewScheduler(WithDataDir(data), WithFileStore(cat))
+	seqs := make([]int64, 23) // 4 B magic + 23 x 44 B GTID events = 1016 B
+	for i := range seqs {
+		seqs[i] = int64(37 + i)
+	}
 	for i := 0; i < 100; i++ {
 		task, dir := evalTask(t, s, data)
 		p := filepath.Join(dir, "mysql-bin.000001")
-		writeAlertSegment(t, p, 37, 38, 39, 40)
+		writeAlertSegment(t, p, seqs...)
 		cat.add(t, task.ID, p)
 	}
 	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorOn)
 	const rate = 32 << 10
 	r := NewRehasher(e, rate)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	start := time.Now()
 	var done atomic.Bool
@@ -623,8 +632,10 @@ func TestRehasher_KeepsToByteBudgetOver100Tasks(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	elapsed := time.Since(start).Seconds()
-	got := float64(r.Stats().Bytes) / elapsed
+	st := r.Stats()
+	got := float64(st.Bytes) / elapsed
+	t.Logf("rehash read %d B in %d segments over %.3fs: %.0f B/s", st.Bytes, st.Segments, elapsed, got)
 	if got > rate*1.1 || got < rate*0.9 {
-		t.Fatalf("rehash read %.0f B/s over 100 tasks, want %d ±10%%", got, rate)
+		t.Fatalf("rehash read %.0f B/s over 100 tasks (%d segments), want %d ±10%%", got, st.Segments, rate)
 	}
 }
