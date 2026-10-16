@@ -106,7 +106,19 @@ type EvaluatorConfig struct {
 	// LivenessTick is how often the source liveness clocks are checked for
 	// a threshold crossing (default 5s); a crossing marks the task dirty.
 	LivenessTick time.Duration
-	Now          func() time.Time
+	// UploadGrace is upload.grace_sec (0 = assurance.DefaultUploadGrace);
+	// UploadGraceTask overrides it per task id (design 0009 §21.1).
+	UploadGrace     time.Duration
+	UploadGraceTask map[string]time.Duration
+	// UploadLateCriticalAfter is health.upload_late_critical_after_sec
+	// (0 = 24h); UploadLateCriticalAfterTask overrides it per task (§21.7).
+	UploadLateCriticalAfter     time.Duration
+	UploadLateCriticalAfterTask map[string]time.Duration
+	// ObjectListInterval is health.object_list_interval_sec (default 300s);
+	// ObjectListLimit is health.object_list_limit (default 10000) (§21.3).
+	ObjectListInterval time.Duration
+	ObjectListLimit    int
+	Now                func() time.Time
 }
 
 // EvaluatorStats counts what the evaluator did.
@@ -152,7 +164,12 @@ type Evaluator struct {
 	// confirmed: per task, the Confirm-kind keys the previous pass derived.
 	confirmed map[string]map[health.Key]bool
 	signals   map[string]map[health.SignalKey]*signalEntry
-	phase     map[string]string
+	// listings: the object listing cache per prefix (design 0009 §21.3);
+	// objectConfig: the last object storage configuration seen (§21.5).
+	listings     map[string]*objectListing
+	listingGen   int64
+	objectConfig string
+	phase        map[string]string
 
 	// schemaAbsent: the store has no 000009 (ErrSchemaAbsent on the last
 	// write); the legacy Report path keeps writing the managed kinds.
@@ -185,10 +202,16 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	if cfg.Mode == "" {
 		cfg.Mode = EvaluatorOff
 	}
+	if cfg.ObjectListInterval <= 0 {
+		cfg.ObjectListInterval = defaultObjectListInterval
+	}
+	if cfg.ObjectListLimit <= 0 {
+		cfg.ObjectListLimit = defaultObjectListLimit
+	}
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
 		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
-		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}}
+		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}}
 	if s != nil {
 		s.healthEval.Store(e)
 		e.adoptEarlySignals()
@@ -588,7 +611,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	case isCluster:
 		facts.Complete[health.ScopeChainLocal] = true // _cluster has no chain
 	default:
-		if chain := e.chainFacts(task, now); chain != nil {
+		if chain := e.chainFactsInto(task, now, facts); chain != nil {
 			facts.Chain = chain
 			facts.Complete[health.ScopeChainLocal] = true
 		}
@@ -834,6 +857,12 @@ func (e *Evaluator) openFindings(ctx context.Context, id string) ([]health.Findi
 // of segments still on the order with the size and mtime that were hashed.
 // nil when the task directory cannot be read (the scope is incomplete).
 func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
+	return e.chainFactsInto(task, now, nil)
+}
+
+// chainFactsInto is chainFacts; with facts set it also fills the object
+// facts of design 0009 §21 (chain.objects, Produced, NoObjectStorage).
+func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts) *health.ChainFacts {
 	e.s.mu.Lock()
 	dataDir := e.s.dataDir
 	e.s.mu.Unlock()
@@ -863,7 +892,8 @@ func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 	} else {
 		order, rows = e.s.chainOrder(task.ID, dataDir, catalog)
 	}
-	orderKey := strings.Join(order, "\x00") + "\x01" + rowsKey(rows)
+	obj := e.objectView(task.ID, now, rows, facts)
+	orderKey := strings.Join(order, "\x00") + "\x01" + rowsKey(rows) + "\x01" + obj.key
 	var violations []assurance.Violation
 	if hit && cached.fp == fp && cached.orderKey == orderKey {
 		violations = cached.violations
@@ -875,6 +905,11 @@ func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 			Order:     order,
 			Rows:      rows,
 			NoCatalog: !catalog,
+			// §21: object storage, the listed prefixes and the upload grace.
+			ObjectStorage:  obj.storage,
+			Objects:        obj.objects,
+			ObjectPrefixes: obj.prefixes,
+			UploadGrace:    obj.grace,
 			// §20.1: the planner's legacy failback (I3_LEGACY_FAILBACK),
 			// which also suppresses the legacy row size rule (§20.2).
 			Plan: func() []assurance.Violation {
@@ -890,6 +925,9 @@ func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 	for _, v := range violations {
 		if e.cfg.Cluster && v.Kind == assurance.I6MissingLocal {
 			continue // §20.1: the owner judges its own disk (P2-6 delegation)
+		}
+		if objectKinds[v.Kind] && anyIn(v.Segments, obj.unjudged) {
+			continue // §21.3: uploaded after the listing it would be judged by
 		}
 		out.Violations = append(out.Violations, v)
 	}

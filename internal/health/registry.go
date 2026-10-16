@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"binlog_server/internal/assurance"
 )
@@ -69,7 +70,24 @@ func chainDerive(kind Kind) func(f *Facts) []Instance {
 			if len(v.Segments) > 0 {
 				subject = v.Segments[0]
 			}
-			out = append(out, Instance{Key: Key{Subject: subject}, Detail: v.Detail, Evidence: v.Evidence, Segments: append([]string(nil), v.Segments...)})
+			if objectOrigin[v.Kind] {
+				subject = ObjectSubject(subject)
+			}
+			in := Instance{Key: Key{Subject: subject}, Detail: v.Detail, Evidence: v.Evidence, Segments: append([]string(nil), v.Segments...)}
+			switch v.Kind {
+			case assurance.I7UploadLate:
+				after := f.UploadLateCriticalAfter
+				if after <= 0 {
+					after = DefaultUploadLateCriticalAfter
+				}
+				in.Severity = Warning
+				if !v.Since.IsZero() && f.Now.Sub(v.Since) >= after {
+					in.Severity = Critical
+				}
+			case assurance.I7Unverified:
+				in.Confirm = true // the upload writes UPLOADED before its verification (§21.7)
+			}
+			out = append(out, in)
 		}
 		return out
 	}
@@ -78,8 +96,28 @@ func chainDerive(kind Kind) func(f *Facts) []Instance {
 // notDerived are assurance kinds whose facts the evaluator cannot trust
 // yet (design §20.1): no switch records (I2_SWITCH_UNRECORDED), adopt does
 // not backfill rows (I6_MISSING_ROW), objects are not judged before P2-5.2.
-var notDerived = map[assurance.Kind]bool{assurance.I2SwitchUnrecorded: true, assurance.I6MissingRow: true,
-	assurance.I6MissingObject: true, assurance.I6ObjectSizeMismatch: true}
+var notDerived = map[assurance.Kind]bool{assurance.I2SwitchUnrecorded: true, assurance.I6MissingRow: true}
+
+// objectOrigin are the assurance kinds about the stored object: their
+// instances have subject ObjectSubject(segment) (design §21.4).
+var objectOrigin = map[assurance.Kind]bool{assurance.I6MissingObject: true, assurance.I6ObjectSizeMismatch: true}
+
+// objectSuffix marks an object-origin subject.
+const objectSuffix = "#object"
+
+// ObjectSubject is the subject of an object-origin instance of segment.
+func ObjectSubject(segment string) string { return segment + objectSuffix }
+
+// IsObjectSubject reports an object-origin subject and its segment.
+func IsObjectSubject(subject string) (string, bool) {
+	if strings.HasSuffix(subject, objectSuffix) {
+		return strings.TrimSuffix(subject, objectSuffix), true
+	}
+	return "", false
+}
+
+// DefaultUploadLateCriticalAfter is when UPLOAD_LATE turns CRITICAL (§15 D5).
+const DefaultUploadLateCriticalAfter = 24 * time.Hour
 
 func signalSpec(kind Kind, sev Severity, inv, text string) KindSpec {
 	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{ScopeSignals}, Version: 1, Derive: signalDerive(kind),
@@ -114,7 +152,8 @@ var p24Managed = map[Kind]bool{
 
 // p25Managed are the chain.local structural kinds of P2-5.1 (design §20),
 // opened only after two consecutive passes derive them.
-var p25Managed = map[Kind]bool{SegmentDamaged: true, ChainIndexGap: true, LegacyFailback: true, SegmentMissing: true}
+var p25Managed = map[Kind]bool{SegmentDamaged: true, ChainIndexGap: true, LegacyFailback: true, SegmentMissing: true,
+	UploadLate: true} // P2-5.2, design §21.7
 
 // ManagedKinds is every kind the evaluator owns in this release.
 func ManagedKinds() map[Kind]bool {
@@ -151,7 +190,7 @@ func DefaultRegistry() Registry {
 		chainSpec(ChainIndexGap, Critical, ScopeChainLocal, "I2", "indexes are contiguous and every source switch is recorded"),
 		chainSpec(LegacyFailback, Critical, ScopeChainLocal, "I3", "the planner no longer reports a legacy failback"),
 		chainSpec(CheckpointAhead, Critical, ScopeChainLocal, "I5", "the checkpoint is at or before the chain's cut point"),
-		chainSpec(SegmentMissing, Critical, ScopeChainLocal, "I6", "catalog row and local file agree (objects join with P2-5.2)"),
+		chainSpec(SegmentMissing, Critical, ScopeChainLocal, "I6", "catalog row, local file and object agree (an object-origin instance needs its prefix listed completely)", ScopeChainObjects),
 		chainSpec(OrphanRow, Warning, ScopeChainLocal, "I6", "the row has its bytes again, or carries a retention marker", ScopeChainObjects),
 		chainSpec(UploadLate, Warning, ScopeChainLocal, "I7", "the segment is UPLOADED with checksum match"),
 		uploadUnverifiedSpec(),

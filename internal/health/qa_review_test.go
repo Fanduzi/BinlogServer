@@ -89,7 +89,7 @@ func TestQA_Canon_Cases(t *testing.T) {
 // Q2: I6_MISSING_OBJECT finding must not close while objects are not listed (design P2-5 QA).
 func TestQA_SegmentMissingObjectNotClosedWhenUnlisted(t *testing.T) {
 	r := withObjects(qmanaged(DefaultRegistry(), SegmentMissing))
-	open := []Finding{{TaskID: "1", Kind: SegmentMissing, Subject: "mysql-bin.000006", Severity: Critical, Evidence: "object missing"}}
+	open := []Finding{{TaskID: "1", Kind: SegmentMissing, Subject: ObjectSubject("mysql-bin.000006"), Severity: Critical, Evidence: "object missing"}}
 	c := qall()
 	c[ScopeChainObjects] = false // objects not enumerated this pass
 	f := &Facts{TaskID: "1", Now: qt0, Chain: &ChainFacts{}, Complete: c}

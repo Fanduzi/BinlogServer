@@ -13,6 +13,35 @@ import (
 
 func (f *Facts) complete(s Scope) bool { return f != nil && f.Complete[s] }
 
+// instanceComplete: every scope this instance is judged from is complete
+// (design §21.4). An object-origin instance needs chain.objects and its
+// segment's prefix listed completely; a local-origin SEGMENT_MISSING
+// instance needs only chain.local. Other kinds need all their scopes.
+func (f *Facts) instanceComplete(spec KindSpec, key Key) bool {
+	if seg, ok := IsObjectSubject(key.Subject); ok {
+		return f.complete(ScopeChainObjects) && f.ObjectSegments[seg]
+	}
+	if spec.Kind != SegmentMissing {
+		return f.allComplete(spec.Scopes)
+	}
+	var scopes []Scope
+	for _, s := range spec.Scopes {
+		if s != ScopeChainObjects {
+			scopes = append(scopes, s)
+		}
+	}
+	return f.allComplete(scopes)
+}
+
+// configScoped: the instance exists only because the task has object
+// storage, so removing that configuration closes it (Reason CONFIG).
+func configScoped(key Key) bool {
+	if _, ok := IsObjectSubject(key.Subject); ok {
+		return true
+	}
+	return key.Kind == UploadLate
+}
+
 // allComplete: every scope the kind needs is complete (close and update).
 func (f *Facts) allComplete(scopes []Scope) bool {
 	for _, s := range scopes {
@@ -49,7 +78,7 @@ func (r Registry) derive(f *Facts, open map[Key]bool) (Desired, map[Key]bool) {
 	out := Desired{}
 	raw, waivedKeys := r.deriveRaw(f)
 	for key, in := range raw {
-		if r[key.Kind].Confirm && !open[key] && !f.Open[key] && !f.Confirmed[key] {
+		if (r[key.Kind].Confirm || in.Confirm) && !open[key] && !f.Open[key] && !f.Confirmed[key] {
 			continue
 		}
 		out[key] = in
@@ -62,8 +91,8 @@ func (r Registry) derive(f *Facts, open map[Key]bool) (Desired, map[Key]bool) {
 func (r Registry) Candidates(f *Facts) map[Key]bool {
 	raw, _ := r.deriveRaw(f)
 	out := map[Key]bool{}
-	for key := range raw {
-		if r[key.Kind].Confirm {
+	for key, in := range raw {
+		if r[key.Kind].Confirm || in.Confirm {
 			out[key] = true
 		}
 	}
@@ -165,7 +194,7 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			case want.Severity != o.Severity || want.Detail != o.Detail || want.Evidence != o.Evidence || strings.Join(want.Segments, "\x00") != strings.Join(o.Segments, "\x00"):
 				op = OpUpdate
 			}
-			if (op == OpUpdate || op == OpDowngrade) && !f.allComplete(spec.Scopes) {
+			if (op == OpUpdate || op == OpDowngrade) && !f.instanceComplete(spec, key) {
 				op = "" // a pass missing one of the kind's scopes may raise severity, never rewrite or lower it
 			}
 			if op != "" {
@@ -173,7 +202,13 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			}
 			continue
 		}
-		if !f.allComplete(spec.Scopes) {
+		if f.NoObjectStorage && configScoped(key) {
+			tr := closeOf(o, spec, ReasonConfig, f)
+			tr.Instance.Detail = strings.TrimSpace(tr.Instance.Detail + " — object storage no longer configured (" + f.ObjectConfigAudit + "; at " + f.Now.UTC().Format(time.RFC3339) + ")")
+			out = append(out, tr)
+			continue
+		}
+		if !f.instanceComplete(spec, key) {
 			continue
 		}
 		if waivedKeys[key] {
@@ -249,13 +284,17 @@ func (r Registry) HealthOf(open []Finding, f *Facts) TaskHealth {
 			}
 		}
 	}
+	produced := Produced
+	if f.Produced != nil {
+		produced = f.Produced
+	}
 	scopes := map[Scope]bool{}
 	for _, spec := range r {
 		if !spec.Managed {
 			continue
 		}
 		for _, s := range spec.Scopes {
-			if s != ScopeSignals && Produced[s] && !f.complete(s) {
+			if s != ScopeSignals && produced[s] && !f.complete(s) {
 				scopes[s] = true
 			}
 		}

@@ -147,7 +147,7 @@ func (s *FileStore) ApplyTransitions(ctx context.Context, taskID string, fence h
 			fact = now
 		}
 		st.Transitions = append(st.Transitions, Transition{TaskID: taskID, Kind: string(t.Kind), Subject: t.Subject, Op: string(t.Op),
-			Reason: t.Reason, Severity: string(t.Instance.Severity), Digest: d, Generation: gen, KindVersion: t.KindVersion, FactAt: fact})
+			Reason: t.Reason, Severity: string(t.Instance.Severity), Detail: t.Instance.Detail, Digest: d, Generation: gen, KindVersion: t.KindVersion, FactAt: fact})
 		key := health.Key{TaskID: taskID, Kind: t.Kind, Subject: t.Subject}
 		j, exists := index[key]
 		if t.Op == health.OpClose {
