@@ -114,9 +114,12 @@ type Store interface {
 // Transition is one stored finding_transitions row.
 type Transition struct {
 	TaskID, Kind, Subject, Op, Reason, Severity, Digest string
-	Generation                                          int64
-	KindVersion                                         int
-	FactAt                                              time.Time
+	// Detail is the instance detail at the transition (a CONFIG close
+	// carries its audit note here, design 0009 §21.5).
+	Detail      string
+	Generation  int64
+	KindVersion int
+	FactAt      time.Time
 }
 
 // TransitionLister lists stored transitions in generation order (tests,

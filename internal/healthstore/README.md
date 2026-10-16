@@ -1,4 +1,5 @@
 # internal/healthstore Module
+- `Transition.Detail`：转换时实例的 detail（CONFIG 关闭的审计说明在这里，设计 0009 §21.5），文件存储与 meta `ListTransitions` 都返回。
 
 健康评估的持久化接口（ADR 0009 阶段 2 P2-2，设计见 `docs/design/0009-phase2-health-evaluator.md` §5、§9）。尚未接线：P2-3 之后由评估器调用。
 

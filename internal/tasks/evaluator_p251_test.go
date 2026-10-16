@@ -111,7 +111,12 @@ func TestP251LegacyFailbackOpensAndClosesAfterRepair(t *testing.T) {
 // the disk sizes.
 func sizedDir(t *testing.T) *lfFixture {
 	t.Helper()
-	f := newLFFixture(t)
+	return sizedDirWith(t)
+}
+
+func sizedDirWith(t *testing.T, opts ...Option) *lfFixture {
+	t.Helper()
+	f := newLFFixture(t, opts...)
 	f.chain(t, fbA)
 	lfSegment(t, filepath.Join(f.dir, "mysql-bin.000001"), fbA+":1", fbEvents(fbA, 2, 3)...)
 	lfSegment(t, filepath.Join(f.dir, "mysql-bin.000002"), fbA+":1-3", fbEvents(fbA, 4, 5)...)

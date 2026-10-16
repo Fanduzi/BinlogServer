@@ -159,6 +159,12 @@ type FileUploader interface {
 	UploadFile(ctx context.Context, taskID, localPath, objectKey string) error
 }
 
+// ObjectLister lists object keys and sizes under one prefix (design 0009
+// §21.3). truncated means the listing stopped at limit and is incomplete.
+type ObjectLister interface {
+	ListObjects(ctx context.Context, prefix string, limit int) (map[string]int64, bool, error)
+}
+
 type uploadFailureCounter interface {
 	CountUploadFailures(ctx context.Context) (int64, error)
 }

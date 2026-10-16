@@ -1,4 +1,5 @@
 # internal/health Module
+- P2-5.2（设计 0009 §21）：对象来源实例的 subject 是 `seg#object`（`ObjectSubject`），关闭只需该段 prefix 列举完整；`Instance.Confirm` 让 UPLOAD_UNVERIFIED 的链部分两轮确认；UPLOAD_LATE 受管，超过 `UploadLateCriticalAfter`（默认 24h）升为 CRITICAL；`NoObjectStorage` 以 `CONFIG` 原因关闭对象实例；`Facts.Produced` 按任务覆盖全局 Produced。
 
 健康评估的纯类型与生命周期函数（ADR 0009 阶段 2 P2-1，设计见 `docs/design/0009-phase2-health-evaluator.md`）。只依赖 `internal/assurance`，不做 I/O，尚未接线。
 

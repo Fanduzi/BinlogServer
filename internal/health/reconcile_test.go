@@ -274,6 +274,7 @@ func TestHealthOf(t *testing.T) {
 // and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED.
 var wantManagedP24 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true,
 	SegmentDamaged: true, ChainIndexGap: true, LegacyFailback: true, SegmentMissing: true, // P2-5.1, design §20.1
+	UploadLate:        true, // P2-5.2, design §21.7
 	TaskPersistFailed: true, MetadataWriteBlocked: true, EventPersistFailed: true, EventReadFailed: true,
 	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
 	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
@@ -364,7 +365,7 @@ var designScopes = map[Kind][]Scope{
 	GTIDHole:                 {ScopeChainLocal},
 	LegacyFailback:           {ScopeChainLocal},
 	CheckpointAhead:          {ScopeChainLocal},
-	SegmentMissing:           {ScopeChainLocal}, // chain.objects joins with P2-5.2 (§20.1)
+	SegmentMissing:           {ScopeChainLocal, ScopeChainObjects}, // per instance since P2-5.2 (§21.4)
 	OrphanRow:                {ScopeChainLocal, ScopeChainObjects},
 	UploadLate:               {ScopeChainLocal},
 	UploadUnverified:         {ScopeChainLocal, ScopeSignals},
@@ -412,7 +413,11 @@ func TestCloseNeedsEveryScope(t *testing.T) {
 			continue
 		}
 		r := qmanaged(DefaultRegistry(), k)
-		open := []Finding{{TaskID: "1", Kind: k, Subject: "s", Severity: Critical}}
+		subject := "s"
+		if k == SegmentMissing {
+			subject = ObjectSubject("s") // per instance (§21.4): the object-origin instance reads both
+		}
+		open := []Finding{{TaskID: "1", Kind: k, Subject: subject, Severity: Critical}}
 		for _, missing := range scopes {
 			c := qall()
 			c[missing] = false

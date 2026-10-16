@@ -1223,6 +1223,13 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 			ecfg.UnreachableAfterTask[id] = time.Duration(sec) * time.Second
 		}
 	}
+	// design 0009 §21: upload grace, UPLOAD_LATE escalation, object listing.
+	ecfg.UploadGrace = time.Duration(cfg.UploadGraceSec) * time.Second
+	ecfg.UploadGraceTask = secondsMap(cfg.UploadGraceTaskSec)
+	ecfg.UploadLateCriticalAfter = time.Duration(cfg.Health.UploadLateCriticalAfterSec) * time.Second
+	ecfg.UploadLateCriticalAfterTask = secondsMap(cfg.Health.UploadLateCriticalAfterTaskSec)
+	ecfg.ObjectListInterval = time.Duration(cfg.Health.ObjectListIntervalSec) * time.Second
+	ecfg.ObjectListLimit = cfg.Health.ObjectListLimit
 	if ecfg.Instance, err = tasks.RandomID(); err != nil {
 		return err
 	}
@@ -1253,4 +1260,16 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 	spawn(func() { rehasher.Run(ctx) })
 	log.Printf("health evaluator %s (sweep %s, rehash %d B/s, node %s)", mode, ecfg.Sweep, cfg.Health.RehashBytesPerSec, ecfg.NodeID)
 	return nil
+}
+
+// secondsMap turns a per-task seconds map into durations (nil when empty).
+func secondsMap(m map[string]int) map[string]time.Duration {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(m))
+	for id, sec := range m {
+		out[id] = time.Duration(sec) * time.Second
+	}
+	return out
 }

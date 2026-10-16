@@ -73,6 +73,32 @@ func (u *S3Uploader) UploadFile(ctx context.Context, _ string, localPath, object
 	return err
 }
 
+// ListObjects lists the keys under prefix with their sizes (design 0009
+// §21.3). It stops after limit keys (limit <= 0 means no limit) and
+// reports truncated, so the caller never treats a partial listing as
+// complete. Any listing error is returned and nothing is judged from it.
+func (u *S3Uploader) ListObjects(ctx context.Context, prefix string, limit int) (map[string]int64, bool, error) {
+	if u == nil || u.client == nil {
+		return nil, false, fmt.Errorf("object storage is not configured")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	out := map[string]int64{}
+	for obj := range u.client.ListObjects(ctx, u.bucket, minio.ListObjectsOptions{Prefix: filepath.ToSlash(prefix), Recursive: true}) {
+		if obj.Err != nil {
+			return nil, false, obj.Err
+		}
+		if limit > 0 && len(out) >= limit {
+			return out, true, nil
+		}
+		out[obj.Key] = obj.Size
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return out, false, nil
+}
+
 // SealedObjectMatches reports whether the stored object is the same bytes as the sealed local file.
 // It HEADs the object and compares that ETag with the ETag of the local file.
 // A single PUT at or under 16MiB uses the file MD5. A larger upload uses the same 16MiB part boundaries as UploadFile.
