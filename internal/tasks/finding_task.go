@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"binlog_server/internal/healthstore"
 )
 
 // notePersistFailureLocked records that the store does not hold this task's
@@ -17,9 +19,9 @@ func (s *Scheduler) notePersistFailureLocked(id string, state State, err error) 
 	if err == nil {
 		return
 	}
-	if errors.Is(err, ErrStaleTaskWrite) {
+	if errors.Is(err, ErrStaleTaskWrite) || errors.Is(err, healthstore.ErrFenced) {
 		// The store's fence says another epoch owns the row now; its row wins
-		// and there is nothing of ours left to republish.
+		// and there is nothing of ours left to republish (#360 / P2-6a).
 		if _, ok := s.unpublished[id]; ok {
 			delete(s.unpublished, id)
 			s.SignalSuccess(id, FindingTaskPersistFailed, "")

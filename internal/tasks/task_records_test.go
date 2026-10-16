@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -553,13 +554,21 @@ func TestTaskRecords_InvalidKeyIsKeyInvalid(t *testing.T) {
 	}
 }
 
+// failingRecordFile fails Save while fail is set. A run's exit save can
+// land after StopTask returns, so the flag is shared across goroutines.
 type failingRecordFile struct {
 	*taskrecords.Store
-	fail bool
+	fail atomic.Bool
+}
+
+func newFailingRecordFile(store *taskrecords.Store, fail bool) *failingRecordFile {
+	f := &failingRecordFile{Store: store}
+	f.fail.Store(fail)
+	return f
 }
 
 func (f *failingRecordFile) Save(plain []byte) error {
-	if f.fail {
+	if f.fail.Load() {
 		return errors.New("no space left on device")
 	}
 	return f.Store.Save(plain)
@@ -567,12 +576,12 @@ func (f *failingRecordFile) Save(plain []byte) error {
 
 func TestTaskRecords_FailedSaveRefusesCreate(t *testing.T) {
 	data := recordDir(t)
-	file := &failingRecordFile{Store: taskrecords.Open(data, recordKey(t, 1), nil)}
+	file := newFailingRecordFile(taskrecords.Open(data, recordKey(t, 1), nil), false)
 	s, _ := recordProcess(t, data, file, nil)
 	if _, err := s.CreateTaskFromSpec("ok", "ok-key", recordSourceCfg(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	file.fail = true
+	file.fail.Store(true)
 	_, err := s.CreateTaskFromSpec("no", "no-key", recordSourceCfg(), nil, nil)
 	if !errors.Is(err, ErrTransitionNotRecorded) || !errors.Is(err, ErrTaskRecordsNotSaved) {
 		t.Fatalf("create with a failing save: %v", err)
@@ -591,7 +600,7 @@ func TestTaskRecords_FailedSaveRefusesCreate(t *testing.T) {
 	if !strings.Contains(f.Detail, "seq 1") || !strings.Contains(f.Detail, "saved_at") {
 		t.Fatalf("write detail lacks the last good seq/saved_at: %q", f.Detail)
 	}
-	file.fail = false
+	file.fail.Store(false)
 	if _, err := s.CreateTaskFromSpec("again", "again-key", recordSourceCfg(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +613,7 @@ func TestTaskRecords_FailedSaveRefusesCreate(t *testing.T) {
 func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
 	data := recordDir(t)
 	key := recordKey(t, 1)
-	file := &failingRecordFile{Store: taskrecords.Open(data, key, nil)}
+	file := newFailingRecordFile(taskrecords.Open(data, key, nil), false)
 	s, r := recordProcess(t, data, file, nil)
 	run, err := s.CreateTaskFromSpec("run", "run-key", recordSourceCfg(), &StartConfig{Mode: StartModeFilePos, File: "mysql-bin.000001", Pos: 4}, nil)
 	if err != nil {
@@ -618,7 +627,7 @@ func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.next(t)
-	file.fail = true
+	file.fail.Store(true)
 	if err := s.StopTask(run.ID); err != nil {
 		t.Fatalf("stop refused by a failing save: %v", err)
 	}
@@ -640,7 +649,7 @@ func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
 	if _, ok := clusterFinding(t, s, RecordsWrite); !ok {
 		t.Fatal("write finding closed while the save still fails")
 	}
-	file.fail = false
+	file.fail.Store(false)
 	s.RetryRecordSave()
 	if _, ok := clusterFinding(t, s, RecordsWrite); ok {
 		t.Fatal("write finding still open after a successful retry")
@@ -682,7 +691,7 @@ func TestTaskRecords_RotationResaveFailureKeepsOldFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(filepath.Join(data, taskrecords.FileName))
-	file := &failingRecordFile{Store: taskrecords.Open(data, cur, old), fail: true}
+	file := newFailingRecordFile(taskrecords.Open(data, cur, old), true)
 	s2, _ := recordProcess(t, data, file, nil)
 	if got, err := s2.GetTask(task.ID); err != nil || got.Source.Password != recordPassword {
 		t.Fatalf("restore on the previous key with a failing re-save: %+v %v", got, err)
@@ -695,7 +704,7 @@ func TestTaskRecords_RotationResaveFailureKeepsOldFile(t *testing.T) {
 	if !ok || !strings.Contains(f.Detail, old.ID()) {
 		t.Fatalf("failed rotation: write finding %+v %v, want the previous key id", f, ok)
 	}
-	file.fail = false
+	file.fail.Store(false)
 	s2.RetryRecordSave()
 	if _, info, err := taskrecords.Open(data, cur, nil).Load(); err != nil || info.KeyID != cur.ID() {
 		t.Fatalf("retry did not move the file to the current key: %+v %v", info, err)
@@ -765,7 +774,7 @@ func TestTaskRecords_LogsHoldNoSecrets(t *testing.T) {
 	r3.next(t)
 	// A refused write and a Stop applied without a save: their error text,
 	// finding detail and log lines (#393 QA P3).
-	fail := &failingRecordFile{Store: taskrecords.Open(recordDir(t), cur, nil), fail: true}
+	fail := newFailingRecordFile(taskrecords.Open(recordDir(t), cur, nil), true)
 	s4, _ := recordProcess(t, recordDir(t), fail, nil)
 	_, refused := s4.CreateTaskFromSpec("x", "x-key", recordSourceCfg(), nil, nil)
 	if refused == nil {

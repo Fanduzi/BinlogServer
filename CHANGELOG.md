@@ -12,6 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- #417（P1）：集群里 owner 被冻住超过 lease TTL、新 owner 接管后，旧 owner 醒来会继续往分段里追加，并写 checkpoint、目录行和上传结果，任务永久卡在 `STORAGE_INCONSISTENT`。现在每个写边界都带 lease `(owner, epoch)` 栅栏（ADR 0009 设计 §23）：本地 lease 时钟在追加、新建 open 文件、封存、上传之前拒绝过期的 epoch；checkpoint 和 `binlog_files` 的写在同一事务里对 `task_leases` 加锁校验。被拒的 run 作为租约移交退出，不写 FAILED。封存改名改用 `RENAME_NOREPLACE`。行为变化：meta 续约持续报错时，超过 `0.8 × lease_ttl_sec` 就停止落盘，不再写到 `lease_grace_sec`。
+- #360（P3）：宿主机或 meta 停顿后，丢了 lease 的旧 owner 会把 STOPPING / STOPPED（`lease lost`，desired STOP）写进新 owner 刚认领、还没改写的任务行，新 owner 把它当成远端 Stop，任务停在 STOPPED、需要人工 Start。现在这条写在同一事务里对 `task_leases` 校验，lease 已有新持有者时不写（ADR 0009 P2-6a，§23.4.1）。#417 的数据面栅栏会让这个竞态在 meta 暂停超过 lease TTL 时必现，所以两者一起发布。
+- #415（P2）：租约接管续写上一个 epoch 的 open 分段时直接改名，沿用同一个 inode。被 SIGSTOP 冻住的旧 owner 醒来后用旧句柄把缓冲的 Rotate 追加进新 owner 已封存的文件，封存文件比封存时多 42 字节，健康评估报 CRITICAL `SEGMENT_UNREADABLE`。现在新 epoch 把完整事件复制成自己的文件再删旧文件，旧句柄写不到续写或封存的分段。接管时多一次本地复制（最大一个 open 分段）。
+
 ## [v0.5.70] - 2026-10-17
 
 发布说明：`docs/releases/v0.5.70.md`。没有新迁移；新增可选配置项 `upload.grace_sec`、`health.upload_late_critical_after_sec`、`health.object_list_interval_sec`、`health.object_list_limit`（及按任务覆盖）。

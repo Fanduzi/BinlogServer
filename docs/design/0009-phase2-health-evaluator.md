@@ -602,6 +602,7 @@ CREATE TABLE task_mutes (
 | P2-5a | #348：`upload.grace` 配置（全局默认 15min，任务级覆盖）由 tasks 显式传入 `assurance.Inputs.UploadGrace`（`assurance.DefaultUploadGrace` 已有，缺的是配置与传入） | 「全局 `upload.grace=2m` 时 2m 后报、15min 默认不生效」「任务级 `upload_grace=30m` 覆盖全局」红 | — | P2-3 |
 | P2-5 | **前置：§6.1 五条**（实例级 origin/scope、CONFIG 关闭 + 审计、按前缀的列举完整性、未配置 = 确认事实、按任务的 chain.objects 判断）；`UPLOAD_LATE` 升级阈值（全局 `health.upload_late_critical_after` 默认 24h，任务级覆盖）；新链 kind：`SEGMENT_DAMAGED`、`CHAIN_INDEX_GAP`、`GTID_HOLE`(#352，Waivable)、`LEGACY_FAILBACK`、`CHECKPOINT_AHEAD`、`SEGMENT_MISSING`、`ORPHAN_ROW`、`UPLOAD_LATE`、`UPLOAD_UNVERIFIED` 条件化；waiver 存取；保留期删除标记 + 事件(#341)；`SEAL_FACTS_ABSENT`(#353) | 每种 kind ≥2 个构造目录用例：打开一次、修复后关闭一次；waiver 精确匹配 | 上述新 kind | P2-4、P2-5a |
 | P2-6a | #360：任务行写走 `meta.fencedExec`；TaskFacts 与 `task_leases` 交叉校验 | 「#355 run 3 复现后旧 owner 的 STOPPED 写被拒」「行与 lease 不一致时 task.state 不完整」红 | — | P2-2 |
+| P2-6b | #417：数据面端到端写栅栏（§23）：本地 lease 时钟 + meta 事务内校验 `task_leases`，覆盖追加、新 open 文件、封存、checkpoint、目录行、上传 | 「冻结 owner 醒来后的追加/checkpoint/目录行被拒」「过期 run 不建 open 文件」红 | — | P2-6a 平行、#416 |
 | P2-6 | 集群：评估权跟随任务 lease、`_health` 选评估者、非共享存储委派最后 owner（绑定最后 lease epoch + 节点）、OWNER_CHANGED、ErrFenced 处理、接管调和、`HEALTH_STALE`、节点消失清理 | 两/三节点：冻结 owner 写被拒且新 owner 不被锁死；委派在新 lease 后失效 | `HEALTH_STALE` | P2-4、P2-5、P2-6a |
 | P2-7 | API（`/api/alerts` 分页、`/tasks/{id}/health`、mute（key 级 + 任务级，`task_mutes`）、waive、evaluate、standalone takeover）+ `task_muted` 指标+ 指标（`task_healthy` 总有序列、meta 宕机缓存、真实 2s）+ 推荐规则文件；swagger | 「新建任务即有序列」「meta 暂停时 2s 内返回且序列为 0」「评估停 `stale_after` → UNKNOWN」红 | — | P2-6 |
 | P2-8 | Console 告警页（静音、豁免操作）、健康徽标、finding 事件按事实时间排序 | UI 测试：告警页数据与 `/api/alerts` 一致 | — | P2-7 |
@@ -928,3 +929,73 @@ P2-5.1（§20）只翻转了本地事实。本步把「配置了对象存储时�
 - `healthstore` / `meta`：PutWaiver → ListWaivers 读回规范化 evidence；Unwaive 清空；关闭后 waiver 仍能 List 到。
 - `tasks`：评估器传入 Switches 后，failback 黄金目录不因跨 stint 打开 `GTID_HOLE`；构造单源内部洞（#352）→ `GTID_HOLE` OPEN → PutWaiver 精确区间 → CLOSE(WAIVED)、健康恢复；checkpoint 超前 → `CHECKPOINT_AHEAD` OPEN，拉回后关闭；连续两轮评估中 checkpoint 前进不导致整链 Check 每轮重算（I5 除外）。
 - `api`：`POST /api/alerts/waive` 400（非 Waivable / evidence 非法）、200 后 Evaluate 关闭该洞。
+
+## 23. P2-6b：数据面端到端写栅栏（#417，2026-10-17）
+
+### 23.1 问题
+
+P2-6a 只栅住了任务行。集群里 owner 被冻住（SIGSTOP、宿主机停顿、长 GC）超过 lease TTL，新 owner 以 epoch+1 接管后，旧 owner 醒来时手里已经有读好的事件，它产生的副作用都没有栅栏：
+
+| 副作用 | 原来的保护 | 冻结醒来后的后果 |
+|---|---|---|
+| open 分段的追加 / flush | 无 | 与新 owner 写同一个分段（#417），`STORAGE_INCONSISTENT re-dump damage` 永久挂住 |
+| 接管时继续旧 epoch 的 open 文件 | rename，沿用 inode | 旧句柄写进新 owner 的分段或封存文件（#415，由 #416 改成复制） |
+| 新 open 文件 | 无 | 旧 epoch 名字的残留文件 |
+| 封存 rename | 封存前 `Verify`，之后 stat 再 rename | `Verify` 与 rename 之间冻住时覆盖或抢先占用封存名 |
+| checkpoint、OPEN/SEALED 目录行、目录行删除 | 无 | 旧 epoch 的位点覆盖新 owner 的位点，续传从错的位置开始 |
+| 上传后的目录行更新 | 无 | 旧 owner 改写新 owner 的目录行 |
+
+### 23.2 栅栏令牌
+
+令牌就是任务 lease 的 `(owner, epoch)`（§4，与 P2-6a 同一个计数器，从不与 `_health` epoch 比较）。每个写边界有两道检查：
+
+1. **本地 lease 时钟（`tasks.LeaseClock`）**。调度器每次 Acquire / Renew 成功，记下**发出请求之前**的 `time.Now()`；Renew 返回 false、grace 用完、`yieldLostLeaseLocked` 时把该 epoch 记为 lost（同一 epoch 不会再复活，只有更高 epoch 能覆盖）。`Fresh(task, epoch)` 要求未 lost 且距上次确认不到 `ttl × 4/5`。比较用 Go 的单调时钟读数，进程被 SIGSTOP 或虚机暂停时单调时钟照走，所以醒来后的第一次写就会被拒，不需要先和 meta 通信。剩下的 1/5 吸收本机与数据库的时钟速率差。不启动 Acquire 的启动路径（同一 worker 已持有 lease）先同步 Renew 一次再确认。
+2. **meta 事务内校验**。run 的 context 带上 `tasks.FenceIdentity`。`UpsertCheckpoint`、`UpsertBinlogFile`、`DeleteBinlogFile` 看到它时在同一个事务里先 `SELECT owner_worker_id, epoch FROM task_leases WHERE task_id = ? FOR UPDATE`，owner 和 epoch 都相同才写；lease 已释放（owner 为空）或没有行也拒绝（与 P2-6a 的 STOPPED 收敛写不同：数据写必须是当前持有者）。行锁让这次写和 Acquire 串行：接管先提交，旧写被拒；旧写先提交，新 owner 续传时能读到。
+
+两道都返回 `tasks.ErrWriteFenced`，runner 包成 `ErrLeaseEpochMismatch` → `tasks.NewLeaseHandoff`：调度器只停掉本进程，不写 FAILED，不写 `CHECKPOINT_WRITE_FAILED`。
+
+### 23.3 写边界
+
+| 边界 | 本地时钟 | meta 事务 |
+|---|---|---|
+| run 开始（`resolveRunStart` 之前，含接管复制） | ✓ | — |
+| 打开分段（`openBinlogWriterIn`，新建 open 文件、写 magic） | ✓ | OPEN 行 ✓ |
+| 追加（`appendAndPersist`，在 Append/Flush 之前） | ✓ | — |
+| checkpoint 与 OPEN 行（`flushCheckpoint`、rotate、LATEST 锚点） | ✓（flush） | ✓ |
+| 封存（`Verify` 之后、rename 之前再查一次；rename 用 `renameat2(RENAME_NOREPLACE)`） | ✓ | SEALED 行 ✓ |
+| 释放已被 UPLOADED 覆盖的 open 段 | ✓ | 行删除 ✓ |
+| 上传（`uploadSealed` 之前；上传后的目录行更新在同一 context 下） | ✓ | ✓ |
+
+后台补传不属于某个 run，没有令牌，按原来的方式写（它只处理已封存、已有目录行的文件）。standalone 不接本地时钟、不带令牌，行为不变。
+
+### 23.4 与 #411、#416 的关系
+
+- **#416（#415）叠在下面**：接管把旧 epoch 的 open 文件复制成新 inode。它保证就算旧 owner 在本地检查和 `write(2)` 之间冻住，写进去的也是一个没有名字的文件。本节的栅栏让旧 owner 一醒来就停，不再产生字节、位点、目录行。两者缺一不可：只有复制，旧 owner 还会写 checkpoint 和目录行；只有栅栏，检查与写之间仍有微秒级窗口。
+- **#411（P2-6a）合入本 PR**：任务行的 `meta.FencedExec` 与本节 `execUnderFence` 共用一个 `leaseRowForUpdate`（同一条 `SELECT … FOR UPDATE`）。差别只在策略：任务行允许在 lease 已释放或没有行时收敛到 STOPPED，数据写只允许当前持有者。
+
+### 23.4.1 为什么两个栅栏必须一起上（#420 QA 测试 3）
+
+只有本节的数据面栅栏、没有 P2-6a 时，meta 暂停超过 lease TTL（QA 用 SIGSTOP 暂停 meta 的 mariadbd 30s）会把任务永久停住：
+
+1. meta 恢复后，owner B 的本地 lease 时钟已过 `ttl × 4/5`，下一次追加被拒，run 按租约移交退出。这一步是对的。
+2. 同一时刻 A 在 `task_leases` 上认领过期 lease（epoch+1），但还没写任务行。
+3. B 的续约返回 false（owner 已变），`rowTakenOverLocked` 读任务行，行上还是 B，于是走老的 `failSafeStopLocked` 路径，把 STOPPING / STOPPED（`last_error = lease lost`，desired STOP）写进任务行。
+4. A 读回任务行，看到 STOPPED，按远端 Stop 取消自己的 dump。任务停在 STOPPED、没有 owner，需要人工 Start。
+
+main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这个竞态很少出现；它本身就是 #360。数据面栅栏让 B 先退出，把竞态变成了必现。P2-6a 让第 3 步的写在同一事务里对 `task_leases` 校验：lease 已是 A 的新 epoch，写被拒，B 只在内存里让出，任务行留给 A。续约返回 false 只可能是 owner/epoch 已变或 lease 已释放（`RenewTaskLease` 不看过期时间），所以第 3 步的写总能看到新的持有者。
+
+回归测试 `tasks/p26_handoff_row_test.go` 覆盖两种先后顺序（栅栏先拒、续约先发现）；在没有 P2-6a 的提交上它复现 QA 的现象（`STOPPED`、owner 为空、`last_error = lease lost`）。
+
+### 23.5 剩余窗口
+
+本地检查与系统调用之间（微秒级）冻住超过 TTL：追加由 #416 的 inode 分离兜住；封存 rename 用 NOREPLACE，最多留下一个没有目录行的封存文件（SEALED 行的 meta 写会被拒），由链检查报出，不会静默覆盖。
+
+行为变化：`LEASE_DEGRADED`（meta 续约报错）期间，超过 `0.8 × lease_ttl_sec` 没有续约成功就停止落盘并按租约移交退出，不再写到 `lease_grace_sec`。默认 TTL 15s、grace 30s，原来 lease 在库里过期后还会继续写约 15s，这正是可能与新 owner 双写的窗口。meta 恢复后任务按过期 lease 被重新认领。
+
+### 23.6 测试（先红）
+
+- `replication/write_fence_test.go`：运行中 lease 移走后放出冻结前读到的事件，分段字节不变、checkpoint 不再写、run 以带 `ErrWriteFenced` 的租约移交结束；一开始就过期的 run 不建 open 文件；封存目标已存在时 NOREPLACE 拒绝且不覆盖。
+- `meta/write_fence_test.go`（sqlmock）：新 epoch、已释放、无行都拒绝且不执行 INSERT；匹配时 INSERT 与锁在同一事务；无令牌时仍是单条语句。
+- `tasks/write_fence_test.go`：`LeaseClock` 的 4/5 窗口、lost 不复活、旧 epoch 不覆盖新 epoch。
+- `tasks/p26_handoff_row_test.go`：§23.4.1 的两种顺序下旧 owner 都不改任务行。
+- QA：两节点 + `rotload.sh` 高频轮转 + 对 owner `SIGSTOP` 20s/60s/120s 后 `SIGCONT`，旧 owner 日志出现 `fence: refused`，任务不进入 `STORAGE_INCONSISTENT`，最终恢复校验和一致。

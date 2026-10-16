@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED; checkpoint and binlog_files upsert/delete run under execUnderFence when the context carries a fence identity (ADR 0009 P2-6b, #417)
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -744,6 +744,23 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.upsert_task")
 	defer endMetaSpan(span)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if err := s.upsertTaskInTx(ctx, tx, task); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// upsertTaskInTx writes the task snapshot (and run start/finish) on an open
+// transaction. Callers that fence the write (UpsertTaskFenced) lock task_leases
+// in the same transaction first.
+func (s *MySQLTaskStore) upsertTaskInTx(ctx context.Context, tx *sql.Tx, task tasks.Task) error {
 	sourceJSON, err := s.marshalSource(task.Source)
 	if err != nil {
 		return err
@@ -761,14 +778,6 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	if updatedAt.IsZero() {
 		updatedAt = time.Now()
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
 
 	var previousRunID sql.NullString
 	queries := sqlcgen.New(tx)
@@ -829,10 +838,6 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		}); err != nil {
 			return err
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return err
 	}
 	return nil
 }
@@ -1241,8 +1246,8 @@ func (s *MySQLTaskStore) UpsertCheckpoint(ctx context.Context, taskID string, ch
 		updatedAt = time.Now()
 	}
 
-	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		_, err := s.db.ExecContext(
+	return s.execUnderFence(ctx, taskID, func(ctx context.Context, q fenceExecer) error {
+		_, err := q.ExecContext(
 			ctx,
 			upsertCheckpointSQL,
 			taskID,
@@ -1405,8 +1410,8 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 		query = upsertBinlogFileUnknownEndSQL
 	}
 
-	if err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		_, err := s.db.ExecContext(
+	if err := s.execUnderFence(ctx, meta.TaskID, func(ctx context.Context, q fenceExecer) error {
+		_, err := q.ExecContext(
 			ctx,
 			query,
 			meta.TaskID,
@@ -1443,8 +1448,8 @@ func (s *MySQLTaskStore) DeleteBinlogFile(ctx context.Context, taskID, fileName 
 	if taskID == "" || fileName == "" {
 		return fmt.Errorf("task id and file name are required")
 	}
-	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		_, err := s.db.ExecContext(ctx, deleteBinlogFileSQL, taskID, fileName, epoch)
+	return s.execUnderFence(ctx, taskID, func(ctx context.Context, q fenceExecer) error {
+		_, err := q.ExecContext(ctx, deleteBinlogFileSQL, taskID, fileName, epoch)
 		return err
 	})
 }

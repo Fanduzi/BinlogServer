@@ -328,6 +328,94 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 // A trailing artificial Rotate (end_log_pos 0) must not make resume decide
 // the segment is missing. The extra bytes are dropped and the dump continues
 // at the last real event.
+// TestTakeover_FrozenOwnerHandleCannotReachContinuedSegment is #415: the
+// earlier owner was SIGSTOPped with its open segment still open. The new
+// epoch continued that segment and, under rotation churn, sealed it. When
+// the earlier owner woke it appended its buffered Rotate through the old
+// handle, and the sealed file grew past its seal facts (SEGMENT_UNREADABLE).
+// The continued segment must not share the old handle's file.
+func TestTakeover_FrozenOwnerHandleCannotReachContinuedSegment(t *testing.T) {
+	workerB := t.TempDir()
+	workerA := t.TempDir()
+	const taskID = "task-1"
+	aDir := filepath.Join(workerA, taskID)
+	if err := os.MkdirAll(aDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	eventAt := time.Unix(1_700_000_000, 0).UTC()
+	const beforeSQL = "INSERT INTO frozen_owner VALUES ('ON-A')"
+	const afterSQL = "INSERT INTO frozen_owner VALUES ('ON-B')"
+	first, endPos := chainBinlogEvents(4, eventAt, []namedEvent{
+		{typ: goreplication.FORMAT_DESCRIPTION_EVENT, body: formatDescriptionBody(eventAt)},
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", beforeSQL)},
+	})
+	openPath := filepath.Join(aDir, "mysql-bin.000003.open.e1")
+	writeBinlogSegment(t, openPath, first)
+	// Worker A's writer handle, held across the stall.
+	frozen, err := os.OpenFile(openPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer frozen.Close()
+
+	next, _ := chainBinlogEvents(endPos, eventAt, []namedEvent{
+		{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", afterSQL)},
+	})
+	phase := append([]*goreplication.BinlogEvent{preambleEvent(0, eventAt.Add(-time.Hour))}, next...)
+	catalog := &takeoverCatalog{rows: []tasks.BinlogFile{{
+		TaskID: taskID, FileName: "mysql-bin.000003", FilePath: openPath,
+		State: "OPEN", EndPos: tasks.FilePos(endPos), UploadState: "LOCAL_ONLY",
+	}}}
+	store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000003", Pos: endPos}, ok: true}
+	syncer := &stopResumeSyncer{phases: [][]*goreplication.BinlogEvent{phase}}
+	runner := NewMySQLRunner(workerB, WithCheckpointStore(store), WithFileMetaStore(catalog))
+	runner.fetcher = &fakeSourceMetaFetcher{
+		status:     MasterStatus{File: "mysql-bin.000099", Pos: 9000},
+		serverUUID: "11111111-1111-1111-1111-111111111111",
+	}
+	runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+	task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+	task.Epoch = 2
+	task.OwnerWorkerID = "worker-b"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx, task) }()
+	waitForMarker(t, workerA, taskID, afterSQL)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	continued := filepath.Join(aDir, "mysql-bin.000003.open.e2")
+	before, err := os.ReadFile(continued)
+	if err != nil {
+		t.Fatalf("continued segment: %v", err)
+	}
+	if !strings.Contains(string(before), beforeSQL) || !strings.Contains(string(before), afterSQL) {
+		t.Fatalf("segment lost the boundary: %q", before)
+	}
+
+	// Worker A wakes and appends the Rotate it had buffered.
+	const staleRotate = "STALE-ROTATE-FROM-FROZEN-OWNER"
+	if _, err := frozen.Write([]byte(staleRotate)); err != nil {
+		t.Fatalf("frozen owner write: %v", err)
+	}
+	after, err := os.ReadFile(continued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(after), staleRotate) || len(after) != len(before) {
+		t.Fatalf("frozen owner's write reached the continued segment: %d -> %d bytes", len(before), len(after))
+	}
+	if _, err := os.Stat(openPath); !os.IsNotExist(err) {
+		t.Fatalf("old epoch still present: %v", err)
+	}
+	if temps, _ := filepath.Glob(filepath.Join(aDir, ".takeover-*")); len(temps) != 0 {
+		t.Fatalf("takeover temp left behind: %v", temps)
+	}
+}
+
 func TestTakeover_ArtificialRotatePosZeroStaysOnWorker(t *testing.T) {
 	dir := t.TempDir()
 	const taskID = "task-1"

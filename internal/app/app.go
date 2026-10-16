@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417)
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -1157,6 +1157,13 @@ func applyClusterRuntimeOptions(
 	}
 	if workerEnabled {
 		runnerOpts = append(runnerOpts, replication.WithLeaseVerifier(leaseManager))
+		if isClusterMode(cfg) {
+			// ADR 0009 P2-6 (#417): one lease clock, written by the
+			// scheduler's acquire/renew, read at every runner write boundary.
+			clock := tasks.NewLeaseClock()
+			opts = append(opts, tasks.WithLeaseClock(clock))
+			runnerOpts = append(runnerOpts, replication.WithWriteFence(clock))
+		}
 	}
 	return opts, runnerOpts
 }

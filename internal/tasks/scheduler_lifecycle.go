@@ -201,6 +201,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		previousOwner := task.OwnerWorkerID
 		previousState := task.State
 		leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
+		acquireSentAt := time.Now()
 		epoch, acquired, err := s.leaseManager.Acquire(leaseCtx, id, s.clusterWorkerID, s.leaseTTL)
 		cancelLease()
 		if err != nil {
@@ -213,6 +214,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		}
 		task.OwnerWorkerID = s.clusterWorkerID
 		task.Epoch = epoch
+		s.leaseClock.Confirm(id, epoch, acquireSentAt, s.leaseTTL)
 		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
 		acquiredNow = true
 		if previousState == StateRunning || previousState == StateLeaseDegraded {
@@ -221,6 +223,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		}
 	} else if s.leaseManager != nil {
 		task.RunID = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
+		s.confirmHeldLeaseLocked(id, task.OwnerWorkerID, task.Epoch)
 	}
 
 	pending := s.leftoverDumpLocked(id, task)

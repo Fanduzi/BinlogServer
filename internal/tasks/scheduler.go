@@ -267,6 +267,15 @@ func WithClusterWorkerID(workerID string) Option {
 	}
 }
 
+// WithLeaseClock makes the scheduler record each acquire and renew of its
+// leases on clock, and mark an epoch lost when renew says so or grace runs
+// out. The runner's write fence reads the same clock (ADR 0009 P2-6, #417).
+func WithLeaseClock(clock *LeaseClock) Option {
+	return func(s *Scheduler) {
+		s.leaseClock = clock
+	}
+}
+
 // WithClusterLease 配置 lease 的 TTL、续租周期和降级宽限时间。
 func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
 	return func(s *Scheduler) {
@@ -346,6 +355,7 @@ type Scheduler struct {
 	leaseTTL           time.Duration
 	leaseRenewInterval time.Duration
 	leaseGrace         time.Duration
+	leaseClock         *LeaseClock
 
 	checkpointReader CheckpointReader
 	eventStore       EventStore
