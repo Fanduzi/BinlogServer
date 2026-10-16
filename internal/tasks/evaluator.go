@@ -943,8 +943,18 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		}
 		out.Violations = append(out.Violations, v)
 	}
+	// #413: copy the mismatches under e.mu; setRehash writes this inner map
+	// under the lock, so it must never be read after Unlock.
 	e.mu.Lock()
-	results := e.rehash[task.ID]
+	var results map[string]rehashResult
+	for name, r := range e.rehash[task.ID] {
+		if !r.ok {
+			if results == nil {
+				results = map[string]rehashResult{}
+			}
+			results[name] = r
+		}
+	}
 	e.mu.Unlock()
 	for _, name := range order {
 		r, ok := results[name]
