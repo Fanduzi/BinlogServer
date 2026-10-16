@@ -2,6 +2,7 @@
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API, CONFIRM) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
 // output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
+// note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -126,13 +127,13 @@ type EvaluatorStats struct {
 	Evaluations, Applied, Errors, Shadowed, Pending int64
 }
 
-// chainCacheEntry is the last Check of a task directory: reused while the
-// directory fingerprint (names, sizes, mtimes) and the replay order are the
-// same, the size+mtime rule the ledger's own caches use.
+// chainCacheEntry is the last CheckBody of a task directory: reused while the
+// directory fingerprint (names, sizes, mtimes), replay order, rows and
+// Switches key stay the same. I5 is never cached (design 0009 §22.4).
 type chainCacheEntry struct {
 	fp, orderKey string
 	order        []string
-	violations   []assurance.Violation
+	violations   []assurance.Violation // CheckBody only (no I5)
 }
 
 type rehashResult struct {
@@ -655,6 +656,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		return unknown(health.TaskHealth{}, err)
 	}
 	e.openAndProbes(ctx, id, open, facts)
+	e.loadWaivers(ctx, id, facts)
 	e.mu.Lock()
 	facts.Confirmed = e.confirmed[id]
 	e.mu.Unlock()
@@ -852,9 +854,10 @@ func (e *Evaluator) openFindings(ctx context.Context, id string) ([]health.Findi
 	return open, nil
 }
 
-// chainFacts is chain.local for the task: Check over the replay order
-// (open copies included, empty leftovers flagged), plus rehash mismatches
-// of segments still on the order with the size and mtime that were hashed.
+// chainFacts is chain.local for the task: CheckBody over the replay order
+// (open copies included, empty leftovers flagged), plus a fresh
+// CheckCheckpoint (I5, never cached), plus rehash mismatches of segments
+// still on the order. Checkpoint is read before order/disk (§22.4).
 // nil when the task directory cannot be read (the scope is incomplete).
 func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 	return e.chainFactsInto(task, now, nil)
@@ -876,6 +879,9 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	if _, err := os.ReadDir(dir); err != nil {
 		return nil
 	}
+	// §22.4: checkpoint before order/disk so C cannot point past this snapshot.
+	cp := e.assuranceCheckpoint(task)
+	switches := e.s.assuranceSwitches(task.ID)
 	fp := e.fingerprint(task.ID)
 	e.s.mu.Lock()
 	catalog := e.s.fileStore != nil
@@ -893,34 +899,40 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		order, rows = e.s.chainOrder(task.ID, dataDir, catalog)
 	}
 	obj := e.objectView(task.ID, now, rows, facts)
-	orderKey := strings.Join(order, "\x00") + "\x01" + rowsKey(rows) + "\x01" + obj.key
+	swKey := switchesKey(switches)
+	orderKey := strings.Join(order, "\x00") + "\x01" + rowsKey(rows) + "\x01" + obj.key + "\x02" + swKey
 	var violations []assurance.Violation
+	in := assurance.Inputs{
+		Flavor:     task.Source.Flavor,
+		StartGTID:  StartGTIDText(task),
+		Checkpoint: cp, // used only for CheckCheckpoint below; body cache ignores it
+		Local:      binlog.LedgerAt(dir),
+		Order:      order,
+		Rows:       rows,
+		NoCatalog:  !catalog,
+		Switches:   switches,
+		// §21: object storage, the listed prefixes and the upload grace.
+		ObjectStorage:  obj.storage,
+		Objects:        obj.objects,
+		ObjectPrefixes: obj.prefixes,
+		UploadGrace:    obj.grace,
+		// §20.1: the planner's legacy failback (I3_LEGACY_FAILBACK),
+		// which also suppresses the legacy row size rule (§20.2).
+		Plan: func() []assurance.Violation {
+			return e.s.plannedProblems(task, dir, binlog.LedgerAt(dir))
+		},
+	}
 	if hit && cached.fp == fp && cached.orderKey == orderKey {
-		violations = cached.violations
+		violations = append([]assurance.Violation(nil), cached.violations...)
 	} else {
-		chain := assurance.ChainOf(assurance.Inputs{
-			Flavor:    task.Source.Flavor,
-			StartGTID: StartGTIDText(task),
-			Local:     binlog.LedgerAt(dir),
-			Order:     order,
-			Rows:      rows,
-			NoCatalog: !catalog,
-			// §21: object storage, the listed prefixes and the upload grace.
-			ObjectStorage:  obj.storage,
-			Objects:        obj.objects,
-			ObjectPrefixes: obj.prefixes,
-			UploadGrace:    obj.grace,
-			// §20.1: the planner's legacy failback (I3_LEGACY_FAILBACK),
-			// which also suppresses the legacy row size rule (§20.2).
-			Plan: func() []assurance.Violation {
-				return e.s.plannedProblems(task, dir, binlog.LedgerAt(dir))
-			},
-		})
-		violations = chain.Check(now)
+		bodyIn := in
+		bodyIn.Checkpoint = assurance.Checkpoint{} // body cache must not depend on C
+		violations = assurance.ChainOf(bodyIn).CheckBody(now)
 		e.mu.Lock()
 		e.chainCache[task.ID] = chainCacheEntry{fp: fp, orderKey: orderKey, order: order, violations: violations}
 		e.mu.Unlock()
 	}
+	violations = append(violations, assurance.ChainOf(in).CheckCheckpoint()...)
 	out := &health.ChainFacts{}
 	for _, v := range violations {
 		if e.cfg.Cluster && v.Kind == assurance.I6MissingLocal {
@@ -947,6 +959,132 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		out.Violations = append(out.Violations, assurance.Violation{Kind: assurance.I1Unreadable, Segments: []string{name}, Evidence: r.evidence, Detail: detail})
 	}
 	return out
+}
+
+// assuranceCheckpoint is the task checkpoint for I5 (empty when unknown).
+func (e *Evaluator) assuranceCheckpoint(task Task) assurance.Checkpoint {
+	if e == nil || e.s == nil {
+		return assurance.Checkpoint{}
+	}
+	cp, ok, err := e.s.GetCheckpoint(context.Background(), task.ID)
+	if err != nil || !ok {
+		return assurance.Checkpoint{}
+	}
+	return assurance.Checkpoint{GTIDSet: cp.GTIDSet, File: cp.File, Pos: cp.Pos}
+}
+
+// assuranceSwitches builds Inputs.Switches from SourceChain (§22.2).
+func (s *Scheduler) assuranceSwitches(taskID string) []assurance.Switch {
+	if s == nil {
+		return nil
+	}
+	chain, err := s.SourceChain(taskID)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []assurance.Switch
+	add := func(id, stored string) {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, assurance.Switch{Identity: id, Stored: stored})
+	}
+	// .source-chain stints after the first are recorded switches even with no events.
+	for i, srv := range chain.Servers {
+		if i == 0 {
+			continue
+		}
+		add(srv.Identity, "")
+	}
+	for _, sw := range chain.Switches {
+		add(sw.New, sw.GTIDSet)
+	}
+	return out
+}
+
+func switchesKey(sw []assurance.Switch) string {
+	if len(sw) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(sw))
+	for _, s := range sw {
+		parts = append(parts, strings.ToLower(strings.TrimSpace(s.Identity))+"|"+s.Stored)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// loadWaivers fills Facts.Waivers when the store implements WaiverStore (§22.3).
+func (e *Evaluator) loadWaivers(ctx context.Context, taskID string, facts *health.Facts) {
+	if e == nil || e.cfg.Store == nil || facts == nil {
+		return
+	}
+	ws, ok := e.cfg.Store.(healthstore.WaiverStore)
+	if !ok {
+		return
+	}
+	list, err := ws.ListWaivers(ctx, taskID)
+	if err != nil {
+		return
+	}
+	facts.Waivers = list
+}
+
+// WaiveGTIDHole stores a waiver for an exact GTID_HOLE evidence and marks the
+// task dirty so the next pass closes with reason=WAIVED (§22.3).
+func (e *Evaluator) WaiveGTIDHole(ctx context.Context, taskID, subject, evidence, reason, actor string) error {
+	if e == nil || e.cfg.Store == nil {
+		return errors.New("no health store")
+	}
+	ws, ok := e.cfg.Store.(healthstore.WaiverStore)
+	if !ok {
+		return errors.New("health store does not support waivers")
+	}
+	canon, err := health.CanonicalGTIDRanges(evidence)
+	if err != nil {
+		return err
+	}
+	spec := e.reg[health.GTIDHole]
+	if !spec.Waivable || !spec.Managed {
+		return errors.New("GTID_HOLE is not waivable")
+	}
+	fence, ok := e.fenceFor(Task{ID: taskID})
+	if !ok {
+		return errNotResponsible
+	}
+	if actor == "" {
+		actor = "operator"
+	}
+	w := health.Waiver{Key: health.Key{TaskID: taskID, Kind: health.GTIDHole, Subject: subject}, Evidence: canon, Reason: reason, Actor: actor, At: e.cfg.Now()}
+	if err := ws.PutWaiver(ctx, taskID, fence, w); err != nil {
+		return err
+	}
+	e.MarkDirty(taskID, ReasonAPI)
+	return nil
+}
+
+// UnwaiveGTIDHole clears a stored waiver (§22.3).
+func (e *Evaluator) UnwaiveGTIDHole(ctx context.Context, taskID, subject string) error {
+	if e == nil || e.cfg.Store == nil {
+		return errors.New("no health store")
+	}
+	ws, ok := e.cfg.Store.(healthstore.WaiverStore)
+	if !ok {
+		return errors.New("health store does not support waivers")
+	}
+	fence, ok := e.fenceFor(Task{ID: taskID})
+	if !ok {
+		return errNotResponsible
+	}
+	key := health.Key{TaskID: taskID, Kind: health.GTIDHole, Subject: subject}
+	if err := ws.DeleteWaiver(ctx, taskID, fence, key); err != nil {
+		return err
+	}
+	e.MarkDirty(taskID, ReasonAPI)
+	return nil
 }
 
 func (e *Evaluator) setRehash(taskID, segment string, r rehashResult) (changed bool) {
@@ -1110,4 +1248,34 @@ func RandomID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// WaiveFinding is the scheduler-facing waive entry (API).
+func (s *Scheduler) WaiveFinding(ctx context.Context, taskID, kind, subject, evidence, reason, actor string) error {
+	if s == nil {
+		return errors.New("no scheduler")
+	}
+	e := s.healthEval.Load()
+	if e == nil {
+		return errors.New("health evaluator is not attached")
+	}
+	if health.Kind(kind) != health.GTIDHole {
+		return fmt.Errorf("kind %q is not waivable", kind)
+	}
+	return e.WaiveGTIDHole(ctx, taskID, subject, evidence, reason, actor)
+}
+
+// UnwaiveFinding clears a stored waiver (API).
+func (s *Scheduler) UnwaiveFinding(ctx context.Context, taskID, kind, subject string) error {
+	if s == nil {
+		return errors.New("no scheduler")
+	}
+	e := s.healthEval.Load()
+	if e == nil {
+		return errors.New("health evaluator is not attached")
+	}
+	if health.Kind(kind) != health.GTIDHole {
+		return fmt.Errorf("kind %q is not waivable", kind)
+	}
+	return e.UnwaiveGTIDHole(ctx, taskID, subject)
 }

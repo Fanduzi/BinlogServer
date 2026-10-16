@@ -130,6 +130,8 @@ func (s *Server) routes() {
 	apiGroup.GET("/workers", gin.WrapF(s.handleWorkers))
 	apiGroup.GET("/cluster/overview", gin.WrapF(s.handleClusterOverview))
 	apiGroup.GET("/findings", gin.WrapF(s.handleOpenFindings))
+	apiGroup.POST("/alerts/waive", gin.WrapF(s.handleAlertsWaive))
+	apiGroup.DELETE("/alerts/waive", gin.WrapF(s.handleAlertsWaive))
 	apiGroup.POST("/tasks", gin.WrapF(s.handleTasks))
 	apiGroup.GET("/tasks", gin.WrapF(s.handleTasks))
 	apiGroup.Any("/tasks/*path", gin.WrapF(s.handleTaskAction))
