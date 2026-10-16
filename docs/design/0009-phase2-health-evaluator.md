@@ -888,3 +888,43 @@ P2-5.1（§20）只翻转了本地事实。本步把「配置了对象存储时�
 - `health`：P2-5.2 的 Managed 表；`#object` 实例在 `chain.objects` 或前缀不完整时不关、本地来源实例只要 `chain.local`；对象存储移除时以 CONFIG 关闭且 detail 带审计；`Facts.Produced` 让列举失败的任务 UNKNOWN；`UPLOAD_LATE` 超阈值 ESCALATE 到 CRITICAL；链来源 `UPLOAD_UNVERIFIED` 两轮确认、信号来源一轮。
 - `tasks`：宽限按全局与按任务传入；`UPLOAD_LATE` 在宽限后两轮打开、24h 后升级、上传完成后关闭；假列举器：对象被删 → `SEGMENT_MISSING/段#object` 打开，放回后关闭；列举命中上限 → 不开不关、健康 UNKNOWN；列举出错 → 同上；快照之后才上传的段不判缺失；移除 uploader（确认无对象存储）→ CONFIG 关闭。
 - `upload`：S3 `ListObjects` 的上限与 `truncated`（用 MinIO 的 e2e 覆盖，单测覆盖参数与分页截断逻辑）。
+
+## 22. P2-5.3：GTID_HOLE、waiver、CHECKPOINT_AHEAD（2026-10-17）
+
+§20 把 `GTID_HOLE` / `CHECKPOINT_AHEAD` 留到本步：前者要 waiver 存取，且不传 `Switches` 时跨换源的洞会误报；后者要先读 checkpoint 再读顺序/磁盘，并把 I5 从链缓存里拆出去（§20.4）。本步不碰对象类、`ORPHAN_ROW`、`SEAL_FACTS_ABSENT`、#341（P2-5.4）和完整 alerts API（P2-7）。
+
+### 22.1 翻转
+
+| Kind | 本步 | Confirm | 说明 |
+|---|---|---|---|
+| `GTID_HOLE` | Managed，`Waivable` | 否 | `I3_GTID_HOLE` / `I3_STORED_HOLE`。洞的证据来自同一次 `Check` 读到的文件内容，没有多读竞态，不设 Confirm |
+| `CHECKPOINT_AHEAD` | Managed | 否 | `I5_CHECKPOINT_AHEAD`。误报靠读顺序 + I5 不进链缓存消除，不靠 Confirm |
+
+`I2_SWITCH_UNRECORDED` 仍不派生（§20.1）：本步只把 `Switches` 传进 assurance，用来压掉跨换源的 **I3** 误报，不翻转 I2。
+
+### 22.2 Switches：跨换源洞不再误报
+
+- 评估器从 `Scheduler.SourceChain` 构造 `assurance.Inputs.Switches`：每个 `SOURCE_SWITCHOVER` 的 `New`（`Stored` = 事件里的 `gtid_set`），以及 `.source-chain` 里**除第一个以外**的每个 server identity（没有事件时也能认出已记录的 stint）。
+- `Check` 在相邻段跨前缀走 `switchHole` 时：若上一段或下一段的 server identity（`identityOf`，UUID 前缀名才非空）在 `Switches` 里，**不**报 `I3_GTID_HOLE`。有意的 VIP / failback 边界上的间隙不是洞；真缺事务仍由规划器的 `I3_STORED_HOLE` 负责。
+- `I2_SWITCH_UNRECORDED` 的行为不变（仍用同一张 `Switches` 表），只是本步继续 `notDerived`。
+
+### 22.3 Waiver 存取（评估器最小路径）
+
+- 存：`task_findings` 的 `waiver_evidence` / `waiver_reason` / `waiver_actor` / `waived_at` / `waiver_kind_version`（migration `000009` 已有）。standalone 的 `.health.json` 在 finding 上加同样字段。
+- 写：`healthstore.WaiverStore.PutWaiver`（规范化 evidence，`CanonicalGTIDRanges`；只允许 `Waivable` kind，目前仅 `GTID_HOLE`）在 finding 行写入上述列，并往 `finding_transitions` 记一条 `op=WAIVE`（`reason`/`actor` 进 detail）。`DeleteWaiver` 清空列并记 `op=UNWAIVE`。不在 Put 时 CLOSE：下一轮 Evaluate 的 Derive 跳过该 evidence，Reconcile 以 `reason=WAIVED` 关闭（已有逻辑）。
+- 读：`ListWaivers` 返回该任务所有 `waiver_evidence` 非空的行（含已 resolved），评估器填入 `Facts.Waivers`。
+- HTTP：`POST /api/alerts/waive` `{task_id,kind,subject,evidence,reason}`（actor 来自 auth 或 `operator`）走 PutWaiver 并 `MarkDirty`；`DELETE` 同路径 Unwaive。完整 alerts 列表 / mute 仍归 P2-7。
+
+### 22.4 CHECKPOINT_AHEAD：读顺序 + I5 出缓存（§20.4）
+
+1. **读顺序**：`chainFacts` 先 `GetCheckpoint`，再算 fingerprint / `chainOrder` / 列本地段。checkpoint 写在数据落盘之后；先读顺序再读 checkpoint 会在运行中的任务上把 C 指到快照里还没有的新文件。
+2. **缓存**：链结论仍按「目录指纹 + 顺序 + 目录行（+ Switches 键）」缓存，**缓存的 Inputs.Checkpoint 恒为空**，`Check` 结果里不含 I5。每轮用本轮读到的 checkpoint 单独跑 `CheckCheckpoint`（只需已存集合与尾部位置），把 I5 违规追加进 `ChainFacts`。checkpoint 每个事务都在变，不得进缓存键。
+3. assurance 导出 `CheckCheckpoint`（或等价：`Check` 在 Checkpoint 为空时自然不产 I5，另有只跑 I5 的入口），单测覆盖「空 checkpoint 的 Check 无 I5」「同一链改 checkpoint 只影响 CheckCheckpoint」。
+
+### 22.5 测试（先红）
+
+- `assurance`：跨换源相邻段在 destination/prev identity 属于 `Switches` 时不报 `I3_GTID_HOLE`，不属于时仍报；`CheckCheckpoint` 独立于 body；缓存场景下改 checkpoint 只改 I5。
+- `health`：P2-5.3 Managed 表（`GTID_HOLE` Waivable 且 Managed，`CHECKPOINT_AHEAD` Managed，二者无 Confirm）；既有 waiver exact-match 用例仍绿。
+- `healthstore` / `meta`：PutWaiver → ListWaivers 读回规范化 evidence；Unwaive 清空；关闭后 waiver 仍能 List 到。
+- `tasks`：评估器传入 Switches 后，failback 黄金目录不因跨 stint 打开 `GTID_HOLE`；构造单源内部洞（#352）→ `GTID_HOLE` OPEN → PutWaiver 精确区间 → CLOSE(WAIVED)、健康恢复；checkpoint 超前 → `CHECKPOINT_AHEAD` OPEN，拉回后关闭；连续两轮评估中 checkpoint 前进不导致整链 Check 每轮重算（I5 除外）。
+- `api`：`POST /api/alerts/waive` 400（非 Waivable / evidence 非法）、200 后 Evaluate 关闭该洞。
