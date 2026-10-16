@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- #415（P2）：租约接管续写上一个 epoch 的 open 分段时直接改名，沿用同一个 inode。被 SIGSTOP 冻住的旧 owner 醒来后用旧句柄把缓冲的 Rotate 追加进新 owner 已封存的文件，封存文件比封存时多 42 字节，健康评估报 CRITICAL `SEGMENT_UNREADABLE`。现在新 epoch 把完整事件复制成自己的文件再删旧文件，旧句柄写不到续写或封存的分段。接管时多一次本地复制（最大一个 open 分段）。
+
 ## [v0.5.69] - 2026-10-16
 
 发布说明：`docs/releases/v0.5.69.md`。没有新迁移，没有新配置项。
