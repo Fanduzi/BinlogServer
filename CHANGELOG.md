@@ -12,6 +12,20 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.69] - 2026-10-16
+
+发布说明：`docs/releases/v0.5.69.md`。没有新迁移，没有新配置项。
+
+### Fixed
+
+- #405（P1）：standalone+meta 遗留 failback 升级修复后，续写的 `.open.e1` 与修复出的 `.sealed.e1` 同键，OPEN 行顶替 SEALED 行，`/replay` 无提示丢掉一段 stint，恢复报 `ERROR 1032`。Start 现在在磁盘上所有封存副本之上的 epoch 续写。
+- #405：集群模式修复后只含 binlog 头的 `.open.eN` 被 I4 误判为副本，误报 `storage_alert`；只含头事件的打开文件不再算副本。
+
+### Added
+
+- P2-5.1：健康评估器（默认 `off`）接管 `SEGMENT_DAMAGED`、`CHAIN_INDEX_GAP`、`LEGACY_FAILBACK`、`SEGMENT_MISSING`（本地情形），新实例两轮确认后才打开；遗留段按已封存目录行大小比较。
+- `scripts/e2e/upgrade-legacy-failback.sh` 支持 `FBUP_MODE=cluster|standalone`。
+
 ## [v0.5.68] - 2026-10-16
 
 发布说明：`docs/releases/v0.5.68.md`。没有新迁移，没有新配置项。
