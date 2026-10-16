@@ -90,7 +90,10 @@ type KindSpec struct {
 	SegmentScoped bool
 	// Managed: the evaluator owns open and close. An unmanaged kind keeps
 	// its legacy Report/Resolve lifecycle and Reconcile never touches it.
-	Managed  bool
+	Managed bool
+	// Confirm: a new instance opens only when the previous pass derived it
+	// too (Facts.Confirmed); an open one is unaffected (design §20.3).
+	Confirm  bool
 	Version  int
 	Waivable bool
 }
@@ -198,6 +201,8 @@ type Facts struct {
 	AbsentSince map[Key]time.Time
 	// Open is the stored open set's keys (handoff rules read it).
 	Open map[Key]bool
+	// Confirmed are the Confirm-kind keys the previous pass derived.
+	Confirmed map[Key]bool
 	// Probes are the alternative success proofs of §5.5 that held this
 	// pass, by open key (a signal that rarely succeeds can still close).
 	Probes map[Key]bool

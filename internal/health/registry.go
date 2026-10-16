@@ -1,7 +1,7 @@
 // Package health provides module-level functionality for health.
 // input: assurance violation kinds
 // output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
-// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385)
+// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385); since P2-5.1 (§20) SEGMENT_DAMAGED, CHAIN_INDEX_GAP, LEGACY_FAILBACK and SEGMENT_MISSING (chain.local only) are Managed with Confirm, and I2_SWITCH_UNRECORDED, I6_MISSING_ROW, I6_MISSING_OBJECT and I6_OBJECT_SIZE_MISMATCH are not derived
 // note: if this file changes, update this header and module README.md.
 package health
 
@@ -16,24 +16,25 @@ import (
 )
 
 var fromAssurance = map[assurance.Kind]Kind{
-	assurance.I1Regression:       SegmentDamaged,
-	assurance.I1Unreadable:       SegmentUnreadable,
-	assurance.I2IndexGap:         ChainIndexGap,
-	assurance.I2SwitchUnrecorded: ChainIndexGap,
-	assurance.I2OrderInvalid:     ChainIndexGap,
-	assurance.I3GTIDHole:         GTIDHole,
-	assurance.I3StoredHole:       GTIDHole,
-	assurance.I3LegacyFailback:   LegacyFailback,
-	assurance.I4Overlap:          SegmentOverlap,
-	assurance.I4EmptyLeftover:    SegmentEmptyLeftover,
-	assurance.I5CheckpointAhead:  CheckpointAhead,
-	assurance.I6MissingLocal:     SegmentMissing,
-	assurance.I6MissingObject:    SegmentMissing,
-	assurance.I6MissingRow:       SegmentMissing,
-	assurance.I6SizeMismatch:     SegmentMissing,
-	assurance.I6OrphanRow:        OrphanRow,
-	assurance.I7UploadLate:       UploadLate,
-	assurance.I7Unverified:       UploadUnverified,
+	assurance.I1Regression:         SegmentDamaged,
+	assurance.I1Unreadable:         SegmentUnreadable,
+	assurance.I2IndexGap:           ChainIndexGap,
+	assurance.I2SwitchUnrecorded:   ChainIndexGap,
+	assurance.I2OrderInvalid:       ChainIndexGap,
+	assurance.I3GTIDHole:           GTIDHole,
+	assurance.I3StoredHole:         GTIDHole,
+	assurance.I3LegacyFailback:     LegacyFailback,
+	assurance.I4Overlap:            SegmentOverlap,
+	assurance.I4EmptyLeftover:      SegmentEmptyLeftover,
+	assurance.I5CheckpointAhead:    CheckpointAhead,
+	assurance.I6MissingLocal:       SegmentMissing,
+	assurance.I6MissingObject:      SegmentMissing,
+	assurance.I6MissingRow:         SegmentMissing,
+	assurance.I6SizeMismatch:       SegmentMissing,
+	assurance.I6ObjectSizeMismatch: SegmentMissing,
+	assurance.I6OrphanRow:          OrphanRow,
+	assurance.I7UploadLate:         UploadLate,
+	assurance.I7Unverified:         UploadUnverified,
 }
 
 // FromAssurance maps an assurance kind to its finding kind (many to one).
@@ -58,6 +59,9 @@ func chainDerive(kind Kind) func(f *Facts) []Instance {
 		}
 		var out []Instance
 		for _, v := range f.Chain.Violations {
+			if notDerived[v.Kind] {
+				continue
+			}
 			if k, ok := fromAssurance[v.Kind]; !ok || k != kind {
 				continue
 			}
@@ -70,6 +74,12 @@ func chainDerive(kind Kind) func(f *Facts) []Instance {
 		return out
 	}
 }
+
+// notDerived are assurance kinds whose facts the evaluator cannot trust
+// yet (design §20.1): no switch records (I2_SWITCH_UNRECORDED), adopt does
+// not backfill rows (I6_MISSING_ROW), objects are not judged before P2-5.2.
+var notDerived = map[assurance.Kind]bool{assurance.I2SwitchUnrecorded: true, assurance.I6MissingRow: true,
+	assurance.I6MissingObject: true, assurance.I6ObjectSizeMismatch: true}
 
 func signalSpec(kind Kind, sev Severity, inv, text string) KindSpec {
 	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{ScopeSignals}, Version: 1, Derive: signalDerive(kind),
@@ -102,6 +112,10 @@ var p24Managed = map[Kind]bool{
 	TaskRecordsFailed: true, // #385, ADR 0010
 }
 
+// p25Managed are the chain.local structural kinds of P2-5.1 (design §20),
+// opened only after two consecutive passes derive them.
+var p25Managed = map[Kind]bool{SegmentDamaged: true, ChainIndexGap: true, LegacyFailback: true, SegmentMissing: true}
+
 // ManagedKinds is every kind the evaluator owns in this release.
 func ManagedKinds() map[Kind]bool {
 	out := map[Kind]bool{}
@@ -109,6 +123,9 @@ func ManagedKinds() map[Kind]bool {
 		out[k] = true
 	}
 	for k := range p24Managed {
+		out[k] = true
+	}
+	for k := range p25Managed {
 		out[k] = true
 	}
 	return out
@@ -134,7 +151,7 @@ func DefaultRegistry() Registry {
 		chainSpec(ChainIndexGap, Critical, ScopeChainLocal, "I2", "indexes are contiguous and every source switch is recorded"),
 		chainSpec(LegacyFailback, Critical, ScopeChainLocal, "I3", "the planner no longer reports a legacy failback"),
 		chainSpec(CheckpointAhead, Critical, ScopeChainLocal, "I5", "the checkpoint is at or before the chain's cut point"),
-		chainSpec(SegmentMissing, Critical, ScopeChainLocal, "I6", "catalog row, local file and object agree, or a retention marker explains the absence", ScopeChainObjects),
+		chainSpec(SegmentMissing, Critical, ScopeChainLocal, "I6", "catalog row and local file agree (objects join with P2-5.2)"),
 		chainSpec(OrphanRow, Warning, ScopeChainLocal, "I6", "the row has its bytes again, or carries a retention marker", ScopeChainObjects),
 		chainSpec(UploadLate, Warning, ScopeChainLocal, "I7", "the segment is UPLOADED with checksum match"),
 		uploadUnverifiedSpec(),
@@ -172,7 +189,8 @@ func DefaultRegistry() Registry {
 	specs = append(specs, gh)
 	r := Registry{}
 	for _, s := range specs {
-		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind]
+		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind] || p25Managed[s.Kind]
+		s.Confirm = p25Managed[s.Kind]
 		r[s.Kind] = s
 	}
 	return r

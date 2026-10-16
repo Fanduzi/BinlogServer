@@ -273,6 +273,7 @@ func TestHealthOf(t *testing.T) {
 // wantManagedP24: P2-3's three segment kinds, and since P2-4 every signal
 // and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED.
 var wantManagedP24 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true,
+	SegmentDamaged: true, ChainIndexGap: true, LegacyFailback: true, SegmentMissing: true, // P2-5.1, design §20.1
 	TaskPersistFailed: true, MetadataWriteBlocked: true, EventPersistFailed: true, EventReadFailed: true,
 	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
 	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
@@ -363,7 +364,7 @@ var designScopes = map[Kind][]Scope{
 	GTIDHole:                 {ScopeChainLocal},
 	LegacyFailback:           {ScopeChainLocal},
 	CheckpointAhead:          {ScopeChainLocal},
-	SegmentMissing:           {ScopeChainLocal, ScopeChainObjects},
+	SegmentMissing:           {ScopeChainLocal}, // chain.objects joins with P2-5.2 (§20.1)
 	OrphanRow:                {ScopeChainLocal, ScopeChainObjects},
 	UploadLate:               {ScopeChainLocal},
 	UploadUnverified:         {ScopeChainLocal, ScopeSignals},

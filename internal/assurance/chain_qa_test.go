@@ -106,14 +106,9 @@ func TestI6BothSizesDiffer(t *testing.T) {
 	f := live(t)
 	f.row(t, qs5).Size = 100
 	f.in.Objects["t/"+qs5] = 200
-	n := 0
-	for _, v := range f.check(t) {
-		if v.Kind == I6SizeMismatch && v.Segments[0] == qs5 {
-			n++
-		}
-	}
-	if n != 2 {
-		t.Fatalf("local and object both differ: %d SIZE_MISMATCH, want 2", n)
+	vs := f.check(t)
+	if countKind(vs, I6SizeMismatch, qs5) != 1 || countKind(vs, I6ObjectSizeMismatch, qs5) != 1 {
+		t.Fatalf("local and object both differ: want one I6_SIZE_MISMATCH and one I6_OBJECT_SIZE_MISMATCH, got %s", kinds(vs))
 	}
 }
 

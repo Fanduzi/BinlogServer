@@ -386,8 +386,15 @@ func violationCases() []violationCase {
 			f.row(t, "mysql-bin.000004").Size = 1
 			f.in.Objects["t/mysql-bin.000004"] = 1
 		}},
-		{"I6/size-object", I6SizeMismatch, "mysql-bin.000005", func(t *testing.T, f *fixture) {
+		{"I6/size-local-000006", I6SizeMismatch, "mysql-bin.000006", func(t *testing.T, f *fixture) {
+			f.row(t, "mysql-bin.000006").Size = 2
+			f.in.Objects["t/mysql-bin.000006"] = 2
+		}},
+		{"I6/size-object", I6ObjectSizeMismatch, "mysql-bin.000005", func(t *testing.T, f *fixture) {
 			f.in.Objects["t/mysql-bin.000005"] = 7
+		}},
+		{"I6/size-object-000003", I6ObjectSizeMismatch, "mysql-bin.000003", func(t *testing.T, f *fixture) {
+			f.in.Objects["t/mysql-bin.000003"] = 9
 		}},
 		// I7: sealed long ago and still not UPLOADED+match.
 		{"I7/late-upload-failed", I7UploadLate, "mysql-bin.000005", func(t *testing.T, f *fixture) {

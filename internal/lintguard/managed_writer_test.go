@@ -24,7 +24,9 @@ func managedConstants(t *testing.T) map[string]bool {
 			out["\x00"+kind] = true
 		}
 	}
-	if len(out) < 2*len(health.ManagedKinds())-4 { // SEGMENT_EMPTY_LEFTOVER etc. may have no tasks constant
+	// The four chain-derived P2-5.1 kinds (design 0009 §20.1) have no tasks
+	// constant; SEGMENT_EMPTY_LEFTOVER etc. may have none either.
+	if len(out) < 2*(len(health.ManagedKinds())-4)-4 {
 		t.Fatalf("only %d managed constants found: %v", len(out)/2, out)
 	}
 	return out
