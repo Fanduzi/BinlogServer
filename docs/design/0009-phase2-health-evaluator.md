@@ -971,7 +971,20 @@ P2-6a 只栅住了任务行。集群里 owner 被冻住（SIGSTOP、宿主机停
 ### 23.4 与 #411、#416 的关系
 
 - **#416（#415）叠在下面**：接管把旧 epoch 的 open 文件复制成新 inode。它保证就算旧 owner 在本地检查和 `write(2)` 之间冻住，写进去的也是一个没有名字的文件。本节的栅栏让旧 owner 一醒来就停，不再产生字节、位点、目录行。两者缺一不可：只有复制，旧 owner 还会写 checkpoint 和目录行；只有栅栏，检查与写之间仍有微秒级窗口。
-- **#411（P2-6a）平行**：任务行的 `meta.fencedExec` 与本节 `execUnderFence` 用同一条 `SELECT … FOR UPDATE`。差别只在空 owner 的处理（任务行允许收敛到 STOPPED，数据写不允许）。#411 合并后把两处合成一个 helper，参数决定是否接受已释放的 lease。
+- **#411（P2-6a）合入本 PR**：任务行的 `meta.FencedExec` 与本节 `execUnderFence` 共用一个 `leaseRowForUpdate`（同一条 `SELECT … FOR UPDATE`）。差别只在策略：任务行允许在 lease 已释放或没有行时收敛到 STOPPED，数据写只允许当前持有者。
+
+### 23.4.1 为什么两个栅栏必须一起上（#420 QA 测试 3）
+
+只有本节的数据面栅栏、没有 P2-6a 时，meta 暂停超过 lease TTL（QA 用 SIGSTOP 暂停 meta 的 mariadbd 30s）会把任务永久停住：
+
+1. meta 恢复后，owner B 的本地 lease 时钟已过 `ttl × 4/5`，下一次追加被拒，run 按租约移交退出。这一步是对的。
+2. 同一时刻 A 在 `task_leases` 上认领过期 lease（epoch+1），但还没写任务行。
+3. B 的续约返回 false（owner 已变），`rowTakenOverLocked` 读任务行，行上还是 B，于是走老的 `failSafeStopLocked` 路径，把 STOPPING / STOPPED（`last_error = lease lost`，desired STOP）写进任务行。
+4. A 读回任务行，看到 STOPPED，按远端 Stop 取消自己的 dump。任务停在 STOPPED、没有 owner，需要人工 Start。
+
+main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这个竞态很少出现；它本身就是 #360。数据面栅栏让 B 先退出，把竞态变成了必现。P2-6a 让第 3 步的写在同一事务里对 `task_leases` 校验：lease 已是 A 的新 epoch，写被拒，B 只在内存里让出，任务行留给 A。续约返回 false 只可能是 owner/epoch 已变或 lease 已释放（`RenewTaskLease` 不看过期时间），所以第 3 步的写总能看到新的持有者。
+
+回归测试 `tasks/p26_handoff_row_test.go` 覆盖两种先后顺序（栅栏先拒、续约先发现）；在没有 P2-6a 的提交上它复现 QA 的现象（`STOPPED`、owner 为空、`last_error = lease lost`）。
 
 ### 23.5 剩余窗口
 
@@ -984,4 +997,5 @@ P2-6a 只栅住了任务行。集群里 owner 被冻住（SIGSTOP、宿主机停
 - `replication/write_fence_test.go`：运行中 lease 移走后放出冻结前读到的事件，分段字节不变、checkpoint 不再写、run 以带 `ErrWriteFenced` 的租约移交结束；一开始就过期的 run 不建 open 文件；封存目标已存在时 NOREPLACE 拒绝且不覆盖。
 - `meta/write_fence_test.go`（sqlmock）：新 epoch、已释放、无行都拒绝且不执行 INSERT；匹配时 INSERT 与锁在同一事务；无令牌时仍是单条语句。
 - `tasks/write_fence_test.go`：`LeaseClock` 的 4/5 窗口、lost 不复活、旧 epoch 不覆盖新 epoch。
+- `tasks/p26_handoff_row_test.go`：§23.4.1 的两种顺序下旧 owner 都不改任务行。
 - QA：两节点 + `rotload.sh` 高频轮转 + 对 owner `SIGSTOP` 20s/60s/120s 后 `SIGCONT`，旧 owner 日志出现 `fence: refused`，任务不进入 `STORAGE_INCONSISTENT`，最终恢复校验和一致。

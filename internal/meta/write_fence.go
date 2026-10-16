@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a write context that may carry tasks.FenceIdentity (task, owner, epoch) and the statement to run
-// output: execUnderFence: with an identity for this task, one transaction that locks task_leases (SELECT … FOR UPDATE), requires owner and epoch to match a held row, runs the write on that transaction and commits, or returns tasks.ErrWriteFenced without writing; without an identity, the old single statement (ADR 0009 P2-6, #417)
+// output: execUnderFence: with an identity for this task, one transaction that locks task_leases (leaseRowForUpdate, shared with the P2-6a task-row fence), requires owner and epoch to match a held row, runs the write on that transaction and commits, or returns tasks.ErrWriteFenced without writing; without an identity, the old single statement (ADR 0009 P2-6, #417)
 // pos: metadata half of the end-to-end write fence (checkpoint, binlog_files upsert and delete)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -8,13 +8,10 @@ package meta
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 
 	"binlog_server/internal/tasks"
 )
-
-const selectWriteFenceSQL = `SELECT owner_worker_id, epoch FROM task_leases WHERE task_id = ? FOR UPDATE`
 
 type fenceExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -37,14 +34,12 @@ func (s *MySQLTaskStore) execUnderFence(ctx context.Context, taskID string, fn f
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		var owner string
-		var epoch int64
-		err = tx.QueryRowContext(ctx, selectWriteFenceSQL, taskID).Scan(&owner, &epoch)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: task %s has no lease row (writer %s epoch %d)", tasks.ErrWriteFenced, taskID, id.Owner, id.Epoch)
-		}
+		owner, epoch, found, err := leaseRowForUpdate(ctx, tx, taskID)
 		if err != nil {
 			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: task %s has no lease row (writer %s epoch %d)", tasks.ErrWriteFenced, taskID, id.Owner, id.Epoch)
 		}
 		if owner == "" || owner != id.Owner || epoch != id.Epoch {
 			return fmt.Errorf("%w: task %s lease is %q epoch %d (writer %s epoch %d)", tasks.ErrWriteFenced, taskID, owner, epoch, id.Owner, id.Epoch)
