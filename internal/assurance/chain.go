@@ -2,6 +2,7 @@
 // input: Inputs: the task's chain order, catalog rows, task directory ledger, object listing snapshot, checkpoint, start set and recorded source switches
 // output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER
 // note P2-5.1 (design 0009 §20.2): a local size is compared with a sealed row only for a legacy segment with no .seal-sha256 line and not while a legacy failback is planned; an object size mismatch is I6_OBJECT_SIZE_MISMATCH
+// note P2-5.3 (design 0009 §22): Switches suppress cross-stint I3_GTID_HOLE (switchHole); CheckCheckpoint is separate from Check so I5 stays out of the chain cache
 // pos: the one answer to "is this backup complete, and where is each part" (ADR 0009 phase 1); depends on binlog only
 // note #405: an open file of only header events is never an I4 copy (every copy of a source file starts with the same header)
 // note: if this file changes, update this header and module README.md.
@@ -211,10 +212,38 @@ func (c *Chain) Segments() []Segment {
 	return c.segs
 }
 
-// Check reports every violation of I1-I7, in chain order: a violation sorts
-// by the first segment it names; one that names no chain segment comes last.
-// The same Inputs and now give the same result.
+// Check reports every violation of I1-I7 except I5, then appends CheckCheckpoint
+// (I5). Callers that cache the chain body must use CheckBody + CheckCheckpoint
+// so a moving checkpoint does not bust the cache (design 0009 §22.4).
+// Violations sort by the first segment they name; one that names no chain
+// segment comes last. The same Inputs and now give the same result.
 func (c *Chain) Check(now time.Time) []Violation {
+	body := c.CheckBody(now)
+	i5 := c.CheckCheckpoint()
+	if len(i5) == 0 {
+		return body
+	}
+	out := append(append([]Violation(nil), body...), i5...)
+	segs := c.Segments()
+	pos := map[string]int{}
+	for i, s := range segs {
+		pos[s.Name] = i
+	}
+	rank := func(v Violation) int {
+		if len(v.Segments) > 0 {
+			if p, ok := pos[v.Segments[0]]; ok {
+				return p
+			}
+		}
+		return len(segs)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
+	return out
+}
+
+// CheckBody is Check without I5 (design 0009 §22.4): safe to cache while the
+// directory fingerprint, order, rows and Switches stay the same.
+func (c *Chain) CheckBody(now time.Time) []Violation {
 	segs := c.Segments()
 	var out []Violation
 	add := func(k Kind, evidence, detail string, names ...string) {
@@ -231,6 +260,7 @@ func (c *Chain) Check(now time.Time) []Violation {
 		seq    uint64
 		log    binlog.SegmentGTIDLog
 		first  string
+		id     string // identityOf of the group's first segment (failback UUID prefix)
 	}
 	var prev *group
 	var before []binlog.GTIDEventRef
@@ -296,7 +326,11 @@ func (c *Chain) Check(now time.Time) []Violation {
 					if c.mysql() && seg.Contents != nil {
 						var hole bool
 						if prev.prefix != prefix {
-							hole = switchHole(stored, before, log)
+							// §22.2: a recorded stint boundary is not an I3 hole.
+							nextID := identityOf(seg.Named.Source)
+							if !switched[prev.id] && !switched[nextID] {
+								hole = switchHole(stored, before, log)
+							}
 						} else {
 							hole = gtidHole(prev.log, log)
 						}
@@ -305,16 +339,14 @@ func (c *Chain) Check(now time.Time) []Violation {
 						}
 					}
 				}
-				prev = &group{prefix: prefix, seq: seg.Named.Seq, log: log, first: seg.Name}
+				prev = &group{prefix: prefix, seq: seg.Named.Seq, log: log, first: seg.Name, id: identityOf(seg.Named.Source)}
 			}
 		}
 		c.checkCopies(seg, now, add)
 	}
 	if c.mysql() {
 		c.checkInteriorHole(segs, &out, add)
-		c.checkCheckpointGTID(segs, stored, add)
 	}
-	c.checkCheckpointPos(segs, add)
 	c.checkOrder(segs, add)
 	c.checkOffChainRows(add)
 	out = append(out, c.in.Planned...)
@@ -344,6 +376,21 @@ func (c *Chain) Check(now time.Time) []Violation {
 		return len(segs)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
+	return out
+}
+
+// CheckCheckpoint is I5 only (design 0009 §22.4): checkpoint GTID set and
+// file/position against the already-built chain. Empty Checkpoint yields nothing.
+func (c *Chain) CheckCheckpoint() []Violation {
+	segs := c.Segments()
+	var out []Violation
+	add := func(k Kind, evidence, detail string, names ...string) {
+		out = append(out, Violation{Kind: k, Segments: names, Evidence: evidence, Detail: detail})
+	}
+	if c.mysql() {
+		c.checkCheckpointGTID(segs, c.storedSet(segs), add)
+	}
+	c.checkCheckpointPos(segs, add)
 	return out
 }
 

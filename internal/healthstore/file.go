@@ -1,6 +1,6 @@
 // Package healthstore provides module-level functionality for healthstore.
 // input: transitions and health of standalone tasks
-// output: FileStore: {data_dir}/.health.json written atomically (temp file, fsync, rename); standalone fence only; pending transitions saved in the same file
+// output: FileStore: {data_dir}/.health.json written atomically (temp file, fsync, rename); standalone fence only; pending transitions saved in the same file; WaiverStore for GTID_HOLE (§22.3)
 // pos: standalone (no meta DSN) Store
 // note: if this file changes, update this header and module README.md.
 package healthstore
@@ -31,6 +31,12 @@ type fileFinding struct {
 	health.Finding
 	Count      int64      `json:"count"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+	// Waiver fields (design 0009 §22.3); kept after resolve so Derive still skips.
+	WaiverEvidence string     `json:"waiver_evidence,omitempty"`
+	WaiverReason   string     `json:"waiver_reason,omitempty"`
+	WaiverActor    string     `json:"waiver_actor,omitempty"`
+	WaivedAt       *time.Time `json:"waived_at,omitempty"`
+	WaiverKindVer  int        `json:"waiver_kind_version,omitempty"`
 }
 
 type fileHealth struct {
@@ -263,4 +269,133 @@ func (s *FileStore) LoadPending() (map[string][]health.Transition, error) {
 		return nil, err
 	}
 	return st.Pending, nil
+}
+
+var _ WaiverStore = (*FileStore)(nil)
+
+// ListWaivers implements WaiverStore.
+func (s *FileStore) ListWaivers(ctx context.Context, taskID string) ([]health.Waiver, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	var out []health.Waiver
+	for _, f := range st.Findings {
+		if f.TaskID != taskID || f.WaiverEvidence == "" {
+			continue
+		}
+		w := health.Waiver{Key: f.Key(), Evidence: f.WaiverEvidence, Reason: f.WaiverReason, Actor: f.WaiverActor}
+		if f.WaivedAt != nil {
+			w.At = *f.WaivedAt
+		}
+		out = append(out, w)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].Subject < out[j].Subject
+	})
+	return out, nil
+}
+
+// PutWaiver implements WaiverStore.
+func (s *FileStore) PutWaiver(ctx context.Context, taskID string, fence health.Fence, w health.Waiver) error {
+	if fence.Mode != health.FenceStandalone {
+		return ErrModeUnsupported
+	}
+	if w.Evidence == "" {
+		return fmt.Errorf("waiver evidence required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load()
+	if err != nil {
+		return err
+	}
+	rec, ok := st.Health[taskID]
+	var stored *Stored
+	if ok {
+		stored = &rec.Stored
+	}
+	if err := CheckFence(fence, nil, stored); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if w.At.IsZero() {
+		w.At = now
+	}
+	key := health.Key{TaskID: taskID, Kind: w.Kind, Subject: w.Subject}
+	idx := -1
+	for i, f := range st.Findings {
+		if f.Key() == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		st.Findings = append(st.Findings, fileFinding{Finding: health.Finding{TaskID: taskID, Kind: w.Kind, Subject: w.Subject, FirstSeen: now, LastSeen: now}})
+		idx = len(st.Findings) - 1
+	}
+	at := w.At
+	st.Findings[idx].WaiverEvidence = w.Evidence
+	st.Findings[idx].WaiverReason = w.Reason
+	st.Findings[idx].WaiverActor = w.Actor
+	st.Findings[idx].WaivedAt = &at
+	st.Findings[idx].WaiverKindVer = 1
+	gen := rec.Generation + 1
+	rec.Generation = gen
+	st.Health[taskID] = fileHealth{TaskHealth: rec.TaskHealth, Generation: gen, Stored: Stored{Mode: fence.Mode, Node: fence.Node, Instance: fence.Instance}}
+	d := health.TransitionDigest(taskID, health.Transition{Key: key, Op: "WAIVE", Reason: w.Reason, At: now, FactAt: w.At, KindVersion: 1,
+		Instance: health.Instance{Key: key, Evidence: w.Evidence, Detail: w.Actor + ": " + w.Reason}})
+	st.Transitions = append(st.Transitions, Transition{TaskID: taskID, Kind: string(w.Kind), Subject: w.Subject, Op: "WAIVE",
+		Reason: w.Reason, Digest: d, Generation: gen, KindVersion: 1, FactAt: w.At})
+	return s.save(st)
+}
+
+// DeleteWaiver implements WaiverStore.
+func (s *FileStore) DeleteWaiver(ctx context.Context, taskID string, fence health.Fence, key health.Key) error {
+	if fence.Mode != health.FenceStandalone {
+		return ErrModeUnsupported
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load()
+	if err != nil {
+		return err
+	}
+	rec, ok := st.Health[taskID]
+	var stored *Stored
+	if ok {
+		stored = &rec.Stored
+	}
+	if err := CheckFence(fence, nil, stored); err != nil {
+		return err
+	}
+	idx := -1
+	for i, f := range st.Findings {
+		if f.Key() == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || st.Findings[idx].WaiverEvidence == "" {
+		return nil
+	}
+	st.Findings[idx].WaiverEvidence = ""
+	st.Findings[idx].WaiverReason = ""
+	st.Findings[idx].WaiverActor = ""
+	st.Findings[idx].WaivedAt = nil
+	st.Findings[idx].WaiverKindVer = 0
+	now := time.Now().UTC()
+	gen := rec.Generation + 1
+	rec.Generation = gen
+	st.Health[taskID] = fileHealth{TaskHealth: rec.TaskHealth, Generation: gen, Stored: Stored{Mode: fence.Mode, Node: fence.Node, Instance: fence.Instance}}
+	d := health.TransitionDigest(taskID, health.Transition{Key: key, Op: "UNWAIVE", Reason: "UNWAIVE", At: now, FactAt: now, KindVersion: 1,
+		Instance: health.Instance{Key: key}})
+	st.Transitions = append(st.Transitions, Transition{TaskID: taskID, Kind: string(key.Kind), Subject: key.Subject, Op: "UNWAIVE",
+		Reason: "UNWAIVE", Digest: d, Generation: gen, KindVersion: 1, FactAt: now})
+	return s.save(st)
 }

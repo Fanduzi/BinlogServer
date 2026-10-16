@@ -17,9 +17,15 @@ func TestP251ManagedTable(t *testing.T) {
 			t.Errorf("%s: managed=%v confirm=%v, want both", k, r[k].Managed, r[k].Confirm)
 		}
 	}
-	for _, k := range []Kind{GTIDHole, CheckpointAhead, OrphanRow, SealFactsAbsent} {
+	for _, k := range []Kind{OrphanRow, SealFactsAbsent} {
 		if r[k].Managed {
 			t.Errorf("%s is managed; it is not part of P2-5.1", k)
+		}
+	}
+	// GTID_HOLE / CHECKPOINT_AHEAD flip in P2-5.3 (§22), not here.
+	for _, k := range []Kind{GTIDHole, CheckpointAhead} {
+		if r[k].Confirm {
+			t.Errorf("%s gained Confirm in P2-5.1; Confirm stays off (P2-5.3)", k)
 		}
 	}
 	for _, k := range []Kind{SegmentUnreadable, SegmentOverlap, SegmentEmptyLeftover} {

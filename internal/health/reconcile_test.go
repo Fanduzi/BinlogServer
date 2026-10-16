@@ -274,7 +274,8 @@ func TestHealthOf(t *testing.T) {
 // and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED.
 var wantManagedP24 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true, SegmentEmptyLeftover: true,
 	SegmentDamaged: true, ChainIndexGap: true, LegacyFailback: true, SegmentMissing: true, // P2-5.1, design §20.1
-	UploadLate:        true, // P2-5.2, design §21.7
+	UploadLate: true,                        // P2-5.2, design §21.7
+	GTIDHole:   true, CheckpointAhead: true, // P2-5.3, design §22.1
 	TaskPersistFailed: true, MetadataWriteBlocked: true, EventPersistFailed: true, EventReadFailed: true,
 	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
 	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,

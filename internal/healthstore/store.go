@@ -127,3 +127,14 @@ type Transition struct {
 type TransitionLister interface {
 	ListTransitions(ctx context.Context, taskID string) ([]Transition, error)
 }
+
+// WaiverStore persists GTID_HOLE waivers (design 0009 §22.3). Optional:
+// stores that do not implement it leave Facts.Waivers empty.
+type WaiverStore interface {
+	ListWaivers(ctx context.Context, taskID string) ([]health.Waiver, error)
+	// PutWaiver writes waiver_* on the finding row (open or resolved) and
+	// appends a WAIVE transition. Evidence must already be canonical.
+	PutWaiver(ctx context.Context, taskID string, fence health.Fence, w health.Waiver) error
+	// DeleteWaiver clears waiver_* and appends UNWAIVE.
+	DeleteWaiver(ctx context.Context, taskID string, fence health.Fence, key health.Key) error
+}

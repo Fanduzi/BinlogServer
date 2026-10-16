@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
@@ -22,6 +23,7 @@ import (
 )
 
 var _ healthstore.Store = (*MySQLTaskStore)(nil)
+var _ healthstore.WaiverStore = (*MySQLTaskStore)(nil)
 var _ healthstore.TransitionLister = (*MySQLTaskStore)(nil)
 var _ tasks.RehashCursorStore = (*MySQLTaskStore)(nil)
 
@@ -351,4 +353,120 @@ func (s *MySQLTaskStore) SaveRehashCursor(ctx context.Context, taskID, segment s
 	}
 	_, err = s.db.ExecContext(ctx, q, taskID, segment)
 	return healthErr(err)
+}
+
+// ListWaivers implements healthstore.WaiverStore (open and resolved rows).
+func (s *MySQLTaskStore) ListWaivers(ctx context.Context, taskID string) ([]health.Waiver, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT kind, subject, waiver_evidence, waiver_reason, waiver_actor, waived_at FROM task_findings "+
+		"WHERE task_id = ? AND waiver_evidence IS NOT NULL AND waiver_evidence <> '' ORDER BY kind, subject", taskID)
+	if err != nil {
+		return nil, healthErr(err)
+	}
+	defer rows.Close()
+	var out []health.Waiver
+	for rows.Next() {
+		var w health.Waiver
+		var kind, evidence, reason, actor sql.NullString
+		var at sql.NullTime
+		if err := rows.Scan(&kind, &w.Subject, &evidence, &reason, &actor, &at); err != nil {
+			return nil, healthErr(err)
+		}
+		w.TaskID, w.Kind = taskID, health.Kind(kind.String)
+		w.Evidence, w.Reason, w.Actor = evidence.String, reason.String, actor.String
+		if at.Valid {
+			w.At = at.Time
+		}
+		out = append(out, w)
+	}
+	return out, healthErr(rows.Err())
+}
+
+// PutWaiver implements healthstore.WaiverStore.
+func (s *MySQLTaskStore) PutWaiver(ctx context.Context, taskID string, fence health.Fence, w health.Waiver) error {
+	return s.waiverWrite(ctx, taskID, fence, w.Key, "WAIVE", w)
+}
+
+// DeleteWaiver implements healthstore.WaiverStore.
+func (s *MySQLTaskStore) DeleteWaiver(ctx context.Context, taskID string, fence health.Fence, key health.Key) error {
+	return s.waiverWrite(ctx, taskID, fence, key, "UNWAIVE", health.Waiver{Key: key})
+}
+
+func (s *MySQLTaskStore) waiverWrite(ctx context.Context, taskID string, fence health.Fence, key health.Key, op string, w health.Waiver) error {
+	switch fence.Mode {
+	case health.FenceCluster, health.FenceStandalone, health.FenceNeverLeased:
+	default:
+		return healthstore.ErrModeUnsupported
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', NOW(6))", taskID); err != nil {
+		return healthErr(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return healthErr(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var lease *healthstore.Lease
+	if fence.Mode != health.FenceStandalone {
+		var l healthstore.Lease
+		err = tx.QueryRowContext(ctx, "SELECT owner_worker_id, epoch, lease_expire_at <= NOW(6) FROM task_leases WHERE task_id = ? FOR UPDATE", taskID).Scan(&l.Owner, &l.Epoch, &l.Expired)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			err = nil
+		case err != nil:
+			return healthErr(err)
+		default:
+			lease = &l
+		}
+	}
+	var stored healthstore.Stored
+	var mode string
+	var gen int64
+	if err = tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
+		Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen); err != nil {
+		return healthErr(err)
+	}
+	stored.Mode = health.FenceMode(mode)
+	var sp *healthstore.Stored
+	if mode != "" {
+		sp = &stored
+	}
+	if err = healthstore.CheckFence(fence, lease, sp); err != nil {
+		return err
+	}
+	gen++
+	now := time.Now().UTC()
+	detail := w.Actor + ": " + w.Reason
+	digest := health.TransitionDigest(taskID, health.Transition{Key: key, Op: health.Op(op), Reason: w.Reason, At: now, FactAt: w.At, KindVersion: 1,
+		Instance: health.Instance{Key: key, Evidence: w.Evidence, Detail: detail}})
+	if _, err = tx.ExecContext(ctx, "INSERT INTO finding_transitions (task_id, kind, subject, op, reason, generation, kind_version, fact_at, severity, detail, at, transition_digest) "+
+		"VALUES (?, ?, ?, ?, ?, ?, 1, COALESCE(?, NOW(6)), '', ?, NOW(6), ?)",
+		taskID, string(key.Kind), key.Subject, op, w.Reason, gen, nullTime(w.At), detail, digest); err != nil {
+		return healthErr(err)
+	}
+	if op == "WAIVE" {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO task_findings (task_id, kind, subject, severity, detail, evidence, first_seen, last_seen, count, generation, waiver_evidence, waiver_reason, waiver_actor, waived_at, waiver_kind_version) "+
+			"VALUES (?, ?, ?, 'CRITICAL', '', ?, NOW(6), NOW(6), 1, ?, ?, ?, ?, COALESCE(?, NOW(6)), 1) "+
+			"ON DUPLICATE KEY UPDATE waiver_evidence = VALUES(waiver_evidence), waiver_reason = VALUES(waiver_reason), waiver_actor = VALUES(waiver_actor), "+
+			"waived_at = VALUES(waived_at), waiver_kind_version = 1, generation = VALUES(generation)",
+			taskID, string(key.Kind), key.Subject, w.Evidence, gen, w.Evidence, w.Reason, w.Actor, nullTime(w.At)); err != nil {
+			return healthErr(err)
+		}
+	} else {
+		if _, err = tx.ExecContext(ctx, "UPDATE task_findings SET waiver_evidence = NULL, waiver_reason = NULL, waiver_actor = NULL, waived_at = NULL, waiver_kind_version = NULL, generation = ? "+
+			"WHERE task_id = ? AND kind = ? AND subject = ?", gen, taskID, string(key.Kind), key.Subject); err != nil {
+			return healthErr(err)
+		}
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE task_health SET generation = ?, fence_mode = ?, fence_instance = ?, fence_epoch = ?, fence_node = ? WHERE task_id = ?",
+		gen, string(fence.Mode), fence.Instance, fence.TaskEpoch, fence.Node, taskID); err != nil {
+		return healthErr(err)
+	}
+	return healthErr(tx.Commit())
+}
+
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
