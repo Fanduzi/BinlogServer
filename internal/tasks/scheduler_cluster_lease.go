@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: lease renew ticks and lease manager renew responses/errors
-// output: lease renewal decisions delegated to centralized lifecycle transitions; a lost lease whose row has a new owner or newer epoch stops the dump and yields in memory without writing the row (#346); the renew loop start marks LEASE_ACQUIRED and a yield marks LEASE_LOST for the health evaluator
+// output: lease renewal decisions delegated to centralized lifecycle transitions; a lost lease whose row has a new owner or newer epoch stops the dump and yields in memory without writing the row (#346); the renew loop start marks LEASE_ACQUIRED and a yield marks LEASE_LOST for the health evaluator; each successful renew confirms the lease clock (WithLeaseClock) from the time the renew was sent, and a lost renew, exceeded grace or yield marks that epoch lost so the runner's write fence refuses the next write (ADR 0009 P2-6b, #417)
 // pos: scheduler cluster lease-maintenance loop separated from transition recipes
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -37,9 +37,11 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		}
 
 		leaseCtx, cancel := s.withLeaseTimeout(ctx)
-		ok, err := s.leaseManager.Renew(leaseCtx, id, workerID, epoch, time.Now(), s.leaseTTL)
+		renewSentAt := time.Now()
+		ok, err := s.leaseManager.Renew(leaseCtx, id, workerID, epoch, renewSentAt, s.leaseTTL)
 		cancel()
 		if err == nil && ok {
+			s.leaseClock.Confirm(id, epoch, renewSentAt, s.leaseTTL)
 			if !degradedSince.IsZero() {
 				// 从降级状态恢复后，清空降级计时并收敛回 RUNNING。
 				degradedSince = time.Time{}
@@ -51,6 +53,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		}
 
 		if err == nil && !ok {
+			s.leaseClock.Lose(id, epoch)
 			// lease 被抢占/丢失：立刻 fail-safe stop，避免双写同一任务。
 			// #346: when another owner or a newer epoch is on the row, stop the
 			// dump on this tick and yield in memory only; writing STOPPING or
@@ -79,6 +82,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 		// Step 3: 超过 grace 仍不可续租，触发 fail-safe 停止。
 		if now.Sub(degradedSince) >= s.leaseGrace {
 			// 超过 grace 仍无法续租，必须停止，优先保证文件语义与单执行安全。
+			s.leaseClock.Lose(id, epoch)
 			s.mu.Lock()
 			logTransitionPersistError(id, StateStopping, s.failSafeStopLocked(id, "TASK_LEASE_GRACE_EXCEEDED", "lease renew grace exceeded"))
 			s.mu.Unlock()
@@ -92,6 +96,7 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 // yieldLostLeaseLocked stops this worker's run after its lease epoch was lost.
 // Only memory changes; the task row belongs to the new owner. Caller holds s.mu.
 func (s *Scheduler) yieldLostLeaseLocked(id string, epoch int64) {
+	s.leaseClock.Lose(id, epoch)
 	s.markHealthDirty(id, ReasonLeaseLost)
 	task, ok := s.tasks[id]
 	if !ok {
@@ -137,4 +142,21 @@ func rowTakenOver(row Task, owner string, epoch int64) bool {
 		return false
 	}
 	return row.OwnerWorkerID != owner || row.Epoch > epoch
+}
+
+// confirmHeldLeaseLocked renews a lease this worker already holds before a
+// run starts without Acquire, so the run's write fence starts fresh. A failed
+// renew leaves the clock as it is: the run's first write is then refused as a
+// lease handoff (ADR 0009 P2-6). Caller holds s.mu; only with a lease clock.
+func (s *Scheduler) confirmHeldLeaseLocked(id, owner string, epoch int64) {
+	if s.leaseClock == nil || s.leaseManager == nil || owner == "" || epoch <= 0 {
+		return
+	}
+	ctx, cancel := s.withLeaseTimeout(context.Background())
+	defer cancel()
+	sentAt := time.Now()
+	ok, err := s.leaseManager.Renew(ctx, id, owner, epoch, sentAt, s.leaseTTL)
+	if err == nil && ok {
+		s.leaseClock.Confirm(id, epoch, sentAt, s.leaseTTL)
+	}
 }

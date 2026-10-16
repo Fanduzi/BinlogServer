@@ -203,3 +203,30 @@ func TestWriteFence_StaleOwnerDoesNotOpenSegment(t *testing.T) {
 		t.Fatalf("stale owner created open segments: %v", matches)
 	}
 }
+
+func TestRenameNoReplace_RefusesExistingTarget(t *testing.T) {
+	dir := t.TempDir()
+	from, to := filepath.Join(dir, "a.open.e2"), filepath.Join(dir, "a")
+	if err := os.WriteFile(from, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(to, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := renameNoReplace(from, to)
+	if !tasks.IsPermanent(err) {
+		t.Fatalf("err = %v, want permanent SEALED_FILE_EXISTS", err)
+	}
+	if b, _ := os.ReadFile(to); string(b) != "old" {
+		t.Fatalf("target overwritten: %q", b)
+	}
+	if err := os.Remove(to); err != nil {
+		t.Fatal(err)
+	}
+	if err := renameNoReplace(from, to); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(from); !os.IsNotExist(err) {
+		t.Fatalf("source still there: %v", err)
+	}
+}

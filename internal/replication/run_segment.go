@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: the run's writer opener, the source session (disk names, resume GTID), the executed GTID set, the checkpoint and catalog stores
-// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes every event but writes the checkpoint and the OPEN row only at a transaction boundary, batched by checkpointBatchWindow (a held commit is written by the next commit past the window, a heartbeat, a rotate, a seal, or the run exit; #391); a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint before the put, uploads, and opens the next file
+// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes every event but writes the checkpoint and the OPEN row only at a transaction boundary, batched by checkpointBatchWindow (a held commit is written by the next commit past the window, a heartbeat, a rotate, a seal, or the run exit; #391); a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint before the put, uploads, and opens the next file; every append and checkpoint flush first passes the run's write fence (ADR 0009 P2-6b, #417)
 // pos: phase 3 of MySQLRunner.run (ADR 0008): segment append, rotate and seal
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -93,6 +93,10 @@ func (s *openSegment) close() {
 // in unsaved. Every event used to write both, so a 20k-event transaction did
 // ~28k meta INSERTs (#391).
 func (s *openSegment) appendAndPersist(raw []byte, next binlog.Checkpoint, commit bool) error {
+	// A thawed owner reaches here with events it read before it froze.
+	if err := s.r.fenceWrite(s.task, "append"); err != nil {
+		return err
+	}
 	if err := s.writer.Append(raw, next); err != nil {
 		return err
 	}
@@ -123,6 +127,9 @@ func (s *openSegment) flushCheckpoint() error {
 	}
 	checkpoint := *s.unsaved
 	r := s.r
+	if err := r.fenceWrite(s.task, "checkpoint"); err != nil {
+		return err
+	}
 	if r.checkpointStore != nil {
 		if err := r.checkpointStore.UpsertCheckpoint(s.ctx, s.task.ID, checkpoint); err != nil {
 			return checkpointWriteError(err)
@@ -268,6 +275,9 @@ func (s *openSegment) rotate(logPos uint32, raw []byte, nextFile string, nextPos
 				if !ok {
 					return ErrLeaseEpochMismatch
 				}
+			}
+			if err := r.fenceWrite(task, "release covered open"); err != nil {
+				return err
 			}
 			if err := r.releaseCoveredOpen(ctx, task.ID, s.session.diskName(s.name), s.path, coveredEpoch); err != nil {
 				return err

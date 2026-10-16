@@ -14,6 +14,7 @@ Maintenance rules:
 
 ### Fixed
 
+- #417（P1）：集群里 owner 被冻住超过 lease TTL、新 owner 接管后，旧 owner 醒来会继续往分段里追加，并写 checkpoint、目录行和上传结果，任务永久卡在 `STORAGE_INCONSISTENT`。现在每个写边界都带 lease `(owner, epoch)` 栅栏（ADR 0009 设计 §23）：本地 lease 时钟在追加、新建 open 文件、封存、上传之前拒绝过期的 epoch；checkpoint 和 `binlog_files` 的写在同一事务里对 `task_leases` 加锁校验。被拒的 run 作为租约移交退出，不写 FAILED。封存改名改用 `RENAME_NOREPLACE`。行为变化：meta 续约持续报错时，超过 `0.8 × lease_ttl_sec` 就停止落盘，不再写到 `lease_grace_sec`。
 - #415（P2）：租约接管续写上一个 epoch 的 open 分段时直接改名，沿用同一个 inode。被 SIGSTOP 冻住的旧 owner 醒来后用旧句柄把缓冲的 Rotate 追加进新 owner 已封存的文件，封存文件比封存时多 42 字节，健康评估报 CRITICAL `SEGMENT_UNREADABLE`。现在新 epoch 把完整事件复制成自己的文件再删旧文件，旧句柄写不到续写或封存的分段。接管时多一次本地复制（最大一个 open 分段）。
 
 ## [v0.5.70] - 2026-10-17
