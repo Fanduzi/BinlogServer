@@ -567,7 +567,8 @@ CREATE TABLE task_mutes (
 | #341 上传模式保留期删除不写 RETENTION_REMOVED | **吸收**：I6 需要保留期删除标记（阶段 1 §4.1 已排到阶段 2）；同一 PR 写事件、失败走 `RETENTION_RECORD_FAILED` 信号 | P2-5 |
 | #342 lintguard 覆盖面 | **部分吸收**：新增「`Report/Resolve` 只能在 evaluator 内」规则时一并识别 logger 实例方法；其余条目不在本阶段 | P2-4 |
 | #368 事件时间线按写入时间排序 | **部分吸收**：告警页与时间线中的 finding 事件按事件时间排；时间线整体排序随 Console 修 | P2-8 |
-| #360 lease 丢失后 STOPPED 覆盖新 owner 行 | **吸收，作为 P2-6 的前置 P2-6a**：任务行写走 `meta.fencedExec`（事务内校验 `task_leases`）；评估器另外交叉校验任务行与 lease 表（§8.4） | P2-6a |
+| #360 lease 丢失后 STOPPED 覆盖新 owner 行 | **吸收，作为 P2-6 的前置 P2-6a**：任务行写走 `meta.fencedExec`（事务内校验 `task_leases`）；评估器另外交叉校验任务行与 lease 表（§8.4） | P2-5.1 | P2-5 的第一步（§20）：`SEGMENT_DAMAGED`、`CHAIN_INDEX_GAP`（不含 `I2_SWITCH_UNRECORDED`）、`LEGACY_FAILBACK`、`SEGMENT_MISSING`（origin=local：非集群的 `I6_MISSING_LOCAL` 与旧段的目录行大小比较）翻 Managed；`KindSpec.Confirm` 两轮确认 | 47 个目录用例无误报；每种 kind 打开一次、修复后关闭一次；单轮的轮转竞态不打开 | — | P2-4 |
+| P2-6a |
 | #343 只读 meta 下 RUNNING 显示 1–3s | 不吸收（任务状态，不是健康）；健康会在首次写失败信号后 1 轮内变 UNHEALTHY，缩小但不消除该窗口 | — |
 | #345 DUMP_STALLED 48–49s 才报 | 不吸收（runner 检测阈值）；评估器不改变检测时机 | — |
 | #348 UploadGrace 默认值 | **吸收为 P2-5 的前置 P2-5a**：`assurance.DefaultUploadGrace`（15min）已有，但 tasks 侧未传入配置；P2-5a 加 `upload.grace` 配置并显式传入，Registry Derive 单测覆盖 | P2-5a |
@@ -766,3 +767,64 @@ P2-4 按 §5.5、§5.6、§6 落地（`internal/health/signals.go`、`internal/t
 - **删除也会打开**：standalone 的 `DELETE` 不删目录，删掉后目录仍有分段，就和重启后的残留目录一样，打开 TASK_UNADOPTED。处理方式一样：adopt，或把目录移出 data_dir。之所以不区分，是因为重启后两者无法区分（standalone 不落盘任务记录）。
 - **没有做的另一半**：重启后自动恢复复制。Adrian 已决定做（#385），见 [ADR 0010](../adr/0010-standalone-task-records.md)：任务规格与源密码加密存于 `{data_dir}/.tasks.enc`，重启后按磁盘位点自动续传。TASK_UNADOPTED 仍用于没有记录的目录；records 开启时，删除的任务留墓碑，不再打开 TASK_UNADOPTED。
 - 已知（§17.1 遗留的 P3）：无 meta 时任务列表的 `open_findings` 不含评估器的行；`/api/findings` 与任务健康已包含 TASK_UNADOPTED。
+
+## 20. P2-5.1：chain.local 结构类 kind（2026-10-16）
+
+§13 的 P2-5 太大，一个 PR 做不完，也没法一次 QA。按「事实是否已经可信」拆成几步。**P2-5.1** 只翻转那些事实只来自本节点磁盘（加可选的目录行）、而且在 47 个阶段 1 目录用例上没有误报的链 kind。其余的写明缺什么，留给后面的步骤。
+
+### 20.1 本步翻转为 Managed 的 kind
+
+| Kind | 来自哪些 assurance kind | 本步不派生的 assurance kind（及原因） |
+|---|---|---|
+| `SEGMENT_DAMAGED` | `I1_REGRESSION` | — |
+| `CHAIN_INDEX_GAP` | `I2_INDEX_GAP`、`I2_ORDER_INVALID` | `I2_SWITCH_UNRECORDED`：评估器还没有可信的换源记录。`SOURCE_SWITCHOVER` 事件可能被事件保留期清掉，standalone 也可能没有事件库。不传 `Switches` 时，47 个用例里健康的 failback 目录会全部误报 |
+| `LEGACY_FAILBACK` | `I3_LEGACY_FAILBACK`（规划器） | — |
+| `SEGMENT_MISSING` | `I6_MISSING_LOCAL`（非集群）、`I6_SIZE_MISMATCH`（本地，见 20.2） | `I6_MISSING_ROW`：adopt 不回填目录行，有 meta 时被 adopt 的目录里每个旧段都会报。`I6_MISSING_OBJECT`、`I6_OBJECT_SIZE_MISMATCH`：需要 §6.1 的五条（P2-5.2）。集群模式下的 `I6_MISSING_LOCAL`：非共享存储时上一个 owner 的段不在本机，要等 P2-6 的委派 |
+
+仍然不是 Managed：`GTID_HOLE`（需要 waiver 存取；不传 `Switches` 时跨换源的洞也会误报，P2-5.3）、`CHECKPOINT_AHEAD`（见 20.4）、`ORPHAN_ROW`、`UPLOAD_LATE`、`UPLOAD_UNVERIFIED` 的链部分，以及 P2-5a（这三项都只在配置了对象存储时有意义，P2-5.2 与 P2-5a 一起做）、`SEAL_FACTS_ABSENT`、保留期删除标记（#341/#353，P2-5.4）。
+
+Scope：`SEGMENT_MISSING` 在本步只从 `chain.local` 判定，所以 kind 的 `Scopes` 暂时只有 `chain.local`。否则 Reconcile 要求 `chain.objects` 也完整才关闭，而现在没有任何评估器产出 `chain.objects`，打开的实例会永远关不上。P2-5.2 按 §6.1 第 1 条加实例级 origin/scope，再把 `chain.objects` 加回来。
+
+### 20.2 旧段的大小比较（§17.2 留下的缺口）
+
+有两个证人能说出封存段「封存时多大」：
+
+1. `.seal-sha256` 账本（封存时由 `withSealFacts` 写，legacy failback 重写时也追加）。
+2. 目录行 `size_bytes`。
+
+规则：
+
+- **账本有该名字的行**：账本说了算。本地大小不等于账本大小，就是 `SEGMENT_UNREADABLE`（I1，§17.2，会截断 `/replay`），不再拿目录行比较。本地大小等于账本大小而目录行不同，说明目录行旧了，不报。这是 §17.2 担心的 legacy failback 重写后的旧大小。
+- **账本没有该名字的行**（ledger 出现之前封存的旧段）：如果封存的目录行有 `size_bytes > 0` 而且不等于本地大小，就派生 `I6_SIZE_MISMATCH`，归 `SEGMENT_MISSING`（origin=local），evidence `local=<n> row=<m>`，subject 是段名。**它不进入存储健康判定，不截断 `/replay`**。目录行是比账本弱的证人（写入路径不同，未修复的 legacy failback 期间会指向另一个文件），只够打开一个 finding 让人去比对，不够改变回放。
+- **规划器报告 legacy failback 时不报本地大小不一致**：未修复的 A→B→A 目录里，共用名字的目录行指向后一个 stint 的文件，大小必然不同。`LEGACY_FAILBACK` 已经说明了这件事；修复按磁盘重写目录行（`diskCatalogRow`），之后自然一致。
+- 对象大小与目录行不同改用独立的 `I6_OBJECT_SIZE_MISMATCH`，origin 由 kind 本身表达。本步不派生（P2-5.2）。
+- 只比较 `Sealed` 的目录行，OPEN 行的大小本来就在变。
+
+### 20.3 两轮确认（`KindSpec.Confirm`）
+
+链的事实分几次读出来：目录行、磁盘列表、账本、规划器。这几次读不是原子的。一次轮转发生在「读顺序」和「列本地段」之间时，刚出现或刚改名的段会被当成「不在链顺序上」（`I2_ORDER_INVALID`），一次 CRITICAL 打开下一轮就关闭，还会发出通知。P2-3 的三个 kind 没有这个问题，它们只比较同一次读到的文件内容。
+
+- 新增 `KindSpec.Confirm`：这类 kind 的实例要在**同一任务连续两轮评估**里都被派生，才进入 desired 并打开。已经 open 的实例不受影响：它要关闭照样只看清除规则。
+- 评估器为每个任务记住上一轮派生出的 Confirm 键（`Facts.Confirmed`）。本轮第一次出现的键记为 pending，评估器在 `Debounce` 后再标脏一次（`EvalReason` `CONFIRM`），不用等 60s 的 sweep。真实故障的打开延迟是一轮评估加一个 debounce（默认 1s）。
+- P2-5.1 的四个 kind 都设 `Confirm`。P2-3/P2-4 的 kind 不变。
+- shadow 模式同样两轮确认，日志里的 OPEN 与 on 模式一致。
+
+### 20.4 为什么 `CHECKPOINT_AHEAD` 不在本步
+
+I5 需要 checkpoint，评估器现在不读 checkpoint。要读就要先解决两件事，否则会在运行中的任务上持续误报：
+
+1. **读的顺序**：先读 checkpoint，再读顺序和磁盘。checkpoint 写在数据落盘之后，反过来读，checkpoint 可能指向快照里还没有的新文件。
+2. **缓存**：现在的链结论按「目录指纹 + 顺序 + 目录行」缓存。checkpoint 每个事务都在变，放进缓存键会让运行中的任务每轮都重算整条链。需要把 I5 从 `Check` 里分出来单独算（它只要已存集合与尾部位置）。
+
+这两件事和 `GTID_HOLE` 的 `Switches` 输入一起做（P2-5.3）。
+
+### 20.5 测试（先红）
+
+- `assurance`：账本优先（有账本行时不比目录行；账本不一致仍是 I1）；没有账本行的旧段报 `I6_SIZE_MISMATCH`；规划器报告 legacy failback 时不报；对象大小不一致是 `I6_OBJECT_SIZE_MISMATCH`。
+- `health`：P2-5.1 的 Managed 表；`SEGMENT_MISSING`/`CHAIN_INDEX_GAP` 不从本步排除的 assurance kind 派生；`SEGMENT_MISSING` 只在 `chain.local` 完整时就能关闭；`Confirm` 第一轮不打开、第二轮打开、已 open 的不受影响。
+- `tasks`：
+  - 47 个阶段 1 目录用例（含 `/objects`、`/start`、MariaDB）各评估两轮。`SEGMENT_DAMAGED` 只出现在 4 组 damaged 用例上，`CHAIN_INDEX_GAP` 只出现在 `live-hole`（真的缺了 000004），没有 `SEGMENT_MISSING` 和 `LEGACY_FAILBACK`。
+  - legacy failback 目录打开 `LEGACY_FAILBACK`，修复后关闭。
+  - 有 meta 时，旧段（无账本行）目录行大小不符打开 `SEGMENT_MISSING`，改回后关闭；有账本行时不报。
+  - SEALED 行的本地文件不在时打开 `SEGMENT_MISSING`，集群模式不派生。
+  - 单轮看到的「不在链顺序上」不打开。
