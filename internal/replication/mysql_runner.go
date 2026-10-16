@@ -72,6 +72,7 @@ type MySQLRunner struct {
 	objectDeleter   objectDeleter
 	objectOpener    objectOpener
 	leaseVerifier   LeaseVerifier
+	writeFence      tasks.WriteFence
 	sealedHandler   func(context.Context, tasks.BinlogFile) error
 	// uploadTimeout bounds the post-seal put. It is the same meta.timeout.upload_sec
 	// value Scheduler.withUploadTimeout uses for background retry. Zero means no extra deadline.
@@ -483,6 +484,17 @@ func WithSealedHandler(handler func(context.Context, tasks.BinlogFile) error, pr
 func WithLeaseVerifier(verifier LeaseVerifier) RunnerOption {
 	return func(r *MySQLRunner) {
 		r.leaseVerifier = verifier
+	}
+}
+
+// WithWriteFence injects the worker's lease clock. Every write boundary of a
+// run (segment bytes, a new open file, seal, checkpoint, catalog row, upload)
+// asks it before the side effect, and the run context carries the fencing
+// token so the metadata store checks it against task_leases in the same
+// transaction (ADR 0009 P2-6, #417). Cluster mode only.
+func WithWriteFence(fence tasks.WriteFence) RunnerOption {
+	return func(r *MySQLRunner) {
+		r.writeFence = fence
 	}
 }
 
