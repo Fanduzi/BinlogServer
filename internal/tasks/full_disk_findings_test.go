@@ -54,7 +54,7 @@ func TestFullDisk_RecordsWriteFindingServedFromMemory(t *testing.T) {
 	fs := &fullFindingStore{FindingStore: NewFileFindingStore(filepath.Join(data, FindingFileName))}
 	hs.full.Store(true)
 	fs.full.Store(true)
-	file := &failingRecordFile{Store: taskrecords.Open(data, recordKey(t, 1), nil), fail: true}
+	file := newFailingRecordFile(taskrecords.Open(data, recordKey(t, 1), nil), true)
 	s, _ := recordProcess(t, data, file, nil, WithFindingStore(fs))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -91,7 +91,7 @@ func TestFullDisk_RecordsWriteFindingServedFromMemory(t *testing.T) {
 	// Room again: the state lands in the store and the persist finding closes.
 	hs.full.Store(false)
 	fs.full.Store(false)
-	file.fail = false
+	file.fail.Store(false)
 	s.RetryRecordSave()
 	for i := 0; i < 3; i++ {
 		_ = e.SweepNow(context.Background())
