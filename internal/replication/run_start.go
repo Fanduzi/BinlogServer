@@ -187,7 +187,7 @@ func (r *MySQLRunner) resolveRunStart(ctx context.Context, task tasks.Task) (*ru
 				if dir == "" {
 					dir = filepath.Join(r.dataDir, task.ID)
 				}
-				if err := promoteEpochZeroOpen(dir, decision.Checkpoint.File, task.Epoch, decision.Checkpoint.Pos, files); err != nil {
+				if err := r.promoteEpochZeroOpen(task.ID, dir, decision.Checkpoint.File, task.Epoch, decision.Checkpoint.Pos, files); err != nil {
 					return nil, err
 				}
 				if decision.Dir != "" {
