@@ -568,6 +568,7 @@ CREATE TABLE task_mutes (
 | #342 lintguard 覆盖面 | **部分吸收**：新增「`Report/Resolve` 只能在 evaluator 内」规则时一并识别 logger 实例方法；其余条目不在本阶段 | P2-4 |
 | #368 事件时间线按写入时间排序 | **部分吸收**：告警页与时间线中的 finding 事件按事件时间排；时间线整体排序随 Console 修 | P2-8 |
 | #360 lease 丢失后 STOPPED 覆盖新 owner 行 | **吸收，作为 P2-6 的前置 P2-6a**：任务行写走 `meta.fencedExec`（事务内校验 `task_leases`）；评估器另外交叉校验任务行与 lease 表（§8.4） | P2-5.1 | P2-5 的第一步（§20）：`SEGMENT_DAMAGED`、`CHAIN_INDEX_GAP`（不含 `I2_SWITCH_UNRECORDED`）、`LEGACY_FAILBACK`、`SEGMENT_MISSING`（origin=local：非集群的 `I6_MISSING_LOCAL` 与旧段的目录行大小比较）翻 Managed；`KindSpec.Confirm` 两轮确认 | 47 个目录用例无误报；每种 kind 打开一次、修复后关闭一次；单轮的轮转竞态不打开 | — | P2-4 |
+| P2-5.2 | §21：P2-5a（`upload.grace_sec` 全局 + `upload.grace_task_sec` 按任务）；§6.1 五条（实例来源 `#object`、CONFIG 关闭 + 审计、按前缀列举完整性、未配置 = 确认事实、按任务的 `chain.objects`）；对象列举（`ObjectLister`，有上限、有缓存）；`UPLOAD_LATE`（W→C，`health.upload_late_critical_after_sec` 默认 24h + 按任务）| 见 §21.7 | `UPLOAD_LATE`；`SEGMENT_MISSING` 的对象来源；`UPLOAD_UNVERIFIED` 的链部分开始派生 | P2-5.1 |
 | P2-6a |
 | #343 只读 meta 下 RUNNING 显示 1–3s | 不吸收（任务状态，不是健康）；健康会在首次写失败信号后 1 轮内变 UNHEALTHY，缩小但不消除该窗口 | — |
 | #345 DUMP_STALLED 48–49s 才报 | 不吸收（runner 检测阈值）；评估器不改变检测时机 | — |
@@ -828,3 +829,62 @@ I5 需要 checkpoint，评估器现在不读 checkpoint。要读就要先解决�
   - 有 meta 时，旧段（无账本行）目录行大小不符打开 `SEGMENT_MISSING`，改回后关闭；有账本行时不报。
   - SEALED 行的本地文件不在时打开 `SEGMENT_MISSING`，集群模式不派生。
   - 单轮看到的「不在链顺序上」不打开。
+
+## 21. P2-5.2：对象类 kind、P2-5a、UPLOAD_LATE、UPLOAD_UNVERIFIED（2026-10-16）
+
+P2-5.1（§20）只翻转了本地事实。本步把「配置了对象存储时才有意义」的部分做完：先满足 §6.1 的五条前置，再让对象缺失、上传迟到、上传未校验进入评估器。`ORPHAN_ROW` 仍不翻转：它在对象保留期删除后必然出现，要等保留期删除标记（#341，P2-5.4）。
+
+### 21.1 P2-5a：上传宽限（#348）
+
+- `upload.grace_sec`（全局，默认 900 = `assurance.DefaultUploadGrace`）与 `upload.grace_task_sec: {"<task id>": 秒}`（按任务覆盖，写法与 `health.unreachable_after_task_sec` 相同，必须为正）。
+- 评估器把它显式传入 `assurance.Inputs.UploadGrace`。封存后宽限之内不判定 `I7_UPLOAD_LATE`。
+- 只影响评估器。`/replay`、`/window`、`storage_alert` 不读 I7，字节不变。
+
+### 21.2 对象存储是否配置：确认过的事实（§6.1 第 4 条）
+
+- 进程启动时读到的配置里没有上传端点（`Scheduler` 没有 uploader）：该任务**确认没有对象存储**。`Inputs.ObjectStorage=false`，`chain.objects` 对该任务不被产出（`Facts.Produced[chain.objects]=false`），I7 不判定。
+- 配置了上传：`ObjectStorage=true`，`chain.objects` 被产出，是否完整看 21.3。uploader 不支持列举（旧实现、测试替身）或列举出错（凭据、网络）：`chain.objects` 不完整。
+- 配置读不出来进程就起不来，所以「读不出配置」不会被当成「没有对象存储」。
+
+### 21.3 对象列举（§6.1 第 3 条）
+
+- uploader 实现可选接口 `tasks.ObjectLister.ListObjects(ctx, prefix, limit) (map[key]size, truncated, err)`。S3 实现用递归 ListObjects，读到 `limit` 个即停并报 `truncated`。
+- 列举的前缀是该任务 UPLOADED 行 `object_key` 的目录部分（`path.Dir(key)+"/"`，即 `prefix/cluster_key/server_uuid/`），每个前缀一次。
+- **按前缀记完整性**：命中上限或出错的前缀不完整。assurance 新增 `Inputs.ObjectPrefixes map[prefix]bool`（nil 时保持阶段 1 行为：`Objects` 非 nil 即视为全部已列举）。一个段只有在它的前缀完整时才 `ObjectListed`。不完整前缀上的段既不派生对象类实例，已 open 的也不关闭。
+- **快照与新上传**：列举结果缓存 `health.object_list_interval_sec`（默认 300）。快照记下列举**开始前**已经是 UPLOADED 的 key；列举之后才变成 UPLOADED、而快照里没有的 key 不算「已列举」，下一次列举（不早于 30s 后）再判。否则刚上传完的段会被旧快照判成对象缺失。
+- `health.object_list_limit`（默认 10000）是每个前缀的上限。
+
+### 21.4 实例来源与按实例的 scope（§6.1 第 1 条）
+
+- 对象来源的实例 subject 是 `<段名>#object`（`I6_MISSING_OBJECT`、`I6_OBJECT_SIZE_MISMATCH`），本地来源保持段名。同一个段本地和对象同时缺失时是两条 finding，各自打开、各自关闭。
+- `SEGMENT_MISSING` 的 kind 级 `Scopes` 恢复成 §6 的 `{chain.local, chain.objects}`，但 Reconcile 按实例取 scope：本地来源只要 `chain.local` 完整；对象来源要 `chain.objects` 完整**且**该段的前缀完整（`Facts.ObjectSegments[段名]`）。关闭、UPDATE、DOWNGRADE 都按实例 scope 判断。
+- 本地文件恢复后，即使对象还没列举，本地来源的实例也能关闭（QA 第 2 轮的要求）。
+
+### 21.5 移除对象存储导致的关闭（§6.1 第 2 条）
+
+- 任务确认没有对象存储（21.2）时，`#object` 实例与 `UPLOAD_LATE` 以 `Reason=CONFIG` 关闭，不作为普通 EVAL。
+- transition 的 detail 追加审计说明：`object storage no longer configured (was <旧配置指纹>; source: config file; at <时间>)`。旧指纹是评估器记住的上一次「有对象存储」时的配置指纹（端点 + bucket + prefix 的短哈希），进程重启后未知则写 `unknown`。
+
+### 21.6 按任务判断 chain.objects（§6.1 第 5 条）
+
+- 新增 `Facts.Produced map[Scope]bool`：非 nil 时 `HealthOf` 用它代替全局 `Produced` 判断该任务哪些 scope 算数。评估器总是设置它（全局 `Produced` 加上该任务是否产出 `chain.objects`）。
+- 这样配置了对象存储但列举失败的任务是 UNKNOWN 而不是 HEALTHY，而 Reconcile 也因为同一个 `Complete[chain.objects]=false` 不关闭对象实例。两者读的是同一份判断。
+
+### 21.7 翻转与派生
+
+| Kind | 本步 | 说明 |
+|---|---|---|
+| `UPLOAD_LATE` | Managed，`Confirm` | `I7_UPLOAD_LATE`，WARNING；封存超过 `health.upload_late_critical_after_sec`（默认 86400，`health.upload_late_critical_after_task_sec` 按任务）为 CRITICAL（ESCALATE）。Scope `chain.local`（只读目录行）。对象存储移除时 CONFIG 关闭 |
+| `SEGMENT_MISSING` | 对象来源开始派生 | `I6_MISSING_OBJECT`、`I6_OBJECT_SIZE_MISMATCH`，subject `段#object`。`I6_MISSING_ROW` 仍不派生（§20.1） |
+| `UPLOAD_UNVERIFIED` | 链部分开始派生（P2-4 起已是 Managed） | `I7_UNVERIFIED`（UPLOADED 而 checksum 不是 match）。上传先写 UPLOADED 再写校验结果时会有一瞬间不一致，所以**链来源的实例**两轮确认（实例级 `Instance.Confirm`）；信号来源照旧一轮 |
+| `ORPHAN_ROW` | 不翻转 | 对象保留期删除后行仍在，必然误报；等 #341 删除标记（P2-5.4） |
+
+对象保留期删除先删对象再删本地（删除失败时保留本地并报 `OBJECT_PURGE_FAILED`）。两步之间如果有一次列举，会看到「本地有、对象无」。两轮确认加上列举间隔让这种窗口不打开 finding。删除失败时那个段确实只剩本地一份，打开 `SEGMENT_MISSING#object` 是对的。
+
+### 21.8 测试（先红）
+
+- `config`：`upload.grace_sec`、`upload.grace_task_sec`、`health.upload_late_critical_after_sec`（含按任务）、`health.object_list_interval_sec`、`health.object_list_limit` 的解析、默认值与校验（负数、按任务非正数被拒）。
+- `assurance`：`ObjectPrefixes` 不完整的前缀上不派生 `I6_MISSING_OBJECT`，完整的前缀上派生；nil 时行为不变。
+- `health`：P2-5.2 的 Managed 表；`#object` 实例在 `chain.objects` 或前缀不完整时不关、本地来源实例只要 `chain.local`；对象存储移除时以 CONFIG 关闭且 detail 带审计；`Facts.Produced` 让列举失败的任务 UNKNOWN；`UPLOAD_LATE` 超阈值 ESCALATE 到 CRITICAL；链来源 `UPLOAD_UNVERIFIED` 两轮确认、信号来源一轮。
+- `tasks`：宽限按全局与按任务传入；`UPLOAD_LATE` 在宽限后两轮打开、24h 后升级、上传完成后关闭；假列举器：对象被删 → `SEGMENT_MISSING/段#object` 打开，放回后关闭；列举命中上限 → 不开不关、健康 UNKNOWN；列举出错 → 同上；快照之后才上传的段不判缺失；移除 uploader（确认无对象存储）→ CONFIG 关闭。
+- `upload`：S3 `ListObjects` 的上限与 `truncated`（用 MinIO 的 e2e 覆盖，单测覆盖参数与分页截断逻辑）。
