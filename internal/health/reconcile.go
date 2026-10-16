@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a Registry, the stored open findings of one task, and that task's Facts
-// output: Desire (findings that should be open), Reconcile (transitions), HealthOf (verdict)
+// output: Desire (findings that should be open), Reconcile (transitions), HealthOf (verdict), Candidates and Pending (the two-pass Confirm of design §20.3: a Confirm kind opens only when the previous pass derived it too)
 // pos: the one lifecycle function; pure and idempotent
 // note: if this file changes, update this header and module README.md.
 package health
@@ -45,7 +45,51 @@ func waived(f *Facts, in Instance, spec KindSpec) bool {
 
 // derive is Derive of every managed kind whose scope is complete, before
 // waivers; the bool map says which instances a waiver removes.
-func (r Registry) derive(f *Facts) (Desired, map[Key]bool) {
+func (r Registry) derive(f *Facts, open map[Key]bool) (Desired, map[Key]bool) {
+	out := Desired{}
+	raw, waivedKeys := r.deriveRaw(f)
+	for key, in := range raw {
+		if r[key.Kind].Confirm && !open[key] && !f.Open[key] && !f.Confirmed[key] {
+			continue
+		}
+		out[key] = in
+	}
+	return out, waivedKeys
+}
+
+// Candidates are the Confirm-kind keys derived this pass: the next pass's
+// Facts.Confirmed (design §20.3).
+func (r Registry) Candidates(f *Facts) map[Key]bool {
+	raw, _ := r.deriveRaw(f)
+	out := map[Key]bool{}
+	for key := range raw {
+		if r[key.Kind].Confirm {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+// Pending are derived Confirm-kind keys neither open nor confirmed: they
+// open if the next pass derives them again. Sorted.
+func (r Registry) Pending(f *Facts) []Key {
+	var out []Key
+	for key := range r.Candidates(f) {
+		if !f.Open[key] && !f.Confirmed[key] {
+			out = append(out, key)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return a.Subject < b.Subject
+	})
+	return out
+}
+
+func (r Registry) deriveRaw(f *Facts) (Desired, map[Key]bool) {
 	out, waivedKeys := Desired{}, map[Key]bool{}
 	for _, k := range r.kinds() {
 		spec := r[k]
@@ -82,7 +126,7 @@ func (r Registry) kinds() []Kind {
 // Desire is what should be open: Derive of every managed kind whose scope
 // is complete, less exactly waived evidence.
 func (r Registry) Desire(f *Facts) Desired {
-	d, _ := r.derive(f)
+	d, _ := r.derive(f, nil)
 	return d
 }
 
@@ -92,7 +136,13 @@ func (r Registry) Desire(f *Facts) Desired {
 // (open, f) gives the same transitions, sorted by key, and reconciling the
 // result again gives none. open must be the task's complete open set.
 func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
-	desired, waivedKeys := r.derive(f)
+	openKeys := map[Key]bool{}
+	for _, o := range open {
+		if o.TaskID == f.TaskID {
+			openKeys[o.Key()] = true
+		}
+	}
+	desired, waivedKeys := r.derive(f, openKeys)
 	var out []Transition
 	seen := map[Key]bool{}
 	for _, o := range open {

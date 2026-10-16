@@ -20,6 +20,15 @@ func qmanaged(r Registry, ks ...Kind) Registry {
 	return out
 }
 
+// withObjects is SEGMENT_MISSING as P2-5.2 will judge it: chain.local and
+// chain.objects, objects derived (design §20.1 keeps it local for now).
+func withObjects(r Registry) Registry {
+	s := r[SegmentMissing]
+	s.Scopes = []Scope{ScopeChainLocal, ScopeChainObjects}
+	r[SegmentMissing] = s
+	return r
+}
+
 var qt0 = time.Date(2026, 10, 15, 1, 0, 0, 0, time.UTC)
 
 func qall() map[Scope]bool {
@@ -79,7 +88,7 @@ func TestQA_Canon_Cases(t *testing.T) {
 
 // Q2: I6_MISSING_OBJECT finding must not close while objects are not listed (design P2-5 QA).
 func TestQA_SegmentMissingObjectNotClosedWhenUnlisted(t *testing.T) {
-	r := qmanaged(DefaultRegistry(), SegmentMissing)
+	r := withObjects(qmanaged(DefaultRegistry(), SegmentMissing))
 	open := []Finding{{TaskID: "1", Kind: SegmentMissing, Subject: "mysql-bin.000006", Severity: Critical, Evidence: "object missing"}}
 	c := qall()
 	c[ScopeChainObjects] = false // objects not enumerated this pass

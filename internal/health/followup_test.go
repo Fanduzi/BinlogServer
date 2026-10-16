@@ -10,11 +10,11 @@ import (
 // an object; a pass without an object listing must not rewrite the
 // evidence (UPDATE) or lower the severity (DOWNGRADE); ESCALATE still goes.
 func TestUpdateAndDowngradeNeedEveryScope(t *testing.T) {
-	r := qmanaged(DefaultRegistry(), SegmentMissing)
+	r := withObjects(qmanaged(DefaultRegistry(), SegmentMissing))
 	facts := func(objects bool, vs ...assurance.Violation) *Facts {
 		c := qall()
 		c[ScopeChainObjects] = objects
-		return &Facts{TaskID: "1", Now: qt0, Chain: &ChainFacts{Violations: vs}, Complete: c}
+		return &Facts{TaskID: "1", Now: qt0, Chain: &ChainFacts{Violations: vs}, Complete: c, Confirmed: map[Key]bool{{"1", SegmentMissing, "s6"}: true}}
 	}
 	loc := assurance.Violation{Kind: assurance.I6MissingLocal, Segments: []string{"s6"}, Evidence: "local"}
 	obj := assurance.Violation{Kind: assurance.I6MissingObject, Segments: []string{"s6"}, Evidence: "object"}

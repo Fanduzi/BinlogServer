@@ -1,6 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
-// input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
+// input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API, CONFIRM) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
 // output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
+// note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -65,6 +66,9 @@ const (
 	ReasonSweep         EvalReason = "SWEEP"
 	ReasonAPI           EvalReason = "API"
 	ReasonRehash        EvalReason = "REHASH"
+	// ReasonConfirm: a Confirm-kind instance was derived for the first
+	// time; the next pass decides whether it opens (design 0009 §20.3).
+	ReasonConfirm EvalReason = "CONFIRM"
 )
 
 // EvaluatorConfig configures NewEvaluator.
@@ -145,8 +149,10 @@ type Evaluator struct {
 	fingerprints map[string]string
 	rehash       map[string]map[string]rehashResult
 	chainCache   map[string]chainCacheEntry
-	signals      map[string]map[health.SignalKey]*signalEntry
-	phase        map[string]string
+	// confirmed: per task, the Confirm-kind keys the previous pass derived.
+	confirmed map[string]map[health.Key]bool
+	signals   map[string]map[health.SignalKey]*signalEntry
+	phase     map[string]string
 
 	// schemaAbsent: the store has no 000009 (ErrSchemaAbsent on the last
 	// write); the legacy Report path keeps writing the managed kinds.
@@ -182,7 +188,7 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
 		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
-		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}}
+		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}}
 	if s != nil {
 		s.healthEval.Store(e)
 		e.adoptEarlySignals()
@@ -626,7 +632,11 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		return unknown(health.TaskHealth{}, err)
 	}
 	e.openAndProbes(ctx, id, open, facts)
+	e.mu.Lock()
+	facts.Confirmed = e.confirmed[id]
+	e.mu.Unlock()
 	ts, _ := e.reg.Reconcile(open, facts)
+	e.noteCandidates(id, facts)
 	h := e.reg.HealthOf(afterTransitions(open, ts), facts)
 	if e.cfg.Mode == EvaluatorShadow {
 		e.shadowed.Add(1)
@@ -640,6 +650,23 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		return unknown(h, err)
 	}
 	return h, nil
+}
+
+// noteCandidates keeps this pass's Confirm-kind keys for the next pass and
+// queues a CONFIRM pass (after Debounce) when one is still pending.
+func (e *Evaluator) noteCandidates(id string, facts *health.Facts) {
+	cands := e.reg.Candidates(facts)
+	pending := len(e.reg.Pending(facts)) > 0
+	e.mu.Lock()
+	if len(cands) == 0 {
+		delete(e.confirmed, id)
+	} else {
+		e.confirmed[id] = cands
+	}
+	e.mu.Unlock()
+	if pending {
+		e.MarkDirty(id, ReasonConfirm)
+	}
 }
 
 // unsavedHealth is one task's in-memory open set after a failed write.
@@ -848,13 +875,24 @@ func (e *Evaluator) chainFacts(task Task, now time.Time) *health.ChainFacts {
 			Order:     order,
 			Rows:      rows,
 			NoCatalog: !catalog,
+			// §20.1: the planner's legacy failback (I3_LEGACY_FAILBACK),
+			// which also suppresses the legacy row size rule (§20.2).
+			Plan: func() []assurance.Violation {
+				return e.s.plannedProblems(task, dir, binlog.LedgerAt(dir))
+			},
 		})
 		violations = chain.Check(now)
 		e.mu.Lock()
 		e.chainCache[task.ID] = chainCacheEntry{fp: fp, orderKey: orderKey, order: order, violations: violations}
 		e.mu.Unlock()
 	}
-	out := &health.ChainFacts{Violations: append([]assurance.Violation(nil), violations...)}
+	out := &health.ChainFacts{}
+	for _, v := range violations {
+		if e.cfg.Cluster && v.Kind == assurance.I6MissingLocal {
+			continue // §20.1: the owner judges its own disk (P2-6 delegation)
+		}
+		out.Violations = append(out.Violations, v)
+	}
 	e.mu.Lock()
 	results := e.rehash[task.ID]
 	e.mu.Unlock()

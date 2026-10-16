@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a sealed segment's directory, base name, size and sha256 at seal; the task directory when reading them back
-// output: the seal checksum ledger {task dir}/.seal-sha256: one "sha256 size name" line appended per seal (the last line of a name wins), LoadSealSums to read it (sealSumAt caches it per ledger stamp for the unreadable check, #381), and compaction that drops names no longer on disk once the ledger passes 1 MiB; it is the expected checksum the health rehasher compares with when no catalog row carries one (standalone without meta, or meta without migration 000008)
+// output: the seal checksum ledger {task dir}/.seal-sha256: one "sha256 size name" line appended per seal (the last line of a name wins), LoadSealSums to read it, SealSumAt for one name (sealSumAt caches it per ledger stamp for the unreadable check, #381), and compaction that drops names no longer on disk once the ledger passes 1 MiB; it is the expected checksum the health rehasher compares with when no catalog row carries one (standalone without meta, or meta without migration 000008)
 // pos: ADR 0009 P2-3 rehash source (#380 QA): the bytes at seal, recorded next to the segments they describe
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -91,6 +91,9 @@ var sealSumsCache stampCache[map[string]SealSum] // ledger path -> LoadSealSums
 
 // sealSumAt is name's checksum and size at seal in dir's ledger, read once
 // per ledger size and mtime. A missing or unreadable ledger has no entry.
+// SealSumAt is name's last ledger line in dir, cached per ledger stamp.
+func SealSumAt(dir, name string) (SealSum, bool) { return sealSumAt(dir, name) }
+
 func sealSumAt(dir, name string) (SealSum, bool) {
 	path := filepath.Join(dir, SealSumsFileName)
 	info, err := os.Stat(path)

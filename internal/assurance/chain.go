@@ -1,6 +1,7 @@
 // Package assurance provides module-level functionality for assurance.
 // input: Inputs: the task's chain order, catalog rows, task directory ledger, object listing snapshot, checkpoint, start set and recorded source switches
 // output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER
+// note P2-5.1 (design 0009 §20.2): a local size is compared with a sealed row only for a legacy segment with no .seal-sha256 line and not while a legacy failback is planned; an object size mismatch is I6_OBJECT_SIZE_MISMATCH
 // pos: the one answer to "is this backup complete, and where is each part" (ADR 0009 phase 1); depends on binlog only
 // note: if this file changes, update this header and module README.md.
 package assurance
@@ -93,16 +94,20 @@ const (
 	I6MissingObject   Kind = "I6_MISSING_OBJECT"
 	I6OrphanRow       Kind = "I6_ORPHAN_ROW"
 	I6MissingRow      Kind = "I6_MISSING_ROW"
-	I6SizeMismatch    Kind = "I6_SIZE_MISMATCH"
-	I7UploadLate      Kind = "I7_UPLOAD_LATE"
-	I7Unverified      Kind = "I7_UNVERIFIED"
+	// I6SizeMismatch: a legacy segment (no .seal-sha256 line) whose sealed
+	// catalog row disagrees with the local file size (design 0009 §20.2).
+	I6SizeMismatch Kind = "I6_SIZE_MISMATCH"
+	// I6ObjectSizeMismatch: the stored object's size disagrees with the row.
+	I6ObjectSizeMismatch Kind = "I6_OBJECT_SIZE_MISMATCH"
+	I7UploadLate         Kind = "I7_UPLOAD_LATE"
+	I7Unverified         Kind = "I7_UNVERIFIED"
 )
 
 // AllKinds lists every Kind.
 func AllKinds() []Kind {
 	return []Kind{I1Regression, I1Unreadable, I2IndexGap, I2SwitchUnrecorded, I2OrderInvalid, I3GTIDHole, I3StoredHole, I3LegacyFailback,
 		I4Overlap, I4EmptyLeftover, I5CheckpointAhead, I6MissingLocal, I6MissingObject, I6OrphanRow, I6MissingRow,
-		I6SizeMismatch, I7UploadLate, I7Unverified}
+		I6SizeMismatch, I6ObjectSizeMismatch, I7UploadLate, I7Unverified}
 }
 
 // Violation is one broken invariant.
@@ -305,6 +310,7 @@ func (c *Chain) Check(now time.Time) []Violation {
 	c.checkOffChainRows(add)
 	out = append(out, c.in.Planned...)
 	out = append(out, c.plan()...)
+	out = dropSizeUnderLegacyFailback(out)
 	pos := map[string]int{}
 	for i, s := range segs {
 		pos[s.Name] = i
@@ -491,11 +497,14 @@ func (c *Chain) checkCopies(seg *Segment, now time.Time, add func(Kind, string, 
 	if uploaded && strings.TrimSpace(row.ObjectKey) == "" && (c.in.Objects != nil || c.in.ObjectStorage) {
 		add(I6MissingObject, "object_key=", fmt.Sprintf("segment %s is UPLOADED but its row has no object key", seg.Name), seg.Name)
 	}
-	if seg.Local && row.Size > 0 && seg.LocalSize != row.Size {
+	// §20.2: a ledger line is the size at seal and wins over the row (a
+	// disagreement with the file is I1_UNREADABLE); only a legacy segment
+	// with a sealed row is compared.
+	if seg.Local && row.Sealed && row.Size > 0 && seg.LocalSize != row.Size && !c.ledgerHas(seg.Name) {
 		add(I6SizeMismatch, fmt.Sprintf("local=%d row=%d", seg.LocalSize, row.Size), fmt.Sprintf("segment %s is %d bytes on disk, the catalog says %d", seg.Name, seg.LocalSize, row.Size), seg.Name)
 	}
 	if seg.Object != nil && row.Size > 0 && *seg.Object != row.Size {
-		add(I6SizeMismatch, fmt.Sprintf("object=%d row=%d", *seg.Object, row.Size), fmt.Sprintf("object %s is %d bytes, the catalog says %d", row.ObjectKey, *seg.Object, row.Size), seg.Name)
+		add(I6ObjectSizeMismatch, fmt.Sprintf("object=%d row=%d", *seg.Object, row.Size), fmt.Sprintf("object %s is %d bytes, the catalog says %d", row.ObjectKey, *seg.Object, row.Size), seg.Name)
 	}
 	if !c.in.ObjectStorage {
 		return
@@ -749,4 +758,33 @@ func identityOf(source string) string {
 		return ""
 	}
 	return strings.ToLower(first)
+}
+
+func (c *Chain) ledgerHas(name string) bool {
+	if c.in.Local == nil || c.in.Local.Dir() == "" {
+		return false
+	}
+	_, ok := binlog.SealSumAt(c.in.Local.Dir(), name)
+	return ok
+}
+
+// dropSizeUnderLegacyFailback: the legacy failback repair rewrites rows
+// from disk, so the row sizes are not judged meanwhile (§20.2).
+func dropSizeUnderLegacyFailback(vs []Violation) []Violation {
+	legacy := false
+	for _, v := range vs {
+		if v.Kind == I3LegacyFailback {
+			legacy = true
+		}
+	}
+	if !legacy {
+		return vs
+	}
+	out := vs[:0]
+	for _, v := range vs {
+		if v.Kind != I6SizeMismatch {
+			out = append(out, v)
+		}
+	}
+	return out
 }

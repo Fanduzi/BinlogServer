@@ -105,7 +105,7 @@ func TestP251ConfirmTwoPasses(t *testing.T) {
 	if p := r.Pending(second); len(p) != 0 {
 		t.Fatalf("confirmed key still pending: %v", p)
 	}
-	open := []Finding{{TaskID: "1", Kind: ChainIndexGap, Subject: "c", Severity: Critical, Detail: string(assurance.I2OrderInvalid)}}
+	open := []Finding{{TaskID: "1", Kind: ChainIndexGap, Subject: "c", Severity: Critical, Detail: string(assurance.I2OrderInvalid), Segments: []string{"c"}}}
 	if ts, _ := r.Reconcile(open, first); len(ts) != 0 {
 		t.Fatalf("open finding without confirmation transitioned: %+v", ts)
 	}
