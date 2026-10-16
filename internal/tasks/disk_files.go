@@ -2,6 +2,7 @@
 // input: local data_dir and task id for a binlog segment directory
 // output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out; a listing that re-reads the directory until segments stop being renamed or removed under it (#322) The adopt resume point is the last complete event end (DurableResume), then a sealed file's Rotate target, never a file size (#356).
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
+// note #405: diskNextSealedEpoch is one above the highest .sealed.eN (0 when none)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -721,6 +722,36 @@ func diskNextOpenEpoch(dataDir, taskID string) (int64, error) {
 	next := maxEpoch + 1
 	if next < 1 {
 		next = 1
+	}
+	return next, nil
+}
+
+// diskNextSealedEpoch is one above the highest .sealed.eN in the task
+// directory, or 0 when there is none.
+func diskNextSealedEpoch(dataDir, taskID string) (int64, error) {
+	dir, ok := taskBinlogDir(dataDir, taskID)
+	if !ok {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	next := int64(0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		named, ok := binlog.ClassifySegment(entry.Name())
+		if !ok || named.Open || named.Epoch < 0 || !strings.Contains(entry.Name(), ".sealed.e") {
+			continue
+		}
+		if named.Epoch+1 > next {
+			next = named.Epoch + 1
+		}
 	}
 	return next, nil
 }

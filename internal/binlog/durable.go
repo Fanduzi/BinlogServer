@@ -2,6 +2,7 @@
 // input: a task data directory and on-disk binlog segment bytes
 // output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start; the highest open segment chosen for resume, shared with the open-tail scan; SegmentPositions is cached per path and file stamp (size, mtime, ctime), bounded
 // pos: shared durable-position reader used by the replication runner and the task resume API
+// note #405: HeaderEventsOnly is true for a file of only header events (format description, previous GTIDs, MariaDB GTID list and checkpoint, start v3, rotate) at any log_pos
 // note: if this file changes, update this header and module README.md.
 package binlog
 
@@ -290,6 +291,51 @@ func PreambleOnly(path string) bool {
 		eventSize := int64(binary.LittleEndian.Uint32(hdr[9:13]))
 		logPos := binary.LittleEndian.Uint32(hdr[13:17])
 		if eventSize < int64(goreplication.EventHeaderSize) || offset+eventSize > size || logPos != 0 {
+			return false
+		}
+		if _, err := f.Seek(eventSize-int64(goreplication.EventHeaderSize), io.SeekCurrent); err != nil {
+			return false
+		}
+		offset += eventSize
+	}
+	return offset == size
+}
+
+// HeaderEventsOnly: the file is the magic followed only by complete file
+// header events (format description, previous GTIDs, MariaDB GTID list and
+// binlog checkpoint, start v3, rotate), whatever their log_pos. Every copy
+// of one source file starts with the same header, so such a file holds no
+// content of its own (QA #404: a resumed open file before its first
+// transaction).
+func HeaderEventsOnly(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() < 4 {
+		return false
+	}
+	size := info.Size()
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(f, magic); err != nil || string(magic) != string(durableMagic) {
+		return false
+	}
+	offset := int64(4)
+	hdr := make([]byte, goreplication.EventHeaderSize)
+	for offset+int64(goreplication.EventHeaderSize) <= size {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			return false
+		}
+		eventSize := int64(binary.LittleEndian.Uint32(hdr[9:13]))
+		if eventSize < int64(goreplication.EventHeaderSize) || offset+eventSize > size {
+			return false
+		}
+		switch goreplication.EventType(hdr[4]) {
+		case goreplication.FORMAT_DESCRIPTION_EVENT, goreplication.PREVIOUS_GTIDS_EVENT, goreplication.ROTATE_EVENT,
+			goreplication.MARIADB_GTID_LIST_EVENT, goreplication.MARIADB_BINLOG_CHECKPOINT_EVENT, goreplication.START_EVENT_V3:
+		default:
 			return false
 		}
 		if _, err := f.Seek(eventSize-int64(goreplication.EventHeaderSize), io.SeekCurrent); err != nil {

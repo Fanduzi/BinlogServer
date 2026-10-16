@@ -3,6 +3,7 @@
 // output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER
 // note P2-5.1 (design 0009 §20.2): a local size is compared with a sealed row only for a legacy segment with no .seal-sha256 line and not while a legacy failback is planned; an object size mismatch is I6_OBJECT_SIZE_MISMATCH
 // pos: the one answer to "is this backup complete, and where is each part" (ADR 0009 phase 1); depends on binlog only
+// note #405: an open file of only header events is never an I4 copy (every copy of a source file starts with the same header)
 // note: if this file changes, update this header and module README.md.
 package assurance
 
@@ -417,6 +418,15 @@ func (c *Chain) sameOpenCopy(a, b *Segment) bool {
 	}
 	if c.in.Local == nil || !a.Local || !b.Local {
 		return false
+	}
+	// A preamble (format description, previous GTIDs) starts every copy of
+	// a source file, including an open file that has just resumed it on a
+	// later epoch and holds no transaction yet: that is not a second copy
+	// (QA #404, after the legacy failback repair).
+	for _, s := range []*Segment{a, b} {
+		if s.Named.Open && binlog.HeaderEventsOnly(filepath.Join(c.in.Local.Dir(), s.Name)) {
+			return false
+		}
 	}
 	return bytePrefix(filepath.Join(c.in.Local.Dir(), a.Name), filepath.Join(c.in.Local.Dir(), b.Name))
 }

@@ -491,3 +491,65 @@ func TestLegacyFailback_RestartedOldBuildLayout(t *testing.T) {
 		t.Fatalf("checkpoint %+v", cp)
 	}
 }
+
+// QA #404 fbup standalone+meta: v0.5.57 restarted after the failback, so
+// the repaired third stint is A~2.mysql-bin.000006.sealed.e1 plus a
+// header-only A~2.mysql-bin.000006.open.e1. A standalone server's
+// MemoryLease starts at epoch 1 again, so the resumed open file was
+// open.e1 too: its OPEN row (same file name and epoch) replaced the sealed
+// row, /replay left the sealed copy out without a warning (GTID gap), and
+// the next seal would hit SEALED_FILE_EXISTS. Start must resume above
+// every sealed epoch on disk.
+func TestLegacyFailback_StandaloneResumesAboveSealedEpoch(t *testing.T) {
+	ml := NewMemoryLease()
+	f := newLFFixture(t, WithClusterLeaseManager(ml), WithClusterWorkerID("w1"))
+	f.chain(t, fbA, fbB)
+	lfSegment(t, filepath.Join(f.dir, "mysql-bin.000006"), fbA+":1-2209", fbEvents(fbA, 2210, 2211)...)
+	lfSegment(t, filepath.Join(f.dir, fbB+".mysql-bin.000005"), "", fbEvents(fbB, 3006, 3007)...)
+	lfSegment(t, filepath.Join(f.dir, "mysql-bin.000006.sealed.e1"), fbA+":1-2209", fbEvents(fbA, 2410, 2411)...)
+	lfSegment(t, filepath.Join(f.dir, "mysql-bin.000006.open.e1"), fbA+":1-2209")
+	at := time.Date(2026, 10, 9, 2, 18, 0, 0, time.UTC)
+	f.addEvents(t,
+		lfSwitch(fbA, fbB, fbA+":1-2409,"+fbB+":1-3005", "mysql-bin.000006", at),
+		lfSwitch(fbB, fbA, fbA+":1-2409,"+fbB+":1-3205", "mysql-bin.000005", at.Add(time.Minute)),
+		lfSwitch(fbB, fbA, fbA+":1-2609,"+fbB+":1-3205", "mysql-bin.000006", at.Add(3*time.Minute)),
+	)
+	f.row(t, "mysql-bin.000006", 1, "SEALED", "UPLOADED", "p/c/"+fbB+"/mysql-bin.000006.sealed.e1")
+	f.row(t, fbB+".mysql-bin.000005", 0, "SEALED", "UPLOADED", "p/c/"+fbB+"/"+fbB+".mysql-bin.000005")
+	f.cps.cp[f.task.ID] = binlog.Checkpoint{File: "mysql-bin.000006", Pos: 628506}
+	if err := f.s.RepairLegacyFailback(t.Context(), f.task); err != nil {
+		t.Fatal(err)
+	}
+	if row := f.catalog.rows[catalogKey(fbA+"~2.mysql-bin.000006", 1)]; row.State != "SEALED" {
+		t.Fatalf("the sealed third stint lost its row: %+v", row)
+	}
+	if epoch, ok, err := ml.Acquire(t.Context(), f.task.ID, "w1", time.Minute); err != nil || !ok || epoch != 1 {
+		t.Fatalf("acquire %d %v %v", epoch, ok, err)
+	}
+	f.s.mu.Lock()
+	task := f.s.tasks[f.task.ID]
+	task.Epoch, task.OwnerWorkerID = 1, "w1"
+	err := f.s.prepareDiskResumeEpochLocked(&task)
+	f.s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Epoch < 2 {
+		t.Fatalf("standalone resumes at epoch %d, the epoch of %s~2.mysql-bin.000006.sealed.e1: its open row would replace the sealed one", task.Epoch, fbA)
+	}
+}
+
+// A standalone directory without an epoch-suffixed sealed copy keeps its epoch.
+func TestStandaloneResumeEpochUnchangedWithoutSealedCopy(t *testing.T) {
+	f := newLFFixture(t, WithClusterLeaseManager(NewMemoryLease()), WithClusterWorkerID("w1"))
+	lfSegment(t, filepath.Join(f.dir, "mysql-bin.000001"), "", fbEvents(fbA, 1, 2)...)
+	lfSegment(t, filepath.Join(f.dir, "mysql-bin.000002.open.e1"), fbA+":1-2", fbEvents(fbA, 3)...)
+	f.s.mu.Lock()
+	task := f.s.tasks[f.task.ID]
+	task.Epoch, task.OwnerWorkerID = 1, "w1"
+	err := f.s.prepareDiskResumeEpochLocked(&task)
+	f.s.mu.Unlock()
+	if err != nil || task.Epoch != 1 {
+		t.Fatalf("epoch %d err %v, want 1", task.Epoch, err)
+	}
+}

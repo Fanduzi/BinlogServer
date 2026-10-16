@@ -2,6 +2,7 @@
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
 // output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released; a run that already wrote FAILED is not turned into STOPPING by its own desired STOP row read back by a GET or sync before the run exits. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump, then proves and renews its lease at that epoch before the dump opens (#346)., and a legacy failback directory repaired or refused (RepairLegacyFailback) before the runner starts
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
+// note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -387,13 +388,40 @@ func (s *Scheduler) refusesUnfencedTakeoverLocked(task Task) bool {
 
 // prepareDiskResumeEpochLocked raises an adopted task's epoch above every
 // leftover .open.e* file so the new segment sorts after them. Caller holds s.mu.
+//
+// A standalone server (MemoryLease) starts again at epoch 1 after a
+// restart, so a task whose directory holds a .sealed.eN copy (the legacy
+// failback repair keeps v0.5.57's restart layout) is raised above N too:
+// an open file at epoch N would share that sealed copy's catalog key
+// (file name, epoch), replace its row (a silent GTID gap on /replay) and
+// fail its own seal with SEALED_FILE_EXISTS (QA #404 fbup standalone+meta).
 func (s *Scheduler) prepareDiskResumeEpochLocked(task *Task) error {
-	if task == nil || !task.KeepLocalSegments {
+	if task == nil {
 		return nil
+	}
+	_, memory := s.leaseManager.(*MemoryLease)
+	if !task.KeepLocalSegments {
+		if !memory {
+			return nil
+		}
+		sealedNext, err := diskNextSealedEpoch(s.dataDir, task.ID)
+		if err != nil {
+			return err
+		}
+		if sealedNext <= task.Epoch {
+			return nil
+		}
 	}
 	next, err := diskNextOpenEpoch(s.dataDir, task.ID)
 	if err != nil {
 		return err
+	}
+	if !task.KeepLocalSegments {
+		if sealedNext, err := diskNextSealedEpoch(s.dataDir, task.ID); err != nil {
+			return err
+		} else if sealedNext > next {
+			next = sealedNext
+		}
 	}
 	if s.leaseManager == nil {
 		if task.Epoch < next {
