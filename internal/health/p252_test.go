@@ -31,7 +31,7 @@ func TestP252ManagedTable(t *testing.T) {
 
 func objFacts(vs ...assurance.Violation) *Facts {
 	return &Facts{TaskID: "1", Now: t0, Chain: &ChainFacts{Violations: vs},
-		Complete:       map[Scope]bool{ScopeChainLocal: true, ScopeChainObjects: true},
+		Complete:       map[Scope]bool{ScopeChainLocal: true, ScopeChainObjects: true, ScopeSignals: true},
 		Produced:       map[Scope]bool{ScopeChainLocal: true, ScopeChainObjects: true},
 		ObjectSegments: map[string]bool{"s4": true},
 		Confirmed:      map[Key]bool{}, UploadLateCriticalAfter: 24 * time.Hour}
@@ -91,7 +91,7 @@ func TestP252ConfigRemovalClosesObjectInstances(t *testing.T) {
 		Complete:        map[Scope]bool{ScopeChainLocal: true},
 		Produced:        map[Scope]bool{ScopeChainLocal: true},
 		NoObjectStorage: true, ObjectConfigAudit: "was 1a2b3c; source: config file",
-		Confirmed:       map[Key]bool{{"1", SegmentMissing, "s6"}: true}}
+		Confirmed: map[Key]bool{{"1", SegmentMissing, "s6"}: true}}
 	ts, _ := r.Reconcile(open, f)
 	closed := map[string]Transition{}
 	for _, tr := range ts {

@@ -9,6 +9,7 @@
 - 上传接口：将 sealed binlog 文件上传到对象存储。
 - `OpenObject`：用同一客户端和同一套上传配置按 object key 打开已上传对象，返回打开时的对象大小。不新增配置项。对象不存在时返回 `os.ErrNotExist`。
 - `SealedObjectMatches`：HEAD 已上传对象，把 ETag 与封存文件比较。不超过 16MiB 用整文件 MD5；更大用与 `FPutObject` 相同的 16MiB 分片 ETag。ETag 为空或大小不一致返回 false。Stat 失败返回错误，调用方据此把 `checksum` 留空，不写成 `mismatch`。
+- `ListObjects(ctx, prefix, limit)`：列出 prefix 下的 key 与大小（设计 0009 §21.3），超过 limit 返回 truncated=true；出错或截断时调用方不据此判定任何对象缺失。
 - `DeleteObject`：按 object key 删除已上传对象。不新增配置项。对象不存在时返回 nil。其它错误返回给保留清理，本地分段留下。
 
 ## Dependencies

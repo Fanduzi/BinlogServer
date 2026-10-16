@@ -282,7 +282,7 @@ func (s *MySQLTaskStore) ListHealth(ctx context.Context) ([]health.TaskHealth, e
 
 // ListTransitions implements healthstore.TransitionLister.
 func (s *MySQLTaskStore) ListTransitions(ctx context.Context, taskID string) ([]healthstore.Transition, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT kind, subject, op, reason, severity, transition_digest, generation, kind_version, fact_at FROM finding_transitions WHERE task_id = ? ORDER BY generation, id", taskID)
+	rows, err := s.db.QueryContext(ctx, "SELECT kind, subject, op, reason, severity, COALESCE(detail, ''), transition_digest, generation, kind_version, fact_at FROM finding_transitions WHERE task_id = ? ORDER BY generation, id", taskID)
 	if err != nil {
 		return nil, healthErr(err)
 	}
@@ -290,7 +290,7 @@ func (s *MySQLTaskStore) ListTransitions(ctx context.Context, taskID string) ([]
 	var out []healthstore.Transition
 	for rows.Next() {
 		t := healthstore.Transition{TaskID: taskID}
-		if err := rows.Scan(&t.Kind, &t.Subject, &t.Op, &t.Reason, &t.Severity, &t.Digest, &t.Generation, &t.KindVersion, &t.FactAt); err != nil {
+		if err := rows.Scan(&t.Kind, &t.Subject, &t.Op, &t.Reason, &t.Severity, &t.Detail, &t.Digest, &t.Generation, &t.KindVersion, &t.FactAt); err != nil {
 			return nil, healthErr(err)
 		}
 		out = append(out, t)

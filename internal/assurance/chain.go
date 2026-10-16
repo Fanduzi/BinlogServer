@@ -58,12 +58,17 @@ type Inputs struct {
 	Rows       []Row
 	// NoCatalog says there is no catalog at all (standalone without meta):
 	// a segment without a row is then not I6_MISSING_ROW.
-	NoCatalog     bool
-	Local         *binlog.Ledger
-	Objects       map[string]int64
-	ObjectStorage bool
-	UploadGrace   time.Duration
-	Switches      []Switch
+	NoCatalog bool
+	Local     *binlog.Ledger
+	Objects   map[string]int64
+	// ObjectPrefixes, when set, are the listing prefixes (ObjectPrefixOf)
+	// and whether each was listed completely (design 0009 §21.3): a segment
+	// whose prefix is missing or incomplete is not judged against Objects.
+	// nil keeps phase 1: a non-nil Objects is a full listing.
+	ObjectPrefixes map[string]bool
+	ObjectStorage  bool
+	UploadGrace    time.Duration
+	Switches       []Switch
 	// Planned are conclusions the tasks planners already reached (stored
 	// GTID hole, legacy failback; I3 subclasses). Check returns them in
 	// chain order with its own.
@@ -120,6 +125,9 @@ type Violation struct {
 	// Problem is the full storage problem for the kinds storage health
 	// reports (I1 from Ledger.Damage, the planner I3 subclasses).
 	Problem *binlog.StorageProblem
+	// Since is when the condition began, when the chain knows it
+	// (I7_UPLOAD_LATE: the row's sealed_at), for severity by age.
+	Since time.Time
 }
 
 // Segment is one segment on the chain and where it can be read.
@@ -192,7 +200,7 @@ func (c *Chain) Segments() []Segment {
 				}
 			}
 		}
-		if seg.Row != nil && seg.Row.ObjectKey != "" && c.in.Objects != nil {
+		if seg.Row != nil && seg.Row.ObjectKey != "" && c.in.Objects != nil && c.prefixListed(seg.Row.ObjectKey) {
 			seg.ObjectListed = true
 			if size, ok := c.in.Objects[seg.Row.ObjectKey]; ok {
 				seg.Object = &size
@@ -312,6 +320,17 @@ func (c *Chain) Check(now time.Time) []Violation {
 	out = append(out, c.in.Planned...)
 	out = append(out, c.plan()...)
 	out = dropSizeUnderLegacyFailback(out)
+	for i := range out {
+		if out[i].Kind != I7UploadLate || len(out[i].Segments) == 0 {
+			continue
+		}
+		for j := range segs {
+			if segs[j].Name == out[i].Segments[0] && segs[j].Row != nil {
+				out[i].Since = segs[j].Row.SealedAt
+				break
+			}
+		}
+	}
 	pos := map[string]int{}
 	for i, s := range segs {
 		pos[s.Name] = i
@@ -797,4 +816,21 @@ func dropSizeUnderLegacyFailback(vs []Violation) []Violation {
 		}
 	}
 	return out
+}
+
+// ObjectPrefixOf is the listing prefix of an object key: its directory with
+// the trailing slash, or "" for a key with no directory.
+func ObjectPrefixOf(key string) string {
+	i := strings.LastIndex(key, "/")
+	if i < 0 {
+		return ""
+	}
+	return key[:i+1]
+}
+
+func (c *Chain) prefixListed(key string) bool {
+	if c.in.ObjectPrefixes == nil {
+		return true
+	}
+	return c.in.ObjectPrefixes[ObjectPrefixOf(key)]
 }

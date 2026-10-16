@@ -64,6 +64,10 @@ type Instance struct {
 	Segments []string
 	// FactAt is when the fact happened (signal time); zero = Facts.Now.
 	FactAt time.Time
+	// Confirm: this instance opens only when the previous pass derived it
+	// too, whatever its kind's Confirm (a chain-derived instance of a kind
+	// whose signal opens in one pass, design §21.7).
+	Confirm bool
 }
 
 // ClearRule says when an open finding of a kind closes by itself.
@@ -203,6 +207,21 @@ type Facts struct {
 	Open map[Key]bool
 	// Confirmed are the Confirm-kind keys the previous pass derived.
 	Confirmed map[Key]bool
+	// Produced, when set, replaces the global Produced for this task in
+	// HealthOf (design §21.6: chain.objects is produced only for a task
+	// with object storage).
+	Produced map[Scope]bool
+	// ObjectSegments are the segments whose object prefix was listed
+	// completely this pass (§21.3); an object-origin instance (subject
+	// ObjectSubject) closes only when its segment is here.
+	ObjectSegments map[string]bool
+	// NoObjectStorage: the configuration was read and the task has no
+	// object storage (§21.2). Object-origin instances and UPLOAD_LATE then
+	// close with Reason CONFIG and ObjectConfigAudit in their detail.
+	NoObjectStorage   bool
+	ObjectConfigAudit string
+	// UploadLateCriticalAfter is when UPLOAD_LATE becomes CRITICAL (0 = 24h).
+	UploadLateCriticalAfter time.Duration
 	// Probes are the alternative success proofs of §5.5 that held this
 	// pass, by open key (a signal that rarely succeeds can still close).
 	Probes map[Key]bool
@@ -248,8 +267,11 @@ const (
 
 // Transition reasons.
 const (
-	ReasonEval      = "EVAL"
-	ReasonWaived    = "WAIVED"
+	ReasonEval   = "EVAL"
+	ReasonWaived = "WAIVED"
+	// ReasonConfig: closed because the task's object storage was removed
+	// from the configuration (design §6.1 item 2, §21.5).
+	ReasonConfig    = "CONFIG"
 	ReasonUpgrade   = "UPGRADE"
 	ReasonHandedOff = "HANDED_OFF"
 )

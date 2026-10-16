@@ -41,6 +41,11 @@ type Config struct {
 	UploadRegion    string
 	UploadPrefix    string
 	UploadUseSSL    bool
+	// UploadGraceSec (upload.grace_sec, default 900) is how long a sealed
+	// segment may stay not UPLOADED before I7_UPLOAD_LATE (P2-5a, #348);
+	// UploadGraceTaskSec overrides it per task id.
+	UploadGraceSec     int
+	UploadGraceTaskSec map[string]int
 
 	// Log 是日志输出与轮转配置。
 	Log LogConfig
@@ -144,6 +149,15 @@ type HealthConfig struct {
 	// SignalStaleAfterSec: an open signal row with no failure seen by this
 	// process for this long is shown as INFO (P2-4, default 86400).
 	SignalStaleAfterSec int
+	// UploadLateCriticalAfterSec: UPLOAD_LATE is CRITICAL once a segment
+	// has been sealed this long (P2-5.2, default 86400); the _task_sec map
+	// overrides it per task id.
+	UploadLateCriticalAfterSec     int
+	UploadLateCriticalAfterTaskSec map[string]int
+	// ObjectListIntervalSec is how long one object listing of a task is
+	// reused (default 300); ObjectListLimit caps each prefix (default 10000).
+	ObjectListIntervalSec int
+	ObjectListLimit       int
 }
 
 // StandaloneConfig configures the encrypted standalone task record
@@ -245,6 +259,10 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("health.rehash_bytes_per_sec", 4<<20)
 	v.SetDefault("health.unreachable_after_sec", 90)
 	v.SetDefault("health.signal_stale_after_sec", 86400)
+	v.SetDefault("health.upload_late_critical_after_sec", 86400)
+	v.SetDefault("health.object_list_interval_sec", 300)
+	v.SetDefault("health.object_list_limit", 10000)
+	v.SetDefault("upload.grace_sec", 900)
 	v.SetDefault("meta.timeout.write_sec", 5)
 	v.SetDefault("meta.timeout.lease_sec", 2)
 	v.SetDefault("meta.timeout.upload_sec", 30)
@@ -296,9 +314,11 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			"upload.secret_key",
 			"upload_secret_key",
 		),
-		UploadRegion: getString(v, decryptor, "upload.region", "upload_region"),
-		UploadPrefix: getString(v, decryptor, "upload.prefix", "upload_prefix"),
-		UploadUseSSL: getBool(v, "upload.use_ssl", "upload_use_ssl"),
+		UploadRegion:       getString(v, decryptor, "upload.region", "upload_region"),
+		UploadPrefix:       getString(v, decryptor, "upload.prefix", "upload_prefix"),
+		UploadUseSSL:       getBool(v, "upload.use_ssl", "upload_use_ssl"),
+		UploadGraceSec:     getInt(v, "upload.grace_sec", "upload_grace_sec"),
+		UploadGraceTaskSec: healthTaskOverrides(v.GetStringMap("upload.grace_task_sec")),
 		Log: LogConfig{
 			Level:          getString(v, decryptor, "log.level", "log_level"),
 			Encoding:       getString(v, decryptor, "log.encoding", "log_encoding"),
@@ -391,12 +411,16 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			},
 		},
 		Health: HealthConfig{
-			Evaluator:               strings.ToLower(strings.TrimSpace(getString(v, decryptor, "health.evaluator", "health_evaluator"))),
-			SweepIntervalSec:        getInt(v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
-			RehashBytesPerSec:       int64(getInt(v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
-			UnreachableAfterSec:     getInt(v, "health.unreachable_after_sec", "health_unreachable_after_sec"),
-			UnreachableAfterTaskSec: healthTaskOverrides(v.GetStringMap("health.unreachable_after_task_sec")),
-			SignalStaleAfterSec:     getInt(v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
+			Evaluator:                      strings.ToLower(strings.TrimSpace(getString(v, decryptor, "health.evaluator", "health_evaluator"))),
+			SweepIntervalSec:               getInt(v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
+			RehashBytesPerSec:              int64(getInt(v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
+			UnreachableAfterSec:            getInt(v, "health.unreachable_after_sec", "health_unreachable_after_sec"),
+			UnreachableAfterTaskSec:        healthTaskOverrides(v.GetStringMap("health.unreachable_after_task_sec")),
+			SignalStaleAfterSec:            getInt(v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
+			UploadLateCriticalAfterSec:     getInt(v, "health.upload_late_critical_after_sec", "health_upload_late_critical_after_sec"),
+			UploadLateCriticalAfterTaskSec: healthTaskOverrides(v.GetStringMap("health.upload_late_critical_after_task_sec")),
+			ObjectListIntervalSec:          getInt(v, "health.object_list_interval_sec", "health_object_list_interval_sec"),
+			ObjectListLimit:                getInt(v, "health.object_list_limit", "health_object_list_limit"),
 		},
 		Standalone: StandaloneConfig{
 			TaskRecords:         strings.ToLower(strings.TrimSpace(v.GetString("standalone.task_records"))),
@@ -414,6 +438,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	}
 	applyEnabledAuthProtectDefaults(v, &cfg.API.Auth)
 	if err := validateConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateUploadGrace(cfg); err != nil {
 		return Config{}, err
 	}
 	if err := validateHealthConfig(cfg.Health); err != nil {
@@ -673,6 +700,14 @@ func validateHealthConfig(h HealthConfig) error {
 			return fmt.Errorf("health.unreachable_after_task_sec[%s] must be positive, got %d", id, sec)
 		}
 	}
+	if h.UploadLateCriticalAfterSec < 0 || h.ObjectListIntervalSec < 0 || h.ObjectListLimit < 0 {
+		return fmt.Errorf("health.upload_late_critical_after_sec, health.object_list_interval_sec and health.object_list_limit must not be negative")
+	}
+	for id, sec := range h.UploadLateCriticalAfterTaskSec {
+		if sec <= 0 {
+			return fmt.Errorf("health.upload_late_critical_after_task_sec[%s] must be positive, got %d", id, sec)
+		}
+	}
 	return nil
 }
 
@@ -702,4 +737,17 @@ func healthTaskOverrides(raw map[string]any) map[string]int {
 		out[id] = n
 	}
 	return out
+}
+
+// validateUploadGrace checks upload.grace_sec and upload.grace_task_sec (P2-5a).
+func validateUploadGrace(cfg Config) error {
+	if cfg.UploadGraceSec < 0 {
+		return fmt.Errorf("upload.grace_sec must not be negative, got %d", cfg.UploadGraceSec)
+	}
+	for id, sec := range cfg.UploadGraceTaskSec {
+		if sec <= 0 {
+			return fmt.Errorf("upload.grace_task_sec[%s] must be positive, got %d", id, sec)
+		}
+	}
+	return nil
 }

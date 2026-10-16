@@ -54,7 +54,7 @@ type p252Clock struct {
 	t  time.Time
 }
 
-func (c *p252Clock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *p252Clock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
 func (c *p252Clock) Add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
 
 type p252Fixture struct {
