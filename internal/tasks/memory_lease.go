@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: in-process Acquire/Renew/Release calls with worker id, epoch, and TTL
-// output: exclusive task ownership without a lease table; same-owner reclaim keeps the epoch; a different worker taking an expired lease increases it; Release frees the row immediately; Verify answers seal-time ownership
+// output: exclusive task ownership without a lease table; same-owner reclaim keeps the epoch; a different worker taking an expired lease increases it; Release frees the row immediately; Verify answers seal-time ownership; ViewLease exposes the stored owner/epoch for TaskFacts cross-checks (P2-6a)
 // pos: in-memory LeaseManager adapter for standalone and tests (the ownership door)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -102,4 +102,15 @@ func (m *MemoryLease) Verify(_ context.Context, taskID, workerID string, epoch i
 		return false, nil
 	}
 	return row.expire.After(m.now()), nil
+}
+
+// ViewLease implements LeaseView: the stored owner/epoch, including released rows.
+func (m *MemoryLease) ViewLease(_ context.Context, taskID string) (owner string, epoch int64, present bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.rows[taskID]
+	if !ok {
+		return "", 0, false, nil
+	}
+	return row.owner, row.epoch, true, nil
 }
