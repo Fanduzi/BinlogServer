@@ -1,14 +1,17 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged; STOPPING/STOPPED from lease-loss paths write through persistTaskFencedLocked (#360 / P2-6a)
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
+
+	"binlog_server/internal/healthstore"
 )
 
 func (s *Scheduler) markStartDispatchedLocked(task Task) error {
@@ -96,12 +99,19 @@ func (s *Scheduler) failSafeStopLocked(id, eventType, message string) error {
 	if !ok || task.State == StateStopping || task.State == StateStopped || task.State == StateFailed {
 		return nil
 	}
+	owner, epoch := task.OwnerWorkerID, task.Epoch
 	task.State = StateStopping
 	task.LastError = message
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	s.appendEventLocked(id, eventType, message, "")
-	err := s.persistTaskLocked(task)
+	// P2-6a / #360: fence the STOPPING write on task_leases so a stale owner
+	// after lease loss cannot overwrite a newer holder's row.
+	err := s.persistTaskFencedLocked(task, owner, epoch)
+	if errors.Is(err, healthstore.ErrFenced) {
+		s.yieldLostLeaseLocked(id, epoch)
+		err = nil
+	}
 	if cancel, ok := s.cancels[id]; ok {
 		// 这里只发取消信号；最终 STOPPED 由 runTask defer 统一收敛。
 		cancel()
@@ -221,6 +231,7 @@ func (s *Scheduler) keepNewerStopSpecLocked(id string, task Task) Task {
 }
 
 func (s *Scheduler) writeStoppedLocked(id string, task Task) error {
+	owner, epoch := task.OwnerWorkerID, task.Epoch
 	task.State = StateStopped
 	task.DesiredRun = TaskDesiredStop
 	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。
@@ -230,7 +241,14 @@ func (s *Scheduler) writeStoppedLocked(id string, task Task) error {
 	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_STOPPED", "task stopped", "")
-	return s.persistTaskLocked(task)
+	// P2-6a: fence with the pre-clear (owner, epoch) so a stale run-exit
+	// STOPPED cannot land after another worker claimed the lease (#360).
+	err := s.persistTaskFencedLocked(task, owner, epoch)
+	if errors.Is(err, healthstore.ErrFenced) {
+		s.markHealthDirty(id, ReasonLeaseLost)
+		return nil
+	}
+	return err
 }
 
 // finishStoredStopLocked writes STOPPED again when the store still has the

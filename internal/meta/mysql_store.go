@@ -744,6 +744,23 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.upsert_task")
 	defer endMetaSpan(span)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if err := s.upsertTaskInTx(ctx, tx, task); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// upsertTaskInTx writes the task snapshot (and run start/finish) on an open
+// transaction. Callers that fence the write (UpsertTaskFenced) lock task_leases
+// in the same transaction first.
+func (s *MySQLTaskStore) upsertTaskInTx(ctx context.Context, tx *sql.Tx, task tasks.Task) error {
 	sourceJSON, err := s.marshalSource(task.Source)
 	if err != nil {
 		return err
@@ -761,14 +778,6 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 	if updatedAt.IsZero() {
 		updatedAt = time.Now()
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
 
 	var previousRunID sql.NullString
 	queries := sqlcgen.New(tx)
@@ -829,10 +838,6 @@ func (s *MySQLTaskStore) UpsertTask(ctx context.Context, task tasks.Task) error 
 		}); err != nil {
 			return err
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return err
 	}
 	return nil
 }

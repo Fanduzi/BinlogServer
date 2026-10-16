@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: hot-path failure and success reports (SignalFailure/SignalSuccess, and Report/Resolve for a kind the evaluator manages), the task rows, the task directory, the catalog, and the event store
-// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, Unadopted for a standalone leftover directory (#385), and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
+// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, Unadopted for a standalone leftover directory (#385), and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it; P2-6a: Task nil when the row disagrees with task_leases), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §5.6, §6); the only way a signal kind reaches task_findings while the evaluator is on
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -174,12 +174,29 @@ func (e *Evaluator) signalFacts(ctx context.Context, task Task, isCluster bool, 
 		facts.Signals[k] = en.st
 	}
 	e.mu.Unlock()
-	facts.Complete[health.ScopeTaskState] = true
+	// P2-6a: row/lease mismatch leaves Task nil → task.state incomplete (UNKNOWN).
+	if isCluster || facts.Task != nil {
+		facts.Complete[health.ScopeTaskState] = true
+	}
 	facts.Complete[health.ScopeSignals] = true
 }
 
 // taskFacts is task.state, plus the evaluator-side SOURCE_UNREACHABLE streak.
+// Returns nil when the task row disagrees with task_leases (P2-6a / #360):
+// task.state is then incomplete so DUMP_STALLED / TASK_TRANSITION_STALLED do not
+// close on a wrong STOPPED.
 func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
+	if e.s != nil && e.s.leaseManager != nil {
+		if view, ok := e.s.leaseManager.(LeaseView); ok {
+			leaseOwner, leaseEpoch, present, err := view.ViewLease(context.Background(), task.ID)
+			if err != nil {
+				return nil
+			}
+			if present && !leaseRowAgrees(task.OwnerWorkerID, task.Epoch, leaseOwner, leaseEpoch) {
+				return nil
+			}
+		}
+	}
 	tf := &health.TaskFacts{State: string(task.State), Desired: task.DesiredRun, Owner: task.OwnerWorkerID, Epoch: task.Epoch,
 		StateSince: task.UpdatedAt, LastError: task.LastError,
 		FailedCurrent: task.State == StateFailed && task.FailedSpecRevision > 0 && task.FailedSpecRevision == task.SpecRevision}
@@ -213,6 +230,21 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 		}
 	}
 	return tf
+}
+
+// leaseRowAgrees reports that the task row and task_leases describe the same
+// holder (or both show no holder). A live lease against a cleared STOPPED row
+// is a mismatch (#360).
+func leaseRowAgrees(rowOwner string, rowEpoch int64, leaseOwner string, leaseEpoch int64) bool {
+	leaseHeld := leaseOwner != ""
+	rowClaims := rowOwner != ""
+	if !leaseHeld && !rowClaims {
+		return true
+	}
+	if leaseHeld && rowClaims && rowOwner == leaseOwner && rowEpoch == leaseEpoch {
+		return true
+	}
+	return false
 }
 
 // openAndProbes sets the open keys, the probes of open signal rows that a
