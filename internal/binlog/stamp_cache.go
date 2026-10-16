@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a segment file's os.FileInfo and a value computed from its bytes
-// output: FileStamp (size, mtime and, where the OS has it, ctime) and stampCache, a bounded per-path cache that is valid only while the file's stamp is unchanged; touch -r keeps the mtime but not the ctime, so an in-place edit is read again (#380 QA)
+// output: FileStamp (size, mtime and, where the OS has it, ctime) and stampCache, a bounded per-path cache that is valid only while the file's stamp is unchanged; touch -r keeps the mtime but not the ctime, so an in-place edit is read again (#380 QA); ForgetFile drops a path from every cache for the rewrite the stamp cannot see (same ctime tick), called by the rehasher
 // pos: shared by the ledger contents, sealed-corrupt, damage and positions caches and the health evaluator's directory fingerprint
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -67,4 +67,21 @@ func (c *stampCache[T]) len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.m)
+}
+
+func (c *stampCache[T]) forget(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.m, key)
+}
+
+// ForgetFile drops every stamp-cached read of path. The stamp cannot see an
+// in-place rewrite that lands within one ctime tick with the mtime kept
+// (coarse kernel clock); the rehasher, which read the bytes, calls this when
+// a segment's sha verdict flips so the next read parses the file again.
+func ForgetFile(path string) {
+	positionsCache.forget(path)
+	contentsCache.forget(path)
+	sealedCorruptCache.forget(path)
+	sealSumsCache.forget(path)
 }

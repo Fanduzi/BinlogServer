@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the sealed segments of every task the evaluator is responsible for, with the checksum each had at seal (catalog sha256 from migration 000008, else the task directory's .seal-sha256 ledger), and a global byte budget
-// output: Rehasher: an asynchronous sha256 re-check, one segment at a time on a cross-task cursor (persisted in rehash_cursor when the store has it), token-bucket limited to health.rehash_bytes_per_sec, idle I/O priority and no page-cache pollution on Linux; results go to the evaluator as facts and mark the task dirty (REHASH); a segment without a recorded sha256, or whose size is no longer the size at seal, is skipped and counted unavailable; a cycle is one snapshot of the targets, so a step does no catalog listing
+// output: Rehasher: an asynchronous sha256 re-check, one segment at a time on a cross-task cursor (persisted in rehash_cursor when the store has it), token-bucket limited to health.rehash_bytes_per_sec, idle I/O priority and no page-cache pollution on Linux; results go to the evaluator as facts and mark the task dirty (REHASH); a flipped verdict also drops the stamp-cached parses of that segment and the task's chain conclusion (an in-place rewrite within one ctime tick keeps the stamp); a segment without a recorded sha256, or whose size is no longer the size at seal, is skipped and counted unavailable; a cycle is one snapshot of the targets, so a step does no catalog listing
 // pos: ADR 0009 phase 2 P2-3 (design §5.7); never on the evaluation path, so a pass hashes nothing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -225,6 +225,12 @@ func (r *Rehasher) check(ctx context.Context, t rehashTarget) (int64, error) {
 		res.evidence = "sha256 recorded=" + t.sha + " local=" + sum
 	}
 	if r.e.setRehash(t.taskID, t.name, res) {
+		// The verdict flipped, so the bytes changed under an unchanged stamp
+		// (in-place edit within one ctime tick): drop the stamp-cached parses
+		// and the chain conclusion, or a repaired segment keeps the facts
+		// read while it was damaged (e.g. a GTID_HOLE that never closes).
+		binlog.ForgetFile(t.path)
+		r.e.forgetChain(t.taskID)
 		r.e.MarkDirty(t.taskID, ReasonRehash)
 	}
 	r.advance(ctx, t)
@@ -286,4 +292,11 @@ func (r *Rehasher) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// forgetChain drops the cached chain conclusion of a task (see Step).
+func (e *Evaluator) forgetChain(taskID string) {
+	e.mu.Lock()
+	delete(e.chainCache, taskID)
+	e.mu.Unlock()
 }
