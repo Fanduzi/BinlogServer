@@ -8,6 +8,19 @@ import (
 	"binlog_server/internal/health"
 )
 
+// managedWithoutConstant are the Managed kinds that have no tasks.FindingX
+// constant because only the evaluator derives them (no legacy writer ever
+// existed): the chain-derived P2-5.1 kinds (design 0009 §20.1),
+// SEGMENT_EMPTY_LEFTOVER (P2-3), TASK_UNADOPTED (#385, §19), UPLOAD_LATE
+// (P2-5.2, §21.7) and GTID_HOLE / CHECKPOINT_AHEAD (P2-5.3, §22.1).
+// A new Managed kind must be added here or given a constant.
+var managedWithoutConstant = map[health.Kind]bool{
+	health.SegmentDamaged: true, health.ChainIndexGap: true, health.LegacyFailback: true, health.SegmentMissing: true,
+	health.SegmentEmptyLeftover: true, health.TaskUnadopted: true,
+	health.UploadLate: true,
+	health.GTIDHole:   true, health.CheckpointAhead: true,
+}
+
 // managedConstants is every tasks.FindingX constant whose kind the health
 // evaluator manages, plus each kind's string literal.
 func managedConstants(t *testing.T) map[string]bool {
@@ -18,17 +31,36 @@ func managedConstants(t *testing.T) map[string]bool {
 	}
 	reg := health.DefaultRegistry()
 	out := map[string]bool{}
+	have := map[string]bool{}
 	for name, kind := range consts {
+		have[kind] = true
 		if reg[health.Kind(kind)].Managed {
 			out[name] = true
 			out["\x00"+kind] = true
 		}
 	}
-	// The four chain-derived P2-5.1 kinds (design 0009 §20.1) and
-	// UPLOAD_LATE (P2-5.2, §21.7) have no tasks constant;
-	// SEGMENT_EMPTY_LEFTOVER etc. may have none either.
-	if len(out) < 2*(len(health.ManagedKinds())-5)-4 {
-		t.Fatalf("only %d managed constants found: %v", len(out)/2, out)
+	// Every Managed kind must either have a tasks.FindingX constant or be
+	// declared in managedWithoutConstant; no count slack, no stale entries.
+	for k := range health.ManagedKinds() {
+		if !reg[k].Managed {
+			t.Errorf("ManagedKinds lists %s but DefaultRegistry does not mark it Managed", k)
+		}
+		if have[string(k)] {
+			if managedWithoutConstant[k] {
+				t.Errorf("%s has a tasks constant now; drop it from managedWithoutConstant", k)
+			}
+			continue
+		}
+		if !managedWithoutConstant[k] {
+			t.Errorf("managed kind %s has no tasks.FindingX constant and is not declared in managedWithoutConstant", k)
+		}
+		// Still guard its string literal: Report(..., "KIND", ...) is a write.
+		out["\x00"+string(k)] = true
+	}
+	for k := range managedWithoutConstant {
+		if !health.ManagedKinds()[k] {
+			t.Errorf("managedWithoutConstant lists %s, which is not Managed", k)
+		}
 	}
 	return out
 }

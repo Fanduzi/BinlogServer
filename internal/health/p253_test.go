@@ -22,7 +22,7 @@ func TestP253ManagedTable(t *testing.T) {
 		t.Fatal("GTID_HOLE must stay Waivable")
 	}
 	// Still not managed this step.
-	for _, k := range []Kind{OrphanRow, UploadLate, SealFactsAbsent} {
+	for _, k := range []Kind{OrphanRow, SealFactsAbsent} {
 		if r[k].Managed {
 			t.Errorf("%s managed early", k)
 		}
