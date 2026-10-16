@@ -12,6 +12,25 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.70] - 2026-10-17
+
+发布说明：`docs/releases/v0.5.70.md`。没有新迁移；新增可选配置项 `upload.grace_sec`、`health.upload_late_critical_after_sec`、`health.object_list_interval_sec`、`health.object_list_limit`（及按任务覆盖）。
+
+### Fixed
+
+- #413（P1）：频繁轮转时评估器 `concurrent map read and map write` 崩溃；rehash 结果改在锁内拷贝（#414）。
+- 损坏段原地修复后缓存的链事实未清，`GTID_HOLE` 不关闭；校验结果变化时清缓存（#412）。
+
+### Added
+
+- P2-5.2（#408）：`<segment>#object` 对象类别、`UPLOAD_LATE`（WARNING→24h CRITICAL）、`UPLOAD_UNVERIFIED`（两轮确认）；有界缓存的 S3 `ListObjects`，截断时健康 UNKNOWN；移除存储配置以 `CONFIG` 关闭。
+- P2-5.3（#412）：`GTID_HOLE` 豁免（`POST`/`DELETE /api/alerts/waive`）、切换记录、`CHECKPOINT_AHEAD`。
+
+### Known issues
+
+- #417：集群段文件脑裂，任务停在 `STORAGE_INCONSISTENT`；修复进行中。非 v0.5.69 回归。
+- #415：已封存段被追加 Rotate 后误报 `SEGMENT_UNREADABLE`；修复 PR #416 在 QA。非 v0.5.69 回归。
+
 ## [v0.5.69] - 2026-10-16
 
 发布说明：`docs/releases/v0.5.69.md`。没有新迁移，没有新配置项。
