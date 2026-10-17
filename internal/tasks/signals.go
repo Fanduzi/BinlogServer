@@ -209,9 +209,8 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 		tf.OwnedElsewhere = s.leaseManager != nil && task.OwnerWorkerID != "" && task.OwnerWorkerID != s.clusterWorkerID
 		_, known := s.tasks[task.ID]
 		tf.Unadopted = s.store == nil && !known && !s.recordTombstonedLocked(task.ID) // only data_dir knows the task (#385); a tombstone is a deliberate delete (ADR 0010)
-		if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
-			tf.Progress = s.runProgressFactsLocked(task.ID)
-		}
+		// The book of the epoch this node holds, run open or not (§24.15).
+		tf.Progress = s.runProgressFactsLocked(task.ID)
 		s.mu.Unlock()
 	}
 	if e.s != nil {

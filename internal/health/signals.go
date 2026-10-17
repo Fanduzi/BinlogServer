@@ -295,6 +295,8 @@ func noProgress(f *Facts) (time.Duration, string, bool) {
 	owner := t.Owner
 	if owner == "" {
 		owner = "none"
+	} else if t.LeaseExpired {
+		owner += " (lease expired)"
 	}
 	return idle, "desired RUN but no worker is running the task: state " + t.State + ", owner " + owner + ", for " + idle.Round(time.Second).String() + threshold, true
 }

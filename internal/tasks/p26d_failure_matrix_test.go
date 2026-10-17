@@ -174,7 +174,7 @@ func newMatrixEnv(t *testing.T, cluster bool, runner Runner, o matrixOpts) *matr
 			s.SetRunner(o.runnerB)
 		}
 		e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, Cluster: cluster, NodeID: name, Instance: name + "-i",
-			Sweep: time.Minute, NoProgressAfter: matrixNoProgressAfter})
+			Sweep: time.Minute, NoProgressAfter: matrixNoProgressAfter, ControlPlaneOnly: workerID == "" && cluster})
 		env.nodes = append(env.nodes, &matrixNode{name: name, s: s, e: e, lease: lease})
 	}
 	return env
@@ -530,7 +530,9 @@ func TestFailurePathMatrix(t *testing.T) {
 				env.writeRow(t, row)
 				a := env.nodes[0]
 				a.s.mu.Lock()
-				a.s.dumpKiller = func(SourceConfig, uint32) error { return errors.New("dial tcp 127.0.0.1:3306: connect: connection refused") }
+				a.s.dumpKiller = func(SourceConfig, uint32) error {
+					return errors.New("dial tcp 127.0.0.1:3306: connect: connection refused")
+				}
 				a.s.mu.Unlock()
 				if err := a.s.StartTask(task.ID); err != nil {
 					t.Fatalf("StartTask: %v", err)

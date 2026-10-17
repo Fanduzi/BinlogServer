@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the cluster lease manager, the task row and its task_leases row
-// output: the _health lease (one node per cluster, renewed each sweep, TTL 3x sweep) and the proxy authority with which that node evaluates task.state of tasks whose row names no owner (FAILED, STOPPED, CREATED, unclaimed STARTING): Fence{cluster, last lease epoch, Proxy} or Fence{never}; unownedFacts (task.state from the row only, no signals, no chain, no liveness)
+// output: the _health lease (one node per cluster, any role, renewed each sweep, TTL 3x sweep; a store error on that write is FINDINGS_PERSIST_FAILED on this node, §24.14) and the proxy authority with which that node evaluates task.state of tasks whose row names no owner (FAILED, STOPPED, CREATED, unclaimed STARTING) or names an owner whose lease expired (DeadOwnerLister / ExpiredLeaseTaskLister, timed from when this node first saw it, §24.13): Fence{cluster, last lease epoch, Proxy} or Fence{never}; unownedFacts (task.state from the row only, no signals, no chain, no liveness)
 // pos: ADR 0009 phase 2 P2-6c (docs/design/0009-phase2-health-evaluator.md §24, #421): a cluster FAILED is never silent
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -33,6 +33,7 @@ func (e *Evaluator) refreshHealthLease(ctx context.Context) bool {
 	ttl := e.healthLeaseTTL()
 	if epoch := e.healthEpoch.Load(); epoch > 0 {
 		ok, err := lm.Renew(ctx, HealthLeaseID, e.cfg.NodeID, epoch, e.cfg.Now(), ttl)
+		e.noteLeaseWrite(err)
 		if err == nil && ok {
 			e.healthHeld.Store(true)
 			return true
@@ -45,6 +46,7 @@ func (e *Evaluator) refreshHealthLease(ctx context.Context) bool {
 		e.healthEpoch.Store(0)
 	}
 	epoch, ok, err := lm.Acquire(ctx, HealthLeaseID, e.cfg.NodeID, ttl)
+	e.noteLeaseWrite(err)
 	if err != nil || !ok {
 		e.healthHeld.Store(false)
 		return false
@@ -69,13 +71,138 @@ func (e *Evaluator) leaseManager() LeaseManager {
 // unowned: the task row names no owner, so no node evaluates it as holder.
 func unowned(t Task) bool { return t.OwnerWorkerID == "" || t.Epoch <= 0 }
 
+// noteLeaseWrite records the result of a _health lease write: a store error
+// is FINDINGS_PERSIST_FAILED on this node until a write gets through
+// (design §24.14, #425). A refused acquire (held elsewhere) is not an error.
+func (e *Evaluator) noteLeaseWrite(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err == nil {
+		e.leaseWriteErr, e.leaseWriteErrAt = nil, time.Time{}
+		return
+	}
+	if e.leaseWriteErr == nil {
+		e.leaseWriteErrAt = e.cfg.Now()
+	}
+	e.leaseWriteErr = err
+}
+
+// DeadOwnerLister lists the tasks whose row names an owner (owner set,
+// epoch > 0), that desire RUN and are not FAILED or STOPPED, and whose
+// task lease expired by the store's clock: the owner is gone and nobody
+// claimed the task (design §24.13). Without it the evaluator falls back to
+// ExpiredLeaseTaskLister (RUNNING / LEASE_DEGRADED / RETRY_BACKOFF).
+type DeadOwnerLister interface {
+	ListTaskIDsWithExpiredOwnerLease(ctx context.Context) ([]string, error)
+}
+
+// refreshExpiredLeases is the _health holder's list of tasks whose owner's
+// lease expired, each with the time this node first saw it so. Other nodes
+// keep none: they do not proxy.
+func (e *Evaluator) refreshExpiredLeases(ctx context.Context) {
+	if !e.cfg.Cluster || !e.healthHeld.Load() || e.s == nil {
+		e.mu.Lock()
+		e.leaseExpired = map[string]time.Time{}
+		e.mu.Unlock()
+		return
+	}
+	e.s.mu.Lock()
+	store := e.s.store
+	e.s.mu.Unlock()
+	var ids []string
+	var err error
+	switch l := store.(type) {
+	case DeadOwnerLister:
+		ids, err = l.ListTaskIDsWithExpiredOwnerLease(ctx)
+	case ExpiredLeaseTaskLister:
+		var list []Task
+		list, err = l.ListTasksWithExpiredLease(ctx)
+		for _, t := range list {
+			if t.State != StateStopping && !unowned(t) {
+				ids = append(ids, t.ID)
+			}
+		}
+	default:
+		return
+	}
+	if err != nil {
+		return // keep the last list; the store is failing
+	}
+	now := e.cfg.Now()
+	e.mu.Lock()
+	next := make(map[string]time.Time, len(ids))
+	for _, id := range ids {
+		if seen, ok := e.leaseExpired[id]; ok {
+			next[id] = seen
+		} else {
+			next[id] = now
+		}
+	}
+	e.leaseExpired = next
+	e.mu.Unlock()
+}
+
+// expiredSince is when this node first saw the task's owner lease expired
+// (zero when it is not, or this node does not hold _health).
+func (e *Evaluator) expiredSince(id string) time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.leaseExpired[id]
+}
+
+// proxyCandidates (§24.13): the stored tasks this process does not hold
+// in memory, for the _health holder. A control-plane node has no claim
+// loop, so a task created and run on a worker is never in its memory;
+// without this its proxy evaluation would see nothing. Only the holder
+// pays the full list, once per sweep; a failing store adds nothing.
+func (e *Evaluator) proxyCandidates(listed []Task) []Task {
+	if !e.cfg.Cluster || !e.healthHeld.Load() || e.s == nil {
+		return nil
+	}
+	e.s.mu.Lock()
+	store := e.s.store
+	e.s.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	ctx, cancel := e.s.withReadTimeout(context.Background())
+	defer cancel()
+	stored, err := store.ListTasks(ctx)
+	if err != nil {
+		return nil
+	}
+	known := make(map[string]bool, len(listed))
+	for _, t := range listed {
+		known[t.ID] = true
+	}
+	var out []Task
+	for _, t := range stored {
+		if !known[t.ID] && (unowned(t) || !e.expiredSince(t.ID).IsZero()) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// mayEvaluate: this node evaluates t, as holder or by proxy, without a
+// store read (the health summary calls it).
+func (e *Evaluator) mayEvaluate(t Task) bool {
+	if _, ok := e.fenceFor(t); ok {
+		return true
+	}
+	return e.cfg.Cluster && e.healthHeld.Load() && (unowned(t) || !e.expiredSince(t.ID).IsZero())
+}
+
 // proxyFence is the _health holder's authority for an unowned task: the
 // last task lease epoch on behalf of its owner (a released lease has none
 // left, the holder writes in its own name), or the never-leased fence. The
 // store re-checks it under lock: nobody may hold the task lease (§24.3).
 func (e *Evaluator) proxyFence(t Task) (health.Fence, bool) {
-	if !e.cfg.Cluster || !e.healthHeld.Load() || !unowned(t) || t.ID == ClusterFindingTask {
+	if !e.cfg.Cluster || !e.healthHeld.Load() || t.ID == ClusterFindingTask {
 		return health.Fence{}, false
+	}
+	if !unowned(t) && e.expiredSince(t.ID).IsZero() {
+		return health.Fence{}, false // owned, and its owner's lease is live
 	}
 	view, ok := e.leaseManager().(LeaseView)
 	if !ok {
@@ -109,8 +236,18 @@ func (e *Evaluator) authorityFor(t Task) (health.Fence, bool) {
 // nothing local is read: no signals (this node may keep some from when it
 // held the task), no liveness, no chain. Only task.state is produced, so
 // the other scopes neither close their rows nor make the health UNKNOWN.
-func unownedFacts(task Task, facts *health.Facts) {
+//
+// expiredAt (§24.13): the row still names an owner whose lease expired;
+// the task has been without a worker since this node first saw that, not
+// since the row was last written (a long RUNNING row is old).
+func unownedFacts(task Task, facts *health.Facts, expiredAt time.Time) {
 	facts.Task = rowTaskFacts(task)
+	if !expiredAt.IsZero() && !unowned(task) {
+		facts.Task.LeaseExpired = true
+		if expiredAt.After(facts.Task.StateSince) {
+			facts.Task.StateSince = expiredAt
+		}
+	}
 	facts.Signals = map[health.SignalKey]health.SignalState{}
 	facts.Complete[health.ScopeTaskState] = true
 	facts.Produced = map[health.Scope]bool{health.ScopeTaskState: true}

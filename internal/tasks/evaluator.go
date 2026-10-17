@@ -89,8 +89,13 @@ type EvaluatorConfig struct {
 	// Cluster: the fence is the task lease (cluster mode); otherwise the
 	// standalone fence with the persisted node id.
 	Cluster bool
-	// NodeID is the cluster worker id, or the standalone {data_dir}/.node_id.
+	// NodeID is the cluster worker id, or the standalone {data_dir}/.node_id;
+	// a control-plane-only node uses cluster.worker_id or its persisted id
+	// (design §24.13).
 	NodeID string
+	// ControlPlaneOnly: this node runs no tasks (cluster role control-plane).
+	// It never evaluates as a task holder, only through _health (§24.13).
+	ControlPlaneOnly bool
 	// Instance is this process's id (standalone fence).
 	Instance string
 	// RehashCursor, when set, persists the rehasher's cursor (rehash_cursor).
@@ -184,6 +189,13 @@ type Evaluator struct {
 	// evaluates unowned tasks (P2-6c, design §24.2).
 	healthHeld  atomic.Bool
 	healthEpoch atomic.Int64
+	// leaseExpired (§24.13): tasks whose row names an owner whose lease
+	// expired, with the time this node first saw it; refreshed by the
+	// _health holder each sweep. leaseWriteErr: the last _health lease write
+	// error and since when (§24.14: every node shows a meta write failure).
+	leaseExpired    map[string]time.Time
+	leaseWriteErr   error
+	leaseWriteErrAt time.Time
 
 	evaluations, applied, errs, shadowed atomic.Int64
 }
@@ -221,7 +233,7 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
 		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
-		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}}
+		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}}
 	if s != nil {
 		s.healthEval.Store(e)
 		e.adoptEarlySignals()
@@ -415,7 +427,9 @@ func (e *Evaluator) finish(id string) {
 // responsible is every task this node evaluates, sorted.
 func (e *Evaluator) responsible() []Task {
 	var out []Task
-	for _, t := range e.s.ListTasks() {
+	listed := e.s.ListTasks()
+	listed = append(listed, e.proxyCandidates(listed)...)
+	for _, t := range listed {
 		if _, ok := e.authorityFor(t); ok {
 			out = append(out, t)
 		}
@@ -502,6 +516,7 @@ func (e *Evaluator) clusterHasWork() bool {
 func (e *Evaluator) markResponsible(r EvalReason) []string {
 	var ids []string
 	e.refreshHealthLease(context.Background())
+	e.refreshExpiredLeases(context.Background())
 	for _, t := range e.responsible() {
 		reason := r
 		fp := e.fingerprint(t.ID)
@@ -575,7 +590,7 @@ func (e *Evaluator) fenceFor(t Task) (health.Fence, bool) {
 	if !e.cfg.Cluster {
 		return health.Fence{Mode: health.FenceStandalone, Node: e.cfg.NodeID, Instance: e.cfg.Instance}, true
 	}
-	if t.OwnerWorkerID == "" || t.OwnerWorkerID != e.cfg.NodeID || t.Epoch <= 0 {
+	if e.cfg.ControlPlaneOnly || t.OwnerWorkerID == "" || t.OwnerWorkerID != e.cfg.NodeID || t.Epoch <= 0 {
 		return health.Fence{}, false
 	}
 	return health.Fence{Mode: health.FenceCluster, TaskEpoch: t.Epoch, Node: e.cfg.NodeID, Instance: e.cfg.Instance}, true
@@ -621,7 +636,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		facts.Task = &health.TaskFacts{State: string(StateStopped), Desired: TaskDesiredStop, RunHere: true}
 		facts.Complete[health.ScopeTaskState] = true
 	case proxy:
-		unownedFacts(task, facts) // P2-6c: task.state only (§24.2)
+		unownedFacts(task, facts, e.expiredSince(task.ID)) // P2-6c: task.state only (§24.2)
 	case isCluster:
 		facts.Complete[health.ScopeChainLocal] = true // _cluster has no chain
 	default:
@@ -750,9 +765,12 @@ func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) 
 	e.mu.Unlock()
 	for id, u := range all {
 		if id != ClusterFindingTask && e.s != nil {
-			if _, gerr := e.s.GetTask(id); gerr != nil {
+			t, gerr := e.s.GetTask(id)
+			if gerr != nil || !e.mayEvaluate(t) {
 				// The task is gone (or was never created: a refused create
-				// still marks its id dirty); nothing will write its row again.
+				// still marks its id dirty), or this node no longer
+				// evaluates it (another owner, design §24.14): nothing of
+				// ours will write its row again.
 				e.mu.Lock()
 				delete(e.unsaved, id)
 				e.mu.Unlock()
@@ -762,6 +780,18 @@ func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) 
 		ids = append(ids, id)
 		if err == nil || u.since.Before(since) {
 			err, since = u.err, u.since
+		}
+	}
+	e.mu.Lock()
+	lerr, lsince := e.leaseWriteErr, e.leaseWriteErrAt
+	e.mu.Unlock()
+	if lerr != nil {
+		// Every cluster node writes the _health lease each sweep, so a meta
+		// store refusing writes shows on every node, not only on the
+		// owner of a task (design §24.14, #425).
+		ids = append(ids, HealthLeaseID)
+		if err == nil || lsince.Before(since) {
+			err, since = fmt.Errorf("metadata store refused the %s lease write: %w", HealthLeaseID, lerr), lsince
 		}
 	}
 	sort.Strings(ids)

@@ -111,6 +111,9 @@ type TaskFacts struct {
 	Owner          string
 	Epoch          int64
 	RunHere        bool
+	// LeaseExpired (§24.13): the row names an owner whose lease expired and
+	// nobody claimed the task; StateSince is when that was first seen.
+	LeaseExpired bool
 	StateSince     time.Time
 	LastError      string
 	// FailedCurrent: the task is FAILED for the operator's current ask (its

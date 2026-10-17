@@ -227,6 +227,9 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		s.confirmHeldLeaseLocked(id, task.OwnerWorkerID, task.Epoch)
 	}
 
+	// The progress book follows the held epoch, not one run: a start that
+	// never opens its dump (a leftover KILL that fails) still ages (§24.15).
+	s.beginRunProgressLocked(id, task.Epoch, opts.resetBudget)
 	pending := s.leftoverDumpLocked(id, task)
 	killer := s.dumpKiller
 	if pending.ConnectionID == 0 && s.persistsPendingDumpLocked() {
@@ -348,7 +351,6 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	}
 	s.cancels[id] = cancel
 	s.runs[id] = done
-	s.beginRunProgressLocked(id)
 	if s.runSpec == nil {
 		s.runSpec = make(map[string]int64)
 	}
@@ -878,6 +880,15 @@ func (s *Scheduler) noteRemoteStopLocked(stored Task) bool {
 	if !exists {
 		current = stored
 	}
+	if staleStoppedRow(stored, current, s.runSpec[stored.ID]) {
+		// STOPPED with desired RUN, no newer ask, written by another
+		// owner/epoch: a lost owner's late write, not a Stop (a Stop always
+		// writes desired STOP or STOPPING first). Keep running and publish
+		// this run's row again, fenced by its epoch (#425, §24.14).
+		log.Printf("ignored stale STOPPED row task=%s row_owner=%q row_epoch=%d run_owner=%s run_epoch=%d", stored.ID, stored.OwnerWorkerID, stored.Epoch, current.OwnerWorkerID, current.Epoch)
+		s.unpublished[stored.ID] = struct{}{}
+		return true
+	}
 	if current.State == StateFailed {
 		// This run already wrote FAILED: desired STOP on the row is its own
 		// write, not a remote Stop. FAILED cancelled the run and released
@@ -1142,7 +1153,6 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		if currentDone, ok := s.runs[id]; ok && currentDone == done {
 			delete(s.runs, id)
 			delete(s.runSpec, id)
-			delete(s.progress, id)
 		}
 		// done 在放下锁之前关闭。下一次 StartSync 要等这个 Close 完成。
 		close(done)
@@ -1212,6 +1222,10 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			current.LastError = ""
 			current.UpdatedAt = time.Now()
 			s.tasks[id] = current
+			// Nothing of this epoch is left to publish: a row write that
+			// failed earlier must not be republished as this yielded copy
+			// (STOPPED, no owner) over the next owner's row (#425, §24.14).
+			s.dropUnpublishedLocked(id)
 			s.appendEventLocked(id, "TASK_LEASE_YIELDED", "runner stopped; another owner holds the lease", errMsg)
 			s.flushPendingEventsLocked()
 			s.mu.Unlock()
