@@ -1135,6 +1135,55 @@ QA 只在真机上跑了「先 FAILED、旧 owner 后醒」。反向顺序——
 
 `cluster-roles`、`worker-crash-recovery`、`meta-failover` 三个集群 e2e 只在手动触发（meta-failover 还有 push main）时跑。改成每个 PR 都跑需要改 `.github/workflows/e2e.yml`，本仓库自动化用的 token 没有 workflow 权限，改动写在交接文档里由有权限的人执行。上面的矩阵和栅栏顺序测试是纯 `go test`，不依赖这一步，本 PR 起每个 PR 都跑。
 
+### 24.13 只剩控制面节点时 owner 死掉（QA r3 (b)，2026-10-17）
+
+**现象**：唯一的 worker n1 被 `kill -9`，只剩 control-plane 节点 n2。任务行停在 `RUNNING / n1 / 1` 超过 100s，0 finding，n2 `/api/health` = ok；n2 的评估器启动日志是 `node )`（空 node id）。
+
+**根因**：
+1. control-plane 角色不解析 worker id（`resolvedWorkerID` 只在 worker 角色里赋值），评估器 `NodeID` 为空，`refreshHealthLease` 在 `NodeID == ""` 时直接放弃，控制面节点永远不持有 `_health`，也就不代评任何任务。
+2. 即使持有 `_health`，「无主」只认任务行（`owner == "" || epoch <= 0`）。owner 死掉后行仍写着 `n1 / 1`，lease 已过期但没有活着的 worker 去认领，于是它既不是「无主」，也没有节点按持有者评估它。
+
+**规则**：
+- 评估器在每种角色上都运行，并有稳定的 node id：worker 用 worker id；control-plane 用 `cluster.worker_id`（若配置），否则用 data_dir 里持久化的 node id（与单机同一个 `LoadOrCreateNodeID`）。control-plane 节点从不按持有者评估任务（`EvaluatorConfig.ControlPlaneOnly`：即使 id 恰好等于某个 worker 的 owner 也不行），只通过 `_health` 代评。
+- `_health` 持有者每轮用 store 的 `ListTasksWithExpiredLease`（按 meta 的 `NOW(6)` 判过期，不用本地时钟）找出 lease 已过期的任务，把它们与「行无主」的任务同样代评 `task.state`。代写栅栏不变：`(last owner, last epoch, Proxy)`，store 端已经允许「epoch 相同且 lease 过期」的代写；新 owner 一认领，epoch 前进，代写即被栅栏拒绝。
+- 这种任务的 `TASK_NO_PROGRESS` 计时起点是 max(任务行 `updated_at`, 本节点第一次看到它 lease 过期的时间)，不是行的 `updated_at`：一个跑了几天的任务 lease 刚过期，不应立刻 CRITICAL。界：lease TTL + 1 个 sweep（发现）+ `no_progress_after_sec` + 1 个 sweep。QA 配置（TTL 15s、sweep 5s、NP 30s）下约 55s，小于 2×NP。detail 写明 `lease of owner n1 expired; no worker is running the task`。
+- 关闭：有 worker 认领（epoch 前进、行有新 owner），或 desired STOP / FAILED。
+
+### 24.14 meta 只读之后静默 STOPPED（QA r3 (d)，#425，2026-10-17）
+
+**现象**：meta `read_only=ON` 100s（非 SUPER 用户）。期间只有 n1 `/api/health` degraded（`FINDINGS_PERSIST_FAILED`），n2 一直 ok；`read_only=OFF` 后任务变成 `STOPPED / 无 owner / desired STOP`，0 finding，不再恢复。
+
+**根因**（本地复现 + meta general log 逐条核对）：
+1. 只读期间 n1 的行写失败（`STARTING n1/1` 等），任务进 `unpublished`，sink tick 每 5s 重写一次内存行（`republishUnpublished`）。
+2. n1 的本地 lease 时钟在 0.8×TTL 后拒绝写，runner 以 lease handoff 退出，内存行改成 `STOPPED / "" / 0`（「让出」，按设计不落库）。但 `unpublished` 没清，republish 继续重写的是这份让出后的内存行。
+3. 无 owner、epoch 0 的行走 `persistTaskLocked`，不过栅栏（`persistTaskFencedLocked` 对 `owner == "" || epoch <= 0` 直接退化为不带栅栏的 `UpsertTask`），spec_revision 相同，upsert 接受。
+4. `read_only=OFF` 后 n2 在 11:04:33 认领 epoch 2 写 `RUNNING n2/2`；n1 的 republish 在 11:04:35 把 `STOPPED / "" / 0 / desired RUN`（updated_at 还是只读期间的 11:04:03）写回。
+5. n2 的远端 Stop 轮询把「共享行 STOPPED」当成控制面 Stop：取消自己的 dump，写 `STOPPED / desired STOP` 并释放 lease。desired 被改成 STOP，所以 `TASK_NO_PROGRESS` 也不会开。
+
+和 #424 是同一套栅栏/状态代码（旧 owner 在失去 lease 后改写共享行），在 #424 里修。
+
+**规则**：
+- 让出（lease handoff）后本进程对这行没有任何要发布的东西：清掉 `unpublished`（与 `ErrStaleTaskWrite` 的处理一致），关闭 `TASK_PERSIST_FAILED`。
+- republish 带栅栏：内存行有 owner/epoch 时走 `persistTaskFencedLocked(owner, epoch)`；新 owner 已认领时 store 拒绝（`ErrStaleTaskWrite`），本进程丢弃这份待发布。
+- 新 owner 的防线：共享行 `STOPPED` 但 desired 仍是 RUN、spec_revision 没有比本次 run 打开的更新、且行上的 owner 不是本 run，这不是 Stop（控制面 Stop 总是写 desired STOP，或先 STOPPING），而是旧 owner 的陈旧写。本 run 继续，并把自己的行重新发布（带栅栏）。
+- 所有节点的 health 都反映 meta 写失败：每个评估器每轮都写 `_health` lease（持有者续约、其他节点尝试获取）。这个写返回 store 错误时，记入 `FINDINGS_PERSIST_FAILED`（detail：metadata store refused the `_health` lease write），所以只读期间每个节点 `/api/health` 都 degraded；写恢复后关闭。
+- 本节点不再评估的任务（不是 owner、也不代评），其「健康写失败」记录在下一次 health 汇总时丢弃，否则 meta 恢复后 n1 永远挂着过期的 `FINDINGS_PERSIST_FAILED`。
+
+### 24.15 重试中的 owner 与 SOURCE_UNREACHABLE 的余量（QA r3 (c)，2026-10-17）
+
+QA (c)：新 owner 认领后一直 `RETRY_BACKOFF`（旧 dump 连接 KILL 不到源，run 根本没打开），`SOURCE_UNREACHABLE` 在 fault+60s 才开，正好压在 2×NP 上；期间 `TASK_NO_PROGRESS` 没开。
+
+**根因**：进度账只在 run 打开时存在（run 退出即删）；没有 run 时退回到行的 `updated_at`，而重试循环每隔几秒把 `RETRY_BACKOFF ↔ STARTING` 写回行，`updated_at` 一直被刷新，计时永远到不了阈值。
+
+**规则**：进度账按「本节点以 epoch E 持有任务」记，不按单个 run 记：本节点拿到（或认领）任务、确定 owner/epoch 时开账（同一 epoch 已有账则沿用起点），run 退出、重试、KILL 失败都不清；换 epoch、操作员 Start、删任务时重开或删除。本节点是 owner 且有账时，`TASK_NO_PROGRESS` 一律按账计（max(持有起点, 最后一次在 data_dir 下推进)），不看行的 `updated_at`。界：认领 + `no_progress_after_sec` + 1 个 sweep，QA 配置下约 fault+15+30+5 = 50s，SOURCE_UNREACHABLE 之前先开。
+
+### 24.16 测试（先红）
+
+- 矩阵行 `dead-worker-control-plane-only`（集群）：worker-a 以 epoch 1 跑任务后死掉（run 取消、lease 不再续、行仍 `RUNNING a/1`），剩下的节点是 control-plane（无 runner、无 worker id，node id 来自配置/持久化）。lease 过期后在阈值内打开 CRITICAL `TASK_NO_PROGRESS`，每个节点 `/api/health` degraded，行不被改写。
+- 矩阵行 `meta-read-only`（集群）：a 跑任务；meta 只读（任务行写、lease 写都报错）期间 a、b 两个节点 `/api/health` 都 degraded；a 的行写失败后 lease handoff 让出；lease 过期、只读解除，b 认领 epoch 2；a 的 sink tick republish、b 的远端 Stop 轮询之后，行仍是 `RUNNING b/2 desired RUN`，不出现静默 STOPPED，恢复后两个节点 health ok。
+- 矩阵行 `retrying-owner-no-run`（集群/单机）：owner 的启动在 KILL 旧连接失败后反复 `RETRY_BACKOFF`（run 从未打开），`TASK_NO_PROGRESS` 在阈值内打开。
+- `app` 单测：control-plane 角色的评估器 node id 非空（`cluster.worker_id` 或持久化 id），并且 `ControlPlaneOnly`。
+
 ### 24.7 本步不做
 
 - `HEALTH_STALE`（§8 第 10 条）：需要持有者给**有主**任务写 finding，而有主任务的写权在 owner，代写栅栏要求 lease 无人持有，两者冲突；拟改为 `_cluster` 级 finding（subject = 任务 id，`never` 栅栏，持有者写），下一步单独做。
