@@ -36,3 +36,32 @@ func TestStartHealthEvaluatorStandalone(t *testing.T) {
 		t.Fatal("unknown mode accepted")
 	}
 }
+
+// QA r3 (b), design 0009 §24.13: a control-plane-only node resolves no
+// worker id, yet its evaluator must have a node id (cluster.worker_id, else
+// the persisted one) to hold _health, and never evaluate as a task holder.
+func TestHealthEvaluatorIdentity(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{DataDir: dir, Mode: "cluster"}
+	cfg.Cluster.Role = "control-plane"
+	id, cpOnly, err := healthEvaluatorIdentity(cfg, "")
+	if err != nil || id == "" || !cpOnly {
+		t.Fatalf("control-plane without worker_id: id=%q cpOnly=%v err=%v", id, cpOnly, err)
+	}
+	again, _, err := healthEvaluatorIdentity(cfg, "")
+	if err != nil || again != id {
+		t.Fatalf("control-plane node id not stable: %q then %q (%v)", id, again, err)
+	}
+	cfg.Cluster.WorkerID = "n2"
+	if id, cpOnly, err = healthEvaluatorIdentity(cfg, ""); err != nil || id != "n2" || !cpOnly {
+		t.Fatalf("control-plane with worker_id: id=%q cpOnly=%v err=%v", id, cpOnly, err)
+	}
+	cfg.Cluster.Role = "all-in-one"
+	if id, cpOnly, err = healthEvaluatorIdentity(cfg, "n1"); err != nil || id != "n1" || cpOnly {
+		t.Fatalf("worker: id=%q cpOnly=%v err=%v", id, cpOnly, err)
+	}
+	standalone := config.Config{DataDir: t.TempDir()}
+	if id, cpOnly, err = healthEvaluatorIdentity(standalone, "standalone"); err != nil || id == "" || id == "standalone" || cpOnly {
+		t.Fatalf("standalone: id=%q cpOnly=%v err=%v", id, cpOnly, err)
+	}
+}

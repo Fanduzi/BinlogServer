@@ -57,6 +57,8 @@ type matrixRunner struct {
 	// resolve, when set, runs first, as the replication runner's takeover
 	// resolution does; its error ends the run.
 	resolve func(task Task) error
+	// exit, when set, ends the open run with the error sent on it.
+	exit chan error
 }
 
 func (r *matrixRunner) Run(ctx context.Context, task Task) error {
@@ -79,6 +81,8 @@ func (r *matrixRunner) Run(ctx context.Context, task Task) error {
 		select {
 		case <-ctx.Done():
 			return context.Canceled
+		case err := <-r.exit:
+			return err
 		case <-tick.C:
 			if r.report != nil {
 				n++
@@ -89,9 +93,10 @@ func (r *matrixRunner) Run(ctx context.Context, task Task) error {
 }
 
 type matrixNode struct {
-	name string
-	s    *Scheduler
-	e    *Evaluator
+	name  string
+	s     *Scheduler
+	e     *Evaluator
+	lease *roLease
 }
 
 type matrixEnv struct {
@@ -101,11 +106,26 @@ type matrixEnv struct {
 	hs      *leaseHealthStore
 	dataDir string
 	nodes   []*matrixNode // nodes[0] drives the task
+	runnerB *matrixRunner
+	// ro is meta read-only: task row, lease and health writes fail.
+	ro atomic.Bool
 }
 
 const matrixNoProgressAfter = 300 * time.Millisecond
 
-func newMatrixEnv(t *testing.T, cluster bool, runner Runner, relDataDir bool) *matrixEnv {
+// matrixOpts shapes the cluster of one row (QA r3 rows, design §24.13-24.16).
+type matrixOpts struct {
+	// relDataDir configures data_dir as a relative path.
+	relDataDir bool
+	// controlPlane makes the second cluster node control-plane only: no
+	// runner and no worker id, as app wires that role.
+	controlPlane bool
+	// runnerB is the second cluster node's runner (nil: none).
+	runnerB Runner
+}
+
+func newMatrixEnv(t *testing.T, cluster bool, runner Runner, o matrixOpts) *matrixEnv {
+	relDataDir := o.relDataDir
 	t.Helper()
 	leases := NewMemoryLease()
 	dataDir := t.TempDir()
@@ -124,13 +144,22 @@ func newMatrixEnv(t *testing.T, cluster bool, runner Runner, relDataDir bool) *m
 	names := []string{"standalone"}
 	if cluster {
 		names = []string{"worker-a", "worker-b"}
+		if o.controlPlane {
+			names[1] = "cp-1"
+		}
 	}
+	hs := &roHealthStore{leaseHealthStore: env.hs, ro: &env.ro}
 	for i, name := range names {
+		lease := &roLease{freezableLease: &freezableLease{MemoryLease: leases}, ro: &env.ro}
+		workerID := name
+		if o.controlPlane && i == 1 {
+			workerID = "" // app: a control-plane node resolves no worker id
+		}
 		opts := []Option{
-			WithStore(&nodeStore{sharedTaskTable: env.table, node: name}),
-			WithFindingStore(env.hs),
-			WithClusterLeaseManager(leases),
-			WithClusterWorkerID(name),
+			WithStore(&roNodeStore{nodeStore: &nodeStore{sharedTaskTable: env.table, node: name}, ro: &env.ro}),
+			WithFindingStore(hs),
+			WithClusterLeaseManager(lease),
+			WithClusterWorkerID(workerID),
 			WithDataDir(env.dataDir),
 			WithRetryBackoff(time.Millisecond, time.Millisecond),
 		}
@@ -141,9 +170,12 @@ func newMatrixEnv(t *testing.T, cluster bool, runner Runner, relDataDir bool) *m
 		if i == 0 && runner != nil {
 			s.SetRunner(runner)
 		}
-		e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: env.hs, Cluster: cluster, NodeID: name, Instance: name + "-i",
+		if i == 1 && o.runnerB != nil {
+			s.SetRunner(o.runnerB)
+		}
+		e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, Cluster: cluster, NodeID: name, Instance: name + "-i",
 			Sweep: time.Minute, NoProgressAfter: matrixNoProgressAfter})
-		env.nodes = append(env.nodes, &matrixNode{name: name, s: s, e: e})
+		env.nodes = append(env.nodes, &matrixNode{name: name, s: s, e: e, lease: lease})
 	}
 	return env
 }
@@ -260,6 +292,9 @@ type matrixRow struct {
 	noRunner bool
 	// relDataDir configures data_dir as a relative path.
 	relDataDir bool
+	// controlPlane / runnerB: see matrixOpts.
+	controlPlane bool
+	runnerB      func() *matrixRunner
 }
 
 func TestFailurePathMatrix(t *testing.T) {
@@ -399,6 +434,116 @@ func TestFailurePathMatrix(t *testing.T) {
 				}
 				return startRunningTask(t, env, r, task)
 			}},
+		// QA r3 (b), §24.13: the only worker dies (kill -9: no release, no
+		// write, renew stops), only a control-plane node is left. Its lease
+		// expires; nobody claims it. The row still names the dead owner.
+		{name: "dead-worker-control-plane-only", cluster: true, kind: health.TaskNoProgress, state: StateRunning, detail: "no worker is running",
+			runner: blocking(true), controlPlane: true,
+			setup: func(t *testing.T, env *matrixEnv, r *matrixRunner) string {
+				id := startRunning(t, env, r)
+				a := env.nodes[0]
+				a.lease.freeze() // the dead process renews nothing
+				t.Cleanup(a.lease.thaw)
+				progressTarget.Store(nil)
+				env.nodes = env.nodes[1:] // and evaluates nothing
+				env.expireLease(id)
+				env.sweep(t) // the control plane sees the expired lease
+				time.Sleep(matrixNoProgressAfter + 200*time.Millisecond)
+				t.Cleanup(func() {
+					a.lease.thaw()
+					a.s.mu.Lock()
+					cancel := a.s.cancels[id]
+					a.s.mu.Unlock()
+					if cancel != nil {
+						cancel()
+					}
+				})
+				return id
+			}},
+		// QA r3 (d), #425, §24.14: meta read-only. Every node's health is
+		// degraded while it lasts; the owner's row write fails and its run
+		// yields the lease; after recovery the other worker claims epoch 2,
+		// the old owner republishes and the new owner polls remote stops:
+		// the task keeps running, never a silent STOPPED.
+		{name: "meta-read-only", cluster: true, state: StateRunning, runner: blocking(true),
+			runnerB: func() *matrixRunner { return &matrixRunner{started: make(chan struct{}, 8)} },
+			setup: func(t *testing.T, env *matrixEnv, r *matrixRunner) string {
+				r.exit = make(chan error, 2)
+				id := startRunning(t, env, r)
+				a, b := env.nodes[0], env.nodes[1]
+				env.ro.Store(true)
+				env.sweepAll()
+				assertHealth(t, env.nodes, HealthDegraded, "during meta read-only")
+				// The owner's write fails (RETRY_BACKOFF not stored), then
+				// its run yields: the local lease clock refused the epoch.
+				r.exit <- errors.New("save checkpoint: " + errMetaReadOnly.Error())
+				select {
+				case <-r.started:
+				case <-time.After(2 * time.Second):
+					t.Fatal("retry did not start")
+				}
+				r.exit <- NewLeaseHandoff(errors.New("lease/epoch mismatch: WRITE_FENCED: lease epoch no longer owns the task: run start"))
+				waitRunClosed(t, a.s, id, "owner run after the handoff")
+				env.expireLease(id)
+				a.s.republishUnpublished() // still read-only: fails
+				env.ro.Store(false)
+				// The other worker claims the expired lease and runs epoch 2.
+				if _, err := b.s.ClaimExpiredTasks(); err != nil {
+					t.Fatalf("ClaimExpiredTasks: %v", err)
+				}
+				select {
+				case <-env.runnerB.started:
+				case <-time.After(2 * time.Second):
+					t.Fatal("worker-b run did not start")
+				}
+				row := waitStoredState(t, env.table, id, StateRunning)
+				if row.OwnerWorkerID != b.name || row.Epoch != 2 {
+					t.Fatalf("claim: row %s/%s/%d, want RUNNING %s/2", row.State, row.OwnerWorkerID, row.Epoch, b.name)
+				}
+				// The old owner's sink tick, then the new owner's remote-stop poll.
+				a.s.republishUnpublished()
+				b.s.applyRemoteStops()
+				time.Sleep(100 * time.Millisecond)
+				row, _ = env.table.GetTask(context.Background(), id)
+				if row.State != StateRunning || row.OwnerWorkerID != b.name || row.DesiredRun != TaskDesiredRun {
+					t.Fatalf("after recovery: row %s/%s/%d desired %s, want RUNNING %s desired RUN (silent stop, #425)",
+						row.State, row.OwnerWorkerID, row.Epoch, row.DesiredRun, b.name)
+				}
+				b.s.mu.Lock()
+				done, open := b.s.runs[id]
+				b.s.mu.Unlock()
+				if !open || isClosed(done) {
+					t.Fatal("worker-b run stopped after recovery (silent stop, #425)")
+				}
+				env.reload(id)
+				env.sweepAll()
+				return id
+			}},
+		// QA r3 (c), §24.15: the owner cannot open the dump (the old dump
+		// connection cannot be KILLed) and retries with no run open; each
+		// retry rewrites the row, so updated_at never ages.
+		{name: "retrying-owner-no-run", cluster: true, single: true, kind: health.TaskNoProgress, state: StateRetryBackoff, runner: blocking(false),
+			setup: func(t *testing.T, env *matrixEnv, r *matrixRunner) string {
+				task := env.newTask(t)
+				row, _ := env.table.GetTask(context.Background(), task.ID)
+				row.PendingDumpCleanup = &DumpCleanup{ConnectionID: 19, Host: "127.0.0.1", Port: 3306, Held: true, Epoch: 0}
+				env.writeRow(t, row)
+				a := env.nodes[0]
+				a.s.mu.Lock()
+				a.s.dumpKiller = func(SourceConfig, uint32) error { return errors.New("dial tcp 127.0.0.1:3306: connect: connection refused") }
+				a.s.mu.Unlock()
+				if err := a.s.StartTask(task.ID); err != nil {
+					t.Fatalf("StartTask: %v", err)
+				}
+				deadline := time.Now().Add(matrixNoProgressAfter + 250*time.Millisecond)
+				for time.Now().Before(deadline) {
+					_, _ = a.s.convergeTask(task.ID) // the claim loop retrying
+					time.Sleep(40 * time.Millisecond)
+				}
+				waitStoredState(t, env.table, task.ID, StateRetryBackoff)
+				env.reload(task.ID)
+				return task.ID
+			}},
 	}
 	for _, row := range rows {
 		for _, cluster := range []bool{true, false} {
@@ -425,7 +570,14 @@ func TestFailurePathMatrix(t *testing.T) {
 					r = &matrixRunner{started: make(chan struct{}, 8)}
 					runner = r
 				}
-				env := newMatrixEnv(t, cluster, runner, row.relDataDir)
+				o := matrixOpts{relDataDir: row.relDataDir, controlPlane: row.controlPlane}
+				var rb *matrixRunner
+				if row.runnerB != nil {
+					rb = row.runnerB()
+					o.runnerB = rb
+				}
+				env := newMatrixEnv(t, cluster, runner, o)
+				env.runnerB = rb
 				id := row.setup(t, env, r)
 				defer env.cleanup(id)
 				before, err := env.table.GetTask(context.Background(), id)
