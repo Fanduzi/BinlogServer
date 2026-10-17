@@ -1070,7 +1070,7 @@ main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这�
 
 **问题**：两节点各自独立的 `data_dir`、却落在**同一主机**（或把旧 owner 的绝对路径挂成可读）时，`binlog_files.file_path` 指向的 open 分段对 new owner **仍然可读**。旧规则把「可读的 catalog 目录」当成接管续写目录（`ResolveTakeover` → `TakeoverResume.Dir`），于是 n2 认领后 `RUNNING`、往**别人的**目录续写或（更糟）在错误假设下几乎不写、0 finding、`/api/health` = ok，只有 `task_health=UNKNOWN`——比 ENOENT / chmod 000 的大声失败更危险。
 
-**规则**：接管 / run start 时，catalog 的 `file_path`（或其目录）必须落在**本节点配置的 `data_dir`** 之下（`filepath.Clean`，两侧能 `EvalSymlinks` 则解析后再比；比较用 `filepath.Rel`，禁止 `..` 逃逸）。可读但落在本 `data_dir` **之外** → 与不可读 / ENOENT 相同：永久 `SEGMENT_NOT_ON_WORKER`（点名该分段），**不得**因可读就继续写入外来绝对路径，也不得在本机另起一套静默目录假装续写。
+**规则**：接管 / run start 时，catalog 的 `file_path`（或其目录）必须落在**本节点配置的 `data_dir`** 之下（两侧先 `filepath.Abs`——相对的 `data_dir` 相对进程工作目录——再在存在时 `EvalSymlinks`，解析后再比；比较用 `filepath.Rel`，禁止 `..` 逃逸。相对 `data_dir` 与 catalog 里的绝对路径（或反过来）指同一目录时算本节点自己的分段，#424 QA 前补）。可读但落在本 `data_dir` **之外** → 与不可读 / ENOENT 相同：永久 `SEGMENT_NOT_ON_WORKER`（点名该分段），**不得**因可读就继续写入外来绝对路径，也不得在本机另起一套静默目录假装续写。
 
 **共享 `data_dir` 不受影响**：部署前提（§24.5）下 catalog 路径本就在共享根下，继续今日行为（含 #415 换 inode 续写）。
 
@@ -1118,6 +1118,7 @@ Adrian 指出 #421 这类 bug 测试本该拦住。缺口是：每条失败路�
 | unclaimed-starting | 集群 | desired RUN、STARTING、无 owner，没人认领 | `TASK_NO_PROGRESS`（代评） |
 | lease-expired-stopped | 集群 | lease 释放后 fail-safe 写成 `STOPPED / desired RUN`，没人重启 | `TASK_NO_PROGRESS`（代评） |
 | operator-stop（对照） | 单机 / 集群 | 运维 Stop | 无 finding，health ok，行是 `STOPPED / desired STOP` |
+| relative-data-dir-own-segments（对照） | 单机 / 集群 | `data_dir` 配成相对路径 `data`，接管时 catalog 记录的是本节点分段的绝对路径，run 先走 `ResolveTakeover` | 不报 `SEGMENT_NOT_ON_WORKER`，无 CRITICAL，health ok，行保持 `RUNNING` |
 
 源端连不上时任务停在 `RETRY_BACKOFF`，由 `SOURCE_UNREACHABLE`（CRITICAL）报；它和 `DUMP_STALLED`、链类 kind 已有各自的回归，不重复进表。
 

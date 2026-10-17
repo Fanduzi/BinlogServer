@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task id, data dir, KeepLocalSegments, epoch, catalog file_path rows, ClassifySegment when state is empty, and an optional stored checkpoint
-// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory under this worker's data_dir, a readable epoch-0 bare OPEN file on this worker, a magic-only or header-only open file resumed from the saved checkpoint, or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
+// output: the file, pos, and gtid_set the next Start continues from, including a takeover segment directory under this worker's data_dir (ownership compares absolute, symlink-resolved paths, so a relative data_dir owns its own segments), a readable epoch-0 bare OPEN file on this worker, a magic-only or header-only open file resumed from the saved checkpoint, or the name of a segment this worker cannot read; a position-4 rewind omits gtid_set
 // pos: resume identity shared by the replication runner and GET /api/tasks/{id}/checkpoint
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -311,8 +311,10 @@ func catalogOpen(row BinlogFile) bool {
 }
 
 // pathUnderDataDir reports whether path is this worker's data_dir or a path
-// inside it. Clean both sides; EvalSymlinks when the path exists so a shared
-// mount reached by one symlink still counts. A readable path on the same host
+// inside it. Both sides are made absolute (a relative data_dir is relative to
+// the process working directory) and symlink-resolved when they exist, so a
+// relative data_dir owns segments the catalog records by absolute path (and
+// the reverse), and a shared mount reached by one symlink still counts. A readable path on the same host
 // that is not under data_dir is foreign (#421 sc1).
 func pathUnderDataDir(path, dataDir string) bool {
 	path = strings.TrimSpace(path)
@@ -320,21 +322,38 @@ func pathUnderDataDir(path, dataDir string) bool {
 	if path == "" || dataDir == "" {
 		return false
 	}
-	root := filepath.Clean(dataDir)
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
+	root, ok := resolvedAbs(dataDir)
+	if !ok {
+		return false
 	}
-	target := filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
-		target = resolved
-	} else if parent, err := filepath.EvalSymlinks(filepath.Dir(target)); err == nil {
-		target = filepath.Join(parent, filepath.Base(target))
+	target, ok := resolvedAbs(path)
+	if !ok {
+		return false
 	}
 	rel, err := filepath.Rel(root, target)
 	if err != nil {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// resolvedAbs is path made absolute (against the process working directory,
+// which is what a relative data_dir is opened against) with symlinks
+// resolved; a path that does not exist yet resolves through its parent.
+// Ownership then compares directories, not spellings: data_dir "data" and a
+// catalog path "/srv/bs/data/1/x" name the same place (#424).
+func resolvedAbs(path string) (string, bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, true
+	}
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		return filepath.Join(parent, filepath.Base(abs)), true
+	}
+	return abs, true
 }
 
 // catalogPathInDir names a catalog file_path under dir for SEGMENT_NOT_ON_WORKER.

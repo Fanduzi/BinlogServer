@@ -17,6 +17,7 @@ Maintenance rules:
 ### Fixed
 
 - #421 / #424（P1）：集群节点各用独立 `data_dir` 时，接管节点能读到旧 owner 的绝对路径，就把分段续写到别人的目录里，自己的 `data_dir` 什么都不写，也不开 finding，`/api/health` 仍是 ok。现在接管只认本节点 `data_dir` 下的分段，不在其下的报 `SEGMENT_NOT_ON_WORKER`（任务 FAILED，打开 CRITICAL `TASK_FAILED`）。
+- `data_dir` 配成相对路径时，接管把本节点自己的分段（目录记录的是绝对路径）误判为不在本节点，任务 FAILED（`SEGMENT_NOT_ON_WORKER`）。归属判断现在两边都解析成绝对路径并解析符号链接后再比较。
 - 任务行 `spec_revision` 为 0 时 FAILED 不会打开 `TASK_FAILED`（`FailedCurrent` 要求 `failed_spec_revision > 0`）；现在按 `failed_spec_revision == spec_revision` 判断。
 
 ### Added
