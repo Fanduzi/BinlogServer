@@ -1119,6 +1119,9 @@ Adrian 指出 #421 这类 bug 测试本该拦住。缺口是：每条失败路�
 | lease-expired-stopped | 集群 | lease 释放后 fail-safe 写成 `STOPPED / desired RUN`，没人重启 | `TASK_NO_PROGRESS`（代评） |
 | operator-stop（对照） | 单机 / 集群 | 运维 Stop | 无 finding，health ok，行是 `STOPPED / desired STOP` |
 | relative-data-dir-own-segments（对照） | 单机 / 集群 | `data_dir` 配成相对路径 `data`，接管时 catalog 记录的是本节点分段的绝对路径，run 先走 `ResolveTakeover` | 不报 `SEGMENT_NOT_ON_WORKER`，无 CRITICAL，health ok，行保持 `RUNNING` |
+| dead-worker-control-plane-only | 集群 | 唯一 worker 被 kill -9，只剩 control-plane 节点（无 worker_id）；任务行停在 `RUNNING / 死 owner / epoch`，lease 过期（§24.13） | `TASK_NO_PROGRESS`（control-plane 代评，详情“no worker is running … (lease expired)”） |
+| meta-read-only | 集群 | meta 只读期间：所有节点 health degraded（`FINDINGS_PERSIST_FAILED`），任务不被静默写成 `STOPPED / desired STOP`；恢复后任务重新 `RUNNING`、health 回到 ok（§24.14，#425） | 恢复后无 open CRITICAL，行 `RUNNING` |
+| retrying-owner-no-run | 单机 / 集群 | owner 持有 lease 但每次启动都在 leftover dump KILL 处失败、进 RETRY_BACKOFF，从不开 run（§24.15） | `TASK_NO_PROGRESS`（在 claim + no_progress_after_sec + 一个 sweep 内） |
 
 源端连不上时任务停在 `RETRY_BACKOFF`，由 `SOURCE_UNREACHABLE`（CRITICAL）报；它和 `DUMP_STALLED`、链类 kind 已有各自的回归，不重复进表。
 

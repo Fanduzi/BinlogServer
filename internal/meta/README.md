@@ -20,6 +20,7 @@
 ## Exports
 - Task/Checkpoint/Event/File（含 OPEN/SEALED）/Lease/Run/Worker metadata 存储接口（含 `GetTask`、`ListTasksPage`、`ListStartingUnownedTasks`、`CountTaskStates`、`CountTasksBySource`、`ListRunningTaskRefs`）。
 - `ListTasksWithExpiredLease`：cluster worker 查询，返回 `lease_expire_at <= NOW(6)` 的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF，以及同样过期的 STOPPING。STOPPING 由 worker 收成 STOPPED，不接管执行。
+- `ListTaskIDsWithExpiredOwnerLease`（#424 r3，设计 §24.13）：健康评估器代评用，只返回 id：owner 非空、epoch > 0、desired RUN、状态不是 FAILED/STOPPED/CREATED、`lease_expire_at <= NOW(6)` 的任务。实现 `tasks.DeadOwnerLister`。
 - `NewMySQLTaskStoreWithSchemaTimeout(dsn, timeout, encryptionKey)`：可选 AES-256 key，用于 source 密码加解密。
 - 启动期 schema 版本与结构校验（支持 schema 校验超时配置）。
 
