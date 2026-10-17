@@ -1,5 +1,5 @@
 // Package tasks provides module-level functionality for tasks.
-// input: one row per path that leaves a task FAILED, STOPPED with desired RUN, or held without progress, in cluster (two Schedulers sharing a task table, MemoryLease and a lease-fenced health store; the _health holder proxies unowned tasks) and standalone (MemoryLease, worker "standalone"); a deliberate operator Stop and a healthy advancing run as controls
+// input: one row per path that leaves a task FAILED, STOPPED with desired RUN, or held without progress, in cluster (two Schedulers sharing a task table, MemoryLease and a lease-fenced health store; the _health holder proxies unowned tasks) and standalone (MemoryLease, worker "standalone"); a deliberate operator Stop, a healthy advancing run, and a relative data_dir taking over its own segment recorded at an absolute path as controls
 // output: proof that every failure row opens its CRITICAL finding (TASK_FAILED or TASK_NO_PROGRESS), that Scheduler.HealthSummary (GET /api/health) is degraded and names it on every node, and that the stored state and last_error survive another round (the other node's remote-stop poll, the control loop, a second sweep); the controls open nothing CRITICAL and stay ok
 // pos: ADR 0009 P2-6d failure-path matrix (docs/design/0009-phase2-health-evaluator.md §24.10); runs in the per-PR go test. RULE: a new code path that can leave a task FAILED, STOPPED or stalled gets a row here.
 // note: if this file changes, update this header and module README.md.
@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/health"
 )
 
@@ -53,12 +54,20 @@ type matrixRunner struct {
 	fail error
 	// report, when set, is called every 10ms while the run is open.
 	report func(task Task, n uint32)
+	// resolve, when set, runs first, as the replication runner's takeover
+	// resolution does; its error ends the run.
+	resolve func(task Task) error
 }
 
 func (r *matrixRunner) Run(ctx context.Context, task Task) error {
 	select {
 	case r.started <- struct{}{}:
 	default:
+	}
+	if r.resolve != nil {
+		if err := r.resolve(task); err != nil {
+			return err
+		}
 	}
 	if r.fail != nil {
 		return r.fail
@@ -96,10 +105,21 @@ type matrixEnv struct {
 
 const matrixNoProgressAfter = 300 * time.Millisecond
 
-func newMatrixEnv(t *testing.T, cluster bool, runner Runner) *matrixEnv {
+func newMatrixEnv(t *testing.T, cluster bool, runner Runner, relDataDir bool) *matrixEnv {
 	t.Helper()
 	leases := NewMemoryLease()
-	env := &matrixEnv{cluster: cluster, leases: leases, hs: newLeaseHealthStore(leases), dataDir: t.TempDir(),
+	dataDir := t.TempDir()
+	if relDataDir {
+		// data_dir configured as a relative path ("data"), resolved
+		// against the process working directory.
+		base := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(base, "data"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(base)
+		dataDir = "data"
+	}
+	env := &matrixEnv{cluster: cluster, leases: leases, hs: newLeaseHealthStore(leases), dataDir: dataDir,
 		table: &sharedTaskTable{fencedMemoryStore: &fencedMemoryStore{lockedFakeStore: &lockedFakeStore{fakeStore: newFakeStore()}, leases: leases}}}
 	names := []string{"standalone"}
 	if cluster {
@@ -238,6 +258,8 @@ type matrixRow struct {
 	setup    func(t *testing.T, env *matrixEnv, r *matrixRunner) string // returns the task id
 	runner   func(env *matrixEnv) *matrixRunner
 	noRunner bool
+	// relDataDir configures data_dir as a relative path.
+	relDataDir bool
 }
 
 func TestFailurePathMatrix(t *testing.T) {
@@ -344,6 +366,39 @@ func TestFailurePathMatrix(t *testing.T) {
 				}
 				return startRunningTask(t, env, r, task)
 			}},
+		// Relative data_dir owning its own segments: a takeover whose catalog
+		// records the segment's absolute path is this worker's own segment,
+		// not SEGMENT_NOT_ON_WORKER, and the task stays healthy.
+		{name: "relative-data-dir-own-segments", cluster: true, single: true, state: StateRunning, runner: blocking(true), relDataDir: true,
+			setup: func(t *testing.T, env *matrixEnv, r *matrixRunner) string {
+				task := env.newTask(t)
+				dir := filepath.Join(env.dataDir, task.ID)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				local := filepath.Join(dir, "mysql-bin.000001.open.e1")
+				if err := os.WriteFile(local, []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				abs, err := filepath.Abs(local)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.resolve = func(task Task) error {
+					took := task
+					took.Epoch = 2
+					cp := binlog.Checkpoint{File: "mysql-bin.000001", Pos: 154}
+					d := ResolveTakeover(env.dataDir, took, cp, true, []BinlogFile{{
+						TaskID: task.ID, FileName: "mysql-bin.000001", FilePath: abs,
+						Epoch: 1, State: "OPEN", StartPos: 154, EndPos: 154, UploadState: "LOCAL_ONLY",
+					}})
+					if d.Missing != "" {
+						return NewPermanentError(CodeSegmentNotOnWorker, "segment "+d.Missing+" is not on this worker")
+					}
+					return nil
+				}
+				return startRunningTask(t, env, r, task)
+			}},
 	}
 	for _, row := range rows {
 		for _, cluster := range []bool{true, false} {
@@ -370,7 +425,7 @@ func TestFailurePathMatrix(t *testing.T) {
 					r = &matrixRunner{started: make(chan struct{}, 8)}
 					runner = r
 				}
-				env := newMatrixEnv(t, cluster, runner)
+				env := newMatrixEnv(t, cluster, runner, row.relDataDir)
 				id := row.setup(t, env, r)
 				defer env.cleanup(id)
 				before, err := env.table.GetTask(context.Background(), id)

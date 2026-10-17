@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local open segments and stored checkpoints
-// output: proof that NextResumePosition matches the position Start continues from, that a magic-only or header-only open file on this worker is resumed from the saved checkpoint instead of being reported missing, and that a readable catalog path outside this worker's data_dir is Missing (#421 sc1) while a path under data_dir continues
+// output: proof that NextResumePosition matches the position Start continues from, that a magic-only or header-only open file on this worker is resumed from the saved checkpoint instead of being reported missing, and that a readable catalog path outside this worker's data_dir is Missing (#421 sc1) while a path under data_dir continues, including when data_dir is relative and the catalog path absolute (or the reverse)
 // pos: regression coverage for the operator-visible resume identity
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -254,5 +254,66 @@ func TestResolveTakeover_UploadedForeignLocalMaterializes(t *testing.T) {
 	decision = ResolveTakeover(workerB, task, cp, true, []BinlogFile{row})
 	if decision.Missing != "" || !decision.Apply || decision.Dir != localDir || decision.Covering != nil {
 		t.Fatalf("local under data_dir should Apply+Dir: %+v", decision)
+	}
+}
+
+// TestPathUnderDataDir_RelativeDataDir: a relative data_dir and an absolute
+// catalog path (or the reverse) naming the same directory are this worker's
+// own; ownership compares resolved absolute paths, not spellings.
+func TestPathUnderDataDir_RelativeDataDir(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "data", "1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(base)
+	absBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownAbs := filepath.Join(absBase, "data", "1", "mysql-bin.000001.open.e1")
+	foreign := t.TempDir()
+	cases := []struct {
+		path, dataDir string
+		want          bool
+	}{
+		{ownAbs, "data", true},
+		{filepath.Join(absBase, "data", "1"), "./data", true},
+		{filepath.Join("data", "1", "mysql-bin.000001"), filepath.Join(absBase, "data"), true},
+		{filepath.Join("data", "1"), "data", true},
+		{filepath.Join(foreign, "1", "mysql-bin.000001"), "data", false},
+		{filepath.Join(absBase, "other", "1"), "data", false},
+		{filepath.Join("..", "data", "1"), "data", false},
+	}
+	for _, c := range cases {
+		if got := pathUnderDataDir(c.path, c.dataDir); got != c.want {
+			t.Errorf("pathUnderDataDir(%q, %q) = %v, want %v", c.path, c.dataDir, got, c.want)
+		}
+	}
+}
+
+// TestResolveTakeover_RelativeDataDirOwnSegment: with data_dir "data" and a
+// catalog row holding the absolute path of the segment under it, the
+// takeover continues this worker's own segment instead of reporting it
+// SEGMENT_NOT_ON_WORKER.
+func TestResolveTakeover_RelativeDataDirOwnSegment(t *testing.T) {
+	base := t.TempDir()
+	const taskID = "1"
+	localDir := filepath.Join(base, "data", taskID)
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(base)
+	localPath := filepath.Join(localDir, "mysql-bin.000003.open.e1")
+	if err := os.WriteFile(localPath, []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cp := binlog.Checkpoint{File: "mysql-bin.000003", Pos: 154}
+	files := []BinlogFile{{
+		TaskID: taskID, FileName: "mysql-bin.000003", FilePath: localPath,
+		Epoch: 1, State: "OPEN", StartPos: 154, EndPos: 154, UploadState: "LOCAL_ONLY",
+	}}
+	decision := ResolveTakeover("data", Task{ID: taskID, Epoch: 2, OwnerWorkerID: "worker-b"}, cp, true, files)
+	if decision.Missing != "" || !decision.Apply || decision.Dir != localDir || decision.Checkpoint != cp {
+		t.Fatalf("relative data_dir, own segment: %+v", decision)
 	}
 }
