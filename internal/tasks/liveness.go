@@ -269,6 +269,10 @@ func (e *Evaluator) markLivenessCrossings() {
 	if stalledAfter <= 0 {
 		stalledAfter = health.DefaultDumpStalledAfter
 	}
+	noProgressAfter := e.cfg.NoProgressAfter
+	if noProgressAfter <= 0 {
+		noProgressAfter = health.DefaultNoProgressAfter
+	}
 	for _, t := range e.responsible() {
 		snap, ok := e.s.LivenessSnapshot(t.ID)
 		if !ok {
@@ -282,6 +286,9 @@ func (e *Evaluator) markLivenessCrossings() {
 			ua = health.DefaultUnreachableAfter
 		}
 		ph := livenessPhase(snap, now, stalledAfter, ua)
+		if idle, ok := e.s.runProgressIdle(t.ID, now); ok && idle >= noProgressAfter {
+			ph += "+no-progress" // TASK_NO_PROGRESS opens within one tick (§24.9)
+		}
 		e.mu.Lock()
 		if e.phase == nil {
 			e.phase = map[string]string{}

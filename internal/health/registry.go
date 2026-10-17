@@ -1,7 +1,7 @@
 // Package health provides module-level functionality for health.
 // input: assurance violation kinds
 // output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
-// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385); since P2-5.1 (§20) SEGMENT_DAMAGED, CHAIN_INDEX_GAP, LEGACY_FAILBACK and SEGMENT_MISSING (chain.local only) are Managed with Confirm, and I2_SWITCH_UNRECORDED, I6_MISSING_ROW, I6_MISSING_OBJECT and I6_OBJECT_SIZE_MISMATCH are not derived; since P2-5.3 (§22) GTID_HOLE (Waivable) and CHECKPOINT_AHEAD are Managed without Confirm
+// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385); since P2-5.1 (§20) SEGMENT_DAMAGED, CHAIN_INDEX_GAP, LEGACY_FAILBACK and SEGMENT_MISSING (chain.local only) are Managed with Confirm, and I2_SWITCH_UNRECORDED, I6_MISSING_ROW, I6_MISSING_OBJECT and I6_OBJECT_SIZE_MISMATCH are not derived; since P2-5.3 (§22) GTID_HOLE (Waivable) and CHECKPOINT_AHEAD are Managed without Confirm; since P2-6d (§24.9) TASK_NO_PROGRESS (CRITICAL, task.state) is Managed
 // note: if this file changes, update this header and module README.md.
 package health
 
@@ -159,6 +159,10 @@ var p25Managed = map[Kind]bool{SegmentDamaged: true, ChainIndexGap: true, Legacy
 // without Confirm (facts come from one Check / one checkpoint read).
 var p253Managed = map[Kind]bool{GTIDHole: true, CheckpointAhead: true}
 
+// p26dManaged is TASK_NO_PROGRESS (design §24.9): derived from task.state
+// only, no legacy writer ever existed.
+var p26dManaged = map[Kind]bool{TaskNoProgress: true}
+
 // ManagedKinds is every kind the evaluator owns in this release.
 func ManagedKinds() map[Kind]bool {
 	out := map[Kind]bool{}
@@ -172,6 +176,9 @@ func ManagedKinds() map[Kind]bool {
 		out[k] = true
 	}
 	for k := range p253Managed {
+		out[k] = true
+	}
+	for k := range p26dManaged {
 		out[k] = true
 	}
 	return out
@@ -223,6 +230,9 @@ func DefaultRegistry() Registry {
 			Clear: ClearRule{Invariant: "task", Text: "the task leaves FAILED for its current ask (restarted, or stopped); a new failure class closes the old subject and opens the new one"}},
 		{Kind: TaskUnadopted, Severity: Critical, Scopes: []Scope{ScopeTaskState}, Version: 1, Derive: taskUnadoptedDerive,
 			Clear: ClearRule{Invariant: "task", Text: "the task is adopted (a task record drives it again), or the directory no longer holds segments under data_dir"}},
+		{Kind: TaskNoProgress, Severity: Critical, Scopes: []Scope{ScopeTaskState}, Version: 1, Derive: noProgressDerive,
+			Clear: ClearRule{Invariant: "lease", Holds: noProgressCleared,
+				Text: "the run advances under this worker's data_dir or is confirmed caught up with the source, or the task is stopped, FAILED (TASK_FAILED takes over) or owned elsewhere"}},
 		{Kind: SourceUnreachable, Severity: Critical, Scopes: []Scope{ScopeTaskState, ScopeSignals}, Version: 2, Derive: sourceUnreachableDerive,
 			Clear: ClearRule{Invariant: "S12", Holds: sourceUnreachableCleared,
 				Text: "a byte is read from the source (dump or probe) after the latest failed attempt, or the task is stopped, FAILED (TASK_FAILED takes over) or owned elsewhere"}},
@@ -235,7 +245,7 @@ func DefaultRegistry() Registry {
 	specs = append(specs, gh)
 	r := Registry{}
 	for _, s := range specs {
-		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind] || p25Managed[s.Kind] || p253Managed[s.Kind]
+		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind] || p25Managed[s.Kind] || p253Managed[s.Kind] || p26dManaged[s.Kind]
 		s.Confirm = p25Managed[s.Kind]
 		r[s.Kind] = s
 	}

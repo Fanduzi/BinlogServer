@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -146,6 +146,11 @@ type HealthConfig struct {
 	// UnreachableAfterTaskSec overrides UnreachableAfterSec per task id
 	// (health.unreachable_after_task_sec: {"<task id>": seconds}).
 	UnreachableAfterTaskSec map[string]int
+	// NoProgressAfterSec: TASK_NO_PROGRESS (CRITICAL) opens once a task
+	// with desired RUN has a local run that has not advanced under data_dir
+	// (nor been confirmed caught up with the source), or no worker runs it,
+	// for this long (P2-6d, design 0009 §24.9, default 120; 0 = default).
+	NoProgressAfterSec int
 	// SignalStaleAfterSec: an open signal row with no failure seen by this
 	// process for this long is shown as INFO (P2-4, default 86400).
 	SignalStaleAfterSec int
@@ -258,6 +263,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("health.sweep_interval_sec", 60)
 	v.SetDefault("health.rehash_bytes_per_sec", 4<<20)
 	v.SetDefault("health.unreachable_after_sec", 90)
+	v.SetDefault("health.no_progress_after_sec", 120)
 	v.SetDefault("health.signal_stale_after_sec", 86400)
 	v.SetDefault("health.upload_late_critical_after_sec", 86400)
 	v.SetDefault("health.object_list_interval_sec", 300)
@@ -416,6 +422,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			RehashBytesPerSec:              int64(getInt(v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
 			UnreachableAfterSec:            getInt(v, "health.unreachable_after_sec", "health_unreachable_after_sec"),
 			UnreachableAfterTaskSec:        healthTaskOverrides(v.GetStringMap("health.unreachable_after_task_sec")),
+			NoProgressAfterSec:             getInt(v, "health.no_progress_after_sec", "health_no_progress_after_sec"),
 			SignalStaleAfterSec:            getInt(v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
 			UploadLateCriticalAfterSec:     getInt(v, "health.upload_late_critical_after_sec", "health_upload_late_critical_after_sec"),
 			UploadLateCriticalAfterTaskSec: healthTaskOverrides(v.GetStringMap("health.upload_late_critical_after_task_sec")),
@@ -694,6 +701,9 @@ func validateHealthConfig(h HealthConfig) error {
 	}
 	if h.UnreachableAfterSec < 0 || h.SignalStaleAfterSec < 0 {
 		return fmt.Errorf("health.unreachable_after_sec and health.signal_stale_after_sec must not be negative")
+	}
+	if h.NoProgressAfterSec < 0 {
+		return fmt.Errorf("health.no_progress_after_sec must not be negative, got %d", h.NoProgressAfterSec)
 	}
 	for id, sec := range h.UnreachableAfterTaskSec {
 		if sec <= 0 {

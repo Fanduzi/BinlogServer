@@ -54,3 +54,4 @@
 - 封存（`sealFile` 与磁盘上无目录行的封存分段补登）经 `withSealFacts` 在目录行上带首尾事件时间和 SHA-256（ADR 0009 P1-4）；读不到文件只记日志，不影响封存。
 
 - MariaDB 11.4+ 行事件 LogPos=0（#359）：`buildSyncerConfig` 只加 `BINLOG_SEND_ANNOTATE_ROWS_EVENT`，不用 go-mysql 的 `FillZeroLogPos`（它也会给文件中间起点的 FDE 填 start+252，导致 STREAM_REGRESSION）。`handleEvent` 用 `filledEndPos`（我们自己的游标 + 事件大小）给数据事件补位置，FDE/Rotate/心跳/GTID list/checkpoint 等头部和控制事件、ARTIFICIAL 事件和 MySQL 都不补；`stampLogPosInRaw` 把它写进落盘字节并重算 CRC。`mariadb11_dump_test.go` 覆盖 10.11、11.4 的 pos 4、LATEST、文件中间 FILE_POS、Stop/Start。
+- P2-6d / #424：`run_events.go` 的 `onHeartbeat` 处理心跳（源空闲：写出批量窗口里滞留的 checkpoint、报告进度），progress reporter 实现 `SourceCaughtUpReporter` 时调用 `ReportSourceCaughtUp`，让 `TASK_NO_PROGRESS` 把空闲源当作已追平而不误报。`p26d_heartbeat_caught_up_test.go` 覆盖。

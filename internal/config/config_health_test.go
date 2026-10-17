@@ -67,3 +67,29 @@ func TestLoadConfig_HealthSignalKeys(t *testing.T) {
 		}
 	}
 }
+
+// P2-6d: health.no_progress_after_sec (default 120, not negative) feeds
+// TASK_NO_PROGRESS (design 0009 §24.9).
+func TestLoadConfig_HealthNoProgressAfter(t *testing.T) {
+	setRequiredAuthEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.NoProgressAfterSec != 120 {
+		t.Fatalf("default %d", cfg.Health.NoProgressAfterSec)
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("health:\n  no_progress_after_sec: 300\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = LoadConfig(path); err != nil || cfg.Health.NoProgressAfterSec != 300 {
+		t.Fatalf("override %v %+v", err, cfg)
+	}
+	if err := os.WriteFile(path, []byte("health:\n  no_progress_after_sec: -1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("negative health.no_progress_after_sec accepted")
+	}
+}

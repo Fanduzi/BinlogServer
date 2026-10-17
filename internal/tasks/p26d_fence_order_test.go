@@ -186,6 +186,7 @@ func TestReverseFenceOrder_OldOwnerActsBeforeFailed(t *testing.T) {
 			bRunner := &handoffRunner{started: make(chan struct{}, 4), refuse: make(chan struct{})}
 			b := NewScheduler(
 				WithStore(&nodeStore{sharedTaskTable: table, node: "worker-b"}),
+				WithFindingStore(hs),
 				WithClusterLeaseManager(bLease),
 				WithClusterWorkerID("worker-b"),
 				WithClusterLease(300*time.Millisecond, 40*time.Millisecond, time.Minute),
@@ -217,6 +218,7 @@ func TestReverseFenceOrder_OldOwnerActsBeforeFailed(t *testing.T) {
 			aRunner := &failingRunner{started: make(chan struct{}, 4), fail: make(chan struct{})}
 			a := NewScheduler(
 				WithStore(&nodeStore{sharedTaskTable: table, node: "worker-a"}),
+				WithFindingStore(hs),
 				WithClusterLeaseManager(leases),
 				WithClusterWorkerID("worker-a"),
 				WithClusterLease(time.Minute, time.Hour, time.Minute),

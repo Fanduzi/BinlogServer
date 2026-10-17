@@ -18,12 +18,14 @@ type caughtUpReporter struct {
 	caughtUp []string
 }
 
-func (c *caughtUpReporter) ReportSourceCaughtUp(taskID string) { c.caughtUp = append(c.caughtUp, taskID) }
+func (c *caughtUpReporter) ReportSourceCaughtUp(taskID string) {
+	c.caughtUp = append(c.caughtUp, taskID)
+}
 
 func TestHeartbeatReportsSourceCaughtUp(t *testing.T) {
 	rep := &caughtUpReporter{}
 	r := NewMySQLRunner(t.TempDir(), WithProgressReporter(rep))
-	l := &runLoop{r: r, ctx: context.Background(), task: tasks.Task{ID: "7"}, seg: &openSegment{name: "mysql-bin.000004", pos: 1200}}
+	l := &runLoop{r: r, ctx: context.Background(), task: tasks.Task{ID: "7"}, runStart: &runStart{}, seg: &openSegment{name: "mysql-bin.000004", pos: 1200}}
 	if err := l.onHeartbeat(time.Time{}); err != nil {
 		t.Fatalf("onHeartbeat: %v", err)
 	}

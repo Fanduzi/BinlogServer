@@ -348,6 +348,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	}
 	s.cancels[id] = cancel
 	s.runs[id] = done
+	s.beginRunProgressLocked(id)
 	if s.runSpec == nil {
 		s.runSpec = make(map[string]int64)
 	}
@@ -1141,6 +1142,7 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		if currentDone, ok := s.runs[id]; ok && currentDone == done {
 			delete(s.runs, id)
 			delete(s.runSpec, id)
+			delete(s.progress, id)
 		}
 		// done 在放下锁之前关闭。下一次 StartSync 要等这个 Close 完成。
 		close(done)

@@ -105,6 +105,9 @@ type EvaluatorConfig struct {
 	StalledAfter time.Duration
 	// DumpStalledAfter is the DUMP_STALLED silence threshold (default 45s).
 	DumpStalledAfter time.Duration
+	// NoProgressAfter is health.no_progress_after_sec, the TASK_NO_PROGRESS
+	// threshold (default 120s, design §24.9).
+	NoProgressAfter time.Duration
 	// LivenessTick is how often the source liveness clocks are checked for
 	// a threshold crossing (default 5s); a crossing marks the task dirty.
 	LivenessTick time.Duration
@@ -612,7 +615,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	e.mu.Unlock()
 	e.evaluations.Add(1)
 	now := e.cfg.Now()
-	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}}
+	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}, NoProgressAfter: e.cfg.NoProgressAfter}
 	switch {
 	case gone:
 		facts.Task = &health.TaskFacts{State: string(StateStopped), Desired: TaskDesiredStop, RunHere: true}

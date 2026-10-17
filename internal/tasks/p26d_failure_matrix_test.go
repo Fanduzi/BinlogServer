@@ -18,6 +18,34 @@ import (
 	"binlog_server/internal/health"
 )
 
+// leaseHealthStore is also the meta finding store, as in production: the
+// meta store serves both health writes and GET /api/findings, so
+// HealthSummary reads the evaluator's rows from it.
+func (s *leaseHealthStore) UpsertFinding(context.Context, Finding) error { return nil }
+
+func (s *leaseHealthStore) ListFindings(ctx context.Context, taskID string, _ bool, limit int) ([]Finding, error) {
+	all, err := s.ListOpenFindings(ctx, limit)
+	var out []Finding
+	for _, f := range all {
+		if f.TaskID == taskID {
+			out = append(out, f)
+		}
+	}
+	return out, err
+}
+
+func (s *leaseHealthStore) ListOpenFindings(_ context.Context, _ int) ([]Finding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Finding
+	for taskID, m := range s.open {
+		for _, f := range m {
+			out = append(out, Finding{TaskID: taskID, Kind: FindingKind(f.Kind), Subject: f.Subject, Severity: FindingSeverity(f.Severity), Detail: f.Detail, Count: 1})
+		}
+	}
+	return out, nil
+}
+
 // matrixRunner is the runner of the node that drives the task.
 type matrixRunner struct {
 	started chan struct{}
@@ -80,6 +108,7 @@ func newMatrixEnv(t *testing.T, cluster bool, runner Runner) *matrixEnv {
 	for i, name := range names {
 		opts := []Option{
 			WithStore(&nodeStore{sharedTaskTable: env.table, node: name}),
+			WithFindingStore(env.hs),
 			WithClusterLeaseManager(leases),
 			WithClusterWorkerID(name),
 			WithDataDir(env.dataDir),
@@ -138,9 +167,17 @@ func (env *matrixEnv) writeRow(t *testing.T, row Task) {
 // polls remote stops and converges, then every node sweeps (twice).
 func (env *matrixEnv) again(t *testing.T, id string) {
 	t.Helper()
+	row, _ := env.table.GetTask(context.Background(), id)
 	for _, n := range env.nodes[1:] {
 		n.s.applyRemoteStops()
-		_, _ = n.s.convergeTask(id)
+	}
+	if row.State == StateFailed {
+		// The control loop of every node must leave FAILED alone. (On a
+		// STOPPED desired-RUN row a worker's control loop restarting the
+		// task is the recovery, not a rewrite, so it is not run there.)
+		for _, n := range env.nodes {
+			_, _ = n.s.convergeTask(id)
+		}
 	}
 	env.reload(id)
 	env.sweep(t)
@@ -221,14 +258,16 @@ func TestFailurePathMatrix(t *testing.T) {
 		env.reload(task.ID)
 		return task.ID
 	}
-	startRunning := func(t *testing.T, env *matrixEnv, r *matrixRunner) string {
-		task := env.newTask(t)
+	startRunningTask := func(t *testing.T, env *matrixEnv, r *matrixRunner, task Task) string {
 		progressTarget.Store(env.nodes[0].s)
 		startAndWait(t, env.nodes[0].s, r, task.ID)
 		waitStoredState(t, env.table, task.ID, StateRunning)
 		env.reload(task.ID)
 		time.Sleep(matrixNoProgressAfter + 200*time.Millisecond)
 		return task.ID
+	}
+	startRunning := func(t *testing.T, env *matrixEnv, r *matrixRunner) string {
+		return startRunningTask(t, env, r, env.newTask(t))
 	}
 	blocking := func(report bool) func(*matrixEnv) *matrixRunner {
 		return func(env *matrixEnv) *matrixRunner {
@@ -303,7 +342,7 @@ func TestFailurePathMatrix(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "mysql-bin.000001.open.e1"), []byte{0xfe, 'b', 'i', 'n'}, 0o644); err != nil {
 					t.Fatal(err)
 				}
-				return startRunning(t, env, r)
+				return startRunningTask(t, env, r, task)
 			}},
 	}
 	for _, row := range rows {

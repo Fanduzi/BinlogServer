@@ -51,6 +51,9 @@
 - `fenced_persist.go`: P2-6a。`FencedTaskStore` / `LeaseView`；`persistTaskFencedLocked` 在 store 支持时走 `UpsertTaskFenced`。P2-6c / #421：`CheckTaskRowFence` 是所有 `FencedTaskStore` 共用的任务行栅栏规则（持有中须是写者本人；已释放须释放在写者的 epoch，更大 epoch 拒绝；无 lease 行时按任务行判断）。
 - `evaluator_unowned.go`: P2-6c / #421（设计 §24）。`_health` lease（`HealthLeaseID`，TTL 3×sweep，每次 sweep 续约或认领）选出一个节点，用代写栅栏（最后一次任务 lease epoch，`Proxy`；从未有 lease 行时 `never`）评估任务行无 owner 的任务（FAILED、STOPPED、CREATED、未认领的 STARTING）的 `task.state`；`unownedFacts` 只读任务行，不读本地信号、liveness、链。
 - `p26c_unowned_eval_test.go`: #421：集群里 FAILED 无主任务由 `_health` 持有者打开 CRITICAL `TASK_FAILED`、健康 UNHEALTHY；只有一个节点评估；代评不读本地旧信号；认领中被栅栏拒绝后，释放后的下一轮会写；有主任务不代评。
+- `run_progress.go`: P2-6d / #424（设计 §24.9）。每个打开的 run 的进度账：run 开始时间、最后一次推进（位点前进或 `ReportSourceCaughtUp` 确认追平源）、当前文件与位点，以及当前文件是否在本节点 `data_dir` 下（`segmentInDataDir`）。`runProgressFactsLocked` 给出 `TaskFacts.Progress`，供 `TASK_NO_PROGRESS` 推导；liveness tick 在跨过阈值时标脏。
+- `p26d_fence_order_test.go`: #424：两个真实 Scheduler（真实续约循环与 `ClaimExpiredTasks`）共享一张任务表，在旧 owner 写 FAILED 之前先注入续约发现丢 lease、栅栏拒绝、远端 Stop 三种顺序；断言旧 owner 丢 lease 后不再写任务行、FAILED 不被改写、打开 CRITICAL finding、两个节点的 HealthSummary 都 degraded。
+- `p26d_failure_matrix_test.go`: #424 失败路径矩阵（设计 §24.10）：standalone 与集群两种模式下，每条让任务 FAILED、STOPPED 或停滞的路径（永久错误、分段不在本 worker、未分类错误、RUNNING 无进度、只在 data_dir 外推进、未认领的 STARTING、lease 过期后 STOPPED），断言打开 CRITICAL finding、`HealthSummary` degraded、任务状态没被悄悄改写；另有人工 Stop 与健康 RUNNING 两条对照。跑在普通 `go test` 里。
 - `p26c_failed_preserved_test.go`: #421：旧 owner 醒来读到别的 epoch 写的 FAILED，停止 dump、行保持 FAILED 与 `last_error`；`CheckTaskRowFence` 表驱动；`markLeaseDegradedLocked`、`finishStoredStopLocked` 遇到 FAILED 不写。
 - `p26a_fence_test.go`: #360：lease 已到新 epoch 而任务行仍是旧 owner 时 fail-safe 写被拒；行与 lease 不一致时 TaskFacts 为 nil、健康非 HEALTHY。
 - `p26_handoff_row_test.go`: #420 QA 测试 3（meta 暂停 30s）：B 的 lease 已被 A 在 `task_leases` 上以新 epoch 认领、任务行还没改时，无论是 B 的数据面栅栏先拒绝追加（租约移交），还是 B 的续约先发现丢租，B 都不改任务行，A 的认领不会被当成远端 STOPPED。

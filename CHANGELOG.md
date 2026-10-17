@@ -12,6 +12,17 @@ Maintenance rules:
 
 ## [Unreleased]
 
+新配置项：`health.no_progress_after_sec`（默认 `120`，`0` 为默认值，不可为负）。没有新迁移。
+
+### Fixed
+
+- #421 / #424（P1）：集群节点各用独立 `data_dir` 时，接管节点能读到旧 owner 的绝对路径，就把分段续写到别人的目录里，自己的 `data_dir` 什么都不写，也不开 finding，`/api/health` 仍是 ok。现在接管只认本节点 `data_dir` 下的分段，不在其下的报 `SEGMENT_NOT_ON_WORKER`（任务 FAILED，打开 CRITICAL `TASK_FAILED`）。
+- 任务行 `spec_revision` 为 0 时 FAILED 不会打开 `TASK_FAILED`（`FailedCurrent` 要求 `failed_spec_revision > 0`）；现在按 `failed_spec_revision == spec_revision` 判断。
+
+### Added
+
+- CRITICAL `TASK_NO_PROGRESS`（设计 0009 §24.9）：desired RUN 的任务，本进程的 run 在 `health.no_progress_after_sec` 内没有在自己的 `data_dir` 下推进位点、也没有确认追平源（心跳），或者没有任何 worker 在跑它（任务行停在 STARTING / STOPPED 等），就打开，`/api/health` 变为 degraded。作为“持有任务却不干活”这类问题的兜底，不依赖具体根因。
+
 ## [v0.5.71] - 2026-10-17
 
 发布说明：`docs/releases/v0.5.71.md`。没有新迁移，没有新配置项。

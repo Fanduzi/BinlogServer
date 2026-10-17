@@ -420,6 +420,13 @@ type ProgressReporter interface {
 	ReportReplicationProgress(taskID string, sourceEventAt time.Time, file string, pos uint32, atTip bool)
 }
 
+// SourceCaughtUpReporter is an optional ProgressReporter extension: a
+// heartbeat from the dump means the run is caught up with its source
+// (design 0009 §24.9, TASK_NO_PROGRESS).
+type SourceCaughtUpReporter interface {
+	ReportSourceCaughtUp(taskID string)
+}
+
 // LeaseVerifier 封文件前问租约是否仍在。tasks.LeaseManager 直接满足，不必经 App 转一层。
 type LeaseVerifier interface {
 	Verify(ctx context.Context, taskID, workerID string, epoch int64) (bool, error)

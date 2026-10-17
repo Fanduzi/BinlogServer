@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a task's signal book, task row facts with the source liveness clock, the stored open keys and this pass's probes
-// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED (45s with no byte read, any state) and SOURCE_UNREACHABLE (a failed attempt 90s after the last read) from the one source liveness clock, with a same-pass HANDED_OFF; TASK_FAILED by failure class; TASK_TRANSITION_STALLED; TASK_UNADOPTED for a standalone leftover directory (#385); ClassifyFailure
+// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED (45s with no byte read, any state) and SOURCE_UNREACHABLE (a failed attempt 90s after the last read) from the one source liveness clock, with a same-pass HANDED_OFF; TASK_FAILED by failure class; TASK_TRANSITION_STALLED; TASK_NO_PROGRESS (§24.9: a desired-RUN task whose local run has not advanced under data_dir, or that no worker runs, for no_progress_after); TASK_UNADOPTED for a standalone leftover directory (#385); ClassifyFailure
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §6); pure
 // note: if this file changes, update this header and module README.md.
 package health
@@ -27,6 +27,8 @@ const (
 	DefaultUnreachableAfter = 90 * time.Second
 	DefaultDumpStalledAfter = 45 * time.Second
 	DefaultStalledAfter     = 60 * time.Second
+	// DefaultNoProgressAfter is health.no_progress_after_sec (§24.9).
+	DefaultNoProgressAfter = 120 * time.Second
 )
 
 // TASK_FAILED subjects: a closed set; anything unrecognised is OTHER.
@@ -238,4 +240,73 @@ func transitionStalledDerive(f *Facts) []Instance {
 		return []Instance{{Detail: "task is in " + t.State + " for " + age.Round(time.Second).String() + " with no dump driving it"}}
 	}
 	return nil
+}
+
+func noProgressAfter(f *Facts) time.Duration {
+	if f.NoProgressAfter > 0 {
+		return f.NoProgressAfter
+	}
+	return DefaultNoProgressAfter
+}
+
+// noProgress (design 0009 §24.9) is the backstop for a task that should be
+// running and is not getting anywhere, whatever the cause: a local run that
+// has not advanced under this worker's data_dir (nor been confirmed caught
+// up with the source) since it started, or a desired-RUN task that no
+// worker runs. It returns how long, and the detail.
+func noProgress(f *Facts) (time.Duration, string, bool) {
+	t := f.Task
+	if !desiresRun(t) || t.State == stateFailed || t.OwnedElsewhere || unreachable(f) {
+		return 0, "", false
+	}
+	after := noProgressAfter(f)
+	threshold := " (no_progress_after " + after.String() + ")"
+	if p := t.Progress; p != nil {
+		since := p.RunSince
+		if p.InDataDir && p.LastAdvance.After(since) {
+			since = p.LastAdvance
+		}
+		if since.IsZero() {
+			return 0, "", false
+		}
+		idle := f.Now.Sub(since)
+		if idle < after {
+			return 0, "", false
+		}
+		d := idle.Round(time.Second).String()
+		switch {
+		case p.File != "" && !p.InDataDir && !p.LastAdvance.IsZero():
+			return idle, "this node runs the task (state " + t.State + ") but for " + d + " nothing it wrote is under this worker's data_dir: " +
+				"the run's current segment " + p.File + " is not under this worker's data_dir" + threshold +
+				"; the backup is not advancing here. Cluster nodes must share data_dir at the same path", true
+		case p.LastAdvance.IsZero():
+			return idle, "this node runs the task (state " + t.State + ") but has written nothing and has not been confirmed at the source tip for " + d + threshold, true
+		default:
+			return idle, "this node runs the task (state " + t.State + ") but it has not advanced under data_dir or been confirmed at the source tip for " + d + threshold, true
+		}
+	}
+	if t.RunHere || t.StateSince.IsZero() {
+		return 0, "", false // a node with no runner keeps no progress book
+	}
+	idle := f.Now.Sub(t.StateSince)
+	if idle < after {
+		return 0, "", false
+	}
+	owner := t.Owner
+	if owner == "" {
+		owner = "none"
+	}
+	return idle, "desired RUN but no worker is running the task: state " + t.State + ", owner " + owner + ", for " + idle.Round(time.Second).String() + threshold, true
+}
+
+func noProgressDerive(f *Facts) []Instance {
+	if _, detail, ok := noProgress(f); ok {
+		return []Instance{{Detail: detail}}
+	}
+	return nil
+}
+
+func noProgressCleared(f *Facts, key Key) bool {
+	_, _, ok := noProgress(f)
+	return !ok
 }

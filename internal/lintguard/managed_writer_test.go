@@ -12,13 +12,15 @@ import (
 // constant because only the evaluator derives them (no legacy writer ever
 // existed): the chain-derived P2-5.1 kinds (design 0009 §20.1),
 // SEGMENT_EMPTY_LEFTOVER (P2-3), TASK_UNADOPTED (#385, §19), UPLOAD_LATE
-// (P2-5.2, §21.7) and GTID_HOLE / CHECKPOINT_AHEAD (P2-5.3, §22.1).
+// (P2-5.2, §21.7), GTID_HOLE / CHECKPOINT_AHEAD (P2-5.3, §22.1) and
+// TASK_NO_PROGRESS (P2-6d, §24.9).
 // A new Managed kind must be added here or given a constant.
 var managedWithoutConstant = map[health.Kind]bool{
 	health.SegmentDamaged: true, health.ChainIndexGap: true, health.LegacyFailback: true, health.SegmentMissing: true,
 	health.SegmentEmptyLeftover: true, health.TaskUnadopted: true,
 	health.UploadLate: true,
 	health.GTIDHole:   true, health.CheckpointAhead: true,
+	health.TaskNoProgress: true, // P2-6d, §24.9
 }
 
 // managedConstants is every tasks.FindingX constant whose kind the health

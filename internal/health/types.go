@@ -127,6 +127,23 @@ type TaskFacts struct {
 	// none for the task, so DUMP_STALLED and SOURCE_UNREACHABLE are not
 	// derived here).
 	Liveness *Liveness
+	// Progress is the progress book of this process's open run of the task
+	// (nil: no run of this process is open, or this process keeps none).
+	// TASK_NO_PROGRESS is derived from it (§24.9).
+	Progress *Progress
+}
+
+// Progress is what one local run has achieved (design 0009 §24.9).
+// RunSince is when the run was registered; retries inside the run do not
+// move it. LastAdvance is the latest time the run's (file, pos) moved
+// forward or the run was confirmed caught up with the source (an idle
+// at-tip check, or a heartbeat). File is the run's current segment source
+// file; InDataDir reports that a segment for it exists under this worker's
+// {data_dir}/{task_id}. An advance outside data_dir is not progress (#421 sc1).
+type Progress struct {
+	RunSince, LastAdvance time.Time
+	File                  string
+	InDataDir             bool
 }
 
 // Liveness is the one source liveness clock (§18): when a byte (event or
@@ -235,6 +252,9 @@ type Facts struct {
 	StalledAfter time.Duration
 	// DumpStalledAfter is the DUMP_STALLED silence threshold; 0 = 45s.
 	DumpStalledAfter time.Duration
+	// NoProgressAfter is the TASK_NO_PROGRESS threshold
+	// (health.no_progress_after_sec); 0 = 120s (§24.9).
+	NoProgressAfter time.Duration
 }
 
 // Finding is a stored finding row as the evaluator sees it.
@@ -343,6 +363,7 @@ const (
 	SourceUnreachable    Kind = "SOURCE_UNREACHABLE"
 	TaskUnadopted        Kind = "TASK_UNADOPTED"
 	TaskRecordsFailed    Kind = "TASK_RECORDS_FAILED"
+	TaskNoProgress       Kind = "TASK_NO_PROGRESS"
 	SealFactsAbsent      Kind = "SEAL_FACTS_ABSENT"
 	HealthStale          Kind = "HEALTH_STALE"
 	HealthStoreDegraded  Kind = "HEALTH_STORE_DEGRADED"
