@@ -97,6 +97,9 @@ type matrixNode struct {
 	s     *Scheduler
 	e     *Evaluator
 	lease *roLease
+	// unaware: nothing on this node reads the task (a control plane with
+	// no API call for it); reload skips it, only its evaluator may.
+	unaware bool
 }
 
 type matrixEnv struct {
@@ -148,36 +151,47 @@ func newMatrixEnv(t *testing.T, cluster bool, runner Runner, o matrixOpts) *matr
 			names[1] = "cp-1"
 		}
 	}
-	hs := &roHealthStore{leaseHealthStore: env.hs, ro: &env.ro}
 	for i, name := range names {
-		lease := &roLease{freezableLease: &freezableLease{MemoryLease: leases}, ro: &env.ro}
 		workerID := name
 		if o.controlPlane && i == 1 {
 			workerID = "" // app: a control-plane node resolves no worker id
 		}
-		opts := []Option{
-			WithStore(&roNodeStore{nodeStore: &nodeStore{sharedTaskTable: env.table, node: name}, ro: &env.ro}),
-			WithFindingStore(hs),
-			WithClusterLeaseManager(lease),
-			WithClusterWorkerID(workerID),
-			WithDataDir(env.dataDir),
-			WithRetryBackoff(time.Millisecond, time.Millisecond),
-		}
-		if cluster {
-			opts = append(opts, WithClusterLease(time.Minute, time.Hour, time.Minute), WithLeaseClock(NewLeaseClock()))
-		}
-		s := NewScheduler(opts...)
+		var r Runner
 		if i == 0 && runner != nil {
-			s.SetRunner(runner)
+			r = runner
 		}
 		if i == 1 && o.runnerB != nil {
-			s.SetRunner(o.runnerB)
+			r = o.runnerB
 		}
-		e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, Cluster: cluster, NodeID: name, Instance: name + "-i",
-			Sweep: time.Minute, NoProgressAfter: matrixNoProgressAfter, ControlPlaneOnly: workerID == "" && cluster})
-		env.nodes = append(env.nodes, &matrixNode{name: name, s: s, e: e, lease: lease})
+		env.nodes = append(env.nodes, env.newNode(name, workerID, r))
 	}
 	return env
+}
+
+// newNode builds one process on the shared tables. A fresh node knows no
+// task until it reads one: a control-plane node started (or restarted)
+// after the task was created on a worker has none in memory (QA r3 (b)).
+func (env *matrixEnv) newNode(name, workerID string, runner Runner) *matrixNode {
+	hs := &roHealthStore{leaseHealthStore: env.hs, ro: &env.ro}
+	lease := &roLease{freezableLease: &freezableLease{MemoryLease: env.leases}, ro: &env.ro}
+	opts := []Option{
+		WithStore(&roNodeStore{nodeStore: &nodeStore{sharedTaskTable: env.table, node: name}, ro: &env.ro}),
+		WithFindingStore(hs),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID(workerID),
+		WithDataDir(env.dataDir),
+		WithRetryBackoff(time.Millisecond, time.Millisecond),
+	}
+	if env.cluster {
+		opts = append(opts, WithClusterLease(time.Minute, time.Hour, time.Minute), WithLeaseClock(NewLeaseClock()))
+	}
+	s := NewScheduler(opts...)
+	if runner != nil {
+		s.SetRunner(runner)
+	}
+	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, Cluster: env.cluster, NodeID: name, Instance: name + "-i",
+		Sweep: time.Minute, NoProgressAfter: matrixNoProgressAfter, ControlPlaneOnly: workerID == "" && env.cluster})
+	return &matrixNode{name: name, s: s, e: e, lease: lease}
 }
 
 // newTask creates a sourced task on the driving node and loads it everywhere.
@@ -202,7 +216,9 @@ func mustStartSourcedTaskNoStart(t *testing.T, s *Scheduler) Task {
 
 func (env *matrixEnv) reload(id string) {
 	for _, n := range env.nodes {
-		_, _ = n.s.GetTask(id)
+		if !n.unaware {
+			_, _ = n.s.GetTask(id)
+		}
 	}
 }
 
@@ -445,7 +461,12 @@ func TestFailurePathMatrix(t *testing.T) {
 				a.lease.freeze() // the dead process renews nothing
 				t.Cleanup(a.lease.thaw)
 				progressTarget.Store(nil)
-				env.nodes = env.nodes[1:] // and evaluates nothing
+				// The dead process evaluates nothing; the control plane
+				// restarted since (as in QA r3 (b), it never ran the task),
+				// so the task is in no node's memory.
+				cp := env.newNode("cp-2", "", nil)
+				cp.unaware = true
+				env.nodes = []*matrixNode{cp}
 				env.expireLease(id)
 				env.sweep(t) // the control plane sees the expired lease
 				time.Sleep(matrixNoProgressAfter + 200*time.Millisecond)
