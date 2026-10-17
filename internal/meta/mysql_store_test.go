@@ -717,6 +717,32 @@ func TestMySQLTaskStore_ListTasksWithExpiredLease(t *testing.T) {
 	}
 }
 
+// TestMySQLTaskStore_ListTaskIDsWithExpiredOwnerLease (design 0009 §24.13):
+// a row that still names an owner whose lease expired by the meta clock,
+// desired RUN, not FAILED/STOPPED/CREATED (STARTING included).
+func TestMySQLTaskStore_ListTaskIDsWithExpiredOwnerLease(t *testing.T) {
+	for _, want := range []string{"INNER JOIN task_leases", "lease_expire_at <= NOW(6)", "t.owner_worker_id <> ''", "t.epoch > 0", "t.desired_run = 'RUN'", "NOT IN ('FAILED', 'STOPPED', 'CREATED')"} {
+		if !strings.Contains(listTaskIDsWithExpiredOwnerLeaseSQL, want) {
+			t.Fatalf("listTaskIDsWithExpiredOwnerLeaseSQL must contain %q, got %q", want, listTaskIDsWithExpiredOwnerLeaseSQL)
+		}
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	mock.ExpectQuery(regexp.QuoteMeta(listTaskIDsWithExpiredOwnerLeaseSQL)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("3").AddRow("7"))
+	ids, err := store.ListTaskIDsWithExpiredOwnerLease(context.Background())
+	if err != nil || len(ids) != 2 || ids[0] != "3" || ids[1] != "7" {
+		t.Fatalf("ids %v err %v", ids, err)
+	}
+	var _ tasks.DeadOwnerLister = store
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 const testSourcePasswordKey = "01234567890123456789012345678901"
 
 type encryptedSourceJSONArg struct {

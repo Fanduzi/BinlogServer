@@ -3,6 +3,7 @@
 // output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
+// note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -88,8 +89,13 @@ type EvaluatorConfig struct {
 	// Cluster: the fence is the task lease (cluster mode); otherwise the
 	// standalone fence with the persisted node id.
 	Cluster bool
-	// NodeID is the cluster worker id, or the standalone {data_dir}/.node_id.
+	// NodeID is the cluster worker id, or the standalone {data_dir}/.node_id;
+	// a control-plane-only node uses cluster.worker_id or its persisted id
+	// (design §24.13).
 	NodeID string
+	// ControlPlaneOnly: this node runs no tasks (cluster role control-plane).
+	// It never evaluates as a task holder, only through _health (§24.13).
+	ControlPlaneOnly bool
 	// Instance is this process's id (standalone fence).
 	Instance string
 	// RehashCursor, when set, persists the rehasher's cursor (rehash_cursor).
@@ -104,6 +110,9 @@ type EvaluatorConfig struct {
 	StalledAfter time.Duration
 	// DumpStalledAfter is the DUMP_STALLED silence threshold (default 45s).
 	DumpStalledAfter time.Duration
+	// NoProgressAfter is health.no_progress_after_sec, the TASK_NO_PROGRESS
+	// threshold (default 120s, design §24.9).
+	NoProgressAfter time.Duration
 	// LivenessTick is how often the source liveness clocks are checked for
 	// a threshold crossing (default 5s); a crossing marks the task dirty.
 	LivenessTick time.Duration
@@ -176,6 +185,18 @@ type Evaluator struct {
 	// write); the legacy Report path keeps writing the managed kinds.
 	schemaAbsent atomic.Bool
 
+	// healthHeld / healthEpoch: this node holds the _health lease and
+	// evaluates unowned tasks (P2-6c, design §24.2).
+	healthHeld  atomic.Bool
+	healthEpoch atomic.Int64
+	// leaseExpired (§24.13): tasks whose row names an owner whose lease
+	// expired, with the time this node first saw it; refreshed by the
+	// _health holder each sweep. leaseWriteErr: the last _health lease write
+	// error and since when (§24.14: every node shows a meta write failure).
+	leaseExpired    map[string]time.Time
+	leaseWriteErr   error
+	leaseWriteErrAt time.Time
+
 	evaluations, applied, errs, shadowed atomic.Int64
 }
 
@@ -212,7 +233,7 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
 		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
-		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}}
+		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}}
 	if s != nil {
 		s.healthEval.Store(e)
 		e.adoptEarlySignals()
@@ -406,8 +427,10 @@ func (e *Evaluator) finish(id string) {
 // responsible is every task this node evaluates, sorted.
 func (e *Evaluator) responsible() []Task {
 	var out []Task
-	for _, t := range e.s.ListTasks() {
-		if _, ok := e.fenceFor(t); ok {
+	listed := e.s.ListTasks()
+	listed = append(listed, e.proxyCandidates(listed)...)
+	for _, t := range listed {
+		if _, ok := e.authorityFor(t); ok {
 			out = append(out, t)
 		}
 	}
@@ -492,6 +515,8 @@ func (e *Evaluator) clusterHasWork() bool {
 // sweep, otherwise the given reason (design §5.3).
 func (e *Evaluator) markResponsible(r EvalReason) []string {
 	var ids []string
+	e.refreshHealthLease(context.Background())
+	e.refreshExpiredLeases(context.Background())
 	for _, t := range e.responsible() {
 		reason := r
 		fp := e.fingerprint(t.ID)
@@ -559,13 +584,13 @@ func (e *Evaluator) EvaluateNow(ctx context.Context, taskID string) (health.Task
 var errNotResponsible = errors.New("this node does not evaluate the task")
 
 // fenceFor is the write authority for the task (design §8), and whether
-// this node evaluates it. Cluster: only the task lease holder in P2-3
-// (the _health holder and delegation land in P2-6).
+// this node evaluates it as holder. Cluster: only the task lease holder;
+// the _health holder evaluates unowned tasks through authorityFor (P2-6c).
 func (e *Evaluator) fenceFor(t Task) (health.Fence, bool) {
 	if !e.cfg.Cluster {
 		return health.Fence{Mode: health.FenceStandalone, Node: e.cfg.NodeID, Instance: e.cfg.Instance}, true
 	}
-	if t.OwnerWorkerID == "" || t.OwnerWorkerID != e.cfg.NodeID || t.Epoch <= 0 {
+	if e.cfg.ControlPlaneOnly || t.OwnerWorkerID == "" || t.OwnerWorkerID != e.cfg.NodeID || t.Epoch <= 0 {
 		return health.Fence{}, false
 	}
 	return health.Fence{Mode: health.FenceCluster, TaskEpoch: t.Epoch, Node: e.cfg.NodeID, Instance: e.cfg.Instance}, true
@@ -591,12 +616,13 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 			task, gone = Task{ID: id}, true
 		}
 	}
-	fence, ok := e.fenceFor(task)
+	fence, ok := e.authorityFor(task)
 	if !ok {
 		return health.TaskHealth{}, errNotResponsible
 	}
+	proxy := fence.Proxy || fence.Mode == health.FenceNeverLeased
 	e.mu.Lock()
-	if epoch, stopped := e.fenced[id]; stopped && epoch == fence.TaskEpoch {
+	if epoch, stopped := e.fenced[id]; stopped && epoch == fence.TaskEpoch && !proxy {
 		e.mu.Unlock()
 		return health.TaskHealth{}, errNotResponsible
 	}
@@ -604,11 +630,13 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	e.mu.Unlock()
 	e.evaluations.Add(1)
 	now := e.cfg.Now()
-	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}}
+	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}, NoProgressAfter: e.cfg.NoProgressAfter}
 	switch {
 	case gone:
 		facts.Task = &health.TaskFacts{State: string(StateStopped), Desired: TaskDesiredStop, RunHere: true}
 		facts.Complete[health.ScopeTaskState] = true
+	case proxy:
+		unownedFacts(task, facts, e.expiredSince(task.ID)) // P2-6c: task.state only (§24.2)
 	case isCluster:
 		facts.Complete[health.ScopeChainLocal] = true // _cluster has no chain
 	default:
@@ -617,7 +645,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 			facts.Complete[health.ScopeChainLocal] = true
 		}
 	}
-	if !gone {
+	if !gone && !proxy {
 		e.signalFacts(ctx, task, isCluster, facts)
 	}
 	store := e.cfg.Store
@@ -737,9 +765,12 @@ func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) 
 	e.mu.Unlock()
 	for id, u := range all {
 		if id != ClusterFindingTask && e.s != nil {
-			if _, gerr := e.s.GetTask(id); gerr != nil {
+			t, gerr := e.s.GetTask(id)
+			if gerr != nil || !e.mayEvaluate(t) {
 				// The task is gone (or was never created: a refused create
-				// still marks its id dirty); nothing will write its row again.
+				// still marks its id dirty), or this node no longer
+				// evaluates it (another owner, design §24.14): nothing of
+				// ours will write its row again.
 				e.mu.Lock()
 				delete(e.unsaved, id)
 				e.mu.Unlock()
@@ -749,6 +780,18 @@ func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) 
 		ids = append(ids, id)
 		if err == nil || u.since.Before(since) {
 			err, since = u.err, u.since
+		}
+	}
+	e.mu.Lock()
+	lerr, lsince := e.leaseWriteErr, e.leaseWriteErrAt
+	e.mu.Unlock()
+	if lerr != nil {
+		// Every cluster node writes the _health lease each sweep, so a meta
+		// store refusing writes shows on every node, not only on the
+		// owner of a task (design §24.14, #425).
+		ids = append(ids, HealthLeaseID)
+		if err == nil || lsince.Before(since) {
+			err, since = fmt.Errorf("metadata store refused the %s lease write: %w", HealthLeaseID, lerr), lsince
 		}
 	}
 	sort.Strings(ids)
@@ -773,7 +816,11 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 	case errors.Is(err, healthstore.ErrFenced):
 		e.mu.Lock()
 		delete(e.pending, id)
-		e.fenced[id] = fence.TaskEpoch
+		if !fence.Proxy && fence.Mode != health.FenceNeverLeased {
+			// A proxy authority is derived again on every pass (the
+			// lease may be released a moment later), so it is not latched.
+			e.fenced[id] = fence.TaskEpoch
+		}
 		e.mu.Unlock()
 		return err
 	}

@@ -1,6 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
 // output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released; a run that already wrote FAILED is not turned into STOPPING by its own desired STOP row read back by a GET or sync before the run exits. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump, then proves and renews its lease at that epoch before the dump opens (#346)., and a legacy failback directory repaired or refused (RepairLegacyFailback) before the runner starts
+// note P2-6c (#421): a live run whose shared row is FAILED by another epoch is not a remote Stop: the run stops, its lease epoch is marked lost, memory takes the FAILED row and nothing is written
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
 // note: if this file changes, update this header and module README.md.
@@ -226,6 +227,9 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		s.confirmHeldLeaseLocked(id, task.OwnerWorkerID, task.Epoch)
 	}
 
+	// The progress book follows the held epoch, not one run: a start that
+	// never opens its dump (a leftover KILL that fails) still ages (§24.15).
+	s.beginRunProgressLocked(id, task.Epoch, opts.resetBudget)
 	pending := s.leftoverDumpLocked(id, task)
 	killer := s.dumpKiller
 	if pending.ConnectionID == 0 && s.persistsPendingDumpLocked() {
@@ -876,11 +880,27 @@ func (s *Scheduler) noteRemoteStopLocked(stored Task) bool {
 	if !exists {
 		current = stored
 	}
+	if staleStoppedRow(stored, current, s.runSpec[stored.ID]) {
+		// STOPPED with desired RUN, no newer ask, written by another
+		// owner/epoch: a lost owner's late write, not a Stop (a Stop always
+		// writes desired STOP or STOPPING first). Keep running and publish
+		// this run's row again, fenced by its epoch (#425, §24.14).
+		log.Printf("ignored stale STOPPED row task=%s row_owner=%q row_epoch=%d run_owner=%s run_epoch=%d", stored.ID, stored.OwnerWorkerID, stored.Epoch, current.OwnerWorkerID, current.Epoch)
+		s.unpublished[stored.ID] = struct{}{}
+		return true
+	}
 	if current.State == StateFailed {
 		// This run already wrote FAILED: desired STOP on the row is its own
 		// write, not a remote Stop. FAILED cancelled the run and released
 		// the lease; turning it into STOPPING here would make the run's exit
 		// write STOPPED over the error (a silent stop, #389).
+		return true
+	}
+	if stored.State == StateFailed {
+		// FAILED that this run did not write: another epoch ran the task
+		// after this worker lost its lease and failed it. It is not a Stop;
+		// the row belongs to that failure (design 0009 §24.4, #421).
+		s.yieldToStoredFailureLocked(stored, current)
 		return true
 	}
 	changed := false
@@ -903,6 +923,27 @@ func (s *Scheduler) noteRemoteStopLocked(stored Task) bool {
 		log.Printf("cancelled local dump for remote stop task=%s store_state=%s", stored.ID, stored.State)
 	}
 	return true
+}
+
+// yieldToStoredFailureLocked stops this worker's run because the shared row
+// is FAILED by another epoch. Only memory changes: the run's lease epoch is
+// marked lost (the data-plane fence refuses its next write), the local copy
+// becomes the stored FAILED row, and the run's exit sees FAILED and writes
+// nothing. Caller holds s.mu.
+func (s *Scheduler) yieldToStoredFailureLocked(stored, current Task) {
+	if current.Epoch > 0 {
+		s.leaseClock.Lose(stored.ID, current.Epoch)
+	}
+	s.markHealthDirty(stored.ID, ReasonLeaseLost)
+	if cancel, ok := s.cancels[stored.ID]; ok {
+		cancel()
+		delete(s.cancels, stored.ID)
+		log.Printf("cancelled local dump: row FAILED by another epoch task=%s local_epoch=%d", stored.ID, current.Epoch)
+	}
+	failed := stored
+	failed.PendingDumpCleanup = current.PendingDumpCleanup
+	s.tasks[stored.ID] = failed
+	s.appendEventLocked(stored.ID, "TASK_LEASE_LOST", "lease lost; the row was FAILED by another epoch, dump stopped and the row left as FAILED", stored.LastError)
 }
 
 // completeIdleStop 把没有本进程执行的 STOPPING 收成 STOPPED。
@@ -1181,6 +1222,10 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			current.LastError = ""
 			current.UpdatedAt = time.Now()
 			s.tasks[id] = current
+			// Nothing of this epoch is left to publish: a row write that
+			// failed earlier must not be republished as this yielded copy
+			// (STOPPED, no owner) over the next owner's row (#425, §24.14).
+			s.dropUnpublishedLocked(id)
 			s.appendEventLocked(id, "TASK_LEASE_YIELDED", "runner stopped; another owner holds the lease", errMsg)
 			s.flushPendingEventsLocked()
 			s.mu.Unlock()

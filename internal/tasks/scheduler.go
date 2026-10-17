@@ -323,12 +323,15 @@ type Scheduler struct {
 	// runBase is the process run context (SetRunContext). Every runner
 	// context derives from it; runWG counts runTask goroutines so shutdown
 	// can join them (WaitRuns).
-	runBase    context.Context
-	runWG      sync.WaitGroup
-	seq        int
-	tasks      map[string]Task
-	events     map[string][]TaskEvent
-	replica    map[string]ReplicationProgress
+	runBase context.Context
+	runWG   sync.WaitGroup
+	seq     int
+	tasks   map[string]Task
+	events  map[string][]TaskEvent
+	replica map[string]ReplicationProgress
+	// progress is the progress book of each run this process has open
+	// (design 0009 §24.9, TASK_NO_PROGRESS); guarded by mu.
+	progress   map[string]runProgress
 	runner     Runner
 	dumpKiller func(source SourceConfig, connectionID uint32) error
 	store      TaskStore
@@ -412,6 +415,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		tasks:       make(map[string]Task),
 		events:      make(map[string][]TaskEvent),
 		replica:     make(map[string]ReplicationProgress),
+		progress:    make(map[string]runProgress),
 		cancels:     make(map[string]context.CancelFunc),
 		runs:        make(map[string]chan struct{}),
 		runSpec:     make(map[string]int64),

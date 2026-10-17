@@ -280,7 +280,8 @@ var wantManagedP24 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true
 	DumpCleanupPersistFailed: true, DiskListFailed: true, UploadUnverified: true, UploadRecordFailed: true,
 	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
 	MetricSourceFailed: true, TransitionStalled: true, SourceUnreachable: true, TaskFailed: true,
-	TaskUnadopted: true, TaskRecordsFailed: true}
+	TaskUnadopted: true, TaskRecordsFailed: true,
+	TaskNoProgress: true} // P2-6d, design §24.9
 
 func TestEmptyLeftoverDerivesFromChain(t *testing.T) {
 	f := &Facts{TaskID: "t", Complete: map[Scope]bool{ScopeChainLocal: true, ScopeTaskState: true, ScopeSignals: true, ScopeStore: true},
@@ -387,6 +388,7 @@ var designScopes = map[Kind][]Scope{
 	SourceUnreachable:        {ScopeTaskState, ScopeSignals},
 	TaskUnadopted:            {ScopeTaskState},
 	TaskRecordsFailed:        {ScopeSignals},
+	TaskNoProgress:           {ScopeTaskState}, // §24.9
 	SealFactsAbsent:          {ScopeStore},
 	HealthStale:              {ScopeTaskState},
 	HealthStoreDegraded:      {ScopeStore},

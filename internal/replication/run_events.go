@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: one binlog event from the dump, the open segment, the executed GTID set, and the source session
-// output: what that event does to the backup: an identity check before anything is appended, heartbeats reported as progress, the dump's synthetic rotate moving only the cursor, a first rotate opening the named file, a real or artificial rotate sealing and moving on (openSegment.rotate), a mid-file format description held for the first copied event, a stored GTID skipped with the rest of its transaction, a re-sent file header ignored, an event behind the flushed cursor returned as STREAM_REGRESSION, and every other event flushed, with the checkpoint written only at a transaction boundary (txn_boundary.go) and a log line when a transaction streams past longTxnWarnAfter with no commit (#391)
+// output: what that event does to the backup: an identity check before anything is appended, heartbeats reported as progress and as caught up with the source (TASK_NO_PROGRESS, design 0009 §24.9), the dump's synthetic rotate moving only the cursor, a first rotate opening the named file, a real or artificial rotate sealing and moving on (openSegment.rotate), a mid-file format description held for the first copied event, a stored GTID skipped with the rest of its transaction, a re-sent file header ignored, an event behind the flushed cursor returned as STREAM_REGRESSION, and every other event flushed, with the checkpoint written only at a transaction boundary (txn_boundary.go) and a log line when a transaction streams past longTxnWarnAfter with no commit (#391)
 // pos: phase 4 of MySQLRunner.run (ADR 0008): the event handler shared by the async loop and the semi-sync SynchronousEventHandler
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -40,6 +40,24 @@ func (l *runLoop) reportProgress(at time.Time) {
 	}
 }
 
+// onHeartbeat handles a heartbeat: an idle source. A checkpoint held back by
+// the batch window is written, and the run is reported caught up with the
+// source (MySQL and MariaDB send a heartbeat only when the dump thread has
+// sent the whole binlog and waits at its end), so an idle source is progress
+// for TASK_NO_PROGRESS (design 0009 §24.9).
+func (l *runLoop) onHeartbeat(sourceEventAt time.Time) error {
+	if !l.txn.inTxn {
+		if err := l.seg.flushCheckpoint(); err != nil {
+			return err
+		}
+	}
+	l.reportProgress(sourceEventAt)
+	if caught, ok := l.r.progressReporter.(SourceCaughtUpReporter); ok {
+		caught.ReportSourceCaughtUp(l.task.ID)
+	}
+	return nil
+}
+
 func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 	if event == nil || event.Header == nil {
 		return nil
@@ -61,14 +79,7 @@ func (l *runLoop) handleEvent(event *replication.BinlogEvent) error {
 	sourceEventAt := sourceEventTime(event)
 
 	if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
-		// An idle source: write a checkpoint held back by the batch window.
-		if !l.txn.inTxn {
-			if err := seg.flushCheckpoint(); err != nil {
-				return err
-			}
-		}
-		l.reportProgress(sourceEventAt)
-		return nil
+		return l.onHeartbeat(sourceEventAt)
 	}
 
 	if event.Header.EventType == replication.ROTATE_EVENT {

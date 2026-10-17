@@ -155,6 +155,7 @@ func (e *Evaluator) signalFacts(ctx context.Context, task Task, isCluster bool, 
 		facts.UnreachableAfter = d
 	}
 	facts.DumpStalledAfter = e.cfg.DumpStalledAfter
+	facts.NoProgressAfter = e.cfg.NoProgressAfter
 	facts.StalledAfter = e.cfg.StalledAfter
 	if facts.StalledAfter <= 0 && e.s != nil {
 		e.s.mu.Lock()
@@ -197,15 +198,7 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 			}
 		}
 	}
-	tf := &health.TaskFacts{State: string(task.State), Desired: task.DesiredRun, Owner: task.OwnerWorkerID, Epoch: task.Epoch,
-		StateSince: task.UpdatedAt, LastError: task.LastError,
-		FailedCurrent: task.State == StateFailed && task.FailedSpecRevision > 0 && task.FailedSpecRevision == task.SpecRevision}
-	if tf.Desired == "" {
-		tf.Desired = TaskDesiredRun
-		if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
-			tf.Desired = TaskDesiredStop
-		}
-	}
+	tf := rowTaskFacts(task)
 	if s := e.s; s != nil {
 		s.mu.Lock()
 		if s.runner == nil {
@@ -216,6 +209,8 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 		tf.OwnedElsewhere = s.leaseManager != nil && task.OwnerWorkerID != "" && task.OwnerWorkerID != s.clusterWorkerID
 		_, known := s.tasks[task.ID]
 		tf.Unadopted = s.store == nil && !known && !s.recordTombstonedLocked(task.ID) // only data_dir knows the task (#385); a tombstone is a deliberate delete (ADR 0010)
+		// The book of the epoch this node holds, run open or not (§24.15).
+		tf.Progress = s.runProgressFactsLocked(task.ID)
 		s.mu.Unlock()
 	}
 	if e.s != nil {
@@ -227,6 +222,23 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 				snap, _ = e.s.LivenessSnapshot(task.ID)
 			}
 			tf.Liveness = &health.Liveness{LastRead: snap.LastRead, LastFailure: snap.LastFailure, FailureDetail: snap.FailureDetail}
+		}
+	}
+	return tf
+}
+
+// rowTaskFacts is the part of task.state read from the task row alone.
+func rowTaskFacts(task Task) *health.TaskFacts {
+	tf := &health.TaskFacts{State: string(task.State), Desired: task.DesiredRun, Owner: task.OwnerWorkerID, Epoch: task.Epoch,
+		StateSince: task.UpdatedAt, LastError: task.LastError,
+		// spec_revision 0 (no ask recorded yet, e.g. a run resumed or
+		// claimed without an operator Start) with failed_spec_revision 0 is
+		// still the current ask: it used to keep TASK_FAILED closed (§24.11).
+		FailedCurrent: task.State == StateFailed && task.FailedSpecRevision == task.SpecRevision}
+	if tf.Desired == "" {
+		tf.Desired = TaskDesiredRun
+		if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
+			tf.Desired = TaskDesiredStop
 		}
 	}
 	return tf

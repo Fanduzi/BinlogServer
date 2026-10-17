@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED; checkpoint and binlog_files upsert/delete run under execUnderFence when the context carries a fence identity (ADR 0009 P2-6b, #417)
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover and idle STOPPING whose lease has expired, ListTaskIDsWithExpiredOwnerLease (a row naming an owner, desired RUN, not FAILED/STOPPED/CREATED, lease expired by NOW(6)) for the _health holder (design 0009 §24.13), backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED; checkpoint and binlog_files upsert/delete run under execUnderFence when the context carries a fence identity (ADR 0009 P2-6b, #417)
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -185,6 +185,20 @@ SELECT t.id, t.name, t.cluster_key, t.state, t.last_error, t.owner_worker_id, t.
 FROM backup_tasks t
 INNER JOIN task_leases l ON l.task_id = t.id
 WHERE t.state IN ('RUNNING', 'LEASE_DEGRADED', 'RETRY_BACKOFF', 'STOPPING')
+  AND l.lease_expire_at <= NOW(6)
+ORDER BY CAST(t.id AS UNSIGNED), t.id;
+`
+
+// listTaskIDsWithExpiredOwnerLeaseSQL: rows that still name an owner, want
+// RUN and are not FAILED/STOPPED/CREATED, whose lease expired by the meta
+// clock: a dead owner nobody claimed (design 0009 §24.13).
+const listTaskIDsWithExpiredOwnerLeaseSQL = `
+SELECT t.id
+FROM backup_tasks t
+INNER JOIN task_leases l ON l.task_id = t.id
+WHERE t.owner_worker_id <> '' AND t.epoch > 0
+  AND t.desired_run = 'RUN'
+  AND t.state NOT IN ('FAILED', 'STOPPED', 'CREATED')
   AND l.lease_expire_at <= NOW(6)
 ORDER BY CAST(t.id AS UNSIGNED), t.id;
 `
@@ -1060,6 +1074,27 @@ func (s *MySQLTaskStore) ListTasksWithExpiredLease(ctx context.Context) ([]tasks
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks_with_expired_lease")
 	defer endMetaSpan(span)
 	return s.queryTasks(ctx, s.withPendingColumn(listTasksWithExpiredLeaseSQL))
+}
+
+// ListTaskIDsWithExpiredOwnerLease implements tasks.DeadOwnerLister for the
+// _health holder's proxy evaluation (design 0009 §24.13).
+func (s *MySQLTaskStore) ListTaskIDsWithExpiredOwnerLease(ctx context.Context) ([]string, error) {
+	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_task_ids_with_expired_owner_lease")
+	defer endMetaSpan(span)
+	rows, err := s.db.QueryContext(ctx, listTaskIDsWithExpiredOwnerLeaseSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ListTasks 读取全部任务快照并反序列化配置字段。Restore 仍使用该全量路径。

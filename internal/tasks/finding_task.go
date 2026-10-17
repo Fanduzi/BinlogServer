@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task row write results from persistTaskLocked
-// output: TASK_PERSIST_FAILED findings (S2/S3) and a retry of the in-memory row on the sink tick until a write succeeds
+// output: TASK_PERSIST_FAILED findings (S2/S3) and a retry of the in-memory row on the sink tick until a write succeeds, fenced by the row's (owner, epoch) and dropped after a lease handoff (dropUnpublishedLocked); staleStoppedRow tells a lost owner's late STOPPED (desired RUN, other owner/epoch, no newer ask) from a Stop (#425)
 // pos: makes a lost state transition a visible, retried condition instead of a log line
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -37,6 +37,31 @@ func (s *Scheduler) notePersistFailureLocked(id string, state State, err error) 
 	})
 }
 
+// dropUnpublishedLocked forgets a pending republish: this process has
+// nothing left to publish for the task (its lease epoch was handed off).
+// Caller holds s.mu.
+func (s *Scheduler) dropUnpublishedLocked(id string) {
+	if _, ok := s.unpublished[id]; !ok {
+		return
+	}
+	delete(s.unpublished, id)
+	s.SignalSuccess(id, FindingTaskPersistFailed, "")
+}
+
+// staleStoppedRow: the shared row is STOPPED with desired RUN and no ask
+// newer than the one this run opened, and it names another owner/epoch
+// than this run holds. Only a lost owner's late write looks like that (a
+// Stop writes desired STOP, or STOPPING first) (#425, design §24.14).
+func staleStoppedRow(stored, current Task, openedSpec int64) bool {
+	if stored.State != StateStopped || stored.DesiredRun != TaskDesiredRun || stored.SpecRevision > openedSpec {
+		return false
+	}
+	if current.OwnerWorkerID == "" || current.Epoch <= 0 {
+		return false
+	}
+	return stored.OwnerWorkerID != current.OwnerWorkerID || stored.Epoch != current.Epoch
+}
+
 // notePersistedLocked clears the condition after a successful row write.
 // Caller holds s.mu.
 func (s *Scheduler) notePersistedLocked(id string) {
@@ -68,8 +93,11 @@ func (s *Scheduler) republishUnpublished() {
 			s.SignalSuccess(id, FindingTaskPersistFailed, "")
 			continue
 		}
-		// Errors are recorded by persistTaskLocked itself.
-		if err := s.persistTaskLocked(task); err != nil {
+		// Errors are recorded by the persist itself. A row that names an
+		// owner is written under that (owner, epoch) fence: once another
+		// worker claimed the task the store refuses it (ErrStaleTaskWrite)
+		// and the pending republish is dropped (#425, design §24.14).
+		if err := s.persistTaskFencedLocked(task, task.OwnerWorkerID, task.Epoch); err != nil {
 			continue
 		}
 	}

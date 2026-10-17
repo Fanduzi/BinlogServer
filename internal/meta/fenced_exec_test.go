@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock lease rows and backup_tasks upserts under FencedExec / UpsertTaskFenced
-// output: P2-6a coverage for ADR 0009 §8.4 / #360: a stale owner's STOPPED write is refused when task_leases names a newer holder; a matching or released lease allows the write; no lease row allows the write
+// output: P2-6a coverage for ADR 0009 §8.4 / #360: a stale owner's STOPPED write is refused when task_leases names a newer holder; a matching lease or one released at the writer's epoch allows the write; a release at a newer epoch refuses it (#421); with no lease row the task row decides
 // pos: unit tests for meta.fencedExec (P2-6a); no dockerd
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -134,6 +134,9 @@ func TestUpsertTaskFenced_NoLeaseRowAllowsWrite(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(selectLeaseForUpdateSQL)).
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"owner_worker_id", "epoch"}))
+	mock.ExpectQuery(regexp.QuoteMeta(selectTaskOwnerForUpdateSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"owner_worker_id", "epoch"}).AddRow("worker-b", int64(1)))
 	mock.ExpectQuery(regexp.QuoteMeta(loadTaskRunStateSQL)).
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}))
@@ -174,6 +177,57 @@ func TestFencedExec_CallbackSkippedWhenFenced(t *testing.T) {
 	}
 	if ran {
 		t.Fatal("callback ran despite fence")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql: %v", err)
+	}
+}
+
+// #421: n2 claimed epoch 2, failed and released the lease (” / 2). The old
+// owner (worker-b, epoch 1) wakes up; its STOPPED write must not land.
+func TestUpsertTaskFenced_ReleasedAtNewerEpochRefused(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(selectLeaseForUpdateSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"owner_worker_id", "epoch"}).AddRow("", int64(2)))
+	mock.ExpectRollback()
+
+	if err := store.UpsertTaskFenced(context.Background(), stoppedTask(), "worker-b", 1); !errors.Is(err, healthstore.ErrFenced) {
+		t.Fatalf("UpsertTaskFenced: %v, want ErrFenced", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql: %v", err)
+	}
+}
+
+// With no task_leases row the task row is the fence: another owner or a
+// newer epoch on it refuses the write.
+func TestUpsertTaskFenced_NoLeaseRowTaskRowNamesOtherOwner(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(selectLeaseForUpdateSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"owner_worker_id", "epoch"}))
+	mock.ExpectQuery(regexp.QuoteMeta(selectTaskOwnerForUpdateSQL)).
+		WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"owner_worker_id", "epoch"}).AddRow("worker-a", int64(3)))
+	mock.ExpectRollback()
+
+	if err := store.UpsertTaskFenced(context.Background(), stoppedTask(), "worker-b", 1); !errors.Is(err, healthstore.ErrFenced) {
+		t.Fatalf("UpsertTaskFenced: %v, want ErrFenced", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("sql: %v", err)

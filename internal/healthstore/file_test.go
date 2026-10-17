@@ -64,6 +64,13 @@ func TestCheckFence(t *testing.T) {
 		{"stored same epoch other node", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "a"}, &healthstore.Lease{Owner: "a", Epoch: 2}, st(health.FenceCluster, 2, "b"), healthstore.ErrFenced},
 		{"proxy expired", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "a", Proxy: true}, &healthstore.Lease{Owner: "a", Epoch: 2, Expired: true}, st(health.FenceCluster, 2, "a"), nil},
 		{"proxy released", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "a", Proxy: true}, &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}, nil, nil},
+		// #421: n2 wrote health at epoch 2, then failed and released ('' / 2);
+		// the _health holder writes in its own name and is not fenced by node.
+		{"proxy released, stored same epoch other node", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "h", Proxy: true}, &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}, st(health.FenceCluster, 2, "n2"), nil},
+		{"proxy released, stored newer epoch", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "h", Proxy: true}, &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}, st(health.FenceCluster, 3, "n3"), healthstore.ErrFenced},
+		// Only expired, owner still on the row: it may reclaim at the same
+		// epoch, so a proxy in another node's name is still fenced.
+		{"proxy expired, stored same epoch other node", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "h", Proxy: true}, &healthstore.Lease{Owner: "n2", Epoch: 2, Expired: true}, st(health.FenceCluster, 2, "n2"), healthstore.ErrFenced},
 		{"proxy on a live lease", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "a", Proxy: true}, &healthstore.Lease{Owner: "a", Epoch: 2}, nil, healthstore.ErrFenced},
 		{"never no row", health.Fence{Mode: health.FenceNeverLeased, Node: "h"}, nil, nil, nil},
 		{"never with row", health.Fence{Mode: health.FenceNeverLeased, Node: "h"}, &healthstore.Lease{Owner: "a", Epoch: 1}, nil, healthstore.ErrFenced},

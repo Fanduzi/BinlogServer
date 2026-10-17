@@ -1,7 +1,7 @@
 // Package replication provides module-level functionality for replication.
 // input: a dead worker's segment directory recorded in binlog_files.file_path, and a second worker data dir
-// output: proof that takeover continues in that directory when it is readable, fails naming the segment when it is not, continues a readable epoch-0 bare OPEN file on this worker as .open.eN, does not fail SEGMENT_NOT_ON_WORKER when a local open segment ends with an artificial rotate whose end_log_pos is 0, and does not seal or upload an already-uploaded source file again when the dump rotates to the next file
-// pos: regression for lease takeover that must not rebuild a fresh directory from position 4
+// output: proof that takeover continues in a readable catalog directory under this worker's data_dir, fails with SEGMENT_NOT_ON_WORKER naming the segment when the path is missing or readable but outside data_dir (#421 sc1), continues a readable epoch-0 bare OPEN file on this worker as .open.eN, does not fail SEGMENT_NOT_ON_WORKER when a local open segment ends with an artificial rotate whose end_log_pos is 0, and does not seal or upload an already-uploaded source file again when the dump rotates to the next file
+// pos: regression for lease takeover that must not rebuild a fresh directory from position 4 or write into a foreign data_dir
 // note: if this file changes, update this header and module README.md.
 package replication
 
@@ -25,11 +25,13 @@ import (
 )
 
 // TestTakeoverUsesDeadWorkerSegmentDirectory is the lease-takeover regression.
-// Worker A's open segment is not under worker B's data_dir. The catalog file_path
-// is the only record of that directory. Current main rewinds to position 4 and
-// writes a new directory on B.
+// A readable catalog path outside this worker's data_dir must fail loud
+// (SEGMENT_NOT_ON_WORKER, #421 sc1). A path under data_dir continues in place.
+// A missing open segment still fails naming the path.
 func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
-	t.Run("visible directory continues", func(t *testing.T) {
+	t.Run("readable directory outside data_dir fails", func(t *testing.T) {
+		// #421 sc1: same host, separate data_dirs; old owner's absolute path is
+		// still readable. Takeover must not continue into that foreign dir.
 		workerB := t.TempDir()
 		workerA := t.TempDir()
 		const taskID = "task-1"
@@ -39,12 +41,62 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 		}
 		eventAt := time.Unix(1_700_000_000, 0).UTC()
 		const beforeSQL = "INSERT INTO takeover_boundary VALUES ('ON-A')"
-		const afterSQL = "INSERT INTO takeover_boundary VALUES ('ON-B')"
 		first, endPos := chainBinlogEvents(4, eventAt, []namedEvent{
 			{typ: goreplication.FORMAT_DESCRIPTION_EVENT, body: formatDescriptionBody(eventAt)},
 			{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", beforeSQL)},
 		})
 		openPath := filepath.Join(aDir, "mysql-bin.000003.open.e1")
+		writeBinlogSegment(t, openPath, first)
+
+		catalog := &takeoverCatalog{rows: []tasks.BinlogFile{{
+			TaskID: taskID, FileName: "mysql-bin.000003", FilePath: openPath,
+			State: "OPEN", EndPos: tasks.FilePos(endPos), UploadState: "LOCAL_ONLY",
+		}}}
+		store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000003", Pos: endPos}, ok: true}
+		syncer := &fakeSyncer{streamer: &fakeStreamer{results: []streamResult{{err: context.Canceled}}}}
+		runner := NewMySQLRunner(workerB, WithCheckpointStore(store), WithFileMetaStore(catalog))
+		runner.fetcher = &fakeSourceMetaFetcher{
+			status:     MasterStatus{File: "mysql-bin.000099", Pos: 9000},
+			serverUUID: "11111111-1111-1111-1111-111111111111",
+		}
+		runner.newSyncer = func(goreplication.BinlogSyncerConfig) binlogSyncer { return syncer }
+		task := newRunnerTask(tasks.StartConfig{Mode: tasks.StartModeLatest})
+		task.Epoch = 2
+		task.OwnerWorkerID = "worker-b"
+
+		err := runner.Run(context.Background(), task)
+		if err == nil || !tasks.IsPermanent(err) {
+			t.Fatalf("err=%v, want a permanent failure", err)
+		}
+		if !strings.Contains(err.Error(), "SEGMENT_NOT_ON_WORKER") || !strings.Contains(err.Error(), openPath) {
+			t.Fatalf("error should name the foreign segment: %v", err)
+		}
+		if syncer.startPosCalls != 0 {
+			t.Fatalf("started a dump at %+v", syncer.startPos)
+		}
+		if matches, _ := filepath.Glob(filepath.Join(aDir, "mysql-bin.000003*")); len(matches) != 1 || matches[0] != openPath {
+			t.Fatalf("must not write into the foreign directory: %v", matches)
+		}
+		if _, statErr := os.Stat(filepath.Join(workerB, taskID)); !os.IsNotExist(statErr) {
+			t.Fatalf("fresh directory under this worker: %v", statErr)
+		}
+	})
+
+	t.Run("readable directory under data_dir continues", func(t *testing.T) {
+		worker := t.TempDir()
+		const taskID = "task-1"
+		taskDir := filepath.Join(worker, taskID)
+		if err := os.MkdirAll(taskDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		eventAt := time.Unix(1_700_000_000, 0).UTC()
+		const beforeSQL = "INSERT INTO takeover_boundary VALUES ('ON-A')"
+		const afterSQL = "INSERT INTO takeover_boundary VALUES ('ON-B')"
+		first, endPos := chainBinlogEvents(4, eventAt, []namedEvent{
+			{typ: goreplication.FORMAT_DESCRIPTION_EVENT, body: formatDescriptionBody(eventAt)},
+			{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", beforeSQL)},
+		})
+		openPath := filepath.Join(taskDir, "mysql-bin.000003.open.e1")
 		writeBinlogSegment(t, openPath, first)
 		next, _ := chainBinlogEvents(endPos, eventAt, []namedEvent{
 			{typ: goreplication.QUERY_EVENT, body: queryEventBody("t", afterSQL)},
@@ -57,7 +109,7 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 		}}}
 		store := &memCheckpointStore{cp: binlog.Checkpoint{File: "mysql-bin.000003", Pos: endPos}, ok: true}
 		syncer := &stopResumeSyncer{phases: [][]*goreplication.BinlogEvent{phase}}
-		runner := NewMySQLRunner(workerB, WithCheckpointStore(store), WithFileMetaStore(catalog))
+		runner := NewMySQLRunner(worker, WithCheckpointStore(store), WithFileMetaStore(catalog))
 		runner.fetcher = &fakeSourceMetaFetcher{
 			status:     MasterStatus{File: "mysql-bin.000099", Pos: 9000},
 			serverUUID: "11111111-1111-1111-1111-111111111111",
@@ -71,7 +123,7 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 		defer cancel()
 		done := make(chan error, 1)
 		go func() { done <- runner.Run(ctx, task) }()
-		waitForMarker(t, workerA, taskID, afterSQL)
+		waitForMarker(t, worker, taskID, afterSQL)
 		cancel()
 		if err := <-done; err != nil {
 			t.Fatalf("Run: %v", err)
@@ -80,7 +132,7 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 		if len(starts) != 1 || starts[0].Name != "mysql-bin.000003" || starts[0].Pos != endPos {
 			t.Fatalf("takeover start %+v, want mysql-bin.000003:%d", starts, endPos)
 		}
-		continued := filepath.Join(aDir, "mysql-bin.000003.open.e2")
+		continued := filepath.Join(taskDir, "mysql-bin.000003.open.e2")
 		body, err := os.ReadFile(continued)
 		if err != nil {
 			t.Fatalf("continued segment: %v", err)
@@ -91,15 +143,12 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 		if _, err := os.Stat(openPath); !os.IsNotExist(err) {
 			t.Fatalf("old epoch still present: %v", err)
 		}
-		matches, err := filepath.Glob(filepath.Join(aDir, "mysql-bin.000003*"))
+		matches, err := filepath.Glob(filepath.Join(taskDir, "mysql-bin.000003*"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(matches) != 1 {
 			t.Fatalf("duplicate segment for one source file: %v", matches)
-		}
-		if _, err := os.Stat(filepath.Join(workerB, taskID)); !os.IsNotExist(err) {
-			t.Fatalf("worker B started a fresh directory: %v", err)
 		}
 	})
 
@@ -335,10 +384,10 @@ func TestTakeoverUsesDeadWorkerSegmentDirectory(t *testing.T) {
 // handle, and the sealed file grew past its seal facts (SEGMENT_UNREADABLE).
 // The continued segment must not share the old handle's file.
 func TestTakeover_FrozenOwnerHandleCannotReachContinuedSegment(t *testing.T) {
+	// Shared data_dir: both epochs see the same catalog path under this worker.
 	workerB := t.TempDir()
-	workerA := t.TempDir()
 	const taskID = "task-1"
-	aDir := filepath.Join(workerA, taskID)
+	aDir := filepath.Join(workerB, taskID)
 	if err := os.MkdirAll(aDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +431,7 @@ func TestTakeover_FrozenOwnerHandleCannotReachContinuedSegment(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(ctx, task) }()
-	waitForMarker(t, workerA, taskID, afterSQL)
+	waitForMarker(t, workerB, taskID, afterSQL)
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Run: %v", err)

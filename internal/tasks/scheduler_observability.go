@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: replication/checkpoint/event/file/history read requests and TaskStore.GetTask for missing-task refresh
-// output: observability-facing task progress including at-tip lag, events read from the event store without holding the scheduler lock, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, the runner's retention-blocked file counts for metrics, and a Restore that loads a stored pending dump into this process; ResumePosition adds the open segment's complete transactions to a GTID task's gtid_set, reports the cut of an unfinished trailing transaction, and keeps the stored updated_at, without touching the file; a progress report on a new file marks the task dirty (SEAL) for the health evaluator
+// output: observability-facing task progress including at-tip lag, events read from the event store without holding the scheduler lock, meta or on-disk files in ascending source-index replay order with location local/bucket/both, leftover-directory file lists, the resume file/pos (and gtid_set when the stored checkpoint matches) the next Start continues from, a catalog file_path takeover position instead of a position-4 rewind, runs, worker heartbeat views, the runner's retention-blocked file counts for metrics, and a Restore that loads a stored pending dump into this process; ResumePosition adds the open segment's complete transactions to a GTID task's gtid_set, reports the cut of an unfinished trailing transaction, and keeps the stored updated_at, without touching the file; a progress report on a new file marks the task dirty (SEAL) for the health evaluator, and every report feeds the run's progress book (TASK_NO_PROGRESS, run_progress.go)
 // pos: scheduler read/query layer for API and metrics consumption; missing-task checkpoint refresh uses GetTask
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -43,6 +43,7 @@ func (s *Scheduler) ReportReplicationProgress(taskID string, sourceEventAt time.
 	progress.AtTip = atTip
 	progress.UpdatedAt = time.Now()
 	s.replica[taskID] = progress
+	s.noteRunProgressLocked(taskID, file, pos, atTip)
 }
 
 // GetReplicationProgress 获取任务复制进度快照。

@@ -130,6 +130,7 @@ func (s *Scheduler) commitDeleteLocked(id string) error {
 	delete(s.tasks, id)
 	delete(s.events, id)
 	delete(s.replica, id)
+	delete(s.progress, id)
 	delete(s.persisted, id)
 	delete(s.unpublished, id)
 	s.forgetPendingDumpLocked(id)

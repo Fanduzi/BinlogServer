@@ -1223,7 +1223,8 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 	}
 	ecfg := tasks.EvaluatorConfig{Mode: mode, Sweep: time.Duration(cfg.Health.SweepIntervalSec) * time.Second, Cluster: isClusterMode(cfg),
 		UnreachableAfter: time.Duration(cfg.Health.UnreachableAfterSec) * time.Second,
-		SignalStaleAfter: time.Duration(cfg.Health.SignalStaleAfterSec) * time.Second}
+		SignalStaleAfter: time.Duration(cfg.Health.SignalStaleAfterSec) * time.Second,
+		NoProgressAfter:  time.Duration(cfg.Health.NoProgressAfterSec) * time.Second}
 	if len(cfg.Health.UnreachableAfterTaskSec) > 0 {
 		ecfg.UnreachableAfterTask = map[string]time.Duration{}
 		for id, sec := range cfg.Health.UnreachableAfterTaskSec {
@@ -1252,10 +1253,8 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 	} else {
 		ecfg.Store = healthstore.NewFileStore(filepath.Join(cfg.DataDir, healthstore.HealthFileName))
 	}
-	if ecfg.Cluster {
-		ecfg.NodeID = workerID
-	} else if ecfg.NodeID, err = tasks.LoadOrCreateNodeID(cfg.DataDir); err != nil {
-		return fmt.Errorf("health node id: %w", err)
+	if ecfg.NodeID, ecfg.ControlPlaneOnly, err = healthEvaluatorIdentity(cfg, workerID); err != nil {
+		return err
 	}
 	e := tasks.NewEvaluator(scheduler, ecfg)
 	spawn(func() { e.Run(ctx) })
@@ -1265,8 +1264,34 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 	spawn(func() { scheduler.RunSourceLiveness(ctx) })
 	rehasher := tasks.NewRehasher(e, cfg.Health.RehashBytesPerSec)
 	spawn(func() { rehasher.Run(ctx) })
-	log.Printf("health evaluator %s (sweep %s, rehash %d B/s, node %s)", mode, ecfg.Sweep, cfg.Health.RehashBytesPerSec, ecfg.NodeID)
+	log.Printf("health evaluator %s (sweep %s, rehash %d B/s, node %s, control-plane only %v)", mode, ecfg.Sweep, cfg.Health.RehashBytesPerSec, ecfg.NodeID, ecfg.ControlPlaneOnly)
 	return nil
+}
+
+// healthEvaluatorIdentity is the evaluator's node id on every role (design
+// 0009 §24.13): a worker uses its worker id (the task lease owner); a
+// control-plane-only node, which resolves no worker id, uses
+// cluster.worker_id when configured, else the node id persisted in
+// data_dir, so it can hold _health and proxy unowned tasks. controlPlaneOnly
+// keeps such a node from ever evaluating as a task holder. Standalone uses
+// the persisted node id.
+func healthEvaluatorIdentity(cfg config.Config, workerID string) (nodeID string, controlPlaneOnly bool, err error) {
+	if isClusterMode(cfg) {
+		if workerID != "" {
+			return workerID, false, nil
+		}
+		if configured := strings.TrimSpace(cfg.Cluster.WorkerID); configured != "" {
+			return configured, true, nil
+		}
+		if nodeID, err = tasks.LoadOrCreateNodeID(cfg.DataDir); err != nil {
+			return "", true, fmt.Errorf("health node id: %w", err)
+		}
+		return nodeID, true, nil
+	}
+	if nodeID, err = tasks.LoadOrCreateNodeID(cfg.DataDir); err != nil {
+		return "", false, fmt.Errorf("health node id: %w", err)
+	}
+	return nodeID, false, nil
 }
 
 // secondsMap turns a per-task seconds map into durations (nil when empty).

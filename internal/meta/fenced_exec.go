@@ -1,7 +1,7 @@
 // Package meta provides module-level functionality for meta.
 // input: taskID + (owner, epoch) fence identity and a callback that mutates meta under one transaction
-// output: leaseRowForUpdate (the one task_leases FOR UPDATE read both fences share); FencedExec / UpsertTaskFenced: lock the lease row, then run the write only when the lease still matches (or is released / absent); otherwise healthstore.ErrFenced and no task-row write (ADR 0009 P2-6a / #360)
-// pos: write fence for STOPPED/STOPPING task-row paths after lease loss
+// output: leaseRowForUpdate (the one task_leases FOR UPDATE read both fences share); FencedExec / UpsertTaskFenced: lock the lease row, then run the write only when tasks.CheckTaskRowFence allows it (the held lease is the writer's, a released lease was released at the writer's epoch, or with no lease row the backup_tasks row names no other owner or newer epoch); otherwise healthstore.ErrFenced and no task-row write (ADR 0009 P2-6a / #360)
+// pos: write fence for STOPPED/STOPPING task-row paths after lease loss (P2-6c / #421: a release at a newer epoch fences the old owner)
 // note: if this file changes, update this header and module README.md.
 package meta
 
@@ -10,13 +10,12 @@ import (
 	"database/sql"
 	"errors"
 
-	"binlog_server/internal/healthstore"
 	"binlog_server/internal/tasks"
 )
 
 // leaseRowForUpdate locks the task_leases row inside tx and returns its
 // holder. It is the one lease read both fences use: the task-row fence here
-// (a released or missing row lets the old owner converge to STOPPED) and the
+// (a release at the writer's own epoch lets it converge to STOPPED) and the
 // data-plane fence in write_fence.go (only the current holder writes).
 func leaseRowForUpdate(ctx context.Context, tx *sql.Tx, taskID string) (owner string, epoch int64, found bool, err error) {
 	err = tx.QueryRowContext(ctx, `SELECT owner_worker_id, epoch FROM task_leases WHERE task_id = ? FOR UPDATE`, taskID).Scan(&owner, &epoch)
@@ -29,19 +28,32 @@ func leaseRowForUpdate(ctx context.Context, tx *sql.Tx, taskID string) (owner st
 	return owner, epoch, true, nil
 }
 
-// checkLeaseFenceLocked inspects the locked lease row. A different non-empty
-// holder (owner or epoch) fences the write. A released row (owner "") or a
-// missing row lets the old owner converge to STOPPED (0346 R3).
+// checkLeaseFenceLocked locks the lease row (and, when there is none, the
+// task row) and applies tasks.CheckTaskRowFence. A release at a newer epoch
+// fences the old owner: another worker ran the task after it and ended it
+// (FAILED, #421), and the old owner must not rewrite that row as STOPPED.
 func checkLeaseFenceLocked(ctx context.Context, tx *sql.Tx, taskID, owner string, epoch int64) error {
-	leaseOwner, leaseEpoch, found, err := leaseRowForUpdate(ctx, tx, taskID)
+	var in tasks.TaskRowFenceInput
+	var err error
+	in.LeaseOwner, in.LeaseEpoch, in.LeaseFound, err = leaseRowForUpdate(ctx, tx, taskID)
 	if err != nil {
 		return err
 	}
-	if !found || leaseOwner == "" || (leaseOwner == owner && leaseEpoch == epoch) {
-		return nil
+	if !in.LeaseFound {
+		err = tx.QueryRowContext(ctx, selectTaskOwnerForUpdateSQL, taskID).Scan(&in.RowOwner, &in.RowEpoch)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return err
+		default:
+			in.RowFound = true
+		}
 	}
-	return healthstore.ErrFenced
+	return tasks.CheckTaskRowFence(in, owner, epoch)
 }
+
+// selectTaskOwnerForUpdateSQL locks the task row when task_leases has none.
+const selectTaskOwnerForUpdateSQL = `SELECT COALESCE(owner_worker_id, ''), epoch FROM backup_tasks WHERE id = ? FOR UPDATE`
 
 // FencedExec runs fn in one transaction after locking task_leases and
 // confirming (owner, epoch). On mismatch it returns healthstore.ErrFenced
