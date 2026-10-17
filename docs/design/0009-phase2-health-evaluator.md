@@ -1047,7 +1047,7 @@ main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这�
 
 ### 24.5 集群存储前提（文档，不改行为）
 
-接管按 `binlog_files.file_path` 走（deployment §6.3「Worker 异常退出与自动接管」）。集群节点**必须共享 `data_dir`**（同一路径挂同一块共享存储，或任务固定在一台机器上不接管）；否则 owner 换机后读不到 open 分段与未上传的封存分段，任务进 `FAILED`（`SEGMENT_NOT_ON_WORKER`）。本步之后这个 FAILED 会以 CRITICAL `TASK_FAILED` 告警，不再静默，但备份仍然停了，需要运维把目录挂过来再 Start。deployment 文档补上这条前提。
+接管按 `binlog_files.file_path` 走（deployment §6.3「Worker 异常退出与自动接管」）。集群节点**必须共享 `data_dir`**（同一路径挂同一块共享存储，或任务固定在一台机器上不接管）；否则 owner 换机后读不到 open 分段与未上传的封存分段，任务进 `FAILED`（`SEGMENT_NOT_ON_WORKER`）。本步之后这个 FAILED 会以 CRITICAL `TASK_FAILED` 告警，不再静默，但备份仍然停了，需要运维把目录挂过来再 Start。deployment 文档补上这条前提。**补充（§24.8）**：即使旧路径在新节点上「碰巧可读」（同机绝对路径、错误挂载），只要不在本节点配置的 `data_dir` 下，同样 `SEGMENT_NOT_ON_WORKER`，禁止续写外来目录。
 
 以下作为**备选方案**列出，待 Adrian 决定，本步不实现：
 
@@ -1063,7 +1063,20 @@ main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这�
 - `healthstore/storetest`：已释放 lease 的同 epoch 代写在 `fence_node` 不同时放行；仅过期（owner 仍在）时仍按节点拒绝。
 - `tasks/p26c_failed_preserved_test.go`：共享行被别的 epoch 写成 FAILED、lease 已释放在 epoch 2，本节点 epoch 1 的 run 仍在：`applyRemoteStops` 之后 run 退出，任务行仍是 `FAILED`、`last_error` 不变；内存为 FAILED。`markLeaseDegradedLocked` 与 `finishStoredStopLocked` 遇到 FAILED 都不写（§24.4 第 4 条）。
 - `meta/fenced_exec_test.go`、`tasks.CheckTaskRowFence` 表驱动：已释放于更大 epoch 拒绝、释放于同 epoch 放行、无 lease 行时按任务行判断。
-- 真机（#421 复现脚本改写）：非共享 `data_dir` 下 (a) CRITICAL `TASK_FAILED` 打开、`/api/health` 非 ok，(b) 旧 owner 醒来后任务行仍是 FAILED，(c) 共享目录下冻结接管照常续写。证据在 `/workspace/binlog-server-verify-evidence-421/`。
+- `tasks/resume_test.go` / `replication/takeover_segment_test.go`（§24.8）：catalog `file_path` 可读但在本 worker `data_dir` 外 → `ResolveTakeover.Missing` / Start 永久 `SEGMENT_NOT_ON_WORKER`，不往外来目录写、不开 dump；路径在本 `data_dir` 下则照常续写；UPLOADED 物化仍进本 `data_dir`。
+- 真机（#421 复现脚本改写）：非共享 `data_dir` 下 (a) CRITICAL `TASK_FAILED` 打开、`/api/health` 非 ok，(b) 旧 owner 醒来后任务行仍是 FAILED，(c) 共享目录下冻结接管照常续写；(d) 同机可读外来路径（sc1）同样 FAILED + finding。证据在 `/workspace/binlog-server-verify-evidence-421/` / `…-424/`。
+
+### 24.8 可读但不在本节点 data_dir ≡ 不在本 worker（#421 sc1，2026-10-17）
+
+**问题**：两节点各自独立的 `data_dir`、却落在**同一主机**（或把旧 owner 的绝对路径挂成可读）时，`binlog_files.file_path` 指向的 open 分段对 new owner **仍然可读**。旧规则把「可读的 catalog 目录」当成接管续写目录（`ResolveTakeover` → `TakeoverResume.Dir`），于是 n2 认领后 `RUNNING`、往**别人的**目录续写或（更糟）在错误假设下几乎不写、0 finding、`/api/health` = ok，只有 `task_health=UNKNOWN`——比 ENOENT / chmod 000 的大声失败更危险。
+
+**规则**：接管 / run start 时，catalog 的 `file_path`（或其目录）必须落在**本节点配置的 `data_dir`** 之下（`filepath.Clean`，两侧能 `EvalSymlinks` 则解析后再比；比较用 `filepath.Rel`，禁止 `..` 逃逸）。可读但落在本 `data_dir` **之外** → 与不可读 / ENOENT 相同：永久 `SEGMENT_NOT_ON_WORKER`（点名该分段），**不得**因可读就继续写入外来绝对路径，也不得在本机另起一套静默目录假装续写。
+
+**共享 `data_dir` 不受影响**：部署前提（§24.5）下 catalog 路径本就在共享根下，继续今日行为（含 #415 换 inode 续写）。
+
+**UPLOADED**：本地文件缺席或路径在外来目录时，仍走对象物化到本节点 `data_dir`（`Covering`）；不得把 `Dir` 设成外来路径。仅当已上传对象对应的本地文件就在本 `data_dir` 下时，才直接 `Apply`+`Dir`。
+
+**风险**：同一块盘经不同 bind-mount 路径挂到两台（`/data` vs `/mnt/n1`）且未共享同一 `data_dir` 配置字符串时，仍会判「外来」并 FAILED——这符合「集群必须共享 data_dir 路径」的前提；真要跨路径等同，需另做 marker / 相对路径方案（§24.5 A/B）。
 
 ### 24.7 本步不做
 
