@@ -5,7 +5,7 @@
 
 ## Files
 
-- `store.go`: `Store` / `TransitionLister` 接口、`Applied`、`Transition`；错误 `ErrFenced`、`ErrLeaseLagging`、`ErrSchemaAbsent`、`ErrModeUnsupported`；`CheckFence(fence, lease, stored)` 是 cluster / standalone / never-leased 三种 fence 的唯一判定，MySQL 与文件实现共用。cluster 持有者要求 owner 与 epoch 都等于租约行（过期仍是自己的 → `ErrLeaseLagging`）；Proxy / Delegated 只在同 epoch 的租约已过期或已释放时可写；库里已有更高 epoch，或同 epoch 不同节点，一律 `ErrFenced`。standalone 不能写 cluster 写过的任务。
+- `store.go`: （P2-6c：已释放 lease 上的代写 / 委派写同 epoch 不按节点比较）`Store` / `TransitionLister` 接口、`Applied`、`Transition`；错误 `ErrFenced`、`ErrLeaseLagging`、`ErrSchemaAbsent`、`ErrModeUnsupported`；`CheckFence(fence, lease, stored)` 是 cluster / standalone / never-leased 三种 fence 的唯一判定，MySQL 与文件实现共用。cluster 持有者要求 owner 与 epoch 都等于租约行（过期仍是自己的 → `ErrLeaseLagging`）；Proxy / Delegated 只在同 epoch 的租约已过期或已释放时可写；库里已有更高 epoch，或同 epoch 不同节点，一律 `ErrFenced`。standalone 不能写 cluster 写过的任务。
 - `file.go`: `FileStore`，无 meta DSN 时使用，`{data_dir}/.health.json`，临时文件 + fsync + rename 原子写；只接受 standalone fence，其他返回 `ErrModeUnsupported`；`SavePending` / `LoadPending` 让重启后补写未落盘的 transition；transition 日志最多保留 20000 条。
 - `file_test.go`: 文件实现跑 contract、重启与 pending 持久化、`CheckFence` 表驱动用例。
 - `storetest/storetest.go`: 两种实现共用的 contract：generation 由 store 分配、按内容（digest）识别重放、5000 条 open finding 分页读全、standalone fence、1000 路并发写 generation 恰好 1..n 不重复、cluster fence（含 100 轮新旧 epoch 交替、委托写在新租约后失效）。

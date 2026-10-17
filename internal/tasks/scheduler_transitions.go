@@ -1,6 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
 // output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged; STOPPING/STOPPED from lease-loss paths write through persistTaskFencedLocked (#360 / P2-6a)
+// note P2-6c (#421): markStoppedLocked never writes STOPPED over a stored FAILED row and fences STOPPED with this run's (owner, epoch), not the row read back
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -166,6 +167,10 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 	if !ok || task.State == StateStopped {
 		return nil
 	}
+	// The fence identity is this run's (owner, epoch), never the row read
+	// back below: a row another epoch already ended has no owner, and
+	// fencing with that empty identity would skip the fence (#421).
+	fenceOwner, fenceEpoch := task.OwnerWorkerID, task.Epoch
 	if s.store != nil {
 		store := s.store
 		currentEpoch := task.Epoch
@@ -185,6 +190,12 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 		if err == nil && fresh.SpecRevision >= task.SpecRevision {
 			// A newer operator Start already asked for another dump. Do not cover that row with STOPPED.
 			if fresh.DesiredRun == TaskDesiredRun && fresh.SpecRevision > task.AppliedSpecRevision {
+				return nil
+			}
+			if fresh.State == StateFailed {
+				// FAILED leaves only by an operator Start; a stop that
+				// ends a run never writes STOPPED over it (§24.4).
+				s.tasks[id] = s.overlayPendingDumpLocked(fresh)
 				return nil
 			}
 			active := fresh.State == StateRunning || fresh.State == StateStarting || fresh.State == StateRetryBackoff || fresh.State == StateLeaseDegraded
@@ -207,7 +218,7 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 			task = s.overlayPendingDumpLocked(task)
 		}
 	}
-	if err := s.writeStoppedLocked(id, task); err != nil {
+	if err := s.writeStoppedLocked(id, task, fenceOwner, fenceEpoch); err != nil {
 		return err
 	}
 	return s.finishStoredStopLocked(id)
@@ -230,8 +241,12 @@ func (s *Scheduler) keepNewerStopSpecLocked(id string, task Task) Task {
 	return task
 }
 
-func (s *Scheduler) writeStoppedLocked(id string, task Task) error {
-	owner, epoch := task.OwnerWorkerID, task.Epoch
+// writeStoppedLocked writes STOPPED fenced by the run's (owner, epoch); an
+// empty identity falls back to the unfenced write (standalone).
+func (s *Scheduler) writeStoppedLocked(id string, task Task, owner string, epoch int64) error {
+	if owner == "" || epoch <= 0 {
+		owner, epoch = task.OwnerWorkerID, task.Epoch
+	}
 	task.State = StateStopped
 	task.DesiredRun = TaskDesiredStop
 	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。

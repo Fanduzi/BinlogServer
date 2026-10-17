@@ -197,15 +197,7 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 			}
 		}
 	}
-	tf := &health.TaskFacts{State: string(task.State), Desired: task.DesiredRun, Owner: task.OwnerWorkerID, Epoch: task.Epoch,
-		StateSince: task.UpdatedAt, LastError: task.LastError,
-		FailedCurrent: task.State == StateFailed && task.FailedSpecRevision > 0 && task.FailedSpecRevision == task.SpecRevision}
-	if tf.Desired == "" {
-		tf.Desired = TaskDesiredRun
-		if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
-			tf.Desired = TaskDesiredStop
-		}
-	}
+	tf := rowTaskFacts(task)
 	if s := e.s; s != nil {
 		s.mu.Lock()
 		if s.runner == nil {
@@ -227,6 +219,20 @@ func (e *Evaluator) taskFacts(task Task, now time.Time) *health.TaskFacts {
 				snap, _ = e.s.LivenessSnapshot(task.ID)
 			}
 			tf.Liveness = &health.Liveness{LastRead: snap.LastRead, LastFailure: snap.LastFailure, FailureDetail: snap.FailureDetail}
+		}
+	}
+	return tf
+}
+
+// rowTaskFacts is the part of task.state read from the task row alone.
+func rowTaskFacts(task Task) *health.TaskFacts {
+	tf := &health.TaskFacts{State: string(task.State), Desired: task.DesiredRun, Owner: task.OwnerWorkerID, Epoch: task.Epoch,
+		StateSince: task.UpdatedAt, LastError: task.LastError,
+		FailedCurrent: task.State == StateFailed && task.FailedSpecRevision > 0 && task.FailedSpecRevision == task.SpecRevision}
+	if tf.Desired == "" {
+		tf.Desired = TaskDesiredRun
+		if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
+			tf.Desired = TaskDesiredStop
 		}
 	}
 	return tf

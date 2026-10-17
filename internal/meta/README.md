@@ -10,7 +10,7 @@
 - `lease_store.go`: lease 读写（Acquire/Renew/Release/Verify，与封文件前验租同一扇门）。同一 `worker_id` 收回租约（含已过期）不增加 epoch；别的 worker 接管过期租约才 `epoch+1`。`Release` 把 `owner_worker_id` 写成空，下一次 Acquire 视为换主并增加 epoch。
 - `write_fence.go`: ADR 0009 P2-6b / #417。`execUnderFence`：写的 context 带本任务的 `tasks.FenceIdentity` 时，`UpsertCheckpoint`、`UpsertBinlogFile`、`DeleteBinlogFile` 在同一事务里先 `SELECT owner_worker_id, epoch FROM task_leases … FOR UPDATE`，owner 与 epoch 都相同才写，否则（含 lease 已释放、没有行）返回 `tasks.ErrWriteFenced`，不写；重试包住整个事务。没有令牌（standalone、后台补传）时仍是原来的单条语句。
 - `write_fence_test.go`: sqlmock：新 epoch / 已释放 / 无行被拒且不执行 INSERT，匹配时锁与写同一事务，无令牌时单条语句。
-- `fenced_exec.go`: P2-6a / #360。`FencedExec` / `UpsertTaskFenced` 在同一事务里 `SELECT … FROM task_leases … FOR UPDATE`，仅当 (owner, epoch) 仍匹配（或 lease 已释放 / 无行）时写任务行，否则返回 `healthstore.ErrFenced`，拒绝陈旧 STOPPING/STOPPED 覆盖新 holder。
+- `fenced_exec.go`: P2-6a / #360（P2-6c / #421：规则改为 `tasks.CheckTaskRowFence`；已释放于更大 epoch 拒绝，无 lease 行时锁 `backup_tasks` 行判断）。`FencedExec` / `UpsertTaskFenced` 在同一事务里 `SELECT … FROM task_leases … FOR UPDATE`，仅当 (owner, epoch) 仍匹配（或 lease 已释放 / 无行）时写任务行，否则返回 `healthstore.ErrFenced`，拒绝陈旧 STOPPING/STOPPED 覆盖新 holder。
 - `fenced_exec_test.go`: sqlmock：陈旧 owner 被拒、匹配/已释放/无行可写、fenced 时不跑回调。
 - `retry.go`: 重试策略适配层与执行器封装（基于 backoff v4，屏蔽第三方类型）。`IsTransientMySQLError` 与任务重试白名单共用同一组文本（deadlock、lock wait timeout、connection reset、connection refused、broken pipe、server has gone away、invalid connection、bad connection、read-only、read only、timeout、eof）。
 - `tracing.go`: metadata store tracing 开关与 span helper（默认关闭）。

@@ -28,8 +28,14 @@ func (s *fencedMemoryStore) UpsertTaskFenced(ctx context.Context, task Task, own
 	s.leases.mu.Lock()
 	row, ok := s.leases.rows[task.ID]
 	s.leases.mu.Unlock()
-	if ok && row.owner != "" && (row.owner != owner || row.epoch != epoch) {
-		return healthstore.ErrFenced
+	in := TaskRowFenceInput{LeaseFound: ok, LeaseOwner: row.owner, LeaseEpoch: row.epoch}
+	if !ok {
+		if stored, err := s.fakeStore.GetTask(ctx, task.ID); err == nil {
+			in.RowFound, in.RowOwner, in.RowEpoch = true, stored.OwnerWorkerID, stored.Epoch
+		}
+	}
+	if err := CheckTaskRowFence(in, owner, epoch); err != nil {
+		return err
 	}
 	return s.fakeStore.UpsertTask(ctx, task)
 }
