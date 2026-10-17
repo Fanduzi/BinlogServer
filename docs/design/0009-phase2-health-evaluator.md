@@ -1078,6 +1078,62 @@ main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这�
 
 **风险**：同一块盘经不同 bind-mount 路径挂到两台（`/data` vs `/mnt/n1`）且未共享同一 `data_dir` 配置字符串时，仍会判「外来」并 FAILED——这符合「集群必须共享 data_dir 路径」的前提；真要跨路径等同，需另做 marker / 相对路径方案（§24.5 A/B）。
 
+### 24.9 兜底：拿着任务却没有进展（`TASK_NO_PROGRESS`，#421 sc1 QA，2026-10-17）
+
+**为什么还要兜底**：§24.8 堵住了 sc1 这一条路，但 sc1 暴露的是一类问题：节点拿着 lease、任务行 `RUNNING`，实际没有往本节点 `data_dir` 写任何东西，而现有 kind 全都不响——`DUMP_STALLED` / `SOURCE_UNREACHABLE` 只看源端有没有字节（sc1 里源端一直有字节），`TASK_TRANSITION_STALLED` 只看 STARTING/STOPPING 且是 WARNING，链 scope 读不到目录只会让健康变成 `UNKNOWN`，而 `UNKNOWN` 不让 `/api/health` 降级。以后任何一种「拿着任务但没干活」的 bug 都会同样静默。兜底按结果判断，不按原因判断。
+
+**事实**（`health.TaskFacts.Progress`，只在本进程开着这个任务的 run 时有）：
+- `RunSince`：本进程这次 run 登记的时间（`startTask` 登记 `s.runs[id]`）。同一次 run 内的重试不重置它，所以 RUNNING↔RETRY_BACKOFF 来回跳不会一直推迟告警。
+- `LastAdvance`：最近一次「有进展」的时间。进展 = runner 上报的 (file, pos) 前进了，或者确认已在源端 tip（idle 探测确认 at-tip，或收到心跳事件：MySQL / MariaDB 只在 dump 线程已发完 binlog、在末尾空等时才发心跳）。空闲的源库因此不会误报。
+- `File` / `InDataDir`：runner 当前分段的源文件名，以及本节点 `{data_dir}/{task_id}` 下有没有这个文件的分段。不在本节点 `data_dir` 下的进展**不算进展**（sc1 式往别处写）。`data_dir` 为空（只在测试里）时不做这项检查。
+
+**规则**（`TASK_NO_PROGRESS`，CRITICAL，scope `task.state`，subject 空，每个任务最多一条）：
+- 前提：desired `RUN`；状态不是 `FAILED`（`TASK_FAILED` 负责）；不是别的节点拥有（`OwnedElsewhere`，由 owner 评估）；`SOURCE_UNREACHABLE` 没有在说同一件事。
+- 本进程开着 run：`since = max(RunSince, LastAdvance（仅当 InDataDir）)`。
+- 本进程没开 run（无主任务由 `_health` 持有者代评、或 owner 是本节点但 run 没起来）：`since = StateSince`（任务行 `updated_at`）。这覆盖「desired RUN 但没有任何节点在跑」：dispatched 的 STARTING 一直没人认领、lease 只是过期后 fail-safe 写成的 `STOPPED / desired RUN` 一直没人重启。
+- 本进程是「没有 runner」的节点（`RunHere` 恒真、没有进度账本）：不判。
+- `now - since ≥ health.no_progress_after_sec`（默认 **120s**，0 = 默认，负数拒绝启动）即打开；detail 写明是哪种情况、多久、阈值，以及当前分段是否在本节点 `data_dir` 外。
+- 清除：同一规则不再成立（有了进展、任务停了 / FAILED / 被别人拥有）。
+
+**为什么 120s**：心跳周期 15s，idle 探测 2s，正常 run 从登记到第一次上报只要几秒；120s 比 `DUMP_STALLED`（45s）和 `SOURCE_UNREACHABLE`（90s）都晚，源端问题先由那两个 kind 报，兜底只抓它们看不见的。QA 的 sc1 在 70s 时还静默，加上默认 sweep 60s 和 5s liveness tick，sc1 类问题最迟约 125s 打开。
+
+**评估时机**：除 sweep 外，`markLivenessCrossings`（默认每 5s）把「越过阈值」也当作一次相位变化，标脏立即评估，不等下一次 sweep。
+
+### 24.10 失败路径矩阵（每个 PR 的 `go test` 都跑）
+
+Adrian 指出 #421 这类 bug 测试本该拦住。缺口是：每条失败路径只在各自的单测里验证了「状态对」，没有统一断言「有告警、`/api/health` 降级、状态不被改写」。`internal/tasks/p26d_failure_matrix_test.go` 把会让任务停在 FAILED / STOPPED / 卡住的路径列成一张表，集群和单机各跑一遍，每一行都断言三件事：
+1. 打开了预期的 CRITICAL finding（kind + 严重级别）；
+2. `Scheduler.HealthSummary` 是 `degraded`，reasons 里有这条 finding；
+3. 再跑一轮（旧 owner 醒来的 `applyRemoteStops`、control loop、再 sweep 一次）后任务行的状态和 `last_error` 没被改写。
+
+运维主动 Stop 是唯一预期「没有 finding、health ok」的行，作为对照放在表里。表里每一行写明对应的代码路径；新增一条会让任务停下的路径时必须在表里加一行（表头注释写明这条规则）。
+
+| 行 | 模式 | 怎么造 | 预期 |
+|---|---|---|---|
+| permanent-error | 单机 / 集群 | runner 返回永久错误 → `markFailedLocked` | `TASK_FAILED`；集群由 `_health` 持有者代评 |
+| segment-not-on-worker | 集群 | runner 返回 §24.8 的 `SEGMENT_NOT_ON_WORKER`（真机路径见 replication 的 sc1 回归） | `TASK_FAILED`，旧 owner 醒来后仍 FAILED |
+| unclassified-error | 单机 / 集群 | runner 返回不在重试白名单里的错误（如 `sealed file already exists`）→ 一次即 FAILED | `TASK_FAILED` |
+| running-no-progress | 单机 / 集群 | run 开着、RUNNING，但从不上报进展 | `TASK_NO_PROGRESS` |
+| progress-outside-data-dir | 单机 / 集群 | run 上报进展，但分段不在本节点 `data_dir` 下（sc1 形状） | `TASK_NO_PROGRESS` |
+| unclaimed-starting | 集群 | desired RUN、STARTING、无 owner，没人认领 | `TASK_NO_PROGRESS`（代评） |
+| lease-expired-stopped | 集群 | lease 释放后 fail-safe 写成 `STOPPED / desired RUN`，没人重启 | `TASK_NO_PROGRESS`（代评） |
+| operator-stop（对照） | 单机 / 集群 | 运维 Stop | 无 finding，health ok，行是 `STOPPED / desired STOP` |
+
+源端连不上时任务停在 `RETRY_BACKOFF`，由 `SOURCE_UNREACHABLE`（CRITICAL）报；它和 `DUMP_STALLED`、链类 kind 已有各自的回归，不重复进表。
+
+### 24.11 反向栅栏顺序（集成测试）
+
+QA 只在真机上跑了「先 FAILED、旧 owner 后醒」。反向顺序——旧 owner 先醒、它的 renew / 远端 stop 收尾先于新 owner 写 FAILED——此前只有单测。`internal/tasks/p26d_fence_order_test.go` 用两个真实的 `Scheduler`（共享任务表、`MemoryLease`、按 lease 检查栅栏的健康存储），真实的 renew 循环和 claim 路径：
+1. worker-b 以 epoch 1 运行；冻结它的 renew（lease 管理器上的闸门），等 lease 过期；
+2. worker-a 走 `ClaimExpiredTasks` 以 epoch 2 认领，它的 runner 停在「还没失败」；
+3. 解冻 worker-b，分两种顺序：(i) renew 先发现丢失；(ii) 先跑 `applyRemoteStops`。断言 worker-b 的 run 退出、任务行仍是 worker-a / epoch 2、没有 `TASK_STOPPED`、worker-b 没写任何行；
+4. worker-a 的 runner 返回 `SEGMENT_NOT_ON_WORKER` → FAILED、释放 lease；
+5. worker-b 再跑一次 `applyRemoteStops` 和 control loop，两个节点各 sweep 一次：任务行仍 FAILED 且 `last_error` 不变，CRITICAL `TASK_FAILED` 打开，`HealthSummary` degraded。
+
+### 24.12 集群 e2e 进每个 PR（交接）
+
+`cluster-roles`、`worker-crash-recovery`、`meta-failover` 三个集群 e2e 只在手动触发（meta-failover 还有 push main）时跑。改成每个 PR 都跑需要改 `.github/workflows/e2e.yml`，本仓库自动化用的 token 没有 workflow 权限，改动写在交接文档里由有权限的人执行。上面的矩阵和栅栏顺序测试是纯 `go test`，不依赖这一步，本 PR 起每个 PR 都跑。
+
 ### 24.7 本步不做
 
 - `HEALTH_STALE`（§8 第 10 条）：需要持有者给**有主**任务写 finding，而有主任务的写权在 owner，代写栅栏要求 lease 无人持有，两者冲突；拟改为 `_cluster` 级 finding（subject = 任务 id，`never` 栅栏，持有者写），下一步单独做。
