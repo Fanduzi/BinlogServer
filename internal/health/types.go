@@ -114,8 +114,8 @@ type TaskFacts struct {
 	// LeaseExpired (§24.13): the row names an owner whose lease expired and
 	// nobody claimed the task; StateSince is when that was first seen.
 	LeaseExpired bool
-	StateSince     time.Time
-	LastError      string
+	StateSince   time.Time
+	LastError    string
 	// FailedCurrent: the task is FAILED for the operator's current ask (its
 	// failed spec revision is the current one). FAILED sets desired STOP, so
 	// desired alone cannot tell a failed run from a deliberate stop.

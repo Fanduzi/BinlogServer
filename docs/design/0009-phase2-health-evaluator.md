@@ -1148,9 +1148,10 @@ QA 只在真机上跑了「先 FAILED、旧 owner 后醒」。反向顺序——
 
 **规则**：
 - 评估器在每种角色上都运行，并有稳定的 node id：worker 用 worker id；control-plane 用 `cluster.worker_id`（若配置），否则用 data_dir 里持久化的 node id（与单机同一个 `LoadOrCreateNodeID`）。control-plane 节点从不按持有者评估任务（`EvaluatorConfig.ControlPlaneOnly`：即使 id 恰好等于某个 worker 的 owner 也不行），只通过 `_health` 代评。
-- `_health` 持有者每轮用 store 的 `ListTasksWithExpiredLease`（按 meta 的 `NOW(6)` 判过期，不用本地时钟）找出 lease 已过期的任务，把它们与「行无主」的任务同样代评 `task.state`。代写栅栏不变：`(last owner, last epoch, Proxy)`，store 端已经允许「epoch 相同且 lease 过期」的代写；新 owner 一认领，epoch 前进，代写即被栅栏拒绝。
+- `_health` 持有者每轮用 store 的 `ListTaskIDsWithExpiredOwnerLease`（没有时退回 `ListTasksWithExpiredLease`；按 meta 的 `NOW(6)` 判过期，不用本地时钟）找出 lease 已过期的任务，把它们与「行无主」的任务同样代评 `task.state`。代写栅栏不变：`(last owner, last epoch, Proxy)`，store 端已经允许「epoch 相同且 lease 过期」的代写；新 owner 一认领，epoch 前进，代写即被栅栏拒绝。
 - 这种任务的 `TASK_NO_PROGRESS` 计时起点是 max(任务行 `updated_at`, 本节点第一次看到它 lease 过期的时间)，不是行的 `updated_at`：一个跑了几天的任务 lease 刚过期，不应立刻 CRITICAL。界：lease TTL + 1 个 sweep（发现）+ `no_progress_after_sec` + 1 个 sweep。QA 配置（TTL 15s、sweep 5s、NP 30s）下约 55s，小于 2×NP。detail 写明 `lease of owner n1 expired; no worker is running the task`。
 - 关闭：有 worker 认领（epoch 前进、行有新 owner），或 desired STOP / FAILED。
+- 候选集合来自 store，不只来自内存：control-plane 节点没有认领循环，在 worker 上创建、运行的任务从不进它的内存（QA r3 (b) 真机复现：修了身份之后 n2 已持有 `_health`，`responsible()` 只看内存名单，仍是 0 个任务）。`_health` 持有者每轮再读一次 store 全量任务表，把内存里没有、且「行无主」或「lease 已过期」的任务加入候选。只有持有者付这一次全表读；store 读失败时什么都不加。查过期 lease 用专门的 `ListTaskIDsWithExpiredOwnerLease`（只返回 id；owner 非空、epoch > 0、desired RUN、非 FAILED/STOPPED/CREATED）。
 
 ### 24.14 meta 只读之后静默 STOPPED（QA r3 (d)，#425，2026-10-17）
 
