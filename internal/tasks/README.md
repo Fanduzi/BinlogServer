@@ -51,7 +51,7 @@
 - `fenced_persist.go`: P2-6a。`FencedTaskStore` / `LeaseView`；`persistTaskFencedLocked` 在 store 支持时走 `UpsertTaskFenced`。P2-6c / #421：`CheckTaskRowFence` 是所有 `FencedTaskStore` 共用的任务行栅栏规则（持有中须是写者本人；已释放须释放在写者的 epoch，更大 epoch 拒绝；无 lease 行时按任务行判断）。
 - `evaluator_unowned.go`: P2-6c / #421（设计 §24）。`_health` lease（`HealthLeaseID`，TTL 3×sweep，每次 sweep 续约或认领）选出一个节点，用代写栅栏（最后一次任务 lease epoch，`Proxy`；从未有 lease 行时 `never`）评估任务行无 owner 的任务（FAILED、STOPPED、CREATED、未认领的 STARTING）的 `task.state`；`unownedFacts` 只读任务行，不读本地信号、liveness、链。
 - `p26c_unowned_eval_test.go`: #421：集群里 FAILED 无主任务由 `_health` 持有者打开 CRITICAL `TASK_FAILED`、健康 UNHEALTHY；只有一个节点评估；代评不读本地旧信号；认领中被栅栏拒绝后，释放后的下一轮会写；有主任务不代评。
-- `p26c_failed_preserved_test.go`: #421：旧 owner 醒来读到别的 epoch 写的 FAILED，停止 dump、行保持 FAILED 与 `last_error`；`CheckTaskRowFence` 表驱动。
+- `p26c_failed_preserved_test.go`: #421：旧 owner 醒来读到别的 epoch 写的 FAILED，停止 dump、行保持 FAILED 与 `last_error`；`CheckTaskRowFence` 表驱动；`markLeaseDegradedLocked`、`finishStoredStopLocked` 遇到 FAILED 不写。
 - `p26a_fence_test.go`: #360：lease 已到新 epoch 而任务行仍是旧 owner 时 fail-safe 写被拒；行与 lease 不一致时 TaskFacts 为 nil、健康非 HEALTHY。
 - `p26_handoff_row_test.go`: #420 QA 测试 3（meta 暂停 30s）：B 的 lease 已被 A 在 `task_leases` 上以新 epoch 认领、任务行还没改时，无论是 B 的数据面栅栏先拒绝追加（租约移交），还是 B 的续约先发现丢租，B 都不改任务行，A 的认领不会被当成远端 STOPPED。
 - `errors.go`: 稳定操作员错误类型（永久的 1045 / log_bin off / 身份不可用 / `SEGMENT_NOT_ON_WORKER` / `SEALED_FILE_EXISTS` / `CHECKPOINT_WRITE_FAILED` / `STREAM_REGRESSION` / `STORAGE_INCONSISTENT` / `EPOCH_NOT_ACQUIRED` / `SOURCE_SWITCHOVER`，可重试的 `SOURCE_UNREACHABLE`，与 `meta.IsTransientMySQLError` 同一组瞬时元数据文本，`OBJECT_PURGE_FAILED`，以及租约移交 `ErrLeaseHandoff`）。不在这三项白名单上的错误由调度器第一次写成 `FAILED`。`SOURCE_SWITCHOVER`、`STREAM_REGRESSION`、`STORAGE_INCONSISTENT` 不在白名单上。

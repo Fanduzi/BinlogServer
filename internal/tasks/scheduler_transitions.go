@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
 // output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged; STOPPING/STOPPED from lease-loss paths write through persistTaskFencedLocked (#360 / P2-6a)
-// note P2-6c (#421): markStoppedLocked never writes STOPPED over a stored FAILED row and fences STOPPED with this run's (owner, epoch), not the row read back
+// note P2-6c (#421): markStoppedLocked and finishStoredStopLocked never write STOPPED over a stored FAILED row, STOPPED is fenced with this run's (owner, epoch), not the row read back, and markLeaseDegradedLocked leaves FAILED alone
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -67,7 +67,9 @@ func (s *Scheduler) markRunnerReadyLocked(id string) error {
 
 func (s *Scheduler) markLeaseDegradedLocked(id, message string, now time.Time) error {
 	task, ok := s.tasks[id]
-	if !ok || task.State == StateStopping || task.State == StateStopped {
+	// FAILED (this run's, or another epoch's adopted from the row) is not
+	// degraded: a renew error on the way out must not rewrite it (#421).
+	if !ok || task.State == StateStopping || task.State == StateStopped || task.State == StateFailed {
 		return nil
 	}
 	if task.State != StateLeaseDegraded {
@@ -284,7 +286,8 @@ func (s *Scheduler) finishStoredStopLocked(id string) error {
 		if err != nil {
 			return err
 		}
-		if fresh.State == StateStopped {
+		if fresh.State == StateStopped || fresh.State == StateFailed {
+			// FAILED is not a Stop to finish (§24.4, #421).
 			return nil
 		}
 		if mem, ok := s.tasks[id]; ok && mem.DesiredRun == TaskDesiredRun && mem.SpecRevision > fresh.SpecRevision && mem.SpecRevision > mem.AppliedSpecRevision {

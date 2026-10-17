@@ -1,6 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: lease renew ticks and lease manager renew responses/errors
 // output: lease renewal decisions delegated to centralized lifecycle transitions; a lost lease whose row has a new owner or newer epoch stops the dump and yields in memory without writing the row (#346); the renew loop start marks LEASE_ACQUIRED and a yield marks LEASE_LOST for the health evaluator; each successful renew confirms the lease clock (WithLeaseClock) from the time the renew was sent, and a lost renew, exceeded grace or yield marks that epoch lost so the runner's write fence refuses the next write (ADR 0009 P2-6b, #417)
+// note P2-6c (#421): a renew error after the run's context ended returns without LEASE_DEGRADED (it would cover the state the run ended in)
 // pos: scheduler cluster lease-maintenance loop separated from transition recipes
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -67,6 +68,13 @@ func (s *Scheduler) renewLeaseLoop(ctx context.Context, id, workerID string, epo
 				logTransitionPersistError(id, StateStopping, s.failSafeStopLocked(id, "TASK_LEASE_LOST", "lease lost"))
 			}
 			s.mu.Unlock()
+			return
+		}
+
+		if ctx.Err() != nil {
+			// The run is ending (cancelled): a renew error from that is not
+			// a degraded lease, and writing LEASE_DEGRADED would cover the
+			// state the run ended in (a FAILED row, #421).
 			return
 		}
 

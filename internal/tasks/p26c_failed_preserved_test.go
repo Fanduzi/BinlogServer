@@ -116,3 +116,44 @@ func TestThawedOwnerKeepsForeignFailed(t *testing.T) {
 		t.Fatal("the old epoch is still fresh on the lease clock; the data-plane fence would let it write")
 	}
 }
+
+// The renew loop of the old run failed with "context canceled" once the run
+// was cancelled; markLeaseDegradedLocked wrote LEASE_DEGRADED over the
+// FAILED row (seen on the real #421 repro). And finishStoredStopLocked
+// wrote STOPPED over a stored FAILED row without a fence.
+func TestStopPathsKeepStoredFailed(t *testing.T) {
+	for _, path := range []string{"lease-degraded", "finish-stored-stop"} {
+		t.Run(path, func(t *testing.T) {
+			store := newFakeStore()
+			s := NewScheduler(WithStore(store))
+			task := s.mustTask(t)
+			ctx := context.Background()
+			failed, err := store.GetTask(ctx, task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failed.State, failed.DesiredRun, failed.LastError = StateFailed, TaskDesiredStop, failedLastError
+			failed.OwnerWorkerID, failed.Epoch = "", 0
+			if err := store.UpsertTask(ctx, failed); err != nil {
+				t.Fatal(err)
+			}
+			s.mu.Lock()
+			s.tasks[task.ID] = failed
+			switch path {
+			case "lease-degraded":
+				err = s.markLeaseDegradedLocked(task.ID, "context canceled", time.Now())
+			default:
+				err = s.finishStoredStopLocked(task.ID)
+			}
+			mem := s.tasks[task.ID]
+			s.mu.Unlock()
+			if err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			got, _ := store.GetTask(ctx, task.ID)
+			if got.State != StateFailed || got.LastError != failedLastError || mem.State != StateFailed {
+				t.Fatalf("FAILED rewritten: row=%s %q memory=%s", got.State, got.LastError, mem.State)
+			}
+		})
+	}
+}

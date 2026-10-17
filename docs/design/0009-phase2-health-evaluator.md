@@ -1041,6 +1041,9 @@ main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这�
    | 已释放（owner 空） | lease epoch 等于写者 epoch（释放的是自己这一代）；epoch 更大 = 之后有别的 epoch 运行并结束 → `ErrFenced` |
    | 没有行 | 同一事务 `SELECT owner_worker_id, epoch FROM tasks … FOR UPDATE`：行 epoch 为 0，或 owner 与 epoch 等于写者；行上是别的 owner / 更大 epoch → `ErrFenced` |
    被拒的写和原来一样只在内存里让出（`yieldLostLeaseLocked` / `markHealthDirty(LEASE_LOST)`）。
+4. **真机复现补出的两条路径**（单测只覆盖了前三条，真机上旧 owner 仍把行写成 `STOPPED / last_error = context canceled`）：
+   - 第 1 条取消 run 后，续约循环的 Renew 因 context 取消返回错误，`markLeaseDegradedLocked` 把内存的 FAILED 改成 `LEASE_DEGRADED` 并**无栅栏**写回任务行，run 退出时内存不再是 FAILED，又走了 STOPPED 收尾。改为：续约循环在 run 的 context 已结束时直接返回，不算降级；`markLeaseDegradedLocked` 对 FAILED 不动（与 `failSafeStopLocked` 一致）。
+   - `finishStoredStopLocked`（STOPPED 之后「行上仍是 Stop 就再写一次」）用无栅栏的 `persistTaskLocked`，读回 `FAILED / desired STOP` 会当成未完成的 Stop 写 STOPPED；`writeStoppedLocked` 被栅栏拒绝时返回 nil，这一步照样执行。改为：读回 FAILED 直接返回。
 
 ### 24.5 集群存储前提（文档，不改行为）
 
@@ -1058,7 +1061,7 @@ main 上没有数据面栅栏，B 在恢复后往往先续约成功，所以这�
 
 - `tasks/p26c_unowned_eval_test.go`：集群评估器、内存 lease；任务行 `FAILED / owner 空`、lease `'' / 2`、`task_health` 上一次由 n1 epoch 1 写成 HEALTHY：持有 `_health` 的节点一轮 sweep 后打开 CRITICAL `TASK_FAILED`、健康 `UNHEALTHY`；不持有 `_health` 的节点不评估；`_health` 被别的节点持有时本节点不代评；代评不读本节点的旧信号、不改链 kind。
 - `healthstore/storetest`：已释放 lease 的同 epoch 代写在 `fence_node` 不同时放行；仅过期（owner 仍在）时仍按节点拒绝。
-- `tasks/p26c_failed_preserved_test.go`：共享行被别的 epoch 写成 FAILED、lease 已释放在 epoch 2，本节点 epoch 1 的 run 仍在：`applyRemoteStops` 之后 run 退出，任务行仍是 `FAILED`、`last_error` 不变；内存为 FAILED。
+- `tasks/p26c_failed_preserved_test.go`：共享行被别的 epoch 写成 FAILED、lease 已释放在 epoch 2，本节点 epoch 1 的 run 仍在：`applyRemoteStops` 之后 run 退出，任务行仍是 `FAILED`、`last_error` 不变；内存为 FAILED。`markLeaseDegradedLocked` 与 `finishStoredStopLocked` 遇到 FAILED 都不写（§24.4 第 4 条）。
 - `meta/fenced_exec_test.go`、`tasks.CheckTaskRowFence` 表驱动：已释放于更大 epoch 拒绝、释放于同 epoch 放行、无 lease 行时按任务行判断。
 - 真机（#421 复现脚本改写）：非共享 `data_dir` 下 (a) CRITICAL `TASK_FAILED` 打开、`/api/health` 非 ok，(b) 旧 owner 醒来后任务行仍是 FAILED，(c) 共享目录下冻结接管照常续写。证据在 `/workspace/binlog-server-verify-evidence-421/`。
 
