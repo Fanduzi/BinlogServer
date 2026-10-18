@@ -1192,3 +1192,61 @@ QA (c)：新 owner 认领后一直 `RETRY_BACKOFF`（旧 dump 连接 KILL 不到
 
 - `HEALTH_STALE`（§8 第 10 条）：需要持有者给**有主**任务写 finding，而有主任务的写权在 owner，代写栅栏要求 lease 无人持有，两者冲突；拟改为 `_cluster` 级 finding（subject = 任务 id，`never` 栅栏，持有者写），下一步单独做。
 - 链 scope 的代评与非共享存储的委派、`OWNER_CHANGED`、节点消失清理（§13 P2-6 其余部分）。
+
+## 25. #427：meta 被黑洞时 `/api/health` 有界返回，并留下 `META_UNREACHABLE`（2026-10-19）
+
+本节把 P2-7 中「meta 宕机缓存、真实 2s」里 `/api/health` 的部分提前做，`/metrics` 的独立连接池与缓存序列仍留在 P2-7。
+
+### 25.1 问题（#424 r4 (h) 复现）
+
+两节点集群，`meta_dsn` 指向一个 TCP 代理；对代理 `kill -STOP` 100s（连接挂住，而不是被拒绝）。
+
+1. 整整 100s，两个节点的 `/api/health` 在 3s 内一次都没有返回。
+2. 写入停止（128161 → 128824 字节），但恢复后 `finding_transitions` 为空：这次中断在 meta 里没有任何记录，事后无法审计。
+3. n1 日志只有 info 级别的 `health evaluate task=1: context deadline exceeded`。
+
+对照（r4 (g)）：代理被 kill、连接被拒绝时，30s 内两个节点都 degraded（`FINDINGS_PERSIST_FAILED; findings store unreadable: ... connection refused`），恢复后补记了 METADATA_WRITE_BLOCKED / EVENT_PERSIST_FAILED / TASK_NO_PROGRESS 的开关。
+
+### 25.2 根因（假设，先用红测证实）
+
+- `Scheduler.HealthSummary` 用请求自己的 ctx（没有 deadline）调 `OpenFindings`：一次 `ListOpenFindings`，加上每个任务一次 `ListOpenFindingsForTask`，都走共享的 32 连接池。DSN 没有 `readTimeout`，连接挂住时查询一直等到 TCP 恢复，handler 也就一直不返回。连接被拒绝时 driver 立刻报错，所以 (g) 正常。
+- `openManagedFindings` 读失败时返回 nil：meta 读不到时，评估器管理的 CRITICAL finding 从汇总里**静默消失**，只剩 store 错误这一条把状态拉成 degraded。
+- 评估器每轮都有 deadline，超时后只打日志，不产生信号，所以没有任何 kind 会因「meta 读不到」打开。恢复后事实看起来一切正常，于是没有转移。
+
+### 25.3 规则
+
+**D1 `/api/health` 的读有上限。**
+- `HealthSummary` 的全部 meta 读共用一个预算 `healthReadBudget = 1s`（从进入 handler 算起，不按每次查询算）。第一次超时之后，剩下的读立即失败，不会叠加成 N × 1s。
+- 读在单独的 goroutine 里跑，handler 在预算到点时直接返回，不依赖 driver 是否遵守 ctx（#339 re-QA 测到过 5.0s）。同一时刻最多一个读在路上（single-flight）：并发的探针共用这一次读的结果，不在挂住的连接上堆积 goroutine 和连接。
+- 预算内没读完：返回 503 `degraded`，reason 含 `META_UNREACHABLE: findings store read did not answer within 1s`。内存里的 finding（未持久化的、评估器 `unsavedOpen` 的、`persistFailureFinding`）照常列出。
+- `openManagedFindings` 读失败时不再返回空：它把错误交回 `OpenFindings`，汇总里写明「managed findings of task X unreadable」，而不是假装这个任务没有 open finding。
+
+**D2 `META_UNREACHABLE`：本节点观察到的 meta 不可达。**
+- 新的信号 kind（S17），CRITICAL，task = `_cluster`，subject = 本节点 node id（集群里每个节点各报各的，互不覆盖）。Managed，唯一写者是评估器（lintguard 的 Managed 表一并更新）。
+- 观测来源（都走同一个 `metaReach` 记录器，本地时钟）：
+  1. `/api/health` 的有界读：超时或连接错误记一次失败，读成功记一次成功；
+  2. 评估器每个 `LivenessTick`（默认 5s）做一次 `PingContext`，上限 1s；
+  3. 评估器一轮里 meta 读返回超时或连接类错误（`context.DeadlineExceeded`、`driver.ErrBadConn`、`net.Error`、MySQL 2002/2003/2006/2013）。SQL 语义错误（权限、只读 1290 等）不算不可达，那些有各自的 kind。
+- 第一次失败记下 `since`。连续失败满 `meta_unreachable_after`（默认 10s，避免一次慢查询就打开）后 `SignalFailure`，detail 带 `since` 与最近一次错误（`timed out after 1s` 或 `connection refused`）。下一次成功 `SignalSuccess`。
+- 打开期间 meta 写不进去：finding 留在评估器内存里（`unsavedOpen`），`/api/health` 与 `/api/findings` 从内存列出。恢复后走现有的补记路径（与 r4 (g) 的 METADATA_WRITE_BLOCKED 相同），写入 OPEN 与 CLOSE 两条转移，`FactAt` 分别是本地观察到的开始与恢复时间。
+- 连接被拒绝与连接挂住走同一套逻辑；被拒绝时 `FINDINGS_PERSIST_FAILED` 照旧，两条同时存在。
+
+### 25.4 本步不做
+
+- `/metrics` 的独立连接池、`readTimeout=2s` 的 DSN、缓存任务列表输出 `task_healthy=0`（P2-7）。
+- 写路径（checkpoint、任务行、lease 续约）的超时不变；黑洞期间 dump 写不进去，仍由 `TASK_NO_PROGRESS` 在恢复后补记。
+
+### 25.5 测试（先红）
+
+- `tasks` 单测：store 的 `ListOpenFindings` 一直阻塞到 ctx 结束 → `HealthSummary` 在 1s + 200ms 内返回 degraded，reason 含 `META_UNREACHABLE`；store 忽略 ctx、永远阻塞 → 仍在上限内返回；10 个并发调用只触发一次 store 读。
+- `tasks` 单测：`ListOpenFindingsForTask` 返回错误 → 汇总写明不可读，不报 ok。
+- 评估器单测（假时钟）：Ping 连续失败 9s 不开、满 10s 打开 `META_UNREACHABLE/<node>`；恢复后一轮内关闭；store 在故障期间拒绝写、恢复后接受 → 有 OPEN 与 CLOSE 两条转移，`FactAt` 等于故障开始与恢复时间。
+- 错误分类单测：1290（只读）不算不可达，2003、`context.DeadlineExceeded` 算。
+- `api` 单测：handler 在 store 挂住时 2s 内返回 503。
+
+### 25.6 QA
+
+- 重跑 r4 (h)：每 10s `curl -m 3 /api/health`，从 fault+10s 起每次都在 2s 内返回 degraded，reason 含 `META_UNREACHABLE`；恢复后每个节点各有一对 `META_UNREACHABLE` OPEN/CLOSE，时间与故障窗口相差不超过一个 LivenessTick + `meta_unreachable_after`。
+- 重跑 r4 (g)（连接被拒绝）：结果与 r4 一致，另多一对 `META_UNREACHABLE`。
+- 重跑 sc5（meta 暂停 12s、30s）：12s 的暂停打开并关闭一次 `META_UNREACHABLE`（这是真实的不可达，不是误报）；恢复数据一致。
+- 健康时 0 条 `META_UNREACHABLE`；1 小时空闲源无误报。
