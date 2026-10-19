@@ -37,6 +37,7 @@ note: if this file changes, update this header and frontend/src/components/READM
           </div>
           <div class="detail-grid detail-grid--summary">
             <div class="detail-item"><span>{{ $t('detail.currentState') }}</span><strong>{{ stateLabel(task.state) }}</strong></div>
+            <div class="detail-item"><span>{{ $t('detail.desiredRun') }}</span><strong data-testid="task-desired-run">{{ task.desired_run || "--" }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.replicationStatus') }}</span><strong>{{ replication ? replicationStatusLabel(replication.status) : "--" }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.delay') }}</span><strong>{{ replication ? `${formatDelay(replication.delay_seconds, replication.has_progress)} ${$t('detail.seconds')}` : "--" }}</strong></div>
             <div class="detail-item"><span>{{ $t('detail.leaseStatus') }}</span><strong>{{ leaseRiskLabel(task, lease) }}</strong></div>

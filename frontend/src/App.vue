@@ -264,6 +264,11 @@ note: if this file changes, update this header and frontend/README.md.
                 <el-tag v-if="row.task.storage_alert" size="small" type="danger" data-testid="task-storage-alert-row">{{ $t('detail.storageAlert') }}</el-tag>
               </template>
             </el-table-column>
+            <el-table-column :label="$t('table.desiredRun')" width="100">
+              <template #default="{ row }">
+                <span :data-testid="`task-desired-${row.task.id}`">{{ row.task.desired_run || "--" }}</span>
+              </template>
+            </el-table-column>
             <el-table-column :label="$t('table.ownerWorker')" min-width="130">
               <template #default="{ row }">{{ ownerWorkerLabel(row.task) }}</template>
             </el-table-column>

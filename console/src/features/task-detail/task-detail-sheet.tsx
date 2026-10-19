@@ -1,3 +1,7 @@
+// input: one task, including desired_run, and its replication and replay data
+// output: the task detail drawer, including the desired RUN or STOP state
+// pos: Console task detail
+// note: if this file changes, update this header and console/src/features/task-detail/README.md.
 // Task detail drawer, ported from frontend/src/components/TaskDetailDrawer.vue
 // plus its handlers in App.vue. Rendered by the /tasks/$taskId and
 // /alerts/$taskId routes, so a detail link opens directly.
@@ -468,6 +472,9 @@ function DetailBody({
         </div>
         <div className={cn(grid, 'mt-3')}>
           <Item label={t('detail.currentState')}>{stateLabel(t, task.state)}</Item>
+          <Item label={t('detail.desiredRun')}>
+            <span data-testid='task-desired-run'>{task.desired_run || '--'}</span>
+          </Item>
           <Item label={t('detail.replicationStatus')}>
             {replication ? replicationStatusLabel(t, replication.status) : '--'}
           </Item>
