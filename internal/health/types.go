@@ -180,6 +180,10 @@ type SignalState struct {
 	Failures   int64
 	Detail     string
 	FactAt     time.Time
+	// SuccessFactAt is when the latest success happened when the caller
+	// observed it earlier than it was signalled (META_UNREACHABLE closes at
+	// the first answer, design §25.8 R3); zero = the evaluation time.
+	SuccessFactAt time.Time
 	// Epoch is the task lease epoch the latest failure belongs to (0 =
 	// unknown); a failure of an older epoch no longer speaks for the task.
 	Epoch int64

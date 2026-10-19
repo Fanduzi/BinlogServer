@@ -116,6 +116,11 @@ type EvaluatorConfig struct {
 	// MetaUnreachableAfter is how long metadata store failures last before
 	// META_UNREACHABLE opens (default 10s, design §25 D2).
 	MetaUnreachableAfter time.Duration
+	// MetaPingInterval is how often this node pings the metadata store for
+	// META_UNREACHABLE, on its own goroutine (default 1s, design §25.8 R1).
+	MetaPingInterval time.Duration
+	// MetaPingTimeout bounds one such ping (default 1s).
+	MetaPingTimeout time.Duration
 	// LivenessTick is how often the source liveness clocks are checked for
 	// a threshold crossing (default 5s); a crossing marks the task dirty.
 	LivenessTick time.Duration
