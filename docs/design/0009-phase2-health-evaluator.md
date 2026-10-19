@@ -1289,6 +1289,16 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
   - 集群 legacy 行：`first_seen` = `since`，`resolved_at` = 第一次成功的观测时刻，`UpsertFinding` 转 UTC 写入（原来就是）。
   - 已经按会话时区写进去的旧行不迁移。
 
+- **R4 集群里每次中断都留下记录（本地 sc5 复现时发现）。** R1–R3 之后在真实两节点集群上重跑 sc5，12s 和 30s 两次暂停都被观测到，但 `task_findings` 每个节点只剩一行：`first_seen` 是第一次暂停的开始，`resolved_at` 是第二次的结束，`count` 累加，看起来像一次 67s 的中断。原因：
+  - legacy 的 `upsertFindingSQL` 对已存在的行一律 `first_seen = LEAST(...)`、`count = GREATEST(...)`，一行已经 resolved 之后再次打开，仍保留上一次的 `first_seen` 与次数。
+  - 集群里（P2-6 之前）`_cluster` 没有 `finding_transitions`，legacy sink 又对 `_cluster` 不写 `task_events`，所以同一节点的上一次中断被下一次覆盖后，在 meta 里没有任何痕迹。
+
+  修订：
+  - legacy upsert：已 resolved 的行再次打开时，`first_seen` 与 `count` 取新值（与健康存储的 `findingUpsertSQL` 一致）；仍打开的行照旧保留更早的 `first_seen`。
+  - legacy sink 对 `_cluster` 的 `META_UNREACHABLE` 也写 `task_events`（`task_id = _cluster`）：`FINDING_REPORTED` / `FINDING_RESOLVED`，message 为 `META_UNREACHABLE <node>`，RESOLVED 的 `event_time` 是第一次应答，detail 写明这次中断的起止（UTC）。故障期间 REPORTED 写不进去，通常只剩 RESOLVED，它本身带着完整窗口。其他 `_cluster` kind 不变。
+  - 每个节点在打开和关闭时各打一行日志（`META_UNREACHABLE opened ... since` / `resolved: outage <起> – <止> (<时长>)`）。
+  - P2-6 让 `_health` 持有者评估 `_cluster` 之后，集群也改为 OPEN/CLOSE 转移，届时这一条事件可以去掉。
+
 **测试（先红）**
 
 - `internal/tasks/p26f_meta_outage_matrix_test.go`：失败路径矩阵新增 meta 中断一组，真实的 `Evaluator.Run` 循环与 finding sink，meta 调用（lease、健康存储、finding 存储、ping）在暂停期间挂住直到 ctx 结束，时间按比例缩小（`meta_unreachable_after` = 300ms，ping 间隔 20ms）。
@@ -1296,6 +1306,8 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
   - `meta-pause-30s`（3×）：每个节点各一行 `META_UNREACHABLE/<node>`，`first_seen` 在暂停开始后 1 个 ping 间隔内，`resolved_at` 在恢复后很短时间内；standalone 有 OPEN/CLOSE，`fact_at` 同样分别对应暂停开始与恢复。
   - `meta-pause-12s`（1.2×）：同上，每个节点都有记录。
   - `meta-pause-5s`（0.5×，对照）：任何节点都没有记录。
+  - `meta-pause-12s-then-30s`（sc5 原样：12s，间隔 25s，再 30s）：集群每个节点两条 `FINDING_RESOLVED META_UNREACHABLE <node>` 事件，时间分别是两次恢复；行的 `first_seen` 是第二次暂停的开始。standalone 依次是 OPEN、CLOSE、OPEN、CLOSE。
+- `internal/meta`：真实 MySQL（`BINLOG_TEST_META_DSN`）上，已 resolved 的 legacy 行再次打开时 `first_seen` 与 `count` 取新值。
 - `internal/meta`：sqlmock 断言健康存储的写入用 `UTC_TIMESTAMP(6)` 而不是 `NOW(6)`，OPEN 的 `first_seen` 和 CLOSE 的 `resolved_at` 用转移的 `FactAt`。
 - `internal/health`：带 `SuccessFactAt` 的 signal 关闭时，CLOSE 的 `FactAt` 是这个时间；不带时仍是本轮时间。
 
