@@ -1683,3 +1683,134 @@ Swagger 的 `kind` 不是枚举。多一种 kind 字符串，不重生成。
 - standalone 的 `HEALTH_STALE`。
 - 评估器 `on` 且 schema < 9 时拒绝启动。
 - 真机 SIGSTOP / kill -9。已交付的栅栏（P2-6a/b/c）和 P2-6.2 的盒子验收不在本步重跑。CI 的三节点 e2e 是 `workflow_dispatch`，本步用进程内三调度器代替。
+
+## 29. #450：续租宽限把期望 RUNNING 写成 STOPPED，meta 恢复后不再续跑（2026-10-19）
+
+v0.5.75 和 #449（`8301564`）都能复现，不是 #449 引入的。#425 堵住的是 meta 只读之后旧 owner 把行改写成 `STOPPED / desired STOP` 的那一条；续租宽限超时这条还在。本节是任务状态模型上的决定：期望状态和观察到的执行状态是两回事，只有运维 Stop 和 FAILED 可以写下期望 STOP。
+
+### 29.1 现象（#450）
+
+两节点或三节点，`lease_ttl_sec: 60`，`lease_renew_interval_sec: 5`，`lease_grace_sec` 仍是默认 30，评估器 on，任务期望 RUNNING。把节点到 meta 的通路黑洞或拒绝连接 35 秒以上（QA 测的是 36 秒、40 秒、45 秒）：
+
+```
+11:59:02  TASK_LEASE_DEGRADED
+11:59:38  TASK_LEASE_GRACE_EXCEEDED, TASK_STOPPED
+```
+
+meta 恢复 90 秒后 `backup_tasks` 仍是 `STOPPED / owner 空 / desired STOP`。`task_findings` 没有未关闭的行，两个节点的 `/api/health` 都是 ok。v0.5.75 上同样停在 STOPPED，只是碰巧留下一条 `TASK_PERSIST_FAILED`。备份静默停掉，和运维手动停的样子一样。源端 purge 之后就丢数据。
+
+### 29.2 根因
+
+三问里，前两个都是第三个的后果。
+
+**期望状态和观察到的执行状态被写成了同一件事。** `renewLeaseLoop` 在续租报错满 `lease_grace_sec` 时调用 `failSafeStopLocked`（`TASK_LEASE_GRACE_EXCEEDED`）。它把内存改成 STOPPING、取消 dump。run 退出时 `markStoppedLocked` → `writeStoppedLocked` 同时写三样东西：观察到的 `state = STOPPED`、`desired_run = STOP`、owner / epoch 清空，并释放 lease。`desired_run = STOP` 是运维 Stop 的信号（`StopTask` 先把 desired 写成 STOP，再写 STOPPING）。宽限超时不是运维 Stop，却走了同一条收尾。
+
+续租返回 `!ok` 且行上没有新 owner（lease 只是被释放或过期、还没人认领）也走 `failSafeStopLocked`。续租循环 panic 同样。这三条都把「这一个 epoch 不能再写」写成「不要再跑」。
+
+**调度器不会再认领，是因为行已经不像该跑的任务。** `ClaimExpiredTasks` 只认 lease 过期的 `RUNNING` / `LEASE_DEGRADED` / `RETRY_BACKOFF`。`decideConverge` 看到 desired STOP 就收尾，不再 Acquire。`STOPPED / desired STOP / owner 空` 和运维 Stop 无法区分。
+
+**没有 finding，是因为告警看的是期望，而期望已经被改掉。**
+
+1. `TASK_NO_PROGRESS`（§24.9）的前提是 desired RUN。写成 desired STOP 之后这条永不成立。矩阵里的 `lease-expired-stopped` 能报，是因为它手工留着 desired RUN；宽限路径不留。
+2. `HEALTH_STALE`（§28）看 `task_health.evaluated_at`。无主的 STOPPED 仍由 `_health` 持有者代评 `task.state`，代评会刷新 `evaluated_at`。健康行一直是新的，HEALTH_STALE 不开。它本身也只是 WARNING，不让 `/api/health` 降级（§28 D8）。
+3. `META_UNREACHABLE` 在 meta 一应答就关闭。恢复之后健康是 ok。
+
+meta 还断着的时候，STOPPED 写往往失败，进 `unpublished`。`writeStoppedLocked` 已经把内存里的 owner / epoch 清掉，`republishUnpublished` 对空身份退回不带栅栏的 upsert（和 #425 同一形状）。meta 一恢复，这份 `STOPPED / desired STOP` 就落库，可能盖住已经认领的新 epoch。v0.5.75 上留下的 `TASK_PERSIST_FAILED` 就是这次失败的写。
+
+默认数字对得上 QA 的 35 秒：宽限 30 秒，续租周期 5 秒，第一次失败后再过一个周期才判定宽限，大约 35 秒。`lease_ttl` 60 秒还没到，`0.8 × ttl` 的数据面栅栏（48 秒）也还没到。宽限先把 dump 停掉，并写下期望 STOP，过期认领根本看不到一行 RUNNING。
+
+### 29.3 状态机
+
+两条轴，不合并。
+
+| 轴 | 存在哪 | 谁可以改 | 含义 |
+|---|---|---|---|
+| 期望 `desired_run` | 任务行 | 运维 Start / Stop；`markFailedLocked`（终态，离开只能再 Start） | 该不该有人跑 |
+| 观察 `state` | 任务行 + 本进程内存 | 执行路径 | 现在有没有 dump 在跑 |
+
+`STOPPED` 只表示「本进程这条 dump 已经结束」。它不是「不要再跑」。期望 STOP 只来自两处：运维 `StopTask`（先 desired STOP，再 STOPPING，run 退出写 STOPPED），以及 FAILED（desired STOP，`failed_spec_revision` = 当前 spec，离开只能运维 Start）。
+
+续租失败、宽限用尽、lease 被别人拿走、续租循环 panic、进程被暂停，都只结束本 epoch 的 dump。期望保持 RUN。
+
+```
+期望 RUN
+  ├─ 恰好一个节点持有未过期 lease，epoch 为栅栏，dump 在跑或在该 epoch 上重试
+  └─ 否则：lease 已释放或已过期，任何节点可以 Acquire（释放后 owner 为空，epoch + 1）
+        一个 sweep 内仍没有这样的持有者 → CRITICAL（§29.6）
+
+期望 STOP（运维 Stop 或 FAILED）
+  └─ 不认领、不改回 RUN、不开「没人跑」这条 finding
+```
+
+### 29.4 时序
+
+记号：`G` = `lease_grace_sec`（默认 30），`T` = `lease_ttl_sec`（QA 为 60），`R` = 续租周期（QA 为 5）。宽限判定落在下一次续租 tick 上，所以观察到的停 dump 约在 `G` 到 `G+R`。数据面本地栅栏在 `0.8 × T`（QA 为 48 秒）拒绝本 epoch 的写。
+
+**中断短于宽限（也短于 T）。** 续租报错，内存进入 `LEASE_DEGRADED`（写得进 meta 则行也是；写不进则 `unpublished`）。宽限之内续租成功：`markLeaseRenewedLocked` 回到 RUNNING，同一 epoch，dump 没有被取消。没有缺口，没有第二份 dump。v0.5.74 的 15 秒黑洞是这一档。
+
+**中断长于宽限、短于 T（#450，约 35–60 秒）。** 宽限到了，本进程 `Lose` 这个 epoch（本地栅栏拒绝后续写）、取消 dump、尝试释放 lease。期望保持 RUN，行保持最后一次成功写下的 `RUNNING` 或 `LEASE_DEGRADED`（不写 STOPPED）。释放成功则 owner 被清空、`lease_expire_at = NOW`，下一个 Acquire 把 epoch 加一（释放后的 owner 是空，和任何 worker 都不同）。释放时 meta 仍不可达则记下重试，lease 自己也会在 T 到期。meta 恢复后认领循环 Acquire 新 epoch，从已存 checkpoint 续跑。旧 epoch 的写被栅栏拒绝。同一时刻最多一条 dump。
+
+**中断长于 T。** 宽限仍先于 T 取消 dump。lease 在 T 到期后即可被认领，不必等释放调用成功。期望仍是 RUN，所以认领发生。不会留下 desired STOP。
+
+**脑裂：一个节点到得了 meta，另一个到不了。** 到不了的是 owner。它的续租报错，宽限后取消自己的 dump 并 `Lose`。释放调用到不了 meta，lease 行仍是它的、未过期，到得了 meta 的节点不认领，不会开第二条 dump。T 一到，对端 Acquire epoch+1。owner 醒来后的续租看到新 owner，走已有的 `yieldLostLeaseLocked`（只改内存，不写行，#346）。它晚到的行写带着旧 epoch，栅栏拒绝。
+
+**节点 SIGSTOP（进程冻住，meta 正常）。** 进程不跑，宽限计时不走。冻的时间短于 T：解冻后的第一次续租仍是本 owner（续租 SQL 不看是否过期），`Confirm` 刷新本地栅栏，同一条 dump 继续。冻的时间长于 T 且对端已认领：解冻后续租 `!ok` 且行上是新 owner，`yieldLostLeaseLocked`，不写 STOPPED。这是 P2-6a/b 已有的路径，本节不改。SIGSTOP 不会走进宽限，因为续租调用被冻在内核里，返回的不是错误。
+
+**运维 Stop 或 FAILED 与宽限重叠。** `StopTask` 先写 desired STOP。宽限路径看到 desired STOP 或已经是 STOPPING / STOPPED，就走原来的收尾，写成 STOPPED，不改回 RUN。FAILED 直接返回，不改行。run 的 context 已经结束时，续租循环返回，不计降级（#421）。
+
+### 29.5 不变量
+
+期望为 RUNNING 的任务，要么正在恰好一个节点上跑，并且由该 lease epoch 栅栏住（本地 `LeaseClock` 与 meta 里的 `task_leases` 是同一个 epoch），要么在一个 sweep 之内有一条 CRITICAL finding 开着，`/api/health` 降级。
+
+「一个 sweep」：`_health` 持有者（standalone 则是本进程）在看到「期望 RUN、没有未过期 lease、本进程没有 run」时，从第一次看到算起满一个 sweep 就打开。认领循环默认 2 秒，短于默认 sweep 60 秒，正常的重新认领在下一次 sweep 之前完成，不开 finding。认领失败则下一次 sweep 打开，然后一直开到有人跑起来、运维 Stop 或 FAILED。
+
+### 29.6 决定
+
+**D1 切分。** 恢复和检测一起做。不新增配置，不迁移，不改 `lease_grace_sec` 的含义（到点仍必须停掉本 epoch 的 dump，避免和下一任双写）。
+
+**D2 宽限、无人认领的 lease 丢失、续租 panic 都让出而不是 Stop。** 新的 `yieldForResumeLocked`：`LeaseClock.Lose`，取消本进程 dump，期望保持 RUN，观察状态留在 `LEASE_DEGRADED`（已经是则保持），不写 STOPPED，不改 desired。记 `TASK_LEASE_GRACE_EXCEEDED` 或原来的事件。run 退出时释放这个 epoch 的 lease，不调用 `markStoppedLocked`。释放报错（meta 仍不可达）则记在本进程，下一次 `ClaimRunnableTasks` 先重试释放再认领。已是 desired STOP、STOPPING、STOPPED 的，仍走 `failSafeStopLocked`。FAILED 不动。
+
+**D3 认领。** 释放之后行仍是 `RUNNING` 或 `LEASE_DEGRADED`、desired RUN。`ClaimExpiredTasks` 和本节点的空闲认领都会 Acquire。释放把 owner 清空，所以即使是同一个 worker 再次 Acquire，epoch 也加一（`task_leases` 的规则：owner 不同才加 epoch；空 owner 和谁都不同）。新 run 走现有的 checkpoint 续跑，不另起一份空文件。源端仍留着 checkpoint 之后的事件，续跑不产生 GTID 缺口，也不和旧 dump 重叠：旧 dump 在释放之前已经取消，旧 epoch 已被 `Lose`，`Confirm` 不能把它复活。
+
+**D4 丢失的 epoch 不再被本进程拉起。** `LeaseClock.Lost`。`startTask` 在打开 dump 之前如果这个 epoch 已丢失，就再释放一次并返回，不 `resumeHeld`。下一次认领拿到的是新 epoch，`Confirm` 只刷新新 epoch。这避免「Lose 之后同一 epoch 的 Confirm 被拒绝，dump 开了却永远写不进」（P2-6b：丢失的 epoch 不能被 Confirm 复活）。
+
+**D5 不把运维 Stop 或 FAILED 改回可运行。** desired STOP 的行，认领循环只收尾。FAILED 且 `failed_spec_revision` 等于当前 spec 的，`decideConverge` 仍是 `convergeNone`。本节不调用 `writeStartIntent`，不增加 spec。
+
+**D6 检测并进 `TASK_NO_PROGRESS`，不新加 kind。** 没有本进程 run、也没有别的节点持有未过期 lease 时（无主、lease 已过期、`STOPPED / desired RUN`），时钟用 `min(sweep, no_progress_after)`，不再一律用 120 秒。评估器把这个值放进 `Facts.UnownedAfter`。0 表示沿用 `no_progress_after`（单测不填时保持 §24.9）。默认 sweep 60 秒、`no_progress_after` 120 秒时，无人跑的任务在一个 sweep 打开。本进程有 run 但没有进展的，仍用 `no_progress_after`（§24.9、§24.15 不变）。打开则 CRITICAL，`/api/health` 降级。关闭条件不变：有了进展、期望变为 STOP、FAILED、或别的节点持有。
+
+**D7 进度。** 本进程已经让出的任务不再接受进度上报，直到新的 run 打开。否则宽限之后、认领之前的迟到上报会把「没人跑」的账记成有进展。
+
+**D8 不改 HEALTH_STALE。** #450 的静默不是健康行过期，而是期望被改成 STOP 之后代评还在刷新健康行。D6 按期望 RUN 且没有持有者来报，不靠 HEALTH_STALE。#451（中断长于 `stale_after` 之后的第一次 sweep 对健康任务短暂 OPEN/CLOSE）和 #452（shadow 不写 `task_health`，每个 sweep 都对全部任务打 OPEN HEALTH_STALE）不是这条路径的后果，本节不改它们。
+
+### 29.7 失败路径
+
+| 情况 | 任务行 | 谁在跑 | finding | `/api/health` |
+|---|---|---|---|---|
+| 中断 < 宽限，然后恢复 | 仍是原 owner / 原 epoch，RUNNING，desired RUN | 原来那一条 dump | 无 | 中断期间 `META_UNREACHABLE`，恢复后 ok |
+| 中断 ≥ 宽限（< T 或 > T），meta 恢复 | desired RUN，新 epoch，RUNNING | 恰好一个节点 | 认领成功则不开；一个 sweep 仍无人持有则 CRITICAL `TASK_NO_PROGRESS` | 无人持有时 degraded |
+| 脑裂：owner 到不了 meta，对端可以 | 宽限后 owner 停 dump 但不写 STOPPED；T 后对端 epoch+1 | 最多一条 | 同上一行 | 同上一行 |
+| 节点 SIGSTOP < T | 原 epoch，解冻后续租成功 | 原来那一条 | 无 | ok |
+| 节点 SIGSTOP > T，对端已认领 | 新 epoch；旧 owner 只让出内存 | 对端那一条 | 无（认领已完成） | ok |
+| 运维 Stop | `STOPPED / desired STOP` | 无 | 无 | ok |
+| FAILED | `FAILED / desired STOP`，`last_error` 保留 | 无 | `TASK_FAILED` | degraded |
+| 让出之后没有 runner 会认领（只剩控制面） | desired RUN，lease 已释放或过期 | 无 | 一个 sweep 内 CRITICAL `TASK_NO_PROGRESS` | degraded |
+
+### 29.8 测试（先红）
+
+`internal/tasks/p29_meta_outage_resume_test.go`，进程内三个调度器、一把 `MemoryLease`、一张带栅栏的任务表（与 §28 的三调度器同一形状，不进 workflow e2e）：
+
+- 复现 #450：TTL 长于宽限，meta 调用在宽限之内挂起然后恢复。今天失败：行变成 `STOPPED / desired STOP`，认领循环拉不起来。修好后：desired RUN，恰好一个节点 RUNNING，epoch 比让出前大，两条 dump 的存活期不重叠。
+- 中断短于宽限：同一条 dump、同一 epoch，不写 STOPPED。
+- 只挡住 owner 的续租（对端到得了 meta）：宽限后对端在 lease 仍被持有时不开第二条 dump；释放或到期之后恰好一条。
+- 续租调用被冻住（SIGSTOP）短于 TTL：不解出 STOPPED，解冻后同一条 dump 还在。
+- 运维 Stop 之后认领循环不把它拉起。FAILED 之后也不拉起。
+- 让出之后没有人认领：一个 sweep 内 CRITICAL `TASK_NO_PROGRESS`，`HealthSummary` degraded。
+
+实现再改已有的续租单测：它们断言宽限或 `!ok` 会把行收到 STOPPED 并清空 owner。那是 #450 的旧行为。改为期望保持 RUN、观察状态留在 `LEASE_DEGRADED`、dump 已停、lease 已释放。直接调用 `failSafeStopLocked` 的用例仍覆盖「已经在收尾的 Stop」和栅栏拒绝。
+
+### 29.9 本步不做
+
+- #451、#452（§29.6 D8）。
+- 新的 finding kind、新配置、新迁移、swagger。
+- 改 `ClaimExpiredTasks` 的 SQL（释放后的行仍是 `RUNNING` / `LEASE_DEGRADED`，现有查询认得出；`lease_expire_at <= NOW(6)` 不要求 owner 非空）。
+- 真机两节点黑洞。进程内三调度器是本 PR 的回归；QA 探针写在 PR 说明里。
