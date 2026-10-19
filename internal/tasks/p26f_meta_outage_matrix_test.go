@@ -213,6 +213,21 @@ func (s *outageEvents) AppendEvent(ctx context.Context, ev TaskEvent) error {
 
 func (s *outageEvents) ListEvents(context.Context, string, int) ([]TaskEvent, error) { return nil, nil }
 
+// reported is the FINDING_REPORTED META_UNREACHABLE events of subject: a
+// write that lands only after the outage, often twice (a retried and a
+// newer copy); the RESOLVED event carries the whole window instead.
+func (s *outageEvents) reported(subject string) []TaskEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []TaskEvent
+	for _, ev := range s.list {
+		if ev.Type == "FINDING_REPORTED" && ev.Message == string(FindingMetaUnreachable)+" "+subject {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
 // resolved is the FINDING_RESOLVED META_UNREACHABLE events of subject.
 func (s *outageEvents) resolved(subject string) []TaskEvent {
 	s.mu.Lock()
@@ -443,6 +458,9 @@ func TestFailurePathMatrixMetaOutage(t *testing.T) {
 							if !outageWithin(*r.resolved, resumeAt[last], outageSlackOut) {
 								t.Errorf("%s (%s): resolved_at %s, want the first answer after %s (+%s)", n.name, n.role, r.resolved.Format(time.StampMicro), resumeAt[last].Format(time.StampMicro), outageSlackOut)
 							}
+						}
+						if rep := env.events.reported(n.name); len(rep) > 0 {
+							t.Errorf("%s (%s): FINDING_REPORTED META_UNREACHABLE events %+v, want only one RESOLVED per outage", n.name, n.role, rep)
 						}
 						if len(evs) != len(row.pauses) {
 							t.Errorf("%s (%s): %d FINDING_RESOLVED META_UNREACHABLE events %+v for %d outages, want one each", n.name, n.role, len(evs), evs, len(row.pauses))
