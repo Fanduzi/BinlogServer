@@ -40,11 +40,15 @@ func TestFormatGTIDCommand(t *testing.T) {
 	start := clock(t, "2024-01-01 01:20:00")
 	got := FormatGTIDCommand("mysqlbinlog", []string{"/data/1/mysql-bin.000001", "/data/1/mysql-bin.000002.open.e8"}, &start, 154)
 	want := strings.Join([]string{
+		"set -o pipefail",
 		"TZ=UTC mysqlbinlog \\",
 		"  --start-datetime='2024-01-01 01:20:00' \\",
 		"  --stop-position=154 \\",
 		"  /data/1/mysql-bin.000001 \\",
 		"  /data/1/mysql-bin.000002.open.e8",
+		"# Pipe stdout to mysql in this same shell so pipefail sees a client failure.",
+		"# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.",
+		"# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
 	}, "\n")
 	if got != want {
 		t.Fatalf("command\n%s", got)

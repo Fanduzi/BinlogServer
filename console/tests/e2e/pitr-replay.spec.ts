@@ -5,6 +5,7 @@
 
 import { test, expect, type Download } from '@playwright/test'
 import { registerMockRoutes } from './fixtures/mock-routes'
+import { mysqlRestoreCommand } from './fixtures/restore-command'
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
 
@@ -24,11 +25,10 @@ test('task drawer builds a point-in-time replay command', async ({ page }) => {
   const stopURL = new URL((await stopRequest).url())
   expect(stopURL.searchParams.get('stop_datetime')).toBe('2024-01-01 00:30:00')
   expect(stopURL.searchParams.get('start_datetime')).toBeNull()
-  const stopCommand = [
-    'TZ=UTC mysqlbinlog \\',
+  const stopCommand = mysqlRestoreCommand([
     "  --stop-datetime='2024-01-01 00:30:00' \\",
     '  /data/1/mysql-bin.000001',
-  ].join('\n')
+  ])
   await expect(page.getByTestId('task-pitr-command')).toHaveText(stopCommand)
   await expect(page.getByTestId('task-replay-command')).toContainText('mysql-bin.000002.open.e4')
 
@@ -40,13 +40,12 @@ test('task drawer builds a point-in-time replay command', async ({ page }) => {
   await page.getByTestId('task-pitr-stop').fill('2024-01-01 12:00:00')
   await page.getByTestId('task-pitr-build').click()
   await expect(page.getByTestId('task-pitr-command')).toHaveText(
-    [
-      'TZ=UTC mysqlbinlog \\',
+    mysqlRestoreCommand([
       "  --start-datetime='2024-01-01 00:30:00' \\",
       "  --stop-datetime='2024-01-01 12:00:00' \\",
       '  /data/1/mysql-bin.000001 \\',
       '  /data/1/mysql-bin.000002.open.e4',
-    ].join('\n'),
+    ]),
   )
 
   await page.getByTestId('task-pitr-stop').fill('not-a-time')
@@ -91,12 +90,11 @@ test('task drawer stops replay before one GTID', async ({ page }) => {
   expect(stopURL.searchParams.get('stop_gtid')).toBe(gtid)
   expect(stopURL.searchParams.get('stop_datetime')).toBeNull()
   expect(stopURL.searchParams.has('limit')).toBe(false)
-  const stopCommand = [
-    'TZ=UTC mysqlbinlog \\',
+  const stopCommand = mysqlRestoreCommand([
     '  --stop-position=154 \\',
     '  /data/1/mysql-bin.000001 \\',
     '  /data/1/mysql-bin.000002.open.e4',
-  ].join('\n')
+  ])
   await expect(page.getByTestId('task-pitr-command')).toHaveText(stopCommand)
 
   await page.getByTestId('task-pitr-stop').fill('2024-01-01 01:20:00')
@@ -147,12 +145,11 @@ test('task drawer rolls forward from an executed GTID set', async ({ page }) => 
   expect(stopURL.searchParams.get('start_gtid_set')).toBe(executed)
   expect(stopURL.searchParams.get('stop_gtid')).toBe(gtid)
   expect(stopURL.searchParams.get('start_datetime')).toBeNull()
-  const command = [
-    'TZ=UTC mysqlbinlog \\',
+  const command = mysqlRestoreCommand([
     `  --exclude-gtids=${executed} \\`,
     '  --stop-position=154 \\',
     '  /data/1/mysql-bin.000002.open.e4',
-  ].join('\n')
+  ])
   await expect(page.getByTestId('task-pitr-command')).toHaveText(command)
 
   await page.getByTestId('task-pitr-executed').fill('3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100')

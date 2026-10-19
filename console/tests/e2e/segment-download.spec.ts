@@ -5,6 +5,7 @@
 
 import { test, expect, type Download } from '@playwright/test'
 import { registerMockRoutes } from './fixtures/mock-routes'
+import { mysqlRestoreCommand } from './fixtures/restore-command'
 
 test('task files table downloads the listed basename, including an open epoch', async ({ page }) => {
   await registerMockRoutes(page, { scenario: 'healthy' })
@@ -24,11 +25,10 @@ test('task files table downloads the listed basename, including an open epoch', 
   }
 
   await expect(page.getByTestId('task-replay-command')).toHaveText(
-    [
-      'mysqlbinlog \\',
+    mysqlRestoreCommand([
       '  /data/1/mysql-bin.000001 \\',
       '  /data/1/mysql-bin.000002.open.e4',
-    ].join('\n'),
+    ]),
   )
   await expect(page.getByTestId('task-replay-copy')).toBeEnabled()
 

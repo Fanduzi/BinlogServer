@@ -8,6 +8,7 @@ Playwright 测试夹具，提供共享 mock 场景类型和 API 路由适配。
 |------|---------------|
 | `mock-data.ts` | 暴露共享场景的 TypeScript union 与测试类型 |
 | `mock-routes.ts` | 将 Page 的 `/api/**` 请求（含 JSON body）转发给共享 mock session，并可注入首个 start 失败。分段下载沿用 mock 的 `contentType` 与 `filename`，正文不再被 JSON 包一层 |
+| `restore-command.ts` | 拼出 Console 复制的 MySQL 多文件回放命令：`set -o pipefail`、一次 `mysqlbinlog`、行数或 `@@gtid_executed` 核对注释 |
 
 ## Interfaces
 

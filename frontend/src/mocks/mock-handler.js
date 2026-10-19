@@ -677,20 +677,46 @@ function shellToken(text) {
   return value;
 }
 
+function restoreCommandNote(client) {
+  if (client === "mariadb-binlog") {
+    return [
+      "# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.",
+      "# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.",
+      "# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.",
+      "# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'",
+    ].join("\n");
+  }
+  return [
+    "# Pipe stdout to mysql in this same shell so pipefail sees a client failure.",
+    "# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.",
+    "# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+  ].join("\n");
+}
+
+function formatClientCommand(client, tokens) {
+  if (!tokens.length) return "";
+  const lines = [];
+  if (client) {
+    const flag = client === "mariadb-binlog" ? " --skip-gtid-strict-mode" : "";
+    lines.push("set -o pipefail");
+    lines.push(`TZ=UTC ${client}${flag} \\`);
+  }
+  tokens.forEach((token, index) => {
+    const indent = client || index > 0 ? "  " : "";
+    const cont = index === tokens.length - 1 ? "" : " \\";
+    lines.push(`${indent}${token}${cont}`);
+  });
+  if (client) lines.push(restoreCommandNote(client));
+  return lines.join("\n");
+}
+
 function formatGTIDCommand(client, paths, start, stopPos) {
   if (!paths.length) return "";
   const tokens = [];
   if (start) tokens.push(`--start-datetime=${shellToken(pitrClock(start))}`);
   tokens.push(`--stop-position=${stopPos}`);
   paths.forEach((filePath) => tokens.push(shellToken(filePath)));
-  const lines = [];
-  if (client) lines.push(`TZ=UTC ${client} \\`);
-  tokens.forEach((token, index) => {
-    const indent = client || index > 0 ? "  " : "";
-    const cont = index === tokens.length - 1 ? "" : " \\";
-    lines.push(`${indent}${token}${cont}`);
-  });
-  return lines.join("\n");
+  return formatClientCommand(client, tokens);
 }
 
 function formatExecutedCommand(client, paths, exclude, stopPos, useStopPos, stop) {
@@ -699,14 +725,7 @@ function formatExecutedCommand(client, paths, exclude, stopPos, useStopPos, stop
   if (stop) tokens.push(`--stop-datetime=${shellToken(pitrClock(stop))}`);
   if (useStopPos) tokens.push(`--stop-position=${stopPos}`);
   paths.forEach((filePath) => tokens.push(shellToken(filePath)));
-  const lines = [];
-  if (client) lines.push(`TZ=UTC ${client} \\`);
-  tokens.forEach((token, index) => {
-    const indent = client || index > 0 ? "  " : "";
-    const cont = index === tokens.length - 1 ? "" : " \\";
-    lines.push(`${indent}${token}${cont}`);
-  });
-  return lines.join("\n");
+  return formatClientCommand(client, tokens);
 }
 
 function executedGTIDResult(task, files, pitr) {
@@ -792,14 +811,7 @@ function formatPITRCommand(client, paths, start, stop) {
   if (start) tokens.push(`--start-datetime=${shellToken(pitrClock(start))}`);
   tokens.push(`--stop-datetime=${shellToken(pitrClock(stop))}`);
   paths.forEach((filePath) => tokens.push(shellToken(filePath)));
-  const lines = [];
-  if (client) lines.push(`TZ=UTC ${client} \\`);
-  tokens.forEach((token, index) => {
-    const indent = client || index > 0 ? "  " : "";
-    const cont = index === tokens.length - 1 ? "" : " \\";
-    lines.push(`${indent}${token}${cont}`);
-  });
-  return lines.join("\n");
+  return formatClientCommand(client, tokens);
 }
 
 function replayClient(flavor) {

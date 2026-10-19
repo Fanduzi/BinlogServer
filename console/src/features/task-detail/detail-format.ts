@@ -1,3 +1,7 @@
+// input: replay path lists, binlog client names, checkpoints, and locale labels
+// output: copy-paste restore commands with set -o pipefail, --skip-gtid-strict-mode for mariadb-binlog, and a row-count or GTID verification comment
+// pos: task-detail formatting for the replay command the operator copies
+// note: if this file changes, update this header and console/src/features/task-detail/README.md.
 // Pure helpers for the task detail drawer, ported line for line from
 // frontend/src/components/TaskDetailDrawer.vue and the drawer handlers in
 // App.vue / useTaskDetail.js / useFormatters.js.
@@ -106,13 +110,45 @@ export function shellToken(path: unknown) {
   return text
 }
 
+export function restoreCommandNote(client: string) {
+  if (client === 'mariadb-binlog') {
+    return [
+      '# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.',
+      '# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.',
+      '# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.',
+      "# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'",
+    ].join('\n')
+  }
+  return [
+    '# Pipe stdout to mysql in this same shell so pipefail sees a client failure.',
+    '# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.',
+    "# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+  ].join('\n')
+}
+
+// formatClientCommand matches internal/tasks formatClientCommand. stdout stays
+// the client SQL. The comment tells the operator to pipe in the same shell.
+export function formatClientCommand(client: string, tokens: string[]) {
+  if (tokens.length === 0) return ''
+  const lines: string[] = []
+  if (client) {
+    const flag = client === 'mariadb-binlog' ? ' --skip-gtid-strict-mode' : ''
+    lines.push('set -o pipefail')
+    lines.push(`TZ=UTC ${client}${flag} \\`)
+  }
+  tokens.forEach((token, index) => {
+    const indent = client || index > 0 ? '  ' : ''
+    const cont = index === tokens.length - 1 ? '' : ' \\'
+    lines.push(`${indent}${token}${cont}`)
+  })
+  if (client) lines.push(restoreCommandNote(client))
+  return lines.join('\n')
+}
+
 export function formatReplayCommand(replay: AnyRecord | null) {
   const paths: string[] = Array.isArray(replay?.paths) ? replay.paths.filter(Boolean) : []
   if (paths.length === 0) return ''
-  const tokens = paths.map(shellToken)
-  const client = String(replay?.client || '').trim()
-  if (!client) return tokens.join('\n')
-  return `${client} \\\n${tokens.map((token) => `  ${token}`).join(' \\\n')}`
+  return formatClientCommand(String(replay?.client || '').trim(), paths.map(shellToken))
 }
 
 export function pendingDumpTitle(t: TFunction, task: AnyRecord) {

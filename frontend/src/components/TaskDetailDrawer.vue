@@ -564,13 +564,43 @@ async function copyReplay() {
   }
 }
 
+function restoreCommandNote(client) {
+  if (client === "mariadb-binlog") {
+    return [
+      "# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.",
+      "# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.",
+      "# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.",
+      "# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'",
+    ].join("\n");
+  }
+  return [
+    "# Pipe stdout to mysql in this same shell so pipefail sees a client failure.",
+    "# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.",
+    "# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+  ].join("\n");
+}
+
+function formatClientCommand(client, tokens) {
+  if (!tokens.length) return "";
+  const lines = [];
+  if (client) {
+    const flag = client === "mariadb-binlog" ? " --skip-gtid-strict-mode" : "";
+    lines.push("set -o pipefail");
+    lines.push(`TZ=UTC ${client}${flag} \\`);
+  }
+  tokens.forEach((token, index) => {
+    const indent = client || index > 0 ? "  " : "";
+    const cont = index === tokens.length - 1 ? "" : " \\";
+    lines.push(`${indent}${token}${cont}`);
+  });
+  if (client) lines.push(restoreCommandNote(client));
+  return lines.join("\n");
+}
+
 function formatReplayCommand(replay) {
   const paths = Array.isArray(replay?.paths) ? replay.paths.filter(Boolean) : [];
   if (paths.length === 0) return "";
-  const tokens = paths.map(shellToken);
-  const client = String(replay?.client || "").trim();
-  if (!client) return tokens.join("\n");
-  return `${client} \\\n${tokens.map((token) => `  ${token}`).join(" \\\n")}`;
+  return formatClientCommand(String(replay?.client || "").trim(), paths.map(shellToken));
 }
 
 function shellToken(path) {

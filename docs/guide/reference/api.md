@@ -664,7 +664,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
 
 每个源序号仍只留一条路径，规则与 5.5 相同：同一序号既有封存名又有 `.open.e*` 时，留下 epoch 最大的 open 路径。这条路径不再先按 `limit` 裁掉序号较小的分段，而是看整份清单。分段要能在本进程打开：本地文件优先；本地没有时，只读封存且 `UPLOADED`、`object_key` 非空的对象。事件头时间落在窗口里才选中。`stop_datetime` 是开区间的右端，与 `--stop-datetime` 相同：时间戳大于等于停止时间的事件不进这条命令。设置了 `start_datetime` 时，左端含这个时刻，与 `--start-datetime` 相同。没有事件时间的分段不进入窗口。
 
-`source.flavor` 的客户端与 5.5 相同。`paths` 按序号升序。`command` 是一条命令：有客户端时以 `TZ=UTC mysqlbinlog` 或 `TZ=UTC mariadb-binlog` 开头，然后是 `--stop-datetime='<UTC>'`，设置了开始时间时还有 `--start-datetime='<UTC>'`，最后是这些路径。
+`source.flavor` 的客户端与 5.5 相同。`paths` 按序号升序。`command` 是一条命令：有客户端时以 `set -o pipefail` 开头，然后是 `TZ=UTC mysqlbinlog` 或 `TZ=UTC mariadb-binlog --skip-gtid-strict-mode`，然后是 `--stop-datetime='<UTC>'`，设置了开始时间时还有 `--start-datetime='<UTC>'`，最后是这些路径。末尾注释要求在同一 shell 里把标准输出接到 `mysql` 或 `mariadb`，并核对行数或 `@@gtid_executed` / `@@gtid_current_pos`。标准输出仍是 SQL，字符串本身不带管道。一次调用传入全部文件。MariaDB 11.4 不加 `--skip-gtid-strict-mode` 会在第一个文件后停下。MySQL 的 `mysqlbinlog` 不带这个参数。
 
 ```json
 {
@@ -675,7 +675,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
     "/data/binlog-server/data/1/mysql-bin.000003",
     "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
   ],
-  "command": "TZ=UTC mysqlbinlog \\\n  --stop-datetime='2024-01-01 01:30:00' \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1"
+  "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2024-01-01 01:30:00' \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
 }
 ```
 
@@ -719,7 +719,7 @@ MariaDB 的形状是 `domain-server-seq`，例如 `0-1-10`。`source.flavor` 为
 
 服务端按 binlog 顺序找第一个 `GTID_EVENT`，UUID 和序号都相同才算命中。previous-GTIDs 不是这条事务。找到之后，`paths` 收到这条事件所在的分段为止，包含它前面的分段，不包含后面的分段。每个源序号留下全部分封存分段，再加该序号 epoch 最大的 open。更早的封存路径还在。这条 GTID 在封存文件、`.open.e*`、或只存在于桶里的对象上，用的是同一条规则。本地文件优先。本地没有时，只读封存且 `UPLOADED`、`object_key` 非空的对象。`location` 为 `bucket` 的路径仍是目录里的 `file_path`。先下载，再交给 `mysqlbinlog`。
 
-`command` 以 `TZ=UTC mysqlbinlog` 开头。设置了 `start_datetime` 时先写 `--start-datetime='<UTC>'`。然后是 `--stop-position=<N>`，最后是这些路径。`N` 是这条 GTID 事件在最后一个文件里的起始字节。它不是事件头里的 `end_log_pos`。中部复制进来的分段前面有一段格式描述，这两个数不一样。`mysqlbinlog` 只对命令行上的最后一个文件使用 `--stop-position`，从 `N` 开始的事件不解码。所以这条命令放进该 GTID 之前的每一个事务，不放进该事务，也不放进它后面的事务。
+`command` 以 `set -o pipefail` 开头，然后是 `TZ=UTC mysqlbinlog`。设置了 `start_datetime` 时先写 `--start-datetime='<UTC>'`。然后是 `--stop-position=<N>`，最后是这些路径。末尾注释要求管道和行数或 GTID 核对。标准输出仍是 SQL。`N` 是这条 GTID 事件在最后一个文件里的起始字节。它不是事件头里的 `end_log_pos`。中部复制进来的分段前面有一段格式描述，这两个数不一样。`mysqlbinlog` 只对命令行上的最后一个文件使用 `--stop-position`，从 `N` 开始的事件不解码。所以这条命令放进该 GTID 之前的每一个事务，不放进该事务，也不放进它后面的事务。
 
 `start_datetime` 与 5.7 一样，含这个时刻。它等于这条 GTID 事件的时间戳时可以一起用。比这条事件的时间戳更晚是 400 `start_datetime is after stop_gtid`。更早的分段如果复制事件都在开始时间之前，不进入 `paths`。这条 GTID 所在的分段留下。
 
@@ -732,7 +732,7 @@ MariaDB 的形状是 `domain-server-seq`，例如 `0-1-10`。`source.flavor` 为
     "/data/binlog-server/data/1/mysql-bin.000003",
     "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
   ],
-  "command": "TZ=UTC mysqlbinlog \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1"
+  "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
 }
 ```
 
@@ -777,7 +777,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
 
 服务端按 binlog 顺序读每个分段里的 `GTID_EVENT`。停止规则与 5.7、5.8 相同：`stop_datetime` 不含这个时刻，`stop_gtid` 停在该事件的起始字节。窗口里的事务如果已经在 `start_gtid_set` 中，不算还要应用。一个分段里、停止点之前的事务全都已经在集合里时，这个分段不进入 `paths`，也不进 tar。还剩事务要应用的分段留下。`location` 为 `bucket` 的对象与本地文件同一条规则。
 
-`command` 以 `TZ=UTC mysqlbinlog` 开头。先写 `--exclude-gtids=<规范集合>`，所以 mysqlbinlog 跳过集合里已有的事务，只放进还没有的事务。`stop_datetime` 时接着写 `--stop-datetime='<UTC>'`。`stop_gtid` 落在最后一个路径所在的文件里时，再写 `--stop-position=<N>`，`N` 仍是该事件的起始字节。停止点所在的文件因为停止点之前没有新事务而被省略时，命令不写 `--stop-position`，前面留下的文件整段应用。不写 `--start-datetime`。
+`command` 以 `set -o pipefail` 开头，然后是 `TZ=UTC mysqlbinlog`。先写 `--exclude-gtids=<规范集合>`，所以 mysqlbinlog 跳过集合里已有的事务，只放进还没有的事务。末尾注释要求管道和行数或 GTID 核对。标准输出仍是 SQL。`stop_datetime` 时接着写 `--stop-datetime='<UTC>'`。`stop_gtid` 落在最后一个路径所在的文件里时，再写 `--stop-position=<N>`，`N` 仍是该事件的起始字节。停止点所在的文件因为停止点之前没有新事务而被省略时，命令不写 `--stop-position`，前面留下的文件整段应用。不写 `--start-datetime`。
 
 停止点之前的每一条事务都已经在集合里时，仍是 HTTP 200。`paths` 是 `[]`，`command` 是空字符串，`note` 是 `every transaction up to the stop is already in start_gtid_set`。这不是错误，也不会给出一条会重复应用的命令。停止点落在第一条事务上、窗口里本来就没有事务时，`paths` 和 `command` 仍为空，不带这条 `note`。
 
@@ -791,7 +791,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
   "paths": [
     "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
   ],
-  "command": "TZ=UTC mysqlbinlog \\\n  --exclude-gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20 \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1"
+  "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --exclude-gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20 \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
 }
 ```
 

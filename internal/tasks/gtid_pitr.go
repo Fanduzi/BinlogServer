@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full replay inventory, each segment's bytes, one MySQL stop_gtid, and an optional UTC start_datetime
-// output: the segments through the GTID event and one mysqlbinlog command that stops at that event's start offset; plain-text errors for a bad GTID, a GTID outside the backup, an unsupported flavor, and a start time after that event; the damaged segment and every later one are left out and warning says so
+// output: the segments through the GTID event and one mysqlbinlog command that stops at that event's start offset, starts with set -o pipefail, and comments the pipe plus a row-count or GTID check; plain-text errors for a bad GTID, a GTID outside the backup, an unsupported flavor, and a start time after that event; the damaged segment and every later one are left out and warning says so
 // pos: GTID stop on the same replay selection as the datetime window; the limit window stays when neither stop is set
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -111,22 +111,7 @@ func FormatGTIDCommand(client string, paths []string, start *time.Time, stopPos 
 	for _, path := range paths {
 		tokens = append(tokens, shellToken(path))
 	}
-	var b strings.Builder
-	if client != "" {
-		b.WriteString("TZ=UTC ")
-		b.WriteString(client)
-		b.WriteString(" \\\n")
-	}
-	for i, token := range tokens {
-		if client != "" || i > 0 {
-			b.WriteString("  ")
-		}
-		b.WriteString(token)
-		if i != len(tokens)-1 {
-			b.WriteString(" \\\n")
-		}
-	}
-	return b.String()
+	return formatClientCommand(client, tokens)
 }
 
 func (s *Scheduler) selectGTIDFiles(taskID, raw string, start *time.Time) ([]BinlogFile, uint64, Task, error) {
