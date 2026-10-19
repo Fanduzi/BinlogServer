@@ -379,6 +379,11 @@ type BinlogFile struct {
 	FirstEventAt *time.Time `json:"first_event_at,omitempty"`
 	LastEventAt  *time.Time `json:"last_event_at,omitempty"`
 	SHA256       string     `json:"sha256,omitempty"`
+	// RetentionRemovedAt is when local retention deleted the local file and
+	// left this row (migration 000010, design 0009 §26). nil means the column
+	// is empty or the catalog has no such column. It is not filled by the
+	// files-list SELECT.
+	RetentionRemovedAt *time.Time `json:"retention_removed_at,omitempty"`
 	// ResetSealFacts asks the catalog to clear the seal facts: the row now
 	// names a file whose facts could not be read, so the old ones are stale.
 	ResetSealFacts bool `json:"-"`

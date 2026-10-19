@@ -1,6 +1,8 @@
 # internal/replication Module
 
 ## Files
+
+P2-5.4（设计 0009 §26，#341）：配了上传时，本地保留删掉仍在桶窗口内的本地文件后写 `RETENTION_REMOVED`，并在目录行记下 `RetentionRemovedAt`。写失败打开 `RETENTION_RECORD_FAILED`。
 - `txn_boundary.go`: 事务边界（XID、XA PREPARE、压缩事务、COMMIT/ROLLBACK/XA COMMIT、自动提交语句、事务外的事件）。checkpoint 和 OPEN 目录行只在边界写，且 `checkpointBatchWindow`（200ms）内的提交合并成一次；没写的提交由下一次超过窗口的提交、心跳、rotate、封存或 run 退出写出。checkpoint 永远不超过已落盘的字节。事务超过 `longTxnWarnAfter`（2 分钟）没有提交时每个间隔打一条 `long transaction` 日志（#391）。以前每个事件都写 checkpoint，一个约 2 万事件的 3MB 事务在有 meta 时要约 2.8 万条 INSERT、47.5 秒。
 - `checkpoint_commit_test.go`: 大事务只在提交时写 checkpoint 且耗时有界；小事务在窗口内合并、退出时写出；事务边界和长事务日志（#391）。
 - `resume_stored_set_test.go`: 切源后检查点停在旧源 1-5、封存分段已有 1-10 时，续传集合和去重集合覆盖封存分段（#391）；没有打开分段时同样覆盖。
