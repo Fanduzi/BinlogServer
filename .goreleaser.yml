@@ -55,6 +55,7 @@ archives:
       - migrations/*.sql
       - scripts/adopt-leftovers.sh
       - docs/security.md
+      - docs/releases/**/*
       - docs/guide/*.md
       - docs/guide/**/*
 

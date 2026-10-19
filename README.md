@@ -134,6 +134,7 @@ binlog-server_0.5.76_linux_amd64/
   config.production.example.yaml # Hardened production baseline
   docs/guide/                    # Operator guide, including on-disk replay
   docs/security.md               # Auth, encryption, and the standalone task key
+  docs/releases/                 # Upgrade notes for offline operators
 ```
 
 ### 2. Start local evaluation (Loopback)

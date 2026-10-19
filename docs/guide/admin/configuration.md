@@ -228,6 +228,8 @@ lease_renew_interval_sec < lease_ttl_sec < lease_grace_sec
 | `upload.region` | string | - | 区域 |
 | `upload.prefix` | string | - | 对象前缀 |
 | `upload.use_ssl` | bool | false | 是否使用 SSL |
+| `upload.grace_sec` | int | 900 | 上传落后超过这么多秒才算 UPLOAD_LATE。不能为负 |
+| `upload.grace_task_sec` | map | 空 | 按任务 id 覆盖 `upload.grace_sec`。每个值必须是正整数 |
 
 **推荐配置：**
 
@@ -547,6 +549,59 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 | 大文件上传阻塞 | 长时间占用连接 | `ReadTimeout` 限制时间 |
 | 慢客户端阻塞响应 | 其他请求排队 | `WriteTimeout` 释放连接 |
 | 空闲连接占用 | 连接池耗尽 | `IdleTimeout` 回收连接 |
+
+完整键名是 `http.control_plane.read_header_timeout_sec`、`http.control_plane.read_timeout_sec`、`http.control_plane.write_timeout_sec`、`http.control_plane.idle_timeout_sec`，以及 `http.worker_health.read_header_timeout_sec`、`http.worker_health.read_timeout_sec`、`http.worker_health.write_timeout_sec`、`http.worker_health.idle_timeout_sec`。
+
+### 3.10 元数据库超时（`meta.timeout`）
+
+内部访问元数据库的超时，单位秒，都必须大于 0。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `meta.timeout.read_sec` | 3 | 读超时 |
+| `meta.timeout.write_sec` | 5 | 写超时 |
+| `meta.timeout.lease_sec` | 2 | 租约读写超时 |
+| `meta.timeout.upload_sec` | 30 | 上传相关元数据超时 |
+
+### 3.11 健康评估（`health`）
+
+`health.evaluator` 为 `off`（默认）、`shadow` 或 `on`。`off` 只保留旧 finding。`shadow` 评估并写日志，不落库。`on` 时评估器接管对应 finding。负数拒绝启动。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `health.evaluator` | off | `off`、`shadow`、`on` |
+| `health.sweep_interval_sec` | 60 | 评估周期，秒 |
+| `health.rehash_bytes_per_sec` | 4194304 | 全局 sha256 复查预算，字节/秒（4 MiB/s） |
+| `health.unreachable_after_sec` | 90 | 源库无进展多久算 SOURCE_UNREACHABLE，秒 |
+| `health.unreachable_after_task_sec` | 空 | 按任务 id 覆盖上一行。每个值必须是正整数 |
+| `health.no_progress_after_sec` | 120 | 期望 RUN 的任务多久没有本地进展算 TASK_NO_PROGRESS，秒 |
+| `health.stale_after_sec` | 0 | 0 表示 5 倍 sweep。集群健康行过期则 HEALTH_STALE。需要 `health.evaluator: on` |
+| `health.node_gone_after_sec` | 0 | 0 表示 3 倍 sweep。最后一任链主人消失则 UNKNOWN。需要 `health.evaluator: on` |
+| `health.signal_stale_after_sec` | 86400 | 信号多久没有新消息就降为 INFO，秒 |
+| `health.upload_late_critical_after_sec` | 86400 | 上传落后多久升级为 CRITICAL，秒 |
+| `health.upload_late_critical_after_task_sec` | 空 | 按任务 id 覆盖上一行。每个值必须是正整数 |
+| `health.object_list_interval_sec` | 300 | 列举对象存储的间隔，秒 |
+| `health.object_list_limit` | 10000 | 一次列举的对象上限 |
+
+### 3.12 无元数据库时的任务记录（`standalone`）
+
+没有 `meta_dsn` 时，任务加密写在 `{data_dir}/.tasks.enc`。密钥用 `binlog-server task-key generate --out <path>` 生成，不写进这个文件。详见 `docs/security.md`。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `standalone.task_records` | on | `on` 或 `off` |
+| `standalone.task_key_file` | 空 | 模式 `0600` 或 `0400` 的密钥文件。环境变量 `BINLOG_SERVER_STANDALONE_TASK_KEY_FILE`。也可以用 `BINLOG_SERVER_TASK_KEY` |
+| `standalone.task_key_previous_file` | 空 | 轮换期间的旧密钥文件。环境变量 `BINLOG_SERVER_STANDALONE_TASK_KEY_PREVIOUS_FILE`。密钥内容本身用 `BINLOG_SERVER_TASK_KEY_PREVIOUS` |
+
+### 3.13 链路追踪（`tracing`）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `tracing.enabled` | false | 是否导出 |
+| `tracing.exporter` | disabled | `disabled`、`otlp-http`、`otlp-grpc`、`jaeger`。打开且不是 disabled 时，当前只接受 `otlp-http` |
+| `tracing.endpoint` | `http://127.0.0.1:4318/v1/traces` | 导出地址。打开且 exporter 不是 disabled 时不能为空 |
+| `tracing.sample_ratio` | 0.1 | 采样率，必须在 0 到 1 之间 |
+| `tracing.service_name` | binlog-server | 服务名，不能为空 |
 
 ## 4. 任务配置参数
 
