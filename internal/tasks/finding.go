@@ -493,6 +493,9 @@ func (s *Scheduler) ListFindings(ctx context.Context, taskID string, includeReso
 		if f, ok := s.persistFailureFinding(); ok {
 			local = append(local, f)
 		}
+		if f, ok := s.metaReachFinding(); ok {
+			local = append(local, f)
+		}
 	}
 	return mergeFindings(stored, local, limit), nil
 }
@@ -552,6 +555,9 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		}
 	}
 	if f, ok := s.persistFailureFinding(); ok {
+		local = append(local, f)
+	}
+	if f, ok := s.metaReachFinding(); ok {
 		local = append(local, f)
 	}
 	return mergeFindings(stored, local, limit), err

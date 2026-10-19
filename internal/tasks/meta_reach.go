@@ -146,6 +146,26 @@ func (s *Scheduler) noteMetaReach(err error, countSuccess bool) {
 	}
 }
 
+// metaReachFinding is the open META_UNREACHABLE while the evaluator owns it
+// and cannot store it (the store is the thing that does not answer), so
+// /api/health and /api/findings list it from memory (§25 D2). The legacy
+// book lists its own copy.
+func (s *Scheduler) metaReachFinding() (Finding, bool) {
+	e := s.healthEval.Load()
+	if !e.ownsSignal(ClusterFindingTask, FindingMetaUnreachable) {
+		return Finding{}, false
+	}
+	r := &s.metaReach
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.opened || r.since.IsZero() {
+		return Finding{}, false
+	}
+	return Finding{TaskID: ClusterFindingTask, Kind: FindingMetaUnreachable, Subject: r.subjectLocked(s.clusterWorkerID), Severity: FindingCritical,
+		FirstSeen: r.since, LastSeen: e.cfg.Now(), Count: 1,
+		Detail: fmt.Sprintf("this node has not reached the metadata store since %s: %s", r.since.UTC().Format(time.RFC3339), r.lastErr)}, true
+}
+
 // settleMetaReach runs on each evaluated _cluster open set: once the OPEN
 // of a recovered outage is stored, the held success is signalled and the
 // next pass closes it.
@@ -267,8 +287,8 @@ func (s *Scheduler) boundedOpenFindings(ctx context.Context) (open []Finding, er
 }
 
 // memoryOpenFindings is what this process holds without reading a store:
-// the legacy book's open findings, the evaluator's unsaved open sets, and
-// FINDINGS_PERSIST_FAILED.
+// the legacy book's open findings, the evaluator's unsaved open sets,
+// FINDINGS_PERSIST_FAILED, and an open META_UNREACHABLE.
 func (s *Scheduler) memoryOpenFindings() []Finding {
 	b := s.findings
 	b.mu.Lock()
@@ -288,6 +308,9 @@ func (s *Scheduler) memoryOpenFindings() []Finding {
 		e.mu.Unlock()
 	}
 	if f, ok := s.persistFailureFindingFrom(false); ok {
+		local = append(local, f)
+	}
+	if f, ok := s.metaReachFinding(); ok {
 		local = append(local, f)
 	}
 	return mergeFindings(nil, local, 1000)

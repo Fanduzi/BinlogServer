@@ -1258,4 +1258,5 @@ QA (c)：新 owner 认领后一直 `RETRY_BACKOFF`（旧 dump 连接 KILL 不到
 - **恢复时的 OPEN/CLOSE**：故障期间评估器读不到 store，OPEN 存不下；如果恢复时立刻 `SignalSuccess`，下一轮看到「失败之后又成功」就什么也不写，中断就丢了。所以评估器拥有该信号时（standalone），恢复只记 `recovering`，信号保持失败；`_cluster` 那一轮把 OPEN 存下后，`settleMetaReach` 才发成功，再下一轮 CLOSE。OPEN 的 `FactAt` 是第一次失败（`signalAt`），CLOSE 的 `FactAt` 是恢复后关闭的那一轮（比恢复晚一个 debounce）。
 - **集群**：`_cluster` 在 P2-6 之前不归评估器，`META_UNREACHABLE` 走 legacy 账本：故障期间在内存里（`/api/health`、`/api/findings` 照常列出），恢复后 report 与 resolve 合并成一次写入，`task_findings` 里留下一行 `first_seen` = 第一次失败、`resolved_at` = 恢复的已关闭行，没有 `finding_transitions`。P2-6 让 `_health` 持有者评估 `_cluster` 后改为 OPEN/CLOSE 两条转移。§25.6 第一条 QA 在集群里按这一行验收。
 - `clusterHasWork` 原来用无超时的 ctx 读 `_cluster` 的 open finding；它在 sweep 循环里跑，挂住会让 ping 也停下。现在限时 2s。
+- 故障期间（standalone，评估器拥有该信号）OPEN 存不下，`metaReachFinding` 从 `metaReach` 状态合成这条 finding，`/api/health` 的内存汇总与 `OpenFindings` 都列出它。`/api/findings` 本身的 store 读仍无上限（黑洞时会挂住），归 P2-7 与 `/metrics` 一起处理。
 - 本步不加配置项：`meta_unreachable_after` 固定为 10s（`EvaluatorConfig.MetaUnreachableAfter` 供测试使用）。

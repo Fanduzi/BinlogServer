@@ -162,6 +162,9 @@ func TestMetaUnreachableOpensAfterTenSecondsAndLeavesOpenClose(t *testing.T) {
 		t.Fatal("META_UNREACHABLE not signalled after 10s of failures")
 	}
 	_ = e.SweepNow(context.Background()) // the store is down: nothing lands
+	if got := s.HealthSummary(context.Background()); !strings.Contains(strings.Join(got.Reasons, "; "), "META_UNREACHABLE/n1 (task _cluster)") {
+		t.Fatalf("summary during the outage %+v, want META_UNREACHABLE/n1 served from memory", got)
+	}
 
 	advance(20 * time.Second)
 	hs.down.Store(false)
