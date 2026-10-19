@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task row write results from persistTaskLocked
-// output: TASK_PERSIST_FAILED findings (S2/S3) and a retry of the in-memory row on the sink tick until a write succeeds, fenced by the row's (owner, epoch) and dropped after a lease handoff (dropUnpublishedLocked); staleStoppedRow tells a lost owner's late STOPPED (desired RUN, other owner/epoch, no newer ask) from a Stop (#425)
+// output: TASK_PERSIST_FAILED findings (S2/S3) and a retry of the in-memory row on the sink tick until a write succeeds, fenced by the row's (owner, epoch) and dropped after a lease handoff (dropUnpublishedLocked); a yielded STOPPED row with desired RUN and an empty owner is not republished (#454); staleStoppedRow tells a lost owner's late STOPPED (desired RUN, other owner/epoch, no newer ask) from a Stop (#425)
 // pos: makes a lost state transition a visible, retried condition instead of a log line
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -89,6 +89,15 @@ func (s *Scheduler) republishUnpublished() {
 	for _, id := range ids {
 		task, ok := s.tasks[id]
 		if !ok {
+			delete(s.unpublished, id)
+			s.SignalSuccess(id, FindingTaskPersistFailed, "")
+			continue
+		}
+		// This process already gave the epoch up and the in-memory copy is
+		// the unclaimable yield (STOPPED, desired RUN, no owner). Publishing
+		// it skips the fence because the owner is empty and leaves a row
+		// nobody claims (#454). The last successful row stays as it was.
+		if s.yielded[id] && claimableStoppedRun(task) {
 			delete(s.unpublished, id)
 			s.SignalSuccess(id, FindingTaskPersistFailed, "")
 			continue

@@ -32,7 +32,9 @@ func (t *resumeTable) ListTasksWithExpiredLease(ctx context.Context) ([]Task, er
 		switch task.State {
 		case StateRunning, StateLeaseDegraded, StateRetryBackoff, StateStopping:
 		default:
-			continue
+			if !claimableStoppedRun(task) {
+				continue
+			}
 		}
 		t.leases.mu.Lock()
 		row, ok := t.leases.rows[task.ID]

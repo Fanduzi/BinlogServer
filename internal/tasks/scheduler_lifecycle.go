@@ -4,7 +4,7 @@
 // note P2-6c (#421): a live run whose shared row is FAILED by another epoch is not a remote Stop: the run stops, its lease epoch is marked lost, memory takes the FAILED row and nothing is written
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
-// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost
+// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost; ClaimExpiredTasks also claims STOPPED when desired RUN and the owner is empty
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -577,7 +577,7 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 			s.completeIdleStop(item)
 			continue
 		}
-		if !isExpiredLeaseTakeoverState(item.State) {
+		if !isExpiredLeaseTakeoverState(item.State) && !claimableStoppedRun(item) {
 			continue
 		}
 		if !s.prepareExpiredTaskClaim(item) {
@@ -633,7 +633,7 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 	for _, id := range ids {
 		s.mu.Lock()
 		task, ok := s.tasks[id]
-		if !ok || !isClaimableActiveState(task.State) {
+		if !ok || (!isClaimableActiveState(task.State) && !claimableStoppedRun(task)) {
 			s.mu.Unlock()
 			continue
 		}
@@ -673,6 +673,12 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 
 func isClaimableActiveState(state State) bool {
 	return state == StateRunning || state == StateStarting || state == StateRetryBackoff || state == StateLeaseDegraded
+}
+
+// claimableStoppedRun is a desired-RUN task left STOPPED with no owner.
+// An operator Stop is desired STOP and stays terminal (#454, design §29.10).
+func claimableStoppedRun(task Task) bool {
+	return task.State == StateStopped && task.DesiredRun == TaskDesiredRun && task.OwnerWorkerID == ""
 }
 
 // prepareStartingTaskClaim 把 store 里的 STARTING 任务注入内存，并过滤本机不可接管场景。
@@ -1259,10 +1265,34 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			// This epoch no longer owns the task. Writing FAILED or RETRY_BACKOFF
 			// would persist this worker's row over the new owner. Stop, drop
 			// only this epoch, and leave the shared row.
+			// A fence with no successor (grace Lose, or a released lease) stays
+			// claimable instead: STOPPED with desired RUN and an empty owner
+			// is what nobody claims (#454).
 			if cancel, ok := s.cancels[id]; ok {
 				cancel()
 				delete(s.cancels, id)
 			}
+			owner, epoch := current.OwnerWorkerID, current.Epoch
+			if s.store != nil && !s.successorOwnsLocked(id, owner, epoch) {
+				fresh, ok := s.tasks[id]
+				if !ok {
+					s.mu.Unlock()
+					return
+				}
+				// No successor. A failed run or an operator Stop still finishes
+				// on the way out. Anything else stays claimable (#454).
+				if fresh.State != StateFailed && fresh.DesiredRun != TaskDesiredStop && fresh.State != StateStopping {
+					s.yieldFencedEpochLocked(id, fresh, epoch, errMsg)
+				}
+				s.mu.Unlock()
+				return
+			}
+			fresh, ok := s.tasks[id]
+			if !ok {
+				s.mu.Unlock()
+				return
+			}
+			current = fresh
 			current.State = StateStopped
 			current.OwnerWorkerID = ""
 			current.Epoch = 0

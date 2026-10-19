@@ -670,6 +670,11 @@ func TestListTasksWithExpiredLeaseSQL_JoinsExpiredActiveStates(t *testing.T) {
 	if !strings.Contains(listTasksWithExpiredLeaseSQL, "ORDER BY CAST(t.id AS UNSIGNED), t.id") {
 		t.Fatalf("listTasksWithExpiredLeaseSQL must order by numeric id, got %q", listTasksWithExpiredLeaseSQL)
 	}
+	for _, want := range []string{"t.state = 'STOPPED'", "t.desired_run = 'RUN'", "t.owner_worker_id = ''", "t.owner_worker_id IS NULL"} {
+		if !strings.Contains(listTasksWithExpiredLeaseSQL, want) {
+			t.Fatalf("listTasksWithExpiredLeaseSQL must claim STOPPED desired RUN with an empty owner (%s), got %q", want, listTasksWithExpiredLeaseSQL)
+		}
+	}
 }
 
 // TestMySQLTaskStore_ListTasksWithExpiredLease 验证过期租约任务列表扫描。

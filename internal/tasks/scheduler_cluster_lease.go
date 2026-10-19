@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: lease renew ticks and lease manager renew responses/errors
-// output: lease renewal decisions delegated to centralized lifecycle transitions; a lost lease whose row has a new owner or newer epoch stops the dump and yields in memory without writing the row (#346); grace, a lease lost with no new owner, and a renew panic yield the epoch for a later claim and do not write desired STOP (§29); the renew loop start marks LEASE_ACQUIRED and a yield marks LEASE_LOST for the health evaluator; each successful renew confirms the lease clock (WithLeaseClock) from the time the renew was sent, and a lost renew, exceeded grace or yield marks that epoch lost so the runner's write fence refuses the next write (ADR 0009 P2-6b, #417)
+// output: lease renewal decisions delegated to centralized lifecycle transitions; a lost lease whose row has a new owner or newer epoch stops the dump and yields in memory without writing the row (#346); grace, a lease lost with no new owner, and a renew panic yield the epoch for a later claim and do not write desired STOP (§29); a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF instead of STOPPED (#454); the renew loop start marks LEASE_ACQUIRED and a yield marks LEASE_LOST for the health evaluator; each successful renew confirms the lease clock (WithLeaseClock) from the time the renew was sent, and a lost renew, exceeded grace or yield marks that epoch lost so the runner's write fence refuses the next write (ADR 0009 P2-6b, #417)
 // note P2-6c (#421): a renew error after the run's context ended returns without LEASE_DEGRADED (it would cover the state the run ended in)
 // pos: scheduler cluster lease-maintenance loop separated from transition recipes
 // note: if this file changes, update this header and module README.md.
@@ -144,6 +144,69 @@ func (s *Scheduler) yieldForResumeLocked(id string, epoch int64, eventType, mess
 	s.yielded[id] = true
 	s.appendEventLocked(id, eventType, message, "")
 	s.flushPendingEventsLocked()
+}
+
+// yieldFencedEpochLocked records a WRITE_FENCED append when no other owner
+// holds the lease or the task row (#454, design §29.10). Desired stays RUN.
+// The observed state stays claimable: LEASE_DEGRADED, or RETRY_BACKOFF when
+// the run was already there. The run exit releases this epoch and does not
+// call markStoppedLocked. Caller holds s.mu. Returns false when this epoch
+// is already an operator Stop or FAILED, so the caller finishes that path.
+func (s *Scheduler) yieldFencedEpochLocked(id string, task Task, epoch int64, message string) bool {
+	if task.State == StateFailed || task.DesiredRun == TaskDesiredStop || task.State == StateStopping {
+		return false
+	}
+	s.leaseClock.Lose(id, epoch)
+	s.markHealthDirty(id, ReasonLeaseLost)
+	if task.State != StateLeaseDegraded && task.State != StateRetryBackoff {
+		task.State = StateLeaseDegraded
+		task.UpdatedAt = time.Now()
+	}
+	task.LastError = message
+	s.tasks[id] = task
+	if s.yieldRelease == nil {
+		s.yieldRelease = map[string]leaseHold{}
+	}
+	if _, ok := s.yieldRelease[id]; !ok {
+		owner := task.OwnerWorkerID
+		if owner == "" {
+			owner = s.clusterWorkerID
+		}
+		if epoch <= 0 {
+			epoch = task.Epoch
+		}
+		s.yieldRelease[id] = leaseHold{owner: owner, epoch: epoch}
+	}
+	if s.yielded == nil {
+		s.yielded = map[string]bool{}
+	}
+	s.yielded[id] = true
+	s.appendEventLocked(id, "TASK_LEASE_YIELDED", "runner stopped; lease epoch fenced, no new owner", message)
+	s.flushPendingEventsLocked()
+	return true
+}
+
+// successorOwnsLocked reports that another owner or a newer epoch already
+// holds the task row or the lease. A read error is not a successor: the
+// epoch stays claimable instead of being stored as STOPPED (#454). Caller
+// holds s.mu; it is released during the reads.
+func (s *Scheduler) successorOwnsLocked(id, owner string, epoch int64) bool {
+	if s.rowTakenOverLocked(id, owner, epoch) {
+		return true
+	}
+	view, ok := s.leaseManager.(LeaseView)
+	if !ok || owner == "" || epoch <= 0 {
+		return false
+	}
+	s.mu.Unlock()
+	ctx, cancel := s.withLeaseTimeout(context.Background())
+	leaseOwner, leaseEpoch, present, err := view.ViewLease(ctx, id)
+	cancel()
+	s.mu.Lock()
+	if err != nil || !present || leaseOwner == "" || leaseEpoch <= 0 {
+		return false
+	}
+	return leaseOwner != owner || leaseEpoch > epoch
 }
 
 // yieldLostLeaseLocked stops this worker's run after its lease epoch was lost.
