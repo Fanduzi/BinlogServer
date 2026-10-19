@@ -12,10 +12,12 @@ Maintenance rules:
 
 ## [Unreleased]
 
-新配置项：`health.no_progress_after_sec`（默认 `120`，`0` 为默认值，不可为负）。没有新迁移。
+新配置项：`health.no_progress_after_sec`（默认 `120`，`0` 为默认值，不可为负）。可选迁移 `000010_binlog_files_retention_marker`（`binlog_files.retention_removed_at`，加法、可空）；`minRequiredSchemaVersion` 仍为 6。没有新的健康配置项。
 
 ### Fixed
 
+- #341：配了上传、且本地保留短于桶保留时，删掉仍在桶窗口内的本地文件不写 `RETENTION_REMOVED`，本地窗口为什么变短没有审计。现在先写这条事件，再写 `retention_removed_at`（迁移 000010，可选）。写失败打开 `RETENTION_RECORD_FAILED`，下一轮干净的保留结束关掉。带标记的行不再报 `ORPHAN_ROW`；对象被列举确认丢失时仍报 `SEGMENT_MISSING`（对象）。没有 000010 时事件照写，幂等只保持到进程重启。
+- #353：在线把迁移 000008 降下去再升回来后，同一进程把新封存行的 `first_event_at` / `last_event_at` / `sha256` 留成 NULL，直到重启，也没有日志。现在每次封存和每轮健康评估都再探这些列；列不在且 schema ≥ 8（或本进程见过这些列）时一轮内打开 `SEAL_FACTS_ABSENT`，列回来就关闭并恢复写入。卡住窗口里已经写成 NULL 的旧行不回填。
 - #421 / #424（P1）：集群节点各用独立 `data_dir` 时，接管节点能读到旧 owner 的绝对路径，就把分段续写到别人的目录里，自己的 `data_dir` 什么都不写，也不开 finding，`/api/health` 仍是 ok。现在接管只认本节点 `data_dir` 下的分段，不在其下的报 `SEGMENT_NOT_ON_WORKER`（任务 FAILED，打开 CRITICAL `TASK_FAILED`）。
 - `data_dir` 配成相对路径时，接管把本节点自己的分段（目录记录的是绝对路径）误判为不在本节点，任务 FAILED（`SEGMENT_NOT_ON_WORKER`）。归属判断现在两边都解析成绝对路径并解析符号链接后再比较。
 - #424（P1）：唯一的 worker 被 kill -9、只剩 control-plane 节点时，任务行一直停在 `RUNNING / 死 owner`，不开 finding，health ok。control-plane 节点的健康评估器 node id 为空，从不持有 `_health`；owner 非空的行也不算“无 owner”。现在 control-plane 节点用 `cluster.worker_id`（没配时用持久化的 `.node_id`）作为评估器身份，并代评 owner 的任务 lease 已过期的行，按 `TASK_NO_PROGRESS` 报出。多个 control-plane 节点共享 `data_dir` 时请各自配置 `cluster.worker_id`。

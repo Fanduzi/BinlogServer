@@ -330,6 +330,27 @@ func (e *Evaluator) openAndProbes(ctx context.Context, taskID string, open []hea
 				}
 				cancel()
 			}
+		case health.RetentionRecordFailed:
+			// §5.5 / §26.3: a later retention pass that finishes, even with
+			// nothing to delete. Compared with the failure's FactAt, not
+			// LastSeen (LastSeen moves forward on every evaluation).
+			if e.s == nil {
+				continue
+			}
+			at := e.s.RetentionCleanAt(taskID)
+			if at.IsZero() {
+				continue
+			}
+			e.mu.Lock()
+			en := e.signals[taskID][health.SignalKey{Kind: k.Kind, Subject: k.Subject}]
+			var failAt time.Time
+			if en != nil {
+				failAt = en.st.FactAt
+			}
+			e.mu.Unlock()
+			if failAt.IsZero() || at.After(failAt) {
+				facts.Probes[k] = true
+			}
 		}
 	}
 }

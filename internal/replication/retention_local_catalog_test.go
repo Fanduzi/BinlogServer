@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a catalog with no uploader, an aged sealed file, a row whose file is already gone, and an UPLOADED row inside a longer bucket window
-// output: proof that local-only retention drops the catalog row so the files list, download, replay, and replay archive no longer offer it, and that an UPLOADED row stays listed and downloadable from the bucket
+// output: proof that local-only retention drops the catalog row so the files list, download, replay, and replay archive no longer offer it, and that an UPLOADED row inside a longer bucket window stays listed and downloadable from the bucket while one RETENTION_REMOVED event and the retention marker record the local delete
 // pos: HTTP coverage for retention issue 209 on the file-open purge
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -246,8 +246,12 @@ func TestSplitRetentionUploadedRowStaysDownloadable(t *testing.T) {
 	if len(bucket.deleted) != 0 {
 		t.Fatalf("object deleted: %v", bucket.deleted)
 	}
-	if countRetentionRemoved(catalog.events, "mysql-bin.000003") != 0 {
-		t.Fatalf("uploaded row announced removed: %+v", catalog.events)
+	if n := countRetentionRemoved(catalog.events, "mysql-bin.000003"); n != 1 {
+		t.Fatalf("local retention of an uploaded row wrote %d RETENTION_REMOVED, events %+v", n, catalog.events)
+	}
+	marked := catalog.rows["mysql-bin.000003"]
+	if marked.RetentionRemovedAt == nil {
+		t.Fatal("uploaded row kept its local file unmarked after local retention")
 	}
 
 	listed := getRetentionFiles(t, handler, "/api/tasks/"+taskID+"/files")

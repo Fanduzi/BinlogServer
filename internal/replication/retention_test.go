@@ -1105,6 +1105,36 @@ type purgeCatalog struct {
 	appendErr error
 }
 
+func (c *purgeCatalog) rowBy(fileName string, epoch int64) (string, tasks.BinlogFile, bool) {
+	for key, row := range c.rows {
+		if row.FileName == fileName && row.Epoch == epoch {
+			return key, row, true
+		}
+	}
+	return "", tasks.BinlogFile{}, false
+}
+
+func (c *purgeCatalog) RetentionMarked(_ context.Context, taskID, fileName string, epoch int64) (bool, error) {
+	_, row, ok := c.rowBy(fileName, epoch)
+	if !ok || (taskID != "" && row.TaskID != "" && row.TaskID != taskID) {
+		return false, nil
+	}
+	return row.RetentionRemovedAt != nil, nil
+}
+
+func (c *purgeCatalog) MarkRetentionRemoved(_ context.Context, taskID, fileName string, epoch int64, at time.Time) error {
+	key, row, ok := c.rowBy(fileName, epoch)
+	if !ok || (taskID != "" && row.TaskID != "" && row.TaskID != taskID) {
+		return nil
+	}
+	if row.RetentionRemovedAt != nil {
+		return nil
+	}
+	row.RetentionRemovedAt = &at
+	c.rows[key] = row
+	return nil
+}
+
 func (c *purgeCatalog) AppendEvent(_ context.Context, event tasks.TaskEvent) error {
 	if c.appendErr != nil {
 		return c.appendErr

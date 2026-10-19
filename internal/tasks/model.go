@@ -8,6 +8,7 @@ package tasks
 import (
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -412,6 +413,16 @@ const (
 	// comparison did not finish. The existing upload retry checks that object again.
 	ChecksumVerifyPrefix = "checksum verify failed: "
 )
+
+// ErrRetentionMarkerUnsupported means binlog_files has no retention_removed_at
+// column (schema before migration 000010). Local retention still deletes the
+// file and writes the event; idempotency is in-process until the column exists.
+var ErrRetentionMarkerUnsupported = errors.New("retention marker column is absent")
+
+// RetentionMarkerKey is the map key for one catalog row's retention marker.
+func RetentionMarkerKey(fileName string, epoch int64) string {
+	return fileName + "\x00" + strconv.FormatInt(epoch, 10)
+}
 
 // ReplicationProgress 描述任务最近一次复制进度观测值。
 type ReplicationProgress struct {

@@ -4,7 +4,7 @@
 
 ## Files
 
-P2-5.4（设计 0009 §26）：`Row.RetentionRemoved` 表示本地保留删过本地文件、行还在。有标记时不报 `I6_ORPHAN_ROW`；前缀完整且对象不在时改报 `I6_MISSING_OBJECT`。
+P2-5.4（设计 0009 §26）：`Row.RetentionRemoved` 表示本地保留删过本地文件、行还在。有标记时不报 `I6_ORPHAN_ROW`；前缀完整且对象不在时改报 `I6_MISSING_OBJECT`。前缀未列举完时两者都不报（链上与链下）。
 - `chain.go`: `Inputs`（链顺序、全部目录行、任务目录账本、对象清单快照、checkpoint、起点集合、已记录的换源、tasks 规划器已得出的 I3 子类结论）→ `ChainOf` → `Chain`。`Segments()` 按还原顺序给出每段的目录行、本地是否在与大小、对象是否列举与大小、段内容。`Check(now)` 给出 I1–I7 违反：封闭枚举 `Kind`、涉及的段（第一个是首个违反点）、证据和一句说明；按链顺序排列，同样的输入给出同样的结果。`Objects == nil` 时不判定对象相关的 I6；未配置对象存储时不判定 I7；MariaDB 不做 GTID 判定。P2-3 起 I4 按 replay 顺序判定时包含 open 副本：open 副本只有在内容相同（GTID 相交，或一个文件的字节是另一个的前缀）时才算重复，延续的新 epoch 不算；空残留 open 段（只有 magic、只有头事件、或不足一个事件头且无完整事件，且不是顺序上最后一段）给 INFO `I4_EMPTY_LEFTOVER`，不参与 I4，也不是 `Health()` 结论，replay 不截断。 `Inputs.NoCatalog`（standalone 无 meta）时没有目录行不算 I6_MISSING_ROW。
   - #348 QA 后：`UploadGrace` 未设置（≤0）时取 `DefaultUploadGrace`（15min）。I5 还覆盖 checkpoint 指向链上最后一个同前缀源文件之后的文件、以及 pos 超过所指封存段末尾（本地大小，否则行大小），位置判定不限 MySQL。新增 `I2_ORDER_INVALID`：调用方给的顺序漏掉本地账本里的段（例如整段回切 stint），或同一前缀内序号后退。链上段既无目录行也无本地文件报 `I6_MISSING_ROW`；只有头部事件的 open 文件不算 I4 副本（同一源文件的每份副本都以相同的头开始；#405：legacy failback 修复后续写的 open 文件在第一个事务前被误判为第二份副本）。本地大小与对象大小都不等于行大小时报 `I6_SIZE_MISMATCH` 与 `I6_OBJECT_SIZE_MISMATCH` 各一条（P2-5.1; P2-5.3 (§22): Switches suppress cross-stint I3; CheckCheckpoint separate from CheckBody 起对象大小不等是独立 kind；本地大小只在行已封存、`.seal-sha256` 无该段记录（旧段）时与行比较，账本有记录时以账本为准，计划中有 legacy failback 时不报，设计 0009 §20.2）；UPLOADED 行 `object_key` 为空报 `I6_MISSING_OBJECT`；内部 GTID 洞逐个区间报告，只跳过邻段判定已在同一后继段上报过的那个。
 - `gtid.go`: I3 的 GTID 洞判定（段内、相邻源文件、换源处），从 `tasks/window.go` 搬来，现在是唯一一份，`Check` 和 `WindowOf` 共用。

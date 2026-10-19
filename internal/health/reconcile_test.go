@@ -1,3 +1,8 @@
+// Package health provides module-level functionality for health.
+// input: a small test registry and Facts for reconcile
+// output: proof of open, close, confirm and health status, including that ORPHAN_ROW and SEAL_FACTS_ABSENT are in the managed set (design 0009 §26)
+// pos: unit tests for Reconcile and HealthOf
+// note: if this file changes, update this header and module README.md.
 package health
 
 import (
@@ -281,7 +286,8 @@ var wantManagedP24 = map[Kind]bool{SegmentUnreadable: true, SegmentOverlap: true
 	RetentionRecordFailed: true, RetryLoopFailed: true, DumpStalled: true, OpenTailCutFailed: true,
 	MetricSourceFailed: true, TransitionStalled: true, SourceUnreachable: true, TaskFailed: true,
 	TaskUnadopted: true, TaskRecordsFailed: true,
-	TaskNoProgress: true} // P2-6d, design §24.9
+	TaskNoProgress: true,                        // P2-6d, design §24.9
+	OrphanRow:      true, SealFactsAbsent: true} // P2-5.4, design §26
 
 func TestEmptyLeftoverDerivesFromChain(t *testing.T) {
 	f := &Facts{TaskID: "t", Complete: map[Scope]bool{ScopeChainLocal: true, ScopeTaskState: true, ScopeSignals: true, ScopeStore: true},

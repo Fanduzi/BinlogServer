@@ -39,7 +39,7 @@ func configScoped(key Key) bool {
 	if _, ok := IsObjectSubject(key.Subject); ok {
 		return true
 	}
-	return key.Kind == UploadLate
+	return key.Kind == UploadLate || key.Kind == OrphanRow
 }
 
 // allComplete: every scope the kind needs is complete (close and update).

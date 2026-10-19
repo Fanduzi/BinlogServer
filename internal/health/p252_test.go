@@ -1,3 +1,8 @@
+// Package health provides module-level functionality for health.
+// input: DefaultRegistry and object-origin chain violations
+// output: proof that UPLOAD_LATE and the object kinds follow §21, and that ORPHAN_ROW is Managed with Confirm (design 0009 §26)
+// pos: P2-5.2 kind-table tests
+// note: if this file changes, update this header and module README.md.
 package health
 
 import (
@@ -15,8 +20,8 @@ func TestP252ManagedTable(t *testing.T) {
 	if s := r[UploadLate]; !s.Managed || !s.Confirm {
 		t.Errorf("UPLOAD_LATE managed=%v confirm=%v", s.Managed, s.Confirm)
 	}
-	if r[OrphanRow].Managed {
-		t.Error("ORPHAN_ROW waits for the retention markers (P2-5.4)")
+	if !r[OrphanRow].Managed || !r[OrphanRow].Confirm {
+		t.Error("ORPHAN_ROW is managed with Confirm since P2-5.4 (§26)")
 	}
 	if r[UploadUnverified].Confirm {
 		t.Error("UPLOAD_UNVERIFIED kind-level Confirm would delay its signal")
