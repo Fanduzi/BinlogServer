@@ -3,6 +3,7 @@
 // output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
+// note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
@@ -672,6 +673,9 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	if !gone && !proxy {
 		e.signalFacts(ctx, task, isCluster, facts)
 	}
+	if !proxy {
+		e.fillStoreFacts(ctx, facts)
+	}
 	store := e.cfg.Store
 	unknown := func(h health.TaskHealth, err error) (health.TaskHealth, error) {
 		e.errs.Add(1)
@@ -934,6 +938,51 @@ func (e *Evaluator) openFindings(ctx context.Context, id string) ([]health.Findi
 	return open, nil
 }
 
+// sealFactsProber is the metadata store's per-sweep probe of migration 000008
+// (design 0009 §26.5). A store that does not implement it has no seal-fact
+// columns to lose.
+type sealFactsProber interface {
+	ProbeSealFacts(ctx context.Context) (schemaVersion int, absent bool, err error)
+}
+
+// fillStoreFacts sets Facts.Store and Complete[store]. A probe error leaves
+// the scope incomplete (health UNKNOWN once SEAL_FACTS_ABSENT is managed)
+// and does not clear the store's memory. No metadata store is complete and
+// not absent.
+func (e *Evaluator) fillStoreFacts(ctx context.Context, facts *health.Facts) {
+	if facts == nil {
+		return
+	}
+	if e.s == nil {
+		facts.Store = &health.StoreFacts{}
+		facts.Complete[health.ScopeStore] = true
+		return
+	}
+	e.s.mu.Lock()
+	store := e.s.store
+	e.s.mu.Unlock()
+	if store == nil {
+		facts.Store = &health.StoreFacts{}
+		facts.Complete[health.ScopeStore] = true
+		return
+	}
+	p, ok := store.(sealFactsProber)
+	if !ok {
+		facts.Store = &health.StoreFacts{}
+		facts.Complete[health.ScopeStore] = true
+		return
+	}
+	c, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ver, absent, err := p.ProbeSealFacts(c)
+	if err != nil {
+		log.Printf("health: seal fact probe task=%s: %v", facts.TaskID, err)
+		return
+	}
+	facts.Store = &health.StoreFacts{SchemaVersion: ver, SealFactsAbsent: absent}
+	facts.Complete[health.ScopeStore] = true
+}
+
 // chainFacts is chain.local for the task: CheckBody over the replay order
 // (open copies included, empty leftovers flagged), plus a fresh
 // CheckCheckpoint (I5, never cached), plus rehash mismatches of segments
@@ -976,7 +1025,11 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	if hit && cached.fp == fp && !catalog {
 		order = cached.order // a disk-only order is a function of the directory
 	} else {
-		order, rows = e.s.chainOrder(task.ID, dataDir, catalog)
+		var err error
+		order, rows, err = e.s.chainOrder(task.ID, dataDir, catalog)
+		if err != nil {
+			return nil
+		}
 	}
 	obj := e.objectView(task.ID, now, rows, facts)
 	swKey := switchesKey(switches)

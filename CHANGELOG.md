@@ -12,6 +12,13 @@ Maintenance rules:
 
 ## [Unreleased]
 
+可选迁移 `000010_binlog_files_retention_marker`（`binlog_files.retention_removed_at`，加法、可空）；schema 最高到 10，`minRequiredSchemaVersion` 仍为 6。没有新配置项。
+
+### Fixed
+
+- #341：配了上传、且本地保留短于桶保留时，删掉仍在桶窗口内的本地文件不写 `RETENTION_REMOVED`，本地窗口为什么变短没有审计。现在先写这条事件，再写 `retention_removed_at`（迁移 000010，可选）。写失败打开 `RETENTION_RECORD_FAILED`，下一轮干净的保留结束关掉。带标记的行不再报 `ORPHAN_ROW`；对象被列举确认丢失时仍报 `SEGMENT_MISSING`（对象）。没有 000010 时事件照写，幂等只保持到进程重启。
+- #353：在线把迁移 000008 降下去再升回来后，同一进程把新封存行的 `first_event_at` / `last_event_at` / `sha256` 留成 NULL，直到重启，也没有日志。现在每次封存和每轮健康评估都再探这些列；列不在且 schema ≥ 8（或本进程见过这些列）时一轮内打开 `SEAL_FACTS_ABSENT`，列回来就关闭并恢复写入。卡住窗口里已经写成 NULL 的旧行不回填。
+
 ## [v0.5.73] - 2026-10-19
 
 发布说明：`docs/releases/v0.5.73.md`。没有新迁移（schema 仍为 9，`minRequiredSchemaVersion` 仍为 6），没有新配置项。`/api/health` 的有界读在任何模式下都生效；`META_UNREACHABLE` 的 ping 与评估读两路观测需要 `health.evaluator: on`（v0.5.x 默认 `off`）。

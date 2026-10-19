@@ -1,12 +1,13 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock for the binlog_files upsert and the seal-facts update
-// output: assertions that a ResetSealFacts row clears the facts, that a sealed row with facts writes them after the upsert (UTC times, NULL for an unknown span), that a row without facts or not sealed writes nothing more, that a catalog without the 000008 columns (1054) is skipped, and that the next seal probes those columns and writes again when they return (#353)
+// output: assertions that a ResetSealFacts row clears the facts, that a sealed row with facts writes them after the upsert (UTC times, NULL for an unknown span), that a row without facts or not sealed writes nothing more, that a catalog without the 000008 columns (1054) is skipped, that the next seal probes those columns and writes again when they return (#353), and that ProbeSealFacts opens only when the columns are absent and the schema is at least 8 or this process has seen them
 // pos: persistence coverage for ADR 0009 phase 1, P1-4
 // note: if this file changes, update this header and module README.md.
 package meta
 
 import (
 	"context"
+	"database/sql"
 	"regexp"
 	"testing"
 	"time"
@@ -67,6 +68,8 @@ func TestUpsertBinlogFile_WritesSealFacts(t *testing.T) {
 		t.Fatalf("schema 7 catalog: %v", err)
 	}
 	mock.ExpectExec(regexp.QuoteMeta(upsertBinlogFileSQL)).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(probeSealColumnsSQL)).
+		WillReturnError(&mysqlDriver.MySQLError{Number: 1054, Message: "Unknown column 'first_event_at'"})
 	if err := store.UpsertBinlogFile(ctx, sealed); err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +108,50 @@ func TestSealFacts_ProbeResumesAfterColumnsReturn(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := store.UpsertBinlogFile(ctx, sealed); err != nil {
 		t.Fatalf("columns returned: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProbeSealFacts_SeenColumnsReopenAfterDown(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, time.Second)
+	ctx := context.Background()
+	unknown := &mysqlDriver.MySQLError{Number: 1054, Message: "Unknown column 'first_event_at'"}
+
+	probe := func(version int64, missing bool) (int, bool) {
+		t.Helper()
+		mock.ExpectQuery(regexp.QuoteMeta(currentSchemaVersionSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"version", "dirty"}).AddRow(version, false))
+		q := mock.ExpectQuery(regexp.QuoteMeta(probeSealColumnsSQL))
+		if missing {
+			q.WillReturnError(unknown)
+		} else {
+			q.WillReturnError(sql.ErrNoRows)
+		}
+		ver, absent, err := store.ProbeSealFacts(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ver, absent
+	}
+
+	if ver, absent := probe(7, true); ver != 7 || absent {
+		t.Fatalf("schema 7 never seen: version=%d absent=%v", ver, absent)
+	}
+	if ver, absent := probe(8, true); ver != 8 || !absent {
+		t.Fatalf("schema 8 missing columns: version=%d absent=%v", ver, absent)
+	}
+	if ver, absent := probe(8, false); ver != 8 || absent {
+		t.Fatalf("columns returned: version=%d absent=%v", ver, absent)
+	}
+	if ver, absent := probe(7, true); ver != 7 || !absent {
+		t.Fatalf("down to 7 after the columns were seen: version=%d absent=%v", ver, absent)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

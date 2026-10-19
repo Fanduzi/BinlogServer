@@ -497,8 +497,16 @@ type MySQLTaskStore struct {
 	schemaTimeout  time.Duration
 	sourceCrypto   *config.Decryptor
 	hasPendingDump bool
-	// sealFactsAbsent: binlog_files has no 000008 columns (schema 6 or 7).
+	// sealFactsAbsent: the last probe found no 000008 columns. Cleared when a
+	// later probe sees them (design 0009 §26.5, #353). sealFactsSeen stays
+	// set for the life of the process once the columns have been present.
 	sealFactsAbsent atomic.Bool
+	sealFactsSeen   atomic.Bool
+	sealFactsWarned atomic.Bool
+	// retentionMarkerAbsent: binlog_files has no 000010 column. Re-probed;
+	// one warning. Schema 6–9 keep working (design 0009 §26.2, #341).
+	retentionMarkerAbsent atomic.Bool
+	retentionMarkerWarned atomic.Bool
 	// healthUpsertAlias caches the upsert dialect: 0 unknown, 1 alias, 2 VALUES().
 	healthUpsertAlias atomic.Int32
 }
@@ -1338,17 +1346,19 @@ func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent)
 		eventTime = time.Now()
 	}
 
-	_, err := s.db.ExecContext(
-		ctx,
-		insertTaskEventSQL,
-		event.TaskID,
-		event.Type,
-		event.Message,
-		event.Detail,
-		eventTime,
-		event.Sequence,
-	)
-	return err
+	return s.execUnderFence(ctx, event.TaskID, func(ctx context.Context, q fenceExecer) error {
+		_, err := q.ExecContext(
+			ctx,
+			insertTaskEventSQL,
+			event.TaskID,
+			event.Type,
+			event.Message,
+			event.Detail,
+			eventTime,
+			event.Sequence,
+		)
+		return err
+	})
 }
 
 // ListEvents 返回最新的 limit 条事件，旧的在前。
@@ -1470,7 +1480,7 @@ func (s *MySQLTaskStore) UpsertBinlogFile(ctx context.Context, meta tasks.Binlog
 	}); err != nil {
 		return err
 	}
-	return WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error { return s.writeSealFacts(ctx, meta) })
+	return s.writeSealFacts(ctx, meta)
 }
 
 // DeleteBinlogFile removes one epoch's catalog row. Zero rows is success.

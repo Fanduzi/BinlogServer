@@ -1,3 +1,8 @@
+// Package health provides module-level functionality for health.
+// input: DefaultRegistry and GTID / checkpoint violations
+// output: proof that GTID_HOLE and CHECKPOINT_AHEAD are Managed; ORPHAN_ROW is managed in P2-5.4
+// pos: P2-5.3 kind-table tests (design 0009 §22)
+// note: if this file changes, update this header and module README.md.
 package health
 
 import (
@@ -21,12 +26,7 @@ func TestP253ManagedTable(t *testing.T) {
 	if !r[GTIDHole].Waivable {
 		t.Fatal("GTID_HOLE must stay Waivable")
 	}
-	// Still not managed this step.
-	for _, k := range []Kind{OrphanRow, SealFactsAbsent} {
-		if r[k].Managed {
-			t.Errorf("%s managed early", k)
-		}
-	}
+	// ORPHAN_ROW and SEAL_FACTS_ABSENT flip in P2-5.4 (§26), not here.
 }
 
 func TestP253DerivesGTIDHoleAndCheckpointAhead(t *testing.T) {

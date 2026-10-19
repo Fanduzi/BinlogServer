@@ -388,6 +388,23 @@ func (s *Scheduler) ListWorkerHeartbeats(limit int) ([]WorkerHeartbeat, error) {
 	return []WorkerHeartbeat{}, nil
 }
 
+// RetentionCleanAt is when this process last finished a retention pass for
+// the task with no RETENTION_RECORD_FAILED (design 0009 §26.3). The zero
+// time means this process has not finished one.
+func (s *Scheduler) RetentionCleanAt(taskID string) time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	s.mu.Lock()
+	runner := s.runner
+	s.mu.Unlock()
+	c, ok := runner.(interface{ RetentionCleanAt(string) time.Time })
+	if !ok || c == nil {
+		return time.Time{}
+	}
+	return c.RetentionCleanAt(taskID)
+}
+
 // RetentionBlockedFiles returns how many expired sealed files the runner is
 // keeping because they are not uploaded. The count is per task id and drops
 // when a later retention pass purges those files. A runner that does not
