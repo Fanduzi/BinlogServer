@@ -6,6 +6,7 @@
 // note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
 // note §27 (#436/#441): ErrSchemaAbsent while the evaluator is on opens HEALTH_STORE_UNAVAILABLE from memory; chainFactsInto reads checkpoint, fingerprint and order under Scheduler.TryHoldChain (bounded by ChainLockWait; the checkpoint read by the internal read timeout, a failed read leaves chain.local incomplete) and releases it before CheckBody; every sweep tick probes the health store (§27.8)
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
+// note P2-6.1 (§28): while this node holds _health it also evaluates _cluster, and only for HEALTH_STALE (task.state, never fence, epoch 0); standalone _cluster is unchanged
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -119,6 +120,8 @@ type EvaluatorConfig struct {
 	// NoProgressAfter is health.no_progress_after_sec, the TASK_NO_PROGRESS
 	// threshold (default 120s, design §24.9).
 	NoProgressAfter time.Duration
+	// StaleAfter is health.stale_after_sec (design §28). 0 means 5×Sweep.
+	StaleAfter time.Duration
 	// MetaUnreachableAfter is how long metadata store failures last before
 	// META_UNREACHABLE opens (default 10s, design §25 D2).
 	MetaUnreachableAfter time.Duration
@@ -210,6 +213,9 @@ type Evaluator struct {
 	leaseExpired    map[string]time.Time
 	leaseWriteErr   error
 	leaseWriteErrAt time.Time
+	// healthKnown (§28): when this holder first saw a task that has no
+	// task_health row. Process-local; a row replaces it.
+	healthKnown map[string]time.Time
 
 	evaluations, applied, errs, shadowed atomic.Int64
 }
@@ -250,7 +256,7 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
 		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
-		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}}
+		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}, healthKnown: map[string]time.Time{}}
 	if s != nil {
 		s.healthEval.Store(e)
 		s.setMetaReachNode(cfg.NodeID, cfg.MetaUnreachableAfter)
@@ -463,7 +469,11 @@ func (e *Evaluator) responsible() []Task {
 			out = append(out, t)
 		}
 	}
-	if !e.cfg.Cluster && e.clusterHasWork() {
+	if e.cfg.Cluster {
+		if e.healthHeld.Load() {
+			out = append(out, Task{ID: ClusterFindingTask})
+		}
+	} else if e.clusterHasWork() {
 		out = append(out, Task{ID: ClusterFindingTask})
 	}
 	out = append(out, e.goneUnadopted(out)...)
@@ -641,11 +651,20 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	isCluster := id == ClusterFindingTask
 	var task Task
 	gone := false
+	clusterStale := false
 	if isCluster {
-		if e.cfg.Cluster || !e.clusterHasWork() {
+		if e.cfg.Cluster {
+			// P2-6.1: only the _health holder, and only HEALTH_STALE (§28).
+			if !e.healthHeld.Load() {
+				return health.TaskHealth{}, errNotResponsible
+			}
+			task = Task{ID: id}
+			clusterStale = true
+		} else if !e.clusterHasWork() {
 			return health.TaskHealth{}, errNotResponsible
+		} else {
+			task = Task{ID: id}
 		}
-		task = Task{ID: id}
 	} else {
 		var err error
 		if task, err = e.s.GetTask(id); err != nil {
@@ -657,11 +676,21 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 			task, gone = Task{ID: id}, true
 		}
 	}
-	fence, ok := e.authorityFor(task)
+	var fence health.Fence
+	ok := true
+	if clusterStale {
+		// never, epoch 0: _cluster has no task_leases row, and this is not
+		// the _health epoch (§28). A later holder may overwrite.
+		fence = health.Fence{Mode: health.FenceNeverLeased, Node: e.cfg.NodeID, Instance: e.cfg.Instance}
+	} else {
+		fence, ok = e.authorityFor(task)
+	}
 	if !ok {
 		return health.TaskHealth{}, errNotResponsible
 	}
-	proxy := fence.Proxy || fence.Mode == health.FenceNeverLeased
+	// FenceNeverLeased would otherwise look like a proxy pass. The stale
+	// pass must not: that would run unownedFacts and the signal settles.
+	proxy := !clusterStale && (fence.Proxy || fence.Mode == health.FenceNeverLeased)
 	e.mu.Lock()
 	if epoch, stopped := e.fenced[id]; stopped && epoch == fence.TaskEpoch && !proxy {
 		e.mu.Unlock()
@@ -676,6 +705,10 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	case gone:
 		facts.Task = &health.TaskFacts{State: string(StateStopped), Desired: TaskDesiredStop, RunHere: true}
 		facts.Complete[health.ScopeTaskState] = true
+	case clusterStale:
+		if err := e.staleFacts(ctx, facts); err != nil {
+			return health.TaskHealth{}, err
+		}
 	case proxy:
 		unownedFacts(task, facts, e.expiredSince(task.ID)) // P2-6c: task.state only (§24.2)
 	case isCluster:
@@ -686,10 +719,10 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 			facts.Complete[health.ScopeChainLocal] = true
 		}
 	}
-	if !gone && !proxy {
+	if !gone && !proxy && !clusterStale {
 		e.signalFacts(ctx, task, isCluster, facts)
 	}
-	if !proxy {
+	if !proxy && !clusterStale {
 		e.fillStoreFacts(ctx, facts)
 	}
 	store := e.cfg.Store
@@ -733,7 +766,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		}
 		return unknown(health.TaskHealth{}, err)
 	}
-	if isCluster {
+	if isCluster && !e.cfg.Cluster {
 		e.settleMetaReach(open)
 		e.settleHealthStore(open)
 	}

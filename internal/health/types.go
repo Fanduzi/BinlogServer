@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: one task's facts at one moment (task state, assurance chain verdicts, hot-path signals, store capability, waivers)
-// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf)
+// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28)
 // pos: the single lifecycle owner of findings (ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md); pure, no I/O, imports only assurance
 // note: if this file changes, update this header and module README.md.
 package health
@@ -262,6 +262,17 @@ type Facts struct {
 	// NoProgressAfter is the TASK_NO_PROGRESS threshold
 	// (health.no_progress_after_sec); 0 = 120s (§24.9).
 	NoProgressAfter time.Duration
+	// StaleAfter is health.stale_after (§28). 0 means this pass does not
+	// judge HEALTH_STALE. The evaluator fills 5×sweep when the config is 0.
+	StaleAfter time.Duration
+	// HealthEvaluatedAt is task_health.evaluated_at for the tasks this
+	// _cluster pass judges (§28). A zero time means the task is listed and
+	// has no usable row. A missing key means the task is not in this pass.
+	// Nil means this is not a HEALTH_STALE pass.
+	HealthEvaluatedAt map[string]time.Time
+	// HealthKnownSince is when this holder first saw a listed task that
+	// had no health row. Age starts there until a row appears.
+	HealthKnownSince map[string]time.Time
 }
 
 // Finding is a stored finding row as the evaluator sees it.

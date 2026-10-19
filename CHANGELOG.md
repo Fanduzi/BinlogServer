@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- 集群里 `_health` 的持有者会在任务 `_cluster` 上打开 WARNING `HEALTH_STALE`（subject 是任务 id）：某个任务的 `task_health.evaluated_at` 超过 `health.stale_after_sec`（默认 0，即 5 倍 `health.sweep_interval_sec`）没有更新，或持有者看见这个任务一直没有健康行并超过了同一阈值。需要 `health.evaluator: on`。没有新迁移。`/api/health` 仍只因 CRITICAL 降级，这条不把它打成 degraded；`/api/findings` 和已有的 `binlog_server_finding_open` 能列出它。年龄对照数据库的 `UTC_TIMESTAMP(6)`，不对照节点墙钟。standalone 不开这条。
+
 ## [v0.5.75] - 2026-10-19
 
 发布说明：`docs/releases/v0.5.75.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。`HEALTH_STORE_UNAVAILABLE` 由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）；轮转修复在任何模式下都生效。

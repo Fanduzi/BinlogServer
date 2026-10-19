@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -23,6 +23,7 @@ import (
 )
 
 var _ healthstore.Store = (*MySQLTaskStore)(nil)
+var _ healthstore.StoreClock = (*MySQLTaskStore)(nil)
 var _ healthstore.WaiverStore = (*MySQLTaskStore)(nil)
 var _ healthstore.TransitionLister = (*MySQLTaskStore)(nil)
 var _ tasks.RehashCursorStore = (*MySQLTaskStore)(nil)
@@ -257,6 +258,15 @@ func (s *MySQLTaskStore) ListOpenFindingsForTask(ctx context.Context, taskID str
 			return out, nil
 		}
 	}
+}
+
+// StoreNow is the database clock HEALTH_STALE ages against (design §28).
+// The same UTC_TIMESTAMP(6) stamps evaluated_at, so a node clock ±5 minutes
+// off the database does not open or close the finding.
+func (s *MySQLTaskStore) StoreNow(ctx context.Context) (time.Time, error) {
+	var now time.Time
+	err := s.db.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)").Scan(&now)
+	return now, healthErr(err)
 }
 
 // ListHealth implements healthstore.Store. Placeholder rows of a write that

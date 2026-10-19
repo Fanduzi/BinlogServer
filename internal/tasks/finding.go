@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"binlog_server/internal/healthstore"
 )
 
 // FindingKind is a closed set. Every kind has a fault-injection test in
@@ -581,13 +583,18 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		}
 	}
 	if e := s.healthEval.Load(); e != nil {
+		seen := map[string]bool{}
 		ids := make([]string, 0)
 		for _, t := range s.ListTasks() {
+			if seen[t.ID] {
+				continue
+			}
+			seen[t.ID] = true
 			ids = append(ids, t.ID)
 		}
-		if !e.cfg.Cluster {
-			// Standalone evaluates _cluster itself (RETRY_LOOP_FAILED,
-			// TASK_RECORDS_FAILED); it has no task row to be listed by.
+		// _cluster has no task row. Standalone evaluates it directly;
+		// in cluster the _health holder writes HEALTH_STALE there (§28).
+		if !seen[ClusterFindingTask] {
 			ids = append(ids, ClusterFindingTask)
 		}
 		var unreadable []string
@@ -595,6 +602,10 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		for _, id := range ids {
 			managed, merr := e.openManagedFindings(ctx, id)
 			if merr != nil {
+				// A missing 000009 on _cluster is already HEALTH_STORE_UNAVAILABLE (§28).
+				if id == ClusterFindingTask && e.cfg.Cluster && errors.Is(merr, healthstore.ErrSchemaAbsent) {
+					continue
+				}
 				// Not an empty set: the task's managed findings are unknown (§25 D1).
 				unreadable = append(unreadable, id)
 				if firstErr == nil {
