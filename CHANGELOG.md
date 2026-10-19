@@ -12,11 +12,26 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.75] - 2026-10-19
+
+发布说明：`docs/releases/v0.5.75.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。`HEALTH_STORE_UNAVAILABLE` 由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）；轮转修复在任何模式下都生效。
+
 ### Fixed
 
 - #436：`health.evaluator=on` 且迁移 000009 不在（在线 `migrate goto 7` 或 `8`，或进程就停在 schema 9 以下）时，健康评估停了，`/api/health` 仍是 `ok`，日志每轮一条 INFO。现在 `/api/health` 为 503 `degraded`，原因写明 `HEALTH_STORE_UNAVAILABLE: schema N < 9, run ./migrate up`（探不到版本或版本已经 ≥ 9 但表被删掉时，写明 `health tables are absent; run ./migrate up to 000009`）。同一条 CRITICAL finding（task `_cluster`，subject 为本节点）出现在 `/api/health` 和 `/api/findings`，写不进库时从内存提供。000009 回来之后，单机留下一对 OPEN/CLOSE；集群留下一行已关闭的 finding 和一条 `FINDING_RESOLVED`。`shadow` 只打一次 WARN，不把健康打成 degraded。`off` 不变。不提高 schema 地板，不加配置，不加迁移。只缺 000008、000009 仍在时，行为与 `SEAL_FACTS_ABSENT` 相同，不开这条。
 - #441：源端 `FLUSH BINARY LOGS` 时，下一文件的 checkpoint 写在 `.open` 出现之前，中间还隔着封存上传，评估器会把这 1–2 秒看成 `CHECKPOINT_AHEAD`（CRITICAL）再自己关上。现在轮转把「写下一段 checkpoint」到「新文件已在目录里」放在与评估器读 checkpoint 和段列表同一把锁里，上传挪到打开文件之后。真的位点超前（链上没有的更后文件、越过封存末尾、GTID 超前）仍在一轮内打开。评估器取这把锁最多等 2 秒，轮转卡在锁里时这一轮的链记为不完整，不会因此停下评估（`TASK_NO_PROGRESS` 照常能报）；锁内的 checkpoint 读受 `meta.timeout.read` 约束，读失败不当作「没有 checkpoint」。
 - #436：健康存储每个 sweep 都探一次，不只在启动时。集群里不负责任何任务的节点在线 `goto 8` 后也会 degraded，`up` 之后不用重启就恢复。
+
+### Upgrade notes
+
+- 评估器 on 且 meta schema 低于 9 的部署，升级后 `/api/health` 立刻是 503 `degraded`（`HEALTH_STORE_UNAVAILABLE`）；执行 `./migrate up` 后一轮内恢复，不用重启。
+
+### Known issues
+
+- #446（P3）：评估器 on 或 shadow、schema 低于 9 时，rehasher 每 20 秒打几千条「进度表不存在」的 INFO 日志；单机模式下 `HEALTH_STORE_UNAVAILABLE` 的 subject 是每次启动都会变的随机节点 id。
+- #437（P3）：在线 up 到 000010 后，up 之前删掉的行要到重启才写标记。
+- #438（P4）：保留按 mtime 删、补写按 `sealed_at` 判断，记录可能永远补不上。
+- `/api/findings` 还没有读超时（P2-7）。
 
 ## [v0.5.74] - 2026-10-19
 
