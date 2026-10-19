@@ -411,6 +411,9 @@ func (s *Scheduler) memoryOpenFindings() []Finding {
 	if f, ok := s.metaReachFinding(); ok {
 		local = append(local, f)
 	}
+	if f, ok := s.healthStoreFinding(); ok {
+		local = append(local, f)
+	}
 	return mergeFindings(nil, local, 1000)
 }
 

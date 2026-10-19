@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE, which is dated at the first answer and names the outage window, §25.8 R4); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -65,6 +65,9 @@ const (
 	// meta_unreachable_after (S17, design 0009 §25); task _cluster, subject
 	// the node id.
 	FindingMetaUnreachable FindingKind = "META_UNREACHABLE"
+	// FindingHealthStoreUnavailable: the evaluator is on and migration 000009
+	// cannot be read or written (S18, design §27, #436).
+	FindingHealthStoreUnavailable FindingKind = "HEALTH_STORE_UNAVAILABLE"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.
@@ -247,6 +250,35 @@ func (b *findingBook) resolve(taskID string, kind FindingKind, subject string) {
 	b.kick()
 }
 
+// recordClosed enqueues one already-resolved row. It does not pass through
+// the open book, so a gap that could not be stored still leaves a single
+// FINDING_RESOLVED and no REPORTED (design §27 D3, same shape as §25.7).
+func (b *findingBook) recordClosed(f Finding, at time.Time) {
+	f.TaskID = strings.TrimSpace(f.TaskID)
+	if f.TaskID == "" {
+		f.TaskID = ClusterFindingTask
+	}
+	if f.Severity == "" {
+		f.Severity = FindingCritical
+	}
+	if at.IsZero() {
+		at = b.now()
+	}
+	if f.FirstSeen.IsZero() || f.FirstSeen.After(at) {
+		f.FirstSeen = at
+	}
+	f.LastSeen = at
+	f.ResolvedAt = &at
+	if f.Count == 0 {
+		f.Count = 1
+	}
+	b.mu.Lock()
+	delete(b.open, findingKey{f.TaskID, f.Kind, f.Subject})
+	b.enqueueLocked(findingOp{finding: f, resolve: true})
+	b.mu.Unlock()
+	b.kick()
+}
+
 // forget drops a key the health evaluator closed: from the open book and
 // from the pending writes, so a queued legacy upsert cannot reopen it.
 func (b *findingBook) forget(taskID string, kind FindingKind, subject string) {
@@ -299,7 +331,7 @@ func findingEvented(op findingOp) bool {
 		return false
 	}
 	if f.TaskID == ClusterFindingTask {
-		return f.Kind == FindingMetaUnreachable && op.resolve
+		return op.resolve && (f.Kind == FindingMetaUnreachable || f.Kind == FindingHealthStoreUnavailable)
 	}
 	return true
 }
@@ -520,6 +552,9 @@ func (s *Scheduler) ListFindings(ctx context.Context, taskID string, includeReso
 		if f, ok := s.metaReachFinding(); ok {
 			local = append(local, f)
 		}
+		if f, ok := s.healthStoreFinding(); ok {
+			local = append(local, f)
+		}
 	}
 	return mergeFindings(stored, local, limit), nil
 }
@@ -582,6 +617,9 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		local = append(local, f)
 	}
 	if f, ok := s.metaReachFinding(); ok {
+		local = append(local, f)
+	}
+	if f, ok := s.healthStoreFinding(); ok {
 		local = append(local, f)
 	}
 	return mergeFindings(stored, local, limit), err
@@ -788,6 +826,9 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 		reasons = append(reasons, "META_UNREACHABLE: "+errHealthReadTimeout.Error())
 	case err != nil:
 		reasons = append(reasons, "findings store unreadable: "+err.Error())
+	}
+	if reason, ok := s.healthStoreDegradedReason(); ok {
+		reasons = append(reasons, reason)
 	}
 	if len(reasons) == 0 {
 		return HealthSummary{Status: HealthOK}

@@ -4,6 +4,7 @@
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
+// note §27 (#436/#441): ErrSchemaAbsent while the evaluator is on opens HEALTH_STORE_UNAVAILABLE from memory; chainFactsInto reads checkpoint, fingerprint and order under Scheduler.HoldChain and releases it before CheckBody
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
@@ -339,11 +340,14 @@ func (e *Evaluator) Stats() EvaluatorStats {
 }
 
 // Run evaluates dirty tasks on the worker pool and sweeps every Sweep
-// until ctx ends. The first sweep (STARTUP) runs at once.
+// until ctx ends. The first sweep (STARTUP) runs at once. A health-store
+// probe runs first, so a process that booted below migration 000009 is
+// degraded before the first task sweep (design §27).
 func (e *Evaluator) Run(ctx context.Context) {
 	if e.cfg.Mode == EvaluatorOff {
 		return
 	}
+	e.probeHealthStore(ctx)
 	var wg sync.WaitGroup
 	for i := 0; i < e.cfg.Workers; i++ {
 		wg.Add(1)
@@ -389,7 +393,9 @@ func (e *Evaluator) work(ctx context.Context) {
 			continue
 		}
 		if _, err := e.evaluate(ctx, id); err != nil && !errors.Is(err, errNotResponsible) {
-			log.Printf("health evaluate task=%s: %v", id, err)
+			if !errors.Is(err, healthstore.ErrSchemaAbsent) {
+				log.Printf("health evaluate task=%s: %v", id, err)
+			}
 			e.s.noteMetaReach(err, false) // a timeout or connection error counts (§25 D2)
 		}
 		e.finish(id)
@@ -563,6 +569,7 @@ func (e *Evaluator) SweepNow(ctx context.Context) error {
 	if e.cfg.Mode == EvaluatorOff {
 		return nil
 	}
+	e.probeHealthStore(ctx)
 	var errs []error
 	for _, id := range e.markResponsible(ReasonSweep) {
 		e.mu.Lock()
@@ -694,6 +701,9 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		if len(pending) > 0 {
 			open, err := e.openFindings(ctx, id)
 			if err != nil {
+				if errors.Is(err, healthstore.ErrSchemaAbsent) {
+					e.noteHealthStoreAbsent(err)
+				}
 				return unknown(health.TaskHealth{}, err)
 			}
 			h := e.reg.HealthOf(afterTransitions(open, pending), facts)
@@ -709,10 +719,14 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	}
 	open, err := e.openFindings(ctx, id)
 	if err != nil {
+		if errors.Is(err, healthstore.ErrSchemaAbsent) {
+			e.noteHealthStoreAbsent(err)
+		}
 		return unknown(health.TaskHealth{}, err)
 	}
 	if isCluster {
 		e.settleMetaReach(open)
+		e.settleHealthStore(open)
 	}
 	e.openAndProbes(ctx, id, open, facts)
 	e.loadWaivers(ctx, id, facts)
@@ -842,7 +856,7 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 	_, err := e.cfg.Store.ApplyTransitions(ctx, id, fence, ts, h)
 	switch {
 	case err == nil:
-		e.schemaAbsent.Store(false)
+		e.noteHealthStoreWritable()
 		e.applied.Add(int64(len(ts)))
 		e.mu.Lock()
 		delete(e.pending, id)
@@ -862,7 +876,7 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 		return err
 	}
 	if errors.Is(err, healthstore.ErrSchemaAbsent) {
-		e.schemaAbsent.Store(true)
+		e.noteHealthStoreAbsent(err)
 	}
 	if len(ts) > 0 {
 		e.mu.Lock()
@@ -1008,9 +1022,11 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	if _, err := os.ReadDir(dir); err != nil {
 		return nil
 	}
+	// §27: checkpoint, fingerprint and order are one snapshot with rotate.
+	// The lock does not cover CheckBody (that reads every file).
+	release := e.s.HoldChain(task.ID)
 	// §22.4: checkpoint before order/disk so C cannot point past this snapshot.
 	cp := e.assuranceCheckpoint(task)
-	switches := e.s.assuranceSwitches(task.ID)
 	fp := e.fingerprint(task.ID)
 	e.s.mu.Lock()
 	catalog := e.s.fileStore != nil
@@ -1028,9 +1044,12 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		var err error
 		order, rows, err = e.s.chainOrder(task.ID, dataDir, catalog)
 		if err != nil {
+			release()
 			return nil
 		}
 	}
+	release()
+	switches := e.s.assuranceSwitches(task.ID)
 	obj := e.objectView(task.ID, now, rows, facts)
 	swKey := switchesKey(switches)
 	orderKey := strings.Join(order, "\x00") + "\x01" + rowsKey(rows) + "\x01" + obj.key + "\x02" + swKey

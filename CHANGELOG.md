@@ -16,6 +16,8 @@ Maintenance rules:
 
 ### Fixed
 
+- #436：`health.evaluator=on` 且迁移 000009 不在（在线 `migrate goto 7` 或 `8`，或进程就停在 schema 9 以下）时，健康评估停了，`/api/health` 仍是 `ok`，日志每轮一条 INFO。现在 `/api/health` 为 503 `degraded`，原因写明 `HEALTH_STORE_UNAVAILABLE: schema N < 9, run ./migrate up`（探不到版本或版本已经 ≥ 9 但表被删掉时，写明 `health tables are absent; run ./migrate up to 000009`）。同一条 CRITICAL finding（task `_cluster`，subject 为本节点）出现在 `/api/health` 和 `/api/findings`，写不进库时从内存提供。000009 回来之后，单机留下一对 OPEN/CLOSE；集群留下一行已关闭的 finding 和一条 `FINDING_RESOLVED`。`shadow` 只打一次 WARN，不把健康打成 degraded。`off` 不变。不提高 schema 地板，不加配置，不加迁移。只缺 000008、000009 仍在时，行为与 `SEAL_FACTS_ABSENT` 相同，不开这条。
+- #441：源端 `FLUSH BINARY LOGS` 时，下一文件的 checkpoint 写在 `.open` 出现之前，中间还隔着封存上传，评估器会把这 1–2 秒看成 `CHECKPOINT_AHEAD`（CRITICAL）再自己关上。现在轮转把「写下一段 checkpoint」到「新文件已在目录里」放在与评估器读 checkpoint 和段列表同一把锁里，上传挪到打开文件之后。真的位点超前（链上没有的更后文件、越过封存末尾、GTID 超前）仍在一轮内打开。
 - #341：配了上传、且本地保留短于桶保留时，删掉仍在桶窗口内的本地文件不写 `RETENTION_REMOVED`，本地窗口为什么变短没有审计。现在先写这条事件，再写 `retention_removed_at`（迁移 000010，可选）。写失败打开 `RETENTION_RECORD_FAILED`，下一轮干净的保留结束关掉。带标记的行不再报 `ORPHAN_ROW`；对象被列举确认丢失时仍报 `SEGMENT_MISSING`（对象）。没有 000010 时事件照写，幂等只保持到进程重启。
 - #353：在线把迁移 000008 降下去再升回来后，同一进程把新封存行的 `first_event_at` / `last_event_at` / `sha256` 留成 NULL，直到重启，也没有日志。现在每次封存和每轮健康评估都再探这些列；列不在且 schema ≥ 8（或本进程见过这些列）时一轮内打开 `SEAL_FACTS_ABSENT`，列回来就关闭并恢复写入。卡住窗口里已经写成 NULL 的旧行不回填。
 

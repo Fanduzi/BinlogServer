@@ -52,15 +52,38 @@ func TestRotateUploadDoesNotExposeNextCheckpointBeforeTheOpenFile(t *testing.T) 
 	}}
 
 	started := make(chan struct{})
-	release := make(chan struct{})
+	releaseUpload := make(chan struct{})
 	var signaled atomic.Bool
+	gate := tasks.NewScheduler()
+	var sawGap atomic.Bool
+	stopWatch := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stopWatch:
+				return
+			default:
+			}
+			rel := gate.HoldChain("1")
+			file := ""
+			if n := len(cp.upserts); n > 0 {
+				file = cp.upserts[n-1].File
+			}
+			_, statErr := os.Stat(nextPath)
+			rel()
+			if file == nextName && statErr != nil {
+				sawGap.Store(true)
+			}
+		}
+	}()
 	r := &MySQLRunner{
 		checkpointStore: cp,
+		chainGate:       gate,
 		sealedHandler: func(context.Context, tasks.BinlogFile) error {
 			if signaled.CompareAndSwap(false, true) {
 				close(started)
 			}
-			<-release
+			<-releaseUpload
 			return nil
 		},
 	}
@@ -104,7 +127,11 @@ func TestRotateUploadDoesNotExposeNextCheckpointBeforeTheOpenFile(t *testing.T) 
 	if _, err := os.Stat(nextPath); err != nil {
 		t.Fatalf("checkpoint is %s but %s is missing while the upload runs: %v", nextName, nextPath, err)
 	}
-	close(release)
+	close(stopWatch)
+	if sawGap.Load() {
+		t.Fatal("a reader holding HoldChain saw the next-file checkpoint before the open file existed")
+	}
+	close(releaseUpload)
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
 	}
