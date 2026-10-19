@@ -1,6 +1,6 @@
 # 集群所有权与故障转移：一台状态机
 
-Status: Proposed（2026-10-19；同日第三轮设计评审后修订）。只有设计，没有运行时代码。等本记录被接受之后才按第 5 节改代码。
+Status: Proposed（2026-10-19；同日第四轮设计评审后修订）。只有设计，没有运行时代码。等本记录被接受之后才按第 5 节改代码。
 
 相关记录：[0001](0001-task-ownership.md)（所有权只有一扇门；worker 注册不是任务所有权）、[0005](0005-single-task-authority-and-segment-catalog.md)（期望与观察分开，meta 是权威，控制回路是唯一启动者）、[0009](0009-backup-assurance.md) 及其设计说明 `docs/design/0009-phase2-health-evaluator.md` 的 §28–§31.6（健康、让出、链委派、封存段缺失）。这些决定里「meta 是权威、操作员写期望、段按 `(task_id, source_file, epoch)` 标识、失败必须留下 finding」都保留。本记录替换的是 §28 之后那一串补丁所依赖的写法：每修一个故障转移缺陷，就在调度器、评估器和健康写入上再加一条特殊路径。
 
@@ -18,7 +18,7 @@ Four failures on the current #471 build, plus #476, are the same hole:
 4. The tail-yield backoff is a map in the scheduler. A restart claims again immediately.
 5. #476: an owner stopped while it holds `SELECT … FROM task_leases … FOR UPDATE` blocks every peer with no deadline tied to the lease TTL. The task stays `RUNNING`, the last health row stays `HEALTHY`, `/api/health` stays 200, and no dump is running.
 
-The target is one transition function. Desired `STOP` is written only by an operator Stop or operator Delete. A fact that is not true on every node is a yield, a retry, or a finding. `FAILED` is only the closed terminal allowlist (source authentication, `log_bin` off). Every runner event updates on `row_generation` and `epoch` together, and the same transaction checks the lease row; a newer epoch drops the event instead of reapplying it on the new owner's row. `chain_owner` moves to its own record and is written only after this node has read the chain directory. A chain owner returns from `FAILED` / `CHAIN_OWNER_GONE` to `LEASE_DEGRADED` only after a `ChainVerified` newer than `failed_at`, not on the heartbeat alone. An expired `STOPPING` lease is finalized by any node (`StopExpired`). `DumpReady` deletes every refusal for that task. Only a `per_node` tail refusal is open-ended; every other refusal retries on a 600 second cap, so `epoch` grows at a bounded rate and a disk blip does not stick. Refusals and `tail_unreadable_since` are rows, not maps. The tail finding stays open across claim and Start until a `DumpReady` after that timestamp. The lease-row lock is bounded by a kill that exists on that server: MySQL 8 uses `wait_timeout`, net read/write timeouts, and a side `KILL` that does not lock `task_leases`; MariaDB uses `idle_transaction_timeout` plus those same backstops. The side `KILL` is issued only by a node already waiting on that lock, and only after the same `trx_id` is seen idle twice, at least `idle_kill` apart. It stays off unless a startup and per-sweep canary proves a `KILL` from a second connection actually drops the locker (`cluster.side_kill: auto|off`). A stalled lock is a critical finding on `_cluster`, written without locking `task_leases`, and HTTP 503. RTO runs from the last successful Renew (or the Acquire, if none) to the new owner's `DumpReady`. Start, Stop, and Delete are one transaction: the HTTP status and the row agree. A rolling upgrade rejects every old `backup_tasks` update that does not bump `row_generation`. The migration prechecks for live registrations and long transactions before it takes a metadata lock.
+The target is one transition function. Desired `STOP` is written only by an operator Stop or operator Delete. A fact that is not true on every node is a yield, a retry, or a finding. `FAILED` is only the closed terminal allowlist (source authentication, `log_bin` off). Every runner event updates on `row_generation` and `epoch` together, and the same transaction checks the lease row; a newer epoch drops the event instead of reapplying it on the new owner's row. `chain_owner` moves to its own record and is written only after this node has read the chain directory. A chain owner returns from `FAILED` / `CHAIN_OWNER_GONE` to `LEASE_DEGRADED` only after a `ChainVerified` newer than `failed_at`, not on the heartbeat alone. An expired `STOPPING` lease is finalized by any node (`StopExpired`). `DumpReady` deletes every refusal for that task. Only a `per_node` tail refusal is open-ended; every other refusal retries on a 600 second cap, so `epoch` grows at a bounded rate and a disk blip does not stick. Refusals and `tail_unreadable_since` are rows, not maps. The tail finding stays open across claim and Start until a `DumpReady` after that timestamp. The lease-row lock is bounded by a timeout that exists on that server. The default is server-side only, because `cluster.side_kill` defaults to `off`: MySQL 8 uses `wait_timeout` and the net read/write timeouts; MariaDB uses `idle_transaction_timeout` plus those backstops. The published RTO uses that server-side bound. `auto` is opt-in and only for a direct connection; it is unsafe behind any proxy that parses SQL. When it is on, the canary and the real kill are both `CALL binlog_server_kill_trx(trx_id)`. The procedure finds the thread by `trx_id`, checks that it still holds the row lock on `task_leases` or `meta_canary`, and kills inside the server (`mysql.rds_kill` on RDS). The client never sends `KILL`. A reused connection has a new `trx_id`, so the call does nothing. If the procedure cannot be created, `side_kill` stays off. A stalled lock is a critical finding on `_cluster`, written without locking `task_leases`, and HTTP 503. RTO runs from the last successful Renew (or the Acquire, if none) to the new owner's `DumpReady`. Start, Stop, and Delete are one transaction: the HTTP status and the row agree. A rolling upgrade rejects every old `backup_tasks` update that does not bump `row_generation`. The migration prechecks for live registrations and long transactions before it takes a metadata lock.
 
 PR #471 should not be merged. The one behavior worth keeping (a missing sealed segment on a directory this node actually read opens `SEGMENT_MISSING`) is re-landed by itself in a later, smaller change. The yield, backoff and “fail when the chain owner is me” paths in that branch are deleted rather than fixed in place.
 
@@ -214,7 +214,7 @@ PR #471 should not be merged. The one behavior worth keeping (a missing sealed s
 | `ChainVerified` | 评估器，且仅当第 2 节第 4 条的读目录成功 | 本节点是任务租约持有者，或已经是 `task_chain.owner_node` 且租约已释放（今天的委派） | 把 `owner_node` 写成本节点，`verified_at` 写成库时钟，`verified_epoch` 写成这次读到的 epoch。覆盖回填留下的 NULL。不改变任务观察态。最新封存段必须与 catalog 一致这一条留到 PR-5（第 6 节 F7），本事件的守卫先仍是第 4 条 |
 | `ChainOwnerGone` | `_health` 持有者的代写轮 | `task_chain.owner_node` 非空（`verified_at` 为 NULL 的回填行也用来看这个节点的心跳），该节点心跳早于有效 `node_gone_after`，观察态是 `LEASE_DEGRADED`，且 `tail_unreadable_since` 非空 | 观察态 `FAILED`，`failed_reason = CHAIN_OWNER_GONE`，`failed_at` 写成库时钟，期望保持 `RUN`，finding 保持打开。这不是 desired `STOP`。自动出口是 `ChainOwnerBack`，不是操作员 Start |
 | `ChainOwnerBack` | 链主人节点自己 | 观察态 `FAILED`，`failed_reason = CHAIN_OWNER_GONE`，期望 `RUN`，本节点是 `task_chain.owner_node`，并且心跳恢复之后本节点做过一次 `ChainVerified`：`verified_at` 非空且 `verified_at > failed_at`。只有心跳、目录没读到，守卫不通过 | 观察态 `LEASE_DEGRADED`，`failed_reason` 与 `failed_at` 清空，可以被认领。不需要操作员 Start，不加 `spec_revision`。`tail_unreadable_since` 留到 `DumpReady`。目录或盘已经不在时行留在 `FAILED`，CRITICAL 保持打开，epoch 不加。心跳还在、目录还在时，这就是今天 `SIGCONT` 之后自己续跑的那条路 |
-| `EpochLost` | 续租循环；`WRITE_FENCED` 且行上没有更新的 epoch；本 epoch 的 open 文件 `ENOENT`（`per_node` 与 `shared` 都算，即使本地以为还握着租约）；`ENOSPC` / `EROFS`；不在终态允许名单、也不在重试允许名单上的 runner 错误；决定时读不到租约行 | epoch 栅栏：读得到租约且 epoch 已经更大，则只丢弃，不再写拒绝行。期望是 `STOP` 时不走让出 | 期望是 `STOP`：结果与 `StopConfirmed` 相同（`STOPPED`，`pending_delete` 则删除）。期望不是 `STOP`：释放本 epoch，观察态 `LEASE_DEGRADED`，期望 `RUN`，owner 空，`run_id` 空。拒绝行的 `attempts` 加一，`refuse_until = now + min(refusal_retry_cap_sec, claim_interval × 2^(attempts-1))`。缺省从 2 秒起按 2 的幂增加，不超过 600 秒；到顶之后每次仍是 `now + 600` 秒，不写 NULL。磁盘满或只读超过约 122 秒的那个唯一能读的节点，因此还会再 `Acquire`。WARNING。同一节点连续 3 次且中间没有 `DumpReady`，这条升为 CRITICAL。不写 `FAILED`，不写 desired `STOP`。epoch 按这个上限以有界速率增长，不永久停在 `LEASE_DEGRADED` |
+| `EpochLost` | 续租循环；`WRITE_FENCED` 且行上没有更新的 epoch；本 epoch 的 open 文件 `ENOENT`（`per_node` 与 `shared` 都算，即使本地以为还握着租约）；`ENOSPC` / `EROFS`；不在终态允许名单、也不在重试允许名单上的 runner 错误；决定时读不到租约行 | epoch 栅栏：读得到租约且 epoch 已经更大，则只丢弃，不再写拒绝行。期望是 `STOP` 时不走让出 | 期望是 `STOP`：结果与 `StopConfirmed` 相同（`STOPPED`，`pending_delete` 则删除）。期望不是 `STOP`：释放本 epoch，观察态 `LEASE_DEGRADED`，期望 `RUN`，owner 空，`run_id` 空。拒绝行的 `attempts` 加一，`refuse_until = now + min(refusal_retry_cap_sec, claim_interval × 2^(attempts-1))`。缺省从 2 秒起按 2 的幂增加，不超过 600 秒；到顶之后每次仍是 `now + 600` 秒，不写 NULL。磁盘满或只读的节点在这一期限到了之后还会再 `Acquire`。唯一能读的节点只是短暂磁盘满时，恢复之后最坏再等约一个 `refusal_retry_cap_sec`（缺省 600 秒）才回到 `RUNNING`；这 600 秒加在第 3.4 节的 RTO 公式之外，整段等待是 CRITICAL，`/api/health` 是 503。WARNING。同一节点连续 3 次且中间没有 `DumpReady`，这条升为 CRITICAL。不写 `FAILED`，不写 desired `STOP`。epoch 按这个上限以有界速率增长，不永久停在 `LEASE_DEGRADED` |
 | `MetaLockTimeout` | 任何一次锁等待超时，或旁路连接看见持有者超过 idle 上界 | 无。写入不得再去锁 `task_leases` | 不改任务观察态。finding 写在 `_cluster`。见 3.4 |
 
 `FAILED` 不再附带 desired `STOP`。0005 用 desired `STOP` 阻止控制回路把失败的任务再拉起来；同一件事用「认领不拉 `FAILED`，直到 `spec_revision` 大于 `failed_spec_revision`」已经表达了。两套开关（desired `STOP` 和 `failed_spec_revision`）让 #450 那类补丁必须记得把哪一个改回去。目标只留规格这一套，再用 `failed_reason` 区分「允许名单上的终态」和「链主人暂时不在」。操作员 Stop 仍然把期望写成 `STOP`。`LEGACY_UNKNOWN` 与允许名单上的 `FAILED` 靠 `OperatorStart` 离开；`CHAIN_OWNER_GONE` 靠满足 `verified_at > failed_at` 的 `ChainOwnerBack`，或靠 `OperatorStart` 离开。推进的 `OperatorStart` 清空 `failed_reason` 和 `failed_at`。
@@ -244,32 +244,42 @@ MySQL 8.0：
 - `net_read_timeout` 与 `net_write_timeout` 设为同一上界，覆盖还停在语句中途、还没进入 Sleep 的连接。
 - `innodb_lock_wait_timeout` 设为同一上界。它约束的是**等锁的人**，不是握锁的人。
 - 每一条会锁 `task_leases` 的调用带上相同时限的客户端上下文。超时后调用方关掉自己的连接。被 `SIGSTOP` 的进程跑不到这个超时，所以它不是 #476 的证明，只是还在跑的进程的上界。
-- 旁路 `KILL` 的规则见下面一节。握锁的进程自己是停的，杀它的只能是已经在等这把锁的节点。
+- 旁路过程的规则见下面一节。握锁的进程自己是停的，杀它的只能是已经在等这把锁的节点，而且客户端不发 `KILL`。
 
 MariaDB：
 
 - `idle_transaction_timeout` 设为该上界，作为「事务已开且变成空闲」的第一刀。
-- 其余与 MySQL 8.0 相同：`wait_timeout`、`net_read_timeout`、`net_write_timeout`、`innodb_lock_wait_timeout`、客户端上下文，以及同一套旁路 `KILL` 规则。
+- 其余与 MySQL 8.0 相同：`wait_timeout`、`net_read_timeout`、`net_write_timeout`、`innodb_lock_wait_timeout`、客户端上下文，以及同一套旁路过程。缺省仍是 `side_kill=off`。
 
 连接池的 `ConnMaxIdleTime` 只作用于还在池里、没有被借出的连接。#476 的连接已经被借出并停在事务里，它杀不掉。`wait_timeout` 是 5 秒时，把 `ConnMaxIdleTime` 配得短于 5 秒，当作池卫生，不把它写进 RTO 的证明。
 
-**旁路 `KILL`。** 配置 `cluster.side_kill` 是 `auto` 或 `off`，缺省 `auto`。`off` 从不发 `KILL`。`auto` 只有演练通过才发。
+**旁路杀会话。** 配置 `cluster.side_kill` 是 `auto` 或 `off`，缺省 `off`。缺省不演练，也不调用过程。`auto` 是显式打开，只用于到 meta 的直连。任何会解析 SQL 的代理（ProxySQL、MaxScale，以及同类）后面打开 `auto` 都不安全：代理会自己处理 `KILL`，也会改写或丢掉 `CALL`。发布说明写明这条不能开在这种代理后面。
 
-谁可以发：已经在等这把 `task_leases` 锁、并且已经提出 `MetaLockTimeout` 的节点。它自己的那条等锁连接不去发 `KILL`；用另一条不执行 `SELECT … FROM task_leases FOR UPDATE` 的连接，读 `information_schema.innodb_trx` 与锁等待视图。目标必须在两次探测里是同一个 `trx_id`，两次间隔至少 `idle_kill`，两次都是 Sleep，并且两次都握着该任务的 `task_leases` 行锁。`trx_id` 变了就当它不是同一个事务，不杀。`trx_id` 不复用：看到的 id 一旦离开 `innodb_trx`，下一次出现的同号不算续上。RDS 上这条 `KILL` 走 `mysql.rds_kill`。
+客户端不发 `KILL`。演练和真杀都只 `CALL binlog_server_kill_trx(p_trx_id)`。过程在服务器内做完这四步，否则什么都不做：
 
-`CONNECTION_ID()` 和 `performance_schema.threads` 是在同一个后端上算的，经过 ProxySQL 或 MaxScale 也相等，认不出多路复用。不用它判断能不能杀。能开 `side_kill` 的唯一证据是端到端演练，启动时做一次，之后每个 sweep 再做一次：
+1. 按 `trx_id` 在 `information_schema.innodb_trx` 里找到仍在的线程。
+2. 确认该事务仍握着 `task_leases` 或 `meta_canary` 的行锁。锁检查读不出来，也什么都不做。
+3. 同一调用里杀掉该线程。RDS 上这一步是过程内部的 `mysql.rds_kill`，不是客户端发的 `KILL`。
+4. 连接被多路复用转给别的客户端之后，新事务的 `trx_id` 已经不同。按旧 `trx_id` 的这次 `CALL` 是 no-op，不会杀到新会话。
 
-1. 连接 A 对专用的一行加锁（`meta_canary`，一行，`SELECT … FOR UPDATE`）。这行不是 `task_leases`。
-2. 连接 B 从 `information_schema.innodb_trx` 读出 A 正在握着的那个线程 id，对它 `KILL`（RDS 用 `mysql.rds_kill`）。
-3. 只有 A 的会话掉了，并且 B 随即能锁上同一行，这次演练才通过，`side_kill` 为 on。A 还在，或者 B 锁不上，演练失败，`side_kill` 为 off，直到下一次 sweep 通过。失败是关：杀错了别的会话时 A 不会掉，演练不会把开关打开。
+谁可以发真杀：已经在等这把 `task_leases` 锁、并且已经提出 `MetaLockTimeout` 的节点。等锁的那条连接不发 `CALL`。另一条不执行 `SELECT … FROM task_leases FOR UPDATE` 的连接，读 `innodb_trx` 与锁等待视图。目标必须在两次探测里是同一个 `trx_id`，两次间隔至少 `idle_kill`，两次都是 Sleep，并且两次都握着该任务的 `task_leases` 行锁。然后把这个 `trx_id` 传进过程。过程在服务器里再查一次锁。`trx_id` 变了就不杀。`trx_id` 不复用：看到的 id 一旦离开 `innodb_trx`，下一次出现的同号不算续上。
 
-权限不够时演练本身失败，不必另做一套「id 是否相等」的直连探测。账号仍要有 `PROCESS`，以及 `CONNECTION_ADMIN` 或 `SUPER`；RDS 上要能执行 `mysql.rds_kill`。没有这些，演练失败，开关保持 off。
+`CONNECTION_ID()` 和 `performance_schema.threads` 是在同一个后端上算的，经过代理也相等，不用它判断能不能杀。`auto` 下能开 `side_kill` 的唯一证据是端到端演练，启动时做一次，之后每个 sweep 再做一次。`meta_canary` 每个 `node_id` 一行，本节点只锁自己的行，节点之间的演练不互相挡：
 
-`side_kill` 为 off 时，RTO 公式的形状不变，`idle_kill` 只剩服务器超时那一项，健康详情写 `side_kill=off`。#476 那种已经 Sleep、事务仍开着的会话，MySQL 8 仍由 `wait_timeout` 在上界内拆掉，MariaDB 由 `idle_transaction_timeout` 拆掉。服务器既不把它当成 Sleep、也不把它当成网络读写真的卡住时（冻结在语句执行中，又没有旁路 `KILL`），这个上界不再覆盖它；发布说明把这一条写在 RTO 旁边。
+1. 连接 A 执行 `SELECT … FROM meta_canary WHERE node_id = ? FOR UPDATE`。这行不是 `task_leases`。节点在演练前 `INSERT` 自己的那一行。
+2. 连接 B 从 `information_schema.innodb_trx` 读出 A 的 `trx_id`，不读线程 id 去发 `KILL`。
+3. 连接 B 执行 `CALL binlog_server_kill_trx(该 trx_id)`。
+4. 只有 A 的会话掉了，并且 B 随即能锁上同一行，这次演练才通过，`side_kill` 为 on。A 还在、B 锁不上、过程不存在或 `CALL` 失败，演练失败，`side_kill` 为 off，直到下一次 sweep 通过。
+
+过程是 `SQL SECURITY DEFINER`，`DEFINER` 是跑迁移的那个账号，与触发器相同。调用方不需要 `SUPER`。建过程走与 `CREATE TRIGGER` 同一条预检：`log_bin` 开着时，账号要有 `SUPER` 或 `log_bin_trust_function_creators = 1`。过程建不上，即使配置写成 `auto`，`side_kill` 也保持 off。`DEFINER` 在服务器里执行 `KILL` 仍要有 `CONNECTION_ADMIN` 或 `SUPER`；RDS 上要能执行 `mysql.rds_kill`。没有这些，演练失败，开关保持 off。
+
+每次成功的演练会在服务器错误日志留下一条 `Aborted connection`。打开 `auto` 的部署把这条加进 DBA 告警白名单。缺省 `off` 不演练，不产生这条日志。
+
+缺省 `side_kill` 为 off。RTO 公式的形状不变，`idle_kill` 只是服务器超时：MySQL 8 是 `wait_timeout`（以及同一上界的 `net_read_timeout`、`net_write_timeout`），MariaDB 是 `idle_transaction_timeout`。旁路过程不进缺省公式。健康详情写 `side_kill=off`。#476 那种已经 Sleep、事务仍开着的会话，仍由这些超时在上界内拆掉。服务器既不把它当成 Sleep、也不把它当成网络读写真的卡住时（冻结在语句执行中，又没有打开 `auto`），这个上界不再覆盖它；发布说明把这一条写在 RTO 旁边。`auto` 且演练已通过时，过程可以在同一 `idle_kill` 上界内更早拆掉锁，数字上界不因此变短，也不写进缺省 RTO。
 
 事务内部不做磁盘 IO、不等待源库。0009 §23 的写边界保持「先锁租约行，再写这一小段 meta」。评估器把目录读完，再开这一个短事务提交结果。健康事务不再为 1205/1213 重试 50 次。
 
-`MetaLockTimeout` 的 finding 主题是 `META_LOCK_STALLED`（只用这一个名字，不再用 `META_UNREACHABLE` 兼着）。它写在任务 `_cluster` 上。写入者是观察到超时或执行了旁路 `KILL` 的那个节点，走一条**不**调用 `applyOnce`、**不**锁 `task_leases` 的路径。这条写入自己失败时，该节点的 `/api/health` 503 用进程内「已经观察到锁超时」来判断，不依赖 finding 行先落库。关闭者就是这同一个节点：它连续两次在 `lock_wait` 之内拿到先前卡住的那把锁之后，关掉 finding，并清掉进程内的 503 原因。单次锁等待要不要先经过 Confirm 才打开 finding、才让 503，留给 PR-2（第 6 节 F12）；本记录不把第一次 1205 规定成一次页面。
+`MetaLockTimeout` 的 finding 主题是 `META_LOCK_STALLED`（只用这一个名字，不再用 `META_UNREACHABLE` 兼着）。它写在任务 `_cluster` 上。写入者是观察到超时或调用了 `binlog_server_kill_trx` 的那个节点，走一条**不**调用 `applyOnce`、**不**锁 `task_leases` 的路径。这条写入自己失败时，该节点的 `/api/health` 503 用进程内「已经观察到锁超时」来判断，不依赖 finding 行先落库。关闭者就是这同一个节点：它连续两次在 `lock_wait` 之内拿到先前卡住的那把锁之后，关掉 finding，并清掉进程内的 503 原因。单次锁等待要不要先经过 Confirm 才打开 finding、才让 503，留给 PR-2（第 6 节 F12）；本记录不把第一次 1205 规定成一次页面。
 
 `/api/health` 在下面任一成立时是 503，即使最后一行 `task_health.status` 还是 `HEALTHY`：
 
@@ -287,7 +297,7 @@ end   = 新 owner 的 DumpReady 提交（该 epoch 的观察态 RUNNING）
 RTO  <= lease_ttl + max(idle_kill, lock_wait) + claim_interval + start_to_ready
 ```
 
-`idle_kill` 在 MySQL 8 上是 `wait_timeout`（旁路 `KILL` 启用时用同一上界），在 MariaDB 上是 `idle_transaction_timeout`。`KILL` 被禁用时，`idle_kill` 仍是这个服务器超时，健康详情写 `side_kill=off`。`lock_wait` 是 `innodb_lock_wait_timeout`。`start_to_ready` 的起止是 `STARTING` 提交到 `DumpReady` 提交。缺省数字是 10 秒，写进发布说明，e2e 用这个数字断言。缺省量级：TTL 15 秒，`idle_kill` 与 `lock_wait` 都是 5 秒，认领间隔 2 秒，`start_to_ready` 10 秒，RTO 上界 32 秒。现场 TTL 60 秒时，上界是 60 + 5 + 2 + 10 = 77 秒。宽限不进公式。跨节点恢复不等另一个 `worker_id` 的注册过期。同一 `worker_id` 被 `SIGSTOP` 之后，新进程要等注册过期才能占用这个 id——这是 0001 的会话所有权，保留；它不得挡住**另一个** `worker_id` 的任务认领。#463 的 143 秒在这套公式下是失败，不是可以接受的上界。同一 `node_id`、同一 `data_dir` 在 `per_node` 上被 `kill -9` 之后的上界见第 6 节 F10，不塞进这条跨节点公式。
+缺省 `cluster.side_kill` 是 `off`，所以上面这条就是发布的缺省公式，里面没有旁路杀会话。`idle_kill` 在 MySQL 8 上是 `wait_timeout`，在 MariaDB 上是 `idle_transaction_timeout`。`lock_wait` 是 `innodb_lock_wait_timeout`。`start_to_ready` 的起止是 `STARTING` 提交到 `DumpReady` 提交。缺省数字是 10 秒，写进发布说明，e2e 用这个数字断言。缺省量级：TTL 15 秒，`idle_kill` 与 `lock_wait` 都是 5 秒，认领间隔 2 秒，`start_to_ready` 10 秒，RTO 上界 32 秒。现场 TTL 60 秒时，上界是 60 + 5 + 2 + 10 = 77 秒。健康详情写 `side_kill=off`。宽限不进公式。唯一能读的节点短暂磁盘满时，还要在这条公式之外再加上约一个 `refusal_retry_cap_sec`（缺省 600 秒），整段是 CRITICAL 和 503。跨节点恢复不等另一个 `worker_id` 的注册过期。同一 `worker_id` 被 `SIGSTOP` 之后，新进程要等注册过期才能占用这个 id——这是 0001 的会话所有权，保留；它不得挡住**另一个** `worker_id` 的任务认领。#463 的 143 秒在这套公式下是失败，不是可以接受的上界。同一 `node_id`、同一 `data_dir` 在 `per_node` 上被 `kill -9` 之后的上界见第 6 节 F10，不塞进这条跨节点公式。
 
 ### 3.5 finding 从状态机派生，而不是从一次扫目录的差集派生
 
@@ -316,6 +326,8 @@ RTO  <= lease_ttl + max(idle_kill, lock_wait) + claim_interval + start_to_ready
 3. 事务提交之后才在本进程收敛。收敛的错误不再改写已经返回的状态码；若响应还没写，收敛失败也不把已经提交的 `STARTING` 说成 400。调用方看到推进的 204 时，行上已经是这次 `Acquire` 的 owner 和 `STARTING`。
 4. `LEASE_DEGRADED` 且期望 `RUN`、`pending_delete` 未置位，是合法的 Start。它清拒绝行、清 `run_id`、进入 `STARTING`。这是操作员明确要求再试，不是认领循环偷偷违反退避。它不清 `tail_unreadable_since`。
 
+`per_node` 上把链目录拷到一台曾经让出的对端之后，该对端的 `refuse_until` 仍是 NULL，认领不会用它。只拷目录不清这行。操作员必须再 Start 一次：Start 删掉本任务全部拒绝行，对端才能 `Acquire`。本记录不另加「本地目录已经可读就删掉自己的 NULL 拒绝」事件。清掉它的是这次 Start，或另一节点的 `DumpReady`。
+
 Stop 已经是「先落库 `STOPPING`」。保持为单事务。失败不写 `STOPPING`。认领事务进行中收到 Stop：认领在同一把锁下看见期望 `STOP`，回滚 `Acquire`。删除落在接管中途：`OperatorDelete` 把观察态写成 `STOPPING` 并置 `pending_delete`。持有者还在就等 `StopConfirmed`；持有者已死、租约过期后，任一节点 `StopExpired` 删行。期望 `STOP` 时的 `EpochLost` 与 `StopConfirmed` 同一结果。
 
 ### 3.7 考虑过的方案
@@ -343,12 +355,12 @@ Stop 已经是「先落库 `STOPPING`」。保持为单事务。失败不写 `ST
 检查分安全性与活性。安全性看每一段前缀。活性只在下面三条公平性假设成立时要求有界步数；这三条是模型的前提，不是被证明的性质：
 
 1. 没有被停住的节点最终会走出一步（认领循环、评估器或 runner）。
-2. `task_leases` 上的行锁在 `idle_kill` 内释放（服务器的会话杀，或那条不锁 `task_leases` 的旁路 `KILL`）。
+2. `task_leases` 上的行锁在 `idle_kill` 内释放。缺省证明是服务器的会话超时（`side_kill` 为 `off`）。`auto` 且演练已通过时，过程可以更早拆掉同一把锁，不改变这个上界。
 3. 读得到链目录、拒绝期限已过、且没有被停住的节点，会在一个 `claim_interval` 内被调度到。
 
 - **安全**（Go 的随机序列，固定种子可重放）：从 `CREATED` 出发，任意交错事件，每一段前缀都满足不变量 1–5、8、10，以及 6、7、9 的安全半边。特别是：非操作员 Stop/Delete 之后 desired 不是 `STOP`；`FAILED` 只出现在终态允许名单或 `CHAIN_OWNER_GONE` 上，不会出现在「本节点读不到目录、且 `task_chain` 是别人」的前缀里；未分类错误、`ENOENT`、`ENOSPC`、`EROFS` 的前缀不是 `FAILED`；同一 finding 键不会在事实未变时先关后开；`tail_unreadable_since` 在 `DumpReady` 之前不被 Start 或 `STARTING` 清掉；`OperatorStart` 的 409 分支不改变状态；runner 事件在更新的 epoch 上不写入；拒绝期限只来自库时钟那一列；认领不拉 `FAILED`。
 - **活性**（同一台函数，步数有上界。一步是一个事件或一个超时）：
-  - (a) 前提是：期望 `RUN`，至少一个能读目录的节点没有被停住。拒绝行不放进前提。`per_node` 的 NULL 拒绝由别人的 `DumpReady` 删掉；`shared` 的 `TailUnreadable` 和全部 `EpochLost` 在 `refusal_retry_cap_sec` 内到期，能读的节点会再次可调度。K = 1 次 `idle_kill` + 1 次 `claim_interval` + 1 次 `start_to_ready`。该节点若还停在一条会到期的拒绝里，K 再加这一次上限（缺省 600 秒）。前提因此不会因为拒绝行永不到期而变成空集。
+  - (a) 前提是：期望 `RUN`，至少一个能读目录的节点没有被停住。拒绝行不放进前提。`per_node` 的 NULL 拒绝由别人的 `DumpReady` 删掉；`shared` 的 `TailUnreadable` 和全部 `EpochLost` 在 `refusal_retry_cap_sec` 内到期，能读的节点会再次可调度。K = 1 次 `idle_kill` + 1 次 `claim_interval` + 1 次 `start_to_ready`。该节点若还停在一条会到期的拒绝里，K 再加这一次上限（缺省 600 秒）。唯一能读的节点短暂磁盘满时，恢复后最坏就是这一次 600 秒，整段是 CRITICAL，`/api/health` 是 503，并且这 600 秒加在第 3.4 节的缺省 RTO 之外。前提因此不会因为拒绝行永不到期而变成空集。
   - (b) 不存在把任务永久停在 `LEASE_DEGRADED` 的认领循环。`per_node` 上 `tail_unreadable_since` 还在时，每个读不到目录的节点至多 `Acquire` 一次（`refuse_until` 为 NULL），直到某一次 `DumpReady` 删掉这些行；这一段 epoch 至多增加 N。`shared` 的 `TailUnreadable` 和 `EpochLost` 到顶之后按 `refusal_retry_cap_sec` 再试，速率有界，不写 NULL。链主人心跳还在但目录已经不在时，`ChainOwnerBack` 不发生，行留在 `FAILED`，能读的节点仍按上面的到期拒绝再试。K 还要不要把这 N 次无用认领算进 (a)、以及用有界搜索而不是随机前缀来查活性，留到 PR-1（第 6 节 N9）。
   - (c) `DumpReady` 之后，尾巴 finding 在一个 sweep 步内关闭。
 - **轨迹**（表驱动，QA 场景写成事件序列，断言终态）：
@@ -400,7 +412,7 @@ PlusCal 不作为 CI 的依赖。过渡函数的注释用同一套变量名（`p
 
 | # | 场景 | 断言 |
 | --- | --- | --- |
-| 1 | MySQL 8.0 的 meta，事务内 `SIGSTOP` | 不依赖 `idle_transaction_timeout`。`wait_timeout` 或旁路 `KILL` 在 `idle_kill` 内拆掉会话；对端的 `FOR UPDATE` 继续；等待期间 503，不是 200 加 `HEALTHY`。RTO 的终点是新 owner 的 `DumpReady` |
+| 1 | MySQL 8.0 的 meta，事务内 `SIGSTOP` | 不依赖 `idle_transaction_timeout`。缺省 `side_kill=off`，由 `wait_timeout` 在 `idle_kill` 内拆掉会话。`auto` 且演练已通过时，由 `binlog_server_kill_trx` 在同一上界内拆掉，客户端不发 `KILL`。对端的 `FOR UPDATE` 继续；等待期间 503，不是 200 加 `HEALTHY`。RTO 的终点是新 owner 的 `DumpReady` |
 | 2 | 停住的是 `_health` 持有者而不是任务 owner，并且它握着 `task_leases` 行锁 | owner 自己的写入撞上 1205 时重试，任务保持这个 owner 的 epoch，不写 `FAILED` |
 | 3 | owner 在事务里停顿超过 `idle_kill`、不到 TTL | 会话被杀，租约行的 `lease_expire_at` 仍在将来。同一个 owner 在新连接上重试，不发生对端接管，不写 `FAILED` |
 | 4 | `ChainVerified` 之后停 2×TTL 再写 | 写入带着的 epoch 与 `task_leases` 不符，条件更新拒绝。行留在新 owner 上，旧事件丢弃 |
@@ -414,7 +426,7 @@ PlusCal 不作为 CI 的依赖。过渡函数的注释用同一套变量名（`p
 | 12 | 旧二进制与新二进制同时对着一套已迁移的 meta | 触发器只拒绝 `backup_tasks` 上不把 `row_generation` 加一的 `UPDATE`。续租在 `task_leases`，目录行在 `binlog_files`，dump 线程不走这张表，这三样照常。响声是 `_cluster` 上的 `MIXED_VERSION`。`SIGSTOP` 到注册过期再 `SIGCONT` 的旧节点能绕过预检，回来后继续 dump。升级顺序仍是先停掉全部旧节点，再 `migrate up` |
 | 13 | meta 切主，或库时钟偏差大于 TTL 减续租间隔 | 比较用同一条语句里的 `NOW(6)`。偏差已经大于 TTL − renew 时允许提前接管。旧 epoch 的写入被栅栏拒绝。源上至多一条 dump，不得停在 200 加 `HEALTHY` |
 | 14 | 损坏的副本，校验和还只来自 catalog，rehash 没跑完 | 这一轮是不完整读。不得关闭 `SEGMENT_UNREADABLE`。规则在 PR-5（第 6 节 F7）；这一格是该 PR 的验收 |
-| 15 | owner 磁盘满或 `EROFS` | `EpochLost`，不是 `TerminalError`。期望保持 `RUN`。拒绝指数退避，到顶后每 `refusal_retry_cap_sec` 再 `Acquire`，磁盘恢复后可以 `DumpReady` 并清掉全部拒绝行。不永久停在 `LEASE_DEGRADED`。WARNING，连续 3 次升 CRITICAL。写得出的另一个节点可以接管 |
+| 15 | owner 磁盘满或 `EROFS` | `EpochLost`，不是 `TerminalError`。期望保持 `RUN`。拒绝指数退避，到顶后每 `refusal_retry_cap_sec` 再 `Acquire`，磁盘恢复后可以 `DumpReady` 并清掉全部拒绝行。不永久停在 `LEASE_DEGRADED`。唯一能读的节点只是短暂磁盘满时，恢复后最坏再等约 600 秒，整段 CRITICAL，`/api/health` 503，这 600 秒加在缺省 RTO 之外。WARNING，连续 3 次升 CRITICAL。写得出的另一个节点可以接管 |
 | 16 | 宽限用尽之后、TTL 之前的 45 秒（#450 / #454） | 恢复之后观察态在第 2 节第 9 条的并集里，下一任 owner 的 epoch 加一。不是 desired `STOP`，也不是认领查询匹配不到的形状 |
 | 17 | uploads 开启与关闭各跑一遍接管 | 两次的事件相同。还没封存的尾巴是 `LOCAL_ONLY`，接管不因为 uploads 开着就换一条过渡。D6 仍不做。`cluster.storage` 登记进 meta 留到 PR-4（第 6 节 F11） |
 
@@ -435,7 +447,7 @@ PlusCal 不作为 CI 的依赖。过渡函数的注释用同一套变量名（`p
 | S19 迁移时还有一个旧节点 | 预检看见未过期注册，迁移在 DDL 之前失败。触发器只挡 `backup_tasks` 的 `UPDATE`。dump、`task_leases` 上的续租、`binlog_files` 不受影响。注册过期之后 `SIGCONT` 回来的旧节点继续 dump，新节点看到旧协议注册就打开 `MIXED_VERSION` 并且不认领 | 关上。措辞不再把续租和 dump 算进触发器 |
 | S20 迁移时有停住的长事务 | 预检看见 `innodb_trx` 里超过 `idle_kill` 的事务，迁移失败，不排到元数据锁后面。DDL 前 `SET SESSION lock_wait_timeout = 10`，锁真的出现也在 10 秒内失败返回 | 关上 |
 | S21 `per_node` 上回填 `task_chain` | `INSERT IGNORE`，`verified_at` 为 NULL。这行只给 `ChainOwnerGone` 看心跳。`TailUnreadable` 不把未验证的 `owner_node` 当成链主人，没有目录的节点仍让出。重跑迁移不插第二行 | 关上 |
-| S23 meta 在 ProxySQL、MaxScale 或 RDS 后面 | 不用 `CONNECTION_ID()` 判断直连。启动和每个 sweep 做演练：A 锁 `meta_canary`，B 按 `innodb_trx` 里的线程 `KILL`，只有 A 掉线且 B 随后锁上该行才 `side_kill=on`。`cluster.side_kill=off` 时不做。RDS 的演练和真杀都走 `mysql.rds_kill`。演练失败则只留服务器超时 | 关上 |
+| S23 meta 在 ProxySQL、MaxScale 或 RDS 后面 | 客户端不发 `KILL`。演练和真杀都是 `CALL binlog_server_kill_trx(trx_id)`。过程在服务器内按 `trx_id` 找线程，确认它仍握着 `task_leases` 或 `meta_canary` 的行锁，再在同一调用里杀掉；RDS 在过程里调 `mysql.rds_kill`。连接转给别人之后 `trx_id` 已变，`CALL` 是 no-op。`meta_canary` 每个 `node_id` 一行。`cluster.side_kill` 缺省 `off`，不演练，缺省 RTO 只用服务器超时。`auto` 只用于直连，写明在会解析 SQL 的代理后面不安全。过程建不上则开关保持 off。演练成功会在错误日志留下 `Aborted connection` | 关上 |
 
 ## 5. 迁移
 
@@ -443,7 +455,7 @@ PlusCal 不作为 CI 的依赖。过渡函数的注释用同一套变量名（`p
 
 滚动升级要有栅栏。今天 `minRequiredSchemaVersion` 是 6，已发布的二进制只拒绝比 6 更旧的 schema。改列名只让重启后的心跳写失败。会话变量会在重连、`COM_RESET_CONNECTION` 或代理后面丢掉，不拿它当栅栏。PR-4 的迁移（下一号是 `000011`）按这个顺序做。每一步先查 `information_schema`，列或表已经在就跳过，所以一次失败的 up 可以重跑。MySQL 8 没有 `ADD COLUMN IF NOT EXISTS`。
 
-1. **预检，失败则一行 DDL 都不做。** 下面任一成立，迁移直接退出：`worker_registrations` 里还有 `lease_expire_at > NOW(6)` 的行；`information_schema.innodb_trx` 里有起始时间早于 `idle_kill` 的事务；`log_bin` 开着，而当前账号既没有 `SUPER`，也没有 `log_bin_trust_function_creators = 1`。最后一条是因为 `CREATE TRIGGER` 在开了 binlog 的主从或 RDS 上会要这个权限，不能等 `ALTER` 做完一半才失败。这样 #476 那种停住的事务不会把 `ALTER` 堵在元数据锁上，后面的查询也不会排到 `ALTER` 后面。
+1. **预检，失败则一行 DDL 都不做。** 下面任一成立，迁移直接退出：`worker_registrations` 里还有 `lease_expire_at > NOW(6)` 的行；`information_schema.innodb_trx` 里有起始时间早于 `idle_kill` 的事务；`log_bin` 开着，而当前账号既没有 `SUPER`，也没有 `log_bin_trust_function_creators = 1`。最后一条同时盖住 `CREATE TRIGGER` 和 `CREATE PROCEDURE binlog_server_kill_trx`：两者在开了 binlog 的主从或 RDS 上都会要这个权限，不能等 `ALTER` 做完一半才失败。过程最终没建出来时，`side_kill` 保持 off，不把集群卡在没有过程的 `auto` 上。这样 #476 那种停住的事务不会把 `ALTER` 堵在元数据锁上，后面的查询也不会排到 `ALTER` 后面。
 2. **DDL 前** `SET SESSION lock_wait_timeout = 10`。预检之后仍出现的锁，10 秒内失败返回，不把集群挂住。
 3. 新二进制把 `minRequiredSchemaVersion` 抬到 11。迁移没跑完，新进程不起。这一条只管新二进制。
 4. 同一迁移把 `worker_heartbeats.version` 改名为 `build_version`（数据原样拷过去）。这只让**重启**的旧进程在启动校验里失败，与 `000006` 删掉仍被旧清单点名的索引是同一类。它停不住已经跑着的 dump，下一步的触发器也停不住。
@@ -461,7 +473,7 @@ BEGIN
 END;
 ```
 
-6. `worker_registrations` 增加 `cluster_protocol_version`（缺省 0，新二进制写 11）。预检已经要求迁移时没有活注册。迁移之后若又有协议低于 11 且未过期的注册，新节点不认领，并在 `_cluster` 上打开 CRITICAL `MIXED_VERSION`。这是旧节点还在 dump 时集群上能看见的信号。同一迁移建 `meta_canary`（一行），给第 3.4 节的演练加锁，不锁 `task_leases`。升级说明写明：先停掉全部旧节点，再 `migrate up`，再启动新节点。手写的 `UPDATE backup_tasks`（例如 `scripts/e2e/smoke-epoch-segments.sh`，以及升级说明里的 SQL）会被这个触发器拒绝，清单和改法在 PR-4（第 6 节 P2-3），不在本记录里逐条改脚本。
+6. `worker_registrations` 增加 `cluster_protocol_version`（缺省 0，新二进制写 11）。预检已经要求迁移时没有活注册。迁移之后若又有协议低于 11 且未过期的注册，新节点不认领，并在 `_cluster` 上打开 CRITICAL `MIXED_VERSION`。这是旧节点还在 dump 时集群上能看见的信号。同一迁移建 `meta_canary`（主键 `node_id`，每个节点一行）和过程 `binlog_server_kill_trx(p_trx_id)`。过程是 `SQL SECURITY DEFINER`，`DEFINER` 与触发器相同，升级说明写明这个账号不能删。演练锁自己的 `meta_canary` 行，不锁 `task_leases`。升级说明写明：先停掉全部旧节点，再 `migrate up`，再启动新节点。手写的 `UPDATE backup_tasks`（例如 `scripts/e2e/smoke-epoch-segments.sh`，以及升级说明里的 SQL）会被这个触发器拒绝，清单和改法在 PR-4（第 6 节 P2-3），不在本记录里逐条改脚本。
 
 存量行的迁移，同一笔 `000011`，并且这笔 `UPDATE` 自己也要把 `row_generation` 加一，否则过不了上面的触发器。触发器在这批回填之后再建，回填就不必绕过它；顺序是回填，然后 `CREATE TRIGGER`。
 
@@ -489,10 +501,12 @@ WHERE chain_owner <> '';
 
 **降级。** `migrate down` 同样先做预检：还有 `cluster_protocol_version >= 11` 且未过期的注册，就拒绝，不在新进程还连着的时候拆栅栏。然后 `SET SESSION lock_wait_timeout = 10`，再按这个顺序：
 
-1. `DROP TRIGGER backup_tasks_bu_generation`。触发器还在时，旧二进制对 `backup_tasks` 的更新失败。
-2. 把 `build_version` 改回 `version`，旧进程的启动校验才认这列。
-3. 删掉这次加的列和表：`backup_tasks` 上的 `row_generation`、`failed_reason`、`failed_at`、`tail_unreadable_since`、`pending_delete`，`worker_registrations.cluster_protocol_version`，以及 `task_chain`、`task_node_refusal`、`meta_canary`。留下它们的话，MySQL 8 没有 `ADD COLUMN IF NOT EXISTS`，再 `migrate up` 会在重复列上失败。不把 `LEGACY_UNKNOWN` 改回 desired `STOP`：分不清哪些是升级时翻转的，哪些是升级之后操作员又 Start 过的。需要停的任务由操作员在降级前 Stop。
-4. 降级说明：先停掉全部新节点，再 `migrate down`，再启动旧节点。新二进制的 `minRequiredSchemaVersion` 是 11，schema 回到 10 之后它不起。
+1. `DROP PROCEDURE binlog_server_kill_trx`。旧二进制不调用它。
+2. `DROP TRIGGER backup_tasks_bu_generation`。触发器还在时，旧二进制对 `backup_tasks` 的更新失败。
+3. 把 `build_version` 改回 `version`，旧进程的启动校验才认这列。
+4. 先处理 `pending_delete`，再删列。还有 `pending_delete` 置位、并且 `task_leases` 未过期的行，down 拒绝，列先留着。等持有者 `StopConfirmed`，或等租约过期后再跑一次 down。租约已空或已过期、且 `pending_delete` 置位的行，在删列之前删掉：任务行、`task_chain`、拒绝行、finding、租约。观察态已经是 `STOPPED` 的也删。列一删，旧二进制不认识这个意图，行会永远留成 `STOPPED`。
+5. 删掉这次加的列和表：`backup_tasks` 上的 `row_generation`、`failed_reason`、`failed_at`、`tail_unreadable_since`、`pending_delete`，`worker_registrations.cluster_protocol_version`，以及 `task_chain`、`task_node_refusal`、`meta_canary`。留下它们的话，MySQL 8 没有 `ADD COLUMN IF NOT EXISTS`，再 `migrate up` 会在重复列上失败。不把 `LEGACY_UNKNOWN` 改回 desired `STOP`：分不清哪些是升级时翻转的，哪些是升级之后操作员又 Start 过的。需要停的任务由操作员在降级前 Stop。
+6. 降级说明：先停掉全部新节点，再 `migrate down`，再启动旧节点。新二进制的 `minRequiredSchemaVersion` 是 11，schema 回到 10 之后它不起。活租约还在的 `pending_delete` 行会让这一步拒绝，等租约过期后重跑。
 
 不使用 `@binlog_server_protocol` 或任何会话变量。重连和代理都会把它丢掉，操作员 Stop 不能靠它。
 
@@ -504,9 +518,9 @@ WHERE chain_owner <> '';
 | --- | --- | --- | --- |
 | 0 | 本记录 | 无代码 | 不关 issue。接受之后才有下面几行 |
 | 1 | 纯过渡函数、第 4.1 节的属性和轨迹，含目录消失时 `ChainOwnerBack` 不发生、`StopExpired`、以及 epoch 有上限。活性的检查方法（有界搜索，K 含 N 次无用认领，第 6 节 N9）在这个 PR 里写定。不接到调度器 | 无 | 无。规格先红后绿 |
-| 2 | 按 flavor 设置会话杀：MySQL 8 的 `wait_timeout`、`net_read_timeout`、`net_write_timeout`，MariaDB 的 `idle_transaction_timeout`，两边都设 `innodb_lock_wait_timeout`。旁路 `KILL` 只由等锁节点发出，同一 `trx_id` 两次探测间隔至少 `idle_kill`。`cluster.side_kill` 缺省 `auto`：启动和每个 sweep 用 `meta_canary` 做演练，A 掉线且 B 锁上该行才打开；`off` 或演练失败则 RTO 只剩服务器超时。`SET SESSION` 失败则拒绝 cluster 启动。`META_LOCK_STALLED` 写到 `_cluster`。有效 `stale_after` 用第 2 节第 7 条的下限，不夹到一轮 sweep 以下；有活 owner 的 `no_progress_after` 保持配置值。e2e 在 MySQL 8.0 和 MariaDB 上各打一格「握着 `FOR UPDATE` 时 `SIGSTOP`」，并打缺省 sweep 下 `/api/health` 保持 200。认领路径加一条断言：不读 `worker_registrations`。发布说明写上带起止点的 RTO 公式和 `start_to_ready` 的 10 秒。同一 `node_id` 的 `per_node` 重启上界（F10）、单次锁超时的 Confirm（F12 的打开侧）、以及观察者死后由 `_health` 持有者关闭 `META_LOCK_STALLED`（N6）在这个 PR 里定 | 健康事务「1205 重试 50 次」这条把上界乘开的循环，改成超时就按 3.4 报告 | **#476、#463** |
+| 2 | 按 flavor 设置会话杀：MySQL 8 的 `wait_timeout`、`net_read_timeout`、`net_write_timeout`，MariaDB 的 `idle_transaction_timeout`，两边都设 `innodb_lock_wait_timeout`。`cluster.side_kill` 缺省 `off`，缺省 RTO 只用这些服务器超时。`auto` 只用于直连，发布说明写明在会解析 SQL 的代理后面不安全。打开时演练和真杀都是 `CALL binlog_server_kill_trx`，客户端不发 `KILL`；`meta_canary` 每个 `node_id` 一行；过程不存在或演练失败则保持 off。发布说明把演练的 `Aborted connection` 列进告警白名单。`SET SESSION` 失败则拒绝 cluster 启动。`META_LOCK_STALLED` 写到 `_cluster`。有效 `stale_after` 用第 2 节第 7 条的下限，不夹到一轮 sweep 以下；有活 owner 的 `no_progress_after` 保持配置值。e2e 在 MySQL 8.0 和 MariaDB 上各打一格「握着 `FOR UPDATE` 时 `SIGSTOP`」，并打缺省 sweep 下 `/api/health` 保持 200。认领路径加一条断言：不读 `worker_registrations`。发布说明写上带起止点的缺省 RTO 公式和 `start_to_ready` 的 10 秒。同一 `node_id` 的 `per_node` 重启上界（F10）、单次锁超时的 Confirm（F12 的打开侧）、以及观察者死后由 `_health` 持有者关闭 `META_LOCK_STALLED`（N6）在这个 PR 里定 | 健康事务「1205 重试 50 次」这条把上界乘开的循环，改成超时就按 3.4 报告 | **#476、#463** |
 | 3 | 已 `ChainVerified` 的目录不再丢弃 `I6_MISSING_LOCAL`，打开 `SEGMENT_MISSING`。未读到目录不写 `task_chain` / `chain_owner`。finding 还没改成单调之前，这条 PR **禁止**在不完整观察上关闭已打开的 `SEGMENT_MISSING`（先不关，留给 PR-5，避免再引入 100 ms 开合） | `chainFactsInto` 里集群模式对 I6 的 `continue` | **#462** |
-| 4 | 接上过渡函数。`task_chain`（`INSERT IGNORE` 回填且 `verified_at` 为 NULL）、`task_node_refusal`、`row_generation`、`failed_reason`、`failed_at`、`tail_unreadable_since`、`pending_delete`。runner 事件的 epoch 栅栏，`ChainOwnerBack` 要求 `verified_at > failed_at`，`per_node` 的 `TailUnreadable` 每个节点一次且 `DumpReady` 删掉全部拒绝行，`shared` 与 `EpochLost` 到顶后按 `refusal_retry_cap_sec`（缺省 600 秒）再试。预检含 `CREATE TRIGGER` 所需的 `SUPER` 或 `log_bin_trust_function_creators`。down 删掉新列，`StopExpired`，`OperatorDelete` 写入 `STOPPING`，`pending_delete` 上 Start 为 409。`node_gone_after` 为 0 时取 `max(3×sweep, lease_ttl + 2×sweep)`。迁移 `000011`：预检、`lock_wait_timeout=10`、抬 `minRequiredSchemaVersion`、改名 `worker_heartbeats.version`、`row_generation` 触发器、`cluster_protocol_version`、`FAILED`+`STOP` 的存量 `UPDATE`、down 的步骤。`Release` 之后同一 `worker_id` 再 `Acquire` 必须把 epoch 加一，比较用同一条语句的 `NOW(6)`（第 6 节 F9）。拒绝行与让出同一事务（F12 的写入侧）。`cluster.storage` 登记进 meta（F11）。终态允许名单在进 `FAILED` 前先按可重试处理至少 2 分钟（N7）。只有 API 或没有目录的节点上 Start 写空 owner 的 `STARTING`（N8）。e2e：让出后重启、拷贝目录后 Start、`per_node` 的 `SIGSTOP`/`SIGCONT`（含目录还在时自己恢复，以及只有心跳时留在 `FAILED`）、持有者 `kill -9` 后的 Stop 与 Delete、第 4.2 节的竞态行与混跑行 | `yieldUnreachableTailLocked`、`failYieldedTail`、`tailYieldUntil`、`yieldsUnreachableTail`、`reportUnreachableTail` 的 `PreserveChainOwner` 特殊写入、`markFailedLocked` 里对 desired `STOP` 的赋值、`ReconcileLegacyDesiredRun` 里 `FAILED` → `STOP` 的那一臂。`startTask` 里「`STARTING` 但 `run_id` 非空就拒绝」不再能碰到，因为写 `STARTING` 的唯一入口会清 `run_id` | **#473**，以及 #471 上尚未单独开 issue 的 QA（2）（3）（4） |
+| 4 | 接上过渡函数。`task_chain`（`INSERT IGNORE` 回填且 `verified_at` 为 NULL）、`task_node_refusal`、`row_generation`、`failed_reason`、`failed_at`、`tail_unreadable_since`、`pending_delete`。runner 事件的 epoch 栅栏，`ChainOwnerBack` 要求 `verified_at > failed_at`，`per_node` 的 `TailUnreadable` 每个节点一次且 `DumpReady` 删掉全部拒绝行，`shared` 与 `EpochLost` 到顶后按 `refusal_retry_cap_sec`（缺省 600 秒）再试。预检同时盖住 `CREATE TRIGGER` 和 `CREATE PROCEDURE binlog_server_kill_trx` 所需的 `SUPER` 或 `log_bin_trust_function_creators`；过程没建出来则 `side_kill` 保持 off。down 先删过程，再删掉租约已过期的 `pending_delete` 行，活租约还在则拒绝 down，然后删掉新列。`StopExpired`，`OperatorDelete` 写入 `STOPPING`，`pending_delete` 上 Start 为 409。`node_gone_after` 为 0 时取 `max(3×sweep, lease_ttl + 2×sweep)`。迁移 `000011`：预检、`lock_wait_timeout=10`、抬 `minRequiredSchemaVersion`、改名 `worker_heartbeats.version`、`row_generation` 触发器、`cluster_protocol_version`、`FAILED`+`STOP` 的存量 `UPDATE`、down 的步骤。`Release` 之后同一 `worker_id` 再 `Acquire` 必须把 epoch 加一，比较用同一条语句的 `NOW(6)`（第 6 节 F9）。拒绝行与让出同一事务（F12 的写入侧）。`cluster.storage` 登记进 meta（F11）。终态允许名单在进 `FAILED` 前先按可重试处理至少 2 分钟（N7）。只有 API 或没有目录的节点上 Start 写空 owner 的 `STARTING`（N8）。e2e：让出后重启、拷贝目录后 Start、`per_node` 的 `SIGSTOP`/`SIGCONT`（含目录还在时自己恢复，以及只有心跳时留在 `FAILED`）、持有者 `kill -9` 后的 Stop 与 Delete、第 4.2 节的竞态行与混跑行 | `yieldUnreachableTailLocked`、`failYieldedTail`、`tailYieldUntil`、`yieldsUnreachableTail`、`reportUnreachableTail` 的 `PreserveChainOwner` 特殊写入、`markFailedLocked` 里对 desired `STOP` 的赋值、`ReconcileLegacyDesiredRun` 里 `FAILED` → `STOP` 的那一臂。`startTask` 里「`STARTING` 但 `run_id` 非空就拒绝」不再能碰到，因为写 `STARTING` 的唯一入口会清 `run_id` | **#473**，以及 #471 上尚未单独开 issue 的 QA（2）（3）（4） |
 | 5 | finding 改成 3.5 的派生，尾巴事实用 `tail_unreadable_since`。同一键先关后开的属性测试接上生产的 `Reconcile`。`ChainVerified` 要求最新封存段与 catalog 一致；rehash 完成前的 catalog-only 校验和算不完整读，不关 `SEGMENT_UNREADABLE`（第 6 节 F7） | `OWNER_CHANGED` 关闭、`AwaitRehash` 作为「这次要不要关」的条件、`noteOwnerChanged` 在目录不完整时仍然置位并往下关的路径 | #471 QA（1）。#462 的 finding 从此在接管时不会闪 |
 
 PR-2 和 PR-3 互不依赖，可以并行。PR-4 依赖 PR-1。PR-5 依赖 PR-3 的「未验证不关」那条临时禁令，并在同一 PR 里把禁令换成正式的派生规则，不让禁令多活一个版本。
