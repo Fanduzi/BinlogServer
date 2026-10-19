@@ -142,13 +142,14 @@ func TestScheduler_LeaseLostTransitionsToStoppingStopped(t *testing.T) {
 		t.Fatal("runner was not invoked")
 	}
 
-	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
+	waitRunClosed(t, s, task.ID, "lease lost")
 	got, err := s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 || got.RunID != "" {
-		t.Fatalf("expected lease identity cleared after stop, got owner=%q epoch=%d run_id=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
+	if got.State != StateLeaseDegraded || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("lease lost should stay desired RUN in LEASE_DEGRADED, got state=%s desired=%s", got.State, got.DesiredRun)
 	}
 }
 
@@ -187,13 +188,13 @@ func TestScheduler_LeaseRenewFailureEntersDegradedThenStop(t *testing.T) {
 	}
 
 	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
-	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
+	waitRunClosed(t, s, task.ID, "grace exceeded")
 	got, err := s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 || got.RunID != "" {
-		t.Fatalf("expected lease identity cleared after stop, got owner=%q epoch=%d run_id=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
+	if got.State != StateLeaseDegraded || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("grace should leave desired RUN in LEASE_DEGRADED, got state=%s desired=%s", got.State, got.DesiredRun)
 	}
 }
 
@@ -337,16 +338,16 @@ func TestScheduler_OwnershipLossLeavesHealthyRunningPosture(t *testing.T) {
 		t.Fatal("runner was not invoked")
 	}
 
-	waitTaskState(t, s, task.ID, 2*time.Second, StateStopping)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
 	got, err := s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
-	if got.State == StateRunning {
-		t.Fatalf("expected ownership-loss to exit healthy running posture, got %s", got.State)
+	if got.State == StateRunning || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("expected ownership-loss to leave LEASE_DEGRADED desired RUN, got state=%s desired=%s", got.State, got.DesiredRun)
 	}
 	if got.OwnerWorkerID == "" || got.Epoch == 0 || got.RunID == "" {
-		t.Fatalf("expected runtime ownership retained until final convergence, got owner=%q epoch=%d run_id=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
+		t.Fatalf("expected runtime ownership retained until reclaim, got owner=%q epoch=%d run_id=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
 	}
 }
 
@@ -396,7 +397,7 @@ func TestScheduler_OwnershipLossSuppressesProgressAfterRenewLoss(t *testing.T) {
 		t.Fatal("expected initial replication progress to exist")
 	}
 
-	waitTaskState(t, s, task.ID, 2*time.Second, StateStopping)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
 
 	s.ReportReplicationProgress(task.ID, time.Unix(200, 0), "mysql-bin.000002", 456, false)
 	after, ok, err := s.GetReplicationProgress(task.ID)
@@ -504,13 +505,14 @@ func TestScheduler_OwnershipLossClearsRuntimeOwnershipOnStop(t *testing.T) {
 		t.Fatal("runner was not invoked")
 	}
 
-	waitTaskState(t, s, task.ID, 2*time.Second, StateStopped)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
+	waitRunClosed(t, s, task.ID, "lease lost")
 	got, err := s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 || got.RunID != "" {
-		t.Fatalf("expected ownership cleared after final stop, got owner=%q epoch=%d run_id=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
+	if got.State != StateLeaseDegraded || got.DesiredRun != TaskDesiredRun || got.OwnerWorkerID == "" || got.Epoch == 0 {
+		t.Fatalf("expected desired RUN kept with ownership until reclaim, got state=%s desired=%s owner=%q epoch=%d", got.State, got.DesiredRun, got.OwnerWorkerID, got.Epoch)
 	}
 }
 

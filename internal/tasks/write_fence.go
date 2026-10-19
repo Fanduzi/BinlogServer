@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: lease acquire/renew/lose events from the scheduler, and the (task, owner, epoch) identity a run writes under
-// output: LeaseClock, the worker's monotonic view of whether its lease epoch is still fresh (a write boundary refuses once ttl*4/5 has passed since the last confirmed acquire or renew, or once the scheduler marked the epoch lost); FenceIdentity carried on the run context so metadata stores can check the epoch against task_leases in the same transaction as the write; ErrWriteFenced (ADR 0009 P2-6, #417)
+// output: LeaseClock, the worker's monotonic view of whether its lease epoch is still fresh (a write boundary refuses once ttl*4/5 has passed since the last confirmed acquire or renew, or once the scheduler marked the epoch lost); Lost reports that exact epoch so a resume does not open a dump whose writes stay fenced (§29); FenceIdentity carried on the run context so metadata stores can check the epoch against task_leases in the same transaction as the write; ErrWriteFenced (ADR 0009 P2-6, #417)
 // pos: shared fencing token for every side effect a non-owner could produce (segment bytes, seal, checkpoint, catalog rows, uploads)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -91,6 +91,18 @@ func (c *LeaseClock) Confirm(taskID string, epoch int64, at time.Time, ttl time.
 		return
 	}
 	c.entries[taskID] = leaseClockEntry{epoch: epoch, confirmedAt: at, ttl: ttl}
+}
+
+// Lost reports that this process marked (taskID, epoch) lost. A new epoch
+// is not lost. Confirm of a lost epoch does not revive it (§29).
+func (c *LeaseClock) Lost(taskID string, epoch int64) bool {
+	if c == nil || taskID == "" || epoch <= 0 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cur, ok := c.entries[taskID]
+	return ok && cur.lost && cur.epoch == epoch
 }
 
 // Lose marks (taskID, epoch) as no longer held. A later Confirm of the same

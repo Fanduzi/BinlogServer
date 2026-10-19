@@ -4,6 +4,7 @@
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
+// note §29: every pass sets Facts.UnownedAfter to min(sweep, no_progress_after) so a desired-RUN task with no runner opens TASK_NO_PROGRESS within one sweep
 // note §27 (#436/#441): ErrSchemaAbsent while the evaluator is on opens HEALTH_STORE_UNAVAILABLE from memory; chainFactsInto reads checkpoint, fingerprint and order under Scheduler.TryHoldChain (bounded by ChainLockWait; the checkpoint read by the internal read timeout, a failed read leaves chain.local incomplete) and releases it before CheckBody; every sweep tick probes the health store (§27.8)
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // note P2-6.1 (§28): while this node holds _health it also evaluates _cluster, and only for HEALTH_STALE (task.state, never fence, epoch 0); standalone _cluster is unchanged
@@ -647,6 +648,25 @@ func (e *Evaluator) fenceFor(t Task) (health.Fence, bool) {
 	return health.Fence{Mode: health.FenceCluster, TaskEpoch: t.Epoch, Node: e.cfg.NodeID, Instance: e.cfg.Instance}, true
 }
 
+// unownedQuietAfter is how long a desired-RUN task may sit with no runner
+// before TASK_NO_PROGRESS (§29). One sweep, and never longer than
+// no_progress_after, so a matrix row that already uses a short threshold
+// still opens on that threshold.
+func (e *Evaluator) unownedQuietAfter() time.Duration {
+	sweep := e.cfg.Sweep
+	if sweep <= 0 {
+		sweep = time.Minute
+	}
+	np := e.cfg.NoProgressAfter
+	if np <= 0 {
+		np = health.DefaultNoProgressAfter
+	}
+	if sweep < np {
+		return sweep
+	}
+	return np
+}
+
 func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth, error) {
 	isCluster := id == ClusterFindingTask
 	var task Task
@@ -700,7 +720,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	e.mu.Unlock()
 	e.evaluations.Add(1)
 	now := e.cfg.Now()
-	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}, NoProgressAfter: e.cfg.NoProgressAfter}
+	facts := &health.Facts{TaskID: id, Now: now, Complete: map[health.Scope]bool{}, NoProgressAfter: e.cfg.NoProgressAfter, UnownedAfter: e.unownedQuietAfter()}
 	switch {
 	case gone:
 		facts.Task = &health.TaskFacts{State: string(StateStopped), Desired: TaskDesiredStop, RunHere: true}
