@@ -507,22 +507,22 @@ mysqlbinlog --version
 
 输出印着 MariaDB（例如 `mysqlbinlog from 11.8.6-MariaDB`）时，不要拿它回放 MySQL。这个客户端退出码是 0，并注入 binlog 文件里没有的 `SET @@session.check_constraint_checks=1`。MySQL 8.0 回答 `ERROR 1193 (HY000) Unknown system variable 'check_constraint_checks'`，管道在 `check_constraint_checks` 这里失败，一条数据都不进。文件没有坏。换成 `--version` 印着 MySQL 的官方 `mysqlbinlog`（例如 `Ver 8.0.46`）再执行下面的命令。
 
-然后按源文件名序号从小到大，一次把全部文件交给同一个 `mysqlbinlog`。不要按文件循环。`set -o pipefail` 让客户端失败时整条管道失败，否则 shell 只看 `mysql` 的退出码。回放之后核对行数或 `@@gtid_executed`。下面就是上一节那两个文件：
+然后按源文件名序号从小到大，一次把全部文件交给同一个 `mysqlbinlog`。不要按文件循环。`set -o pipefail` 让客户端失败时整条管道失败，否则 shell 只看 `mysql` 的退出码。`--verify-binlog-checksum` 让中间文件被改坏时客户端非 0 退出，而不是 rc 0 写入错误数据。回放之后核对行数或 `@@gtid_executed`。下面就是上一节那两个文件：
 
 ```bash
 set -o pipefail
-mysqlbinlog \
+mysqlbinlog --verify-binlog-checksum \
   ./data/1/mysql-bin.000003 \
   ./data/1/mysql-bin.000004.open.e1 \
   | mysql -h 127.0.0.1 -u root -p
 mysql -h 127.0.0.1 -u root -p -Nse "SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed"
 ```
 
-MariaDB 源用 `mariadb-binlog --skip-gtid-strict-mode`，恢复端用 `mariadb`，文件顺序不变。`mariadb-binlog --version` 应印着 MariaDB。不加 `--skip-gtid-strict-mode` 时，MariaDB 11.4 的客户端在第一个文件后停下（`Binary logs are missing data for domain`），管道仍可能显示成功，后面的文件不会进库。MySQL 的 `mysqlbinlog` 没有这个参数。
+MariaDB 源用 `mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum`，恢复端用 `mariadb`，文件顺序不变。`mariadb-binlog --version` 应印着 MariaDB。不加 `--skip-gtid-strict-mode` 时，MariaDB 11.4 的客户端在第一个文件后停下（`Binary logs are missing data for domain`），管道仍可能显示成功，后面的文件不会进库。MySQL 的 `mysqlbinlog` 没有 `--skip-gtid-strict-mode`。两个客户端都要 `--verify-binlog-checksum`。
 
 ```bash
 set -o pipefail
-mariadb-binlog --skip-gtid-strict-mode \
+mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \
   ./data/1/mysql-bin.000003 \
   ./data/1/mysql-bin.000004.open.e1 \
   | mariadb -h 127.0.0.1 -u root -p
@@ -636,22 +636,22 @@ mysqlbinlog --version
 
 If that prints MariaDB (for example `mysqlbinlog from 11.8.6-MariaDB`), do not use it against MySQL. The client exits 0 and injects `SET @@session.check_constraint_checks=1`, which is not in the binlog file. MySQL 8.0 answers `ERROR 1193 (HY000) Unknown system variable 'check_constraint_checks'`. The pipe fails at `check_constraint_checks` with 1193, and no rows land. The files are not corrupt. Use the official MySQL `mysqlbinlog` (`--version` prints MySQL, for example `Ver 8.0.46`), then run the command below.
 
-Replay in source-file index order. Pass every file to one `mysqlbinlog`. Do not loop one file at a time. `set -o pipefail` makes a client failure fail the pipeline; without it the shell only reports `mysql`. After the pipe, check a row count or `@@gtid_executed`. These are the two files from the layout above:
+Replay in source-file index order. Pass every file to one `mysqlbinlog`. Do not loop one file at a time. `set -o pipefail` makes a client failure fail the pipeline; without it the shell only reports `mysql`. `--verify-binlog-checksum` makes a corrupted file exit non-zero instead of loading the wrong rows with rc 0. After the pipe, check a row count or `@@gtid_executed`. These are the two files from the layout above:
 
 ```bash
 set -o pipefail
-mysqlbinlog \
+mysqlbinlog --verify-binlog-checksum \
   ./data/1/mysql-bin.000003 \
   ./data/1/mysql-bin.000004.open.e1 \
   | mysql -h 127.0.0.1 -u root -p
 mysql -h 127.0.0.1 -u root -p -Nse "SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed"
 ```
 
-On a MariaDB source, use `mariadb-binlog --skip-gtid-strict-mode` and `mariadb` with the same files in the same order. `mariadb-binlog --version` should print MariaDB. Without `--skip-gtid-strict-mode`, the MariaDB 11.4 client stops after the first file (`Binary logs are missing data for domain`) while the pipe can still look successful, so later files never land. MySQL's `mysqlbinlog` does not have that flag.
+On a MariaDB source, use `mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum` and `mariadb` with the same files in the same order. `mariadb-binlog --version` should print MariaDB. Without `--skip-gtid-strict-mode`, the MariaDB 11.4 client stops after the first file (`Binary logs are missing data for domain`) while the pipe can still look successful, so later files never land. MySQL's `mysqlbinlog` does not have `--skip-gtid-strict-mode`. Both clients take `--verify-binlog-checksum`.
 
 ```bash
 set -o pipefail
-mariadb-binlog --skip-gtid-strict-mode \
+mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \
   ./data/1/mysql-bin.000003 \
   ./data/1/mysql-bin.000004.open.e1 \
   | mariadb -h 127.0.0.1 -u root -p

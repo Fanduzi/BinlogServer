@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full files inventory, every sealed segment plus the highest open epoch per source index, and each segment's event-header time span
-// output: the ordered paths whose copied events cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command that starts with set -o pipefail, adds --skip-gtid-strict-mode for mariadb-binlog, and comments the pipe and a row-count or GTID check; stdout stays SQL; a format description or previous-GTIDs timestamp does not select a path; start equal to stop yields no paths and no command; Note explains an executed-GTID window that already contains every transaction up to the stop; the damaged segment and every later one are left out and warning says so
+// output: the ordered paths whose copied events cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command that starts with set -o pipefail, adds --verify-binlog-checksum, adds --skip-gtid-strict-mode for mariadb-binlog, and comments the pipe and a row-count or GTID check; stdout stays SQL; a format description or previous-GTIDs timestamp does not select a path; start equal to stop yields no paths and no command; Note explains an executed-GTID window that already contains every transaction up to the stop; the damaged segment and every later one are left out and warning says so
 // pos: point-in-time seek on the existing replay selection; the limit window stays on GET /replay without stop_datetime
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -114,7 +114,8 @@ func FormatPITRCommand(client string, paths []string, start *time.Time, stop tim
 // pipe does not hide a non-zero client, and ends with a comment that names
 // the pipe and a verification query. mariadb-binlog gets
 // --skip-gtid-strict-mode because MariaDB 11.4 otherwise stops after the
-// first file. mysqlbinlog does not get that flag.
+// first file. mysqlbinlog does not get that flag. Both clients get
+// --verify-binlog-checksum so a corrupt event fails the client.
 func formatClientCommand(client string, tokens []string) string {
 	if len(tokens) == 0 {
 		return ""
@@ -127,6 +128,7 @@ func formatClientCommand(client string, tokens []string) string {
 		if client == "mariadb-binlog" {
 			b.WriteString(" --skip-gtid-strict-mode")
 		}
+		b.WriteString(" --verify-binlog-checksum")
 		b.WriteString(" \\\n")
 	}
 	for i, token := range tokens {

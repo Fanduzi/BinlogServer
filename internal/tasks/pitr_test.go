@@ -84,7 +84,7 @@ func TestFormatPITRCommand(t *testing.T) {
 	got := FormatPITRCommand("mysqlbinlog", []string{"/data/1/mysql-bin.000001", "/data/1/mysql-bin.000002.open.e8"}, nil, stop)
 	want := strings.Join([]string{
 		"set -o pipefail",
-		"TZ=UTC mysqlbinlog \\",
+		"TZ=UTC mysqlbinlog --verify-binlog-checksum \\",
 		"  --stop-datetime='2024-01-01 01:20:00' \\",
 		"  /data/1/mysql-bin.000001 \\",
 		"  /data/1/mysql-bin.000002.open.e8",
@@ -101,7 +101,7 @@ func TestFormatPITRCommand(t *testing.T) {
 	start := clock(t, "2024-01-01 01:20:00")
 	stop = clock(t, "2024-01-01 02:10:00")
 	got = FormatPITRCommand("mariadb-binlog", []string{"/data/1/mysql-bin.000001", "/data/1/mysql-bin.000003"}, &start, stop)
-	if !strings.HasPrefix(got, "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode \\\n") || !strings.Contains(got, "--start-datetime='2024-01-01 01:20:00'") || !strings.Contains(got, "--stop-datetime='2024-01-01 02:10:00'") || !strings.Contains(got, "/data/1/mysql-bin.000001") || !strings.Contains(got, "/data/1/mysql-bin.000003") {
+	if !strings.HasPrefix(got, "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \\\n") || !strings.Contains(got, "--verify-binlog-checksum") || !strings.Contains(got, "--start-datetime='2024-01-01 01:20:00'") || !strings.Contains(got, "--stop-datetime='2024-01-01 02:10:00'") || !strings.Contains(got, "/data/1/mysql-bin.000001") || !strings.Contains(got, "/data/1/mysql-bin.000003") {
 		t.Fatalf("start+stop\n%s", got)
 	}
 	if !strings.Contains(got, "MariaDB 11.4 stops after the first file") || !strings.Contains(got, "@@gtid_current_pos") || strings.Contains(got, "| mariadb") {
@@ -207,7 +207,7 @@ func TestPITRReplay_DiskSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if maria.Client != "mariadb-binlog" || maria.ClientHint != "mariadb-binlog" || !strings.HasPrefix(maria.Command, "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode \\\n") {
+	if maria.Client != "mariadb-binlog" || maria.ClientHint != "mariadb-binlog" || !strings.HasPrefix(maria.Command, "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \\\n") {
 		t.Fatalf("maria %+v", maria)
 	}
 }

@@ -40,7 +40,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -56,7 +56,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-damaged": {
@@ -258,7 +258,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -272,7 +272,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-hole/objects": {
@@ -314,7 +314,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -328,7 +328,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-hole/objects/start": {
@@ -370,7 +370,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -384,7 +384,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-hole/start": {
@@ -426,7 +426,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -440,7 +440,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-tail-partial": {
@@ -484,7 +484,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -500,7 +500,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-tail-partial/objects": {
@@ -544,7 +544,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -560,7 +560,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-tail-partial/objects/start": {
@@ -604,7 +604,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -620,7 +620,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback-tail-partial/start": {
@@ -664,7 +664,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -680,7 +680,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback/mariadb": {
@@ -724,7 +724,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
+      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
     },
     "replay_mid": {
       "flavor": "mariadb",
@@ -740,7 +740,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
+      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
     }
   },
   "failback/objects": {
@@ -784,7 +784,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -800,7 +800,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback/objects/start": {
@@ -844,7 +844,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -860,7 +860,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "failback/start": {
@@ -904,7 +904,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000003.open.e1 \\\n  $DATA/1/mysql-bin.000003.sealed.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -920,7 +920,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2026-10-09 07:48:30' \\\n  $DATA/1/5e86458b-c3b5-11f1-8415-822b383dbcd0.mysql-bin.000001 \\\n  $DATA/1/mysql-bin.000002 \\\n  $DATA/1/mysql-bin.000003\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     }
   },
   "live": {
@@ -964,7 +964,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1015,7 +1015,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
       "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89."
     },
     "replay_mid": {
@@ -1228,7 +1228,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
       "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-5:10-89."
     },
     "replay_mid": {
@@ -1281,7 +1281,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
       "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89."
     },
     "replay_mid": {
@@ -1334,7 +1334,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
       "warning": "Segment mysql-bin.000005 is damaged (STORAGE_INCONSISTENT). Replay stops before it: that segment and every later one are left out. Take the transactions after these files from a new task started with gtid_set e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-89."
     },
     "replay_mid": {
@@ -1385,7 +1385,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1434,7 +1434,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
+      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
     },
     "replay_mid": {
       "flavor": "mariadb",
@@ -1483,7 +1483,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1532,7 +1532,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1581,7 +1581,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1630,7 +1630,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1679,7 +1679,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1728,7 +1728,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1777,7 +1777,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1828,7 +1828,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1879,7 +1879,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1930,7 +1930,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -1981,7 +1981,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -2032,7 +2032,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -2083,7 +2083,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -2134,7 +2134,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -2185,7 +2185,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -2236,7 +2236,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
+      "command": "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.\n# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.\n# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.\n# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'"
     },
     "replay_mid": {
       "flavor": "mariadb",
@@ -2287,7 +2287,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -2338,7 +2338,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",
@@ -2389,7 +2389,7 @@
         "local",
         "local"
       ],
-      "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+      "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2030-01-01 00:00:00' \\\n  $DATA/1/mysql-bin.000003 \\\n  $DATA/1/mysql-bin.000004 \\\n  $DATA/1/mysql-bin.000005 \\\n  $DATA/1/mysql-bin.000006 \\\n  $DATA/1/mysql-bin.000007.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
     },
     "replay_mid": {
       "flavor": "mysql",

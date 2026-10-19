@@ -587,7 +587,7 @@ function formatClientCommand(client, tokens) {
   if (client) {
     const flag = client === "mariadb-binlog" ? " --skip-gtid-strict-mode" : "";
     lines.push("set -o pipefail");
-    lines.push(`TZ=UTC ${client}${flag} \\`);
+    lines.push(`TZ=UTC ${client}${flag} --verify-binlog-checksum \\`);
   }
   tokens.forEach((token, index) => {
     const indent = client || index > 0 ? "  " : "";

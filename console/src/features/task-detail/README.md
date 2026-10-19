@@ -8,7 +8,7 @@
 |------|----------------|
 | `task-detail-sheet.tsx` | 任务详情界面。当前状态旁边显示期望状态 `desired_run`（`RUN` 或 `STOP`），`data-testid` 是 `task-desired-run` |
 | `use-task-detail.ts` | 详情数据加载 |
-| `detail-format.ts` | 回放命令和位点文案。有客户端时命令以 `set -o pipefail` 开头；`mariadb-binlog` 带 `--skip-gtid-strict-mode`；末尾注释要求在同一 shell 里管道并核对行数或 GTID。标准输出仍是 SQL |
+| `detail-format.ts` | 回放命令和位点文案。有客户端时命令以 `set -o pipefail` 开头，并带 `--verify-binlog-checksum`；`mariadb-binlog` 另带 `--skip-gtid-strict-mode`；末尾注释要求在同一 shell 里管道并核对行数或 GTID。标准输出仍是 SQL |
 | `detail-format.test.ts` | 上述格式化的单元测试 |
 
 ## Interfaces

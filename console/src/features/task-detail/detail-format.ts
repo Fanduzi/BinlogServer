@@ -1,5 +1,5 @@
 // input: replay path lists, binlog client names, checkpoints, and locale labels
-// output: copy-paste restore commands with set -o pipefail, --skip-gtid-strict-mode for mariadb-binlog, and a row-count or GTID verification comment
+// output: copy-paste restore commands with set -o pipefail, --verify-binlog-checksum, --skip-gtid-strict-mode for mariadb-binlog, and a row-count or GTID verification comment
 // pos: task-detail formatting for the replay command the operator copies
 // note: if this file changes, update this header and console/src/features/task-detail/README.md.
 // Pure helpers for the task detail drawer, ported line for line from
@@ -134,7 +134,7 @@ export function formatClientCommand(client: string, tokens: string[]) {
   if (client) {
     const flag = client === 'mariadb-binlog' ? ' --skip-gtid-strict-mode' : ''
     lines.push('set -o pipefail')
-    lines.push(`TZ=UTC ${client}${flag} \\`)
+    lines.push(`TZ=UTC ${client}${flag} --verify-binlog-checksum \\`)
   }
   tokens.forEach((token, index) => {
     const indent = client || index > 0 ? '  ' : ''

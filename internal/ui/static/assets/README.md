@@ -8,7 +8,7 @@ Console 构建生成的静态资源子目录。
 |------|---------------|
 | `index-*.js` | Console entry bundle（React、路由、观测上下文、壳层指标卡） |
 | `vendor-*.js` | react / router / radix 依赖 chunk |
-| 其他 `*.js` | 按路由拆分的页面 chunk（任务、告警、总览、源、Worker、任务详情）。任务表有期望列 `desired_run`（`task-desired-<id>`），详情有期望状态（`task-desired-run`）。任务详情复制的多文件回放命令以 `set -o pipefail` 开头，`mariadb-binlog` 带 `--skip-gtid-strict-mode`，注释要求同一 shell 管道并核对行数或 GTID |
+| 其他 `*.js` | 按路由拆分的页面 chunk（任务、告警、总览、源、Worker、任务详情）。任务表有期望列 `desired_run`（`task-desired-<id>`），详情有期望状态（`task-desired-run`）。任务详情复制的多文件回放命令以 `set -o pipefail` 开头，并带 `--verify-binlog-checksum`，`mariadb-binlog` 另带 `--skip-gtid-strict-mode`，注释要求同一 shell 管道并核对行数或 GTID |
 | `*.css` | Tailwind 样式 |
 
 ## Exports

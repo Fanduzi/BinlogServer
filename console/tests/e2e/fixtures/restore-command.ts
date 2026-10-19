@@ -6,7 +6,7 @@
 export function mysqlRestoreCommand(body: string[]) {
   return [
     'set -o pipefail',
-    'TZ=UTC mysqlbinlog \\',
+    'TZ=UTC mysqlbinlog --verify-binlog-checksum \\',
     ...body,
     '# Pipe stdout to mysql in this same shell so pipefail sees a client failure.',
     '# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.',

@@ -664,7 +664,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
 
 每个源序号仍只留一条路径，规则与 5.5 相同：同一序号既有封存名又有 `.open.e*` 时，留下 epoch 最大的 open 路径。这条路径不再先按 `limit` 裁掉序号较小的分段，而是看整份清单。分段要能在本进程打开：本地文件优先；本地没有时，只读封存且 `UPLOADED`、`object_key` 非空的对象。事件头时间落在窗口里才选中。`stop_datetime` 是开区间的右端，与 `--stop-datetime` 相同：时间戳大于等于停止时间的事件不进这条命令。设置了 `start_datetime` 时，左端含这个时刻，与 `--start-datetime` 相同。没有事件时间的分段不进入窗口。
 
-`source.flavor` 的客户端与 5.5 相同。`paths` 按序号升序。`command` 是一条命令：有客户端时以 `set -o pipefail` 开头，然后是 `TZ=UTC mysqlbinlog` 或 `TZ=UTC mariadb-binlog --skip-gtid-strict-mode`，然后是 `--stop-datetime='<UTC>'`，设置了开始时间时还有 `--start-datetime='<UTC>'`，最后是这些路径。末尾注释要求在同一 shell 里把标准输出接到 `mysql` 或 `mariadb`，并核对行数或 `@@gtid_executed` / `@@gtid_current_pos`。标准输出仍是 SQL，字符串本身不带管道。一次调用传入全部文件。MariaDB 11.4 不加 `--skip-gtid-strict-mode` 会在第一个文件后停下。MySQL 的 `mysqlbinlog` 不带这个参数。
+`source.flavor` 的客户端与 5.5 相同。`paths` 按序号升序。`command` 是一条命令：有客户端时以 `set -o pipefail` 开头，然后是 `TZ=UTC mysqlbinlog --verify-binlog-checksum` 或 `TZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum`，然后是 `--stop-datetime='<UTC>'`，设置了开始时间时还有 `--start-datetime='<UTC>'`，最后是这些路径。末尾注释要求在同一 shell 里把标准输出接到 `mysql` 或 `mariadb`，并核对行数或 `@@gtid_executed` / `@@gtid_current_pos`。标准输出仍是 SQL，字符串本身不带管道。一次调用传入全部文件。两个客户端都带 `--verify-binlog-checksum`，校验失败时客户端非 0 退出。MariaDB 11.4 不加 `--skip-gtid-strict-mode` 会在第一个文件后停下。MySQL 的 `mysqlbinlog` 不带这个参数。
 
 ```json
 {
@@ -675,7 +675,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
     "/data/binlog-server/data/1/mysql-bin.000003",
     "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
   ],
-  "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-datetime='2024-01-01 01:30:00' \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+  "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-datetime='2024-01-01 01:30:00' \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
 }
 ```
 
@@ -732,7 +732,7 @@ MariaDB 的形状是 `domain-server-seq`，例如 `0-1-10`。`source.flavor` 为
     "/data/binlog-server/data/1/mysql-bin.000003",
     "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
   ],
-  "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+  "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000003 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
 }
 ```
 
@@ -791,7 +791,7 @@ curl -G -sS "http://localhost:8080/api/tasks/1/replay" \
   "paths": [
     "/data/binlog-server/data/1/mysql-bin.000004.open.e1"
   ],
-  "command": "set -o pipefail\nTZ=UTC mysqlbinlog \\\n  --exclude-gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20 \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
+  "command": "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n  --exclude-gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20 \\\n  --stop-position=154 \\\n  /data/binlog-server/data/1/mysql-bin.000004.open.e1\n# Pipe stdout to mysql in this same shell so pipefail sees a client failure.\n# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.\n# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'"
 }
 ```
 

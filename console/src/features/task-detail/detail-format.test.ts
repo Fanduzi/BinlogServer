@@ -37,7 +37,7 @@ describe('detail-format', () => {
       client: 'mysqlbinlog',
       paths: ['/data/1/mysql-bin.000001', '/data/1/mysql-bin.000002'],
     })
-    expect(mysql.startsWith('set -o pipefail\nTZ=UTC mysqlbinlog \\\n')).toBe(true)
+    expect(mysql.startsWith('set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n')).toBe(true)
     expect(mysql).toContain('/data/1/mysql-bin.000001')
     expect(mysql).toContain('/data/1/mysql-bin.000002')
     expect(mysql).toContain('@@gtid_executed')
@@ -47,7 +47,7 @@ describe('detail-format', () => {
       client: 'mariadb-binlog',
       paths: ['/data/1/a', '/data/1/b'],
     })
-    expect(maria).toContain('TZ=UTC mariadb-binlog --skip-gtid-strict-mode')
+    expect(maria).toContain('TZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum')
     expect(maria).toContain('@@gtid_current_pos')
     expect(maria).toContain('stops after the first file')
   })

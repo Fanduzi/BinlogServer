@@ -48,7 +48,7 @@ func TestFormatExecutedGTIDCommand(t *testing.T) {
 	got := FormatExecutedGTIDCommand("mysqlbinlog", []string{"/data/1/mysql-bin.000002"}, gtidPITRUUID+":1-2,"+other+":1-3", 154, true, &stop)
 	want := strings.Join([]string{
 		"set -o pipefail",
-		"TZ=UTC mysqlbinlog \\",
+		"TZ=UTC mysqlbinlog --verify-binlog-checksum \\",
 		"  --exclude-gtids='" + gtidPITRUUID + ":1-2," + other + ":1-3' \\",
 		"  --stop-datetime='2024-01-01 01:20:00' \\",
 		"  --stop-position=154 \\",
