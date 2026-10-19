@@ -1917,3 +1917,74 @@ PR #453 把「期望被写成 STOP」堵住了。2 节点、`lease_ttl` 60、宽
 - §8.9：`_cluster` finding 以 `NODE_GONE` 关闭。
 - 改 `.github/workflows`。三节点 e2e 仍是 `workflow_dispatch`。
 - 真机 SIGSTOP / kill -9。QA 在非共享存储上停掉最后 owner：`node_gone_after` 之后健康是 UNKNOWN(node gone)，链 finding 仍开；任务在另一节点起来之后旧目录 finding 以 `OWNER_CHANGED` 关闭，旧 owner 的委派写被拒。
+
+## 31. 封存段缺失，以及没有对端能读的本地尾巴（#462，2026-10-19）
+
+QA：BinlogServerQA 在真节点上跑 main `92507326`。两件事，都在非共享存储上。
+
+1. 主人磁盘上删掉一个封存段，没有 finding。`SEGMENT_UNREADABLE` 会开，`I6_MISSING_LOCAL` 在集群里被丢掉。备份链不完整，没有人看见。这违反 #326 的零静默失败。
+2. 主人死掉之后，对端 `Start` 在写下第一条健康之前就以 `SEGMENT_NOT_ON_WORKER` 失败。`ResolveTakeover` 把任何不是 `UPLOADED`、本地又不是普通文件的目录行当成缺失。打开的尾巴永远是 `LOCAL_ONLY`，所以每节点存储上主人一死，对端一定失败。上传开或关都一样。`flush binary logs` 留下的 375 字节 OPEN 尾巴也一样。没有接口把已有任务改到一个新位置再跑。`OWNER_CHANGED` 只有把任务目录拷到对端才到。另外：坏副本被接管时，`CLOSE`/`OWNER_CHANGED` 和再 `OPEN` 大约隔 130ms、落在两个 generation 上，因为新主人第一轮的 sha256 还没算完。观察者看到一段很短的 CRITICAL 关/开。
+
+### 31.1 为什么集群丢掉 I6
+
+§20.1 在委派之前丢掉 `I6_MISSING_LOCAL`：非共享存储上，不是这块盘主人的节点读空目录，会把每个未上传的封存段都报成缺失。`I1`（`SEGMENT_UNREADABLE`）不丢，因为坏字节就在正在读的文件里。
+
+§30 之后读 `chain.local` 的只有两个人：当前 lease 持有者，和被委派的 `chain_owner`。两个人读的都是自己 `data_dir` 里的那份目录。无条件丢掉 I6 现在是错的：主人磁盘上删掉一个封存文件没有 finding，改坏一个字节却有 `SEGMENT_UNREADABLE`。
+
+### 31.2 决定
+
+**D1 拥有这块盘的人判断 I6。** 去掉 `chainFactsInto` 里集群模式对 `I6_MISSING_LOCAL` 的 continue。仍是 `SEGMENT_MISSING`，CRITICAL，scope `chain.local`，subject 是段名，现有 Confirm（连续两轮才 OPEN；已经打开的，下一轮按清除规则立刻 CLOSE）。持有者或委派的 `chain_owner` 用自己的栅栏写，和 `SEGMENT_UNREADABLE` 同一条路。不新增 kind，不迁移，不改 `HealthSummary`。CRITICAL 已经让 `/api/health` 503。standalone 从不走这条 continue，行为不变。
+
+**D2 关闭。** 文件放回去：下一轮 `EVAL` 关闭。链换到另一个节点、新目录不再要这个 key：现有 `OWNER_CHANGED`。同一节点、新 epoch 仍是 `EVAL`（§30 D5）。同一 key 新目录仍想要：仍是同一轮先 CLOSE 再 OPEN，不另开一轮缝。
+
+**D3 接管失败不评链。** 对端如果在 `SEGMENT_NOT_ON_WORKER` 时跑一轮持有者链评估，空目录会把 `chain_owner` 写成这个没有文件的节点，用 `OWNER_CHANGED` 关掉真正的链 finding，并对每一行 `LOCAL_ONLY` 误开 I6。本步不评。`OWNER_CHANGED` 仍只在新持有者真正读到一份目录时发生。QA 的观察保留：只有把任务目录拷到对端，才会到 `OWNER_CHANGED`。
+
+**D4 「该跑、主人已死、没有对端能接管，因为本地尾巴不在」必须看得见。** 这一段在本 PR。永久错误 `SEGMENT_NOT_ON_WORKER` 时，本节点还握着 lease、`markFailedLocked` 清掉 owner 之前，写一条 CRITICAL `TASK_FAILED`，subject 是 `SEGMENT_NOT_ON_WORKER`。`ClassifyFailure` 增加这一类，不再落进 `OTHER`；detail 仍是 `task FAILED: ` 加 `last_error`（路径留在里面）。栅栏是持有者栅栏，但 `Fence.PreserveChainOwner` 为真：集群持有者写入只在它为假时把 `chain_owner` 写成 `fence.Node`。这次写为真，所以 `chain_owner` 留在最后真正评过目录的节点。这次写也不把本节点记成委派的链主人（`noteDelegated` 跳过）。这次写的健康是 UNHEALTHY，`/api/health` 降级。然后现有 `failRunLocked`：`FAILED`、desired STOP、释放 lease。认领循环不再拉起。运维再 Start、同样失败，再写一次这条 finding。
+
+期望留在 RUN 会让认领循环反复 start、反复失败。本步不改状态机：失败仍是 `FAILED` / desired STOP。信号不是「卡在 start 循环的日志」，而是这条 CRITICAL 和降级的健康。事故里的「期望该跑」描述的是备份本该在跑，不是要求把 `desired_run` 留在 RUN。
+
+评估器不是 `on` 时不写这条 finding（和今天一样），行仍是 FAILED；下一次代写 sweep 可以打开 `TASK_FAILED`，subject 也是这一类。健康写失败仍把任务写成 FAILED，代写是后备。旧 `chain_owner` 的 `node_gone` 不盖住 `TASK_FAILED`（§30 D7）。只在集群写。standalone 的失败仍走原来的评估。
+
+**D5 重哈希的开合抖动：不加重，没算完就继承。** 坏副本被接管时，第一轮 `e.rehash` 还没有这个段。这一轮不从重哈希派生 `I1_UNREADABLE`，`OWNER_CHANGED` 把打开的 `SEGMENT_UNREADABLE` 关掉；大约 130ms 后重哈希对不上，下一轮再打开。两个 generation，中间健康会短暂回去。
+
+`Facts.AwaitRehash`：段名集合。这一轮目录顺序里有这个段，重哈希还没有结果（对上或对不上都还没有）。`Reconcile`：`ChainOwnerChanged` 时，打开的 kind 是 `SEGMENT_UNREADABLE`，这一轮没有派生出这个 subject 的 `I1_UNREADABLE`，并且 subject 在 `AwaitRehash` 里，则不关闭、不产生转移。`CheckBody` 已经在这一轮派生出 `I1_UNREADABLE` 的，仍走今天的同一轮 CLOSE 再 OPEN（那一次写入里 finding 结束时是开着的，不是 130ms 的缝）。重哈希之后 `chain_owner` 已经在第一轮写上，`ChainOwnerChanged` 为假：对上则 `EVAL` 关闭；对不上则 finding 已经开着，不再 OPEN。不把所有 `SEGMENT_UNREADABLE` 都留着不关，否则一份没有封存校验和、其实已经干净的副本会一直 CRITICAL。`TestOwnerChangedReopensTheSameKey`（空残留、仍想要）不变。
+
+**D6 后续，本 PR 不做：放弃丢失尾巴。** 今天没有接口把一个已有任务改到新位置再跑。Start 总会再进 `ResolveTakeover`。要的形状：运维显式确认之后，放弃丢失的 `LOCAL_ONLY` 尾巴（含 OPEN），从最后一条 `UPLOADED` 段或已确认的 GTID 续跑。不在本 PR 实现。QA 不要期待这个 API。可见性（D4）不依赖它。
+
+### 31.3 保证
+
+| 情况 | finding | `chain_owner` | 健康 |
+|---|---|---|---|
+| 持有者或委派的最后 owner 的盘上，封存的非 `UPLOADED` 段文件没了 | 两轮后 CRITICAL `SEGMENT_MISSING`，subject 是段名 | 不动（持有者写入仍记下自己；委派写不动） | UNHEALTHY，`/api/health` 503 |
+| 文件放回同一份目录 | `EVAL` 关闭 | 不动 | 没有别的 CRITICAL 时恢复 |
+| 另一节点拿到一份不再缺这个段的目录 | `OWNER_CHANGED` 关闭 | 换成新持有者 | 按新目录 |
+| 同一节点、新 epoch、同一份目录 | 按新一轮事实，`EVAL` | 仍是它 | 按这个目录 |
+| standalone，封存段缺失再放回 | 现有的开、关，没有 `OWNER_CHANGED` | 无此列 | 现有路径 |
+| 对端 start 永久失败 `SEGMENT_NOT_ON_WORKER`（上传开或关，OPEN 尾巴也算） | 失败当时就有 CRITICAL `TASK_FAILED`，subject `SEGMENT_NOT_ON_WORKER`；不额外等 sweep | 留在最后评过目录的节点 | 这次写就是 UNHEALTHY |
+| 同上，但评估器不是 `on`，或这次健康写失败 | 行仍是 `FAILED` / desired STOP；代写 sweep 仍可打开 `TASK_FAILED` | 这次写不改 | 写失败时不靠这次写降级 |
+| 坏副本被接管，第一轮重哈希还没结果 | 打开的 `SEGMENT_UNREADABLE` 保持打开，不先关再开 | 换成新持有者 | 保持 UNHEALTHY |
+| 新目录的重哈希对上 | `EVAL` 关闭 | 已是新持有者 | 没有别的 CRITICAL 时恢复 |
+| 新目录的 `CheckBody` 这一轮就看到不可读 | 同一轮 CLOSE `OWNER_CHANGED` 再 OPEN | 换成新持有者 | 写入之后仍是 UNHEALTHY |
+| 最后 owner 心跳已过 `node_gone_after`，另有这条 `TASK_FAILED` | 链 finding 仍开 | 不动 | UNHEALTHY（§30 D7） |
+
+### 31.4 测试（先红）
+
+进程内，不进 workflow。先写、在实现之前失败的：
+
+- 集群持有者删掉封存的 `LOCAL_ONLY` 文件，两轮之后 `SEGMENT_MISSING` CRITICAL，`chain_owner` 是它，健康 UNHEALTHY。今天 I6 被丢掉。文件放回则 `EVAL` 关闭。
+- 另一节点拿到文件已经放回的目录，关闭原因是 `OWNER_CHANGED`。今天这条 finding 开不出来。
+- standalone 删掉再放回，打开再关闭，没有 `OWNER_CHANGED`。今天已经绿，留作回归。
+- 对端 start 返回永久 `SEGMENT_NOT_ON_WORKER`：任务到 `FAILED` 之后、不再额外 sweep，`TASK_FAILED` 的 subject 是 `SEGMENT_NOT_ON_WORKER`，`chain_owner` 仍是原主人，原目录的链 finding 没有被 `OWNER_CHANGED` 关掉，`HealthSummary` degraded。今天没有这次同步写入，subject 也会是 `OTHER`。
+
+实现再补（依赖 `Facts.AwaitRehash`，红提交里编译不过）：
+
+- `ChainOwnerChanged`、打开的 `SEGMENT_UNREADABLE`、本轮没有这个 subject 的 `I1_UNREADABLE`、subject 在 `AwaitRehash` 里：没有转移。本轮已经派生出 `I1_UNREADABLE` 的，仍是 CLOSE 再 OPEN。
+
+### 31.5 本步不做
+
+- D6 的放弃尾巴 API。
+- 失败的对端跑完整链评估来制造 `OWNER_CHANGED`。
+- 共享存储上由 `_health` 持有者读别人的目录（§30 D9）。
+- 新迁移、新 finding kind、`HealthSummary` 把 UNKNOWN 算进 `/api/health`。
+- 改 `.github/workflows`。三节点 e2e 仍是 `workflow_dispatch`。
+- 把所有 `SEGMENT_UNREADABLE` 在换 owner 时都留着不关。
