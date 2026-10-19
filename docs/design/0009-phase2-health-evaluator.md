@@ -1295,7 +1295,7 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
 
   修订：
   - legacy upsert：已 resolved 的行再次打开时，`first_seen` 与 `count` 取新值（与健康存储的 `findingUpsertSQL` 一致）；仍打开的行照旧保留更早的 `first_seen`。
-  - legacy sink 对 `_cluster` 的 `META_UNREACHABLE` 也写 `task_events`（`task_id = _cluster`）：`FINDING_REPORTED` / `FINDING_RESOLVED`，message 为 `META_UNREACHABLE <node>`，RESOLVED 的 `event_time` 是第一次应答，detail 写明这次中断的起止（UTC）。故障期间 REPORTED 写不进去，通常只剩 RESOLVED，它本身带着完整窗口。其他 `_cluster` kind 不变。
+  - legacy sink 对 `_cluster` 的 `META_UNREACHABLE` 也写 `task_events`（`task_id = _cluster`）：只写 `FINDING_RESOLVED`，message 为 `META_UNREACHABLE <node>`，`event_time` 是第一次应答，detail 写明这次中断的起止（UTC）。REPORTED 不写：故障期间它写不进去，恢复后才落地，还常常是两份（重试的一份加较新的一份），RESOLVED 本身已带着完整窗口。其他 `_cluster` kind 不变。
   - 每个节点在打开和关闭时各打一行日志（`META_UNREACHABLE opened ... since` / `resolved: outage <起> – <止> (<时长>)`）。
   - P2-6 让 `_health` 持有者评估 `_cluster` 之后，集群也改为 OPEN/CLOSE 转移，届时这一条事件可以去掉。
 
