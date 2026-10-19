@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: the run's writer opener, the source session (disk names, resume GTID), the executed GTID set, the checkpoint and catalog stores
-// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes every event but writes the checkpoint and the OPEN row only at a transaction boundary, batched by checkpointBatchWindow (a held commit is written by the next commit past the window, a heartbeat, a rotate, a seal, or the run exit; #391); a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint before the put, uploads, and opens the next file; every append and checkpoint flush first passes the run's write fence (ADR 0009 P2-6b, #417)
+// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes every event but writes the checkpoint and the OPEN row only at a transaction boundary, batched by checkpointBatchWindow (a held commit is written by the next commit past the window, a heartbeat, a rotate, a seal, or the run exit; #391); a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint and opens the next file under HoldChain when a chain gate is set, then uploads outside that lock (#441); every append and checkpoint flush first passes the run's write fence (ADR 0009 P2-6b, #417)
 // pos: phase 3 of MySQLRunner.run (ADR 0008): segment append, rotate and seal
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -306,25 +306,30 @@ func (s *openSegment) rotate(logPos uint32, raw []byte, nextFile string, nextPos
 	s.name = nextFile
 	s.pos = nextPos
 
-	// Record the next file before opening it. A real rotate is already
-	// in the sealed file. An artificial one is not, because it is
-	// not part of the source binlog. If that open fails, the retry
-	// must start on the next file. Resuming on the sealed name
-	// opens <name>.open.e<epoch> beside it, and the next rotate
-	// stops on "sealed file already exists".
+	// Record the next file before opening it, and open it before anyone
+	// else can read the pair. The checkpoint stays ahead of the create so
+	// a crash resumes on the next file instead of beside the sealed one.
+	// The upload is after the open and outside the lock: a hung put must
+	// not pin the lease, and must not leave "checkpoint on the next file,
+	// file not listed" visible for the whole put (#441).
+	release := func() {}
+	if r.chainGate != nil {
+		release = r.chainGate.HoldChain(task.ID)
+	}
+	defer release()
 	if r.checkpointStore != nil {
 		if err := r.checkpointStore.UpsertCheckpoint(ctx, task.ID, s.checkpointAt(s.name, s.pos)); err != nil {
 			return checkpointWriteError(err)
 		}
 	}
+	if err := s.openAt(s.name, s.pos); err != nil {
+		return err
+	}
+	release()
 	if !discardEmpty && !covered {
 		if err := r.uploadSealed(ctx, sealed); err != nil {
 			return err
 		}
-	}
-
-	if err := s.openAt(s.name, s.pos); err != nil {
-		return err
 	}
 	s.startPos = s.pos
 	s.createdAt = time.Now()
