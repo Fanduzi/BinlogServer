@@ -1250,3 +1250,12 @@ QA (c)：新 owner 认领后一直 `RETRY_BACKOFF`（旧 dump 连接 KILL 不到
 - 重跑 r4 (g)（连接被拒绝）：结果与 r4 一致，另多一对 `META_UNREACHABLE`。
 - 重跑 sc5（meta 暂停 12s、30s）：12s 的暂停打开并关闭一次 `META_UNREACHABLE`（这是真实的不可达，不是误报）；恢复数据一致。
 - 健康时 0 条 `META_UNREACHABLE`；1 小时空闲源无误报。
+
+### 25.7 实现说明（2026-10-19）
+
+- 观测汇总在 `internal/tasks/meta_reach.go`（`metaReach`）。只有任务存储实现 `tasks.MetaProbe`（`internal/meta/reach.go`：`PingMeta`、`MetaUnreachable`）时才记录，没有 meta 的 standalone 永远不会出现这个 kind。错误分类放在 meta 包里（它认识 driver 的错误类型），1290/1045/1146 等服务端错误不算不可达。
+- 评估一轮失败只记失败，不记成功；成功来自 ping 与 `/api/health` 读。
+- **恢复时的 OPEN/CLOSE**：故障期间评估器读不到 store，OPEN 存不下；如果恢复时立刻 `SignalSuccess`，下一轮看到「失败之后又成功」就什么也不写，中断就丢了。所以评估器拥有该信号时（standalone），恢复只记 `recovering`，信号保持失败；`_cluster` 那一轮把 OPEN 存下后，`settleMetaReach` 才发成功，再下一轮 CLOSE。OPEN 的 `FactAt` 是第一次失败（`signalAt`），CLOSE 的 `FactAt` 是恢复后关闭的那一轮（比恢复晚一个 debounce）。
+- **集群**：`_cluster` 在 P2-6 之前不归评估器，`META_UNREACHABLE` 走 legacy 账本：故障期间在内存里（`/api/health`、`/api/findings` 照常列出），恢复后 report 与 resolve 合并成一次写入，`task_findings` 里留下一行 `first_seen` = 第一次失败、`resolved_at` = 恢复的已关闭行，没有 `finding_transitions`。P2-6 让 `_health` 持有者评估 `_cluster` 后改为 OPEN/CLOSE 两条转移。§25.6 第一条 QA 在集群里按这一行验收。
+- `clusterHasWork` 原来用无超时的 ctx 读 `_cluster` 的 open finding；它在 sweep 循环里跑，挂住会让 ping 也停下。现在限时 2s。
+- 本步不加配置项：`meta_unreachable_after` 固定为 10s（`EvaluatorConfig.MetaUnreachableAfter` 供测试使用）。

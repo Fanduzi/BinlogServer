@@ -22,3 +22,4 @@ P2-5.3（设计 §22）：`GTID_HOLE`（Waivable）与 `CHECKPOINT_AHEAD` 为 Ma
 - 新增 kind 必须在 `DefaultRegistry` 有完整 spec（severity、scope、invariant、clears_when 文本、Version ≥ 1）；`assurance` 新增 kind 必须在 `fromAssurance` 有映射，否则 `TestRegistryComplete` 失败。
 - 把 kind 翻成 Managed 的 PR 必须同时把该 kind 的 `Report/Resolve` 调用改为 `Signal`。
 - P2-6d / #424（设计 §24.9）：`TASK_NO_PROGRESS`（CRITICAL，Managed，作用域 `task.state`，不变量 `lease`）。`TaskFacts.Progress`（`RunSince`、`LastAdvance`、`File`、`InDataDir`）与 `Facts.NoProgressAfter`（`DefaultNoProgressAfter` = 120s）。desired RUN、非 FAILED、非他处持有、没有打开的 `SOURCE_UNREACHABLE` 时：本进程有 run 则从 max(run 开始, 最后一次在 data_dir 下的推进) 起算，没有 run 则从任务行 `updated_at` 起算，超过阈值打开；推进或停止、FAILED、被他处持有时关闭。`p26d_no_progress_test.go` 覆盖注册与派生/关闭表。`TaskFacts.LeaseExpired`（P2-6e）：行上的 owner 的任务 lease 已过期，详情里 owner 显示为 `n1 (lease expired)`。
+- #427（设计 §25）：`META_UNREACHABLE`（信号 kind S17，CRITICAL，Managed，作用域 `signals`，task `_cluster`，subject 是观察到不可达的节点 id）。下一次 ping 或读有应答时关闭。

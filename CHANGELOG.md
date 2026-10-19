@@ -12,6 +12,14 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- #427（P2）：meta 库被黑洞（连接挂住而不是被拒绝）时，所有节点的 `/api/health` 一直不返回，恢复后也没有任何 finding，中断无法审计。现在 `/api/health` 的全部 meta 读共用 1s 预算、同一时刻只有一个读，超时就用内存里的 finding 返回 503 `degraded`，原因含 `META_UNREACHABLE`；评估器管理的 finding 读不到时写明不可读，不再从汇总里消失。
+
+### Added
+
+- #427：新的 CRITICAL finding `META_UNREACHABLE`（task `_cluster`，subject 为节点 id，每个节点各报各的）：本节点对 meta 的 ping（每 5s，限时 1s）、`/api/health` 读或评估读连续超时或连接失败满 10s 时打开，下一次应答时关闭；只读（1290）、权限等 SQL 错误不算。standalone + meta 时一次中断在恢复后留下 OPEN（`fact_at` = 第一次失败）与 CLOSE 两条转移；集群里（P2-6 前 `_cluster` 走旧 finding 路径）留下一行带 `first_seen` / `resolved_at` 的已关闭 finding。需要 `health.evaluator: on` 才有 ping 与评估读两路观测；`/api/health` 的有界读在任何模式下都生效。
+
 ## [v0.5.72] - 2026-10-19
 
 发布说明：`docs/releases/v0.5.72.md`。新配置项：`health.no_progress_after_sec`（默认 `120`，`0` 为默认值，不可为负）。没有新迁移（schema 仍为 9，`minRequiredSchemaVersion` 仍为 6）。`TASK_FAILED`（无主任务）、`TASK_NO_PROGRESS` 和 `_health` lease 都由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）。

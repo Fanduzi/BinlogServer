@@ -113,6 +113,9 @@ type EvaluatorConfig struct {
 	// NoProgressAfter is health.no_progress_after_sec, the TASK_NO_PROGRESS
 	// threshold (default 120s, design §24.9).
 	NoProgressAfter time.Duration
+	// MetaUnreachableAfter is how long metadata store failures last before
+	// META_UNREACHABLE opens (default 10s, design §25 D2).
+	MetaUnreachableAfter time.Duration
 	// LivenessTick is how often the source liveness clocks are checked for
 	// a threshold crossing (default 5s); a crossing marks the task dirty.
 	LivenessTick time.Duration
@@ -236,6 +239,7 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}}
 	if s != nil {
 		s.healthEval.Store(e)
+		s.setMetaReachNode(cfg.NodeID, cfg.MetaUnreachableAfter)
 		e.adoptEarlySignals()
 		s.replayRecordSignals()
 	}
@@ -353,6 +357,7 @@ func (e *Evaluator) Run(ctx context.Context) {
 			e.markResponsible(ReasonSweep)
 		case <-lt.C:
 			e.markLivenessCrossings()
+			go e.s.probeMeta() // S17 (§25); bounded, never blocks this loop
 		}
 	}
 }
@@ -377,6 +382,7 @@ func (e *Evaluator) work(ctx context.Context) {
 		}
 		if _, err := e.evaluate(ctx, id); err != nil && !errors.Is(err, errNotResponsible) {
 			log.Printf("health evaluate task=%s: %v", id, err)
+			e.s.noteMetaReach(err, false) // a timeout or connection error counts (§25 D2)
 		}
 		e.finish(id)
 	}
@@ -495,7 +501,11 @@ func (e *Evaluator) clusterHasWork() bool {
 	e.mu.Unlock()
 	if successes && e.cfg.Store != nil {
 		// A success may close a row an earlier process left open.
-		if open, err := e.cfg.Store.ListOpenFindingsForTask(context.Background(), ClusterFindingTask); err == nil && len(open) > 0 {
+		// Bounded: this runs on the sweep loop, which also pings meta (§25).
+		ctx, cancel := context.WithTimeout(context.Background(), 2*healthReadBudget)
+		open, err := e.cfg.Store.ListOpenFindingsForTask(ctx, ClusterFindingTask)
+		cancel()
+		if err == nil && len(open) > 0 {
 			return true
 		}
 	}
@@ -683,6 +693,9 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	if err != nil {
 		return unknown(health.TaskHealth{}, err)
 	}
+	if isCluster {
+		e.settleMetaReach(open)
+	}
 	e.openAndProbes(ctx, id, open, facts)
 	e.loadWaivers(ctx, id, facts)
 	e.mu.Lock()
@@ -754,6 +767,12 @@ func (e *Evaluator) unsavedOpen(id string) ([]health.Finding, bool) {
 
 // persistFailure summarises the tasks whose health could not be stored.
 func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) {
+	return e.persistFailureFrom(true)
+}
+
+// persistFailureFrom: prune false reads no task row (the metadata store may
+// not answer, design §25), so tasks no longer ours are not dropped.
+func (e *Evaluator) persistFailureFrom(prune bool) (ids []string, err error, since time.Time) {
 	if e == nil {
 		return nil, nil, time.Time{}
 	}
@@ -764,7 +783,7 @@ func (e *Evaluator) persistFailure() (ids []string, err error, since time.Time) 
 	}
 	e.mu.Unlock()
 	for id, u := range all {
-		if id != ClusterFindingTask && e.s != nil {
+		if prune && id != ClusterFindingTask && e.s != nil {
 			t, gerr := e.s.GetTask(id)
 			if gerr != nil || !e.mayEvaluate(t) {
 				// The task is gone (or was never created: a refused create
@@ -1235,15 +1254,17 @@ func describeTransitions(ts []health.Transition) string {
 
 // openManagedFindings is the evaluator's open managed findings of a task
 // as API findings, when its store is separate from the legacy sink.
-func (e *Evaluator) openManagedFindings(ctx context.Context, taskID string) []Finding {
+// A read error is returned, not an empty set: a CRITICAL finding must not
+// vanish from the summary because the store did not answer (§25 D1).
+func (e *Evaluator) openManagedFindings(ctx context.Context, taskID string) ([]Finding, error) {
 	if e == nil || e.cfg.Mode != EvaluatorOn || !e.separateLegacyStore() {
-		return nil
+		return nil, nil
 	}
 	open, ok := e.unsavedOpen(taskID)
 	if !ok {
 		var err error
 		if open, err = e.cfg.Store.ListOpenFindingsForTask(ctx, taskID); err != nil {
-			return nil
+			return nil, err
 		}
 	}
 	out := make([]Finding, 0, len(open))
@@ -1251,7 +1272,7 @@ func (e *Evaluator) openManagedFindings(ctx context.Context, taskID string) []Fi
 		out = append(out, Finding{TaskID: f.TaskID, Kind: FindingKind(f.Kind), Subject: f.Subject, Severity: FindingSeverity(f.Severity),
 			Detail: f.Detail, FirstSeen: f.FirstSeen, LastSeen: f.LastSeen, Count: 1})
 	}
-	return out
+	return out, nil
 }
 
 // NodeIDFileName is the persisted standalone node id under data_dir.

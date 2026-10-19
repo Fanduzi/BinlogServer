@@ -60,6 +60,11 @@ const (
 	FindingSegmentOverlap FindingKind = "SEGMENT_OVERLAP"
 	// FindingTaskRecordsFailed: the standalone task record file cannot be read or written (ADR 0010); subject key_missing, key_invalid, wrong_key, corrupt or write.
 	FindingTaskRecordsFailed FindingKind = "TASK_RECORDS_FAILED"
+	// FindingMetaUnreachable: this node could not reach the metadata store (a
+	// ping or read timed out, or the connection failed) for
+	// meta_unreachable_after (S17, design 0009 §25); task _cluster, subject
+	// the node id.
+	FindingMetaUnreachable FindingKind = "META_UNREACHABLE"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.
@@ -208,7 +213,9 @@ func (b *findingBook) report(f Finding) {
 		f.FirstSeen = prev.FirstSeen
 		f.Count = prev.Count + 1
 	} else {
-		f.FirstSeen = now
+		if f.FirstSeen.IsZero() || f.FirstSeen.After(now) {
+			f.FirstSeen = now // a caller may name an earlier first failure (META_UNREACHABLE, §25)
+		}
 		f.Count = 1
 	}
 	f.LastSeen = now
@@ -477,7 +484,11 @@ func (s *Scheduler) ListFindings(ctx context.Context, taskID string, includeReso
 			return nil, err
 		}
 	}
-	local = append(local, s.healthEval.Load().openManagedFindings(ctx, taskID)...)
+	managed, err := s.healthEval.Load().openManagedFindings(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("managed findings of task %s unreadable: %w", taskID, err)
+	}
+	local = append(local, managed...)
 	if taskID == ClusterFindingTask {
 		if f, ok := s.persistFailureFinding(); ok {
 			local = append(local, f)
@@ -508,13 +519,36 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		}
 	}
 	if e := s.healthEval.Load(); e != nil {
+		ids := make([]string, 0)
 		for _, t := range s.ListTasks() {
-			local = append(local, e.openManagedFindings(ctx, t.ID)...)
+			ids = append(ids, t.ID)
 		}
 		if !e.cfg.Cluster {
 			// Standalone evaluates _cluster itself (RETRY_LOOP_FAILED,
 			// TASK_RECORDS_FAILED); it has no task row to be listed by.
-			local = append(local, e.openManagedFindings(ctx, ClusterFindingTask)...)
+			ids = append(ids, ClusterFindingTask)
+		}
+		var unreadable []string
+		var firstErr error
+		for _, id := range ids {
+			managed, merr := e.openManagedFindings(ctx, id)
+			if merr != nil {
+				// Not an empty set: the task's managed findings are unknown (§25 D1).
+				unreadable = append(unreadable, id)
+				if firstErr == nil {
+					firstErr = merr
+				}
+				continue
+			}
+			local = append(local, managed...)
+		}
+		if len(unreadable) > 0 {
+			merr := fmt.Errorf("managed findings of task %s unreadable: %w", strings.Join(unreadable, ", "), firstErr)
+			if err == nil {
+				err = merr
+			} else {
+				err = fmt.Errorf("%w; %v", err, merr)
+			}
 		}
 	}
 	if f, ok := s.persistFailureFinding(); ok {
@@ -654,9 +688,14 @@ func (s *Scheduler) OpenFindingCounts(ctx context.Context) (map[string]int, erro
 // persistFailureFinding is FINDINGS_PERSIST_FAILED while the evaluator's
 // health store or the findings file is failing to write (#395 QA P2).
 func (s *Scheduler) persistFailureFinding() (Finding, bool) {
+	return s.persistFailureFindingFrom(true)
+}
+
+// persistFailureFindingFrom: prune false reads no task row (design §25).
+func (s *Scheduler) persistFailureFindingFrom(prune bool) (Finding, bool) {
 	var parts []string
 	var first time.Time
-	ids, herr, hsince := s.healthEval.Load().persistFailure()
+	ids, herr, hsince := s.healthEval.Load().persistFailureFrom(prune)
 	if herr != nil {
 		parts = append(parts, fmt.Sprintf("health state for %s could not be saved: %v", strings.Join(ids, ", "), herr))
 		first = hsince
@@ -694,8 +733,15 @@ type HealthSummary struct {
 // HealthSummary is degraded while any CRITICAL finding is open, read from
 // memory as GET /api/findings is, so a finding that could not be persisted
 // still counts (#395 QA P2).
+//
+// Every metadata read shares healthReadBudget (1s) and at most one read is in
+// flight; past the budget the summary is built from memory and names
+// META_UNREACHABLE, so a blackholed meta store cannot hang the probe (§25).
 func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
-	open, err := s.OpenFindings(ctx, 1000)
+	open, err, timedOut := s.boundedOpenFindings(ctx)
+	if timedOut {
+		open = s.memoryOpenFindings()
+	}
 	var reasons []string
 	for _, f := range open {
 		if f.Severity != FindingCritical || !f.Open() {
@@ -707,7 +753,10 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 		}
 		reasons = append(reasons, r+" (task "+f.TaskID+")")
 	}
-	if err != nil {
+	switch {
+	case isHealthReadTimeout(err):
+		reasons = append(reasons, "META_UNREACHABLE: "+errHealthReadTimeout.Error())
+	case err != nil:
 		reasons = append(reasons, "findings store unreadable: "+err.Error())
 	}
 	if len(reasons) == 0 {
