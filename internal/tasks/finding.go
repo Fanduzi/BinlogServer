@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except META_UNREACHABLE, whose FINDING_RESOLVED is dated at the first answer and names the outage window, §25.8 R4); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -287,6 +287,17 @@ func (b *findingBook) kick() {
 	}
 }
 
+// findingEvented: a finding write that also gets a task event. _cluster
+// rows have no task timeline, except META_UNREACHABLE: in cluster mode its
+// row is reused by the node's next outage, so the event is the only record
+// left of the earlier one (design 0009 §25.8 R4).
+func findingEvented(f Finding) bool {
+	if f.Kind == FindingEventPersistFailed {
+		return false
+	}
+	return f.TaskID != ClusterFindingTask || f.Kind == FindingMetaUnreachable
+}
+
 // flush writes every pending op once. Failed ops stay pending (unless a newer
 // op for the same key arrived meanwhile) and count as sink errors.
 func (b *findingBook) flush(ctx context.Context) {
@@ -313,14 +324,21 @@ func (b *findingBook) flush(ctx context.Context) {
 			b.mu.Unlock()
 			return
 		}
-		if err == nil && events != nil && op.finding.TaskID != ClusterFindingTask && op.finding.Kind != FindingEventPersistFailed {
+		if err == nil && events != nil && findingEvented(op.finding) {
 			// The finding row is the record; the event is the timeline entry.
 			// An event failure here is counted, not reported, so it cannot loop.
 			evType, msg := "FINDING_REPORTED", string(op.finding.Kind)+" "+op.finding.Subject
+			detail, at := op.finding.Detail, b.now()
 			if op.resolve {
 				evType = "FINDING_RESOLVED"
+				if op.finding.ResolvedAt != nil && op.finding.Kind == FindingMetaUnreachable {
+					// The outage window, dated at the first answer (§25.8 R4).
+					at = *op.finding.ResolvedAt
+					detail = fmt.Sprintf("%s; open from %s to %s (%s)", detail, op.finding.FirstSeen.UTC().Format(time.RFC3339Nano),
+						at.UTC().Format(time.RFC3339Nano), at.Sub(op.finding.FirstSeen).Round(time.Millisecond))
+				}
 			}
-			if evErr := events.AppendEvent(wctx, TaskEvent{TaskID: op.finding.TaskID, Type: evType, Message: strings.TrimSpace(msg), Detail: op.finding.Detail, Time: b.now()}); evErr != nil {
+			if evErr := events.AppendEvent(wctx, TaskEvent{TaskID: op.finding.TaskID, Type: evType, Message: strings.TrimSpace(msg), Detail: detail, Time: at}); evErr != nil {
 				b.mu.Lock()
 				b.sinkErrors++
 				b.mu.Unlock()

@@ -16,6 +16,7 @@ Maintenance rules:
 
 - #427（P2）：meta 库被黑洞（连接挂住而不是被拒绝）时，所有节点的 `/api/health` 一直不返回，恢复后也没有任何 finding，中断无法审计。现在 `/api/health` 的全部 meta 读共用 1s 预算、同一时刻只有一个读，超时就用内存里的 finding 返回 503 `degraded`，原因含 `META_UNREACHABLE`；评估器管理的 finding 读不到时写明不可读，不再从汇总里消失。
 - 健康存储写 `task_findings`、`finding_transitions`、`task_health` 的时间改为 UTC（`UTC_TIMESTAMP(6)`），以前用会话时区的 `NOW(6)`，与旧 finding 路径写入的 UTC 混在一起；评估器写入的 finding 行 `first_seen` 现在是 OPEN 的事实时间（第一次失败），`resolved_at` 是 CLOSE 的事实时间，不再是写入时刻。已有的旧行不迁移。
+- 旧 finding 路径（`task_findings` 的 legacy upsert）：已解决的行再次打开时 `first_seen` 与 `count` 取新值，不再沿用上一次的首见时间、次数累加。集群里 `META_UNREACHABLE`（`_cluster`）每次中断另写一条 `task_events`（`task_id = _cluster`，`FINDING_RESOLVED META_UNREACHABLE <node>`，`event_time` = 恢复时刻，detail 写明起止），下一次中断复用同一行后上一次仍有记录；节点日志在打开、关闭时各一行。
 
 ### Added
 

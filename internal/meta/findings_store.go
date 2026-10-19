@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: tasks.Finding rows from the scheduler's finding sink
-// output: task_findings upsert/list (migration 000007); tasks.ErrFindingStoreAbsent on schema 6 so the sink keeps findings in memory
+// output: task_findings upsert/list (migration 000007; a resolved row written again takes the new first_seen and count, §25.8 R4); tasks.ErrFindingStoreAbsent on schema 6 so the sink keeps findings in memory
 // pos: metadata persistence for ADR 0009 findings
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -12,16 +12,19 @@ import (
 	"binlog_server/internal/tasks"
 )
 
-// first_seen keeps the earlier value; everything else is the sink's current view.
+// While the row is open first_seen keeps the earlier value; a resolved row
+// that is written again is a new occurrence and takes the new first_seen
+// and count (design 0009 §25.8 R4). Assignments run left to right, so
+// first_seen and count read resolved_at before it is overwritten.
 const upsertFindingSQL = `
 INSERT INTO task_findings (task_id, kind, subject, severity, detail, first_seen, last_seen, count, resolved_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   severity = VALUES(severity),
   detail = VALUES(detail),
-  first_seen = LEAST(first_seen, VALUES(first_seen)),
+  first_seen = IF(resolved_at IS NULL, LEAST(first_seen, VALUES(first_seen)), VALUES(first_seen)),
+  count = IF(resolved_at IS NULL, GREATEST(count, VALUES(count)), VALUES(count)),
   last_seen = GREATEST(last_seen, VALUES(last_seen)),
-  count = GREATEST(count, VALUES(count)),
   resolved_at = VALUES(resolved_at);
 `
 

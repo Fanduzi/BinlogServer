@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -140,9 +141,13 @@ func (s *Scheduler) noteMetaReachAt(err error, countSuccess bool, at time.Time) 
 			r.mu.Unlock()
 			return
 		}
+		first := !r.opened
 		r.opened = true
 		f := r.findingLocked(subject)
 		r.mu.Unlock()
+		if first {
+			log.Printf("META_UNREACHABLE opened on %s: no metadata store answer since %s: %s", subject, f.FirstSeen.UTC().Format(time.RFC3339Nano), err)
+		}
 		s.SignalFailure(f)
 		return
 	}
@@ -154,8 +159,12 @@ func (s *Scheduler) noteMetaReachAt(err error, countSuccess bool, at time.Time) 
 		r.opened = true
 		f := r.findingLocked(subject)
 		r.mu.Unlock()
+		log.Printf("META_UNREACHABLE opened on %s at its first answer: no metadata store answer since %s: %s", subject, f.FirstSeen.UTC().Format(time.RFC3339Nano), f.Detail)
 		s.SignalFailure(f)
 		r.mu.Lock()
+	}
+	if r.opened && !r.since.IsZero() {
+		log.Printf("META_UNREACHABLE resolved on %s: outage %s to %s (%s)", subject, r.since.UTC().Format(time.RFC3339Nano), at.UTC().Format(time.RFC3339Nano), at.Sub(r.since).Round(time.Millisecond))
 	}
 	r.since, r.lastErr = time.Time{}, ""
 	switch {
