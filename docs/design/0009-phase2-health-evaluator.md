@@ -1225,7 +1225,7 @@ QA (c)：新 owner 认领后一直 `RETRY_BACKOFF`（旧 dump 连接 KILL 不到
 - 新的信号 kind（S17），CRITICAL，task = `_cluster`，subject = 本节点 node id（集群里每个节点各报各的，互不覆盖）。Managed，唯一写者是评估器（lintguard 的 Managed 表一并更新）。
 - 观测来源（都走同一个 `metaReach` 记录器，本地时钟）：
   1. `/api/health` 的有界读：超时或连接错误记一次失败，读成功记一次成功；
-  2. 评估器每个 `LivenessTick`（默认 5s）做一次 `PingContext`，上限 1s；
+  2. 每个节点独立的 ping（§25.8 R1：每 1s 一次，不经过评估循环；r1 之前挂在 `LivenessTick` 上，默认 5s），上限 1s；
   3. 评估器一轮里 meta 读返回超时或连接类错误（`context.DeadlineExceeded`、`driver.ErrBadConn`、`net.Error`、MySQL 2002/2003/2006/2013）。SQL 语义错误（权限、只读 1290 等）不算不可达，那些有各自的 kind。
 - 第一次失败记下 `since`。连续失败满 `meta_unreachable_after`（默认 10s，避免一次慢查询就打开）后 `SignalFailure`，detail 带 `since` 与最近一次错误（`timed out after 1s` 或 `connection refused`）。下一次成功 `SignalSuccess`。
 - 打开期间 meta 写不进去：finding 留在评估器内存里（`unsavedOpen`），`/api/health` 与 `/api/findings` 从内存列出。恢复后走现有的补记路径（与 r4 (g) 的 METADATA_WRITE_BLOCKED 相同），写入 OPEN 与 CLOSE 两条转移，`FactAt` 分别是本地观察到的开始与恢复时间。
@@ -1255,8 +1255,48 @@ QA (c)：新 owner 认领后一直 `RETRY_BACKOFF`（旧 dump 连接 KILL 不到
 
 - 观测汇总在 `internal/tasks/meta_reach.go`（`metaReach`）。只有任务存储实现 `tasks.MetaProbe`（`internal/meta/reach.go`：`PingMeta`、`MetaUnreachable`）时才记录，没有 meta 的 standalone 永远不会出现这个 kind。错误分类放在 meta 包里（它认识 driver 的错误类型），1290/1045/1146 等服务端错误不算不可达。
 - 评估一轮失败只记失败，不记成功；成功来自 ping 与 `/api/health` 读。
-- **恢复时的 OPEN/CLOSE**：故障期间评估器读不到 store，OPEN 存不下；如果恢复时立刻 `SignalSuccess`，下一轮看到「失败之后又成功」就什么也不写，中断就丢了。所以评估器拥有该信号时（standalone），恢复只记 `recovering`，信号保持失败；`_cluster` 那一轮把 OPEN 存下后，`settleMetaReach` 才发成功，再下一轮 CLOSE。OPEN 的 `FactAt` 是第一次失败（`signalAt`），CLOSE 的 `FactAt` 是恢复后关闭的那一轮（比恢复晚一个 debounce）。
+- **恢复时的 OPEN/CLOSE**：故障期间评估器读不到 store，OPEN 存不下；如果恢复时立刻 `SignalSuccess`，下一轮看到「失败之后又成功」就什么也不写，中断就丢了。所以评估器拥有该信号时（standalone），恢复只记 `recovering`，信号保持失败；`_cluster` 那一轮把 OPEN 存下后，`settleMetaReach` 才发成功，再下一轮 CLOSE。OPEN 的 `FactAt` 是第一次失败（`signalAt`），CLOSE 的 `FactAt` 是恢复时第一次成功（§25.8 R3；r1 之前是关闭的那一轮，比恢复晚一个 debounce）。
 - **集群**：`_cluster` 在 P2-6 之前不归评估器，`META_UNREACHABLE` 走 legacy 账本：故障期间在内存里（`/api/health`、`/api/findings` 照常列出），恢复后 report 与 resolve 合并成一次写入，`task_findings` 里留下一行 `first_seen` = 第一次失败、`resolved_at` = 恢复的已关闭行，没有 `finding_transitions`。P2-6 让 `_health` 持有者评估 `_cluster` 后改为 OPEN/CLOSE 两条转移。§25.6 第一条 QA 在集群里按这一行验收。
 - `clusterHasWork` 原来用无超时的 ctx 读 `_cluster` 的 open finding；它在 sweep 循环里跑，挂住会让 ping 也停下。现在限时 2s。
 - 故障期间（standalone，评估器拥有该信号）OPEN 存不下，`metaReachFinding` 从 `metaReach` 状态合成这条 finding，`/api/health` 的内存汇总与 `OpenFindings` 都列出它。`/api/findings` 本身的 store 读仍无上限（黑洞时会挂住），归 P2-7 与 `/metrics` 一起处理。
 - 本步不加配置项：`meta_unreachable_after` 固定为 10s（`EvaluatorConfig.MetaUnreachableAfter` 供测试使用）。
+
+### 25.8 QA r1 修订（#430 sc5，2026-10-19）
+
+QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，间隔 25s 再停 30s）：数据一致，但 `META_UNREACHABLE` 的记录不符合 §25.6。
+
+**问题与根因（日志证实）**
+
+1. **P2：30s 暂停只有 n2 留下一行，n1 什么都没记。**
+   - 评估器 `Run` 循环的 sweep 分支同步调用 `markResponsible`，它先跑 `refreshHealthLease`（`_health` lease 的 `Renew`/`Acquire`）和 `refreshExpiredLeases`（`ListTaskIDsWithExpiredOwnerLease`），用的都是 `context.Background()`，没有 deadline。meta 被 SIGSTOP 时这些调用一直挂到恢复，循环停在 sweep 分支里，`LivenessTick` 分支的 ping 一次都没发出去（`time.Ticker` 丢 tick）。
+   - 于是剩下的唯一观测来源是「评估一轮超时」，而只有对某个任务负责的节点（任务 owner 或 `_health` 持有者）才有这样的评估。sc5 第一次暂停后 n2 接管了任务（epoch 2）和 `_health`（epoch 2），第二次暂停期间 n1 两者都不是，没有任何观测，所以没有行。
+   - 佐证：n2 那一行 `first_seen=09:07:35.979`，正好是它第一条 `health evaluate task=1: context deadline exceeded` 的时间，而不是暂停开始的 09:07:25，说明 ping 没在跑。r4 (h) 两个节点都有行，是因为 QA 每 10s curl 一次 `/api/health`，那是唯一的观测；集群 `first_seen` 比故障晚约 10s 也是同一个原因。
+2. **P3：12s 暂停两边都没记。** 原来的规则要求「失败观测之间」跨度达到 10s 才打开。ping 每 5s 一次、超时 1s，12s 的暂停里两次失败观测的跨度经常不到 10s（这次 ping 干脆没跑）。恢复时又直接清零，这段中断就丢了。
+3. **P3：时间。** standalone 的行由健康存储写，`first_seen`/`last_seen`/`resolved_at`/`evaluated_at` 都是 SQL 里的 `NOW(6)`：取会话时区（QA 机器 +08:00），而集群 legacy 行是 Go 传进来的 UTC；`first_seen` 还是写入时刻（恢复以后），不是第一次失败。CLOSE 的 `fact_at` 是关闭那一轮的时间，比恢复晚一个 debounce。
+
+**规则修订**
+
+- **R1 ping 不经过评估循环。** `META_UNREACHABLE` 的 ping 由独立的 goroutine 按 `metaPingInterval`（1s）发出，单次上限 `metaPingTimeout`（1s），同一时刻最多一个 ping 在路上；上一个还没回来时，这个 tick 直接记一次失败。评估循环里任何 meta 调用卡住都不影响它。`markResponsible` 里的 lease 续约/抢占和过期 lease 列表也改为限时 2s，超时或连接错误同样计入（只记失败）。这样**每个节点**，不论是不是任务 owner、是不是 `_health` 持有者、是不是纯控制面，都有自己的观测。
+- **R2 窗口从第一次失败算起，恢复时补记。**
+  - `since` 取第一次失败的观测**发出**的时间（ping 或 `/api/health` 读开始的时刻），不是超时返回的时刻。
+  - 连续失败期间，`now − since ≥ meta_unreachable_after` 就打开（与原来相同）。
+  - 第一次成功时，如果还没打开，但 `成功时间 − since ≥ meta_unreachable_after`，就补记一次：先以 `since` 打开，再以成功时间关闭。
+  - 结论：故障开始后 1 个 ping 间隔内有第一次失败，恢复后 1 个间隔内有第一次成功，所以任何持续 ≥ `meta_unreachable_after` + 1 个 ping 间隔（默认 11s）的中断一定留下一对记录；短于 `meta_unreachable_after`（10s）的一定不记。§25.6 第三条（12s 暂停打开并关闭一次）不变。
+- **R3 时间一律 UTC，首见 = 第一次失败，解决 = 第一次成功，两种模式一致。**
+  - 健康存储写 `task_findings`、`finding_transitions`、`task_health` 的时间戳改用 `UTC_TIMESTAMP(6)`（与 Go 驱动默认 `loc=UTC` 写入的值同一时区）。lease 表的 `NOW(6)` 不变：它只和 `NOW(6)` 比较，从不和 Go 时间比较。
+  - OPEN 转移写 `first_seen` = 转移的 `FactAt`（signal 的第一次失败），而不是写入时刻；行已打开时保留原来的 `first_seen`。CLOSE 转移写 `resolved_at` = CLOSE 的 `FactAt`。
+  - signal 的成功可以带事实时间（`SignalState.SuccessFactAt`）；CLOSE 的 `FactAt` 取它（不晚于本轮）。`META_UNREACHABLE` 在恢复时记下第一次成功的时间，评估器存下 OPEN 后发出的成功带上这个时间，所以 CLOSE 的 `fact_at` 与 `resolved_at` 都是恢复时刻。其他 kind 不带事实时间，行为不变。
+  - 集群 legacy 行：`first_seen` = `since`，`resolved_at` = 第一次成功的观测时刻，`UpsertFinding` 转 UTC 写入（原来就是）。
+  - 已经按会话时区写进去的旧行不迁移。
+
+**测试（先红）**
+
+- `internal/tasks/p26f_meta_outage_matrix_test.go`：失败路径矩阵新增 meta 中断一组，真实的 `Evaluator.Run` 循环与 finding sink，meta 调用（lease、健康存储、finding 存储、ping）在暂停期间挂住直到 ctx 结束，时间按比例缩小（`meta_unreachable_after` = 300ms，ping 间隔 20ms）。
+  - 集群三个节点：任务 owner（worker-a）、`_health` 持有者（worker-b）、两者都不是（worker-c）。standalone 一个节点（带运行中的任务）。
+  - `meta-pause-30s`（3×）：每个节点各一行 `META_UNREACHABLE/<node>`，`first_seen` 在暂停开始后 1 个 ping 间隔内，`resolved_at` 在恢复后很短时间内；standalone 有 OPEN/CLOSE，`fact_at` 同样分别对应暂停开始与恢复。
+  - `meta-pause-12s`（1.2×）：同上，每个节点都有记录。
+  - `meta-pause-5s`（0.5×，对照）：任何节点都没有记录。
+- `internal/meta`：sqlmock 断言健康存储的写入用 `UTC_TIMESTAMP(6)` 而不是 `NOW(6)`，OPEN 的 `first_seen` 和 CLOSE 的 `resolved_at` 用转移的 `FactAt`。
+- `internal/health`：带 `SuccessFactAt` 的 signal 关闭时，CLOSE 的 `FactAt` 是这个时间；不带时仍是本轮时间。
+
+**QA**：重跑 sc5（12s、30s）与 r4 (h)、(g)：每个节点（包括任务 owner 和非 `_health` 持有者）每次暂停各一对记录，`first_seen` 与故障开始相差不超过 1 个 ping 间隔，`resolved_at` 与恢复相差不超过 1 个 ping 间隔加一次写入；standalone 行的时间是 UTC，与集群行可直接比较。
