@@ -85,8 +85,9 @@ func (e *Evaluator) Signal(taskID string, kind FindingKind, subject string, ok b
 	e.signalAt(taskID, kind, subject, ok, detail, time.Time{})
 }
 
-// signalAt is Signal with the failure's fact time when the caller observed
-// it earlier than now (META_UNREACHABLE opens at the first failure, §25).
+// signalAt is Signal with the observation's fact time when the caller saw
+// it earlier than now: a failure opens at it (META_UNREACHABLE opens at the
+// first failure, §25), a success closes at it (§25.8 R3).
 func (e *Evaluator) signalAt(taskID string, kind FindingKind, subject string, ok bool, detail string, factAt time.Time) {
 	if e == nil || e.cfg.Mode == EvaluatorOff {
 		return
@@ -111,6 +112,10 @@ func (e *Evaluator) signalAt(taskID string, kind FindingKind, subject string, ok
 	}
 	if ok {
 		en.st.SuccessSeq = seq
+		en.st.SuccessFactAt = time.Time{}
+		if !factAt.IsZero() && !factAt.After(now) {
+			en.st.SuccessFactAt = factAt // the first answer, earlier than this signal (§25.8 R3)
+		}
 	} else {
 		en.st.FailureSeq = seq
 		en.st.Failures++

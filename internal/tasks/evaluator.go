@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API, CONFIRM) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
-// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
+// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
@@ -348,6 +348,9 @@ func (e *Evaluator) Run(ctx context.Context) {
 		wg.Add(1)
 		go func() { defer wg.Done(); e.work(ctx) }()
 	}
+	// S17 (§25.8 R1): pings on their own goroutine, never behind this loop.
+	wg.Add(1)
+	go func() { defer wg.Done(); e.s.runMetaProbe(ctx, e.cfg.MetaPingInterval, e.cfg.MetaPingTimeout) }()
 	e.markResponsible(ReasonStartup)
 	t := time.NewTicker(e.cfg.Sweep)
 	defer t.Stop()
@@ -362,7 +365,6 @@ func (e *Evaluator) Run(ctx context.Context) {
 			e.markResponsible(ReasonSweep)
 		case <-lt.C:
 			e.markLivenessCrossings()
-			go e.s.probeMeta() // S17 (§25); bounded, never blocks this loop
 		}
 	}
 }
@@ -507,7 +509,7 @@ func (e *Evaluator) clusterHasWork() bool {
 	if successes && e.cfg.Store != nil {
 		// A success may close a row an earlier process left open.
 		// Bounded: this runs on the sweep loop, which also pings meta (§25).
-		ctx, cancel := context.WithTimeout(context.Background(), 2*healthReadBudget)
+		ctx, cancel := context.WithTimeout(context.Background(), sweepMetaTimeout)
 		open, err := e.cfg.Store.ListOpenFindingsForTask(ctx, ClusterFindingTask)
 		cancel()
 		if err == nil && len(open) > 0 {
@@ -530,8 +532,15 @@ func (e *Evaluator) clusterHasWork() bool {
 // sweep, otherwise the given reason (design §5.3).
 func (e *Evaluator) markResponsible(r EvalReason) []string {
 	var ids []string
-	e.refreshHealthLease(context.Background())
-	e.refreshExpiredLeases(context.Background())
+	// Bounded (§25.8 R1): against a hanging meta these calls would hold the
+	// sweep loop until it answers; a timeout or connection error is also a
+	// META_UNREACHABLE observation.
+	ctx, cancel := context.WithTimeout(context.Background(), sweepMetaTimeout)
+	e.refreshHealthLease(ctx)
+	cancel()
+	ctx, cancel = context.WithTimeout(context.Background(), sweepMetaTimeout)
+	e.refreshExpiredLeases(ctx)
+	cancel()
 	for _, t := range e.responsible() {
 		reason := r
 		fp := e.fingerprint(t.ID)
