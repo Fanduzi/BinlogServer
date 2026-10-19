@@ -41,6 +41,10 @@ type Row struct {
 	ObjectKey   string
 	CreatedAt   time.Time
 	SealedAt    time.Time
+	// RetentionRemoved is set when local retention deleted the local file
+	// and left the row (design 0009 §26). The marker is not a license to
+	// ignore a missing object.
+	RetentionRemoved bool
 }
 
 // Switch is one continued source switch: the server the chain moved to and
