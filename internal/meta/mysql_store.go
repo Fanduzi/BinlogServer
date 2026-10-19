@@ -1346,7 +1346,7 @@ func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent)
 		eventTime = time.Now()
 	}
 
-	return s.execUnderFence(ctx, event.TaskID, func(ctx context.Context, q fenceExecer) error {
+	insert := func(ctx context.Context, q fenceExecer) error {
 		_, err := q.ExecContext(
 			ctx,
 			insertTaskEventSQL,
@@ -1358,7 +1358,14 @@ func (s *MySQLTaskStore) AppendEvent(ctx context.Context, event tasks.TaskEvent)
 			event.Sequence,
 		)
 		return err
-	})
+	}
+	// Design 0009 §26.6: only a run's own events carry its token. Without
+	// one (the scheduler's ordered event lane, the finding sink) the insert
+	// stays one statement with no retry, as before P2-5.4.
+	if id, ok := tasks.FenceIdentityFrom(ctx); !ok || id.TaskID != event.TaskID {
+		return insert(ctx, s.db)
+	}
+	return s.execUnderFence(ctx, event.TaskID, insert)
 }
 
 // ListEvents 返回最新的 limit 条事件，旧的在前。
