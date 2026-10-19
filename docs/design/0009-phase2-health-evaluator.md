@@ -1420,3 +1420,126 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
 - (b) 没有 000010 时重启后会重复写 `RETENTION_REMOVED`：接受，见 §26.2。
 - (c) 卡住窗口里的 NULL 不回填：下游不会因此误判，见 §26.5 末尾。
 - (d) `AppendEvent` 有令牌时走栅栏：只有 run 里的保留事件带令牌，见 §26.6；没有令牌时保持单条语句、不重试。
+
+## 27. #436 / #441：健康表缺失时不再静默，轮转不再误报 CHECKPOINT_AHEAD（2026-10-19）
+
+§25 把「meta 不应答」做成内存里的 `META_UNREACHABLE`，`/api/health` 立刻 degraded。§22.4 规定 checkpoint 先于段列表读，免得运行中的任务把位点指到快照里还没有的新文件。这两处都还有一个洞：#436 是评估器开着、000009 不在时整套健康系统停了却仍然 `ok`；#441 是源端轮转时 I5 的「位点落在最后一段之后」在 1–2 秒里开一条 CRITICAL 再自己关上。本步只补这两个洞。不改 `minRequiredSchemaVersion`（仍是 6），不加配置项，不加迁移，不把 `CHECKPOINT_AHEAD` 改成两轮确认。
+
+### 27.1 问题
+
+**#436。** `health.evaluator=on`，在线 `migrate goto 7` 或 `8`（000009 的 `task_health`、`finding_transitions` 和新列都没了）。之后每一轮评估只打一行 INFO：`health evaluate task=1: health tables are absent; run ./migrate up to 000009`。finding 写不进去，`/api/health` 一直 `ok`。健康系统已经停了，操作员看不到。进程一开始就停在 schema 9 以下、评估器开着，也是同一件事。
+
+QA 还看到：9→7 把 000008 的封存事实列和 000009 一起拿掉，`SEAL_FACTS_ABSENT`（§26.5）也开不出来。只拿掉 000008、留下 000009 时，它仍在一轮内打开、`up` 后一轮内关闭。
+
+**#441。** 评估器开着，任务持续有写入，源端 `FLUSH BINARY LOGS`。standalone 和集群都能复现（v0.5.73 和 9bd6c9a）。`finding_transitions` 里一条 OPEN 和一条 CLOSE(EVAL)，大约 1–2 秒：
+
+```text
+CHECKPOINT_AHEAD  CRITICAL
+checkpoint mbin.000007:4 is at a source file after the last chain segment mbin.000006
+```
+
+接了告警的人每次轮转都可能收到一条 CRITICAL。时间久了，真的 `CHECKPOINT_AHEAD` 也会被当成噪音。
+
+### 27.2 根因（代码里的证据，不是猜测）
+
+**#436。** `healthstore.ErrSchemaAbsent` 只在 `Evaluator.write` 里把 `schemaAbsent` 置上（`evaluator.go`）。评估一轮先 `ListOpenFindingsForTask`，这条 SELECT 用了 000009 的列（`evidence`、`segments`、`generation`），1054/1146 直接返回，`write` 走不到，`schemaAbsent` 一直是 false。于是 `ownsManaged` 仍为真：热路径不走 v0.5.66 的 upsert，评估器自己又写不进健康存储。`/api/health` 在有 meta 时读的是旧 finding 列（`openManagedFindings` 只在独立文件存储时读健康存储），读得到、里面没有 CRITICAL，状态就是 `ok`。日志是 `log.Printf`，经 zap 的标准库重定向落在 INFO，而且每个任务每一轮一次。
+
+**#441。** `openSegment.rotate`（`internal/replication/run_segment.go`）的顺序是：把 checkpoint 写成**下一个**文件（新文件起点，pos 一般为 4），然后 `uploadSealed`（封存段上传，超时才继续，成功也要等它返回），**最后**才 `openAt` 把 `.open` 建出来。注释写明这是为了崩溃后续传从下一个文件开始，而不是在已封存的名字旁边再开一个 `.open`。
+
+§22.4 的「先读 checkpoint 再列段」防的是另一件事：普通事务的 checkpoint 写在数据落盘之后，先列段再读位点会把 C 指到快照里还没有的文件。轮转相反：位点先于新文件出现，中间还隔着一次上传。上传要 1–2 秒时，5 秒一轮的 sweep 很容易落在这个窗口里。I5 的「`seq > lastSeq`」分支（`chain.go` `checkCheckpointPos`）看到的就是「checkpoint 在 `lastSeq+1`、pos ≤ 4，段列表里还没有这个 `.open`」。下一轮文件已经在，finding 关掉。两轮确认压得住症状，盖不住这个窗口；§22.1 也写了这个 kind 不靠 Confirm。
+
+`assurance` 的用例「file after the tail」（checkpoint 在 `mysql-bin.000008:4`，链只到 `000007`，没有正在进行的轮转）是真的超前，必须继续打开。不能按「下一段、pos ≤ 4」一刀切掉。
+
+### 27.3 决定
+
+**D1 不拒绝启动。** schema 地板仍是 6，评估器在 v0.5.x 仍可单独打开。开着评估器、schema 低于 9，进程照常起来，用下面这条 finding 说明，而不是退出。v0.6.0 把地板提到 9 仍按 §9，本步不提前做。
+
+**D2 `HEALTH_STORE_UNAVAILABLE`（新，S18）。** CRITICAL，Managed，task = `_cluster`，subject = 本节点 node id（与 `META_UNREACHABLE` 同一个 id；没有时用 `local`）。评估器模式是 `on`，并且健康存储的读或写返回 `ErrSchemaAbsent` 时打开。不等 10 秒：缺表不是慢查询。`shadow` 和 `off` 不开这条，也不把 `/api/health` 打成 degraded；`shadow` 对这个错误只打一次 WARN。
+
+打开期间写不进 000009，所以和 §25 一样从内存列出：`/api/health`、`/api/findings`、`/api/findings?task_id=_cluster` 都能看到。`/api/health` 为 503 `degraded`。原因里除了 finding 那一行（`HEALTH_STORE_UNAVAILABLE/<node> (task _cluster)`），还有一句写明缺的是健康存储和怎么修：
+
+- 探到 schema 版本且小于 9：`HEALTH_STORE_UNAVAILABLE: schema N < 9, run ./migrate up`
+- 探不到版本，或版本已经 ≥ 9 但表/列仍缺：`HEALTH_STORE_UNAVAILABLE: health tables are absent; run ./migrate up to 000009`
+
+版本来自现有的封存事实探针（`schema_migrations`）。探针失败不挡住这条 finding。
+
+第一次打开打一行 WARN（`HEALTH_STORE_UNAVAILABLE opened ...`），关闭打一行 WARN。不再每个任务每一轮打 INFO。`work` 里对 `ErrSchemaAbsent` 不再 `log.Printf`。
+
+指标不加新名字。`OpenFindings` 把这条算进去之后，已有的 `binlog_server_finding_open{task_id="_cluster",kind="HEALTH_STORE_UNAVAILABLE",severity="critical"}` 就是它。`binlog_server_finding_store_active` 只表示旧 finding 存储配了没有，不表示 000009 在不在，这里不用它。
+
+**D3 关上，并且能写的时候把关写下来。** 一次健康存储写入成功（`ApplyTransitions` 返回 nil）就说明 000009 回来了。`schemaAbsent` 清掉。
+
+- standalone（评估器拥有 `_cluster` 的信号，与 §25.7 相同）：恢复后先保持失败，把 OPEN 写入健康存储（`fact_at` = 第一次看到 `ErrSchemaAbsent`），写上之后再发成功，下一轮 CLOSE（`fact_at` = 第一次写成功的时刻）。一次缺失留下一对转移。
+- 集群（P2-6 之前 `_cluster` 不归评估器，与 §25.7 相同）：内存里的这一条在恢复时交给旧 finding 路径，写成一行已关闭的 `task_findings`（`first_seen` = 第一次看到，`resolved_at` = 写成功的时刻），并写一条 `FINDING_RESOLVED`（`task_id=_cluster`，message 为 `HEALTH_STORE_UNAVAILABLE <node>`）。故障期间不写 REPORTED：000009 不在，健康存储的转移写不进去；旧列虽然还在，但这条 finding 的写者是评估器，不在缺口里改走旧 upsert，免得和恢复后的转移抢同一行。
+
+`Run` 一开始先做一次健康存储读（`ListHealth` 即可）。进程启动时 schema 已经低于 9 的，不必等第一轮评估，`/api/health` 就 degraded。
+
+`schemaAbsent` 一旦置上，`ownsManaged` 为假，其它 Managed kind 回到 §9 写的 v0.5.66 upsert。今天这条回退没有生效，就是因为读失败时标志置不上。本步把读失败也算进去。
+
+**D4 和 `SEAL_FACTS_ABSENT` 的关系。** 两条各看各的，不互相代替。
+
+| schema | 000008 列 | 000009 | 本步 |
+|---|---|---|---|
+| ≤ 7，本进程没见过列 | 无 | 无 | 只开 `HEALTH_STORE_UNAVAILABLE`。§26.5 本来就不开 `SEAL_FACTS_ABSENT`（支持的部署） |
+| ≤ 7，本进程见过列（从 9 `goto 7`） | 无 | 无 | 只开 `HEALTH_STORE_UNAVAILABLE`。封存事实探针照旧跑，`sealFactsAbsent` 记忆照旧更新，所以列回来之后封存会再写事实。`SEAL_FACTS_ABSENT` 不另做一条内存 finding：000009 不在，它存不下；正常的 `./migrate up` 会把 000008 和 000009 一起带回来，下一轮列在，它不需要开。若只把 000009 补回、列仍缺（不是 `goto`/`up` 的路径），下一轮按 §26.5 打开并写进健康存储 |
+| 8 | 在 | 无 | 只开 `HEALTH_STORE_UNAVAILABLE`。列在，`SEAL_FACTS_ABSENT` 不开 |
+| ≥ 9，列缺、000009 在 | 无 | 在 | 与今天相同：一轮内 `SEAL_FACTS_ABSENT`，没有 `HEALTH_STORE_UNAVAILABLE` |
+| ≥ 9，两者都在 | 在 | 在 | 两条都关着 |
+
+缺口期间评估一轮在健康存储读失败处停下，不再做链的 Reconcile。链上的 finding 等 000009 回来的下一轮再判。操作员看到的是「健康存储不能用」，不是一条条存不住的链 finding。
+
+**D5 轮转的快照（#441）。** 不改 I5 的判定，不加 Confirm。
+
+1. 同一个任务上加一把锁 `HoldChain(taskID)`。轮转在「把 checkpoint 写成下一个文件」到「`.open` 已经在目录里」之间持有它。评估器在读这一轮的 checkpoint、目录指纹和段顺序时持有同一把锁，读完就放，不罩住后面的 `CheckBody`（那会读每个文件，把轮转堵住）。
+2. 锁里面的顺序仍是先写 checkpoint、再创建文件（崩溃后续传必须从下一个文件开始，这条不变）。上传挪到放锁之后：挂住的上传不再把「位点已是新文件、文件还不存在」暴露给评估器，也不会占着这把锁。
+3. 评估器看到的要么是「位点还在旧文件、新文件还没有」，要么是「位点在新文件、`.open` 已经在段列表里」。I5 的「after the last chain segment」在轮转窗口里看不到。
+4. 没装上这把锁的读者（单测里的 runner、`/replay`）不产生 finding。生产里 app 把 scheduler 装到 runner 上。
+
+残留，不靠两轮确认去盖：
+
+- `openAt` 在 checkpoint 已经写上之后失败（磁盘满等）：锁已放，下一轮可能看到真的「位点在还没有的文件上」。这是轮转失败，不是每次 `FLUSH` 的常态；run 会返回错误。
+- 进程在 checkpoint 提交之后、文件创建之前崩溃：进程已经不在评估。重启后续传会把文件打开。启动后第一轮若赶在打开之前，仍可能开一条短 finding。这不是 #441 的轮转窗口，本步不另加 Confirm，避免把现有的一轮打开用例拖成两轮。
+
+真的超前（位点在链上不存在的更后文件、或同一文件上越过封存末尾、或 GTID 集合超前）仍在一轮内打开。现有 `TestCheckpointAheadOfTheChain` 和 `TestP253CheckpointAheadManaged` 保持。
+
+### 27.4 类型与签名
+
+- `health.HealthStoreUnavailable`（`HEALTH_STORE_UNAVAILABLE`），`tasks.FindingHealthStoreUnavailable`。`DefaultRegistry` 里是信号 spec，CRITICAL，scope `signals`，Managed，无 Confirm。`ManagedKinds`、lintguard 的 Managed 表一并加上。`isSignalKind` 加上它，但缺口期间不走 `SignalFailure`（见 D3：不改走旧 upsert）。
+- `tasks.Scheduler.HoldChain(taskID string) (release func())`。未注册的任务也有自己的锁；`release` 可以多次调用约定为只放一次（调用方 `defer`）。
+- `replication.WithChainGate(gate)`，`gate` 是 `HoldChain(taskID string) (release func())`。nil 时轮转不加锁，仍把 `openAt` 放在上传之前。`App` 在创建 runner 时把 scheduler 传进去。
+- `openSegment.rotate`：checkpoint 与 `openAt` 在锁内，`uploadSealed` 在锁外、在 `openAt` 成功之后。
+- `Evaluator.chainFactsInto`：checkpoint、指纹、`chainOrder` 在 `HoldChain` 内取，然后放锁再跑 `CheckBody` / `CheckCheckpoint`。
+- 评估器上记缺口：第一次 `ErrSchemaAbsent`、schema 版本、是否已经打过打开日志、恢复时刻。`HealthSummary` / `OpenFindings` / `ListFindings` / `memoryOpenFindings` 在 `metaReachFinding` 旁边列出它。
+
+Swagger 的 `/api/health` 是开放 object，finding 的 `kind` 也不是枚举。响应多了一句 reason、多了一种 kind 字符串，文档不改契约形状，本步不重生成 swagger。
+
+### 27.5 失败路径矩阵
+
+| 情况 | `/api/health` | finding | 日志 | 恢复后 |
+|---|---|---|---|---|
+| 评估器 `on`，schema 8（列在，无 000009） | degraded，reason 含 `schema 8 < 9` | 内存中一条 `_cluster` / 本节点 CRITICAL | 打开一次 WARN | `up` 后写入 OPEN+CLOSE（集群为已关闭行 + `FINDING_RESOLVED`），reason 消失 |
+| 评估器 `on`，schema 7，没见过 000008 | 同上，`schema 7 < 9` | 同上 | 同上 | 同上；不出现 `SEAL_FACTS_ABSENT` |
+| 评估器 `on`，从 9 `goto 7`（见过列） | 同上 | 只有 `HEALTH_STORE_UNAVAILABLE` | 同上；封存事实探针仍打自己的 WARN | `up` 后两条都不开（列和健康表一起回来） |
+| 评估器 `on`，只缺 000008、000009 在 | 按 `SEAL_FACTS_ABSENT`（WARNING）degraded | 没有 `HEALTH_STORE_UNAVAILABLE` | 与 §26.5 相同 | 列回来即关 |
+| 评估器 `off` 或 `shadow`，schema 7 | `ok`（没有别的 CRITICAL 时） | 无此 finding | `shadow` 一次 WARN | — |
+| 评估器 `on`，schema ≥ 9，表被手工删掉 | degraded，reason 含 `health tables are absent` | 内存中一条 | 打开一次 WARN | 表回来后同上关闭 |
+| 轮转，上传要 1–2 秒，评估器同时在跑 | 不因 `CHECKPOINT_AHEAD` 变化 | 零条 `CHECKPOINT_AHEAD` 开关 | 无 | — |
+| checkpoint 停在链上没有的文件，没有轮转在进行 | degraded | `CHECKPOINT_AHEAD` 一轮打开 | 与今天相同 | 位点拉回后关闭 |
+| 轮转中 `openAt` 失败 | 可能短暂 degraded | 可能一条 `CHECKPOINT_AHEAD`，直到重试打开文件或位点改回 | run 的错误照旧 | 见 D5 残留 |
+
+### 27.6 测试（先红）
+
+- `health`：`HEALTH_STORE_UNAVAILABLE` 在 Managed 表里，CRITICAL，无 Confirm；不从 assurance 派生。
+- `tasks`：健康存储的读和写都返回 `ErrSchemaAbsent`、评估器 `on` 时，一轮之内（以及 `Run` 前的那一次探测）`HealthSummary` 为 degraded，reason 含 `HEALTH_STORE_UNAVAILABLE: schema 8 < 9, run ./migrate up`；`OpenFindings` 与 `ListFindings(_cluster)` 有一条 subject 为本节点的 CRITICAL。同一错误再评估几轮，打开日志只有一次。存储改为可写之后，standalone 留下 OPEN 与 CLOSE，`fact_at` 分别是第一次失败和第一次写成功；`/api/health` 回到 ok。schema 7 且封存事实探针报「列缺、见过列」时，不开 `SEAL_FACTS_ABSENT`，只开这一条。评估器 `off` 时 health 仍是 ok。
+- `replication`：轮转里 checkpoint 已是下一个文件、上传还在进行时，并发的链快照读（持同一把锁）看不到「位点在最后一段之后」。不持锁、在上传之前就列目录的对照读得到这个窗口（证明测的是这把锁，不是把 I5 关了）。上传放在 `openAt` 之后：慢上传期间目录里已经有 `.open`。
+- `assurance` / 现有 `tasks` P2-5.3：`TestCheckpointAheadOfTheChain` 的「file after the tail」仍是 I5；评估器上 GTID 超前仍一轮打开 `CHECKPOINT_AHEAD`，拉回后关闭。
+- `lintguard`：新 kind 在 Managed 表里，没有新的 `Report` 调用。
+
+### 27.7 本步不做
+
+- 启动时因「评估器 on 且 schema < 9」退出。
+- 把 `CHECKPOINT_AHEAD` 改成两轮确认，或按 pos ≤ 4 忽略下一段。
+- 缺口期间把链 finding 也留在内存里。
+- 新的 Prometheus 指标名、新配置、新迁移、swagger 重生成。
+- P2-6 让 `_health` 持有者评估 `_cluster` 之后，集群这条改为 OPEN/CLOSE 转移（与 `META_UNREACHABLE` 同一笔账，到那时再改）。
+
