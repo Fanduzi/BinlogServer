@@ -395,7 +395,7 @@ evaluate(task):
 | `METRIC_SOURCE_FAILED` | W | signals | 信号，subject=指标源 | S10/S11：下一次计算成功 |
 | `TASK_TRANSITION_STALLED` | W | task.state | STARTING/STOPPING 超过 60s 且无 run 驱动 | 任务离开该状态或有 run 驱动 |
 | `SEAL_FACTS_ABSENT`（新，**#353**） | W | store | `000008` 列缺失而 schema 记录 ≥8，或进程内「列缺失」记忆与库不符 | 每轮 sweep 重新探测列；列存在即清除记忆并关闭 |
-| `HEALTH_STALE`（新，集群级） | W | task.state | 某任务 `task_health.evaluated_at` 超过 `health.stale_after`（默认 5×sweep，可配）未更新且该任务应有评估者 | 该任务被评估 |
+| `HEALTH_STALE`（新，集群级） | W | task.state | 某任务 `task_health.evaluated_at` 超过 `health.stale_after`（默认 5×sweep，可配）未更新且该任务应有评估者 | 该任务在 `health.stale_after` 内再次被评估（P2-6.1，§28：finding 在 `_cluster`，subject = 任务 id） |
 | `HEALTH_STORE_DEGRADED`（新，集群级） | W | store | `000009` 缺失或 ApplyTransitions 连续失败 | 写成功 |
 
 规则：
@@ -604,12 +604,15 @@ CREATE TABLE task_mutes (
 | P2-6a | #360：任务行写走 `meta.fencedExec`；TaskFacts 与 `task_leases` 交叉校验 | 「#355 run 3 复现后旧 owner 的 STOPPED 写被拒」「行与 lease 不一致时 task.state 不完整」红 | — | P2-2 |
 | P2-6b | #417：数据面端到端写栅栏（§23）：本地 lease 时钟 + meta 事务内校验 `task_leases`，覆盖追加、新 open 文件、封存、checkpoint、目录行、上传 | 「冻结 owner 醒来后的追加/checkpoint/目录行被拒」「过期 run 不建 open 文件」红 | — | P2-6a 平行、#416 |
 | P2-6c | #421：`_health` lease 选出的节点评估无主任务的 `task.state`（代写栅栏 = 最后一次任务 lease 的 epoch）；FAILED 不被旧 owner 改成 STOPPED；任务行栅栏覆盖已释放 / 无行（§24） | 「集群 FAILED 打开 TASK_FAILED」「旧 owner 醒来后行仍是 FAILED」「已释放于更大 epoch 的 lease 拒绝写」红 | — | P2-6a、P2-6b |
-| P2-6 | 集群：评估权跟随任务 lease、`_health` 选评估者、非共享存储委派最后 owner（绑定最后 lease epoch + 节点）、OWNER_CHANGED、ErrFenced 处理、接管调和、`HEALTH_STALE`、节点消失清理 | 两/三节点：冻结 owner 写被拒且新 owner 不被锁死；委派在新 lease 后失效 | `HEALTH_STALE` | P2-4、P2-5、P2-6a |
+| P2-6 | 拆成 P2-6.1–P2-6.3（§28）。评估权、`_health` 选举、ErrFenced、接管触发已在 P2-6a/b/c 交付，不重做 | — | — | P2-6c |
+| P2-6.1 | `_health` 持有者把 `HEALTH_STALE` 写在 `_cluster`（`never` 栅栏，只比任务 epoch，从不比 `_health` epoch）；`health.stale_after_sec`（0 = 5×sweep） | 「evaluated_at 超过阈值打开」「5×sweep 内 120 个任务不误报」「非持有者不写」红 | `HEALTH_STALE` | P2-6c |
+| P2-6.2 | 非共享存储：链 scope 委派给最后 owner（绑定最后 lease epoch + 节点 id）、`OWNER_CHANGED`、`node_gone_after` → UNKNOWN(node gone) | 「新 lease 后委派写被拒」「旧目录 finding 以 OWNER_CHANGED 关闭」红 | — | P2-6.1 |
+| P2-6.3 | 混版本：`health.evaluator=on` 时，一条没有 version 的心跳加入，本节点评估退回 `shadow`（§9） | 「无 version 心跳加入后退回 shadow，不改 finding 行」红 | — | P2-6.1 |
 | P2-7 | API（`/api/alerts` 分页、`/tasks/{id}/health`、mute（key 级 + 任务级，`task_mutes`）、waive、evaluate、standalone takeover）+ `task_muted` 指标+ 指标（`task_healthy` 总有序列、meta 宕机缓存、真实 2s）+ 推荐规则文件；swagger | 「新建任务即有序列」「meta 暂停时 2s 内返回且序列为 0」「评估停 `stale_after` → UNKNOWN」红 | — | P2-6 |
 | P2-8 | Console 告警页（静音、豁免操作）、健康徽标、finding 事件按事实时间排序 | UI 测试：告警页数据与 `/api/alerts` 一致 | — | P2-7 |
 | P2-9 | 通知器：`_notify` lease、outbox 游标、两种格式（AM webhook 格式 / AM `/api/v2/alerts`）、去抖、flapping、静音、UPGRADE 摘要；`docs/notifications.md`（钉钉、飞书、邮件路由） | 「投递失败重试且不丢」「`_notify` 切换不重复也不丢」「升级首轮只发一条摘要」红 | — | P2-6、P2-7 |
 
-依赖图：P2-1 → P2-2 → P2-3 → P2-4 → P2-5（另需 P2-5a ← P2-3）；P2-2 → P2-6a；{P2-4, P2-5, P2-6a} → P2-6 → P2-7 → {P2-8, P2-9}。阶段 2 完成后发 v0.6.0，schema 下限提到 9，`health.evaluator` 默认 `on`（§15 D1）。
+依赖图：P2-1 → P2-2 → P2-3 → P2-4 → P2-5（另需 P2-5a ← P2-3）；P2-2 → P2-6a；{P2-4, P2-5, P2-6a} → P2-6c → P2-6.1 → {P2-6.2, P2-6.3} → P2-7 → {P2-8, P2-9}。P2-7 仍等 P2-6.2 与 P2-6.3，不把 P2-6.1 当成整段 P2-6 完成。阶段 2 完成后发 v0.6.0，schema 下限提到 9，`health.evaluator` 默认 `on`（§15 D1）。
 
 ## 14. QA 计划（每个 PR）
 
@@ -624,7 +627,9 @@ CREATE TABLE task_mutes (
 | P2-5a | 全局 `upload.grace=2m`：2m 后出现 `I7_UPLOAD_LATE`；任务级 `upload_grace=30m` 覆盖全局；不配置时 15min；MinIO 暂停 5min 再恢复（#351 retry）期间无 UPLOAD_LATE、无通知 |
 | P2-5 | §6.1 前置：本地缺失的段恢复后，对象未列举时也关闭（origin=local）；对象缺失的实例在对象未列举时不开不关；移除任务的对象存储配置 → 对象类实例以 CONFIG 关闭并有审计说明；列举上限设为 10 而对象有 25 个 → 未覆盖前缀不完整、无误报 MISSING、无误关；配置文件不可读或凭据缺失 → chain.objects 不完整、健康不为 HEALTHY；混跑集群中不能列举的节点不接管这些 kind；同一任务 HealthOf 与 Reconcile 对 chain.objects 的判断一致（对象未列举时不报 HEALTHY 而 Reconcile 卡住）。#352 复现（`gtid_next` 跳号 363–381，单源）→ `GTID_HOLE` OPEN；对 `uuid:363-381` waive（提交大写 uuid 或拆分区间也规范化为同一 evidence）→ CLOSE(WAIVED)、健康恢复；源继续写入（已存集合增长）后 waiver 仍有效；再跳号 400–410 → 新洞重新 OPEN；MinIO 删对象（已列举）→ `SEGMENT_MISSING`，未列举时不开不关；UPLOAD_LATE WARNING→超阈值 CRITICAL，任务级覆盖生效；保留期删除后无 `ORPHAN_ROW` 且有 `RETENTION_REMOVED`；#353 复现 1 sweep 内 `SEAL_FACTS_ABSENT` OPEN，`up` 后关闭且封存事实恢复；ADR 0006/0007 的 47 个目录用例无误报 |
 | P2-6a | #355 run 3 复现（宿主机停顿 2 分钟）：旧 owner 的 STOPPED 写被拒，任务行保持新 owner 的状态；人为制造行/lease 不一致 → 健康 UNKNOWN 而非 HEALTHY；36 次重复无覆盖 |
-| P2-6 | 3 节点：kill -9 owner；SIGSTOP owner 60s（#364）与 2min（#355）后恢复——旧 owner 的 finding/health/任务行写全部被拒，新 owner 不出现 ErrFenced、≤1 sweep 调和完成；STOPPED 任务只由一个 `_health` 节点评估；非共享存储下 STOPPED 任务的链 finding 由最后 owner 打开/关闭、健康不为 UNKNOWN；任务在另一节点重启后旧目录 finding 以 OWNER_CHANGED 关闭、旧 owner 的委派写被拒；kill 最后 owner `node_gone_after` 后 UNKNOWN(node gone)；杀 `_health` 持有者后另一节点接手；load ~120 时 `HEALTH_STALE` 不误报（默认 5×sweep）；meta 慢导致续约迟到（lease 过期但仍是本节点）时评估不停止、续约后转移写入；节点时钟偏移 ±5min 不影响关闭判定；混版本：v0.5.67 不自动退回（§9），验收项为 `on` 期间加入一个 v0.5.66 节点时任务仍由新版本节点接管、恢复数据一致，自动退回 `shadow` 列为后续 P2-6 实现时的验收项 |
+| P2-6.1 | 三节点进程内：只有 `_health` 持有者打开 WARNING `HEALTH_STALE`（task `_cluster`，subject = 任务 id），`task_health` 为 DEGRADED；另外两个节点不写。`evaluated_at` 在 5×sweep 以内（含 120 个任务）不开。没有健康行时第一次见到不开，过了 `stale_after` 才开。任务从名单消失后 CLOSE。`ListHealth` 失败不开也不关。写入栅栏是 `never`、epoch 0，不是 `_health` 的 epoch。`shadow` 不写。`/api/health` 仍只因 CRITICAL 降级（本 kind 是 WARNING，探针保持 ok），`/api/findings` 能列出。standalone 的 `_cluster` 路径不变。META_UNREACHABLE / HEALTH_STORE_UNAVAILABLE 的集群内存路径不被这一轮关掉。真机 SIGSTOP / kill -9 仍归已交付的 P2-6a/b/c，不在本步重跑 |
+| P2-6.2 | 非共享存储下 STOPPED 任务的链 finding 由最后 owner 打开/关闭、健康不为 UNKNOWN；任务在另一节点重启后旧目录 finding 以 OWNER_CHANGED 关闭、旧 owner 的委派写被拒；kill 最后 owner，`node_gone_after` 后 UNKNOWN(node gone)；新 lease 后委派失效 |
+| P2-6.3 | `health.evaluator=on` 期间加入一条没有 version 的心跳：本节点评估退回 `shadow`（不改 finding 行、不通知），该心跳消失后恢复 `on`。v0.5.67 不自动退回的现状保持到本步之前 |
 | P2-7 | 每个健康条件单独破坏一次，`/api/alerts`、`task_healthy`、`task_health_status` 在 1 个评估周期内变化；`task_healthy` 对每个任务总有序列（含 STOPPED、从未启动）；**meta 暂停（SIGSTOP mysqld）时 scrape ≤2s 返回、每个缓存任务 `task_healthy=0`**；mute 不改变健康、waive 改变健康；key 级 mute >7d、任务级 >24h 被拒；MUTE/RENEW/EXPIRE/END_EARLY 均有 transition 且带 reason/actor；换 owner 后 mute 仍生效；`task_muted` 每个任务总有序列；standalone 换数据目录后写入被拒，`health takeover` 后恢复，`.node_id` 不随主机名变化；`/api/alerts` 分页可读完 5000 条 |
 | P2-8 | 告警页与 `/api/alerts` 一致（20 个构造 finding）；徽标四态；静音/豁免操作需填原因并显示操作者；关闭的 finding 7 天内可见；#364 第 6 项复现：被拒事件按事实时间排在 FINDING 事件之前；浏览器控制台无错误；中英文 |
 | P2-9 | 全部用**本地 mock 接收端**（离线可跑）：一个记录请求的 mock webhook（AM webhook 格式）、一个 mock Alertmanager（`/api/v2/alerts`）、mailpit 作为 mock SMTP（经真实 Alertmanager 容器的 `email_configs`）、一个 mock 钉钉/飞书 relay（校验转换后的机器人消息体）。接收端停 10 分钟后恢复：全部转移按 generation 到达、按 delivery id 无重复；meta 只读期间产生的转移在恢复后以 `FactAt` 排序；`_notify` 切换不丢不重；flapping 合并；静音抑制 OPEN 不抑制 CLOSE、7 天到期恢复、续期生效、无 reason 被拒；升级首轮只发一条摘要；任务级 mute 期间 Prometheus 规则 `task_healthy == 0 unless on(task_id) task_muted == 1` 不触发（用 promtool 规则单测 + 本地 Prometheus），mute 结束后触发；真实钉钉/飞书/邮件账号验证列为可选 |
@@ -1190,8 +1195,8 @@ QA (c)：新 owner 认领后一直 `RETRY_BACKOFF`（旧 dump 连接 KILL 不到
 
 ### 24.7 本步不做
 
-- `HEALTH_STALE`（§8 第 10 条）：需要持有者给**有主**任务写 finding，而有主任务的写权在 owner，代写栅栏要求 lease 无人持有，两者冲突；拟改为 `_cluster` 级 finding（subject = 任务 id，`never` 栅栏，持有者写），下一步单独做。
-- 链 scope 的代评与非共享存储的委派、`OWNER_CHANGED`、节点消失清理（§13 P2-6 其余部分）。
+- `HEALTH_STALE`（§8 第 10 条）：需要持有者给**有主**任务写 finding，而有主任务的写权在 owner，代写栅栏要求 lease 无人持有，两者冲突；改为 `_cluster` 级 finding（subject = 任务 id，`never` 栅栏，持有者写）。落地是 P2-6.1（§28）。
+- 链 scope 的代评与非共享存储的委派、`OWNER_CHANGED`、节点消失清理留到 P2-6.2（§28.7）。混版本自动退回 `shadow` 留到 P2-6.3。
 
 ## 25. #427：meta 被黑洞时 `/api/health` 有界返回，并留下 `META_UNREACHABLE`（2026-10-19）
 
@@ -1571,3 +1576,110 @@ Swagger 的 `/api/health` 是开放 object，finding 的 `kind` 也不是枚举�
 - checkpoint 读直接报错时，`chainFacts` 返回 nil（不当作没有 checkpoint）。
 - checkpoint 读一直挂住到 ctx 结束时，`chainFacts` 在读超时量级内返回 nil，且锁已放（随后 `HoldChain` 立刻拿到）。
 - 运行中的评估器在 `Run` 之后健康存储改为 `ErrSchemaAbsent`、没有任何任务时，一个 Sweep 之内 `/api/health` degraded；改回可写后一个 Sweep 之内恢复。
+
+## 28. P2-6.1：`_health` 持有者在 `_cluster` 上写 `HEALTH_STALE`（2026-10-19）
+
+§13 的 P2-6 在 P2-6a/b/c 之后还剩三块，一块 PR 装不下。本步只做 P2-6.1。P2-6.2（链委派）和 P2-6.3（混版本退回 `shadow`）记在 §28.7，不在本步写代码。
+
+### 28.1 已经交付（对照代码，不重做）
+
+1. **有主任务的评估权跟随任务 lease。** `fenceFor`（`internal/tasks/evaluator.go`）在集群里只在 `OwnerWorkerID == NodeID && Epoch > 0` 时给出 `Fence{cluster, TaskEpoch: 任务 epoch}`。`MarkDirty(LEASE_LOST)` 丢掉 dirty 和 pending。`write` 遇到 `ErrFenced` 丢掉 pending，并把 `e.fenced[id]` 记成该任务 epoch，直到 `LEASE_ACQUIRED`。数据面栅栏是 P2-6b（`write_fence.go`，§23），任务行栅栏是 P2-6a/c（`CheckTaskRowFence`、`meta/fenced_exec.go`）。
+2. **`_health` 选出谁评估无主任务。** `refreshHealthLease`（`evaluator_unowned.go`）用 `task_leases` 行 `_health`，TTL 3×sweep，CAS 只有一个持有者。`proxyFence` / `unownedFacts` 只评估任务行无 owner，或 owner 的任务 lease 已过期的任务的 `task.state`。`_health` 的 epoch 只用来选节点，不写进 finding 或 health 行。
+3. **`ErrFenced` 与 `ErrLeaseLagging`。** `write` 对 `ErrFenced` 丢 pending；`ErrLeaseLagging` 不在这个 switch 里，pending 留下、下轮重试。`noteUnsaved` 不保留被栅栏拒绝的写。`scheduler_cluster_lease.go` 在 `LEASE_ACQUIRED` 时 `MarkDirty`，清掉 latch。`never` 和 `Proxy` 不 latch（`write` 里 `!fence.Proxy && fence.Mode != FenceNeverLeased`）。
+4. **接管触发。** `ReasonLeaseAcquired` 把任务标脏，新持有者跑一轮期望状态调和。这不是链 finding 的 `OWNER_CHANGED`。`DUMP_STALLED` 在任务 epoch 变化时按已有清除规则关闭（P2-4）。
+5. **`Proxy` 和 `Delegated` 栅栏类型。** `healthstore.CheckFence` 已实现，文件存储和 `storetest` 有用例。评估器从不把 `Delegated` 设为 true。`chain_owner` 只在 `fence.Delegated` 时写入（`internal/meta/health_store.go`）。
+6. **冻结的旧 owner 锁不死新 owner。** 栅栏只比较任务 lease epoch。`_health` epoch 不进 finding / health 行。
+7. **FAILED 不被改写成 STOPPED、`TASK_NO_PROGRESS`、有界 `/api/health`、`META_UNREACHABLE`、`HEALTH_STORE_UNAVAILABLE`。** 分别在 P2-6c、#427/#430、#445。
+
+### 28.2 还缺什么
+
+- **P2-6.1（本步）。** `HEALTH_STALE`。`stateSpec(HealthStale, …)`（`registry.go`）没有 `Derive`，也不在任何 `p2*Managed` 里，所以永远不开。`evaluate` 在 `cfg.Cluster` 时对 `_cluster` 直接 `errNotResponsible`。`responsible` 只在非集群且 `clusterHasWork` 时加入 `_cluster`。`OpenFindings` 只在非集群时把 `_cluster` 列入托管读。
+- **P2-6.2（不做）。** 非共享存储下链 scope 委派给最后 owner（最后 lease epoch + 节点 id）、`OWNER_CHANGED` 关闭、`node_gone_after` 之后 `chain.*` 不完整、健康 UNKNOWN(node gone)。§24.3：FAILED 释放后任务行和 lease 行的 owner 都被清掉；代写还会改掉 `task_health.fence_node`。最后 owner 没有一行可靠的记录，不能在本步顺手做。共享存储下由持有者直接读目录也不在本步：没有「存储是共享的」这一事实，对着空的本地目录读会把链 finding 误关。
+- **P2-6.3（不做）。** §9：`health.evaluator=on` 时，一条没有 version 的心跳加入，本节点评估退回 `shadow`。`worker_heartbeats.version` 从迁移 000001 起就是 `NOT NULL`，`effectiveBinaryVersion` 总会写入 build info 或 `"devel"`。没有任何代码读心跳来改评估模式。v0.5.67 不自动退回。什么叫「没有 version」（空串还是旧版本号）以及全局模式来回切，单独一步。
+
+### 28.3 决定
+
+**D1 切分。** 本 PR 只实现 P2-6.1。P2-7 仍等 P2-6.2 和 P2-6.3（§13 依赖图）。
+
+**D2 finding 放哪。** task = `_cluster`，subject = 任务 id，WARNING，Managed，scope 只有 `task.state`，无 Confirm。写者只有 `_health` 持有者。栅栏是 `Fence{Mode: never, Node: 持有者, Instance: 持有者实例, TaskEpoch: 0}`，不是 Proxy，不是 Delegated。`_cluster` 没有 `task_leases` 行。`CheckFence` 的 `never` 不比较 `stored.Node`，后一任持有者可以覆盖。`_health` 的 epoch 不写入。
+
+**D3 谁算过期。** 持有者每轮列出全部任务：本进程 `ListTasks` 与 store `ListTasks` 的并集（含有主任务；control-plane 没有认领循环，任务只在 store 里）。跳过 `_cluster` 和 `_health`。`evaluated_at` 有值时，年龄 = 库时钟 − `evaluated_at`。没有健康行时，年龄从本持有者第一次见到该任务（`knownSince`，进程内）起算，第一次见到不开。年龄 ≥ `stale_after` 才开。年龄 < `stale_after`，或任务已不在名单里，则 CLOSE。`ListHealth`、任务名单或库时钟失败：本轮 `task.state` 不完整，在 `write` 之前返回，不开也不关。`evaluated_at` 在库时钟之后（负年龄）不算过期。
+
+**D4 配置。** `health.stale_after_sec`，0 = 5×sweep（默认 sweep 60s → 300s）。负数在启动时拒绝。正数按原值使用，不再乘 sweep。不把默认写成 300，这样它跟着 sweep 走。
+
+**D5 负载。** 120 行 `evaluated_at = now−4×sweep` 时零条 `HEALTH_STALE`；其中一行 `now−5×sweep` 时恰好一条。没有健康行的任务第一次见到不开；过了 `stale_after` 仍没有行才开一条。detail 稳定，不写会变的「已过期多久」，否则每一轮都是 UPDATE。没有行：`task <id> has no task_health row; expected an evaluation since <RFC3339> (health.stale_after <duration>)`。有行：`task <id> has not been evaluated within health.stale_after (<duration>); last health write <RFC3339>`。
+
+**D6 不碰其它 `_cluster` 结论。** 集群的这一轮只设 `Produced = {task.state}` 和 `Complete[task.state]`。不调用 `signalFacts`、`fillStoreFacts`、`settleMetaReach`、`settleHealthStore`。`FenceNeverLeased` 本来会走进 `proxy`（`unownedFacts`），本轮必须排除，否则会改掉 `META_UNREACHABLE` / `HEALTH_STORE_UNAVAILABLE` 的集群内存路径。standalone 的 `_cluster` 路径（`clusterHasWork`、信号、这两条 CRITICAL）不变。信号 scope 不完整，已开的 `META_UNREACHABLE` 不会被本轮关掉。`deriveRaw` 只在该 kind 的第一个 scope 完整时派生。
+
+**D7 谁跑这一轮。** 本步 standalone 不开 `HEALTH_STALE`（进程没了没人写这条 finding）。只有集群，且只有持有者。`responsible` 在 `cfg.Cluster && healthHeld` 时加入 `_cluster`。`markResponsible` 先 `refreshHealthLease` 再 `responsible`，拿到 lease 的同一轮就包含 `_cluster`。
+
+**D8 对外。** `/api/health` 只因 CRITICAL 降级，本 kind 是 WARNING，探针保持 ok。`_cluster` 的 `task_health` 在这条开着时是 DEGRADED，没有其它 finding 时是 HEALTHY。`OpenFindings` 在集群也列入 `_cluster`，这样 `/api/findings` 和已有的 `binlog_server_finding_open` 能看见它（meta 的 `ListOpenFindings` 本来就跨任务；单独的健康存储要靠这个 id）。集群里该 id 的 `ListOpenFindingsForTask` 返回 `ErrSchemaAbsent` 时忽略，不另加一条 “unreadable”（`HEALTH_STORE_UNAVAILABLE` 已经覆盖缺表）。standalone 对这个错误的行为不变。不加新的指标名。
+
+**D9 `shadow`。** 照旧计算并打日志，不写。`_cluster` 的写入次数为 0。
+
+**D10 不 latch。** `never` 的 `ErrFenced` 已有代码不写入 `e.fenced`。持有者换人后下一轮还能写。
+
+**D11 单写者。** `HEALTH_STALE` 只由评估器派生，没有 `tasks.Finding` 常量，没有 `Report`。`managedWithoutConstant` 加上它。`isSignalKind` 不含它。
+
+**D12 不改 `HealthSummary`。** 不把 WARNING 算进 `/api/health`，否则每一种 WARNING 都会变。
+
+**D13 自己的行。** `_cluster` 这一轮会更新自己的 `evaluated_at`。它不是 `HEALTH_STALE` 的 subject。
+
+**D14 换持有者。** `knownSince` 只在本进程、且只在没有健康行时使用。已有旧 `evaluated_at` 的任务，新持有者第一轮就开。新的一行第一轮就关。丢掉 `_health` 就停止评估；finding 留到新持有者调和。
+
+**D15 时钟。** MySQL 把 `evaluated_at` 写成 `UTC_TIMESTAMP(6)`，忽略 Go 的时间（`health_store.go` 的 UPDATE）。年龄对照 `StoreNow`：`SELECT UTC_TIMESTAMP(6)`。`StoreNow` 失败则本轮不完整，不开也不关。没有这个接口的存储（本步的单测、文件存储）用 `cfg.Now()`。文件存储不实现它：standalone 不跑这一轮。节点墙钟与库时钟差 ±5 分钟不参与比较。
+
+**D16 失败矩阵见 §28.5。**
+
+### 28.4 类型与签名
+
+- `health.Facts`：`StaleAfter time.Duration`；`HealthEvaluatedAt map[string]time.Time`（零值 = 本轮在名单里但没有可用的 `evaluated_at`；缺 key = 本轮不判断）；`HealthKnownSince map[string]time.Time`。
+- `healthStaleDerive`。`DefaultRegistry` 里 `HEALTH_STALE` 改为带 `Derive` 的 spec：WARNING，scope `task.state`，Version 1，无 Confirm，清除文本 `the task is evaluated again within health.stale_after`。`p261Managed` 把它标成 Managed，`ManagedKinds` 一并带上。
+- `EvaluatorConfig.StaleAfter`。`staleAfter()`：`> 0` 用配置，否则 `5 * Sweep`。
+- `Evaluator.healthKnown`。`staleFacts`：在 `sweepMetaTimeout`（2s）内取任务并集、`ListHealth`、可选 `StoreNow`，然后填上面三个字段、`Complete[task.state]`、`Produced = {task.state}`。任一步失败就返回，评估在 `write` 之前停下。
+- `authority`：集群且持有 `_health` 时，`_cluster` 用 `Fence{never, TaskEpoch: 0, Node, Instance}`。`proxy` 判定排除这一轮。
+- `healthstore.StoreClock`：`StoreNow(ctx) (time.Time, error)`。`meta.MySQLTaskStore` 执行 `SELECT UTC_TIMESTAMP(6)`。
+- `HealthConfig.StaleAfterSec`，viper 默认 0，`health.stale_after_sec` / `health_stale_after_sec`，校验 `>= 0`。`startHealthEvaluator` 把秒数赋给 `EvaluatorConfig.StaleAfter`。
+- `OpenFindings`：集群也列入 `_cluster`（已在名单里则不重复）。集群且该 id 返回 `ErrSchemaAbsent` 时跳过，不记 unreadable。
+
+Swagger 的 `kind` 不是枚举。多一种 kind 字符串，不重生成。
+
+### 28.5 失败路径矩阵
+
+| 情况 | 谁写 | finding | `_cluster` 的 task_health | `/api/health` |
+|---|---|---|---|---|
+| 持有者，某任务 `evaluated_at` 早于 5×sweep | 只有持有者，栅栏 `never`、epoch 0 | WARNING `HEALTH_STALE`，subject = 该任务 | DEGRADED | ok |
+| 另外两个节点 | 不写 | 不变 | 不变 | ok |
+| 120 个任务都在 4×sweep 以内 | 持有者写 `_cluster` 健康行，零条 OPEN | 无 | HEALTHY | ok |
+| 没有健康行，持有者第一次见到 | 不 OPEN | 无 | HEALTHY | ok |
+| 仍没有行，且 `knownSince` 已过 `stale_after` | 持有者 | 一条，detail 含第一次见到的时刻 | DEGRADED | ok |
+| 任务从名单消失 | 持有者 | CLOSE | 按剩余 finding | ok |
+| `ListHealth` / 任务名单 / `StoreNow` 失败 | 不写 | 保持原样 | 保持原样 | 不因本 kind 变化 |
+| `shadow` | 不写 | 不改行 | 不改行 | ok |
+| `_cluster` 上已有 `META_UNREACHABLE` | 持有者只动 `task.state` | 该 CRITICAL 仍开，并可另开 `HEALTH_STALE` | 因 CRITICAL 为 UNHEALTHY | degraded（因为那条 CRITICAL，不是因为 `HEALTH_STALE`） |
+| standalone | 不跑本轮 | 无 `HEALTH_STALE` | 原 `_cluster` 路径 | 原路径 |
+| 持有者换成另一节点 | 新持有者用 `never` 覆盖（不比节点，不比 `_health` epoch） | 按新一轮事实 | 随事实 | ok |
+
+### 28.6 测试（先红）
+
+先写、在本步实现之前失败：
+
+- `health`：`HEALTH_STALE` 在 Managed 表里，WARNING，无 Confirm。
+- `tasks`，三节点进程内（同一 `MemoryLease`，不进 workflow 的三节点 e2e；§24.12 的 workflow 改动留给人）：只有 `_health` 持有者打开上述 finding，另外两节点不写；栅栏是 `never`、`TaskEpoch` 0、非 Proxy、非 Delegated，且不等于 `_health` epoch。120 行里只有越过阈值的那一行打开。没有健康行时第一轮不开、过了 `stale_after` 才开。刷新 `evaluated_at` 后 CLOSE。任务从内存和 store 都消失后 CLOSE。`ListHealth` 失败时返回错误且不关已开的、也不新开。control-plane 节点（任务只在 store）能开。`_cluster` 上已开的 `META_UNREACHABLE` 本轮之后仍开。`shadow` 对 `_cluster` 的写入为 0。`/api/health` 在只有这条 WARNING 时为 ok，`/api/findings` 能列出。
+
+实现提交再补上（依赖新字段，红提交里编译不过）：
+
+- `healthStaleDerive`：4×sweep 不开，恰好 5×sweep 开，未来的 `evaluated_at` 不开，缺 key 的已开 finding 关闭，`_cluster` / `_health` 不作 subject，同一 `evaluated_at` 下两轮 detail 相同。
+- 配置：`health.stale_after_sec: -1` 拒绝启动；缺省为 0。
+- `StoreNow` 的 SQL 是 `UTC_TIMESTAMP(6)`。
+
+### 28.7 本步不做
+
+- P2-6.2：链 scope 委派、`OWNER_CHANGED`、`NODE_GONE`、`node_gone_after` → UNKNOWN(node gone)、共享存储下持有者直接读链目录。
+- P2-6.3：无 version 心跳加入时自动退回 `shadow`。
+- 把集群的 `META_UNREACHABLE` / `HEALTH_STORE_UNAVAILABLE` 改成 OPEN/CLOSE 转移（§27.7）。
+- 新的 Prometheus 指标名、schema 迁移、swagger 重生成。
+- `HealthSummary` 把 WARNING 算进去。
+- standalone 的 `HEALTH_STALE`。
+- 评估器 `on` 且 schema < 9 时拒绝启动。
+- 真机 SIGSTOP / kill -9。已交付的栅栏（P2-6a/b/c）和 P2-6.2 的盒子验收不在本步重跑。CI 的三节点 e2e 是 `workflow_dispatch`，本步用进程内三调度器代替。
