@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -333,7 +333,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		),
 		UploadRegion:       getString(v, decryptor, "upload.region", "upload_region"),
 		UploadPrefix:       getString(v, decryptor, "upload.prefix", "upload_prefix"),
-		UploadUseSSL:       getBool(v, "upload.use_ssl", "upload_use_ssl"),
+		UploadUseSSL:       getBool(&loadErr, v, "upload.use_ssl", "upload_use_ssl"),
 		UploadGraceSec:     getInt(&loadErr, v, "upload.grace_sec", "upload_grace_sec"),
 		UploadGraceTaskSec: healthTaskOverrides(&loadErr, "upload.grace_task_sec", v.GetStringMap("upload.grace_task_sec")),
 		Log: LogConfig{
@@ -343,24 +343,24 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			MaxSizeMB:      getInt(&loadErr, v, "log.max_size_mb", "log_max_size_mb"),
 			MaxBackups:     getInt(&loadErr, v, "log.max_backups", "log_max_backups"),
 			MaxAgeDays:     getInt(&loadErr, v, "log.max_age_days", "log_max_age_days"),
-			Compress:       getBool(v, "log.compress", "log_compress"),
+			Compress:       getBool(&loadErr, v, "log.compress", "log_compress"),
 			RotateInterval: getString(v, decryptor, "log.rotate_interval", "log_rotate_interval"),
 		},
 		API: APIConfig{
 			Auth: APIAuthConfig{
-				Enabled:      getBool(v, "api.auth.enabled", "api_auth_enabled"),
+				Enabled:      getBool(&loadErr, v, "api.auth.enabled", "api_auth_enabled"),
 				Mode:         strings.ToLower(getString(v, decryptor, "api.auth.mode", "api_auth_mode")),
 				BearerToken:  getString(v, decryptor, "api.auth.bearer_token", "api_auth_bearer_token"),
 				APIKey:       getString(v, decryptor, "api.auth.api_key", "api_auth_api_key"),
 				APIKeyHeader: getString(v, decryptor, "api.auth.api_key_header", "api_auth_api_key_header"),
-				ProtectAPI:   getBool(v, "api.auth.protect_api", "api_auth_protect_api"),
-				ProtectMetrics: getBool(v,
+				ProtectAPI:   getBool(&loadErr, v, "api.auth.protect_api", "api_auth_protect_api"),
+				ProtectMetrics: getBool(&loadErr, v,
 					"api.auth.protect_metrics",
 					"api_auth_protect_metrics",
 				),
 			},
 			RateLimit: RateLimitConfig{
-				Enabled:           getBool(v, "api.rate_limit.enabled", "api_rate_limit_enabled"),
+				Enabled:           getBool(&loadErr, v, "api.rate_limit.enabled", "api_rate_limit_enabled"),
 				RequestsPerSecond: getFloat64(&loadErr, v, "api.rate_limit.requests_per_second", "api_rate_limit_requests_per_second"),
 				Burst:             getInt(&loadErr, v, "api.rate_limit.burst", "api_rate_limit_burst"),
 			},
@@ -458,7 +458,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			TaskKeyPreviousFile: strings.TrimSpace(v.GetString("standalone.task_key_previous_file")),
 		},
 		Tracing: TracingConfig{
-			Enabled:     getBool(v, "tracing.enabled", "tracing_enabled"),
+			Enabled:     getBool(&loadErr, v, "tracing.enabled", "tracing_enabled"),
 			Exporter:    strings.ToLower(getString(v, decryptor, "tracing.exporter", "tracing_exporter")),
 			Endpoint:    getString(v, decryptor, "tracing.endpoint", "tracing_endpoint"),
 			SampleRatio: getFloat64(&loadErr, v, "tracing.sample_ratio", "tracing_sample_ratio"),
@@ -509,14 +509,42 @@ func getString(v *viper.Viper, decryptor *Decryptor, keys ...string) string {
 	return ""
 }
 
-// getBool 返回首个已设置的布尔配置值。
-func getBool(v *viper.Viper, keys ...string) bool {
+// getBool 返回首个已设置的布尔配置值。只接受 true/false，其他字面量记入 errp。
+func getBool(errp *error, v *viper.Viper, keys ...string) bool {
 	for _, key := range keys {
-		if v.IsSet(key) {
-			return v.GetBool(key)
+		if !v.IsSet(key) {
+			continue
 		}
+		b, err := strictBool(keys[0], v.Get(key))
+		if err != nil {
+			noteLoadErr(errp, err)
+			return false
+		}
+		return b
 	}
 	return false
+}
+
+func strictBool(key string, raw any) (bool, error) {
+	switch n := raw.(type) {
+	case bool:
+		return n, nil
+	case string:
+		switch strings.ToLower(strings.TrimSpace(n)) {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		default:
+			return false, invalidBoolean(key, strings.TrimSpace(n))
+		}
+	default:
+		return false, invalidBoolean(key, strings.TrimSpace(fmt.Sprint(raw)))
+	}
+}
+
+func invalidBoolean(key, text string) error {
+	return fmt.Errorf("%s: invalid boolean %q", key, text)
 }
 
 // applyEnabledAuthProtectDefaults treats unset protect flags as true when auth is enabled.

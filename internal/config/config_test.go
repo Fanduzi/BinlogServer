@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional encryption key
-// output: config loading regression coverage including unresolved protected-auth secret rejection, an unset meta_dsn ${ENV} naming the variable, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token
+// output: config loading regression coverage including unresolved protected-auth secret rejection, an unset meta_dsn ${ENV} naming the variable, booleans other than true or false, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -717,6 +717,60 @@ func TestLoadConfig_UnsetMetaDSNPlaceholder(t *testing.T) {
 	}
 	if cfg.MetaDSN != "" {
 		t.Fatalf("empty env meta_dsn = %q", cfg.MetaDSN)
+	}
+}
+
+func TestLoadConfig_RejectsGarbageBool(t *testing.T) {
+	setRequiredAuthEnv(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "")
+	write("api:\n  auth:\n    enabled: yes\n")
+	_, err := LoadConfig(path)
+	want := `api.auth.enabled: invalid boolean "yes"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("file yes: got %v, want %s", err, want)
+	}
+
+	write("upload:\n  use_ssl: 1\n")
+	_, err = LoadConfig(path)
+	want = `upload.use_ssl: invalid boolean "1"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("file 1: got %v, want %s", err, want)
+	}
+
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "yes")
+	write("api:\n  auth:\n    enabled: true\n")
+	_, err = LoadConfig(path)
+	want = `api.auth.enabled: invalid boolean "yes"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("env yes: got %v, want %s", err, want)
+	}
+
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "TRUE")
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.API.Auth.Enabled {
+		t.Fatal("TRUE was not accepted as true")
+	}
+
+	t.Setenv("BINLOG_SERVER_API_AUTH_ENABLED", "false")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_API", "false")
+	t.Setenv("BINLOG_SERVER_API_AUTH_PROTECT_METRICS", "false")
+	cfg, err = LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Auth.Enabled {
+		t.Fatal("false was not accepted as false")
 	}
 }
 

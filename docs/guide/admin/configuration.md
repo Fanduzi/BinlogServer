@@ -52,6 +52,10 @@ config warning: key "meta_dsn" appears to contain plaintext sensitive value; pre
 
 整型和浮点配置写成非数字时，进程拒绝启动，不再把值当成 0。例如 `health.sweep_interval_sec: abc`、`1.5` 或 `""` 的错误分别是 `health.sweep_interval_sec: invalid integer "abc"`、`invalid integer "1.5"` 和 `invalid integer ""`。浮点字段的错误是 `tracing.sample_ratio: invalid number "abc"`。同一个键经环境变量写入非数字时同样拒绝。
 
+### 1.3 布尔只接受 true 或 false
+
+布尔配置只接受 `true` 和 `false`（大小写不限，环境变量同理）。`yes`、`no`、`on`、`off`、`1`、`0` 都会在启动时拒绝，错误形如 `api.auth.enabled: invalid boolean "yes"`。这样 `yes` 不会被当成 `false` 而把鉴权关掉。环境变量覆盖同样校验，错误里的键名仍是 YAML 键。
+
 ## 2. 完整配置示例
 
 ```yaml
