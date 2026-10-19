@@ -1750,6 +1750,8 @@ meta 还断着的时候，STOPPED 写往往失败，进 `unpublished`。`writeSt
 
 **中断长于宽限、短于 T（#450，约 35–60 秒）。** 宽限到了，本进程 `Lose` 这个 epoch（本地栅栏拒绝后续写）、取消 dump、尝试释放 lease。期望保持 RUN，行保持最后一次成功写下的 `RUNNING` 或 `LEASE_DEGRADED`（不写 STOPPED）。释放成功则 owner 被清空、`lease_expire_at = NOW`，下一个 Acquire 把 epoch 加一（释放后的 owner 是空，和任何 worker 都不同）。释放时 meta 仍不可达则记下重试，lease 自己也会在 T 到期。meta 恢复后认领循环 Acquire 新 epoch，从已存 checkpoint 续跑。旧 epoch 的写被栅栏拒绝。同一时刻最多一条 dump。
 
+宽限已经 `Lose` 之后，还堵在 meta 上的 append 会在恢复时被本地栅栏拒绝（`WRITE_FENCED`）。这条不是新主人来了。它必须留在可认领状态上，不能写成 `STOPPED / desired RUN / owner 空`（#454，§29.10）。
+
 **中断长于 T。** 宽限仍先于 T 取消 dump。lease 在 T 到期后即可被认领，不必等释放调用成功。期望仍是 RUN，所以认领发生。不会留下 desired STOP。
 
 **脑裂：一个节点到得了 meta，另一个到不了。** 到不了的是 owner。它的续租报错，宽限后取消自己的 dump 并 `Lose`。释放调用到不了 meta，lease 行仍是它的、未过期，到得了 meta 的节点不认领，不会开第二条 dump。T 一到，对端 Acquire epoch+1。owner 醒来后的续租看到新 owner，走已有的 `yieldLostLeaseLocked`（只改内存，不写行，#346）。它晚到的行写带着旧 epoch，栅栏拒绝。
@@ -1768,9 +1770,9 @@ meta 还断着的时候，STOPPED 写往往失败，进 `unpublished`。`writeSt
 
 **D1 切分。** 恢复和检测一起做。不新增配置，不迁移，不改 `lease_grace_sec` 的含义（到点仍必须停掉本 epoch 的 dump，避免和下一任双写）。
 
-**D2 宽限、无人认领的 lease 丢失、续租 panic 都让出而不是 Stop。** 新的 `yieldForResumeLocked`：`LeaseClock.Lose`，取消本进程 dump，期望保持 RUN，观察状态留在 `LEASE_DEGRADED`（已经是则保持），不写 STOPPED，不改 desired。记 `TASK_LEASE_GRACE_EXCEEDED` 或原来的事件。run 退出时释放这个 epoch 的 lease，不调用 `markStoppedLocked`。释放报错（meta 仍不可达）则记在本进程，下一次 `ClaimRunnableTasks` 先重试释放再认领。已是 desired STOP、STOPPING、STOPPED 的，仍走 `failSafeStopLocked`。FAILED 不动。
+**D2 宽限、无人认领的 lease 丢失、续租 panic 都让出而不是 Stop。** 新的 `yieldForResumeLocked`：`LeaseClock.Lose`，取消本进程 dump，期望保持 RUN，观察状态留在 `LEASE_DEGRADED`（已经是则保持），不写 STOPPED，不改 desired。记 `TASK_LEASE_GRACE_EXCEEDED` 或原来的事件。run 退出时释放这个 epoch 的 lease，不调用 `markStoppedLocked`。释放报错（meta 仍不可达）则记在本进程，下一次 `ClaimRunnableTasks` 先重试释放再认领。已是 desired STOP、STOPPING、STOPPED 的，仍走 `failSafeStopLocked`。FAILED 不动。没有新主人的 `WRITE_FENCED` 走同一条让出（§29.10 D9），不把内存收成 `STOPPED`。
 
-**D3 认领。** 释放之后行仍是 `RUNNING` 或 `LEASE_DEGRADED`、desired RUN。`ClaimExpiredTasks` 和本节点的空闲认领都会 Acquire。释放把 owner 清空，所以即使是同一个 worker 再次 Acquire，epoch 也加一（`task_leases` 的规则：owner 不同才加 epoch；空 owner 和谁都不同）。新 run 走现有的 checkpoint 续跑，不另起一份空文件。源端仍留着 checkpoint 之后的事件，续跑不产生 GTID 缺口，也不和旧 dump 重叠：旧 dump 在释放之前已经取消，旧 epoch 已被 `Lose`，`Confirm` 不能把它复活。
+**D3 认领。** 释放之后行仍是 `RUNNING` 或 `LEASE_DEGRADED`、desired RUN。`ClaimExpiredTasks` 和本节点的空闲认领都会 Acquire。释放把 owner 清空，所以即使是同一个 worker 再次 Acquire，epoch 也加一（`task_leases` 的规则：owner 不同才加 epoch；空 owner 和谁都不同）。新 run 走现有的 checkpoint 续跑，不另起一份空文件。源端仍留着 checkpoint 之后的事件，续跑不产生 GTID 缺口，也不和旧 dump 重叠：旧 dump 在释放之前已经取消，旧 epoch 已被 `Lose`，`Confirm` 不能把它复活。已经落成 `STOPPED / desired RUN / owner 空` 的行同样认领（§29.10 D10）。运维 Stop 的 desired 是 STOP，不认领。
 
 **D4 丢失的 epoch 不再被本进程拉起。** `LeaseClock.Lost`。`startTask` 在打开 dump 之前如果这个 epoch 已丢失，就再释放一次并返回，不 `resumeHeld`。下一次认领拿到的是新 epoch，`Confirm` 只刷新新 epoch。这避免「Lose 之后同一 epoch 的 Confirm 被拒绝，dump 开了却永远写不进」（P2-6b：丢失的 epoch 不能被 Confirm 复活）。
 
@@ -1808,9 +1810,24 @@ meta 还断着的时候，STOPPED 写往往失败，进 `unpublished`。`writeSt
 
 实现再改已有的续租单测：它们断言宽限或 `!ok` 会把行收到 STOPPED 并清空 owner。那是 #450 的旧行为。改为期望保持 RUN、观察状态留在 `LEASE_DEGRADED`、dump 已停、lease 已释放。直接调用 `failSafeStopLocked` 的用例仍覆盖「已经在收尾的 Stop」和栅栏拒绝。
 
+#454 再加两条，先红：宽限取消时在途 append 返回 `WRITE_FENCED`，并在 run 退出后把内存行再发布一次。今天失败：行是 `STOPPED / desired RUN / owner 空`，认领拉不起来。修好后内存留在 `LEASE_DEGRADED` 或 `RETRY_BACKOFF`，行不是这份 STOPPED，认领后 epoch 比让出前大，恰好一条 dump，两条不重叠。另一条把已经落成 `STOPPED / desired RUN / owner 空`（spec 已不是 0）的行交给认领循环，epoch 加一续跑；运维 Stop 仍不拉起。
+
 ### 29.9 本步不做
 
-- #451、#452（§29.6 D8）。
+- #451、#452（§29.6 D8），以及那两条之外的健康行抖动。
 - 新的 finding kind、新配置、新迁移、swagger。
-- 改 `ClaimExpiredTasks` 的 SQL（释放后的行仍是 `RUNNING` / `LEASE_DEGRADED`，现有查询认得出；`lease_expire_at <= NOW(6)` 不要求 owner 非空）。
-- 真机两节点黑洞。进程内三调度器是本 PR 的回归；QA 探针写在 PR 说明里。
+- 真机两节点黑洞。进程内三调度器是本 PR 的回归；QA 探针写在 PR 说明里。45 秒黑洞（宽限 < 中断 < TTL）要在 2 节点和 3 节点上多跑几次，覆盖在途 append 被栅栏拒绝（#454）。
+
+### 29.10 #454：宽限让出时在途 append 被栅栏拒绝，行停在 STOPPED / desired RUN / 无 owner（2026-10-19）
+
+PR #453 把「期望被写成 STOP」堵住了。2 节点、`lease_ttl` 60、宽限 30、续租 5，把到 meta 的通路黑洞 45 秒（宽限 < 中断 < TTL），4 次里有 1 次备份仍停住。3 节点和另外 3 次 2 节点都以 epoch 2 续跑。检测是好的：恢复后约 7 秒 `TASK_NO_PROGRESS` 为 CRITICAL，`/api/health` 为 503。要等人工 Stop/Start 才再跑。
+
+**现象。** 宽限到点记 `TASK_LEASE_GRACE_EXCEEDED`。meta 一恢复，堵在事务里的 append 被本地栅栏拒绝（`fence: refused append`，`WRITE_FENCED`），runner 记 `TASK_LEASE_YIELDED`。200 秒后 `backup_tasks` 仍是 `STOPPED / desired RUN / owner 空`，`task_leases` 是空 owner、原 epoch。两个节点都不认领。
+
+**根因。** 这条 `WRITE_FENCED` 没有新主人。宽限已经 `Lose` 了本 epoch，在途 append 的下一次写边界被本地栅栏拒绝，走的是「别人持有 lease」那条 handoff：内存写成 `STOPPED`、owner 和 epoch 清空，desired 不动。run 退出看到内存已经是 STOPPED，就不再 `markStoppedLocked`（那条会把 desired 写成 STOP），只释放 lease。宽限期间失败的落库还在飞，`dropUnpublished` 先清掉再发布标记，写超时之后 `notePersistFailure` 又把它设上。下一次 sink 把**当前内存**再发布出去。owner 已经是空，`persistTaskFencedLocked` 退回不带栅栏的 upsert，行就成了 `STOPPED / desired RUN / owner 空`。认领都匹配不到：`ListTasksWithExpiredLease` 的状态只有 RUNNING / LEASE_DEGRADED / RETRY_BACKOFF / STOPPING；`ListTaskIDsWithExpiredOwnerLease` 要求 owner 非空且排除 STOPPED；`isClaimableActiveState` 不含 STOPPED。运维 Stop 也是 STOPPED，但是 desired STOP，和这行不是同一种。
+
+**D9 没有新主人就不写 STOPPED。** `IsLeaseHandoff` 先看任务行和 `task_leases`。别的 owner 或更新的 epoch 已经在上面（#346、#420、#425）仍只改内存、丢掉 unpublished，不盖住新主人。读失败不算被抢走。没有新主人（lease 还是本 epoch，或已经释放成空 owner）走 `yieldFencedEpochLocked`：期望保持 RUN，观察状态留在 `LEASE_DEGRADED`（已经是 `RETRY_BACKOFF` 则保持），不改 owner，不调用 `markStoppedLocked`。run 退出释放该 epoch。本进程已经让出、内存却是 `STOPPED / desired RUN / owner 空` 时，`republishUnpublished` 丢掉这次再发布，避免无栅栏覆盖。store 里留下的是上一次成功的 `RUNNING` 或 `LEASE_DEGRADED`。
+
+**D10 已经写成该形状的行可以认领。** `desired_run = RUN` 且 `owner_worker_id` 为空且 `state = STOPPED`、lease 已过期：`ListTasksWithExpiredLease`、`ClaimExpiredTasks` 和本进程空闲认领都 Acquire。运维 Stop 的 desired 是 STOP，不在这条里。`spec_revision` 和 `applied_spec_revision` 都是 0 的旧行仍按状态推导期望，STOPPED 推导为 STOP，认领循环看到的是收尾而不是拉起。新 run 仍是 D3 的 checkpoint 续跑：epoch 加一，不另起一份空文件，不和旧 dump 重叠。
+
+不变量不变（§29.5）：期望 RUN 要么恰好一个节点在跑并由该 lease epoch 栅栏住，要么一个 sweep 内有 CRITICAL finding。恢复后 epoch 比让出前大 1。
