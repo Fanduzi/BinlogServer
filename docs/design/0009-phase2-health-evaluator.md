@@ -1832,6 +1832,14 @@ PR #453 把「期望被写成 STOP」堵住了。2 节点、`lease_ttl` 60、宽
 
 不变量不变（§29.5）：期望 RUN 要么恰好一个节点在跑并由该 lease epoch 栅栏住，要么一个 sweep 内有 CRITICAL finding。恢复后 epoch 比让出前大 1。
 
+### 29.11 #457：旧 epoch 的 `.open.eN` 被接管删掉之后，`stat` ENOENT 把任务写成 FAILED（2026-10-19）
+
+共享 `data_dir` 的三节点。owner 到不了 meta 的时间 ≥ lease TTL，对端以 epoch+1 接管，并按 #415 删掉旧的 `.open.eN`（复制完整事件到 `.takeover-*`，改名到新 epoch，再 `Remove` 旧文件，避免冻住的写者用旧 fd 改到续写或已封存的分段）。旧 owner 的 meta 恢复后，`flushCheckpoint` 在 checkpoint 写已经返回之后 `stat` 自己的 `.open.eN`，得到 `ENOENT`。这条不是 `WRITE_FENCED`，调度器把它当成未分类的 runner 错误，`markFailedLocked` 用不带栅栏的 upsert 写成 `FAILED / desired STOP`，并记 `TASK_FAILED` CRITICAL。新 owner 看到行被别的 epoch 写成 FAILED，取消自己还健康的 dump（`cancelled local dump: row FAILED by another epoch`）。备份停住，直到运维介入。
+
+**这条 ENOENT 是移交，不是失败。** 本 run 的 epoch 对应的 open 文件不在了（`stat` / `open` / `rename` 的 `ENOENT`，basename 经 `ClassifySegment` 是 `.open.e{本 epoch}`），并且下面任一成立：本进程 `LeaseClock.Lost` 了这个 epoch，或 `task_leases` 的 `Verify` 明确返回不再持有，或任务行 / lease 上已经是别的 owner 或更大的 epoch。处理与已有的 lease handoff 相同：不调用 `writeFailed`，不把行写成 FAILED，期望保持 RUN。已经有新 epoch 在跑时，只改本进程内存，共享行仍是那个 RUNNING owner。没有新主人时留在可认领状态（§29.10），不写 desired STOP。`Verify` 或读行失败不算被抢走。
+
+**下面仍要失败。** 本 epoch 还持有租约（未 `Lost`，`Verify` 为真，行上没有更新的 owner / epoch）时，缺的 open 文件是真的缺，包括未上传的尾巴。`SEGMENT_NOT_ON_WORKER`（`ResolveTakeover.Missing`、目录行路径不可读、路径在 `data_dir` 之外）不是这条 ENOENT，仍是永久失败。#415 的复制再删除不改。
+
 ## 30. P2-6.2：非共享存储的链委派（2026-10-19）
 
 §8.2 是草图。本节是对照当前代码之后的决定。§29 是 #450 / #454 的续跑，不是这一步。P2-6.3（混版本退回 `shadow`）不在这里。

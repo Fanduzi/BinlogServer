@@ -1,0 +1,125 @@
+# Binlog Server v0.5.76
+
+Release date: 2026-10-20
+
+v0.5.76 is ADR 0009 §28 and §29 (#449, #453, #458). In a cluster, a meta outage or a lease takeover no longer stops a backup silently: a task whose lease grace runs out is released with desired state still RUN and resumes on the next epoch (#450, #454), and an old owner that finds its `.open.eN` deleted after a takeover yields instead of writing FAILED over the new owner (#457). The `_health` holder now opens WARNING `HEALTH_STALE` on `_cluster` for a task whose health row stops being refreshed (#449). No new migration (schema up to 10, `minRequiredSchemaVersion` still 6), the upgrade floor stays v0.5.51, and there is one new optional config key, `health.stale_after_sec`.
+
+## Upgrade Notes
+
+- **Lease grace no longer writes desired STOP.** On v0.5.75 and earlier, a meta outage longer than `lease_grace_sec` (35 s or more with `lease_ttl_sec: 60`) could leave a cluster task `STOPPED` with desired `STOP` and no owner, with `/api/health` ok. v0.5.76 does not write that state, but it cannot tell a row an older binary left that way from an operator Stop. After the upgrade, look for tasks that are `STOPPED` with desired `STOP` that nobody stopped on purpose, and Start them. Rows left `STOPPED` with desired `RUN` and no owner (#454) are claimed again by v0.5.76 without operator action.
+- **The fix applies per node.** A v0.5.75 node in the same cluster can still write desired STOP on grace until it is replaced. Finish the rolling upgrade before relying on the new behaviour.
+- **New config key `health.stale_after_sec`** (default `0` = 5 × `health.sweep_interval_sec`; a negative value refuses to start). It only matters with `health.evaluator: on` in a cluster. Existing configs need no change.
+- No new migration. v0.5.75 runs on the same schema, so the binary can be rolled back; a rolled-back node keeps the v0.5.75 grace behaviour above. If you set `health.stale_after_sec`, v0.5.75 ignores it.
+- `HEALTH_STALE` is produced by the health evaluator, which needs `health.evaluator: on` (default `off` in v0.5.x; it becomes the default in v0.6.0). The lease fixes (#450, #454, #457) apply in every mode.
+- From v0.5.75, replace the binary; a rolling restart of a 3-node cluster from the v0.5.75 release passed QA (#449). The v0.5.75 notes still apply when upgrading from v0.5.74 or earlier, the v0.5.74 notes from v0.5.73 or earlier, the v0.5.73 notes from v0.5.72 or earlier, the v0.5.72 notes from v0.5.71 or earlier, and the v0.5.67 notes from v0.5.66 or earlier.
+
+## Fixes
+
+| Issue | PR | Fix |
+|---|---|---|
+| #450 | #453 | Lease grace exhausted, lease lost with no new owner, or a renew-loop panic no longer write desired `STOP` |
+| #454 | #453 | A fenced in-flight append at grace handoff with no successor stays claimable |
+| #457 | #458 | ENOENT on this epoch's `.open.eN` after a takeover is a handoff, not FAILED |
+
+- **#450: a meta outage longer than lease grace stopped tasks silently** (#453, §29). With `lease_ttl_sec: 60`, a meta outage of 35 s or more (blackhole or refused) made every affected task `STOPPED` with desired `STOP` and no owner. Nothing claimed it again after meta returned, `TASK_NO_PROGRESS` did not open because desired was STOP, and `HEALTH_STALE` did not catch it because the STOPPED task's health row was still refreshed. Now grace, an unclaimed lease loss and a renew-loop panic end only the current epoch (`TASK_LEASE_YIELDED`); desired stays RUN and the next Acquire resumes from the existing checkpoint at epoch+1. At most one dump runs at a time: the old epoch is already lost and cannot be confirmed back. If nothing claims the task, CRITICAL `TASK_NO_PROGRESS` opens within one sweep and `/api/health` returns 503. Operator Stop and FAILED stay terminal.
+- **#454: a fenced append at grace handoff left the task stuck** (#453, §29.10). In about 1 of 4 runs with a 45 s outage (longer than grace, shorter than TTL), an append blocked on meta was refused by the local fence (`WRITE_FENCED`) after grace had already released the lease. The row ended `STOPPED` with desired `RUN` and no owner, which no claim query matched, so the backup stayed stopped until an operator Stop/Start. Now a `WRITE_FENCED` with no new owner stays in `LEASE_DEGRADED` or `RETRY_BACKOFF`, a late republish after the yield is dropped, and a `STOPPED` row with desired `RUN` and no owner is claimed like an expired lease.
+- **#457: an old owner wrote FAILED over a healthy new owner** (#458, §29.11). With a shared `data_dir`, after a peer took over at epoch+1 and removed the old `.open.eN` (#415), the old owner got ENOENT when its meta came back, treated it as a permanent runner failure and wrote `FAILED` / desired `STOP` (`TASK_FAILED`). The new owner then cancelled its healthy dump (`row FAILED by another epoch`). Now ENOENT on this run's `.open.e{epoch}` is a handoff when this process has already lost the epoch, the lease no longer verifies, or the row or lease shows another owner or a newer epoch: desired stays RUN. When a newer epoch is already running, only this process's memory changes; with no new owner the task stays claimable (§29.10). If this epoch still holds the lease, a missing open file still fails, and `SEGMENT_NOT_ON_WORKER` is unchanged.
+
+## Added
+
+- **`HEALTH_STALE` on `_cluster`** (#449, §28, WARNING, subject = task id). In a cluster with `health.evaluator: on`, the `_health` holder opens it when a task's `task_health.evaluated_at` is older than `health.stale_after_sec`, or when the holder has seen no health row for the task for that long (the first sighting does not open). Age is measured against the database's `UTC_TIMESTAMP(6)`, not the node clock. It closes when the task is evaluated again or leaves the task list. If listing or the database clock fails, that sweep neither opens nor closes. `/api/health` still degrades only on CRITICAL, so this WARNING does not make it 503; it shows on `/api/findings` and in the existing `binlog_server_finding_open` metric (no new metric name). Standalone does not open it.
+
+## Known issues
+
+- **#451 (P3):** on the first sweep after a meta outage or a process or host pause longer than `stale_after`, `HEALTH_STALE` opens briefly for healthy tasks and closes a few seconds later.
+- **#452 (P3):** in `shadow` mode the `_health` holder logs `OPEN:HEALTH_STALE` for every task on every sweep, so the shadow preview overstates it. Nothing is written.
+- **#455 (P3):** after an old owner paused longer than TTL is resumed, the new owner's Binlog Dump connections can get EOF about 4 s later and reconnect on the same epoch. No gap, no STOPPED.
+- **#456 (P4):** an unowned `TASK_NO_PROGRESS` detail says `no_progress_after 5s` when the actual clock is `min(sweep, no_progress_after)`; the configured 120 s is unchanged.
+- **#446 (P3):** rehasher log flood at schema below 9. **#437 (P3)** and **#438 (P4)** from v0.5.74 are still open.
+- `/api/findings` has no read timeout yet (P2-7).
+
+## Changes since v0.5.75
+
+`git log --oneline --first-parent v0.5.75..2785c49`, plus the merge of this notes PR, which v0.5.76 is tagged on:
+
+| Commit | Change |
+|---|---|
+| `f801ced` | PR #448: install docs point at v0.5.75 |
+| `3d8b342` | PR #449: `HEALTH_STALE` on `_cluster` for the `_health` holder, `health.stale_after_sec` (§28) |
+| `265622f` | PR #453: lease grace does not write desired STOP; a fenced append with no successor stays claimable (#450, #454, §29, §29.10) |
+| `2785c49` | PR #458: ENOENT on this epoch's open segment after a takeover is a handoff (#457, §29.11) |
+
+## QA summary
+
+PR #449 QA PASS (BinlogServerQA), 2026-10-19, `-race`, MariaDB 11.4 meta, moto for S3, sweep 5 s: only the `_health` holder writes `HEALTH_STALE`, across holder kill -9 and SIGSTOP past the lease, one row per task; a stall opened at 25 s (5 × sweep) and 12 s with `stale_after_sec: 12`; healthy and new tasks never opened; `/api/health` stayed ok with only this WARNING; shadow wrote nothing; standalone never opened; a negative value refused to start; rolling upgrade of 3 nodes from the v0.5.75 release clean. This QA found #450.
+
+PR #453 QA PASS (BinlogServerQA), 2026-10-19: 19 runs of 45 s outages (2 and 3 nodes, blackhole and refused) with continuous writes, all resumed at epoch 2 with zero rows left `STOPPED` / desired `RUN` / no owner, GTIDs contiguous and replay md5 matching; split brain never had two dumps per task; SIGSTOP past TTL wrote no STOPPED; operator Stop and FAILED stayed terminal; a forced unowned task opened CRITICAL `TASK_NO_PROGRESS` with 503 and cleared after restart; 15 min `-race` idle clean apart from the known #451 flap.
+
+PR #458 QA PASS (BinlogServerQA), 2026-10-19: split brain with owner meta blackholed about 100 s, 5/5 with zero FAILED rows (the ENOENT handoff path hit in one run); SIGSTOP past TTL 3/3 with zero FAILED; 45 s outage stuck 0; a missing open file while this epoch still holds the lease still fails.
+
+Tip QA 2785c49 PASS (BinlogServerQA), 2026-10-19: split brain 4/4 and SIGSTOP 2/2 with zero FAILED (ENOENT handoff hit once); 45 s outage on 2 nodes 2/2 stuck 0; 20 s and 90 s outages resumed with no silent stop; operator Stop and FAILED terminal; unowned CRITICAL with 503 then clear; replay md5 matched in every stress run; `-race` build. CI passed on `2785c49`, including `e2e-meta-failover`.
+
+## Chinese Release Notes
+
+Chinese version:
+
+# Binlog Server v0.5.76 中文发布说明
+
+> 对应版本：`v0.5.76`
+
+发布日期：2026-10-20
+
+v0.5.76 是 ADR 0009 §28 和 §29（#449、#453、#458）。集群里 meta 中断或 lease 被接管不再让备份静默停掉：续租宽限用尽的任务只释放本 epoch，期望仍是 RUN，下一个 epoch 接着跑（#450、#454）；旧 owner 在接管后发现自己的 `.open.eN` 被删掉时让出，不再把 FAILED 写到新 owner 头上（#457）。`_health` 持有者对健康行不再刷新的任务在 `_cluster` 上打开 WARNING `HEALTH_STALE`（#449）。没有新迁移（schema 最高 10，`minRequiredSchemaVersion` 仍为 6），升级地板仍是 v0.5.51，新增一个可选配置项 `health.stale_after_sec`。
+
+## 升级须知
+
+- **续租宽限不再写 desired STOP。** v0.5.75 及更早版本里，meta 中断超过 `lease_grace_sec`（`lease_ttl_sec: 60` 时约 35 秒以上）可能把集群任务留在 `STOPPED`、desired `STOP`、没有 owner，`/api/health` 仍是 ok。v0.5.76 不再写出这种状态，但分不清旧二进制留下的这种行和运维 Stop。升级后请找出 `STOPPED`、desired `STOP` 而又没人主动停过的任务，手动 Start。留在 `STOPPED`、desired `RUN`、没有 owner 的行（#454）会被 v0.5.76 自动认领，不用人工处理。
+- **修复按节点生效。** 同一集群里还没换掉的 v0.5.75 节点在宽限到点时仍可能写 desired STOP。滚动升级做完再依赖新行为。
+- **新配置项 `health.stale_after_sec`**（默认 `0`，即 5 倍 `health.sweep_interval_sec`；负数拒绝启动）。只在集群且 `health.evaluator: on` 时有用，已有配置不用改。
+- 没有新迁移。v0.5.75 在同样的 schema 上照常运行，二进制可以回退；回退的节点仍是上面 v0.5.75 的宽限行为。设置了 `health.stale_after_sec` 时 v0.5.75 会忽略它。
+- `HEALTH_STALE` 由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`，v0.6.0 起默认 `on`）。lease 相关修复（#450、#454、#457）在任何模式下都生效。
+- 从 v0.5.75 升级：换二进制重启；三节点集群从 v0.5.75 发布版滚动升级已在 QA 中通过（#449）。从 v0.5.74 或更早升级仍按 v0.5.75 的升级须知操作，v0.5.73 或更早按 v0.5.74，v0.5.72 或更早按 v0.5.73，v0.5.71 或更早按 v0.5.72，v0.5.66 或更早按 v0.5.67。
+
+## 修复
+
+| Issue | PR | 修复 |
+|---|---|---|
+| #450 | #453 | 宽限用尽、lease 丢失且没有新 owner、续租循环 panic 不再写 desired `STOP` |
+| #454 | #453 | 宽限让出时在途 append 被栅栏拒绝、又没有新主人时，任务保持可认领 |
+| #457 | #458 | 接管后本 epoch 的 `.open.eN` 返回 ENOENT 时走移交，不写 FAILED |
+
+- **#450：meta 中断超过续租宽限时任务被静默停掉**（#453，§29）。`lease_ttl_sec: 60` 时，meta 中断 35 秒以上（黑洞或拒绝连接）会把受影响的任务写成 `STOPPED`、desired `STOP`、没有 owner。meta 恢复后没有人再认领；desired 是 STOP，所以 `TASK_NO_PROGRESS` 不开；STOPPED 任务的健康行照常刷新，所以 `HEALTH_STALE` 也抓不到。现在宽限用尽、无人认领的 lease 丢失、续租循环 panic 都只结束本 epoch（`TASK_LEASE_YIELDED`），desired 仍是 RUN，下一次 Acquire 以 epoch+1 从已有 checkpoint 续跑。同一时刻最多一条 dump：旧 epoch 已经丢掉，不能再被确认回来。没有人认领时，一个 sweep 内打开 CRITICAL `TASK_NO_PROGRESS`，`/api/health` 返回 503。运维 Stop 和 FAILED 仍是终态。
+- **#454：宽限让出时被栅栏拒绝的 append 让任务卡住**（#453，§29.10）。中断 45 秒（长于宽限、短于 TTL）时约 4 次里有 1 次，宽限已经释放 lease 之后，堵在 meta 上的 append 被本地栅栏拒绝（`WRITE_FENCED`），行落成 `STOPPED`、desired `RUN`、没有 owner。认领查询都匹配不到这行，备份一直停着，要等运维 Stop/Start。现在没有新主人的 `WRITE_FENCED` 留在 `LEASE_DEGRADED` 或 `RETRY_BACKOFF`，让出之后迟到的再发布被丢掉，`STOPPED`、desired `RUN`、没有 owner 的行按 lease 过期一样认领。
+- **#457：旧 owner 把 FAILED 写到健康的新 owner 头上**（#458，§29.11）。共享 `data_dir` 时，对端以 epoch+1 接管并删掉旧的 `.open.eN`（#415）之后，旧 owner 的 meta 恢复时得到 ENOENT，当成永久 runner 失败，写下 `FAILED` / desired `STOP`（`TASK_FAILED`），新 owner 随即取消自己健康的 dump（`row FAILED by another epoch`）。现在本 run 的 `.open.e{epoch}` 返回 ENOENT，且本进程已经丢掉这个 epoch、租约 `Verify` 不再持有、或任务行 / lease 上已经是别的 owner 或更大的 epoch 时，走移交：desired 保持 RUN。已经有新 epoch 在跑时只改本进程内存；没有新主人时留在可认领状态（§29.10）。本 epoch 仍持有租约时，缺 open 文件仍然失败；`SEGMENT_NOT_ON_WORKER` 不变。
+
+## 新增
+
+- **`_cluster` 上的 `HEALTH_STALE`**（#449，§28，WARNING，subject 为任务 id）。集群里 `health.evaluator: on` 时，`_health` 持有者在某个任务的 `task_health.evaluated_at` 超过 `health.stale_after_sec`，或持有者一直看不到这个任务的健康行并超过同一阈值时打开（第一次看到不开）。年龄对照数据库的 `UTC_TIMESTAMP(6)`，不对照节点墙钟。任务重新被评估或从名单消失时关闭。名单或库时钟读失败时，这一轮不开也不关。`/api/health` 仍只因 CRITICAL 降级，这条 WARNING 不会让它变 503；`/api/findings` 和已有的 `binlog_server_finding_open` 指标能看到（不加新指标名）。standalone 不开这条。
+
+## 已知问题
+
+- **#451（P3）：** meta 中断、进程或宿主暂停超过 `stale_after` 之后的第一个 sweep，`HEALTH_STALE` 会对正常任务短暂打开，几秒后关闭。
+- **#452（P3）：** `shadow` 模式下 `_health` 持有者每个 sweep 都对所有任务打 `OPEN:HEALTH_STALE` 日志，预演结果偏多。不写任何行。
+- **#455（P3）：** 暂停超过 TTL 的旧 owner 恢复后约 4 秒，新 owner 的 Binlog Dump 连接可能收到 EOF，同一 epoch 重连。没有缺口，不写 STOPPED。
+- **#456（P4）：** 无人持有的 `TASK_NO_PROGRESS` detail 写成 `no_progress_after 5s`，实际时钟是 `min(sweep, no_progress_after)`；配置的 120 秒没变。
+- **#446（P3）：** schema 低于 9 时 rehasher 日志刷屏。v0.5.74 起的 **#437（P3）** 和 **#438（P4）** 仍未关闭。
+- `/api/findings` 还没有读超时（P2-7）。
+
+## 自 v0.5.75 以来的变更
+
+| 提交 | 变更 |
+|---|---|
+| `f801ced` | PR #448：安装文档指向 v0.5.75 |
+| `3d8b342` | PR #449：`_health` 持有者在 `_cluster` 上打开 `HEALTH_STALE`，新增 `health.stale_after_sec`（§28） |
+| `265622f` | PR #453：续租宽限不写 desired STOP；没有新主人的栅栏拒绝保持可认领（#450、#454，§29、§29.10） |
+| `2785c49` | PR #458：接管后本 epoch 的 open 分段 ENOENT 走移交（#457，§29.11） |
+
+## QA 摘要
+
+PR #449 QA PASS（BinlogServerQA），2026-10-19，`-race`、MariaDB 11.4 meta、moto 模拟 S3、sweep 5 秒：只有 `_health` 持有者写 `HEALTH_STALE`，持有者 kill -9 和 SIGSTOP 超过租约时也一样，每个任务一行；停滞 25 秒（5 倍 sweep）打开，`stale_after_sec: 12` 时 12 秒；正常任务和新任务从不打开；只有这条 WARNING 时 `/api/health` 仍是 ok；shadow 不写；standalone 不开；负数拒绝启动；三节点从 v0.5.75 发布版滚动升级干净。#450 就是这一轮 QA 发现的。
+
+PR #453 QA PASS（BinlogServerQA），2026-10-19：19 次 45 秒中断（2 节点和 3 节点、黑洞和拒绝连接）并持续写入，全部以 epoch 2 续跑，没有一行留在 `STOPPED`、desired `RUN`、没有 owner，GTID 连续、回放 md5 一致；脑裂时每个任务从不出现两条 dump；SIGSTOP 超过 TTL 不写 STOPPED；运维 Stop 和 FAILED 保持终态；强制无人持有时打开 CRITICAL `TASK_NO_PROGRESS` 并返回 503，重启后清除；15 分钟 `-race` 空闲干净，只有已知的 #451 短暂开关。
+
+PR #458 QA PASS（BinlogServerQA），2026-10-19：owner 的 meta 黑洞约 100 秒的脑裂 5/5，FAILED 行为 0（其中一轮走到了 ENOENT 移交）；SIGSTOP 超过 TTL 3/3，FAILED 为 0；45 秒中断卡住为 0；本 epoch 仍持有租约时缺 open 文件仍然失败。
+
+Tip QA 2785c49 PASS（BinlogServerQA），2026-10-19：脑裂 4/4、SIGSTOP 2/2，FAILED 为 0（走到一次 ENOENT 移交）；2 节点 45 秒中断 2/2 卡住为 0；20 秒和 90 秒中断都续跑、没有静默停止；运维 Stop 和 FAILED 保持终态；无人持有时 CRITICAL 加 503，之后清除；每个压测轮次回放 md5 一致；`-race` 构建。CI 在 `2785c49` 上通过，含 `e2e-meta-failover`。

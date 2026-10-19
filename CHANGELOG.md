@@ -12,9 +12,31 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.76] - 2026-10-20
+
+发布说明：`docs/releases/v0.5.76.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `health.stale_after_sec`（默认 0，即 5 倍 `health.sweep_interval_sec`；负数拒绝启动）。`HEALTH_STALE` 由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）；lease 修复在任何模式下都生效。
+
+### Fixed
+
+- #450：集群里 `lease_ttl_sec` 60 秒时，meta 中断 35 秒以上会把任务写成 `STOPPED`、desired `STOP`、owner 为空，恢复后不再认领，`/api/health` 仍是 ok、没有 finding。现在续租宽限用尽、无人认领的 lease 丢失、续租循环 panic 只结束本 epoch（`TASK_LEASE_YIELDED`），desired 保持 RUN，下一次 Acquire 以 epoch+1 从已有 checkpoint 续跑；同一时刻最多一条 dump。没有人认领时一个 sweep 内打开 CRITICAL `TASK_NO_PROGRESS`，`/api/health` 降级。运维 Stop 和 FAILED 仍是终态（设计 0009 §29）。
+- #454：宽限已让出、没有新主人时，堵在 meta 上的 append 被本地栅栏拒绝（`WRITE_FENCED`），行落成 `STOPPED / desired RUN / owner 空`，认领查询匹配不到。现在这种拒绝留在 `LEASE_DEGRADED` 或 `RETRY_BACKOFF`，让出之后的再发布被丢掉，`STOPPED / desired RUN / owner 空` 的行也会被认领（§29.10）。
+- #457：共享 `data_dir` 时对端以 epoch+1 接管并删掉旧 `.open.eN` 后，旧 owner 恢复时的 ENOENT 被当成永久失败，写下 `FAILED / desired STOP`，新 owner 随即取消健康的 dump。现在本进程已丢掉这个 epoch、租约不再持有、或行 / lease 上已是别的 owner 或更大的 epoch 时走移交，desired 保持 RUN；本 epoch 仍持有租约时缺 open 文件仍失败（§29.11）。
+
 ### Added
 
 - 集群里 `_health` 的持有者会在任务 `_cluster` 上打开 WARNING `HEALTH_STALE`（subject 是任务 id）：某个任务的 `task_health.evaluated_at` 超过 `health.stale_after_sec`（默认 0，即 5 倍 `health.sweep_interval_sec`）没有更新，或持有者看见这个任务一直没有健康行并超过了同一阈值。需要 `health.evaluator: on`。没有新迁移。`/api/health` 仍只因 CRITICAL 降级，这条不把它打成 degraded；`/api/findings` 和已有的 `binlog_server_finding_open` 能列出它。年龄对照数据库的 `UTC_TIMESTAMP(6)`，不对照节点墙钟。standalone 不开这条。
+
+### Upgrade notes
+
+- v0.5.75 及更早版本因 #450 留下的 `STOPPED / desired STOP` 任务与运维 Stop 无法区分，不会自动恢复；升级后请检查并手动 Start。`STOPPED / desired RUN / owner 空` 的行会被自动认领。修复按节点生效，滚动升级完成前 v0.5.75 节点仍可能写 desired STOP。
+
+### Known issues
+
+- #451（P3）：meta 中断或进程暂停恢复后的第一个 sweep，`HEALTH_STALE` 会对正常任务短暂误报。
+- #452（P3）：`shadow` 模式下 `_health` 持有者每个 sweep 都打 `OPEN HEALTH_STALE` 日志。
+- #455（P3）：暂停超过 TTL 的旧 owner 恢复后，新 owner 的 Binlog Dump 连接可能 EOF 并同 epoch 重连。
+- #456（P4）：无人持有的 `TASK_NO_PROGRESS` detail 写成 `no_progress_after 5s`。
+- #446、#437、#438 仍未关闭；`/api/findings` 还没有读超时（P2-7）。
 
 ## [v0.5.75] - 2026-10-19
 
