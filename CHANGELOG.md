@@ -12,13 +12,17 @@ Maintenance rules:
 
 ## [Unreleased]
 
-新配置项：`health.no_progress_after_sec`（默认 `120`，`0` 为默认值，不可为负）。没有新迁移。
+## [v0.5.72] - 2026-10-19
+
+发布说明：`docs/releases/v0.5.72.md`。新配置项：`health.no_progress_after_sec`（默认 `120`，`0` 为默认值，不可为负）。没有新迁移（schema 仍为 9，`minRequiredSchemaVersion` 仍为 6）。`TASK_FAILED`（无主任务）、`TASK_NO_PROGRESS` 和 `_health` lease 都由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）。
 
 ### Fixed
 
+- #421 / #424（P1）：集群里没有节点评估无主任务：FAILED 会清掉任务行的 owner 并释放 lease，`TASK_FAILED` 从不打开，`task_health` 停在 HEALTHY，`/api/health` 仍是 ok，集群里的每个 FAILED 都是静默的。现在由 `_health` lease（`task_leases` 行 `_health`，TTL 3×sweep）选出一个节点（任何角色），用上一个任务 lease epoch 的代理栅栏只评估无主任务（FAILED、STOPPED、CREATED、未认领的 STARTING）的 `task.state`，FAILED 打开 CRITICAL `TASK_FAILED`。
+- #421 / #424（P1）：旧 owner 醒来后把别的 epoch 写下的 FAILED 当成远端 Stop，无栅栏地改写成 `STOPPED / desired STOP / owner 空 / epoch 0`，看起来像有人手动停了任务。现在 FAILED 只能由操作员 Start 离开：正在跑的 run 看到别的 epoch 写的 FAILED 就停下且不写任何东西；`markStoppedLocked`、续约降级（`LEASE_DEGRADED`）和未完成 Stop 的收尾路径都不再覆盖 FAILED；任务行栅栏统一为 `tasks.CheckTaskRowFence`（lease 已释放时只接受在写入者 epoch 释放的）。部署文档写明集群运行任务的节点必须共享 `data_dir`。
 - #421 / #424（P1）：集群节点各用独立 `data_dir` 时，接管节点能读到旧 owner 的绝对路径，就把分段续写到别人的目录里，自己的 `data_dir` 什么都不写，也不开 finding，`/api/health` 仍是 ok。现在接管只认本节点 `data_dir` 下的分段，不在其下的报 `SEGMENT_NOT_ON_WORKER`（任务 FAILED，打开 CRITICAL `TASK_FAILED`）。
 - `data_dir` 配成相对路径时，接管把本节点自己的分段（目录记录的是绝对路径）误判为不在本节点，任务 FAILED（`SEGMENT_NOT_ON_WORKER`）。归属判断现在两边都解析成绝对路径并解析符号链接后再比较。
-- #424（P1）：唯一的 worker 被 kill -9、只剩 control-plane 节点时，任务行一直停在 `RUNNING / 死 owner`，不开 finding，health ok。control-plane 节点的健康评估器 node id 为空，从不持有 `_health`；owner 非空的行也不算“无 owner”。现在 control-plane 节点用 `cluster.worker_id`（没配时用持久化的 `.node_id`）作为评估器身份，并代评 owner 的任务 lease 已过期的行，按 `TASK_NO_PROGRESS` 报出。多个 control-plane 节点共享 `data_dir` 时请各自配置 `cluster.worker_id`。
+- #426（P1）：唯一的 worker 被 kill -9、只剩 control-plane 节点时，任务行一直停在 `RUNNING / 死 owner`，不开 finding，health ok。control-plane 节点的健康评估器 node id 为空，从不持有 `_health`；owner 非空的行也不算“无 owner”。现在 control-plane 节点用 `cluster.worker_id`（没配时用持久化的 `.node_id`）作为评估器身份，并代评 owner 的任务 lease 已过期的行，按 `TASK_NO_PROGRESS` 报出。多个 control-plane 节点共享 `data_dir` 时请各自配置 `cluster.worker_id`。
 - #425（P1）：meta 库只读一段时间后，任务被静默写成 `STOPPED / desired STOP`、没有 owner、没有 finding，永不恢复；只读期间只有一个节点 degraded。原因：租约移交后旧 owner 仍把待重写的 `STOPPED / owner 空 / epoch 0` 行无栅栏地写回，新 owner 把这条旧行当成远端 Stop。现在移交时丢弃待重写行、重写带 `(owner, epoch)` 栅栏，新 owner 忽略 owner/epoch 不同的旧 `STOPPED / desired RUN` 行；`_health` lease 写失败在每个节点都报 `FINDINGS_PERSIST_FAILED`。
 - 持有 lease 却在启动阶段（leftover dump KILL 失败）一直重试、从不开 run 的 owner 不会打开 `TASK_NO_PROGRESS`，只能等 `SOURCE_UNREACHABLE` 刚好在时限边上打开。现在进度账按持有的 epoch 记，在 claim + `no_progress_after_sec` + 一个 sweep 内打开。
 - 任务行 `spec_revision` 为 0 时 FAILED 不会打开 `TASK_FAILED`（`FailedCurrent` 要求 `failed_spec_revision > 0`）；现在按 `failed_spec_revision == spec_revision` 判断。
@@ -26,6 +30,10 @@ Maintenance rules:
 ### Added
 
 - CRITICAL `TASK_NO_PROGRESS`（设计 0009 §24.9）：desired RUN 的任务，本进程的 run 在 `health.no_progress_after_sec` 内没有在自己的 `data_dir` 下推进位点、也没有确认追平源（心跳），或者没有任何 worker 在跑它（任务行停在 STARTING / STOPPED 等），就打开，`/api/health` 变为 degraded。作为“持有任务却不干活”这类问题的兜底，不依赖具体根因。
+
+### Known issues
+
+- #427（P2）：meta 库被黑洞（连接挂住、不返回 refused）时，所有节点的 `/api/health` 在 3 秒内都不响应，恢复后也不补记任何 finding。连接被拒绝时会正常 degraded。
 
 ## [v0.5.71] - 2026-10-17
 
