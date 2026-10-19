@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -305,6 +306,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		}
 	}
 
+	var loadErr error
 	cfg := Config{
 		ListenAddr: getString(v, decryptor, "listen_addr"),
 		DataDir:    getString(v, decryptor, "data_dir"),
@@ -314,9 +316,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			Role:                   getString(v, decryptor, "cluster.role"),
 			WorkerID:               getString(v, decryptor, "cluster.worker_id"),
 			WorkerHealthListenAddr: getString(v, decryptor, "cluster.worker_health_listen_addr"),
-			LeaseTTLSec:            getInt(v, "cluster.lease_ttl_sec"),
-			LeaseRenewIntervalSec:  getInt(v, "cluster.lease_renew_interval_sec"),
-			LeaseGraceSec:          getInt(v, "cluster.lease_grace_sec"),
+			LeaseTTLSec:            getInt(&loadErr, v, "cluster.lease_ttl_sec"),
+			LeaseRenewIntervalSec:  getInt(&loadErr, v, "cluster.lease_renew_interval_sec"),
+			LeaseGraceSec:          getInt(&loadErr, v, "cluster.lease_grace_sec"),
 			FailoverPolicy:         getString(v, decryptor, "cluster.failover_policy"),
 		},
 		UploadEndpoint: getString(v, decryptor, "upload.endpoint", "upload_endpoint"),
@@ -332,15 +334,15 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		UploadRegion:       getString(v, decryptor, "upload.region", "upload_region"),
 		UploadPrefix:       getString(v, decryptor, "upload.prefix", "upload_prefix"),
 		UploadUseSSL:       getBool(v, "upload.use_ssl", "upload_use_ssl"),
-		UploadGraceSec:     getInt(v, "upload.grace_sec", "upload_grace_sec"),
-		UploadGraceTaskSec: healthTaskOverrides(v.GetStringMap("upload.grace_task_sec")),
+		UploadGraceSec:     getInt(&loadErr, v, "upload.grace_sec", "upload_grace_sec"),
+		UploadGraceTaskSec: healthTaskOverrides(&loadErr, "upload.grace_task_sec", v.GetStringMap("upload.grace_task_sec")),
 		Log: LogConfig{
 			Level:          getString(v, decryptor, "log.level", "log_level"),
 			Encoding:       getString(v, decryptor, "log.encoding", "log_encoding"),
 			File:           getString(v, decryptor, "log.file", "log_file"),
-			MaxSizeMB:      getInt(v, "log.max_size_mb", "log_max_size_mb"),
-			MaxBackups:     getInt(v, "log.max_backups", "log_max_backups"),
-			MaxAgeDays:     getInt(v, "log.max_age_days", "log_max_age_days"),
+			MaxSizeMB:      getInt(&loadErr, v, "log.max_size_mb", "log_max_size_mb"),
+			MaxBackups:     getInt(&loadErr, v, "log.max_backups", "log_max_backups"),
+			MaxAgeDays:     getInt(&loadErr, v, "log.max_age_days", "log_max_age_days"),
 			Compress:       getBool(v, "log.compress", "log_compress"),
 			RotateInterval: getString(v, decryptor, "log.rotate_interval", "log_rotate_interval"),
 		},
@@ -359,28 +361,32 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			},
 			RateLimit: RateLimitConfig{
 				Enabled:           getBool(v, "api.rate_limit.enabled", "api_rate_limit_enabled"),
-				RequestsPerSecond: getFloat64(v, "api.rate_limit.requests_per_second", "api_rate_limit_requests_per_second"),
-				Burst:             getInt(v, "api.rate_limit.burst", "api_rate_limit_burst"),
+				RequestsPerSecond: getFloat64(&loadErr, v, "api.rate_limit.requests_per_second", "api_rate_limit_requests_per_second"),
+				Burst:             getInt(&loadErr, v, "api.rate_limit.burst", "api_rate_limit_burst"),
 			},
 		},
 		HTTP: HTTPConfig{
 			ControlPlane: HTTPServerTimeoutConfig{
 				ReadHeaderTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.control_plane.read_header_timeout_sec",
 					"http_control_plane_read_header_timeout_sec",
 				),
 				ReadTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.control_plane.read_timeout_sec",
 					"http_control_plane_read_timeout_sec",
 				),
 				WriteTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.control_plane.write_timeout_sec",
 					"http_control_plane_write_timeout_sec",
 				),
 				IdleTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.control_plane.idle_timeout_sec",
 					"http_control_plane_idle_timeout_sec",
@@ -388,21 +394,25 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			},
 			WorkerHealth: HTTPServerTimeoutConfig{
 				ReadHeaderTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.worker_health.read_header_timeout_sec",
 					"http_worker_health_read_header_timeout_sec",
 				),
 				ReadTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.worker_health.read_timeout_sec",
 					"http_worker_health_read_timeout_sec",
 				),
 				WriteTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.worker_health.write_timeout_sec",
 					"http_worker_health_write_timeout_sec",
 				),
 				IdleTimeoutSec: getInt(
+					&loadErr,
 					v,
 					"http.worker_health.idle_timeout_sec",
 					"http_worker_health_idle_timeout_sec",
@@ -411,14 +421,16 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		},
 		Meta: MetaConfig{
 			Timeout: MetaTimeoutConfig{
-				ReadSec: getInt(v, "meta.timeout.read_sec", "meta_timeout_read_sec"),
+				ReadSec: getInt(&loadErr, v, "meta.timeout.read_sec", "meta_timeout_read_sec"),
 				WriteSec: getInt(
+					&loadErr,
 					v,
 					"meta.timeout.write_sec",
 					"meta_timeout_write_sec",
 				),
-				LeaseSec: getInt(v, "meta.timeout.lease_sec", "meta_timeout_lease_sec"),
+				LeaseSec: getInt(&loadErr, v, "meta.timeout.lease_sec", "meta_timeout_lease_sec"),
 				UploadSec: getInt(
+					&loadErr,
 					v,
 					"meta.timeout.upload_sec",
 					"meta_timeout_upload_sec",
@@ -427,18 +439,18 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		},
 		Health: HealthConfig{
 			Evaluator:                      strings.ToLower(strings.TrimSpace(getString(v, decryptor, "health.evaluator", "health_evaluator"))),
-			SweepIntervalSec:               getInt(v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
-			RehashBytesPerSec:              int64(getInt(v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
-			UnreachableAfterSec:            getInt(v, "health.unreachable_after_sec", "health_unreachable_after_sec"),
-			UnreachableAfterTaskSec:        healthTaskOverrides(v.GetStringMap("health.unreachable_after_task_sec")),
-			NoProgressAfterSec:             getInt(v, "health.no_progress_after_sec", "health_no_progress_after_sec"),
-			StaleAfterSec:                  getInt(v, "health.stale_after_sec", "health_stale_after_sec"),
-			NodeGoneAfterSec:               getInt(v, "health.node_gone_after_sec", "health_node_gone_after_sec"),
-			SignalStaleAfterSec:            getInt(v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
-			UploadLateCriticalAfterSec:     getInt(v, "health.upload_late_critical_after_sec", "health_upload_late_critical_after_sec"),
-			UploadLateCriticalAfterTaskSec: healthTaskOverrides(v.GetStringMap("health.upload_late_critical_after_task_sec")),
-			ObjectListIntervalSec:          getInt(v, "health.object_list_interval_sec", "health_object_list_interval_sec"),
-			ObjectListLimit:                getInt(v, "health.object_list_limit", "health_object_list_limit"),
+			SweepIntervalSec:               getInt(&loadErr, v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
+			RehashBytesPerSec:              int64(getInt(&loadErr, v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
+			UnreachableAfterSec:            getInt(&loadErr, v, "health.unreachable_after_sec", "health_unreachable_after_sec"),
+			UnreachableAfterTaskSec:        healthTaskOverrides(&loadErr, "health.unreachable_after_task_sec", v.GetStringMap("health.unreachable_after_task_sec")),
+			NoProgressAfterSec:             getInt(&loadErr, v, "health.no_progress_after_sec", "health_no_progress_after_sec"),
+			StaleAfterSec:                  getInt(&loadErr, v, "health.stale_after_sec", "health_stale_after_sec"),
+			NodeGoneAfterSec:               getInt(&loadErr, v, "health.node_gone_after_sec", "health_node_gone_after_sec"),
+			SignalStaleAfterSec:            getInt(&loadErr, v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
+			UploadLateCriticalAfterSec:     getInt(&loadErr, v, "health.upload_late_critical_after_sec", "health_upload_late_critical_after_sec"),
+			UploadLateCriticalAfterTaskSec: healthTaskOverrides(&loadErr, "health.upload_late_critical_after_task_sec", v.GetStringMap("health.upload_late_critical_after_task_sec")),
+			ObjectListIntervalSec:          getInt(&loadErr, v, "health.object_list_interval_sec", "health_object_list_interval_sec"),
+			ObjectListLimit:                getInt(&loadErr, v, "health.object_list_limit", "health_object_list_limit"),
 		},
 		Standalone: StandaloneConfig{
 			TaskRecords:         strings.ToLower(strings.TrimSpace(v.GetString("standalone.task_records"))),
@@ -449,10 +461,13 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			Enabled:     getBool(v, "tracing.enabled", "tracing_enabled"),
 			Exporter:    strings.ToLower(getString(v, decryptor, "tracing.exporter", "tracing_exporter")),
 			Endpoint:    getString(v, decryptor, "tracing.endpoint", "tracing_endpoint"),
-			SampleRatio: getFloat64(v, "tracing.sample_ratio", "tracing_sample_ratio"),
+			SampleRatio: getFloat64(&loadErr, v, "tracing.sample_ratio", "tracing_sample_ratio"),
 			ServiceName: getString(v, decryptor, "tracing.service_name", "tracing_service_name"),
 		},
 		EncryptionKey: encryptionKey,
+	}
+	if loadErr != nil {
+		return Config{}, loadErr
 	}
 	applyEnabledAuthProtectDefaults(v, &cfg.API.Auth)
 	if err := validateConfig(cfg); err != nil {
@@ -528,24 +543,137 @@ func isBoolConfigured(v *viper.Viper, keys ...string) bool {
 	return false
 }
 
-// getInt 返回首个已设置的整型配置值。
-func getInt(v *viper.Viper, keys ...string) int {
+// getInt 返回首个已设置的整型配置值。非整数字面量记入 errp，不再变成 0。
+func getInt(errp *error, v *viper.Viper, keys ...string) int {
 	for _, key := range keys {
-		if v.IsSet(key) {
-			return v.GetInt(key)
+		if !v.IsSet(key) {
+			continue
 		}
+		n, err := strictInt(keys[0], v.Get(key))
+		if err != nil {
+			noteLoadErr(errp, err)
+			return 0
+		}
+		return n
 	}
 	return 0
 }
 
-// getFloat64 返回首个已设置的浮点配置值。
-func getFloat64(v *viper.Viper, keys ...string) float64 {
+// getFloat64 返回首个已设置的浮点配置值。非数字记入 errp，不再变成 0。
+func getFloat64(errp *error, v *viper.Viper, keys ...string) float64 {
 	for _, key := range keys {
-		if v.IsSet(key) {
-			return v.GetFloat64(key)
+		if !v.IsSet(key) {
+			continue
 		}
+		n, err := strictFloat(keys[0], v.Get(key))
+		if err != nil {
+			noteLoadErr(errp, err)
+			return 0
+		}
+		return n
 	}
 	return 0
+}
+
+func noteLoadErr(errp *error, err error) {
+	if errp != nil && *errp == nil && err != nil {
+		*errp = err
+	}
+}
+
+func strictInt(key string, raw any) (int, error) {
+	switch n := raw.(type) {
+	case int:
+		return n, nil
+	case int8:
+		return int(n), nil
+	case int16:
+		return int(n), nil
+	case int32:
+		return int(n), nil
+	case int64:
+		if n > math.MaxInt || n < math.MinInt {
+			return 0, invalidInteger(key, strconv.FormatInt(n, 10))
+		}
+		return int(n), nil
+	case uint:
+		if uint64(n) > uint64(math.MaxInt) {
+			return 0, invalidInteger(key, strconv.FormatUint(uint64(n), 10))
+		}
+		return int(n), nil
+	case uint8:
+		return int(n), nil
+	case uint16:
+		return int(n), nil
+	case uint32:
+		if uint64(n) > uint64(math.MaxInt) {
+			return 0, invalidInteger(key, strconv.FormatUint(uint64(n), 10))
+		}
+		return int(n), nil
+	case uint64:
+		if n > uint64(math.MaxInt) {
+			return 0, invalidInteger(key, strconv.FormatUint(n, 10))
+		}
+		return int(n), nil
+	case float32:
+		return strictInt(key, float64(n))
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n || n > float64(math.MaxInt) || n < float64(math.MinInt) {
+			return 0, invalidInteger(key, strconv.FormatFloat(n, 'f', -1, 64))
+		}
+		return int(n), nil
+	case string:
+		text := strings.TrimSpace(n)
+		parsed, err := strconv.ParseInt(text, 10, 64)
+		if err != nil || parsed > math.MaxInt || parsed < math.MinInt {
+			return 0, invalidInteger(key, text)
+		}
+		return int(parsed), nil
+	default:
+		return 0, invalidInteger(key, strings.TrimSpace(fmt.Sprint(raw)))
+	}
+}
+
+func strictFloat(key string, raw any) (float64, error) {
+	switch n := raw.(type) {
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0, invalidNumber(key, strconv.FormatFloat(n, 'f', -1, 64))
+		}
+		return n, nil
+	case float32:
+		return float64(n), nil
+	case int:
+		return float64(n), nil
+	case int64:
+		return float64(n), nil
+	case int32:
+		return float64(n), nil
+	case uint:
+		return float64(n), nil
+	case uint64:
+		return float64(n), nil
+	case string:
+		text := strings.TrimSpace(n)
+		parsed, err := strconv.ParseFloat(text, 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return 0, invalidNumber(key, text)
+		}
+		return parsed, nil
+	default:
+		if n, err := strictInt(key, raw); err == nil {
+			return float64(n), nil
+		}
+		return 0, invalidNumber(key, strings.TrimSpace(fmt.Sprint(raw)))
+	}
+}
+
+func invalidInteger(key, text string) error {
+	return fmt.Errorf("%s: invalid integer %q", key, text)
+}
+
+func invalidNumber(key, text string) error {
+	return fmt.Errorf("%s: invalid number %q", key, text)
 }
 
 func expandEnvPlaceholders(raw string) string {
@@ -569,11 +697,20 @@ func warnSensitivePlaintextInConfig(v *viper.Viper) {
 		"api.auth.bearer_token",
 		"api.auth.api_key",
 	}
+	// AutomaticEnv expands ${ENV} before GetString, so a file token looks like
+	// the secret itself. Read the file again with env expansion off.
+	rawFile := viper.New()
+	if path := v.ConfigFileUsed(); path != "" {
+		rawFile.SetConfigFile(path)
+		if err := rawFile.ReadInConfig(); err != nil {
+			return
+		}
+	}
 	for _, key := range sensitiveKeys {
-		if !v.InConfig(key) {
+		if !rawFile.InConfig(key) {
 			continue
 		}
-		raw := strings.TrimSpace(v.GetString(key))
+		raw := strings.TrimSpace(rawFile.GetString(key))
 		if raw == "" {
 			continue
 		}
@@ -738,28 +875,18 @@ func validateHealthConfig(h HealthConfig) error {
 	return nil
 }
 
-// healthTaskOverrides reads health.unreachable_after_task_sec; a value
-// that is not a whole number becomes -1 so validation names it.
-func healthTaskOverrides(raw map[string]any) map[string]int {
+// healthTaskOverrides reads a per-task integer map. A value that is not a
+// whole number is an invalid-integer error, not a silent -1.
+func healthTaskOverrides(errp *error, key string, raw map[string]any) map[string]int {
 	if len(raw) == 0 {
 		return nil
 	}
 	out := make(map[string]int, len(raw))
 	for id, val := range raw {
-		n := -1
-		switch x := val.(type) {
-		case int:
-			n = x
-		case int64:
-			n = int(x)
-		case float64:
-			if x == float64(int(x)) {
-				n = int(x)
-			}
-		case string:
-			if v, err := strconv.Atoi(strings.TrimSpace(x)); err == nil {
-				n = v
-			}
+		n, err := strictInt(key+"["+id+"]", val)
+		if err != nil {
+			noteLoadErr(errp, err)
+			continue
 		}
 		out[id] = n
 	}

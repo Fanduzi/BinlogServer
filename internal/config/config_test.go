@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional encryption key
-// output: config loading regression coverage including unresolved protected-auth secret rejection, enabled-auth protect-flag defaults, and EncryptionKey passthrough
+// output: config loading regression coverage including unresolved protected-auth secret rejection, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -679,5 +679,89 @@ func TestLoadConfig_StandaloneTaskRecords(t *testing.T) {
 	t.Setenv("BINLOG_SERVER_STANDALONE_TASK_RECORDS", "maybe")
 	if _, err := LoadConfig(""); err == nil || !strings.Contains(err.Error(), "standalone.task_records") {
 		t.Fatalf("invalid value: %v", err)
+	}
+}
+
+func TestLoadConfig_RejectsNonNumericIntegers(t *testing.T) {
+	setRequiredAuthEnv(t)
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "word",
+			body: "health:\n  sweep_interval_sec: abc\n",
+			want: `health.sweep_interval_sec: invalid integer "abc"`,
+		},
+		{
+			name: "fraction",
+			body: "health:\n  sweep_interval_sec: 1.5\n",
+			want: `health.sweep_interval_sec: invalid integer "1.5"`,
+		},
+		{
+			name: "empty",
+			body: "health:\n  sweep_interval_sec: \"\"\n",
+			want: `health.sweep_interval_sec: invalid integer ""`,
+		},
+		{
+			name: "task override",
+			body: "health:\n  unreachable_after_task_sec:\n    task-a: abc\n",
+			want: `health.unreachable_after_task_sec[task-a]: invalid integer "abc"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadConfig(path)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("got %v, want %s", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_RejectsNonNumericFloat(t *testing.T) {
+	setRequiredAuthEnv(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("tracing:\n  sample_ratio: abc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	want := `tracing.sample_ratio: invalid number "abc"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %s", err, want)
+	}
+}
+
+func TestLoadConfig_EnvPlaceholderDoesNotWarnPlaintext(t *testing.T) {
+	setRequiredAuthEnv(t)
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "t")
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+api:
+  auth:
+    bearer_token: "${BINLOG_SERVER_API_AUTH_BEARER_TOKEN}"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Auth.BearerToken != "t" {
+		t.Fatalf("token = %q", cfg.API.Auth.BearerToken)
+	}
+	if strings.Contains(buf.String(), "plaintext") {
+		t.Fatalf("placeholder warned: %s", buf.String())
 	}
 }
