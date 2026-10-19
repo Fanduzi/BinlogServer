@@ -2,6 +2,7 @@
 // input: assurance violation kinds
 // output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
 // pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385); since P2-5.1 (§20) SEGMENT_DAMAGED, CHAIN_INDEX_GAP, LEGACY_FAILBACK and SEGMENT_MISSING (chain.local only) are Managed with Confirm, and I2_SWITCH_UNRECORDED, I6_MISSING_ROW, I6_MISSING_OBJECT and I6_OBJECT_SIZE_MISMATCH are not derived; since P2-5.3 (§22) GTID_HOLE (Waivable) and CHECKPOINT_AHEAD are Managed without Confirm; since P2-6d (§24.9) TASK_NO_PROGRESS (CRITICAL, task.state) is Managed; since #427 (§25) META_UNREACHABLE (S17, CRITICAL, signals, task _cluster, subject node id) is Managed; since #436 (§27) HEALTH_STORE_UNAVAILABLE (S18, CRITICAL, signals, task _cluster, subject node id) is Managed without Confirm
+// note P2-6.1 (§28): HEALTH_STALE is Managed (WARNING, task.state, no Confirm) and derived by healthStaleDerive
 // note: if this file changes, update this header and module README.md.
 package health
 
@@ -186,6 +187,10 @@ var p27Managed = map[Kind]bool{HealthStoreUnavailable: true}
 // (no Confirm: one sweep, design §26).
 var p254Managed = map[Kind]bool{OrphanRow: true, SealFactsAbsent: true}
 
+// p261Managed is HEALTH_STALE (design §28): the _health holder derives it
+// onto _cluster. No tasks.Finding constant and no legacy writer.
+var p261Managed = map[Kind]bool{HealthStale: true}
+
 // ManagedKinds is every kind the evaluator owns in this release.
 func ManagedKinds() map[Kind]bool {
 	out := map[Kind]bool{}
@@ -208,6 +213,9 @@ func ManagedKinds() map[Kind]bool {
 		out[k] = true
 	}
 	for k := range p27Managed {
+		out[k] = true
+	}
+	for k := range p261Managed {
 		out[k] = true
 	}
 	return out
@@ -268,7 +276,7 @@ func DefaultRegistry() Registry {
 			Clear: ClearRule{Invariant: "S12", Holds: sourceUnreachableCleared,
 				Text: "a byte is read from the source (dump or probe) after the latest failed attempt, or the task is stopped, FAILED (TASK_FAILED takes over) or owned elsewhere"}},
 		sealFactsAbsentSpec(),
-		stateSpec(HealthStale, Warning, ScopeTaskState, "F", "the task is evaluated"),
+		healthStaleSpec(),
 		stateSpec(HealthStoreDegraded, Warning, ScopeStore, "F", "health writes succeed with migration 000009 present and versions not mixed"),
 	}
 	gh := chainSpec(GTIDHole, Critical, ScopeChainLocal, "I3", "B ∪ Stored is contiguous at this point, or the exact hole range is waived")
@@ -276,7 +284,7 @@ func DefaultRegistry() Registry {
 	specs = append(specs, gh)
 	r := Registry{}
 	for _, s := range specs {
-		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind] || p25Managed[s.Kind] || p253Managed[s.Kind] || p26dManaged[s.Kind] || p254Managed[s.Kind] || p27Managed[s.Kind]
+		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind] || p25Managed[s.Kind] || p253Managed[s.Kind] || p26dManaged[s.Kind] || p254Managed[s.Kind] || p27Managed[s.Kind] || p261Managed[s.Kind]
 		s.Confirm = p25Managed[s.Kind] || s.Kind == OrphanRow
 		r[s.Kind] = s
 	}

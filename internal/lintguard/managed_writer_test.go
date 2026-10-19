@@ -18,8 +18,9 @@ import (
 // existed): the chain-derived P2-5.1 kinds (design 0009 §20.1),
 // SEGMENT_EMPTY_LEFTOVER (P2-3), TASK_UNADOPTED (#385, §19), UPLOAD_LATE
 // (P2-5.2, §21.7), GTID_HOLE / CHECKPOINT_AHEAD (P2-5.3, §22.1) and
-// TASK_NO_PROGRESS (P2-6d, §24.9) and ORPHAN_ROW / SEAL_FACTS_ABSENT
-// (P2-5.4, §26: derived, no legacy writer).
+// TASK_NO_PROGRESS (P2-6d, §24.9), ORPHAN_ROW / SEAL_FACTS_ABSENT
+// (P2-5.4, §26: derived, no legacy writer) and HEALTH_STALE
+// (P2-6.1, §28: derived onto _cluster, no legacy writer).
 // A new Managed kind must be added here or given a constant.
 var managedWithoutConstant = map[health.Kind]bool{
 	health.SegmentDamaged: true, health.ChainIndexGap: true, health.LegacyFailback: true, health.SegmentMissing: true,
@@ -28,6 +29,7 @@ var managedWithoutConstant = map[health.Kind]bool{
 	health.GTIDHole:   true, health.CheckpointAhead: true,
 	health.TaskNoProgress: true, // P2-6d, §24.9
 	health.OrphanRow:      true, health.SealFactsAbsent: true,
+	health.HealthStale: true, // P2-6.1, §28
 }
 
 // managedConstants is every tasks.FindingX constant whose kind the health

@@ -382,6 +382,17 @@ func TestClusterHealthStaleShadowWritesNothing(t *testing.T) {
 	}
 }
 
+func TestStaleAfterFollowsSweep(t *testing.T) {
+	e := NewEvaluator(NewScheduler(), EvaluatorConfig{Mode: EvaluatorOff, Sweep: time.Minute})
+	if e.staleAfter() != 5*time.Minute {
+		t.Fatalf("default %s, want 5m", e.staleAfter())
+	}
+	e.cfg.StaleAfter = 2 * time.Minute
+	if e.staleAfter() != 2*time.Minute {
+		t.Fatalf("configured %s, want 2m", e.staleAfter())
+	}
+}
+
 func TestStandaloneClusterPathDoesNotOpenHealthStale(t *testing.T) {
 	dir := t.TempDir()
 	store := healthstore.NewFileStore(filepath.Join(dir, ".health.json"))

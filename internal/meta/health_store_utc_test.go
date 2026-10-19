@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock with a recording query matcher, one standalone OPEN and then CLOSE of META_UNREACHABLE whose fact times are the outage start and the first answer
-// output: proof that the health store stamps task_findings, finding_transitions and task_health with UTC_TIMESTAMP(6) (never the session-time-zone NOW(6)), writes first_seen from the OPEN's FactAt and resolved_at from the CLOSE's FactAt
+// output: proof that the health store stamps task_findings, finding_transitions and task_health with UTC_TIMESTAMP(6) (never the session-time-zone NOW(6)), writes first_seen from the OPEN's FactAt and resolved_at from the CLOSE's FactAt, and that StoreNow reads UTC_TIMESTAMP(6) (§28)
 // pos: ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md §25.8 R3 (#427 QA r1)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -103,5 +103,23 @@ func TestHealthStoreStampsUTCAndFactTimes(t *testing.T) {
 	}
 	if len(closeArgs) != 5 || !asTime(closeArgs[0]).Equal(answered) {
 		t.Errorf("task_findings CLOSE args %v, want resolved_at (1st) = the CLOSE fact time %s", closeArgs, answered)
+	}
+}
+
+func TestHealthStoreNowUsesUTC(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := newMySQLTaskStoreFromDB(db, time.Second)
+	want := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`SELECT UTC_TIMESTAMP\(6\)`).WillReturnRows(sqlmock.NewRows([]string{"utc"}).AddRow(want))
+	got, err := store.StoreNow(context.Background())
+	if err != nil || !got.Equal(want) {
+		t.Fatalf("StoreNow %v %v, want %s", got, err, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

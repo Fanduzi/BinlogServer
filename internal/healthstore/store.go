@@ -1,6 +1,6 @@
 // Package healthstore provides module-level functionality for healthstore.
 // input: health transitions and health verdicts for one task, guarded by a health.Fence
-// output: the Store contract (fenced, transactional apply with store-allocated generations and digest replay; complete open-set paging; health listing), its errors, the fence rule (CheckFence) and the standalone file store
+// output: the Store contract (fenced, transactional apply with store-allocated generations and digest replay; complete open-set paging; health listing), its errors, the fence rule (CheckFence), StoreClock (the database clock HEALTH_STALE ages against, §28) and the standalone file store
 // note P2-6c (#421): a proxy or delegated write on a released lease is not compared by node at the same epoch (no holder can write that epoch again)
 // pos: persistence seam of ADR 0009 phase 2 (P2-2); meta implements the MySQL store, this package the standalone file store
 // note: if this file changes, update this header and module README.md.
@@ -118,6 +118,14 @@ type Store interface {
 	// (keyset paging until done, no cap).
 	ListOpenFindingsForTask(ctx context.Context, taskID string) ([]health.Finding, error)
 	ListHealth(ctx context.Context) ([]health.TaskHealth, error)
+}
+
+// StoreClock is the database clock a HEALTH_STALE age is compared against
+// (design §28). evaluated_at is stamped with UTC_TIMESTAMP(6); the node
+// wall clock is not. A store without this interface is aged with the
+// evaluator's clock (tests, and the file store, which does not run the pass).
+type StoreClock interface {
+	StoreNow(ctx context.Context) (time.Time, error)
 }
 
 // Transition is one stored finding_transitions row.

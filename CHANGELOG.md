@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- 集群里 `_health` 的持有者会在任务 `_cluster` 上打开 WARNING `HEALTH_STALE`（subject 是任务 id）：某个任务的 `task_health.evaluated_at` 超过 `health.stale_after_sec`（默认 0，即 5 倍 `health.sweep_interval_sec`）没有更新，或持有者看见这个任务一直没有健康行并超过了同一阈值。需要 `health.evaluator: on`。没有新迁移。`/api/health` 仍只因 CRITICAL 降级，这条不把它打成 degraded；`/api/findings` 和已有的 `binlog_server_finding_open` 能列出它。年龄对照数据库的 `UTC_TIMESTAMP(6)`，不对照节点墙钟。standalone 不开这条。
+
 ### Fixed
 
 - #436：`health.evaluator=on` 且迁移 000009 不在（在线 `migrate goto 7` 或 `8`，或进程就停在 schema 9 以下）时，健康评估停了，`/api/health` 仍是 `ok`，日志每轮一条 INFO。现在 `/api/health` 为 503 `degraded`，原因写明 `HEALTH_STORE_UNAVAILABLE: schema N < 9, run ./migrate up`（探不到版本或版本已经 ≥ 9 但表被删掉时，写明 `health tables are absent; run ./migrate up to 000009`）。同一条 CRITICAL finding（task `_cluster`，subject 为本节点）出现在 `/api/health` 和 `/api/findings`，写不进库时从内存提供。000009 回来之后，单机留下一对 OPEN/CLOSE；集群留下一行已关闭的 finding 和一条 `FINDING_RESOLVED`。`shadow` 只打一次 WARN，不把健康打成 degraded。`off` 不变。不提高 schema 地板，不加配置，不加迁移。只缺 000008、000009 仍在时，行为与 `SEAL_FACTS_ABSENT` 相同，不开这条。
