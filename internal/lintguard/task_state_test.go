@@ -55,8 +55,12 @@ var stateWriters = map[string]bool{
 	"scheduler_cluster_lease.go:yieldForResumeLocked": true,
 	// §29.10: a fenced append with no successor stays LEASE_DEGRADED, not STOPPED
 	"scheduler_cluster_lease.go:yieldFencedEpochLocked": true,
-	"control_loop.go:adoptNewerStopLocked":              true,
-	"control_loop.go:intentLocked":                      true,
+	// §31.6: a peer that cannot read another node's tail yields; desired stays RUN
+	"scheduler_lifecycle.go:yieldUnreachableTailLocked": true,
+	// §31.6: that chain owner is gone; FAILED, desired stays RUN
+	"scheduler_lifecycle.go:failYieldedTail": true,
+	"control_loop.go:adoptNewerStopLocked":   true,
+	"control_loop.go:intentLocked":           true,
 	// standalone startup read of the task record (ADR 0010), as Restore reads backup_tasks
 	"task_records.go:restoredTask": true,
 	// Task values built only to be read, never stored or persisted.

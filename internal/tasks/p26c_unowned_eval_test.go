@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a cluster whose task row is FAILED with no owner (another epoch failed it and released the lease), task_health still HEALTHY from the last owner's epoch, a health store that checks healthstore.CheckFence against the in-memory task_leases, and evaluators on two nodes
-// output: proof that the _health holder opens CRITICAL TASK_FAILED and the health turns UNHEALTHY, that only one node evaluates unowned tasks, that a proxy pass reads no local signals, and that a proxy write fenced by a live claim is retried once the lease is released; the in-memory store keeps chain_owner across proxy, delegated, and PreserveChainOwner writes (§30, §31) and records task_health.owner the way MySQL does today (the fence node and task epoch) so a test can see it drift from the task row
+// output: proof that the _health holder opens CRITICAL TASK_FAILED and the health turns UNHEALTHY, that only one node evaluates unowned tasks, that a proxy pass reads no local signals, and that a proxy write fenced by a live claim is retried once the lease is released; the in-memory store keeps chain_owner across proxy, delegated, and PreserveChainOwner writes (§30, §31) and, when Fence.FollowRow is set, records task_health.owner from the task row (§31.6)
 // pos: regression for ADR 0009 P2-6c (design 0009 §24.2–§24.3, #421)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -25,7 +25,7 @@ type leaseHealthStore struct {
 	stored map[string]healthstore.Stored
 	writes map[string]int
 	// rowOwner / rowEpoch mirror task_health.owner and owner_epoch.
-	// Today that is the fence node and task epoch, which is not the task row.
+	// FollowRow copies the task row; otherwise the columns stay put.
 	rowOwner map[string]string
 	rowEpoch map[string]int64
 }
@@ -77,9 +77,11 @@ func (s *leaseHealthStore) ApplyTransitions(_ context.Context, taskID string, f 
 	}
 	s.stored[taskID] = next
 	s.writes[taskID]++
-	// Same columns MySQL writes today: fence node and task epoch, not the task row.
-	s.rowOwner[taskID] = f.Node
-	s.rowEpoch[taskID] = f.TaskEpoch
+	// task_health.owner follows the task row when the writer says so (§31.6).
+	if f.FollowRow {
+		s.rowOwner[taskID] = f.RowOwner
+		s.rowEpoch[taskID] = f.RowEpoch
+	}
 	return out, nil
 }
 

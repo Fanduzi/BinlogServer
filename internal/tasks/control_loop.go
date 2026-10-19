@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: backup_tasks desired_run, spec_revision, applied_spec_revision, failed_spec_revision, lease hold, and whether this process has a live dump
-// output: (writeStartIntent records Start through commitTransitionLocked: persist first, and only a recorded Start cancels a RETRY_BACKOFF loop) one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
+// output: (writeStartIntent records Start through commitTransitionLocked: persist first, and only a recorded Start cancels a RETRY_BACKOFF loop; operator Start clears the §31.6 tail-yield backoff) one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
 // pos: the only starter and stopper of a dump; operator Start, Stop, and spec edits write the row and this loop catches up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -374,6 +374,7 @@ func (s *Scheduler) writeStartIntent(id string) error {
 		return err
 	}
 
+	delete(s.tailYieldUntil, id) // operator Start ignores the peer backoff (§31.6)
 	task.DesiredRun = TaskDesiredRun
 	task.SpecRevision++
 	task.RetryAttempt = 0

@@ -2,7 +2,7 @@
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
 // output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder and SourceSwitchBinder so a closing dump can KILL its thread with the current password and a VIP switch appends one SOURCE_SWITCHOVER event, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.; the attached health evaluator (healthEval), and HoldChain so a rotate and that evaluator share one chain snapshot (#441)
 // pos: core domain orchestration layer governing backup task lifecycle and policies
-// note: if this file changes, update this header and module README.md. §29: yieldRelease, pendingRelease and yielded remember an epoch given up so a later claim can resume it. §29.10: ListTasksWithExpiredLease also returns STOPPED when desired RUN and the owner is empty.
+// note: if this file changes, update this header and module README.md. §29: yieldRelease, pendingRelease and yielded remember an epoch given up so a later claim can resume it. §29.10: ListTasksWithExpiredLease also returns STOPPED when desired RUN and the owner is empty. §31.6: tailYieldUntil and tailYieldBackoff (default 60s, WithTailYieldBackoff) keep a node from reclaiming a tail it just yielded.
 package tasks
 
 import (
@@ -276,6 +276,17 @@ func WithLeaseClock(clock *LeaseClock) Option {
 	}
 }
 
+// WithTailYieldBackoff is how long this process waits before claiming a
+// task it yielded because the local tail is on another node (§31.6).
+// d <= 0 keeps the 60s default.
+func WithTailYieldBackoff(d time.Duration) Option {
+	return func(s *Scheduler) {
+		if d > 0 {
+			s.tailYieldBackoff = d
+		}
+	}
+}
+
 // WithClusterLease 配置 lease 的 TTL、续租周期和降级宽限时间。
 func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
 	return func(s *Scheduler) {
@@ -359,6 +370,11 @@ type Scheduler struct {
 	leaseRenewInterval time.Duration
 	leaseGrace         time.Duration
 	leaseClock         *LeaseClock
+	// tailYieldUntil is when this process may claim a task it yielded because
+	// the local tail is on another node (§31.6). Process memory only.
+	tailYieldUntil map[string]time.Time
+	// tailYieldBackoff is health.tail_yield_backoff_sec. 0 means 60s.
+	tailYieldBackoff time.Duration
 	// yieldRelease is the epoch a grace, lease-lost, or renew-panic path
 	// gave up. The run exit releases it and does not write desired STOP (§29).
 	yieldRelease map[string]leaseHold
@@ -444,6 +460,7 @@ func NewScheduler(opts ...Option) *Scheduler {
 		retryBaseDelay:        time.Second,
 		retryMaxDelay:         30 * time.Second,
 		leaseTTL:              15 * time.Second,
+		tailYieldBackoff:      60 * time.Second,
 		leaseRenewInterval:    5 * time.Second,
 		leaseGrace:            30 * time.Second,
 		retryUploads:          make(map[string]struct{}),

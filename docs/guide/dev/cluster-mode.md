@@ -424,7 +424,7 @@ Worker A           MySQL            Worker B
                      │                 │     or FAILED)
 ```
 
-租约转到 Worker B。分段目录不跟着走，路径在 `binlog_files.file_path`。B 能读该目录时，从里面最后一个完整事件续写。读不到未上传的尾部时任务 `FAILED`，`last_error` 以 `SEGMENT_NOT_ON_WORKER` 开头并写出该路径，不另起目录从位置 4 重拉。checkpoint 已在封存 `UPLOADED` 对象里时从对象续。操作步骤见[部署指南 6.3 第 2 节](../admin/deployment.md)。
+租约转到 Worker B。分段目录不跟着走，路径在 `binlog_files.file_path`。B 能读该目录时，从里面最后一个完整事件续写。读不到未上传的尾部、并且 `task_health.chain_owner` 是别的节点时，B 让出租约：期望保持 RUN，状态 `LEASE_DEGRADED`，`last_error` 以 `SEGMENT_NOT_ON_WORKER` 开头并写出该路径，不另起目录从位置 4 重拉，也不把期望写成 STOP。CRITICAL finding 在无人持有租约时保持打开。原主人恢复后以更大的 epoch 认领，finding 关闭。链主人心跳早于 `health.node_gone_after_sec` 之后任务才是 `FAILED`，期望仍是 RUN。`chain_owner` 为空或就是 B 时，仍是 `FAILED` 且期望 STOP。checkpoint 已在封存 `UPLOADED` 对象里时从对象续。操作步骤见[部署指南 6.3 第 2 节](../admin/deployment.md)。
 
 ## 7. 配置参数
 

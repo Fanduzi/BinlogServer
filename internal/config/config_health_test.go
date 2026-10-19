@@ -150,3 +150,27 @@ func TestLoadConfig_HealthNodeGoneAfter(t *testing.T) {
 		t.Fatal("negative health.node_gone_after_sec accepted")
 	}
 }
+
+func TestLoadConfig_HealthTailYieldBackoff(t *testing.T) {
+	setRequiredAuthEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.TailYieldBackoffSec != 0 {
+		t.Fatalf("default %d, want 0", cfg.Health.TailYieldBackoffSec)
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("health:\n  tail_yield_backoff_sec: 15\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = LoadConfig(path); err != nil || cfg.Health.TailYieldBackoffSec != 15 {
+		t.Fatalf("override %v %+v", err, cfg.Health.TailYieldBackoffSec)
+	}
+	if err := os.WriteFile(path, []byte("health:\n  tail_yield_backoff_sec: -1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("negative health.tail_yield_backoff_sec accepted")
+	}
+}

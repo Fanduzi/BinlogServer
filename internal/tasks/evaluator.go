@@ -9,7 +9,7 @@
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // note P2-6.1 (§28): while this node holds _health it also evaluates _cluster, and only for HEALTH_STALE (task.state, never fence, epoch 0); standalone _cluster is unchanged
 // note P2-6.2 (§30): a released last owner evaluates chain.local with Delegated; a proxy pass does not read the directory; NodeGoneAfter 0 means 3×Sweep
-// note §31: reportUnreachableTail writes TASK_FAILED for SEGMENT_NOT_ON_WORKER under the holder fence with PreserveChainOwner and does not read the chain; a holder write with PreserveChainOwner does not call noteDelegated
+// note §31: reportUnreachableTail writes TASK_FAILED for SEGMENT_NOT_ON_WORKER under the holder fence with PreserveChainOwner and does not read the chain; a holder write with PreserveChainOwner does not call noteDelegated; write stamps Fence.FollowRow from the task row (§31.6); a proxy pass calls abandonYieldedTail when TailYielded and NodeGone
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -754,6 +754,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	case proxyLike:
 		unownedFacts(task, facts, e.expiredSince(task.ID)) // P2-6c: task.state only (§24.2)
 		e.noteNodeGone(ctx, facts)
+		e.abandonYieldedTail(task, facts)
 	case delegated:
 		if chain := e.chainFacts(task, now); chain != nil {
 			facts.Chain = chain
@@ -981,6 +982,7 @@ func (e *Evaluator) reportUnreachableTail(ctx context.Context, task Task, errMsg
 // write is dropped and the task is not evaluated again until the lease is
 // re-acquired; any other failure keeps ts pending for the next pass.
 func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts []health.Transition, h health.TaskHealth) error {
+	e.stampRowOwner(id, &fence)
 	_, err := e.cfg.Store.ApplyTransitions(ctx, id, fence, ts, h)
 	switch {
 	case err == nil:
@@ -1020,6 +1022,21 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 		e.mu.Unlock()
 	}
 	return err
+}
+
+// stampRowOwner makes task_health.owner follow the task row (§31.6).
+// A missing row leaves FollowRow false so the columns stay as they are.
+func (e *Evaluator) stampRowOwner(id string, fence *health.Fence) {
+	if e == nil || e.s == nil || fence == nil {
+		return
+	}
+	task, err := e.s.GetTask(id)
+	if err != nil {
+		return
+	}
+	fence.FollowRow = true
+	fence.RowOwner = task.OwnerWorkerID
+	fence.RowEpoch = task.Epoch
 }
 
 // afterApply keeps the in-process finding book in step: a closed key

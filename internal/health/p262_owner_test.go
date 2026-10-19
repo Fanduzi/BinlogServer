@@ -52,6 +52,29 @@ func TestOwnerChangedInheritsUnhashedUnreadable(t *testing.T) {
 	}
 }
 
+func TestOwnerChangedKeepsUnreadableWhenChainIncomplete(t *testing.T) {
+	subject := "mysql-bin.000001"
+	open := []Finding{{TaskID: "1", Kind: SegmentUnreadable, Subject: subject, Severity: Critical, Detail: "sha"}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true, Complete: map[Scope]bool{}}
+	ts, _ := DefaultRegistry().Reconcile(open, f)
+	if len(ts) != 0 {
+		t.Fatalf("transitions %+v, want none while chain.local is incomplete", ts)
+	}
+}
+
+func TestAwaitRehashKeepsUnreadableAfterOwnerSettled(t *testing.T) {
+	subject := "mysql-bin.000001"
+	open := []Finding{{TaskID: "1", Kind: SegmentUnreadable, Subject: subject, Severity: Critical, Detail: "sha"}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(),
+		Complete:    map[Scope]bool{ScopeChainLocal: true},
+		AwaitRehash: map[string]bool{subject: true},
+	}
+	ts, _ := DefaultRegistry().Reconcile(open, f)
+	if len(ts) != 0 {
+		t.Fatalf("transitions %+v, want none while rehash has not reported", ts)
+	}
+}
+
 func TestOwnerChangedReopensUnreadableDerivedThisPass(t *testing.T) {
 	subject := "mysql-bin.000001"
 	key := Key{TaskID: "1", Kind: SegmentUnreadable, Subject: subject}

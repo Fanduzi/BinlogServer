@@ -226,7 +226,7 @@ curl "http://localhost:8080/api/tasks?host=10.0.0.1&port=3306&state=FAILED"
 | LEASE_DEGRADED | 租约续约异常，仍在 grace 窗口内 |
 | REBUILDING_FILE | failover 后正在重建当前 binlog 文件 |
 | RETRY_BACKOFF | 可重试错误，退避等待，租约仍由当前 worker 持有。源不可达连续 10 次后变为 FAILED。瞬时元数据错误、`OBJECT_PURGE_FAILED`、没有已存 GTID 的 MySQL 1236 留在此状态 |
-| FAILED | 不可恢复错误，已停止，租约已放开。`last_error` 以稳定错误码开头，例如 `SOURCE_ACCESS_DENIED`、`SOURCE_UNREACHABLE`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`、`SEALED_FILE_EXISTS`、`CHECKPOINT_WRITE_FAILED`、`SOURCE_SWITCHOVER` |
+| FAILED | 不可恢复错误，已停止，租约已放开。`last_error` 以稳定错误码开头，例如 `SOURCE_ACCESS_DENIED`、`SOURCE_UNREACHABLE`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`、`SEALED_FILE_EXISTS`、`CHECKPOINT_WRITE_FAILED`、`SOURCE_SWITCHOVER`。对端读不到另一节点的本地尾巴时不是这行：那是 `LEASE_DEGRADED`、期望仍是 RUN（见部署指南 6.3）。只有链主人消失超过 `health.node_gone_after_sec`，或 `chain_owner` 为空 / 就是本节点，`SEGMENT_NOT_ON_WORKER` 才进入 FAILED；前一种期望仍是 RUN |
 | STOPPING | 已收到停止请求，等待退出 |
 | STOPPED | 执行路径已退出 |
 

@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: the writer's view of the task lease, and a transition
-// output: Fence (which counter and node guard a health write, design §8; PreserveChainOwner keeps chain_owner on a holder write, §31) and TransitionDigest (content identity for replay, §5.4)
+// output: Fence (which counter and node guard a health write, design §8; PreserveChainOwner keeps chain_owner on a holder write, §31; FollowRow writes task_health.owner from the task row, §31.6) and TransitionDigest (content identity for replay, §5.4)
 // pos: pure fence and replay identity shared by every health store
 // note: if this file changes, update this header and module README.md.
 package health
@@ -46,6 +46,12 @@ type Fence struct {
 	// chain_owner (§31). The unreachable-tail finding is written before the
 	// chain directory is read.
 	PreserveChainOwner bool
+	// FollowRow: task_health.owner and owner_epoch are the task row's owner
+	// and epoch, not this fence (§31.6). When false those columns stay as
+	// they are. fence_node and fence_epoch are still this fence.
+	FollowRow bool
+	RowOwner  string
+	RowEpoch  int64
 }
 
 // TransitionDigest is the content identity of a transition: a replay of

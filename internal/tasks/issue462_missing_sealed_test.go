@@ -219,11 +219,11 @@ func TestIssue462PeerStartSurfacesUnreachableTail(t *testing.T) {
 	startAndWait(t, s2, r, env.task.ID)
 	waitRunClosed(t, s2, env.task.ID, "peer start")
 	row, err := env.store.GetTask(context.Background(), env.task.ID)
-	if err != nil || row.State != StateFailed {
-		t.Fatalf("stored state %s (%v), want FAILED", row.State, err)
+	if err != nil || row.State == StateFailed || row.DesiredRun != TaskDesiredRun {
+		t.Fatalf("stored state %s desired %s (%v), want a yield that keeps desired RUN", row.State, row.DesiredRun, err)
 	}
-	if row.DesiredRun != TaskDesiredStop {
-		t.Fatalf("desired %s, want STOP", row.DesiredRun)
+	if row.OwnerWorkerID != "" {
+		t.Fatalf("row owner %q, want empty after the peer yields", row.OwnerWorkerID)
 	}
 
 	_, open, _ := env.hs.snapshot(env.task.ID)
