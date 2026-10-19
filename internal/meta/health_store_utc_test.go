@@ -65,7 +65,7 @@ func TestHealthStoreStampsUTCAndFactTimes(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT VERSION()")).WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow("8.0.36"))
 	mock.ExpectExec("INSERT IGNORE INTO task_health").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT fence_mode").WillReturnRows(sqlmock.NewRows([]string{"m", "e", "n", "i", "g"}).AddRow("", 0, "", "", 0))
+	mock.ExpectQuery("SELECT fence_mode").WillReturnRows(sqlmock.NewRows([]string{"m", "e", "n", "i", "g", "c"}).AddRow("", 0, "", "", 0, ""))
 	mock.ExpectQuery("FROM finding_transitions").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
 	mock.ExpectExec("INSERT INTO finding_transitions").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO task_findings").WithArgs(captures(10, &mu, &openArgs)...).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -78,7 +78,7 @@ func TestHealthStoreStampsUTCAndFactTimes(t *testing.T) {
 
 	mock.ExpectExec("INSERT IGNORE INTO task_health").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT fence_mode").WillReturnRows(sqlmock.NewRows([]string{"m", "e", "n", "i", "g"}).AddRow("standalone", 0, "standalone", "i1", 1))
+	mock.ExpectQuery("SELECT fence_mode").WillReturnRows(sqlmock.NewRows([]string{"m", "e", "n", "i", "g", "c"}).AddRow("standalone", 0, "standalone", "i1", 1, ""))
 	mock.ExpectQuery("FROM finding_transitions").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
 	mock.ExpectExec("INSERT INTO finding_transitions").WillReturnResult(sqlmock.NewResult(2, 1))
 	mock.ExpectExec("UPDATE task_findings SET resolved_at").WithArgs(captures(5, &mu, &closeArgs)...).WillReturnResult(sqlmock.NewResult(0, 1))

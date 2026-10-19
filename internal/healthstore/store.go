@@ -1,7 +1,8 @@
 // Package healthstore provides module-level functionality for healthstore.
 // input: health transitions and health verdicts for one task, guarded by a health.Fence
-// output: the Store contract (fenced, transactional apply with store-allocated generations and digest replay; complete open-set paging; health listing), its errors, the fence rule (CheckFence), StoreClock (the database clock HEALTH_STALE ages against, §28) and the standalone file store
-// note P2-6c (#421): a proxy or delegated write on a released lease is not compared by node at the same epoch (no holder can write that epoch again)
+// output: the Store contract (fenced, transactional apply with store-allocated generations and digest replay; complete open-set paging; health listing), its errors, the fence rule (CheckFence), StoreClock (the database clock HEALTH_STALE ages against, §28), ChainOwnerStore (task_health.chain_owner, §30) and the standalone file store
+// note P2-6c (#421): a proxy or delegated write on a released lease is not compared by fence_node at the same epoch
+// note P2-6.2 (§30): a delegated write also requires stored.ChainOwner == fence.Node
 // pos: persistence seam of ADR 0009 phase 2 (P2-2); meta implements the MySQL store, this package the standalone file store
 // note: if this file changes, update this header and module README.md.
 package healthstore
@@ -43,6 +44,11 @@ type Stored struct {
 	Epoch    int64
 	Node     string
 	Instance string
+	// ChainOwner is the last cluster holder that evaluated this task's own
+	// directory (design §30). Empty until that write. Proxy, delegated,
+	// standalone and waiver writes do not change it. The file store never
+	// sets it.
+	ChainOwner string `json:"chain_owner,omitempty"`
 }
 
 // CheckFence is the one fence rule (design §8.3). lease is nil when the
@@ -98,6 +104,14 @@ func CheckFence(f health.Fence, lease *Lease, stored *Stored) error {
 			return ErrFenced
 		}
 	}
+	// Delegated chain writes are bound to the node the last holder recorded.
+	// fence_node is not that record: a proxy pass rewrites it (design §30).
+	// A newer task-lease epoch already returned ErrFenced above.
+	if f.Delegated {
+		if stored == nil || stored.ChainOwner == "" || stored.ChainOwner != f.Node {
+			return ErrFenced
+		}
+	}
 	return nil
 }
 
@@ -118,6 +132,13 @@ type Store interface {
 	// (keyset paging until done, no cap).
 	ListOpenFindingsForTask(ctx context.Context, taskID string) ([]health.Finding, error)
 	ListHealth(ctx context.Context) ([]health.TaskHealth, error)
+}
+
+// ChainOwnerStore reads task_health.chain_owner (design §30). A store
+// without it cannot delegate chain evaluation. The file store does not
+// implement it: standalone never delegates.
+type ChainOwnerStore interface {
+	ChainOwner(ctx context.Context, taskID string) (string, error)
 }
 
 // StoreClock is the database clock a HEALTH_STALE age is compared against

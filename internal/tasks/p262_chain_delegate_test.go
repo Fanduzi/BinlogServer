@@ -188,6 +188,10 @@ func TestP262StoppedLastOwnerOpensAndClosesChain(t *testing.T) {
 	if err := e2.SweepNow(ctx); err != nil {
 		t.Fatalf("proxy sweep: %v", err)
 	}
+	owner, err := env.hs.ChainOwner(ctx, env.task.ID)
+	if err != nil || owner != "n1" {
+		t.Fatalf("chain owner %q after proxy (%v), want n1", owner, err)
+	}
 	if err := os.Remove(filepath.Join(dir, "mysql-bin.000002.open.e3")); err != nil {
 		t.Fatal(err)
 	}
@@ -248,11 +252,103 @@ func TestP262NodeGoneChainUnknown(t *testing.T) {
 		t.Fatalf("proxy sweep: %v", err)
 	}
 	h, open, _ := env.hs.snapshot(env.task.ID)
-	if h.Status != health.StatusUnknown {
-		t.Fatalf("health %s, want UNKNOWN after the last owner is gone", h.Status)
+	if h.Status != health.StatusUnknown || h.UnknownDetail != "node gone" {
+		t.Fatalf("health %+v, want UNKNOWN (node gone)", h)
+	}
+	if len(h.Unknown) != 1 || h.Unknown[0] != health.ScopeChainLocal {
+		t.Fatalf("unknown scopes %+v, want chain.local", h.Unknown)
 	}
 	if open[p262LeftoverKey(env.task.ID)].Kind != health.SegmentEmptyLeftover {
 		t.Fatalf("chain finding %+v, want it still open", open)
+	}
+}
+
+func TestP262MissingHeartbeatIsNodeGone(t *testing.T) {
+	env := newP262(t)
+	data1 := t.TempDir()
+	p262WriteChain(t, filepath.Join(data1, env.task.ID), true)
+	_, e1 := env.node("n1", data1, nil)
+	ctx := context.Background()
+	if _, err := e1.EvaluateNow(ctx, env.task.ID); err != nil {
+		t.Fatalf("holder: %v", err)
+	}
+	env.release("n1", 1)
+	hb := &hbStore{fakeStore: env.store}
+	_, e2 := env.node("n2", t.TempDir(), hb)
+	if err := e2.SweepNow(ctx); err != nil {
+		t.Fatalf("proxy sweep: %v", err)
+	}
+	h, open, _ := env.hs.snapshot(env.task.ID)
+	if h.Status != health.StatusUnknown || open[p262LeftoverKey(env.task.ID)].Kind != health.SegmentEmptyLeftover {
+		t.Fatalf("health %+v open %+v, want UNKNOWN with the chain finding still open", h, open)
+	}
+}
+
+func TestP262HeartbeatErrorDoesNotDeclareGone(t *testing.T) {
+	env := newP262(t)
+	data1 := t.TempDir()
+	p262WriteChain(t, filepath.Join(data1, env.task.ID), true)
+	_, e1 := env.node("n1", data1, nil)
+	ctx := context.Background()
+	if _, err := e1.EvaluateNow(ctx, env.task.ID); err != nil {
+		t.Fatalf("holder: %v", err)
+	}
+	env.release("n1", 1)
+	hb := &hbStore{fakeStore: env.store, err: errors.New("heartbeat list failed")}
+	_, e2 := env.node("n2", t.TempDir(), hb)
+	if err := e2.SweepNow(ctx); err != nil {
+		t.Fatalf("proxy sweep: %v", err)
+	}
+	h, open, _ := env.hs.snapshot(env.task.ID)
+	if h.Status == health.StatusUnknown {
+		t.Fatalf("health %+v, a heartbeat read error must not declare the node gone", h)
+	}
+	if open[p262LeftoverKey(env.task.ID)].Kind != health.SegmentEmptyLeftover {
+		t.Fatalf("chain finding %+v, want it still open", open)
+	}
+}
+
+func TestP262SameNodeNewEpochIsEval(t *testing.T) {
+	env := newP262(t)
+	data := t.TempDir()
+	dir := filepath.Join(data, env.task.ID)
+	p262WriteChain(t, dir, true)
+	_, e1 := env.node("n1", data, nil)
+	ctx := context.Background()
+	if _, err := e1.EvaluateNow(ctx, env.task.ID); err != nil {
+		t.Fatalf("holder: %v", err)
+	}
+	env.release("n1", 1)
+	epoch, ok, err := env.leases.Acquire(ctx, env.task.ID, "n1", time.Hour)
+	if err != nil || !ok || epoch <= 1 {
+		t.Fatalf("acquire epoch=%d ok=%v err=%v", epoch, ok, err)
+	}
+	env.own("n1", epoch, StateRunning, TaskDesiredRun)
+	if err := os.Remove(filepath.Join(dir, "mysql-bin.000002.open.e3")); err != nil {
+		t.Fatal(err)
+	}
+	_, again := env.node("n1", data, nil)
+	h, err := again.EvaluateNow(ctx, env.task.ID)
+	if err != nil {
+		t.Fatalf("same node, new epoch: %v", err)
+	}
+	reason, found := env.log.closeReason(health.SegmentEmptyLeftover)
+	if !found || reason != health.ReasonEval {
+		t.Fatalf("close reason %q found=%v, want EVAL", reason, found)
+	}
+	if h.Status == health.StatusUnknown {
+		t.Fatalf("health %+v", h)
+	}
+}
+
+func TestP262LastOwnerDelegatedWriteAllowed(t *testing.T) {
+	lease := &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}
+	stored := &healthstore.Stored{Mode: health.FenceCluster, Epoch: 2, Node: "proxy", ChainOwner: "n1"}
+	if err := healthstore.CheckFence(health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "n1", Delegated: true}, lease, stored); err != nil {
+		t.Fatalf("last owner delegated write: %v", err)
+	}
+	if err := healthstore.CheckFence(health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "n9", Delegated: true}, lease, stored); !errors.Is(err, healthstore.ErrFenced) {
+		t.Fatalf("other node: %v, want ErrFenced", err)
 	}
 }
 

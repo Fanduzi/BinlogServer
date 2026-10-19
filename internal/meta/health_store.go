@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -23,6 +23,7 @@ import (
 )
 
 var _ healthstore.Store = (*MySQLTaskStore)(nil)
+var _ healthstore.ChainOwnerStore = (*MySQLTaskStore)(nil)
 var _ healthstore.StoreClock = (*MySQLTaskStore)(nil)
 var _ healthstore.WaiverStore = (*MySQLTaskStore)(nil)
 var _ healthstore.TransitionLister = (*MySQLTaskStore)(nil)
@@ -125,8 +126,8 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 	var stored healthstore.Stored
 	var mode string
 	var gen int64
-	if err = tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
-		Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation, chain_owner FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
+		Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen, &stored.ChainOwner); err != nil {
 		return out, err
 	}
 	stored.Mode = health.FenceMode(mode)
@@ -186,17 +187,21 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 		}
 	}
 	reasons, _ := json.Marshal(h.Reasons)
-	chainOwner := ""
-	if fence.Delegated {
-		chainOwner = fence.Node
-	}
 	status := string(h.Status)
 	if status == "" {
 		status = string(health.StatusUnknown)
 	}
+	// Only a cluster holder records the chain owner. Proxy and delegated
+	// writes leave the column alone (design §30): a proxy used to clear it.
+	chainSQL := "chain_owner = chain_owner"
+	args := []any{status, string(reasons), gen, fence.Node, fence.TaskEpoch, string(fence.Mode), fence.Instance, fence.TaskEpoch, fence.Node}
+	if fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {
+		chainSQL = "chain_owner = ?"
+		args = append(args, fence.Node)
+	}
+	args = append(args, taskID)
 	if _, err = tx.ExecContext(ctx, "UPDATE task_health SET status = ?, reasons = ?, evaluated_at = UTC_TIMESTAMP(6), generation = ?, owner = ?, owner_epoch = ?, "+
-		"fence_mode = ?, fence_instance = ?, fence_epoch = ?, fence_node = ?, chain_owner = ? WHERE task_id = ?",
-		status, string(reasons), gen, fence.Node, fence.TaskEpoch, string(fence.Mode), fence.Instance, fence.TaskEpoch, fence.Node, chainOwner, taskID); err != nil {
+		"fence_mode = ?, fence_instance = ?, fence_epoch = ?, fence_node = ?, "+chainSQL+" WHERE task_id = ?", args...); err != nil {
 		return out, err
 	}
 	err = tx.Commit()
@@ -258,6 +263,17 @@ func (s *MySQLTaskStore) ListOpenFindingsForTask(ctx context.Context, taskID str
 			return out, nil
 		}
 	}
+}
+
+// ChainOwner is the last cluster holder recorded for the task directory
+// (design §30). A missing row is an empty owner, not an error.
+func (s *MySQLTaskStore) ChainOwner(ctx context.Context, taskID string) (string, error) {
+	var owner string
+	err := s.db.QueryRowContext(ctx, "SELECT chain_owner FROM task_health WHERE task_id = ?", taskID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return owner, healthErr(err)
 }
 
 // StoreNow is the database clock HEALTH_STALE ages against (design §28).
@@ -433,8 +449,8 @@ func (s *MySQLTaskStore) waiverWrite(ctx context.Context, taskID string, fence h
 	var stored healthstore.Stored
 	var mode string
 	var gen int64
-	if err = tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
-		Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation, chain_owner FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
+		Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen, &stored.ChainOwner); err != nil {
 		return healthErr(err)
 	}
 	stored.Mode = health.FenceMode(mode)

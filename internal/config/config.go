@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -154,6 +154,10 @@ type HealthConfig struct {
 	// StaleAfterSec: HEALTH_STALE opens once a task's task_health row is
 	// this old (P2-6.1, design 0009 §28). 0 means 5×sweep. Not negative.
 	StaleAfterSec int
+	// NodeGoneAfterSec: on non-shared storage, chain.local becomes
+	// incomplete once the last chain owner's heartbeat is this old
+	// (P2-6.2, design 0009 §30). 0 means 3×sweep. Not negative.
+	NodeGoneAfterSec int
 	// SignalStaleAfterSec: an open signal row with no failure seen by this
 	// process for this long is shown as INFO (P2-4, default 86400).
 	SignalStaleAfterSec int
@@ -269,6 +273,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("health.no_progress_after_sec", 120)
 	v.SetDefault("health.signal_stale_after_sec", 86400)
 	v.SetDefault("health.stale_after_sec", 0)
+	v.SetDefault("health.node_gone_after_sec", 0)
 	v.SetDefault("health.upload_late_critical_after_sec", 86400)
 	v.SetDefault("health.object_list_interval_sec", 300)
 	v.SetDefault("health.object_list_limit", 10000)
@@ -428,6 +433,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			UnreachableAfterTaskSec:        healthTaskOverrides(v.GetStringMap("health.unreachable_after_task_sec")),
 			NoProgressAfterSec:             getInt(v, "health.no_progress_after_sec", "health_no_progress_after_sec"),
 			StaleAfterSec:                  getInt(v, "health.stale_after_sec", "health_stale_after_sec"),
+			NodeGoneAfterSec:               getInt(v, "health.node_gone_after_sec", "health_node_gone_after_sec"),
 			SignalStaleAfterSec:            getInt(v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
 			UploadLateCriticalAfterSec:     getInt(v, "health.upload_late_critical_after_sec", "health_upload_late_critical_after_sec"),
 			UploadLateCriticalAfterTaskSec: healthTaskOverrides(v.GetStringMap("health.upload_late_critical_after_task_sec")),
@@ -712,6 +718,9 @@ func validateHealthConfig(h HealthConfig) error {
 	}
 	if h.StaleAfterSec < 0 {
 		return fmt.Errorf("health.stale_after_sec must not be negative, got %d", h.StaleAfterSec)
+	}
+	if h.NodeGoneAfterSec < 0 {
+		return fmt.Errorf("health.node_gone_after_sec must not be negative, got %d", h.NodeGoneAfterSec)
 	}
 	for id, sec := range h.UnreachableAfterTaskSec {
 		if sec <= 0 {

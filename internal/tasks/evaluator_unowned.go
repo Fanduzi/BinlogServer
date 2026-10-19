@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the cluster lease manager, the task row and its task_leases row
-// output: the _health lease (one node per cluster, any role, renewed each sweep, TTL 3x sweep; a store error on that write is FINDINGS_PERSIST_FAILED on this node, §24.14, and a timeout or connection error is also a META_UNREACHABLE observation, §25.8 R1) and the proxy authority with which that node evaluates task.state of tasks whose row names no owner (FAILED, STOPPED, CREATED, unclaimed STARTING) or names an owner whose lease expired (DeadOwnerLister / ExpiredLeaseTaskLister, timed from when this node first saw it, §24.13): Fence{cluster, last lease epoch, Proxy} or Fence{never}; unownedFacts (task.state from the row only, no signals, no chain, no liveness)
+// output: the _health lease (one node per cluster, any role, renewed each sweep, TTL 3x sweep; a store error on that write is FINDINGS_PERSIST_FAILED on this node, §24.14, and a timeout or connection error is also a META_UNREACHABLE observation, §25.8 R1) and the proxy authority with which that node evaluates task.state of tasks whose row names no owner (FAILED, STOPPED, CREATED, unclaimed STARTING) or names an owner whose lease expired (DeadOwnerLister / ExpiredLeaseTaskLister, timed from when this node first saw it, §24.13): Fence{cluster, last lease epoch, Proxy} or Fence{never}; unownedFacts (task.state from the row only, no signals, no chain, no liveness). authorityFor asks delegatedFence first (§30)
 // pos: ADR 0009 phase 2 P2-6c (docs/design/0009-phase2-health-evaluator.md §24, #421): a cluster FAILED is never silent
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -194,6 +194,9 @@ func (e *Evaluator) mayEvaluate(t Task) bool {
 	if _, ok := e.fenceFor(t); ok {
 		return true
 	}
+	if e.isDelegated(t.ID) {
+		return true
+	}
 	return e.cfg.Cluster && e.healthHeld.Load() && (unowned(t) || !e.expiredSince(t.ID).IsZero())
 }
 
@@ -226,12 +229,23 @@ func (e *Evaluator) proxyFence(t Task) (health.Fence, bool) {
 }
 
 // authorityFor is the fence this node evaluates the task with: as the task
-// lease holder (fenceFor), or as the _health holder for an unowned task.
+// lease holder (fenceFor), as the last chain owner (delegatedFence, §30),
+// or as the _health holder for an unowned task. One node that is both the
+// _health holder and the last chain owner gets both flags on one fence.
 func (e *Evaluator) authorityFor(t Task) (health.Fence, bool) {
 	if f, ok := e.fenceFor(t); ok {
 		return f, true
 	}
-	return e.proxyFence(t)
+	d, dok := e.delegatedFence(t)
+	p, pok := e.proxyFence(t)
+	if dok && pok {
+		d.Proxy = true
+		return d, true
+	}
+	if dok {
+		return d, true
+	}
+	return p, pok
 }
 
 // unownedFacts is task.state for a proxy pass: the row as stored. The row

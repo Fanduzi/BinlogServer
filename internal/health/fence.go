@@ -39,7 +39,8 @@ type Fence struct {
 	// expired or released and still at that epoch.
 	Proxy bool
 	// Delegated: the last owner evaluates chain.* of its own directory for
-	// a task nobody holds (non-shared storage, D2); same lease check as Proxy.
+	// a task nobody holds (non-shared storage, §30). The lease epoch check
+	// matches Proxy; the node must also equal task_health.chain_owner.
 	Delegated bool
 }
 

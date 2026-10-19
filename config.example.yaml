@@ -81,6 +81,7 @@ health:
   evaluator: "off" # off | shadow | on
   sweep_interval_sec: 60
   stale_after_sec: 0 # 0 = 5x sweep; cluster HEALTH_STALE (needs evaluator: on)
+  node_gone_after_sec: 0 # 0 = 3x sweep; last chain owner gone -> UNKNOWN (needs evaluator: on)
   rehash_bytes_per_sec: 4194304 # global sha256 re-check budget (4 MiB/s)
 
 tracing:

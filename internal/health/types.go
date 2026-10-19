@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: one task's facts at one moment (task state, assurance chain verdicts, hot-path signals, store capability, waivers)
-// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29)
+// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30)
 // pos: the single lifecycle owner of findings (ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md); pure, no I/O, imports only assurance
 // note: if this file changes, update this header and module README.md.
 package health
@@ -277,6 +277,14 @@ type Facts struct {
 	// HealthKnownSince is when this holder first saw a listed task that
 	// had no health row. Age starts there until a row appears.
 	HealthKnownSince map[string]time.Time
+	// ChainOwnerChanged: this pass is a new cluster holder and the recorded
+	// chain_owner is some other node (design §30). Chain-directory findings
+	// close with OWNER_CHANGED even when the new directory is incomplete.
+	ChainOwnerChanged bool
+	// NodeGone: the last chain owner's heartbeat is older than
+	// node_gone_after (design §30). Chain-directory findings do not decide
+	// status; chain.local is unknown.
+	NodeGone bool
 }
 
 // Finding is a stored finding row as the evaluator sees it.
@@ -316,6 +324,9 @@ const (
 	ReasonConfig    = "CONFIG"
 	ReasonUpgrade   = "UPGRADE"
 	ReasonHandedOff = "HANDED_OFF"
+	// ReasonOwnerChanged: the task's chain now lives on another node
+	// (design §30). The closed finding described the previous directory.
+	ReasonOwnerChanged = "OWNER_CHANGED"
 )
 
 // Transition is one change to a finding. Generation is allocated by the
@@ -351,6 +362,10 @@ type TaskHealth struct {
 	Reasons     []Key
 	Unknown     []Scope
 	EvaluatedAt time.Time
+	// UnknownDetail is why status is UNKNOWN when a scope is incomplete for
+	// a reason the scope list does not name (design §30: "node gone").
+	// It is not stored.
+	UnknownDetail string
 }
 
 // Finding kinds (§6). The first sixteen are the v0.5.66 kinds.

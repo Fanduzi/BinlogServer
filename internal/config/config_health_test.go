@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML health blocks and the built-in defaults
-// output: proof that health.evaluator, sweep, rehash, signal, no-progress and stale_after keys load, and that illegal values are rejected (design 0009 §28 for stale_after)
+// output: proof that health.evaluator, sweep, rehash, signal, no-progress, stale_after and node_gone_after keys load, and that illegal values are rejected (design 0009 §28 for stale_after, §30 for node_gone_after)
 // pos: config tests for the health evaluator keys
 // note: if this file changes, update this header and module README.md.
 package config
@@ -122,5 +122,31 @@ func TestLoadConfig_HealthStaleAfter(t *testing.T) {
 	}
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("negative health.stale_after_sec accepted")
+	}
+}
+
+// P2-6.2: health.node_gone_after_sec defaults to 0 (3×sweep inside the
+// evaluator) and a negative value is rejected (design 0009 §30).
+func TestLoadConfig_HealthNodeGoneAfter(t *testing.T) {
+	setRequiredAuthEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Health.NodeGoneAfterSec != 0 {
+		t.Fatalf("default %d, want 0", cfg.Health.NodeGoneAfterSec)
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("health:\n  node_gone_after_sec: 180\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = LoadConfig(path); err != nil || cfg.Health.NodeGoneAfterSec != 180 {
+		t.Fatalf("override %v %+v", err, cfg.Health.NodeGoneAfterSec)
+	}
+	if err := os.WriteFile(path, []byte("health:\n  node_gone_after_sec: -1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("negative health.node_gone_after_sec accepted")
 	}
 }

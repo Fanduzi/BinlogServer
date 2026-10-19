@@ -1,3 +1,8 @@
+// Package healthstore_test provides module-level functionality for healthstore_test.
+// input: a temp .health.json and health.Fence values
+// output: the file-store contract, restart and pending persistence, and the CheckFence table including delegated chain-owner cases (design §30)
+// pos: tests for the standalone file store and the shared fence rule
+// note: if this file changes, update this header and module README.md.
 package healthstore_test
 
 import (
@@ -72,6 +77,10 @@ func TestCheckFence(t *testing.T) {
 		// epoch, so a proxy in another node's name is still fenced.
 		{"proxy expired, stored same epoch other node", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "h", Proxy: true}, &healthstore.Lease{Owner: "n2", Epoch: 2, Expired: true}, st(health.FenceCluster, 2, "n2"), healthstore.ErrFenced},
 		{"proxy on a live lease", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "a", Proxy: true}, &healthstore.Lease{Owner: "a", Epoch: 2}, nil, healthstore.ErrFenced},
+		{"delegated released, chain owner", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "n1", Delegated: true}, &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}, &healthstore.Stored{Mode: health.FenceCluster, Epoch: 2, Node: "proxy", ChainOwner: "n1"}, nil},
+		{"delegated released, empty chain owner", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "n1", Delegated: true}, &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}, st(health.FenceCluster, 2, "n1"), healthstore.ErrFenced},
+		{"delegated released, other chain owner", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "n9", Delegated: true}, &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}, &healthstore.Stored{Mode: health.FenceCluster, Epoch: 2, Node: "n1", ChainOwner: "n1"}, healthstore.ErrFenced},
+		{"delegated no stored row", health.Fence{Mode: health.FenceCluster, TaskEpoch: 2, Node: "n1", Delegated: true}, &healthstore.Lease{Owner: "", Epoch: 2, Expired: true}, nil, healthstore.ErrFenced},
 		{"never no row", health.Fence{Mode: health.FenceNeverLeased, Node: "h"}, nil, nil, nil},
 		{"never with row", health.Fence{Mode: health.FenceNeverLeased, Node: "h"}, &healthstore.Lease{Owner: "a", Epoch: 1}, nil, healthstore.ErrFenced},
 		{"standalone first", health.Fence{Mode: health.FenceStandalone, Node: "n", Instance: "i"}, nil, nil, nil},

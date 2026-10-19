@@ -8,6 +8,7 @@
 // note §27 (#436/#441): ErrSchemaAbsent while the evaluator is on opens HEALTH_STORE_UNAVAILABLE from memory; chainFactsInto reads checkpoint, fingerprint and order under Scheduler.TryHoldChain (bounded by ChainLockWait; the checkpoint read by the internal read timeout, a failed read leaves chain.local incomplete) and releases it before CheckBody; every sweep tick probes the health store (§27.8)
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // note P2-6.1 (§28): while this node holds _health it also evaluates _cluster, and only for HEALTH_STALE (task.state, never fence, epoch 0); standalone _cluster is unchanged
+// note P2-6.2 (§30): a released last owner evaluates chain.local with Delegated; a proxy pass does not read the directory; NodeGoneAfter 0 means 3×Sweep
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -123,6 +124,8 @@ type EvaluatorConfig struct {
 	NoProgressAfter time.Duration
 	// StaleAfter is health.stale_after_sec (design §28). 0 means 5×Sweep.
 	StaleAfter time.Duration
+	// NodeGoneAfter is health.node_gone_after_sec (design §30). 0 means 3×Sweep.
+	NodeGoneAfter time.Duration
 	// MetaUnreachableAfter is how long metadata store failures last before
 	// META_UNREACHABLE opens (default 10s, design §25 D2).
 	MetaUnreachableAfter time.Duration
@@ -217,6 +220,11 @@ type Evaluator struct {
 	// healthKnown (§28): when this holder first saw a task that has no
 	// task_health row. Process-local; a row replaces it.
 	healthKnown map[string]time.Time
+	// delegated (§30): tasks whose chain_owner is this node, so a released
+	// lease is still ours to evaluate. A holder or delegated write sets it;
+	// a fenced delegated write clears it. mayEvaluate reads it and does not
+	// touch the store.
+	delegated map[string]bool
 
 	evaluations, applied, errs, shadowed atomic.Int64
 }
@@ -257,7 +265,7 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
 		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
-		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}, healthKnown: map[string]time.Time{}}
+		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}, healthKnown: map[string]time.Time{}, delegated: map[string]bool{}}
 	if s != nil {
 		s.healthEval.Store(e)
 		s.setMetaReachNode(cfg.NodeID, cfg.MetaUnreachableAfter)
@@ -710,9 +718,14 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	}
 	// FenceNeverLeased would otherwise look like a proxy pass. The stale
 	// pass must not: that would run unownedFacts and the signal settles.
-	proxy := !clusterStale && (fence.Proxy || fence.Mode == health.FenceNeverLeased)
+	// proxyLike includes the never-leased fence: task.state only, no signals.
+	// delegated is the last chain owner (design §30). A relay write is not
+	// latched: the next pass derives the fence again.
+	proxyLike := !clusterStale && (fence.Proxy || fence.Mode == health.FenceNeverLeased)
+	delegated := !clusterStale && fence.Delegated
+	relay := proxyLike || delegated
 	e.mu.Lock()
-	if epoch, stopped := e.fenced[id]; stopped && epoch == fence.TaskEpoch && !proxy {
+	if epoch, stopped := e.fenced[id]; stopped && epoch == fence.TaskEpoch && !relay {
 		e.mu.Unlock()
 		return health.TaskHealth{}, errNotResponsible
 	}
@@ -729,8 +742,23 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		if err := e.staleFacts(ctx, facts); err != nil {
 			return health.TaskHealth{}, err
 		}
-	case proxy:
+	case proxyLike && delegated:
+		unownedFacts(task, facts, e.expiredSince(task.ID))
+		// chainFacts, not chainFactsInto: an uploader must not replace Produced.
+		if chain := e.chainFacts(task, now); chain != nil {
+			facts.Chain = chain
+			facts.Complete[health.ScopeChainLocal] = true
+		}
+		facts.Produced[health.ScopeChainLocal] = true
+	case proxyLike:
 		unownedFacts(task, facts, e.expiredSince(task.ID)) // P2-6c: task.state only (§24.2)
+		e.noteNodeGone(ctx, facts)
+	case delegated:
+		if chain := e.chainFacts(task, now); chain != nil {
+			facts.Chain = chain
+			facts.Complete[health.ScopeChainLocal] = true
+		}
+		facts.Produced = map[health.Scope]bool{health.ScopeChainLocal: true}
 	case isCluster:
 		facts.Complete[health.ScopeChainLocal] = true // _cluster has no chain
 	default:
@@ -738,11 +766,12 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 			facts.Chain = chain
 			facts.Complete[health.ScopeChainLocal] = true
 		}
+		e.noteOwnerChanged(ctx, fence, facts)
 	}
-	if !gone && !proxy && !clusterStale {
+	if !gone && !relay && !clusterStale {
 		e.signalFacts(ctx, task, isCluster, facts)
 	}
-	if !proxy && !clusterStale {
+	if !relay && !clusterStale {
 		e.fillStoreFacts(ctx, facts)
 	}
 	store := e.cfg.Store
@@ -924,17 +953,23 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 		delete(e.pending, id)
 		delete(e.unsaved, id)
 		e.mu.Unlock()
+		if fence.Mode == health.FenceCluster && (!fence.Proxy || fence.Delegated) {
+			e.noteDelegated(id, true)
+		}
 		e.afterApply(ts)
 		return nil
 	case errors.Is(err, healthstore.ErrFenced):
 		e.mu.Lock()
 		delete(e.pending, id)
-		if !fence.Proxy && fence.Mode != health.FenceNeverLeased {
-			// A proxy authority is derived again on every pass (the
-			// lease may be released a moment later), so it is not latched.
+		if !fence.Proxy && !fence.Delegated && fence.Mode != health.FenceNeverLeased {
+			// A proxy or delegated authority is derived again on every
+			// pass, so it is not latched.
 			e.fenced[id] = fence.TaskEpoch
 		}
 		e.mu.Unlock()
+		if fence.Delegated {
+			e.noteDelegated(id, false)
+		}
 		return err
 	}
 	if errors.Is(err, healthstore.ErrSchemaAbsent) {

@@ -1,6 +1,6 @@
 // Package storetest provides module-level functionality for storetest.
 // input: a healthstore.Store constructor and, for stores with a lease table, a hook that sets a task_leases row
-// output: Run, the contract every Store must pass (design §14 P2-2): store-allocated generations, digest replay, complete paging, standalone and cluster fences, 1000-way concurrent writers
+// output: Run, the contract every Store must pass (design §14 P2-2): store-allocated generations, digest replay, complete paging, standalone and cluster fences, 1000-way concurrent writers; a cluster storm seeds chain_owner with an empty holder write first (§30)
 // pos: shared contract tests for the file store and the MySQL store
 // note: if this file changes, update this header and module README.md.
 package storetest
@@ -159,6 +159,12 @@ func Run(t *testing.T, h Harness) {
 		// owner (cluster), or two goroutines of one standalone node.
 		proxy, deleg := standalone("n1", "i1"), standalone("n1", "i1")
 		if h.SetLease != nil {
+			// A delegated write needs the chain owner a holder write records
+			// (design §30). Empty transitions leave generation at 0.
+			h.SetLease(t, task, "n1", 3, false)
+			if _, err := s.ApplyTransitions(ctx, task, health.Fence{Mode: health.FenceCluster, TaskEpoch: 3, Node: "n1"}, nil, th(task, health.StatusHealthy)); err != nil {
+				t.Fatalf("seed chain owner: %v", err)
+			}
 			h.SetLease(t, task, "n1", 3, true)
 			proxy = health.Fence{Mode: health.FenceCluster, TaskEpoch: 3, Node: "n1", Proxy: true}
 			deleg = health.Fence{Mode: health.FenceCluster, TaskEpoch: 3, Node: "n1", Delegated: true}

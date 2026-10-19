@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a Registry, the stored open findings of one task, and that task's Facts
-// output: Desire (findings that should be open), Reconcile (transitions; a signal's CLOSE carries SignalState.SuccessFactAt when the success named one, §25.8 R3), HealthOf (verdict), Candidates and Pending (the two-pass Confirm of design §20.3: a Confirm kind opens only when the previous pass derived it too)
+// output: Desire (findings that should be open), Reconcile (transitions; a signal's CLOSE carries SignalState.SuccessFactAt when the success named one, §25.8 R3; a chain-directory finding closes with OWNER_CHANGED when Facts.ChainOwnerChanged, §30), HealthOf (verdict; Facts.NodeGone forces chain.local unknown and ignores chain-directory severity, §30), Candidates and Pending (the two-pass Confirm of design §20.3: a Confirm kind opens only when the previous pass derived it too)
 // pos: the one lifecycle function; pure and idempotent
 // note: if this file changes, update this header and module README.md.
 package health
@@ -174,14 +174,22 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 	desired, waivedKeys := r.derive(f, openKeys)
 	var out []Transition
 	seen := map[Key]bool{}
+	// ownerChanged is not in seen: a still-desired instance of the same key
+	// opens in this pass (design §30).
+	ownerChanged := map[Key]bool{}
 	for _, o := range open {
 		spec, ok := r[o.Kind]
 		if !ok || !spec.Managed || o.TaskID != f.TaskID {
 			continue
 		}
 		key := o.Key()
-		if seen[key] {
+		if seen[key] || ownerChanged[key] {
 			continue // a duplicate stored row for the same key: one transition per key
+		}
+		if f.ChainOwnerChanged && chainDirectoryOnly(spec) {
+			ownerChanged[key] = true
+			out = append(out, closeOf(o, spec, ReasonOwnerChanged, f))
+			continue
 		}
 		seen[key] = true
 		if want, ok := desired[key]; ok {
@@ -237,8 +245,42 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			out = append(out, Transition{Key: key, Op: OpOpen, Reason: ReasonEval, At: f.Now, FactAt: factAt(want, f), KindVersion: r[key.Kind].Version, Instance: want})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return lessKey(out[i].Key, out[j].Key) })
+	sort.SliceStable(out, func(i, j int) bool {
+		if lessKey(out[i].Key, out[j].Key) {
+			return true
+		}
+		if lessKey(out[j].Key, out[i].Key) {
+			return false
+		}
+		return opRank(out[i].Op) < opRank(out[j].Op)
+	})
 	return out, desired
+}
+
+// chainDirectoryOnly: the finding describes the task directory (chain.local
+// and maybe chain.objects), not task.state or signals. UPLOAD_UNVERIFIED
+// is not in this set (design §30).
+func chainDirectoryOnly(spec KindSpec) bool {
+	if len(spec.Scopes) == 0 {
+		return false
+	}
+	for _, s := range spec.Scopes {
+		if s != ScopeChainLocal && s != ScopeChainObjects {
+			return false
+		}
+	}
+	return true
+}
+
+func opRank(op Op) int {
+	switch op {
+	case OpClose:
+		return 0
+	case OpOpen:
+		return 2
+	default:
+		return 1
+	}
 }
 
 func closeOf(o Finding, spec KindSpec, reason string, f *Facts) Transition {
@@ -282,6 +324,11 @@ func (r Registry) HealthOf(open []Finding, f *Facts) TaskHealth {
 	h := TaskHealth{TaskID: f.TaskID, Status: StatusHealthy, EvaluatedAt: f.Now}
 	worst := 0
 	for _, o := range open {
+		if f.NodeGone {
+			if spec, ok := r[o.Kind]; ok && chainDirectoryOnly(spec) {
+				continue // the directory is on a node that is gone (§30)
+			}
+		}
 		if rk := o.Severity.rank(); rk >= Warning.rank() {
 			if rk > worst {
 				worst, h.Reasons = rk, nil
@@ -306,6 +353,9 @@ func (r Registry) HealthOf(open []Finding, f *Facts) TaskHealth {
 			}
 		}
 	}
+	if f.NodeGone {
+		scopes[ScopeChainLocal] = true
+	}
 	for s := range scopes {
 		h.Unknown = append(h.Unknown, s)
 	}
@@ -318,6 +368,9 @@ func (r Registry) HealthOf(open []Finding, f *Facts) TaskHealth {
 		h.Status = StatusDegraded
 	case len(h.Unknown) > 0:
 		h.Status = StatusUnknown
+	}
+	if f.NodeGone && h.Status == StatusUnknown {
+		h.UnknownDetail = "node gone"
 	}
 	return h
 }
