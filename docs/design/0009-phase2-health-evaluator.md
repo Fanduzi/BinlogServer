@@ -1332,6 +1332,7 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
   - down：`DROP COLUMN retention_removed_at;`
 - `listBinlogFiles` 的 SELECT 不改（sqlmock 钉着那条语句）。标记用旁路查询：`ListRetentionMarkers`（本任务 `retention_removed_at IS NOT NULL` 的 `source_file, epoch`）和单行是否已标记。
 - 1054：进程内记住缺列，打**一条** WARN，之后每次 sweep / 下一次写入再探。缺列是 schema 6–9 的支持路径，**不**对每个文件开 `RETENTION_RECORD_FAILED`。幂等退化为进程内集合；重启后同一文件可能再写一条 `RETENTION_REMOVED`。事件是审计，finding 不因此常开。
+  - 评审定案（§26.9 (b)）：没有 000010 时，每次进程重启后的第一轮回补会给本目录里每一条「本地已删、仍在桶窗口内、checksum match 的 `UPLOADED` 行」各再写一条 `RETENTION_REMOVED`，不只是刚删的那个文件。重复的是审计事件，不是 finding，也不改任何备份状态，所以接受；运维要去重时按 `(task_id, message)` 取最早一条，或者 `./migrate up` 到 10。
 - 顺序：先写事件，再写标记。事件失败则标记保持空，下一轮重试，审计不会丢。事件成功、标记失败：下一轮会再写一条事件然后写上标记（重复一条，好过丢掉）。标记已有则跳过事件。
 - 回补：之后的一轮里，本任务目录下 `file_path` 已不在、仍在桶窗口内、checksum 为 match 的 `UPLOADED` 行，标记为空，补事件和标记。覆盖「删完文件、记下之前崩溃」以及旧二进制已经删掉的文件。升级后第一轮可能集中写一批事件，和 #209「旧行下一轮清掉」同一类。`file_path` 不在本目录的行（别的 worker、只有对象）不标。
 
@@ -1378,6 +1379,13 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
 
 卡住窗口里已经写成 NULL 的旧行不回填。
 
+不回填之后下游是否会把这些行看错（评审定案 §26.9 (c)）：
+- 复核器（P2-3）的预期校验和是「目录行 sha256，否则任务目录的 `.seal-sha256` 账本」。账本在封存时由 `withSealFacts` 写，不依赖 000008，所以卡住窗口里封存的段照样有预期值、照样复核；两边都没有时复核器把这一段算作不可复核（`unavailable`），与 000008 之前一致，不算通过。
+- `/window`、`/replay` 和恢复计划从段文件本身读事件头时间和 GTID（`assurance.WindowOf`），不读 `first_event_at` / `last_event_at`，NULL 不改变可恢复窗口。
+- legacy 判断（P2-5.1 的本地大小比对）看的是 `.seal-sha256` 有没有这一行，不看目录行的 sha256。
+- 对象一致性看 `checksum`（`match` / `mismatch`）与对象列举，不看 sha256。
+所以这些 NULL 只是目录里少了冗余的封存事实，没有哪条路径因此把段判成正常或损坏。`SEAL_FACTS_ABSENT` 关闭的那一条 CLOSE 不声称补齐了旧行；回填留到以后单独做（§26.8）。
+
 ### 26.6 栅栏（§23 / §24）
 
 保留跑在 `openBinlogWriter` 里，run 的 context 上有 `FenceIdentity`（standalone 与后台补传没有）。
@@ -1389,7 +1397,7 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
 | 封存事实 UPDATE | 同上，仍是 upsert 提交之后的第二条语句（不并进 upsert 事务） |
 | 删本地文件之前 | `fenceWrite`（本地 lease 时钟）。拒绝则返回 `ErrWriteFenced`，不删、不记 S6 |
 
-任务行和 finding 的栅栏不变。`ErrWriteFenced` 不打开 `RETENTION_RECORD_FAILED`。有令牌的其它 `AppendEvent` 调用方一并进 `execUnderFence`（run 里的事件不应在丢掉 lease 之后落地）；没有令牌的调用方语句不变。
+任务行和 finding 的栅栏不变。`ErrWriteFenced` 不打开 `RETENTION_RECORD_FAILED`。有令牌的其它 `AppendEvent` 调用方一并进 `execUnderFence`（run 里的事件不应在丢掉 lease 之后落地）；没有令牌的调用方语句不变：仍是一条 INSERT、不重试、出错原样返回（调度器的有序事件通道和 finding 汇都没有令牌，重试会让一次 meta 中断把通道堵住更久）。评审定案（§26.9 (d)）：今天只有 `run` 的 context 带令牌（`mysql_runner.go` 的 `WithFenceIdentity` 是唯一来源），里面写事件的只有 `RETENTION_REMOVED` 与 `RETENTION_SKIPPED_NOT_UPLOADED`；调度器的事件（`TASK_LEASE_LOST`、`SOURCE_SWITCHOVER`、状态事件）和 finding 汇的 `FINDING_*` 事件都用 `context.Background()` 派生的 context，不会因为 lease 已经释放而被挡掉。令牌只对同一个任务生效（`id.TaskID != taskID` 时走单条语句）。
 
 ### 26.7 测试（先红）
 
@@ -1405,3 +1413,10 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
 - 把整段桶过期改成留行。
 - 回填卡住窗口里已经写成 NULL 的封存事实。
 - `I6_MISSING_ROW`、集群模式下链 kind 的委派。
+
+### 26.9 评审定案（2026-10-19）
+
+- (a) 带标记的行，对象被完整列举确认不在时仍开 `SEGMENT_MISSING#object`：保留。标记只说明本地副本是保留期删的，不说明桶里那份还在；不开就是静默丢备份。
+- (b) 没有 000010 时重启后会重复写 `RETENTION_REMOVED`：接受，见 §26.2。
+- (c) 卡住窗口里的 NULL 不回填：下游不会因此误判，见 §26.5 末尾。
+- (d) `AppendEvent` 有令牌时走栅栏：只有 run 里的保留事件带令牌，见 §26.6；没有令牌时保持单条语句、不重试。
