@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.73] - 2026-10-19
+
+发布说明：`docs/releases/v0.5.73.md`。没有新迁移（schema 仍为 9，`minRequiredSchemaVersion` 仍为 6），没有新配置项。`/api/health` 的有界读在任何模式下都生效；`META_UNREACHABLE` 的 ping 与评估读两路观测需要 `health.evaluator: on`（v0.5.x 默认 `off`）。
+
 ### Fixed
 
 - #427（P2）：meta 库被黑洞（连接挂住而不是被拒绝）时，所有节点的 `/api/health` 一直不返回，恢复后也没有任何 finding，中断无法审计。现在 `/api/health` 的全部 meta 读共用 1s 预算、同一时刻只有一个读，超时就用内存里的 finding 返回 503 `degraded`，原因含 `META_UNREACHABLE`；评估器管理的 finding 读不到时写明不可读，不再从汇总里消失。
@@ -21,6 +25,12 @@ Maintenance rules:
 ### Added
 
 - #427：新的 CRITICAL finding `META_UNREACHABLE`（task `_cluster`，subject 为节点 id，每个节点各报各的）：本节点对 meta 的 ping（每 1s，限时 1s，独立 goroutine，评估循环卡住也照发）、`/api/health` 读、评估器 sweep 的 lease 调用或评估读，从第一次失败算起连续失败满 10s 时打开，下一次应答时关闭；恢复时才满 10s 的中断（例如 12s 的暂停）也补记一次开与关，所以任何约 11s 以上的中断每个节点都会留下记录；只读（1290）、权限等 SQL 错误不算。standalone + meta 时一次中断在恢复后留下 OPEN（`fact_at` = 第一次失败）与 CLOSE（`fact_at` = 第一次应答）两条转移；集群里（P2-6 前 `_cluster` 走旧 finding 路径）留下一行 `first_seen` = 第一次失败、`resolved_at` = 第一次应答的已关闭 finding。需要 `health.evaluator: on` 才有 ping 与评估读两路观测；`/api/health` 的有界读在任何模式下都生效。
+
+### Known issues
+
+- P3：连续两次相隔很近的 meta 中断（15s / 间隔 10s / 15s）后，meta 恢复约 35s 时 `TASK_PERSIST_FAILED`（state LEASE_DEGRADED not written）、`EVENT_PERSIST_FAILED`、`TASK_LEASE_DEGRADED` 仍打开，`/api/health` 仍 degraded，任务已 RUNNING 并在写入；不确定之后是否自行关闭。单次中断后约 4s 内关闭。
+- P3：standalone 下 `META_UNREACHABLE` 只写 `finding_transitions` 的 OPEN/CLOSE，不写 `FINDING_RESOLVED` 事件。
+- `/api/findings` 还没有读超时（P2-7）。
 
 ## [v0.5.72] - 2026-10-19
 
