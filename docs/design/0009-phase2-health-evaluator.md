@@ -1543,3 +1543,30 @@ Swagger 的 `/api/health` 是开放 object，finding 的 `kind` 也不是枚举�
 - 新的 Prometheus 指标名、新配置、新迁移、swagger 重生成。
 - P2-6 让 `_health` 持有者评估 `_cluster` 之后，集群这条改为 OPEN/CLOSE 转移（与 `META_UNREACHABLE` 同一笔账，到那时再改）。
 
+
+### 27.8 评审定案（2026-10-19）
+
+评审 PR #444 时按崩溃点和锁的两头又过了一遍。结论和要改的三处：
+
+**崩溃点（轮转）。** 封存先把 `.open` 改名并写一行 `UPLOAD_FAILED`（`sealedUploadPending`），然后在锁内写下一个文件的 checkpoint、创建 `.open`，放锁，再上传。
+
+| 崩溃在 | 磁盘 / 元数据 | 重启后 | 丢 / 重 |
+|---|---|---|---|
+| 封存之后、checkpoint 提交之前 | 封存段 + `UPLOAD_FAILED` 行，checkpoint 仍在旧文件 | 与 main 相同（本步没动这一段）；#391 让封存段的事务进续传集合 | 不变 |
+| checkpoint 提交之后、`.open` 创建之前 | checkpoint = `next:4`，GTID 集合含已封存段 | 从 `next:4` 续传并创建文件；启动后第一轮若早于打开，可开一条短 `CHECKPOINT_AHEAD`，打开后关 | 无 |
+| `.open` 创建之后、上传之前 / 上传中 | 只有 magic 的 `.open`，行仍是 `UPLOAD_FAILED` | 只有 magic 的 open 段从保存的 checkpoint 续传；后台重试上传并校验该行 | 无；不会有「已封存、没上传、也没记录」的段 |
+
+上传在同一个 goroutine 里、`openAt` 之后同步执行，下一次轮转要等它返回，所以放锁不会让封存乱序。上传报错时 run 照旧返回错误，行仍是 `UPLOAD_FAILED`。
+
+**R1 评估器不等轮转。** 本步之前评估器从不等复制热路径。加了 `HoldChain` 之后，轮转若卡在锁内（checkpoint 写在元数据上挂住、`openAt` 卡在磁盘上），评估器的 worker 会一直等这把锁。这一轮还没走到 `signalFacts`，所以这个任务的 `TASK_NO_PROGRESS` 永远判不出来：正好是轮转卡住时该报的那条。改为：评估器最多等 `ChainLockWait`（默认 2 秒）。等不到就把这一轮的 `chain.local` 记为不完整（UNKNOWN，不关已开的链 finding），其余 scope 照常评估。轮转一侧仍是阻塞取锁。
+
+**R2 锁内的 checkpoint 读有上限。** `assuranceCheckpoint` 原来用 `context.Background()` 读元数据。它在锁内，元数据挂住时会把轮转堵在锁上，复制热路径因此等评估器。改为 scheduler 的内部读超时（`meta.timeout.read`）。读失败（超时、连接错误）时同样记 `chain.local` 不完整，不再当作「没有 checkpoint」去跑 I5：那样会把一条真的 `CHECKPOINT_AHEAD` 关掉。`ErrTaskNotFound` 仍按没有 checkpoint 处理。
+
+**R3 每一轮扫描都探健康存储。** `probeHealthStore` 原来只在 `Run` 开始时跑一次，其后靠任务评估的读写发现缺口。集群里 `_cluster` 不归评估器，一个不负责任何任务的节点（没有 owner 的任务、没拿 `_health`）在线 `goto 8` 之后永远发现不了，`/api/health` 一直是 ok；反过来，它若在 schema 8 上启动，`up` 之后也永远关不掉，直到重启。改为 `Run` 的每个 Sweep tick 先探一次（有上限的 `ListHealth`），再 `markResponsible`。
+
+**shadow。** 只打一次 WARN，不 degraded。shadow 下评估器不拥有 finding，旧路径照常告警，这里不藏真实故障，按 D2 保持。
+
+测试（先红）：
+- 测试持着 `HoldChain` 不放时，`chainFacts` 在 `ChainLockWait` 量级内返回 nil；`SweepNow` 照样完成。
+- checkpoint 读一直挂住到 ctx 结束时，`chainFacts` 在读超时量级内返回 nil，且锁已放（随后 `HoldChain` 立刻拿到）。
+- 运行中的评估器在 `Run` 之后健康存储改为 `ErrSchemaAbsent`、没有任何任务时，一个 Sweep 之内 `/api/health` degraded；改回可写后一个 Sweep 之内恢复。
