@@ -14,6 +14,7 @@ P2-5.4（设计 0009 §26，#341）：配了上传时，本地保留删掉仍在
 - `run_start.go`: `run` 第 1 阶段（ADR 0008）：`resolveRunStart` 在开 dump 前决定起点（LATEST 锚点、本地续传、接管、已执行 GTID 种子与打开尾部对账、1236 回退集合），并在损坏目录上返回 `STORAGE_INCONSISTENT`。
 - `run_dump.go`: 第 2、5 阶段：先 KILL 上次留下的 dump 再开 dump；`readEvent` 的 1236 GTID 回退与按落盘位点重连；换源后的 GTID 重开；`pump` 是异步与半同步共用的循环，`streamEnded` 把取消归为正常结束。
 - `run_segment.go`: 第 3 阶段：`openSegment` 追加（先 flush 再写 checkpoint 和 OPEN 行）、挂起 format description、换源封存，以及 rotate 的封存/丢弃/释放、下一文件 checkpoint、上传和打开下一文件。
+- `rotate_checkpoint_snapshot_test.go`: §27（#441）。rotate 把 checkpoint 写成下一个文件时该文件还不在；上传进行中时下一个 open 文件必须已经在目录里，评估器才不会在这个窗口看到 `CHECKPOINT_AHEAD`。
 - `run_events.go`: 第 4 阶段：`handleEvent` 对单个事件的处理与 `handleRotate` 的判定。
 - `run_phases_test.go`: 不连源库直接构造各阶段的接口测试。
 - `resume_reconcile_test.go`: 打开分段里有 checkpoint 之后的完整事务、末尾没写完的事务、截不掉的事务时的续传；GTID 空洞、乱序、多个 UUID、事务中途断线重连、重发的文件头都不失败。
