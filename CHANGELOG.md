@@ -12,6 +12,16 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- #427（P2）：meta 库被黑洞（连接挂住而不是被拒绝）时，所有节点的 `/api/health` 一直不返回，恢复后也没有任何 finding，中断无法审计。现在 `/api/health` 的全部 meta 读共用 1s 预算、同一时刻只有一个读，超时就用内存里的 finding 返回 503 `degraded`，原因含 `META_UNREACHABLE`；评估器管理的 finding 读不到时写明不可读，不再从汇总里消失。
+- 健康存储写 `task_findings`、`finding_transitions`、`task_health` 的时间改为 UTC（`UTC_TIMESTAMP(6)`），以前用会话时区的 `NOW(6)`，与旧 finding 路径写入的 UTC 混在一起；评估器写入的 finding 行 `first_seen` 现在是 OPEN 的事实时间（第一次失败），`resolved_at` 是 CLOSE 的事实时间，不再是写入时刻。已有的旧行不迁移。
+- 旧 finding 路径（`task_findings` 的 legacy upsert）：已解决的行再次打开时 `first_seen` 与 `count` 取新值，不再沿用上一次的首见时间、次数累加。集群里 `META_UNREACHABLE`（`_cluster`）每次中断另写一条（只写 RESOLVED）`task_events`（`task_id = _cluster`，`FINDING_RESOLVED META_UNREACHABLE <node>`，`event_time` = 恢复时刻，detail 写明起止），下一次中断复用同一行后上一次仍有记录；节点日志在打开、关闭时各一行。
+
+### Added
+
+- #427：新的 CRITICAL finding `META_UNREACHABLE`（task `_cluster`，subject 为节点 id，每个节点各报各的）：本节点对 meta 的 ping（每 1s，限时 1s，独立 goroutine，评估循环卡住也照发）、`/api/health` 读、评估器 sweep 的 lease 调用或评估读，从第一次失败算起连续失败满 10s 时打开，下一次应答时关闭；恢复时才满 10s 的中断（例如 12s 的暂停）也补记一次开与关，所以任何约 11s 以上的中断每个节点都会留下记录；只读（1290）、权限等 SQL 错误不算。standalone + meta 时一次中断在恢复后留下 OPEN（`fact_at` = 第一次失败）与 CLOSE（`fact_at` = 第一次应答）两条转移；集群里（P2-6 前 `_cluster` 走旧 finding 路径）留下一行 `first_seen` = 第一次失败、`resolved_at` = 第一次应答的已关闭 finding。需要 `health.evaluator: on` 才有 ping 与评估读两路观测；`/api/health` 的有界读在任何模式下都生效。
+
 ## [v0.5.72] - 2026-10-19
 
 发布说明：`docs/releases/v0.5.72.md`。新配置项：`health.no_progress_after_sec`（默认 `120`，`0` 为默认值，不可为负）。没有新迁移（schema 仍为 9，`minRequiredSchemaVersion` 仍为 6）。`TASK_FAILED`（无主任务）、`TASK_NO_PROGRESS` 和 `_health` lease 都由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）。

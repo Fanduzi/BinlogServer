@@ -398,6 +398,11 @@ type Scheduler struct {
 	findings *findingBook
 	// healthEval is the ADR 0009 phase 2 evaluator, nil until NewEvaluator.
 	healthEval atomic.Pointer[Evaluator]
+	// metaReach is this node's META_UNREACHABLE streak (design 0009 §25).
+	metaReach metaReach
+	// healthReadCur is the one in-flight HealthSummary read (single-flight).
+	healthReadMu  sync.Mutex
+	healthReadCur *healthRead
 	// liveness is the per-task source liveness clock (liveness.go).
 	liveness    *livenessBook
 	unpublished map[string]struct{}

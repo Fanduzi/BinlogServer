@@ -50,7 +50,7 @@ func isSignalKind(k FindingKind) bool {
 	case health.TaskPersistFailed, health.MetadataWriteBlocked, health.EventPersistFailed, health.EventReadFailed,
 		health.DumpCleanupPersistFailed, health.DiskListFailed, health.UploadUnverified, health.UploadRecordFailed,
 		health.RetentionRecordFailed, health.RetryLoopFailed, health.OpenTailCutFailed, health.MetricSourceFailed,
-		health.TaskRecordsFailed:
+		health.TaskRecordsFailed, health.MetaUnreachable:
 		return true
 	}
 	return false
@@ -82,6 +82,13 @@ func normTask(id string) string {
 // Signal records one observation of a signal kind. Never blocks on I/O;
 // safe with s.mu held.
 func (e *Evaluator) Signal(taskID string, kind FindingKind, subject string, ok bool, detail string) {
+	e.signalAt(taskID, kind, subject, ok, detail, time.Time{})
+}
+
+// signalAt is Signal with the observation's fact time when the caller saw
+// it earlier than now: a failure opens at it (META_UNREACHABLE opens at the
+// first failure, §25), a success closes at it (§25.8 R3).
+func (e *Evaluator) signalAt(taskID string, kind FindingKind, subject string, ok bool, detail string, factAt time.Time) {
 	if e == nil || e.cfg.Mode == EvaluatorOff {
 		return
 	}
@@ -105,11 +112,18 @@ func (e *Evaluator) Signal(taskID string, kind FindingKind, subject string, ok b
 	}
 	if ok {
 		en.st.SuccessSeq = seq
+		en.st.SuccessFactAt = time.Time{}
+		if !factAt.IsZero() && !factAt.After(now) {
+			en.st.SuccessFactAt = factAt // the first answer, earlier than this signal (§25.8 R3)
+		}
 	} else {
 		en.st.FailureSeq = seq
 		en.st.Failures++
 		en.st.Detail = detail
 		en.st.FactAt = now
+		if !factAt.IsZero() && factAt.Before(now) {
+			en.st.FactAt = factAt
+		}
 		en.st.Epoch = 0
 		en.lastFailure = now
 	}
@@ -124,7 +138,7 @@ func (s *Scheduler) SignalFailure(f Finding) {
 	f.TaskID = normTask(f.TaskID)
 	if e.ownsSignal(f.TaskID, f.Kind) {
 		if isSignalKind(f.Kind) { // a derived kind (DUMP_STALLED) has no signal
-			e.Signal(f.TaskID, f.Kind, f.Subject, false, f.Detail)
+			e.signalAt(f.TaskID, f.Kind, f.Subject, false, f.Detail, f.FirstSeen)
 		}
 		return
 	}

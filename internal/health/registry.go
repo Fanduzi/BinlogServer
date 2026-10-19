@@ -1,7 +1,7 @@
 // Package health provides module-level functionality for health.
 // input: assurance violation kinds
 // output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
-// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385); since P2-5.1 (§20) SEGMENT_DAMAGED, CHAIN_INDEX_GAP, LEGACY_FAILBACK and SEGMENT_MISSING (chain.local only) are Managed with Confirm, and I2_SWITCH_UNRECORDED, I6_MISSING_ROW, I6_MISSING_OBJECT and I6_OBJECT_SIZE_MISMATCH are not derived; since P2-5.3 (§22) GTID_HOLE (Waivable) and CHECKPOINT_AHEAD are Managed without Confirm; since P2-6d (§24.9) TASK_NO_PROGRESS (CRITICAL, task.state) is Managed
+// pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385); since P2-5.1 (§20) SEGMENT_DAMAGED, CHAIN_INDEX_GAP, LEGACY_FAILBACK and SEGMENT_MISSING (chain.local only) are Managed with Confirm, and I2_SWITCH_UNRECORDED, I6_MISSING_ROW, I6_MISSING_OBJECT and I6_OBJECT_SIZE_MISMATCH are not derived; since P2-5.3 (§22) GTID_HOLE (Waivable) and CHECKPOINT_AHEAD are Managed without Confirm; since P2-6d (§24.9) TASK_NO_PROGRESS (CRITICAL, task.state) is Managed; since #427 (§25) META_UNREACHABLE (S17, CRITICAL, signals, task _cluster, subject node id) is Managed
 // note: if this file changes, update this header and module README.md.
 package health
 
@@ -161,7 +161,8 @@ var p253Managed = map[Kind]bool{GTIDHole: true, CheckpointAhead: true}
 
 // p26dManaged is TASK_NO_PROGRESS (design §24.9): derived from task.state
 // only, no legacy writer ever existed.
-var p26dManaged = map[Kind]bool{TaskNoProgress: true}
+var p26dManaged = map[Kind]bool{TaskNoProgress: true,
+	MetaUnreachable: true} // #427, design §25
 
 // ManagedKinds is every kind the evaluator owns in this release.
 func ManagedKinds() map[Kind]bool {
@@ -221,6 +222,7 @@ func DefaultRegistry() Registry {
 		signalSpec(OpenTailCutFailed, Critical, "S4", "the next cut succeeds, or the segment is sealed or gone"),
 		signalSpec(MetricSourceFailed, Warning, "S10/S11", "the next scrape computes the source"),
 		signalSpec(TaskRecordsFailed, Critical, "S16", "the standalone task record file is read at startup with the right key, or the next save succeeds"),
+		signalSpec(MetaUnreachable, Critical, "S17", "a metadata store ping or read from this node answers again (the subject is the node id)"),
 		{Kind: DumpStalled, Severity: Warning, Scopes: []Scope{ScopeSignals, ScopeTaskState}, Version: 3, Derive: dumpStalledDerive,
 			Clear: ClearRule{Invariant: "S12", Holds: dumpStalledCleared, Reason: dumpStalledReason,
 				Text: "a byte (event or heartbeat) is read from the source again; or the task is stopped or owned elsewhere; or SOURCE_UNREACHABLE opens in the same pass (HANDED_OFF)"}},

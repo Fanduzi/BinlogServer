@@ -30,7 +30,6 @@ var allowlist = map[string]Allowed{
 	"internal/replication/source_switch.go:clearResumeGTID:blank-call":                     {1, "follow-up: a resume-GTID file that cannot be removed is read again on the next start; should report a finding"},
 	"internal/tasks/legacy_failback.go:fetchLegacySegment:blank-call":                      {1, cleanupOnErrorPath},
 	"internal/tasks/legacy_failback.go:syncDir:blank-call":                                 {1, "best-effort directory fsync; some filesystems reject fsync on a directory"},
-	"internal/tasks/evaluator.go:Evaluator.work:log-only":                                  {1, "a failed evaluation keeps its pending transitions and the task is marked again by the next sweep (P2-3)"},
 	"internal/tasks/rehash.go:Rehasher.Run:log-only":                                       {1, "the rehasher steps again on the next tick; a mismatch it finds is written by the evaluator, not here"},
 	"internal/tasks/rehash.go:Rehasher.advance:log-only":                                   {1, "an unsaved rehash cursor only restarts the cross-task walk from an older point"},
 	"internal/tasks/rehash_linux.go:dropPageCache:blank-call":                              {1, "best-effort fadvise hint; the hash result does not depend on it"},

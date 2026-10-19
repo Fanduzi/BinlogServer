@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them; on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE, which is dated at the first answer and names the outage window, §25.8 R4); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; standalone OpenFindings includes _cluster); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -60,6 +60,11 @@ const (
 	FindingSegmentOverlap FindingKind = "SEGMENT_OVERLAP"
 	// FindingTaskRecordsFailed: the standalone task record file cannot be read or written (ADR 0010); subject key_missing, key_invalid, wrong_key, corrupt or write.
 	FindingTaskRecordsFailed FindingKind = "TASK_RECORDS_FAILED"
+	// FindingMetaUnreachable: this node could not reach the metadata store (a
+	// ping or read timed out, or the connection failed) for
+	// meta_unreachable_after (S17, design 0009 §25); task _cluster, subject
+	// the node id.
+	FindingMetaUnreachable FindingKind = "META_UNREACHABLE"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.
@@ -208,7 +213,9 @@ func (b *findingBook) report(f Finding) {
 		f.FirstSeen = prev.FirstSeen
 		f.Count = prev.Count + 1
 	} else {
-		f.FirstSeen = now
+		if f.FirstSeen.IsZero() || f.FirstSeen.After(now) {
+			f.FirstSeen = now // a caller may name an earlier first failure (META_UNREACHABLE, §25)
+		}
 		f.Count = 1
 	}
 	f.LastSeen = now
@@ -280,6 +287,23 @@ func (b *findingBook) kick() {
 	}
 }
 
+// findingEvented: a finding write that also gets a task event. _cluster
+// rows have no task timeline, except the RESOLVED of META_UNREACHABLE: in
+// cluster mode its row is reused by the node's next outage, so that event,
+// which names the whole window, is the only record left of the earlier
+// one. Its REPORTED writes only land after the outage, often twice (a
+// retried and a newer copy), so they get no event (design 0009 §25.8 R4).
+func findingEvented(op findingOp) bool {
+	f := op.finding
+	if f.Kind == FindingEventPersistFailed {
+		return false
+	}
+	if f.TaskID == ClusterFindingTask {
+		return f.Kind == FindingMetaUnreachable && op.resolve
+	}
+	return true
+}
+
 // flush writes every pending op once. Failed ops stay pending (unless a newer
 // op for the same key arrived meanwhile) and count as sink errors.
 func (b *findingBook) flush(ctx context.Context) {
@@ -306,14 +330,21 @@ func (b *findingBook) flush(ctx context.Context) {
 			b.mu.Unlock()
 			return
 		}
-		if err == nil && events != nil && op.finding.TaskID != ClusterFindingTask && op.finding.Kind != FindingEventPersistFailed {
+		if err == nil && events != nil && findingEvented(op) {
 			// The finding row is the record; the event is the timeline entry.
 			// An event failure here is counted, not reported, so it cannot loop.
 			evType, msg := "FINDING_REPORTED", string(op.finding.Kind)+" "+op.finding.Subject
+			detail, at := op.finding.Detail, b.now()
 			if op.resolve {
 				evType = "FINDING_RESOLVED"
+				if op.finding.ResolvedAt != nil && op.finding.Kind == FindingMetaUnreachable {
+					// The outage window, dated at the first answer (§25.8 R4).
+					at = *op.finding.ResolvedAt
+					detail = fmt.Sprintf("%s; open from %s to %s (%s)", detail, op.finding.FirstSeen.UTC().Format(time.RFC3339Nano),
+						at.UTC().Format(time.RFC3339Nano), at.Sub(op.finding.FirstSeen).Round(time.Millisecond))
+				}
 			}
-			if evErr := events.AppendEvent(wctx, TaskEvent{TaskID: op.finding.TaskID, Type: evType, Message: strings.TrimSpace(msg), Detail: op.finding.Detail, Time: b.now()}); evErr != nil {
+			if evErr := events.AppendEvent(wctx, TaskEvent{TaskID: op.finding.TaskID, Type: evType, Message: strings.TrimSpace(msg), Detail: detail, Time: at}); evErr != nil {
 				b.mu.Lock()
 				b.sinkErrors++
 				b.mu.Unlock()
@@ -477,9 +508,16 @@ func (s *Scheduler) ListFindings(ctx context.Context, taskID string, includeReso
 			return nil, err
 		}
 	}
-	local = append(local, s.healthEval.Load().openManagedFindings(ctx, taskID)...)
+	managed, err := s.healthEval.Load().openManagedFindings(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("managed findings of task %s unreadable: %w", taskID, err)
+	}
+	local = append(local, managed...)
 	if taskID == ClusterFindingTask {
 		if f, ok := s.persistFailureFinding(); ok {
+			local = append(local, f)
+		}
+		if f, ok := s.metaReachFinding(); ok {
 			local = append(local, f)
 		}
 	}
@@ -508,16 +546,42 @@ func (s *Scheduler) OpenFindings(ctx context.Context, limit int) ([]Finding, err
 		}
 	}
 	if e := s.healthEval.Load(); e != nil {
+		ids := make([]string, 0)
 		for _, t := range s.ListTasks() {
-			local = append(local, e.openManagedFindings(ctx, t.ID)...)
+			ids = append(ids, t.ID)
 		}
 		if !e.cfg.Cluster {
 			// Standalone evaluates _cluster itself (RETRY_LOOP_FAILED,
 			// TASK_RECORDS_FAILED); it has no task row to be listed by.
-			local = append(local, e.openManagedFindings(ctx, ClusterFindingTask)...)
+			ids = append(ids, ClusterFindingTask)
+		}
+		var unreadable []string
+		var firstErr error
+		for _, id := range ids {
+			managed, merr := e.openManagedFindings(ctx, id)
+			if merr != nil {
+				// Not an empty set: the task's managed findings are unknown (§25 D1).
+				unreadable = append(unreadable, id)
+				if firstErr == nil {
+					firstErr = merr
+				}
+				continue
+			}
+			local = append(local, managed...)
+		}
+		if len(unreadable) > 0 {
+			merr := fmt.Errorf("managed findings of task %s unreadable: %w", strings.Join(unreadable, ", "), firstErr)
+			if err == nil {
+				err = merr
+			} else {
+				err = fmt.Errorf("%w; %v", err, merr)
+			}
 		}
 	}
 	if f, ok := s.persistFailureFinding(); ok {
+		local = append(local, f)
+	}
+	if f, ok := s.metaReachFinding(); ok {
 		local = append(local, f)
 	}
 	return mergeFindings(stored, local, limit), err
@@ -654,9 +718,14 @@ func (s *Scheduler) OpenFindingCounts(ctx context.Context) (map[string]int, erro
 // persistFailureFinding is FINDINGS_PERSIST_FAILED while the evaluator's
 // health store or the findings file is failing to write (#395 QA P2).
 func (s *Scheduler) persistFailureFinding() (Finding, bool) {
+	return s.persistFailureFindingFrom(true)
+}
+
+// persistFailureFindingFrom: prune false reads no task row (design §25).
+func (s *Scheduler) persistFailureFindingFrom(prune bool) (Finding, bool) {
 	var parts []string
 	var first time.Time
-	ids, herr, hsince := s.healthEval.Load().persistFailure()
+	ids, herr, hsince := s.healthEval.Load().persistFailureFrom(prune)
 	if herr != nil {
 		parts = append(parts, fmt.Sprintf("health state for %s could not be saved: %v", strings.Join(ids, ", "), herr))
 		first = hsince
@@ -694,8 +763,15 @@ type HealthSummary struct {
 // HealthSummary is degraded while any CRITICAL finding is open, read from
 // memory as GET /api/findings is, so a finding that could not be persisted
 // still counts (#395 QA P2).
+//
+// Every metadata read shares healthReadBudget (1s) and at most one read is in
+// flight; past the budget the summary is built from memory and names
+// META_UNREACHABLE, so a blackholed meta store cannot hang the probe (§25).
 func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
-	open, err := s.OpenFindings(ctx, 1000)
+	open, err, timedOut := s.boundedOpenFindings(ctx)
+	if timedOut {
+		open = s.memoryOpenFindings()
+	}
 	var reasons []string
 	for _, f := range open {
 		if f.Severity != FindingCritical || !f.Open() {
@@ -707,7 +783,10 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 		}
 		reasons = append(reasons, r+" (task "+f.TaskID+")")
 	}
-	if err != nil {
+	switch {
+	case isHealthReadTimeout(err):
+		reasons = append(reasons, "META_UNREACHABLE: "+errHealthReadTimeout.Error())
+	case err != nil:
 		reasons = append(reasons, "findings store unreadable: "+err.Error())
 	}
 	if len(reasons) == 0 {

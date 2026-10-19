@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -86,7 +86,7 @@ func (s *MySQLTaskStore) ApplyTransitions(ctx context.Context, taskID string, fe
 	}
 	// The row exists before the transaction so concurrent writers queue on
 	// its record lock instead of deadlocking on an insert gap lock.
-	if _, err := s.db.ExecContext(ctx, "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', NOW(6))", taskID); err != nil {
+	if _, err := s.db.ExecContext(ctx, "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', UTC_TIMESTAMP(6))", taskID); err != nil {
 		return healthstore.Applied{}, healthErr(err)
 	}
 	for attempt := 1; ; attempt++ {
@@ -152,7 +152,7 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 		if fact.IsZero() {
 			fact = t.At
 		}
-		var factArg any = fact
+		var factArg any = fact.UTC()
 		if fact.IsZero() {
 			factArg = nil
 		}
@@ -165,20 +165,22 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 			reason = "EVAL"
 		}
 		if _, err = tx.ExecContext(ctx, "INSERT INTO finding_transitions (task_id, kind, subject, op, reason, generation, kind_version, fact_at, severity, detail, at, transition_digest) "+
-			"VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW(6)), ?, ?, NOW(6), ?)",
+			"VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, UTC_TIMESTAMP(6)), ?, ?, UTC_TIMESTAMP(6), ?)",
 			taskID, string(t.Kind), t.Subject, string(t.Op), reason, gen, kv, factArg, string(t.Instance.Severity), t.Instance.Detail, digest); err != nil {
 			return out, err
 		}
 		if t.Op == health.OpClose {
-			if _, err = tx.ExecContext(ctx, "UPDATE task_findings SET resolved_at = NOW(6), generation = ? WHERE task_id = ? AND kind = ? AND subject = ? AND resolved_at IS NULL",
-				gen, taskID, string(t.Kind), t.Subject); err != nil {
+			// resolved_at is the CLOSE's fact time (the first answer for a
+			// signal), in UTC like every stamp here (design §25.8 R3).
+			if _, err = tx.ExecContext(ctx, "UPDATE task_findings SET resolved_at = COALESCE(?, UTC_TIMESTAMP(6)), generation = ? WHERE task_id = ? AND kind = ? AND subject = ? AND resolved_at IS NULL",
+				factArg, gen, taskID, string(t.Kind), t.Subject); err != nil {
 				return out, err
 			}
 			continue
 		}
 		segs, _ := json.Marshal(t.Instance.Segments)
 		if _, err = tx.ExecContext(ctx, findingUpsertSQL(alias), taskID, string(t.Kind), t.Subject, string(t.Instance.Severity), t.Instance.Detail,
-			t.Instance.Evidence, string(segs), gen, fence.TaskEpoch); err != nil {
+			t.Instance.Evidence, string(segs), factArg, gen, fence.TaskEpoch); err != nil {
 			return out, err
 		}
 	}
@@ -191,7 +193,7 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 	if status == "" {
 		status = string(health.StatusUnknown)
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE task_health SET status = ?, reasons = ?, evaluated_at = NOW(6), generation = ?, owner = ?, owner_epoch = ?, "+
+	if _, err = tx.ExecContext(ctx, "UPDATE task_health SET status = ?, reasons = ?, evaluated_at = UTC_TIMESTAMP(6), generation = ?, owner = ?, owner_epoch = ?, "+
 		"fence_mode = ?, fence_instance = ?, fence_epoch = ?, fence_node = ?, chain_owner = ? WHERE task_id = ?",
 		status, string(reasons), gen, fence.Node, fence.TaskEpoch, string(fence.Mode), fence.Instance, fence.TaskEpoch, fence.Node, chainOwner, taskID); err != nil {
 		return out, err
@@ -202,7 +204,7 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 
 func findingUpsertSQL(alias bool) string {
 	ins := "INSERT INTO task_findings (task_id, kind, subject, severity, detail, evidence, segments, first_seen, last_seen, count, generation, owner_epoch, evaluated_at) " +
-		"VALUES (?, ?, ?, ?, ?, ?, ?, NOW(6), NOW(6), 1, ?, ?, NOW(6))"
+		"VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, UTC_TIMESTAMP(6)), UTC_TIMESTAMP(6), 1, ?, ?, UTC_TIMESTAMP(6))"
 	ref := func(c string) string { return "VALUES(" + c + ")" }
 	if alias {
 		ins += " AS new"
@@ -397,7 +399,7 @@ func (s *MySQLTaskStore) waiverWrite(ctx context.Context, taskID string, fence h
 	default:
 		return healthstore.ErrModeUnsupported
 	}
-	if _, err := s.db.ExecContext(ctx, "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', NOW(6))", taskID); err != nil {
+	if _, err := s.db.ExecContext(ctx, "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', UTC_TIMESTAMP(6))", taskID); err != nil {
 		return healthErr(err)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -439,13 +441,13 @@ func (s *MySQLTaskStore) waiverWrite(ctx context.Context, taskID string, fence h
 	digest := health.TransitionDigest(taskID, health.Transition{Key: key, Op: health.Op(op), Reason: w.Reason, At: now, FactAt: w.At, KindVersion: 1,
 		Instance: health.Instance{Key: key, Evidence: w.Evidence, Detail: detail}})
 	if _, err = tx.ExecContext(ctx, "INSERT INTO finding_transitions (task_id, kind, subject, op, reason, generation, kind_version, fact_at, severity, detail, at, transition_digest) "+
-		"VALUES (?, ?, ?, ?, ?, ?, 1, COALESCE(?, NOW(6)), '', ?, NOW(6), ?)",
+		"VALUES (?, ?, ?, ?, ?, ?, 1, COALESCE(?, UTC_TIMESTAMP(6)), '', ?, UTC_TIMESTAMP(6), ?)",
 		taskID, string(key.Kind), key.Subject, op, w.Reason, gen, nullTime(w.At), detail, digest); err != nil {
 		return healthErr(err)
 	}
 	if op == "WAIVE" {
 		if _, err = tx.ExecContext(ctx, "INSERT INTO task_findings (task_id, kind, subject, severity, detail, evidence, first_seen, last_seen, count, generation, waiver_evidence, waiver_reason, waiver_actor, waived_at, waiver_kind_version) "+
-			"VALUES (?, ?, ?, 'CRITICAL', '', ?, NOW(6), NOW(6), 1, ?, ?, ?, ?, COALESCE(?, NOW(6)), 1) "+
+			"VALUES (?, ?, ?, 'CRITICAL', '', ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 1, ?, ?, ?, ?, COALESCE(?, UTC_TIMESTAMP(6)), 1) "+
 			"ON DUPLICATE KEY UPDATE waiver_evidence = VALUES(waiver_evidence), waiver_reason = VALUES(waiver_reason), waiver_actor = VALUES(waiver_actor), "+
 			"waived_at = VALUES(waived_at), waiver_kind_version = 1, generation = VALUES(generation)",
 			taskID, string(key.Kind), key.Subject, w.Evidence, gen, w.Evidence, w.Reason, w.Actor, nullTime(w.At)); err != nil {
@@ -468,5 +470,5 @@ func nullTime(t time.Time) any {
 	if t.IsZero() {
 		return nil
 	}
-	return t
+	return t.UTC()
 }
