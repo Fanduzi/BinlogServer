@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: repo source tree, Go toolchain, Node toolchain, and target version/platform settings
-# output: complete local release archives with service/migrate binaries, migration SQL, example configs, docs/guide, and checksums
+# output: complete local release archives with service/migrate binaries, migration SQL, example configs, docs/guide, docs/security.md, and checksums
 # pos: local release packaging validator mirroring the GoReleaser archive contract
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -86,6 +86,7 @@ for target in $TARGETS; do
   mkdir -p "$stage_dir/migrations" "$stage_dir/docs"
   cp "$ROOT_DIR"/migrations/*.sql "$stage_dir/migrations/"
   cp -R "$ROOT_DIR/docs/guide" "$stage_dir/docs/guide"
+  cp "$ROOT_DIR/docs/security.md" "$stage_dir/docs/security.md"
 
   echo "[release] archive $artifact_name.tar.gz"
   tar -C "$DIST_ROOT" -czf "$archive_path" "$artifact_name"

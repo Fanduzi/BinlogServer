@@ -132,12 +132,17 @@ binlog-server_0.5.76_linux_amd64/
   config.example.yaml            # 完整参数参考配置
   config.production.example.yaml # 生产安全推荐模板
   docs/guide/                    # 运维指南，含本地分段回放
+  docs/security.md               # 鉴权、加密，以及 standalone 任务密钥
 ```
 
 ### 2. 本地快速体验 (Loopback 监听)
 
+没有 `meta_dsn` 时，任务写在 `{data_dir}/.tasks.enc`。先生成任务密钥。这条命令写出模式 `0600` 的文件，并打印路径和 key id，不打印密钥本身。密钥文件放在 `data_dir` 外面。说明见 [docs/security.md](docs/security.md)。
+
 ```bash
 # 绑定到 127.0.0.1 允许免鉴权快速启动演示
+./binlog-server task-key generate --out ./task.key
+export BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server
@@ -150,6 +155,10 @@ export BINLOG_SERVER_DATA_DIR=./data
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 # 期望返回: ok
+curl -fsS http://127.0.0.1:8080/api/health
+# 配了任务密钥后，正文里 status 为 ok。
+# 没配密钥时是 degraded：
+# {"status":"degraded","reasons":["TASK_RECORDS_FAILED/key_missing (task _cluster)"]}
 ```
 
 ### 4. 提交第一个备份任务

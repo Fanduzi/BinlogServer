@@ -133,12 +133,17 @@ binlog-server_0.5.76_linux_amd64/
   config.example.yaml            # Annotated configuration reference
   config.production.example.yaml # Hardened production baseline
   docs/guide/                    # Operator guide, including on-disk replay
+  docs/security.md               # Auth, encryption, and the standalone task key
 ```
 
 ### 2. Start local evaluation (Loopback)
 
+A standalone process with no `meta_dsn` stores tasks in `{data_dir}/.tasks.enc`. Generate a task key first. The command writes a mode `0600` file and prints the path and key id. It does not print the key. Keep that file outside `data_dir`. See [docs/security.md](docs/security.md).
+
 ```bash
 # Loopback bind (127.0.0.1) allows unauthenticated local evaluation
+./binlog-server task-key generate --out ./task.key
+export BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server
@@ -151,6 +156,10 @@ export BINLOG_SERVER_DATA_DIR=./data
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 # Expected output: ok
+curl -fsS http://127.0.0.1:8080/api/health
+# Expected output includes "status":"ok" after the task key is set.
+# Without the key this is degraded:
+# {"status":"degraded","reasons":["TASK_RECORDS_FAILED/key_missing (task _cluster)"]}
 ```
 
 ### 4. Create your first replication task

@@ -118,6 +118,41 @@ The base64-encoded ciphertext contains:
 - The encrypted data
 - A 16-byte authentication tag (from GCM)
 
+## Standalone task record key
+
+Without `meta_dsn`, task records are encrypted in `{data_dir}/.tasks.enc` (ADR 0010). A fresh install that never sets a key starts, `/healthz` stays `ok`, and `/api/health` is degraded:
+
+```text
+{"status":"degraded","reasons":["TASK_RECORDS_FAILED/key_missing (task _cluster)"]}
+```
+
+Generate a key before the first start. `task-key generate` writes a new mode `0600` file and prints the path and key id. It does not print the key. Do not capture its stdout and treat that text as key material.
+
+```bash
+./binlog-server task-key generate --out ./task.key
+export BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"
+```
+
+The same path can be set as `standalone.task_key_file` in the YAML file. An existing `--out` path is refused, so a second generate does not overwrite a live key.
+
+The file must be a regular file with mode `0600` or `0400`. A wider mode is `TASK_RECORDS_FAILED/key_invalid`. The process does not change the mode for you.
+
+Keep the file outside `data_dir` and back it up separately. The encrypted task file is useless without this key, and a copy of `data_dir` should not also contain the key.
+
+`BINLOG_SERVER_TASK_KEY` is the alternative: 32 bytes as base64 or 64 hex characters, for a container secret. The process unsets the variable after reading it. A file is still preferred, because a running process environment is visible to the same user and to root.
+
+### Rotation
+
+1. Generate a new key file. Leave the current key in place.
+2. Point `standalone.task_key_previous_file` (or `BINLOG_SERVER_TASK_KEY_PREVIOUS`) at the old key.
+3. Point `standalone.task_key_file` (or `BINLOG_SERVER_STANDALONE_TASK_KEY_FILE`) at the new key.
+4. Restart. Startup re-encrypts `.tasks.enc` with the new key.
+5. After that restart has finished, remove the previous-key setting. Keep the old file until you have confirmed the new file loads.
+
+### Storage
+
+Do not commit the key, do not put it in shell history, and do not store it under `data_dir`. Use a root-owned `0600` file outside the data directory, or a container secret via `BINLOG_SERVER_TASK_KEY`.
+
 ## Rate Limiting
 
 Binlog Server includes built-in rate limiting to protect against abuse:
@@ -159,7 +194,12 @@ Before deploying to production:
    - Ensure sensitive data (passwords, tokens) are not logged
    - Configure appropriate log levels
 
-6. **Network Security**
+6. **Set the standalone task key** when there is no `meta_dsn`
+   - `./binlog-server task-key generate --out <path>` then `standalone.task_key_file` or `BINLOG_SERVER_STANDALONE_TASK_KEY_FILE`
+   - Mode `0600` or `0400`, stored outside `data_dir`
+   - Rotate with `standalone.task_key_previous_file` and keep the old key until the restart re-encrypts `.tasks.enc`
+
+7. **Network Security**
    - Use TLS for production deployments
    - Consider running behind a reverse proxy with additional security features
 
