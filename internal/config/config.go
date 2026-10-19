@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -469,6 +469,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	if loadErr != nil {
 		return Config{}, loadErr
 	}
+	if err := rejectUnsetMetaDSN(cfg.MetaDSN); err != nil {
+		return Config{}, err
+	}
 	applyEnabledAuthProtectDefaults(v, &cfg.API.Auth)
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
@@ -674,6 +677,22 @@ func invalidInteger(key, text string) error {
 
 func invalidNumber(key, text string) error {
 	return fmt.Errorf("%s: invalid number %q", key, text)
+}
+
+// rejectUnsetMetaDSN fails when meta_dsn still contains ${VAR} because VAR is
+// unset. An empty string, including a placeholder whose variable is set to "",
+// is standalone mode and is not an error.
+func rejectUnsetMetaDSN(raw string) error {
+	for _, match := range envPlaceholderPattern.FindAllStringSubmatch(raw, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		if _, ok := os.LookupEnv(match[1]); ok {
+			continue
+		}
+		return fmt.Errorf("%s is not set; leave meta_dsn empty for standalone mode", match[1])
+	}
+	return nil
 }
 
 func expandEnvPlaceholders(raw string) string {

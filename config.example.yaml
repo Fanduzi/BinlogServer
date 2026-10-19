@@ -12,7 +12,12 @@
 
 listen_addr: "127.0.0.1:8080"
 data_dir: "./data"
-meta_dsn: "${BINLOG_SERVER_META_DSN}" # 推荐用环境变量注入，避免明文口令
+# Leave meta_dsn commented out for standalone mode. Tasks are encrypted in
+# {data_dir}/.tasks.enc. Uncomment the next line only after exporting
+# BINLOG_SERVER_META_DSN to a real DSN. An unset variable is a startup error
+# ("BINLOG_SERVER_META_DSN is not set; leave meta_dsn empty for standalone mode"),
+# not an empty DSN. Setting the variable to an empty string is standalone mode.
+# meta_dsn: "${BINLOG_SERVER_META_DSN}"
 mode: "standalone" # standalone | cluster
 
 cluster:

@@ -137,7 +137,7 @@ log:
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `meta_dsn` | string | - | MySQL 连接字符串。cluster 模式必需。standalone 为空时控制面只在内存，进程退出后任务元数据丢失；binlog 文件仍落在 `data_dir`。 |
+| `meta_dsn` | string | - | MySQL 连接字符串。cluster 模式必需。standalone 为空时任务加密写在 `{data_dir}/.tasks.enc`。写成 `${BINLOG_SERVER_META_DSN}` 而该变量没有设置时，启动失败并指出变量名（`BINLOG_SERVER_META_DSN is not set; leave meta_dsn empty for standalone mode`）。把变量设成空字符串则是 standalone。 |
 
 没配 `meta_dsn`，或该任务的 `binlog_files` 一条目录都没有时，`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`，列出封存文件和 `.open.e<epoch>` 分段。standalone 用同一个 `data_dir` 重启后，任务列表和 dashboard 会列出仍有这些分段的目录，id 就是目录名，files 用同一套扫描；没有源库账号，不能启动。配了 `meta_dsn` 时不从磁盘发现任务。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 保留 `.open.e<epoch>`。`start_pos` 和 `end_pos` 是 0。磁盘扫描不编造 checkpoint：没有位点行时 `GET /api/tasks/{id}/checkpoint` 仍是 `404`，正文是 `checkpoint not found`。该任务已有目录行时以目录为准，磁盘上多出来的文件不会列出。store 出错不会退回磁盘。用磁盘分段回放见 [部署指南「源库不可用时，用本地分段回放」](deployment.md#replay-local-segments)（English: [Replay local segments when the source is gone](deployment.md#replay-local-segments-en)）。
 

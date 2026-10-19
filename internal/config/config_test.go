@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional encryption key
-// output: config loading regression coverage including unresolved protected-auth secret rejection, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token
+// output: config loading regression coverage including unresolved protected-auth secret rejection, an unset meta_dsn ${ENV} naming the variable, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -13,6 +13,21 @@ import (
 	"strings"
 	"testing"
 )
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	prev, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			os.Setenv(key, prev)
+		} else {
+			os.Unsetenv(key)
+		}
+	})
+}
 
 func setRequiredAuthEnv(t *testing.T) {
 	t.Helper()
@@ -679,6 +694,29 @@ func TestLoadConfig_StandaloneTaskRecords(t *testing.T) {
 	t.Setenv("BINLOG_SERVER_STANDALONE_TASK_RECORDS", "maybe")
 	if _, err := LoadConfig(""); err == nil || !strings.Contains(err.Error(), "standalone.task_records") {
 		t.Fatalf("invalid value: %v", err)
+	}
+}
+
+func TestLoadConfig_UnsetMetaDSNPlaceholder(t *testing.T) {
+	setRequiredAuthEnv(t)
+	unsetEnv(t, "BINLOG_SERVER_META_DSN")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("meta_dsn: \"${BINLOG_SERVER_META_DSN}\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	want := "BINLOG_SERVER_META_DSN is not set; leave meta_dsn empty for standalone mode"
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %s", err, want)
+	}
+
+	t.Setenv("BINLOG_SERVER_META_DSN", "")
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetaDSN != "" {
+		t.Fatalf("empty env meta_dsn = %q", cfg.MetaDSN)
 	}
 }
 

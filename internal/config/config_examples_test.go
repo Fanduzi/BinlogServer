@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: repo-root example YAML, .goreleaser.yml archive file list, scripts/release-assets.sh copy list
-// output: proof that every shipped example config loads through LoadConfig
+// output: proof that every shipped example config loads through LoadConfig, including when BINLOG_SERVER_META_DSN is unset
 // pos: regression guard for packaged configuration samples
 // note: if this file changes, update this header and module README.md.
 package config
@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestLoadConfig_ShippedExamples(t *testing.T) {
@@ -61,6 +63,32 @@ func TestLoadConfig_ShippedExamples(t *testing.T) {
 	}
 	if cfg.Health.Evaluator != "off" || cfg.Health.SweepIntervalSec != 60 {
 		t.Fatalf("health = %+v", cfg.Health)
+	}
+}
+
+// TestLoadConfig_ShippedExamplesUnsetMetaDSN loads every packaged example
+// with BINLOG_SERVER_META_DSN truly unset. A leftover ${...} must not survive
+// as a DSN the MySQL driver later rejects.
+func TestLoadConfig_ShippedExamplesUnsetMetaDSN(t *testing.T) {
+	unsetEnv(t, "BINLOG_SERVER_META_DSN")
+	t.Setenv("BINLOG_SERVER_API_AUTH_BEARER_TOKEN", "shipped-example-token")
+	root := repoRoot(t)
+	for _, rel := range shippedExampleConfigs(t, root) {
+		t.Run(rel, func(t *testing.T) {
+			cfg, err := LoadConfig(filepath.Join(root, rel))
+			if err != nil {
+				t.Fatalf("LoadConfig(%s): %v", rel, err)
+			}
+			if strings.Contains(cfg.MetaDSN, "${") {
+				t.Fatalf("LoadConfig(%s) left an unresolved meta_dsn %q", rel, cfg.MetaDSN)
+			}
+			if cfg.MetaDSN == "" {
+				return
+			}
+			if _, err := mysql.ParseDSN(cfg.MetaDSN); err != nil {
+				t.Fatalf("LoadConfig(%s) meta_dsn: %v", rel, err)
+			}
+		})
 	}
 }
 
