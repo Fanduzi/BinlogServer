@@ -217,7 +217,11 @@ func TestIssue462PeerStartSurfacesUnreachableTail(t *testing.T) {
 		Sweep: time.Minute, Debounce: time.Millisecond,
 	})
 	startAndWait(t, s2, r, env.task.ID)
-	row := waitStoredState(t, env.store, env.task.ID, StateFailed)
+	waitRunClosed(t, s2, env.task.ID, "peer start")
+	row, err := env.store.GetTask(context.Background(), env.task.ID)
+	if err != nil || row.State != StateFailed {
+		t.Fatalf("stored state %s (%v), want FAILED", row.State, err)
+	}
 	if row.DesiredRun != TaskDesiredStop {
 		t.Fatalf("desired %s, want STOP", row.DesiredRun)
 	}

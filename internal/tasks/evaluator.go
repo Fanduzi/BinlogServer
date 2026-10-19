@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API, CONFIRM) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
 // output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
-// note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
+// note P2-5.1 (§20, §31): chain.local includes the planner (I3_LEGACY_FAILBACK); the disk owner derives I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass; segments with a seal checksum and no rehash result yet are Facts.AwaitRehash
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
 // note §29: every pass sets Facts.UnownedAfter to min(sweep, no_progress_after) so a desired-RUN task with no runner opens TASK_NO_PROGRESS within one sweep
@@ -9,6 +9,7 @@
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // note P2-6.1 (§28): while this node holds _health it also evaluates _cluster, and only for HEALTH_STALE (task.state, never fence, epoch 0); standalone _cluster is unchanged
 // note P2-6.2 (§30): a released last owner evaluates chain.local with Delegated; a proxy pass does not read the directory; NodeGoneAfter 0 means 3×Sweep
+// note §31: reportUnreachableTail writes TASK_FAILED for SEGMENT_NOT_ON_WORKER under the holder fence with PreserveChainOwner and does not read the chain; a holder write with PreserveChainOwner does not call noteDelegated
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -940,6 +941,42 @@ func (e *Evaluator) persistFailureFrom(prune bool) (ids []string, err error, sin
 	return ids, err, since
 }
 
+// reportUnreachableTail writes CRITICAL TASK_FAILED for a cluster start that
+// failed with SEGMENT_NOT_ON_WORKER while this node still holds the lease
+// (§31). It does not read the chain and does not record this node as
+// chain_owner. A store error is logged; the caller still marks the task
+// FAILED and the proxy sweep can open the finding.
+func (e *Evaluator) reportUnreachableTail(ctx context.Context, task Task, errMsg string) {
+	if e == nil || e.cfg.Mode != EvaluatorOn || !e.cfg.Cluster || e.cfg.Store == nil {
+		return
+	}
+	if task.OwnerWorkerID == "" || task.OwnerWorkerID != e.cfg.NodeID || task.Epoch <= 0 {
+		return
+	}
+	open, err := e.openFindings(ctx, task.ID)
+	if err == nil {
+		facts := &health.Facts{
+			TaskID: task.ID,
+			Now:    e.cfg.Now(),
+			Task: &health.TaskFacts{
+				State: string(StateFailed), Desired: TaskDesiredStop, LastError: errMsg,
+				FailedCurrent: true, Owner: task.OwnerWorkerID, Epoch: task.Epoch,
+			},
+			Complete: map[health.Scope]bool{health.ScopeTaskState: true},
+		}
+		ts, _ := e.reg.Reconcile(open, facts)
+		h := e.reg.HealthOf(afterTransitions(open, ts), facts)
+		fence := health.Fence{
+			Mode: health.FenceCluster, TaskEpoch: task.Epoch, Node: e.cfg.NodeID, Instance: e.cfg.Instance,
+			PreserveChainOwner: true,
+		}
+		err = e.write(ctx, task.ID, fence, ts, h)
+	}
+	if err != nil {
+		log.Printf("health: unreachable tail finding task=%s: %v", task.ID, err)
+	}
+}
+
 // write applies ts under fence. Success clears the pending list; a fenced
 // write is dropped and the task is not evaluated again until the lease is
 // re-acquired; any other failure keeps ts pending for the next pass.
@@ -953,7 +990,7 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 		delete(e.pending, id)
 		delete(e.unsaved, id)
 		e.mu.Unlock()
-		if fence.Mode == health.FenceCluster && (!fence.Proxy || fence.Delegated) {
+		if fence.Mode == health.FenceCluster && (!fence.Proxy || fence.Delegated) && !fence.PreserveChainOwner {
 			e.noteDelegated(id, true)
 		}
 		e.afterApply(ts)
@@ -1194,9 +1231,8 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	violations = append(violations, assurance.ChainOf(in).CheckCheckpoint()...)
 	out := &health.ChainFacts{}
 	for _, v := range violations {
-		if e.cfg.Cluster && v.Kind == assurance.I6MissingLocal {
-			continue // §20.1: the owner judges its own disk (P2-6 delegation)
-		}
+		// §31: the holder and the delegated chain_owner both read their own
+		// disk. Dropping I6 here hid a deleted sealed segment.
 		if objectKinds[v.Kind] && anyIn(v.Segments, obj.unjudged) {
 			continue // §21.3: uploaded after the listing it would be judged by
 		}
@@ -1206,7 +1242,9 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	// under the lock, so it must never be read after Unlock.
 	e.mu.Lock()
 	var results map[string]rehashResult
+	reported := map[string]bool{}
 	for name, r := range e.rehash[task.ID] {
+		reported[name] = true
 		if !r.ok {
 			if results == nil {
 				results = map[string]rehashResult{}
@@ -1226,6 +1264,40 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		}
 		detail := "segment " + name + " no longer matches the sha256 recorded at seal: " + r.evidence
 		out.Violations = append(out.Violations, assurance.Violation{Kind: assurance.I1Unreadable, Segments: []string{name}, Evidence: r.evidence, Detail: detail})
+	}
+	if facts != nil {
+		facts.AwaitRehash = awaitRehash(dir, order, reported)
+	}
+	return out
+}
+
+// awaitRehash is the segments on order whose .seal-sha256 line has no rehash
+// result yet (§31). The ledger is the rehasher's fallback and is one file,
+// not another catalog list. A checksum that lives only on the catalog row is
+// not waited on here. A segment with no seal checksum is not included: rehash
+// will not report one, and inheriting its SEGMENT_UNREADABLE would leave a
+// clean copy CRITICAL.
+func awaitRehash(dir string, order []string, reported map[string]bool) map[string]bool {
+	if dir == "" || len(order) == 0 {
+		return nil
+	}
+	sums, err := binlog.LoadSealSums(dir)
+	if err != nil || len(sums) == 0 {
+		return nil
+	}
+	inOrder := map[string]bool{}
+	for _, name := range order {
+		inOrder[name] = true
+	}
+	var out map[string]bool
+	for name, sum := range sums {
+		if sum.SHA256 == "" || !inOrder[name] || reported[name] {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[name] = true
 	}
 	return out
 }

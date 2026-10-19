@@ -1947,7 +1947,7 @@ QA：BinlogServerQA 在真节点上跑 main `92507326`。两件事，都在非�
 
 **D5 重哈希的开合抖动：不加重，没算完就继承。** 坏副本被接管时，第一轮 `e.rehash` 还没有这个段。这一轮不从重哈希派生 `I1_UNREADABLE`，`OWNER_CHANGED` 把打开的 `SEGMENT_UNREADABLE` 关掉；大约 130ms 后重哈希对不上，下一轮再打开。两个 generation，中间健康会短暂回去。
 
-`Facts.AwaitRehash`：段名集合。这一轮目录顺序里有这个段，重哈希还没有结果（对上或对不上都还没有）。`Reconcile`：`ChainOwnerChanged` 时，打开的 kind 是 `SEGMENT_UNREADABLE`，这一轮没有派生出这个 subject 的 `I1_UNREADABLE`，并且 subject 在 `AwaitRehash` 里，则不关闭、不产生转移。`CheckBody` 已经在这一轮派生出 `I1_UNREADABLE` 的，仍走今天的同一轮 CLOSE 再 OPEN（那一次写入里 finding 结束时是开着的，不是 130ms 的缝）。重哈希之后 `chain_owner` 已经在第一轮写上，`ChainOwnerChanged` 为假：对上则 `EVAL` 关闭；对不上则 finding 已经开着，不再 OPEN。不把所有 `SEGMENT_UNREADABLE` 都留着不关，否则一份没有封存校验和、其实已经干净的副本会一直 CRITICAL。`TestOwnerChangedReopensTheSameKey`（空残留、仍想要）不变。
+`Facts.AwaitRehash`：段名集合。这一轮目录顺序里有这个段，任务目录 `.seal-sha256` 账本有它的校验和，重哈希还没有结果（对上或对不上都还没有）。名单只读这一份账本，不另列目录。只写在目录行上、账本里没有的校验和，这一轮不等：重哈希仍会算，算完之前换 owner 仍可能关一次再开。`Reconcile`：`ChainOwnerChanged` 时，打开的 kind 是 `SEGMENT_UNREADABLE`，这一轮没有派生出这个 subject 的 `I1_UNREADABLE`，并且 subject 在 `AwaitRehash` 里，则不关闭、不产生转移。`CheckBody` 已经在这一轮派生出 `I1_UNREADABLE` 的，仍走今天的同一轮 CLOSE 再 OPEN（那一次写入里 finding 结束时是开着的，不是 130ms 的缝）。重哈希之后 `chain_owner` 已经在第一轮写上，`ChainOwnerChanged` 为假：对上则 `EVAL` 关闭；对不上则 finding 已经开着，不再 OPEN。不把所有 `SEGMENT_UNREADABLE` 都留着不关，否则一份没有封存校验和、其实已经干净的副本会一直 CRITICAL。`TestOwnerChangedReopensTheSameKey`（空残留、仍想要）不变。
 
 **D6 后续，本 PR 不做：放弃丢失尾巴。** 今天没有接口把一个已有任务改到新位置再跑。Start 总会再进 `ResolveTakeover`。要的形状：运维显式确认之后，放弃丢失的 `LOCAL_ONLY` 尾巴（含 OPEN），从最后一条 `UPLOADED` 段或已确认的 GTID 续跑。不在本 PR 实现。QA 不要期待这个 API。可见性（D4）不依赖它。
 

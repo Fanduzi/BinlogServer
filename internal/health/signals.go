@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a task's signal book, task row facts with the source liveness clock, the stored open keys and this pass's probes
-// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED (45s with no byte read, any state) and SOURCE_UNREACHABLE (a failed attempt 90s after the last read) from the one source liveness clock, with a same-pass HANDED_OFF; TASK_FAILED by failure class; TASK_TRANSITION_STALLED; TASK_NO_PROGRESS (§24.9: a desired-RUN task whose local run has not advanced under data_dir, or that no worker runs, for no_progress_after; with no local run, Facts.UnownedAfter when set, §29); TASK_UNADOPTED for a standalone leftover directory (#385); ClassifyFailure
+// output: the P2-4 Derive and ClearRule of every signal and task-state kind: a signal opens on a failure and closes on the first later success or its §5.5 probe, an open signal with no news for signal_stale_after shows as INFO; DUMP_STALLED (45s with no byte read, any state) and SOURCE_UNREACHABLE (a failed attempt 90s after the last read) from the one source liveness clock, with a same-pass HANDED_OFF; TASK_FAILED by failure class (including SEGMENT_NOT_ON_WORKER, §31); TASK_TRANSITION_STALLED; TASK_NO_PROGRESS (§24.9: a desired-RUN task whose local run has not advanced under data_dir, or that no worker runs, for no_progress_after; with no local run, Facts.UnownedAfter when set, §29); TASK_UNADOPTED for a standalone leftover directory (#385); ClassifyFailure
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §6); pure
 // note: if this file changes, update this header and module README.md.
 package health
@@ -33,19 +33,20 @@ const (
 
 // TASK_FAILED subjects: a closed set; anything unrecognised is OTHER.
 const (
-	FailStreamRegression  = "STREAM_REGRESSION"
-	FailSourceError1236   = "SOURCE_ERROR_1236"
-	FailPermissionDenied  = "PERMISSION_DENIED"
-	FailStorage           = "STORAGE_INCONSISTENT"
-	FailSourceSwitchover  = "SOURCE_SWITCHOVER"
-	FailSourceUnreachable = "SOURCE_UNREACHABLE"
-	FailConfig            = "CONFIG"
-	FailOther             = "OTHER"
+	FailStreamRegression   = "STREAM_REGRESSION"
+	FailSourceError1236    = "SOURCE_ERROR_1236"
+	FailPermissionDenied   = "PERMISSION_DENIED"
+	FailStorage            = "STORAGE_INCONSISTENT"
+	FailSourceSwitchover   = "SOURCE_SWITCHOVER"
+	FailSourceUnreachable  = "SOURCE_UNREACHABLE"
+	FailConfig             = "CONFIG"
+	FailSegmentNotOnWorker = "SEGMENT_NOT_ON_WORKER"
+	FailOther              = "OTHER"
 )
 
 // FailureClasses lists every TASK_FAILED subject.
 func FailureClasses() []string {
-	return []string{FailStreamRegression, FailSourceError1236, FailPermissionDenied, FailStorage, FailSourceSwitchover, FailSourceUnreachable, FailConfig, FailOther}
+	return []string{FailStreamRegression, FailSourceError1236, FailPermissionDenied, FailStorage, FailSourceSwitchover, FailSourceUnreachable, FailConfig, FailSegmentNotOnWorker, FailOther}
 }
 
 // ClassifyFailure maps a task's last_error ("CODE: message") to its
@@ -71,6 +72,8 @@ func ClassifyFailure(lastError string) string {
 		return FailSourceUnreachable
 	case code == "INVALID_REQUEST" || code == "SOURCE_LOG_BIN_OFF" || code == "SOURCE_IDENTITY_UNAVAILABLE":
 		return FailConfig
+	case code == "SEGMENT_NOT_ON_WORKER":
+		return FailSegmentNotOnWorker
 	}
 	return FailOther
 }

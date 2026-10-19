@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: one task's facts at one moment (task state, assurance chain verdicts, hot-path signals, store capability, waivers)
-// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30)
+// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30); Facts.AwaitRehash keeps an unhashed SEGMENT_UNREADABLE open across OWNER_CHANGED (§31)
 // pos: the single lifecycle owner of findings (ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md); pure, no I/O, imports only assurance
 // note: if this file changes, update this header and module README.md.
 package health
@@ -285,6 +285,10 @@ type Facts struct {
 	// node_gone_after (design §30). Chain-directory findings do not decide
 	// status; chain.local is unknown.
 	NodeGone bool
+	// AwaitRehash: segment names on this pass's order that have a seal
+	// checksum and no rehash result yet (§31). An open SEGMENT_UNREADABLE
+	// for one of them stays open across OWNER_CHANGED until rehash reports.
+	AwaitRehash map[string]bool
 }
 
 // Finding is a stored finding row as the evaluator sees it.

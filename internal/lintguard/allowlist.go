@@ -28,6 +28,7 @@ var allowlist = map[string]Allowed{
 	"internal/replication/run_segment.go:openSegment.close:log-only":                       {1, "a held boundary checkpoint not written at run exit only leaves the stored checkpoint behind the flushed file; the next start reads the open tail back (ADR 0005, #391)"},
 	"internal/replication/mysql_runner.go:defaultServerID:blank-call":                      {1, "hash.Hash.Write never returns an error"},
 	"internal/replication/source_switch.go:clearResumeGTID:blank-call":                     {1, "follow-up: a resume-GTID file that cannot be removed is read again on the next start; should report a finding"},
+	"internal/tasks/evaluator.go:Evaluator.reportUnreachableTail:log-only":                 {1, "§31: a failed health write does not stop markFailed; the _health proxy sweep opens TASK_FAILED"},
 	"internal/tasks/legacy_failback.go:fetchLegacySegment:blank-call":                      {1, cleanupOnErrorPath},
 	"internal/tasks/legacy_failback.go:syncDir:blank-call":                                 {1, "best-effort directory fsync; some filesystems reject fsync on a directory"},
 	"internal/tasks/rehash.go:Rehasher.Run:log-only":                                       {1, "the rehasher steps again on the next tick; a mismatch it finds is written by the evaluator, not here"},
