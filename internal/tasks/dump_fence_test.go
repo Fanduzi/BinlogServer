@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a held Binlog Dump connection id, an expired lease, and a KILL that may not reach the source
-// output: coverage that a foreign worker fences that connection instead of writing STOPPED, that Start does not open a dump until KILL is confirmed, and that the holder keeps its lease until Close returns
+// output: coverage that a foreign worker fences that connection instead of writing STOPPED, that Start does not open a dump until KILL is confirmed, that the holder keeps its lease until Close returns, and that a released lease stops the dump without writing desired STOP (§29)
 // pos: unit coverage for issue 255
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -504,7 +504,14 @@ func TestScheduler_LeaseLossFencesHeldDump(t *testing.T) {
 		t.Fatalf("fenced pending %+v raw %s", got.PendingDumpCleanup, store.pending[task.ID])
 	}
 	close(runner.release)
-	waitTaskState(t, holder, task.ID, 2*time.Second, StateStopped)
+	waitRunClosed(t, holder, task.ID, "lease lost")
+	finished, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.State == StateStopped || finished.DesiredRun != TaskDesiredRun {
+		t.Fatalf("lease loss wrote %s desired %s; the dump stops, desired stays RUN (§29)", finished.State, finished.DesiredRun)
+	}
 }
 
 type fenceGateRunner struct {

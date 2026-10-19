@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: one task's facts at one moment (task state, assurance chain verdicts, hot-path signals, store capability, waivers)
-// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28)
+// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29)
 // pos: the single lifecycle owner of findings (ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md); pure, no I/O, imports only assurance
 // note: if this file changes, update this header and module README.md.
 package health
@@ -262,6 +262,10 @@ type Facts struct {
 	// NoProgressAfter is the TASK_NO_PROGRESS threshold
 	// (health.no_progress_after_sec); 0 = 120s (§24.9).
 	NoProgressAfter time.Duration
+	// UnownedAfter is the TASK_NO_PROGRESS clock when no worker is running
+	// the task (§29). 0 keeps NoProgressAfter. The evaluator sets
+	// min(sweep, no_progress_after).
+	UnownedAfter time.Duration
 	// StaleAfter is health.stale_after (§28). 0 means this pass does not
 	// judge HEALTH_STALE. The evaluator fills 5×sweep when the config is 0.
 	StaleAfter time.Duration

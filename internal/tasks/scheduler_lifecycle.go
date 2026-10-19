@@ -4,6 +4,7 @@
 // note P2-6c (#421): a live run whose shared row is FAILED by another epoch is not a remote Stop: the run stops, its lease epoch is marked lost, memory takes the FAILED row and nothing is written
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
+// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -29,8 +30,30 @@ func (s *Scheduler) releaseTaskLease(taskID, owner string, epoch int64) {
 	ctx, cancel := s.withLeaseTimeout(context.Background())
 	released, err := s.leaseManager.Release(ctx, taskID, owner, epoch)
 	cancel()
+	s.pendingMu.Lock()
+	if s.pendingRelease == nil {
+		s.pendingRelease = map[string]leaseHold{}
+	}
+	if err != nil {
+		s.pendingRelease[taskID] = leaseHold{owner: owner, epoch: epoch}
+	} else if cur, ok := s.pendingRelease[taskID]; ok && cur.owner == owner && cur.epoch == epoch {
+		delete(s.pendingRelease, taskID)
+	}
+	s.pendingMu.Unlock()
 	if err != nil || !released {
 		log.Printf("lease release failed task=%s owner=%s epoch=%d released=%v err=%v", taskID, owner, epoch, released, err)
+	}
+}
+
+// retryPendingReleases tries lease releases that failed while meta was down,
+// before this process claims the task again (§29).
+func (s *Scheduler) retryPendingReleases() {
+	s.pendingMu.Lock()
+	pending := s.pendingRelease
+	s.pendingRelease = nil
+	s.pendingMu.Unlock()
+	for id, rel := range pending {
+		s.releaseTaskLease(id, rel.owner, rel.epoch)
 	}
 }
 
@@ -227,6 +250,16 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		s.confirmHeldLeaseLocked(id, task.OwnerWorkerID, task.Epoch)
 	}
 
+	// A lost epoch must not open a dump: Confirm will not revive it, so the
+	// writes would stay fenced. Release it and let the next claim take a new
+	// epoch (§29).
+	if s.leaseClock.Lost(id, task.Epoch) {
+		owner, ep := task.OwnerWorkerID, task.Epoch
+		s.mu.Unlock()
+		s.releaseTaskLease(id, owner, ep)
+		return ErrLeaseNotAcquired
+	}
+
 	// The progress book follows the held epoch, not one run: a start that
 	// never opens its dump (a leftover KILL that fails) still ages (§24.15).
 	s.beginRunProgressLocked(id, task.Epoch, opts.resetBudget)
@@ -351,6 +384,7 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	}
 	s.cancels[id] = cancel
 	s.runs[id] = done
+	delete(s.yielded, id)
 	if s.runSpec == nil {
 		s.runSpec = make(map[string]int64)
 	}
@@ -567,6 +601,7 @@ func isExpiredLeaseTakeoverState(state State) bool {
 // ClaimRunnableTasks 把该本 Worker 跑的任务跑起来：没人要的 STARTING、过期租约、以及自己名下还空着的。
 // 同一轮先看共享行：本进程还在拉流时，行已经是 STOPPING 或 STOPPED 就取消这次执行。
 func (s *Scheduler) ClaimRunnableTasks() (int, error) {
+	s.retryPendingReleases()
 	if _, err := s.ReconcileLegacyDesiredRun(context.Background()); err != nil {
 		return 0, err
 	}
@@ -1117,8 +1152,21 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		)
 		s.mu.Lock()
 		// Run 已经返回，同步器的 Close 也已经返回。这里才允许写 STOPPED。
+		// A grace or lease-lost yield releases this epoch and leaves desired
+		// RUN. An operator Stop that landed after the yield still finishes.
 		fresh, ferr := s.intentLocked(id)
-		if newer, ok := s.wantReopenLocked(fresh, ferr, openedSpec); ok {
+		skipStop := false
+		if rel, yielded := s.yieldRelease[id]; yielded {
+			delete(s.yieldRelease, id)
+			mem := s.tasks[id]
+			if mem.State != StateFailed && mem.DesiredRun != TaskDesiredStop && mem.State != StateStopping && mem.State != StateStopped {
+				releaseOwner, releaseEpoch = rel.owner, rel.epoch
+				skipStop = true
+			}
+		}
+		if skipStop {
+			// released below; the row stays RUNNING or LEASE_DEGRADED
+		} else if newer, ok := s.wantReopenLocked(fresh, ferr, openedSpec); ok {
 			reopen = true
 			s.keepOwnerForReopenLocked(id, task, newer)
 		} else if mem, ok := s.tasks[id]; ok && mem.State != StateFailed {

@@ -460,7 +460,7 @@ func TestFailedTaskIsNotClaimed(t *testing.T) {
 }
 
 func TestUnclaimedAfterGraceOpensNoProgress(t *testing.T) {
-	w := newP29World(t, 2*time.Second, 15*time.Millisecond, 80*time.Millisecond, true, false)
+	w := newP29World(t, 400*time.Millisecond, 15*time.Millisecond, 80*time.Millisecond, true, false)
 	id, _ := w.start()
 	w.outagePastGrace(id)
 	deadline := time.Now().Add(2 * time.Second)

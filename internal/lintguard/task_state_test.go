@@ -1,3 +1,8 @@
+// Package lintguard checks that task state writes stay on the persist-first path.
+// input: internal/tasks Go sources parsed as AST
+// output: test failure when State is assigned outside the allowlist
+// pos: AST guard for the task state machine
+// note: if this file changes, update this header and module README.md.
 package lintguard
 
 import (
@@ -46,8 +51,10 @@ var stateWriters = map[string]bool{
 	"scheduler_lifecycle.go:noteRemoteStopLocked":      true,
 	"scheduler_lifecycle.go:settleForeignStop":         true,
 	"scheduler_cluster_lease.go:yieldLostLeaseLocked":  true,
-	"control_loop.go:adoptNewerStopLocked":             true,
-	"control_loop.go:intentLocked":                     true,
+	// §29: this epoch's dump already stopped; the row stays desired RUN and is not persisted here
+	"scheduler_cluster_lease.go:yieldForResumeLocked": true,
+	"control_loop.go:adoptNewerStopLocked":            true,
+	"control_loop.go:intentLocked":                    true,
 	// standalone startup read of the task record (ADR 0010), as Restore reads backup_tasks
 	"task_records.go:restoredTask": true,
 	// Task values built only to be read, never stored or persisted.

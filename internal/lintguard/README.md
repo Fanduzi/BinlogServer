@@ -10,5 +10,5 @@
 Not covered (by design, syntactic only): `v, _ := f()` blank error results, and errors dropped by not assigning a call's result at all. The full `errcheck`/`go vet` CI step needs a workflow edit and is tracked in the token-gaps handoff.
 
 When the test fails: report a finding, return the error, or add the site to `allowlist.go` with a reason in the same PR.
-- `task_state_test.go`：AST 检查。`internal/tasks` 里设置任务 `State` 只能在 `commitTransitionLocked` 或列明理由的 runner/控制回路配方里；操作员动作函数不得直接赋值 `s.tasks[...]`、删除 `s.tasks`、调用 `persistTaskLocked`，必须调用 `commitTransitionLocked`/`commitDeleteLocked`。白名单里不存在的函数也会报错。
+- `task_state_test.go`：AST 检查。`internal/tasks` 里设置任务 `State` 只能在 `commitTransitionLocked` 或列明理由的 runner/控制回路配方里；操作员动作函数不得直接赋值 `s.tasks[...]`、删除 `s.tasks`、调用 `persistTaskLocked`，必须调用 `commitTransitionLocked`/`commitDeleteLocked`。白名单里不存在的函数也会报错。`yieldForResumeLocked`（§29）记的是本进程已经放弃的这一轮 dump，不落盘 desired STOP，所以和 `yieldLostLeaseLocked` 一样在白名单里。
 - `managed_writer.go` + `managed_writer_test.go`（P2-4，#342）：任何名为 `Report`/`Resolve`/`report`/`resolve` 的调用（方法、logger 方法或函数值）若参数提到健康评估器 Managed 的 kind（`tasks.FindingX` 常量或其字符串）即失败；热路径改用 `SignalFailure`/`SignalSuccess`。只由评估器推导、没有 `tasks.FindingX` 常量的 kind 记在 `managedWithoutConstant`（含 P2-5.4 的 `ORPHAN_ROW` 与 `SEAL_FACTS_ABSENT`，以及 P2-6.1 的 `HEALTH_STALE`）。`testdata/managed` 覆盖各种写法。

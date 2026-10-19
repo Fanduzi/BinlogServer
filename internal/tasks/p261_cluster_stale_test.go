@@ -1,5 +1,5 @@
 // Package tasks provides module-level functionality for tasks.
-// input: three in-process cluster schedulers sharing one MemoryLease and one health store, with an injected clock
+// input: three in-process cluster schedulers sharing one MemoryLease and one health store, with a wall clock (lease renew stamps that clock onto task_leases)
 // output: proof that only the _health holder opens WARNING HEALTH_STALE on _cluster (subject = task id, never fence, epoch 0), that a task inside 5 sweeps does not open it, and that a failed ListHealth neither opens nor closes
 // pos: regression for ADR 0009 P2-6.1 (design 0009 §28); the in-process stand-in for the 3-node QA row
 // note: if this file changes, update this header and module README.md.
@@ -67,7 +67,10 @@ type staleCluster struct {
 
 func newStaleCluster(t *testing.T) *staleCluster {
 	t.Helper()
-	start := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	// Wall clock, not a fixed noon: lease renew stamps cfg.Now() onto
+	// task_leases, and a noon that is already past expires _health on the
+	// holder's next sweep.
+	start := time.Now().UTC()
 	hs := newLeaseHealthStore(NewMemoryLease())
 	return &staleCluster{
 		t: t, start: start, clock: start, leases: hs.leases, hs: hs,
