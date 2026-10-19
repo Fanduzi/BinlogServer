@@ -12,12 +12,30 @@ Maintenance rules:
 
 ## [Unreleased]
 
-可选迁移 `000010_binlog_files_retention_marker`（`binlog_files.retention_removed_at`，加法、可空）；schema 最高到 10，`minRequiredSchemaVersion` 仍为 6。没有新配置项。
+## [v0.5.74] - 2026-10-19
+
+发布说明：`docs/releases/v0.5.74.md`。可选迁移 `000010_binlog_files_retention_marker`（`binlog_files.retention_removed_at`，加法、可空）；schema 最高到 10，`minRequiredSchemaVersion` 仍为 6。没有新配置项。新 kind 由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）。
 
 ### Fixed
 
 - #341：配了上传、且本地保留短于桶保留时，删掉仍在桶窗口内的本地文件不写 `RETENTION_REMOVED`，本地窗口为什么变短没有审计。现在先写这条事件，再写 `retention_removed_at`（迁移 000010，可选）。写失败打开 `RETENTION_RECORD_FAILED`，下一轮干净的保留结束关掉。带标记的行不再报 `ORPHAN_ROW`；对象被列举确认丢失时仍报 `SEGMENT_MISSING`（对象）。没有 000010 时事件照写，幂等只保持到进程重启。
 - #353：在线把迁移 000008 降下去再升回来后，同一进程把新封存行的 `first_event_at` / `last_event_at` / `sha256` 留成 NULL，直到重启，也没有日志。现在每次封存和每轮健康评估都再探这些列；列不在且 schema ≥ 8（或本进程见过这些列）时一轮内打开 `SEAL_FACTS_ABSENT`，列回来就关闭并恢复写入。卡住窗口里已经写成 NULL 的旧行不回填。
+
+### Added
+
+- #434：`ORPHAN_ROW` 改为评估器管理（WARNING，Confirm）：带保留标记的行不报；前缀完整且标记行的对象不在时报 `SEGMENT_MISSING#object`（CRITICAL）；去掉对象存储后以 `CONFIG` 关闭。`SEAL_FACTS_ABSENT`（WARNING，一轮内打开）。`RETENTION_REMOVED` 事件、标记 UPDATE、封存事实 UPDATE 在有租约令牌时与 `task_leases` 行锁同一事务；没有令牌的 `AppendEvent` 仍是一条 INSERT、不重试。
+
+### Upgrade notes
+
+- 升级后第一轮保留会给本目录里「已上传、checksum match、本地已删、仍在桶窗口内」的行补写 `RETENTION_REMOVED`（有 000010 时同时写标记），包括旧二进制删掉的文件。没有 000010 时，每次重启后的第一轮会给这些行再写一条（重复的审计事件，不开 finding）。
+
+### Known issues
+
+- #436（P2）：在线回滚到 000009 以下后评估器只打 INFO、开不了任何 finding，`/api/health` 仍是 ok。
+- #437（P3）：在线 up 到 000010 后，up 之前删掉的行要到重启才写标记，重启时多写一条事件；期间对象丢失报 `ORPHAN_ROW` 而不是 `SEGMENT_MISSING#object`。
+- #438（P3）：保留按 mtime 删、补写按 `sealed_at` 判断，mtime 早于 `sealed_at` 的文件记录失败后可能永远补不上。
+- #441（P3）：源端轮转时 CRITICAL `CHECKPOINT_AHEAD` 误报 1–2 秒（v0.5.73 起）。
+- `/api/findings` 还没有读超时（P2-7）。
 
 ## [v0.5.73] - 2026-10-19
 
