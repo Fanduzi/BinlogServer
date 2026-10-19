@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task's catalog rows (when there is a catalog) and its task directory listing
-// output: HoldChain (one mutex per task, release is idempotent) plus chainOrder, the segment order, catalog rows and an error the health evaluator's chain reads: without a catalog the /replay order of the directory; with one, the catalog's rows reconciled with the directory, so a segment on disk with no row (a hand-added copy) is on the order and is I4/I6 evidence, and every catalogued segment carries its row (no I6_MISSING_ROW flood); RetentionRemoved comes from ListRetentionMarkers, and a real marker-query error is returned so the chain scope stays incomplete (1054 is an empty marker set)
+// output: HoldChain (one lock per task, release is idempotent; TryHoldChain gives up after a bounded wait for the evaluator, §27.8) plus chainOrder, the segment order, catalog rows and an error the health evaluator's chain reads: without a catalog the /replay order of the directory; with one, the catalog's rows reconciled with the directory, so a segment on disk with no row (a hand-added copy) is on the order and is I4/I6 evidence, and every catalogued segment carries its row (no I6_MISSING_ROW flood); RetentionRemoved comes from ListRetentionMarkers, and a real marker-query error is returned so the chain scope stays incomplete (1054 is an empty marker set)
 // pos: ADR 0009 phase 2 P2-3 QA round 1 (#380): the chain order with meta
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -23,22 +23,48 @@ import (
 // while it reads that task's checkpoint, directory fingerprint and chain
 // order (design §27, #441). release is safe to call more than once.
 func (s *Scheduler) HoldChain(taskID string) (release func()) {
+	release, _ = s.holdChain(taskID, -1)
+	return release
+}
+
+// TryHoldChain is HoldChain that gives up after wait. The evaluator uses it
+// so a rotate stuck inside the lock never stops evaluation (design §27.8 R1).
+func (s *Scheduler) TryHoldChain(taskID string, wait time.Duration) (release func(), ok bool) {
+	if wait < 0 {
+		wait = 0
+	}
+	return s.holdChain(taskID, wait)
+}
+
+// holdChain takes the task's chain lock; wait < 0 blocks.
+func (s *Scheduler) holdChain(taskID string, wait time.Duration) (func(), bool) {
 	if s == nil {
-		return func() {}
+		return func() {}, true
 	}
 	s.chainMu.Lock()
 	if s.chainLocks == nil {
-		s.chainLocks = map[string]*sync.Mutex{}
+		s.chainLocks = map[string]chan struct{}{}
 	}
 	m := s.chainLocks[taskID]
 	if m == nil {
-		m = &sync.Mutex{}
+		m = make(chan struct{}, 1)
 		s.chainLocks[taskID] = m
 	}
 	s.chainMu.Unlock()
-	m.Lock()
+	switch {
+	case wait < 0:
+		m <- struct{}{}
+	default:
+		t := time.NewTimer(wait)
+		select {
+		case m <- struct{}{}:
+			t.Stop()
+		case <-t.C:
+			return func() {}, false
+		}
+	}
 	var once sync.Once
-	return func() { once.Do(m.Unlock) }
+	return func() { once.Do(func() { <-m }) }, true
 }
 
 // chainOrder is the evaluator's chain order and, with a catalog, its rows.

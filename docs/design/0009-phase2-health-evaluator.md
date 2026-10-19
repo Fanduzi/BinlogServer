@@ -1562,11 +1562,12 @@ Swagger 的 `/api/health` 是开放 object，finding 的 `kind` 也不是枚举�
 
 **R2 锁内的 checkpoint 读有上限。** `assuranceCheckpoint` 原来用 `context.Background()` 读元数据。它在锁内，元数据挂住时会把轮转堵在锁上，复制热路径因此等评估器。改为 scheduler 的内部读超时（`meta.timeout.read`）。读失败（超时、连接错误）时同样记 `chain.local` 不完整，不再当作「没有 checkpoint」去跑 I5：那样会把一条真的 `CHECKPOINT_AHEAD` 关掉。`ErrTaskNotFound` 仍按没有 checkpoint 处理。
 
-**R3 每一轮扫描都探健康存储。** `probeHealthStore` 原来只在 `Run` 开始时跑一次，其后靠任务评估的读写发现缺口。集群里 `_cluster` 不归评估器，一个不负责任何任务的节点（没有 owner 的任务、没拿 `_health`）在线 `goto 8` 之后永远发现不了，`/api/health` 一直是 ok；反过来，它若在 schema 8 上启动，`up` 之后也永远关不掉，直到重启。改为 `Run` 的每个 Sweep tick 先探一次（有上限的 `ListHealth`），再 `markResponsible`。
+**R3 每一轮扫描都探健康存储。** `probeHealthStore` 原来只在 `Run` 开始时跑一次，其后靠任务评估的读写发现缺口。集群里 `_cluster` 不归评估器，一个不负责任何任务的节点（没有 owner 的任务、没拿 `_health`）在线 `goto 8` 之后永远发现不了，`/api/health` 一直是 ok；反过来，它若在 schema 8 上启动，`up` 之后也永远关不掉，直到重启。改为 `Run` 的每个 Sweep tick 先探一次（有上限的 `ListHealth`），再 `markResponsible`。签名：`Scheduler.TryHoldChain(taskID, wait) (release func(), ok bool)`，`EvaluatorConfig.ChainLockWait`。
 
 **shadow。** 只打一次 WARN，不 degraded。shadow 下评估器不拥有 finding，旧路径照常告警，这里不藏真实故障，按 D2 保持。
 
 测试（先红）：
-- 测试持着 `HoldChain` 不放时，`chainFacts` 在 `ChainLockWait` 量级内返回 nil；`SweepNow` 照样完成。
+- 测试持着 `HoldChain` 不放时，`chainFacts` 在 `ChainLockWait` 量级内返回 nil。
+- checkpoint 读直接报错时，`chainFacts` 返回 nil（不当作没有 checkpoint）。
 - checkpoint 读一直挂住到 ctx 结束时，`chainFacts` 在读超时量级内返回 nil，且锁已放（随后 `HoldChain` 立刻拿到）。
 - 运行中的评估器在 `Run` 之后健康存储改为 `ErrSchemaAbsent`、没有任何任务时，一个 Sweep 之内 `/api/health` degraded；改回可写后一个 Sweep 之内恢复。

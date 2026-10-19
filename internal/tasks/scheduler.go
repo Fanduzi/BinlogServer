@@ -402,9 +402,9 @@ type Scheduler struct {
 	metaReach metaReach
 	// healthGap is HEALTH_STORE_UNAVAILABLE while migration 000009 is absent (design §27).
 	healthGap healthGap
-	// chainLocks is HoldChain, one mutex per task (design §27, #441).
+	// chainLocks is HoldChain, one lock per task (design §27, #441).
 	chainMu    sync.Mutex
-	chainLocks map[string]*sync.Mutex
+	chainLocks map[string]chan struct{}
 	// healthReadCur is the one in-flight HealthSummary read (single-flight).
 	healthReadMu  sync.Mutex
 	healthReadCur *healthRead
