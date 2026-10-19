@@ -1,12 +1,13 @@
 // Package tasks provides module-level functionality for tasks.
-// input: three in-process schedulers sharing one MemoryLease and one fenced task table; the owner's meta calls can hang until their ctx ends, or its renew can freeze as under SIGSTOP
-// output: proof that a meta outage longer than lease grace resumes the task on a new epoch with one dump and no overlap, that a shorter outage and a SIGSTOP keep the same dump, that an operator Stop and a FAILED task stay stopped, and that a desired-RUN task nobody claims opens CRITICAL TASK_NO_PROGRESS within one sweep and degrades HealthSummary
+// input: three in-process schedulers sharing one MemoryLease and one fenced task table; the owner's meta calls can hang until their ctx ends, or its renew can freeze as under SIGSTOP; an in-flight append that returns WRITE_FENCED when grace cancels the dump
+// output: proof that a meta outage longer than lease grace resumes the task on a new epoch with one dump and no overlap, that a WRITE_FENCED append at that handoff leaves a claimable row and resumes at epoch+1 (#454), that a STOPPED row with desired RUN and an empty owner is claimed the same way, that a shorter outage and a SIGSTOP keep the same dump, that an operator Stop and a FAILED task stay stopped, and that a desired-RUN task nobody claims opens CRITICAL TASK_NO_PROGRESS within one sweep and degrades HealthSummary
 // pos: regression for issue 450 (design 0009 §29); the in-process three-scheduler harness
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -189,6 +190,21 @@ func (r *nodeRunner) Run(ctx context.Context, task Task) error {
 	return context.Canceled
 }
 
+// fencedAppendRunner is an append still in flight when grace cancels the
+// dump. The local fence refuses that append (Lose already ran), and that
+// error is what the scheduler sees, not the cancel (#454).
+type fencedAppendRunner struct {
+	node string
+	log  *dumpLog
+}
+
+func (r *fencedAppendRunner) Run(ctx context.Context, task Task) error {
+	end := r.log.begin(r.node, task.Epoch)
+	defer end()
+	<-ctx.Done()
+	return NewLeaseHandoff(fmt.Errorf("%w: append", ErrWriteFenced))
+}
+
 // p29World is three schedulers on one lease table and one task table.
 type p29World struct {
 	t      *testing.T
@@ -352,6 +368,70 @@ func TestMetaOutagePastGraceResumesOnNewEpoch(t *testing.T) {
 	}
 	if got.OwnerWorkerID == "" {
 		t.Fatalf("resumed row has no owner")
+	}
+}
+
+func TestFencedAppendAtGraceHandoffResumesOnNewEpoch(t *testing.T) {
+	w := newP29World(t, 2*time.Second, 15*time.Millisecond, 80*time.Millisecond, true, false)
+	w.owner().SetRunner(&fencedAppendRunner{node: "n1", log: w.log})
+	id, epoch := w.start()
+	w.gate.pause()
+	waitRunClosed(t, w.owner(), id, "fenced append at grace")
+	time.Sleep(60 * time.Millisecond) // the release attempt must time out while meta is down
+	w.gate.resume()
+	// A persist that was in flight fails after the handoff dropped the
+	// unpublished mark, and the sink republishes whatever memory holds.
+	w.owner().mu.Lock()
+	w.owner().unpublished[id] = struct{}{}
+	w.owner().mu.Unlock()
+	w.owner().republishUnpublished()
+
+	w.owner().mu.Lock()
+	mem := w.owner().tasks[id]
+	w.owner().mu.Unlock()
+	if mem.DesiredRun != TaskDesiredRun || (mem.State != StateLeaseDegraded && mem.State != StateRetryBackoff) {
+		t.Fatalf("memory %s desired %s owner %q, want LEASE_DEGRADED or RETRY_BACKOFF desired RUN", mem.State, mem.DesiredRun, mem.OwnerWorkerID)
+	}
+	got, err := w.table.GetTask(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State == StateStopped || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("published %s desired %s owner %q; a fenced append with no new owner must not store STOPPED", got.State, got.DesiredRun, got.OwnerWorkerID)
+	}
+	w.claim()
+	resumed := w.waitResumed(id, epoch)
+	if resumed.Epoch <= epoch || w.openRuns(id) != 1 || w.log.overlaps() || w.log.peak() != 1 {
+		t.Fatalf("resumed epoch %d runs %d peak %d overlap %v, want epoch > %d and one dump", resumed.Epoch, w.openRuns(id), w.log.peak(), w.log.overlaps(), epoch)
+	}
+}
+
+func TestStoppedDesiredRunWithNoOwnerIsClaimed(t *testing.T) {
+	w := newP29World(t, time.Minute, time.Hour, time.Minute, false, false)
+	s := w.owner()
+	task := ownedIdleTask(t, s, "", 0, StateStopped)
+	s.mu.Lock()
+	item := s.tasks[task.ID]
+	item.SpecRevision = 1
+	item.AppliedSpecRevision = 1
+	item.State = StateStopped
+	item.DesiredRun = TaskDesiredRun
+	item.OwnerWorkerID = ""
+	item.Epoch = 0
+	s.tasks[task.ID] = item
+	if err := s.persistTaskLocked(item); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+	w.leases.mu.Lock()
+	w.leases.rows[task.ID] = memoryLeaseRow{owner: "", epoch: 1, expire: time.Now().Add(-time.Second)}
+	w.leases.mu.Unlock()
+
+	w.claim()
+	got := w.waitResumed(task.ID, 1)
+	if got.Epoch != 2 || got.DesiredRun != TaskDesiredRun || w.openRuns(task.ID) != 1 || w.log.overlaps() {
+		t.Fatalf("resumed %s desired %s epoch %d runs %d overlap %v, want RUNNING desired RUN epoch 2 and one dump", got.State, got.DesiredRun, got.Epoch, w.openRuns(task.ID), w.log.overlaps())
 	}
 }
 
