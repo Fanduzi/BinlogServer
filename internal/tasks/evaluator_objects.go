@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: the task's uploaded catalog rows and the configured object lister
+// output: objectView, the chain.objects facts (listing completeness per prefix, unjudged keys uploaded after the snapshot, NoObjectStorage); object kinds that an incomplete listing must not judge, including I6_ORPHAN_ROW (design 0009 §21, §26.4)
+// pos: P2-5.2 object listing for the health evaluator
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 // evaluator_objects.go: the object facts of design 0009 §21 (P2-5.2). One
@@ -25,7 +30,7 @@ const (
 )
 
 // objectKinds are the assurance kinds judged from an object listing.
-var objectKinds = map[assurance.Kind]bool{assurance.I6MissingObject: true, assurance.I6ObjectSizeMismatch: true}
+var objectKinds = map[assurance.Kind]bool{assurance.I6MissingObject: true, assurance.I6ObjectSizeMismatch: true, assurance.I6OrphanRow: true}
 
 type objectListing struct {
 	at    time.Time

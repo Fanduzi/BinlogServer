@@ -1312,3 +1312,111 @@ QA 在 01d6c6fa 上跑 sc5（两节点集群，meta 进程 `kill -STOP` 12s，�
 - `internal/health`：带 `SuccessFactAt` 的 signal 关闭时，CLOSE 的 `FactAt` 是这个时间；不带时仍是本轮时间。
 
 **QA**：重跑 sc5（12s、30s）与 r4 (h)、(g)：每个节点（包括任务 owner 和非 `_health` 持有者）每次暂停各一对记录，`first_seen` 与故障开始相差不超过 1 个 ping 间隔，`resolved_at` 与恢复相差不超过 1 个 ping 间隔加一次写入；standalone 行的时间是 UTC，与集群行可直接比较。
+
+## 26. P2-5.4：保留期删除标记、RETENTION_REMOVED、SEAL_FACTS_ABSENT（#341 / #353，2026-10-19）
+
+§21.7 没有翻转 `ORPHAN_ROW`：配了上传时，本地保留删掉本地文件、桶里的对象和 `UPLOADED` 行都留着，行上没有「这次删除是保留期做的」标记，链检查会把它当成孤儿。§20 把 `SEAL_FACTS_ABSENT` 和这个标记留到本步。本步是 P2-5 的最后一块，不碰 `HEALTH_STALE`、完整 alerts API（P2-7）、整段桶过期仍删行（#209），也不把已经写成 NULL 的封存事实回填。
+
+### 26.1 现状
+
+- **#341**：`local_retention_days` 短于 `bucket_retention_days` 时，仍在桶窗口内且 checksum 为 match 的 `UPLOADED` 封存文件只删本地（`release` 的 `localOnly`）。对象和目录行留下，**不写** `RETENTION_REMOVED`。没配上传的路径（`dropGoneLocalOnlyRows`）会写这条事件，写失败才 `signalFail` `RETENTION_RECORD_FAILED`（S6）。所以配了上传时 S6 永远不出现，本地窗口为什么变短没有审计。数据没丢。
+- **#353**：`writeSealFacts` / `ListSealedChecksums` 遇到 MySQL 1054 就把 `sealFactsAbsent` 记到进程结束，之后的封存 UPDATE 直接跳过，不打日志。在线 `migrate down` 再 `up` 回 000008 之后，同一进程仍把新封存行的 `first_event_at` / `last_event_at` / `sha256` 留成 NULL，直到重启。评估器关掉时这条路径也存在。
+- **`ORPHAN_ROW` 仍不是 Managed**（§21.7，代码里 `p25` / `p253` / `p26d` 都不含它）。`I6_ORPHAN_ROW` 在「行在、本地不在、对象列举完整且 key 不在」时打开，不看保留期。桶窗口到期的整段删除会连行一起删，不会变成孤儿；误报来自留下的行。
+
+### 26.2 删除标记（migration 000010）
+
+只在「本地保留删掉本地文件、行和对象留下」时打标。整段过期仍删对象再删行，不留标记，也不写 `RETENTION_REMOVED`（行已经不在）。
+
+- 新迁移 `000010_binlog_files_retention_marker`，加法、可空，下限仍是 6（与 000008 相同）：
+  - up：`ALTER TABLE binlog_files ADD COLUMN retention_removed_at DATETIME(6) NULL;`
+  - down：`DROP COLUMN retention_removed_at;`
+- `listBinlogFiles` 的 SELECT 不改（sqlmock 钉着那条语句）。标记用旁路查询：`ListRetentionMarkers`（本任务 `retention_removed_at IS NOT NULL` 的 `source_file, epoch`）和单行是否已标记。
+- 1054：进程内记住缺列，打**一条** WARN，之后每次 sweep / 下一次写入再探。缺列是 schema 6–9 的支持路径，**不**对每个文件开 `RETENTION_RECORD_FAILED`。幂等退化为进程内集合；重启后同一文件可能再写一条 `RETENTION_REMOVED`。事件是审计，finding 不因此常开。
+  - 评审定案（§26.9 (b)）：没有 000010 时，每次进程重启后的第一轮回补会给本目录里每一条「本地已删、仍在桶窗口内、checksum match 的 `UPLOADED` 行」各再写一条 `RETENTION_REMOVED`，不只是刚删的那个文件。重复的是审计事件，不是 finding，也不改任何备份状态，所以接受；运维要去重时按 `(task_id, message)` 取最早一条，或者 `./migrate up` 到 10。
+- 顺序：先写事件，再写标记。事件失败则标记保持空，下一轮重试，审计不会丢。事件成功、标记失败：下一轮会再写一条事件然后写上标记（重复一条，好过丢掉）。标记已有则跳过事件。
+- 回补：之后的一轮里，本任务目录下 `file_path` 已不在、仍在桶窗口内、checksum 为 match 的 `UPLOADED` 行，标记为空，补事件和标记。覆盖「删完文件、记下之前崩溃」以及旧二进制已经删掉的文件。升级后第一轮可能集中写一批事件，和 #209「旧行下一轮清掉」同一类。`file_path` 不在本目录的行（别的 worker、只有对象）不标。
+
+### 26.3 事件与 RETENTION_RECORD_FAILED
+
+事件与今天没配上传的那条相同：type `RETENTION_REMOVED`，message `<name> removed by local retention`，detail 是 upload state，日志 `retention: removed ...`。成功后 `signalOK` 同一 subject（含原来的 `announceRetentionRemoved` 成功路径，它今天只在失败时 `signalFail`）。
+
+失败（不是 `tasks.ErrWriteFenced`）→ `signalFail` `RETENTION_RECORD_FAILED`，subject 是文件名，并且这一轮**不算**干净的保留轮。`ErrWriteFenced` 是租约移交，不走这个信号；文件可能已经删掉，下一个 owner 按 26.2 回补。
+
+§5.5 的关闭不依赖「这一轮刚好又删了同一个文件」：runner 只在 `cleanupTaskBinlogs` 返回 nil **且** 本轮没有记过保留记录失败时，写下 `RetentionCleanAt(task)`。评估器对已打开的 `RETENTION_RECORD_FAILED`：这个时间非零，且（本进程没见过这次失败，或该时间晚于信号的 `FactAt`）时把 `Probes[key]` 置真。不和 `LastSeen` 比（每轮评估都会把它往后推，永远关不上）。本轮 `signalFail` 之后不更新这个时间，所以旧的一轮关不掉新的失败。
+
+### 26.4 I6 与 ORPHAN_ROW
+
+`assurance.Row` 增加 `RetentionRemoved`。链缓存键带上这一位。
+
+| 行 | 对象列举 | 结果 |
+|---|---|---|
+| 有标记，对象还在 | 前缀完整 | 不报 `I6_ORPHAN_ROW` |
+| 有标记，对象不在 | 前缀完整 | `I6_MISSING_OBJECT`（subject `段#object`），**不**报孤儿。留下的那份副本丢了，这不是本地保留做的事 |
+| 有标记 | 前缀不完整 | 不判断 |
+| 无标记，本地和对象都不在 | 前缀完整 | `I6_ORPHAN_ROW`（#209） |
+| 无标记 | 前缀不完整 | 不判断（`checkOffChainRows` 同样认 `ObjectPrefixes`；nil 时仍是阶段 1：`Objects` 非 nil 即全量） |
+
+§6 把标记写成「`SEGMENT_MISSING` 也算一致」。本步不这么做：标记只免掉 `ORPHAN_ROW`。对象被列举确认丢失时仍开 `SEGMENT_MISSING#object`，否则对象丢了会静默。QA「保留期删除后无 `ORPHAN_ROW` 且有 `RETENTION_REMOVED`」仍然成立。
+
+`ORPHAN_ROW` 改为 Managed，`Confirm`（目录、磁盘、列举不是同一次读，与 P2-5.1 的链 kind 一样两轮才打开；已打开的照旧只看清除规则）。`SEAL_FACTS_ABSENT` 不设 Confirm（QA 要求 1 个 sweep 内打开）。
+
+确认没有对象存储时，已打开的 `ORPHAN_ROW` 以 `Reason=CONFIG` 关闭（与 `#object` / `UPLOAD_LATE` 相同），避免卸掉上传端点后 `chain.objects` 不再完整、finding 关不上。
+
+未列举完的段上的 `I6_ORPHAN_ROW` 与对象类 kind 一样不进入本轮事实。
+
+### 26.5 SEAL_FACTS_ABSENT（#353）
+
+每轮评估探一次，写路径在 `sealFactsAbsent` 为真时也探一次（评估器关掉时同样恢复）。探针是 `SELECT first_event_at FROM binlog_files LIMIT 0`，加上 `schema_migrations` 的版本。`LIMIT 0` 没有行仍表示列在（`ErrNoRows`）。
+
+- `seen`：本进程曾经探到列在。进程内一直为真，不随 down 清掉。
+- 打开：列不在，且（schema 版本 ≥ 8，**或** `seen`）。一直停在 schema 6/7、从未见过这些列：不开（支持的部署）。曾经写过事实、然后 down 到 7：`seen` 为真、列不在 → 一轮内 OPEN。
+- 关闭：探针看到列 → 清掉 `sealFactsAbsent`、`seen` 保持、finding CLOSE，之后的封存再写事实。记忆和库不一致在同一次探针里先改记忆再 Derive，不留着一条「不一致」的 finding。
+- 第一次变成缺列打一条 WARN；列回来再打一条「封存事实恢复写入」。缺列期间不再每条封存都打。
+- 探针失败：打日志，`store` scope 不完整（kind 变为 Managed 之后健康是 UNKNOWN），不改记忆，不关闭已打开的 finding。
+- 没有 meta（standalone 文件）：`Complete[store]=true`，`SealFactsAbsent=false`。
+- Derive 读 `Facts.Store.SealFactsAbsent`。subject 空，WARNING，健康 DEGRADED。不设 Confirm。detail 写 schema 版本，以及列回来之前不写封存事实。
+- `store` 在全局 `Produced` 里。kind 一旦 Managed，每一轮成功的评估都必须把 `Complete[store]` 设上，否则所有任务变成 UNKNOWN。代评无主任务的 `Produced` 仍只有 `task.state`（§24.2），不因这次探针变成 UNKNOWN。
+
+卡住窗口里已经写成 NULL 的旧行不回填。
+
+不回填之后下游是否会把这些行看错（评审定案 §26.9 (c)）：
+- 复核器（P2-3）的预期校验和是「目录行 sha256，否则任务目录的 `.seal-sha256` 账本」。账本在封存时由 `withSealFacts` 写，不依赖 000008，所以卡住窗口里封存的段照样有预期值、照样复核；两边都没有时复核器把这一段算作不可复核（`unavailable`），与 000008 之前一致，不算通过。
+- `/window`、`/replay` 和恢复计划从段文件本身读事件头时间和 GTID（`assurance.WindowOf`），不读 `first_event_at` / `last_event_at`，NULL 不改变可恢复窗口。
+- legacy 判断（P2-5.1 的本地大小比对）看的是 `.seal-sha256` 有没有这一行，不看目录行的 sha256。
+- 对象一致性看 `checksum`（`match` / `mismatch`）与对象列举，不看 sha256。
+所以这些 NULL 只是目录里少了冗余的封存事实，没有哪条路径因此把段判成正常或损坏。`SEAL_FACTS_ABSENT` 关闭的那一条 CLOSE 不声称补齐了旧行；回填留到以后单独做（§26.8）。
+
+### 26.6 栅栏（§23 / §24）
+
+保留跑在 `openBinlogWriter` 里，run 的 context 上有 `FenceIdentity`（standalone 与后台补传没有）。
+
+| 写 | 栅栏 |
+|---|---|
+| `RETENTION_REMOVED` 的 `AppendEvent` | `execUnderFence`：有本任务令牌时与 lease 行同一事务；没有令牌时仍是单条 INSERT |
+| `retention_removed_at` 的 UPDATE | 同上 |
+| 封存事实 UPDATE | 同上，仍是 upsert 提交之后的第二条语句（不并进 upsert 事务） |
+| 删本地文件之前 | `fenceWrite`（本地 lease 时钟）。拒绝则返回 `ErrWriteFenced`，不删、不记 S6 |
+
+任务行和 finding 的栅栏不变。`ErrWriteFenced` 不打开 `RETENTION_RECORD_FAILED`。有令牌的其它 `AppendEvent` 调用方一并进 `execUnderFence`（run 里的事件不应在丢掉 lease 之后落地）；没有令牌的调用方语句不变：仍是一条 INSERT、不重试、出错原样返回（调度器的有序事件通道和 finding 汇都没有令牌，重试会让一次 meta 中断把通道堵住更久）。评审定案（§26.9 (d)）：今天只有 `run` 的 context 带令牌（`mysql_runner.go` 的 `WithFenceIdentity` 是唯一来源），里面写事件的只有 `RETENTION_REMOVED` 与 `RETENTION_SKIPPED_NOT_UPLOADED`；调度器的事件（`TASK_LEASE_LOST`、`SOURCE_SWITCHOVER`、状态事件）和 finding 汇的 `FINDING_*` 事件都用 `context.Background()` 派生的 context，不会因为 lease 已经释放而被挡掉。令牌只对同一个任务生效（`id.TaskID != taskID` 时走单条语句）。
+
+### 26.7 测试（先红）
+
+- `assurance`：本地和对象都没了、无标记 → `I6_ORPHAN_ROW`；同一行 `RetentionRemoved` → 没有 `I6_ORPHAN_ROW`；有标记且前缀完整、对象不在 → `I6_MISSING_OBJECT` 而不是孤儿；前缀不完整 → 两者都不报（链上与链下）。
+- `health`：`ORPHAN_ROW` Managed 且 `Confirm`，`SEAL_FACTS_ABSENT` Managed 且无 Confirm；`Store.SealFactsAbsent` 且 `store` 完整时一轮打开、标志清掉后 CLOSE；孤儿第一轮不打开、第二轮打开；卸掉对象存储时 `ORPHAN_ROW` 以 CONFIG 关闭。
+- `replication`：本地 1 天 / 桶 7 天，仍在桶窗口内的 `UPLOADED` 文件删掉本地后恰好一条 `RETENTION_REMOVED`，行上 `RetentionRemovedAt` 非空；桶窗口内、本目录没有 `file_path` 的行没有这条事件。事件写入失败 → `RETENTION_RECORD_FAILED`，这一轮不算干净。
+- `meta`：封存 UPDATE 返回 1054 之后，下一次封存在探针成功时再写事实；探针仍是 1054 则继续跳过。有令牌时标记 UPDATE 与 lease 锁在同一事务；无令牌时仍是单条语句。
+- `tasks`：评估器一轮内打开 `SEAL_FACTS_ABSENT`，列恢复的下一轮关闭且健康不是 UNKNOWN；保留轮的完成时间晚于失败 `FactAt` 时探针关闭 `RETENTION_RECORD_FAILED`。
+
+### 26.8 本步不做
+
+- `HEALTH_STALE`、完整 alerts API（P2-7）。
+- 把整段桶过期改成留行。
+- 回填卡住窗口里已经写成 NULL 的封存事实。
+- `I6_MISSING_ROW`、集群模式下链 kind 的委派。
+
+### 26.9 评审定案（2026-10-19）
+
+- (a) 带标记的行，对象被完整列举确认不在时仍开 `SEGMENT_MISSING#object`：保留。标记只说明本地副本是保留期删的，不说明桶里那份还在；不开就是静默丢备份。
+- (b) 没有 000010 时重启后会重复写 `RETENTION_REMOVED`：接受，见 §26.2。
+- (c) 卡住窗口里的 NULL 不回填：下游不会因此误判，见 §26.5 末尾。
+- (d) `AppendEvent` 有令牌时走栅栏：只有 run 里的保留事件带令牌，见 §26.6；没有令牌时保持单条语句、不重试。

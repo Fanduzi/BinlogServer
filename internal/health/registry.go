@@ -131,6 +131,19 @@ func chainSpec(kind Kind, sev Severity, scope Scope, inv, text string, more ...S
 
 // stateSpec: kinds derived from task state; their Derive lands with the
 // PR that takes them over (P2-4/P2-6), so they never open before then.
+func sealFactsAbsentSpec() KindSpec {
+	s := stateSpec(SealFactsAbsent, Warning, ScopeStore, "store", "the seal fact columns are found again on the next probe")
+	s.Derive = sealFactsAbsentDerive
+	return s
+}
+
+func sealFactsAbsentDerive(f *Facts) []Instance {
+	if f == nil || f.Store == nil || !f.Store.SealFactsAbsent {
+		return nil
+	}
+	return []Instance{{Detail: fmt.Sprintf("binlog_files has no seal-fact columns (schema %d); seal facts stay unset until the columns return", f.Store.SchemaVersion)}}
+}
+
 func stateSpec(kind Kind, sev Severity, scope Scope, inv, text string, more ...Scope) KindSpec {
 	return KindSpec{Kind: kind, Severity: sev, Scopes: append([]Scope{scope}, more...), Version: 1, Clear: ClearRule{Invariant: inv, Text: text}}
 }
@@ -164,6 +177,11 @@ var p253Managed = map[Kind]bool{GTIDHole: true, CheckpointAhead: true}
 var p26dManaged = map[Kind]bool{TaskNoProgress: true,
 	MetaUnreachable: true} // #427, design §25
 
+// p254Managed is ORPHAN_ROW (Confirm, the retention marker keeps a
+// deleted local file from looking like an orphan) and SEAL_FACTS_ABSENT
+// (no Confirm: one sweep, design §26).
+var p254Managed = map[Kind]bool{OrphanRow: true, SealFactsAbsent: true}
+
 // ManagedKinds is every kind the evaluator owns in this release.
 func ManagedKinds() map[Kind]bool {
 	out := map[Kind]bool{}
@@ -180,6 +198,9 @@ func ManagedKinds() map[Kind]bool {
 		out[k] = true
 	}
 	for k := range p26dManaged {
+		out[k] = true
+	}
+	for k := range p254Managed {
 		out[k] = true
 	}
 	return out
@@ -238,7 +259,7 @@ func DefaultRegistry() Registry {
 		{Kind: SourceUnreachable, Severity: Critical, Scopes: []Scope{ScopeTaskState, ScopeSignals}, Version: 2, Derive: sourceUnreachableDerive,
 			Clear: ClearRule{Invariant: "S12", Holds: sourceUnreachableCleared,
 				Text: "a byte is read from the source (dump or probe) after the latest failed attempt, or the task is stopped, FAILED (TASK_FAILED takes over) or owned elsewhere"}},
-		stateSpec(SealFactsAbsent, Warning, ScopeStore, "store", "the seal fact columns are found again on the next probe"),
+		sealFactsAbsentSpec(),
 		stateSpec(HealthStale, Warning, ScopeTaskState, "F", "the task is evaluated"),
 		stateSpec(HealthStoreDegraded, Warning, ScopeStore, "F", "health writes succeed with migration 000009 present and versions not mixed"),
 	}
@@ -247,8 +268,8 @@ func DefaultRegistry() Registry {
 	specs = append(specs, gh)
 	r := Registry{}
 	for _, s := range specs {
-		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind] || p25Managed[s.Kind] || p253Managed[s.Kind] || p26dManaged[s.Kind]
-		s.Confirm = p25Managed[s.Kind]
+		s.Managed = p23Managed[s.Kind] || p24Managed[s.Kind] || p25Managed[s.Kind] || p253Managed[s.Kind] || p26dManaged[s.Kind] || p254Managed[s.Kind]
+		s.Confirm = p25Managed[s.Kind] || s.Kind == OrphanRow
 		r[s.Kind] = s
 	}
 	return r

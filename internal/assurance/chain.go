@@ -41,6 +41,10 @@ type Row struct {
 	ObjectKey   string
 	CreatedAt   time.Time
 	SealedAt    time.Time
+	// RetentionRemoved is set when local retention deleted the local file
+	// and left the row (design 0009 §26). The marker is not a license to
+	// ignore a missing object.
+	RetentionRemoved bool
 }
 
 // Switch is one continued source switch: the server the chain moved to and
@@ -565,6 +569,10 @@ func (c *Chain) checkCopies(seg *Segment, now time.Time, add func(Kind, string, 
 	switch {
 	case !seg.Local && !uploaded:
 		add(I6MissingLocal, row.UploadState, fmt.Sprintf("segment %s is %s but not on local disk", seg.Name, row.UploadState), seg.Name)
+	case !seg.Local && seg.ObjectListed && seg.Object == nil && row.RetentionRemoved:
+		// Local retention removed the file and left the row. The object was
+		// the remaining copy; its absence is not an orphan (§26.4).
+		add(I6MissingObject, row.ObjectKey, fmt.Sprintf("segment %s was removed by local retention but object %s is missing", seg.Name, row.ObjectKey), seg.Name)
 	case !seg.Local && seg.ObjectListed && seg.Object == nil:
 		add(I6OrphanRow, row.ObjectKey, fmt.Sprintf("segment %s is neither on local disk nor in object storage (%s)", seg.Name, row.ObjectKey), seg.Name)
 	case seg.Local && uploaded && seg.ObjectListed && seg.Object == nil:
@@ -612,7 +620,14 @@ func (c *Chain) checkOffChainRows(add func(Kind, string, string, ...string)) {
 				continue
 			}
 		}
+		if !c.prefixListed(row.ObjectKey) {
+			continue
+		}
 		if _, ok := c.in.Objects[row.ObjectKey]; ok && row.ObjectKey != "" {
+			continue
+		}
+		if row.RetentionRemoved {
+			add(I6MissingObject, row.ObjectKey, fmt.Sprintf("catalog row %s was removed by local retention but object %s is missing", row.Name, row.ObjectKey), row.Name)
 			continue
 		}
 		add(I6OrphanRow, row.ObjectKey, fmt.Sprintf("catalog row %s has no local file and no object", row.Name), row.Name)

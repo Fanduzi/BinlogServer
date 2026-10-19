@@ -8,6 +8,7 @@ package tasks
 import (
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -379,6 +380,11 @@ type BinlogFile struct {
 	FirstEventAt *time.Time `json:"first_event_at,omitempty"`
 	LastEventAt  *time.Time `json:"last_event_at,omitempty"`
 	SHA256       string     `json:"sha256,omitempty"`
+	// RetentionRemovedAt is when local retention deleted the local file and
+	// left this row (migration 000010, design 0009 §26). nil means the column
+	// is empty or the catalog has no such column. It is not filled by the
+	// files-list SELECT.
+	RetentionRemovedAt *time.Time `json:"retention_removed_at,omitempty"`
 	// ResetSealFacts asks the catalog to clear the seal facts: the row now
 	// names a file whose facts could not be read, so the old ones are stale.
 	ResetSealFacts bool `json:"-"`
@@ -407,6 +413,16 @@ const (
 	// comparison did not finish. The existing upload retry checks that object again.
 	ChecksumVerifyPrefix = "checksum verify failed: "
 )
+
+// ErrRetentionMarkerUnsupported means binlog_files has no retention_removed_at
+// column (schema before migration 000010). Local retention still deletes the
+// file and writes the event; idempotency is in-process until the column exists.
+var ErrRetentionMarkerUnsupported = errors.New("retention marker column is absent")
+
+// RetentionMarkerKey is the map key for one catalog row's retention marker.
+func RetentionMarkerKey(fileName string, epoch int64) string {
+	return fileName + "\x00" + strconv.FormatInt(epoch, 10)
+}
 
 // ReplicationProgress 描述任务最近一次复制进度观测值。
 type ReplicationProgress struct {
