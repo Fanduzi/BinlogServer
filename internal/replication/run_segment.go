@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: the run's writer opener, the source session (disk names, resume GTID), the executed GTID set, the checkpoint and catalog stores
-// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes every event but writes the checkpoint and the OPEN row only at a transaction boundary, batched by checkpointBatchWindow (a held commit is written by the next commit past the window, a heartbeat, a rotate, a seal, or the run exit; #391); a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint and opens the next file under HoldChain when a chain gate is set, then uploads outside that lock (#441); every append and checkpoint flush first passes the run's write fence (ADR 0009 P2-6b, #417)
+// output: the open segment of a run: its file, writer, cursor and catalog row; an append that flushes every event but writes the checkpoint and the OPEN row only at a transaction boundary, batched by checkpointBatchWindow (a held commit is written by the next commit past the window, a heartbeat, a rotate, a seal, or the run exit; #391); a mid-file format description held until the first copied event; a seal for a source switch; and the rotate that seals (or discards, or releases as covered by an UPLOADED epoch) the old file, records the next-file checkpoint and opens the next file under HoldChain when a chain gate is set, then uploads outside that lock (#441); every append and checkpoint flush first passes the run's write fence (ADR 0009 P2-6b, #417); ENOENT from stat of this epoch's .open.eN after the lease moved is a handoff, not a failed checkpoint (#457)
 // pos: phase 3 of MySQLRunner.run (ADR 0008): segment append, rotate and seal
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -138,7 +138,7 @@ func (s *openSegment) flushCheckpoint() error {
 	if r.fileMetaStore != nil {
 		info, err := os.Stat(s.path)
 		if err != nil {
-			return err
+			return r.missingOpenHandoff(s.ctx, s.task, s.path, err)
 		}
 		if err := r.fileMetaStore.UpsertBinlogFile(s.ctx, carryUpload(tasks.BinlogFile{
 			TaskID:      s.task.ID,

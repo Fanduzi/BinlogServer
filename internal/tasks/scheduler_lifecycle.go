@@ -4,7 +4,7 @@
 // note P2-6c (#421): a live run whose shared row is FAILED by another epoch is not a remote Stop: the run stops, its lease epoch is marked lost, memory takes the FAILED row and nothing is written
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
-// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost; ClaimExpiredTasks also claims STOPPED when desired RUN and the owner is empty
+// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost; ClaimExpiredTasks also claims STOPPED when desired RUN and the owner is empty
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -13,10 +13,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"binlog_server/internal/binlog"
 
 	"go.uber.org/zap"
 )
@@ -1258,6 +1262,19 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		}
 
 		err = classifyRunError(err)
+		// #457: takeover deletes this epoch's .open.eN. stat/open ENOENT on
+		// that name, once the epoch is lost or a newer one holds the row, is
+		// a handoff. The same ENOENT while this epoch still owns the lease
+		// still fails. A read error is not a successor.
+		if statOfThisOpenEpoch(err, current.Epoch) && s.openEpochHandoffLocked(id, current) {
+			err = NewLeaseHandoff(err)
+			fresh, ok := s.tasks[id]
+			if !ok {
+				s.mu.Unlock()
+				return
+			}
+			current = fresh
+		}
 		errMsg := err.Error()
 		zap.L().Error("runner error", zap.String("task_id", id), zap.Error(err))
 		s.noteRunnerError(id, err)
@@ -1367,6 +1384,33 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		task = current
 		s.mu.Unlock()
 	}
+}
+
+// statOfThisOpenEpoch reports ENOENT for this run's .open.eN. A sealed
+// name, another epoch, or a non-path error is not this case (#457).
+func statOfThisOpenEpoch(err error, epoch int64) bool {
+	if err == nil || epoch <= 0 || !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	var pe *os.PathError
+	if !errors.As(err, &pe) || pe.Path == "" {
+		return false
+	}
+	named, ok := binlog.ClassifySegment(filepath.Base(pe.Path))
+	return ok && named.Open && named.Epoch == epoch
+}
+
+// openEpochHandoffLocked reports that a missing .open.eN for current.Epoch
+// must not be written as FAILED. Caller holds s.mu. successorOwnsLocked
+// releases it during the row and lease reads.
+func (s *Scheduler) openEpochHandoffLocked(id string, current Task) bool {
+	if current.Epoch <= 0 {
+		return false
+	}
+	if s.leaseClock != nil && s.leaseClock.Lost(id, current.Epoch) {
+		return true
+	}
+	return s.successorOwnsLocked(id, current.OwnerWorkerID, current.Epoch)
 }
 
 // runRunner 负责把 Scheduler 状态机与 Runner 生命周期对齐。
