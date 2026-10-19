@@ -134,6 +134,7 @@ binlog-server_0.5.76_linux_amd64/
   docs/guide/                    # 运维指南，含本地分段回放
   docs/security.md               # 鉴权、加密，以及 standalone 任务密钥
   docs/releases/                 # 离线升级说明
+  scripts/adopt-leftovers.sh     # 批量认领遗留任务目录
 ```
 
 ### 2. 本地快速体验 (Loopback 监听)

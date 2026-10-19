@@ -135,6 +135,7 @@ binlog-server_0.5.76_linux_amd64/
   docs/guide/                    # Operator guide, including on-disk replay
   docs/security.md               # Auth, encryption, and the standalone task key
   docs/releases/                 # Upgrade notes for offline operators
+  scripts/adopt-leftovers.sh     # Bulk adopt for leftover task directories
 ```
 
 ### 2. Start local evaluation (Loopback)
