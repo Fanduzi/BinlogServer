@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the full files inventory, every sealed segment plus the highest open epoch per source index, and each segment's event-header time span
-// output: the ordered paths whose copied events cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command; a format description or previous-GTIDs timestamp does not select a path; start equal to stop yields no paths and no command; Note explains an executed-GTID window that already contains every transaction up to the stop; the damaged segment and every later one are left out and warning says so
+// output: the ordered paths whose copied events cover a UTC point-in-time window, locations aligned with those paths, plus one mysqlbinlog or mariadb-binlog command that starts with set -o pipefail, adds --verify-binlog-checksum, adds --skip-gtid-strict-mode for mariadb-binlog, and comments the pipe and a row-count or GTID check; stdout stays SQL; a format description or previous-GTIDs timestamp does not select a path; start equal to stop yields no paths and no command; Note explains an executed-GTID window that already contains every transaction up to the stop; the damaged segment and every later one are left out and warning says so
 // pos: point-in-time seek on the existing replay selection; the limit window stays on GET /replay without stop_datetime
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -89,8 +89,11 @@ func FilterPITRFiles(files []BinlogFile, spans []EventSpan, start *time.Time, st
 
 // FormatPITRCommand is the copy-paste client invocation for paths.
 // An empty path list returns an empty string. When client is set, the string
-// starts with TZ=UTC and that client. Flags are --start-datetime (when start
+// starts with set -o pipefail, then TZ=UTC and that client. mariadb-binlog
+// also gets --skip-gtid-strict-mode. Flags are --start-datetime (when start
 // is set) then --stop-datetime, then paths, in order. Clock text is UTC.
+// A trailing comment tells the operator to pipe stdout in the same shell and
+// check a row count or GTID. The string itself does not pipe, so stdout is SQL.
 func FormatPITRCommand(client string, paths []string, start *time.Time, stop time.Time) string {
 	if len(paths) == 0 {
 		return ""
@@ -103,10 +106,29 @@ func FormatPITRCommand(client string, paths []string, start *time.Time, stop tim
 	for _, path := range paths {
 		tokens = append(tokens, shellToken(path))
 	}
+	return formatClientCommand(client, tokens)
+}
+
+// formatClientCommand wraps one binlog client invocation. An empty client
+// prints only tokens. A named client starts with set -o pipefail so a later
+// pipe does not hide a non-zero client, and ends with a comment that names
+// the pipe and a verification query. mariadb-binlog gets
+// --skip-gtid-strict-mode because MariaDB 11.4 otherwise stops after the
+// first file. mysqlbinlog does not get that flag. Both clients get
+// --verify-binlog-checksum so a corrupt event fails the client.
+func formatClientCommand(client string, tokens []string) string {
+	if len(tokens) == 0 {
+		return ""
+	}
 	var b strings.Builder
 	if client != "" {
+		b.WriteString("set -o pipefail\n")
 		b.WriteString("TZ=UTC ")
 		b.WriteString(client)
+		if client == "mariadb-binlog" {
+			b.WriteString(" --skip-gtid-strict-mode")
+		}
+		b.WriteString(" --verify-binlog-checksum")
 		b.WriteString(" \\\n")
 	}
 	for i, token := range tokens {
@@ -118,7 +140,27 @@ func FormatPITRCommand(client string, paths []string, start *time.Time, stop tim
 			b.WriteString(" \\\n")
 		}
 	}
+	if client != "" {
+		b.WriteString("\n")
+		b.WriteString(restoreCommandNote(client))
+	}
 	return b.String()
+}
+
+func restoreCommandNote(client string) string {
+	if client == "mariadb-binlog" {
+		return strings.Join([]string{
+			"# Pipe stdout to mariadb in this same shell so pipefail sees a client failure.",
+			"# Without --skip-gtid-strict-mode, MariaDB 11.4 stops after the first file.",
+			"# Pass every file to one mariadb-binlog, in order. Do not restore one file at a time.",
+			"# Verify: mariadb -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_current_pos'",
+		}, "\n")
+	}
+	return strings.Join([]string{
+		"# Pipe stdout to mysql in this same shell so pipefail sees a client failure.",
+		"# Pass every file to one mysqlbinlog, in order. Do not restore one file at a time.",
+		"# Verify: mysql -Nse 'SELECT COUNT(*) FROM db.tbl; SELECT @@gtid_executed'",
+	}, "\n")
 }
 
 // PITRReplay lists every sealed segment and the highest open epoch across the full inventory, keeps

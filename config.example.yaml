@@ -1,4 +1,4 @@
-# BinlogServer v0.5.13 Comprehensive Configuration Reference
+# BinlogServer v0.5.76 Comprehensive Configuration Reference
 #
 # Rule 1 (Auth Fail-Closed):
 #   - Loopback (127.0.0.1/localhost/::1) may stay unauthenticated for local testing.
@@ -12,7 +12,12 @@
 
 listen_addr: "127.0.0.1:8080"
 data_dir: "./data"
-meta_dsn: "${BINLOG_SERVER_META_DSN}" # 推荐用环境变量注入，避免明文口令
+# Leave meta_dsn commented out for standalone mode. Tasks are encrypted in
+# {data_dir}/.tasks.enc. Uncomment the next line only after exporting
+# BINLOG_SERVER_META_DSN to a real DSN. An unset variable is a startup error
+# ("BINLOG_SERVER_META_DSN is not set; leave meta_dsn empty for standalone mode"),
+# not an empty DSN. Setting the variable to an empty string is standalone mode.
+# meta_dsn: "${BINLOG_SERVER_META_DSN}"
 mode: "standalone" # standalone | cluster
 
 cluster:
@@ -53,18 +58,19 @@ http:
     read_timeout_sec: 30
     write_timeout_sec: 30
     idle_timeout_sec: 120
-  worker_# ADR 0010: without meta_dsn, tasks are saved encrypted in {data_dir}/.tasks.enc
+  worker_health:
+    read_header_timeout_sec: 3
+    read_timeout_sec: 10
+    write_timeout_sec: 10
+    idle_timeout_sec: 30
+
+# ADR 0010: without meta_dsn, tasks are saved encrypted in {data_dir}/.tasks.enc
 # and resume by themselves after a restart. The key comes from the env
 # BINLOG_SERVER_TASK_KEY or a 0600 key file (binlog-server task-key generate --out <path>).
 standalone:
   task_records: "on" # on | off
   task_key_file: ""
   task_key_previous_file: "" # the old key while rotating
-health:
-    read_header_timeout_sec: 3
-    read_timeout_sec: 10
-    write_timeout_sec: 10
-    idle_timeout_sec: 30
 
 meta:
   timeout:

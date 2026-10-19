@@ -132,12 +132,19 @@ binlog-server_0.5.76_linux_amd64/
   config.example.yaml            # 完整参数参考配置
   config.production.example.yaml # 生产安全推荐模板
   docs/guide/                    # 运维指南，含本地分段回放
+  docs/security.md               # 鉴权、加密，以及 standalone 任务密钥
+  docs/releases/                 # 离线升级说明
+  scripts/adopt-leftovers.sh     # 批量认领遗留任务目录
 ```
 
 ### 2. 本地快速体验 (Loopback 监听)
 
+没有 `meta_dsn` 时，任务写在 `{data_dir}/.tasks.enc`。先生成任务密钥。这条命令写出模式 `0600` 的文件，并打印路径和 key id，不打印密钥本身。密钥文件放在 `data_dir` 外面。说明见 [docs/security.md](docs/security.md)。
+
 ```bash
 # 绑定到 127.0.0.1 允许免鉴权快速启动演示
+./binlog-server task-key generate --out ./task.key
+export BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server
@@ -150,6 +157,10 @@ export BINLOG_SERVER_DATA_DIR=./data
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 # 期望返回: ok
+curl -fsS http://127.0.0.1:8080/api/health
+# 配了任务密钥后，正文里 status 为 ok。
+# 没配密钥时是 degraded：
+# {"status":"degraded","reasons":["TASK_RECORDS_FAILED/key_missing (task _cluster)"]}
 ```
 
 ### 4. 提交第一个备份任务
@@ -243,7 +254,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
 - 用同一个回放窗口下载一个 tar。`GET /api/tasks/<task-id>/replay/archive` 的 `limit` 与 `GET /api/tasks/<task-id>/replay` 相同。响应是 `application/x-tar`，文件名是 `task-<task-id>-replay.tar`。每个成员是 basename，不是主机路径。本地文件优先；本地没有时，只有目录行仍是封存且 `UPLOADED`、`object_key` 非空才从对象存储读。保留清理会同时删掉该行和对象，所以已清理的分段不会出现在这个 tar 里。没有可选分段时返回空 tar。任一选中分段打不开，响应是错误，不是半个 tar。解压后把这些 basename 交给 `mysqlbinlog` 或 `mariadb-binlog`。JSON 回放命令不变。
-- 全量备份由你自己恢复之后，可以按时间点要这段 binlog。`GET /api/tasks/<task-id>/replay?stop_datetime=2024-01-01%2001:30:00` 返回事件时间盖住这个 UTC 时刻的每个源序号一条路径，以及一条带 `--stop-datetime` 的 `TZ=UTC mysqlbinlog` 或 `TZ=UTC mariadb-binlog` 命令。备份的一致性时间要作为起点时，再加上 `start_datetime`。同一个查询打在 `/replay/archive` 上下载这些 basename。窗口为空仍是 HTTP 200，`paths` 是 `[]`，`command` 是空字符串。时间无法解析是 HTTP 400。要停在某一条事务之前，同一路由传 `stop_gtid=<server_uuid>:<序号>`。命令列出这条 MySQL GTID 所在文件以及它前面的分段，并用 `--stop-position` 指到该事件的起始字节，所以这条事务和它后面的事务都不放进去。`start_datetime` 仍可以和 `stop_gtid` 一起用。`stop_datetime` 和 `stop_gtid` 同时出现是 HTTP 400，正文 `stop_datetime and stop_gtid cannot both be set`。flavor 不是 mysql 是 HTTP 400，正文 `stop_gtid is not supported for this flavor`。恢复库已经有已执行 GTID 集合时（`xtrabackup_binlog_info`、mysqldump 的 `GTID_PURGED`，或 `SELECT @@gtid_executed`），把这个集合作为 `start_gtid_set` 和任意一个停止参数一起传。只含集合里已有事务的分段不进入 `paths`。命令用 `mysqlbinlog --exclude-gtids`，只应用集合里没有的事务，停止语义不变。`start_gtid_set` 和非空 `start_datetime` 同时出现是 HTTP 400，正文 `start_gtid_set and start_datetime cannot both be set`。集合比保留的 binlog 更老、要应用的第一段之前有缺口时是 HTTP 400，正文 `start_gtid_set has a gap before this task's backed-up range`。集合已经包含停止点之前的每一条事务时仍是 HTTP 200，`paths` 为空，`command` 为空，`note` 为 `every transaction up to the stop is already in start_gtid_set`。
+- 全量备份由你自己恢复之后，可以按时间点要这段 binlog。`GET /api/tasks/<task-id>/replay?stop_datetime=2024-01-01%2001:30:00` 返回事件时间盖住这个 UTC 时刻的每个源序号一条路径，以及一条以 `set -o pipefail` 开头、带 `--stop-datetime` 和 `--verify-binlog-checksum` 的 `TZ=UTC mysqlbinlog` 或 `TZ=UTC mariadb-binlog --skip-gtid-strict-mode` 命令。在同一 shell 里把标准输出接到 `mysql` 或 `mariadb`，一次传入全部文件，并核对行数或 `@@gtid_executed` / `@@gtid_current_pos`。不加 `--skip-gtid-strict-mode` 时 MariaDB 11.4 会在第一个文件后停下。MySQL 的 `mysqlbinlog` 没有这个参数。备份的一致性时间要作为起点时，再加上 `start_datetime`。同一个查询打在 `/replay/archive` 上下载这些 basename。窗口为空仍是 HTTP 200，`paths` 是 `[]`，`command` 是空字符串。时间无法解析是 HTTP 400。要停在某一条事务之前，同一路由传 `stop_gtid=<server_uuid>:<序号>`。命令列出这条 MySQL GTID 所在文件以及它前面的分段，并用 `--stop-position` 指到该事件的起始字节，所以这条事务和它后面的事务都不放进去。`start_datetime` 仍可以和 `stop_gtid` 一起用。`stop_datetime` 和 `stop_gtid` 同时出现是 HTTP 400，正文 `stop_datetime and stop_gtid cannot both be set`。flavor 不是 mysql 是 HTTP 400，正文 `stop_gtid is not supported for this flavor`。恢复库已经有已执行 GTID 集合时（`xtrabackup_binlog_info`、mysqldump 的 `GTID_PURGED`，或 `SELECT @@gtid_executed`），把这个集合作为 `start_gtid_set` 和任意一个停止参数一起传。只含集合里已有事务的分段不进入 `paths`。命令用 `mysqlbinlog --exclude-gtids`，只应用集合里没有的事务，停止语义不变。`start_gtid_set` 和非空 `start_datetime` 同时出现是 HTTP 400，正文 `start_gtid_set and start_datetime cannot both be set`。集合比保留的 binlog 更老、要应用的第一段之前有缺口时是 HTTP 400，正文 `start_gtid_set has a gap before this task's backed-up range`。集合已经包含停止点之前的每一条事务时仍是 HTTP 200，`paths` 为空，`command` 为空，`note` 为 `every transaction up to the stop is already in start_gtid_set`。
   ```bash
   curl -fL -OJ -H "Authorization: Bearer $TOKEN" \
     "http://localhost:8080/api/tasks/<task-id>/replay/archive?limit=200"
@@ -259,7 +270,7 @@ curl -i -X POST http://127.0.0.1:8080/api/tasks/<task-id>/start
 
 在将生产环境升级至 `v0.5.76` 之前，请确认下面的运维约定。`v0.5.27`、`v0.5.28`、`v0.5.29`、`v0.5.30`、`v0.5.31`、`v0.5.32`、`v0.5.33`、`v0.5.34`、`v0.5.35`、`v0.5.36`、`v0.5.37`、`v0.5.38`、`v0.5.39`、`v0.5.40`、`v0.5.41`、`v0.5.42`、`v0.5.43`、`v0.5.44`、`v0.5.45`、`v0.5.46`、`v0.5.47`、`v0.5.48`、`v0.5.49`、`v0.5.50`、`v0.5.51`、`v0.5.52`、`v0.5.53`、`v0.5.54`、`v0.5.55`、`v0.5.56`、`v0.5.57`、`v0.5.58`、`v0.5.59`、`v0.5.60`、`v0.5.61`、`v0.5.62`、`v0.5.63`、`v0.5.64`、`v0.5.65` 与 `v0.5.66` 的记录留在下方链接的发布说明里。
 
-- **v0.5.76：meta 中断和 lease 接管不再让备份静默停掉（#453、#458），集群 `HEALTH_STALE`（#449），没有迁移，新增一个可选配置项：** 修复 #450、#454 和 #457。集群里续租宽限用尽（`lease_ttl_sec: 60` 时 meta 中断 35 秒以上）、无人认领的 lease 丢失或续租循环 panic，现在只结束本 epoch：desired 保持 RUN，任务以 epoch+1 从 checkpoint 续跑；没有人认领时一个 sweep 内打开 CRITICAL `TASK_NO_PROGRESS`，`/api/health` 返回 503。宽限让出时在途 append 被栅栏拒绝、又没有新主人时，任务保持可认领；已经落成 `STOPPED`、desired `RUN`、没有 owner 的行会被重新认领。旧 owner 在接管后发现 `.open.eN` 被删掉时让出，不再把 FAILED 写到新 owner 头上。旧二进制留下的 `STOPPED`、desired `STOP` 任务看起来和运维 Stop 一样，不会自动恢复：升级后请检查并手动 Start。修复按节点生效，请做完滚动升级。`health.evaluator: on` 时，`_health` 持有者对健康行超过新配置项 `health.stale_after_sec`（默认 0，即 5 倍 sweep）的任务在 `_cluster` 上打开 WARNING `HEALTH_STALE`，不让 `/api/health` 降级。v0.5.75 在同样的 schema 上运行，回退安全。已知问题：#451、#452、#455（P3），#456（P4）。
+- **v0.5.76：meta 中断和 lease 接管不再让备份静默停掉（#453、#458），集群 `HEALTH_STALE`（#449），没有迁移，新增一个可选配置项：** 修复 #450、#454 和 #457。集群里续租宽限用尽（`lease_ttl_sec: 60` 时 meta 中断 35 秒以上）、无人认领的 lease 丢失或续租循环 panic，现在只结束本 epoch：desired 保持 RUN，任务以 epoch+1 从 checkpoint 续跑；没有人认领时一个 sweep 内打开 CRITICAL `TASK_NO_PROGRESS`，`/api/health` 返回 503。宽限让出时在途 append 被栅栏拒绝、又没有新主人时，任务保持可认领；已经落成 `STOPPED`、desired `RUN`、没有 owner 的行会被重新认领。旧 owner 在接管后发现 `.open.eN` 被删掉时让出，不再把 FAILED 写到新 owner 头上。旧二进制留下的 `STOPPED`、desired `STOP` 任务看起来和运维 Stop 一样，不会自动恢复。`GET /api/tasks` 带 `desired_run`。用 `curl -sS "$A/api/tasks?state=STOPPED" | jq '.items[] | select(.desired_run=="STOP") | {id, name, state, desired_run, last_error}'` 找出它们，对 `last_error` 含 `lease renew grace exceeded` 的手动 Start。Console 任务列表的「期望」列和详情里的「期望状态」是同一个字段。已经落成 `STOPPED`、desired `RUN`、没有 owner 的行会被重新认领，不要再 Start。修复按节点生效，请做完滚动升级。`health.evaluator: on` 时，`_health` 持有者对健康行超过新配置项 `health.stale_after_sec`（默认 0，即 5 倍 sweep）的任务在 `_cluster` 上打开 WARNING `HEALTH_STALE`，不让 `/api/health` 降级。v0.5.75 在同样的 schema 上运行，回退安全。已知问题：#451、#452、#455（P3），#456（P4）。
 - **v0.5.75：schema 低于 9 时评估器不再静默，轮转不再误报 `CHECKPOINT_AHEAD`（#445），没有迁移和配置变更：** 修复 #436 和 #441。`health.evaluator: on` 且 meta 低于迁移 000009（在线 `migrate goto 7` 或 `8`，或进程在 schema 8 及以下启动）时，一轮内从内存打开 CRITICAL `HEALTH_STORE_UNAVAILABLE`（task `_cluster`，subject 为本节点），`/api/health` 返回 503 `degraded` 并写明 `schema N < 9, run ./migrate up`；`./migrate up` 之后不用重启即关闭，不负责任何任务的节点也一样。`shadow` 只打一次 WARN，`off` 不探。已经在 schema 9 以下开着评估器的部署，升级后会立刻 degraded：执行 `./migrate up`。`FLUSH BINARY LOGS` 时 checkpoint 和新文件取自同一快照，不再误报 CRITICAL `CHECKPOINT_AHEAD`；评估器取链锁最多等 2 秒（这一轮记 UNKNOWN，`TASK_NO_PROGRESS` 照常能报），checkpoint 读受 `meta.timeout.read` 约束。v0.5.74 在同样的 schema 上运行，回退安全。已知问题：#446（P3：schema 低于 9 时 rehasher INFO 日志刷屏）、#437、#438。
 - **v0.5.74：配了上传时本地保留删除留下审计（#434），可选迁移 000010，没有配置变更：** 修复 #341 和 #353。配了上传时，本地保留每删一个文件都写 `RETENTION_REMOVED`，有可选迁移 000010（`binlog_files.retention_removed_at`；`minRequiredSchemaVersion` 仍为 6）时同时写标记；记录失败打开 `RETENTION_RECORD_FAILED`。带标记的行不报 `ORPHAN_ROW`；列举确认对象不在时报 CRITICAL `SEGMENT_MISSING#object`。在线把 000008 降下去再升回来后，封存事实不用重启就恢复写入，缺列期间由 `SEAL_FACTS_ABSENT` 报出。升级后第一轮保留会给已经删掉的文件（包括旧二进制删的）补写事件；没有 000010 时重启会再写一遍（重复的审计事件，不开 finding）。v0.5.73 能在 schema 10 上运行，回退二进制是安全的。已知问题：#436（P2：在线回滚到 000009 以下后评估器静默、health 仍是 ok；评估器开着时不要把 meta 回滚到 9 以下）、#437、#438、#441。
 - **v0.5.73：meta 中断时有应答、有记录（#430），没有迁移和配置变更：** 修复 #427（P2）：meta 被黑洞（连接挂住而不是被拒绝）时，`/api/health` 不再挂住，所有节点、任何模式下都在约 1 秒内返回 503 `degraded` 并带 `META_UNREACHABLE`。`health.evaluator: on` 时，任何约 11 秒以上的中断，每个节点都记一条 CRITICAL `META_UNREACHABLE`，从第一次失败到第一次应答，时间为 UTC；集群里每次中断每个节点留一条 `_cluster` `FINDING_RESOLVED` 事件。健康存储时间改为 UTC（旧行不迁移）。已知 P3：连续两次中断后 persist/lease 类 finding 可能在恢复后约 35 秒仍打开；standalone 不写 `FINDING_RESOLVED` 事件。

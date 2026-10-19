@@ -244,6 +244,9 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 	if created.ID == "" {
 		t.Fatal("expected created task id")
 	}
+	if created.DesiredRun != tasks.TaskDesiredStop {
+		t.Fatalf("create desired_run=%q", created.DesiredRun)
+	}
 
 	listResp := httptest.NewRecorder()
 	listReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -286,6 +289,9 @@ func TestTaskAPI_CreateListStartStop(t *testing.T) {
 			t.Fatalf("expected one task, got %d", len(list.Items))
 		}
 		if list.Items[0].State == tasks.StateStopped {
+			if list.Items[0].DesiredRun != tasks.TaskDesiredStop {
+				t.Fatalf("list desired_run=%q", list.Items[0].DesiredRun)
+			}
 			break
 		}
 		if time.Now().After(deadline) {

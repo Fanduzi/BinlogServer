@@ -1,3 +1,7 @@
+// input: detail-format helpers and a test translator
+// output: assertions that a multi-file restore command uses pipefail, the MariaDB flag, and a verification comment
+// pos: unit coverage for the copied replay command
+// note: if this file changes, update this header and console/src/features/task-detail/README.md.
 import { describe, expect, it } from 'vitest'
 import { t } from '@/test/t'
 import {
@@ -27,6 +31,25 @@ describe('detail-format', () => {
   it('formatReplayCommand is empty without paths', () => {
     expect(formatReplayCommand({ paths: [] })).toBe('')
     expect(formatReplayCommand(null)).toBe('')
+  })
+  it('formatReplayCommand keeps a client failure visible and verifies the restore', () => {
+    const mysql = formatReplayCommand({
+      client: 'mysqlbinlog',
+      paths: ['/data/1/mysql-bin.000001', '/data/1/mysql-bin.000002'],
+    })
+    expect(mysql.startsWith('set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n')).toBe(true)
+    expect(mysql).toContain('/data/1/mysql-bin.000001')
+    expect(mysql).toContain('/data/1/mysql-bin.000002')
+    expect(mysql).toContain('@@gtid_executed')
+    expect(mysql).not.toContain('--skip-gtid-strict-mode')
+    expect(mysql).not.toContain('| mysql')
+    const maria = formatReplayCommand({
+      client: 'mariadb-binlog',
+      paths: ['/data/1/a', '/data/1/b'],
+    })
+    expect(maria).toContain('TZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum')
+    expect(maria).toContain('@@gtid_current_pos')
+    expect(maria).toContain('stops after the first file')
   })
   it('effectiveRetention falls back to retention_days', () => {
     expect(effectiveRetention({ retention_days: 7 }, 'local')).toBe('7')

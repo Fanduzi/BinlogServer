@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: one restored backup's MySQL executed GTID set, one existing stop (stop_datetime or stop_gtid), and each selected segment's GTID events
-// output: the segments that still contain a transaction the backup does not have, a mysqlbinlog command that skips the executed set, an explanatory note when nothing remains to apply, and plain-text errors for a bad set, a non-mysql flavor, a missing stop, or a gap before the retained range including sequences a GTID dump skipped between previous-GTIDs and the first copied event; the damaged segment and every later one are left out and warning says so
+// output: the segments that still contain a transaction the backup does not have, a mysqlbinlog command that skips the executed set and starts with set -o pipefail plus a pipe and row-count or GTID comment, an explanatory note when nothing remains to apply, and plain-text errors for a bad set, a non-mysql flavor, a missing stop, or a gap before the retained range including sequences a GTID dump skipped between previous-GTIDs and the first copied event; the damaged segment and every later one are left out and warning says so
 // pos: roll forward from a restored full backup to an existing stop, on the same replay selection as stop_datetime and stop_gtid
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -121,22 +121,7 @@ func FormatExecutedGTIDCommand(client string, paths []string, exclude string, st
 	for _, path := range paths {
 		tokens = append(tokens, shellToken(path))
 	}
-	var b strings.Builder
-	if client != "" {
-		b.WriteString("TZ=UTC ")
-		b.WriteString(client)
-		b.WriteString(" \\\n")
-	}
-	for i, token := range tokens {
-		if client != "" || i > 0 {
-			b.WriteString("  ")
-		}
-		b.WriteString(token)
-		if i != len(tokens)-1 {
-			b.WriteString(" \\\n")
-		}
-	}
-	return b.String()
+	return formatClientCommand(client, tokens)
 }
 
 type executedFile struct {

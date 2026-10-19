@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: repo source tree, Go toolchain, Node toolchain, and target version/platform settings
-# output: complete local release archives with service/migrate binaries, migration SQL, docs/guide, and checksums
+# output: complete local release archives with service/migrate binaries, migration SQL, example configs, scripts/adopt-leftovers.sh, docs/guide, docs/security.md, docs/releases, and checksums
 # pos: local release packaging validator mirroring the GoReleaser archive contract
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -81,10 +81,15 @@ for target in $TARGETS; do
       go build -trimpath -o "$stage_dir/migrate" ./cmd/migrate
   )
 
-  cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/README.md" "$ROOT_DIR/README_ZH.md" "$ROOT_DIR/CHANGELOG.md" "$stage_dir/"
-  mkdir -p "$stage_dir/migrations" "$stage_dir/docs"
+  cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/README.md" "$ROOT_DIR/README_ZH.md" "$ROOT_DIR/CHANGELOG.md" \
+    "$ROOT_DIR/config.example.yaml" "$ROOT_DIR/config.production.example.yaml" "$stage_dir/"
+  mkdir -p "$stage_dir/migrations" "$stage_dir/docs" "$stage_dir/scripts"
+  cp "$ROOT_DIR/scripts/adopt-leftovers.sh" "$stage_dir/scripts/adopt-leftovers.sh"
+  chmod 0755 "$stage_dir/scripts/adopt-leftovers.sh"
   cp "$ROOT_DIR"/migrations/*.sql "$stage_dir/migrations/"
   cp -R "$ROOT_DIR/docs/guide" "$stage_dir/docs/guide"
+  cp "$ROOT_DIR/docs/security.md" "$stage_dir/docs/security.md"
+  cp -R "$ROOT_DIR/docs/releases" "$stage_dir/docs/releases"
 
   echo "[release] archive $artifact_name.tar.gz"
   tar -C "$DIST_ROOT" -czf "$archive_path" "$artifact_name"

@@ -57,7 +57,7 @@ func TestTaskAPI_GTIDReplay(t *testing.T) {
 	if len(got.Paths) != 1 || !strings.HasSuffix(got.Paths[0], "mysql-bin.000002.open.e3") {
 		t.Fatalf("paths %v", got.Paths)
 	}
-	if !strings.Contains(got.Command, "--stop-position="+strconv.FormatUint(off, 10)) || strings.Contains(got.Command, "mysql-bin.000003") || strings.Contains(got.Command, "--stop-datetime=") || !strings.HasPrefix(got.Command, "TZ=UTC mysqlbinlog \\\n") {
+	if !strings.Contains(got.Command, "--stop-position="+strconv.FormatUint(off, 10)) || strings.Contains(got.Command, "mysql-bin.000003") || strings.Contains(got.Command, "--stop-datetime=") || !strings.HasPrefix(got.Command, "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n") || strings.Contains(got.Command, "--skip-gtid-strict-mode") {
 		t.Fatalf("command %s", got.Command)
 	}
 

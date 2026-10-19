@@ -1,3 +1,7 @@
+// input: BinlogServer HTTP JSON for tasks, dashboard rows, and auth
+// output: typed task responses including desired_run (RUN or STOP)
+// pos: Console API client shared by the task list and task detail
+// note: if this file changes, update this header and console/src/lib/README.md.
 // API layer for the new Console. Endpoints, params and auth handling match
 // frontend/src/api.js; pages move over one by one (issue #302) and add their
 // calls here as they land.
@@ -89,6 +93,7 @@ export interface Task {
   id: number | string
   name?: string
   state?: string
+  desired_run?: string
   storage_alert?: boolean
   owner_worker_id?: string
   epoch?: number

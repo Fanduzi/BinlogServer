@@ -1,3 +1,7 @@
+// input: dashboard rows whose task includes state and desired_run
+// output: the task table, including a Desired column for RUN or STOP
+// pos: Console task list
+// note: if this file changes, update this header and console/src/features/tasks/README.md.
 // Tasks / Alerts view, ported from the tasks|alerts branch of App.vue:
 // KPI cards, current-page filter panel, server-paged task table.
 import { useMemo, type ReactNode } from 'react'
@@ -96,6 +100,13 @@ export function TasksPage({ view, children }: { view: 'tasks' | 'alerts'; childr
             </ToneBadge>
           )}
         </div>
+      ),
+    },
+    {
+      key: 'desired',
+      header: t('table.desiredRun'),
+      cell: (row) => (
+        <span data-testid={`task-desired-${row.task.id}`}>{row.task.desired_run || '--'}</span>
       ),
     },
     { key: 'owner', header: t('table.ownerWorker'), cell: (row) => ownerWorkerLabel(row.task) },

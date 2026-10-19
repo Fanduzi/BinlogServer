@@ -5,6 +5,7 @@
 
 import { test, expect, type Download } from '@playwright/test'
 import { registerMockRoutes } from './fixtures/mock-routes'
+import { mysqlRestoreCommand } from './fixtures/restore-command'
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
 
@@ -25,26 +26,18 @@ test('task drawer copies the highest-epoch replay command', async ({ page }) => 
 
   await expect(page.getByTestId('task-replay-hint')).toHaveText('MySQL mysqlbinlog')
   const command = page.getByTestId('task-replay-command')
-  await expect(command).toHaveText(
-    [
-      'mysqlbinlog \\',
-      '  /data/1/mysql-bin.000001 \\',
-      '  /data/1/mysql-bin.000002.open.e4',
-    ].join('\n'),
-  )
+  const replayCommand = mysqlRestoreCommand([
+    '  /data/1/mysql-bin.000001 \\',
+    '  /data/1/mysql-bin.000002.open.e4',
+  ])
+  await expect(command).toHaveText(replayCommand)
   await expect(command).not.toContainText('.open.e1')
   await expect(command).not.toContainText('/data/1/mysql-bin.000002 \\')
 
   await page.getByTestId('task-replay-copy').click()
   await expect(page.getByText('已复制回放命令')).toBeVisible()
   const copied = await page.evaluate(() => navigator.clipboard.readText())
-  expect(copied).toBe(
-    [
-      'mysqlbinlog \\',
-      '  /data/1/mysql-bin.000001 \\',
-      '  /data/1/mysql-bin.000002.open.e4',
-    ].join('\n'),
-  )
+  expect(copied).toBe(replayCommand)
 
   const requestPromise = page.waitForRequest(
     (req) => req.method() === 'GET' && req.url().includes('/api/tasks/100/replay/archive'),

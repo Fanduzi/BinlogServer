@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, the persisted desired-run and retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions; storage_alert also carries segment, detail, missing_gtids, valid_segments, and restart_gtid_set
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, desired_run on API JSON (RUN or STOP), retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions; storage_alert also carries segment, detail, missing_gtids, valid_segments, and restart_gtid_set
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -72,7 +72,9 @@ type Task struct {
 	OperatorStart *StartConfig `json:"-"`
 	// DesiredRun is RUN or STOP. Metadata mode persists it on backup_tasks.
 	// Standalone keeps it on this struct until the process exits.
-	DesiredRun string `json:"-"`
+	// API JSON includes it so an operator can tell a desired STOP from a
+	// STOPPED row whose desired state is still RUN.
+	DesiredRun string `json:"desired_run"`
 	// SpecRevision increases when the operator Starts, Stops, or edits the dump spec.
 	// The control loop restarts one dump when this is ahead of the open dump.
 	SpecRevision int64 `json:"-"`

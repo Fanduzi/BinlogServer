@@ -62,7 +62,7 @@ func TestTaskAPI_PITRReplay(t *testing.T) {
 	if strings.Join(stopOnly.Paths, "\n") != strings.Join(wantStop, "\n") {
 		t.Fatalf("stop-only paths %v", stopOnly.Paths)
 	}
-	if !strings.Contains(stopOnly.Command, "--stop-datetime='2024-01-01 01:20:00'") || strings.Contains(stopOnly.Command, "--start-datetime=") || !strings.HasPrefix(stopOnly.Command, "TZ=UTC mysqlbinlog \\\n") {
+	if !strings.Contains(stopOnly.Command, "--stop-datetime='2024-01-01 01:20:00'") || strings.Contains(stopOnly.Command, "--start-datetime=") || !strings.HasPrefix(stopOnly.Command, "set -o pipefail\nTZ=UTC mysqlbinlog --verify-binlog-checksum \\\n") || strings.Contains(stopOnly.Command, "--skip-gtid-strict-mode") {
 		t.Fatalf("stop-only command %s", stopOnly.Command)
 	}
 	for _, path := range wantStop {
@@ -110,7 +110,7 @@ func TestTaskAPI_PITRReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	maria := getPITR(t, handler, "/api/tasks/2/replay", url.Values{"stop_datetime": {"2024-01-01 00:30:00"}})
-	if maria.Flavor != "mariadb" || maria.Client != "mariadb-binlog" || maria.ClientHint != "mariadb-binlog" || !strings.HasPrefix(maria.Command, "TZ=UTC mariadb-binlog \\\n") {
+	if maria.Flavor != "mariadb" || maria.Client != "mariadb-binlog" || maria.ClientHint != "mariadb-binlog" || !strings.HasPrefix(maria.Command, "set -o pipefail\nTZ=UTC mariadb-binlog --skip-gtid-strict-mode --verify-binlog-checksum \\\n") || !strings.Contains(maria.Command, "@@gtid_current_pos") {
 		t.Fatalf("maria %+v", maria)
 	}
 
