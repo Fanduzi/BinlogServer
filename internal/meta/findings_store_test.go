@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock for the task_findings statements; optionally BINLOG_TEST_META_DSN pointing at a schema 7 database
-// output: assertions that a finding upsert binds every column (NULL resolved_at while open), a missing table maps to tasks.ErrFindingStoreAbsent, and on real MySQL a reopen keeps first_seen and a resolve keeps the row
+// output: assertions that a finding upsert binds every column (NULL resolved_at while open), a missing table maps to tasks.ErrFindingStoreAbsent, and on real MySQL an update of an open row keeps first_seen, a resolve keeps the row, and a resolved row that opens again takes the new first_seen and count (§25.8 R4)
 // pos: persistence coverage for ADR 0009 findings
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -86,6 +86,21 @@ func TestFindingsOnMySQL(t *testing.T) {
 	all, err := store.ListFindings(ctx, "it-1", true, 10)
 	if err != nil || len(all) != 1 || all[0].ResolvedAt == nil {
 		t.Fatalf("history %+v err %v", all, err)
+	}
+	// A resolved row that opens again is a new occurrence: its first_seen
+	// and count are the new ones, not the earlier outage's (§25.8 R4).
+	t3 := at.Add(time.Hour)
+	again := tasks.Finding{TaskID: "it-1", Kind: tasks.FindingEventPersistFailed, Subject: "TASK_CREATED", Severity: tasks.FindingWarning, Detail: "c", FirstSeen: t3, LastSeen: t3, Count: 1}
+	if err := store.UpsertFinding(ctx, again); err != nil {
+		t.Fatal(err)
+	}
+	open, err = store.ListFindings(ctx, "it-1", false, 10)
+	if err != nil || len(open) != 1 || !open[0].FirstSeen.Equal(t3) || open[0].Count != 1 {
+		t.Fatalf("reopened after resolve: %+v err %v, want first_seen %s count 1", open, err, t3)
+	}
+	again.ResolvedAt = &t3
+	if err := store.UpsertFinding(ctx, again); err != nil {
+		t.Fatal(err)
 	}
 	global, err := store.ListOpenFindings(ctx, 10)
 	if err != nil {

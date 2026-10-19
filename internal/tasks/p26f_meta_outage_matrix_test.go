@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the failure-path matrix pieces (shared task table, MemoryLease, lease-fenced health store) with every metadata call gated: while the gate is closed a lease call, a health or finding store call and the MetaProbe ping hang until their ctx ends, as against a SIGSTOPped meta; real Evaluator.Run loops and finding sinks; meta_unreachable_after 300ms, ping every 20ms
-// output: one row per meta outage length (30s, 12s and a 5s control, scaled to meta_unreachable_after 10s), in cluster (three nodes: the task owner, the _health holder, and a node that is neither) and standalone (one node with a running task): every node records its own META_UNREACHABLE with first_seen at the outage start and resolved at the first answer (cluster: the legacy task_findings row; standalone: OPEN and CLOSE transitions whose fact_at are those times); the control records nothing
+// output: one row per meta outage shape (30s, 12s, sc5 12s-then-30s, and a 5s control, scaled to meta_unreachable_after 10s), in cluster (three nodes: the task owner, the _health holder, and a node that is neither) and standalone (one node with a running task): every node records its own META_UNREACHABLE with first_seen at the outage start and resolved at the first answer (cluster: the legacy task_findings row for the latest outage and one FINDING_RESOLVED _cluster event per outage; standalone: OPEN and CLOSE transitions whose fact_at are those times); the control records nothing
 // pos: ADR 0009 P2-6d failure-path matrix, meta outage rows (docs/design/0009-phase2-health-evaluator.md §25.8, #430 QA r1 sc5); runs in the per-PR go test
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -137,8 +137,9 @@ func (s *outageStore) ListOpenFindingsForTask(ctx context.Context, taskID string
 	return s.leaseHealthStore.ListOpenFindingsForTask(ctx, taskID)
 }
 
-// UpsertFinding keeps first_seen = LEAST and resolved_at as written, as
-// meta's upsertFindingSQL does.
+// UpsertFinding keeps the earlier first_seen while the row is open, takes
+// the new one when a resolved row reopens, and resolved_at as written, as
+// meta's upsertFindingSQL does (§25.8 R4).
 func (s *outageStore) UpsertFinding(ctx context.Context, f Finding) error {
 	if err := s.g.wait(ctx); err != nil {
 		return err
@@ -149,7 +150,7 @@ func (s *outageStore) UpsertFinding(ctx context.Context, f Finding) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row, ok := s.rows[f.Subject]
-	if !ok || f.FirstSeen.Before(row.firstSeen) {
+	if !ok || row.resolved != nil || f.FirstSeen.Before(row.firstSeen) {
 		row.firstSeen = f.FirstSeen
 	}
 	row.resolved = f.ResolvedAt
@@ -190,6 +191,41 @@ func (s *outageStore) transitions(subject string) []outageTransition {
 	return out
 }
 
+// outageEvents is meta's task_events behind the gate; it keeps the
+// _cluster events (the per-outage record in cluster mode, §25.8 R4).
+type outageEvents struct {
+	g    *metaGate
+	mu   sync.Mutex
+	list []TaskEvent
+}
+
+func (s *outageEvents) AppendEvent(ctx context.Context, ev TaskEvent) error {
+	if err := s.g.wait(ctx); err != nil {
+		return err
+	}
+	if ev.TaskID == ClusterFindingTask {
+		s.mu.Lock()
+		s.list = append(s.list, ev)
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *outageEvents) ListEvents(context.Context, string, int) ([]TaskEvent, error) { return nil, nil }
+
+// resolved is the FINDING_RESOLVED META_UNREACHABLE events of subject.
+func (s *outageEvents) resolved(subject string) []TaskEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []TaskEvent
+	for _, ev := range s.list {
+		if ev.Type == "FINDING_RESOLVED" && ev.Message == string(FindingMetaUnreachable)+" "+subject {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
 const (
 	outageAfter    = 300 * time.Millisecond // meta_unreachable_after, scaled from 10s
 	outagePing     = 20 * time.Millisecond  // ping interval and timeout, scaled from 1s
@@ -214,6 +250,7 @@ type outageEnv struct {
 	leases *MemoryLease
 	table  *sharedTaskTable
 	hs     *outageStore
+	events *outageEvents
 	nodes  []*outageNode
 }
 
@@ -221,8 +258,9 @@ func newOutageEnv() *outageEnv {
 	leases := NewMemoryLease()
 	g := &metaGate{}
 	return &outageEnv{g: g, leases: leases,
-		table: &sharedTaskTable{fencedMemoryStore: &fencedMemoryStore{lockedFakeStore: &lockedFakeStore{fakeStore: newFakeStore()}, leases: leases}},
-		hs:    &outageStore{leaseHealthStore: newLeaseHealthStore(leases), g: g, rows: map[string]outageRow{}}}
+		table:  &sharedTaskTable{fencedMemoryStore: &fencedMemoryStore{lockedFakeStore: &lockedFakeStore{fakeStore: newFakeStore()}, leases: leases}},
+		hs:     &outageStore{leaseHealthStore: newLeaseHealthStore(leases), g: g, rows: map[string]outageRow{}},
+		events: &outageEvents{g: g}}
 }
 
 // start builds one process and runs its evaluator loop and finding sink.
@@ -231,6 +269,7 @@ func (env *outageEnv) start(t *testing.T, name, role string, cluster bool, runne
 	opts := []Option{
 		WithStore(&outageTaskStore{nodeStore: &nodeStore{sharedTaskTable: env.table, node: name}, g: env.g}),
 		WithFindingStore(env.hs),
+		WithEventStore(env.events),
 		WithClusterLeaseManager(&outageLease{MemoryLease: env.leases, g: env.g}),
 		WithClusterWorkerID(name),
 		WithDataDir(dataDir),
@@ -323,15 +362,18 @@ func outageWithin(at, from time.Time, slack time.Duration) bool {
 func TestFailurePathMatrixMetaOutage(t *testing.T) {
 	rows := []struct {
 		name   string
-		outage time.Duration
+		pauses []time.Duration
 		record bool
 	}{
 		// sc5 second pause: every node, the task owner included, records it.
-		{name: "meta-pause-30s", outage: scaled(30), record: true},
+		{name: "meta-pause-30s", pauses: []time.Duration{scaled(30)}, record: true},
 		// sc5 first pause: longer than meta_unreachable_after, so recorded.
-		{name: "meta-pause-12s", outage: scaled(12), record: true},
+		{name: "meta-pause-12s", pauses: []time.Duration{scaled(12)}, record: true},
+		// sc5 as run: 12s, 25s apart, then 30s. Each outage keeps its own
+		// record; the second does not swallow the first (§25.8 R4).
+		{name: "meta-pause-12s-then-30s", pauses: []time.Duration{scaled(12), scaled(30)}, record: true},
 		// Control: shorter than meta_unreachable_after, never recorded.
-		{name: "meta-pause-5s", outage: scaled(5), record: false},
+		{name: "meta-pause-5s", pauses: []time.Duration{scaled(5)}, record: false},
 	}
 	for _, row := range rows {
 		for _, cluster := range []bool{true, false} {
@@ -349,64 +391,95 @@ func TestFailurePathMatrixMetaOutage(t *testing.T) {
 				}
 				time.Sleep(10 * outagePing) // healthy pings first
 
-				pauseAt := time.Now()
-				env.g.pause()
-				time.Sleep(row.outage)
-				resumeAt := time.Now()
-				env.g.resume()
+				var pauseAt, resumeAt []time.Time
+				for i, d := range row.pauses {
+					if i > 0 {
+						time.Sleep(scaled(25))
+					}
+					pauseAt = append(pauseAt, time.Now())
+					env.g.pause()
+					time.Sleep(d)
+					resumeAt = append(resumeAt, time.Now())
+					env.g.resume()
+				}
+				last := len(row.pauses) - 1
 
 				if !row.record {
 					time.Sleep(outageAfter + 200*time.Millisecond)
 					for _, n := range env.nodes {
 						if r, ok := env.hs.row(n.name); ok {
-							t.Errorf("%s (%s): a %s outage was recorded %+v, want nothing below meta_unreachable_after", n.name, n.role, row.outage, r)
+							t.Errorf("%s (%s): a %v outage was recorded %+v, want nothing below meta_unreachable_after", n.name, n.role, row.pauses, r)
 						}
 						if ts := env.hs.transitions(n.name); len(ts) > 0 {
-							t.Errorf("%s (%s): a %s outage left transitions %+v, want none", n.name, n.role, row.outage, ts)
+							t.Errorf("%s (%s): a %v outage left transitions %+v, want none", n.name, n.role, row.pauses, ts)
+						}
+						if evs := env.events.resolved(n.name); len(evs) > 0 {
+							t.Errorf("%s (%s): a %v outage left events %+v, want none", n.name, n.role, row.pauses, evs)
 						}
 					}
 					return
 				}
 				for _, n := range env.nodes {
 					if cluster {
+						// The row is the latest outage; each outage has its event.
 						var r outageRow
 						ok := false
+						var evs []TaskEvent
 						deadline := time.Now().Add(3 * time.Second)
 						for time.Now().Before(deadline) {
-							if r, ok = env.hs.row(n.name); ok && r.resolved != nil {
+							r, ok = env.hs.row(n.name)
+							evs = env.events.resolved(n.name)
+							if ok && r.resolved != nil && len(evs) >= len(row.pauses) {
 								break
 							}
 							time.Sleep(5 * time.Millisecond)
 						}
 						if !ok || r.resolved == nil {
-							t.Errorf("%s (%s): no resolved META_UNREACHABLE/%s row for a %s outage (row %+v, present %v)", n.name, n.role, n.name, row.outage, r, ok)
+							t.Errorf("%s (%s): no resolved META_UNREACHABLE/%s row for a %v outage (row %+v, present %v)", n.name, n.role, n.name, row.pauses, r, ok)
+						} else {
+							if !outageWithin(r.firstSeen, pauseAt[last], outageSlackIn) {
+								t.Errorf("%s (%s): first_seen %s, want the last outage start %s (+%s)", n.name, n.role, r.firstSeen.Format(time.StampMicro), pauseAt[last].Format(time.StampMicro), outageSlackIn)
+							}
+							if !outageWithin(*r.resolved, resumeAt[last], outageSlackOut) {
+								t.Errorf("%s (%s): resolved_at %s, want the first answer after %s (+%s)", n.name, n.role, r.resolved.Format(time.StampMicro), resumeAt[last].Format(time.StampMicro), outageSlackOut)
+							}
+						}
+						if len(evs) != len(row.pauses) {
+							t.Errorf("%s (%s): %d FINDING_RESOLVED META_UNREACHABLE events %+v for %d outages, want one each", n.name, n.role, len(evs), evs, len(row.pauses))
 							continue
 						}
-						if !outageWithin(r.firstSeen, pauseAt, outageSlackIn) {
-							t.Errorf("%s (%s): first_seen %s, want the outage start %s (+%s)", n.name, n.role, r.firstSeen.Format(time.StampMicro), pauseAt.Format(time.StampMicro), outageSlackIn)
-						}
-						if !outageWithin(*r.resolved, resumeAt, outageSlackOut) {
-							t.Errorf("%s (%s): resolved_at %s, want the first answer after %s (+%s)", n.name, n.role, r.resolved.Format(time.StampMicro), resumeAt.Format(time.StampMicro), outageSlackOut)
+						for i, ev := range evs {
+							if !outageWithin(ev.Time, resumeAt[i], outageSlackOut) {
+								t.Errorf("%s (%s): outage %d resolved event at %s, want the first answer after %s (+%s)", n.name, n.role, i+1, ev.Time.Format(time.StampMicro), resumeAt[i].Format(time.StampMicro), outageSlackOut)
+							}
 						}
 						continue
 					}
+					want := 2 * len(row.pauses)
 					var ts []outageTransition
 					deadline := time.Now().Add(3 * time.Second)
 					for time.Now().Before(deadline) {
-						if ts = env.hs.transitions(n.name); len(ts) >= 2 {
+						if ts = env.hs.transitions(n.name); len(ts) >= want {
 							break
 						}
 						time.Sleep(5 * time.Millisecond)
 					}
-					if len(ts) != 2 || ts[0].op != health.OpOpen || ts[1].op != health.OpClose {
-						t.Errorf("%s (%s): transitions %+v for a %s outage, want OPEN then CLOSE", n.name, n.role, ts, row.outage)
+					if len(ts) != want {
+						t.Errorf("%s (%s): transitions %+v for a %v outage, want OPEN and CLOSE per outage", n.name, n.role, ts, row.pauses)
 						continue
 					}
-					if !outageWithin(ts[0].factAt, pauseAt, outageSlackIn) {
-						t.Errorf("%s (%s): OPEN fact_at %s, want the outage start %s (+%s)", n.name, n.role, ts[0].factAt.Format(time.StampMicro), pauseAt.Format(time.StampMicro), outageSlackIn)
-					}
-					if !outageWithin(ts[1].factAt, resumeAt, outageSlackOut) {
-						t.Errorf("%s (%s): CLOSE fact_at %s, want the first answer after %s (+%s)", n.name, n.role, ts[1].factAt.Format(time.StampMicro), resumeAt.Format(time.StampMicro), outageSlackOut)
+					for i := range row.pauses {
+						o, c := ts[2*i], ts[2*i+1]
+						if o.op != health.OpOpen || c.op != health.OpClose {
+							t.Errorf("%s (%s): outage %d transitions %s,%s, want OPEN,CLOSE", n.name, n.role, i+1, o.op, c.op)
+							continue
+						}
+						if !outageWithin(o.factAt, pauseAt[i], outageSlackIn) {
+							t.Errorf("%s (%s): outage %d OPEN fact_at %s, want its start %s (+%s)", n.name, n.role, i+1, o.factAt.Format(time.StampMicro), pauseAt[i].Format(time.StampMicro), outageSlackIn)
+						}
+						if !outageWithin(c.factAt, resumeAt[i], outageSlackOut) {
+							t.Errorf("%s (%s): outage %d CLOSE fact_at %s, want the first answer after %s (+%s)", n.name, n.role, i+1, c.factAt.Format(time.StampMicro), resumeAt[i].Format(time.StampMicro), outageSlackOut)
+						}
 					}
 				}
 			})
