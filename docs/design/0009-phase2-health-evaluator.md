@@ -1675,7 +1675,7 @@ Swagger 的 `kind` 不是枚举。多一种 kind 字符串，不重生成。
 
 ### 28.7 本步不做
 
-- P2-6.2：链 scope 委派、`OWNER_CHANGED`、`NODE_GONE`、`node_gone_after` → UNKNOWN(node gone)、共享存储下持有者直接读链目录。
+- P2-6.2：链 scope 委派、`OWNER_CHANGED`、`node_gone_after` → UNKNOWN(node gone)。落地见 §30。共享存储下持有者直接读链目录仍不做。
 - P2-6.3：无 version 心跳加入时自动退回 `shadow`。
 - 把集群的 `META_UNREACHABLE` / `HEALTH_STORE_UNAVAILABLE` 改成 OPEN/CLOSE 转移（§27.7）。
 - 新的 Prometheus 指标名、schema 迁移、swagger 重生成。
@@ -1831,3 +1831,81 @@ PR #453 把「期望被写成 STOP」堵住了。2 节点、`lease_ttl` 60、宽
 **D10 已经写成该形状的行可以认领。** `desired_run = RUN` 且 `owner_worker_id` 为空且 `state = STOPPED`、lease 已过期：`ListTasksWithExpiredLease`、`ClaimExpiredTasks` 和本进程空闲认领都 Acquire。运维 Stop 的 desired 是 STOP，不在这条里。`spec_revision` 和 `applied_spec_revision` 都是 0 的旧行仍按状态推导期望，STOPPED 推导为 STOP，认领循环看到的是收尾而不是拉起。新 run 仍是 D3 的 checkpoint 续跑：epoch 加一，不另起一份空文件，不和旧 dump 重叠。
 
 不变量不变（§29.5）：期望 RUN 要么恰好一个节点在跑并由该 lease epoch 栅栏住，要么一个 sweep 内有 CRITICAL finding。恢复后 epoch 比让出前大 1。
+
+## 30. P2-6.2：非共享存储的链委派（2026-10-19）
+
+§8.2 是草图。本节是对照当前代码之后的决定。§29 是 #450 / #454 的续跑，不是这一步。P2-6.3（混版本退回 `shadow`）不在这里。
+
+### 30.1 代码里已经成立的事实
+
+1. **最后 owner 今天没有可靠的行。** FAILED 释放 lease（§24.3）把任务行的 `owner_worker_id` 和 `task_leases.owner_worker_id` 都清掉，epoch 留在 lease 行上（`Release` 不清 epoch）。`proxyFence` 在 owner 为空时用 `_health` 持有者自己的节点填 `Fence.Node`。`applyOnce` 每次都写 `fence_node = fence.Node`，并且只在 `fence.Delegated` 时写 `chain_owner`，否则写成空。代写因此既改掉 `fence_node`，又清掉 `chain_owner`。
+2. **新 lease 已经拒绝委派写。** `CheckFence` 要求 `lease.Epoch == Fence.TaskEpoch`。`storetest` 的 ClusterFence 已断言「delegation must lapse on a new lease」。这一条不用新规则。
+3. **已释放的同 epoch 不比节点。** `releasedProxy` 对 `Proxy` 和 `Delegated` 都成立：owner 为空时，同 epoch 不同 `fence_node` 不返回 `ErrFenced`。所以任何节点都能以 `Delegated` 在这个 epoch 上写。缺的是「只能是被记录的最后 owner」。
+4. **栅栏只比任务 lease epoch。** 从不与 `_health` 的 epoch 比较（§4、§8）。委派写的 `TaskEpoch` 是任务 lease 行上的 epoch。
+5. **没有「存储是共享的」这一事实。** `_health` 持有者读自己的本地目录，空目录会把链 finding 关掉。本步不读。
+6. **standalone 在 `fenceFor` 里就返回**，不走集群栅栏。文件存储拒绝非 standalone 的 fence。
+7. **评估器从不把 `Delegated` 设为 true。** 最后 owner 在行上的 owner 被清掉之后是 `errNotResponsible`，链 finding 停在打开，健康由代写的 `task.state` 决定（链 scope 不在本轮 `Produced` 里，所以不完整也不变成 UNKNOWN）。
+8. **`chain_owner` 列已经在 `000009`。** 不新增列、不新增迁移。再加一列会让 schema 10 上的健康写入遇到 1054，`healthErr` 把它变成 `ErrSchemaAbsent`，评估器退回旧路径。
+
+### 30.2 决定
+
+**D1 最后 owner 记在 `task_health.chain_owner`，绑定的 epoch 是 lease 行的 epoch。** 不新增 `chain_epoch`。lease 行在释放后仍留着 epoch；委派写把这个 epoch 放进 `Fence.TaskEpoch`，`CheckFence` 已有的比较就是绑定。`fence_node` 继续被代写改掉，不拿它当最后 owner。
+
+**D2 只有集群持有者的写入更新 `chain_owner`。** `Mode == cluster` 且不是 `Proxy`、不是 `Delegated` 时，`chain_owner = fence.Node`。代写、委派写、standalone、`never`、waiver 的 UPDATE 都写成 `chain_owner = chain_owner`。已经被旧代写清成空的行保持空，直到下一次持有者写入；不回填，不猜。
+
+**D3 委派写多一道节点检查。** `Delegated` 在现有的 lease epoch 检查之后还要求：已有 `task_health` 行，且 `chain_owner` 非空，且等于 `Fence.Node`。否则 `ErrFenced`。新 lease（epoch 不同）仍由原检查拒绝。不把这次 `ErrFenced` 闩住：和 `Proxy` 一样，下一轮重新派生。`storetest` 的并发代写在开风暴之前先做一次持有者写入（转移为空，generation 仍是 0，只记下 `chain_owner`），否则空的 `chain_owner` 会把委派写全部拒绝。
+
+**D4 谁评估。** `authorityFor`：行上 owner 是自己且 epoch > 0 时仍走 `fenceFor`（持有者，不是委派）。否则在代写之前试委派：集群、不是 control-plane、不是 `_cluster` / `_health`、`chain_owner` 是自己、lease 行在、epoch > 0、lease owner 为空或是自己。同一节点既持有 `_health` 又是最后 owner 时，一轮同时带 `Proxy` 和 `Delegated`：`task.state` 用 `unownedFacts`，链用 `chainFacts`（`facts == nil`，避免对象存储把 `Produced` 换成全局集合）。只委派的一轮只产生 `chain.local`，不读信号、不探 store。control-plane 只代写，不委派。`mayEvaluate` 不读库：持有者写成功或委派栅栏成立时记下这个任务，委派写被拒时清掉，避免未落库的健康被剪掉。
+
+**D5 `OWNER_CHANGED` 只在节点变了的时候。** 新的集群持有者（不是代写、不是委派）读到的 `chain_owner` 非空且不等于自己，则 `Facts.ChainOwnerChanged`。`Reconcile` 把 scope 只有 `chain.local` 和/或 `chain.objects` 的打开 finding 以 `OWNER_CHANGED` 关闭，即使新目录不完整；不把这个 key 记进 seen，同一轮里新目录仍想要的实例再 OPEN。同一 key 的 CLOSE 排在 OPEN 前面（`sort.Slice` 不稳定，按 key 再按 op）。同一节点、新 epoch（目录还是那一份）不是 `OWNER_CHANGED`，仍是 `EVAL`。`UPLOAD_UNVERIFIED` 带 `signals`，不在这条里。读 `chain_owner` 失败则不置位，不误关。
+
+**D6 `node_gone_after`。** 配置 `health.node_gone_after_sec`，0 = 3×sweep，负数拒绝启动。`_health` 持有者的代写轮：`chain_owner` 非空、不是自己、并且该 worker 的 `last_seen_at` 早于阈值（没有心跳行算消失）时，不读目录，把 `chain.local` 标成已产生但不完整，`Facts.NodeGone`。链 finding 保持打开，不以 `NODE_GONE` 关闭。心跳列表读失败不算消失；任务库没有心跳接口也不算消失。比较用 `StoreClock.StoreNow`，没有则用评估器时钟。
+
+**D7 健康。** `NodeGone` 时，只含链目录 scope 的 finding 不参与 CRITICAL / WARNING；`chain.local` 强制进 `Unknown`；没有别的 WARNING / CRITICAL 时状态是 UNKNOWN，`TaskHealth.UnknownDetail = "node gone"`。这个字符串不入库（MySQL 只写 `status` 和 `reasons`）。非链的 CRITICAL（`TASK_FAILED`）仍是 UNHEALTHY。`HealthSummary` 仍只因 CRITICAL 降级，不改。
+
+**D8 standalone 不变。** 不在文件存储上实现 `ChainOwner`。standalone 的空残留路径保持现在的开、关和 HEALTHY。
+
+**D9 不读共享目录，shadow 不记 `chain_owner`。** shadow 只计算不写，所以不会记下最后 owner；本步不补。`_cluster` 上以 `NODE_GONE` 关闭集群 finding（§8.9）仍不做：那些 subject 是观察者节点或任务 id，不是链的最后 owner。
+
+### 30.3 保证
+
+| 情况 | 链 finding | 委派写 | 健康 |
+|---|---|---|---|
+| STOPPED，最后 owner 还在，目录仍是它的 | 它继续打开和关闭 | 同 epoch、`chain_owner` 是它，允许 | 目录完整时不为 UNKNOWN |
+| 代写改了 `fence_node` | `chain_owner` 不动 | 最后 owner 仍可写 | 同上一行 |
+| 别的节点、同一 epoch、`Delegated` | — | `ErrFenced` | — |
+| 新 lease（任何节点，更高 epoch） | 新持有者按新目录重算 | 旧 epoch 的委派写 `ErrFenced` | 按新目录 |
+| 新持有者在另一个节点 | 旧目录的链 finding 以 `OWNER_CHANGED` 关闭；新目录仍成立的同一 key 同一轮再打开 | 旧 owner 被拒 | 按新目录 |
+| 同一节点，新 epoch | 按新一轮事实，原因 `EVAL` | 它现在是持有者，不是委派 | 按这个目录 |
+| 最后 owner 的心跳早于 `node_gone_after`（或没有心跳行） | 保持打开 | 它已经不写 | UNKNOWN，`chain.local`，detail `node gone` |
+| 同上，但另有非链 CRITICAL（`TASK_FAILED`） | 链 finding 仍开着 | — | UNHEALTHY |
+| 心跳列表读失败，或任务库没有心跳接口 | 保持打开 | — | 不因节点消失变成 UNKNOWN |
+| standalone | 现有路径 | 无委派 | 现有路径 |
+
+### 30.4 测试（先红）
+
+进程内多调度器，不进 `workflow_dispatch` 的三节点 e2e。先写、在实现之前失败的：
+
+- `TestP262NewLeaseRejectsDelegatedWrite`：更高 epoch 拒绝旧的委派写。这条今天已经绿，留作回归。
+- `TestP262OtherNodeDelegatedWriteRejected`：lease 已释放、代写改过 `fence_node` 之后，不是最后 owner 的 `Delegated` 写必须 `ErrFenced`。今天通过。
+- `TestP262StoppedLastOwnerOpensAndClosesChain`：最后 owner 打开 `SEGMENT_EMPTY_LEFTOVER`，释放 lease 并清空行 owner，代写一轮之后删掉残留，它必须关掉且健康不是 UNKNOWN。今天是 `errNotResponsible`。
+- `TestP262OwnerChangedClosesOldDirectory`：另一节点新 epoch、另一份没有残留的目录，关闭原因必须是 `OWNER_CHANGED`。今天是 `EVAL`。
+- `TestP262NodeGoneChainUnknown`：最后 owner 不再评估，心跳 `last_seen` 早于 3×sweep，链 finding 仍开，健康 UNKNOWN。今天代写写成 HEALTHY。
+- `TestP262StandaloneChainUnchanged`：standalone 打开再关闭空残留，健康不是 UNKNOWN，没有 `OWNER_CHANGED`。今天已经绿。
+
+实现再补上（依赖新字段，红提交里编译不过）：
+
+- 同一节点新 epoch 的关闭原因是 `EVAL`。
+- 代写之后 `chain_owner` 仍是最后 owner，它的委派写成功，别的节点被拒。
+- `NodeGone` 时链上的 CRITICAL 不把健康打成 UNHEALTHY；另有 `TASK_FAILED` 时仍是 UNHEALTHY；`UnknownDetail` 是 `node gone`。
+- 心跳读失败不置 `NodeGone`。
+- `health.node_gone_after_sec: -1` 拒绝启动；缺省为 0。
+
+### 30.5 本步不做
+
+- P2-6.3。
+- 共享存储上由 `_health` 持有者读链目录。
+- 新迁移、新 finding kind、`HealthSummary` 把 UNKNOWN 算进 `/api/health`。
+- §8.9：`_cluster` finding 以 `NODE_GONE` 关闭。
+- 改 `.github/workflows`。三节点 e2e 仍是 `workflow_dispatch`。
+- 真机 SIGSTOP / kill -9。QA 在非共享存储上停掉最后 owner：`node_gone_after` 之后健康是 UNKNOWN(node gone)，链 finding 仍开；任务在另一节点起来之后旧目录 finding 以 `OWNER_CHANGED` 关闭，旧 owner 的委派写被拒。
