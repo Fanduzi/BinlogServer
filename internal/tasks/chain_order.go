@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task's catalog rows (when there is a catalog) and its task directory listing
-// output: chainOrder, the segment order, catalog rows and an error the health evaluator's chain reads: without a catalog the /replay order of the directory; with one, the catalog's rows reconciled with the directory, so a segment on disk with no row (a hand-added copy) is on the order and is I4/I6 evidence, and every catalogued segment carries its row (no I6_MISSING_ROW flood); RetentionRemoved comes from ListRetentionMarkers, and a real marker-query error is returned so the chain scope stays incomplete (1054 is an empty marker set)
+// output: HoldChain (one mutex per task, release is idempotent) plus chainOrder, the segment order, catalog rows and an error the health evaluator's chain reads: without a catalog the /replay order of the directory; with one, the catalog's rows reconciled with the directory, so a segment on disk with no row (a hand-added copy) is on the order and is I4/I6 evidence, and every catalogued segment carries its row (no I6_MISSING_ROW flood); RetentionRemoved comes from ListRetentionMarkers, and a real marker-query error is returned so the chain scope stays incomplete (1054 is an empty marker set)
 // pos: ADR 0009 phase 2 P2-3 QA round 1 (#380): the chain order with meta
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -12,10 +12,34 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"binlog_server/internal/assurance"
 )
+
+// HoldChain is the per-task lock a rotate holds from the next-file checkpoint
+// write until the new open file is in the directory, and the evaluator holds
+// while it reads that task's checkpoint, directory fingerprint and chain
+// order (design §27, #441). release is safe to call more than once.
+func (s *Scheduler) HoldChain(taskID string) (release func()) {
+	if s == nil {
+		return func() {}
+	}
+	s.chainMu.Lock()
+	if s.chainLocks == nil {
+		s.chainLocks = map[string]*sync.Mutex{}
+	}
+	m := s.chainLocks[taskID]
+	if m == nil {
+		m = &sync.Mutex{}
+		s.chainLocks[taskID] = m
+	}
+	s.chainMu.Unlock()
+	m.Lock()
+	var once sync.Once
+	return func() { once.Do(m.Unlock) }
+}
 
 // chainOrder is the evaluator's chain order and, with a catalog, its rows.
 // A listing error leaves the order empty, like replayOrder.
