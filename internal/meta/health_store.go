@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it, unless Fence.PreserveChainOwner (§30, §31); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -191,11 +191,12 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 	if status == "" {
 		status = string(health.StatusUnknown)
 	}
-	// Only a cluster holder records the chain owner. Proxy and delegated
-	// writes leave the column alone (design §30): a proxy used to clear it.
+	// Only a cluster holder records the chain owner. Proxy, delegated, and
+	// PreserveChainOwner writes leave the column alone (design §30, §31):
+	// a proxy used to clear it, and a tail-failure write must not steal it.
 	chainSQL := "chain_owner = chain_owner"
 	args := []any{status, string(reasons), gen, fence.Node, fence.TaskEpoch, string(fence.Mode), fence.Instance, fence.TaskEpoch, fence.Node}
-	if fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {
+	if fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated && !fence.PreserveChainOwner {
 		chainSQL = "chain_owner = ?"
 		args = append(args, fence.Node)
 	}

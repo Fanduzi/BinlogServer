@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: the writer's view of the task lease, and a transition
-// output: Fence (which counter and node guard a health write, design §8) and TransitionDigest (content identity for replay, §5.4)
+// output: Fence (which counter and node guard a health write, design §8; PreserveChainOwner keeps chain_owner on a holder write, §31) and TransitionDigest (content identity for replay, §5.4)
 // pos: pure fence and replay identity shared by every health store
 // note: if this file changes, update this header and module README.md.
 package health
@@ -42,6 +42,10 @@ type Fence struct {
 	// a task nobody holds (non-shared storage, §30). The lease epoch check
 	// matches Proxy; the node must also equal task_health.chain_owner.
 	Delegated bool
+	// PreserveChainOwner: this cluster holder write must not record Node as
+	// chain_owner (§31). The unreachable-tail finding is written before the
+	// chain directory is read.
+	PreserveChainOwner bool
 }
 
 // TransitionDigest is the content identity of a transition: a replay of
