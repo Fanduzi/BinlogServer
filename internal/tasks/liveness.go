@@ -269,10 +269,7 @@ func (e *Evaluator) markLivenessCrossings() {
 	if stalledAfter <= 0 {
 		stalledAfter = health.DefaultDumpStalledAfter
 	}
-	noProgressAfter := e.cfg.NoProgressAfter
-	if noProgressAfter <= 0 {
-		noProgressAfter = health.DefaultNoProgressAfter
-	}
+	noProgressAfter := e.configuredNoProgress()
 	for _, t := range e.responsible() {
 		snap, ok := e.s.LivenessSnapshot(t.ID)
 		if !ok {

@@ -1255,6 +1255,54 @@ func TestStepTimeGuardsCoverSource(t *testing.T) {
 	}
 }
 
+// TestStepTimeGuardConstants pins each boundary-table constant to the Params
+// field (or named function) written in that row's source. Halving no_progress,
+// sweep, or stale_after moves the constant off the named value.
+func TestStepTimeGuardConstants(t *testing.T) {
+	p := Params{
+		LeaseTTL:        30 * time.Second,
+		ClaimInterval:   2 * time.Second,
+		Sweep:           13 * time.Second,
+		LockWait:        4 * time.Second,
+		IdleKill:        3 * time.Second,
+		StartToReady:    10 * time.Second,
+		NodeGoneAfter:   7 * time.Hour,
+		NoProgressAfter: 11 * time.Minute,
+		StaleAfter:      9 * time.Minute,
+	}
+	for _, g := range stepTimeGuards() {
+		got := g.cons(p)
+		want := guardConstant(g.src, p)
+		if got != want {
+			t.Errorf("%s: constant %s, source names %s", g.src, got, want)
+		}
+	}
+}
+
+func guardConstant(src string, p Params) time.Duration {
+	filled := p.fill()
+	switch {
+	case strings.Contains(src, "AcquiredAt"):
+		return filled.NoProgressAfter
+	case strings.Contains(src, "IdleKill"):
+		return filled.IdleKill
+	case strings.Contains(src, "LockWait"):
+		return filled.LockWait
+	case strings.Contains(src, "NoProgressAfter"):
+		return filled.NoProgressAfter
+	case strings.Contains(src, "Sweep"):
+		return filled.Sweep
+	case strings.Contains(src, "EffectiveNodeGone") || strings.Contains(src, "due.Before(now)"):
+		return EffectiveNodeGone(p)
+	case strings.Contains(src, "EffectiveStaleAfter"):
+		return EffectiveStaleAfter(p)
+	case strings.Contains(src, "time.Millisecond"):
+		return time.Millisecond
+	default:
+		return 0
+	}
+}
+
 func TestAdvanceBeforeDeadlinePreservesStep(t *testing.T) {
 	for seed := 0; seed < 40; seed++ {
 		s, now := fairRandState(t, int64(seed))
@@ -1352,6 +1400,17 @@ func TestUnkeyedStepInputsDoNotChangeOutcomes(t *testing.T) {
 	}
 }
 
+func intentText(in []Intent) string {
+	if len(in) == 0 {
+		return "-"
+	}
+	parts := make([]string, len(in))
+	for i, it := range in {
+		parts[i] = fmt.Sprintf("%s/%s/%s/%s/%t", it.Kind, it.Node, it.Finding.Name, it.Finding.Subject, it.LocksTaskLease)
+	}
+	return strings.Join(parts, ",")
+}
+
 func stepPrint(s State, now time.Time) string {
 	ids := []string{"_health"}
 	for _, n := range s.Nodes {
@@ -1391,7 +1450,7 @@ func stepPrint(s State, now time.Time) string {
 				ev.ReadOK = true
 			}
 			res := Step(s, ev, now)
-			fmt.Fprintf(&b, "%s %s %s %s %s %s|", id, k, res.Decision, res.Detail, res.State.Phase, res.State.FailedReason)
+			fmt.Fprintf(&b, "%s %s %s %s %s %s %s|", id, k, res.Decision, res.Detail, res.State.Phase, res.State.FailedReason, intentText(res.Intents))
 		}
 	}
 	return b.String()

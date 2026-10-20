@@ -150,3 +150,27 @@ func TestLoadConfig_HealthNodeGoneAfter(t *testing.T) {
 		t.Fatal("negative health.node_gone_after_sec accepted")
 	}
 }
+
+func TestLoadConfig_SideKill(t *testing.T) {
+	setRequiredAuthEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cluster.SideKill != "off" {
+		t.Fatalf("default %q, want off", cfg.Cluster.SideKill)
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("cluster:\n  side_kill: auto\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = LoadConfig(path); err != nil || cfg.Cluster.SideKill != "auto" {
+		t.Fatalf("auto %v %q", err, cfg.Cluster.SideKill)
+	}
+	if err := os.WriteFile(path, []byte("cluster:\n  side_kill: on\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("cluster.side_kill=on accepted")
+	}
+}
