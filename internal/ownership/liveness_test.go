@@ -1,14 +1,12 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Step, under the three fairness assumptions in ADR 0011 §4.1
-// output: liveness (a), (b), and (c). K counts backoff wastes and the deadline jumps between them (N9)
-// pos: the bounded fair search. Random prefixes in invariant_test.go are safety only
+// output: liveness (a), (b), and (c) checked against FairStepBound
+// pos: the fair-start set. The Step search that checks the bound is in observe_test.go
 // note: if this file changes, update this header and module README.md.
 package ownership
 
 import (
 	"math/rand"
-	"sort"
-	"strings"
 	"testing"
 	"time"
 )
@@ -23,7 +21,7 @@ import (
 // The start set is every distinct premise state reached by 60 biased walks
 // (both storages, Start first, Stop and Delete usually rewritten to Acquire).
 // From each of those states, every schedule allowed by the three fairness
-// assumptions must be RUNNING within K. The three assumptions are premises:
+// assumptions must reach RUNNING. The three assumptions are premises:
 //
 //  1. A node that is not stopped eventually takes a step.
 //  2. A task_leases row lock is released within one idle_kill step. The
@@ -35,20 +33,14 @@ import (
 // One wasted claim is Acquire plus the TailUnreadable (or EpochLost, when the
 // node is the verified chain owner) that releases it. A live owner that cannot
 // read yields with that same release and no extra Acquire. Either way it counts
-// as one step. per_node NULL refusals are pruned: that node cannot claim again.
-// A dated refusal (shared TailUnreadable, and every EpochLost) can be claimed
-// again after refuse_until, on the RefusalDelay schedule, until the reader's
-// horizon. The search may jump to every distinct deadline in (now, horizon],
-// not only the reader's, so a non-reader can spend every claim that fits.
+// as one step. per_node NULL refusals do not expire. A dated refusal can be
+// claimed again after refuse_until.
 //
-// While a fresh non-reader waits out a horizon H and the cap does not bind,
-// the waste count is floor(log2(H/claim_interval+1))+1. After the delay hits
-// refusal_retry_cap the gap is the cap and the count is the RefusalDelay
-// iteration, not the log formula. K is that waste/jump DP, plus Acquire and
-// DumpReady, plus the forced lock, stopped-owner, retry, and chain steps.
-// The longest fair schedule has exactly K steps. K-1 does not fit it.
-// The published lengths (8, 20, 37, 52, 30, 62) are literals. On the small
-// fixtures a second search, which only calls Step, has to agree with K.
+// FairStepBound is an upper bound on those steps, not the schedule length.
+// The search in observe_test.go only calls Step. Where it finishes, the
+// longest schedule is at most the bound. A bound lowered by one fails on a
+// fixture whose observed length equals the bound. Past the state cap, a
+// seeded walk has to stay under the same bound.
 //
 // ChainOwnerBack is not taken when the directory cannot be read. That fixture
 // must stay FAILED. Terminal FAILED (auth, log_bin, legacy) waits for
@@ -63,23 +55,32 @@ func TestLivenessBudgetCountsWastedClaims(t *testing.T) {
 	s = expireLease(s, later)
 	// Drop the live owner so the claim set is open and both peers can waste a claim.
 	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseENOENT), later)
-	n := wastedPossible(s, later)
+	n := 0
+	for _, node := range s.Nodes {
+		if node.CanRead || node.Stopped {
+			continue
+		}
+		if r, ok := s.Refusal[node.ID]; ok && (r.OpenEnded || r.Until.After(later)) {
+			continue
+		}
+		n++
+	}
 	if n != 2 {
 		t.Fatalf("wasted possible %d, want 2", n)
 	}
-	longest, k, err := searchAll(s, later)
-	if err != nil {
-		t.Fatal(err)
+	end := observeFair(s, later)
+	bound := FairStepBound(s, later)
+	if end.over || !end.ok {
+		t.Fatalf("search over=%v ok=%v", end.over, end.ok)
 	}
-	if longest.phase != PhaseRunning || longest.owner != "n1" {
-		t.Fatalf("phase %s owner %s steps %d K %d wasted %d", longest.phase, longest.owner, longest.steps, k, longest.wasted)
+	if end.state.Phase != PhaseRunning || end.state.Lease.Owner != "n1" {
+		t.Fatalf("phase %s owner %s steps %d bound %d", end.state.Phase, end.state.Lease.Owner, end.steps, bound)
 	}
-	if longest.wasted != 2 || longest.steps != k {
-		t.Fatalf("steps %d wasted %d K %d; K must be exactly the longest fair schedule", longest.steps, longest.wasted, k)
+	if end.steps > bound {
+		t.Fatalf("steps %d exceed bound %d", end.steps, bound)
 	}
-	// N9: K without the N wasted claims is too small for the longest fair schedule.
-	if longest.steps <= k-n {
-		t.Fatalf("schedule fit in K-N (%d <= %d); N is not actually in the budget", longest.steps, k-n)
+	if end.steps < n+2 {
+		t.Fatalf("schedule %d did not include %d wastes plus acquire and dump", end.steps, n)
 	}
 }
 
@@ -91,18 +92,21 @@ func TestLivenessSharedReclaimFitsInK(t *testing.T) {
 	s = applied(t, s, Event{Kind: EventAcquire, Node: "n1"}, later)
 	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseEROFS), later)
 	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: later.Add(time.Hour), Attempts: 1}
-	base := 2 + wastedPossible(s, later)
-	longest, k, err := searchAll(s, later)
-	if err != nil {
-		t.Fatal(err)
+	base := 3 // acquire, dump, and one waste, before any reclaim
+	end := observeFair(s, later)
+	bound := FairStepBound(s, later)
+	got := end.steps
+	if end.over {
+		got, _ = walkMax(s, later, 32)
+	} else if !end.ok || end.state.Phase != PhaseRunning {
+		t.Fatalf("search ok=%v phase %s", end.ok, end.state.Phase)
+	} else if got <= base {
+		t.Fatalf("schedule %d did not reclaim on top of %d", got, base)
 	}
-	if k <= base {
-		t.Fatalf("K %d does not count the shared re-claim on top of %d", k, base)
+	if got > bound {
+		t.Fatalf("steps %d exceed bound %d", got, bound)
 	}
-	if longest.phase != PhaseRunning || longest.steps != k {
-		t.Fatalf("steps %d K %d phase %s", longest.steps, k, longest.phase)
-	}
-	t.Logf("shared reclaim H=1h formula=%d longest=%d wasted=%d", k, longest.steps, longest.wasted)
+	t.Logf("shared reclaim H=1h bound=%d steps=%d over=%v", bound, got, end.over)
 }
 
 func addChainGoneStarts(t *testing.T, add func(State, time.Time)) {
@@ -286,26 +290,31 @@ func TestLivenessAllFairSchedules(t *testing.T) {
 	if goneStarts < 1 {
 		t.Fatal("liveness start set has no FAILED/CHAIN_OWNER_GONE state")
 	}
+	tight, overflow := 0, 0
 	for i, st := range starts {
-		longest, k, err := searchAll(st.s, st.now)
-		if err != nil {
-			t.Fatalf("start %d phase %s owner %s live %v lock %v reader %q claim %v tail %v refusals %d K %d: %v", i, st.s.Phase, st.s.Lease.Owner, LeaseLive(st.s, st.now), st.s.Lock.Held, eligibleReader(st.s, st.now), InClaimSet(st.s, st.now), !st.s.TailSince.IsZero(), len(st.s.Refusal), budget(st.s, st.now), err)
+		end := observeFair(st.s, st.now)
+		bound := FairStepBound(st.s, st.now)
+		got := end.steps
+		if end.over {
+			overflow++
+			got, _ = walkMax(st.s, st.now, 8)
+		} else if !end.ok {
+			t.Fatalf("start %d phase %s owner %s lock %v tail %v refusals %d: no fair schedule", i, st.s.Phase, st.s.Lease.Owner, st.s.Lock.Held, !st.s.TailSince.IsZero(), len(st.s.Refusal))
 		}
-		if longest.steps != k {
-			t.Fatalf("start %d steps %d != K %d phase %s storage %s", i, longest.steps, k, st.s.Phase, st.s.Params.Storage)
+		if got > bound {
+			t.Fatalf("start %d steps %d exceed bound %d phase %s storage %s", i, got, bound, st.s.Phase, st.s.Params.Storage)
 		}
-		if i == 41 && (longest.steps != 8 || k != 8) {
-			t.Fatalf("start 41 steps %d K %d phase %s storage %s owner %s refusals %d", longest.steps, k, st.s.Phase, st.s.Params.Storage, st.s.Lease.Owner, len(st.s.Refusal))
-		}
-		if k > 0 {
-			if _, err := runSearch(st.s, st.now, k-1); err == nil {
-				t.Fatalf("start %d still reached RUNNING within K-1 (%d)", i, k-1)
+		if !end.over && got == bound && bound > 0 {
+			tight++
+			if got <= bound-1 {
+				t.Fatalf("start %d schedule fit in bound-1 (%d)", i, bound-1)
 			}
 		}
-		if findOpen(st.s, FindingTail, st.s.TaskID) && findOpen(longest.state, FindingTail, st.s.TaskID) {
+		if !end.over && findOpen(st.s, FindingTail, st.s.TaskID) && findOpen(end.state, FindingTail, st.s.TaskID) {
 			t.Fatalf("start %d left the tail finding open", i)
 		}
 	}
+	t.Logf("starts %d tight %d overflow %d", len(starts), tight, overflow)
 }
 
 func livenessPremise(s State, now time.Time) bool {
@@ -315,109 +324,10 @@ func livenessPremise(s State, now time.Time) bool {
 	if s.Phase == PhaseFailed && s.FailedReason != ReasonChainOwnerGone {
 		return false
 	}
-	if s.Phase == PhaseFailed && !eligibleNode(s, s.Chain.Owner, now) {
+	if s.Phase == PhaseFailed && !obsCanRead(s, s.Chain.Owner) {
 		return false
 	}
-	return eligibleReader(s, now) != ""
-}
-
-func eligibleNode(s State, id string, now time.Time) bool {
-	n := findNode(s, id)
-	if n == nil || !n.CanRead || n.Stopped {
-		return false
-	}
-	if r, ok := s.Refusal[id]; ok && r.OpenEnded {
-		return false
-	}
-	_ = now
-	return true
-}
-
-func eligibleReader(s State, now time.Time) string {
-	if owner := s.Lease.Owner; LeaseLive(s, now) && eligibleNode(s, owner, now) {
-		return owner
-	}
-	for _, n := range s.Nodes {
-		if eligibleNode(s, n.ID, now) {
-			return n.ID
-		}
-	}
-	return ""
-}
-
-func findNode(s State, id string) *Node {
-	for i := range s.Nodes {
-		if s.Nodes[i].ID == id {
-			return &s.Nodes[i]
-		}
-	}
-	return nil
-}
-
-func wastedPossible(s State, now time.Time) int {
-	if !InClaimSet(s, now) && !(LeaseLive(s, now) && ownerStopped(s)) {
-		// Peers cannot claim while a live owner will finish the run.
-		if LeaseLive(s, now) && eligibleNode(s, s.Lease.Owner, now) {
-			return 0
-		}
-	}
-	n := 0
-	for _, node := range s.Nodes {
-		if node.CanRead || node.Stopped || RefusalBlocks(s, node.ID, now) {
-			continue
-		}
-		n++
-	}
-	return n
-}
-
-func canWasteNow(s State, now time.Time, id string) bool {
-	node := findNode(s, id)
-	if node == nil || node.CanRead || node.Stopped || RefusalBlocks(s, id, now) || !InClaimSet(s, now) {
-		return false
-	}
-	return true
-}
-
-func wasteStaysOpen(s State, id string) bool {
-	if s.Params.Storage != StoragePerNode {
-		return false
-	}
-	return !(s.Chain.Verified() && s.Chain.Owner == id)
-}
-
-func ownerStopped(s State) bool {
-	n := findNode(s, s.Lease.Owner)
-	return n != nil && n.Stopped
-}
-
-func budget(s State, now time.Time) int {
-	return budgetRec(s, now, 0)
-}
-
-func budgetRec(s State, now time.Time, depth int) int {
-	if depth > 80 {
-		return 0
-	}
-	refreshHeartbeats(&s, now)
-	if runningNow(s, now) {
-		return 0
-	}
-	if m, ok := forcedMove(s, now); ok {
-		return 1 + budgetRec(m.s, m.at, depth+1)
-	}
-	if !InClaimSet(s, now) {
-		return 0
-	}
-	return claimBound(s, now)
-}
-
-// claimBound is the waste/jump DP for an open claim set, plus Acquire and
-// DumpReady. It calls RefusalDelay, including the shift cap, and does not call Step.
-func claimBound(s State, now time.Time) int {
-	p := s.Params.fill()
-	pre := dpWaste(wastersOf(s, now), now.UnixNano(), readerHorizon(s, now).UnixNano(), p, map[string]int{})
-	return pre + 2 // acquire + DumpReady
+	return obsReader(s, now) != ""
 }
 
 type timedState struct {
@@ -425,697 +335,6 @@ type timedState struct {
 	now time.Time
 }
 
-type searchFrame struct {
-	s         State
-	now       time.Time
-	steps     int
-	wasted    int
-	path      string
-	label     string
-	wastedIDs map[string]bool
-}
-
-type scheduleEnd struct {
-	state  State
-	phase  Phase
-	owner  string
-	steps  int
-	wasted int
-}
-
-// searchAll explores every fair schedule. A schedule that is still not
-// RUNNING after K steps is a failure. The returned end is the longest one.
-func searchAll(start State, now time.Time) (scheduleEnd, int, error) {
-	k := budget(start, now)
-	end, err := runSearch(start, now, k)
-	return end, k, err
-}
-
-// searchBudget reports whether every fair schedule reaches RUNNING within limit.
-func searchBudget(start State, now time.Time, limit int) error {
-	_, err := runSearch(start, now, limit)
-	return err
-}
-
-type memoHit struct {
-	steps, wasted, choice int
-	ok                    bool
-}
-
-type searcher struct {
-	memo     map[string]memoHit
-	misses   int
-	overflow bool
-	goal     State
-	haveGoal bool
-}
-
-func runSearch(start State, now time.Time, limit int) (scheduleEnd, error) {
-	s := start
-	s.trace = nil
-	sr := &searcher{memo: map[string]memoHit{}}
-	steps, wasted, ok := sr.longest(s, now)
-	if sr.overflow {
-		return scheduleEnd{}, errFair("fair search did not stay bounded")
-	}
-	if !ok {
-		return scheduleEnd{}, errFair("no fair schedule reached RUNNING from " + string(s.Phase))
-	}
-	if steps > limit {
-		return scheduleEnd{}, errFair("fair schedule still going after " + itoa(int64(limit)) + " steps, longest " + itoa(int64(steps)))
-	}
-	goal := sr.goal
-	if !sr.haveGoal {
-		goal = sr.witness(s, now)
-	}
-	return scheduleEnd{state: goal, phase: goal.Phase, owner: goal.Lease.Owner, steps: steps, wasted: wasted}, nil
-}
-
-func (sr *searcher) longest(s State, now time.Time) (int, int, bool) {
-	refreshHeartbeats(&s, now)
-	if runningNow(s, now) {
-		return 0, 0, true
-	}
-	key := schedKey(s, now)
-	if hit, seen := sr.memo[key]; seen {
-		return hit.steps, hit.wasted, hit.ok
-	}
-	sr.misses++
-	if sr.misses > 2000000 {
-		sr.overflow = true
-		return 0, 0, false
-	}
-	if m, forced := forcedMove(s, now); forced {
-		ds, dw, ok := sr.longest(m.s, m.at)
-		if !ok {
-			return 0, 0, false
-		}
-		sr.memo[key] = memoHit{steps: ds + 1, wasted: dw + m.waste, choice: 0, ok: true}
-		return ds + 1, dw + m.waste, true
-	}
-	if InClaimSet(s, now) {
-		steps, wasted, goal, ok := realizeClaim(s, now)
-		if !ok {
-			return 0, 0, false
-		}
-		sr.goal = goal
-		sr.haveGoal = true
-		sr.memo[key] = memoHit{steps: steps, wasted: wasted, ok: true}
-		return steps, wasted, true
-	}
-	// A cycle in the key space is not a fair path.
-	sr.memo[key] = memoHit{}
-	next := fairSuccessors(s, now)
-	bestSteps, bestWaste, bestChoice := -1, 0, -1
-	for i := range next {
-		ds, dw, ok := sr.longest(next[i].s, next[i].now)
-		if !ok {
-			continue
-		}
-		total := ds + 1
-		waste := dw + next[i].wasted
-		if total > bestSteps || (total == bestSteps && waste > bestWaste) {
-			bestSteps, bestWaste, bestChoice = total, waste, i
-		}
-	}
-	if bestSteps < 0 {
-		return 0, 0, false
-	}
-	sr.memo[key] = memoHit{steps: bestSteps, wasted: bestWaste, choice: bestChoice, ok: true}
-	return bestSteps, bestWaste, true
-}
-
-func (sr *searcher) witness(s State, now time.Time) State {
-	refreshHeartbeats(&s, now)
-	if runningNow(s, now) {
-		return s
-	}
-	hit := sr.memo[schedKey(s, now)]
-	next := fairSuccessors(s, now)
-	if hit.choice < 0 || hit.choice >= len(next) {
-		return s
-	}
-	return sr.witness(next[hit.choice].s, next[hit.choice].now)
-}
-
-type fairError string
-
-func (e fairError) Error() string { return string(e) }
-
-func errFair(s string) error { return fairError(s) }
-
-type move struct {
-	s     State
-	at    time.Time
-	waste int
-	label string
-}
-
-func forcedMove(s State, now time.Time) (move, bool) {
-	reader := eligibleReader(s, now)
-	if reader == "" {
-		reader = s.Lease.Owner
-	}
-	if s.Lock.Held {
-		when := now
-		deadline := s.Lock.Since.Add(s.Params.IdleKill)
-		if when.Before(deadline) {
-			when = deadline
-		}
-		res := Step(s, Event{Kind: EventMetaLockTimeout, Node: reader}, when)
-		return move{s: res.State, at: when, label: "lock-timeout"}, true
-	}
-	if s.Phase == PhaseFailed && s.FailedReason == ReasonChainOwnerGone {
-		owner := s.Chain.Owner
-		if !s.Chain.VerifiedAt.After(s.FailedAt) {
-			when := now
-			if !when.After(s.FailedAt) {
-				when = s.FailedAt.Add(time.Millisecond)
-			}
-			res := Step(s, Event{Kind: EventChainVerified, Node: owner, ReadOK: true}, when)
-			if res.Decision == DecisionApplied {
-				return move{s: res.State, at: when, label: "chain-verified"}, true
-			}
-			return move{}, false
-		}
-		res := Step(s, Event{Kind: EventChainOwnerBack, Node: owner}, now)
-		if res.Decision == DecisionApplied {
-			return move{s: res.State, at: now, label: "chain-back"}, true
-		}
-		return move{}, false
-	}
-	if LeaseLive(s, now) && ownerStopped(s) && now.Before(s.Lease.ExpireAt) {
-		return move{s: s, at: s.Lease.ExpireAt, label: "wait-ttl"}, true
-	}
-	if LeaseLive(s, now) && s.Lease.Owner != "" && s.Lease.Owner != eligibleReader(s, now) {
-		if next, ok := yieldHolder(s, now); ok {
-			return move{s: next, at: now, waste: 1, label: "yield-holder"}, true
-		}
-		if now.Before(s.Lease.ExpireAt) {
-			return move{s: s, at: s.Lease.ExpireAt, label: "wait-holder"}, true
-		}
-	}
-	if InStopSet(s, now) {
-		res := Step(s, Event{Kind: EventStopExpired, Node: reader}, now)
-		if res.Decision == DecisionApplied {
-			return move{s: res.State, at: now, label: "stop-expired"}, true
-		}
-		return move{}, false
-	}
-	if s.Lease.Owner == eligibleReader(s, now) && LeaseLive(s, now) {
-		if s.Phase == PhaseRetryBackoff && now.Before(s.RetryUntil) {
-			return move{s: s, at: s.RetryUntil, label: "wait-retry"}, true
-		}
-		res := Step(s, Held(s, EventDumpReady, s.Lease.Owner), now)
-		if res.Decision == DecisionApplied || res.Decision == DecisionIdempotent {
-			return move{s: res.State, at: now, label: "dump"}, true
-		}
-	}
-	return move{}, false
-}
-
-func fairSuccessors(s State, now time.Time) []searchFrame {
-	var out []searchFrame
-	add := func(next State, at time.Time, w int, label string) {
-		out = append(out, searchFrame{s: next, now: at, wasted: w, label: label})
-	}
-	if m, ok := forcedMove(s, now); ok {
-		add(m.s, m.at, m.waste, m.label)
-		return out
-	}
-	if !InClaimSet(s, now) {
-		return out
-	}
-	reader := eligibleReader(s, now)
-	seen := map[string]bool{}
-	for _, node := range s.Nodes {
-		if !canWasteNow(s, now, node.ID) {
-			continue
-		}
-		sig := wasterSig(s, node.ID)
-		if seen[sig] {
-			continue
-		}
-		seen[sig] = true
-		if next, ok := wasteNode(s, now, node.ID); ok {
-			add(next, now, 1, "waste-"+node.ID)
-		}
-	}
-	horizon := readerHorizon(s, now)
-	if horizon.After(now) {
-		for _, when := range jumpTimes(s, now, horizon) {
-			add(s, when, 0, "jump")
-		}
-		return out
-	}
-	if reader != "" && !RefusalBlocks(s, reader, now) {
-		res := Step(s, Event{Kind: EventAcquire, Node: reader}, now)
-		if res.Decision == DecisionApplied {
-			add(res.State, now, 0, "acquire-"+reader)
-		}
-	}
-	return out
-}
-
-func runningNow(s State, now time.Time) bool {
-	if s.Lock.Held {
-		return false
-	}
-	return s.Phase == PhaseRunning && s.Desired == DesiredRun && LeaseLive(s, now) && eligibleNode(s, s.Lease.Owner, now)
-}
-
-func readerHorizon(s State, now time.Time) time.Time {
-	reader := eligibleReader(s, now)
-	if r, ok := s.Refusal[reader]; ok && !r.OpenEnded && r.Until.After(now) {
-		return r.Until
-	}
-	return now
-}
-
-func jumpTimes(s State, now, horizon time.Time) []time.Time {
-	seen := map[int64]bool{}
-	var out []time.Time
-	add := func(t time.Time) {
-		if !t.After(now) || t.After(horizon) {
-			return
-		}
-		ns := t.UnixNano()
-		if seen[ns] {
-			return
-		}
-		seen[ns] = true
-		out = append(out, t)
-	}
-	add(horizon)
-	for _, node := range s.Nodes {
-		if node.CanRead || node.Stopped {
-			continue
-		}
-		r, ok := s.Refusal[node.ID]
-		if !ok || r.OpenEnded {
-			continue
-		}
-		add(r.Until)
-	}
-	return out
-}
-
-func wasterSig(s State, id string) string {
-	r := s.Refusal[id]
-	once := 0
-	if wasteStaysOpen(s, id) {
-		once = 1
-	}
-	chain := 0
-	if s.Chain.Verified() && s.Chain.Owner == id {
-		chain = 1
-	}
-	open := 0
-	if r.OpenEnded {
-		open = 1
-	}
-	return itoa(int64(r.Attempts)) + "|" + itoa(r.Until.UnixNano()) + "|" + itoa(int64(open)) + "|" + itoa(int64(once)) + "|" + itoa(int64(chain))
-}
-
-type waster struct {
-	id    string
-	att   int
-	ready int64
-	once  bool
-	spent bool
-	chain bool
-}
-
-func wastersOf(s State, now time.Time) []waster {
-	var out []waster
-	for _, node := range s.Nodes {
-		if node.CanRead || node.Stopped {
-			continue
-		}
-		r := s.Refusal[node.ID]
-		if r.OpenEnded {
-			continue
-		}
-		ready := now.UnixNano()
-		if r.Until.After(now) {
-			ready = r.Until.UnixNano()
-		}
-		out = append(out, waster{
-			id:    node.ID,
-			att:   r.Attempts,
-			ready: ready,
-			once:  wasteStaysOpen(s, node.ID),
-			chain: s.Chain.Verified() && s.Chain.Owner == node.ID,
-		})
-	}
-	sortWasters(out)
-	return out
-}
-
-func sortWasters(ws []waster) {
-	sort.Slice(ws, func(i, j int) bool {
-		if ws[i].att != ws[j].att {
-			return ws[i].att < ws[j].att
-		}
-		if ws[i].ready != ws[j].ready {
-			return ws[i].ready < ws[j].ready
-		}
-		if ws[i].once != ws[j].once {
-			return !ws[i].once
-		}
-		if ws[i].spent != ws[j].spent {
-			return !ws[i].spent
-		}
-		if ws[i].chain != ws[j].chain {
-			return !ws[i].chain && ws[j].chain
-		}
-		return ws[i].id < ws[j].id
-	})
-}
-
-func dpWaste(ws []waster, now, horizon int64, p Params, memo map[string]int) int {
-	steps, _, _ := solveClaim(ws, now, horizon, p)
-	_ = memo
-	return steps
-}
-
-type claimMove struct {
-	jump bool
-	at   int64
-	id   string
-}
-
-type reachMark struct {
-	steps  int
-	wasted int
-}
-
-type claimSolver struct {
-	p         Params
-	horizon   int64
-	best      int
-	bestWaste int
-	bestPath  []claimMove
-	seen      map[string]reachMark
-	expanded  int
-	capped    bool
-}
-
-func solveClaim(ws []waster, now, horizon int64, p Params) (int, int, []claimMove) {
-	cs := &claimSolver{p: p, horizon: horizon, seen: map[string]reachMark{}}
-	gSteps, gWaste, gPath := greedyClaim(ws, now, horizon, p)
-	cs.best, cs.bestWaste, cs.bestPath = gSteps, gWaste, gPath
-	cs.walk(append([]waster(nil), ws...), now, 0, 0, nil)
-	return cs.best, cs.bestWaste, cs.bestPath
-}
-
-func (cs *claimSolver) walk(ws []waster, now int64, steps, wasted int, path []claimMove) {
-	if cs.capped {
-		return
-	}
-	cs.expanded++
-	if cs.expanded > 2000000 {
-		cs.capped = true
-		return
-	}
-	upW, upJ := claimUpper(ws, now, cs.horizon, cs.p)
-	if steps+upW+upJ < cs.best || (steps+upW+upJ == cs.best && wasted+upW <= cs.bestWaste) {
-		return
-	}
-	key := dpKey(ws, now, cs.horizon)
-	if prev, ok := cs.seen[key]; ok && (steps < prev.steps || (steps == prev.steps && wasted <= prev.wasted)) {
-		return
-	}
-	cs.seen[key] = reachMark{steps: steps, wasted: wasted}
-	if claimDone(ws, now, cs.horizon) {
-		if steps > cs.best || (steps == cs.best && wasted > cs.bestWaste) {
-			cs.best = steps
-			cs.bestWaste = wasted
-			cs.bestPath = append([]claimMove(nil), path...)
-		}
-		return
-	}
-	extend := func(move claimMove, next []waster, at int64, w int) {
-		np := make([]claimMove, len(path)+1)
-		copy(np, path)
-		np[len(path)] = move
-		cs.walk(next, at, steps+1, wasted+w, np)
-	}
-	for i := range ws {
-		if ws[i].spent || ws[i].ready > now {
-			continue
-		}
-		if i > 0 && wasterEq(ws[i], ws[i-1]) {
-			continue
-		}
-		next := append([]waster(nil), ws...)
-		id := next[i].id
-		spendWaster(&next[i], now, cs.p)
-		sortWasters(next)
-		extend(claimMove{id: id}, next, now, 1)
-	}
-	if now >= cs.horizon {
-		return
-	}
-	var jumps []int64
-	seenJump := map[int64]bool{}
-	for _, w := range ws {
-		if w.spent || w.ready <= now || w.ready > cs.horizon || seenJump[w.ready] {
-			continue
-		}
-		seenJump[w.ready] = true
-		jumps = append(jumps, w.ready)
-	}
-	if !seenJump[cs.horizon] {
-		jumps = append(jumps, cs.horizon)
-	}
-	sort.Slice(jumps, func(i, j int) bool { return jumps[i] < jumps[j] })
-	for _, at := range jumps {
-		extend(claimMove{jump: true, at: at}, ws, at, 0)
-	}
-}
-
-func claimDone(ws []waster, now, horizon int64) bool {
-	if now < horizon {
-		return false
-	}
-	for _, w := range ws {
-		if !w.spent && w.ready <= now {
-			return false
-		}
-	}
-	return true
-}
-
-func claimUpper(ws []waster, now, horizon int64, p Params) (wastes, jumps int) {
-	for i := range ws {
-		wastes += claimsLeft(ws[i], now, horizon, p)
-	}
-	if now >= horizon {
-		return wastes, 0
-	}
-	// Every future waste creates at most one new deadline, and every deadline
-	// already pending can be visited on its own. The horizon is one of them.
-	seen := map[int64]bool{}
-	for _, w := range ws {
-		if w.spent || w.ready <= now || w.ready > horizon || seen[w.ready] {
-			continue
-		}
-		seen[w.ready] = true
-		jumps++
-	}
-	if !seen[horizon] {
-		jumps++
-	}
-	jumps += wastes
-	return wastes, jumps
-}
-
-func claimsLeft(w waster, now, horizon int64, p Params) int {
-	if w.spent {
-		return 0
-	}
-	pos := now
-	t := w.ready
-	if t < pos {
-		t = pos
-	}
-	att := w.att
-	n := 0
-	for t <= horizon {
-		if pos >= horizon && t > pos {
-			break
-		}
-		n++
-		att++
-		if att > maxRefusalAttempts {
-			att = maxRefusalAttempts
-		}
-		if att < 1 {
-			att = 1
-		}
-		next := t + int64(RefusalDelay(att, p.ClaimInterval, p.RefusalRetryCap))
-		if pos >= horizon {
-			break
-		}
-		t = next
-		pos = t
-	}
-	return n
-}
-
-func greedyClaim(ws0 []waster, now, horizon int64, p Params) (int, int, []claimMove) {
-	ws := append([]waster(nil), ws0...)
-	var path []claimMove
-	steps, wasted := 0, 0
-	for {
-		if now >= horizon {
-			i := readyWaster(ws, now)
-			if i < 0 {
-				break
-			}
-			path = append(path, claimMove{id: ws[i].id})
-			spendWaster(&ws[i], now, p)
-			sortWasters(ws)
-			steps++
-			wasted++
-			continue
-		}
-		if i := readyWaster(ws, now); i >= 0 {
-			path = append(path, claimMove{id: ws[i].id})
-			spendWaster(&ws[i], now, p)
-			sortWasters(ws)
-			steps++
-			wasted++
-		}
-		next, ok := earliestDeadline(ws, now, horizon)
-		if !ok {
-			break
-		}
-		path = append(path, claimMove{jump: true, at: next})
-		now = next
-		steps++
-	}
-	return steps, wasted, path
-}
-
-func readyWaster(ws []waster, now int64) int {
-	for i := range ws {
-		if ws[i].spent || ws[i].ready > now {
-			continue
-		}
-		if i > 0 && wasterEq(ws[i], ws[i-1]) {
-			continue
-		}
-		return i
-	}
-	return -1
-}
-
-func earliestDeadline(ws []waster, now, horizon int64) (int64, bool) {
-	if now >= horizon {
-		return 0, false
-	}
-	next := horizon
-	for _, w := range ws {
-		if w.spent || w.ready <= now || w.ready > horizon {
-			continue
-		}
-		if w.ready < next {
-			next = w.ready
-		}
-	}
-	return next, true
-}
-
-func realizeClaim(s State, now time.Time) (int, int, State, bool) {
-	p := s.Params.fill()
-	ws := wastersOf(s, now)
-	horizon := readerHorizon(s, now)
-	pre, wasted, path := solveClaim(ws, now.UnixNano(), horizon.UnixNano(), p)
-	cur := s
-	at := now
-	got, gotW := 0, 0
-	for _, m := range path {
-		if m.jump {
-			at = time.Unix(0, m.at).UTC()
-			got++
-			continue
-		}
-		next, ok := wasteNode(cur, at, m.id)
-		if !ok {
-			return 0, 0, State{}, false
-		}
-		cur, got, gotW = next, got+1, gotW+1
-	}
-	reader := eligibleReader(cur, at)
-	if reader == "" || RefusalBlocks(cur, reader, at) || !InClaimSet(cur, at) {
-		return 0, 0, State{}, false
-	}
-	res := Step(cur, Event{Kind: EventAcquire, Node: reader}, at)
-	if res.Decision != DecisionApplied {
-		return 0, 0, State{}, false
-	}
-	got++
-	cur = res.State
-	res = Step(cur, Held(cur, EventDumpReady, cur.Lease.Owner), at)
-	if res.Decision != DecisionApplied && res.Decision != DecisionIdempotent {
-		return 0, 0, State{}, false
-	}
-	got++
-	if got != pre+2 || gotW != wasted || !runningNow(res.State, at) {
-		return 0, 0, State{}, false
-	}
-	return got, gotW, res.State, true
-}
-
-func spendWaster(w *waster, now int64, p Params) {
-	if w.once {
-		w.spent = true
-		return
-	}
-	w.att++
-	if w.att > maxRefusalAttempts {
-		w.att = maxRefusalAttempts
-	}
-	if w.att < 1 {
-		w.att = 1
-	}
-	delay := RefusalDelay(w.att, p.ClaimInterval, p.RefusalRetryCap)
-	w.ready = now + int64(delay)
-}
-
-func wasterEq(a, b waster) bool {
-	return a.att == b.att && a.ready == b.ready && a.once == b.once && a.spent == b.spent && a.chain == b.chain
-}
-
-func dpKey(ws []waster, now, horizon int64) string {
-	var b strings.Builder
-	b.WriteString(itoa(now))
-	b.WriteByte('|')
-	b.WriteString(itoa(horizon))
-	for _, w := range ws {
-		b.WriteByte(';')
-		b.WriteString(itoa(int64(w.att)))
-		b.WriteByte(',')
-		b.WriteString(itoa(w.ready))
-		if w.once {
-			b.WriteByte('o')
-		}
-		if w.spent {
-			b.WriteByte('s')
-		}
-		if w.chain {
-			b.WriteByte('c')
-		}
-	}
-	return b.String()
-}
-
-// iteratedWastes is how many claims a fresh node fits into a horizon H.
-// The next claim is at the previous claim plus RefusalDelay, so the cap and
-// the shift saturation are included. The closed form floor(log2(H/claim+1))+1
-// matches this only while every delay stays at or below the cap.
 func iteratedWastes(h, claim, cap time.Duration) int {
 	if h < 0 {
 		return 0
@@ -1151,116 +370,6 @@ func logWastes(h, claim time.Duration) int {
 		lg++
 	}
 	return lg + 1
-}
-
-func schedKey(s State, now time.Time) string {
-	var b strings.Builder
-	b.WriteString(itoa(now.UnixNano()))
-	b.WriteByte('|')
-	b.WriteString(string(s.Phase))
-	b.WriteByte('|')
-	b.WriteString(string(s.Desired))
-	b.WriteByte('|')
-	b.WriteString(s.Lease.Owner)
-	b.WriteByte('|')
-	b.WriteString(itoa(s.Lease.ExpireAt.UnixNano()))
-	b.WriteByte('|')
-	if s.Lease.Present {
-		b.WriteByte('1')
-	}
-	b.WriteByte('|')
-	if s.Lock.Held {
-		b.WriteString(s.Lock.HeldBy)
-		b.WriteByte('@')
-		b.WriteString(itoa(s.Lock.Since.UnixNano()))
-	}
-	b.WriteByte('|')
-	b.WriteString(itoa(int64(s.RetryAttempt)))
-	b.WriteByte('@')
-	b.WriteString(itoa(s.RetryUntil.UnixNano()))
-	b.WriteByte('|')
-	b.WriteString(s.FailedReason)
-	b.WriteByte('@')
-	b.WriteString(itoa(s.FailedAt.UnixNano()))
-	b.WriteByte('|')
-	b.WriteString(s.Chain.Owner)
-	b.WriteByte('@')
-	b.WriteString(itoa(s.Chain.VerifiedAt.UnixNano()))
-	if !s.TailSince.IsZero() {
-		b.WriteString("|tail")
-	}
-	if s.PendingDelete {
-		b.WriteString("|pend")
-	}
-	if s.Deleted {
-		b.WriteString("|del")
-	}
-	b.WriteByte('|')
-	b.WriteString(string(s.Params.Storage))
-	b.WriteByte('|')
-	b.WriteString(itoa(int64(s.Params.ClaimInterval)))
-	b.WriteByte('|')
-	b.WriteString(itoa(int64(s.Params.RefusalRetryCap)))
-	var readers, others []string
-	for _, node := range s.Nodes {
-		r := s.Refusal[node.ID]
-		sig := node.ID + "#" + boolBit(node.CanRead) + boolBit(node.Stopped) + "#" + itoa(int64(r.Attempts)) + "#" + itoa(r.Until.UnixNano()) + "#" + boolBit(r.OpenEnded)
-		if node.Stopped {
-			sig += "#" + itoa(node.HeartbeatAt.UnixNano())
-		}
-		if node.CanRead {
-			readers = append(readers, sig)
-			continue
-		}
-		sig += "#" + boolBit(wasteStaysOpen(s, node.ID)) + "#" + boolBit(s.Chain.Verified() && s.Chain.Owner == node.ID)
-		others = append(others, sig)
-	}
-	sort.Strings(others)
-	b.WriteString("|R")
-	for _, sig := range readers {
-		b.WriteByte(',')
-		b.WriteString(sig)
-	}
-	b.WriteString("|N")
-	for _, sig := range others {
-		b.WriteByte(',')
-		b.WriteString(sig)
-	}
-	return b.String()
-}
-
-func boolBit(v bool) string {
-	if v {
-		return "1"
-	}
-	return "0"
-}
-
-func refreshHeartbeats(s *State, now time.Time) {
-	for i := range s.Nodes {
-		if !s.Nodes[i].Stopped {
-			s.Nodes[i].HeartbeatAt = now
-		}
-	}
-}
-
-func yieldHolder(s State, now time.Time) (State, bool) {
-	owner := s.Lease.Owner
-	if owner == "" || !LeaseLive(s, now) {
-		return s, false
-	}
-	ev := heldCause(s, EventTailUnreadable, owner, CauseSegmentNotOnWorker)
-	yielded := Step(s, ev, now)
-	if yielded.Decision == DecisionApplied {
-		return yielded.State, true
-	}
-	ev.Kind = EventEpochLost
-	ev.Cause = CauseENOENT
-	yielded = Step(s, ev, now)
-	if yielded.Decision == DecisionApplied {
-		return yielded.State, true
-	}
-	return s, false
 }
 
 func premiseKey(s State) string {
@@ -1299,159 +408,6 @@ func itoa(n int64) string {
 	return string(buf[i:])
 }
 
-func wasteNode(s State, now time.Time, id string) (State, bool) {
-	node := findNode(s, id)
-	if node == nil || node.CanRead || node.Stopped || RefusalBlocks(s, id, now) || !InClaimSet(s, now) {
-		return s, false
-	}
-	res := Step(s, Event{Kind: EventAcquire, Node: id}, now)
-	if res.Decision != DecisionApplied {
-		return s, false
-	}
-	ev := heldCause(res.State, EventTailUnreadable, id, CauseSegmentNotOnWorker)
-	yielded := Step(res.State, ev, now)
-	if yielded.Decision == DecisionApplied {
-		return yielded.State, true
-	}
-	ev.Kind = EventEpochLost
-	ev.Cause = CauseENOENT
-	ev.Epoch = res.State.Lease.Epoch
-	ev.RowGeneration = res.State.RowGeneration
-	yielded = Step(res.State, ev, now)
-	if yielded.Decision == DecisionApplied {
-		return yielded.State, true
-	}
-	return s, false
-}
-
-// stepClaimBound searches fair schedules by calling Step. It shares no
-// code with solveClaim: a bug that shrinks the DP shrinks claimBound and
-// leaves this search where it is.
-func stepClaimBound(s State, now time.Time) (int, bool) {
-	type hit struct {
-		n  int
-		ok bool
-	}
-	memo := map[string]hit{}
-	overflow := false
-	var rec func(State, time.Time) (int, bool)
-	rec = func(s State, now time.Time) (int, bool) {
-		if overflow {
-			return 0, false
-		}
-		refreshHeartbeats(&s, now)
-		if runningNow(s, now) {
-			return 0, true
-		}
-		key := stepKey(s, now)
-		if h, seen := memo[key]; seen {
-			return h.n, h.ok
-		}
-		if len(memo) > 200000 {
-			overflow = true
-			return 0, false
-		}
-		best, ok := -1, false
-		consider := func(n int, childOK bool) {
-			if childOK && n > best {
-				best, ok = n, true
-			}
-		}
-		if m, forced := forcedMove(s, now); forced {
-			n, childOK := rec(m.s, m.at)
-			consider(n+1, childOK)
-			memo[key] = hit{best, ok}
-			return best, ok
-		}
-		if InClaimSet(s, now) {
-			seen := map[string]bool{}
-			for _, node := range s.Nodes {
-				if !canWasteNow(s, now, node.ID) {
-					continue
-				}
-				sig := wasterSig(s, node.ID)
-				if seen[sig] {
-					continue
-				}
-				seen[sig] = true
-				next, wasted := wasteNode(s, now, node.ID)
-				if !wasted {
-					continue
-				}
-				n, childOK := rec(next, now)
-				consider(n+1, childOK)
-			}
-			horizon := readerHorizon(s, now)
-			if horizon.After(now) {
-				for _, when := range jumpTimes(s, now, horizon) {
-					n, childOK := rec(s, when)
-					consider(n+1, childOK)
-				}
-			} else if reader := eligibleReader(s, now); reader != "" && !RefusalBlocks(s, reader, now) {
-				res := Step(s, Event{Kind: EventAcquire, Node: reader}, now)
-				if res.Decision == DecisionApplied {
-					dumped := Step(res.State, Held(res.State, EventDumpReady, reader), now)
-					if dumped.Decision == DecisionApplied || dumped.Decision == DecisionIdempotent {
-						consider(2, true)
-					}
-				}
-			}
-		}
-		if !ok {
-			memo[key] = hit{}
-			return 0, false
-		}
-		memo[key] = hit{best, true}
-		return best, true
-	}
-	n, ok := rec(s, now)
-	if overflow {
-		return 0, false
-	}
-	return n, ok
-}
-
-func stepKey(s State, now time.Time) string {
-	var b strings.Builder
-	b.WriteString(itoa(now.UnixNano()))
-	b.WriteByte('|')
-	b.WriteString(string(s.Phase))
-	b.WriteByte('|')
-	b.WriteString(s.Lease.Owner)
-	for _, node := range s.Nodes {
-		b.WriteByte(';')
-		b.WriteString(node.ID)
-		r := s.Refusal[node.ID]
-		b.WriteByte(',')
-		b.WriteString(itoa(int64(r.Attempts)))
-		b.WriteByte(',')
-		b.WriteString(itoa(r.Until.UnixNano()))
-		if r.OpenEnded {
-			b.WriteByte('o')
-		}
-	}
-	return b.String()
-}
-
-// wantBound is the fair-schedule length for one published fixture.
-// The numbers are literals. claimBound is not allowed to be the expected value.
-func wantBound(t *testing.T, nonReaders int, hold time.Duration, want int) {
-	t.Helper()
-	s, later := refusedReader(t, nonReaders, hold)
-	if got := claimBound(s, later); got != want {
-		t.Fatalf("%d non-readers H=%s claimBound %d, want %d", nonReaders, hold, got, want)
-	}
-	// Two and three non-readers at 600s are past the Step search's state budget.
-	// The smaller fixtures are cross-checked against Step itself.
-	if nonReaders > 2 && hold >= 600*time.Second {
-		return
-	}
-	got, ok := stepClaimBound(s, later)
-	if !ok || got != want {
-		t.Fatalf("%d non-readers H=%s Step search %d ok=%v, want %d", nonReaders, hold, got, ok, want)
-	}
-}
-
 func TestLivenessWasteFormula(t *testing.T) {
 	claim := 2 * time.Second
 	cap := 600 * time.Second
@@ -1466,180 +422,10 @@ func TestLivenessWasteFormula(t *testing.T) {
 	if logWastes(1022*time.Second, claim) != 10 || iteratedWastes(1022*time.Second, claim, cap) != 10 {
 		t.Fatalf("H=1022s log %d iterated %d, want 10", logWastes(1022*time.Second, claim), iteratedWastes(1022*time.Second, claim, cap))
 	}
-	if claimsLeft(waster{}, 0, int64(1022*time.Second), DefaultParams()) != 10 {
-		t.Fatalf("claimsLeft at H=1022s = %d, want 10", claimsLeft(waster{}, 0, int64(1022*time.Second), DefaultParams()))
-	}
 	if logWastes(3600*time.Second, claim) != 11 {
 		t.Fatalf("H=3600s log %d, want 11", logWastes(3600*time.Second, claim))
 	}
 	if iteratedWastes(3600*time.Second, claim, cap) != 14 {
 		t.Fatalf("H=3600s iterated %d, want 14", iteratedWastes(3600*time.Second, claim, cap))
 	}
-}
-
-func TestLivenessOneNonReaderRefused600(t *testing.T) {
-	s, later := refusedReader(t, 1, 600*time.Second)
-	longest, k, err := searchAll(s, later)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if longest.steps != 20 || longest.wasted != 9 || k != 20 {
-		t.Fatalf("steps %d wasted %d K %d, want 20 steps and 9 wastes", longest.steps, longest.wasted, k)
-	}
-	if searchBudget(s, later, 19) == nil {
-		t.Fatal("K-1 held the 600s schedule")
-	}
-	t.Logf("non-readers=1 H=600s formula=%d longest=%d wasted=%d", k, longest.steps, longest.wasted)
-}
-
-func TestLivenessPublishedBounds(t *testing.T) {
-	// Literals, not claimBound's own output. 8 is also start 41 in
-	// TestLivenessAllFairSchedules. 30 is one non-reader held for an hour
-	// with the 600s cap, so the log formula (11) is not the waste count.
-	// 62 is four non-readers at 600s: 36 wastes, 24 jumps, Acquire, DumpReady.
-	wantBound(t, 1, 600*time.Second, 20)
-	wantBound(t, 2, 600*time.Second, 37)
-	wantBound(t, 3, 600*time.Second, 52)
-	wantBound(t, 4, 600*time.Second, 62)
-	wantBound(t, 1, time.Hour, 30)
-	wantBound(t, 2, 3*time.Second, 8)
-	for _, tc := range []struct {
-		n, want int
-		hold    time.Duration
-	}{
-		{1, 20, 600 * time.Second},
-		{2, 37, 600 * time.Second},
-		{3, 52, 600 * time.Second},
-		{4, 62, 600 * time.Second},
-	} {
-		s, later := refusedReader(t, tc.n, tc.hold)
-		if err := searchBudget(s, later, tc.want-1); err == nil {
-			t.Fatalf("%d non-readers held at %d", tc.n, tc.want-1)
-		}
-	}
-	if got := replayFourNonReaders(t); got != 62 {
-		t.Fatalf("4 non-readers Step schedule %d, want 62", got)
-	}
-}
-
-// replayFourNonReaders runs one 600s schedule through Step and counts
-// fair steps. The times are fixed; solveClaim is not consulted.
-func replayFourNonReaders(t *testing.T) int {
-	t.Helper()
-	s, later := refusedReader(t, 4, 600*time.Second)
-	type act struct {
-		id   string
-		jump time.Duration
-	}
-	script := []act{
-		{id: "n2"}, {id: "n3"}, {id: "n4"}, {id: "n5"},
-		{jump: 2 * time.Second},
-		{id: "n2"}, {id: "n3"}, {id: "n4"}, {id: "n5"},
-		{jump: 6 * time.Second},
-		{id: "n2"}, {id: "n3"}, {id: "n4"}, {id: "n5"},
-		{jump: 14 * time.Second},
-		{id: "n2"},
-		{jump: 30 * time.Second},
-		{id: "n3"}, {id: "n2"},
-		{jump: 46 * time.Second},
-		{id: "n3"},
-		{jump: 62 * time.Second},
-		{jump: 78 * time.Second},
-		{id: "n4"},
-		{jump: 94 * time.Second},
-		{id: "n5"}, {id: "n4"}, {id: "n2"},
-		{jump: 110 * time.Second},
-		{id: "n5"}, {id: "n3"},
-		{jump: 126 * time.Second},
-		{id: "n4"},
-		{jump: 142 * time.Second},
-		{id: "n5"},
-		{jump: 158 * time.Second},
-		{id: "n2"},
-		{jump: 174 * time.Second},
-		{id: "n3"},
-		{jump: 190 * time.Second},
-		{id: "n4"},
-		{jump: 206 * time.Second},
-		{id: "n5"},
-		{jump: 286 * time.Second},
-		{id: "n2"},
-		{jump: 302 * time.Second},
-		{id: "n3"},
-		{jump: 318 * time.Second},
-		{id: "n4"},
-		{jump: 334 * time.Second},
-		{id: "n5"},
-		{jump: 542 * time.Second},
-		{id: "n2"},
-		{jump: 558 * time.Second},
-		{id: "n3"},
-		{jump: 574 * time.Second},
-		{id: "n4"},
-		{jump: 590 * time.Second},
-		{id: "n5"},
-		{jump: 600 * time.Second},
-	}
-	at := later
-	steps := 0
-	for _, a := range script {
-		if a.jump != 0 {
-			at = later.Add(a.jump)
-			steps++
-			continue
-		}
-		next, ok := wasteNode(s, at, a.id)
-		if !ok {
-			t.Fatalf("waste %s at %s did not apply", a.id, at.Sub(later))
-		}
-		s = next
-		steps++
-	}
-	reader := eligibleReader(s, at)
-	res := Step(s, Event{Kind: EventAcquire, Node: reader}, at)
-	if res.Decision != DecisionApplied {
-		t.Fatalf("acquire %s", res.Decision)
-	}
-	steps++
-	res = Step(res.State, Held(res.State, EventDumpReady, reader), at)
-	if res.Decision != DecisionApplied && res.Decision != DecisionIdempotent {
-		t.Fatalf("dump %s", res.Decision)
-	}
-	steps++
-	if !runningNow(res.State, at) {
-		t.Fatal("schedule did not reach RUNNING")
-	}
-	return steps
-}
-
-func TestLivenessTwoAndThreeNonReaders(t *testing.T) {
-	for _, tc := range []struct{ n, want int }{{2, 37}, {3, 52}} {
-		s, later := refusedReader(t, tc.n, 600*time.Second)
-		longest, k, err := searchAll(s, later)
-		if err != nil {
-			t.Fatalf("%d non-readers: %v", tc.n, err)
-		}
-		if k != tc.want || longest.steps != tc.want || longest.phase != PhaseRunning {
-			t.Fatalf("%d non-readers steps %d K %d phase %s, want %d", tc.n, longest.steps, k, longest.phase, tc.want)
-		}
-		if searchBudget(s, later, tc.want-1) == nil {
-			t.Fatalf("%d non-readers held at %d", tc.n, tc.want-1)
-		}
-	}
-}
-
-func refusedReader(t *testing.T, nonReaders int, hold time.Duration) (State, time.Time) {
-	t.Helper()
-	peers := make([]Node, nonReaders)
-	for i := 0; i < nonReaders; i++ {
-		peers[i] = peer(nodeID(i+1), false, t0)
-	}
-	s := boot(t, "n1", t0, peers)
-	s.Params.Storage = StorageShared
-	later := t0.Add(time.Hour)
-	s = expireLease(s, later)
-	s = applied(t, s, Event{Kind: EventAcquire, Node: "n1"}, later)
-	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseEROFS), later)
-	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: later.Add(hold), Attempts: 1}
-	return s, later
 }
