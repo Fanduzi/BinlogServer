@@ -242,10 +242,15 @@ func (s *outageEvents) resolved(subject string) []TaskEvent {
 }
 
 const (
-	outageAfter    = 300 * time.Millisecond // meta_unreachable_after, scaled from 10s
-	outagePing     = 20 * time.Millisecond  // ping interval and timeout, scaled from 1s
-	outageSlackIn  = outagePing + 80*time.Millisecond
-	outageSlackOut = outagePing + 150*time.Millisecond
+	outageAfter = 300 * time.Millisecond // meta_unreachable_after, scaled from 10s
+	outagePing  = 20 * time.Millisecond  // ping interval and timeout, scaled from 1s
+	// first_seen is when the in-flight ping was sent, which can be one
+	// interval before the gate closes, and the ping goroutine can be late
+	// under load. The gap between outages in this test is 750ms, so the
+	// window stays inside one outage.
+	outageSlackIn  = outagePing + 250*time.Millisecond
+	outageSlackOut = outagePing + 300*time.Millisecond
+	outageEarly    = outagePing + 150*time.Millisecond
 )
 
 // scaled maps an outage of real seconds onto meta_unreachable_after 10s.
@@ -371,7 +376,11 @@ func (env *outageEnv) setupStandalone(t *testing.T) {
 
 // within: at in [from, from+slack].
 func outageWithin(at, from time.Time, slack time.Duration) bool {
-	return !at.Before(from.Add(-5*time.Millisecond)) && !at.After(from.Add(slack))
+	return outageWithinEarly(at, from, slack, 5*time.Millisecond)
+}
+
+func outageWithinEarly(at, from time.Time, slack, early time.Duration) bool {
+	return !at.Before(from.Add(-early)) && !at.After(from.Add(slack))
 }
 
 func TestFailurePathMatrixMetaOutage(t *testing.T) {
@@ -452,7 +461,7 @@ func TestFailurePathMatrixMetaOutage(t *testing.T) {
 						if !ok || r.resolved == nil {
 							t.Errorf("%s (%s): no resolved META_UNREACHABLE/%s row for a %v outage (row %+v, present %v)", n.name, n.role, n.name, row.pauses, r, ok)
 						} else {
-							if !outageWithin(r.firstSeen, pauseAt[last], outageSlackIn) {
+							if !outageWithinEarly(r.firstSeen, pauseAt[last], outageSlackIn, outageEarly) {
 								t.Errorf("%s (%s): first_seen %s, want the last outage start %s (+%s)", n.name, n.role, r.firstSeen.Format(time.StampMicro), pauseAt[last].Format(time.StampMicro), outageSlackIn)
 							}
 							if !outageWithin(*r.resolved, resumeAt[last], outageSlackOut) {
@@ -492,7 +501,7 @@ func TestFailurePathMatrixMetaOutage(t *testing.T) {
 							t.Errorf("%s (%s): outage %d transitions %s,%s, want OPEN,CLOSE", n.name, n.role, i+1, o.op, c.op)
 							continue
 						}
-						if !outageWithin(o.factAt, pauseAt[i], outageSlackIn) {
+						if !outageWithinEarly(o.factAt, pauseAt[i], outageSlackIn, outageEarly) {
 							t.Errorf("%s (%s): outage %d OPEN fact_at %s, want its start %s (+%s)", n.name, n.role, i+1, o.factAt.Format(time.StampMicro), pauseAt[i].Format(time.StampMicro), outageSlackIn)
 						}
 						if !outageWithin(c.factAt, resumeAt[i], outageSlackOut) {

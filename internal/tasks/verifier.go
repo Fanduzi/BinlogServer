@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the in-memory task list, a complete catalog listing, the task directory under data_dir, an object store that can HEAD and GET, and the open findings (severity and detail)
-// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass, and the verify gauges
+// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json
 // pos: ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10). Cluster mode does not run it; Allows stays with ADR 0011. This file does not import internal/ownership
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -102,6 +102,7 @@ type Verifier struct {
 
 	mu      sync.Mutex
 	start   int
+	dirty   bool
 	state   verifyStateFile
 	metrics map[string]TaskVerifyMetrics
 }
@@ -205,7 +206,13 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	}
 	tasks := v.sched.ListTasks()
 	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+	live := map[string]bool{}
+	for _, task := range tasks {
+		live[task.ID] = true
+	}
 	if len(tasks) == 0 {
+		v.pruneAbsentTasks(live)
+		v.saveIfDirty()
 		return
 	}
 	v.mu.Lock()
@@ -214,12 +221,15 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	v.mu.Unlock()
 	ordered := append(append([]Task(nil), tasks[start:]...), tasks[:start]...)
 	for _, task := range ordered {
+		// A deadline that cuts the list still keeps the tasks already
+		// checked. saveIfDirty below writes that partial progress.
 		if ctx.Err() != nil {
-			return
+			break
 		}
 		v.passTask(ctx, task.ID, now)
 	}
-	v.save()
+	v.pruneAbsentTasks(live)
+	v.saveIfDirty()
 }
 
 func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) {
@@ -234,6 +244,7 @@ func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) {
 		log.Printf("verifier: list catalog task=%s: %v", taskID, err)
 		return
 	}
+	v.pruneSegments(taskID, files)
 	markers, err := v.sched.retentionMarkers(taskID)
 	if err != nil {
 		log.Printf("verifier: retention markers task=%s: %v", taskID, err)
@@ -309,6 +320,7 @@ func (v *Verifier) remember(taskID string, rep assurance.Report) {
 		st.LastRead[name] = mark
 	}
 	v.state.Tasks[taskID] = st
+	v.dirty = true
 }
 
 func (v *Verifier) note(taskID string, now time.Time, rep assurance.Report) {
@@ -451,6 +463,71 @@ func (v *Verifier) load() {
 	v.state = st
 }
 
+// pruneSegments drops progress for names the catalog no longer lists.
+// A failed listing does not call this: a missing observation is not
+// evidence the segment is gone.
+func (v *Verifier) pruneSegments(taskID string, files []BinlogFile) {
+	keep := map[string]struct{}{}
+	for _, f := range files {
+		if name := segmentInventoryBasename(f); name != "" {
+			keep[name] = struct{}{}
+		}
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	st, ok := v.state.Tasks[taskID]
+	if !ok {
+		return
+	}
+	if dropProgress(st.LastVerified, keep) || dropReads(st.LastRead, keep) {
+		v.dirty = true
+		v.state.Tasks[taskID] = st
+	}
+}
+
+// pruneAbsentTasks drops progress for tasks that are no longer in the scheduler.
+func (v *Verifier) pruneAbsentTasks(live map[string]bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for id := range v.state.Tasks {
+		if !live[id] {
+			delete(v.state.Tasks, id)
+			v.dirty = true
+		}
+	}
+}
+
+func dropProgress(m map[string]time.Time, keep map[string]struct{}) bool {
+	dropped := false
+	for name := range m {
+		if _, ok := keep[name]; !ok {
+			delete(m, name)
+			dropped = true
+		}
+	}
+	return dropped
+}
+
+func dropReads(m map[string]assurance.ReadMark, keep map[string]struct{}) bool {
+	dropped := false
+	for name := range m {
+		if _, ok := keep[name]; !ok {
+			delete(m, name)
+			dropped = true
+		}
+	}
+	return dropped
+}
+
+func (v *Verifier) saveIfDirty() {
+	v.mu.Lock()
+	dirty := v.dirty
+	v.mu.Unlock()
+	if dirty {
+		v.save()
+	}
+}
+
 func (v *Verifier) save() {
 	path := v.statePath()
 	if path == "" {
@@ -465,7 +542,11 @@ func (v *Verifier) save() {
 	}
 	if err := writeAtomic(path, raw); err != nil {
 		log.Printf("verifier: write %s: %v", path, err)
+		return
 	}
+	v.mu.Lock()
+	v.dirty = false
+	v.mu.Unlock()
 }
 
 func writeAtomic(path string, raw []byte) error {

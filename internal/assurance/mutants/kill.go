@@ -448,8 +448,7 @@ var mutants = []mutant{
 	{id: "H23", desc: "a future uploaded_at within tolerance counts as a change", file: verify,
 		old: "\tif !row.UploadedAt.After(p.now) && row.UploadedAt.After(changed) {", new: "\tif !ClockSkewed(row.UploadedAt, p.now) && row.UploadedAt.After(changed) {"},
 	{id: "H25", desc: "LOCAL_UNREADABLE closes on any found STAT", file: verify,
-		old: "cov.Local.Method == MethodStat && cov.Local.Found && reported(rep, KindVerifyFailed, f.Subject)", new: "cov.Local.Method == MethodStat && cov.Local.Found",
-		equiv: "an open LOCAL_UNREADABLE whose local file is still there is forced, so the local is parsed or skipped, not left at STAT. STAT with Found is the size-mismatch path, which also reports VERIFY_FAILED. Closing on any found STAT and closing only when that VERIFY_FAILED is reported are the same rows"},
+		old: "cov.Local.Method == MethodStat && cov.Local.Found && reported(rep, KindVerifyFailed, f.Subject)", new: "cov.Local.Method == MethodStat && cov.Local.Found"},
 }
 
 func main() {

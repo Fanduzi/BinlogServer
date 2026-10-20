@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: process startup with an upload client, and a checkpoint covered only by a sealed UPLOADED object
-// output: proof that startup wires that client as the object reader and does not fail with SEGMENT_NOT_ON_WORKER, and that worker startup deletes a crashed .takeover-* without touching other names
+// output: proof that startup wires that client as the object reader and does not fail with SEGMENT_NOT_ON_WORKER, and that worker startup deletes a crashed .takeover-* without touching other names; the startup fake can HEAD so a configured upload client is accepted
 // pos: regression for lease takeover when the local sealed file is gone
 // note: if this file changes, update this header and module README.md.
 package app
@@ -174,6 +174,10 @@ type startupObjectClient struct {
 func (c *startupObjectClient) UploadFile(context.Context, string, string, string) error { return nil }
 
 func (c *startupObjectClient) DeleteObject(context.Context, string) error { return nil }
+
+func (c *startupObjectClient) HeadObject(context.Context, string) (int64, error) {
+	return int64(len(c.body)), nil
+}
 
 func (c *startupObjectClient) OpenObject(_ context.Context, key string) (io.ReadCloser, int64, error) {
 	c.opens++

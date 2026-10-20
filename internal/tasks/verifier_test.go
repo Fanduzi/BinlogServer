@@ -1,18 +1,23 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a temp data_dir, a fake catalog, and the verifier worker driven pass by pass
-// output: proof that a forced segment is read once per period, that LOCAL_UNREADABLE escalates and closes only after the detail is fed back, and that SealedAt reaches the clock-skew check
+// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked, and that SealedAt reaches the clock-skew check
 // pos: worker feedback tests for ADR 0009 phase 3 (docs/design/0009-phase3-verifier.md §10)
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"binlog_server/internal/assurance"
+	"binlog_server/internal/health"
 )
 
 func newTestVerifier(t *testing.T, objects assurance.ObjectStore) (dir, id string, files *fakeFileStore, s *Scheduler, v *Verifier) {
@@ -175,6 +180,94 @@ func TestVerifier_SealedAtFeedsClockSkew(t *testing.T) {
 	}
 }
 
+func copyLedger(t *testing.T, dir, id, name string) int64 {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "binlog", "testdata", "ledger", "live", "mysql-bin.000003"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id, name), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return int64(len(body))
+}
+
+func verifierCfg(dir string, extra VerifierConfig) VerifierConfig {
+	extra.DataDir = dir
+	if extra.BudgetBytesPerSec == 0 {
+		extra.BudgetBytesPerSec = -1
+	}
+	if extra.RotationPeriods == 0 {
+		extra.RotationPeriods = -1
+	}
+	return extra
+}
+
+type scriptObjects struct {
+	obj       map[string][]byte
+	blockOpen bool
+}
+
+func (s *scriptObjects) Head(_ context.Context, key string) (int64, error) {
+	b, ok := s.obj[key]
+	if !ok {
+		return 0, os.ErrNotExist
+	}
+	return int64(len(b)), nil
+}
+
+func (s *scriptObjects) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	if s.blockOpen {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	b, ok := s.obj[key]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return io.NopCloser(bytes.NewReader(append([]byte(nil), b...))), nil
+}
+
+func readVerifyState(t *testing.T, dir string) verifyStateFile {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, VerifyStateFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st verifyStateFile
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+func restartVerifier(t *testing.T, dir string, files *fakeFileStore, prev *Scheduler, cfg VerifierConfig) (*Scheduler, *Verifier) {
+	t.Helper()
+	flushFindings(t, prev)
+	s := NewScheduler(WithDataDir(dir), WithFileStore(files), WithFindingStore(NewFileFindingStore(filepath.Join(dir, FindingFileName))))
+	prev.mu.Lock()
+	copied := make(map[string]Task, len(prev.tasks))
+	for id, task := range prev.tasks {
+		copied[id] = task
+	}
+	prev.mu.Unlock()
+	s.mu.Lock()
+	for id, task := range copied {
+		s.tasks[id] = task
+	}
+	s.mu.Unlock()
+	if err := s.LoadOpenFindings(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	v := NewVerifier(s, cfg)
+	s.SetVerifier(v)
+	return s, v
+}
+
+func localBytes(s *Scheduler, id string) int64 {
+	return s.VerifyMetrics().Tasks[id].LocalBytes
+}
+
 func TestVerifier_AllowsFalseSkips(t *testing.T) {
 	dir, id, files, s, v := newTestVerifier(t, nil)
 	putSealed(files, id, "mysql-bin.000001", dir, BinlogFile{UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
@@ -185,5 +278,252 @@ func TestVerifier_AllowsFalseSkips(t *testing.T) {
 	}
 	if _, ok := s.VerifyMetrics().Tasks[id]; ok {
 		t.Fatal("skipped task updated metrics")
+	}
+}
+
+// TestVerifier_LastVerifiedStopsTheNextRead is W1: Report.VerifiedAt has to
+// become Options.LastVerified or the next pass reads the segment again.
+func TestVerifier_LastVerifiedStopsTheNextRead(t *testing.T) {
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	if localBytes(s, id) != size {
+		t.Fatalf("first pass read %d, want %d", localBytes(s, id), size)
+	}
+	v.Pass(context.Background(), now.Add(time.Hour))
+	if localBytes(s, id) != size {
+		t.Fatalf("second pass read %d, want the first pass only (%d)", localBytes(s, id), size)
+	}
+}
+
+// TestVerifier_CriticalSeverityReadBack is W4: CRITICAL has to come back
+// from the file store into the next pass, or a later failure drops to WARNING.
+func TestVerifier_CriticalSeverityReadBack(t *testing.T) {
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	taskDir := filepath.Join(dir, id)
+	for _, name := range []string{"mysql-bin.000001", "mysql-bin.000002"} {
+		if err := os.WriteFile(filepath.Join(taskDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		putSealed(files, id, name, dir, BinlogFile{SizeBytes: 1, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	}
+	if err := os.Chmod(taskDir, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(taskDir, 0o755) })
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	v.Pass(context.Background(), now.Add(time.Hour))
+	if err := os.Chmod(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	v.Pass(context.Background(), now.Add(2*time.Hour))
+	s, v = restartVerifier(t, dir, files, s, v.cfg)
+	got, ok := openKind(s, id, assurance.KindLocalUnreadable)
+	if !ok || got.Severity != FindingCritical || got.Detail != assurance.DetailUnreadableRecovering {
+		t.Fatalf("file store: %+v %v", got, ok)
+	}
+	if err := os.Chmod(taskDir, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	v.Pass(context.Background(), now.Add(3*time.Hour))
+	got, ok = openKind(s, id, assurance.KindLocalUnreadable)
+	if !ok || got.Severity != FindingCritical {
+		t.Fatalf("severity was not read back: %+v %v", got, ok)
+	}
+}
+
+// TestVerifier_BudgetBytesPerSecLimitsReads is W6.
+func TestVerifier_BudgetBytesPerSecLimitsReads(t *testing.T) {
+	dir, id, files, s, _ := newTestVerifier(t, nil)
+	v := NewVerifier(s, verifierCfg(dir, VerifierConfig{BudgetBytesPerSec: 1, PassDeadline: time.Second}))
+	s.SetVerifier(v)
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	if got := localBytes(s, id); got != 0 {
+		t.Fatalf("budget let %d bytes through a 1 B/s pass", got)
+	}
+}
+
+// TestVerifier_PassMaxBytesLimitsReads is W7.
+func TestVerifier_PassMaxBytesLimitsReads(t *testing.T) {
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{PassMaxBytes: 100})
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	if got := localBytes(s, id); got != 0 {
+		t.Fatalf("pass_max_bytes let %d bytes through a 100 byte pass", got)
+	}
+}
+
+// TestVerifier_AllowsErrorIsNotAllowed is W8.
+func TestVerifier_AllowsErrorIsNotAllowed(t *testing.T) {
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	putSealed(files, id, "mysql-bin.000001", dir, BinlogFile{UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	v.cfg.Allows = func(context.Context, string) (bool, error) { return true, errors.New("ownership unknown") }
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	if got := s.openBookFindings(id); len(got) != 0 {
+		t.Fatalf("Allows error opened %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, VerifyStateFileName)); !os.IsNotExist(err) {
+		t.Fatalf(".verify.json err=%v", err)
+	}
+}
+
+// TestVerifier_ProgressSurvivesRestart is W10.
+func TestVerifier_ProgressSurvivesRestart(t *testing.T) {
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	st := readVerifyState(t, dir)
+	if _, ok := st.Tasks[id].LastVerified[name]; !ok {
+		t.Fatalf("saved progress %+v", st)
+	}
+	s2, v2 := restartVerifier(t, dir, files, s, v.cfg)
+	v2.Pass(context.Background(), now.Add(time.Hour))
+	if got := localBytes(s2, id); got != 0 {
+		t.Fatalf("restart read %d bytes; progress was not loaded", got)
+	}
+}
+
+// TestVerifier_ObjectSubjectRoundTripsAndCloses is W13.
+func TestVerifier_ObjectSubjectRoundTripsAndCloses(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}}
+	dir, id, files, s, v := newTestVerifier(t, objs)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	v.cfg.Objects = objs
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	key := "bucket/" + name
+	body, err := os.ReadFile(filepath.Join(dir, id, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	putSealed(files, id, name, dir, BinlogFile{
+		SizeBytes: size, UploadState: "UPLOADED", ObjectKey: key, State: "SEALED",
+		SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), UploadedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+	})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	got, ok := openKind(s, id, assurance.KindObjectMissing)
+	if !ok || got.Subject != health.ObjectSubject(name) {
+		t.Fatalf("stored subject %+v %v", got, ok)
+	}
+	s, v = restartVerifier(t, dir, files, s, v.cfg)
+	v.cfg.Objects = objs
+	v.Pass(context.Background(), now.Add(time.Hour))
+	got, ok = openKind(s, id, assurance.KindObjectMissing)
+	if !ok || got.Subject != health.ObjectSubject(name) {
+		t.Fatalf("after reload %+v %v", got, ok)
+	}
+	objs.obj[key] = body
+	v.Pass(context.Background(), now.Add(2*time.Hour))
+	if _, ok := openKind(s, id, assurance.KindObjectMissing); ok {
+		t.Fatalf("object restored, finding still open: %+v", s.openBookFindings(id))
+	}
+}
+
+func TestVerifier_PruneGoneSegmentsAndTasks(t *testing.T) {
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	kept, gone := "mysql-bin.000003", "mysql-bin.000004"
+	size := copyLedger(t, dir, id, kept)
+	if err := os.WriteFile(filepath.Join(dir, id, gone), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The gone name is not a real binlog; give it a catalog row the first
+	// pass can record, then drop the row.
+	putSealed(files, id, kept, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	v.mu.Lock()
+	st := v.state.Tasks[id]
+	if st.LastVerified == nil {
+		st.LastVerified = map[string]time.Time{}
+	}
+	st.LastVerified[gone] = now
+	v.state.Tasks[id] = st
+	v.dirty = true
+	v.mu.Unlock()
+	v.save()
+	files.files[id] = files.files[id][:1]
+	os.Remove(filepath.Join(dir, id, gone))
+	v.Pass(context.Background(), now.Add(time.Hour))
+	if _, ok := readVerifyState(t, dir).Tasks[id].LastVerified[gone]; ok {
+		t.Fatal("gone segment still in .verify.json")
+	}
+	if _, ok := readVerifyState(t, dir).Tasks[id].LastVerified[kept]; !ok {
+		t.Fatal("live segment was pruned")
+	}
+
+	other, err := s.CreateTask("other", "other-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, other.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyLedger(t, dir, other.ID, kept)
+	putSealed(files, other.ID, kept, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	v.Pass(context.Background(), now.Add(2*time.Hour))
+	s.mu.Lock()
+	delete(s.tasks, other.ID)
+	s.mu.Unlock()
+	// ListTasks also returns a data_dir child that still holds a segment.
+	if err := os.RemoveAll(filepath.Join(dir, other.ID)); err != nil {
+		t.Fatal(err)
+	}
+	v.Pass(context.Background(), now.Add(3*time.Hour))
+	if _, ok := readVerifyState(t, dir).Tasks[other.ID]; ok {
+		t.Fatal("gone task still in .verify.json")
+	}
+	if _, ok := readVerifyState(t, dir).Tasks[id]; !ok {
+		t.Fatal("live task was pruned")
+	}
+}
+
+func TestVerifier_DeadlinePersistsPartialProgress(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, blockOpen: true}
+	dir, id, files, s, v := newTestVerifier(t, objs)
+	v.cfg = verifierCfg(dir, VerifierConfig{PassDeadline: 200 * time.Millisecond})
+	v.cfg.Objects = objs
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	objs.obj["k"] = bytes.Repeat([]byte{7}, int(size))
+	putSealed(files, id, name, dir, BinlogFile{
+		SizeBytes: size, UploadState: "UPLOADED", ObjectKey: "k", State: "SEALED",
+		SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	second, err := s.CreateTask("second", "second-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, second.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	putSealed(files, second.ID, "mysql-bin.000009", dir, BinlogFile{UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	st := readVerifyState(t, dir)
+	if _, ok := st.Tasks[id]; !ok {
+		t.Fatalf("partial pass did not save the task it checked: %+v", st.Tasks)
+	}
+	if _, ok := st.Tasks[second.ID]; ok {
+		t.Fatal("deadline still checked the later task")
+	}
+	if len(s.openBookFindings(second.ID)) != 0 {
+		t.Fatalf("later task was verified: %+v", s.openBookFindings(second.ID))
 	}
 }

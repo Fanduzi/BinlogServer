@@ -14,7 +14,7 @@
 | 对象只在上传当时对过一次 ETag | 上传后桶里的对象被生命周期删掉或改掉一个字节，没有第二个人去 HEAD / 读 | #173 那类「看起来已上传」会在上传之后再次出现，而且本地保留删掉之后无本地可比 |
 | 链上的违反没有一个固定的周期作者 | 评估器会派生它读到的违反，但对象侧 scope 还没有被标成「有人生产」（`health.Produced` 不含 `chain.objects` 和 `verify`） | 对象丢失不会变成一条会自己关掉的 finding |
 
-还原演练（每 7 天在一台专用实例上放到一个时间点）默认仍关，等阶段 5 的还原计划。周期巡检的工人在 `internal/tasks/verifier.go`：缺本地文件和损坏对象由运行中的工人检出，经现有 API 报出，检查在 `go test ./...` 里。生产清单 A4 因此是 MET。真实 MinIO 场景仍不在任何 job 里。
+还原演练（每 7 天在一台专用实例上放到一个时间点）默认仍关，等阶段 5 的还原计划。周期巡检的工人在 `internal/tasks/verifier.go`：缺本地文件和损坏对象由运行中的工人检出，经现有 API 报出，检查在 `go test ./...` 里。集群上 `Allows` 恒为 false，所以生产清单 A4 仍是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）落地后再开。真实 MinIO 场景仍不在任何 job 里。
 
 ## 2. 这一份实现的边界
 
@@ -421,7 +421,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | `TestVerify_ConcurrentPassesShareOneBudget` | 两轮并发共用一只预算：各自的 `Bytes` 等于单轮，累计等于两轮之和（`-race` 下跑） |
 | `TestApplySealedUpload_FillsEmptySHA256`、`TestApplySealedUpload_FillKeepsStoredEventTimes` | 行上没有摘要时补上；已有摘要和已有事件时间不被盖掉 |
 
-变异：`go run ./internal/assurance/mutants/kill.go` 跑 QA r1 的 25 个（M01–M25）、第 2 轮覆盖模型的 29 个（N 开头）、QA r2 的 20 个（X01–X20）、第 3 轮队列与关闭规则的 44 个（R 开头）、QA r3 的 Y10 和 Y14、第 4 轮的 20 个（S 开头：新鲜度、最近档份额、对象侧解析、链 kind）、QA r4 的 Z08 和 Z16，以及第 5 轮的 24 个（T 开头：末档、份额封顶、`LOCAL_UNREADABLE`、短正文、`sealed_at` 偏差、强制段每周期一次；T05 随 QA r5 P3 反过来，改成「轮换关掉时从没验过的不进末档」），QA r5 留下的 6 个（W09、W11、W12、W17、W21、W28；W28 按新的「未来时间不算改动」改写），以及 QA r5 后续的 16 个（V 开头：排序时间、`ReadMark.UploadedAt`、`LOCAL_UNREADABLE` 的升级、两次干净读、任务级合并、大小不符时关闭、容差内的 `sealed_at`），再加上工人之前的收尾 6 个（H06、H07、H08、H19、H23、H25：合并时少算一个成功的 stat、混合 errno 也合并、悬空符号链接当失败的 stat、被点名的过期段用 `last_verified_at` 进槽、容差内的未来 `uploaded_at` 当改动、`LOCAL_UNREADABLE` 在任意 `STAT` 成功时关闭），共 194 个。除标明等价的 N30、X05、R15、H25（理由写在 kill.go 里）外全部被打死，没有一个靠编译失败算打死。N08 的「未上传且本地缺失不报」现在打在 `markAbsent`（目录里没有，和 stat 得到不存在，同一处报 `LOCAL_MISSING`）。
+变异：`go run ./internal/assurance/mutants/kill.go` 跑 QA r1 的 25 个（M01–M25）、第 2 轮覆盖模型的 29 个（N 开头）、QA r2 的 20 个（X01–X20）、第 3 轮队列与关闭规则的 44 个（R 开头）、QA r3 的 Y10 和 Y14、第 4 轮的 20 个（S 开头：新鲜度、最近档份额、对象侧解析、链 kind）、QA r4 的 Z08 和 Z16，以及第 5 轮的 24 个（T 开头：末档、份额封顶、`LOCAL_UNREADABLE`、短正文、`sealed_at` 偏差、强制段每周期一次；T05 随 QA r5 P3 反过来，改成「轮换关掉时从没验过的不进末档」），QA r5 留下的 6 个（W09、W11、W12、W17、W21、W28；W28 按新的「未来时间不算改动」改写），以及 QA r5 后续的 16 个（V 开头：排序时间、`ReadMark.UploadedAt`、`LOCAL_UNREADABLE` 的升级、两次干净读、任务级合并、大小不符时关闭、容差内的 `sealed_at`），再加上工人之前的收尾 6 个（H06、H07、H08、H19、H23、H25：合并时少算一个成功的 stat、混合 errno 也合并、悬空符号链接当失败的 stat、被点名的过期段用 `last_verified_at` 进槽、容差内的未来 `uploaded_at` 当改动、`LOCAL_UNREADABLE` 在任意 `STAT` 成功时关闭），共 194 个。除标明等价的 N30、X05、R15（理由写在 kill.go 里）外全部被打死，没有一个靠编译失败算打死。H25 由 `TestVerify_CancelDoesNotCloseUnreadLocalUnreadable` 打死：取消的那一轮没读到的强制段停在 `STAT`，关闭只作用于这一轮真正读过的行。N08 的「未上传且本地缺失不报」现在打在 `markAbsent`（目录里没有，和 stat 得到不存在，同一处报 `LOCAL_MISSING`）。
 
 真实 MinIO 不在任何现有 CI job 里。`e2e.yml` 的 `unit-and-e2e` 跑 `run-suite.sh --profile quick`，quick 的场景名单是写死的，里面没有 MinIO。每个会拉 MinIO 的场景（`smoke-retry-upload`、`smoke-split-retention`）各有一个 job，场景名写在 workflow 里。`workflow_dispatch` 的 profile 也是 workflow 里的闭枚举。不改 workflow 就没法把新场景加进这些 job，而把 MinIO 塞进 quick 会让 `go test` 那个 job 被镜像仓库拖垮。现有做法是把 MinIO 隔在自己的 job 里。
 
@@ -442,7 +442,7 @@ e2e-verify:
       run: ./scripts/e2e/smoke-verify.sh
 ```
 
-`workflow_dispatch` 的 `e2e_profile` 选项加上 `verify`。这一份改不了 workflow，所以上面的 MinIO job 先不加。A4 不靠它：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出，并在 `/metrics` 上看到 `finding_open` 与 `binlog_server_verify_bytes_total`。它在 `go test ./...` 里，现有 `unit-and-e2e` 每个 PR 都跑。工人写回的多轮测试在 `internal/tasks/verifier_test.go`。因此 A4 是 MET。可选演练仍关。
+`workflow_dispatch` 的 `e2e_profile` 选项加上 `verify`。这一份改不了 workflow，所以上面的 MinIO job 先不加。A4 不靠它：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出，并在 `/metrics` 上看到 `finding_open` 与 `binlog_server_verify_bytes_total`。`TestApp_VerifierTickerReportsTwoPasses` 从进程启动走到第一轮和 ticker 第二轮。它在 `go test ./...` 里，现有 `unit-and-e2e` 每个 PR 都跑。工人写回的多轮测试在 `internal/tasks/verifier_test.go`。集群仍不巡检（`TestStartVerifier_ClusterIsInert`），所以 A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。可选演练仍关。
 
 ## 15. 留给后面的清单
 
@@ -455,7 +455,7 @@ e2e-verify:
 5. 不加 `binlog_files.last_verified_at` 列。进度在 `.verify.json`。
 6. 不和复核器合成一把字节预算。巡检自己一把。
 7. 阶段 5 的还原计划到位之后再开演练。演练默认仍关，工人不拨 `verify.drill_dsn`。
-8. 不改 `e2e.yml`。A4 由 `go test ./...` 里的 `TestVerifier_APIReportsMissingLocalAndCorruptObject` 支撑，是 MET。第 14 节的 MinIO job 仍要改 workflow 才能进 CI。
+8. 不改 `e2e.yml`。standalone 的周期巡检由 `go test ./...` 里的 `TestVerifier_APIReportsMissingLocalAndCorruptObject` 和 `TestApp_VerifierTickerReportsTwoPasses` 支撑。集群 `Allows` 仍关，A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。第 14 节的 MinIO job 仍要改 workflow 才能进 CI。
 9. 两个 gauge 已从本轮 `Report` 导出。趁本地文件还在把空 `sha256` 写回目录行的后台任务还没有。
 10. 「row removed」关闭时记一条单独事件：还没有。关闭原因写在 finding 的 detail 里。
 
