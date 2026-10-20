@@ -1,14 +1,17 @@
 // Package tasks provides module-level functionality for tasks.
 // input: sealed binlog file metadata, FileUploader, and file metadata writer
-// output: ObjectKey and UPLOADED only when the checksum matches; UPLOAD_FAILED with checksum mismatch or an unfinished check, without failing the caller
+// output: ObjectKey and UPLOADED only when the checksum matches; UPLOAD_FAILED with checksum mismatch or an unfinished check, without failing the caller; a persisted row with an empty SHA256 gets that digest from the local sealed file (migration 000008 column, plus the task directory ledger)
 // pos: single best-effort upload caller used after seal and on retry
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
+
+	"binlog_server/internal/binlog"
 )
 
 // ObjectKey builds the object-store key. It joins with "/" and does not filepath.Clean.
@@ -113,10 +116,41 @@ func verifySealedUpload(ctx context.Context, uploader FileUploader, writer Binlo
 }
 
 func persistBinlogFile(ctx context.Context, writer BinlogFileWriter, file BinlogFile) (BinlogFile, error) {
+	file = fillSealDigest(file)
 	if writer == nil {
 		return file, nil
 	}
 	return file, writer.UpsertBinlogFile(ctx, file)
+}
+
+// fillSealDigest records the sealed file's SHA-256 when the catalog row does
+// not already have one. An existing digest is left alone. A file that cannot
+// be read leaves the row unchanged and does not fail the upload.
+func fillSealDigest(file BinlogFile) BinlogFile {
+	if strings.TrimSpace(file.SHA256) != "" || strings.TrimSpace(file.FilePath) == "" {
+		return file
+	}
+	facts, err := binlog.ReadSealFacts(file.FilePath)
+	if err != nil || facts.SHA256 == "" {
+		return file
+	}
+	file.SHA256 = facts.SHA256
+	if facts.HasSpan {
+		if file.FirstEventAt == nil {
+			first := facts.First
+			file.FirstEventAt = &first
+		}
+		if file.LastEventAt == nil {
+			last := facts.Last
+			file.LastEventAt = &last
+		}
+	}
+	// The ledger is what a standalone process compares against when there is no catalog column.
+	// A failed append leaves that segment unavailable to the rehasher, as a seal without a ledger line already does.
+	if err := binlog.RecordSealFacts(file.FilePath, facts); err != nil {
+		log.Printf("seal checksum ledger task=%s file=%s: %v", file.TaskID, file.FilePath, err)
+	}
+	return file
 }
 
 func checksumVerifyPending(file BinlogFile) bool {

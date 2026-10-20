@@ -1,6 +1,6 @@
 # internal/assurance Module
 
-备份链（ADR 0009 阶段 1，设计见 `docs/design/0009-phase1-backup-chain.md`）。只依赖 `internal/binlog`，不做网络 I/O。
+备份链（ADR 0009 阶段 1，设计见 `docs/design/0009-phase1-backup-chain.md`）和阶段 3 巡检的纯函数（`docs/design/0009-phase3-verifier.md`）。链只依赖 `internal/binlog`。巡检另外用 `golang.org/x/time/rate` 按字节限速；对象的 HEAD/GET 由调用方注入，本包不拨号。
 
 ## Files
 
@@ -12,6 +12,8 @@ P2-5.4（设计 0009 §26）：`Row.RetentionRemoved` 表示本地保留删过�
 
 ## Exports
 - `Inputs`、`Row`、`Switch`、`Checkpoint`、`Segment`、`Violation`、`Kind`（`AllKinds`）、`ChainOf`、`Chain.Segments`、`Chain.Check`、`DefaultUploadGrace`。
+- `verify.go`: 阶段 3 巡检的纯函数（设计 `docs/design/0009-phase3-verifier.md`）。`Verify` 读目录行、本地封存段和对象 HEAD/GET，返回本轮应当开着的 finding，以及可以推进 `last_verified_at` 的段。`Disappeared` 给出这一轮完整检查里消失的 finding。`ByteBudget` 按字节限速。调用方必须已经是该任务的主人；本文件不问租约。
+
 
 ## Dependencies
 - Upstream: 尚无（P1-2 起 `internal/tasks`）。

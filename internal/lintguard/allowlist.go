@@ -35,6 +35,7 @@ var allowlist = map[string]Allowed{
 	"internal/tasks/rehash_linux.go:dropPageCache:blank-call":                              {1, "best-effort fadvise hint; the hash result does not depend on it"},
 	"internal/tasks/rehash_linux.go:setIdleIOPriority:blank-call":                          {1, "best-effort ioprio hint; the token-bucket budget still bounds the rehasher"},
 	"internal/tasks/legacy_failback.go:withDiskSealFacts:log-only":                         {1, "same as withSealFacts: a missing ledger line only makes the rewritten segment unavailable to the rehasher (its size guard already skips the old line)"},
+	"internal/tasks/sealed_upload.go:fillSealDigest:log-only":                              {1, "same as withSealFacts: the catalog sha256 is already on the row; a missing ledger line only makes the segment unavailable to the rehasher when there is no catalog column"},
 	"internal/tasks/replay_archive.go:Scheduler.openSealedSuccessor:blank-call":            {1, "read-side close of an object body being skipped; no backup state changes"},
 	"internal/tasks/replay_archive.go:closeReplayMembers:blank-call":                       {1, "read-side close of replay members; no backup state changes"},
 	"internal/tasks/replay_archive.go:materializeReplayTar:blank-call":                     {3, cleanupOnErrorPath + "; scratch replay tar only"},
