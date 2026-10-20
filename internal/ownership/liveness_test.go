@@ -17,9 +17,11 @@ import (
 // walk of a small alphabet. Every prefix must satisfy Check and CheckStep.
 // Those walks are not asked to reach RUNNING.
 //
-// Liveness is a bounded forward search from each state the safety walk
-// reaches, and from the hand-built fixtures below (including "directory
-// gone, heartbeat alive"). The three fairness assumptions are premises:
+// Liveness is a bounded search of every fair schedule, not one witness path.
+// The start set is every distinct premise state reached by 60 biased walks
+// (both storages, Start first, Stop and Delete usually rewritten to Acquire).
+// From each of those states, every schedule allowed by the three fairness
+// assumptions must be RUNNING within K. The three assumptions are premises:
 //
 //  1. A node that is not stopped eventually takes a step.
 //  2. A task_leases row lock is released within one idle_kill step. The
@@ -58,17 +60,19 @@ func TestLivenessBudgetCountsWastedClaims(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("wasted possible %d, want 2", n)
 	}
-	got, _, steps, wasted := fair(s, later)
-	k := budget(s, later)
-	if got.Phase != PhaseRunning || got.Lease.Owner != "n1" {
-		t.Fatalf("phase %s owner %s steps %d K %d wasted %d", got.Phase, got.Lease.Owner, steps, k, wasted)
+	longest, k, err := searchAll(s, later)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if wasted != 2 || steps > k {
-		t.Fatalf("steps %d wasted %d K %d", steps, wasted, k)
+	if longest.phase != PhaseRunning || longest.owner != "n1" {
+		t.Fatalf("phase %s owner %s steps %d K %d wasted %d", longest.phase, longest.owner, longest.steps, k, longest.wasted)
 	}
-	// N9: K without the N wasted claims is too small for this schedule.
-	if steps <= k-n {
-		t.Fatalf("schedule fit in K-N (%d <= %d); N is not actually in the budget", steps, k-n)
+	if longest.wasted != 2 || longest.steps > k {
+		t.Fatalf("steps %d wasted %d K %d", longest.steps, longest.wasted, k)
+	}
+	// N9: K without the N wasted claims is too small for the longest fair schedule.
+	if longest.steps <= k-n {
+		t.Fatalf("schedule fit in K-N (%d <= %d); N is not actually in the budget", longest.steps, k-n)
 	}
 }
 
@@ -164,45 +168,76 @@ func TestLivenessDirectoryGoneHeartbeatAliveStaysFailed(t *testing.T) {
 	}
 }
 
-func TestLivenessFairSearchFromRandomStates(t *testing.T) {
+func TestLivenessAllFairSchedules(t *testing.T) {
 	const seed = 20261020
-	checked := 0
-	for seq := 0; seq < 20; seq++ {
+	seen := map[string]bool{}
+	var starts []timedState
+	add := func(s State, now time.Time) {
+		if !livenessPremise(s, now) {
+			return
+		}
+		key := premiseKey(s)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		starts = append(starts, timedState{s: s, now: now})
+	}
+	for seq := 0; seq < 60; seq++ {
 		rng := rand.New(rand.NewSource(seed + int64(seq) + 100))
 		s := New()
+		if seq%2 == 0 {
+			s.Params.Storage = StorageShared
+		}
 		s.Nodes = []Node{
 			{ID: "n1", CanRead: true, HeartbeatAt: t0},
 			{ID: "n2", CanRead: rng.Intn(2) == 0, HeartbeatAt: t0},
 			{ID: "n3", CanRead: false, HeartbeatAt: t0},
 		}
 		now := t0
-		for i := 0; i < 12; i++ {
+		// Leave CREATED. The liveness premise starts once a reader exists.
+		started := Step(s, Event{Kind: EventOperatorStart, Node: "n1"}, now)
+		if v := CheckStep(s, started.State, Event{Kind: EventOperatorStart, Node: "n1"}, started, now); len(v) > 0 {
+			t.Fatalf("start seq %d: %+v", seq, v)
+		}
+		s = started.State
+		add(s, now)
+		for i := 0; i < 24; i++ {
 			e := randomEvent(rng, s, 3)
-			now = now.Add(time.Duration(1+rng.Intn(10)) * time.Second)
+			// Stop and Delete are safety events. Keep most of the walk inside (a).
+			if (e.Kind == EventOperatorStop || e.Kind == EventOperatorDelete) && rng.Intn(4) != 0 {
+				e.Kind = EventAcquire
+				e.Node = "n1"
+			}
+			now = now.Add(time.Duration(1+rng.Intn(40)) * time.Second)
 			res := Step(s, e, now)
 			if v := CheckStep(s, res.State, e, res, now); len(v) > 0 {
 				t.Fatalf("safety seq %d: %+v", seq, v)
 			}
 			s = res.State
-			if !livenessPremise(s, now) {
-				continue
+			add(s, now)
+			if len(starts) >= 200 {
+				break
 			}
-			got, at, steps, _ := fair(s, now)
-			if got.Phase != PhaseRunning {
-				t.Fatalf("seq %d step %d: stayed %s owner %s failed %s steps %d K %d", seq, i, got.Phase, got.Lease.Owner, got.FailedReason, steps, budget(s, now))
-			}
-			if steps > budget(s, now) {
-				t.Fatalf("seq %d exceeded K: steps %d K %d", seq, steps, budget(s, now))
-			}
-			if findOpen(s, FindingTail, s.TaskID) && findOpen(got, FindingTail, s.TaskID) {
-				t.Fatal("tail finding still open after DumpReady")
-			}
-			_ = at
-			checked++
+		}
+		if len(starts) >= 200 {
+			break
 		}
 	}
-	if checked < 10 {
-		t.Fatalf("premise held for only %d states", checked)
+	if len(starts) < 80 {
+		t.Fatalf("premise held for only %d states", len(starts))
+	}
+	for i, st := range starts {
+		longest, k, err := searchAll(st.s, st.now)
+		if err != nil {
+			t.Fatalf("start %d phase %s owner %s live %v lock %v reader %q claim %v tail %v refusals %d K %d: %v", i, st.s.Phase, st.s.Lease.Owner, LeaseLive(st.s, st.now), st.s.Lock.Held, eligibleReader(st.s, st.now), InClaimSet(st.s, st.now), !st.s.TailSince.IsZero(), len(st.s.Refusal), budget(st.s, st.now), err)
+		}
+		if longest.steps > k {
+			t.Fatalf("start %d exceeded K: steps %d K %d", i, longest.steps, k)
+		}
+		if findOpen(st.s, FindingTail, st.s.TaskID) && findOpen(longest.state, FindingTail, st.s.TaskID) {
+			t.Fatalf("start %d left the tail finding open", i)
+		}
 	}
 }
 
@@ -278,6 +313,17 @@ func budget(s State, now time.Time) int {
 	k := 2 + wastedPossible(s, now) // claim + DumpReady + N
 	if s.Lock.Held {
 		k++
+		// idle_kill can land at or after lease_expire_at. The owner then has to
+		// claim again, and every non-reader may waste a claim first.
+		releaseAt := now
+		if deadline := s.Lock.Since.Add(s.Params.IdleKill); deadline.After(now) {
+			releaseAt = deadline
+		}
+		if LeaseLive(s, now) && !s.Lease.ExpireAt.After(releaseAt) {
+			dead := s
+			dead.Lease.ExpireAt = releaseAt
+			k += wastedPossible(dead, releaseAt)
+		}
 	}
 	if LeaseLive(s, now) && ownerStopped(s) {
 		k++
@@ -299,119 +345,177 @@ func budget(s State, now time.Time) int {
 	return k
 }
 
-// fair runs one schedule. It returns the state, the clock, the step count,
-// and how many wasted per_node claims it spent.
-func fair(start State, now time.Time) (State, time.Time, int, int) {
-	s := start
-	k := budget(s, now)
-	reader := eligibleReader(s, now)
-	steps := 0
-	wasted := 0
-	for steps <= k+2 {
-		refreshHeartbeats(&s, now)
-		if runningNow(s, now) {
-			s = Step(s, Event{Kind: EventSweep, Node: reader}, now).State
-			return s, now, steps, wasted
+type timedState struct {
+	s   State
+	now time.Time
+}
+
+type searchFrame struct {
+	s         State
+	now       time.Time
+	steps     int
+	wasted    int
+	path      string
+	label     string
+	wastedIDs map[string]bool
+}
+
+type scheduleEnd struct {
+	state  State
+	phase  Phase
+	owner  string
+	steps  int
+	wasted int
+}
+
+// searchAll explores every fair schedule. A schedule that is still not
+// RUNNING after K steps is a failure. The returned end is the longest one,
+// which is the schedule that spends the wasted claims.
+func searchAll(start State, now time.Time) (scheduleEnd, int, error) {
+	k := budget(start, now)
+	queue := []searchFrame{{s: start, now: now}}
+	var longest scheduleEnd
+	seenGoal := false
+	visited := 0
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		visited++
+		if visited > 200000 {
+			return scheduleEnd{}, k, errFair("fair search did not stay bounded")
 		}
-		if steps > k {
-			break
-		}
-		if s.Lock.Held {
-			if now.Before(s.Lock.Since.Add(s.Params.IdleKill)) {
-				now = s.Lock.Since.Add(s.Params.IdleKill)
+		refreshHeartbeats(&cur.s, cur.now)
+		if runningNow(cur.s, cur.now) {
+			if cur.steps > k {
+				return scheduleEnd{}, k, errFair("fair schedule reached RUNNING past K")
 			}
-			s = Step(s, Event{Kind: EventMetaLockTimeout, Node: reader}, now).State
-			steps++
+			seenGoal = true
+			if cur.steps >= longest.steps {
+				longest = scheduleEnd{state: cur.s, phase: cur.s.Phase, owner: cur.s.Lease.Owner, steps: cur.steps, wasted: cur.wasted}
+			}
 			continue
 		}
-		if s.Phase == PhaseFailed && s.FailedReason == ReasonChainOwnerGone {
-			owner := s.Chain.Owner
-			if !s.Chain.VerifiedAt.After(s.FailedAt) {
-				when := now
-				if !when.After(s.FailedAt) {
-					when = s.FailedAt.Add(time.Millisecond)
-				}
-				now = when
-				res := Step(s, Event{Kind: EventChainVerified, Node: owner, ReadOK: true}, now)
-				if res.Decision != DecisionApplied {
-					break
-				}
-				s = res.State
-				steps++
-				continue
-			}
-			res := Step(s, Event{Kind: EventChainOwnerBack, Node: owner}, now)
-			if res.Decision != DecisionApplied {
-				break
-			}
-			s = res.State
-			steps++
-			continue
+		if cur.steps >= k {
+			return scheduleEnd{}, k, errFair("fair schedule still " + string(cur.s.Phase) + " owner " + cur.s.Lease.Owner + " path " + cur.path + " after K")
 		}
-		if LeaseLive(s, now) && ownerStopped(s) {
-			if now.Before(s.Lease.ExpireAt) {
-				now = s.Lease.ExpireAt
-				steps++
-				continue
-			}
+		next := fairSuccessors(cur.s, cur.now, cur.steps, cur.wasted, cur.wastedIDs)
+		for i := range next {
+			next[i].path = cur.path + ">" + next[i].label
 		}
-		// A live owner that cannot read the directory yields. That release is
-		// one wasted claim. A stopped owner waits out the TTL instead.
-		if LeaseLive(s, now) && s.Lease.Owner != reader {
-			if next, ok := yieldHolder(s, now); ok {
-				s = next
-				wasted++
-				steps++
-				continue
-			}
-			if now.Before(s.Lease.ExpireAt) {
-				now = s.Lease.ExpireAt
-				steps++
-				continue
-			}
+		if len(next) == 0 {
+			return scheduleEnd{}, k, errFair("no fair move from " + string(cur.s.Phase) + " owner " + cur.s.Lease.Owner)
 		}
-		if InStopSet(s, now) {
-			s = Step(s, Event{Kind: EventStopExpired, Node: reader}, now).State
-			steps++
-			continue
-		}
-		if InClaimSet(s, now) {
-			if next, ok := wasteOne(s, now); ok {
-				s = next
-				wasted++
-				steps++
-				continue
-			}
-			if r, ok := s.Refusal[reader]; ok && !r.OpenEnded && r.Until.After(now) {
-				now = r.Until
-				steps++
-				continue
-			}
-			res := Step(s, Event{Kind: EventAcquire, Node: reader}, now)
-			if res.Decision != DecisionApplied {
-				break
-			}
-			s = res.State
-			steps++
-			continue
-		}
-		if s.Lease.Owner == reader && LeaseLive(s, now) {
-			if s.Phase == PhaseRetryBackoff && now.Before(s.RetryUntil) {
-				now = s.RetryUntil
-				steps++
-				continue
-			}
-			res := Step(s, Held(s, EventDumpReady, reader), now)
-			if res.Decision != DecisionApplied && res.Decision != DecisionIdempotent {
-				break
-			}
-			s = res.State
-			steps++
-			continue
-		}
-		break
+		queue = append(queue, next...)
 	}
-	return s, now, steps, wasted
+	if !seenGoal {
+		return scheduleEnd{}, k, errFair("no fair schedule reached RUNNING")
+	}
+	return longest, k, nil
+}
+
+type fairError string
+
+func (e fairError) Error() string { return string(e) }
+
+func errFair(s string) error { return fairError(s) }
+
+func fairSuccessors(s State, now time.Time, steps, wasted int, already map[string]bool) []searchFrame {
+	var out []searchFrame
+	add := func(next State, at time.Time, w int, label, wastedID string) {
+		ids := make(map[string]bool, len(already)+1)
+		for id := range already {
+			ids[id] = true
+		}
+		if wastedID != "" {
+			ids[wastedID] = true
+		}
+		out = append(out, searchFrame{s: next, now: at, steps: steps + 1, wasted: wasted + w, label: label, wastedIDs: ids})
+	}
+	reader := eligibleReader(s, now)
+	if reader == "" {
+		reader = s.Lease.Owner
+	}
+	if s.Lock.Held {
+		when := now
+		deadline := s.Lock.Since.Add(s.Params.IdleKill)
+		if when.Before(deadline) {
+			when = deadline
+		}
+		res := Step(s, Event{Kind: EventMetaLockTimeout, Node: reader}, when)
+		add(res.State, when, 0, "lock-timeout", "")
+		return out
+	}
+	if s.Phase == PhaseFailed && s.FailedReason == ReasonChainOwnerGone {
+		owner := s.Chain.Owner
+		if !s.Chain.VerifiedAt.After(s.FailedAt) {
+			when := now
+			if !when.After(s.FailedAt) {
+				when = s.FailedAt.Add(time.Millisecond)
+			}
+			res := Step(s, Event{Kind: EventChainVerified, Node: owner, ReadOK: true}, when)
+			if res.Decision == DecisionApplied {
+				add(res.State, when, 0, "chain-verified", "")
+			}
+			return out
+		}
+		res := Step(s, Event{Kind: EventChainOwnerBack, Node: owner}, now)
+		if res.Decision == DecisionApplied {
+			add(res.State, now, 0, "chain-back", "")
+		}
+		return out
+	}
+	if LeaseLive(s, now) && ownerStopped(s) && now.Before(s.Lease.ExpireAt) {
+		add(s, s.Lease.ExpireAt, 0, "wait-ttl", "")
+		return out
+	}
+	if LeaseLive(s, now) && s.Lease.Owner != "" && s.Lease.Owner != eligibleReader(s, now) {
+		if next, ok := yieldHolder(s, now); ok {
+			add(next, now, 1, "yield-holder", s.Lease.Owner)
+			return out
+		}
+		if now.Before(s.Lease.ExpireAt) {
+			add(s, s.Lease.ExpireAt, 0, "wait-holder", "")
+			return out
+		}
+	}
+	if InStopSet(s, now) {
+		res := Step(s, Event{Kind: EventStopExpired, Node: reader}, now)
+		if res.Decision == DecisionApplied {
+			add(res.State, now, 0, "stop-expired", "")
+		}
+		return out
+	}
+	if InClaimSet(s, now) {
+		for _, node := range s.Nodes {
+			if already[node.ID] {
+				continue
+			}
+			if next, ok := wasteNode(s, now, node.ID); ok {
+				add(next, now, 1, "waste-"+node.ID, node.ID)
+			}
+		}
+		if r, ok := s.Refusal[reader]; ok && !r.OpenEnded && r.Until.After(now) {
+			add(s, r.Until, 0, "wait-refusal", "")
+		} else if reader != "" && !RefusalBlocks(s, reader, now) {
+			res := Step(s, Event{Kind: EventAcquire, Node: reader}, now)
+			if res.Decision == DecisionApplied {
+				add(res.State, now, 0, "acquire-"+reader, "")
+			}
+		}
+		return out
+	}
+	if s.Lease.Owner == eligibleReader(s, now) && LeaseLive(s, now) {
+		if s.Phase == PhaseRetryBackoff && now.Before(s.RetryUntil) {
+			add(s, s.RetryUntil, 0, "wait-retry", "")
+			return out
+		}
+		res := Step(s, Held(s, EventDumpReady, s.Lease.Owner), now)
+		if res.Decision == DecisionApplied || res.Decision == DecisionIdempotent {
+			add(res.State, now, 0, "dump", "")
+		}
+		return out
+	}
+	return out
 }
 
 func runningNow(s State, now time.Time) bool {
@@ -445,31 +549,63 @@ func yieldHolder(s State, now time.Time) (State, bool) {
 	return s, false
 }
 
-func wasteOne(s State, now time.Time) (State, bool) {
-	if !InClaimSet(s, now) {
+func premiseKey(s State) string {
+	tail := "0"
+	if !s.TailSince.IsZero() {
+		tail = "1"
+	}
+	lock := "0"
+	if s.Lock.Held {
+		lock = "1"
+	}
+	return string(s.Phase) + "|" + string(s.Desired) + "|" + s.Lease.Owner + "|" +
+		itoa(s.Lease.Epoch) + "|" + itoa(s.RowGeneration) + "|" + itoa(int64(len(s.Refusal))) + "|" +
+		itoa(int64(s.RetryAttempt)) + "|" + s.FailedReason + "|" + s.Chain.Owner + "|" + tail + "|" + lock
+}
+
+func itoa(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+func wasteNode(s State, now time.Time, id string) (State, bool) {
+	node := findNode(s, id)
+	if node == nil || node.CanRead || node.Stopped || RefusalBlocks(s, id, now) || !InClaimSet(s, now) {
 		return s, false
 	}
-	for _, node := range s.Nodes {
-		if node.CanRead || node.Stopped || RefusalBlocks(s, node.ID, now) {
-			continue
-		}
-		res := Step(s, Event{Kind: EventAcquire, Node: node.ID}, now)
-		if res.Decision != DecisionApplied {
-			continue
-		}
-		ev := heldCause(res.State, EventTailUnreadable, node.ID, CauseSegmentNotOnWorker)
-		yielded := Step(res.State, ev, now)
-		if yielded.Decision == DecisionApplied {
-			return yielded.State, true
-		}
-		ev.Kind = EventEpochLost
-		ev.Cause = CauseENOENT
-		ev.Epoch = res.State.Lease.Epoch
-		ev.RowGeneration = res.State.RowGeneration
-		yielded = Step(res.State, ev, now)
-		if yielded.Decision == DecisionApplied {
-			return yielded.State, true
-		}
+	res := Step(s, Event{Kind: EventAcquire, Node: id}, now)
+	if res.Decision != DecisionApplied {
+		return s, false
+	}
+	ev := heldCause(res.State, EventTailUnreadable, id, CauseSegmentNotOnWorker)
+	yielded := Step(res.State, ev, now)
+	if yielded.Decision == DecisionApplied {
+		return yielded.State, true
+	}
+	ev.Kind = EventEpochLost
+	ev.Cause = CauseENOENT
+	ev.Epoch = res.State.Lease.Epoch
+	ev.RowGeneration = res.State.RowGeneration
+	yielded = Step(res.State, ev, now)
+	if yielded.Decision == DecisionApplied {
+		return yielded.State, true
 	}
 	return s, false
 }

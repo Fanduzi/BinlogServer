@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State and the clock used for lease, refusal, and stale comparisons
-// output: Violation list for invariants 1–10, claim and stop sets, /api/health code
+// output: Violation list for invariants 1–10, ProgressOverdue, claim and stop sets, /api/health code
 // pos: the checkable predicates ADR 0011 §2 requires of every prefix
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -11,6 +11,25 @@ import "time"
 type Violation struct {
 	Invariant string
 	Detail    string
+}
+
+func epochFenced(k Kind) bool {
+	switch k {
+	case EventDumpReady, EventRetryableError, EventTerminalError, EventTailUnreadable, EventEpochLost, EventStopConfirmed, EventRenew:
+		return true
+	default:
+		return false
+	}
+}
+
+func dropInv(v []Violation, id string) []Violation {
+	out := v[:0:0]
+	for _, item := range v {
+		if item.Invariant != id {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func add(v []Violation, id, detail string) []Violation {
@@ -164,16 +183,49 @@ func Check(s State, now time.Time) []Violation {
 	if s.MetaLockStalled && HealthCode(s, now) != 503 {
 		v = add(v, "6", "META_LOCK_STALLED but /api/health is not 503")
 	}
-	if s.NoProgress && !hasFinding(s, FindingNoProgress, s.TaskID) {
-		v = add(v, "7", "no-progress fact without TASK_NO_PROGRESS")
+	// Invariant 7 is recomputed from the row and the clock. The code-under-test's
+	// NoProgress flag is not consulted: a mutated threshold must still fail here.
+	if ProgressOverdue(s, now) != hasFinding(s, FindingNoProgress, s.TaskID) {
+		v = add(v, "7", "TASK_NO_PROGRESS does not match the sweep and no_progress_after clocks")
 	}
 	return v
+}
+
+// ProgressOverdue is invariant 7's clock. Unowned work (desired RUN, no live
+// lease, not a legal retry) is overdue one sweep after UnownedSince. A live
+// owner is overdue only after no_progress_after. This does not read State.NoProgress.
+func ProgressOverdue(s State, now time.Time) bool {
+	if s.Deleted || s.Desired != DesiredRun || s.Phase == PhaseFailed || s.Phase == PhaseCreated {
+		return false
+	}
+	p := s.Params.fill()
+	if !LeaseLive(s, now) && !LegalRetry(s, now) && s.Phase != PhaseStopped {
+		if s.UnownedSince.IsZero() {
+			return false
+		}
+		return !now.Before(s.UnownedSince.Add(p.Sweep))
+	}
+	if LeaseLive(s, now) {
+		anchor := s.ProgressAt
+		if anchor.IsZero() {
+			anchor = s.Lease.AcquiredAt
+		}
+		if !anchor.IsZero() && now.Sub(anchor) > p.NoProgressAfter {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckStep is the transition half: desired STOP, FAILED, the epoch fence,
 // chain writes, close-then-open, and operator HTTP.
 func CheckStep(before, after State, e Event, res Result, now time.Time) []Violation {
 	v := Check(after, now)
+	// A dropped event does not re-derive findings, so the clock moving past
+	// one sweep must not be blamed on the row that was just refused.
+	if res.Decision != DecisionApplied {
+		v = dropInv(v, "7")
+	}
 	if before.Desired != DesiredStop && after.Desired == DesiredStop {
 		if e.Kind != EventOperatorStop && e.Kind != EventOperatorDelete {
 			v = add(v, "1", "non-operator event wrote desired STOP")
@@ -198,6 +250,24 @@ func CheckStep(before, after State, e Event, res Result, now time.Time) []Violat
 	if res.Decision == DecisionDiscarded || res.Decision == DecisionReread || res.Decision == DecisionRejected {
 		if before.Phase != after.Phase || before.RowGeneration != after.RowGeneration || before.Lease.Epoch != after.Lease.Epoch || before.Desired != after.Desired {
 			v = add(v, "3", "a dropped event wrote the task row")
+		}
+	}
+	// Invariant 3 also constrains events that were accepted. A dropped-event
+	// check cannot see a stolen live lease or a stale epoch that was applied.
+	if LeaseLive(before, now) && after.Lease.Owner != "" && after.Lease.Owner != before.Lease.Owner {
+		v = add(v, "3", "another node took a live lease")
+	}
+	if e.Kind == EventStopExpired && res.Decision == DecisionApplied && LeaseLive(before, now) {
+		v = add(v, "3", "StopExpired applied while the lease was live")
+	}
+	if res.Decision == DecisionApplied && epochFenced(e.Kind) {
+		if e.Node != before.Lease.Owner || e.Epoch != before.Lease.Epoch {
+			v = add(v, "3", "runner event applied without the current owner and epoch")
+		}
+	}
+	if e.Kind == EventChainOwnerGone && before.Phase != PhaseFailed && after.Phase == PhaseFailed {
+		if before.Phase != PhaseLeaseDegraded || before.TailSince.IsZero() {
+			v = add(v, "2", "ChainOwnerGone entered FAILED outside LEASE_DEGRADED with a tail")
 		}
 	}
 	chainMoved := before.Chain.Owner != after.Chain.Owner || !before.Chain.VerifiedAt.Equal(after.Chain.VerifiedAt)
