@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: mocked MySQL contracts including OPEN/SEALED file state, retry and lease timing policies, optional AES-256 source-password key
-// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, an unknown end_pos bound as NULL without assigning end_pos, DeleteBinlogFile by task id, source file name, and epoch, ListEvents newest-row window returned oldest-first, ListSourceSwitchEvents oldest SOURCE_SWITCHOVER rows, the legacy desired_run reconcile update, source_json password encryption, schema 5 refusal that names ./migrate up, schema 6 acceptance without uk_task_file_epoch, and the pre-step-9 index list refusing schema 6 with missing index uk_task_file_epoch
+// output: persistence contract coverage for tasks, files, leases, runs, checkpoints, GetTask by id, SQL LIMIT/OFFSET pages, GROUP BY state and source rollups, SameSourceHost loopback SQL identity, expired-lease listing, catalog file list replay order and limit window, a bounded binlog_files page query, an unknown end_pos bound as NULL without assigning end_pos, DeleteBinlogFile by task id, source file name, and epoch, a failed-upload list that returns sha256 and event times and falls back when those columns are absent, ListEvents newest-row window returned oldest-first, ListSourceSwitchEvents oldest SOURCE_SWITCHOVER rows, the legacy desired_run reconcile update, source_json password encryption, schema 5 refusal that names ./migrate up, schema 6 acceptance without uk_task_file_epoch, and the pre-step-9 index list refusing schema 6 with missing index uk_task_file_epoch
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -1384,6 +1384,50 @@ func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
 	defer db.Close()
 
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	sealedAt := time.Now()
+	rows := sqlmock.NewRows([]string{
+		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
+		"object_key", "upload_state", "upload_error", "uploaded_at", "epoch",
+		"sha256", "first_event_at", "last_event_at",
+	}).AddRow(
+		"1", "mysql-bin.000002", "/tmp/mysql-bin.000002", int64(2048), uint32(4), uint32(2200), time.Now().Add(-time.Minute), sealedAt,
+		"prefix/cluster-a/uuid/mysql-bin.000002", "UPLOAD_FAILED", "network timeout", nil, int64(0),
+		"abc", sealedAt, sealedAt,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(listFailedSealedBinlogFilesWithSealFactsSQL)).
+		WithArgs("1", 100).
+		WillReturnRows(rows)
+
+	files, err := store.ListFailedUploadBinlogFiles(context.Background(), "1", 0)
+	if err != nil {
+		t.Fatalf("ListFailedUploadBinlogFiles returned error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].UploadState != "UPLOAD_FAILED" {
+		t.Fatalf("expected upload state UPLOAD_FAILED, got %s", files[0].UploadState)
+	}
+	if files[0].SHA256 != "abc" || files[0].FirstEventAt == nil || files[0].LastEventAt == nil {
+		t.Fatalf("seal facts not loaded: %+v", files[0])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestMySQLTaskStore_ListFailedUploadBinlogFiles_FallsBackWithoutSealFacts(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
+	mock.ExpectQuery(regexp.QuoteMeta(listFailedSealedBinlogFilesWithSealFactsSQL)).
+		WithArgs("1", 100).
+		WillReturnError(&mysqlDriver.MySQLError{Number: 1054, Message: "Unknown column 'sha256' in 'field list'"})
 	rows := sqlmock.NewRows([]string{
 		"task_id", "file_name", "file_path", "size_bytes", "start_pos", "end_pos", "created_at", "sealed_at",
 		"object_key", "upload_state", "upload_error", "uploaded_at", "epoch",
@@ -1399,13 +1443,12 @@ func TestMySQLTaskStore_ListFailedUploadBinlogFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListFailedUploadBinlogFiles returned error: %v", err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("expected 1 file, got %d", len(files))
+	if len(files) != 1 || files[0].SHA256 != "" || files[0].FirstEventAt != nil {
+		t.Fatalf("fallback row = %+v", files)
 	}
-	if files[0].UploadState != "UPLOAD_FAILED" {
-		t.Fatalf("expected upload state UPLOAD_FAILED, got %s", files[0].UploadState)
+	if !store.sealFactsAbsent.Load() {
+		t.Fatal("1054 did not remember that seal fact columns are absent")
 	}
-
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}

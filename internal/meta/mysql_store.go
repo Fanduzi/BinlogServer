@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, idle STOPPING, and STOPPED rows with desired RUN and an empty owner whose lease has expired (#454), ListTaskIDsWithExpiredOwnerLease (a row naming an owner, desired RUN, not FAILED/STOPPED/CREATED, lease expired by NOW(6)) for the _health holder (design 0009 §24.13), backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED; checkpoint and binlog_files upsert/delete run under execUnderFence when the context carries a fence identity (ADR 0009 P2-6b, #417)
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, idle STOPPING, and STOPPED rows with desired RUN and an empty owner whose lease has expired (#454), ListTaskIDsWithExpiredOwnerLease (a row naming an owner, desired RUN, not FAILED/STOPPED/CREATED, lease expired by NOW(6)) for the _health holder (design 0009 §24.13), backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED that also returns sha256 and event times when migration 000008 columns exist (1054 falls back to the list without them); checkpoint and binlog_files upsert/delete run under execUnderFence when the context carries a fence identity (ADR 0009 P2-6b, #417)
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -379,6 +379,21 @@ LIMIT ?
 const listFailedSealedBinlogFilesSQL = `
 SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
        object_key, upload_state, upload_error, uploaded_at, epoch
+FROM binlog_files
+WHERE task_id = ?
+  AND upload_state = 'UPLOAD_FAILED'
+  AND state = 'SEALED'
+ORDER BY sealed_at DESC
+LIMIT ?;
+`
+
+// listFailedSealedBinlogFilesWithSealFactsSQL is the same list plus the
+// 000008 columns. Retry upload must see an existing sha256 and event times,
+// or a later fill would recompute the digest and write the times as NULL.
+const listFailedSealedBinlogFilesWithSealFactsSQL = `
+SELECT task_id, file_name, file_path, size_bytes, start_pos, end_pos, created_at, sealed_at,
+       object_key, upload_state, upload_error, uploaded_at, epoch,
+       sha256, first_event_at, last_event_at
 FROM binlog_files
 WHERE task_id = ?
   AND upload_state = 'UPLOAD_FAILED'
@@ -1611,7 +1626,18 @@ func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID
 		limit = 1000
 	}
 
-	rows, err := s.db.QueryContext(ctx, listFailedSealedBinlogFilesSQL, taskID, limit)
+	query := listFailedSealedBinlogFilesSQL
+	withFacts := false
+	if !s.sealFactsAbsent.Load() {
+		query = listFailedSealedBinlogFilesWithSealFactsSQL
+		withFacts = true
+	}
+	rows, err := s.db.QueryContext(ctx, query, taskID, limit)
+	if withFacts && isMySQLUnknownColumnError(err) {
+		s.noteSealColumns(false, 0)
+		withFacts = false
+		rows, err = s.db.QueryContext(ctx, listFailedSealedBinlogFilesSQL, taskID, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1621,7 +1647,9 @@ func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID
 	for rows.Next() {
 		var item tasks.BinlogFile
 		var uploadedAt sql.NullTime
-		if err := rows.Scan(
+		var sha sql.NullString
+		var first, last sql.NullTime
+		dest := []any{
 			&item.TaskID,
 			&item.FileName,
 			&item.FilePath,
@@ -1635,11 +1663,26 @@ func (s *MySQLTaskStore) ListFailedUploadBinlogFiles(ctx context.Context, taskID
 			&item.UploadError,
 			&uploadedAt,
 			&item.Epoch,
-		); err != nil {
+		}
+		if withFacts {
+			dest = append(dest, &sha, &first, &last)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
 		if uploadedAt.Valid {
 			item.UploadedAt = uploadedAt.Time
+		}
+		if sha.Valid {
+			item.SHA256 = sha.String
+		}
+		if first.Valid {
+			at := first.Time
+			item.FirstEventAt = &at
+		}
+		if last.Valid {
+			at := last.Time
+			item.LastEventAt = &at
 		}
 		out = append(out, item)
 	}
