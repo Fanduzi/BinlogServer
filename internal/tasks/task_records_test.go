@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a standalone data_dir with the encrypted task record (ADR 0010), a recording runner, and leftover segments
-// output: #385 as tests: a restart restores every recorded task and Starts the desired-RUN ones with the source password and a start computed from disk (never the record); LATEST with nothing on disk fails RESUME_POSITION_UNKNOWN; a stopped task stays stopped; a worker FAILED survives a restart; delete leaves a tombstone (no TASK_UNADOPTED) and adopt clears it; wrong key, corrupt file and missing key are TASK_RECORDS_FAILED, restore nothing, refuse writes and leave the file as it was; a failed save refuses the action; rotation re-saves on the current key; ids are not reused
+// output: #385 as tests: a restart restores every recorded task and Starts the desired-RUN ones with the source password and a start computed from disk (never the record); LATEST with nothing on disk fails RESUME_POSITION_UNKNOWN; a stopped task stays stopped; a worker FAILED survives a restart; delete leaves a tombstone (no TASK_UNADOPTED) and adopt clears it; wrong key, corrupt file and missing key are TASK_RECORDS_FAILED, restore nothing, refuse writes and leave the file as it was; a failed save refuses the action; rotation re-saves on the current key; ids are not reused; an evaluator attached before Restore leaves the previous process's TASK_RECORDS_FAILED open until EvaluateClusterNow
 // pos: ADR 0010 (docs/adr/0010-standalone-task-records.md)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -874,5 +874,54 @@ func TestTaskRecords_RightKeyClosesEarlierLockFinding(t *testing.T) {
 	boot(good)
 	if open := openOf(t, store, ClusterFindingTask); len(open) != 0 {
 		t.Fatalf("right key left findings open: %+v", open)
+	}
+}
+
+// App attaches the evaluator before Restore. The earlier process's row stays
+// open until EvaluateClusterNow, which is what app.Run calls before listen.
+func TestTaskRecords_EvaluateClusterNowClosesEarlierLock(t *testing.T) {
+	data := recordDir(t)
+	good := recordKey(t, 1)
+	s1, _ := recordProcess(t, data, taskrecords.Open(data, good, nil), nil)
+	if _, err := s1.CreateTaskFromSpec("n", "n-key", recordSourceCfg(), &StartConfig{Mode: StartModeLatest}, nil); err != nil {
+		t.Fatal(err)
+	}
+	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
+	cfg := EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: "n", Instance: "i", Debounce: time.Second}
+	boot := func(key *taskrecords.Key) *Scheduler {
+		s := NewScheduler(WithDataDir(data), WithRunner(newRecordRunner()), WithClusterLeaseManager(NewMemoryLease()),
+			WithClusterWorkerID("standalone"), WithTaskRecords(taskrecords.Open(data, key, nil), nil))
+		NewEvaluator(s, cfg) // before Restore, as app.Run does
+		if err := s.Restore(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	wrong := boot(recordKey(t, 2))
+	if err := wrong.EvaluateClusterNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	key := string(FindingTaskRecordsFailed) + "/" + RecordsWrongKey
+	if _, ok := openOf(t, store, ClusterFindingTask)[key]; !ok {
+		t.Fatalf("wrong key did not open: %+v", openOf(t, store, ClusterFindingTask))
+	}
+	right := boot(good)
+	if _, ok := openOf(t, store, ClusterFindingTask)[key]; !ok {
+		t.Fatal("right key closed the earlier finding before EvaluateClusterNow")
+	}
+	if err := right.EvaluateClusterNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if open := openOf(t, store, ClusterFindingTask); len(open) != 0 {
+		t.Fatalf("EvaluateClusterNow left findings open: %+v", open)
+	}
+	listed, err := right.OpenFindings(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range listed {
+		if f.Kind == FindingTaskRecordsFailed {
+			t.Fatalf("OpenFindings still has %s/%s", f.Kind, f.Subject)
+		}
 	}
 }

@@ -373,7 +373,6 @@ func (a *App) Run(ctx context.Context) error {
 	if err := startHealthEvaluator(runCtx, a.cfg, scheduler, mysqlStore, resolvedWorkerID, spawn); err != nil {
 		return err
 	}
-	startVerifier(runCtx, a.cfg, scheduler, verifyObjects, spawn)
 	if workerEnabled {
 		// 将 runner 进度回传给 scheduler，供 API/状态机读取。
 		runnerOpts = append(runnerOpts, replication.WithProgressReporter(scheduler))
@@ -396,6 +395,13 @@ func (a *App) Run(ctx context.Context) error {
 	if err := scheduler.Restore(restoreCtx); err != nil {
 		return err
 	}
+	// SignalSuccess during Restore only marks the evaluator dirty. Store the
+	// close before listen: the sweep debounce is 1s, and a restart otherwise
+	// keeps serving the previous process's TASK_RECORDS_FAILED.
+	if err := scheduler.EvaluateClusterNow(runCtx); err != nil {
+		log.Printf("health evaluate %s after restore: %v", tasks.ClusterFindingTask, err)
+	}
+	startVerifier(runCtx, a.cfg, scheduler, verifyObjects, spawn)
 	if workerEnabled {
 		claimed, err := scheduler.ClaimRunnableTasks()
 		if err != nil {
