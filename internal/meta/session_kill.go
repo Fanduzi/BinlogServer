@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a cluster meta DSN, the lease TTL, and cluster.side_kill
-// output: a pool whose every connection and reconnect sets the session-kill timeouts; each lock statement's client deadline is innodb_lock_wait_timeout plus at least 1s, with a longer outer backstop around the whole health write; ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout; a startup readback of the armed session variables on a fresh pool connection (and again on the lease transaction), a mismatch or a failed read is degraded; lock_detail=reduced when the naming queries return 1227 or 1142 (not degraded)
+// output: a pool whose every connection and reconnect sets the session-kill timeouts; each lock statement's client deadline is innodb_lock_wait_timeout plus at least 1s, with a longer outer backstop around the whole health write; ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout; a startup readback of the armed session variables on a fresh pool connection (and again on the lease transaction), a mismatch or a failed read is degraded; lock_detail=reduced when the naming queries, which read one row, return 1227 or 1142 (not degraded)
 // pos: ADR 0011 PR-2 session kill (P2-7, P2-8); standalone pools are not armed
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -447,19 +447,21 @@ func (s *MySQLTaskStore) lockTablesReadable(ctx context.Context) bool {
 	// These are the queries that name a holder. 1227 and 1142 mean the
 	// account cannot use that view. information_schema.innodb_trx succeeding
 	// is not enough: without PROCESS it returns only this session and does
-	// not error on every server. SHOW GRANTS text is not a privilege.
+	// not error on every server. A grant string is not a privilege.
+	// LIMIT 1, not LIMIT 0: MariaDB checks PROCESS while filling
+	// information_schema, and LIMIT 0 never fills the table.
 	for _, q := range []string{
 		`SELECT t.PROCESSLIST_ID
 FROM performance_schema.data_lock_waits w
 JOIN performance_schema.threads req ON req.THREAD_ID = w.REQUESTING_THREAD_ID
 JOIN performance_schema.threads t ON t.THREAD_ID = w.BLOCKING_THREAD_ID
 WHERE req.PROCESSLIST_ID = 0
-LIMIT 0`,
+LIMIT 1`,
 		`SELECT w.blocking_trx_id
 FROM information_schema.innodb_lock_waits w
 JOIN information_schema.innodb_trx r ON r.trx_id = w.requesting_trx_id
 WHERE r.trx_mysql_thread_id = 0
-LIMIT 0`,
+LIMIT 1`,
 	} {
 		if err := s.queryErr(ctx, q); err == nil {
 			return true

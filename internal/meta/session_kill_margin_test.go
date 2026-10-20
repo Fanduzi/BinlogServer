@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock for pool checkout, side_kill probes, naming-view denials, and startup session readback; BINLOG_TEST_MYSQL_ROOT_DSNS for a SET the server rejects
-// output: proof that pool starvation is a lock stall only with lock evidence, a changed second probe does not call the procedure, side_kill stays off while off and while the naming views deny access, startup readback degrades before any lease write, and a rejected session SET refuses startup
+// output: proof that pool starvation is a lock stall only with lock evidence, a changed second probe does not call the procedure, side_kill stays off while off and while the naming views deny access, the privilege probe reads a row so MariaDB applies the PROCESS check, startup readback degrades before any lease write, and a rejected session SET refuses startup
 // pos: ADR 0011 PR-2 deadline margin, pool checkout, and the privilege probe
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -223,6 +223,48 @@ func TestPrivilegeProbeDoesNotMatchGrantText(t *testing.T) {
 		}
 		if strings.Contains(b.String(), "SHOW GRANTS") {
 			t.Fatalf("%s still matches grant text", name)
+		}
+	}
+}
+
+func TestPrivilegeProbeReadsARow(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller")
+	}
+	dir := filepath.Dir(file)
+	checks := []struct{ file, fn string }{
+		{"session_kill.go", "func (s *MySQLTaskStore) lockTablesReadable"},
+		{"side_kill.go", "func (s *MySQLTaskStore) canSeeOtherLocks"},
+		{"side_kill.go", "func (s *MySQLTaskStore) canReadDataLocks"},
+	}
+	for _, c := range checks {
+		raw, err := os.ReadFile(filepath.Join(dir, c.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		for _, line := range strings.Split(string(raw), "\n") {
+			if i := strings.Index(line, "//"); i >= 0 {
+				line = line[:i]
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		text := b.String()
+		i := strings.Index(text, c.fn)
+		if i < 0 {
+			t.Fatalf("%s missing %s", c.file, c.fn)
+		}
+		rest := text[i:]
+		if j := strings.Index(rest[len(c.fn):], "\nfunc "); j >= 0 {
+			rest = rest[:len(c.fn)+j]
+		}
+		if strings.Contains(rest, "LIMIT 0") {
+			t.Fatalf("%s %s uses LIMIT 0, which does not fill information_schema", c.file, c.fn)
+		}
+		if !strings.Contains(rest, "LIMIT 1") {
+			t.Fatalf("%s %s does not read a row", c.file, c.fn)
 		}
 	}
 }
