@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a small test registry and Facts for reconcile
-// output: proof of open, close, confirm and health status, including that ORPHAN_ROW and SEAL_FACTS_ABSENT are in the managed set (design 0009 §26) and HEALTH_STALE is too (design §28)
+// output: proof of open, close, confirm and health status, including that ORPHAN_ROW and SEAL_FACTS_ABSENT are in the managed set (design 0009 §26), HEALTH_STALE is too (design §28), and the phase 3 verifier kinds are in the design scope table under verify
 // pos: unit tests for Reconcile and HealthOf
 // note: if this file changes, update this header and module README.md.
 package health
@@ -403,6 +403,12 @@ var designScopes = map[Kind][]Scope{
 	SealFactsAbsent:          {ScopeStore},
 	HealthStale:              {ScopeTaskState},
 	HealthStoreDegraded:      {ScopeStore},
+	VerifyFailed:             {ScopeVerify},
+	ObjectCorrupt:            {ScopeVerify},
+	UploadClockSkew:          {ScopeVerify},
+	LocalUnreadable:          {ScopeVerify},
+	DrillFailed:              {ScopeVerify},
+	DrillRefused:             {ScopeVerify},
 }
 
 func TestRegistryScopesMatchDesign(t *testing.T) {

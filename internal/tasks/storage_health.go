@@ -106,7 +106,7 @@ func (s *Scheduler) resolveUnmanaged(taskID string, kind FindingKind, subject st
 	if s.healthEval.Load().ownsManaged() {
 		return
 	}
-	s.findings.resolve(taskID, kind, subject)
+	s.findings.resolve(taskID, kind, subject, "")
 }
 
 // markHealthDirty tells the evaluator, when there is one, that the task's

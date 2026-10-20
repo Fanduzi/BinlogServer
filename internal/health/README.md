@@ -9,6 +9,8 @@ P2-5.3（设计 §22）：`GTID_HOLE`（Waivable）与 `CHECKPOINT_AHEAD` 为 Ma
 
 §27（#436）：`HEALTH_STORE_UNAVAILABLE`（信号 S18，CRITICAL，Managed，无 Confirm，task `_cluster`，subject 为本节点）不从 assurance 派生。评估器 `on` 且 000009 不可用时由 `tasks` 从内存列出。
 
+阶段 3 巡检的 kind（`VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`、`LOCAL_UNREADABLE`、`DRILL_FAILED`、`DRILL_REFUSED`）在注册表里，Unmanaged，`Derive` 为空。`Produced` 不含 `verify`：工人经 finding 汇报告，CRITICAL 由 `/api/health` 降级。
+
 `META_LOCK_STALLED` 不是本包的受管 kind。`Reconcile` 遇到不在表里的种类会跳过，所以 `_cluster` 那一轮不会关掉它。
 
 ## Files

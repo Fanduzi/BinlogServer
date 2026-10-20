@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason
 // note: if this file changes, update this header and module README.md.
@@ -198,13 +198,20 @@ func (s *Scheduler) Report(f Finding) {
 // Resolve marks a finding resolved when this process has it open. Resolving a
 // finding this process never saw is a no-op, so success paths stay cheap.
 func (s *Scheduler) Resolve(taskID string, kind FindingKind, subject string) {
+	s.ResolveWithReason(taskID, kind, subject, "")
+}
+
+// ResolveWithReason marks a finding resolved. A non-empty reason replaces
+// the row's detail, so the FINDING_RESOLVED event records why it closed
+// (design 0009 phase 3 §10: "row removed" and the other Closure reasons).
+func (s *Scheduler) ResolveWithReason(taskID string, kind FindingKind, subject, reason string) {
 	if s.healthEval.Load().manages(kind) {
 		if isSignalKind(kind) {
 			s.SignalSuccess(taskID, kind, subject)
 		}
 		return
 	}
-	s.findings.resolve(taskID, kind, subject)
+	s.findings.resolve(taskID, kind, subject, reason)
 }
 
 func (b *findingBook) report(f Finding) {
@@ -237,7 +244,7 @@ func (b *findingBook) report(f Finding) {
 	b.kick()
 }
 
-func (b *findingBook) resolve(taskID string, kind FindingKind, subject string) {
+func (b *findingBook) resolve(taskID string, kind FindingKind, subject, reason string) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
 		taskID = ClusterFindingTask
@@ -252,6 +259,9 @@ func (b *findingBook) resolve(taskID string, kind FindingKind, subject string) {
 	delete(b.open, key)
 	at := b.now()
 	f.ResolvedAt = &at
+	if reason != "" {
+		f.Detail = reason
+	}
 	b.enqueueLocked(findingOp{finding: f, resolve: true})
 	b.mu.Unlock()
 	b.kick()

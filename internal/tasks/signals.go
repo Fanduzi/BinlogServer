@@ -157,7 +157,7 @@ func (s *Scheduler) SignalSuccess(taskID string, kind FindingKind, subject strin
 		return
 	}
 	e.Signal(taskID, kind, subject, true, "")
-	s.findings.resolve(taskID, kind, subject)
+	s.findings.resolve(taskID, kind, subject, "")
 }
 
 // signalFacts fills the P2-4 scopes of facts for task (cluster: the pseudo

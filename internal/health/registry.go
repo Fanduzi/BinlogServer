@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: assurance violation kinds
-// output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive), FromAssurance, LegacyKinds, CanonicalGTIDRanges
+// output: DefaultRegistry (every finding kind with severity, scope, clearing invariant and Derive, including unmanaged verifier kinds VERIFY_FAILED, OBJECT_CORRUPT, UPLOAD_CLOCK_SKEW, LOCAL_UNREADABLE, DRILL_FAILED and DRILL_REFUSED), FromAssurance, LegacyKinds, CanonicalGTIDRanges
 // pos: the closed kind table of ADR 0009 phase 2 §6; since P2-3 SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER are Managed, since P2-4 every signal and task-state kind of the sixteen plus SOURCE_UNREACHABLE and TASK_FAILED, and TASK_UNADOPTED for a standalone leftover directory (#385); since P2-5.1 (§20) SEGMENT_DAMAGED, CHAIN_INDEX_GAP, LEGACY_FAILBACK and SEGMENT_MISSING (chain.local only) are Managed with Confirm, and I2_SWITCH_UNRECORDED, I6_MISSING_ROW, I6_MISSING_OBJECT and I6_OBJECT_SIZE_MISMATCH are not derived; since P2-5.3 (§22) GTID_HOLE (Waivable) and CHECKPOINT_AHEAD are Managed without Confirm; since P2-6d (§24.9) TASK_NO_PROGRESS (CRITICAL, task.state) is Managed; since #427 (§25) META_UNREACHABLE (S17, CRITICAL, signals, task _cluster, subject node id) is Managed; since #436 (§27) HEALTH_STORE_UNAVAILABLE (S18, CRITICAL, signals, task _cluster, subject node id) is Managed without Confirm
 // note P2-6.1 (§28): HEALTH_STALE is Managed (WARNING, task.state, no Confirm) and derived by healthStaleDerive
 // note: if this file changes, update this header and module README.md.
@@ -145,6 +145,13 @@ func sealFactsAbsentDerive(f *Facts) []Instance {
 	return []Instance{{Detail: fmt.Sprintf("binlog_files has no seal-fact columns (schema %d); seal facts stay unset until the columns return", f.Store.SchemaVersion)}}
 }
 
+// verifySpec is an unmanaged verifier kind. Derive stays nil: the worker
+// opens and closes these through the finding sink, not the evaluator.
+func verifySpec(kind Kind, sev Severity, text string) KindSpec {
+	return KindSpec{Kind: kind, Severity: sev, Scopes: []Scope{ScopeVerify}, Version: 1,
+		Clear: ClearRule{Invariant: "verify", Text: text}}
+}
+
 func stateSpec(kind Kind, sev Severity, scope Scope, inv, text string, more ...Scope) KindSpec {
 	return KindSpec{Kind: kind, Severity: sev, Scopes: append([]Scope{scope}, more...), Version: 1, Clear: ClearRule{Invariant: inv, Text: text}}
 }
@@ -279,6 +286,14 @@ func DefaultRegistry() Registry {
 		healthStaleSpec(),
 		stateSpec(HealthStoreDegraded, Warning, ScopeStore, "F", "health writes succeed with migration 000009 present and versions not mixed"),
 	}
+	specs = append(specs,
+		verifySpec(VerifyFailed, Critical, "the segment parses and matches the catalog row, or the row is removed"),
+		verifySpec(ObjectCorrupt, Critical, "the object hashes to the local file or the catalog digest, or the row is removed"),
+		verifySpec(UploadClockSkew, Warning, "sealed_at and uploaded_at are no longer past the clock-skew tolerance, or the row is removed"),
+		verifySpec(LocalUnreadable, Warning, "the local file reads cleanly twice, or is gone, or the row is removed"),
+		verifySpec(DrillFailed, Critical, "a later restore drill passes"),
+		verifySpec(DrillRefused, Warning, "the drill DSN no longer names the task source, or the drill is off"),
+	)
 	gh := chainSpec(GTIDHole, Critical, ScopeChainLocal, "I3", "B ∪ Stored is contiguous at this point, or the exact hole range is waived")
 	gh.Waivable = true
 	specs = append(specs, gh)

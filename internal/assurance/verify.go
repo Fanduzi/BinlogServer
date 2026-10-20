@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
 // input: catalog rows (with sealed_at and uploaded_at), a task directory of sealed segments, an object store that can HEAD and GET, an optional Chain, the findings open before this pass, each segment's last_verified_at and last ReadMark, a byte budget and the recent tier's share of it (1–100)
-// output: a Report whose Coverage records, per segment, what this pass did to the local copy and to the object (parsed, hashed, HEAD only, skipped, error) and why; the findings it wants open; the open findings it closes and why; the segments whose last_verified_at may advance (content-verified and named by no finding other than UPLOAD_CLOCK_SKEW); a ReadMark per segment read in full (fed back so a forced segment is read once per period); paid bytes; counts of objects with no digest or no comparable size
+// output: a Report whose Coverage records, per segment, what this pass did to the local copy and to the object (parsed, hashed, HEAD only, skipped, error) and why; the findings it wants open; the open findings it closes and why; the segments whose last_verified_at may advance (content-verified and named by no finding other than UPLOAD_CLOCK_SKEW); a ReadMark per segment read in full (fed back so a forced segment is read once per period); paid bytes; counts of objects with no digest or no comparable size; a listed name whose stat returns not-exist is absent (LOCAL_MISSING when not uploaded); a task-level LOCAL_UNREADABLE keeps a per-file CRITICAL, and a split back into per-file findings copies that severity and detail and closes the task-level one as a split
 // pos: ADR 0009 phase 3 pure verifier (docs/design/0009-phase3-verifier.md); the caller must already be the task owner — this file does not ask
 // note: if this file changes, update this header and module README.md.
 package assurance
@@ -101,9 +101,13 @@ const (
 	// ReasonUnreadableTask closes a per-file LOCAL_UNREADABLE that the
 	// task-level one (empty Subject) now covers.
 	ReasonUnreadableTask = "covered by the task-level LOCAL_UNREADABLE"
-	// ReasonLocalStat closes the task-level LOCAL_UNREADABLE: a local file
-	// stats again.
-	ReasonLocalStat      = "local files stat again"
+	// ReasonLocalStat closes the task-level LOCAL_UNREADABLE when the local
+	// files stat again and none of them is still ERROR: a full recovery.
+	ReasonLocalStat = "local files stat again"
+	// ReasonSplit closes the task-level LOCAL_UNREADABLE when per-file
+	// findings take over. It is not a recovery, so the task-level finding
+	// is not re-reported as recovering.
+	ReasonSplit          = "split into per-file findings"
 	reasonTail           = "not verified since its last change, past the recent share or window; paid from what the pass had left"
 	reasonHeldForced     = "forced recheck already done this period and nothing changed since"
 	reasonNotScheduled   = "not scheduled for a content check this pass"
@@ -625,14 +629,17 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 		case !listed:
 			s.cov.Local = Check{Method: MethodSkipped, Reason: "task directory not listed: " + listErr.Error()}
 		case !present[row.Name]:
-			s.cov.Local = absentLocal(row)
-			if s.cov.Local.Method == MethodMissing {
-				rep.Findings = append(rep.Findings, Finding{Kind: KindLocalMissing, Subject: row.Name, Severity: SeverityCritical,
-					Detail: "sealed segment is not UPLOADED and has no local file", Evidence: "upload_state=" + strings.TrimSpace(row.UploadState)})
-			}
+			p.markAbsent(s)
 		default:
+			info, statErr := statPath(s.path)
+			// A directory entry whose stat returns not-exist (a dangling
+			// symlink) is absent, not a failed stat. Counting it would make
+			// one missing name look like every file is unreadable.
+			if errors.Is(statErr, os.ErrNotExist) {
+				p.markAbsent(s)
+				break
+			}
 			stats++
-			info, statErr := os.Stat(s.path)
 			if statErr != nil {
 				s.cov.Local = Check{Method: MethodError, Reason: statErr.Error()}
 				localClean = false
@@ -1045,6 +1052,23 @@ func (p *pass) unreadable(row VerifyRow, err error) {
 		return
 	}
 	p.rep.Findings = append(p.rep.Findings, p.unreadableFinding(row.Name, !uploaded(row), err.Error()))
+	p.carryTaskUnreadable()
+}
+
+// carryTaskUnreadable copies an open task-level LOCAL_UNREADABLE's severity
+// and detail onto a new per-file finding, so a split does not restart at
+// WARNING. An open per-file finding for the same subject already decided
+// the severity.
+func (p *pass) carryTaskUnreadable() {
+	f := &p.rep.Findings[len(p.rep.Findings)-1]
+	if _, ok := p.prevUnreadable(f.Subject); ok {
+		return
+	}
+	task, ok := p.prevUnreadable("")
+	if !ok {
+		return
+	}
+	f.Severity, f.Detail = task.Severity, task.Detail
 }
 
 // unreadableFinding is WARNING, or CRITICAL when soleCopy and the previous
@@ -1053,10 +1077,39 @@ func (p *pass) unreadable(row VerifyRow, err error) {
 // until it closes.
 func (p *pass) unreadableFinding(subject string, soleCopy bool, evidence string) Finding {
 	sev := SeverityWarning
-	if prev, ok := p.prevUnreadable(subject); ok && soleCopy && (prev.Severity == SeverityCritical || prev.Detail != DetailUnreadableRecovering) {
+	if prev, ok := p.prevUnreadable(subject); ok && soleCopy && unreadableEscalates(prev) {
 		sev = SeverityCritical
 	}
 	return Finding{Kind: KindLocalUnreadable, Subject: subject, Severity: sev, Detail: DetailUnreadable, Evidence: evidence}
+}
+
+// unreadableEscalates is the second-failure rule, shared by a per-file
+// finding and a collapse onto the task: CRITICAL already, or not the
+// recovering detail.
+func unreadableEscalates(prev Finding) bool {
+	return (prev.Severity == SeverityCritical || prev.Detail != DetailUnreadableRecovering)
+}
+
+// collapsedUnreadable is the task-level LOCAL_UNREADABLE. A sole copy that
+// already has an open per-file finding at CRITICAL, or still failing
+// (detail is not the recovering one), starts at CRITICAL: collapsing must
+// not drop it to WARNING for one pass. A recovering WARNING stays WARNING.
+// An uploaded task stays WARNING.
+func (p *pass) collapsedUnreadable(sole bool, evidence string) Finding {
+	f := p.unreadableFinding("", sole, evidence)
+	if !sole {
+		return f
+	}
+	for _, prev := range p.opt.OpenFindings {
+		if prev.Kind != KindLocalUnreadable || prev.Subject == "" {
+			continue
+		}
+		if unreadableEscalates(prev) {
+			f.Severity = SeverityCritical
+			return f
+		}
+	}
+	return f
 }
 
 type statFail struct {
@@ -1081,7 +1134,7 @@ func (p *pass) statFails(fails []statFail, stats int) {
 			sole = sole || !uploaded(f.row)
 		}
 		if same {
-			p.rep.Findings = append(p.rep.Findings, p.unreadableFinding("", sole,
+			p.rep.Findings = append(p.rep.Findings, p.collapsedUnreadable(sole,
 				fmt.Sprintf("stat failed for all %d local files: %s; first: %v", len(real), cause(real[0].err), real[0].err)))
 			return
 		}
@@ -1344,8 +1397,19 @@ func closes(f Finding, rep Report) string {
 		}
 	case KindLocalUnreadable:
 		if f.Subject == "" {
+			for _, g := range rep.Findings {
+				if g.Kind == KindLocalUnreadable && g.Subject != "" {
+					return ReasonSplit
+				}
+			}
+			clean := true
 			for _, c := range rep.Coverage {
-				if c.Local.Found {
+				if c.Local.Method == MethodError {
+					clean = false
+				}
+			}
+			for _, c := range rep.Coverage {
+				if c.Local.Found && clean {
 					return ReasonLocalStat
 				}
 			}
@@ -1446,6 +1510,21 @@ func (p *pass) forcedBy(s *seg) bool {
 	return false
 }
 
+// markAbsent records a name that is not on disk. A not-uploaded row is
+// LOCAL_MISSING. Both the listing and a dangling symlink use this, so the
+// finding is raised in one place.
+func (p *pass) markAbsent(s *seg) {
+	s.cov.Local = absentLocal(s.row)
+	if s.cov.Local.Method == MethodMissing {
+		p.rep.Findings = append(p.rep.Findings, missingLocal(s.row))
+	}
+}
+
+func missingLocal(row VerifyRow) Finding {
+	return Finding{Kind: KindLocalMissing, Subject: row.Name, Severity: SeverityCritical,
+		Detail: "sealed segment is not UPLOADED and has no local file", Evidence: "upload_state=" + strings.TrimSpace(row.UploadState)}
+}
+
 func absentLocal(row VerifyRow) Check {
 	switch {
 	case uploaded(row):
@@ -1463,6 +1542,9 @@ func uploaded(row VerifyRow) bool {
 
 // openLocal opens a local segment file; tests replace it to inject read errors.
 var openLocal = func(path string) (io.ReadCloser, error) { return os.Open(path) }
+
+// statPath stats a listed local name; tests replace it to inject stat errors.
+var statPath = os.Stat
 
 type localResult struct {
 	check   Check

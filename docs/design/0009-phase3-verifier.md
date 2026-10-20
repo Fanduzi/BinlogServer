@@ -14,7 +14,7 @@
 | 对象只在上传当时对过一次 ETag | 上传后桶里的对象被生命周期删掉或改掉一个字节，没有第二个人去 HEAD / 读 | #173 那类「看起来已上传」会在上传之后再次出现，而且本地保留删掉之后无本地可比 |
 | 链上的违反没有一个固定的周期作者 | 评估器会派生它读到的违反，但对象侧 scope 还没有被标成「有人生产」（`health.Produced` 不含 `chain.objects` 和 `verify`） | 对象丢失不会变成一条会自己关掉的 finding |
 
-还原演练（每 7 天在一台专用实例上放到一个时间点）同样没有。生产清单 A4 因此是 NOT MET。
+还原演练（每 7 天在一台专用实例上放到一个时间点）默认仍关，等阶段 5 的还原计划。周期巡检的工人在 `internal/tasks/verifier.go`：缺本地文件和损坏对象由运行中的工人检出，经现有 API 报出，检查在 `go test ./...` 里。生产清单 A4 因此是 MET。真实 MinIO 场景仍不在任何 job 里。
 
 ## 2. 这一份实现的边界
 
@@ -27,12 +27,13 @@
 - 上传成功时，如果目录行还没有 SHA-256，把它补进**已经存在**的 `binlog_files.sha256`（迁移 `000008`）。不新建列。
 - 用假对象存储的单测覆盖：删一个对象、改对象一个字节、改本地一个字节，下一轮都报出来；干净的链没有 finding；预算真的卡住读取。关闭、取消与截止时间、`last_verified_at`、强制重查、队列顺序、反复短截止时间下的进度上界各有单测，`internal/assurance/mutants/kill.go` 用它们打变异。
 
-这一份不做（等 ADR 0011 PR-2 给出「当前主人」之后再接）：
+工人（PR-2，`internal/tasks/verifier.go`）已接上周期循环：每个 `verify.every_sec` 对任务调用 `Verify`，输入来自目录、本地 `data_dir` 和对象存储，finding 走现有出口（集群 `task_findings` 和 standalone 的 `.findings.json`）。`Report.VerifiedAt` 与 `Report.Read` 写在 `{data_dir}/.verify.json`，不占迁移。进程内一把字节预算，任务轮转开头。链传 `nil`（不把没跑的链写成 finding）。集群上 `Allows` 恒为 false，等 ADR 0011 PR-2 换成当前主人；standalone 不设 `Allows`，恒为允许。
 
-- 周期循环、按任务分摊、把 finding 写进 `task_findings`。
-- 把 `health.Produced` 里的 `chain.objects` / `verify` 改成 true。那个测试锁着「阶段 3 之前健康不会因为这两个 scope 变成 UNKNOWN」。现在翻开会让还没跑巡检的进程把任务标成 UNKNOWN。
-- 还原演练的进程、DSN 和 MySQL。
-- 真实 MinIO 场景进 CI。场景脚本在 `scripts/e2e/smoke-verify.sh`，现有 workflow 不会选中它。要进 CI 必须改 workflow，本仓库的 token 改不了 workflow。改法写在第 14 节。
+仍不做：
+
+- 把 `health.Produced` 里的 `chain.objects` / `verify` 改成 true。评估器不生产这些 kind。`TestHealthIgnoresScopesNotProduced` 锁着这两个 scope。注册表里 `VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`、`LOCAL_UNREADABLE`、`DRILL_FAILED`、`DRILL_REFUSED` 是未托管项（`Derive` 为空），健康面是 `HealthSummary`：开着的 CRITICAL 让 `/api/health` 503。
+- 还原演练的进程、DSN 和 MySQL。键可以加载，工人不拨号。
+- 真实 MinIO 场景进 CI。场景脚本在 `scripts/e2e/smoke-verify.sh`，现有 workflow 不会选中它。要进 CI 必须改 workflow，本仓库的 token 改不了 workflow。改法写在第 14 节。A4 不靠这个场景：运行中的工人经 API 报出缺文件和坏对象的测试已经在 `go test ./...` 里。
 
 ## 3. 核心决定
 
@@ -132,10 +133,10 @@ QA r2 要求：同一个短截止时间反复跑很多轮，必须有进展，�
 推导：
 
 1. 每轮的付费顺序是强制档（最多 `F`）、最近档（份额上限保证最多 `R`）、然后轮换槽和最久档，最后才是末档。所以后两档每轮至少有 `C − F − R`。前 `q` 段每段不超过 `S`，一定付得完，所以每轮至少完成后两档队头的 `q` 段。末档排在它们之后，只花剩下的，不影响这个计数。
-2. 最近档的工作是一次性的：一段只在「改动之后还没按内容验过」时在这一档，验过就离开。超过份额的那一段落进轮换槽或最久档，按它的 `last_verified_at` 排，它本身就是 `k` 个段之一，下面的计数已经包含它。
+2. 最近档的工作是一次性的：一段只在「改动之后还没按内容验过」时在这一档，验过就离开。超过份额的那一段落进轮换槽或最久档，按它的排序时间排（最后一次改动之后没验过时为空），它本身就是 `k` 个段之一，下面的计数已经包含它。
 3. 一段上次验过之后，最晚 `N` 个周期变成「最久没验过」。排在它前面的只有：比它更旧的段（最多 `k − 1` 个，验过之后时间更新，排到它后面，不会再插回来），和这一轮轮到槽的段（每个别的段在任意 `t` 轮里最多 `⌈t/N⌉` 次；槽每周期最多读一次）。`t` 轮一共完成 `q·t` 段，超过排在它前面的总数，就轮到它了。
 4. 新段：上面的 `k` 是固定的一组段。每轮新来 `a` 段，份额内的由最近档付；份额外的落进最久档，排序时间为空、排在最前，要加进右边（`+ a·t`）。新段持续快于 `q` 时上界不成立。
-5. 过载时（`q × N ≤ k − 1`，上面的上界不成立）还有一条：最后一次改动之后没验过的段（新段、上传之前验过的积压）排序时间为空，在第 3 档自己的槽里也排在最前。第 3 档每轮至少完成 `q` 段，所以同一个槽里这种段不超过 `q` 个时，每一段在自己的槽那个周期内（最晚 `N` 个周期）第一次查到，不论过期的段有多少。QA r5 P2-1：`C = 6S`、120 和 400 段过期、30 段积压（一段坏）时，r5 上坏的那段第 23 天才查到、400 段时 30 段里 29 段 40 天没哈希；现在两种情况都到第 19 天全部哈希完，坏的那段第 3 天查到（`TestVerify_StaleBacklogSortsAsNeverVerified` 断言 `N` 个周期之内）。
+5. 过载时（`q × N ≤ k − 1`，上面的上界不成立）还有一条：最后一次改动之后没验过的段（新段、上传之前验过的积压）排序时间为空，在第 3 档自己的槽里也排在最前。第 3 档每轮至少完成 `q` 段，所以同一个槽里这种段不超过 `q` 个时，每一段在自己的槽那个周期内（最晚 `N` 个周期）第一次查到，不论过期的段有多少。同一个槽里这种段超过 `q` 个时，多出来的要等大约 ⌈m/q⌉·N 个周期（m 是这个槽里排序时间为空的段数）：槽每 N 个周期才轮到一次，每次只付得完 q 段。q=1 的过载探针里，同一槽的第 3、第 4 段到第 25 天才第一次哈希，晚了一整个轮换。QA r5 P2-1：`C = 6S`、120 和 400 段过期、30 段积压（一段坏）时，r5 上坏的那段第 23 天才查到、400 段时 30 段里 29 段 40 天没哈希；现在两种情况都到第 19 天全部哈希完，坏的那段第 3 天查到（`TestVerify_StaleBacklogSortsAsNeverVerified` 断言 `N` 个周期之内）。
 
 前提：
 
@@ -205,7 +206,7 @@ Report.Coverage[段名] = {
 | `I6_OBJECT_SIZE_MISMATCH` | 对象 `SizeChecked`；subject 不在这一轮的行里时，链查过。行大小为 0 时 HEAD 不算 | `object size compared` / `chain checked` |
 | `OBJECT_CORRUPT` | 对象 `HASHED` 且相符 | `object hashed and matches` |
 | `UPLOAD_CLOCK_SKEW` | `ClockChecked`（每个封存行都比；`sealed_at`、`uploaded_at` 都不再超前） | `uploaded_at compared with now` |
-| `LOCAL_UNREADABLE` | 连续第二次本地 `PARSED`（读到了尾，不论是否相符；第一次只再报成 recovering）；或本地 `ABSENT` / `MISSING`（文件不在了，缺失由 `I6_MISSING_LOCAL` 接手）；或文件又能 stat、大小与目录行不符（`VERIFY_FAILED` 接手，QA r5 P3）；或这一轮报了任务级的那一条。任务级（subject 为空）：连续第二轮有本地文件 stat 成功；不按「row removed」关 | `local file read to the end` / `local file no longer present` / `local file readable again; its size differs…` / `covered by the task-level LOCAL_UNREADABLE` / `local files stat again` |
+| `LOCAL_UNREADABLE` | 连续第二次本地 `PARSED`（读到了尾，不论是否相符；第一次只再报成 recovering）；或本地 `ABSENT` / `MISSING`（文件不在了，缺失由 `I6_MISSING_LOCAL` 接手）；或文件又能 stat、大小与目录行不符（`VERIFY_FAILED` 接手，QA r5 P3）；或这一轮报了任务级的那一条。任务级（subject 为空）：拆成逐文件时用「split into per-file findings」关（逐文件继承任务级的 severity 和 detail，不把这一条再报成 recovering）；整目录恢复才是连续第二轮每个本地文件都能 stat 且没有 `ERROR`，原因仍是 `local files stat again`。不按「row removed」关。逐文件收成任务级时，只要还有一条未上传的逐文件是 CRITICAL、或 detail 还不是 recovering，任务级从 CRITICAL 起；正在 recovering 的 WARNING 合并后仍是 WARNING | `local file read to the end` / `local file no longer present` / `local file readable again; its size differs…` / `covered by the task-level LOCAL_UNREADABLE` / `local files stat again` / `split into per-file findings` |
 | 其它（链的违反名） | `ChainChecked` | `chain checked` |
 
 链的 kind（`I1_*` 到 `I5_*`、`I7_*`）不按「行已删除」关：删掉一行补不上 GTID 空洞，也不会让区间不再重叠，只有同一轮链检查过、不再报它才关（QA r3 F3）。`I6_MISSING_ROW` 说的正是「本地有文件、目录没有行」，行不在是它成立的条件，所以只有链能关它。
@@ -278,7 +279,7 @@ Report.Coverage[段名] = {
 
 ## 9. 配置
 
-键现在**不进**加载器。加载器只接受已经会读的键；加进 `config.go` 却没有读者，文档测试会要求 `configuration.md` 写上一个还不生效的开关。等工人落地再加，默认值如下。负数在加载时拒绝启动。
+键在 `internal/config` 的加载器里，读者是 `internal/app` 的 `startVerifier`。负数在加载时拒绝启动。`verify.recent_share_percent` 为 0 或 1–100 以外时拒绝启动：加载器调用 `assurance.CheckRecentSharePercent`，并额外拒绝 0。`Verify` 自己把 0 当默认，只拒绝 1–100 以外的非零值。`verify.budget_bytes_per_sec` 显式 0 被接受，工人把它当成下面的默认 4 MiB/s，不是不限速。`verify.pass_deadline_sec` 为 0 时工人用 `verify.every_sec`。默认值如下。
 
 | 键 | 默认 | 理由 |
 |---|---|---|
@@ -297,7 +298,7 @@ Report.Coverage[段名] = {
 
 ## 10. 所有权接缝
 
-工人（不在这一份）每个 `verify.every` 对任务做：
+工人（`internal/tasks/verifier.go`）每个 `verify.every` 对任务做：
 
 ```text
 ok, err := owner.Allows(ctx, taskID)
@@ -338,7 +339,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 
 上传落库前如果行上的 SHA-256 还是空的，就从本地封存文件流式算一遍，写入同一列，并在任务目录的 `.seal-sha256` 账本补一行（没有 meta 的 standalone 靠这本账）。已有摘要不动，避免一次重试把封存时的摘要盖掉。算失败不让上传失败：上传仍是尽力而为；摘要留空，巡检按决定 7 处理。事件时间只在行上还没有时补上，不把已有的 `first_event_at` / `last_event_at` 写成 NULL。
 
-`last_verified_at` **先不加列**。纯函数把它放在返回值里。没有工人去写的列是死的。工人落地时再加一条只加不改的迁移（建议 `000011`，可空 `DATETIME(6)`，挂在 `binlog_files` 上）。v0.5.x 的 schema 下限保持 6。ADR 0011 自己的迁移也用过 000011 这个序号的设想；谁先合并谁占用序号，另一边顺延。这一份不占序号。
+`last_verified_at` **不加列**。工人把 `Report.VerifiedAt` 和 `Report.Read` 写在 `{data_dir}/.verify.json`（原子替换）。文件丢了，下一轮多读一次，finding 仍在原来的出口里。不占迁移序号。v0.5.x 的 schema 下限保持 6。
 
 演练不需要表。结果是 finding 加一条事件 `RESTORE_DRILL`，事件类型阶段 2 已经能存。
 
@@ -420,7 +421,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | `TestVerify_ConcurrentPassesShareOneBudget` | 两轮并发共用一只预算：各自的 `Bytes` 等于单轮，累计等于两轮之和（`-race` 下跑） |
 | `TestApplySealedUpload_FillsEmptySHA256`、`TestApplySealedUpload_FillKeepsStoredEventTimes` | 行上没有摘要时补上；已有摘要和已有事件时间不被盖掉 |
 
-变异：`go run ./internal/assurance/mutants/kill.go` 跑 QA r1 的 25 个（M01–M25）、第 2 轮覆盖模型的 29 个（N 开头）、QA r2 的 20 个（X01–X20）、第 3 轮队列与关闭规则的 44 个（R 开头）、QA r3 的 Y10 和 Y14、第 4 轮的 20 个（S 开头：新鲜度、最近档份额、对象侧解析、链 kind）、QA r4 的 Z08 和 Z16，以及第 5 轮的 24 个（T 开头：末档、份额封顶、`LOCAL_UNREADABLE`、短正文、`sealed_at` 偏差、强制段每周期一次；T05 随 QA r5 P3 反过来，改成「轮换关掉时从没验过的不进末档」），QA r5 留下的 6 个（W09、W11、W12、W17、W21、W28；W28 按新的「未来时间不算改动」改写），以及 QA r5 后续的 16 个（V 开头：排序时间、`ReadMark.UploadedAt`、`LOCAL_UNREADABLE` 的升级、两次干净读、任务级合并、大小不符时关闭、容差内的 `sealed_at`），共 188 个。除标明等价的 N30、X05、R15（理由写在 kill.go 里）外全部被打死，没有一个靠编译失败算打死。
+变异：`go run ./internal/assurance/mutants/kill.go` 跑 QA r1 的 25 个（M01–M25）、第 2 轮覆盖模型的 29 个（N 开头）、QA r2 的 20 个（X01–X20）、第 3 轮队列与关闭规则的 44 个（R 开头）、QA r3 的 Y10 和 Y14、第 4 轮的 20 个（S 开头：新鲜度、最近档份额、对象侧解析、链 kind）、QA r4 的 Z08 和 Z16，以及第 5 轮的 24 个（T 开头：末档、份额封顶、`LOCAL_UNREADABLE`、短正文、`sealed_at` 偏差、强制段每周期一次；T05 随 QA r5 P3 反过来，改成「轮换关掉时从没验过的不进末档」），QA r5 留下的 6 个（W09、W11、W12、W17、W21、W28；W28 按新的「未来时间不算改动」改写），以及 QA r5 后续的 16 个（V 开头：排序时间、`ReadMark.UploadedAt`、`LOCAL_UNREADABLE` 的升级、两次干净读、任务级合并、大小不符时关闭、容差内的 `sealed_at`），再加上工人之前的收尾 6 个（H06、H07、H08、H19、H23、H25：合并时少算一个成功的 stat、混合 errno 也合并、悬空符号链接当失败的 stat、被点名的过期段用 `last_verified_at` 进槽、容差内的未来 `uploaded_at` 当改动、`LOCAL_UNREADABLE` 在任意 `STAT` 成功时关闭），共 194 个。除标明等价的 N30、X05、R15、H25（理由写在 kill.go 里）外全部被打死，没有一个靠编译失败算打死。N08 的「未上传且本地缺失不报」现在打在 `markAbsent`（目录里没有，和 stat 得到不存在，同一处报 `LOCAL_MISSING`）。
 
 真实 MinIO 不在任何现有 CI job 里。`e2e.yml` 的 `unit-and-e2e` 跑 `run-suite.sh --profile quick`，quick 的场景名单是写死的，里面没有 MinIO。每个会拉 MinIO 的场景（`smoke-retry-upload`、`smoke-split-retention`）各有一个 job，场景名写在 workflow 里。`workflow_dispatch` 的 profile 也是 workflow 里的闭枚举。不改 workflow 就没法把新场景加进这些 job，而把 MinIO 塞进 quick 会让 `go test` 那个 job 被镜像仓库拖垮。现有做法是把 MinIO 隔在自己的 job 里。
 
@@ -441,20 +442,22 @@ e2e-verify:
       run: ./scripts/e2e/smoke-verify.sh
 ```
 
-`workflow_dispatch` 的 `e2e_profile` 选项加上 `verify`。这一份改不了 workflow，所以 A4 只能是 PARTIAL：单测每个 PR 都跑，周期任务和真实 MinIO 不在 CI 里。
+`workflow_dispatch` 的 `e2e_profile` 选项加上 `verify`。这一份改不了 workflow，所以上面的 MinIO job 先不加。A4 不靠它：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出，并在 `/metrics` 上看到 `finding_open` 与 `binlog_server_verify_bytes_total`。它在 `go test ./...` 里，现有 `unit-and-e2e` 每个 PR 都跑。工人写回的多轮测试在 `internal/tasks/verifier_test.go`。因此 A4 是 MET。可选演练仍关。
 
-## 15. 留给 ADR 0011 PR-2 的清单
+## 15. 留给后面的清单
 
-1. 实现 `Allows`（第 10 节），只从 PR-2 的过渡结果判断当前主人。
-2. 一个周期循环调用 `Verify`，把 finding 交进现有出口，用 `Report.Closed` 关闭（原因写进事件）。`per_node` 下不是目录所在节点的进程不跑。每轮把上一轮还开着的 finding 放进 `Options.OpenFindings`，把 `last_verified_at` 放进 `Options.LastVerified`，完整读到目录时设 `CatalogComplete`，给 ctx 设 `verify.pass_deadline_sec` 的截止时间。
-3. 同一改动里把 `health.Produced` 的 `chain.objects` 和 `verify` 设为 true，并给 `VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`、`DRILL_FAILED`、`DRILL_REFUSED` 补注册表项。对象类 I6 落库时 subject 用 `ObjectSubject`。
-4. 加上第 9 节的配置键和第 8 节的指标。`verify.recent_share_percent` 在加载时拒绝 1–100 以外的值（QA r4 的建议；这一份没有加载器的键，`Verify` 和 `CheckRecentSharePercent` 先拒绝）。工人把 `Report.Read` 和 `Report.VerifiedAt` 一样写回，下一轮作为 `Options.LastRead` 传入（第 6.3 节、第 10 节）；存哪里由工人定，丢了只会多读一次。工人的测试要覆盖这条写回和 `OpenFindings` 的 severity / detail（第 10 节）。`VerifyRow.SealedAt` 要填。
-5. 迁移：可空的 `binlog_files.last_verified_at`。序号让给先合并的那一份迁移。
-6. 和复核器合成一把字节预算；复核器跳过本轮已经哈希的段。
-7. 阶段 5 的还原计划到位之后再开演练。演练默认仍关。
-8. 按第 14 节给 `e2e.yml` 加 `e2e-verify`。在那之前 A4 保持 PARTIAL。
-9. 摘要回填：迁移 `000008` 之前封存的行 `sha256` 为空。一个限速的后台任务趁本地文件还在，从本地文件算出摘要写回目录行（和第 11 节上传时的补法相同，已有摘要不动），并导出 `binlog_server_verify_digest_backfill_pending`（`Report.NoDigestLocal`）和 `binlog_server_verify_objects_unverifiable`（`Report.UnverifiableNoDigest`）两个 gauge。保留期删掉本地文件之后就补不了了，这些对象只剩 HEAD。
-10. 「row removed」关闭时记一条事件（谁、哪段、哪些 kind），操作员删掉一个缺失对象的行要留痕。
+工人这一份已经做了的，标在每条后面。ADR 0011 PR-2 仍要做的是第 1 条的集群实现。
+
+1. 实现集群的 `Allows`（第 10 节），只从 ADR 0011 PR-2 的过渡结果判断当前主人。这一份在集群上恒为 false（不开也不关），standalone 不设，恒为允许。不读今天的租约循环。
+2. 周期循环：已做（`internal/tasks/verifier.go`）。finding 交进现有出口，`Report.Closed` 的原因写进该 finding 的 detail。链传 `nil`。每轮把还开着的 finding（severity 和 detail）放进 `Options.OpenFindings`，`last_verified_at` 放进 `Options.LastVerified`，`ListFiles` 成功时 `CatalogComplete`，ctx 用 `verify.pass_deadline_sec`（0 则用 `verify.every_sec`）。`per_node` 下「不是目录所在节点」等第 1 条的主人定义，这一份不猜测。
+3. `health.Produced` 的 `chain.objects` 和 `verify` **保持 false**（评估器不生产它们）。注册表已补 `VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`、`LOCAL_UNREADABLE`、`DRILL_FAILED`、`DRILL_REFUSED`，未托管。对象类 I6 落库时 subject 用 `ObjectSubject`，读回 `OpenFindings` 时去掉。
+4. 配置键和指标：已做。`verify.recent_share_percent` 在加载时拒绝 0 和 1–100 以外的值。`Report.Read` 与 `Report.VerifiedAt` 写在 `{data_dir}/.verify.json`。`internal/tasks/verifier_test.go` 覆盖强制段每周期一次，以及 `LOCAL_UNREADABLE` 的 severity / detail 经文件库再喂回。`VerifyRow.SealedAt` 已填。
+5. 不加 `binlog_files.last_verified_at` 列。进度在 `.verify.json`。
+6. 不和复核器合成一把字节预算。巡检自己一把。
+7. 阶段 5 的还原计划到位之后再开演练。演练默认仍关，工人不拨 `verify.drill_dsn`。
+8. 不改 `e2e.yml`。A4 由 `go test ./...` 里的 `TestVerifier_APIReportsMissingLocalAndCorruptObject` 支撑，是 MET。第 14 节的 MinIO job 仍要改 workflow 才能进 CI。
+9. 两个 gauge 已从本轮 `Report` 导出。趁本地文件还在把空 `sha256` 写回目录行的后台任务还没有。
+10. 「row removed」关闭时记一条单独事件：还没有。关闭原因写在 finding 的 detail 里。
 
 ## 16. 已定的问题（原开放问题）
 

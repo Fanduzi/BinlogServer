@@ -110,7 +110,7 @@ var mutants = []mutant{
 	{id: "N07", desc: "no digest: body downloaded anyway", file: verify,
 		old: "\tif digest == \"\" {\n\t\tif s.cov.Local.Method == MethodSkipped {", new: "\tif digest == \"\" && false {\n\t\tif s.cov.Local.Method == MethodSkipped {"},
 	{id: "N08", desc: "sealed, not uploaded, local missing raises nothing", file: verify,
-		old: "\t\t\tif s.cov.Local.Method == MethodMissing {", new: "\t\t\tif false {"},
+		old: "\tif s.cov.Local.Method == MethodMissing {", new: "\tif false {"},
 	{id: "N09", desc: "retention-removed, not uploaded counted as missing", file: verify,
 		old: "\tcase row.RetentionRemoved:\n", new: "\tcase false:\n"},
 	{id: "N10", desc: "clock skew raises no finding", file: verify,
@@ -417,7 +417,7 @@ var mutants = []mutant{
 	{id: "V06", desc: "CRITICAL LOCAL_UNREADABLE drops back to WARNING after a clean read", file: verify,
 		old: "(prev.Severity == SeverityCritical || prev.Detail != DetailUnreadableRecovering)", new: "(prev.Detail != DetailUnreadableRecovering)"},
 	{id: "V07", desc: "uploaded rows escalate LOCAL_UNREADABLE too", file: verify,
-		old: "ok && soleCopy && (prev", new: "ok && (prev"},
+		old: "ok && soleCopy && unreadableEscalates(prev)", new: "ok && unreadableEscalates(prev)"},
 	{id: "V08", desc: "LOCAL_UNREADABLE CRITICAL on the first failure", file: verify,
 		old: "if prev, ok := p.prevUnreadable(subject); ok && soleCopy", new: "if prev, ok := p.prevUnreadable(subject); !ok && soleCopy || ok && soleCopy"},
 	{id: "V09", desc: "a single failing stat collapses to the task", file: verify,
@@ -436,6 +436,20 @@ var mutants = []mutant{
 		old: "\t\t\t\t\treturn ReasonLocalStat\n", new: "\t\t\t\t\treturn \"\"\n"},
 	{id: "V16", desc: "a sealed_at within the tolerance counts as a change before it passes", file: verify,
 		old: "\tif !row.SealedAt.After(p.now) {\n\t\tchanged", new: "\tif !ClockSkewed(row.SealedAt, p.now) {\n\t\tchanged"},
+	// QA r5 P3 carry-over (collapse, dangling symlink, future uploaded_at, slot order).
+	{id: "H06", desc: "collapse when one stat still succeeds", file: verify,
+		old: "\tif len(real) > 1 && len(real) == stats {", new: "\tif len(real) > 1 && len(real) >= stats-1 {"},
+	{id: "H07", desc: "collapse mixed stat errors", file: verify,
+		old: "same = same && cause(f.err) == cause(real[0].err)", new: "same = same"},
+	{id: "H08", desc: "a listed name that stat cannot see is a failed stat", file: verify,
+		old: "if errors.Is(statErr, os.ErrNotExist)", new: "if false && errors.Is(statErr, os.ErrNotExist)"},
+	{id: "H19", desc: "a named stale row's slot uses last_verified_at", file: verify,
+		old: "s.order.Before(slotStart(p.now, p.opt.Period))", new: "s.last.Before(slotStart(p.now, p.opt.Period))"},
+	{id: "H23", desc: "a future uploaded_at within tolerance counts as a change", file: verify,
+		old: "\tif !row.UploadedAt.After(p.now) && row.UploadedAt.After(changed) {", new: "\tif !ClockSkewed(row.UploadedAt, p.now) && row.UploadedAt.After(changed) {"},
+	{id: "H25", desc: "LOCAL_UNREADABLE closes on any found STAT", file: verify,
+		old: "cov.Local.Method == MethodStat && cov.Local.Found && reported(rep, KindVerifyFailed, f.Subject)", new: "cov.Local.Method == MethodStat && cov.Local.Found",
+		equiv: "an open LOCAL_UNREADABLE whose local file is still there is forced, so the local is parsed or skipped, not left at STAT. STAT with Found is the size-mismatch path, which also reports VERIFY_FAILED. Closing on any found STAT and closing only when that VERIFY_FAILED is reported are the same rows"},
 }
 
 func main() {
