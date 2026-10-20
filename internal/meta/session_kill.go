@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a cluster meta DSN, the lease TTL, and cluster.side_kill
-// output: a pool whose every connection and reconnect sets the session-kill timeouts; each lock statement's client deadline is innodb_lock_wait_timeout plus at least 1s, with a longer outer backstop around the whole health write; ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout; a startup readback of the armed session variables on a fresh pool connection (and again on the lease transaction), a mismatch or a failed read is degraded; lock_detail=reduced when the naming queries, which read one row, return 1227 or 1142 (not degraded)
+// output: a pool whose every connection and reconnect sets the session-kill timeouts; each lock statement's client deadline is innodb_lock_wait_timeout plus 2s, with a longer outer backstop around the whole health write; a statement deadline that fires after that lock timeout is a lock wait classified by elapsed time; ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout; a startup readback of the armed session variables on a fresh pool connection (and again on the lease transaction), a mismatch or a failed read is degraded; lock_detail=reduced when the naming queries, which read one row, return 1227 or 1142 (not degraded)
 // pos: ADR 0011 PR-2 session kill (P2-7, P2-8); standalone pools are not armed
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -111,9 +111,12 @@ func (st *sessionState) noteReadbackFailed(err error) {
 }
 
 // statementMargin is the gap between innodb_lock_wait_timeout and the
-// client deadline of that one statement. One second is the minimum that
-// still lets the server return 1205 first.
-const statementMargin = time.Second
+// client deadline of that one statement. InnoDB checks lock-wait expiry
+// about once a second, so error 1205 can arrive up to about a second
+// late. Two seconds lets that 1205 win. A deadline that still fires
+// after the statement has already run for the lock timeout is classified
+// as a lock wait by elapsed time.
+const statementMargin = 2 * time.Second
 
 // healthLockStatements is how many lock-taking statements one health write
 // runs: the health insert, the lease FOR UPDATE, the health FOR UPDATE, and
@@ -122,7 +125,7 @@ const healthLockStatements = 4
 
 // lockWaitSeconds is innodb_lock_wait_timeout. It rounds the idle bound down
 // to a whole second and is at least 1. The statement deadline sits one
-// margin above this value, so the server timer fires first.
+// margin above this value, so the server timer normally fires first.
 func lockWaitSeconds(deadline time.Duration) int {
 	sec := int(deadline / time.Second)
 	if time.Duration(sec)*time.Second >= deadline {

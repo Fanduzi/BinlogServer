@@ -30,9 +30,11 @@ var (
 	// store has no lease table).
 	ErrModeUnsupported = errors.New("fence mode not supported by this store")
 	// ErrLockWait: the health transaction hit a lock wait (MySQL 1205, no
-	// PROCESS privilege required) or the session deadline fired while that
-	// connection was waiting on task_leases or task_health. A slow statement
-	// is not a lock wait.
+	// PROCESS privilege required), the session deadline fired while that
+	// connection was waiting on task_leases or task_health, or a lock
+	// statement's own deadline fired after it had already run for at least
+	// innodb_lock_wait_timeout (recorded as classified by elapsed time).
+	// An outer cancel, or a cancel before that timeout, is not a lock wait.
 	// One observation is not a page; the caller confirms a second one
 	// before META_LOCK_STALLED.
 	ErrLockWait = errors.New("metadata lock wait")

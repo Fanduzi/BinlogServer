@@ -532,6 +532,9 @@ type MySQLTaskStore struct {
 	// lockWaitSeen overrides the lock-wait probe. Nil asks
 	// performance_schema.data_lock_waits, then information_schema.innodb_trx.
 	lockWaitSeen func(threadID int64) bool
+	// nowFn overrides the clock lock-statement elapsed time is measured
+	// with. Nil uses time.Now. Tests set it; production leaves it nil.
+	nowFn func() time.Time
 	// flight tracks in-progress lock statements so a saturated pool can
 	// tell a lock stall from a slow pool.
 	flight stmtFlight
