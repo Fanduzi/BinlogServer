@@ -153,7 +153,9 @@ func mustVerify(t *testing.T, dir string, rows []VerifyRow, objs ObjectStore, ch
 }
 
 // verifiedAt is a LastVerified map that marks every row verified at at, so
-// that only forced, recent and slot work is scheduled.
+// that only forced, recent and slot work is scheduled. A segment verified
+// since its slot period began gets no slot work, so tests pass a time one
+// period back.
 func verifiedAt(rows []VerifyRow, at time.Time) map[string]time.Time {
 	out := map[string]time.Time{}
 	for _, row := range rows {

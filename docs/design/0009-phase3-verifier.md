@@ -39,7 +39,7 @@
 1. **巡检是一次纯计算，不是一个新的写者。** 输入是这一刻的目录行、本地字节和对象字节，输出是 finding 集合和每个通过的段的 `last_verified_at`。同一份输入给出同一份输出。谁来周期调用它、谁把结果落库，是主人接缝后面的事。理由：阶段 2 已经有唯一的 finding 生命周期（`Reconcile`）。再做一个会写 `task_findings` 的循环，就会在 ADR 0011 换掉单调性之前多出一个写者。
 2. **只有当前主人为这个任务跑巡检。** 纯函数自己不问。调用方先问第 10 节的缝；缝说不是，或者缝出错，就跳过这个任务，**既不开也不关** finding。理由：本地字节在主人那台机器上（ADR 0011 §3.3）。一台没有目录的机器跑结构检查，会把「文件不在我这儿」写成损坏。缝出错同样不能关 finding：关需要一份完整观察，观察失败不是「问题消失了」。这和 ADR 0011 §3.5「不完整的观察既不开也不关」是同一条。
 3. **三条检查各报各的种类，不合成一个 `VERIFY_FAILED`。** 结构失败是 `VERIFY_FAILED`，对象不在是 `I6_MISSING_OBJECT`，对象大小不符是 `I6_OBJECT_SIZE_MISMATCH`，对象字节不符是 `OBJECT_CORRUPT`。理由：处置不同。对象没了要查桶的生命周期；字节不符是静默损坏；本地解析失败是这段备份不能读。ADR 原文把对象「不符」笼统写成这三个名字里的 `VERIFY_FAILED`。阶段 2 草图已经单列了 `OBJECT_CORRUPT`。沿用草图的名字，避免一条 finding 盖住两种事故。`I6_SIZE_MISMATCH` 不拿来用：那个名字在代码里是「旧段的本地大小和目录行不一致」，和对象大小不是一件事。
-4. **先做免费的，再按队列花预算。** 每一轮先 stat 每个本地封存文件、HEAD 每个已上传对象（都不计费），再把要读内容的工作（本地整文件解析、对象正文哈希）排成一个队列，按「强制 → 最近 24 小时 → 轮换槽 → 最久没验过」付费。预算或截止时间用完，剩下的记 `SKIPPED`，这一轮正常结束；只有调用方取消才中止。理由：第 2 轮先把所有本地文件整解析一遍再碰对象，QA 用 64 KiB/s、450ms 截止连跑 25 轮，每轮都停在同一个本地文件上，对象一次 HEAD 都没有（生产里 100 GiB 本地段在 4 MiB/s 下要 7 小时）。HEAD 便宜，能抓住误删和截断，不该排在付费工作后面；付费工作排序之后，每一轮从上一轮停下的地方之后接着走（第 5.3 节有上界）。24 小时而不是「上一轮之后」，是因为纯函数看不到上一轮的游标；`verify.every` 的默认就是 24 小时，两者对齐。
+4. **先做免费的，再按队列花预算。** 每一轮先 stat 每个本地封存文件、HEAD 每个已上传对象（都不计费），再把要读内容的工作（本地整文件解析、对象正文哈希）排成一个队列，按「强制 → 最近（改动之后还没验过的未上传行和 24 小时内上传，有份额上限） → 轮换槽 → 最久没验过」付费。预算或截止时间用完，剩下的记 `SKIPPED`，这一轮正常结束；只有调用方取消才中止。理由：第 2 轮先把所有本地文件整解析一遍再碰对象，QA 用 64 KiB/s、450ms 截止连跑 25 轮，每轮都停在同一个本地文件上，对象一次 HEAD 都没有（生产里 100 GiB 本地段在 4 MiB/s 下要 7 小时）。HEAD 便宜，能抓住误删和截断，不该排在付费工作后面；付费工作排序之后，每一轮从上一轮停下的地方之后接着走（第 5.3 节有上界）。最近档用 `last_verified_at` 判断新鲜度：一段改动（封存、上传）之后按内容验过一次就离开这一档，所以它的消耗有界，并按份额计入第 5.3 节的上界（QA r3 F1）。窗口取 24 小时，和 `verify.every` 的默认对齐。
 5. **轮换长度按周期数配置，不按百分比。** 每个段名有一个固定的槽：`sha256(段名)` 的前 8 字节对 `N` 取模，`N = RotationPeriods`（默认 20）。第 `d` 个周期（`floor(unix 秒 / 周期)`，UTC 对齐）槽号等于 `d mod N` 的段进入轮换槽这一档。最坏间隔就是 `N × 周期`（`WorstGap`），不取整：周期从 24h 改成 48h，最坏间隔就是 20 × 48h = 960h（QA r2 在切换那天按小时采样量到 961h，即 20 个新周期加上采样粒度）。这是预算够用时的上界；预算不够时见第 5.3 节。理由：第 2 轮用百分比换算成 `ceil(100/percent)`，51–99 都变成 50%、30 变成 25%（QA r2 F5）。直接配周期数就没有换算。`RotationPeriods` 为负时关掉轮换和「最久没验过」这一档，只做强制和最近的工作（测试和应急用）。
 6. **字节预算是整个进程一份，不是每个任务一份。** 默认 4 MiB/s，和现有 `health.rehash_bytes_per_sec` 同一个数。理由：ADR 写的是「每任务每轮上限」。100 个任务各 4 MiB/s 就是 400 MiB/s，QA 要求的「限速下源延迟不升高」做不到。一个任务可以吃满整个预算，多个任务分享它。复核器今天已经是全局限速；接上主人之后，巡检和复核器用同一只桶，不加倍。在那之前复核器不动，避免在所有权改写的同时改评估器的读盘行为。
 7. **没有可比的东西时，记成「无法验证」，不算验证过。** 目录行 `sha256` 为空、本地文件又不在（或这一轮没能干净地解析它）时，没有东西可以和对象正文比：不下载正文，对象记 `UNVERIFIABLE`，`Report.UnverifiableNoDigest` 计一次，不开 finding，`last_verified_at` 不前进，已开的 `OBJECT_CORRUPT` 也不会因此关闭。行上的 `size_bytes` 为 0（未知）时，HEAD 不能比大小：对象的 `SizeChecked` 为 false，关不掉 `I6_OBJECT_SIZE_MISMATCH`；只有正文哈希和本地文件相符才算比过大小，否则计入 `Report.UnverifiableSize`。另一个计数 `Report.NoDigestLocal` 是「行上没有摘要、但本地文件还在」的封存段数：这些段现在还能从本地文件补摘要，保留期删掉之后就不能了。理由：把「旧行没有摘要」报成损坏，会在升级后的第一轮把保留期删掉的历史段全部打成 CRITICAL；但也不能把它们算成验证过。补摘要的任务和对应的 gauge 留给 PR-2（第 15 节第 9 条）。新上传的段由第 11 节在上传时补上摘要。
@@ -96,12 +96,16 @@ HEAD 不计费。全部 HEAD 完、全部本地 stat 完之后，调用方给了
 | 档 | 条件 |
 |---|---|
 | 1 强制 | 开着 `OBJECT_CORRUPT` 或 `VERIFY_FAILED`，或者行大小未知时开着 `I6_OBJECT_SIZE_MISMATCH`，**并且本地文件还在**（第 6.3 节） |
-| 2 最近 | 24 小时内上传，或者还没上传（本地是唯一一份） |
-| 3 轮换槽 | 这一周期是它的槽（决定 5） |
+| 2 最近 | 自上一次改动之后还没按内容验过（`last_verified_at` 为空，或早于 `max(uploaded_at, sealed_at)`），并且还没上传（本地是唯一一份）或 24 小时内上传；被开着的 finding 点名的段不进这一档。每轮最多花 `C` 的 `verify.recent_share_percent`（默认 25%），超出的那一段落到它在下面两档的位置（QA r3 F1） |
+| 3 轮换槽 | 这一周期是它的槽（决定 5），且这一周期开始之后还没验过（每周期最多一次） |
 | 4 最久没验过 | `last_verified_at` 为空，或者距今不短于 `N × 周期`；被开着的 finding 点名的段不进这一档（它不会前进，放进来会一直占着队头） |
 | — | 都不是：本地只 stat（`STAT`），对象只 HEAD（`HEAD`） |
 
 档内按 `last_verified_at` 从旧到新（没有的最旧），再按段名。`Options.LastVerified` 是调用方传进来的每段 `last_verified_at`；工人把每轮的 `VerifiedAt` 写回去，下一轮再传进来。
+
+最近档看新鲜度，不只看状态：未上传的行（`PENDING`、`UPLOAD_FAILED`）解析过一次就离开这一档，之后和别的段一样按轮换槽和 `last_verified_at` 排；上传是一次改动，上传之后对象再按最近档读一次。第 3 轮的最近档只看「没上传或 24 小时内上传」，不看 `last_verified_at`：桶故障积压 `UPLOAD_FAILED` 时，这些行每轮都排在轮换槽和最久档前面，QA r3 量到 10 个旧对象 200 个周期一次都没哈希过。`VerifyRow.SealedAt` 是行在上传前的最后一次改动；为零时只看 `uploaded_at`。
+
+最近档有份额上限：一份最近档的工作开始前，若这一轮最近档已付的字节加上它超过 `⌊C × 份额⌋`（`C` 在付费部分开始时按第 5.3 节算：`PassBytes` 与「令牌桶余额 + 速率 × 剩余截止时间」中较小的；两者都不限时不设上限），这一段剩下的最近档工作（本地和对象一起，这样对象哈希不会跑到它要用的本地解析前面）落到它的下一档：轮换槽、最久没验过，或者都不是就记 `SKIPPED`（原因「最近档的份额用完了」）。所以一次大积压（桶恢复后一小时上传了几千段）不会把一整天的预算都吃掉。
 
 按顺序付费。一份工作开始之前先问「放得下吗」：`PassBytes` 剩下的够不够，以及按令牌桶现在的余额和速率，截止时间之前付不付得完。放不下就记 `SKIPPED`（原因「放不下这一轮剩下的预算」），`Report.Deferred` 加一，**接着试下一份更小的**，不让一个大文件堵住后面的。截止时间到了，剩下的全部 `SKIPPED`（原因「截止时间到了」），这一轮正常返回。读的途中等不到预算（`ErrBudgetDeadline`，例如另一轮并发拿走了令牌）也只是这一份 `SKIPPED`。只有上下文被取消才返回错误。
 
@@ -109,28 +113,41 @@ HEAD 不计费。全部 HEAD 完、全部本地 stat 完之后，调用方给了
 
 ### 5.3 进度上界
 
-QA r2 要求：同一个短截止时间反复跑很多轮，必须有进展，不能每轮停在同一处。记号：
+QA r2 要求：同一个短截止时间反复跑很多轮，必须有进展，不能每轮停在同一处。QA r3 指出第 3 轮的上界漏了最近档（未上传的行永远在最近档）。第 4 轮把最近档的消耗按份额上限计入。记号：
 
 - `C`：一轮最多能付的字节，`PassBytes` 与「突发 + 速率 × 截止时间」中较小的；
-- `F`：强制段每轮的内容字节；`S`：放得进一轮的段里，单段内容字节（本地 + 对象）的最大值；
-- `q = ⌊(C − F) / S⌋`：每轮至少完成的非强制段数；
-- `k`：会进队列的非强制段数（比 `C − F` 还大的段排除，它们每轮记 `SKIPPED`、`Deferred` 计数，要调大预算或截止时间）；`N`：轮换长度。
+- `F`：强制段每轮的内容字节；
+- `R = ⌊C × verify.recent_share_percent / 100⌋`：最近档每轮最多花的字节（默认 25%）；
+- `S`：放得进一轮的段里，单段内容字节（本地 + 对象）的最大值；
+- `q = ⌊(C − F − R) / S⌋`：每轮至少完成的轮换槽、最久档段数；
+- `k`：会进队列的非强制段数（比 `C − F − R` 还大的段排除，它们每轮记 `SKIPPED`、`Deferred` 计数，要调大预算或截止时间）；`N`：轮换长度。
 
 上界：若 `q ≥ 1` 且 `q × N > k − 1`，令 `P` 为满足 `q·t ≥ (k − 1)·(1 + ⌈t/N⌉) + 1` 的最小 `t`。则每段两次内容检查之间最多隔 `N + P` 个周期，从没查过的段在前 `P` 轮内第一次查到。预算不限时就是 `N` 个周期（`N × 周期`，决定 5）。
 
-推导：一段上次验过之后，最晚 `N` 个周期变成「最久没验过」。之后每一轮，强制档先付（`F`），剩下的从队头按顺序付；前 `q` 段每段不超过 `S`，一定付得完，所以每轮至少完成队头的 `q` 段。排在它前面的只有三种：比它更旧的段（最多 `k − 1` 个，验过之后时间更新，排到它后面，不会再插回来）、这一轮轮到槽的段（每个别的段在任意 `t` 轮里最多 `⌈t/N⌉` 次）、最近档的新段（下面的数字里没有新上传；有的话加进右边）。`t` 轮一共完成 `q·t` 段，超过排在它前面的总数，就轮到它了。
+推导：
 
-两个用到的数：
+1. 每轮的付费顺序是强制档（最多 `F`）、最近档（份额上限保证最多 `R`）、然后轮换槽和最久档。所以后两档每轮至少有 `C − F − R`。前 `q` 段每段不超过 `S`，一定付得完，所以每轮至少完成后两档队头的 `q` 段。
+2. 最近档的工作是一次性的：一段只在「改动之后还没按内容验过」时在这一档，验过就离开。超过份额的那一段落进轮换槽或最久档，按它的 `last_verified_at` 排，它本身就是 `k` 个段之一，下面的计数已经包含它。
+3. 一段上次验过之后，最晚 `N` 个周期变成「最久没验过」。排在它前面的只有：比它更旧的段（最多 `k − 1` 个，验过之后时间更新，排到它后面，不会再插回来），和这一轮轮到槽的段（每个别的段在任意 `t` 轮里最多 `⌈t/N⌉` 次；槽每周期最多读一次）。`t` 轮一共完成 `q·t` 段，超过排在它前面的总数，就轮到它了。
+4. 新段：上面的 `k` 是固定的一组段。每轮新来 `a` 段，份额内的由最近档付；份额外的落进最久档，`last_verified_at` 为空、排在最前，要加进右边（`+ a·t`）。新段持续快于 `q` 时上界不成立。
 
-| 场景 | C | F | S | q | k | N | P | 上界 | 实测 |
-|---|---|---|---|---|---|---|---|---|---|
-| QA r2 的 64 KiB/s、450ms、25 轮，一段开着 `OBJECT_CORRUPT`（`TestVerify_StarvationUnderAFixedDeadline`；`C` 按截止时间扣 150ms 余量） | 85196 | 31528 | 31528 | 1 | 3 | 20 | 5 | 第一次检查在前 5 轮内 | 前 2 轮全部查到；强制段每轮都查 |
-| 4 段本地 + 20 段只剩对象 + 1 段 300 KiB 的超大对象，`PassBytes = 94584`，120 轮（`TestVerify_QueueBoundsTheGap`） | 94584 | 0 | 31528 | 3 | 24 | 20 | 16 | 36 个周期 | 最坏 20；超大对象每轮 `SKIPPED` |
-| 同上，不限 | — | — | — | — | — | 20 | — | 20 个周期 | 20 |
+前提：
 
-上界的前提是调用方把每轮的 `VerifiedAt` 写回、下一轮作为 `Options.LastVerified` 传进来（第 6.4 节）。不写回时每段一直是「从没查过」，第 4 档每轮按段名排、停在同样的前几段，名字靠后的段只在自己的槽那天（第 3 档）查到：仍然有进展，但上界退回到 `N` 个周期，不是 `P` 轮。QA r2 的探针按原样（不写回）在 r3 上重放，450ms 时名字最靠后的 `000006` 只在第 19 轮（它的槽）查到；写回时它在第 1 轮查到。
+- 调用方把每轮的 `VerifiedAt` 写回，下一轮作为 `Options.LastVerified` 传进来（第 6.4 节）。不写回时每段一直是「从没查过」，第 4 档每轮按段名排、停在同样的前几段，名字靠后的段只在自己的槽那天查到：仍然有进展，但上界退回到 `N` 个周期，不是 `P` 轮。
+- `q ≥ 1`。**强制集合没有上限**：每条开着、本地还在的 `OBJECT_CORRUPT` / `VERIFY_FAILED` 每轮都把整段读一遍，`F` 随开着的 finding 数增长。`F > C − R − S` 时 `q = 0`，后两档一段也付不到，上界不成立，`Deferred` 会一直不为零。这时要处理掉开着的 finding（重新上传、修复本地），或者调大预算。
 
-生产的量级：4 MiB/s、截止时间一天时 `C` ≈ 337 GiB；1 GiB 的段 `S` = 2 GiB，`q` ≈ 168，`q × N` ≈ 3360 段，即大约 3.3 TiB 的段能在 `N + P` 内轮完。数据更多时上界不成立（每天轮到槽的量本身就超过一轮的预算），`Deferred` 会一直不为零：要调大预算或轮换长度。
+用到的数：
+
+| 场景 | C | F | R | S | q | k | N | P | 上界 | 实测 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| QA r2 的 64 KiB/s、450ms、25 轮，一段开着 `OBJECT_CORRUPT`（`TestVerify_StarvationUnderAFixedDeadline`；`C` 按截止时间扣 150ms 余量） | 85196 | 31528 | 21299 | 31528 | 1 | 3 | 20 | 5 | 第一次检查在前 5 轮内 | 前 2 轮全部查到；强制段每轮都查 |
+| QA r3 的 pending_local_hog_3：3 段未上传的本地段 + 10 段只剩对象，`PassBytes = 47292`，200 轮，写回（`TestVerify_PendingBacklogDoesNotStarveTheRotation`） | 47292 | 0 | 11823 | 15764 | 2 | 13 | 20 | 13 | 前 13 轮首查，间隔 ≤ 33 | 见第 14 节 |
+| 4 段本地 + 20 段只剩对象 + 1 段 300 KiB 的超大对象，`PassBytes = 94584`，120 轮（`TestVerify_QueueBoundsTheGap`） | 94584 | 0 | 23646 | 31528 | 2 | 24 | 20 | 35 | 55 个周期 | 见第 14 节；超大对象每轮 `SKIPPED` |
+| 同上，不限 | — | — | — | — | — | — | 20 | — | 20 个周期 | 20 |
+
+`R` 是上限，不是每轮都花掉：最近档空着的那一轮，后两档实际拿到的是 `C − F`，上界是按最坏情况算的。
+
+生产的量级：4 MiB/s、截止时间一天时 `C` ≈ 337 GiB，`R` ≈ 84 GiB；1 GiB 的段 `S` = 2 GiB，`q` ≈ 126，`q × N` ≈ 2520 段，即大约 2.5 TiB 的段能在 `N + P` 内轮完。数据更多时上界不成立（每天轮到槽的量本身就超过一轮的预算），`Deferred` 会一直不为零：要调大预算或轮换长度。
 
 ## 6. 链检查、覆盖记录，以及消失的结论
 
@@ -172,9 +189,10 @@ Report.Coverage[段名] = {
 
 | kind | 这一轮怎样才能关 | 原因 |
 |---|---|---|
-| 任何 kind（`I6_MISSING_ROW` 除外） | `Options.CatalogComplete` 为真（调用方读到的是这个任务完整的目录），而行里没有这个 subject（任何状态的行都算还在） | `row removed` |
+| 按行的 kind：`VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW` 和 `I6_*`（`I6_MISSING_ROW` 除外） | `Options.CatalogComplete` 为真（调用方读到的是这个任务完整的目录），而行里没有这个 subject（任何状态的行都算还在） | `row removed` |
+| `VERIFY_FAILED`（sha 不符那一种） | 本地副本 `ABSENT`（保留期删了），对象 `HASHED`、比的是目录行摘要且相符、没有报 `OBJECT_CORRUPT`，并且对象流边哈希边解析、位点和 GTID 集合都和行相符（`Parsed`） | `local removed; object matches catalog` |
+| `VERIFY_FAILED`（解析失败、位点不符、GTID 不符、大小不符） | 同上，`Parsed` 必须为真 | `local removed; object parses and matches the catalog row` |
 | `VERIFY_FAILED` | 本地副本 `PARSED` 且和行相符 | `local parsed and matches the catalog row` |
-| `VERIFY_FAILED` | 本地副本 `ABSENT`（保留期删了），对象 `HASHED`、比的是目录行摘要、没有报 `OBJECT_CORRUPT` | `local removed; object matches catalog` |
 | `I6_MISSING_LOCAL` | 本地 `Found`（文件回来了）；或链这一轮查过。`ABSENT` 不关（保留期标记不代表文件在） | `local file present` / `chain checked` |
 | `I6_MISSING_OBJECT` | 对象 `Found`；subject 不在这一轮的行里时，链查过 | `object found by HEAD` / `chain checked` |
 | `I6_OBJECT_SIZE_MISMATCH` | 对象 `SizeChecked`；subject 不在这一轮的行里时，链查过。行大小为 0 时 HEAD 不算 | `object size compared` / `chain checked` |
@@ -182,7 +200,9 @@ Report.Coverage[段名] = {
 | `UPLOAD_CLOCK_SKEW` | `ClockChecked` | `uploaded_at compared with now` |
 | 其它（链的违反名） | `ChainChecked` | `chain checked` |
 
-`I6_MISSING_ROW` 说的正是「本地有文件、目录没有行」，行不在是它成立的条件，所以只有链能关它。工人按「行已删除」关闭时记一条事件，操作员删掉一个缺失对象的行是值得留痕的事（QA r2 F3）。行从一份**不完整**的目录里消失，什么也不关。`OBJECT_CORRUPT` 在行变成非 UPLOADED 时也不关：重新上传成功、行回到 UPLOADED 之后，强制重查会把它哈希一遍再关。
+链的 kind（`I1_*` 到 `I5_*`、`I7_*`）不按「行已删除」关：删掉一行补不上 GTID 空洞，也不会让区间不再重叠，只有同一轮链检查过、不再报它才关（QA r3 F3）。`I6_MISSING_ROW` 说的正是「本地有文件、目录没有行」，行不在是它成立的条件，所以只有链能关它。
+
+本地已删时，「对象和目录行摘要相符」只说明对象就是当初封存的那份字节，不说明那份字节是好的（QA r3 F2：封存摘要按写下来的文件算，解析失败的段，目录摘要就是坏字节的摘要）。所以开着 `VERIFY_FAILED`、本地 `ABSENT`、要按目录摘要哈希对象时，同一份字节同时喂给解析器和位点跟踪（`readSegment`，不多花预算）。哈希相符而解析失败、位点或 GTID 不符，就再报一条 `VERIFY_FAILED`（CRITICAL），detail 前缀 `object (sole copy): `，表示缺陷在剩下的唯一一份上，finding 保持开着、继续点名该段。finding 的种类由 detail 区分：`DetailSHA` 等常量（`VERIFY_FAILED` 的 detail 从这一版起是稳定的）。只有 sha 不符那一种用「local removed; object matches catalog」关；detail 不认识的旧 finding 按非 sha 处理，要求对象能解析。工人按「行已删除」关闭时记一条事件，操作员删掉一个缺失对象的行是值得留痕的事（QA r2 F3）。行从一份**不完整**的目录里消失，什么也不关。`OBJECT_CORRUPT` 在行变成非 UPLOADED 时也不关：重新上传成功、行回到 UPLOADED 之后，强制重查会把它哈希一遍再关。
 
 ### 6.3 强制重查
 
@@ -202,7 +222,7 @@ Report.Coverage[段名] = {
 
 `NewByteBudget(bytesPerSec)`。`<= 0` 表示不限速（测试和「显式不限」）。限速用已经在用的 `golang.org/x/time/rate` 令牌桶，突发等于速率，但不超过 64 KiB，这样大段不会一次借走一整秒以上的额度。每次读最多读一个突发那么多字节，读到之后先付钱再用；付不成（截止时间之前等不到）这些字节就扔掉，不计入这一轮，那一份工作记 `SKIPPED`。所以 `Report.Bytes` 恰好是这一轮付给预算的字节（QA r2 F6：第 2 轮中止的那一轮多算了读了没付的一块）。
 
-计入预算的是：本地整文件解析读到的字节（位点不再单独读）、对象 GET 的正文。stat 和 HEAD 不计入，它们不搬段数据。
+计入预算的是：本地整文件解析读到的字节（位点不再单独读；解析失败也把剩下的读完，摘要覆盖整份文件，花的仍是事先估算的文件大小）、对象 GET 的正文（需要时边哈希边解析，同一份字节，不另计）。stat 和 HEAD 不计入，它们不搬段数据。
 
 一份工作开始之前先估算放不放得下（第 5.2 节）：令牌桶现在的余额加上到截止时间为止能补的量，以及 `Options.PassBytes`（这一轮最多读多少，0 不设上限）。估算放得下、读的途中被另一轮并发拿走令牌而付不成，那一份 `SKIPPED`，这一轮接着试别的。
 
@@ -254,6 +274,7 @@ Report.Coverage[段名] = {
 | `verify.every_sec` | 86400 | ADR 的 24 小时 |
 | `verify.budget_bytes_per_sec` | 4194304 | 第 7 节。0 在工人里表示用这个默认，不表示不限速；测试里的「不限」是直接传空预算，不是配置 |
 | `verify.rotation_periods` | 20 | 轮换长度，按周期数（决定 5）。最坏间隔 = 这个数 × `verify.every_sec`，不取整 |
+| `verify.recent_share_percent` | 25 | 最近档每轮最多花这一轮容量 `C` 的百分之几（第 5.2、5.3 节）。1–100；越大，新段读得越快，轮换的上界越松 |
 | `verify.pass_deadline_sec` | 等于 `verify.every_sec` | 一轮的截止时间，到了剩下的记 `SKIPPED`、正常结束（第 5.2 节）。取消只在进程退出或失去主人时发生 |
 | `verify.pass_max_bytes` | 0 | 一轮最多读多少字节（`Options.PassBytes`），0 不设上限 |
 | `verify.object_recent_sec` | 86400 | 第 5.2 节的「最近」窗口 |
@@ -325,7 +346,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | 第 2 轮本设计 | 先解析全部本地段，再查对象；预算等不到就中止整轮 | 先 stat 和 HEAD，再按队列付费；预算或截止时间用完记 `SKIPPED`、正常结束 | 决定 4、第 5.2 节。QA r2 F1：短截止时间下对象永远查不到 |
 | 第 2 轮本设计 | 开着 `OBJECT_CORRUPT` / `VERIFY_FAILED` 每轮强制 | 本地文件还在才每轮；不在时随轮换 | 第 6.3 节。QA r2 F2 |
 | ADR §3 | 每任务 `verify_budget` | 进程级一把预算，默认等于单任务上限 | 决定 6。多任务相加会打满磁盘 |
-| ADR 决定 4 | 抽样加上「上一轮之后新上传的全部」 | 加上最近 24 小时 | 决定 4。纯函数没有游标；默认周期也是 24 小时 |
+| ADR 决定 4 | 抽样加上「上一轮之后新上传的全部」 | 最近档：未上传的行和 24 小时内上传的行，各在改动之后读一次（看 `last_verified_at`），每轮最多花 25% | 决定 4、第 5.2 节。「上一轮之后」用 `last_verified_at` 表达；份额上限让积压不挤掉轮换 |
 | ADR §3 | 复用 ADR 0001 的租约判断主人 | 只留 `Allows`，实现等 ADR 0011 PR-2 | 0001 的续租循环会被 PR-2 换掉。现在接上就是在即将删除的代码上加一个调用方 |
 | 阶段 2 §11 | 巡检让 `ScopeChainObjects` 变为 Complete 并 `MarkDirty` | 纯函数返回报告；`Produced` 保持不变 | 决定 9。没有周期调用就标成已生产，健康会误报 UNKNOWN |
 | 阶段 2 §11 | 新 kind 直接注册 | 名字定了，注册表不动 | 注册表一项没有 `Derive` 就会在评估器里开出空行为。等工人一起加 |
@@ -341,6 +362,13 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | `TestVerify_CleanChainHasNoFindings` | 阶段 1 的 live 夹具加上与字节一致的行和对象，`Chain.Check` 与结构、对象检查都为空；每段 `PARSED` + `HASHED`，预算计费等于本轮字节 |
 | `TestVerify_ObjectSizeMismatch`、`TestVerify_LocalMismatchesAgainstTheCatalogRow` | 截断对象、目录行大小 +1、本地大小、SHA-256、首尾位点、GTID 文本各自报对 kind 和覆盖 |
 | `TestVerify_WorkThatDoesNotFitIsSkippedNotBlocking` | 队头放不下的一份记 `SKIPPED`，后面放得下的照样付（杀 R09） |
+| `TestVerify_PendingBacklogDoesNotStarveTheRotation` | QA r3 F1 的 pending_local_hog_3（C=47292、F=0、S=15764、k=13、N=20，写回）：推出 q=2、P=13；200 轮里每段前 13 轮内首查，最坏间隔 20 ≤ 33 |
+| `TestVerify_NotUploadedRowIsRecentUntilParsed`、`TestVerify_NamedSegmentGetsNoRecentWork` | 未上传的行解析过就离开最近档，`sealed_at` 改动、上传都让它回来（杀 Y10）；被开着的 finding 点名的段不进最近档 |
+| `TestVerify_NewUploadIsReadAtMostTwiceInItsFirstDay` | 每小时一轮、预算充足、48 小时每小时上传一段：每段头 24 轮最多读 2 次（最近档一次，槽最多一次） |
+| `TestVerify_RecentShareCapsTheRecentTier` | 最近档超过份额的落到下一档，旧段照样付；份额累计；只有预算和截止时间时按它们算 `C` |
+| `TestVerify_LocalRemovedVerifyFailedNeedsTheObjectToParse` | QA r3 F2：本地已删，对象和目录摘要相符但解析失败（目录摘要就是坏字节的）、`end_log_pos` 不符、GTID 不符，三种都不关、不前进，改报对象侧的 `VERIFY_FAILED`；对象好时 sha 那种按「local removed; object matches catalog」关、其它按「object parses」关；对象字节只付一次 |
+| `TestVerify_RowRemovedLeavesChainKindsToTheChain` | QA r3 F3：行删了、这一轮没查链，I1/I2/I3/I4/I5/I7 都不关；同一轮查了链才关 |
+| `TestVerify_HeadPhaseStopsAtTheDeadline` | QA r3 F4（Y14）：第一次 HEAD 撞上截止时间之后不再发 HEAD，剩下的 `SKIPPED`，正常返回 |
 | `TestVerify_StarvationUnderAFixedDeadline` | QA r2 F1 原样的 64 KiB/s、450ms、25 轮：每轮都 HEAD 全部对象、没有一轮返回错误；按第 5.3 节推出的上界（5 轮）内每份副本都查到；强制段每轮都查 |
 | `TestVerify_QueueBoundsTheGap`、`TestQueueBound` | 25 段 120 轮、`PassBytes` 封顶：每段第一次在 `P` 轮内、之后间隔不超过 `N + P`；超大对象每轮 `SKIPPED` 不堵队；不封顶时间隔不超过 `N` |
 | `TestVerify_QueueOrder`、`TestVerify_OverdueAtRotationTimesPeriod` | 强制 → 最近 → 轮换槽 → 最久没验过；档内旧的先；被开着的 finding 点名的段不进最后一档；恰好 `N × 周期` 算过期 |
@@ -349,7 +377,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | `TestSpanTracker_MatchesEventSpan`、`TestVerify_ChargesEveryReadToTheBudget` | 流式位点和 `binlog.EventSpan` 在夹具和 450 份损坏副本上一致；设了位点的段也只付一次 |
 | `TestVerify_CorruptObjectStaysOpenUntilRehashed`、`TestVerify_ForcedRecheckWithoutLocalFollowsTheRotation` | 本地在：开着的 `OBJECT_CORRUPT` 每轮强制、修好就关；本地不在：45 天里只在槽那天下载 |
 | `TestVerify_VerifyFailedWithLocalRemoved`、`TestVerify_OpenFindingsBlockLastVerified` | QA r2 F2：对象和目录行相符时带「local removed; object matches catalog」关闭，关之前不前进、只在槽那天下载；不相符时一直开着；开着的 finding 挡住 `last_verified_at` |
-| `TestVerify_RowRemovedClosesEveryKind` | QA r2 F3：完整目录里行没了，所有 kind 按「row removed」关，`I6_MISSING_ROW` 除外，也不再强制；目录不完整什么也不关；未封存的行不算删除 |
+| `TestVerify_RowRemovedClosesEveryKind` | QA r2 F3：完整目录里行没了，按行的 kind 按「row removed」关，`I6_MISSING_ROW` 和链的 kind 除外，也不再强制；目录不完整什么也不关；未封存的行不算删除 |
 | `TestVerify_UnknownRowSize` | QA r2 F4：行大小为 0 时 HEAD 不关大小结论；和本地文件相符的哈希才关；开着的大小结论强制哈希；没有本地文件时用目录摘要哈希也不算比过大小 |
 | `TestVerify_RetentionMarkerDoesNotCloseMissingLocal` | QA r2 X14：保留期标记的 `ABSENT` 不关 `I6_MISSING_LOCAL` |
 | `TestVerify_CancelLeavesUnreachedSubjectsUnverified` | 取消：没走到的内容不关不推进；HEAD 看到的照常关 `I6_MISSING_OBJECT`；HEAD 途中取消，后面的行没有条目 |
@@ -360,7 +388,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | `TestVerify_ConcurrentPassesShareOneBudget` | 两轮并发共用一只预算：各自的 `Bytes` 等于单轮，累计等于两轮之和（`-race` 下跑） |
 | `TestApplySealedUpload_FillsEmptySHA256`、`TestApplySealedUpload_FillKeepsStoredEventTimes` | 行上没有摘要时补上；已有摘要和已有事件时间不被盖掉 |
 
-变异：`go run ./internal/assurance/mutants/kill.go` 跑 QA r1 的 25 个（M01–M25）、第 2 轮覆盖模型的 29 个（N 开头）、QA r2 的 20 个（X01–X20）和第 3 轮队列与关闭规则的 44 个（R 开头），共 118 个。除标明等价的 N30、X05、R15（理由写在 kill.go 里）外全部被打死。
+变异：`go run ./internal/assurance/mutants/kill.go` 跑 QA r1 的 25 个（M01–M25）、第 2 轮覆盖模型的 29 个（N 开头）、QA r2 的 20 个（X01–X20）、第 3 轮队列与关闭规则的 44 个（R 开头）、QA r3 的 Y10 和 Y14，以及第 4 轮的 20 个（S 开头：新鲜度、最近档份额、对象侧解析、链 kind），共 140 个。除标明等价的 N30、X05、R15（理由写在 kill.go 里）外全部被打死，没有一个靠编译失败算打死。
 
 真实 MinIO 不在任何现有 CI job 里。`e2e.yml` 的 `unit-and-e2e` 跑 `run-suite.sh --profile quick`，quick 的场景名单是写死的，里面没有 MinIO。每个会拉 MinIO 的场景（`smoke-retry-upload`、`smoke-split-retention`）各有一个 job，场景名写在 workflow 里。`workflow_dispatch` 的 profile 也是 workflow 里的闭枚举。不改 workflow 就没法把新场景加进这些 job，而把 MinIO 塞进 quick 会让 `go test` 那个 job 被镜像仓库拖垮。现有做法是把 MinIO 隔在自己的 job 里。
 
@@ -402,4 +430,7 @@ e2e-verify:
 2. 进程级 4 MiB/s 作为默认。多任务之间公平分摊放到 PR-2 的周期循环里做，免得一个大任务把别的任务推到下一个周期。
 3. 演练等阶段 5 的还原计划，不在巡检器里复制一份回放命令。
 4. 本地文件不在时，开着的 `OBJECT_CORRUPT` / `VERIFY_FAILED` 不再每轮强制，随轮换重查（第 6.3 节）。这台机器上没有副本可传，每轮下载修不了它。
-5. `I6_MISSING_ROW` 不按「row removed」关：行不在正是它报的事。
+5. `I6_MISSING_ROW` 不按「row removed」关：行不在正是它报的事。链的 kind（I1–I5、I7）也不按它关，只靠同一轮的链检查（QA r3 F3）。
+6. 最近档的消耗用份额上限计入上界（默认 25%），不用「按到达速率算」：份额上限对任何积压都成立，按到达速率算要假设积压的大小（QA r3 F1）。代价是上界按最坏情况扣掉 `R`，比实测松。
+7. 本地已删、开着 `VERIFY_FAILED` 时，对象边哈希边解析；对象坏就改报对象侧的 `VERIFY_FAILED`，不新开一个 kind（处置相同：这一段唯一的副本不能用，要人查）。只在这种情况下解析对象，不对每个按目录摘要哈希的对象都解析：后者会给从来没有本地问题的段新开结论，超出这一版的范围，留作后续。
+8. 轮换槽每周期最多读一次（这一周期开始之后验过就不再读）。被 finding 点名、`last_verified_at` 不前进的段，在槽那个周期里每一轮都会读；一天一轮时就是一次，一轮比一个周期更频繁时会多读，留给工人按周期调度。

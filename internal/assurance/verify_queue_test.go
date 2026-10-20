@@ -39,7 +39,7 @@ func queueBound(k, q, n int) int {
 
 func TestQueueBound(t *testing.T) {
 	for _, c := range []struct{ k, q, n, want int }{
-		{4, 1, 20, 7}, {3, 1, 20, 5}, {1, 1, 20, 1}, {24, 3, 20, 16}, {21, 1, 20, -1}, {10, 0, 20, -1},
+		{4, 1, 20, 7}, {3, 1, 20, 5}, {1, 1, 20, 1}, {24, 3, 20, 16}, {24, 2, 20, 35}, {13, 2, 20, 13}, {21, 1, 20, -1}, {10, 0, 20, -1},
 	} {
 		if got := queueBound(c.k, c.q, c.n); got != c.want {
 			t.Errorf("queueBound(%d,%d,%d)=%d want %d", c.k, c.q, c.n, got, c.want)
@@ -54,7 +54,8 @@ func TestQueueBound(t *testing.T) {
 //
 // Bound (design §5.3): C = burst + rate x (deadline - 150ms slack) = 85196
 // bytes; the forced segment costs F = 2 x 15764; a segment's content is S =
-// 2 x 15764; q = floor((C-F)/S) = 1 segment per pass; with k = 3 other
+// 2 x 15764; the recent share is Rc = C x 25% = 21299; q = floor((C-F-Rc)/S)
+// = 1 segment per pass; with k = 3 other
 // segments and a rotation of 20, P = queueBound(3, 1, 20) = 5. So every
 // copy of every other segment is content-checked within the first 5 passes,
 // and the forced segment's two copies on every pass.
@@ -69,7 +70,7 @@ func TestVerify_StarvationUnderAFixedDeadline(t *testing.T) {
 	const rate, deadline, slack = 64 << 10, 450 * time.Millisecond, 150 * time.Millisecond
 	seg := 2 * fileSize(t, filepath.Join(f.dir, first))
 	c := int64(rate) + int64(float64(rate)*(deadline-slack).Seconds())
-	q := int((c - seg) / seg)
+	q := queueQ(c, seg, seg, DefaultRecentSharePercent)
 	bound := queueBound(len(rows)-1, q, DefaultRotationPeriods)
 	if bound != 5 {
 		t.Fatalf("derived bound %d (C=%d S=%d q=%d)", bound, c, seg, q)
@@ -191,8 +192,9 @@ func TestVerify_QueueBoundsTheGap(t *testing.T) {
 			k, s := len(rows)-1, int64(2*15764)
 			bound := n
 			if c.passBytes > 0 {
-				bound = queueBound(k, int(c.passBytes/s), n)
-				if bound != 16 {
+				// q = floor((C - C x 25%) / S) = 2 with the recent share counted.
+				bound = queueBound(k, queueQ(c.passBytes, 0, s, DefaultRecentSharePercent), n)
+				if bound != 35 {
 					t.Fatalf("derived bound %d", bound)
 				}
 			}
@@ -287,15 +289,16 @@ func TestVerify_QueueOrder(t *testing.T) {
 	overdue, recent, slot, forced := rows[0].Name, rows[1].Name, rows[2].Name, rows[3].Name
 	day := slotDayFor(t, slot, overdue)
 	rows[1].UploadedAt = day.Add(-time.Hour)
-	lv := verifiedAt(rows, day.Add(-time.Hour))
+	lv := verifiedAt(rows, day.Add(-DefaultPeriod))
 	delete(lv, overdue)
 	open := []Finding{{Kind: KindObjectCorrupt, Subject: forced}}
 	order := []string{forced, recent, slot, overdue}
 	seg := 2 * fileSize(t, filepath.Join(f.dir, forced))
 	for i := 0; i <= len(order); i++ {
-		rep := mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: day, OpenFindings: open, LastVerified: lv, PassBytes: int64(i) * seg})
+		// The recent share is lifted here; TestVerify_RecentShareCapsTheRecentTier covers it.
+		rep := mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: day, OpenFindings: open, LastVerified: lv, PassBytes: int64(i) * seg, RecentSharePercent: 100})
 		if i == 0 {
-			rep = mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: day, OpenFindings: open, LastVerified: lv, PassBytes: 1})
+			rep = mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: day, OpenFindings: open, LastVerified: lv, PassBytes: 1, RecentSharePercent: 100})
 		}
 		for j, name := range order {
 			cov := rep.Coverage[name]
@@ -328,7 +331,7 @@ func TestVerify_QueueOrder(t *testing.T) {
 		}
 	}
 	// The older one has the later name, so name order alone would pick the other.
-	lv = verifiedAt(rows, other.Add(-time.Hour))
+	lv = verifiedAt(rows, other.Add(-DefaultPeriod))
 	lv[overdue] = other.Add(-100 * 24 * time.Hour)
 	lv[slot] = other.Add(-200 * 24 * time.Hour)
 	rep := mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: other, LastVerified: lv, PassBytes: seg})
@@ -597,12 +600,12 @@ func TestVerify_VerifyFailedWithLocalRemoved(t *testing.T) {
 			if corrupt {
 				flipStored(t, objs, "t/"+n)
 			}
-			open := []Finding{{Kind: KindVerifyFailed, Subject: n}}
+			open := []Finding{{Kind: KindVerifyFailed, Subject: n, Detail: DetailSHA}}
 			gets, closedOn := 0, -1
 			for d := 0; d < 45; d++ {
 				now := testNow.Add(time.Duration(d) * 24 * time.Hour)
 				before := objs.opened["t/"+n]
-				rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: now, OpenFindings: open, LastVerified: verifiedAt(rows, now.Add(-time.Hour))})
+				rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: now, OpenFindings: open, LastVerified: verifiedAt(rows, now.Add(-DefaultPeriod))})
 				got := objs.opened["t/"+n] - before
 				gets += got
 				in := InRotation(n, now, DefaultPeriod, DefaultRotationPeriods)
@@ -628,7 +631,7 @@ func TestVerify_VerifyFailedWithLocalRemoved(t *testing.T) {
 				}
 				if corrupt {
 					// The caller keeps every finding open; OBJECT_CORRUPT does not force a GET without a local copy.
-					open = append([]Finding{{Kind: KindVerifyFailed, Subject: n}}, rep.Findings...)
+					open = append([]Finding{{Kind: KindVerifyFailed, Subject: n, Detail: DetailSHA}}, rep.Findings...)
 				}
 			}
 			if corrupt && (closedOn >= 0 || gets < 2 || gets > 3) {
@@ -659,7 +662,8 @@ func TestVerify_OpenFindingsBlockLastVerified(t *testing.T) {
 		{KindObjectCorrupt, true},   // hashed and matching
 		{KindVerifyFailed, true},    // parsed and matching
 	} {
-		rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, OpenFindings: []Finding{{Kind: c.kind, Subject: n}}})
+		// A named segment gets content work on its slot only; rotation 1 makes every period its slot.
+		rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: 1, LastVerified: verifiedAt(rows, testNow.Add(-DefaultPeriod)), OpenFindings: []Finding{{Kind: c.kind, Subject: n}}})
 		if c := rep.Coverage[n]; c.Local.Method != MethodParsed || c.Object.Method != MethodHashed {
 			t.Fatalf("coverage %+v", c)
 		}
@@ -670,9 +674,10 @@ func TestVerify_OpenFindingsBlockLastVerified(t *testing.T) {
 }
 
 // TestVerify_RowRemovedClosesEveryKind is QA r2 F3: once a complete catalog
-// has no row for a subject, every kind on it closes as "row removed", and it
-// is no longer forced. I6_MISSING_ROW is the one exception: no row is what it
-// reports, so only the chain closes it.
+// has no row for a subject, every row-scoped kind on it closes as "row
+// removed", and it is no longer forced. I6_MISSING_ROW is the exception (no
+// row is what it reports), and so are chain kinds (QA r3 F3): removing a row
+// does not fill a GTID hole, so they close only when the chain is checked.
 func TestVerify_RowRemovedClosesEveryKind(t *testing.T) {
 	f := live(t)
 	rows := verifyRows(t, f, testNow.Add(-30*24*time.Hour))
@@ -683,13 +688,13 @@ func TestVerify_RowRemovedClosesEveryKind(t *testing.T) {
 		prev = append(prev, Finding{Kind: kind, Subject: n})
 	}
 	objs := objectsFromDir(t, f)
-	lv := verifiedAt(rows, testNow.Add(-time.Hour))
+	lv := verifiedAt(rows, testNow.Add(-DefaultPeriod))
 	rep := mustVerify(t, f.dir, kept, objs, nil, Options{Now: testNow, OpenFindings: prev, CatalogComplete: true, RotationPeriods: -1, LastVerified: lv})
-	if len(rep.Closed) != len(prev)-1 {
+	if len(rep.Closed) != len(prev)-2 {
 		t.Fatalf("closed %+v", rep.Closed)
 	}
 	for _, c := range rep.Closed {
-		if c.Reason != ReasonRowRemoved || c.Finding.Kind == string(I6MissingRow) {
+		if c.Reason != ReasonRowRemoved || c.Finding.Kind == string(I6MissingRow) || c.Finding.Kind == string(I3GTIDHole) {
 			t.Fatalf("closure %+v", c)
 		}
 	}
@@ -737,7 +742,7 @@ func TestVerify_UnknownRowSize(t *testing.T) {
 	// Old and off-slot: a HEAD alone closes nothing; the open finding forces the hash.
 	rows[0].UploadedAt = testNow.Add(-30 * 24 * time.Hour)
 	_, off := oldDayInSlot(t, n, testNow)
-	lv := verifiedAt(rows, off.Add(-time.Hour))
+	lv := verifiedAt(rows, off.Add(-DefaultPeriod))
 	rep = mustVerify(t, f.dir, rows, objs, nil, Options{Now: off, LastVerified: lv})
 	if c := rep.Coverage[n]; c.Object.Method != MethodHead || c.Object.SizeChecked || len(Disappeared(prev, rep)) != 0 || rep.UnverifiableSize != 1 {
 		t.Fatalf("HEAD with size 0: %+v", c)
@@ -752,7 +757,7 @@ func TestVerify_UnknownRowSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	in, _ := oldDayInSlot(t, n, testNow)
-	rep = mustVerify(t, f.dir, rows, objectsFromDir2(t, f, rows), nil, Options{Now: in, LastVerified: lv, OpenFindings: prev})
+	rep = mustVerify(t, f.dir, rows, objectsFromDir2(t, f, rows), nil, Options{Now: in, LastVerified: verifiedAt(rows, in.Add(-DefaultPeriod)), OpenFindings: prev})
 	if c := rep.Coverage[n]; c.Object.Method != MethodHashed || c.Object.Digest != "catalog" || c.Object.SizeChecked || len(rep.Closed) != 0 || rep.UnverifiableSize != 1 {
 		t.Fatalf("no local, size 0: %+v closed %+v", c, rep.Closed)
 	}

@@ -1,5 +1,5 @@
 // Package assurance provides module-level functionality for assurance.
-// input: catalog rows, a task directory of sealed segments, an object store that can HEAD and GET, an optional Chain, the findings open before this pass, each segment's last_verified_at, and a byte budget
+// input: catalog rows (with sealed_at and uploaded_at), a task directory of sealed segments, an object store that can HEAD and GET, an optional Chain, the findings open before this pass, each segment's last_verified_at, a byte budget and the recent tier's share of it
 // output: a Report whose Coverage records, per segment, what this pass did to the local copy and to the object (parsed, hashed, HEAD only, skipped, error) and why; the findings it wants open; the open findings it closes and why; the segments whose last_verified_at may advance (content-verified and named by no finding); paid bytes; counts of objects with no digest or no comparable size
 // pos: ADR 0009 phase 3 pure verifier (docs/design/0009-phase3-verifier.md); the caller must already be the task owner — this file does not ask
 // note: if this file changes, update this header and module README.md.
@@ -33,6 +33,10 @@ const (
 	DefaultRotationPeriods = 20
 	// DefaultRecent is the window in which every upload is checked by content.
 	DefaultRecent = 24 * time.Hour
+	// DefaultRecentSharePercent is the most of one pass's capacity the
+	// recent tier may spend (design §5.3). Recent work past it falls back to
+	// the rotation slot or the overdue tier.
+	DefaultRecentSharePercent = 25
 	// DefaultPeriod is the length of one rotation slot.
 	DefaultPeriod = 24 * time.Hour
 	// ClockSkewTolerance is how far in the future uploaded_at may be and
@@ -69,6 +73,7 @@ const (
 const (
 	ReasonParsed         = "local parsed and matches the catalog row"
 	ReasonLocalRemoved   = "local removed; object matches catalog"
+	ReasonObjectParsed   = "local removed; object parses and matches the catalog row"
 	ReasonLocalPresent   = "local file present"
 	ReasonObjectFound    = "object found by HEAD"
 	ReasonSizeCompared   = "object size compared"
@@ -79,6 +84,18 @@ const (
 	reasonNotScheduled   = "not scheduled for a content check this pass"
 	reasonDeferredBudget = "deferred: does not fit in what is left of this pass's budget"
 	reasonDeferredTime   = "deferred: the pass deadline ran out"
+	reasonDeferredRecent = "deferred: the recent tier's share of this pass is used up"
+)
+
+// VERIFY_FAILED details. A finding on the object, the copy left once local
+// retention removed the file, carries DetailObjectPrefix before the detail.
+const (
+	DetailParse        = "sealed segment did not parse"
+	DetailSHA          = "sha256 differs from the catalog row"
+	DetailPositions    = "event positions differ from the catalog row"
+	DetailGTID         = "gtid set differs from the catalog row"
+	DetailSize         = "size differs from the catalog row"
+	DetailObjectPrefix = "object (sole copy): "
 )
 
 // Method is what one pass did to one copy of a segment.
@@ -128,6 +145,10 @@ type Check struct {
 	// catalog row (row size known), or, for an object whose row size is
 	// unknown, by a hash that matched the local file.
 	SizeChecked bool
+	// Parsed is set on an object HASHED against the catalog digest whose
+	// bytes were also parsed while hashing and matched the row's positions
+	// and GTID set. Only an open VERIFY_FAILED with no local file asks for it.
+	Parsed bool
 }
 
 // Coverage is what one pass established about one segment.
@@ -150,16 +171,18 @@ type ObjectStore interface {
 // Size, StartPos and EndPos of 0 are unknown and are not compared.
 // RetentionRemoved is the design 0009 §26 marker: local retention removed the file.
 type VerifyRow struct {
-	Name             string
-	Sealed           bool
-	Size             int64
-	StartPos         uint32
-	EndPos           uint32
-	SHA256           string
-	GTIDSet          string
-	UploadState      string
-	ObjectKey        string
-	UploadedAt       time.Time
+	Name        string
+	Sealed      bool
+	Size        int64
+	StartPos    uint32
+	EndPos      uint32
+	SHA256      string
+	GTIDSet     string
+	UploadState string
+	ObjectKey   string
+	UploadedAt  time.Time
+	// SealedAt is the row's last change before upload (sealed_at); zero is unknown.
+	SealedAt         time.Time
 	RetentionRemoved bool
 }
 
@@ -227,17 +250,20 @@ type Report struct {
 // PassBytes > 0 caps what one pass reads. OpenFindings are the findings open
 // before this pass. LastVerified is each segment's last_verified_at (missing
 // means never). CatalogComplete says rows is the whole catalog of the task,
-// so a subject with no row has had its row removed.
+// so a subject with no row has had its row removed. RecentSharePercent caps
+// what the recent tier may spend of the pass's capacity; 0 or less means
+// DefaultRecentSharePercent, more than 100 means 100.
 type Options struct {
-	Now             time.Time
-	RotationPeriods int
-	Recent          time.Duration
-	Period          time.Duration
-	Budget          *ByteBudget
-	PassBytes       int64
-	OpenFindings    []Finding
-	LastVerified    map[string]time.Time
-	CatalogComplete bool
+	Now                time.Time
+	RotationPeriods    int
+	Recent             time.Duration
+	RecentSharePercent int
+	Period             time.Duration
+	Budget             *ByteBudget
+	PassBytes          int64
+	OpenFindings       []Finding
+	LastVerified       map[string]time.Time
+	CatalogComplete    bool
 }
 
 // ErrBudgetDeadline is a budget wait that cannot finish before the context
@@ -403,12 +429,14 @@ type seg struct {
 	localSHA string
 	last     time.Time
 	tier     int
+	demoted  bool // its recent work went past the recent share
 }
 
 // work is one scheduled content check: a local parse or an object hash.
 type work struct {
 	s     *seg
 	local bool
+	tier  int
 }
 
 // pass is one Verify call.
@@ -431,7 +459,8 @@ type pass struct {
 //
 // The pass is free work first (stat every local file, HEAD every object,
 // the chain), then content checks from one queue in priority order: forced,
-// recent, rotation slot, overdue by oldest last_verified_at. When the budget
+// recent (not content-verified since the last change; capped at a share of
+// the pass), rotation slot, overdue by oldest last_verified_at. When the budget
 // or the deadline runs out, what is left is SKIPPED and the pass ends
 // normally. Only a cancelled context returns an error.
 func Verify(ctx context.Context, dir string, rows []VerifyRow, objects ObjectStore, chain *Chain, opt Options) (rep Report, err error) {
@@ -527,7 +556,7 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 			s.cov.Local = Check{Method: MethodStat, Reason: reasonNotScheduled, Found: true, SizeChecked: row.Size > 0}
 			if row.Size > 0 && s.size != row.Size {
 				s.cov.Local.Reason = "size differs from the catalog row; not parsed"
-				rep.Findings = append(rep.Findings, *localFinding(row.Name, "size differs from the catalog row", fmt.Sprintf("local=%d row=%d", s.size, row.Size)))
+				rep.Findings = append(rep.Findings, *localFinding(row.Name, DetailSize, fmt.Sprintf("local=%d row=%d", s.size, row.Size)))
 				break
 			}
 			s.parse = true
@@ -614,14 +643,36 @@ func (p *pass) head(s *seg, noDigest bool) error {
 
 // tierOf places a segment in the content queue (design §5.2).
 func (p *pass) tierOf(s *seg) int {
-	row := s.row
 	if p.forcedBy(s) {
 		return tierForced
 	}
-	if !uploaded(row) || RecentUpload(row.UploadedAt, p.now, p.opt.Recent) {
+	if !p.named[s.row.Name] && p.fresh(s) {
 		return tierRecent
 	}
-	if InRotation(row.Name, p.now, p.opt.Period, p.opt.RotationPeriods) {
+	return p.fallback(s)
+}
+
+// fresh is the recent tier: a row not content-verified since its last
+// change (sealed, or uploaded) that is not uploaded yet, or was uploaded
+// within the recent window. Once verified it leaves the tier.
+func (p *pass) fresh(s *seg) bool {
+	row := s.row
+	changed := row.SealedAt
+	if row.UploadedAt.After(changed) {
+		changed = row.UploadedAt
+	}
+	if !s.last.IsZero() && !s.last.Before(changed) {
+		return false
+	}
+	return !uploaded(row) || RecentUpload(row.UploadedAt, p.now, p.opt.Recent)
+}
+
+// fallback is the tier below recent: the rotation slot once per slot
+// period, then overdue by last_verified_at. A segment an open finding names
+// gets the slot only.
+func (p *pass) fallback(s *seg) int {
+	row := s.row
+	if InRotation(row.Name, p.now, p.opt.Period, p.opt.RotationPeriods) && s.last.Before(slotStart(p.now, p.opt.Period)) {
 		return tierSlot
 	}
 	if p.named[row.Name] {
@@ -634,6 +685,12 @@ func (p *pass) tierOf(s *seg) int {
 	return tierNone
 }
 
+// slotStart is the start of the rotation period that holds now.
+func slotStart(now time.Time, period time.Duration) time.Time {
+	sec := int64(periodOf(period) / time.Second)
+	return time.Unix(now.Unix()/sec*sec, 0)
+}
+
 // queue is the content work in the order it is paid for.
 func (p *pass) queue(segs []*seg) []work {
 	var q []work
@@ -643,34 +700,39 @@ func (p *pass) queue(segs []*seg) []work {
 			continue
 		}
 		if s.parse {
-			q = append(q, work{s: s, local: true})
+			q = append(q, work{s: s, local: true, tier: s.tier})
 		}
 		if s.hash {
-			q = append(q, work{s: s})
+			q = append(q, work{s: s, tier: s.tier})
 		}
 	}
-	sort.SliceStable(q, func(i, j int) bool {
-		a, b := q[i], q[j]
-		if a.s.tier != b.s.tier {
-			return a.s.tier < b.s.tier
-		}
-		if !a.s.last.Equal(b.s.last) {
-			return a.s.last.Before(b.s.last)
-		}
-		if a.s.row.Name != b.s.row.Name {
-			return a.s.row.Name < b.s.row.Name
-		}
-		return a.local && !b.local
-	})
+	sort.SliceStable(q, func(i, j int) bool { return before(q[i], q[j]) })
 	return q
+}
+
+func before(a, b work) bool {
+	if a.tier != b.tier {
+		return a.tier < b.tier
+	}
+	if !a.s.last.Equal(b.s.last) {
+		return a.s.last.Before(b.s.last)
+	}
+	if a.s.row.Name != b.s.row.Name {
+		return a.s.row.Name < b.s.row.Name
+	}
+	return a.local && !b.local
 }
 
 // content pays for the queue in order. Work that does not fit is deferred
 // and the next, smaller work is tried; once the deadline has passed the rest
-// is deferred. A cancelled context stops the pass with its error.
+// is deferred. Recent work past the recent share drops to its fallback tier.
+// A cancelled context stops the pass with its error.
 func (p *pass) content(segs []*seg) error {
 	q := p.queue(segs)
-	for i, w := range q {
+	share := p.recentShare()
+	var recent int64
+	for i := 0; i < len(q); i++ {
+		w := q[i]
 		if cancelled(p.ctx) {
 			return p.ctx.Err()
 		}
@@ -684,21 +746,67 @@ func (p *pass) content(segs []*seg) error {
 		if !w.local {
 			size = w.s.objSize
 		}
+		if w.tier == tierRecent && (w.s.demoted || share >= 0 && recent+size > share) {
+			// The segment's remaining recent work drops together, so an
+			// object hash never runs ahead of the local parse it needs.
+			w.s.demoted = true
+			w.tier = p.fallback(w.s)
+			if w.tier == tierNone {
+				p.defer1(w, reasonDeferredRecent)
+				continue
+			}
+			rest := q[i+1:]
+			at := i + 1 + sort.Search(len(rest), func(j int) bool { return before(w, rest[j]) })
+			q = append(q[:at], append([]work{w}, q[at:]...)...)
+			continue
+		}
 		if !p.fits(size) {
 			p.defer1(w, reasonDeferredBudget)
 			continue
 		}
+		paid := p.count.total()
 		var err error
 		if w.local {
-			err = p.parseLocal(w.s)
+			err = p.parseLocal(w)
 		} else {
-			err = p.hashObject(w.s)
+			err = p.hashObject(w)
 		}
 		if err != nil {
 			return err
 		}
+		if w.tier == tierRecent {
+			recent += p.count.total() - paid
+		}
 	}
 	return nil
+}
+
+// recentShare is the most the recent tier may spend this pass: the share
+// of C, the lesser of PassBytes and what the budget can pay before the
+// deadline. -1 when neither limits the pass.
+func (p *pass) recentShare() int64 {
+	c := int64(-1)
+	if p.opt.PassBytes > 0 {
+		c = p.opt.PassBytes
+	}
+	if b := p.opt.Budget; b != nil && p.hasDL {
+		now := time.Now()
+		left := max(p.deadline.Sub(now), 0)
+		if bc := int64(b.lim.TokensAt(now) + float64(b.lim.Limit())*left.Seconds()); c < 0 || bc < c {
+			c = bc
+		}
+	}
+	if c < 0 {
+		return -1
+	}
+	pct := p.opt.RecentSharePercent
+	if pct <= 0 {
+		pct = DefaultRecentSharePercent
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return c * int64(pct) / 100
 }
 
 func (p *pass) fits(size int64) bool {
@@ -742,10 +850,11 @@ func (p *pass) failed(w work, err error) error {
 	return nil
 }
 
-func (p *pass) parseLocal(s *seg) error {
+func (p *pass) parseLocal(w work) error {
+	s := w.s
 	res, err := checkLocal(p.ctx, s.path, s.row, s.size, p.opt.Budget, &p.count.local)
 	if err != nil {
-		return p.failed(work{s: s, local: true}, err)
+		return p.failed(w, err)
 	}
 	res.check.Found, res.check.SizeChecked = true, s.row.Size > 0
 	s.cov.Local = res.check
@@ -758,7 +867,8 @@ func (p *pass) parseLocal(s *seg) error {
 	return nil
 }
 
-func (p *pass) hashObject(s *seg) error {
+func (p *pass) hashObject(w work) error {
+	s := w.s
 	row := s.row
 	digest, source := s.localSHA, "local"
 	if digest == "" {
@@ -766,7 +876,7 @@ func (p *pass) hashObject(s *seg) error {
 	}
 	if digest == "" {
 		if s.cov.Local.Method == MethodSkipped {
-			p.defer1(work{s: s}, "deferred: no digest this pass, the local parse was deferred")
+			p.defer1(w, "deferred: no digest this pass, the local parse was deferred")
 			return nil
 		}
 		s.cov.Object.Method = MethodUnverifiable
@@ -775,19 +885,29 @@ func (p *pass) hashObject(s *seg) error {
 		p.rep.Coverage[row.Name] = s.cov
 		return nil
 	}
+	// An open VERIFY_FAILED with no local file left can only close on the
+	// object: parse it while hashing, from the same bytes (design §6.2).
+	parse := source == "catalog" && s.cov.Local.Method == MethodAbsent && p.openKind(row.Name, KindVerifyFailed)
 	key := strings.TrimSpace(row.ObjectKey)
 	body, err := p.objects.Open(p.ctx, key)
 	if err == nil {
-		var sum string
-		sum, err = hashReader(p.ctx, body, p.opt.Budget, &p.count.object)
+		var rd segRead
+		rd, err = readSegment(p.ctx, body, s.objSize, parse, p.opt.Budget, &p.count.object)
 		body.Close()
 		if err == nil {
-			s.cov.Object = Check{Method: MethodHashed, Reason: tierReason(s.tier), Digest: source, Found: true,
+			s.cov.Object = Check{Method: MethodHashed, Reason: tierReason(w.tier), Digest: source, Found: true,
 				SizeChecked: s.cov.Object.SizeChecked}
-			if !strings.EqualFold(sum, digest) {
-				p.rep.Findings = append(p.rep.Findings, *objectFinding(KindObjectCorrupt, row.Name, "object sha256 differs", fmt.Sprintf("object=%s want=%s source=%s", sum, digest, source)))
-			} else if source == "local" {
+			switch {
+			case !strings.EqualFold(rd.sum, digest):
+				p.rep.Findings = append(p.rep.Findings, *objectFinding(KindObjectCorrupt, row.Name, "object sha256 differs", fmt.Sprintf("object=%s want=%s source=%s", rd.sum, digest, source)))
+			case source == "local":
 				s.cov.Object.SizeChecked = true
+			case parse:
+				if detail, evidence := mismatch(row, rd, false); detail != "" {
+					p.rep.Findings = append(p.rep.Findings, *localFinding(row.Name, DetailObjectPrefix+detail, evidence))
+				} else {
+					s.cov.Object.Parsed = true
+				}
 			}
 			p.rep.Coverage[row.Name] = s.cov
 			return nil
@@ -799,7 +919,17 @@ func (p *pass) hashObject(s *seg) error {
 		p.rep.Coverage[row.Name] = s.cov
 		return nil
 	}
-	return p.failed(work{s: s}, err)
+	return p.failed(w, err)
+}
+
+// openKind is whether a finding of kind on subject was open before this pass.
+func (p *pass) openKind(subject, kind string) bool {
+	for _, k := range p.forced[subject] {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func tierReason(tier int) string {
@@ -891,7 +1021,7 @@ func Closures(previous []Finding, rep Report) []Closure {
 
 // closes is the per-kind detector table (design §6.2): the reason f closes, or "".
 func closes(f Finding, rep Report) string {
-	if rep.CatalogComplete && !rep.catalog[f.Subject] && f.Kind != string(I6MissingRow) {
+	if rep.CatalogComplete && !rep.catalog[f.Subject] && rowScoped(f.Kind) {
 		return ReasonRowRemoved
 	}
 	cov, ok := rep.Coverage[f.Subject]
@@ -900,8 +1030,11 @@ func closes(f Finding, rep Report) string {
 		if ok && cov.Local.Method == MethodParsed {
 			return ReasonParsed
 		}
-		if ok && cov.Local.Method == MethodAbsent && cov.Object.Method == MethodHashed && cov.Object.Digest == "catalog" && !reported(rep, KindObjectCorrupt, f.Subject) {
-			return ReasonLocalRemoved
+		if ok && cov.Local.Method == MethodAbsent && cov.Object.Method == MethodHashed && cov.Object.Digest == "catalog" && cov.Object.Parsed && !reported(rep, KindObjectCorrupt, f.Subject) {
+			if strings.HasPrefix(f.Detail, DetailSHA) {
+				return ReasonLocalRemoved
+			}
+			return ReasonObjectParsed
 		}
 	case KindLocalMissing:
 		if ok && cov.Local.Found {
@@ -938,6 +1071,20 @@ func closes(f Finding, rep Report) string {
 		}
 	}
 	return ""
+}
+
+// rowScoped is a kind about one catalog row, which a removed row closes:
+// this file's kinds and the chain's I6 kinds except I6_MISSING_ROW. The
+// chain's other kinds (I1–I5, I7) describe the chain and close only when the
+// chain is checked (design §6.2).
+func rowScoped(kind string) bool {
+	switch kind {
+	case KindVerifyFailed, KindObjectCorrupt, KindUploadClockSkew:
+		return true
+	case string(I6MissingRow):
+		return false
+	}
+	return strings.HasPrefix(kind, "I6_")
 }
 
 func reported(rep Report, kind, subject string) bool {
@@ -1028,45 +1175,90 @@ func checkLocal(ctx context.Context, path string, row VerifyRow, size int64, bud
 		return localResult{}, err
 	}
 	defer f.Close()
-	br := &budgetReader{ctx: ctx, r: f, b: budget, n: n}
-	h := sha256.New()
-	span := &spanTracker{size: size}
-	w := io.MultiWriter(h, span)
-	contents, parseErr := binlog.ReadSealedSegmentContents(io.TeeReader(br, w))
-	if parseErr == nil {
-		_, parseErr = io.Copy(io.Discard, io.TeeReader(br, w))
-	}
-	if br.err != nil {
-		return localResult{}, br.err
-	}
-	if err := ctx.Err(); err != nil {
+	rd, err := readSegment(ctx, f, size, true, budget, n)
+	if err != nil {
 		return localResult{}, err
 	}
 	parsed := func(reason string, finding *Finding, sum string) (localResult, error) {
 		return localResult{check: Check{Method: MethodParsed, Reason: reason}, finding: finding, sum: sum}, nil
 	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	if parseErr != nil {
-		return parsed("did not parse", localFinding(row.Name, "sealed segment did not parse", parseErr.Error()), "")
+	if detail, evidence := mismatch(row, rd, true); detail != "" {
+		sum := rd.sum
+		if detail == DetailParse {
+			sum = ""
+		}
+		return parsed(reasonFor(detail), localFinding(row.Name, detail, evidence), sum)
 	}
-	want := strings.TrimSpace(row.SHA256)
-	if want != "" && !strings.EqualFold(sum, want) {
-		return parsed("sha256 differs from the catalog row", localFinding(row.Name, "sha256 differs from the catalog row", fmt.Sprintf("local=%s row=%s", sum, want)), sum)
+	if strings.TrimSpace(row.SHA256) == "" {
+		return parsed("parsed; catalog row has no sha256 to compare", nil, rd.sum)
+	}
+	return parsed("parsed; matches the catalog row", nil, rd.sum)
+}
+
+func reasonFor(detail string) string {
+	if detail == DetailParse {
+		return "did not parse"
+	}
+	return detail
+}
+
+// segRead is one segment's bytes read once: the SHA-256 of everything read,
+// and, when parsed, the parse result and the event span.
+type segRead struct {
+	sum      string
+	contents binlog.SegmentContents
+	parseErr error
+	span     *spanTracker
+}
+
+// readSegment streams r through the budget into the hash and, when parse is
+// set, the parser and the span tracker. A parse failure does not stop the
+// read: the rest is drained into the hash so the digest covers every byte.
+// The error is a budget, context or read error, never a parse failure.
+func readSegment(ctx context.Context, r io.Reader, size int64, parse bool, budget *ByteBudget, n *int64) (segRead, error) {
+	br := &budgetReader{ctx: ctx, r: r, b: budget, n: n}
+	h := sha256.New()
+	rd := segRead{span: &spanTracker{size: size}}
+	var err error
+	if parse {
+		w := io.MultiWriter(h, rd.span)
+		rd.contents, rd.parseErr = binlog.ReadSealedSegmentContents(io.TeeReader(br, w))
+		_, err = io.Copy(w, br)
+	} else {
+		_, err = io.Copy(h, br)
+	}
+	if br.err != nil {
+		return segRead{}, br.err
+	}
+	if err != nil {
+		return segRead{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return segRead{}, err
+	}
+	rd.sum = hex.EncodeToString(h.Sum(nil))
+	return rd, nil
+}
+
+// mismatch is the first way rd differs from row, as a VERIFY_FAILED detail
+// and evidence, or "" when it matches. sha compares the digest too.
+func mismatch(row VerifyRow, rd segRead, sha bool) (string, string) {
+	if rd.parseErr != nil {
+		return DetailParse, rd.parseErr.Error()
+	}
+	if want := strings.TrimSpace(row.SHA256); sha && want != "" && !strings.EqualFold(rd.sum, want) {
+		return DetailSHA, fmt.Sprintf("local=%s row=%s", rd.sum, want)
 	}
 	if row.StartPos > 0 || row.EndPos > 0 {
-		start, end, ok := span.result()
+		start, end, ok := rd.span.result()
 		if !ok || (row.StartPos > 0 && start != row.StartPos) || (row.EndPos > 0 && end != row.EndPos) {
-			return parsed("event positions differ from the catalog row", localFinding(row.Name, "event positions differ from the catalog row", fmt.Sprintf("start local=%d row=%d end local=%d row=%d", start, row.StartPos, end, row.EndPos)), sum)
+			return DetailPositions, fmt.Sprintf("start got=%d row=%d end got=%d row=%d", start, row.StartPos, end, row.EndPos)
 		}
 	}
-	if gtid := strings.TrimSpace(row.GTIDSet); gtid != "" && contents.GTIDs.String() != gtid {
-		return parsed("gtid set differs from the catalog row", localFinding(row.Name, "gtid set differs from the catalog row", fmt.Sprintf("parsed=%s row=%s", contents.GTIDs.String(), gtid)), sum)
+	if gtid := strings.TrimSpace(row.GTIDSet); gtid != "" && rd.contents.GTIDs.String() != gtid {
+		return DetailGTID, fmt.Sprintf("parsed=%s row=%s", rd.contents.GTIDs.String(), gtid)
 	}
-	reason := "parsed; matches the catalog row"
-	if want == "" {
-		reason = "parsed; catalog row has no sha256 to compare"
-	}
-	return parsed(reason, nil, sum)
+	return "", ""
 }
 
 func localFinding(name, detail, evidence string) *Finding {
@@ -1141,6 +1333,9 @@ func (b *budgetReader) Read(p []byte) (int, error) {
 			return 0, werr
 		}
 		*b.n += int64(n)
+	}
+	if err != nil && err != io.EOF {
+		b.err = err
 	}
 	return n, err
 }

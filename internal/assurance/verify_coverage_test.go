@@ -44,7 +44,7 @@ func TestVerify_CorruptObjectStaysOpenUntilRehashed(t *testing.T) {
 	good := append([]byte(nil), objs.obj[key]...)
 	flipStored(t, objs, key)
 	slotDay, nextDay := oldDayInSlot(t, name, testNow)
-	fresh := verifiedAt(rows, slotDay.Add(-time.Hour))
+	fresh := verifiedAt(rows, slotDay.Add(-DefaultPeriod))
 
 	found := mustVerify(t, f.dir, rows, objs, nil, Options{Now: slotDay, LastVerified: fresh})
 	if !hasFinding(found.Findings, KindObjectCorrupt, name) {
@@ -102,7 +102,7 @@ func TestVerify_ForcedRecheckWithoutLocalFollowsTheRotation(t *testing.T) {
 	for d := 0; d < 45; d++ {
 		now := testNow.Add(time.Duration(d) * 24 * time.Hour)
 		before := objs.openCount()
-		rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: now, OpenFindings: open, LastVerified: verifiedAt(rows, now.Add(-time.Hour))})
+		rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: now, OpenFindings: open, LastVerified: verifiedAt(rows, now.Add(-DefaultPeriod))})
 		in := InRotation(name, now, DefaultPeriod, DefaultRotationPeriods)
 		if in {
 			slots++
@@ -139,7 +139,7 @@ func TestVerify_OpenVerifyFailedForcesObjectHash(t *testing.T) {
 	name := rows[0].Name
 	objs := objectsFromDir(t, f)
 	_, off := oldDayInSlot(t, name, testNow)
-	fresh := verifiedAt(rows, off.Add(-time.Hour))
+	fresh := verifiedAt(rows, off.Add(-DefaultPeriod))
 	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: off, LastVerified: fresh})
 	if c := rep.Coverage[name]; c.Object.Method != MethodHead || c.Local.Method != MethodStat {
 		t.Fatalf("off-slot coverage %+v", c)
@@ -312,7 +312,10 @@ func TestDisappeared_ClosesOnlyWithTheDetectingMethod(t *testing.T) {
 		{KindVerifyFailed, cov(m(MethodParsed), m(""), false), ReasonParsed},
 		{KindVerifyFailed, cov(found(MethodStat), found(MethodHashed), true), ""},
 		{KindVerifyFailed, cov(m(MethodAbsent), found(MethodHashed), true), ""},
-		{KindVerifyFailed, cov(m(MethodAbsent), Check{Method: MethodHashed, Digest: "catalog", Found: true}, true), ReasonLocalRemoved},
+		{KindVerifyFailed, cov(m(MethodAbsent), Check{Method: MethodHashed, Digest: "catalog", Found: true, Parsed: true}, true), ReasonObjectParsed},
+		{KindVerifyFailed, cov(m(MethodAbsent), Check{Method: MethodHashed, Digest: "catalog", Found: true}, true), ""},
+		{KindVerifyFailed, cov(m(MethodAbsent), Check{Method: MethodHashed, Digest: "local", Found: true, Parsed: true}, true), ""},
+		{KindVerifyFailed, cov(m(MethodAbsent), Check{Method: MethodHead, Digest: "catalog", Found: true, Parsed: true}, true), ""},
 		{KindVerifyFailed, cov(m(MethodAbsent), Check{Method: MethodHashed, Digest: "local", Found: true}, true), ""},
 		{KindVerifyFailed, cov(m(MethodAbsent), Check{Method: MethodHead, Digest: "catalog", Found: true}, true), ""},
 		{KindVerifyFailed, cov(m(MethodSkipped), Check{Method: MethodHashed, Digest: "catalog", Found: true}, true), ""},
@@ -370,6 +373,20 @@ func TestDisappeared_ClosesOnlyWithTheDetectingMethod(t *testing.T) {
 			t.Errorf("case %d: Disappeared disagrees with Closures", i)
 		}
 	}
+	// Only the sha-mismatch variant closes as "local removed; object matches catalog".
+	byHash := cov(m(MethodAbsent), Check{Method: MethodHashed, Digest: "catalog", Found: true, Parsed: true}, true)
+	for detail, want := range map[string]string{DetailSHA: ReasonLocalRemoved, DetailParse: ReasonObjectParsed, DetailPositions: ReasonObjectParsed, DetailGTID: ReasonObjectParsed, DetailSize: ReasonObjectParsed} {
+		got := Closures([]Finding{{Kind: KindVerifyFailed, Subject: s, Detail: detail}}, byHash)
+		if len(got) != 1 || got[0].Reason != want {
+			t.Errorf("detail %q: %+v want %q", detail, got, want)
+		}
+	}
+	// A VERIFY_FAILED does not close by the object while OBJECT_CORRUPT is reported on it.
+	withCorrupt := cov(m(MethodAbsent), Check{Method: MethodHashed, Digest: "catalog", Found: true, Parsed: true}, true)
+	withCorrupt.Findings = []Finding{{Kind: KindObjectCorrupt, Subject: s}}
+	if got := Closures([]Finding{{Kind: KindVerifyFailed, Subject: s, Detail: DetailSHA}}, withCorrupt); len(got) != 0 {
+		t.Errorf("closed despite OBJECT_CORRUPT: %+v", got)
+	}
 	// Reported again is never closed, whatever the coverage.
 	rep := cov(found(MethodParsed), found(MethodHashed), true)
 	rep.Findings = []Finding{{Kind: KindObjectCorrupt, Subject: s}}
@@ -409,7 +426,7 @@ func TestVerify_LastVerifiedOnlyForContentChecks(t *testing.T) {
 	for InRotation(rows[3].Name, off, DefaultPeriod, DefaultRotationPeriods) {
 		off = off.Add(24 * time.Hour)
 	}
-	fresh := verifiedAt(rows, off.Add(-time.Hour))
+	fresh := verifiedAt(rows, off.Add(-DefaultPeriod))
 	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: off, OpenFindings: []Finding{{Kind: KindObjectCorrupt, Subject: rows[0].Name}}, LastVerified: fresh})
 	want := map[string][2]Method{
 		rows[0].Name: {MethodAbsent, MethodUnverifiable},
