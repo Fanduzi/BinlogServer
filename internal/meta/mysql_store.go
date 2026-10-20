@@ -529,6 +529,9 @@ type MySQLTaskStore struct {
 	healthUpsertAlias atomic.Int32
 	// session is set only by OpenClusterMeta. Standalone pools stay nil.
 	session *sessionState
+	// lockWaitSeen overrides the lock-wait probe. Nil asks
+	// performance_schema.data_lock_waits, then information_schema.innodb_trx.
+	lockWaitSeen func(threadID int64) bool
 }
 
 var _ tasks.TaskStore = (*MySQLTaskStore)(nil)

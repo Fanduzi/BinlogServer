@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: cluster.side_kill, information_schema, and meta_canary when that table exists
-// output: side_kill on only after the canary passes; otherwise off. The client never sends a server kill statement
+// output: side_kill on only after the canary passes; otherwise off. The client never sends a server kill statement. sleepingLeaseHolder matches one task id exactly on MySQL and on MariaDB
 // pos: ADR 0011 PR-2 drill and auto (P2-9). Creating the procedure is a later migration
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -255,25 +255,18 @@ func (s *MySQLTaskStore) armMariaDBWaiter(ctx context.Context, nodeID string) (b
 	return false, nil
 }
 
-func (s *MySQLTaskStore) sleepingLeaseHolder(ctx context.Context, taskID string) (string, bool) {
-	if s.session.flavor == "mariadb" {
-		var id string
-		err := s.db.QueryRowContext(ctx, `
+const mariaSleepingLeaseSQL = `
 SELECT t.trx_id
 FROM information_schema.innodb_lock_waits w
 JOIN information_schema.innodb_locks l ON l.lock_id = w.blocking_lock_id
 JOIN information_schema.innodb_trx t ON t.trx_id = w.blocking_trx_id
 WHERE l.lock_table LIKE '%task_leases%'
+  AND (l.lock_data = ? OR l.lock_data = CONCAT('''', ?, ''''))
   AND t.trx_state = 'RUNNING'
   AND (t.trx_query IS NULL OR t.trx_query = '')
-LIMIT 1`).Scan(&id)
-		if err != nil || id == "" {
-			return "", false
-		}
-		return id, true
-	}
-	var id string
-	err := s.db.QueryRowContext(ctx, `
+LIMIT 1`
+
+const mysqlSleepingLeaseSQL = `
 SELECT trx.trx_id
 FROM information_schema.innodb_trx trx
 JOIN performance_schema.data_locks dl ON dl.ENGINE_TRANSACTION_ID = trx.trx_id
@@ -282,8 +275,16 @@ WHERE trx.trx_state = 'RUNNING'
   AND dl.OBJECT_SCHEMA = DATABASE()
   AND dl.OBJECT_NAME = 'task_leases'
   AND dl.LOCK_STATUS = 'GRANTED'
-  AND dl.LOCK_DATA LIKE ?
-LIMIT 1`, "%"+taskID+"%").Scan(&id)
+  AND (dl.LOCK_DATA = ? OR dl.LOCK_DATA = CONCAT('''', ?, ''''))
+LIMIT 1`
+
+func (s *MySQLTaskStore) sleepingLeaseHolder(ctx context.Context, taskID string) (string, bool) {
+	q := mysqlSleepingLeaseSQL
+	if s.session.flavor == "mariadb" {
+		q = mariaSleepingLeaseSQL
+	}
+	var id string
+	err := s.db.QueryRowContext(ctx, q, taskID, taskID).Scan(&id)
 	if err != nil || id == "" {
 		return "", false
 	}
