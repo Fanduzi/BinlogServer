@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the task list (this process and the task store) and task_health.evaluated_at, aged against StoreClock.StoreNow when the store has one
-// output: Facts for one _cluster pass that derives HEALTH_STALE only (task.state complete, no signals, no chain, no store scope) and the process-local knownSince of tasks that have no health row
+// output: Facts for one _cluster pass that derives HEALTH_STALE only (task.state complete, no signals, no chain, no store scope) and the process-local knownSince of tasks that have no health row; stale_after is ownership.EffectiveStaleAfter (default 125s)
 // pos: ADR 0009 P2-6.1 (docs/design/0009-phase2-health-evaluator.md §28); only the _health holder runs this
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -13,15 +13,23 @@ import (
 
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
+	"binlog_server/internal/ownership"
 )
 
-// staleAfter is health.stale_after. Zero config means five sweeps, so the
-// threshold follows the sweep instead of a fixed 300s.
-func (e *Evaluator) staleAfter() time.Duration {
-	if e.cfg.StaleAfter > 0 {
-		return e.cfg.StaleAfter
+// configuredNoProgress is the live-owner TASK_NO_PROGRESS threshold. It stays
+// the configured value (default 120s). It is not clamped to the RTO bound.
+func (e *Evaluator) configuredNoProgress() time.Duration {
+	if e.cfg.NoProgressAfter > 0 {
+		return e.cfg.NoProgressAfter
 	}
-	return 5 * e.cfg.Sweep
+	return health.DefaultNoProgressAfter
+}
+
+// staleAfter is the effective HEALTH_STALE threshold: max(2×sweep+lock_wait,
+// min(S, RTO)). S is 5×sweep when health.stale_after_sec is 0. The result
+// is not clamped below one sweep. Defaults are 125s.
+func (e *Evaluator) staleAfter() time.Duration {
+	return ownership.EffectiveStaleAfter(e.ownershipParams())
 }
 
 // staleFacts fills the _cluster pass (design §28). A list, health or clock

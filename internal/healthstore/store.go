@@ -1,6 +1,6 @@
 // Package healthstore provides module-level functionality for healthstore.
 // input: health transitions and health verdicts for one task, guarded by a health.Fence
-// output: the Store contract (fenced, transactional apply with store-allocated generations and digest replay; complete open-set paging; health listing), its errors, the fence rule (CheckFence), StoreClock (the database clock HEALTH_STALE ages against, §28), ChainOwnerStore (task_health.chain_owner, §30) and the standalone file store
+// output: the Store contract (fenced, transactional apply with store-allocated generations and digest replay; complete open-set paging; health listing), its errors including ErrLockWait, the fence rule (CheckFence), StoreClock (the database clock HEALTH_STALE ages against, §28), ChainOwnerStore (task_health.chain_owner, §30) and the standalone file store
 // note P2-6c (#421): a proxy or delegated write on a released lease is not compared by fence_node at the same epoch
 // note P2-6.2 (§30): a delegated write also requires stored.ChainOwner == fence.Node
 // pos: persistence seam of ADR 0009 phase 2 (P2-2); meta implements the MySQL store, this package the standalone file store
@@ -29,6 +29,10 @@ var (
 	// ErrModeUnsupported: the store cannot check this fence mode (the file
 	// store has no lease table).
 	ErrModeUnsupported = errors.New("fence mode not supported by this store")
+	// ErrLockWait: the health transaction hit a lock wait (MySQL 1205) or
+	// the session-kill bound. One observation is not a page; the caller
+	// confirms a second one before META_LOCK_STALLED.
+	ErrLockWait = errors.New("metadata lock wait")
 )
 
 // Lease is the task_leases row a cluster fence is checked against.

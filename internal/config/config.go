@@ -1,6 +1,7 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
 // output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
+// note ADR 0011: cluster.side_kill is off or auto, default off
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -79,6 +80,9 @@ type ClusterConfig struct {
 	LeaseRenewIntervalSec  int
 	LeaseGraceSec          int
 	FailoverPolicy         string
+	// SideKill is cluster.side_kill: off (default) or auto. auto is a direct
+	// connection only. Empty means off.
+	SideKill string
 }
 
 // LogConfig 定义日志级别、输出位置与轮转策略。
@@ -240,6 +244,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("cluster.lease_renew_interval_sec", 5)
 	v.SetDefault("cluster.lease_grace_sec", 30)
 	v.SetDefault("cluster.failover_policy", "rebuild_current_file")
+	v.SetDefault("cluster.side_kill", "off")
 	v.SetDefault("upload.use_ssl", false)
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.encoding", "json")
@@ -320,6 +325,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			LeaseRenewIntervalSec:  getInt(&loadErr, v, "cluster.lease_renew_interval_sec"),
 			LeaseGraceSec:          getInt(&loadErr, v, "cluster.lease_grace_sec"),
 			FailoverPolicy:         getString(v, decryptor, "cluster.failover_policy"),
+			SideKill:               getString(v, decryptor, "cluster.side_kill"),
 		},
 		UploadEndpoint: getString(v, decryptor, "upload.endpoint", "upload_endpoint"),
 		UploadBucket:   getString(v, decryptor, "upload.bucket", "upload_bucket"),
@@ -784,7 +790,19 @@ func validateConfig(cfg Config) error {
 	if err := validateTracingConfig(cfg.Tracing); err != nil {
 		return err
 	}
+	if err := validateSideKill(cfg.Cluster.SideKill); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateSideKill(mode string) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "off", "auto":
+		return nil
+	default:
+		return fmt.Errorf("cluster.side_kill must be off or auto, got %q", mode)
+	}
 }
 
 func validateHTTPTimeoutConfig(scope string, cfg HTTPServerTimeoutConfig) error {

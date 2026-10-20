@@ -308,6 +308,22 @@ func TestMutantF02_ChainOwnerBackNeedsAFreshHeartbeat(t *testing.T) {
 	}
 }
 
+func TestMutantQ13_ChainOwnerBackRejectsVerifiedAtEqualFailedAt(t *testing.T) {
+	s := yieldTail(t, "n1", "n2")
+	goneAt := s.TailSince.Add(EffectiveNodeGone(s.Params) + time.Second)
+	s = heartbeat(s, "n1", s.TailSince)
+	s = applied(t, s, Event{Kind: EventChainOwnerGone, Node: "_health"}, goneAt)
+	s = heartbeat(s, "n1", goneAt)
+	s = applied(t, s, Event{Kind: EventChainVerified, Node: "n1", ReadOK: true}, goneAt)
+	if !s.Chain.VerifiedAt.Equal(s.FailedAt) {
+		t.Fatalf("verified_at %s failed_at %s", s.Chain.VerifiedAt, s.FailedAt)
+	}
+	res := step(t, s, Event{Kind: EventChainOwnerBack, Node: "n1"}, goneAt)
+	if res.Decision == DecisionApplied || res.State.Phase != PhaseFailed {
+		t.Fatalf("equal verified_at accepted: %s phase %s", res.Decision, res.State.Phase)
+	}
+}
+
 func TestMutantF20_ChainOwnerBackAllowsTheExactBoundary(t *testing.T) {
 	s := yieldTail(t, "n1", "n2")
 	goneAt := s.TailSince.Add(EffectiveNodeGone(s.Params) + time.Second)

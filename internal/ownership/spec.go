@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Params and the migration facts the caller already collected
-// output: effective stale_after, node_gone_after, RTO, and the capped refusal delay
+// output: effective stale_after, node_gone_after, RTO, the session-kill bound, the same-node restart bound, and the capped refusal delay
 // pos: formulas from ADR 0011 §2, §3.4, and §5 that are not themselves transitions
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -40,6 +40,35 @@ func (p Params) fill() Params {
 		p.SideKill = d.SideKill
 	}
 	return p
+}
+
+// SessionKillBound is min(5s, lease_ttl/2), and at least 1s. A non-positive
+// lease TTL uses the published default. MySQL 8 and MariaDB both arm session
+// timeouts to this bound.
+func SessionKillBound(leaseTTL time.Duration) time.Duration {
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultParams().LeaseTTL
+	}
+	half := leaseTTL / 2
+	const cap = 5 * time.Second
+	if half > cap {
+		half = cap
+	}
+	if half < time.Second {
+		return time.Second
+	}
+	return half
+}
+
+// SameNodeRestartBound is the per-node restart bound: the cross-node RTO plus
+// this node's own registration TTL. F10 counts that TTL here. A clean restart
+// does not take an unexpired registration; that wait is ADR 0001 session
+// ownership. Another worker_id is not in this sum.
+func SameNodeRestartBound(p Params, registrationTTL time.Duration) time.Duration {
+	if registrationTTL < 0 {
+		registrationTTL = 0
+	}
+	return RTOBound(p) + registrationTTL
 }
 
 // RTOBound is lease_ttl + max(idle_kill, lock_wait) + claim_interval + start_to_ready.
