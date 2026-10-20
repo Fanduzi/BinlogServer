@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Step and Check only. No helper from FairStepBound
-// output: the observed fair-schedule length beside FairStepBound
+// output: the observed fair-schedule length beside FairStepBound, including terminal FAILED
 // pos: the Step search and the adversarial walks that check the upper bound
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -19,11 +19,13 @@ import (
 const obsStateCap = 200000
 
 type obsResult struct {
-	steps int
-	state State
-	at    time.Time
-	ok    bool
-	over  bool
+	steps  int
+	states int
+	state  State
+	at     time.Time
+	ok     bool
+	over   bool
+	stuck  bool
 }
 
 type obsMove struct {
@@ -48,21 +50,25 @@ type obsHit struct {
 }
 
 type observer struct {
-	memo map[string]obsHit
-	over bool
+	memo      map[string]obsHit
+	over      bool
+	stuck     bool
+	stuckAt   time.Time
+	stuckSnap State
 }
 
 func observeFair(start State, now time.Time) obsResult {
 	sr := &observer{memo: map[string]obsHit{}}
 	steps, ok := sr.rec(start, now, 0)
+	states := len(sr.memo)
 	if sr.over {
-		return obsResult{over: true}
+		return obsResult{over: true, states: states}
 	}
-	if !ok {
-		return obsResult{}
+	if sr.stuck || !ok {
+		return obsResult{stuck: sr.stuck, states: states, state: sr.stuckSnap, at: sr.stuckAt}
 	}
 	end, at := sr.witness(start, now, 0)
-	return obsResult{steps: steps, state: end, at: at, ok: true}
+	return obsResult{steps: steps, states: states, state: end, at: at, ok: true}
 }
 
 func (sr *observer) rec(s State, now time.Time, depth int) (int, bool) {
@@ -74,7 +80,7 @@ func (sr *observer) rec(s State, now time.Time, depth int) (int, bool) {
 		return 0, false
 	}
 	s = obsPrep(s, now)
-	if obsRunning(s, now) {
+	if obsTerminal(s, now) {
 		return 0, true
 	}
 	key := obsKey(s, now)
@@ -88,6 +94,12 @@ func (sr *observer) rec(s State, now time.Time, depth int) (int, bool) {
 	// A re-entry while this key is open is a cycle, not a fair path.
 	sr.memo[key] = obsHit{choice: -1}
 	moves := fairMoves(s, now)
+	if len(moves) == 0 {
+		sr.stuck = true
+		sr.stuckSnap = s
+		sr.stuckAt = now
+		return 0, false
+	}
 	best, choice := -1, -1
 	for i := range moves {
 		n, ok := sr.rec(moves[i].s, moves[i].at, depth+1)
@@ -107,7 +119,7 @@ func (sr *observer) rec(s State, now time.Time, depth int) (int, bool) {
 
 func (sr *observer) witness(s State, now time.Time, depth int) (State, time.Time) {
 	s = obsPrep(s, now)
-	if obsRunning(s, now) || depth > 400 {
+	if obsTerminal(s, now) || depth > 400 {
 		return s, now
 	}
 	hit, seen := sr.memo[obsKey(s, now)]
@@ -199,10 +211,11 @@ func fairMoves(s State, now time.Time) []obsMove {
 		res.State.trace = nil
 		return []obsMove{{s: res.State, at: now, kind: moveForced}}
 	}
+	// RetryUntil still blocks Acquire after the lease has already expired.
+	if s.Phase == PhaseRetryBackoff && now.Before(s.RetryUntil) {
+		return []obsMove{{s: s, at: s.RetryUntil, kind: moveJump}}
+	}
 	if live && reader != "" && s.Lease.Owner == reader {
-		if s.Phase == PhaseRetryBackoff && now.Before(s.RetryUntil) {
-			return []obsMove{{s: s, at: s.RetryUntil, kind: moveJump}}
-		}
 		res := Step(s, Held(s, EventDumpReady, reader), now)
 		if res.Decision == DecisionApplied || res.Decision == DecisionIdempotent {
 			res.State.trace = nil
@@ -227,6 +240,21 @@ func fairMoves(s State, now time.Time) []obsMove {
 		out = append(out, obsMove{s: next, at: now, kind: moveWaste, attempts: s.Refusal[node.ID].Attempts})
 	}
 	horizon := obsHorizon(s, now, reader)
+	if due, ok := stoppedChainGoneAt(s, now); ok {
+		if !now.Before(due) {
+			// The sweep is enabled. It is the fair end: ChainOwnerBack stays
+			// refused while this owner is stopped.
+			res := Step(s, Event{Kind: EventChainOwnerGone, Node: "_health"}, now)
+			if res.Decision == DecisionApplied {
+				res.State.trace = nil
+				return []obsMove{{s: res.State, at: now, kind: moveForced}}
+			}
+		} else if horizon.After(due) {
+			// A reader who is already late past the sweep does not get to
+			// claim after it. A reader who can claim now still does.
+			horizon = due
+		}
+	}
 	if horizon.After(now) {
 		for _, when := range obsJumps(s, now, horizon) {
 			out = append(out, obsMove{s: s, at: when, kind: moveJump})
@@ -378,6 +406,57 @@ func obsRunning(s State, now time.Time) bool {
 	return obsCanRead(s, s.Lease.Owner)
 }
 
+// obsTerminal is RUNNING, or a FAILED reason the fair scheduler does not
+// leave. CHAIN_OWNER_GONE is terminal while the chain owner is stopped or
+// missing. A chain owner that is not stopped can still verify and return.
+func obsTerminal(s State, now time.Time) bool {
+	if obsRunning(s, now) {
+		return true
+	}
+	if s.Phase != PhaseFailed {
+		return false
+	}
+	switch s.FailedReason {
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+		return true
+	case ReasonChainOwnerGone:
+		return obsStopped(s, s.Chain.Owner) || obsFind(s, s.Chain.Owner) == nil
+	default:
+		return false
+	}
+}
+
+func obsFind(s State, id string) *Node {
+	for i := range s.Nodes {
+		if s.Nodes[i].ID == id {
+			return &s.Nodes[i]
+		}
+	}
+	return nil
+}
+
+// stoppedChainGoneAt is when the sweep's ChainOwnerGone applies for a
+// stopped chain owner. The guards match chainOwnerGone. The deadline is
+// one nanosecond past the effective node_gone, because the heartbeat check
+// is strict.
+func stoppedChainGoneAt(s State, now time.Time) (time.Time, bool) {
+	if s.Chain.Owner == "" || s.Phase != PhaseLeaseDegraded || s.TailSince.IsZero() {
+		return time.Time{}, false
+	}
+	owner := obsFind(s, s.Chain.Owner)
+	if owner == nil || !owner.Stopped {
+		return time.Time{}, false
+	}
+	due := now
+	if !owner.HeartbeatAt.IsZero() {
+		due = owner.HeartbeatAt.Add(EffectiveNodeGone(s.Params) + time.Nanosecond)
+	}
+	if due.Before(now) {
+		due = now
+	}
+	return due, true
+}
+
 func obsKey(s State, now time.Time) string {
 	var b strings.Builder
 	b.Grow(160)
@@ -516,6 +595,10 @@ func stoppedOwnerFixture(t *testing.T) (State, time.Time) {
 	s.Lease.ExpireAt = now.Add(15 * time.Second)
 	s.Phase = PhaseRunning
 	s.Nodes[0].Stopped = true
+	s.Nodes[0].HeartbeatAt = now
+	// The stopped holder is not the chain owner. The live reader is.
+	s.Chain.Owner = "n2"
+	s.Chain.VerifiedAt = now
 	s.Refusal["n4"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(10 * time.Second), Attempts: 1}
 	return s, now
 }
@@ -567,6 +650,83 @@ func untilAtHorizon(t *testing.T) (State, time.Time) {
 	return s, now
 }
 
+// idleKillFixture holds the row lock for longer than the default 5s.
+// Both non-readers become ready in that gap.
+func idleKillFixture(t *testing.T) (State, time.Time) {
+	t.Helper()
+	now := t0.Add(time.Hour)
+	s := boot(t, "n1", t0, []Node{peer("n2", false, t0), peer("n3", false, t0)})
+	s = expireLease(s, now)
+	s.Params.Storage = StoragePerNode
+	s.Params.IdleKill = 8 * time.Second
+	s.Lock = Lock{Held: true, HeldBy: "n1", Since: now}
+	s.Refusal["n2"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(6 * time.Second), Attempts: 1}
+	s.Refusal["n3"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(6 * time.Second), Attempts: 1}
+	return s, now
+}
+
+// stoppedNonReaderOwnerFixture is a stopped holder who cannot read.
+// The lease TTL is the clock that lets the refused non-readers claim.
+func stoppedNonReaderOwnerFixture(t *testing.T) (State, time.Time) {
+	t.Helper()
+	now := t0.Add(time.Hour)
+	s := boot(t, "n1", t0, []Node{peer("n2", true, t0), peer("n3", false, t0), peer("n4", false, t0)})
+	s.Nodes[0].Stopped = true
+	s.Nodes[0].CanRead = false
+	s.Nodes[0].HeartbeatAt = now
+	// The stopped holder is not the chain owner. The live reader is.
+	s.Chain.Owner = "n2"
+	s.Chain.VerifiedAt = now
+	s.Lease.Present = true
+	s.Lease.Owner = "n1"
+	s.Lease.ExpireAt = now.Add(15 * time.Second)
+	s.Phase = PhaseRunning
+	s.Params.Storage = StoragePerNode
+	s.Refusal["n3"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(10 * time.Second), Attempts: 1}
+	s.Refusal["n4"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(10 * time.Second), Attempts: 1}
+	return s, now
+}
+
+// stoppedChainOwnerFixture is QA's stopped chain owner. n2 verified the
+// chain, lost the epoch, and was then stopped. n3's yield wrote the tail
+// timestamp. n1 can read but is refused past node_gone, so the sweep's
+// ChainOwnerGone is the fair end.
+func stoppedChainOwnerFixture(t *testing.T) (State, time.Time) {
+	t.Helper()
+	now := t0
+	s := boot(t, "n1", now, []Node{peer("n2", true, now), peer("n3", false, now)})
+	s.Params.Storage = StorageShared
+	s = expireLease(s, now)
+	s = applied(t, s, Event{Kind: EventAcquire, Node: "n2"}, now)
+	s = applied(t, s, Event{Kind: EventChainVerified, Node: "n2", ReadOK: true}, now)
+	s = applied(t, s, Held(s, EventEpochLost, "n2"), now)
+	s = applied(t, s, Event{Kind: EventAcquire, Node: "n3"}, now)
+	ev := Held(s, EventTailUnreadable, "n3")
+	ev.Cause = CauseSegmentNotOnWorker
+	s = applied(t, s, ev, now)
+	for i := range s.Nodes {
+		if s.Nodes[i].ID == "n2" {
+			s.Nodes[i].Stopped = true
+			s.Nodes[i].HeartbeatAt = now
+		}
+	}
+	gone := EffectiveNodeGone(s.Params)
+	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(gone + 2*time.Second), Attempts: 1}
+	return s, now
+}
+
+// retryAfterExpiry is a second RetryableError whose RetryUntil is later
+// than the lease. The search clock is in that gap.
+func retryAfterExpiry(t *testing.T) (State, time.Time) {
+	t.Helper()
+	s := boot(t, "n1", t0, []Node{peer("n2", false, t0)})
+	s.Params.LeaseTTL = 3 * time.Second
+	s.Lease.ExpireAt = t0.Add(3 * time.Second)
+	s = applied(t, s, Held(s, EventRetryableError, "n1"), t0)
+	s = applied(t, s, Held(s, EventRetryableError, "n1"), t0.Add(2*time.Second))
+	return s, t0.Add(4 * time.Second)
+}
+
 func j11Fixture(t *testing.T) (State, time.Time) {
 	t.Helper()
 	// per_node chain owner cannot use TailUnreadable. EpochLost is dated, so
@@ -585,15 +745,6 @@ func TestFairStepBoundObserved(t *testing.T) {
 	u06 := observeFair(u06s, u06n)
 	if u06.over || !u06.ok || u06.steps != 3 || u06.steps > FairStepBound(u06s, u06n) || u06.steps != FairStepBound(u06s, u06n) {
 		t.Fatalf("until = H+1ns observed %d bound %d over %v ok %v", u06.steps, FairStepBound(u06s, u06n), u06.over, u06.ok)
-	}
-
-	// J06 hand count: stored attempts 6, so the next delays are 128s, 256s,
-	// then 512s which is already past H=300s. n = 3. floor(300/600)+1 = 1,
-	// so wastes ≤ 4. One deadline is already pending. jumps ≤ 4+1+1 = 6.
-	// Acquire and DumpReady add 2. K = 12.
-	s, now := j06Fixture(t)
-	if got := FairStepBound(s, now); got != 12 {
-		t.Fatalf("J06 bound %d, hand count is 12", got)
 	}
 
 	cases := []struct {
@@ -616,6 +767,22 @@ func TestFairStepBoundObserved(t *testing.T) {
 	add("J05 cap=7s H=100s", j5s, j5n, 33, false)
 	j6s, j6n := j06Fixture(t)
 	add("J06 attempts=6 H=300s", j6s, j6n, 7, false)
+	// Stored attempts have to shrink the bound. The schedule that starts
+	// those attempts at 0 is longer than the attempts=6 bound. Zeroing the
+	// stored attempts makes the two bounds match, and that bound is at
+	// least this longer schedule.
+	fromZero := j6s
+	fromZero.Refusal = make(map[string]Refusal, len(j6s.Refusal))
+	for id, r := range j6s.Refusal {
+		fromZero.Refusal[id] = r
+	}
+	zr := fromZero.Refusal["n2"]
+	zr.Attempts = 0
+	fromZero.Refusal["n2"] = zr
+	zeroEnd := observeFair(fromZero, j6n)
+	if zeroEnd.over || !zeroEnd.ok || FairStepBound(j6s, j6n) >= zeroEnd.steps {
+		t.Fatalf("attempts=6 bound %d, from-zero schedule %d over %v ok %v", FairStepBound(j6s, j6n), zeroEnd.steps, zeroEnd.over, zeroEnd.ok)
+	}
 	j11s, j11n := j11Fixture(t)
 	add("J11 per_node chain owner", j11s, j11n, 15, false)
 	h0p, h0pn := freshClaim(t, StoragePerNode)
@@ -644,8 +811,8 @@ func TestFairStepBoundObserved(t *testing.T) {
 	for _, tc := range cases {
 		end := observeFair(tc.s, tc.now)
 		b := FairStepBound(tc.s, tc.now)
-		if end.over || !end.ok {
-			t.Fatalf("%s search over=%v ok=%v states capped at %d", tc.name, end.over, end.ok, obsStateCap)
+		if end.over || !end.ok || end.stuck {
+			t.Fatalf("%s search over=%v ok=%v stuck=%v states capped at %d", tc.name, end.over, end.ok, end.stuck, obsStateCap)
 		}
 		if v := Check(end.state, end.at); len(v) > 0 {
 			t.Fatalf("%s running state: %+v", tc.name, v)
@@ -666,6 +833,58 @@ func TestFairStepBoundObserved(t *testing.T) {
 		fmt.Printf("%s\t%d\t%d\t%.3f\n", tc.name, end.steps, b, ratio)
 		t.Logf("%s observed %d bound %d ratio %.3f", tc.name, end.steps, b, ratio)
 	}
+}
+
+func TestStoppedChainOwnerReachesTerminal(t *testing.T) {
+	s, now := stoppedChainOwnerFixture(t)
+	end := observeFair(s, now)
+	b := FairStepBound(s, now)
+	if end.stuck || end.over || !end.ok || end.steps > b {
+		t.Fatalf("chain owner steps %d bound %d stuck %v over %v ok %v", end.steps, b, end.stuck, end.over, end.ok)
+	}
+	if end.state.Phase != PhaseFailed || end.state.FailedReason != ReasonChainOwnerGone {
+		t.Fatalf("end phase %s reason %s, want FAILED/CHAIN_OWNER_GONE", end.state.Phase, end.state.FailedReason)
+	}
+	if v := Check(end.state, end.at); len(v) > 0 {
+		t.Fatalf("terminal state: %+v", v)
+	}
+	fmt.Printf("fixture\tstopped chain owner\t%d\t%d\n", end.steps, b)
+	t.Logf("stopped chain owner observed %d bound %d", end.steps, b)
+}
+
+func TestIdleKillAndStoppedNonReader(t *testing.T) {
+	lockS, lockNow := idleKillFixture(t)
+	lock := observeFair(lockS, lockNow)
+	if lock.stuck || !lock.ok || lock.steps != 5 || lock.steps > FairStepBound(lockS, lockNow) {
+		t.Fatalf("idle_kill observed %d bound %d stuck %v ok %v", lock.steps, FairStepBound(lockS, lockNow), lock.stuck, lock.ok)
+	}
+	stopS, stopNow := stoppedNonReaderOwnerFixture(t)
+	stop := observeFair(stopS, stopNow)
+	if stop.stuck || !stop.ok || stop.steps != 5 || stop.steps > FairStepBound(stopS, stopNow) {
+		t.Fatalf("stopped non-reader observed %d bound %d stuck %v ok %v", stop.steps, FairStepBound(stopS, stopNow), stop.stuck, stop.ok)
+	}
+	fmt.Printf("fixture\tidle_kill 8s\t%d\t%d\n", lock.steps, FairStepBound(lockS, lockNow))
+	fmt.Printf("fixture\tstopped non-reader owner\t%d\t%d\n", stop.steps, FairStepBound(stopS, stopNow))
+}
+
+func TestRetryWaitAfterLeaseExpiry(t *testing.T) {
+	s, now := retryAfterExpiry(t)
+	if obsTerminal(s, now) {
+		t.Fatal("expired lease inside RetryUntil is not terminal")
+	}
+	if len(fairMoves(s, now)) == 0 {
+		t.Fatal("no fair move while RetryUntil is still ahead")
+	}
+	end := observeFair(s, now)
+	b := FairStepBound(s, now)
+	if end.stuck || !end.ok || end.steps > b {
+		t.Fatalf("retry gap steps %d bound %d stuck %v ok %v", end.steps, b, end.stuck, end.ok)
+	}
+	if !obsRunning(end.state, end.at) {
+		t.Fatalf("retry gap ended in %s", end.state.Phase)
+	}
+	fmt.Printf("fixture\tretry after lease expiry\t%d\t%d\n", end.steps, b)
+	t.Logf("retry gap observed %d bound %d", end.steps, b)
 }
 
 func TestFairStepBoundLargeConfigs(t *testing.T) {

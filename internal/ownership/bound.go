@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, the caller clock, and RefusalDelay
-// output: FairStepBound, an upper bound on fair steps until RUNNING
+// output: FairStepBound, an upper bound on fair steps until RUNNING or a declared terminal FAILED
 // pos: the RTO step ceiling in ADR 0011 §4.1(a). It is not a schedule search
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -8,8 +8,9 @@ package ownership
 import "time"
 
 // FairStepBound is an upper bound on fair-schedule steps from s at now until
-// a reader is RUNNING. It is not the length of the longest schedule. A larger
-// value is allowed. A smaller value is a bug.
+// a reader is RUNNING or the task is in a declared terminal FAILED state.
+// It is not the length of the longest schedule. A larger value is allowed.
+// A smaller value is a bug.
 //
 // Proof sketch (ADR 0011 §4.1(a)):
 //
@@ -28,17 +29,25 @@ import "time"
 //   - stopped owner: wait until Lease.ExpireAt. Not yielded.
 //   - live owner who is not stopped and is not the reader: yield now, or
 //     wait until Lease.ExpireAt if TailUnreadable and EpochLost are refused.
-//   - RETRY_BACKOFF while that reader holds a live lease: jump to RetryUntil.
-//     RetryUntil can land after ExpireAt and open the claim set there.
+//   - RETRY_BACKOFF: jump to RetryUntil even when the lease has already
+//     expired. Acquire stays refused until that instant, and the instant
+//     can land after ExpireAt.
 //   - CHAIN_OWNER_GONE before VerifiedAt is after FailedAt: jump to
 //     FailedAt+1ms. ChainOwnerBack then runs at that same instant.
 //   - dated refusals on eligible readers (the old horizon H).
 //
 // Not jumps, so they do not extend W:
 //   - StopExpired, ChainOwnerBack, DumpReady, Acquire: applied at now.
-//   - node_gone: the search refreshes heartbeats of nodes that are not stopped.
+//   - node_gone of a node that is not stopped: the search refreshes that
+//     heartbeat, so the sweep never waits it out.
+//   - a stopped chain owner is the exception. The heartbeat stays put.
+//     Once the phase is LEASE_DEGRADED and tail_unreadable_since is set,
+//     the sweep's ChainOwnerGone fires at HeartbeatAt+node_gone+1ns.
+//     The owner is still stopped, so ChainOwnerBack stays refused and
+//     FAILED/CHAIN_OWNER_GONE is terminal. That deadline is part of W,
+//     and the ChainOwnerGone step is one of the forced steps.
 //   - UnownedSince+Sweep and no_progress_after: sweep facts, not a fair path
-//     to RUNNING.
+//     toward RUNNING or a terminal FAILED.
 //   - lock_wait: only the second take that clears META_LOCK_STALLED. The
 //     fair path is MetaLockTimeout at idle_kill.
 //   - StartToReady and Renew: not fair failover steps.
@@ -65,7 +74,7 @@ import "time"
 // jumps ≤ wastes + pending + 1. When W is 0 there is no future deadline.
 // A reader then takes Acquire and DumpReady. The sum of those pieces is K.
 func FairStepBound(s State, now time.Time) int {
-	if boundRunning(s, now) {
+	if boundTerminal(s, now) {
 		return 0
 	}
 	p := s.Params.fill()
@@ -89,6 +98,30 @@ func FairStepBound(s State, now time.Time) int {
 		finish = 2 // acquire and DumpReady
 	}
 	return forced + wastes + jumps + finish
+}
+
+// boundTerminal is RUNNING, or FAILED with a reason the fair scheduler
+// does not leave. SOURCE_AUTH, LOG_BIN_OFF, and LEGACY_UNKNOWN have no
+// fair exit. CHAIN_OWNER_GONE is terminal only while the chain owner is
+// stopped or missing: the search does not refresh that heartbeat, so
+// ChainOwnerBack stays refused. A live chain owner still verifies and
+// comes back, and that path is not terminal.
+func boundTerminal(s State, now time.Time) bool {
+	if boundRunning(s, now) {
+		return true
+	}
+	if s.Phase != PhaseFailed {
+		return false
+	}
+	switch s.FailedReason {
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+		return true
+	case ReasonChainOwnerGone:
+		owner := boundFind(s, s.Chain.Owner)
+		return owner == nil || owner.Stopped
+	default:
+		return false
+	}
 }
 
 func boundRunning(s State, now time.Time) bool {
@@ -118,6 +151,11 @@ func boundWindow(s State, now time.Time) (time.Duration, string) {
 	}
 	p := s.Params.fill()
 	W := time.Duration(0)
+	// Stopped chain owner. HeartbeatAt is not refreshed. ChainOwnerGone
+	// applies one nanosecond after the effective node_gone deadline.
+	if due, ok := boundStoppedChainGone(s, now, p); ok {
+		W = boundExtend(W, now, due) // stopped chain owner
+	}
 	// Reader refusals. The scheduler waits for the reader it picked; taking
 	// the longest eligible refusal only adds claims.
 	for _, node := range s.Nodes {
@@ -151,8 +189,8 @@ func boundWindow(s State, now time.Time) (time.Duration, string) {
 	if live && owner != nil && !owner.Stopped && s.Lease.Owner != reader {
 		W = boundExtend(W, now, s.Lease.ExpireAt) // yielding owner
 	}
-	// RETRY_BACKOFF with the reader holding the lease jumps to RetryUntil,
-	// which can land after ExpireAt and open the claim set there.
+	// RETRY_BACKOFF jumps to RetryUntil even after the lease has expired.
+	// Acquire stays refused until that instant.
 	if s.Phase == PhaseRetryBackoff {
 		W = boundExtend(W, now, s.RetryUntil) // retry window
 	}
@@ -199,7 +237,32 @@ func boundForced(s State, now time.Time) int {
 	if s.Phase == PhaseRetryBackoff && s.RetryUntil.After(now) {
 		n++
 	}
+	if _, ok := boundStoppedChainGone(s, now, s.Params.fill()); ok {
+		n++ // ChainOwnerGone
+	}
 	return n
+}
+
+// boundStoppedChainGone is the sweep deadline for a stopped chain owner.
+// The phase, the tail timestamp, and the heartbeat check are the guards in
+// chainOwnerGone. A node that is not stopped is refreshed by the search and
+// is not on this path.
+func boundStoppedChainGone(s State, now time.Time, p Params) (time.Time, bool) {
+	if s.Chain.Owner == "" || s.Phase != PhaseLeaseDegraded || s.TailSince.IsZero() {
+		return time.Time{}, false
+	}
+	owner := boundFind(s, s.Chain.Owner)
+	if owner == nil || !owner.Stopped {
+		return time.Time{}, false
+	}
+	due := now
+	if !owner.HeartbeatAt.IsZero() {
+		due = owner.HeartbeatAt.Add(EffectiveNodeGone(p) + time.Nanosecond)
+	}
+	if due.Before(now) {
+		due = now
+	}
+	return due, true
 }
 
 func boundNodeWastes(s State, id string, now time.Time, W time.Duration, p Params) (int, int) {

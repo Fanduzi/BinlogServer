@@ -310,7 +310,7 @@ func TestLivenessAllFairSchedules(t *testing.T) {
 				t.Fatalf("start %d schedule fit in bound-1 (%d)", i, bound-1)
 			}
 		}
-		if !end.over && findOpen(st.s, FindingTail, st.s.TaskID) && findOpen(end.state, FindingTail, st.s.TaskID) {
+		if !end.over && end.state.Phase != PhaseFailed && findOpen(st.s, FindingTail, st.s.TaskID) && findOpen(end.state, FindingTail, st.s.TaskID) {
 			t.Fatalf("start %d left the tail finding open", i)
 		}
 	}
