@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a cluster meta DSN, the lease TTL, and cluster.side_kill
-// output: a pool whose every connection and reconnect sets the session-kill timeouts, with innodb_lock_wait_timeout strictly below the client deadline, ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout, a readback of @@session.wait_timeout and MariaDB @@session.idle_transaction_timeout on the lease transaction's own connection (a failed read is degraded), and lock_detail=reduced when the account cannot read lock tables (not degraded)
+// output: a pool whose every connection and reconnect sets the session-kill timeouts; each lock statement's client deadline is innodb_lock_wait_timeout plus at least 1s, with a longer outer backstop around the whole health write; ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout; a startup readback of the armed session variables on a fresh pool connection (and again on the lease transaction), a mismatch or a failed read is degraded; lock_detail=reduced when the naming queries return 1227 or 1142 (not degraded)
 // pos: ADR 0011 PR-2 session kill (P2-7, P2-8); standalone pools are not armed
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -8,6 +8,7 @@ package meta
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -69,13 +70,28 @@ func (st *sessionState) noteNamed(name string, got int) {
 	if st == nil || st.expectSec <= 0 {
 		return
 	}
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if got != st.expectSec {
-		st.degraded = true
-		st.detail = fmt.Sprintf("@@session.%s=%d, want %d", name, got, st.expectSec)
+	st.noteExact(name, got, st.expectSec)
+	if got == st.expectSec {
+		st.noteAllMatch()
+	}
+}
+
+func (st *sessionState) noteExact(name string, got, want int) {
+	if st == nil {
 		return
 	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.degraded = true
+	st.detail = fmt.Sprintf("@@session.%s=%d, want %d", name, got, want)
+}
+
+func (st *sessionState) noteAllMatch() {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	st.degraded = false
 	st.detail = ""
 }
@@ -94,8 +110,19 @@ func (st *sessionState) noteReadbackFailed(err error) {
 	st.detail = "session timeout read failed: " + msg
 }
 
-// lockWaitSeconds is innodb_lock_wait_timeout. It rounds the client deadline
-// down to a whole second, stays strictly under that deadline, and is at least 1.
+// statementMargin is the gap between innodb_lock_wait_timeout and the
+// client deadline of that one statement. One second is the minimum that
+// still lets the server return 1205 first.
+const statementMargin = time.Second
+
+// healthLockStatements is how many lock-taking statements one health write
+// runs: the health insert, the lease FOR UPDATE, the health FOR UPDATE, and
+// the health update. The outer bound is only a backstop around all of them.
+const healthLockStatements = 4
+
+// lockWaitSeconds is innodb_lock_wait_timeout. It rounds the idle bound down
+// to a whole second and is at least 1. The statement deadline sits one
+// margin above this value, so the server timer fires first.
 func lockWaitSeconds(deadline time.Duration) int {
 	sec := int(deadline / time.Second)
 	if time.Duration(sec)*time.Second >= deadline {
@@ -107,9 +134,10 @@ func lockWaitSeconds(deadline time.Duration) int {
 	return sec
 }
 
-// healthDeadline is the context budget around a health write. It stays
-// strictly above innodb_lock_wait_timeout so a row lock ends as server 1205.
-func (st *sessionState) healthDeadline() time.Duration {
+// statementDeadline is the client budget for one lock statement. It starts
+// when that statement starts, so earlier work in the transaction cannot
+// shrink it under innodb_lock_wait_timeout.
+func (st *sessionState) statementDeadline() time.Duration {
 	if st == nil || st.bound <= 0 {
 		return 0
 	}
@@ -117,11 +145,17 @@ func (st *sessionState) healthDeadline() time.Duration {
 	if lockSec <= 0 {
 		lockSec = lockWaitSeconds(st.bound)
 	}
-	lock := time.Duration(lockSec) * time.Second
-	if lock >= st.bound {
-		return lock + time.Second
+	return time.Duration(lockSec)*time.Second + statementMargin
+}
+
+// healthDeadline is the backstop around a whole health write. It is longer
+// than one statement so a lock wait that starts late still reaches 1205.
+func (st *sessionState) healthDeadline() time.Duration {
+	one := st.statementDeadline()
+	if one <= 0 {
+		return 0
 	}
-	return st.bound
+	return time.Duration(healthLockStatements)*one + statementMargin
 }
 
 func armSessionTimeouts(cfg *mysqlDriver.Config, flavor string, idleSec, lockSec int) {
@@ -142,6 +176,16 @@ func armSessionTimeouts(cfg *mysqlDriver.Config, flavor string, idleSec, lockSec
 // database/sql wakes its cleaner on about this interval, so a connection can
 // outlive one interval. Stay under wait_timeout: the pool closes the
 // connection before the server kills it and the driver logs the abort.
+// poolMaxIdle is 0 when the idle bound is short enough that a parked
+// connection would be killed by wait_timeout before the cleaner runs.
+// Otherwise the pool keeps 8 idle connections.
+func poolMaxIdle(bound time.Duration) int {
+	if bound <= 2*time.Second {
+		return 0
+	}
+	return 8
+}
+
 func poolIdleBeforeWait(bound time.Duration) time.Duration {
 	idle := bound / 3
 	if idle > 2*time.Second {
@@ -174,6 +218,13 @@ func (s *MySQLTaskStore) healthDeadline() time.Duration {
 		return 0
 	}
 	return s.session.healthDeadline()
+}
+
+func (s *MySQLTaskStore) statementDeadline() time.Duration {
+	if s == nil || s.session == nil {
+		return 0
+	}
+	return s.session.statementDeadline()
 }
 
 // LockDetail is "reduced" when this account cannot read the lock tables.
@@ -218,6 +269,10 @@ func (s *MySQLTaskStore) SideKill() string {
 	return s.session.kill()
 }
 
+// testArmExtra adds session variables in tests. A value the server rejects
+// must refuse startup.
+var testArmExtra func(*mysqlDriver.Config)
+
 // OpenClusterMeta opens the cluster metadata pool with session-kill timeouts
 // on every connection. A required SET that the server rejects refuses startup.
 // Standalone does not call this.
@@ -237,6 +292,9 @@ func OpenClusterMeta(dsn string, schemaTimeout time.Duration, encryptionKey stri
 		return nil, err
 	}
 	armSessionTimeouts(cfg, flavor, sec, lockSec)
+	if testArmExtra != nil {
+		testArmExtra(cfg)
+	}
 	connector, err := mysqlDriver.NewConnector(cfg)
 	if err != nil {
 		return nil, err
@@ -244,11 +302,7 @@ func OpenClusterMeta(dsn string, schemaTimeout time.Duration, encryptionKey stri
 	db := sql.OpenDB(connector)
 	db.SetConnMaxLifetime(30 * time.Second)
 	db.SetMaxOpenConns(32)
-	if bound <= 2*time.Second {
-		db.SetMaxIdleConns(0)
-	} else {
-		db.SetMaxIdleConns(8)
-	}
+	db.SetMaxIdleConns(poolMaxIdle(bound))
 	db.SetConnMaxIdleTime(poolIdleBeforeWait(bound))
 	pingCtx, cancel := context.WithTimeout(context.Background(), schemaTimeoutOr(schemaTimeout))
 	err = db.PingContext(pingCtx)
@@ -276,6 +330,9 @@ func OpenClusterMeta(dsn string, schemaTimeout time.Duration, encryptionKey stri
 	pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	store.probeLockDetail(pctx)
 	pcancel()
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	store.readArmedOnFreshConn(rctx)
+	rcancel()
 	return store, nil
 }
 
@@ -305,35 +362,68 @@ func probeFlavor(dsn string) (string, error) {
 	return "mysql", nil
 }
 
-// readSessionTimeout reads @@session.wait_timeout, and on MariaDB
-// @@session.idle_transaction_timeout, on the lease transaction's own
-// connection. A mismatch or a failed read is degraded; the lease write
-// still commits.
+// rowQuery is the lease transaction or a fresh pool connection.
+type rowQuery interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// readSessionTimeout reads the armed session variables on the lease
+// transaction's own connection. A mismatch or a failed read is degraded;
+// the lease write still commits.
 func (s *LeaseStore) readSessionTimeout(ctx context.Context, tx *sql.Tx) {
-	if s == nil || s.session == nil || s.session.expectSec <= 0 || tx == nil {
+	if s == nil || tx == nil {
 		return
 	}
-	var got int
-	if err := tx.QueryRowContext(ctx, "SELECT @@session.wait_timeout").Scan(&got); err != nil {
+	s.session.readArmed(ctx, tx)
+}
+
+// readArmedOnFreshConn reads the armed variables on a connection that just
+// came out of the pool, before the first lease write. A proxy that strips
+// one of them is degraded from startup.
+func (s *MySQLTaskStore) readArmedOnFreshConn(ctx context.Context) {
+	if s == nil || s.session == nil || s.db == nil {
+		return
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
 		s.session.noteReadbackFailed(err)
 		return
 	}
-	if got != s.session.expectSec {
-		s.session.noteTimeout(got)
+	defer conn.Close()
+	s.session.readArmed(ctx, conn)
+}
+
+func (st *sessionState) readArmed(ctx context.Context, q rowQuery) {
+	if st == nil || st.expectSec <= 0 || q == nil {
 		return
 	}
-	if s.session.flavor == "mariadb" {
-		var idle int
-		if err := tx.QueryRowContext(ctx, "SELECT @@session.idle_transaction_timeout").Scan(&idle); err != nil {
-			s.session.noteReadbackFailed(fmt.Errorf("idle_transaction_timeout: %w", err))
+	type pair struct {
+		name string
+		want int
+	}
+	vars := []pair{
+		{"wait_timeout", st.expectSec},
+		{"net_read_timeout", st.expectSec},
+		{"net_write_timeout", st.expectSec},
+	}
+	if st.lockWaitSec > 0 {
+		vars = append(vars, pair{"innodb_lock_wait_timeout", st.lockWaitSec})
+	}
+	if st.flavor == "mariadb" {
+		vars = append(vars, pair{"idle_transaction_timeout", st.expectSec})
+	}
+	for _, v := range vars {
+		var got int
+		if err := q.QueryRowContext(ctx, "SELECT @@session."+v.name).Scan(&got); err != nil {
+			st.noteReadbackFailed(fmt.Errorf("%s: %w", v.name, err))
 			return
 		}
-		if idle != s.session.expectSec {
-			s.session.noteNamed("idle_transaction_timeout", idle)
+		if got != v.want {
+			st.noteExact(v.name, got, v.want)
 			return
 		}
 	}
-	s.session.noteTimeout(got)
+	st.noteAllMatch()
 }
 
 func (s *MySQLTaskStore) probeLockDetail(ctx context.Context) {
@@ -349,16 +439,49 @@ func (s *MySQLTaskStore) probeLockDetail(ctx context.Context) {
 	}
 	s.session.mu.Unlock()
 	if !full {
-		log.Printf("meta account cannot read performance_schema.data_lock_waits or information_schema.innodb_trx; lock holder name is omitted; stall detection still uses server error 1205")
+		log.Printf("meta account cannot name a lock holder; MySQL 8 PROCESS alone does not name the holder; lock holder name is omitted; stall detection still uses server error 1205")
 	}
 }
 
 func (s *MySQLTaskStore) lockTablesReadable(ctx context.Context) bool {
-	if s.queryOK(ctx, "SELECT 1 FROM performance_schema.data_lock_waits LIMIT 0") {
-		return true
+	// These are the queries that name a holder. 1227 and 1142 mean the
+	// account cannot use that view. information_schema.innodb_trx succeeding
+	// is not enough: without PROCESS it returns only this session and does
+	// not error on every server. SHOW GRANTS text is not a privilege.
+	for _, q := range []string{
+		`SELECT t.PROCESSLIST_ID
+FROM performance_schema.data_lock_waits w
+JOIN performance_schema.threads req ON req.THREAD_ID = w.REQUESTING_THREAD_ID
+JOIN performance_schema.threads t ON t.THREAD_ID = w.BLOCKING_THREAD_ID
+WHERE req.PROCESSLIST_ID = 0
+LIMIT 0`,
+		`SELECT w.blocking_trx_id
+FROM information_schema.innodb_lock_waits w
+JOIN information_schema.innodb_trx r ON r.trx_id = w.requesting_trx_id
+WHERE r.trx_mysql_thread_id = 0
+LIMIT 0`,
+	} {
+		if err := s.queryErr(ctx, q); err == nil {
+			return true
+		}
 	}
-	// innodb_trx without PROCESS shows only this session, so it cannot name another holder.
-	return s.queryOK(ctx, "SELECT 1 FROM information_schema.innodb_trx LIMIT 0") && s.hasProcessPrivilege(ctx)
+	return false
+}
+
+func (s *MySQLTaskStore) queryErr(ctx context.Context, q string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("no metadata pool")
+	}
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return err
+	}
+	return rows.Close()
+}
+
+func accessDenied(err error) bool {
+	var me *mysqlDriver.MySQLError
+	return errors.As(err, &me) && (me.Number == 1227 || me.Number == 1142)
 }
 
 func (s *MySQLTaskStore) queryOK(ctx context.Context, q string) bool {

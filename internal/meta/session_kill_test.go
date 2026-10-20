@@ -39,23 +39,27 @@ func TestLockWaitStaysUnderTheClientDeadline(t *testing.T) {
 	cases := []struct {
 		bound time.Duration
 		lock  int
-		dead  time.Duration
 	}{
-		{5 * time.Second, 4, 5 * time.Second},
-		{2 * time.Second, 1, 2 * time.Second},
-		{time.Second, 1, 2 * time.Second},
-		{1500 * time.Millisecond, 1, 1500 * time.Millisecond},
+		{5 * time.Second, 4},
+		{2 * time.Second, 1},
+		{time.Second, 1},
+		{1500 * time.Millisecond, 1},
 	}
 	for _, tc := range cases {
 		if got := lockWaitSeconds(tc.bound); got != tc.lock {
 			t.Fatalf("bound %s lock %d, want %d", tc.bound, got, tc.lock)
 		}
 		st := &sessionState{bound: tc.bound, lockWaitSec: tc.lock}
-		if got := st.healthDeadline(); got != tc.dead {
-			t.Fatalf("bound %s deadline %s, want %s", tc.bound, got, tc.dead)
+		stmt := st.statementDeadline()
+		lock := time.Duration(tc.lock) * time.Second
+		if stmt != lock+statementMargin {
+			t.Fatalf("bound %s statement %s, want %s", tc.bound, stmt, lock+statementMargin)
 		}
-		if time.Duration(tc.lock)*time.Second >= st.healthDeadline() {
-			t.Fatalf("bound %s lock is not strictly under the deadline", tc.bound)
+		if lock >= stmt {
+			t.Fatalf("bound %s lock is not strictly under the statement deadline", tc.bound)
+		}
+		if st.healthDeadline() <= stmt {
+			t.Fatalf("bound %s outer %s does not outlast one statement", tc.bound, st.healthDeadline())
 		}
 	}
 }
@@ -121,6 +125,10 @@ func TestLeaseReadbackIncludesIdleTransactionTimeout(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"NOW(6)"}).AddRow(now))
 	mock.ExpectQuery("SELECT @@session.wait_timeout").
 		WillReturnRows(sqlmock.NewRows([]string{"t"}).AddRow(5))
+	mock.ExpectQuery("SELECT @@session.net_read_timeout").
+		WillReturnRows(sqlmock.NewRows([]string{"t"}).AddRow(5))
+	mock.ExpectQuery("SELECT @@session.net_write_timeout").
+		WillReturnRows(sqlmock.NewRows([]string{"t"}).AddRow(5))
 	mock.ExpectQuery("SELECT @@session.idle_transaction_timeout").
 		WillReturnError(errors.New("read failed"))
 	mock.ExpectCommit()
@@ -183,6 +191,12 @@ func TestPoolIdleClosesBeforeWaitTimeout(t *testing.T) {
 		if bound >= 3*time.Second && 2*idle >= bound {
 			t.Fatalf("bound %s idle %s can outlive wait_timeout", bound, idle)
 		}
+	}
+	if poolMaxIdle(5*time.Second) != 8 {
+		t.Fatalf("idle conns %d, want 8", poolMaxIdle(5*time.Second))
+	}
+	if poolMaxIdle(2*time.Second) != 0 || poolMaxIdle(time.Second) != 0 {
+		t.Fatal("a short bound must not keep idle connections")
 	}
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: docker mysql:8.0 (compose mysql80) and mariadb:11.4, the suite metadata DSN, curl and jq
-# output: SIGSTOP of a holder opened through OpenClusterMeta is released inside the session-kill bound on MySQL 8.0 and MariaDB; TestSessionKillDropsSleepingForUpdate passes on both; a database-only account still opens META_LOCK_STALLED; a cluster server with one task and the default 60s sweep keeps /api/health at 200 with no HEALTH_STALE
+# output: SIGSTOP of a holder opened through OpenClusterMeta is released inside the session-kill bound on MySQL 8.0 and MariaDB; TestSessionKillDropsSleepingForUpdate, TestQA484DeadlineMargin and TestQA484PoolPressure pass on both; a database-only account's live evaluator opens META_LOCK_STALLED and /api/health returns 503; a cluster server with one task and the default 60s sweep keeps /api/health at 200 with no HEALTH_STALE
 # pos: ADR 0011 PR-2 e2e cells, in the quick profile so unit-and-e2e runs them
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -15,8 +15,11 @@ BIN="$WORK/binlog-server"
 HOLD="$WORK/hold"
 META_DSN="${BINLOG_SERVER_META_DSN:-$(e2e_meta_dsn direct)}"
 API="http://127.0.0.1:18120"
+NP_API="http://127.0.0.1:18121"
 HEALTH_PID=""
 HOLDER_PID=""
+NP_PID=""
+NP_HOLD=""
 SCRATCH_DB=""
 MARIA_NAME="binlog-e2e-session-kill-maria"
 MARIA_PORT="${E2E_SESSION_KILL_MARIA_PORT:-13348}"
@@ -40,6 +43,15 @@ cleanup() {
   if [[ -n "$HEALTH_PID" ]]; then
     kill "$HEALTH_PID" >/dev/null 2>&1 || true
     wait "$HEALTH_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$NP_HOLD" ]]; then
+    kill -CONT "$NP_HOLD" >/dev/null 2>&1 || true
+    kill "$NP_HOLD" >/dev/null 2>&1 || true
+    wait "$NP_HOLD" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$NP_PID" ]]; then
+    kill "$NP_PID" >/dev/null 2>&1 || true
+    wait "$NP_PID" >/dev/null 2>&1 || true
   fi
   docker rm -f -v "$MARIA_NAME" >/dev/null 2>&1 || true
   if [[ -n "$SCRATCH_DB" ]]; then
@@ -84,7 +96,7 @@ run_required_test() {
   local logf="$2"
   shift 2
   set +e
-  ( cd "$ROOT_DIR" && go test -count=1 -timeout 180s -v -run "^${name}$" "$@" ) >"$logf" 2>&1
+  ( cd "$ROOT_DIR" && go test -count=1 -timeout 240s -v -run "^${name}$" "$@" ) >"$logf" 2>&1
   local rc=$?
   set -e
   if grep -E -q -- '--- SKIP:' "$logf"; then
@@ -233,9 +245,24 @@ cell_pool_test() {
   log "pool test passed on MySQL 8.0 and MariaDB"
 }
 
+stop_np() {
+  if [[ -n "$NP_HOLD" ]]; then
+    kill -CONT "$NP_HOLD" >/dev/null 2>&1 || true
+    kill "$NP_HOLD" >/dev/null 2>&1 || true
+    wait "$NP_HOLD" >/dev/null 2>&1 || true
+    NP_HOLD=""
+  fi
+  if [[ -n "$NP_PID" ]]; then
+    kill "$NP_PID" >/dev/null 2>&1 || true
+    wait "$NP_PID" >/dev/null 2>&1 || true
+    NP_PID=""
+  fi
+}
+
 cell_noprocess() {
   local sql_fn="$1" port="$2" label="$3"
   local db="binlog_np_${RUN_TAG}"
+  stop_np
   create_db "$sql_fn" "$db"
   local admin="root:root@tcp(127.0.0.1:${port})/${db}?parseTime=true"
   migrate_db "$admin"
@@ -251,9 +278,106 @@ cell_noprocess() {
   local dsn="sknp:sknp@tcp(127.0.0.1:${port})/${db}?parseTime=true"
   BINLOG_TEST_NOPROCESS_DSN="$dsn" \
     run_required_test TestMetaLockStallWithoutProcess "$WORK/noprocess-${label}.log" ./internal/meta
+  "$sql_fn" "INSERT INTO ${db}.backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, desired_run, spec_revision, applied_spec_revision, failed_spec_revision, retry_attempt, consecutive_source_failures) VALUES ('sk-np', 'sk-np', 'sk-np-${label}-${RUN_TAG}', 'STOPPED', '', 'sk-np', 1, '', '{}', '{}', '{}', UTC_TIMESTAMP(6), 'STOP', 1, 1, 0, 0, 0)"
+  "$sql_fn" "INSERT INTO ${db}.task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at) VALUES ('sk-np', 'sk-np', 1, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR), UTC_TIMESTAMP(6))"
+  local holdlog="$WORK/noprocess-${label}.hold"
+  "$HOLD" --plain "$admin" sk-np >"$holdlog" 2>&1 &
+  NP_HOLD=$!
+  local i
+  for i in $(seq 1 100); do
+    if grep -q HOLDING "$holdlog"; then
+      break
+    fi
+    if ! kill -0 "$NP_HOLD" 2>/dev/null; then
+      echo "$label plain holder exited" >&2
+      cat "$holdlog" >&2 || true
+      return 1
+    fi
+    if [[ "$i" -eq 100 ]]; then
+      echo "$label plain holder did not lock" >&2
+      cat "$holdlog" >&2 || true
+      return 1
+    fi
+    sleep 0.1
+  done
+  kill -STOP "$NP_HOLD"
+  local data="$WORK/noprocess-${label}-data"
+  mkdir -p "$data"
+  local srvlog="$WORK/noprocess-${label}-server.log"
+  (
+    cd "$ROOT_DIR"
+    exec env \
+      BINLOG_SERVER_MODE=cluster \
+      BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18121 \
+      BINLOG_SERVER_DATA_DIR="$data" \
+      BINLOG_SERVER_META_DSN="$dsn" \
+      BINLOG_SERVER_HEALTH_EVALUATOR=on \
+      BINLOG_SERVER_CLUSTER_WORKER_ID=sk-np \
+      BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC=2 \
+      "$BIN" --config "$ROOT_DIR/deploy/e2e/config.yaml"
+  ) >"$srvlog" 2>&1 &
+  NP_PID=$!
+  local saw=0
+  for i in $(seq 1 90); do
+    if ! kill -0 "$NP_PID" 2>/dev/null; then
+      echo "$label evaluator exited" >&2
+      tail -n 80 "$srvlog" >&2 || true
+      return 1
+    fi
+    local body code status
+    body="$(curl -sS -m 5 -w '\n%{http_code}' "$NP_API/api/health" || true)"
+    code="$(printf '%s' "$body" | tail -n 1)"
+    body="$(printf '%s' "$body" | sed '$d')"
+    if [[ "$code" == "503" ]] && printf '%s' "$body" | grep -q META_LOCK_STALLED; then
+      status="$(printf '%s' "$body" | jq -r '.status')"
+      if [[ "$status" != "degraded" ]]; then
+        echo "$label /api/health status=$status, want degraded: $body" >&2
+        return 1
+      fi
+      saw=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$saw" -ne 1 ]]; then
+    echo "$label live evaluator did not open META_LOCK_STALLED" >&2
+    curl -sS -m 5 -w '\n%{http_code}\n' "$NP_API/api/health" >&2 || true
+    tail -n 80 "$srvlog" >&2 || true
+    return 1
+  fi
+  stop_np
   "$sql_fn" "DROP USER IF EXISTS 'sknp'@'%'" || true
   "$sql_fn" "DROP DATABASE IF EXISTS ${db}" || true
-  log "$label META_LOCK_STALLED opened without PROCESS"
+  log "$label META_LOCK_STALLED opened through the live evaluator without PROCESS"
+}
+
+cell_qa_margin() {
+  local mysql_root="root:root@tcp(127.0.0.1:${E2E_MYSQL80_PORT})/"
+  local maria_root="root:root@tcp(127.0.0.1:${MARIA_PORT})/"
+  local dsns="${mysql_root},${maria_root}"
+  QA_PRE_HOLD_MS=1500 BINLOG_TEST_MYSQL_ROOT_DSNS="$dsns" \
+    run_required_test TestQA484DeadlineMargin "$WORK/TestQA484DeadlineMargin.log" ./internal/meta
+  local n
+  n="$(grep -c -- '--- PASS: TestQA484DeadlineMargin/server-' "$WORK/TestQA484DeadlineMargin.log" || true)"
+  if [[ "$n" -ne 2 ]]; then
+    echo "TestQA484DeadlineMargin passed on ${n} servers, want 2" >&2
+    return 1
+  fi
+  QA_PRE_HOLD_MS=1500 BINLOG_TEST_MYSQL_ROOT_DSNS="$dsns" \
+    run_required_test TestQA484PoolPressure "$WORK/TestQA484PoolPressure.log" ./internal/meta
+  n="$(grep -c -- '--- PASS: TestQA484PoolPressure/server-' "$WORK/TestQA484PoolPressure.log" || true)"
+  if [[ "$n" -ne 2 ]]; then
+    echo "TestQA484PoolPressure passed on ${n} servers, want 2" >&2
+    return 1
+  fi
+  BINLOG_TEST_MYSQL_ROOT_DSNS="$dsns" \
+    run_required_test TestRejectedSetRefusesStartup "$WORK/TestRejectedSetRefusesStartup.log" ./internal/meta
+  n="$(grep -c -- '--- PASS: TestRejectedSetRefusesStartup' "$WORK/TestRejectedSetRefusesStartup.log" || true)"
+  if [[ "$n" -lt 1 ]]; then
+    echo "TestRejectedSetRefusesStartup did not pass" >&2
+    return 1
+  fi
+  log "deadline margin, pool pressure, and a rejected SET passed on MySQL 8.0 and MariaDB"
 }
 
 cell_health() {
@@ -347,6 +471,7 @@ cell_mysql80
 start_mariadb
 cell_mariadb
 cell_pool_test
+cell_qa_margin
 cell_noprocess mysql80_sql "${E2E_MYSQL80_PORT}" mysql80
 cell_noprocess maria_sql "${MARIA_PORT}" mariadb
 cell_health
