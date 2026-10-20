@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
-// input: catalog rows (with sealed_at and uploaded_at), a task directory of sealed segments, an object store that can HEAD and GET, an optional Chain, the findings open before this pass, each segment's last_verified_at, a byte budget and the recent tier's share of it
-// output: a Report whose Coverage records, per segment, what this pass did to the local copy and to the object (parsed, hashed, HEAD only, skipped, error) and why; the findings it wants open; the open findings it closes and why; the segments whose last_verified_at may advance (content-verified and named by no finding); paid bytes; counts of objects with no digest or no comparable size
+// input: catalog rows (with sealed_at and uploaded_at), a task directory of sealed segments, an object store that can HEAD and GET, an optional Chain, the findings open before this pass, each segment's last_verified_at and last ReadMark, a byte budget and the recent tier's share of it (1–100)
+// output: a Report whose Coverage records, per segment, what this pass did to the local copy and to the object (parsed, hashed, HEAD only, skipped, error) and why; the findings it wants open; the open findings it closes and why; the segments whose last_verified_at may advance (content-verified and named by no finding other than UPLOAD_CLOCK_SKEW); a ReadMark per segment read in full (fed back so a forced segment is read once per period); paid bytes; counts of objects with no digest or no comparable size
 // pos: ADR 0009 phase 3 pure verifier (docs/design/0009-phase3-verifier.md); the caller must already be the task owner — this file does not ask
 // note: if this file changes, update this header and module README.md.
 package assurance
@@ -34,8 +34,10 @@ const (
 	// DefaultRecent is the window in which every upload is checked by content.
 	DefaultRecent = 24 * time.Hour
 	// DefaultRecentSharePercent is the most of one pass's capacity the
-	// recent tier may spend (design §5.3). Recent work past it falls back to
-	// the rotation slot or the overdue tier.
+	// recent tier may spend (design §5.3), further capped so the slot and
+	// overdue tiers keep room for one segment. Recent work past it falls back
+	// to the rotation slot, the overdue tier, or the tail tier that is paid
+	// only from what the pass has left.
 	DefaultRecentSharePercent = 25
 	// DefaultPeriod is the length of one rotation slot.
 	DefaultPeriod = 24 * time.Hour
@@ -60,9 +62,14 @@ const (
 	// KindLocalMissing is a sealed row that is not UPLOADED and has no local
 	// file: no copy of those bytes exists. Same name as the chain's I6.
 	KindLocalMissing = string(I6MissingLocal)
-	// KindUploadClockSkew is an UPLOADED row whose uploaded_at is more than
-	// ClockSkewTolerance in the future.
+	// KindUploadClockSkew is a row whose uploaded_at (UPLOADED rows) or
+	// sealed_at is more than ClockSkewTolerance in the future.
 	KindUploadClockSkew = "UPLOAD_CLOCK_SKEW"
+	// KindLocalUnreadable is a local segment file that exists but could not
+	// be read (stat, open or read failed with something other than not-found,
+	// a deadline or a cancel). WARNING, CRITICAL when the row is not uploaded
+	// and the file is the only copy.
+	KindLocalUnreadable = "LOCAL_UNREADABLE"
 
 	SeverityCritical = "CRITICAL"
 	SeverityWarning  = "WARNING"
@@ -81,10 +88,13 @@ const (
 	ReasonClockChecked   = "uploaded_at compared with now"
 	ReasonChainChecked   = "chain checked"
 	ReasonRowRemoved     = "row removed"
+	ReasonLocalRead      = "local file read to the end"
+	ReasonLocalGone      = "local file no longer present"
+	reasonTail           = "not verified since its last change, past the recent share or window; paid from what the pass had left"
+	reasonHeldForced     = "forced recheck already done this period and nothing changed since"
 	reasonNotScheduled   = "not scheduled for a content check this pass"
 	reasonDeferredBudget = "deferred: does not fit in what is left of this pass's budget"
 	reasonDeferredTime   = "deferred: the pass deadline ran out"
-	reasonDeferredRecent = "deferred: the recent tier's share of this pass is used up"
 )
 
 // VERIFY_FAILED details. A finding on the object, the copy left once local
@@ -155,8 +165,20 @@ type Check struct {
 type Coverage struct {
 	Local  Check
 	Object Check
-	// ClockChecked is true when uploaded_at was compared with now.
+	// ClockChecked is true when sealed_at, and for an UPLOADED row
+	// uploaded_at, were compared with now.
 	ClockChecked bool
+}
+
+// ReadMark is what a segment looked like when a pass last read every copy
+// it scheduled. The caller feeds Report.Read back as Options.LastRead so a
+// forced segment is re-read at most once per period unless its local size,
+// local mtime or object size changed (design §6.3).
+type ReadMark struct {
+	At           time.Time
+	LocalSize    int64
+	LocalModTime time.Time
+	ObjectSize   int64
 }
 
 // ObjectStore is the object half of one pass. A missing object is os.ErrNotExist.
@@ -213,6 +235,9 @@ type Report struct {
 	Closed     []Closure
 	Coverage   map[string]Coverage
 	VerifiedAt map[string]time.Time
+	// Read is a ReadMark for each segment this pass read every scheduled
+	// copy of (at least one by content). Feed it back as Options.LastRead.
+	Read map[string]ReadMark
 	// ChainChecked is true when Chain.Check ran on a fully listed directory.
 	ChainChecked bool
 	// CatalogComplete is Options.CatalogComplete: rows was the whole catalog.
@@ -251,8 +276,10 @@ type Report struct {
 // before this pass. LastVerified is each segment's last_verified_at (missing
 // means never). CatalogComplete says rows is the whole catalog of the task,
 // so a subject with no row has had its row removed. RecentSharePercent caps
-// what the recent tier may spend of the pass's capacity; 0 or less means
-// DefaultRecentSharePercent, more than 100 means 100.
+// what the recent tier may spend of the pass's capacity: 0 means
+// DefaultRecentSharePercent, 1–100 is a percentage, anything else makes
+// Verify return an error (CheckRecentSharePercent). LastRead is the previous
+// passes' Report.Read.
 type Options struct {
 	Now                time.Time
 	RotationPeriods    int
@@ -263,7 +290,18 @@ type Options struct {
 	PassBytes          int64
 	OpenFindings       []Finding
 	LastVerified       map[string]time.Time
+	LastRead           map[string]ReadMark
 	CatalogComplete    bool
+}
+
+// CheckRecentSharePercent rejects a recent share outside 1–100. 0 is the
+// default and is accepted here; a config loader should reject it too, since
+// the key has a default and 0 would read as "off".
+func CheckRecentSharePercent(pct int) error {
+	if pct < 0 || pct > 100 {
+		return fmt.Errorf("verify: recent share percent %d is outside 1-100", pct)
+	}
+	return nil
 }
 
 // ErrBudgetDeadline is a budget wait that cannot finish before the context
@@ -406,6 +444,7 @@ const (
 	tierRecent
 	tierSlot
 	tierOverdue
+	tierTail // recent work past the share whose fallback is none: leftover budget only
 	tierNone
 )
 
@@ -423,6 +462,7 @@ type seg struct {
 	cov      Coverage
 	path     string
 	size     int64 // local size from stat
+	mtime    time.Time
 	parse    bool  // the local file may be parsed
 	objSize  int64 // object size from HEAD
 	hash     bool  // the object may be hashed
@@ -430,6 +470,7 @@ type seg struct {
 	last     time.Time
 	tier     int
 	demoted  bool // its recent work went past the recent share
+	held     bool // forced, but already read this period with nothing changed
 }
 
 // work is one scheduled content check: a local parse or an object hash.
@@ -458,20 +499,26 @@ type pass struct {
 // every object SKIPPED. A chain of nil leaves the chain unchecked.
 //
 // The pass is free work first (stat every local file, HEAD every object,
-// the chain), then content checks from one queue in priority order: forced,
-// recent (not content-verified since the last change; capped at a share of
-// the pass), rotation slot, overdue by oldest last_verified_at. When the budget
+// the chain), then content checks from one queue in priority order: forced
+// (at most once per period with Options.LastRead), recent (not
+// content-verified since the last change; capped at min(share × C,
+// C − F − S)), rotation slot, overdue by oldest last_verified_at, and a tail
+// paid from what is left (recent overflow, and verified rows not verified
+// since an upload outside the recent window). When the budget
 // or the deadline runs out, what is left is SKIPPED and the pass ends
 // normally. Only a cancelled context returns an error.
 func Verify(ctx context.Context, dir string, rows []VerifyRow, objects ObjectStore, chain *Chain, opt Options) (rep Report, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := CheckRecentSharePercent(opt.RecentSharePercent); err != nil {
+		return Report{}, err
+	}
 	now := opt.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	rep = Report{Coverage: map[string]Coverage{}, VerifiedAt: map[string]time.Time{}, CatalogComplete: opt.CatalogComplete, catalog: map[string]bool{}}
+	rep = Report{Coverage: map[string]Coverage{}, VerifiedAt: map[string]time.Time{}, Read: map[string]ReadMark{}, CatalogComplete: opt.CatalogComplete, catalog: map[string]bool{}}
 	for _, row := range rows {
 		rep.catalog[row.Name] = true
 	}
@@ -493,7 +540,24 @@ func Verify(ctx context.Context, dir string, rows []VerifyRow, objects ObjectSto
 		}
 		rep.ChainChecked = true
 	}
-	return rep, p.content(segs)
+	if err := p.content(segs); err != nil {
+		return rep, err
+	}
+	p.mark(segs)
+	return rep, nil
+}
+
+// mark records a ReadMark for every segment whose scheduled copies were all
+// read to a conclusion this pass, at least one by content.
+func (p *pass) mark(segs []*seg) {
+	for _, s := range segs {
+		l, o := s.cov.Local.Method, s.cov.Object.Method
+		local := !s.parse || l == MethodParsed
+		object := !s.hash || o == MethodHashed || o == MethodUnverifiable || o == MethodMissing
+		if local && object && (l == MethodParsed || o == MethodHashed) {
+			p.rep.Read[s.row.Name] = ReadMark{At: p.now, LocalSize: s.size, LocalModTime: s.mtime, ObjectSize: s.objSize}
+		}
+	}
 }
 
 // cancelled is a context cancelled by its owner. A passed deadline is not:
@@ -547,8 +611,10 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 				if rep.LocalErr == nil {
 					rep.LocalErr = statErr
 				}
+				p.unreadable(row, statErr)
 				break
 			}
+			s.mtime = info.ModTime()
 			if noDigest {
 				rep.NoDigestLocal++
 			}
@@ -565,6 +631,12 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 		if uploaded(row) && noDigest && !s.parse {
 			rep.UnverifiableNoDigest++
 		}
+		if ClockSkewed(row.SealedAt, p.now) {
+			rep.Findings = append(rep.Findings, Finding{Kind: KindUploadClockSkew, Subject: row.Name, Severity: SeverityWarning,
+				Detail:   "sealed_at is in the future; it is not used for the recent tier",
+				Evidence: fmt.Sprintf("sealed_at=%s now=%s", row.SealedAt.UTC().Format(time.RFC3339Nano), p.now.UTC().Format(time.RFC3339Nano))})
+		}
+		s.cov.ClockChecked = true
 		switch {
 		case !uploaded(row):
 			s.cov.Object = Check{Method: MethodNotApplicable, Reason: "upload_state=" + strings.TrimSpace(row.UploadState)}
@@ -574,7 +646,6 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 					Detail:   "uploaded_at is in the future; the row is not treated as recent",
 					Evidence: fmt.Sprintf("uploaded_at=%s now=%s", row.UploadedAt.UTC().Format(time.RFC3339Nano), p.now.UTC().Format(time.RFC3339Nano))})
 			}
-			s.cov.ClockChecked = true
 			if p.objects == nil {
 				s.cov.Object = Check{Method: MethodSkipped, Reason: "no object store"}
 				break
@@ -644,27 +715,58 @@ func (p *pass) head(s *seg, noDigest bool) error {
 // tierOf places a segment in the content queue (design §5.2).
 func (p *pass) tierOf(s *seg) int {
 	if p.forcedBy(s) {
+		if p.readThisPeriod(s) {
+			s.held = true
+			return tierNone
+		}
 		return tierForced
 	}
-	if !p.named[s.row.Name] && p.fresh(s) {
+	if p.named[s.row.Name] {
+		return p.fallback(s)
+	}
+	if p.fresh(s) {
 		return tierRecent
 	}
-	return p.fallback(s)
+	// Verified once, but not since an upload that is now outside the
+	// recent window (a backlog the recent share could not take in time):
+	// the tail, paid only from what the pass has left (QA r4 G1). A row
+	// never verified is the overdue tier's, and stays unread when the
+	// rotation is off.
+	if t := p.fallback(s); t != tierNone || s.last.IsZero() || !p.stale(s) {
+		return t
+	}
+	return tierTail
+}
+
+// readThisPeriod is a forced segment already read in this rotation period
+// (Options.LastRead) whose local size, local mtime and object size are what
+// that read saw: reading it again would read the same bytes (design §6.3).
+func (p *pass) readThisPeriod(s *seg) bool {
+	m, ok := p.opt.LastRead[s.row.Name]
+	return ok && !m.At.Before(slotStart(p.now, p.opt.Period)) && m.LocalSize == s.size && m.LocalModTime.Equal(s.mtime) && m.ObjectSize == s.objSize
 }
 
 // fresh is the recent tier: a row not content-verified since its last
 // change (sealed, or uploaded) that is not uploaded yet, or was uploaded
-// within the recent window. Once verified it leaves the tier.
+// within the recent window. Once verified it leaves the tier. A sealed_at or
+// uploaded_at more than ClockSkewTolerance in the future is clock skew
+// (UPLOAD_CLOCK_SKEW) and is not a change.
 func (p *pass) fresh(s *seg) bool {
+	return p.stale(s) && (!uploaded(s.row) || RecentUpload(s.row.UploadedAt, p.now, p.opt.Recent))
+}
+
+// stale is a row not content-verified since its last change: sealed_at or
+// uploaded_at, whichever is later and not clock skew.
+func (p *pass) stale(s *seg) bool {
 	row := s.row
-	changed := row.SealedAt
-	if row.UploadedAt.After(changed) {
+	var changed time.Time
+	if !ClockSkewed(row.SealedAt, p.now) {
+		changed = row.SealedAt
+	}
+	if !ClockSkewed(row.UploadedAt, p.now) && row.UploadedAt.After(changed) {
 		changed = row.UploadedAt
 	}
-	if !s.last.IsZero() && !s.last.Before(changed) {
-		return false
-	}
-	return !uploaded(row) || RecentUpload(row.UploadedAt, p.now, p.opt.Recent)
+	return s.last.IsZero() || s.last.Before(changed)
 }
 
 // fallback is the tier below recent: the rotation slot once per slot
@@ -696,6 +798,15 @@ func (p *pass) queue(segs []*seg) []work {
 	var q []work
 	for _, s := range segs {
 		s.tier = p.tierOf(s)
+		if s.held {
+			if s.cov.Local.Method == MethodStat && s.parse {
+				s.cov.Local.Reason = reasonHeldForced
+			}
+			if s.cov.Object.Method == MethodHead && s.hash {
+				s.cov.Object.Reason = reasonHeldForced
+			}
+			p.rep.Coverage[s.row.Name] = s.cov
+		}
 		if s.tier == tierNone {
 			continue
 		}
@@ -725,11 +836,12 @@ func before(a, b work) bool {
 
 // content pays for the queue in order. Work that does not fit is deferred
 // and the next, smaller work is tried; once the deadline has passed the rest
-// is deferred. Recent work past the recent share drops to its fallback tier.
-// A cancelled context stops the pass with its error.
+// is deferred. Recent work past the recent share drops to its fallback tier,
+// or to the tail tier when it has none. A cancelled context stops the pass
+// with its error.
 func (p *pass) content(segs []*seg) error {
 	q := p.queue(segs)
-	share := p.recentShare()
+	share := p.recentShare(q)
 	var recent int64
 	for i := 0; i < len(q); i++ {
 		w := q[i]
@@ -752,8 +864,7 @@ func (p *pass) content(segs []*seg) error {
 			w.s.demoted = true
 			w.tier = p.fallback(w.s)
 			if w.tier == tierNone {
-				p.defer1(w, reasonDeferredRecent)
-				continue
+				w.tier = tierTail
 			}
 			rest := q[i+1:]
 			at := i + 1 + sort.Search(len(rest), func(j int) bool { return before(w, rest[j]) })
@@ -781,10 +892,13 @@ func (p *pass) content(segs []*seg) error {
 	return nil
 }
 
-// recentShare is the most the recent tier may spend this pass: the share
-// of C, the lesser of PassBytes and what the budget can pay before the
-// deadline. -1 when neither limits the pass.
-func (p *pass) recentShare() int64 {
+// recentShare is R, the most the recent tier may spend this pass (design
+// §5.3): min(⌊C × share⌋, max(0, C − F − S)), where C is the lesser of
+// PassBytes and what the budget can pay before the deadline, F the forced
+// work and S the largest other segment that fits in C − F. So whenever
+// C − F ≥ S the slot and overdue tiers keep room for one segment. -1 when
+// neither PassBytes nor the budget limits the pass.
+func (p *pass) recentShare(q []work) int64 {
 	c := int64(-1)
 	if p.opt.PassBytes > 0 {
 		c = p.opt.PassBytes
@@ -800,13 +914,29 @@ func (p *pass) recentShare() int64 {
 		return -1
 	}
 	pct := p.opt.RecentSharePercent
-	if pct <= 0 {
+	if pct == 0 {
 		pct = DefaultRecentSharePercent
 	}
-	if pct > 100 {
-		pct = 100
+	var f int64
+	cost := map[*seg]int64{}
+	for _, w := range q {
+		size := w.s.size
+		if !w.local {
+			size = w.s.objSize
+		}
+		if w.tier == tierForced {
+			f += size
+		} else {
+			cost[w.s] += size
+		}
 	}
-	return c * int64(pct) / 100
+	var s int64
+	for _, n := range cost {
+		if n <= c-f && n > s {
+			s = n
+		}
+	}
+	return min(c*int64(pct)/100, max(0, c-f-s))
 }
 
 func (p *pass) fits(size int64) bool {
@@ -842,12 +972,27 @@ func (p *pass) failed(w work, err error) error {
 		if p.rep.LocalErr == nil {
 			p.rep.LocalErr = err
 		}
+		p.unreadable(w.s.row, err)
 	} else if p.rep.ObjectErr == nil {
 		p.rep.ObjectErr = err
 	}
 	c.Method, c.Reason = MethodError, err.Error()
 	p.rep.Coverage[w.s.row.Name] = w.s.cov
 	return nil
+}
+
+// unreadable reports a local file that exists but cannot be read. A file
+// that vanished is not unreadable: the next pass sees it absent.
+func (p *pass) unreadable(row VerifyRow, err error) {
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	sev := SeverityWarning
+	if !uploaded(row) {
+		sev = SeverityCritical
+	}
+	p.rep.Findings = append(p.rep.Findings, Finding{Kind: KindLocalUnreadable, Subject: row.Name, Severity: sev,
+		Detail: "local segment file could not be read", Evidence: err.Error()})
 }
 
 func (p *pass) parseLocal(w work) error {
@@ -894,6 +1039,11 @@ func (p *pass) hashObject(w work) error {
 		var rd segRead
 		rd, err = readSegment(p.ctx, body, s.objSize, parse, p.opt.Budget, &p.count.object)
 		body.Close()
+		if err == nil && rd.n < s.objSize {
+			// A body that ends cleanly before the HEAD size is a cut-short
+			// read, not different bytes.
+			err = fmt.Errorf("object body ended after %d of %d bytes (HEAD): %w", rd.n, s.objSize, io.ErrUnexpectedEOF)
+		}
 		if err == nil {
 			s.cov.Object = Check{Method: MethodHashed, Reason: tierReason(w.tier), Digest: source, Found: true,
 				SizeChecked: s.cov.Object.SizeChecked}
@@ -940,6 +1090,8 @@ func tierReason(tier int) string {
 		return "uploaded within the recent window, or not uploaded yet"
 	case tierSlot:
 		return "rotation slot"
+	case tierTail:
+		return reasonTail
 	default:
 		return "overdue: oldest last_verified_at"
 	}
@@ -958,16 +1110,20 @@ func (rep *Report) finish(now time.Time, count *passCounter, open []Finding) {
 			rep.UnverifiableSize++
 		}
 	}
+	// UPLOAD_CLOCK_SKEW is about timestamps, not bytes: it does not hold
+	// back last_verified_at (QA r4 G5).
 	named := map[string]bool{}
 	for _, f := range rep.Findings {
-		named[f.Subject] = true
+		if f.Kind != KindUploadClockSkew {
+			named[f.Subject] = true
+		}
 	}
 	closed := map[string]bool{}
 	for _, c := range rep.Closed {
 		closed[c.Finding.Kind+"\x00"+c.Finding.Subject] = true
 	}
 	for _, f := range open {
-		if !closed[f.Kind+"\x00"+f.Subject] {
+		if f.Kind != KindUploadClockSkew && !closed[f.Kind+"\x00"+f.Subject] {
 			named[f.Subject] = true
 		}
 	}
@@ -1065,6 +1221,13 @@ func closes(f Finding, rep Report) string {
 		if ok && cov.ClockChecked {
 			return ReasonClockChecked
 		}
+	case KindLocalUnreadable:
+		if ok && cov.Local.Method == MethodParsed {
+			return ReasonLocalRead
+		}
+		if ok && (cov.Local.Method == MethodAbsent || cov.Local.Method == MethodMissing) {
+			return ReasonLocalGone
+		}
 	default:
 		if rep.ChainChecked {
 			return ReasonChainChecked
@@ -1079,7 +1242,7 @@ func closes(f Finding, rep Report) string {
 // chain is checked (design §6.2).
 func rowScoped(kind string) bool {
 	switch kind {
-	case KindVerifyFailed, KindObjectCorrupt, KindUploadClockSkew:
+	case KindVerifyFailed, KindObjectCorrupt, KindUploadClockSkew, KindLocalUnreadable:
 		return true
 	case string(I6MissingRow):
 		return false
@@ -1120,7 +1283,9 @@ func sealedRows(rows []VerifyRow) []VerifyRow {
 func openSubjects(open []Finding) (forced map[string][]string, named map[string]bool) {
 	forced, named = map[string][]string{}, map[string]bool{}
 	for _, f := range open {
-		named[f.Subject] = true
+		if f.Kind != KindUploadClockSkew {
+			named[f.Subject] = true
+		}
 		forced[f.Subject] = append(forced[f.Subject], f.Kind)
 	}
 	return forced, named
@@ -1137,7 +1302,7 @@ func (p *pass) forcedBy(s *seg) bool {
 	}
 	for _, kind := range p.forced[s.row.Name] {
 		switch {
-		case kind == KindObjectCorrupt, kind == KindVerifyFailed:
+		case kind == KindObjectCorrupt, kind == KindVerifyFailed, kind == KindLocalUnreadable:
 			return true
 		case kind == KindObjectSizeMismatch && s.row.Size <= 0:
 			return true
@@ -1161,6 +1326,9 @@ func uploaded(row VerifyRow) bool {
 	return strings.EqualFold(strings.TrimSpace(row.UploadState), "UPLOADED") && strings.TrimSpace(row.ObjectKey) != ""
 }
 
+// openLocal opens a local segment file; tests replace it to inject read errors.
+var openLocal = func(path string) (io.ReadCloser, error) { return os.Open(path) }
+
 type localResult struct {
 	check   Check
 	finding *Finding
@@ -1170,7 +1338,7 @@ type localResult struct {
 // checkLocal reads the file once: the parse, the SHA-256 and the event
 // span all come from the same stream, so the file is paid for once.
 func checkLocal(ctx context.Context, path string, row VerifyRow, size int64, budget *ByteBudget, n *int64) (localResult, error) {
-	f, err := os.Open(path)
+	f, err := openLocal(path)
 	if err != nil {
 		return localResult{}, err
 	}
@@ -1205,7 +1373,9 @@ func reasonFor(detail string) string {
 // segRead is one segment's bytes read once: the SHA-256 of everything read,
 // and, when parsed, the parse result and the event span.
 type segRead struct {
-	sum      string
+	sum string
+	n   int64 // bytes read
+
 	contents binlog.SegmentContents
 	parseErr error
 	span     *spanTracker
@@ -1237,6 +1407,7 @@ func readSegment(ctx context.Context, r io.Reader, size int64, parse bool, budge
 		return segRead{}, err
 	}
 	rd.sum = hex.EncodeToString(h.Sum(nil))
+	rd.n = br.got
 	return rd, nil
 }
 
@@ -1312,6 +1483,7 @@ type budgetReader struct {
 	r   io.Reader
 	b   *ByteBudget
 	n   *int64
+	got int64 // bytes read through this reader
 	err error
 }
 
@@ -1333,6 +1505,7 @@ func (b *budgetReader) Read(p []byte) (int, error) {
 			return 0, werr
 		}
 		*b.n += int64(n)
+		b.got += int64(n)
 	}
 	if err != nil && err != io.EOF {
 		b.err = err

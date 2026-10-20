@@ -294,7 +294,16 @@ func TestVerify_QueueOrder(t *testing.T) {
 	open := []Finding{{Kind: KindObjectCorrupt, Subject: forced}}
 	order := []string{forced, recent, slot, overdue}
 	seg := 2 * fileSize(t, filepath.Join(f.dir, forced))
+	// R is at most C - F - S (QA r4 G2): with room for two segments the
+	// forced one takes one and the recent one may not take the other, so it
+	// drops to the tail and the slot is paid. From three segments on the
+	// tiers are paid in order.
+	paid := [][]string{nil, {forced}, {forced, slot}, {forced, recent, slot}, order}
 	for i := 0; i <= len(order); i++ {
+		want := map[string]bool{}
+		for _, name := range paid[i] {
+			want[name] = true
+		}
 		// The recent share is lifted here; TestVerify_RecentShareCapsTheRecentTier covers it.
 		rep := mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: day, OpenFindings: open, LastVerified: lv, PassBytes: int64(i) * seg, RecentSharePercent: 100})
 		if i == 0 {
@@ -303,10 +312,10 @@ func TestVerify_QueueOrder(t *testing.T) {
 		for j, name := range order {
 			cov := rep.Coverage[name]
 			done := cov.Local.Method == MethodParsed && cov.Object.Method == MethodHashed
-			if done != (j < i) {
+			if done != want[name] {
 				t.Fatalf("cap %d segments: %s (rank %d) coverage %+v", i, name, j, cov)
 			}
-			if j >= i && (cov.Local.Method != MethodSkipped || cov.Object.Method != MethodSkipped) {
+			if !want[name] && (cov.Local.Method != MethodSkipped || cov.Object.Method != MethodSkipped) {
 				t.Fatalf("cap %d: deferred %s not SKIPPED: %+v", i, name, cov)
 			}
 		}
