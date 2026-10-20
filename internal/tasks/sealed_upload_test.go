@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: ApplySealedUpload with fake uploader and file writer
-// output: UPLOADED on a checksum match, UPLOAD_FAILED on upload error, checksum mismatch, or a failed object HEAD, without failing the caller; an empty SHA256 is filled from the sealed file and an existing digest is kept
+// output: UPLOADED on a checksum match, UPLOAD_FAILED on upload error, checksum mismatch, or a failed object HEAD, without failing the caller; an empty SHA256 is filled from the sealed file, an existing digest is kept, and stored event times are not overwritten by the fill
 // pos: best-effort upload caller tests
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"binlog_server/internal/binlog"
 )
@@ -199,5 +200,43 @@ func TestApplySealedUpload_FillsEmptySHA256(t *testing.T) {
 	}
 	if kept.SHA256 != "abc" {
 		t.Fatalf("existing digest was replaced with %q", kept.SHA256)
+	}
+}
+
+func TestApplySealedUpload_FillKeepsStoredEventTimes(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "mysql-bin.000003")
+	raw, err := os.ReadFile(filepath.Join("..", "binlog", "testdata", "ledger", "live", "mysql-bin.000003"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := binlog.ReadSealFacts(local)
+	if err != nil || !facts.HasSpan {
+		t.Fatalf("fixture facts %+v %v", facts, err)
+	}
+	first := time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC)
+	last := time.Date(2026, 1, 1, 0, 0, 2, 0, time.UTC)
+	writer := &sealedUploadWriter{}
+	updated, err := ApplySealedUpload(context.Background(), okUploader{}, writer,
+		BinlogFile{TaskID: "1", FilePath: local, ObjectKey: "k", FirstEventAt: &first, LastEventAt: &last})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.SHA256 != facts.SHA256 {
+		t.Fatalf("sha256 not filled: %q", updated.SHA256)
+	}
+	if !updated.FirstEventAt.Equal(first) || !updated.LastEventAt.Equal(last) {
+		t.Fatalf("stored event times overwritten: first=%v last=%v", updated.FirstEventAt, updated.LastEventAt)
+	}
+	// No stored times: the file's span fills them.
+	empty, err := ApplySealedUpload(context.Background(), okUploader{}, &sealedUploadWriter{}, BinlogFile{TaskID: "1", FilePath: local, ObjectKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.FirstEventAt == nil || !empty.FirstEventAt.Equal(facts.First) || empty.LastEventAt == nil || !empty.LastEventAt.Equal(facts.Last) {
+		t.Fatalf("event times not filled: %+v", empty)
 	}
 }

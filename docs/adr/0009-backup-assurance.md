@@ -91,7 +91,7 @@ func (c *Chain) Plan(target RestoreTarget) (RestorePlan, error) // 第 5 节
 2. **告警**：Console「告警」页 = 未解决的 `CRITICAL/WARNING` 结论 ∪ 不健康的任务（第 2.2 节），不再是前端对 `state` 的过滤。可选通知出口见「需要决定的事」。
 3. **指标**：`binlog_server_finding_open{task_id,kind,severity}`（gauge）和 `binlog_server_findings_reported_total{kind}`（counter）。
 
-`Finding` 种类是封闭枚举，覆盖：七条不变量违反、`TRANSITION_PERSIST_FAILED`、`EVENT_PERSIST_FAILED`、`UPLOAD_LATE`、`UPLOAD_UNVERIFIED`、`RETENTION_PURGE_FAILED`、`VERIFY_FAILED`、`DUMP_STALLED`、`RETRY_LOOP_FAILED`、`DUMP_CLEANUP_PENDING`、`METRIC_SOURCE_ERROR`、`TASK_UNHEALTHY`。
+`Finding` 种类是封闭枚举，覆盖：七条不变量违反、`TRANSITION_PERSIST_FAILED`、`EVENT_PERSIST_FAILED`、`UPLOAD_LATE`、`UPLOAD_UNVERIFIED`、`RETENTION_PURGE_FAILED`、`VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`（阶段 3；对象大小不符用 I6 族的 `I6_OBJECT_SIZE_MISMATCH`）、`DUMP_STALLED`、`RETRY_LOOP_FAILED`、`DUMP_CLEANUP_PENDING`、`METRIC_SOURCE_ERROR`、`TASK_UNHEALTHY`。
 
 结论汇自己的写入失败怎么办：内存中保留一个有上限的待写队列，失败本身计入 `binlog_server_finding_sink_errors_total`，并让 `/healthz` 返回 degraded。这是唯一允许「只有指标」的路径，因为它就是出口本身。
 
@@ -164,9 +164,20 @@ healthy(t) ⇔ state ∈ {RUNNING}
 **巡检器 (Verifier)** 是 worker 上的周期任务（只在持有租约的 worker 上跑该任务，复用 ADR 0001 的所有权），每 `verify_every`（默认 24h，分批平摊，每任务每轮上限 `verify_budget` 字节/秒）：
 
 1. **结构**：对每个本地封存段用 `binlog.ReadSegmentContents` 完整解析（magic、每事件 CRC32、`end_log_pos`、GTID 事件），结果与目录行比对（size、首尾位点、GTID 集合摘要）。失败 → `VERIFY_FAILED`（CRITICAL）。
-2. **对象**：对每个 UPLOADED 段 `HEAD` 一次（存在、大小）；按 `verify_object_sample`（默认 5%，加上最近 24h 新上传的全部）下载并比对 SHA-256 与本地（本地已删则与目录行记录的 SHA-256 比对，因此上传时需要把 SHA-256 写进目录行）。缺失或不符 → `I6_MISSING_OBJECT`/`I6_SIZE_MISMATCH`/`VERIFY_FAILED`。这也会发现对象存储侧的生命周期策略误删。
+2. **对象**：对每个 UPLOADED 段 `HEAD` 一次（存在、大小）；下载并比对 SHA-256 的是最近 24h 新上传的全部、按段名固定槽轮换到当天的那一批（`verify_object_sample` 默认 5%，即每 20 天轮一遍），以及还开着 `OBJECT_CORRUPT` / `VERIFY_FAILED` 的段。正文与本地比对，本地已删则与目录行记录的 SHA-256 比对（因此上传时需要把 SHA-256 写进目录行）；两边都没有摘要时只 HEAD，记为「无法验证」。这也会发现对象存储侧的生命周期策略误删。结论与处置（2026-10-20 修订，阶段 3 设计 `docs/design/0009-phase3-verifier.md` §8）：
+
+   | 结论 | 严重度 | 含义 | 处置 |
+   |---|---|---|---|
+   | `VERIFY_FAILED` | CRITICAL | 本地封存段解析失败，或与目录行（大小、SHA-256、位点、GTID）不符 | 本地字节或目录行有一边错了，需要人查；先不动对象 |
+   | `OBJECT_CORRUPT` | CRITICAL | 对象正文的 SHA-256 与本地或目录行不同 | 远端字节变了：用本地副本重新上传 |
+   | `I6_MISSING_OBJECT` | CRITICAL | UPLOADED 段的对象 HEAD/GET 不在 | 查桶的生命周期与删除记录；本地还在就重新上传 |
+   | `I6_OBJECT_SIZE_MISMATCH` | CRITICAL | 对象大小与目录行不同 | 对象被截断或替换（或目录行错）：对照本地后重新上传 |
+   | `UPLOAD_CLOCK_SKEW` | WARNING | `uploaded_at` 比当前时间晚超过 1 小时 | 修时钟；该行不按「最近」处理，不会每轮整个下载 |
+   | 无法验证（报告里的计数，不是结论） | — | 目录行没有 SHA-256 且本地已删，正文无从比对 | 本地还在时补摘要；补不了就只靠 HEAD |
+
+   结论只在本轮用能发现它的方法重新查过该段时关闭（`OBJECT_CORRUPT` 要重新哈希，`VERIFY_FAILED` 要重新解析）；没查到、查失败或中途取消都不关。
 3. **链**：对整条链跑 `Chain.Check`，把违反写成结论，消失的结论标记 resolved。
-4. 每段记录 `last_verified_at`，进入健康定义的 `verify_age`。
+4. 每段记录 `last_verified_at`，进入健康定义的 `verify_age`。只有本轮按内容验过（本地解析、对象哈希）且没有结论点名的段才前进；只 HEAD 或无法验证的不前进。
 
 **还原演练 (Restore Drill)**（可选，默认关闭）：配置一个**专用演练实例**（`verify.drill.dsn`），每 `drill_every`（默认 7 天）对窗口内随机一个时间点生成还原计划（第 5 节），用 `mysqlbinlog | mysql` 在演练实例上从 `B` 起回放到该点，比较演练实例的 `gtid_executed` 与计划预期；可选再比较用户提供的校验 SQL。演练绝不连接源库。结果写事件 `RESTORE_DRILL` 与指标 `binlog_server_restore_drill_last_success_timestamp`；失败为 CRITICAL 结论。
 
