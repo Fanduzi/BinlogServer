@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege; the driver error stays in the unwrap chain) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait; a confirmed deadline is not also context.DeadlineExceeded; the lock views only name the holder) and 1213 retried once; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege; the driver error stays in the unwrap chain) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait; a confirmed deadline is not also context.DeadlineExceeded; the lock views only name the holder) and 1213 retried once on the insert and on the main transaction; each lock statement has its own deadline of innodb_lock_wait_timeout plus at least 1s, so work earlier in the transaction cannot hide the server 1205, and the outer deadline is only a backstop; a pool checkout that times out while every connection is in use and a lock wait is already confirmed or past its statement bound is ErrLockWait ("pool starvation behind a lock wait"), while a slow pool with no lock evidence stays an unconfirmed deadline; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -59,6 +60,69 @@ type lockWaitError struct{ error }
 
 func (e lockWaitError) Unwrap() error { return e.error }
 
+// stmtMark is one in-flight lock statement.
+type stmtMark struct {
+	at        time.Time
+	confirmed atomic.Bool
+}
+
+// stmtFlight is the set of lock statements this process is inside.
+type stmtFlight struct {
+	mu   sync.Mutex
+	open []*stmtMark
+}
+
+func (f *stmtFlight) begin() *stmtMark {
+	m := &stmtMark{at: time.Now()}
+	f.mu.Lock()
+	f.open = append(f.open, m)
+	f.mu.Unlock()
+	return m
+}
+
+func (f *stmtFlight) end(m *stmtMark) {
+	if m == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, x := range f.open {
+		if x == m {
+			f.open = append(f.open[:i], f.open[i+1:]...)
+			return
+		}
+	}
+}
+
+// evidence is true when some in-flight lock statement was confirmed waiting,
+// or has already used its whole statement budget.
+func (f *stmtFlight) evidence(bound time.Duration, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.open {
+		if m.confirmed.Load() {
+			return true
+		}
+		if bound > 0 && !now.Before(m.at.Add(bound)) {
+			return true
+		}
+	}
+	return false
+}
+
+// poolStarvationReason is the stall signal for a connection that could not
+// be checked out because every pool slot is behind a lock wait.
+const poolStarvationReason = "pool starvation behind a lock wait"
+
+// stallFromPoolWait is a stall only when the pool is full and a lock wait
+// is already evidenced. A slow pool with neither fact stays unconfirmed.
+func stallFromPoolWait(saturated, confirmed, exceeded bool) (bool, string) {
+	if saturated && (confirmed || exceeded) {
+		return true, poolStarvationReason
+	}
+	return false, ""
+}
+
 func classifyHealthErr(err error) error {
 	if err == nil {
 		return nil
@@ -87,7 +151,7 @@ func (s *MySQLTaskStore) insertHealthRow(ctx context.Context, taskID string) err
 		_, err := s.db.ExecContext(ctx, insertHealthRowSQL, taskID)
 		return classifyLock(err, false)
 	}
-	conn, err := s.db.Conn(ctx)
+	conn, err := s.acquireConn(ctx)
 	if err != nil {
 		return err
 	}
@@ -97,9 +161,88 @@ func (s *MySQLTaskStore) insertHealthRow(ctx context.Context, taskID string) err
 		return err
 	}
 	return s.withLock(thread, func() error {
-		_, err := conn.ExecContext(ctx, insertHealthRowSQL, taskID)
-		return err
+		return s.lockStmt(ctx, func(sctx context.Context) error {
+			_, err := conn.ExecContext(sctx, insertHealthRowSQL, taskID)
+			return err
+		})
 	})
+}
+
+// acquireConn waits for a pool connection on its own budget, separate from
+// any lock statement. A timeout is a stall only when the pool is saturated
+// and some in-flight write is already in a lock wait or past its statement
+// bound. A slow pool with no lock evidence stays an unconfirmed deadline.
+func (s *MySQLTaskStore) acquireConn(ctx context.Context) (*sql.Conn, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("no metadata pool")
+	}
+	budget := s.statementDeadline()
+	if budget <= 0 {
+		return s.db.Conn(ctx)
+	}
+	cctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	conn, err := s.db.Conn(cctx)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		return conn, err
+	}
+	if s.poolStarved() {
+		return nil, fmt.Errorf("%w: %s", healthstore.ErrLockWait, poolStarvationReason)
+	}
+	return nil, err
+}
+
+func (s *MySQLTaskStore) poolStarved() bool {
+	if s == nil || s.db == nil {
+		return false
+	}
+	st := s.db.Stats()
+	saturated := st.MaxOpenConnections > 0 && st.InUse >= st.MaxOpenConnections
+	bound := s.statementDeadline()
+	confirmed, exceeded := false, false
+	s.flight.mu.Lock()
+	for _, m := range s.flight.open {
+		if m.confirmed.Load() {
+			confirmed = true
+		}
+		if bound > 0 && !time.Now().Before(m.at.Add(bound)) {
+			exceeded = true
+		}
+	}
+	s.flight.mu.Unlock()
+	ok, _ := stallFromPoolWait(saturated, confirmed, exceeded)
+	return ok
+}
+
+// beginHealthTx checks a connection out on the pool budget, then starts the
+// transaction. release returns that connection to the pool.
+func (s *MySQLTaskStore) beginHealthTx(ctx context.Context) (*sql.Tx, func(), error) {
+	if s.statementDeadline() <= 0 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		return tx, func() {}, err
+	}
+	conn, err := s.acquireConn(ctx)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, func() {}, err
+	}
+	return tx, func() { _ = conn.Close() }, nil
+}
+
+// lockStmt gives one lock-taking statement its own deadline, measured from
+// now. The outer context is only a backstop and must not be the budget.
+func (s *MySQLTaskStore) lockStmt(ctx context.Context, fn func(context.Context) error) error {
+	budget := s.statementDeadline()
+	if budget <= 0 {
+		return fn(ctx)
+	}
+	sctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	return fn(sctx)
 }
 
 func classifyLock(err error, waiting bool) error {
@@ -113,9 +256,14 @@ func classifyLock(err error, waiting bool) error {
 }
 
 func (s *MySQLTaskStore) withLock(thread int64, fn func() error) (err error) {
+	var mark *stmtMark
+	if s != nil && s.statementDeadline() > 0 {
+		mark = s.flight.begin()
+		defer s.flight.end(mark)
+	}
 	var stop func() bool
 	if thread > 0 {
-		stop = s.armLockWatch(thread)
+		stop = s.armLockWatch(thread, mark)
 		defer func() { stop() }()
 	}
 	err = fn()
@@ -170,7 +318,7 @@ LIMIT 1`, thread).Scan(&id)
 
 // armLockWatch polls for a lock wait while a lock statement runs. The
 // returned function stops the poll and reports whether a wait was visible.
-func (s *MySQLTaskStore) armLockWatch(thread int64) func() bool {
+func (s *MySQLTaskStore) armLockWatch(thread int64, mark *stmtMark) func() bool {
 	var seen atomic.Bool
 	done := make(chan struct{})
 	go func() {
@@ -183,6 +331,9 @@ func (s *MySQLTaskStore) armLockWatch(thread int64) func() bool {
 			case <-t.C:
 				if s.sawLockWait(thread) {
 					seen.Store(true)
+					if mark != nil {
+						mark.confirmed.Store(true)
+					}
 					return
 				}
 			}
@@ -292,10 +443,11 @@ func (s *MySQLTaskStore) ApplyTransitions(ctx context.Context, taskID string, fe
 }
 
 func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence health.Fence, ts []health.Transition, h health.TaskHealth, alias bool) (out healthstore.Applied, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, release, err := s.beginHealthTx(ctx)
 	if err != nil {
 		return out, err
 	}
+	defer release()
 	defer func() {
 		if err != nil {
 			_ = tx.Rollback()
@@ -311,7 +463,9 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 	if fence.Mode != health.FenceStandalone {
 		var l healthstore.Lease
 		err = s.withLock(thread, func() error {
-			return tx.QueryRowContext(ctx, "SELECT owner_worker_id, epoch, lease_expire_at <= NOW(6) FROM task_leases WHERE task_id = ? FOR UPDATE", taskID).Scan(&l.Owner, &l.Epoch, &l.Expired)
+			return s.lockStmt(ctx, func(sctx context.Context) error {
+				return tx.QueryRowContext(sctx, "SELECT owner_worker_id, epoch, lease_expire_at <= NOW(6) FROM task_leases WHERE task_id = ? FOR UPDATE", taskID).Scan(&l.Owner, &l.Epoch, &l.Expired)
+			})
 		})
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -326,8 +480,10 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 	var mode string
 	var gen int64
 	err = s.withLock(thread, func() error {
-		return tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation, chain_owner FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
-			Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen, &stored.ChainOwner)
+		return s.lockStmt(ctx, func(sctx context.Context) error {
+			return tx.QueryRowContext(sctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation, chain_owner FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
+				Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen, &stored.ChainOwner)
+		})
 	})
 	if err != nil {
 		return out, err
@@ -402,8 +558,11 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 		args = append(args, fence.Node)
 	}
 	args = append(args, taskID)
-	if _, err = tx.ExecContext(ctx, "UPDATE task_health SET status = ?, reasons = ?, evaluated_at = UTC_TIMESTAMP(6), generation = ?, owner = ?, owner_epoch = ?, "+
-		"fence_mode = ?, fence_instance = ?, fence_epoch = ?, fence_node = ?, "+chainSQL+" WHERE task_id = ?", args...); err != nil {
+	if err = s.lockStmt(ctx, func(sctx context.Context) error {
+		_, err := tx.ExecContext(sctx, "UPDATE task_health SET status = ?, reasons = ?, evaluated_at = UTC_TIMESTAMP(6), generation = ?, owner = ?, owner_epoch = ?, "+
+			"fence_mode = ?, fence_instance = ?, fence_epoch = ?, fence_node = ?, "+chainSQL+" WHERE task_id = ?", args...)
+		return err
+	}); err != nil {
 		return out, err
 	}
 	err = tx.Commit()

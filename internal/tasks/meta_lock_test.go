@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: two lock-wait observations and later acquisitions of the same row
-// output: proof that the first observation stays healthy, the second opens META_LOCK_STALLED, two takes inside lock_wait close it, another node does not, a late take restarts the count, and lock_detail=reduced does not degrade health
+// output: proof that the first observation stays healthy, the second opens META_LOCK_STALLED, a successful acquisition resets that count, two takes inside lock_wait close it, another node does not, a late take restarts the count, and lock_detail=reduced does not degrade health
 // pos: ADR 0011 PR-2 F12 confirm and the close rule
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -70,6 +70,22 @@ func TestMetaLockSecondTimeoutDegradesHealth(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("reasons %v, want META_LOCK_STALLED", sum.Reasons)
+	}
+}
+
+func TestMetaLockSuccessResetsTheCount(t *testing.T) {
+	s := NewScheduler()
+	now := time.Now()
+	p := lockParams()
+	if opened := s.NoteMetaLockTimeout("t1", "n1", now, p); opened {
+		t.Fatal("first observation opened the finding")
+	}
+	s.NoteMetaLockHeld("t1", "n1", now, p, false, time.Hour, nil)
+	if opened := s.NoteMetaLockTimeout("t1", "n1", now.Add(time.Millisecond), p); opened {
+		t.Fatal("a successful acquisition did not reset the count")
+	}
+	if s.HealthSummary(context.Background()).Status != HealthOK {
+		t.Fatal("one timeout after a success degraded health")
 	}
 }
 

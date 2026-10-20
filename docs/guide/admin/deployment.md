@@ -191,7 +191,9 @@ export META_DSN="binlog_meta:YourPassword@tcp(10.0.0.20:3306)/binlog_server_meta
 ./migrate up --dsn "$META_DSN" --path ./migrations
 ```
 
-元数据库账号授 `ALL ON binlog_server_meta.*`（库名按上面的库）。不要为了卡住检测再授 `PROCESS`。行锁会在 `innodb_lock_wait_timeout` 上以服务器错误 1205 结束，客户端期限比它长，所以没有 `PROCESS` 也能打开 `META_LOCK_STALLED`。`PROCESS` 或 `performance_schema` 只用来在日志里写上挡住的会话。没有这些权限时，启动打一条警告，`/api/health` 带 `lock_detail=reduced`，状态仍按有没有 CRITICAL 结论决定，这个字段本身不算 degraded。
+元数据库账号授 `ALL ON binlog_server_meta.*`（库名按上面的库，与发布说明里的 `binlog_server_meta` 是同一个名字）。不要为了卡住检测再授 `PROCESS`。每一条拿锁的语句各自有客户端期限，等于 `innodb_lock_wait_timeout` 再加至少 1 秒，从这条语句开始时算起，所以行锁以服务器错误 1205 结束，没有 `PROCESS` 也能打开 `META_LOCK_STALLED`。整次健康写入的外层期限只做兜底。池满、并且已经有一条元数据写入在等锁或超过了自己的语句期限时，等不到连接也算同一种卡住；池只是慢则不算。
+
+只授 `PROCESS` 的 MySQL 8 给不出挡住的会话名字。点名要 `performance_schema.data_lock_waits` 或 `information_schema.innodb_lock_waits` 真正答得上。答不上时启动打一条警告，`/api/health` 带 `lock_detail=reduced`，状态仍按有没有 CRITICAL 结论决定，这个字段本身不算 degraded。启动还会在一条新的池连接上回读武装过的会话变量；代理剥掉其中任意一个，从启动起就是 degraded，不必等到第一次租约写入。
 
 #### 4.2.2 Control Plane 节点配置 (`control-plane.yaml`)
 

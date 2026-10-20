@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: cluster.side_kill, information_schema, and meta_canary when that table exists
-// output: side_kill on only after the canary passes; otherwise off. The client never sends a server kill statement. sleepingLeaseHolder matches one task id exactly on MySQL and on MariaDB
+// output: side_kill on only after the canary passes; otherwise off, including while the switch is off and while the naming views return 1227 or 1142. The second probe must still be the same sleeping transaction or the procedure is not called. The client never sends a server kill statement. sleepingLeaseHolder matches one task id exactly on MySQL and on MariaDB
 // pos: ADR 0011 PR-2 drill and auto (P2-9). Creating the procedure is a later migration
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -57,7 +57,11 @@ func (s *MySQLTaskStore) SideKillStalled(ctx context.Context, taskID string) {
 	if s == nil || s.session == nil || s.session.kill() != "on" || taskID == "" {
 		return
 	}
-	go s.probeAndCall(context.WithoutCancel(ctx), taskID)
+	run := s.sideKillRun
+	if run == nil {
+		run = func(fn func()) { go fn() }
+	}
+	run(func() { s.probeAndCall(context.WithoutCancel(ctx), taskID) })
 }
 
 func (s *MySQLTaskStore) probeAndCall(ctx context.Context, taskID string) {
@@ -100,7 +104,7 @@ func (s *MySQLTaskStore) drillSideKill(ctx context.Context, nodeID string) (bool
 	if err != nil || n == 0 {
 		return false, err
 	}
-	process := s.hasProcessPrivilege(ctx)
+	process := s.canSeeOtherLocks(ctx)
 	dataLocks := false
 	if s.session.flavor != "mariadb" {
 		dataLocks = s.canReadDataLocks(ctx)
@@ -120,23 +124,17 @@ func (s *MySQLTaskStore) countQuery(ctx context.Context, q string) (int, error) 
 	return n, err
 }
 
-func (s *MySQLTaskStore) hasProcessPrivilege(ctx context.Context) bool {
-	rows, err := s.db.QueryContext(ctx, "SHOW GRANTS FOR CURRENT_USER()")
-	if err != nil {
-		return false
+// canSeeOtherLocks is true only when a naming view answers. A grant string
+// is not a privilege: a user named processor, or a database named
+// qa_process_db, must not count. 1227 and 1142 are a denial.
+func (s *MySQLTaskStore) canSeeOtherLocks(ctx context.Context) bool {
+	if err := s.queryErr(ctx, "SELECT ENGINE_TRANSACTION_ID FROM performance_schema.data_locks LIMIT 0"); err == nil {
+		return true
+	} else if accessDenied(err) {
+		// denied; try the MariaDB view
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var grant string
-		if err := rows.Scan(&grant); err != nil {
-			return false
-		}
-		up := strings.ToUpper(grant)
-		if strings.Contains(up, "ALL PRIVILEGES ON *.*") || strings.Contains(up, "PROCESS") || strings.Contains(up, "SUPER") {
-			return true
-		}
-	}
-	return false
+	err := s.queryErr(ctx, "SELECT lock_id FROM information_schema.innodb_lock_waits LIMIT 0")
+	return err == nil && !accessDenied(err)
 }
 
 func (s *MySQLTaskStore) canReadDataLocks(ctx context.Context) bool {

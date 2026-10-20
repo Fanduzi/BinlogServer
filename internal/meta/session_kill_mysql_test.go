@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: BINLOG_TEST_MYSQL_ROOT_DSNS, one scratch database per server; BINLOG_TEST_NOPROCESS_DSN for an account granted only that database
-// output: proof that a newly opened pool connection carries the session-kill timeouts and that a sleeping FOR UPDATE holder is dropped inside the bound; proof that META_LOCK_STALLED still opens from server error 1205 when that account has no PROCESS privilege
+// output: proof that a newly opened pool connection carries the session-kill timeouts and that a sleeping FOR UPDATE holder is dropped inside the bound; proof that two health writes against a stopped holder return server error 1205 when that account has no PROCESS privilege. The live evaluator and /api/health 503 are the smoke cell
 // pos: ADR 0011 PR-2 e2e cell for MySQL 8 and MariaDB; skipped when the DSN list is unset
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -21,8 +21,6 @@ import (
 
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
-	"binlog_server/internal/ownership"
-	"binlog_server/internal/tasks"
 
 	mysqlDriver "github.com/go-sql-driver/mysql"
 	"github.com/golang-migrate/migrate/v4"
@@ -140,10 +138,11 @@ func assertSessionTimeouts(t *testing.T, db *sql.DB, mariadb bool) {
 	}
 }
 
-// TestMetaLockStallWithoutProcess is the least-privilege cell. The smoke
+// TestMetaLockStallWithoutProcess is the least-privilege check. The smoke
 // script creates the account with privileges on the meta database only.
 // The child holds task_leases and is SIGSTOPped. Two health writes must
-// come back as server 1205, and the second observation opens META_LOCK_STALLED.
+// come back as server 1205. Opening META_LOCK_STALLED is the live evaluator
+// in the smoke cell, not a hand-driven scheduler.
 func TestMetaLockStallWithoutProcess(t *testing.T) {
 	if os.Getenv("BINLOG_TEST_HOLD_CHILD") == "1" {
 		if err := holdStoppedLease(os.Getenv("BINLOG_TEST_NOPROCESS_DSN"), os.Getenv("BINLOG_TEST_HOLD_READY")); err != nil {
@@ -229,27 +228,6 @@ func TestMetaLockStallWithoutProcess(t *testing.T) {
 		if !errors.As(err, &me) || me.Number != 1205 {
 			t.Fatalf("observation %d: %v, want server 1205", i+1, err)
 		}
-	}
-	sched := tasks.NewScheduler()
-	now := time.Now()
-	p := ownership.DefaultParams()
-	p.LockWait = time.Second
-	sched.NoteMetaLockTimeout("t-noproc", "n1", now, p)
-	if opened := sched.NoteMetaLockTimeout("t-noproc", "n1", now.Add(time.Millisecond), p); !opened {
-		t.Fatal("second observation did not open META_LOCK_STALLED")
-	}
-	sum := sched.HealthSummary(context.Background())
-	if sum.Status != tasks.HealthDegraded {
-		t.Fatalf("status %s, want degraded", sum.Status)
-	}
-	found := false
-	for _, reason := range sum.Reasons {
-		if strings.Contains(reason, "META_LOCK_STALLED") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("reasons %v, want META_LOCK_STALLED", sum.Reasons)
 	}
 }
 
