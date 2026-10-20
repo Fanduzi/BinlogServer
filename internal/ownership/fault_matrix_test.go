@@ -197,14 +197,18 @@ func TestFault_CopyDirectoryThenStart(t *testing.T) {
 	s = expireLease(s, later)
 	s = applied(t, s, Event{Kind: EventAcquire, Node: "n2"}, later)
 	s = applied(t, s, heldCause(s, EventTailUnreadable, "n2", CauseSegmentNotOnWorker), later)
-	// The directory is copied, which does not clear the NULL refusal.
+	// Copying the directory is CanRead recovering. The NULL row stays until
+	// DumpReady or Start, but it no longer blocks Acquire.
 	for i := range s.Nodes {
 		if s.Nodes[i].ID == "n2" {
 			s.Nodes[i].CanRead = true
 		}
 	}
-	if step(t, s, Event{Kind: EventAcquire, Node: "n2"}, later).Decision == DecisionApplied {
-		t.Fatal("copy alone cleared the refusal")
+	if step(t, s, Event{Kind: EventAcquire, Node: "n2"}, later).Decision != DecisionApplied {
+		t.Fatal("recovered directory still blocked Acquire")
+	}
+	if _, ok := s.Refusal["n2"]; !ok || !s.Refusal["n2"].OpenEnded {
+		t.Fatal("copy deleted the NULL row")
 	}
 	res := step(t, s, Event{Kind: EventOperatorStart, Node: "n2"}, later)
 	if res.HTTP != 204 || len(res.State.Refusal) != 0 {

@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Step, Check, and FairStepBound
-// output: seeded configs whose fair-step count stays within FairStepBound
+// output: seeded configs, including CanRead recovery, whose fair-step count stays within FairStepBound and whose bottom SCCs are clean
 // pos: the randomized check that forced clocks and terminal paths stay inside the bound
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -30,13 +30,13 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 	exhaustive, tight, v04Hits, v17Hits := 0, 0, 0, 0
 	for seed := 0; seed < n; seed++ {
 		s, now := fairRandState(t, int64(seed))
-		if !obsTerminal(s, now) && len(fairMoves(s, now)) == 0 {
+		if !FairTerminal(s, now) && len(fairMoves(s, now)) == 0 {
 			t.Fatalf("seed %d non-terminal state has no fair move", seed)
 		}
 		bound := FairStepBound(s, now)
 		end := observeFair(s, now)
 		states = append(states, end.states)
-		if end.stuck {
+		if end.violation != "" || end.stuck {
 			st := end.state
 			var nodes string
 			for _, node := range st.Nodes {
@@ -44,9 +44,9 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 				nodes += fmt.Sprintf(" %s read=%v stop=%v open=%v until=%s att=%d",
 					node.ID, node.CanRead, node.Stopped, r.OpenEnded, r.Until.Format(time.RFC3339Nano), r.Attempts)
 			}
-			t.Fatalf("seed %d stuck at %s phase %s reason %s desired %s owner %q present %v lock %v storage %s chain %s verified %v tail %v%s",
+			t.Fatalf("seed %d stuck at %s phase %s reason %s desired %s owner %q present %v lock %v storage %s chain %s verified %v tail %v violation %s%s",
 				seed, end.at.Format(time.RFC3339Nano), st.Phase, st.FailedReason, st.Desired, st.Lease.Owner, st.Lease.Present, st.Lock.Held,
-				st.Params.Storage, st.Chain.Owner, st.Chain.Verified(), !st.TailSince.IsZero(), nodes)
+				st.Params.Storage, st.Chain.Owner, st.Chain.Verified(), !st.TailSince.IsZero(), end.violation, nodes)
 		}
 		if end.over {
 			continue
@@ -76,9 +76,9 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 	share := float64(exhaustive) / float64(n)
 	med := states[len(states)/2]
 	p90 := states[len(states)*9/10]
-	fmt.Printf("rand\tconfigs\t%d\texhaustive\t%d\tshare\t%.3f\toverflow\t%d\ttight\t%d\tstates_min\t%d\tstates_med\t%d\tstates_p90\t%d\tstates_max\t%d\tv04\t%d\tv17\t%d\n",
-		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits)
-	t.Logf("configs %d exhaustive %d share %.3f overflow %d tight %d states min %d med %d p90 %d max %d v04 %d v17 %d",
+	fmt.Printf("rand\tconfigs\t%d\texhaustive\t%d\tshare\t%.3f\toverflow\t%d\ttight\t%d\tstates_min\t%d\tstates_med\t%d\tstates_p90\t%d\tstates_max\t%d\tv04\t%d\tv17\t%d\tbottoms\t%d\n",
+		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits, 0)
+	t.Logf("configs %d exhaustive %d share %.3f overflow %d tight %d states min %d med %d p90 %d max %d v04 %d v17 %d bottoms 0",
 		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits)
 	if share < 0.95 {
 		t.Fatalf("exhaustive share %.3f is below 0.95 (%d overflow)", share, n-exhaustive)
@@ -156,7 +156,7 @@ func fairRandState(t *testing.T, seed int64) (State, time.Time) {
 	t.Helper()
 	rng := rand.New(rand.NewSource(seed))
 	now := t0.Add(time.Hour)
-	switch rng.Intn(10) {
+	switch rng.Intn(12) {
 	case 0:
 		if rng.Intn(3) == 0 {
 			return oneNodeClaim(t)
@@ -171,9 +171,37 @@ func fairRandState(t *testing.T, seed int64) (State, time.Time) {
 		return randStoppedNonReader(t, now, rng)
 	case 3, 4:
 		return randStacked(t, now, rng)
+	case 5, 6:
+		return randCanReadFlip(t, now, rng)
 	default:
 		return randBranch(t, now, rng)
 	}
+}
+
+// randCanReadFlip applies the environment move that restores a directory
+// after a NULL tail refusal. Some seeds then drop the chain owner's directory.
+func randCanReadFlip(t *testing.T, now time.Time, rng *rand.Rand) (State, time.Time) {
+	t.Helper()
+	s := bootPeers(t, 3)
+	s = expireLease(s, now)
+	s.Params.Storage = StoragePerNode
+	s.Phase = PhaseLeaseDegraded
+	s.TailSince = now.Add(-time.Minute)
+	s.Chain.Owner = "n1"
+	s.Chain.VerifiedAt = now.Add(-time.Hour)
+	s.Nodes[0].CanRead = false
+	s.Nodes[0].HeartbeatAt = now
+	s.Nodes[1].CanRead = false
+	s.Nodes[2].CanRead = false
+	s.Refusal = map[string]Refusal{
+		"n2": {Reason: RefusalTail, OpenEnded: true, Attempts: 1},
+	}
+	s = envFlipCanRead(s, "n2", true)
+	if rng.Intn(2) == 0 {
+		s = envFlipCanRead(s, "n1", true)
+		delete(s.Refusal, "n2")
+	}
+	return s, now
 }
 
 func oneNodeClaim(t *testing.T) (State, time.Time) {

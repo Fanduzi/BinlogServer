@@ -1,6 +1,6 @@
 # internal/ownership/mutants
 
-把评审用的源码变异重新打到 `internal/ownership` 上，确认测试会失败。表里有 M01 起的一串，也有 G01，以及打在 `FairStepBound` 上的 J05、J06、J11、B01–B04、U06、U08、U16、U17、U18、V04、V17，和把任何 `CHAIN_OWNER_GONE` 都当成终态的 S03。没有单独标成等价的一档。
+把评审用的源码变异重新打到 `internal/ownership` 上，确认测试会失败。表里有 M01 起的一串，也有 G01，以及打在 `FairStepBound` 上的 J05、J06、J11、B01–B04、U06、U08、U16、U17、U18、V04、V17，和把任何 `CHAIN_OWNER_GONE` 都当成终态的 S03，删掉 sweep 步的 W02，`fairRunning` 不看行锁的 T08，上界丢掉 `ChainOwnerGone` 的 W04，以及把 NULL 拒绝重新写成永久的 P01。没有单独标成等价的一档。
 
 ## Files
 
