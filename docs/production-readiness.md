@@ -22,7 +22,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | A1 | 七条链不变量 I1–I7（ADR 0009）在 standalone 和 cluster 下都会被判定，违反就开 finding | `internal/assurance/chain_*_test.go`（CI 单测）。还缺：cluster 模式删掉一个封存段要开 finding 的 e2e；GTID 内部空洞要开 finding | PARTIAL | #462（P1，cluster 丢掉 I6_MISSING_LOCAL）、#352、#415、#406、#397；按 ADR 0011 由 PR-3 修，#471 不合并 |
 | A2 | ADR 0009 列出的 15 条静默路径（S1–S15），每条都同时落下 finding、事件和指标 | `internal/tasks/finding_test.go`、`internal/api/metric_source_test.go`、`internal/replication/finding_dump_test.go`；`internal/lintguard` 拦新的 `_ = err` 和只打日志的写法（都在 `unit-and-e2e` 里） | MET | 注意：lintguard 只看语法，allowlist 里还有 5 条 follow-up；ADR 要求的 `errcheck`/vet 步骤要改 workflow，还没进 CI |
 | A3 | 配了对象存储时，每个封存段都会上传并校验；保留期不删没验证过的段 | `e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments` | MET | #438（P4，审计行可能丢） |
-| A4 | 周期巡检：本地段完整解析，对象 HEAD 加抽样 SHA-256 比对；可选的还原演练每 7 天跑一次 | 没有。要做 ADR 0009 阶段 3 的 Verifier，再加一个 e2e：删一个 MinIO 对象、改一个字节、改本地一个字节，下一轮必须全部报出来 | NOT MET | ADR 0009 阶段 3 没开工 |
+| A4 | 周期巡检：本地段完整解析，对象 HEAD 加抽样 SHA-256 比对；可选的还原演练每 7 天跑一次 | `TestVerify_ReportsDeletedObjectFlippedObjectAndFlippedLocal`、`TestVerify_CleanChainHasNoFindings`、`TestByteBudget_IsRespected`（`internal/assurance/verify_test.go`，CI 的 `go test ./...`）。还缺：进程里的周期任务（等 ADR 0011 PR-2 的 owner 接缝）、还原演练、真实 MinIO（`scripts/e2e/smoke-verify.sh` 的 `TestVerifyAgainstMinIO`，没有任何 job 跑它） | PARTIAL | ADR 0011 PR-2；演练等阶段 5 的还原计划 |
 | A5 | 数据盘写满时，备份不能看起来还健康，空间释放后续传不留缺口 | `smoke-standalone-full-disk`（quick；只测 standalone，任务没在跑）。还缺：正在 dump 的任务和 cluster owner 写满的场景（ADR 0011 §4.2 第 15 行） | PARTIAL | ADR 0011 PR-4 |
 
 ## B. 崩溃与重启恢复
@@ -102,12 +102,12 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 12 / PARTIAL 9 / NOT MET 14**。
+共 35 项：**MET 12 / PARTIAL 10 / NOT MET 13**。
 
 ## 最卡生产级的 5 项
 
 1. **C1–C3、C5，cluster 故障切换**：两个 P1（#476、#473）都靠 ADR 0011 的 PR-1 到 PR-4，PR-1（#478）连续 6 轮 QA 没过。
 2. **A1、C6，cluster 下缺段没有 finding**：#462（P1）；对应的 PR #471 不会合，要等 PR-3 和 PR-5。
 3. **F2、F4，失败到不了人**：评估器默认关，没有 `task_healthy`，没有 webhook，也没有随附的告警规则。
-4. **A4、D3，备份是否可还原没人持续验证**：没有巡检、没有还原演练、没有覆盖查询和还原计划（ADR 0009 阶段 3–5 都没做）。
+4. **A4（部分）、D3，备份是否可还原没人持续验证**：巡检的纯检查在单测里（删对象、改对象一个字节、改本地一个字节），周期任务、还原演练和 MinIO 场景还没进 CI；没有覆盖查询和还原计划（ADR 0009 阶段 4、5）。
 5. **C4、J3、H2，CI 门禁有洞**：多节点 e2e 不挡 PR，发布不看 e2e，也不跑 -race。改 workflow 需要有 workflow 权限的 token。

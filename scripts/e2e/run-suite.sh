@@ -59,6 +59,7 @@ Scenarios:
   smoke-scale
   smoke-standalone-restart
   smoke-standalone-full-disk
+  smoke-verify
 EOF
 }
 
@@ -152,7 +153,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk|smoke-verify)
       return 0
       ;;
     *)
@@ -219,6 +220,10 @@ run_scenario() {
     smoke-standalone-full-disk)
       # A 30MB tmpfs data_dir (sudo mount; skips without it), server on 18112.
       "$ROOT_DIR/scripts/e2e/smoke-standalone-full-disk.sh"
+      ;;
+    smoke-verify)
+      # Own MinIO. Not part of quick or full; CI does not select it.
+      "$ROOT_DIR/scripts/e2e/smoke-verify.sh"
       ;;
     smoke-gtid-purge)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-purge.sh"
