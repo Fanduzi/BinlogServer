@@ -1,7 +1,7 @@
 // Package assurance provides module-level functionality for assurance.
 // input: the live ledger fixture, catalog rows copied from it, and an in-memory object store
-// output: proof that one pass reports a deleted object, a one-byte object change, a truncated object and a one-byte local change; that local size, digest, position and GTID mismatches are VERIFY_FAILED; that a clean chain reports nothing; and that the byte budget binds and is charged for every read
-// pos: acceptance tests for the phase 3 verifier (docs/design/0009-phase3-verifier.md); coverage, closing and rotation tests are in verify_coverage_test.go
+// output: proof that one pass reports a deleted object, a one-byte object change, a truncated object and a one-byte local change; that local size, digest, position and GTID mismatches are VERIFY_FAILED; that a clean chain reports nothing; and that the byte budget binds and every file is charged once
+// pos: acceptance tests for the phase 3 verifier (docs/design/0009-phase3-verifier.md); coverage, closing and rotation tests are in verify_coverage_test.go, scheduling and budget tests in verify_queue_test.go
 // note: if this file changes, update this header and module README.md.
 package assurance
 
@@ -152,6 +152,16 @@ func mustVerify(t *testing.T, dir string, rows []VerifyRow, objs ObjectStore, ch
 	return rep
 }
 
+// verifiedAt is a LastVerified map that marks every row verified at at, so
+// that only forced, recent and slot work is scheduled.
+func verifiedAt(rows []VerifyRow, at time.Time) map[string]time.Time {
+	out := map[string]time.Time{}
+	for _, row := range rows {
+		out[row.Name] = at
+	}
+	return out
+}
+
 func fileSize(t *testing.T, path string) int64 {
 	t.Helper()
 	info, err := os.Stat(path)
@@ -185,7 +195,7 @@ func TestVerify_CleanChainHasNoFindings(t *testing.T) {
 	rows := verifyRows(t, f, testNow.Add(-time.Hour))
 	objs := objectsFromDir(t, f)
 	budget := NewByteBudget(1 << 30)
-	rep := mustVerify(t, f.dir, rows, objs, chainOf(f), Options{Now: testNow, SamplePercent: 100, Budget: budget})
+	rep := mustVerify(t, f.dir, rows, objs, chainOf(f), Options{Now: testNow, RotationPeriods: 1, Budget: budget})
 	if len(rep.Findings) != 0 {
 		t.Fatalf("findings %+v", rep.Findings)
 	}
@@ -210,7 +220,7 @@ func TestVerify_ReportsDeletedObjectFlippedObjectAndFlippedLocal(t *testing.T) {
 	f := live(t)
 	rows := verifyRows(t, f, testNow.Add(-time.Hour))
 	objs := objectsFromDir(t, f)
-	opt := Options{Now: testNow, SamplePercent: 100}
+	opt := Options{Now: testNow, RotationPeriods: 1}
 	clean := mustVerify(t, f.dir, rows, objs, chainOf(f), opt)
 	if len(clean.Findings) != 0 {
 		t.Fatalf("clean pass %+v", clean.Findings)
@@ -282,7 +292,7 @@ func TestVerify_ObjectSizeMismatch(t *testing.T) {
 	objs := objectsFromDir(t, f)
 	key := rows[0].ObjectKey
 	objs.obj[key] = objs.obj[key][:len(objs.obj[key])-1]
-	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, SamplePercent: 100})
+	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: 1})
 	if !hasFinding(rep.Findings, KindObjectSizeMismatch, name) || hasFinding(rep.Findings, KindObjectCorrupt, name) {
 		t.Fatalf("truncated object: %+v", rep.Findings)
 	}
@@ -293,7 +303,7 @@ func TestVerify_ObjectSizeMismatch(t *testing.T) {
 	// A wrong catalog size is wrong for both copies.
 	objs = objectsFromDir(t, f)
 	rows[0].Size++
-	rep = mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, SamplePercent: 100})
+	rep = mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: 1})
 	if !hasFinding(rep.Findings, KindObjectSizeMismatch, name) || !hasFinding(rep.Findings, KindVerifyFailed, name) {
 		t.Fatalf("catalog size +1: %+v", rep.Findings)
 	}
@@ -344,13 +354,13 @@ func TestVerify_LocalMismatchesAgainstTheCatalogRow(t *testing.T) {
 	}
 }
 
-func TestVerify_RecentUploadIsHashedWhenSampleIsOff(t *testing.T) {
+func TestVerify_RecentUploadIsHashedWithRotationOff(t *testing.T) {
 	f := live(t)
 	rows := verifyRows(t, f, testNow.Add(-time.Hour))
 	rows = rows[:1]
 	objs := objectsFromDir(t, f)
 	flipStored(t, objs, rows[0].ObjectKey)
-	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, SamplePercent: -1})
+	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1})
 	if !hasFinding(rep.Findings, KindObjectCorrupt, rows[0].Name) {
 		t.Fatalf("recent upload not hashed: %+v", rep.Findings)
 	}
@@ -359,13 +369,13 @@ func TestVerify_RecentUploadIsHashedWhenSampleIsOff(t *testing.T) {
 	}
 }
 
-func TestVerify_OldObjectOutsideSampleIsNotRead(t *testing.T) {
+func TestVerify_OldObjectOutsideRotationIsNotRead(t *testing.T) {
 	f := live(t)
 	rows := verifyRows(t, f, testNow.Add(-48*time.Hour))
 	rows = rows[:1]
 	objs := objectsFromDir(t, f)
 	flipStored(t, objs, rows[0].ObjectKey)
-	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, SamplePercent: -1})
+	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1})
 	if hasFinding(rep.Findings, KindObjectCorrupt, rows[0].Name) {
 		t.Fatalf("old object was judged by body: %+v", rep.Findings)
 	}
@@ -379,7 +389,7 @@ func TestVerify_OldObjectOutsideSampleIsNotRead(t *testing.T) {
 		t.Fatal("a HEAD-only object advanced last_verified_at")
 	}
 	delete(objs.obj, rows[0].ObjectKey)
-	rep = mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, SamplePercent: -1})
+	rep = mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1})
 	if !hasFinding(rep.Findings, KindObjectMissing, rows[0].Name) {
 		t.Fatalf("HEAD miss not reported: %+v", rep.Findings)
 	}
@@ -414,9 +424,9 @@ func TestByteBudget_BurstIsCapped(t *testing.T) {
 	}
 }
 
-// TestVerify_ChargesEveryReadToTheBudget counts what each read costs:
-// the parse, the EventSpan second read when positions are compared, and
-// every streamed object byte. HEAD is free.
+// TestVerify_ChargesEveryReadToTheBudget counts what each read costs: the
+// local file once (the positions come from the same stream as the parse),
+// and every streamed object byte. HEAD and stat are free.
 func TestVerify_ChargesEveryReadToTheBudget(t *testing.T) {
 	f := live(t)
 	rows := verifyRows(t, f, testNow.Add(-time.Hour))
@@ -431,7 +441,7 @@ func TestVerify_ChargesEveryReadToTheBudget(t *testing.T) {
 	for i := range noPos {
 		noPos[i].StartPos, noPos[i].EndPos = 0, 0
 	}
-	rep := mustVerify(t, f.dir, noPos, objectsFromDir(t, f), nil, Options{Now: testNow, SamplePercent: 100, Budget: budget})
+	rep := mustVerify(t, f.dir, noPos, objectsFromDir(t, f), nil, Options{Now: testNow, RotationPeriods: 1, Budget: budget})
 	if rep.LocalBytes != local || rep.ObjectBytes != objectBytes || rep.Bytes != local+objectBytes {
 		t.Fatalf("pass read local=%d object=%d total=%d, want %d %d", rep.LocalBytes, rep.ObjectBytes, rep.Bytes, local, objectBytes)
 	}
@@ -439,15 +449,22 @@ func TestVerify_ChargesEveryReadToTheBudget(t *testing.T) {
 		t.Fatalf("budget charged %d, want %d", budget.Charged(), local+objectBytes)
 	}
 
+	// Positions set: still one read of each file.
 	budget = NewByteBudget(1 << 30)
-	rep = mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: testNow, SamplePercent: 100, Budget: budget})
-	if rep.LocalBytes != 2*local || budget.Charged() != 2*local+objectBytes {
-		t.Fatalf("with positions: local=%d charged=%d, want %d and %d", rep.LocalBytes, budget.Charged(), 2*local, 2*local+objectBytes)
+	rep = mustVerify(t, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: testNow, RotationPeriods: 1, Budget: budget})
+	if rep.LocalBytes != local || budget.Charged() != local+objectBytes || len(rep.Findings) != 0 {
+		t.Fatalf("with positions: local=%d charged=%d findings=%+v, want %d and %d", rep.LocalBytes, budget.Charged(), rep.Findings, local, local+objectBytes)
 	}
 
+	// Nothing scheduled: stat and HEAD only, nothing charged.
 	budget = NewByteBudget(1 << 30)
-	rep = mustVerify(t, f.dir, noPos, objectsFromDir(t, f), nil, Options{Now: testNow.Add(72 * time.Hour), SamplePercent: -1, Budget: budget})
-	if rep.ObjectBytes != 0 || budget.Charged() != local {
-		t.Fatalf("HEAD only: object=%d charged=%d", rep.ObjectBytes, budget.Charged())
+	rep = mustVerify(t, f.dir, noPos, objectsFromDir(t, f), nil, Options{Now: testNow.Add(72 * time.Hour), RotationPeriods: -1, Budget: budget})
+	if rep.Bytes != 0 || budget.Charged() != 0 {
+		t.Fatalf("stat and HEAD only: bytes=%d charged=%d", rep.Bytes, budget.Charged())
+	}
+	for _, row := range noPos {
+		if c := rep.Coverage[row.Name]; c.Local.Method != MethodStat || c.Object.Method != MethodHead || !c.Local.Found || !c.Object.Found {
+			t.Fatalf("%s coverage %+v", row.Name, c)
+		}
 	}
 }

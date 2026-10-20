@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
-// input: catalog rows, a task directory of sealed segments, an object store that can HEAD and GET, an optional Chain, the findings open before this pass, and a byte budget
-// output: a Report whose Coverage records, per segment, what this pass did to the local copy and to the object (parsed, hashed, HEAD only, skipped, error) and why; the findings it wants open; the segments whose last_verified_at may advance (content-verified only); per-pass bytes; counts of objects with no digest. Disappeared closes a previous finding only for a subject this pass checked with the method that detects that kind
+// input: catalog rows, a task directory of sealed segments, an object store that can HEAD and GET, an optional Chain, the findings open before this pass, each segment's last_verified_at, and a byte budget
+// output: a Report whose Coverage records, per segment, what this pass did to the local copy and to the object (parsed, hashed, HEAD only, skipped, error) and why; the findings it wants open; the open findings it closes and why; the segments whose last_verified_at may advance (content-verified and named by no finding); paid bytes; counts of objects with no digest or no comparable size
 // pos: ADR 0009 phase 3 pure verifier (docs/design/0009-phase3-verifier.md); the caller must already be the task owner — this file does not ask
 // note: if this file changes, update this header and module README.md.
 package assurance
@@ -26,13 +26,12 @@ import (
 )
 
 const (
-	// DefaultSamplePercent is the share of older uploaded objects whose
-	// bodies are hashed on one pass. It sets the rotation length: 5% is a
-	// rotation of 20 periods, so every object is hashed at least once every
-	// 20 periods. Recent uploads and objects with an open OBJECT_CORRUPT or
-	// VERIFY_FAILED are hashed on every pass.
-	DefaultSamplePercent = 5
-	// DefaultRecent is the window in which every upload is hashed.
+	// DefaultRotationPeriods is the rotation length: every segment has one
+	// slot in each run of this many periods. The worst gap between two
+	// content checks of a segment with spare budget is RotationPeriods x
+	// Period (20 x 24h by default); WorstGap computes it.
+	DefaultRotationPeriods = 20
+	// DefaultRecent is the window in which every upload is checked by content.
 	DefaultRecent = 24 * time.Hour
 	// DefaultPeriod is the length of one rotation slot.
 	DefaultPeriod = 24 * time.Hour
@@ -66,14 +65,31 @@ const (
 	SeverityInfo     = "INFO"
 )
 
+// Closing reasons (Closure.Reason).
+const (
+	ReasonParsed         = "local parsed and matches the catalog row"
+	ReasonLocalRemoved   = "local removed; object matches catalog"
+	ReasonLocalPresent   = "local file present"
+	ReasonObjectFound    = "object found by HEAD"
+	ReasonSizeCompared   = "object size compared"
+	ReasonHashed         = "object hashed and matches"
+	ReasonClockChecked   = "uploaded_at compared with now"
+	ReasonChainChecked   = "chain checked"
+	ReasonRowRemoved     = "row removed"
+	reasonNotScheduled   = "not scheduled for a content check this pass"
+	reasonDeferredBudget = "deferred: does not fit in what is left of this pass's budget"
+	reasonDeferredTime   = "deferred: the pass deadline ran out"
+)
+
 // Method is what one pass did to one copy of a segment.
 type Method string
 
 const (
 	// MethodParsed: the local file was read end to end (magic, event
-	// lengths, CRC32, GTID events), hashed, and compared with the row.
+	// lengths, CRC32, GTID events, positions), hashed, and compared with the row.
 	MethodParsed Method = "PARSED"
-	// MethodStat: the local file's size differs from the row; it was not parsed.
+	// MethodStat: the local file exists and its size was compared with the
+	// row; it was not parsed (the size differs, or it was not scheduled).
 	MethodStat Method = "STAT"
 	// MethodAbsent: there is no local file and none is required (the row is
 	// UPLOADED, or local retention removed it).
@@ -83,18 +99,18 @@ const (
 	MethodMissing Method = "MISSING"
 	// MethodHashed: the object body was read and its SHA-256 compared with a digest.
 	MethodHashed Method = "HASHED"
-	// MethodHead: the object exists and its size was compared; the body was not read.
+	// MethodHead: the object exists; the body was not read.
 	MethodHead Method = "HEAD"
-	// MethodUnverifiable: the object exists and its size was compared, but
-	// there is no digest to compare a body with (empty catalog sha256 and no
-	// clean local parse). Never counts as verified.
+	// MethodUnverifiable: the object exists, but there is no digest to compare
+	// a body with (empty catalog sha256 and no clean local parse). Never
+	// counts as verified.
 	MethodUnverifiable Method = "UNVERIFIABLE"
 	// MethodNotApplicable: the row is not UPLOADED, so there is no object to check.
 	MethodNotApplicable Method = "NOT_APPLICABLE"
 	// MethodError: a read failed with something other than not-found.
-	// Nothing about this copy is known.
 	MethodError Method = "ERROR"
-	// MethodSkipped: this copy was not looked at; Reason says why.
+	// MethodSkipped: this copy was not looked at, or its scheduled content
+	// check was deferred (budget or deadline); Reason says why.
 	MethodSkipped Method = "SKIPPED"
 )
 
@@ -106,6 +122,12 @@ type Check struct {
 	// Digest is the source of the digest a HASHED body was compared with:
 	// "local" or "catalog".
 	Digest string
+	// Found is true when this pass saw the copy exist (stat or HEAD answered).
+	Found bool
+	// SizeChecked is true when this pass compared the copy's size: with the
+	// catalog row (row size known), or, for an object whose row size is
+	// unknown, by a hash that matched the local file.
+	SizeChecked bool
 }
 
 // Coverage is what one pass established about one segment.
@@ -125,7 +147,7 @@ type ObjectStore interface {
 
 // VerifyRow is one catalog row. Name is the on-disk segment name.
 // GTIDSet is optional: the catalog has no such column, and an empty value is not compared.
-// StartPos and EndPos of 0 are unknown and are not compared.
+// Size, StartPos and EndPos of 0 are unknown and are not compared.
 // RetentionRemoved is the design 0009 §26 marker: local retention removed the file.
 type VerifyRow struct {
 	Name             string
@@ -150,53 +172,76 @@ type Finding struct {
 	Evidence string
 }
 
+// Closure is an open finding a pass is positive evidence against, and why.
+type Closure struct {
+	Finding Finding
+	Reason  string
+}
+
 // Report is one pass.
 //
 // Coverage has an entry for every sealed row the pass reached, and each
-// copy's Method says what was done. A copy the pass never reached (it
-// returned early on cancel or error) has a zero Check. Closing a finding and
-// advancing last_verified_at read only Coverage, so an early return cannot
-// close or advance anything it did not check.
+// copy's Method says what was done. Closing a finding and advancing
+// last_verified_at read only Coverage, so nothing the pass did not check can
+// close or advance.
 type Report struct {
-	Findings   []Finding
+	Findings []Finding
+	// Closed is Closures(Options.OpenFindings, this report).
+	Closed     []Closure
 	Coverage   map[string]Coverage
 	VerifiedAt map[string]time.Time
-	// ChainChecked is true when Chain.Check ran on a fully listed and read directory.
+	// ChainChecked is true when Chain.Check ran on a fully listed directory.
 	ChainChecked bool
-	// Bytes is what this pass read: LocalBytes plus ObjectBytes. It is not
-	// the shared budget's running total.
+	// CatalogComplete is Options.CatalogComplete: rows was the whole catalog.
+	CatalogComplete bool
+	// Bytes is what this pass paid for: LocalBytes plus ObjectBytes. With a
+	// budget it equals what this pass charged to it.
 	Bytes       int64
 	LocalBytes  int64
 	ObjectBytes int64
+	// Deferred counts scheduled content checks (one per copy) this pass did
+	// not do because the budget or the deadline ran out.
+	Deferred int
 	// UnverifiableNoDigest counts UPLOADED rows this pass had no digest for:
 	// the catalog sha256 is empty and the local file is gone or did not parse
 	// cleanly. Their objects get HEAD only.
 	UnverifiableNoDigest int
+	// UnverifiableSize counts objects found whose size this pass could not
+	// compare: the catalog size is unknown and no hash matched a local file.
+	UnverifiableSize int
 	// NoDigestLocal counts sealed rows with an empty catalog sha256 whose local
 	// file still exists (rows sealed before migration 000008). A digest can be
 	// backfilled from that file now; after retention it cannot.
 	NoDigestLocal int
 	LocalErr      error
 	ObjectErr     error
+
+	catalog map[string]bool
 }
 
-// Options selects the sample and the budget. A nil Budget is unlimited.
-// SamplePercent 0 means DefaultSamplePercent. Negative means older objects
-// are not downloaded unless forced. Recent and Period of 0 mean the defaults.
-// OpenFindings are the findings open before this pass: a subject with an open
-// OBJECT_CORRUPT or VERIFY_FAILED has its object hashed on every pass until a
-// pass rechecks it.
+// Options schedules one pass.
+//
+// RotationPeriods is the rotation length in periods; 0 means
+// DefaultRotationPeriods, negative turns the rotation and the overdue queue
+// off. Recent and Period of 0 mean the defaults. A nil Budget is unlimited.
+// PassBytes > 0 caps what one pass reads. OpenFindings are the findings open
+// before this pass. LastVerified is each segment's last_verified_at (missing
+// means never). CatalogComplete says rows is the whole catalog of the task,
+// so a subject with no row has had its row removed.
 type Options struct {
-	Now           time.Time
-	SamplePercent int
-	Recent        time.Duration
-	Period        time.Duration
-	Budget        *ByteBudget
-	OpenFindings  []Finding
+	Now             time.Time
+	RotationPeriods int
+	Recent          time.Duration
+	Period          time.Duration
+	Budget          *ByteBudget
+	PassBytes       int64
+	OpenFindings    []Finding
+	LastVerified    map[string]time.Time
+	CatalogComplete bool
 }
 
 // ErrBudgetDeadline is a budget wait that cannot finish before the context
-// deadline. The pass stops there, as it does on cancel.
+// deadline. The copy being read is deferred; the pass goes on with work that fits.
 var ErrBudgetDeadline = errors.New("byte budget wait would pass the context deadline")
 
 // ByteBudget paces reads. A nil budget does not pace. It is safe to share
@@ -218,7 +263,8 @@ func NewByteBudget(bytesPerSec int64) *ByteBudget {
 	return &ByteBudget{lim: rate.NewLimiter(rate.Limit(bytesPerSec), int(burst))}
 }
 
-// Wait blocks until n bytes are allowed. n larger than the burst is split.
+// Wait blocks until n bytes are allowed. n larger than the burst is split,
+// and each step is charged when it is allowed.
 func (b *ByteBudget) Wait(ctx context.Context, n int64) error {
 	if b == nil || n <= 0 {
 		return nil
@@ -249,6 +295,29 @@ func (b *ByteBudget) Charged() int64 {
 	return b.charged.Load()
 }
 
+// chunk is the most one budgeted read may take, so a read is paid in one step.
+func (b *ByteBudget) chunk() int {
+	if b == nil {
+		return 0
+	}
+	return b.lim.Burst()
+}
+
+// fits reports whether n bytes can be paid before deadline at the current
+// rate. Without a budget or a deadline it cannot tell and says yes.
+func (b *ByteBudget) fits(n int64, deadline time.Time, ok bool) bool {
+	if b == nil || !ok {
+		return true
+	}
+	now := time.Now()
+	need := float64(n) - b.lim.TokensAt(now)
+	if need <= 0 {
+		return true
+	}
+	wait := time.Duration(need / float64(b.lim.Limit()) * float64(time.Second))
+	return !now.Add(wait).After(deadline)
+}
+
 // ClockSkewed reports whether uploadedAt is more than ClockSkewTolerance after now.
 func ClockSkewed(uploadedAt, now time.Time) bool {
 	return !uploadedAt.IsZero() && uploadedAt.Sub(now) > ClockSkewTolerance
@@ -267,54 +336,104 @@ func RecentUpload(uploadedAt, now time.Time, recent time.Duration) bool {
 	return now.Sub(uploadedAt) <= recent
 }
 
-// RotationLength is the number of periods in one rotation for percent:
-// ceil(100/percent). 1 means every period, 0 means never.
-func RotationLength(percent int) int {
-	if percent == 0 {
-		percent = DefaultSamplePercent
+// rotationLength is rotation with the default applied; 0 means off.
+func rotationLength(rotation int) int {
+	if rotation == 0 {
+		return DefaultRotationPeriods
 	}
-	if percent < 0 {
+	if rotation < 0 {
 		return 0
 	}
-	if percent >= 100 {
-		return 1
+	return rotation
+}
+
+func periodOf(period time.Duration) time.Duration {
+	if period < time.Second {
+		return DefaultPeriod
 	}
-	return (100 + percent - 1) / percent
+	return period
+}
+
+// WorstGap is the longest a segment waits for its slot: rotation x period,
+// with the defaults applied. 0 when the rotation is off.
+func WorstGap(rotation int, period time.Duration) time.Duration {
+	return time.Duration(rotationLength(rotation)) * periodOf(period)
 }
 
 // InRotation reports whether name's slot is the current period. Each name
-// has one fixed slot, sha256(name) mod RotationLength, so it is drawn exactly
-// once every RotationLength periods.
-func InRotation(name string, now time.Time, period time.Duration, percent int) bool {
-	n := RotationLength(percent)
+// has one fixed slot, sha256(name) mod rotation, so it is drawn exactly once
+// in every run of rotation periods. rotation 0 is the default; negative is off.
+func InRotation(name string, now time.Time, period time.Duration, rotation int) bool {
+	n := rotationLength(rotation)
 	if n == 0 {
 		return false
 	}
-	if period < time.Second {
-		period = DefaultPeriod
-	}
-	slot := uint64(now.Unix()) / uint64(period/time.Second)
+	slot := uint64(now.Unix()) / uint64(periodOf(period)/time.Second)
 	sum := sha256.Sum256([]byte(name))
 	h := binary.BigEndian.Uint64(sum[:8])
 	return h%uint64(n) == slot%uint64(n)
 }
 
-// SampleObject reports whether this pass downloads the object body without
-// being forced: a recent upload, or the object's rotation slot.
-func SampleObject(name string, uploadedAt, now time.Time, recent, period time.Duration, percent int) bool {
-	return RecentUpload(uploadedAt, now, recent) || InRotation(name, now, period, percent)
-}
+// Scheduling tiers, best first (design §5.2).
+const (
+	tierForced = iota
+	tierRecent
+	tierSlot
+	tierOverdue
+	tierNone
+)
 
-// passCounter counts the bytes one pass read. One pass runs on one goroutine.
+// passCounter counts the bytes one pass paid for. One pass runs on one goroutine.
 type passCounter struct {
 	local  int64
 	object int64
 }
 
+func (c *passCounter) total() int64 { return c.local + c.object }
+
+// seg is one sealed row during a pass.
+type seg struct {
+	row      VerifyRow
+	cov      Coverage
+	path     string
+	size     int64 // local size from stat
+	parse    bool  // the local file may be parsed
+	objSize  int64 // object size from HEAD
+	hash     bool  // the object may be hashed
+	localSHA string
+	last     time.Time
+	tier     int
+}
+
+// work is one scheduled content check: a local parse or an object hash.
+type work struct {
+	s     *seg
+	local bool
+}
+
+// pass is one Verify call.
+type pass struct {
+	ctx      context.Context
+	now      time.Time
+	opt      Options
+	objects  ObjectStore
+	rep      *Report
+	count    passCounter
+	deadline time.Time
+	hasDL    bool
+	forced   map[string][]string
+	named    map[string]bool
+}
+
 // Verify checks sealed segments under dir against rows, objects and chain.
 // The caller must already be the owner of this task. A store of nil leaves
 // every object SKIPPED. A chain of nil leaves the chain unchecked.
-// On an early return the Report holds only what was checked before it.
+//
+// The pass is free work first (stat every local file, HEAD every object,
+// the chain), then content checks from one queue in priority order: forced,
+// recent, rotation slot, overdue by oldest last_verified_at. When the budget
+// or the deadline runs out, what is left is SKIPPED and the pass ends
+// normally. Only a cancelled context returns an error.
 func Verify(ctx context.Context, dir string, rows []VerifyRow, objects ObjectStore, chain *Chain, opt Options) (rep Report, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -323,15 +442,47 @@ func Verify(ctx context.Context, dir string, rows []VerifyRow, objects ObjectSto
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	rep = Report{Coverage: map[string]Coverage{}, VerifiedAt: map[string]time.Time{}}
-	var count passCounter
-	defer func() { rep.finish(now, &count) }()
-	if err := ctx.Err(); err != nil {
+	rep = Report{Coverage: map[string]Coverage{}, VerifiedAt: map[string]time.Time{}, CatalogComplete: opt.CatalogComplete, catalog: map[string]bool{}}
+	for _, row := range rows {
+		rep.catalog[row.Name] = true
+	}
+	p := &pass{ctx: ctx, now: now, opt: opt, objects: objects, rep: &rep}
+	p.deadline, p.hasDL = ctx.Deadline()
+	defer func() { rep.finish(now, &p.count, opt.OpenFindings) }()
+	if cancelled(ctx) {
+		return rep, ctx.Err()
+	}
+	p.forced, p.named = openSubjects(opt.OpenFindings)
+
+	segs, localClean, err := p.free(dir, sealedRows(rows))
+	if err != nil {
 		return rep, err
 	}
-	items := sealedRows(rows)
-	forced := forcedSubjects(opt.OpenFindings)
+	if chain != nil && localClean && ctx.Err() == nil {
+		for _, v := range chain.Check(now) {
+			rep.Findings = append(rep.Findings, findingFromViolation(v))
+		}
+		rep.ChainChecked = true
+	}
+	return rep, p.content(segs)
+}
 
+// cancelled is a context cancelled by its owner. A passed deadline is not:
+// it ends the pass normally.
+func cancelled(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
+}
+
+// outOfTime is a passed deadline, or a budget wait that cannot finish before it.
+func (p *pass) outOfTime(err error) bool {
+	return errors.Is(p.ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrBudgetDeadline)
+}
+
+// free is everything that costs no budget: list and stat the local files,
+// HEAD every object. It fills Coverage with what is known without reading
+// a body and marks what may be read.
+func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
+	rep := p.rep
 	present := map[string]bool{}
 	entries, listErr := os.ReadDir(dir)
 	listed := listErr == nil
@@ -345,121 +496,350 @@ func Verify(ctx context.Context, dir string, rows []VerifyRow, objects ObjectSto
 		rep.LocalErr = listErr
 	}
 	localClean := listed
-	localSHA := map[string]string{}
-	for _, row := range items {
-		var cov Coverage
+	timeUp := false
+	var segs []*seg
+	for _, row := range rows {
+		s := &seg{row: row, path: filepath.Join(dir, row.Name), last: p.opt.LastVerified[row.Name]}
+		noDigest := strings.TrimSpace(row.SHA256) == ""
 		switch {
 		case !listed:
-			cov.Local = Check{Method: MethodSkipped, Reason: "task directory not listed: " + listErr.Error()}
+			s.cov.Local = Check{Method: MethodSkipped, Reason: "task directory not listed: " + listErr.Error()}
 		case !present[row.Name]:
-			cov.Local = absentLocal(row)
-			if cov.Local.Method == MethodMissing {
+			s.cov.Local = absentLocal(row)
+			if s.cov.Local.Method == MethodMissing {
 				rep.Findings = append(rep.Findings, Finding{Kind: KindLocalMissing, Subject: row.Name, Severity: SeverityCritical,
 					Detail: "sealed segment is not UPLOADED and has no local file", Evidence: "upload_state=" + strings.TrimSpace(row.UploadState)})
 			}
 		default:
-			if strings.TrimSpace(row.SHA256) == "" {
-				rep.NoDigestLocal++
-			}
-			res, readErr := checkLocal(ctx, filepath.Join(dir, row.Name), row, opt.Budget, &count)
-			if readErr != nil {
-				if stop := abort(ctx, readErr); stop != nil {
-					return rep, stop
-				}
-				cov.Local = Check{Method: MethodError, Reason: readErr.Error()}
+			info, statErr := os.Stat(s.path)
+			if statErr != nil {
+				s.cov.Local = Check{Method: MethodError, Reason: statErr.Error()}
 				localClean = false
 				if rep.LocalErr == nil {
-					rep.LocalErr = readErr
+					rep.LocalErr = statErr
 				}
 				break
 			}
-			cov.Local = res.check
-			if res.finding != nil {
-				rep.Findings = append(rep.Findings, *res.finding)
-			} else if res.sum != "" {
-				localSHA[row.Name] = res.sum
+			if noDigest {
+				rep.NoDigestLocal++
 			}
+			s.size = info.Size()
+			s.cov.Local = Check{Method: MethodStat, Reason: reasonNotScheduled, Found: true, SizeChecked: row.Size > 0}
+			if row.Size > 0 && s.size != row.Size {
+				s.cov.Local.Reason = "size differs from the catalog row; not parsed"
+				rep.Findings = append(rep.Findings, *localFinding(row.Name, "size differs from the catalog row", fmt.Sprintf("local=%d row=%d", s.size, row.Size)))
+				break
+			}
+			s.parse = true
 		}
-		rep.Coverage[row.Name] = cov
-	}
 
-	for _, row := range items {
-		cov := rep.Coverage[row.Name]
-		if !uploaded(row) {
-			cov.Object = Check{Method: MethodNotApplicable, Reason: "upload_state=" + strings.TrimSpace(row.UploadState)}
-			rep.Coverage[row.Name] = cov
-			continue
-		}
-		// The clock observation needs no I/O, so it is complete and recorded before the object is touched.
-		if ClockSkewed(row.UploadedAt, now) {
-			rep.Findings = append(rep.Findings, Finding{Kind: KindUploadClockSkew, Subject: row.Name, Severity: SeverityWarning,
-				Detail:   "uploaded_at is in the future; the row is not treated as recent",
-				Evidence: fmt.Sprintf("uploaded_at=%s now=%s", row.UploadedAt.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))})
-		}
-		cov.ClockChecked = true
-		rep.Coverage[row.Name] = cov
-		digest, source := localSHA[row.Name], "local"
-		if digest == "" {
-			digest, source = strings.TrimSpace(row.SHA256), "catalog"
-		}
-		if digest == "" {
+		if uploaded(row) && noDigest && !s.parse {
 			rep.UnverifiableNoDigest++
 		}
-		if objects == nil {
-			cov.Object = Check{Method: MethodSkipped, Reason: "no object store"}
-		} else {
-			why := hashReason(row, now, opt, forced)
-			res, objErr := checkObject(ctx, row, digest, source, why, objects, opt.Budget, &count)
-			if objErr != nil {
-				if stop := abort(ctx, objErr); stop != nil {
-					return rep, stop
+		switch {
+		case !uploaded(row):
+			s.cov.Object = Check{Method: MethodNotApplicable, Reason: "upload_state=" + strings.TrimSpace(row.UploadState)}
+		default:
+			if ClockSkewed(row.UploadedAt, p.now) {
+				rep.Findings = append(rep.Findings, Finding{Kind: KindUploadClockSkew, Subject: row.Name, Severity: SeverityWarning,
+					Detail:   "uploaded_at is in the future; the row is not treated as recent",
+					Evidence: fmt.Sprintf("uploaded_at=%s now=%s", row.UploadedAt.UTC().Format(time.RFC3339Nano), p.now.UTC().Format(time.RFC3339Nano))})
+			}
+			s.cov.ClockChecked = true
+			if p.objects == nil {
+				s.cov.Object = Check{Method: MethodSkipped, Reason: "no object store"}
+				break
+			}
+			if timeUp {
+				s.cov.Object = Check{Method: MethodSkipped, Reason: reasonDeferredTime}
+				break
+			}
+			if err := p.head(s, noDigest); err != nil {
+				if cancelled(p.ctx) {
+					segs = append(segs, s)
+					p.store(segs)
+					return nil, false, p.ctx.Err()
 				}
-				cov.Object = Check{Method: MethodError, Reason: objErr.Error()}
+				if p.outOfTime(err) {
+					timeUp = true
+					s.cov.Object = Check{Method: MethodSkipped, Reason: reasonDeferredTime}
+					break
+				}
+				s.cov.Object = Check{Method: MethodError, Reason: err.Error()}
 				if rep.ObjectErr == nil {
-					rep.ObjectErr = objErr
-				}
-			} else {
-				cov.Object = res.check
-				if res.finding != nil {
-					rep.Findings = append(rep.Findings, *res.finding)
+					rep.ObjectErr = err
 				}
 			}
 		}
-		rep.Coverage[row.Name] = cov
+		segs = append(segs, s)
+		rep.Coverage[row.Name] = s.cov
 	}
-
-	if chain != nil && localClean {
-		for _, v := range chain.Check(now) {
-			rep.Findings = append(rep.Findings, findingFromViolation(v))
-		}
-		rep.ChainChecked = true
-	}
-	return rep, nil
+	return segs, localClean, nil
 }
 
-// abort is the error that ends the pass early: a cancelled context, or a
-// budget wait that cannot finish before the deadline. Other read errors leave
-// one copy as ERROR and the pass goes on.
-func abort(ctx context.Context, err error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+func (p *pass) store(segs []*seg) {
+	for _, s := range segs {
+		p.rep.Coverage[s.row.Name] = s.cov
 	}
-	if errors.Is(err, ErrBudgetDeadline) {
+}
+
+// head HEADs one object and records what a HEAD alone can tell.
+func (p *pass) head(s *seg, noDigest bool) error {
+	row := s.row
+	key := strings.TrimSpace(row.ObjectKey)
+	size, err := p.objects.Head(p.ctx, key)
+	if errors.Is(err, os.ErrNotExist) {
+		s.cov.Object = Check{Method: MethodMissing, Reason: "HEAD answered not found"}
+		p.rep.Findings = append(p.rep.Findings, *objectFinding(KindObjectMissing, row.Name, "uploaded object is missing", "key="+key))
+		return nil
+	}
+	if err != nil {
 		return err
+	}
+	s.objSize = size
+	s.cov.Object = Check{Method: MethodHead, Reason: reasonNotScheduled, Found: true, SizeChecked: row.Size > 0}
+	if row.Size > 0 && size != row.Size {
+		s.cov.Object.Reason = "size differs from the catalog row; body not read"
+		p.rep.Findings = append(p.rep.Findings, *objectFinding(KindObjectSizeMismatch, row.Name, "object size differs from the catalog row", fmt.Sprintf("object=%d row=%d", size, row.Size)))
+		return nil
+	}
+	if noDigest && !s.parse {
+		s.cov.Object.Method = MethodUnverifiable
+		s.cov.Object.Reason = "no digest: catalog sha256 is empty and there is no local file to parse"
+		return nil
+	}
+	s.hash = true
+	return nil
+}
+
+// tierOf places a segment in the content queue (design §5.2).
+func (p *pass) tierOf(s *seg) int {
+	row := s.row
+	if p.forcedBy(s) {
+		return tierForced
+	}
+	if !uploaded(row) || RecentUpload(row.UploadedAt, p.now, p.opt.Recent) {
+		return tierRecent
+	}
+	if InRotation(row.Name, p.now, p.opt.Period, p.opt.RotationPeriods) {
+		return tierSlot
+	}
+	if p.named[row.Name] {
+		return tierNone
+	}
+	n := rotationLength(p.opt.RotationPeriods)
+	if n > 0 && (s.last.IsZero() || p.now.Sub(s.last) >= time.Duration(n)*periodOf(p.opt.Period)) {
+		return tierOverdue
+	}
+	return tierNone
+}
+
+// queue is the content work in the order it is paid for.
+func (p *pass) queue(segs []*seg) []work {
+	var q []work
+	for _, s := range segs {
+		s.tier = p.tierOf(s)
+		if s.tier == tierNone {
+			continue
+		}
+		if s.parse {
+			q = append(q, work{s: s, local: true})
+		}
+		if s.hash {
+			q = append(q, work{s: s})
+		}
+	}
+	sort.SliceStable(q, func(i, j int) bool {
+		a, b := q[i], q[j]
+		if a.s.tier != b.s.tier {
+			return a.s.tier < b.s.tier
+		}
+		if !a.s.last.Equal(b.s.last) {
+			return a.s.last.Before(b.s.last)
+		}
+		if a.s.row.Name != b.s.row.Name {
+			return a.s.row.Name < b.s.row.Name
+		}
+		return a.local && !b.local
+	})
+	return q
+}
+
+// content pays for the queue in order. Work that does not fit is deferred
+// and the next, smaller work is tried; once the deadline has passed the rest
+// is deferred. A cancelled context stops the pass with its error.
+func (p *pass) content(segs []*seg) error {
+	q := p.queue(segs)
+	for i, w := range q {
+		if cancelled(p.ctx) {
+			return p.ctx.Err()
+		}
+		if p.ctx.Err() != nil {
+			for _, rest := range q[i:] {
+				p.defer1(rest, reasonDeferredTime)
+			}
+			return nil
+		}
+		size := w.s.size
+		if !w.local {
+			size = w.s.objSize
+		}
+		if !p.fits(size) {
+			p.defer1(w, reasonDeferredBudget)
+			continue
+		}
+		var err error
+		if w.local {
+			err = p.parseLocal(w.s)
+		} else {
+			err = p.hashObject(w.s)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// finish sorts and merges findings, totals this pass's bytes, and derives
-// VerifiedAt from Coverage. It runs on every return, early or not.
-func (rep *Report) finish(now time.Time, count *passCounter) {
+func (p *pass) fits(size int64) bool {
+	if p.opt.PassBytes > 0 && p.count.total()+size > p.opt.PassBytes {
+		return false
+	}
+	return p.opt.Budget.fits(size, p.deadline, p.hasDL)
+}
+
+func (p *pass) defer1(w work, reason string) {
+	p.rep.Deferred++
+	c := &w.s.cov.Object
+	if w.local {
+		c = &w.s.cov.Local
+	}
+	c.Method, c.Reason = MethodSkipped, reason
+	p.rep.Coverage[w.s.row.Name] = w.s.cov
+}
+
+// failed sorts a read error: cancel stops the pass, a deadline defers this
+// copy, anything else leaves it ERROR.
+func (p *pass) failed(w work, err error) error {
+	if cancelled(p.ctx) {
+		return p.ctx.Err()
+	}
+	if p.outOfTime(err) {
+		p.defer1(w, reasonDeferredTime)
+		return nil
+	}
+	c := &w.s.cov.Object
+	if w.local {
+		c = &w.s.cov.Local
+		if p.rep.LocalErr == nil {
+			p.rep.LocalErr = err
+		}
+	} else if p.rep.ObjectErr == nil {
+		p.rep.ObjectErr = err
+	}
+	c.Method, c.Reason = MethodError, err.Error()
+	p.rep.Coverage[w.s.row.Name] = w.s.cov
+	return nil
+}
+
+func (p *pass) parseLocal(s *seg) error {
+	res, err := checkLocal(p.ctx, s.path, s.row, s.size, p.opt.Budget, &p.count.local)
+	if err != nil {
+		return p.failed(work{s: s, local: true}, err)
+	}
+	res.check.Found, res.check.SizeChecked = true, s.row.Size > 0
+	s.cov.Local = res.check
+	if res.finding != nil {
+		p.rep.Findings = append(p.rep.Findings, *res.finding)
+	} else {
+		s.localSHA = res.sum
+	}
+	p.rep.Coverage[s.row.Name] = s.cov
+	return nil
+}
+
+func (p *pass) hashObject(s *seg) error {
+	row := s.row
+	digest, source := s.localSHA, "local"
+	if digest == "" {
+		digest, source = strings.TrimSpace(row.SHA256), "catalog"
+	}
+	if digest == "" {
+		if s.cov.Local.Method == MethodSkipped {
+			p.defer1(work{s: s}, "deferred: no digest this pass, the local parse was deferred")
+			return nil
+		}
+		s.cov.Object.Method = MethodUnverifiable
+		s.cov.Object.Reason = "no digest: catalog sha256 is empty and the local file did not parse cleanly"
+		p.rep.UnverifiableNoDigest++
+		p.rep.Coverage[row.Name] = s.cov
+		return nil
+	}
+	key := strings.TrimSpace(row.ObjectKey)
+	body, err := p.objects.Open(p.ctx, key)
+	if err == nil {
+		var sum string
+		sum, err = hashReader(p.ctx, body, p.opt.Budget, &p.count.object)
+		body.Close()
+		if err == nil {
+			s.cov.Object = Check{Method: MethodHashed, Reason: tierReason(s.tier), Digest: source, Found: true,
+				SizeChecked: s.cov.Object.SizeChecked}
+			if !strings.EqualFold(sum, digest) {
+				p.rep.Findings = append(p.rep.Findings, *objectFinding(KindObjectCorrupt, row.Name, "object sha256 differs", fmt.Sprintf("object=%s want=%s source=%s", sum, digest, source)))
+			} else if source == "local" {
+				s.cov.Object.SizeChecked = true
+			}
+			p.rep.Coverage[row.Name] = s.cov
+			return nil
+		}
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		s.cov.Object = Check{Method: MethodMissing, Reason: "GET answered not found"}
+		p.rep.Findings = append(p.rep.Findings, *objectFinding(KindObjectMissing, row.Name, "uploaded object is missing", "key="+key))
+		p.rep.Coverage[row.Name] = s.cov
+		return nil
+	}
+	return p.failed(work{s: s}, err)
+}
+
+func tierReason(tier int) string {
+	switch tier {
+	case tierForced:
+		return "an open finding forces a recheck"
+	case tierRecent:
+		return "uploaded within the recent window, or not uploaded yet"
+	case tierSlot:
+		return "rotation slot"
+	default:
+		return "overdue: oldest last_verified_at"
+	}
+}
+
+// finish sorts and merges findings, totals this pass's bytes, closes what it
+// can, and derives VerifiedAt from Coverage. It runs on every return.
+func (rep *Report) finish(now time.Time, count *passCounter, open []Finding) {
 	rep.Findings = dedupe(rep.Findings)
 	rep.LocalBytes = count.local
 	rep.ObjectBytes = count.object
-	rep.Bytes = count.local + count.object
+	rep.Bytes = count.total()
+	rep.Closed = Closures(open, *rep)
+	for _, c := range rep.Coverage {
+		if c.Object.Found && !c.Object.SizeChecked {
+			rep.UnverifiableSize++
+		}
+	}
 	named := map[string]bool{}
 	for _, f := range rep.Findings {
 		named[f.Subject] = true
+	}
+	closed := map[string]bool{}
+	for _, c := range rep.Closed {
+		closed[c.Finding.Kind+"\x00"+c.Finding.Subject] = true
+	}
+	for _, f := range open {
+		if !closed[f.Kind+"\x00"+f.Subject] {
+			named[f.Subject] = true
+		}
 	}
 	for name, cov := range rep.Coverage {
 		if !named[name] && contentVerified(cov) {
@@ -471,7 +851,7 @@ func (rep *Report) finish(now time.Time, count *passCounter) {
 // contentVerified is true when every copy that exists was checked by content
 // this pass: the local file PARSED (or no local copy is required) and the
 // object HASHED (or there is no object), and at least one of the two was.
-// HEAD only, UNVERIFIABLE, SKIPPED, ERROR and unreached copies never count.
+// HEAD only, UNVERIFIABLE, STAT, SKIPPED, ERROR and unreached copies never count.
 func contentVerified(cov Coverage) bool {
 	local := cov.Local.Method == MethodParsed || cov.Local.Method == MethodAbsent
 	object := cov.Object.Method == MethodHashed || cov.Object.Method == MethodNotApplicable
@@ -479,60 +859,94 @@ func contentVerified(cov Coverage) bool {
 	return local && object && read
 }
 
-// Disappeared is the previous findings this pass is positive evidence against:
-// not reported again, and the subject was checked with the method that
-// detects that kind. A copy that was skipped, errored or not reached closes nothing.
+// Disappeared is the findings of Closures.
 func Disappeared(previous []Finding, rep Report) []Finding {
+	var out []Finding
+	for _, c := range Closures(previous, rep) {
+		out = append(out, c.Finding)
+	}
+	return out
+}
+
+// Closures is the previous findings this pass is positive evidence against:
+// not reported again, and the subject was checked with the method that
+// detects that kind, or its row is gone from a complete catalog. A copy that
+// was skipped, errored or not reached closes nothing.
+func Closures(previous []Finding, rep Report) []Closure {
 	have := map[string]bool{}
 	for _, f := range rep.Findings {
 		have[f.Kind+"\x00"+f.Subject] = true
 	}
-	var out []Finding
+	var out []Closure
 	for _, f := range previous {
 		if have[f.Kind+"\x00"+f.Subject] {
 			continue
 		}
-		if closes(f, rep) {
-			out = append(out, f)
+		if reason := closes(f, rep); reason != "" {
+			out = append(out, Closure{Finding: f, Reason: reason})
 		}
 	}
 	return out
 }
 
-// closes is the per-kind detector table (design §6).
-func closes(f Finding, rep Report) bool {
+// closes is the per-kind detector table (design §6.2): the reason f closes, or "".
+func closes(f Finding, rep Report) string {
+	if rep.CatalogComplete && !rep.catalog[f.Subject] && f.Kind != string(I6MissingRow) {
+		return ReasonRowRemoved
+	}
 	cov, ok := rep.Coverage[f.Subject]
 	switch f.Kind {
 	case KindVerifyFailed:
-		return ok && cov.Local.Method == MethodParsed
+		if ok && cov.Local.Method == MethodParsed {
+			return ReasonParsed
+		}
+		if ok && cov.Local.Method == MethodAbsent && cov.Object.Method == MethodHashed && cov.Object.Digest == "catalog" && !reported(rep, KindObjectCorrupt, f.Subject) {
+			return ReasonLocalRemoved
+		}
 	case KindLocalMissing:
-		return (ok && localPresent(cov.Local.Method)) || rep.ChainChecked
+		if ok && cov.Local.Found {
+			return ReasonLocalPresent
+		}
+		if rep.ChainChecked {
+			return ReasonChainChecked
+		}
 	case KindObjectMissing:
-		if ok {
-			return objectFound(cov.Object.Method)
+		if ok && cov.Object.Found {
+			return ReasonObjectFound
 		}
-		return rep.ChainChecked
+		if !ok && rep.ChainChecked {
+			return ReasonChainChecked
+		}
 	case KindObjectSizeMismatch:
-		if ok {
-			return objectFound(cov.Object.Method)
+		if ok && cov.Object.SizeChecked {
+			return ReasonSizeCompared
 		}
-		return rep.ChainChecked
+		if !ok && rep.ChainChecked {
+			return ReasonChainChecked
+		}
 	case KindObjectCorrupt:
-		return ok && cov.Object.Method == MethodHashed
+		if ok && cov.Object.Method == MethodHashed {
+			return ReasonHashed
+		}
 	case KindUploadClockSkew:
-		return ok && cov.ClockChecked
+		if ok && cov.ClockChecked {
+			return ReasonClockChecked
+		}
 	default:
-		return rep.ChainChecked
+		if rep.ChainChecked {
+			return ReasonChainChecked
+		}
 	}
+	return ""
 }
 
-func localPresent(m Method) bool {
-	return m == MethodParsed || m == MethodStat
-}
-
-// objectFound is a HEAD that answered with a size; each of these compared it with the row.
-func objectFound(m Method) bool {
-	return m == MethodHead || m == MethodUnverifiable || m == MethodHashed
+func reported(rep Report, kind, subject string) bool {
+	for _, f := range rep.Findings {
+		if f.Kind == kind && f.Subject == subject {
+			return true
+		}
+	}
+	return false
 }
 
 func sealedRows(rows []VerifyRow) []VerifyRow {
@@ -555,14 +969,34 @@ func sealedRows(rows []VerifyRow) []VerifyRow {
 	return out
 }
 
-func forcedSubjects(open []Finding) map[string]string {
-	out := map[string]string{}
+// openSubjects is the open kinds per subject and every subject an open finding names.
+func openSubjects(open []Finding) (forced map[string][]string, named map[string]bool) {
+	forced, named = map[string][]string{}, map[string]bool{}
 	for _, f := range open {
-		if f.Kind == KindObjectCorrupt || f.Kind == KindVerifyFailed {
-			out[f.Subject] = f.Kind
+		named[f.Subject] = true
+		forced[f.Subject] = append(forced[f.Subject], f.Kind)
+	}
+	return forced, named
+}
+
+// forcedBy is whether an open finding forces s into every pass: OBJECT_CORRUPT
+// or VERIFY_FAILED, or I6_OBJECT_SIZE_MISMATCH on a row whose size is unknown
+// (only a hash against the local file can recheck it). Only while a local copy
+// exists: without one nothing here can repair the segment, and the rotation
+// rechecks it once per rotation.
+func (p *pass) forcedBy(s *seg) bool {
+	if !s.cov.Local.Found {
+		return false
+	}
+	for _, kind := range p.forced[s.row.Name] {
+		switch {
+		case kind == KindObjectCorrupt, kind == KindVerifyFailed:
+			return true
+		case kind == KindObjectSizeMismatch && s.row.Size <= 0:
+			return true
 		}
 	}
-	return out
+	return false
 }
 
 func absentLocal(row VerifyRow) Check {
@@ -576,20 +1010,6 @@ func absentLocal(row VerifyRow) Check {
 	}
 }
 
-// hashReason is why this pass reads the object body, or "" when it does not.
-func hashReason(row VerifyRow, now time.Time, opt Options, forced map[string]string) string {
-	if kind, ok := forced[row.Name]; ok {
-		return "open " + kind + " forces a recheck"
-	}
-	if RecentUpload(row.UploadedAt, now, opt.Recent) {
-		return "uploaded within the recent window"
-	}
-	if InRotation(row.Name, now, opt.Period, opt.SamplePercent) {
-		return "rotation slot"
-	}
-	return ""
-}
-
 func uploaded(row VerifyRow) bool {
 	return strings.EqualFold(strings.TrimSpace(row.UploadState), "UPLOADED") && strings.TrimSpace(row.ObjectKey) != ""
 }
@@ -600,36 +1020,27 @@ type localResult struct {
 	sum     string
 }
 
-func checkLocal(ctx context.Context, path string, row VerifyRow, budget *ByteBudget, count *passCounter) (localResult, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return localResult{}, err
-	}
-	if row.Size > 0 && info.Size() != row.Size {
-		return localResult{
-			check:   Check{Method: MethodStat, Reason: "size differs from the catalog row; not parsed"},
-			finding: localFinding(row.Name, "size differs from the catalog row", fmt.Sprintf("local=%d row=%d", info.Size(), row.Size)),
-		}, nil
-	}
+// checkLocal reads the file once: the parse, the SHA-256 and the event
+// span all come from the same stream, so the file is paid for once.
+func checkLocal(ctx context.Context, path string, row VerifyRow, size int64, budget *ByteBudget, n *int64) (localResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return localResult{}, err
 	}
 	defer f.Close()
-	br := &budgetReader{ctx: ctx, r: f, b: budget, n: &count.local}
+	br := &budgetReader{ctx: ctx, r: f, b: budget, n: n}
 	h := sha256.New()
-	contents, parseErr := binlog.ReadSealedSegmentContents(io.TeeReader(br, h))
+	span := &spanTracker{size: size}
+	w := io.MultiWriter(h, span)
+	contents, parseErr := binlog.ReadSealedSegmentContents(io.TeeReader(br, w))
 	if parseErr == nil {
-		_, parseErr = io.Copy(io.Discard, io.TeeReader(br, h))
-		if errors.Is(parseErr, io.EOF) {
-			parseErr = nil
-		}
+		_, parseErr = io.Copy(io.Discard, io.TeeReader(br, w))
 	}
 	if br.err != nil {
 		return localResult{}, br.err
 	}
-	if ctx.Err() != nil {
-		return localResult{}, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return localResult{}, err
 	}
 	parsed := func(reason string, finding *Finding, sum string) (localResult, error) {
 		return localResult{check: Check{Method: MethodParsed, Reason: reason}, finding: finding, sum: sum}, nil
@@ -643,12 +1054,7 @@ func checkLocal(ctx context.Context, path string, row VerifyRow, budget *ByteBud
 		return parsed("sha256 differs from the catalog row", localFinding(row.Name, "sha256 differs from the catalog row", fmt.Sprintf("local=%s row=%s", sum, want)), sum)
 	}
 	if row.StartPos > 0 || row.EndPos > 0 {
-		// EventSpan seeks, so the second read is paid up front instead of paced.
-		if err := budget.Wait(ctx, info.Size()); err != nil {
-			return localResult{}, err
-		}
-		count.local += info.Size()
-		start, end, ok := binlog.EventSpan(path)
+		start, end, ok := span.result()
 		if !ok || (row.StartPos > 0 && start != row.StartPos) || (row.EndPos > 0 && end != row.EndPos) {
 			return parsed("event positions differ from the catalog row", localFinding(row.Name, "event positions differ from the catalog row", fmt.Sprintf("start local=%d row=%d end local=%d row=%d", start, row.StartPos, end, row.EndPos)), sum)
 		}
@@ -665,62 +1071,6 @@ func checkLocal(ctx context.Context, path string, row VerifyRow, budget *ByteBud
 
 func localFinding(name, detail, evidence string) *Finding {
 	return &Finding{Kind: KindVerifyFailed, Subject: name, Severity: SeverityCritical, Detail: detail, Evidence: evidence}
-}
-
-type objectResult struct {
-	check   Check
-	finding *Finding
-}
-
-// checkObject HEADs the object and, when why is not empty and there is a
-// digest, hashes the body. digest empty means UNVERIFIABLE: the body is not read.
-func checkObject(ctx context.Context, row VerifyRow, digest, source, why string, objects ObjectStore, budget *ByteBudget, count *passCounter) (objectResult, error) {
-	key := strings.TrimSpace(row.ObjectKey)
-	missing := func(how string) (objectResult, error) {
-		return objectResult{
-			check:   Check{Method: MethodMissing, Reason: how + " answered not found"},
-			finding: objectFinding(KindObjectMissing, row.Name, "uploaded object is missing", "key="+key),
-		}, nil
-	}
-	size, err := objects.Head(ctx, key)
-	if errors.Is(err, os.ErrNotExist) {
-		return missing("HEAD")
-	}
-	if err != nil {
-		return objectResult{}, err
-	}
-	if row.Size > 0 && size != row.Size {
-		return objectResult{
-			check:   Check{Method: MethodHead, Reason: "size differs from the catalog row; body not read"},
-			finding: objectFinding(KindObjectSizeMismatch, row.Name, "object size differs from the catalog row", fmt.Sprintf("object=%d row=%d", size, row.Size)),
-		}, nil
-	}
-	if digest == "" {
-		return objectResult{check: Check{Method: MethodUnverifiable, Reason: "no digest: catalog sha256 is empty and there is no clean local parse"}}, nil
-	}
-	if why == "" {
-		return objectResult{check: Check{Method: MethodHead, Reason: "not in this period's rotation slot"}}, nil
-	}
-	body, err := objects.Open(ctx, key)
-	if errors.Is(err, os.ErrNotExist) {
-		return missing("GET")
-	}
-	if err != nil {
-		return objectResult{}, err
-	}
-	defer body.Close()
-	sum, err := hashReader(ctx, body, budget, &count.object)
-	if errors.Is(err, os.ErrNotExist) {
-		return missing("GET")
-	}
-	if err != nil {
-		return objectResult{}, err
-	}
-	res := objectResult{check: Check{Method: MethodHashed, Reason: why, Digest: source}}
-	if !strings.EqualFold(sum, digest) {
-		res.finding = objectFinding(KindObjectCorrupt, row.Name, "object sha256 differs", fmt.Sprintf("object=%s want=%s source=%s", sum, digest, source))
-	}
-	return res, nil
 }
 
 func objectFinding(kind, name, detail, evidence string) *Finding {
@@ -762,7 +1112,9 @@ func dedupe(in []Finding) []Finding {
 	return out
 }
 
-// budgetReader paces reads on the shared budget and counts them for this pass.
+// budgetReader paces reads on the shared budget and counts, for this pass,
+// only the bytes it paid for. One read takes at most one burst, so it is
+// paid in one step or not at all.
 type budgetReader struct {
 	ctx context.Context
 	r   io.Reader
@@ -779,13 +1131,16 @@ func (b *budgetReader) Read(p []byte) (int, error) {
 		b.err = err
 		return 0, err
 	}
+	if c := b.b.chunk(); c > 0 && len(p) > c {
+		p = p[:c]
+	}
 	n, err := b.r.Read(p)
-	*b.n += int64(n)
 	if n > 0 {
 		if werr := b.b.Wait(b.ctx, int64(n)); werr != nil {
 			b.err = werr
-			return n, werr
+			return 0, werr
 		}
+		*b.n += int64(n)
 	}
 	return n, err
 }
@@ -796,4 +1151,90 @@ func hashReader(ctx context.Context, r io.Reader, budget *ByteBudget, n *int64) 
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// spanTracker is binlog.EventSpan computed from the bytes as they stream
+// past, so checking positions does not read the file a second time. size is
+// the file size EventSpan would stat.
+type spanTracker struct {
+	size       int64
+	off        int64 // bytes seen
+	magic      []byte
+	next       int64 // offset of the next event header
+	hdr        []byte
+	done       bool
+	start, end uint32
+	found      bool
+}
+
+const eventHeaderSize = 19
+
+func (t *spanTracker) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 && !t.done {
+		if t.off < 4 {
+			k := min(int(4-t.off), len(p))
+			t.magic = append(t.magic, p[:k]...)
+			t.off += int64(k)
+			p = p[k:]
+			if t.off == 4 {
+				if t.size < 4 || string(t.magic) != "\xfebin" {
+					t.done = true
+				}
+				t.next = 4
+			}
+			continue
+		}
+		if t.off < t.next {
+			k := int(min(t.next-t.off, int64(len(p))))
+			t.off += int64(k)
+			p = p[k:]
+			continue
+		}
+		if len(t.hdr) == 0 && t.next+eventHeaderSize > t.size {
+			t.done = true
+			break
+		}
+		k := min(eventHeaderSize-len(t.hdr), len(p))
+		t.hdr = append(t.hdr, p[:k]...)
+		t.off += int64(k)
+		p = p[k:]
+		if len(t.hdr) < eventHeaderSize {
+			continue
+		}
+		t.event()
+	}
+	return n, nil
+}
+
+func (t *spanTracker) event() {
+	eventSize := int64(binary.LittleEndian.Uint32(t.hdr[9:13]))
+	logPos := binary.LittleEndian.Uint32(t.hdr[13:17])
+	t.hdr = t.hdr[:0]
+	if eventSize < eventHeaderSize || t.next+eventSize > t.size {
+		t.done = true
+		return
+	}
+	t.next += eventSize
+	if logPos == 0 || int64(logPos) < eventSize {
+		return
+	}
+	evStart := logPos - uint32(eventSize)
+	if !t.found || evStart > t.end {
+		t.start, t.end, t.found = evStart, logPos, true
+		return
+	}
+	if evStart < t.start {
+		t.start = evStart
+	}
+	if logPos > t.end {
+		t.end = logPos
+	}
+}
+
+func (t *spanTracker) result() (start, end uint32, ok bool) {
+	if !t.found {
+		return 0, 0, false
+	}
+	return t.start, t.end, true
 }

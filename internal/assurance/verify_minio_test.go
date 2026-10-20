@@ -54,7 +54,7 @@ func TestVerifyAgainstMinIO(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = client.RemoveObject(ctx, bucket, row.ObjectKey, minio.RemoveObjectOptions{}) })
 	}
-	opt := Options{Now: time.Now().UTC(), SamplePercent: 100}
+	opt := Options{Now: time.Now().UTC(), RotationPeriods: 1}
 	clean, err := Verify(ctx, f.dir, rows, store, nil, opt)
 	if err != nil {
 		t.Fatal(err)

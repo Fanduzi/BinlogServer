@@ -12,8 +12,8 @@ P2-5.4（设计 0009 §26）：`Row.RetentionRemoved` 表示本地保留删过�
 
 ## Exports
 - `Inputs`、`Row`、`Switch`、`Checkpoint`、`Segment`、`Violation`、`Kind`（`AllKinds`）、`ChainOf`、`Chain.Segments`、`Chain.Check`、`DefaultUploadGrace`。
-- `verify.go`: 阶段 3 巡检的纯函数（设计 `docs/design/0009-phase3-verifier.md`）。`Verify` 读目录行、本地封存段和对象 HEAD/GET，返回 `Report`：`Coverage` 按段记下这一轮对本地副本和对象各做了什么（`PARSED`、`STAT`、`ABSENT`、`MISSING`、`HASHED`、`HEAD`、`UNVERIFIABLE`、`NOT_APPLICABLE`、`ERROR`、`SKIPPED`）以及原因，没走到的副本是零值；本轮应当开着的 finding；只对按内容验过的段推进的 `VerifiedAt`；本轮自己的字节数；`UnverifiableNoDigest` 与 `NoDigestLocal` 两个计数。`Disappeared` 只关「这一轮用能发现该 kind 的方法查过这个 subject」的 finding。`Options.OpenFindings` 里开着 `OBJECT_CORRUPT` 或 `VERIFY_FAILED` 的段每轮都哈希对象。抽样是轮换（`RotationLength`、`InRotation`），`RecentUpload` / `ClockSkewed` 管最近窗口和时钟偏差。`ByteBudget` 按字节限速，可以被并发的多轮共用。调用方必须已经是该任务的主人；本文件不问租约。
-- `verify_test.go`、`verify_coverage_test.go`: 检出、比对、预算计费、覆盖模型、关闭表、提前返回、轮换上界。`mutants/kill.go` 用这些测试打 54 个变异。
+- `verify.go`: 阶段 3 巡检的纯函数（设计 `docs/design/0009-phase3-verifier.md`）。`Verify` 读目录行、本地封存段和对象 HEAD/GET，返回 `Report`：`Coverage` 按段记下这一轮对本地副本和对象各做了什么（`PARSED`、`STAT`、`ABSENT`、`MISSING`、`HASHED`、`HEAD`、`UNVERIFIABLE`、`NOT_APPLICABLE`、`ERROR`、`SKIPPED`）以及原因，没走到的副本是零值；本轮应当开着的 finding；只对按内容验过的段推进的 `VerifiedAt`；本轮自己的字节数；`UnverifiableNoDigest` 与 `NoDigestLocal` 两个计数。`Closures`（`Report.Closed`）只关「这一轮用能发现该 kind 的方法查过这个 subject」的 finding，并带原因（含「local removed; object matches catalog」和「row removed」），`Disappeared` 是它的简写。HEAD 不计预算；本地解析和对象哈希排进同一个队列（强制重查、最近窗口、轮换槽、最久没验过），放不下的记 `SKIPPED`，截止时间到了正常结束，只有取消才返回错误；`Report.Bytes` 只记付过的字节。轮换长度按周期数（`Options.RotationPeriods`、`InRotation`、`WorstGap`），`RecentUpload` / `ClockSkewed` 管最近窗口和时钟偏差。`ByteBudget` 按字节限速，可以被并发的多轮共用。调用方必须已经是该任务的主人；本文件不问租约。
+- `verify_test.go`、`verify_coverage_test.go`、`verify_queue_test.go`: 检出、比对、预算计费、覆盖模型、关闭表、取消与截止时间、轮换上界、队列顺序、反复短截止时间下的进度上界（设计 §5.3）、付费字节。`mutants/kill.go` 用这些测试打 118 个变异（3 个等价，理由在文件里）。
 
 ## Dependencies
 - Upstream: 尚无（P1-2 起 `internal/tasks`）。
