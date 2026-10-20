@@ -488,6 +488,85 @@ func j06Fixture(t *testing.T) (State, time.Time) {
 	return s, now
 }
 
+// qaLockFixture is the r6 counterexample: a refused non-reader, then a row
+// lock. idle_kill lands after the refusal, so the node claims again.
+func qaLockFixture(t *testing.T) (State, time.Time) {
+	t.Helper()
+	s, now := freshClaim(t, StorageShared)
+	s = applied(t, s, Event{Kind: EventAcquire, Node: "n2"}, now)
+	ev := Held(s, EventTailUnreadable, "n2")
+	ev.Cause = CauseSegmentNotOnWorker
+	s = applied(t, s, ev, now)
+	s = applied(t, s, Event{Kind: EventLock, Node: "n1"}, now)
+	return s, now
+}
+
+// stoppedOwnerFixture waits out a stopped holder's TTL. The non-reader whose
+// refusal sits inside that TTL claims after the wait.
+func stoppedOwnerFixture(t *testing.T) (State, time.Time) {
+	t.Helper()
+	now := t0.Add(time.Hour)
+	s := boot(t, "n1", t0, []Node{
+		peer("n2", true, t0),
+		peer("n3", false, t0),
+		peer("n4", false, t0),
+	})
+	s.Lease.Present = true
+	s.Lease.Owner = "n1"
+	s.Lease.ExpireAt = now.Add(15 * time.Second)
+	s.Phase = PhaseRunning
+	s.Nodes[0].Stopped = true
+	s.Refusal["n4"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(10 * time.Second), Attempts: 1}
+	return s, now
+}
+
+// twoReadersFixture has two dated readers. The search follows the first
+// reader's horizon. A window that keeps only the shorter refusal undercounts.
+func twoReadersFixture(t *testing.T) (State, time.Time) {
+	t.Helper()
+	now := t0.Add(time.Hour)
+	s := boot(t, "n1", t0, []Node{peer("n2", true, t0), peer("n3", false, t0)})
+	s = expireLease(s, now)
+	s.Params.Storage = StorageShared
+	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(30 * time.Second), Attempts: 1}
+	s.Refusal["n2"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(time.Second), Attempts: 1}
+	return s, now
+}
+
+// retryBackoffFixture jumps to RetryUntil after the lease expires. The
+// non-reader refused until a point between those two clocks claims there.
+func retryBackoffFixture(t *testing.T) (State, time.Time) {
+	t.Helper()
+	s := boot(t, "n1", t0, []Node{peer("n2", false, t0)})
+	now := t0.Add(time.Hour)
+	s.Lease.ExpireAt = now.Add(15 * time.Second)
+	s = applied(t, s, Held(s, EventRetryableError, "n1"), now)
+	s.Lease.ExpireAt = now.Add(5 * time.Second)
+	s.RetryUntil = now.Add(10 * time.Second)
+	s.Refusal["n2"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(6 * time.Second), Attempts: 1}
+	return s, now
+}
+
+// untilJustAfterHorizon is one nanosecond past the reader. The non-reader
+// never claims. The schedule is the window-end jump, Acquire, and DumpReady.
+func untilJustAfterHorizon(t *testing.T) (State, time.Time) {
+	t.Helper()
+	s, now := freshClaim(t, StorageShared)
+	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(2 * time.Second), Attempts: 1}
+	s.Refusal["n2"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(2*time.Second + time.Nanosecond), Attempts: 1}
+	return s, now
+}
+
+// untilAtHorizon puts the non-reader's refusal on the window endpoint.
+// That claim is inside the window.
+func untilAtHorizon(t *testing.T) (State, time.Time) {
+	t.Helper()
+	s, now := freshClaim(t, StorageShared)
+	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(2 * time.Second), Attempts: 1}
+	s.Refusal["n2"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(2 * time.Second), Attempts: 0}
+	return s, now
+}
+
 func j11Fixture(t *testing.T) (State, time.Time) {
 	t.Helper()
 	// per_node chain owner cannot use TailUnreadable. EpochLost is dated, so
@@ -541,6 +620,18 @@ func TestFairStepBoundObserved(t *testing.T) {
 	add("2 non-readers H=600s", two, twoNow, 37, false)
 	short, shortNow := refusedReader(t, 2, 3*time.Second)
 	add("2 non-readers H=3s", short, shortNow, 8, false)
+	lockS, lockNow := qaLockFixture(t)
+	add("QA lock + refused non-reader", lockS, lockNow, 4, false)
+	stopS, stopNow := stoppedOwnerFixture(t)
+	add("stopped owner + refused non-reader", stopS, stopNow, 5, false)
+	twoR, twoRNow := twoReadersFixture(t)
+	add("two readers", twoR, twoRNow, 11, false)
+	retryS, retryNow := retryBackoffFixture(t)
+	add("RETRY_BACKOFF", retryS, retryNow, 4, false)
+	u06s, u06n := untilJustAfterHorizon(t)
+	add("until = H+1ns", u06s, u06n, 3, true)
+	u08s, u08n := untilAtHorizon(t)
+	add("until = H", u08s, u08n, 4, false)
 
 	fmt.Println("fixture\tobs\tbound\tratio")
 	for _, tc := range cases {
@@ -560,9 +651,6 @@ func TestFairStepBoundObserved(t *testing.T) {
 		}
 		if tc.tight && end.steps != b {
 			t.Fatalf("%s observed %d bound %d, equality is required here", tc.name, end.steps, b)
-		}
-		if end.steps == b && end.steps <= b-1 {
-			t.Fatalf("%s schedule fit in bound-1 (%d)", tc.name, b-1)
 		}
 		ratio := 1.0
 		if b > 0 {
