@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, one Event (LeaseUnreadable included), and the caller-supplied clock
-// output: Result, the next state and the side-effect intents
+// output: Result, the next state, the side-effect intents, and one applied-event trace entry
 // pos: the single transition function; it does no I/O and reads no clock
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -72,47 +72,47 @@ func Step(s State, e Event, now time.Time) Result {
 	}
 	switch e.Kind {
 	case EventOperatorStart:
-		return finish(s, now, operatorStart(s, e, now))
+		return finish(s, e, now, operatorStart(s, e, now))
 	case EventOperatorStop:
-		return finish(s, now, operatorStop(s, e, now))
+		return finish(s, e, now, operatorStop(s, e, now))
 	case EventOperatorDelete:
-		return finish(s, now, operatorDelete(s, e, now))
+		return finish(s, e, now, operatorDelete(s, e, now))
 	case EventStopConfirmed:
-		return finish(s, now, stopConfirmed(s, e, now))
+		return finish(s, e, now, stopConfirmed(s, e, now))
 	case EventStopExpired:
-		return finish(s, now, stopExpired(s, e, now))
+		return finish(s, e, now, stopExpired(s, e, now))
 	case EventAcquire, EventLeaseExpired:
-		return finish(s, now, acquire(s, e, now))
+		return finish(s, e, now, acquire(s, e, now))
 	case EventDumpReady:
-		return finish(s, now, dumpReady(s, e, now))
+		return finish(s, e, now, dumpReady(s, e, now))
 	case EventRetryableError:
-		return finish(s, now, retryable(s, e, now))
+		return finish(s, e, now, retryable(s, e, now))
 	case EventTerminalError:
-		return finish(s, now, terminal(s, e, now))
+		return finish(s, e, now, terminal(s, e, now))
 	case EventTailUnreadable:
-		return finish(s, now, tailUnreadable(s, e, now))
+		return finish(s, e, now, tailUnreadable(s, e, now))
 	case EventEpochLost:
-		return finish(s, now, epochLost(s, e, now))
+		return finish(s, e, now, epochLost(s, e, now))
 	case EventChainVerified:
-		return finish(s, now, chainVerified(s, e, now))
+		return finish(s, e, now, chainVerified(s, e, now))
 	case EventChainOwnerGone:
-		return finish(s, now, chainOwnerGone(s, e, now))
+		return finish(s, e, now, chainOwnerGone(s, e, now))
 	case EventChainOwnerBack:
-		return finish(s, now, chainOwnerBack(s, e, now))
+		return finish(s, e, now, chainOwnerBack(s, e, now))
 	case EventMetaLockTimeout:
-		return finish(s, now, metaLockTimeout(s, e, now))
+		return finish(s, e, now, metaLockTimeout(s, e, now))
 	case EventRenew:
-		return finish(s, now, renew(s, e, now))
+		return finish(s, e, now, renew(s, e, now))
 	case EventSweep:
-		return finish(s, now, sweep(s, e, now))
+		return finish(s, e, now, sweep(s, e, now))
 	case EventLock:
-		return finish(s, now, takeLock(s, e, now))
+		return finish(s, e, now, takeLock(s, e, now))
 	case EventEvalDirFailed:
-		return finish(s, now, appliedPair(s, Result{Decision: DecisionRejected, Detail: "directory not read"}))
+		return finish(s, e, now, appliedPair(s, Result{Decision: DecisionRejected, Detail: "directory not read"}))
 	case EventLegacyUpdate:
-		return finish(s, now, legacyUpdate(s))
+		return finish(s, e, now, legacyUpdate(s))
 	default:
-		return finish(s, now, appliedPair(s, Result{Decision: DecisionRejected, Detail: "unknown event"}))
+		return finish(s, e, now, appliedPair(s, Result{Decision: DecisionRejected, Detail: "unknown event"}))
 	}
 }
 
@@ -123,12 +123,13 @@ type partial struct {
 
 func appliedPair(s State, r Result) partial { return partial{state: s, result: r} }
 
-func finish(before State, now time.Time, p partial) Result {
+func finish(before State, e Event, now time.Time, p partial) Result {
 	next := p.state
 	res := p.result
 	if res.Decision == DecisionApplied {
 		noteOwnership(&next, now)
 		next.NoProgress = noProgressFact(next, now)
+		next.Trace = append(next.Trace, traceSnap(e, next, now))
 		var opened, closed []Finding
 		derived := derive(next)
 		opened, closed = diffFindings(before.Findings, derived)
@@ -149,7 +150,12 @@ func finish(before State, now time.Time, p partial) Result {
 }
 
 func noteOwnership(s *State, now time.Time) {
-	unowned := s.Desired == DesiredRun && !LeaseLive(*s, now) && s.Phase != PhaseFailed && s.Phase != PhaseCreated && s.Phase != PhaseStopped && !s.Deleted
+	// FAILED stays in this clock. noProgressFact's phase exclusion is what
+	// keeps TASK_NO_PROGRESS off a failed row; deleting that exclusion opens
+	// the finding, and the trace checker rejects it. A legal retry is not
+	// unowned yet: the clock starts on the first event at or after retry_until,
+	// and the next sweep is the one that opens the finding.
+	unowned := s.Desired == DesiredRun && !LeaseLive(*s, now) && !LegalRetry(*s, now) && s.Phase != PhaseCreated && s.Phase != PhaseStopped && !s.Deleted
 	if unowned {
 		if s.UnownedSince.IsZero() {
 			s.UnownedSince = now
@@ -157,6 +163,22 @@ func noteOwnership(s *State, now time.Time) {
 		return
 	}
 	s.UnownedSince = time.Time{}
+}
+
+func traceSnap(e Event, s State, now time.Time) TraceEvent {
+	return TraceEvent{
+		Kind:         e.Kind,
+		At:           now,
+		Phase:        s.Phase,
+		Desired:      s.Desired,
+		Deleted:      s.Deleted,
+		Owner:        s.Lease.Owner,
+		Expire:       s.Lease.ExpireAt,
+		Acquired:     s.Lease.AcquiredAt,
+		Present:      s.Lease.Present,
+		RetryAttempt: s.RetryAttempt,
+		RetryUntil:   s.RetryUntil,
+	}
 }
 
 func noProgressFact(s State, now time.Time) bool {
@@ -192,6 +214,7 @@ func (s State) clone() State {
 			n.RegistrationLive[k] = v
 		}
 	}
+	n.Trace = append([]TraceEvent(nil), s.Trace...)
 	return n
 }
 
@@ -426,11 +449,17 @@ func acquire(s State, e Event, now time.Time) partial {
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "not claimable"})
 	}
 	next := s
+	fromFailed := s.Phase == PhaseFailed
 	next.takeLease(e.Node, now)
 	next.bump()
 	next.Phase = PhaseStarting
 	next.RunID = ""
 	next.LastError = ""
+	if fromFailed {
+		next.FailedReason = ""
+		next.FailedAt = time.Time{}
+		next.FailedSpec = 0
+	}
 	return partial{state: next, result: Result{Decision: DecisionApplied, LocksTaskLease: true, Intents: []Intent{{Kind: IntentAcquire, Node: e.Node}}}}
 }
 
@@ -573,6 +602,9 @@ func yield(s State, node string, now time.Time, openEnded bool, reason string) S
 	r := next.Refusal[node]
 	r.Reason = reason
 	r.Attempts++
+	if r.Attempts > maxRefusalAttempts {
+		r.Attempts = maxRefusalAttempts
+	}
 	if openEnded {
 		r.OpenEnded = true
 		r.Until = time.Time{}
@@ -644,6 +676,9 @@ func chainOwnerBack(s State, e Event, now time.Time) partial {
 	next.Phase = PhaseLeaseDegraded
 	next.FailedReason = ""
 	next.FailedAt = time.Time{}
+	// The unowned clock does not run while the row is FAILED. Start it at
+	// this transition, not at failed_at.
+	next.UnownedSince = time.Time{}
 	return partial{state: next, result: Result{Decision: DecisionApplied, Detail: "LEASE_DEGRADED"}}
 }
 
