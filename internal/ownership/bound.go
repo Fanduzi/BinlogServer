@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, the caller clock, and RefusalDelay
-// output: FairStepBound, an upper bound on fair steps. NextDeadline and the window share fairDeadlines
+// output: FairStepBound, an upper bound on fair steps. NextDeadline and the window share fairDeadlines. A non-reader refusal strictly inside that window is part of the minimum when the claim set is already open, and does not extend the window
 // pos: the RTO step ceiling in ADR 0011 §4.1(a). It is not a schedule search
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -155,12 +155,19 @@ func fairDeadlines(s State, now time.Time, reader string) []time.Time {
 	for _, at := range ready {
 		add(at)
 	}
-	// A non-reader refusal past the reader horizon is not a fair wait:
-	// the reader is already due, and that claim does not extend W.
+	// A non-reader refusal past the reader horizon is not a fair wait
+	// when the reader is already due, and that claim must not extend W.
+	// One that sits strictly before a deadline already listed is a minimum
+	// only when the claim set is already open there: Acquire then goes
+	// from rejected to applied. A live lease or a legal retry still
+	// rejects it, so that instant is not a jump.
+	var inside []time.Time
 	for _, at := range other {
 		if !at.After(horizon) {
 			add(at)
+			continue
 		}
+		inside = append(inside, at)
 	}
 	if s.Lock.Held && !s.Lock.Since.IsZero() {
 		idle := s.Params.IdleKill
@@ -182,6 +189,17 @@ func fairDeadlines(s State, now time.Time, reader string) []time.Time {
 	}
 	if s.Phase == PhaseFailed && s.FailedReason == ReasonChainOwnerGone && !s.Chain.VerifiedAt.After(s.FailedAt) {
 		add(s.FailedAt.Add(time.Millisecond))
+	}
+	latest := time.Time{}
+	for _, at := range out {
+		if latest.IsZero() || at.After(latest) {
+			latest = at
+		}
+	}
+	for _, at := range inside {
+		if at.Before(latest) && InClaimSet(s, at) {
+			add(at)
+		}
 	}
 	return out
 }

@@ -16,9 +16,10 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 | `spec.go` | RTO、stale、`node_gone`、拒绝退避、迁移预检、旁路杀计划。`RefusalDelay` 在指数大于 20 或 `claim > cap>>shift` 时取 cap，移位回绕不能把期限算短 |
 | `invariant_test.go` | 安全性：固定种子的随机前缀，加深度 3 的有界穷举。字母表含旧 epoch、`StopConfirmed`、`StopExpired`、`Lock`，时钟会跳过租约 TTL |
 | `bottom_scc_test.go` | 底强连通分量检查。起点在 `DumpReady` 之前，所以把这一步换成退避环时，这个测试先失败 |
-| `bound.go` | `FairStepBound`：公平步数的上界。窗口 W 是 `fairDeadlines` 的最大值，`NextDeadline` 是同一组的最小值。目录已经没了、行还没写成链消失时，K 仍算随后的 `ChainOwnerGone`。估大可以，估小是错 |
+| `bound.go` | `FairStepBound`：公平步数的上界。窗口 W 是 `fairDeadlines` 的最大值，`NextDeadline` 是同一组的最小值。读者期限之后、认领集已经开着、又严格早于已有终点的非读者拒绝也在最小值里，不把 W 拉长。目录已经没了、行还没写成链消失时，K 仍算随后的 `ChainOwnerGone`。估大可以，估小是错 |
 | `liveness_test.go` | 活性 (a)(b)(c) 的起点。60 次偏向游走加上 `FAILED` / `CHAIN_OWNER_GONE`。能搜完的起点要求观察步数 ≤ `FairStepBound`；两者相等时，界再减一就装不下。检查方法写在文件头 |
-| `observe_test.go` | 公平步图。状态键是夹紧的 `deadline−now`，不存绝对 now。底强连通分量要么含 `RUNNING`，要么是 ADR 字面量里的单个操作员 `FAILED`。`FairTerminal` 只用来对账。唯一的时间步是 `NextDeadline`。超过状态上限是失败 |
+| `time_region.go` | 公平搜索的时间区域。一张表列出 `Step` 的每条时间比较。边界 c 和 c±1ns 保持精确，只有严格更早的差值饱和 |
+| `observe_test.go` | 公平步图。状态键用上面的边界，不存绝对 now。底强连通分量要么含 `RUNNING`，要么是 ADR 字面量里的单个操作员 `FAILED`。`FairTerminal` 只用来对账。唯一的时间步是 `NextDeadline`。超过状态上限或单种子时间预算是失败 |
 | `bound_rand_test.go` | 至少 300 个带种子的随机配置，含 `CanRead` 恢复这一环境步。穷尽比例必须是 1，超过状态上限的种子是失败。底强连通分量按种类计数。更多种子用 `FAIR_BOUND_SEEDS` |
 | `trajectory_test.go` | §4.1 轨迹 |
 | `fault_matrix_test.go` | §4.2 里纯模型能表达的每一行 |
