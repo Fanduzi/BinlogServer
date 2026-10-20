@@ -42,10 +42,11 @@ import "time"
 //     heartbeat, so the sweep never waits it out.
 //   - a stopped chain owner is the exception. The heartbeat stays put.
 //     Once the phase is LEASE_DEGRADED and tail_unreadable_since is set,
-//     the sweep's ChainOwnerGone fires at HeartbeatAt+node_gone+1ns.
-//     The owner is still stopped, so ChainOwnerBack stays refused and
-//     FAILED/CHAIN_OWNER_GONE is terminal. That deadline is part of W,
-//     and the ChainOwnerGone step is one of the forced steps.
+//     ChainOwnerGone may fire at any time from HeartbeatAt+node_gone+1ns
+//     onward. The search may take another enabled move first. The deadline
+//     is part of W, and the ChainOwnerGone step is one of the forced steps.
+//     FAILED/CHAIN_OWNER_GONE is terminal while that owner is stopped,
+//     absent, or alive with CanRead false.
 //   - UnownedSince+Sweep and no_progress_after: sweep facts, not a fair path
 //     toward RUNNING or a terminal FAILED.
 //   - lock_wait: only the second take that clears META_LOCK_STALLED. The
@@ -100,38 +101,9 @@ func FairStepBound(s State, now time.Time) int {
 	return forced + wastes + jumps + finish
 }
 
-// boundTerminal is RUNNING, or FAILED with a reason the fair scheduler
-// does not leave. SOURCE_AUTH, LOG_BIN_OFF, and LEGACY_UNKNOWN have no
-// fair exit. CHAIN_OWNER_GONE is terminal only while the chain owner is
-// stopped or missing: the search does not refresh that heartbeat, so
-// ChainOwnerBack stays refused. A live chain owner still verifies and
-// comes back, and that path is not terminal.
+// boundTerminal is FairTerminal. The search uses the same predicate.
 func boundTerminal(s State, now time.Time) bool {
-	if boundRunning(s, now) {
-		return true
-	}
-	if s.Phase != PhaseFailed {
-		return false
-	}
-	switch s.FailedReason {
-	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
-		return true
-	case ReasonChainOwnerGone:
-		owner := boundFind(s, s.Chain.Owner)
-		return owner == nil || owner.Stopped
-	default:
-		return false
-	}
-}
-
-func boundRunning(s State, now time.Time) bool {
-	if s.Lock.Held || s.Phase != PhaseRunning || s.Desired != DesiredRun {
-		return false
-	}
-	if !s.Lease.Present || s.Lease.Owner == "" || !s.Lease.ExpireAt.After(now) {
-		return false
-	}
-	return boundCanRead(s, s.Lease.Owner)
+	return FairTerminal(s, now)
 }
 
 // boundWindow is how far the fair scheduler can push the clock before it
@@ -315,14 +287,7 @@ func boundNodeWastes(s State, id string, now time.Time, W time.Duration, p Param
 }
 
 func boundCanRead(s State, id string) bool {
-	n := boundFind(s, id)
-	if n == nil || !n.CanRead || n.Stopped {
-		return false
-	}
-	if r, ok := s.Refusal[id]; ok && r.OpenEnded {
-		return false
-	}
-	return true
+	return nodeReady(s, id)
 }
 
 func boundFind(s State, id string) *Node {

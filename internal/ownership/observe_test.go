@@ -174,7 +174,11 @@ func fairMoves(s State, now time.Time) []obsMove {
 			if !when.After(s.FailedAt) {
 				when = s.FailedAt.Add(time.Millisecond)
 			}
-			res := Step(s, Event{Kind: EventChainVerified, Node: owner, ReadOK: true}, when)
+			readOK := false
+			if n := obsFind(s, owner); n != nil {
+				readOK = n.CanRead
+			}
+			res := Step(s, Event{Kind: EventChainVerified, Node: owner, ReadOK: readOK}, when)
 			if res.Decision != DecisionApplied {
 				return nil
 			}
@@ -240,19 +244,14 @@ func fairMoves(s State, now time.Time) []obsMove {
 		out = append(out, obsMove{s: next, at: now, kind: moveWaste, attempts: s.Refusal[node.ID].Attempts})
 	}
 	horizon := obsHorizon(s, now, reader)
-	if due, ok := stoppedChainGoneAt(s, now); ok {
-		if !now.Before(due) {
-			// The sweep is enabled. It is the fair end: ChainOwnerBack stays
-			// refused while this owner is stopped.
-			res := Step(s, Event{Kind: EventChainOwnerGone, Node: "_health"}, now)
-			if res.Decision == DecisionApplied {
-				res.State.trace = nil
-				return []obsMove{{s: res.State, at: now, kind: moveForced}}
-			}
-		} else if horizon.After(due) {
-			// A reader who is already late past the sweep does not get to
-			// claim after it. A reader who can claim now still does.
-			horizon = due
+	// The sweep may fire at any time after it is due. It is one fair move
+	// beside the wastes and jumps that are already enabled, so the search
+	// can postpone it. The reader horizon is not cut down to the sweep.
+	if due, ok := stoppedChainGoneAt(s, now); ok && !now.Before(due) {
+		res := Step(s, Event{Kind: EventChainOwnerGone, Node: "_health"}, now)
+		if res.Decision == DecisionApplied {
+			res.State.trace = nil
+			out = append(out, obsMove{s: res.State, at: now, kind: moveForced})
 		}
 	}
 	if horizon.After(now) {
@@ -397,33 +396,14 @@ func obsStopped(s State, id string) bool {
 }
 
 func obsRunning(s State, now time.Time) bool {
-	if s.Lock.Held || s.Phase != PhaseRunning || s.Desired != DesiredRun {
-		return false
-	}
-	if !s.Lease.Present || s.Lease.Owner == "" || !s.Lease.ExpireAt.After(now) {
-		return false
-	}
-	return obsCanRead(s, s.Lease.Owner)
+	return fairRunning(s, now)
 }
 
-// obsTerminal is RUNNING, or a FAILED reason the fair scheduler does not
-// leave. CHAIN_OWNER_GONE is terminal while the chain owner is stopped or
-// missing. A chain owner that is not stopped can still verify and return.
+// obsTerminal is FairTerminal. Whitelisted FAILED reasons are terminal only
+// while the row is not claimable. CHAIN_OWNER_GONE is terminal while the
+// chain owner is stopped, absent, or alive and unable to read.
 func obsTerminal(s State, now time.Time) bool {
-	if obsRunning(s, now) {
-		return true
-	}
-	if s.Phase != PhaseFailed {
-		return false
-	}
-	switch s.FailedReason {
-	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
-		return true
-	case ReasonChainOwnerGone:
-		return obsStopped(s, s.Chain.Owner) || obsFind(s, s.Chain.Owner) == nil
-	default:
-		return false
-	}
+	return FairTerminal(s, now)
 }
 
 func obsFind(s State, id string) *Node {
@@ -835,21 +815,121 @@ func TestFairStepBoundObserved(t *testing.T) {
 	}
 }
 
-func TestStoppedChainOwnerReachesTerminal(t *testing.T) {
+func chainGoneStopped(t *testing.T) (State, time.Time) {
+	t.Helper()
 	s, now := stoppedChainOwnerFixture(t)
-	end := observeFair(s, now)
-	b := FairStepBound(s, now)
-	if end.stuck || end.over || !end.ok || end.steps > b {
-		t.Fatalf("chain owner steps %d bound %d stuck %v over %v ok %v", end.steps, b, end.stuck, end.over, end.ok)
+	due := now
+	if owner := obsFind(s, s.Chain.Owner); owner != nil && !owner.HeartbeatAt.IsZero() {
+		due = owner.HeartbeatAt.Add(EffectiveNodeGone(s.Params) + time.Nanosecond)
+	}
+	res := Step(s, Event{Kind: EventChainOwnerGone, Node: "_health"}, due)
+	if res.Decision != DecisionApplied || res.State.FailedReason != ReasonChainOwnerGone {
+		t.Fatalf("sweep %s %s", res.Decision, res.Detail)
+	}
+	res.State.trace = nil
+	return res.State, due
+}
+
+func resumeChainOwner(s State, read bool, now time.Time) State {
+	nodes := append([]Node(nil), s.Nodes...)
+	s.Nodes = nodes
+	for i := range s.Nodes {
+		if s.Nodes[i].ID != s.Chain.Owner {
+			continue
+		}
+		s.Nodes[i].Stopped = false
+		s.Nodes[i].CanRead = read
+		s.Nodes[i].HeartbeatAt = now
+	}
+	return s
+}
+
+func TestChainOwnerUnreadableStaysTerminal(t *testing.T) {
+	base, at := chainGoneStopped(t)
+	s := resumeChainOwner(base, false, at)
+	if InClaimSet(s, at) || !FairTerminal(s, at) || FairStepBound(s, at) != 0 {
+		t.Fatal("alive chain owner without a directory is claimable or not terminal")
+	}
+	if !findOpen(s, FindingFailed, ReasonChainOwnerGone) {
+		t.Fatal("CHAIN_OWNER_GONE is not surfaced as TASK_FAILED")
+	}
+	end := observeFair(s, at)
+	if end.stuck || end.over || !end.ok || end.steps > FairStepBound(s, at) {
+		t.Fatalf("unreadable owner steps %d bound %d stuck %v over %v ok %v", end.steps, FairStepBound(s, at), end.stuck, end.over, end.ok)
 	}
 	if end.state.Phase != PhaseFailed || end.state.FailedReason != ReasonChainOwnerGone {
-		t.Fatalf("end phase %s reason %s, want FAILED/CHAIN_OWNER_GONE", end.state.Phase, end.state.FailedReason)
+		t.Fatalf("end phase %s reason %s", end.state.Phase, end.state.FailedReason)
 	}
 	if v := Check(end.state, end.at); len(v) > 0 {
 		t.Fatalf("terminal state: %+v", v)
 	}
-	fmt.Printf("fixture\tstopped chain owner\t%d\t%d\n", end.steps, b)
-	t.Logf("stopped chain owner observed %d bound %d", end.steps, b)
+	fmt.Printf("fixture\tchain owner alive unreadable\t%d\t%d\n", end.steps, FairStepBound(s, at))
+	t.Logf("unreadable chain owner observed %d bound %d", end.steps, FairStepBound(s, at))
+}
+
+func TestChainOwnerReadableReturns(t *testing.T) {
+	base, at := chainGoneStopped(t)
+	s := resumeChainOwner(base, true, at)
+	if FairTerminal(s, at) {
+		t.Fatal("readable chain owner is terminal before ChainVerified")
+	}
+	end := observeFair(s, at)
+	b := FairStepBound(s, at)
+	if end.stuck || end.over || !end.ok || end.steps == 0 || end.steps > b || !obsRunning(end.state, end.at) {
+		t.Fatalf("readable return steps %d bound %d stuck %v over %v ok %v phase %s", end.steps, b, end.stuck, end.over, end.ok, end.state.Phase)
+	}
+	if v := Check(end.state, end.at); len(v) > 0 {
+		t.Fatalf("running state: %+v", v)
+	}
+	fmt.Printf("fixture\tchain owner readable again\t%d\t%d\n", end.steps, b)
+	t.Logf("readable chain owner observed %d bound %d", end.steps, b)
+}
+
+func TestClaimableFailedReachesRunning(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s = applied(t, s, heldCause(s, EventTerminalError, "n1", CauseSourceAuth), t0)
+	if !FairTerminal(s, t0) || FairStepBound(s, t0) != 0 {
+		t.Fatal("SOURCE_AUTH at the failed spec is not terminal")
+	}
+	bumped := s
+	bumped.SpecRevision = s.FailedSpec + 1
+	if FairTerminal(bumped, t0) || !InClaimSet(bumped, t0) {
+		t.Fatal("spec bump left SOURCE_AUTH terminal")
+	}
+	if v := Check(bumped, t0); len(v) > 0 {
+		t.Fatalf("claim-pull shape: %+v", v)
+	}
+	end := observeFair(bumped, t0)
+	b := FairStepBound(bumped, t0)
+	if end.stuck || !end.ok || end.steps == 0 || end.steps > b || !obsRunning(end.state, end.at) {
+		t.Fatalf("spec bump steps %d bound %d stuck %v ok %v phase %s", end.steps, b, end.stuck, end.ok, end.state.Phase)
+	}
+	fmt.Printf("fixture\tSOURCE_AUTH spec bump\t%d\t%d\n", end.steps, b)
+	t.Logf("spec bump observed %d bound %d", end.steps, b)
+}
+
+func TestStoppedChainOwnerDelaySweep(t *testing.T) {
+	s, now := stoppedChainOwnerFixture(t)
+	due := now
+	if owner := obsFind(s, s.Chain.Owner); owner != nil && !owner.HeartbeatAt.IsZero() {
+		due = owner.HeartbeatAt.Add(EffectiveNodeGone(s.Params) + time.Nanosecond)
+	}
+	swept := Step(s, Event{Kind: EventChainOwnerGone, Node: "_health"}, due)
+	if swept.Decision != DecisionApplied || swept.State.FailedReason != ReasonChainOwnerGone {
+		t.Fatalf("sweep at the deadline: %s %s", swept.Decision, swept.Detail)
+	}
+	// The longest fair path waits out the reader's refusal and reaches
+	// RUNNING. Firing the sweep at the deadline is the shorter choice.
+	end := observeFair(s, now)
+	b := FairStepBound(s, now)
+	if end.stuck || end.over || !end.ok || end.steps > b || !obsRunning(end.state, end.at) {
+		t.Fatalf("delayed sweep steps %d bound %d stuck %v over %v ok %v phase %s", end.steps, b, end.stuck, end.over, end.ok, end.state.Phase)
+	}
+	if v := Check(end.state, end.at); len(v) > 0 {
+		t.Fatalf("running state: %+v", v)
+	}
+	fmt.Printf("fixture\tstopped chain owner delayed sweep\t%d\t%d\n", end.steps, b)
+	t.Logf("stopped chain owner delayed sweep observed %d bound %d", end.steps, b)
 }
 
 func TestIdleKillAndStoppedNonReader(t *testing.T) {
