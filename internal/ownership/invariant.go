@@ -191,21 +191,25 @@ func Check(s State, now time.Time) []Violation {
 	return v
 }
 
-// ProgressOverdue is invariant 7's clock. Unowned work (desired RUN, no live
-// lease, not a legal retry) is overdue one sweep after UnownedSince. A live
-// owner is overdue only after no_progress_after. This does not read State.NoProgress.
+// ProgressOverdue is invariant 7's clock, written from the ADR text.
+// It does not call LeaseLive or LegalRetry: those belong to the model, and a
+// flipped comparison there must still disagree with this copy.
+// A live lease is owner set and expire_at > now. A legal retry is RETRY_BACKOFF
+// with budget left and now < retry_until. Unowned work is overdue one sweep
+// after UnownedSince. A live owner is overdue only after no_progress_after,
+// strictly, so the boundary itself is not yet CRITICAL.
 func ProgressOverdue(s State, now time.Time) bool {
 	if s.Deleted || s.Desired != DesiredRun || s.Phase == PhaseFailed || s.Phase == PhaseCreated {
 		return false
 	}
 	p := s.Params.fill()
-	if !LeaseLive(s, now) && !LegalRetry(s, now) && s.Phase != PhaseStopped {
+	if !adrLeaseLive(s, now) && !adrLegalRetry(s, now) && s.Phase != PhaseStopped {
 		if s.UnownedSince.IsZero() {
 			return false
 		}
 		return !now.Before(s.UnownedSince.Add(p.Sweep))
 	}
-	if LeaseLive(s, now) {
+	if adrLeaseLive(s, now) {
 		anchor := s.ProgressAt
 		if anchor.IsZero() {
 			anchor = s.Lease.AcquiredAt
@@ -215,6 +219,20 @@ func ProgressOverdue(s State, now time.Time) bool {
 		}
 	}
 	return false
+}
+
+// adrLeaseLive is ADR lease liveness: expire_at > now. Equality is not live.
+func adrLeaseLive(s State, now time.Time) bool {
+	return s.Lease.Owner != "" && s.Lease.Present && s.Lease.ExpireAt.After(now)
+}
+
+// adrLegalRetry is ADR invariant 7's window: budget remains and the deadline
+// has not arrived. now == retry_until is already outside the window.
+func adrLegalRetry(s State, now time.Time) bool {
+	if s.Deleted || s.Phase != PhaseRetryBackoff || s.RetryUntil.IsZero() || s.RetryAttempt >= RetryBudget {
+		return false
+	}
+	return s.RetryUntil.After(now)
 }
 
 // CheckStep is the transition half: desired STOP, FAILED, the epoch fence,
