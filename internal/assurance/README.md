@@ -12,8 +12,8 @@ P2-5.4（设计 0009 §26）：`Row.RetentionRemoved` 表示本地保留删过�
 
 ## Exports
 - `Inputs`、`Row`、`Switch`、`Checkpoint`、`Segment`、`Violation`、`Kind`（`AllKinds`）、`ChainOf`、`Chain.Segments`、`Chain.Check`、`DefaultUploadGrace`。
-- `verify.go`: 阶段 3 巡检的纯函数（设计 `docs/design/0009-phase3-verifier.md`）。`Verify` 读目录行、本地封存段和对象 HEAD/GET，返回本轮应当开着的 finding，以及可以推进 `last_verified_at` 的段。`Disappeared` 给出这一轮完整检查里消失的 finding。`ByteBudget` 按字节限速。调用方必须已经是该任务的主人；本文件不问租约。
-
+- `verify.go`: 阶段 3 巡检的纯函数（设计 `docs/design/0009-phase3-verifier.md`）。`Verify` 读目录行、本地封存段和对象 HEAD/GET，返回 `Report`：`Coverage` 按段记下这一轮对本地副本和对象各做了什么（`PARSED`、`STAT`、`ABSENT`、`MISSING`、`HASHED`、`HEAD`、`UNVERIFIABLE`、`NOT_APPLICABLE`、`ERROR`、`SKIPPED`）以及原因，没走到的副本是零值；本轮应当开着的 finding；只对按内容验过的段推进的 `VerifiedAt`；本轮自己的字节数；`UnverifiableNoDigest` 与 `NoDigestLocal` 两个计数。`Disappeared` 只关「这一轮用能发现该 kind 的方法查过这个 subject」的 finding。`Options.OpenFindings` 里开着 `OBJECT_CORRUPT` 或 `VERIFY_FAILED` 的段每轮都哈希对象。抽样是轮换（`RotationLength`、`InRotation`），`RecentUpload` / `ClockSkewed` 管最近窗口和时钟偏差。`ByteBudget` 按字节限速，可以被并发的多轮共用。调用方必须已经是该任务的主人；本文件不问租约。
+- `verify_test.go`、`verify_coverage_test.go`: 检出、比对、预算计费、覆盖模型、关闭表、提前返回、轮换上界。`mutants/kill.go` 用这些测试打 54 个变异。
 
 ## Dependencies
 - Upstream: 尚无（P1-2 起 `internal/tasks`）。
