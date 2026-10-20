@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, and deletion of one stored key
+// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key, and deletion of one stored key
 // pos: outbound storage adapter for sealed binlog upload, checksum, download, and retention delete
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -176,6 +176,25 @@ func sealedETag(localPath string, partSize int64) (string, error) {
 	}
 	sum := md5.Sum(concat)
 	return hex.EncodeToString(sum[:]) + "-" + strconv.Itoa(parts), nil
+}
+
+// HeadObject reports the size of one stored object. A missing object is os.ErrNotExist.
+func (u *S3Uploader) HeadObject(ctx context.Context, objectKey string) (int64, error) {
+	if u == nil || u.client == nil {
+		return 0, fmt.Errorf("object storage is not configured")
+	}
+	key := filepath.ToSlash(strings.TrimSpace(objectKey))
+	if key == "" {
+		return 0, fmt.Errorf("empty object key")
+	}
+	info, err := u.client.StatObject(ctx, u.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		if objectMissing(err) {
+			return 0, os.ErrNotExist
+		}
+		return 0, err
+	}
+	return info.Size, nil
 }
 
 // OpenObject opens one stored object and reports its size at open.

@@ -593,6 +593,23 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 | `health.object_list_interval_sec` | 300 | 列举对象存储的间隔，秒 |
 | `health.object_list_limit` | 10000 | 一次列举的对象上限 |
 
+### 3.11.1 周期巡检（`verify`）
+
+进程内巡检的周期和预算。负数拒绝启动。`verify.recent_share_percent` 只接受 1–100，0 也拒绝。`verify.budget_bytes_per_sec` 为 0 时工人用默认 4 MiB/s，不表示不限速。`verify.drill_dsn` 为空则演练关闭；这一版不拨号。它按源密码的方式保护，不要明文写进日志。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `verify.every_sec` | 86400 | 巡检周期，秒。必须为正 |
+| `verify.budget_bytes_per_sec` | 4194304 | 进程级读预算，字节/秒。0 用这个默认 |
+| `verify.rotation_periods` | 20 | 轮换长度，按周期数。0 用默认 |
+| `verify.recent_share_percent` | 25 | 最近档最多占一轮容量的百分之几。1–100 |
+| `verify.pass_deadline_sec` | 0 | 一轮截止时间，秒。0 等于 `verify.every_sec` |
+| `verify.pass_max_bytes` | 0 | 一轮最多读多少字节。0 不设上限 |
+| `verify.object_recent_sec` | 86400 | 最近上传窗口，秒。0 用默认 24 小时 |
+| `verify.drill_dsn` | 空 | 演练实例的地址。空就是关 |
+| `verify.drill_every_sec` | 604800 | 演练周期，秒 |
+| `verify.drill_check_sql` | 空 | 演练通过后可选的校验 SQL |
+
 ### 3.12 无元数据库时的任务记录（`standalone`）
 
 没有 `meta_dsn` 时，任务加密写在 `{data_dir}/.tasks.enc`。密钥用 `binlog-server task-key generate --out <path>` 生成，不写进这个文件。详见 `docs/security.md`。

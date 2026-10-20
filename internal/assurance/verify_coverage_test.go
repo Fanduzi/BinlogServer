@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -521,19 +522,19 @@ func TestVerify_DigestSourcesAndBackfillCount(t *testing.T) {
 	}
 }
 
-// TestVerify_LocalReadErrorLeavesChainUnchecked is QA M22.
+// TestVerify_LocalReadErrorLeavesChainUnchecked is QA M22. A stat error
+// (not a dangling symlink: that name is absent) leaves the chain unchecked.
 func TestVerify_LocalReadErrorLeavesChainUnchecked(t *testing.T) {
 	f := live(t)
 	rows := verifyRows(t, f, testNow.Add(-time.Hour))
 	chain := chainOf(f)
 	name := rows[1].Name
-	p := filepath.Join(f.dir, name)
-	if err := os.Remove(p); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(f.dir, "does-not-exist"), p); err != nil {
-		t.Fatal(err)
-	}
+	withStatPath(t, func(path string) (os.FileInfo, error) {
+		if filepath.Base(path) == name {
+			return nil, statPathErr(path, syscall.EACCES)
+		}
+		return os.Stat(path)
+	})
 	rep := mustVerify(t, f.dir, rows, objectsFromDir2(t, f, rows), chain, Options{Now: testNow, RotationPeriods: 1})
 	if rep.Coverage[name].Local.Method != MethodError || rep.LocalErr == nil {
 		t.Fatalf("coverage %+v err=%v", rep.Coverage[name], rep.LocalErr)

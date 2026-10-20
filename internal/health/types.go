@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: one task's facts at one moment (task state, assurance chain verdicts, hot-path signals, store capability, waivers)
-// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30)
+// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30); verifier kinds are registered and unmanaged, and Produced does not include verify
 // pos: the single lifecycle owner of findings (ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md); pure, no I/O, imports only assurance
 // note: if this file changes, update this header and module README.md.
 package health
@@ -406,9 +406,19 @@ const (
 	SealFactsAbsent        Kind = "SEAL_FACTS_ABSENT"
 	HealthStale            Kind = "HEALTH_STALE"
 	HealthStoreDegraded    Kind = "HEALTH_STORE_DEGRADED"
+	// Verifier kinds (ADR 0009 phase 3). Unmanaged: the worker writes them
+	// through the finding sink. Produced[ScopeVerify] stays false.
+	VerifyFailed    Kind = "VERIFY_FAILED"
+	ObjectCorrupt   Kind = "OBJECT_CORRUPT"
+	UploadClockSkew Kind = "UPLOAD_CLOCK_SKEW"
+	LocalUnreadable Kind = "LOCAL_UNREADABLE"
+	DrillFailed     Kind = "DRILL_FAILED"
+	DrillRefused    Kind = "DRILL_REFUSED"
 )
 
 // Produced lists the scopes some evaluator produces in this phase. HealthOf
-// never reports UNKNOWN for a scope that is not produced (chain.objects and
-// verify arrive with the phase 3 Verifier).
+// never reports UNKNOWN for a scope that is not produced. ScopeVerify and
+// ScopeChainObjects stay false: the phase 3 worker reports through the
+// finding sink, and marking verify produced would make every managed kind
+// in that scope UNKNOWN until a pass sets the scope complete.
 var Produced = map[Scope]bool{ScopeChainLocal: true, ScopeTaskState: true, ScopeSignals: true, ScopeStore: true}

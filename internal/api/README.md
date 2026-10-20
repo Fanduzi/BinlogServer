@@ -9,6 +9,8 @@
 | `health_degraded_test.go` | 打开的 CRITICAL finding（含未能持久化的）使 `/api/health` 返回 503 degraded，`/healthz` 不受影响 |
 | `findings.go` | `GET /api/tasks/{id}/findings` 与 `GET /api/findings`（ADR 0009 结论汇的读取面） |
 | `metrics_findings.go` | 结论汇指标：`binlog_server_finding_open` 始终至少一条序列，另有 reported/sink_errors/sink_pending/store_active |
+| `metrics_verify.go` | 阶段 3 巡检指标：`binlog_server_task_last_verified_timestamp`、`binlog_server_verify_bytes_total`、`binlog_server_verify_pass_incomplete`，以及 unverifiable、digest backfill、size unverifiable、deferred。演练关着时不打演练成功时间 |
+| `verifier_api_test.go` | 工人发现缺本地文件或坏对象后，`GET /api/tasks/{id}/findings` 返回该 finding，`/api/health` degraded，`/metrics` 带巡检序列 |
 | `auth_status_test.go` | 鉴权失败状态码回归测试（一律 401） |
 | `rate_limiter.go` | 基于 IP 的令牌桶限流器 |
 | `metrics_prometheus.go` | `/metrics` 采集与输出：一次 scrape 只读一份 `ListClusterObservation`，失败 5xx，不在 Collect 里再读一遍后记日志并吐空计数。`upload_retry` 计数包含后台对已封存失败文件的补传。`binlog_server_retention_blocked_files{task_id}` 是 runner 最近一次成功保留清理仍留下的过期未上传封存文件数，清理掉之后变为 0。`binlog_server_recovery_breaks{task_id}` 是该任务保留链的缺口数。`binlog_server_recovery_earliest_age_seconds{task_id}` 是最早可恢复事件距现在的秒数。`binlog_server_source_switchovers{task_id,outcome}` 按 `source_chain` 计：`continued` 是继续复制的切换数（相同的相邻事件只算一次），`stopped` 是仍未解决的停止数，任务恢复运行后回到 0；读到的任务两个序列都有 |

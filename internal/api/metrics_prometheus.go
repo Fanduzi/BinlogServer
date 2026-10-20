@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers (continued switches, and stops the task still sits on, each move counted once); a store list error answers 200 with metric_source_up{_cluster,task_list} 0 and no task series instead of 5xx
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers (continued switches, and stops the task still sits on, each move counted once), plus the phase 3 verifier gauges when a verifier is attached; a store list error answers 200 with metric_source_up{_cluster,task_list} 0 and no task series instead of 5xx
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -358,6 +358,9 @@ func newMetricsHandler(taskSvc taskService) http.Handler {
 		registry.MustRegister(precollect(collector))
 		if source, ok := taskSvc.(findingMetricsSource); ok {
 			registry.MustRegister(newFindingCollector(source, r.Context()))
+		}
+		if source, ok := taskSvc.(verifyMetricsSource); ok {
+			registry.MustRegister(newVerifyCollector(source))
 		}
 		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
 	})

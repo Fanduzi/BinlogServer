@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30); verify.every_sec, verify.budget_bytes_per_sec, verify.rotation_periods, verify.recent_share_percent (1–100, 0 rejected), verify.pass_deadline_sec, verify.pass_max_bytes, verify.object_recent_sec, verify.drill_dsn, verify.drill_every_sec and verify.drill_check_sql for the phase 3 verifier
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"binlog_server/internal/assurance"
 
 	"github.com/spf13/viper"
 )
@@ -60,6 +62,8 @@ type Config struct {
 	Meta MetaConfig
 	// Health is the ADR 0009 phase 2 evaluator (P2-3).
 	Health HealthConfig
+	// Verify is the ADR 0009 phase 3 verifier.
+	Verify VerifyConfig
 	// Tracing 是 OpenTelemetry tracing 配置（默认关闭）。
 	Tracing TracingConfig
 	// Standalone is the no-meta_dsn task record (ADR 0010).
@@ -173,6 +177,21 @@ type HealthConfig struct {
 	ObjectListLimit       int
 }
 
+// VerifyConfig is the phase 3 verifier (design 0009-phase3 §9).
+// DrillDSN empty leaves the restore drill off. The worker does not dial it.
+type VerifyConfig struct {
+	EverySec           int
+	BudgetBytesPerSec  int64
+	RotationPeriods    int
+	RecentSharePercent int
+	PassDeadlineSec    int
+	PassMaxBytes       int64
+	ObjectRecentSec    int
+	DrillDSN           string
+	DrillEverySec      int
+	DrillCheckSQL      string
+}
+
 // StandaloneConfig configures the encrypted standalone task record
 // (ADR 0010, #385). The key itself is never read from YAML: it comes from
 // BINLOG_SERVER_TASK_KEY or the key file named here.
@@ -279,6 +298,16 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("health.object_list_interval_sec", 300)
 	v.SetDefault("health.object_list_limit", 10000)
 	v.SetDefault("upload.grace_sec", 900)
+	v.SetDefault("verify.every_sec", 86400)
+	v.SetDefault("verify.budget_bytes_per_sec", 4<<20)
+	v.SetDefault("verify.rotation_periods", 20)
+	v.SetDefault("verify.recent_share_percent", 25)
+	v.SetDefault("verify.pass_deadline_sec", 0)
+	v.SetDefault("verify.pass_max_bytes", 0)
+	v.SetDefault("verify.object_recent_sec", 86400)
+	v.SetDefault("verify.drill_dsn", "")
+	v.SetDefault("verify.drill_every_sec", 604800)
+	v.SetDefault("verify.drill_check_sql", "")
 	v.SetDefault("meta.timeout.write_sec", 5)
 	v.SetDefault("meta.timeout.lease_sec", 2)
 	v.SetDefault("meta.timeout.upload_sec", 30)
@@ -452,6 +481,18 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			ObjectListIntervalSec:          getInt(&loadErr, v, "health.object_list_interval_sec", "health_object_list_interval_sec"),
 			ObjectListLimit:                getInt(&loadErr, v, "health.object_list_limit", "health_object_list_limit"),
 		},
+		Verify: VerifyConfig{
+			EverySec:           getInt(&loadErr, v, "verify.every_sec", "verify_every_sec"),
+			BudgetBytesPerSec:  int64(getInt(&loadErr, v, "verify.budget_bytes_per_sec", "verify_budget_bytes_per_sec")),
+			RotationPeriods:    getInt(&loadErr, v, "verify.rotation_periods", "verify_rotation_periods"),
+			RecentSharePercent: getInt(&loadErr, v, "verify.recent_share_percent", "verify_recent_share_percent"),
+			PassDeadlineSec:    getInt(&loadErr, v, "verify.pass_deadline_sec", "verify_pass_deadline_sec"),
+			PassMaxBytes:       int64(getInt(&loadErr, v, "verify.pass_max_bytes", "verify_pass_max_bytes")),
+			ObjectRecentSec:    getInt(&loadErr, v, "verify.object_recent_sec", "verify_object_recent_sec"),
+			DrillDSN:           getString(v, decryptor, "verify.drill_dsn", "verify_drill_dsn"),
+			DrillEverySec:      getInt(&loadErr, v, "verify.drill_every_sec", "verify_drill_every_sec"),
+			DrillCheckSQL:      getString(v, decryptor, "verify.drill_check_sql", "verify_drill_check_sql"),
+		},
 		Standalone: StandaloneConfig{
 			TaskRecords:         strings.ToLower(strings.TrimSpace(v.GetString("standalone.task_records"))),
 			TaskKeyFile:         strings.TrimSpace(v.GetString("standalone.task_key_file")),
@@ -480,6 +521,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		return Config{}, err
 	}
 	if err := validateHealthConfig(cfg.Health); err != nil {
+		return Config{}, err
+	}
+	if err := validateVerifyConfig(cfg.Verify); err != nil {
 		return Config{}, err
 	}
 	if err := validateStandaloneConfig(cfg.Standalone); err != nil {
@@ -743,6 +787,7 @@ func warnSensitivePlaintextInConfig(v *viper.Viper) {
 		"upload.secret_key",
 		"api.auth.bearer_token",
 		"api.auth.api_key",
+		"verify.drill_dsn",
 	}
 	// AutomaticEnv expands ${ENV} before GetString, so a file token looks like
 	// the secret itself. Read the file again with env expansion off.
@@ -882,6 +927,36 @@ func validateStandaloneConfig(c StandaloneConfig) error {
 	default:
 		return fmt.Errorf("standalone.task_records must be on or off, got %q", c.TaskRecords)
 	}
+}
+
+// validateVerifyConfig checks the phase 3 verifier keys. recent_share_percent
+// rejects 0 here; CheckRecentSharePercent itself treats 0 as the default.
+func validateVerifyConfig(v VerifyConfig) error {
+	if v.EverySec <= 0 {
+		return fmt.Errorf("verify.every_sec must be positive, got %d", v.EverySec)
+	}
+	if v.BudgetBytesPerSec < 0 {
+		return fmt.Errorf("verify.budget_bytes_per_sec must not be negative, got %d", v.BudgetBytesPerSec)
+	}
+	if v.RotationPeriods < 0 {
+		return fmt.Errorf("verify.rotation_periods must not be negative, got %d", v.RotationPeriods)
+	}
+	if v.RecentSharePercent == 0 || assurance.CheckRecentSharePercent(v.RecentSharePercent) != nil {
+		return fmt.Errorf("verify.recent_share_percent must be 1–100, got %d", v.RecentSharePercent)
+	}
+	if v.PassDeadlineSec < 0 {
+		return fmt.Errorf("verify.pass_deadline_sec must not be negative, got %d", v.PassDeadlineSec)
+	}
+	if v.PassMaxBytes < 0 {
+		return fmt.Errorf("verify.pass_max_bytes must not be negative, got %d", v.PassMaxBytes)
+	}
+	if v.ObjectRecentSec < 0 {
+		return fmt.Errorf("verify.object_recent_sec must not be negative, got %d", v.ObjectRecentSec)
+	}
+	if v.DrillEverySec < 0 {
+		return fmt.Errorf("verify.drill_every_sec must not be negative, got %d", v.DrillEverySec)
+	}
+	return nil
 }
 
 // validateHealthConfig checks the P2-3 evaluator keys.

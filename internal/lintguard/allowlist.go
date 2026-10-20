@@ -32,6 +32,7 @@ var allowlist = map[string]Allowed{
 	"internal/tasks/legacy_failback.go:syncDir:blank-call":                                 {1, "best-effort directory fsync; some filesystems reject fsync on a directory"},
 	"internal/tasks/rehash.go:Rehasher.Run:log-only":                                       {1, "the rehasher steps again on the next tick; a mismatch it finds is written by the evaluator, not here"},
 	"internal/tasks/rehash.go:Rehasher.advance:log-only":                                   {1, "an unsaved rehash cursor only restarts the cross-task walk from an older point"},
+	"internal/tasks/verifier.go:Verifier.save:log-only":                                    {1, "an unsaved .verify.json only makes the next pass re-read segments it already read; open findings stay in the finding store"},
 	"internal/tasks/rehash_linux.go:dropPageCache:blank-call":                              {1, "best-effort fadvise hint; the hash result does not depend on it"},
 	"internal/tasks/rehash_linux.go:setIdleIOPriority:blank-call":                          {1, "best-effort ioprio hint; the token-bucket budget still bounds the rehasher"},
 	"internal/tasks/legacy_failback.go:withDiskSealFacts:log-only":                         {1, "same as withSealFacts: a missing ledger line only makes the rewritten segment unavailable to the rehasher (its size guard already skips the old line)"},

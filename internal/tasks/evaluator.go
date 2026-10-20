@@ -305,7 +305,7 @@ func (e *Evaluator) adoptEarlySignals() {
 		e.s.unadoptedOpen = nil
 		e.s.mu.Unlock()
 		for id := range handed {
-			b.resolve(id, findingTaskUnadopted, "")
+			b.resolve(id, findingTaskUnadopted, "", "")
 			e.MarkDirty(id, ReasonStartup)
 		}
 	}
@@ -995,7 +995,7 @@ func (e *Evaluator) afterApply(ts []health.Transition) {
 			continue
 		}
 		if e.separateLegacyStore() {
-			b.resolve(t.TaskID, FindingKind(t.Kind), t.Subject)
+			b.resolve(t.TaskID, FindingKind(t.Kind), t.Subject, "")
 		}
 		b.forget(t.TaskID, FindingKind(t.Kind), t.Subject)
 	}

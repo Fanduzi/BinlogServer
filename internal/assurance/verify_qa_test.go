@@ -1,3 +1,8 @@
+// Package assurance provides module-level functionality for assurance.
+// input: pass state fed back the way the worker does (last_verified_at, ReadMark, open findings with severity and detail), catalog rows, a temp directory and an in-memory object store
+// output: proof that a backlog sorts as never verified, that LOCAL_UNREADABLE escalates and closes across passes, that collapse and split keep severity and detail, that a future uploaded_at within tolerance is not a change, and that a dangling symlink on a pending segment is LOCAL_MISSING
+// pos: QA r5 follow-ups for the phase 3 verifier (docs/design/0009-phase3-verifier.md §5.2, §5.3, §6.2)
+// note: if this file changes, update this header and module README.md.
 package assurance
 
 import (
@@ -10,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -435,7 +441,8 @@ func TestVerify_LocalUnreadableHysteresis(t *testing.T) {
 // TestVerify_LocalUnreadableTaskLevel is QA r5 P2-2: when every stat in the
 // task fails with the same error the pass reports one task-level
 // LOCAL_UNREADABLE (empty Subject), which covers the per-file ones and is
-// not closed as a removed row; it escalates like a file's and closes after
+// not closed as a removed row. An open per-file failure that is not
+// recovering makes that task-level finding start CRITICAL; it closes after
 // two passes in which the files stat again.
 func TestVerify_LocalUnreadableTaskLevel(t *testing.T) {
 	f := live(t)
@@ -464,7 +471,9 @@ func TestVerify_LocalUnreadableTaskLevel(t *testing.T) {
 			un = append(un, fd)
 		}
 	}
-	if len(un) != 1 || un[0].Subject != "" || un[0].Severity != SeverityWarning || len(rep.Closed) != 1 || rep.Closed[0].Reason != ReasonUnreadableTask {
+	// The planted per-file finding is already a failure (not recovering), so
+	// the task-level one starts CRITICAL instead of dropping to WARNING.
+	if len(un) != 1 || un[0].Subject != "" || un[0].Severity != SeverityCritical || len(rep.Closed) != 1 || rep.Closed[0].Reason != ReasonUnreadableTask {
 		t.Fatalf("findings %+v closed %+v", rep.Findings, rep.Closed)
 	}
 	pass(1)
@@ -520,5 +529,270 @@ func TestTierOf_NotVerifiedSinceItsLastChange(t *testing.T) {
 		if p.stale(s) != s.order.IsZero() {
 			t.Fatalf("%s: stale %v, order %v", tc.name, p.stale(s), s.order)
 		}
+	}
+}
+
+func withStatPath(t *testing.T, stat func(string) (os.FileInfo, error)) {
+	t.Helper()
+	prev := statPath
+	statPath = stat
+	t.Cleanup(func() { statPath = prev })
+}
+
+func statPathErr(path string, err error) error {
+	return &os.PathError{Op: "stat", Path: path, Err: err}
+}
+
+// pendingStatRows is four not-uploaded sealed names whose files are one byte.
+// A successful stat with Size 2 is a size mismatch, so it does not parse.
+func pendingStatRows(t *testing.T) (string, []VerifyRow) {
+	t.Helper()
+	dir := t.TempDir()
+	var rows []VerifyRow
+	for i := 1; i <= 4; i++ {
+		name := fmt.Sprintf("mysql-bin.%06d", i)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, VerifyRow{Name: name, Sealed: true, Size: 2, UploadState: "PENDING", SealedAt: testNow.Add(-48 * time.Hour)})
+	}
+	return dir, rows
+}
+
+func statByName(fail map[string]error) func(string) (os.FileInfo, error) {
+	return func(path string) (os.FileInfo, error) {
+		if err, ok := fail[filepath.Base(path)]; ok {
+			return nil, statPathErr(path, err)
+		}
+		return os.Stat(path)
+	}
+}
+
+// TestVerify_LocalUnreadableCollapseKeepsSeverity is QA r5 P3-1: switching
+// between per-file and task-level LOCAL_UNREADABLE keeps the severity (and,
+// on a split, the detail). A sole-copy CRITICAL must not come back as
+// WARNING for one pass, and a split must not leave the task-level finding
+// open beside new WARNINGs.
+func TestVerify_LocalUnreadableCollapseKeepsSeverity(t *testing.T) {
+	dir, rows := pendingStatRows(t)
+	names := []string{rows[0].Name, rows[1].Name, rows[2].Name, rows[3].Name}
+	eloop := map[string]error{}
+	for _, n := range names {
+		eloop[n] = syscall.ELOOP
+	}
+	three := map[string]error{}
+	for _, n := range names[:3] {
+		three[n] = syscall.ELOOP
+	}
+	z := newPassState()
+	pass := func(i int, fail map[string]error) Report {
+		withStatPath(t, statByName(fail))
+		rep := mustVerify(t, dir, rows, nil, nil, z.opt(Options{Now: testNow.Add(time.Duration(i) * time.Hour), CatalogComplete: true}))
+		z.feed(rep)
+		return rep
+	}
+	openUnreadable := func() []Finding {
+		var out []Finding
+		for _, f := range z.open {
+			if f.Kind == KindLocalUnreadable {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	rep := pass(0, eloop)
+	if got := openUnreadable(); len(got) != 1 || got[0].Subject != "" || got[0].Severity != SeverityWarning {
+		t.Fatalf("first collapse: %+v findings %+v", got, rep.Findings)
+	}
+	pass(1, eloop)
+	if fd, ok := z.finding(KindLocalUnreadable, ""); !ok || fd.Severity != SeverityCritical {
+		t.Fatalf("second collapse: %+v %v", fd, ok)
+	}
+	rep = pass(2, three)
+	if len(rep.Closed) != 1 || rep.Closed[0].Reason != ReasonSplit || rep.Closed[0].Finding.Subject != "" {
+		t.Fatalf("split close: %+v", rep.Closed)
+	}
+	got := openUnreadable()
+	if len(got) != 3 {
+		t.Fatalf("split open: %+v", got)
+	}
+	for _, f := range got {
+		if f.Subject == "" || f.Severity != SeverityCritical || f.Detail != DetailUnreadable {
+			t.Fatalf("split finding: %+v", f)
+		}
+	}
+	rep = pass(3, eloop)
+	if fd, ok := z.finding(KindLocalUnreadable, ""); !ok || fd.Severity != SeverityCritical {
+		t.Fatalf("collapse again: %+v %v", fd, ok)
+	}
+	if len(openUnreadable()) != 1 {
+		t.Fatalf("per-file still open: %+v", openUnreadable())
+	}
+	for _, c := range rep.Closed {
+		if c.Finding.Kind == KindLocalUnreadable && c.Finding.Subject != "" && c.Reason != ReasonUnreadableTask {
+			t.Fatalf("per-file close: %+v", c)
+		}
+	}
+	rep = pass(4, three)
+	got = openUnreadable()
+	if len(got) != 3 {
+		t.Fatalf("second split: %+v", got)
+	}
+	for _, f := range got {
+		if f.Severity != SeverityCritical || f.Detail != DetailUnreadable {
+			t.Fatalf("second split finding: %+v", f)
+		}
+	}
+	_ = rep
+}
+
+// TestVerify_PartialStatFailureDoesNotCollapse kills H06: three of four
+// stats failing the same way stay per-file. Collapsing when one file still
+// stats would hide which names failed.
+func TestVerify_PartialStatFailureDoesNotCollapse(t *testing.T) {
+	dir, rows := pendingStatRows(t)
+	fail := map[string]error{}
+	for _, row := range rows[:3] {
+		fail[row.Name] = syscall.ELOOP
+	}
+	withStatPath(t, statByName(fail))
+	rep := mustVerify(t, dir, rows, nil, nil, Options{Now: testNow})
+	if hasFinding(rep.Findings, KindLocalUnreadable, "") {
+		t.Fatalf("collapsed a partial failure: %+v", rep.Findings)
+	}
+	for _, row := range rows[:3] {
+		if !hasFinding(rep.Findings, KindLocalUnreadable, row.Name) {
+			t.Fatalf("missing %s: %+v", row.Name, rep.Findings)
+		}
+	}
+	if hasFinding(rep.Findings, KindLocalUnreadable, rows[3].Name) {
+		t.Fatalf("healthy name reported: %+v", rep.Findings)
+	}
+}
+
+// TestVerify_MixedStatErrorsDoNotCollapse kills H07: two errno values are
+// not one task-level finding.
+func TestVerify_MixedStatErrorsDoNotCollapse(t *testing.T) {
+	dir, rows := pendingStatRows(t)
+	fail := map[string]error{
+		rows[0].Name: syscall.ELOOP, rows[1].Name: syscall.ELOOP,
+		rows[2].Name: syscall.EACCES, rows[3].Name: syscall.EACCES,
+	}
+	withStatPath(t, statByName(fail))
+	rep := mustVerify(t, dir, rows, nil, nil, Options{Now: testNow})
+	if hasFinding(rep.Findings, KindLocalUnreadable, "") {
+		t.Fatalf("collapsed mixed errno: %+v", rep.Findings)
+	}
+	for _, row := range rows {
+		if !hasFinding(rep.Findings, KindLocalUnreadable, row.Name) {
+			t.Fatalf("missing %s: %+v", row.Name, rep.Findings)
+		}
+	}
+}
+
+// TestVerify_DanglingSymlinkPendingIsMissingLocal kills H08: a directory
+// entry that stat cannot follow (ENOENT) is absent. A pending segment with
+// no other copy is LOCAL_MISSING, not a stat error and not LOCAL_UNREADABLE.
+func TestVerify_DanglingSymlinkPendingIsMissingLocal(t *testing.T) {
+	dir := t.TempDir()
+	name := "mysql-bin.000001"
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+	row := VerifyRow{Name: name, Sealed: true, UploadState: "PENDING", SealedAt: testNow.Add(-48 * time.Hour)}
+	rep := mustVerify(t, dir, []VerifyRow{row}, nil, nil, Options{Now: testNow, CatalogComplete: true})
+	if rep.Coverage[name].Local.Method != MethodMissing {
+		t.Fatalf("local %+v", rep.Coverage[name].Local)
+	}
+	if !hasFinding(rep.Findings, KindLocalMissing, name) || hasFinding(rep.Findings, KindLocalUnreadable, name) || hasFinding(rep.Findings, KindLocalUnreadable, "") {
+		t.Fatalf("findings %+v", rep.Findings)
+	}
+}
+
+// TestVerify_FutureUploadedAtWithinToleranceIsNotAChange is QA r5 P3 and
+// kills H23: uploaded_at up to an hour in the future is not a change and
+// not UPLOAD_CLOCK_SKEW, so a corrupt object stays unread until that time
+// passes. Past the hour it is clock skew immediately and is hashed once
+// the timestamp is no longer in the future. A row whose uploaded_at is
+// already past is hashed on the first pass.
+func TestVerify_FutureUploadedAtWithinToleranceIsNotAChange(t *testing.T) {
+	body, sum := qaBody(32, 7)
+	bad := append([]byte(nil), body...)
+	bad[0] ^= 1
+	objs := &memObjects{obj: map[string][]byte{}}
+	sealed := testNow.Add(-48 * time.Hour)
+	row := func(name string, uploaded time.Time) VerifyRow {
+		key := "t/" + name
+		objs.obj[key] = append([]byte(nil), bad...)
+		return VerifyRow{Name: name, Sealed: true, Size: 32, SHA256: sum, UploadState: "UPLOADED", ObjectKey: key,
+			UploadedAt: uploaded, SealedAt: sealed, RetentionRemoved: true}
+	}
+	control := row("mysql-bin.000010", testNow.Add(-time.Hour))
+	for _, tc := range []struct {
+		name     string
+		uploaded time.Time
+		hashAt   time.Duration
+		skew     bool
+	}{
+		{"plus 30m", testNow.Add(30 * time.Minute), 30 * time.Minute, false},
+		{"plus 59m", testNow.Add(59 * time.Minute), time.Hour, false},
+		{"plus 61m", testNow.Add(61 * time.Minute), 70 * time.Minute, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			future := row("mysql-bin.000011", tc.uploaded)
+			rows := []VerifyRow{control, future}
+			last := testNow.Add(-time.Hour) // after slot start, after sealed
+			z := newPassState()
+			z.last[future.Name] = last
+			var hashedAt time.Duration = -1
+			for _, step := range []time.Duration{0, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 40 * time.Minute, 50 * time.Minute, time.Hour, 70 * time.Minute} {
+				rep := mustVerify(t, t.TempDir(), rows, objs, nil, z.opt(Options{Now: testNow.Add(step), RotationPeriods: 1}))
+				z.feed(rep)
+				if step == 0 && rep.Coverage[control.Name].Object.Method != MethodHashed {
+					t.Fatalf("control at 0: %s", rep.Coverage[control.Name].Object.Method)
+				}
+				got := rep.Coverage[future.Name].Object.Method
+				skewed := hasFinding(rep.Findings, KindUploadClockSkew, future.Name)
+				if step == 0 && tc.skew != skewed {
+					t.Fatalf("skew at 0: %v, want %v; findings %+v", skewed, tc.skew, rep.Findings)
+				}
+				if step == 0 && !tc.skew && skewed {
+					t.Fatal("clock skew inside the tolerance")
+				}
+				if got == MethodHashed {
+					if hashedAt < 0 {
+						hashedAt = step
+					}
+					if !hasFinding(rep.Findings, KindObjectCorrupt, future.Name) {
+						t.Fatalf("hashed at %s without OBJECT_CORRUPT: %+v", step, rep.Findings)
+					}
+				}
+			}
+			if hashedAt != tc.hashAt {
+				t.Fatalf("hashed at %s, want %s", hashedAt, tc.hashAt)
+			}
+		})
+	}
+}
+
+// TestVerify_NamedStaleRowUsesOrderNotLastVerified kills H19: a named row
+// that is stale (order empty) still takes its slot. Using last_verified_at,
+// which is inside the slot, would skip it.
+func TestVerify_NamedStaleRowUsesOrderNotLastVerified(t *testing.T) {
+	body, sum := qaBody(32, 9)
+	bad := append([]byte(nil), body...)
+	bad[3] ^= 1
+	name := "mysql-bin.000020"
+	key := "t/" + name
+	objs := &memObjects{obj: map[string][]byte{key: bad}}
+	slot := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	row := VerifyRow{Name: name, Sealed: true, Size: 32, SHA256: sum, UploadState: "UPLOADED", ObjectKey: key,
+		UploadedAt: slot.Add(2 * time.Hour), SealedAt: slot.Add(-24 * time.Hour), RetentionRemoved: true}
+	opt := Options{Now: testNow, RotationPeriods: 1, CatalogComplete: true,
+		LastVerified: map[string]time.Time{name: slot.Add(time.Hour)},
+		OpenFindings: []Finding{{Kind: KindObjectMissing, Subject: name, Severity: SeverityCritical, Detail: "uploaded object is missing"}}}
+	rep := mustVerify(t, t.TempDir(), []VerifyRow{row}, objs, nil, opt)
+	if rep.Coverage[name].Object.Method != MethodHashed || !hasFinding(rep.Findings, KindObjectCorrupt, name) {
+		t.Fatalf("coverage %+v findings %+v", rep.Coverage[name].Object, rep.Findings)
 	}
 }
