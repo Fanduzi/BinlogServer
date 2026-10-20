@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 and this process's session-kill deadline returned as healthstore.ErrLockWait and 1213 returned for the next sweep; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait) and 1213 retried once; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"binlog_server/internal/health"
@@ -45,6 +46,144 @@ func healthErr(err error) error {
 func isLockWaitError(err error) bool {
 	var me *mysqlDriver.MySQLError
 	return errors.As(err, &me) && me.Number == 1205
+}
+
+func isDeadlock(err error) bool {
+	var me *mysqlDriver.MySQLError
+	return errors.As(err, &me) && me.Number == 1213
+}
+
+// lockWaitError is a 1205, or a session deadline that fired while this
+// connection was waiting on task_leases or task_health.
+type lockWaitError struct{ error }
+
+func (e lockWaitError) Unwrap() error { return e.error }
+
+func classifyHealthErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var lw lockWaitError
+	if errors.As(err, &lw) || isLockWaitError(err) {
+		return fmt.Errorf("%w: %v", healthstore.ErrLockWait, err)
+	}
+	return healthErr(err)
+}
+
+const insertHealthRowSQL = "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', UTC_TIMESTAMP(6))"
+
+// insertHealthRow creates the health row before the applying transaction so
+// concurrent writers queue on its record lock. The statement is inside the
+// session-kill bound, and a 1205 here is a lock stall.
+func (s *MySQLTaskStore) insertHealthRow(ctx context.Context, taskID string) error {
+	if s.sessionBound() == 0 {
+		_, err := s.db.ExecContext(ctx, insertHealthRowSQL, taskID)
+		return classifyLock(err, false)
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var thread int64
+	if err := conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&thread); err != nil {
+		return err
+	}
+	return s.withLock(thread, func() error {
+		_, err := conn.ExecContext(ctx, insertHealthRowSQL, taskID)
+		return err
+	})
+}
+
+func classifyLock(err error, waiting bool) error {
+	if err == nil || errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if isLockWaitError(err) || (errors.Is(err, context.DeadlineExceeded) && waiting) {
+		return lockWaitError{err}
+	}
+	return err
+}
+
+func (s *MySQLTaskStore) withLock(thread int64, fn func() error) (err error) {
+	var stop func() bool
+	if thread > 0 {
+		stop = s.armLockWatch(thread)
+		defer func() { stop() }()
+	}
+	err = fn()
+	saw := false
+	if stop != nil {
+		saw = stop()
+	}
+	if errors.Is(err, context.DeadlineExceeded) && !saw && thread > 0 {
+		saw = s.sawLockWait(thread)
+	}
+	return classifyLock(err, saw)
+}
+
+// armLockWatch polls for a lock wait while a lock statement runs. The
+// returned function stops the poll and reports whether a wait was visible.
+func (s *MySQLTaskStore) armLockWatch(thread int64) func() bool {
+	var seen atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if s.sawLockWait(thread) {
+					seen.Store(true)
+					return
+				}
+			}
+		}
+	}()
+	return func() bool {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+		return seen.Load()
+	}
+}
+
+func (s *MySQLTaskStore) sawLockWait(thread int64) bool {
+	if s == nil || thread <= 0 {
+		return false
+	}
+	if s.lockWaitSeen != nil {
+		return s.lockWaitSeen(thread)
+	}
+	return s.connectionWaiting(thread)
+}
+
+// connectionWaiting is true when this server thread is in a lock wait.
+// performance_schema.data_lock_waits is preferred; information_schema.innodb_trx
+// covers servers without that view, including MariaDB.
+func (s *MySQLTaskStore) connectionWaiting(thread int64) bool {
+	if s == nil || s.db == nil || thread <= 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM performance_schema.data_lock_waits w
+JOIN performance_schema.threads th ON th.THREAD_ID = w.REQUESTING_THREAD_ID
+WHERE th.PROCESSLIST_ID = ?`, thread).Scan(&n)
+	if err == nil && n > 0 {
+		return true
+	}
+	err = s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM information_schema.innodb_trx
+WHERE trx_mysql_thread_id = ? AND trx_state = 'LOCK WAIT'`, thread).Scan(&n)
+	return err == nil && n > 0
 }
 
 func (s *MySQLTaskStore) useAlias(ctx context.Context) (bool, error) {
@@ -82,11 +221,6 @@ func (s *MySQLTaskStore) ApplyTransitions(ctx context.Context, taskID string, fe
 	if err != nil {
 		return healthstore.Applied{}, err
 	}
-	// The row exists before the transaction so concurrent writers queue on
-	// its record lock instead of deadlocking on an insert gap lock.
-	if _, err := s.db.ExecContext(ctx, "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', UTC_TIMESTAMP(6))", taskID); err != nil {
-		return healthstore.Applied{}, healthErr(err)
-	}
 	parent := ctx
 	bound := s.sessionBound()
 	if bound > 0 {
@@ -94,11 +228,21 @@ func (s *MySQLTaskStore) ApplyTransitions(ctx context.Context, taskID string, fe
 		ctx, cancel = context.WithTimeout(context.WithoutCancel(parent), bound)
 		defer cancel()
 	}
-	out, err := s.applyOnce(ctx, taskID, fence, ts, h, alias)
-	if isLockWaitError(err) || (errors.Is(err, context.DeadlineExceeded) && parent.Err() == nil) {
-		return out, fmt.Errorf("%w: %v", healthstore.ErrLockWait, err)
+	var out healthstore.Applied
+	for attempt := 0; ; attempt++ {
+		if err = s.insertHealthRow(ctx, taskID); err != nil {
+			if isDeadlock(err) && attempt == 0 {
+				continue
+			}
+			break
+		}
+		out, err = s.applyOnce(ctx, taskID, fence, ts, h, alias)
+		if isDeadlock(err) && attempt == 0 {
+			continue
+		}
+		break
 	}
-	return out, healthErr(err)
+	return out, classifyHealthErr(err)
 }
 
 func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence health.Fence, ts []health.Transition, h health.TaskHealth, alias bool) (out healthstore.Applied, err error) {
@@ -111,10 +255,18 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 			_ = tx.Rollback()
 		}
 	}()
+	var thread int64
+	if s.sessionBound() > 0 {
+		if err = tx.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&thread); err != nil {
+			return out, err
+		}
+	}
 	var lease *healthstore.Lease
 	if fence.Mode != health.FenceStandalone {
 		var l healthstore.Lease
-		err = tx.QueryRowContext(ctx, "SELECT owner_worker_id, epoch, lease_expire_at <= NOW(6) FROM task_leases WHERE task_id = ? FOR UPDATE", taskID).Scan(&l.Owner, &l.Epoch, &l.Expired)
+		err = s.withLock(thread, func() error {
+			return tx.QueryRowContext(ctx, "SELECT owner_worker_id, epoch, lease_expire_at <= NOW(6) FROM task_leases WHERE task_id = ? FOR UPDATE", taskID).Scan(&l.Owner, &l.Epoch, &l.Expired)
+		})
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			err = nil
@@ -127,8 +279,11 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 	var stored healthstore.Stored
 	var mode string
 	var gen int64
-	if err = tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation, chain_owner FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
-		Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen, &stored.ChainOwner); err != nil {
+	err = s.withLock(thread, func() error {
+		return tx.QueryRowContext(ctx, "SELECT fence_mode, fence_epoch, fence_node, fence_instance, generation, chain_owner FROM task_health WHERE task_id = ? FOR UPDATE", taskID).
+			Scan(&mode, &stored.Epoch, &stored.Node, &stored.Instance, &gen, &stored.ChainOwner)
+	})
+	if err != nil {
 		return out, err
 	}
 	stored.Mode = health.FenceMode(mode)
