@@ -129,7 +129,7 @@ func finish(before State, e Event, now time.Time, p partial) Result {
 	if res.Decision == DecisionApplied {
 		noteOwnership(&next, now)
 		next.NoProgress = noProgressFact(next, now)
-		next.Trace = append(next.Trace, traceSnap(e, next, now))
+		next.trace = append(next.trace, traceSnap(e, next, now))
 		var opened, closed []Finding
 		derived := derive(next)
 		opened, closed = diffFindings(before.Findings, derived)
@@ -214,7 +214,7 @@ func (s State) clone() State {
 			n.RegistrationLive[k] = v
 		}
 	}
-	n.Trace = append([]TraceEvent(nil), s.Trace...)
+	n.trace = append([]TraceEvent(nil), s.trace...)
 	return n
 }
 

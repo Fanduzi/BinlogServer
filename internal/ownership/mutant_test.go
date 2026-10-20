@@ -197,6 +197,35 @@ func TestMutantF11_SecondLockIsSameNodeInsideLockWait(t *testing.T) {
 	}
 }
 
+func TestMutantG01_SweepAtExactExpireIsNotLive(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s.Params.LeaseTTL = s.Params.NoProgressAfter + 30*time.Second
+	renewAt := t0.Add(10 * time.Second)
+	s = renewLease(t, s, renewAt)
+	expire := s.Lease.ExpireAt
+	if !expire.After(t0.Add(s.Params.NoProgressAfter)) || !expire.Equal(renewAt.Add(s.Params.LeaseTTL)) {
+		t.Fatalf("expire %s", expire.Sub(t0))
+	}
+	swept := applied(t, s, Event{Kind: EventSweep, Node: "n1"}, expire)
+	if findOpen(swept, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS opened on the sweep at exactly expire_at")
+	}
+	if v := Check(swept, expire); hasInv(v, "7") {
+		t.Fatalf("checker reported invariant 7 at exactly expire_at: %+v", v)
+	}
+}
+
+func TestRefusalDelayOverflowDoesNotShrink(t *testing.T) {
+	claim := time.Duration(int64(1)<<44 + 1)
+	got := RefusalDelay(21, claim, 600*time.Second)
+	if got != 600*time.Second {
+		t.Fatalf("RefusalDelay(21, ~4.9h, 600s) = %s, want 10m0s", got)
+	}
+	if RefusalDelay(9, 2*time.Second, 600*time.Second) != 512*time.Second {
+		t.Fatalf("shift 8 = %s, want 8m32s", RefusalDelay(9, 2*time.Second, 600*time.Second))
+	}
+}
+
 func TestMutantF12_NoProgressBoundaryIsStrict(t *testing.T) {
 	s := boot(t, "n1", t0, nil)
 	renewed := t0.Add(s.Params.NoProgressAfter - s.Params.LeaseTTL + time.Second)

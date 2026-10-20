@@ -219,17 +219,17 @@ func failedSpecClaimable(s State) bool {
 	}
 }
 
-// ProgressOverdue is invariant 7's clock, replayed from State.Trace.
+// ProgressOverdue is invariant 7's clock, replayed from the applied-event trace.
 // Step appends that log and never reads it back. This function does not read
 // ProgressAt, UnownedSince, or NoProgress, and it does not call LeaseLive or
 // LegalRetry. An empty trace is not overdue: a silent lease expiry does not
 // start the unowned clock, and a later Check only extends a clock an applied
 // event already started.
 func ProgressOverdue(s State, now time.Time) bool {
-	if len(s.Trace) == 0 {
+	if len(s.trace) == 0 {
 		return false
 	}
-	anchor, unownedSince, snap := replayProgress(s.Trace)
+	anchor, unownedSince, snap := replayProgress(s.trace)
 	p := s.Params.fill()
 	live := snap.Present && snap.Owner != "" && snap.Expire.After(now)
 	legal := snap.Phase == PhaseRetryBackoff && !snap.Deleted && snap.RetryAttempt < RetryBudget && !snap.RetryUntil.IsZero() && snap.RetryUntil.After(now)

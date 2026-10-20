@@ -1,6 +1,6 @@
 # internal/ownership/mutants
 
-把评审用的源码变异重新打到 `internal/ownership` 上，确认测试会失败。表里的编号是 M01 起的一串，和评审评论里的 F/G 编号不是同一套。
+把评审用的源码变异重新打到 `internal/ownership` 上，确认测试会失败。表里有 M01 起的一串，也有评审评论里的 G01、H02、H03、H05。没有单独标成等价的一档。
 
 ## Files
 
