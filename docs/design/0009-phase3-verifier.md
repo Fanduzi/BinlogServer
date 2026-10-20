@@ -380,7 +380,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | `TestVerify_ObjectSizeMismatch`、`TestVerify_LocalMismatchesAgainstTheCatalogRow` | 截断对象、目录行大小 +1、本地大小、SHA-256、首尾位点、GTID 文本各自报对 kind 和覆盖 |
 | `TestVerify_WorkThatDoesNotFitIsSkippedNotBlocking` | 队头放不下的一份记 `SKIPPED`，后面放得下的照样付（杀 R09） |
 | `TestVerify_PendingBacklogDoesNotStarveTheRotation` | QA r3 F1 的 pending_local_hog_3（C=47292、F=0、S=15764、k=13、N=20，写回）：推出 q=2、P=13；200 轮里每段前 13 轮内首查，最坏间隔 20 ≤ 33 |
-| `TestVerify_NotUploadedRowIsRecentUntilParsed`、`TestVerify_NamedSegmentGetsNoRecentWork` | 未上传的行解析过就离开最近档，`sealed_at` 改动、上传都让它回来（杀 Y10）；被开着的 finding 点名的段不进最近档 |
+| `TestVerify_NotUploadedRowIsRecentUntilParsed`、`TestVerify_NamedSegmentGetsNoRecentWork` | 未上传的行解析过就离开最近档，`sealed_at` 改动、上传都让它回来（杀 Y10，和 `TestTierOf_NotVerifiedSinceItsLastChange` 一起）；被开着的 finding 点名的段不进最近档 |
 | `TestVerify_NewUploadIsReadAtMostTwiceInItsFirstDay` | 每小时一轮、预算充足、48 小时每小时上传一段：每段头 24 轮最多读 2 次（最近档一次，槽最多一次） |
 | `TestVerify_RecentShareCapsTheRecentTier` | 最近档超过份额的落到下一档：轮换开着时进第 4 档、排在验过的过期段前面（QA r5 P2-1），轮换关掉时进末档、用剩下的预算（杀 Z08）；份额累计、封顶在 `C − F − S`；只有预算和截止时间时按它们算 `C`；份额 −1、101 被拒绝 |
 | `TestVerify_BucketRecoveryHashesTheBacklog` | QA r4 G1：30 段 `UPLOAD_FAILED` 待上传时解析过、桶恢复后一起上传，`C = 630560`、每天一轮、写回：第一天付满 `C`，全部对象两天内第一次哈希 |
@@ -415,7 +415,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | `TestVerify_ObjectOneByteShortIsError` | 正文只短一个字节也是 `ERROR`（杀 W17） |
 | `TestVerify_LocalUnreadableClosesWhenSoleCopyGone`、`TestVerify_LocalUnreadableClosesOnSizeMismatch` | 未上传段的文件没了：`LOCAL_MISSING`，`LOCAL_UNREADABLE` 关（杀 W21）；文件又能 stat、大小不符：`VERIFY_FAILED` 接手，`LOCAL_UNREADABLE` 关（QA r5 P3，杀 V12） |
 | `TestVerify_LocalUnreadableHysteresis` | QA r5 P2-2，按工人写回的样子（`passState`：severity 和 detail 覆盖）：未上传段失败、失败 → WARNING、CRITICAL，干净读不降级，连续两次干净读才关；隔一轮一错一直 WARNING、只开一次、不中途关；已上传段永远 WARNING（杀 V04–V08、V11） |
-| `TestVerify_LocalUnreadableTaskLevel` | QA r5 P2-2：目录不能搜索、每个 stat 都 `EACCES`：只报一条 subject 为空的，关掉逐文件的那条，完整目录下不按「row removed」关；第二轮 CRITICAL；恢复后两轮才关（杀 V09、V10、V13–V15） |
+| `TestVerify_LocalUnreadableTaskLevel` | QA r5 P2-2：目录不能搜索、每个 stat 都 `EACCES`：只报一条 subject 为空的，关掉逐文件的那条，完整目录下不按「row removed」关；第二轮 CRITICAL；恢复后两轮才关（杀 V10、V13–V15；V09 由 `TestVerify_LocalReadErrorIsLocalUnreadable` 的单文件 stat 失败打死） |
 | `TestRotation_BoundsTheGap` | 2000 个名字一年：每个名字恰好每 20 天一次；`WorstGap` = 轮换 × 周期，不取整；任意轮换长度每轮恰好一次 |
 | `TestVerify_ConcurrentPassesShareOneBudget` | 两轮并发共用一只预算：各自的 `Bytes` 等于单轮，累计等于两轮之和（`-race` 下跑） |
 | `TestApplySealedUpload_FillsEmptySHA256`、`TestApplySealedUpload_FillKeepsStoredEventTimes` | 行上没有摘要时补上；已有摘要和已有事件时间不被盖掉 |

@@ -413,7 +413,7 @@ var mutants = []mutant{
 	{id: "V04", desc: "an open LOCAL_UNREADABLE is held after one read this period", file: verify,
 		old: "\tif p.unreadableOpen(s.row.Name) {\n\t\treturn false\n\t}\n", new: ""},
 	{id: "V05", desc: "LOCAL_UNREADABLE escalates on any failure while open", file: verify,
-		old: "prev.Severity == SeverityCritical || prev.Detail != DetailUnreadableRecovering", new: "true"},
+		old: "prev.Severity == SeverityCritical || prev.Detail != DetailUnreadableRecovering", new: "prev.Severity != \"\" || true"},
 	{id: "V06", desc: "CRITICAL LOCAL_UNREADABLE drops back to WARNING after a clean read", file: verify,
 		old: "(prev.Severity == SeverityCritical || prev.Detail != DetailUnreadableRecovering)", new: "(prev.Detail != DetailUnreadableRecovering)"},
 	{id: "V07", desc: "uploaded rows escalate LOCAL_UNREADABLE too", file: verify,

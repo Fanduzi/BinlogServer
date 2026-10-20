@@ -484,3 +484,41 @@ func TestVerify_LocalUnreadableTaskLevel(t *testing.T) {
 		t.Fatalf("second clean pass: closed %+v", rep.Closed)
 	}
 }
+
+// TestTierOf_NotVerifiedSinceItsLastChange: where a row that is not
+// content-verified since its last change lands. A not-uploaded row is
+// recent whatever its age (Y10); an upload is recent only inside the window;
+// past it, the rotation decides between the overdue tier (empty order) and
+// the tail. A row verified since its last change is in none.
+func TestTierOf_NotVerifiedSinceItsLastChange(t *testing.T) {
+	old := testNow.Add(-48 * time.Hour)
+	pending := VerifyRow{Name: "mysql-bin.000001", Sealed: true, UploadState: "PENDING", SealedAt: old}
+	upOld := VerifyRow{Name: "mysql-bin.000001", Sealed: true, UploadState: "UPLOADED", ObjectKey: "k", SealedAt: old, UploadedAt: old}
+	upNew := upOld
+	upNew.UploadedAt = testNow.Add(-time.Hour)
+	for _, tc := range []struct {
+		name     string
+		row      VerifyRow
+		last     time.Time
+		rotation int
+		want     int
+	}{
+		{"pending, never verified, rotation off", pending, time.Time{}, -1, tierRecent},
+		{"pending, sealed after the last verify", pending, old.Add(-time.Hour), -1, tierRecent},
+		{"pending, verified since", pending, old.Add(time.Hour), -1, tierNone},
+		{"recent upload, verified before it", upNew, old.Add(time.Hour), -1, tierRecent},
+		{"old upload, never verified, rotation off", upOld, time.Time{}, -1, tierTail},
+		{"old upload, verified before it, rotation off", upOld, old.Add(-time.Hour), -1, tierTail},
+		{"old upload, verified after it, rotation off", upOld, old.Add(time.Hour), -1, tierNone},
+		{"old upload, verified before it, rotation on", upOld, old.Add(-time.Hour), 1000, tierOverdue},
+	} {
+		p := &pass{now: testNow, opt: Options{Now: testNow, RotationPeriods: tc.rotation}}
+		s := &seg{row: tc.row, last: tc.last}
+		if got := p.tierOf(s); got != tc.want {
+			t.Fatalf("%s: tier %d, want %d", tc.name, got, tc.want)
+		}
+		if p.stale(s) != s.order.IsZero() {
+			t.Fatalf("%s: stale %v, order %v", tc.name, p.stale(s), s.order)
+		}
+	}
+}
