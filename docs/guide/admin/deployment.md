@@ -191,6 +191,8 @@ export META_DSN="binlog_meta:YourPassword@tcp(10.0.0.20:3306)/binlog_server_meta
 ./migrate up --dsn "$META_DSN" --path ./migrations
 ```
 
+元数据库账号授 `ALL ON binlog_server_meta.*`（库名按上面的库）。不要为了卡住检测再授 `PROCESS`。行锁会在 `innodb_lock_wait_timeout` 上以服务器错误 1205 结束，客户端期限比它长，所以没有 `PROCESS` 也能打开 `META_LOCK_STALLED`。`PROCESS` 或 `performance_schema` 只用来在日志里写上挡住的会话。没有这些权限时，启动打一条警告，`/api/health` 带 `lock_detail=reduced`，状态仍按有没有 CRITICAL 结论决定，这个字段本身不算 degraded。
+
 #### 4.2.2 Control Plane 节点配置 (`control-plane.yaml`)
 
 Control Plane 专职提供 API、Swagger 与 Web 控制台，不拉取复制流：
