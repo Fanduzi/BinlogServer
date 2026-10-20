@@ -602,7 +602,9 @@ func TestVerify_FutureUploadedAtIsClockSkew(t *testing.T) {
 	rows := verifyRows(t, f, testNow.Add(10*365*24*time.Hour))[:1]
 	name := rows[0].Name
 	objs := objectsFromDir(t, f)
-	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1})
+	// Verified once already: a skewed uploaded_at is not a change, so the
+	// row is not read again (a never-verified row is read once, from the tail).
+	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1, LastVerified: verifiedAt(rows, testNow.Add(-48*time.Hour))})
 	got, ok := findingOf(rep.Findings, KindUploadClockSkew, name)
 	if !ok || got.Severity != SeverityWarning {
 		t.Fatalf("findings %+v", rep.Findings)

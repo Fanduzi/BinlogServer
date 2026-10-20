@@ -377,7 +377,9 @@ func TestVerify_OldObjectOutsideRotationIsNotRead(t *testing.T) {
 	rows = rows[:1]
 	objs := objectsFromDir(t, f)
 	flipStored(t, objs, rows[0].ObjectKey)
-	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1})
+	// Verified after its upload: with the rotation off nothing reads it again.
+	lv := verifiedAt(rows, testNow.Add(-47*time.Hour))
+	rep := mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1, LastVerified: lv})
 	if hasFinding(rep.Findings, KindObjectCorrupt, rows[0].Name) {
 		t.Fatalf("old object was judged by body: %+v", rep.Findings)
 	}
@@ -391,7 +393,7 @@ func TestVerify_OldObjectOutsideRotationIsNotRead(t *testing.T) {
 		t.Fatal("a HEAD-only object advanced last_verified_at")
 	}
 	delete(objs.obj, rows[0].ObjectKey)
-	rep = mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1})
+	rep = mustVerify(t, f.dir, rows, objs, nil, Options{Now: testNow, RotationPeriods: -1, LastVerified: lv})
 	if !hasFinding(rep.Findings, KindObjectMissing, rows[0].Name) {
 		t.Fatalf("HEAD miss not reported: %+v", rep.Findings)
 	}
@@ -460,7 +462,7 @@ func TestVerify_ChargesEveryReadToTheBudget(t *testing.T) {
 
 	// Nothing scheduled: stat and HEAD only, nothing charged.
 	budget = NewByteBudget(1 << 30)
-	rep = mustVerify(t, f.dir, noPos, objectsFromDir(t, f), nil, Options{Now: testNow.Add(72 * time.Hour), RotationPeriods: -1, Budget: budget})
+	rep = mustVerify(t, f.dir, noPos, objectsFromDir(t, f), nil, Options{Now: testNow.Add(72 * time.Hour), RotationPeriods: -1, Budget: budget, LastVerified: verifiedAt(noPos, testNow.Add(time.Hour))})
 	if rep.Bytes != 0 || budget.Charged() != 0 {
 		t.Fatalf("stat and HEAD only: bytes=%d charged=%d", rep.Bytes, budget.Charged())
 	}

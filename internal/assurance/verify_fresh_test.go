@@ -207,8 +207,11 @@ func TestVerify_NewUploadIsReadAtMostTwiceInItsFirstDay(t *testing.T) {
 
 // TestVerify_RecentShareCapsTheRecentTier: recent work past the share falls
 // to its fallback tier, or to the tail tier that is paid only from what the
-// pass has left, so older work still gets paid for and spare budget is not
-// left unused (QA r4 G1). R is also capped at C − F − S (QA r4 G2).
+// pass has left, so spare budget is not left unused (QA r4 G1). R is also
+// capped at C − F − S (QA r4 G2). With the rotation on, a recent object past
+// the share has never been verified since its upload, so it is overdue and
+// sorts ahead of verified overdue work (QA r5 P2-1); with the rotation off it
+// goes to the tail.
 func TestVerify_RecentShareCapsTheRecentTier(t *testing.T) {
 	dir, rows, objs := simFixture(t, 0, []int{1000, 1000, 1000})
 	old, a, b := rows[0].Name, rows[1].Name, rows[2].Name
@@ -218,42 +221,40 @@ func TestVerify_RecentShareCapsTheRecentTier(t *testing.T) {
 	}
 	rows[1].UploadedAt, rows[2].UploadedAt = now.Add(-time.Hour), now.Add(-time.Hour)
 	lv := map[string]time.Time{old: now.Add(-100 * DefaultPeriod), a: now.Add(-2 * time.Hour), b: now.Add(-2 * time.Hour)}
+	overdue := tierReason(tierOverdue)
 	// R = min(500, 2000-0-1000) = 500: neither recent object fits the
-	// share. The overdue object is paid first, then a from the tail with the
-	// 1000 bytes left; b does not fit what is left.
+	// share. Both are overdue and never verified since their upload, so they
+	// sort ahead of the verified overdue object, which is deferred.
 	rep := mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 2000, LastVerified: lv})
-	tail := func(what string, rep Report, wantB Check) {
-		t.Helper()
-		if c := rep.Coverage[old].Object; c.Method != MethodHashed {
-			t.Fatalf("%s: overdue starved by the recent tier: %+v", what, c)
-		}
-		if c := rep.Coverage[a].Object; c.Method != MethodHashed || c.Reason != reasonTail {
-			t.Fatalf("%s: a past the share: %+v", what, c)
-		}
-		if c := rep.Coverage[b].Object; c.Method != wantB.Method || c.Reason != wantB.Reason {
-			t.Fatalf("%s: b past the share: %+v", what, c)
-		}
+	if ca, cb, co := rep.Coverage[a].Object, rep.Coverage[b].Object, rep.Coverage[old].Object; ca.Method != MethodHashed || ca.Reason != overdue || cb.Method != MethodHashed || cb.Reason != overdue || co.Method != MethodSkipped || co.Reason != reasonDeferredBudget {
+		t.Fatalf("share 25 of 2000: a %+v b %+v old %+v", ca, cb, co)
 	}
-	tail("share 25 of 2000", rep, Check{Method: MethodSkipped, Reason: reasonDeferredBudget})
+	// Rotation off, C = 1500: R = min(375, 500) = 375. a is paid from the
+	// tail; b does not fit what is left; old was verified after its upload
+	// and is not read.
+	rep = mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 1500, LastVerified: lv, RotationPeriods: -1})
+	if ca, cb, co := rep.Coverage[a].Object, rep.Coverage[b].Object, rep.Coverage[old].Object; ca.Method != MethodHashed || ca.Reason != reasonTail || cb.Method != MethodSkipped || cb.Reason != reasonDeferredBudget || co.Method != MethodHead {
+		t.Fatalf("rotation off: a %+v b %+v old %+v", ca, cb, co)
+	}
 	// share 100 and 50: R = min(2000 or 1000, 1000) = 1000, so a is recent,
-	// b goes to the tail, and the overdue object still gets its 1000.
+	// b is overdue and paid ahead of the verified overdue object.
 	for _, pct := range []int{100, 50} {
 		rep = mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 2000, LastVerified: lv, RecentSharePercent: pct})
 		ca, cb, co := rep.Coverage[a].Object, rep.Coverage[b].Object, rep.Coverage[old].Object
-		if ca.Method != MethodHashed || ca.Reason != tierReason(tierRecent) || cb.Method != MethodSkipped || cb.Reason != reasonDeferredBudget || co.Method != MethodHashed {
+		if ca.Method != MethodHashed || ca.Reason != tierReason(tierRecent) || cb.Method != MethodHashed || cb.Reason != overdue || co.Method != MethodSkipped || co.Reason != reasonDeferredBudget {
 			t.Fatalf("share %d: a %+v b %+v old %+v", pct, ca, cb, co)
 		}
 	}
-	// Spare budget: the tail is paid. With no PassBytes, C is what the
-	// budget can pay before the deadline: 2000 tokens + 2000 B/s x 2s, so R
-	// is about 1500 bytes: a is recent, b is paid from the tail.
+	// Spare budget. With no PassBytes, C is what the budget can pay before
+	// the deadline: 2000 tokens + 2000 B/s x 2s, so R is about 1500 bytes:
+	// a is recent, b and old are overdue, and all three are paid.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	rep, err := Verify(ctx, dir, rows, objs, nil, Options{Now: now, Budget: NewByteBudget(2000), LastVerified: lv})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ca, cb, co := rep.Coverage[a].Object, rep.Coverage[b].Object, rep.Coverage[old].Object; ca.Method != MethodHashed || ca.Reason != tierReason(tierRecent) || cb.Method != MethodHashed || cb.Reason != reasonTail || co.Method != MethodHashed {
+	if ca, cb, co := rep.Coverage[a].Object, rep.Coverage[b].Object, rep.Coverage[old].Object; ca.Method != MethodHashed || ca.Reason != tierReason(tierRecent) || cb.Method != MethodHashed || cb.Reason != overdue || co.Method != MethodHashed {
 		t.Fatalf("budget and deadline: a %+v b %+v old %+v", ca, cb, co)
 	}
 	for _, pct := range []int{-1, 101} {

@@ -99,16 +99,18 @@ func TestVerify_RecentShareLeavesRoomForOneSegment(t *testing.T) {
 	lv := map[string]time.Time{old: now.Add(-100 * DefaultPeriod), a: now.Add(-2 * time.Hour), b: now.Add(-2 * time.Hour)}
 	// C = 2S at 100%: R = min(2000, 1000) = 1000.
 	rep := mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 2000, LastVerified: lv, RecentSharePercent: 100})
-	if c := rep.Coverage[old].Object; c.Method != MethodHashed {
-		t.Fatalf("overdue starved at a 100%% share: %+v", c)
+	// a is recent; the other 1000 goes to the overdue tier, where b (never
+	// verified since its upload) sorts ahead of old.
+	if ca, cb := rep.Coverage[a].Object, rep.Coverage[b].Object; ca.Reason != tierReason(tierRecent) || cb.Method != MethodHashed || cb.Reason != tierReason(tierOverdue) {
+		t.Fatalf("overdue starved at a 100%% share: a %+v b %+v", ca, cb)
 	}
-	// C = S: R = min(250, 0) = 0, the recent tier is off; the overdue
-	// segment is paid and the recent ones wait in the tail.
+	// C = S: R = min(250, 0) = 0, the recent tier is off; the overdue tier
+	// gets its one segment: a, never verified since its upload.
 	rep = mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 1000, LastVerified: lv})
-	if c := rep.Coverage[old].Object; c.Method != MethodHashed {
+	if c := rep.Coverage[a].Object; c.Method != MethodHashed || c.Reason != tierReason(tierOverdue) {
 		t.Fatalf("C = S: overdue not paid: %+v", c)
 	}
-	for _, n := range []string{a, b} {
+	for _, n := range []string{b, old} {
 		if c := rep.Coverage[n].Object; c.Method != MethodSkipped || c.Reason != reasonDeferredBudget {
 			t.Fatalf("C = S: %s %+v", n, c)
 		}
@@ -180,9 +182,9 @@ func withOpenLocal(t *testing.T, open func(path string) (io.ReadCloser, error)) 
 }
 
 // TestVerify_LocalReadErrorIsLocalUnreadable is QA r4 G3 (and Z16): a read
-// error in the middle of a local parse is ERROR and LOCAL_UNREADABLE (WARNING,
-// CRITICAL when the row is not uploaded), never VERIFY_FAILED; the next
-// clean read closes it. A file that cannot be opened at all is the same, and
+// error in the middle of a local parse is ERROR and LOCAL_UNREADABLE
+// (WARNING the first time, QA r5 P2-2), never VERIFY_FAILED; two clean reads
+// in a row close it. A file that cannot be opened at all is the same, and
 // the finding closes once the file is gone.
 func TestVerify_LocalReadErrorIsLocalUnreadable(t *testing.T) {
 	for _, state := range []string{"UPLOADED", "PENDING"} {
@@ -193,7 +195,6 @@ func TestVerify_LocalReadErrorIsLocalUnreadable(t *testing.T) {
 			want := SeverityWarning
 			if state != "UPLOADED" {
 				rows[0].UploadState, rows[0].ObjectKey = state, ""
-				want = SeverityCritical
 			}
 			objs := objectsFromDir2(t, f, rows)
 			withOpenLocal(t, func(path string) (io.ReadCloser, error) {
@@ -215,6 +216,14 @@ func TestVerify_LocalReadErrorIsLocalUnreadable(t *testing.T) {
 			openLocal = func(path string) (io.ReadCloser, error) { return os.Open(path) }
 			// The open finding forces the re-read: no slot, no recent tier.
 			opt.OpenFindings, opt.RotationPeriods = rep.Findings, -1
+			rep = mustVerify(t, f.dir, rows, objs, nil, opt)
+			fd, ok = findingOf(rep.Findings, KindLocalUnreadable, n)
+			if c := rep.Coverage[n].Local; c.Method != MethodParsed || len(rep.Closed) != 0 || !ok || fd.Detail != DetailUnreadableRecovering || fd.Severity != want {
+				t.Fatalf("first clean read: local %+v closed %+v findings %+v", c, rep.Closed, rep.Findings)
+			}
+			// Read in this period already, but an open LOCAL_UNREADABLE is
+			// not held: the second clean read closes it.
+			opt.OpenFindings, opt.LastRead = rep.Findings, rep.Read
 			rep = mustVerify(t, f.dir, rows, objs, nil, opt)
 			if c := rep.Coverage[n].Local; c.Method != MethodParsed || len(rep.Closed) != 1 || rep.Closed[0].Reason != ReasonLocalRead {
 				t.Fatalf("clean read: local %+v closed %+v findings %+v", c, rep.Closed, rep.Findings)

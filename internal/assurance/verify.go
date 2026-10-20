@@ -36,8 +36,8 @@ const (
 	// DefaultRecentSharePercent is the most of one pass's capacity the
 	// recent tier may spend (design §5.3), further capped so the slot and
 	// overdue tiers keep room for one segment. Recent work past it falls back
-	// to the rotation slot, the overdue tier, or the tail tier that is paid
-	// only from what the pass has left.
+	// to the rotation slot or the overdue tier, or with the rotation off to
+	// the tail tier that is paid only from what the pass has left.
 	DefaultRecentSharePercent = 25
 	// DefaultPeriod is the length of one rotation slot.
 	DefaultPeriod = 24 * time.Hour
@@ -67,8 +67,13 @@ const (
 	KindUploadClockSkew = "UPLOAD_CLOCK_SKEW"
 	// KindLocalUnreadable is a local segment file that exists but could not
 	// be read (stat, open or read failed with something other than not-found,
-	// a deadline or a cancel). WARNING, CRITICAL when the row is not uploaded
-	// and the file is the only copy.
+	// a deadline or a cancel). WARNING. When the row is not uploaded (the
+	// file is the only copy) it becomes CRITICAL on the second consecutive
+	// failure and stays CRITICAL until it closes. It closes after two clean
+	// reads in a row (DetailUnreadableRecovering marks the first), so an error
+	// every other pass does not open and close it each time. When every stat
+	// in the task fails with the same error the pass reports one finding with
+	// an empty Subject (the task) instead of one per file.
 	KindLocalUnreadable = "LOCAL_UNREADABLE"
 
 	SeverityCritical = "CRITICAL"
@@ -78,23 +83,38 @@ const (
 
 // Closing reasons (Closure.Reason).
 const (
-	ReasonParsed         = "local parsed and matches the catalog row"
-	ReasonLocalRemoved   = "local removed; object matches catalog"
-	ReasonObjectParsed   = "local removed; object parses and matches the catalog row"
-	ReasonLocalPresent   = "local file present"
-	ReasonObjectFound    = "object found by HEAD"
-	ReasonSizeCompared   = "object size compared"
-	ReasonHashed         = "object hashed and matches"
-	ReasonClockChecked   = "uploaded_at compared with now"
-	ReasonChainChecked   = "chain checked"
-	ReasonRowRemoved     = "row removed"
-	ReasonLocalRead      = "local file read to the end"
-	ReasonLocalGone      = "local file no longer present"
+	ReasonParsed       = "local parsed and matches the catalog row"
+	ReasonLocalRemoved = "local removed; object matches catalog"
+	ReasonObjectParsed = "local removed; object parses and matches the catalog row"
+	ReasonLocalPresent = "local file present"
+	ReasonObjectFound  = "object found by HEAD"
+	ReasonSizeCompared = "object size compared"
+	ReasonHashed       = "object hashed and matches"
+	ReasonClockChecked = "uploaded_at compared with now"
+	ReasonChainChecked = "chain checked"
+	ReasonRowRemoved   = "row removed"
+	ReasonLocalRead    = "local file read to the end"
+	ReasonLocalGone    = "local file no longer present"
+	// ReasonLocalSizeDiffers closes LOCAL_UNREADABLE when the file stats
+	// again but its size differs from the row: VERIFY_FAILED takes over.
+	ReasonLocalSizeDiffers = "local file readable again; its size differs from the catalog row (VERIFY_FAILED)"
+	// ReasonUnreadableTask closes a per-file LOCAL_UNREADABLE that the
+	// task-level one (empty Subject) now covers.
+	ReasonUnreadableTask = "covered by the task-level LOCAL_UNREADABLE"
+	// ReasonLocalStat closes the task-level LOCAL_UNREADABLE: a local file
+	// stats again.
+	ReasonLocalStat      = "local files stat again"
 	reasonTail           = "not verified since its last change, past the recent share or window; paid from what the pass had left"
 	reasonHeldForced     = "forced recheck already done this period and nothing changed since"
 	reasonNotScheduled   = "not scheduled for a content check this pass"
 	reasonDeferredBudget = "deferred: does not fit in what is left of this pass's budget"
 	reasonDeferredTime   = "deferred: the pass deadline ran out"
+)
+
+// LOCAL_UNREADABLE details.
+const (
+	DetailUnreadable           = "local segment file could not be read"
+	DetailUnreadableRecovering = "read cleanly once since it could not be read; closes after a second clean read"
 )
 
 // VERIFY_FAILED details. A finding on the object, the copy left once local
@@ -173,12 +193,14 @@ type Coverage struct {
 // ReadMark is what a segment looked like when a pass last read every copy
 // it scheduled. The caller feeds Report.Read back as Options.LastRead so a
 // forced segment is re-read at most once per period unless its local size,
-// local mtime or object size changed (design §6.3).
+// local mtime, object size or uploaded_at changed (design §6.3).
 type ReadMark struct {
 	At           time.Time
 	LocalSize    int64
 	LocalModTime time.Time
 	ObjectSize   int64
+	// UploadedAt is the row's uploaded_at: a same-size re-upload changes it.
+	UploadedAt time.Time
 }
 
 // ObjectStore is the object half of one pass. A missing object is os.ErrNotExist.
@@ -444,7 +466,7 @@ const (
 	tierRecent
 	tierSlot
 	tierOverdue
-	tierTail // recent work past the share whose fallback is none: leftover budget only
+	tierTail // not verified since its last change, fallback none (rotation off): leftover budget only
 	tierNone
 )
 
@@ -469,8 +491,9 @@ type seg struct {
 	localSHA string
 	last     time.Time
 	tier     int
-	demoted  bool // its recent work went past the recent share
-	held     bool // forced, but already read this period with nothing changed
+	demoted  bool      // its recent work went past the recent share
+	held     bool      // forced, but already read this period with nothing changed
+	order    time.Time // last, or zero when not verified since its last change
 }
 
 // work is one scheduled content check: a local parse or an object hash.
@@ -502,9 +525,11 @@ type pass struct {
 // the chain), then content checks from one queue in priority order: forced
 // (at most once per period with Options.LastRead), recent (not
 // content-verified since the last change; capped at min(share × C,
-// C − F − S)), rotation slot, overdue by oldest last_verified_at, and a tail
-// paid from what is left (recent overflow, and verified rows not verified
-// since an upload outside the recent window). When the budget
+// C − F − S)), rotation slot, overdue, and with the rotation off a tail
+// paid from what is left (rows not verified since their last change that
+// are not recent). Within a tier the oldest last_verified_at goes first, a
+// row not verified since its last change counting as never verified
+// (seg.order). When the budget
 // or the deadline runs out, what is left is SKIPPED and the pass ends
 // normally. Only a cancelled context returns an error.
 func Verify(ctx context.Context, dir string, rows []VerifyRow, objects ObjectStore, chain *Chain, opt Options) (rep Report, err error) {
@@ -555,7 +580,7 @@ func (p *pass) mark(segs []*seg) {
 		local := !s.parse || l == MethodParsed
 		object := !s.hash || o == MethodHashed || o == MethodUnverifiable || o == MethodMissing
 		if local && object && (l == MethodParsed || o == MethodHashed) {
-			p.rep.Read[s.row.Name] = ReadMark{At: p.now, LocalSize: s.size, LocalModTime: s.mtime, ObjectSize: s.objSize}
+			p.rep.Read[s.row.Name] = ReadMark{At: p.now, LocalSize: s.size, LocalModTime: s.mtime, ObjectSize: s.objSize, UploadedAt: s.row.UploadedAt}
 		}
 	}
 }
@@ -590,6 +615,8 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 	}
 	localClean := listed
 	timeUp := false
+	var fails []statFail
+	stats := 0
 	var segs []*seg
 	for _, row := range rows {
 		s := &seg{row: row, path: filepath.Join(dir, row.Name), last: p.opt.LastVerified[row.Name]}
@@ -604,6 +631,7 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 					Detail: "sealed segment is not UPLOADED and has no local file", Evidence: "upload_state=" + strings.TrimSpace(row.UploadState)})
 			}
 		default:
+			stats++
 			info, statErr := os.Stat(s.path)
 			if statErr != nil {
 				s.cov.Local = Check{Method: MethodError, Reason: statErr.Error()}
@@ -611,7 +639,7 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 				if rep.LocalErr == nil {
 					rep.LocalErr = statErr
 				}
-				p.unreadable(row, statErr)
+				fails = append(fails, statFail{row, statErr})
 				break
 			}
 			s.mtime = info.ModTime()
@@ -674,6 +702,7 @@ func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 		segs = append(segs, s)
 		rep.Coverage[row.Name] = s.cov
 	}
+	p.statFails(fails, stats)
 	return segs, localClean, nil
 }
 
@@ -714,6 +743,10 @@ func (p *pass) head(s *seg, noDigest bool) error {
 
 // tierOf places a segment in the content queue (design §5.2).
 func (p *pass) tierOf(s *seg) int {
+	s.order = s.last
+	if p.stale(s) {
+		s.order = time.Time{}
+	}
 	if p.forcedBy(s) {
 		if p.readThisPeriod(s) {
 			s.held = true
@@ -727,23 +760,42 @@ func (p *pass) tierOf(s *seg) int {
 	if p.fresh(s) {
 		return tierRecent
 	}
-	// Verified once, but not since an upload that is now outside the
-	// recent window (a backlog the recent share could not take in time):
-	// the tail, paid only from what the pass has left (QA r4 G1). A row
-	// never verified is the overdue tier's, and stays unread when the
-	// rotation is off.
-	if t := p.fallback(s); t != tierNone || s.last.IsZero() || !p.stale(s) {
+	// Not verified since its last change and not recent (recent work past
+	// the share, an upload outside the window, never verified or verified
+	// before the upload): with the rotation on that is the overdue tier
+	// (order is zero); with it off, the tail, paid only from what the pass
+	// has left (QA r4 G1), so each such row is read once (QA r5 P3).
+	if t := p.fallback(s); t != tierNone || !p.stale(s) {
 		return t
 	}
 	return tierTail
 }
 
 // readThisPeriod is a forced segment already read in this rotation period
-// (Options.LastRead) whose local size, local mtime and object size are what
-// that read saw: reading it again would read the same bytes (design §6.3).
+// (Options.LastRead) whose local size, local mtime, object size and
+// uploaded_at are what that read saw: reading it again would read the same
+// bytes (design §6.3). An open LOCAL_UNREADABLE is never held: the read is
+// its check, and it closes only after a second clean read.
 func (p *pass) readThisPeriod(s *seg) bool {
+	if p.unreadableOpen(s.row.Name) {
+		return false
+	}
 	m, ok := p.opt.LastRead[s.row.Name]
-	return ok && !m.At.Before(slotStart(p.now, p.opt.Period)) && m.LocalSize == s.size && m.LocalModTime.Equal(s.mtime) && m.ObjectSize == s.objSize
+	return ok && !m.At.Before(slotStart(p.now, p.opt.Period)) && m.LocalSize == s.size && m.LocalModTime.Equal(s.mtime) && m.ObjectSize == s.objSize && m.UploadedAt.Equal(s.row.UploadedAt)
+}
+
+func (p *pass) unreadableOpen(name string) bool {
+	_, ok := p.prevUnreadable(name)
+	return ok
+}
+
+func (p *pass) prevUnreadable(subject string) (Finding, bool) {
+	for _, f := range p.opt.OpenFindings {
+		if f.Kind == KindLocalUnreadable && f.Subject == subject {
+			return f, true
+		}
+	}
+	return Finding{}, false
 }
 
 // fresh is the recent tier: a row not content-verified since its last
@@ -756,32 +808,37 @@ func (p *pass) fresh(s *seg) bool {
 }
 
 // stale is a row not content-verified since its last change: sealed_at or
-// uploaded_at, whichever is later and not clock skew.
+// uploaded_at, whichever is later and not in the future. A future time is
+// not a change yet: beyond ClockSkewTolerance it is UPLOAD_CLOCK_SKEW, and
+// within it a read now would leave last_verified_at before it, so every pass
+// would read the segment again until the time passed (QA r5 P3). It counts
+// once it is no longer in the future.
 func (p *pass) stale(s *seg) bool {
 	row := s.row
 	var changed time.Time
-	if !ClockSkewed(row.SealedAt, p.now) {
+	if !row.SealedAt.After(p.now) {
 		changed = row.SealedAt
 	}
-	if !ClockSkewed(row.UploadedAt, p.now) && row.UploadedAt.After(changed) {
+	if !row.UploadedAt.After(p.now) && row.UploadedAt.After(changed) {
 		changed = row.UploadedAt
 	}
 	return s.last.IsZero() || s.last.Before(changed)
 }
 
 // fallback is the tier below recent: the rotation slot once per slot
-// period, then overdue by last_verified_at. A segment an open finding names
-// gets the slot only.
+// period, then overdue. Both use order, so a row not verified since its
+// last change counts as never verified (QA r5 P2-1). A segment an open
+// finding names gets the slot only.
 func (p *pass) fallback(s *seg) int {
 	row := s.row
-	if InRotation(row.Name, p.now, p.opt.Period, p.opt.RotationPeriods) && s.last.Before(slotStart(p.now, p.opt.Period)) {
+	if InRotation(row.Name, p.now, p.opt.Period, p.opt.RotationPeriods) && s.order.Before(slotStart(p.now, p.opt.Period)) {
 		return tierSlot
 	}
 	if p.named[row.Name] {
 		return tierNone
 	}
 	n := rotationLength(p.opt.RotationPeriods)
-	if n > 0 && (s.last.IsZero() || p.now.Sub(s.last) >= time.Duration(n)*periodOf(p.opt.Period)) {
+	if n > 0 && (s.order.IsZero() || p.now.Sub(s.order) >= time.Duration(n)*periodOf(p.opt.Period)) {
 		return tierOverdue
 	}
 	return tierNone
@@ -825,8 +882,8 @@ func before(a, b work) bool {
 	if a.tier != b.tier {
 		return a.tier < b.tier
 	}
-	if !a.s.last.Equal(b.s.last) {
-		return a.s.last.Before(b.s.last)
+	if !a.s.order.Equal(b.s.order) {
+		return a.s.order.Before(b.s.order)
 	}
 	if a.s.row.Name != b.s.row.Name {
 		return a.s.row.Name < b.s.row.Name
@@ -987,12 +1044,75 @@ func (p *pass) unreadable(row VerifyRow, err error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
+	p.rep.Findings = append(p.rep.Findings, p.unreadableFinding(row.Name, !uploaded(row), err.Error()))
+}
+
+// unreadableFinding is WARNING, or CRITICAL when soleCopy and the previous
+// attempt failed too (the open finding is not recovering) or it is CRITICAL
+// already: two failures in a row escalate, and once CRITICAL it stays so
+// until it closes.
+func (p *pass) unreadableFinding(subject string, soleCopy bool, evidence string) Finding {
 	sev := SeverityWarning
-	if !uploaded(row) {
+	if prev, ok := p.prevUnreadable(subject); ok && soleCopy && (prev.Severity == SeverityCritical || prev.Detail != DetailUnreadableRecovering) {
 		sev = SeverityCritical
 	}
-	p.rep.Findings = append(p.rep.Findings, Finding{Kind: KindLocalUnreadable, Subject: row.Name, Severity: sev,
-		Detail: "local segment file could not be read", Evidence: err.Error()})
+	return Finding{Kind: KindLocalUnreadable, Subject: subject, Severity: sev, Detail: DetailUnreadable, Evidence: evidence}
+}
+
+type statFail struct {
+	row VerifyRow
+	err error
+}
+
+// statFails reports the stat errors of one pass: one task-level
+// LOCAL_UNREADABLE (empty Subject) when every stat failed with the same
+// error, else one per file.
+func (p *pass) statFails(fails []statFail, stats int) {
+	var real []statFail
+	for _, f := range fails {
+		if !errors.Is(f.err, os.ErrNotExist) {
+			real = append(real, f)
+		}
+	}
+	if len(real) > 1 && len(real) == stats {
+		same, sole := true, false
+		for _, f := range real {
+			same = same && cause(f.err) == cause(real[0].err)
+			sole = sole || !uploaded(f.row)
+		}
+		if same {
+			p.rep.Findings = append(p.rep.Findings, p.unreadableFinding("", sole,
+				fmt.Sprintf("stat failed for all %d local files: %s; first: %v", len(real), cause(real[0].err), real[0].err)))
+			return
+		}
+	}
+	for _, f := range real {
+		p.unreadable(f.row, f.err)
+	}
+}
+
+// cause is an error without the path it names.
+func cause(err error) string {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return pe.Op + ": " + pe.Err.Error()
+	}
+	return err.Error()
+}
+
+// recovering re-reports, as DetailUnreadableRecovering, an open
+// LOCAL_UNREADABLE whose first clean read was this pass, so it stays open
+// until a second clean read in a row.
+func (rep *Report) recovering(open []Finding) {
+	for _, f := range open {
+		if f.Kind != KindLocalUnreadable || f.Detail == DetailUnreadableRecovering || reported(*rep, f.Kind, f.Subject) {
+			continue
+		}
+		if r := closes(f, *rep); r == ReasonLocalRead || r == ReasonLocalStat {
+			f.Detail = DetailUnreadableRecovering
+			rep.Findings = append(rep.Findings, f)
+		}
+	}
 }
 
 func (p *pass) parseLocal(w work) error {
@@ -1100,6 +1220,7 @@ func tierReason(tier int) string {
 // finish sorts and merges findings, totals this pass's bytes, closes what it
 // can, and derives VerifiedAt from Coverage. It runs on every return.
 func (rep *Report) finish(now time.Time, count *passCounter, open []Finding) {
+	rep.recovering(open)
 	rep.Findings = dedupe(rep.Findings)
 	rep.LocalBytes = count.local
 	rep.ObjectBytes = count.object
@@ -1177,7 +1298,7 @@ func Closures(previous []Finding, rep Report) []Closure {
 
 // closes is the per-kind detector table (design §6.2): the reason f closes, or "".
 func closes(f Finding, rep Report) string {
-	if rep.CatalogComplete && !rep.catalog[f.Subject] && rowScoped(f.Kind) {
+	if rep.CatalogComplete && f.Subject != "" && !rep.catalog[f.Subject] && rowScoped(f.Kind) {
 		return ReasonRowRemoved
 	}
 	cov, ok := rep.Coverage[f.Subject]
@@ -1222,8 +1343,22 @@ func closes(f Finding, rep Report) string {
 			return ReasonClockChecked
 		}
 	case KindLocalUnreadable:
+		if f.Subject == "" {
+			for _, c := range rep.Coverage {
+				if c.Local.Found {
+					return ReasonLocalStat
+				}
+			}
+			return ""
+		}
+		if reported(rep, KindLocalUnreadable, "") {
+			return ReasonUnreadableTask
+		}
 		if ok && cov.Local.Method == MethodParsed {
 			return ReasonLocalRead
+		}
+		if ok && cov.Local.Method == MethodStat && cov.Local.Found && reported(rep, KindVerifyFailed, f.Subject) {
+			return ReasonLocalSizeDiffers
 		}
 		if ok && (cov.Local.Method == MethodAbsent || cov.Local.Method == MethodMissing) {
 			return ReasonLocalGone
