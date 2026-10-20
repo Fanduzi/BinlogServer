@@ -41,6 +41,10 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
+// S3Uploader is the process object client. Renaming HeadObject or OpenObject
+// fails this compile, instead of the Run type assertion silently dropping it.
+var _ tasks.ObjectHeadOpener = (*upload.S3Uploader)(nil)
+
 const (
 	workerIDFileName                  = ".worker-id"
 	maxWorkerIDLength                 = 128
@@ -301,9 +305,11 @@ func (a *App) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if opener, ok := uploader.(tasks.ObjectHeadOpener); ok {
-			verifyObjects = opener
+		opener, ok := uploader.(tasks.ObjectHeadOpener)
+		if !ok {
+			return fmt.Errorf("upload is configured but the object client cannot HEAD and GET objects")
 		}
+		verifyObjects = opener
 		opts = append(opts, tasks.WithFileUploader(uploader))
 		// WithUploader is the one post-seal upload caller (ADR 0002). It writes
 		// through the runner's file metadata store and reports the upload

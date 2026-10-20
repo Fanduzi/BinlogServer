@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
 // input: the live ledger fixture, catalog rows copied from it, and in-memory object stores that fail, cancel or change between passes
-// output: proof that Coverage records what each pass checked; that Disappeared closes a finding only for a subject checked by the method that detects it; that cancel and errors leave unreached subjects unverified; that last_verified_at advances only on content checks; that open findings force a recheck; that clock skew, missing local copies and missing digests are reported; that concurrent passes share the budget safely; and that the rotation bounds the gap
+// output: proof that Coverage records what each pass checked; that Disappeared closes a finding only for a subject checked by the method that detects it; that cancel and errors leave unreached subjects unverified; that a cancelled pass leaves an unread forced file at STAT and does not close its LOCAL_UNREADABLE; that a deadline-cut pass closes nothing it did not read; that last_verified_at advances only on content checks; that open findings force a recheck; that clock skew, missing local copies and missing digests are reported; that concurrent passes share the budget safely; and that the rotation bounds the gap
 // pos: coverage-model tests for the phase 3 verifier (docs/design/0009-phase3-verifier.md §6)
 // note: if this file changes, update this header and module README.md.
 package assurance
@@ -278,6 +278,47 @@ func TestVerify_CancelLeavesUnreachedSubjectsUnverified(t *testing.T) {
 	}
 	if got := Disappeared(prev, rep); len(got) != 1 || got[0].Subject != rows[0].Name || got[0].Kind != KindObjectMissing {
 		t.Fatalf("closed %+v; only the first HEAD answered", got)
+	}
+}
+
+// TestVerify_CancelDoesNotCloseUnreadLocalUnreadable is H25. A cancelled
+// pass stats a forced file and stops before reading it, so the local stays
+// STAT with Found set and VERIFY_FAILED is not reported. That is not a read.
+// Closing LOCAL_UNREADABLE on any found STAT would drop the finding. A
+// deadline that ends the pass first defers the unread copy; that is not a
+// read either, and it closes nothing.
+func TestVerify_CancelDoesNotCloseUnreadLocalUnreadable(t *testing.T) {
+	f := live(t)
+	rows := verifyRows(t, f, testNow.Add(-48*time.Hour))[:1]
+	name := rows[0].Name
+	prev := []Finding{{Kind: KindLocalUnreadable, Subject: name, Severity: SeverityCritical, Detail: DetailUnreadable}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	heads := &cancelOnHead{memObjects: objectsFromDir(t, f), at: 1, cancel: cancel}
+	rep, err := Verify(ctx, f.dir, rows, heads, nil, Options{Now: testNow, RotationPeriods: 1, OpenFindings: prev})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled pass returned %v", err)
+	}
+	if c := rep.Coverage[name].Local; c.Method != MethodStat || !c.Found {
+		t.Fatalf("unread forced file should stay at STAT: %+v", c)
+	}
+	if hasFinding(rep.Findings, KindVerifyFailed, name) {
+		t.Fatalf("size matched; VERIFY_FAILED %+v", rep.Findings)
+	}
+	if len(rep.Closed) != 0 {
+		t.Fatalf("cancelled pass closed unread LOCAL_UNREADABLE: %+v", rep.Closed)
+	}
+
+	dead, stop := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer stop()
+	time.Sleep(time.Millisecond)
+	cut, err := Verify(dead, f.dir, rows, objectsFromDir(t, f), nil, Options{Now: testNow, RotationPeriods: 1, OpenFindings: prev})
+	if err != nil {
+		t.Fatalf("a passed deadline ends the pass: %v", err)
+	}
+	if len(cut.Closed) != 0 {
+		t.Fatalf("partial pass closed unread LOCAL_UNREADABLE: %+v coverage=%+v", cut.Closed, cut.Coverage[name])
 	}
 }
 
