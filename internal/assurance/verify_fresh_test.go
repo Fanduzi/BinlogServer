@@ -20,9 +20,11 @@ import (
 )
 
 // queueQ is design §5.3's q: what is left of C after the forced work and
-// the recent share, in whole segments of S.
+// the recent share R = min(⌊C × share⌋, max(0, C − F − S)), in whole
+// segments of S.
 func queueQ(c, f, s int64, sharePct int) int {
-	return int((c - f - c*int64(sharePct)/100) / s)
+	r := min(c*int64(sharePct)/100, max(0, c-f-s))
+	return int((c - f - r) / s)
 }
 
 // hogRows is QA r3's pending_local_hog: object-only segments of the
@@ -204,7 +206,9 @@ func TestVerify_NewUploadIsReadAtMostTwiceInItsFirstDay(t *testing.T) {
 }
 
 // TestVerify_RecentShareCapsTheRecentTier: recent work past the share falls
-// to its fallback tier, so older work still gets paid for.
+// to its fallback tier, or to the tail tier that is paid only from what the
+// pass has left, so older work still gets paid for and spare budget is not
+// left unused (QA r4 G1). R is also capped at C − F − S (QA r4 G2).
 func TestVerify_RecentShareCapsTheRecentTier(t *testing.T) {
 	dir, rows, objs := simFixture(t, 0, []int{1000, 1000, 1000})
 	old, a, b := rows[0].Name, rows[1].Name, rows[2].Name
@@ -214,36 +218,49 @@ func TestVerify_RecentShareCapsTheRecentTier(t *testing.T) {
 	}
 	rows[1].UploadedAt, rows[2].UploadedAt = now.Add(-time.Hour), now.Add(-time.Hour)
 	lv := map[string]time.Time{old: now.Add(-100 * DefaultPeriod), a: now.Add(-2 * time.Hour), b: now.Add(-2 * time.Hour)}
+	// R = min(500, 2000-0-1000) = 500: neither recent object fits the
+	// share. The overdue object is paid first, then a from the tail with the
+	// 1000 bytes left; b does not fit what is left.
 	rep := mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 2000, LastVerified: lv})
-	if rep.Coverage[old].Object.Method != MethodHashed {
-		t.Fatalf("overdue starved by the recent tier: %+v", rep.Coverage[old])
-	}
-	for _, n := range []string{a, b} {
-		if c := rep.Coverage[n].Object; c.Method != MethodSkipped || c.Reason != reasonDeferredRecent {
-			t.Fatalf("%s past the share: %+v", n, c)
-		}
-	}
-	rep = mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 2000, LastVerified: lv, RecentSharePercent: 100})
-	if rep.Coverage[a].Object.Method != MethodHashed || rep.Coverage[b].Object.Method != MethodHashed || rep.Coverage[old].Object.Method != MethodSkipped {
-		t.Fatalf("share 100: %+v", rep.Coverage)
-	}
-	// The share is cumulative: the first recent item uses it up.
-	check := func(what string, rep Report) {
+	tail := func(what string, rep Report, wantB Check) {
 		t.Helper()
-		if rep.Coverage[a].Object.Method != MethodHashed || rep.Coverage[b].Object.Reason != reasonDeferredRecent || rep.Coverage[old].Object.Method != MethodHashed {
-			t.Fatalf("%s: %+v", what, rep.Coverage)
+		if c := rep.Coverage[old].Object; c.Method != MethodHashed {
+			t.Fatalf("%s: overdue starved by the recent tier: %+v", what, c)
+		}
+		if c := rep.Coverage[a].Object; c.Method != MethodHashed || c.Reason != reasonTail {
+			t.Fatalf("%s: a past the share: %+v", what, c)
+		}
+		if c := rep.Coverage[b].Object; c.Method != wantB.Method || c.Reason != wantB.Reason {
+			t.Fatalf("%s: b past the share: %+v", what, c)
 		}
 	}
-	check("share 50 of 2000", mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 2000, LastVerified: lv, RecentSharePercent: 50}))
-	// With no PassBytes, C is what the budget can pay before the deadline:
-	// 2000 tokens + 2000 B/s x 2s, so the 25% share is about 1500 bytes.
+	tail("share 25 of 2000", rep, Check{Method: MethodSkipped, Reason: reasonDeferredBudget})
+	// share 100 and 50: R = min(2000 or 1000, 1000) = 1000, so a is recent,
+	// b goes to the tail, and the overdue object still gets its 1000.
+	for _, pct := range []int{100, 50} {
+		rep = mustVerify(t, dir, rows, objs, nil, Options{Now: now, PassBytes: 2000, LastVerified: lv, RecentSharePercent: pct})
+		ca, cb, co := rep.Coverage[a].Object, rep.Coverage[b].Object, rep.Coverage[old].Object
+		if ca.Method != MethodHashed || ca.Reason != tierReason(tierRecent) || cb.Method != MethodSkipped || cb.Reason != reasonDeferredBudget || co.Method != MethodHashed {
+			t.Fatalf("share %d: a %+v b %+v old %+v", pct, ca, cb, co)
+		}
+	}
+	// Spare budget: the tail is paid. With no PassBytes, C is what the
+	// budget can pay before the deadline: 2000 tokens + 2000 B/s x 2s, so R
+	// is about 1500 bytes: a is recent, b is paid from the tail.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	rep, err := Verify(ctx, dir, rows, objs, nil, Options{Now: now, Budget: NewByteBudget(2000), LastVerified: lv})
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("budget and deadline", rep)
+	if ca, cb, co := rep.Coverage[a].Object, rep.Coverage[b].Object, rep.Coverage[old].Object; ca.Method != MethodHashed || ca.Reason != tierReason(tierRecent) || cb.Method != MethodHashed || cb.Reason != reasonTail || co.Method != MethodHashed {
+		t.Fatalf("budget and deadline: a %+v b %+v old %+v", ca, cb, co)
+	}
+	for _, pct := range []int{-1, 101} {
+		if _, err := Verify(context.Background(), dir, rows, objs, nil, Options{Now: now, RecentSharePercent: pct}); err == nil {
+			t.Fatalf("share %d accepted", pct)
+		}
+	}
 }
 
 // TestVerify_LocalRemovedVerifyFailedNeedsTheObjectToParse is QA r3 F2: with
