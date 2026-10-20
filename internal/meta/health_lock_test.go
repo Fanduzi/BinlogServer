@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock for the health insert, the task_leases lock, and a slow health update
-// output: proof that a 1205 and a confirmed lock wait are ErrLockWait, a plain slow statement is not, and a 1213 is retried once
+// output: proof that a 1205 and a confirmed lock wait are ErrLockWait, the 1205 number stays readable, a confirmed deadline is not also a client deadline, a plain slow statement is not a stall, and a 1213 is retried once
 // pos: ADR 0011 PR-2 lock-stall classification
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -34,6 +34,13 @@ func TestApplyTransitionsInsertLockWaitIsStall(t *testing.T) {
 	_, err = store.ApplyTransitions(context.Background(), "t1", health.Fence{Mode: health.FenceStandalone, Node: "n", Instance: "i"}, nil, health.TaskHealth{TaskID: "t1"})
 	if !errors.Is(err, healthstore.ErrLockWait) {
 		t.Fatalf("insert 1205: %v, want ErrLockWait", err)
+	}
+	var me *mysqlDriver.MySQLError
+	if !errors.As(err, &me) || me.Number != 1205 {
+		t.Fatalf("insert 1205: %v, want server error 1205", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("server 1205 also matches a client deadline: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -92,6 +99,13 @@ func TestApplyTransitionsDeadlineOnLeaseLock(t *testing.T) {
 			if waiting {
 				if !errors.Is(err, healthstore.ErrLockWait) {
 					t.Fatalf("confirmed lock deadline: %v, want ErrLockWait", err)
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("confirmed lock deadline also matches a client deadline: %v", err)
+				}
+				var me *mysqlDriver.MySQLError
+				if errors.As(err, &me) {
+					t.Fatalf("confirmed lock deadline exposed mysql %d", me.Number)
 				}
 			} else if errors.Is(err, healthstore.ErrLockWait) || !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("unconfirmed deadline: %v", err)
