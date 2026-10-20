@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, the caller clock, and RefusalDelay
-// output: FairStepBound, an upper bound on fair steps until RUNNING or a declared terminal FAILED
+// output: FairStepBound, an upper bound on fair steps. NextDeadline and the window share fairDeadlines
 // pos: the RTO step ceiling in ADR 0011 §4.1(a). It is not a schedule search
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -106,72 +106,74 @@ func boundTerminal(s State, now time.Time) bool {
 	return FairTerminal(s, now)
 }
 
-// boundWindow is how far the fair scheduler can push the clock before it
-// finishes the claim set. Every deadline is folded with max, never min.
+// boundWindow is the furthest fairDeadlines instant. NextDeadline is the
+// nearest one. Both read that list; neither lists the timers again.
 func boundWindow(s State, now time.Time) (time.Duration, string) {
-	reader := ""
-	if s.Lease.Present && s.Lease.ExpireAt.After(now) && boundCanRead(s, s.Lease.Owner) {
-		reader = s.Lease.Owner
+	reader := fairReader(s, now)
+	W := time.Duration(0)
+	for _, at := range fairDeadlines(s, now, reader) {
+		W = boundExtend(W, now, at)
 	}
-	if reader == "" {
-		for _, node := range s.Nodes {
-			if boundCanRead(s, node.ID) {
-				reader = node.ID
-				break
-			}
+	return W, reader
+}
+
+// fairDeadlines is every future instant Step reacts to on a fair path.
+// NextDeadline takes the minimum. The bound takes the maximum.
+func fairDeadlines(s State, now time.Time, reader string) []time.Time {
+	s.Params = s.Params.fill()
+	var out []time.Time
+	add := func(at time.Time) {
+		if at.After(now) {
+			out = append(out, at)
 		}
 	}
-	p := s.Params.fill()
-	W := time.Duration(0)
-	// Stopped chain owner. HeartbeatAt is not refreshed. ChainOwnerGone
-	// applies one nanosecond after the effective node_gone deadline.
-	if due, ok := boundStoppedChainGone(s, now, p); ok {
-		W = boundExtend(W, now, due) // stopped chain owner
+	if due, ok := stoppedSweepDue(s, now); ok {
+		add(due) // stopped chain owner
 	}
-	// Reader refusals. The scheduler waits for the reader it picked; taking
-	// the longest eligible refusal only adds claims.
 	for _, node := range s.Nodes {
-		if !boundCanRead(s, node.ID) {
+		if !nodeReady(s, node.ID) {
 			continue
 		}
 		r, ok := s.Refusal[node.ID]
 		if !ok || r.OpenEnded {
 			continue
 		}
-		W = boundExtend(W, now, r.Until)
+		add(r.Until)
 	}
-	// Step clears a held row lock at Since+idle_kill, before the event runs.
 	if s.Lock.Held && !s.Lock.Since.IsZero() {
-		idle := p.IdleKill
+		idle := s.Params.IdleKill
 		if idle <= 0 {
 			idle = 5 * time.Second
 		}
-		W = boundExtend(W, now, s.Lock.Since.Add(idle))
+		add(s.Lock.Since.Add(idle))
 	}
 	live := s.Lease.Present && s.Lease.Owner != "" && s.Lease.ExpireAt.After(now)
-	owner := boundFind(s, s.Lease.Owner)
-	// A stopped holder is not yielded. fairMoves waits until ExpireAt and
-	// does not also take the yielding arm.
+	owner := s.node(s.Lease.Owner)
 	if live && owner != nil && owner.Stopped {
-		W = boundExtend(W, now, s.Lease.ExpireAt) // stopped owner
+		add(s.Lease.ExpireAt) // stopped owner
 	}
-	// A live holder who is not stopped and is not the reader is yielded at
-	// the current clock, or waited out until ExpireAt when that yield is
-	// refused (step.go TailUnreadable / EpochLost).
 	if live && owner != nil && !owner.Stopped && s.Lease.Owner != reader {
-		W = boundExtend(W, now, s.Lease.ExpireAt) // yielding owner
+		add(s.Lease.ExpireAt) // yielding owner
 	}
-	// RETRY_BACKOFF jumps to RetryUntil even after the lease has expired.
-	// Acquire stays refused until that instant.
 	if s.Phase == PhaseRetryBackoff {
-		W = boundExtend(W, now, s.RetryUntil) // retry window
+		add(s.RetryUntil) // retry window
 	}
-	// Chain verify is not applied at FailedAt itself. The scheduler steps one
-	// millisecond later. ChainOwnerBack then runs at that same instant.
 	if s.Phase == PhaseFailed && s.FailedReason == ReasonChainOwnerGone && !s.Chain.VerifiedAt.After(s.FailedAt) {
-		W = boundExtend(W, now, s.FailedAt.Add(time.Millisecond))
+		add(s.FailedAt.Add(time.Millisecond))
 	}
-	return W, reader
+	return out
+}
+
+// NextDeadline is the earliest future instant in fairDeadlines.
+// The zero time means nothing is pending.
+func NextDeadline(s State, now time.Time) time.Time {
+	var best time.Time
+	for _, at := range fairDeadlines(s, now, fairReader(s, now)) {
+		if best.IsZero() || at.Before(best) {
+			best = at
+		}
+	}
+	return best
 }
 
 func boundExtend(W time.Duration, now, at time.Time) time.Duration {
@@ -195,7 +197,7 @@ func boundForced(s State, now time.Time) int {
 		n += 2
 	}
 	if live {
-		owner := boundFind(s, s.Lease.Owner)
+		owner := s.node(s.Lease.Owner)
 		if owner != nil && owner.Stopped && now.Before(s.Lease.ExpireAt) {
 			n++
 		}
@@ -209,32 +211,10 @@ func boundForced(s State, now time.Time) int {
 	if s.Phase == PhaseRetryBackoff && s.RetryUntil.After(now) {
 		n++
 	}
-	if _, ok := boundStoppedChainGone(s, now, s.Params.fill()); ok {
+	if chainGoneStep(s, now) {
 		n++ // ChainOwnerGone
 	}
 	return n
-}
-
-// boundStoppedChainGone is the sweep deadline for a stopped chain owner.
-// The phase, the tail timestamp, and the heartbeat check are the guards in
-// chainOwnerGone. A node that is not stopped is refreshed by the search and
-// is not on this path.
-func boundStoppedChainGone(s State, now time.Time, p Params) (time.Time, bool) {
-	if s.Chain.Owner == "" || s.Phase != PhaseLeaseDegraded || s.TailSince.IsZero() {
-		return time.Time{}, false
-	}
-	owner := boundFind(s, s.Chain.Owner)
-	if owner == nil || !owner.Stopped {
-		return time.Time{}, false
-	}
-	due := now
-	if !owner.HeartbeatAt.IsZero() {
-		due = owner.HeartbeatAt.Add(EffectiveNodeGone(p) + time.Nanosecond)
-	}
-	if due.Before(now) {
-		due = now
-	}
-	return due, true
 }
 
 func boundNodeWastes(s State, id string, now time.Time, W time.Duration, p Params) (int, int) {
@@ -288,13 +268,4 @@ func boundNodeWastes(s State, id string, now time.Time, W time.Duration, p Param
 
 func boundCanRead(s State, id string) bool {
 	return nodeReady(s, id)
-}
-
-func boundFind(s State, id string) *Node {
-	for i := range s.Nodes {
-		if s.Nodes[i].ID == id {
-			return &s.Nodes[i]
-		}
-	}
-	return nil
 }

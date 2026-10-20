@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, one Event (LeaseUnreadable included), and the caller-supplied clock
-// output: Result, the next state, the side-effect intents, and one applied-event trace entry
+// output: Result, the next state, the side-effect intents, and one applied-event trace entry. NULL tail refusals are re-checked against CanRead. A lost chain directory becomes CHAIN_OWNER_GONE
 // pos: the single transition function; it does no I/O and reads no clock
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -448,6 +448,11 @@ func acquire(s State, e Event, now time.Time) partial {
 	if RefusalBlocks(s, e.Node, now) || !InClaimSet(s, now) {
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "not claimable"})
 	}
+	// Another node does not take over a chain whose owner lost the directory
+	// once that loss can become CHAIN_OWNER_GONE.
+	if chainGoneStep(s, now) && ownerDirGone(s) && e.Node != s.Chain.Owner {
+		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "chain owner directory gone"})
+	}
 	next := s
 	fromFailed := s.Phase == PhaseFailed
 	next.takeLease(e.Node, now)
@@ -586,6 +591,11 @@ func epochLost(s State, e Event, now time.Time) partial {
 	}
 	next := yield(s, e.Node, now, false, RefusalEpochLost)
 	next.LastError = string(e.Cause)
+	// The verified owner's directory is gone. The yield has to leave a tail
+	// timestamp, or ChainOwnerGone can never fire and the backoff never ends.
+	if s.Chain.Verified() && s.Chain.Owner == e.Node && ownerDirGone(s) && next.TailSince.IsZero() {
+		next.TailSince = now
+	}
 	return partial{state: next, result: Result{Decision: DecisionApplied, LocksTaskLease: true, Intents: []Intent{{Kind: IntentRelease, Node: e.Node}}}}
 }
 
@@ -635,9 +645,76 @@ func chainVerified(s State, e Event, now time.Time) partial {
 	return partial{state: next, result: Result{Decision: DecisionApplied, Detail: "chain"}}
 }
 
+// ownerDirGone is a verified chain owner who is still in the node table and
+// cannot read the directory. Waiting does not bring that directory back.
+func ownerDirGone(s State) bool {
+	if !s.Chain.Verified() {
+		return false
+	}
+	n := s.node(s.Chain.Owner)
+	return n != nil && !n.CanRead
+}
+
+// failChainOwner is the operator-required FAILED/CHAIN_OWNER_GONE write.
+func failChainOwner(s State, now time.Time) partial {
+	next := s
+	next.bump()
+	next.Phase = PhaseFailed
+	next.FailedReason = ReasonChainOwnerGone
+	next.FailedAt = now
+	next.Desired = DesiredRun
+	if next.TailSince.IsZero() {
+		next.TailSince = now
+	}
+	return partial{state: next, result: Result{Decision: DecisionApplied, Detail: ReasonChainOwnerGone}}
+}
+
+// stoppedSweepDue is the fair-search deadline for a stopped chain owner.
+// A live owner's heartbeat is refreshed by the search, so it is not a wait.
+// The instant is one nanosecond past HeartbeatAt+node_gone because the
+// comparison in chainOwnerGone is strict.
+func lostChainRow(s State) bool {
+	return s.Chain.Owner != "" && s.Phase == PhaseLeaseDegraded && !s.TailSince.IsZero()
+}
+
+func stoppedSweepDue(s State, now time.Time) (time.Time, bool) {
+	if !lostChainRow(s) {
+		return time.Time{}, false
+	}
+	n := s.node(s.Chain.Owner)
+	if n == nil || !n.Stopped {
+		return time.Time{}, false
+	}
+	if n.HeartbeatAt.IsZero() {
+		return now, true
+	}
+	due := n.HeartbeatAt.Add(EffectiveNodeGone(s.Params) + time.Nanosecond)
+	if due.Before(now) {
+		return now, true
+	}
+	return due, true
+}
+
+// chainGoneStep is the ChainOwnerGone fair step: the owner cannot read now,
+// or a stopped owner's sweep deadline is on the clock.
+func chainGoneStep(s State, now time.Time) bool {
+	if !lostChainRow(s) {
+		return false
+	}
+	if ownerDirGone(s) {
+		return true
+	}
+	_, ok := stoppedSweepDue(s, now)
+	return ok
+}
+
 func chainOwnerGone(s State, e Event, now time.Time) partial {
 	if s.Chain.Owner == "" || s.Phase != PhaseLeaseDegraded || s.TailSince.IsZero() {
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "guard"})
+	}
+	if ownerDirGone(s) {
+		_ = e
+		return failChainOwner(s, now)
 	}
 	hb := time.Time{}
 	if n := s.node(s.Chain.Owner); n != nil {
@@ -647,14 +724,8 @@ func chainOwnerGone(s State, e Event, now time.Time) partial {
 	if !gone {
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "heartbeat fresh"})
 	}
-	next := s
-	next.bump()
-	next.Phase = PhaseFailed
-	next.FailedReason = ReasonChainOwnerGone
-	next.FailedAt = now
-	next.Desired = DesiredRun
 	_ = e
-	return partial{state: next, result: Result{Decision: DecisionApplied, Detail: ReasonChainOwnerGone}}
+	return failChainOwner(s, now)
 }
 
 func chainOwnerBack(s State, e Event, now time.Time) partial {

@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State and the clock used for lease, refusal, and stale comparisons
-// output: Violation list for invariants 1–10, ProgressOverdue from the applied-event trace, claim and stop sets, FairTerminal, /api/health code
+// output: Violation list for invariants 1–10, ProgressOverdue from the applied-event trace, claim and stop sets, FairTerminal, the operator FAILED table, /api/health code
 // pos: the checkable predicates ADR 0011 §2 requires of every prefix
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -52,13 +52,20 @@ func LegalRetry(s State, now time.Time) bool {
 	return now.Before(s.RetryUntil)
 }
 
-// RefusalBlocks is an unexpired refusal or a NULL per_node tail refusal.
+// RefusalBlocks is an unexpired refusal, or a NULL per_node tail refusal
+// whose node still cannot read. The NULL row is the only permanent-shaped
+// write (per_node TailUnreadable). It records a missing directory and is
+// re-evaluated on Acquire: once CanRead is true it no longer blocks.
 func RefusalBlocks(s State, node string, now time.Time) bool {
 	r, ok := s.Refusal[node]
 	if !ok {
 		return false
 	}
 	if r.OpenEnded {
+		n := s.node(node)
+		if n != nil && n.CanRead {
+			return false
+		}
 		return true
 	}
 	return r.Until.After(now)
@@ -258,13 +265,31 @@ func fairRunning(s State, now time.Time) bool {
 
 func nodeReady(s State, id string) bool {
 	n := s.node(id)
-	if n == nil || !n.CanRead || n.Stopped {
+	return n != nil && n.CanRead && !n.Stopped
+}
+
+// fairReader is the live owner when that owner is ready, otherwise the first
+// ready node. A NULL tail refusal does not remove a node that can read.
+func fairReader(s State, now time.Time) string {
+	if s.Lease.Present && s.Lease.Owner != "" && s.Lease.ExpireAt.After(now) && nodeReady(s, s.Lease.Owner) {
+		return s.Lease.Owner
+	}
+	for _, node := range s.Nodes {
+		if nodeReady(s, node.ID) {
+			return node.ID
+		}
+	}
+	return ""
+}
+
+// operatorFailed is the ADR operator-required FAILED table.
+func operatorFailed(reason string) bool {
+	switch reason {
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown, ReasonChainOwnerGone:
+		return true
+	default:
 		return false
 	}
-	if r, ok := s.Refusal[id]; ok && r.OpenEnded {
-		return false
-	}
-	return true
 }
 
 // ProgressOverdue is invariant 7's clock, replayed from the applied-event trace.
