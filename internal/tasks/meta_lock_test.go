@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: two lock-wait observations and later acquisitions of the same row
-// output: proof that the first observation stays healthy, the second opens META_LOCK_STALLED, two takes inside lock_wait close it, another node does not, and a late take restarts the count
+// output: proof that the first observation stays healthy, the second opens META_LOCK_STALLED, two takes inside lock_wait close it, another node does not, a late take restarts the count, and lock_detail=reduced does not degrade health
 // pos: ADR 0011 PR-2 F12 confirm and the close rule
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -18,6 +18,24 @@ func lockParams() ownership.Params {
 	p := ownership.DefaultParams()
 	p.LockWait = time.Second
 	return p
+}
+
+type lockDetailStore struct {
+	*fakeStore
+	detail string
+}
+
+func (s lockDetailStore) LockDetail() string { return s.detail }
+
+func TestReducedLockDetailStaysHealthy(t *testing.T) {
+	s := NewScheduler(WithStore(lockDetailStore{fakeStore: newFakeStore(), detail: "reduced"}))
+	sum := s.HealthSummary(context.Background())
+	if sum.Status != HealthOK {
+		t.Fatalf("status %s reasons %v, want ok", sum.Status, sum.Reasons)
+	}
+	if sum.LockDetail != "reduced" {
+		t.Fatalf("lock_detail %q", sum.LockDetail)
+	}
 }
 
 func TestMetaLockFirstTimeoutIsNotAPage(t *testing.T) {

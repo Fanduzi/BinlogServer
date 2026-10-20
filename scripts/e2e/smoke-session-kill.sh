@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: docker mysql:8.0 (compose mysql80) and mariadb:11.4, the suite metadata DSN, curl and jq
-# output: SIGSTOP of a process holding task_leases FOR UPDATE is released inside the session-kill bound on MySQL 8.0 and MariaDB; a cluster server with the default 60s sweep keeps /api/health at 200
+# output: SIGSTOP of a holder opened through OpenClusterMeta is released inside the session-kill bound on MySQL 8.0 and MariaDB; TestSessionKillDropsSleepingForUpdate passes on both; a database-only account still opens META_LOCK_STALLED; a cluster server with one task and the default 60s sweep keeps /api/health at 200 with no HEALTH_STALE
 # pos: ADR 0011 PR-2 e2e cells, in the quick profile so unit-and-e2e runs them
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -61,18 +61,48 @@ maria_sql() {
   docker exec -i "$MARIA_NAME" mariadb -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "$1" 2>/dev/null
 }
 
-prepare_row() {
+create_db() {
   local sql_fn="$1" db="$2"
   "$sql_fn" "DROP DATABASE IF EXISTS ${db}; CREATE DATABASE ${db};"
-  "$sql_fn" "CREATE TABLE ${db}.task_leases (
-    task_id varchar(191) NOT NULL PRIMARY KEY,
-    owner_worker_id varchar(191) NOT NULL,
-    epoch bigint NOT NULL,
-    lease_expire_at datetime(6) NOT NULL,
-    renewed_at datetime(6) NOT NULL
-  )"
+}
+
+migrate_db() {
+  local dsn="$1"
+  ( cd "$ROOT_DIR" && META_DSN="$dsn" go run ./cmd/migrate up )
+}
+
+insert_lease() {
+  local sql_fn="$1" db="$2"
   "$sql_fn" "INSERT INTO ${db}.task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
     VALUES ('t-stop', 'w1', 1, DATE_ADD(NOW(6), INTERVAL 1 HOUR), NOW(6))"
+}
+
+# run_required_test fails when the test skips or does not pass. go test
+# exits 0 on a skip, so the log is checked as well.
+run_required_test() {
+  local name="$1"
+  local logf="$2"
+  shift 2
+  set +e
+  ( cd "$ROOT_DIR" && go test -count=1 -timeout 180s -v -run "^${name}$" "$@" ) >"$logf" 2>&1
+  local rc=$?
+  set -e
+  if grep -E -q -- '--- SKIP:' "$logf"; then
+    echo "$name skipped" >&2
+    cat "$logf" >&2
+    return 1
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    echo "$name failed" >&2
+    cat "$logf" >&2
+    return 1
+  fi
+  if ! grep -q -- "--- PASS: ${name}" "$logf"; then
+    echo "$name did not pass" >&2
+    cat "$logf" >&2
+    return 1
+  fi
+  log "$name passed"
 }
 
 stop_holder() {
@@ -148,14 +178,16 @@ cell_mysql80() {
   local version
   version="$(mysql80_sql "SELECT VERSION()")"
   [[ "$version" == 8.0* ]] || { echo "want MySQL 8.0, got $version" >&2; return 1; }
-  prepare_row mysql80_sql "$db"
-  local dsn="root:root@tcp(127.0.0.1:${E2E_MYSQL80_PORT})/${db}?parseTime=true&wait_timeout=2&net_read_timeout=2&net_write_timeout=2&innodb_lock_wait_timeout=2"
+  create_db mysql80_sql "$db"
+  local dsn="root:root@tcp(127.0.0.1:${E2E_MYSQL80_PORT})/${db}?parseTime=true"
+  migrate_db "$dsn"
+  insert_lease mysql80_sql "$db"
   local peer="root:root@tcp(127.0.0.1:${E2E_MYSQL80_PORT})/${db}?parseTime=true&innodb_lock_wait_timeout=8"
   stop_holder "$dsn" "$peer" mysql80
   mysql80_sql "DROP DATABASE IF EXISTS ${db}" || true
 }
 
-cell_mariadb() {
+start_mariadb() {
   docker rm -f -v "$MARIA_NAME" >/dev/null 2>&1 || true
   docker run -d --name "$MARIA_NAME" -p "127.0.0.1:${MARIA_PORT}:3306" \
     -e MARIADB_ROOT_PASSWORD=root -e MARIADB_ROOT_HOST=% \
@@ -175,16 +207,58 @@ cell_mariadb() {
   local version
   version="$(maria_sql "SELECT VERSION()")"
   [[ "$version" == *MariaDB* ]] || { echo "want MariaDB, got $version" >&2; return 1; }
+}
+
+cell_mariadb() {
   local db="binlog_sk_${RUN_TAG}"
-  prepare_row maria_sql "$db"
-  local dsn="root:root@tcp(127.0.0.1:${MARIA_PORT})/${db}?parseTime=true&wait_timeout=2&net_read_timeout=2&net_write_timeout=2&innodb_lock_wait_timeout=2&idle_transaction_timeout=2"
+  create_db maria_sql "$db"
+  local dsn="root:root@tcp(127.0.0.1:${MARIA_PORT})/${db}?parseTime=true"
+  migrate_db "$dsn"
+  insert_lease maria_sql "$db"
   local peer="root:root@tcp(127.0.0.1:${MARIA_PORT})/${db}?parseTime=true&innodb_lock_wait_timeout=8"
   stop_holder "$dsn" "$peer" mariadb
 }
 
+cell_pool_test() {
+  local mysql_root="root:root@tcp(127.0.0.1:${E2E_MYSQL80_PORT})/"
+  local maria_root="root:root@tcp(127.0.0.1:${MARIA_PORT})/"
+  BINLOG_TEST_MYSQL_ROOT_DSNS="${mysql_root},${maria_root}" \
+    run_required_test TestSessionKillDropsSleepingForUpdate "$WORK/TestSessionKillDropsSleepingForUpdate.log" ./internal/meta
+  local n
+  n="$(grep -c -- '--- PASS: TestSessionKillDropsSleepingForUpdate/server-' "$WORK/TestSessionKillDropsSleepingForUpdate.log" || true)"
+  if [[ "$n" -ne 2 ]]; then
+    echo "TestSessionKillDropsSleepingForUpdate passed on ${n} servers, want 2" >&2
+    return 1
+  fi
+  log "pool test passed on MySQL 8.0 and MariaDB"
+}
+
+cell_noprocess() {
+  local sql_fn="$1" port="$2" label="$3"
+  local db="binlog_np_${RUN_TAG}"
+  create_db "$sql_fn" "$db"
+  local admin="root:root@tcp(127.0.0.1:${port})/${db}?parseTime=true"
+  migrate_db "$admin"
+  "$sql_fn" "CREATE USER IF NOT EXISTS 'sknp'@'%' IDENTIFIED BY 'sknp'"
+  "$sql_fn" "GRANT ALL PRIVILEGES ON ${db}.* TO 'sknp'@'%'"
+  "$sql_fn" "FLUSH PRIVILEGES"
+  local grants
+  grants="$("$sql_fn" "SHOW GRANTS FOR 'sknp'@'%'")"
+  if printf '%s\n' "$grants" | grep -Eiq 'PROCESS|SUPER|ALL PRIVILEGES ON \*\.\*'; then
+    echo "$label account is not limited to ${db}.*: $grants" >&2
+    return 1
+  fi
+  local dsn="sknp:sknp@tcp(127.0.0.1:${port})/${db}?parseTime=true"
+  BINLOG_TEST_NOPROCESS_DSN="$dsn" \
+    run_required_test TestMetaLockStallWithoutProcess "$WORK/noprocess-${label}.log" ./internal/meta
+  "$sql_fn" "DROP USER IF EXISTS 'sknp'@'%'" || true
+  "$sql_fn" "DROP DATABASE IF EXISTS ${db}" || true
+  log "$label META_LOCK_STALLED opened without PROCESS"
+}
+
 cell_health() {
-  # An empty database. The suite meta already holds tasks from earlier
-  # scenarios; evaluating those would degrade /api/health for other reasons.
+  # A scratch database with one stopped task. The suite meta already holds
+  # tasks from earlier scenarios; evaluating those would degrade /api/health.
   local scratch="binlog_meta_sk${RUN_TAG}"
   SCRATCH_DB="$scratch"
   docker exec -i binlog-e2e-meta-primary mysql -uroot -proot -e \
@@ -192,6 +266,11 @@ cell_health() {
   local dsn
   dsn="$(printf '%s' "$META_DSN" | sed -E "s#^(.*@tcp\\([^)]+\\)/)[^/?]+#\\1${scratch}#")"
   ( cd "$ROOT_DIR" && META_DSN="$dsn" go run ./cmd/migrate up )
+  docker exec -i binlog-e2e-meta-primary mysql -uroot -proot "$scratch" -e \
+    "INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, desired_run, spec_revision, applied_spec_revision, failed_spec_revision, retry_attempt, consecutive_source_failures) VALUES ('sk-health', 'sk-health', 'sk-health-${RUN_TAG}', 'STOPPED', '', '', 0, '', '{}', '{}', '{}', UTC_TIMESTAMP(6), 'STOP', 1, 1, 0, 0, 0)"
+  local tasks
+  tasks="$(docker exec -i binlog-e2e-meta-primary mysql -uroot -proot -Nse "SELECT COUNT(*) FROM ${scratch}.backup_tasks")"
+  [[ "$tasks" == "1" ]] || { echo "health cell has ${tasks} tasks, want 1" >&2; return 1; }
   local data="$WORK/data"
   mkdir -p "$data"
   (
@@ -224,10 +303,22 @@ cell_health() {
     echo "health sweep interval is overridden; the cell needs the 60s default" >&2
     return 1
   fi
-  assert_health
-  sleep 5
-  assert_health
-  log "default sweep kept /api/health at 200"
+  local start now samples=0
+  start="$(date +%s)"
+  while true; do
+    assert_health
+    samples=$((samples + 1))
+    now="$(date +%s)"
+    if (( now - start >= 65 )); then
+      break
+    fi
+    sleep 5
+  done
+  if (( samples < 12 )); then
+    echo "health cell took ${samples} samples, want at least 12 across one 60s sweep" >&2
+    return 1
+  fi
+  log "one task and the default sweep kept /api/health at 200 for ${samples} samples"
 }
 
 assert_health() {
@@ -243,12 +334,20 @@ assert_health() {
     echo "/api/health named META_LOCK_STALLED: $body" >&2
     return 1
   fi
+  if printf '%s' "$body" | grep -q HEALTH_STALE; then
+    echo "/api/health named HEALTH_STALE: $body" >&2
+    return 1
+  fi
   local status
   status="$(printf '%s' "$body" | jq -r '.status')"
   [[ "$status" == "ok" ]] || { echo "/api/health status=$status: $body" >&2; return 1; }
 }
 
 cell_mysql80
+start_mariadb
 cell_mariadb
+cell_pool_test
+cell_noprocess mysql80_sql "${E2E_MYSQL80_PORT}" mysql80
+cell_noprocess maria_sql "${MARIA_PORT}" mariadb
 cell_health
 log "session-kill cells passed"
