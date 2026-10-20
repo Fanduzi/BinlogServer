@@ -2,7 +2,7 @@
 
 // Package main holds one task_leases row with SELECT ... FOR UPDATE.
 // input: a MySQL DSN and a task id; --take waits for the row instead of holding it
-// output: HOLDING on stdout after the lock, then the process blocks; --take exits 0 when the lock is acquired
+// output: HOLDING on stdout after the lock, then the process sleeps so it stays alive; --take exits 0 when the lock is acquired within --timeout
 // pos: e2e helper for the ADR 0011 PR-2 SIGSTOP cell
 // note: if this file changes, update this header and scripts/e2e/README.md.
 package main
@@ -19,13 +19,32 @@ import (
 
 func main() {
 	take := false
+	timeout := 8 * time.Second
 	args := os.Args[1:]
-	if len(args) > 0 && args[0] == "--take" {
-		take = true
-		args = args[1:]
+	for len(args) > 0 && len(args[0]) > 1 && args[0][0] == '-' {
+		switch args[0] {
+		case "--take":
+			take = true
+			args = args[1:]
+		case "--timeout":
+			if len(args) < 2 {
+				fmt.Fprintln(os.Stderr, "usage: hold_for_update [--take] [--timeout 8s] <dsn> <task-id>")
+				os.Exit(2)
+			}
+			d, err := time.ParseDuration(args[1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			timeout = d
+			args = args[2:]
+		default:
+			fmt.Fprintln(os.Stderr, "usage: hold_for_update [--take] [--timeout 8s] <dsn> <task-id>")
+			os.Exit(2)
+		}
 	}
 	if len(args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: hold_for_update [--take] <dsn> <task-id>")
+		fmt.Fprintln(os.Stderr, "usage: hold_for_update [--take] [--timeout 8s] <dsn> <task-id>")
 		os.Exit(2)
 	}
 	db, err := sql.Open("mysql", args[0])
@@ -38,7 +57,7 @@ func main() {
 	ctx := context.Background()
 	if take {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 	conn, err := db.Conn(ctx)
@@ -63,5 +82,10 @@ func main() {
 	}
 	fmt.Println("HOLDING")
 	_ = os.Stdout.Sync()
-	select {}
+	// An empty select is a deadlock: the process exits and the server
+	// drops the session because the client went away. Sleep keeps the
+	// process, and the lock, alive until the server timeout or SIGKILL.
+	for {
+		time.Sleep(time.Hour)
+	}
 }
