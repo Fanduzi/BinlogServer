@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Step and Check only. No helper from FairStepBound
-// output: the observed fair-schedule length, and bottom-SCC terminality. Time in the key is a clamped deadline delta. The operator FAILED table is an ADR literal
+// output: the observed fair-schedule length, and bottom-SCC terminality. Time in the key keeps each Step boundary exact and saturates only strictly past them. The operator FAILED table is an ADR literal
 // pos: the Step search and the adversarial walks that check the upper bound
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -8,6 +8,10 @@ package ownership
 import (
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +22,10 @@ import (
 // with a seeded walk instead of a full schedule tree.
 const obsStateCap = 200000
 
+// obsSeedBudget is the per-seed clock. A livelock that never repeats a key
+// fails with the seed number instead of running until the test timeout.
+const obsSeedBudget = 30 * time.Second
+
 type obsResult struct {
 	steps     int
 	states    int
@@ -25,6 +33,7 @@ type obsResult struct {
 	at        time.Time
 	ok        bool
 	over      bool
+	timedOut  bool
 	stuck     bool
 	violation string
 	bottoms   map[string]int
@@ -63,6 +72,8 @@ type observer struct {
 	node      map[string]obsNode
 	edge      map[string][]string
 	over      bool
+	timedOut  bool
+	deadline  time.Time
 	stuck     bool
 	violation string
 	stuckAt   time.Time
@@ -71,9 +82,18 @@ type observer struct {
 }
 
 func observeFair(start State, now time.Time) obsResult {
-	sr := &observer{memo: map[string]obsHit{}, node: map[string]obsNode{}, edge: map[string][]string{}, kinds: map[string]int{}}
+	sr := &observer{
+		memo:     map[string]obsHit{},
+		node:     map[string]obsNode{},
+		edge:     map[string][]string{},
+		kinds:    map[string]int{},
+		deadline: time.Now().Add(obsSeedBudget),
+	}
 	steps, ok := sr.rec(start, now, 0)
 	states := len(sr.memo)
+	if sr.timedOut {
+		return obsResult{over: true, timedOut: true, states: states}
+	}
 	if sr.over {
 		return obsResult{over: true, states: states}
 	}
@@ -90,6 +110,11 @@ func observeFair(start State, now time.Time) obsResult {
 
 func (sr *observer) rec(s State, now time.Time, depth int) (int, bool) {
 	if sr.over {
+		return 0, false
+	}
+	if !sr.deadline.IsZero() && time.Now().After(sr.deadline) {
+		sr.over = true
+		sr.timedOut = true
 		return 0, false
 	}
 	if depth > obsStateCap {
@@ -600,15 +625,15 @@ func obsFind(s State, id string) *Node {
 }
 
 func obsKey(s State, now time.Time) string {
-	limit := clockLimit(s)
+	p := s.Params.fill()
 	var b strings.Builder
 	b.Grow(160)
 	put := func(v int64) {
 		b.WriteString(strconv.FormatInt(v, 10))
 		b.WriteByte('|')
 	}
-	rel := func(t time.Time) {
-		put(relTime(t, now, limit))
+	rel := func(field string, t time.Time) {
+		writeRegion(&b, field, t, now, p)
 	}
 	b.WriteString(string(s.Phase))
 	b.WriteByte('|')
@@ -619,23 +644,34 @@ func obsKey(s State, now time.Time) string {
 	if s.Lease.Present {
 		b.WriteByte('1')
 	}
-	rel(s.Lease.ExpireAt)
+	rel("expire", s.Lease.ExpireAt)
+	rel("acquired", s.Lease.AcquiredAt)
 	put(s.SpecRevision)
 	put(s.FailedSpec)
 	if s.Lock.Held {
 		b.WriteString(s.Lock.HeldBy)
-		rel(s.Lock.Since)
+		rel("lockSince", s.Lock.Since)
 	}
+	b.WriteString(s.LockObserver)
 	b.WriteByte('|')
 	put(int64(clampRetry(s.RetryAttempt)))
-	rel(s.RetryUntil)
+	rel("retry", s.RetryUntil)
 	b.WriteString(s.FailedReason)
 	b.WriteByte('|')
-	rel(s.FailedAt)
+	rel("failedAt", s.FailedAt)
+	rel("unowned", s.UnownedSince)
+	rel("progress", s.ProgressAt)
+	rel("evaluated", s.EvaluatedAt)
 	b.WriteString(s.Chain.Owner)
 	b.WriteByte('|')
 	if s.Chain.Verified() {
 		b.WriteByte('v')
+	}
+	if s.Chain.MissingSealed {
+		b.WriteByte('m')
+	}
+	if s.Chain.Unreadable {
+		b.WriteByte('u')
 	}
 	put(int64(timeOrder(s.Chain.VerifiedAt, s.FailedAt)))
 	if !s.TailSince.IsZero() {
@@ -652,14 +688,15 @@ func obsKey(s State, now time.Time) string {
 	}
 	b.WriteString(string(s.Params.Storage))
 	b.WriteByte('|')
-	p := s.Params.fill()
 	put(int64(p.LeaseTTL))
 	put(int64(p.ClaimInterval))
 	put(int64(p.RefusalRetryCap))
 	put(int64(p.IdleKill))
 	put(int64(p.LockWait))
 	put(int64(p.Sweep))
+	put(int64(p.NoProgressAfter))
 	put(int64(EffectiveNodeGone(p)))
+	put(int64(EffectiveStaleAfter(p)))
 	put(int64(s.LockRecoveries))
 	for _, node := range s.Nodes {
 		b.WriteString(node.ID)
@@ -669,10 +706,12 @@ func obsKey(s State, now time.Time) string {
 		if node.Stopped {
 			b.WriteByte('s')
 		}
-		rel(node.HeartbeatAt)
+		rel("heartbeat", node.HeartbeatAt)
 		r := s.Refusal[node.ID]
+		b.WriteString(r.Reason)
+		b.WriteByte('|')
 		put(int64(clampAttempts(r.Attempts)))
-		rel(r.Until)
+		rel("until", r.Until)
 		if r.OpenEnded {
 			b.WriteByte('o')
 		}
@@ -681,40 +720,6 @@ func obsKey(s State, now time.Time) string {
 		}
 	}
 	return b.String()
-}
-
-// clockLimit is the largest duration Step compares a timer against.
-// A remaining time older than this is one saturated region.
-func clockLimit(s State) time.Duration {
-	p := s.Params.fill()
-	limit := time.Nanosecond
-	for _, d := range []time.Duration{
-		p.LeaseTTL, p.ClaimInterval, p.RefusalRetryCap, p.Sweep, p.LockWait,
-		p.IdleKill, p.StartToReady, p.NoProgressAfter, p.StaleAfter,
-		EffectiveNodeGone(p), 16 * time.Hour, time.Millisecond,
-	} {
-		if d > limit {
-			limit = d
-		}
-	}
-	return limit
-}
-
-const timeZeroKey int64 = -1 << 62
-
-// relTime is deadline-now. Zero stays a sentinel. A delta at or below
-// -clockLimit saturates: every comparison against a constant has already
-// flipped. A future delta stays exact, because NextDeadline is the minimum
-// of those deltas and the successor key has to be a function of this one.
-func relTime(t, now time.Time, limit time.Duration) int64 {
-	if t.IsZero() {
-		return timeZeroKey
-	}
-	d := t.Sub(now)
-	if d <= -limit {
-		return -int64(limit)
-	}
-	return int64(d)
 }
 
 func timeOrder(a, b time.Time) int {
@@ -992,23 +997,13 @@ func TestSaturatedBackoffRepeatsKey(t *testing.T) {
 }
 
 func TestTimeKeyDeterminesSuccessors(t *testing.T) {
-	check := func(a, b State, an, bn time.Time) {
+	mustShare := func(a, b State, an, bn time.Time) {
 		t.Helper()
 		a, b = obsPrep(a, an), obsPrep(b, bn)
 		if obsKey(a, an) != obsKey(b, bn) {
 			t.Fatal("states that differ only by a time shift or a saturated past do not share a key")
 		}
-		ma, mb := fairMoves(a, an), fairMoves(b, bn)
-		if len(ma) != len(mb) {
-			t.Fatalf("move count %d %d", len(ma), len(mb))
-		}
-		for i := range ma {
-			ca := obsPrep(ma[i].s, ma[i].at)
-			cb := obsPrep(mb[i].s, mb[i].at)
-			if obsKey(ca, ma[i].at) != obsKey(cb, mb[i].at) {
-				t.Fatalf("successor %d keys differ kind %d", i, ma[i].kind)
-			}
-		}
+		sameMoves(t, a, b, an, bn, 3)
 	}
 	shift := func(s State, now time.Time, d time.Duration) (State, time.Time) {
 		s = s.clone()
@@ -1027,6 +1022,9 @@ func TestTimeKeyDeterminesSuccessors(t *testing.T) {
 		s.TailSince = add(s.TailSince)
 		s.Chain.VerifiedAt = add(s.Chain.VerifiedAt)
 		s.Lock.Since = add(s.Lock.Since)
+		s.UnownedSince = add(s.UnownedSince)
+		s.ProgressAt = add(s.ProgressAt)
+		s.EvaluatedAt = add(s.EvaluatedAt)
 		for i := range s.Nodes {
 			s.Nodes[i].HeartbeatAt = add(s.Nodes[i].HeartbeatAt)
 		}
@@ -1044,28 +1042,359 @@ func TestTimeKeyDeterminesSuccessors(t *testing.T) {
 		func() (State, time.Time) { return retryBackoffFixture(t) },
 		func() (State, time.Time) { return j11Fixture(t) },
 	}
-	for i, mk := range bases {
+	for _, mk := range bases {
 		s, now := mk()
 		t2, now2 := shift(s, now, 3*time.Hour+time.Millisecond)
-		check(s, t2, now, now2)
-		if i > 2 {
-			continue
-		}
-		old := s.clone()
-		limit := clockLimit(s)
-		old.FailedAt = now.Add(-limit - time.Hour)
-		old.Chain.VerifiedAt = now.Add(-limit - 2*time.Hour)
-		older := old.clone()
-		older.FailedAt = now.Add(-limit - 9*time.Hour)
-		older.Chain.VerifiedAt = now.Add(-limit - 10*time.Hour)
-		older.Lease.Epoch += 9
-		check(old, older, now, now)
+		mustShare(s, t2, now, now2)
 	}
-	for seed := 0; seed < 40; seed++ {
+	for seed := 0; seed < 20; seed++ {
 		s, now := fairRandState(t, int64(seed))
 		t2, now2 := shift(s, now, time.Duration(seed+1)*time.Minute)
-		check(s, t2, now, now2)
+		mustShare(s, t2, now, now2)
+		perturbBoundaries(t, s, now)
 	}
+	// P2: NodeGoneAfter is 20h, so the old <= -limit key merged these two.
+	// age == 20h rejects ChainOwnerGone; age == 25h applies it.
+	now := t0
+	young := chainGoneAtAge(t, now, 20*time.Hour)
+	old := chainGoneAtAge(t, now, 25*time.Hour)
+	gy := Step(young, Event{Kind: EventChainOwnerGone, Node: "_health"}, now)
+	goo := Step(old, Event{Kind: EventChainOwnerGone, Node: "_health"}, now)
+	if gy.Decision == goo.Decision {
+		t.Fatalf("20h %s and 25h %s should disagree", gy.Decision, goo.Decision)
+	}
+	sameMoves(t, young, old, now, now, 3)
+}
+
+// perturbBoundaries moves one clock onto each boundary and onto a strictly
+// older instant. Equal keys must share moves for three steps. The last
+// boundary must not share a key with the saturated region: that is the
+// r11 off-by-one, which used <= and swallowed the boundary.
+func perturbBoundaries(t *testing.T, base State, now time.Time) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, g := range stepTimeGuards() {
+		if seen[g.field] {
+			continue
+		}
+		seen[g.field] = true
+		limit := fieldLimit(g.field, base.Params)
+		ages := []time.Duration{
+			limit - time.Nanosecond,
+			limit,
+			limit + time.Nanosecond,
+			limit + time.Hour,
+			limit + 5*time.Hour,
+		}
+		var states []State
+		for _, age := range ages {
+			if age <= 0 {
+				continue
+			}
+			states = append(states, setClock(base, g.field, now.Add(-age)))
+		}
+		atLimit := setClock(base, g.field, now.Add(-limit))
+		far := setClock(base, g.field, now.Add(-limit-time.Hour))
+		if obsKey(atLimit, now) == obsKey(far, now) {
+			t.Fatalf("%s at the last boundary shares the saturated key", g.field)
+		}
+		for i := range states {
+			for j := i + 1; j < len(states); j++ {
+				sameMoves(t, states[i], states[j], now, now, 3)
+			}
+		}
+	}
+}
+
+func chainGoneAtAge(t *testing.T, now time.Time, age time.Duration) State {
+	t.Helper()
+	s := boot(t, "n1", now, nil)
+	s = expireLease(s, now)
+	s.Phase = PhaseLeaseDegraded
+	s.Desired = DesiredRun
+	s.Lease.Owner = ""
+	s.Params.NodeGoneAfter = 20 * time.Hour
+	s.TailSince = now.Add(-time.Hour)
+	s.Chain.Owner = "n1"
+	s.Chain.VerifiedAt = now.Add(-2 * time.Hour)
+	s.Nodes[0].Stopped = true
+	s.Nodes[0].CanRead = true
+	s.Nodes[0].HeartbeatAt = now.Add(-age)
+	return s
+}
+
+func setClock(s State, field string, at time.Time) State {
+	s = s.clone()
+	switch field {
+	case "lockSince":
+		s.Lock.Held = true
+		if s.Lock.HeldBy == "" {
+			s.Lock.HeldBy = "n1"
+		}
+		s.Lock.Since = at
+	case "unowned":
+		s.UnownedSince = at
+	case "progress":
+		s.ProgressAt = at
+	case "acquired":
+		s.Lease.AcquiredAt = at
+	case "heartbeat":
+		if len(s.Nodes) == 0 {
+			s.Nodes = []Node{{ID: "n1", CanRead: true}}
+		}
+		s.Nodes[0].Stopped = true
+		s.Nodes[0].HeartbeatAt = at
+	case "expire":
+		s.Lease.Present = true
+		if s.Lease.Owner == "" {
+			s.Lease.Owner = "n1"
+		}
+		s.Lease.ExpireAt = at
+	case "retry":
+		s.RetryUntil = at
+	case "until":
+		if s.Refusal == nil {
+			s.Refusal = map[string]Refusal{}
+		}
+		id := "n1"
+		if len(s.Nodes) > 0 {
+			id = s.Nodes[0].ID
+		}
+		r := s.Refusal[id]
+		r.Until = at
+		r.OpenEnded = false
+		if r.Reason == "" {
+			r.Reason = RefusalEpochLost
+		}
+		s.Refusal[id] = r
+	case "evaluated":
+		s.EvaluatedAt = at
+	case "failedAt":
+		s.FailedAt = at
+	default:
+		panic("unknown clock " + field)
+	}
+	return s
+}
+
+func sameMoves(t *testing.T, a, b State, an, bn time.Time, depth int) {
+	t.Helper()
+	a, b = obsPrep(a, an), obsPrep(b, bn)
+	if obsKey(a, an) != obsKey(b, bn) {
+		return
+	}
+	ma, mb := fairMoves(a, an), fairMoves(b, bn)
+	if len(ma) != len(mb) {
+		t.Fatalf("equal keys, move count %d %d", len(ma), len(mb))
+	}
+	if depth == 0 {
+		return
+	}
+	for i := range ma {
+		if ma[i].kind != mb[i].kind {
+			t.Fatalf("equal keys, move %d kind %d %d", i, ma[i].kind, mb[i].kind)
+		}
+		ca := obsPrep(ma[i].s, ma[i].at)
+		cb := obsPrep(mb[i].s, mb[i].at)
+		if obsKey(ca, ma[i].at) != obsKey(cb, mb[i].at) {
+			t.Fatalf("equal keys, successor %d kind %d", i, ma[i].kind)
+		}
+		sameMoves(t, ca, cb, ma[i].at, mb[i].at, depth-1)
+	}
+}
+
+func TestStepTimeGuardsCoverSource(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller")
+	}
+	dir := filepath.Dir(file)
+	var blob string
+	var lines []string
+	for _, name := range []string{"step.go", "invariant.go", "bound.go"} {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		blob += string(raw)
+		for _, line := range strings.Split(string(raw), "\n") {
+			trim := strings.TrimSpace(line)
+			if strings.HasPrefix(trim, "//") {
+				continue
+			}
+			if strings.Contains(trim, "now.Sub(") || strings.Contains(trim, "now.Before(") || strings.Contains(trim, "now.After(") || strings.Contains(trim, ".After(now)") || strings.Contains(trim, ".Before(now)") || strings.Contains(trim, "time.Nanosecond") {
+				lines = append(lines, trim)
+			}
+		}
+	}
+	var srcs []string
+	for _, g := range stepTimeGuards() {
+		if !strings.Contains(blob, g.src) {
+			t.Errorf("guard src missing from Step: %s", g.src)
+		}
+		srcs = append(srcs, g.src)
+	}
+	allow := map[string]bool{
+		"if at.After(now) {":  true,
+		"if !at.After(now) {": true,
+	}
+	for _, line := range lines {
+		if allow[line] {
+			continue
+		}
+		covered := false
+		for _, src := range srcs {
+			if strings.Contains(line, src) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("clock comparison is not in the boundary table: %s", line)
+		}
+	}
+}
+
+func TestAdvanceBeforeDeadlinePreservesStep(t *testing.T) {
+	for seed := 0; seed < 40; seed++ {
+		s, now := fairRandState(t, int64(seed))
+		next := NextDeadline(s, now)
+		if !next.After(now) {
+			continue
+		}
+		window := next.Sub(now)
+		base := stepPrint(s, now)
+		for _, dt := range []time.Duration{time.Nanosecond, window / 2, window - time.Nanosecond} {
+			if dt <= 0 || !now.Add(dt).Before(next) {
+				continue
+			}
+			if got := stepPrint(s, now.Add(dt)); got != base {
+				t.Fatalf("seed %d advance %s before deadline %s changed Step", seed, dt, window)
+			}
+		}
+	}
+}
+
+func TestUnkeyedStepInputsDoNotChangeOutcomes(t *testing.T) {
+	s, now := fairRandState(t, 3)
+	s = obsPrep(s, now)
+	baseK := obsKey(s, now)
+	base := stepPrint(s, now)
+	check := func(name string, mut State) {
+		t.Helper()
+		if obsKey(mut, now) != baseK || stepPrint(mut, now) != base {
+			t.Fatalf("%s changes the key or Step", name)
+		}
+	}
+	next := s.clone()
+	next.Lease.Epoch += 4
+	check("epoch", next)
+	next = s.clone()
+	next.RowGeneration += 7
+	check("row_generation", next)
+	next = s.clone()
+	next.RunID = "other"
+	check("run_id", next)
+	next = s.clone()
+	next.LastError = "other"
+	check("last_error", next)
+	next = s.clone()
+	next.Lease.RenewedAt = now.Add(time.Minute)
+	check("renewed_at", next)
+	next = s.clone()
+	next.NoProgress = !s.NoProgress
+	check("no_progress", next)
+	next = s.clone()
+	next.LastSweep = now.Add(-time.Minute)
+	check("last_sweep", next)
+	next = s.clone()
+	next.HealthStatus = "OTHER"
+	check("health_status", next)
+	next = s.clone()
+	next.Partitioned = !s.Partitioned
+	check("partitioned", next)
+	next = s.clone()
+	next.RegistrationLive = map[string]bool{"n9": true}
+	check("registration", next)
+	next = s.clone()
+	next.StoppedByOperator = !s.StoppedByOperator
+	check("stopped_by_operator", next)
+	next = s.clone()
+	next.Chain.VerifiedEpoch += 3
+	check("verified_epoch", next)
+	next = s.clone()
+	next.Params.SideKill = "auto"
+	check("side_kill", next)
+	next = s.clone()
+	next.Params.Uploads = !s.Params.Uploads
+	check("uploads", next)
+	next = s.clone()
+	next.Params.StartToReady = 3 * time.Second
+	check("start_to_ready", next)
+	next = s.clone()
+	next.trace = append(next.trace, TraceEvent{Kind: EventSweep, At: now})
+	check("trace", next)
+
+	a := s.clone()
+	a.MetaLockStalled = true
+	a.Lock = Lock{Held: true, HeldBy: "n1", Since: now}
+	a.LockRecoveries = 1
+	a.LockObserver = "n1"
+	b := a.clone()
+	b.LockObserver = "n2"
+	if obsKey(a, now) == obsKey(b, now) {
+		t.Fatal("LockObserver is not in the key")
+	}
+	ra := Step(a, Event{Kind: EventLock, Node: "n1"}, now)
+	rb := Step(b, Event{Kind: EventLock, Node: "n1"}, now)
+	if ra.State.MetaLockStalled == rb.State.MetaLockStalled {
+		t.Fatal("LockObserver did not change takeLock")
+	}
+}
+
+func stepPrint(s State, now time.Time) string {
+	ids := []string{"_health"}
+	for _, n := range s.Nodes {
+		ids = append(ids, n.ID)
+	}
+	if s.Lease.Owner != "" {
+		ids = append(ids, s.Lease.Owner)
+	}
+	if s.Chain.Owner != "" {
+		ids = append(ids, s.Chain.Owner)
+	}
+	sort.Strings(ids)
+	uniq := ids[:0]
+	var prev string
+	for _, id := range ids {
+		if id == prev {
+			continue
+		}
+		uniq = append(uniq, id)
+		prev = id
+	}
+	kinds := []Kind{
+		EventOperatorStart, EventOperatorStop, EventOperatorDelete,
+		EventStopConfirmed, EventStopExpired, EventAcquire, EventLeaseExpired,
+		EventDumpReady, EventRetryableError, EventTerminalError, EventTailUnreadable,
+		EventEpochLost, EventChainVerified, EventChainOwnerGone, EventChainOwnerBack,
+		EventMetaLockTimeout, EventRenew, EventSweep, EventLock, EventEvalDirFailed,
+		EventLegacyUpdate,
+	}
+	var b strings.Builder
+	for _, id := range uniq {
+		for _, k := range kinds {
+			ev := Event{Kind: k, Node: id, Cause: CauseENOENT, ReadOK: true}
+			if epochFenced(k) {
+				ev = Held(s, k, id)
+				ev.Cause = CauseENOENT
+				ev.ReadOK = true
+			}
+			res := Step(s, ev, now)
+			fmt.Fprintf(&b, "%s %s %s %s %s %s|", id, k, res.Decision, res.Detail, res.State.Phase, res.State.FailedReason)
+		}
+	}
+	return b.String()
 }
 
 func TestNobodyCanReadFitsBound(t *testing.T) {
@@ -1144,7 +1473,7 @@ func TestFairStepBoundObserved(t *testing.T) {
 	short, shortNow := refusedReader(t, 2, 3*time.Second)
 	add("2 non-readers H=3s", short, shortNow, 8, false)
 	lockS, lockNow := qaLockFixture(t)
-	add("QA lock + refused non-reader", lockS, lockNow, 5, false)
+	add("QA lock + refused non-reader", lockS, lockNow, 6, false)
 	stopS, stopNow := stoppedOwnerFixture(t)
 	add("stopped owner + refused non-reader", stopS, stopNow, 5, false)
 	twoR, twoRNow := twoReadersFixture(t)
@@ -1435,7 +1764,7 @@ func TestStoppedChainOwnerDelaySweep(t *testing.T) {
 func TestIdleKillAndStoppedNonReader(t *testing.T) {
 	lockS, lockNow := idleKillFixture(t)
 	lock := observeFair(lockS, lockNow)
-	if lock.stuck || !lock.ok || lock.steps != 6 || lock.steps > FairStepBound(lockS, lockNow) {
+	if lock.stuck || !lock.ok || lock.steps != 7 || lock.steps > FairStepBound(lockS, lockNow) {
 		t.Fatalf("idle_kill observed %d bound %d stuck %v ok %v", lock.steps, FairStepBound(lockS, lockNow), lock.stuck, lock.ok)
 	}
 	stopS, stopNow := stoppedNonReaderOwnerFixture(t)

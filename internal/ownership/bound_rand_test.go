@@ -50,6 +50,9 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 				seed, end.at.Format(time.RFC3339Nano), st.Phase, st.FailedReason, st.Desired, st.Lease.Owner, st.Lease.Present, st.Lock.Held,
 				st.Params.Storage, st.Chain.Owner, st.Chain.Verified(), !st.TailSince.IsZero(), end.violation, nodes)
 		}
+		if end.timedOut {
+			t.Fatalf("seed %d exceeded %s after %d states", seed, obsSeedBudget, end.states)
+		}
 		if end.over {
 			t.Fatalf("seed %d overflow states %d", seed, end.states)
 		}
