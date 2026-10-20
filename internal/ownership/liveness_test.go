@@ -47,6 +47,8 @@ import (
 // iteration, not the log formula. K is that waste/jump DP, plus Acquire and
 // DumpReady, plus the forced lock, stopped-owner, retry, and chain steps.
 // The longest fair schedule has exactly K steps. K-1 does not fit it.
+// The published lengths (8, 20, 37, 52, 30, 62) are literals. On the small
+// fixtures a second search, which only calls Step, has to agree with K.
 //
 // ChainOwnerBack is not taken when the directory cannot be read. That fixture
 // must stay FAILED. Terminal FAILED (auth, log_bin, legacy) waits for
@@ -470,7 +472,7 @@ type searcher struct {
 
 func runSearch(start State, now time.Time, limit int) (scheduleEnd, error) {
 	s := start
-	s.Trace = nil
+	s.trace = nil
 	sr := &searcher{memo: map[string]memoHit{}}
 	steps, wasted, ok := sr.longest(s, now)
 	if sr.overflow {
@@ -1322,6 +1324,134 @@ func wasteNode(s State, now time.Time, id string) (State, bool) {
 	return s, false
 }
 
+// stepClaimBound searches fair schedules by calling Step. It shares no
+// code with solveClaim: a bug that shrinks the DP shrinks claimBound and
+// leaves this search where it is.
+func stepClaimBound(s State, now time.Time) (int, bool) {
+	type hit struct {
+		n  int
+		ok bool
+	}
+	memo := map[string]hit{}
+	overflow := false
+	var rec func(State, time.Time) (int, bool)
+	rec = func(s State, now time.Time) (int, bool) {
+		if overflow {
+			return 0, false
+		}
+		refreshHeartbeats(&s, now)
+		if runningNow(s, now) {
+			return 0, true
+		}
+		key := stepKey(s, now)
+		if h, seen := memo[key]; seen {
+			return h.n, h.ok
+		}
+		if len(memo) > 200000 {
+			overflow = true
+			return 0, false
+		}
+		best, ok := -1, false
+		consider := func(n int, childOK bool) {
+			if childOK && n > best {
+				best, ok = n, true
+			}
+		}
+		if m, forced := forcedMove(s, now); forced {
+			n, childOK := rec(m.s, m.at)
+			consider(n+1, childOK)
+			memo[key] = hit{best, ok}
+			return best, ok
+		}
+		if InClaimSet(s, now) {
+			seen := map[string]bool{}
+			for _, node := range s.Nodes {
+				if !canWasteNow(s, now, node.ID) {
+					continue
+				}
+				sig := wasterSig(s, node.ID)
+				if seen[sig] {
+					continue
+				}
+				seen[sig] = true
+				next, wasted := wasteNode(s, now, node.ID)
+				if !wasted {
+					continue
+				}
+				n, childOK := rec(next, now)
+				consider(n+1, childOK)
+			}
+			horizon := readerHorizon(s, now)
+			if horizon.After(now) {
+				for _, when := range jumpTimes(s, now, horizon) {
+					n, childOK := rec(s, when)
+					consider(n+1, childOK)
+				}
+			} else if reader := eligibleReader(s, now); reader != "" && !RefusalBlocks(s, reader, now) {
+				res := Step(s, Event{Kind: EventAcquire, Node: reader}, now)
+				if res.Decision == DecisionApplied {
+					dumped := Step(res.State, Held(res.State, EventDumpReady, reader), now)
+					if dumped.Decision == DecisionApplied || dumped.Decision == DecisionIdempotent {
+						consider(2, true)
+					}
+				}
+			}
+		}
+		if !ok {
+			memo[key] = hit{}
+			return 0, false
+		}
+		memo[key] = hit{best, true}
+		return best, true
+	}
+	n, ok := rec(s, now)
+	if overflow {
+		return 0, false
+	}
+	return n, ok
+}
+
+func stepKey(s State, now time.Time) string {
+	var b strings.Builder
+	b.WriteString(itoa(now.UnixNano()))
+	b.WriteByte('|')
+	b.WriteString(string(s.Phase))
+	b.WriteByte('|')
+	b.WriteString(s.Lease.Owner)
+	for _, node := range s.Nodes {
+		b.WriteByte(';')
+		b.WriteString(node.ID)
+		r := s.Refusal[node.ID]
+		b.WriteByte(',')
+		b.WriteString(itoa(int64(r.Attempts)))
+		b.WriteByte(',')
+		b.WriteString(itoa(r.Until.UnixNano()))
+		if r.OpenEnded {
+			b.WriteByte('o')
+		}
+	}
+	return b.String()
+}
+
+// wantBound is the fair-schedule length for one published fixture.
+// The numbers are literals. claimBound is not allowed to be the expected value.
+func wantBound(t *testing.T, nonReaders int, hold time.Duration, want int) {
+	t.Helper()
+	s, later := refusedReader(t, nonReaders, hold)
+	if got := claimBound(s, later); got != want {
+		t.Fatalf("%d non-readers H=%s claimBound %d, want %d", nonReaders, hold, got, want)
+	}
+	// Two and three non-readers at 600s are past the Step search's state budget.
+	// The smaller fixtures are cross-checked against Step itself.
+	if nonReaders > 2 && hold >= 600*time.Second {
+		return
+	}
+	got, ok := stepClaimBound(s, later)
+	if !ok || got != want {
+		t.Fatalf("%d non-readers H=%s Step search %d ok=%v, want %d", nonReaders, hold, got, ok, want)
+	}
+}
+
 func TestLivenessWasteFormula(t *testing.T) {
 	claim := 2 * time.Second
 	cap := 600 * time.Second
@@ -1330,6 +1460,14 @@ func TestLivenessWasteFormula(t *testing.T) {
 	}
 	if logWastes(600*time.Second, claim) != 9 || iteratedWastes(600*time.Second, claim, cap) != 9 {
 		t.Fatalf("H=600s log %d iterated %d, want 9", logWastes(600*time.Second, claim), iteratedWastes(600*time.Second, claim, cap))
+	}
+	// 1022s is the horizon where the 10th claim lands on H itself
+	// (0+2+4+...+512 = 1022). A strict < would drop that claim.
+	if logWastes(1022*time.Second, claim) != 10 || iteratedWastes(1022*time.Second, claim, cap) != 10 {
+		t.Fatalf("H=1022s log %d iterated %d, want 10", logWastes(1022*time.Second, claim), iteratedWastes(1022*time.Second, claim, cap))
+	}
+	if claimsLeft(waster{}, 0, int64(1022*time.Second), DefaultParams()) != 10 {
+		t.Fatalf("claimsLeft at H=1022s = %d, want 10", claimsLeft(waster{}, 0, int64(1022*time.Second), DefaultParams()))
 	}
 	if logWastes(3600*time.Second, claim) != 11 {
 		t.Fatalf("H=3600s log %d, want 11", logWastes(3600*time.Second, claim))
@@ -1354,20 +1492,139 @@ func TestLivenessOneNonReaderRefused600(t *testing.T) {
 	t.Logf("non-readers=1 H=600s formula=%d longest=%d wasted=%d", k, longest.steps, longest.wasted)
 }
 
+func TestLivenessPublishedBounds(t *testing.T) {
+	// Literals, not claimBound's own output. 8 is also start 41 in
+	// TestLivenessAllFairSchedules. 30 is one non-reader held for an hour
+	// with the 600s cap, so the log formula (11) is not the waste count.
+	// 62 is four non-readers at 600s: 36 wastes, 24 jumps, Acquire, DumpReady.
+	wantBound(t, 1, 600*time.Second, 20)
+	wantBound(t, 2, 600*time.Second, 37)
+	wantBound(t, 3, 600*time.Second, 52)
+	wantBound(t, 4, 600*time.Second, 62)
+	wantBound(t, 1, time.Hour, 30)
+	wantBound(t, 2, 3*time.Second, 8)
+	for _, tc := range []struct {
+		n, want int
+		hold    time.Duration
+	}{
+		{1, 20, 600 * time.Second},
+		{2, 37, 600 * time.Second},
+		{3, 52, 600 * time.Second},
+		{4, 62, 600 * time.Second},
+	} {
+		s, later := refusedReader(t, tc.n, tc.hold)
+		if err := searchBudget(s, later, tc.want-1); err == nil {
+			t.Fatalf("%d non-readers held at %d", tc.n, tc.want-1)
+		}
+	}
+	if got := replayFourNonReaders(t); got != 62 {
+		t.Fatalf("4 non-readers Step schedule %d, want 62", got)
+	}
+}
+
+// replayFourNonReaders runs one 600s schedule through Step and counts
+// fair steps. The times are fixed; solveClaim is not consulted.
+func replayFourNonReaders(t *testing.T) int {
+	t.Helper()
+	s, later := refusedReader(t, 4, 600*time.Second)
+	type act struct {
+		id   string
+		jump time.Duration
+	}
+	script := []act{
+		{id: "n2"}, {id: "n3"}, {id: "n4"}, {id: "n5"},
+		{jump: 2 * time.Second},
+		{id: "n2"}, {id: "n3"}, {id: "n4"}, {id: "n5"},
+		{jump: 6 * time.Second},
+		{id: "n2"}, {id: "n3"}, {id: "n4"}, {id: "n5"},
+		{jump: 14 * time.Second},
+		{id: "n2"},
+		{jump: 30 * time.Second},
+		{id: "n3"}, {id: "n2"},
+		{jump: 46 * time.Second},
+		{id: "n3"},
+		{jump: 62 * time.Second},
+		{jump: 78 * time.Second},
+		{id: "n4"},
+		{jump: 94 * time.Second},
+		{id: "n5"}, {id: "n4"}, {id: "n2"},
+		{jump: 110 * time.Second},
+		{id: "n5"}, {id: "n3"},
+		{jump: 126 * time.Second},
+		{id: "n4"},
+		{jump: 142 * time.Second},
+		{id: "n5"},
+		{jump: 158 * time.Second},
+		{id: "n2"},
+		{jump: 174 * time.Second},
+		{id: "n3"},
+		{jump: 190 * time.Second},
+		{id: "n4"},
+		{jump: 206 * time.Second},
+		{id: "n5"},
+		{jump: 286 * time.Second},
+		{id: "n2"},
+		{jump: 302 * time.Second},
+		{id: "n3"},
+		{jump: 318 * time.Second},
+		{id: "n4"},
+		{jump: 334 * time.Second},
+		{id: "n5"},
+		{jump: 542 * time.Second},
+		{id: "n2"},
+		{jump: 558 * time.Second},
+		{id: "n3"},
+		{jump: 574 * time.Second},
+		{id: "n4"},
+		{jump: 590 * time.Second},
+		{id: "n5"},
+		{jump: 600 * time.Second},
+	}
+	at := later
+	steps := 0
+	for _, a := range script {
+		if a.jump != 0 {
+			at = later.Add(a.jump)
+			steps++
+			continue
+		}
+		next, ok := wasteNode(s, at, a.id)
+		if !ok {
+			t.Fatalf("waste %s at %s did not apply", a.id, at.Sub(later))
+		}
+		s = next
+		steps++
+	}
+	reader := eligibleReader(s, at)
+	res := Step(s, Event{Kind: EventAcquire, Node: reader}, at)
+	if res.Decision != DecisionApplied {
+		t.Fatalf("acquire %s", res.Decision)
+	}
+	steps++
+	res = Step(res.State, Held(res.State, EventDumpReady, reader), at)
+	if res.Decision != DecisionApplied && res.Decision != DecisionIdempotent {
+		t.Fatalf("dump %s", res.Decision)
+	}
+	steps++
+	if !runningNow(res.State, at) {
+		t.Fatal("schedule did not reach RUNNING")
+	}
+	return steps
+}
+
 func TestLivenessTwoAndThreeNonReaders(t *testing.T) {
-	for _, n := range []int{2, 3} {
-		s, later := refusedReader(t, n, 600*time.Second)
+	for _, tc := range []struct{ n, want int }{{2, 37}, {3, 52}} {
+		s, later := refusedReader(t, tc.n, 600*time.Second)
 		longest, k, err := searchAll(s, later)
 		if err != nil {
-			t.Fatalf("%d non-readers: %v", n, err)
+			t.Fatalf("%d non-readers: %v", tc.n, err)
 		}
-		if longest.steps != k || longest.phase != PhaseRunning {
-			t.Fatalf("%d non-readers steps %d K %d phase %s", n, longest.steps, k, longest.phase)
+		if k != tc.want || longest.steps != tc.want || longest.phase != PhaseRunning {
+			t.Fatalf("%d non-readers steps %d K %d phase %s, want %d", tc.n, longest.steps, k, longest.phase, tc.want)
 		}
-		if k > 0 && searchBudget(s, later, k-1) == nil {
-			t.Fatalf("%d non-readers held at K-1 %d", n, k-1)
+		if searchBudget(s, later, tc.want-1) == nil {
+			t.Fatalf("%d non-readers held at %d", tc.n, tc.want-1)
 		}
-		t.Logf("non-readers=%d formula=%d longest=%d wasted=%d", n, k, longest.steps, longest.wasted)
 	}
 }
 

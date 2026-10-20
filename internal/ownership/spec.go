@@ -109,9 +109,10 @@ func NodeGoneRejectsStart(p Params) bool {
 // RefusalCapRejectsStart is true when health.refusal_retry_cap_sec is negative.
 func RefusalCapRejectsStart(p Params) bool { return p.RefusalRetryCap < 0 }
 
-// maxRefusalShift is the largest exponent RefusalDelay will apply.
-// claim_interval << 21 overflows time.Duration for claim intervals at or above
-// about 2^34 nanoseconds, and a negative result would shrink the backoff.
+// maxRefusalShift is the largest exponent RefusalDelay will apply. A larger
+// shift saturates at the cap. So does a claim that is already greater than
+// cap>>shift: the shift is not performed, because a wrapped product can come
+// out positive and shorter than the cap.
 const maxRefusalShift = 20
 
 // maxRefusalAttempts caps the refusal counter. Past this, another failure
@@ -122,7 +123,8 @@ const maxRefusalAttempts = maxRefusalShift + 1
 // a NULL deadline. attempts is the count after this failure. A non-positive
 // attempt, claim, or cap is replaced with the published default (1, 2s, 600s)
 // so a direct call cannot panic or report the cap in place of the claim.
-// A shift above maxRefusalShift saturates at the cap instead of overflowing.
+// A shift above maxRefusalShift, or a claim above cap>>shift, saturates at
+// the cap instead of overflowing. Overflow must not shorten the deadline.
 func RefusalDelay(attempts int, claim, cap time.Duration) time.Duration {
 	if attempts < 1 {
 		attempts = 1
@@ -134,14 +136,10 @@ func RefusalDelay(attempts int, claim, cap time.Duration) time.Duration {
 		cap = 600 * time.Second
 	}
 	shift := attempts - 1
-	if shift > maxRefusalShift {
+	if shift > maxRefusalShift || claim > cap>>shift {
 		return cap
 	}
-	d := claim << shift
-	if d <= 0 || d > cap {
-		return cap
-	}
-	return d
+	return claim << shift
 }
 
 // Precheck is the 000011 gate. Any true failure skips every DDL statement.
