@@ -294,13 +294,10 @@ func TestLivenessAllFairSchedules(t *testing.T) {
 	for i, st := range starts {
 		end := observeFair(st.s, st.now)
 		bound := FairStepBound(st.s, st.now)
-		got := end.steps
-		if end.over {
-			overflow++
-			got, _ = walkMax(st.s, st.now, 8)
-		} else if !end.ok {
-			t.Fatalf("start %d phase %s owner %s lock %v tail %v refusals %d: no fair schedule", i, st.s.Phase, st.s.Lease.Owner, st.s.Lock.Held, !st.s.TailSince.IsZero(), len(st.s.Refusal))
+		if end.over || !end.ok {
+			t.Fatalf("start %d phase %s over=%v ok=%v states %d violation %s stuck %v", i, st.s.Phase, end.over, end.ok, end.states, end.violation, end.stuck)
 		}
+		got := end.steps
 		if got > bound {
 			t.Fatalf("start %d steps %d exceed bound %d phase %s storage %s", i, got, bound, st.s.Phase, st.s.Params.Storage)
 		}
