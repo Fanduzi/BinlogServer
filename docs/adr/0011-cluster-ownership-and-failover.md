@@ -279,7 +279,7 @@ MariaDB：
 
 事务内部不做磁盘 IO、不等待源库。0009 §23 的写边界保持「先锁租约行，再写这一小段 meta」。评估器把目录读完，再开这一个短事务提交结果。健康事务不再为 1205/1213 重试 50 次。
 
-`MetaLockTimeout` 的 finding 主题是 `META_LOCK_STALLED`（只用这一个名字，不再用 `META_UNREACHABLE` 兼着）。它写在任务 `_cluster` 上。写入者是观察到超时或调用了 `binlog_server_kill_trx` 的那个节点，走一条**不**调用 `applyOnce`、**不**锁 `task_leases` 的路径。这条写入自己失败时，该节点的 `/api/health` 503 用进程内「已经观察到锁超时」来判断，不依赖 finding 行先落库。关闭者就是这同一个节点：它连续两次在 `lock_wait` 之内拿到先前卡住的那把锁之后，关掉 finding，并清掉进程内的 503 原因。单次锁等待要不要先经过 Confirm 才打开 finding、才让 503，留给 PR-2（第 6 节 F12）；本记录不把第一次 1205 规定成一次页面。
+`MetaLockTimeout` 的 finding 主题是 `META_LOCK_STALLED`（只用这一个名字，不再用 `META_UNREACHABLE` 兼着）。它写在任务 `_cluster` 上。写入者是观察到超时或调用了 `binlog_server_kill_trx` 的那个节点，走一条**不**调用 `applyOnce`、**不**锁 `task_leases` 的路径。这条写入自己失败时，该节点的 `/api/health` 503 用进程内「已经观察到锁超时」来判断，不依赖 finding 行先落库。关闭者就是这同一个节点：它连续两次在 `lock_wait` 之内拿到先前卡住的那把锁之后，关掉 finding，并清掉进程内的 503 原因。第二次必须是同一个节点，并且落在它上一次拿到这把锁之后的 `lock_wait` 之内；别的节点拿锁不算，超过 `lock_wait` 则从第一次重新计。观察者不能从仍握着锁的持有者手里把锁拿走。单次锁等待要不要先经过 Confirm 才打开 finding、才让 503，留给 PR-2（第 6 节 F12）；本记录不把第一次 1205 规定成一次页面。
 
 `/api/health` 在下面任一成立时是 503，即使最后一行 `task_health.status` 还是 `HEALTHY`：
 
@@ -360,8 +360,8 @@ Stop 已经是「先落库 `STOPPING`」。保持为单事务。失败不写 `ST
 
 - **安全**（Go 的随机序列，固定种子可重放）：从 `CREATED` 出发，任意交错事件，每一段前缀都满足不变量 1–5、8、10，以及 6、7、9 的安全半边。特别是：非操作员 Stop/Delete 之后 desired 不是 `STOP`；`FAILED` 只出现在终态允许名单或 `CHAIN_OWNER_GONE` 上，不会出现在「本节点读不到目录、且 `task_chain` 是别人」的前缀里；未分类错误、`ENOENT`、`ENOSPC`、`EROFS` 的前缀不是 `FAILED`；同一 finding 键不会在事实未变时先关后开；`tail_unreadable_since` 在 `DumpReady` 之前不被 Start 或 `STARTING` 清掉；`OperatorStart` 的 409 分支不改变状态；runner 事件在更新的 epoch 上不写入；拒绝期限只来自库时钟那一列；认领不拉 `FAILED`。
 - **活性**（同一台函数，步数有上界。一步是一个事件或一个超时）：
-  - (a) 前提是：期望 `RUN`，至少一个能读目录的节点没有被停住。拒绝行不放进前提。`per_node` 的 NULL 拒绝由别人的 `DumpReady` 删掉；`shared` 的 `TailUnreadable` 和全部 `EpochLost` 在 `refusal_retry_cap_sec` 内到期，能读的节点会再次可调度。K = 1 次 `idle_kill` + 1 次 `claim_interval` + 1 次 `start_to_ready`。该节点若还停在一条会到期的拒绝里，K 再加这一次上限（缺省 600 秒）。唯一能读的节点短暂磁盘满时，恢复后最坏就是这一次 600 秒，整段是 CRITICAL，`/api/health` 是 503，并且这 600 秒加在第 3.4 节的缺省 RTO 之外。前提因此不会因为拒绝行永不到期而变成空集。
-  - (b) 不存在把任务永久停在 `LEASE_DEGRADED` 的认领循环。`per_node` 上 `tail_unreadable_since` 还在时，每个读不到目录的节点至多 `Acquire` 一次（`refuse_until` 为 NULL），直到某一次 `DumpReady` 删掉这些行；这一段 epoch 至多增加 N。`shared` 的 `TailUnreadable` 和 `EpochLost` 到顶之后按 `refusal_retry_cap_sec` 再试，速率有界，不写 NULL。链主人心跳还在但目录已经不在时，`ChainOwnerBack` 不发生，行留在 `FAILED`，能读的节点仍按上面的到期拒绝再试。K 含这 N 次无用认领：一次无用认领在搜索里算一步（`Acquire` 加上把它放开的 `TailUnreadable`，或该节点已是已验证链主人时的 `EpochLost`）。活性用三条公平性假设下的有界搜索，随机前缀只验安全性。检查方法写在 `internal/ownership/liveness_test.go`（第 6 节 N9）。
+  - (a) 前提是：期望 `RUN`，至少一个能读目录的节点没有被停住。拒绝行不放进前提。`per_node` 的 NULL 拒绝由别人的 `DumpReady` 删掉；`shared` 的 `TailUnreadable` 和全部 `EpochLost` 在 `refusal_retry_cap_sec` 内到期，能读的节点会再次可调度。K = 1 次 `idle_kill` + 1 次 `claim_interval` + 1 次 `start_to_ready`。该节点若还停在一条会到期的拒绝里，K 再加这一次上限（缺省 600 秒）。`shared` 下这条拒绝到期之后，同一个节点还可以再认领；公平调度在读者的拒绝、`idle_kill` 或停住 owner 的租约 TTL 上跳一次时钟时，每个因此到期的节点再计一次无用认领，K 含这些再认领，不把 N 截成节点个数。`per_node` 的 NULL 拒绝不到期，不记再认领。唯一能读的节点短暂磁盘满时，恢复后最坏就是这一次 600 秒，整段是 CRITICAL，`/api/health` 是 503，并且这 600 秒加在第 3.4 节的缺省 RTO 之外。前提因此不会因为拒绝行永不到期而变成空集。
+  - (b) 不存在把任务永久停在 `LEASE_DEGRADED` 的认领循环。`per_node` 上 `tail_unreadable_since` 还在时，每个读不到目录的节点至多 `Acquire` 一次（`refuse_until` 为 NULL），直到某一次 `DumpReady` 删掉这些行；这一段 epoch 至多增加 N，搜索把第二次认领剪掉。`shared` 的 `TailUnreadable` 和 `EpochLost` 到顶之后按 `refusal_retry_cap_sec` 再试，速率有界，不写 NULL，搜索不剪掉到期后的再认领。链主人心跳还在但目录已经不在时，`ChainOwnerBack` 不发生，行留在 `FAILED`，能读的节点仍按上面的到期拒绝再试。K 含这 N 次无用认领，并且含 (a) 里 `shared` 的再认领：一次无用认领在搜索里算一步（`Acquire` 加上把它放开的 `TailUnreadable`，或该节点已是已验证链主人时的 `EpochLost`）。起点包含 `FAILED` / `CHAIN_OWNER_GONE`。活性用三条公平性假设下的有界搜索，随机前缀只验安全性。检查方法写在 `internal/ownership/liveness_test.go`（第 6 节 N9）。
   - (c) `DumpReady` 之后，尾巴 finding 在一个 sweep 步内关闭。
 - **轨迹**（表驱动，QA 场景写成事件序列，断言终态）：
 
@@ -542,7 +542,7 @@ PR-2 和 PR-3 互不依赖，可以并行。PR-4 依赖 PR-1。PR-5 依赖 PR-3 
 | N6 | `META_LOCK_STALLED` 的观察者死后 finding 不关，全集群一直 503。subject 用任务 id，`_cluster` 的 Reconcile 不得关掉不是它派生的这一条。观察者心跳早于 `node_gone_after` 之后，由 `_health` 持有者在连续两次拿到锁之后关闭 | PR-2 |
 | N7 | 源改密码，或 VIP 切到 `log_bin` 关闭的从库，会把 `FAILED` 钉死，而 desired 仍是 `RUN`。进终态允许名单之前先按 `RetryableError` 重试至少 2 分钟。Console 显示 `failed_reason`。`OperatorStart` 清空 `failed_reason` 已在第 3.2 节写明 | PR-4 |
 | N8 | 推进的 `OperatorStart` 在接住 HTTP 的那个进程上 `Acquire`。只有 API、或没有目录的节点会因此空握一个 TTL。这种进程改为写 owner 为空的 `STARTING`，交给有目录的节点认领 | PR-4 |
-| N9 | 第 4.1 节活性 (a) 的 K 含 (b) 的 N 次无用认领。一次无用认领算一步。检查方法是：在三条公平性假设的调度下，从每个可达状态做有界搜索。随机前缀只验安全性。搜索里要包含目录已消失、心跳还在的 `ChainOwnerBack` 情形（第 4.1 节已有这条轨迹） | PR-1。方法写在 `internal/ownership/liveness_test.go` |
+| N9 | 第 4.1 节活性 (a) 的 K 含 (b) 的 N 次无用认领，`shared` 再含拒绝到期后的再认领。一次无用认领算一步。`per_node` 的 NULL 拒绝剪枝，会到期的拒绝不剪。检查方法是：在三条公平性假设的调度下，从每个可达状态做有界搜索，起点包含 `FAILED` / `CHAIN_OWNER_GONE`。随机前缀只验安全性。搜索里要包含目录已消失、心跳还在的 `ChainOwnerBack` 情形（第 4.1 节已有这条轨迹） | PR-1。方法写在 `internal/ownership/liveness_test.go` |
 | P2-3 | 触发器会拒绝一切不把 `row_generation` 加一的 `UPDATE backup_tasks`。PR-4 列出并改掉仓库里的手写更新，包括 `scripts/e2e/smoke-epoch-segments.sh` 和升级说明里的 SQL | PR-4 |
 | P2-5 | `StopExpired` 之后，旧持有者迟到的 `EpochLost` 或 `StopConfirmed` 若更新 0 行，就是 no-op，不是错误。租约行已经不在，也算 epoch 已丢。`per_node` 上删除任务之后，目录由谁清理要有主人：删除时留 tombstone，交给已有的 leftovers 机制，不在本记录里新做一套清理器。纯模型里，迟到的 0 行事件是 `DecisionDiscarded`，`per_node` 删除带 `IntentTombstone` | PR-4 |
 | P2-7 | meta 的会话超时必须落在每一条池连接和每一次重连上，用 DSN 系统变量参数或连接钩子。e2e 在一条新开的池连接上复现握着 `FOR UPDATE` 时被服务器踢掉。只 `SET` 一次的话，其余连接仍是 28800 秒，第 3.4 节的 RTO 不成立 | PR-2，必做 |

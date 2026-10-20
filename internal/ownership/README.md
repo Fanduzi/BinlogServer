@@ -11,11 +11,11 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 | `state.go` | 任务状态：期望、观察态、租约、备份链、拒绝、结论、节点 |
 | `event.go` | ADR 0011 §3.2 的事件，以及续租、sweep、行锁、旧二进制更新 |
 | `step.go` | `Step`：一次事件到下一状态和意图 |
-| `invariant.go` | 不变量 1–10 的可检查谓词，认领集、停止集、`/api/health`。不变量 7 用 `ProgressOverdue` 从状态和时钟重算 |
+| `invariant.go` | 不变量 1–10 的可检查谓词。不变量 7 的 `ProgressOverdue` 按 ADR 自己重算租约是否活着、重试窗口是否还在，不调用模型的 `LeaseLive` / `LegalRetry` |
 | `finding.go` | 结论从事实派生。事实没变时，同一键不会先关后开 |
 | `spec.go` | RTO、stale、`node_gone`、拒绝退避、迁移预检、旁路杀计划 |
 | `invariant_test.go` | 安全性：固定种子的随机前缀，加深度 3 的有界穷举。字母表含旧 epoch、`StopConfirmed`、`StopExpired`、`Lock`，时钟会跳过租约 TTL |
-| `liveness_test.go` | 活性 (a)(b)(c)。有界搜索每一条公平调度，起点是多条带偏随机游走里的前提状态。检查方法写在文件头。K 含 N 次无用认领 |
+| `liveness_test.go` | 活性 (a)(b)(c)。有界搜索每一条公平调度。`per_node` 的 NULL 拒绝剪枝；`shared` 到期后再认领算进 K。起点含 `FAILED` / `CHAIN_OWNER_GONE`。检查方法写在文件头 |
 | `trajectory_test.go` | §4.1 轨迹 |
 | `fault_matrix_test.go` | §4.2 里纯模型能表达的每一行 |
 | `scenario_walk_test.go` | §4.3 里纯模型能表达的走查 |

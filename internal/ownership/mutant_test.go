@@ -132,6 +132,156 @@ func TestMutantM04_RefusalDelayDoubles(t *testing.T) {
 	}
 }
 
+func TestMutantF03_FirstRefusalIsClaimInterval(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s.Params.Storage = StorageShared
+	if s.Params.ClaimInterval != 2*time.Second {
+		t.Fatalf("claim interval %s", s.Params.ClaimInterval)
+	}
+	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseEROFS), t0)
+	first := s.Refusal["n1"].Until.Sub(t0)
+	if first != s.Params.ClaimInterval {
+		t.Fatalf("first refusal %s, want %s", first, s.Params.ClaimInterval)
+	}
+}
+
+func TestMutantF04_LeaseTTLIsExact(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	want := t0.Add(s.Params.LeaseTTL)
+	if !s.Lease.ExpireAt.Equal(want) {
+		t.Fatalf("expire %s, want %s", s.Lease.ExpireAt, want)
+	}
+}
+
+func TestMutantF09_StartClearsFailedReason(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s = applied(t, s, heldCause(s, EventTerminalError, "n1", CauseSourceAuth), t0)
+	if s.FailedReason == "" || s.Phase != PhaseFailed {
+		t.Fatalf("phase %s reason %s", s.Phase, s.FailedReason)
+	}
+	s.RetryAttempt = 4
+	s.LastError = "stuck"
+	before := s.SpecRevision
+	res := step(t, s, Event{Kind: EventOperatorStart, Node: "n1"}, t0)
+	if res.State.FailedReason != "" || !res.State.FailedAt.IsZero() || res.State.RetryAttempt != 0 || res.State.LastError != "" {
+		t.Fatalf("reason %q at %s attempt %d err %q", res.State.FailedReason, res.State.FailedAt, res.State.RetryAttempt, res.State.LastError)
+	}
+	if res.State.SpecRevision <= before {
+		t.Fatalf("spec %d -> %d", before, res.State.SpecRevision)
+	}
+}
+
+func TestMutantF11_SecondLockIsSameNodeInsideLockWait(t *testing.T) {
+	s := boot(t, "n1", t0, []Node{peer("n2", true, t0)})
+	s.Params.LockWait = time.Second
+	s = applied(t, s, Event{Kind: EventLock, Node: "n1"}, t0)
+	early := t0.Add(time.Second)
+	stalled := applied(t, s, Event{Kind: EventMetaLockTimeout, Node: "n2"}, early)
+	at := t0.Add(s.Params.IdleKill)
+	once := applied(t, stalled, Event{Kind: EventLock, Node: "n2"}, at)
+	if !once.MetaLockStalled || once.LockRecoveries != 1 {
+		t.Fatalf("first take stalled %v recoveries %d", once.MetaLockStalled, once.LockRecoveries)
+	}
+	late := applied(t, once, Event{Kind: EventLock, Node: "n2"}, at.Add(s.Params.LockWait+time.Millisecond))
+	if !late.MetaLockStalled || late.LockRecoveries != 1 {
+		t.Fatalf("late take closed the stall: stalled %v recoveries %d", late.MetaLockStalled, late.LockRecoveries)
+	}
+	freed := t0.Add(2 * s.Params.IdleKill)
+	other := applied(t, once, Event{Kind: EventLock, Node: "n1"}, freed)
+	if !other.MetaLockStalled {
+		t.Fatal("a different node closed META_LOCK_STALLED")
+	}
+}
+
+func TestMutantF12_NoProgressBoundaryIsStrict(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	renewed := t0.Add(s.Params.NoProgressAfter - s.Params.LeaseTTL + time.Second)
+	s = applied(t, s, Event{Kind: EventRenew, Node: "n1", Epoch: s.Lease.Epoch}, renewed)
+	at := t0.Add(s.Params.NoProgressAfter)
+	if !LeaseLive(s, at) {
+		t.Fatal("fixture let the lease die on the boundary")
+	}
+	exact := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, at)
+	if findOpen(exact, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS opened at exactly no_progress_after")
+	}
+	open := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, at.Add(time.Nanosecond))
+	if !findOpen(open, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS stayed closed after no_progress_after")
+	}
+	hand := exact
+	hand.Findings = nil
+	hand.NoProgress = false
+	if v := Check(hand, at); hasInv(v, "7") {
+		t.Fatalf("checker fired on the boundary: %+v", v)
+	}
+	hand.NoProgress = false
+	if v := Check(hand, at.Add(time.Nanosecond)); !hasInv(v, "7") {
+		t.Fatal("checker stayed quiet after the boundary")
+	}
+}
+
+func TestMutantF15_RetryUntilBoundaryIsStrict(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s = applied(t, s, heldCause(s, EventRetryableError, "n1", CauseLockWait), t0)
+	deadline := s.RetryUntil
+	s.Lease.ExpireAt = deadline
+	s.UnownedSince = deadline.Add(-s.Params.Sweep)
+	s.Findings = nil
+	s.NoProgress = false
+	early := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, deadline.Add(-time.Nanosecond))
+	if findOpen(early, FindingNoProgress, s.TaskID) || !LegalRetry(s, deadline.Add(-time.Nanosecond)) {
+		t.Fatal("retry window closed before retry_until")
+	}
+	at := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, deadline)
+	if !findOpen(at, FindingNoProgress, s.TaskID) || LegalRetry(s, deadline) {
+		t.Fatal("retry window still open at retry_until")
+	}
+}
+
+func TestMutantF16_NodeGoneBoundaryIsStrict(t *testing.T) {
+	s := yieldTail(t, "n1", "n2")
+	limit := EffectiveNodeGone(s.Params)
+	s = heartbeat(s, "n1", s.TailSince)
+	at := s.TailSince.Add(limit)
+	res := step(t, s, Event{Kind: EventChainOwnerGone, Node: "_health"}, at)
+	if res.Decision == DecisionApplied || res.State.Phase == PhaseFailed {
+		t.Fatalf("gone at exactly node_gone_after: %s phase %s", res.Decision, res.State.Phase)
+	}
+	res = step(t, s, Event{Kind: EventChainOwnerGone, Node: "_health"}, at.Add(time.Nanosecond))
+	if res.State.Phase != PhaseFailed || res.State.FailedReason != ReasonChainOwnerGone {
+		t.Fatalf("not gone just after node_gone_after: phase %s reason %s", res.State.Phase, res.State.FailedReason)
+	}
+}
+
+func TestMutantF02_ChainOwnerBackNeedsAFreshHeartbeat(t *testing.T) {
+	s := yieldTail(t, "n1", "n2")
+	goneAt := s.TailSince.Add(EffectiveNodeGone(s.Params) + time.Second)
+	s = heartbeat(s, "n1", s.TailSince)
+	s = applied(t, s, Event{Kind: EventChainOwnerGone, Node: "_health"}, goneAt)
+	backAt := goneAt.Add(time.Second)
+	s = heartbeat(s, "n1", time.Time{})
+	s = applied(t, s, Event{Kind: EventChainVerified, Node: "n1", ReadOK: true}, backAt)
+	res := step(t, s, Event{Kind: EventChainOwnerBack, Node: "n1"}, backAt)
+	if res.Decision == DecisionApplied || res.State.Phase != PhaseFailed {
+		t.Fatalf("back with a zero heartbeat: %s phase %s", res.Decision, res.State.Phase)
+	}
+}
+
+func TestMutantF20_ChainOwnerBackAllowsTheExactBoundary(t *testing.T) {
+	s := yieldTail(t, "n1", "n2")
+	goneAt := s.TailSince.Add(EffectiveNodeGone(s.Params) + time.Second)
+	s = heartbeat(s, "n1", s.TailSince)
+	s = applied(t, s, Event{Kind: EventChainOwnerGone, Node: "_health"}, goneAt)
+	backAt := goneAt.Add(time.Second)
+	s = heartbeat(s, "n1", backAt.Add(-EffectiveNodeGone(s.Params)))
+	s = applied(t, s, Event{Kind: EventChainVerified, Node: "n1", ReadOK: true}, backAt)
+	res := step(t, s, Event{Kind: EventChainOwnerBack, Node: "n1"}, backAt)
+	if res.State.Phase != PhaseLeaseDegraded || res.State.FailedReason != "" {
+		t.Fatalf("back at exactly node_gone_after: phase %s reason %s", res.State.Phase, res.State.FailedReason)
+	}
+}
+
 func TestMutantM13_RetryableErrorOnDeadLeaseIsEpochLost(t *testing.T) {
 	s := boot(t, "n1", t0, nil)
 	later := t0.Add(s.Params.LeaseTTL)
@@ -169,12 +319,17 @@ func TestMutantM16_StallClosesOnSecondLockNotFirstSweep(t *testing.T) {
 	if !swept.MetaLockStalled {
 		t.Fatal("two sweeps closed META_LOCK_STALLED")
 	}
-	once := applied(t, res.State, Event{Kind: EventLock, Node: "n2"}, early)
-	if !once.MetaLockStalled || once.LockRecoveries < 1 {
-		t.Fatal("the first take closed the stall")
+	stolen := step(t, res.State, Event{Kind: EventLock, Node: "n2"}, early)
+	if stolen.Decision == DecisionApplied || stolen.State.Lock.HeldBy != "n1" || !stolen.State.MetaLockStalled {
+		t.Fatalf("observer took the stalled holder's lock: decision %s holder %s", stolen.Decision, stolen.State.Lock.HeldBy)
 	}
-	twice := applied(t, once, Event{Kind: EventLock, Node: "n2"}, early.Add(time.Second))
-	if twice.MetaLockStalled || HealthCode(twice, early.Add(time.Second)) == 503 && twice.HealthBlocked {
+	at := t0.Add(s.Params.IdleKill)
+	once := applied(t, res.State, Event{Kind: EventLock, Node: "n2"}, at)
+	if !once.MetaLockStalled || once.Lock.HeldBy != "n2" || once.LockRecoveries < 1 {
+		t.Fatalf("first take closed the stall or missed the lock: stalled %v holder %s", once.MetaLockStalled, once.Lock.HeldBy)
+	}
+	twice := applied(t, once, Event{Kind: EventLock, Node: "n2"}, at.Add(time.Second))
+	if twice.MetaLockStalled || HealthCode(twice, at.Add(time.Second)) == 503 && twice.HealthBlocked {
 		t.Fatalf("second take left stalled %v blocked %v", twice.MetaLockStalled, twice.HealthBlocked)
 	}
 }

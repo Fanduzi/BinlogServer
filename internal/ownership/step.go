@@ -681,9 +681,14 @@ func sweep(s State, e Event, now time.Time) partial {
 }
 
 func takeLock(s State, e Event, now time.Time) partial {
+	// The observer does not take a lock the stalled holder still has.
+	// idle_kill drops it; until then another node is refused.
+	if s.Lock.Held && s.Lock.HeldBy != "" && s.Lock.HeldBy != e.Node {
+		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "lock held"})
+	}
 	next := s
 	// Closing META_LOCK_STALLED takes the previously stuck lock twice, inside
-	// lock_wait. A sweep does not count, and one take is not enough.
+	// lock_wait, and both takes are the observer. A sweep does not count.
 	if next.MetaLockStalled && e.Node == next.LockObserver {
 		within := next.LockRecoveries > 0 && next.Lock.HeldBy == e.Node && !now.After(next.Lock.Since.Add(next.Params.LockWait))
 		if within {
