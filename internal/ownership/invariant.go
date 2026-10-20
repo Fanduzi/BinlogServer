@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State and the clock used for lease, refusal, and stale comparisons
-// output: Violation list for invariants 1–10, ProgressOverdue from the applied-event trace, claim and stop sets, /api/health code
+// output: Violation list for invariants 1–10, ProgressOverdue from the applied-event trace, claim and stop sets, FairTerminal, /api/health code
 // pos: the checkable predicates ADR 0011 §2 requires of every prefix
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -207,9 +207,11 @@ func Check(s State, now time.Time) []Violation {
 	return v
 }
 
-// failedSpecClaimable is the claim gate for a terminal FAILED row.
-// The allowlist and LEGACY_UNKNOWN resume only when the spec revision has
-// moved past the revision recorded at failure. CHAIN_OWNER_GONE never does.
+// failedSpecClaimable is the claim gate for a whitelisted FAILED row.
+// SOURCE_AUTH, LOG_BIN_OFF, and LEGACY_UNKNOWN resume only when the spec
+// revision has moved past the revision recorded at failure.
+// CHAIN_OWNER_GONE never does: another node does not take over a chain
+// whose owner lost the directory.
 func failedSpecClaimable(s State) bool {
 	switch s.FailedReason {
 	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
@@ -217,6 +219,52 @@ func failedSpecClaimable(s State) bool {
 	default:
 		return false
 	}
+}
+
+// FairTerminal is the liveness end. RUNNING is one. A FAILED row is the
+// other only while the fair scheduler cannot leave it.
+// A whitelisted reason is terminal only when InClaimSet is false: the spec
+// revision has not moved past failed_spec_revision. CHAIN_OWNER_GONE is
+// never claimable. It stays terminal while the chain owner is stopped,
+// absent, or alive with CanRead false. An owner who can still read the
+// directory can ChainVerified and ChainOwnerBack.
+func FairTerminal(s State, now time.Time) bool {
+	if fairRunning(s, now) {
+		return true
+	}
+	if s.Phase != PhaseFailed {
+		return false
+	}
+	switch s.FailedReason {
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+		return !InClaimSet(s, now)
+	case ReasonChainOwnerGone:
+		n := s.node(s.Chain.Owner)
+		return n == nil || n.Stopped || !n.CanRead
+	default:
+		return false
+	}
+}
+
+func fairRunning(s State, now time.Time) bool {
+	if s.Lock.Held || s.Phase != PhaseRunning || s.Desired != DesiredRun {
+		return false
+	}
+	if !LeaseLive(s, now) {
+		return false
+	}
+	return nodeReady(s, s.Lease.Owner)
+}
+
+func nodeReady(s State, id string) bool {
+	n := s.node(id)
+	if n == nil || !n.CanRead || n.Stopped {
+		return false
+	}
+	if r, ok := s.Refusal[id]; ok && r.OpenEnded {
+		return false
+	}
+	return true
 }
 
 // ProgressOverdue is invariant 7's clock, replayed from the applied-event trace.
