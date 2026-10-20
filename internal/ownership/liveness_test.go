@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Step, under the three fairness assumptions in ADR 0011 §4.1
-// output: liveness (a), (b), and (c), with K counting wasted per_node claims (N9)
+// output: liveness (a), (b), and (c). K counts wasted claims and shared re-claims (N9)
 // pos: the bounded fair search. Random prefixes in invariant_test.go are safety only
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -30,13 +30,16 @@ import (
 //     and which is not stopped, is the reader the search schedules. An
 //     expiring refusal costs one wait step, up to refusal_retry_cap.
 //
-// One wasted per_node claim is Acquire plus the TailUnreadable (or EpochLost,
-// when the node is the verified chain owner) that releases it. A live owner
-// that cannot read yields with that same release and no extra Acquire. Either
-// way it counts as one step. N in K is how many such claims are still possible
-// at the start of the search, which is at most the number of nodes.
+// One wasted claim is Acquire plus the TailUnreadable (or EpochLost, when the
+// node is the verified chain owner) that releases it. A live owner that cannot
+// read yields with that same release and no extra Acquire. Either way it counts
+// as one step. per_node NULL refusals are pruned: that node cannot claim again.
+// A dated refusal (shared TailUnreadable, and every EpochLost) can be claimed
+// again after it expires. K counts one such re-claim per node when a fair time
+// jump — the reader's refusal, idle_kill, or a stopped owner's lease TTL —
+// lands at or after refuse_until.
 //
-//	K = claim + DumpReady + N
+//	K = claim + DumpReady + N + re-claims
 //	    + 1 if a row lock is held          (idle_kill)
 //	    + 1 if the live owner is stopped   (wait out lease_expire_at, the TTL term of the RTO formula)
 //	    + 1 if the reader has an expiring refusal
@@ -67,13 +70,54 @@ func TestLivenessBudgetCountsWastedClaims(t *testing.T) {
 	if longest.phase != PhaseRunning || longest.owner != "n1" {
 		t.Fatalf("phase %s owner %s steps %d K %d wasted %d", longest.phase, longest.owner, longest.steps, k, longest.wasted)
 	}
-	if longest.wasted != 2 || longest.steps > k {
-		t.Fatalf("steps %d wasted %d K %d", longest.steps, longest.wasted, k)
+	if longest.wasted != 2 || longest.steps != k {
+		t.Fatalf("steps %d wasted %d K %d; K must be exactly the longest fair schedule", longest.steps, longest.wasted, k)
 	}
 	// N9: K without the N wasted claims is too small for the longest fair schedule.
 	if longest.steps <= k-n {
 		t.Fatalf("schedule fit in K-N (%d <= %d); N is not actually in the budget", longest.steps, k-n)
 	}
+}
+
+func TestLivenessSharedReclaimFitsInK(t *testing.T) {
+	s := boot(t, "n1", t0, []Node{peer("n2", true, t0), peer("n3", false, t0)})
+	s.Params.Storage = StorageShared
+	later := t0.Add(time.Hour)
+	s = expireLease(s, later)
+	s = applied(t, s, Event{Kind: EventAcquire, Node: "n1"}, later)
+	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseEROFS), later)
+	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: later.Add(time.Hour), Attempts: 1}
+	base := 2 + wastedPossible(s, later)
+	longest, k, err := searchAll(s, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k <= base {
+		t.Fatalf("K %d does not count the shared re-claim on top of %d", k, base)
+	}
+	if longest.phase != PhaseRunning || longest.steps != k {
+		t.Fatalf("steps %d K %d phase %s", longest.steps, k, longest.phase)
+	}
+}
+
+func addChainGoneStarts(t *testing.T, add func(State, time.Time)) {
+	t.Helper()
+	per := yieldTail(t, "n1", "n2")
+	goneAt := per.TailSince.Add(EffectiveNodeGone(per.Params) + time.Second)
+	per = heartbeat(per, "n1", per.TailSince)
+	per = applied(t, per, Event{Kind: EventChainOwnerGone, Node: "_health"}, goneAt)
+	add(per, goneAt)
+
+	shared := boot(t, "n1", t0, []Node{peer("n2", false, t0), peer("n3", false, t0)})
+	shared.Params.Storage = StorageShared
+	later := t0.Add(time.Hour)
+	shared = expireLease(shared, later)
+	shared = applied(t, shared, Event{Kind: EventAcquire, Node: "n2"}, later)
+	shared = applied(t, shared, heldCause(shared, EventTailUnreadable, "n2", CauseSegmentNotOnWorker), later)
+	when := shared.TailSince.Add(EffectiveNodeGone(shared.Params) + time.Second)
+	shared = heartbeat(shared, "n1", shared.TailSince)
+	shared = applied(t, shared, Event{Kind: EventChainOwnerGone, Node: "_health"}, when)
+	add(shared, when)
 }
 
 func TestLivenessDumpReadyClosesTailWithinSweep(t *testing.T) {
@@ -224,8 +268,18 @@ func TestLivenessAllFairSchedules(t *testing.T) {
 			break
 		}
 	}
+	addChainGoneStarts(t, add)
 	if len(starts) < 80 {
 		t.Fatalf("premise held for only %d states", len(starts))
+	}
+	goneStarts := 0
+	for _, st := range starts {
+		if st.s.Phase == PhaseFailed && st.s.FailedReason == ReasonChainOwnerGone {
+			goneStarts++
+		}
+	}
+	if goneStarts < 1 {
+		t.Fatal("liveness start set has no FAILED/CHAIN_OWNER_GONE state")
 	}
 	for i, st := range starts {
 		longest, k, err := searchAll(st.s, st.now)
@@ -304,13 +358,87 @@ func wastedPossible(s State, now time.Time) int {
 	return n
 }
 
+// extraWastes is the shared-mode (and dated EpochLost) re-claim term.
+// A NULL per_node refusal does not expire, so it adds nothing. A dated refusal
+// adds one more claim when the fair jump lands at or after refuse_until.
+func extraWastes(s State, now time.Time) int {
+	jump := fairJump(s, now)
+	if !jump.After(now) {
+		return 0
+	}
+	p := s.Params.fill()
+	n := 0
+	for _, node := range s.Nodes {
+		if node.CanRead || node.Stopped {
+			continue
+		}
+		r, ok := s.Refusal[node.ID]
+		if ok && r.OpenEnded {
+			continue
+		}
+		if ok && r.Until.After(now) {
+			if !r.Until.After(jump) {
+				n++
+			}
+			continue
+		}
+		if !canWasteNow(s, now, node.ID) || wasteStaysOpen(s, node.ID) {
+			continue
+		}
+		attempts := r.Attempts + 1
+		if attempts < 1 {
+			attempts = 1
+		}
+		until := now.Add(RefusalDelay(attempts, p.ClaimInterval, p.RefusalRetryCap))
+		if !until.After(jump) {
+			n++
+		}
+	}
+	return n
+}
+
+func fairJump(s State, now time.Time) time.Time {
+	jump := now
+	reader := eligibleReader(s, now)
+	if r, ok := s.Refusal[reader]; ok && !r.OpenEnded && r.Until.After(jump) {
+		jump = r.Until
+	}
+	if s.Lock.Held {
+		if d := s.Lock.Since.Add(s.Params.IdleKill); d.After(jump) {
+			jump = d
+		}
+	}
+	if LeaseLive(s, now) && ownerStopped(s) && s.Lease.ExpireAt.After(jump) {
+		jump = s.Lease.ExpireAt
+	}
+	if LegalRetry(s, now) && s.Lease.Owner == reader && s.RetryUntil.After(jump) {
+		jump = s.RetryUntil
+	}
+	return jump
+}
+
+func canWasteNow(s State, now time.Time, id string) bool {
+	node := findNode(s, id)
+	if node == nil || node.CanRead || node.Stopped || RefusalBlocks(s, id, now) || !InClaimSet(s, now) {
+		return false
+	}
+	return true
+}
+
+func wasteStaysOpen(s State, id string) bool {
+	if s.Params.Storage != StoragePerNode {
+		return false
+	}
+	return !(s.Chain.Verified() && s.Chain.Owner == id)
+}
+
 func ownerStopped(s State) bool {
 	n := findNode(s, s.Lease.Owner)
 	return n != nil && n.Stopped
 }
 
 func budget(s State, now time.Time) int {
-	k := 2 + wastedPossible(s, now) // claim + DumpReady + N
+	k := 2 + wastedPossible(s, now) + extraWastes(s, now) // claim + DumpReady + N + re-claims
 	if s.Lock.Held {
 		k++
 		// idle_kill can land at or after lease_expire_at. The owner then has to
@@ -488,7 +616,12 @@ func fairSuccessors(s State, now time.Time, steps, wasted int, already map[strin
 	if InClaimSet(s, now) {
 		for _, node := range s.Nodes {
 			if already[node.ID] {
-				continue
+				r, ok := s.Refusal[node.ID]
+				// per_node NULL refusals never expire. A dated refusal can be
+				// claimed again once refuse_until has passed.
+				if !ok || r.OpenEnded || r.Until.After(now) {
+					continue
+				}
 			}
 			if next, ok := wasteNode(s, now, node.ID); ok {
 				add(next, now, 1, "waste-"+node.ID, node.ID)

@@ -1,6 +1,6 @@
 # internal/ownership/mutants
 
-把评审用的 34 个源码变异重新打到 `internal/ownership` 上，确认测试会失败。
+把评审用的源码变异重新打到 `internal/ownership` 上，确认测试会失败。表里是原先的 34 个，加上后来的 F01–F20。
 
 ## Files
 
@@ -12,7 +12,7 @@
 
 - `go run ./internal/ownership/mutants/kill.go`
 
-退出码 0 表示 34 个变异都被测试打死。退出码 1 表示有变异活下来，或补丁没有唯一命中。
+退出码 0 表示每个变异都被测试打死，或被标成等价（行为不变）。退出码 1 表示有变异活下来。
 
 ## Dependencies
 
