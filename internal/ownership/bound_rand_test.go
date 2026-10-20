@@ -1,7 +1,7 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
-// input: Step, Check, FairStepBound, and a local copy of the reader-horizon bound
+// input: Step, Check, and FairStepBound
 // output: seeded configs whose fair-step count stays within FairStepBound
-// pos: the randomized check that a reader-horizon-only window undercounts
+// pos: the randomized check that forced clocks and terminal paths stay inside the bound
 // note: if this file changes, update this header and module README.md.
 package ownership
 
@@ -9,177 +9,11 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
 )
-
-// horizonOnlyBound is the d90eb7b8 bound. The window is the longest dated
-// refusal on an eligible reader. A lock, a stopped owner, and a retry wait
-// do not extend it, so a non-reader who becomes ready in that gap counts as 0.
-// It is inlined here so the check does not call boundWindow or the other
-// bound helpers.
-func horizonOnlyBound(s State, now time.Time) int {
-	if r6Running(s, now) {
-		return 0
-	}
-	p := s.Params.fill()
-	H, reader := r6Horizon(s, now)
-	forced := r6Forced(s, now)
-	wastes, pending := 0, 0
-	for _, node := range s.Nodes {
-		if node.ID == reader || node.CanRead || node.Stopped {
-			continue
-		}
-		w, pend := r6Wastes(s, node.ID, now, H, p)
-		wastes += w
-		pending += pend
-	}
-	jumps := 0
-	if H > 0 {
-		jumps = wastes + pending + 1
-	}
-	finish := 0
-	if reader != "" {
-		finish = 2
-	}
-	return forced + wastes + jumps + finish
-}
-
-func r6Running(s State, now time.Time) bool {
-	if s.Lock.Held || s.Phase != PhaseRunning || s.Desired != DesiredRun {
-		return false
-	}
-	if !s.Lease.Present || s.Lease.Owner == "" || !s.Lease.ExpireAt.After(now) {
-		return false
-	}
-	return r6CanRead(s, s.Lease.Owner)
-}
-
-func r6Horizon(s State, now time.Time) (time.Duration, string) {
-	reader := ""
-	if s.Lease.Present && s.Lease.ExpireAt.After(now) && r6CanRead(s, s.Lease.Owner) {
-		reader = s.Lease.Owner
-	}
-	if reader == "" {
-		for _, node := range s.Nodes {
-			if r6CanRead(s, node.ID) {
-				reader = node.ID
-				break
-			}
-		}
-	}
-	H := time.Duration(0)
-	for _, node := range s.Nodes {
-		if !r6CanRead(s, node.ID) {
-			continue
-		}
-		r, ok := s.Refusal[node.ID]
-		if !ok || r.OpenEnded || !r.Until.After(now) {
-			continue
-		}
-		if d := r.Until.Sub(now); d > H {
-			H = d
-		}
-	}
-	return H, reader
-}
-
-func r6Forced(s State, now time.Time) int {
-	n := 0
-	live := s.Lease.Present && s.Lease.Owner != "" && s.Lease.ExpireAt.After(now)
-	if s.Lock.Held {
-		n++
-	}
-	if s.Phase == PhaseFailed && s.FailedReason == ReasonChainOwnerGone {
-		n += 2
-	}
-	if live {
-		owner := r6Find(s, s.Lease.Owner)
-		if owner != nil && owner.Stopped && now.Before(s.Lease.ExpireAt) {
-			n++
-		}
-		if owner != nil && !owner.CanRead {
-			n++
-		}
-	}
-	if s.Desired == DesiredStop && s.Phase == PhaseStopping && !live {
-		n++
-	}
-	if s.Phase == PhaseRetryBackoff && s.RetryUntil.After(now) {
-		n++
-	}
-	return n
-}
-
-func r6Wastes(s State, id string, now time.Time, H time.Duration, p Params) (int, int) {
-	r := s.Refusal[id]
-	if r.OpenEnded {
-		return 0, 0
-	}
-	ready := time.Duration(0)
-	pending := 0
-	if r.Until.After(now) {
-		ready = r.Until.Sub(now)
-		if ready <= H {
-			pending = 1
-		}
-	}
-	if ready > H {
-		return 0, 0
-	}
-	if p.Storage == StoragePerNode && !(s.Chain.Verified() && s.Chain.Owner == id) {
-		return 1, pending
-	}
-	cap := p.RefusalRetryCap
-	if cap <= 0 {
-		cap = 600 * time.Second
-	}
-	limit := cap
-	if H < limit {
-		limit = H
-	}
-	att := r.Attempts
-	n := 0
-	for n < maxRefusalAttempts {
-		att++
-		if att > maxRefusalAttempts {
-			att = maxRefusalAttempts
-		}
-		if att < 1 {
-			att = 1
-		}
-		n++
-		if RefusalDelay(att, p.ClaimInterval, cap) >= limit {
-			break
-		}
-	}
-	extra := 0
-	if H > 0 && cap > 0 {
-		extra = int(H/cap) + 1
-	}
-	return n + extra, pending
-}
-
-func r6CanRead(s State, id string) bool {
-	n := r6Find(s, id)
-	if n == nil || !n.CanRead || n.Stopped {
-		return false
-	}
-	if r, ok := s.Refusal[id]; ok && r.OpenEnded {
-		return false
-	}
-	return true
-}
-
-func r6Find(s State, id string) *Node {
-	for i := range s.Nodes {
-		if s.Nodes[i].ID == id {
-			return &s.Nodes[i]
-		}
-	}
-	return nil
-}
 
 func TestFairStepBoundRandomConfigs(t *testing.T) {
 	n := 300
@@ -192,129 +26,327 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 			n = parsed
 		}
 	}
-	want := []int{94, 195, 231, 270}
-	violations := 0
-	got := map[int][3]int{}
+	var states []int
+	exhaustive, tight, v04Hits, v17Hits := 0, 0, 0, 0
 	for seed := 0; seed < n; seed++ {
 		s, now := fairRandState(t, int64(seed))
+		if !obsTerminal(s, now) && len(fairMoves(s, now)) == 0 {
+			t.Fatalf("seed %d non-terminal state has no fair move", seed)
+		}
 		bound := FairStepBound(s, now)
-		old := horizonOnlyBound(s, now)
 		end := observeFair(s, now)
-		steps := end.steps
-		if end.over || !end.ok {
-			steps, _ = walkMax(s, now, 4)
-			if !end.ok && !end.over {
-				t.Fatalf("seed %d has no fair schedule", seed)
+		states = append(states, end.states)
+		if end.stuck {
+			st := end.state
+			var nodes string
+			for _, node := range st.Nodes {
+				r := st.Refusal[node.ID]
+				nodes += fmt.Sprintf(" %s read=%v stop=%v open=%v until=%s att=%d",
+					node.ID, node.CanRead, node.Stopped, r.OpenEnded, r.Until.Format(time.RFC3339Nano), r.Attempts)
+			}
+			t.Fatalf("seed %d stuck at %s phase %s reason %s desired %s owner %q present %v lock %v storage %s chain %s verified %v tail %v%s",
+				seed, end.at.Format(time.RFC3339Nano), st.Phase, st.FailedReason, st.Desired, st.Lease.Owner, st.Lease.Present, st.Lock.Held,
+				st.Params.Storage, st.Chain.Owner, st.Chain.Verified(), !st.TailSince.IsZero(), nodes)
+		}
+		if end.over {
+			continue
+		}
+		if !end.ok {
+			t.Fatalf("seed %d has no fair schedule", seed)
+		}
+		exhaustive++
+		if end.steps > bound {
+			t.Fatalf("seed %d observed %d exceeds bound %d", seed, end.steps, bound)
+		}
+		if bound > 0 && end.steps == bound {
+			tight++
+		}
+		if s.Lock.Held && s.Params.IdleKill > 5*time.Second {
+			shrunk := s
+			shrunk.Params.IdleKill = 5 * time.Second
+			if end.steps > FairStepBound(shrunk, now) {
+				v04Hits++
 			}
 		}
-		if steps > bound {
-			t.Fatalf("seed %d observed %d exceeds bound %d (r6 %d)", seed, steps, bound, old)
-		}
-		if steps > old {
-			violations++
-			got[seed] = [3]int{steps, old, bound}
+		if v17Undercounts(s, now, end.steps) {
+			v17Hits++
 		}
 	}
-	fmt.Printf("rand\tseeds\t%d\tr6_violations\t%d\tfair_violations\t0\n", n, violations)
-	t.Logf("seeds %d r6 violations %d fair violations 0", n, violations)
-	for _, seed := range want {
-		row, ok := got[seed]
-		if !ok {
-			t.Fatalf("seed %d did not exceed the reader-horizon bound", seed)
-		}
-		fmt.Printf("rand\tseed\t%d\tobs\t%d\tr6\t%d\tbound\t%d\n", seed, row[0], row[1], row[2])
-		t.Logf("seed %d observed %d r6 %d bound %d", seed, row[0], row[1], row[2])
+	sort.Ints(states)
+	share := float64(exhaustive) / float64(n)
+	med := states[len(states)/2]
+	p90 := states[len(states)*9/10]
+	fmt.Printf("rand\tconfigs\t%d\texhaustive\t%d\tshare\t%.3f\toverflow\t%d\ttight\t%d\tstates_min\t%d\tstates_med\t%d\tstates_p90\t%d\tstates_max\t%d\tv04\t%d\tv17\t%d\n",
+		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits)
+	t.Logf("configs %d exhaustive %d share %.3f overflow %d tight %d states min %d med %d p90 %d max %d v04 %d v17 %d",
+		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits)
+	if share < 0.95 {
+		t.Fatalf("exhaustive share %.3f is below 0.95 (%d overflow)", share, n-exhaustive)
 	}
-	if violations < 4 {
-		t.Fatalf("reader-horizon bound undercounted %d seeds, want the QA seeds", violations)
+	if tight < 20 {
+		t.Fatalf("tight schedules %d, want at least 20", tight)
+	}
+	if med < 10 {
+		t.Fatalf("median states %d, searches are still the 3-9 state shape", med)
+	}
+	if v04Hits < 1 || v17Hits < 1 {
+		t.Fatalf("generator did not undercut the idle_kill=5s bound (%d) or the can-read stopped-owner bound (%d)", v04Hits, v17Hits)
 	}
 }
 
-// fairRandState builds a small claim set plus one forced clock: a row lock,
-// a stopped owner, or RETRY_BACKOFF. The non-reader refusal sits strictly
-// after the reader horizon and on or before that forced deadline.
+// v17Undercounts reports a stopped owner who cannot read, with a non-reader
+// refusal inside the lease and no other forced clock. A bound that extends
+// W only when that owner can read counts the refusal as zero.
+func v17Shape(s State, now time.Time) bool {
+	if s.Lock.Held || s.Phase == PhaseRetryBackoff || !s.Lease.ExpireAt.After(now) {
+		return false
+	}
+	owner := obsFind(s, s.Lease.Owner)
+	return owner != nil && owner.Stopped && !owner.CanRead
+}
+
+func v17Undercounts(s State, now time.Time, steps int) bool {
+	if !v17Shape(s, now) {
+		return false
+	}
+	owner := obsFind(s, s.Lease.Owner)
+	if owner == nil || !owner.Stopped || owner.CanRead {
+		return false
+	}
+	// The mutant keeps W at the reader horizon only.
+	horizon := time.Duration(0)
+	for _, node := range s.Nodes {
+		if !node.CanRead || node.Stopped {
+			continue
+		}
+		r := s.Refusal[node.ID]
+		if r.OpenEnded || !r.Until.After(now) {
+			continue
+		}
+		if d := r.Until.Sub(now); d > horizon {
+			horizon = d
+		}
+	}
+	late := 0
+	for _, node := range s.Nodes {
+		if node.CanRead || node.Stopped || node.ID == s.Lease.Owner {
+			continue
+		}
+		r := s.Refusal[node.ID]
+		if r.OpenEnded || !r.Until.After(now) {
+			continue
+		}
+		ready := r.Until.Sub(now)
+		if ready > horizon && ready <= s.Lease.ExpireAt.Sub(now) {
+			late++
+		}
+	}
+	if late < 2 || horizon > 0 {
+		return false
+	}
+	// Mutant: W=0, those refusals contribute 0, jumps 0.
+	// Forced steps are the stopped wait and the unreadable owner. Finish is 2.
+	mutant := 2 + 2
+	return steps > mutant
+}
+
+// fairRandState mixes tight claims, a long idle_kill, a stopped non-reader
+// owner, chain owners, and several forced clocks at once.
 func fairRandState(t *testing.T, seed int64) (State, time.Time) {
 	t.Helper()
 	rng := rand.New(rand.NewSource(seed))
 	now := t0.Add(time.Hour)
-	nNodes := 1 + rng.Intn(4)
-	kind := rng.Intn(3)
-	if kind == 1 && nNodes < 3 {
-		nNodes = 3
+	switch rng.Intn(10) {
+	case 0:
+		if rng.Intn(3) == 0 {
+			return oneNodeClaim(t)
+		}
+		if rng.Intn(2) == 0 {
+			return freshClaim(t, StorageShared)
+		}
+		return freshClaim(t, StoragePerNode)
+	case 1:
+		return randIdleKill(t, now, rng)
+	case 2:
+		return randStoppedNonReader(t, now, rng)
+	case 3, 4:
+		return randStacked(t, now, rng)
+	default:
+		return randBranch(t, now, rng)
 	}
-	peers := make([]Node, 0, nNodes-1)
-	for i := 1; i < nNodes; i++ {
-		peers = append(peers, peer(nodeID(i), false, t0))
-	}
-	s := boot(t, "n1", t0, peers)
+}
+
+func oneNodeClaim(t *testing.T) (State, time.Time) {
+	t.Helper()
+	s := boot(t, "n1", t0, nil)
+	now := t0.Add(time.Hour)
+	return expireLease(s, now), now
+}
+
+func randIdleKill(t *testing.T, now time.Time, rng *rand.Rand) (State, time.Time) {
+	t.Helper()
+	n := 2 + rng.Intn(2)
+	s := bootPeers(t, n)
 	s = expireLease(s, now)
 	if rng.Intn(2) == 0 {
 		s.Params.Storage = StorageShared
 	}
-	caps := []time.Duration{5, 7, 10, 15, 30}
-	s.Params.RefusalRetryCap = caps[rng.Intn(len(caps))] * time.Second
-	if rng.Intn(2) == 0 {
-		s.Params.ClaimInterval = time.Second
+	s.Params.IdleKill = []time.Duration{8, 10, 12}[rng.Intn(3)] * time.Second
+	s.Params.RefusalRetryCap = []time.Duration{8, 15, 30}[rng.Intn(3)] * time.Second
+	s.Lock = Lock{Held: true, HeldBy: "n1", Since: now}
+	until := 6 * time.Second
+	if s.Params.IdleKill > 10*time.Second {
+		until = 8 * time.Second
 	}
-	holds := []time.Duration{0, time.Second, 2 * time.Second}
-	hold := holds[rng.Intn(len(holds))]
-	// One excluded claim is absorbed by the horizon jump. Two are not.
-	nonReaders := nNodes - 1
-	if kind == 1 {
-		nonReaders = nNodes - 2
-	}
-	if nonReaders < 2 {
-		hold = 0
-	}
-	gap := []time.Duration{time.Second, 2 * time.Second}[rng.Intn(2)]
-	until := hold + gap
-	slack := []time.Duration{time.Second, 2 * time.Second, 5 * time.Second}[rng.Intn(3)]
-	deadline := until + slack
-	attempts := rng.Intn(7)
-	if hold > 0 {
-		s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(hold), Attempts: 1}
-	}
-	if nNodes >= 4 && kind != 1 && rng.Intn(2) == 0 {
-		s.Nodes[1].CanRead = true
-		if hold > 0 {
-			s.Refusal["n2"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(hold), Attempts: 1}
-		}
-	}
-	startNon := 1
-	if kind == 1 {
-		s.Nodes[0].Stopped = true
-		s.Nodes[1].CanRead = true
-		delete(s.Refusal, "n1")
-		if hold > 0 {
-			s.Refusal["n2"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(hold), Attempts: 1}
-		}
-		s.Lease.Present = true
-		s.Lease.Owner = "n1"
-		s.Lease.ExpireAt = now.Add(deadline)
-		s.Phase = PhaseRunning
-		startNon = 2
-	}
-	for i := startNon; i < len(s.Nodes); i++ {
-		if s.Nodes[i].CanRead {
-			continue
-		}
-		s.Refusal[s.Nodes[i].ID] = Refusal{
-			Reason:   RefusalEpochLost,
-			Until:    now.Add(until),
-			Attempts: attempts,
-		}
-	}
-	switch kind {
-	case 0:
-		s.Lock = Lock{Held: true, HeldBy: "n1", Since: now}
-		s.Params.IdleKill = deadline
-	case 2:
-		s.Phase = PhaseRetryBackoff
-		s.RetryAttempt = 1 + rng.Intn(3)
-		s.Lease.Present = true
-		s.Lease.Owner = "n1"
-		s.Lease.ExpireAt = now.Add(until)
-		s.RetryUntil = now.Add(deadline)
+	for i := 1; i < len(s.Nodes); i++ {
+		s.Refusal[s.Nodes[i].ID] = Refusal{Reason: RefusalEpochLost, Until: now.Add(until), Attempts: rng.Intn(3)}
 	}
 	return s, now
+}
+
+func randStoppedNonReader(t *testing.T, now time.Time, rng *rand.Rand) (State, time.Time) {
+	t.Helper()
+	// Four nodes: the stopped owner, the reader, and two non-readers
+	// whose refusals sit inside the lease. Two late refusals are what
+	// make a can-read-only window undercount.
+	s := bootPeers(t, 4)
+	s.Nodes[0].Stopped = true
+	s.Nodes[0].CanRead = false
+	// Fresh heartbeat. A stale one would make the first waste trip
+	// ChainOwnerGone and the non-readers inside the lease would never claim.
+	s.Nodes[0].HeartbeatAt = now
+	s.Nodes[1].CanRead = true
+	s.Chain.Owner = "n2"
+	s.Chain.VerifiedAt = now
+	s.Lease.Present = true
+	s.Lease.Owner = "n1"
+	ttl := []time.Duration{8, 12, 15}[rng.Intn(3)] * time.Second
+	s.Lease.ExpireAt = now.Add(ttl)
+	s.Phase = PhaseRunning
+	if rng.Intn(2) == 0 {
+		s.Params.Storage = StorageShared
+	}
+	s.Params.LeaseTTL = ttl
+	s.Params.RefusalRetryCap = []time.Duration{10, 20, 30}[rng.Intn(3)] * time.Second
+	until := ttl / 2
+	if until < time.Second {
+		until = time.Second
+	}
+	for i := 2; i < len(s.Nodes); i++ {
+		s.Refusal[s.Nodes[i].ID] = Refusal{Reason: RefusalEpochLost, Until: now.Add(until), Attempts: rng.Intn(3)}
+	}
+	return s, now
+}
+
+func randBranch(t *testing.T, now time.Time, rng *rand.Rand) (State, time.Time) {
+	t.Helper()
+	// Shared storage with two or three non-readers and a reader horizon
+	// of several seconds. per_node is the smaller tree; it is still more
+	// than a single acquire.
+	n := 3 + rng.Intn(2)
+	s := bootPeers(t, n)
+	s = expireLease(s, now)
+	if rng.Intn(3) == 0 {
+		s.Params.Storage = StoragePerNode
+	} else {
+		s.Params.Storage = StorageShared
+	}
+	s.Params.IdleKill = []time.Duration{8, 12}[rng.Intn(2)] * time.Second
+	s.Params.LeaseTTL = []time.Duration{8, 15}[rng.Intn(2)] * time.Second
+	s.Params.RefusalRetryCap = []time.Duration{4, 6, 8}[rng.Intn(3)] * time.Second
+	s.Params.ClaimInterval = []time.Duration{time.Second, 2 * time.Second}[rng.Intn(2)]
+	hold := []time.Duration{8, 10, 12}[rng.Intn(3)] * time.Second
+	s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(hold), Attempts: 1}
+	for i := 1; i < len(s.Nodes); i++ {
+		s.Nodes[i].CanRead = false
+		wait := time.Duration(1+rng.Intn(3)) * time.Second
+		s.Refusal[s.Nodes[i].ID] = Refusal{
+			Reason:   RefusalEpochLost,
+			Until:    now.Add(wait),
+			Attempts: rng.Intn(3),
+		}
+	}
+	if s.Params.Storage == StoragePerNode && rng.Intn(2) == 0 {
+		s.Chain.Owner = "n2"
+		s.Chain.VerifiedAt = now
+		s.Nodes[1].CanRead = false
+	}
+	return s, now
+}
+
+func randStacked(t *testing.T, now time.Time, rng *rand.Rand) (State, time.Time) {
+	t.Helper()
+	// Lock, stopped owner, retry, and refusals are all set. Each deadline
+	// is inside the reader horizon, so after the forced jumps the
+	// non-readers still branch. n1 stays a reader that is not stopped.
+	n := 3 + rng.Intn(2)
+	if rng.Intn(8) == 0 {
+		n = 2
+	}
+	s, _ := randBranch(t, now, rng)
+	if len(s.Nodes) != n {
+		s = bootPeers(t, n)
+		s = expireLease(s, now)
+		s.Params.Storage = StorageShared
+		s.Params.RefusalRetryCap = 6 * time.Second
+		s.Params.ClaimInterval = time.Second
+		s.Refusal["n1"] = Refusal{Reason: RefusalEpochLost, Until: now.Add(10 * time.Second), Attempts: 1}
+		for i := 1; i < len(s.Nodes); i++ {
+			s.Nodes[i].CanRead = false
+			s.Refusal[s.Nodes[i].ID] = Refusal{Reason: RefusalEpochLost, Until: now.Add(time.Second), Attempts: 1}
+		}
+	}
+	s.Params.IdleKill = []time.Duration{2, 4}[rng.Intn(2)] * time.Second
+	s.Params.LeaseTTL = []time.Duration{4, 8, 15}[rng.Intn(3)] * time.Second
+	s.Lock = Lock{Held: true, HeldBy: "n1", Since: now}
+	if len(s.Nodes) >= 3 {
+		s.Nodes[1].Stopped = true
+		s.Nodes[1].CanRead = false
+		s.Nodes[1].HeartbeatAt = now
+		delete(s.Refusal, "n2")
+		s.Lease.Present = true
+		s.Lease.Owner = "n2"
+		s.Lease.ExpireAt = now.Add(3 * time.Second)
+	}
+	s.Phase = PhaseRetryBackoff
+	s.RetryAttempt = 1
+	s.RetryUntil = now.Add(4 * time.Second)
+	s.Lease.Present = true
+	if s.Lease.Owner == "" {
+		s.Lease.Owner = "n1"
+	}
+	if !s.RetryUntil.After(s.Lease.ExpireAt) {
+		s.Lease.ExpireAt = now.Add(time.Second)
+	}
+	if rng.Intn(3) == 0 && len(s.Nodes) >= 2 {
+		s.Params.Storage = StoragePerNode
+		s.Chain.Owner = "n2"
+		s.Chain.VerifiedAt = now
+		s.Nodes[1].CanRead = false
+	}
+	if rng.Intn(4) == 0 && len(s.Nodes) >= 2 {
+		s.Phase = PhaseLeaseDegraded
+		s.RetryUntil = time.Time{}
+		s.RetryAttempt = 0
+		s.TailSince = now
+		s.Chain.Owner = "n2"
+		s.Chain.VerifiedAt = now.Add(-time.Second)
+		s.Params.NodeGoneAfter = []time.Duration{6, 8}[rng.Intn(2)] * time.Second
+		s.Nodes[1].Stopped = true
+		s.Nodes[1].CanRead = false
+		s.Nodes[1].HeartbeatAt = now
+		delete(s.Refusal, "n2")
+	}
+	s.Nodes[0].CanRead = true
+	s.Nodes[0].Stopped = false
+	return s, now
+}
+
+func bootPeers(t *testing.T, n int) State {
+	t.Helper()
+	peers := make([]Node, 0, n-1)
+	for i := 1; i < n; i++ {
+		peers = append(peers, peer(nodeID(i), false, t0))
+	}
+	return boot(t, "n1", t0, peers)
 }
