@@ -17,12 +17,10 @@ import (
 )
 
 type mutant struct {
-	id    string
-	file  string
-	old   string
-	new   string
-	note  string
-	equiv bool
+	id   string
+	file string
+	old  string
+	new  string
 }
 
 func main() {
@@ -61,10 +59,6 @@ func main() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			status, test := runOne(pkg, src, m)
-			if status == "survived" && m.equiv {
-				status = "equivalent"
-				test = m.note
-			}
 			out[i] = result{m.id, status, test}
 			fmt.Printf("%s\t%s\t%s\n", m.id, status, test)
 		}(i, m)
@@ -73,19 +67,17 @@ func main() {
 
 	fmt.Println()
 	fmt.Println("id\tresult\tkilled_by")
-	killed, equiv, survived := 0, 0, 0
+	killed, survived := 0, 0
 	for _, r := range out {
 		fmt.Printf("%s\t%s\t%s\n", r.id, r.status, r.test)
 		switch r.status {
 		case "killed":
 			killed++
-		case "equivalent":
-			equiv++
 		default:
 			survived++
 		}
 	}
-	fmt.Printf("killed %d, equivalent %d, total %d\n", killed, equiv, len(out))
+	fmt.Printf("killed %d, total %d\n", killed, len(out))
 	if survived > 0 {
 		os.Exit(1)
 	}
@@ -199,24 +191,33 @@ var mutants = []mutant{
 	{id: "M32", file: "step.go", old: "\t\tDecision:       DecisionApplied,\n\t\tLocksTaskLease: false,\n\t\tIntents:        []Intent{{Kind: IntentClusterFinding, Finding: Finding{Name: FindingLockStalled, Subject: s.TaskID, OnCluster: true}}},", new: "\t\tDecision:       DecisionApplied,\n\t\tLocksTaskLease: true,\n\t\tIntents:        []Intent{{Kind: IntentClusterFinding, Finding: Finding{Name: FindingLockStalled, Subject: s.TaskID, OnCluster: true}}},"},
 	{id: "M33", file: "invariant.go", old: "\tif ProgressOverdue(s, now) != hasFinding(s, FindingNoProgress, s.TaskID) {\n\t\tv = add(v, \"7\", \"TASK_NO_PROGRESS does not match the sweep and no_progress_after clocks\")\n\t}\n", new: ""},
 	{id: "M34", file: "step.go", old: "\t\treturn !s.UnownedSince.IsZero() && !now.Before(s.UnownedSince.Add(s.Params.Sweep))", new: "\t\treturn !s.UnownedSince.IsZero() && !now.Before(s.UnownedSince.Add(10 * s.Params.Sweep))"},
-	{id: "F01", file: "step.go", old: "\tif e.RowGeneration != s.RowGeneration {\n\t\treturn fenceReread\n\t}\n", new: ""},
-	{id: "F02", file: "step.go", old: "\tif hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}\n", new: "\tif false && (hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params)) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}\n"},
-	{id: "F03", file: "spec.go", old: "\td := claim << shift", new: "\td := claim << (shift + 1)"},
-	{id: "F04", file: "step.go", old: "\ts.Lease.ExpireAt = now.Add(s.Params.LeaseTTL)", new: "\ts.Lease.ExpireAt = now.Add(s.Params.LeaseTTL - time.Second)"},
-	{id: "F05", file: "step.go", old: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n\tnext.FailedAt = time.Time{}\n\tnext.FailedSpec = 0\n", new: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n\tnext.FailedSpec = 0\n"},
-	{id: "F06", file: "step.go", old: "\tnext.SpecRevision++\n\tnext.RetryAttempt = 0\n\tnext.RetryUntil = time.Time{}\n", new: "\tnext.SpecRevision++\n\tnext.RetryUntil = time.Time{}\n"},
-	{id: "F07", file: "step.go", old: "\tnext.LastError = \"\"\n\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n", new: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n"},
-	{id: "F08", file: "step.go", old: "\tnext.SpecRevision++\n\tnext.RetryAttempt = 0\n", new: "\tnext.RetryAttempt = 0\n"},
-	{id: "F09", file: "step.go", old: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n\tnext.FailedAt = time.Time{}\n", new: "\tnext.RunID = \"\"\n\tnext.FailedAt = time.Time{}\n"},
-	{id: "F10", file: "invariant.go", old: "\t\tif !anchor.IsZero() && now.Sub(anchor) > p.NoProgressAfter {", new: "\t\tif !anchor.IsZero() && now.Sub(anchor) >= p.NoProgressAfter {"},
-	{id: "F11", file: "step.go", old: "\t\twithin := next.LockRecoveries > 0 && next.Lock.HeldBy == e.Node && !now.After(next.Lock.Since.Add(next.Params.LockWait))", new: "\t\twithin := next.LockRecoveries > 0"},
-	{id: "F12", file: "step.go", old: "\t\tif !anchor.IsZero() && now.Sub(anchor) > s.Params.NoProgressAfter {", new: "\t\tif !anchor.IsZero() && now.Sub(anchor) >= s.Params.NoProgressAfter {"},
-	{id: "F13", file: "invariant.go", old: "\treturn s.Lease.Present && s.Lease.Owner != \"\" && s.Lease.ExpireAt.After(now)", new: "\treturn s.Lease.Present && s.Lease.Owner != \"\" && !s.Lease.ExpireAt.Before(now)"},
-	{id: "F14", file: "liveness_test.go", old: "\tk := 2 + wastedPossible(s, now) + extraWastes(s, now) // claim + DumpReady + N + re-claims", new: "\tk := 3 + wastedPossible(s, now) + extraWastes(s, now) // claim + DumpReady + N + re-claims"},
-	{id: "F15", file: "invariant.go", old: "\treturn now.Before(s.RetryUntil)", new: "\treturn !now.After(s.RetryUntil)"},
-	{id: "F16", file: "step.go", old: "\tgone := hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params)", new: "\tgone := hb.IsZero() || now.Sub(hb) >= EffectiveNodeGone(s.Params)"},
-	{id: "F17", file: "spec.go", old: "\tif shift > 20 {\n\t\treturn cap\n\t}\n", new: "", equiv: true, note: "equivalent: attempts that overflow the shift already return cap via d<=0 or d>cap"},
-	{id: "F18", file: "spec.go", old: "\tif attempts < 1 {\n\t\tattempts = 1\n\t}\n", new: "", equiv: true, note: "equivalent: Step increments attempts before RefusalDelay"},
-	{id: "F19", file: "spec.go", old: "\tif claim <= 0 {\n\t\tclaim = 2 * time.Second\n\t}\n", new: "", equiv: true, note: "equivalent: Step fills ClaimInterval before RefusalDelay"},
-	{id: "F20", file: "step.go", old: "\tif hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}", new: "\tif hb.IsZero() || now.Sub(hb) >= EffectiveNodeGone(s.Params) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}"},
+	{id: "M35", file: "step.go", old: "\tif e.RowGeneration != s.RowGeneration {\n\t\treturn fenceReread\n\t}\n", new: ""},
+	{id: "M36", file: "step.go", old: "\tif hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}\n", new: "\tif false && (hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params)) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}\n"},
+	{id: "M37", file: "spec.go", old: "\td := claim << shift", new: "\td := claim << (shift + 1)"},
+	{id: "M38", file: "step.go", old: "\ts.Lease.ExpireAt = now.Add(s.Params.LeaseTTL)", new: "\ts.Lease.ExpireAt = now.Add(s.Params.LeaseTTL - time.Second)"},
+	{id: "M39", file: "step.go", old: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n\tnext.FailedAt = time.Time{}\n\tnext.FailedSpec = 0\n", new: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n\tnext.FailedSpec = 0\n"},
+	{id: "M40", file: "step.go", old: "\tnext.SpecRevision++\n\tnext.RetryAttempt = 0\n\tnext.RetryUntil = time.Time{}\n", new: "\tnext.SpecRevision++\n\tnext.RetryUntil = time.Time{}\n"},
+	{id: "M41", file: "step.go", old: "\tnext.LastError = \"\"\n\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n", new: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n"},
+	{id: "M42", file: "step.go", old: "\tnext.SpecRevision++\n\tnext.RetryAttempt = 0\n", new: "\tnext.RetryAttempt = 0\n"},
+	{id: "M43", file: "step.go", old: "\tnext.RunID = \"\"\n\tnext.FailedReason = \"\"\n\tnext.FailedAt = time.Time{}\n", new: "\tnext.RunID = \"\"\n\tnext.FailedAt = time.Time{}\n"},
+	{id: "M44", file: "invariant.go", old: "\t\tif !anchor.IsZero() && now.Sub(anchor) > p.NoProgressAfter {", new: "\t\tif !anchor.IsZero() && now.Sub(anchor) >= p.NoProgressAfter {"},
+	{id: "M45", file: "step.go", old: "\t\twithin := next.LockRecoveries > 0 && next.Lock.HeldBy == e.Node && !now.After(next.Lock.Since.Add(next.Params.LockWait))", new: "\t\twithin := next.LockRecoveries > 0"},
+	{id: "M46", file: "step.go", old: "\t\tif !anchor.IsZero() && now.Sub(anchor) > s.Params.NoProgressAfter {", new: "\t\tif !anchor.IsZero() && now.Sub(anchor) >= s.Params.NoProgressAfter {"},
+	{id: "M47", file: "invariant.go", old: "\treturn s.Lease.Present && s.Lease.Owner != \"\" && s.Lease.ExpireAt.After(now)", new: "\treturn s.Lease.Present && s.Lease.Owner != \"\" && !s.Lease.ExpireAt.Before(now)"},
+	{id: "M48", file: "liveness_test.go", old: "\treturn pre + 2 // acquire + DumpReady", new: "\treturn pre + 3 // acquire + DumpReady"},
+	{id: "M49", file: "invariant.go", old: "\treturn now.Before(s.RetryUntil)", new: "\treturn !now.After(s.RetryUntil)"},
+	{id: "M50", file: "step.go", old: "\tgone := hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params)", new: "\tgone := hb.IsZero() || now.Sub(hb) >= EffectiveNodeGone(s.Params)"},
+	{id: "M51", file: "spec.go", old: "\tif shift > maxRefusalShift {\n\t\treturn cap\n\t}\n", new: ""},
+	{id: "M52", file: "spec.go", old: "\tif attempts < 1 {\n\t\tattempts = 1\n\t}\n", new: ""},
+	{id: "M53", file: "spec.go", old: "\tif claim <= 0 {\n\t\tclaim = 2 * time.Second\n\t}\n", new: ""},
+	{id: "M54", file: "step.go", old: "\tif hb.IsZero() || now.Sub(hb) > EffectiveNodeGone(s.Params) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}", new: "\tif hb.IsZero() || now.Sub(hb) >= EffectiveNodeGone(s.Params) {\n\t\treturn appliedPair(s, Result{Decision: DecisionRejected, Detail: \"heartbeat\"})\n\t}"},
+	{id: "M55", file: "step.go", old: "!now.After(next.Lock.Since.Add(next.Params.LockWait))", new: "now.Before(next.Lock.Since.Add(next.Params.LockWait))"},
+	{id: "M56", file: "step.go", old: "\tnext.ProgressAt = now\n", new: ""},
+	{id: "M57", file: "step.go", old: "return Result{State: s, Decision: DecisionDiscarded, ZeroRow: true, Detail: \"deleted\"}", new: "return Result{State: s, Decision: DecisionRejected, HTTP: 409, Detail: \"deleted\"}"},
+	{id: "M58", file: "step.go", old: "\t\tif s.UnownedSince.IsZero() {\n\t\t\ts.UnownedSince = now\n\t\t}\n", new: ""},
+	{id: "M59", file: "step.go", old: "\ts.UnownedSince = time.Time{}\n", new: ""},
+	{id: "M60", file: "step.go", old: "\tif s.Deleted || s.Desired != DesiredRun || s.Phase == PhaseFailed || s.Phase == PhaseCreated {", new: "\tif s.Deleted || s.Desired != DesiredRun || s.Phase == PhaseCreated {"},
+	{id: "M61", file: "step.go", old: "\tnext.FailedSpec = s.SpecRevision\n", new: ""},
+	{id: "M62", file: "spec.go", old: "\tif cap <= 0 {\n\t\tcap = 600 * time.Second\n\t}\n", new: ""},
+	{id: "M63", file: "step.go", old: "\tif r.Attempts > maxRefusalAttempts {\n\t\tr.Attempts = maxRefusalAttempts\n\t}\n", new: ""},
 }

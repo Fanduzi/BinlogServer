@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: none (no scheduler, database, or clock)
-// output: State, the task row, lease, chain, refusal table, and finding set one step reads
+// output: State, the task row, lease, chain, refusal table, finding set, and the applied-event trace
 // pos: value types for phase, desired, chain, refusal, and findings
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -209,7 +209,28 @@ type State struct {
 	// RegistrationLive is ignored by Acquire. Claim does not read it (0001, #463).
 	RegistrationLive map[string]bool
 
+	// Trace is the applied-event log. Step appends one entry per applied
+	// transition and never reads it. The checker replays it for invariant 7.
+	Trace []TraceEvent
+
 	Params Params
+}
+
+// TraceEvent is one applied transition, plus the row columns the checker
+// needs to replay lease and retry clocks. ProgressAt, UnownedSince, and
+// NoProgress are deliberately absent: those are the fields under test.
+type TraceEvent struct {
+	Kind         Kind
+	At           time.Time
+	Phase        Phase
+	Desired      Desired
+	Deleted      bool
+	Owner        string
+	Expire       time.Time
+	Acquired     time.Time
+	Present      bool
+	RetryAttempt int
+	RetryUntil   time.Time
 }
 
 // New is CREATED, desired RUN, no owner. Claim does not pull CREATED.

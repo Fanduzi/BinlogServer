@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State and the clock used for lease, refusal, and stale comparisons
-// output: Violation list for invariants 1–10, ProgressOverdue, claim and stop sets, /api/health code
+// output: Violation list for invariants 1–10, ProgressOverdue from the applied-event trace, claim and stop sets, /api/health code
 // pos: the checkable predicates ADR 0011 §2 requires of every prefix
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -68,9 +68,14 @@ func RefusalBlocks(s State, node string, now time.Time) bool {
 // STARTING with no live lease is included, whether or not the owner column is
 // still filled: Acquire has committed, the dump has not opened, and the lease
 // has since expired. That is the shape the peer must be able to take.
+// A terminal FAILED row is claimable only after spec_revision moves past
+// failed_spec_revision. CHAIN_OWNER_GONE is not claimable.
 func InClaimSet(s State, now time.Time) bool {
-	if s.Deleted || s.PendingDelete || s.Desired != DesiredRun || LeaseLive(s, now) || s.Phase == PhaseFailed {
+	if s.Deleted || s.PendingDelete || s.Desired != DesiredRun || LeaseLive(s, now) {
 		return false
+	}
+	if s.Phase == PhaseFailed {
+		return failedSpecClaimable(s)
 	}
 	switch s.Phase {
 	case PhaseStarting, PhaseLeaseDegraded, PhaseRunning:
@@ -138,6 +143,17 @@ func Check(s State, now time.Time) []Violation {
 		default:
 			v = add(v, "2", "FAILED reason "+s.FailedReason+" is outside the allowlist")
 		}
+		switch s.FailedReason {
+		case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+			// spec_revision > failed_spec_revision is the claim-pull shape and
+			// still FAILED. Zero, or a revision above the row, means the
+			// terminal write was dropped.
+			if s.SpecRevision > 0 && (s.FailedSpec == 0 || s.FailedSpec > s.SpecRevision) {
+				v = add(v, "2", "terminal FAILED did not record failed_spec_revision")
+			}
+		}
+	} else if s.FailedSpec != 0 {
+		v = add(v, "2", "failed_spec_revision set outside FAILED")
 	}
 	for node, r := range s.Refusal {
 		if r.OpenEnded {
@@ -183,36 +199,52 @@ func Check(s State, now time.Time) []Violation {
 	if s.MetaLockStalled && HealthCode(s, now) != 503 {
 		v = add(v, "6", "META_LOCK_STALLED but /api/health is not 503")
 	}
-	// Invariant 7 is recomputed from the row and the clock. The code-under-test's
-	// NoProgress flag is not consulted: a mutated threshold must still fail here.
+	// Invariant 7 is recomputed from the applied-event trace. ProgressAt,
+	// UnownedSince, and NoProgress are the model's copies and are not read.
 	if ProgressOverdue(s, now) != hasFinding(s, FindingNoProgress, s.TaskID) {
 		v = add(v, "7", "TASK_NO_PROGRESS does not match the sweep and no_progress_after clocks")
 	}
 	return v
 }
 
-// ProgressOverdue is invariant 7's clock, written from the ADR text.
-// It does not call LeaseLive or LegalRetry: those belong to the model, and a
-// flipped comparison there must still disagree with this copy.
-// A live lease is owner set and expire_at > now. A legal retry is RETRY_BACKOFF
-// with budget left and now < retry_until. Unowned work is overdue one sweep
-// after UnownedSince. A live owner is overdue only after no_progress_after,
-// strictly, so the boundary itself is not yet CRITICAL.
-func ProgressOverdue(s State, now time.Time) bool {
-	if s.Deleted || s.Desired != DesiredRun || s.Phase == PhaseFailed || s.Phase == PhaseCreated {
+// failedSpecClaimable is the claim gate for a terminal FAILED row.
+// The allowlist and LEGACY_UNKNOWN resume only when the spec revision has
+// moved past the revision recorded at failure. CHAIN_OWNER_GONE never does.
+func failedSpecClaimable(s State) bool {
+	switch s.FailedReason {
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+		return s.SpecRevision > s.FailedSpec
+	default:
 		return false
 	}
+}
+
+// ProgressOverdue is invariant 7's clock, replayed from State.Trace.
+// Step appends that log and never reads it back. This function does not read
+// ProgressAt, UnownedSince, or NoProgress, and it does not call LeaseLive or
+// LegalRetry. An empty trace is not overdue: a silent lease expiry does not
+// start the unowned clock, and a later Check only extends a clock an applied
+// event already started.
+func ProgressOverdue(s State, now time.Time) bool {
+	if len(s.Trace) == 0 {
+		return false
+	}
+	anchor, unownedSince, snap := replayProgress(s.Trace)
 	p := s.Params.fill()
-	if !adrLeaseLive(s, now) && !adrLegalRetry(s, now) && s.Phase != PhaseStopped {
-		if s.UnownedSince.IsZero() {
+	live := snap.Present && snap.Owner != "" && snap.Expire.After(now)
+	legal := snap.Phase == PhaseRetryBackoff && !snap.Deleted && snap.RetryAttempt < RetryBudget && !snap.RetryUntil.IsZero() && snap.RetryUntil.After(now)
+	if snap.Deleted || snap.Desired != DesiredRun || snap.Phase == PhaseFailed || snap.Phase == PhaseCreated {
+		return false
+	}
+	if !live && !legal && snap.Phase != PhaseStopped {
+		if unownedSince.IsZero() {
 			return false
 		}
-		return !now.Before(s.UnownedSince.Add(p.Sweep))
+		return !now.Before(unownedSince.Add(p.Sweep))
 	}
-	if adrLeaseLive(s, now) {
-		anchor := s.ProgressAt
+	if live {
 		if anchor.IsZero() {
-			anchor = s.Lease.AcquiredAt
+			anchor = snap.Acquired
 		}
 		if !anchor.IsZero() && now.Sub(anchor) > p.NoProgressAfter {
 			return true
@@ -221,18 +253,38 @@ func ProgressOverdue(s State, now time.Time) bool {
 	return false
 }
 
-// adrLeaseLive is ADR lease liveness: expire_at > now. Equality is not live.
-func adrLeaseLive(s State, now time.Time) bool {
-	return s.Lease.Owner != "" && s.Lease.Present && s.Lease.ExpireAt.After(now)
-}
-
-// adrLegalRetry is ADR invariant 7's window: budget remains and the deadline
-// has not arrived. now == retry_until is already outside the window.
-func adrLegalRetry(s State, now time.Time) bool {
-	if s.Deleted || s.Phase != PhaseRetryBackoff || s.RetryUntil.IsZero() || s.RetryAttempt >= RetryBudget {
-		return false
+// replayProgress walks the applied-event log. The progress anchor is the last
+// DumpReady that landed in RUNNING, and it is cleared when Acquire,
+// LeaseExpired, or OperatorStart changes AcquiredAt. The unowned clock starts
+// at the first event whose snapshot is unowned, and clears when a later event
+// is not. Lease and retry comparisons are strict After, so equality is outside
+// both windows.
+func replayProgress(trace []TraceEvent) (anchor, unownedSince time.Time, last TraceEvent) {
+	var prevAcquired time.Time
+	havePrev := false
+	for _, ev := range trace {
+		last = ev
+		live := ev.Present && ev.Owner != "" && ev.Expire.After(ev.At)
+		legal := ev.Phase == PhaseRetryBackoff && !ev.Deleted && ev.RetryAttempt < RetryBudget && !ev.RetryUntil.IsZero() && ev.RetryUntil.After(ev.At)
+		unowned := ev.Desired == DesiredRun && !live && !legal && ev.Phase != PhaseCreated && ev.Phase != PhaseStopped && ev.Phase != PhaseFailed && !ev.Deleted
+		if unowned {
+			if unownedSince.IsZero() {
+				unownedSince = ev.At
+			}
+		} else {
+			unownedSince = time.Time{}
+		}
+		if ev.Kind == EventDumpReady && ev.Phase == PhaseRunning {
+			anchor = ev.At
+		}
+		acquiredChanged := !havePrev || !ev.Acquired.Equal(prevAcquired)
+		if acquiredChanged && (ev.Kind == EventAcquire || ev.Kind == EventLeaseExpired || ev.Kind == EventOperatorStart) {
+			anchor = time.Time{}
+		}
+		prevAcquired = ev.Acquired
+		havePrev = true
 	}
-	return s.RetryUntil.After(now)
+	return anchor, unownedSince, last
 }
 
 // CheckStep is the transition half: desired STOP, FAILED, the epoch fence,
