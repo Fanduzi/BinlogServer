@@ -37,7 +37,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
-| C1 | ADR 0011 被接受；PR-1 的纯过渡模型合入，十条不变量和活性上界都用有界搜索自动检查 | PR-1 的模型测试，合入后进 `go test ./...` | NOT MET | ADR 还是 Proposed；#478 第 6 轮 QA FAIL，第 7 轮（`77cb41f`）待 QA |
+| C1 | ADR 0011 被接受；PR-1 的纯过渡模型合入，十条不变量和活性上界都用有界搜索自动检查 | `internal/ownership` 的 `invariant_test.go`（含 `TestSafetyBoundedExhaustive`、`TestSafetyRandomPrefixes`）、`liveness_test.go`（含 `TestLivenessAllFairSchedules`）、`fault_matrix_test.go`，都在 CI 的 `go test ./...` | MET | ADR 0011 已接受；PR-1 经 #481 合入 main（`4a970319`，#478 第 12 轮 QA PASS） |
 | C2 | owner 握着 `task_leases` 行锁被暂停时，对端在 RTO 公式之内接管，等待期间 `/api/health` 返回 503 | ADR 0011 PR-2 的 e2e：在 MySQL 8.0 和 MariaDB 上，持有 `FOR UPDATE` 时 SIGSTOP | NOT MET | #476（P1）、#463 |
 | C3 | per_node 存储下，接管不写 FAILED 或 desired STOP；原主人恢复后用更大的 epoch 继续，源上始终最多一条 dump | ADR 0011 PR-4 的 e2e：per_node 下 SIGSTOP/SIGCONT | NOT MET | #473（P1）、#455 |
 | C4 | 多节点 e2e 是每个 PR 的门禁 | 已有 `e2e-cluster-roles`、`e2e-worker-crash-recovery`，但只能手动触发（最近一次是 10-19 在分支上手动跑的）；`e2e-meta-failover` 只在 push main 跑。现有场景都没覆盖「每节点独立 data_dir 加 SIGSTOP 接管」 | PARTIAL | 要改 workflow，需要有 `workflow` 权限的 token（`HANDOFF-ci-cluster-e2e.md` 里有现成的 diff） |
@@ -102,11 +102,11 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 13 / PARTIAL 9 / NOT MET 13**。
+共 35 项：**MET 14 / PARTIAL 9 / NOT MET 12**。
 
 ## 最卡生产级的 5 项
 
-1. **C1–C3、C5，cluster 故障切换**：两个 P1（#476、#473）都靠 ADR 0011 的 PR-1 到 PR-4，PR-1（#478）连续 6 轮 QA 没过。
+1. **C2、C3、C5，cluster 故障切换**：两个 P1（#476、#473）都靠 ADR 0011 的 PR-2 到 PR-4；PR-1 的纯模型已合入（C1）。
 2. **A1、C6，cluster 下缺段没有 finding**：#462（P1）；对应的 PR #471 不会合，要等 PR-3 和 PR-5。
 3. **F2、F4，失败到不了人**：评估器默认关，没有 `task_healthy`，没有 webhook，也没有随附的告警规则。
 4. **D3，备份是否可还原没人持续验证**：周期巡检已经在 CI 里（A4，运行中的工人把缺本地文件和损坏对象报成 finding）。可选的还原演练和真实 MinIO 还没有；没有覆盖查询和还原计划（ADR 0009 阶段 4、5）。

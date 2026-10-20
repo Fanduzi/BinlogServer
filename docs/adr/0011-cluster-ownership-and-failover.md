@@ -1,6 +1,6 @@
 # 集群所有权与故障转移：一台状态机
 
-Status: Proposed（2026-10-19；同日第四轮设计评审后修订）。只有设计，没有运行时代码。等本记录被接受之后才按第 5 节改代码。
+Status: Accepted（2026-10-20 批准；2026-10-19 第四轮设计评审后修订）。按第 5 节分 PR 实施：PR-1 的纯过渡模型已经合入（`4a970319`）。
 
 相关记录：[0001](0001-task-ownership.md)（所有权只有一扇门；worker 注册不是任务所有权）、[0005](0005-single-task-authority-and-segment-catalog.md)（期望与观察分开，meta 是权威，控制回路是唯一启动者）、[0009](0009-backup-assurance.md) 及其设计说明 `docs/design/0009-phase2-health-evaluator.md` 的 §28–§31.6（健康、让出、链委派、封存段缺失）。这些决定里「meta 是权威、操作员写期望、段按 `(task_id, source_file, epoch)` 标识、失败必须留下 finding」都保留。本记录替换的是 §28 之后那一串补丁所依赖的写法：每修一个故障转移缺陷，就在调度器、评估器和健康写入上再加一条特殊路径。
 
