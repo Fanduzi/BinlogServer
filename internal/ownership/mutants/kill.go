@@ -235,4 +235,5 @@ var mutants = []mutant{
 	{id: "U18", file: "bound.go", old: "\t\tW = boundExtend(W, now, s.RetryUntil) // retry window", new: "\t\tW = W // retry window"},
 	{id: "V04", file: "bound.go", old: "\tif s.Lock.Held && !s.Lock.Since.IsZero() {\n\t\tidle := p.IdleKill\n\t\tif idle <= 0 {\n\t\t\tidle = 5 * time.Second\n\t\t}\n\t\tW = boundExtend(W, now, s.Lock.Since.Add(idle))\n\t}", new: "\tif s.Lock.Held && !s.Lock.Since.IsZero() {\n\t\tW = boundExtend(W, now, s.Lock.Since.Add(5*time.Second))\n\t}"},
 	{id: "V17", file: "bound.go", old: "\tif live && owner != nil && owner.Stopped {\n\t\tW = boundExtend(W, now, s.Lease.ExpireAt) // stopped owner\n\t}", new: "\tif live && owner != nil && owner.Stopped && owner.CanRead {\n\t\tW = boundExtend(W, now, s.Lease.ExpireAt) // stopped owner\n\t}"},
+	{id: "S03", file: "invariant.go", old: "\tcase ReasonChainOwnerGone:\n\t\tn := s.node(s.Chain.Owner)\n\t\treturn n == nil || n.Stopped || !n.CanRead", new: "\tcase ReasonChainOwnerGone:\n\t\treturn true"},
 }
