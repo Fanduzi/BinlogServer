@@ -1,11 +1,12 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a standalone task record file (RecordFile, the encrypted {data_dir}/.tasks.enc of ADR 0010), the key problem found at startup, the in-memory tasks, and the task directories under data_dir
-// output: the record snapshot (spec, source password, desired state, terminal failure, id seq, delete tombstones; never a position) saved before memory changes at the two operator commit points and best effort when a worker failure changes desired state; Restore of standalone tasks from that file with the start computed fresh from disk (diskResumeStart, adopt semantics) and RESUME_POSITION_UNKNOWN instead of a guessed position; ResumeRecordedTasks that Starts every desired-RUN task after a restart; TASK_RECORDS_FAILED (key_missing, key_invalid, wrong_key, corrupt, write) and refused record-changing actions while the file cannot be used
+// output: the record snapshot (spec, source password, desired state, terminal failure, id seq, delete tombstones; never a position) saved before memory changes at the two operator commit points and best effort when a worker failure changes desired state; Restore of standalone tasks from that file with the start computed fresh from disk (diskResumeStart, adopt semantics) and RESUME_POSITION_UNKNOWN instead of a guessed position; ResumeRecordedTasks that Starts every desired-RUN task after a restart; TASK_RECORDS_FAILED (key_missing, key_invalid, wrong_key, corrupt, write) and refused record-changing actions while the file cannot be used; EvaluateClusterNow stores a startup clear before the API listens when the evaluator was attached before Restore
 // pos: ADR 0010 (#385): standalone auto-resume after restart; memory stays the runtime authority (ADR 0005), the file is a write-through journal read once at startup
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -637,6 +638,20 @@ func (s *Scheduler) replayRecordSignals() {
 	for subject, detail := range s.records.open {
 		s.SignalFailure(Finding{TaskID: ClusterFindingTask, Kind: FindingTaskRecordsFailed, Subject: subject, Severity: FindingCritical, Detail: detail})
 	}
+}
+
+// EvaluateClusterNow runs one evaluation of the pseudo task so a
+// task-record clear made during Restore is stored before the API serves.
+// The app attaches the evaluator before Restore, so that clear is only a
+// success signal until this runs; the sweep would otherwise wait out its
+// debounce. No evaluator, evaluator off, or cluster mode is a no-op.
+func (s *Scheduler) EvaluateClusterNow(ctx context.Context) error {
+	e := s.healthEval.Load()
+	if e == nil || e.Mode() != EvaluatorOn || e.cfg.Cluster {
+		return nil
+	}
+	_, err := e.EvaluateNow(ctx, ClusterFindingTask)
+	return err
 }
 
 // recordStaleNoteLocked names the last snapshot that is on disk, so a
