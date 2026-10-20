@@ -209,10 +209,11 @@ type State struct {
 	// RegistrationLive is ignored by Acquire. Claim does not read it (0001, #463).
 	RegistrationLive map[string]bool
 
-	// trace is the applied-event log. It is unexported so a caller cannot
-	// append to it or let it grow as part of the State value they store.
-	// Step appends one entry per applied transition and never reads it.
-	// The checker replays it for invariant 7.
+	// trace is the applied-event log. It is unexported, so other packages
+	// cannot append to it. Step still appends one entry on every applied
+	// event, and a State value the caller keeps grows with that log for as
+	// long as they keep stepping it. Step does not read the log back. The
+	// checker replays it for invariant 7.
 	trace []TraceEvent
 
 	Params Params
