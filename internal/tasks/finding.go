@@ -2,6 +2,7 @@
 // input: failure reports from the scheduler, the runner, and background loops
 // output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
+// note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill and a session-timeout mismatch when the store reports them
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -70,6 +71,10 @@ const (
 	// FindingHealthStoreUnavailable: the evaluator is on and migration 000009
 	// cannot be read or written (S18, design §27, #436).
 	FindingHealthStoreUnavailable FindingKind = "HEALTH_STORE_UNAVAILABLE"
+	// FindingMetaLockStalled: a task_leases row lock outlived one session-kill
+	// bound twice (ADR 0011). Task _cluster, subject the task id. Not a
+	// managed health kind, so Reconcile does not close it.
+	FindingMetaLockStalled FindingKind = "META_LOCK_STALLED"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.
@@ -805,8 +810,9 @@ const (
 
 // HealthSummary is the process health GET /api/health serves.
 type HealthSummary struct {
-	Status  string   `json:"status"`
-	Reasons []string `json:"reasons,omitempty"`
+	Status   string   `json:"status"`
+	Reasons  []string `json:"reasons,omitempty"`
+	SideKill string   `json:"side_kill,omitempty"`
 }
 
 // HealthSummary is degraded while any CRITICAL finding is open, read from
@@ -841,9 +847,24 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 	if reason, ok := s.healthStoreDegradedReason(); ok {
 		reasons = append(reasons, reason)
 	}
+	sum := HealthSummary{Status: HealthOK}
+	if view, ok := s.store.(interface {
+		SessionDegraded() (bool, string)
+		SideKill() string
+	}); ok {
+		if degraded, detail := view.SessionDegraded(); degraded {
+			if detail == "" {
+				detail = "@@session.wait_timeout does not match the session-kill bound"
+			}
+			reasons = append(reasons, "session wait_timeout mismatch: "+detail)
+		}
+		sum.SideKill = view.SideKill()
+	}
 	if len(reasons) == 0 {
-		return HealthSummary{Status: HealthOK}
+		return sum
 	}
 	sort.Strings(reasons)
-	return HealthSummary{Status: HealthDegraded, Reasons: reasons}
+	sum.Status = HealthDegraded
+	sum.Reasons = reasons
+	return sum
 }

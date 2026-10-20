@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 and this process's session-kill deadline returned as healthstore.ErrLockWait and 1213 returned for the next sweep; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -32,10 +32,6 @@ var _ tasks.RehashCursorStore = (*MySQLTaskStore)(nil)
 // openFindingsPage is the keyset page size of ListOpenFindingsForTask.
 const openFindingsPage = 1000
 
-// healthTxAttempts bounds retries of a health transaction that lost a
-// deadlock or lock wait to a concurrent writer of the same task.
-const healthTxAttempts = 50
-
 func healthErr(err error) error {
 	if err == nil {
 		return nil
@@ -46,9 +42,9 @@ func healthErr(err error) error {
 	return err
 }
 
-func isRetryableTxError(err error) bool {
+func isLockWaitError(err error) bool {
 	var me *mysqlDriver.MySQLError
-	return errors.As(err, &me) && (me.Number == 1213 || me.Number == 1205)
+	return errors.As(err, &me) && me.Number == 1205
 }
 
 func (s *MySQLTaskStore) useAlias(ctx context.Context) (bool, error) {
@@ -91,13 +87,18 @@ func (s *MySQLTaskStore) ApplyTransitions(ctx context.Context, taskID string, fe
 	if _, err := s.db.ExecContext(ctx, "INSERT IGNORE INTO task_health (task_id, status, evaluated_at) VALUES (?, '', UTC_TIMESTAMP(6))", taskID); err != nil {
 		return healthstore.Applied{}, healthErr(err)
 	}
-	for attempt := 1; ; attempt++ {
-		out, err := s.applyOnce(ctx, taskID, fence, ts, h, alias)
-		if err != nil && isRetryableTxError(err) && attempt < healthTxAttempts && ctx.Err() == nil {
-			continue
-		}
-		return out, healthErr(err)
+	parent := ctx
+	bound := s.sessionBound()
+	if bound > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(parent), bound)
+		defer cancel()
 	}
+	out, err := s.applyOnce(ctx, taskID, fence, ts, h, alias)
+	if isLockWaitError(err) || (errors.Is(err, context.DeadlineExceeded) && parent.Err() == nil) {
+		return out, fmt.Errorf("%w: %v", healthstore.ErrLockWait, err)
+	}
+	return out, healthErr(err)
 }
 
 func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence health.Fence, ts []health.Transition, h health.TaskHealth, alias bool) (out healthstore.Applied, err error) {

@@ -28,6 +28,7 @@ cluster:
   lease_renew_interval_sec: 5
   lease_grace_sec: 30
   failover_policy: "rebuild_current_file"
+  side_kill: "off" # off | auto. auto is a direct meta connection only
 
 # Per-task retention is not a process setting. POST /api/tasks storage:
 #   retention_days: 7                # required, 1..3650; both retentions when the next two are omitted

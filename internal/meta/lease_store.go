@@ -86,7 +86,8 @@ type Lease struct {
 
 // LeaseStore 负责基于 MySQL 表实现 lease acquire/renew/release。
 type LeaseStore struct {
-	db *sql.DB
+	db      *sql.DB
+	session *sessionState
 }
 
 // NewLeaseStore 基于 *sql.DB 构建 LeaseStore。
@@ -99,7 +100,7 @@ func NewLeaseStoreFromTaskStore(store *MySQLTaskStore) *LeaseStore {
 	if store == nil {
 		return nil
 	}
-	return &LeaseStore{db: store.db}
+	return &LeaseStore{db: store.db, session: store.session}
 }
 
 func (s *LeaseStore) queries() *sqlcgen.Queries {
@@ -147,6 +148,7 @@ func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl t
 	if err != nil {
 		return 0, false, err
 	}
+	s.checkSessionTimeout(ctx)
 	return epoch, ok, nil
 }
 
@@ -173,6 +175,7 @@ func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch i
 	if err != nil {
 		return false, err
 	}
+	s.checkSessionTimeout(ctx)
 	return renewed, nil
 }
 

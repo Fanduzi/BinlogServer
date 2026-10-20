@@ -527,6 +527,8 @@ type MySQLTaskStore struct {
 	retentionMarkerWarned atomic.Bool
 	// healthUpsertAlias caches the upsert dialect: 0 unknown, 1 alias, 2 VALUES().
 	healthUpsertAlias atomic.Int32
+	// session is set only by OpenClusterMeta. Standalone pools stay nil.
+	session *sessionState
 }
 
 var _ tasks.TaskStore = (*MySQLTaskStore)(nil)

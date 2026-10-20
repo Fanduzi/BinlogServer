@@ -2,7 +2,7 @@
 
 // Package main replays the review mutants against the ownership tests.
 // input: internal/ownership Go sources and the mutant table in this file
-// output: a kill table on stdout; exit status 1 when a mutant survives
+// output: a kill table on stdout; exit status 1 when a mutant survives. Q07, Q22, Q23 halve table constants. Q13 accepts equal chain times
 // pos: the reproducible mutation harness, excluded from go test
 // note: if this file changes, update this header and module README.md.
 package main
@@ -243,4 +243,8 @@ var mutants = []mutant{
 	{id: "L01", file: "observe_test.go", old: "res := Step(s, Held(s, EventDumpReady, reader), now)", new: "res := Step(s, Held(s, EventEpochLost, reader), now)"},
 	{id: "L02", file: "observe_test.go", old: "\t// progress step\n\tif live && reader != \"\" && s.Lease.Owner == reader {\n\t\tres := Step(s, Held(s, EventDumpReady, reader), now)\n\t\tif res.Decision == DecisionApplied || res.Decision == DecisionIdempotent {\n\t\t\tres.State.trace = nil\n\t\t\treturn []obsMove{{s: res.State, at: now, kind: moveDump}}\n\t\t}\n\t}\n", new: "\t// progress step\n\tif live && reader != \"\" && s.Lease.Owner == reader {\n\t\treturn []obsMove{{s: s, at: now.Add(s.Params.fill().RefusalRetryCap), kind: moveJump}}\n\t}\n"},
 	{id: "K01", file: "time_region.go", old: "if d < -limit {", new: "if d <= -limit {"},
+	{id: "Q07", file: "time_region.go", old: "noProg := func(p Params) time.Duration { return p.fill().NoProgressAfter }", new: "noProg := func(p Params) time.Duration { return p.fill().NoProgressAfter / 2 }"},
+	{id: "Q22", file: "time_region.go", old: "sweep := func(p Params) time.Duration { return p.fill().Sweep }", new: "sweep := func(p Params) time.Duration { return p.fill().Sweep / 2 }"},
+	{id: "Q23", file: "time_region.go", old: "{field: \"evaluated\", cmp: \">\", src: \"now.Sub(s.EvaluatedAt) > EffectiveStaleAfter(s.Params)\", cons: EffectiveStaleAfter},", new: "{field: \"evaluated\", cmp: \">\", src: \"now.Sub(s.EvaluatedAt) > EffectiveStaleAfter(s.Params)\", cons: func(p Params) time.Duration { return EffectiveStaleAfter(p) / 2 }},"},
+	{id: "Q13", file: "step.go", old: "!s.Chain.VerifiedAt.After(s.FailedAt)", new: "s.Chain.VerifiedAt.Before(s.FailedAt)"},
 }
