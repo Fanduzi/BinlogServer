@@ -79,21 +79,21 @@ func TestMutantM29_ChainOwnerGoneOnlyFromDegradedTail(t *testing.T) {
 }
 
 func TestMutantM33_Invariant7IgnoresNoProgressFlag(t *testing.T) {
-	s := New()
-	s.Phase = PhaseLeaseDegraded
-	s.Desired = DesiredRun
-	s.Lease = Lease{Present: true, ExpireAt: t0}
-	s.UnownedSince = t0
-	s.NoProgress = false
+	s := boot(t, "n1", t0, nil)
+	later := t0.Add(time.Hour)
+	s = expireLease(s, later)
+	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseENOENT), later)
 	s.Findings = nil
-	at := t0.Add(s.Params.Sweep)
+	s.NoProgress = false
+	s.UnownedSince = time.Time{}
+	at := later.Add(s.Params.Sweep)
 	if !ProgressOverdue(s, at) {
-		t.Fatal("clock did not call the stall overdue")
+		t.Fatal("trace clock did not call the stall overdue")
 	}
 	if v := Check(s, at); !hasInv(v, "7") {
 		t.Fatalf("invariant 7 trusted the cleared flag: %+v", v)
 	}
-	if v := Check(s, t0.Add(s.Params.Sweep-time.Second)); hasInv(v, "7") {
+	if v := Check(s, later.Add(s.Params.Sweep-time.Second)); hasInv(v, "7") {
 		t.Fatalf("invariant 7 fired before one sweep: %+v", v)
 	}
 }
@@ -163,8 +163,8 @@ func TestMutantF09_StartClearsFailedReason(t *testing.T) {
 	s.LastError = "stuck"
 	before := s.SpecRevision
 	res := step(t, s, Event{Kind: EventOperatorStart, Node: "n1"}, t0)
-	if res.State.FailedReason != "" || !res.State.FailedAt.IsZero() || res.State.RetryAttempt != 0 || res.State.LastError != "" {
-		t.Fatalf("reason %q at %s attempt %d err %q", res.State.FailedReason, res.State.FailedAt, res.State.RetryAttempt, res.State.LastError)
+	if res.State.FailedReason != "" || !res.State.FailedAt.IsZero() || res.State.FailedSpec != 0 || res.State.RetryAttempt != 0 || res.State.LastError != "" {
+		t.Fatalf("reason %q at %s spec %d attempt %d err %q", res.State.FailedReason, res.State.FailedAt, res.State.FailedSpec, res.State.RetryAttempt, res.State.LastError)
 	}
 	if res.State.SpecRevision <= before {
 		t.Fatalf("spec %d -> %d", before, res.State.SpecRevision)
@@ -185,6 +185,10 @@ func TestMutantF11_SecondLockIsSameNodeInsideLockWait(t *testing.T) {
 	late := applied(t, once, Event{Kind: EventLock, Node: "n2"}, at.Add(s.Params.LockWait+time.Millisecond))
 	if !late.MetaLockStalled || late.LockRecoveries != 1 {
 		t.Fatalf("late take closed the stall: stalled %v recoveries %d", late.MetaLockStalled, late.LockRecoveries)
+	}
+	exact := applied(t, once, Event{Kind: EventLock, Node: "n2"}, at.Add(s.Params.LockWait))
+	if exact.MetaLockStalled || exact.LockRecoveries != 0 {
+		t.Fatalf("take at exactly lock_wait left stalled %v recoveries %d", exact.MetaLockStalled, exact.LockRecoveries)
 	}
 	freed := t0.Add(2 * s.Params.IdleKill)
 	other := applied(t, once, Event{Kind: EventLock, Node: "n1"}, freed)
@@ -226,16 +230,23 @@ func TestMutantF15_RetryUntilBoundaryIsStrict(t *testing.T) {
 	s = applied(t, s, heldCause(s, EventRetryableError, "n1", CauseLockWait), t0)
 	deadline := s.RetryUntil
 	s.Lease.ExpireAt = deadline
-	s.UnownedSince = deadline.Add(-s.Params.Sweep)
-	s.Findings = nil
-	s.NoProgress = false
-	early := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, deadline.Add(-time.Nanosecond))
-	if findOpen(early, FindingNoProgress, s.TaskID) || !LegalRetry(s, deadline.Add(-time.Nanosecond)) {
+	if !LegalRetry(s, deadline.Add(-time.Nanosecond)) {
 		t.Fatal("retry window closed before retry_until")
 	}
-	at := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, deadline)
-	if !findOpen(at, FindingNoProgress, s.TaskID) || LegalRetry(s, deadline) {
+	early := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, deadline.Add(-time.Nanosecond))
+	if findOpen(early, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS opened inside the retry window")
+	}
+	if LegalRetry(s, deadline) {
 		t.Fatal("retry window still open at retry_until")
+	}
+	at := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, deadline)
+	if findOpen(at, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS opened on the sweep that first sees retry_until")
+	}
+	next := applied(t, at, Event{Kind: EventSweep, Node: "n2"}, deadline.Add(s.Params.Sweep))
+	if !findOpen(next, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS stayed closed one sweep after retry_until")
 	}
 }
 
@@ -421,5 +432,159 @@ func TestLeaseUnreadableDoesNotBecomeFailedOrRunning(t *testing.T) {
 	got = step(t, s, ready, t0)
 	if got.State.Phase == PhaseRunning || got.State.Lease.Owner != "" {
 		t.Fatalf("DumpReady with unreadable lease: phase %s owner %s", got.State.Phase, got.State.Lease.Owner)
+	}
+}
+
+func TestRefusalDelayGuards(t *testing.T) {
+	claim := 17179869185 * time.Nanosecond
+	if got := RefusalDelay(31, claim, 10*time.Minute); got != 10*time.Minute {
+		t.Fatalf("shift 30 delay %s, want 10m", got)
+	}
+	if got := RefusalDelay(0, 2*time.Second, 10*time.Minute); got != 2*time.Second {
+		t.Fatalf("attempts 0 delay %s, want 2s", got)
+	}
+	if got := RefusalDelay(-4, 2*time.Second, 10*time.Minute); got != 2*time.Second {
+		t.Fatalf("negative attempts delay %s, want 2s", got)
+	}
+	if got := RefusalDelay(1, 0, 10*time.Minute); got != 2*time.Second {
+		t.Fatalf("claim 0 delay %s, want 2s", got)
+	}
+	if got := RefusalDelay(1, -time.Second, 10*time.Minute); got != 2*time.Second {
+		t.Fatalf("negative claim delay %s, want 2s", got)
+	}
+	if got := RefusalDelay(1, 2*time.Second, 0); got != 2*time.Second {
+		t.Fatalf("cap 0 delay %s, want 2s", got)
+	}
+	if got := RefusalDelay(31, 2*time.Second, 0); got != 10*time.Minute {
+		t.Fatalf("cap 0 saturated delay %s, want 10m", got)
+	}
+	if got := RefusalDelay(1, 2*time.Second, -time.Second); got != 2*time.Second {
+		t.Fatalf("negative cap delay %s, want 2s", got)
+	}
+}
+
+func TestRefusalAttemptsStayCapped(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s.Params.Storage = StorageShared
+	when := t0
+	for i := 0; i < 30; i++ {
+		s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseEROFS), when)
+		if s.Refusal["n1"].Attempts > maxRefusalAttempts {
+			t.Fatalf("attempt %d after %d losses", s.Refusal["n1"].Attempts, i+1)
+		}
+		when = s.Refusal["n1"].Until
+		s = applied(t, s, Event{Kind: EventAcquire, Node: "n1"}, when)
+	}
+	if s.Refusal["n1"].Attempts != maxRefusalAttempts {
+		t.Fatalf("attempts %d, want the cap %d", s.Refusal["n1"].Attempts, maxRefusalAttempts)
+	}
+}
+
+func TestDumpReadyStampsProgressBeforeNoProgress(t *testing.T) {
+	s := New()
+	s.Nodes = []Node{{ID: "n1", CanRead: true, HeartbeatAt: t0}}
+	s.Params.LeaseTTL = 3 * time.Minute
+	s = applied(t, s, Event{Kind: EventOperatorStart, Node: "n1"}, t0)
+	dumpAt := t0.Add(15 * time.Second)
+	s = applied(t, s, Held(s, EventDumpReady, "n1"), dumpAt)
+	sweepAt := t0.Add(2*time.Minute + 7500*time.Millisecond)
+	s = applied(t, s, Event{Kind: EventSweep, Node: "n1"}, sweepAt)
+	if findOpen(s, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS opened inside no_progress_after of DumpReady")
+	}
+	hand := s
+	hand.Findings = nil
+	hand.NoProgress = false
+	hand.ProgressAt = time.Time{}
+	if v := Check(hand, sweepAt); hasInv(v, "7") {
+		t.Fatalf("checker used ProgressAt: %+v", v)
+	}
+}
+
+func TestDeletedRowDiscardsLaterOperations(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s = applied(t, s, Event{Kind: EventOperatorDelete, Node: "n1"}, t0)
+	if s.Deleted || !s.PendingDelete {
+		t.Fatalf("deleted %v pending %v", s.Deleted, s.PendingDelete)
+	}
+	later := t0.Add(time.Hour)
+	s = expireLease(s, later)
+	s = applied(t, s, Event{Kind: EventStopExpired, Node: "n1"}, later)
+	if !s.Deleted {
+		t.Fatal("stop did not delete the row")
+	}
+	for _, kind := range []Kind{EventOperatorStart, EventAcquire} {
+		res := step(t, s, Event{Kind: kind, Node: "n1"}, later)
+		if res.Decision != DecisionDiscarded || res.HTTP != 0 || !res.ZeroRow {
+			t.Fatalf("%s decision %s http %d zero %v", kind, res.Decision, res.HTTP, res.ZeroRow)
+		}
+	}
+	swept := step(t, s, Event{Kind: EventSweep, Node: "n1"}, later)
+	if swept.Decision != DecisionApplied {
+		t.Fatalf("sweep on a deleted row: %s", swept.Decision)
+	}
+}
+
+func TestFailedSpecBlocksClaimUntilSpecChanges(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s = applied(t, s, heldCause(s, EventTerminalError, "n1", CauseSourceAuth), t0)
+	if s.Phase != PhaseFailed || s.FailedSpec != s.SpecRevision || s.FailedSpec == 0 {
+		t.Fatalf("phase %s failed spec %d spec %d", s.Phase, s.FailedSpec, s.SpecRevision)
+	}
+	if InClaimSet(s, t0) {
+		t.Fatal("claim pulled a FAILED row at the failed spec")
+	}
+	res := step(t, s, Event{Kind: EventAcquire, Node: "n1"}, t0)
+	if res.Decision == DecisionApplied || res.State.Phase != PhaseFailed {
+		t.Fatalf("acquire at the failed spec: %s phase %s", res.Decision, res.State.Phase)
+	}
+	bumped := s
+	bumped.SpecRevision = s.FailedSpec + 1
+	got := step(t, bumped, Event{Kind: EventAcquire, Node: "n1"}, t0)
+	if got.Decision != DecisionApplied || got.State.Phase != PhaseStarting || got.State.FailedSpec != 0 || got.State.FailedReason != "" {
+		t.Fatalf("acquire after a new spec: %s phase %s failed spec %d reason %q", got.Decision, got.State.Phase, got.State.FailedSpec, got.State.FailedReason)
+	}
+	gone := yieldTail(t, "n1", "n2")
+	when := gone.TailSince.Add(EffectiveNodeGone(gone.Params) + time.Second)
+	gone = heartbeat(gone, "n1", gone.TailSince)
+	gone = applied(t, gone, Event{Kind: EventChainOwnerGone, Node: "_health"}, when)
+	if gone.FailedReason != ReasonChainOwnerGone || gone.FailedSpec != 0 {
+		t.Fatalf("reason %s failed spec %d", gone.FailedReason, gone.FailedSpec)
+	}
+	gone.SpecRevision = 5
+	if InClaimSet(gone, when) {
+		t.Fatal("claim pulled CHAIN_OWNER_GONE")
+	}
+	res = step(t, gone, Event{Kind: EventAcquire, Node: "n2"}, when)
+	if res.Decision == DecisionApplied {
+		t.Fatal("acquire applied on CHAIN_OWNER_GONE")
+	}
+}
+
+func TestNoProgressStaysClosedOnFailed(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s = applied(t, s, heldCause(s, EventTerminalError, "n1", CauseSourceAuth), t0)
+	if findOpen(s, FindingNoProgress, s.TaskID) {
+		t.Fatal("opened at the terminal event")
+	}
+	swept := applied(t, s, Event{Kind: EventSweep, Node: "n2"}, t0.Add(s.Params.Sweep))
+	if findOpen(swept, FindingNoProgress, s.TaskID) {
+		t.Fatal("TASK_NO_PROGRESS opened on FAILED")
+	}
+}
+
+func TestUnownedClockResetsOnReacquire(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s.Params.Storage = StorageShared
+	later := t0.Add(time.Hour)
+	s = expireLease(s, later)
+	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseEROFS), later)
+	back := s.Refusal["n1"].Until
+	s = applied(t, s, Event{Kind: EventAcquire, Node: "n1"}, back)
+	s = applied(t, s, heldCause(s, EventEpochLost, "n1", CauseEROFS), back)
+	sweepAt := later.Add(s.Params.Sweep)
+	s = applied(t, s, Event{Kind: EventSweep, Node: "n2"}, sweepAt)
+	if findOpen(s, FindingNoProgress, s.TaskID) {
+		t.Fatal("stale unowned clock opened TASK_NO_PROGRESS")
 	}
 }
