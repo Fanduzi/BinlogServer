@@ -10,15 +10,15 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 |------|---------------|
 | `state.go` | 任务状态：期望、观察态、租约、备份链、拒绝、结论、节点。已应用事件轨迹不导出；`Step` 仍往里追加，调用方留着的 State 会随轨迹变长 |
 | `event.go` | ADR 0011 §3.2 的事件，以及续租、sweep、行锁、旧二进制更新 |
-| `step.go` | `Step`：一次事件到下一状态和意图 |
+| `step.go` | `Step`：一次事件到下一状态和意图。`per_node` 的 NULL 拒绝在 `CanRead` 恢复后不再挡住 `Acquire`。链主人目录没了时 `ChainOwnerGone` 立刻成立 |
 | `invariant.go` | 不变量 1–10 的可检查谓词。不变量 7 的 `ProgressOverdue` 只重放 `Step` 追加的未导出事件轨迹，不读 `ProgressAt` / `UnownedSince` / `NoProgress`，也不调用 `LeaseLive` / `LegalRetry`。终态 `FAILED` 只有 `spec_revision > failed_spec_revision` 才进认领集 |
 | `finding.go` | 结论从事实派生。事实没变时，同一键不会先关后开 |
 | `spec.go` | RTO、stale、`node_gone`、拒绝退避、迁移预检、旁路杀计划。`RefusalDelay` 在指数大于 20 或 `claim > cap>>shift` 时取 cap，移位回绕不能把期限算短 |
 | `invariant_test.go` | 安全性：固定种子的随机前缀，加深度 3 的有界穷举。字母表含旧 epoch、`StopConfirmed`、`StopExpired`、`Lock`，时钟会跳过租约 TTL |
-| `bound.go` | `FairStepBound`：公平步数的上界，直到 `FairTerminal`。允许名单上的 FAILED 只有不可认领时才是终态。`CHAIN_OWNER_GONE` 在链主人停住、缺席或活着但读不到目录时是终态。窗口 W 含行锁 idle_kill、停住 owner 的 TTL、重试窗口，以及停住链主人的 node_gone。估大可以，估小是错 |
+| `bound.go` | `FairStepBound`：公平步数的上界。窗口 W 是 `fairDeadlines` 的最大值，`NextDeadline` 是同一组的最小值。估大可以，估小是错 |
 | `liveness_test.go` | 活性 (a)(b)(c) 的起点。60 次偏向游走加上 `FAILED` / `CHAIN_OWNER_GONE`。能搜完的起点要求观察步数 ≤ `FairStepBound`；两者相等时，界再减一就装不下。检查方法写在文件头 |
-| `observe_test.go` | 只调用 `Step` 和 `Check` 的公平搜索，终态用 `FairTerminal`。`ChainVerified` 的 `ReadOK` 取节点的 `CanRead`。sweep 到期后可以先走其它公平步。20 万状态以内穷尽；3/4 个非读者用带种子的公平游走。已知长调度按 `Step` 重放，只要求不超过上界 |
-| `bound_rand_test.go` | 至少 300 个带种子的随机配置：1–4 个节点，shared 与 per_node，非缺省 idle_kill、TTL 和 cap，行锁、停住的非读者 owner、重试和链主人可以同时在。穷尽搜索要求观察步数 ≤ `FairStepBound`。状态数超过上限的不记成通过，穷尽比例必须高于 95%，超过上限的种子数打在输出里。中位状态数要明显高于个位数。更多种子用 `FAIR_BOUND_SEEDS` |
+| `observe_test.go` | 公平步图。底强连通分量要么含 `RUNNING`，要么是单个操作员 `FAILED`。`FairTerminal` 只用来和这些底分量对账。没有其它步时按 `NextDeadline` 跳时钟。20 万状态以内穷尽 |
+| `bound_rand_test.go` | 至少 300 个带种子的随机配置，含 `CanRead` 恢复这一环境步。穷尽搜索要求观察步数 ≤ `FairStepBound`，底强连通分量违例为 0。超过上限的种子数和违例数打在输出里。更多种子用 `FAIR_BOUND_SEEDS` |
 | `trajectory_test.go` | §4.1 轨迹 |
 | `fault_matrix_test.go` | §4.2 里纯模型能表达的每一行 |
 | `scenario_walk_test.go` | §4.3 里纯模型能表达的走查 |
