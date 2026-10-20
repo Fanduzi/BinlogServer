@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, one Event (LeaseUnreadable included), and the caller-supplied clock
-// output: Result, the next state, the side-effect intents, and one applied-event trace entry. NULL tail refusals are re-checked against CanRead. A lost chain directory becomes CHAIN_OWNER_GONE
+// output: Result, the next state, the side-effect intents, and one applied-event trace entry. NULL tail refusals are re-checked against CanRead. A lost chain directory becomes CHAIN_OWNER_GONE. ChainVerified and ChainOwnerBack reject a stopped, missing, or unreadable node
 // pos: the single transition function; it does no I/O and reads no clock
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -631,6 +631,12 @@ func chainVerified(s State, e Event, now time.Time) partial {
 	if e.Node == "" || e.Incomplete || !e.ReadOK {
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "directory not read"})
 	}
+	// A stopped node, a missing node, or one that cannot read does not
+	// verify. The fair search tries the event and stops when Step rejects
+	// it; it does not keep a second copy of this condition.
+	if n := s.node(e.Node); n == nil || n.Stopped || !n.CanRead {
+		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "directory not read"})
+	}
 	holder := LeaseLive(s, now) && s.Lease.Owner == e.Node
 	delegated := s.Chain.Owner == e.Node && !LeaseLive(s, now)
 	if !holder && !delegated {
@@ -734,6 +740,9 @@ func chainOwnerBack(s State, e Event, now time.Time) partial {
 	}
 	if e.Node != s.Chain.Owner || !s.Chain.Verified() || !s.Chain.VerifiedAt.After(s.FailedAt) {
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "directory not verified after failed_at"})
+	}
+	if n := s.node(e.Node); n == nil || n.Stopped || !n.CanRead {
+		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "directory not read"})
 	}
 	hb := time.Time{}
 	if n := s.node(e.Node); n != nil {

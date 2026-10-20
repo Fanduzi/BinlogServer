@@ -46,7 +46,10 @@ import "time"
 //     onward. The search may take another enabled move first. The deadline
 //     is part of W, and the ChainOwnerGone step is one of the forced steps.
 //     FAILED/CHAIN_OWNER_GONE is terminal while that owner is stopped,
-//     absent, or alive with CanRead false.
+//     absent, or alive with CanRead false. If the directory is already
+//     gone but the row is not yet LEASE_DEGRADED with a tail timestamp,
+//     the owner's EpochLost writes that timestamp and ChainOwnerGone is
+//     the following step. That step is in K.
 //   - UnownedSince+Sweep and no_progress_after: sweep facts, not a fair path
 //     toward RUNNING or a terminal FAILED.
 //   - lock_wait: only the second take that clears META_LOCK_STALLED. The
@@ -130,15 +133,34 @@ func fairDeadlines(s State, now time.Time, reader string) []time.Time {
 	if due, ok := stoppedSweepDue(s, now); ok {
 		add(due) // stopped chain owner
 	}
+	horizon := now
+	var ready, other []time.Time
 	for _, node := range s.Nodes {
-		if !nodeReady(s, node.ID) {
+		if node.Stopped {
 			continue
 		}
 		r, ok := s.Refusal[node.ID]
-		if !ok || r.OpenEnded {
+		if !ok || r.OpenEnded || !r.Until.After(now) {
 			continue
 		}
-		add(r.Until)
+		if node.CanRead {
+			if r.Until.After(horizon) {
+				horizon = r.Until
+			}
+			ready = append(ready, r.Until)
+			continue
+		}
+		other = append(other, r.Until)
+	}
+	for _, at := range ready {
+		add(at)
+	}
+	// A non-reader refusal past the reader horizon is not a fair wait:
+	// the reader is already due, and that claim does not extend W.
+	for _, at := range other {
+		if !at.After(horizon) {
+			add(at)
+		}
 	}
 	if s.Lock.Held && !s.Lock.Since.IsZero() {
 		idle := s.Params.IdleKill
@@ -213,6 +235,11 @@ func boundForced(s State, now time.Time) int {
 	}
 	if chainGoneStep(s, now) {
 		n++ // ChainOwnerGone
+	}
+	// The owner's EpochLost fills an empty tail timestamp and the next
+	// step is ChainOwnerGone. Count that step before the row shows it.
+	if ownerDirGone(s) && !chainGoneStep(s, now) {
+		n++ // directory gone
 	}
 	return n
 }

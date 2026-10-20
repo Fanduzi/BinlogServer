@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Step, Check, and FairStepBound
-// output: seeded configs, including CanRead recovery, whose fair-step count stays within FairStepBound and whose bottom SCCs are clean
+// output: seeded configs, including CanRead recovery, whose fair-step count stays within FairStepBound. Overflow fails the test. Bottom SCCs are counted by kind
 // pos: the randomized check that forced clocks and terminal paths stay inside the bound
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,6 +29,7 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 	}
 	var states []int
 	exhaustive, tight, v04Hits, v17Hits := 0, 0, 0, 0
+	bottoms := map[string]int{}
 	for seed := 0; seed < n; seed++ {
 		s, now := fairRandState(t, int64(seed))
 		if !FairTerminal(s, now) && len(fairMoves(s, now)) == 0 {
@@ -49,7 +51,7 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 				st.Params.Storage, st.Chain.Owner, st.Chain.Verified(), !st.TailSince.IsZero(), end.violation, nodes)
 		}
 		if end.over {
-			continue
+			t.Fatalf("seed %d overflow states %d", seed, end.states)
 		}
 		if !end.ok {
 			t.Fatalf("seed %d has no fair schedule", seed)
@@ -57,6 +59,9 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 		exhaustive++
 		if end.steps > bound {
 			t.Fatalf("seed %d observed %d exceeds bound %d", seed, end.steps, bound)
+		}
+		for k, c := range end.bottoms {
+			bottoms[k] += c
 		}
 		if bound > 0 && end.steps == bound {
 			tight++
@@ -76,12 +81,12 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 	share := float64(exhaustive) / float64(n)
 	med := states[len(states)/2]
 	p90 := states[len(states)*9/10]
-	fmt.Printf("rand\tconfigs\t%d\texhaustive\t%d\tshare\t%.3f\toverflow\t%d\ttight\t%d\tstates_min\t%d\tstates_med\t%d\tstates_p90\t%d\tstates_max\t%d\tv04\t%d\tv17\t%d\tbottoms\t%d\n",
-		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits, 0)
-	t.Logf("configs %d exhaustive %d share %.3f overflow %d tight %d states min %d med %d p90 %d max %d v04 %d v17 %d bottoms 0",
-		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits)
-	if share < 0.95 {
-		t.Fatalf("exhaustive share %.3f is below 0.95 (%d overflow)", share, n-exhaustive)
+	fmt.Printf("rand\tconfigs\t%d\texhaustive\t%d\tshare\t%.3f\toverflow\t%d\ttight\t%d\tstates_min\t%d\tstates_med\t%d\tstates_p90\t%d\tstates_max\t%d\tv04\t%d\tv17\t%d\tbottoms\t%s\n",
+		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits, formatBottoms(bottoms))
+	t.Logf("configs %d exhaustive %d share %.3f overflow %d tight %d states min %d med %d p90 %d max %d v04 %d v17 %d bottoms %s",
+		n, exhaustive, share, n-exhaustive, tight, states[0], med, p90, states[len(states)-1], v04Hits, v17Hits, formatBottoms(bottoms))
+	if exhaustive != n {
+		t.Fatalf("exhaustive share %.3f (%d overflow)", share, n-exhaustive)
 	}
 	if tight < 20 {
 		t.Fatalf("tight schedules %d, want at least 20", tight)
@@ -94,8 +99,27 @@ func TestFairStepBoundRandomConfigs(t *testing.T) {
 	}
 }
 
-// v17Undercounts reports a stopped owner who cannot read, with a non-reader
-// refusal inside the lease and no other forced clock. A bound that extends
+// formatBottoms is the bottom-SCC tally by kind. Zero is not hard-coded.
+func formatBottoms(m map[string]int) string {
+	if len(m) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%s=%d", k, m[k])
+	}
+	return b.String()
+}
+
+// v17Shape is a stopped owner who cannot read. A bound that extends
 // W only when that owner can read counts the refusal as zero.
 func v17Shape(s State, now time.Time) bool {
 	if s.Lock.Held || s.Phase == PhaseRetryBackoff || !s.Lease.ExpireAt.After(now) {

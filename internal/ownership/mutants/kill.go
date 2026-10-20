@@ -240,4 +240,6 @@ var mutants = []mutant{
 	{id: "T08", file: "invariant.go", old: "\tif s.Lock.Held || s.Phase != PhaseRunning || s.Desired != DesiredRun {", new: "\tif s.Phase != PhaseRunning || s.Desired != DesiredRun {"},
 	{id: "W04", file: "bound.go", old: "\t\tn++ // ChainOwnerGone", new: ""},
 	{id: "P01", file: "invariant.go", old: "\t\tn := s.node(node)\n\t\tif n != nil && n.CanRead {\n\t\t\treturn false\n\t\t}\n\t\treturn true", new: "\t\treturn true"},
+	{id: "L01", file: "observe_test.go", old: "res := Step(s, Held(s, EventDumpReady, reader), now)", new: "res := Step(s, Held(s, EventEpochLost, reader), now)"},
+	{id: "L02", file: "observe_test.go", old: "\t// progress step\n\tif live && reader != \"\" && s.Lease.Owner == reader {\n\t\tres := Step(s, Held(s, EventDumpReady, reader), now)\n\t\tif res.Decision == DecisionApplied || res.Decision == DecisionIdempotent {\n\t\t\tres.State.trace = nil\n\t\t\treturn []obsMove{{s: res.State, at: now, kind: moveDump}}\n\t\t}\n\t}\n", new: "\t// progress step\n\tif live && reader != \"\" && s.Lease.Owner == reader {\n\t\treturn []obsMove{{s: s, at: now.Add(s.Params.fill().RefusalRetryCap), kind: moveJump}}\n\t}\n"},
 }
