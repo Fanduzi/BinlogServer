@@ -532,6 +532,11 @@ type MySQLTaskStore struct {
 	// lockWaitSeen overrides the lock-wait probe. Nil asks
 	// performance_schema.data_lock_waits, then information_schema.innodb_trx.
 	lockWaitSeen func(threadID int64) bool
+	// flight tracks in-progress lock statements so a saturated pool can
+	// tell a lock stall from a slow pool.
+	flight stmtFlight
+	// sideKillRun starts the side-kill probe. Nil starts a goroutine.
+	sideKillRun func(func())
 }
 
 var _ tasks.TaskStore = (*MySQLTaskStore)(nil)
