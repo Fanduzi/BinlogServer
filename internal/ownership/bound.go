@@ -15,49 +15,73 @@ import "time"
 //
 // The reader is the live owner when that owner can read, is not stopped, and
 // has no open-ended refusal; otherwise the first node in order with those
-// properties. H is the longest dated refusal still ahead on any such node, or
-// 0. Using the longest one only adds room.
+// properties. The non-reader window W is the furthest the fair scheduler can
+// move the clock before the claim set is worked: the longest dated refusal
+// still ahead on any eligible reader, and every forced deadline below.
+// Using the longest one only adds room.
 //
-// Forced steps are each counted once: a held row lock, chain verify, chain
-// owner back, waiting out a stopped owner's TTL, yielding a live owner who
-// cannot read, StopExpired, and a legal retry wait.
+// Clock jumps the fair scheduler can take, from fairMoves. W is the max of
+// the absolute deadlines, not the sum. Each is also counted once as a step
+// when it applies:
+//   - row lock: Step drops it at Lock.Since+idle_kill before the event
+//     (step.go preamble). A zero Since is already in the past.
+//   - stopped owner: wait until Lease.ExpireAt. Not yielded.
+//   - live owner who is not stopped and is not the reader: yield now, or
+//     wait until Lease.ExpireAt if TailUnreadable and EpochLost are refused.
+//   - RETRY_BACKOFF while that reader holds a live lease: jump to RetryUntil.
+//     RetryUntil can land after ExpireAt and open the claim set there.
+//   - CHAIN_OWNER_GONE before VerifiedAt is after FailedAt: jump to
+//     FailedAt+1ms. ChainOwnerBack then runs at that same instant.
+//   - dated refusals on eligible readers (the old horizon H).
+//
+// Not jumps, so they do not extend W:
+//   - StopExpired, ChainOwnerBack, DumpReady, Acquire: applied at now.
+//   - node_gone: the search refreshes heartbeats of nodes that are not stopped.
+//   - UnownedSince+Sweep and no_progress_after: sweep facts, not a fair path
+//     to RUNNING.
+//   - lock_wait: only the second take that clears META_LOCK_STALLED. The
+//     fair path is MetaLockTimeout at idle_kill.
+//   - StartToReady and Renew: not fair failover steps.
+//   - a waste's new refuse_until: a jump target inside W, not a new arm of
+//     the max. takeLease's ExpireAt is the same. The scheduler does not
+//     wait out a refusal created after the reader can already acquire.
 //
 // Each non-reader (cannot read, not stopped, not the reader) contributes:
 //   - 0 if it already holds an open-ended refusal, or its next ready time is
-//     after H.
+//     after W. A ready time after the reader's own H still counts when a
+//     forced jump lands past H.
 //   - at most 1 if storage is per_node and it is not the verified chain
 //     owner. That TailUnreadable is NULL and does not expire. The verified
 //     chain owner is not in this case: its release is EpochLost, which is dated.
 //   - otherwise n+q. Stored Attempts is a. n counts successive calls
 //     RefusalDelay(a+1), RefusalDelay(a+2), … until the delay is at least
-//     min(cap, H), and counts that last delay. q is 0 when H or cap is 0,
-//     otherwise floor(H/cap)+1, the most claims that fit in a window of
-//     length H when each gap is at least cap. Those cap-spaced claims were
-//     already eligible to be inside n, so n+q over-counts. A deadline already
-//     pending inside (now, now+H] is one extra jump target.
+//     min(cap, W), and counts that last delay. q is 0 when W or cap is 0,
+//     otherwise floor(W/cap)+1. Those cap-spaced claims were already eligible
+//     to be inside n, so n+q over-counts. A deadline already pending inside
+//     (now, now+W] is one extra jump target. The endpoint W is included.
 //
-// When H > 0 every waste creates at most one new deadline, every non-reader
-// has at most one pending deadline, and the horizon is one more jump, so
-// jumps ≤ wastes + pending + 1. When H is 0 there is no future deadline.
+// When W > 0 every waste creates at most one new deadline, every non-reader
+// has at most one pending deadline, and the window end is one more jump, so
+// jumps ≤ wastes + pending + 1. When W is 0 there is no future deadline.
 // A reader then takes Acquire and DumpReady. The sum of those pieces is K.
 func FairStepBound(s State, now time.Time) int {
 	if boundRunning(s, now) {
 		return 0
 	}
 	p := s.Params.fill()
-	H, reader := boundHorizon(s, now)
+	W, reader := boundWindow(s, now)
 	forced := boundForced(s, now)
 	wastes, pending := 0, 0
 	for _, node := range s.Nodes {
 		if node.ID == reader || node.CanRead || node.Stopped {
 			continue
 		}
-		w, pend := boundNodeWastes(s, node.ID, now, H, p)
+		w, pend := boundNodeWastes(s, node.ID, now, W, p)
 		wastes += w
 		pending += pend
 	}
 	jumps := 0
-	if H > 0 {
+	if W > 0 {
 		jumps = wastes + pending + 1
 	}
 	finish := 0
@@ -77,7 +101,9 @@ func boundRunning(s State, now time.Time) bool {
 	return boundCanRead(s, s.Lease.Owner)
 }
 
-func boundHorizon(s State, now time.Time) (time.Duration, string) {
+// boundWindow is how far the fair scheduler can push the clock before it
+// finishes the claim set. Every deadline is folded with max, never min.
+func boundWindow(s State, now time.Time) (time.Duration, string) {
 	reader := ""
 	if s.Lease.Present && s.Lease.ExpireAt.After(now) && boundCanRead(s, s.Lease.Owner) {
 		reader = s.Lease.Owner
@@ -90,20 +116,63 @@ func boundHorizon(s State, now time.Time) (time.Duration, string) {
 			}
 		}
 	}
-	H := time.Duration(0)
+	p := s.Params.fill()
+	W := time.Duration(0)
+	// Reader refusals. The scheduler waits for the reader it picked; taking
+	// the longest eligible refusal only adds claims.
 	for _, node := range s.Nodes {
 		if !boundCanRead(s, node.ID) {
 			continue
 		}
 		r, ok := s.Refusal[node.ID]
-		if !ok || r.OpenEnded || !r.Until.After(now) {
+		if !ok || r.OpenEnded {
 			continue
 		}
-		if d := r.Until.Sub(now); d > H {
-			H = d
-		}
+		W = boundExtend(W, now, r.Until)
 	}
-	return H, reader
+	// Step clears a held row lock at Since+idle_kill, before the event runs.
+	if s.Lock.Held && !s.Lock.Since.IsZero() {
+		idle := p.IdleKill
+		if idle <= 0 {
+			idle = 5 * time.Second
+		}
+		W = boundExtend(W, now, s.Lock.Since.Add(idle))
+	}
+	live := s.Lease.Present && s.Lease.Owner != "" && s.Lease.ExpireAt.After(now)
+	owner := boundFind(s, s.Lease.Owner)
+	// A stopped holder is not yielded. fairMoves waits until ExpireAt and
+	// does not also take the yielding arm.
+	if live && owner != nil && owner.Stopped {
+		W = boundExtend(W, now, s.Lease.ExpireAt) // stopped owner
+	}
+	// A live holder who is not stopped and is not the reader is yielded at
+	// the current clock, or waited out until ExpireAt when that yield is
+	// refused (step.go TailUnreadable / EpochLost).
+	if live && owner != nil && !owner.Stopped && s.Lease.Owner != reader {
+		W = boundExtend(W, now, s.Lease.ExpireAt) // yielding owner
+	}
+	// RETRY_BACKOFF with the reader holding the lease jumps to RetryUntil,
+	// which can land after ExpireAt and open the claim set there.
+	if s.Phase == PhaseRetryBackoff {
+		W = boundExtend(W, now, s.RetryUntil) // retry window
+	}
+	// Chain verify is not applied at FailedAt itself. The scheduler steps one
+	// millisecond later. ChainOwnerBack then runs at that same instant.
+	if s.Phase == PhaseFailed && s.FailedReason == ReasonChainOwnerGone && !s.Chain.VerifiedAt.After(s.FailedAt) {
+		W = boundExtend(W, now, s.FailedAt.Add(time.Millisecond))
+	}
+	return W, reader
+}
+
+func boundExtend(W time.Duration, now, at time.Time) time.Duration {
+	if !at.After(now) {
+		return W
+	}
+	d := at.Sub(now)
+	if d > W {
+		W = d
+	}
+	return W
 }
 
 func boundForced(s State, now time.Time) int {
@@ -133,7 +202,7 @@ func boundForced(s State, now time.Time) int {
 	return n
 }
 
-func boundNodeWastes(s State, id string, now time.Time, H time.Duration, p Params) (int, int) {
+func boundNodeWastes(s State, id string, now time.Time, W time.Duration, p Params) (int, int) {
 	r := s.Refusal[id]
 	if r.OpenEnded {
 		return 0, 0
@@ -142,11 +211,11 @@ func boundNodeWastes(s State, id string, now time.Time, H time.Duration, p Param
 	pending := 0
 	if r.Until.After(now) {
 		ready = r.Until.Sub(now)
-		if ready <= H {
+		if ready <= W {
 			pending = 1
 		}
 	}
-	if ready > H {
+	if ready > W {
 		return 0, 0
 	}
 	if p.Storage == StoragePerNode && !(s.Chain.Verified() && s.Chain.Owner == id) {
@@ -157,8 +226,8 @@ func boundNodeWastes(s State, id string, now time.Time, H time.Duration, p Param
 		cap = 600 * time.Second
 	}
 	limit := cap
-	if H < limit {
-		limit = H
+	if W < limit {
+		limit = W
 	}
 	att := r.Attempts
 	n := 0
@@ -176,8 +245,8 @@ func boundNodeWastes(s State, id string, now time.Time, H time.Duration, p Param
 		}
 	}
 	extra := 0
-	if H > 0 && cap > 0 {
-		extra = int(H/cap) + 1
+	if W > 0 && cap > 0 {
+		extra = int(W/cap) + 1
 	}
 	return n + extra, pending
 }

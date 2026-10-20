@@ -15,9 +15,10 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 | `finding.go` | 结论从事实派生。事实没变时，同一键不会先关后开 |
 | `spec.go` | RTO、stale、`node_gone`、拒绝退避、迁移预检、旁路杀计划。`RefusalDelay` 在指数大于 20 或 `claim > cap>>shift` 时取 cap，移位回绕不能把期限算短 |
 | `invariant_test.go` | 安全性：固定种子的随机前缀，加深度 3 的有界穷举。字母表含旧 epoch、`StopConfirmed`、`StopExpired`、`Lock`，时钟会跳过租约 TTL |
-| `bound.go` | `FairStepBound`：公平步数的上界，不是最长调度的长度。每个非读者按 `RefusalDelay`、cap、已有 attempts 和 `per_node` 链主人分开计；估大可以，估小是错 |
+| `bound.go` | `FairStepBound`：公平步数的上界，不是最长调度的长度。非读者窗口 W 取读者拒绝期限和公平搜索会跳到的强制期限的最大值。估大可以，估小是错 |
 | `liveness_test.go` | 活性 (a)(b)(c) 的起点。60 次偏向游走加上 `FAILED` / `CHAIN_OWNER_GONE`。能搜完的起点要求观察步数 ≤ `FairStepBound`；两者相等时，界再减一就装不下。检查方法写在文件头 |
 | `observe_test.go` | 只调用 `Step` 和 `Check` 的公平搜索，不调用 `FairStepBound` 的内部函数。20 万状态以内穷尽；3/4 个非读者用带种子的公平游走。已知长调度按 `Step` 重放，只要求不超过上界 |
+| `bound_rand_test.go` | 至少 300 个带种子的随机配置。穷尽搜索（过长则公平游走）要求观察步数 ≤ `FairStepBound`。同一批种子对只按读者期限开窗口的旧上界复现违例。更多种子用 `FAIR_BOUND_SEEDS` |
 | `trajectory_test.go` | §4.1 轨迹 |
 | `fault_matrix_test.go` | §4.2 里纯模型能表达的每一行 |
 | `scenario_walk_test.go` | §4.3 里纯模型能表达的走查 |
