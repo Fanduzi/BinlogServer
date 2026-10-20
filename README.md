@@ -323,6 +323,7 @@ BinlogServer is structured as a modular control plane with clear separation betw
 | `internal/config` | YAML and environment-based configuration loading | [internal/config/README.md](internal/config/README.md) |
 | `internal/logging` | Logger setup and log output rotation | [internal/logging/README.md](internal/logging/README.md) |
 | `internal/meta` | Metadata storage, schema checks, lease-backed coordination data | [internal/meta/README.md](internal/meta/README.md) |
+| `internal/ownership` | Pure task-ownership and failover transition (ADR 0011). No I/O, and not wired into the scheduler | [internal/ownership/README.md](internal/ownership/README.md) |
 | `internal/replication` | MySQL replication pull loop and durable local write path | [internal/replication/README.md](internal/replication/README.md) |
 | `internal/tasks` | Task state machine, scheduling, and execution orchestration | [internal/tasks/README.md](internal/tasks/README.md) |
 | `internal/ui` | Embedded UI asset serving | [internal/ui/README.md](internal/ui/README.md) |
