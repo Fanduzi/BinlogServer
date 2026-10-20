@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait) and 1213 retried once; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait; the lock views only name the holder) and 1213 retried once; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -119,7 +119,46 @@ func (s *MySQLTaskStore) withLock(thread int64, fn func() error) (err error) {
 	if errors.Is(err, context.DeadlineExceeded) && !saw && thread > 0 {
 		saw = s.sawLockWait(thread)
 	}
-	return classifyLock(err, saw)
+	err = classifyLock(err, saw)
+	var lw lockWaitError
+	if s != nil && errors.As(err, &lw) && s.session.detailFull() {
+		if name := s.blockingHolder(thread); name != "" {
+			err = fmt.Errorf("%w; holder %s", err, name)
+		}
+	}
+	return err
+}
+
+// blockingHolder names the session that blocks this thread. A missing
+// privilege or a missing view returns an empty string. The caller already
+// classified the stall.
+func (s *MySQLTaskStore) blockingHolder(thread int64) string {
+	if s == nil || s.db == nil || thread <= 0 {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+SELECT t.PROCESSLIST_ID
+FROM performance_schema.data_lock_waits w
+JOIN performance_schema.threads req ON req.THREAD_ID = w.REQUESTING_THREAD_ID
+JOIN performance_schema.threads t ON t.THREAD_ID = w.BLOCKING_THREAD_ID
+WHERE req.PROCESSLIST_ID = ?
+LIMIT 1`, thread).Scan(&id)
+	if err == nil && id != "" {
+		return "process " + id
+	}
+	err = s.db.QueryRowContext(ctx, `
+SELECT w.blocking_trx_id
+FROM information_schema.innodb_lock_waits w
+JOIN information_schema.innodb_trx r ON r.trx_id = w.requesting_trx_id
+WHERE r.trx_mysql_thread_id = ?
+LIMIT 1`, thread).Scan(&id)
+	if err == nil && id != "" {
+		return "trx " + id
+	}
+	return ""
 }
 
 // armLockWatch polls for a lock wait while a lock statement runs. The
@@ -222,10 +261,10 @@ func (s *MySQLTaskStore) ApplyTransitions(ctx context.Context, taskID string, fe
 		return healthstore.Applied{}, err
 	}
 	parent := ctx
-	bound := s.sessionBound()
-	if bound > 0 {
+	deadline := s.healthDeadline()
+	if deadline > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.WithoutCancel(parent), bound)
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(parent), deadline)
 		defer cancel()
 	}
 	var out healthstore.Applied

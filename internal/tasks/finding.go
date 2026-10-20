@@ -2,7 +2,7 @@
 // input: failure reports from the scheduler, the runner, and background loops
 // output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4)
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
-// note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill and a session-timeout mismatch when the store reports them
+// note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -813,6 +813,9 @@ type HealthSummary struct {
 	Status   string   `json:"status"`
 	Reasons  []string `json:"reasons,omitempty"`
 	SideKill string   `json:"side_kill,omitempty"`
+	// LockDetail is "reduced" when the meta account cannot read lock tables.
+	// Stall detection still uses server error 1205, so this is not a reason.
+	LockDetail string `json:"lock_detail,omitempty"`
 }
 
 // HealthSummary is degraded while any CRITICAL finding is open, read from
@@ -859,6 +862,9 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 			reasons = append(reasons, "session wait_timeout mismatch: "+detail)
 		}
 		sum.SideKill = view.SideKill()
+	}
+	if view, ok := s.store.(interface{ LockDetail() string }); ok {
+		sum.LockDetail = view.LockDetail()
 	}
 	if len(reasons) == 0 {
 		return sum

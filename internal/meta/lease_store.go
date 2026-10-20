@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify/ViewLease; same-owner reclaim keeps epoch; an armed pool reads @@session.wait_timeout on that same transaction), runs, and checkpoints
+// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify/ViewLease; same-owner reclaim keeps epoch; an armed pool reads @@session.wait_timeout, and on MariaDB @@session.idle_transaction_timeout, on that same transaction), runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
