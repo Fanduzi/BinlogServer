@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify/ViewLease; same-owner reclaim keeps epoch), runs, and checkpoints
+// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify/ViewLease; same-owner reclaim keeps epoch; an armed pool reads @@session.wait_timeout on that same transaction), runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -117,8 +117,8 @@ func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl t
 		epoch int64
 		ok    bool
 	)
-	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		err := s.queries().AcquireTaskLease(ctx, sqlcgen.AcquireTaskLeaseParams{
+	run := func(q *sqlcgen.Queries) error {
+		err := q.AcquireTaskLease(ctx, sqlcgen.AcquireTaskLeaseParams{
 			TaskID:    taskID,
 			WorkerID:  workerID,
 			TtlMicros: ttlMicros,
@@ -126,8 +126,7 @@ func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl t
 		if err != nil {
 			return err
 		}
-
-		lease, exists, err := s.getNoRetry(ctx, taskID)
+		lease, exists, err := getLease(ctx, q, taskID)
 		if err != nil {
 			return err
 		}
@@ -136,20 +135,43 @@ func (s *LeaseStore) Acquire(ctx context.Context, taskID, workerID string, ttl t
 			ok = false
 			return nil
 		}
-
-		dbNow, err := s.currentDBTimeNoRetry(ctx)
+		dbNow, err := q.GetCurrentDBTime(ctx)
 		if err != nil {
 			return err
 		}
 		epoch = lease.Epoch
 		ok = lease.OwnerWorkerID == workerID && lease.LeaseExpireAt.After(dbNow)
 		return nil
+	}
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		if s.session == nil || s.session.expectSec <= 0 {
+			return run(s.queries())
+		}
+		return s.withSessionTx(ctx, run)
 	})
 	if err != nil {
 		return 0, false, err
 	}
-	s.checkSessionTimeout(ctx)
 	return epoch, ok, nil
+}
+
+// withSessionTx runs fn and the wait_timeout readback on one connection.
+func (s *LeaseStore) withSessionTx(ctx context.Context, fn func(q *sqlcgen.Queries) error) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(sqlcgen.New(tx)); err != nil {
+		return err
+	}
+	s.readSessionTimeout(ctx, tx)
+	return tx.Commit()
 }
 
 // Renew 续租指定 epoch 的 lease，返回是否续租成功。
@@ -159,8 +181,8 @@ func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch i
 
 	_ = now
 	var renewed bool
-	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
-		result, err := s.queries().RenewTaskLease(ctx, sqlcgen.RenewTaskLeaseParams{
+	run := func(q *sqlcgen.Queries) error {
+		result, err := q.RenewTaskLease(ctx, sqlcgen.RenewTaskLeaseParams{
 			TtlMicros: durationToMicroseconds(ttl),
 			TaskID:    taskID,
 			WorkerID:  workerID,
@@ -171,11 +193,16 @@ func (s *LeaseStore) Renew(ctx context.Context, taskID, workerID string, epoch i
 		}
 		renewed, err = rowsAffectedGreaterThanZero(result)
 		return err
+	}
+	err := WithRetry(ctx, DefaultMySQLRetryPolicy(), func() error {
+		if s.session == nil || s.session.expectSec <= 0 {
+			return run(s.queries())
+		}
+		return s.withSessionTx(ctx, run)
 	})
 	if err != nil {
 		return false, err
 	}
-	s.checkSessionTimeout(ctx)
 	return renewed, nil
 }
 
@@ -201,7 +228,11 @@ func (s *LeaseStore) Get(ctx context.Context, taskID string) (Lease, bool, error
 
 // getNoRetry 读取单任务 lease 记录（不带重试封装）。
 func (s *LeaseStore) getNoRetry(ctx context.Context, taskID string) (Lease, bool, error) {
-	row, err := s.queries().GetTaskLease(ctx, taskID)
+	return getLease(ctx, s.queries(), taskID)
+}
+
+func getLease(ctx context.Context, q *sqlcgen.Queries, taskID string) (Lease, bool, error) {
+	row, err := q.GetTaskLease(ctx, taskID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return Lease{}, false, nil

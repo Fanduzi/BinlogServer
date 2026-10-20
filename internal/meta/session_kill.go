@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a cluster meta DSN, the lease TTL, and cluster.side_kill
-// output: a pool whose every connection and reconnect sets the session-kill timeouts, ConnMaxIdleTime shorter than that bound, and a lease-transaction readback of @@session.wait_timeout
+// output: a pool whose every connection and reconnect sets the session-kill timeouts, ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout, and a readback of @@session.wait_timeout on the lease transaction's own connection (a failed read is degraded)
 // pos: ADR 0011 PR-2 session kill (P2-7, P2-8); standalone pools are not armed
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -72,6 +72,35 @@ func (st *sessionState) noteTimeout(got int) {
 	st.detail = ""
 }
 
+func (st *sessionState) noteReadbackFailed(err error) {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.degraded = true
+	msg := "read failed"
+	if err != nil {
+		msg = err.Error()
+	}
+	st.detail = "@@session.wait_timeout read failed: " + msg
+}
+
+// poolIdleBeforeWait is how long a pooled connection may sit idle.
+// database/sql wakes its cleaner on about this interval, so a connection can
+// outlive one interval. Stay under wait_timeout: the pool closes the
+// connection before the server kills it and the driver logs the abort.
+func poolIdleBeforeWait(bound time.Duration) time.Duration {
+	idle := bound / 3
+	if idle > 2*time.Second {
+		idle = 2 * time.Second
+	}
+	if idle < 50*time.Millisecond {
+		idle = 50 * time.Millisecond
+	}
+	return idle
+}
+
 func (st *sessionState) degradedReason() (bool, string) {
 	if st == nil {
 		return false, ""
@@ -140,13 +169,13 @@ func OpenClusterMeta(dsn string, schemaTimeout time.Duration, encryptionKey stri
 	}
 	db := sql.OpenDB(connector)
 	db.SetConnMaxLifetime(30 * time.Second)
-	db.SetMaxIdleConns(8)
 	db.SetMaxOpenConns(32)
-	idle := bound - time.Second
-	if idle <= 0 {
-		idle = bound / 2
+	if bound <= 2*time.Second {
+		db.SetMaxIdleConns(0)
+	} else {
+		db.SetMaxIdleConns(8)
 	}
-	db.SetConnMaxIdleTime(idle)
+	db.SetConnMaxIdleTime(poolIdleBeforeWait(bound))
 	pingCtx, cancel := context.WithTimeout(context.Background(), schemaTimeoutOr(schemaTimeout))
 	err = db.PingContext(pingCtx)
 	cancel()
@@ -199,22 +228,16 @@ func probeFlavor(dsn string) (string, error) {
 	return "mysql", nil
 }
 
-func (s *LeaseStore) checkSessionTimeout(ctx context.Context) {
-	if s == nil || s.session == nil || s.session.expectSec <= 0 || s.db == nil {
+// readSessionTimeout reads @@session.wait_timeout on the lease transaction's
+// own connection. A mismatch or a failed read is degraded; the lease write
+// still commits.
+func (s *LeaseStore) readSessionTimeout(ctx context.Context, tx *sql.Tx) {
+	if s == nil || s.session == nil || s.session.expectSec <= 0 || tx == nil {
 		return
 	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
 	var got int
 	if err := tx.QueryRowContext(ctx, "SELECT @@session.wait_timeout").Scan(&got); err != nil {
+		s.session.noteReadbackFailed(err)
 		return
 	}
 	s.session.noteTimeout(got)
