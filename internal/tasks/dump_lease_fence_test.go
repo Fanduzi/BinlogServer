@@ -244,8 +244,9 @@ func TestRenewLeaseLoop_LostLeaseStopsDumpWithoutWritingRow(t *testing.T) {
 	}
 }
 
-// lockedFakeStore lets the test write worker A's row while worker B's renew
-// loop reads it.
+// lockedFakeStore lets one worker write the shared row while another reads it.
+// Every TaskStore method takes mu: an embedded list that skips the lock races
+// the map under -race (claim loop vs markRunnerReadyLocked).
 type lockedFakeStore struct {
 	*fakeStore
 	mu sync.Mutex
@@ -267,4 +268,22 @@ func (s *lockedFakeStore) ListTasks(ctx context.Context) ([]Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.fakeStore.ListTasks(ctx)
+}
+
+func (s *lockedFakeStore) ListTasksPage(ctx context.Context, filter TaskListFilter) ([]Task, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.ListTasksPage(ctx, filter)
+}
+
+func (s *lockedFakeStore) ListStartingUnownedTasks(ctx context.Context) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.ListStartingUnownedTasks(ctx)
+}
+
+func (s *lockedFakeStore) DeleteTask(ctx context.Context, taskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.DeleteTask(ctx, taskID)
 }

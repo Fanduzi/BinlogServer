@@ -1,12 +1,13 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task_health.chain_owner (healthstore.ChainOwnerStore), the task lease row, and worker_heartbeats when the task store implements workerHeartbeatReader
-// output: delegatedFence (the last chain owner writes chain.local after its lease is released, bound to that lease epoch and node, design §30), noteOwnerChanged (OWNER_CHANGED when a new holder is a different node), noteNodeGone (chain.local incomplete and Facts.NodeGone after node_gone_after; a heartbeat read error is not gone)
+// output: delegatedFence (the last chain owner writes chain.local after its lease is released, bound to that lease epoch and node, design §30), noteOwnerChanged (OWNER_CHANGED when a new holder is a different node), noteNodeGone (chain.local incomplete and Facts.NodeGone after node_gone_after; a heartbeat read error is not gone), abandonYieldedTail (FAILED with desired still RUN once that gone owner had yielded a tail, §31.6)
 // pos: ADR 0009 phase 2 P2-6.2 (docs/design/0009-phase2-health-evaluator.md §30); standalone never reaches this file's fences
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"binlog_server/internal/health"
@@ -184,4 +185,22 @@ func (e *Evaluator) noteNodeGone(ctx context.Context, facts *health.Facts) {
 	}
 	facts.Produced[health.ScopeChainLocal] = true
 	delete(facts.Complete, health.ScopeChainLocal)
+}
+
+// abandonYieldedTail writes FAILED, desired still RUN, once the chain owner
+// of a yielded tail has been gone longer than node_gone_after (§31.6).
+// The same pass then derives TASK_FAILED from that FAILED row.
+func (e *Evaluator) abandonYieldedTail(task Task, facts *health.Facts) {
+	if e == nil || e.s == nil || facts == nil || facts.Task == nil || !facts.Task.TailYielded || !facts.NodeGone {
+		return
+	}
+	if err := e.s.failYieldedTail(task.ID); err != nil {
+		log.Printf("health: yielded tail task=%s: %v", task.ID, err)
+		return
+	}
+	fresh, err := e.s.GetTask(task.ID)
+	if err != nil {
+		return
+	}
+	facts.Task = rowTaskFacts(fresh)
 }

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: hot-path failure and success reports (SignalFailure/SignalSuccess, and Report/Resolve for a kind the evaluator manages), the task rows, the task directory, the catalog, and the event store
-// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure; HEALTH_STORE_UNAVAILABLE is a signal kind but the gap path does not SignalFailure, §27) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, Unadopted for a standalone leftover directory (#385), and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it; P2-6a: Task nil when the row disagrees with task_leases), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
+// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure; HEALTH_STORE_UNAVAILABLE is a signal kind but the gap path does not SignalFailure, §27) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, TailYielded for a yielded SEGMENT_NOT_ON_WORKER row that is not FAILED or STOP, §31.6, OwnedElsewhere, RunHere, Unadopted for a standalone leftover directory (#385), and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it; P2-6a: Task nil when the row disagrees with task_leases), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §5.6, §6); the only way a signal kind reaches task_findings while the evaluator is on
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -248,7 +248,9 @@ func rowTaskFacts(task Task) *health.TaskFacts {
 		// spec_revision 0 (no ask recorded yet, e.g. a run resumed or
 		// claimed without an operator Start) with failed_spec_revision 0 is
 		// still the current ask: it used to keep TASK_FAILED closed (§24.11).
-		FailedCurrent: task.State == StateFailed && task.FailedSpecRevision == task.SpecRevision}
+		FailedCurrent: task.State == StateFailed && task.FailedSpecRevision == task.SpecRevision,
+		// §31.6: a yielded peer is not FAILED. The finding stays open from the row.
+		TailYielded: tailYieldedRow(task)}
 	if tf.Desired == "" {
 		tf.Desired = TaskDesiredRun
 		if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
@@ -256,6 +258,15 @@ func rowTaskFacts(task Task) *health.TaskFacts {
 		}
 	}
 	return tf
+}
+
+// tailYieldedRow is a peer that released the lease because the local tail is
+// on another node (§31.6). FAILED and an operator STOP use the normal rules.
+func tailYieldedRow(task Task) bool {
+	if task.DesiredRun == TaskDesiredStop || task.State == StateFailed || task.State == StateStopped || task.State == StateStopping {
+		return false
+	}
+	return health.ClassifyFailure(task.LastError) == health.FailSegmentNotOnWorker
 }
 
 // leaseRowAgrees reports that the task row and task_leases describe the same

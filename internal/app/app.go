@@ -3,6 +3,7 @@
 // output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441)
 // note P2-6.1 (§28): health.stale_after_sec (0 = 5×sweep) is EvaluatorConfig.StaleAfter
 // note P2-6.2 (§30): health.node_gone_after_sec (0 = 3×sweep) is EvaluatorConfig.NodeGoneAfter
+// note §31.6: cluster mode passes health.tail_yield_backoff_sec (0 = 60s) to WithTailYieldBackoff
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -1157,6 +1158,8 @@ func applyClusterRuntimeOptions(
 			time.Duration(cfg.Cluster.LeaseRenewIntervalSec)*time.Second,
 			time.Duration(cfg.Cluster.LeaseGraceSec)*time.Second,
 		))
+		// §31.6: 0 means 60s inside WithTailYieldBackoff.
+		opts = append(opts, tasks.WithTailYieldBackoff(time.Duration(cfg.Health.TailYieldBackoffSec)*time.Second))
 	}
 	if workerEnabled {
 		runnerOpts = append(runnerOpts, replication.WithLeaseVerifier(leaseManager))

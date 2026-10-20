@@ -46,8 +46,8 @@ type Stored struct {
 	Instance string
 	// ChainOwner is the last cluster holder that evaluated this task's own
 	// directory (design §30). Empty until that write. Proxy, delegated,
-	// standalone and waiver writes do not change it. The file store never
-	// sets it.
+	// PreserveChainOwner (§31), standalone and waiver writes do not change
+	// it. The file store never sets it.
 	ChainOwner string `json:"chain_owner,omitempty"`
 }
 

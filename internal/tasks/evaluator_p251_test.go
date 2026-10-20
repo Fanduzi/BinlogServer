@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: phase-1 golden directories and a sized legacy directory whose sealed row or local file is wrong
+// output: proof that the P2-5.1 chain.local kinds open and close through the evaluator, and that a cluster owner derives I6_MISSING_LOCAL for a sealed file that is gone (§31)
+// pos: evaluator coverage for design 0009 §20.5 and §31
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
@@ -188,13 +193,17 @@ func TestP251SealedRowLocalMissing(t *testing.T) {
 	if _, ok := p251Open(t, store, f.task.ID)[string(health.SegmentMissing)+"/mysql-bin.000002"]; !ok {
 		t.Fatalf("SEGMENT_MISSING/mysql-bin.000002 not open: %v", p251Open(t, store, f.task.ID))
 	}
-	// Cluster mode: MISSING_LOCAL waits for P2-6 delegation.
+	// §31: the owning disk reports a missing sealed segment in cluster mode too.
 	e.cfg.Cluster = true
 	facts := e.chainFacts(f.task, time.Now())
+	found := false
 	for _, v := range facts.Violations {
 		if v.Kind == assurance.I6MissingLocal {
-			t.Fatalf("cluster mode derived %+v", v)
+			found = true
 		}
+	}
+	if !found {
+		t.Fatal("cluster owner did not derive I6_MISSING_LOCAL")
 	}
 }
 

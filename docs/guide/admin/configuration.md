@@ -587,6 +587,7 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 | `health.no_progress_after_sec` | 120 | 期望 RUN 的任务多久没有本地进展算 TASK_NO_PROGRESS，秒 |
 | `health.stale_after_sec` | 0 | 0 表示 5 倍 sweep。集群健康行过期则 HEALTH_STALE。需要 `health.evaluator: on` |
 | `health.node_gone_after_sec` | 0 | 0 表示 3 倍 sweep。最后一任链主人消失则 UNKNOWN。需要 `health.evaluator: on` |
+| `health.tail_yield_backoff_sec` | 0 | 0 表示 60 秒，负数拒绝启动。对端读不到另一节点的本地尾巴（`SEGMENT_NOT_ON_WORKER`）让出租约后，本进程隔这么久才再认领该任务（设计 0009 §31）|
 | `health.signal_stale_after_sec` | 86400 | 信号多久没有新消息就降为 INFO，秒 |
 | `health.upload_late_critical_after_sec` | 86400 | 上传落后多久升级为 CRITICAL，秒 |
 | `health.upload_late_critical_after_task_sec` | 空 | 按任务 id 覆盖上一行。每个值必须是正整数 |

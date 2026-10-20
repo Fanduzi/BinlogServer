@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30), and health.tail_yield_backoff_sec (default 0 = 60s, not negative) for a peer that cannot read the local tail (§31.6)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -159,6 +159,10 @@ type HealthConfig struct {
 	// incomplete once the last chain owner's heartbeat is this old
 	// (P2-6.2, design 0009 §30). 0 means 3×sweep. Not negative.
 	NodeGoneAfterSec int
+	// TailYieldBackoffSec: how long one node waits before claiming a task
+	// it yielded because the local tail is on another node (design 0009
+	// §31.6). 0 means 60s. Not negative.
+	TailYieldBackoffSec int
 	// SignalStaleAfterSec: an open signal row with no failure seen by this
 	// process for this long is shown as INFO (P2-4, default 86400).
 	SignalStaleAfterSec int
@@ -275,6 +279,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("health.signal_stale_after_sec", 86400)
 	v.SetDefault("health.stale_after_sec", 0)
 	v.SetDefault("health.node_gone_after_sec", 0)
+	v.SetDefault("health.tail_yield_backoff_sec", 0)
 	v.SetDefault("health.upload_late_critical_after_sec", 86400)
 	v.SetDefault("health.object_list_interval_sec", 300)
 	v.SetDefault("health.object_list_limit", 10000)
@@ -446,6 +451,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			NoProgressAfterSec:             getInt(&loadErr, v, "health.no_progress_after_sec", "health_no_progress_after_sec"),
 			StaleAfterSec:                  getInt(&loadErr, v, "health.stale_after_sec", "health_stale_after_sec"),
 			NodeGoneAfterSec:               getInt(&loadErr, v, "health.node_gone_after_sec", "health_node_gone_after_sec"),
+			TailYieldBackoffSec:            getInt(&loadErr, v, "health.tail_yield_backoff_sec", "health_tail_yield_backoff_sec"),
 			SignalStaleAfterSec:            getInt(&loadErr, v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
 			UploadLateCriticalAfterSec:     getInt(&loadErr, v, "health.upload_late_critical_after_sec", "health_upload_late_critical_after_sec"),
 			UploadLateCriticalAfterTaskSec: healthTaskOverrides(&loadErr, "health.upload_late_critical_after_task_sec", v.GetStringMap("health.upload_late_critical_after_task_sec")),
@@ -905,6 +911,9 @@ func validateHealthConfig(h HealthConfig) error {
 	}
 	if h.NodeGoneAfterSec < 0 {
 		return fmt.Errorf("health.node_gone_after_sec must not be negative, got %d", h.NodeGoneAfterSec)
+	}
+	if h.TailYieldBackoffSec < 0 {
+		return fmt.Errorf("health.tail_yield_backoff_sec must not be negative, got %d", h.TailYieldBackoffSec)
 	}
 	for id, sec := range h.UnreachableAfterTaskSec {
 		if sec <= 0 {

@@ -397,7 +397,7 @@ func (s *Scheduler) StopTask(id string) error {
 
 - `SEALED_FILE_EXISTS`：封存文件已经在磁盘上（`sealed file already exists`）
 - `CHECKPOINT_WRITE_FAILED`：checkpoint 写入不是瞬时元数据错误
-- 原有的 `SOURCE_ACCESS_DENIED`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`
+- 原有的 `SOURCE_ACCESS_DENIED`、`SOURCE_LOG_BIN_OFF`、`SOURCE_IDENTITY_UNAVAILABLE`、`SEGMENT_NOT_ON_WORKER`（`chain_owner` 为空或就是本节点时仍直接 FAILED 且期望 STOP。`chain_owner` 是别的节点时对端让出：`LEASE_DEGRADED`、期望保持 RUN，见部署指南 6.3）
 
 只有白名单里的错误留在同一次所有权里重试。`SOURCE_UNREACHABLE` 连续 10 次后才 `FAILED`，runner ready 会把这个计数清零。瞬时元数据错误（与 `meta.IsTransientMySQLError` 同一组文本）没有任务级次数上限，恢复后回到 `RUNNING`，不经过 `FAILED`。`OBJECT_PURGE_FAILED` 不是任务失败。除此之外，包括没有已存 GTID 的 MySQL 1236 和未分类的 runner 错误，在任务仍应继续跑的时候第一次就 `FAILED`，写一条 `TASK_FAILED`，放开租约。1236 且没有 GTID 时 `last_error` 写明 1236 和 purged binlog。
 

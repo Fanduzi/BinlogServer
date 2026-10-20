@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: an open chain-directory finding, Facts.ChainOwnerChanged, and Facts.NodeGone
-// output: proof that OWNER_CHANGED closes that finding even when the new directory is incomplete and reopens a still-desired key after the close, that UPLOAD_UNVERIFIED is not closed that way, and that NodeGone yields UNKNOWN(node gone) unless a non-chain CRITICAL is open
+// output: proof that OWNER_CHANGED closes that finding even when the new directory is incomplete and reopens a still-desired key after the close, that an unhashed SEGMENT_UNREADABLE stays open (§31), that UPLOAD_UNVERIFIED is not closed that way, and that NodeGone yields UNKNOWN(node gone) unless a non-chain CRITICAL is open
 // pos: unit coverage for ADR 0009 P2-6.2 reconcile and health (design §30)
 // note: if this file changes, update this header and module README.md.
 package health
@@ -36,6 +36,57 @@ func TestOwnerChangedReopensTheSameKey(t *testing.T) {
 	}
 	if ts[0].Key != key || ts[1].Key != key {
 		t.Fatalf("keys %+v %+v", ts[0].Key, ts[1].Key)
+	}
+}
+
+func TestOwnerChangedInheritsUnhashedUnreadable(t *testing.T) {
+	subject := "mysql-bin.000001"
+	open := []Finding{{TaskID: "1", Kind: SegmentUnreadable, Subject: subject, Severity: Critical, Detail: "sha"}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true,
+		Complete:    map[Scope]bool{ScopeChainLocal: true},
+		AwaitRehash: map[string]bool{subject: true},
+	}
+	ts, _ := DefaultRegistry().Reconcile(open, f)
+	if len(ts) != 0 {
+		t.Fatalf("transitions %+v, want none while rehash has not reported", ts)
+	}
+}
+
+func TestOwnerChangedKeepsUnreadableWhenChainIncomplete(t *testing.T) {
+	subject := "mysql-bin.000001"
+	open := []Finding{{TaskID: "1", Kind: SegmentUnreadable, Subject: subject, Severity: Critical, Detail: "sha"}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true, Complete: map[Scope]bool{}}
+	ts, _ := DefaultRegistry().Reconcile(open, f)
+	if len(ts) != 0 {
+		t.Fatalf("transitions %+v, want none while chain.local is incomplete", ts)
+	}
+}
+
+func TestAwaitRehashKeepsUnreadableAfterOwnerSettled(t *testing.T) {
+	subject := "mysql-bin.000001"
+	open := []Finding{{TaskID: "1", Kind: SegmentUnreadable, Subject: subject, Severity: Critical, Detail: "sha"}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(),
+		Complete:    map[Scope]bool{ScopeChainLocal: true},
+		AwaitRehash: map[string]bool{subject: true},
+	}
+	ts, _ := DefaultRegistry().Reconcile(open, f)
+	if len(ts) != 0 {
+		t.Fatalf("transitions %+v, want none while rehash has not reported", ts)
+	}
+}
+
+func TestOwnerChangedReopensUnreadableDerivedThisPass(t *testing.T) {
+	subject := "mysql-bin.000001"
+	key := Key{TaskID: "1", Kind: SegmentUnreadable, Subject: subject}
+	open := []Finding{{TaskID: "1", Kind: SegmentUnreadable, Subject: subject, Severity: Critical, Detail: "old"}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true,
+		Complete:    map[Scope]bool{ScopeChainLocal: true},
+		AwaitRehash: map[string]bool{subject: true},
+		Chain:       &ChainFacts{Violations: []assurance.Violation{{Kind: assurance.I1Unreadable, Segments: []string{subject}, Detail: "still unreadable"}}},
+	}
+	ts, _ := DefaultRegistry().Reconcile(open, f)
+	if len(ts) != 2 || ts[0].Op != OpClose || ts[0].Reason != ReasonOwnerChanged || ts[1].Op != OpOpen || ts[0].Key != key || ts[1].Key != key {
+		t.Fatalf("transitions %+v, want CLOSE then OPEN when this pass derived it", ts)
 	}
 }
 

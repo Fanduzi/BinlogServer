@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a Registry, the stored open findings of one task, and that task's Facts
-// output: Desire (findings that should be open), Reconcile (transitions; a signal's CLOSE carries SignalState.SuccessFactAt when the success named one, §25.8 R3; a chain-directory finding closes with OWNER_CHANGED when Facts.ChainOwnerChanged, §30), HealthOf (verdict; Facts.NodeGone forces chain.local unknown and ignores chain-directory severity, §30), Candidates and Pending (the two-pass Confirm of design §20.3: a Confirm kind opens only when the previous pass derived it too)
+// output: Desire (findings that should be open), Reconcile (transitions; a signal's CLOSE carries SignalState.SuccessFactAt when the success named one, §25.8 R3; a chain-directory finding closes with OWNER_CHANGED when Facts.ChainOwnerChanged, §30; an open SEGMENT_UNREADABLE stays open when chain.local is incomplete or its subject is in Facts.AwaitRehash and is not derived this pass, including after chain_owner has already moved, §31.6), HealthOf (verdict; Facts.NodeGone forces chain.local unknown and ignores chain-directory severity, §30), Candidates and Pending (the two-pass Confirm of design §20.3: a Confirm kind opens only when the previous pass derived it too)
 // pos: the one lifecycle function; pure and idempotent
 // note: if this file changes, update this header and module README.md.
 package health
@@ -187,6 +187,15 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			continue // a duplicate stored row for the same key: one transition per key
 		}
 		if f.ChainOwnerChanged && chainDirectoryOnly(spec) {
+			// §31.6: do not close SEGMENT_UNREADABLE until this pass finished
+			// chain.local and the segment is not still waiting on rehash.
+			// An early chainFacts return leaves AwaitRehash empty; closing
+			// then is the 130ms flap. A subject derived this pass still
+			// closes and opens again in the same write.
+			if o.Kind == SegmentUnreadable && !unreadableJudged(f, spec, key, desired) {
+				seen[key] = true
+				continue
+			}
 			ownerChanged[key] = true
 			out = append(out, closeOf(o, spec, ReasonOwnerChanged, f))
 			continue
@@ -217,6 +226,11 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			continue
 		}
 		if !f.instanceComplete(spec, key) {
+			continue
+		}
+		// §31.6: chain_owner already moved, so this is not OWNER_CHANGED.
+		// The segment is still waiting on rehash and was not derived.
+		if o.Kind == SegmentUnreadable && f.AwaitRehash[o.Subject] {
 			continue
 		}
 		if waivedKeys[key] {
@@ -255,6 +269,19 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 		return opRank(out[i].Op) < opRank(out[j].Op)
 	})
 	return out, desired
+}
+
+// unreadableJudged: an open SEGMENT_UNREADABLE may close because the owner
+// changed (§31.6). Incomplete chain.local has not judged the segment.
+// AwaitRehash without a derived instance this pass has not rehashed it.
+func unreadableJudged(f *Facts, spec KindSpec, key Key, desired Desired) bool {
+	if !f.instanceComplete(spec, key) {
+		return false
+	}
+	if _, want := desired[key]; want {
+		return true
+	}
+	return !f.AwaitRehash[key.Subject]
 }
 
 // chainDirectoryOnly: the finding describes the task directory (chain.local

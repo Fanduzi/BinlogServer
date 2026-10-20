@@ -5,6 +5,7 @@
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
 // note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost; ClaimExpiredTasks also claims STOPPED when desired RUN and the owner is empty
+// note §31: a cluster SEGMENT_NOT_ON_WORKER failure writes CRITICAL TASK_FAILED (subject SEGMENT_NOT_ON_WORKER) while the lease is still held, with PreserveChainOwner, and does not evaluate the chain. §31.6: when chain_owner is another node the peer yields (LEASE_DEGRADED, desired RUN, owner cleared, per-process backoff) instead of FAILED; ClaimExpiredTasks and claimOwnedIdleTasks skip that backoff; failYieldedTail writes FAILED with desired still RUN
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/health"
 
 	"go.uber.org/zap"
 )
@@ -584,6 +586,9 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 		if !isExpiredLeaseTakeoverState(item.State) && !claimableStoppedRun(item) {
 			continue
 		}
+		if s.tailYieldBlocked(item.ID) {
+			continue
+		}
 		if !s.prepareExpiredTaskClaim(item) {
 			continue
 		}
@@ -638,6 +643,10 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 		s.mu.Lock()
 		task, ok := s.tasks[id]
 		if !ok || (!isClaimableActiveState(task.State) && !claimableStoppedRun(task)) {
+			s.mu.Unlock()
+			continue
+		}
+		if until, blocked := s.tailYieldUntil[id]; blocked && time.Now().Before(until) {
 			s.mu.Unlock()
 			continue
 		}
@@ -1339,6 +1348,9 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 		// Allowlist only: SOURCE_UNREACHABLE (budget 10), transient metadata
 		// text, and OBJECT_PURGE_FAILED. Anything else fails once.
 		if !retryAllowed(err) {
+			if s.yieldUnreachableTailLocked(id, &current, errMsg) {
+				return
+			}
 			s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
 			return
 		}
@@ -1466,13 +1478,145 @@ func isClosed(ch <-chan struct{}) bool {
 
 // failRunLocked writes FAILED for this run, releases the lease, and unlocks s.mu.
 // Caller holds s.mu. One TASK_FAILED is appended by markFailedLocked.
+// A cluster SEGMENT_NOT_ON_WORKER also writes the CRITICAL finding first,
+// while this node still holds the lease (§31).
 func (s *Scheduler) failRunLocked(id string, current *Task, attempt, consecutive int, errMsg string) {
 	owner, epoch := current.OwnerWorkerID, current.Epoch
+	if tailFailureVisible(s, current, errMsg) {
+		snap := *current
+		s.mu.Unlock()
+		if e := s.healthEval.Load(); e != nil {
+			e.reportUnreachableTail(context.Background(), snap, errMsg)
+		}
+		s.mu.Lock()
+		fresh, ok := s.tasks[id]
+		// Stop, delete, or a newer epoch landed while the finding was written.
+		// Do not put the pre-unlock snapshot back over that row.
+		if !ok || fresh.State == StateStopped || fresh.State == StateStopping || fresh.OwnerWorkerID != owner || fresh.Epoch != epoch {
+			s.mu.Unlock()
+			s.releaseTaskLease(id, owner, epoch)
+			return
+		}
+		*current = fresh
+	}
 	rememberRetryBudget(current, attempt, consecutive)
 	s.tasks[id] = *current
 	logTransitionPersistError(id, StateFailed, s.markFailedLocked(id, errMsg))
 	s.mu.Unlock()
 	s.releaseTaskLease(id, owner, epoch)
+}
+
+// yieldUnreachableTailLocked releases this epoch when the local tail belongs
+// to another node (§31.6). Desired stays RUN. The row owner is cleared so
+// the next sweep does not evaluate an empty directory. Caller holds s.mu.
+// False leaves the lock held for failRunLocked. True unlocks.
+func (s *Scheduler) yieldUnreachableTailLocked(id string, current *Task, errMsg string) bool {
+	if current == nil || !s.yieldsUnreachableTail(current, errMsg) {
+		return false
+	}
+	owner, epoch := current.OwnerWorkerID, current.Epoch
+	snap := *current
+	fresh := *current
+	fresh.State = StateLeaseDegraded
+	fresh.OwnerWorkerID = ""
+	fresh.Epoch = 0
+	fresh.LastError = errMsg
+	fresh.UpdatedAt = time.Now()
+	s.tasks[id] = fresh
+	if s.yieldRelease == nil {
+		s.yieldRelease = map[string]leaseHold{}
+	}
+	s.yieldRelease[id] = leaseHold{owner: owner, epoch: epoch}
+	if s.yielded == nil {
+		s.yielded = map[string]bool{}
+	}
+	s.yielded[id] = true
+	backoff := s.tailYieldBackoff
+	if backoff <= 0 {
+		backoff = 60 * time.Second
+	}
+	if s.tailYieldUntil == nil {
+		s.tailYieldUntil = map[string]time.Time{}
+	}
+	s.tailYieldUntil[id] = time.Now().Add(backoff)
+	s.appendEventLocked(id, "TASK_TAIL_YIELDED", "peer cannot read the local tail; lease released, desired stays RUN", errMsg)
+	logTransitionPersistError(id, StateLeaseDegraded, s.persistTaskLocked(fresh))
+	s.mu.Unlock()
+	// The lease is still held until runTask returns. The fence is the snap
+	// from before the row was cleared, so CheckFence passes, and the health
+	// owner follows the cleared row.
+	if e := s.healthEval.Load(); e != nil {
+		e.reportUnreachableTail(context.Background(), snap, errMsg)
+	}
+	return true
+}
+
+// yieldsUnreachableTail is tailFailureVisible when chain_owner is another
+// node. An empty chain_owner, or this node, is still a permanent failure.
+// A chain_owner read error yields: do not write desired STOP while unsure.
+// Caller holds s.mu.
+func (s *Scheduler) yieldsUnreachableTail(current *Task, errMsg string) bool {
+	if !tailFailureVisible(s, current, errMsg) {
+		return false
+	}
+	e := s.healthEval.Load()
+	owner, ok := e.chainOwner(context.Background(), current.ID)
+	if !ok {
+		return true
+	}
+	return owner != "" && owner != e.cfg.NodeID
+}
+
+// tailYieldBlocked is the per-process backoff after a tail yield (§31.6).
+func (s *Scheduler) tailYieldBlocked(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.tailYieldUntil[id]
+	if !ok {
+		return false
+	}
+	if time.Now().Before(until) {
+		return true
+	}
+	delete(s.tailYieldUntil, id)
+	return false
+}
+
+// failYieldedTail marks a yielded tail FAILED once the chain owner is gone
+// (§31.6). Desired stays RUN. Caller does not hold s.mu.
+func (s *Scheduler) failYieldedTail(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[id]
+	if !ok {
+		return ErrTaskNotFound
+	}
+	if task.State == StateFailed || task.DesiredRun == TaskDesiredStop || task.State == StateStopped || task.State == StateStopping {
+		return nil
+	}
+	if health.ClassifyFailure(task.LastError) != health.FailSegmentNotOnWorker {
+		return nil
+	}
+	task.State = StateFailed
+	task.FailedSpecRevision = task.SpecRevision
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_FAILED", "chain owner gone; local tail still unreachable", task.LastError)
+	return s.persistTaskLocked(task)
+}
+
+// tailFailureVisible is a cluster evaluator-on start that cannot read the
+// previous worker's local tail (§31). Caller holds s.mu.
+func tailFailureVisible(s *Scheduler, current *Task, errMsg string) bool {
+	e := s.healthEval.Load()
+	if e == nil || e.cfg.Mode != EvaluatorOn || !e.cfg.Cluster || current == nil {
+		return false
+	}
+	if current.OwnerWorkerID == "" || current.OwnerWorkerID != e.cfg.NodeID || current.Epoch <= 0 {
+		return false
+	}
+	code, _, _ := strings.Cut(strings.TrimSpace(errMsg), ":")
+	return strings.EqualFold(strings.TrimSpace(code), CodeSegmentNotOnWorker)
 }
 
 func rememberRetryBudget(task *Task, attempt, consecutive int) {
