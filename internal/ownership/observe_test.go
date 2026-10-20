@@ -579,6 +579,14 @@ func j11Fixture(t *testing.T) (State, time.Time) {
 }
 
 func TestFairStepBoundObserved(t *testing.T) {
+	// Dropping the window-end jump leaves this schedule over the bound.
+	// The non-reader is ready 1ns after the reader, so it never claims.
+	u06s, u06n := untilJustAfterHorizon(t)
+	u06 := observeFair(u06s, u06n)
+	if u06.over || !u06.ok || u06.steps != 3 || u06.steps > FairStepBound(u06s, u06n) || u06.steps != FairStepBound(u06s, u06n) {
+		t.Fatalf("until = H+1ns observed %d bound %d over %v ok %v", u06.steps, FairStepBound(u06s, u06n), u06.over, u06.ok)
+	}
+
 	// J06 hand count: stored attempts 6, so the next delays are 128s, 256s,
 	// then 512s which is already past H=300s. n = 3. floor(300/600)+1 = 1,
 	// so wastes ≤ 4. One deadline is already pending. jumps ≤ 4+1+1 = 6.
@@ -628,7 +636,6 @@ func TestFairStepBoundObserved(t *testing.T) {
 	add("two readers", twoR, twoRNow, 11, false)
 	retryS, retryNow := retryBackoffFixture(t)
 	add("RETRY_BACKOFF", retryS, retryNow, 4, false)
-	u06s, u06n := untilJustAfterHorizon(t)
 	add("until = H+1ns", u06s, u06n, 3, true)
 	u08s, u08n := untilAtHorizon(t)
 	add("until = H", u08s, u08n, 4, false)
