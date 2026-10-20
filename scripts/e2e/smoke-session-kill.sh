@@ -97,14 +97,30 @@ stop_holder() {
     fi
     sleep 0.1
   done
-  kill -STOP "$HOLDER_PID"
+  if ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+    echo "$label holder exited after HOLDING" >&2
+    cat "$logf" >&2 || true
+    return 1
+  fi
+  if ! kill -STOP "$HOLDER_PID" 2>/dev/null; then
+    echo "$label holder was gone before SIGSTOP" >&2
+    cat "$logf" >&2 || true
+    return 1
+  fi
   local stat
   stat="$(ps -o stat= -p "$HOLDER_PID" | tr -d '[:space:]')"
   case "$stat" in
     *T*) ;;
-    *) echo "$label process not stopped (stat=$stat)" >&2; return 1 ;;
+    *) echo "$label process not stopped (stat=$stat)" >&2; cat "$logf" >&2 || true; return 1 ;;
   esac
-  if ! "$HOLD" --take "$peer" t-stop; then
+  # The stopped client must still hold the row. A process that exited
+  # would have released it already, which is not the server timeout.
+  if "$HOLD" --take --timeout 400ms "$peer" t-stop; then
+    echo "$label lock was already free after SIGSTOP" >&2
+    cat "$logf" >&2 || true
+    return 1
+  fi
+  if ! "$HOLD" --take --timeout 8s "$peer" t-stop; then
     echo "$label peer did not take the row after SIGSTOP" >&2
     cat "$logf" >&2 || true
     return 1
