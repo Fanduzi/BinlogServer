@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait; the lock views only name the holder) and 1213 retried once; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege; the driver error stays in the unwrap chain) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait; a confirmed deadline is not also context.DeadlineExceeded; the lock views only name the holder) and 1213 retried once; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -65,6 +65,13 @@ func classifyHealthErr(err error) error {
 	}
 	var lw lockWaitError
 	if errors.As(err, &lw) || isLockWaitError(err) {
+		// A server 1205 has to stay typed. Formatting it with %v made
+		// errors.As miss the driver error, so a least-privilege account
+		// looked like an unconfirmed client deadline. A confirmed deadline
+		// stays only ErrLockWait.
+		if isLockWaitError(err) {
+			return fmt.Errorf("%w: %w", healthstore.ErrLockWait, err)
+		}
 		return fmt.Errorf("%w: %v", healthstore.ErrLockWait, err)
 	}
 	return healthErr(err)
