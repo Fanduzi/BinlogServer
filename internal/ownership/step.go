@@ -1,5 +1,5 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
-// input: State, one Event, and the caller-supplied clock
+// input: State, one Event (LeaseUnreadable included), and the caller-supplied clock
 // output: Result, the next state and the side-effect intents
 // pos: the single transition function; it does no I/O and reads no clock
 // note: if this file changes, update this header and module README.md.
@@ -56,6 +56,11 @@ type Result struct {
 func Step(s State, e Event, now time.Time) Result {
 	s = s.clone()
 	s.Params = s.Params.fill()
+	// The server drops an idle transaction at idle_kill. MetaLockTimeout only
+	// records the stall; it must not pretend the row lock is already gone.
+	if s.Lock.Held && !s.Lock.Since.IsZero() && !now.Before(s.Lock.Since.Add(s.Params.IdleKill)) {
+		s.Lock = Lock{}
+	}
 	if s.Refusal == nil {
 		s.Refusal = map[string]Refusal{}
 	}
@@ -435,6 +440,9 @@ func dumpReady(s State, e Event, now time.Time) partial {
 	default:
 		return dropped(s, k)
 	}
+	if e.LeaseUnreadable {
+		return epochLost(s, e, now)
+	}
 	if s.Desired != DesiredRun {
 		return appliedPair(s, Result{Decision: DecisionDiscarded, Detail: "desired STOP", Intents: []Intent{{Kind: IntentStopLocal}}})
 	}
@@ -466,7 +474,7 @@ func retryable(s State, e Event, now time.Time) partial {
 	if s.Desired == DesiredStop || s.Phase == PhaseStopping {
 		return finishStop(s, now)
 	}
-	if !LeaseLive(s, now) {
+	if e.LeaseUnreadable || !LeaseLive(s, now) {
 		return epochLost(s, e, now)
 	}
 	if s.RetryAttempt >= RetryBudget {
@@ -486,6 +494,9 @@ func terminal(s State, e Event, now time.Time) partial {
 	case fenceOK:
 	default:
 		return dropped(s, k)
+	}
+	if e.LeaseUnreadable {
+		return epochLost(s, e, now)
 	}
 	var reason string
 	switch e.Cause {
@@ -519,6 +530,9 @@ func tailUnreadable(s State, e Event, now time.Time) partial {
 	}
 	if s.Desired == DesiredStop || s.Phase == PhaseStopping {
 		return finishStop(s, now)
+	}
+	if e.LeaseUnreadable {
+		return epochLost(s, e, now)
 	}
 	if s.Chain.Verified() && s.Chain.Owner == e.Node {
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "verified chain owner"})
@@ -639,7 +653,6 @@ func metaLockTimeout(s State, e Event, now time.Time) partial {
 	next.HealthBlocked = true
 	next.LockObserver = e.Node
 	next.LockRecoveries = 0
-	next.Lock = Lock{}
 	_ = now
 	return partial{state: next, result: Result{
 		Decision:       DecisionApplied,
@@ -663,21 +676,27 @@ func sweep(s State, e Event, now time.Time) partial {
 	next := s
 	next.EvaluatedAt = now
 	next.LastSweep = now
-	if next.MetaLockStalled && !next.Lock.Held && e.Node == next.LockObserver {
-		next.LockRecoveries++
-		if next.LockRecoveries >= 2 {
-			next.MetaLockStalled = false
-			next.HealthBlocked = false
-			next.LockRecoveries = 0
-		}
-	} else if next.Lock.Held {
-		next.LockRecoveries = 0
-	}
+	_ = e
 	return partial{state: next, result: Result{Decision: DecisionApplied, Detail: "sweep"}}
 }
 
 func takeLock(s State, e Event, now time.Time) partial {
 	next := s
+	// Closing META_LOCK_STALLED takes the previously stuck lock twice, inside
+	// lock_wait. A sweep does not count, and one take is not enough.
+	if next.MetaLockStalled && e.Node == next.LockObserver {
+		within := next.LockRecoveries > 0 && next.Lock.HeldBy == e.Node && !now.After(next.Lock.Since.Add(next.Params.LockWait))
+		if within {
+			next.LockRecoveries++
+		} else {
+			next.LockRecoveries = 1
+		}
+		if next.LockRecoveries >= 2 {
+			next.MetaLockStalled = false
+			next.HealthBlocked = false
+			next.LockRecoveries = 0
+		}
+	}
 	next.Lock = Lock{Held: true, HeldBy: e.Node, Since: now}
 	return partial{state: next, result: Result{Decision: DecisionApplied, Detail: "lock", LocksTaskLease: true}}
 }
