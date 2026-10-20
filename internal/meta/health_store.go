@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege; the driver error stays in the unwrap chain) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a plain slow statement is not a lock wait; a confirmed deadline is not also context.DeadlineExceeded; the lock views only name the holder) and 1213 retried once on the insert and on the main transaction; each lock statement has its own deadline of innodb_lock_wait_timeout plus at least 1s, so work earlier in the transaction cannot hide the server 1205, and the outer deadline is only a backstop; a pool checkout that times out while every connection is in use and a lock wait is already confirmed or past its statement bound is ErrLockWait ("pool starvation behind a lock wait"), while a slow pool with no lock evidence stays an unconfirmed deadline; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege; the driver error stays in the unwrap chain) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a statement that ends before innodb_lock_wait_timeout is not a lock wait; a confirmed deadline is not also context.DeadlineExceeded; the lock views only name the holder) and 1213 retried once on the insert and on the main transaction; each lock statement has its own deadline of innodb_lock_wait_timeout plus 2s, so work earlier in the transaction cannot hide the server 1205; a lock-statement deadline that fires after the statement has already run for at least innodb_lock_wait_timeout is ErrLockWait recorded as classified by elapsed time, while an outer cancel or a cancel before that timeout is not; the outer deadline is only a backstop; a pool checkout that times out while every connection is in use and a lock wait is already confirmed or past its statement bound is ErrLockWait ("pool starvation behind a lock wait"), while a slow pool with no lock evidence stays an unconfirmed deadline; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -235,14 +235,53 @@ func (s *MySQLTaskStore) beginHealthTx(ctx context.Context) (*sql.Tx, func(), er
 
 // lockStmt gives one lock-taking statement its own deadline, measured from
 // now. The outer context is only a backstop and must not be the budget.
+// When that deadline fires after the statement has already run for at least
+// innodb_lock_wait_timeout, the result is a lock wait classified by elapsed
+// time. An outer cancel, or a cancel before that timeout, is left alone.
 func (s *MySQLTaskStore) lockStmt(ctx context.Context, fn func(context.Context) error) error {
 	budget := s.statementDeadline()
 	if budget <= 0 {
 		return fn(ctx)
 	}
+	start := s.now()
 	sctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	return fn(sctx)
+	err := fn(sctx)
+	return s.noteElapsedLock(ctx, err, s.now().Sub(start))
+}
+
+func (s *MySQLTaskStore) now() time.Time {
+	if s != nil && s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
+}
+
+func (s *MySQLTaskStore) lockWaitDuration() time.Duration {
+	if s == nil || s.session == nil || s.session.bound <= 0 {
+		return 0
+	}
+	sec := s.session.lockWaitSec
+	if sec <= 0 {
+		sec = lockWaitSeconds(s.session.bound)
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// errClassifiedByElapsed records that a lock-statement deadline was treated
+// as a lock wait because the statement had already run for at least
+// innodb_lock_wait_timeout. The server error 1205 is a different record.
+var errClassifiedByElapsed = errors.New("classified by elapsed time")
+
+func (s *MySQLTaskStore) noteElapsedLock(parent context.Context, err error, elapsed time.Duration) error {
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || parent.Err() != nil {
+		return err
+	}
+	lock := s.lockWaitDuration()
+	if lock <= 0 || elapsed < lock {
+		return err
+	}
+	return fmt.Errorf("%w: %w: %v", healthstore.ErrLockWait, errClassifiedByElapsed, err)
 }
 
 func classifyLock(err error, waiting bool) error {
@@ -325,17 +364,17 @@ func (s *MySQLTaskStore) armLockWatch(thread int64, mark *stmtMark) func() bool 
 		t := time.NewTicker(100 * time.Millisecond)
 		defer t.Stop()
 		for {
+			if s.sawLockWait(thread) {
+				seen.Store(true)
+				if mark != nil {
+					mark.confirmed.Store(true)
+				}
+				return
+			}
 			select {
 			case <-done:
 				return
 			case <-t.C:
-				if s.sawLockWait(thread) {
-					seen.Store(true)
-					if mark != nil {
-						mark.confirmed.Store(true)
-					}
-					return
-				}
 			}
 		}
 	}()
