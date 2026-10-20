@@ -164,7 +164,7 @@ healthy(t) ⇔ state ∈ {RUNNING}
 **巡检器 (Verifier)** 是 worker 上的周期任务（只在持有租约的 worker 上跑该任务，复用 ADR 0001 的所有权），每 `verify_every`（默认 24h，分批平摊，每任务每轮上限 `verify_budget` 字节/秒）：
 
 1. **结构**：对每个本地封存段用 `binlog.ReadSegmentContents` 完整解析（magic、每事件 CRC32、`end_log_pos`、GTID 事件），结果与目录行比对（size、首尾位点、GTID 集合摘要）。失败 → `VERIFY_FAILED`（CRITICAL）。
-2. **对象**：每轮先对每个 UPLOADED 段 `HEAD` 一次（存在、大小；不计预算）。之后本地解析和对象哈希排进同一个队列，按「强制重查（还开着 `OBJECT_CORRUPT` / `VERIFY_FAILED` 且本地还在，或行上大小未知的 `I6_OBJECT_SIZE_MISMATCH`）→ 最近 24h 新上传 → 按段名固定槽轮换到当天的那一批 → `last_verified_at` 最旧的」依次花预算；放不下或截止时间到了的记 `SKIPPED`，本轮正常结束，只有 ctx 取消才算中止。轮换长度按周期数配置（`verify.rotation_periods` 默认 20），最坏间隔就是轮换长度 × 周期，不取整；预算不够时的进度上界见设计 §5.3。正文与本地比对，本地已删则与目录行记录的 SHA-256 比对（因此上传时需要把 SHA-256 写进目录行）；两边都没有摘要时只 HEAD，记为「无法验证」。这也会发现对象存储侧的生命周期策略误删。结论与处置（2026-10-20 修订，阶段 3 设计 `docs/design/0009-phase3-verifier.md` §8）：
+2. **对象**：每轮先对每个 UPLOADED 段 `HEAD` 一次（存在、大小；不计预算）。之后本地解析和对象哈希排进同一个队列，按「强制重查（还开着 `OBJECT_CORRUPT` / `VERIFY_FAILED` 且本地还在，或行上大小未知的 `I6_OBJECT_SIZE_MISMATCH`）→ 最近（还没上传的行，以及最近 24h 新上传的行，各自只在封存或上传之后还没按内容验过时算；被开着的结论点名的段不算；每轮最多花本轮容量的 `verify.recent_share_percent`，默认 25%，超出的落到后两档） → 按段名固定槽轮换到当天的那一批（每周期最多一次） → `last_verified_at` 最旧的」依次花预算；放不下或截止时间到了的记 `SKIPPED`，本轮正常结束，只有 ctx 取消才算中止。轮换长度按周期数配置（`verify.rotation_periods` 默认 20），最坏间隔就是轮换长度 × 周期，不取整；预算不够时的进度上界见设计 §5.3（最近档按份额计入）。强制重查的集合没有上限：每条开着、本地还在的 `OBJECT_CORRUPT` / `VERIFY_FAILED` 每轮都读整段，积累多了会把轮换和最久档挤掉，上界随之失效，这时 `Deferred` 一直不为零。正文与本地比对，本地已删则与目录行记录的 SHA-256 比对（因此上传时需要把 SHA-256 写进目录行）；两边都没有摘要时只 HEAD，记为「无法验证」。这也会发现对象存储侧的生命周期策略误删。结论与处置（2026-10-20 修订，阶段 3 设计 `docs/design/0009-phase3-verifier.md` §8）：
 
    | 结论 | 严重度 | 含义 | 处置 |
    |---|---|---|---|
@@ -175,7 +175,7 @@ healthy(t) ⇔ state ∈ {RUNNING}
    | `UPLOAD_CLOCK_SKEW` | WARNING | `uploaded_at` 比当前时间晚超过 1 小时 | 修时钟；该行不按「最近」处理，不会每轮整个下载 |
    | 无法验证（报告里的计数，不是结论） | — | 目录行没有 SHA-256 且本地已删，正文无从比对 | 本地还在时补摘要；补不了就只靠 HEAD |
 
-   结论只在本轮用能发现它的方法重新查过该段时关闭（`OBJECT_CORRUPT` 要重新哈希，`VERIFY_FAILED` 要重新解析）；没查到、查失败或中途取消都不关。本地已被保留期删掉的 `VERIFY_FAILED`：对象按目录行摘要哈希相符时以「local removed; object matches catalog」关闭，不相符时继续开着，但只在轮换槽那天重新下载。完整读到目录且行已不在时，该段各类结论以「row removed」关闭（`I6_MISSING_ROW` 除外，它说的正是行不在）。行上 `size_bytes` 为 0 时 HEAD 不能关 `I6_OBJECT_SIZE_MISMATCH`，只有正文哈希与本地相符才算比过大小。
+   结论只在本轮用能发现它的方法重新查过该段时关闭（`OBJECT_CORRUPT` 要重新哈希，`VERIFY_FAILED` 要重新解析）；没查到、查失败或中途取消都不关。本地已被保留期删掉的 `VERIFY_FAILED`：哈希对象时同一份字节同时解析，对象和目录行摘要相符、能解析、`end_log_pos` 和 GTID 集合都和行相符才关；sha 不符那一种以「local removed; object matches catalog」关闭，解析失败、位点不符、GTID 不符那几种以「local removed; object parses and matches the catalog row」关闭。对象哈希相符但解析或比对不过（坏字节在封存时就写进了摘要），改报对象侧的 `VERIFY_FAILED`（CRITICAL，唯一的副本）并继续开着。不相符时继续开着，只在轮换槽那天重新下载。完整读到目录且行已不在时，按行的结论（`VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`、`I6_*`）以「row removed」关闭；`I6_MISSING_ROW` 除外（它说的正是行不在），链的结论（I1–I5、I7）也除外，只在同一轮查过链时关闭。行上 `size_bytes` 为 0 时 HEAD 不能关 `I6_OBJECT_SIZE_MISMATCH`，只有正文哈希与本地相符才算比过大小。
 3. **链**：对整条链跑 `Chain.Check`，把违反写成结论，消失的结论标记 resolved。
 4. 每段记录 `last_verified_at`，进入健康定义的 `verify_age`。只有本轮按内容验过（本地解析、对象哈希）且没有结论点名的段才前进；还开着、本轮没关掉的结论也算点名。只 HEAD 或无法验证的不前进。
 
@@ -281,7 +281,7 @@ RestorePlan {
 1. **告警通知**：Prometheus 指标 + 推荐告警规则，外加**一个通用 webhook**（JSON POST）。不做各家 IM 的专用集成。
 2. **默认阈值**：`stall_after` 45s、`upload_grace` 15min、`verify_every` 24h、健康分钟占比 SLO 99.9%（30 天）、对象存储 RPO p99 20min。全部可配置。
 3. **还原演练**：保留为可选功能，默认关闭；只有配置了 `verify.drill.dsn` 才启用。
-4. **巡检对象轮换**：默认每 20 个周期轮一遍（2026-10-20 前写作「抽样 5%」），加上最近 24h 新上传的全部对象；可配置为全量。
+4. **巡检对象轮换**：默认每 20 个周期轮一遍（2026-10-20 前写作「抽样 5%」），加上还没上传的行和最近 24h 新上传的对象（各自验过一次就离开，每轮最多 25% 预算）；可配置为全量。
 5. **发布**：`000007`–`000009` 均为只加迁移，随 v0.5.x 可选；**v0.6.0** 把 `minRequiredSchemaVersion` 提到 9（阶段 2 设计 §15 D1，建议默认值，待 Adrian 确认；原 2026-10-13 定稿为「v0.6.0 提到 7」）。
 6. **meta 库丢失后还原 / sidecar manifest（方案 3）**：本期不做。
 
