@@ -135,31 +135,36 @@ func TestSafetyRandomPrefixes(t *testing.T) {
 }
 
 // Bounded exhaustive search over a small alphabet for N=2, depth 3.
-// Every prefix must satisfy CheckStep. 20^3 sequences.
+// One pass steps 2s. One pass jumps past the lease TTL, so expiry guards
+// are reachable inside the depth. The alphabet includes stale epochs,
+// StopConfirmed, StopExpired, and Lock.
 func TestSafetyBoundedExhaustive(t *testing.T) {
-	now := t0
-	s0 := New()
-	s0.Nodes = []Node{peer("n1", true, now), peer("n2", false, now)}
-	type item struct {
-		s    State
-		now  time.Time
-		left int
-	}
-	queue := []item{{s: s0, now: now, left: 3}}
+	jumps := []time.Duration{2 * time.Second, DefaultParams().LeaseTTL + time.Second}
 	seen := 0
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		if cur.left == 0 {
-			continue
+	for _, jump := range jumps {
+		now := t0
+		s0 := New()
+		s0.Nodes = []Node{peer("n1", true, now), peer("n2", false, now)}
+		type item struct {
+			s    State
+			now  time.Time
+			left int
 		}
-		for _, e := range alphabet(cur.s) {
-			res := Step(cur.s, e, cur.now)
-			if v := CheckStep(cur.s, res.State, e, res, cur.now); len(v) > 0 {
-				t.Fatalf("depth %d %s: %+v", 4-cur.left, e.Kind, v)
+		queue := []item{{s: s0, now: now, left: 3}}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			if cur.left == 0 {
+				continue
 			}
-			seen++
-			queue = append(queue, item{s: res.State, now: cur.now.Add(2 * time.Second), left: cur.left - 1})
+			for _, e := range alphabet(cur.s) {
+				res := Step(cur.s, e, cur.now)
+				if v := CheckStep(cur.s, res.State, e, res, cur.now); len(v) > 0 {
+					t.Fatalf("jump %s depth %d %s epoch %d: %+v", jump, 4-cur.left, e.Kind, e.Epoch, v)
+				}
+				seen++
+				queue = append(queue, item{s: res.State, now: cur.now.Add(jump), left: cur.left - 1})
+			}
 		}
 	}
 	if seen < 1000 {
@@ -188,10 +193,32 @@ func alphabet(s State) []Event {
 			Event{Kind: EventChainOwnerBack, Node: n},
 			Event{Kind: EventSweep, Node: n},
 			Event{Kind: EventRenew, Node: n, Epoch: s.Lease.Epoch},
+			Held(s, EventStopConfirmed, n),
+			Event{Kind: EventStopExpired, Node: n},
+			Event{Kind: EventLock, Node: n},
+		)
+		// A second copy carries a stale epoch. Operator events ignore it;
+		// runner events must not apply it.
+		stale := Held(s, EventDumpReady, n)
+		stale.Epoch--
+		out = append(out,
+			stale,
+			heldStale(s, EventRetryableError, n, CauseLockWait),
+			heldStale(s, EventTerminalError, n, CauseSourceAuth),
+			heldStale(s, EventTailUnreadable, n, CauseSegmentNotOnWorker),
+			heldStale(s, EventEpochLost, n, CauseENOENT),
+			heldStale(s, EventStopConfirmed, n, ""),
+			Event{Kind: EventRenew, Node: n, Epoch: s.Lease.Epoch - 1},
 		)
 	}
 	out = append(out, Event{Kind: EventMetaLockTimeout, Node: "n2"}, Event{Kind: EventLegacyUpdate})
 	return out
+}
+
+func heldStale(s State, kind Kind, node string, c Cause) Event {
+	e := heldCause(s, kind, node, c)
+	e.Epoch--
+	return e
 }
 
 func heldCause(s State, kind Kind, node string, c Cause) Event {
