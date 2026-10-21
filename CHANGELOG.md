@@ -12,6 +12,30 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.78] - 2026-10-21
+
+发布说明：`docs/releases/v0.5.78.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `verify.every_sec`（默认 86400）、`verify.budget_bytes_per_sec`（默认 4 MiB/s）、`verify.rotation_periods`、`verify.recent_share_percent`、`verify.pass_deadline_sec`、`verify.pass_max_bytes`、`verify.object_recent_sec`、`verify.drill_dsn`、`verify.drill_every_sec`、`verify.drill_check_sql`；负数拒绝启动，`verify.recent_share_percent` 只接受 1–100。
+
+### Added
+
+- #501（落地 #485，ADR 0009 第 3 阶段）：进程内周期巡检。单机启动后立刻跑一轮，之后每 `verify.every_sec` 一轮，在进程级读预算内完整读本地段、HEAD 每个已上传对象、按队列比对 SHA-256。可能打开 `VERIFY_FAILED`、`OBJECT_CORRUPT`（CRITICAL，`/api/health` 503）、`LOCAL_UNREADABLE`、`UPLOAD_CLOCK_SKEW`（WARNING）。进度写在 `{data_dir}/.verify.json`。新增 `binlog_server_verify_*` 指标。集群上跳过所有任务（A4 仍是 PARTIAL）。还原演练仍关，`verify.drill_dsn` 只加载、不拨号。
+- 配了对象存储时，启动对桶做一次 HEAD（2 秒超时）。失败写进 `/api/health` 的 `detail`（桶名和端点，不带密钥），`status` 仍是 ok。对象 HEAD 连续 3 轮失败时再写一条 detail；这个计数只在内存里，重启从 0 数，默认周期下会推迟大约 3 天。
+
+### Fixed
+
+- #505：发布包里没有 `docs/releases/`，glob `docs/releases/**/*` 匹配不到这一层的文件。现在加上了 `docs/releases/*`。`migrate` 也只用 `-w` 构建。
+- #499（#498）：发布的 `binlog-server` 只用 `-w` 构建，保留符号表，二进制模式扫描不再误报 GO-2026-5932。
+- #497：安装文档指向 v0.5.77。
+
+### Upgrade notes
+
+- 单机下巡检默认开启、没有关闭开关。升级后第一轮可能报出原有的本地或对象问题，并让 `/api/health` 返回 503。对象存储的请求会变多，可以用 `verify.budget_bytes_per_sec`、`verify.pass_max_bytes`、`verify.every_sec` 控制负载。
+- 回滚到 v0.5.77 安全（同一 schema）；如果旧二进制拒绝未知配置项，先删掉 `verify.*`。
+
+### Known issues
+
+- #490、#494、#500、#502、#503、#504（P3）。#487、#488、#451、#452、#455、#456、#446、#437、#438 仍未关闭；`/api/findings` 还没有读超时（P2-7）。
+
 ## [v0.5.77] - 2026-10-21
 
 发布说明：`docs/releases/v0.5.77.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `cluster.side_kill`（`off` | `auto`，默认 `off`）和 `health.node_gone_after_sec`（默认 0，即 3 倍 sweep；负数拒绝启动）。启动时的配置校验更严格，见 Changed。
