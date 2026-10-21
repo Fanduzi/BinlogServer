@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a temp data_dir, a fake catalog, and the verifier worker driven pass by pass
-// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked and returns within its own timeout, that a clean second pass does not rewrite .verify.json, that a failed rename leaves no temp and is retried, that a cancelled pass does not mark the task verified and keeps partial progress, that pass_deadline_sec 0 uses every_sec, that an empty scheduler drops stale tasks, that a finished object pass resets the strike streak, that a pass with no tasks does not, that deleting the last task clears object detail without zeroing the streak, that an all-skipped pass neither increments nor clears the streak, that an Allows skip and a catalog-list failure are not checked tasks and the pass log counts them as skipped, that a progress temp name contains the pid, that startup sweep removes both the pid form and the old form and leaves unrelated names, that each object-incomplete marker is enough on its own and an empty object or bucket field is omitted, that stale-temp cleanup unlinks a symlink without touching its target and keeps going after a remove error, that catalog, retention, verify, progress-read, and encode failures are zap warn, that a startup HEAD tells a missing key from auth, a missing bucket, and a network error, and that SealedAt reaches the clock-skew check
+// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked and returns within its own timeout, that a clean second pass does not rewrite .verify.json, that a failed rename leaves no temp and is retried, that a cancelled pass does not mark the task verified and keeps partial progress, that pass_deadline_sec 0 uses every_sec, that an empty scheduler drops stale tasks, that a finished object pass resets the strike streak, that a pass with no tasks does not, that deleting the last task clears object detail without zeroing the streak and the next failure is consecutive 4, that an all-skipped pass neither increments nor clears the streak and keeps a detail that is already set, that the next real failure after an empty or all-skipped pass is consecutive 3, that an all-skipped pass keeps a detail already set so the next real failure is consecutive 4, that an empty pass logs tasks=0 skipped=0, that a mixed pass logs skipped equal to the skipped tasks, that a deadline does not count unreached tasks as skipped, that the object-incomplete warn's consecutive matches the streak, that health detail side_kill and lock_detail stay on both summary returns, that an Allows skip and a catalog-list failure are not checked tasks and the pass log counts them as skipped, that a progress temp name contains the pid, that startup sweep removes both the pid form and the old form and leaves unrelated names, that each object-incomplete marker is enough on its own and an empty object or bucket field is omitted, that stale-temp cleanup unlinks a symlink without touching its target and keeps going after a remove error, that catalog, retention, verify, progress-read, and encode failures are zap warn, that a startup HEAD tells a missing key from auth, a missing bucket, and a network error, and that SealedAt reaches the clock-skew check
 // pos: worker feedback tests for ADR 0009 phase 3 (docs/design/0009-phase3-verifier.md §10)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -951,8 +951,11 @@ func TestVerifier_ObjectIncompleteDegradesThenClears(t *testing.T) {
 	v.Pass(context.Background(), now.Add(3*time.Minute))
 	h := s.HealthSummary(context.Background())
 	joined := strings.Join(h.Detail, " ")
-	if h.Status != HealthOK || !strings.Contains(joined, "consecutive") || !strings.Contains(joined, "connection refused") || !strings.Contains(joined, "task "+id+" object k bucket binlogs") {
+	if h.Status != HealthOK || !detailHasConsecutive(h, 3) || !strings.Contains(joined, "connection refused") || !strings.Contains(joined, "task "+id+" object k bucket binlogs") {
 		t.Fatalf("after 3: %+v", h)
+	}
+	if got := warnConsecutives(obs.All()); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Fatalf("warn consecutive %v", got)
 	}
 	if !sawLevel(obs, "verifier: object pass incomplete", zapcore.WarnLevel) {
 		t.Fatal("object incomplete was not logged at warn")
@@ -975,6 +978,21 @@ func TestVerifier_ObjectIncompleteDegradesThenClears(t *testing.T) {
 	if !passFlag(obs.All()[from:], "object_incomplete=false") {
 		t.Fatal("recovery pass still marked object_incomplete")
 	}
+}
+
+func warnConsecutives(entries []observer.LoggedEntry) []int64 {
+	var out []int64
+	for _, e := range entries {
+		if e.Level != zapcore.WarnLevel || !strings.Contains(e.Message, "verifier: object pass incomplete") {
+			continue
+		}
+		for _, f := range e.Context {
+			if f.Key == "consecutive" {
+				out = append(out, f.Integer)
+			}
+		}
+	}
+	return out
 }
 
 func sawLevel(obs *observer.ObservedLogs, msg string, level zapcore.Level) bool {
@@ -1474,7 +1492,253 @@ func TestVerifier_LastTaskDeletedClearsDetail(t *testing.T) {
 	}
 	copyLedger(t, dir, id, "mysql-bin.000003")
 	v.Pass(context.Background(), now.Add(5*time.Minute))
-	if h := s.HealthSummary(context.Background()); !strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+	if h := s.HealthSummary(context.Background()); !detailHasConsecutive(h, 4) {
 		t.Fatalf("streak was cleared with the detail: %+v", h)
+	}
+}
+
+func detailHasConsecutive(h HealthSummary, n int) bool {
+	return strings.Contains(strings.Join(h.Detail, " "), fmt.Sprintf("%d consecutive", n))
+}
+
+func lastPassLine(entries []observer.LoggedEntry) (tasks, skipped int, cut, incomplete bool, ok bool) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		msg := entries[i].Message
+		if !strings.Contains(msg, "verifier: pass ") || entries[i].Level != zapcore.InfoLevel {
+			continue
+		}
+		var bytes int64
+		var opened, open, closed int
+		var dur string
+		_, err := fmt.Sscanf(msg, "verifier: pass tasks=%d skipped=%d bytes=%d findings_opened=%d findings_open=%d findings_closed=%d cut_short=%t object_incomplete=%t duration=%s",
+			&tasks, &skipped, &bytes, &opened, &open, &closed, &cut, &incomplete, &dur)
+		if err != nil {
+			return 0, 0, false, false, false
+		}
+		return tasks, skipped, cut, incomplete, true
+	}
+	return 0, 0, false, false, false
+}
+
+func dropTask(t *testing.T, dir, id string, s *Scheduler) Task {
+	t.Helper()
+	s.mu.Lock()
+	task := s.tasks[id]
+	delete(s.tasks, id)
+	s.mu.Unlock()
+	if err := os.RemoveAll(filepath.Join(dir, id)); err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+func restoreTask(t *testing.T, dir, id string, s *Scheduler, task Task) {
+	t.Helper()
+	s.mu.Lock()
+	s.tasks[id] = task
+	s.mu.Unlock()
+	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyLedger(t, dir, id, "mysql-bin.000003")
+}
+
+// TestVerifier_EmptyPassDoesNotBumpStreak is P03. Two object failures, a
+// pass with no tasks, then one real failure is consecutive 3. Adding one
+// during the empty pass would make it 4.
+func TestVerifier_EmptyPassDoesNotBumpStreak(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	dir, id, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	task := dropTask(t, dir, id, s)
+	v.Pass(context.Background(), now.Add(3*time.Minute))
+	restoreTask(t, dir, id, s, task)
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	if h := s.HealthSummary(context.Background()); !detailHasConsecutive(h, 3) {
+		t.Fatalf("empty pass changed the streak: %+v", h)
+	}
+}
+
+// TestVerifier_EmptyPassLogsZeroSkipped is the zero-task info line:
+// tasks=0 skipped=0, and the pass is not cut short.
+func TestVerifier_EmptyPassLogsZeroSkipped(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	dir, id, s, v := uploadedLedger(t, &scriptObjects{obj: map[string][]byte{}})
+	dropTask(t, dir, id, s)
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	tasks, skipped, cut, incomplete, ok := lastPassLine(obs.All())
+	if !ok || tasks != 0 || skipped != 0 || cut || incomplete {
+		t.Fatalf("tasks=%d skipped=%d cut=%t incomplete=%t ok=%t", tasks, skipped, cut, incomplete, ok)
+	}
+}
+
+// TestVerifier_AllSkippedDoesNotBumpStreak is the silent N03. Two object
+// failures, a pass that skips the only task, then one real failure is
+// consecutive 3.
+func TestVerifier_AllSkippedDoesNotBumpStreak(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	_, _, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	v.cfg.Allows = denyAllows
+	v.Pass(context.Background(), now.Add(3*time.Minute))
+	v.cfg.Allows = nil
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	if h := s.HealthSummary(context.Background()); !detailHasConsecutive(h, 3) {
+		t.Fatalf("all-skipped pass changed the streak: %+v", h)
+	}
+}
+
+// TestVerifier_AllSkippedKeepsDetail is P04. Three strikes set the detail.
+// Skipping the only task must leave that detail in place, and the next real
+// failure is consecutive 4.
+func TestVerifier_AllSkippedKeepsDetail(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	_, _, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 3; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	if h := s.HealthSummary(context.Background()); !detailHasConsecutive(h, 3) {
+		t.Fatalf("three failures left %+v", h)
+	}
+	v.cfg.Allows = denyAllows
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	if h := s.HealthSummary(context.Background()); !detailHasConsecutive(h, 3) {
+		t.Fatalf("all-skipped pass wiped the detail: %+v", h)
+	}
+	v.cfg.Allows = nil
+	v.Pass(context.Background(), now.Add(5*time.Minute))
+	if h := s.HealthSummary(context.Background()); !detailHasConsecutive(h, 4) {
+		t.Fatalf("all-skipped pass changed the streak: %+v", h)
+	}
+}
+
+// TestVerifier_MixedPassCountsSkipped is P07. One allowed task and two
+// Allows skips log tasks=1 skipped=2.
+func TestVerifier_MixedPassCountsSkipped(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	dir, _, _, s, v := newTestVerifier(t, nil)
+	second, err := s.CreateTask("second", "second-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.CreateTask("third", "third-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []Task{second, third} {
+		if err := os.MkdirAll(filepath.Join(dir, task.ID), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v.cfg.Allows = func(_ context.Context, taskID string) (bool, error) {
+		return taskID == second.ID, nil
+	}
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	tasks, skipped, cut, incomplete, ok := lastPassLine(obs.All())
+	if !ok || tasks != 1 || skipped != 2 || cut || incomplete {
+		t.Fatalf("tasks=%d skipped=%d cut=%t incomplete=%t ok=%t", tasks, skipped, cut, incomplete, ok)
+	}
+}
+
+// TestVerifier_DeadlineDoesNotCountUnreachedAsSkipped is P08. The task the
+// deadline never reaches is cut_short, not skipped.
+func TestVerifier_DeadlineDoesNotCountUnreachedAsSkipped(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	objs := &scriptObjects{obj: map[string][]byte{}, blockOpen: true}
+	dir, id, files, s, v := newTestVerifier(t, objs)
+	v.cfg = verifierCfg(dir, VerifierConfig{PassDeadline: 200 * time.Millisecond})
+	v.cfg.Objects = objs
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	objs.obj["k"] = bytes.Repeat([]byte{7}, int(size))
+	putSealed(files, id, name, dir, BinlogFile{
+		SizeBytes: size, UploadState: "UPLOADED", ObjectKey: "k", State: "SEALED",
+		SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	second, err := s.CreateTask("second", "second-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, second.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	putSealed(files, second.ID, "mysql-bin.000009", dir, BinlogFile{UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	passWithin(t, v, context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	tasks, skipped, cut, _, ok := lastPassLine(obs.All())
+	if !ok || tasks != 1 || skipped != 0 || !cut {
+		t.Fatalf("tasks=%d skipped=%d cut=%t ok=%t", tasks, skipped, cut, ok)
+	}
+}
+
+// TestVerifier_CanceledPassIsCutShortNotSkipped is the pass that reaches no
+// task. It is cut_short, and the unreached task is not skipped.
+func TestVerifier_CanceledPassIsCutShortNotSkipped(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	_, _, _, _, v := newTestVerifier(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	v.Pass(ctx, time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	tasks, skipped, cut, incomplete, ok := lastPassLine(obs.All())
+	if !ok || tasks != 0 || skipped != 0 || !cut || incomplete {
+		t.Fatalf("tasks=%d skipped=%d cut=%t incomplete=%t ok=%t", tasks, skipped, cut, incomplete, ok)
+	}
+}
+
+type healthFieldStore struct {
+	*fakeStore
+	side string
+	lock string
+}
+
+func (s healthFieldStore) SessionDegraded() (bool, string) { return false, "" }
+func (s healthFieldStore) SideKill() string                { return s.side }
+func (s healthFieldStore) LockDetail() string              { return s.lock }
+
+func newHealthFieldScheduler(t *testing.T) *Scheduler {
+	t.Helper()
+	s := NewScheduler(WithDataDir(t.TempDir()), WithStore(healthFieldStore{fakeStore: newFakeStore(), side: "off", lock: "reduced"}))
+	s.SetVerifyStorageDetail("object storage probe: NoSuchBucket bucket binlog endpoint 127.0.0.1:9000")
+	return s
+}
+
+func healthFieldsHeld(t *testing.T, h HealthSummary, status string) {
+	t.Helper()
+	if h.Status != status {
+		t.Fatalf("status %s reasons %v", h.Status, h.Reasons)
+	}
+	if !strings.Contains(strings.Join(h.Detail, "\n"), "NoSuchBucket") {
+		t.Fatalf("detail %+v", h)
+	}
+	if h.SideKill != "off" || h.LockDetail != "reduced" {
+		t.Fatalf("side_kill %q lock_detail %q", h.SideKill, h.LockDetail)
+	}
+}
+
+// TestHealthSummary_PinsFieldsWhenOK is the healthy return. Detail,
+// side_kill, and lock_detail are all present, and status stays ok.
+func TestHealthSummary_PinsFieldsWhenOK(t *testing.T) {
+	h := newHealthFieldScheduler(t).HealthSummary(context.Background())
+	healthFieldsHeld(t, h, HealthOK)
+	if len(h.Reasons) != 0 {
+		t.Fatalf("reasons %v", h.Reasons)
+	}
+}
+
+// TestHealthSummary_PinsFieldsWhenDegraded is P12, P17b, and P17c. A
+// degraded summary keeps detail, side_kill, lock_detail, and the reasons.
+func TestHealthSummary_PinsFieldsWhenDegraded(t *testing.T) {
+	s := newHealthFieldScheduler(t)
+	s.Report(Finding{TaskID: "1", Kind: FindingTaskPersistFailed, Severity: FindingCritical, Detail: "disk"})
+	h := s.HealthSummary(context.Background())
+	healthFieldsHeld(t, h, HealthDegraded)
+	if !strings.Contains(strings.Join(h.Reasons, " "), "TASK_PERSIST_FAILED") {
+		t.Fatalf("reasons %v", h.Reasons)
 	}
 }
