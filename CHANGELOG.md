@@ -14,6 +14,7 @@ Maintenance rules:
 
 ### Security
 
+- `google.golang.org/grpc` v1.83.1 → v1.83.2，修复 GO-2026-6443（`http2Server.HandleStreams`）。源码模式的 govulncheck 判定为未调用，但扫描构建出的二进制（`govulncheck -mode=binary`、Trivy、Grype）会报出这一条（#493）。没有其他模块变化。
 - 构建升级到 Go 1.26.10，修复 GO-2026-6809（标准库 `crypto/x509` 不再信任已泄露的中间证书；govulncheck 报告 `App.Run` 经 `http.Server.Serve` 调到 `x509.Certificate.Verify`）。从源码构建需要 Go 1.26.10+。没有其他模块变化。
 
 ## [v0.5.76] - 2026-10-20
