@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
-// input: a standalone process with a short verify.every_sec and a HEAD/GET object client, a cluster process with the same client, and an upload client that cannot HEAD
-// output: proof that the running worker reports a finding on the first pass and another on the ticker pass, that cluster mode does not read, open a finding or write .verify.json, and that an upload client which cannot HEAD and GET refuses startup
+// input: a standalone process with a short verify.every_sec and a HEAD/GET object client, a cluster process with the same client, an upload client that cannot HEAD, and fake clients that fail HEAD with an auth error, a missing bucket, or a network error
+// output: proof that the running worker reports a finding on the first pass and another on the ticker pass, that cluster mode does not read, open a finding or write .verify.json, and that a startup HEAD failure is WARN detail on /api/health while status stays ok
 // pos: process-level checks for the ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10, production-readiness A4)
 // note: if this file changes, update this header and module README.md.
 package app
@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -289,14 +290,97 @@ func TestApp_UploadClientMustHeadAndGet(t *testing.T) {
 	restore := newUploadClientForRun
 	newUploadClientForRun = func(upload.S3Config) (uploadClient, error) { return headlessUpload{}, nil }
 	t.Cleanup(func() { newUploadClientForRun = restore })
-	a := New(config.Config{
-		DataDir: t.TempDir(), ListenAddr: "127.0.0.1:0",
-		UploadEndpoint: "127.0.0.1:9000", UploadBucket: "binlogs", UploadAccessKey: "key", UploadSecretKey: "secret",
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := a.Run(ctx)
-	if err == nil || !strings.Contains(err.Error(), "HEAD") || !strings.Contains(err.Error(), "GET") {
-		t.Fatalf("startup err %v", err)
+	status, detail := runProbe(t, nil)
+	if status != "ok" || !strings.Contains(strings.Join(detail, " "), "HEAD") {
+		t.Fatalf("status %s detail %v", status, detail)
 	}
+}
+
+type probeUpload struct{ err error }
+
+func (p probeUpload) UploadFile(context.Context, string, string, string) error { return nil }
+func (p probeUpload) DeleteObject(context.Context, string) error               { return nil }
+func (p probeUpload) OpenObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return io.NopCloser(strings.NewReader("")), 0, nil
+}
+func (p probeUpload) HeadObject(context.Context, string) (int64, error) { return 0, p.err }
+
+func TestApp_ObjectProbeStaysHealthy(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "auth", err: errors.New("AccessDenied"), want: "AccessDenied"},
+		{name: "missing-bucket", err: errors.New("NoSuchBucket"), want: "NoSuchBucket"},
+		{name: "network", err: errors.New("connection refused"), want: "connection refused"},
+		{name: "missing-key", err: os.ErrNotExist, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.err
+			status, detail := runProbe(t, &err)
+			joined := strings.Join(detail, " ")
+			if status != "ok" {
+				t.Fatalf("status %s body detail %v", status, detail)
+			}
+			if tc.want == "" {
+				if joined != "" {
+					t.Fatalf("missing key set detail %q", joined)
+				}
+				return
+			}
+			if !strings.Contains(joined, tc.want) {
+				t.Fatalf("detail %q does not contain %s", joined, tc.want)
+			}
+		})
+	}
+}
+
+// runProbe starts one process. headErr nil installs a client with no HeadObject.
+// A non-nil pointer installs a client whose HeadObject returns that error.
+func runProbe(t *testing.T, headErr *error) (status string, detail []string) {
+	t.Helper()
+	restore := newUploadClientForRun
+	newUploadClientForRun = func(upload.S3Config) (uploadClient, error) {
+		if headErr == nil {
+			return headlessUpload{}, nil
+		}
+		return probeUpload{err: *headErr}, nil
+	}
+	t.Cleanup(func() { newUploadClientForRun = restore })
+	data := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "task.key")
+	if _, err := taskrecords.GenerateKeyFile(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	a := New(config.Config{
+		DataDir: data, ListenAddr: "127.0.0.1:0",
+		UploadEndpoint: "127.0.0.1:9000", UploadBucket: "binlogs", UploadAccessKey: "key", UploadSecretKey: "secret",
+		Standalone: config.StandaloneConfig{TaskRecords: "on", TaskKeyFile: keyFile},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	defer func() {
+		cancel()
+		waitRunExit(t, errCh)
+	}()
+	waitReady(t, a)
+	resp, err := http.Get("http://" + a.Addr() + "/api/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health %d", resp.StatusCode)
+	}
+	var body struct {
+		Status string   `json:"status"`
+		Detail []string `json:"detail"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	return body.Status, body.Detail
 }

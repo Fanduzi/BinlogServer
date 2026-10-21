@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary, whose Detail does not change status): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -814,9 +814,36 @@ const (
 )
 
 // HealthSummary is the process health GET /api/health serves.
+// Detail is operator context that does not change Status: a startup
+// object-storage probe failure is listed here while status stays ok.
 type HealthSummary struct {
 	Status  string   `json:"status"`
 	Reasons []string `json:"reasons,omitempty"`
+	Detail  []string `json:"detail,omitempty"`
+}
+
+// SetVerifyStorageDetail records a startup object-storage probe failure.
+// HealthSummary copies it into Detail and does not change Status.
+func (s *Scheduler) SetVerifyStorageDetail(detail string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.verifyStorageDetail = detail
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) verifyStorageDetails() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	detail := s.verifyStorageDetail
+	s.mu.Unlock()
+	if detail == "" {
+		return nil
+	}
+	return []string{detail}
 }
 
 // HealthSummary is degraded while any CRITICAL finding is open, read from
@@ -851,9 +878,10 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 	if reason, ok := s.healthStoreDegradedReason(); ok {
 		reasons = append(reasons, reason)
 	}
+	detail := s.verifyStorageDetails()
 	if len(reasons) == 0 {
-		return HealthSummary{Status: HealthOK}
+		return HealthSummary{Status: HealthOK, Detail: detail}
 	}
 	sort.Strings(reasons)
-	return HealthSummary{Status: HealthDegraded, Reasons: reasons}
+	return HealthSummary{Status: HealthDegraded, Reasons: reasons, Detail: detail}
 }

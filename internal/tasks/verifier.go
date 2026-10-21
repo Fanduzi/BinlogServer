@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the in-memory task list, a complete catalog listing, the task directory under data_dir, an object store that can HEAD and GET, and the open findings (severity and detail)
-// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json
+// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json. A failed rename removes its temp file and is logged at WARN; dirty stays set until a write succeeds. Each pass logs tasks checked, bytes read, findings opened and closed, whether it was cut short, and the duration. pass_deadline_sec 0 uses every_sec. A cancelled pass keeps the partial progress it already applied and does not mark the task verified. An empty scheduler drops tasks that are no longer listed
 // pos: ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10). Cluster mode does not run it; Allows stays with ADR 0011. This file does not import internal/ownership
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -29,10 +29,27 @@ const VerifyStateFileName = ".verify.json"
 
 // ObjectHeadOpener is the object client the verifier can HEAD and GET.
 // A missing object is os.ErrNotExist. The upload client is not required to
-// implement it; a client that cannot HEAD is left unused.
+// implement it; a client that cannot HEAD is left unused and object checks stay off.
 type ObjectHeadOpener interface {
 	HeadObject(ctx context.Context, key string) (int64, error)
 	OpenObject(ctx context.Context, key string) (io.ReadCloser, int64, error)
+}
+
+// ObjectProbeKey is the startup HEAD. A missing key means the bucket answered.
+// An auth error, a network error, and a missing bucket are not that answer.
+const ObjectProbeKey = ".binlog-server-verify-probe"
+
+// ProbeObjectHead HEADs ObjectProbeKey. A successful HEAD or os.ErrNotExist
+// means storage answered. Any other error is returned unchanged.
+func ProbeObjectHead(ctx context.Context, c ObjectHeadOpener) error {
+	if c == nil {
+		return errors.New("object client cannot HEAD and GET")
+	}
+	_, err := c.HeadObject(ctx, ObjectProbeKey)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 type headOpenerStore struct{ c ObjectHeadOpener }
@@ -192,8 +209,9 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	if v == nil || v.sched == nil {
 		return
 	}
+	started := time.Now()
 	if now.IsZero() {
-		now = time.Now()
+		now = started
 	}
 	deadline := v.cfg.PassDeadline
 	if deadline == 0 {
@@ -213,6 +231,7 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	if len(tasks) == 0 {
 		v.pruneAbsentTasks(live)
 		v.saveIfDirty()
+		v.logPass(started, 0, 0, 0, 0, false)
 		return
 	}
 	v.mu.Lock()
@@ -220,19 +239,38 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	v.start++
 	v.mu.Unlock()
 	ordered := append(append([]Task(nil), tasks[start:]...), tasks[:start]...)
+	var tasksChecked, opened, closed int
+	var bytesRead int64
+	cut := false
 	for _, task := range ordered {
 		// A deadline that cuts the list still keeps the tasks already
 		// checked. saveIfDirty below writes that partial progress.
 		if ctx.Err() != nil {
+			cut = true
 			break
 		}
-		v.passTask(ctx, task.ID, now)
+		checked, n, openedN, closedN, short := v.passTask(ctx, task.ID, now)
+		if checked {
+			tasksChecked++
+			bytesRead += n
+			opened += openedN
+			closed += closedN
+		}
+		if short {
+			cut = true
+		}
 	}
 	v.pruneAbsentTasks(live)
 	v.saveIfDirty()
+	v.logPass(started, tasksChecked, bytesRead, opened, closed, cut)
 }
 
-func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) {
+func (v *Verifier) logPass(started time.Time, tasks int, bytes int64, opened, closed int, cut bool) {
+	log.Printf("INFO verifier: pass tasks=%d bytes=%d findings_opened=%d findings_closed=%d cut_short=%t duration=%s",
+		tasks, bytes, opened, closed, cut, time.Since(started))
+}
+
+func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) (checked bool, bytes int64, opened, closed int, cut bool) {
 	if v.cfg.Allows != nil {
 		ok, err := v.cfg.Allows(ctx, taskID)
 		if err != nil || !ok {
@@ -254,6 +292,11 @@ func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) {
 	rows := verifyRowsFromCatalog(files, markers)
 	opt := v.options(taskID, now)
 	rep, err := assurance.Verify(ctx, dir, rows, v.cfg.Objects, nil, opt)
+	checked = true
+	bytes = rep.LocalBytes + rep.ObjectBytes
+	opened = len(rep.Findings)
+	closed = len(rep.Closed)
+	cut = rep.Deferred > 0 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("verifier: task=%s: %v", taskID, err)
 		return
@@ -263,6 +306,7 @@ func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) {
 	if !errors.Is(err, context.Canceled) {
 		v.note(taskID, now, rep)
 	}
+	return
 }
 
 func (v *Verifier) options(taskID string, now time.Time) assurance.Options {
@@ -541,7 +585,7 @@ func (v *Verifier) save() {
 		return
 	}
 	if err := writeAtomic(path, raw); err != nil {
-		log.Printf("verifier: write %s: %v", path, err)
+		log.Printf("WARN verifier: write %s: %v", path, err)
 		return
 	}
 	v.mu.Lock()
@@ -567,5 +611,8 @@ func writeAtomic(path string, raw []byte) error {
 	if err := tmp.Close(); err != nil {
 		return errors.Join(err, os.Remove(tmpName))
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return errors.Join(err, os.Remove(tmpName))
+	}
+	return nil
 }

@@ -595,7 +595,7 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 
 ### 3.11.1 周期巡检（`verify`）
 
-进程内巡检的周期和预算。负数拒绝启动。`verify.recent_share_percent` 只接受 1–100，0 也拒绝。`verify.budget_bytes_per_sec` 为 0 时工人用默认 4 MiB/s，不表示不限速。`verify.drill_dsn` 为空则演练关闭；这一版不拨号。它按源密码的方式保护，不要明文写进日志。
+进程内巡检的周期和预算。负数拒绝启动。`verify.recent_share_percent` 只接受 1–100，0 也拒绝。`verify.budget_bytes_per_sec` 为 0 时工人用默认 4 MiB/s，不表示不限速。同尺寸的对象损坏（`OBJECT_CORRUPT`）要等到该段的轮换槽才会被哈希，最坏检测延迟是 `verify.rotation_periods` × `verify.every_sec`（默认 20 × 86400 秒）。`verify.drill_dsn` 为空则演练关闭；这一版不拨号。它按源密码的方式保护，不要明文写进日志。配了对象存储时，启动对桶做一次 HEAD：失败只打 WARN，写在 `GET /api/health` 的 `detail` 里，`status` 仍是 `ok`，HTTP 仍是 200。不因此拒绝启动。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
