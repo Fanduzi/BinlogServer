@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +21,10 @@ import (
 
 	"binlog_server/internal/assurance"
 	"binlog_server/internal/health"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func newTestVerifier(t *testing.T, objects assurance.ObjectStore) (dir, id string, files *fakeFileStore, s *Scheduler, v *Verifier) {
@@ -209,10 +214,14 @@ type scriptObjects struct {
 	obj         map[string][]byte
 	blockOpen   bool
 	blockHead   bool
+	headErr     error
 	headStarted chan struct{}
 }
 
 func (s *scriptObjects) Head(ctx context.Context, key string) (int64, error) {
+	if s.headErr != nil {
+		return 0, s.headErr
+	}
 	if s.blockHead {
 		if s.headStarted != nil {
 			select {
@@ -793,5 +802,234 @@ func TestProbeObjectHead_ClassifiesErrors(t *testing.T) {
 	}
 	if err := ProbeObjectHead(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "HEAD") {
 		t.Fatalf("nil client: %v", err)
+	}
+}
+
+func captureZap(t *testing.T, level zapcore.Level) *observer.ObservedLogs {
+	t.Helper()
+	core, obs := observer.New(level)
+	prev := zap.L()
+	zap.ReplaceGlobals(zap.New(core))
+	t.Cleanup(func() { zap.ReplaceGlobals(prev) })
+	return obs
+}
+
+func withVerifyFileFault(t *testing.T, which string) {
+	t.Helper()
+	prev := verifyFiles
+	t.Cleanup(func() { verifyFiles = prev })
+	boom := errors.New(which + " failed")
+	switch which {
+	case "write":
+		verifyFiles.write = func(*os.File, []byte) (int, error) { return 0, boom }
+	case "sync":
+		verifyFiles.sync = func(*os.File) error { return boom }
+	case "close":
+		verifyFiles.close = func(*os.File) error { return boom }
+	default:
+		t.Fatalf("unknown fault %s", which)
+	}
+}
+
+func assertFileFaultDropsTemp(t *testing.T, which string) {
+	t.Helper()
+	dir := t.TempDir()
+	withVerifyFileFault(t, which)
+	err := writeAtomic(filepath.Join(dir, VerifyStateFileName), []byte("{}\n"))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	temps, gerr := verifyTemps(dir)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("%s failure left %v", which, temps)
+	}
+}
+
+func TestVerifier_WriteErrorDropsTemp(t *testing.T) { assertFileFaultDropsTemp(t, "write") }
+func TestVerifier_SyncErrorDropsTemp(t *testing.T)  { assertFileFaultDropsTemp(t, "sync") }
+func TestVerifier_CloseErrorDropsTemp(t *testing.T) { assertFileFaultDropsTemp(t, "close") }
+
+func TestVerifier_WriteFailureLogsWarn(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	dir := t.TempDir()
+	s := NewScheduler(WithDataDir(dir))
+	v := NewVerifier(s, VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+	v.mu.Lock()
+	v.dirty = true
+	v.state.Tasks["t"] = verifyTaskState{}
+	v.mu.Unlock()
+	withVerifyFileFault(t, "write")
+	v.save()
+	v.mu.Lock()
+	dirty := v.dirty
+	v.mu.Unlock()
+	if !dirty {
+		t.Fatal("failed write cleared dirty")
+	}
+	var saw bool
+	for _, e := range obs.All() {
+		if !strings.Contains(e.Message, "verifier: write progress") {
+			continue
+		}
+		saw = true
+		if e.Level != zapcore.WarnLevel {
+			t.Fatalf("write failure level %s, want warn", e.Level)
+		}
+	}
+	if !saw {
+		t.Fatal("write failure was not logged")
+	}
+}
+
+func TestVerifier_FindingsOpenedCountsNewOnly(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	name := "mysql-bin.000001"
+	body := make([]byte, 64)
+	copy(body[:4], []byte{0xfe, 'b', 'i', 'n'})
+	if err := os.WriteFile(filepath.Join(dir, id, name), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: 64, UploadState: "PENDING", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	want := [][2]int{{1, 1}, {0, 1}, {0, 1}}
+	for i := 0; i < 3; i++ {
+		from := len(obs.All())
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+		opened, open, ok := lastPassCounts(obs.All()[from:])
+		if !ok {
+			t.Fatalf("pass %d did not log", i+1)
+		}
+		if opened != want[i][0] || open != want[i][1] {
+			t.Fatalf("pass %d opened=%d open=%d, want %d %d", i+1, opened, open, want[i][0], want[i][1])
+		}
+	}
+	if _, ok := openKind(s, id, assurance.KindVerifyFailed); !ok {
+		t.Fatal("VERIFY_FAILED was not left open")
+	}
+}
+
+func lastPassCounts(entries []observer.LoggedEntry) (opened, open int, ok bool) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		msg := entries[i].Message
+		if !strings.Contains(msg, "verifier: pass ") {
+			continue
+		}
+		if entries[i].Level != zapcore.InfoLevel {
+			return 0, 0, false
+		}
+		var tasks, closed int
+		var bytes int64
+		var cut, incomplete bool
+		var dur string
+		_, err := fmt.Sscanf(msg, "verifier: pass tasks=%d bytes=%d findings_opened=%d findings_open=%d findings_closed=%d cut_short=%t object_incomplete=%t duration=%s",
+			&tasks, &bytes, &opened, &open, &closed, &cut, &incomplete, &dur)
+		if err != nil {
+			return 0, 0, false
+		}
+		return opened, open, true
+	}
+	return 0, 0, false
+}
+
+func TestVerifier_ObjectIncompleteDegradesThenClears(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	dir, id, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+		h := s.HealthSummary(context.Background())
+		if h.Status != HealthOK || strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+			t.Fatalf("pass %d health %+v", i, h)
+		}
+	}
+	v.Pass(context.Background(), now.Add(3*time.Minute))
+	h := s.HealthSummary(context.Background())
+	joined := strings.Join(h.Detail, " ")
+	if h.Status != HealthOK || !strings.Contains(joined, "consecutive") || !strings.Contains(joined, "connection refused") {
+		t.Fatalf("after 3: %+v", h)
+	}
+	if !sawLevel(obs, "verifier: object pass incomplete", zapcore.WarnLevel) {
+		t.Fatal("object incomplete was not logged at warn")
+	}
+	if !passFlag(obs.All(), "object_incomplete=true") {
+		t.Fatal("info line did not mark the object pass incomplete")
+	}
+	body, err := os.ReadFile(filepath.Join(dir, id, "mysql-bin.000003"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.headErr = nil
+	objs.obj["k"] = body
+	from := len(obs.All())
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	h = s.HealthSummary(context.Background())
+	if h.Status != HealthOK || len(h.Detail) != 0 {
+		t.Fatalf("cleared health %+v", h)
+	}
+	if !passFlag(obs.All()[from:], "object_incomplete=false") {
+		t.Fatal("recovery pass still marked object_incomplete")
+	}
+}
+
+func sawLevel(obs *observer.ObservedLogs, msg string, level zapcore.Level) bool {
+	for _, e := range obs.All() {
+		if strings.Contains(e.Message, msg) && e.Level == level {
+			return true
+		}
+	}
+	return false
+}
+
+func passFlag(entries []observer.LoggedEntry, flag string) bool {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if strings.Contains(entries[i].Message, "verifier: pass ") && strings.Contains(entries[i].Message, flag) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestVerifier_StartupDropsStaleTemps(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "task-1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, ".verify-123.tmp")
+	nested := filepath.Join(taskDir, ".verify-9.tmp")
+	other := filepath.Join(dir, "notes.tmp")
+	for _, name := range []string{stale, nested, other} {
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := NewScheduler(WithDataDir(dir))
+	NewVerifier(s, VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp remains: %v", err)
+	}
+	if _, err := os.Stat(nested); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHealthSummary_KeepsProbeDetailWhenDegraded(t *testing.T) {
+	s := NewScheduler(WithDataDir(t.TempDir()))
+	s.Report(Finding{TaskID: "1", Kind: FindingTaskPersistFailed, Severity: FindingCritical, Detail: "disk"})
+	s.SetVerifyStorageDetail("object storage probe: NoSuchBucket bucket binlog endpoint 127.0.0.1:9000")
+	h := s.HealthSummary(context.Background())
+	if h.Status != HealthDegraded {
+		t.Fatalf("status %s reasons %v", h.Status, h.Reasons)
+	}
+	if !strings.Contains(strings.Join(h.Detail, "\n"), "NoSuchBucket") {
+		t.Fatalf("detail dropped while degraded: %+v", h)
 	}
 }

@@ -8,7 +8,7 @@
 ## Exports
 - 上传接口：将 sealed binlog 文件上传到对象存储。
 - `OpenObject`：用同一客户端和同一套上传配置按 object key 打开已上传对象，返回打开时的对象大小。不新增配置项。对象不存在时返回 `os.ErrNotExist`。
-- `ProbeStorage`：启动时 HEAD 桶。桶在返回 nil；桶不在返回 `NoSuchBucket`；鉴权失败和网络错误原样返回。对象 HEAD 的空 404 会被 SDK 报成 `NoSuchKey`，分不清桶不在，所以探针不走 `HeadObject`。
+- `ProbeStorage`：启动时 HEAD 桶。桶在返回 nil；桶不在、鉴权失败和网络错误都带上桶名和端点，不带密钥。对象 HEAD 的空 404 会被 SDK 报成 `NoSuchKey`，分不清桶不在，所以探针不走 `HeadObject`。能 ListBucket 但不能 GetObject 的策略这里看不出来。
 - `HeadObject`：按同一 key 做 HEAD，返回对象大小。对象不存在（`NoSuchKey` 或 404）时返回 `os.ErrNotExist`。响应里带 `NoSuchBucket` 时不是对象缺失，原样返回。巡检用它，不把它加进启动用的上传接口。
 - `SealedObjectMatches`：HEAD 已上传对象，把 ETag 与封存文件比较。不超过 16MiB 用整文件 MD5；更大用与 `FPutObject` 相同的 16MiB 分片 ETag。ETag 为空或大小不一致返回 false。Stat 失败返回错误，调用方据此把 `checksum` 留空，不写成 `mismatch`。
 - `ListObjects(ctx, prefix, limit)`：列出 prefix 下的 key 与大小（设计 0009 §21.3），超过 limit 返回 truncated=true；出错或截断时调用方不据此判定任何对象缺失。
