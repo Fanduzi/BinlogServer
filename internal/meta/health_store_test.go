@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock for the health statements; optionally BINLOG_TEST_MYSQL_ROOT_DSNS (comma-separated root DSNs ending in "/") for real MySQL 8.0, 5.7 and MariaDB
-// output: assertions that a missing 000009 maps to healthstore.ErrSchemaAbsent without being remembered, the upsert dialect per server version, the healthstore contract on real servers, and 6/7/8 → 9 migrations with down/up
+// output: assertions that a missing 000009 maps to healthstore.ErrSchemaAbsent without being remembered, the upsert dialect per server version, the healthstore contract on real servers, and 6/7/8 → latest migrations (through 000009) with down to 8 and up again
 // pos: persistence coverage for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -75,6 +75,31 @@ func migrationsURL(t *testing.T) string {
 	return "file://" + filepath.Join(filepath.Dir(file), "..", "..", "migrations")
 }
 
+// latestMigration returns the highest version among migrations/*.up.sql, so
+// upgrade tests follow new migrations without editing a constant.
+func latestMigration(t *testing.T) uint {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	ups, err := filepath.Glob(filepath.Join(filepath.Dir(file), "..", "..", "migrations", "*.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var latest uint
+	for _, up := range ups {
+		var v uint
+		if _, err := fmt.Sscanf(filepath.Base(up), "%d_", &v); err != nil {
+			t.Fatalf("migration %s: %v", up, err)
+		}
+		if v > latest {
+			latest = v
+		}
+	}
+	if latest < 9 {
+		t.Fatalf("latest migration %d, want at least 000009", latest)
+	}
+	return latest
+}
+
 // scratchDB creates an empty database and returns its DSN and a migrator.
 func scratchDB(t *testing.T, root, name string) (*sql.DB, *migrate.Migrate) {
 	t.Helper()
@@ -140,6 +165,7 @@ func TestHealthStoreContractOnMySQL(t *testing.T) {
 
 func TestMigrateTo9FromEachVersion(t *testing.T) {
 	ctx := context.Background()
+	latest := latestMigration(t)
 	for i, root := range rootDSNs(t) {
 		for _, from := range []uint{6, 7, 8} {
 			root, from := root, from
@@ -165,8 +191,8 @@ func TestMigrateTo9FromEachVersion(t *testing.T) {
 				if err := m.Up(); err != nil {
 					t.Fatal(err)
 				}
-				if v, dirty, _ := m.Version(); v != 9 || dirty {
-					t.Fatalf("version %d dirty %v", v, dirty)
+				if v, dirty, _ := m.Version(); v != latest || dirty {
+					t.Fatalf("version %d dirty %v, want %d", v, dirty, latest)
 				}
 				if _, err := store.ApplyTransitions(ctx, "t", f, []health.Transition{tr}, health.TaskHealth{TaskID: "t", Status: health.StatusUnhealthy}); err != nil {
 					t.Fatalf("after 000009 the same store works without restart: %v", err)
@@ -179,10 +205,13 @@ func TestMigrateTo9FromEachVersion(t *testing.T) {
 				}
 				legacy.Count = 4
 				if err := store.UpsertFinding(ctx, legacy); err != nil {
-					t.Fatalf("v0.5.66 upsert on schema 9: %v", err)
+					t.Fatalf("v0.5.66 upsert on schema %d: %v", latest, err)
 				}
-				if err := m.Steps(-1); err != nil {
+				if err := m.Migrate(8); err != nil {
 					t.Fatal(err)
+				}
+				if v, dirty, _ := m.Version(); v != 8 || dirty {
+					t.Fatalf("after down: version %d dirty %v, want 8", v, dirty)
 				}
 				if err := store.UpsertFinding(ctx, legacy); err != nil {
 					t.Fatalf("v0.5.66 upsert after down to 8: %v", err)

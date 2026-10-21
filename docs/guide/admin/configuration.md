@@ -80,6 +80,7 @@ cluster:
   lease_renew_interval_sec: 5  # 续租间隔（秒）
   lease_grace_sec: 30          # 宽限期（秒）
   failover_policy: "rebuild_current_file"
+  side_kill: "off"             # off | auto。auto 只用于到 meta 的直连
 
 # 上传配置（可选）
 upload:
@@ -173,6 +174,7 @@ export BINLOG_SERVER_META_DSN="root:pass@tcp(127.0.0.1:3306)/binlog_server_meta?
 | `cluster.lease_renew_interval_sec` | int | 5 | 续租间隔（秒） |
 | `cluster.lease_grace_sec` | int | 30 | 宽限期（秒） |
 | `cluster.failover_policy` | string | rebuild_current_file | 仍接受该值。接管不靠这个键切换。分段目录是 `binlog_files.file_path`，见[部署指南 6.3 第 2 节](deployment.md) |
+| `cluster.side_kill` | string | off | `off` 或 `auto`。缺省不演练。`auto` 只用于到 meta 的直连；会解析 SQL 的代理后面不要开 |
 
 **角色说明：**
 

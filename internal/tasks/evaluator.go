@@ -9,6 +9,7 @@
 // note P2-6c (§24): cluster responsibility and the pass's fence come from authorityFor (holder, or the _health holder for an unowned task); a proxy pass uses unownedFacts and a fenced proxy write is not latched
 // note P2-6.1 (§28): while this node holds _health it also evaluates _cluster, and only for HEALTH_STALE (task.state, never fence, epoch 0); standalone _cluster is unchanged
 // note P2-6.2 (§30): a released last owner evaluates chain.local with Delegated; a proxy pass does not read the directory; NodeGoneAfter 0 means 3×Sweep
+// note ADR 0011 PR-2: ErrLockWait is one lock-stall observation (the second opens META_LOCK_STALLED); each sweep refreshes side_kill
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -122,8 +123,18 @@ type EvaluatorConfig struct {
 	// NoProgressAfter is health.no_progress_after_sec, the TASK_NO_PROGRESS
 	// threshold (default 120s, design §24.9).
 	NoProgressAfter time.Duration
-	// StaleAfter is health.stale_after_sec (design §28). 0 means 5×Sweep.
+	// StaleAfter is health.stale_after_sec (design §28). 0 means 5×Sweep,
+	// then raised to max(2×sweep+lock_wait, min(S, RTO)). It is not clamped
+	// down to one sweep.
 	StaleAfter time.Duration
+	// LeaseTTL, LockWait, IdleKill, ClaimInterval and StartToReady feed the
+	// ADR 0011 stale floor and the lock-stall transition. Zero uses the
+	// published defaults inside ownership.Params.fill.
+	LeaseTTL      time.Duration
+	LockWait      time.Duration
+	IdleKill      time.Duration
+	ClaimInterval time.Duration
+	StartToReady  time.Duration
 	// NodeGoneAfter is health.node_gone_after_sec (design §30). 0 means 3×Sweep.
 	NodeGoneAfter time.Duration
 	// MetaUnreachableAfter is how long metadata store failures last before
@@ -370,6 +381,7 @@ func (e *Evaluator) Run(ctx context.Context) {
 		return
 	}
 	e.probeHealthStore(ctx)
+	e.refreshSideKill(ctx)
 	var wg sync.WaitGroup
 	for i := 0; i < e.cfg.Workers; i++ {
 		wg.Add(1)
@@ -391,6 +403,7 @@ func (e *Evaluator) Run(ctx context.Context) {
 		case <-t.C:
 			// §27.8 R3: a node that evaluates no task still sees 000009 go and return.
 			e.probeHealthStore(ctx)
+			e.refreshSideKill(ctx)
 			e.markResponsible(ReasonSweep)
 		case <-lt.C:
 			e.markLivenessCrossings()
@@ -598,6 +611,7 @@ func (e *Evaluator) SweepNow(ctx context.Context) error {
 		return nil
 	}
 	e.probeHealthStore(ctx)
+	e.refreshSideKill(ctx)
 	var errs []error
 	for _, id := range e.markResponsible(ReasonSweep) {
 		e.mu.Lock()
@@ -957,6 +971,7 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 			e.noteDelegated(id, true)
 		}
 		e.afterApply(ts)
+		e.noteMetaLockHeld(ctx, id)
 		return nil
 	case errors.Is(err, healthstore.ErrFenced):
 		e.mu.Lock()
@@ -974,6 +989,9 @@ func (e *Evaluator) write(ctx context.Context, id string, fence health.Fence, ts
 	}
 	if errors.Is(err, healthstore.ErrSchemaAbsent) {
 		e.noteHealthStoreAbsent(err)
+	}
+	if errors.Is(err, healthstore.ErrLockWait) {
+		e.noteMetaLockTimeout(id)
 	}
 	if len(ts) > 0 {
 		e.mu.Lock()

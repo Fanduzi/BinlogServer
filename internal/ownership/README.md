@@ -33,7 +33,7 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 - `Step(State, Event, time.Time) Result`
 - `Check`、`CheckStep`、`ProgressOverdue`
 - `InClaimSet`、`InStopSet`、`Covered`、`LeaseLive`、`HealthCode`
-- `RTOBound`、`RTOStart`、`EffectiveStaleAfter`、`EffectiveNodeGone`、`NodeGoneRejectsStart`
+- `RTOBound`、`RTOStart`、`SessionKillBound`、`SameNodeRestartBound`、`EffectiveStaleAfter`、`EffectiveNodeGone`、`NodeGoneRejectsStart`
 - `MigrationAllowed`、`PlanSideKill`、`BackfillChain`、`GenerationBumped`、`RefusalDelay`、`FairStepBound`
 - `New`、`DefaultParams`、`Held`
 
@@ -42,7 +42,7 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 ## Dependencies
 
 - Upstream: 无。不导入调度器，不打开数据库。
-- Downstream: 无。PR-2 接会话超时和旁路杀，PR-4 把 `Step` 接到调度器。本包不实现观察者死后由 `_health` 持有者关闭 `META_LOCK_STALLED`（N6），也不实现 catalog 一致性（F7，PR-5）。
+- Downstream: 集群元数据池用 `SessionKillBound` 武装会话超时；锁等待的打开和关闭调用 `Step`。调度器的让出和切回仍留到后续变更。catalog 一致性（F7）不在本包。
 
 ## Update Rule
 

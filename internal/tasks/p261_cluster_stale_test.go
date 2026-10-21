@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: three in-process cluster schedulers sharing one MemoryLease and one health store, with a wall clock (lease renew stamps that clock onto task_leases)
-// output: proof that only the _health holder opens WARNING HEALTH_STALE on _cluster (subject = task id, never fence, epoch 0), that a task inside 5 sweeps does not open it, and that a failed ListHealth neither opens nor closes
+// output: proof that only the _health holder opens WARNING HEALTH_STALE on _cluster (subject = task id, never fence, epoch 0), that a task younger than the effective stale floor does not open it, and that a failed ListHealth neither opens nor closes
 // pos: regression for ADR 0009 P2-6.1 (design 0009 §28); the in-process stand-in for the 3-node QA row
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -17,6 +17,7 @@ import (
 
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
+	"binlog_server/internal/ownership"
 )
 
 // recordingHealthStore records the fence of each health write and can fail ListHealth.
@@ -53,8 +54,9 @@ func (s *recordingHealthStore) fencesOf(taskID string) []health.Fence {
 	return append([]health.Fence(nil), s.fences[taskID]...)
 }
 
-// staleCluster is three schedulers on one lease table. Sweep is one minute,
-// so the default stale threshold is five minutes without a new config field.
+// staleCluster is three schedulers on one lease table. Sweep is one minute.
+// The effective stale floor is max(2×sweep+lock_wait, min(5×sweep, RTO)).
+// With default lease and lock values that floor is 125s.
 type staleCluster struct {
 	t      *testing.T
 	start  time.Time
@@ -200,9 +202,9 @@ func TestClusterHealthStaleNotBeforeFiveSweeps(t *testing.T) {
 	c := newStaleCluster(t)
 	var mem []Task
 	for i := 0; i < 120; i++ {
-		mem = append(mem, c.putOwned(fmt.Sprintf("t%03d", i), "n2", 1, c.start.Add(-4*time.Minute), true))
+		mem = append(mem, c.putOwned(fmt.Sprintf("t%03d", i), "n2", 1, c.start.Add(-60*time.Second), true))
 	}
-	mem = append(mem, c.putOwned("late", "n2", 1, c.start.Add(-5*time.Minute), true))
+	mem = append(mem, c.putOwned("late", "n2", 1, c.start.Add(-126*time.Second), true))
 	_, e1 := c.node("n1", mem, false, EvaluatorOn)
 	_, _ = c.node("n2", mem, false, EvaluatorOn)
 	_, _ = c.node("n3", mem, false, EvaluatorOn)
@@ -387,12 +389,26 @@ func TestClusterHealthStaleShadowWritesNothing(t *testing.T) {
 
 func TestStaleAfterFollowsSweep(t *testing.T) {
 	e := NewEvaluator(NewScheduler(), EvaluatorConfig{Mode: EvaluatorOff, Sweep: time.Minute})
-	if e.staleAfter() != 5*time.Minute {
-		t.Fatalf("default %s, want 5m", e.staleAfter())
+	if e.staleAfter() != 125*time.Second {
+		t.Fatalf("default %s, want 125s", e.staleAfter())
 	}
+	e.cfg.Sweep = time.Second
+	e.cfg.LockWait = time.Second
+	e.cfg.IdleKill = time.Second
+	e.cfg.LeaseTTL = 10 * time.Minute
 	e.cfg.StaleAfter = 2 * time.Minute
 	if e.staleAfter() != 2*time.Minute {
 		t.Fatalf("configured %s, want 2m", e.staleAfter())
+	}
+}
+
+func TestConfiguredNoProgressStaysAboveRTO(t *testing.T) {
+	e := NewEvaluator(NewScheduler(), EvaluatorConfig{Mode: EvaluatorOff, NoProgressAfter: 120 * time.Second})
+	if e.configuredNoProgress() != 120*time.Second {
+		t.Fatalf("no_progress %s, want 120s", e.configuredNoProgress())
+	}
+	if ownership.RTOBound(ownership.DefaultParams()) != 32*time.Second {
+		t.Fatalf("rto %s, want 32s", ownership.RTOBound(ownership.DefaultParams()))
 	}
 }
 

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task directories with duplicated, stale-open, empty-leftover and bit-rotted segments, health stores that fail, fence or block, and evaluator modes off/shadow/on
-// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, 1500 segments evaluate in under 50ms, the rehasher keeps to its byte budget over 100 tasks
+// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, 1500 segments evaluate in under 50ms, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5, §5.7, §6)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -428,8 +428,17 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), block: block}
 	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: evalNode, Workers: 4, Sweep: time.Hour, Debounce: time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.Run(ctx)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		e.Run(ctx)
+	}()
+	// TempDir cleanup runs after this function returns. Cancel alone does not
+	// wait, so a worker can create a file while the directory is being removed.
+	defer func() {
+		cancel()
+		<-stopped
+	}()
 	e.MarkDirty(task.ID, ReasonSeal)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -637,5 +646,46 @@ func TestRehasher_KeepsToByteBudgetOver100Tasks(t *testing.T) {
 	t.Logf("rehash read %d B in %d segments over %.3fs: %.0f B/s", st.Bytes, st.Segments, elapsed, got)
 	if got > rate*1.1 || got < rate*0.9 {
 		t.Fatalf("rehash read %.0f B/s over 100 tasks (%d segments), want %d ±10%%", got, st.Segments, rate)
+	}
+}
+
+func TestEvaluatorLockWaitOpensOnTheSecondSweep(t *testing.T) {
+	data := t.TempDir()
+	s := NewScheduler(WithDataDir(data))
+	task, _ := evalTask(t, s, data)
+	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
+		applyErr: []error{healthstore.ErrLockWait, healthstore.ErrLockWait}}
+	e := newEval(t, s, store, EvaluatorOn)
+	ctx := context.Background()
+	_ = e.SweepNow(ctx)
+	if strings.Contains(strings.Join(s.HealthSummary(ctx).Reasons, " "), "META_LOCK_STALLED") {
+		t.Fatal("the first lock wait opened META_LOCK_STALLED")
+	}
+	_ = e.SweepNow(ctx)
+	sum := s.HealthSummary(ctx)
+	if sum.Status != HealthDegraded {
+		t.Fatalf("status %s, want degraded", sum.Status)
+	}
+	if !strings.Contains(strings.Join(sum.Reasons, " "), "META_LOCK_STALLED/"+task.ID) && !strings.Contains(strings.Join(sum.Reasons, " "), "META_LOCK_STALLED") {
+		t.Fatalf("reasons %v, want META_LOCK_STALLED for %s", sum.Reasons, task.ID)
+	}
+}
+
+func TestEvaluatorSuccessfulWriteResetsLockCount(t *testing.T) {
+	data := t.TempDir()
+	s := NewScheduler(WithDataDir(data))
+	_, _ = evalTask(t, s, data)
+	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
+		applyErr: []error{healthstore.ErrLockWait}}
+	e := newEval(t, s, store, EvaluatorOn)
+	ctx := context.Background()
+	_ = e.SweepNow(ctx)
+	_ = e.SweepNow(ctx)
+	store.mu.Lock()
+	store.applyErr = []error{healthstore.ErrLockWait}
+	store.mu.Unlock()
+	_ = e.SweepNow(ctx)
+	if strings.Contains(strings.Join(s.HealthSummary(ctx).Reasons, " "), "META_LOCK_STALLED") {
+		t.Fatal("a successful write left the lock-wait count set")
 	}
 }

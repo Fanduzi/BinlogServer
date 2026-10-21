@@ -22,7 +22,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk
+  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk,smoke-session-kill
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -59,6 +59,7 @@ Scenarios:
   smoke-scale
   smoke-standalone-restart
   smoke-standalone-full-disk
+  smoke-session-kill
   smoke-verify
 EOF
 }
@@ -104,7 +105,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk"
+      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk smoke-session-kill"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -153,7 +154,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk|smoke-verify)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk|smoke-session-kill|smoke-verify)
       return 0
       ;;
     *)
@@ -220,6 +221,10 @@ run_scenario() {
     smoke-standalone-full-disk)
       # A 30MB tmpfs data_dir (sudo mount; skips without it), server on 18112.
       "$ROOT_DIR/scripts/e2e/smoke-standalone-full-disk.sh"
+      ;;
+    smoke-session-kill)
+      # MySQL 8.0 from compose, its own MariaDB, health server on 18120.
+      BINLOG_SERVER_META_DSN="$META_DSN" "$ROOT_DIR/scripts/e2e/smoke-session-kill.sh"
       ;;
     smoke-verify)
       # Own MinIO. Not part of quick or full; CI does not select it.

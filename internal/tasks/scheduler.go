@@ -335,6 +335,7 @@ type Scheduler struct {
 	runner     Runner
 	dumpKiller func(source SourceConfig, connectionID uint32) error
 	store      TaskStore
+	metaLocks  metaLockBook
 	// records is the standalone task record (ADR 0010); nil when off.
 	records            *recordState
 	metadataSourceHost string

@@ -1,7 +1,7 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup or turning health red when the probe fails (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket
-// note P2-6.1 (§28): health.stale_after_sec (0 = 5×sweep) is EvaluatorConfig.StaleAfter
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup or turning health red when the probe fails (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound
+// note P2-6.1 (§28): health.stale_after_sec (0 = 5×sweep, then the ADR 0011 floor max(2×sweep+lock_wait, min(S, RTO))) is EvaluatorConfig.StaleAfter
 // note P2-6.2 (§30): health.node_gone_after_sec (0 = 3×sweep) is EvaluatorConfig.NodeGoneAfter
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
@@ -32,6 +32,7 @@ import (
 	"binlog_server/internal/config"
 	"binlog_server/internal/healthstore"
 	"binlog_server/internal/meta"
+	"binlog_server/internal/ownership"
 	"binlog_server/internal/replication"
 	"binlog_server/internal/taskrecords"
 	"binlog_server/internal/tasks"
@@ -68,11 +69,11 @@ type appMetaStore interface {
 }
 
 var newAppMetaStoreForRun = func(cfg config.Config) (appMetaStore, error) {
-	return meta.NewMySQLTaskStoreWithSchemaTimeout(
-		cfg.MetaDSN,
-		time.Duration(cfg.Meta.Timeout.WriteSec)*time.Second,
-		cfg.EncryptionKey,
-	)
+	timeout := time.Duration(cfg.Meta.Timeout.WriteSec) * time.Second
+	if isClusterMode(cfg) && strings.TrimSpace(cfg.MetaDSN) != "" {
+		return meta.OpenClusterMeta(cfg.MetaDSN, timeout, cfg.EncryptionKey, time.Duration(cfg.Cluster.LeaseTTLSec)*time.Second, cfg.Cluster.SideKill)
+	}
+	return meta.NewMySQLTaskStoreWithSchemaTimeout(cfg.MetaDSN, timeout, cfg.EncryptionKey)
 }
 
 var newClusterLeaseRuntimeForRun = func(store appMetaStore) tasks.LeaseManager {
@@ -1331,7 +1332,14 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 		SignalStaleAfter: time.Duration(cfg.Health.SignalStaleAfterSec) * time.Second,
 		NoProgressAfter:  time.Duration(cfg.Health.NoProgressAfterSec) * time.Second,
 		StaleAfter:       time.Duration(cfg.Health.StaleAfterSec) * time.Second,
-		NodeGoneAfter:    time.Duration(cfg.Health.NodeGoneAfterSec) * time.Second}
+		NodeGoneAfter:    time.Duration(cfg.Health.NodeGoneAfterSec) * time.Second,
+		LeaseTTL:         time.Duration(cfg.Cluster.LeaseTTLSec) * time.Second,
+		ClaimInterval:    2 * time.Second,
+		StartToReady:     10 * time.Second,
+	}
+	killBound := ownership.SessionKillBound(time.Duration(cfg.Cluster.LeaseTTLSec) * time.Second)
+	ecfg.LockWait = killBound
+	ecfg.IdleKill = killBound
 	if len(cfg.Health.UnreachableAfterTaskSec) > 0 {
 		ecfg.UnreachableAfterTask = map[string]time.Duration{}
 		for id, sec := range cfg.Health.UnreachableAfterTaskSec {

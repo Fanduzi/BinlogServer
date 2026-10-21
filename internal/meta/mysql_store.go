@@ -527,6 +527,19 @@ type MySQLTaskStore struct {
 	retentionMarkerWarned atomic.Bool
 	// healthUpsertAlias caches the upsert dialect: 0 unknown, 1 alias, 2 VALUES().
 	healthUpsertAlias atomic.Int32
+	// session is set only by OpenClusterMeta. Standalone pools stay nil.
+	session *sessionState
+	// lockWaitSeen overrides the lock-wait probe. Nil asks
+	// performance_schema.data_lock_waits, then information_schema.innodb_trx.
+	lockWaitSeen func(threadID int64) bool
+	// nowFn overrides the clock lock-statement elapsed time is measured
+	// with. Nil uses time.Now. Tests set it; production leaves it nil.
+	nowFn func() time.Time
+	// flight tracks in-progress lock statements so a saturated pool can
+	// tell a lock stall from a slow pool.
+	flight stmtFlight
+	// sideKillRun starts the side-kill probe. Nil starts a goroutine.
+	sideKillRun func(func())
 }
 
 var _ tasks.TaskStore = (*MySQLTaskStore)(nil)

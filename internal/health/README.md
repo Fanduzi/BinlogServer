@@ -11,6 +11,8 @@ P2-5.3（设计 §22）：`GTID_HOLE`（Waivable）与 `CHECKPOINT_AHEAD` 为 Ma
 
 阶段 3 巡检的 kind（`VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`、`LOCAL_UNREADABLE`、`DRILL_FAILED`、`DRILL_REFUSED`）在注册表里，Unmanaged，`Derive` 为空。`Produced` 不含 `verify`：工人经 finding 汇报告，CRITICAL 由 `/api/health` 降级。
 
+`META_LOCK_STALLED` 不是本包的受管 kind。`Reconcile` 遇到不在表里的种类会跳过，所以 `_cluster` 那一轮不会关掉它。
+
 ## Files
 - `types.go`: `Kind`（封闭集合，16 种 v0.5.66 kind + 阶段 2 新增）、`Severity`、`Scope`、`Key`、`Instance`、`ClearRule`、`KindSpec`（含 `Scopes`、`Managed`、`Confirm`、`Version`、`Waivable`）、`Produced`（本阶段有评估器产生的 scope）、`Registry`、`Facts`（`TaskFacts`、`ChainFacts`、`SignalState`、`StoreFacts`、`Waiver`；§30 增加 `ChainOwnerChanged`、`NodeGone`）、`Mute`、`Finding`、`Transition`（原因含 `OWNER_CHANGED`）、`Desired`、`TaskHealth`（`UnknownDetail` 不入库）。
 - `registry.go`: `HEALTH_STORE_UNAVAILABLE`（§27，信号 kind S18，CRITICAL，Managed，无 Confirm）。`TASK_RECORDS_FAILED`（ADR 0010，信号 kind S16，CRITICAL，Managed）。`DefaultRegistry()`（设计 §6 的 kind 表；P2-3 起 `SEGMENT_UNREADABLE`、`SEGMENT_OVERLAP`、`SEGMENT_EMPTY_LEFTOVER`（INFO，来自 `I4_EMPTY_LEFTOVER`）是 Managed；P2-4 起除 SEGMENT_* 外的信号与任务状态 kind 以及新增的 SOURCE_UNREACHABLE、TASK_FAILED 也是 Managed，#385 起 TASK_UNADOPTED（CRITICAL，standalone 残留目录）也是 Managed，P2-5.1 起 SEGMENT_DAMAGED、CHAIN_INDEX_GAP、LEGACY_FAILBACK、SEGMENT_MISSING（暂只 chain.local）是 Managed 且 `Confirm`（连续两轮推导才打开），I2_SWITCH_UNRECORDED、I6_MISSING_ROW、I6_MISSING_OBJECT、I6_OBJECT_SIZE_MISMATCH 暂不推导（设计 §20.1），`ManagedKinds()` 列出全部）、`FromAssurance`（每个 `assurance.Kind` 映射到一个 finding kind）、`LegacyKinds`、`CanonicalGTIDRanges`（waiver evidence 规范格式：MySQL `uuid:a-b`（十六进制 uuid），接受 `uuid:1-5:7-9` 与 8.4 tag `uuid:tag:a-b`；MariaDB `domain-server:a-b`，接受 `d-s-n`）。
