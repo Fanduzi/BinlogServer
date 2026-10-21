@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: health transitions and verdicts under a health.Fence
-// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write changes it (§30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege; the driver error stays in the unwrap chain) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a statement that ends before innodb_lock_wait_timeout is not a lock wait; a confirmed deadline is not also context.DeadlineExceeded; the lock views only name the holder) and 1213 retried once on the insert and on the main transaction; each lock statement has its own deadline of innodb_lock_wait_timeout plus 2s, so work earlier in the transaction cannot hide the server 1205; a lock-statement deadline that fires after the statement has already run for at least innodb_lock_wait_timeout is ErrLockWait recorded as classified by elapsed time, while an outer cancel or a cancel before that timeout is not; the outer deadline is only a backstop; a pool checkout that times out while every connection is in use and a lock wait is already confirmed or past its statement bound is ErrLockWait ("pool starvation behind a lock wait"), while a slow pool with no lock evidence stays an unconfirmed deadline; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
+// output: the MySQL healthstore.Store on migration 000009 (task_findings health columns, task_health, finding_transitions); WaiverStore on the same finding rows (§22.3); every stamp in UTC (UTC_TIMESTAMP(6), Go times converted to UTC), first_seen of an OPEN = its FactAt and resolved_at of a CLOSE = its FactAt (§25.8 R3); StoreNow reads UTC_TIMESTAMP(6) for HEALTH_STALE (§28); ChainOwner reads task_health.chain_owner and only a cluster holder write with Fence.ChainVerified changes it (ADR 0011 PR-3; a holder that did not read the directory leaves it, §30); missing tables/columns (1146/1054) map to healthstore.ErrSchemaAbsent on every call, never cached; a single apply, with MySQL 1205 (no PROCESS privilege; the driver error stays in the unwrap chain) and a session deadline that fired during a confirmed task_leases or task_health lock wait returned as healthstore.ErrLockWait (a statement that ends before innodb_lock_wait_timeout is not a lock wait; a confirmed deadline is not also context.DeadlineExceeded; the lock views only name the holder) and 1213 retried once on the insert and on the main transaction; each lock statement has its own deadline of innodb_lock_wait_timeout plus 2s, so work earlier in the transaction cannot hide the server 1205; a lock-statement deadline that fires after the statement has already run for at least innodb_lock_wait_timeout is ErrLockWait recorded as classified by elapsed time, while an outer cancel or a cancel before that timeout is not; the outer deadline is only a backstop; a pool checkout that times out while every connection is in use and a lock wait is already confirmed or past its statement bound is ErrLockWait ("pool starvation behind a lock wait"), while a slow pool with no lock evidence stays an unconfirmed deadline; the one-row rehash_cursor (LoadRehashCursor/SaveRehashCursor)
 // pos: metadata persistence for ADR 0009 phase 2 (P2-2)
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -588,11 +588,12 @@ func (s *MySQLTaskStore) applyOnce(ctx context.Context, taskID string, fence hea
 	if status == "" {
 		status = string(health.StatusUnknown)
 	}
-	// Only a cluster holder records the chain owner. Proxy and delegated
-	// writes leave the column alone (design §30): a proxy used to clear it.
+	// Only a cluster holder that read the directory records the chain owner
+	// (ADR 0011 PR-3). Proxy, delegated, and a holder whose directory read
+	// failed leave the column alone (design §30): a proxy used to clear it.
 	chainSQL := "chain_owner = chain_owner"
 	args := []any{status, string(reasons), gen, fence.Node, fence.TaskEpoch, string(fence.Mode), fence.Instance, fence.TaskEpoch, fence.Node}
-	if fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {
+	if fence.RecordChainOwner() {
 		chainSQL = "chain_owner = ?"
 		args = append(args, fence.Node)
 	}

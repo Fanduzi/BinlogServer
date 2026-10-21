@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: golden chain directories and a catalog whose sealed row disagrees with the local file, or whose local file was removed
+// output: proof that the P2-5.1 chain kinds open after Confirm and close when the cause is gone; standalone still opens SEGMENT_MISSING for a deleted sealed file, names the node on the finding and on HealthSummary, and closes it with EVAL when the file returns; cluster mode reports I6_MISSING_LOCAL for that file (ADR 0011 PR-3)
+// pos: evaluator coverage for design 0009 §20.5 and the cluster half of issue #462
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
@@ -177,24 +182,81 @@ func TestP251LedgerLineWinsOverStaleRow(t *testing.T) {
 	}
 }
 
+func p251CloseReason(t *testing.T, store *healthstore.FileStore, id string, kind health.Kind) string {
+	t.Helper()
+	ts, err := store.ListTransitions(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(ts) - 1; i >= 0; i-- {
+		if ts[i].Op == string(health.OpClose) && ts[i].Kind == string(kind) {
+			return ts[i].Reason
+		}
+	}
+	return ""
+}
+
 func TestP251SealedRowLocalMissing(t *testing.T) {
 	f := sizedDir(t)
-	if err := os.Remove(filepath.Join(f.dir, "mysql-bin.000002")); err != nil {
+	path := filepath.Join(f.dir, "mysql-bin.000002")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
 	e := newEval(t, f.s, store, EvaluatorOn)
 	sweepTwice(t, e)
-	if _, ok := p251Open(t, store, f.task.ID)[string(health.SegmentMissing)+"/mysql-bin.000002"]; !ok {
+	got, ok := p251Open(t, store, f.task.ID)[string(health.SegmentMissing)+"/mysql-bin.000002"]
+	if !ok {
 		t.Fatalf("SEGMENT_MISSING/mysql-bin.000002 not open: %v", p251Open(t, store, f.task.ID))
 	}
-	// Cluster mode: MISSING_LOCAL waits for P2-6 delegation.
+	if !strings.Contains(got.Detail, "node="+evalNode) {
+		t.Fatalf("detail %q, want node=%s", got.Detail, evalNode)
+	}
+	sum := f.s.HealthSummary(context.Background())
+	if !strings.Contains(strings.Join(sum.Reasons, " "), "node="+evalNode) {
+		t.Fatalf("health %+v, want node=%s", sum, evalNode)
+	}
+	listed, err := f.s.ListFindings(context.Background(), f.task.ID, false, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listedDetail string
+	for _, finding := range listed {
+		if string(finding.Kind) == string(health.SegmentMissing) && finding.Subject == "mysql-bin.000002" {
+			listedDetail = finding.Detail
+		}
+	}
+	if !strings.Contains(listedDetail, "node="+evalNode) {
+		t.Fatalf("ListFindings detail %q, want node=%s", listedDetail, evalNode)
+	}
+	// ADR 0011 PR-3: cluster mode judges I6_MISSING_LOCAL on a directory it read.
 	e.cfg.Cluster = true
 	facts := e.chainFacts(f.task, time.Now())
+	var saw bool
 	for _, v := range facts.Violations {
 		if v.Kind == assurance.I6MissingLocal {
-			t.Fatalf("cluster mode derived %+v", v)
+			saw = true
 		}
+	}
+	if !saw {
+		t.Fatalf("cluster mode dropped I6_MISSING_LOCAL: %+v", facts.Violations)
+	}
+	e.cfg.Cluster = false
+	if err := os.WriteFile(filepath.Join(f.dir, "mysql-bin.000002"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.EvaluateNow(context.Background(), f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if open := p251Open(t, store, f.task.ID); len(open) != 0 {
+		t.Fatalf("open after the file returned %v", open)
+	}
+	if got := p251CloseReason(t, store, f.task.ID, health.SegmentMissing); got != health.ReasonEval {
+		t.Fatalf("close reason %q, want EVAL", got)
 	}
 }
 

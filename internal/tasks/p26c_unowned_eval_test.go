@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a cluster whose task row is FAILED with no owner (another epoch failed it and released the lease), task_health still HEALTHY from the last owner's epoch, a health store that checks healthstore.CheckFence against the in-memory task_leases, and evaluators on two nodes
-// output: proof that the _health holder opens CRITICAL TASK_FAILED and the health turns UNHEALTHY, that only one node evaluates unowned tasks, that a proxy pass reads no local signals, and that a proxy write fenced by a live claim is retried once the lease is released; the in-memory store keeps chain_owner across proxy and delegated writes (§30)
+// output: proof that the _health holder opens CRITICAL TASK_FAILED and the health turns UNHEALTHY, that only one node evaluates unowned tasks, that a proxy pass reads no local signals, and that a proxy write fenced by a live claim is retried once the lease is released; the in-memory store keeps chain_owner across proxy, delegated, and unverified holder writes, and sets it only when Fence.RecordChainOwner (ADR 0011 PR-3, §30)
 // pos: regression for ADR 0009 P2-6c (design 0009 §24.2–§24.3, #421)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -65,8 +65,9 @@ func (s *leaseHealthStore) ApplyTransitions(_ context.Context, taskID string, f 
 	s.health[taskID] = h
 	prev := s.stored[taskID]
 	next := healthstore.Stored{Mode: f.Mode, Epoch: f.TaskEpoch, Node: f.Node, Instance: f.Instance, ChainOwner: prev.ChainOwner}
-	// Only a cluster holder records the chain owner (design §30).
-	if f.Mode == health.FenceCluster && !f.Proxy && !f.Delegated {
+	// Only a cluster holder that read the directory records the chain owner
+	// (ADR 0011 PR-3). The same predicate as the MySQL store.
+	if f.RecordChainOwner() {
 		next.ChainOwner = f.Node
 	}
 	s.stored[taskID] = next

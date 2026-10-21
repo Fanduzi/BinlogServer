@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
-// input: a catalog with no uploader, an aged sealed file, a row whose file is already gone, and an UPLOADED row inside a longer bucket window
-// output: proof that local-only retention drops the catalog row so the files list, download, replay, and replay archive no longer offer it, and that an UPLOADED row inside a longer bucket window stays listed and downloadable from the bucket while one RETENTION_REMOVED event and the retention marker record the local delete
+// input: a catalog with no uploader, an aged sealed file, a row past local retention whose file is already gone, rows whose file is gone inside local retention or with no age, a file this purge removes whose row is a moment younger than the cutoff, and an UPLOADED row inside a longer bucket window
+// output: proof that local-only retention drops the catalog row so the files list, download, replay, and replay archive no longer offer it, that a gone row still inside local retention (or with no sealed_at/created_at) stays with no RETENTION_REMOVED (ADR 0011 PR-3: SEGMENT_MISSING is judged from it), that a file this purge removed drops its row whatever the row's own age, and that an UPLOADED row inside a longer bucket window stays listed and downloadable from the bucket while one RETENTION_REMOVED event and the retention marker record the local delete
 // pos: HTTP coverage for retention issue 209 on the file-open purge
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -55,9 +55,11 @@ func TestLocalOnlyRetentionCatalogAgreesWithFilesAPI(t *testing.T) {
 			TaskID: taskID, FileName: "mysql-bin.000003", FilePath: removedPath,
 			State: "SEALED", UploadState: "LOCAL_ONLY",
 		},
+		// Already gone and past local retention by its own sealed_at: a
+		// purge that removed the file and stopped before the row went.
 		"mysql-bin.000004": {
 			TaskID: taskID, FileName: "mysql-bin.000004", FilePath: orphanPath,
-			State: "SEALED", UploadState: "LOCAL_ONLY",
+			State: "SEALED", UploadState: "LOCAL_ONLY", SealedAt: old,
 		},
 		"mysql-bin.000005": {
 			TaskID: taskID, FileName: "mysql-bin.000005", FilePath: youngPath,
@@ -437,4 +439,73 @@ func containsPathBase(paths []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// TestLocalOnlyRetentionKeepsMissingRowInsideRetention: a runner start must
+// not erase the row of a sealed segment that went missing before local
+// retention would have removed it (PR #507 QA P2). Only a file this purge
+// removed, or a row past local retention by its own age, is dropped.
+func TestLocalOnlyRetentionKeepsMissingRowInsideRetention(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "task-1"
+	taskDir := filepath.Join(dir, taskID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	// Expired by mtime, so this purge removes it, but sealed_at is a moment
+	// after the cutoff (seal time is after the last write).
+	edgePath := filepath.Join(taskDir, "mysql-bin.000002")
+	if err := os.WriteFile(edgePath, []byte("edge"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mtime := cutoff.Add(-time.Minute)
+	if err := os.Chtimes(edgePath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	row := func(name string, sealed, created time.Time) tasks.BinlogFile {
+		return tasks.BinlogFile{
+			TaskID: taskID, FileName: name, FilePath: filepath.Join(taskDir, name),
+			State: "SEALED", UploadState: "LOCAL_ONLY", SealedAt: sealed, CreatedAt: created,
+		}
+	}
+	catalog := &purgeCatalog{rows: map[string]tasks.BinlogFile{
+		"mysql-bin.000002": row("mysql-bin.000002", cutoff.Add(time.Minute), cutoff.Add(-2*time.Minute)),
+		// Gone, sealed an hour ago: lost, not expired.
+		"mysql-bin.000003": row("mysql-bin.000003", now.Add(-time.Hour), now.Add(-2*time.Hour)),
+		// Gone, no sealed_at, created an hour ago: still inside retention.
+		"mysql-bin.000004": row("mysql-bin.000004", time.Time{}, now.Add(-time.Hour)),
+		// Gone, no sealed_at, created 8 days ago: past retention.
+		"mysql-bin.000005": row("mysql-bin.000005", time.Time{}, now.Add(-8*24*time.Hour)),
+		// Gone, no timestamps at all: age unknown, kept.
+		"mysql-bin.000006": row("mysql-bin.000006", time.Time{}, time.Time{}),
+	}}
+	runner := NewMySQLRunner(dir, WithFileMetaStore(catalog))
+	file, _, _, err := runner.openBinlogWriter(context.Background(), tasks.Task{
+		ID: taskID, Epoch: 1, Storage: tasks.Storage{RetentionDays: 7},
+	}, "mysql-bin.000009", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if _, err := os.Stat(edgePath); !os.IsNotExist(err) {
+		t.Fatalf("expired file still on disk: %v", err)
+	}
+	for name, want := range map[string]bool{
+		"mysql-bin.000002": false, "mysql-bin.000003": true, "mysql-bin.000004": true,
+		"mysql-bin.000005": false, "mysql-bin.000006": true,
+	} {
+		_, kept := catalog.rows[name]
+		if kept != want {
+			t.Errorf("%s row kept=%v, want %v", name, kept, want)
+		}
+		events := 0
+		if !want {
+			events = 1
+		}
+		if got := countRetentionRemoved(catalog.events, name); got != events {
+			t.Errorf("%s RETENTION_REMOVED %d, want %d", name, got, events)
+		}
+	}
 }
