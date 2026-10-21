@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
-// input: an injected clock and sqlmock; no wall-clock wait for the lock timeout
-// output: proof that a lock-statement deadline after innodb_lock_wait_timeout is ErrLockWait classified by elapsed time, a cancel before that timeout is not, an outer cancel is not, and the normal suite kills the per-statement deadline, the watch confirm bit, mark removal, in-flight publication, and an exceeded checkout
+// input: an injected clock, sqlmock, and one real per-statement deadline
+// output: proof that a lock-statement deadline after innodb_lock_wait_timeout is ErrLockWait classified by elapsed time, including when the statement blocks until its own deadline; a cancel before that timeout is not, an outer cancel is not, the context deadline is the lock timeout plus 2s, and the normal suite kills the per-statement deadline, the watch confirm bit, mark removal, in-flight publication, and an exceeded checkout
 // pos: ADR 0011 PR-2 elapsed lock-wait classification and the mutants the QA cells do not pin
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -130,6 +130,57 @@ func TestOuterCancelIsNotLockWait(t *testing.T) {
 	})
 	if errors.Is(err, healthstore.ErrLockWait) || errors.Is(err, errClassifiedByElapsed) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("outer deadline: %v", err)
+	}
+}
+
+// TestOwnDeadlineExpiryIsElapsedLockWait kills the mutant that asks
+// noteElapsedLock about the statement context. Once that context has
+// expired, its Err is set, and the elapsed rule never applies.
+// context.WithTimeout uses the real clock, so this waits out the injected
+// 1s lock timeout plus the 2s margin. The parent outlives that budget.
+func TestOwnDeadlineExpiryIsElapsedLockWait(t *testing.T) {
+	store := &MySQLTaskStore{session: &sessionState{bound: 2 * time.Second, lockWaitSec: 1}}
+	parent, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := store.lockStmt(parent, func(sctx context.Context) error {
+		<-sctx.Done()
+		return sctx.Err()
+	})
+	elapsed := time.Since(start)
+	if elapsed < time.Second {
+		t.Fatalf("returned in %s, the statement deadline did not fire", elapsed)
+	}
+	if !errors.Is(err, healthstore.ErrLockWait) || !errors.Is(err, errClassifiedByElapsed) {
+		t.Fatalf("after %s: %v, want ErrLockWait classified by elapsed time", elapsed, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("elapsed classification still matches a client deadline: %v", err)
+	}
+}
+
+// TestStatementDeadlineIsLockTimeoutPlusTwoSeconds kills a 1s margin.
+// The deadline is read off the statement context, not off the helper that
+// would move with the constant.
+func TestStatementDeadlineIsLockTimeoutPlusTwoSeconds(t *testing.T) {
+	const lock = 4 * time.Second
+	store := &MySQLTaskStore{session: &sessionState{bound: 5 * time.Second, lockWaitSec: 4}}
+	start := time.Now()
+	err := store.lockStmt(context.Background(), func(sctx context.Context) error {
+		dl, ok := sctx.Deadline()
+		if !ok {
+			return errors.New("statement context has no deadline")
+		}
+		got := dl.Sub(start)
+		low := lock + time.Second + 500*time.Millisecond
+		high := lock + 2*time.Second + 100*time.Millisecond
+		if got <= low || got > high {
+			return errors.New("statement deadline " + got.String() + ", want " + (lock + 2*time.Second).String())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
