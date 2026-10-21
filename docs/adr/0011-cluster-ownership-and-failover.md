@@ -533,6 +533,8 @@ PR-2 和 PR-3 互不依赖，可以并行。PR-4 依赖 PR-1。PR-5 依赖 PR-3 
 
 **目录行是证据，运行器启动不能抹掉它（PR #507 QA P2）。** `SEGMENT_MISSING` 从「目录里有 `LOCAL_ONLY` / `UPLOAD_FAILED` 封存行、目录里没有文件」推导，所以这一行就是「这个段应该存在」的唯一证据。没配上传时，打开文件的保留清理（Start、重启、epoch 提升、接管都会走）只在两种情况下删掉文件已不在的行：文件是这一轮保留按 mtime 删的；或者行按自己的 `sealed_at`（为空则 `created_at`）已经过了本地保留（上一轮删了文件、没来得及删行就退出，#209）。还在本地保留期内、或两个时间都空的行留下，并打一行 `retention: kept catalog row … inside local retention`。所以「关闭只发生在段回来之后」在故障切换、滚动重启和运维 Start 之后仍成立。段一直没回来、直到按保留策略本来也该删的那一天，这一行按保留删掉并记 `RETENTION_REMOVED`，`SEGMENT_MISSING` 随之以 `EVAL` 关闭：过了保留期的段不再是这条链欠下的数据。
 
+读到目录的这一轮把节点写进 `I6_MISSING_LOCAL` 的 detail：集群是 `chain_owner=<node>`，standalone 是 `node=<node>`。`/api/findings` 的 detail 和 `/api/health` 的 reason 带上同一个词，方便到那块磁盘上去找。任务目录存在但读不了（含路径在但不是目录）时，开始和恢复各打一行日志，`/api/health` 的 detail 也列出这一行；status 不变，不开也不关 finding，不改 `chain_owner`。非 owner 进程在 finding 已经关闭后仍可能把 `/api/health` 留在 503，那是各进程内存账本和共享存储之间的传播，不由「谁可以忘掉封存段」决定，见 #510，本 PR 不改。
+
 0005 第 5 步的「失败则 desired `STOP`」在 PR-4 被本记录修正。0005 正文不在这个设计 PR 里改；PR-4 改代码时在 0005 的失败策略一节加一段指向本记录的修正，避免两份 ADR 对着干。
 
 ## 6. 留到实现 PR 的项

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a cluster holder, a catalog of sealed LOCAL_ONLY segments, and the task directory on that holder's data_dir; a second node that has not read the directory; a second holder that has read a directory where the file is present; the recorded owner's directory made unreadable while SEGMENT_MISSING is open; an OPEN catalog row whose .open.eN file is deleted
-// output: proof that deleting a sealed segment on the verified owner opens CRITICAL SEGMENT_MISSING after Confirm and Scheduler.HealthSummary becomes degraded (GET /api/health maps any status other than ok to 503), that restoring the file to the same directory closes it with EVAL, that an unverified owner change neither closes it nor writes chain_owner, and that a holder who never read the directory does not write chain_owner, that a recorded owner whose directory read fails keeps SEGMENT_MISSING open and chain_owner unchanged (QA mutant Q02), that deleting the open segment does not open SEGMENT_MISSING (QA mutant Q08), and that an unreadable owner directory is logged once when it starts and once when it ends (QA P3 5)
+// output: proof that deleting a sealed segment on the verified owner opens CRITICAL SEGMENT_MISSING after Confirm and Scheduler.HealthSummary becomes degraded (GET /api/health maps any status other than ok to 503), that the finding detail, ListFindings and the health reason name chain_owner, that restoring the file to the same directory closes it with EVAL, that an unverified owner change neither closes it nor writes chain_owner, and that a holder who never read the directory does not write chain_owner, that a recorded owner whose directory read fails keeps SEGMENT_MISSING open and chain_owner unchanged (QA mutant Q02), that deleting the open segment does not open SEGMENT_MISSING (QA mutant Q08), and that an unreadable owner directory is logged once when it starts and once when it ends and is listed on HealthSummary.Detail without closing the finding or changing chain_owner (QA P3 5)
 // pos: ADR 0011 PR-3 acceptance for issue #462 (docs/adr/0011-cluster-ownership-and-failover.md rollout row 3 and §3.5); runs in go test
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -133,9 +133,28 @@ func TestClusterVerifiedOwnerOpensSegmentMissing(t *testing.T) {
 		t.Fatalf("task health %s, want UNHEALTHY", h.Status)
 	}
 	// handleAPIHealth maps every HealthSummary status other than ok to 503.
+	_, open, _ := c.env.hs.snapshot(c.env.task.ID)
+	stored := open[health.Key{TaskID: c.env.task.ID, Kind: health.SegmentMissing, Subject: "mysql-bin.000002"}]
+	if !strings.Contains(stored.Detail, "chain_owner=n1") {
+		t.Fatalf("stored detail %q, want chain_owner=n1", stored.Detail)
+	}
+	listed, err := c.s.ListFindings(ctx, c.env.task.ID, false, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listedDetail string
+	for _, f := range listed {
+		if string(f.Kind) == string(health.SegmentMissing) && f.Subject == "mysql-bin.000002" {
+			listedDetail = f.Detail
+		}
+	}
+	if !strings.Contains(listedDetail, "chain_owner=n1") {
+		t.Fatalf("ListFindings detail %q, want chain_owner=n1", listedDetail)
+	}
 	sum := c.s.HealthSummary(ctx)
-	if sum.Status != HealthDegraded || !strings.Contains(strings.Join(sum.Reasons, " "), "SEGMENT_MISSING/mysql-bin.000002") {
-		t.Fatalf("health %+v, want degraded naming SEGMENT_MISSING", sum)
+	reasons := strings.Join(sum.Reasons, " ")
+	if sum.Status != HealthDegraded || !strings.Contains(reasons, "SEGMENT_MISSING/mysql-bin.000002") || !strings.Contains(reasons, "chain_owner=n1") {
+		t.Fatalf("health %+v, want degraded naming SEGMENT_MISSING and chain_owner=n1", sum)
 	}
 
 	c.restoreSealed(t)
@@ -336,11 +355,61 @@ func TestSegmentMissingNotForOpenSegment(t *testing.T) {
 
 // TestUnreadableOwnerDirectoryIsLogged: an owner directory that exists but
 // cannot be read is no longer silent (QA P3 5). One line when it starts, one
-// when it ends; the open finding is untouched meanwhile.
+// when it ends. HealthSummary.Detail carries the same line and does not
+// change status. The open finding and chain_owner stay put. mode 000 is the
+// permission failure; a file standing in for the directory is the same
+// condition when the process can still read mode 000 (root).
 func TestUnreadableOwnerDirectoryIsLogged(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode 000 directory")
-	}
+	t.Run("mode 000", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode 000 directory")
+		}
+		assertUnreadableOwnerDirectory(t, func(t *testing.T, dir string) func() {
+			t.Helper()
+			if err := os.Chmod(dir, 0); err != nil {
+				t.Fatal(err)
+			}
+			var once bool
+			return func() {
+				if once {
+					return
+				}
+				once = true
+				if err := os.Chmod(dir, 0o755); err != nil {
+					t.Errorf("restore %s: %v", dir, err)
+				}
+			}
+		})
+	})
+	t.Run("not a directory", func(t *testing.T) {
+		assertUnreadableOwnerDirectory(t, func(t *testing.T, dir string) func() {
+			t.Helper()
+			kept := dir + ".kept"
+			if err := os.Rename(dir, kept); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dir, []byte("not-a-directory"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var once bool
+			return func() {
+				if once {
+					return
+				}
+				once = true
+				if err := os.Remove(dir); err != nil {
+					t.Errorf("remove stand-in %s: %v", dir, err)
+				}
+				if err := os.Rename(kept, dir); err != nil {
+					t.Errorf("restore %s: %v", dir, err)
+				}
+			}
+		})
+	})
+}
+
+func assertUnreadableOwnerDirectory(t *testing.T, block func(t *testing.T, dir string) func()) {
+	t.Helper()
 	c := newSealedCluster(t)
 	ctx := context.Background()
 	if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
@@ -355,10 +424,8 @@ func TestUnreadableOwnerDirectoryIsLogged(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	if err := os.Chmod(c.dir, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(c.dir, 0o755) })
+	restore := block(t, c.dir)
+	t.Cleanup(restore)
 	for i := 0; i < 3; i++ {
 		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
 			t.Fatal(err)
@@ -370,9 +437,19 @@ func TestUnreadableOwnerDirectoryIsLogged(t *testing.T) {
 	if !c.missingOpen(t) {
 		t.Fatal("SEGMENT_MISSING closed while the owner directory was unreadable")
 	}
-	if err := os.Chmod(c.dir, 0o755); err != nil {
-		t.Fatal(err)
+	owner, err := c.env.hs.ChainOwner(ctx, c.env.task.ID)
+	if err != nil || owner != "n1" {
+		t.Fatalf("chain owner %q (%v) while unreadable, want n1", owner, err)
 	}
+	sum := c.s.HealthSummary(ctx)
+	detail := strings.Join(sum.Detail, "\n")
+	if sum.Status != HealthDegraded || !strings.Contains(detail, "directory "+c.dir+" is unreadable") {
+		t.Fatalf("health %+v, want degraded with the unreadable directory in detail", sum)
+	}
+	if strings.Contains(strings.Join(sum.Reasons, " "), "is unreadable") {
+		t.Fatalf("unreadable directory changed status via reasons: %+v", sum)
+	}
+	restore()
 	for i := 0; i < 2; i++ {
 		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
 			t.Fatal(err)
@@ -380,5 +457,19 @@ func TestUnreadableOwnerDirectoryIsLogged(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), "directory "+c.dir+" is readable again"); n != 1 {
 		t.Fatalf("readable again logged %d times, want 1:\n%s", n, buf.String())
+	}
+	if !c.missingOpen(t) {
+		t.Fatal("SEGMENT_MISSING closed when the directory became readable but the file was still gone")
+	}
+	owner, err = c.env.hs.ChainOwner(ctx, c.env.task.ID)
+	if err != nil || owner != "n1" {
+		t.Fatalf("chain owner %q (%v) after the directory was readable again, want n1", owner, err)
+	}
+	sum = c.s.HealthSummary(ctx)
+	if strings.Contains(strings.Join(sum.Detail, "\n"), "is unreadable") {
+		t.Fatalf("health detail still names an unreadable directory: %+v", sum)
+	}
+	if sum.Status != HealthDegraded {
+		t.Fatalf("health %+v, want degraded while the segment is still missing", sum)
 	}
 }

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: golden chain directories and a catalog whose sealed row disagrees with the local file, or whose local file was removed
-// output: proof that the P2-5.1 chain kinds open after Confirm and close when the cause is gone; standalone still opens SEGMENT_MISSING for a deleted sealed file and closes it with EVAL when the file returns; cluster mode reports I6_MISSING_LOCAL for that file (ADR 0011 PR-3)
+// output: proof that the P2-5.1 chain kinds open after Confirm and close when the cause is gone; standalone still opens SEGMENT_MISSING for a deleted sealed file, names the node on the finding and on HealthSummary, and closes it with EVAL when the file returns; cluster mode reports I6_MISSING_LOCAL for that file (ADR 0011 PR-3)
 // pos: evaluator coverage for design 0009 §20.5 and the cluster half of issue #462
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -209,8 +209,29 @@ func TestP251SealedRowLocalMissing(t *testing.T) {
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
 	e := newEval(t, f.s, store, EvaluatorOn)
 	sweepTwice(t, e)
-	if _, ok := p251Open(t, store, f.task.ID)[string(health.SegmentMissing)+"/mysql-bin.000002"]; !ok {
+	got, ok := p251Open(t, store, f.task.ID)[string(health.SegmentMissing)+"/mysql-bin.000002"]
+	if !ok {
 		t.Fatalf("SEGMENT_MISSING/mysql-bin.000002 not open: %v", p251Open(t, store, f.task.ID))
+	}
+	if !strings.Contains(got.Detail, "node="+evalNode) {
+		t.Fatalf("detail %q, want node=%s", got.Detail, evalNode)
+	}
+	sum := f.s.HealthSummary(context.Background())
+	if !strings.Contains(strings.Join(sum.Reasons, " "), "node="+evalNode) {
+		t.Fatalf("health %+v, want node=%s", sum, evalNode)
+	}
+	listed, err := f.s.ListFindings(context.Background(), f.task.ID, false, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listedDetail string
+	for _, finding := range listed {
+		if string(finding.Kind) == string(health.SegmentMissing) && finding.Subject == "mysql-bin.000002" {
+			listedDetail = finding.Detail
+		}
+	}
+	if !strings.Contains(listedDetail, "node="+evalNode) {
+		t.Fatalf("ListFindings detail %q, want node=%s", listedDetail, evalNode)
 	}
 	// ADR 0011 PR-3: cluster mode judges I6_MISSING_LOCAL on a directory it read.
 	e.cfg.Cluster = true

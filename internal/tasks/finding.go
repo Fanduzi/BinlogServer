@@ -2,7 +2,7 @@
 // input: failure reports from the scheduler, the runner, and background loops
 // output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary, whose Detail does not change status and is kept when status is already degraded): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
-// note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason
+// note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason. A reason names chain_owner or node when the finding detail does. An unreadable task directory is copied into Detail and does not change Status
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -869,7 +869,39 @@ func (s *Scheduler) verifyStorageDetails() []string {
 	if runtime != "" {
 		out = append(out, runtime)
 	}
+	if e := s.healthEval.Load(); e != nil {
+		out = append(out, e.directoryUnreadableLines()...)
+	}
 	return out
+}
+
+// directoryNodePhrase is the chain_owner or node token from a finding
+// detail, prefixed for a health reason. chain_owner wins when both appear.
+// Empty when the detail does not name a directory node.
+func directoryNodePhrase(detail string) string {
+	token := directoryNodeToken(detail)
+	if token == "" {
+		return ""
+	}
+	return ", " + token
+}
+
+func directoryNodeToken(detail string) string {
+	for _, key := range []string{"chain_owner=", "node="} {
+		i := strings.Index(detail, key)
+		if i < 0 {
+			continue
+		}
+		rest := detail[i:]
+		end := strings.IndexAny(rest, " \t,)")
+		if end < 0 {
+			end = len(rest)
+		}
+		if end > 0 {
+			return rest[:end]
+		}
+	}
+	return ""
 }
 
 // HealthSummary is degraded while any CRITICAL finding is open, read from
@@ -893,7 +925,7 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 		if f.Subject != "" {
 			r += "/" + f.Subject
 		}
-		reasons = append(reasons, r+" (task "+f.TaskID+")")
+		reasons = append(reasons, r+" (task "+f.TaskID+directoryNodePhrase(f.Detail)+")")
 	}
 	switch {
 	case isHealthReadTimeout(err):
