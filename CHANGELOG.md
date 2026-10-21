@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Security
+
+- 构建升级到 Go 1.26.10，修复 GO-2026-6809（标准库 `crypto/x509` 不再信任已泄露的中间证书；govulncheck 报告 `App.Run` 经 `http.Server.Serve` 调到 `x509.Certificate.Verify`）。从源码构建需要 Go 1.26.10+。没有其他模块变化。
+
 ## [v0.5.76] - 2026-10-20
 
 发布说明：`docs/releases/v0.5.76.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `health.stale_after_sec`（默认 0，即 5 倍 `health.sweep_interval_sec`；负数拒绝启动）。`HEALTH_STALE` 由健康评估器产生，需要 `health.evaluator: on`（v0.5.x 默认 `off`）；lease 修复在任何模式下都生效。

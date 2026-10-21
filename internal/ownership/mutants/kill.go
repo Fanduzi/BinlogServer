@@ -97,7 +97,7 @@ func runOne(pkg string, src map[string]string, m mutant) (status, test string) {
 			return "error", err.Error()
 		}
 	}
-	mod := "module ownership\n\ngo 1.26.9\n"
+	mod := "module ownership\n\ngo 1.26.10\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o644); err != nil {
 		return "error", err.Error()
 	}
