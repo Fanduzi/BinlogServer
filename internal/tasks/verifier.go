@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the in-memory task list, a complete catalog listing, the task directory under data_dir, an object store that can HEAD and GET, and the open findings (severity and detail)
-// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json. Write, Sync, Close, and Rename failures remove the temp file; a failed write is zap warn and dirty stays set until a write succeeds. Startup removes leftover .verify-*.tmp in the data dir only. Each pass logs at info: tasks, bytes, findings newly opened, findings currently open, findings closed, cut short, object incomplete, and duration. An object-storage error is zap warn; three consecutive ones set health detail without changing status, and a finished object pass clears it. pass_deadline_sec 0 uses every_sec. A cancelled pass keeps the partial progress it already applied and does not mark the task verified. An empty scheduler drops tasks that are no longer listed
+// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json. Write, Sync, Close, and Rename failures remove the temp file; a failed write is zap warn and dirty stays set until a write succeeds. Startup removes leftover .verify-*.tmp in the data dir only, unlinking a symlink without touching its target; a remove error is zap warn and the other temps are still removed. Temp names include the process id. Each pass logs at info: tasks, bytes, findings newly opened, findings currently open, findings closed, cut short, object incomplete, and duration. An object-storage error is zap warn and names the task, object key, and bucket; three consecutive ones set health detail without changing status, and a finished object pass clears it. A pass that checks no task does not change that streak. The streak is memory only. A corrupt .verify.json, a directory at that name, a catalog-list error, a retention-marker error, a per-task Verify error, and an encode error are zap warn and do not stop the process. pass_deadline_sec 0 uses every_sec. A cancelled pass keeps the partial progress it already applied and does not mark the task verified. An empty scheduler drops tasks that are no longer listed
 // pos: ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10). Cluster mode does not run it; Allows stays with ADR 0011. This file does not import internal/ownership
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -92,6 +91,9 @@ type VerifierConfig struct {
 	// and nothing is opened, closed or advanced.
 	Allows  func(ctx context.Context, taskID string) (bool, error)
 	Objects assurance.ObjectStore
+	// ObjectBucket is the upload bucket named in an incomplete object pass.
+	// Empty when the process has no bucket configured.
+	ObjectBucket string
 }
 
 // TaskVerifyMetrics is one task's verifier series after the last finished pass.
@@ -126,14 +128,16 @@ type Verifier struct {
 	state   verifyStateFile
 	metrics map[string]TaskVerifyMetrics
 	// objectStreak counts consecutive passes whose object scope failed
-	// because storage returned an error. It is not a budget skip.
+	// because storage returned an error. It is not a budget skip. It is not
+	// written to .verify.json: a restart starts again at zero.
 	objectStreak int
 }
 
 // objectIncompleteDegradeAfter is how many consecutive object-storage
 // failures it takes before /api/health detail records them. Status stays ok.
 // A later pass that finishes its object checks clears that detail. Not a
-// config key: the default period is 24h, so this is three periods.
+// config key: the default period is 24h, so this is three periods. The count
+// is not saved, so a restart waits another three periods.
 const objectIncompleteDegradeAfter = 3
 
 // verifyFileOps is the write path of .verify.json. Tests replace a function
@@ -151,6 +155,10 @@ var verifyFiles = verifyFileOps{
 	close:  func(f *os.File) error { return f.Close() },
 	remove: os.Remove,
 }
+
+// verifyEncode is json.MarshalIndent. A test returns an error the real
+// encoder does not produce for verifyStateFile.
+var verifyEncode = json.MarshalIndent
 
 type verifyStateFile struct {
 	Tasks map[string]verifyTaskState `json:"tasks"`
@@ -259,6 +267,8 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	if len(tasks) == 0 {
 		v.pruneAbsentTasks(live)
 		v.saveIfDirty()
+		// No task was checked. This is not a finished object pass.
+		v.noteObjectPasses(0, false, "")
 		v.logPass(started, 0, 0, 0, v.openFindingCount(), 0, false, false)
 		return
 	}
@@ -292,7 +302,7 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 		if objErr {
 			objectIncomplete = true
 			if cause != "" {
-				causes = append(causes, task.ID+": "+cause)
+				causes = append(causes, cause)
 			}
 		}
 	}
@@ -310,6 +320,8 @@ func (v *Verifier) logPass(started time.Time, tasks int, bytes int64, opened, op
 // noteObjectPasses warns when storage stopped an object check, and after
 // objectIncompleteDegradeAfter consecutive passes records health detail.
 // A pass that checked at least one task and finished its object scope clears both.
+// A pass that checked nothing (an empty scheduler, or every task skipped) is
+// not an object pass: it does not increment the streak and it does not clear it.
 func (v *Verifier) noteObjectPasses(checked int, incomplete bool, cause string) {
 	if incomplete {
 		v.objectStreak++
@@ -337,13 +349,13 @@ func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) (
 	}
 	files, err := v.sched.ListFiles(taskID, segmentInventoryLimit)
 	if err != nil {
-		log.Printf("verifier: list catalog task=%s: %v", taskID, err)
+		zap.L().Warn(fmt.Sprintf("verifier: list catalog task=%s: %v", taskID, err))
 		return
 	}
 	v.pruneSegments(taskID, files)
 	markers, err := v.sched.retentionMarkers(taskID)
 	if err != nil {
-		log.Printf("verifier: retention markers task=%s: %v", taskID, err)
+		zap.L().Warn(fmt.Sprintf("verifier: retention markers task=%s: %v", taskID, err))
 		return
 	}
 	dir, _ := taskBinlogDir(v.cfg.DataDir, taskID)
@@ -354,10 +366,10 @@ func (v *Verifier) passTask(ctx context.Context, taskID string, now time.Time) (
 	bytes = rep.LocalBytes + rep.ObjectBytes
 	closed = len(rep.Closed)
 	cut = rep.Deferred > 0 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-	cause = objectStorageCause(rep)
+	cause = objectPassCause(taskID, v.cfg.ObjectBucket, rows, rep)
 	objectErr = cause != ""
 	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("verifier: task=%s: %v", taskID, err)
+		zap.L().Warn(fmt.Sprintf("verifier: task=%s: %v", taskID, err))
 		return
 	}
 	opened = v.newlyOpened(taskID, rep)
@@ -387,19 +399,34 @@ func (v *Verifier) newlyOpened(taskID string, rep assurance.Report) int {
 	return n
 }
 
-func objectStorageCause(rep assurance.Report) string {
+// objectPassCause names the task, the object key, and the bucket when storage
+// stopped an object check. Either marker is enough: ObjectErr, or a coverage
+// row whose object method is MethodError. An empty string means the object
+// scope finished.
+func objectPassCause(taskID, bucket string, rows []assurance.VerifyRow, rep assurance.Report) string {
+	reason := ""
 	if rep.ObjectErr != nil {
-		return rep.ObjectErr.Error()
+		reason = rep.ObjectErr.Error()
 	}
-	for name, c := range rep.Coverage {
-		if c.Object.Method == assurance.MethodError {
-			if c.Object.Reason != "" {
-				return name + ": " + c.Object.Reason
-			}
-			return name + ": object check failed"
+	key := ""
+	for _, row := range rows {
+		c, ok := rep.Coverage[row.Name]
+		if !ok || c.Object.Method != assurance.MethodError {
+			continue
 		}
+		key = row.ObjectKey
+		if reason == "" {
+			reason = c.Object.Reason
+			if reason == "" {
+				reason = "object check failed"
+			}
+		}
+		break
 	}
-	return ""
+	if reason == "" {
+		return ""
+	}
+	return fmt.Sprintf("task %s object %s bucket %s: %s", taskID, key, bucket, reason)
 }
 
 func (v *Verifier) options(taskID string, now time.Time) assurance.Options {
@@ -604,18 +631,20 @@ func (v *Verifier) load() {
 	if path == "" {
 		return
 	}
-	sweepVerifyTemps(filepath.Dir(path))
+	if err := sweepVerifyTemps(filepath.Dir(path)); err != nil {
+		// warned per file; a leftover temp must not hide saved progress
+	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
 	if err != nil {
-		log.Printf("verifier: read %s: %v", path, err)
+		zap.L().Warn(fmt.Sprintf("verifier: read %s: %v", path, err))
 		return
 	}
 	var st verifyStateFile
 	if err := json.Unmarshal(raw, &st); err != nil {
-		log.Printf("verifier: %s is not progress (ignored; the next pass may re-read): %v", path, err)
+		zap.L().Warn(fmt.Sprintf("verifier: %s is not progress (ignored; the next pass may re-read): %v", path, err))
 		return
 	}
 	if st.Tasks == nil {
@@ -695,10 +724,10 @@ func (v *Verifier) save() {
 		return
 	}
 	v.mu.Lock()
-	raw, err := json.MarshalIndent(v.state, "", "  ")
+	raw, err := verifyEncode(v.state, "", "  ")
 	v.mu.Unlock()
 	if err != nil {
-		log.Printf("verifier: encode progress: %v", err)
+		zap.L().Warn(fmt.Sprintf("verifier: encode progress: %v", err))
 		return
 	}
 	if err := writeAtomic(path, raw); err != nil {
@@ -714,7 +743,7 @@ func writeAtomic(path string, raw []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".verify-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), fmt.Sprintf(".verify-%d-*.tmp", os.Getpid()))
 	if err != nil {
 		return err
 	}
@@ -736,18 +765,25 @@ func writeAtomic(path string, raw []byte) error {
 
 // sweepVerifyTemps removes crash leftovers in the data dir only.
 // The name is exactly .verify-*.tmp; task directories are not walked.
-func sweepVerifyTemps(dir string) {
+// os.Remove unlinks a symlink and does not delete its target.
+// A remove error is returned after the rest of the names are tried.
+// load keeps reading progress when that error is set.
+func sweepVerifyTemps(dir string) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
-		return
+		return nil
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, ".verify-*.tmp"))
 	if err != nil {
-		return
+		return nil
 	}
+	var failed error
 	for _, name := range matches {
-		if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := verifyFiles.remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 			zap.L().Warn("verifier: remove stale temp", zap.String("path", name), zap.Error(err))
+			failed = err
+			continue
 		}
 	}
+	return failed
 }

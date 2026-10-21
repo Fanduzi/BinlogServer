@@ -43,7 +43,7 @@ const (
 var packages = map[string][]string{
 	verify: {"./internal/assurance/"},
 	upload: {"-run", "TestApplySealedUpload", "./internal/tasks/"},
-	worker: {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress|TestVerifier_WriteErrorDropsTemp|TestVerifier_SyncErrorDropsTemp|TestVerifier_CloseErrorDropsTemp|TestVerifier_WriteFailureLogsWarn", "./internal/tasks/"},
+	worker: {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress|TestVerifier_WriteErrorDropsTemp|TestVerifier_SyncErrorDropsTemp|TestVerifier_CloseErrorDropsTemp|TestVerifier_WriteFailureLogsWarn|TestVerifier_CompletedPassResetsStreak|TestVerifier_EmptyPassKeepsStreak|TestVerifier_ObjectErrAloneIsIncomplete|TestVerifier_MethodErrorAloneIsIncomplete|TestVerifier_SweepDoesNotFollowSymlink|TestVerifier_SweepRemoveErrorStillLoads|TestVerifier_SweepRemoveErrorContinues|TestVerifier_SweepRemoveErrorLogsWarn", "./internal/tasks/"},
 	health: {"-run", "TestHealthSummary_KeepsProbeDetailWhenDegraded", "./internal/tasks/"},
 	probe:  {"-run", "TestObjectProbe_DeadlineStaysNearTwoSeconds|TestObjectProbe_FastHealthyIsOK|TestObjectProbe_TimeoutSaysTimedOutAfter", "./internal/app/"},
 	store:  {"-run", "TestMySQLTaskStore_ListFailedUploadBinlogFiles", "./internal/meta/"},
@@ -471,7 +471,7 @@ var mutants = []mutant{
 		old: "\tdeadline := v.cfg.PassDeadline\n\tif deadline == 0 {\n\t\tdeadline = v.cfg.Every\n\t}\n",
 		new: "\tdeadline := v.cfg.PassDeadline\n"},
 	{id: "WV15", desc: "V15: an empty scheduler leaves stale tasks in .verify.json", file: worker,
-		old: "\tif len(tasks) == 0 {\n\t\tv.pruneAbsentTasks(live)\n\t\tv.saveIfDirty()\n\t\tv.logPass(started, 0, 0, 0, v.openFindingCount(), 0, false, false)\n\t\treturn\n\t}\n",
+		old: "\tif len(tasks) == 0 {\n\t\tv.pruneAbsentTasks(live)\n\t\tv.saveIfDirty()\n\t\t// No task was checked. This is not a finished object pass.\n\t\tv.noteObjectPasses(0, false, \"\")\n\t\tv.logPass(started, 0, 0, 0, v.openFindingCount(), 0, false, false)\n\t\treturn\n\t}\n",
 		new: "\tif len(tasks) == 0 {\n\t\treturn\n\t}\n"},
 	// QA r2. P* live in the probe and health summary; T* live in the progress write.
 	{id: "WVP01", desc: "P01: probe timeout 2s changed to 30s", file: probe,
@@ -495,6 +495,27 @@ var mutants = []mutant{
 	{id: "WVT07", desc: "T07: the warn level on a failed progress write is dropped", file: worker,
 		old: "zap.L().Warn(\"verifier: write progress\", zap.String(\"path\", path), zap.Error(err))",
 		new: "zap.L().Info(\"verifier: write progress\", zap.String(\"path\", path), zap.Error(err))"},
+	// QA r3. S* is the object-pass streak. C* is stale-temp cleanup.
+	{id: "WVS03", desc: "S03: a finished object pass clears detail but does not zero the streak", file: worker,
+		old: "\tv.objectStreak = 0\n", new: ""},
+	{id: "WVS05", desc: "S05: a pass that checked no task resets the streak", file: worker,
+		old: "\tif checked == 0 {\n\t\treturn\n\t}\n", new: ""},
+	{id: "WVS06", desc: "S06: ObjectErr alone is not an incomplete object pass", file: worker,
+		old: "\tif rep.ObjectErr != nil {\n\t\treason = rep.ObjectErr.Error()\n\t}\n", new: ""},
+	{id: "WVS07", desc: "S07: a MethodError coverage row alone is not an incomplete object pass", file: worker,
+		old: "\tfor _, row := range rows {\n\t\tc, ok := rep.Coverage[row.Name]\n\t\tif !ok || c.Object.Method != assurance.MethodError {\n\t\t\tcontinue\n\t\t}\n\t\tkey = row.ObjectKey\n\t\tif reason == \"\" {\n\t\t\treason = c.Object.Reason\n\t\t\tif reason == \"\" {\n\t\t\t\treason = \"object check failed\"\n\t\t\t}\n\t\t}\n\t\tbreak\n\t}\n", new: ""},
+	{id: "WVC05", desc: "C05: stale-temp cleanup follows a symlink and removes the target", file: worker,
+		old: "\t\tif err := verifyFiles.remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {\n",
+		new: "\t\tif resolved, rerr := filepath.EvalSymlinks(name); rerr == nil {\n\t\t\tname = resolved\n\t\t}\n\t\tif err := verifyFiles.remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {\n"},
+	{id: "WVC06", desc: "C06: a stale-temp remove error skips loading progress", file: worker,
+		old: "\tif err := sweepVerifyTemps(filepath.Dir(path)); err != nil {\n\t\t// warned per file; a leftover temp must not hide saved progress\n\t}\n",
+		new: "\tif err := sweepVerifyTemps(filepath.Dir(path)); err != nil {\n\t\treturn\n\t}\n"},
+	{id: "WVC07", desc: "C07: a stale-temp remove error stops cleanup of the remaining files", file: worker,
+		old: "\t\t\tzap.L().Warn(\"verifier: remove stale temp\", zap.String(\"path\", name), zap.Error(err))\n\t\t\tfailed = err\n\t\t\tcontinue\n",
+		new: "\t\t\tzap.L().Warn(\"verifier: remove stale temp\", zap.String(\"path\", name), zap.Error(err))\n\t\t\treturn err\n"},
+	{id: "WVC08", desc: "C08: a stale-temp remove error is not logged", file: worker,
+		old: "\t\t\tzap.L().Warn(\"verifier: remove stale temp\", zap.String(\"path\", name), zap.Error(err))\n",
+		new: ""},
 }
 
 func main() {
