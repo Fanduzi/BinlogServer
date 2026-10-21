@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a temp data_dir, a fake catalog, and the verifier worker driven pass by pass
-// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked and returns within its own timeout, that a clean second pass does not rewrite .verify.json, that a failed rename leaves no temp and is retried, that a cancelled pass does not mark the task verified and keeps partial progress, that pass_deadline_sec 0 uses every_sec, that an empty scheduler drops stale tasks, that a finished object pass resets the strike streak, that a pass with no tasks does not, that each object-incomplete marker is enough on its own, that stale-temp cleanup unlinks a symlink without touching its target and keeps going after a remove error, that catalog, retention, verify, progress-read, and encode failures are zap warn, that a startup HEAD tells a missing key from auth, a missing bucket, and a network error, and that SealedAt reaches the clock-skew check
+// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked and returns within its own timeout, that a clean second pass does not rewrite .verify.json, that a failed rename leaves no temp and is retried, that a cancelled pass does not mark the task verified and keeps partial progress, that pass_deadline_sec 0 uses every_sec, that an empty scheduler drops stale tasks, that a finished object pass resets the strike streak, that a pass with no tasks does not, that deleting the last task clears object detail without zeroing the streak, that an all-skipped pass neither increments nor clears the streak, that an Allows skip and a catalog-list failure are not checked tasks and the pass log counts them as skipped, that a progress temp name contains the pid, that startup sweep removes both the pid form and the old form and leaves unrelated names, that each object-incomplete marker is enough on its own and an empty object or bucket field is omitted, that stale-temp cleanup unlinks a symlink without touching its target and keeps going after a remove error, that catalog, retention, verify, progress-read, and encode failures are zap warn, that a startup HEAD tells a missing key from auth, a missing bucket, and a network error, and that SealedAt reaches the clock-skew check
 // pos: worker feedback tests for ADR 0009 phase 3 (docs/design/0009-phase3-verifier.md §10)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -921,12 +921,12 @@ func lastPassCounts(entries []observer.LoggedEntry) (opened, open int, ok bool) 
 		if entries[i].Level != zapcore.InfoLevel {
 			return 0, 0, false
 		}
-		var tasks, closed int
+		var tasks, skipped, closed int
 		var bytes int64
 		var cut, incomplete bool
 		var dur string
-		_, err := fmt.Sscanf(msg, "verifier: pass tasks=%d bytes=%d findings_opened=%d findings_open=%d findings_closed=%d cut_short=%t object_incomplete=%t duration=%s",
-			&tasks, &bytes, &opened, &open, &closed, &cut, &incomplete, &dur)
+		_, err := fmt.Sscanf(msg, "verifier: pass tasks=%d skipped=%d bytes=%d findings_opened=%d findings_open=%d findings_closed=%d cut_short=%t object_incomplete=%t duration=%s",
+			&tasks, &skipped, &bytes, &opened, &open, &closed, &cut, &incomplete, &dur)
 		if err != nil {
 			return 0, 0, false
 		}
@@ -984,6 +984,26 @@ func sawLevel(obs *observer.ObservedLogs, msg string, level zapcore.Level) bool 
 		}
 	}
 	return false
+}
+
+func lastPassTasks(entries []observer.LoggedEntry) (tasks, skipped int, ok bool) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		msg := entries[i].Message
+		if !strings.Contains(msg, "verifier: pass ") || entries[i].Level != zapcore.InfoLevel {
+			continue
+		}
+		var bytes int64
+		var opened, open, closed int
+		var cut, incomplete bool
+		var dur string
+		_, err := fmt.Sscanf(msg, "verifier: pass tasks=%d skipped=%d bytes=%d findings_opened=%d findings_open=%d findings_closed=%d cut_short=%t object_incomplete=%t duration=%s",
+			&tasks, &skipped, &bytes, &opened, &open, &closed, &cut, &incomplete, &dur)
+		if err != nil {
+			return 0, 0, false
+		}
+		return tasks, skipped, true
+	}
+	return 0, 0, false
 }
 
 func passFlag(entries []observer.LoggedEntry, flag string) bool {
@@ -1101,11 +1121,19 @@ func TestVerifier_EmptyPassKeepsStreak(t *testing.T) {
 }
 
 // TestVerifier_ObjectErrAloneIsIncomplete is S06. ObjectErr with no
-// MethodError coverage row is still an incomplete object pass.
+// MethodError coverage row is still an incomplete object pass. With no
+// per-object row the object field is omitted, and an empty bucket is too.
 func TestVerifier_ObjectErrAloneIsIncomplete(t *testing.T) {
 	cause := objectPassCause("1", "binlogs", nil, assurance.Report{ObjectErr: errors.New("Access Denied.")})
-	if !strings.Contains(cause, "Access Denied.") || !strings.Contains(cause, "task 1") || !strings.Contains(cause, "bucket binlogs") {
+	if cause != "task 1 bucket binlogs: Access Denied." {
 		t.Fatalf("ObjectErr alone: %q", cause)
+	}
+	if strings.Contains(cause, "object  ") || strings.Contains(cause, "bucket  ") || strings.Contains(cause, "object bucket") {
+		t.Fatalf("empty field: %q", cause)
+	}
+	nobucket := objectPassCause("1", "", nil, assurance.Report{ObjectErr: errors.New("Access Denied.")})
+	if nobucket != "task 1: Access Denied." || strings.Contains(nobucket, "bucket") || strings.Contains(nobucket, "object ") {
+		t.Fatalf("empty bucket: %q", nobucket)
 	}
 }
 
@@ -1120,6 +1148,10 @@ func TestVerifier_MethodErrorAloneIsIncomplete(t *testing.T) {
 	cause := objectPassCause("1", "binlogs", rows, rep)
 	if !strings.Contains(cause, "Access Denied.") || !strings.Contains(cause, "object k") || !strings.Contains(cause, "bucket binlogs") {
 		t.Fatalf("MethodError alone: %q", cause)
+	}
+	emptyKey := objectPassCause("1", "binlogs", []assurance.VerifyRow{{Name: "mysql-bin.000003"}}, rep)
+	if !strings.Contains(emptyKey, "object mysql-bin.000003") || strings.Contains(emptyKey, "object  ") || strings.Contains(emptyKey, "bucket  ") {
+		t.Fatalf("empty object key: %q", emptyKey)
 	}
 }
 
@@ -1278,4 +1310,171 @@ func TestVerifier_ErrorPathsLogWarn(t *testing.T) {
 			t.Fatal("encode failure was not logged at warn")
 		}
 	})
+}
+
+func denyAllows(context.Context, string) (bool, error) { return false, nil }
+
+// TestVerifier_AllSkippedDoesNotIncrementStreak is N03. Two object failures
+// leave the streak at 2. Skipping the only task must not make it the third.
+func TestVerifier_AllSkippedDoesNotIncrementStreak(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	_, _, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	v.cfg.Allows = denyAllows
+	v.Pass(context.Background(), now.Add(3*time.Minute))
+	if h := s.HealthSummary(context.Background()); strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("all-skipped pass incremented the streak: %+v", h)
+	}
+}
+
+// TestVerifier_AllSkippedDoesNotClearStreak is N04. The same skip must not
+// zero the streak: one real failure afterwards is the third strike.
+func TestVerifier_AllSkippedDoesNotClearStreak(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	_, _, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	v.cfg.Allows = denyAllows
+	v.Pass(context.Background(), now.Add(3*time.Minute))
+	v.cfg.Allows = nil
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	h := s.HealthSummary(context.Background())
+	if h.Status != HealthOK || !strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("all-skipped pass cleared the streak: %+v", h)
+	}
+}
+
+// TestVerifier_AllowsSkipIsNotChecked is N05. A task Allows refuses is
+// skipped, not checked.
+func TestVerifier_AllowsSkipIsNotChecked(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	_, _, _, v := uploadedLedger(t, &scriptObjects{obj: map[string][]byte{}})
+	v.cfg.Allows = denyAllows
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	tasks, skipped, ok := lastPassTasks(obs.All())
+	if !ok || tasks != 0 || skipped != 1 {
+		t.Fatalf("tasks=%d skipped=%d ok=%t", tasks, skipped, ok)
+	}
+}
+
+// TestVerifier_CatalogListFailureIsNotChecked is N07. A catalog-list failure
+// is not a checked task.
+func TestVerifier_CatalogListFailureIsNotChecked(t *testing.T) {
+	obs := captureZap(t, zapcore.InfoLevel)
+	_, _, files, _, v := newTestVerifier(t, nil)
+	files.listErr = errors.New("catalog down")
+	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	tasks, skipped, ok := lastPassTasks(obs.All())
+	if !ok || tasks != 0 || skipped != 1 {
+		t.Fatalf("tasks=%d skipped=%d ok=%t", tasks, skipped, ok)
+	}
+}
+
+// TestVerifier_TempNameIncludesPid is N08. The progress temp name contains
+// this process id between the dots, not only somewhere in the random suffix.
+func TestVerifier_TempNameIncludesPid(t *testing.T) {
+	dir := t.TempDir()
+	var name string
+	prev := verifyFiles.write
+	t.Cleanup(func() { verifyFiles.write = prev })
+	verifyFiles.write = func(f *os.File, p []byte) (int, error) {
+		name = f.Name()
+		return prev(f, p)
+	}
+	if err := writeAtomic(filepath.Join(dir, VerifyStateFileName), []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(".verify-%d-", os.Getpid())
+	base := filepath.Base(name)
+	if !strings.Contains(base, want) || !strings.HasSuffix(base, ".tmp") {
+		t.Fatalf("temp %q", base)
+	}
+}
+
+// TestVerifier_SweepRemovesPidAndOldTemps is N09. Startup removes both the
+// pid form and the older .verify-123.tmp form.
+func TestVerifier_SweepRemovesPidAndOldTemps(t *testing.T) {
+	dir := t.TempDir()
+	names := []string{
+		filepath.Join(dir, fmt.Sprintf(".verify-%d-abc.tmp", os.Getpid())),
+		filepath.Join(dir, ".verify-123.tmp"),
+	}
+	for _, name := range names {
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	NewVerifier(NewScheduler(WithDataDir(dir)), VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+	for _, name := range names {
+		if _, err := os.Stat(name); !os.IsNotExist(err) {
+			t.Fatalf("%s remains: %v", filepath.Base(name), err)
+		}
+	}
+}
+
+// TestVerifier_SweepKeepsUnrelatedNames is N11 and N12. Names that are not
+// .verify-*.tmp stay, including ones a wider glob would take.
+func TestVerifier_SweepKeepsUnrelatedNames(t *testing.T) {
+	dir := t.TempDir()
+	keep := []string{".verify-foo", ".verify.json.bak", "other.tmp", ".verifyX.tmp"}
+	for _, name := range keep {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	real := filepath.Join(dir, ".verify-123.tmp")
+	if err := os.WriteFile(real, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	NewVerifier(NewScheduler(WithDataDir(dir)), VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+	if _, err := os.Stat(real); !os.IsNotExist(err) {
+		t.Fatalf("real temp remains: %v", err)
+	}
+	for _, name := range keep {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+// TestVerifier_LastTaskDeletedClearsDetail: three object failures set the
+// detail. Deleting the last task clears that detail and leaves the streak,
+// so the next failure after the task returns sets the detail again.
+func TestVerifier_LastTaskDeletedClearsDetail(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	dir, id, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 3; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	if h := s.HealthSummary(context.Background()); !strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("three failures left %+v", h)
+	}
+	s.mu.Lock()
+	task := s.tasks[id]
+	delete(s.tasks, id)
+	s.mu.Unlock()
+	if err := os.RemoveAll(filepath.Join(dir, id)); err != nil {
+		t.Fatal(err)
+	}
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	if h := s.HealthSummary(context.Background()); strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("last task deleted left detail %+v", h)
+	}
+	s.mu.Lock()
+	s.tasks[id] = task
+	s.mu.Unlock()
+	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyLedger(t, dir, id, "mysql-bin.000003")
+	v.Pass(context.Background(), now.Add(5*time.Minute))
+	if h := s.HealthSummary(context.Background()); !strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("streak was cleared with the detail: %+v", h)
+	}
 }

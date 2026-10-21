@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: a standalone process with a short verify.every_sec and a HEAD/GET object client, a cluster process with the same client, an upload client that cannot HEAD, and fake clients that fail HEAD with an auth error, a missing bucket, or a network error
-// output: proof that the running worker reports a finding on the first pass and another on the ticker pass, that cluster mode does not read, open a finding or write .verify.json, and that a startup HEAD failure is WARN detail on /api/health while status stays ok
+// output: proof that the running worker reports a finding on the first pass and another on the ticker pass, that cluster mode does not read, open a finding or write .verify.json, that a startup HEAD failure is WARN detail on /api/health while status stays ok, and that startVerifier stores upload.bucket on the verifier
 // pos: process-level checks for the ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10, production-readiness A4)
 // note: if this file changes, update this header and module README.md.
 package app
@@ -383,4 +383,16 @@ func runProbe(t *testing.T, headErr *error) (status string, detail []string) {
 		t.Fatal(err)
 	}
 	return body.Status, body.Detail
+}
+
+// TestStartVerifier_PassesUploadBucket is N16. upload.bucket reaches the
+// verifier. The spawn does not start the pass loop.
+func TestStartVerifier_PassesUploadBucket(t *testing.T) {
+	dir := t.TempDir()
+	s := tasks.NewScheduler(tasks.WithDataDir(dir))
+	cfg := config.Config{DataDir: dir, UploadBucket: "binlogs"}
+	startVerifier(context.Background(), cfg, s, nil, func(func()) {})
+	if got := s.VerifierObjectBucket(); got != "binlogs" {
+		t.Fatalf("upload bucket %q", got)
+	}
 }
