@@ -12,10 +12,41 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.77] - 2026-10-21
+
+发布说明：`docs/releases/v0.5.77.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `cluster.side_kill`（`off` | `auto`，默认 `off`）和 `health.node_gone_after_sec`（默认 0，即 3 倍 sweep；负数拒绝启动）。启动时的配置校验更严格，见 Changed。
+
 ### Security
 
 - `google.golang.org/grpc` v1.83.1 → v1.83.2，修复 GO-2026-6443（`http2Server.HandleStreams`）。源码模式的 govulncheck 判定为未调用，但扫描构建出的二进制（`govulncheck -mode=binary`、Trivy、Grype）会报出这一条（#493）。没有其他模块变化。
 - 构建升级到 Go 1.26.10，修复 GO-2026-6809（标准库 `crypto/x509` 不再信任已泄露的中间证书；govulncheck 报告 `App.Run` 经 `http.Server.Serve` 调到 `x509.Certificate.Verify`）。从源码构建需要 Go 1.26.10+。没有其他模块变化。
+
+### Added
+
+- #492（ADR 0011 PR-2，落地 #484）：集群模式下每条 meta 池连接和每次重连都设置 `wait_timeout`、`net_read_timeout`、`net_write_timeout`、`innodb_lock_wait_timeout`（MariaDB 另有 `idle_transaction_timeout`），每条拿锁语句的客户端期限是锁等待再加 2 秒（缺省 4 秒 + 2 秒）。服务器拒绝必需的 `SET` 时集群拒绝启动；代理吞掉 `SET` 或回读失败时 `/api/health` 为 degraded。元数据行锁卡住时，第二次观察打开 CRITICAL `META_LOCK_STALLED`（任务 `_cluster`，subject 为任务 id）并返回 503；不需要 `PROCESS`，缺少点名权限时 `/api/health` 带 `"lock_detail":"reduced"`（不算 degraded）。运维约定见 `docs/releases/adr-0011-pr2.md`。单机不武装。
+- #461（ADR 0009 §30）：非共享存储上，不再运行的任务的链 finding 委派给最后一任 owner（绑定最后的任务 lease epoch 和节点 id，记在 `task_health.chain_owner`，不迁移）。其他节点或旧 epoch 的委派写被拒绝；任务换到另一个节点后旧目录的链 finding 以 `OWNER_CHANGED` 关闭；最后一任 owner 心跳早于 `health.node_gone_after_sec` 或没有心跳行时健康为 UNKNOWN（`node gone`）。
+- #467：任务 API 返回 `desired_run`，Console 任务列表和详情显示 Desired。
+
+### Changed
+
+- #475：布尔配置项只接受 `true` 和 `false`，其他值（含环境变量覆盖）拒绝启动并写明配置项。#469：数值项填非数字拒绝启动。#464：`meta_dsn` 里未设置的 `${BINLOG_SERVER_META_DSN}` 启动报错并写明变量名。
+- #466、#474：生成的恢复命令和恢复文档使用 `set -o pipefail`、把所有文件交给同一个客户端、加 `--verify-binlog-checksum`，`mariadb-binlog` 另加 `--skip-gtid-strict-mode`；文件损坏时以非零退出。
+
+### Fixed
+
+- #464：随包的 `config.example.yaml` 能被加载器读取，并以单机模式启动；所有随包示例都在测试里加载。
+- #465：Quick Start 先生成 0600 的单机任务密钥；`docs/security.md` 随发布包提供。
+- #468：加载器读取的每个配置项都有文档；发布版本号由 `VERSION` 固定。本地发布包包含 `scripts/adopt-leftovers.sh` 和 `docs/releases`。
+
+### Upgrade notes
+
+- 重启前先用新二进制检查配置：v0.5.76 能接受的 `yes`/`no`/`1` 布尔值和非数字数值现在会拒绝启动。
+- 回滚到 v0.5.76 安全（同一 schema）；如果旧二进制拒绝未知配置项，先删掉 `cluster.side_kill` 和 `health.node_gone_after_sec`。
+
+### Known issues
+
+- #490（P3）：`TestFailurePathMatrixMetaOutage` 在高负载机器上不稳定（加不加 `-race` 都会）。#494（P3）：`binlog_server_checkpoint_age_seconds` 的 `task_id` label 为空。#487：每次抓取 `/metrics` 都重读所有已封存文件。#488：单机不配 meta DSN 时上传后的文件仍是 `LOCAL_ONLY`。
+- #451、#452、#455、#456、#446、#437、#438 仍未关闭；`/api/findings` 还没有读超时（P2-7）。
 
 ## [v0.5.76] - 2026-10-20
 
