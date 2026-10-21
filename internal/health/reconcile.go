@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: a Registry, the stored open findings of one task, and that task's Facts
-// output: Desire (findings that should be open), Reconcile (transitions; a signal's CLOSE carries SignalState.SuccessFactAt when the success named one, §25.8 R3; a chain-directory finding closes with OWNER_CHANGED when Facts.ChainOwnerChanged, §30), HealthOf (verdict; Facts.NodeGone forces chain.local unknown and ignores chain-directory severity, §30), Candidates and Pending (the two-pass Confirm of design §20.3: a Confirm kind opens only when the previous pass derived it too)
+// output: Desire (findings that should be open), Reconcile (transitions; a signal's CLOSE carries SignalState.SuccessFactAt when the success named one, §25.8 R3; a chain-directory finding closes with OWNER_CHANGED when Facts.ChainOwnerChanged, §30, except SEGMENT_MISSING, which stays open on that pass and is not opened again in the same pass, ADR 0011 PR-3; an incomplete scope still cannot close it; it closes with EVAL only when chain.local is complete and the key is no longer derived), HealthOf (verdict; Facts.NodeGone forces chain.local unknown and ignores chain-directory severity, §30), Candidates and Pending (the two-pass Confirm of design §20.3: a Confirm kind opens only when the previous pass derived it too)
 // pos: the one lifecycle function; pure and idempotent
 // note: if this file changes, update this header and module README.md.
 package health
@@ -187,6 +187,13 @@ func (r Registry) Reconcile(open []Finding, f *Facts) ([]Transition, Desired) {
 			continue // a duplicate stored row for the same key: one transition per key
 		}
 		if f.ChainOwnerChanged && chainDirectoryOnly(spec) {
+			// ADR 0011 PR-3: do not close SEGMENT_MISSING on an ownership
+			// change. seen keeps this pass from opening a second row for the
+			// same key. PR-5 replaces this ban with derived findings.
+			if spec.Kind == SegmentMissing {
+				seen[key] = true
+				continue
+			}
 			ownerChanged[key] = true
 			out = append(out, closeOf(o, spec, ReasonOwnerChanged, f))
 			continue
