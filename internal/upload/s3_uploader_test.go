@@ -519,6 +519,12 @@ func TestProbeStorage_ClassifiesBucketHEAD(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("probe %v, want %s", err, tc.want)
 			}
+			if !strings.Contains(err.Error(), "bucket binlog") || !strings.Contains(err.Error(), "endpoint ") {
+				t.Fatalf("probe does not name bucket and endpoint: %v", err)
+			}
+			if strings.Contains(err.Error(), "test-secret") || strings.Contains(err.Error(), "test-access") {
+				t.Fatalf("probe includes a credential: %v", err)
+			}
 		})
 	}
 
@@ -530,8 +536,12 @@ func TestProbeStorage_ClassifiesBucketHEAD(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := uploader.ProbeStorage(ctx); err == nil {
+	err = uploader.ProbeStorage(ctx)
+	if err == nil {
 		t.Fatal("dead endpoint probe succeeded")
+	}
+	if !strings.Contains(err.Error(), "bucket binlog") || !strings.Contains(err.Error(), "endpoint 127.0.0.1:1") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("dead endpoint probe: %v", err)
 	}
 }
 

@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe, and deletion of one stored key
+// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe whose errors name the bucket and endpoint and not the credentials, and deletion of one stored key
 // pos: outbound storage adapter for sealed binlog upload, checksum, download, and retention delete
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -42,8 +42,9 @@ type S3Config struct {
 
 // S3Uploader 是基于 minio-go 的 S3 兼容上传实现。
 type S3Uploader struct {
-	client *minio.Client
-	bucket string
+	client   *minio.Client
+	bucket   string
+	endpoint string
 }
 
 // NewS3Uploader 校验配置并创建上传客户端。
@@ -62,8 +63,9 @@ func NewS3Uploader(cfg S3Config) (*S3Uploader, error) {
 	}
 
 	return &S3Uploader{
-		client: client,
-		bucket: cfg.Bucket,
+		client:   client,
+		bucket:   cfg.Bucket,
+		endpoint: cfg.Endpoint,
 	}, nil
 }
 
@@ -179,22 +181,28 @@ func sealedETag(localPath string, partSize int64) (string, error) {
 }
 
 // ProbeStorage HEADs the bucket. A missing bucket, an auth failure, and a
-// network error are returned. A bucket that answers is success, including
-// when the sentinel object key is absent. Startup uses this so a missing
-// bucket is not mistaken for a missing key: an object HEAD with an empty
-// body is reported as NoSuchKey.
+// network error are returned, each naming the bucket and endpoint and none
+// of them the credentials. A bucket that answers is success, including when
+// the sentinel object key is absent. Startup uses this so a missing bucket
+// is not mistaken for a missing key: an object HEAD with an empty body is
+// reported as NoSuchKey. A policy that can ListBucket but not GetObject is
+// not visible here; the verifier sees it when it HEADs an uploaded object.
 func (u *S3Uploader) ProbeStorage(ctx context.Context) error {
 	if u == nil || u.client == nil {
 		return fmt.Errorf("object storage is not configured")
 	}
 	exists, err := u.client.BucketExists(ctx, u.bucket)
 	if err != nil {
-		return err
+		return u.probeErr(err)
 	}
 	if !exists {
-		return fmt.Errorf("NoSuchBucket")
+		return u.probeErr(fmt.Errorf("NoSuchBucket"))
 	}
 	return nil
+}
+
+func (u *S3Uploader) probeErr(err error) error {
+	return fmt.Errorf("%w bucket %s endpoint %s", err, u.bucket, u.endpoint)
 }
 
 // HeadObject reports the size of one stored object. A missing object is os.ErrNotExist.

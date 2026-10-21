@@ -1,7 +1,7 @@
 //go:build ignore
 
 // Package main replays the verifier review mutants against the tests.
-// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/meta/mysql_store.go) and the mutant table in this file
+// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go) and the mutant table in this file
 // output: a kill table on stdout; exit status 1 when a mutant that is not marked equivalent survives
 // pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill.go [id ...]
 // note: if this file changes, update this header and module README.md.
@@ -33,6 +33,8 @@ const (
 	verify = "internal/assurance/verify.go"
 	upload = "internal/tasks/sealed_upload.go"
 	worker = "internal/tasks/verifier.go"
+	health = "internal/tasks/finding.go"
+	probe  = "internal/app/app.go"
 	store  = "internal/meta/mysql_store.go"
 )
 
@@ -41,7 +43,9 @@ const (
 var packages = map[string][]string{
 	verify: {"./internal/assurance/"},
 	upload: {"-run", "TestApplySealedUpload", "./internal/tasks/"},
-	worker: {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress", "./internal/tasks/"},
+	worker: {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress|TestVerifier_WriteErrorDropsTemp|TestVerifier_SyncErrorDropsTemp|TestVerifier_CloseErrorDropsTemp|TestVerifier_WriteFailureLogsWarn", "./internal/tasks/"},
+	health: {"-run", "TestHealthSummary_KeepsProbeDetailWhenDegraded", "./internal/tasks/"},
+	probe:  {"-run", "TestObjectProbe_DeadlineStaysNearTwoSeconds|TestObjectProbe_FastHealthyIsOK|TestObjectProbe_TimeoutSaysTimedOutAfter", "./internal/app/"},
 	store:  {"-run", "TestMySQLTaskStore_ListFailedUploadBinlogFiles", "./internal/meta/"},
 }
 
@@ -455,8 +459,8 @@ var mutants = []mutant{
 	{id: "WV08", desc: "V08: dirty flag is never cleared, so .verify.json is rewritten every pass", file: worker,
 		old: "\tv.mu.Lock()\n\tv.dirty = false\n\tv.mu.Unlock()\n", new: ""},
 	{id: "WV14", desc: "V14: a failed write clears dirty, so it is never retried", file: worker,
-		old: "\tif err := writeAtomic(path, raw); err != nil {\n\t\tlog.Printf(\"WARN verifier: write %s: %v\", path, err)\n\t\treturn\n\t}\n",
-		new: "\tif err := writeAtomic(path, raw); err != nil {\n\t\tlog.Printf(\"WARN verifier: write %s: %v\", path, err)\n\t\tv.mu.Lock()\n\t\tv.dirty = false\n\t\tv.mu.Unlock()\n\t\treturn\n\t}\n"},
+		old: "\tif err := writeAtomic(path, raw); err != nil {\n\t\tzap.L().Warn(\"verifier: write progress\", zap.String(\"path\", path), zap.Error(err))\n\t\treturn\n\t}\n",
+		new: "\tif err := writeAtomic(path, raw); err != nil {\n\t\tzap.L().Warn(\"verifier: write progress\", zap.String(\"path\", path), zap.Error(err))\n\t\tv.mu.Lock()\n\t\tv.dirty = false\n\t\tv.mu.Unlock()\n\t\treturn\n\t}\n"},
 	{id: "WV11", desc: "V11: a cancelled pass still marks the task verified", file: worker,
 		old: "\tif !errors.Is(err, context.Canceled) {\n\t\tv.note(taskID, now, rep)\n\t}\n",
 		new: "\tv.note(taskID, now, rep)\n"},
@@ -467,8 +471,30 @@ var mutants = []mutant{
 		old: "\tdeadline := v.cfg.PassDeadline\n\tif deadline == 0 {\n\t\tdeadline = v.cfg.Every\n\t}\n",
 		new: "\tdeadline := v.cfg.PassDeadline\n"},
 	{id: "WV15", desc: "V15: an empty scheduler leaves stale tasks in .verify.json", file: worker,
-		old: "\tif len(tasks) == 0 {\n\t\tv.pruneAbsentTasks(live)\n\t\tv.saveIfDirty()\n\t\tv.logPass(started, 0, 0, 0, 0, false)\n\t\treturn\n\t}\n",
+		old: "\tif len(tasks) == 0 {\n\t\tv.pruneAbsentTasks(live)\n\t\tv.saveIfDirty()\n\t\tv.logPass(started, 0, 0, 0, v.openFindingCount(), 0, false, false)\n\t\treturn\n\t}\n",
 		new: "\tif len(tasks) == 0 {\n\t\treturn\n\t}\n"},
+	// QA r2. P* live in the probe and health summary; T* live in the progress write.
+	{id: "WVP01", desc: "P01: probe timeout 2s changed to 30s", file: probe,
+		old: "const objectProbeTimeout = 2 * time.Second\n", new: "const objectProbeTimeout = 30 * time.Second\n"},
+	{id: "WVP02", desc: "P02: timeout set to 1ns, so every real probe times out", file: probe,
+		old: "const objectProbeTimeout = 2 * time.Second\n", new: "const objectProbeTimeout = time.Nanosecond\n"},
+	{id: "WVP03", desc: "P03: the timed out after wording dropped", file: probe,
+		old: "\terr = fmt.Errorf(\"timed out after %s\", objectProbeTimeout)\n", new: "\terr = fmt.Errorf(\"%s\", objectProbeTimeout)\n"},
+	{id: "WVP12", desc: "P12: detail dropped when the status is already degraded", file: health,
+		old: "\treturn HealthSummary{Status: HealthDegraded, Reasons: reasons, Detail: detail}\n",
+		new: "\treturn HealthSummary{Status: HealthDegraded, Reasons: reasons}\n"},
+	{id: "WVT01", desc: "T01: no temp-file removal on the Write error path", file: worker,
+		old: "\tif _, err := verifyFiles.write(tmp, raw); err != nil {\n\t\treturn errors.Join(err, verifyFiles.close(tmp), verifyFiles.remove(tmpName))\n\t}\n",
+		new: "\tif _, err := verifyFiles.write(tmp, raw); err != nil {\n\t\treturn errors.Join(err, verifyFiles.close(tmp))\n\t}\n"},
+	{id: "WVT02", desc: "T02: no temp-file removal on the Sync error path", file: worker,
+		old: "\tif err := verifyFiles.sync(tmp); err != nil {\n\t\treturn errors.Join(err, verifyFiles.close(tmp), verifyFiles.remove(tmpName))\n\t}\n",
+		new: "\tif err := verifyFiles.sync(tmp); err != nil {\n\t\treturn errors.Join(err, verifyFiles.close(tmp))\n\t}\n"},
+	{id: "WVT03", desc: "T03: no temp-file removal on the Close error path", file: worker,
+		old: "\tif err := verifyFiles.close(tmp); err != nil {\n\t\treturn errors.Join(err, verifyFiles.remove(tmpName))\n\t}\n",
+		new: "\tif err := verifyFiles.close(tmp); err != nil {\n\t\treturn err\n\t}\n"},
+	{id: "WVT07", desc: "T07: the warn level on a failed progress write is dropped", file: worker,
+		old: "zap.L().Warn(\"verifier: write progress\", zap.String(\"path\", path), zap.Error(err))",
+		new: "zap.L().Info(\"verifier: write progress\", zap.String(\"path\", path), zap.Error(err))"},
 }
 
 func main() {

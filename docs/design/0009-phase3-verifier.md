@@ -279,7 +279,7 @@ Report.Coverage[段名] = {
 
 ## 9. 配置
 
-键在 `internal/config` 的加载器里，读者是 `internal/app` 的 `startVerifier`。负数在加载时拒绝启动。`verify.recent_share_percent` 为 0 或 1–100 以外时拒绝启动：加载器调用 `assurance.CheckRecentSharePercent`，并额外拒绝 0。`Verify` 自己把 0 当默认，只拒绝 1–100 以外的非零值。`verify.budget_bytes_per_sec` 显式 0 被接受，工人把它当成下面的默认 4 MiB/s，不是不限速。`verify.pass_deadline_sec` 为 0 时工人用 `verify.every_sec`。配了对象存储时，启动对桶做一次 HEAD：桶在算通；鉴权、网络、桶不在只打 WARN，写在 `/api/health` 的 `detail`，不改变 `status`，也不拒绝启动（对象存储可以暂时不可用，本地捕获照常跑）。探针只做一次，detail 留到进程退出。对象 HEAD 分不清「桶不在」和「key 不在」（空的 404 会被报成 NoSuchKey），所以探针打在桶上。默认值如下。
+键在 `internal/config` 的加载器里，读者是 `internal/app` 的 `startVerifier`。负数在加载时拒绝启动。`verify.recent_share_percent` 为 0 或 1–100 以外时拒绝启动：加载器调用 `assurance.CheckRecentSharePercent`，并额外拒绝 0。`Verify` 自己把 0 当默认，只拒绝 1–100 以外的非零值。`verify.budget_bytes_per_sec` 显式 0 被接受，工人把它当成下面的默认 4 MiB/s，不是不限速。`verify.pass_deadline_sec` 为 0 时工人用 `verify.every_sec`。配了对象存储时，启动对桶做一次 HEAD，超时 2 秒：桶在算通；鉴权、网络、桶不在打 warn，detail 带桶名和端点、不带密钥，写在 `/api/health` 的 `detail`，不改变 `status`，也不拒绝启动（对象存储可以暂时不可用，本地捕获照常跑）。端点黑洞时监听最多晚这 2 秒。探针只做一次，这条 detail 留到进程退出。对象 HEAD 分不清「桶不在」和「key 不在」（空的 404 会被报成 NoSuchKey），所以探针打在桶上。桶 HEAD 也看不出「能 ListBucket、不能 GetObject」；启动时目录还没装上，不 HEAD 已知 key。之后对象范围因为存储错误没查完时，INFO 行 `object_incomplete=true` 并打 warn。连续 3 轮（`objectIncompleteDegradeAfter`，不是配置项）再写一条 detail，status 仍是 ok；有一轮查完对象范围就清掉。默认值如下。
 
 | 键 | 默认 | 理由 |
 |---|---|---|

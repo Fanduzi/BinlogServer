@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary, whose Detail does not change status): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary, whose Detail does not change status and is kept when status is already degraded): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason
 // note: if this file changes, update this header and module README.md.
@@ -842,17 +842,34 @@ func (s *Scheduler) SetVerifyStorageDetail(detail string) {
 	s.mu.Unlock()
 }
 
+// SetVerifyObjectDetail records consecutive object-pass failures.
+// An empty detail clears it. HealthSummary copies it into Detail and does
+// not change Status. The startup probe detail is left in place.
+func (s *Scheduler) SetVerifyObjectDetail(detail string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.verifyObjectDetail = detail
+	s.mu.Unlock()
+}
+
 func (s *Scheduler) verifyStorageDetails() []string {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
-	detail := s.verifyStorageDetail
+	startup := s.verifyStorageDetail
+	runtime := s.verifyObjectDetail
 	s.mu.Unlock()
-	if detail == "" {
-		return nil
+	var out []string
+	if startup != "" {
+		out = append(out, startup)
 	}
-	return []string{detail}
+	if runtime != "" {
+		out = append(out, runtime)
+	}
+	return out
 }
 
 // HealthSummary is degraded while any CRITICAL finding is open, read from

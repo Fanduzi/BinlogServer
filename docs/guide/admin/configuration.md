@@ -597,7 +597,7 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 
 ### 3.11.1 周期巡检（`verify`）
 
-进程内巡检的周期和预算。负数拒绝启动。`verify.recent_share_percent` 只接受 1–100，0 也拒绝。`verify.budget_bytes_per_sec` 为 0 时工人用默认 4 MiB/s，不表示不限速。同尺寸的对象损坏（`OBJECT_CORRUPT`）要等到该段的轮换槽才会被哈希，最坏检测延迟是 `verify.rotation_periods` × `verify.every_sec`（默认 20 × 86400 秒）。`verify.drill_dsn` 为空则演练关闭；这一版不拨号。它按源密码的方式保护，不要明文写进日志。配了对象存储时，启动对桶做一次 HEAD：失败只打 WARN，写在 `GET /api/health` 的 `detail` 里，`status` 仍是 `ok`，HTTP 仍是 200。不因此拒绝启动。
+进程内巡检的周期和预算。负数拒绝启动。`verify.recent_share_percent` 只接受 1–100，0 也拒绝。`verify.budget_bytes_per_sec` 为 0 时工人用默认 4 MiB/s，不表示不限速。同尺寸的对象损坏（`OBJECT_CORRUPT`）要等到该段的轮换槽才会被哈希，最坏检测延迟是 `verify.rotation_periods` × `verify.every_sec`（默认 20 × 86400 秒）。`verify.drill_dsn` 为空则演练关闭；这一版不拨号。它按源密码的方式保护，不要明文写进日志。配了对象存储时，启动对桶做一次 HEAD，最多等 2 秒。端点是黑洞时，开始监听会晚大约这 2 秒。失败打 warn（不是把 `WARN` 写进 info 消息），写在 `GET /api/health` 的 `detail` 里，并带上桶名和端点，不写访问密钥。`status` 仍是 `ok`，HTTP 仍是 200。不因此拒绝启动。桶 HEAD 看得到 ListBucket，看不到「能 PUT、不能 GetObject」。启动时目录还没装上，探针不 HEAD 已知对象。之后某一轮对已上传对象 HEAD 失败时，这一轮的 INFO 行 `object_incomplete=true`，并打一条 warn，带上原因。连续 3 轮都这样（没有配置项；默认周期下是 3 天），`detail` 再写一条，`status` 仍是 ok。有一轮把对象范围查完就清掉这一条。启动探针的 detail 留到进程退出。每一轮还有一行 info：`verifier: pass tasks` 查过的任务数，`bytes` 读过的字节，`findings_opened` 这一轮新开的 finding，`findings_open` 当前开着的总数，`findings_closed` 这一轮关闭的，`cut_short` 是否被截止或取消截断，`object_incomplete` 对象存储是否让这一轮的对象范围没查完，`duration` 耗时。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
