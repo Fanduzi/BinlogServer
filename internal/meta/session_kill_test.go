@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a session-kill bound and the side-kill sources
-// output: proof that a mismatched or failed wait_timeout readback is degraded, MariaDB idle_transaction_timeout is read on the same transaction, innodb_lock_wait_timeout stays strictly under the client deadline, a reduced lock detail is not degraded, a missing procedure stays off, the client sends no kill statement, idle pool time stays under wait_timeout, and a sleeping lease holder is matched by exact task id
+// output: proof that a mismatched or failed wait_timeout readback is degraded, MariaDB idle_transaction_timeout is read on the same transaction, innodb_lock_wait_timeout stays strictly under the client deadline, the health-write backstop is four statement budgets plus 2s, a reduced lock detail is not degraded, a missing procedure stays off, the client sends no kill statement, idle pool time is capped at 2s and stays under wait_timeout, and a sleeping lease holder is matched by exact task id
 // pos: ADR 0011 PR-2 P2-8 and P2-9 without a server
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -61,6 +61,17 @@ func TestLockWaitStaysUnderTheClientDeadline(t *testing.T) {
 		if st.healthDeadline() <= stmt {
 			t.Fatalf("bound %s outer %s does not outlast one statement", tc.bound, st.healthDeadline())
 		}
+	}
+}
+
+// TestHealthBackstopIsFourStatementsPlusMargin kills a backstop cut down
+// to one statement budget. The numbers are literals, not the constants.
+func TestHealthBackstopIsFourStatementsPlusMargin(t *testing.T) {
+	st := &sessionState{bound: 5 * time.Second, lockWaitSec: 4}
+	one := 4*time.Second + 2*time.Second
+	want := 4*one + 2*time.Second
+	if st.healthDeadline() != want {
+		t.Fatalf("backstop %s, want %s", st.healthDeadline(), want)
 	}
 }
 
@@ -197,6 +208,11 @@ func TestPoolIdleClosesBeforeWaitTimeout(t *testing.T) {
 	}
 	if poolMaxIdle(2*time.Second) != 0 || poolMaxIdle(time.Second) != 0 {
 		t.Fatal("a short bound must not keep idle connections")
+	}
+	// A bound longer than 6s is where the cap binds. 15s/3 is 5s, so a
+	// 20s cap would leave 5s and a 2s cap leaves 2s.
+	if got := poolIdleBeforeWait(15 * time.Second); got != 2*time.Second {
+		t.Fatalf("idle cap %s, want 2s", got)
 	}
 }
 
