@@ -531,6 +531,8 @@ PR-2 和 PR-3 互不依赖，可以并行。PR-4 依赖 PR-1。PR-5 依赖 PR-3 
 
 **PR-3 的实现（上表第 3 行，实现后补）。** 今天没有 `task_chain`。`ChainVerified` 是 `health.Fence` 上的一次性标志：只有集群租约持有者这一轮（不是 Proxy、不是 Delegated），并且 `chainFactsInto` 非空（`Stat`、`ReadDir`、链锁、checkpoint 和顺序都成功，本轮用的是这份快照）才置位。`task_health.chain_owner` 只在 `Fence.RecordChainOwner` 为真时写成 `fence.Node`；目录没读到、Proxy、Delegated 都保持原值。`Reconcile` 在 `ChainOwnerChanged` 时不关闭 `SEGMENT_MISSING`（含对象来源的同一 kind），并把该 key 记为已见，同一轮不再 OPEN。`chain.local` 不完整时本来就不能关。关闭只发生在随后一轮：本节点已是记下的 `chain_owner`（或该列为空）、`chain.local` 完整、这个 key 不再被推导，原因 `EVAL`。其它链 finding 的 `OWNER_CHANGED` 不动。第 6 节 F7 的 catalog 比对、`task_chain` 表、派生 finding 仍是 PR-4 / PR-5。
 
+**目录行是证据，运行器启动不能抹掉它（PR #507 QA P2）。** `SEGMENT_MISSING` 从「目录里有 `LOCAL_ONLY` / `UPLOAD_FAILED` 封存行、目录里没有文件」推导，所以这一行就是「这个段应该存在」的唯一证据。没配上传时，打开文件的保留清理（Start、重启、epoch 提升、接管都会走）只在两种情况下删掉文件已不在的行：文件是这一轮保留按 mtime 删的；或者行按自己的 `sealed_at`（为空则 `created_at`）已经过了本地保留（上一轮删了文件、没来得及删行就退出，#209）。还在本地保留期内、或两个时间都空的行留下，并打一行 `retention: kept catalog row … inside local retention`。所以「关闭只发生在段回来之后」在故障切换、滚动重启和运维 Start 之后仍成立。段一直没回来、直到按保留策略本来也该删的那一天，这一行按保留删掉并记 `RETENTION_REMOVED`，`SEGMENT_MISSING` 随之以 `EVAL` 关闭：过了保留期的段不再是这条链欠下的数据。
+
 0005 第 5 步的「失败则 desired `STOP`」在 PR-4 被本记录修正。0005 正文不在这个设计 PR 里改；PR-4 改代码时在 0005 的失败策略一节加一段指向本记录的修正，避免两份 ADR 对着干。
 
 ## 6. 留到实现 PR 的项
