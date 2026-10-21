@@ -1303,6 +1303,7 @@ func startVerifier(ctx context.Context, cfg config.Config, scheduler *tasks.Sche
 		PassMaxBytes:       cfg.Verify.PassMaxBytes,
 		ObjectRecent:       time.Duration(cfg.Verify.ObjectRecentSec) * time.Second,
 		Objects:            tasks.NewObjectStore(objects),
+		ObjectBucket:       cfg.UploadBucket,
 	}
 	if isClusterMode(cfg) {
 		vc.Allows = func(context.Context, string) (bool, error) { return false, nil }

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a temp data_dir, a fake catalog, and the verifier worker driven pass by pass
-// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked and returns within its own timeout, that a clean second pass does not rewrite .verify.json, that a failed rename leaves no temp and is retried, that a cancelled pass does not mark the task verified and keeps partial progress, that pass_deadline_sec 0 uses every_sec, that an empty scheduler drops stale tasks, that a startup HEAD tells a missing key from auth, a missing bucket, and a network error, and that SealedAt reaches the clock-skew check
+// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked and returns within its own timeout, that a clean second pass does not rewrite .verify.json, that a failed rename leaves no temp and is retried, that a cancelled pass does not mark the task verified and keeps partial progress, that pass_deadline_sec 0 uses every_sec, that an empty scheduler drops stale tasks, that a finished object pass resets the strike streak, that a pass with no tasks does not, that each object-incomplete marker is enough on its own, that stale-temp cleanup unlinks a symlink without touching its target and keeps going after a remove error, that catalog, retention, verify, progress-read, and encode failures are zap warn, that a startup HEAD tells a missing key from auth, a missing bucket, and a network error, and that SealedAt reaches the clock-skew check
 // pos: worker feedback tests for ADR 0009 phase 3 (docs/design/0009-phase3-verifier.md §10)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -939,6 +939,7 @@ func TestVerifier_ObjectIncompleteDegradesThenClears(t *testing.T) {
 	obs := captureZap(t, zapcore.InfoLevel)
 	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
 	dir, id, s, v := uploadedLedger(t, objs)
+	v.cfg.ObjectBucket = "binlogs"
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	for i := 1; i <= 2; i++ {
 		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
@@ -950,7 +951,7 @@ func TestVerifier_ObjectIncompleteDegradesThenClears(t *testing.T) {
 	v.Pass(context.Background(), now.Add(3*time.Minute))
 	h := s.HealthSummary(context.Background())
 	joined := strings.Join(h.Detail, " ")
-	if h.Status != HealthOK || !strings.Contains(joined, "consecutive") || !strings.Contains(joined, "connection refused") {
+	if h.Status != HealthOK || !strings.Contains(joined, "consecutive") || !strings.Contains(joined, "connection refused") || !strings.Contains(joined, "task "+id+" object k bucket binlogs") {
 		t.Fatalf("after 3: %+v", h)
 	}
 	if !sawLevel(obs, "verifier: object pass incomplete", zapcore.WarnLevel) {
@@ -1032,4 +1033,249 @@ func TestHealthSummary_KeepsProbeDetailWhenDegraded(t *testing.T) {
 	if !strings.Contains(strings.Join(h.Detail, "\n"), "NoSuchBucket") {
 		t.Fatalf("detail dropped while degraded: %+v", h)
 	}
+}
+
+// TestVerifier_CompletedPassResetsStreak is S03. Two storage failures, one
+// finished object pass, then one more failure must not set health detail.
+// Clearing the detail without zeroing the streak would make that last
+// failure the third strike.
+func TestVerifier_CompletedPassResetsStreak(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	dir, id, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	body, err := os.ReadFile(filepath.Join(dir, id, "mysql-bin.000003"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.headErr = nil
+	objs.obj["k"] = body
+	v.Pass(context.Background(), now.Add(3*time.Minute))
+	if h := s.HealthSummary(context.Background()); h.Status != HealthOK || len(h.Detail) != 0 {
+		t.Fatalf("finished pass left detail %+v", h)
+	}
+	objs.headErr = errors.New("connection refused")
+	objs.obj = map[string][]byte{}
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	h := s.HealthSummary(context.Background())
+	if h.Status != HealthOK || strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("one failure after a finished pass set detail %+v", h)
+	}
+}
+
+// TestVerifier_EmptyPassKeepsStreak is S05. A pass with zero tasks is not an
+// object pass: it does not reset the streak. Two failures, an empty
+// scheduler, then one failure is the third strike.
+func TestVerifier_EmptyPassKeepsStreak(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, headErr: errors.New("connection refused")}
+	dir, id, s, v := uploadedLedger(t, objs)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 2; i++ {
+		v.Pass(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	s.mu.Lock()
+	task := s.tasks[id]
+	delete(s.tasks, id)
+	s.mu.Unlock()
+	if err := os.RemoveAll(filepath.Join(dir, id)); err != nil {
+		t.Fatal(err)
+	}
+	v.Pass(context.Background(), now.Add(3*time.Minute))
+	if h := s.HealthSummary(context.Background()); strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("empty pass set detail %+v", h)
+	}
+	s.mu.Lock()
+	s.tasks[id] = task
+	s.mu.Unlock()
+	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyLedger(t, dir, id, "mysql-bin.000003")
+	v.Pass(context.Background(), now.Add(4*time.Minute))
+	h := s.HealthSummary(context.Background())
+	if h.Status != HealthOK || !strings.Contains(strings.Join(h.Detail, " "), "consecutive") {
+		t.Fatalf("empty pass reset the streak: %+v", h)
+	}
+}
+
+// TestVerifier_ObjectErrAloneIsIncomplete is S06. ObjectErr with no
+// MethodError coverage row is still an incomplete object pass.
+func TestVerifier_ObjectErrAloneIsIncomplete(t *testing.T) {
+	cause := objectPassCause("1", "binlogs", nil, assurance.Report{ObjectErr: errors.New("Access Denied.")})
+	if !strings.Contains(cause, "Access Denied.") || !strings.Contains(cause, "task 1") || !strings.Contains(cause, "bucket binlogs") {
+		t.Fatalf("ObjectErr alone: %q", cause)
+	}
+}
+
+// TestVerifier_MethodErrorAloneIsIncomplete is S07. A MethodError coverage
+// row with a nil ObjectErr is still an incomplete object pass, and it names
+// the object key.
+func TestVerifier_MethodErrorAloneIsIncomplete(t *testing.T) {
+	rep := assurance.Report{Coverage: map[string]assurance.Coverage{
+		"mysql-bin.000003": {Object: assurance.Check{Method: assurance.MethodError, Reason: "Access Denied."}},
+	}}
+	rows := []assurance.VerifyRow{{Name: "mysql-bin.000003", ObjectKey: "k"}}
+	cause := objectPassCause("1", "binlogs", rows, rep)
+	if !strings.Contains(cause, "Access Denied.") || !strings.Contains(cause, "object k") || !strings.Contains(cause, "bucket binlogs") {
+		t.Fatalf("MethodError alone: %q", cause)
+	}
+}
+
+// TestVerifier_SweepDoesNotFollowSymlink is C05. The data-dir temp is a
+// symlink; cleanup unlinks it and leaves the target outside the data dir.
+func TestVerifier_SweepDoesNotFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "keep")
+	if err := os.WriteFile(target, []byte("safe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, ".verify-link.tmp")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	NewVerifier(NewScheduler(WithDataDir(dir)), VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("symlink remains: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "safe" {
+		t.Fatalf("target %q err %v", got, err)
+	}
+}
+
+func sweepFaultDir(t *testing.T) (string, *Verifier) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{".verify-a.tmp", ".verify-b.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := []byte(`{"tasks":{"kept":{"last_verified":{"mysql-bin.000001":"2026-01-01T00:00:00Z"}}}}`)
+	if err := os.WriteFile(filepath.Join(dir, VerifyStateFileName), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := verifyFiles.remove
+	t.Cleanup(func() { verifyFiles.remove = prev })
+	verifyFiles.remove = func(name string) error {
+		if filepath.Base(name) == ".verify-a.tmp" {
+			return errors.New("remove failed")
+		}
+		return os.Remove(name)
+	}
+	v := NewVerifier(NewScheduler(WithDataDir(dir)), VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+	return dir, v
+}
+
+// TestVerifier_SweepRemoveErrorStillLoads is C06. A remove error does not
+// skip loading .verify.json.
+func TestVerifier_SweepRemoveErrorStillLoads(t *testing.T) {
+	_, v := sweepFaultDir(t)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if _, ok := v.state.Tasks["kept"]; !ok {
+		t.Fatalf("progress not loaded: %+v", v.state.Tasks)
+	}
+}
+
+// TestVerifier_SweepRemoveErrorContinues is C07. One remove error does not
+// leave the later temp in place.
+func TestVerifier_SweepRemoveErrorContinues(t *testing.T) {
+	dir, _ := sweepFaultDir(t)
+	if _, err := os.Stat(filepath.Join(dir, ".verify-b.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("later temp remains: %v", err)
+	}
+}
+
+// TestVerifier_SweepRemoveErrorLogsWarn is C08. The remove error is a zap warn.
+func TestVerifier_SweepRemoveErrorLogsWarn(t *testing.T) {
+	obs := captureZap(t, zapcore.WarnLevel)
+	sweepFaultDir(t)
+	if !sawLevel(obs, "verifier: remove stale temp", zapcore.WarnLevel) {
+		t.Fatal("remove error was not logged at warn")
+	}
+}
+
+// TestVerifier_ErrorPathsLogWarn: a level=warn filter sees a corrupt
+// progress file, a directory at that name, a catalog-list error, a
+// retention-marker error, a per-task Verify error, and an encode error.
+func TestVerifier_ErrorPathsLogWarn(t *testing.T) {
+	t.Run("corrupt", func(t *testing.T) {
+		obs := captureZap(t, zapcore.WarnLevel)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, VerifyStateFileName), []byte("{"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		NewVerifier(NewScheduler(WithDataDir(dir)), VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+		if !sawLevel(obs, "is not progress", zapcore.WarnLevel) {
+			t.Fatal("corrupt progress was not logged at warn")
+		}
+	})
+	t.Run("directory", func(t *testing.T) {
+		obs := captureZap(t, zapcore.WarnLevel)
+		dir := t.TempDir()
+		path := filepath.Join(dir, VerifyStateFileName)
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "x"), []byte("y"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		NewVerifier(NewScheduler(WithDataDir(dir)), VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+		if !sawLevel(obs, "verifier: read ", zapcore.WarnLevel) {
+			t.Fatal("directory progress was not logged at warn")
+		}
+	})
+	t.Run("list", func(t *testing.T) {
+		obs := captureZap(t, zapcore.WarnLevel)
+		_, _, files, _, v := newTestVerifier(t, nil)
+		files.listErr = errors.New("catalog down")
+		v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+		if !sawLevel(obs, "verifier: list catalog", zapcore.WarnLevel) {
+			t.Fatal("catalog list was not logged at warn")
+		}
+	})
+	t.Run("markers", func(t *testing.T) {
+		obs := captureZap(t, zapcore.WarnLevel)
+		_, _, files, _, v := newTestVerifier(t, nil)
+		files.markerErr = errors.New("markers down")
+		v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+		if !sawLevel(obs, "verifier: retention markers", zapcore.WarnLevel) {
+			t.Fatal("retention markers were not logged at warn")
+		}
+	})
+	t.Run("verify", func(t *testing.T) {
+		obs := captureZap(t, zapcore.WarnLevel)
+		_, _, _, _, v := newTestVerifier(t, nil)
+		v.cfg.RecentSharePercent = 101
+		v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+		if !sawLevel(obs, "verifier: task=", zapcore.WarnLevel) {
+			t.Fatal("verify error was not logged at warn")
+		}
+	})
+	t.Run("encode", func(t *testing.T) {
+		obs := captureZap(t, zapcore.WarnLevel)
+		dir := t.TempDir()
+		v := NewVerifier(NewScheduler(WithDataDir(dir)), VerifierConfig{DataDir: dir, BudgetBytesPerSec: -1})
+		prev := verifyEncode
+		t.Cleanup(func() { verifyEncode = prev })
+		verifyEncode = func(any, string, string) ([]byte, error) {
+			return nil, errors.New("encode failed")
+		}
+		v.mu.Lock()
+		v.dirty = true
+		v.mu.Unlock()
+		v.save()
+		v.mu.Lock()
+		dirty := v.dirty
+		v.mu.Unlock()
+		if !dirty {
+			t.Fatal("encode failure cleared dirty")
+		}
+		if !sawLevel(obs, "verifier: encode progress", zapcore.WarnLevel) {
+			t.Fatal("encode failure was not logged at warn")
+		}
+	})
 }

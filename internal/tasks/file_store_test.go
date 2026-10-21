@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, and execution coordination
+// output: task state transitions, scheduling decisions, and execution coordination. The fake catalog can fail ListBinlogFiles and ListRetentionMarkers
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -12,7 +12,9 @@ import (
 )
 
 type fakeFileStore struct {
-	files map[string][]BinlogFile
+	files     map[string][]BinlogFile
+	listErr   error
+	markerErr error
 }
 
 // newFakeFileStore 实现对应功能逻辑。
@@ -36,6 +38,9 @@ func (f *fakeFileStore) UpsertBinlogFile(_ context.Context, meta BinlogFile) err
 
 // ListBinlogFiles 实现对应功能逻辑。
 func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit int) ([]BinlogFile, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	items := f.files[taskID]
 	if limit <= 0 || limit >= len(items) {
 		out := make([]BinlogFile, len(items))
@@ -45,6 +50,13 @@ func (f *fakeFileStore) ListBinlogFiles(_ context.Context, taskID string, limit 
 	out := make([]BinlogFile, limit)
 	copy(out, items[len(items)-limit:])
 	return out, nil
+}
+
+func (f *fakeFileStore) ListRetentionMarkers(context.Context, string) (map[string]time.Time, error) {
+	if f.markerErr != nil {
+		return nil, f.markerErr
+	}
+	return nil, nil
 }
 
 // TestScheduler_ListFilesFromStore 验证相关行为。
