@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API, CONFIRM) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
 // output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
-// note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); cluster mode drops I6_MISSING_LOCAL; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
+// note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); ADR 0011 PR-3 keeps I6_MISSING_LOCAL in cluster mode and sets Fence.ChainVerified only when this holder pass's chainFactsInto read the directory; a task directory that exists but cannot be read is logged once when it starts and once when it ends (noteDirRead) and listed on HealthSummary.Detail without changing status; a pass that read the directory sets Facts.DirectoryNode (cluster chain_owner, standalone node) so I6_MISSING_LOCAL names it; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
 // note §29: every pass sets Facts.UnownedAfter to min(sweep, no_progress_after) so a desired-RUN task with no runner opens TASK_NO_PROGRESS within one sweep
@@ -203,6 +203,10 @@ type Evaluator struct {
 	fingerprints map[string]string
 	rehash       map[string]map[string]rehashResult
 	chainCache   map[string]chainCacheEntry
+	// dirUnreadable is the last read error logged per task directory, so an
+	// unreadable directory is logged once when it starts and once when it ends.
+	// HealthSummary copies it into Detail and does not change Status.
+	dirUnreadable map[string]dirReadProblem
 	// confirmed: per task, the Confirm-kind keys the previous pass derived.
 	confirmed map[string]map[health.Key]bool
 	signals   map[string]map[health.SignalKey]*signalEntry
@@ -762,6 +766,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		if chain := e.chainFacts(task, now); chain != nil {
 			facts.Chain = chain
 			facts.Complete[health.ScopeChainLocal] = true
+			e.noteDirectoryRead(facts, fence)
 		}
 		facts.Produced[health.ScopeChainLocal] = true
 	case proxyLike:
@@ -771,14 +776,22 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		if chain := e.chainFacts(task, now); chain != nil {
 			facts.Chain = chain
 			facts.Complete[health.ScopeChainLocal] = true
+			e.noteDirectoryRead(facts, fence)
 		}
 		facts.Produced = map[health.Scope]bool{health.ScopeChainLocal: true}
 	case isCluster:
 		facts.Complete[health.ScopeChainLocal] = true // _cluster has no chain
 	default:
+		// ADR 0011 PR-3: ChainVerified only after this holder pass read the directory.
 		if chain := e.chainFactsInto(task, now, facts); chain != nil {
 			facts.Chain = chain
 			facts.Complete[health.ScopeChainLocal] = true
+			if fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {
+				fence.ChainVerified = true
+			}
+		}
+		if facts.Chain != nil {
+			e.noteDirectoryRead(facts, fence)
 		}
 		e.noteOwnerChanged(ctx, fence, facts)
 	}
@@ -1132,11 +1145,17 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		return nil
 	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("%s is not a directory", dir)
+		}
+		e.noteDirRead(task.ID, dir, err)
 		return nil
 	}
 	if _, err := os.ReadDir(dir); err != nil {
+		e.noteDirRead(task.ID, dir, err)
 		return nil
 	}
+	e.noteDirRead(task.ID, dir, nil)
 	// §27: checkpoint, fingerprint and order are one snapshot with rotate.
 	// The lock does not cover CheckBody (that reads every file).
 	// §27.8 R1: never wait on a rotate stuck inside the lock; this pass
@@ -1212,9 +1231,6 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	violations = append(violations, assurance.ChainOf(in).CheckCheckpoint()...)
 	out := &health.ChainFacts{}
 	for _, v := range violations {
-		if e.cfg.Cluster && v.Kind == assurance.I6MissingLocal {
-			continue // §20.1: the owner judges its own disk (P2-6 delegation)
-		}
 		if objectKinds[v.Kind] && anyIn(v.Segments, obj.unjudged) {
 			continue // §21.3: uploaded after the listing it would be judged by
 		}
@@ -1252,6 +1268,75 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 // none). The read is bounded by the internal read timeout because it runs
 // under HoldChain (§27.8 R2). ok is false when the read failed: I5 is then
 // not judged, so a meta error cannot close a real CHECKPOINT_AHEAD.
+// dirReadProblem is one task directory that exists but cannot be read.
+type dirReadProblem struct {
+	dir string
+	msg string
+}
+
+// noteDirectoryRead records the node that read the task directory this pass.
+// An empty node adds nothing, so a pass with no node id leaves details unchanged.
+// Cluster names that node chain_owner; standalone names it node.
+func (e *Evaluator) noteDirectoryRead(facts *health.Facts, fence health.Fence) {
+	if facts == nil || fence.Node == "" {
+		return
+	}
+	facts.DirectoryNode = fence.Node
+	facts.NameChainOwner = fence.Mode == health.FenceCluster
+}
+
+// noteDirRead logs when a task directory that exists cannot be read, and
+// when it can be read again. A missing directory is normal on a node that
+// does not hold the task and is not logged. A path that exists but is not
+// a directory is the same as unreadable. While it is unreadable chain.local
+// is incomplete: SEGMENT_MISSING neither opens nor closes (ADR 0011 PR-3).
+// The same text is copied onto HealthSummary.Detail.
+func (e *Evaluator) noteDirRead(taskID, dir string, err error) {
+	msg := ""
+	if err != nil && !os.IsNotExist(err) {
+		msg = err.Error()
+	}
+	e.mu.Lock()
+	prev, had := e.dirUnreadable[taskID]
+	switch {
+	case msg != "" && prev.msg != msg:
+		if e.dirUnreadable == nil {
+			e.dirUnreadable = map[string]dirReadProblem{}
+		}
+		e.dirUnreadable[taskID] = dirReadProblem{dir: dir, msg: msg}
+	case msg == "" && had:
+		delete(e.dirUnreadable, taskID)
+	default:
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
+	if msg != "" {
+		log.Printf("health evaluator: task %s directory %s is unreadable, chain.local is incomplete until it is: %s", taskID, dir, msg)
+		return
+	}
+	log.Printf("health evaluator: task %s directory %s is readable again", taskID, dir)
+}
+
+// directoryUnreadableLines is the health detail for task directories that
+// exist but cannot be read. It does not change health status.
+func (e *Evaluator) directoryUnreadableLines() []string {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.dirUnreadable) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(e.dirUnreadable))
+	for id, p := range e.dirUnreadable {
+		out = append(out, fmt.Sprintf("task %s directory %s is unreadable, chain.local is incomplete until it is: %s", id, p.dir, p.msg))
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (e *Evaluator) assuranceCheckpoint(task Task) (assurance.Checkpoint, bool) {
 	if e == nil || e.s == nil {
 		return assurance.Checkpoint{}, true
