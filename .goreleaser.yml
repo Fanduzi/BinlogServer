@@ -35,6 +35,8 @@ builds:
     goarch:
       - amd64
       - arm64
+    ldflags:
+      - -w
 
 archives:
   - id: release-archive
@@ -55,6 +57,7 @@ archives:
       - migrations/*.sql
       - scripts/adopt-leftovers.sh
       - docs/security.md
+      - docs/releases/*
       - docs/releases/**/*
       - docs/guide/*.md
       - docs/guide/**/*
