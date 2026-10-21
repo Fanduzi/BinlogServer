@@ -20,7 +20,7 @@ builds:
       - arm64
     ldflags:
       - >-
-        -s -w
+        -w
         -X binlog_server/cmd/binlog-server/cmd.buildVersion={{ .Version }}
         -X binlog_server/cmd/binlog-server/cmd.buildCommit={{ .FullCommit }}
         -X binlog_server/cmd/binlog-server/cmd.buildDate={{ .Date }}
