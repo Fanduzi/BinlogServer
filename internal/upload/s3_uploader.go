@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key, and deletion of one stored key
+// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe, and deletion of one stored key
 // pos: outbound storage adapter for sealed binlog upload, checksum, download, and retention delete
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -178,6 +178,25 @@ func sealedETag(localPath string, partSize int64) (string, error) {
 	return hex.EncodeToString(sum[:]) + "-" + strconv.Itoa(parts), nil
 }
 
+// ProbeStorage HEADs the bucket. A missing bucket, an auth failure, and a
+// network error are returned. A bucket that answers is success, including
+// when the sentinel object key is absent. Startup uses this so a missing
+// bucket is not mistaken for a missing key: an object HEAD with an empty
+// body is reported as NoSuchKey.
+func (u *S3Uploader) ProbeStorage(ctx context.Context) error {
+	if u == nil || u.client == nil {
+		return fmt.Errorf("object storage is not configured")
+	}
+	exists, err := u.client.BucketExists(ctx, u.bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("NoSuchBucket")
+	}
+	return nil
+}
+
 // HeadObject reports the size of one stored object. A missing object is os.ErrNotExist.
 func (u *S3Uploader) HeadObject(ctx context.Context, objectKey string) (int64, error) {
 	if u == nil || u.client == nil {
@@ -250,5 +269,10 @@ func (u *S3Uploader) DeleteObject(ctx context.Context, objectKey string) error {
 
 func objectMissing(err error) bool {
 	resp := minio.ToErrorResponse(err)
+	// A missing bucket is often 404 too. Leaving it as ErrNotExist would
+	// make the startup probe, and a later HEAD, look like a missing key.
+	if resp.Code == "NoSuchBucket" {
+		return false
+	}
 	return resp.Code == "NoSuchKey" || resp.StatusCode == http.StatusNotFound
 }

@@ -1,7 +1,7 @@
 //go:build ignore
 
 // Package main replays the verifier review mutants against the tests.
-// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/meta/mysql_store.go) and the mutant table in this file
+// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/meta/mysql_store.go) and the mutant table in this file
 // output: a kill table on stdout; exit status 1 when a mutant that is not marked equivalent survives
 // pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill.go [id ...]
 // note: if this file changes, update this header and module README.md.
@@ -32,6 +32,7 @@ type mutant struct {
 const (
 	verify = "internal/assurance/verify.go"
 	upload = "internal/tasks/sealed_upload.go"
+	worker = "internal/tasks/verifier.go"
 	store  = "internal/meta/mysql_store.go"
 )
 
@@ -40,6 +41,7 @@ const (
 var packages = map[string][]string{
 	verify: {"./internal/assurance/"},
 	upload: {"-run", "TestApplySealedUpload", "./internal/tasks/"},
+	worker: {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress", "./internal/tasks/"},
 	store:  {"-run", "TestMySQLTaskStore_ListFailedUploadBinlogFiles", "./internal/meta/"},
 }
 
@@ -449,6 +451,24 @@ var mutants = []mutant{
 		old: "\tif !row.UploadedAt.After(p.now) && row.UploadedAt.After(changed) {", new: "\tif !ClockSkewed(row.UploadedAt, p.now) && row.UploadedAt.After(changed) {"},
 	{id: "H25", desc: "LOCAL_UNREADABLE closes on any found STAT", file: verify,
 		old: "cov.Local.Method == MethodStat && cov.Local.Found && reported(rep, KindVerifyFailed, f.Subject)", new: "cov.Local.Method == MethodStat && cov.Local.Found"},
+	// Worker progress (QA on 10408723). V08–V16 already name verify.go mutants.
+	{id: "WV08", desc: "V08: dirty flag is never cleared, so .verify.json is rewritten every pass", file: worker,
+		old: "\tv.mu.Lock()\n\tv.dirty = false\n\tv.mu.Unlock()\n", new: ""},
+	{id: "WV14", desc: "V14: a failed write clears dirty, so it is never retried", file: worker,
+		old: "\tif err := writeAtomic(path, raw); err != nil {\n\t\tlog.Printf(\"WARN verifier: write %s: %v\", path, err)\n\t\treturn\n\t}\n",
+		new: "\tif err := writeAtomic(path, raw); err != nil {\n\t\tlog.Printf(\"WARN verifier: write %s: %v\", path, err)\n\t\tv.mu.Lock()\n\t\tv.dirty = false\n\t\tv.mu.Unlock()\n\t\treturn\n\t}\n"},
+	{id: "WV11", desc: "V11: a cancelled pass still marks the task verified", file: worker,
+		old: "\tif !errors.Is(err, context.Canceled) {\n\t\tv.note(taskID, now, rep)\n\t}\n",
+		new: "\tv.note(taskID, now, rep)\n"},
+	{id: "WV16", desc: "V16: a cancelled Verify error drops that task's partial progress", file: worker,
+		old: "\tif err != nil && !errors.Is(err, context.Canceled) {\n",
+		new: "\tif err != nil {\n"},
+	{id: "WV12", desc: "V12: no default deadline when pass_deadline_sec=0", file: worker,
+		old: "\tdeadline := v.cfg.PassDeadline\n\tif deadline == 0 {\n\t\tdeadline = v.cfg.Every\n\t}\n",
+		new: "\tdeadline := v.cfg.PassDeadline\n"},
+	{id: "WV15", desc: "V15: an empty scheduler leaves stale tasks in .verify.json", file: worker,
+		old: "\tif len(tasks) == 0 {\n\t\tv.pruneAbsentTasks(live)\n\t\tv.saveIfDirty()\n\t\tv.logPass(started, 0, 0, 0, 0, false)\n\t\treturn\n\t}\n",
+		new: "\tif len(tasks) == 0 {\n\t\treturn\n\t}\n"},
 }
 
 func main() {

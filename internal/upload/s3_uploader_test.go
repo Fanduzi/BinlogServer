@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, and deletion of one stored key including a missing object
+// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, a bucket HEAD that separates a missing bucket, an auth error, and a dead endpoint, and deletion of one stored key including a missing object
 // pos: outbound storage adapter layer for sealed binlog upload and download
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -480,6 +480,58 @@ func TestDeleteObject_RemovesKey(t *testing.T) {
 	}
 	if requestPath.Load() != "/binlog/prefix/cluster/mysql-bin.000001" {
 		t.Fatalf("path = %v", requestPath.Load())
+	}
+}
+
+func TestObjectMissing_IgnoresNoSuchBucket(t *testing.T) {
+	if objectMissing(minio.ErrorResponse{Code: "NoSuchBucket", StatusCode: http.StatusNotFound}) {
+		t.Fatal("NoSuchBucket counted as a missing object")
+	}
+	if !objectMissing(minio.ErrorResponse{Code: "NoSuchKey", StatusCode: http.StatusNotFound}) {
+		t.Fatal("NoSuchKey was not a missing object")
+	}
+}
+
+func TestProbeStorage_ClassifiesBucketHEAD(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{name: "ok", status: http.StatusOK},
+		{name: "missing-bucket", status: http.StatusNotFound, want: "NoSuchBucket"},
+		{name: "auth", status: http.StatusForbidden, want: "Access Denied"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+			uploader := newTestUploader(t, server.URL, false)
+			err := uploader.ProbeStorage(context.Background())
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("probe %v, want %s", err, tc.want)
+			}
+		})
+	}
+
+	uploader, err := NewS3Uploader(S3Config{
+		Endpoint: "127.0.0.1:1", Bucket: "binlog", AccessKey: "key", SecretKey: "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := uploader.ProbeStorage(ctx); err == nil {
+		t.Fatal("dead endpoint probe succeeded")
 	}
 }
 

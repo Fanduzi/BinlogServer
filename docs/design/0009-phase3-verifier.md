@@ -279,13 +279,13 @@ Report.Coverage[段名] = {
 
 ## 9. 配置
 
-键在 `internal/config` 的加载器里，读者是 `internal/app` 的 `startVerifier`。负数在加载时拒绝启动。`verify.recent_share_percent` 为 0 或 1–100 以外时拒绝启动：加载器调用 `assurance.CheckRecentSharePercent`，并额外拒绝 0。`Verify` 自己把 0 当默认，只拒绝 1–100 以外的非零值。`verify.budget_bytes_per_sec` 显式 0 被接受，工人把它当成下面的默认 4 MiB/s，不是不限速。`verify.pass_deadline_sec` 为 0 时工人用 `verify.every_sec`。默认值如下。
+键在 `internal/config` 的加载器里，读者是 `internal/app` 的 `startVerifier`。负数在加载时拒绝启动。`verify.recent_share_percent` 为 0 或 1–100 以外时拒绝启动：加载器调用 `assurance.CheckRecentSharePercent`，并额外拒绝 0。`Verify` 自己把 0 当默认，只拒绝 1–100 以外的非零值。`verify.budget_bytes_per_sec` 显式 0 被接受，工人把它当成下面的默认 4 MiB/s，不是不限速。`verify.pass_deadline_sec` 为 0 时工人用 `verify.every_sec`。配了对象存储时，启动对桶做一次 HEAD：桶在算通；鉴权、网络、桶不在只打 WARN，写在 `/api/health` 的 `detail`，不改变 `status`，也不拒绝启动（对象存储可以暂时不可用，本地捕获照常跑）。探针只做一次，detail 留到进程退出。对象 HEAD 分不清「桶不在」和「key 不在」（空的 404 会被报成 NoSuchKey），所以探针打在桶上。默认值如下。
 
 | 键 | 默认 | 理由 |
 |---|---|---|
 | `verify.every_sec` | 86400 | ADR 的 24 小时 |
 | `verify.budget_bytes_per_sec` | 4194304 | 第 7 节。0 在工人里表示用这个默认，不表示不限速；测试里的「不限」是直接传空预算，不是配置 |
-| `verify.rotation_periods` | 20 | 轮换长度，按周期数（决定 5）。最坏间隔 = 这个数 × `verify.every_sec`，不取整 |
+| `verify.rotation_periods` | 20 | 轮换长度，按周期数（决定 5）。最坏间隔 = 这个数 × `verify.every_sec`，不取整。同尺寸的对象损坏（`OBJECT_CORRUPT`）要等该段的轮换槽才会被哈希，最坏检测延迟就是这个乘积 |
 | `verify.recent_share_percent` | 25 | 最近档每轮最多花这一轮容量 `C` 的百分之几（第 5.2、5.3 节），再封顶在 `C − F − S`。加载时 1–100 以外的值（包括 0）拒绝启动，用 `assurance.CheckRecentSharePercent` 加上「不能为 0」；`Verify` 自己对 1–100 以外的非零值返回错误，0 当默认 |
 | `verify.pass_deadline_sec` | 等于 `verify.every_sec` | 一轮的截止时间，到了剩下的记 `SKIPPED`、正常结束（第 5.2 节）。取消只在进程退出或失去主人时发生 |
 | `verify.pass_max_bytes` | 0 | 一轮最多读多少字节（`Options.PassBytes`），0 不设上限 |

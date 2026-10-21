@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a temp data_dir, a fake catalog, and the verifier worker driven pass by pass
-// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked, and that SealedAt reaches the clock-skew check
+// output: proof that a forced segment is read once per period, that LastVerified stops the next read, that LOCAL_UNREADABLE escalates and stays CRITICAL when that severity is read back, that both byte caps stop a read, that an Allows error skips the task, that .verify.json is saved and loaded, that an object subject round-trips through the file store and closes, that gone segments and tasks leave the progress file, that a deadline keeps the tasks already checked and returns within its own timeout, that a clean second pass does not rewrite .verify.json, that a failed rename leaves no temp and is retried, that a cancelled pass does not mark the task verified and keeps partial progress, that pass_deadline_sec 0 uses every_sec, that an empty scheduler drops stale tasks, that a startup HEAD tells a missing key from auth, a missing bucket, and a network error, and that SealedAt reaches the clock-skew check
 // pos: worker feedback tests for ADR 0009 phase 3 (docs/design/0009-phase3-verifier.md §10)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -204,11 +206,24 @@ func verifierCfg(dir string, extra VerifierConfig) VerifierConfig {
 }
 
 type scriptObjects struct {
-	obj       map[string][]byte
-	blockOpen bool
+	obj         map[string][]byte
+	blockOpen   bool
+	blockHead   bool
+	headStarted chan struct{}
 }
 
-func (s *scriptObjects) Head(_ context.Context, key string) (int64, error) {
+func (s *scriptObjects) Head(ctx context.Context, key string) (int64, error) {
+	if s.blockHead {
+		if s.headStarted != nil {
+			select {
+			case <-s.headStarted:
+			default:
+				close(s.headStarted)
+			}
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
 	b, ok := s.obj[key]
 	if !ok {
 		return 0, os.ErrNotExist
@@ -515,7 +530,7 @@ func TestVerifier_DeadlinePersistsPartialProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	putSealed(files, second.ID, "mysql-bin.000009", dir, BinlogFile{UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
-	v.Pass(context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	passWithin(t, v, context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
 	st := readVerifyState(t, dir)
 	if _, ok := st.Tasks[id]; !ok {
 		t.Fatalf("partial pass did not save the task it checked: %+v", st.Tasks)
@@ -525,5 +540,258 @@ func TestVerifier_DeadlinePersistsPartialProgress(t *testing.T) {
 	}
 	if len(s.openBookFindings(second.ID)) != 0 {
 		t.Fatalf("later task was verified: %+v", s.openBookFindings(second.ID))
+	}
+}
+
+// passWithin fails the test when Pass does not return. A missing deadline
+// used to block until go test's own timeout.
+func passWithin(t *testing.T, v *Verifier, ctx context.Context, now time.Time) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		v.Pass(ctx, now)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pass did not return")
+	}
+}
+
+func fileInode(t *testing.T, path string) uint64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("file stat has no inode")
+	}
+	return st.Ino
+}
+
+func verifyTemps(dir string) ([]string, error) {
+	return filepath.Glob(filepath.Join(dir, ".verify-*.tmp"))
+}
+
+// TestVerifier_CleanPassDoesNotRewriteProgress is WV08. A second pass that
+// checks nothing must not rewrite .verify.json.
+func TestVerifier_CleanPassDoesNotRewriteProgress(t *testing.T) {
+	dir, id, files, _, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	path := filepath.Join(dir, VerifyStateFileName)
+	ino := fileInode(t, path)
+	v.cfg.Allows = func(context.Context, string) (bool, error) { return false, nil }
+	v.Pass(context.Background(), now.Add(time.Hour))
+	if got := fileInode(t, path); got != ino {
+		t.Fatalf("clean pass rewrote .verify.json (inode %d -> %d)", ino, got)
+	}
+}
+
+// TestVerifier_RenameFailureRetriesAndDropsTemp is the leaked temp and WV14.
+// A non-empty directory at .verify.json makes rename fail. The temp is
+// removed, dirty stays set, and the next pass writes once the directory is gone.
+func TestVerifier_RenameFailureRetriesAndDropsTemp(t *testing.T) {
+	dir, id, files, _, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	blocked := filepath.Join(dir, VerifyStateFileName)
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "keep"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	temps, err := verifyTemps(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("rename failure left %v", temps)
+	}
+	if err := os.RemoveAll(blocked); err != nil {
+		t.Fatal(err)
+	}
+	v.cfg.Allows = func(context.Context, string) (bool, error) { return false, nil }
+	v.Pass(context.Background(), now.Add(time.Hour))
+	st := readVerifyState(t, dir)
+	if _, ok := st.Tasks[id].LastVerified[name]; !ok {
+		t.Fatalf("failed write was not retried: %+v", st.Tasks)
+	}
+	temps, err = verifyTemps(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("retry left %v", temps)
+	}
+}
+
+func uploadedLedger(t *testing.T, objs *scriptObjects) (dir, id string, s *Scheduler, v *Verifier) {
+	t.Helper()
+	var files *fakeFileStore
+	dir, id, files, s, v = newTestVerifier(t, objs)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	v.cfg.Objects = objs
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{
+		SizeBytes: size, UploadState: "UPLOADED", ObjectKey: "k", State: "SEALED",
+		SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	return dir, id, s, v
+}
+
+// TestVerifier_CancelDoesNotMarkVerified is WV11. Cancelling during HEAD
+// must not set last_verified.
+func TestVerifier_CancelDoesNotMarkVerified(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, blockHead: true, headStarted: make(chan struct{})}
+	_, id, s, v := uploadedLedger(t, objs)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		v.Pass(ctx, time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+		close(done)
+	}()
+	select {
+	case <-objs.headStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HEAD did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled pass did not return")
+	}
+	if m := s.VerifyMetrics().Tasks[id]; m.HaveLastVerified {
+		t.Fatal("cancelled pass marked the task verified")
+	}
+}
+
+// TestVerifier_CancelKeepsPartialProgress is WV16. The same cancel still
+// writes the task it had already applied.
+func TestVerifier_CancelKeepsPartialProgress(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, blockHead: true, headStarted: make(chan struct{})}
+	dir, id, _, v := uploadedLedger(t, objs)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		v.Pass(ctx, time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+		close(done)
+	}()
+	select {
+	case <-objs.headStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HEAD did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled pass did not return")
+	}
+	st := readVerifyState(t, dir)
+	if _, ok := st.Tasks[id]; !ok {
+		t.Fatalf("cancelled pass dropped the task: %+v", st.Tasks)
+	}
+}
+
+// TestVerifier_ZeroDeadlineUsesEvery is WV12. pass_deadline_sec 0 uses every_sec.
+func TestVerifier_ZeroDeadlineUsesEvery(t *testing.T) {
+	objs := &scriptObjects{obj: map[string][]byte{}, blockOpen: true}
+	dir, id, files, s, v := newTestVerifier(t, objs)
+	v.cfg = verifierCfg(dir, VerifierConfig{Every: 200 * time.Millisecond})
+	v.cfg.Objects = objs
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	objs.obj["k"] = bytes.Repeat([]byte{7}, int(size))
+	putSealed(files, id, name, dir, BinlogFile{
+		SizeBytes: size, UploadState: "UPLOADED", ObjectKey: "k", State: "SEALED",
+		SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	second, err := s.CreateTask("second", "second-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, second.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	putSealed(files, second.ID, "mysql-bin.000009", dir, BinlogFile{UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	passWithin(t, v, context.Background(), time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	if _, ok := readVerifyState(t, dir).Tasks[second.ID]; ok {
+		t.Fatal("a zero pass deadline still checked the later task")
+	}
+}
+
+// TestVerifier_EmptySchedulerDropsStaleTasks is WV15.
+func TestVerifier_EmptySchedulerDropsStaleTasks(t *testing.T) {
+	dir, id, files, s, v := newTestVerifier(t, nil)
+	v.cfg = verifierCfg(dir, VerifierConfig{})
+	name := "mysql-bin.000003"
+	size := copyLedger(t, dir, id, name)
+	putSealed(files, id, name, dir, BinlogFile{SizeBytes: size, UploadState: "PENDING", State: "SEALED", SealedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	v.Pass(context.Background(), now)
+	s.mu.Lock()
+	delete(s.tasks, id)
+	s.mu.Unlock()
+	if err := os.RemoveAll(filepath.Join(dir, id)); err != nil {
+		t.Fatal(err)
+	}
+	v.Pass(context.Background(), now.Add(time.Hour))
+	if _, ok := readVerifyState(t, dir).Tasks[id]; ok {
+		t.Fatal("empty scheduler left the task in .verify.json")
+	}
+}
+
+type probeHead struct{ err error }
+
+func (p probeHead) HeadObject(context.Context, string) (int64, error) { return 0, p.err }
+func (p probeHead) OpenObject(context.Context, string) (io.ReadCloser, int64, error) {
+	return io.NopCloser(bytes.NewReader(nil)), 0, nil
+}
+
+func TestProbeObjectHead_ClassifiesErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		fail bool
+	}{
+		{name: "auth", err: errors.New("AccessDenied"), fail: true},
+		{name: "missing-bucket", err: errors.New("NoSuchBucket"), fail: true},
+		{name: "network", err: errors.New("connection refused"), fail: true},
+		{name: "missing-key", err: os.ErrNotExist, fail: false},
+		{name: "present", err: nil, fail: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ProbeObjectHead(context.Background(), probeHead{err: tc.err})
+			if tc.fail {
+				if err == nil || !strings.Contains(err.Error(), tc.err.Error()) {
+					t.Fatalf("probe err %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if err := ProbeObjectHead(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "HEAD") {
+		t.Fatalf("nil client: %v", err)
 	}
 }

@@ -292,6 +292,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	uploadConfigured := a.cfg.UploadEndpoint != "" && a.cfg.UploadBucket != "" && a.cfg.UploadAccessKey != "" && a.cfg.UploadSecretKey != ""
 	var verifyObjects tasks.ObjectHeadOpener
+	var probeDetail string
 	if uploadConfigured {
 		// upload 是可选能力；启用后 runner 会上传 sealed binlog file。
 		uploader, err := newUploadClientForRun(upload.S3Config{
@@ -305,11 +306,12 @@ func (a *App) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		opener, ok := uploader.(tasks.ObjectHeadOpener)
-		if !ok {
-			return fmt.Errorf("upload is configured but the object client cannot HEAD and GET objects")
+		if opener, ok := uploader.(tasks.ObjectHeadOpener); ok {
+			verifyObjects = opener
+			probeDetail = objectProbeDetail(runCtx, uploader, opener)
+		} else {
+			probeDetail = objectProbeDetail(runCtx, uploader, nil)
 		}
-		verifyObjects = opener
 		opts = append(opts, tasks.WithFileUploader(uploader))
 		// WithUploader is the one post-seal upload caller (ADR 0002). It writes
 		// through the runner's file metadata store and reports the upload
@@ -342,6 +344,9 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 	scheduler := tasks.NewScheduler(opts...)
+	if probeDetail != "" {
+		scheduler.SetVerifyStorageDetail(probeDetail)
+	}
 	// Task runners belong to this run: runCtx ending cancels them, and the
 	// shutdown below joins them before Run returns.
 	scheduler.SetRunContext(runCtx)
@@ -1227,6 +1232,35 @@ func isNonNilInterface(v any) bool {
 	default:
 		return true
 	}
+}
+
+// objectProbeTimeout bounds the startup HEAD so a dead endpoint does not hold listen.
+const objectProbeTimeout = 2 * time.Second
+
+// objectProbeDetail HEADs the bucket when the client can, otherwise a sentinel
+// key. Empty means storage answered. A failure is logged at WARN and returned
+// for /api/health detail. Startup continues either way: local capture must run
+// while storage is down. The detail is not cleared if storage later recovers.
+func objectProbeDetail(ctx context.Context, uploader uploadClient, opener tasks.ObjectHeadOpener) string {
+	pctx, cancel := context.WithTimeout(ctx, objectProbeTimeout)
+	defer cancel()
+	var err error
+	if p, ok := uploader.(interface{ ProbeStorage(context.Context) error }); ok {
+		err = p.ProbeStorage(pctx)
+	} else if opener == nil {
+		log.Printf("WARN verifier: object client cannot HEAD and GET; object checks stay off")
+		return "object client cannot HEAD and GET"
+	} else {
+		err = tasks.ProbeObjectHead(pctx, opener)
+	}
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("timed out after %s", objectProbeTimeout)
+	}
+	log.Printf("WARN verifier: object storage probe: %v", err)
+	return "object storage probe: " + err.Error()
 }
 
 // startVerifier runs the phase 3 verifier on the background group. Standalone
