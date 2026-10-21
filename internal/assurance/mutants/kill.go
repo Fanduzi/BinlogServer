@@ -1,7 +1,7 @@
 //go:build ignore
 
 // Package main replays the verifier review mutants against the tests.
-// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go, internal/tasks/evaluator.go, internal/health/reconcile.go, internal/health/fence.go, internal/meta/health_store.go, internal/replication/mysql_runner.go, internal/assurance/chain.go) and the mutant table in this file
+// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go, internal/tasks/evaluator.go, internal/health/reconcile.go, internal/health/fence.go, internal/health/registry.go, internal/meta/health_store.go, internal/replication/mysql_runner.go, internal/assurance/chain.go) and the mutant table in this file
 // output: a kill table on stdout; exit status 1 when a mutant that is not marked equivalent survives
 // pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill.go [id ...]
 // note: if this file changes, update this header and module README.md.
@@ -42,6 +42,7 @@ const (
 	healthSQL = "internal/meta/health_store.go"
 	runnerRet = "internal/replication/mysql_runner.go"
 	chainFile = "internal/assurance/chain.go"
+	regFile   = "internal/health/registry.go"
 )
 
 // packages maps a mutated file to the go test arguments that judge it.
@@ -50,7 +51,7 @@ var packages = map[string][]string{
 	verify:    {"./internal/assurance/"},
 	upload:    {"-run", "TestApplySealedUpload", "./internal/tasks/"},
 	worker:    {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress|TestVerifier_WriteErrorDropsTemp|TestVerifier_SyncErrorDropsTemp|TestVerifier_CloseErrorDropsTemp|TestVerifier_WriteFailureLogsWarn|TestVerifier_CompletedPassResetsStreak|TestVerifier_EmptyPassKeepsStreak|TestVerifier_ObjectErrAloneIsIncomplete|TestVerifier_MethodErrorAloneIsIncomplete|TestVerifier_SweepDoesNotFollowSymlink|TestVerifier_SweepRemoveErrorStillLoads|TestVerifier_SweepRemoveErrorContinues|TestVerifier_SweepRemoveErrorLogsWarn|TestVerifier_AllSkippedDoesNotIncrementStreak|TestVerifier_AllSkippedDoesNotClearStreak|TestVerifier_AllowsSkipIsNotChecked|TestVerifier_CatalogListFailureIsNotChecked|TestVerifier_TempNameIncludesPid|TestVerifier_SweepRemovesPidAndOldTemps|TestVerifier_SweepKeepsUnrelatedNames|TestVerifier_LastTaskDeletedClearsDetail|TestVerifier_EmptyPassDoesNotBumpStreak|TestVerifier_EmptyPassLogsZeroSkipped|TestVerifier_AllSkippedDoesNotBumpStreak|TestVerifier_AllSkippedKeepsDetail|TestVerifier_MixedPassCountsSkipped|TestVerifier_DeadlineDoesNotCountUnreachedAsSkipped|TestVerifier_CanceledPassIsCutShortNotSkipped|TestVerifier_ObjectIncompleteDegradesThenClears", "./internal/tasks/"},
-	health:    {"-run", "TestHealthSummary_KeepsProbeDetailWhenDegraded|TestHealthSummary_PinsFieldsWhenOK|TestHealthSummary_PinsFieldsWhenDegraded|TestReducedLockDetailStaysHealthy", "./internal/tasks/"},
+	health:    {"-run", "TestHealthSummary_KeepsProbeDetailWhenDegraded|TestHealthSummary_PinsFieldsWhenOK|TestHealthSummary_PinsFieldsWhenDegraded|TestReducedLockDetailStaysHealthy|TestUnreadableOwnerDirectoryIsLogged|TestClusterVerifiedOwnerOpensSegmentMissing", "./internal/tasks/"},
 	probe:     {"-run", "TestObjectProbe_DeadlineStaysNearTwoSeconds|TestObjectProbe_FastHealthyIsOK|TestObjectProbe_TimeoutSaysTimedOutAfter|TestStartVerifier_PassesUploadBucket", "./internal/app/"},
 	store:     {"-run", "TestMySQLTaskStore_ListFailedUploadBinlogFiles", "./internal/meta/"},
 	evalFacts: {"-run", "TestClusterVerifiedOwnerOpensSegmentMissing|TestP251SealedRowLocalMissing|TestSegmentMissingUnverifiedOwnerDoesNotClose|TestHolderWithoutDirectoryDoesNotWriteChainOwner|TestSegmentMissingRecordedOwnerReadFailureKeepsOpen|TestUnreadableOwnerDirectoryIsLogged", "./internal/tasks/"},
@@ -59,6 +60,7 @@ var packages = map[string][]string{
 	healthSQL: {"-run", "TestApplyTransitionsChainOwnerRequiresVerifiedRead", "./internal/meta/"},
 	runnerRet: {"-run", "TestRunnerStartKeepsYoungMissingSegment|TestLocalOnlyRetention|TestRetentionNoUploaderStillDeletesExpiredLocalFile", "./internal/replication/"},
 	chainFile: {"-run", "TestSegmentMissingNotForOpenSegment", "./internal/tasks/"},
+	regFile:   {"-run", "TestI6MissingLocalNamesDirectoryNode", "./internal/health/"},
 }
 
 var mutants = []mutant{
@@ -738,6 +740,21 @@ var mutants = []mutant{
 	{id: "SM17", desc: "an unreadable owner directory is silent again", file: evalFacts,
 		old: "\tif err != nil && !os.IsNotExist(err) {\n\t\tmsg = err.Error()\n\t}\n",
 		new: ""},
+	{id: "SM18", desc: "a read directory does not name its node", file: evalFacts,
+		old: "\tfacts.DirectoryNode = fence.Node\n\tfacts.NameChainOwner = fence.Mode == health.FenceCluster\n",
+		new: "\treturn\n"},
+	{id: "SM19", desc: "I6_MISSING_LOCAL detail omits the directory node", file: regFile,
+		old: "\t\t\tif v.Kind == assurance.I6MissingLocal {\n\t\t\t\tin.Detail = withDirectoryNode(in.Detail, f)\n\t\t\t}\n",
+		new: ""},
+	{id: "SM20", desc: "an unreadable directory is left off health detail", file: health,
+		old: "\t\tout = append(out, e.directoryUnreadableLines()...)\n",
+		new: ""},
+	{id: "SM21", desc: "health reason omits the directory node", file: health,
+		old: "directoryNodePhrase(f.Detail)",
+		new: "\"\""},
+	{id: "SM22", desc: "cluster names the directory node as node", file: evalFacts,
+		old: "\tfacts.NameChainOwner = fence.Mode == health.FenceCluster\n",
+		new: "\tfacts.NameChainOwner = false\n"},
 }
 
 func main() {

@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: one task's facts at one moment (task state, assurance chain verdicts, hot-path signals, store capability, waivers)
-// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30; SEGMENT_MISSING is not closed on ChainOwnerChanged, ADR 0011 PR-3); verifier kinds are registered and unmanaged, and Produced does not include verify
+// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30; SEGMENT_MISSING is not closed on ChainOwnerChanged, ADR 0011 PR-3); Facts.DirectoryNode and NameChainOwner name the node that read the directory on an I6_MISSING_LOCAL detail; verifier kinds are registered and unmanaged, and Produced does not include verify
 // pos: the single lifecycle owner of findings (ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md); pure, no I/O, imports only assurance
 // note: if this file changes, update this header and module README.md.
 package health
@@ -287,6 +287,13 @@ type Facts struct {
 	// node_gone_after (design §30). Chain-directory findings do not decide
 	// status; chain.local is unknown.
 	NodeGone bool
+	// DirectoryNode is the node that read the task directory this pass.
+	// Empty when this pass did not read it, or the fence has no node id.
+	// chainDerive names it on I6_MISSING_LOCAL only.
+	DirectoryNode string
+	// NameChainOwner selects the chain_owner label for DirectoryNode.
+	// Standalone uses the node label.
+	NameChainOwner bool
 }
 
 // Finding is a stored finding row as the evaluator sees it.
