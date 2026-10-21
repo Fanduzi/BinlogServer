@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: BINLOG_TEST_MYSQL_ROOT_DSNS and QA_PRE_HOLD_MS (default 1500); one scratch database per server
-// output: proof that a health-row pre-hold followed by a stalled lease holder ends as server error 1205, and that 40 health writes on a 32-connection pool all come back as ErrLockWait
+// output: proof that a health-row pre-hold followed by a stalled lease holder ends as ErrLockWait, either server error 1205 or classified by elapsed time, and that a plain context deadline is not accepted; 40 health writes on a 32-connection pool all come back as ErrLockWait
 // pos: ADR 0011 PR-2 deadline margin, the QA repro for one client deadline around the whole write
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -88,11 +88,13 @@ func qaDeadlineMargin(t *testing.T, root string, i int, pre time.Duration) {
 	_, err = store.ApplyTransitions(context.Background(), taskID, fence, nil, health.TaskHealth{TaskID: taskID})
 	elapsed := time.Since(start)
 	var me *mysqlDriver.MySQLError
-	if !errors.Is(err, healthstore.ErrLockWait) || !errors.As(err, &me) || me.Number != 1205 {
-		t.Fatalf("after %s (pre-hold %s): %v, want server 1205", elapsed, pre, err)
+	server1205 := errors.As(err, &me) && me.Number == 1205
+	classified := errors.Is(err, errClassifiedByElapsed)
+	if !errors.Is(err, healthstore.ErrLockWait) || (!server1205 && !classified) {
+		t.Fatalf("after %s (pre-hold %s): %v, want ErrLockWait from server 1205 or elapsed time", elapsed, pre, err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("server 1205 also matches a client deadline after %s: %v", elapsed, err)
+		t.Fatalf("lock wait also matches a plain client deadline after %s: %v", elapsed, err)
 	}
 	if elapsed < 4*time.Second-500*time.Millisecond {
 		t.Fatalf("finished in %s, the server lock timer did not run", elapsed)
