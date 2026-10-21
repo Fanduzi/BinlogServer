@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the in-memory task list, a complete catalog listing, the task directory under data_dir, an object store that can HEAD and GET, and the open findings (severity and detail)
-// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json. Write, Sync, Close, and Rename failures remove the temp file; a failed write is zap warn and dirty stays set until a write succeeds. Startup removes leftover .verify-*.tmp in the data dir only, unlinking a symlink without touching its target; a remove error is zap warn and the other temps are still removed. Temp names include the process id. Each pass logs at info: tasks, bytes, findings newly opened, findings currently open, findings closed, cut short, object incomplete, and duration. An object-storage error is zap warn and names the task, object key, and bucket; three consecutive ones set health detail without changing status, and a finished object pass clears it. A pass that checks no task does not change that streak. The streak is memory only. A corrupt .verify.json, a directory at that name, a catalog-list error, a retention-marker error, a per-task Verify error, and an encode error are zap warn and do not stop the process. pass_deadline_sec 0 uses every_sec. A cancelled pass keeps the partial progress it already applied and does not mark the task verified. An empty scheduler drops tasks that are no longer listed
+// output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json. Write, Sync, Close, and Rename failures remove the temp file; a failed write is zap warn and dirty stays set until a write succeeds. Startup removes leftover .verify-*.tmp in the data dir only, unlinking a symlink without touching its target; a remove error is zap warn and the other temps are still removed. Temp names include the process id. Each pass logs at info: tasks, skipped, bytes, findings newly opened, findings currently open, findings closed, cut short, object incomplete, and duration. An object-storage error is zap warn and names the task, plus the object key and bucket when they are known (an empty object key uses the segment name; no per-object row omits the object field); three consecutive ones set health detail without changing status, and a finished object pass clears it. A pass with no tasks clears that detail but does not change the streak. A pass that skips every existing task changes neither. VerifierObjectBucket reports the bucket startVerifier stored. The streak is memory only. A corrupt .verify.json, a directory at that name, a catalog-list error, a retention-marker error, a per-task Verify error, and an encode error are zap warn and do not stop the process. pass_deadline_sec 0 uses every_sec. A cancelled pass keeps the partial progress it already applied and does not mark the task verified. An empty scheduler drops tasks that are no longer listed
 // pos: ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10). Cluster mode does not run it; Allows stays with ADR 0011. This file does not import internal/ownership
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -196,6 +196,19 @@ func (s *Scheduler) SetVerifier(v *Verifier) {
 	s.verifier.Store(v)
 }
 
+// VerifierObjectBucket is the upload bucket stored on the attached verifier.
+// Empty means no verifier is attached or the bucket was not set.
+func (s *Scheduler) VerifierObjectBucket() string {
+	if s == nil {
+		return ""
+	}
+	v := s.verifier.Load()
+	if v == nil {
+		return ""
+	}
+	return v.cfg.ObjectBucket
+}
+
 // VerifyMetrics is the last finished pass per task. An empty snapshot means
 // no verifier is attached or no pass has finished.
 func (s *Scheduler) VerifyMetrics() VerifyMetrics {
@@ -267,9 +280,14 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	if len(tasks) == 0 {
 		v.pruneAbsentTasks(live)
 		v.saveIfDirty()
-		// No task was checked. This is not a finished object pass.
+		// No task remains to report. The streak stays, so a task that
+		// comes back continues the count, but the detail named a task
+		// that is gone.
+		if v.sched != nil {
+			v.sched.SetVerifyObjectDetail("")
+		}
 		v.noteObjectPasses(0, false, "")
-		v.logPass(started, 0, 0, 0, v.openFindingCount(), 0, false, false)
+		v.logPass(started, 0, 0, 0, 0, v.openFindingCount(), 0, false, false)
 		return
 	}
 	v.mu.Lock()
@@ -277,7 +295,7 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	v.start++
 	v.mu.Unlock()
 	ordered := append(append([]Task(nil), tasks[start:]...), tasks[:start]...)
-	var tasksChecked, opened, closed int
+	var tasksChecked, opened, closed, skipped int
 	var bytesRead int64
 	cut := false
 	objectIncomplete := false
@@ -285,17 +303,20 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 	for _, task := range ordered {
 		// A deadline that cuts the list still keeps the tasks already
 		// checked. saveIfDirty below writes that partial progress.
+		// Tasks the deadline never reached are cut_short, not skipped.
 		if ctx.Err() != nil {
 			cut = true
 			break
 		}
 		checked, n, openedN, closedN, short, objErr, cause := v.passTask(ctx, task.ID, now)
-		if checked {
-			tasksChecked++
-			bytesRead += n
-			opened += openedN
-			closed += closedN
+		if !checked {
+			skipped++
+			continue
 		}
+		tasksChecked++
+		bytesRead += n
+		opened += openedN
+		closed += closedN
 		if short {
 			cut = true
 		}
@@ -306,22 +327,30 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 			}
 		}
 	}
+	if tasksChecked == 0 {
+		// Tasks exist but none was checked (Allows, or the catalog list
+		// failed). Not an object pass: leave the streak and the detail.
+		v.pruneAbsentTasks(live)
+		v.saveIfDirty()
+		v.logPass(started, 0, skipped, 0, 0, v.openFindingCount(), 0, cut, false)
+		return
+	}
 	v.noteObjectPasses(tasksChecked, objectIncomplete, strings.Join(causes, "; "))
 	v.pruneAbsentTasks(live)
 	v.saveIfDirty()
-	v.logPass(started, tasksChecked, bytesRead, opened, v.openFindingCount(), closed, cut, objectIncomplete)
+	v.logPass(started, tasksChecked, skipped, bytesRead, opened, v.openFindingCount(), closed, cut, objectIncomplete)
 }
 
-func (v *Verifier) logPass(started time.Time, tasks int, bytes int64, opened, open, closed int, cut, objectIncomplete bool) {
-	zap.L().Info(fmt.Sprintf("verifier: pass tasks=%d bytes=%d findings_opened=%d findings_open=%d findings_closed=%d cut_short=%t object_incomplete=%t duration=%s",
-		tasks, bytes, opened, open, closed, cut, objectIncomplete, time.Since(started)))
+func (v *Verifier) logPass(started time.Time, tasks, skipped int, bytes int64, opened, open, closed int, cut, objectIncomplete bool) {
+	zap.L().Info(fmt.Sprintf("verifier: pass tasks=%d skipped=%d bytes=%d findings_opened=%d findings_open=%d findings_closed=%d cut_short=%t object_incomplete=%t duration=%s",
+		tasks, skipped, bytes, opened, open, closed, cut, objectIncomplete, time.Since(started)))
 }
 
 // noteObjectPasses warns when storage stopped an object check, and after
 // objectIncompleteDegradeAfter consecutive passes records health detail.
 // A pass that checked at least one task and finished its object scope clears both.
-// A pass that checked nothing (an empty scheduler, or every task skipped) is
-// not an object pass: it does not increment the streak and it does not clear it.
+// A pass that checked nothing does not increment the streak and does not clear it.
+// The caller clears the detail itself when the scheduler has no task left.
 func (v *Verifier) noteObjectPasses(checked int, incomplete bool, cause string) {
 	if incomplete {
 		v.objectStreak++
@@ -399,10 +428,12 @@ func (v *Verifier) newlyOpened(taskID string, rep assurance.Report) int {
 	return n
 }
 
-// objectPassCause names the task, the object key, and the bucket when storage
-// stopped an object check. Either marker is enough: ObjectErr, or a coverage
-// row whose object method is MethodError. An empty string means the object
-// scope finished.
+// objectPassCause names the task, and the object key and bucket when they are
+// known, when storage stopped an object check. Either marker is enough:
+// ObjectErr, or a coverage row whose object method is MethodError. A
+// MethodError row with an empty object key uses the segment name. No
+// per-object row omits the object field. An empty bucket is omitted too.
+// An empty string means the object scope finished.
 func objectPassCause(taskID, bucket string, rows []assurance.VerifyRow, rep assurance.Report) string {
 	reason := ""
 	if rep.ObjectErr != nil {
@@ -415,6 +446,9 @@ func objectPassCause(taskID, bucket string, rows []assurance.VerifyRow, rep assu
 			continue
 		}
 		key = row.ObjectKey
+		if key == "" {
+			key = row.Name
+		}
 		if reason == "" {
 			reason = c.Object.Reason
 			if reason == "" {
@@ -426,7 +460,14 @@ func objectPassCause(taskID, bucket string, rows []assurance.VerifyRow, rep assu
 	if reason == "" {
 		return ""
 	}
-	return fmt.Sprintf("task %s object %s bucket %s: %s", taskID, key, bucket, reason)
+	msg := "task " + taskID
+	if key != "" {
+		msg += " object " + key
+	}
+	if bucket != "" {
+		msg += " bucket " + bucket
+	}
+	return msg + ": " + reason
 }
 
 func (v *Verifier) options(taskID string, now time.Time) assurance.Options {
