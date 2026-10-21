@@ -1,12 +1,14 @@
 // Package tasks provides module-level functionality for tasks.
-// input: a cluster holder, a catalog of sealed LOCAL_ONLY segments, and the task directory on that holder's data_dir; a second node that has not read the directory; a second holder that has read a directory where the file is present
-// output: proof that deleting a sealed segment on the verified owner opens CRITICAL SEGMENT_MISSING after Confirm and Scheduler.HealthSummary becomes degraded (GET /api/health maps any status other than ok to 503), that restoring the file to the same directory closes it with EVAL, that an unverified owner change neither closes it nor writes chain_owner, and that a holder who never read the directory does not write chain_owner
+// input: a cluster holder, a catalog of sealed LOCAL_ONLY segments, and the task directory on that holder's data_dir; a second node that has not read the directory; a second holder that has read a directory where the file is present; the recorded owner's directory made unreadable while SEGMENT_MISSING is open; an OPEN catalog row whose .open.eN file is deleted
+// output: proof that deleting a sealed segment on the verified owner opens CRITICAL SEGMENT_MISSING after Confirm and Scheduler.HealthSummary becomes degraded (GET /api/health maps any status other than ok to 503), that restoring the file to the same directory closes it with EVAL, that an unverified owner change neither closes it nor writes chain_owner, and that a holder who never read the directory does not write chain_owner, that a recorded owner whose directory read fails keeps SEGMENT_MISSING open and chain_owner unchanged (QA mutant Q02), that deleting the open segment does not open SEGMENT_MISSING (QA mutant Q08), and that an unreadable owner directory is logged once when it starts and once when it ends (QA P3 5)
 // pos: ADR 0011 PR-3 acceptance for issue #462 (docs/adr/0011-cluster-ownership-and-failover.md rollout row 3 and §3.5); runs in go test
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -245,5 +247,138 @@ func TestSegmentMissingVerifiedSuccessorDoesNotCloseOnFirstPass(t *testing.T) {
 	reason, found := c.env.log.closeReason(health.SegmentMissing)
 	if !found || reason != health.ReasonEval {
 		t.Fatalf("close reason %q found=%v, want EVAL", reason, found)
+	}
+}
+
+// TestSegmentMissingRecordedOwnerReadFailureKeepsOpen: the recorded
+// chain_owner itself cannot read its directory while the finding is open.
+// That pass is incomplete: no close, no chain_owner write (QA Q02).
+func TestSegmentMissingRecordedOwnerReadFailureKeepsOpen(t *testing.T) {
+	c := newSealedCluster(t)
+	ctx := context.Background()
+	if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.deleteSealed(t)
+	for i := 0; i < 2; i++ {
+		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !c.missingOpen(t) {
+		t.Fatal("setup did not open SEGMENT_MISSING")
+	}
+	away := c.dir + ".away"
+	if err := os.Rename(c.dir, away); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+			t.Fatalf("unreadable pass %d: %v", i, err)
+		}
+	}
+	if !c.missingOpen(t) {
+		t.Fatal("SEGMENT_MISSING closed on a pass where the recorded owner could not read its directory")
+	}
+	if reason, found := c.env.log.closeReason(health.SegmentMissing); found {
+		t.Fatalf("closed with %s on an unread directory", reason)
+	}
+	owner, err := c.env.hs.ChainOwner(ctx, c.env.task.ID)
+	if err != nil || owner != "n1" {
+		t.Fatalf("chain owner %q (%v), want n1", owner, err)
+	}
+	if err := os.Rename(away, c.dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !c.missingOpen(t) {
+		t.Fatal("SEGMENT_MISSING closed once the directory was readable again but the file is still gone")
+	}
+}
+
+// TestSegmentMissingNotForOpenSegment: the open segment is the writer's file,
+// not a sealed copy. Deleting it fails the runner loudly; it is never
+// SEGMENT_MISSING (QA Q08).
+func TestSegmentMissingNotForOpenSegment(t *testing.T) {
+	c := newSealedCluster(t)
+	ctx := context.Background()
+	openName := "mysql-bin.000004.open.e1"
+	openPath := filepath.Join(c.dir, openName)
+	writeAlertSegment(t, openPath, 43)
+	if err := c.cat.UpsertBinlogFile(ctx, BinlogFile{
+		TaskID: c.env.task.ID, FileName: "mysql-bin.000004", FilePath: openPath, Epoch: 1, State: "OPEN", UploadState: "LOCAL_ONLY",
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(openPath); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, open, _ := c.env.hs.snapshot(c.env.task.ID)
+	for k := range open {
+		if k.Kind == health.SegmentMissing {
+			t.Fatalf("deleted open segment opened %v", k)
+		}
+	}
+}
+
+// TestUnreadableOwnerDirectoryIsLogged: an owner directory that exists but
+// cannot be read is no longer silent (QA P3 5). One line when it starts, one
+// when it ends; the open finding is untouched meanwhile.
+func TestUnreadableOwnerDirectoryIsLogged(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 000 directory")
+	}
+	c := newSealedCluster(t)
+	ctx := context.Background()
+	if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.deleteSealed(t)
+	for i := 0; i < 2; i++ {
+		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	if err := os.Chmod(c.dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(c.dir, 0o755) })
+	for i := 0; i < 3; i++ {
+		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(buf.String(), "directory "+c.dir+" is unreadable"); n != 1 {
+		t.Fatalf("unreadable logged %d times, want 1:\n%s", n, buf.String())
+	}
+	if !c.missingOpen(t) {
+		t.Fatal("SEGMENT_MISSING closed while the owner directory was unreadable")
+	}
+	if err := os.Chmod(c.dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(buf.String(), "directory "+c.dir+" is readable again"); n != 1 {
+		t.Fatalf("readable again logged %d times, want 1:\n%s", n, buf.String())
 	}
 }

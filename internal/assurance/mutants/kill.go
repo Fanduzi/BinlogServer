@@ -1,7 +1,7 @@
 //go:build ignore
 
 // Package main replays the verifier review mutants against the tests.
-// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go, internal/tasks/evaluator.go, internal/health/reconcile.go, internal/health/fence.go, internal/meta/health_store.go) and the mutant table in this file
+// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go, internal/tasks/evaluator.go, internal/health/reconcile.go, internal/health/fence.go, internal/meta/health_store.go, internal/replication/mysql_runner.go, internal/assurance/chain.go) and the mutant table in this file
 // output: a kill table on stdout; exit status 1 when a mutant that is not marked equivalent survives
 // pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill.go [id ...]
 // note: if this file changes, update this header and module README.md.
@@ -40,6 +40,8 @@ const (
 	reconFile = "internal/health/reconcile.go"
 	fenceFile = "internal/health/fence.go"
 	healthSQL = "internal/meta/health_store.go"
+	runnerRet = "internal/replication/mysql_runner.go"
+	chainFile = "internal/assurance/chain.go"
 )
 
 // packages maps a mutated file to the go test arguments that judge it.
@@ -51,10 +53,12 @@ var packages = map[string][]string{
 	health:    {"-run", "TestHealthSummary_KeepsProbeDetailWhenDegraded|TestHealthSummary_PinsFieldsWhenOK|TestHealthSummary_PinsFieldsWhenDegraded|TestReducedLockDetailStaysHealthy", "./internal/tasks/"},
 	probe:     {"-run", "TestObjectProbe_DeadlineStaysNearTwoSeconds|TestObjectProbe_FastHealthyIsOK|TestObjectProbe_TimeoutSaysTimedOutAfter|TestStartVerifier_PassesUploadBucket", "./internal/app/"},
 	store:     {"-run", "TestMySQLTaskStore_ListFailedUploadBinlogFiles", "./internal/meta/"},
-	evalFacts: {"-run", "TestClusterVerifiedOwnerOpensSegmentMissing|TestP251SealedRowLocalMissing|TestSegmentMissingUnverifiedOwnerDoesNotClose|TestHolderWithoutDirectoryDoesNotWriteChainOwner", "./internal/tasks/"},
+	evalFacts: {"-run", "TestClusterVerifiedOwnerOpensSegmentMissing|TestP251SealedRowLocalMissing|TestSegmentMissingUnverifiedOwnerDoesNotClose|TestHolderWithoutDirectoryDoesNotWriteChainOwner|TestSegmentMissingRecordedOwnerReadFailureKeepsOpen|TestUnreadableOwnerDirectoryIsLogged", "./internal/tasks/"},
 	reconFile: {"-run", "TestSegmentMissingStaysOpenWhenOwnerChanges|TestSegmentMissingClosesOnlyWhenVerifiedAndGone|TestOwnerChangedClosesIncompleteChain", "./internal/health/"},
 	fenceFile: {"-run", "TestRecordChainOwnerRequiresVerifiedRead", "./internal/health/"},
 	healthSQL: {"-run", "TestApplyTransitionsChainOwnerRequiresVerifiedRead", "./internal/meta/"},
+	runnerRet: {"-run", "TestRunnerStartKeepsYoungMissingSegment|TestLocalOnlyRetention|TestRetentionNoUploaderStillDeletesExpiredLocalFile", "./internal/replication/"},
+	chainFile: {"-run", "TestSegmentMissingNotForOpenSegment", "./internal/tasks/"},
 }
 
 var mutants = []mutant{
@@ -702,6 +706,38 @@ var mutants = []mutant{
 	{id: "SM07", desc: "ChainVerified is set when the directory was not read", file: evalFacts,
 		old: "\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\t\tfence.ChainVerified = true\n\t\t\t}\n\t\t}\n",
 		new: "\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\tfence.ChainVerified = true\n\t\t}\n\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t}\n"},
+	// PR #507 QA: a runner start must not drop the row of a missing segment
+	// inside local retention (P2); Q02 and Q08 were surviving test gaps.
+	{id: "SM08", desc: "revert the fix: drop every gone LOCAL_ONLY row", file: runnerRet,
+		old: "\t\t\tif _, ours := removed[filepath.Base(row.FilePath)]; !ours && !rowPastLocalRetention(row, expireBefore) {",
+		new: "\t\t\tif false {"},
+	{id: "SM09", desc: "drop only by row age (ignore the files this purge removed)", file: runnerRet,
+		old: "\t\t\tif _, ours := removed[filepath.Base(row.FilePath)]; !ours && !rowPastLocalRetention(row, expireBefore) {",
+		new: "\t\t\tif !rowPastLocalRetention(row, expireBefore) {"},
+	{id: "SM10", desc: "drop only files this purge removed (no #209 crash recovery)", file: runnerRet,
+		old: "\t\t\tif _, ours := removed[filepath.Base(row.FilePath)]; !ours && !rowPastLocalRetention(row, expireBefore) {",
+		new: "\t\t\tif _, ours := removed[filepath.Base(row.FilePath)]; !ours {"},
+	{id: "SM11", desc: "a row with no timestamps counts as past retention", file: runnerRet,
+		old: "\treturn !age.IsZero() && age.Before(expireBefore)",
+		new: "\treturn age.IsZero() || age.Before(expireBefore)"},
+	{id: "SM12", desc: "no created_at fallback", file: runnerRet,
+		old: "\tif age.IsZero() {\n\t\tage = row.CreatedAt\n\t}\n\treturn !age.IsZero()",
+		new: "\treturn !age.IsZero()"},
+	{id: "SM13", desc: "purgeExpiredAt does not report what it removed", file: runnerRet,
+		old: "\t\tremoved[name] = struct{}{}\n\t}\n\treturn removed, nil",
+		new: "\t}\n\treturn removed, nil"},
+	{id: "SM14", desc: "cutoff is now (any gone row is expired)", file: runnerRet,
+		old: "r.dropGoneLocalOnlyRows(ctx, task.ID, dir, removed, localExpireBefore(localDays, now))",
+		new: "r.dropGoneLocalOnlyRows(ctx, task.ID, dir, removed, now)"},
+	{id: "SM15", desc: "chain.local complete when the directory was not read", file: evalFacts,
+		old: "\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n",
+		new: "\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n"},
+	{id: "SM16", desc: "open segment judged for I6_MISSING_LOCAL", file: chainFile,
+		old: "\tif seg.Named.Open {\n\t\treturn\n\t}\n\trow := seg.Row",
+		new: "\tif false && seg.Named.Open {\n\t\treturn\n\t}\n\trow := seg.Row"},
+	{id: "SM17", desc: "an unreadable owner directory is silent again", file: evalFacts,
+		old: "\tif err != nil && !os.IsNotExist(err) {\n\t\tmsg = err.Error()\n\t}\n",
+		new: ""},
 }
 
 func main() {
