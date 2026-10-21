@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: the writer's view of the task lease, and a transition
-// output: Fence (which counter and node guard a health write, design §8) and TransitionDigest (content identity for replay, §5.4)
+// output: Fence (which counter and node guard a health write, design §8), RecordChainOwner (ADR 0011 PR-3: task_health.chain_owner changes only when this cluster holder read the directory), and TransitionDigest (content identity for replay, §5.4)
 // pos: pure fence and replay identity shared by every health store
 // note: if this file changes, update this header and module README.md.
 package health
@@ -42,6 +42,20 @@ type Fence struct {
 	// a task nobody holds (non-shared storage, §30). The lease epoch check
 	// matches Proxy; the node must also equal task_health.chain_owner.
 	Delegated bool
+	// ChainVerified: this cluster holder read the task directory (Stat,
+	// ReadDir, the chain lock, the checkpoint, and the order all succeeded)
+	// and this pass used that snapshot. ADR 0011 PR-3. There is no
+	// task_chain table yet; this flag is the write-time stand-in for that
+	// event. Proxy, delegated, and a holder whose read returned nothing
+	// leave it false.
+	ChainVerified bool
+}
+
+// RecordChainOwner reports whether this write may set task_health.chain_owner.
+// Only a cluster holder that read the directory. Proxy, delegated, standalone,
+// and a holder that did not read leave the column unchanged.
+func (f Fence) RecordChainOwner() bool {
+	return f.Mode == FenceCluster && !f.Proxy && !f.Delegated && f.ChainVerified
 }
 
 // TransitionDigest is the content identity of a transition: a replay of

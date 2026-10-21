@@ -1,7 +1,7 @@
 //go:build ignore
 
 // Package main replays the verifier review mutants against the tests.
-// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go) and the mutant table in this file
+// input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go, internal/tasks/evaluator.go, internal/health/reconcile.go, internal/health/fence.go, internal/meta/health_store.go) and the mutant table in this file
 // output: a kill table on stdout; exit status 1 when a mutant that is not marked equivalent survives
 // pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill.go [id ...]
 // note: if this file changes, update this header and module README.md.
@@ -30,23 +30,31 @@ type mutant struct {
 }
 
 const (
-	verify = "internal/assurance/verify.go"
-	upload = "internal/tasks/sealed_upload.go"
-	worker = "internal/tasks/verifier.go"
-	health = "internal/tasks/finding.go"
-	probe  = "internal/app/app.go"
-	store  = "internal/meta/mysql_store.go"
+	verify    = "internal/assurance/verify.go"
+	upload    = "internal/tasks/sealed_upload.go"
+	worker    = "internal/tasks/verifier.go"
+	health    = "internal/tasks/finding.go"
+	probe     = "internal/app/app.go"
+	store     = "internal/meta/mysql_store.go"
+	evalFacts = "internal/tasks/evaluator.go"
+	reconFile = "internal/health/reconcile.go"
+	fenceFile = "internal/health/fence.go"
+	healthSQL = "internal/meta/health_store.go"
 )
 
 // packages maps a mutated file to the go test arguments that judge it.
 // The tasks and meta packages are large; only the tests for the touched code run.
 var packages = map[string][]string{
-	verify: {"./internal/assurance/"},
-	upload: {"-run", "TestApplySealedUpload", "./internal/tasks/"},
-	worker: {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress|TestVerifier_WriteErrorDropsTemp|TestVerifier_SyncErrorDropsTemp|TestVerifier_CloseErrorDropsTemp|TestVerifier_WriteFailureLogsWarn|TestVerifier_CompletedPassResetsStreak|TestVerifier_EmptyPassKeepsStreak|TestVerifier_ObjectErrAloneIsIncomplete|TestVerifier_MethodErrorAloneIsIncomplete|TestVerifier_SweepDoesNotFollowSymlink|TestVerifier_SweepRemoveErrorStillLoads|TestVerifier_SweepRemoveErrorContinues|TestVerifier_SweepRemoveErrorLogsWarn|TestVerifier_AllSkippedDoesNotIncrementStreak|TestVerifier_AllSkippedDoesNotClearStreak|TestVerifier_AllowsSkipIsNotChecked|TestVerifier_CatalogListFailureIsNotChecked|TestVerifier_TempNameIncludesPid|TestVerifier_SweepRemovesPidAndOldTemps|TestVerifier_SweepKeepsUnrelatedNames|TestVerifier_LastTaskDeletedClearsDetail|TestVerifier_EmptyPassDoesNotBumpStreak|TestVerifier_EmptyPassLogsZeroSkipped|TestVerifier_AllSkippedDoesNotBumpStreak|TestVerifier_AllSkippedKeepsDetail|TestVerifier_MixedPassCountsSkipped|TestVerifier_DeadlineDoesNotCountUnreachedAsSkipped|TestVerifier_CanceledPassIsCutShortNotSkipped|TestVerifier_ObjectIncompleteDegradesThenClears", "./internal/tasks/"},
-	health: {"-run", "TestHealthSummary_KeepsProbeDetailWhenDegraded|TestHealthSummary_PinsFieldsWhenOK|TestHealthSummary_PinsFieldsWhenDegraded|TestReducedLockDetailStaysHealthy", "./internal/tasks/"},
-	probe:  {"-run", "TestObjectProbe_DeadlineStaysNearTwoSeconds|TestObjectProbe_FastHealthyIsOK|TestObjectProbe_TimeoutSaysTimedOutAfter|TestStartVerifier_PassesUploadBucket", "./internal/app/"},
-	store:  {"-run", "TestMySQLTaskStore_ListFailedUploadBinlogFiles", "./internal/meta/"},
+	verify:    {"./internal/assurance/"},
+	upload:    {"-run", "TestApplySealedUpload", "./internal/tasks/"},
+	worker:    {"-run", "TestVerifier_CleanPassDoesNotRewriteProgress|TestVerifier_RenameFailureRetriesAndDropsTemp|TestVerifier_CancelDoesNotMarkVerified|TestVerifier_CancelKeepsPartialProgress|TestVerifier_ZeroDeadlineUsesEvery|TestVerifier_EmptySchedulerDropsStaleTasks|TestVerifier_DeadlinePersistsPartialProgress|TestVerifier_WriteErrorDropsTemp|TestVerifier_SyncErrorDropsTemp|TestVerifier_CloseErrorDropsTemp|TestVerifier_WriteFailureLogsWarn|TestVerifier_CompletedPassResetsStreak|TestVerifier_EmptyPassKeepsStreak|TestVerifier_ObjectErrAloneIsIncomplete|TestVerifier_MethodErrorAloneIsIncomplete|TestVerifier_SweepDoesNotFollowSymlink|TestVerifier_SweepRemoveErrorStillLoads|TestVerifier_SweepRemoveErrorContinues|TestVerifier_SweepRemoveErrorLogsWarn|TestVerifier_AllSkippedDoesNotIncrementStreak|TestVerifier_AllSkippedDoesNotClearStreak|TestVerifier_AllowsSkipIsNotChecked|TestVerifier_CatalogListFailureIsNotChecked|TestVerifier_TempNameIncludesPid|TestVerifier_SweepRemovesPidAndOldTemps|TestVerifier_SweepKeepsUnrelatedNames|TestVerifier_LastTaskDeletedClearsDetail|TestVerifier_EmptyPassDoesNotBumpStreak|TestVerifier_EmptyPassLogsZeroSkipped|TestVerifier_AllSkippedDoesNotBumpStreak|TestVerifier_AllSkippedKeepsDetail|TestVerifier_MixedPassCountsSkipped|TestVerifier_DeadlineDoesNotCountUnreachedAsSkipped|TestVerifier_CanceledPassIsCutShortNotSkipped|TestVerifier_ObjectIncompleteDegradesThenClears", "./internal/tasks/"},
+	health:    {"-run", "TestHealthSummary_KeepsProbeDetailWhenDegraded|TestHealthSummary_PinsFieldsWhenOK|TestHealthSummary_PinsFieldsWhenDegraded|TestReducedLockDetailStaysHealthy", "./internal/tasks/"},
+	probe:     {"-run", "TestObjectProbe_DeadlineStaysNearTwoSeconds|TestObjectProbe_FastHealthyIsOK|TestObjectProbe_TimeoutSaysTimedOutAfter|TestStartVerifier_PassesUploadBucket", "./internal/app/"},
+	store:     {"-run", "TestMySQLTaskStore_ListFailedUploadBinlogFiles", "./internal/meta/"},
+	evalFacts: {"-run", "TestClusterVerifiedOwnerOpensSegmentMissing|TestP251SealedRowLocalMissing|TestSegmentMissingUnverifiedOwnerDoesNotClose|TestHolderWithoutDirectoryDoesNotWriteChainOwner", "./internal/tasks/"},
+	reconFile: {"-run", "TestSegmentMissingStaysOpenWhenOwnerChanges|TestSegmentMissingClosesOnlyWhenVerifiedAndGone|TestOwnerChangedClosesIncompleteChain", "./internal/health/"},
+	fenceFile: {"-run", "TestRecordChainOwnerRequiresVerifiedRead", "./internal/health/"},
+	healthSQL: {"-run", "TestApplyTransitionsChainOwnerRequiresVerifiedRead", "./internal/meta/"},
 }
 
 var mutants = []mutant{
@@ -670,6 +678,30 @@ var mutants = []mutant{
 	{id: "WVP17D", desc: "a healthy summary is reported degraded", file: health,
 		old: "\tsum := HealthSummary{Status: HealthOK, Detail: detail}\n",
 		new: "\tsum := HealthSummary{Status: HealthDegraded, Detail: detail}\n"},
+
+	// ADR 0011 PR-3: a verified directory must open SEGMENT_MISSING, and an
+	// incomplete observation must not close it or steal chain_owner.
+	{id: "SM01", desc: "cluster mode drops I6_MISSING_LOCAL again", file: evalFacts,
+		old: "\tout := &health.ChainFacts{}\n\tfor _, v := range violations {\n\t\tif objectKinds[v.Kind] && anyIn(v.Segments, obj.unjudged) {",
+		new: "\tout := &health.ChainFacts{}\n\tfor _, v := range violations {\n\t\tif e.cfg.Cluster && v.Kind == assurance.I6MissingLocal {\n\t\t\tcontinue\n\t\t}\n\t\tif objectKinds[v.Kind] && anyIn(v.Segments, obj.unjudged) {"},
+	{id: "SM02", desc: "OWNER_CHANGED closes SEGMENT_MISSING", file: reconFile,
+		old: "\t\t\tif spec.Kind == SegmentMissing {\n\t\t\t\tseen[key] = true\n\t\t\t\tcontinue\n\t\t\t}\n",
+		new: ""},
+	{id: "SM03", desc: "chain_owner is written without ChainVerified", file: fenceFile,
+		old: "\treturn f.Mode == FenceCluster && !f.Proxy && !f.Delegated && f.ChainVerified\n",
+		new: "\treturn f.Mode == FenceCluster && !f.Proxy && !f.Delegated\n"},
+	{id: "SM04", desc: "incomplete chain.local closes SEGMENT_MISSING", file: reconFile,
+		old: "\t\tif !f.instanceComplete(spec, key) {\n\t\t\tcontinue\n\t\t}\n",
+		new: "\t\tif spec.Kind != SegmentMissing && !f.instanceComplete(spec, key) {\n\t\t\tcontinue\n\t\t}\n"},
+	{id: "SM05", desc: "MySQL apply writes chain_owner for every holder", file: healthSQL,
+		old: "\tif fence.RecordChainOwner() {\n",
+		new: "\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n"},
+	{id: "SM06", desc: "a verified read does not set ChainVerified", file: evalFacts,
+		old: "\t\t\t\tfence.ChainVerified = true\n",
+		new: "\t\t\t\tfence.ChainVerified = false\n"},
+	{id: "SM07", desc: "ChainVerified is set when the directory was not read", file: evalFacts,
+		old: "\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\t\tfence.ChainVerified = true\n\t\t\t}\n\t\t}\n",
+		new: "\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\tfence.ChainVerified = true\n\t\t}\n\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t}\n"},
 }
 
 func main() {

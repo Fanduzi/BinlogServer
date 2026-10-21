@@ -529,6 +529,8 @@ WHERE chain_owner <> '';
 
 PR-2 和 PR-3 互不依赖，可以并行。PR-4 依赖 PR-1。PR-5 依赖 PR-3 的「未验证不关」那条临时禁令，并在同一 PR 里把禁令换成正式的派生规则，不让禁令多活一个版本。
 
+**PR-3 的实现（上表第 3 行，实现后补）。** 今天没有 `task_chain`。`ChainVerified` 是 `health.Fence` 上的一次性标志：只有集群租约持有者这一轮（不是 Proxy、不是 Delegated），并且 `chainFactsInto` 非空（`Stat`、`ReadDir`、链锁、checkpoint 和顺序都成功，本轮用的是这份快照）才置位。`task_health.chain_owner` 只在 `Fence.RecordChainOwner` 为真时写成 `fence.Node`；目录没读到、Proxy、Delegated 都保持原值。`Reconcile` 在 `ChainOwnerChanged` 时不关闭 `SEGMENT_MISSING`（含对象来源的同一 kind），并把该 key 记为已见，同一轮不再 OPEN。`chain.local` 不完整时本来就不能关。关闭只发生在随后一轮：本节点已是记下的 `chain_owner`（或该列为空）、`chain.local` 完整、这个 key 不再被推导，原因 `EVAL`。其它链 finding 的 `OWNER_CHANGED` 不动。第 6 节 F7 的 catalog 比对、`task_chain` 表、派生 finding 仍是 PR-4 / PR-5。
+
 0005 第 5 步的「失败则 desired `STOP`」在 PR-4 被本记录修正。0005 正文不在这个设计 PR 里改；PR-4 改代码时在 0005 的失败策略一节加一段指向本记录的修正，避免两份 ADR 对着干。
 
 ## 6. 留到实现 PR 的项
