@@ -274,6 +274,11 @@ jobs:
           go-version-file: "go.mod"
           cache: true
 
+      - name: Fetch the MID build commit
+        # 0a84917a is PR #293's merge commit; it is not reachable from any
+        # branch, so a full clone still lacks it.
+        run: git fetch --no-tags origin 0a84917a35276a243f2feeae29c97e0f2a4b2773
+
       - name: Check host mysqlbinlog is 8.0
         run: |
           mysqlbinlog --version
