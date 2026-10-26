@@ -12,6 +12,10 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.80] - 2026-10-26
+
+发布说明：`docs/releases/v0.5.80.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。`upload.use_ssl` 默认改为 `true`：明文 HTTP 对象存储升级前必须写 `upload.use_ssl: false`。新增可选配置项 `source.tls`（任务）、`meta.tls`、`upload.tls.ca_file`。
+
 ### Changed
 
 - 源库复制和 meta 可以要求并校验证书（`source.tls`、`meta.tls`，见 `docs/adr/0012-connection-tls.md`）。两边默认 `disabled`，旧配置不写这些键时仍是明文。
@@ -23,6 +27,20 @@ Maintenance rules:
 - 对象存储的 TLS 错误按类型加一句提示，原文保留：明文端点是 `upload.use_ssl: false`；`x509.HostnameError` 是主机名不匹配；`x509.UnknownAuthorityError` 是 `upload.tls.ca_file`；其它错误不加提示。协议版本不匹配和 `remote error: tls:` 这类握手 alert 也算 TLS：原文保留、不加提示、`/api/health` 为 503 `UPLOAD_TLS`、`binlog_server_upload_tls_failures_total` 增加，启动探针不把它写成 2 秒超时。校验和匹配的上传或补传成功才清 `UPLOAD_TLS`。一次 `UPLOAD_RECORD_FAILED` 不清。非 TLS 的上传失败不清。探针超时如果正文已经是 TLS 错误，仍保留这段 TLS 文本。
 - `preferred` 信任问候包里的 `CLIENT_SSL`。能改这份明文问候包的攻击者去掉该位后，连接降级为明文。需要防护时用 `required`、`verify-ca` 或 `verify-identity`。meta 驱动的 `tls=preferred` 同样。
 - `binlog_server_upload_tls_failures_total` 计上传 TLS 握手失败的次数。
+
+### Fixed
+
+- #537：`cmd/migrate` 支持 `meta.tls`（`./migrate --config`），私有 CA 的 meta 库不再需要 skip-verify。
+- #516：安装文档指向 v0.5.79。
+
+### Upgrade notes
+
+- 没写 `upload.use_ssl` 的明文 HTTP 对象存储：升级后 `/api/health` 503 `UPLOAD_TLS`，复制继续，段留在本地为 `UPLOAD_FAILED`；启动只有一条 WARN，没有「默认值已改」日志。写上 `upload.use_ssl: false` 重启后待传段补传。
+- 回滚到 v0.5.79 可以（同一 schema），但它不读 `source.tls`、`meta.tls`、`upload.tls.ca_file`，没写 `upload.use_ssl` 时走 HTTP，并会在任务下一次状态变化时写回不带 `tls` 的源配置；再次升级后检查各任务的 `source.tls`。
+
+### Known issues
+
+- #541、#540（P3），#510，#473（P1），#462（P1），#513（P2），#539。#514、#512、#490、#494、#500、#502、#503、#504、#487、#488、#451、#452、#455、#456、#446、#437、#438 仍未关闭。
 
 ## [v0.5.79] - 2026-10-26
 
