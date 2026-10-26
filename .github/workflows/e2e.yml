@@ -97,18 +97,7 @@ jobs:
         run: go vet ./...
 
       - name: go test -race
-        # Known -race flakes, each with an open issue, are skipped here and
-        # still run in unit-and-e2e's plain go test ./...: #490
-        # (TestFailurePathMatrixMetaOutage, TestOpenEpochENOENTAfterTakeoverDoesNotFail),
-        # #504 (TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess,
-        # TestEvaluator_1500SegmentsUnder50ms), #439
-        # (TestApp_ProductionAuthProtectsRealRoutes), and #526
-        # (TestTaskRecords_StopAndDeleteApplyWhenSaveFails, seen in the #507 QA).
-        # Drop a name when its flake is fixed.
-        run: |
-          go test -race -count=1 -timeout 30m \
-            -skip '^(TestFailurePathMatrixMetaOutage|TestOpenEpochENOENTAfterTakeoverDoesNotFail|TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess|TestEvaluator_1500SegmentsUnder50ms|TestApp_ProductionAuthProtectsRealRoutes|TestTaskRecords_StopAndDeleteApplyWhenSaveFails)$' \
-            ./...
+        run: go test -race -count=1 -timeout 30m ./...
 
   unit-and-e2e:
     if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback') }}

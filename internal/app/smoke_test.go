@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth, anonymous Console UI, swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage; waitRunExit waits out the runner, background and finding shutdown budgets
+// output: application lifecycle plus real-route production auth, anonymous Console UI, swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage; waitRunExit waits out the HTTP, runner, background and finding shutdown budgets
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -211,14 +211,7 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 	}
 
 	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("app returned error: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("app did not shut down in time")
-	}
+	waitRunExit(t, errCh)
 }
 
 func TestApp_ProductionRefusesEmptyEncryptionKey(t *testing.T) {
@@ -1319,18 +1312,22 @@ func waitReady(t *testing.T, a *App) {
 	}
 }
 
-// waitRunExit waits for Run to return. Shutdown itself is bounded by the
-// runner, background and finding-flush budgets; the wait has to cover them
-// or a busy machine reports a hang that already finished.
+// waitRunExit waits for Run to return. Serve blocks in HTTP shutdown before
+// the deferred joins, and those joins then wait out runners, background
+// goroutines and the finding flush. The wait is the sum of those budgets
+// plus a second for the hand-off between them. A shorter wait reports a hang
+// on a loaded machine after a shutdown that already finished inside its budgets.
 func waitRunExit(t *testing.T, errCh <-chan error) {
 	t.Helper()
+	budget := shutdownHTTPTimeout + shutdownRunnersTimeout + shutdownBackgroundTimeout + shutdownFindingsTimeout + time.Second
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("app returned error: %v", err)
 		}
-	case <-time.After(shutdownRunnersTimeout + shutdownBackgroundTimeout + shutdownFindingsTimeout + time.Second):
-		t.Fatal("app did not shut down in time")
+	case <-time.After(budget):
+		t.Fatalf("app did not shut down within %s (http %s, runners %s, background %s, findings %s)",
+			budget, shutdownHTTPTimeout, shutdownRunnersTimeout, shutdownBackgroundTimeout, shutdownFindingsTimeout)
 	}
 }
 

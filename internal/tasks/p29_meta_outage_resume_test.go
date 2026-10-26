@@ -27,6 +27,9 @@ func (t *resumeTable) ListTasksWithExpiredLease(ctx context.Context) ([]Task, er
 		return nil, err
 	}
 	now := time.Now()
+	if t.leases != nil && t.leases.now != nil {
+		now = t.leases.now()
+	}
 	var out []Task
 	for _, task := range all {
 		switch task.State {
@@ -323,7 +326,11 @@ func (w *p29World) leaseFree(id string) bool {
 	if !ok || row.owner == "" {
 		return true
 	}
-	return !row.expire.After(time.Now())
+	now := time.Now()
+	if w.leases.now != nil {
+		now = w.leases.now()
+	}
+	return !row.expire.After(now)
 }
 
 // waitResumed fails immediately once the row has been stored as an operator

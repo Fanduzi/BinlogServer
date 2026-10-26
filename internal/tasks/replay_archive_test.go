@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: on-disk segments, catalog rows, task state, and an optional object opener
-// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read
+// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live in one private directory so a count is not shared with another package
 // pos: scheduler tests for the replay archive
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -16,6 +16,20 @@ import (
 	"strings"
 	"testing"
 )
+
+// TestMain puts archive temps in a private directory. go test runs packages
+// in parallel and they share the process temp dir; counting binlog-replay-*.tar
+// there races another package that is building an archive at the same time.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "replay-archive-temps-*")
+	if err != nil {
+		panic(err)
+	}
+	replayArchiveTempDir = dir
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func TestOpenReplayArchive_RunningOpenEpochAndEmpty(t *testing.T) {
 	dir := t.TempDir()
@@ -180,7 +194,11 @@ func readReplayTar(t *testing.T, raw []byte) map[string][]byte {
 
 func countReplayTemps(t *testing.T) int {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "binlog-replay-*.tar"))
+	dir := replayArchiveTempDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "binlog-replay-*.tar"))
 	if err != nil {
 		t.Fatal(err)
 	}

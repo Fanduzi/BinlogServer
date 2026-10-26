@@ -1,5 +1,5 @@
 // Package tasks provides module-level functionality for tasks.
-// input: the files inventory window, SelectReplayFiles, the point-in-time selection, the GTID stop selection, the executed-GTID selection, and OpenTaskSegment for each selected basename
+// input: the files inventory window, SelectReplayFiles, the point-in-time selection, the GTID stop selection, the executed-GTID selection, and OpenTaskSegment for each selected basename; replayArchiveTempDir chooses where the temp tar is created (empty: the process temp dir)
 // output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read; a damaged segment and every later one are not archived; an open member sealed after the selection is read under its sealed name or selected again (#322)
 // pos: replay-set archive for the authenticated download route, including the same datetime window, the same GTID stop, and the same executed-GTID roll-forward as the replay JSON
 // note: if this file changes, update this header and module README.md.
@@ -55,10 +55,16 @@ func (s *Scheduler) OpenExecutedGTIDArchive(taskID, executedRaw, stopGTIDRaw str
 	})
 }
 
+// replayArchiveTempDir, when set, is the directory archive temps are created in.
+// Empty uses the process temp directory (production). The tasks test binary
+// sets it so a leftover count is not shared with another package's tests,
+// which run in parallel and use the same process temp directory.
+var replayArchiveTempDir string
+
 func materializeReplayTar(members []replayMember) (io.ReadCloser, int64, error) {
 	defer closeReplayMembers(members)
 
-	tmp, err := os.CreateTemp("", "binlog-replay-*.tar")
+	tmp, err := os.CreateTemp(replayArchiveTempDir, "binlog-replay-*.tar")
 	if err != nil {
 		return nil, 0, err
 	}

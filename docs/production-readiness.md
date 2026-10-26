@@ -74,7 +74,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
-| G1 | PRODUCTION 模式下鉴权失败就拒绝启动；源密码和 standalone 任务记录加密存放；依赖做漏洞扫描 | `internal/app/http_server_test.go`、`smoke_test.go`、`internal/taskrecords` 单测、`smoke-standalone-restart`（密钥错误、缺失）、`vulncheck` job | MET | #439（-race 下偶发失败） |
+| G1 | PRODUCTION 模式下鉴权失败就拒绝启动；源密码和 standalone 任务记录加密存放；依赖做漏洞扫描 | `internal/app/http_server_test.go`、`smoke_test.go`、`internal/taskrecords` 单测、`smoke-standalone-restart`（密钥错误、缺失）、`vulncheck` job | MET | — |
 | G2 | 到源库和 meta 的连接支持并校验 TLS，S3 默认走 TLS | 没有：复制连接和 meta 都没有 TLS 配置，`upload.use_ssl` 默认是 false，也没有测试 | NOT MET | 没有对应 issue |
 
 ## H. 性能与资源上界
@@ -82,7 +82,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | H1 | 在约定负载下（ADR 0009 §6：≥500 TPS、24h、注入各类故障）延迟有界，RSS/fd/goroutine 不会单调增长，用独立判定器验收 | `smoke-scale` 只能手动 opt-in，不在任何 job 里；`scripts/soak/` 不存在 | NOT MET | ADR 0009 阶段 6 |
-| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`。已知在 -race 下偶发失败的 6 个测试用 `-skip` 点名跳过：`TestFailurePathMatrixMetaOutage`、`TestOpenEpochENOENTAfterTakeoverDoesNotFail`（#490），`TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess`、`TestEvaluator_1500SegmentsUnder50ms`（#504），`TestApp_ProductionAuthProtectsRealRoutes`（#439），`TestTaskRecords_StopAndDeleteApplyWhenSaveFails`（#526）。这 6 个没有环境开关或 `-short` 跳过，仍在 `unit-and-e2e` 的普通 `go test ./...` 里跑 | MET | 注意：上面 6 个只在非 race 下跑，修好一个就把它从 `-skip` 里去掉；#386 |
+| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`，不再 `-skip`。原先在 -race 下偶发失败的 `TestFailurePathMatrixMetaOutage`、`TestOpenEpochENOENTAfterTakeoverDoesNotFail`（#490），`TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess`、`TestEvaluator_1500SegmentsUnder50ms`（#504），`TestApp_ProductionAuthProtectsRealRoutes`（#439），`TestTaskRecords_StopAndDeleteApplyWhenSaveFails`（#526）都在这个 job 里跑 | MET | #386 没有点名测试，仍开着 |
 
 ## I. 运维文档与 runbook
 
