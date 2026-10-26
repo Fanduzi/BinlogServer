@@ -4,6 +4,7 @@
 // input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go, internal/tasks/evaluator.go, internal/health/reconcile.go, internal/health/fence.go, internal/health/registry.go, internal/meta/health_store.go, internal/replication/mysql_runner.go, internal/assurance/chain.go) and the mutant table in this file
 // output: a kill table on stdout; exit status 1 when a mutant that is not marked equivalent survives
 // pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill.go [id ...]
+// note ADR 0011 PR-4: P401-P407 cover a stored refusal, an in-memory refusal, an ownerless Start, the terminal window, mixed version, storage mismatch, and StopExpired on a live-looking lease
 // note: if this file changes, update this header and module README.md.
 package main
 
@@ -43,6 +44,10 @@ const (
 	runnerRet = "internal/replication/mysql_runner.go"
 	chainFile = "internal/assurance/chain.go"
 	regFile   = "internal/health/registry.go"
+	lifeFile  = "internal/tasks/scheduler_lifecycle.go"
+	ownFile   = "internal/tasks/ownership_bridge.go"
+	stepFile  = "internal/ownership/step.go"
+	stopFile  = "internal/tasks/scheduler_transitions.go"
 )
 
 // packages maps a mutated file to the go test arguments that judge it.
@@ -61,6 +66,10 @@ var packages = map[string][]string{
 	runnerRet: {"-run", "TestRunnerStartKeepsYoungMissingSegment|TestLocalOnlyRetention|TestRetentionNoUploaderStillDeletesExpiredLocalFile", "./internal/replication/"},
 	chainFile: {"-run", "TestSegmentMissingNotForOpenSegment", "./internal/tasks/"},
 	regFile:   {"-run", "TestI6MissingLocalNamesDirectoryNode", "./internal/health/"},
+	lifeFile:  {"-run", "TestStoredRefusalBlocksClaim|TestClaimLoopUnreachableReachesFailedWithoutEpochClimb", "./internal/tasks/"},
+	ownFile:   {"-run", "TestAllowlistRetriesUntilTerminalWindow|TestMixedVersionRefusesClaim|TestStorageMismatchRefusesClaim", "./internal/tasks/"},
+	stepFile:  {"-run", "TestOwnerlessStartDoesNotTakeLease", "./internal/ownership/"},
+	stopFile:  {"-run", "TestScheduler_ExpiredStoppingFinalizesWithoutStartingDump|TestScheduler_ExpiredStoppingPendingDeleteErases", "./internal/tasks/"},
 }
 
 var mutants = []mutant{
@@ -706,7 +715,7 @@ var mutants = []mutant{
 		old: "\t\t\t\tfence.ChainVerified = true\n",
 		new: "\t\t\t\tfence.ChainVerified = false\n"},
 	{id: "SM07", desc: "ChainVerified is set when the directory was not read", file: evalFacts,
-		old: "\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\t\tfence.ChainVerified = true\n\t\t\t}\n\t\t}\n",
+		old: "\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\t\tfence.ChainVerified = true\n\t\t\t\tif e.s != nil && !e.s.confirmChainVerified(task.ID, fence.Node) {\n\t\t\t\t\tfence.ChainVerified = false\n\t\t\t\t}\n\t\t\t}\n\t\t}\n",
 		new: "\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\tfence.ChainVerified = true\n\t\t}\n\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t}\n"},
 	// PR #507 QA: a runner start must not drop the row of a missing segment
 	// inside local retention (P2); Q02 and Q08 were surviving test gaps.
@@ -755,6 +764,29 @@ var mutants = []mutant{
 	{id: "SM22", desc: "cluster names the directory node as node", file: evalFacts,
 		old: "\tfacts.NameChainOwner = fence.Mode == health.FenceCluster\n",
 		new: "\tfacts.NameChainOwner = false\n"},
+
+	// ADR 0011 PR-4 claim and stop guards.
+	{id: "P401", desc: "a stored refusal does not block Acquire", file: lifeFile,
+		old: "\t\tif err := s.refuseStoredClaimLocked(id); err != nil {\n\t\t\ts.mu.Unlock()\n\t\t\treturn err\n\t\t}\n",
+		new: ""},
+	{id: "P402", desc: "an in-memory refusal does not block Acquire", file: lifeFile,
+		old: "\t\tif s.refusalBlocksLocked(id, s.clusterWorkerID, time.Now()) {\n\t\t\ts.mu.Unlock()\n\t\t\treturn ErrLeaseNotAcquired\n\t\t}\n",
+		new: ""},
+	{id: "P403", desc: "an ownerless Start still takes the lease", file: stepFile,
+		old: "\tif e.Ownerless {\n\t\treturn ownerlessStart(s, e, now)\n\t}\n",
+		new: ""},
+	{id: "P404", desc: "the terminal allowlist never reaches FAILED", file: ownFile,
+		old: "\tif s.terminalRetry <= 0 {\n\t\treturn false\n\t}\n",
+		new: "\treturn true\n"},
+	{id: "P405", desc: "an older live protocol does not refuse the claim", file: ownFile,
+		old: "\tif older > 0 {\n",
+		new: "\tif false {\n"},
+	{id: "P406", desc: "a storage mismatch does not refuse the claim", file: ownFile,
+		old: "\tif registered != \"\" && registered != mode {\n\t\treturn fmt.Errorf(\"cluster.storage %s does not match registered %s\", mode, registered)\n\t}\n",
+		new: ""},
+	{id: "P407", desc: "StopExpired still sees a live lease", file: stopFile,
+		old: "\tif st.Lease.Owner != \"\" && !st.Lease.ExpireAt.Before(now) {\n\t\tst.Lease.ExpireAt = now.Add(-time.Nanosecond)\n\t}\n",
+		new: ""},
 }
 
 func main() {

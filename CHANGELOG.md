@@ -12,6 +12,18 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- ADR 0011 PR-4：调度器改走 `ownership.Step`。迁移 `000011` 把 schema 下限抬到 11，增加 `row_generation`、`failed_reason`、`failed_at`、`tail_unreadable_since`、`pending_delete`、`task_chain`、`task_node_refusal`、`cluster_storage`、`meta_canary` 和 `worker_registrations.cluster_protocol_version`，并把 `worker_heartbeats.version` 改名为 `build_version`。触发器 `backup_tasks_bu_generation` 和过程 `binlog_server_kill_trx` 在 `migrate up` 提交之后安装。允许名单上的源错误先重试至少 2 分钟再进入 `FAILED`，期望保持 `RUN`。没有 runner 或没有数据目录的进程写出没有 owner 的 `STARTING`。认领登记 `cluster.storage`，模式不一致或仍有协议低于 11 的活注册时拒绝认领并打开 `MIXED_VERSION`。
+
+### Changed
+
+- 非终态名单上的 runner 错误（含 `SEGMENT_NOT_ON_WORKER`、封存文件已存在、未分类错误、用尽预算的 `SOURCE_UNREACHABLE`）让出为 `LEASE_DEGRADED`，期望保持 `RUN`，不再写成 `FAILED` 加期望 `STOP`。过期的 `STOPPING` 由任一节点 `StopExpired` 收成 `STOPPED`；`pending_delete` 在同一步删除。`per_node` 删除留下目录墓碑。
+
+### Upgrade notes
+
+- 先停掉全部旧节点，再 `migrate up`，再启动新节点。新二进制在 schema 10 上拒绝启动。手写的 `UPDATE backup_tasks` 必须把 `row_generation` 加一。原来期望是 `STOP` 的 `FAILED` 行会被改成期望 `RUN`，仍要停的任务需要再 Stop 一次。过程的 `DEFINER`、`GRANT EXECUTE` 和 down 步骤见 `docs/releases/adr-0011-pr4.md`。
+
 ## [v0.5.78] - 2026-10-21
 
 发布说明：`docs/releases/v0.5.78.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `verify.every_sec`（默认 86400）、`verify.budget_bytes_per_sec`（默认 4 MiB/s）、`verify.rotation_periods`、`verify.recent_share_percent`、`verify.pass_deadline_sec`、`verify.pass_max_bytes`、`verify.object_recent_sec`、`verify.drill_dsn`、`verify.drill_every_sec`、`verify.drill_check_sql`；负数拒绝启动，`verify.recent_share_percent` 只接受 1–100。
