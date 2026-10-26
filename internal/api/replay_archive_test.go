@@ -468,15 +468,15 @@ func replayTempCount(t *testing.T) int {
 // process temp directory is another package's file and must not change the
 // count. A file in the seam directory must.
 func TestReplayTempCount_CountsOnlyTheSeamDir(t *testing.T) {
+	before := replayTempCount(t)
 	outside, err := os.CreateTemp("", "binlog-replay-*.tar")
 	if err != nil {
 		t.Fatal(err)
 	}
 	outside.Close()
 	t.Cleanup(func() { _ = os.Remove(outside.Name()) })
-	before := replayTempCount(t)
 	if replayTempCount(t) != before {
-		t.Fatalf("process temp file %s changed the api count", outside.Name())
+		t.Fatalf("process temp file %s changed the api count from %d", outside.Name(), before)
 	}
 	seam, err := os.CreateTemp(tasks.ReplayArchiveTempDir(), "binlog-replay-*.tar")
 	if err != nil {

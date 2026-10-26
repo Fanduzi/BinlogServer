@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a segment file's os.FileInfo and a value computed from its bytes
-// output: FileStamp (size, mtime and, where the OS has it, ctime) and stampCache, a bounded per-path cache that is valid only while the file's stamp is unchanged; touch -r keeps the mtime but not the ctime, so an in-place edit is read again (#380 QA); ForgetFile drops a path from every cache for the rewrite the stamp cannot see (same ctime tick), called by the rehasher
+// output: FileStamp (size, mtime and, where the OS has it, ctime) and stampCache, a bounded per-path cache that is valid only while the file's stamp is unchanged; touch -r keeps the mtime but not the ctime, so an in-place edit is read again (#380 QA); ForgetFile drops a path from every cache for the rewrite the stamp cannot see (same ctime tick), called by the rehasher; SegmentTouches counts every StampOf so a nested segment walk cannot skip the count by avoiding Chain.Segments
 // pos: shared by the ledger contents, sealed-corrupt, damage and positions caches and the health evaluator's directory fingerprint
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -8,6 +8,7 @@ package binlog
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,8 +19,24 @@ type FileStamp struct {
 	CTime int64 // nanoseconds; 0 where the OS does not report it
 }
 
-// StampOf is the stamp of info.
+// segmentTouches counts StampOf calls. The evaluator's cold pass stamps every
+// segment it walks (the directory fingerprint and each segment it reads).
+// A nested walk stamps the inner segment too, so the count stays linear only
+// when the walk is.
+var segmentTouches atomic.Int64
+
+// NoteSegmentTouch records one segment visit. StampOf calls it.
+func NoteSegmentTouch() { segmentTouches.Add(1) }
+
+// SegmentTouches is the number of visits since the last reset.
+func SegmentTouches() int64 { return segmentTouches.Load() }
+
+// ResetSegmentTouches zeroes the visit counter.
+func ResetSegmentTouches() { segmentTouches.Store(0) }
+
+// StampOf is the stamp of info. Each call counts as one segment visit.
 func StampOf(info os.FileInfo) FileStamp {
+	NoteSegmentTouch()
 	return FileStamp{Size: info.Size(), MTime: info.ModTime(), CTime: changeTime(info)}
 }
 

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the failure-path matrix pieces (shared task table, MemoryLease, lease-fenced health store) with every metadata call gated: while the gate is closed a lease call and a health or finding store call hang until their ctx ends, as against a SIGSTOPped meta; real Evaluator.Run loops and finding sinks; one shared test clock (EvaluatorConfig.Now, MemoryLease.now, findingBook.now) and explicit noteMetaReach observations; meta_unreachable_after stays 10s
-// output: one row per meta outage shape (30s, 12s, sc5 12s-then-30s, and a 5s control), in cluster (three nodes: the task owner, the _health holder, and a node that is neither) and standalone (one node with a running task): every node records its own META_UNREACHABLE with first_seen at the outage start and resolved at the first answer (cluster: the legacy task_findings row for the latest outage and one FINDING_RESOLVED _cluster event per outage; standalone: one OPEN and one CLOSE per outage, extra UPDATEs ignored, fact_at equal to those clock times); the control records nothing
+// output: one row per meta outage shape (30s, 12s, sc5 12s-then-30s, and a 5s control), in cluster (three nodes: the task owner, the _health holder, and a node that is neither) and standalone (one node with a running task): every node records its own META_UNREACHABLE with first_seen at the outage start and resolved at the first answer (cluster: the legacy task_findings row for the latest outage and one FINDING_RESOLVED _cluster event per outage; standalone: one OPEN and one CLOSE per outage, extra UPDATEs ignored, fact_at equal to those clock times); the control records nothing; settle waits until the finding sink has finished the write instead of flushing beside it
 // pos: ADR 0009 P2-6d failure-path matrix, meta outage rows (docs/design/0009-phase2-health-evaluator.md §25.8, #430 QA r1 sc5); runs in the per-PR go test
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -406,22 +406,36 @@ func (env *outageEnv) idle() bool {
 	return true
 }
 
-// settle waits until every evaluator has applied the observations, then
-// flushes the legacy finding books. The flush is synchronous: the sink's
-// own tick is a real timer and is not what the assertions wait on.
+// settle waits until every evaluator has applied the observations and the
+// finding sink has finished writing them. The sink is the only flusher:
+// flushing beside it lets an older report land after the resolve.
 func (env *outageEnv) settle(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	for !env.idle() {
+	for {
+		idle := env.idle()
+		quiet := env.findingsQuiet()
+		if idle && quiet && env.idle() && env.findingsQuiet() {
+			return
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("evaluators did not go idle after the meta observation")
 		}
-		env.nudge()
+		if !idle {
+			env.nudge()
+		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func (env *outageEnv) findingsQuiet() bool {
 	for _, n := range env.nodes {
-		n.s.findings.flush(context.Background())
+		if !n.s.findings.quiet() {
+			n.s.findings.kick()
+			return false
+		}
 	}
+	return true
 }
 
 // outageOpenClose keeps OPEN and CLOSE. A later ping can UPDATE the open

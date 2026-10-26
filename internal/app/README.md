@@ -12,7 +12,7 @@
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `tracing_test.go`: OTLP HTTP 默认 traces 路径兼容性回归测试。
 - `http_server_test.go`: HTTP 超时、PRODUCTION 以及非 loopback listen 的 auth fail-closed 校验测试。
-- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由、未带凭证可打开 Console、ClaimRunnableTasks 恢复、以及认领循环回归。`waitRunExit` 等的是 runner、后台和 finding 三段关停预算之和再加一秒。HTTP 关停跑在后台组里，已经含在后台那一段，不再另加 5s。`TestApp_StartAndServeHealth` 和 `TestApp_ProductionAuthProtectsRealRoutes` 用 2s：空闲关停是毫秒级，多出来的几秒必须失败。这不说明是哪一段慢。
+- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由、未带凭证可打开 Console、ClaimRunnableTasks 恢复、以及认领循环回归。`waitRunExit` 等的是 runner、后台和 finding 三段关停预算之和再加一秒。HTTP 关停跑在后台组里，已经含在后台那一段，不再另加 5s。`TestApp_StartAndServeHealth` 和 `TestApp_ProductionAuthProtectsRealRoutes` 用 2s、自己的 HTTP client 和 `t.TempDir()` 数据目录：关停前先关掉空闲 keep-alive 和还没发出请求的连接，空闲关停是毫秒级，多出来的几秒必须失败。超时的那次运行拿着的锁在它自己的目录里，不会挡住下一次。
 - `restart_recovery_test.go`: standalone 重启后安全的持久化 active task 自动恢复、metadata/source 冲突任务保持停止的回归测试。
 - `source_guard_test.go`: 从 `meta_dsn` 到任务 API 的 metadata/source 隔离装配回归测试。
 

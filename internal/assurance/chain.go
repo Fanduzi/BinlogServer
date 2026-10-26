@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
 // input: Inputs: the task's chain order, catalog rows, task directory ledger, object listing snapshot, checkpoint, start set and recorded source switches
-// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER; ChainSteps counts one visit per segment in Segments so a test can tell a linear walk from a quadratic one
+// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER; ChainSteps counts segment visits, including every file stamp, so a nested walk cannot skip the count by avoiding the call in Segments
 // note P2-5.1 (design 0009 §20.2): a local size is compared with a sealed row only for a legacy segment with no .seal-sha256 line and not while a legacy failback is planned; an object size mismatch is I6_OBJECT_SIZE_MISMATCH
 // note P2-5.3 (design 0009 §22): Switches suppress cross-stint I3_GTID_HOLE (switchHole); CheckCheckpoint is separate from Check so I5 stays out of the chain cache
 // pos: the one answer to "is this backup complete, and where is each part" (ADR 0009 phase 1); depends on binlog only
@@ -17,24 +17,21 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"binlog_server/internal/binlog"
 )
 
-// chainSteps counts one visit per segment inside Segments. A test resets it
-// around one pass and checks that the count stays linear in the segment
-// count. Production does not read it.
-var chainSteps atomic.Int64
-
-func noteChainStep() { chainSteps.Add(1) }
+// noteChainStep records one segment visit. The same counter is incremented
+// from binlog.StampOf, which every fingerprint and segment read calls, so a
+// nested loop that skips this line still counts when it stats or reads.
+func noteChainStep() { binlog.NoteSegmentTouch() }
 
 // ChainSteps is the number of segment visits since the last reset.
-func ChainSteps() int64 { return chainSteps.Load() }
+func ChainSteps() int64 { return binlog.SegmentTouches() }
 
 // ResetChainSteps zeroes the visit counter.
-func ResetChainSteps() { chainSteps.Store(0) }
+func ResetChainSteps() { binlog.ResetSegmentTouches() }
 
 // Checkpoint is the task's checkpoint (C in ADR 0009).
 type Checkpoint struct {

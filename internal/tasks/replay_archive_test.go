@@ -44,7 +44,7 @@ func TestMain(m *testing.M) {
 	if err := os.MkdirAll(archives, 0o755); err != nil {
 		panic(err)
 	}
-	replayArchiveTempDir = archives
+	replayArchiveTempDir.Store(archives)
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)
@@ -213,8 +213,9 @@ func readReplayTar(t *testing.T, raw []byte) map[string][]byte {
 
 func countReplayTemps(t *testing.T) int {
 	t.Helper()
-	n := globReplayTemps(t, replayArchiveTempDir)
-	if td := os.TempDir(); td != "" && filepath.Clean(td) != filepath.Clean(replayArchiveTempDir) {
+	dir := replayArchiveCreateDir()
+	n := globReplayTemps(t, dir)
+	if td := os.TempDir(); td != "" && filepath.Clean(td) != filepath.Clean(dir) {
 		n += globReplayTemps(t, td)
 	}
 	return n

@@ -25,7 +25,10 @@ func TestBuildHTTPServerAppliesTimeouts(t *testing.T) {
 		IdleTimeoutSec:       37,
 	}
 
-	server := buildHTTPServer(handler, timeoutCfg)
+	server, closeIdle := buildHTTPServer(handler, timeoutCfg)
+	if closeIdle == nil {
+		t.Fatal("idle connections are not closed on shutdown")
+	}
 	if server.ReadHeaderTimeout != 7*time.Second {
 		t.Fatalf("expected ReadHeaderTimeout=7s, got %s", server.ReadHeaderTimeout)
 	}

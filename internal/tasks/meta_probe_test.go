@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task store whose PingMeta ignores ctx and blocks, a health store whose ApplyTransitions blocks, and a manual test clock
-// output: proof that Evaluator.Run's metadata ping counts a hung ping as a failure dated when it was sent, and that the next ping still runs while that store call is blocked
+// output: proof that Evaluator.Run's metadata ping counts a hung ping as a failure dated when it was sent, that the ping is not sent until a full interval has elapsed, and that the next ping still runs while that store call is blocked
 // pos: design 0009 §25.8 R1 and R2, the independent meta ping (runMetaProbe / probeMeta)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -47,7 +47,7 @@ func TestMetaProbe_HungPingFailsAtSendWhileStoreHangs(t *testing.T) {
 	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), block: block}
 	clock := newManualClock(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
 	const (
-		interval = time.Second
+		interval = 2 * time.Second
 		timeout  = time.Second
 	)
 	e := NewEvaluator(s, EvaluatorConfig{
@@ -87,13 +87,25 @@ func TestMetaProbe_HungPingFailsAtSendWhileStoreHangs(t *testing.T) {
 		t.Fatalf("failure recorded before the ping timed out: pinging %v since %s", pinging, since)
 	}
 
-	// The probe arms After only after Run has started it. Advance once a
-	// waiter exists, and stop as soon as the ping is out, so a tick is not
-	// dropped between the arm and the receive.
-	sent := advanceUntil(t, clock, interval, func() bool {
+	// The probe's waiter is the only one parked for a full interval: an idle
+	// worker caps its wait at 1s. Advancing interval-ε must not send the ping.
+	waitUntil(t, 5*time.Second, "ping interval was not armed", func() bool {
+		return clock.HasDeadline(clock.Now().Add(interval))
+	})
+	mark := clock.Now()
+	clock.Advance(interval - time.Millisecond)
+	if _, pinging, _, _ := metaReachSnap(s); pinging {
+		t.Fatal("ping fired before the interval elapsed")
+	}
+	if !clock.HasDeadline(mark.Add(interval)) {
+		t.Fatal("probe waiter was not armed for the full interval")
+	}
+	clock.Advance(time.Millisecond)
+	waitUntil(t, 5*time.Second, "timed out waiting for the metadata ping", func() bool {
 		_, pinging, _, _ := metaReachSnap(s)
 		return pinging
 	})
+	sent := mark.Add(interval)
 	_, _, start, _ := metaReachSnap(s)
 	if !start.Equal(sent) {
 		t.Fatalf("ping started at %s, clock %s", start, sent)

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task directories with duplicated, stale-open, empty-leftover and bit-rotted segments, health stores that fail, fence or block, and evaluator modes off/shadow/on
-// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (the merged pass is one debounce later, and advancing the clock after idle adds no pass) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a pass over 1500 segments stays within 25x of the 150-segment pass with a linear segment-visit cap and a ceiling on the smaller pass, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
+// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (the merged pass is one debounce later, and advancing the clock after idle adds no pass) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a pass over 1500 segments stays within 15x of the same try's 150-segment pass with segment visits counted at the file stamp and a 30ms ceiling on the 1-segment pass, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5, §5.7, §6)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -430,7 +430,7 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	clock := newManualClock(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
 	const debounce = time.Second
 	e := NewEvaluator(s, EvaluatorConfig{
-		Mode: EvaluatorOn, Store: store, NodeID: evalNode, Workers: 1,
+		Mode: EvaluatorOn, Store: store, NodeID: evalNode, Workers: 4,
 		Sweep: time.Hour, LivenessTick: time.Hour, Debounce: debounce,
 		Now: clock.Now, After: clock.After,
 	})
@@ -463,8 +463,9 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	// The merged pass is released by one debounce on the test clock, and the
 	// wall time from unblocking the first pass is well under two seconds.
 	// A pass that sleeps two seconds, or that waits an extra second of this
-	// clock, does not arrive. After the evaluator is idle, moving the clock
-	// does not start another pass.
+	// clock, does not arrive. Four workers share the pool, so dropping the
+	// per-task lock lets a second evaluation of this task overlap the first.
+	// After idle, a window on the test clock and on the wall stays quiet.
 	base := clock.Now()
 	started := time.Now()
 	close(block)
@@ -499,16 +500,32 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("%d passes for the startup pass plus 200 marks, want exactly 2", n)
 	}
-	clock.Advance(2 * time.Second)
-	quiet := time.Now().Add(2 * time.Second)
-	for {
-		if evalIdle(e) && clock.WaiterCount() > 0 && storeApplies(store) == n {
-			break
+	// A window, not one instant: a pass 30ms later on this clock or on the
+	// wall must be visible. Steps land on 30ms, 100ms and 2s.
+	startClock := clock.Now()
+	startWall := time.Now()
+	for _, step := range []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 70 * time.Millisecond, 1900 * time.Millisecond} {
+		clock.Advance(step)
+		deadline := time.Now().Add(200 * time.Millisecond)
+		for {
+			if got := storeApplies(store); got != n {
+				t.Fatalf("extra pass at clock +%s wall +%s: applied %d, want %d", clock.Now().Sub(startClock), time.Since(startWall), got, n)
+			}
+			if evalIdle(e) && clock.WaiterCount() > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("after idle, clock +%s left the evaluator busy (applied %d)", clock.Now().Sub(startClock), storeApplies(store))
+			}
+			time.Sleep(time.Millisecond)
 		}
-		if time.Now().After(quiet) {
-			t.Fatalf("after idle, clock +2s left applied %d (was %d) idle %v", storeApplies(store), n, evalIdle(e))
+	}
+	wall := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(wall) {
+		if got := storeApplies(store); got != n {
+			t.Fatalf("extra pass %s after idle: applied %d, want %d", time.Since(startWall), got, n)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	if got := storeApplies(store); got != n {
 		t.Fatalf("after idle, %d extra passes", got-n)
@@ -655,63 +672,84 @@ func TestNodeIDPersistsInDataDir(t *testing.T) {
 }
 
 // TestEvaluator_1500SegmentsNearLinear checks that the cold pass which walks
-// the segments stays near-linear. A 50ms wall failed under -race on a loaded
-// host when the walk was correct (#504), and 50x the 150-segment pass still
-// passed a 60ms slowdown and a cheap quadratic. Ten times the segments must
-// cost at most 25 times (measured -race peak is about 15x). The smaller pass
-// also has an absolute ceiling, so a fixed per-pass delay fails even when
-// the ratio stays small. Segment visits must stay linear, so a nested walk
-// fails even when it is too cheap to move the ratio. The chain cache is not
-// warmed first, so the measured pass is the walk.
+// the segments stays near-linear. The absolute ceiling is the 1-segment pass:
+// a fixed per-pass delay stands out there, and a loaded host moves the
+// 150-segment time without making the walk quadratic (#504). Ten times the
+// segments must cost at most 15 times on the same try. Pairing the fastest
+// 150-segment pass with the fastest 1500-segment pass from another try makes
+// a linear walk look like 15x when the host is busy. Visits are counted at
+// the file stamp on every try, so a nested walk that skips the counter in
+// Segments still counts. The chain cache is not warmed first, so the
+// measured pass is the walk.
 func TestEvaluator_1500SegmentsNearLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("benchmark-style QA condition")
 	}
 	const (
+		tinyN          = 1
 		smallN         = 150
 		largeN         = 1500
-		maxRatio       = 25
+		maxRatio       = 15
 		maxStepRatio   = 12
-		smallCeiling   = 50 * time.Millisecond
+		tinyCeiling    = 30 * time.Millisecond
 		largeCeiling   = 2 * time.Second
 		maxStepsPerSeg = 8
 	)
 	ctx := context.Background()
-	bestSmall, bestLarge := time.Hour, time.Hour
-	var stepsSmall, stepsLarge int64
+	bestTiny := time.Hour
+	bestLarge := time.Hour
+	bestRatio := -1.0
+	var ratioSmall, ratioLarge time.Duration
+	var stepsTiny, stepsSmall, stepsLarge int64
+	checkSteps := func(n int, steps int64) {
+		t.Helper()
+		if steps < int64(n) {
+			t.Fatalf("%d-segment pass visited %d, want at least one per segment", n, steps)
+		}
+		if steps > int64(n*maxStepsPerSeg) {
+			t.Fatalf("%d-segment pass visited %d, want <= %d per segment", n, steps, maxStepsPerSeg)
+		}
+	}
 	for i := 0; i < 3; i++ {
-		d, steps := evalPassTime(t, ctx, smallN)
-		if d < bestSmall {
-			bestSmall = d
-			stepsSmall = steps
+		dTiny, stTiny := evalPassTime(t, ctx, tinyN)
+		dSmall, stSmall := evalPassTime(t, ctx, smallN)
+		dLarge, stLarge := evalPassTime(t, ctx, largeN)
+		checkSteps(tinyN, stTiny)
+		checkSteps(smallN, stSmall)
+		checkSteps(largeN, stLarge)
+		if stSmall > 0 && stLarge > stSmall*maxStepRatio {
+			t.Fatalf("segment visits grew %.1fx from %d to %d segments; a nested walk is quadratic", float64(stLarge)/float64(stSmall), smallN, largeN)
 		}
-		d, steps = evalPassTime(t, ctx, largeN)
-		if d < bestLarge {
-			bestLarge = d
-			stepsLarge = steps
+		if dTiny < bestTiny {
+			bestTiny = dTiny
+			stepsTiny = stTiny
+		}
+		if dLarge < bestLarge {
+			bestLarge = dLarge
+		}
+		if dSmall <= 0 || dLarge <= 0 {
+			t.Fatalf("pass reported no time: small %s large %s", dSmall, dLarge)
+		}
+		r := float64(dLarge) / float64(dSmall)
+		if bestRatio < 0 || r < bestRatio {
+			bestRatio = r
+			ratioSmall, ratioLarge = dSmall, dLarge
+			stepsSmall, stepsLarge = stSmall, stLarge
 		}
 	}
-	t.Logf("best pass %d segments %s (%d visits), %d segments %s (%d visits)", smallN, bestSmall, stepsSmall, largeN, bestLarge, stepsLarge)
-	if bestSmall <= 0 || bestLarge <= 0 {
-		t.Fatalf("pass reported no time: small %s large %s", bestSmall, bestLarge)
+	t.Logf("best %d-segment %s (%d visits); best same-try ratio %.1fx (%d segments %s / %d segments %s, visits %d / %d); fastest %d-segment %s",
+		tinyN, bestTiny, stepsTiny, bestRatio, largeN, ratioLarge, smallN, ratioSmall, stepsLarge, stepsSmall, largeN, bestLarge)
+	if bestTiny <= 0 {
+		t.Fatalf("1-segment pass reported no time")
 	}
-	if bestSmall > smallCeiling {
-		t.Fatalf("%d-segment pass took %s, ceiling %s", smallN, bestSmall, smallCeiling)
+	if bestTiny > tinyCeiling {
+		t.Fatalf("%d-segment pass took %s, ceiling %s", tinyN, bestTiny, tinyCeiling)
 	}
 	if bestLarge > largeCeiling {
 		t.Fatalf("%d-segment pass took %s, ceiling %s", largeN, bestLarge, largeCeiling)
 	}
-	if bestLarge > bestSmall*maxRatio {
-		t.Fatalf("%d segments took %s, %d took %s (%.1fx); want <= %dx", largeN, bestLarge, smallN, bestSmall, float64(bestLarge)/float64(bestSmall), maxRatio)
-	}
-	if stepsSmall < int64(smallN) || stepsLarge < int64(largeN) {
-		t.Fatalf("segment visits small %d large %d, each pass must visit every segment", stepsSmall, stepsLarge)
-	}
-	if stepsSmall > int64(smallN*maxStepsPerSeg) || stepsLarge > int64(largeN*maxStepsPerSeg) {
-		t.Fatalf("segment visits small %d (n=%d) large %d (n=%d), want <= %d per segment", stepsSmall, smallN, stepsLarge, largeN, maxStepsPerSeg)
-	}
-	if stepsSmall > 0 && stepsLarge > stepsSmall*maxStepRatio {
-		t.Fatalf("segment visits grew %.1fx from %d to %d segments; a nested walk is quadratic", float64(stepsLarge)/float64(stepsSmall), smallN, largeN)
+	if bestRatio > float64(maxRatio) {
+		t.Fatalf("%d segments took %s, %d took %s (%.1fx on that try); want <= %dx", largeN, ratioLarge, smallN, ratioSmall, bestRatio, maxRatio)
 	}
 }
 
