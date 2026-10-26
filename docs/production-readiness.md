@@ -10,7 +10,7 @@
 只能 `workflow_dispatch` 手动触发的 e2e 一律不算 MET。
 
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
-- 每个 PR 和 push main 都跑：`vulncheck`；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
+- 每个 PR 和 push main 都跑：`vulncheck`；`race-and-vet`（`go vet ./...`、`go test -race ./...`）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
 - 只在 push main 跑：`e2e-meta-failover`。
 - 只能手动触发：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-observability`。
 - 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`、`upgrade-legacy-failback`。
@@ -20,7 +20,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | A1 | 七条链不变量 I1–I7（ADR 0009）在 standalone 和 cluster 下都会被判定，违反就开 finding | `internal/assurance/chain_*_test.go`（CI 单测）。cluster 下删掉封存段：`TestClusterVerifiedOwnerOpensSegmentMissing`、`TestSegmentMissingUnverifiedOwnerDoesNotClose`、`TestP251SealedRowLocalMissing`、`TestRunnerStartKeepsYoungMissingSegment`、`TestSegmentMissingRecordedOwnerReadFailureKeepsOpen`、`TestSegmentMissingNotForOpenSegment`、`TestUnreadableOwnerDirectoryIsLogged`（都在 `go test ./...`，Confirm 后开 `SEGMENT_MISSING`，健康 degraded，finding 与 `/api/health` 点名 `chain_owner` 或 `node`，文件回到同一目录以 `EVAL` 关；未读到目录不关、不写 `chain_owner`；保留期内文件已不在的目录行在真实 Start 和接管后仍在；读不了的 owner 目录写进 health detail）。还缺：这条路径的 cluster e2e（`e2e-cluster-roles` 只是手动触发，本 PR 不改 workflow）；GTID 内部空洞要开 finding | PARTIAL | #352、#415、#406、#397。#462 的静默缺口由上面的单测盖住，issue 留给 QA，不在这里关。#471 不合并。F7 的 catalog 比对仍是 PR-5 |
-| A2 | ADR 0009 列出的 15 条静默路径（S1–S15），每条都同时落下 finding、事件和指标 | `internal/tasks/finding_test.go`、`internal/api/metric_source_test.go`、`internal/replication/finding_dump_test.go`；`internal/lintguard` 拦新的 `_ = err` 和只打日志的写法（都在 `unit-and-e2e` 里） | MET | 注意：lintguard 只看语法，allowlist 里还有 5 条 follow-up；ADR 要求的 `errcheck`/vet 步骤要改 workflow，还没进 CI |
+| A2 | ADR 0009 列出的 15 条静默路径（S1–S15），每条都同时落下 finding、事件和指标 | `internal/tasks/finding_test.go`、`internal/api/metric_source_test.go`、`internal/replication/finding_dump_test.go`；`internal/lintguard` 拦新的 `_ = err` 和只打日志的写法（都在 `unit-and-e2e` 里） | MET | 注意：lintguard 只看语法，allowlist 里还有 5 条 follow-up；`go vet ./...` 已在 `race-and-vet` job 里；ADR 要求的 `errcheck` 还没进 CI |
 | A3 | 配了对象存储时，每个封存段都会上传并校验；保留期不删没验证过的段 | `e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments` | MET | #438（P4，审计行可能丢） |
 | A4 | 周期巡检：本地段完整解析，对象每轮 HEAD，SHA-256 按队列（强制重查、最近档（未上传和 24h 内上传，验过即离开，份额上限）、按周期数轮换、最久没验过）在预算内比对；可选的还原演练每 7 天跑一次 | 纯检查仍在 `go test ./...`：`TestVerify_ReportsDeletedObjectFlippedObjectAndFlippedLocal`、`TestVerify_CleanChainHasNoFindings`、`TestByteBudget_IsRespected`（`internal/assurance/verify_test.go`），覆盖模型、关闭规则、轮换上界在 `verify_coverage_test.go`，队列顺序、反复短截止时间下的进度上界、付费字节在 `verify_queue_test.go`，最近档新鲜度与份额、本地已删时的对象解析、链 kind 在 `verify_fresh_test.go`，末档、份额封顶、`LOCAL_UNREADABLE`、短正文、`sealed_at` 偏差、强制段每周期一次在 `verify_r5_test.go`，积压排序、`LOCAL_UNREADABLE` 的升级与两次干净读、`ReadMark` 每个字段在 `verify_qa_test.go`。进程里的周期任务：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出；写回（强制段每周期一次、`LOCAL_UNREADABLE` 的 severity 和 detail）在 `internal/tasks/verifier_test.go`。都在 `unit-and-e2e` 的 `go test ./...` 里。进程级再加 `TestApp_VerifierTickerReportsTwoPasses`（第一轮和 ticker 第二轮都经 API 报出）和 `TestStartVerifier_ClusterIsInert`（集群不读、不开 finding、不写 `.verify.json`）。`go run ./internal/assurance/mutants/kill.go` 打 268 个变异，265 个打死、3 个等价（N30、X05、R15；另有工人 WV08、WV14、WV11、WV16、WV12、WV15、WVP01、WVP02、WVP03、WVP12、WVT01、WVT02、WVT03、WVT07、WVS03、WVS05、WVS06、WVS07、WVC05、WVC06、WVC07、WVC08、WVN03、WVN04、WVN05、WVN07、WVN08、WVN09、WVN11、WVN12、WVN16、WVP03A、WVP03D、WVP03C、WVP03H、WVP06、WVP06T、WVN03S、WVN03D、WVN03H、WVP04、WVP05、WVP05T、WVP07、WVP07T、WVP07S、WVP08、WVP08C、WVP08F、WVP08T、WVS02、WVS02B、WVS02W、WVS04、WVS04B、WVS03D、WVS08、WVS08T、WVS09、WVS06E、WVS06B、WVS06O、WVS07K、WVN10、WVP12K、WVP17B、WVP17C、WVP17K、WVP17R、WVP17O、WVP17S、WVP17L、WVP17X、WVP17D；不在 CI）。启动 HEAD 探针失败打 warn，写在 `/api/health` 的 `detail`，`status` 仍是 ok。连续 3 轮对象存储没查完也写 detail，查完就清。可选演练仍关；真实 MinIO（`scripts/e2e/smoke-verify.sh`）没有任何 job 跑。集群上 `Allows` 恒为 false，这一项因此还不是 MET | PARTIAL | cluster Allows; enabled once ADR 0011 ownership lands (PR-2/PR-4) |
 | A5 | 数据盘写满时，备份不能看起来还健康，空间释放后续传不留缺口 | `smoke-standalone-full-disk`（quick；只测 standalone，任务没在跑）。还缺：正在 dump 的任务和 cluster owner 写满的场景（ADR 0011 §4.2 第 15 行） | PARTIAL | ADR 0011 PR-4 |
@@ -83,7 +83,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | H1 | 在约定负载下（ADR 0009 §6：≥500 TPS、24h、注入各类故障）延迟有界，RSS/fd/goroutine 不会单调增长，用独立判定器验收 | `smoke-scale` 只能手动 opt-in，不在任何 job 里；`scripts/soak/` 不存在 | NOT MET | ADR 0009 阶段 6 |
-| H2 | CI 里跑 `go test -race` | 不跑。CI 是 `go test ./...`，`-race` 只在本地脚本 `scripts/verify-phase-acceptance.sh` 里 | NOT MET | #386、#439（已知的偶发失败）；要改 workflow |
+| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`。已知在 -race 下偶发失败的 6 个测试用 `-skip` 点名跳过（#490、#504、#439 各自的测试，加上 #507 QA 里出现的 `TestTaskRecords_StopAndDeleteApplyWhenSaveFails`），它们仍在 `unit-and-e2e` 的普通 `go test ./...` 里跑 | MET | 修好一个偶发失败就把它从 `-skip` 里去掉；#386 |
 
 ## I. 运维文档与 runbook
 
@@ -102,7 +102,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 13 / PARTIAL 10 / NOT MET 12**。
+共 35 项：**MET 14 / PARTIAL 10 / NOT MET 11**。
 
 ## 最卡生产级的 5 项
 
