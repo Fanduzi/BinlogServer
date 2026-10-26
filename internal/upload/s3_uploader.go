@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe whose errors name the bucket and endpoint and not the credentials, deletion of one stored key, and HTTPS trust limited to upload.tls.ca_file when that path is set; a TLS handshake error is returned on the first attempt with its original text and one hint for plain HTTP, a hostname mismatch, or an unknown authority
+// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe whose errors name the bucket and endpoint and not the credentials, deletion of one stored key, and HTTPS trust limited to upload.tls.ca_file when that path is set; a TLS handshake error is returned on the first attempt with its original text and one hint for plain HTTP, a hostname mismatch, or an unknown authority; a protocol-version mismatch and a remote TLS alert keep that text; each call keeps its own TLS error
 // pos: outbound storage adapter for sealed binlog upload, checksum, download, and retention delete
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -52,7 +52,6 @@ type S3Uploader struct {
 	client   *minio.Client
 	bucket   string
 	endpoint string
-	tlsStop  *stopTLSRetry
 }
 
 // NewS3Uploader 校验配置并创建上传客户端。
@@ -70,7 +69,6 @@ func NewS3Uploader(cfg S3Config) (*S3Uploader, error) {
 	if caFile != "" && !cfg.UseSSL {
 		return nil, fmt.Errorf("upload.tls.ca_file requires upload.use_ssl: true")
 	}
-	var stop *stopTLSRetry
 	if cfg.UseSSL {
 		var pool *x509.CertPool
 		if caFile != "" {
@@ -85,7 +83,6 @@ func NewS3Uploader(cfg S3Config) (*S3Uploader, error) {
 			return nil, err
 		}
 		opts.Transport = tr
-		stop, _ = tr.(*stopTLSRetry)
 	}
 	client, err := minio.New(cfg.Endpoint, opts)
 	if err != nil {
@@ -96,14 +93,14 @@ func NewS3Uploader(cfg S3Config) (*S3Uploader, error) {
 		client:   client,
 		bucket:   cfg.Bucket,
 		endpoint: cfg.Endpoint,
-		tlsStop:  stop,
 	}, nil
 }
 
 // UploadFile 上传本地文件到指定 object key。
 func (u *S3Uploader) UploadFile(ctx context.Context, _ string, localPath, objectKey string) error {
+	ctx = withTLSSave(ctx)
 	_, err := u.client.FPutObject(ctx, u.bucket, filepath.ToSlash(objectKey), localPath, minio.PutObjectOptions{})
-	return u.finishTLS(err)
+	return u.finishTLS(ctx, err)
 }
 
 // ListObjects lists the keys under prefix with their sizes (design 0009
@@ -114,12 +111,13 @@ func (u *S3Uploader) ListObjects(ctx context.Context, prefix string, limit int) 
 	if u == nil || u.client == nil {
 		return nil, false, fmt.Errorf("object storage is not configured")
 	}
+	ctx = withTLSSave(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	out := map[string]int64{}
 	for obj := range u.client.ListObjects(ctx, u.bucket, minio.ListObjectsOptions{Prefix: filepath.ToSlash(prefix), Recursive: true}) {
 		if obj.Err != nil {
-			return nil, false, u.finishTLS(obj.Err)
+			return nil, false, u.finishTLS(ctx, obj.Err)
 		}
 		if limit > 0 && len(out) >= limit {
 			return out, true, nil
@@ -144,13 +142,14 @@ func (u *S3Uploader) SealedObjectMatches(ctx context.Context, localPath, objectK
 	if key == "" {
 		return false, fmt.Errorf("empty object key")
 	}
+	ctx = withTLSSave(ctx)
 	want, err := sealedETag(localPath, minioPartSize)
 	if err != nil {
 		return false, err
 	}
 	info, err := u.client.StatObject(ctx, u.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
-		return false, u.finishTLS(err)
+		return false, u.finishTLS(ctx, err)
 	}
 	st, err := os.Stat(localPath)
 	if err != nil {
@@ -222,9 +221,10 @@ func (u *S3Uploader) ProbeStorage(ctx context.Context) error {
 	if u == nil || u.client == nil {
 		return fmt.Errorf("object storage is not configured")
 	}
+	ctx = withTLSSave(ctx)
 	exists, err := u.client.BucketExists(ctx, u.bucket)
 	if err != nil {
-		return u.probeErr(u.finishTLS(err))
+		return u.probeErr(u.finishTLS(ctx, err))
 	}
 	if !exists {
 		return u.probeErr(fmt.Errorf("NoSuchBucket"))
@@ -245,12 +245,13 @@ func (u *S3Uploader) HeadObject(ctx context.Context, objectKey string) (int64, e
 	if key == "" {
 		return 0, fmt.Errorf("empty object key")
 	}
+	ctx = withTLSSave(ctx)
 	info, err := u.client.StatObject(ctx, u.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		if objectMissing(err) {
 			return 0, os.ErrNotExist
 		}
-		return 0, u.finishTLS(err)
+		return 0, u.finishTLS(ctx, err)
 	}
 	return info.Size, nil
 }
@@ -266,12 +267,13 @@ func (u *S3Uploader) OpenObject(ctx context.Context, objectKey string) (io.ReadC
 	if key == "" {
 		return nil, 0, fmt.Errorf("empty object key")
 	}
+	ctx = withTLSSave(ctx)
 	obj, err := u.client.GetObject(ctx, u.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		if objectMissing(err) {
 			return nil, 0, os.ErrNotExist
 		}
-		return nil, 0, u.finishTLS(err)
+		return nil, 0, u.finishTLS(ctx, err)
 	}
 	info, err := obj.Stat()
 	if err != nil {
@@ -279,7 +281,7 @@ func (u *S3Uploader) OpenObject(ctx context.Context, objectKey string) (io.ReadC
 		if objectMissing(err) {
 			return nil, 0, os.ErrNotExist
 		}
-		return nil, 0, u.finishTLS(err)
+		return nil, 0, u.finishTLS(ctx, err)
 	}
 	if info.Size < 0 {
 		_ = obj.Close()
@@ -299,11 +301,12 @@ func (u *S3Uploader) DeleteObject(ctx context.Context, objectKey string) error {
 	if key == "" {
 		return fmt.Errorf("empty object key")
 	}
+	ctx = withTLSSave(ctx)
 	err := u.client.RemoveObject(ctx, u.bucket, key, minio.RemoveObjectOptions{})
 	if err != nil && objectMissing(err) {
 		return nil
 	}
-	return u.finishTLS(err)
+	return u.finishTLS(ctx, err)
 }
 
 // objectTransport starts from minio's default (proxy from the environment,
@@ -326,9 +329,30 @@ func objectTransport(pool *x509.CertPool) (http.RoundTripper, error) {
 }
 
 type stopTLSRetry struct {
-	base  http.RoundTripper
-	mu    sync.Mutex
-	saved error
+	base http.RoundTripper
+}
+
+// tlsSave is the TLS error for one call. Concurrent calls each have their own.
+type tlsSave struct {
+	mu  sync.Mutex
+	err error
+}
+
+type tlsSaveKey struct{}
+
+func withTLSSave(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, tlsSaveKey{}, &tlsSave{})
+}
+
+func tlsSaveFrom(ctx context.Context) *tlsSave {
+	if ctx == nil {
+		return nil
+	}
+	box, _ := ctx.Value(tlsSaveKey{}).(*tlsSave)
+	return box
 }
 
 func (s *stopTLSRetry) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -336,38 +360,30 @@ func (s *stopTLSRetry) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err == nil || !tlsRetryHides(err) {
 		return resp, err
 	}
-	s.mu.Lock()
-	s.saved = err
-	s.mu.Unlock()
+	if box := tlsSaveFrom(req.Context()); box != nil {
+		box.mu.Lock()
+		box.err = err
+		box.mu.Unlock()
+	}
 	// Empty cert: minio stops retrying, and finishTLS can tell this sentinel
 	// from a real UnknownAuthorityError that carries a certificate.
 	return resp, x509.UnknownAuthorityError{}
 }
 
-func (s *stopTLSRetry) take() error {
-	if s == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	err := s.saved
-	s.saved = nil
-	return err
-}
-
-// finishTLS restores a TLS error that RoundTrip replaced so minio would not
-// retry, then classifies it. ponytail: one saved error per client; concurrent
-// TLS failures on the same client can swap text. The class is the endpoint's.
-func (u *S3Uploader) finishTLS(err error) error {
-	if u == nil || u.tlsStop == nil {
-		return err
-	}
-	saved := u.tlsStop.take()
+// finishTLS restores the TLS error this call's RoundTrip replaced so minio
+// would not retry, then classifies it.
+func (u *S3Uploader) finishTLS(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if saved != nil && replaceTLS(err) {
-		err = saved
+	if box := tlsSaveFrom(ctx); box != nil {
+		box.mu.Lock()
+		saved := box.err
+		box.err = nil
+		box.mu.Unlock()
+		if saved != nil && replaceTLS(err) {
+			err = saved
+		}
 	}
 	return annotateTLS(err)
 }
@@ -414,15 +430,18 @@ func loadCAFile(path string) (*x509.CertPool, error) {
 }
 
 // TLSTransportFailure reports an object-storage error that is a TLS mismatch
-// (private CA, a hostname mismatch, or HTTPS speaking to an HTTP endpoint),
-// not a missing bucket.
+// (private CA, a hostname mismatch, HTTPS speaking to an HTTP endpoint, a
+// protocol-version mismatch, or a remote TLS alert), not a missing bucket.
 func TLSTransportFailure(msg string) bool {
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "x509:") ||
 		strings.Contains(lower, "unknown authority") ||
 		strings.Contains(lower, "http response to https client") ||
 		strings.Contains(lower, "first record does not look like a tls handshake") ||
-		strings.Contains(lower, "failed to verify certificate")
+		strings.Contains(lower, "failed to verify certificate") ||
+		strings.Contains(lower, "protocol version not supported") ||
+		strings.Contains(lower, "unsupported protocol version") ||
+		strings.Contains(lower, "remote error: tls:")
 }
 
 const (

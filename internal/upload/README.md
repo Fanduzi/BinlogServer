@@ -1,7 +1,7 @@
 # internal/upload Module
 
 ## Files
-- `s3_uploader.go`: 对象存储上传。`UseSSL` 为 true 时走 HTTPS（进程配置 `upload.use_ssl` 默认 true），传输从 minio-go 的默认传输建起（环境变量代理和 SDK 超时），`CAFile`（`upload.tls.ca_file`）设置后只替换 `RootCAs`，是这个客户端唯一的信任库，主机名仍检查。TLS 握手错误第一次就返回，不重试到调用方超时。原文保留，并按类型加一句提示：明文端点是 `upload.use_ssl: false`，主机名不匹配不提 `ca_file`，未知 CA 才提 `upload.tls.ca_file`，其它错误不加提示。上传后用对象 HEAD 的 ETag 与封存文件对比（`SealedObjectMatches`），按已有 object key 打开已上传对象（本进程磁盘上没有该封存分段时供下载），以及按同一 key 删除对象（`DeleteObject`，对象不存在视为成功）。
+- `s3_uploader.go`: 对象存储上传。`UseSSL` 为 true 时走 HTTPS（进程配置 `upload.use_ssl` 默认 true），传输从 minio-go 的默认传输建起（环境变量代理和 SDK 超时），`CAFile`（`upload.tls.ca_file`）设置后只替换 `RootCAs`，是这个客户端唯一的信任库，主机名仍检查。TLS 握手错误第一次就返回，不重试到调用方超时。原文保留，并按类型加一句提示：明文端点是 `upload.use_ssl: false`，主机名不匹配不提 `ca_file`，未知 CA 才提 `upload.tls.ca_file`，协议版本不匹配和 `remote error: tls:` 不加提示。每次调用把自己的 TLS 错误放在该次 context 上，并发失败不串文。上传后用对象 HEAD 的 ETag 与封存文件对比（`SealedObjectMatches`），按已有 object key 打开已上传对象（本进程磁盘上没有该封存分段时供下载），以及按同一 key 删除对象（`DeleteObject`，对象不存在视为成功）。
 - `s3_uploader_test.go` 的 `TestUseSSLTrueSendsTLSClientHello`：`UseSSL` true 的第一字节是 TLS client hello，false 不是。`TestCAFileTrustsOnlyThatCA`：配了 CA 的探测不是 x509，错误 CA 和空 CA 是。
 - `tls_live_test.go` 的 `TestLiveS3TLS`（`BINLOG_TEST_TLS=1`，CI job `e2e-tls`）：私有 CA 的 MinIO，`upload.tls.ca_file` 经 HTTPS 上传一个分段，不受信任的 CA 失败。明文 MinIO 配 `use_ssl: true` 时错误含 `upload.use_ssl: false`，不含 `ca_file`。
 - `s3_uploader_test.go`: 上传、按 key 打开对象、以及删除对象的测试。

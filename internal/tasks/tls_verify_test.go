@@ -1,6 +1,6 @@
 // Package tasks proves a TLS verify failure on a leftover dump is terminal.
 // input: a stopped task with a pending Binlog Dump id and a KILL that returns an x509 error
-// output: FAILED, last_error contains the x509 text, and the runner does not start
+// output: FAILED, last_error contains the x509 text, and the runner does not start; one UPLOAD_RECORD_FAILED leaves UPLOAD_TLS and health 503; a protocol-version upload failure counts and stays UPLOAD_TLS
 // pos: unit coverage for a verify-identity change applied while a dump is still open
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -124,6 +124,50 @@ func TestUploadTLSClearsAfterSuccessfulRetry(t *testing.T) {
 	joined := strings.Join(h.Detail, " ")
 	if h.Status != HealthOK || !strings.Contains(joined, "NoSuchBucket") {
 		t.Fatalf("non-tls probe %+v", h)
+	}
+}
+
+func TestUploadRecordFailedKeepsUploadTLS(t *testing.T) {
+	const tlsLine = `object storage probe: Get "https://127.0.0.1:9000": x509: certificate signed by unknown authority`
+	s := NewScheduler()
+	s.SetVerifyStorageDetail(tlsLine)
+	s.reportFinding(Finding{
+		TaskID: "t1", Kind: FindingUploadRecordFailed, Subject: "mysql-bin.000001",
+		Severity: FindingWarning, Detail: "upload result (UPLOAD_FAILED) not written to the binlog catalog",
+	})
+	h := s.HealthSummary(context.Background())
+	if h.Status != HealthDegraded || !strings.Contains(strings.Join(h.Reasons, " "), "UPLOAD_TLS") || !strings.Contains(strings.Join(h.Reasons, " "), "x509") {
+		t.Fatalf("UPLOAD_RECORD_FAILED cleared the probe: %+v", h)
+	}
+}
+
+func TestProtocolVersionUploadCountsAsTLS(t *testing.T) {
+	name := "mysql-bin.000095"
+	objectKey := "prefix/c/u/" + name
+	const tlsErr = `Put "https://127.0.0.1:9000/binlog": remote error: tls: protocol version not supported`
+	store := newRetryTestFileStore()
+	uploader := &retryTestUploader{errByObject: map[string]error{objectKey: errors.New(tlsErr)}}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.files[task.ID] = []BinlogFile{{
+		TaskID: task.ID, FileName: name, FilePath: writeRetryTestFile(t, t.TempDir(), name),
+		SealedAt: time.Now(), UploadState: "UPLOAD_FAILED", ObjectKey: objectKey,
+	}}
+	before := UploadTLSFailures()
+	s.retryKnownFailedUploads()
+	h := s.HealthSummary(context.Background())
+	reasons := strings.Join(h.Reasons, " ")
+	if h.Status != HealthDegraded || !strings.Contains(reasons, "UPLOAD_TLS") || !strings.Contains(reasons, "protocol version not supported") {
+		t.Fatalf("health %+v", h)
+	}
+	if strings.Contains(reasons, "upload.tls.ca_file") || strings.Contains(reasons, "timed out") {
+		t.Fatalf("health rewrote the alert: %+v", h)
+	}
+	if got := UploadTLSFailures() - before; got != 1 {
+		t.Fatalf("upload tls failures +%d, want 1", got)
 	}
 }
 

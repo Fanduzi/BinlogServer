@@ -53,7 +53,7 @@ curl http://localhost:8080/metrics
 | 指标名 | 类型 | 标签 | 说明 |
 |--------|------|------|------|
 | `binlog_server_upload_failures_total` | gauge | - | 上传失败的文件记录数 |
-| `binlog_server_upload_tls_failures_total` | counter | - | 上传时 TLS 握手失败的次数。同一失败使 `/api/health` 为 503 `UPLOAD_TLS`。明文端点的错误提示 `upload.use_ssl: false`，主机名不匹配不提示 `ca_file`，未知 CA 提示 `upload.tls.ca_file`。校验和匹配的下一次成功上传或补传后回到 200；非 TLS 的上传失败不清这条 reason |
+| `binlog_server_upload_tls_failures_total` | counter | - | 上传时 TLS 握手失败的次数，含协议版本不匹配和 `remote error: tls:` 这类握手 alert。同一失败使 `/api/health` 为 503 `UPLOAD_TLS`。明文端点的错误提示 `upload.use_ssl: false`，主机名不匹配不提示 `ca_file`，未知 CA 提示 `upload.tls.ca_file`，协议版本和握手 alert 保留原文。校验和匹配的下一次成功上传或补传后回到 200；一次 `UPLOAD_RECORD_FAILED` 和非 TLS 的上传失败都不清这条 reason |
 | `binlog_server_upload_retry_total` | counter | `result` | 重试上传 API 调用结果（success/failed/skipped） |
 | `binlog_server_upload_retry_last_ts` | gauge | - | 最近一次重试上传 API 执行时间（Unix 时间戳） |
 

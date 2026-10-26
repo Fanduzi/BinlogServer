@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, a bucket HEAD that separates a missing bucket, an auth error, and a dead endpoint, and deletion of one stored key including a missing object; UseSSL true sends a TLS client hello; upload.tls.ca_file trusts only that CA (ADR 0012)
+// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, a bucket HEAD that separates a missing bucket, an auth error, and a dead endpoint, and deletion of one stored key including a missing object; UseSSL true sends a TLS client hello; upload.tls.ca_file trusts only that CA (ADR 0012); a protocol-version alert is not a probe timeout; concurrent TLS failures each keep their own text
 // pos: outbound storage adapter layer for sealed binlog upload and download
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -850,6 +851,93 @@ func TestCAFileTransportKeepsMinIODefaults(t *testing.T) {
 	}
 	if (got == nil) != (want == nil) || (got != nil && got.String() != want.String()) {
 		t.Fatalf("proxy %v, want %v", got, want)
+	}
+}
+
+func TestProbeStorage_ProtocolVersionIsNotATimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
+				// fatal protocol_version alert
+				_, _ = c.Write([]byte{21, 3, 1, 0, 2, 2, 70})
+			}(c)
+		}
+	}()
+	up, err := NewS3Uploader(S3Config{
+		Endpoint: ln.Addr().String(), Bucket: "binlog", AccessKey: "k", SecretKey: "s", UseSSL: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	err = up.ProbeStorage(ctx)
+	if err == nil || time.Since(start) > time.Second || strings.Contains(err.Error(), "timed out") || !TLSTransportFailure(err.Error()) || strings.Contains(err.Error(), "upload.tls.ca_file") || strings.Contains(err.Error(), "upload.use_ssl: false") {
+		t.Fatalf("protocol version after %s = %v", time.Since(start), err)
+	}
+	if !strings.Contains(err.Error(), "protocol version") && !strings.Contains(err.Error(), "remote error: tls:") {
+		t.Fatalf("protocol version text lost: %v", err)
+	}
+}
+
+type tlsTokKey struct{}
+
+type ctxErrRT struct{}
+
+func (ctxErrRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	msg, _ := req.Context().Value(tlsTokKey{}).(string)
+	return nil, errors.New(msg)
+}
+
+func TestFinishTLSConcurrentFailuresKeepOwnText(t *testing.T) {
+	const a = "tls: first record does not look like a TLS handshake marker-a"
+	const b = "remote error: tls: handshake failure marker-b"
+	stop := &stopTLSRetry{base: ctxErrRT{}}
+	ctxA := withTLSSave(context.WithValue(context.Background(), tlsTokKey{}, a))
+	ctxB := withTLSSave(context.WithValue(context.Background(), tlsTokKey{}, b))
+	req := func(ctx context.Context) *http.Request {
+		r, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://127.0.0.1/bucket", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	var rtA, rtB error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, rtA = stop.RoundTrip(req(ctxA))
+	}()
+	go func() {
+		defer wg.Done()
+		_, rtB = stop.RoundTrip(req(ctxB))
+	}()
+	wg.Wait()
+	u := &S3Uploader{}
+	wrap := func(err error) error {
+		return &url.Error{Op: "Get", URL: "https://127.0.0.1/bucket", Err: err}
+	}
+	gotA := u.finishTLS(ctxA, wrap(rtA))
+	gotB := u.finishTLS(ctxB, wrap(rtB))
+	if gotA == nil || !strings.Contains(gotA.Error(), "marker-a") || strings.Contains(gotA.Error(), "marker-b") {
+		t.Fatalf("A = %v", gotA)
+	}
+	if gotB == nil || !strings.Contains(gotB.Error(), "marker-b") || strings.Contains(gotB.Error(), "marker-a") || strings.Contains(gotB.Error(), "upload.tls.ca_file") {
+		t.Fatalf("B = %v", gotB)
 	}
 }
 
