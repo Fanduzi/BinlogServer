@@ -97,11 +97,11 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 |---|---|---|---|---|
 | J1 | 发布时必须有发布说明，4 个平台的包带 checksums，Linux 包过 glibc 兼容检查 | `release.yml`（v0.5.76 有 4 个包加 `checksums.txt`，我核对过 sha256） | MET | — |
 | J2 | 发布出来的二进制报告正确的 version 和 commit | `scripts/check-release-archive-identity.sh` 解包 linux_amd64 包，跑 `binlog-server version`，要求 `Version:` 等于 goreleaser 构建的版本（打 tag 时也等于去掉 `v` 的 tag）、`Commit:` 等于 `GITHUB_SHA`。`release.yml` 在发布前和发布后（发布会重新构建）各跑一次；`e2e.yml` 的 `release-archive` job 每个 PR 用 snapshot 构建跑同一个检查 | MET | — |
-| J3 | 打 tag 之前，这个 commit 已经过了全部 e2e（包括多节点 job） | 没有：`release.yml` 只跑 `go test ./...`，不检查 tag 所在 commit 的 CI 结果 | NOT MET | 要改 workflow |
+| J3 | 打 tag 之前，这个 commit 已经过了全部 e2e（包括多节点 job） | `release.yml` 的 `ci` job 调用整个 `e2e.yml`（`on: workflow_call`），`release` job `needs: [ci]`：tag 所在 commit 上每个按 PR 跑的 job（含 `e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover`）都通过才构建和发布。`internal/lintguard/release_gate_test.go`（`go test ./...`）锁住这层依赖，并且不许 `e2e.yml` 里出现只在手动触发或 push main 才跑的 job | MET | — |
 
 ## 计数
 
-共 35 项：**MET 16 / PARTIAL 7 / NOT MET 12**。
+共 35 项：**MET 17 / PARTIAL 7 / NOT MET 11**。
 
 ## 最卡生产级的 5 项
 
@@ -109,4 +109,4 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 2. **A1 还不是 MET，C6 仍是 NOT MET**：#462 的「cluster 删封存段没有 finding」已有单测（ADR 0011 PR-3），但 GTID 内部空洞和手动档 cluster e2e 还没进 CI，所以 A1 仍是 PARTIAL。所有权变化时 finding 单调（C6）要等 PR-5。#471 不合并。
 3. **F2、F4，失败到不了人**：评估器默认关，没有 `task_healthy`，没有 webhook，也没有随附的告警规则。
 4. **D3，备份是否可还原没人持续验证**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4 PARTIAL，等 ADR 0011 的主人）。可选的还原演练和真实 MinIO 还没有；没有覆盖查询和还原计划（ADR 0009 阶段 4、5）。
-5. **C4、J3、H2，CI 门禁有洞**：多节点 e2e 不挡 PR，发布不看 e2e，也不跑 -race。改 workflow 需要有 workflow 权限的 token。
+5. **H2，CI 不跑 -race**：多节点 e2e 已挡 PR（C4），发布要等 tag 所在 commit 过完 e2e（J3），但还不跑 `go test -race`。

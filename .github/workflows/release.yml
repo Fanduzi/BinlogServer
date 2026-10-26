@@ -12,7 +12,15 @@ permissions:
   contents: write
 
 jobs:
+  # Every per-PR job in e2e.yml (unit tests, quick and single-node scenarios,
+  # the cluster jobs, race and vet when present) runs again on the tagged
+  # commit; nothing is built or published unless all of them pass.
+  ci:
+    name: ci
+    uses: ./.github/workflows/e2e.yml
+
   release:
+    needs: [ci]
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
