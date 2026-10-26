@@ -76,6 +76,38 @@ jobs:
       - name: Verify Linux release archive, version and commit
         run: ./scripts/check-release-archive-identity.sh
 
+  race-and-vet:
+    if: ${{ !github.event.inputs.e2e_profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        # Known -race flakes, each with an open issue, are skipped here and
+        # still run in unit-and-e2e's plain go test ./...: #490
+        # (TestFailurePathMatrixMetaOutage, TestOpenEpochENOENTAfterTakeoverDoesNotFail),
+        # #504 (TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess,
+        # TestEvaluator_1500SegmentsUnder50ms), #439
+        # (TestApp_ProductionAuthProtectsRealRoutes), and
+        # TestTaskRecords_StopAndDeleteApplyWhenSaveFails (seen in the #507 QA,
+        # no issue yet). Drop a name when its flake is fixed.
+        run: |
+          go test -race -count=1 -timeout 30m \
+            -skip '^(TestFailurePathMatrixMetaOutage|TestOpenEpochENOENTAfterTakeoverDoesNotFail|TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess|TestEvaluator_1500SegmentsUnder50ms|TestApp_ProductionAuthProtectsRealRoutes|TestTaskRecords_StopAndDeleteApplyWhenSaveFails)$' \
+            ./...
+
   unit-and-e2e:
     if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover') }}
     runs-on: ubuntu-latest
