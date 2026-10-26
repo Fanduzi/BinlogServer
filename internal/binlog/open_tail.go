@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task segment directory and the bytes of its highest open segment
-// output: the GTIDs of every complete transaction in that segment, its previous-GTIDs text, and the resume cut: the end of the last complete transaction when the segment ends inside one that can be cut cleanly, otherwise the GTID of that unfinished transaction
+// output: the GTIDs of every complete transaction in that segment, its previous-GTIDs text, and the resume cut: the end of the last complete transaction when the segment ends inside one that can be cut cleanly, otherwise the GTID of that unfinished transaction; the file is opened through the counted walk seam
 // pos: the per-file scanner behind Ledger.Tail and Ledger.ResumeGTID (ledger.go); reconcile a checkpoint written after the segment flush with what the open segment really holds, so a resume never treats its own tail as a gap
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -9,7 +9,6 @@ import (
 	"bufio"
 	"encoding/binary"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 
@@ -55,7 +54,7 @@ type OpenTail struct {
 // ScanOpenTail reads one segment. ok is false when the file is unreadable or
 // has no event whose end log_pos is greater than 0.
 func ScanOpenTail(path string) (OpenTail, bool) {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return OpenTail{}, false
 	}

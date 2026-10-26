@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown (idle keep-alives and connections that have not sent a request are closed first, including one that reaches StateNew or StateIdle after that close has started, so they do not consume the budget), retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup or turning health red when the probe fails (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown (idle keep-alives and connections that have not sent a request are closed first, including one that reaches StateNew or StateIdle after that close has started (the shutting flag is stored before the idle snapshot), so they do not consume the budget), retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup or turning health red when the probe fails (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound
 // note P2-6.1 (§28): health.stale_after_sec (0 = 5×sweep, then the ADR 0011 floor max(2×sweep+lock_wait, min(S, RTO))) is EvaluatorConfig.StaleAfter
 // note P2-6.2 (§30): health.node_gone_after_sec (0 = 3×sweep) is EvaluatorConfig.NodeGoneAfter
 // pos: application composition layer that wires modules into runnable service modes
@@ -1184,13 +1184,25 @@ func (t *httpConnTrack) observe(c net.Conn, state http.ConnState) {
 	}
 }
 
+// connTrackSnap, when a test sets it, runs after shutting is stored and
+// before the idle snapshot. The lock is not held: the test can dial, and
+// ConnState then sees shutting already true. Moving the assignment to
+// after the snapshot makes the hook observe shutting still false.
+var connTrackSnap func(shutting bool)
+
 // closeIdle closes connections that are not serving a request, and arms the
 // hook so a StateNew or StateIdle connection that arrives afterwards is
-// closed too. The caller must not hold t.mu: Close runs the ConnState hook,
-// which takes t.mu.
+// closed too. shutting is stored before the snapshot. The caller must not
+// hold t.mu: Close runs the ConnState hook, which takes t.mu.
 func (t *httpConnTrack) closeIdle() {
 	t.mu.Lock()
 	t.shutting = true
+	armed := t.shutting
+	t.mu.Unlock()
+	if connTrackSnap != nil {
+		connTrackSnap(armed)
+	}
+	t.mu.Lock()
 	var drop []net.Conn
 	for c, state := range t.conns {
 		if state == http.StateIdle || state == http.StateNew {

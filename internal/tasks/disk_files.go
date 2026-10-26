@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: local data_dir and task id for a binlog segment directory
-// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out; a listing that re-reads the directory until segments stop being renamed or removed under it (#322) The adopt resume point is the last complete event end (DurableResume), then a sealed file's Rotate target, never a file size (#356).
+// output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out; a listing that re-reads the directory until segments stop being renamed or removed under it (#322) The adopt resume point is the last complete event end (DurableResume), then a sealed file's Rotate target, never a file size (#356). Directory reads, lstats and stats go through the counted walk seam. A regular file from that listing is not stat'ed again for its location.
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
 // note #405: diskNextSealedEpoch is one above the highest .sealed.eN (0 when none)
 // note: if this file changes, update this header and module README.md.
@@ -108,7 +108,7 @@ var diskListAfterReadDir func(dir string)
 
 // readSegmentNames is the segment basenames in dir. A missing dir is empty.
 func readSegmentNames(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := binlog.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -132,7 +132,7 @@ func readSegmentNames(dir string) ([]string, error) {
 func readSegmentEntry(dir, taskID, name string) (BinlogFile, bool, error) {
 	source, _, epoch, state, _ := classifyBinlogSegment(name)
 	full := filepath.Join(dir, name)
-	info, err := os.Lstat(full)
+	info, err := binlog.Lstat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return BinlogFile{}, false, nil
@@ -157,10 +157,13 @@ func readSegmentEntry(dir, taskID, name string) (BinlogFile, bool, error) {
 	if state == "SEALED" {
 		item.SealedAt = item.CreatedAt
 	}
+	if info.Mode().IsRegular() {
+		item.listedRegular = true
+	}
 	if start, end, ok := binlog.SegmentPositions(full); ok {
 		item.StartPos = FilePos(start)
 		item.EndPos = FilePos(end)
-	} else if _, err := os.Lstat(full); os.IsNotExist(err) {
+	} else if _, err := binlog.Lstat(full); os.IsNotExist(err) {
 		return BinlogFile{}, false, nil
 	}
 	return item, true, nil
@@ -365,6 +368,9 @@ func segmentLocation(dataDir string, file BinlogFile) string {
 }
 
 func segmentOnDisk(dataDir string, file BinlogFile) bool {
+	if file.listedRegular {
+		return true
+	}
 	name := segmentInventoryBasename(file)
 	if dir, ok := taskBinlogDir(dataDir, file.TaskID); ok && name != "" && regularFile(filepath.Join(dir, name)) {
 		return true
@@ -377,7 +383,7 @@ func segmentOnDisk(dataDir string, file BinlogFile) bool {
 }
 
 func regularFile(path string) bool {
-	info, err := os.Stat(path)
+	info, err := binlog.Stat(path)
 	return err == nil && info.Mode().IsRegular()
 }
 
@@ -553,7 +559,7 @@ func listDiskBackupTasks(dataDir string, known map[string]struct{}) ([]Task, err
 	if dataDir == "" {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(dataDir)
+	entries, err := binlog.ReadDir(dataDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -599,7 +605,7 @@ func lookupDiskBackupTask(dataDir, taskID string) (Task, bool, error) {
 	if !ok || strings.HasPrefix(taskID, ".") {
 		return Task{}, false, nil
 	}
-	info, err := os.Lstat(dir)
+	info, err := binlog.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Task{}, false, nil
@@ -699,7 +705,7 @@ func diskNextOpenEpoch(dataDir, taskID string) (int64, error) {
 	if !ok {
 		return 1, nil
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := binlog.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 1, nil
@@ -733,7 +739,7 @@ func diskNextSealedEpoch(dataDir, taskID string) (int64, error) {
 	if !ok {
 		return 0, nil
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := binlog.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil

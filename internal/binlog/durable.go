@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a task data directory and on-disk binlog segment bytes
-// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start; the highest open segment chosen for resume, shared with the open-tail scan; SegmentPositions is cached per path and file stamp (size, mtime, ctime), bounded
+// output: the source file and end log_pos of the last complete event in a task directory or in one segment, the cursor that finds where that event ends (skipping an artificial event whose end log_pos is 0), the start and end binlog positions of the contiguous event chain in one segment, whether a segment is only magic or a log_pos 0 header, and the next file named by a sealed rotate, and SegmentPositions as that cursor end plus the event-chain start; the highest open segment chosen for resume, shared with the open-tail scan; SegmentPositions is cached per path and file stamp (size, mtime, ctime), bounded; directory lists, stats and opens go through the counted walk seam
 // pos: shared durable-position reader used by the replication runner and the task resume API
 // note #405: HeaderEventsOnly is true for a file of only header events (format description, previous GTIDs, MariaDB GTID list and checkpoint, start v3, rotate) at any log_pos
 // note: if this file changes, update this header and module README.md.
@@ -56,7 +56,7 @@ func durableOpenSegment(taskDir string) (durableSegment, bool) {
 	if taskDir == "" {
 		return durableSegment{}, false
 	}
-	entries, err := os.ReadDir(taskDir)
+	entries, err := ReadDir(taskDir)
 	if err != nil {
 		return durableSegment{}, false
 	}
@@ -107,7 +107,7 @@ func durableOpenSegmentIn(taskDir string, entries []os.DirEntry) (durableSegment
 // at or after end. A segment with no event whose end log_pos is greater than
 // 0 is not a resume point.
 func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return 0, 0, 0, false
 	}
@@ -163,7 +163,7 @@ func DurableCursor(path string) (pos uint32, end int64, size int64, ok bool) {
 // leading format description does not pull start back across a gap. ok is
 // false when the file has no such event.
 func EventSpan(path string) (start, end uint32, ok bool) {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -226,7 +226,7 @@ func EventSpan(path string) (start, end uint32, ok bool) {
 // DurableCursor is not ok: the file is missing, partial, or has no complete event.
 // Cached per path and FileStamp (an open file that grows is read again).
 func SegmentPositions(path string) (start, end uint32, ok bool) {
-	info, err := os.Stat(path)
+	info, err := Stat(path)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -262,7 +262,7 @@ func segmentPositionsUncached(path string) (start, end uint32, ok bool) {
 // end log_pos is 0 also qualifies when the file ends on an event boundary.
 // A torn tail does not. An event whose end log_pos is greater than 0 does not.
 func PreambleOnly(path string) bool {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return false
 	}
@@ -308,7 +308,7 @@ func PreambleOnly(path string) bool {
 // content of its own (QA #404: a resumed open file before its first
 // transaction).
 func HeaderEventsOnly(path string) bool {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return false
 	}
@@ -351,7 +351,7 @@ func HeaderEventsOnly(path string) bool {
 // is ignored. ok is false when the last complete event is not a rotate.
 // A CRC32 trailer, when the format description says so, is not part of the name.
 func LastRotateTarget(path string) (nextFile string, nextPos uint32, endPos uint32, ok bool) {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return "", 0, 0, false
 	}

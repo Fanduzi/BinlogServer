@@ -1,7 +1,7 @@
 // Package binlog provides module-level functionality for binlog.
 // input: paths the segment walk stats, opens or lists
-// output: Stat, Open and ReadDir, each counted in WalkOps together with every StampOf; ResetWalkOps zeroes that count
-// pos: the filesystem seam the cold segment walk uses, so a nested stat, open or stamp cannot skip the count by avoiding the call in Chain.Segments
+// output: Stat, Lstat, Open, ReadDir and ReadFile, each counted in WalkOps together with every StampOf; ResetWalkOps zeroes that count
+// pos: the filesystem seam the cold segment walk uses, so a nested stat, open, list or read cannot skip the count by calling os directly
 // note: if this file changes, update this header and module README.md.
 package binlog
 
@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 )
 
-// walkOps counts Stat, Open, ReadDir, a ReadDir entry's Info, and StampOf.
+// walkOps counts Stat, Lstat, Open, ReadFile, ReadDir, a ReadDir entry's Info, and StampOf.
 // The evaluator's cold pass goes through these, so a nested walk that skips
 // the old per-segment counter still counts.
 var walkOps atomic.Int64
@@ -30,10 +30,22 @@ func Stat(name string) (os.FileInfo, error) {
 	return os.Stat(name)
 }
 
+// Lstat is os.Lstat, counted as one walk operation.
+func Lstat(name string) (os.FileInfo, error) {
+	noteWalk()
+	return os.Lstat(name)
+}
+
 // Open is os.Open, counted as one walk operation.
 func Open(name string) (*os.File, error) {
 	noteWalk()
 	return os.Open(name)
+}
+
+// ReadFile is os.ReadFile, counted as one walk operation.
+func ReadFile(name string) ([]byte, error) {
+	noteWalk()
+	return os.ReadFile(name)
 }
 
 // ReadDir is os.ReadDir, counted as one walk operation. Info on a returned

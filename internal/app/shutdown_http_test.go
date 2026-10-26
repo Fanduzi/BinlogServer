@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: an HTTP server built by buildHTTPServer, a raw connection that never sends a request, and one slow in-flight request
-// output: shutdownHTTP returns within 2s while the in-flight request still receives its full body; a connection that becomes StateNew after closeIdle has started does not keep Server.Shutdown busy for the HTTP budget
+// output: shutdownHTTP returns within 2s while the in-flight request still receives its full body; a connection that becomes StateNew after closeIdle has started does not keep Server.Shutdown busy for the HTTP budget; a connection dialed after shutting is stored and before the idle snapshot is already closed
 // pos: regression coverage for the HTTP shutdown that closes StateNew and StateIdle without cutting StateActive
 // note: if this file changes, update this header and module README.md.
 package app
@@ -121,5 +121,43 @@ func TestShutdownHTTP_StateNewArrivingDuringShutdown(t *testing.T) {
 	_ = srv.Shutdown(ctx)
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("connection accepted during shutdown blocked Shutdown for %s", d)
+	}
+}
+
+// TestShutdownHTTP_ShuttingIsSetBeforeTheSnapshot dials inside the gap
+// after shutting is stored and before the snapshot. The connection must
+// already be closed, and the hook must have observed shutting.
+func TestShutdownHTTP_ShuttingIsSetBeforeTheSnapshot(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(http.ResponseWriter, *http.Request) {})
+	srv, closeIdle, ln := shutdownTestServer(t, mux)
+	var raw net.Conn
+	connTrackSnap = func(shutting bool) {
+		if !shutting {
+			t.Errorf("shutting was false at the snapshot")
+		}
+		var err error
+		raw, err = net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Errorf("dial: %v", err)
+		}
+	}
+	t.Cleanup(func() { connTrackSnap = nil })
+	closeIdle()
+	if raw == nil {
+		t.Fatal("snapshot hook did not run")
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	_ = raw.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, err := raw.Read(buf); err == nil {
+		t.Fatal("connection accepted before the snapshot was left open")
+	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("connection accepted before the snapshot blocked Shutdown for %s", d)
 	}
 }
