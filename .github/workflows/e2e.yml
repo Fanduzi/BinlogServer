@@ -322,10 +322,12 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-upgrade-failback:
-    # D2: after the legacy repair, every sealed uploaded segment is taken off
-    # disk; /replay/archive must read them from MinIO, and its restore with
-    # mysqlbinlog 8.0 into a fresh MySQL must match A's CHECKSUM TABLE while the
-    # files stay off disk. Builds v0.5.57 and 0a84917a, so full history.
+    # D2: after the legacy repair, A rotates to a sealed boundary and split
+    # retention (local 1 day, bucket 30) removes every segment before it from
+    # disk. /replay/archive must GET each one from MinIO (mc admin trace), no
+    # copy may appear under data_dir, the server TMPDIR or /tmp, and the bucket
+    # members alone, restored with mysqlbinlog 8.0, must match A's CHECKSUM
+    # TABLE at the boundary. Builds v0.5.57 and 0a84917a, so full history.
     if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'upgrade-failback' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40

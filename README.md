@@ -254,6 +254,7 @@ Do not use permissive development defaults in production. Follow these mandatory
   ```bash
   curl -X POST http://localhost:8080/api/tasks/<task-id>/files/retry-upload?limit=100
   ```
+- **RPO if the disk is lost ([#530](https://github.com/Fanduzi/BinlogServer/issues/530)):** a segment is sealed, and only then uploaded, when the source moves to its next binlog file (`FLUSH BINARY LOGS`, reaching `max_binlog_size`, and so on). The open `.open.e<epoch>` segment exists only in `data_dir`. If the disk holding `data_dir` is lost, object storage restores only up to the last rotation; every transaction since then is lost, even though it was `fsync`ed, and a quiet source may not rotate for hours. To bound the window, run `FLUSH BINARY LOGS` on the source on a schedule (for example every 5–15 minutes), or lower `max_binlog_size`.
 - Download one listed segment without SSH. `name` is the basename from `GET /api/tasks/<task-id>/files` (a sealed name or `mysql-bin.000004.open.e1`). The response is the raw bytes, named as that file. Replay on the backup host still uses `GET /api/tasks/<task-id>/replay`.
   ```bash
   curl -fL -OJ -H "Authorization: Bearer $TOKEN" \

@@ -554,6 +554,10 @@ standalone 没配 `meta_dsn` 时，任务和位点仍只在内存，分段在磁
 
 对象存储只保存已经封存并且上传成功的文件。对象键是 `{upload.prefix/}{cluster_key}/{source_identity}/{封存文件名}`，没有 `.open.e`。`source_identity` 在 MySQL 上是 `server_uuid`，在 MariaDB 上是 `mariadb:<server_id>:<gtid_domain_id>`。正在写的分段不会出现在桶里。`UPLOAD_FAILED` 的封存文件仍在磁盘上。没配上传时桶是空的。
 
+**丢盘时的 RPO（[#530](https://github.com/Fanduzi/BinlogServer/issues/530)）：** 分段只在源库切到下一个 binlog 文件时（`FLUSH BINARY LOGS`、写满 `max_binlog_size` 等）封存，封存之后才上传。正在写的 `.open.e<epoch>` 只在 `data_dir` 里。`data_dir` 所在的盘丢了，对象存储只能恢复到最后一次切换为止，之后已经 `fsync` 的事务全部丢失；写入少的源库可能几个小时都不切换。要限定这个窗口，在源库上定时执行 `FLUSH BINARY LOGS`（例如每 5–15 分钟），或调小 `max_binlog_size`。
+
+English: **RPO if the disk is lost ([#530](https://github.com/Fanduzi/BinlogServer/issues/530)):** a segment is sealed, and only then uploaded, when the source moves to its next binlog file (`FLUSH BINARY LOGS`, reaching `max_binlog_size`, and so on). The open `.open.e<epoch>` segment exists only in `data_dir`. If the disk holding `data_dir` is lost, object storage restores only up to the last rotation; every transaction since then is lost, even though it was `fsync`ed, and a quiet source may not rotate for hours. To bound the window, run `FLUSH BINARY LOGS` on the source on a schedule (for example every 5–15 minutes), or lower `max_binlog_size`.
+
 封存分段上传之后，`GET /api/tasks/{id}/files` 和 Console 任务文件表的「校验」列给出 `checksum`。`match` 表示桶里该对象和这份封存文件是同一串字节：对象 HEAD 的 ETag 与本地文件一致（不超过 16MiB 时是整文件 MD5，更大时是与这次上传相同的 16MiB 分片 ETag）。`mismatch` 表示这次核对已经完成且字节不同。`checksum` 写成 `match` 只发生在这次 ETag 核对通过之后。对象 HEAD 失败时 `checksum` 留空，这一行仍是 `UPLOADED`，空值不是已校验。`mismatch` 或 HEAD 失败时拉流继续。
 
 复制循环下次打开文件时，会删掉修改时间早于 `storage.retention_days` 的其它已封存本地文件。当前这个 `.open.e<epoch>` 不删。保留清理也不删其它 open 分段，也不碰它们的对象。已经上传的封存分段会在同一次清理里从桶中删除，并删掉目录行。还在保留期内的对象不删。对象删除失败时本地文件留下，任务 `last_error` 以 `OBJECT_PURGE_FAILED` 开头，下次打开文件会再试。这次删除后来成功时，复制从下一个 binlog 文件继续，不会因为刚封存的文件已在磁盘上而停在 `sealed file already exists`。

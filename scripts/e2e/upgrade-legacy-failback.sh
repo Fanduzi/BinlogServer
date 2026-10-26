@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # input: two MySQL 8.0 servers in a GTID pair behind one TCP proxy, a meta MySQL, MinIO, and three binlog-server binaries (OLD, MID, NEW; default: built from v0.5.57, 0a84917a, and this checkout)
-# output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; object-only removes A's first-stint mysql-bin.00000N from disk so only its MinIO object holds it (Start must fetch it back), and after the repaired restore takes every sealed UPLOADED segment off disk again, requires /replay to mark them bucket, restores /replay/archive (read from MinIO) into a fresh MySQL whose CHECKSUM TABLE must match A, and fails if any removed file comes back to disk (D2); object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
-# pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1); not in any suite profile; e2e.yml e2e-upgrade-failback runs FBUP_CASE=object-only on every PR
+# output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; object-only creates the task with local_retention_days 1 and bucket_retention_days 30, moves A's first-stint mysql-bin.00000N off disk (mv) so only its MinIO object holds it (Start must fetch it back), and after the repaired restore runs D2: FLUSH BINARY LOGS on A sets a sealed boundary, every segment before it must be SEALED and UPLOADED, the product's split retention (files aged 2 days, then another rotation) removes them from disk, 30 more transactions go to the local open segment only, then /replay must mark each removed segment bucket, /replay/archive must issue at least one MinIO GetObject per removed object key (mc admin trace) and return the removed bytes, no byte-identical copy may exist under data_dir (dot dirs included), the server TMPDIR ($FBUP_WORK/tmp) or newer /tmp files after the archive read and after the restore, the bucket members alone must restore A's CHECKSUM TABLE and gtid_executed at the boundary, and the local post-boundary members on top must reach A's final checksum; object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
+# pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1) and the object-only restore (D2); not in any run-suite.sh profile; e2e.yml e2e-upgrade-failback runs FBUP_CASE=object-only on every PR and alone for e2e_profile=upgrade-failback
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
 
@@ -22,12 +22,17 @@ mkdir -p "$WORK/bin" "$WORK/out"
 WORK="$(cd "$WORK" && pwd)"
 DATA="$WORK/data"
 OUT="$WORK/out"
-SERVER_PID="" PROXY_PID=""
+# Every server runs with TMPDIR here so the object-only scan can see its temp files.
+SERVER_TMP="$WORK/tmp"
+mkdir -p "$SERVER_TMP"
+SERVER_PID="" PROXY_PID="" TRACE_PID=""
 
 log() { echo "[fbup] $*"; }
 die() { echo "[fbup] FAIL: $*" >&2; exit 1; }
 
 cleanup() {
+  # The object-only mc trace runs until killed; wait below would hang on it.
+  [[ -n "$TRACE_PID" ]] && kill "$TRACE_PID" 2>/dev/null || true
   [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
   pkill -f -- "-c $WORK/config.yaml" 2>/dev/null || true
   [[ -n "$PROXY_PID" ]] && kill "$PROXY_PID" 2>/dev/null || true
@@ -62,6 +67,8 @@ MYSQLBINLOG="${FBUP_MYSQLBINLOG:-$(command -v mysqlbinlog || true)}"
 
 # The MinIO image ships mc. A per-command alias: no mc config is written.
 mcx() { docker exec -e MC_HOST_fbup="http://minioadmin:minioadmin@127.0.0.1:${P_S3}" "$C_S3" mc "$@"; }
+# The restore MySQL's client, fed on stdin.
+restore_mysql() { docker exec -i "$C_RESTORE" mysql -uroot -proot -h127.0.0.1 -P"$P_RESTORE" --protocol=tcp "$@"; }
 objects() { mcx ls -r --json fbup/fbup 2>/dev/null | jq -r 'select(.key) | "\(.key) \(.size) \(.etag)"' | sort; }
 rows() { m "$P_META" "SELECT file_name, epoch, state, file_path, start_pos, end_pos, size_bytes, upload_state, object_key, checksum FROM fbup.binlog_files WHERE task_id='$TASK' ORDER BY file_name, epoch"; }
 
@@ -206,7 +213,7 @@ start_server() {
   ! curl -fsS "$API/api/tasks" >/dev/null 2>&1 || die "port $P_API is already serving; stop the earlier server first"
   # exec: SERVER_PID must be the server itself, or stop_server leaves it
   # running and the next build's health check reaches the old process.
-  (cd "$ROOT_DIR" && exec env -u BINLOG_SERVER_META_DSN "$bin" -c "$WORK/config.yaml" --encryption-key 0123456789abcdef0123456789abcdef >>"$OUT/server-$tag.out" 2>&1) &
+  (cd "$ROOT_DIR" && exec env -u BINLOG_SERVER_META_DSN TMPDIR="$SERVER_TMP" "$bin" -c "$WORK/config.yaml" --encryption-key 0123456789abcdef0123456789abcdef >>"$OUT/server-$tag.out" 2>&1) &
   SERVER_PID=$!
   local i
   for i in $(seq 1 60); do
@@ -297,27 +304,142 @@ else
 fi
 write_config
 
-# object_only_restore (D2): the restore above read files that Start fetched
-# back to disk. Here every sealed UPLOADED segment is taken off the disk
-# again, so /replay must mark each one bucket and /replay/archive must read it
-# from MinIO. The archive is applied to a fresh restore database and must
-# match A, and none of the removed files may come back to disk.
+# --- object-only (D2) begin: everything from here to "object-only (D2) end"
+# runs after the repaired restore. Helpers the block uses from above: m, log,
+# die, wait_cp, rows, write_load, mcx, restore_mysql; variables: API, TASK,
+# DATA, OUT, SERVER_TMP, P_A, P_META, MYSQLBINLOG, FIRST, FIRST_MD5.
+#
+# What it proves (D2): after a sealed boundary, every segment up to that
+# boundary is removed from local disk by the product's own split retention
+# (local_retention_days 1 < bucket_retention_days 30, so the object and the
+# catalog row stay), /replay marks each one bucket, /replay/archive serves
+# each one with at least one MinIO GetObject for its object key, no copy of
+# its bytes appears under data_dir (dot dirs included), the server TMPDIR or
+# new /tmp files, and the bucket members alone restore A's state at the
+# boundary. Writes after the boundary stay in the local open segment; they are
+# restored separately and labelled as local.
+
+declare -A D2_MD5=() D2_SIZE=()
+D2_MARK="" D2_N=0
+
+d2_path() { if [[ "$1" == /* ]]; then printf '%s\n' "$1"; else printf '%s\n' "$DATA/$1"; fi; }
+
+# d2_wait_sealed CUR GTID: the checkpoint covers GTID, every sealed row is
+# UPLOADED with an object key, and the only unsealed row is A's current
+# binlog CUR (the segment opened by the boundary rotation).
+d2_wait_sealed() {
+  local cur="$1" gtid="$2" i n open pending bad
+  wait_cp "$gtid"
+  for i in $(seq 1 120); do
+    open="$(m "$P_META" "SELECT file_name FROM fbup.binlog_files WHERE task_id='$TASK' AND state<>'SEALED'")"
+    bad=""
+    while IFS= read -r n; do
+      [[ -z "$n" || "$n" == "$cur" || "$n" == *".$cur" ]] || bad+=" $n"
+    done <<<"$open"
+    pending="$(m "$P_META" "SELECT COUNT(*) FROM fbup.binlog_files WHERE task_id='$TASK' AND state='SEALED' AND (upload_state<>'UPLOADED' OR object_key IS NULL OR object_key='')")"
+    [[ -z "$bad" && "$pending" == 0 ]] && return 0
+    sleep 1
+  done
+  rows | sed -e "s|$DATA/||g" -e 's/^/[fbup]   row /'
+  die "object-only: segments before the boundary $cur are not all sealed and uploaded (unsealed:${bad:- none}, not uploaded: $pending)"
+}
+
+# d2_scan TAG: fail if a byte-identical copy of any removed segment exists
+# under data_dir (recursive, dot dirs such as .cache included), the server's
+# TMPDIR, or among files under /tmp newer than the removal.
+d2_scan() {
+  local tag="$1" f sz md hits="" checked=0
+  while IFS= read -r -d '' f; do
+    sz="$(stat -c %s "$f" 2>/dev/null)" || continue
+    [[ -n "${D2_SIZE[$sz]:-}" ]] || continue
+    checked=$((checked + 1))
+    md="$(md5sum "$f" 2>/dev/null | awk '{print $1}')"
+    [[ -n "$md" && -n "${D2_MD5[$md]:-}" ]] && hits+=" ${f}=${D2_MD5[$md]}"
+  done < <(find "$DATA" "$SERVER_TMP" -type f -print0 2>/dev/null; find /tmp -xdev -path "$WORK" -prune -o -type f -newer "$D2_MARK" -print0 2>/dev/null)
+  [[ -z "$hits" ]] || die "object-only ($tag): a removed segment's bytes are on local disk:$hits"
+  log "object-only scan ($tag): no copy of the $D2_N removed segment(s) under $DATA (dot dirs included), $SERVER_TMP or new /tmp files ($checked same-size file(s) hashed)"
+}
+
 object_only_restore() {
-  local gone="$OUT/object-only-gone" ext="$OUT/object-only-archive" tarball="$OUT/object-only.tar"
-  local rel name path n=0 rc=0 want got
-  local -a removed=() members=() files=()
-  mkdir -p "$gone" "$ext"
-  while IFS=$'\t' read -r rel name; do
-    # file_path is absolute in NEW's rows and relative to $DATA in older ones.
-    if [[ "$rel" == /* ]]; then path="$rel"; else path="$DATA/$rel"; fi
+  local gone="$OUT/object-only-gone" ext="$OUT/object-only-archive" tarball="$OUT/object-only.tar" trace="$OUT/object-only-trace.json"
+  local rel name key path n=0 rc=0 i cur boundary_gtid boundary_sum final_gtid final_sum got got_gtid left attempt
+  local -a removed=() keys=() members=() bucket=() tail=() files=()
+  mkdir -p "$gone" "$ext" "$SERVER_TMP"
+
+  # 1. Sealed boundary: rotate A, then wait until everything before the new
+  # binlog is sealed and uploaded. A's state here is what the bucket alone
+  # must restore.
+  m "$P_A" "FLUSH BINARY LOGS"
+  cur="$(m "$P_A" "SHOW MASTER STATUS" | awk 'NR==1{print $1}')"
+  boundary_gtid="$(gtid_of "$P_A")"
+  boundary_sum="$(m "$P_A" "CHECKSUM TABLE fb.t" | awk '{print $2}')"
+  d2_wait_sealed "$cur" "$boundary_gtid"
+  log "object-only boundary: A rotated to $cur at $boundary_gtid checksum $boundary_sum; every earlier segment is sealed and uploaded"
+
+  # 2. The removal set: every sealed UPLOADED row at the boundary.
+  while IFS=$'\t' read -r rel name key; do
+    path="$(d2_path "$rel")"
     [[ -n "$rel" && -f "$path" ]] || die "object-only: sealed UPLOADED row $rel is not on disk before removal"
-    mv "$path" "$gone/$name"
+    cp -p "$path" "$gone/$name"
+    D2_MD5["$(md5sum "$path" | awk '{print $1}')"]="$name"
+    D2_SIZE["$(stat -c %s "$path")"]=1
     removed+=("$path")
+    keys+=("$key")
     n=$((n + 1))
-  done < <(m "$P_META" "SELECT file_path, SUBSTRING_INDEX(file_path, '/', -1) FROM fbup.binlog_files WHERE task_id='$TASK' AND state='SEALED' AND upload_state='UPLOADED' AND object_key IS NOT NULL AND object_key<>'' ORDER BY id")
+  done < <(m "$P_META" "SELECT file_path, SUBSTRING_INDEX(file_path, '/', -1), object_key FROM fbup.binlog_files WHERE task_id='$TASK' AND state='SEALED' AND upload_state='UPLOADED' AND object_key IS NOT NULL AND object_key<>'' ORDER BY id")
   [[ "$n" -gt 0 ]] || die "object-only: no sealed UPLOADED rows to remove"
-  [[ -f "$gone/$FIRST" ]] || die "object-only: $FIRST was not among the removed sealed UPLOADED rows"
-  log "object-only restore: removed $n sealed uploaded segment(s) from disk: $(printf '%s\n' "${removed[@]##*/}" | paste -sd' ')"
+  D2_N="$n"
+  [[ -f "$gone/$FIRST" ]] || die "object-only: $FIRST was not among the sealed UPLOADED rows"
+
+  # 3. Removal through the product: the task has local_retention_days 1 and
+  # bucket_retention_days 30. Age the files past the local window only, then
+  # rotate A; the runner's retention pass on the new file deletes the local
+  # files and keeps the objects and catalog rows. No file is moved or deleted
+  # by this script. A file the product keeps (for example an upload it has not
+  # verified) is retried after its re-check, then the step fails.
+  for attempt in 1 2 3; do
+    for path in "${removed[@]}"; do [[ -e "$path" ]] && touch -d '2 days ago' "$path"; done
+    m "$P_A" "FLUSH BINARY LOGS"
+    left=""
+    for i in $(seq 1 60); do
+      left=""
+      for path in "${removed[@]}"; do [[ -e "$path" ]] && left+=" ${path##*/}"; done
+      [[ -z "$left" ]] && break
+      sleep 1
+    done
+    [[ -z "$left" ]] && break
+    log "object-only retention attempt $attempt kept:$left; waiting for the upload re-check"
+    for i in $(seq 1 60); do
+      [[ "$(m "$P_META" "SELECT COUNT(*) FROM fbup.binlog_files WHERE task_id='$TASK' AND state='SEALED' AND upload_state<>'UPLOADED'")" == 0 ]] && break
+      sleep 2
+    done
+  done
+  [[ -z "$left" ]] || die "object-only: split retention did not remove:$left (product kept them; see RETENTION events)"
+  D2_MARK="$OUT/object-only.mark"
+  : >"$D2_MARK"
+  curl -fsS "$API/api/tasks/$TASK/events?limit=500" >"$OUT/object-only-events.json" || true
+  log "object-only removal: split retention removed $n sealed segment(s) from disk: $(printf '%s\n' "${removed[@]##*/}" | paste -sd' '); RETENTION_REMOVED events: $(jq -r '[.[]? | select(.type=="RETENTION_REMOVED")] | length' "$OUT/object-only-events.json" 2>/dev/null)"
+  for i in "${!removed[@]}"; do
+    [[ "$(m "$P_META" "SELECT COUNT(*) FROM fbup.binlog_files WHERE task_id='$TASK' AND state='SEALED' AND upload_state='UPLOADED' AND object_key='${keys[$i]}'")" == 1 ]] ||
+      die "object-only: retention dropped the catalog row for ${removed[$i]##*/}"
+  done
+
+  # 4. Writes after the boundary land in the local open segment only.
+  write_load "$P_A" 30 a4
+  final_gtid="$(gtid_of "$P_A")"
+  final_sum="$(m "$P_A" "CHECKSUM TABLE fb.t" | awk '{print $2}')"
+  wait_cp "$final_gtid"
+  [[ "$final_sum" != "$boundary_sum" ]] || die "object-only: the post-boundary writes did not change fb.t"
+
+  # 5. Count GetObject per object key while /replay and the archive are read.
+  mcx admin trace --json fbup >"$trace" 2>&1 &
+  TRACE_PID=$!
+  for i in $(seq 1 30); do
+    mcx stat "fbup/${keys[0]}" >/dev/null 2>&1 || true
+    grep -q '"api"\|"funcName"' "$trace" 2>/dev/null && break
+    sleep 1
+  done
+  grep -q '"api"\|"funcName"' "$trace" 2>/dev/null || { kill "$TRACE_PID" 2>/dev/null; die "object-only: mc admin trace never started"; }
 
   curl -fsS -G "$API/api/tasks/$TASK/replay" --data-urlencode "limit=200" >"$OUT/object-only-replay.json" || die "object-only: /replay failed"
   log "object-only replay: $(jq -c '{paths:[.paths[]? | split("/")[-1]], locations, warning}' "$OUT/object-only-replay.json")"
@@ -339,27 +461,72 @@ object_only_restore() {
     cmp -s "$ext/${rel##*/}" "$gone/${rel##*/}" || die "object-only: archive member ${rel##*/} differs from the removed file"
   done
   [[ "$(md5sum "$ext/$FIRST" | awk '{print $1}')" == "$FIRST_MD5" ]] || die "object-only: archive $FIRST differs from the first stint"
-  log "object-only archive: ${#members[@]} member(s) in order: $(printf '%s\n' "${members[@]}" | paste -sd' ')"
+  # The removed (bucket) members must come first; whatever follows was
+  # written after the boundary and is still local.
+  for name in "${members[@]}"; do
+    if printf '%s\n' "${removed[@]##*/}" | grep -qxF -- "$name"; then
+      [[ "${#tail[@]}" == 0 ]] || die "object-only: bucket member $name comes after local member ${tail[0]}"
+      bucket+=("$name")
+    else
+      tail+=("$name")
+    fi
+  done
+  [[ "${#bucket[@]}" == "$n" ]] || die "object-only: archive has ${#bucket[@]} of $n removed segment(s)"
+  log "object-only archive: ${#members[@]} member(s): bucket $(printf '%s\n' "${bucket[@]}" | paste -sd' ') | local after the boundary: $(printf '%s\n' "${tail[@]}" | paste -sd' ')"
+  d2_scan "after the archive read"
 
+  # 6. Restore the bucket members alone; they must reach A's boundary state.
   m "$P_RESTORE" "DROP DATABASE IF EXISTS fb" >/dev/null || true
   m "$P_RESTORE" "RESET MASTER" >/dev/null || m "$P_RESTORE" "RESET BINARY LOGS AND GTIDS" >/dev/null || true
-  docker exec -i "$C_RESTORE" mysql -uroot -proot -h127.0.0.1 -P"$P_RESTORE" --protocol=tcp <"$OUT/seed.sql" 2>/dev/null
-  for name in "${members[@]}"; do files+=("$ext/$name"); done
-  "$MYSQLBINLOG" "${files[@]}" 2>"$OUT/object-only.mbl.err" \
-    | docker exec -i "$C_RESTORE" mysql -uroot -proot -h127.0.0.1 -P"$P_RESTORE" --protocol=tcp --binary-mode 2>"$OUT/object-only.apply.err" || rc=$?
-  want="$(m "$P_A" "CHECKSUM TABLE fb.t" | awk '{print $2}')"
+  restore_mysql <"$OUT/seed.sql" 2>/dev/null
+  for name in "${bucket[@]}"; do files+=("$ext/$name"); done
+  "$MYSQLBINLOG" "${files[@]}" 2>"$OUT/object-only.mbl.err" | restore_mysql --binary-mode 2>"$OUT/object-only.apply.err" || rc=$?
   got="$(m "$P_RESTORE" "CHECKSUM TABLE fb.t" | awk '{print $2}')"
-  log "object-only restore apply rc=$rc $(grep -v Warning "$OUT/object-only.apply.err" | head -1) checksum A=$want restore=$got"
-  [[ "$rc" == 0 && -n "$want" && "$want" == "$got" ]] || die "object-only restore checksum A=$want restore=$got rc=$rc"
+  got_gtid="$(gtid_of "$P_RESTORE")"
+  log "object-only bucket-only restore rc=$rc $(grep -v Warning "$OUT/object-only.apply.err" | head -1) checksum boundary=$boundary_sum restore=$got"
+  [[ "$rc" == 0 && -n "$got" && "$got" == "$boundary_sum" ]] || die "object-only bucket-only restore checksum boundary=$boundary_sum restore=$got rc=$rc"
+  [[ "$(m "$P_A" "SELECT GTID_SUBSET('$boundary_gtid', '$got_gtid') AND GTID_SUBSET('$got_gtid', '$boundary_gtid')")" == 1 ]] ||
+    die "object-only bucket-only restore gtid $got_gtid is not the boundary $boundary_gtid"
+
+  # 7. The local post-boundary members on top reach A's final state.
+  files=()
+  for name in "${tail[@]}"; do files+=("$ext/$name"); done
+  rc=0
+  if [[ "${#files[@]}" -gt 0 ]]; then
+    "$MYSQLBINLOG" "${files[@]}" 2>>"$OUT/object-only.mbl.err" | restore_mysql --binary-mode 2>>"$OUT/object-only.apply.err" || rc=$?
+  fi
+  got="$(m "$P_RESTORE" "CHECKSUM TABLE fb.t" | awk '{print $2}')"
+  log "object-only bucket + local tail restore rc=$rc checksum A=$final_sum restore=$got"
+  [[ "$rc" == 0 && "$got" == "$final_sum" ]] || die "object-only bucket + local tail restore checksum A=$final_sum restore=$got rc=$rc"
   for rel in "${removed[@]}"; do
     [[ ! -e "$rel" ]] || die "object-only: ${rel##*/} came back to disk during the restore"
   done
-  log "evidence: object-only restore from MinIO ($n sealed segment(s) absent from disk, $FIRST among them) checksum $got matches A"
+  d2_scan "after the restore"
+
+  # 8. Every removed segment was read from MinIO.
+  sleep 2
+  kill "$TRACE_PID" 2>/dev/null || true
+  wait "$TRACE_PID" 2>/dev/null || true
+  TRACE_PID=""
+  local gets total=0 missing=""
+  for i in "${!keys[@]}"; do
+    gets="$(jq -R -r --arg p "/fbup/${keys[$i]}" 'fromjson? | select(((.api // .funcName // "") | test("GetObject")) and .path == $p and ((.statusCode // 200) < 300)) | .path' "$trace" 2>/dev/null | wc -l)"
+    total=$((total + gets))
+    [[ "$gets" -ge 1 ]] || missing+=" ${removed[$i]##*/}"
+  done
+  [[ -z "$missing" ]] || die "object-only: no MinIO GetObject for removed segment(s):$missing"
+  log "object-only GetObject: $total for the $n removed object key(s), at least one each"
+  log "evidence: object-only restore from MinIO ($n sealed segment(s) removed by split retention, $FIRST among them, $total GetObject) bucket-only checksum $boundary_sum matches A at the boundary $cur; with the local tail $final_sum matches A"
 }
+# --- object-only (D2) end
 
 log "=== OLD build: $OLD_BIN"
 start_server "$OLD_BIN" old
-body="$(jq -n --arg gs "$SEED_GTID" --argjson port "$P_VIP" '{name:"fbup",cluster_key:"fbup",source:{host:"127.0.0.1",port:$port,user:"repl",password:"replpass",flavor:"mysql",server_id:470001},start:{mode:"GTID",gtid_set:$gs},storage:{retention_days:7}}')"
+# object-only removes local files through split retention (local 1 day,
+# bucket 30 days): nothing is old enough until the D2 step ages it.
+storage='{"retention_days":7}'
+[[ "$CASE" == object-only ]] && storage='{"retention_days":7,"local_retention_days":1,"bucket_retention_days":30}'
+body="$(jq -n --arg gs "$SEED_GTID" --argjson port "$P_VIP" --argjson st "$storage" '{name:"fbup",cluster_key:"fbup",source:{host:"127.0.0.1",port:$port,user:"repl",password:"replpass",flavor:"mysql",server_id:470001},start:{mode:"GTID",gtid_set:$gs},storage:$st}')"
 TASK="$(curl -fsS -X POST "$API/api/tasks" -H 'Content-Type: application/json' -d "$body" | jq -r '.id')"
 curl -fsS -X POST "$API/api/tasks/$TASK/start" >/dev/null
 wait_state RUNNING
