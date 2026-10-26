@@ -57,6 +57,12 @@ func TestSessionKillDropsSleepingForUpdate(t *testing.T) {
 			if err := m.Up(); err != nil {
 				t.Fatal(err)
 			}
+			guardDB, err := sql.Open("mysql", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installOwnershipGuards(t, guardDB)
+			_ = guardDB.Close()
 			store, err := OpenClusterMeta(dsn, 15*time.Second, "", 4*time.Second, "off")
 			if err != nil {
 				t.Fatal(err)

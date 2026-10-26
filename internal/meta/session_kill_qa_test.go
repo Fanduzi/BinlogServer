@@ -62,6 +62,7 @@ func qaDeadlineMargin(t *testing.T, root string, i int, pre time.Duration) {
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
 	}
+	installOwnershipGuards(t, db)
 	taskID := "t-qa-margin"
 	if _, err := db.Exec(`INSERT INTO task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
 		VALUES (?, 'n1', 1, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR), UTC_TIMESTAMP(6))`, taskID); err != nil {
@@ -111,6 +112,7 @@ func qaPoolPressure(t *testing.T, root string, i int) {
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
 	}
+	installOwnershipGuards(t, db)
 	taskID := "t-qa-pool"
 	if _, err := db.Exec(`INSERT INTO task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
 		VALUES (?, 'n1', 1, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR), UTC_TIMESTAMP(6))`, taskID); err != nil {

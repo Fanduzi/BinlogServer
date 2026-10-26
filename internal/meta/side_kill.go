@@ -1,7 +1,7 @@
 // Package meta provides module-level functionality for meta.
 // input: cluster.side_kill, information_schema, and meta_canary when that table exists
 // output: side_kill on only after the canary passes; otherwise off, including while the switch is off and while the naming views return 1227 or 1142. The privilege probe reads one row (LIMIT 1); LIMIT 0 does not fill information_schema, so MariaDB would skip the PROCESS check. The second probe must still be the same sleeping transaction or the procedure is not called. The client never sends a server kill statement. sleepingLeaseHolder matches one task id exactly on MySQL and on MariaDB
-// pos: ADR 0011 PR-2 drill and auto (P2-9). Creating the procedure is a later migration
+// pos: ADR 0011 PR-2 drill and auto (P2-9). Migration 000011's guard installer creates the procedure; a missing procedure keeps side_kill off
 // note: if this file changes, update this header and module README.md.
 package meta
 

@@ -1564,7 +1564,7 @@ func expectSchemaCheckQueries(
 }
 
 func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
-	for _, version := range []int64{4, 5} {
+	for _, version := range []int64{4, 5, 10} {
 		t.Run(fmt.Sprintf("schema%d", version), func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			if err != nil {
@@ -1587,7 +1587,7 @@ func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
 				t.Fatalf("error should say schema version too old, got %v", err)
 			}
 			wantCurrent := fmt.Sprintf("current=%d", version)
-			if !strings.Contains(err.Error(), wantCurrent) || !strings.Contains(err.Error(), "required>=6") {
+			if !strings.Contains(err.Error(), wantCurrent) || !strings.Contains(err.Error(), "required>=11") {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -1598,8 +1598,14 @@ func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
 }
 
 func TestMySQLTaskStore_Schema6DropsFileEpochIndex(t *testing.T) {
-	if minRequiredSchemaVersion != 6 {
-		t.Fatalf("minRequiredSchemaVersion=%d, want 6", minRequiredSchemaVersion)
+	if minRequiredSchemaVersion != 11 {
+		t.Fatalf("minRequiredSchemaVersion=%d, want 11", minRequiredSchemaVersion)
+	}
+	if ClusterProtocolVersion != minRequiredSchemaVersion {
+		t.Fatalf("cluster protocol %d, want schema floor %d", ClusterProtocolVersion, minRequiredSchemaVersion)
+	}
+	if !strings.Contains(acquireWorkerRegistrationSQL, "11") {
+		t.Fatal("registration SQL must write protocol 11")
 	}
 	var indexes, columns []string
 	for _, table := range requiredTableSchemas {

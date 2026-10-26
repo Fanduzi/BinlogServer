@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: meta-primary MySQL, a MySQL 8 server, migrations through 000006, the current binlog-server binary, and the published v0.5.49 and v0.5.52 binaries
-# output: proof that 000005 still adds both unique keys, the current binary refuses schema 5, 000006 drops uk_task_file_epoch without deleting rows, the current binary starts on schema 6 and seals a task, v0.5.52 refuses schema 6 with missing index uk_task_file_epoch, and down restores that index with the binlog_files count unchanged
+# output: proof that 000005 still adds both unique keys, the current binary refuses schema 5, 000006 drops uk_task_file_epoch without deleting rows, the current binary starts on schema 11 and seals a task, v0.5.52 refuses schema 6 with missing index uk_task_file_epoch, and down restores that index with the binlog_files count unchanged
 # pos: acceptance check for ADR 0005 step 9 on a real metadata database
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -374,8 +374,8 @@ expect_missing_file_epoch() {
   fi
 }
 
-if ! grep -q 'const minRequiredSchemaVersion int64 = 6' "$ROOT_DIR/internal/meta/mysql_store.go"; then
-  fail "minRequiredSchemaVersion must be 6"
+if ! grep -q 'const minRequiredSchemaVersion int64 = 11' "$ROOT_DIR/internal/meta/mysql_store.go"; then
+  fail "minRequiredSchemaVersion must be 11"
 fi
 
 echo "[task-desired] scratch database $SCRATCH_DB"
@@ -497,19 +497,27 @@ files_before_000006="$(sql_one "SELECT COUNT(*) FROM binlog_files")"
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate up
 )
-# 000007 (task_findings), 000008 (binlog_files seal facts) and 000009 (health)
-# are additive and the floor stays 6. Step back to 6 so the 000006 assertions below see the
-# schema they were written for.
+# Later migrations are additive. Step back to 6 so the 000006 assertions see the
+# schema they were written for. The current binary's floor is 11, so it starts
+# only after migrate up returns here.
 (
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate goto 6
 )
 assert_schema6_catalog percona meta-primary "$SCRATCH_DB" "$files_before_000006"
 
-echo "[task-desired] start current binary against schema 6"
+echo "[task-desired] start current binary against schema 11"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate up
+)
 start_current "$SCRATCH_DSN" "$DATA_DIR" "$SERVER_LOG"
-wait_healthz "$SERVER_LOG" "schema 6"
+wait_healthz "$SERVER_LOG" "schema 11"
 kill_server
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$SCRATCH_DSN" go run ./cmd/migrate goto 6
+)
 
 echo "[task-desired] down 000006; uk_task_file_epoch returns and binlog_files count stays"
 files_before_down006="$(sql_one "SELECT COUNT(*) FROM binlog_files")"
@@ -624,26 +632,29 @@ echo "[task-desired] migrate up 000006 on MySQL 8"
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate up
 )
-# 000007 (task_findings), 000008 (binlog_files seal facts) and 000009 (health)
-# are additive and the floor stays 6. Step back to 6 so the 000006 assertions below see the
-# schema they were written for.
+# Later migrations are additive. Step back to 6 so the 000006 assertions see the
+# schema they were written for. The seal test and the current binary need schema 11.
 (
   cd "$ROOT_DIR"
   MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate goto 6
 )
 assert_schema6_catalog mysql80 mysql80 "$MYSQL80_DB" "$mysql80_before"
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate up
+)
 
-echo "[task-desired] seal, enroll, and upload epoch 0 and epoch 1 on schema 6"
+echo "[task-desired] seal, enroll, and upload epoch 0 and epoch 1 on schema 11"
 (
   cd "$ROOT_DIR"
   BINLOG_TEST_META_DSN="$MYSQL80_DSN" go test -count=1 -timeout 300s -run 'TestIssue189_SealedEpochsOnMySQL$' ./internal/replication/
 )
 
-echo "[task-desired] current binary on MySQL 8 schema 6 lists both epochs"
+echo "[task-desired] current binary on MySQL 8 schema 11 lists both epochs"
 MYSQL80_DATA="${DATA_DIR}-mysql80"
 MYSQL80_LOG="${SERVER_LOG}.mysql80"
 start_current "$MYSQL80_DSN" "$MYSQL80_DATA" "$MYSQL80_LOG"
-wait_healthz "$MYSQL80_LOG" "mysql80 schema 6"
+wait_healthz "$MYSQL80_LOG" "mysql80 schema 11"
 files_json="$(curl -fsS "$API/api/tasks/task-1/files")"
 printf '%s\n' "$files_json" | jq -e '
   ([.[] | select(.file_name=="mysql-bin.000009")] | length) == 2
@@ -654,6 +665,10 @@ printf '%s\n' "$files_json" | jq -e '
 ' >/dev/null
 printf '%s\n' "$files_json" | jq -r '.[] | select(.file_name=="mysql-bin.000009") | "\(.epoch // 0) \(.start_pos) \(.end_pos) \(.state)"'
 kill_server
+(
+  cd "$ROOT_DIR"
+  MIGRATE_ENV=dev META_DSN="$MYSQL80_DSN" go run ./cmd/migrate goto 6
+)
 
 echo "[task-desired] v0.5.52 refuses schema 6 with missing index uk_task_file_epoch"
 V0552_BIN="$(download_release 0.5.52)"
@@ -677,4 +692,4 @@ echo "[task-desired] current binary must refuse MySQL 8 schema 4"
 expect_refuse "$MYSQL80_DSN" "${DATA_DIR}-mysql80-schema4" "${SERVER_LOG}.mysql80.schema4" "mysql80 schema 4"
 
 compose_mysql mysql80 -e "DROP DATABASE IF EXISTS ${MYSQL80_DB};" >/dev/null
-echo "[task-desired] success: 000006 drops uk_task_file_epoch on Percona 5.7 and MySQL 8, schema 6 healthz, seal and files API, v0.5.49 healthz on schema 5, v0.5.52 missing index on schema 6, down keeps rows"
+echo "[task-desired] success: 000006 drops uk_task_file_epoch on Percona 5.7 and MySQL 8, schema 11 healthz, seal and files API, v0.5.49 healthz on schema 5, v0.5.52 missing index on schema 6, down keeps rows"

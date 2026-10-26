@@ -1,17 +1,21 @@
 // Package main provides module-level functionality for main.
 // input: migration files, META_DSN/env flags, golang-migrate driver dependencies
-// output: schema migration commands (up/down/version/force/goto) execution results
+// output: schema migration commands (up/down/version/force/goto) execution results; up and goto at schema 11 also install the ownership trigger and kill procedure
 // pos: database schema migration CLI for operational change management
 // note: if this file changes, update this header and module README.md.
 package main
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"binlog_server/internal/meta"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/mysql"
@@ -79,11 +83,10 @@ func newUpCommand(opts *migrateOptions) *cobra.Command {
 				return err
 			}
 			defer closeMigrator(m)
-			if err := m.Up(); err != nil {
-				if errors.Is(err, migrate.ErrNoChange) {
-					fmt.Println("no change")
-					return nil
-				}
+			if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+				return err
+			}
+			if err := installOwnershipGuards(opts); err != nil {
 				return err
 			}
 			version, dirty, err := m.Version()
@@ -209,11 +212,10 @@ func newGotoCommand(opts *migrateOptions) *cobra.Command {
 				return err
 			}
 			defer closeMigrator(m)
-			if err := m.Migrate(uint(version)); err != nil {
-				if errors.Is(err, migrate.ErrNoChange) {
-					fmt.Println("no change")
-					return nil
-				}
+			if err := m.Migrate(uint(version)); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+				return err
+			}
+			if err := installOwnershipGuards(opts); err != nil {
 				return err
 			}
 			fmt.Printf("version=%d dirty=false\n", version)
@@ -239,6 +241,37 @@ func closeMigrator(m *migrate.Migrate) {
 	if srcErr != nil || dbErr != nil {
 		fmt.Fprintf(os.Stderr, "close migrate resources warning: source=%v database=%v\n", srcErr, dbErr)
 	}
+}
+
+func installOwnershipGuards(opts *migrateOptions) error {
+	m, err := newMigrator(opts.path, opts.dsn)
+	if err != nil {
+		return err
+	}
+	defer closeMigrator(m)
+	version, dirty, err := m.Version()
+	if err != nil {
+		if errors.Is(err, migrate.ErrNilVersion) {
+			return nil
+		}
+		return err
+	}
+	if dirty || version < 11 {
+		return nil
+	}
+	db, err := sql.Open("mysql", driverDSN(opts.dsn))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	path := filepath.Join(opts.path, "000011_cluster_ownership.guards.sql")
+	return meta.InstallClusterOwnershipGuards(context.Background(), db, path)
+}
+
+func driverDSN(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	dsn = strings.TrimPrefix(dsn, "mysql://")
+	return dsn
 }
 
 func normalizeDSN(dsn string) string {

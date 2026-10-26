@@ -32,7 +32,7 @@ ORDER BY started_at DESC
 LIMIT ?;
 
 -- name: UpsertWorkerHeartbeat :exec
-INSERT INTO worker_heartbeats (worker_id, host, version, last_seen_at, status)
+INSERT INTO worker_heartbeats (worker_id, host, build_version, last_seen_at, status)
 VALUES (
   sqlc.arg(worker_id),
   sqlc.arg(host),
@@ -42,12 +42,12 @@ VALUES (
 )
 ON DUPLICATE KEY UPDATE
   host = VALUES(host),
-  version = VALUES(version),
+  build_version = VALUES(build_version),
   last_seen_at = VALUES(last_seen_at),
   status = VALUES(status);
 
 -- name: ListWorkerHeartbeats :many
-SELECT worker_id, host, version, last_seen_at, status
+SELECT worker_id, host, build_version AS version, last_seen_at, status
 FROM worker_heartbeats
 ORDER BY worker_id ASC
 LIMIT ?;

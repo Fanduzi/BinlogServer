@@ -59,6 +59,7 @@ func realCatalogTask(t *testing.T, root, name string) (*tasks.Scheduler, tasks.T
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
 	}
+	installOwnershipGuards(t, db)
 	store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 	data := t.TempDir()
 	s := tasks.NewScheduler(tasks.WithDataDir(data), tasks.WithFileStore(store))

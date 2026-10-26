@@ -11,7 +11,7 @@
 
 ## Dependencies
 - Upstream: 运维脚本/Makefile 调用。
-- Downstream: `migrations/`, `golang-migrate` 驱动。
+- Downstream: `migrations/`, `golang-migrate` 驱动。`up` 和 `goto` 在版本至少为 11 且不脏时，再执行 `000011_cluster_ownership.guards.sql`（触发器与 `binlog_server_kill_trx`）。`ErrNoChange` 也会再装一次，已经存在则跳过。
 
 ## Update Rule
 - 迁移命令行为、生产保护策略变化时，更新本文件。

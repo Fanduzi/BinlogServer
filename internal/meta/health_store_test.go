@@ -157,6 +157,7 @@ func TestHealthStoreContractOnMySQL(t *testing.T) {
 			if err := m.Up(); err != nil {
 				t.Fatal(err)
 			}
+			installOwnershipGuards(t, db)
 			store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 			storetest.Run(t, storetest.Harness{New: func(*testing.T) healthstore.Store { return store }, SetLease: setLease(db)})
 		})
@@ -191,6 +192,7 @@ func TestMigrateTo9FromEachVersion(t *testing.T) {
 				if err := m.Up(); err != nil {
 					t.Fatal(err)
 				}
+				installOwnershipGuards(t, db)
 				if v, dirty, _ := m.Version(); v != latest || dirty {
 					t.Fatalf("version %d dirty %v, want %d", v, dirty, latest)
 				}
@@ -225,6 +227,7 @@ func TestMigrateTo9FromEachVersion(t *testing.T) {
 				if err := m.Up(); err != nil {
 					t.Fatal(err)
 				}
+				installOwnershipGuards(t, db)
 				if _, err := store.ApplyTransitions(ctx, "t", f, []health.Transition{tr}, health.TaskHealth{TaskID: "t", Status: health.StatusUnhealthy}); err != nil {
 					t.Fatalf("after up again (re-probe, nothing remembered): %v", err)
 				}
@@ -240,6 +243,7 @@ func TestRehashCursorOnMySQL(t *testing.T) {
 		if err := m.Up(); err != nil {
 			t.Fatal(err)
 		}
+		installOwnershipGuards(t, db)
 		store := newMySQLTaskStoreFromDB(db, 5*time.Second)
 		if task, seg, err := store.LoadRehashCursor(ctx); err != nil || task != "" || seg != "" {
 			t.Fatalf("empty cursor %q %q %v", task, seg, err)

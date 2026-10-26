@@ -30,7 +30,7 @@ type Querier interface {
 	GetCurrentDBTime(ctx context.Context) (time.Time, error)
 	GetTaskLease(ctx context.Context, taskID string) (TaskLease, error)
 	ListTaskRuns(ctx context.Context, arg ListTaskRunsParams) ([]TaskRun, error)
-	ListWorkerHeartbeats(ctx context.Context, limit int32) ([]WorkerHeartbeat, error)
+	ListWorkerHeartbeats(ctx context.Context, limit int32) ([]ListWorkerHeartbeatsRow, error)
 	LoadTaskRunState(ctx context.Context, taskID string) (sql.NullString, error)
 	ReleaseTaskLease(ctx context.Context, arg ReleaseTaskLeaseParams) (sql.Result, error)
 	RenewTaskLease(ctx context.Context, arg RenewTaskLeaseParams) (sql.Result, error)
