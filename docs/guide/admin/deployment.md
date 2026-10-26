@@ -395,9 +395,9 @@ sudo systemctl status binlog-server
 
 源库复制和 meta 的 TLS 见 `docs/adr/0012-connection-tls.md` 与配置指南的 `meta.tls.*`、`source.tls`。两边默认都是 `disabled`：旧配置不写这些键时仍是明文，包括 `meta_dsn` 里已经带的 `tls=`。
 
-`upload.use_ssl` 的默认从 `false` 改为 `true`。端点写了、这个键没写的配置，升级后走 HTTPS。明文 HTTP 的对象存储（MinIO、没开 TLS 的 RGW）会在握手失败，上传和 HEAD 都失败。升级前对每个明文端点写上 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 只能是 `host[:port]`；带 `://` 的值启动即失败，错误说明默认已是 HTTPS。
+`upload.use_ssl` 的默认从 `false` 改为 `true`。端点写了、这个键没写的配置，升级后走 HTTPS。明文 HTTP 的对象存储（MinIO、没开 TLS 的 RGW）会在握手失败，上传和 HEAD 都失败。错误保留传输层原文，并提示设置 `upload.use_ssl: false` 或改端点，不会提示 `upload.tls.ca_file`。升级前对每个明文端点写上 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 只能是 `host[:port]`；带 `://` 的值启动即失败，错误说明默认已是 HTTPS。
 
-私有 CA 的 HTTPS 端点设置 `upload.tls.ca_file` 为该 CA 的 PEM。空着则用系统信任库。设置后这个客户端只信任该文件，主机名仍然检查。传输从 minio-go 的默认传输建起，只替换根证书。`upload.use_ssl: false` 时不能再写这个键。文件缺失或没有证书，启动失败，错误里是路径。错误 CA 在启动探针上直接是 x509 和 `UPLOAD_TLS`（503）；修好 CA 或端点并且有一次上传或补传成功后，`/api/health` 回到 200，不必重启。
+私有 CA 的 HTTPS 端点设置 `upload.tls.ca_file` 为该 CA 的 PEM。空着则用系统信任库。设置后这个客户端只信任该文件，主机名仍然检查。传输从 minio-go 的默认传输建起，只替换根证书。`upload.use_ssl: false` 时不能再写这个键。文件缺失或没有证书，启动失败，错误里是路径。错误 CA 在启动探针上直接是 x509 和 `UPLOAD_TLS`（503），并提示 `upload.tls.ca_file`。主机名不匹配提示主机名，不提示这份 CA。修好之后，校验和匹配的上传或补传成功，`/api/health` 回到 200，不必重启。非 TLS 的上传失败不会把这条 reason 清掉。
 
 `./migrate` 读同一份 `meta.tls`：`./migrate up --config /path/config.yaml --path ./migrations`。`--dsn` 和 `META_DSN` 覆盖文件里的 `meta_dsn`，TLS 块仍来自文件。不传 `--config` 时 DSN 原样使用，包括已经写上的 `tls=`。`disabled` 不改 DSN。其它模式拒绝 DSN 里已有的 `tls=`。
 

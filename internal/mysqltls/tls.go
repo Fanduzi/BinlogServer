@@ -1,6 +1,6 @@
 // Package mysqltls builds one TLS mode for the meta DSN and the source.
 // input: a tls block (mode, ca, cert, key, server_name) and the host being dialed
-// output: a tls.Config for go-mysql, or a meta DSN whose tls= parameter selects the same mode; errors that name the path and never the PEM; GreetingOffersTLS reads CLIENT_SSL from a server greeting; IsVerifyFailure marks an x509 check failure; PrefixMeta names a bare driver error as the meta pool
+// output: a tls.Config for go-mysql, or a meta DSN whose tls= parameter selects the same mode; errors that name the path and never the PEM; GreetingOffersTLS reads CLIENT_SSL from a server greeting; IsVerifyFailure marks an x509 check failure; PrefixMeta names a bare driver error as the meta pool when the text does not already contain meta.tls:
 // pos: the only place source and meta TLS modes are interpreted (ADR 0012)
 // note: if this file changes, update this header and module README.md.
 package mysqltls
@@ -58,8 +58,9 @@ func Preferred(c Config) bool {
 const clientSSL = uint32(1 << 11)
 
 // GreetingOffersTLS reports whether a server greeting payload (no packet
-// header) has CLIENT_SSL set. preferred falls back to plaintext only when
-// this is false. An auth error or a certificate error is not this case.
+// header) has CLIENT_SSL set. preferred continues plaintext on that same
+// socket only when this is false. An auth error or a certificate error is
+// not this case.
 func GreetingOffersTLS(payload []byte) bool {
 	if len(payload) < 1 || payload[0] != 10 {
 		return false
@@ -78,9 +79,10 @@ func GreetingOffersTLS(payload []byte) bool {
 }
 
 // PrefixMeta names a bare driver error as the meta pool. An error that
-// already says meta is unchanged, so startup and migrate do not stack prefixes.
+// already contains the prefix meta.tls: is unchanged, so startup and migrate
+// do not stack prefixes. A hostname such as metadb.example is not that prefix.
 func PrefixMeta(err error) error {
-	if err == nil || strings.Contains(err.Error(), "meta") {
+	if err == nil || strings.Contains(err.Error(), "meta.tls:") {
 		return err
 	}
 	return fmt.Errorf("meta.tls: %w", err)

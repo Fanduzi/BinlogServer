@@ -7,7 +7,7 @@
 | `auth.go` | 路由级鉴权配置与认证中间件、ServerOption 定义 |
 | `task_records_status_test.go` | 任务记录不可用时改动请求返回 503 `TASK_RECORDS_UNAVAILABLE`、状态冲突返回 409，不再 500 |
 | `health_degraded_test.go` | 打开的 CRITICAL finding（含未能持久化的）使 `/api/health` 返回 503 degraded，`/healthz` 不受影响 |
-| `health_upload_tls_test.go` | 启动探针的 x509 使 `/api/health` 返回 503 `UPLOAD_TLS`，补传成功后回到 200 |
+| `health_upload_tls_test.go` | 启动探针的 x509 使 `/api/health` 返回 503 `UPLOAD_TLS`；校验和匹配的补传成功后 `resolveFinding` 清掉它，回到 200 |
 | `findings.go` | `GET /api/tasks/{id}/findings` 与 `GET /api/findings`（ADR 0009 结论汇的读取面） |
 | `metrics_findings.go` | 结论汇指标：`binlog_server_finding_open` 始终至少一条序列，另有 reported/sink_errors/sink_pending/store_active |
 | `metrics_verify.go` | 阶段 3 巡检指标：`binlog_server_task_last_verified_timestamp`、`binlog_server_verify_bytes_total`、`binlog_server_verify_pass_incomplete`，以及 unverifiable、digest backfill、size unverifiable、deferred。演练关着时不打演练成功时间 |

@@ -91,7 +91,7 @@ func TestUploadTLSClearsAfterSuccessfulRetry(t *testing.T) {
 	name := "mysql-bin.000092"
 	objectKey := "prefix/c/u/" + name
 	store := newRetryTestFileStore()
-	s := NewScheduler(WithFileStore(store), WithFileUploader(&retryTestUploader{}))
+	s := NewScheduler(WithFileStore(store), WithFileUploader(&matchingRetryUploader{retryTestUploader: &retryTestUploader{}}))
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +125,37 @@ func TestUploadTLSClearsAfterSuccessfulRetry(t *testing.T) {
 	if h.Status != HealthOK || !strings.Contains(joined, "NoSuchBucket") {
 		t.Fatalf("non-tls probe %+v", h)
 	}
+}
+
+func TestNonTLSUploadFailureKeepsUploadTLS(t *testing.T) {
+	const tlsLine = `object storage probe: Get "https://127.0.0.1:9000": x509: certificate signed by unknown authority`
+	name := "mysql-bin.000094"
+	objectKey := "prefix/c/u/" + name
+	store := newRetryTestFileStore()
+	uploader := &retryTestUploader{errByObject: map[string]error{objectKey: errors.New("disk full")}}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.files[task.ID] = []BinlogFile{{
+		TaskID: task.ID, FileName: name, FilePath: writeRetryTestFile(t, t.TempDir(), name),
+		SealedAt: time.Now(), UploadState: "UPLOAD_FAILED", ObjectKey: objectKey,
+	}}
+	s.SetVerifyStorageDetail(tlsLine)
+	if _, err := s.RetryFailedUploads(task.ID, 10); err != nil {
+		t.Fatal(err)
+	}
+	h := s.HealthSummary(context.Background())
+	if h.Status != HealthDegraded || !strings.Contains(strings.Join(h.Reasons, " "), "UPLOAD_TLS") {
+		t.Fatalf("non-tls failure cleared the probe: %+v", h)
+	}
+}
+
+type matchingRetryUploader struct{ *retryTestUploader }
+
+func (matchingRetryUploader) SealedObjectMatches(context.Context, string, string) (bool, error) {
+	return true, nil
 }
 
 func TestHealthSummary_TLSTransportDegrades(t *testing.T) {

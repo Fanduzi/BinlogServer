@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a task's source config and a caller context
-// output: a go-mysql client connection with bounded dial, read and write, and source.tls (ADR 0012); preferred falls back only when that dial reports the server has no TLS
+// output: a go-mysql client connection with bounded dial, read and write, and source.tls (ADR 0012); preferred reads CLIENT_SSL on that connection and continues plaintext there when the greeting omits it
 // pos: the only way this module opens a SQL connection to the source (see source_conn_test.go)
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -9,7 +9,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"strings"
+	"io"
+	"net"
 	"time"
 
 	"binlog_server/internal/mysqltls"
@@ -26,17 +27,14 @@ var (
 	sourceIOTimeout      = 5 * time.Second
 )
 
-// mysqlServerRefusedTLS is the full sentence go-mysql returns after it has
-// read the greeting and the capability flags omit CLIENT_SSL. A shorter
-// substring would also match unrelated handshake text.
-const mysqlServerRefusedTLS = "the MySQL Server does not support TLS required by the client"
-
 // connectSource opens a SQL connection to the source. Every source
 // connection in this module must use it; a test fails on any other call.
-// preferred dials with TLS on that connection. It dials plaintext only when
-// go-mysql reports the server has no CLIENT_SSL. A greeting that cannot be
-// read, and any later handshake, auth, or certificate error, is returned.
-// The Connect call stays in this function.
+// preferred reads the greeting on the socket it keeps. CLIENT_SSL continues
+// as TLS on that socket. No CLIENT_SSL continues as plaintext on that socket:
+// closing it and dialing again is an aborted connect, and concurrent tasks
+// trip max_connect_errors before any success can reset the host cache.
+// A greeting that cannot be read is returned. Auth and certificate errors
+// are returned from that one socket. The Connect call stays in this function.
 func connectSource(ctx context.Context, source tasks.SourceConfig) (*sqlclient.Conn, error) {
 	tlsCfg, err := mysqltls.ClientConfig("source", source.TLS, source.Host)
 	if err != nil {
@@ -46,10 +44,14 @@ func connectSource(ctx context.Context, source tasks.SourceConfig) (*sqlclient.C
 		ctx = context.Background()
 	}
 	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-	dial := func(cfg *tls.Config) (*sqlclient.Conn, error) {
+	dial := func(conn net.Conn, cfg *tls.Config) (*sqlclient.Conn, error) {
 		dialCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
 		defer cancel()
-		return sqlclient.ConnectWithContext(dialCtx, addr, source.User, source.Password, "", sourceConnectTimeout, func(c *sqlclient.Conn) error {
+		dialer := (&net.Dialer{Timeout: sourceConnectTimeout}).DialContext
+		if conn != nil {
+			dialer = func(context.Context, string, string) (net.Conn, error) { return conn, nil }
+		}
+		return sqlclient.ConnectWithDialer(dialCtx, "tcp", addr, source.User, source.Password, "", dialer, func(c *sqlclient.Conn) error {
 			c.ReadTimeout = sourceIOTimeout
 			c.WriteTimeout = sourceIOTimeout
 			if cfg != nil {
@@ -58,11 +60,70 @@ func connectSource(ctx context.Context, source tasks.SourceConfig) (*sqlclient.C
 			return nil
 		})
 	}
-	conn, err := dial(tlsCfg)
-	if err != nil && tlsCfg != nil && mysqltls.Preferred(source.TLS) && strings.Contains(err.Error(), mysqlServerRefusedTLS) {
-		return dial(nil)
+	if tlsCfg == nil || !mysqltls.Preferred(source.TLS) {
+		return dial(nil, tlsCfg)
 	}
-	return conn, err
+	conn, payload, err := peekMySQLGreeting(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	if !mysqltls.GreetingOffersTLS(payload) {
+		tlsCfg = nil
+	}
+	return dial(conn, tlsCfg)
+}
+
+// prefixConn replays bytes already read from a MySQL socket, then the rest
+// of the connection. preferred uses it so the handshake continues on the
+// socket that sent the greeting.
+type prefixConn struct {
+	net.Conn
+	buf []byte
+}
+
+func (c *prefixConn) Read(p []byte) (int, error) {
+	if len(c.buf) == 0 {
+		return c.Conn.Read(p)
+	}
+	n := copy(p, c.buf)
+	c.buf = c.buf[n:]
+	return n, nil
+}
+
+// peekMySQLGreeting dials and reads one protocol packet. The returned conn
+// replays that packet. A short read closes the socket and returns the error.
+func peekMySQLGreeting(ctx context.Context, addr string) (net.Conn, []byte, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
+	defer cancel()
+	raw, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := raw.SetReadDeadline(time.Now().Add(sourceConnectTimeout)); err != nil {
+		raw.Close()
+		return nil, nil, err
+	}
+	hdr := make([]byte, 4)
+	if _, err := io.ReadFull(raw, hdr); err != nil {
+		raw.Close()
+		return nil, nil, err
+	}
+	n := int(hdr[0]) | int(hdr[1])<<8 | int(hdr[2])<<16
+	if n <= 0 || n > 1<<20 {
+		raw.Close()
+		return nil, nil, fmt.Errorf("source greeting length %d", n)
+	}
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(raw, payload); err != nil {
+		raw.Close()
+		return nil, nil, err
+	}
+	if err := raw.SetReadDeadline(time.Time{}); err != nil {
+		raw.Close()
+		return nil, nil, err
+	}
+	rawPacket := append(append([]byte{}, hdr...), payload...)
+	return &prefixConn{Conn: raw, buf: rawPacket}, payload, nil
 }
 
 // sourceSyncerTLS is the dump's TLS config. preferred probes once through

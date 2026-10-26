@@ -1,6 +1,6 @@
 // Package mysqltls tests the TLS block without a server.
 // input: PEM files generated in the test, including a key whose text must not appear in errors
-// output: shape errors, DSN rewrite, verify-ca versus verify-identity, and key material absent from errors
+// output: shape errors, DSN rewrite, verify-ca versus verify-identity, key material absent from errors, and PrefixMeta still prefixes a metadb.example hostname
 // pos: unit coverage for ADR 0012 config parsing and validation
 // note: if this file changes, update this header and module README.md.
 package mysqltls
@@ -238,6 +238,10 @@ func TestPrefixMeta(t *testing.T) {
 	}
 	if PrefixMeta(nil) != nil {
 		t.Fatal("nil")
+	}
+	name := PrefixMeta(errors.New("tls: failed to verify certificate: x509: certificate is valid for localhost, not metadb.example"))
+	if name == nil || name.Error() != "meta.tls: tls: failed to verify certificate: x509: certificate is valid for localhost, not metadb.example" {
+		t.Fatalf("server_name metadb.example was not prefixed: %v", name)
 	}
 }
 

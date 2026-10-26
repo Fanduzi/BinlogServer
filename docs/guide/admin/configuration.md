@@ -149,7 +149,7 @@ log:
 | `meta.tls.key` | string | - | 客户端私钥 PEM。和 `meta.tls.cert` 同时设置或同时为空。解析失败只报 `meta.tls: invalid client certificate or key`，不把私钥写进日志或错误。 |
 | `meta.tls.server_name` | string | 拨号主机 | 只用于 `verify-identity`。证书主机名必须匹配它；为空则用 DSN 里的主机。其它模式拒绝。 |
 
-`preferred` 在这条连接上先按 TLS 拨号、不校验证书。服务端问候包没有 `CLIENT_SSL` 时（go-mysql 返回 `the MySQL Server does not support TLS required by the client`）再拨一次明文，并且不能带客户端证书。读不到问候包、认证失败或证书错误不会退回明文。没有 TLS 的服务端上，失败的那一次 TLS 拨号会计一次中断连接，随后的明文握手会把 `max_connect_errors` 的计数清零。`required` 必须加密，不校验证书。`verify-ca` 必须加密，证书链必须接到 `meta.tls.ca`，不检查主机名。`verify-identity` 在此之上还检查主机名。环境变量是 `BINLOG_SERVER_META_TLS_MODE`、`BINLOG_SERVER_META_TLS_CA`、`BINLOG_SERVER_META_TLS_CERT`、`BINLOG_SERVER_META_TLS_KEY`、`BINLOG_SERVER_META_TLS_SERVER_NAME`。决定见 `docs/adr/0012-connection-tls.md`。
+meta 的 `preferred` 是驱动自带的 `tls=preferred`，不能带客户端证书。`required` 必须加密，不校验证书。`verify-ca` 必须加密，证书链必须接到 `meta.tls.ca`，不检查主机名。`verify-identity` 在此之上还检查主机名。拨号错误带 `meta.tls:` 前缀；`server_name` 写成 `metadb.example` 也不会省掉这个前缀。环境变量是 `BINLOG_SERVER_META_TLS_MODE`、`BINLOG_SERVER_META_TLS_CA`、`BINLOG_SERVER_META_TLS_CERT`、`BINLOG_SERVER_META_TLS_KEY`、`BINLOG_SERVER_META_TLS_SERVER_NAME`。决定见 `docs/adr/0012-connection-tls.md`。
 
 没配 `meta_dsn`，或该任务的 `binlog_files` 一条目录都没有时，`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`，列出封存文件和 `.open.e<epoch>` 分段。standalone 用同一个 `data_dir` 重启后，任务列表和 dashboard 会列出仍有这些分段的目录，id 就是目录名，files 用同一套扫描；没有源库账号，不能启动。配了 `meta_dsn` 时不从磁盘发现任务。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 保留 `.open.e<epoch>`。`start_pos` 和 `end_pos` 是 0。磁盘扫描不编造 checkpoint：没有位点行时 `GET /api/tasks/{id}/checkpoint` 仍是 `404`，正文是 `checkpoint not found`。该任务已有目录行时以目录为准，磁盘上多出来的文件不会列出。store 出错不会退回磁盘。用磁盘分段回放见 [部署指南「源库不可用时，用本地分段回放」](deployment.md#replay-local-segments)（English: [Replay local segments when the source is gone](deployment.md#replay-local-segments-en)）。
 
@@ -246,8 +246,8 @@ lease_renew_interval_sec < lease_ttl_sec < lease_grace_sec
 | `upload.secret_key` | string | - | Secret Key（推荐使用环境变量占位符） |
 | `upload.region` | string | - | 区域 |
 | `upload.prefix` | string | - | 对象前缀 |
-| `upload.use_ssl` | bool | true | 是否使用 HTTPS。省略等于 true。明文 HTTP 端点（MinIO、没开 TLS 的 RGW）必须写成 `false`，否则上传和 HEAD 会在 TLS 握手失败。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 是 `host[:port]`，不能带 `://`；写成 `http://...` 时启动失败，错误说明默认已是 HTTPS，并提示对明文端点设置 `upload.use_ssl: false`。 |
-| `upload.tls.ca_file` | string | - | 对象存储的 PEM CA。空则用系统信任库。设置后，这个客户端只信任该文件里的证书，主机名仍然检查。只在 `upload.use_ssl: true` 时允许；明文客户端配了它会启动失败。文件在创建客户端时读取。文件不存在或里面没有证书，启动错误写出路径，不写出 PEM。环境变量是 `BINLOG_SERVER_UPLOAD_TLS_CA_FILE`。HTTPS 客户端从 minio-go 的默认传输建起（环境变量代理、拨号和读头超时），设置了 `ca_file` 时只替换 `RootCAs`。私有 CA 的 HTTPS 端点不把这份 CA 放进系统信任库时，上传和 HEAD 第一次就返回 x509，启动探针不会把它写成 2 秒超时；每次这样的失败打 WARN，`/api/health` 变为 degraded（503），reason 以 `UPLOAD_TLS` 开头。之后有一次上传或补传成功，或探针文本被换成非 TLS 错误，这个 reason 就清掉，`/api/health` 回到 200。桶不存在这类探针失败仍只写 detail，status 保持 ok。 |
+| `upload.use_ssl` | bool | true | 是否使用 HTTPS。省略等于 true。明文 HTTP 端点（MinIO、没开 TLS 的 RGW）必须写成 `false`，否则上传和 HEAD 会在 TLS 握手失败。失败原文是 `first record does not look like a TLS handshake` 或 `server gave HTTP response to HTTPS client`，并提示设置 `upload.use_ssl: false` 或改端点，不会提示 `upload.tls.ca_file`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 是 `host[:port]`，不能带 `://`；写成 `http://...` 时启动失败，错误说明默认已是 HTTPS，并提示对明文端点设置 `upload.use_ssl: false`。 |
+| `upload.tls.ca_file` | string | - | 对象存储的 PEM CA。空则用系统信任库。设置后，这个客户端只信任该文件里的证书，主机名仍然检查。只在 `upload.use_ssl: true` 时允许；明文客户端配了它会启动失败。文件在创建客户端时读取。文件不存在或里面没有证书，启动错误写出路径，不写出 PEM。环境变量是 `BINLOG_SERVER_UPLOAD_TLS_CA_FILE`。HTTPS 客户端从 minio-go 的默认传输建起（环境变量代理、拨号和读头超时），设置了 `ca_file` 时只替换 `RootCAs`。私有 CA 的 HTTPS 端点不把这份 CA 放进系统信任库时，上传和 HEAD 第一次就返回原文 x509，并提示设置 `upload.tls.ca_file`，启动探针不会把它写成 2 秒超时。主机名不匹配（`x509.HostnameError`）提示主机名不符，不提示 `ca_file`。其它 TLS 错误保留原文、不加提示。每次 TLS 传输失败打 WARN，`/api/health` 变为 degraded（503），reason 以 `UPLOAD_TLS` 开头。校验和匹配的上传或补传成功，或探针文本被换成非 TLS 错误，这个 reason 就清掉，`/api/health` 回到 200。非 TLS 的上传失败不清。桶不存在这类探针失败仍只写 detail，status 保持 ok。 |
 | `upload.grace_sec` | int | 900 | 上传落后超过这么多秒才算 UPLOAD_LATE。不能为负 |
 | `upload.grace_task_sec` | map | 空 | 按任务 id 覆盖 `upload.grace_sec`。每个值必须是正整数 |
 
@@ -646,7 +646,7 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 
 ### 4.1 创建任务
 
-创建任务通过 `POST /api/tasks` 提交。`source.tls` 与 `meta.tls` 是同一块（`docs/adr/0012-connection-tls.md`）：`mode`（默认 `disabled`）、`ca`、`cert`、`key`、`server_name`。复制 SQL 和 binlog dump 用同一套。`disabled` 明文。`preferred` 先在这条连接上按 TLS 拨号、不校验证书，只有服务端没有 `CLIENT_SSL` 时才退回明文。`required` 必须加密，不校验证书。`verify-ca` 校验证书链、不查主机名。`verify-identity` 再查 `server_name`，为空则用 `source.host`。证书文件在 worker 拨号时读取，创建和更新只检查形状，不读文件。更新任务时省略 `source.tls` 保留已保存的块（控制台编辑不会清掉它）；`"tls": {"mode": "disabled"}` 才清除。集群写在 `source_json`，standalone 写在加密任务记录里，重启后还在。私钥路径可以出现在 API 响应里，文件内容不会。
+创建任务通过 `POST /api/tasks` 提交。`source.tls` 与 `meta.tls` 是同一块（`docs/adr/0012-connection-tls.md`）：`mode`（默认 `disabled`）、`ca`、`cert`、`key`、`server_name`。复制 SQL 和 binlog dump 用同一套。`disabled` 明文。`preferred` 在将要认证的那条连接上读问候包：有 `CLIENT_SSL` 就继续 TLS，没有就在同一条连接上继续明文，不先断开，所以没有 TLS 的源上重试和并发任务不会增加 `Aborted_connects` 或 `host_cache.SUM_CONNECT_ERRORS`，也不会触发 ERROR 1129。读不到问候包、认证失败或证书错误不另拨明文。`required` 必须加密，不校验证书。`verify-ca` 校验证书链、不查主机名。`verify-identity` 再查 `server_name`，为空则用 `source.host`。证书文件在 worker 拨号时读取，创建和更新只检查形状，不读文件。更新任务时省略 `source.tls` 保留已保存的块（控制台编辑不会清掉它）；`"tls": {"mode": "disabled"}` 才清除。集群写在 `source_json`，standalone 写在加密任务记录里，重启后还在。私钥路径可以出现在 API 响应里，文件内容不会。
 
 其中存储与保留策略参数由 `storage` 对象控制：
 - `storage.retention_days`: 保留天数（有效范围 `1` 到 `3650` 天，默认 `7` 天）。省略下面两个键时，这一个数同时是本地磁盘保留和桶保留，清理行为与只配这一个键时相同。

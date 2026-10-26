@@ -16,7 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,6 +144,191 @@ func TestLiveAppTLS(t *testing.T) {
 			t.Fatalf("wrong meta CA error = %v", err)
 		}
 	})
+}
+
+func TestLiveAppTLSPreferredNoAbort(t *testing.T) {
+	livemysql.Require(t)
+	t.Setenv("PRODUCTION", "")
+	port := livemysql.FreePort(t)
+	livemysql.StartMySQL(t, "binlog-g2-pref", port, "", false)
+	db := adminDB(t, port)
+	waitAdmin(t, db)
+	grantAppUsers(t, db)
+	// The published port is localhost inside the container, and MySQL does not
+	// count that toward max_connect_errors. Dial the bridge address instead.
+	host := containerIP(t, "binlog-g2-pref")
+	port = 3306
+	if _, err := db.Exec("SET GLOBAL max_connect_errors=2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("FLUSH HOSTS"); err != nil {
+		t.Fatal(err)
+	}
+	app, stop := startLiveApp(t, memoryAppConfig(t))
+	defer stop()
+	base := "http://" + app.Addr()
+
+	disabledBefore := connectErrorCounts(t, db)
+	disabledIDs := runPreferredBurst(t, base, host, port, "disabled", 430001)
+	retryTask(t, base, disabledIDs[0])
+	disabledAfter := connectErrorCounts(t, db)
+	t.Logf("disabled max_connect_errors=2 Aborted_connects %d -> %d SUM_CONNECT_ERRORS %d -> %d", disabledBefore.aborted, disabledAfter.aborted, disabledBefore.sum, disabledAfter.sum)
+	if disabledAfter.aborted != disabledBefore.aborted || disabledAfter.sum != disabledBefore.sum {
+		t.Fatalf("disabled connect errors %+v -> %+v", disabledBefore, disabledAfter)
+	}
+	for _, id := range disabledIDs {
+		postAction(t, base, id, "stop")
+		waitState(t, base, id, tasks.StateStopped)
+	}
+
+	before := connectErrorCounts(t, db)
+	beforeHosts := nonLoopbackConnections(t, db)
+	ids := runPreferredBurst(t, base, host, port, "preferred", 430011)
+	retryTask(t, base, ids[0])
+	after := connectErrorCounts(t, db)
+	afterHosts := nonLoopbackConnections(t, db)
+	t.Logf("preferred max_connect_errors=2 Aborted_connects %d -> %d (delta %d) SUM_CONNECT_ERRORS %d -> %d (delta %d) non-loopback connections %d -> %d host_cache %q", before.aborted, after.aborted, after.aborted-before.aborted, before.sum, after.sum, after.sum-before.sum, beforeHosts, afterHosts, after.cache)
+	if after.aborted != before.aborted || after.sum != before.sum {
+		t.Fatalf("preferred connect errors %+v -> %+v cache %s", before, after, after.cache)
+	}
+	if afterHosts <= beforeHosts {
+		t.Fatalf("preferred tasks did not connect from a non-loopback host (%d -> %d); max_connect_errors would not apply", beforeHosts, afterHosts)
+	}
+	for _, id := range ids {
+		task := waitState(t, base, id, tasks.StateRunning)
+		if strings.Contains(task.LastError, "1129") {
+			t.Fatalf("task %s ERROR 1129: %s", id, task.LastError)
+		}
+	}
+}
+
+type connectCounts struct {
+	aborted int
+	sum     int
+	cache   string
+}
+
+func connectErrorCounts(t *testing.T, db *sql.DB) connectCounts {
+	t.Helper()
+	var name, value string
+	if err := db.QueryRow("SHOW GLOBAL STATUS LIKE 'Aborted_connects'").Scan(&name, &value); err != nil {
+		t.Fatal(err)
+	}
+	aborted, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum int
+	if err := db.QueryRow("SELECT COALESCE(SUM(SUM_CONNECT_ERRORS),0) FROM performance_schema.host_cache").Scan(&sum); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query("SELECT IP, SUM_CONNECT_ERRORS, COUNT_HANDSHAKE_ERRORS FROM performance_schema.host_cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var cache strings.Builder
+	for rows.Next() {
+		var ip string
+		var sumErr, handshake int
+		if err := rows.Scan(&ip, &sumErr, &handshake); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&cache, "%s sum=%d handshake=%d; ", ip, sumErr, handshake)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return connectCounts{aborted: aborted, sum: sum, cache: cache.String()}
+}
+
+func containerIP(t *testing.T, name string) string {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name).Output()
+	if err != nil {
+		t.Fatalf("container ip: %v %s", err, out)
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" || ip == "127.0.0.1" || ip == "::1" {
+		t.Fatalf("container %s ip %q", name, ip)
+	}
+	return ip
+}
+
+func nonLoopbackConnections(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	err := db.QueryRow("SELECT COALESCE(SUM(TOTAL_CONNECTIONS),0) FROM performance_schema.hosts WHERE HOST IS NOT NULL AND HOST NOT IN ('localhost', '127.0.0.1', '::1')").Scan(&n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func runPreferredBurst(t *testing.T, base, host string, port int, mode string, serverIDBase uint32) []string {
+	t.Helper()
+	var wg sync.WaitGroup
+	ids := make([]string, 4)
+	errs := make([]error, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			cluster := fmt.Sprintf("g2-%s-%d", mode, i)
+			body := fmt.Sprintf(`{"name":%q,"cluster_key":%q,"source":{"host":%q,"port":%d,"user":"repl","password":"replpw","server_id":%d,"tls":{"mode":%q}},"start":{"mode":"LATEST"},"storage":{"retention_days":1}}`, cluster, cluster, host, port, serverIDBase+uint32(i), mode)
+			resp, err := http.Post(base+"/api/tasks", "application/json", strings.NewReader(body))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusCreated {
+				errs[i] = fmt.Errorf("create %d: %s", resp.StatusCode, raw)
+				return
+			}
+			var task tasks.Task
+			if err := json.Unmarshal(raw, &task); err != nil {
+				errs[i] = err
+				return
+			}
+			ids[i] = task.ID
+			start, err := http.Post(base+"/api/tasks/"+task.ID+"/start", "application/json", nil)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			raw, _ = io.ReadAll(start.Body)
+			start.Body.Close()
+			if start.StatusCode != http.StatusOK && start.StatusCode != http.StatusAccepted && start.StatusCode != http.StatusNoContent {
+				errs[i] = fmt.Errorf("start %d: %s", start.StatusCode, raw)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("task %d: %v", i, err)
+		}
+	}
+	for _, id := range ids {
+		got := waitState(t, base, id, tasks.StateRunning)
+		if strings.Contains(got.LastError, "1129") {
+			t.Fatalf("task %s ERROR 1129: %s", id, got.LastError)
+		}
+	}
+	return ids
+}
+
+func retryTask(t *testing.T, base, id string) {
+	t.Helper()
+	postAction(t, base, id, "stop")
+	waitState(t, base, id, tasks.StateStopped)
+	postAction(t, base, id, "start")
+	got := waitState(t, base, id, tasks.StateRunning)
+	if strings.Contains(got.LastError, "1129") {
+		t.Fatalf("retry %s ERROR 1129: %s", id, got.LastError)
+	}
 }
 
 func memoryAppConfig(t *testing.T) config.Config {

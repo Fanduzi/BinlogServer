@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: a fake object client and the startup probe timeout
-// output: proof that the probe deadline stays near 2s, a fast healthy probe is success, a timeout says "timed out after", and a failure is warn-level and names the bucket and endpoint without secrets
+// output: proof that the probe deadline stays near 2s, a fast healthy probe is success, a timeout says "timed out after", a deadline wrapped around x509 keeps the x509 text, and a failure is warn-level and names the bucket and endpoint without secrets
 // pos: startup object-probe tests for ADR 0009 phase 3
 // note: if this file changes, update this header and module README.md.
 package app
@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,19 @@ type leakyProbe struct{}
 
 func (leakyProbe) ProbeStorage(context.Context) error {
 	return errors.New("AccessDenied secret-value access-value")
+}
+
+type tlsThenDeadline struct{}
+
+func (tlsThenDeadline) ProbeStorage(context.Context) error {
+	return fmt.Errorf("Get \"https://127.0.0.1:9000\": x509: certificate signed by unknown authority: %w", context.DeadlineExceeded)
+}
+
+func TestObjectProbe_DeadlineDoesNotHideTLS(t *testing.T) {
+	detail := objectProbeDetail(context.Background(), tlsThenDeadline{}, nil, "binlogs", "127.0.0.1:9000", "", "")
+	if !strings.Contains(detail, "x509:") || strings.Contains(detail, "timed out after") {
+		t.Fatalf("detail %q", detail)
+	}
 }
 
 func TestObjectProbe_NamesBucketAndScrubsSecret(t *testing.T) {

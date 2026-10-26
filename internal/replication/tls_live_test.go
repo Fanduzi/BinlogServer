@@ -1,6 +1,6 @@
 // Package replication proves source and meta TLS against a real MySQL.
 // input: BINLOG_TEST_TLS=1, docker, openssl, and a generated test CA
-// output: verify-ca and verify-identity accept the test CA and reject a wrong CA or hostname on connectSource and on the meta DSN; preferred uses TLS when the server offers it and plaintext when the greeting has no TLS
+// output: verify-ca and verify-identity accept the test CA and reject a wrong CA or hostname on connectSource and on the meta DSN; preferred uses TLS when the server offers it and plaintext when the greeting has no TLS; a preferred auth failure does not open a second plaintext connection
 // pos: the CI e2e-tls job for connectSource modes (dump and meta pool TLS are TestLiveAppTLS)
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"binlog_server/internal/mysqltls"
 	"binlog_server/internal/tasks"
 
+	sqlclient "github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -49,6 +51,13 @@ func TestLiveMySQLTLS(t *testing.T) {
 		assertDialFails(t, ctx, replSource(tlsPort, "verify-identity", ca, "wrong.example"))
 		assertDialFails(t, ctx, replSource(tlsPort, "verify-identity", wrong, "mysql.tls.test"))
 
+		root, err := connectSource(ctx, rootSource(tlsPort, "required", "", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
+		beforeConn := globalStatus(t, root, "Connections")
+		beforeSSL := globalStatus(t, root, "Ssl_accepts")
 		bad := replSource(tlsPort, "preferred", "", "")
 		bad.Password = "not-the-password"
 		conn, err := connectSource(ctx, bad)
@@ -57,6 +66,11 @@ func TestLiveMySQLTLS(t *testing.T) {
 		}
 		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "access denied") {
 			t.Fatalf("preferred wrong password = %v", err)
+		}
+		deltaConn := globalStatus(t, root, "Connections") - beforeConn
+		deltaSSL := globalStatus(t, root, "Ssl_accepts") - beforeSSL
+		if deltaConn < 1 || deltaConn != deltaSSL {
+			t.Fatalf("preferred auth failure Connections +%d Ssl_accepts +%d (a second plaintext dial is a fallback on any error)", deltaConn, deltaSSL)
 		}
 	})
 
@@ -85,6 +99,23 @@ func replSource(port int, mode, ca, name string) tasks.SourceConfig {
 	src.User = "repl"
 	src.Password = "replpw"
 	return src
+}
+
+func globalStatus(t *testing.T, conn *sqlclient.Conn, name string) int {
+	t.Helper()
+	res, err := conn.Execute("SHOW GLOBAL STATUS LIKE '" + name + "'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := res.GetString(0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := strconv.Atoi(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func assertCipher(t *testing.T, ctx context.Context, src tasks.SourceConfig, wantTLS bool) {

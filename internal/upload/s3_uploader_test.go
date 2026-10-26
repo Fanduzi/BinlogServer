@@ -797,20 +797,18 @@ func TestProbeStorage_UntrustedCAIsNotATimeout(t *testing.T) {
 	if err == nil || !TLSTransportFailure(err.Error()) || strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("probe %v", err)
 	}
+	if !strings.Contains(err.Error(), "unknown authority") || !strings.Contains(err.Error(), "upload.tls.ca_file") || strings.Contains(err.Error(), "upload.use_ssl: false") {
+		t.Fatalf("probe %v", err)
+	}
+	var ua x509.UnknownAuthorityError
+	if !errors.As(err, &ua) {
+		t.Fatalf("probe %v lost the unknown-authority type", err)
+	}
 	if elapsed > time.Second {
 		t.Fatalf("probe took %s; a bad CA was retried until the deadline", elapsed)
 	}
 	if got := accepts.Load(); got != 1 {
 		t.Fatalf("accepts %d, want 1 (a bad CA is not retried)", got)
-	}
-	// minio-go retries unless *url.Error unwraps to UnknownAuthorityError.
-	// A nested CertificateVerificationError is what burns the probe deadline.
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		t.Fatalf("probe error %T", err)
-	}
-	if _, ok := ue.Unwrap().(x509.UnknownAuthorityError); !ok {
-		t.Fatalf("probe unwrap %T; minio retries this and the startup probe reports a timeout", ue.Unwrap())
 	}
 }
 
@@ -828,7 +826,7 @@ func TestCAFileTransportKeepsMinIODefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, ok := rt.(stopTLSRetry).base.(*http.Transport)
+	base, ok := rt.(*stopTLSRetry).base.(*http.Transport)
 	if !ok || base.Proxy == nil {
 		t.Fatal("transport is not minio's default")
 	}
@@ -853,6 +851,126 @@ func TestCAFileTransportKeepsMinIODefaults(t *testing.T) {
 	if (got == nil) != (want == nil) || (got != nil && got.String() != want.String()) {
 		t.Fatalf("proxy %v, want %v", got, want)
 	}
+}
+
+func TestProbeStorage_PlainHTTPHintsUseSSL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+	up, err := NewS3Uploader(S3Config{
+		Endpoint: endpoint, Bucket: "binlog", AccessKey: "k", SecretKey: "s", UseSSL: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = up.ProbeStorage(ctx)
+	if err == nil || !plainHTTPEndpoint(err.Error()) || !strings.Contains(err.Error(), "upload.use_ssl: false") || strings.Contains(err.Error(), "upload.tls.ca_file") {
+		t.Fatalf("plain HTTP = %v", err)
+	}
+}
+
+func TestAnnotateTLS_Classes(t *testing.T) {
+	httpErr := annotateTLS(errors.New("http: server gave HTTP response to HTTPS client"))
+	if httpErr == nil || !strings.Contains(httpErr.Error(), "HTTP response to HTTPS client") || !strings.Contains(httpErr.Error(), "upload.use_ssl: false") || strings.Contains(httpErr.Error(), "upload.tls.ca_file") {
+		t.Fatalf("http-to-https = %v", httpErr)
+	}
+	hostErr := annotateTLS(x509.HostnameError{Certificate: &x509.Certificate{DNSNames: []string{"wrong.example"}}, Host: "db.example"})
+	if hostErr == nil || !strings.Contains(hostErr.Error(), "hostname does not match") || strings.Contains(hostErr.Error(), "upload.tls.ca_file") || strings.Contains(hostErr.Error(), "upload.use_ssl: false") {
+		t.Fatalf("hostname = %v", hostErr)
+	}
+	uaErr := annotateTLS(x509.UnknownAuthorityError{})
+	if uaErr == nil || !strings.Contains(uaErr.Error(), "unknown authority") || !strings.Contains(uaErr.Error(), "upload.tls.ca_file") || strings.Contains(uaErr.Error(), "upload.use_ssl: false") {
+		t.Fatalf("unknown authority = %v", uaErr)
+	}
+	other := annotateTLS(x509.CertificateInvalidError{Reason: x509.Expired})
+	if other == nil || other.Error() != (x509.CertificateInvalidError{Reason: x509.Expired}).Error() || strings.Contains(other.Error(), "upload.tls.ca_file") || strings.Contains(other.Error(), "upload.use_ssl: false") {
+		t.Fatalf("other = %v", other)
+	}
+	again := annotateTLS(uaErr)
+	if again.Error() != uaErr.Error() {
+		t.Fatalf("hint stacked: %v", again)
+	}
+}
+
+func TestProbeStorage_HostnameMismatchHint(t *testing.T) {
+	caPEM, cert := certForName(t, "wrong.example")
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { defer c.Close(); _ = c.(*tls.Conn).Handshake() }(c)
+		}
+	}()
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	up, err := NewS3Uploader(S3Config{
+		Endpoint: ln.Addr().String(), Bucket: "binlog",
+		AccessKey: "k", SecretKey: "s", UseSSL: true, CAFile: caPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = up.ProbeStorage(ctx)
+	if err == nil || !strings.Contains(err.Error(), "hostname does not match") || strings.Contains(err.Error(), "upload.tls.ca_file") || strings.Contains(err.Error(), "upload.use_ssl: false") {
+		t.Fatalf("hostname = %v", err)
+	}
+	var host x509.HostnameError
+	if !errors.As(err, &host) {
+		t.Fatalf("hostname type lost: %v", err)
+	}
+}
+
+func certForName(t *testing.T, dnsName string) ([]byte, tls.Certificate) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "upload-test-ca"},
+		IsCA: true, BasicConstraintsValid: true,
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: dnsName},
+		DNSNames:     []string{dnsName},
+		NotBefore:    time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), tls.Certificate{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}
 }
 
 func privateServerCert(t *testing.T) ([]byte, tls.Certificate) {

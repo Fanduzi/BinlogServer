@@ -1,6 +1,6 @@
 // Package upload proves object-storage TLS against a private CA.
 // input: BINLOG_TEST_TLS=1, openssl, and a MinIO process (docker image or the GitHub release binary)
-// output: one sealed object uploaded over HTTPS with upload.tls.ca_file, and a failure when that CA is not trusted
+// output: one sealed object uploaded over HTTPS with upload.tls.ca_file, a failure when that CA is not trusted, and a plain-HTTP MinIO that tells the operator to set upload.use_ssl: false
 // pos: the CI e2e-tls proof that dropping the S3 TLS transport goes red
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,27 @@ func TestLiveS3TLS(t *testing.T) {
 	if err := newLiveUploader(t, endpoint, "").UploadFile(context.Background(), "g2", local, key+"-plain"); err == nil || !TLSTransportFailure(err.Error()) {
 		t.Fatalf("system roots = %v", err)
 	}
+
+	t.Run("plain-http", func(t *testing.T) {
+		plainPort := livemysql.FreePort(t)
+		plainData := filepath.Join(dir, "plain-data")
+		startPlainMinIO(t, plainPort, plainData)
+		waitPlainMinIO(t, plainPort)
+		plainEndpoint := fmt.Sprintf("127.0.0.1:%d", plainPort)
+		makePlainBucket(t, plainEndpoint)
+		up, err := NewS3Uploader(S3Config{
+			Endpoint: plainEndpoint, Bucket: "binlog", AccessKey: "minioadmin", SecretKey: "minioadmin", UseSSL: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = up.ProbeStorage(ctx)
+		if err == nil || !plainHTTPEndpoint(err.Error()) || !strings.Contains(err.Error(), "upload.use_ssl: false") || strings.Contains(err.Error(), "upload.tls.ca_file") {
+			t.Fatalf("plain HTTP MinIO = %v", err)
+		}
+	})
 }
 
 func newLiveUploader(t *testing.T, endpoint, ca string) *S3Uploader {
@@ -120,6 +142,62 @@ func startMinIO(t *testing.T, port int, certs, data string) {
 		t.Fatalf("docker run minio: %v\n%s", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+}
+
+func startPlainMinIO(t *testing.T, port int, data string) {
+	t.Helper()
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := minioBinary(t)
+	cmd := exec.Command(bin, "server", data, "--address", fmt.Sprintf("127.0.0.1:%d", port))
+	cmd.Env = append(os.Environ(), "MINIO_ROOT_USER=minioadmin", "MINIO_ROOT_PASSWORD=minioadmin")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+}
+
+func waitPlainMinIO(t *testing.T, port int) {
+	t.Helper()
+	url := fmt.Sprintf("http://127.0.0.1:%d/minio/health/live", port)
+	deadline := time.Now().Add(40 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+			last = fmt.Errorf("status %d", resp.StatusCode)
+		} else {
+			last = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("plain minio not ready: %v", last)
+}
+
+func makePlainBucket(t *testing.T, endpoint string) {
+	t.Helper()
+	client, err := minio.New(endpoint, &minio.Options{
+		Creds: credentials.NewStaticV4("minioadmin", "minioadmin", ""), Secure: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := client.MakeBucket(ctx, "binlog", minio.MakeBucketOptions{}); err != nil {
+		resp := minio.ToErrorResponse(err)
+		if resp.Code != "BucketAlreadyOwnedByYou" && resp.Code != "BucketAlreadyExists" {
+			t.Fatal(err)
+		}
+	}
 }
 
 func startMinIOBinary(t *testing.T, port int, certs, data string) {

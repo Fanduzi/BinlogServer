@@ -1,6 +1,6 @@
 // Package api proves UPLOAD_TLS on GET /api/health follows the current transport.
 // input: a scheduler whose startup probe detail is an x509 error, then a retry that stores the object
-// output: 503 with UPLOAD_TLS while the probe line is current, then 200 after the retry succeeds
+// output: 503 with UPLOAD_TLS while the probe line is current, then 200 after a checksum-matching retry succeeds (resolveFinding, not the empty-checksum report)
 // pos: HTTP proof that a fixed CA or endpoint does not leave /api/health failed until restart
 // note: if this file changes, update this header and module README.md.
 package api
@@ -101,3 +101,7 @@ func (s *uploadTLSFiles) ListFailedUploadBinlogFiles(_ context.Context, _ string
 type uploadTLSPut struct{}
 
 func (uploadTLSPut) UploadFile(context.Context, string, string, string) error { return nil }
+
+func (uploadTLSPut) SealedObjectMatches(context.Context, string, string) (bool, error) {
+	return true, nil
+}
