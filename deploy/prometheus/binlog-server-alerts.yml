@@ -1,0 +1,133 @@
+# Recommended alerts for Binlog Server (ADR 0009 decision 1, ADR 0013).
+# Scrape every node. A task is exported only by the node that evaluates it.
+# job_name in the scrape config must be binlog-server (BinlogProcessDown).
+groups:
+  - name: binlog-server
+    rules:
+      - alert: BinlogTaskUnhealthy
+        expr: binlog_server_task_healthy == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "task {{ $labels.task_id }} is unhealthy ({{ $labels.reason }})"
+
+      - alert: BinlogTaskProgressAge
+        expr: binlog_server_task_progress_age_seconds > 45
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "task {{ $labels.task_id }} progress age is high"
+
+      - alert: BinlogTaskUploadLag
+        expr: binlog_server_task_upload_lag_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "task {{ $labels.task_id }} upload lag is over 15m"
+
+      - alert: BinlogTaskOpenCritical
+        expr: binlog_server_task_open_critical > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "task {{ $labels.task_id }} has open critical findings"
+
+      - alert: BinlogFindingCritical
+        expr: binlog_server_finding_open{severity="CRITICAL"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "task {{ $labels.task_id }} finding {{ $labels.kind }} is critical"
+
+      - alert: BinlogVerifyStale
+        expr: (time() - binlog_server_task_last_verified_timestamp) > 172800 and binlog_server_task_last_verified_timestamp > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "task {{ $labels.task_id }} last verified more than 48h ago"
+
+      - alert: BinlogProcessDown
+        expr: up{job="binlog-server"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "binlog-server scrape target is down"
+
+      - alert: TaskHighLag
+        expr: binlog_server_replication_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "task {{ $labels.task_id }} has high replication lag"
+
+      - alert: SourceSwitchStopped
+        expr: binlog_server_source_switchovers{outcome="stopped"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "task {{ $labels.task_id }} stopped on a source switchover"
+
+      - alert: SourceSwitchContinued
+        expr: binlog_server_source_switchovers{outcome="continued"} > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "task {{ $labels.task_id }} continued after a source switchover"
+
+      - alert: TaskCheckpointStale
+        expr: binlog_server_checkpoint_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "task {{ $labels.task_id }} checkpoint is stale"
+
+      - alert: TaskInFailedState
+        expr: binlog_server_task_state_count{state="FAILED"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "a task is in FAILED state"
+
+      - alert: NoActiveWorkers
+        expr: sum(binlog_server_worker_online) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "no active workers in the cluster"
+
+      - alert: WorkerOffline
+        expr: binlog_server_worker_online == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "worker {{ $labels.worker_id }} is offline"
+
+      - alert: UploadFailuresExist
+        expr: binlog_server_upload_failures_total > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "upload failures exist"
+
+      - alert: UploadRetryFailing
+        expr: rate(binlog_server_upload_retry_total{result="failed"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "upload retry is failing"

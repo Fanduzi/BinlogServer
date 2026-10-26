@@ -10,6 +10,7 @@
 | `health_upload_tls_test.go` | 启动探针的 x509 使 `/api/health` 返回 503 `UPLOAD_TLS`；校验和匹配的补传成功后 `resolveFinding` 清掉它，回到 200 |
 | `findings.go` | `GET /api/tasks/{id}/findings` 与 `GET /api/findings`（ADR 0009 结论汇的读取面） |
 | `metrics_findings.go` | 结论汇指标：`binlog_server_finding_open` 始终至少一条序列，另有 reported/sink_errors/sink_pending/store_active |
+| `metrics_health.go` | F2：`binlog_server_task_healthy{task_id,reason}` 以及 progress age、upload lag、open CRITICAL。没有评估结果时输出一条 `task_id=""`、`reason="ok"`、值为 1 的序列 |
 | `metrics_verify.go` | 阶段 3 巡检指标：`binlog_server_task_last_verified_timestamp`、`binlog_server_verify_bytes_total`、`binlog_server_verify_pass_incomplete`，以及 unverifiable、digest backfill、size unverifiable、deferred。演练关着时不打演练成功时间 |
 | `verifier_api_test.go` | 工人发现缺本地文件或坏对象后，`GET /api/tasks/{id}/findings` 返回该 finding，`/api/health` degraded，`/metrics` 带巡检序列 |
 | `auth_status_test.go` | 鉴权失败状态码回归测试（一律 401） |

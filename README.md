@@ -334,6 +334,7 @@ BinlogServer is structured as a modular control plane with clear separation betw
 | `internal/mysqltls` | TLS modes for the source replication connection and the meta DSN (ADR 0012) | [internal/mysqltls/README.md](internal/mysqltls/README.md) |
 | `internal/logging` | Logger setup and log output rotation | [internal/logging/README.md](internal/logging/README.md) |
 | `internal/meta` | Metadata storage, schema checks, lease-backed coordination data | [internal/meta/README.md](internal/meta/README.md) |
+| `internal/notify` | One generic JSON webhook for health transitions and CRITICAL findings (ADR 0009 decision 1) | [internal/notify/README.md](internal/notify/README.md) |
 | `internal/ownership` | Task-ownership transition (ADR 0011). Session timeouts and META_LOCK_STALLED call this package. Scheduler failover cutover is a later change | [internal/ownership/README.md](internal/ownership/README.md) |
 | `internal/replication` | MySQL replication pull loop and durable local write path | [internal/replication/README.md](internal/replication/README.md) |
 | `internal/tasks` | Task state machine, scheduling, and execution orchestration | [internal/tasks/README.md](internal/tasks/README.md) |

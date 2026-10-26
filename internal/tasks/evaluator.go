@@ -10,6 +10,7 @@
 // note P2-6.1 (§28): while this node holds _health it also evaluates _cluster, and only for HEALTH_STALE (task.state, never fence, epoch 0); standalone _cluster is unchanged
 // note P2-6.2 (§30): a released last owner evaluates chain.local with Delegated; a proxy pass does not read the directory; NodeGoneAfter 0 means 3×Sweep
 // note ADR 0011 PR-2: ErrLockWait is one lock-stall observation (the second opens META_LOCK_STALLED); each sweep refreshes side_kill
+// note F2: a pass records HealthSample from this HealthOf (not a second verdict). A written verdict posts health transitions and CRITICAL finding transitions to Notify. ChainFacts.UploadLag is the oldest sealed row that is not UPLOADED with checksum match when object storage is on
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5); the one place a managed finding is opened or closed
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -161,6 +162,9 @@ type EvaluatorConfig struct {
 	ObjectListInterval time.Duration
 	ObjectListLimit    int
 	Now                func() time.Time
+	// Notify receives health transitions and CRITICAL finding transitions
+	// after a verdict is written (ADR 0009 decision 1). Nil disables it.
+	Notify HealthNotifier
 }
 
 // EvaluatorStats counts what the evaluator did.
@@ -175,6 +179,7 @@ type chainCacheEntry struct {
 	fp, orderKey string
 	order        []string
 	violations   []assurance.Violation // CheckBody only (no I5)
+	uploadLag    time.Duration
 }
 
 type rehashResult struct {
@@ -240,6 +245,10 @@ type Evaluator struct {
 	// a fenced delegated write clears it. mayEvaluate reads it and does not
 	// touch the store.
 	delegated map[string]bool
+	// samples is the last HealthOf verdict for tasks this node evaluated.
+	samples map[string]HealthSample
+	// notices dedups webhook delivery. Nil until the first post.
+	notices *notifyState
 
 	evaluations, applied, errs, shadowed atomic.Int64
 }
@@ -280,7 +289,8 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	e := &Evaluator{s: s, cfg: cfg, reg: cfg.Registry, wake: make(chan struct{}, cfg.Workers),
 		dirty: map[string]map[EvalReason]time.Time{}, running: map[string]bool{}, lastRun: map[string]time.Time{},
 		fenced: map[string]int64{}, pending: map[string][]health.Transition{}, unsaved: map[string]unsavedHealth{}, fingerprints: map[string]string{},
-		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}, healthKnown: map[string]time.Time{}, delegated: map[string]bool{}}
+		rehash: map[string]map[string]rehashResult{}, chainCache: map[string]chainCacheEntry{}, confirmed: map[string]map[health.Key]bool{}, listings: map[string]*objectListing{}, leaseExpired: map[string]time.Time{}, healthKnown: map[string]time.Time{}, delegated: map[string]bool{},
+		samples: map[string]HealthSample{}, notices: &notifyState{told: map[string]health.Status{}}}
 	if s != nil {
 		s.healthEval.Store(e)
 		s.setMetaReachNode(cfg.NodeID, cfg.MetaUnreachableAfter)
@@ -802,14 +812,16 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		e.fillStoreFacts(ctx, facts)
 	}
 	store := e.cfg.Store
-	unknown := func(h health.TaskHealth, err error) (health.TaskHealth, error) {
+	unknown := func(h health.TaskHealth, open []health.Finding, err error) (health.TaskHealth, error) {
 		e.errs.Add(1)
 		h.TaskID, h.Status, h.EvaluatedAt = id, health.StatusUnknown, now
 		h.Unknown = appendScope(h.Unknown, health.ScopeStore)
+		e.noteVerdict(h, facts, open, true)
+		e.publish(ctx, h, nil)
 		return h, err
 	}
 	if store == nil {
-		return unknown(health.TaskHealth{}, errors.New("no health store"))
+		return unknown(health.TaskHealth{}, nil, errors.New("no health store"))
 	}
 	// Transitions a failed write left behind go first, as they were.
 	if e.cfg.Mode == EvaluatorOn {
@@ -822,7 +834,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 				if errors.Is(err, healthstore.ErrSchemaAbsent) {
 					e.noteHealthStoreAbsent(err)
 				}
-				return unknown(health.TaskHealth{}, err)
+				return unknown(health.TaskHealth{}, nil, err)
 			}
 			h := e.reg.HealthOf(afterTransitions(open, pending), facts)
 			if err := e.write(ctx, id, fence, pending, h); err != nil {
@@ -830,8 +842,9 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 				// a finding raised while the store is failing is still served.
 				open2 := afterTransitions(open, pending)
 				ts2, _ := e.reg.Reconcile(open2, facts)
-				e.noteUnsaved(id, afterTransitions(open2, ts2), err)
-				return unknown(h, err)
+				settled := afterTransitions(open2, ts2)
+				e.noteUnsaved(id, settled, err)
+				return unknown(h, settled, err)
 			}
 		}
 	}
@@ -840,7 +853,7 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		if errors.Is(err, healthstore.ErrSchemaAbsent) {
 			e.noteHealthStoreAbsent(err)
 		}
-		return unknown(health.TaskHealth{}, err)
+		return unknown(health.TaskHealth{}, nil, err)
 	}
 	if isCluster && !e.cfg.Cluster {
 		e.settleMetaReach(open)
@@ -853,18 +866,22 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	e.mu.Unlock()
 	ts, _ := e.reg.Reconcile(open, facts)
 	e.noteCandidates(id, facts)
-	h := e.reg.HealthOf(afterTransitions(open, ts), facts)
+	settled := afterTransitions(open, ts)
+	h := e.reg.HealthOf(settled, facts)
 	if e.cfg.Mode == EvaluatorShadow {
 		e.shadowed.Add(1)
 		if len(ts) > 0 {
 			log.Printf("health shadow task=%s transitions=%s status=%s", id, describeTransitions(ts), h.Status)
 		}
+		e.noteVerdict(h, facts, settled, false)
 		return h, nil
 	}
 	if err := e.write(ctx, id, fence, ts, h); err != nil {
-		e.noteUnsaved(id, afterTransitions(open, ts), err)
-		return unknown(h, err)
+		e.noteUnsaved(id, settled, err)
+		return unknown(h, settled, err)
 	}
+	e.noteVerdict(h, facts, settled, false)
+	e.publish(ctx, h, ts)
 	return h, nil
 }
 
@@ -1218,6 +1235,7 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 			return e.s.plannedProblems(task, dir, binlog.LedgerAt(dir))
 		},
 	}
+	uploadLag := uploadLagOf(obj.storage, rows, cached, hit && cached.fp == fp && !catalog, now)
 	if hit && cached.fp == fp && cached.orderKey == orderKey {
 		violations = append([]assurance.Violation(nil), cached.violations...)
 	} else {
@@ -1225,7 +1243,7 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		bodyIn.Checkpoint = assurance.Checkpoint{} // body cache must not depend on C
 		violations = assurance.ChainOf(bodyIn).CheckBody(now)
 		e.mu.Lock()
-		e.chainCache[task.ID] = chainCacheEntry{fp: fp, orderKey: orderKey, order: order, violations: violations}
+		e.chainCache[task.ID] = chainCacheEntry{fp: fp, orderKey: orderKey, order: order, violations: violations, uploadLag: uploadLag}
 		e.mu.Unlock()
 	}
 	violations = append(violations, assurance.ChainOf(in).CheckCheckpoint()...)
@@ -1261,6 +1279,7 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		detail := "segment " + name + " no longer matches the sha256 recorded at seal: " + r.evidence
 		out.Violations = append(out.Violations, assurance.Violation{Kind: assurance.I1Unreadable, Segments: []string{name}, Evidence: r.evidence, Detail: detail})
 	}
+	out.UploadLag = uploadLag
 	return out
 }
 

@@ -1,0 +1,124 @@
+rule_files:
+  - binlog-server-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'binlog_server_task_healthy{task_id="9",reason="critical"}'
+        values: '0x10'
+      - series: 'binlog_server_task_healthy{task_id="3",reason="ok"}'
+        values: '1x10'
+      - series: 'binlog_server_task_healthy{task_id="",reason="ok"}'
+        values: '1x10'
+      - series: 'binlog_server_task_progress_age_seconds{task_id="9"}'
+        values: '50x10'
+      - series: 'binlog_server_task_progress_age_seconds{task_id="3"}'
+        values: '1x10'
+      - series: 'binlog_server_task_upload_lag_seconds{task_id="9"}'
+        values: '1200x10'
+      - series: 'binlog_server_task_upload_lag_seconds{task_id="3"}'
+        values: '0x10'
+      - series: 'binlog_server_task_open_critical{task_id="9"}'
+        values: '2x10'
+      - series: 'binlog_server_task_open_critical{task_id="3"}'
+        values: '0x10'
+      - series: 'binlog_server_finding_open{task_id="9",kind="TASK_PERSIST_FAILED",severity="CRITICAL"}'
+        values: '1x10'
+      - series: 'binlog_server_finding_open{task_id="3",kind="DISK_LIST_FAILED",severity="WARNING"}'
+        values: '1x10'
+      - series: 'up{job="binlog-server",instance="127.0.0.1:8080"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BinlogTaskUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              task_id: "9"
+              reason: critical
+            exp_annotations:
+              summary: "task 9 is unhealthy (critical)"
+      - eval_time: 3m
+        alertname: BinlogTaskProgressAge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              task_id: "9"
+            exp_annotations:
+              summary: "task 9 progress age is high"
+      - eval_time: 6m
+        alertname: BinlogTaskUploadLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              task_id: "9"
+            exp_annotations:
+              summary: "task 9 upload lag is over 15m"
+      - eval_time: 2m
+        alertname: BinlogTaskOpenCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              task_id: "9"
+            exp_annotations:
+              summary: "task 9 has open critical findings"
+      - eval_time: 2m
+        alertname: BinlogFindingCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              task_id: "9"
+              kind: TASK_PERSIST_FAILED
+            exp_annotations:
+              summary: "task 9 finding TASK_PERSIST_FAILED is critical"
+
+  - interval: 1m
+    input_series:
+      - series: 'binlog_server_task_healthy{task_id="3",reason="ok"}'
+        values: '1x5'
+      - series: 'binlog_server_task_healthy{task_id="",reason="ok"}'
+        values: '1x5'
+      - series: 'up{job="binlog-server",instance="127.0.0.1:8080"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: BinlogTaskUnhealthy
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BinlogProcessDown
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="binlog-server",instance="127.0.0.1:8080"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BinlogProcessDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: binlog-server
+              instance: 127.0.0.1:8080
+            exp_annotations:
+              summary: "binlog-server scrape target is down"
+
+  - interval: 1m
+    input_series:
+      - series: 'binlog_server_task_last_verified_timestamp{task_id="stale"}'
+        values: '1x3200'
+      - series: 'binlog_server_task_last_verified_timestamp{task_id="fresh"}'
+        values: '180000x3200'
+      - series: 'binlog_server_task_last_verified_timestamp{task_id="never"}'
+        values: '0x3200'
+    alert_rule_test:
+      - eval_time: 50h
+        alertname: BinlogVerifyStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              task_id: stale
+            exp_annotations:
+              summary: "task stale last verified more than 48h ago"

@@ -620,6 +620,18 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 | `verify.drill_every_sec` | 604800 | 演练周期，秒 |
 | `verify.drill_check_sql` | 空 | 演练通过后可选的校验 SQL |
 
+### 3.11.2 告警 webhook（`notify`）
+
+一个通用 JSON POST（ADR 0009 决定 1）。不对接各家 IM。`notify.webhook_url` 为空则不发送。评估器为 `on` 且本轮写入成功后，健康状态变化或 CRITICAL finding 的打开、关闭、升级才发一批；第一次看到 HEALTHY 不发，状态不变也不发。`shadow` 和 `off` 不发。集群里只有正在评估该任务的节点发送。令牌放在请求头 `X-BinlogServer-Token`，不要明文写进会被收集的日志。投递失败按 `notify.attempts` 指数退避重试（传输错误、5xx、429）；其它 4xx 不重试。不跟随重定向。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `notify.webhook_url` | 空 | `http` 或 `https`，必须带主机。空就是关 |
+| `notify.webhook_token` | 空 | 可选。非空时放在 `X-BinlogServer-Token` |
+| `notify.timeout_sec` | 5 | 单次请求超时，秒。1–60 |
+| `notify.attempts` | 3 | 一次投递最多试几次。1–8 |
+| `notify.backoff_ms` | 200 | 第一次重试前等待，毫秒，之后翻倍。1–30000 |
+
 ### 3.12 无元数据库时的任务记录（`standalone`）
 
 没有 `meta_dsn` 时，任务加密写在 `{data_dir}/.tasks.enc`。密钥用 `binlog-server task-key generate --out <path>` 生成，不写进这个文件。详见 `docs/security.md`。

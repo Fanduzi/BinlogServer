@@ -33,6 +33,12 @@ curl http://localhost:8080/metrics
 | 指标名 | 类型 | 标签 | 说明 |
 |--------|------|------|------|
 | `binlog_server_task_state_count` | gauge | `state` | 各状态任务数 |
+| `binlog_server_task_healthy` | gauge | `task_id`, `reason` | 本进程评估器对这个任务的 `HealthOf` 结论。1 只在 HEALTHY，`reason="ok"`。0 的 `reason` 是 `critical`、`warning`、`unknown`、`unevaluated` 或 `unread`。只输出本节点负责的任务。没有评估结果时只有一条 `task_id=""`、`reason="ok"`、值为 1 的哨兵，避免 `== 0` 在评估器关闭时误报 |
+| `binlog_server_task_progress_age_seconds` | gauge | `task_id` | desired RUN 的任务，距最后一次源字节或本地推进的秒数。不是 desired RUN，或这一轮没有时钟，为 0 |
+| `binlog_server_task_upload_lag_seconds` | gauge | `task_id` | 最老一条已封存但还不是 `UPLOADED` 且校验和 match 的段的年龄，秒。没开对象存储，或每条都已匹配，为 0 |
+| `binlog_server_task_open_critical` | gauge | `task_id` | 产生 `task_healthy` 的那一轮里，仍开着的 CRITICAL finding 数 |
+| `binlog_server_finding_open` | gauge | `task_id`, `kind`, `severity` | 当前开着的 finding。`severity` 是 `CRITICAL`、`WARNING` 或 `INFO` |
+| `binlog_server_task_last_verified_timestamp` | gauge | `task_id` | 该任务最近一次巡检完成的 Unix 时间。没有巡检过是 0 |
 
 **复制指标：**
 
@@ -143,88 +149,31 @@ sum(rate(binlog_server_upload_retry_total[5m]))
 
 ## 4. 告警规则
 
-### 4.1 Prometheus 告警规则
+推荐规则在 [`deploy/prometheus/binlog-server-alerts.yml`](../../../deploy/prometheus/binlog-server-alerts.yml)。`promtool test rules deploy/prometheus/binlog-server-alerts.test.yml` 在 CI 的 `promtool` job 里每个 PR 都跑。下面是同一份规则，改规则先改那个文件。
 
-```yaml
-# alerts.yml
-groups:
-  - name: binlog-server
-    rules:
-      # 任务告警
-      - alert: TaskHighLag
-        expr: binlog_server_replication_lag_seconds > 30
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Task {{ $labels.task_id }} has high replication lag"
+抓取每个节点。一个任务只由正在评估它的节点输出（lease 主人、委派的链主人，或持有 `_health` 的节点）。`binlog_server_task_healthy == 0` 不会因为哨兵序列（值为 1）触发。进程挂了用 `up == 0`。评估器默认 `off` 时没有每任务序列，这条告警不响；要分页把 `health.evaluator` 设为 `on`。
 
-      - alert: SourceSwitchStopped
-        expr: binlog_server_source_switchovers{outcome="stopped"} > 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Task {{ $labels.task_id }} stopped on a source switchover"
+| 告警 | 表达式 | for | 级别 |
+|------|--------|-----|------|
+| `BinlogTaskUnhealthy` | `binlog_server_task_healthy == 0` | 2m | critical |
+| `BinlogTaskProgressAge` | `binlog_server_task_progress_age_seconds > 45` | 2m | warning |
+| `BinlogTaskUploadLag` | `binlog_server_task_upload_lag_seconds > 900` | 5m | warning |
+| `BinlogTaskOpenCritical` | `binlog_server_task_open_critical > 0` | 1m | critical |
+| `BinlogFindingCritical` | `binlog_server_finding_open{severity="CRITICAL"} > 0` | 1m | critical |
+| `BinlogVerifyStale` | 有过巡检（时间戳 > 0）且距今超过 48h | 1h | warning |
+| `BinlogProcessDown` | `up{job="binlog-server"} == 0` | 1m | critical |
 
-      - alert: SourceSwitchContinued
-        expr: binlog_server_source_switchovers{outcome="continued"} > 0
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Task {{ $labels.task_id }} continued after a source switchover"
+同一文件里还有复制延迟、源切换、checkpoint、FAILED、worker 和上传失败这几条，阈值与原先写在这里的草稿相同。`job="binlog-server"` 要和 Prometheus 的 `job_name` 一致。
 
-      - alert: TaskCheckpointStale
-        expr: binlog_server_checkpoint_age_seconds > 300
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Task {{ $labels.task_id }} checkpoint is stale"
+### 4.1 通用 webhook
 
-      - alert: TaskInFailedState
-        expr: binlog_server_task_state_count{state="FAILED"} > 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Task is in FAILED state"
+`notify.webhook_url` 非空且 `health.evaluator: on` 时，评估器在健康状态变化，或 CRITICAL finding 打开、关闭、升级时 POST 一批 JSON。第一次观察到 HEALTHY 当作基线，不发。状态不变、也没有新的 CRITICAL 转移时不发。POST 失败留在本进程内存里，下一轮再送；进程重启可能再发一次。`shadow` 不发。集群里只有评估该任务的节点发。
 
-      # 集群告警
-      - alert: NoActiveWorkers
-        expr: sum(binlog_server_worker_online) == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "No active workers in the cluster"
-
-      - alert: WorkerOffline
-        expr: binlog_server_worker_online == 0
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Worker {{ $labels.worker_id }} is offline"
-
-      # 上传告警
-      - alert: UploadFailuresExist
-        expr: binlog_server_upload_failures_total > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Upload failures exist for tasks"
-
-      - alert: UploadRetryFailing
-        expr: rate(binlog_server_upload_retry_total{result="failed"}[5m]) > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Upload retry is failing"
+```json
+{"version":1,"events":[{"type":"health","task_id":"9","status":"UNHEALTHY","previous":"HEALTHY","at":"2026-10-26T18:00:00Z"}]}
 ```
+
+finding 事件的 `type` 是 `finding`，并带 `kind`、`severity`、`op`（`OPEN`、`CLOSE`、`ESCALATE`）、`subject`、`detail`（最长 1024 字符）。请求头：`Content-Type: application/json`；配了 `notify.webhook_token` 时有 `X-BinlogServer-Token`；`X-BinlogServer-Delivery` 是正文的 SHA-256，同一次重试不变。不跟随重定向。传输错误、5xx 和 429 按 `notify.backoff_ms` 指数退避，最多 `notify.attempts` 次；其它 4xx 不重试。
 
 ### 4.2 告警分级
 

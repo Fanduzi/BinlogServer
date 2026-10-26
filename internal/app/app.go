@@ -3,6 +3,7 @@
 // output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup; a TLS transport failure in that probe degrades health, other probe failures leave status ok (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound; the meta DSN is rewritten with meta.tls before the pool opens and a bare dial error is prefixed meta.tls (ADR 0012); upload.tls.ca_file is the object-storage trust store when set
 // note P2-6.1 (§28): health.stale_after_sec (0 = 5×sweep, then the ADR 0011 floor max(2×sweep+lock_wait, min(S, RTO))) is EvaluatorConfig.StaleAfter
 // note P2-6.2 (§30): health.node_gone_after_sec (0 = 3×sweep) is EvaluatorConfig.NodeGoneAfter
+// note F2: a non-empty notify.webhook_url is the evaluator's HealthNotifier; an empty URL leaves it nil
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -33,6 +34,7 @@ import (
 	"binlog_server/internal/healthstore"
 	"binlog_server/internal/meta"
 	"binlog_server/internal/mysqltls"
+	"binlog_server/internal/notify"
 	"binlog_server/internal/ownership"
 	"binlog_server/internal/replication"
 	"binlog_server/internal/taskrecords"
@@ -1394,6 +1396,15 @@ func startHealthEvaluator(ctx context.Context, cfg config.Config, scheduler *tas
 	}
 	if ecfg.NodeID, ecfg.ControlPlaneOnly, err = healthEvaluatorIdentity(cfg, workerID); err != nil {
 		return err
+	}
+	if url := strings.TrimSpace(cfg.Notify.WebhookURL); url != "" {
+		ecfg.Notify = notify.Webhook{
+			URL:      url,
+			Token:    cfg.Notify.WebhookToken,
+			Timeout:  time.Duration(cfg.Notify.TimeoutSec) * time.Second,
+			Attempts: cfg.Notify.Attempts,
+			Backoff:  time.Duration(cfg.Notify.BackoffMs) * time.Millisecond,
+		}
 	}
 	e := tasks.NewEvaluator(scheduler, ecfg)
 	spawn(func() { e.Run(ctx) })

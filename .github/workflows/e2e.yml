@@ -563,3 +563,20 @@ jobs:
         env:
           BINLOG_TEST_TLS: "1"
         run: go test -count=1 -timeout 25m -run 'TestLiveMySQLTLS|TestLiveAppTLS|TestLiveS3TLS' ./internal/replication/ ./internal/app/ ./internal/upload/
+
+  promtool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install promtool
+        run: |
+          curl -fsSL -o /tmp/prometheus.tar.gz https://github.com/prometheus/prometheus/releases/download/v2.55.1/prometheus-2.55.1.linux-amd64.tar.gz
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/prometheus-2.55.1.linux-amd64/promtool /usr/local/bin/promtool
+          promtool --version
+
+      - name: Test alert rules
+        run: promtool test rules deploy/prometheus/binlog-server-alerts.test.yml
