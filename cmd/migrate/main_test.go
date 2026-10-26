@@ -1,11 +1,18 @@
 // Package main provides module-level functionality for main.
-// input: migration files, META_DSN/env flags, golang-migrate driver dependencies
-// output: schema migration commands (up/down/version/force/goto) execution results
+// input: migration files, META_DSN/env flags, a --config meta.tls block, golang-migrate driver dependencies
+// output: schema migration commands (up/down/version/force/goto) execution results; proof that --config applies meta.tls and that disabled leaves an existing tls=
 // pos: database schema migration CLI for operational change management
 // note: if this file changes, update this header and module README.md.
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/go-sql-driver/mysql"
+)
 
 func TestNormalizeDSN(t *testing.T) {
 	t.Parallel()
@@ -124,4 +131,45 @@ func TestEffectiveEnv(t *testing.T) {
 			t.Fatalf("effectiveEnv()=%q, want=dev", got)
 		}
 	})
+}
+
+func TestResolveMigrateDSN(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	required := write("required.yaml", "meta_dsn: \"user:pass@tcp(127.0.0.1:3306)/meta?parseTime=true\"\nmeta:\n  tls:\n    mode: required\n")
+	got, err := resolveMigrateDSN(required, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := mysql.ParseDSN(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.TLSConfig != "binlog-meta" {
+		t.Fatalf("tls=%q, want binlog-meta", parsed.TLSConfig)
+	}
+	_, err = resolveMigrateDSN(required, "other:pass@tcp(127.0.0.1:3306)/meta?parseTime=true&tls=skip-verify")
+	if err == nil || !strings.Contains(err.Error(), "already sets tls=") {
+		t.Fatalf("existing tls= error = %v", err)
+	}
+	disabled := write("disabled.yaml", "meta_dsn: \"file:pass@tcp(127.0.0.1:3306)/meta?parseTime=true\"\nmeta:\n  tls:\n    mode: disabled\n")
+	const override = "other:pass@tcp(127.0.0.1:3306)/meta?parseTime=true&tls=skip-verify"
+	got, err = resolveMigrateDSN(disabled, override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != override {
+		t.Fatalf("disabled rewrote the DSN: %s", got)
+	}
+	_, err = resolveMigrateDSN("", "")
+	if err == nil || !strings.Contains(err.Error(), "--config") {
+		t.Fatalf("missing dsn error = %v", err)
+	}
 }

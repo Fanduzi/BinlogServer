@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: one ListClusterObservation snapshot per scrape, plus replication/checkpoint progress and worker heartbeats
-// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers (continued switches, and stops the task still sits on, each move counted once), plus the phase 3 verifier gauges when a verifier is attached; a store list error answers 200 with metric_source_up{_cluster,task_list} 0 and no task series instead of 5xx
+// output: Prometheus text for that scrape snapshot, including background sealed-file retry counts, binlog_server_upload_tls_failures_total, binlog_server_retention_blocked_files, binlog_server_recovery_breaks, binlog_server_recovery_earliest_age_seconds, and binlog_server_source_switchovers (continued switches, and stops the task still sits on, each move counted once), plus the phase 3 verifier gauges when a verifier is attached; a store list error answers 200 with metric_source_up{_cluster,task_list} 0 and no task series instead of 5xx
 // pos: observability edge for control-plane metrics exposure in API layer
 // note: if this file changes, update this header and module README.md.
 package api
@@ -33,6 +33,7 @@ type apiMetricsCollector struct {
 	checkpointAgeSeconds    *prometheus.Desc
 	workerOnlineDesc        *prometheus.Desc
 	uploadFailuresTotalDesc *prometheus.Desc
+	uploadTLSFailuresDesc   *prometheus.Desc
 	uploadRetryTotalDesc    *prometheus.Desc
 	uploadRetryLastTsGauge  *prometheus.Desc
 	retentionBlockedDesc    *prometheus.Desc
@@ -82,6 +83,12 @@ func newAPIMetricsCollector(taskSvc taskService, observation []tasks.Task) *apiM
 			nil,
 			nil,
 		),
+		uploadTLSFailuresDesc: prometheus.NewDesc(
+			"binlog_server_upload_tls_failures_total",
+			"Upload attempts that failed the TLS handshake.",
+			nil,
+			nil,
+		),
 		uploadRetryTotalDesc: prometheus.NewDesc(
 			"binlog_server_upload_retry_total",
 			"Total sealed-file retry-upload results, including background retries.",
@@ -127,6 +134,7 @@ func (c *apiMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.checkpointAgeSeconds
 	ch <- c.workerOnlineDesc
 	ch <- c.uploadFailuresTotalDesc
+	ch <- c.uploadTLSFailuresDesc
 	ch <- c.uploadRetryTotalDesc
 	ch <- c.uploadRetryLastTsGauge
 	ch <- c.retentionBlockedDesc
@@ -241,6 +249,7 @@ func (c *apiMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	ch <- prometheus.MustNewConstMetric(c.uploadFailuresTotalDesc, prometheus.GaugeValue, float64(countUploadFailures(c.tasks, items)))
+	ch <- prometheus.MustNewConstMetric(c.uploadTLSFailuresDesc, prometheus.CounterValue, float64(tasks.UploadTLSFailures()))
 
 	retryMetrics := c.tasks.GetUploadRetryMetrics()
 	ch <- prometheus.MustNewConstMetric(c.uploadRetryTotalDesc, prometheus.CounterValue, float64(retryMetrics.Success), "success")

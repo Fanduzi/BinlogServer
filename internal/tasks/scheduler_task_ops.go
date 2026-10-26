@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, a spec_revision bump when source/start/storage/cluster_key change so the control loop restarts one dump, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, does not copy a live run's row onto memory, and cancels that run when the row asks to stop, a GetTask read that started before the latest publish left in memory, GetTask that still returns this process's pending dump after STOPPED when the column is absent, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, a spec_revision bump when source/start/storage/cluster_key change so the control loop restarts one dump, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, does not copy a live run's row onto memory, and cancels that run when the row asks to stop, a GetTask read that started before the latest publish left in memory, GetTask that still returns this process's pending dump after STOPPED when the column is absent, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them; an update that omits source.tls keeps the stored block (ADR 0012)
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"binlog_server/internal/mysqltls"
 )
 
 func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
@@ -363,6 +365,11 @@ func (s *Scheduler) UpdateTask(id string, patch TaskPatch) (Task, error) {
 	if validatedSource != nil {
 		if validatedSource.Password == "" {
 			validatedSource.Password = current.Source.Password
+		}
+		// A console edit sends source without tls. Empty means "leave it".
+		// mode disabled is an explicit clear.
+		if validatedSource.TLS == (mysqltls.Config{}) {
+			validatedSource.TLS = current.Source.TLS
 		}
 		next.Source = *validatedSource
 	}

@@ -11,6 +11,10 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"binlog_server/internal/mysqltls"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -142,7 +146,11 @@ func (s *Scheduler) retryPendingDumpCleanups() bool {
 		killErr := killer(src, id)
 		if killErr != nil {
 			failed = true
-			log.Printf("binlog dump cleanup retry task=%s conn=%d err=%v", item.id, id, killErr)
+			if mysqltls.IsVerifyFailure(killErr) {
+				zap.L().Warn("binlog dump cleanup tls verify failed", zap.String("task_id", item.id), zap.Uint32("conn", id), zap.Error(killErr))
+			} else {
+				log.Printf("binlog dump cleanup retry task=%s conn=%d err=%v", item.id, id, killErr)
+			}
 		}
 		s.noteDumpCleanup(item.id, src, id, killErr)
 	}
@@ -490,7 +498,11 @@ func (s *Scheduler) killLeftover(task Task, pending DumpCleanup, killer func(Sou
 	err := killer(src, pending.ConnectionID)
 	s.noteDumpCleanup(task.ID, src, pending.ConnectionID, err)
 	if err != nil {
-		log.Printf("binlog dump cleanup before start task=%s conn=%d err=%v", task.ID, pending.ConnectionID, err)
+		// startTask warns once for a TLS verify failure. A second warn here
+		// logged the same x509 twice.
+		if !mysqltls.IsVerifyFailure(err) {
+			log.Printf("binlog dump cleanup before start task=%s conn=%d err=%v", task.ID, pending.ConnectionID, err)
+		}
 	}
 	return err
 }

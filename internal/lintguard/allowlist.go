@@ -42,7 +42,6 @@ var allowlist = map[string]Allowed{
 	"internal/tasks/task_records.go:Scheduler.failRestoredLocked:log-only":                 {1, "markFailedLocked already set FAILED in memory; a failed record save opens TASK_RECORDS_FAILED/write (ADR 0010)"},
 	"internal/tasks/task_records.go:Scheduler.recordFollowLocked:log-only":                 {1, "saveRecordsLocked opens TASK_RECORDS_FAILED/write; the next save carries this change (ADR 0010)"},
 	"internal/tasks/task_records.go:Scheduler.restoreRecordsLocked:log-only":               {1, "a stale .tasks.enc.tmp-* is only a leftover temp; the record file itself is written by rename"},
-	"internal/tasks/scheduler_dump_cleanup.go:Scheduler.killLeftover:log-only":             {1, "the pending KILL marker stays and is retried every pass; marker write failures are DUMP_CLEANUP_PERSIST_FAILED (S3)"},
 	"internal/tasks/scheduler_dump_cleanup.go:Scheduler.noteDumpCleanup:log-only":          {1, persistReported},
 	"internal/tasks/scheduler_dump_cleanup.go:Scheduler.retryPendingDumpCleanups:log-only": {1, "the pass runs again on the next tick; a stale list only delays a KILL"},
 	"internal/tasks/scheduler_lifecycle.go:Scheduler.claimOwnedIdleTasks:blank-call":       {1, "follow-up: StopTask after an invalid source config; its persist failure is reported by persistTaskLocked, other errors are not"},

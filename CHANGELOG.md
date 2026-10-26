@@ -12,6 +12,18 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Changed
+
+- 源库复制和 meta 可以要求并校验证书（`source.tls`、`meta.tls`，见 `docs/adr/0012-connection-tls.md`）。两边默认 `disabled`，旧配置不写这些键时仍是明文。
+- `upload.use_ssl` 默认从 `false` 改为 `true`。没写这个键的 HTTP 对象存储会改走 HTTPS，握手失败。错误保留传输层原文（`server gave HTTP response to HTTPS client` 或 `first record does not look like a TLS handshake`），并提示设置 `upload.use_ssl: false` 或改端点，不会提示 `upload.tls.ca_file`。升级前对明文端点写 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 带 `://` 时启动失败，错误说明默认已是 HTTPS。
+- `upload.tls.ca_file` 是对象存储的可选 PEM CA。设置后该客户端只信任这份文件，主机名仍检查。`upload.use_ssl: false` 时不能设置。空着用系统信任库。
+- `./migrate --config` 使用与进程相同的 `meta.tls`。`--dsn` 和 `META_DSN` 覆盖文件里的 `meta_dsn`。不传 `--config` 时 DSN 不变。拨号失败（错误 CA 或主机名）的错误带 `meta.tls` 前缀，与进程启动相同。
+- 源库证书校验失败（含残留 Binlog Dump 的 KILL）使任务 `FAILED`，`last_error` 带上 x509，这条 x509 只打一条 warn。上传的 TLS 传输失败每次打 WARN，并把 `/api/health` 标成 degraded。启动探针遇到错误 CA 时直接返回 x509 并标 `UPLOAD_TLS`，不写成 2 秒超时。之后上传或补传成功，或探针文本被替换，`UPLOAD_TLS` 清掉，`/api/health` 回到 200。其它对象探针失败仍保持 status ok。
+- `preferred` 在将要认证的那条连接上读问候包。有 `CLIENT_SSL` 就在这条连接上继续 TLS；没有就在这条连接上继续明文，不先断开。读不到问候包是错误，不另拨明文。认证失败或证书错误不另拨明文。这样在没有 TLS 的源上，重试和并发任务的 `Aborted_connects` 与 `host_cache.SUM_CONNECT_ERRORS` 都不增加，也不会因为 `max_connect_errors` 触发 ERROR 1129。不依赖「稍后一次成功握手会把计数清零」。meta 启动时的 x509 错误带 `meta.tls` 前缀；正文里的 `metadb.example` 这种主机名不会挡住这个前缀。
+- 对象存储的 TLS 错误按类型加一句提示，原文保留：明文端点是 `upload.use_ssl: false`；`x509.HostnameError` 是主机名不匹配；`x509.UnknownAuthorityError` 是 `upload.tls.ca_file`；其它错误不加提示。协议版本不匹配和 `remote error: tls:` 这类握手 alert 也算 TLS：原文保留、不加提示、`/api/health` 为 503 `UPLOAD_TLS`、`binlog_server_upload_tls_failures_total` 增加，启动探针不把它写成 2 秒超时。校验和匹配的上传或补传成功才清 `UPLOAD_TLS`。一次 `UPLOAD_RECORD_FAILED` 不清。非 TLS 的上传失败不清。探针超时如果正文已经是 TLS 错误，仍保留这段 TLS 文本。
+- `preferred` 信任问候包里的 `CLIENT_SSL`。能改这份明文问候包的攻击者去掉该位后，连接降级为明文。需要防护时用 `required`、`verify-ca` 或 `verify-identity`。meta 驱动的 `tls=preferred` 同样。
+- `binlog_server_upload_tls_failures_total` 计上传 TLS 握手失败的次数。
+
 ## [v0.5.79] - 2026-10-26
 
 发布说明：`docs/releases/v0.5.79.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。

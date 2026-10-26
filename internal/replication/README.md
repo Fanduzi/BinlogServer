@@ -2,6 +2,8 @@
 
 ## Files
 
+ADR 0012：`source_conn.go` 的 `connectSource` 按 `source.tls` 拨号（`preferred` 在将要认证的连接上读问候包，有 `CLIENT_SSL` 就继续 TLS，没有就在同一条连接上继续明文，不先断开，所以 `Aborted_connects` 不增加）。`mysql_runner.go` 把同一份 `tls.Config` 交给 binlog syncer。`tls_live_test.go` 的 `TestLiveMySQLTLS`（`BINLOG_TEST_TLS=1`，CI job `e2e-tls`）证明 `connectSource` 和 meta DSN 的模式，并且 preferred 的认证失败不会再拨一条明文。真实任务路径上的 dump `CONNECTION_TYPE` 在 `internal/app` 的 `TestLiveAppTLS`（含 `verify-identity` 且 `server_name` 为证书 SAN）。`TestLiveAppTLSPreferredNoAbort` 在 `max_connect_errors=2` 下并发 4 个 preferred 任务并强制重试一次，`Aborted_connects` 与 `host_cache.SUM_CONNECT_ERRORS` 不变。`preferred_tls_test.go` 用假问候包锁住「非证书错误不退回明文」，没有 `CLIENT_SSL` 时也只有一次 accept，问候读失败也是错误。
+
 P2-5.4（设计 0009 §26，#341）：配了上传时，本地保留删掉仍在桶窗口内的本地文件后写 `RETENTION_REMOVED`，并在目录行记下 `RetentionRemovedAt`。写失败打开 `RETENTION_RECORD_FAILED`。
 - `txn_boundary.go`: 事务边界（XID、XA PREPARE、压缩事务、COMMIT/ROLLBACK/XA COMMIT、自动提交语句、事务外的事件）。checkpoint 和 OPEN 目录行只在边界写，且 `checkpointBatchWindow`（200ms）内的提交合并成一次；没写的提交由下一次超过窗口的提交、心跳、rotate、封存或 run 退出写出。checkpoint 永远不超过已落盘的字节。事务超过 `longTxnWarnAfter`（2 分钟）没有提交时每个间隔打一条 `long transaction` 日志（#391）。以前每个事件都写 checkpoint，一个约 2 万事件的 3MB 事务在有 meta 时要约 2.8 万条 INSERT、47.5 秒。
 - `checkpoint_commit_test.go`: 大事务只在提交时写 checkpoint 且耗时有界；小事务在窗口内合并、退出时写出；事务边界和长事务日志（#391）。

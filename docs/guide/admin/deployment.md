@@ -391,6 +391,20 @@ sudo systemctl start binlog-server
 sudo systemctl status binlog-server
 ```
 
+### 5.3 连接 TLS
+
+源库复制和 meta 的 TLS 见 `docs/adr/0012-connection-tls.md` 与配置指南的 `meta.tls.*`、`source.tls`。两边默认都是 `disabled`：旧配置不写这些键时仍是明文，包括 `meta_dsn` 里已经带的 `tls=`。
+
+`upload.use_ssl` 的默认从 `false` 改为 `true`。端点写了、这个键没写的配置，升级后走 HTTPS。明文 HTTP 的对象存储（MinIO、没开 TLS 的 RGW）会在握手失败，上传和 HEAD 都失败。错误保留传输层原文，并提示设置 `upload.use_ssl: false` 或改端点，不会提示 `upload.tls.ca_file`。升级前对每个明文端点写上 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 只能是 `host[:port]`；带 `://` 的值启动即失败，错误说明默认已是 HTTPS。
+
+私有 CA 的 HTTPS 端点设置 `upload.tls.ca_file` 为该 CA 的 PEM。空着则用系统信任库。设置后这个客户端只信任该文件，主机名仍然检查。传输从 minio-go 的默认传输建起，只替换根证书。`upload.use_ssl: false` 时不能再写这个键。文件缺失或没有证书，启动失败，错误里是路径。错误 CA 在启动探针上直接是 x509 和 `UPLOAD_TLS`（503），并提示 `upload.tls.ca_file`。主机名不匹配提示主机名，不提示这份 CA。修好之后，校验和匹配的上传或补传成功，`/api/health` 回到 200，不必重启。非 TLS 的上传失败不会把这条 reason 清掉。
+
+`./migrate` 读同一份 `meta.tls`：`./migrate up --config /path/config.yaml --path ./migrations`。`--dsn` 和 `META_DSN` 覆盖文件里的 `meta_dsn`，TLS 块仍来自文件。不传 `--config` 时 DSN 原样使用，包括已经写上的 `tls=`。`disabled` 不改 DSN。其它模式拒绝 DSN 里已有的 `tls=`。
+
+证书校验失败（改任务的 `verify-identity` 后，残留 dump 的 KILL 握手失败）把任务写成 `FAILED`，`last_error` 是 x509 文本，日志是 warn。连不上源库的 KILL 仍是 `RETRY_BACKOFF` 和「连接可能还开着」。
+
+证书和私钥是文件路径。日志、错误和 API 响应不包含 PEM 内容。
+
 ---
 
 ## 6. 日常运维、探活与监控
@@ -411,6 +425,7 @@ sudo systemctl status binlog-server
 - `binlog_server_task_state_count{state="FAILED"}`: 失败任务计数。大于 0 应立即触发 P1/P2 告警介入排查。
 - `binlog_server_worker_online{worker_id="..."}`: Worker 在线状态（1 在线，0 离线）。
 - `binlog_server_upload_failures_total`: 上传失败待补传的文件累计数。
+- `binlog_server_upload_tls_failures_total`: 上传时 TLS 握手失败的次数。上涨时看 warn 日志，明文端点写 `upload.use_ssl: false`，私有 CA 写 `upload.tls.ca_file`。
 - `binlog_server_source_switchovers{task_id="...",outcome="stopped"}`: 任务地址换到另一台后停了，而且现在仍停在那里。同一次切换重复 Start 不会累加；任务恢复运行后回到 0，之后普通 Stop 或重启进程也不会变回 1。大于 0 先看 Console 任务详情里的原因，再按故障处理第 3 节处理。不要删 `.source-chain`。
 - `binlog_server_source_switchovers{task_id="...",outcome="continued"}`: 同一地址换到另一台后，这条任务还在复制。大于 0 时核对可恢复窗口是否连续，回放是否先旧服务器、再新服务器。
 

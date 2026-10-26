@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, primary-key GetTask/GetCheckpoint refresh, STARTING-unowned claim, execution coordination, and UpdateTask refusal while a dump still holds its config
+// output: task state transitions, primary-key GetTask/GetCheckpoint refresh, STARTING-unowned claim, execution coordination, and UpdateTask refusal while a dump still holds its config; an omitted source.tls stays stored and mode disabled clears it (ADR 0012)
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -15,7 +15,56 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/mysqltls"
 )
+
+func TestSourceTLSShapeAndUpdateKeepsOmittedBlock(t *testing.T) {
+	s := NewScheduler()
+	source := SourceConfig{
+		Host: "10.0.0.8", Port: 3306, User: "repl", Password: "secret",
+		TLS: mysqltls.Config{Mode: "verify-identity", CA: "/etc/binlog-server/ca.pem", ServerName: "db.example.com"},
+	}
+	task, err := s.CreateTaskFromSpec("tls", "tls-key", &source, &StartConfig{Mode: StartModeLatest}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Source.TLS.Mode != "verify-identity" || task.Source.TLS.ServerName != "db.example.com" {
+		t.Fatalf("stored tls = %+v", task.Source.TLS)
+	}
+	updated, err := s.UpdateTask(task.ID, TaskPatch{
+		ClusterKey: "tls-key",
+		Source:     &SourceConfig{Host: "10.0.0.8", Port: 3306, User: "repl"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Source.TLS != task.Source.TLS {
+		t.Fatalf("omitted tls was dropped: %+v", updated.Source.TLS)
+	}
+	if updated.SpecRevision != task.SpecRevision {
+		t.Fatalf("omitted tls bumped spec %d -> %d", task.SpecRevision, updated.SpecRevision)
+	}
+	cleared, err := s.UpdateTask(task.ID, TaskPatch{
+		ClusterKey: "tls-key",
+		Source: &SourceConfig{
+			Host: "10.0.0.8", Port: 3306, User: "repl",
+			TLS: mysqltls.Config{Mode: "disabled"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mysqltls.Disabled(cleared.Source.TLS) {
+		t.Fatalf("explicit disabled did not clear tls: %+v", cleared.Source.TLS)
+	}
+	_, err = s.CreateTaskFromSpec("bad", "bad-key", &SourceConfig{
+		Host: "10.0.0.9", Port: 3306, User: "repl", Password: "secret",
+		TLS: mysqltls.Config{Mode: "sometimes"},
+	}, &StartConfig{Mode: StartModeLatest}, nil)
+	if !errors.Is(err, ErrInvalidSourceConfig) {
+		t.Fatalf("bad mode error = %v", err)
+	}
+}
 
 func TestScheduler_CreateTaskFromSpecDoesNotPersistOnInvalidStart(t *testing.T) {
 	s := NewScheduler()

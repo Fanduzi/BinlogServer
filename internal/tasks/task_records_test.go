@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a standalone data_dir with the encrypted task record (ADR 0010), a recording runner, and leftover segments
-// output: #385 as tests: a restart restores every recorded task and Starts the desired-RUN ones with the source password and a start computed from disk (never the record); LATEST with nothing on disk fails RESUME_POSITION_UNKNOWN; a stopped task stays stopped; a worker FAILED survives a restart; delete leaves a tombstone (no TASK_UNADOPTED) and adopt clears it; wrong key, corrupt file and missing key are TASK_RECORDS_FAILED, restore nothing, refuse writes and leave the file as it was; a failed save refuses the action; rotation re-saves on the current key; ids are not reused; an evaluator attached before Restore leaves the previous process's TASK_RECORDS_FAILED open until EvaluateClusterNow
+// output: #385 as tests: a restart restores every recorded task and Starts the desired-RUN ones with the source password and a start computed from disk (never the record); LATEST with nothing on disk fails RESUME_POSITION_UNKNOWN; a stopped task stays stopped; a worker FAILED survives a restart; delete leaves a tombstone (no TASK_UNADOPTED) and adopt clears it; wrong key, corrupt file and missing key are TASK_RECORDS_FAILED, restore nothing, refuse writes and leave the file as it was; a failed save refuses the action; rotation re-saves on the current key; ids are not reused; an evaluator attached before Restore leaves the previous process's TASK_RECORDS_FAILED open until EvaluateClusterNow; source.tls survives the encrypted record (ADR 0012)
 // pos: ADR 0010 (docs/adr/0010-standalone-task-records.md)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -22,10 +22,32 @@ import (
 
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
+	"binlog_server/internal/mysqltls"
 	"binlog_server/internal/taskrecords"
 )
 
 const recordPassword = "rec0rd-s3cret-pw"
+
+func TestTaskRecordKeepsSourceTLS(t *testing.T) {
+	s := &Scheduler{dataDir: t.TempDir()}
+	task := Task{
+		ID: "9",
+		Source: SourceConfig{
+			Host: "db.example.com", Port: 3306, User: "repl", Password: recordPassword,
+			TLS: mysqltls.Config{Mode: "verify-ca", CA: "/etc/binlog-server/ca.pem"},
+		},
+	}
+	got, failure := s.restoredTask(recordOf(task))
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if got.Source.TLS != task.Source.TLS {
+		t.Fatalf("restored tls = %+v", got.Source.TLS)
+	}
+	if got.Source.Password != recordPassword {
+		t.Fatal("password was not restored with tls")
+	}
+}
 
 // recordRunner records each task it is started with and runs until cancelled.
 // hold, when set, keeps Run from returning after cancel so the scheduler's

@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional encryption key
-// output: config loading regression coverage including unresolved protected-auth secret rejection, an unset meta_dsn ${ENV} naming the variable, booleans other than true or false, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token
+// output: config loading regression coverage including unresolved protected-auth secret rejection, an unset meta_dsn ${ENV} naming the variable, booleans other than true or false, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token; upload.use_ssl defaults to true, upload.tls.ca_file is parsed, and meta.tls is validated (ADR 0012)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -76,8 +76,11 @@ func TestLoadConfig_DefaultValues(t *testing.T) {
 	if cfg.UploadEndpoint != "" || cfg.UploadBucket != "" {
 		t.Fatalf("expected upload config empty by default, got endpoint=%q bucket=%q", cfg.UploadEndpoint, cfg.UploadBucket)
 	}
-	if cfg.UploadUseSSL {
-		t.Fatal("expected upload ssl disabled by default")
+	if !cfg.UploadUseSSL {
+		t.Fatal("expected upload.use_ssl default true")
+	}
+	if cfg.Meta.TLS.Mode != "" {
+		t.Fatalf("expected meta.tls disabled by default, got %+v", cfg.Meta.TLS)
 	}
 	if cfg.Log.Level != "info" {
 		t.Fatalf("expected default log level info, got %q", cfg.Log.Level)
@@ -855,5 +858,89 @@ api:
 	}
 	if strings.Contains(buf.String(), "plaintext") {
 		t.Fatalf("placeholder warned: %s", buf.String())
+	}
+}
+
+func TestUploadUseSSLDefaultsToTLS(t *testing.T) {
+	setRequiredAuthEnv(t)
+	t.Setenv("BINLOG_SERVER_UPLOAD_USE_SSL", "")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("upload:\n  endpoint: s3.example.com\n  bucket: b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UploadUseSSL {
+		t.Fatal("upload.use_ssl default is true when the key is omitted")
+	}
+	path = filepath.Join(t.TempDir(), "http.yaml")
+	if err := os.WriteFile(path, []byte("upload:\n  endpoint: \"http://127.0.0.1:9000\"\n  use_ssl: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "upload.use_ssl: false") || !strings.Contains(err.Error(), "defaults to true") {
+		t.Fatalf("scheme error = %v", err)
+	}
+}
+
+func TestMetaTLSParseAndValidate(t *testing.T) {
+	setRequiredAuthEnv(t)
+	t.Setenv("BINLOG_SERVER_META_DSN", "")
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("meta_dsn: \"user:pass@tcp(127.0.0.1:3306)/meta?parseTime=true\"\nmeta:\n  tls:\n    mode: required\n")
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Meta.TLS.Mode != "required" {
+		t.Fatalf("mode = %q", cfg.Meta.TLS.Mode)
+	}
+	write("meta_dsn: \"user:pass@tcp(127.0.0.1:3306)/meta\"\nmeta:\n  tls:\n    mode: verify-identity\n")
+	_, err = LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "meta.tls.ca is required") {
+		t.Fatalf("error = %v", err)
+	}
+	write("meta:\n  tls:\n    mode: required\n")
+	_, err = LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "meta.tls is set but meta_dsn is empty") {
+		t.Fatalf("error = %v", err)
+	}
+	write("meta_dsn: \"user:pass@tcp(127.0.0.1:3306)/meta\"\nmeta:\n  tls:\n    mode: sometimes\n")
+	_, err = LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "meta.tls.mode must be") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestUploadCAFile(t *testing.T) {
+	setRequiredAuthEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	ca := filepath.Join(dir, "ca.pem")
+	body := "upload:\n  endpoint: 127.0.0.1:9000\n  bucket: b\n  use_ssl: true\n  tls:\n    ca_file: " + ca + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UploadCAFile != ca || !cfg.UploadUseSSL {
+		t.Fatalf("%+v", cfg.UploadCAFile)
+	}
+	if err := os.WriteFile(path, []byte("upload:\n  endpoint: 127.0.0.1:9000\n  bucket: b\n  use_ssl: false\n  tls:\n    ca_file: "+ca+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "upload.tls.ca_file requires upload.use_ssl: true") {
+		t.Fatalf("error = %v", err)
 	}
 }

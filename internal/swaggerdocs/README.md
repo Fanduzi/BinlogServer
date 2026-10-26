@@ -1,7 +1,7 @@
 # internal/swaggerdocs Module
 
 ## Files
-- `docs.go`: 生成的 swagger/openapi 文档代码。
+- `docs.go`: 生成的 swagger/openapi 文档代码。`tasks.SourceConfig` 含 `tls`（ADR 0012，路径不是 PEM）。
 - `swagger.json` / `swagger.yaml`: 生成的 OpenAPI 规范文件。
 
 ## Exports

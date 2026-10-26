@@ -42,7 +42,9 @@ upload:
   secret_key: "${BINLOG_SERVER_UPLOAD_SECRET_KEY}" # 推荐用环境变量注入
   region: ""
   prefix: ""
-  use_ssl: false
+  use_ssl: true # 默认 true（HTTPS）。明文 HTTP（例如本机 MinIO）必须写 false
+  # tls:
+  #   ca_file: "" # 可选。设置后只信任这份 PEM，主机名仍检查。use_ssl false 时不能写
 
 api:
   auth:
@@ -79,6 +81,12 @@ meta:
     write_sec: 5
     lease_sec: 2
     upload_sec: 30
+  # tls.mode 默认 disabled，省略则 meta_dsn 原样使用（含 DSN 里已有的 tls=）。
+  # verify-identity 示例（ca 文件必须存在，否则启动失败）：
+  # tls:
+  #   mode: verify-identity
+  #   ca: /etc/binlog-server/ca.pem
+  #   server_name: meta.example.com
 
 # ADR 0009 phase 2 health evaluator (P2-3). off: legacy findings only;
 # shadow: evaluate and log, write nothing; on: the evaluator owns

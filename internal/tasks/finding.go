@@ -2,7 +2,7 @@
 // input: failure reports from the scheduler, the runner, and background loops
 // output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary, whose Detail does not change status and is kept when status is already degraded): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them (a flush in flight stays visible so a test waits for that writer instead of flushing beside it), with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
-// note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason. A reason names chain_owner or node when the finding detail does. An unreadable task directory is copied into Detail and does not change Status
+// note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason. A reason names chain_owner or node when the finding detail does. An unreadable task directory is copied into Detail and does not change Status. A TLS transport failure in the object probe or upload retry is reason UPLOAD_TLS and degrades status; a later successful upload or a replaced probe detail clears it; other probe text does not change status and is left in place
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"binlog_server/internal/healthstore"
+	"binlog_server/internal/upload"
 )
 
 // FindingKind is a closed set. Every kind has a fault-injection test in
@@ -848,7 +849,8 @@ type HealthSummary struct {
 }
 
 // SetVerifyStorageDetail records a startup object-storage probe failure.
-// HealthSummary copies it into Detail and does not change Status.
+// HealthSummary copies it into Detail. A TLS transport failure degrades
+// status. Any other probe text does not.
 func (s *Scheduler) SetVerifyStorageDetail(detail string) {
 	if s == nil {
 		return
@@ -868,6 +870,71 @@ func (s *Scheduler) SetVerifyObjectDetail(detail string) {
 	s.mu.Lock()
 	s.verifyObjectDetail = detail
 	s.mu.Unlock()
+}
+
+func (s *Scheduler) noteUploadTLS(detail string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.uploadTLSDetail = detail
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) clearUploadTLS() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.uploadTLSDetail = ""
+	s.mu.Unlock()
+}
+
+// clearStickyUploadTLS drops the current TLS transport failure. A successful
+// upload means the endpoint answered, so the startup probe line is no longer
+// current. A non-TLS probe line stays. SetVerifyStorageDetail replaces the
+// probe line when a later probe passes.
+func (s *Scheduler) clearStickyUploadTLS() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.uploadTLSDetail = ""
+	if upload.TLSTransportFailure(s.verifyStorageDetail) {
+		s.verifyStorageDetail = ""
+	}
+	if upload.TLSTransportFailure(s.verifyObjectDetail) {
+		s.verifyObjectDetail = ""
+	}
+	s.mu.Unlock()
+}
+
+// reportFinding is the runner and retry failure hook. An UPLOAD_UNVERIFIED
+// finding means the object was stored, so the TLS transport is working.
+func (s *Scheduler) reportFinding(f Finding) {
+	s.SignalFailure(f)
+	if f.Kind == FindingUploadUnverified {
+		s.clearStickyUploadTLS()
+	}
+}
+
+// resolveFinding is the runner and retry success hook.
+func (s *Scheduler) resolveFinding(id string, kind FindingKind, subject string) {
+	s.SignalSuccess(id, kind, subject)
+	if kind == FindingUploadUnverified {
+		s.clearStickyUploadTLS()
+	}
+}
+
+// tlsTransportLine is the first probe or upload error that is a TLS mismatch.
+// NoSuchBucket and other storage errors are not this line.
+func tlsTransportLine(lines ...string) string {
+	for _, line := range lines {
+		if upload.TLSTransportFailure(line) {
+			return line
+		}
+	}
+	return ""
 }
 
 func (s *Scheduler) verifyStorageDetails() []string {
@@ -953,6 +1020,15 @@ func (s *Scheduler) HealthSummary(ctx context.Context) HealthSummary {
 		reasons = append(reasons, reason)
 	}
 	detail := s.verifyStorageDetails()
+	s.mu.Lock()
+	uploadTLS := s.uploadTLSDetail
+	s.mu.Unlock()
+	if line := tlsTransportLine(append(append([]string{}, detail...), uploadTLS)...); line != "" {
+		reasons = append(reasons, "UPLOAD_TLS: "+line)
+		if uploadTLS != "" && !strings.Contains(strings.Join(detail, "\n"), uploadTLS) {
+			detail = append(detail, uploadTLS)
+		}
+	}
 	sum := HealthSummary{Status: HealthOK, Detail: detail}
 	if view, ok := s.store.(interface {
 		SessionDegraded() (bool, string)

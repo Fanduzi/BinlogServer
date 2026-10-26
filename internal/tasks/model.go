@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, desired_run on API JSON (RUN or STOP), retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions; storage_alert also carries segment, detail, missing_gtids, valid_segments, and restart_gtid_set; a listing lstat of a regular file is reused for that file's location
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, desired_run on API JSON (RUN or STOP), retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions; storage_alert also carries segment, detail, missing_gtids, valid_segments, and restart_gtid_set; a listing lstat of a regular file is reused for that file's location; source.tls is the ADR 0012 block
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"binlog_server/internal/mysqltls"
 )
 
 // State 表示任务生命周期状态。
@@ -176,6 +178,8 @@ type SourceConfig struct {
 	ServerID uint32 `json:"server_id"`
 	// SemiSync=true 时尝试以 semi-sync 协议拉流；主库不支持时会自动降级为异步。
 	SemiSync bool `json:"semi_sync,omitempty"`
+	// TLS is source.tls (ADR 0012). Empty mode is plaintext.
+	TLS mysqltls.Config `json:"tls,omitempty"`
 }
 
 // StartConfig 描述复制起点策略。

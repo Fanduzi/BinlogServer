@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failed upload metadata via failedUploadFileReader, manual and background retry requests, local sealed files, and object storage uploader operations
-// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows (a row of an unrepaired earlier-build failback is held until the repair) including a checksum mismatch re-upload and an unfinished checksum re-check, refusal of a name ClassifySegment rejects, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots; a retry pass marks the task dirty (UPLOAD) for the health evaluator
+// output: retry-upload execution results, background retries of sealed UPLOAD_FAILED rows (a row of an unrepaired earlier-build failback is held until the repair) including a checksum mismatch re-upload and an unfinished checksum re-check, refusal of a name ClassifySegment rejects, ErrFailedUploadLookupNotAvailable when lookup is missing, failure aggregations, and retry metrics snapshots; a TLS transport failure on a retry is warn and degrades health; a retry pass marks the task dirty (UPLOAD) for the health evaluator
 // pos: scheduler upload-retry compensation, background retry loop, and failure-observability logic
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/upload"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -100,6 +103,7 @@ func (s *Scheduler) retryKnownFailedUploads() {
 		} else {
 			s.SignalSuccess(ClusterFindingTask, FindingRetryLoopFailed, "count")
 			if total == 0 {
+				s.clearUploadTLS()
 				return
 			}
 		}
@@ -126,7 +130,16 @@ func (s *Scheduler) retryKnownFailedUploads() {
 			continue
 		}
 		s.recordUploadRetryMetrics(stats)
-		log.Printf("background upload retry task=%s succeeded=%d failed=%d skipped=%d", id, stats.Succeeded, stats.Failed, stats.Skipped)
+		if upload.TLSTransportFailure(s.currentUploadTLS()) {
+			zap.L().Warn("background upload retry tls transport failed",
+				zap.String("task_id", id),
+				zap.Int("succeeded", stats.Succeeded),
+				zap.Int("failed", stats.Failed),
+				zap.Int("skipped", stats.Skipped),
+				zap.String("error", upload.WithTLSHint(s.currentUploadTLS())))
+		} else {
+			log.Printf("background upload retry task=%s succeeded=%d failed=%d skipped=%d", id, stats.Succeeded, stats.Failed, stats.Skipped)
+		}
 	}
 }
 
@@ -179,6 +192,8 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 
 	held := s.legacyHeldSources(taskID)
 	var stats UploadRetryStats
+	sawTLS := false
+	tlsMsg := ""
 	for _, file := range files {
 		stats.Scanned++
 		if !strings.EqualFold(file.UploadState, "UPLOAD_FAILED") {
@@ -222,15 +237,37 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 			updated, err = ApplySealedUpload(uploadCtx, uploader, fileStore, file)
 		}
 		cancelUpload()
-		NoteUploadOutcome(s.SignalFailure, s.SignalSuccess, updated, err)
+		NoteUploadOutcome(s.reportFinding, s.resolveFinding, updated, err)
 		if err != nil || updated.UploadState != "UPLOADED" {
 			stats.Failed++
+			msg := updated.UploadError
+			if msg == "" && err != nil {
+				msg = err.Error()
+			}
+			if upload.TLSTransportFailure(msg) {
+				sawTLS = true
+				tlsMsg = msg
+			}
 			continue
 		}
 		stats.Succeeded++
 	}
+	if sawTLS {
+		s.noteUploadTLS(tlsMsg)
+	} else if stats.Failed == 0 {
+		s.clearUploadTLS()
+	}
 
 	return stats, nil
+}
+
+func (s *Scheduler) currentUploadTLS() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.uploadTLSDetail
 }
 
 // listRetryUploadCandidates 只走失败文件查询，不再用限量 ListBinlogFiles 冒充「没有失败」。
