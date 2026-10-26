@@ -9,7 +9,8 @@
 | build-ui.sh | `console/`（React Console）构建到 `internal/ui/static`（`/ui/`），`frontend/`（经典 Vue 控制台）构建到 `internal/ui/classic`（`/ui-classic/`，保留一个版本）。先跑 `npm run test:locales`（编译 `console/src/locales`）和 Console 的 `npm test`；每个目标目录整体替换（保留 README），JS 按字节拼上 L3 头，然后跑 `check-ui-bundle.sh`；本地没有 vite 时先 `npm ci` |
 | check-ui-bundle.sh | 对 `/ui/`（`internal/ui/static`）和 `/ui-classic/`（`internal/ui/classic`）各自沿 `index.html` 的静态和动态 import 走完 bundle 图，每个 chunk 做 `node --check --input-type=module`；并要求 `console/src` 里的可恢复窗口标记（`task-recovery-window`、`这条备份链有缺口`）、PITR 标记（`task-pitr`、停止/开始/GTID/已执行 GTID、生成、复制、下载、`stop_datetime`、`start_datetime`、`stop_gtid`、`start_gtid_set`、`停止时间`、`停止 GTID`、`已执行 GTID`）、换主标记（`task-source-chain`、`task-source-continued`、`task-source-stopped`、`task-source-next`、`保留这份备份`、`kept copying`）、`task-storage-alert`、`task-replay-damaged` 和「损坏的分段」出现在 `/ui/` 的图里。缺标记时退出非 0。`.js` 路径上的 `node --check` 会按 CommonJS 解析，抓不到 Chrome 拒绝的 import |
 | check-linux-compat.sh | 检查 Linux 二进制是否为静态链接且无动态 libc 依赖，防止发布产物绑定构建机 glibc |
-| check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL、可执行的 `scripts/adopt-leftovers.sh`，并复用 glibc 兼容性检查 |
+| check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL、可执行的 `scripts/adopt-leftovers.sh`，并复用 glibc 兼容性检查；设了 `EXPECT_VERSION` / `EXPECT_COMMIT` 时再核对包里 `binlog-server version` 报的 Version 和 Commit |
+| check-release-archive-identity.sh | 从 `dist/metadata.json` 取 goreleaser 构建的版本（打 tag 时还要等于去掉 `v` 的 tag），用 `EXPECT_VERSION` 和 `EXPECT_COMMIT=$GITHUB_SHA` 调 `check-linux-release-archive.sh` 检查 linux_amd64 包 |
 | check-landing-assets.sh | 校验落地页 HTML 引用的图片资源真实存在、非空且为有效 PNG 格式，防止部署回退为 HTML 造成图裂 |
 | release-assets.sh | 构建含服务端、migrate、migration SQL、`config.example.yaml`、`config.production.example.yaml`、`scripts/adopt-leftovers.sh`、`docs/guide`、`docs/security.md`、`docs/releases` 与 checksums 的多平台 release 归档；作为本地/手工发版兜底入口。示例配置、`scripts/adopt-leftovers.sh`、`docs/guide`、`docs/security.md` 和 `docs/releases` 与 GoReleaser 归档一致 |
 | verify-phase-acceptance.sh | 统一执行阶段验收命令（test/race/vet/e2e-quick）并输出耗时摘要 |
@@ -44,7 +45,7 @@
 ## Release Notes
 
 - tag 版本发布默认由 `.github/workflows/release.yml` + `.goreleaser.yml` 自动构建并发布 GitHub Release 资产。
-- release workflow 会先执行一次 `goreleaser release --skip=publish,announce` 生成真实 release archive，再运行 `make check-linux-release-archive` 校验必需资产与 Linux 二进制，最后才正式发布。
+- release workflow 会先执行一次 `goreleaser release --skip=publish,announce` 生成真实 release archive，再运行 `scripts/check-release-archive-identity.sh`（`EXPECT_VERSION` 为去掉 `v` 的 tag、`EXPECT_COMMIT` 为 tag 所在 commit）校验必需资产、Linux 二进制和它报的版本与 commit，最后才正式发布；发布会重新构建，所以发布后对 `dist/` 再核一次。手动 `workflow_dispatch` 在分支上跑同样的构建和检查（snapshot，不发布）。`e2e.yml` 的 `release-archive` job 每个 PR 用 snapshot 构建核对同样的内容。
 - `release-assets.sh` 保留为本地验证和手工补发资产时的兜底入口，并与 GoReleaser 共享相同归档内容契约。
 - Linux 分发二进制统一以 `CGO_ENABLED=0` 构建，兼容老环境中的 `glibc 2.17` 基线。
 - 每个 tag 发布前需要先提交英文主 release note：`docs/releases/release-notes-vX.Y.Z.md`。

@@ -5,6 +5,11 @@ on:
     branches:
       - main
   pull_request:
+  # release.yml calls this whole workflow and builds only when every job here
+  # passed on the tagged commit (production-readiness J3). A called workflow
+  # sees the caller's event, so job conditions key on the e2e_profile input
+  # (set only by a manual run of this workflow), never on github.event_name.
+  workflow_call:
   workflow_dispatch:
     inputs:
       e2e_profile:
@@ -26,6 +31,7 @@ on:
           - source-switchover
           - meta-failover
           - upgrade-failback
+          - verify
 
 permissions:
   contents: read
@@ -43,12 +49,73 @@ jobs:
           go-version-file: "go.mod"
           go-package: ./...
 
+  release-archive:
+    # Same goreleaser build and archive check as release.yml, as a snapshot:
+    # the packaged binlog-server must report this commit and the built version.
+    if: ${{ !github.event.inputs.e2e_profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Build snapshot release archives
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --snapshot --skip=publish,announce
+
+      - name: Verify Linux release archive, version and commit
+        run: ./scripts/check-release-archive-identity.sh
+
+  race-and-vet:
+    if: ${{ !github.event.inputs.e2e_profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        # Known -race flakes, each with an open issue, are skipped here and
+        # still run in unit-and-e2e's plain go test ./...: #490
+        # (TestFailurePathMatrixMetaOutage, TestOpenEpochENOENTAfterTakeoverDoesNotFail),
+        # #504 (TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess,
+        # TestEvaluator_1500SegmentsUnder50ms), #439
+        # (TestApp_ProductionAuthProtectsRealRoutes), and #526
+        # (TestTaskRecords_StopAndDeleteApplyWhenSaveFails, seen in the #507 QA).
+        # Drop a name when its flake is fixed.
+        run: |
+          go test -race -count=1 -timeout 30m \
+            -skip '^(TestFailurePathMatrixMetaOutage|TestOpenEpochENOENTAfterTakeoverDoesNotFail|TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess|TestEvaluator_1500SegmentsUnder50ms|TestApp_ProductionAuthProtectsRealRoutes|TestTaskRecords_StopAndDeleteApplyWhenSaveFails)$' \
+            ./...
+
   unit-and-e2e:
-    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'upgrade-failback') }}
+    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
-      E2E_PROFILE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile || 'quick' }}
+      E2E_PROFILE: ${{ github.event.inputs.e2e_profile || 'quick' }}
 
     steps:
       - name: Checkout
@@ -104,7 +171,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-cluster-roles:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'cluster-roles' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'cluster-roles' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -134,7 +201,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-observability:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'observability' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'observability' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -165,7 +232,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-worker-crash-recovery:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'worker-crash-recovery' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'worker-crash-recovery' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -195,7 +262,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-meta-failover:
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'meta-failover') }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'meta-failover' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -225,7 +292,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-retry-upload:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'retry-upload' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'retry-upload' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -299,8 +366,28 @@ jobs:
         run: |
           for f in "${RUNNER_TEMP}"/fbup/out/*; do echo "== $f"; tail -n 100 "$f"; done || true
 
+  e2e-verify:
+    # ADR 0009 phase 3 against a real MinIO (Quay image, GitHub release binary
+    # as fallback; no registry login). No source database compose.
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'verify' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: E2E Verify Against MinIO
+        run: ./scripts/e2e/smoke-verify.sh
+
   e2e-split-retention:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'split-retention' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'split-retention' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -330,7 +417,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-epoch-segments:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'epoch-segments' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'epoch-segments' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -360,7 +447,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-gtid-purge:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'gtid-purge' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'gtid-purge' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -390,7 +477,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-gtid-pitr:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'gtid-pitr' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'gtid-pitr' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -420,7 +507,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-source-switchover:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'source-switchover' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'source-switchover' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 

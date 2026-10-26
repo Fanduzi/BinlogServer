@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: local tooling, observability dependencies, and the canonical E2E database topology
-# output: deterministic e2e orchestration, scenario execution, and verification logs
+# output: deterministic e2e orchestration, scenario execution, and verification logs; with E2E_OTLP_SINK_DIR (set by run-observability.sh) also requires an exported API span (service name, POST /api/tasks/*path, http.target of this task's start)
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -225,6 +225,32 @@ echo "[observability] checkpoint_age second=$AGE_2"
 if ! float_gt "$AGE_2" "$AGE_1"; then
   echo "expected checkpoint_age_seconds to increase: first=$AGE_1 second=$AGE_2" >&2
   exit 1
+fi
+
+if [[ -n "${E2E_OTLP_SINK_DIR:-}" ]]; then
+  # run-observability.sh turned tracing on and points it at otlp-sink.py.
+  # Exports are protobuf; the service name and the API span names are raw
+  # strings inside them.
+  echo "[observability] wait for exported API spans in $E2E_OTLP_SINK_DIR"
+  SPAN_SERVICE="${BINLOG_SERVER_TRACING_SERVICE_NAME:-binlog-server}"
+  trace_ok=""
+  for _ in {1..60}; do
+    if [[ -n "$(find "$E2E_OTLP_SINK_DIR" -name 'export-*.pb' -size +0 -print -quit)" ]] \
+      && grep -aqF "$SPAN_SERVICE" "$E2E_OTLP_SINK_DIR"/export-*.pb \
+      && grep -aqF "binlog_server/internal/api" "$E2E_OTLP_SINK_DIR"/export-*.pb \
+      && grep -aqF "POST /api/tasks/*path" "$E2E_OTLP_SINK_DIR"/export-*.pb \
+      && grep -aqF "/api/tasks/${TASK_ID}/start" "$E2E_OTLP_SINK_DIR"/export-*.pb; then
+      trace_ok=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "$trace_ok" ]]; then
+    echo "no exported API span with http.target /api/tasks/${TASK_ID}/start from service $SPAN_SERVICE in $E2E_OTLP_SINK_DIR" >&2
+    ls -l "$E2E_OTLP_SINK_DIR" >&2 || true
+    exit 1
+  fi
+  echo "[observability] trace export ok: $(find "$E2E_OTLP_SINK_DIR" -name 'export-*.pb' | wc -l | tr -d ' ') export request(s), service=$SPAN_SERVICE, span POST /api/tasks/*path target /api/tasks/${TASK_ID}/start"
 fi
 
 echo "[observability] success"

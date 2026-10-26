@@ -81,12 +81,14 @@ make e2e-topology-check
 - `topology-contract-test.sh`: 无需 Docker，验证拓扑默认值、覆盖优先级、direct/failover 选择、端口校验及 Compose 兜底一致性。
 - `smoke-meta-failover.sh`: 触发 orchestrator 切主，验证元数据库 failover 后 checkpoint 继续推进。
 - `smoke-meta-failover-override.sh`: 用非默认 `E2E_API/E2E_ORC_API` 地址（localhost）覆盖并执行 failover 场景。
-- `smoke-observability.sh`: 验证 `/metrics` 核心指标存在，且 `task_state_count` 与 `checkpoint_age_seconds` 随状态/时间变化。
+- `smoke-observability.sh`: 验证 `/metrics` 核心指标存在，且 `task_state_count` 与 `checkpoint_age_seconds` 随状态/时间变化；设了 `E2E_OTLP_SINK_DIR` 时还要求收到 API span（服务名、`POST /api/tasks/*path`、本任务 start 的 `http.target`）。
+- `run-observability.sh`: `make e2e-observability` 和 CI `e2e-observability` 的入口。先起 `otlp-sink.py`（默认端口 14318，`E2E_OTLP_PORT` 可改），用 `BINLOG_SERVER_TRACING_*` 打开 OTLP/HTTP tracing（采样 1），再跑 `smoke-observability`。
+- `otlp-sink.py`: 只给测试用的 OTLP/HTTP 收集器，把每次 `/v1/traces` 导出原样写成一个文件。
 - `smoke-cluster-roles.sh`: 启动 control-plane + worker 双进程，验证任务执行、worker 离线检测与恢复链路。
 - `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
 - `smoke-invalid-inputs.sh`: 验证任务 API 对非法输入返回 `400`（cluster_key/source/start/storage）。
-- `smoke-verify.sh`: ADR 0009 阶段 3。自己起 MinIO（Quay 镜像，拉不到就用 GitHub release 二进制），跑 `TestVerifyAgainstMinIO`：三个封存段上传后，删一个对象、改一个对象的一个字节、改本地一个字节，下一轮三条都报出来。不连接源库，不在 quick 或 full 里，现有 CI job 不跑它。直接 `./scripts/e2e/smoke-verify.sh`，或 `run-suite.sh --scenarios smoke-verify`。
+- `smoke-verify.sh`: ADR 0009 阶段 3。自己起 MinIO（Quay 镜像，拉不到就用 GitHub release 二进制），跑 `TestVerifyAgainstMinIO`：三个封存段上传后，删一个对象、改一个对象的一个字节、改本地一个字节，下一轮三条都报出来。不连接源库，不在 quick 或 full 里；`e2e.yml` 的 `e2e-verify` job 每个 PR 跑它（测试被跳过也算失败）。直接 `./scripts/e2e/smoke-verify.sh`，或 `run-suite.sh --scenarios smoke-verify`。
 - `smoke-retry-upload.sh`: 验证上传失败不阻断拉流；MinIO 恢复后，已封存的 `UPLOAD_FAILED` 由后台补传变成 `UPLOADED`，场景本身不调用 `/api/tasks/{id}/files/retry-upload`。open 分段不会变成 `UPLOADED`。补传成功的封存文件 `checksum` 为 `match`；同一 MinIO 上内容不同的对象为 `mismatch`，且不让上传调用方失败。桶不可用时，把已封存失败文件的 mtime 拨到保留期之外再 `FLUSH BINARY LOGS`，文件、目录行和复制都留着，并只记一条 `RETENTION_SKIPPED_NOT_UPLOADED`；桶恢复并上传成功后，下一次打开文件会把它清掉。
 - `smoke-split-retention.sh`: 验证桶保留短于本地保留时创建任务返回 400；只配 `storage.retention_days` 的响应不含新字段，过期已上传文件仍同时删对象、目录行和本地文件；`local_retention_days` 短于 `bucket_retention_days` 时，介于两者之间的已上传文件只删本地，`location` 为 `bucket`，下载、`replay`、`stop_datetime` 和 `replay/archive` 仍读到对象。
 - `smoke-recovery-window.sh`: MySQL 8.0 上 GTID 打开。建库建表后任务从当时的 `GTID_EXECUTED` 启动，三次插入并 `FLUSH BINARY LOGS`，停任务。`GET /api/tasks/{id}/window` 是连续的，`earliest`、`latest`、`gtid_set` 都有，`breaks` 为空。`latest` 之后一秒的 `stop_datetime` 得到非空回放命令；`earliest` 之前一秒是空命令。然后删掉中间一条封存分段的本地文件和 `binlog_files` 行。窗口变为不连续，`reason` 含 `missing source file`，`/metrics` 上 `binlog_server_recovery_breaks{task_id}` 至少为 1，并且仍有 `binlog_server_recovery_earliest_age_seconds`。同一较晚停止时间的回放路径不再包含被删的文件名。不在 quick profile 里。场景里关掉 `binlog_transaction_compression`，结束时恢复为 ON。不拉 MinIO。
@@ -151,6 +153,7 @@ make e2e-topology-check
 2. 调用 `/metrics`，确认 5 个核心指标名都可见。
 3. 验证 `task_state_count` 随任务状态变化（`CREATED -> RUNNING -> STOPPED`）。
 4. 写入 source 数据并等待 checkpoint 生成，验证 `checkpoint_age_seconds` 两次抓取间递增。
+5. 经 `run-observability.sh` 跑时（`make e2e-observability`、CI），等 `otlp-sink.py` 收到本次运行的 API span：服务名、`binlog_server/internal/api`、`POST /api/tasks/*path`、`http.target` 为本任务的 `/start`。
 
 ## smoke-control-plane-failover 场景说明
 

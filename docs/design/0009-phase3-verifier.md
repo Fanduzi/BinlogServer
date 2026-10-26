@@ -33,7 +33,7 @@
 
 - 把 `health.Produced` 里的 `chain.objects` / `verify` 改成 true。评估器不生产这些 kind。`TestHealthIgnoresScopesNotProduced` 锁着这两个 scope。注册表里 `VERIFY_FAILED`、`OBJECT_CORRUPT`、`UPLOAD_CLOCK_SKEW`、`LOCAL_UNREADABLE`、`DRILL_FAILED`、`DRILL_REFUSED` 是未托管项（`Derive` 为空），健康面是 `HealthSummary`：开着的 CRITICAL 让 `/api/health` 503。
 - 还原演练的进程、DSN 和 MySQL。键可以加载，工人不拨号。
-- 真实 MinIO 场景进 CI。场景脚本在 `scripts/e2e/smoke-verify.sh`，现有 workflow 不会选中它。要进 CI 必须改 workflow，本仓库的 token 改不了 workflow。改法写在第 14 节。A4 不靠这个场景：运行中的工人经 API 报出缺文件和坏对象的测试已经在 `go test ./...` 里。
+- 真实 MinIO 场景进 CI。场景脚本在 `scripts/e2e/smoke-verify.sh`，由 `e2e.yml` 的 `e2e-verify` job 每个 PR 跑（第 14 节）。A4 不靠这个场景：运行中的工人经 API 报出缺文件和坏对象的测试已经在 `go test ./...` 里。
 
 ## 3. 核心决定
 
@@ -442,7 +442,7 @@ e2e-verify:
       run: ./scripts/e2e/smoke-verify.sh
 ```
 
-`workflow_dispatch` 的 `e2e_profile` 选项加上 `verify`。这一份改不了 workflow，所以上面的 MinIO job 先不加。A4 不靠它：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出，并在 `/metrics` 上看到 `finding_open` 与 `binlog_server_verify_bytes_total`。`TestApp_VerifierTickerReportsTwoPasses` 从进程启动走到第一轮和 ticker 第二轮。它在 `go test ./...` 里，现有 `unit-and-e2e` 每个 PR 都跑。工人写回的多轮测试在 `internal/tasks/verifier_test.go`。集群仍不巡检（`TestStartVerifier_ClusterIsInert`），所以 A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。可选演练仍关。
+这个 job 已加进 `e2e.yml`，`workflow_dispatch` 的 `e2e_profile` 也有 `verify`。A4 不靠它：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出，并在 `/metrics` 上看到 `finding_open` 与 `binlog_server_verify_bytes_total`。`TestApp_VerifierTickerReportsTwoPasses` 从进程启动走到第一轮和 ticker 第二轮。它在 `go test ./...` 里，现有 `unit-and-e2e` 每个 PR 都跑。工人写回的多轮测试在 `internal/tasks/verifier_test.go`。集群仍不巡检（`TestStartVerifier_ClusterIsInert`），所以 A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。可选演练仍关。
 
 ## 15. 留给后面的清单
 
@@ -455,7 +455,7 @@ e2e-verify:
 5. 不加 `binlog_files.last_verified_at` 列。进度在 `.verify.json`。
 6. 不和复核器合成一把字节预算。巡检自己一把。
 7. 阶段 5 的还原计划到位之后再开演练。演练默认仍关，工人不拨 `verify.drill_dsn`。
-8. 不改 `e2e.yml`。standalone 的周期巡检由 `go test ./...` 里的 `TestVerifier_APIReportsMissingLocalAndCorruptObject` 和 `TestApp_VerifierTickerReportsTwoPasses` 支撑。集群 `Allows` 仍关，A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。第 14 节的 MinIO job 仍要改 workflow 才能进 CI。
+8. 不改 `e2e.yml`。standalone 的周期巡检由 `go test ./...` 里的 `TestVerifier_APIReportsMissingLocalAndCorruptObject` 和 `TestApp_VerifierTickerReportsTwoPasses` 支撑。集群 `Allows` 仍关，A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。第 14 节的 MinIO job 已进 CI（`e2e-verify`）。
 9. 两个 gauge 已从本轮 `Report` 导出。趁本地文件还在把空 `sha256` 写回目录行的后台任务还没有。
 10. 「row removed」关闭时记一条单独事件：还没有。关闭原因写在 finding 的 detail 里。
 

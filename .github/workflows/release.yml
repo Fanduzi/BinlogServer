@@ -4,12 +4,23 @@ on:
   push:
     tags:
       - "v*"
+  # A manual run on a branch builds snapshot archives and runs every check
+  # below, but resolves no notes file and publishes nothing.
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # Every per-PR job in e2e.yml (unit tests, quick and single-node scenarios,
+  # the cluster jobs, race and vet when present) runs again on the tagged
+  # commit; nothing is built or published unless all of them pass.
+  ci:
+    name: ci
+    uses: ./.github/workflows/e2e.yml
+
   release:
+    needs: [ci]
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -43,6 +54,10 @@ jobs:
 
       - name: Resolve release note path
         run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "PREPARE_ARGS=release --clean --snapshot --skip=publish,announce" >> "$GITHUB_ENV"
+            exit 0
+          fi
           TAG="${GITHUB_REF_NAME}"
           NOTES_FILE="docs/releases/release-notes-${TAG}.md"
           if [ ! -f "$NOTES_FILE" ]; then
@@ -50,6 +65,7 @@ jobs:
             exit 1
           fi
           echo "RELEASE_NOTES_FILE=$NOTES_FILE" >> "$GITHUB_ENV"
+          echo "PREPARE_ARGS=release --clean --skip=publish,announce --release-notes $NOTES_FILE" >> "$GITHUB_ENV"
 
       - name: Run GoReleaser check
         uses: goreleaser/goreleaser-action@v7
@@ -66,12 +82,13 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean --skip=publish,announce --release-notes ${{ env.RELEASE_NOTES_FILE }}
+          args: ${{ env.PREPARE_ARGS }}
 
-      - name: Verify Linux release archive compatibility
-        run: make check-linux-release-archive VERSION="${GITHUB_REF_NAME}"
+      - name: Verify Linux release archive, version and commit
+        run: ./scripts/check-release-archive-identity.sh
 
       - name: Publish release assets
+        if: ${{ github.ref_type == 'tag' }}
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
@@ -79,3 +96,8 @@ jobs:
           args: release --clean --release-notes ${{ env.RELEASE_NOTES_FILE }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publishing rebuilds dist/, so check the archive that was uploaded too.
+      - name: Verify published Linux archive, version and commit
+        if: ${{ github.ref_type == 'tag' }}
+        run: ./scripts/check-release-archive-identity.sh
