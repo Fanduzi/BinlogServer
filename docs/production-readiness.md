@@ -97,7 +97,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 |---|---|---|---|---|
 | J1 | 发布时必须有发布说明，4 个平台的包带 checksums，Linux 包过 glibc 兼容检查 | `release.yml`（v0.5.76 有 4 个包加 `checksums.txt`，我核对过 sha256） | MET | — |
 | J2 | 发布出来的二进制报告正确的 version 和 commit | `scripts/check-release-archive-identity.sh` 解包 linux_amd64 包，跑 `binlog-server version`，要求 `Version:` 等于 goreleaser 构建的版本（打 tag 时也等于去掉 `v` 的 tag）、`Commit:` 等于 `GITHUB_SHA`。`release.yml` 在发布前和发布后（发布会重新构建）各跑一次；`e2e.yml` 的 `release-archive` job 每个 PR 用 snapshot 构建跑同一个检查 | MET | — |
-| J3 | 打 tag 之前，这个 commit 已经过了全部 e2e（包括多节点 job） | `release.yml` 的 `ci` job 调用整个 `e2e.yml`（`on: workflow_call`），`release` job `needs: [ci]`：tag 所在 commit 上每个按 PR 跑的 job（含 `e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover`）都通过才构建和发布。`internal/lintguard/release_gate_test.go`（`go test ./...`）锁住这层依赖，并且不许 `e2e.yml` 里出现只在手动触发或 push main 才跑的 job | MET | — |
+| J3 | 打 tag 之前，这个 commit 已经过了全部 e2e（包括多节点 job） | `release.yml` 的 `ci` job 调用整个 `e2e.yml`（`on: workflow_call`），`release` job `needs: [ci]`：tag 所在 commit 上每个按 PR 跑的 job（含 `e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover`）都通过才构建和发布。`internal/lintguard/release_gate_test.go`（`go test ./...`）锁住这层依赖，并且不许 `e2e.yml` 的 job 条件看 `github.event_name` 或 `github.ref`（被调用时看到的是 release 的事件，会被跳过） | MET | — |
 
 ## 计数
 

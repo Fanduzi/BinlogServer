@@ -50,8 +50,8 @@ func needsList(v any) []string {
 
 // TestReleaseWaitsForEveryE2EJob locks production-readiness J3: a tag builds
 // and publishes only after the whole e2e.yml workflow passed on that commit,
-// and no e2e.yml job is limited to manual runs or to pushes on main, which
-// would make it skip when release.yml calls the workflow for a tag.
+// and no e2e.yml job condition depends on the event or ref, which would make
+// it skip when release.yml calls the workflow.
 func TestReleaseWaitsForEveryE2EJob(t *testing.T) {
 	release := readWorkflow(t, "release.yml")
 	ci, ok := release.Jobs["ci"]
@@ -72,11 +72,11 @@ func TestReleaseWaitsForEveryE2EJob(t *testing.T) {
 		t.Fatal("e2e.yml must be callable (on: workflow_call) so release.yml can run it")
 	}
 	for name, job := range e2e.Jobs {
-		cond := strings.ReplaceAll(job.If, " ", "")
-		if strings.Contains(cond, "event_name=='workflow_dispatch'&&") ||
-			strings.Contains(cond, "refs/heads/main") ||
-			strings.Contains(cond, "event_name=='push'") {
-			t.Errorf("e2e.yml job %s only runs on manual dispatch or push to main (if: %s); it would be skipped before a release", name, job.If)
+		// A called workflow sees the caller's event (push for a tag,
+		// workflow_dispatch for a manual release run), so a condition on the
+		// event name or ref can skip the job before a release.
+		if strings.Contains(job.If, "event_name") || strings.Contains(job.If, "github.ref") {
+			t.Errorf("e2e.yml job %s keys on the event or ref (if: %s); key on github.event.inputs.e2e_profile so it also runs when release.yml calls it", name, job.If)
 		}
 	}
 }
