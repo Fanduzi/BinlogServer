@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -140,7 +139,7 @@ func (l *Ledger) SegmentUnreadable(name string) (string, bool) {
 		return reason, true
 	}
 	if sum, ok := sealSumAt(l.dir, name); ok && sum.Size >= 0 {
-		if info, err := os.Stat(path); err == nil && info.Size() != sum.Size {
+		if info, err := Stat(path); err == nil && info.Size() != sum.Size {
 			return fmt.Sprintf("it is %d bytes on disk, but it was %d bytes at seal (%s)", info.Size(), sum.Size, SealSumsFileName), true
 		}
 	}
@@ -238,7 +237,7 @@ func storageMessage(p StorageProblem) string {
 // mtime, like the ledger's contents: a sweep over a large directory reads
 // each unchanged segment once.
 func segmentDamage(path, diskName, segmentSource string) (string, bool) {
-	info, err := os.Stat(path)
+	info, err := Stat(path)
 	if err != nil {
 		return "", false
 	}
@@ -270,7 +269,7 @@ func segmentDamageUncached(path, diskName, segmentSource string) (string, bool) 
 }
 
 func positionRegresses(path string) (uint32, uint32, bool) {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -317,7 +316,7 @@ func positionRegresses(path string) (uint32, uint32, bool) {
 }
 
 func strayRotate(path, segmentSource string) (string, bool) {
-	f, err := os.Open(path)
+	f, err := Open(path)
 	if err != nil {
 		return "", false
 	}

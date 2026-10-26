@@ -22,7 +22,7 @@
 | `source_chain_test.go` | HTTP 缝测试：继续和停止的 `source_chain`、重复停止只算一次、文件 `source_identity` 与 `source_server`，以及 `binlog_server_source_switchovers` 的两个 outcome；没有任务时空 `task_id` 为 0 |
 | `swagger_docs_only.go` | swagger 注释占位 |
 | `server_test.go` | HTTP 测试替身。内存 task store 用互斥锁保护，后台 runner 和 HTTP 读可以同时碰到同一份 map |
-| `replay_archive_test.go` | 回放 tar 的 HTTP 覆盖。临时 tar 的计数只看 `tasks.ReplayArchiveTempDir`（本包测试自己的目录），不看进程临时目录。计数的基准取在进程临时目录里的文件创建之前 |
+| `replay_archive_test.go` | 回放 tar 的 HTTP 覆盖。本包测试进程把 `TMPDIR` 指到自己的目录，泄漏计数只看这个目录。只数缝目录、不看进程临时目录的回归在 `internal/tasks` |
 
 ## Exports
 - `NewServer(taskService, ...ServerOption) http.Handler` - 创建 API 服务器

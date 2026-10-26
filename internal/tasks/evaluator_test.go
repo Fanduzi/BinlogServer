@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task directories with duplicated, stale-open, empty-leftover and bit-rotted segments, health stores that fail, fence or block, and evaluator modes off/shadow/on
-// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (the merged pass is one debounce later, and advancing the clock after idle adds no pass) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a pass over 1500 segments stays within 15x of the same try's 150-segment pass with segment visits counted at the file stamp and a 30ms ceiling on the 1-segment pass, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
+// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (four workers, the merged pass is applied at exactly one debounce, a second worker cannot enter the same task, and a mark after idle leaves the evaluator not idle) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a cold pass over 150 and 1500 segments does a constant number of filesystem operations per segment and ten times the segments do ten times the operations, with a 100ms ceiling on the 150-segment pass and a 2s ceiling on the 1500-segment pass, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5, §5.7, §6)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"binlog_server/internal/assurance"
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
 )
@@ -288,13 +288,15 @@ func TestRehasher_SkipsSegmentsWithoutSHA(t *testing.T) {
 // scriptedStore is a health store with hooks; it wraps a FileStore.
 type scriptedStore struct {
 	*healthstore.FileStore
-	mu       sync.Mutex
-	applyErr []error
-	applied  [][]health.Transition
-	seed     []health.Finding
-	block    chan struct{}
-	inFlight map[string]int
-	maxPer   int
+	mu        sync.Mutex
+	applyErr  []error
+	applied   [][]health.Transition
+	seed      []health.Finding
+	block     chan struct{}
+	blockFor  func(taskID string) <-chan struct{}
+	inFlight  map[string]int
+	maxPer    int
+	appliedID []string
 }
 
 func (s *scriptedStore) ApplyTransitions(ctx context.Context, taskID string, f health.Fence, ts []health.Transition, h health.TaskHealth) (healthstore.Applied, error) {
@@ -307,11 +309,16 @@ func (s *scriptedStore) ApplyTransitions(ctx context.Context, taskID string, f h
 		s.maxPer = s.inFlight[taskID]
 	}
 	s.applied = append(s.applied, append([]health.Transition(nil), ts...))
+	s.appliedID = append(s.appliedID, taskID)
 	var err error
 	if len(s.applyErr) > 0 {
 		err, s.applyErr = s.applyErr[0], s.applyErr[1:]
 	}
-	block := s.block
+	var block <-chan struct{}
+	block = s.block
+	if s.blockFor != nil {
+		block = s.blockFor(taskID)
+	}
 	s.mu.Unlock()
 	if block != nil {
 		<-block
@@ -425,8 +432,28 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	s := NewScheduler(WithDataDir(data))
 	task, dir := evalTask(t, s, data)
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
-	block := make(chan struct{})
-	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), block: block}
+	releaseMain := make(chan struct{})
+	releaseSoak := make(chan struct{})
+	var mainOnce, soakOnce sync.Once
+	closeMain := func() { mainOnce.Do(func() { close(releaseMain) }) }
+	closeSoak := func() { soakOnce.Do(func() { close(releaseSoak) }) }
+	var soakMu sync.Mutex
+	soaks := map[string]bool{}
+	store := &scriptedStore{
+		FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
+		blockFor: func(id string) <-chan struct{} {
+			if id == task.ID {
+				return releaseMain
+			}
+			soakMu.Lock()
+			ok := soaks[id]
+			soakMu.Unlock()
+			if ok {
+				return releaseSoak
+			}
+			return nil
+		},
+	}
 	clock := newManualClock(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
 	const debounce = time.Second
 	e := NewEvaluator(s, EvaluatorConfig{
@@ -443,11 +470,8 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	// TempDir cleanup runs after this function returns. Cancel alone does not
 	// wait, so a worker can create a file while the directory is being removed.
 	defer func() {
-		select {
-		case <-block:
-		default:
-			close(block)
-		}
+		closeMain()
+		closeSoak()
 		cancel()
 		clock.Advance(time.Hour)
 		select {
@@ -460,26 +484,64 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	for i := 0; i < 200; i++ { // marks during the pass only set the bit
 		e.MarkDirty(task.ID, ReasonUpload)
 	}
-	// The merged pass is released by one debounce on the test clock, and the
-	// wall time from unblocking the first pass is well under two seconds.
-	// A pass that sleeps two seconds, or that waits an extra second of this
-	// clock, does not arrive. Four workers share the pool, so dropping the
-	// per-task lock lets a second evaluation of this task overlap the first.
-	// After idle, a window on the test clock and on the wall stays quiet.
+	// Four workers, and the other three are free. Dropping the per-task
+	// running bit lets a second evaluation of this task overlap the first.
+	serialDeadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(serialDeadline) {
+		if storeMaxPer(store) > 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := storeMaxPer(store); got != 1 {
+		t.Fatalf("%d evaluations of one task ran at once", got)
+	}
+	// Hold the other three workers inside their own passes. A finish that
+	// then sleeps cannot hand the merged pass to someone else.
+	for i := 0; i < 3; i++ {
+		soak, soakDir := evalTask(t, s, data)
+		writeAlertSegment(t, filepath.Join(soakDir, "mysql-bin.000001"), 37, 38)
+		soakMu.Lock()
+		soaks[soak.ID] = true
+		soakMu.Unlock()
+		before := storeAppliesTask(store, soak.ID)
+		e.MarkDirty(soak.ID, ReasonUpload)
+		// A free worker may be parked on the test clock. Advancing its one
+		// second cap wakes it. The main task is still running, so this does
+		// not release the merged pass.
+		deadline := time.Now().Add(3 * time.Second)
+		for storeAppliesTask(store, soak.ID) == before {
+			if time.Now().After(deadline) {
+				t.Fatalf("soak worker did not enter (applied %d state %s)", storeApplies(store), evalState(e))
+			}
+			clock.Advance(time.Second)
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if got := storeMaxPer(store); got != 1 {
+		t.Fatalf("%d evaluations of one task ran at once", got)
+	}
+	// The merged pass is applied at exactly one debounce on the test clock.
+	// The wall budget from releasing the first pass is 500ms, so a finish
+	// that sleeps two seconds does not arrive.
 	base := clock.Now()
 	started := time.Now()
-	close(block)
+	closeMain()
 	var n int
 	advanced := false
 	for {
-		n = storeApplies(store)
-		if n >= 2 && evalIdle(e) {
+		n = storeAppliesTask(store, task.ID)
+		if n >= 2 {
 			break
 		}
-		if time.Since(started) > 1500*time.Millisecond {
+		if time.Since(started) > 500*time.Millisecond {
 			t.Fatalf("merged pass late: applied %d idle %v clock %s", n, evalIdle(e), clock.Now().Sub(base))
 		}
-		if !advanced && n >= 1 && evalLastRun(e, task.ID).Equal(base) {
+		if !advanced && n == 1 && evalLastRun(e, task.ID).Equal(base) && !evalRunning(e, task.ID) {
+			time.Sleep(20 * time.Millisecond)
+			if got := storeAppliesTask(store, task.ID); got != 1 {
+				t.Fatalf("merged pass ran before the debounce elapsed on the test clock (applied %d)", got)
+			}
 			clock.Advance(debounce)
 			advanced = true
 		}
@@ -491,44 +553,60 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	if got := clock.Now().Sub(base); got != debounce {
 		t.Fatalf("test clock moved %s for the merged pass, want one debounce (%s)", got, debounce)
 	}
-	store.mu.Lock()
-	maxPer := store.maxPer
-	store.mu.Unlock()
-	if maxPer != 1 {
-		t.Fatalf("%d evaluations of one task ran at once", maxPer)
-	}
 	if n != 2 {
 		t.Fatalf("%d passes for the startup pass plus 200 marks, want exactly 2", n)
 	}
+	closeSoak()
+	// A pass can be marked again while it is in the store (the scheduler's
+	// upload bookkeeping). One debounce on the test clock lets that pass
+	// run. It must then be idle. A mark that keeps coming back does not.
+	idleDeadline := time.Now().Add(2 * time.Second)
+	drained := false
+	for {
+		if evalIdle(e) && clock.WaiterCount() > 0 {
+			break
+		}
+		if !drained && !evalRunningAny(e) {
+			clock.Advance(debounce)
+			drained = true
+		}
+		if time.Now().After(idleDeadline) {
+			t.Fatalf("evaluator did not go idle after the soak passes (idle %v waiters %d applied %d state %s)", evalIdle(e), clock.WaiterCount(), storeApplies(store), evalState(e))
+		}
+		time.Sleep(time.Millisecond)
+	}
 	// A window, not one instant: a pass 30ms later on this clock or on the
-	// wall must be visible. Steps land on 30ms, 100ms and 2s.
+	// wall must be visible. Steps land on 30ms, 100ms and 2s. The wall
+	// window also requires the evaluator to be idle, so a mark that has not
+	// been applied is a failure even when the apply count has not moved.
+	quiet := storeApplies(store)
 	startClock := clock.Now()
 	startWall := time.Now()
 	for _, step := range []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 70 * time.Millisecond, 1900 * time.Millisecond} {
 		clock.Advance(step)
 		deadline := time.Now().Add(200 * time.Millisecond)
 		for {
-			if got := storeApplies(store); got != n {
-				t.Fatalf("extra pass at clock +%s wall +%s: applied %d, want %d", clock.Now().Sub(startClock), time.Since(startWall), got, n)
+			if got := storeApplies(store); got != quiet {
+				t.Fatalf("extra pass at clock +%s wall +%s: applied %d, want %d", clock.Now().Sub(startClock), time.Since(startWall), got, quiet)
 			}
 			if evalIdle(e) && clock.WaiterCount() > 0 {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("after idle, clock +%s left the evaluator busy (applied %d)", clock.Now().Sub(startClock), storeApplies(store))
+				t.Fatalf("after idle, clock +%s left the evaluator busy (applied %d idle %v)", clock.Now().Sub(startClock), storeApplies(store), evalIdle(e))
 			}
 			time.Sleep(time.Millisecond)
 		}
 	}
 	wall := time.Now().Add(100 * time.Millisecond)
 	for time.Now().Before(wall) {
-		if got := storeApplies(store); got != n {
-			t.Fatalf("extra pass %s after idle: applied %d, want %d", time.Since(startWall), got, n)
+		if !evalIdle(e) {
+			t.Fatalf("not idle %s after the quiet window: applied %d", time.Since(startWall), storeApplies(store))
+		}
+		if got := storeApplies(store); got != quiet {
+			t.Fatalf("extra pass %s after idle: applied %d, want %d", time.Since(startWall), got, quiet)
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-	if got := storeApplies(store); got != n {
-		t.Fatalf("after idle, %d extra passes", got-n)
 	}
 }
 
@@ -557,6 +635,51 @@ func storeApplies(store *scriptedStore) int {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return len(store.applied)
+}
+
+func storeAppliesTask(store *scriptedStore, taskID string) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	n := 0
+	for _, id := range store.appliedID {
+		if id == taskID {
+			n++
+		}
+	}
+	return n
+}
+
+func storeMaxPer(store *scriptedStore) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.maxPer
+}
+
+func evalRunning(e *Evaluator, id string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.running[id]
+}
+
+func evalRunningAny(e *Evaluator) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.running) > 0
+}
+
+func evalState(e *Evaluator) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var dirty, running []string
+	for id, reasons := range e.dirty {
+		for r := range reasons {
+			dirty = append(dirty, id+":"+string(r))
+		}
+	}
+	for id := range e.running {
+		running = append(running, id)
+	}
+	return "dirty=" + strings.Join(dirty, ",") + " running=" + strings.Join(running, ",")
 }
 
 func evalLastRun(e *Evaluator, id string) time.Time {
@@ -672,84 +795,52 @@ func TestNodeIDPersistsInDataDir(t *testing.T) {
 }
 
 // TestEvaluator_1500SegmentsNearLinear checks that the cold pass which walks
-// the segments stays near-linear. The absolute ceiling is the 1-segment pass:
-// a fixed per-pass delay stands out there, and a loaded host moves the
-// 150-segment time without making the walk quadratic (#504). Ten times the
-// segments must cost at most 15 times on the same try. Pairing the fastest
-// 150-segment pass with the fastest 1500-segment pass from another try makes
-// a linear walk look like 15x when the host is busy. Visits are counted at
-// the file stamp on every try, so a nested walk that skips the counter in
-// Segments still counts. The chain cache is not warmed first, so the
-// measured pass is the walk.
+// the segments does a constant amount of filesystem work per segment.
+// Stat, Open, ReadDir and StampOf share one counter, so a nested walk that
+// skips the call in Segments still counts. Ten times the segments do about
+// ten times the operations. The only wall-clock guard is the 1500-segment
+// pass under 2s. The chain cache is not warmed first, so the measured pass
+// is the walk. A 150-segment pass also stays under 100ms. That is an
+// absolute ceiling, not a ratio: under eight CPU hogs the pass stays
+// under 80ms. An extra 0.7ms inside the per-segment walk is charged on
+// every body check, so the 150-segment pass lands well above 100ms.
 func TestEvaluator_1500SegmentsNearLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("benchmark-style QA condition")
 	}
 	const (
-		tinyN          = 1
-		smallN         = 150
-		largeN         = 1500
-		maxRatio       = 15
-		maxStepRatio   = 12
-		tinyCeiling    = 30 * time.Millisecond
-		largeCeiling   = 2 * time.Second
-		maxStepsPerSeg = 8
+		smallN       = 150
+		largeN       = 1500
+		maxPerSeg    = 20
+		walkOverhead = 4 // directory stats and listings, once per pass
+		smallCeiling = 100 * time.Millisecond
+		largeCeiling = 2 * time.Second
 	)
 	ctx := context.Background()
-	bestTiny := time.Hour
-	bestLarge := time.Hour
-	bestRatio := -1.0
-	var ratioSmall, ratioLarge time.Duration
-	var stepsTiny, stepsSmall, stepsLarge int64
-	checkSteps := func(n int, steps int64) {
+	dSmall, opsSmall := evalPassTime(t, ctx, smallN)
+	dLarge, opsLarge := evalPassTime(t, ctx, largeN)
+	t.Logf("%d segments %s ops %d; %d segments %s ops %d", smallN, dSmall, opsSmall, largeN, dLarge, opsLarge)
+	checkOps := func(n int, ops int64) {
 		t.Helper()
-		if steps < int64(n) {
-			t.Fatalf("%d-segment pass visited %d, want at least one per segment", n, steps)
+		if ops < int64(n) {
+			t.Fatalf("%d-segment pass did %d filesystem ops, want at least one per segment", n, ops)
 		}
-		if steps > int64(n*maxStepsPerSeg) {
-			t.Fatalf("%d-segment pass visited %d, want <= %d per segment", n, steps, maxStepsPerSeg)
-		}
-	}
-	for i := 0; i < 3; i++ {
-		dTiny, stTiny := evalPassTime(t, ctx, tinyN)
-		dSmall, stSmall := evalPassTime(t, ctx, smallN)
-		dLarge, stLarge := evalPassTime(t, ctx, largeN)
-		checkSteps(tinyN, stTiny)
-		checkSteps(smallN, stSmall)
-		checkSteps(largeN, stLarge)
-		if stSmall > 0 && stLarge > stSmall*maxStepRatio {
-			t.Fatalf("segment visits grew %.1fx from %d to %d segments; a nested walk is quadratic", float64(stLarge)/float64(stSmall), smallN, largeN)
-		}
-		if dTiny < bestTiny {
-			bestTiny = dTiny
-			stepsTiny = stTiny
-		}
-		if dLarge < bestLarge {
-			bestLarge = dLarge
-		}
-		if dSmall <= 0 || dLarge <= 0 {
-			t.Fatalf("pass reported no time: small %s large %s", dSmall, dLarge)
-		}
-		r := float64(dLarge) / float64(dSmall)
-		if bestRatio < 0 || r < bestRatio {
-			bestRatio = r
-			ratioSmall, ratioLarge = dSmall, dLarge
-			stepsSmall, stepsLarge = stSmall, stLarge
+		if ops > int64(n)*maxPerSeg+walkOverhead {
+			t.Fatalf("%d-segment pass did %d filesystem ops, want <= %d per segment plus %d", n, ops, maxPerSeg, walkOverhead)
 		}
 	}
-	t.Logf("best %d-segment %s (%d visits); best same-try ratio %.1fx (%d segments %s / %d segments %s, visits %d / %d); fastest %d-segment %s",
-		tinyN, bestTiny, stepsTiny, bestRatio, largeN, ratioLarge, smallN, ratioSmall, stepsLarge, stepsSmall, largeN, bestLarge)
-	if bestTiny <= 0 {
-		t.Fatalf("1-segment pass reported no time")
+	checkOps(smallN, opsSmall)
+	checkOps(largeN, opsLarge)
+	perSmall := opsSmall - walkOverhead
+	perLarge := opsLarge - walkOverhead
+	if perSmall <= 0 || perLarge != perSmall*10 {
+		t.Fatalf("%d segments did %d ops, %d did %d; want 10x the per-segment work", largeN, opsLarge, smallN, opsSmall)
 	}
-	if bestTiny > tinyCeiling {
-		t.Fatalf("%d-segment pass took %s, ceiling %s", tinyN, bestTiny, tinyCeiling)
+	if dSmall > smallCeiling {
+		t.Fatalf("%d-segment pass took %s, ceiling %s", smallN, dSmall, smallCeiling)
 	}
-	if bestLarge > largeCeiling {
-		t.Fatalf("%d-segment pass took %s, ceiling %s", largeN, bestLarge, largeCeiling)
-	}
-	if bestRatio > float64(maxRatio) {
-		t.Fatalf("%d segments took %s, %d took %s (%.1fx on that try); want <= %dx", largeN, ratioLarge, smallN, ratioSmall, bestRatio, maxRatio)
+	if dLarge > largeCeiling {
+		t.Fatalf("%d-segment pass took %s, ceiling %s", largeN, dLarge, largeCeiling)
 	}
 }
 
@@ -762,12 +853,12 @@ func evalPassTime(t *testing.T, ctx context.Context, n int) (time.Duration, int6
 		writeAlertSegment(t, filepath.Join(dir, fmt.Sprintf("mysql-bin.%06d", i+1)), int64(37+i))
 	}
 	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorShadow)
-	assurance.ResetChainSteps()
+	binlog.ResetWalkOps()
 	start := time.Now()
 	if _, err := e.EvaluateNow(ctx, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	return time.Since(start), assurance.ChainSteps()
+	return time.Since(start), binlog.WalkOps()
 }
 
 func TestRehasher_KeepsToByteBudgetOver100Tasks(t *testing.T) {

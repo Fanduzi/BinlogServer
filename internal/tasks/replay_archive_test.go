@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: on-disk segments, catalog rows, task state, and an optional object opener
-// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live under a private TMPDIR, and the count includes both the seam directory and os.TempDir so a temp left in either place fails
+// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live under a private TMPDIR, the leak count includes both the seam directory and os.TempDir, and TestReplayTempCount_CountsOnlyTheSeamDir counts only the seam directory
 // pos: scheduler tests for the replay archive
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -208,6 +208,38 @@ func readReplayTar(t *testing.T, raw []byte) map[string][]byte {
 			t.Fatal(err)
 		}
 		out[hdr.Name] = body
+	}
+}
+
+// replaySeamTempCount counts archive temps in the seam directory only.
+// A file in the process temp directory is another package's file.
+func replaySeamTempCount(t *testing.T) int {
+	t.Helper()
+	return globReplayTemps(t, replayArchiveCreateDir())
+}
+
+// TestReplayTempCount_CountsOnlyTheSeamDir: a binlog-replay tar in the
+// process temp directory must not change the count. A file in the seam
+// directory must. Counting os.TempDir as well fails the first check.
+func TestReplayTempCount_CountsOnlyTheSeamDir(t *testing.T) {
+	before := replaySeamTempCount(t)
+	outside, err := os.CreateTemp("", "binlog-replay-*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside.Close()
+	t.Cleanup(func() { _ = os.Remove(outside.Name()) })
+	if replaySeamTempCount(t) != before {
+		t.Fatalf("process temp file %s changed the count from %d", outside.Name(), before)
+	}
+	seam, err := os.CreateTemp(replayArchiveCreateDir(), "binlog-replay-*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seam.Close()
+	t.Cleanup(func() { _ = os.Remove(seam.Name()) })
+	if got := replaySeamTempCount(t); got != before+1 {
+		t.Fatalf("seam leak count %d, want %d", got, before+1)
 	}
 }
 

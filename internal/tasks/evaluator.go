@@ -1156,14 +1156,14 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	if !ok {
 		return nil
 	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+	if info, err := binlog.Stat(dir); err != nil || !info.IsDir() {
 		if err == nil {
 			err = fmt.Errorf("%s is not a directory", dir)
 		}
 		e.noteDirRead(task.ID, dir, err)
 		return nil
 	}
-	if _, err := os.ReadDir(dir); err != nil {
+	if _, err := binlog.ReadDir(dir); err != nil {
 		e.noteDirRead(task.ID, dir, err)
 		return nil
 	}
@@ -1266,7 +1266,7 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		if !ok || r.ok {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(dir, name))
+		info, err := binlog.Stat(filepath.Join(dir, name))
 		if err != nil || !binlog.StampOf(info).Equal(r.stamp) {
 			continue // changed since it was hashed: the next cycle judges it
 		}
@@ -1505,7 +1505,7 @@ func (e *Evaluator) fingerprint(taskID string) string {
 	if !ok {
 		return ""
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := binlog.ReadDir(dir)
 	if err != nil {
 		return "error:" + err.Error()
 	}

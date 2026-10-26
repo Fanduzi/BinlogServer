@@ -96,7 +96,7 @@ func SealSumAt(dir, name string) (SealSum, bool) { return sealSumAt(dir, name) }
 
 func sealSumAt(dir, name string) (SealSum, bool) {
 	path := filepath.Join(dir, SealSumsFileName)
-	info, err := os.Stat(path)
+	info, err := Stat(path)
 	if err != nil {
 		return SealSum{}, false
 	}

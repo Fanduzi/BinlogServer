@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
 // input: Inputs: the task's chain order, catalog rows, task directory ledger, object listing snapshot, checkpoint, start set and recorded source switches
-// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER; ChainSteps counts segment visits, including every file stamp, so a nested walk cannot skip the count by avoiding the call in Segments
+// output: the backup chain: its segments with where each one is readable, and the I1-I7 violations of ADR 0009 plus the order self-check, each a closed Kind with the segments involved and the evidence; an unset upload grace is 15 minutes; since P2-3 I4 includes open copies on the replay order (same content only: GTIDs intersect or one file is a byte prefix of the other) and an empty leftover open file is INFO I4_EMPTY_LEFTOVER; ChainSteps is WalkOps (stat, open, readdir and every file stamp), so a nested walk cannot skip the count by avoiding the call in Segments
 // note P2-5.1 (design 0009 §20.2): a local size is compared with a sealed row only for a legacy segment with no .seal-sha256 line and not while a legacy failback is planned; an object size mismatch is I6_OBJECT_SIZE_MISMATCH
 // note P2-5.3 (design 0009 §22): Switches suppress cross-stint I3_GTID_HOLE (switchHole); CheckCheckpoint is separate from Check so I5 stays out of the chain cache
 // pos: the one answer to "is this backup complete, and where is each part" (ADR 0009 phase 1); depends on binlog only
@@ -22,9 +22,9 @@ import (
 	"binlog_server/internal/binlog"
 )
 
-// noteChainStep records one segment visit. The same counter is incremented
-// from binlog.StampOf, which every fingerprint and segment read calls, so a
-// nested loop that skips this line still counts when it stats or reads.
+// noteChainStep records one segment visit. Stat, Open, ReadDir and StampOf
+// share that counter, so a nested loop that skips this line still counts
+// when it stats, opens or stamps.
 func noteChainStep() { binlog.NoteSegmentTouch() }
 
 // ChainSteps is the number of segment visits since the last reset.
@@ -207,7 +207,7 @@ func (c *Chain) Segments() []Segment {
 		seg := Segment{Name: name, Row: rows[name]}
 		seg.Named, _ = binlog.ClassifySegment(name)
 		if c.in.Local != nil && c.in.Local.Dir() != "" {
-			if info, err := os.Stat(filepath.Join(c.in.Local.Dir(), name)); err == nil && info.Mode().IsRegular() {
+			if info, err := binlog.Stat(filepath.Join(c.in.Local.Dir(), name)); err == nil && info.Mode().IsRegular() {
 				seg.Local, seg.LocalSize = true, info.Size()
 				contents, err := c.in.Local.Contents(name)
 				if err != nil {
@@ -520,12 +520,12 @@ const minCopyBytes = 4 + 19
 var binlogMagic = []byte{0xfe, 'b', 'i', 'n'}
 
 func bytePrefix(pa, pb string) bool {
-	fa, err := os.Open(pa)
+	fa, err := binlog.Open(pa)
 	if err != nil {
 		return false
 	}
 	defer fa.Close()
-	fb, err := os.Open(pb)
+	fb, err := binlog.Open(pb)
 	if err != nil {
 		return false
 	}
@@ -628,7 +628,7 @@ func (c *Chain) checkOffChainRows(add func(Kind, string, string, ...string)) {
 			continue
 		}
 		if c.in.Local != nil && c.in.Local.Dir() != "" {
-			if _, err := os.Stat(filepath.Join(c.in.Local.Dir(), row.Name)); err == nil {
+			if _, err := binlog.Stat(filepath.Join(c.in.Local.Dir(), row.Name)); err == nil {
 				continue
 			}
 		}

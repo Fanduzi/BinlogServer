@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the files inventory window, SelectReplayFiles, the point-in-time selection, the GTID stop selection, the executed-GTID selection, and OpenTaskSegment for each selected basename; replayArchiveTempDir chooses where the temp tar is created (empty: the process temp dir)
-// output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read; a damaged segment and every later one are not archived; an open member sealed after the selection is read under its sealed name or selected again (#322); SetReplayArchiveTempDirForTest panics outside a test and stores the directory so a concurrent reader does not race the write
+// output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read; a damaged segment and every later one are not archived; an open member sealed after the selection is read under its sealed name or selected again (#322); replayArchiveTempDir stores the directory archive temps are created in so a concurrent reader does not race the write
 // pos: replay-set archive for the authenticated download route, including the same datetime window, the same GTID stop, and the same executed-GTID roll-forward as the replay JSON
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -12,7 +12,6 @@ import (
 	"os"
 	"strconv"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"binlog_server/internal/binlog"
@@ -66,26 +65,6 @@ var replayArchiveTempDir atomic.Value // string
 func replayArchiveCreateDir() string {
 	v, _ := replayArchiveTempDir.Load().(string)
 	return v
-}
-
-// SetReplayArchiveTempDirForTest points archive temps at dir for the rest of
-// this process. It panics outside a test. The empty string is production:
-// os.CreateTemp uses the process temp directory. Tests set a private
-// directory so a count of binlog-replay-*.tar is not shared with another package.
-func SetReplayArchiveTempDirForTest(dir string) {
-	if !testing.Testing() {
-		panic("SetReplayArchiveTempDirForTest is test-only")
-	}
-	replayArchiveTempDir.Store(dir)
-}
-
-// ReplayArchiveTempDir is the directory archive temps are created in.
-// Empty means the process temp directory. Outside a test it is always empty.
-func ReplayArchiveTempDir() string {
-	if !testing.Testing() {
-		return ""
-	}
-	return replayArchiveCreateDir()
 }
 
 func materializeReplayTar(members []replayMember) (io.ReadCloser, int64, error) {
