@@ -49,6 +49,9 @@ jobs:
       - name: Check landing page image assets
         run: ./scripts/check-landing-assets.sh
 
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+
       - name: Run unit tests
         run: go test ./...
 

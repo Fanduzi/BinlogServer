@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: on-disk segments, catalog rows, task state, and an optional object opener
-// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live under a private TMPDIR, the leak count includes both the seam directory and os.TempDir, and TestReplayTempCount_CountsOnlyTheSeamDir counts only the seam directory
+// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live under a private TMPDIR, the leak count includes both the seam directory and os.TempDir, and TestReplayTempCount_CountsOnlyTheSeamDir counts only the seam directory; -syscall-walk re-execs this binary to run one cold evaluator pass
 // pos: scheduler tests for the replay archive
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -22,7 +22,18 @@ import (
 // cached, then puts archive temps in a subdirectory of that. A leak through
 // os.CreateTemp("", ...) and a leak through the seam land in this process
 // only, so the count is not shared with another package's tests.
+// syscallWalkChild, when set, runs one cold evaluator pass and exits.
+// The Linux syscall test re-execs this binary with -syscall-walk.
+var syscallWalkChild func([]string)
+
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "-syscall-walk" {
+		if syscallWalkChild == nil {
+			panic("-syscall-walk is only built on linux")
+		}
+		syscallWalkChild(os.Args[2:])
+		os.Exit(0)
+	}
 	base := os.Getenv("TMPDIR")
 	if base == "" {
 		base = "/tmp"

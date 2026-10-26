@@ -99,6 +99,9 @@ jobs:
           go-version-file: "go.mod"
           cache: true
 
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+
       - name: go vet
         run: go vet ./...
 
@@ -138,6 +141,9 @@ jobs:
 
       - name: Check landing page image assets
         run: ./scripts/check-landing-assets.sh
+
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
 
       - name: Unit Tests
         run: go test ./...
