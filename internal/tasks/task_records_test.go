@@ -50,10 +50,13 @@ func TestTaskRecordKeepsSourceTLS(t *testing.T) {
 }
 
 // recordRunner records each task it is started with and runs until cancelled.
+// hold, when set, keeps Run from returning after cancel so the scheduler's
+// exit save cannot land until the test has observed the stop.
 type recordRunner struct {
 	mu   sync.Mutex
 	seen []Task
 	ch   chan Task
+	hold <-chan struct{}
 }
 
 func newRecordRunner() *recordRunner { return &recordRunner{ch: make(chan Task, 16)} }
@@ -64,6 +67,9 @@ func (r *recordRunner) Run(ctx context.Context, task Task) error {
 	r.mu.Unlock()
 	r.ch <- task
 	<-ctx.Done()
+	if r.hold != nil {
+		<-r.hold
+	}
 	return ctx.Err()
 }
 
@@ -645,6 +651,13 @@ func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The runner's exit save runs after StopTask returns and, while the save
+	// is still failing, replaces the stop detail. Hold Run so that save
+	// cannot land between the flip and this assertion.
+	hold := make(chan struct{})
+	r.hold = hold
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release)
 	if err := s.StartTask(run.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -660,6 +673,8 @@ func TestTaskRecords_StopAndDeleteApplyWhenSaveFails(t *testing.T) {
 	if !ok || !strings.Contains(f.Detail, "task "+run.ID) || !strings.Contains(f.Detail, "restart") || !strings.Contains(f.Detail, "resume") {
 		t.Fatalf("write detail does not say a restart resumes task %s: %+v %v", run.ID, f, ok)
 	}
+	release()
+	waitRunClosed(t, s, run.ID, "stop with a failing record save")
 	if err := s.DeleteTask(gone.ID); err != nil {
 		t.Fatalf("delete refused by a failing save: %v", err)
 	}

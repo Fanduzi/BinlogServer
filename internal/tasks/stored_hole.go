@@ -103,7 +103,7 @@ func (s *Scheduler) uploadedOnlyBefore(taskID, dir, segment string) bool {
 		if _, ok := sealedUploadedObjectKey([]BinlogFile{f}, name); !ok {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(dir, name)); errors.Is(err, os.ErrNotExist) {
+		if _, err := binlog.Lstat(filepath.Join(dir, name)); errors.Is(err, os.ErrNotExist) {
 			return true
 		}
 	}

@@ -1,5 +1,5 @@
 // Package tasks provides module-level functionality for tasks.
-// input: metadata store observations from four places (the bounded /api/health read, a ping every metaPingInterval (1s) on its own goroutine, the evaluator's bounded sweep calls (the _health lease, the expired-lease list), and evaluator passes that fail on a timeout or connection error), the optional MetaProbe of the task store, and the evaluator's node id
+// input: metadata store observations from four places (the bounded /api/health read, a ping every metaPingInterval (1s) on its own goroutine, the evaluator's bounded sweep calls (the _health lease, the expired-lease list), and evaluator passes that fail on a timeout or connection error), the optional MetaProbe of the task store, the evaluator's node id, and EvaluatorConfig.After when a test clock drives the ping interval and one ping's timeout
 // output: META_UNREACHABLE (S17, CRITICAL, task _cluster, subject the node id) through SignalFailure once failures have lasted meta_unreachable_after (default 10s) from the first failure, dated when the failing ping or read was sent; a streak that reaches the threshold only at its first answer opens and closes at once, so any outage of meta_unreachable_after plus one ping interval is recorded (§25.8 R2); the matching SignalSuccess at the first answer (for an evaluator-owned signal only after the evaluator has seen the OPEN row stored, then dated at the first answer, so an outage always leaves an OPEN at its start and a CLOSE at its end); a bounded, single-flight read of the open findings for HealthSummary (healthReadBudget 1s from entry, the handler returns at the budget even when the driver ignores ctx)
 // pos: ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md §25 and §25.8 (#427, #430 QA r1)
 // note: if this file changes, update this header and module README.md.
@@ -261,16 +261,37 @@ func (s *Scheduler) runMetaProbe(ctx context.Context, interval, timeout time.Dur
 	if timeout <= 0 {
 		timeout = metaPingTimeout
 	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
+	after := s.metaAfter()
+	var ticks <-chan time.Time
+	if after == nil {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		ticks = t.C
+	}
 	for {
+		wait := ticks
+		if after != nil {
+			wait = after(interval)
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-wait:
 			s.probeMeta(timeout)
 		}
 	}
+}
+
+// metaAfter is the evaluator's test clock, or nil when pings use the wall.
+func (s *Scheduler) metaAfter() func(time.Duration) <-chan time.Time {
+	if s == nil {
+		return nil
+	}
+	e := s.healthEval.Load()
+	if e == nil {
+		return nil
+	}
+	return e.cfg.After
 }
 
 // probeMeta pings the metadata store once. The ping runs on its own
@@ -314,8 +335,15 @@ func (s *Scheduler) probeMeta(timeout time.Duration) {
 		r.mu.Unlock()
 		done <- err
 	}()
-	t := time.NewTimer(timeout + timeout/10)
-	defer t.Stop()
+	budget := timeout + timeout/10
+	var fired <-chan time.Time
+	if after := s.metaAfter(); after != nil {
+		fired = after(budget)
+	} else {
+		t := time.NewTimer(budget)
+		defer t.Stop()
+		fired = t.C
+	}
 	select {
 	case err := <-done:
 		if err != nil {
@@ -323,7 +351,7 @@ func (s *Scheduler) probeMeta(timeout time.Duration) {
 			return
 		}
 		s.noteMetaReachAt(nil, true, clock())
-	case <-t.C:
+	case <-fired:
 		s.noteMetaReachAt(fmt.Errorf("metadata ping timed out after %s: %w", timeout, context.DeadlineExceeded), false, start)
 	}
 }

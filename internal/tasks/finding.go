@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: failure reports from the scheduler, the runner, and background loops
-// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary, whose Detail does not change status and is kept when status is already degraded): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them, with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
+// output: the finding sink (ADR 0009), served from memory when persisting fails (FINDINGS_PERSIST_FAILED, HealthSummary, whose Detail does not change status and is kept when status is already degraded): an in-process book of open findings and counters, written to a FindingStore by one background writer that keeps failed writes and retries them (a flush in flight stays visible so a test waits for that writer instead of flushing beside it), with a task event per write (none for _cluster except the FINDING_RESOLVED of META_UNREACHABLE (dated at the first answer, §25.8 R4) and of HEALTH_STORE_UNAVAILABLE (dated when 000009 can be written again, §27)); on shutdown WaitFindingSink waits for its final flush; Report never blocks on I/O; forget drops a key the health evaluator closed (with its queued writes), and ListFindings/OpenFindings merge the evaluator's open rows when its store is separate (standalone .health.json; OpenFindings includes _cluster in standalone and in cluster, and a cluster ErrSchemaAbsent on that id is ignored, §28); Report/Resolve of a kind the evaluator manages becomes a signal (SignalFailure/SignalSuccess) or is dropped (P2-4); ResolveWithReason writes the close reason into the resolved row's detail so one FINDING_RESOLVED carries it
 // pos: the single exit for failures that are not returned to a caller that already makes them visible
 // note ADR 0011: META_LOCK_STALLED is not a managed kind. HealthSummary adds side_kill, a session-timeout mismatch, and lock_detail=reduced when the store reports them. lock_detail is not a degraded reason. A reason names chain_owner or node when the finding detail does. An unreadable task directory is copied into Detail and does not change Status. A TLS transport failure in the object probe or upload retry is reason UPLOAD_TLS and degrades status; a later successful upload or a replaced probe detail clears it; other probe text does not change status and is left in place
 // note: if this file changes, update this header and module README.md.
@@ -151,6 +151,7 @@ type findingBook struct {
 	reported   map[FindingKind]int64
 	sinkErrors int64
 	pending    []findingOp
+	inflight   int // flushes that have taken a batch and not finished writing it
 	wake       chan struct{}
 	store      FindingStore
 	events     EventStore
@@ -356,12 +357,27 @@ func findingEvented(op findingOp) bool {
 
 // flush writes every pending op once. Failed ops stay pending (unless a newer
 // op for the same key arrived meanwhile) and count as sink errors.
+// quiet reports that nothing is waiting to be written and no flush is
+// mid-write. A test that also called flush would race the sink and could
+// apply an older report after the resolve (#490).
+func (b *findingBook) quiet() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.pending) == 0 && b.inflight == 0
+}
+
 func (b *findingBook) flush(ctx context.Context) {
 	b.mu.Lock()
+	b.inflight++
 	store, events := b.store, b.events
 	batch := b.pending
 	b.pending = nil
 	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.inflight--
+		b.mu.Unlock()
+	}()
 	if store == nil {
 		return
 	}

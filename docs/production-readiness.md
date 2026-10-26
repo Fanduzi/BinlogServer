@@ -74,7 +74,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
-| G1 | PRODUCTION 模式下鉴权失败就拒绝启动；源密码和 standalone 任务记录加密存放；依赖做漏洞扫描 | `internal/app/http_server_test.go`、`smoke_test.go`、`internal/taskrecords` 单测、`smoke-standalone-restart`（密钥错误、缺失）、`vulncheck` job | MET | #439（-race 下偶发失败） |
+| G1 | PRODUCTION 模式下鉴权失败就拒绝启动；源密码和 standalone 任务记录加密存放；依赖做漏洞扫描 | `internal/app/http_server_test.go`、`smoke_test.go`、`internal/taskrecords` 单测、`smoke-standalone-restart`（密钥错误、缺失）、`vulncheck` job | MET | — |
 | G2 | 到源库和 meta 的连接支持并校验 TLS，S3 默认走 TLS | `TestUploadUseSSLDefaultsToTLS`、`TestMetaTLSParseAndValidate`（`internal/config`）、`TestUseSSLTrueSendsTLSClientHello`（`internal/upload`）、`TestNormalize_DisabledIsDefault`、`TestNormalize_RejectsShape`、`TestApplyDSN_DisabledLeavesDSN`、`TestApplyDSN_PreferredAndRejectsExistingTLS`、`TestClientConfig_VerifyCASkipsHostname`、`TestClientConfig_KeyMaterialStaysOutOfErrors`、`TestClientConfig_LoadsClientCert`（`internal/mysqltls`）、`TestSourceTLSShapeAndUpdateKeepsOmittedBlock`、`TestTaskRecordKeepsSourceTLS`（`internal/tasks`），都在 `unit-and-e2e` 的 `go test ./...` 和 `race-and-vet` 里。真实 MySQL 和 MinIO（job `e2e-tls`，每个 PR 和 push main）：`TestLiveAppTLS`（`internal/app`）经 `POST /api/tasks` 创建 `source.tls` `verify-ca` 任务并 Start，真实 runner 的 binlog dump 在 `performance_schema.threads` 的 `CONNECTION_TYPE` 为 SSL/TLS；错误 CA 和错误主机名的任务为 `FAILED`，`last_error` 含 x509，没有明文 Binlog Dump。同一测试用 `./migrate --config` 的 `meta.tls` `verify-ca` 迁完库后 `App.Run` 打开 meta 池，该账号连接的 `CONNECTION_TYPE` 为 SSL/TLS；错误 CA 启动失败且错误含 `meta.tls` 和 x509。`TestLiveS3TLS`（`internal/upload`）对私有 CA 的 MinIO 用 `upload.tls.ca_file` 经 HTTPS 上传一个分段，不受信任的 CA 失败。`TestLiveMySQLTLS`（`internal/replication`）覆盖 `connectSource` 的模式，`preferred` 只在问候包没有 `CLIENT_SSL` 时退回明文 | MET | — |
 
 ## H. 性能与资源上界
@@ -82,7 +82,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | H1 | 在约定负载下（ADR 0009 §6：≥500 TPS、24h、注入各类故障）延迟有界，RSS/fd/goroutine 不会单调增长，用独立判定器验收 | `smoke-scale` 只能手动 opt-in，不在任何 job 里；`scripts/soak/` 不存在 | NOT MET | ADR 0009 阶段 6 |
-| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`。已知在 -race 下偶发失败的 6 个测试用 `-skip` 点名跳过：`TestFailurePathMatrixMetaOutage`、`TestOpenEpochENOENTAfterTakeoverDoesNotFail`（#490），`TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess`、`TestEvaluator_1500SegmentsUnder50ms`（#504），`TestApp_ProductionAuthProtectsRealRoutes`（#439），`TestTaskRecords_StopAndDeleteApplyWhenSaveFails`（#526）。这 6 个没有环境开关或 `-short` 跳过，仍在 `unit-and-e2e` 的普通 `go test ./...` 里跑 | MET | 注意：上面 6 个只在非 race 下跑，修好一个就把它从 `-skip` 里去掉；#386 |
+| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`，不再 `-skip`。原先在 -race 下偶发失败的 `TestFailurePathMatrixMetaOutage`、`TestOpenEpochENOENTAfterTakeoverDoesNotFail`（#490），`TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess`、`TestEvaluator_1500SegmentsNearLinear`（#504），`TestApp_ProductionAuthProtectsRealRoutes`（#439），`TestTaskRecords_StopAndDeleteApplyWhenSaveFails`（#526）都在这个 job 里跑 | MET | #386 没有点名测试，仍开着 |
 
 ## I. 运维文档与 runbook
 

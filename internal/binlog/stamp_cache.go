@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a segment file's os.FileInfo and a value computed from its bytes
-// output: FileStamp (size, mtime and, where the OS has it, ctime) and stampCache, a bounded per-path cache that is valid only while the file's stamp is unchanged; touch -r keeps the mtime but not the ctime, so an in-place edit is read again (#380 QA); ForgetFile drops a path from every cache for the rewrite the stamp cannot see (same ctime tick), called by the rehasher
+// output: FileStamp (size, mtime and, where the OS has it, ctime) and stampCache, a bounded per-path cache that is valid only while the file's stamp is unchanged; touch -r keeps the mtime but not the ctime, so an in-place edit is read again (#380 QA); ForgetFile drops a path from every cache for the rewrite the stamp cannot see (same ctime tick), called by the rehasher; SegmentTouches is WalkOps, which counts every StampOf plus Stat, Open and ReadDir
 // pos: shared by the ledger contents, sealed-corrupt, damage and positions caches and the health evaluator's directory fingerprint
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -18,8 +18,19 @@ type FileStamp struct {
 	CTime int64 // nanoseconds; 0 where the OS does not report it
 }
 
-// StampOf is the stamp of info.
+// NoteSegmentTouch records one segment visit. StampOf calls it, and the
+// count is the same WalkOps counter as Stat, Open and ReadDir.
+func NoteSegmentTouch() { noteWalk() }
+
+// SegmentTouches is WalkOps: stamps plus the filesystem calls of the walk.
+func SegmentTouches() int64 { return WalkOps() }
+
+// ResetSegmentTouches zeroes the walk counter.
+func ResetSegmentTouches() { ResetWalkOps() }
+
+// StampOf is the stamp of info. Each call counts as one segment visit.
 func StampOf(info os.FileInfo) FileStamp {
+	NoteSegmentTouch()
 	return FileStamp{Size: info.Size(), MTime: info.ModTime(), CTime: changeTime(info)}
 }
 

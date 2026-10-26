@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP GET for the replay window, on-disk segments, catalog rows, and an optional object opener
-// output: one ustar of the replay basenames, an empty tar when that window is empty, and an error body when a selected segment cannot be opened
+// output: one ustar of the replay basenames, an empty tar when that window is empty, and an error body when a selected segment cannot be opened; this process's TMPDIR is private so a leaked archive temp is visible to replayTempCount and another package's temp is not
 // pos: HTTP coverage for the authenticated replay archive
 // note: if this file changes, update this header and module README.md.
 package api
@@ -23,6 +23,41 @@ import (
 
 	"binlog_server/internal/tasks"
 )
+
+// TestMain points this process at its own temp directory before os.TempDir
+// is cached. Archive temps are created there. Another package's
+// binlog-replay-*.tar is not in this directory.
+func TestMain(m *testing.M) {
+	base := os.Getenv("TMPDIR")
+	if base == "" {
+		base = "/tmp"
+	}
+	root := filepath.Join(base, fmt.Sprintf("binlog-api-%d", os.Getpid()))
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("TMPDIR", root); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("TMP", root); err != nil {
+		panic(err)
+	}
+	if got := os.TempDir(); filepath.Clean(got) != filepath.Clean(root) {
+		panic(fmt.Sprintf("os.TempDir is %s, want the private root %s", got, root))
+	}
+	code := m.Run()
+	_ = os.RemoveAll(root)
+	os.Exit(code)
+}
+
+func replayTempCount(t *testing.T) int {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "binlog-replay-*.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(matches)
+}
 
 func TestTaskAPI_ReplayArchiveMatchesReplayWindow(t *testing.T) {
 	dir := t.TempDir()
@@ -435,13 +470,4 @@ func readUstar(t *testing.T, raw []byte) (map[string][]byte, []string) {
 		order = append(order, hdr.Name)
 	}
 	return out, order
-}
-
-func replayTempCount(t *testing.T) int {
-	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "binlog-replay-*.tar"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return len(matches)
 }

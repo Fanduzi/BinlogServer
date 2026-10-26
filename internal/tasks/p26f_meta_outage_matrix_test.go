@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: the failure-path matrix pieces (shared task table, MemoryLease, lease-fenced health store) with every metadata call gated: while the gate is closed a lease call, a health or finding store call and the MetaProbe ping hang until their ctx ends, as against a SIGSTOPped meta; real Evaluator.Run loops and finding sinks; meta_unreachable_after 300ms, ping every 20ms
-// output: one row per meta outage shape (30s, 12s, sc5 12s-then-30s, and a 5s control, scaled to meta_unreachable_after 10s), in cluster (three nodes: the task owner, the _health holder, and a node that is neither) and standalone (one node with a running task): every node records its own META_UNREACHABLE with first_seen at the outage start and resolved at the first answer (cluster: the legacy task_findings row for the latest outage and one FINDING_RESOLVED _cluster event per outage; standalone: OPEN and CLOSE transitions whose fact_at are those times); the control records nothing
+// input: the failure-path matrix pieces (shared task table, MemoryLease, lease-fenced health store) with every metadata call gated: while the gate is closed a lease call and a health or finding store call hang until their ctx ends, as against a SIGSTOPped meta; real Evaluator.Run loops and finding sinks; one shared test clock (EvaluatorConfig.Now, MemoryLease.now, findingBook.now) and explicit noteMetaReach observations; meta_unreachable_after stays 10s
+// output: one row per meta outage shape (30s, 12s, sc5 12s-then-30s, and a 5s control), in cluster (three nodes: the task owner, the _health holder, and a node that is neither) and standalone (one node with a running task): every node records its own META_UNREACHABLE with first_seen at the outage start and resolved at the first answer (cluster: the legacy task_findings row for the latest outage and one FINDING_RESOLVED _cluster event per outage; standalone: one OPEN and one CLOSE per outage, extra UPDATEs ignored, fact_at equal to those clock times); the control records nothing; settle waits until the finding sink has finished the write instead of flushing beside it
 // pos: ADR 0009 P2-6d failure-path matrix, meta outage rows (docs/design/0009-phase2-health-evaluator.md §25.8, #430 QA r1 sc5); runs in the per-PR go test
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,6 +8,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -241,22 +242,12 @@ func (s *outageEvents) resolved(subject string) []TaskEvent {
 	return out
 }
 
-const (
-	outageAfter = 300 * time.Millisecond // meta_unreachable_after, scaled from 10s
-	outagePing  = 20 * time.Millisecond  // ping interval and timeout, scaled from 1s
-	// first_seen is when the in-flight ping was sent, which can be one
-	// interval before the gate closes, and the ping goroutine can be late
-	// under load. The gap between outages in this test is 750ms, so the
-	// window stays inside one outage.
-	outageSlackIn  = outagePing + 250*time.Millisecond
-	outageSlackOut = outagePing + 300*time.Millisecond
-	outageEarly    = outagePing + 150*time.Millisecond
-)
+// metaUnreachableAfter is the production threshold. Pauses advance the test
+// clock by real seconds; nothing here sleeps for the outage length.
+const metaUnreachableAfter = 10 * time.Second
 
-// scaled maps an outage of real seconds onto meta_unreachable_after 10s.
-func scaled(seconds float64) time.Duration {
-	return time.Duration(seconds / 10 * float64(outageAfter))
-}
+// metaOutageGap is the quiet stretch between sc5's two pauses.
+const metaOutageGap = 25 * time.Second
 
 type outageNode struct {
 	name string
@@ -267,6 +258,7 @@ type outageNode struct {
 
 type outageEnv struct {
 	g      *metaGate
+	clock  *leaseTestClock
 	leases *MemoryLease
 	table  *sharedTaskTable
 	hs     *outageStore
@@ -275,9 +267,11 @@ type outageEnv struct {
 }
 
 func newOutageEnv() *outageEnv {
+	clock := &leaseTestClock{now: time.Now()}
 	leases := NewMemoryLease()
+	leases.now = clock.Now
 	g := &metaGate{}
-	return &outageEnv{g: g, leases: leases,
+	return &outageEnv{g: g, clock: clock, leases: leases,
 		table:  &sharedTaskTable{fencedMemoryStore: &fencedMemoryStore{lockedFakeStore: &lockedFakeStore{fakeStore: newFakeStore()}, leases: leases}},
 		hs:     &outageStore{leaseHealthStore: newLeaseHealthStore(leases), g: g, rows: map[string]outageRow{}},
 		events: &outageEvents{g: g}}
@@ -296,15 +290,22 @@ func (env *outageEnv) start(t *testing.T, name, role string, cluster bool, runne
 		WithRetryBackoff(time.Millisecond, time.Millisecond),
 	}
 	if cluster {
-		opts = append(opts, WithClusterLease(time.Minute, time.Hour, time.Minute), WithLeaseClock(NewLeaseClock()))
+		// TTL stays past every pause this test advances on the clock. A
+		// one-minute TTL would expire during a 30s pause plus the gap.
+		opts = append(opts, WithClusterLease(time.Hour, time.Hour, time.Hour), WithLeaseClock(NewLeaseClock()))
 	}
 	s := NewScheduler(opts...)
+	s.findings.now = env.clock.Now
 	if runner != nil {
 		s.SetRunner(runner)
 	}
+	// Sweep, liveness and the meta ping stay on real hour tickers so they
+	// cannot add observations while the test moves the clock. Observations
+	// come from noteMetaReach. Store calls still block on the gate.
 	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: env.hs, Cluster: cluster, NodeID: name, Instance: name + "-i",
-		Sweep: 50 * time.Millisecond, Debounce: 5 * time.Millisecond, LivenessTick: outagePing, NoProgressAfter: time.Hour,
-		MetaUnreachableAfter: outageAfter, MetaPingInterval: outagePing, MetaPingTimeout: outagePing})
+		Sweep: time.Hour, Debounce: time.Millisecond, LivenessTick: time.Hour, Now: env.clock.Now,
+		NoProgressAfter: time.Hour, UnreachableAfter: time.Hour, DumpStalledAfter: time.Hour, StalledAfter: time.Hour,
+		MetaUnreachableAfter: metaUnreachableAfter, MetaPingInterval: time.Hour, MetaPingTimeout: time.Hour})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { e.Run(ctx); close(done) }()
@@ -374,13 +375,81 @@ func (env *outageEnv) setupStandalone(t *testing.T) {
 	})
 }
 
-// within: at in [from, from+slack].
-func outageWithin(at, from time.Time, slack time.Duration) bool {
-	return outageWithinEarly(at, from, slack, 5*time.Millisecond)
+// observe records one metadata observation on every node at the test clock.
+func (env *outageEnv) observe(err error) {
+	for _, n := range env.nodes {
+		n.s.noteMetaReach(err, true)
+	}
 }
 
-func outageWithinEarly(at, from time.Time, slack, early time.Duration) bool {
-	return !at.Before(from.Add(-early)) && !at.After(from.Add(slack))
+// nudge moves the clock past one debounce and wakes each evaluator. take
+// reads the test clock, so a frozen clock would never start the next pass.
+func (env *outageEnv) nudge() {
+	env.clock.Advance(time.Millisecond)
+	for _, n := range env.nodes {
+		select {
+		case n.e.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (env *outageEnv) idle() bool {
+	for _, n := range env.nodes {
+		n.e.mu.Lock()
+		busy := len(n.e.dirty) > 0 || len(n.e.running) > 0
+		n.e.mu.Unlock()
+		if busy {
+			return false
+		}
+	}
+	return true
+}
+
+// settle waits until every evaluator has applied the observations and the
+// finding sink has finished writing them. The sink is the only flusher:
+// flushing beside it lets an older report land after the resolve.
+func (env *outageEnv) settle(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		idle := env.idle()
+		quiet := env.findingsQuiet()
+		if idle && quiet && env.idle() && env.findingsQuiet() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("evaluators did not go idle after the meta observation")
+		}
+		if !idle {
+			env.nudge()
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (env *outageEnv) findingsQuiet() bool {
+	for _, n := range env.nodes {
+		if !n.s.findings.quiet() {
+			n.s.findings.kick()
+			return false
+		}
+	}
+	return true
+}
+
+// outageOpenClose keeps OPEN and CLOSE. A later ping can UPDATE the open
+// row when its detail changes; that is not a second outage.
+func outageOpenClose(ts []outageTransition) (opens, closes []outageTransition) {
+	for _, tr := range ts {
+		switch tr.op {
+		case health.OpOpen:
+			opens = append(opens, tr)
+		case health.OpClose:
+			closes = append(closes, tr)
+		}
+	}
+	return opens, closes
 }
 
 func TestFailurePathMatrixMetaOutage(t *testing.T) {
@@ -390,15 +459,16 @@ func TestFailurePathMatrixMetaOutage(t *testing.T) {
 		record bool
 	}{
 		// sc5 second pause: every node, the task owner included, records it.
-		{name: "meta-pause-30s", pauses: []time.Duration{scaled(30)}, record: true},
+		{name: "meta-pause-30s", pauses: []time.Duration{30 * time.Second}, record: true},
 		// sc5 first pause: longer than meta_unreachable_after, so recorded.
-		{name: "meta-pause-12s", pauses: []time.Duration{scaled(12)}, record: true},
+		{name: "meta-pause-12s", pauses: []time.Duration{12 * time.Second}, record: true},
 		// sc5 as run: 12s, 25s apart, then 30s. Each outage keeps its own
 		// record; the second does not swallow the first (§25.8 R4).
-		{name: "meta-pause-12s-then-30s", pauses: []time.Duration{scaled(12), scaled(30)}, record: true},
+		{name: "meta-pause-12s-then-30s", pauses: []time.Duration{12 * time.Second, 30 * time.Second}, record: true},
 		// Control: shorter than meta_unreachable_after, never recorded.
-		{name: "meta-pause-5s", pauses: []time.Duration{scaled(5)}, record: false},
+		{name: "meta-pause-5s", pauses: []time.Duration{5 * time.Second}, record: false},
 	}
+	errPaused := fmt.Errorf("metadata store did not answer: %w", context.DeadlineExceeded)
 	for _, row := range rows {
 		for _, cluster := range []bool{true, false} {
 			mode := "standalone"
@@ -413,23 +483,28 @@ func TestFailurePathMatrixMetaOutage(t *testing.T) {
 				} else {
 					env.setupStandalone(t)
 				}
-				time.Sleep(10 * outagePing) // healthy pings first
+				// One answer first, so a later short pause has a streak to
+				// clear and does not look like the first contact.
+				env.observe(nil)
+				env.settle(t)
 
 				var pauseAt, resumeAt []time.Time
 				for i, d := range row.pauses {
 					if i > 0 {
-						time.Sleep(scaled(25))
+						env.clock.Advance(metaOutageGap)
 					}
-					pauseAt = append(pauseAt, time.Now())
 					env.g.pause()
-					time.Sleep(d)
-					resumeAt = append(resumeAt, time.Now())
+					pauseAt = append(pauseAt, env.clock.Now())
+					env.observe(errPaused) // streak starts at this clock time
+					env.clock.Advance(d)
+					env.observe(errPaused) // opens only when d >= meta_unreachable_after
+					resumeAt = append(resumeAt, env.clock.Now())
 					env.g.resume()
+					env.observe(nil) // the first answer; CLOSE is dated here
+					env.settle(t)
 				}
-				last := len(row.pauses) - 1
 
 				if !row.record {
-					time.Sleep(outageAfter + 200*time.Millisecond)
 					for _, n := range env.nodes {
 						if r, ok := env.hs.row(n.name); ok {
 							t.Errorf("%s (%s): a %v outage was recorded %+v, want nothing below meta_unreachable_after", n.name, n.role, row.pauses, r)
@@ -443,69 +518,46 @@ func TestFailurePathMatrixMetaOutage(t *testing.T) {
 					}
 					return
 				}
+				last := len(row.pauses) - 1
 				for _, n := range env.nodes {
 					if cluster {
-						// The row is the latest outage; each outage has its event.
-						var r outageRow
-						ok := false
-						var evs []TaskEvent
-						deadline := time.Now().Add(3 * time.Second)
-						for time.Now().Before(deadline) {
-							r, ok = env.hs.row(n.name)
-							evs = env.events.resolved(n.name)
-							if ok && r.resolved != nil && len(evs) >= len(row.pauses) {
-								break
-							}
-							time.Sleep(5 * time.Millisecond)
-						}
+						r, ok := env.hs.row(n.name)
 						if !ok || r.resolved == nil {
 							t.Errorf("%s (%s): no resolved META_UNREACHABLE/%s row for a %v outage (row %+v, present %v)", n.name, n.role, n.name, row.pauses, r, ok)
 						} else {
-							if !outageWithinEarly(r.firstSeen, pauseAt[last], outageSlackIn, outageEarly) {
-								t.Errorf("%s (%s): first_seen %s, want the last outage start %s (+%s)", n.name, n.role, r.firstSeen.Format(time.StampMicro), pauseAt[last].Format(time.StampMicro), outageSlackIn)
+							if !r.firstSeen.Equal(pauseAt[last]) {
+								t.Errorf("%s (%s): first_seen %s, want the last outage start %s", n.name, n.role, r.firstSeen, pauseAt[last])
 							}
-							if !outageWithin(*r.resolved, resumeAt[last], outageSlackOut) {
-								t.Errorf("%s (%s): resolved_at %s, want the first answer after %s (+%s)", n.name, n.role, r.resolved.Format(time.StampMicro), resumeAt[last].Format(time.StampMicro), outageSlackOut)
+							if !r.resolved.Equal(resumeAt[last]) {
+								t.Errorf("%s (%s): resolved_at %s, want the first answer %s", n.name, n.role, r.resolved, resumeAt[last])
 							}
 						}
 						if rep := env.events.reported(n.name); len(rep) > 0 {
 							t.Errorf("%s (%s): FINDING_REPORTED META_UNREACHABLE events %+v, want only one RESOLVED per outage", n.name, n.role, rep)
 						}
+						evs := env.events.resolved(n.name)
 						if len(evs) != len(row.pauses) {
 							t.Errorf("%s (%s): %d FINDING_RESOLVED META_UNREACHABLE events %+v for %d outages, want one each", n.name, n.role, len(evs), evs, len(row.pauses))
 							continue
 						}
 						for i, ev := range evs {
-							if !outageWithin(ev.Time, resumeAt[i], outageSlackOut) {
-								t.Errorf("%s (%s): outage %d resolved event at %s, want the first answer after %s (+%s)", n.name, n.role, i+1, ev.Time.Format(time.StampMicro), resumeAt[i].Format(time.StampMicro), outageSlackOut)
+							if !ev.Time.Equal(resumeAt[i]) {
+								t.Errorf("%s (%s): outage %d resolved event at %s, want the first answer %s", n.name, n.role, i+1, ev.Time, resumeAt[i])
 							}
 						}
 						continue
 					}
-					want := 2 * len(row.pauses)
-					var ts []outageTransition
-					deadline := time.Now().Add(3 * time.Second)
-					for time.Now().Before(deadline) {
-						if ts = env.hs.transitions(n.name); len(ts) >= want {
-							break
-						}
-						time.Sleep(5 * time.Millisecond)
-					}
-					if len(ts) != want {
-						t.Errorf("%s (%s): transitions %+v for a %v outage, want OPEN and CLOSE per outage", n.name, n.role, ts, row.pauses)
+					opens, closes := outageOpenClose(env.hs.transitions(n.name))
+					if len(opens) != len(row.pauses) || len(closes) != len(row.pauses) {
+						t.Errorf("%s (%s): OPEN %d CLOSE %d for a %v outage, want one of each (all %+v)", n.name, n.role, len(opens), len(closes), row.pauses, env.hs.transitions(n.name))
 						continue
 					}
 					for i := range row.pauses {
-						o, c := ts[2*i], ts[2*i+1]
-						if o.op != health.OpOpen || c.op != health.OpClose {
-							t.Errorf("%s (%s): outage %d transitions %s,%s, want OPEN,CLOSE", n.name, n.role, i+1, o.op, c.op)
-							continue
+						if !opens[i].factAt.Equal(pauseAt[i]) {
+							t.Errorf("%s (%s): outage %d OPEN fact_at %s, want its start %s", n.name, n.role, i+1, opens[i].factAt, pauseAt[i])
 						}
-						if !outageWithinEarly(o.factAt, pauseAt[i], outageSlackIn, outageEarly) {
-							t.Errorf("%s (%s): outage %d OPEN fact_at %s, want its start %s (+%s)", n.name, n.role, i+1, o.factAt.Format(time.StampMicro), pauseAt[i].Format(time.StampMicro), outageSlackIn)
-						}
-						if !outageWithin(c.factAt, resumeAt[i], outageSlackOut) {
-							t.Errorf("%s (%s): outage %d CLOSE fact_at %s, want the first answer after %s (+%s)", n.name, n.role, i+1, c.factAt.Format(time.StampMicro), resumeAt[i].Format(time.StampMicro), outageSlackOut)
+						if !closes[i].factAt.Equal(resumeAt[i]) {
+							t.Errorf("%s (%s): outage %d CLOSE fact_at %s, want the first answer %s", n.name, n.role, i+1, closes[i].factAt, resumeAt[i])
 						}
 					}
 				}

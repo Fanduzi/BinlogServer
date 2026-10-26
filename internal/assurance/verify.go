@@ -606,7 +606,7 @@ func (p *pass) outOfTime(err error) bool {
 func (p *pass) free(dir string, rows []VerifyRow) ([]*seg, bool, error) {
 	rep := p.rep
 	present := map[string]bool{}
-	entries, listErr := os.ReadDir(dir)
+	entries, listErr := binlog.ReadDir(dir)
 	listed := listErr == nil
 	if listed {
 		for _, e := range entries {
@@ -1541,10 +1541,10 @@ func uploaded(row VerifyRow) bool {
 }
 
 // openLocal opens a local segment file; tests replace it to inject read errors.
-var openLocal = func(path string) (io.ReadCloser, error) { return os.Open(path) }
+var openLocal = func(path string) (io.ReadCloser, error) { return binlog.Open(path) }
 
 // statPath stats a listed local name; tests replace it to inject stat errors.
-var statPath = os.Stat
+var statPath = binlog.Stat
 
 type localResult struct {
 	check   Check

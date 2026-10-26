@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task directories with duplicated, stale-open, empty-leftover and bit-rotted segments, health stores that fail, fence or block, and evaluator modes off/shadow/on
-// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, 1500 segments evaluate in under 50ms, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
+// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (four workers, a soak worker counts as held once its pass is inside the store including the TRANSITION mark CreateTask makes before it returns, the merged pass is applied at exactly one debounce, a second worker cannot enter the same task, and a mark after idle leaves the evaluator not idle) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a cold pass over 150 and 1500 segments stays within 36 in-process filesystem operations per segment plus 16 and the 1500-segment pass stays within 10.5 times the 150-segment pass, with a 2s hang ceiling on the 1500-segment pass; that counter is a local signal, and the syscall proof lives in syscall_walk_linux_test.go, a second pass over an unchanged directory reuses the chain cache, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5, §5.7, §6)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
 )
@@ -287,13 +288,15 @@ func TestRehasher_SkipsSegmentsWithoutSHA(t *testing.T) {
 // scriptedStore is a health store with hooks; it wraps a FileStore.
 type scriptedStore struct {
 	*healthstore.FileStore
-	mu       sync.Mutex
-	applyErr []error
-	applied  [][]health.Transition
-	seed     []health.Finding
-	block    chan struct{}
-	inFlight map[string]int
-	maxPer   int
+	mu        sync.Mutex
+	applyErr  []error
+	applied   [][]health.Transition
+	seed      []health.Finding
+	block     chan struct{}
+	blockFor  func(taskID string) <-chan struct{}
+	inFlight  map[string]int
+	maxPer    int
+	appliedID []string
 }
 
 func (s *scriptedStore) ApplyTransitions(ctx context.Context, taskID string, f health.Fence, ts []health.Transition, h health.TaskHealth) (healthstore.Applied, error) {
@@ -306,11 +309,16 @@ func (s *scriptedStore) ApplyTransitions(ctx context.Context, taskID string, f h
 		s.maxPer = s.inFlight[taskID]
 	}
 	s.applied = append(s.applied, append([]health.Transition(nil), ts...))
+	s.appliedID = append(s.appliedID, taskID)
 	var err error
 	if len(s.applyErr) > 0 {
 		err, s.applyErr = s.applyErr[0], s.applyErr[1:]
 	}
-	block := s.block
+	var block <-chan struct{}
+	block = s.block
+	if s.blockFor != nil {
+		block = s.blockFor(taskID)
+	}
 	s.mu.Unlock()
 	if block != nil {
 		<-block
@@ -424,9 +432,42 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	s := NewScheduler(WithDataDir(data))
 	task, dir := evalTask(t, s, data)
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
-	block := make(chan struct{})
-	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), block: block}
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: evalNode, Workers: 4, Sweep: time.Hour, Debounce: time.Millisecond})
+	releaseMain := make(chan struct{})
+	releaseSoak := make(chan struct{})
+	var mainOnce, soakOnce sync.Once
+	closeMain := func() { mainOnce.Do(func() { close(releaseMain) }) }
+	closeSoak := func() { soakOnce.Do(func() { close(releaseSoak) }) }
+	var soakMu sync.Mutex
+	soaks := map[string]bool{}
+	// CreateTask marks TRANSITION before it returns, while workers are
+	// already running. Once the soak phase starts, every real task except
+	// the one already held blocks in the store, including that mark.
+	soakPhase := false
+	store := &scriptedStore{
+		FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
+		blockFor: func(id string) <-chan struct{} {
+			if id == task.ID {
+				return releaseMain
+			}
+			if id == ClusterFindingTask {
+				return nil
+			}
+			soakMu.Lock()
+			hold := soakPhase || soaks[id]
+			soakMu.Unlock()
+			if hold {
+				return releaseSoak
+			}
+			return nil
+		},
+	}
+	clock := newManualClock(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
+	const debounce = time.Second
+	e := NewEvaluator(s, EvaluatorConfig{
+		Mode: EvaluatorOn, Store: store, NodeID: evalNode, Workers: 4,
+		Sweep: time.Hour, LivenessTick: time.Hour, Debounce: debounce,
+		Now: clock.Now, After: clock.After,
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {
@@ -436,37 +477,227 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	// TempDir cleanup runs after this function returns. Cancel alone does not
 	// wait, so a worker can create a file while the directory is being removed.
 	defer func() {
+		closeMain()
+		closeSoak()
 		cancel()
-		<-stopped
+		clock.Advance(time.Hour)
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("evaluator did not stop")
+		}
 	}()
-	e.MarkDirty(task.ID, ReasonSeal)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		store.mu.Lock()
-		n := len(store.applied)
-		store.mu.Unlock()
-		if n == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first evaluation never reached the store")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitEvalApplies(t, e, store, 1, "first evaluation never reached the store")
 	for i := 0; i < 200; i++ { // marks during the pass only set the bit
 		e.MarkDirty(task.ID, ReasonUpload)
 	}
-	close(block)
-	time.Sleep(300 * time.Millisecond)
+	// Four workers, and the other three are free. Dropping the per-task
+	// running bit lets a second evaluation of this task overlap the first.
+	serialDeadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(serialDeadline) {
+		if storeMaxPer(store) > 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := storeMaxPer(store); got != 1 {
+		t.Fatalf("%d evaluations of one task ran at once", got)
+	}
+	// Hold the other three workers inside their own passes. A finish that
+	// then sleeps cannot hand the merged pass to someone else.
+	soakMu.Lock()
+	soakPhase = true
+	soakMu.Unlock()
+	for i := 0; i < 3; i++ {
+		soak, soakDir := evalTask(t, s, data)
+		writeAlertSegment(t, filepath.Join(soakDir, "mysql-bin.000001"), 37, 38)
+		soakMu.Lock()
+		soaks[soak.ID] = true
+		soakMu.Unlock()
+		e.MarkDirty(soak.ID, ReasonUpload)
+		// The create-time TRANSITION pass can already be blocked in the
+		// store. That holds the worker; waiting for a further apply
+		// deadlocks behind releaseSoak. A free worker may be parked on
+		// the test clock. Advancing its one second cap wakes it. The
+		// main task is still running, so this does not release the
+		// merged pass.
+		deadline := time.Now().Add(3 * time.Second)
+		for storeInFlight(store, soak.ID) == 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("soak worker did not enter (applied %d state %s)", storeApplies(store), evalState(e))
+			}
+			clock.Advance(time.Second)
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if got := storeMaxPer(store); got != 1 {
+		t.Fatalf("%d evaluations of one task ran at once", got)
+	}
+	// The merged pass is applied at exactly one debounce on the test clock.
+	// The wall budget from releasing the first pass is 500ms, so a finish
+	// that sleeps two seconds does not arrive.
+	base := clock.Now()
+	started := time.Now()
+	closeMain()
+	var n int
+	advanced := false
+	for {
+		n = storeAppliesTask(store, task.ID)
+		if n >= 2 {
+			break
+		}
+		if time.Since(started) > 500*time.Millisecond {
+			t.Fatalf("merged pass late: applied %d idle %v clock %s", n, evalIdle(e), clock.Now().Sub(base))
+		}
+		if !advanced && n == 1 && evalLastRun(e, task.ID).Equal(base) && !evalRunning(e, task.ID) {
+			time.Sleep(20 * time.Millisecond)
+			if got := storeAppliesTask(store, task.ID); got != 1 {
+				t.Fatalf("merged pass ran before the debounce elapsed on the test clock (applied %d)", got)
+			}
+			clock.Advance(debounce)
+			advanced = true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !advanced {
+		t.Fatal("merged pass ran before the debounce elapsed on the test clock")
+	}
+	if got := clock.Now().Sub(base); got != debounce {
+		t.Fatalf("test clock moved %s for the merged pass, want one debounce (%s)", got, debounce)
+	}
+	if n != 2 {
+		t.Fatalf("%d passes for the startup pass plus 200 marks, want exactly 2", n)
+	}
+	closeSoak()
+	// A pass can be marked again while it is in the store (the scheduler's
+	// upload bookkeeping). One debounce on the test clock lets that pass
+	// run. It must then be idle. A mark that keeps coming back does not.
+	idleDeadline := time.Now().Add(2 * time.Second)
+	drained := false
+	for {
+		if evalIdle(e) && clock.WaiterCount() > 0 {
+			break
+		}
+		if !drained && !evalRunningAny(e) {
+			clock.Advance(debounce)
+			drained = true
+		}
+		if time.Now().After(idleDeadline) {
+			t.Fatalf("evaluator did not go idle after the soak passes (idle %v waiters %d applied %d state %s)", evalIdle(e), clock.WaiterCount(), storeApplies(store), evalState(e))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A window, not one instant: a pass 30ms later on this clock or on the
+	// wall must be visible. Steps land on 30ms, 100ms and 2s. The wall
+	// window also requires the evaluator to be idle, so a mark that has not
+	// been applied is a failure even when the apply count has not moved.
+	quiet := storeApplies(store)
+	startClock := clock.Now()
+	startWall := time.Now()
+	for _, step := range []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 70 * time.Millisecond, 1900 * time.Millisecond} {
+		clock.Advance(step)
+		deadline := time.Now().Add(200 * time.Millisecond)
+		for {
+			if got := storeApplies(store); got != quiet {
+				t.Fatalf("extra pass at clock +%s wall +%s: applied %d, want %d", clock.Now().Sub(startClock), time.Since(startWall), got, quiet)
+			}
+			if evalIdle(e) && clock.WaiterCount() > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("after idle, clock +%s left the evaluator busy (applied %d idle %v)", clock.Now().Sub(startClock), storeApplies(store), evalIdle(e))
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	wall := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(wall) {
+		if !evalIdle(e) {
+			t.Fatalf("not idle %s after the quiet window: applied %d", time.Since(startWall), storeApplies(store))
+		}
+		if got := storeApplies(store); got != quiet {
+			t.Fatalf("extra pass %s after idle: applied %d, want %d", time.Since(startWall), got, quiet)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// evalIdle reports that no pass is running and no mark is waiting.
+func evalIdle(e *Evaluator) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.dirty) == 0 && len(e.running) == 0
+}
+
+func waitEvalApplies(t *testing.T, e *Evaluator, store *scriptedStore, want int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if storeApplies(store) >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s (applied %d)", what, storeApplies(store))
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func storeApplies(store *scriptedStore) int {
 	store.mu.Lock()
-	n, maxPer := len(store.applied), store.maxPer
-	store.mu.Unlock()
-	if maxPer != 1 {
-		t.Fatalf("%d evaluations of one task ran at once", maxPer)
+	defer store.mu.Unlock()
+	return len(store.applied)
+}
+
+func storeAppliesTask(store *scriptedStore, taskID string) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	n := 0
+	for _, id := range store.appliedID {
+		if id == taskID {
+			n++
+		}
 	}
-	if n < 2 || n > 3 {
-		t.Fatalf("%d passes for 1 + 200 marks, want them merged into one more", n)
+	return n
+}
+
+func storeMaxPer(store *scriptedStore) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.maxPer
+}
+
+func evalRunning(e *Evaluator, id string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.running[id]
+}
+
+func evalRunningAny(e *Evaluator) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.running) > 0
+}
+
+func evalState(e *Evaluator) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var dirty, running []string
+	for id, reasons := range e.dirty {
+		for r := range reasons {
+			dirty = append(dirty, id+":"+string(r))
+		}
 	}
+	for id := range e.running {
+		running = append(running, id)
+	}
+	return "dirty=" + strings.Join(dirty, ",") + " running=" + strings.Join(running, ",")
+}
+
+func evalLastRun(e *Evaluator, id string) time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastRun[id]
 }
 
 func TestEvaluator_ClosesAllOf5000OpenAcrossTasks(t *testing.T) {
@@ -575,34 +806,96 @@ func TestNodeIDPersistsInDataDir(t *testing.T) {
 	}
 }
 
-func TestEvaluator_1500SegmentsUnder50ms(t *testing.T) {
+// TestEvaluator_1500SegmentsNearLinear is the fast local signal. WalkOps
+// counts Stat, Lstat, Open, OpenFile, ReadDir, ReadFile, Glob and StampOf.
+// It is not the proof: a directory read that never calls those still passes
+// here. The proof is TestEvaluator_SyscallWalkNearLinear. maxPerSeg is about
+// 1.5 times the measured cold count (24 per segment). One extra operation
+// per pass still fits. The 2s ceiling is only a gross hang guard. A constant
+// per-segment slowdown that never touches the filesystem is out of scope for
+// both checks.
+func TestEvaluator_1500SegmentsNearLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("benchmark-style QA condition")
 	}
+	const (
+		smallN       = 150
+		largeN       = 1500
+		maxPerSeg    = 36
+		walkOverhead = 16
+		largeCeiling = 2 * time.Second
+	)
+	ctx := context.Background()
+	dSmall, opsSmall := evalPassTime(t, ctx, smallN)
+	dLarge, opsLarge := evalPassTime(t, ctx, largeN)
+	t.Logf("%d segments %s ops %d; %d segments %s ops %d", smallN, dSmall, opsSmall, largeN, dLarge, opsLarge)
+	checkOps := func(n int, ops int64) {
+		t.Helper()
+		if ops < int64(n) {
+			t.Fatalf("%d-segment pass did %d filesystem ops, want at least one per segment", n, ops)
+		}
+		if ops > int64(n)*maxPerSeg+walkOverhead {
+			t.Fatalf("%d-segment pass did %d filesystem ops, want <= %d per segment plus %d", n, ops, maxPerSeg, walkOverhead)
+		}
+	}
+	checkOps(smallN, opsSmall)
+	// 10.5x, with the integer form opsLarge*2 <= opsSmall*21.
+	// Checked before the large per-segment cap so a nest that still fits
+	// the 150-segment cap fails here.
+	if opsSmall <= 0 || opsLarge*2 > opsSmall*21 {
+		t.Fatalf("%d segments did %d ops, %d did %d; want at most 10.5x", largeN, opsLarge, smallN, opsSmall)
+	}
+	checkOps(largeN, opsLarge)
+	if dLarge > largeCeiling {
+		t.Fatalf("%d-segment pass took %s, ceiling %s", largeN, dLarge, largeCeiling)
+	}
+}
+
+func evalPassTime(t *testing.T, ctx context.Context, n int) (time.Duration, int64) {
+	t.Helper()
 	data := t.TempDir()
 	s := NewScheduler(WithDataDir(data))
 	task, dir := evalTask(t, s, data)
-	for i := 0; i < 1500; i++ {
+	for i := 0; i < n; i++ {
 		writeAlertSegment(t, filepath.Join(dir, fmt.Sprintf("mysql-bin.%06d", i+1)), int64(37+i))
 	}
 	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorShadow)
-	ctx := context.Background()
-	if _, err := e.EvaluateNow(ctx, task.ID); err != nil { // warms the ledger's size+mtime cache
+	binlog.ResetWalkOps()
+	start := time.Now()
+	if _, err := e.EvaluateNow(ctx, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	best := time.Hour
-	for i := 0; i < 5; i++ {
-		start := time.Now()
+	return time.Since(start), binlog.WalkOps()
+}
+
+// TestEvaluator_SecondPassUsesChainCache checks that a second pass over an
+// unchanged directory does not walk the segment bodies again. The chain
+// cache is what skips CheckBody; the fingerprint still runs.
+func TestEvaluator_SecondPassUsesChainCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("benchmark-style QA condition")
+	}
+	const n = 40
+	ctx := context.Background()
+	data := t.TempDir()
+	s := NewScheduler(WithDataDir(data))
+	task, dir := evalTask(t, s, data)
+	for i := 0; i < n; i++ {
+		writeAlertSegment(t, filepath.Join(dir, fmt.Sprintf("mysql-bin.%06d", i+1)), int64(37+i))
+	}
+	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorShadow)
+	pass := func() int64 {
+		t.Helper()
+		binlog.ResetWalkOps()
 		if _, err := e.EvaluateNow(ctx, task.ID); err != nil {
 			t.Fatal(err)
 		}
-		if d := time.Since(start); d < best {
-			best = d
-		}
+		return binlog.WalkOps()
 	}
-	t.Logf("best pass over 1500 segments: %s", best)
-	if best > 50*time.Millisecond {
-		t.Fatalf("one pass over 1500 segments took %s, want < 50ms", best)
+	ops1, ops2 := pass(), pass()
+	t.Logf("first pass %d ops, second %d", ops1, ops2)
+	if ops1 < int64(n) || ops2*3 > ops1 {
+		t.Fatalf("second pass did %d ops after a first pass of %d; the chain cache should skip the body walk", ops2, ops1)
 	}
 }
 

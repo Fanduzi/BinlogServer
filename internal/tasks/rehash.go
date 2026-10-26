@@ -12,7 +12,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -192,7 +191,7 @@ func (r *Rehasher) check(ctx context.Context, t rehashTarget) (int64, error) {
 		r.advance(ctx, t)
 		return 0, nil
 	}
-	info, err := os.Stat(t.path)
+	info, err := binlog.Stat(t.path)
 	if err != nil {
 		r.advance(ctx, t) // gone: the chain's own checks judge that
 		return 0, nil
@@ -213,7 +212,7 @@ func (r *Rehasher) check(ctx context.Context, t rehashTarget) (int64, error) {
 		r.advance(ctx, t)
 		return n, nil
 	}
-	after, err := os.Stat(t.path)
+	after, err := binlog.Stat(t.path)
 	if err != nil || !binlog.StampOf(after).Equal(binlog.StampOf(info)) {
 		r.advance(ctx, t) // changed while read: judged next cycle
 		return n, nil
@@ -238,7 +237,7 @@ func (r *Rehasher) check(ctx context.Context, t rehashTarget) (int64, error) {
 }
 
 func (r *Rehasher) hashFile(ctx context.Context, path string) (string, int64, error) {
-	f, err := os.Open(path)
+	f, err := binlog.Open(path)
 	if err != nil {
 		return "", 0, err
 	}

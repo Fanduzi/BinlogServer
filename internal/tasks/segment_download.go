@@ -89,7 +89,7 @@ func (s *Scheduler) openLocalTaskSegment(taskID, name string) (io.ReadCloser, in
 	if err != nil || rel != name || filepath.Base(full) != name {
 		return nil, 0, ErrInvalidSegmentName
 	}
-	info, err := os.Lstat(full)
+	info, err := binlog.Lstat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, errLocalSegmentAbsent
@@ -111,7 +111,7 @@ func (s *Scheduler) openLocalTaskSegment(taskID, name string) (io.ReadCloser, in
 			return nil, 0, ErrInvalidSegmentName
 		}
 	}
-	file, err := os.Open(full)
+	file, err := binlog.Open(full)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, errLocalSegmentAbsent

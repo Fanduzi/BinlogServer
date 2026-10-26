@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: hot-path failure and success reports (SignalFailure/SignalSuccess, and Report/Resolve for a kind the evaluator manages), the task rows, the task directory, the catalog, and the event store
-// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure; HEALTH_STORE_UNAVAILABLE is a signal kind but the gap path does not SignalFailure, §27) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, Unadopted for a standalone leftover directory (#385), and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it; P2-6a: Task nil when the row disagrees with task_leases), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
+// output: the evaluator's signal book (per task, per kind+subject, one process-wide monotonic seq, the lease epoch stamped at the first pass after a failure; HEALTH_STORE_UNAVAILABLE is a signal kind but the gap path does not SignalFailure, §27) and the P2-4 facts built from it: task.state (state, desired, FailedCurrent, OwnedElsewhere, RunHere, Unadopted for a standalone leftover directory (#385), and the source liveness clock from liveness.go; DUMP_STALLED is derived, so its runner signal is dropped while the evaluator owns it; P2-6a: Task nil when the row disagrees with task_leases), signals, the open keys, probes (UPLOAD_RECORD_FAILED, OPEN_TAIL_CUT_FAILED, DISK_LIST_FAILED, EVENT_READ_FAILED; the disk probes go through the counted walk seam) and stale signals; while the evaluator does not own the managed kinds (off, shadow, schema without 000009, or a _cluster signal in cluster mode) the legacy Report/Resolve path writes them unchanged
 // pos: ADR 0009 phase 2 P2-4 (docs/design/0009-phase2-health-evaluator.md §5.5, §5.6, §6); the only way a signal kind reaches task_findings while the evaluator is on
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/health"
 )
 
@@ -326,13 +327,13 @@ func (e *Evaluator) openAndProbes(ctx context.Context, taskID string, open []hea
 		case health.OpenTailCutFailed:
 			if dir, ok := taskBinlogDir(dataDir, taskID); ok && k.Subject != "" {
 				name := filepath.Base(k.Subject)
-				if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) || !strings.Contains(name, ".open") {
+				if _, err := binlog.Stat(filepath.Join(dir, name)); os.IsNotExist(err) || !strings.Contains(name, ".open") {
 					facts.Probes[k] = true
 				}
 			}
 		case health.DiskListFailed:
 			if k.Subject != "" {
-				if _, err := os.ReadDir(k.Subject); err == nil {
+				if _, err := binlog.ReadDir(k.Subject); err == nil {
 					facts.Probes[k] = true
 				}
 			}

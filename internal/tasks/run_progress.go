@@ -6,7 +6,6 @@
 package tasks
 
 import (
-	"os"
 	"strings"
 	"time"
 
@@ -105,7 +104,7 @@ func segmentInDataDir(dataDir, taskID, file string) bool {
 	if !ok || file == "" || strings.ContainsAny(file, `/\`) {
 		return false
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := binlog.ReadDir(dir)
 	if err != nil {
 		return false
 	}

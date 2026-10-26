@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API, CONFIRM) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
-// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
+// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; EvaluatorConfig.After, when set, drives the worker debounce wait and that ping's interval and timeout; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); ADR 0011 PR-3 keeps I6_MISSING_LOCAL in cluster mode and sets Fence.ChainVerified only when this holder pass's chainFactsInto read the directory; a task directory that exists but cannot be read is logged once when it starts and once when it ends (noteDirRead) and listed on HealthSummary.Detail without changing status; a pass that read the directory sets Facts.DirectoryNode (cluster chain_owner, standalone node) so I6_MISSING_LOCAL names it; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
@@ -165,6 +165,10 @@ type EvaluatorConfig struct {
 	// Notify receives health transitions and CRITICAL finding transitions
 	// after a verdict is written (ADR 0009 decision 1). Nil disables it.
 	Notify HealthNotifier
+	// After, when set, replaces the wall timer for three waits: a worker
+	// parked on the debounce, the metadata ping interval, and one ping's
+	// own timeout. Nil keeps time.Timer and time.Ticker.
+	After func(time.Duration) <-chan time.Time
 }
 
 // EvaluatorStats counts what the evaluator did.
@@ -432,15 +436,23 @@ func (e *Evaluator) work(ctx context.Context) {
 			if wait <= 0 || wait > time.Second {
 				wait = time.Second
 			}
-			t := time.NewTimer(wait)
+			var fired <-chan time.Time
+			stop := func() {}
+			if e.cfg.After != nil {
+				fired = e.cfg.After(wait)
+			} else {
+				timer := time.NewTimer(wait)
+				fired = timer.C
+				stop = func() { timer.Stop() }
+			}
 			select {
 			case <-ctx.Done():
-				t.Stop()
+				stop()
 				return
 			case <-e.wake:
-			case <-t.C:
+			case <-fired:
 			}
-			t.Stop()
+			stop()
 			continue
 		}
 		if _, err := e.evaluate(ctx, id); err != nil && !errors.Is(err, errNotResponsible) {
@@ -1161,14 +1173,14 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 	if !ok {
 		return nil
 	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+	if info, err := binlog.Stat(dir); err != nil || !info.IsDir() {
 		if err == nil {
 			err = fmt.Errorf("%s is not a directory", dir)
 		}
 		e.noteDirRead(task.ID, dir, err)
 		return nil
 	}
-	if _, err := os.ReadDir(dir); err != nil {
+	if _, err := binlog.ReadDir(dir); err != nil {
 		e.noteDirRead(task.ID, dir, err)
 		return nil
 	}
@@ -1272,7 +1284,7 @@ func (e *Evaluator) chainFactsInto(task Task, now time.Time, facts *health.Facts
 		if !ok || r.ok {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(dir, name))
+		info, err := binlog.Stat(filepath.Join(dir, name))
 		if err != nil || !binlog.StampOf(info).Equal(r.stamp) {
 			continue // changed since it was hashed: the next cycle judges it
 		}
@@ -1512,13 +1524,13 @@ func (e *Evaluator) fingerprint(taskID string) string {
 	if !ok {
 		return ""
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := binlog.ReadDir(dir)
 	if err != nil {
 		return "error:" + err.Error()
 	}
 	h := sha256.New()
 	for _, en := range entries {
-		info, err := en.Info()
+		info, err := binlog.EntryInfo(en)
 		if err != nil {
 			continue
 		}
@@ -1609,7 +1621,7 @@ const NodeIDFileName = ".node_id"
 // with the data directory, not the host name).
 func LoadOrCreateNodeID(dataDir string) (string, error) {
 	path := filepath.Join(dataDir, NodeIDFileName)
-	if raw, err := os.ReadFile(path); err == nil {
+	if raw, err := binlog.ReadFile(path); err == nil {
 		if id := strings.TrimSpace(string(raw)); id != "" {
 			return id, nil
 		}

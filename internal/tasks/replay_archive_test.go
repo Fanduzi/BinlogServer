@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: on-disk segments, catalog rows, task state, and an optional object opener
-// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read
+// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live under a private TMPDIR, the leak count includes both the seam directory and os.TempDir, and TestReplayTempCount_CountsOnlyTheSeamDir counts only the seam directory; -syscall-walk re-execs this binary to run one cold evaluator pass
 // pos: scheduler tests for the replay archive
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,12 +10,56 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain gives this process its own temp directory before os.TempDir is
+// cached, then puts archive temps in a subdirectory of that. A leak through
+// os.CreateTemp("", ...) and a leak through the seam land in this process
+// only, so the count is not shared with another package's tests.
+// syscallWalkChild, when set, runs one cold evaluator pass and exits.
+// The Linux syscall test re-execs this binary with -syscall-walk.
+var syscallWalkChild func([]string)
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "-syscall-walk" {
+		if syscallWalkChild == nil {
+			panic("-syscall-walk is only built on linux")
+		}
+		syscallWalkChild(os.Args[2:])
+		os.Exit(0)
+	}
+	base := os.Getenv("TMPDIR")
+	if base == "" {
+		base = "/tmp"
+	}
+	root := filepath.Join(base, fmt.Sprintf("binlog-tasks-%d", os.Getpid()))
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("TMPDIR", root); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("TMP", root); err != nil {
+		panic(err)
+	}
+	if got := os.TempDir(); filepath.Clean(got) != filepath.Clean(root) {
+		panic(fmt.Sprintf("os.TempDir is %s, want the private root %s", got, root))
+	}
+	archives := filepath.Join(root, "archives")
+	if err := os.MkdirAll(archives, 0o755); err != nil {
+		panic(err)
+	}
+	replayArchiveTempDir.Store(archives)
+	code := m.Run()
+	_ = os.RemoveAll(root)
+	os.Exit(code)
+}
 
 func TestOpenReplayArchive_RunningOpenEpochAndEmpty(t *testing.T) {
 	dir := t.TempDir()
@@ -178,9 +222,54 @@ func readReplayTar(t *testing.T, raw []byte) map[string][]byte {
 	}
 }
 
+// replaySeamTempCount counts archive temps in the seam directory only.
+// A file in the process temp directory is another package's file.
+func replaySeamTempCount(t *testing.T) int {
+	t.Helper()
+	return globReplayTemps(t, replayArchiveCreateDir())
+}
+
+// TestReplayTempCount_CountsOnlyTheSeamDir: a binlog-replay tar in the
+// process temp directory must not change the count. A file in the seam
+// directory must. Counting os.TempDir as well fails the first check.
+func TestReplayTempCount_CountsOnlyTheSeamDir(t *testing.T) {
+	before := replaySeamTempCount(t)
+	outside, err := os.CreateTemp("", "binlog-replay-*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside.Close()
+	t.Cleanup(func() { _ = os.Remove(outside.Name()) })
+	if replaySeamTempCount(t) != before {
+		t.Fatalf("process temp file %s changed the count from %d", outside.Name(), before)
+	}
+	seam, err := os.CreateTemp(replayArchiveCreateDir(), "binlog-replay-*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seam.Close()
+	t.Cleanup(func() { _ = os.Remove(seam.Name()) })
+	if got := replaySeamTempCount(t); got != before+1 {
+		t.Fatalf("seam leak count %d, want %d", got, before+1)
+	}
+}
+
 func countReplayTemps(t *testing.T) int {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "binlog-replay-*.tar"))
+	dir := replayArchiveCreateDir()
+	n := globReplayTemps(t, dir)
+	if td := os.TempDir(); td != "" && filepath.Clean(td) != filepath.Clean(dir) {
+		n += globReplayTemps(t, td)
+	}
+	return n
+}
+
+func globReplayTemps(t *testing.T, dir string) int {
+	t.Helper()
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "binlog-replay-*.tar"))
 	if err != nil {
 		t.Fatal(err)
 	}

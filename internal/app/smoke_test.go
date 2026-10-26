@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth, anonymous Console UI, swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage; waitRunExit waits out the runner, background and finding shutdown budgets
+// output: application lifecycle plus real-route production auth, anonymous Console UI, swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage; waitRunExit waits out the runner, background and finding shutdown budgets, and StartAndServeHealth plus ProductionAuth use a 2s bound, their own HTTP client, and a private data directory
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -183,11 +183,10 @@ func (s *fakeAppMetaStore) snapshot() (acquireCalls, renewCalls, releaseCalls in
 
 // TestApp_StartAndServeHealth 验证相关行为。
 func TestApp_StartAndServeHealth(t *testing.T) {
-	cfg := config.Config{ListenAddr: "127.0.0.1:0"}
+	cfg := config.Config{ListenAddr: "127.0.0.1:0", DataDir: t.TempDir()}
 	a := New(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -197,28 +196,28 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 	select {
 	case <-a.Ready():
 	case <-time.After(2 * time.Second):
+		cancel()
 		t.Fatal("app did not become ready in time")
 	}
 
-	resp, err := http.Get("http://" + a.Addr() + "/healthz")
+	client := appTestClient(t)
+	resp, err := client.Get("http://" + a.Addr() + "/healthz")
 	if err != nil {
+		cancel()
 		t.Fatalf("health request failed: %v", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		cancel()
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 
+	// The idle keep-alive stays in the client's pool until Cleanup. Shutdown
+	// has to drop it; closing the client first would hide that.
 	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("app returned error: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("app did not shut down in time")
-	}
+	waitRunExitWithin(t, errCh, 2*time.Second)
 }
 
 func TestApp_ProductionRefusesEmptyEncryptionKey(t *testing.T) {
@@ -256,20 +255,22 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 		t.Fatalf("production template must not require metadata credentials, got %q", cfg.MetaDSN)
 	}
 	cfg.EncryptionKey = "0123456789abcdef0123456789abcdef"
+	cfg.DataDir = t.TempDir()
 	a := New(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- a.Run(ctx) }()
 	defer func() {
 		cancel()
-		waitRunExit(t, errCh)
+		waitRunExitWithin(t, errCh, 2*time.Second)
 	}()
 
 	waitReady(t, a)
+	client := appTestClient(t)
 	base := "http://" + a.Addr()
-	assertHTTPStatus(t, base+"/healthz", http.StatusOK)
+	assertHTTPStatusClient(t, client, base+"/healthz", http.StatusOK)
 	for _, path := range []string{"/api/tasks", "/metrics", "/swagger/index.html"} {
-		resp, err := http.Get(base + path)
+		resp, err := client.Get(base + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
 		}
@@ -283,7 +284,7 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 		req.Header.Set("Authorization", "Bearer test-token")
-		resp, err = http.DefaultClient.Do(req)
+		resp, err = client.Do(req)
 		if err != nil {
 			t.Fatalf("authorized GET %s: %v", path, err)
 		}
@@ -293,7 +294,7 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 
-	uiResp, err := http.Get(base + "/ui/")
+	uiResp, err := client.Get(base + "/ui/")
 	if err != nil {
 		t.Fatalf("GET /ui/: %v", err)
 	}
@@ -1319,18 +1320,29 @@ func waitReady(t *testing.T, a *App) {
 	}
 }
 
-// waitRunExit waits for Run to return. Shutdown itself is bounded by the
-// runner, background and finding-flush budgets; the wait has to cover them
-// or a busy machine reports a hang that already finished.
+// waitRunExit waits for Run to return. Serve returns as soon as Shutdown
+// closes the listener. The HTTP Shutdown call runs on the background group,
+// so it is already inside shutdownBackgroundTimeout. The budget is runners,
+// background and the finding flush, plus a second between them.
+// StartAndServeHealth and ProductionAuth pass 2s: idle keep-alives are
+// closed before Shutdown, so an idle process returns in milliseconds, and
+// a multi-second stall still fails. Each of those tests uses its own data
+// directory, so a Run that is still exiting cannot hold the next test's lock.
 func waitRunExit(t *testing.T, errCh <-chan error) {
+	t.Helper()
+	waitRunExitWithin(t, errCh, shutdownRunnersTimeout+shutdownBackgroundTimeout+shutdownFindingsTimeout+time.Second)
+}
+
+func waitRunExitWithin(t *testing.T, errCh <-chan error, budget time.Duration) {
 	t.Helper()
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("app returned error: %v", err)
 		}
-	case <-time.After(shutdownRunnersTimeout + shutdownBackgroundTimeout + shutdownFindingsTimeout + time.Second):
-		t.Fatal("app did not shut down in time")
+	case <-time.After(budget):
+		t.Fatalf("app did not shut down within %s (runners %s, background %s, findings %s)",
+			budget, shutdownRunnersTimeout, shutdownBackgroundTimeout, shutdownFindingsTimeout)
 	}
 }
 
@@ -1371,10 +1383,24 @@ func waitForHeartbeatWorkerID(t *testing.T, store *fakeAppMetaStore, want string
 	}
 }
 
+// appTestClient is this test's HTTP client. Keep-alives stay on so shutdown
+// is the code that drops them; Cleanup closes the pool after Run returns.
+func appTestClient(t *testing.T) *http.Client {
+	t.Helper()
+	c := &http.Client{Timeout: 5 * time.Second}
+	t.Cleanup(c.CloseIdleConnections)
+	return c
+}
+
 // assertHTTPStatus 实现对应功能逻辑。
 func assertHTTPStatus(t *testing.T, url string, want int) {
 	t.Helper()
-	resp, err := http.Get(url)
+	assertHTTPStatusClient(t, http.DefaultClient, url, want)
+}
+
+func assertHTTPStatusClient(t *testing.T, client *http.Client, url string, want int) {
+	t.Helper()
+	resp, err := client.Get(url)
 	if err != nil {
 		t.Fatalf("request %s failed: %v", url, err)
 	}

@@ -67,7 +67,7 @@ func (l *Ledger) list() error {
 		l.listErr = os.ErrNotExist
 		return l.listErr
 	}
-	entries, err := os.ReadDir(l.dir)
+	entries, err := ReadDir(l.dir)
 	if err != nil {
 		l.listErr = err
 		return err
@@ -281,7 +281,7 @@ var sealedCorruptCache stampCache[string] // path -> UnreadableReason, "" when r
 // the stricter check for a file that was sealed whole. Cached per size and
 // mtime. A file that cannot be opened is not corrupt.
 func sealedSegmentCorrupt(p string) (string, bool) {
-	info, err := os.Stat(p)
+	info, err := Stat(p)
 	if err != nil {
 		return "", false
 	}
@@ -289,7 +289,7 @@ func sealedSegmentCorrupt(p string) (string, bool) {
 	if reason, ok := sealedCorruptCache.get(p, st); ok {
 		return reason, reason != ""
 	}
-	f, err := os.Open(p)
+	f, err := Open(p)
 	if err != nil {
 		return "", false
 	}
@@ -305,7 +305,7 @@ func sealedSegmentCorrupt(p string) (string, bool) {
 
 // segmentContentsAt reads one segment file once per size and mtime.
 func segmentContentsAt(p string) (SegmentContents, error) {
-	info, err := os.Stat(p)
+	info, err := Stat(p)
 	if err != nil {
 		return SegmentContents{}, err
 	}
@@ -313,7 +313,7 @@ func segmentContentsAt(p string) (SegmentContents, error) {
 	if c, ok := contentsCache.get(p, st); ok {
 		return c, nil
 	}
-	f, err := os.Open(p)
+	f, err := Open(p)
 	if err != nil {
 		return SegmentContents{}, err
 	}

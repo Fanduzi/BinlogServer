@@ -6,6 +6,7 @@
 package tasks
 
 import (
+	"binlog_server/internal/binlog"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,7 +34,7 @@ func NewFileFindingStore(path string) FindingStore {
 
 func (f *fileFindingStore) load() (map[findingKey]Finding, error) {
 	out := map[findingKey]Finding{}
-	raw, err := os.ReadFile(f.path)
+	raw, err := binlog.ReadFile(f.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return out, nil
 	}

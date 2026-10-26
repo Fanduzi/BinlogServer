@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup; a TLS transport failure in that probe degrades health, other probe failures leave status ok (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound; the meta DSN is rewritten with meta.tls before the pool opens and a bare dial error is prefixed meta.tls (ADR 0012); upload.tls.ca_file is the object-storage trust store when set
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown (idle keep-alives and connections that have not sent a request are closed first, including one that reaches StateNew or StateIdle after that close has started (the shutting flag is stored before the idle snapshot), so they do not consume the budget), retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup; a TLS transport failure in that probe degrades health, other probe failures leave status ok (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound; the meta DSN is rewritten with meta.tls before the pool opens and a bare dial error is prefixed meta.tls (ADR 0012); upload.tls.ca_file is the object-storage trust store when set
 // note P2-6.1 (§28): health.stale_after_sec (0 = 5×sweep, then the ADR 0011 floor max(2×sweep+lock_wait, min(S, RTO))) is EvaluatorConfig.StaleAfter
 // note P2-6.2 (§30): health.node_gone_after_sec (0 = 3×sweep) is EvaluatorConfig.NodeGoneAfter
 // note F2: a non-empty notify.webhook_url is the evaluator's HealthNotifier; an empty URL leaves it nil
@@ -530,7 +530,7 @@ func (a *App) Run(ctx context.Context) error {
 		}))
 	}
 	handler := api.NewServer(scheduler, apiOptions...)
-	server := buildHTTPServer(handler, a.cfg.HTTP.ControlPlane)
+	server, closeIdle := buildHTTPServer(handler, a.cfg.HTTP.ControlPlane)
 
 	ln, err := net.Listen("tcp", a.cfg.ListenAddr)
 	if err != nil {
@@ -543,14 +543,9 @@ func (a *App) Run(ctx context.Context) error {
 
 	spawn(func() {
 		<-runCtx.Done()
-		// graceful shutdown lets in-flight requests finish (an Adopt or Start
-		// may be writing the task record), bounded so SIGTERM cannot hang.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shutdown: http server: %v", err)
-			_ = server.Close()
-		}
+		// In-flight requests still finish inside the budget. Idle keep-alives
+		// do not: closeIdle drops them before Shutdown waits.
+		shutdownHTTP(server, closeIdle)
 	})
 
 	// Serve 返回 http.ErrServerClosed 表示预期关闭，不应视为错误。
@@ -1149,7 +1144,7 @@ func startWorkerHealthServer(ctx context.Context, listenAddr string, timeoutCfg 
 		w.WriteHeader(http.StatusOK)
 	})
 
-	server := buildHTTPServer(mux, timeoutCfg)
+	server, closeIdle := buildHTTPServer(mux, timeoutCfg)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return "", err
@@ -1157,7 +1152,7 @@ func startWorkerHealthServer(ctx context.Context, listenAddr string, timeoutCfg 
 
 	go func() {
 		<-ctx.Done()
-		_ = server.Shutdown(context.Background())
+		shutdownHTTP(server, closeIdle)
 	}()
 
 	go func() {
@@ -1171,13 +1166,91 @@ func startWorkerHealthServer(ctx context.Context, listenAddr string, timeoutCfg 
 }
 
 // buildHTTPServer 根据配置构建带超时的 HTTP server，避免慢连接拖垮控制面。
-func buildHTTPServer(handler http.Handler, timeoutCfg config.HTTPServerTimeoutConfig) *http.Server {
-	return &http.Server{
+// closeIdle closes keep-alive connections that are idle or have not sent a
+// request. Shutdown closes StateIdle, but it leaves a StateNew connection
+// alone for 5s, which is this process's whole HTTP shutdown budget.
+func buildHTTPServer(handler http.Handler, timeoutCfg config.HTTPServerTimeoutConfig) (*http.Server, func()) {
+	track := &httpConnTrack{conns: map[net.Conn]http.ConnState{}}
+	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: time.Duration(timeoutCfg.ReadHeaderTimeoutSec) * time.Second,
 		ReadTimeout:       time.Duration(timeoutCfg.ReadTimeoutSec) * time.Second,
 		WriteTimeout:      time.Duration(timeoutCfg.WriteTimeoutSec) * time.Second,
 		IdleTimeout:       time.Duration(timeoutCfg.IdleTimeoutSec) * time.Second,
+		ConnState:         track.observe,
+	}
+	return srv, track.closeIdle
+}
+
+// httpConnTrack is the set of connections a server has accepted.
+// shutting is set for the process shutdown. A connection accepted after the
+// idle snapshot, whose ConnState hook has not run yet, is still StateNew
+// and would otherwise keep Shutdown busy for the whole HTTP budget.
+type httpConnTrack struct {
+	mu       sync.Mutex
+	conns    map[net.Conn]http.ConnState
+	shutting bool
+}
+
+func (t *httpConnTrack) observe(c net.Conn, state http.ConnState) {
+	t.mu.Lock()
+	if state == http.StateClosed || state == http.StateHijacked {
+		delete(t.conns, c)
+		t.mu.Unlock()
+		return
+	}
+	t.conns[c] = state
+	// StateActive stays open: an in-flight request has the shutdown budget.
+	drop := t.shutting && (state == http.StateNew || state == http.StateIdle)
+	t.mu.Unlock()
+	if drop {
+		_ = c.Close()
+	}
+}
+
+// connTrackSnap, when a test sets it, runs after shutting is stored and
+// before the idle snapshot. The lock is not held: the test can dial, and
+// ConnState then sees shutting already true. Moving the assignment to
+// after the snapshot makes the hook observe shutting still false.
+var connTrackSnap func(shutting bool)
+
+// closeIdle closes connections that are not serving a request, and arms the
+// hook so a StateNew or StateIdle connection that arrives afterwards is
+// closed too. shutting is stored before the snapshot. The caller must not
+// hold t.mu: Close runs the ConnState hook, which takes t.mu.
+func (t *httpConnTrack) closeIdle() {
+	t.mu.Lock()
+	t.shutting = true
+	armed := t.shutting
+	t.mu.Unlock()
+	if connTrackSnap != nil {
+		connTrackSnap(armed)
+	}
+	t.mu.Lock()
+	var drop []net.Conn
+	for c, state := range t.conns {
+		if state == http.StateIdle || state == http.StateNew {
+			drop = append(drop, c)
+		}
+	}
+	t.mu.Unlock()
+	for _, c := range drop {
+		_ = c.Close()
+	}
+}
+
+// shutdownHTTP turns keep-alives off, drops idle connections, then waits up
+// to shutdownHTTPTimeout for requests that are still being served.
+func shutdownHTTP(server *http.Server, closeIdle func()) {
+	server.SetKeepAlivesEnabled(false)
+	if closeIdle != nil {
+		closeIdle()
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownHTTPTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: http server: %v", err)
+		_ = server.Close()
 	}
 }
 
