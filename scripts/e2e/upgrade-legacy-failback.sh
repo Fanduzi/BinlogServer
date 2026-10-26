@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # input: two MySQL 8.0 servers in a GTID pair behind one TCP proxy, a meta MySQL, MinIO, and three binlog-server binaries (OLD, MID, NEW; default: built from v0.5.57, 0a84917a, and this checkout)
 # output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; object-only removes A's first-stint mysql-bin.00000N from disk so only its MinIO object holds it (Start must fetch it back); object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
-# pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1); opt-in, not in any suite profile
+# pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1); not in any suite profile; e2e.yml e2e-upgrade-failback runs FBUP_CASE=object-only on every PR
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
 

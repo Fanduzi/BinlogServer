@@ -10,10 +10,10 @@
 只能 `workflow_dispatch` 手动触发的 e2e 一律不算 MET。
 
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
-- 每个 PR 和 push main 都跑：`vulncheck`；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
+- 每个 PR 和 push main 都跑：`vulncheck`；`e2e-upgrade-failback`（`upgrade-legacy-failback.sh FBUP_CASE=object-only`）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
 - 只在 push main 跑：`e2e-meta-failover`。
 - 只能手动触发：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-observability`。
-- 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`、`upgrade-legacy-failback`。
+- 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`；`upgrade-legacy-failback` 的 `plain`、`object-gone` 两档。
 
 ## A. 数据完整性与零静默丢失
 
@@ -50,7 +50,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | D1 | 用备份按 GTID 停点还原到一台新 MySQL，数据和预期一致（open 段和封存段都测） | `e2e-gtid-pitr`（`smoke-gtid-pitr`、`smoke-gtid-executed`）；只有 MySQL 8.0 | MET | — |
-| D2 | 本地文件已按保留期删掉、只剩对象存储时，仍能下载回放并还原 | `e2e-split-retention`（只证明 download/replay/archive 能从对象取回，不还原进 MySQL 比校验和）；`upgrade-legacy-failback.sh FBUP_CASE=object-only` 会做还原，但不在任何 job 里 | PARTIAL | — |
+| D2 | 本地文件已按保留期删掉、只剩对象存储时，仍能下载回放并还原 | `e2e-upgrade-failback` 每个 PR 跑 `upgrade-legacy-failback.sh FBUP_CASE=object-only`：A 第一段的 binlog 从磁盘删掉、只留 MinIO 对象，Start 把它取回，`/replay` 用宿主机 MySQL 8.0 `mysqlbinlog` 还原进新 MySQL，`CHECKSUM TABLE` 必须和 A 一致。`e2e-split-retention` 另外证明 download/replay/archive 能从对象取回 | MET | — |
 | D3 | 给一个时间点或 GTID，能查出覆盖它的文件和对象（`/coverage`），并一步生成还原计划和预检（`/restore-plan`） | 没有接口。验收按 ADR 0009 阶段 4/5：窗口内、窗口外、断点上各 10 例，和 mysqlbinlog 的独立解析一致；向导还原 5 个时间点，校验和一致 | NOT MET | ADR 0009 阶段 4、5 |
 | D4 | 各支持版本上都能拉流并且能还原 | `smoke.sh` 在 mysql57、mysql80、percona57、percona80 上拉流（quick）；MariaDB 11.4 和 8.0 在 `smoke-standalone-restart` 里做了还原。缺：5.7 上的还原、8.4 LTS（compose 里没有 8.4） | PARTIAL | — |
 
@@ -102,7 +102,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 13 / PARTIAL 10 / NOT MET 12**。
+共 35 项：**MET 14 / PARTIAL 9 / NOT MET 12**。
 
 ## 最卡生产级的 5 项
 
