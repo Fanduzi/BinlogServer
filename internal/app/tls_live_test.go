@@ -1,6 +1,6 @@
 // Package app proves source and meta TLS through the process that ships.
 // input: BINLOG_TEST_TLS=1, a TLS MySQL, and the real App.Run HTTP API
-// output: a verify-ca task's binlog dump is SSL/TLS on the server; a wrong CA and a wrong hostname fail; meta.tls on App.Run is SSL/TLS for that account; migrate --config applies the same block
+// output: a verify-ca task's binlog dump is SSL/TLS on the server; verify-identity with server_name mysql.tls.test is SSL/TLS too; a wrong CA and a wrong hostname fail; meta.tls on App.Run is SSL/TLS for that account; migrate --config applies the same block and a wrong CA or hostname prints meta.tls
 // pos: the CI e2e-tls proof that deleting the runner TLS assignment or skipping ApplyDSN goes red
 // note: if this file changes, update this header and module README.md.
 package app
@@ -56,6 +56,17 @@ func TestLiveAppTLS(t *testing.T) {
 		waitState(t, base, good.ID, tasks.StateStopped)
 		waitNoDump(t, db)
 
+		goodName := postTask(t, base, taskBody("g2-id", port, 420004, "verify-identity", ca, "mysql.tls.test"))
+		postAction(t, base, goodName.ID, "start")
+		got = waitState(t, base, goodName.ID, tasks.StateRunning)
+		if got.State != tasks.StateRunning {
+			t.Fatalf("verify-identity state %s last_error %s", got.State, got.LastError)
+		}
+		waitDumpType(t, db, "SSL/TLS")
+		postAction(t, base, goodName.ID, "stop")
+		waitState(t, base, goodName.ID, tasks.StateStopped)
+		waitNoDump(t, db)
+
 		badCA := postTask(t, base, taskBody("g2-ca", port, 420002, "verify-ca", wrong, ""))
 		postAction(t, base, badCA.ID, "start")
 		failed := waitState(t, base, badCA.ID, tasks.StateFailed)
@@ -94,6 +105,26 @@ func TestLiveAppTLS(t *testing.T) {
 		if out, err := up.CombinedOutput(); err != nil {
 			t.Fatalf("migrate: %v\n%s", err, out)
 		}
+		badCAPath := filepath.Join(t.TempDir(), "bad-ca.yaml")
+		badCABody := fmt.Sprintf("meta_dsn: \"bmeta:bmetapw@tcp(127.0.0.1:%d)/metatls?parseTime=true\"\nmeta:\n  tls:\n    mode: verify-ca\n    ca: %q\n", port, wrong)
+		if err := os.WriteFile(badCAPath, []byte(badCABody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		badUp := exec.Command(bin, "up", "--config", badCAPath, "--path", filepath.Join(root, "migrations"))
+		out, err := badUp.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "meta.tls") || !strings.Contains(string(out), "x509") {
+			t.Fatalf("migrate wrong CA: %v\n%s", err, out)
+		}
+		badNamePath := filepath.Join(t.TempDir(), "bad-name.yaml")
+		badNameBody := fmt.Sprintf("meta_dsn: \"bmeta:bmetapw@tcp(127.0.0.1:%d)/metatls?parseTime=true\"\nmeta:\n  tls:\n    mode: verify-identity\n    ca: %q\n    server_name: wrong.example\n", port, ca)
+		if err := os.WriteFile(badNamePath, []byte(badNameBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		badNameUp := exec.Command(bin, "up", "--config", badNamePath, "--path", filepath.Join(root, "migrations"))
+		out, err = badNameUp.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "meta.tls") || !strings.Contains(string(out), "x509") {
+			t.Fatalf("migrate wrong hostname: %v\n%s", err, out)
+		}
 
 		metaCfg := memoryAppConfig(t)
 		metaCfg.MetaDSN = fmt.Sprintf("bmeta:bmetapw@tcp(127.0.0.1:%d)/metatls?parseTime=true", port)
@@ -106,7 +137,7 @@ func TestLiveAppTLS(t *testing.T) {
 		bad := metaCfg
 		bad.Meta.TLS.CA = wrong
 		bad.DataDir = t.TempDir()
-		err := New(bad).Run(context.Background())
+		err = New(bad).Run(context.Background())
 		if err == nil || !strings.Contains(err.Error(), "meta.tls") || !strings.Contains(err.Error(), "x509") {
 			t.Fatalf("wrong meta CA error = %v", err)
 		}

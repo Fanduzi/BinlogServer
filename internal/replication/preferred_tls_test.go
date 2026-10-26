@@ -1,6 +1,6 @@
 // Package replication proves preferred falls back only when the greeting omits CLIENT_SSL.
 // input: a local TCP server that sends one MySQL greeting and then closes
-// output: two accepts when the greeting offers TLS (probe plus one TLS dial), a plaintext second dial only when CLIENT_SSL is absent, and one accept plus an error when the greeting cannot be read
+// output: one accept when the greeting offers TLS (the real dial), a plaintext second dial only when CLIENT_SSL is absent, and one accept plus an error when the greeting cannot be read
 // pos: unit coverage for ADR 0012 preferred, including a handshake error that is not "does not support TLS"
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -21,8 +21,8 @@ func TestPreferredFallsBackOnlyWhenGreetingOmitsClientSSL(t *testing.T) {
 	t.Run("offers", func(t *testing.T) {
 		srv := greet(t, true)
 		dialPreferred(t, srv.addr)
-		if got := srv.accepts.Load(); got != 2 {
-			t.Fatalf("accepts %d, want 2 (probe + one TLS dial, no plaintext redial)", got)
+		if got := srv.accepts.Load(); got != 1 {
+			t.Fatalf("accepts %d, want 1 (one TLS dial on the real connection, no probe and no plaintext redial)", got)
 		}
 		if srv.sawSSL.Load() == 0 {
 			t.Fatal("TLS-capable greeting was dialed without CLIENT_SSL")
@@ -32,7 +32,7 @@ func TestPreferredFallsBackOnlyWhenGreetingOmitsClientSSL(t *testing.T) {
 		srv := greet(t, false)
 		dialPreferred(t, srv.addr)
 		if got := srv.accepts.Load(); got != 2 {
-			t.Fatalf("accepts %d, want 2 (probe + one plaintext dial)", got)
+			t.Fatalf("accepts %d, want 2 (TLS dial refused, then one plaintext dial)", got)
 		}
 		if srv.sawSSL.Load() != 0 {
 			t.Fatal("plaintext fallback still set CLIENT_SSL")
@@ -68,9 +68,9 @@ func greet(t *testing.T, offers bool) *greetServer {
 			if err != nil {
 				return
 			}
-			n := srv.accepts.Add(1)
+			srv.accepts.Add(1)
 			wg.Add(1)
-			go func(c net.Conn, n int32) {
+			go func(c net.Conn) {
 				defer wg.Done()
 				defer c.Close()
 				payload := mysqlGreeting(offers)
@@ -78,10 +78,10 @@ func greet(t *testing.T, offers bool) *greetServer {
 				_, _ = c.Write(append(hdr, payload...))
 				buf := make([]byte, 128)
 				nr, _ := c.Read(buf)
-				if n > 1 && clientOffersSSL(buf[:nr]) {
+				if clientOffersSSL(buf[:nr]) {
 					srv.sawSSL.Store(1)
 				}
-			}(c, n)
+			}(c)
 		}
 	}()
 	t.Cleanup(func() { wg.Wait() })

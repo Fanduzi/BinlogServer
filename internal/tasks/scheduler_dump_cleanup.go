@@ -498,9 +498,9 @@ func (s *Scheduler) killLeftover(task Task, pending DumpCleanup, killer func(Sou
 	err := killer(src, pending.ConnectionID)
 	s.noteDumpCleanup(task.ID, src, pending.ConnectionID, err)
 	if err != nil {
-		if mysqltls.IsVerifyFailure(err) {
-			zap.L().Warn("binlog dump cleanup tls verify failed", zap.String("task_id", task.ID), zap.Uint32("conn", pending.ConnectionID), zap.Error(err))
-		} else {
+		// startTask warns once for a TLS verify failure. A second warn here
+		// logged the same x509 twice.
+		if !mysqltls.IsVerifyFailure(err) {
 			log.Printf("binlog dump cleanup before start task=%s conn=%d err=%v", task.ID, pending.ConnectionID, err)
 		}
 	}

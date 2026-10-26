@@ -50,6 +50,83 @@ func TestStartTLSVerifyFailureIsTerminal(t *testing.T) {
 	}
 }
 
+func TestStartTLSVerifyWarnsOnce(t *testing.T) {
+	obs := captureZap(t, zapcore.WarnLevel)
+	runner := &fenceGateRunner{started: make(chan struct{}, 1)}
+	s := NewScheduler()
+	s.SetRunner(runner)
+	task := s.mustTask(t)
+	s.mu.Lock()
+	item := s.tasks[task.ID]
+	item.State = StateStopped
+	item.DesiredRun = TaskDesiredStop
+	s.tasks[task.ID] = item
+	s.rememberPendingDumpLocked(task.ID, DumpCleanup{ConnectionID: 303, Host: "10.0.0.8", Port: 3306})
+	s.mu.Unlock()
+	s.dumpKiller = func(SourceConfig, uint32) error {
+		return errors.New("writeAuthHandshake: x509: certificate signed by unknown authority")
+	}
+	if err := s.startTask(task.ID, taskStart{resetBudget: true}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	warns := 0
+	for _, e := range obs.All() {
+		if e.Level != zapcore.WarnLevel {
+			continue
+		}
+		if e.Message == "binlog dump cleanup tls verify failed" {
+			t.Fatal("killLeftover logged a second x509 warn")
+		}
+		if e.Message == "source tls verify failed" {
+			warns++
+		}
+	}
+	if warns != 1 {
+		t.Fatalf("source tls verify warns=%d, logs=%v", warns, obs.All())
+	}
+}
+
+func TestUploadTLSClearsAfterSuccessfulRetry(t *testing.T) {
+	const tlsLine = `object storage probe: Get "https://127.0.0.1:9000": x509: certificate signed by unknown authority`
+	name := "mysql-bin.000092"
+	objectKey := "prefix/c/u/" + name
+	store := newRetryTestFileStore()
+	s := NewScheduler(WithFileStore(store), WithFileUploader(&retryTestUploader{}))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.files[task.ID] = []BinlogFile{{
+		TaskID: task.ID, FileName: name, FilePath: writeRetryTestFile(t, t.TempDir(), name),
+		SealedAt: time.Now(), UploadState: "UPLOAD_FAILED", ObjectKey: objectKey,
+	}}
+	s.SetVerifyStorageDetail(tlsLine)
+	h := s.HealthSummary(context.Background())
+	if h.Status != HealthDegraded || !strings.Contains(strings.Join(h.Reasons, " "), "UPLOAD_TLS") {
+		t.Fatalf("before %+v", h)
+	}
+	s.SetVerifyStorageDetail("")
+	h = s.HealthSummary(context.Background())
+	if h.Status != HealthOK {
+		t.Fatalf("re-probe %+v", h)
+	}
+	s.SetVerifyStorageDetail(tlsLine)
+	if _, err := s.RetryFailedUploads(task.ID, 10); err != nil {
+		t.Fatal(err)
+	}
+	h = s.HealthSummary(context.Background())
+	if h.Status != HealthOK || strings.Contains(strings.Join(h.Reasons, " "), "UPLOAD_TLS") {
+		t.Fatalf("after retry %+v", h)
+	}
+	s.SetVerifyStorageDetail("object storage probe: NoSuchBucket bucket binlog endpoint 127.0.0.1:9000")
+	s.clearStickyUploadTLS()
+	h = s.HealthSummary(context.Background())
+	joined := strings.Join(h.Detail, " ")
+	if h.Status != HealthOK || !strings.Contains(joined, "NoSuchBucket") {
+		t.Fatalf("non-tls probe %+v", h)
+	}
+}
+
 func TestHealthSummary_TLSTransportDegrades(t *testing.T) {
 	s := NewScheduler()
 	s.SetVerifyStorageDetail("object storage probe: Get \"https://127.0.0.1:9000\": x509: certificate signed by unknown authority")

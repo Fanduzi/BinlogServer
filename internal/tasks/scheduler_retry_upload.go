@@ -238,7 +238,7 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 			updated, err = ApplySealedUpload(uploadCtx, uploader, fileStore, file)
 		}
 		cancelUpload()
-		NoteUploadOutcome(s.SignalFailure, s.SignalSuccess, updated, err)
+		NoteUploadOutcome(s.reportFinding, s.resolveFinding, updated, err)
 		if err != nil || updated.UploadState != "UPLOADED" {
 			stats.Failed++
 			msg := updated.UploadError

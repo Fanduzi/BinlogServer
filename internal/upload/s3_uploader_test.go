@@ -759,6 +759,102 @@ func TestCAFileTrustsOnlyThatCA(t *testing.T) {
 	}
 }
 
+func TestProbeStorage_UntrustedCAIsNotATimeout(t *testing.T) {
+	_, cert := privateServerCert(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	var accepts atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			go func(c net.Conn) { defer c.Close(); _ = c.(*tls.Conn).Handshake() }(c)
+		}
+	}()
+	wrongPEM, _ := privateServerCert(t)
+	wrongPath := filepath.Join(t.TempDir(), "wrong.pem")
+	if err := os.WriteFile(wrongPath, wrongPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	up, err := NewS3Uploader(S3Config{
+		Endpoint: ln.Addr().String(), Bucket: "binlog",
+		AccessKey: "k", SecretKey: "s", UseSSL: true, CAFile: wrongPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	err = up.ProbeStorage(ctx)
+	elapsed := time.Since(start)
+	if err == nil || !TLSTransportFailure(err.Error()) || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("probe %v", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("probe took %s; a bad CA was retried until the deadline", elapsed)
+	}
+	if got := accepts.Load(); got != 1 {
+		t.Fatalf("accepts %d, want 1 (a bad CA is not retried)", got)
+	}
+	// minio-go retries unless *url.Error unwraps to UnknownAuthorityError.
+	// A nested CertificateVerificationError is what burns the probe deadline.
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		t.Fatalf("probe error %T", err)
+	}
+	if _, ok := ue.Unwrap().(x509.UnknownAuthorityError); !ok {
+		t.Fatalf("probe unwrap %T; minio retries this and the startup probe reports a timeout", ue.Unwrap())
+	}
+}
+
+func TestCAFileTransportKeepsMinIODefaults(t *testing.T) {
+	caPEM, _ := privateServerCert(t)
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := loadCAFile(caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := objectTransport(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := rt.(stopTLSRetry).base.(*http.Transport)
+	if !ok || base.Proxy == nil {
+		t.Fatal("transport is not minio's default")
+	}
+	if base.ResponseHeaderTimeout != time.Minute || base.TLSHandshakeTimeout != 10*time.Second || base.IdleConnTimeout != time.Minute || base.ExpectContinueTimeout != 10*time.Second {
+		t.Fatalf("timeouts header=%s handshake=%s idle=%s continue=%s", base.ResponseHeaderTimeout, base.TLSHandshakeTimeout, base.IdleConnTimeout, base.ExpectContinueTimeout)
+	}
+	if base.MaxIdleConns != 256 || base.MaxIdleConnsPerHost != 16 || !base.DisableCompression {
+		t.Fatalf("pool idle=%d perHost=%d compression=%v", base.MaxIdleConns, base.MaxIdleConnsPerHost, base.DisableCompression)
+	}
+	if base.TLSClientConfig == nil || base.TLSClientConfig.RootCAs != pool || base.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatal("RootCAs was not the only trust change")
+	}
+	req := &http.Request{URL: &url.URL{Scheme: "https", Host: "example.com"}}
+	got, err := base.Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := http.ProxyFromEnvironment(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if (got == nil) != (want == nil) || (got != nil && got.String() != want.String()) {
+		t.Fatalf("proxy %v, want %v", got, want)
+	}
+}
+
 func privateServerCert(t *testing.T) ([]byte, tls.Certificate) {
 	t.Helper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

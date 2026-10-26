@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -225,6 +226,19 @@ func signLeaf(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, name 
 		t.Fatal(err)
 	}
 	return cert
+}
+
+func TestPrefixMeta(t *testing.T) {
+	bare := PrefixMeta(errors.New("x509: certificate signed by unknown authority"))
+	if bare == nil || bare.Error() != "meta.tls: x509: certificate signed by unknown authority" {
+		t.Fatal(bare)
+	}
+	if again := PrefixMeta(bare); again.Error() != bare.Error() {
+		t.Fatalf("stacked prefix: %v", again)
+	}
+	if PrefixMeta(nil) != nil {
+		t.Fatal("nil")
+	}
 }
 
 func signClient(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey) (certPEM, keyPEM []byte) {

@@ -53,7 +53,7 @@ curl http://localhost:8080/metrics
 | 指标名 | 类型 | 标签 | 说明 |
 |--------|------|------|------|
 | `binlog_server_upload_failures_total` | gauge | - | 上传失败的文件记录数 |
-| `binlog_server_upload_tls_failures_total` | counter | - | 上传时 TLS 握手失败的次数 |
+| `binlog_server_upload_tls_failures_total` | counter | - | 上传时 TLS 握手失败的次数。同一失败使 `/api/health` 为 503 `UPLOAD_TLS`，下一次成功的上传或补传后回到 200 |
 | `binlog_server_upload_retry_total` | counter | `result` | 重试上传 API 调用结果（success/failed/skipped） |
 | `binlog_server_upload_retry_last_ts` | gauge | - | 最近一次重试上传 API 执行时间（Unix 时间戳） |
 

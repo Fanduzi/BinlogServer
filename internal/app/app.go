@@ -89,10 +89,7 @@ var newAppMetaStoreForRun = func(cfg config.Config) (appMetaStore, error) {
 
 // prefixMetaDial names the meta pool when the driver reports a bare x509 error.
 func prefixMetaDial(err error) error {
-	if err == nil || strings.Contains(err.Error(), "meta") {
-		return err
-	}
-	return fmt.Errorf("meta.tls: %w", err)
+	return mysqltls.PrefixMeta(err)
 }
 
 var newClusterLeaseRuntimeForRun = func(store appMetaStore) tasks.LeaseManager {
@@ -1267,9 +1264,11 @@ const objectProbeTimeout = 2 * time.Second
 // key. Empty means storage answered. A failure is logged at warn level and
 // returned for /api/health detail. The detail names the bucket and endpoint
 // and does not contain the access key or secret. Startup continues either
-// way: local capture must run while storage is down. The detail is not
-// cleared if storage later recovers. A bucket HEAD cannot see a policy that
-// allows ListBucket but not GetObject; that shows up on a later object pass.
+// way: local capture must run while storage is down. A TLS failure is the
+// x509 text, not the probe deadline. A later successful upload clears that
+// line; SetVerifyStorageDetail replaces it. Any other probe line stays until
+// replaced. A bucket HEAD cannot see a policy that allows ListBucket but not
+// GetObject; that shows up on a later object pass.
 func objectProbeDetail(ctx context.Context, uploader any, opener tasks.ObjectHeadOpener, bucket, endpoint, accessKey, secret string) string {
 	pctx, cancel := context.WithTimeout(ctx, objectProbeTimeout)
 	defer cancel()
@@ -1285,7 +1284,7 @@ func objectProbeDetail(ctx context.Context, uploader any, opener tasks.ObjectHea
 	if err == nil {
 		return ""
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) && !upload.TLSTransportFailure(err.Error()) {
 		err = fmt.Errorf("timed out after %s", objectProbeTimeout)
 	}
 	msg := upload.WithTLSHint(placeProbe(scrubSecrets(err.Error(), accessKey, secret), bucket, endpoint))

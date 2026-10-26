@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe whose errors name the bucket and endpoint and not the credentials, deletion of one stored key, and HTTPS trust limited to upload.tls.ca_file when that path is set
+// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe whose errors name the bucket and endpoint and not the credentials, deletion of one stored key, and HTTPS trust limited to upload.tls.ca_file when that path is set; a TLS handshake error is returned on the first attempt
 // pos: outbound storage adapter for sealed binlog upload, checksum, download, and retention delete
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -8,12 +8,13 @@ package upload
 import (
 	"context"
 	"crypto/md5"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -64,17 +65,23 @@ func NewS3Uploader(cfg S3Config) (*S3Uploader, error) {
 		Region: cfg.Region,
 	}
 	caFile := strings.TrimSpace(cfg.CAFile)
-	if caFile != "" {
-		if !cfg.UseSSL {
-			return nil, fmt.Errorf("upload.tls.ca_file requires upload.use_ssl: true")
+	if caFile != "" && !cfg.UseSSL {
+		return nil, fmt.Errorf("upload.tls.ca_file requires upload.use_ssl: true")
+	}
+	if cfg.UseSSL {
+		var pool *x509.CertPool
+		if caFile != "" {
+			var err error
+			pool, err = loadCAFile(caFile)
+			if err != nil {
+				return nil, err
+			}
 		}
-		pool, err := loadCAFile(caFile)
+		tr, err := objectTransport(pool)
 		if err != nil {
 			return nil, err
 		}
-		opts.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		}
+		opts.Transport = tr
 	}
 	client, err := minio.New(cfg.Endpoint, opts)
 	if err != nil {
@@ -292,6 +299,52 @@ func (u *S3Uploader) DeleteObject(ctx context.Context, objectKey string) error {
 		return nil
 	}
 	return err
+}
+
+// objectTransport starts from minio's default (proxy from the environment,
+// the SDK dial and header timeouts) and, when pool is set, uses that pool
+// as the only root. stopTLSRetry makes a TLS failure non-retryable: minio-go
+// v7 only skips retry when a url.Error unwraps one level to
+// x509.UnknownAuthorityError, and the stdlib wraps that error one level
+// deeper, so a bad CA otherwise burns the caller deadline and comes back as
+// a timeout.
+func objectTransport(pool *x509.CertPool) (http.RoundTripper, error) {
+	tr, err := minio.DefaultTransport(true)
+	if err != nil {
+		return nil, err
+	}
+	if pool != nil {
+		tr.TLSClientConfig.RootCAs = pool
+	}
+	return stopTLSRetry{base: tr}, nil
+}
+
+type stopTLSRetry struct {
+	base http.RoundTripper
+}
+
+func (s stopTLSRetry) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := s.base.RoundTrip(req)
+	if err == nil || !tlsRetryHides(err) {
+		return resp, err
+	}
+	return resp, x509.UnknownAuthorityError{}
+}
+
+func tlsRetryHides(err error) bool {
+	if !TLSTransportFailure(err.Error()) {
+		return false
+	}
+	if strings.Contains(err.Error(), "http: server gave HTTP response to HTTPS client") {
+		return false
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if _, ok := ue.Unwrap().(x509.UnknownAuthorityError); ok {
+			return false
+		}
+	}
+	return true
 }
 
 func loadCAFile(path string) (*x509.CertPool, error) {

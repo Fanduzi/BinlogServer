@@ -1,6 +1,6 @@
 // Package mysqltls builds one TLS mode for the meta DSN and the source.
 // input: a tls block (mode, ca, cert, key, server_name) and the host being dialed
-// output: a tls.Config for go-mysql, or a meta DSN whose tls= parameter selects the same mode; errors that name the path and never the PEM; GreetingOffersTLS reads CLIENT_SSL from a server greeting; IsVerifyFailure marks an x509 check failure
+// output: a tls.Config for go-mysql, or a meta DSN whose tls= parameter selects the same mode; errors that name the path and never the PEM; GreetingOffersTLS reads CLIENT_SSL from a server greeting; IsVerifyFailure marks an x509 check failure; PrefixMeta names a bare driver error as the meta pool
 // pos: the only place source and meta TLS modes are interpreted (ADR 0012)
 // note: if this file changes, update this header and module README.md.
 package mysqltls
@@ -75,6 +75,15 @@ func GreetingOffersTLS(payload []byte) bool {
 	}
 	flags := uint32(payload[i]) | uint32(payload[i+1])<<8
 	return flags&clientSSL != 0
+}
+
+// PrefixMeta names a bare driver error as the meta pool. An error that
+// already says meta is unchanged, so startup and migrate do not stack prefixes.
+func PrefixMeta(err error) error {
+	if err == nil || strings.Contains(err.Error(), "meta") {
+		return err
+	}
+	return fmt.Errorf("meta.tls: %w", err)
 }
 
 // IsVerifyFailure reports a certificate check failure. It is not a reason to
