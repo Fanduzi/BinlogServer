@@ -43,7 +43,7 @@ jobs:
           go-package: ./...
 
   race-and-vet:
-    if: ${{ github.event_name != 'workflow_dispatch' }}
+    if: ${{ !github.event.inputs.e2e_profile }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
