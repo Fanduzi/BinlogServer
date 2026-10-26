@@ -82,7 +82,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | H1 | 在约定负载下（ADR 0009 §6：≥500 TPS、24h、注入各类故障）延迟有界，RSS/fd/goroutine 不会单调增长，用独立判定器验收 | `smoke-scale` 只能手动 opt-in，不在任何 job 里；`scripts/soak/` 不存在 | NOT MET | ADR 0009 阶段 6 |
-| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`。已知在 -race 下偶发失败的 6 个测试用 `-skip` 点名跳过（#490、#504、#439 各自的测试，加上 #507 QA 里出现的 `TestTaskRecords_StopAndDeleteApplyWhenSaveFails`），它们仍在 `unit-and-e2e` 的普通 `go test ./...` 里跑 | MET | 修好一个偶发失败就把它从 `-skip` 里去掉；#386 |
+| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`。已知在 -race 下偶发失败的 6 个测试用 `-skip` 点名跳过：`TestFailurePathMatrixMetaOutage`、`TestOpenEpochENOENTAfterTakeoverDoesNotFail`（#490），`TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess`、`TestEvaluator_1500SegmentsUnder50ms`（#504），`TestApp_ProductionAuthProtectsRealRoutes`（#439），`TestTaskRecords_StopAndDeleteApplyWhenSaveFails`（#526）。这 6 个没有环境开关或 `-short` 跳过，仍在 `unit-and-e2e` 的普通 `go test ./...` 里跑 | MET | 注意：上面 6 个只在非 race 下跑，修好一个就把它从 `-skip` 里去掉；#386 |
 
 ## I. 运维文档与 runbook
 
@@ -109,4 +109,4 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 2. **A1 还不是 MET，C6 仍是 NOT MET**：#462 的「cluster 删封存段没有 finding」已有单测（ADR 0011 PR-3），但 GTID 内部空洞和手动档 cluster e2e 还没进 CI，所以 A1 仍是 PARTIAL。所有权变化时 finding 单调（C6）要等 PR-5。#471 不合并。
 3. **F2、F4，失败到不了人**：评估器默认关，没有 `task_healthy`，没有 webhook，也没有随附的告警规则。
 4. **D3，备份是否可还原没人持续验证**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4 PARTIAL，等 ADR 0011 的主人）。真实 MinIO 由 `e2e-verify` 每个 PR 跑；可选的还原演练还没有；没有覆盖查询和还原计划（ADR 0009 阶段 4、5）。
-5. **H2，CI 不跑 -race**：多节点 e2e 已挡 PR（C4），发布要等 tag 所在 commit 过完 e2e（J3），但还不跑 `go test -race`。
+5. **D2，只剩对象存储时的还原没进 CI**：`e2e-split-retention` 证明本地按保留期删掉后 download/replay/archive 仍能从对象取回，但不还原进 MySQL 比校验和。
