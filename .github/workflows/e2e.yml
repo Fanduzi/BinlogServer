@@ -255,9 +255,10 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-upgrade-failback:
-    # D2: A's first-stint binlog exists only as a MinIO object; Start fetches it
-    # back, and /replay is restored with mysqlbinlog 8.0 into a fresh MySQL whose
-    # CHECKSUM TABLE must match A. Builds v0.5.57 and 0a84917a, so full history.
+    # D2: after the legacy repair, every sealed uploaded segment is taken off
+    # disk; /replay/archive must read them from MinIO, and its restore with
+    # mysqlbinlog 8.0 into a fresh MySQL must match A's CHECKSUM TABLE while the
+    # files stay off disk. Builds v0.5.57 and 0a84917a, so full history.
     if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'upgrade-failback' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40

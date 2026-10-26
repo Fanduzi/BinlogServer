@@ -50,7 +50,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | D1 | 用备份按 GTID 停点还原到一台新 MySQL，数据和预期一致（open 段和封存段都测） | `e2e-gtid-pitr`（`smoke-gtid-pitr`、`smoke-gtid-executed`）；只有 MySQL 8.0 | MET | — |
-| D2 | 本地文件已按保留期删掉、只剩对象存储时，仍能下载回放并还原 | `e2e-upgrade-failback` 每个 PR 跑 `upgrade-legacy-failback.sh FBUP_CASE=object-only`：A 第一段的 binlog 从磁盘删掉、只留 MinIO 对象，Start 把它取回，`/replay` 用宿主机 MySQL 8.0 `mysqlbinlog` 还原进新 MySQL，`CHECKSUM TABLE` 必须和 A 一致。`e2e-split-retention` 另外证明 download/replay/archive 能从对象取回 | MET | — |
+| D2 | 本地文件已按保留期删掉、只剩对象存储时，仍能下载回放并还原 | `e2e-upgrade-failback` 每个 PR 跑 `upgrade-legacy-failback.sh FBUP_CASE=object-only`。修复后把这个任务所有 SEALED 且 UPLOADED 的段（含 A 第一段）从磁盘拿走，`/replay` 必须把它们标成 `bucket`，`/replay/archive` 从 MinIO 读出这些段（成员和拿走的文件逐字节一致），用宿主机 MySQL 8.0 `mysqlbinlog` 还原进清空的新库，`CHECKSUM TABLE` 必须和 A 一致，而且拿走的文件在整个过程中都不能回到磁盘。`e2e-split-retention` 另外证明按保留期删掉本地文件后 download/replay/archive 仍从对象取回 | MET | — |
 | D3 | 给一个时间点或 GTID，能查出覆盖它的文件和对象（`/coverage`），并一步生成还原计划和预检（`/restore-plan`） | 没有接口。验收按 ADR 0009 阶段 4/5：窗口内、窗口外、断点上各 10 例，和 mysqlbinlog 的独立解析一致；向导还原 5 个时间点，校验和一致 | NOT MET | ADR 0009 阶段 4、5 |
 | D4 | 各支持版本上都能拉流并且能还原 | `smoke.sh` 在 mysql57、mysql80、percona57、percona80 上拉流（quick）；MariaDB 11.4 和 8.0 在 `smoke-standalone-restart` 里做了还原。缺：5.7 上的还原、8.4 LTS（compose 里没有 8.4） | PARTIAL | — |
 

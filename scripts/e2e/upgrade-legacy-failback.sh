@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: two MySQL 8.0 servers in a GTID pair behind one TCP proxy, a meta MySQL, MinIO, and three binlog-server binaries (OLD, MID, NEW; default: built from v0.5.57, 0a84917a, and this checkout)
-# output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; object-only removes A's first-stint mysql-bin.00000N from disk so only its MinIO object holds it (Start must fetch it back); object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
+# output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; object-only removes A's first-stint mysql-bin.00000N from disk so only its MinIO object holds it (Start must fetch it back), and after the repaired restore takes every sealed UPLOADED segment off disk again, requires /replay to mark them bucket, restores /replay/archive (read from MinIO) into a fresh MySQL whose CHECKSUM TABLE must match A, and fails if any removed file comes back to disk (D2); object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
 # pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1); not in any suite profile; e2e.yml e2e-upgrade-failback runs FBUP_CASE=object-only on every PR
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -297,6 +297,64 @@ else
 fi
 write_config
 
+# object_only_restore (D2): the restore above read files that Start fetched
+# back to disk. Here every sealed UPLOADED segment is taken off the disk
+# again, so /replay must mark each one bucket and /replay/archive must read it
+# from MinIO. The archive is applied to a fresh restore database and must
+# match A, and none of the removed files may come back to disk.
+object_only_restore() {
+  local gone="$OUT/object-only-gone" ext="$OUT/object-only-archive" tarball="$OUT/object-only.tar"
+  local rel name n=0 rc=0 want got
+  local -a removed=() members=() files=()
+  mkdir -p "$gone" "$ext"
+  while IFS=$'\t' read -r rel name; do
+    [[ -n "$rel" && -f "$DATA/$rel" ]] || die "object-only: sealed UPLOADED row $rel is not on disk before removal"
+    mv "$DATA/$rel" "$gone/$name"
+    removed+=("$rel")
+    n=$((n + 1))
+  done < <(m "$P_META" "SELECT file_path, SUBSTRING_INDEX(file_path, '/', -1) FROM fbup.binlog_files WHERE task_id='$TASK' AND state='SEALED' AND upload_state='UPLOADED' AND object_key IS NOT NULL AND object_key<>'' ORDER BY id")
+  [[ "$n" -gt 0 ]] || die "object-only: no sealed UPLOADED rows to remove"
+  [[ -f "$gone/$FIRST" ]] || die "object-only: $FIRST was not among the removed sealed UPLOADED rows"
+  log "object-only restore: removed $n sealed uploaded segment(s) from disk: $(printf '%s\n' "${removed[@]##*/}" | paste -sd' ')"
+
+  curl -fsS -G "$API/api/tasks/$TASK/replay" --data-urlencode "limit=200" >"$OUT/object-only-replay.json" || die "object-only: /replay failed"
+  log "object-only replay: $(jq -c '{paths:[.paths[]? | split("/")[-1]], locations, warning}' "$OUT/object-only-replay.json")"
+  jq -e '.warning == null or .warning == ""' "$OUT/object-only-replay.json" >/dev/null || die "object-only: replay warning"
+  for rel in "${removed[@]}"; do
+    jq -e --arg b "${rel##*/}" '
+      [(.paths // [])[] | split("/")[-1]] as $ps | ($ps | index($b)) as $i |
+      $i != null and (.locations // [])[$i] == "bucket"
+    ' "$OUT/object-only-replay.json" >/dev/null || die "object-only: /replay does not mark ${rel##*/} as bucket"
+  done
+
+  curl -fsS -G "$API/api/tasks/$TASK/replay/archive" --data-urlencode "limit=200" -o "$tarball" || die "object-only: /replay/archive failed"
+  mapfile -t members < <(tar -tf "$tarball")
+  [[ "${#members[@]}" -gt 0 ]] || die "object-only: empty replay archive"
+  tar -xf "$tarball" -C "$ext"
+  for rel in "${removed[@]}"; do
+    [[ ! -e "$DATA/$rel" ]] || die "object-only: ${rel##*/} came back to disk while serving the archive"
+    [[ -f "$ext/${rel##*/}" ]] || die "object-only: archive has no member ${rel##*/}"
+    cmp -s "$ext/${rel##*/}" "$gone/${rel##*/}" || die "object-only: archive member ${rel##*/} differs from the removed file"
+  done
+  [[ "$(md5sum "$ext/$FIRST" | awk '{print $1}')" == "$FIRST_MD5" ]] || die "object-only: archive $FIRST differs from the first stint"
+  log "object-only archive: ${#members[@]} member(s) in order: $(printf '%s\n' "${members[@]}" | paste -sd' ')"
+
+  m "$P_RESTORE" "DROP DATABASE IF EXISTS fb" >/dev/null || true
+  m "$P_RESTORE" "RESET MASTER" >/dev/null || m "$P_RESTORE" "RESET BINARY LOGS AND GTIDS" >/dev/null || true
+  docker exec -i "$C_RESTORE" mysql -uroot -proot -h127.0.0.1 -P"$P_RESTORE" --protocol=tcp <"$OUT/seed.sql" 2>/dev/null
+  for name in "${members[@]}"; do files+=("$ext/$name"); done
+  "$MYSQLBINLOG" "${files[@]}" 2>"$OUT/object-only.mbl.err" \
+    | docker exec -i "$C_RESTORE" mysql -uroot -proot -h127.0.0.1 -P"$P_RESTORE" --protocol=tcp --binary-mode 2>"$OUT/object-only.apply.err" || rc=$?
+  want="$(m "$P_A" "CHECKSUM TABLE fb.t" | awk '{print $2}')"
+  got="$(m "$P_RESTORE" "CHECKSUM TABLE fb.t" | awk '{print $2}')"
+  log "object-only restore apply rc=$rc $(grep -v Warning "$OUT/object-only.apply.err" | head -1) checksum A=$want restore=$got"
+  [[ "$rc" == 0 && -n "$want" && "$want" == "$got" ]] || die "object-only restore checksum A=$want restore=$got rc=$rc"
+  for rel in "${removed[@]}"; do
+    [[ ! -e "$DATA/$rel" ]] || die "object-only: ${rel##*/} came back to disk during the restore"
+  done
+  log "evidence: object-only restore from MinIO ($n sealed segment(s) absent from disk, $FIRST among them) checksum $got matches A"
+}
+
 log "=== OLD build: $OLD_BIN"
 start_server "$OLD_BIN" old
 body="$(jq -n --arg gs "$SEED_GTID" --argjson port "$P_VIP" '{name:"fbup",cluster_key:"fbup",source:{host:"127.0.0.1",port:$port,user:"repl",password:"replpass",flavor:"mysql",server_id:470001},start:{mode:"GTID",gtid_set:$gs},storage:{retention_days:7}}')"
@@ -434,6 +492,9 @@ case "$EXPECT" in
     jq -e '.continuous == true' "$OUT/new-window-after.json" >/dev/null || die "window not continuous after repair"
     [[ "$(md5sum "$DATA/$TASK/$FIRST" | awk '{print $1}')" == "$FIRST_MD5" ]] || die "$FIRST on disk after repair differs from the first stint"
     log "evidence: repaired chain $(paste -sd, "$DATA/$TASK/.source-chain") $FIRST md5 $FIRST_MD5 checksum $got_sum matches A"
+    if [[ "$CASE" == object-only ]]; then
+      object_only_restore
+    fi
     ;;
   refused)
     [[ "$state_after" == FAILED ]] || die "NEW did not refuse: $state_after"
