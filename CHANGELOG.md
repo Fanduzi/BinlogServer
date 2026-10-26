@@ -12,6 +12,24 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.81] - 2026-10-27
+
+发布说明：`docs/releases/v0.5.81.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。
+
+### Changed
+
+- HTTP 关停（控制面和 worker 健康服务）先关掉空闲 keep-alive 和还没发请求的连接，关闭开始后才变成 new 或 idle 的连接由 ConnState 钩子关掉；在途请求仍有 5 秒（#535）。有空闲客户端时 `SIGTERM` 不再被拖最多 5 秒。
+- CI 的 `race-and-vet` 不再 `-skip` 任何测试。`TestEvaluator_SyscallWalkNearLinear` 在 strace 下数冷评估遍历的文件系统调用数和读取字节数，每段和 1500/150 段比值都有上限；跑 `go test` 的 job 都装 strace。
+
+### Fixed
+
+- #439、#490、#504、#526：这些测试在 `-race` 或负载下偶发失败，改为等可观察的结果、由测试驱动时钟（#535，取代 #532）。
+- #534：回放归档临时文件放在 tasks 包内不导出的目录里，计数不再和 `internal/replication` 并行时互相干扰。
+
+### Known issues
+
+- #541、#540、#386（P3），#510，#473（P1），#462（P1），#513（P2），#539。#514、#512、#494、#500、#502、#503、#487、#488、#451、#452、#455、#456、#446、#437、#438 仍未关闭。
+
 ## [v0.5.80] - 2026-10-26
 
 发布说明：`docs/releases/v0.5.80.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。`upload.use_ssl` 默认改为 `true`：明文 HTTP 对象存储升级前必须写 `upload.use_ssl: false`。新增可选配置项 `source.tls`（任务）、`meta.tls`、`upload.tls.ca_file`。
