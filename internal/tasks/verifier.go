@@ -150,12 +150,18 @@ type verifyFileOps struct {
 	remove func(string) error
 }
 
-var verifyFiles = verifyFileOps{
-	write:  func(f *os.File, p []byte) (int, error) { return f.Write(p) },
-	sync:   func(f *os.File) error { return f.Sync() },
-	close:  func(f *os.File) error { return f.Close() },
-	remove: os.Remove,
+// defaultVerifyFileOps is the production write path for .verify.json.
+// Tests replace fields on verifyFiles after this runs.
+func defaultVerifyFileOps() verifyFileOps {
+	return verifyFileOps{
+		write:  func(f *os.File, p []byte) (int, error) { return f.Write(p) },
+		sync:   func(f *os.File) error { return f.Sync() },
+		close:  func(f *os.File) error { return f.Close() },
+		remove: os.Remove,
+	}
 }
+
+var verifyFiles = defaultVerifyFileOps()
 
 // verifyEncode is json.MarshalIndent. A test returns an error the real
 // encoder does not produce for verifyStateFile.

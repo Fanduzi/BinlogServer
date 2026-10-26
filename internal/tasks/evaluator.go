@@ -1511,7 +1511,7 @@ func (e *Evaluator) fingerprint(taskID string) string {
 	}
 	h := sha256.New()
 	for _, en := range entries {
-		info, err := en.Info()
+		info, err := binlog.EntryInfo(en)
 		if err != nil {
 			continue
 		}

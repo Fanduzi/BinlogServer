@@ -578,7 +578,7 @@ func listDiskBackupTasks(dataDir string, known map[string]struct{}) ([]Task, err
 		if entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
-		info, err := entry.Info()
+		info, err := binlog.EntryInfo(entry)
 		if err != nil {
 			return nil, err
 		}

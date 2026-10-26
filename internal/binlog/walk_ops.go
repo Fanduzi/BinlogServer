@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: paths the segment walk stats, opens or lists
-// output: Stat, Lstat, Open, OpenFile, ReadDir, ReadFile and Glob, each counted in WalkOps together with every StampOf; ResetWalkOps zeroes that count
+// output: Stat, Lstat, Open, OpenFile, ReadDir, ReadFile, Glob and EntryInfo, each counted in WalkOps together with every StampOf; ResetWalkOps zeroes that count
 // pos: the filesystem seam the cold segment walk uses, so a nested stat, open, list, read or glob cannot skip the count by calling os directly
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -84,4 +84,11 @@ type countedEntry struct {
 func (e countedEntry) Info() (os.FileInfo, error) {
 	noteWalk()
 	return e.DirEntry.Info()
+}
+
+// EntryInfo is DirEntry.Info for a walk caller. An entry from ReadDir is a
+// countedEntry, so the stat is counted once inside Info. This function does
+// not add a second count.
+func EntryInfo(entry os.DirEntry) (os.FileInfo, error) {
+	return entry.Info()
 }
