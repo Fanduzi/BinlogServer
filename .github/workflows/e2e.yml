@@ -44,7 +44,7 @@ jobs:
           go-package: ./...
 
   unit-and-e2e:
-    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'upgrade-failback') }}
+    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'upgrade-failback') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -258,7 +258,7 @@ jobs:
     # D2: A's first-stint binlog exists only as a MinIO object; Start fetches it
     # back, and /replay is restored with mysqlbinlog 8.0 into a fresh MySQL whose
     # CHECKSUM TABLE must match A. Builds v0.5.57 and 0a84917a, so full history.
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'upgrade-failback' }}
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'upgrade-failback' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
