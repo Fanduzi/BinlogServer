@@ -2,7 +2,7 @@
 
 ## Files
 
-ADR 0012：`source_conn.go` 的 `connectSource` 按 `source.tls` 拨号（`preferred` 仅在服务端没有 TLS 时退回明文）。`mysql_runner.go` 把同一份 `tls.Config` 交给 binlog syncer。`tls_live_test.go` 的 `TestLiveMySQLTLS`（`BINLOG_TEST_TLS=1`，CI job `e2e-tls`）对真实 MySQL 证明复制和 meta 的 verify-ca / verify-identity。
+ADR 0012：`source_conn.go` 的 `connectSource` 按 `source.tls` 拨号（`preferred` 只在问候包没有 `CLIENT_SSL` 时退回明文）。`mysql_runner.go` 把同一份 `tls.Config` 交给 binlog syncer。`tls_live_test.go` 的 `TestLiveMySQLTLS`（`BINLOG_TEST_TLS=1`，CI job `e2e-tls`）证明 `connectSource` 和 meta DSN 的模式。真实任务路径上的 dump `CONNECTION_TYPE` 在 `internal/app` 的 `TestLiveAppTLS`。`preferred_tls_test.go` 用假问候包锁住「非证书错误不退回明文」。
 
 P2-5.4（设计 0009 §26，#341）：配了上传时，本地保留删掉仍在桶窗口内的本地文件后写 `RETENTION_REMOVED`，并在目录行记下 `RetentionRemovedAt`。写失败打开 `RETENTION_RECORD_FAILED`。
 - `txn_boundary.go`: 事务边界（XID、XA PREPARE、压缩事务、COMMIT/ROLLBACK/XA COMMIT、自动提交语句、事务外的事件）。checkpoint 和 OPEN 目录行只在边界写，且 `checkpointBatchWindow`（200ms）内的提交合并成一次；没写的提交由下一次超过窗口的提交、心跳、rotate、封存或 run 退出写出。checkpoint 永远不超过已落盘的字节。事务超过 `longTxnWarnAfter`（2 分钟）没有提交时每个间隔打一条 `long transaction` 日志（#391）。以前每个事件都写 checkpoint，一个约 2 万事件的 3MB 事务在有 meta 时要约 2.8 万条 INSERT、47.5 秒。

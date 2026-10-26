@@ -46,4 +46,6 @@ api:
 #   region: ""
 #   prefix: ""
 #   use_ssl: true # 省略也是 true。明文 HTTP 端点必须写 false
+#   # tls:
+#   #   ca_file: "" # 可选 PEM。设置后只信任这份 CA。use_ssl false 时不能写
 

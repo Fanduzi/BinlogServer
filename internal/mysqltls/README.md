@@ -2,12 +2,13 @@
 
 ## Files
 
-- `tls.go`: ADR 0012 TLS block. `Normalize` checks the mode shape and does not read files. `ClientConfig` reads `ca`/`cert`/`key` and returns a `*tls.Config` for go-mysql (nil means plaintext). `ApplyDSN` rewrites a meta DSN for `github.com/go-sql-driver/mysql`: disabled leaves the DSN unchanged, `preferred` sets `tls=preferred`, and the other modes register `binlog-meta` (or the caller's name). Errors name the path and never the PEM.
+- `tls.go`: ADR 0012 TLS block. `Normalize` checks the mode shape and does not read files. `ClientConfig` reads `ca`/`cert`/`key` and returns a `*tls.Config` for go-mysql (nil means plaintext). `ApplyDSN` rewrites a meta DSN for `github.com/go-sql-driver/mysql`: disabled leaves the DSN unchanged, `preferred` sets `tls=preferred`, and the other modes register `binlog-meta` (or the caller's name). Errors name the path and never the PEM. `GreetingOffersTLS` reads `CLIENT_SSL` from a server greeting. `IsVerifyFailure` marks an x509 check failure.
 - `tls_test.go`: mode shape, defaults, DSN rewrite, CA verification without a hostname check, and key material kept out of errors.
+- `greeting_test.go`: `CLIENT_SSL` on a v10 greeting, and x509 versus a dial timeout.
 
 ## Exports
 
-- `Config`, `Normalize`, `ClientConfig`, `ApplyDSN`, `Disabled`, `Preferred`, `ServerLacksTLS`.
+- `Config`, `Normalize`, `ClientConfig`, `ApplyDSN`, `Disabled`, `Preferred`, `GreetingOffersTLS`, `IsVerifyFailure`.
 - Modes: `disabled`, `preferred`, `required`, `verify-ca`, `verify-identity`.
 
 ## Dependencies

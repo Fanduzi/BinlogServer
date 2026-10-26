@@ -397,6 +397,12 @@ sudo systemctl status binlog-server
 
 `upload.use_ssl` 的默认从 `false` 改为 `true`。端点写了、这个键没写的配置，升级后走 HTTPS。明文 HTTP 的对象存储（MinIO、没开 TLS 的 RGW）会在握手失败，上传和 HEAD 都失败。升级前对每个明文端点写上 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 只能是 `host[:port]`；带 `://` 的值启动即失败，错误说明默认已是 HTTPS。
 
+私有 CA 的 HTTPS 端点设置 `upload.tls.ca_file` 为该 CA 的 PEM。空着则用系统信任库。设置后这个客户端只信任该文件，主机名仍然检查。`upload.use_ssl: false` 时不能再写这个键。文件缺失或没有证书，启动失败，错误里是路径。
+
+`./migrate` 读同一份 `meta.tls`：`./migrate up --config /path/config.yaml --path ./migrations`。`--dsn` 和 `META_DSN` 覆盖文件里的 `meta_dsn`，TLS 块仍来自文件。不传 `--config` 时 DSN 原样使用，包括已经写上的 `tls=`。`disabled` 不改 DSN。其它模式拒绝 DSN 里已有的 `tls=`。
+
+证书校验失败（改任务的 `verify-identity` 后，残留 dump 的 KILL 握手失败）把任务写成 `FAILED`，`last_error` 是 x509 文本，日志是 warn。连不上源库的 KILL 仍是 `RETRY_BACKOFF` 和「连接可能还开着」。
+
 证书和私钥是文件路径。日志、错误和 API 响应不包含 PEM 内容。
 
 ---

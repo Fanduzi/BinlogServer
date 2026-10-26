@@ -414,15 +414,20 @@ type Scheduler struct {
 	// verifier is the ADR 0009 phase 3 worker, nil until SetVerifier.
 	verifier atomic.Pointer[Verifier]
 	// verifyStorageDetail is a startup object-storage probe failure. It is
-	// shown on /api/health and does not change Status. It stays for the
-	// process lifetime; a later recovery is not probed again.
+	// shown on /api/health. A TLS transport failure in this text degrades
+	// status. Any other probe failure does not. It stays for the process
+	// lifetime; a later recovery is not probed again.
 	verifyStorageDetail string
 	// verifyObjectDetail is set after objectIncompleteDegradeAfter consecutive
 	// passes that could not finish object checks, and cleared when one does
 	// or when the scheduler has no task left. An all-skipped pass leaves it.
 	// Clearing it because no task remains does not zero the streak.
-	// It does not change Status.
+	// It does not change Status, unless the text is a TLS transport failure.
 	verifyObjectDetail string
+	// uploadTLSDetail is the latest object-upload TLS transport failure.
+	// HealthSummary turns it into reason UPLOAD_TLS. Empty when no such
+	// failure is outstanding.
+	uploadTLSDetail string
 	// metaReach is this node's META_UNREACHABLE streak (design 0009 §25).
 	metaReach metaReach
 	// healthGap is HEALTH_STORE_UNAVAILABLE while migration 000009 is absent (design §27).

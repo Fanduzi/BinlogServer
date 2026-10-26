@@ -43,7 +43,11 @@ Same five names on both connections, matching MySQL client `--ssl-mode`.
 
 Meta uses `github.com/go-sql-driver/mysql`. When `meta.tls.mode` is `disabled` or omitted, `meta_dsn` is passed through unchanged, including a `tls=` the operator already put in the DSN. Any other mode rejects a DSN that already contains `tls=` (`meta_dsn already sets tls=...; remove it and use meta.tls`). `preferred` appends `tls=preferred`. `required`, `verify-ca`, and `verify-identity` register one `tls.Config` under the name `binlog-meta` and append `tls=binlog-meta`. `verify-ca` sets `InsecureSkipVerify` and checks the chain in `VerifyPeerCertificate` with the configured CA only, so the dial host is not compared to the certificate. `verify-identity` sets `RootCAs` and `ServerName` and leaves hostname verification on.
 
-The replication SQL connection is `connectSource` (`github.com/go-mysql-org/go-mysql/client`). The binlog dump is `replication.BinlogSyncerConfig.TLSConfig` on the same `tls.Config`. go-mysql has no preferred fallback, so `preferred` dials with `InsecureSkipVerify` and, only when the server greeting reports no TLS, dials again in plaintext. The dump does that probe once per run and then sets or clears `TLSConfig`. `required` and the verify modes set `TLSConfig` with no fallback.
+The replication SQL connection is `connectSource` (`github.com/go-mysql-org/go-mysql/client`). The binlog dump is `replication.BinlogSyncerConfig.TLSConfig` on the same `tls.Config`. go-mysql has no preferred fallback, so `preferred` reads the server greeting and dials plaintext only when that greeting's capability flags omit `CLIENT_SSL`. An auth error, a certificate error, or any other handshake error does not dial again. The dump probes once per run through that same path and then sets or clears `TLSConfig`. `required` and the verify modes set `TLSConfig` with no fallback.
+
+A certificate check failure while killing a leftover dump is terminal: the task is `FAILED`, `last_error` is the x509 text, and the log is warn. A dial timeout on that kill stays `RETRY_BACKOFF` with the leftover-dump warning.
+
+`migrate` accepts the same `meta.tls` block. `./migrate up --config /path/config.yaml` loads `meta_dsn` and applies `meta.tls` with `ApplyDSN`. `--dsn` and `META_DSN` override the file's `meta_dsn`. The tls block still comes from the file. Without `--config`, the DSN is unchanged, including a `tls=` already in it. `disabled` leaves that `tls=` in place. Any other mode rejects a DSN that already sets `tls=`.
 
 Paths are read when that process dials. Meta files are checked at startup because this process opens the pool. Source files are checked when the worker dials, not when the API accepts the task: in cluster mode the control plane is not the process that holds the CA. A bad mode or a half-set cert/key is still rejected by create and update.
 
@@ -68,6 +72,10 @@ The default changes from `false` to `true`. A config that sets `upload.endpoint`
 That breaks an HTTP object store (MinIO, Ceph RGW on plain HTTP) that relied on the old default: uploads and HEAD fail with a TLS handshake error. Before upgrading, set `upload.use_ssl: false` on every HTTP endpoint. Configs that already set `true` or `false` do not change. The shipped MinIO e2e configs already set `false`.
 
 `upload.endpoint` is `host[:port]` with no scheme, which is what the S3 client accepts. A value containing `://` is a startup error: `upload.endpoint must be host[:port] without a URL scheme; upload.use_ssl defaults to true (HTTPS); set upload.use_ssl: false for a plain HTTP endpoint`. That is the validation error for an endpoint someone wrote as `http://...` while the new default is TLS.
+
+## `upload.tls.ca_file`
+
+Optional PEM file. Empty uses the system trust store. When set, it is the only trust store for this process's object client. The hostname is still checked. The file is read when the client is built. A missing file or a file with no certificates is a startup error that names the path and not the PEM. `upload.tls.ca_file` with `upload.use_ssl: false` is a startup error. A repeated TLS transport failure (x509, or an HTTP response to an HTTPS client) is logged at warn on every upload attempt and degrades `/api/health` (`UPLOAD_TLS`, HTTP 503). A missing bucket or other probe failure stays detail with status ok.
 
 ## Secrets
 

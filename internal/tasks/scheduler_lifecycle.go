@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/mysqltls"
 
 	"go.uber.org/zap"
 )
@@ -311,6 +312,12 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 			return errLocalRunOpen
 		}
 		if killErr != nil {
+			if mysqltls.IsVerifyFailure(killErr) {
+				zap.L().Warn("source tls verify failed", zap.String("task_id", id), zap.Uint32("conn", pending.ConnectionID), zap.Error(killErr))
+				task.DesiredRun = TaskDesiredStop
+				s.failRunLocked(id, &task, 0, 0, killErr.Error())
+				return nil
+			}
 			task.DesiredRun = TaskDesiredRun
 			if err := s.markRetryBackoffLocked(task, DumpCleanupWarning(pending.ConnectionID)); err != nil {
 				s.mu.Unlock()

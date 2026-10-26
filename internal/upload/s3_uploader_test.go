@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, a bucket HEAD that separates a missing bucket, an auth error, and a dead endpoint, and deletion of one stored key including a missing object; UseSSL true sends a TLS client hello (ADR 0012)
+// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, a bucket HEAD that separates a missing bucket, an auth error, and a dead endpoint, and deletion of one stored key including a missing object; UseSSL true sends a TLS client hello; upload.tls.ca_file trusts only that CA (ADR 0012)
 // pos: outbound storage adapter layer for sealed binlog upload and download
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -8,12 +8,19 @@ package upload
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -701,4 +708,90 @@ func firstDialByte(t *testing.T, useSSL bool) byte {
 		t.Fatal("client did not dial")
 		return 0
 	}
+}
+
+func TestCAFileTrustsOnlyThatCA(t *testing.T) {
+	caPEM, cert := privateServerCert(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { defer c.Close(); _ = c.(*tls.Conn).Handshake() }(c)
+		}
+	}()
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrongPEM, _ := privateServerCert(t)
+	wrongPath := filepath.Join(t.TempDir(), "wrong.pem")
+	if err := os.WriteFile(wrongPath, wrongPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(ca string) error {
+		t.Helper()
+		up, err := NewS3Uploader(S3Config{
+			Endpoint: ln.Addr().String(), Bucket: "binlog",
+			AccessKey: "k", SecretKey: "s", UseSSL: true, CAFile: ca,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return up.ProbeStorage(ctx)
+	}
+	if err := probe(caPath); err == nil || TLSTransportFailure(err.Error()) {
+		t.Fatalf("trusted CA = %v", err)
+	}
+	if err := probe(wrongPath); err == nil || !TLSTransportFailure(err.Error()) {
+		t.Fatalf("untrusted CA = %v", err)
+	}
+	if err := probe(""); err == nil || !TLSTransportFailure(err.Error()) {
+		t.Fatalf("system roots = %v", err)
+	}
+}
+
+func privateServerCert(t *testing.T) ([]byte, tls.Certificate) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "upload-test-ca"},
+		IsCA: true, BasicConstraintsValid: true,
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		NotBefore:    time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:    x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), tls.Certificate{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}
 }

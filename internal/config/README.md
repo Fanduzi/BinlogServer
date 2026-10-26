@@ -27,6 +27,7 @@
 - `http.control_plane.*` / `http.worker_health.*` - HTTP 超时配置
 - `meta.timeout.*` - 内部依赖调用超时配置
 - `meta.tls.*` - meta 连接 TLS（ADR 0012）。默认 disabled。`ca`/`cert`/`key` 是路径，启动时读取，错误不包含 PEM
+- `upload.tls.ca_file` - 对象存储 PEM CA。空用系统信任库。设置后只信任该文件，主机名仍检查。`upload.use_ssl: false` 时拒绝
 - `tracing.*` - OTel tracing 配置
 - 加密值格式：`enc:aes256:<base64-encoded-ciphertext>`
 

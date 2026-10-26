@@ -1,6 +1,6 @@
 // Package mysqltls builds one TLS mode for the meta DSN and the source.
 // input: a tls block (mode, ca, cert, key, server_name) and the host being dialed
-// output: a tls.Config for go-mysql, or a meta DSN whose tls= parameter selects the same mode; errors that name the path and never the PEM
+// output: a tls.Config for go-mysql, or a meta DSN whose tls= parameter selects the same mode; errors that name the path and never the PEM; GreetingOffersTLS reads CLIENT_SSL from a server greeting; IsVerifyFailure marks an x509 check failure
 // pos: the only place source and meta TLS modes are interpreted (ADR 0012)
 // note: if this file changes, update this header and module README.md.
 package mysqltls
@@ -8,6 +8,7 @@ package mysqltls
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -53,9 +54,46 @@ func Preferred(c Config) bool {
 	return strings.ToLower(strings.TrimSpace(c.Mode)) == ModePreferred
 }
 
-// ServerLacksTLS reports the go-mysql error for a server greeting with no TLS.
-func ServerLacksTLS(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "does not support TLS")
+// clientSSL is the MySQL capability bit CLIENT_SSL (protocol handshake).
+const clientSSL = uint32(1 << 11)
+
+// GreetingOffersTLS reports whether a server greeting payload (no packet
+// header) has CLIENT_SSL set. preferred falls back to plaintext only when
+// this is false. An auth error or a certificate error is not this case.
+func GreetingOffersTLS(payload []byte) bool {
+	if len(payload) < 1 || payload[0] != 10 {
+		return false
+	}
+	i := 1
+	for i < len(payload) && payload[i] != 0 {
+		i++
+	}
+	i++            // NUL after the server version
+	i += 4 + 8 + 1 // connection id, scramble, filler
+	if i+2 > len(payload) {
+		return false
+	}
+	flags := uint32(payload[i]) | uint32(payload[i+1])<<8
+	return flags&clientSSL != 0
+}
+
+// IsVerifyFailure reports a certificate check failure. It is not a reason to
+// retry the dial or to describe the source as unreachable.
+func IsVerifyFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var unknown x509.UnknownAuthorityError
+	var host x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	if errors.As(err, &unknown) || errors.As(err, &host) || errors.As(err, &invalid) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "x509:") ||
+		strings.Contains(msg, "certificate is valid for") ||
+		strings.Contains(msg, "certificate signed by unknown authority") ||
+		strings.Contains(msg, "failed to verify certificate")
 }
 
 // Normalize trims the block and checks its shape. It does not read files.

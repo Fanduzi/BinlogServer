@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config, PRODUCTION environment flag, control-plane listen_addr, persisted task state, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup or turning health red when the probe fails (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound; the meta DSN is rewritten with meta.tls before the pool opens (ADR 0012)
+// output: role-aware application lifecycle control with production and non-loopback control-plane auth checks, a PRODUCTION refuse when EncryptionKey is empty, metadata/source isolation, data_dir wired for on-disk file listing, a desired_run reconcile before Restore, ClaimRunnableTasks on start and claim ticks, worker startup removal of a crashed .takeover-* temp in each task directory before tasks are claimed, standalone MemoryLease, LeaseManager as seal verifier, the upload client wired as the retention object deleter and as the reader for a sealed UPLOADED segment, background retry of sealed UPLOAD_FAILED rows on the worker when upload is configured, background KILL of a Binlog Dump left open because Stop could not reach the source, the post-seal upload bounded by meta.timeout.upload_sec, a bounded ordered shutdown: cancel runCtx (every task runner derives from it), join runners (WaitRuns), join background goroutines including the bounded HTTP shutdown, retry an owed record save, then the finding sink's last flush (WaitFindingSink); nothing this run started writes data_dir after Run returns, and shutdown Cluster mode requires the dump fence and logs when migration 000004 is missing.; the ADR 0009 P2-3 health evaluator and rehasher when health.evaluator is shadow or on; the phase 3 verifier on the background group after Restore (standalone always, cluster skipped until ADR 0011); a startup HEAD of the object store (2s) that logs at warn level, names the bucket and endpoint without secrets, and records /api/health detail without refusing startup; a TLS transport failure in that probe degrades health, other probe failures leave status ok (storage can be down; local capture still runs; a blackholed endpoint delays listen by up to that 2s), and one cluster evaluation after Restore so a task-record clear is stored before the API listens; in cluster mode one tasks.LeaseClock is shared by the scheduler (WithLeaseClock) and the runner (WithWriteFence) for the data-plane write fence (ADR 0009 P2-6b, #417); the scheduler is also the runner's WithChainGate so rotate and the health evaluator share HoldChain (#441); startVerifier passes upload.bucket into the verifier so an incomplete object pass names that bucket; cluster meta uses OpenClusterMeta with the session-kill bound; the meta DSN is rewritten with meta.tls before the pool opens and a bare dial error is prefixed meta.tls (ADR 0012); upload.tls.ca_file is the object-storage trust store when set
 // note P2-6.1 (§28): health.stale_after_sec (0 = 5×sweep, then the ADR 0011 floor max(2×sweep+lock_wait, min(S, RTO))) is EvaluatorConfig.StaleAfter
 // note P2-6.2 (§30): health.node_gone_after_sec (0 = 3×sweep) is EvaluatorConfig.NodeGoneAfter
 // pos: application composition layer that wires modules into runnable service modes
@@ -75,10 +75,24 @@ var newAppMetaStoreForRun = func(cfg config.Config) (appMetaStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	var store appMetaStore
 	if isClusterMode(cfg) && strings.TrimSpace(dsn) != "" {
-		return meta.OpenClusterMeta(dsn, timeout, cfg.EncryptionKey, time.Duration(cfg.Cluster.LeaseTTLSec)*time.Second, cfg.Cluster.SideKill)
+		store, err = meta.OpenClusterMeta(dsn, timeout, cfg.EncryptionKey, time.Duration(cfg.Cluster.LeaseTTLSec)*time.Second, cfg.Cluster.SideKill)
+	} else {
+		store, err = meta.NewMySQLTaskStoreWithSchemaTimeout(dsn, timeout, cfg.EncryptionKey)
 	}
-	return meta.NewMySQLTaskStoreWithSchemaTimeout(dsn, timeout, cfg.EncryptionKey)
+	if err != nil {
+		return nil, prefixMetaDial(err)
+	}
+	return store, nil
+}
+
+// prefixMetaDial names the meta pool when the driver reports a bare x509 error.
+func prefixMetaDial(err error) error {
+	if err == nil || strings.Contains(err.Error(), "meta") {
+		return err
+	}
+	return fmt.Errorf("meta.tls: %w", err)
 }
 
 var newClusterLeaseRuntimeForRun = func(store appMetaStore) tasks.LeaseManager {
@@ -103,6 +117,19 @@ type uploadClient interface {
 
 var newUploadClientForRun = func(cfg upload.S3Config) (uploadClient, error) {
 	return upload.NewS3Uploader(cfg)
+}
+
+// s3ConfigFrom is the object-storage client the process starts with.
+func s3ConfigFrom(cfg config.Config) upload.S3Config {
+	return upload.S3Config{
+		Endpoint:  cfg.UploadEndpoint,
+		Bucket:    cfg.UploadBucket,
+		AccessKey: cfg.UploadAccessKey,
+		SecretKey: cfg.UploadSecretKey,
+		Region:    cfg.UploadRegion,
+		UseSSL:    cfg.UploadUseSSL,
+		CAFile:    cfg.UploadCAFile,
+	}
 }
 
 type App struct {
@@ -301,14 +328,7 @@ func (a *App) Run(ctx context.Context) error {
 	var probeDetail string
 	if uploadConfigured {
 		// upload 是可选能力；启用后 runner 会上传 sealed binlog file。
-		uploader, err := newUploadClientForRun(upload.S3Config{
-			Endpoint:  a.cfg.UploadEndpoint,
-			Bucket:    a.cfg.UploadBucket,
-			AccessKey: a.cfg.UploadAccessKey,
-			SecretKey: a.cfg.UploadSecretKey,
-			Region:    a.cfg.UploadRegion,
-			UseSSL:    a.cfg.UploadUseSSL,
-		})
+		uploader, err := newUploadClientForRun(s3ConfigFrom(a.cfg))
 		if err != nil {
 			return err
 		}
@@ -1268,7 +1288,7 @@ func objectProbeDetail(ctx context.Context, uploader any, opener tasks.ObjectHea
 	if errors.Is(err, context.DeadlineExceeded) {
 		err = fmt.Errorf("timed out after %s", objectProbeTimeout)
 	}
-	msg := placeProbe(scrubSecrets(err.Error(), accessKey, secret), bucket, endpoint)
+	msg := upload.WithTLSHint(placeProbe(scrubSecrets(err.Error(), accessKey, secret), bucket, endpoint))
 	zap.L().Warn("verifier: object storage probe", zap.String("detail", msg))
 	return "object storage probe: " + msg
 }

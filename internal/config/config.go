@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30); verify.every_sec, verify.budget_bytes_per_sec, verify.rotation_periods, verify.recent_share_percent (1–100, 0 rejected), verify.pass_deadline_sec, verify.pass_max_bytes, verify.object_recent_sec, verify.drill_dsn, verify.drill_every_sec and verify.drill_check_sql for the phase 3 verifier; meta.tls default disabled and upload.use_ssl default true (ADR 0012)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30); verify.every_sec, verify.budget_bytes_per_sec, verify.rotation_periods, verify.recent_share_percent (1–100, 0 rejected), verify.pass_deadline_sec, verify.pass_max_bytes, verify.object_recent_sec, verify.drill_dsn, verify.drill_every_sec and verify.drill_check_sql for the phase 3 verifier; meta.tls default disabled, upload.use_ssl default true, and upload.tls.ca_file an optional PEM trust store (ADR 0012)
 // note ADR 0011: cluster.side_kill is off or auto, default off
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
@@ -46,6 +46,8 @@ type Config struct {
 	UploadRegion    string
 	UploadPrefix    string
 	UploadUseSSL    bool
+	// UploadCAFile is upload.tls.ca_file. Empty trusts the system roots.
+	UploadCAFile string
 	// UploadGraceSec (upload.grace_sec, default 900) is how long a sealed
 	// segment may stay not UPLOADED before I7_UPLOAD_LATE (P2-5a, #348);
 	// UploadGraceTaskSec overrides it per task id.
@@ -372,6 +374,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		UploadRegion:       getString(v, decryptor, "upload.region", "upload_region"),
 		UploadPrefix:       getString(v, decryptor, "upload.prefix", "upload_prefix"),
 		UploadUseSSL:       getBool(&loadErr, v, "upload.use_ssl", "upload_use_ssl"),
+		UploadCAFile:       getString(v, nil, "upload.tls.ca_file"),
 		UploadGraceSec:     getInt(&loadErr, v, "upload.grace_sec", "upload_grace_sec"),
 		UploadGraceTaskSec: healthTaskOverrides(&loadErr, "upload.grace_task_sec", v.GetStringMap("upload.grace_task_sec")),
 		Log: LogConfig{
@@ -549,6 +552,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		return Config{}, err
 	}
 	if err := validateUploadEndpoint(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateUploadCAFile(cfg); err != nil {
 		return Config{}, err
 	}
 	warnSensitivePlaintextInConfig(v)
@@ -856,6 +862,15 @@ func validateMetaTLS(cfg Config) error {
 
 // validateUploadEndpoint rejects a scheme. The S3 client wants host[:port],
 // and upload.use_ssl (default true) is what selects HTTPS.
+// validateUploadCAFile rejects a custom object-storage CA on a plain HTTP client.
+// The file itself is read when the uploader is built.
+func validateUploadCAFile(cfg Config) error {
+	if strings.TrimSpace(cfg.UploadCAFile) == "" || cfg.UploadUseSSL {
+		return nil
+	}
+	return fmt.Errorf("upload.tls.ca_file requires upload.use_ssl: true")
+}
+
 func validateUploadEndpoint(cfg Config) error {
 	ep := strings.TrimSpace(cfg.UploadEndpoint)
 	if ep == "" || !strings.Contains(ep, "://") {

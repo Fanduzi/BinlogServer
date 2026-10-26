@@ -6,7 +6,7 @@
 
 ## Exports
 - 命令：`up`, `down --steps`, `version`, `force`, `goto`。
-- 参数：`--dsn`, `--path`, `--env`, `--allow-destructive`。
+- 参数：`--dsn`, `--config`, `--path`, `--env`, `--allow-destructive`。`--config` 读取与进程相同的 `meta.tls` 并改写 DSN。`--dsn` 和 `META_DSN` 覆盖文件里的 `meta_dsn`。不传 `--config` 时 DSN 不变。
 - Release：归档内提供 `migrate` 可执行文件及 `migrations/*.sql`，无需 Go 工具链即可执行迁移。
 
 ## Dependencies

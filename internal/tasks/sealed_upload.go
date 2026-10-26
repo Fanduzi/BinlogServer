@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: sealed binlog file metadata, FileUploader, and file metadata writer
-// output: ObjectKey and UPLOADED only when the checksum matches; UPLOAD_FAILED with checksum mismatch or an unfinished check, without failing the caller; a persisted row with an empty SHA256 gets that digest from the local sealed file (migration 000008 column, plus the task directory ledger)
+// output: ObjectKey and UPLOADED only when the checksum matches; UPLOAD_FAILED with checksum mismatch or an unfinished check, without failing the caller; a TLS transport failure is logged at warn; a persisted row with an empty SHA256 gets that digest from the local sealed file (migration 000008 column, plus the task directory ledger)
 // pos: single best-effort upload caller used after seal and on retry
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/upload"
+
+	"go.uber.org/zap"
 )
 
 // ObjectKey builds the object-store key. It joins with "/" and does not filepath.Clean.
@@ -56,6 +59,12 @@ func ApplySealedUpload(ctx context.Context, uploader FileUploader, writer Binlog
 		file.UploadState = "UPLOAD_FAILED"
 		file.UploadError = err.Error()
 		file.Checksum = ""
+		if upload.TLSTransportFailure(err.Error()) {
+			zap.L().Warn("upload tls transport failed",
+				zap.String("task_id", file.TaskID),
+				zap.String("object_key", file.ObjectKey),
+				zap.String("error", upload.WithTLSHint(err.Error())))
+		}
 		return persistBinlogFile(ctx, writer, file)
 	}
 	file.UploadedAt = time.Now()

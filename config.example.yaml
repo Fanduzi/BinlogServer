@@ -43,6 +43,8 @@ upload:
   region: ""
   prefix: ""
   use_ssl: true # 默认 true（HTTPS）。明文 HTTP（例如本机 MinIO）必须写 false
+  # tls:
+  #   ca_file: "" # 可选。设置后只信任这份 PEM，主机名仍检查。use_ssl false 时不能写
 
 api:
   auth:

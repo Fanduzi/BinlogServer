@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe whose errors name the bucket and endpoint and not the credentials, and deletion of one stored key
+// output: sealed-file upload, a HEAD ETag comparison against that sealed file, a reader plus the object size at open for one stored key, a HEAD size for one stored key (a missing key is os.ErrNotExist; a NoSuchBucket body is not), a bucket HEAD for the startup probe whose errors name the bucket and endpoint and not the credentials, deletion of one stored key, and HTTPS trust limited to upload.tls.ca_file when that path is set
 // pos: outbound storage adapter for sealed binlog upload, checksum, download, and retention delete
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -8,6 +8,8 @@ package upload
 import (
 	"context"
 	"crypto/md5"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -38,6 +40,9 @@ type S3Config struct {
 	Region string
 	// UseSSL 控制是否使用 HTTPS。
 	UseSSL bool
+	// CAFile is upload.tls.ca_file. Empty uses the system trust store.
+	// A set path is the only trust store for this client. The hostname is still checked.
+	CAFile string
 }
 
 // S3Uploader 是基于 minio-go 的 S3 兼容上传实现。
@@ -53,11 +58,25 @@ func NewS3Uploader(cfg S3Config) (*S3Uploader, error) {
 		return nil, fmt.Errorf("incomplete s3 config")
 	}
 
-	client, err := minio.New(cfg.Endpoint, &minio.Options{
+	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: cfg.UseSSL,
 		Region: cfg.Region,
-	})
+	}
+	caFile := strings.TrimSpace(cfg.CAFile)
+	if caFile != "" {
+		if !cfg.UseSSL {
+			return nil, fmt.Errorf("upload.tls.ca_file requires upload.use_ssl: true")
+		}
+		pool, err := loadCAFile(caFile)
+		if err != nil {
+			return nil, err
+		}
+		opts.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		}
+	}
+	client, err := minio.New(cfg.Endpoint, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +292,40 @@ func (u *S3Uploader) DeleteObject(ctx context.Context, objectKey string) error {
 		return nil
 	}
 	return err
+}
+
+func loadCAFile(path string) (*x509.CertPool, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("upload.tls.ca_file: read %s: %v", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("upload.tls.ca_file: no certificates in %s", path)
+	}
+	return pool, nil
+}
+
+// TLSTransportFailure reports an object-storage error that is a TLS mismatch
+// (private CA, or HTTPS speaking to an HTTP endpoint), not a missing bucket.
+func TLSTransportFailure(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "x509:") ||
+		strings.Contains(lower, "unknown authority") ||
+		strings.Contains(lower, "http response to https client") ||
+		strings.Contains(lower, "first record does not look like a tls handshake") ||
+		strings.Contains(lower, "failed to verify certificate")
+}
+
+// WithTLSHint appends the operator fix for a TLS transport failure.
+func WithTLSHint(msg string) string {
+	if strings.Contains(msg, "HTTP response to HTTPS client") && !strings.Contains(msg, "upload.use_ssl: false") {
+		return msg + "; set upload.use_ssl: false for a plain HTTP endpoint"
+	}
+	if (strings.Contains(msg, "unknown authority") || strings.Contains(msg, "x509:")) && !strings.Contains(msg, "upload.tls.ca_file") {
+		return msg + "; set upload.tls.ca_file to the endpoint's CA, or install that CA in the system trust store"
+	}
+	return msg
 }
 
 func objectMissing(err error) bool {

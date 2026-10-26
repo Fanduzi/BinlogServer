@@ -16,6 +16,10 @@ Maintenance rules:
 
 - 源库复制和 meta 可以要求并校验证书（`source.tls`、`meta.tls`，见 `docs/adr/0012-connection-tls.md`）。两边默认 `disabled`，旧配置不写这些键时仍是明文。
 - `upload.use_ssl` 默认从 `false` 改为 `true`。没写这个键的 HTTP 对象存储会改走 HTTPS，握手失败。升级前对明文端点写 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 带 `://` 时启动失败，错误说明默认已是 HTTPS。
+- `upload.tls.ca_file` 是对象存储的可选 PEM CA。设置后该客户端只信任这份文件，主机名仍检查。`upload.use_ssl: false` 时不能设置。空着用系统信任库。
+- `./migrate --config` 使用与进程相同的 `meta.tls`。`--dsn` 和 `META_DSN` 覆盖文件里的 `meta_dsn`。不传 `--config` 时 DSN 不变。
+- 源库证书校验失败（含残留 Binlog Dump 的 KILL）使任务 `FAILED`，`last_error` 带上 x509，日志为 warn。上传的 TLS 传输失败每次打 WARN，并把 `/api/health` 标成 degraded。其它对象探针失败仍保持 status ok。
+- `preferred` 只在服务端问候包没有 `CLIENT_SSL` 时退回明文。认证失败或证书错误不再拨明文。meta 启动时的 x509 错误带 `meta.tls` 前缀。
 
 ## [v0.5.79] - 2026-10-26
 

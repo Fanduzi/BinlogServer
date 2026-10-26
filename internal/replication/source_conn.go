@@ -1,6 +1,6 @@
 // Package replication provides module-level functionality for replication.
 // input: a task's source config and a caller context
-// output: a go-mysql client connection with bounded dial, read and write, and source.tls (ADR 0012)
+// output: a go-mysql client connection with bounded dial, read and write, and source.tls (ADR 0012); preferred falls back only when the greeting omits CLIENT_SSL
 // pos: the only way this module opens a SQL connection to the source (see source_conn_test.go)
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -9,6 +9,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
 	"time"
 
 	"binlog_server/internal/mysqltls"
@@ -27,34 +29,81 @@ var (
 
 // connectSource opens a SQL connection to the source. Every source
 // connection in this module must use it; a test fails on any other call.
-// preferred tries TLS and, only when the server greeting has no TLS, dials
-// again in plaintext. The Connect call stays in this function.
+// preferred reads the server greeting and dials plaintext only when that
+// greeting's capability flags omit CLIENT_SSL. A later handshake, auth, or
+// certificate error does not dial again. The Connect call stays in this function.
 func connectSource(ctx context.Context, source tasks.SourceConfig) (*sqlclient.Conn, error) {
 	tlsCfg, err := mysqltls.ClientConfig("source", source.TLS, source.Host)
 	if err != nil {
 		return nil, err
 	}
-	dial := func(cfg *tls.Config) (*sqlclient.Conn, error) {
-		if ctx == nil {
-			ctx = context.Background()
+	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
+	if mysqltls.Preferred(source.TLS) {
+		offers, err := serverOffersTLS(ctx, addr)
+		if err != nil {
+			return nil, err
 		}
-		dialCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
-		defer cancel()
-		addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-		return sqlclient.ConnectWithContext(dialCtx, addr, source.User, source.Password, "", sourceConnectTimeout, func(c *sqlclient.Conn) error {
-			c.ReadTimeout = sourceIOTimeout
-			c.WriteTimeout = sourceIOTimeout
-			if cfg != nil {
-				c.SetTLSConfig(cfg)
-			}
-			return nil
-		})
+		if !offers {
+			tlsCfg = nil
+		}
 	}
-	conn, err := dial(tlsCfg)
-	if mysqltls.Preferred(source.TLS) && mysqltls.ServerLacksTLS(err) {
-		return dial(nil)
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return conn, err
+	dialCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
+	defer cancel()
+	return sqlclient.ConnectWithContext(dialCtx, addr, source.User, source.Password, "", sourceConnectTimeout, func(c *sqlclient.Conn) error {
+		c.ReadTimeout = sourceIOTimeout
+		c.WriteTimeout = sourceIOTimeout
+		if tlsCfg != nil {
+			c.SetTLSConfig(tlsCfg)
+		}
+		return nil
+	})
+}
+
+// serverOffersTLS reads one server greeting and reports CLIENT_SSL.
+// A dial or read error is returned; it is not treated as "no TLS".
+func serverOffersTLS(ctx context.Context, addr string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dialCtx, "tcp", addr)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+	deadline, ok := dialCtx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(sourceConnectTimeout)
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return false, err
+	}
+	payload, err := readMySQLPacket(conn)
+	if err != nil {
+		return false, err
+	}
+	return mysqltls.GreetingOffersTLS(payload), nil
+}
+
+func readMySQLPacket(r io.Reader) ([]byte, error) {
+	hdr := make([]byte, 4)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		return nil, err
+	}
+	n := int(hdr[0]) | int(hdr[1])<<8 | int(hdr[2])<<16
+	if n <= 0 || n > 1<<20 {
+		return nil, fmt.Errorf("mysql greeting length %d", n)
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // sourceSyncerTLS is the dump's TLS config. preferred probes once through

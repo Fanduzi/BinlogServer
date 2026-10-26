@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional encryption key
-// output: config loading regression coverage including unresolved protected-auth secret rejection, an unset meta_dsn ${ENV} naming the variable, booleans other than true or false, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token; upload.use_ssl defaults to true and meta.tls is validated (ADR 0012)
+// output: config loading regression coverage including unresolved protected-auth secret rejection, an unset meta_dsn ${ENV} naming the variable, booleans other than true or false, enabled-auth protect-flag defaults, EncryptionKey passthrough, non-numeric integer and number rejection, and no plaintext warning for a file ${ENV} token; upload.use_ssl defaults to true, upload.tls.ca_file is parsed, and meta.tls is validated (ADR 0012)
 // pos: configuration boundary translating external settings into internal options
 // note: if this file changes, update this header and module README.md.
 package config
@@ -916,6 +916,31 @@ func TestMetaTLSParseAndValidate(t *testing.T) {
 	write("meta_dsn: \"user:pass@tcp(127.0.0.1:3306)/meta\"\nmeta:\n  tls:\n    mode: sometimes\n")
 	_, err = LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "meta.tls.mode must be") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestUploadCAFile(t *testing.T) {
+	setRequiredAuthEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	ca := filepath.Join(dir, "ca.pem")
+	body := "upload:\n  endpoint: 127.0.0.1:9000\n  bucket: b\n  use_ssl: true\n  tls:\n    ca_file: " + ca + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UploadCAFile != ca || !cfg.UploadUseSSL {
+		t.Fatalf("%+v", cfg.UploadCAFile)
+	}
+	if err := os.WriteFile(path, []byte("upload:\n  endpoint: 127.0.0.1:9000\n  bucket: b\n  use_ssl: false\n  tls:\n    ca_file: "+ca+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "upload.tls.ca_file requires upload.use_ssl: true") {
 		t.Fatalf("error = %v", err)
 	}
 }

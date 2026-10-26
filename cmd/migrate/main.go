@@ -1,11 +1,12 @@
 // Package main provides module-level functionality for main.
-// input: migration files, META_DSN/env flags, golang-migrate driver dependencies
-// output: schema migration commands (up/down/version/force/goto) execution results
+// input: migration files, META_DSN/env flags, an optional --config whose meta.tls matches the server, golang-migrate driver dependencies
+// output: schema migration commands (up/down/version/force/goto) execution results; a DSN rewritten with meta.tls when --config is set; the pool is opened in this process so that registered tls config is the one migrate uses
 // pos: database schema migration CLI for operational change management
 // note: if this file changes, update this header and module README.md.
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -13,14 +14,20 @@ import (
 	"strconv"
 	"strings"
 
+	"binlog_server/internal/config"
+	"binlog_server/internal/mysqltls"
+
 	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/mysql"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	mysqldriver "github.com/golang-migrate/migrate/v4/database/mysql"
+	"github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/spf13/cobra"
+
+	_ "github.com/go-sql-driver/mysql"
 )
 
 type migrateOptions struct {
 	dsn       string
+	config    string
 	path      string
 	env       string
 	allowDown bool
@@ -41,9 +48,11 @@ func main() {
 			if cmd.Name() == "help" {
 				return nil
 			}
-			if opts.dsn == "" {
-				return errors.New("META_DSN is required (or pass --dsn)")
+			dsn, err := resolveMigrateDSN(opts.config, opts.dsn)
+			if err != nil {
+				return err
 			}
+			opts.dsn = dsn
 			if opts.path == "" {
 				return errors.New("--path is required")
 			}
@@ -51,6 +60,7 @@ func main() {
 		},
 	}
 	root.PersistentFlags().StringVar(&opts.dsn, "dsn", opts.dsn, "database dsn, e.g. user:pass@tcp(127.0.0.1:3306)/db?parseTime=true")
+	root.PersistentFlags().StringVar(&opts.config, "config", "", "process config; meta.tls from this file is applied to the DSN (same block as the server). --dsn and META_DSN override meta_dsn")
 	root.PersistentFlags().StringVar(&opts.path, "path", opts.path, "migration files path")
 	root.PersistentFlags().StringVar(&opts.env, "env", opts.env, "runtime env (dev/prod)")
 	root.PersistentFlags().BoolVar(&opts.allowDown, "allow-destructive", opts.allowDown, "allow down/force in production")
@@ -228,7 +238,35 @@ func newMigrator(migrationsPath, dsn string) (*migrate.Migrate, error) {
 		return nil, err
 	}
 	sourceURL := "file://" + filepath.ToSlash(absPath)
-	return migrate.New(sourceURL, normalizeDSN(dsn))
+	src, err := (&file.File{}).Open(sourceURL)
+	if err != nil {
+		return nil, err
+	}
+	// Open the pool here. migrate's URL opener re-registers a custom tls=
+	// name and then reads x-tls-ca, which drops the meta.tls config ApplyDSN
+	// already registered.
+	db, err := sql.Open("mysql", migrateSQLDSN(dsn))
+	if err != nil {
+		return nil, err
+	}
+	driver, err := mysqldriver.WithInstance(db, &mysqldriver.Config{})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return migrate.NewWithInstance("file", src, "mysql", driver)
+}
+
+func migrateSQLDSN(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	dsn = strings.TrimPrefix(dsn, "mysql://")
+	if strings.Contains(dsn, "multiStatements=true") {
+		return dsn
+	}
+	if strings.Contains(dsn, "?") {
+		return dsn + "&multiStatements=true"
+	}
+	return dsn + "?multiStatements=true"
 }
 
 func closeMigrator(m *migrate.Migrate) {
@@ -239,6 +277,31 @@ func closeMigrator(m *migrate.Migrate) {
 	if srcErr != nil || dbErr != nil {
 		fmt.Fprintf(os.Stderr, "close migrate resources warning: source=%v database=%v\n", srcErr, dbErr)
 	}
+}
+
+// resolveMigrateDSN applies meta.tls from --config. Without --config the DSN
+// is unchanged, including a tls= the operator already set. --dsn and META_DSN
+// win over the file's meta_dsn. The tls block always comes from the file.
+func resolveMigrateDSN(configPath, dsn string) (string, error) {
+	configPath = strings.TrimSpace(configPath)
+	dsn = strings.TrimSpace(dsn)
+	if configPath == "" {
+		if dsn == "" {
+			return "", errors.New("META_DSN is required (or pass --dsn or --config)")
+		}
+		return dsn, nil
+	}
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return "", err
+	}
+	if dsn == "" {
+		dsn = strings.TrimSpace(cfg.MetaDSN)
+	}
+	if dsn == "" {
+		return "", errors.New("META_DSN is required (or pass --dsn or --config)")
+	}
+	return mysqltls.ApplyDSN(dsn, cfg.Meta.TLS, mysqltls.MetaTLSName)
 }
 
 func normalizeDSN(dsn string) string {
