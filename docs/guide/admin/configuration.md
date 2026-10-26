@@ -90,7 +90,7 @@ upload:
   secret_key: "${BINLOG_SERVER_UPLOAD_SECRET_KEY}"  # 推荐使用环境变量
   region: ""
   prefix: ""
-  use_ssl: false
+  use_ssl: true               # 默认 true（HTTPS）。明文 HTTP 端点必须写 false
 
 # API 鉴权配置
 api:
@@ -143,6 +143,13 @@ log:
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `meta_dsn` | string | - | MySQL 连接字符串。cluster 模式必需。standalone 为空时任务加密写在 `{data_dir}/.tasks.enc`。写成 `${BINLOG_SERVER_META_DSN}` 而该变量没有设置时，启动失败并指出变量名（`BINLOG_SERVER_META_DSN is not set; leave meta_dsn empty for standalone mode`）。把变量设成空字符串则是 standalone。 |
+| `meta.tls.mode` | string | `disabled` | 到 meta 的 TLS：`disabled`、`preferred`、`required`、`verify-ca`、`verify-identity`。省略等于 `disabled`，DSN 原样使用，包括 DSN 里已有的 `tls=`。其它模式拒绝 DSN 里已有的 `tls=`。`meta_dsn` 为空时，非 `disabled` 拒绝启动（`meta.tls is set but meta_dsn is empty`）。standalone 和 cluster 用同一套改写。 |
+| `meta.tls.ca` | string | - | PEM 文件路径。`verify-ca` 和 `verify-identity` 必需。其它模式拒绝。启动时读取；错误写路径，不写文件内容。 |
+| `meta.tls.cert` | string | - | 客户端证书 PEM。和 `meta.tls.key` 同时设置或同时为空。`disabled` 和 `preferred` 拒绝。 |
+| `meta.tls.key` | string | - | 客户端私钥 PEM。和 `meta.tls.cert` 同时设置或同时为空。解析失败只报 `meta.tls: invalid client certificate or key`，不把私钥写进日志或错误。 |
+| `meta.tls.server_name` | string | 拨号主机 | 只用于 `verify-identity`。证书主机名必须匹配它；为空则用 DSN 里的主机。其它模式拒绝。 |
+
+`preferred` 在服务端提供 TLS 时加密、不校验证书，服务端没有 TLS 时退回明文，并且不能带客户端证书。`required` 必须加密，不校验证书。`verify-ca` 必须加密，证书链必须接到 `meta.tls.ca`，不检查主机名。`verify-identity` 在此之上还检查主机名。环境变量是 `BINLOG_SERVER_META_TLS_MODE`、`BINLOG_SERVER_META_TLS_CA`、`BINLOG_SERVER_META_TLS_CERT`、`BINLOG_SERVER_META_TLS_KEY`、`BINLOG_SERVER_META_TLS_SERVER_NAME`。决定见 `docs/adr/0012-connection-tls.md`。
 
 没配 `meta_dsn`，或该任务的 `binlog_files` 一条目录都没有时，`GET /api/tasks/{id}/files` 扫描 `{data_dir}/{task_id}/`，列出封存文件和 `.open.e<epoch>` 分段。standalone 用同一个 `data_dir` 重启后，任务列表和 dashboard 会列出仍有这些分段的目录，id 就是目录名，files 用同一套扫描；没有源库账号，不能启动。配了 `meta_dsn` 时不从磁盘发现任务。`file_name` 是源文件名，`file_path` 是磁盘路径，open 分段的 `file_path` 保留 `.open.e<epoch>`。`start_pos` 和 `end_pos` 是 0。磁盘扫描不编造 checkpoint：没有位点行时 `GET /api/tasks/{id}/checkpoint` 仍是 `404`，正文是 `checkpoint not found`。该任务已有目录行时以目录为准，磁盘上多出来的文件不会列出。store 出错不会退回磁盘。用磁盘分段回放见 [部署指南「源库不可用时，用本地分段回放」](deployment.md#replay-local-segments)（English: [Replay local segments when the source is gone](deployment.md#replay-local-segments-en)）。
 
@@ -239,7 +246,7 @@ lease_renew_interval_sec < lease_ttl_sec < lease_grace_sec
 | `upload.secret_key` | string | - | Secret Key（推荐使用环境变量占位符） |
 | `upload.region` | string | - | 区域 |
 | `upload.prefix` | string | - | 对象前缀 |
-| `upload.use_ssl` | bool | false | 是否使用 SSL |
+| `upload.use_ssl` | bool | true | 是否使用 HTTPS。省略等于 true。明文 HTTP 端点（MinIO、没开 TLS 的 RGW）必须写成 `false`，否则上传和 HEAD 会在 TLS 握手失败。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 是 `host[:port]`，不能带 `://`；写成 `http://...` 时启动失败，错误说明默认已是 HTTPS，并提示对明文端点设置 `upload.use_ssl: false`。 |
 | `upload.grace_sec` | int | 900 | 上传落后超过这么多秒才算 UPLOAD_LATE。不能为负 |
 | `upload.grace_task_sec` | map | 空 | 按任务 id 覆盖 `upload.grace_sec`。每个值必须是正整数 |
 
@@ -638,7 +645,9 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 
 ### 4.1 创建任务
 
-创建任务通过 `POST /api/tasks` 提交，其中存储与保留策略参数由 `storage` 对象控制：
+创建任务通过 `POST /api/tasks` 提交。`source.tls` 与 `meta.tls` 是同一块（`docs/adr/0012-connection-tls.md`）：`mode`（默认 `disabled`）、`ca`、`cert`、`key`、`server_name`。复制 SQL 和 binlog dump 用同一套。`disabled` 明文。`preferred` 在源提供 TLS 时加密、否则明文，不校验证书。`required` 必须加密，不校验证书。`verify-ca` 校验证书链、不查主机名。`verify-identity` 再查 `server_name`，为空则用 `source.host`。证书文件在 worker 拨号时读取，创建和更新只检查形状，不读文件。更新任务时省略 `source.tls` 保留已保存的块（控制台编辑不会清掉它）；`"tls": {"mode": "disabled"}` 才清除。集群写在 `source_json`，standalone 写在加密任务记录里，重启后还在。私钥路径可以出现在 API 响应里，文件内容不会。
+
+其中存储与保留策略参数由 `storage` 对象控制：
 - `storage.retention_days`: 保留天数（有效范围 `1` 到 `3650` 天，默认 `7` 天）。省略下面两个键时，这一个数同时是本地磁盘保留和桶保留，清理行为与只配这一个键时相同。
 - `storage.local_retention_days`: 可选。封存文件留在本地磁盘的天数。`0` 或省略等于 `retention_days`。范围 `1` 到 `3650`。
 - `storage.bucket_retention_days`: 可选。已上传对象和目录行留下的天数。`0` 或省略等于 `retention_days`。范围 `1` 到 `3650`。有效桶保留短于有效本地保留时，创建和更新返回 HTTP 400，正文含 `shorter than local retention`。桶保留只在同时配了对象存储和 `meta_dsn` 时生效。没有目录时，上传仍按本地天数把对象和本地文件一起删除。

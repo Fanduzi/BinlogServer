@@ -1,7 +1,8 @@
 # internal/upload Module
 
 ## Files
-- `s3_uploader.go`: 对象存储上传，上传后用对象 HEAD 的 ETag 与封存文件对比（`SealedObjectMatches`），按已有 object key 打开已上传对象（本进程磁盘上没有该封存分段时供下载），以及按同一 key 删除对象（`DeleteObject`，对象不存在视为成功）。
+- `s3_uploader.go`: 对象存储上传。`UseSSL` 为 true 时走 HTTPS（进程配置 `upload.use_ssl` 默认 true）。上传后用对象 HEAD 的 ETag 与封存文件对比（`SealedObjectMatches`），按已有 object key 打开已上传对象（本进程磁盘上没有该封存分段时供下载），以及按同一 key 删除对象（`DeleteObject`，对象不存在视为成功）。
+- `s3_uploader_test.go` 的 `TestUseSSLTrueSendsTLSClientHello`：`UseSSL` true 的第一字节是 TLS client hello，false 不是。
 - `s3_uploader_test.go`: 上传、按 key 打开对象、以及删除对象的测试。
   重点覆盖配置校验、上传成功/失败、空对象 key、本地文件缺失、context cancel/deadline、HTTPS endpoint、打开已上传对象时的正文与大小，以及 DELETE 成功、对象不存在、存储错误。配置了 `BINLOG_E2E_MINIO_ENDPOINT` 时再对真实 MinIO 删除一次。
 

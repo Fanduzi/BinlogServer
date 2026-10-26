@@ -319,6 +319,7 @@ BinlogServer 以控制面为核心组织服务，HTTP/API 处理、任务编排�
 | `internal/app` | 运行时装配与角色生命周期编排 | [internal/app/README.md](internal/app/README.md) |
 | `internal/binlog` | 本地 binlog 文件写入与 checkpoint 持久化辅助 | [internal/binlog/README.md](internal/binlog/README.md) |
 | `internal/config` | 基于 YAML 与环境变量的配置加载 | [internal/config/README.md](internal/config/README.md) |
+| `internal/mysqltls` | 源库复制连接和 meta DSN 的 TLS 模式（ADR 0012） | [internal/mysqltls/README.md](internal/mysqltls/README.md) |
 | `internal/logging` | Logger 初始化与日志输出轮转 | [internal/logging/README.md](internal/logging/README.md) |
 | `internal/meta` | 元数据存储、schema 校验、租约协调数据 | [internal/meta/README.md](internal/meta/README.md) |
 | `internal/replication` | MySQL 复制拉取循环与持久化本地写入链路 | [internal/replication/README.md](internal/replication/README.md) |

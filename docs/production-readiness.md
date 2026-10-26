@@ -10,7 +10,7 @@
 只能 `workflow_dispatch` 手动触发的 e2e 一律不算 MET。
 
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
-- 每个 PR 和 push main 都跑：`vulncheck`；`e2e-upgrade-failback`（`upgrade-legacy-failback.sh FBUP_CASE=object-only`）；`race-and-vet`（`go vet ./...`、`go test -race ./...`）；`release-archive`（snapshot 包报的 version 和 commit）；`e2e-verify`（真实 MinIO）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`；`e2e-observability`。
+- 每个 PR 和 push main 都跑：`vulncheck`；`e2e-upgrade-failback`（`upgrade-legacy-failback.sh FBUP_CASE=object-only`）；`race-and-vet`（`go vet ./...`、`go test -race ./...`）；`release-archive`（snapshot 包报的 version 和 commit）；`e2e-verify`（真实 MinIO）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`；`e2e-observability`；`e2e-tls`（`TestLiveMySQLTLS`）。
 - 多节点：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover` 也是每个 PR 和 push main 都跑。
 - 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`；`upgrade-legacy-failback` 的 `plain`、`object-gone` 两档。
 
@@ -75,7 +75,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | G1 | PRODUCTION 模式下鉴权失败就拒绝启动；源密码和 standalone 任务记录加密存放；依赖做漏洞扫描 | `internal/app/http_server_test.go`、`smoke_test.go`、`internal/taskrecords` 单测、`smoke-standalone-restart`（密钥错误、缺失）、`vulncheck` job | MET | #439（-race 下偶发失败） |
-| G2 | 到源库和 meta 的连接支持并校验 TLS，S3 默认走 TLS | 没有：复制连接和 meta 都没有 TLS 配置，`upload.use_ssl` 默认是 false，也没有测试 | NOT MET | 没有对应 issue |
+| G2 | 到源库和 meta 的连接支持并校验 TLS，S3 默认走 TLS | `TestUploadUseSSLDefaultsToTLS`、`TestMetaTLSParseAndValidate`（`internal/config`）、`TestUseSSLTrueSendsTLSClientHello`（`internal/upload`）、`TestNormalize_DisabledIsDefault`、`TestNormalize_RejectsShape`、`TestApplyDSN_DisabledLeavesDSN`、`TestApplyDSN_PreferredAndRejectsExistingTLS`、`TestClientConfig_VerifyCASkipsHostname`、`TestClientConfig_KeyMaterialStaysOutOfErrors`、`TestClientConfig_LoadsClientCert`（`internal/mysqltls`）、`TestSourceTLSShapeAndUpdateKeepsOmittedBlock`、`TestTaskRecordKeepsSourceTLS`（`internal/tasks`），都在 `unit-and-e2e` 的 `go test ./...` 和 `race-and-vet` 里。真实 MySQL：`TestLiveMySQLTLS`（`internal/replication`，job `e2e-tls`，每个 PR 和 push main）用测试 CA 连 TLS MySQL，复制和 meta 都测 `verify-ca` / `verify-identity` 拒绝错误 CA 或错误主机名，`preferred` 在无 TLS 的源上退回明文，binlog dump 走 TLS | MET | — |
 
 ## H. 性能与资源上界
 
@@ -101,7 +101,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 19 / PARTIAL 6 / NOT MET 10**。
+共 35 项：**MET 20 / PARTIAL 6 / NOT MET 9**。
 
 ## 最卡生产级的 5 项
 
@@ -109,4 +109,4 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 2. **A1 还不是 MET，C6 仍是 NOT MET**：#462 的「cluster 删封存段没有 finding」已有单测（ADR 0011 PR-3），但 GTID 内部空洞和手动档 cluster e2e 还没进 CI，所以 A1 仍是 PARTIAL。所有权变化时 finding 单调（C6）要等 PR-5。#471 不合并。
 3. **F2、F4，失败到不了人**：评估器默认关，没有 `task_healthy`，没有 webhook，也没有随附的告警规则。
 4. **D3，备份是否可还原没人持续验证**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4 PARTIAL，等 ADR 0011 的主人）。真实 MinIO 由 `e2e-verify` 每个 PR 跑；可选的还原演练还没有；没有覆盖查询和还原计划（ADR 0009 阶段 4、5）。
-5. **G2、H1，上线前提没验**：到源库和 meta 的连接没有 TLS，S3 默认不走 TLS（G2，没有 issue）；约定负载下的长跑验收还没有（H1，ADR 0009 阶段 6）。
+5. **H1，上线前提没验**：约定负载下的长跑验收还没有（H1，ADR 0009 阶段 6）。G2 已由 `e2e-tls` 的 `TestLiveMySQLTLS` 和 `unit-and-e2e` / `race-and-vet` 里的 TLS 单测盖住。

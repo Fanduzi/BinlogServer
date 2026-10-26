@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a standalone task record file (RecordFile, the encrypted {data_dir}/.tasks.enc of ADR 0010), the key problem found at startup, the in-memory tasks, and the task directories under data_dir
-// output: the record snapshot (spec, source password, desired state, terminal failure, id seq, delete tombstones; never a position) saved before memory changes at the two operator commit points and best effort when a worker failure changes desired state; Restore of standalone tasks from that file with the start computed fresh from disk (diskResumeStart, adopt semantics) and RESUME_POSITION_UNKNOWN instead of a guessed position; ResumeRecordedTasks that Starts every desired-RUN task after a restart; TASK_RECORDS_FAILED (key_missing, key_invalid, wrong_key, corrupt, write) and refused record-changing actions while the file cannot be used; EvaluateClusterNow stores a startup clear before the API listens when the evaluator was attached before Restore
+// output: the record snapshot (spec, source password, source.tls, desired state, terminal failure, id seq, delete tombstones; never a position) saved before memory changes at the two operator commit points and best effort when a worker failure changes desired state; Restore of standalone tasks from that file with the start computed fresh from disk (diskResumeStart, adopt semantics) and RESUME_POSITION_UNKNOWN instead of a guessed position; ResumeRecordedTasks that Starts every desired-RUN task after a restart; TASK_RECORDS_FAILED (key_missing, key_invalid, wrong_key, corrupt, write) and refused record-changing actions while the file cannot be used; EvaluateClusterNow stores a startup clear before the API listens when the evaluator was attached before Restore
 // pos: ADR 0010 (#385): standalone auto-resume after restart; memory stays the runtime authority (ADR 0005), the file is a write-through journal read once at startup
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/mysqltls"
 	"binlog_server/internal/taskrecords"
 )
 
@@ -102,13 +103,14 @@ type recordState struct {
 }
 
 type recordSource struct {
-	Host     string `json:"host"`
-	Port     uint16 `json:"port"`
-	User     string `json:"user"`
-	Password string `json:"password"`
-	Flavor   string `json:"flavor"`
-	ServerID uint32 `json:"server_id"`
-	SemiSync bool   `json:"semi_sync,omitempty"`
+	Host     string          `json:"host"`
+	Port     uint16          `json:"port"`
+	User     string          `json:"user"`
+	Password string          `json:"password"`
+	Flavor   string          `json:"flavor"`
+	ServerID uint32          `json:"server_id"`
+	SemiSync bool            `json:"semi_sync,omitempty"`
+	TLS      mysqltls.Config `json:"tls,omitempty"`
 }
 
 type recordFailure struct {
@@ -151,7 +153,7 @@ func recordOf(t Task) taskRecord {
 	r := taskRecord{
 		ID: t.ID, Name: t.Name, ClusterKey: t.ClusterKey,
 		Source: recordSource{Host: t.Source.Host, Port: t.Source.Port, User: t.Source.User, Password: t.Source.Password,
-			Flavor: t.Source.Flavor, ServerID: t.Source.ServerID, SemiSync: t.Source.SemiSync},
+			Flavor: t.Source.Flavor, ServerID: t.Source.ServerID, SemiSync: t.Source.SemiSync, TLS: t.Source.TLS},
 		Storage: t.Storage, DesiredRun: effectiveDesired(t), SpecRevision: t.SpecRevision,
 		Adopted: t.KeepLocalSegments, UpdatedAt: t.UpdatedAt.UTC(),
 	}
@@ -432,7 +434,7 @@ func (s *Scheduler) restoredTask(rec taskRecord) (Task, string) {
 	t := Task{
 		ID: rec.ID, Name: rec.Name, ClusterKey: rec.ClusterKey,
 		Source: SourceConfig{Host: rec.Source.Host, Port: rec.Source.Port, User: rec.Source.User, Password: rec.Source.Password,
-			Flavor: rec.Source.Flavor, ServerID: rec.Source.ServerID, SemiSync: rec.Source.SemiSync},
+			Flavor: rec.Source.Flavor, ServerID: rec.Source.ServerID, SemiSync: rec.Source.SemiSync, TLS: rec.Source.TLS},
 		Storage: rec.Storage, DesiredRun: rec.DesiredRun, SpecRevision: rec.SpecRevision,
 		KeepLocalSegments: rec.Adopted, UpdatedAt: rec.UpdatedAt, State: StateStopped,
 	}

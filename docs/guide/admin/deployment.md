@@ -391,6 +391,14 @@ sudo systemctl start binlog-server
 sudo systemctl status binlog-server
 ```
 
+### 5.3 连接 TLS
+
+源库复制和 meta 的 TLS 见 `docs/adr/0012-connection-tls.md` 与配置指南的 `meta.tls.*`、`source.tls`。两边默认都是 `disabled`：旧配置不写这些键时仍是明文，包括 `meta_dsn` 里已经带的 `tls=`。
+
+`upload.use_ssl` 的默认从 `false` 改为 `true`。端点写了、这个键没写的配置，升级后走 HTTPS。明文 HTTP 的对象存储（MinIO、没开 TLS 的 RGW）会在握手失败，上传和 HEAD 都失败。升级前对每个明文端点写上 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 只能是 `host[:port]`；带 `://` 的值启动即失败，错误说明默认已是 HTTPS。
+
+证书和私钥是文件路径。日志、错误和 API 响应不包含 PEM 内容。
+
 ---
 
 ## 6. 日常运维、探活与监控

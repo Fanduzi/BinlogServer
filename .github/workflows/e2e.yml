@@ -32,6 +32,7 @@ on:
           - meta-failover
           - upgrade-failback
           - verify
+          - tls
 
 permissions:
   contents: read
@@ -111,7 +112,7 @@ jobs:
             ./...
 
   unit-and-e2e:
-    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback') }}
+    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback' && github.event.inputs.e2e_profile != 'tls') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -537,3 +538,23 @@ jobs:
       - name: Cleanup
         if: always()
         run: ./scripts/e2e/down.sh
+
+  e2e-tls:
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'tls' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: MySQL TLS for replication and meta
+        env:
+          BINLOG_TEST_TLS: "1"
+        run: go test -count=1 -timeout 15m -run TestLiveMySQLTLS ./internal/replication/

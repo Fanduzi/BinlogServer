@@ -1,15 +1,17 @@
 // Package replication provides module-level functionality for replication.
 // input: a task's source config and a caller context
-// output: a go-mysql client connection with bounded dial, read and write
+// output: a go-mysql client connection with bounded dial, read and write, and source.tls (ADR 0012)
 // pos: the only way this module opens a SQL connection to the source (see source_conn_test.go)
 // note: if this file changes, update this header and module README.md.
 package replication
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"time"
 
+	"binlog_server/internal/mysqltls"
 	"binlog_server/internal/tasks"
 
 	sqlclient "github.com/go-mysql-org/go-mysql/client"
@@ -25,16 +27,58 @@ var (
 
 // connectSource opens a SQL connection to the source. Every source
 // connection in this module must use it; a test fails on any other call.
+// preferred tries TLS and, only when the server greeting has no TLS, dials
+// again in plaintext. The Connect call stays in this function.
 func connectSource(ctx context.Context, source tasks.SourceConfig) (*sqlclient.Conn, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	tlsCfg, err := mysqltls.ClientConfig("source", source.TLS, source.Host)
+	if err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
-	defer cancel()
-	addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
-	return sqlclient.ConnectWithContext(ctx, addr, source.User, source.Password, "", sourceConnectTimeout, func(c *sqlclient.Conn) error {
-		c.ReadTimeout = sourceIOTimeout
-		c.WriteTimeout = sourceIOTimeout
-		return nil
-	})
+	dial := func(cfg *tls.Config) (*sqlclient.Conn, error) {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dialCtx, cancel := context.WithTimeout(ctx, sourceConnectTimeout)
+		defer cancel()
+		addr := fmt.Sprintf("%s:%d", source.Host, source.Port)
+		return sqlclient.ConnectWithContext(dialCtx, addr, source.User, source.Password, "", sourceConnectTimeout, func(c *sqlclient.Conn) error {
+			c.ReadTimeout = sourceIOTimeout
+			c.WriteTimeout = sourceIOTimeout
+			if cfg != nil {
+				c.SetTLSConfig(cfg)
+			}
+			return nil
+		})
+	}
+	conn, err := dial(tlsCfg)
+	if mysqltls.Preferred(source.TLS) && mysqltls.ServerLacksTLS(err) {
+		return dial(nil)
+	}
+	return conn, err
+}
+
+// sourceSyncerTLS is the dump's TLS config. preferred probes once through
+// connectSource and clears TLS only when that connection is plaintext.
+func sourceSyncerTLS(ctx context.Context, source tasks.SourceConfig) (*tls.Config, error) {
+	tlsCfg, err := mysqltls.ClientConfig("source", source.TLS, source.Host)
+	if err != nil || tlsCfg == nil || !mysqltls.Preferred(source.TLS) {
+		return tlsCfg, err
+	}
+	conn, err := connectSource(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	res, err := conn.Execute("SHOW STATUS LIKE 'Ssl_cipher'")
+	if err != nil {
+		return nil, err
+	}
+	cipher, err := res.GetString(0, 1)
+	if err != nil {
+		return nil, err
+	}
+	if cipher == "" {
+		return nil, nil
+	}
+	return tlsCfg, nil
 }

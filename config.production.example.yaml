@@ -45,5 +45,5 @@ api:
 #   secret_key: "${BINLOG_SERVER_UPLOAD_SECRET_KEY}"
 #   region: ""
 #   prefix: ""
-#   use_ssl: true
+#   use_ssl: true # 省略也是 true。明文 HTTP 端点必须写 false
 

@@ -1929,6 +1929,27 @@
                 "server_id": {
                     "type": "integer"
                 },
+                "tls": {
+                    "description": "ADR 0012。省略时更新保留已保存的块；mode disabled 清除。ca/cert/key 是路径，不是 PEM。",
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string"
+                        },
+                        "ca": {
+                            "type": "string"
+                        },
+                        "cert": {
+                            "type": "string"
+                        },
+                        "key": {
+                            "type": "string"
+                        },
+                        "server_name": {
+                            "type": "string"
+                        }
+                    }
+                },
                 "user": {
                     "type": "string"
                 }

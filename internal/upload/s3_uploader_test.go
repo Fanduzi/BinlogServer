@@ -1,6 +1,6 @@
 // Package upload provides module-level functionality for upload.
 // input: local binlog files, object store credentials/config, upload retry context, and an existing object key
-// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, a bucket HEAD that separates a missing bucket, an auth error, and a dead endpoint, and deletion of one stored key including a missing object
+// output: object storage upload operations, sealed ETag cases, a reader for one stored object at its size at open, a bucket HEAD that separates a missing bucket, an auth error, and a dead endpoint, and deletion of one stored key including a missing object; UseSSL true sends a TLS client hello (ADR 0012)
 // pos: outbound storage adapter layer for sealed binlog upload and download
 // note: if this file changes, update this header and module README.md.
 package upload
@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -640,5 +641,64 @@ func TestDeleteObject_MinIORemovesObject(t *testing.T) {
 	}
 	if err := uploader.DeleteObject(ctx, key); err != nil {
 		t.Fatalf("second delete of a missing object: %v", err)
+	}
+}
+
+// TestUseSSLTrueSendsTLSClientHello proves UseSSL selects TLS on the wire.
+// The config default is covered by TestUploadUseSSLDefaultsToTLS.
+func TestUseSSLTrueSendsTLSClientHello(t *testing.T) {
+	for _, useSSL := range []bool{true, false} {
+		t.Run(strconv.FormatBool(useSSL), func(t *testing.T) {
+			first := firstDialByte(t, useSSL)
+			if useSSL && first != 0x16 {
+				t.Fatalf("UseSSL true first byte = %#x, want TLS client hello 0x16", first)
+			}
+			if !useSSL && first == 0x16 {
+				t.Fatal("UseSSL false sent a TLS client hello")
+			}
+		})
+	}
+}
+
+func firstDialByte(t *testing.T, useSSL bool) byte {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var b [1]byte
+		_, _ = conn.Read(b[:])
+		got <- b[0]
+	}()
+	up, err := NewS3Uploader(S3Config{
+		Endpoint:  ln.Addr().String(),
+		Bucket:    "binlog",
+		AccessKey: "test-access",
+		SecretKey: "test-secret",
+		Region:    "us-east-1",
+		UseSSL:    useSSL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _, _, _ = up.ListObjects(ctx, "p", 1) }()
+	select {
+	case b := <-got:
+		cancel()
+		return b
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not dial")
+		return 0
 	}
 }

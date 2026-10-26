@@ -12,6 +12,11 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Changed
+
+- 源库复制和 meta 可以要求并校验证书（`source.tls`、`meta.tls`，见 `docs/adr/0012-connection-tls.md`）。两边默认 `disabled`，旧配置不写这些键时仍是明文。
+- `upload.use_ssl` 默认从 `false` 改为 `true`。没写这个键的 HTTP 对象存储会改走 HTTPS，握手失败。升级前对明文端点写 `upload.use_ssl: false`。已经写成 `true` 或 `false` 的配置不变。`upload.endpoint` 带 `://` 时启动失败，错误说明默认已是 HTTPS。
+
 ## [v0.5.79] - 2026-10-26
 
 发布说明：`docs/releases/v0.5.79.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。

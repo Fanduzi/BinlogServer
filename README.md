@@ -330,6 +330,7 @@ BinlogServer is structured as a modular control plane with clear separation betw
 | `internal/binlog` | Local binlog file writing, the durable resume file:pos, the next file named by a sealed rotate, and checkpoint persistence helpers | [internal/binlog/README.md](internal/binlog/README.md) |
 | `internal/assurance` | Backup chain invariants and the phase 3 verifier's pure checks (local parse, object HEAD, sampled SHA-256); the in-process worker that runs them lives in `internal/tasks` | [internal/assurance/README.md](internal/assurance/README.md) |
 | `internal/config` | YAML and environment-based configuration loading | [internal/config/README.md](internal/config/README.md) |
+| `internal/mysqltls` | TLS modes for the source replication connection and the meta DSN (ADR 0012) | [internal/mysqltls/README.md](internal/mysqltls/README.md) |
 | `internal/logging` | Logger setup and log output rotation | [internal/logging/README.md](internal/logging/README.md) |
 | `internal/meta` | Metadata storage, schema checks, lease-backed coordination data | [internal/meta/README.md](internal/meta/README.md) |
 | `internal/ownership` | Task-ownership transition (ADR 0011). Session timeouts and META_LOCK_STALLED call this package. Scheduler failover cutover is a later change | [internal/ownership/README.md](internal/ownership/README.md) |

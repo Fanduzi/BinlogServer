@@ -3,7 +3,7 @@
 ## Files
 | File | Responsibility |
 |------|---------------|
-| `config.go` | 配置模型、加载与默认值、校验（`cluster.side_kill` 只接受 off 或 auto，缺省 off；`verify.*` 是阶段 3 巡检：`verify.recent_share_percent` 拒绝 0 和 1–100 以外；`verify.drill_dsn` 按密钥保护；`health.*` 是 ADR 0009 P2-3 评估器开关；`meta_dsn` 为空时 standalone 任务写在 `.tasks.enc`；`meta_dsn` 里未设置的 `${ENV}` 报出变量名；布尔只接受 `true`/`false`，其他字面量记 `invalid boolean`；受保护 auth 不接受未解析 `${ENV}` 密钥；`enabled=true` 时未设置的 protect 标志视为 true；`EncryptionKey` 仅来自 `--encryption-key`；非整型记 `invalid integer`、非数字记 `invalid number`，不再变成 0；明文告警只看文件原文，`${ENV}` 不告警） |
+| `config.go` | 配置模型、加载与默认值、校验（`meta.tls` 默认 disabled，非 disabled 且 `meta_dsn` 为空时拒绝启动；`upload.use_ssl` 默认 true，`upload.endpoint` 带 `://` 时拒绝启动；`cluster.side_kill` 只接受 off 或 auto，缺省 off；`verify.*` 是阶段 3 巡检：`verify.recent_share_percent` 拒绝 0 和 1–100 以外；`verify.drill_dsn` 按密钥保护；`health.*` 是 ADR 0009 P2-3 评估器开关；`meta_dsn` 为空时 standalone 任务写在 `.tasks.enc`；`meta_dsn` 里未设置的 `${ENV}` 报出变量名；布尔只接受 `true`/`false`，其他字面量记 `invalid boolean`；受保护 auth 不接受未解析 `${ENV}` 密钥；`enabled=true` 时未设置的 protect 标志视为 true；`EncryptionKey` 仅来自 `--encryption-key`；非整型记 `invalid integer`、非数字记 `invalid number`，不再变成 0；明文告警只看文件原文，`${ENV}` 不告警） |
 | `config.go`（`StandaloneConfig`） | ADR 0010：`standalone.task_records`（on/off，默认 on）、`standalone.task_key_file`、`standalone.task_key_previous_file`；密钥本身走 `BINLOG_SERVER_TASK_KEY` 或密钥文件，不进配置 |
 | `config_test.go` | 配置加载、覆盖规则、protect 默认值、受保护 auth 未解析密钥、未设置的 `meta_dsn` 占位符、非数字拒绝、非 true/false 布尔拒绝，以及 `${ENV}` 不触发明文告警 |
 | `config_examples_test.go` | 用 `LoadConfig` 加载仓库根目录和发版归档里的每一份示例配置，包括 `BINLOG_SERVER_META_DSN` 未设置时 |
@@ -26,6 +26,7 @@
 - `api.rate_limit.*` - API 限流配置（enabled/requests_per_second/burst），默认 100 req/s、burst 200
 - `http.control_plane.*` / `http.worker_health.*` - HTTP 超时配置
 - `meta.timeout.*` - 内部依赖调用超时配置
+- `meta.tls.*` - meta 连接 TLS（ADR 0012）。默认 disabled。`ca`/`cert`/`key` 是路径，启动时读取，错误不包含 PEM
 - `tracing.*` - OTel tracing 配置
 - 加密值格式：`enc:aes256:<base64-encoded-ciphertext>`
 
