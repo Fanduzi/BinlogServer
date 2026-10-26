@@ -102,6 +102,7 @@ var walkGuardExclude = map[string]string{
 	"binlog_server/internal/replication": "replication writes the segments; it is not the evaluator walk",
 	"binlog_server/internal/app":         "process startup and HTTP shutdown, not the segment walk",
 	"binlog_server/internal/upload":      "object upload, not the segment walk",
+	"binlog_server/internal/mysqltls":    "loads MySQL TLS certificates, not the segment walk",
 }
 
 // walkGuardSymbolAllow is the positive set of non-I/O symbols. A method's
@@ -223,15 +224,50 @@ func TestWalkSeam_UnclassifiedPackageFails(t *testing.T) {
 }
 
 func TestWalkSeam_UploadStaysExcluded(t *testing.T) {
-	reason, ok := walkGuardExclude["binlog_server/internal/upload"]
+	const upload = "binlog_server/internal/upload"
+	reason, ok := walkGuardExclude[upload]
 	if !ok {
 		t.Fatal("upload is not on the exclusion list")
 	}
 	if reason != "object upload, not the segment walk" {
 		t.Fatalf("upload reason: %q", reason)
 	}
-	if walkGuardScan["binlog_server/internal/upload"] {
+	if walkGuardScan[upload] {
 		t.Fatal("upload is both scanned and excluded")
+	}
+	// upload is a live tasks dependency and is not in the scan set, so this
+	// passes only because the exclusion names it. Removing that entry makes
+	// classifyDep fail with "neither guarded nor excluded".
+	if err := classifyDep(upload); err != nil {
+		t.Fatal(err)
+	}
+	root := moduleRoot(t)
+	cmd := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "./internal/tasks")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("go list -deps ./internal/tasks: %v\n%s", err, ee.Stderr)
+		}
+		t.Fatal(err)
+	}
+	live := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == upload {
+			live = true
+		}
+	}
+	if !live {
+		t.Fatal("upload is not in go list -deps ./internal/tasks, so the exclusion is not classifying it")
+	}
+	deps, err := walkGuardDeps(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dep := range deps {
+		if dep.path == upload {
+			t.Fatalf("upload was scanned: %s", dep.rel)
+		}
 	}
 }
 
