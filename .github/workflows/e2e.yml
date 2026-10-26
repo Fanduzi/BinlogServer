@@ -77,6 +77,11 @@ jobs:
           args: release --clean --snapshot --skip=publish,announce
 
       - name: Verify Linux release archive, version and commit
+        # This job always builds a snapshot, also when release.yml calls this
+        # workflow for a tag, so the version is never the tag; release.yml
+        # checks the tag version on its own build.
+        env:
+          RELEASE_IDENTITY_SNAPSHOT: "true"
         run: ./scripts/check-release-archive-identity.sh
 
   race-and-vet:
