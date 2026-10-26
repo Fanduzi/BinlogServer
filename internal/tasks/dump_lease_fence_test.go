@@ -268,3 +268,23 @@ func (s *lockedFakeStore) ListTasks(ctx context.Context) ([]Task, error) {
 	defer s.mu.Unlock()
 	return s.fakeStore.ListTasks(ctx)
 }
+
+// The list and delete paths read or write the same map as UpsertTask, so they
+// take the lock too (go test -race, p29 tests that claim while a runner persists).
+func (s *lockedFakeStore) ListTasksPage(ctx context.Context, filter TaskListFilter) ([]Task, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.ListTasksPage(ctx, filter)
+}
+
+func (s *lockedFakeStore) ListStartingUnownedTasks(ctx context.Context) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.ListStartingUnownedTasks(ctx)
+}
+
+func (s *lockedFakeStore) DeleteTask(ctx context.Context, taskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.DeleteTask(ctx, taskID)
+}
