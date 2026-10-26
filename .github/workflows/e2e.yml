@@ -279,8 +279,11 @@ jobs:
         # branch, so a full clone still lacks it.
         run: git fetch --no-tags origin 0a84917a35276a243f2feeae29c97e0f2a4b2773
 
-      - name: Check host mysqlbinlog is 8.0
+      - name: Check host mysqlbinlog is 8.0, install PyMySQL for the load writer
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-pymysql
+          python3 -c 'import pymysql'
           mysqlbinlog --version
           mysqlbinlog --version | grep -Eq 'Ver 8\.0\.|Distrib 8\.0\.| 8\.0\.[0-9]+'
 
