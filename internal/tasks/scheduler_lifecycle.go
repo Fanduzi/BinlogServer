@@ -70,6 +70,12 @@ type taskStart struct {
 }
 
 func (s *Scheduler) StartTask(id string) error {
+	s.mu.Lock()
+	before := int64(0)
+	if current, ok := s.tasks[id]; ok {
+		before = current.SpecRevision
+	}
+	s.mu.Unlock()
 	if err := s.writeStartIntent(id); err != nil {
 		return err
 	}
@@ -78,6 +84,13 @@ func (s *Scheduler) StartTask(id string) error {
 	// The control plane has no runner. The worker loop is the only starter.
 	// A process that has a runner converges now so all-in-one does not wait for the tick.
 	if s.runner == nil {
+		return nil
+	}
+	s.mu.Lock()
+	current, ok := s.tasks[id]
+	idempotent := ok && current.SpecRevision == before && (current.State == StateRunning || current.State == StateStarting)
+	s.mu.Unlock()
+	if idempotent {
 		return nil
 	}
 	_, err := s.convergeTask(id)
@@ -163,8 +176,16 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	}
 	// A spec-0 active row still says desired STOP. The loop is starting it
 	// from the observed state. Persist RUN so the next read does not cancel it.
+	// The claim gate below reloads the memory row after it drops the lock, so
+	// the decision has to be on that row or the reload puts STOP back.
 	if effectiveDesired(task) == TaskDesiredRun {
 		task.DesiredRun = TaskDesiredRun
+	}
+	if current, ok := s.tasks[id]; ok {
+		current.DesiredRun = task.DesiredRun
+		current.RetryAttempt = task.RetryAttempt
+		current.ConsecutiveSourceFailures = task.ConsecutiveSourceFailures
+		s.tasks[id] = current
 	}
 	// Step 2: control-plane dispatch-only 分支（本地无 runner）。
 	// cluster control-plane 允许 dispatch-only start：仅写入 STARTING，由 worker 接管执行。
@@ -225,6 +246,21 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	}
 	acquiredNow := false
 	killedLeftover := false
+	if s.leaseManager != nil && opts.acquireLease {
+		if err := s.refuseMixedClaimLocked(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if s.refusalBlocksLocked(id, s.clusterWorkerID, time.Now()) {
+			s.mu.Unlock()
+			return ErrLeaseNotAcquired
+		}
+		task, ok = s.tasks[id]
+		if !ok {
+			s.mu.Unlock()
+			return ErrTaskNotFound
+		}
+	}
 	if s.leaseManager != nil && opts.acquireLease {
 		previousOwner := task.OwnerWorkerID
 		previousState := task.State
@@ -1336,19 +1372,21 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			s.SignalFailure(Finding{TaskID: id, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical,
 				Detail: "replication paused: the metadata store refused a write; the dump stopped and retries with backoff until the store accepts writes: " + errMsg})
 		}
-		// Allowlist only: SOURCE_UNREACHABLE (budget 10), transient metadata
-		// text, and OBJECT_PURGE_FAILED. Anything else fails once.
-		if !retryAllowed(err) {
+		// N7: SOURCE_AUTH and LOG_BIN_OFF stay on the retry path until
+		// terminalRetry has elapsed. Then Step writes FAILED and desired stays RUN.
+		// Other non-allowlist errors are EpochLost, not FAILED.
+		allowlistRetry := isTerminalAllowlist(err) && s.terminalWindowOpen(id, time.Now())
+		if !allowlistRetry && !retryAllowed(err) {
 			s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
 			return
 		}
-		if IsSourceUnreachable(err) {
+		if !allowlistRetry && IsSourceUnreachable(err) {
 			consecutiveSourceFailures++
 			if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
 				s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
 				return
 			}
-		} else {
+		} else if !allowlistRetry {
 			consecutiveSourceFailures = 0
 		}
 

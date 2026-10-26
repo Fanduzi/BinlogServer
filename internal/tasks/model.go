@@ -101,6 +101,24 @@ type Task struct {
 	// GET /api/tasks, /api/tasks/{id} and /api/dashboard. It is not stored;
 	// nil (omitted) only when this process cannot count findings.
 	OpenFindings *int `json:"open_findings,omitempty"`
+	// FailedReason is why the row is FAILED. Console reads it. Empty on every
+	// other phase. ADR 0011 allows SOURCE_AUTH, LOG_BIN_OFF, CHAIN_OWNER_GONE,
+	// and LEGACY_UNKNOWN.
+	FailedReason string `json:"failed_reason,omitempty"`
+	// RowGeneration is backup_tasks.row_generation. Zero means this process
+	// has not read it yet. A runner event then fences on epoch alone until
+	// the next read.
+	RowGeneration int64 `json:"-"`
+	// FailedAt is when FailedReason was written.
+	FailedAt time.Time `json:"-"`
+	// TailUnreadableSince is set by a tail yield and is not cleared by Start.
+	TailUnreadableSince time.Time `json:"-"`
+	// PendingDelete is set by operator Delete while a lease is still live.
+	PendingDelete bool `json:"-"`
+	// ChainOwner is task_chain.owner_node after ChainVerified.
+	ChainOwner string `json:"-"`
+	// ChainVerifiedAt is task_chain.verified_at. Zero means not verified.
+	ChainVerifiedAt time.Time `json:"-"`
 }
 
 // StorageAlert is a checkpoint or segment that cannot be continued safely.

@@ -897,6 +897,7 @@ func TestScheduler_FailedReleasesLeaseSoOtherWorkerCanStart(t *testing.T) {
 		WithClusterLeaseManager(leases),
 		WithClusterWorkerID("worker-a"),
 		WithClusterLease(ttl, time.Minute, time.Minute),
+		WithTerminalRetry(0),
 	)
 	task, err := a.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
@@ -992,8 +993,10 @@ func TestScheduler_RetryBackoffKeepsLeaseFromOtherWorker(t *testing.T) {
 	if err := b.Restore(context.Background()); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-	if err = b.StartTask(task.ID); err != nil {
-		t.Fatalf("operator Start while another worker holds the lease: %v", err)
+	err = b.StartTask(task.ID)
+	var op *OperatorError
+	if !errors.As(err, &op) || op.Status != 409 {
+		t.Fatalf("Start while another worker holds the lease: %v", err)
 	}
 	got, err := b.GetTask(task.ID)
 	if err != nil {
@@ -1211,8 +1214,8 @@ func TestScheduler_StartTaskDoesNotStealLiveLease(t *testing.T) {
 	}
 
 	err = s.StartTask(task.ID)
-	if err == nil || err.Error() != "cannot start from state RUNNING" {
-		t.Fatalf("expected cannot start from state RUNNING, got %v", err)
+	if err != nil {
+		t.Fatalf("idempotent Start of a live RUNNING task: %v", err)
 	}
 	got, err := s.GetTask(task.ID)
 	if err != nil {

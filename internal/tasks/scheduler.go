@@ -2,7 +2,7 @@
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
 // output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder and SourceSwitchBinder so a closing dump can KILL its thread with the current password and a VIP switch appends one SOURCE_SWITCHOVER event, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.; the attached health evaluator (healthEval), the periodic verifier attached by SetVerifier, a startup object-probe detail that does not change health status, an object-streak detail cleared when no task remains without zeroing the streak, and HoldChain so a rotate and that evaluator share one chain snapshot (#441)
 // pos: core domain orchestration layer governing backup task lifecycle and policies
-// note: if this file changes, update this header and module README.md. §29: yieldRelease, pendingRelease and yielded remember an epoch given up so a later claim can resume it. §29.10: ListTasksWithExpiredLease also returns STOPPED when desired RUN and the owner is empty.
+// note: if this file changes, update this header and module README.md. §29: yieldRelease, pendingRelease and yielded remember an epoch given up so a later claim can resume it. §29.10: ListTasksWithExpiredLease also returns STOPPED when desired RUN and the owner is empty. ADR 0011: terminalRetry defaults to 2 minutes, cluster.storage defaults to per_node, the refusal cap defaults to 600s, and a cluster gate refuses a storage mismatch or an older protocol.
 package tasks
 
 import (
@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"binlog_server/internal/binlog"
+	"binlog_server/internal/ownership"
 )
 
 var ErrTaskNotFound = errors.New("task not found")
@@ -291,6 +292,43 @@ func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
 	}
 }
 
+// WithTerminalRetry sets how long an allowlist failure retries before FAILED.
+// Zero or negative closes the window so the next error is terminal.
+func WithTerminalRetry(d time.Duration) Option {
+	return func(s *Scheduler) {
+		s.terminalRetry = d
+	}
+}
+
+// WithStorageMode sets cluster.storage. Anything other than shared is per_node.
+func WithStorageMode(mode string) Option {
+	return func(s *Scheduler) {
+		s.storageMode = strings.TrimSpace(mode)
+	}
+}
+
+// WithRefusalCap sets the shared and EpochLost refusal cap.
+func WithRefusalCap(d time.Duration) Option {
+	return func(s *Scheduler) {
+		s.refusalCap = d
+	}
+}
+
+// ClusterGate is the meta side of a claim: register cluster.storage, and
+// count registrations whose protocol is older than this binary.
+type ClusterGate interface {
+	RegisterClusterStorage(ctx context.Context, mode string) (registered string, err error)
+	CountOlderProtocols(ctx context.Context, self string, version int64) (int, error)
+}
+
+// WithClusterGate turns on the claim refusal for a storage mismatch or a
+// mixed-version registration. Claims skip it when the gate is nil.
+func WithClusterGate(g ClusterGate) Option {
+	return func(s *Scheduler) {
+		s.clusterGate = g
+	}
+}
+
 // WithDumpFenceRequired marks a cluster process. Without migration 000004 it
 // refuses to finish another worker's dump or to take that dump over.
 func WithDumpFenceRequired() Option {
@@ -347,6 +385,19 @@ type Scheduler struct {
 
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+	// terminalRetry is how long SOURCE_AUTH and LOG_BIN_OFF stay retryable
+	// before Step may write FAILED (ADR 0011 N7). Zero closes the window.
+	terminalRetry time.Duration
+	terminalSince map[string]time.Time
+	// storageMode is cluster.storage, per_node or shared.
+	storageMode string
+	// refusalCap is health.refusal_retry_cap_sec. Zero uses 600s.
+	refusalCap time.Duration
+	// clusterGate registers storage and counts older protocols before a claim.
+	clusterGate ClusterGate
+	// refusals is the in-memory task_node_refusal table. A claim skips a node
+	// whose refusal has not expired.
+	refusals map[string]map[string]ownership.Refusal
 	// 内部依赖调用超时治理：用于 store/lease/uploader 边界，避免无界阻塞。
 	internalReadTimeout   time.Duration
 	internalWriteTimeout  time.Duration
@@ -456,6 +507,9 @@ func NewScheduler(opts ...Option) *Scheduler {
 
 		retryBaseDelay:        time.Second,
 		retryMaxDelay:         30 * time.Second,
+		terminalRetry:         2 * time.Minute,
+		storageMode:           string(ownership.StoragePerNode),
+		refusalCap:            600 * time.Second,
 		leaseTTL:              15 * time.Second,
 		leaseRenewInterval:    5 * time.Second,
 		leaseGrace:            30 * time.Second,

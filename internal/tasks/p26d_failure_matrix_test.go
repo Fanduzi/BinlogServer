@@ -326,7 +326,7 @@ func TestFailurePathMatrix(t *testing.T) {
 	startFailed := func(t *testing.T, env *matrixEnv, r *matrixRunner) string {
 		task := env.newTask(t)
 		startAndWait(t, env.nodes[0].s, r, task.ID)
-		waitStoredState(t, env.table, task.ID, StateFailed)
+		waitStoredState(t, env.table, task.ID, StateLeaseDegraded)
 		env.cleanup(task.ID)
 		env.reload(task.ID)
 		return task.ID
@@ -353,13 +353,14 @@ func TestFailurePathMatrix(t *testing.T) {
 	}
 	rows := []matrixRow{
 		// markFailedLocked from a permanent runner error.
-		{name: "permanent-error", cluster: true, single: true, kind: health.TaskFailed, state: StateFailed,
+		// STREAM_REGRESSION is not on the terminal allowlist. It yields.
+		{name: "permanent-error", cluster: true, single: true, kind: "", state: StateLeaseDegraded,
 			runner: failWith(NewPermanentError(CodeStreamRegression, "event end pos 120 is behind stored pos 400 in mysql-bin.000003")), setup: startFailed},
 		// §24.8: a takeover whose catalog path is outside this worker's data_dir.
-		{name: "segment-not-on-worker", cluster: true, single: true, kind: health.TaskFailed, state: StateFailed,
+		{name: "segment-not-on-worker", cluster: true, single: true, kind: "", state: StateLeaseDegraded,
 			runner: failWith(NewPermanentError(CodeSegmentNotOnWorker, foreignSegmentError)), setup: startFailed},
-		// A runner error outside the retry allowlist fails once.
-		{name: "unclassified-error", cluster: true, single: true, kind: health.TaskFailed, state: StateFailed,
+		// A runner error outside the retry allowlist yields once. Desired stays RUN.
+		{name: "unclassified-error", cluster: true, single: true, kind: "", state: StateLeaseDegraded,
 			runner: failWith(errors.New("unexpected runner failure: boom")), setup: startFailed},
 		// RUNNING with the lease held, and the run never reports progress.
 		{name: "running-no-progress", cluster: true, single: true, kind: health.TaskNoProgress, state: StateRunning, detail: "has written nothing",

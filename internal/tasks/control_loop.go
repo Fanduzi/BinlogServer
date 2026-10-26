@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: backup_tasks desired_run, spec_revision, applied_spec_revision, failed_spec_revision, lease hold, and whether this process has a live dump
-// output: (writeStartIntent records Start through commitTransitionLocked: persist first, and only a recorded Start cancels a RETRY_BACKOFF loop) one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
+// output: (writeStartIntent records Start through ownership.Step and commitTransitionLocked: persist first, and only a recorded Start cancels a RETRY_BACKOFF loop; an idempotent STARTING or RUNNING Start does not Acquire; a process with no runner or no data directory writes owner-less STARTING) one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
 // pos: the only starter and stopper of a dump; operator Start, Stop, and spec edits write the row and this loop catches up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -9,7 +9,10 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
+
+	"binlog_server/internal/ownership"
 )
 
 // convergeAction is what one control-loop pass does for one task.
@@ -331,18 +334,10 @@ func (s *Scheduler) keepOwnerForReopenLocked(id string, run Task, fresh Task) {
 	s.tasks[id] = mem
 }
 
-func operatorStartState(state State) bool {
-	switch state {
-	case StateCreated, StateStopped, StateFailed, StateRetryBackoff, StateStopping:
-		return true
-	default:
-		return false
-	}
-}
-
-// writeStartIntent records operator Start. It does not Acquire and it does not
-// start a dump. A control-plane process (no runner) also mirrors STARTING with
-// an empty owner so an older claim query still sees the row.
+// writeStartIntent records operator Start by calling ownership.Step.
+// It does not Acquire. A process with no runner or no data directory writes
+// owner-less STARTING (N8). A node that will SQL-Acquire does not persist
+// the epoch Step would predict.
 func (s *Scheduler) writeStartIntent(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -364,9 +359,6 @@ func (s *Scheduler) writeStartIntent(id string) error {
 		}
 		return ErrTaskNotFound
 	}
-	if !operatorStartState(task.State) {
-		return errors.New("cannot start from state " + string(task.State))
-	}
 	if task.Source.Host == "" || task.Source.Port == 0 || task.Source.User == "" {
 		return ErrInvalidSourceConfig
 	}
@@ -374,29 +366,53 @@ func (s *Scheduler) writeStartIntent(id string) error {
 		return err
 	}
 
-	task.DesiredRun = TaskDesiredRun
-	task.SpecRevision++
-	task.RetryAttempt = 0
-	task.ConsecutiveSourceFailures = 0
-	task.LastError = ""
-	task.UpdatedAt = time.Now()
-
+	if s.runner == nil && s.leaseManager == nil {
+		return ErrRunnerNotConfigured
+	}
+	ownerless := s.runner == nil || strings.TrimSpace(s.dataDir) == ""
+	now := time.Now()
+	ev := ownership.Event{
+		Kind:        ownership.EventOperatorStart,
+		Node:        s.holderNode(),
+		Ownerless:   ownerless,
+		ChangesSpec: task.State != StateStarting && task.State != StateRunning,
+	}
+	res := ownership.Step(s.ownershipState(task, now), ev, now)
+	if res.Decision == ownership.DecisionIdempotent {
+		return nil
+	}
+	if res.Decision != ownership.DecisionApplied {
+		status := res.HTTP
+		if status == 0 {
+			status = 409
+		}
+		return &OperatorError{Status: status, Detail: res.Detail}
+	}
 	// Persist first (commitTransitionLocked). A refused write leaves the task
 	// as it was, including a RETRY_BACKOFF loop that still drives it: only a
 	// recorded Start cancels that loop (tip 53a9 P1).
+	task.DesiredRun = string(res.State.Desired)
+	task.SpecRevision = res.State.SpecRevision
+	task.RetryAttempt = 0
+	task.ConsecutiveSourceFailures = 0
+	task.LastError = ""
+	task.FailedReason = ""
+	task.FailedAt = time.Time{}
+	task.FailedSpecRevision = 0
+	task.RunID = ""
+	task.RowGeneration = res.State.RowGeneration
+	task.UpdatedAt = now
 	rec := transitionRecord{Action: "start", Type: "TASK_START_REQUESTED", Message: "operator start recorded"}
-	if s.runner == nil {
-		if s.leaseManager == nil {
-			return ErrRunnerNotConfigured
-		}
+	if ownerless {
 		task.OwnerWorkerID = ""
 		task.Epoch = 0
-		task.RunID = ""
 		rec.Type, rec.Message = "TASK_START_DISPATCHED", "task start dispatched to worker"
 	}
 	if err := s.commitTransitionLocked(task, StateStarting, rec); err != nil {
 		return err
 	}
+	// OperatorStart deletes every refusal. The claim gate reads this map.
+	s.rememberRefusalLocked(id, res.State)
 	if cancel, ok := s.cancels[id]; ok {
 		cancel()
 		delete(s.cancels, id)

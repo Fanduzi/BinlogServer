@@ -365,7 +365,7 @@ func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 // runner errors stop the retry loop and retain the operator-facing reason.
 func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
 	runner := &permanentFailureRunner{}
-	s := NewScheduler(WithRunner(runner))
+	s := NewScheduler(WithRunner(runner), WithTerminalRetry(0))
 
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
@@ -385,8 +385,8 @@ func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
 		if got.State == StateFailed {
-			if got.LastError != "SOURCE_ACCESS_DENIED: denied" {
-				t.Fatalf("expected permanent error detail, got %q", got.LastError)
+			if got.LastError != "SOURCE_ACCESS_DENIED: denied" || got.DesiredRun != TaskDesiredRun {
+				t.Fatalf("expected FAILED desired RUN, state=%s desired=%s last_error=%q", got.State, got.DesiredRun, got.LastError)
 			}
 			break
 		}
@@ -416,6 +416,45 @@ func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
 	}
 	if calls := runner.callCount(); calls != 1 {
 		t.Fatalf("expected runner called once, got %d", calls)
+	}
+}
+
+func TestAllowlistRetriesUntilTerminalWindow(t *testing.T) {
+	runner := &permanentFailureRunner{}
+	s := NewScheduler(WithRunner(runner), WithTerminalRetry(80*time.Millisecond), WithRetryBackoff(time.Millisecond, time.Millisecond))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	sawRetry := false
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateRetryBackoff {
+			sawRetry = true
+		}
+		if got.State == StateFailed {
+			if !sawRetry {
+				t.Fatal("allowlist error failed before the terminal window")
+			}
+			if got.DesiredRun != TaskDesiredRun || got.LastError != "SOURCE_ACCESS_DENIED: denied" {
+				t.Fatalf("state=%s desired=%s last_error=%q", got.State, got.DesiredRun, got.LastError)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected FAILED after the window, state=%s", got.State)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -486,19 +525,19 @@ func TestScheduler_UnreachableSourceFailsAfterTenConsecutiveAttempts(t *testing.
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if got.State == StateFailed {
-			if got.LastError != "SOURCE_UNREACHABLE: dial tcp: connection refused" {
-				t.Fatalf("expected stable source error detail, got %q", got.LastError)
+		if got.State == StateLeaseDegraded {
+			if got.DesiredRun != TaskDesiredRun || got.LastError != "SOURCE_UNREACHABLE: dial tcp: connection refused" {
+				t.Fatalf("expected a yield that keeps desired RUN, state=%s desired=%s last_error=%q", got.State, got.DesiredRun, got.LastError)
 			}
 			break
 		}
 		if time.Now().After(deadline) {
 			_ = s.StopTask(task.ID)
-			t.Fatalf("expected state %s after retry cap, got %s", StateFailed, got.State)
+			t.Fatalf("expected state %s after retry cap, got %s", StateLeaseDegraded, got.State)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	assertEventCounts(10, 9, 1)
+	assertEventCounts(10, 9, 0)
 	if calls := runner.callCount(); calls != 10 {
 		t.Fatalf("expected 10 runner attempts, got %d", calls)
 	}
@@ -506,8 +545,8 @@ func TestScheduler_UnreachableSourceFailsAfterTenConsecutiveAttempts(t *testing.
 	if err != nil {
 		t.Fatalf("ListEvents returned error: %v", err)
 	}
-	if n := len(events); n < 2 || events[n-2].Type != "TASK_RUNNER_ERROR" || events[n-1].Type != "TASK_FAILED" {
-		t.Fatalf("expected exhaustion to end with runner error then failed, got %#v", events)
+	if n := len(events); n < 2 || events[n-2].Type != "TASK_RUNNER_ERROR" || events[n-1].Type != "TASK_LEASE_DEGRADED" {
+		t.Fatalf("expected exhaustion to end with runner error then lease degraded, got %#v", events)
 	}
 }
 
@@ -647,9 +686,9 @@ func TestScheduler_UnlistedSourceCodeFailsOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if got.State == StateFailed {
-			if got.LastError != "SOURCE_THROTTLED: source busy" {
-				t.Fatalf("last_error=%q", got.LastError)
+		if got.State == StateLeaseDegraded {
+			if got.DesiredRun != TaskDesiredRun || got.LastError != "SOURCE_THROTTLED: source busy" {
+				t.Fatalf("last_error=%q desired=%s", got.LastError, got.DesiredRun)
 			}
 			break
 		}
@@ -657,7 +696,7 @@ func TestScheduler_UnlistedSourceCodeFailsOnce(t *testing.T) {
 			t.Fatalf("unlisted source code entered RETRY_BACKOFF: %s", got.LastError)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s", got.State)
+			t.Fatalf("expected LEASE_DEGRADED, state=%s", got.State)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

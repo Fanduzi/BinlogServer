@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; FAILED sets desired_run STOP and failed_spec_revision; a fail-safe stop leaves FAILED unchanged; STOPPING/STOPPED from lease-loss paths write through persistTaskFencedLocked (#360 / P2-6a)
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; a runner error goes through ownership.Step so FAILED keeps desired RUN and only the terminal allowlist reaches FAILED; a fail-safe stop leaves FAILED unchanged; STOPPING/STOPPED from lease-loss paths write through persistTaskFencedLocked (#360 / P2-6a)
 // note P2-6c (#421): markStoppedLocked and finishStoredStopLocked never write STOPPED over a stored FAILED row, STOPPED is fenced with this run's (owner, epoch), not the row read back, and markLeaseDegradedLocked leaves FAILED alone
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"binlog_server/internal/healthstore"
+	"binlog_server/internal/ownership"
 )
 
 func (s *Scheduler) markStartDispatchedLocked(task Task) error {
@@ -55,11 +56,13 @@ func (s *Scheduler) markRunnerReadyLocked(id string) error {
 	if !ok || task.State == StateStopped || task.State == StateStopping || task.State == StateRunning {
 		return nil
 	}
-	task.State = StateRunning
+	if _, applied := s.applyHolderEventLocked(id, ownership.EventDumpReady, "", time.Now()); !applied {
+		return nil
+	}
+	task = s.tasks[id]
 	task.LastError = ""
 	task.RetryAttempt = 0
 	task.ConsecutiveSourceFailures = 0
-	task.UpdatedAt = time.Now()
 	s.tasks[id] = task
 	s.appendEventLocked(id, "TASK_RUNNING", "runner is running", "")
 	return s.persistTaskLocked(task)
@@ -129,35 +132,81 @@ func logTransitionPersistError(id string, state State, err error) {
 	}
 }
 
-// markFailedLocked 将任务收敛到 FAILED，用于不可恢复的源库/配置错误。
-// StartTask 允许从 FAILED 再次启动，方便值班改完密码/配置后重试。
+// markRestoredFailedLocked keeps a standalone restore that cannot find a safe
+// position FAILED. Routing it through EpochLost would leave desired RUN and
+// LEASE_DEGRADED, and the next process would start at LATEST and skip
+// transactions. This is not a runner event. Desired stays RUN.
+func (s *Scheduler) markRestoredFailedLocked(id, message string) error {
+	task, ok := s.tasks[id]
+	if !ok {
+		return nil
+	}
+	task.State = StateFailed
+	task.DesiredRun = TaskDesiredRun
+	task.LastError = message
+	if task.SpecRevision == 0 {
+		task.SpecRevision = 1
+	}
+	task.FailedSpecRevision = task.SpecRevision
+	task.OwnerWorkerID = ""
+	task.RunID = ""
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_FAILED", "task failed", message)
+	return s.persistTaskLocked(task)
+}
+
+// markFailedLocked asks ownership.Step what this runner error writes.
+// SOURCE_AUTH and LOG_BIN_OFF become FAILED with desired RUN.
+// SEGMENT_NOT_ON_WORKER yields the tail. Every other message is EpochLost:
+// LEASE_DEGRADED and desired RUN. Desired STOP is not written here.
 func (s *Scheduler) markFailedLocked(id, message string) error {
 	task, ok := s.tasks[id]
 	if !ok {
 		return nil
 	}
-	if task.State == StateFailed {
+	kind, cause := failureKind(message)
+	if task.State == StateFailed && kind == ownership.EventTerminalError {
 		task.LastError = message
-		task.DesiredRun = TaskDesiredStop
+		task.FailedReason = string(cause)
+		if task.FailedReason == string(ownership.CauseSourceAuth) {
+			task.FailedReason = ownership.ReasonSourceAuth
+		}
+		if task.FailedReason == string(ownership.CauseLogBinOff) {
+			task.FailedReason = ownership.ReasonLogBinOff
+		}
+		task.DesiredRun = TaskDesiredRun
 		task.FailedSpecRevision = task.SpecRevision
 		s.tasks[id] = task
 		return s.persistTaskLocked(task)
 	}
-	task.State = StateFailed
-	task.DesiredRun = TaskDesiredStop
-	task.FailedSpecRevision = task.SpecRevision
-	task.LastError = message
-	task.OwnerWorkerID = ""
-	task.Epoch = 0
-	task.RunID = ""
-	task.UpdatedAt = time.Now()
-	s.tasks[id] = task
-	s.appendEventLocked(id, "TASK_FAILED", "task failed", message)
+	now := time.Now()
+	res, applied := s.applyHolderEventLocked(id, kind, cause, now)
+	if !applied && kind == ownership.EventTerminalError && res.Decision == ownership.DecisionRejected {
+		res, applied = s.applyHolderEventLocked(id, ownership.EventEpochLost, ownership.CauseUnclassified, now)
+	}
+	if !applied {
+		return nil
+	}
+	current := s.tasks[id]
+	current.LastError = message
+	if current.State == StateFailed && current.FailedSpecRevision == 0 {
+		current.FailedSpecRevision = current.SpecRevision
+	}
+	s.tasks[id] = current
+	eventType := "TASK_FAILED"
+	eventMessage := "task failed"
+	if current.State != StateFailed {
+		eventType = "TASK_LEASE_DEGRADED"
+		eventMessage = "runner yielded"
+	}
+	s.appendEventLocked(id, eventType, eventMessage, message)
 	if cancel, ok := s.cancels[id]; ok {
 		cancel()
 		delete(s.cancels, id)
 	}
-	return s.persistTaskLocked(task)
+	s.clearTerminalWindow(id)
+	return s.persistTaskLocked(current)
 }
 
 // markStoppedLocked 将任务收敛到最终 STOPPED 并清理运行时 ownership 字段。
@@ -249,9 +298,46 @@ func (s *Scheduler) writeStoppedLocked(id string, task Task, owner string, epoch
 	if owner == "" || epoch <= 0 {
 		owner, epoch = task.OwnerWorkerID, task.Epoch
 	}
+	now := time.Now()
+	st := s.ownershipState(task, now)
+	fenceNode := owner
+	if fenceNode == "" {
+		fenceNode = task.OwnerWorkerID
+	}
+	if fenceNode == "" {
+		fenceNode = s.holderNode()
+	}
+	leaseEpoch := epoch
+	if leaseEpoch <= 0 {
+		leaseEpoch = task.Epoch
+	}
+	st.Lease.Owner = fenceNode
+	if leaseEpoch > 0 {
+		st.Lease.Epoch = leaseEpoch
+	} else if st.Lease.Epoch <= 0 {
+		st.Lease.Epoch = 1
+	}
+	st.Lease.Present = true
+	st.Lease.ExpireAt = now.Add(time.Minute)
+	if task.DesiredRun == TaskDesiredStop || task.State == StateStopping || task.State == StateStopped {
+		st.Desired = ownership.DesiredStop
+		if task.State != StateStopped {
+			st.Phase = ownership.PhaseStopping
+		}
+	}
+	ev := ownership.Held(st, ownership.EventStopConfirmed, fenceNode)
+	res := ownership.Step(st, ev, now)
+	if res.Decision == ownership.DecisionApplied && res.State.Deleted {
+		s.noteStepIntentsLocked(id, res)
+		return s.commitDeleteLocked(id)
+	}
+	if res.Decision != ownership.DecisionApplied && res.Decision != ownership.DecisionIdempotent {
+		return nil
+	}
 	task.State = StateStopped
 	task.DesiredRun = TaskDesiredStop
-	// STOPPED 是“无执行归属”的稳定终态，清空运行时 ownership 字段。
+	// The task row drops its owner so the claim query can see it. The lease
+	// table keeps the epoch (Release does not zero it).
 	task.OwnerWorkerID = ""
 	task.Epoch = 0
 	task.RunID = ""

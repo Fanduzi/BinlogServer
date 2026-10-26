@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task mutation requests, metadata source policy, full create specs, TaskStore GetTask/ListTasks/ListTasksPage, and optional TaskDashboardRollup
-// output: source-isolated task CRUD/config updates, a spec_revision bump when source/start/storage/cluster_key change so the control loop restarts one dump, adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, does not copy a live run's row onto memory, and cancels that run when the row asks to stop, a GetTask read that started before the latest publish left in memory, GetTask that still returns this process's pending dump after STOPPED when the column is absent, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
+// output: source-isolated task CRUD/config updates, a spec_revision bump when source/start/storage/cluster_key change so the control loop restarts one dump, Delete through ownership.Step (a live lease becomes STOPPING with pending_delete; an idle row is removed), adopt of a leftover data directory onto the same id, primary-key GetTask refresh that fails on store errors, does not copy a live run's row onto memory, and cancels that run when the row asks to stop, a GetTask read that started before the latest publish left in memory, GetTask that still returns this process's pending dump after STOPPED when the column is absent, standalone leftover data_dir discovery when no task store is configured, unfiltered cluster observation from store.ListTasks, paged list reads, and dashboard counters that use SQL rollups when the store implements them
 // pos: scheduler task-management operations layer (non-runner lifecycle actions)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"binlog_server/internal/ownership"
 )
 
 func (s *Scheduler) CreateTask(name, clusterKey string) (Task, error) {
@@ -553,6 +555,39 @@ func (s *Scheduler) DeleteTask(id string) error {
 			return err
 		}
 		return ErrTaskNotFound
+	}
+	now := time.Now()
+	st := s.ownershipState(task, now)
+	if task.OwnerWorkerID != "" && task.Epoch > 0 {
+		st.Lease.Present = true
+		st.Lease.Owner = task.OwnerWorkerID
+		st.Lease.Epoch = task.Epoch
+		st.Lease.ExpireAt = now.Add(time.Minute)
+	}
+	res := ownership.Step(st, ownership.Event{Kind: ownership.EventOperatorDelete, Node: s.holderNode()}, now)
+	if res.Decision == ownership.DecisionRejected {
+		s.mu.Unlock()
+		status := res.HTTP
+		if status == 0 {
+			status = 409
+		}
+		return &OperatorError{Status: status, Detail: res.Detail}
+	}
+	if res.Decision == ownership.DecisionApplied && !res.State.Deleted {
+		task.DesiredRun = string(res.State.Desired)
+		task.PendingDelete = true
+		task.SpecRevision = res.State.SpecRevision
+		task.UpdatedAt = now
+		if err := s.commitTransitionLocked(task, StateStopping, transitionRecord{Action: "delete", Type: "TASK_STOPPING", Message: "delete recorded; the lease is still live"}); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if cancel, ok := s.cancels[id]; ok {
+			cancel()
+			delete(s.cancels, id)
+		}
+		s.mu.Unlock()
+		return nil
 	}
 	if err := s.commitDeleteLocked(id); err != nil {
 		s.mu.Unlock()

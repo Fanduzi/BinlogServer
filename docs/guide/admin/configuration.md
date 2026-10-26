@@ -175,6 +175,7 @@ export BINLOG_SERVER_META_DSN="root:pass@tcp(127.0.0.1:3306)/binlog_server_meta?
 | `cluster.lease_grace_sec` | int | 30 | 宽限期（秒） |
 | `cluster.failover_policy` | string | rebuild_current_file | 仍接受该值。接管不靠这个键切换。分段目录是 `binlog_files.file_path`，见[部署指南 6.3 第 2 节](deployment.md) |
 | `cluster.side_kill` | string | off | `off` 或 `auto`。缺省不演练。`auto` 只用于到 meta 的直连；会解析 SQL 的代理后面不要开 |
+| `cluster.storage` | string | per_node | `per_node` 或 `shared`。登记进 meta 后，另一边的值拒绝认领 |
 
 **角色说明：**
 
@@ -588,7 +589,8 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 | `health.unreachable_after_task_sec` | 空 | 按任务 id 覆盖上一行。每个值必须是正整数 |
 | `health.no_progress_after_sec` | 120 | 期望 RUN 的任务多久没有本地进展算 TASK_NO_PROGRESS，秒 |
 | `health.stale_after_sec` | 0 | 0 表示 5 倍 sweep。集群健康行过期则 HEALTH_STALE。需要 `health.evaluator: on` |
-| `health.node_gone_after_sec` | 0 | 0 表示 3 倍 sweep。最后一任链主人消失则 UNKNOWN。需要 `health.evaluator: on` |
+| `health.node_gone_after_sec` | 0 | 0 表示 max(3×sweep, lease_ttl+2×sweep)。显式值低于 lease_ttl+2×sweep 时拒绝启动。需要 `health.evaluator: on` |
+| `health.refusal_retry_cap_sec` | 600 | shared 的尾巴拒绝和 EpochLost 再次认领前的等待上限。负值拒绝启动 |
 | `health.signal_stale_after_sec` | 86400 | 信号多久没有新消息就降为 INFO，秒 |
 | `health.upload_late_critical_after_sec` | 86400 | 上传落后多久升级为 CRITICAL，秒 |
 | `health.upload_late_critical_after_task_sec` | 空 | 按任务 id 覆盖上一行。每个值必须是正整数 |

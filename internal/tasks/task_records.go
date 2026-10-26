@@ -446,7 +446,7 @@ func (s *Scheduler) restoredTask(rec taskRecord) (Task, string) {
 		t.Start = st
 	}
 	if rec.Failed != nil && rec.Failed.SpecRevision == rec.SpecRevision && rec.SpecRevision > 0 {
-		t.State, t.LastError, t.FailedSpecRevision, t.DesiredRun = StateFailed, rec.Failed.LastError, rec.Failed.SpecRevision, TaskDesiredStop
+		t.State, t.LastError, t.FailedSpecRevision, t.DesiredRun = StateFailed, rec.Failed.LastError, rec.Failed.SpecRevision, TaskDesiredRun
 	}
 	_, hasSegments, err := lookupDiskBackupTask(s.dataDir, t.ID)
 	if err != nil {
@@ -565,7 +565,7 @@ func (s *Scheduler) failRestoredLocked(id, msg string) {
 		t.SpecRevision = 1
 		s.tasks[id] = t
 	}
-	if err := s.markFailedLocked(id, msg); err != nil {
+	if err := s.markRestoredFailedLocked(id, msg); err != nil {
 		log.Printf("task records: task %s FAILED on restore, but not saved: %v", id, err)
 	}
 	log.Printf("task records: task %s FAILED on restore: %s", id, strings.TrimSpace(msg))

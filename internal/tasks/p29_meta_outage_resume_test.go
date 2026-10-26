@@ -522,7 +522,10 @@ func TestOperatorStopIsNotClaimed(t *testing.T) {
 
 func TestFailedTaskIsNotClaimed(t *testing.T) {
 	w := newP29World(t, time.Minute, time.Hour, time.Minute, false, false)
-	w.runner("n1").fail = NewPermanentError(CodeSegmentNotOnWorker, foreignSegmentError)
+	for _, node := range w.nodes {
+		node.terminalRetry = 0
+	}
+	w.runner("n1").fail = NewPermanentError(CodeSourceAccessDenied, "denied")
 	s := w.owner()
 	task := ownedIdleTask(t, s, "", 0, StateStopped)
 	if err := s.startTask(task.ID, taskStart{acquireLease: true}); err != nil {
@@ -536,7 +539,7 @@ func TestFailedTaskIsNotClaimed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != StateFailed || got.DesiredRun != TaskDesiredStop || got.LastError == "" || w.log.count() != before || w.openRuns(task.ID) != 0 {
+	if got.State != StateFailed || got.DesiredRun != TaskDesiredRun || got.LastError == "" || w.log.count() != before || w.openRuns(task.ID) != 0 {
 		t.Fatalf("after claim: %s desired %s err %q spans %d runs %d", got.State, got.DesiredRun, got.LastError, w.log.count(), w.openRuns(task.ID))
 	}
 }

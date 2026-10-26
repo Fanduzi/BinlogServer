@@ -435,7 +435,14 @@ func CheckStep(before, after State, e Event, res Result, now time.Time) []Violat
 		v = add(v, "8", "operator HTTP is 400")
 	}
 	if e.Kind == EventOperatorStart && res.HTTP == 204 && res.Decision == DecisionApplied {
-		if after.Phase != PhaseStarting || after.Desired != DesiredRun || after.RunID != "" || after.Lease.Owner == "" {
+		if after.Phase != PhaseStarting || after.Desired != DesiredRun || after.RunID != "" {
+			v = add(v, "8", "advancing Start did not commit STARTING")
+		}
+		if e.Ownerless {
+			if after.Lease.Owner != "" || after.Lease.Epoch != before.Lease.Epoch {
+				v = add(v, "8", "ownerless Start took a lease")
+			}
+		} else if after.Lease.Owner == "" {
 			v = add(v, "8", "advancing Start did not commit STARTING with an owner")
 		}
 		if !after.TailSince.Equal(before.TailSince) {

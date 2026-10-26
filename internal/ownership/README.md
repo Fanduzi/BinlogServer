@@ -42,7 +42,7 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 ## Dependencies
 
 - Upstream: 无。不导入调度器，不打开数据库。
-- Downstream: 集群元数据池用 `SessionKillBound` 武装会话超时；锁等待的打开和关闭调用 `Step`。调度器的让出和切回仍留到后续变更。catalog 一致性（F7）不在本包。
+- Downstream: 调度器的启动、停止、失败、认领和链确认调用 `Step`，不再自己推阶段。`Ownerless` 的 Start 写下空 owner 的 `STARTING`。集群元数据池用 `SessionKillBound` 武装会话超时。catalog 一致性（F7）不在本包。
 
 ## Update Rule
 

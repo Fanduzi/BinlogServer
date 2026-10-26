@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, one Event (LeaseUnreadable included), and the caller-supplied clock
-// output: Result, the next state, the side-effect intents, and one applied-event trace entry. NULL tail refusals are re-checked against CanRead. A lost chain directory becomes CHAIN_OWNER_GONE. ChainVerified and ChainOwnerBack reject a stopped, missing, or unreadable node
+// output: Result, the next state, the side-effect intents, and one applied-event trace entry. NULL tail refusals are re-checked against CanRead. A lost chain directory becomes CHAIN_OWNER_GONE. ChainVerified and ChainOwnerBack reject a stopped, missing, or unreadable node. Ownerless Start writes STARTING with an empty owner and does not Acquire
 // pos: the single transition function; it does no I/O and reads no clock
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -340,6 +340,9 @@ func operatorStart(s State, e Event, now time.Time) partial {
 	if LeaseLive(s, now) && s.Lease.Owner != e.Node {
 		return appliedPair(s, Result{Decision: DecisionRejected, HTTP: 409, Detail: string(s.Phase) + " lease_held"})
 	}
+	if e.Ownerless {
+		return ownerlessStart(s, e, now)
+	}
 	next := s
 	next.takeLease(e.Node, now)
 	next.bump()
@@ -358,6 +361,37 @@ func operatorStart(s State, e Event, now time.Time) partial {
 	next.clearRefusals()
 	intents := []Intent{{Kind: IntentAcquire, Node: e.Node, LocksTaskLease: true}}
 	if hadRefusal {
+		intents = append(intents, Intent{Kind: IntentDeleteRefusals})
+	}
+	return partial{state: next, result: Result{Decision: DecisionApplied, HTTP: 204, Detail: "STARTING", LocksTaskLease: true, Intents: intents}}
+}
+
+// ownerlessStart is N8. The accepting process does not hold the lease.
+// A live lease this node already holds is released in the same decision.
+func ownerlessStart(s State, e Event, now time.Time) partial {
+	next := s
+	next.bump()
+	next.Phase = PhaseStarting
+	next.Desired = DesiredRun
+	next.StoppedByOperator = false
+	next.SpecRevision++
+	next.RetryAttempt = 0
+	next.RetryUntil = time.Time{}
+	next.LastError = ""
+	next.RunID = ""
+	next.FailedReason = ""
+	next.FailedAt = time.Time{}
+	next.FailedSpec = 0
+	var intents []Intent
+	if LeaseLive(s, now) && s.Lease.Owner == e.Node {
+		release(&next, now)
+		intents = append(intents, Intent{Kind: IntentRelease, Node: e.Node})
+	} else {
+		next.Lease.Owner = ""
+	}
+	had := len(next.Refusal) > 0
+	next.clearRefusals()
+	if had {
 		intents = append(intents, Intent{Kind: IntentDeleteRefusals})
 	}
 	return partial{state: next, result: Result{Decision: DecisionApplied, HTTP: 204, Detail: "STARTING", LocksTaskLease: true, Intents: intents}}

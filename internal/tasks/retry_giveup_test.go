@@ -64,19 +64,19 @@ func TestScheduler_SealedFileExistsFailsAndReleasesLease(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if got.State == StateFailed {
+		if got.State == StateLeaseDegraded {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s last_error=%q calls=%d release=%d", got.State, got.LastError, runner.callCount(), leaseReleaseCount(lease))
+			t.Fatalf("expected LEASE_DEGRADED, state=%s last_error=%q calls=%d release=%d", got.State, got.LastError, runner.callCount(), leaseReleaseCount(lease))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got.LastError != "SEALED_FILE_EXISTS: sealed file already exists: mysql-bin.000003" {
-		t.Fatalf("last_error=%q", got.LastError)
+	if got.LastError != "SEALED_FILE_EXISTS: sealed file already exists: mysql-bin.000003" || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("last_error=%q desired=%s", got.LastError, got.DesiredRun)
 	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 {
-		t.Fatalf("expected lease identity cleared, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	if got.OwnerWorkerID != "" || got.Epoch != 3 {
+		t.Fatalf("release clears the owner and keeps the epoch, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
 	}
 	time.Sleep(40 * time.Millisecond)
 	if calls := runner.callCount(); calls != 1 {
@@ -85,7 +85,7 @@ func TestScheduler_SealedFileExistsFailsAndReleasesLease(t *testing.T) {
 	if got := leaseReleaseCount(lease); got != 1 {
 		t.Fatalf("expected one lease release, got %d", got)
 	}
-	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 1})
+	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 0, "TASK_LEASE_DEGRADED": 1})
 }
 
 func TestScheduler_UnclassifiedRunnerErrorFailsOnce(t *testing.T) {
@@ -110,25 +110,22 @@ func TestScheduler_UnclassifiedRunnerErrorFailsOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if got.State == StateFailed {
+		if got.State == StateLeaseDegraded {
 			break
 		}
 		if got.State == StateRetryBackoff {
 			t.Fatalf("unclassified error entered RETRY_BACKOFF: %s", got.LastError)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s last_error=%q", got.State, got.LastError)
+			t.Fatalf("expected LEASE_DEGRADED, state=%s last_error=%q", got.State, got.LastError)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got.LastError != "append failed" {
-		t.Fatalf("last_error=%q", got.LastError)
+	if got.LastError != "append failed" || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("last_error=%q desired=%s", got.LastError, got.DesiredRun)
 	}
-	if got.DesiredRun != TaskDesiredStop || got.FailedSpecRevision != got.SpecRevision || got.SpecRevision == 0 {
-		t.Fatalf("desired=%s failed_spec=%d spec=%d", got.DesiredRun, got.FailedSpecRevision, got.SpecRevision)
-	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 {
-		t.Fatalf("expected lease identity cleared, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	if got.OwnerWorkerID != "" || got.Epoch != 6 {
+		t.Fatalf("release clears the owner and keeps the epoch, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
 	}
 	time.Sleep(40 * time.Millisecond)
 	if calls := runner.callCount(); calls != 1 {
@@ -137,7 +134,7 @@ func TestScheduler_UnclassifiedRunnerErrorFailsOnce(t *testing.T) {
 	if got := leaseReleaseCount(lease); got != 1 {
 		t.Fatalf("expected one lease release, got %d", got)
 	}
-	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 1})
+	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 0, "TASK_LEASE_DEGRADED": 1})
 }
 
 func TestScheduler_StartAfterFailedArmsTask(t *testing.T) {
@@ -159,11 +156,11 @@ func TestScheduler_StartAfterFailedArmsTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if failed.State == StateFailed {
+		if failed.State == StateLeaseDegraded {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s", failed.State)
+			t.Fatalf("expected LEASE_DEGRADED, state=%s", failed.State)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

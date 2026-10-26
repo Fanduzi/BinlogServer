@@ -97,29 +97,48 @@ func TestClaimLoopUnreachableReachesFailedWithoutEpochClimb(t *testing.T) {
 		if got.Epoch > maxEpoch {
 			maxEpoch = got.Epoch
 		}
-		if got.State == StateFailed {
+		// Budget exhaustion is EpochLost: LEASE_DEGRADED, desired RUN.
+		// The refusal keeps this worker from acquiring again, so the epoch
+		// stays at the released lease epoch.
+		if got.State == StateLeaseDegraded {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s epoch=%d maxEpoch=%d calls=%d last_error=%q", got.State, got.Epoch, maxEpoch, runner.callCount(), got.LastError)
+			t.Fatalf("expected LEASE_DEGRADED, state=%s epoch=%d maxEpoch=%d calls=%d last_error=%q", got.State, got.Epoch, maxEpoch, runner.callCount(), got.LastError)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if maxEpoch != 1 {
-		t.Fatalf("lease epoch climbed to %d", maxEpoch)
+	if maxEpoch != started.Epoch || got.Epoch != started.Epoch {
+		t.Fatalf("lease epoch climbed, started=%d max=%d now=%d", started.Epoch, maxEpoch, got.Epoch)
+	}
+	if got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("desired=%s, want RUN", got.DesiredRun)
 	}
 	if !strings.HasPrefix(got.LastError, "SOURCE_UNREACHABLE:") {
 		t.Fatalf("last_error=%q", got.LastError)
 	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 {
-		t.Fatalf("FAILED should release the lease, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	if got.OwnerWorkerID != "" {
+		t.Fatalf("yield should clear the owner, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
 	}
 	if calls := runner.callCount(); calls != maxConsecutiveRetryableSourceFailures {
 		t.Fatalf("calls=%d, want %d", calls, maxConsecutiveRetryableSourceFailures)
 	}
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	after, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if after.Epoch != got.Epoch || after.State != StateLeaseDegraded {
+		t.Fatalf("refusal did not hold, state=%s epoch %d -> %d", after.State, got.Epoch, after.Epoch)
+	}
+	if calls := runner.callCount(); calls != maxConsecutiveRetryableSourceFailures {
+		t.Fatalf("refusal let another run start, calls=%d", calls)
+	}
 	releaseDeadline := time.Now().Add(time.Second)
 	for {
-		held, err := leases.Verify(context.Background(), task.ID, "worker-a", 1)
+		held, err := leases.Verify(context.Background(), task.ID, "worker-a", started.Epoch)
 		if err != nil {
 			t.Fatalf("Verify: %v", err)
 		}
@@ -127,7 +146,7 @@ func TestClaimLoopUnreachableReachesFailedWithoutEpochClimb(t *testing.T) {
 			break
 		}
 		if time.Now().After(releaseDeadline) {
-			t.Fatal("lease still held after FAILED")
+			t.Fatal("lease still held after the yield")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -180,13 +199,13 @@ func TestClaimCarriesRecordedSourceFailures(t *testing.T) {
 	if claimed != 1 {
 		t.Fatalf("expected the idle owned retry to be claimed, claimed=%d", claimed)
 	}
-	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
 	got, err := s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if !strings.HasPrefix(got.LastError, "SOURCE_UNREACHABLE:") {
-		t.Fatalf("last_error=%q", got.LastError)
+	if got.DesiredRun != TaskDesiredRun || !strings.HasPrefix(got.LastError, "SOURCE_UNREACHABLE:") {
+		t.Fatalf("state=%s desired=%s last_error=%q", got.State, got.DesiredRun, got.LastError)
 	}
 	if calls := runner.callCount(); calls != 1 {
 		t.Fatalf("calls=%d, want the one failure that exhausts the carried budget", calls)
@@ -219,13 +238,13 @@ func TestClaimExpiredTasksCarriesOldestFirstSourceStreak(t *testing.T) {
 	if claimed != 1 {
 		t.Fatalf("expected the expired retry to be claimed, claimed=%d", claimed)
 	}
-	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
 	got, err := s.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if !strings.HasPrefix(got.LastError, "SOURCE_UNREACHABLE:") {
-		t.Fatalf("last_error=%q", got.LastError)
+	if got.DesiredRun != TaskDesiredRun || !strings.HasPrefix(got.LastError, "SOURCE_UNREACHABLE:") {
+		t.Fatalf("state=%s desired=%s last_error=%q", got.State, got.DesiredRun, got.LastError)
 	}
 	if calls := runner.callCount(); calls != 1 {
 		t.Fatalf("calls=%d, want the one failure that exhausts the carried budget", calls)
@@ -329,7 +348,7 @@ func TestClaimUsesPersistedBudgetInsteadOfEvents(t *testing.T) {
 	if _, err := s.ClaimRunnableTasks(); err != nil {
 		t.Fatalf("ClaimRunnableTasks: %v", err)
 	}
-	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
 	if calls := runner.callCount(); calls != 1 {
 		t.Fatalf("calls=%d, want the one failure that exhausts the stored budget", calls)
 	}
@@ -337,8 +356,8 @@ func TestClaimUsesPersistedBudgetInsteadOfEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if got.DesiredRun != TaskDesiredStop || got.FailedSpecRevision != got.SpecRevision {
-		t.Fatalf("FAILED row desired=%s failed_spec=%d spec=%d", got.DesiredRun, got.FailedSpecRevision, got.SpecRevision)
+	if got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("yield row desired=%s, want RUN", got.DesiredRun)
 	}
 	if got.ConsecutiveSourceFailures != 10 {
 		t.Fatalf("consecutive=%d, want 10", got.ConsecutiveSourceFailures)
@@ -555,16 +574,16 @@ func TestTwoRestartsContinuePersistedSourceBudget(t *testing.T) {
 	if _, err := s.ClaimRunnableTasks(); err != nil {
 		t.Fatalf("ClaimRunnableTasks: %v", err)
 	}
-	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
 	got, err := store.GetTask(context.Background(), task.ID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if got.ConsecutiveSourceFailures != 10 || got.DesiredRun != TaskDesiredStop {
-		t.Fatalf("FAILED consecutive=%d desired=%s", got.ConsecutiveSourceFailures, got.DesiredRun)
+	if got.ConsecutiveSourceFailures != 10 || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("yield consecutive=%d desired=%s", got.ConsecutiveSourceFailures, got.DesiredRun)
 	}
-	if got.Epoch != 0 || got.OwnerWorkerID != "" {
-		t.Fatalf("lease not released owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	if got.Epoch == 0 || got.OwnerWorkerID != "" {
+		t.Fatalf("release keeps the epoch and clears the owner, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
 	}
 }
 
@@ -605,7 +624,7 @@ func TestOpenDumpDisconnectCountsTowardSourceBudget(t *testing.T) {
 	runner := &dumpDeathRunner{}
 	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
 	task := mustStartSourcedTask(t, s)
-	waitTaskState(t, s, task.ID, 2*time.Second, StateFailed)
+	waitTaskState(t, s, task.ID, 2*time.Second, StateLeaseDegraded)
 	if calls := runner.callCount(); calls != 14 {
 		got, _ := s.GetTask(task.ID)
 		t.Fatalf("calls=%d, want 14 (4 failures, one ready disconnect, then 9 more), state=%s last_error=%q", calls, got.State, got.LastError)

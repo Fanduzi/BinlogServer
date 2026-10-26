@@ -75,6 +75,9 @@ const (
 	// bound twice (ADR 0011). Task _cluster, subject the task id. Not a
 	// managed health kind, so Reconcile does not close it.
 	FindingMetaLockStalled FindingKind = "META_LOCK_STALLED"
+	// FindingMixedVersion: a live registration is still on a protocol older
+	// than this binary (ADR 0011). Task _cluster. Claims are refused.
+	FindingMixedVersion FindingKind = "MIXED_VERSION"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.

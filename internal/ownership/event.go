@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: the event enum in ADR 0011 §3.2, plus the clock the caller passes to Step
-// output: Event and Cause, the only inputs Step reads besides State
+// output: Event and Cause, the only inputs Step reads besides State; Ownerless marks an API-only Start that does not Acquire
 // pos: names of every transition the ADR lists
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -73,6 +73,11 @@ type Event struct {
 	// LeaseUnreadable means the decider could not read task_leases and must not
 	// assume the lease is still its own.
 	LeaseUnreadable bool
+	// Ownerless is an OperatorStart from a process that has no runner or no
+	// data directory. It writes STARTING with an empty owner and does not
+	// bump the epoch, so a node that has the directory can claim the row.
+	// The default is false: a normal Start still Acquires.
+	Ownerless bool
 }
 
 // Held fills the epoch fence from the lease the caller believes it holds.
