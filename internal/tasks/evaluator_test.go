@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task directories with duplicated, stale-open, empty-leftover and bit-rotted segments, health stores that fail, fence or block, and evaluator modes off/shadow/on
-// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (four workers, the merged pass is applied at exactly one debounce, a second worker cannot enter the same task, and a mark after idle leaves the evaluator not idle) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a cold pass over 150 and 1500 segments stays within 56 filesystem operations per segment plus 16 and the 1500-segment pass stays within 10.5 times the 150-segment pass, with a 2s ceiling on the 1500-segment pass, a second pass over an unchanged directory reuses the chain cache, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
+// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (four workers, the merged pass is applied at exactly one debounce, a second worker cannot enter the same task, and a mark after idle leaves the evaluator not idle) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a cold pass over 150 and 1500 segments stays within 36 filesystem operations per segment plus 16 and the 1500-segment pass stays within 10.5 times the 150-segment pass, with a 2s hang ceiling on the 1500-segment pass, a second pass over an unchanged directory reuses the chain cache, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5, §5.7, §6)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -799,13 +799,12 @@ func TestNodeIDPersistsInDataDir(t *testing.T) {
 // Stat, Lstat, Open, OpenFile, ReadDir, ReadFile, Glob and StampOf share one
 // counter. Ten times the segments stay within 10.5 times the operations.
 // The chain cache is not warmed first, so the measured pass is the walk.
-// maxPerSeg is loose: one extra operation per pass still fits. So does a
-// nest of n/10 extra stats inside Segments. That loop runs twice, and the
-// 150-segment pass then does 8112 operations, which is still under 56 per
-// segment plus 16. The 10.5x ratio rejects it. A cap of 26 would fail the
-// nest on the per-segment line and hide the ratio. The 150-segment pass has
-// no wall-clock ceiling. The 1500-segment pass stays under 2s, which is
-// what catches a 0.7ms sleep inside the per-segment walk.
+// maxPerSeg is about 1.5 times the measured cold count (24 per segment).
+// One extra operation per pass still fits. A nest that grows with the
+// segment count is rejected by the 10.5x ratio when it still fits this
+// cap, and by this cap when it does not. The 2s ceiling is only a gross
+// hang guard. A constant per-segment slowdown that never touches the
+// filesystem is out of scope.
 func TestEvaluator_1500SegmentsNearLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("benchmark-style QA condition")
@@ -813,7 +812,7 @@ func TestEvaluator_1500SegmentsNearLinear(t *testing.T) {
 	const (
 		smallN       = 150
 		largeN       = 1500
-		maxPerSeg    = 56
+		maxPerSeg    = 36
 		walkOverhead = 16
 		largeCeiling = 2 * time.Second
 	)
@@ -832,7 +831,8 @@ func TestEvaluator_1500SegmentsNearLinear(t *testing.T) {
 	}
 	checkOps(smallN, opsSmall)
 	// 10.5x, with the integer form opsLarge*2 <= opsSmall*21.
-	// Checked before the large per-segment cap so an n/10 nest fails here.
+	// Checked before the large per-segment cap so a nest that still fits
+	// the 150-segment cap fails here.
 	if opsSmall <= 0 || opsLarge*2 > opsSmall*21 {
 		t.Fatalf("%d segments did %d ops, %d did %d; want at most 10.5x", largeN, opsLarge, smallN, opsSmall)
 	}
