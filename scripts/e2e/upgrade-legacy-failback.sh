@@ -304,13 +304,15 @@ write_config
 # match A, and none of the removed files may come back to disk.
 object_only_restore() {
   local gone="$OUT/object-only-gone" ext="$OUT/object-only-archive" tarball="$OUT/object-only.tar"
-  local rel name n=0 rc=0 want got
+  local rel name path n=0 rc=0 want got
   local -a removed=() members=() files=()
   mkdir -p "$gone" "$ext"
   while IFS=$'\t' read -r rel name; do
-    [[ -n "$rel" && -f "$DATA/$rel" ]] || die "object-only: sealed UPLOADED row $rel is not on disk before removal"
-    mv "$DATA/$rel" "$gone/$name"
-    removed+=("$rel")
+    # file_path is absolute in NEW's rows and relative to $DATA in older ones.
+    if [[ "$rel" == /* ]]; then path="$rel"; else path="$DATA/$rel"; fi
+    [[ -n "$rel" && -f "$path" ]] || die "object-only: sealed UPLOADED row $rel is not on disk before removal"
+    mv "$path" "$gone/$name"
+    removed+=("$path")
     n=$((n + 1))
   done < <(m "$P_META" "SELECT file_path, SUBSTRING_INDEX(file_path, '/', -1) FROM fbup.binlog_files WHERE task_id='$TASK' AND state='SEALED' AND upload_state='UPLOADED' AND object_key IS NOT NULL AND object_key<>'' ORDER BY id")
   [[ "$n" -gt 0 ]] || die "object-only: no sealed UPLOADED rows to remove"
@@ -332,7 +334,7 @@ object_only_restore() {
   [[ "${#members[@]}" -gt 0 ]] || die "object-only: empty replay archive"
   tar -xf "$tarball" -C "$ext"
   for rel in "${removed[@]}"; do
-    [[ ! -e "$DATA/$rel" ]] || die "object-only: ${rel##*/} came back to disk while serving the archive"
+    [[ ! -e "$rel" ]] || die "object-only: ${rel##*/} came back to disk while serving the archive"
     [[ -f "$ext/${rel##*/}" ]] || die "object-only: archive has no member ${rel##*/}"
     cmp -s "$ext/${rel##*/}" "$gone/${rel##*/}" || die "object-only: archive member ${rel##*/} differs from the removed file"
   done
@@ -350,7 +352,7 @@ object_only_restore() {
   log "object-only restore apply rc=$rc $(grep -v Warning "$OUT/object-only.apply.err" | head -1) checksum A=$want restore=$got"
   [[ "$rc" == 0 && -n "$want" && "$want" == "$got" ]] || die "object-only restore checksum A=$want restore=$got rc=$rc"
   for rel in "${removed[@]}"; do
-    [[ ! -e "$DATA/$rel" ]] || die "object-only: ${rel##*/} came back to disk during the restore"
+    [[ ! -e "$rel" ]] || die "object-only: ${rel##*/} came back to disk during the restore"
   done
   log "evidence: object-only restore from MinIO ($n sealed segment(s) absent from disk, $FIRST among them) checksum $got matches A"
 }
