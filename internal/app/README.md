@@ -12,7 +12,7 @@
 - `tracing.go`: tracing provider 初始化与生命周期管理。
 - `tracing_test.go`: OTLP HTTP 默认 traces 路径兼容性回归测试。
 - `http_server_test.go`: HTTP 超时、PRODUCTION 以及非 loopback listen 的 auth fail-closed 校验测试。
-- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由、未带凭证可打开 Console、ClaimRunnableTasks 恢复、以及认领循环回归。
+- `smoke_test.go`: 应用层烟测（HTTP 创建任务需带 `source.password`），包括 auth 到真实路由、未带凭证可打开 Console、ClaimRunnableTasks 恢复、以及认领循环回归。`waitRunExit` 等的是 HTTP、runner、后台和 finding 四段关停预算之和再加一秒（`Serve` 先在 HTTP 关停里返回，defer 再等后面三段）。
 - `restart_recovery_test.go`: standalone 重启后安全的持久化 active task 自动恢复、metadata/source 冲突任务保持停止的回归测试。
 - `source_guard_test.go`: 从 `meta_dsn` 到任务 API 的 metadata/source 隔离装配回归测试。
 

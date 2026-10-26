@@ -55,7 +55,15 @@ func itoa(n int64) string {
 }
 
 func TestOpenEpochENOENTAfterTakeoverDoesNotFail(t *testing.T) {
-	w := newP29World(t, 150*time.Millisecond, time.Hour, time.Hour, false, false)
+	// The new owner's lease must not expire while this test joins the old
+	// run. A 150ms TTL does: under -race the join outlasts it, the other
+	// peer claims, and two runs stay open because renew is not due for an
+	// hour. Advance a frozen lease clock once so only the original lease
+	// expires.
+	const ttl = time.Hour
+	clock := &leaseTestClock{now: time.Now()}
+	w := newP29World(t, ttl, time.Hour, time.Hour, false, false)
+	w.leases.now = clock.Now
 	release := make(chan struct{})
 	t.Cleanup(func() {
 		select {
@@ -66,6 +74,7 @@ func TestOpenEpochENOENTAfterTakeoverDoesNotFail(t *testing.T) {
 	})
 	w.owner().SetRunner(&statOpenRunner{node: "n1", log: w.log, release: release})
 	id, epoch := w.start()
+	clock.Advance(ttl + time.Second)
 	deadline := time.Now().Add(2 * time.Second)
 	for !w.leaseFree(id) {
 		if time.Now().After(deadline) {
