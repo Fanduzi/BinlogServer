@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # input: dist/ from a goreleaser run (metadata.json plus the linux_amd64 tar.gz); GITHUB_SHA,
-#        and GITHUB_REF_TYPE / GITHUB_REF_NAME when run for a tag
+#        and GITHUB_REF_TYPE / GITHUB_REF_NAME when run for a tag; RELEASE_IDENTITY_SNAPSHOT=true
+#        when the caller built a snapshot on purpose (e2e.yml, also when release.yml calls it for a tag)
 # output: runs check-linux-release-archive.sh on that archive with EXPECT_COMMIT=GITHUB_SHA and
-#         EXPECT_VERSION=the version goreleaser built (for a tag, it must also be the tag without "v")
+#         EXPECT_VERSION=the version goreleaser built (for a tag, it must also be the tag without "v",
+#         unless RELEASE_IDENTITY_SNAPSHOT=true)
 # pos: release.yml (before and after publish) and e2e.yml release-archive (snapshot on every PR)
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -12,7 +14,7 @@ cd "$ROOT_DIR"
 
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
 version="$(jq -er '.version' dist/metadata.json)"
-if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "$version" != "${GITHUB_REF_NAME#v}" ]]; then
+if [[ "${RELEASE_IDENTITY_SNAPSHOT:-}" != "true" && "${GITHUB_REF_TYPE:-}" == "tag" && "$version" != "${GITHUB_REF_NAME#v}" ]]; then
   echo "[release-identity] error: goreleaser built version ${version}, tag is ${GITHUB_REF_NAME}" >&2
   exit 1
 fi
