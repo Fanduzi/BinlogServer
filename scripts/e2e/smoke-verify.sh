@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # input: docker or a GitHub MinIO release binary, and the phase 3 verifier tests
 # output: MinIO started on 127.0.0.1, then TestVerifyAgainstMinIO (delete one object, flip one object byte, flip one local byte)
-# pos: real-object scenario for ADR 0009 phase 3; not in the quick profile and not selected by any CI job
+# pos: real-object scenario for ADR 0009 phase 3; not in the quick profile; run by the e2e-verify job in e2e.yml on every PR
+#      (fails if the test is skipped, so a missing MinIO env can't pass silently)
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -87,4 +88,12 @@ VERIFY_MINIO_ENDPOINT="127.0.0.1:${MINIO_PORT}" \
   VERIFY_MINIO_ACCESS_KEY="$MINIO_USER" \
   VERIFY_MINIO_SECRET_KEY="$MINIO_PASS" \
   VERIFY_MINIO_BUCKET="$MINIO_BUCKET" \
-  go test -count=1 -run TestVerifyAgainstMinIO ./internal/assurance/
+  go test -count=1 -v -run '^TestVerifyAgainstMinIO$' ./internal/assurance/ | tee "/tmp/binlog-e2e-verify-${RUN_TAG}.out"
+if grep -q -- '--- SKIP' "/tmp/binlog-e2e-verify-${RUN_TAG}.out"; then
+  echo "[verify] TestVerifyAgainstMinIO was skipped" >&2
+  exit 1
+fi
+grep -q -- '--- PASS: TestVerifyAgainstMinIO' "/tmp/binlog-e2e-verify-${RUN_TAG}.out" || {
+  echo "[verify] TestVerifyAgainstMinIO did not pass" >&2
+  exit 1
+}

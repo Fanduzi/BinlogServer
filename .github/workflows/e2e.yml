@@ -30,6 +30,7 @@ on:
           - gtid-pitr
           - source-switchover
           - meta-failover
+          - verify
 
 permissions:
   contents: read
@@ -109,7 +110,7 @@ jobs:
             ./...
 
   unit-and-e2e:
-    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover') }}
+    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -318,6 +319,26 @@ jobs:
       - name: Cleanup
         if: always()
         run: ./scripts/e2e/down.sh
+
+  e2e-verify:
+    # ADR 0009 phase 3 against a real MinIO (Quay image, GitHub release binary
+    # as fallback; no registry login). No source database compose.
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'verify' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: E2E Verify Against MinIO
+        run: ./scripts/e2e/smoke-verify.sh
 
   e2e-split-retention:
     if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'split-retention' }}
