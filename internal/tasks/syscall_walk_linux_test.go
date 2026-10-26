@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,7 +94,9 @@ func countColdWalk(t *testing.T, n int) walkCount {
 	logPath := filepath.Join(t.TempDir(), "strace.log")
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "strace", "-f", "-s", "80", "-e", "trace=%file,%desc,getdents64", "-o", logPath, "--", exe, "-syscall-walk", strconv.Itoa(n))
+	// -tt stamps every line so a syscall finished on another thread can be
+	// sorted back between the two sentinel unlinks.
+	cmd := exec.CommandContext(ctx, "strace", "-f", "-tt", "-s", "80", "-e", "trace=%file,%desc,getdents64", "-o", logPath, "--", exe, "-syscall-walk", strconv.Itoa(n))
 	cmd.Env = envWithoutMeta()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -105,7 +108,10 @@ func countColdWalk(t *testing.T, n int) walkCount {
 	}
 	total, counts, err := countWalkSyscalls(string(text))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%v\n%s", err, straceSample(string(text)))
+	}
+	if total < n {
+		t.Fatalf("%d-segment trace counted %d filesystem syscalls\n%s", n, total, straceSample(string(text)))
 	}
 	got := walkCount{n: total, detail: formatSyscallCounts(counts)}
 	t.Logf("%d segments %d syscalls %s", n, total, got.detail)
@@ -164,6 +170,10 @@ func syscallWalkPass(n int) error {
 		Mode: EvaluatorShadow, Store: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
 		NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond,
 	})
+	// Keep the two sentinel unlinks on this OS thread. The walk itself may
+	// still run on others; -tt puts those lines back in order.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	_ = syscall.Unlink(walkSentinelStart)
 	_, err = e.EvaluateNow(context.Background(), task.ID)
 	_ = syscall.Unlink(walkSentinelEnd)
@@ -189,7 +199,7 @@ func syscallWalkSegment(seq int64) []byte {
 }
 
 func countWalkSyscalls(text string) (int, map[string]int, error) {
-	lines := strings.Split(text, "\n")
+	lines := straceLinesInOrder(text)
 	start, end := -1, -1
 	for i, line := range lines {
 		if start < 0 && strings.Contains(line, walkSentinelStart) {
@@ -200,7 +210,7 @@ func countWalkSyscalls(text string) (int, map[string]int, error) {
 		}
 	}
 	if start < 0 || end <= start {
-		return 0, nil, fmt.Errorf("sentinel window missing (start=%d end=%d)", start, end)
+		return 0, nil, fmt.Errorf("sentinel window missing (start=%d end=%d lines=%d)", start, end, len(lines))
 	}
 	counts := map[string]int{}
 	total := 0
@@ -215,34 +225,106 @@ func countWalkSyscalls(text string) (int, map[string]int, error) {
 	return total, counts, nil
 }
 
-func walkSyscallName(line string) (string, bool) {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.Contains(line, "+++") || strings.Contains(line, "resumed>") {
-		return "", false
+// straceLinesInOrder sorts timestamped lines. strace -f does not promise
+// that a line is printed before a later syscall on another thread.
+func straceLinesInOrder(text string) []string {
+	lines := strings.Split(text, "\n")
+	type stamped struct {
+		ts, line string
+		i        int
 	}
+	items := make([]stamped, len(lines))
+	saw := false
+	for i, line := range lines {
+		ts, _ := stracePrefix(line)
+		if ts != "" {
+			saw = true
+		}
+		items[i] = stamped{ts: ts, line: line, i: i}
+	}
+	if !saw {
+		return lines
+	}
+	sort.SliceStable(items, func(a, b int) bool {
+		if items[a].ts == items[b].ts {
+			return items[a].i < items[b].i
+		}
+		if items[a].ts == "" {
+			return false
+		}
+		if items[b].ts == "" {
+			return true
+		}
+		return items[a].ts < items[b].ts
+	})
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = item.line
+	}
+	return out
+}
+
+func stracePrefix(line string) (ts, rest string) {
+	line = strings.TrimSpace(line)
 	if strings.HasPrefix(line, "[pid ") {
 		i := strings.Index(line, "] ")
 		if i < 0 {
-			return "", false
+			return "", line
 		}
-		line = line[i+2:]
-	} else if i := strings.IndexByte(line, ' '); i > 0 && digitsOnly(line[:i]) {
-		line = line[i+1:]
+		line = strings.TrimSpace(line[i+2:])
 	}
-	if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "<...") {
+	if i := strings.IndexByte(line, ' '); i > 0 && digitsOnly(line[:i]) {
+		line = strings.TrimSpace(line[i+1:])
+	}
+	if sp := strings.IndexByte(line, ' '); sp > 0 && isStraceTimestamp(line[:sp]) {
+		return line[:sp], strings.TrimSpace(line[sp+1:])
+	}
+	return "", line
+}
+
+func isStraceTimestamp(s string) bool {
+	// HH:MM:SS.fraction
+	if len(s) < 15 || s[2] != ':' || s[5] != ':' || s[8] != '.' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 2 || i == 5 || i == 8 {
+			continue
+		}
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func walkSyscallName(line string) (string, bool) {
+	_, rest := stracePrefix(line)
+	if rest == "" || strings.Contains(rest, "+++") || strings.Contains(rest, "resumed>") {
 		return "", false
 	}
-	paren := strings.IndexByte(line, '(')
+	if strings.HasPrefix(rest, "---") || strings.HasPrefix(rest, "<...") {
+		return "", false
+	}
+	paren := strings.IndexByte(rest, '(')
 	if paren <= 0 {
 		return "", false
 	}
-	name := line[:paren]
+	name := rest[:paren]
 	for _, c := range name {
 		if c != '_' && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return "", false
 		}
 	}
 	return name, true
+}
+
+func straceSample(text string) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) > 24 {
+		lines = append(lines[:12], append([]string{"..."}, lines[len(lines)-12:]...)...)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func digitsOnly(s string) bool {
@@ -295,5 +377,18 @@ func TestCountWalkSyscalls_Window(t *testing.T) {
 	}
 	if total != 3 || counts["openat"] != 1 || counts["getdents64"] != 1 || counts["read"] != 1 || counts["mmap"] != 0 {
 		t.Fatalf("total %d counts %v", total, counts)
+	}
+	reordered := strings.Join([]string{
+		`9 12:00:00.300000 unlinkat(AT_FDCWD, "/tmp/binlog-walk-sentinel-end", 0) = -1 ENOENT`,
+		`9 12:00:00.200000 openat(AT_FDCWD, "a", O_RDONLY) = 3`,
+		`[pid 10] 12:00:00.100000 unlinkat(AT_FDCWD, "/tmp/binlog-walk-sentinel-start", 0) = -1 ENOENT`,
+		`[pid 10] 12:00:00.250000 getdents64(3, [], 8192) = 10`,
+	}, "\n")
+	total, counts, err = countWalkSyscalls(reordered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || counts["openat"] != 1 || counts["getdents64"] != 1 {
+		t.Fatalf("reordered total %d counts %v", total, counts)
 	}
 }
