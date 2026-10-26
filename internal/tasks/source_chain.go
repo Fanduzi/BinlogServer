@@ -7,7 +7,6 @@ package tasks
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -413,7 +412,7 @@ func readSourceChainFile(dir string) []string {
 	if strings.TrimSpace(dir) == "" {
 		return nil
 	}
-	body, err := os.ReadFile(filepath.Join(dir, sourceChainFileName))
+	body, err := binlog.ReadFile(filepath.Join(dir, sourceChainFileName))
 	if err != nil {
 		return nil
 	}

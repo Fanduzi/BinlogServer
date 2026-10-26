@@ -1,7 +1,7 @@
 // Package binlog provides module-level functionality for binlog.
-// input: the Go sources of the segment walk (this package except the seam, the assurance chain, and the evaluator's disk call sites)
-// output: a failure naming any os.Stat, os.Open, os.ReadDir, os.Lstat, os.ReadFile or filepath.Walk outside walk_ops.go
-// pos: the structural guard so a nested walk cannot dodge WalkOps by calling os directly
+// input: evaluator.go's imports, plus every non-test Go file in those packages and in internal/tasks
+// output: a failure naming any banned filesystem call outside the seam allowlist
+// pos: the structural guard so a nested walk cannot dodge WalkOps by calling os, filepath, io/fs, syscall or unix directly
 // note: if this file changes, update this header and module README.md.
 package binlog
 
@@ -11,23 +11,60 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-var walkGuardOS = map[string]bool{
-	"Stat": true, "Open": true, "ReadDir": true, "Lstat": true, "ReadFile": true,
+// walkGuardAllow is the only production files that may call the banned set.
+// Each value is the one-line reason. The seam counts every call, including
+// writes, so a directory read cannot hide in a file that also writes.
+var walkGuardAllow = map[string]string{
+	"internal/binlog/walk_ops.go": "counted seam for Stat, Lstat, Open, OpenFile, ReadDir, ReadFile, Glob and StampOf",
 }
 
-var walkGuardFilepath = map[string]bool{"Walk": true, "WalkDir": true}
+var walkGuardOS = map[string]bool{
+	"Stat": true, "Lstat": true, "Open": true, "OpenFile": true,
+	"ReadDir": true, "ReadFile": true, "DirFS": true,
+}
 
-// LoadOrCreateNodeID reads .node_id. That is not the segment walk.
-var walkGuardSkipFunc = map[string]bool{"LoadOrCreateNodeID": true}
+var walkGuardFilepath = map[string]bool{"Walk": true, "WalkDir": true, "Glob": true}
+
+var walkGuardFS = map[string]bool{
+	"Stat": true, "ReadDir": true, "ReadFile": true, "WalkDir": true, "Glob": true, "DirFS": true,
+}
+
+var walkGuardSyscall = map[string]bool{
+	"Stat": true, "Lstat": true, "Fstat": true, "Fstatat": true,
+}
+
+var walkGuardMethod = map[string]bool{"Readdirnames": true, "Readdir": true}
 
 func TestWalkSeam_NoDirectOSOutsideSeam(t *testing.T) {
 	root := moduleRoot(t)
-	paths, err := walkGuardPaths(root)
+	for path, reason := range walkGuardAllow {
+		if strings.TrimSpace(reason) == "" || strings.Contains(reason, "\n") {
+			t.Fatalf("%s: allowlist reason must be one non-empty line", path)
+		}
+	}
+	pkgs, err := walkGuardPackages(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"internal/tasks", "internal/binlog", "internal/assurance", "internal/health", "internal/healthstore"} {
+		if !pkgs[want] {
+			t.Fatalf("packages reached from the walk entry: %v, missing %s", pkgNames(pkgs), want)
+		}
+	}
+	// replication, app and upload are not imported by the walk entry.
+	for _, out := range []string{"internal/replication", "internal/app", "internal/upload"} {
+		if pkgs[out] {
+			t.Fatalf("walk derivation included %s, which evaluator.go does not import", out)
+		}
+	}
+	t.Logf("walk packages: %s", strings.Join(pkgNames(pkgs), ", "))
+	paths, err := walkGuardPaths(root, pkgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,18 +83,38 @@ func TestWalkSeam_NoDirectOSOutsideSeam(t *testing.T) {
 }
 
 func TestWalkSeam_GuardFlagsDirectOS(t *testing.T) {
-	flagged := "package p\nimport \"os\"\nfunc f() { _, _ = os.ReadDir(\"x\") }\n"
-	if hits := walkGuardSource(t, "flagged.go", flagged); len(hits) != 1 || !strings.Contains(hits[0], "os.ReadDir") {
-		t.Fatalf("os.ReadDir: %v", hits)
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"readdir", "package p\nimport \"os\"\nfunc f() { _, _ = os.ReadDir(\"x\") }\n", "os.ReadDir"},
+		{"openfile", "package p\nimport \"os\"\nfunc f() { f, _ := os.OpenFile(\"x\", os.O_RDONLY, 0); _, _ = f.Readdirnames(0) }\n", "os.OpenFile"},
+		{"readdirnames", "package p\nimport \"os\"\nfunc f() { f, _ := os.OpenFile(\"x\", os.O_RDONLY, 0); _, _ = f.Readdirnames(0) }\n", "Readdirnames"},
+		{"glob", "package p\nimport \"path/filepath\"\nfunc f() { _, _ = filepath.Glob(\"x\") }\n", "filepath.Glob"},
+		{"syscall", "package p\nimport \"syscall\"\nfunc f() { _ = syscall.Stat(\"x\", nil) }\n", "syscall.Stat"},
+		{"fs", "package p\nimport \"io/fs\"\nfunc f() { _, _ = fs.ReadDir(nil, \"x\") }\n", "fs.ReadDir"},
+		{"unix", "package p\nimport \"golang.org/x/sys/unix\"\nfunc f() { _ = unix.Fstatat(0, \"x\", nil, 0) }\n", "unix.Fstatat"},
 	}
-	allowed := "package p\nimport \"os\"\nfunc f() { _, _ = os.OpenFile(\"x\", os.O_RDWR, 0) }\n"
-	if hits := walkGuardSource(t, "allowed.go", allowed); len(hits) != 0 {
-		t.Fatalf("OpenFile is a write: %v", hits)
+	for _, tc := range cases {
+		hits := walkGuardSource(t, "flagged.go", tc.src)
+		if !containsCall(hits, tc.want) {
+			t.Errorf("%s: hits %v, want %s", tc.name, hits, tc.want)
+		}
 	}
-	skipped := "package p\nimport \"os\"\nfunc LoadOrCreateNodeID() { _, _ = os.ReadFile(\"x\") }\nfunc f() {}\n"
-	if hits := walkGuardSource(t, "evaluator.go", skipped); len(hits) != 0 {
-		t.Fatalf("node id read is not the walk: %v", hits)
+	typeOnly := "package p\nimport \"syscall\"\nfunc f(st *syscall.Stat_t) { _ = st }\n"
+	if hits := walkGuardSource(t, "stamp_linux.go", typeOnly); len(hits) != 0 {
+		t.Fatalf("Stat_t is a type: %v", hits)
 	}
+}
+
+func containsCall(hits []string, want string) bool {
+	for _, hit := range hits {
+		if strings.Contains(hit, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func walkGuardSource(t *testing.T, name, src string) []string {
@@ -67,7 +124,7 @@ func walkGuardSource(t *testing.T, name, src string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return walkGuardAST(fset, name, f)
+	return walkGuardAST(fset, f)
 }
 
 func walkGuardFile(fset *token.FileSet, path string) ([]string, error) {
@@ -75,19 +132,59 @@ func walkGuardFile(fset *token.FileSet, path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return walkGuardAST(fset, path, f), nil
+	return walkGuardAST(fset, f), nil
 }
 
-func walkGuardAST(fset *token.FileSet, path string, f *ast.File) []string {
-	osNames, fpNames, osDot, fpDot := walkGuardImports(f)
-	skip := filepath.Base(path) == "evaluator.go"
+type walkGuardPkgs struct {
+	os, filepath, fs, syscall   map[string]bool
+	osDot, fpDot, fsDot, sysDot bool
+}
+
+func walkGuardImports(f *ast.File) walkGuardPkgs {
+	g := walkGuardPkgs{
+		os: map[string]bool{}, filepath: map[string]bool{},
+		fs: map[string]bool{}, syscall: map[string]bool{},
+	}
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || imp.Name != nil && imp.Name.Name == "_" {
+			continue
+		}
+		var dst map[string]bool
+		var dot *bool
+		def := ""
+		switch path {
+		case "os":
+			dst, dot, def = g.os, &g.osDot, "os"
+		case "path/filepath":
+			dst, dot, def = g.filepath, &g.fpDot, "filepath"
+		case "io/fs":
+			dst, dot, def = g.fs, &g.fsDot, "fs"
+		case "syscall":
+			dst, dot, def = g.syscall, &g.sysDot, "syscall"
+		case "golang.org/x/sys/unix":
+			dst, dot, def = g.syscall, &g.sysDot, "unix"
+		default:
+			continue
+		}
+		if imp.Name != nil && imp.Name.Name == "." {
+			*dot = true
+			continue
+		}
+		local := def
+		if imp.Name != nil {
+			local = imp.Name.Name
+		}
+		dst[local] = true
+	}
+	return g
+}
+
+func walkGuardAST(fset *token.FileSet, f *ast.File) []string {
+	g := walkGuardImports(f)
 	var hits []string
 	ast.Inspect(f, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if ok && skip && walkGuardSkipFunc[fn.Name.Name] {
-			return false
-		}
-		if call, ok := walkGuardCall(n, osNames, fpNames, osDot, fpDot); ok {
+		if call, ok := walkGuardCall(n, g); ok {
 			pos := fset.Position(n.Pos())
 			hits = append(hits, pos.String()+": "+call)
 		}
@@ -96,102 +193,100 @@ func walkGuardAST(fset *token.FileSet, path string, f *ast.File) []string {
 	return hits
 }
 
-func walkGuardImports(f *ast.File) (osNames, fpNames map[string]bool, osDot, fpDot bool) {
-	osNames = map[string]bool{}
-	fpNames = map[string]bool{}
-	for _, imp := range f.Imports {
-		path, err := strconv.Unquote(imp.Path.Value)
-		if err != nil || imp.Name != nil && imp.Name.Name == "_" {
-			continue
-		}
-		local, dot := "", false
-		if imp.Name != nil {
-			if imp.Name.Name == "." {
-				dot = true
-			} else {
-				local = imp.Name.Name
-			}
-		}
-		switch path {
-		case "os":
-			if dot {
-				osDot = true
-			} else {
-				if local == "" {
-					local = "os"
-				}
-				osNames[local] = true
-			}
-		case "path/filepath":
-			if dot {
-				fpDot = true
-			} else {
-				if local == "" {
-					local = "filepath"
-				}
-				fpNames[local] = true
-			}
-		}
-	}
-	return osNames, fpNames, osDot, fpDot
-}
-
-func walkGuardCall(n ast.Node, osNames, fpNames map[string]bool, osDot, fpDot bool) (string, bool) {
+func walkGuardCall(n ast.Node, g walkGuardPkgs) (string, bool) {
 	if sel, ok := n.(*ast.SelectorExpr); ok {
-		id, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return "", false
+		if id, ok := sel.X.(*ast.Ident); ok {
+			name := sel.Sel.Name
+			switch {
+			case g.os[id.Name] && walkGuardOS[name]:
+				return id.Name + "." + name, true
+			case g.filepath[id.Name] && walkGuardFilepath[name]:
+				return id.Name + "." + name, true
+			case g.fs[id.Name] && walkGuardFS[name]:
+				return id.Name + "." + name, true
+			case g.syscall[id.Name] && walkGuardSyscall[name]:
+				return id.Name + "." + name, true
+			}
 		}
-		if osNames[id.Name] && walkGuardOS[sel.Sel.Name] {
-			return id.Name + "." + sel.Sel.Name, true
-		}
-		if fpNames[id.Name] && walkGuardFilepath[sel.Sel.Name] {
-			return id.Name + "." + sel.Sel.Name, true
+		if walkGuardMethod[sel.Sel.Name] {
+			return sel.Sel.Name, true
 		}
 		return "", false
 	}
 	call, ok := n.(*ast.CallExpr)
-	if !ok || (!osDot && !fpDot) {
+	if !ok {
 		return "", false
 	}
 	id, ok := call.Fun.(*ast.Ident)
 	if !ok {
 		return "", false
 	}
-	if osDot && walkGuardOS[id.Name] {
-		return "os." + id.Name, true
-	}
-	if fpDot && walkGuardFilepath[id.Name] {
-		return "filepath." + id.Name, true
+	name := id.Name
+	switch {
+	case g.osDot && walkGuardOS[name]:
+		return "os." + name, true
+	case g.fpDot && walkGuardFilepath[name]:
+		return "filepath." + name, true
+	case g.fsDot && walkGuardFS[name]:
+		return "fs." + name, true
+	case g.sysDot && walkGuardSyscall[name]:
+		return "syscall." + name, true
 	}
 	return "", false
 }
 
-func walkGuardPaths(root string) ([]string, error) {
-	binlogDir := filepath.Join(root, "internal", "binlog")
-	entries, err := os.ReadDir(binlogDir)
+// walkGuardPackages is the tasks package plus every internal package
+// evaluator.go imports. That is the code a segment walk can reach.
+func walkGuardPackages(root string) (map[string]bool, error) {
+	path := filepath.Join(root, "internal", "tasks", "evaluator.go")
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 	if err != nil {
 		return nil, err
 	}
-	var out []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "walk_ops.go" {
+	pkgs := map[string]bool{"internal/tasks": true}
+	for _, imp := range f.Imports {
+		p, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || !strings.HasPrefix(p, "binlog_server/") {
 			continue
 		}
-		out = append(out, filepath.Join(binlogDir, name))
+		rel := strings.TrimPrefix(p, "binlog_server/")
+		if strings.HasPrefix(rel, "internal/") {
+			pkgs[rel] = true
+		}
 	}
-	for _, rel := range []string{
-		"internal/assurance/chain.go",
-		"internal/tasks/evaluator.go",
-		"internal/tasks/disk_files.go",
-		"internal/tasks/signals.go",
-		"internal/tasks/chain_order.go",
-		"internal/tasks/storage_health.go",
-	} {
-		out = append(out, filepath.Join(root, rel))
+	return pkgs, nil
+}
+
+func walkGuardPaths(root string, pkgs map[string]bool) ([]string, error) {
+	var out []string
+	for _, rel := range pkgNames(pkgs) {
+		entries, err := os.ReadDir(filepath.Join(root, rel))
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			relFile := rel + "/" + name
+			if _, ok := walkGuardAllow[relFile]; ok {
+				continue
+			}
+			out = append(out, filepath.Join(root, relFile))
+		}
 	}
 	return out, nil
+}
+
+func pkgNames(pkgs map[string]bool) []string {
+	names := make([]string, 0, len(pkgs))
+	for name := range pkgs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func moduleRoot(t *testing.T) string {

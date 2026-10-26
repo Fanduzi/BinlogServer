@@ -10,14 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"log"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/taskrecords"
@@ -399,7 +399,7 @@ func (s *Scheduler) applySnapshotLocked(snap recordSnapshot) {
 	r.failed = map[string]string{}
 	for _, d := range snap.Deleted {
 		if dir, ok := taskBinlogDir(s.dataDir, d.ID); ok {
-			if _, err := os.Lstat(dir); err == nil {
+			if _, err := binlog.Lstat(dir); err == nil {
 				r.tombstones[d.ID] = d.DeletedAt
 			}
 		}

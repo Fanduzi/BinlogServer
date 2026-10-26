@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: temporary segment files with complete and torn binlog events
-// output: proof that DurableResume returns the highest open segment's last end log_pos, that a trailing artificial rotate with log_pos 0 does not hide that position, that magic and a log_pos 0 header are not resume points, that a trailing rotate names the next file, that EventSpan is the contiguous event chain in the file, and that SegmentPositions uses that DurableCursor end
+// output: proof that DurableResume returns the highest open segment's last end log_pos, that a trailing artificial rotate with log_pos 0 does not hide that position, that magic and a log_pos 0 header are not resume points, that a trailing rotate names the next file, that EventSpan is the contiguous event chain in the file, that SegmentPositions uses that DurableCursor end, and that a second SegmentPositions on an unchanged file skips the body read
 // pos: regression coverage for the shared resume cursor
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -247,5 +247,26 @@ func TestEventSpan_ContiguousChainAndGap(t *testing.T) {
 	writeRawSegment(t, magic, nil)
 	if _, _, ok := EventSpan(magic); ok {
 		t.Fatal("magic-only segment has no event span")
+	}
+}
+
+// TestSegmentPositions_SecondCallSkipsTheRead checks the positions cache.
+// The first call stats and opens the file. The second call, on the same
+// bytes, must do less. Turning the cache hit off makes the two counts equal.
+func TestSegmentPositions_SecondCallSkipsTheRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mysql-bin.000001")
+	writeRawSegment(t, path, nil)
+	ResetWalkOps()
+	if _, _, ok := SegmentPositions(path); ok {
+		t.Fatal("magic-only file has no event span")
+	}
+	first := WalkOps()
+	ResetWalkOps()
+	SegmentPositions(path)
+	second := WalkOps()
+	t.Logf("first %d ops, second %d", first, second)
+	if first < 2 || second >= first {
+		t.Fatalf("second SegmentPositions did %d ops after %d; the positions cache should skip the body read", second, first)
 	}
 }

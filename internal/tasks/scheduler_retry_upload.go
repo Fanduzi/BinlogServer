@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -208,7 +207,7 @@ func (s *Scheduler) retryFailedUploads(taskID string, limit int, opts retryUploa
 			continue
 		}
 		if opts.skipMissingLocal {
-			if _, statErr := os.Stat(file.FilePath); statErr != nil {
+			if _, statErr := binlog.Stat(file.FilePath); statErr != nil {
 				stats.Skipped++
 				continue
 			}

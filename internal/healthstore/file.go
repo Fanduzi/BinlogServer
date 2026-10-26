@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/health"
 )
 
@@ -65,7 +66,7 @@ func NewFileStore(path string) *FileStore { return &FileStore{path: path} }
 
 func (s *FileStore) load() (*fileState, error) {
 	st := &fileState{Health: map[string]fileHealth{}, Pending: map[string][]health.Transition{}}
-	raw, err := os.ReadFile(s.path)
+	raw, err := binlog.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
 	}

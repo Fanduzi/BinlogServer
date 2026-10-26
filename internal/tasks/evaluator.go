@@ -1602,7 +1602,7 @@ const NodeIDFileName = ".node_id"
 // with the data directory, not the host name).
 func LoadOrCreateNodeID(dataDir string) (string, error) {
 	path := filepath.Join(dataDir, NodeIDFileName)
-	if raw, err := os.ReadFile(path); err == nil {
+	if raw, err := binlog.ReadFile(path); err == nil {
 		if id := strings.TrimSpace(string(raw)); id != "" {
 			return id, nil
 		}

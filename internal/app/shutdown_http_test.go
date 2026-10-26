@@ -1,12 +1,13 @@
 // Package app provides module-level functionality for app.
 // input: an HTTP server built by buildHTTPServer, a raw connection that never sends a request, and one slow in-flight request
-// output: shutdownHTTP returns within 2s while the in-flight request still receives its full body; a connection that becomes StateNew after closeIdle has started does not keep Server.Shutdown busy for the HTTP budget; a connection dialed after shutting is stored and before the idle snapshot is already closed
+// output: shutdownHTTP returns within 2s while the in-flight request still receives its full body; a connection that becomes StateNew after closeIdle has started does not keep Server.Shutdown busy for the HTTP budget; a connection dialed after shutting is stored is closed by ConnState before the idle snapshot, which a read inside that gap observes
 // pos: regression coverage for the HTTP shutdown that closes StateNew and StateIdle without cutting StateActive
 // note: if this file changes, update this header and module README.md.
 package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -125,8 +126,10 @@ func TestShutdownHTTP_StateNewArrivingDuringShutdown(t *testing.T) {
 }
 
 // TestShutdownHTTP_ShuttingIsSetBeforeTheSnapshot dials inside the gap
-// after shutting is stored and before the snapshot. The connection must
-// already be closed, and the hook must have observed shutting.
+// after shutting is stored and before the snapshot. ConnState must already
+// have closed that connection: a read in the hook that times out means the
+// hook argument was true while the flag was still false, so the later
+// snapshot was what closed it. The hook must also have observed shutting.
 func TestShutdownHTTP_ShuttingIsSetBeforeTheSnapshot(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(http.ResponseWriter, *http.Request) {})
@@ -140,6 +143,14 @@ func TestShutdownHTTP_ShuttingIsSetBeforeTheSnapshot(t *testing.T) {
 		raw, err = net.Dial("tcp", ln.Addr().String())
 		if err != nil {
 			t.Errorf("dial: %v", err)
+			return
+		}
+		_ = raw.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		buf := make([]byte, 1)
+		_, err = raw.Read(buf)
+		var ne net.Error
+		if err == nil || (errors.As(err, &ne) && ne.Timeout()) {
+			t.Errorf("ConnState left the new connection open: %v", err)
 		}
 	}
 	t.Cleanup(func() { connTrackSnap = nil })

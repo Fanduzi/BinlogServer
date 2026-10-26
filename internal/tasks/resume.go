@@ -6,7 +6,6 @@
 package tasks
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -413,6 +412,6 @@ func regularSegmentFile(path string) bool {
 	if strings.TrimSpace(path) == "" {
 		return false
 	}
-	info, err := os.Stat(path)
+	info, err := binlog.Stat(path)
 	return err == nil && info.Mode().IsRegular()
 }

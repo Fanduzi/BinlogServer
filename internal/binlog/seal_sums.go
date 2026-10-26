@@ -1,6 +1,6 @@
 // Package binlog provides module-level functionality for binlog.
 // input: a sealed segment's directory, base name, size and sha256 at seal; the task directory when reading them back
-// output: the seal checksum ledger {task dir}/.seal-sha256: one "sha256 size name" line appended per seal (the last line of a name wins), LoadSealSums to read it, SealSumAt for one name (sealSumAt caches it per ledger stamp for the unreadable check, #381), and compaction that drops names no longer on disk once the ledger passes 1 MiB; it is the expected checksum the health rehasher compares with when no catalog row carries one (standalone without meta, or meta without migration 000008); the ledger read and the compaction stat go through the counted walk seam
+// output: the seal checksum ledger {task dir}/.seal-sha256: one "sha256 size name" line appended per seal (the last line of a name wins), LoadSealSums to read it, SealSumAt for one name (sealSumAt caches it per ledger stamp for the unreadable check, #381), and compaction that drops names no longer on disk once the ledger passes 1 MiB; it is the expected checksum the health rehasher compares with when no catalog row carries one (standalone without meta, or meta without migration 000008); the ledger read, the append open and the compaction stat go through the counted walk seam
 // pos: ADR 0009 P2-3 rehash source (#380 QA): the bytes at seal, recorded next to the segments they describe
 // note: if this file changes, update this header and module README.md.
 package binlog
@@ -39,7 +39,7 @@ func RecordSealSum(dir, name string, size int64, sha string) error {
 	sealSumsMu.Lock()
 	defer sealSumsMu.Unlock()
 	path := filepath.Join(dir, SealSumsFileName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}

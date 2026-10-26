@@ -287,7 +287,7 @@ func planLegacyFailback(ledger *binlog.Ledger, chainFile []string, events []Task
 		if prefixes[j] == "" {
 			to = seg.server + seg.suffix
 		}
-		if _, err := os.Lstat(filepath.Join(ledger.Dir(), to)); err == nil {
+		if _, err := binlog.Lstat(filepath.Join(ledger.Dir(), to)); err == nil {
 			problems = append(problems, fmt.Sprintf("%s belongs to stint %d but %s already exists", seg.name, j+1, to))
 			continue
 		}
@@ -506,7 +506,7 @@ func legacySignature(ledger *binlog.Ledger, chainFile []string) string {
 }
 
 func readLegacyJournal(dir string) (legacyFailback, bool) {
-	body, err := os.ReadFile(filepath.Join(dir, legacyRepairJournal))
+	body, err := binlog.ReadFile(filepath.Join(dir, legacyRepairJournal))
 	if err != nil {
 		return legacyFailback{}, false
 	}
@@ -633,8 +633,8 @@ func applyLegacyRepair(ctx context.Context, taskID, dir string, plan legacyFailb
 		}
 		from := filepath.Join(dir, mv.From)
 		to := filepath.Join(dir, mv.To)
-		_, fromErr := os.Lstat(from)
-		_, toErr := os.Lstat(to)
+		_, fromErr := binlog.Lstat(from)
+		_, toErr := binlog.Lstat(to)
 		switch {
 		case fromErr == nil && errors.Is(toErr, os.ErrNotExist):
 			if err := os.Rename(from, to); err != nil {
@@ -692,7 +692,7 @@ func applyLegacyRepair(ctx context.Context, taskID, dir string, plan legacyFailb
 			if !ok {
 				continue
 			}
-			if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
+			if _, err := binlog.Lstat(filepath.Join(dir, name)); err != nil {
 				continue
 			}
 			row, have := byKey[catalogKey(named.Source, rowEpoch(named))]
@@ -770,7 +770,7 @@ func diskCatalogRow(taskID, dir, name string) BinlogFile {
 	if named.Open {
 		row.State = "OPEN"
 	}
-	if info, err := os.Stat(p); err == nil {
+	if info, err := binlog.Stat(p); err == nil {
 		row.SizeBytes = info.Size()
 		row.CreatedAt = info.ModTime().UTC()
 		if !named.Open {
@@ -858,7 +858,7 @@ func writeChainFile(dir string, chain []string) error {
 }
 
 func syncFile(p string) error {
-	f, err := os.OpenFile(p, os.O_RDWR, 0)
+	f, err := binlog.OpenFile(p, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
@@ -867,7 +867,7 @@ func syncFile(p string) error {
 }
 
 func syncDir(dir string) error {
-	f, err := os.Open(dir)
+	f, err := binlog.Open(dir)
 	if err != nil {
 		return err
 	}
@@ -965,7 +965,7 @@ func (s *Scheduler) fetchLegacyMissing(ctx context.Context, taskID, dir string, 
 
 func fetchLegacySegment(ctx context.Context, opener objectOpener, dir string, m legacyMissing, key string) error {
 	target := filepath.Join(dir, m.Name)
-	if _, err := os.Lstat(target); err == nil {
+	if _, err := binlog.Lstat(target); err == nil {
 		return nil
 	}
 	rc, size, err := opener.OpenObject(ctx, key)
@@ -977,7 +977,7 @@ func fetchLegacySegment(ctx context.Context, opener objectOpener, dir string, m 
 	}
 	defer rc.Close()
 	tmp := filepath.Join(dir, ".legacy-fetch-"+m.Name)
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := binlog.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
@@ -1018,7 +1018,7 @@ func fetchLegacySegment(ctx context.Context, opener objectOpener, dir string, m 
 	if !eventsContained(outSet, log.Events) {
 		return fail(fmt.Errorf("object %s holds transactions stint %d had not stored when it left, so it is not that stint's %s (a later stint may have overwritten it).", key, m.Stint+1, m.Name))
 	}
-	if _, err := os.Lstat(target); err == nil {
+	if _, err := binlog.Lstat(target); err == nil {
 		return fail(nil)
 	}
 	if err := os.Rename(tmp, target); err != nil {

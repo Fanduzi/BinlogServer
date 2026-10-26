@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"binlog_server/internal/assurance"
+	"binlog_server/internal/binlog"
 	"binlog_server/internal/health"
 
 	"go.uber.org/zap"
@@ -675,7 +676,7 @@ func (v *Verifier) load() {
 	if err := sweepVerifyTemps(filepath.Dir(path)); err != nil {
 		// warned per file; a leftover temp must not hide saved progress
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := binlog.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
@@ -814,7 +815,7 @@ func sweepVerifyTemps(dir string) error {
 	if dir == "" {
 		return nil
 	}
-	matches, err := filepath.Glob(filepath.Join(dir, ".verify-*.tmp"))
+	matches, err := binlog.Glob(filepath.Join(dir, ".verify-*.tmp"))
 	if err != nil {
 		return nil
 	}

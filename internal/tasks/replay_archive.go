@@ -91,7 +91,7 @@ func materializeReplayTar(members []replayMember) (io.ReadCloser, int64, error) 
 	if err := tmp.Close(); err != nil {
 		return nil, 0, err
 	}
-	file, err := os.Open(path)
+	file, err := binlog.Open(path)
 	if err != nil {
 		return nil, 0, err
 	}

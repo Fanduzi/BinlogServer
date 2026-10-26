@@ -1,6 +1,6 @@
 # internal/assurance Module
 
-备份链（ADR 0009 阶段 1，设计见 `docs/design/0009-phase1-backup-chain.md`）和阶段 3 巡检的纯函数（`docs/design/0009-phase3-verifier.md`）。链只依赖 `internal/binlog`。巡检另外用 `golang.org/x/time/rate` 按字节限速；对象的 HEAD/GET 由调用方注入，本包不拨号。
+备份链（ADR 0009 阶段 1，设计见 `docs/design/0009-phase1-backup-chain.md`）和阶段 3 巡检的纯函数（`docs/design/0009-phase3-verifier.md`）。链只依赖 `internal/binlog`。巡检的列目录、打开和 stat 也走 `binlog` 的计数缝。巡检另外用 `golang.org/x/time/rate` 按字节限速；对象的 HEAD/GET 由调用方注入，本包不拨号。
 
 ## Files
 
