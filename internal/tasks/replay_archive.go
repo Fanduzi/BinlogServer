@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the files inventory window, SelectReplayFiles, the point-in-time selection, the GTID stop selection, the executed-GTID selection, and OpenTaskSegment for each selected basename; replayArchiveTempDir chooses where the temp tar is created (empty: the process temp dir)
-// output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read; a damaged segment and every later one are not archived; an open member sealed after the selection is read under its sealed name or selected again (#322)
+// output: one complete ustar of those basenames, or an error and no archive when a selected segment cannot be read; a damaged segment and every later one are not archived; an open member sealed after the selection is read under its sealed name or selected again (#322); SetReplayArchiveTempDirForTest and ReplayArchiveTempDir expose the temp directory to other packages' tests
 // pos: replay-set archive for the authenticated download route, including the same datetime window, the same GTID stop, and the same executed-GTID roll-forward as the replay JSON
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -60,6 +60,16 @@ func (s *Scheduler) OpenExecutedGTIDArchive(taskID, executedRaw, stopGTIDRaw str
 // sets it so a leftover count is not shared with another package's tests,
 // which run in parallel and use the same process temp directory.
 var replayArchiveTempDir string
+
+// SetReplayArchiveTempDirForTest points archive temps at dir for the rest of
+// this process. The empty string is production: os.CreateTemp uses the
+// process temp directory. Tests set a private directory so a count of
+// binlog-replay-*.tar is not shared with another package.
+func SetReplayArchiveTempDirForTest(dir string) { replayArchiveTempDir = dir }
+
+// ReplayArchiveTempDir is the directory archive temps are created in.
+// Empty means the process temp directory.
+func ReplayArchiveTempDir() string { return replayArchiveTempDir }
 
 func materializeReplayTar(members []replayMember) (io.ReadCloser, int64, error) {
 	defer closeReplayMembers(members)

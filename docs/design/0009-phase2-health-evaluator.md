@@ -289,7 +289,7 @@ evaluate(task):
   6. 写失败 → 转移留在 pending，按 (task, generation) 有序重放，健康标 UNKNOWN(store)；standalone 下 pending 持久化进 `.findings.json`，meta 模式下进程重启会丢 pending，由下一轮调和从事实重算补齐（§7.4）
 ```
 
-步骤 2 的读取（账本有 size+mtime 缓存）每轮 O(段数)；`Chain.Check` 在 1500 段的任务上 < 50ms（P2-3 有基准测试作为 QA 条件）。
+步骤 2 的读取（账本有 size+mtime 缓存）每轮 O(段数）。P2-3 的基准不把冷启动压在 50ms 墙上：1500 段相对 150 段不超过 25 倍，`Segments` 的访问次数随段数线性（每段有上限），150 段那一轮还有一个绝对上限。-race 下冷启动会超过 50ms，线性关系仍在。
 
 ### 5.2 触发点
 
@@ -356,7 +356,7 @@ evaluate(task):
   - **全局预算** `health.rehash_bytes_per_sec`（默认 4 MiB/s ≈ 240 MiB/min，与任务数无关），令牌桶限速。
   - **跨任务轮转游标**：游标 `(task_id, segment)` 存于进程内并每轮持久化到单行表 `rehash_cursor`（与 `notify_cursor` 相同做法，只有一份），按任务、段顺序前进，回到起点为一个完整周期；新封存段排到队尾。
   - **低 I/O 优先级**：单 goroutine，Linux 上 `ioprio_set(IOPRIO_CLASS_IDLE)`（失败则只靠限速），读用 `posix_fadvise(DONTNEED)` 不污染页缓存。
-  - 复核结果作为事实（`RehashFacts{segment, ok, at}`）写进进程内表，并 `MarkDirty(task, REHASH)`；评估只读这张表，**不在评估路径上读段字节做哈希**。所以单任务评估 <50ms 的基准不含哈希。
+  - 复核结果作为事实（`RehashFacts{segment, ok, at}`）写进进程内表，并 `MarkDirty(task, REHASH)`；评估只读这张表，**不在评估路径上读段字节做哈希**。所以这条近线性基准不含哈希，也不再是 50ms 的墙上时钟。
   - 不一致 → `SEGMENT_UNREADABLE`（evidence=两个哈希）；`sha256` 为 NULL 的旧段跳过并计入 `rehash_unavailable` 指标，不影响健康。
   - 只在本节点持有（或被委派）的任务上运行；对象侧复核仍属阶段 3 Verifier。
 
@@ -622,7 +622,7 @@ CREATE TABLE task_mutes (
 |---|---|
 | P2-1 | 单测覆盖 Reconcile 全部分支；性质测试：任意 (open, facts) 序列重放两次结果相同、对输出再调和为空；不完整 scope 下从不 CLOSE；非 Managed kind 在任意输入下零转移；`LastSuccess` 为零的信号零 CLOSE；waiver evidence 不完全相等时不豁免 |
 | P2-2 | 在 schema 6/7/8/9 上各跑：读写正常、回退报 `HEALTH_STORE_DEGRADED`；**6→9、7→9、8→9 直接升级**与 `down` 后 v0.5.66 可读写；在线 `migrate down 1`/`up` 后 1 个 sweep 内恢复栅栏写（#353/#351 同型）；两写者不同任务 epoch 只留高 epoch；同 generation 重放（affected rows=0）不被判 ErrFenced；`_health` 代写与任务 epoch 写交替 100 次，结果只由任务 epoch 决定；MySQL 8.0 用 `AS new`、MariaDB/5.7 用 `VALUES()`；5000 条 open 分页读完无遗漏；**standalone + meta_dsn（task_leases 无行）与集群下从未启动的任务**都能打开/关闭 finding，同节点重启（新 instance）可接管、另一节点同 meta 被拒；**`_health` 代写与委派写并发 1000 次，`finding_transitions` 行数等于实际转移数**，无同号、无丢弃；内容相同重放为空操作、内容不同必得新 generation；同 owner 同 epoch 过期写返回 `ErrLeaseLagging`，续约后成功 |
-| P2-3 | 复现 #372：零填充/完整副本 → OPEN；挪走 → ≤1 sweep CLOSE 并有 transition；`.open.e4`≡`.sealed.e5`（openstale）与 openhand → SEGMENT_OVERLAP OPEN，新增 golden；corrupt.py 原地改一字节、保持 mtime → 在一个复核周期内 SEGMENT_UNREADABLE OPEN；**100 个任务时记录复核读带宽 ≤ `rehash_bytes_per_sec`（±10%）**、源延迟不升高，评估基准在复核运行时仍 <50ms；#357 的 4 字节 `.open.e3` + sealed：新增 golden，不报 OVERLAP、不截断 replay，只有 INFO `SEGMENT_EMPTY_LEFTOVER`；meta 只读 60s 期间 tip-2c04 那 8 条 legacy finding 一条不被评估器关；`shadow` 模式不改 finding 行；1500 段单轮 <50ms；多任务 + 5000 条 open 无漏关 |
+| P2-3 | 复现 #372：零填充/完整副本 → OPEN；挪走 → ≤1 sweep CLOSE 并有 transition；`.open.e4`≡`.sealed.e5`（openstale）与 openhand → SEGMENT_OVERLAP OPEN，新增 golden；corrupt.py 原地改一字节、保持 mtime → 在一个复核周期内 SEGMENT_UNREADABLE OPEN；**100 个任务时记录复核读带宽 ≤ `rehash_bytes_per_sec`（±10%）**、源延迟不升高，评估基准在复核运行时仍近线性（1500 段不超过 150 段的 25 倍，段访问次数线性，150 段一轮有绝对上限）；#357 的 4 字节 `.open.e3` + sealed：新增 golden，不报 OVERLAP、不截断 replay，只有 INFO `SEGMENT_EMPTY_LEFTOVER`；meta 只读 60s 期间 tip-2c04 那 8 条 legacy finding 一条不被评估器关；`shadow` 模式不改 finding 行；1500 段单轮相对 150 段不超过 25 倍且段访问次数线性；多任务 + 5000 条 open 无漏关 |
 | P2-4 | S1–S15 注入测试改为「失败→OPEN，恢复后首次成功→CLOSE」；**meta 仍只读时重启进程不关闭、不翻转、不通知**；meta 只读 60s：`METADATA_WRITE_BLOCKED` OPEN→恢复 CLOSE；**黑洞源 3 分钟（STARTING/RETRY_BACKOFF 循环）期间每秒采样至少一条 open finding**，`SOURCE_UNREACHABLE` 在 90s 内打开，SIGCONT 后两者关闭；源计划重启 60s 不打开 `SOURCE_UNREACHABLE`（去抖）；任务级 mute 期间源停 5min：`SOURCE_UNREACHABLE` 照常打开、健康 UNHEALTHY、不通知，源恢复后 mute 自动 END_EARLY、CLOSE 发通知；**无 finding 时重启进程，1 轮内 HEALTHY、`task_healthy` 不掉 0**；未配置上传时 `UPLOAD_RECORD_FAILED` 旧行按 Probe 关闭；#362（MariaDB STREAM_REGRESSION）、#354（1236）、#338（permission denied）复现各打开对应 subject 的 `TASK_FAILED`，健康 UNHEALTHY，修复重启后关闭、Stop 后关闭；有意 Stop 后 `DUMP_STALLED` ≤1 sweep 关闭；lintguard 对 Managed kind 的 `Report` 调用 CI 失败 |
 | P2-5a | 全局 `upload.grace=2m`：2m 后出现 `I7_UPLOAD_LATE`；任务级 `upload_grace=30m` 覆盖全局；不配置时 15min；MinIO 暂停 5min 再恢复（#351 retry）期间无 UPLOAD_LATE、无通知 |
 | P2-5 | §6.1 前置：本地缺失的段恢复后，对象未列举时也关闭（origin=local）；对象缺失的实例在对象未列举时不开不关；移除任务的对象存储配置 → 对象类实例以 CONFIG 关闭并有审计说明；列举上限设为 10 而对象有 25 个 → 未覆盖前缀不完整、无误报 MISSING、无误关；配置文件不可读或凭据缺失 → chain.objects 不完整、健康不为 HEALTHY；混跑集群中不能列举的节点不接管这些 kind；同一任务 HealthOf 与 Reconcile 对 chain.objects 的判断一致（对象未列举时不报 HEALTHY 而 Reconcile 卡住）。#352 复现（`gtid_next` 跳号 363–381，单源）→ `GTID_HOLE` OPEN；对 `uuid:363-381` waive（提交大写 uuid 或拆分区间也规范化为同一 evidence）→ CLOSE(WAIVED)、健康恢复；源继续写入（已存集合增长）后 waiver 仍有效；再跳号 400–410 → 新洞重新 OPEN；MinIO 删对象（已列举）→ `SEGMENT_MISSING`，未列举时不开不关；UPLOAD_LATE WARNING→超阈值 CRITICAL，任务级覆盖生效；保留期删除后无 `ORPHAN_ROW` 且有 `RETENTION_REMOVED`；#353 复现 1 sweep 内 `SEAL_FACTS_ABSENT` OPEN，`up` 后关闭且封存事实恢复；ADR 0006/0007 的 47 个目录用例无误报 |
@@ -717,7 +717,7 @@ P2-3 按 §5、§5.7、§6 落地（`internal/tasks/evaluator.go`、`rehash.go`�
 - **open 副本的 I4 判定只认「内容相同」**：GTID 相交（MySQL，两边都有 GTID），或一个文件的字节是另一个的前缀（#372 openstale/openhand；两边都要有 binlog magic 且不短于 23 字节）。正文写的「区间相交也算」对 sealed↔sealed 保持不变；对含 open 的一对不采用位点区间相交，因为阶段 1 的回放用例里，新 epoch 的 open 段与 sealed 段在合成数据上位点从 4 起算，按区间会被误判并截断 `/replay`，违反 §13「除 open≡sealed 那条 golden 外不改变 /replay 字节」。
 - **空残留**不包括 replay 顺序上的最后一段：轮转后刚开的 open 文件只有头事件，它是正在写的段，不是残留。
 - **新增 golden** 放在 `internal/tasks/testdata/replay/p2-3.json`（open≡sealed、#357 空残留），阶段 1 的 golden 不变。
-- **性能**：评估路径不哈希；目录指纹与 replay 顺序不变时复用上一轮 `Check` 结论，`SegmentPositions` 与单段损坏检查按大小+mtime 缓存。1500 段热路径一轮约 3–4ms，冷启动一轮约 40ms。
+- **性能**：评估路径不哈希；目录指纹与 replay 顺序不变时复用上一轮 `Check` 结论，`SegmentPositions` 与单段损坏检查按大小+mtime 缓存。安静机器上 1500 段热路径一轮约 3–4ms，冷启动一轮曾经约 40ms；测试不再把这当作 50ms 上限，因为 -race 下冷启动会更高。基准是 1500 段不超过 150 段的 25 倍，段访问次数线性，并且 150 段那一轮有绝对上限。
 - **standalone 无 meta**：评估器写 `.health.json`；`.findings.json` 里旧版本写下的 Managed 行并入评估器的 open 集合，关闭时同时在旧文件里关闭；`/api/findings` 合并评估器的 open 行。
 - **meta 缺 000009**：`ApplyTransitions` 返回 `ErrSchemaAbsent` 时旧 `Report` 路径继续写 Managed kind（不出现无人写的窗口），下一次写成功后评估器重新接管。
 - **留给后续 PR**：`_health` 代写与委派（P2-6，集群模式下 P2-3 只评估本节点持有 lease 的任务）；`health_eval_*` 指标与 `POST /api/tasks/{id}/health/evaluate`（P2-7）；`health takeover`（P2-7）；QA 中「100 任务时源延迟不升高」需要 e2e 环境，P2-3 只以单元测试证明复核带宽在预算 ±10% 内。BinlogServerQA 对 #378 的四条 P3 记在 #379。

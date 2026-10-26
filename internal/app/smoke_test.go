@@ -1,6 +1,6 @@
 // Package app provides module-level functionality for app.
 // input: runtime config/template, persisted active tasks, resolved cluster worker id, scheduler/runner/meta store dependencies, process context
-// output: application lifecycle plus real-route production auth, anonymous Console UI, swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage; waitRunExit waits out the HTTP, runner, background and finding shutdown budgets
+// output: application lifecycle plus real-route production auth, anonymous Console UI, swagger auth, empty encryption-key refuse, TaskStore page/get fakes, worker-only, ClaimRunnableTasks recovery, and claim-loop regression coverage; waitRunExit waits out the runner, background and finding shutdown budgets, and StartAndServeHealth plus ProductionAuth use a 2s bound
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -211,7 +211,7 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 	}
 
 	cancel()
-	waitRunExit(t, errCh)
+	waitRunExitWithin(t, errCh, 2*time.Second)
 }
 
 func TestApp_ProductionRefusesEmptyEncryptionKey(t *testing.T) {
@@ -255,7 +255,7 @@ func TestApp_ProductionAuthProtectsRealRoutes(t *testing.T) {
 	go func() { errCh <- a.Run(ctx) }()
 	defer func() {
 		cancel()
-		waitRunExit(t, errCh)
+		waitRunExitWithin(t, errCh, 2*time.Second)
 	}()
 
 	waitReady(t, a)
@@ -1312,22 +1312,29 @@ func waitReady(t *testing.T, a *App) {
 	}
 }
 
-// waitRunExit waits for Run to return. Serve blocks in HTTP shutdown before
-// the deferred joins, and those joins then wait out runners, background
-// goroutines and the finding flush. The wait is the sum of those budgets
-// plus a second for the hand-off between them. A shorter wait reports a hang
-// on a loaded machine after a shutdown that already finished inside its budgets.
+// waitRunExit waits for Run to return. Serve returns as soon as Shutdown
+// closes the listener. The HTTP Shutdown call runs on the background group,
+// so it is already inside shutdownBackgroundTimeout; adding
+// shutdownHTTPTimeout on top of that double-counts the stage. The budget
+// is runners, background and the finding flush, plus a second between them.
+// StartAndServeHealth and ProductionAuth pass 2s instead: an idle shutdown
+// finishes in milliseconds, including under -race, and a multi-second stall
+// must still fail. That bound does not say which stage was slow.
 func waitRunExit(t *testing.T, errCh <-chan error) {
 	t.Helper()
-	budget := shutdownHTTPTimeout + shutdownRunnersTimeout + shutdownBackgroundTimeout + shutdownFindingsTimeout + time.Second
+	waitRunExitWithin(t, errCh, shutdownRunnersTimeout+shutdownBackgroundTimeout+shutdownFindingsTimeout+time.Second)
+}
+
+func waitRunExitWithin(t *testing.T, errCh <-chan error, budget time.Duration) {
+	t.Helper()
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("app returned error: %v", err)
 		}
 	case <-time.After(budget):
-		t.Fatalf("app did not shut down within %s (http %s, runners %s, background %s, findings %s)",
-			budget, shutdownHTTPTimeout, shutdownRunnersTimeout, shutdownBackgroundTimeout, shutdownFindingsTimeout)
+		t.Fatalf("app did not shut down within %s (runners %s, background %s, findings %s)",
+			budget, shutdownRunnersTimeout, shutdownBackgroundTimeout, shutdownFindingsTimeout)
 	}
 }
 

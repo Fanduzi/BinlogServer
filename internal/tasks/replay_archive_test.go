@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: on-disk segments, catalog rows, task state, and an optional object opener
-// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live in one private directory so a count is not shared with another package
+// output: proof OpenReplayArchive returns one complete ustar and leaves no archive when a selected segment cannot be read; archive temps for this test binary live under a private TMPDIR, and the count includes both the seam directory and os.TempDir so a temp left in either place fails
 // pos: scheduler tests for the replay archive
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,17 +18,35 @@ import (
 	"testing"
 )
 
-// TestMain puts archive temps in a private directory. go test runs packages
-// in parallel and they share the process temp dir; counting binlog-replay-*.tar
-// there races another package that is building an archive at the same time.
+// TestMain gives this process its own temp directory before os.TempDir is
+// cached, then puts archive temps in a subdirectory of that. A leak through
+// os.CreateTemp("", ...) and a leak through the seam land in this process
+// only, so the count is not shared with another package's tests.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "replay-archive-temps-*")
-	if err != nil {
+	base := os.Getenv("TMPDIR")
+	if base == "" {
+		base = "/tmp"
+	}
+	root := filepath.Join(base, fmt.Sprintf("binlog-tasks-%d", os.Getpid()))
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		panic(err)
 	}
-	replayArchiveTempDir = dir
+	if err := os.Setenv("TMPDIR", root); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("TMP", root); err != nil {
+		panic(err)
+	}
+	if got := os.TempDir(); filepath.Clean(got) != filepath.Clean(root) {
+		panic(fmt.Sprintf("os.TempDir is %s, want the private root %s", got, root))
+	}
+	archives := filepath.Join(root, "archives")
+	if err := os.MkdirAll(archives, 0o755); err != nil {
+		panic(err)
+	}
+	replayArchiveTempDir = archives
 	code := m.Run()
-	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(root)
 	os.Exit(code)
 }
 
@@ -194,7 +213,15 @@ func readReplayTar(t *testing.T, raw []byte) map[string][]byte {
 
 func countReplayTemps(t *testing.T) int {
 	t.Helper()
-	dir := replayArchiveTempDir
+	n := globReplayTemps(t, replayArchiveTempDir)
+	if td := os.TempDir(); td != "" && filepath.Clean(td) != filepath.Clean(replayArchiveTempDir) {
+		n += globReplayTemps(t, td)
+	}
+	return n
+}
+
+func globReplayTemps(t *testing.T, dir string) int {
+	t.Helper()
 	if dir == "" {
 		dir = os.TempDir()
 	}

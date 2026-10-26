@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP GET for the replay window, on-disk segments, catalog rows, and an optional object opener
-// output: one ustar of the replay basenames, an empty tar when that window is empty, and an error body when a selected segment cannot be opened
+// output: one ustar of the replay basenames, an empty tar when that window is empty, and an error body when a selected segment cannot be opened; replay temp counts use this package's seam directory and ignore the process temp directory
 // pos: HTTP coverage for the authenticated replay archive
 // note: if this file changes, update this header and module README.md.
 package api
@@ -23,6 +23,20 @@ import (
 
 	"binlog_server/internal/tasks"
 )
+
+// TestMain counts archive temps in this package's own directory. Replication
+// tests in another process write binlog-replay-*.tar into the process temp
+// directory; counting that directory fails this package for their files (#534).
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "api-replay-temps-*")
+	if err != nil {
+		panic(err)
+	}
+	tasks.SetReplayArchiveTempDirForTest(dir)
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func TestTaskAPI_ReplayArchiveMatchesReplayWindow(t *testing.T) {
 	dir := t.TempDir()
@@ -439,9 +453,38 @@ func readUstar(t *testing.T, raw []byte) (map[string][]byte, []string) {
 
 func replayTempCount(t *testing.T) int {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "binlog-replay-*.tar"))
+	dir := tasks.ReplayArchiveTempDir()
+	if dir == "" {
+		t.Fatal("replay archive temp dir is not isolated")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "binlog-replay-*.tar"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return len(matches)
+}
+
+// TestReplayTempCount_CountsOnlyTheSeamDir: a binlog-replay tar in the
+// process temp directory is another package's file and must not change the
+// count. A file in the seam directory must.
+func TestReplayTempCount_CountsOnlyTheSeamDir(t *testing.T) {
+	outside, err := os.CreateTemp("", "binlog-replay-*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside.Close()
+	t.Cleanup(func() { _ = os.Remove(outside.Name()) })
+	before := replayTempCount(t)
+	if replayTempCount(t) != before {
+		t.Fatalf("process temp file %s changed the api count", outside.Name())
+	}
+	seam, err := os.CreateTemp(tasks.ReplayArchiveTempDir(), "binlog-replay-*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seam.Close()
+	t.Cleanup(func() { _ = os.Remove(seam.Name()) })
+	if got := replayTempCount(t); got != before+1 {
+		t.Fatalf("seam leak count %d, want %d", got, before+1)
+	}
 }

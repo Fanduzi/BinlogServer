@@ -82,7 +82,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | H1 | 在约定负载下（ADR 0009 §6：≥500 TPS、24h、注入各类故障）延迟有界，RSS/fd/goroutine 不会单调增长，用独立判定器验收 | `smoke-scale` 只能手动 opt-in，不在任何 job 里；`scripts/soak/` 不存在 | NOT MET | ADR 0009 阶段 6 |
-| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`，不再 `-skip`。原先在 -race 下偶发失败的 `TestFailurePathMatrixMetaOutage`、`TestOpenEpochENOENTAfterTakeoverDoesNotFail`（#490），`TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess`、`TestEvaluator_1500SegmentsUnder50ms`（#504），`TestApp_ProductionAuthProtectsRealRoutes`（#439），`TestTaskRecords_StopAndDeleteApplyWhenSaveFails`（#526）都在这个 job 里跑 | MET | #386 没有点名测试，仍开着 |
+| H2 | CI 里跑 `go test -race` | `race-and-vet` job 每个 PR 和 push main 跑 `go vet ./...` 和 `go test -race -count=1 ./...`，不再 `-skip`。原先在 -race 下偶发失败的 `TestFailurePathMatrixMetaOutage`、`TestOpenEpochENOENTAfterTakeoverDoesNotFail`（#490），`TestOpenReplayArchive_MissingOpenSegmentIsNotOnProcess`、`TestEvaluator_1500SegmentsNearLinear`（#504），`TestApp_ProductionAuthProtectsRealRoutes`（#439），`TestTaskRecords_StopAndDeleteApplyWhenSaveFails`（#526）都在这个 job 里跑 | MET | #386 没有点名测试，仍开着 |
 
 ## I. 运维文档与 runbook
 
