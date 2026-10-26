@@ -133,7 +133,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-observability:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'observability' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'observability' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 

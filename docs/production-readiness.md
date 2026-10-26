@@ -12,7 +12,8 @@
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 - 每个 PR 和 push main 都跑：`vulncheck`；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
 - 只在 push main 跑：`e2e-meta-failover`。
-- 只能手动触发：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-observability`。
+- 每个 PR 和 push main 也跑：`e2e-observability`。
+- 只能手动触发：`e2e-cluster-roles`、`e2e-worker-crash-recovery`。
 - 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`、`upgrade-legacy-failback`。
 
 ## A. 数据完整性与零静默丢失
@@ -68,7 +69,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 |---|---|---|---|---|
 | F1 | finding 指标（`binlog_server_finding_open` 等）总有输出；某个任务的读数失败时显式输出 0 并开 finding，不会直接丢掉这条序列 | `internal/api/metric_source_test.go`（S10/S11）、`metrics_findings` 单测 | MET | — |
 | F2 | 每个任务都有 `binlog_server_task_healthy` 和 SLO 指标；仓库里随附推荐告警规则文件（用 promtool 测）和一个通用 webhook（ADR 0009 的决定 1） | 没有：代码里没有 `task_healthy`、没有 webhook；告警规则只写在 `docs/guide/admin/observability.md` 里，也没用 finding 指标 | NOT MET | ADR 0009 §2.2、决定 1 |
-| F3 | `/metrics` 和 trace 的 e2e 每个 PR 都跑 | `e2e-observability` 只能手动触发。全部 80 次手动运行（最早 10-15）里一次都没选过它 | PARTIAL | 要改 workflow（需要 token） |
+| F3 | `/metrics` 和 trace 的 e2e 每个 PR 都跑 | `e2e-observability`（`make e2e-observability`，即 `smoke-observability`）在每个 PR 和 push main 都跑，`workflow_dispatch` 时只在选 `observability` 时跑 | MET | — |
 | F4 | 健康评估器在默认配置下生效，结论只有一条写入路径，CI 测的就是生产跑的路径 | `health.evaluator` 默认是 `off`。CI 的 e2e 配置没有 health 段，所以除了 standalone 的两个场景显式设了 `on`，其余都按 `off` 在跑 | NOT MET | 已经决定删掉这个开关（卡 1），要等 ADR 0011 前两步落地 |
 
 ## G. 安全
@@ -102,7 +103,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 13 / PARTIAL 10 / NOT MET 12**。
+共 35 项：**MET 14 / PARTIAL 9 / NOT MET 12**。
 
 ## 最卡生产级的 5 项
 
