@@ -50,14 +50,14 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 安装与产物准备 (v0.5.78)
+## 3. 安装与产物准备 (v0.5.79)
 
 生产部署无需安装 Go 编译器，直接下载带有校验签名的官方 Release 归档。
 
 > ⚠️ **v0.5.67 新增可选迁移 `000009`（健康评估器，只增），加上 v0.5.65 的 `000007_task_findings`、`000008_binlog_files_seal_facts`，地板仍是 schema 6。schema 6 的库可直接启动；建议 `./migrate up` 到 9。还不是 schema 6 时，先按 v0.5.58 升级。standalone 升级重启之前先配置任务密钥（`task-key generate` + `standalone.task_key_file`），重启后每个任务目录用 `scripts/adopt-leftovers.sh`（在压缩包里）adopt 一次；存活探针用 `/healthz`，`/api/health` 有 CRITICAL finding 时返回 503。见 [v0.5.67 发布说明](../../releases/release-notes-v0.5.67.md)。** `minRequiredSchemaVersion` 仍是 6。v0.5.67 在 schema 5 上不会启动，以退出码 1 结束，还没开始监听。提示含 `schema version too old` 和 `./migrate up`。这与 v0.5.58 的拒绝相同。地板仍是 v0.5.51。v0.5.51 是第一版同时带上第 6 步和第 7 步的发布。v0.5.50 只有第 6 步。v0.5.51 和 v0.5.52 在 schema 6 上拒绝启动。日志含 `missing index` 和 `uk_task_file_epoch`。`./migrate up` 到 schema 6 之前先停掉它们。这一版不是新的 ADR 步骤。第 9 步在 v0.5.53 发出。换二进制之前确认任务地址仍连到写下现有无前缀文件的那台 MySQL。VIP 已经切走时，不要在新主库上启动这条旧任务。在 v0.5.57 或 0a84917a 上做过真实回切（A→B→A）的任务，第一次 Start 修复目录或拒绝且什么都不改，见下面「早期版本回切过的目录」。从 v0.5.57 升级后，检查每个 GTID 任务有没有 `storage_alert`；显示它的任务不要再 Start，按 `restart_gtid_set` 新建任务（见 [排障](troubleshooting.md)）。v0.5.56 的可恢复窗口和 v0.5.55 的 `start_gtid_set` 仍成立。`/replay` 和 `/replay/archive` 不带 `limit` 时现在返回全部文件，不再静默停在 200 个（#305）；带 `limit` 时看 `omitted_files`。`limit` 不合法时 `/replay` 现在返回 400（#307）。凭证错误现在一律返回 401（以前部分是 403），bearer 模式带 `WWW-Authenticate`；新增不需要凭证的 `GET /auth/config`，按路径过滤的代理要放行。细节见 [v0.5.62 发布说明](../../releases/release-notes-v0.5.62.md)。v0.5.63 修复轮转期间 `/replay/archive` 偶发 500（#322），见 [v0.5.63 发布说明](../../releases/release-notes-v0.5.63.md)。v0.5.64 把新 Console 放到 `/ui/`，Vue 控制台在 `/ui-classic/` 保留一个版本，见 [v0.5.64 发布说明](../../releases/release-notes-v0.5.66.md)。v0.5.65 交付 ADR 0009 finding 与不变量（`METADATA_WRITE_BLOCKED`、`DUMP_STALLED`、`SEGMENT_UNREADABLE`、`TASK_TRANSITION_STALLED`）、租约栅栏和先落库的状态转换；MariaDB 11.4+ 之前没有保存行事件（#359），升级后请重新全量备份，见 [v0.5.65 发布说明](../../releases/release-notes-v0.5.66.md)。v0.5.66 能发现重复封存段（`SEGMENT_OVERLAP`，#370），见 [v0.5.66 发布说明](../../releases/release-notes-v0.5.66.md)。v0.5.67 增加 standalone 任务记录与自动恢复（ADR 0010）、`TASK_UNADOPTED` 和 `/api/health` 降级，见 [v0.5.67 发布说明](../../releases/release-notes-v0.5.67.md)。v0.5.70 让任务 runner 归进程运行所有，SIGTERM 关停有界（30 秒，超时退出码 2，再发一次信号立即退出），见 [v0.5.70 发布说明](../../releases/release-notes-v0.5.70.md)。schema 4（`000004_pending_dump_cleanup`）仍在迁移链上。旧二进制留在任务目录里的 `.takeover-*`，会在跑这一版的 worker 启动时删掉。v0.5.49 的封存位点规则仍成立（#189）。故障切换之后，目录里已经有过的源文件再封存同名分段时，`start_pos` 和 `end_pos` 按文件里的第一个和最后一个事件来写。已经是 `UPLOADED` 的行保持原样。
 
 ```bash
-VER=0.5.78
+VER=0.5.79
 OS=linux          # linux 或 darwin
 ARCH=amd64        # amd64 或 arm64
 
@@ -69,18 +69,18 @@ tar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"
 cd "binlog-server_${VER}_${OS}_${ARCH}"
 ```
 
-已发布的 `v0.5.78` `checksums.txt`：
+已发布的 `v0.5.79` `checksums.txt`：
 
 ```text
-ad24993f8e7bb088f8ed864a2d7a937c85630faa06f1b15bba8a3647d6a16542  binlog-server_0.5.78_darwin_amd64.tar.gz
-a0850ac236f24368d74236746e5a93c5bedb5d1c49269ca366794cac28b1e066  binlog-server_0.5.78_darwin_arm64.tar.gz
-2d60273b7b4387a49bdc6f934286e88cab2a7eb446a31212f7f5e5ee0f1a1c36  binlog-server_0.5.78_linux_amd64.tar.gz
-2b8f9e6e8fc6b2b8f409de0b21209db42e73208a0d979c84aebdde2a91de5285  binlog-server_0.5.78_linux_arm64.tar.gz
+01ded0bddcbc6812d510416a5868741da0237d2b04ad3a4f365a39d6c2d17a1d  binlog-server_0.5.79_darwin_amd64.tar.gz
+f56e410f813791ed58b01ab24fabc58967248b17f9a5504819bc811e7ddf262a  binlog-server_0.5.79_darwin_arm64.tar.gz
+3d364d4d1d3931c0ab568adcc7be307aa98f60f9c5f70ad95259adc7bdaa1a3b  binlog-server_0.5.79_linux_amd64.tar.gz
+0869047e96f35d3d03b59bb632b97ee9c715a55e37dee677303f7a95800e192d  binlog-server_0.5.79_linux_arm64.tar.gz
 ```
 
 解压后的标准目录结构如下：
 ```text
-binlog-server_0.5.78_linux_amd64/
+binlog-server_0.5.79_linux_amd64/
 ├── binlog-server                  # 服务核心二进制（已内嵌 Web 控制台）
 ├── migrate                        # 数据库 Schema 迁移工具
 ├── migrations/                    # SQL 迁移脚本目录 (000001_init_schema, 000002_binlog_file_epoch_key, 000003_task_desired_and_retry_budget, 000004_pending_dump_cleanup, 000005_binlog_source_epoch_key, 000006_drop_task_file_epoch_key)
