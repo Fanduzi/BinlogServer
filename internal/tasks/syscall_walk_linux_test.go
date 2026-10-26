@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a task directory of 150 and 1500 segments, and strace on PATH
-// output: a failure when the cold evaluator pass's filesystem syscalls exceed the per-segment bound or 10.5 times the 150-segment count; missing strace fails the test
-// pos: the kernel count for one cold walk, so a directory read the in-process counter does not see still fails
+// output: a failure when the cold evaluator pass's filesystem syscalls or the bytes returned by getdents64, read, pread64 and readv exceed the per-segment bound or 10.5 times the 150-segment count; missing strace fails the test
+// pos: the kernel count for one cold walk, including preamble-only opens, the open tail, and work an AfterFunc scheduled during the pass; a directory reread the syscall count still accepts fails on the byte total
 // note: if this file changes, update this header and module README.md.
 //go:build linux
 
@@ -35,16 +35,29 @@ const (
 	walkSentinelStart = "/tmp/binlog-walk-sentinel-start"
 	walkSentinelEnd   = "/tmp/binlog-walk-sentinel-end"
 
-	// Measured cold pass: 9479 syscalls for 150 segments and 94568 for 1500,
-	// about 63 per segment. 95 is 1.5 times that, and 16 is the fixed slack.
-	// A directory listing once per segment grows with the directory, so the
-	// 1500/150 ratio (at most 10.5x) rejects it even when the per-segment
-	// cap still fits.
-	syscallPerSeg   = 95
+	// Measured cold pass: 23140 syscalls and 150467 bytes for 150 segments,
+	// 231117 syscalls and 1500475 bytes for 1500. About 154 syscalls and
+	// 1003 bytes per segment. 231 and 1506 are 1.5 times those slopes,
+	// and 16 and 4096 are the fixed slack. A directory listing a constant
+	// number of times stays linear. Listing again every few segments
+	// grows with the directory, so the 1500/150 byte ratio (at most
+	// 10.5x) rejects it even when the syscall ratio still fits.
+	syscallPerSeg   = 231
 	syscallOverhead = 16
+	bytePerSeg      = 1506
+	byteOverhead    = 4096
 	syscallSmallN   = 150
 	syscallLargeN   = 1500
 )
+
+// walkByteSyscalls are the calls whose positive return value is bytes the
+// kernel copied. A directory reread grows this sum with the directory.
+var walkByteSyscalls = map[string]bool{
+	"getdents64": true,
+	"read":       true,
+	"pread64":    true,
+	"readv":      true,
+}
 
 // walkSyscallSkip is memory and poll noise that strace's %desc class also
 // prints. A filesystem call is everything else in the traced set.
@@ -63,8 +76,8 @@ func TestEvaluator_SyscallWalkNearLinear(t *testing.T) {
 	}
 	small := countColdWalk(t, syscallSmallN)
 	large := countColdWalk(t, syscallLargeN)
-	t.Logf("%d segments %d filesystem syscalls; %d segments %d", syscallSmallN, small.n, syscallLargeN, large.n)
-	check := func(segs int, got walkCount) {
+	t.Logf("%d segments %d syscalls %d bytes; %d segments %d syscalls %d bytes", syscallSmallN, small.n, small.bytes, syscallLargeN, large.n, large.bytes)
+	checkCalls := func(segs int, got walkCount) {
 		t.Helper()
 		if got.n < segs {
 			t.Fatalf("%d-segment pass did %d filesystem syscalls, want at least one per segment", segs, got.n)
@@ -73,16 +86,30 @@ func TestEvaluator_SyscallWalkNearLinear(t *testing.T) {
 			t.Fatalf("%d-segment pass did %d filesystem syscalls, want <= %d per segment plus %d\n%s", segs, got.n, syscallPerSeg, syscallOverhead, got.detail)
 		}
 	}
-	check(syscallSmallN, small)
+	checkBytes := func(segs int, got walkCount) {
+		t.Helper()
+		if got.bytes < segs {
+			t.Fatalf("%d-segment pass returned %d filesystem bytes, want at least one per segment", segs, got.bytes)
+		}
+		if got.bytes > segs*bytePerSeg+byteOverhead {
+			t.Fatalf("%d-segment pass returned %d bytes from getdents64/read/pread64/readv, want <= %d per segment plus %d\n%s", segs, got.bytes, bytePerSeg, byteOverhead, got.detail)
+		}
+	}
+	checkCalls(syscallSmallN, small)
 	if small.n <= 0 || large.n*2 > small.n*21 {
 		t.Fatalf("%d segments did %d syscalls, %d did %d; want at most 10.5x\n%s\n%s", syscallLargeN, large.n, syscallSmallN, small.n, small.detail, large.detail)
 	}
-	check(syscallLargeN, large)
+	checkCalls(syscallLargeN, large)
+	checkBytes(syscallSmallN, small)
+	if small.bytes <= 0 || large.bytes*2 > small.bytes*21 {
+		t.Fatalf("%d segments returned %d bytes, %d returned %d; want at most 10.5x\n%s\n%s", syscallLargeN, large.bytes, syscallSmallN, small.bytes, small.detail, large.detail)
+	}
+	checkBytes(syscallLargeN, large)
 }
 
 type walkCount struct {
-	n      int
-	detail string
+	n, bytes int
+	detail   string
 }
 
 func countColdWalk(t *testing.T, n int) walkCount {
@@ -94,9 +121,10 @@ func countColdWalk(t *testing.T, n int) walkCount {
 	logPath := filepath.Join(t.TempDir(), "strace.log")
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	// -tt stamps every line so a syscall finished on another thread can be
-	// sorted back between the two sentinel unlinks.
-	cmd := exec.CommandContext(ctx, "strace", "-f", "-tt", "-s", "80", "-e", "trace=%file,%desc,getdents64", "-o", logPath, "--", exe, "-syscall-walk", strconv.Itoa(n))
+	// -ttt stamps seconds since the epoch so a line from another thread
+	// sorts back between the sentinels, including a pass that crosses
+	// midnight. -s 80 keeps the return byte count on the line.
+	cmd := exec.CommandContext(ctx, "strace", "-f", "-ttt", "-s", "80", "-e", "trace=%file,%desc,getdents64", "-o", logPath, "--", exe, "-syscall-walk", strconv.Itoa(n))
 	cmd.Env = envWithoutMeta()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -106,15 +134,15 @@ func countColdWalk(t *testing.T, n int) walkCount {
 	if err != nil {
 		t.Fatal(err)
 	}
-	total, counts, err := countWalkSyscalls(string(text))
+	tr, err := countWalkSyscalls(string(text))
 	if err != nil {
 		t.Fatalf("%v\n%s", err, straceSample(string(text)))
 	}
-	if total < n {
-		t.Fatalf("%d-segment trace counted %d filesystem syscalls\n%s", n, total, straceSample(string(text)))
+	if tr.n < n {
+		t.Fatalf("%d-segment trace counted %d filesystem syscalls\n%s", n, tr.n, straceSample(string(text)))
 	}
-	got := walkCount{n: total, detail: formatSyscallCounts(counts)}
-	t.Logf("%d segments %d syscalls %s", n, total, got.detail)
+	got := walkCount{n: tr.n, bytes: tr.bytes, detail: formatSyscallCounts(tr.counts) + " bytes " + formatSyscallCounts(tr.byteCounts)}
+	t.Logf("%d segments %d syscalls %d bytes %s", n, got.n, got.bytes, got.detail)
 	return got
 }
 
@@ -160,9 +188,22 @@ func syscallWalkPass(n int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	for i := 0; i < n; i++ {
-		path := filepath.Join(dir, fmt.Sprintf("mysql-bin.%06d", i+1))
-		if err := os.WriteFile(path, syscallWalkSegment(int64(37+i)), 0o644); err != nil {
+	for i := 1; i <= n; i++ {
+		name := fmt.Sprintf("mysql-bin.%06d", i)
+		next := fmt.Sprintf("mysql-bin.%06d", i+1)
+		if err := os.WriteFile(filepath.Join(dir, name), syscallWalkSegment(int64(37+i-1), next), 0o644); err != nil {
+			return err
+		}
+		// An earlier open file with only a log_pos 0 rotate is the
+		// preamble path (PreambleOnly). The last open file holds a real
+		// event, so the open-tail path runs on it.
+		var open []byte
+		if i < n {
+			open = syscallWalkPreamble(next)
+		} else {
+			open = syscallWalkSegment(int64(37+n), next)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".open.e1"), open, 0o644); err != nil {
 			return err
 		}
 	}
@@ -171,20 +212,45 @@ func syscallWalkPass(n int) error {
 		NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond,
 	})
 	// Keep the two sentinel unlinks on this OS thread. The walk itself may
-	// still run on others; -tt puts those lines back in order.
+	// still run on others; -ttt puts those lines back in order.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	quiet := runtime.NumGoroutine()
 	_ = syscall.Unlink(walkSentinelStart)
 	_, err = e.EvaluateNow(context.Background(), task.ID)
+	// A pass can arm time.AfterFunc and return before that callback reads
+	// the directory. Wait until those goroutines have finished, then mark
+	// the end, so the callback's syscalls stay inside the window.
+	waitWalkQuiescent(quiet)
 	_ = syscall.Unlink(walkSentinelEnd)
 	return err
 }
 
-func syscallWalkSegment(seq int64) []byte {
-	when, err := ParsePITRDatetime("2024-01-01 09:00:00")
-	if err != nil {
-		panic(err)
+// waitWalkQuiescent gives a callback scheduled as the pass returns time to
+// start, then waits until the goroutine count has been back at the
+// pre-pass level. The cap is the whole strace budget's problem if a
+// callback never returns.
+func waitWalkQuiescent(base int) {
+	deadline := time.Now().Add(30 * time.Second)
+	start := time.Now()
+	var quiet time.Time
+	for time.Now().Before(deadline) {
+		settled := runtime.NumGoroutine() <= base && time.Since(start) >= 50*time.Millisecond
+		if settled {
+			if quiet.IsZero() {
+				quiet = time.Now()
+			}
+			if time.Since(quiet) >= 20*time.Millisecond {
+				return
+			}
+		} else {
+			quiet = time.Time{}
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+func syscallWalkSegment(seq int64, next string) []byte {
 	var buf bytes.Buffer
 	buf.Write([]byte{0xfe, 'b', 'i', 'n'})
 	sid, err := hex.DecodeString(strings.ReplaceAll(gtidPITRUUID, "-", ""))
@@ -194,11 +260,43 @@ func syscallWalkSegment(seq int64) []byte {
 	payload := make([]byte, 1+goreplication.SidLength+8)
 	copy(payload[1:], sid)
 	binary.LittleEndian.PutUint64(payload[1+goreplication.SidLength:], uint64(seq))
-	writeWindowEvent(&buf, when, goreplication.GTID_EVENT, payload)
+	syscallWalkEvent(&buf, goreplication.GTID_EVENT, payload, 128)
+	rot := make([]byte, 8+len(next))
+	binary.LittleEndian.PutUint64(rot[:8], 4)
+	copy(rot[8:], next)
+	syscallWalkEvent(&buf, goreplication.ROTATE_EVENT, rot, 256)
 	return buf.Bytes()
 }
 
-func countWalkSyscalls(text string) (int, map[string]int, error) {
+// syscallWalkPreamble is an open file of one log_pos 0 rotate: big enough
+// to pass the empty-leftover size check, with no GTID event, so the chain
+// calls PreambleOnly.
+func syscallWalkPreamble(next string) []byte {
+	var buf bytes.Buffer
+	buf.Write([]byte{0xfe, 'b', 'i', 'n'})
+	rot := make([]byte, 8+len(next))
+	copy(rot[8:], next)
+	syscallWalkEvent(&buf, goreplication.ROTATE_EVENT, rot, 0)
+	return buf.Bytes()
+}
+
+func syscallWalkEvent(buf *bytes.Buffer, kind goreplication.EventType, payload []byte, logPos uint32) {
+	size := uint32(goreplication.EventHeaderSize + len(payload))
+	var hdr [19]byte
+	hdr[4] = byte(kind)
+	binary.LittleEndian.PutUint32(hdr[9:13], size)
+	binary.LittleEndian.PutUint32(hdr[13:17], logPos)
+	buf.Write(hdr[:])
+	buf.Write(payload)
+}
+
+type walkTrace struct {
+	n, bytes   int
+	counts     map[string]int
+	byteCounts map[string]int
+}
+
+func countWalkSyscalls(text string) (walkTrace, error) {
 	lines := straceLinesInOrder(text)
 	start, end := -1, -1
 	for i, line := range lines {
@@ -210,23 +308,28 @@ func countWalkSyscalls(text string) (int, map[string]int, error) {
 		}
 	}
 	if start < 0 || end <= start {
-		return 0, nil, fmt.Errorf("sentinel window missing (start=%d end=%d lines=%d)", start, end, len(lines))
+		return walkTrace{}, fmt.Errorf("sentinel window missing (start=%d end=%d lines=%d)", start, end, len(lines))
 	}
-	counts := map[string]int{}
-	total := 0
+	tr := walkTrace{counts: map[string]int{}, byteCounts: map[string]int{}}
 	for _, line := range lines[start+1 : end] {
 		name, ok := walkSyscallName(line)
-		if !ok || walkSyscallSkip[name] {
-			continue
+		if ok && !walkSyscallSkip[name] {
+			tr.counts[name]++
+			tr.n++
 		}
-		counts[name]++
-		total++
+		bname, nbytes, bok := walkReturnBytes(line)
+		if bok {
+			tr.byteCounts[bname] += nbytes
+			tr.bytes += nbytes
+		}
 	}
-	return total, counts, nil
+	return tr, nil
 }
 
 // straceLinesInOrder sorts timestamped lines. strace -f does not promise
 // that a line is printed before a later syscall on another thread.
+// Timestamps are seconds since the epoch (-ttt), so a pass that crosses
+// midnight stays in order.
 func straceLinesInOrder(text string) []string {
 	lines := strings.Split(text, "\n")
 	type stamped struct {
@@ -283,19 +386,52 @@ func stracePrefix(line string) (ts, rest string) {
 }
 
 func isStraceTimestamp(s string) bool {
-	// HH:MM:SS.fraction
-	if len(s) < 15 || s[2] != ':' || s[5] != ':' || s[8] != '.' {
+	// -ttt: seconds since the epoch, a dot, then microseconds.
+	dot := strings.IndexByte(s, '.')
+	if dot <= 0 || dot == len(s)-1 || strings.IndexByte(s[dot+1:], '.') >= 0 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		if i == 2 || i == 5 || i == 8 {
-			continue
+	return digitsOnly(s[:dot]) && digitsOnly(s[dot+1:])
+}
+
+// walkReturnBytes is the positive return count of a byte-copying call.
+// A resumed line carries the count when the first line was unfinished.
+func walkReturnBytes(line string) (string, int, bool) {
+	_, rest := stracePrefix(line)
+	name := ""
+	if strings.HasPrefix(rest, "<...") {
+		end := strings.Index(rest, " resumed>")
+		if end < 0 {
+			return "", 0, false
 		}
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
+		name = strings.TrimSpace(rest[len("<..."):end])
+	} else if n, ok := walkSyscallName(line); ok {
+		name = n
 	}
-	return true
+	if !walkByteSyscalls[name] {
+		return "", 0, false
+	}
+	n, ok := straceReturn(rest)
+	if !ok {
+		return "", 0, false
+	}
+	return name, n, true
+}
+
+func straceReturn(rest string) (int, bool) {
+	i := strings.LastIndex(rest, " = ")
+	if i < 0 {
+		return 0, false
+	}
+	field := strings.TrimSpace(rest[i+3:])
+	if sp := strings.IndexAny(field, " <"); sp >= 0 {
+		field = field[:sp]
+	}
+	n, err := strconv.Atoi(field)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func walkSyscallName(line string) (string, bool) {
@@ -368,27 +504,36 @@ func TestCountWalkSyscalls_Window(t *testing.T) {
 		`[pid 9] getdents64(3, [], 8192) = 100`,
 		`[pid 9] <... read resumed> = 4`,
 		`9 read(3, "x", 1) = 1`,
+		`9 pread64(3, "y", 8, 0) = 7`,
+		`9 readv(3, [], 2) = 9`,
+		`9 read(4, "z", 1) = -1 EIO (Input/output error)`,
 		`9 +++ exited with 0 +++`,
 		`12 unlinkat(AT_FDCWD, "/tmp/binlog-walk-sentinel-end", 0) = -1 ENOENT (No such file or directory)`,
 	}, "\n")
-	total, counts, err := countWalkSyscalls(log)
+	tr, err := countWalkSyscalls(log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 3 || counts["openat"] != 1 || counts["getdents64"] != 1 || counts["read"] != 1 || counts["mmap"] != 0 {
-		t.Fatalf("total %d counts %v", total, counts)
+	if tr.n != 6 || tr.counts["openat"] != 1 || tr.counts["getdents64"] != 1 || tr.counts["read"] != 2 || tr.counts["pread64"] != 1 || tr.counts["readv"] != 1 || tr.counts["mmap"] != 0 {
+		t.Fatalf("total %d counts %v", tr.n, tr.counts)
 	}
+	// 100 getdents + 4 resumed read + 1 read + 7 pread64 + 9 readv. The EIO read adds a call and no bytes.
+	if tr.bytes != 121 || tr.byteCounts["getdents64"] != 100 || tr.byteCounts["read"] != 5 || tr.byteCounts["pread64"] != 7 || tr.byteCounts["readv"] != 9 {
+		t.Fatalf("bytes %d by call %v", tr.bytes, tr.byteCounts)
+	}
+	// Printed end-before-start. Epoch seconds still put the window in order,
+	// which a HH:MM:SS stamp would not do across midnight.
 	reordered := strings.Join([]string{
-		`9 12:00:00.300000 unlinkat(AT_FDCWD, "/tmp/binlog-walk-sentinel-end", 0) = -1 ENOENT`,
-		`9 12:00:00.200000 openat(AT_FDCWD, "a", O_RDONLY) = 3`,
-		`[pid 10] 12:00:00.100000 unlinkat(AT_FDCWD, "/tmp/binlog-walk-sentinel-start", 0) = -1 ENOENT`,
-		`[pid 10] 12:00:00.250000 getdents64(3, [], 8192) = 10`,
+		`9 1700000000.300000 unlinkat(AT_FDCWD, "/tmp/binlog-walk-sentinel-end", 0) = -1 ENOENT`,
+		`9 1700000000.200000 openat(AT_FDCWD, "a", O_RDONLY) = 3`,
+		`[pid 10] 1699999999.900000 unlinkat(AT_FDCWD, "/tmp/binlog-walk-sentinel-start", 0) = -1 ENOENT`,
+		`[pid 10] 1700000000.250000 getdents64(3, [], 8192) = 10`,
 	}, "\n")
-	total, counts, err = countWalkSyscalls(reordered)
+	tr, err = countWalkSyscalls(reordered)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 2 || counts["openat"] != 1 || counts["getdents64"] != 1 {
-		t.Fatalf("reordered total %d counts %v", total, counts)
+	if tr.n != 2 || tr.counts["openat"] != 1 || tr.counts["getdents64"] != 1 || tr.bytes != 10 {
+		t.Fatalf("reordered total %d bytes %d counts %v", tr.n, tr.bytes, tr.counts)
 	}
 }

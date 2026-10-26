@@ -289,7 +289,7 @@ evaluate(task):
   6. 写失败 → 转移留在 pending，按 (task, generation) 有序重放，健康标 UNKNOWN(store)；standalone 下 pending 持久化进 `.findings.json`，meta 模式下进程重启会丢 pending，由下一轮调和从事实重算补齐（§7.4）
 ```
 
-步骤 2 的读取（账本有 size+mtime 缓存）每轮 O(段数）。P2-3 的基准不把冷启动压在墙上时间的比值上。CI 的证明是 Linux 上 strace 数到的文件系统系统调用：150 段 9479 次、1500 段 94568 次（约每段 63 次）。上限是每段 95 次再加 16，并且 1500 段不超过 150 段的 10.5 倍。子进程、反射、接口、template 的 Glob 和 http.Dir 都算在里面。进程内 WalkOps（每段 36 次再加 16，2s 只是挂起粗上限）是本地快速信号。纯 CPU、按段 sleep 和只比较名字的循环，系统调用计数看不到。-race 下墙上时间会随负载变。
+步骤 2 的读取（账本有 size+mtime 缓存）每轮 O(段数）。P2-3 的基准不把冷启动压在墙上时间的比值上。CI 的证明是 Linux 上 strace 数到的文件系统系统调用，加上 `getdents64`、`read`、`pread64`、`readv` 的返回字节：150 段 23140 次、150467 字节，1500 段 231117 次、1500475 字节（约每段 154 次、1003 字节）。次数上限是每段 231 次再加 16，字节上限是每段 1506 再加 4096，并且 1500 段的次数和字节都不超过 150 段的 10.5 倍。夹具包含 preamble-only 的 open 文件和真正的 open tail。子进程、反射、接口、`time.AfterFunc` 推迟到 pass 返回之后的读取、template 的 Glob 和 http.Dir 都算在里面。进程内 WalkOps（每段 36 次再加 16，2s 只是挂起粗上限）是本地快速信号。纯 CPU、按段 sleep 和只比较名字的循环，系统调用计数看不到。-race 下墙上时间会随负载变。
 
 ### 5.2 触发点
 
@@ -717,7 +717,7 @@ P2-3 按 §5、§5.7、§6 落地（`internal/tasks/evaluator.go`、`rehash.go`�
 - **open 副本的 I4 判定只认「内容相同」**：GTID 相交（MySQL，两边都有 GTID），或一个文件的字节是另一个的前缀（#372 openstale/openhand；两边都要有 binlog magic 且不短于 23 字节）。正文写的「区间相交也算」对 sealed↔sealed 保持不变；对含 open 的一对不采用位点区间相交，因为阶段 1 的回放用例里，新 epoch 的 open 段与 sealed 段在合成数据上位点从 4 起算，按区间会被误判并截断 `/replay`，违反 §13「除 open≡sealed 那条 golden 外不改变 /replay 字节」。
 - **空残留**不包括 replay 顺序上的最后一段：轮转后刚开的 open 文件只有头事件，它是正在写的段，不是残留。
 - **新增 golden** 放在 `internal/tasks/testdata/replay/p2-3.json`（open≡sealed、#357 空残留），阶段 1 的 golden 不变。
-- **性能**：评估路径不哈希；目录指纹与 replay 顺序不变时复用上一轮 `Check` 结论，`SegmentPositions` 与单段损坏检查按大小+mtime 缓存。安静机器上 1500 段热路径一轮约 3–4ms，冷启动一轮曾经约 40ms；测试不再把这当作 50ms 上限，因为 -race 下冷启动会更高。证明是 Linux 上 strace 的文件系统系统调用，每段不超过 95 次再加 16，1500 段不超过 150 段的 10.5 倍（实测 9479 和 94568）。进程内 WalkOps 每段 36 次再加 16，2s 只是挂起粗上限，是本地快速信号。纯 CPU、按段 sleep 和只比较名字的循环不在这次检查里。
+- **性能**：评估路径不哈希；目录指纹与 replay 顺序不变时复用上一轮 `Check` 结论，`SegmentPositions` 与单段损坏检查按大小+mtime 缓存。安静机器上 1500 段热路径一轮约 3–4ms，冷启动一轮曾经约 40ms；测试不再把这当作 50ms 上限，因为 -race 下冷启动会更高。证明是 Linux 上 strace 的文件系统系统调用和 `getdents64`/`read`/`pread64`/`readv` 的返回字节，次数每段不超过 231 再加 16，字节每段不超过 1506 再加 4096，1500 段的次数和字节都不超过 150 段的 10.5 倍（实测 23140 次 / 150467 字节和 231117 次 / 1500475 字节）。进程内 WalkOps 每段 36 次再加 16，2s 只是挂起粗上限，是本地快速信号。纯 CPU、按段 sleep 和只比较名字的循环不在这次检查里。
 - **standalone 无 meta**：评估器写 `.health.json`；`.findings.json` 里旧版本写下的 Managed 行并入评估器的 open 集合，关闭时同时在旧文件里关闭；`/api/findings` 合并评估器的 open 行。
 - **meta 缺 000009**：`ApplyTransitions` 返回 `ErrSchemaAbsent` 时旧 `Report` 路径继续写 Managed kind（不出现无人写的窗口），下一次写成功后评估器重新接管。
 - **留给后续 PR**：`_health` 代写与委派（P2-6，集群模式下 P2-3 只评估本节点持有 lease 的任务）；`health_eval_*` 指标与 `POST /api/tasks/{id}/health/evaluate`（P2-7）；`health takeover`（P2-7）；QA 中「100 任务时源延迟不升高」需要 e2e 环境，P2-3 只以单元测试证明复核带宽在预算 ±10% 内。BinlogServerQA 对 #378 的四条 P3 记在 #379。
