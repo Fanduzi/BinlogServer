@@ -45,6 +45,8 @@ var allowlist = map[string]Allowed{
 	"internal/tasks/scheduler_dump_cleanup.go:Scheduler.killLeftover:log-only":             {1, "the pending KILL marker stays and is retried every pass; marker write failures are DUMP_CLEANUP_PERSIST_FAILED (S3)"},
 	"internal/tasks/scheduler_dump_cleanup.go:Scheduler.noteDumpCleanup:log-only":          {1, persistReported},
 	"internal/tasks/scheduler_dump_cleanup.go:Scheduler.retryPendingDumpCleanups:log-only": {1, "the pass runs again on the next tick; a stale list only delays a KILL"},
+	"internal/tasks/disk_files.go:leaveDiskTombstone:blank-call":                           {1, "best-effort directory marker; the task-record tombstone is what suppresses TASK_UNADOPTED, and a missing directory is not an error"},
+	"internal/tasks/ownership_bridge.go:Scheduler.deleteStoredRefusalsLocked:log-only":     {1, "a failed delete leaves the refusal row, so the next claim stays blocked; Start and DumpReady try again"},
 	"internal/tasks/scheduler_lifecycle.go:Scheduler.claimOwnedIdleTasks:blank-call":       {1, "follow-up: StopTask after an invalid source config; its persist failure is reported by persistTaskLocked, other errors are not"},
 	"internal/tasks/scheduler_lifecycle.go:Scheduler.completeIdleStop:blank-call":          {1, "settleForeignStop persists through persistTaskLocked (reported) and is retried on the next lifecycle pass"},
 	"internal/tasks/scheduler_lifecycle.go:Scheduler.releaseTaskLease:log-only":            {1, "follow-up: an unreleased lease expires by TTL, but the takeover waits for it; worth a WARNING finding"},

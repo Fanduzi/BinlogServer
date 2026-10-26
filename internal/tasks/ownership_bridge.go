@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the in-memory task row, ownership.Step, and the cluster storage mode
-// output: task phase, desired, failed_reason, and lease fields copied from one Step result; a holder event synthesizes a lease only for the decision and does not invent an epoch on a row that had none; a late event that updates nothing is a no-op
+// output: task phase, desired, failed_reason, and lease fields copied from one Step result; a holder event synthesizes a lease only for the decision and does not invent an epoch on a row that had none; a late event that updates nothing is a no-op; an open task_node_refusal row blocks Acquire after restart; Start and DumpReady delete those rows
 // pos: the only place the scheduler asks ADR 0011 what the next phase is
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -307,11 +307,62 @@ func (s *Scheduler) commitYieldLocked(id string, kind ownership.Kind, res owners
 }
 
 func (s *Scheduler) noteStepIntentsLocked(id string, res ownership.Result) {
+	clear := false
 	for _, in := range res.Intents {
 		if in.Kind == ownership.IntentTombstone {
 			s.recordTombstoneLocked(id)
 			leaveDiskTombstone(s.dataDir, id)
 		}
+		if in.Kind == ownership.IntentDeleteRefusals {
+			clear = true
+		}
+	}
+	if clear {
+		s.deleteStoredRefusalsLocked(id)
+	}
+}
+
+// refuseStoredClaimLocked reads task_node_refusal. A restart has an empty
+// memory map; the row is what still blocks Acquire. Caller holds s.mu.
+func (s *Scheduler) refuseStoredClaimLocked(id string) error {
+	store := s.store
+	node := s.clusterWorkerID
+	q, ok := store.(interface {
+		RefusalOpen(context.Context, string, string) (bool, error)
+	})
+	if !ok {
+		return nil
+	}
+	s.mu.Unlock()
+	ctx, cancel := s.withLeaseTimeout(context.Background())
+	open, err := q.RefusalOpen(ctx, id, node)
+	cancel()
+	s.mu.Lock()
+	if err != nil {
+		return err
+	}
+	if open {
+		return ErrLeaseNotAcquired
+	}
+	return nil
+}
+
+// deleteStoredRefusalsLocked removes the task's refusal rows. Caller holds s.mu.
+func (s *Scheduler) deleteStoredRefusalsLocked(id string) {
+	store := s.store
+	del, ok := store.(interface {
+		DeleteTaskRefusals(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	s.mu.Unlock()
+	ctx, cancel := s.withWriteTimeout(context.Background())
+	err := del.DeleteTaskRefusals(ctx, id)
+	cancel()
+	s.mu.Lock()
+	if err != nil {
+		log.Printf("delete task refusals task=%s err=%v", id, err)
 	}
 }
 

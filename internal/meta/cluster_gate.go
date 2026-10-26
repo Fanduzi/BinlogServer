@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
-// input: cluster.storage and worker_registrations.cluster_protocol_version
-// output: the registered storage mode, the count of older live protocols, and one transaction that writes a yield with its refusal row
+// input: cluster.storage, worker_registrations.cluster_protocol_version, and task_node_refusal
+// output: the registered storage mode, the count of older live protocols, one transaction that writes a yield with its refusal row, and a claim-time read of an open refusal
 // pos: ADR 0011 F11 and F12 on the metadata store
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -119,4 +119,23 @@ WHERE task_id = ? AND epoch = ?`, row.TaskID, row.ReleaseEpoch); err != nil {
 		return 0, err
 	}
 	return n, nil
+}
+
+// RefusalOpen reports a refusal row that still blocks this node.
+// NULL refuse_until is open-ended. A past timestamp does not block.
+func (s *MySQLTaskStore) RefusalOpen(ctx context.Context, taskID, nodeID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM task_node_refusal
+WHERE task_id = ? AND node_id = ?
+  AND (refuse_until IS NULL OR refuse_until > NOW(6))`, taskID, nodeID).Scan(&n)
+	return n > 0, err
+}
+
+// DeleteTaskRefusals removes every refusal for the task.
+// Operator Start and DumpReady both clear them.
+func (s *MySQLTaskStore) DeleteTaskRefusals(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM task_node_refusal WHERE task_id = ?`, taskID)
+	return err
 }

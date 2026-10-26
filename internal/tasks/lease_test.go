@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, cluster lease, expired-lease takeover coverage, split control-plane/worker stop coverage, and a Stop that still stores STOPPED when the upsert keeps a newer spec_revision
+// output: task state transitions, scheduling decisions, cluster lease, expired-lease takeover coverage, split control-plane/worker stop coverage, an expired STOPPING row finalized by StopExpired, pending_delete erased in that same step, and a Stop that still stores STOPPED when the upsert keeps a newer spec_revision
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -1930,5 +1930,29 @@ func TestScheduler_ExpiredStoppingFinalizesWithoutStartingDump(t *testing.T) {
 	lease.mu.Unlock()
 	if releases == 0 {
 		t.Fatal("expected lease release for expired STOPPING")
+	}
+}
+
+func TestScheduler_ExpiredStoppingPendingDeleteErases(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireOK: false}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+	task := newExpiredOwnedTask("1", "worker-dead", StateStopping)
+	task.DesiredRun = TaskDesiredStop
+	task.PendingDelete = true
+	store.tasks[task.ID] = task
+	store.expired = []Task{task}
+
+	if _, err := worker.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if _, err := store.GetTask(context.Background(), task.ID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("pending_delete after StopExpired: err=%v", err)
 	}
 }

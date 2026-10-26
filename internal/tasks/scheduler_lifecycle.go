@@ -4,7 +4,7 @@
 // note P2-6c (#421): a live run whose shared row is FAILED by another epoch is not a remote Stop: the run stops, its lease epoch is marked lost, memory takes the FAILED row and nothing is written
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
-// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost; ClaimExpiredTasks also claims STOPPED when desired RUN and the owner is empty
+// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost and skips a task_node_refusal row that is still open; ClaimExpiredTasks finalizes an expired STOPPING lease with StopExpired and also claims STOPPED when desired RUN and the owner is empty
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -254,6 +254,10 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 		if s.refusalBlocksLocked(id, s.clusterWorkerID, time.Now()) {
 			s.mu.Unlock()
 			return ErrLeaseNotAcquired
+		}
+		if err := s.refuseStoredClaimLocked(id); err != nil {
+			s.mu.Unlock()
+			return err
 		}
 		task, ok = s.tasks[id]
 		if !ok {
@@ -1173,7 +1177,7 @@ func (s *Scheduler) settleForeignStop(task Task) error {
 	}
 	s.tasks[task.ID] = base
 	releaseOwner, releaseEpoch := base.OwnerWorkerID, base.Epoch
-	if err := s.markStoppedLocked(task.ID); err != nil {
+	if err := s.markStopExpiredLocked(task.ID); err != nil {
 		s.mu.Unlock()
 		log.Printf("persist task transition failed task=%s state=%s err=%v", task.ID, StateStopped, err)
 		return err

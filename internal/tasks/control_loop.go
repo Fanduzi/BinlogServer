@@ -411,8 +411,10 @@ func (s *Scheduler) writeStartIntent(id string) error {
 	if err := s.commitTransitionLocked(task, StateStarting, rec); err != nil {
 		return err
 	}
-	// OperatorStart deletes every refusal. The claim gate reads this map.
+	// OperatorStart deletes every refusal. The claim gate reads this map,
+	// and a restarted process reads the same rows from meta.
 	s.rememberRefusalLocked(id, res.State)
+	s.deleteStoredRefusalsLocked(id)
 	if cancel, ok := s.cancels[id]; ok {
 		cancel()
 		delete(s.cancels, id)

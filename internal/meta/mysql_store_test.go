@@ -57,7 +57,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "cluster-a-key", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
+		WithArgs("1", "cluster-a", "cluster-a-key", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(insertTaskRunSQL)).
 		WithArgs("run-1", "1", "worker-a", int64(7), sqlmock.AnyArg()).
@@ -107,7 +107,7 @@ func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}).AddRow("run-1"))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
+		WithArgs("1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(finishTaskRunSQL)).
 		WithArgs(sqlmock.AnyArg(), "NORMAL_STOP", "run-1").
@@ -816,7 +816,7 @@ func TestMySQLTaskStore_EncryptsSourcePasswordWhenKeySet(t *testing.T) {
 			key:      testSourcePasswordKey,
 			password: "secret",
 			host:     "127.0.0.1",
-		}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
+		}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 

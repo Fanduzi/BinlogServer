@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: locked task snapshots plus runner and lease lifecycle signals
-// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; a runner error goes through ownership.Step so FAILED keeps desired RUN and only the terminal allowlist reaches FAILED; a fail-safe stop leaves FAILED unchanged; STOPPING/STOPPED from lease-loss paths write through persistTaskFencedLocked (#360 / P2-6a)
+// output: private state/event/persistence transitions plus best-effort persistence failure logs; STOPPED keeps the latest stored source config, the newer Stop spec when a stale snapshot would leave the row STOPPING, and, when pending_dump_cleanup is not a column, this process's dump marker; RUNNING clears the retry budget; a runner error goes through ownership.Step so FAILED keeps desired RUN and only the terminal allowlist reaches FAILED; a fail-safe stop leaves FAILED unchanged; an expired STOPPING lease is finalized by StopExpired (pending_delete deletes) without a synthesized live lease; STOPPING/STOPPED from the holder's own exit still use StopConfirmed and write through persistTaskFencedLocked (#360 / P2-6a)
 // note P2-6c (#421): markStoppedLocked and finishStoredStopLocked never write STOPPED over a stored FAILED row, STOPPED is fenced with this run's (owner, epoch), not the row read back, and markLeaseDegradedLocked leaves FAILED alone
 // pos: centralized lifecycle transition recipes shared by scheduler orchestration loops
 // note: if this file changes, update this header and module README.md.
@@ -214,6 +214,16 @@ func (s *Scheduler) markFailedLocked(id, message string) error {
 // 正在落库的 Stop 可能已经把 spec_revision 加一。读到的旧行 spec 更小，不能拿它写 STOPPED：
 // 元数据库在 spec 更小时会留下那次 Stop 的 STOPPING。
 func (s *Scheduler) markStoppedLocked(id string) error {
+	return s.finishStopWriteLocked(id, false)
+}
+
+// markStopExpiredLocked finalizes STOPPING after the lease is already gone.
+// The dead holder does not send StopConfirmed. Caller holds s.mu.
+func (s *Scheduler) markStopExpiredLocked(id string) error {
+	return s.finishStopWriteLocked(id, true)
+}
+
+func (s *Scheduler) finishStopWriteLocked(id string, expired bool) error {
 	task, ok := s.tasks[id]
 	if !ok || task.State == StateStopped {
 		return nil
@@ -269,7 +279,19 @@ func (s *Scheduler) markStoppedLocked(id string) error {
 			task = s.overlayPendingDumpLocked(task)
 		}
 	}
-	if err := s.writeStoppedLocked(id, task, fenceOwner, fenceEpoch); err != nil {
+	if expired {
+		stopping := task.State == StateStopping || task.DesiredRun == TaskDesiredStop || task.PendingDelete
+		if !stopping {
+			return nil
+		}
+		applied, err := s.writeStopExpiredLocked(id, task)
+		if err != nil || !applied {
+			return err
+		}
+		if _, ok := s.tasks[id]; !ok {
+			return nil
+		}
+	} else if err := s.writeStoppedLocked(id, task, fenceOwner, fenceEpoch); err != nil {
 		return err
 	}
 	return s.finishStoredStopLocked(id)
@@ -290,6 +312,51 @@ func (s *Scheduler) keepNewerStopSpecLocked(id string, task Task) Task {
 	task.SpecRevision = pending.SpecRevision
 	task.DesiredRun = TaskDesiredStop
 	return task
+}
+
+// writeStopExpiredLocked applies StopExpired with the lease already expired.
+// A synthesized live lease would make InStopSet reject the event. The task
+// row still drops its owner so the claim query can see it. Caller holds s.mu.
+func (s *Scheduler) writeStopExpiredLocked(id string, task Task) (bool, error) {
+	now := time.Now()
+	st := s.ownershipState(task, now)
+	st.Desired = ownership.DesiredStop
+	st.Phase = ownership.PhaseStopping
+	st.StoppedByOperator = true
+	if st.Lease.Owner != "" && !st.Lease.ExpireAt.Before(now) {
+		st.Lease.ExpireAt = now.Add(-time.Nanosecond)
+	}
+	res := ownership.Step(st, ownership.Event{Kind: ownership.EventStopExpired, Node: s.holderNode()}, now)
+	if res.Decision != ownership.DecisionApplied && res.Decision != ownership.DecisionIdempotent {
+		log.Printf("stop expired not applied task=%s decision=%s detail=%s", id, res.Decision, res.Detail)
+		return false, nil
+	}
+	if res.State.Deleted {
+		s.noteStepIntentsLocked(id, res)
+		if err := s.commitDeleteLocked(id); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	owner, epoch := task.OwnerWorkerID, task.Epoch
+	task.State = StateStopped
+	task.DesiredRun = TaskDesiredStop
+	task.OwnerWorkerID = ""
+	task.Epoch = 0
+	task.RunID = ""
+	task.PendingDelete = false
+	task.UpdatedAt = time.Now()
+	s.tasks[id] = task
+	s.appendEventLocked(id, "TASK_STOPPED", "expired stop finalized", "")
+	err := s.persistTaskFencedLocked(task, owner, epoch)
+	if errors.Is(err, healthstore.ErrFenced) {
+		s.markHealthDirty(id, ReasonLeaseLost)
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // writeStoppedLocked writes STOPPED fenced by the run's (owner, epoch); an
