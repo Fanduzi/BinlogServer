@@ -12,6 +12,29 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.79] - 2026-10-26
+
+发布说明：`docs/releases/v0.5.79.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。
+
+### Added
+
+- #511（落地 #507，ADR 0011 PR-3，关联 #462）：集群模式保留 `I6_MISSING_LOCAL`。读到任务目录的租约持有者（`Fence.ChainVerified`）连续两轮推导后打开 CRITICAL `SEGMENT_MISSING`，`/api/health` 503；`chain_owner` 只在这时写。所有权变化、没读到目录都不关；只有记下的 `chain_owner` 在文件回到同一目录、或保留让目录行到期时以 `EVAL` 关。finding detail、`/api/findings` 和 `/api/health` 的 reason 点名 `chain_owner=<node>`（集群）或 `node=<node>`（单机）。任务目录存在但读不了时打日志并写进 `/api/health` 的 detail，status 不变。
+
+### Fixed
+
+- #507 QA P2：没配上传时，运行器启动不再删掉还在本地保留期内（按 `sealed_at`，为空则 `created_at`）、文件已不在的封存目录行；没有时间的行也留下。故障切换、重启和运维 Start 不再在段还缺着时关掉 `SEGMENT_MISSING`。过了本地保留的行照旧删掉（#209）。
+- #476（P1）：MySQL meta 实测确认，冻住的 owner 持有的 `task_leases` 事务 5–7 秒内被杀，对端在 +32 秒接管（修复在 v0.5.77 的 ADR 0011 PR-2）。MariaDB meta 尚未实测。
+- #509：安装文档指向 v0.5.78。
+
+### Upgrade notes
+
+- 集群里升级前就缺失的封存段，升级后可能打开 `SEGMENT_MISSING` 并让 `/api/health` 返回 503。非 owner 节点在关闭后可能还列着它（#510）。
+- 回滚到 v0.5.78 安全（同一 schema）。
+
+### Known issues
+
+- #473（P1，PR-4 进行中）、#462（P1，完整关闭在 PR-5）、#513（P2）、#510、#514、#512（P3）。#490、#494、#500、#502、#503、#504、#487、#488、#451、#452、#455、#456、#446、#437、#438 仍未关闭。
+
 ## [v0.5.78] - 2026-10-21
 
 发布说明：`docs/releases/v0.5.78.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `verify.every_sec`（默认 86400）、`verify.budget_bytes_per_sec`（默认 4 MiB/s）、`verify.rotation_periods`、`verify.recent_share_percent`、`verify.pass_deadline_sec`、`verify.pass_max_bytes`、`verify.object_recent_sec`、`verify.drill_dsn`、`verify.drill_every_sec`、`verify.drill_check_sql`；负数拒绝启动，`verify.recent_share_percent` 只接受 1–100。
