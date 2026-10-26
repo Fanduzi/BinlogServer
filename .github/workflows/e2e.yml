@@ -103,7 +103,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-cluster-roles:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'cluster-roles' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'cluster-roles' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -164,7 +164,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-worker-crash-recovery:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'worker-crash-recovery' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'worker-crash-recovery' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -194,7 +194,7 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-meta-failover:
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_profile == 'meta-failover') }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'meta-failover' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
