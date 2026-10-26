@@ -10,7 +10,7 @@
 只能 `workflow_dispatch` 手动触发的 e2e 一律不算 MET。
 
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
-- 每个 PR 和 push main 都跑：`vulncheck`；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
+- 每个 PR 和 push main 都跑：`vulncheck`；`release-archive`（snapshot 包报的 version 和 commit）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
 - 只在 push main 跑：`e2e-meta-failover`。
 - 只能手动触发：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-observability`。
 - 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`、`upgrade-legacy-failback`。
@@ -97,12 +97,12 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | J1 | 发布时必须有发布说明，4 个平台的包带 checksums，Linux 包过 glibc 兼容检查 | `release.yml`（v0.5.76 有 4 个包加 `checksums.txt`，我核对过 sha256） | MET | — |
-| J2 | 发布出来的二进制报告正确的 version 和 commit | v0.5.76 的 linux_amd64 实测报告 `b1de5576…`，是对的；但 `release.yml` 里没有任何断言，坏了也不会挡 | PARTIAL | — |
+| J2 | 发布出来的二进制报告正确的 version 和 commit | `scripts/check-release-archive-identity.sh` 解包 linux_amd64 包，跑 `binlog-server version`，要求 `Version:` 等于 goreleaser 构建的版本（打 tag 时也等于去掉 `v` 的 tag）、`Commit:` 等于 `GITHUB_SHA`。`release.yml` 在发布前和发布后（发布会重新构建）各跑一次；`e2e.yml` 的 `release-archive` job 每个 PR 用 snapshot 构建跑同一个检查 | MET | — |
 | J3 | 打 tag 之前，这个 commit 已经过了全部 e2e（包括多节点 job） | 没有：`release.yml` 只跑 `go test ./...`，不检查 tag 所在 commit 的 CI 结果 | NOT MET | 要改 workflow |
 
 ## 计数
 
-共 35 项：**MET 13 / PARTIAL 10 / NOT MET 12**。
+共 35 项：**MET 14 / PARTIAL 9 / NOT MET 12**。
 
 ## 最卡生产级的 5 项
 

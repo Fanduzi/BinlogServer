@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# input: Linux release tar.gz archive path plus local tar/mktemp tooling and the binary compatibility checker script
-# output: archive asset checks plus non-zero exit when required binaries/migrations/scripts/adopt-leftovers.sh or Linux compatibility are missing
+# input: Linux release tar.gz archive path plus local tar/mktemp tooling and the binary compatibility checker script;
+#        optional EXPECT_VERSION / EXPECT_COMMIT env the packaged `binlog-server version` banner must report
+# output: archive asset checks plus non-zero exit when required binaries/migrations/scripts/adopt-leftovers.sh or Linux compatibility are missing,
+#         or when the banner's Version / Commit differ from EXPECT_VERSION / EXPECT_COMMIT
 # pos: release artifact guardrail verifying packaged Linux archives are operationally complete and glibc-safe
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -69,5 +71,18 @@ fi
 
 echo "[compat-archive] extracted binary: $bin_path"
 "$CHECKER" "$bin_path"
+
+if [[ -n "${EXPECT_VERSION:-}" || -n "${EXPECT_COMMIT:-}" ]]; then
+  banner="$("$bin_path" version)"
+  grep -E '^(Version|Commit|Built):' <<<"$banner" | sed 's/^/[compat-archive] /'
+  if [[ -n "${EXPECT_VERSION:-}" ]] && ! grep -qxF "Version: ${EXPECT_VERSION}" <<<"$banner"; then
+    echo "[compat-archive] error: packaged binlog-server does not report Version: ${EXPECT_VERSION}" >&2
+    exit 1
+  fi
+  if [[ -n "${EXPECT_COMMIT:-}" ]] && ! grep -qxF "Commit:  ${EXPECT_COMMIT}" <<<"$banner"; then
+    echo "[compat-archive] error: packaged binlog-server does not report Commit: ${EXPECT_COMMIT}" >&2
+    exit 1
+  fi
+fi
 
 echo "[compat-archive] OK: release archive is complete and embeds a glibc-safe Linux binary"
