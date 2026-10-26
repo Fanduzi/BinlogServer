@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: metadata store observations from four places (the bounded /api/health read, a ping every metaPingInterval (1s) on its own goroutine, the evaluator's bounded sweep calls (the _health lease, the expired-lease list), and evaluator passes that fail on a timeout or connection error), the optional MetaProbe of the task store, the evaluator's node id, and EvaluatorConfig.After when a test clock drives the ping interval and one ping's timeout
-// output: META_UNREACHABLE (S17, CRITICAL, task _cluster, subject the node id) through SignalFailure once failures have lasted meta_unreachable_after (default 10s) from the first failure, dated when the failing ping or read was sent; a streak that reaches the threshold only at its first answer opens and closes at once, so any outage of meta_unreachable_after plus one ping interval is recorded (§25.8 R2); the matching SignalSuccess at the first answer (for an evaluator-owned signal only after the evaluator has seen the OPEN row stored, then dated at the first answer, so an outage always leaves an OPEN at its start and a CLOSE at its end); a bounded, single-flight read of the open findings for HealthSummary (healthReadBudget 1s from entry, the handler returns at the budget even when the driver ignores ctx)
+// output: META_UNREACHABLE (S17, CRITICAL, task _cluster, subject the node id) through SignalFailure once failures have lasted meta_unreachable_after (default 10s) from the first failure, dated when the failing ping or read was sent; a streak that reaches the threshold only at its first answer opens and closes at once, so any outage of meta_unreachable_after plus one ping interval is recorded (§25.8 R2); the matching SignalSuccess at the first answer (for an evaluator-owned signal only after the evaluator has seen the OPEN row stored, then dated at the first answer, so an outage always leaves an OPEN at its start and a CLOSE at its end); a failure noted after that answer, but dated at or before it, does not reopen the streak; a bounded, single-flight read of the open findings for HealthSummary (healthReadBudget 1s from entry, the handler returns at the budget even when the driver ignores ctx; the read's observation is applied before waiters are released)
 // pos: ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md §25 and §25.8 (#427, #430 QA r1)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -55,6 +55,7 @@ type metaReach struct {
 	opened      bool      // a failure was signalled for this streak
 	recovering  bool      // answered again; the success is held until the OPEN is stored
 	recoveredAt time.Time // the first answer of a held success (the CLOSE's fact time)
+	answeredAt  time.Time // the latest answer applied; a failure that started at or before it does not open again
 	known       bool      // a success has been signalled since start
 	pinging     bool
 	pingStart   time.Time // when the ping still out was sent
@@ -131,6 +132,15 @@ func (s *Scheduler) noteMetaReachAt(err error, countSuccess bool, at time.Time) 
 	if after <= 0 {
 		after = DefaultMetaUnreachableAfter
 	}
+	// Observations are applied when the goroutine finishes, not when they
+	// happened. A read that started during an outage can be noted after the
+	// first answer; that note must not clear the recovery or start a new
+	// streak (§25 D2: one outage leaves OPEN at the first failure and CLOSE
+	// at the first answer).
+	if !r.answeredAt.IsZero() && !at.After(r.answeredAt) {
+		r.mu.Unlock()
+		return
+	}
 	if err != nil {
 		if r.since.IsZero() || at.Before(r.since) {
 			r.since = at
@@ -151,6 +161,7 @@ func (s *Scheduler) noteMetaReachAt(err error, countSuccess bool, at time.Time) 
 		s.SignalFailure(f)
 		return
 	}
+	r.answeredAt = at
 	// The first answer after a streak. A streak that lasted
 	// meta_unreachable_after from its first failure is an outage even when
 	// no failure observation landed past the threshold (a 12s pause between
@@ -388,12 +399,14 @@ func (s *Scheduler) boundedOpenFindings(ctx context.Context) (open []Finding, er
 				s.healthReadCur = nil
 			}
 			s.healthReadMu.Unlock()
-			close(rd.done)
+			// Note before close so a caller that observed this read cannot
+			// record a later answer that this failure then wipes.
 			if rd.err != nil {
 				s.noteMetaReachAt(rd.err, true, rd.start) // dated when the read was sent
-				return
+			} else {
+				s.noteMetaReach(nil, true)
 			}
-			s.noteMetaReach(nil, true)
+			close(rd.done)
 		}()
 	}
 	s.healthReadMu.Unlock()

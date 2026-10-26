@@ -1,8 +1,14 @@
+// Package tasks provides module-level functionality for tasks.
+// input: a task store with MetaProbe, a health store that can stop answering, and a test clock
+// output: proof that HealthSummary stays inside its read budget, that an unreadable managed set is not ok, and that META_UNREACHABLE opens after 10s and leaves OPEN then CLOSE even when a read started during the outage is noted after the first answer
+// pos: design 0009 §25 D1 and D2 (meta_reach.go)
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,6 +175,10 @@ func TestMetaUnreachableOpensAfterTenSecondsAndLeavesOpenClose(t *testing.T) {
 	advance(20 * time.Second)
 	hs.down.Store(false)
 	s.noteMetaReach(nil, true)
+	// A read that started during the outage can be noted after this answer.
+	// Dated inside the outage, it must not reopen the streak (CI: OPEN then
+	// UPDATE, and no CLOSE).
+	s.noteMetaReachAt(fmt.Errorf("managed findings of task _cluster unreadable: %w", errMetaDown), true, start.Add(10*time.Second))
 	for i := 0; i < 4; i++ {
 		advance(time.Second)
 		_ = e.SweepNow(context.Background())
