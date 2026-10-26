@@ -25,6 +25,7 @@ on:
           - gtid-pitr
           - source-switchover
           - meta-failover
+          - upgrade-failback
 
 permissions:
   contents: read
@@ -43,7 +44,7 @@ jobs:
           go-package: ./...
 
   unit-and-e2e:
-    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover') }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'upgrade-failback') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -252,6 +253,42 @@ jobs:
       - name: Cleanup
         if: always()
         run: ./scripts/e2e/down.sh
+
+  e2e-upgrade-failback:
+    # D2: A's first-stint binlog exists only as a MinIO object; Start fetches it
+    # back, and /replay is restored with mysqlbinlog 8.0 into a fresh MySQL whose
+    # CHECKSUM TABLE must match A. Builds v0.5.57 and 0a84917a, so full history.
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'upgrade-failback' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Check host mysqlbinlog is 8.0
+        run: |
+          mysqlbinlog --version
+          mysqlbinlog --version | grep -Eq 'Ver 8\.0\.|Distrib 8\.0\.| 8\.0\.[0-9]+'
+
+      - name: E2E Upgrade Failback (object-only restore)
+        env:
+          FBUP_CASE: object-only
+          FBUP_WORK: ${{ runner.temp }}/fbup
+        run: ./scripts/e2e/upgrade-legacy-failback.sh
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          for f in "${RUNNER_TEMP}"/fbup/out/*; do echo "== $f"; tail -n 100 "$f"; done || true
 
   e2e-split-retention:
     if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.e2e_profile == 'split-retention' }}
