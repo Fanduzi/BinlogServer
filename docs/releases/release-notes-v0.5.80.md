@@ -48,7 +48,7 @@ v0.5.80 ships TLS for the source, the meta DB and S3 (#536, ADR 0012 `docs/adr/0
 
 ## Changes since v0.5.79
 
-`git log --oneline v0.5.79..e04e949` (28 commits), plus the commit of these notes, which v0.5.80 is tagged on:
+`git log --oneline v0.5.79..e04e949` (28 commits), plus two commits after it: the commit of these notes, and the commit v0.5.80 is tagged on:
 
 | Commits | Change |
 |---|---|
@@ -58,6 +58,8 @@ v0.5.80 ships TLS for the source, the meta DB and S3 (#536, ADR 0012 `docs/adr/0
 | `ea85163`..`3c14fa7` | PR #527: `go vet` and `go test -race` on every PR (H2), real-MinIO verifier scenario on every PR |
 | `5e4dc7e`..`239542d` | PR #525: object-only restore e2e on every PR (D2); the open-segment RPO is documented (#530) |
 | `23f096a`..`e04e949` | PR #536: ADR 0012, TLS for the source, the meta DB and S3 |
+| `5ac43a1` | These release notes |
+| `3c3b7f2` | PR #543: the per-PR `release-archive` job skips the tag version check for its snapshot build, so it also passes when the release workflow reruns it on a tag |
 
 Only #536 changes the server binary. The other PRs change CI, tests and docs. v0.5.80 is the first release built under the J3 gate: the release workflow reruns every per-PR CI job on the tagged commit before it builds anything.
 
@@ -132,7 +134,7 @@ v0.5.80 带上源库、meta 库和 S3 的 TLS（#536，ADR 0012 `docs/adr/0012-c
 
 ## 自 v0.5.79 以来的变更
 
-`git log --oneline v0.5.79..e04e949`（28 个提交），加上这份说明所在的提交（v0.5.80 打在这个提交上）：
+`git log --oneline v0.5.79..e04e949`（28 个提交），加上其后的两个提交：这份说明所在的提交，以及 v0.5.80 所打的提交：
 
 | 提交 | 变更 |
 |---|---|
@@ -142,6 +144,8 @@ v0.5.80 带上源库、meta 库和 S3 的 TLS（#536，ADR 0012 `docs/adr/0012-c
 | `ea85163`..`3c14fa7` | PR #527：每个 PR 跑 `go vet` 和 `go test -race`（H2），真实 MinIO 巡检场景每个 PR 都跑 |
 | `5e4dc7e`..`239542d` | PR #525：只剩对象存储时的还原 e2e 每个 PR 都跑（D2）；open 段的 RPO 写进文档（#530） |
 | `23f096a`..`e04e949` | PR #536：ADR 0012，源库、meta 库和 S3 的 TLS |
+| `5ac43a1` | 本发布说明 |
+| `3c3b7f2` | PR #543：每个 PR 跑的 `release-archive` job 对它的 snapshot 构建不再比对 tag 版本，发布 workflow 在 tag 上重跑它时也能通过 |
 
 只有 #536 改了服务端二进制，其余 PR 改的是 CI、测试和文档。v0.5.80 是第一个在 J3 门禁下构建的版本：发布 workflow 在构建之前，先在 tag 所在提交上重跑每个 PR 的全部 CI job。
 
