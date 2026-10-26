@@ -11,8 +11,8 @@
 
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 - 每个 PR 和 push main 都跑：`vulncheck`；`release-archive`（snapshot 包报的 version 和 commit）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`。
-- 只在 push main 跑：`e2e-meta-failover`。
-- 只能手动触发：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-observability`。
+- 多节点：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover` 也是每个 PR 和 push main 都跑。
+- 只能手动触发：`e2e-observability`。
 - 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`、`upgrade-legacy-failback`。
 
 ## A. 数据完整性与零静默丢失
@@ -40,7 +40,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | C1 | ADR 0011 被接受；PR-1 的纯过渡模型合入，十条不变量和活性上界都用有界搜索自动检查 | `internal/ownership` 的 `invariant_test.go`（含 `TestSafetyBoundedExhaustive`、`TestSafetyRandomPrefixes`）、`liveness_test.go`（含 `TestLivenessAllFairSchedules`）、`fault_matrix_test.go`，都在 CI 的 `go test ./...` | MET | ADR 0011 已接受；PR-1 经 #481 合入 main（`4a970319`，#478 第 12 轮 QA PASS） |
 | C2 | owner 握着 `task_leases` 行锁被暂停时，对端在 RTO 公式之内接管，等待期间 `/api/health` 返回 503 | ADR 0011 PR-2 的 e2e：在 MySQL 8.0 和 MariaDB 上，持有 `FOR UPDATE` 时 SIGSTOP | NOT MET | #476（P1）、#463 |
 | C3 | per_node 存储下，接管不写 FAILED 或 desired STOP；原主人恢复后用更大的 epoch 继续，源上始终最多一条 dump | ADR 0011 PR-4 的 e2e：per_node 下 SIGSTOP/SIGCONT | NOT MET | #473（P1）、#455 |
-| C4 | 多节点 e2e 是每个 PR 的门禁 | 已有 `e2e-cluster-roles`、`e2e-worker-crash-recovery`，但只能手动触发（最近一次是 10-19 在分支上手动跑的）；`e2e-meta-failover` 只在 push main 跑。现有场景都没覆盖「每节点独立 data_dir 加 SIGSTOP 接管」 | PARTIAL | 要改 workflow，需要有 `workflow` 权限的 token（`HANDOFF-ci-cluster-e2e.md` 里有现成的 diff） |
+| C4 | 多节点 e2e 是每个 PR 的门禁 | `e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover` 在每个 PR 和 push main 都跑（`if:` 与 `e2e-retry-upload` 等同形，`workflow_dispatch` 时只跑选中的 profile）。「每节点独立 data_dir 加 SIGSTOP 接管」的场景属于 C3/C5，随 ADR 0011 PR-4 加进来 | MET | — |
 | C5 | ADR 0011 §4.2 的故障注入矩阵（4 个阶段 × SIGSTOP/kill -9/分区/重启，再加 17 行补充）作为发布档 e2e，没跑的格子写明没跑 | 没有，PR-2 和 PR-4 要建 | NOT MET | ADR 0011 PR-2、PR-4 |
 | C6 | 所有权变化时 finding 保持单调（不先关再开），不完整的观察既不开也不关 finding | 生产 `Reconcile` 上的属性测试（PR-5） | NOT MET | ADR 0011 PR-5；#451、#452、#366 |
 | C7 | 源库 VIP 切到 GTID 一致的新主后继续备份，链连续，还原后校验和一致 | `e2e-source-switchover`（每个 PR） | MET | #440（偶发的 pipefail 问题） |
@@ -102,7 +102,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 14 / PARTIAL 9 / NOT MET 12**。
+共 35 项：**MET 15 / PARTIAL 8 / NOT MET 12**。
 
 ## 最卡生产级的 5 项
 
