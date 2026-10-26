@@ -81,7 +81,9 @@ make e2e-topology-check
 - `topology-contract-test.sh`: 无需 Docker，验证拓扑默认值、覆盖优先级、direct/failover 选择、端口校验及 Compose 兜底一致性。
 - `smoke-meta-failover.sh`: 触发 orchestrator 切主，验证元数据库 failover 后 checkpoint 继续推进。
 - `smoke-meta-failover-override.sh`: 用非默认 `E2E_API/E2E_ORC_API` 地址（localhost）覆盖并执行 failover 场景。
-- `smoke-observability.sh`: 验证 `/metrics` 核心指标存在，且 `task_state_count` 与 `checkpoint_age_seconds` 随状态/时间变化。
+- `smoke-observability.sh`: 验证 `/metrics` 核心指标存在，且 `task_state_count` 与 `checkpoint_age_seconds` 随状态/时间变化；设了 `E2E_OTLP_SINK_DIR` 时还要求收到 API span（服务名、`POST /api/tasks/*path`、本任务 start 的 `http.target`）。
+- `run-observability.sh`: `make e2e-observability` 和 CI `e2e-observability` 的入口。先起 `otlp-sink.py`（默认端口 14318，`E2E_OTLP_PORT` 可改），用 `BINLOG_SERVER_TRACING_*` 打开 OTLP/HTTP tracing（采样 1），再跑 `smoke-observability`。
+- `otlp-sink.py`: 只给测试用的 OTLP/HTTP 收集器，把每次 `/v1/traces` 导出原样写成一个文件。
 - `smoke-cluster-roles.sh`: 启动 control-plane + worker 双进程，验证任务执行、worker 离线检测与恢复链路。
 - `smoke-control-plane-failover.sh`: 验证 control-plane 崩溃/重启期间 worker 持续拉流，checkpoint 不中断推进。
 - `smoke-worker-crash-recovery.sh`: 模拟 worker 在 OPEN 期间崩溃，验证新 worker 接管后一致性（checkpoint 推进、stale OPEN 清理、sealed 文件与 md5 校验）。
@@ -151,6 +153,7 @@ make e2e-topology-check
 2. 调用 `/metrics`，确认 5 个核心指标名都可见。
 3. 验证 `task_state_count` 随任务状态变化（`CREATED -> RUNNING -> STOPPED`）。
 4. 写入 source 数据并等待 checkpoint 生成，验证 `checkpoint_age_seconds` 两次抓取间递增。
+5. 经 `run-observability.sh` 跑时（`make e2e-observability`、CI），等 `otlp-sink.py` 收到本次运行的 API span：服务名、`binlog_server/internal/api`、`POST /api/tasks/*path`、`http.target` 为本任务的 `/start`。
 
 ## smoke-control-plane-failover 场景说明
 

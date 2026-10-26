@@ -18,7 +18,7 @@ help:
 	@echo "  make e2e-topology-check         # validate E2E database topology without Docker"
 	@echo "  make e2e-quick                  # run quick e2e (smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
-	@echo "  make e2e-observability          # run observability e2e (smoke-observability)"
+	@echo "  make e2e-observability          # run observability e2e (smoke-observability with OTLP tracing to a local sink)"
 	@echo "  make e2e-scale                  # opt-in 1000-control-task / 100-live-stream scale evidence"
 	@echo "  make e2e-session-kill           # SIGSTOP on MySQL 8.0 and MariaDB, default sweep /api/health"
 	@echo "  make e2e SCENARIOS=a,b,c        # run custom e2e scenarios"
@@ -89,7 +89,7 @@ e2e-full:
 	./scripts/e2e/run-suite.sh --profile full
 
 e2e-observability:
-	./scripts/e2e/run-suite.sh --scenarios smoke-observability
+	./scripts/e2e/run-observability.sh
 
 e2e-scale:
 	./scripts/e2e/run-suite.sh --scenarios smoke-scale
