@@ -1,6 +1,6 @@
 // Package replication proves preferred falls back only when the greeting omits CLIENT_SSL.
 // input: a local TCP server that sends one MySQL greeting and then closes
-// output: two accepts when the greeting offers TLS (probe plus one TLS dial) and a plaintext second dial only when CLIENT_SSL is absent
+// output: two accepts when the greeting offers TLS (probe plus one TLS dial), a plaintext second dial only when CLIENT_SSL is absent, and one accept plus an error when the greeting cannot be read
 // pos: unit coverage for ADR 0012 preferred, including a handshake error that is not "does not support TLS"
 // note: if this file changes, update this header and module README.md.
 package replication
@@ -36,6 +36,13 @@ func TestPreferredFallsBackOnlyWhenGreetingOmitsClientSSL(t *testing.T) {
 		}
 		if srv.sawSSL.Load() != 0 {
 			t.Fatal("plaintext fallback still set CLIENT_SSL")
+		}
+	})
+	t.Run("read error", func(t *testing.T) {
+		srv := greetAndClose(t)
+		dialPreferred(t, srv.addr)
+		if got := srv.accepts.Load(); got != 1 {
+			t.Fatalf("accepts %d, want 1 (a greeting read error is not a plaintext fallback)", got)
 		}
 	})
 }
@@ -78,6 +85,28 @@ func greet(t *testing.T, offers bool) *greetServer {
 		}
 	}()
 	t.Cleanup(func() { wg.Wait() })
+	return srv
+}
+
+// greetAndClose accepts and closes with no bytes, so the greeting read fails.
+func greetAndClose(t *testing.T) *greetServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	srv := &greetServer{addr: ln.Addr().String()}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			srv.accepts.Add(1)
+			c.Close()
+		}
+	}()
 	return srv
 }
 

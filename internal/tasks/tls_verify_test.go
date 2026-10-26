@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.uber.org/zap/zapcore"
 )
 
 func TestStartTLSVerifyFailureIsTerminal(t *testing.T) {
@@ -65,5 +67,38 @@ func TestHealthSummary_TLSTransportDegrades(t *testing.T) {
 	h = s.HealthSummary(context.Background())
 	if h.Status != HealthDegraded || !strings.Contains(strings.Join(h.Reasons, " "), "UPLOAD_TLS") {
 		t.Fatalf("retry tls %+v", h)
+	}
+}
+
+// TestBackgroundUploadRetryTLSDegradesAndWarns drives the background retry,
+// not the startup probe. Dropping the TLS record or the retry WARN goes red.
+func TestBackgroundUploadRetryTLSDegradesAndWarns(t *testing.T) {
+	obs := captureZap(t, zapcore.WarnLevel)
+	name := "mysql-bin.000091"
+	objectKey := "prefix/c/u/" + name
+	const tlsErr = `Put "https://127.0.0.1:9000/binlog": tls: failed to verify certificate: x509: certificate signed by unknown authority`
+	store := newRetryTestFileStore()
+	uploader := &retryTestUploader{errByObject: map[string]error{objectKey: errors.New(tlsErr)}}
+	s := NewScheduler(WithFileStore(store), WithFileUploader(uploader))
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.files[task.ID] = []BinlogFile{{
+		TaskID: task.ID, FileName: name, FilePath: writeRetryTestFile(t, t.TempDir(), name),
+		SealedAt: time.Now(), UploadState: "UPLOAD_FAILED", ObjectKey: objectKey,
+	}}
+	before := UploadTLSFailures()
+	s.retryKnownFailedUploads()
+	h := s.HealthSummary(context.Background())
+	reasons := strings.Join(h.Reasons, " ")
+	if h.Status != HealthDegraded || !strings.Contains(reasons, "UPLOAD_TLS") || !strings.Contains(reasons, "x509") {
+		t.Fatalf("health %+v", h)
+	}
+	if !sawLevel(obs, "background upload retry tls transport failed", zapcore.WarnLevel) {
+		t.Fatalf("missing retry WARN, logs=%v", obs.All())
+	}
+	if got := UploadTLSFailures() - before; got != 1 {
+		t.Fatalf("upload tls failures +%d, want 1", got)
 	}
 }

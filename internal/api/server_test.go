@@ -1500,6 +1500,7 @@ func TestAPI_MetricsEndpointContainsCoreMetrics(t *testing.T) {
 		"binlog_server_checkpoint_age_seconds",
 		"binlog_server_worker_online",
 		"binlog_server_upload_failures_total",
+		"binlog_server_upload_tls_failures_total",
 		"binlog_server_upload_retry_total",
 		"binlog_server_upload_retry_last_ts",
 		"binlog_server_retention_blocked_files",

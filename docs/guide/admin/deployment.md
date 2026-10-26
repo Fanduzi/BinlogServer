@@ -425,6 +425,7 @@ sudo systemctl status binlog-server
 - `binlog_server_task_state_count{state="FAILED"}`: 失败任务计数。大于 0 应立即触发 P1/P2 告警介入排查。
 - `binlog_server_worker_online{worker_id="..."}`: Worker 在线状态（1 在线，0 离线）。
 - `binlog_server_upload_failures_total`: 上传失败待补传的文件累计数。
+- `binlog_server_upload_tls_failures_total`: 上传时 TLS 握手失败的次数。上涨时看 warn 日志，明文端点写 `upload.use_ssl: false`，私有 CA 写 `upload.tls.ca_file`。
 - `binlog_server_source_switchovers{task_id="...",outcome="stopped"}`: 任务地址换到另一台后停了，而且现在仍停在那里。同一次切换重复 Start 不会累加；任务恢复运行后回到 0，之后普通 Stop 或重启进程也不会变回 1。大于 0 先看 Console 任务详情里的原因，再按故障处理第 3 节处理。不要删 `.source-chain`。
 - `binlog_server_source_switchovers{task_id="...",outcome="continued"}`: 同一地址换到另一台后，这条任务还在复制。大于 0 时核对可恢复窗口是否连续，回放是否先旧服务器、再新服务器。
 

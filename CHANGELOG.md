@@ -19,7 +19,8 @@ Maintenance rules:
 - `upload.tls.ca_file` 是对象存储的可选 PEM CA。设置后该客户端只信任这份文件，主机名仍检查。`upload.use_ssl: false` 时不能设置。空着用系统信任库。
 - `./migrate --config` 使用与进程相同的 `meta.tls`。`--dsn` 和 `META_DSN` 覆盖文件里的 `meta_dsn`。不传 `--config` 时 DSN 不变。
 - 源库证书校验失败（含残留 Binlog Dump 的 KILL）使任务 `FAILED`，`last_error` 带上 x509，日志为 warn。上传的 TLS 传输失败每次打 WARN，并把 `/api/health` 标成 degraded。其它对象探针失败仍保持 status ok。
-- `preferred` 只在服务端问候包没有 `CLIENT_SSL` 时退回明文。认证失败或证书错误不再拨明文。meta 启动时的 x509 错误带 `meta.tls` 前缀。
+- `preferred` 只在服务端问候包没有 `CLIENT_SSL` 时退回明文。读不到问候包是错误，不退回明文。认证失败或证书错误不再拨明文。meta 启动时的 x509 错误带 `meta.tls` 前缀。
+- `binlog_server_upload_tls_failures_total` 计上传 TLS 握手失败的次数。
 
 ## [v0.5.79] - 2026-10-26
 
