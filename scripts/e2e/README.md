@@ -33,7 +33,7 @@
 优先使用统一入口脚本 `run-suite.sh`：
 
 ```bash
-# 日常回归（默认）：smoke-task-desired-migration + smoke + compression + smoke-source-outage + smoke-unreachable-giveup + smoke-control-loop + smoke-fail-alert
+# 日常回归（默认）：smoke-task-desired-migration + smoke + smoke-version-restore + compression + smoke-source-outage + smoke-unreachable-giveup + smoke-control-loop + smoke-fail-alert
 ./scripts/e2e/run-suite.sh
 
 # 全量回归：smoke + compression + orchestrator + semisync + meta-failover
@@ -69,10 +69,11 @@ make e2e-topology-check
 
 ## 脚本列表
 
-- `up.sh`: 启动 4 个 source MySQL（`mysql57/mysql80/percona57/percona80`）和独立的 `meta-primary`，并等待可用。
+- `up.sh`: 启动 5 个 source MySQL（`mysql57/mysql80/mysql84/percona57/percona80`）和独立的 `meta-primary`，并等待可用。`mysql84` 是 MySQL 8.4 LTS。
 - `run-server.sh`: 用 e2e 配置启动 `binlog-server`，并以 `CGO_ENABLED=0` 构建临时测试二进制，避免 Linux 测试环境绑定构建机 glibc。模块 zip 拉取失败时最多构建 3 次，成功才 exec。
 - `down.sh`: 清理 e2e 容器与 volume。
-- `smoke.sh`: 创建并启动 4 个基础任务，写入数据并查看 checkpoint。
+- `smoke.sh`: 创建并启动 5 个基础任务（MySQL 5.7、8.0、8.4 LTS、Percona 5.7、Percona 8.0），等 LATEST 的 checkpoint 落盘后再写入，并要求 checkpoint 的 file/pos 离开写入前的值。
+- `smoke-version-restore.sh`: MySQL 5.7 和 MySQL 8.4 LTS。任务从当时的尖端启动并追上之后，建库建表、插入、更新、删除、`FLUSH BINARY LOGS`、再插入。停任务后把 `GET /replay` 的全部分段用同系列 `mysqlbinlog`（官方 `mysql` 镜像没有这个客户端，5.7 用 Percona Server 5.7，8.4 用 Percona Server 8.4）回放到一台同版本空实例。`CHECKSUM TABLE` 和按主键排序的行文本必须与源库一致。在 quick 档（CI `unit-and-e2e`）里运行。
 - `smoke-compression.sh`: 验证压缩事务场景，主动 rotate 并对比源端与备份 binlog 的 md5。
 - `smoke-orchestrator.sh`: 验证 orchestrator 拓扑里是否误纳入 binlog 拉流客户端。
 - `smoke-semisync.sh`: 验证 `semi_sync=true` 时的 client 挂载与停任务后主库提交阻塞到 timeout。
@@ -117,7 +118,7 @@ make e2e-topology-check
 - `E2E_DATA_DIR`: e2e 数据目录（默认 `./tmp/e2e/data-suite-<timestamp>`）。
 - `E2E_SERVER_LOG`: `run-suite.sh` 启动后端时的日志路径（默认 `/tmp/binlog-server-e2e-suite.log`）。
 - `E2E_SOURCE_HOST` / `E2E_SOURCE_USER` / `E2E_SOURCE_PASS`: source 任务共享连接参数，默认 `127.0.0.1` / `repl` / `replpass`。
-- `E2E_MYSQL57_PORT` / `E2E_MYSQL80_PORT`: MySQL 5.7/8.0 宿主机端口，默认 `13306` / `13307`。
+- `E2E_MYSQL57_PORT` / `E2E_MYSQL80_PORT` / `E2E_MYSQL84_PORT`: MySQL 5.7/8.0/8.4 宿主机端口，默认 `13306` / `13307` / `13310`。
 - `E2E_PERCONA57_PORT` / `E2E_PERCONA80_PORT`: Percona 5.7/8.0 宿主机端口，默认 `13308` / `13309`。
 - `E2E_META_HOST` / `E2E_META_USER` / `E2E_META_PASS` / `E2E_META_DB`: metadata 连接参数，默认 `127.0.0.1` / `meta` / `metapass` / `binlog_meta`。
 - `E2E_META_PRIMARY_PORT` / `E2E_META_REPLICA_PORT`: metadata 主从宿主机端口，默认 `13316` / `13317`。

@@ -51,7 +51,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | D1 | 用备份按 GTID 停点还原到一台新 MySQL，数据和预期一致（open 段和封存段都测） | `e2e-gtid-pitr`（`smoke-gtid-pitr`、`smoke-gtid-executed`）；只有 MySQL 8.0 | MET | — |
 | D2 | 本地文件已按保留期删掉、只剩对象存储时，仍能下载回放并还原 | `e2e-upgrade-failback` 每个 PR 跑 `upgrade-legacy-failback.sh FBUP_CASE=object-only`，任务配 `local_retention_days=1`、`bucket_retention_days=30`。修复后先在 A 上 `FLUSH BINARY LOGS` 定一个封存边界，等边界之前的每一段都 SEALED 且 UPLOADED、唯一没封存的是边界之后新开的那段。这些段（含 A 第一段）由产品自己的拆分保留删掉：脚本只把修改时间调到 2 天前，再 `FLUSH BINARY LOGS` 触发保留，本地文件删掉，对象和目录行留下，记 `RETENTION_REMOVED`；脚本不 mv、不删这些文件。`/replay` 必须把每个被删段标成 `bucket`。读 `/replay` 和 `/replay/archive` 期间用 `mc admin trace` 计数，每个被删段的对象键至少一次 MinIO `GetObject`。归档成员与删前的文件逐字节一致，被删段排在归档最前。归档读完、还原之后各扫一遍 md5：`data_dir`（递归，含 `.cache` 等点目录）、服务端 `TMPDIR`、`/tmp` 下比删除更新的文件，出现任何一个被删段的同字节副本就失败；扫描不覆盖这些目录以外的路径，那种藏起来的副本靠 `GetObject` 计数抓。只用这些 bucket 成员、宿主机 MySQL 8.0 `mysqlbinlog` 还原进清空的新库，`CHECKSUM TABLE` 和 `gtid_executed` 必须等于 A 在边界时的值，不依赖 open 尾段。open 尾段例外：边界之后写的事务只在本地（边界后封存的空段和 open 段），叠加还原后等于 A 的最终校验和，这一步读的是本地文件，不算对象存储的证明（丢盘时的 RPO 见 [#530](https://github.com/Fanduzi/BinlogServer/issues/530)）。`e2e-split-retention` 另外证明按保留期删掉本地文件后 download/replay/archive 仍从对象取回 | MET | — |
 | D3 | 给一个时间点或 GTID，能查出覆盖它的文件和对象（`/coverage`），并一步生成还原计划和预检（`/restore-plan`） | 没有接口。验收按 ADR 0009 阶段 4/5：窗口内、窗口外、断点上各 10 例，和 mysqlbinlog 的独立解析一致；向导还原 5 个时间点，校验和一致 | NOT MET | ADR 0009 阶段 4、5 |
-| D4 | 各支持版本上都能拉流并且能还原 | `smoke.sh` 在 mysql57、mysql80、percona57、percona80 上拉流（quick）；MariaDB 11.4 和 8.0 在 `smoke-standalone-restart` 里做了还原。缺：5.7 上的还原、8.4 LTS（compose 里没有 8.4） | PARTIAL | — |
+| D4 | 各支持版本上都能拉流并且能还原 | `unit-and-e2e` 每个 PR 的 quick 档：`smoke.sh` 在 mysql57、mysql80、mysql84、percona57、percona80 上拉流，写入后 checkpoint 的 file/pos 必须前进；`smoke-version-restore.sh` 把 mysql57 和 mysql84 在任务启动之后写入的库表（含一次 `FLUSH BINARY LOGS`）经 `mysqlbinlog` 回放到同版本空实例，`CHECKSUM TABLE` 和行文本与源库一致；`smoke-standalone-restart` 仍在 MySQL 8.0 和 MariaDB 11.4 上做还原 | MET | — |
 
 ## E. 升级、迁移与回滚
 
@@ -101,7 +101,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 21 / PARTIAL 6 / NOT MET 8**。
+共 35 项：**MET 22 / PARTIAL 5 / NOT MET 8**。
 
 ## 最卡生产级的 5 项
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: local tooling, canonical E2E database topology, scenarios, and profile selection
-# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process (also passed with the server log and metadata DSN to the scenarios that restart it: smoke-unreachable-giveup and smoke-gtid-redump)
+# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process (also passed with the server log and metadata DSN to the scenarios that restart it: smoke-unreachable-giveup and smoke-gtid-redump). quick includes smoke-version-restore (MySQL 5.7 and 8.4 LTS checksum restore)
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -22,7 +22,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-task-desired-migration,smoke,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk,smoke-session-kill
+  quick  -> smoke-task-desired-migration,smoke,smoke-version-restore,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk,smoke-session-kill
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -33,6 +33,7 @@ Options:
 
 Scenarios:
   smoke
+  smoke-version-restore
   compression
   orchestrator
   semisync
@@ -105,7 +106,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-task-desired-migration smoke compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk smoke-session-kill"
+      echo "smoke-task-desired-migration smoke smoke-version-restore compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk smoke-session-kill"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -168,6 +169,9 @@ run_scenario() {
   case "$name" in
     smoke)
       "$ROOT_DIR/scripts/e2e/smoke.sh"
+      ;;
+    smoke-version-restore)
+      "$ROOT_DIR/scripts/e2e/smoke-version-restore.sh"
       ;;
     compression)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-compression.sh"

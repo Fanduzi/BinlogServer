@@ -22,7 +22,7 @@
 
 - **运行平台：** Linux (x86_64, arm64) 或 macOS (darwin-amd64, darwin-arm64)。
 - **CGO 规范：** Linux 生产环境直接使用官方发布的静态构建二进制（`CGO_ENABLED=0`，兼容 `glibc 2.17+`）。
-- **源 MySQL 要求：** MySQL 5.7+ / 8.0+ 或 MariaDB 10.3+，开启 `log_bin=ON` 且为 `ROW` 模式。
+- **源 MySQL 要求：** MySQL 5.7、8.0、8.4 LTS，或 MariaDB 10.3+（CI 在 11.4 上还原），开启 `log_bin=ON` 且为 `ROW` 模式。MySQL 8.4 不再提供 `SHOW MASTER STATUS`，位点读取使用 `SHOW BINARY LOG STATUS`。
 - **元数据库 (可选/集群必需)：** 独立部署的高可用 MySQL 5.7+ / 8.0+。
 
 ### 2.2 源 MySQL 配置与复制账号授权
