@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-version="0.5.83">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -615,7 +615,7 @@
 Control Plane</h1>
         <p class="hero-sub" data-i18n="heroSub">Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.</p>
         <div class="hero-actions">
-          <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Quick Start (v0.5.83)</a>
+          <a href="#deployment" class="btn-primary" data-i18n="heroPrimary">Quick Start</a>
           <a href="#console" class="btn-secondary" data-i18n="heroSecondary">Inspect Live Console</a>
         </div>
         <div class="hero-code">
@@ -685,7 +685,7 @@ to verified backup health</h2>
           <div class="step-card">
             <div class="step-header">
               <span class="step-number">1</span>
-              <h3 data-i18n="step1Title">Download &amp; Verify v0.5.83 Release</h3>
+              <h3 data-i18n="step1Title">Download &amp; Verify the Release</h3>
             </div>
             <p data-i18n="step1Body">Fetch the official static binary, verify its SHA256 checksum, unpack the archive, generate a task key, and boot local evaluation.</p>
             <div class="step-code">
@@ -1022,7 +1022,7 @@ before the first production task</h2>
             </div>
           </div>
         </div>
-        <p class="release-line" data-i18n="releaseLine">What changed in each version: <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener">release notes</a> and <a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a>.</p>
+        <p class="release-line" id="changelog" data-i18n="releaseLine">What changed in each version: <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener">release notes</a> and <a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a>.</p>
       </div>
     </section>
 
@@ -1105,10 +1105,10 @@ into a production control plane</h2>
         navPositioning: 'Positioning',
         navChangelog: 'Checklist',
         navCta: 'Releases',
-        heroBadge: 'v0.5.83 — latest release',
+        heroBadge: 'v{ver} — latest release',
         heroTitle: 'Centralized MySQL Binlog Backup\nControl Plane',
         heroSub: 'Continuous replication with local fsync-backed checkpoints, multi-worker lease failover, and decoupled S3 archiving. Built for MySQL DBAs who need deterministic RPO and real operational control — not fragile shell scripts.',
-        heroPrimary: 'Quick Start (v0.5.83)',
+        heroPrimary: 'Quick Start',
         heroSecondary: 'Inspect Live Console',
         heroCode: 'DURABILITY    Local fsync precedes checkpoint advance (zero optimistic progress)\nARCHIVE       Decoupled S3 upload (upload failure never stalls binlog capture)\nCLUSTER       Multi-worker lease ownership with automatic failover & zero split-brain\nOBSERVE       True lag vs source binlog tip, Prometheus metrics, and embedded Web UI',
         consoleLabel: 'Operator Console & Interfaces',
@@ -1123,9 +1123,9 @@ into a production control plane</h2>
         deployLabel: 'Install & First Backup Path',
         deployTitle: 'Four disciplined steps from download\nto verified backup health',
         deploySub: 'Packaged release archives contain precompiled statically-linked binaries (binlog-server, migrate), SQL migrations, and production config templates. Operators do not need Go installed.',
-        step1Title: 'Download & Verify v0.5.83 Release',
+        step1Title: 'Download & Verify the Release',
         step1Body: 'Fetch the official static binary, verify its SHA256 checksum, unpack the archive, generate a task key, and boot local evaluation.',
-        step1Code: 'VER=0.5.83 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation.\n# Generate a 0600 task key first. The command prints the path and key id, not the key.\n./binlog-server task-key generate --out ./task.key\nexport BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER={ver} OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# Loopback bind allows unauthenticated evaluation.\n# Generate a 0600 task key first. The command prints the path and key id, not the key.\n./binlog-server task-key generate --out ./task.key\nexport BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: 'Verify Health & Create Backup Task',
         step2Body: 'Check health probe status and submit your MySQL source specification with explicit retention and start mode.',
         step2Code: '# Check health probe\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# Submit backup task (start from source tip)\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
@@ -1234,7 +1234,7 @@ into a production control plane</h2>
         check3Note: 'Decoupled archive',
         ctaTitle: 'Move MySQL binlog backup\ninto a production control plane',
         ctaSub: 'Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.',
-        ctaPrimary: 'Get Started with v0.5.83',
+        ctaPrimary: 'Get Started with v{ver}',
         ctaSecondary: 'Deployment Guide',
         footerBrand: 'Centralized MySQL binlog backup control plane with durable local persistence, multi-worker failover, and decoupled S3 archiving. Apache 2.0 licensed.',
         footerCol1: 'Operations',
@@ -1263,10 +1263,10 @@ into a production control plane</h2>
         navPositioning: '产品定位',
         navChangelog: '上线清单',
         navCta: '下载发布包',
-        heroBadge: 'v0.5.83 — 最新发布版本',
+        heroBadge: 'v{ver} — 最新发布版本',
         heroTitle: '面向生产环境的集中式\nMySQL Binlog 备份控制平面',
         heroSub: '基于本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档的持续备份服务。专为关注确定性 RPO、状态可见与可靠故障恢复的 MySQL DBA 设计，告别脆弱的散装脚本。',
-        heroPrimary: '快速安装 (v0.5.83)',
+        heroPrimary: '快速安装',
         heroSecondary: '查看控制台界面',
         heroCode: '持久性保障    本地 fsync 成功后方才推进检查点（杜绝虚假乐观进度）\n归档解耦      S3 对象存储异步归档（远端网络抖动绝不阻塞本地实时复制）\n集群高可用    多 Worker 租约竞态与心跳超时自动接管（彻底杜绝双写脑裂）\n生产可观测    对比源库真实位点计算复制延迟，内置 Prometheus 指标与 Web 控制台',
         consoleLabel: '运维控制台与管理接口',
@@ -1281,9 +1281,9 @@ into a production control plane</h2>
         deployLabel: '安装与首条备份链路',
         deployTitle: '从下载解压到验证健康，\n严谨清晰的四步交付路径',
         deploySub: '官方发布包内已打包静态编译二进制（binlog-server、migrate）、数据库迁移脚本与生产配置模板。DBA 在部署机上无需安装 Go 环境。',
-        step1Title: '下载解压并校验 v0.5.83',
+        step1Title: '下载解压并校验发布包',
         step1Body: '下载官方静态二进制压缩包，执行 SHA256 完整性哈希校验，解压后先生成任务密钥，再启动本地评估实例。',
-        step1Code: 'VER=0.5.83 OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验。\n# 先生成 0600 任务密钥。命令只打印路径和 key id，不打印密钥。\n./binlog-server task-key generate --out ./task.key\nexport BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
+        step1Code: 'VER={ver} OS=linux ARCH=amd64\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncurl -fsSL -O "https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/checksums.txt"\nsha256sum -c checksums.txt --ignore-missing\n\ntar -xzf "binlog-server_${VER}_${OS}_${ARCH}.tar.gz"\ncd "binlog-server_${VER}_${OS}_${ARCH}"\n\n# 本机 loopback 监听允许免鉴权快速体验。\n# 先生成 0600 任务密钥。命令只打印路径和 key id，不打印密钥。\n./binlog-server task-key generate --out ./task.key\nexport BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"\nexport BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080\nexport BINLOG_SERVER_DATA_DIR=./data\n./binlog-server',
         step2Title: '探活与创建首个备份任务',
         step2Body: '探活健康检查端点，提交源库连接参数，显式声明数据保留期与复制起点模式。',
         step2Code: '# 检查健康探活端点\ncurl -fsS http://127.0.0.1:8080/healthz\n\n# 提交备份任务（从源库当前最新位点开始）\ncurl -fsS -X POST http://127.0.0.1:8080/api/tasks \\\n  -H \'Content-Type: application/json\' \\\n  -d \'{\n    "name": "prod-mysql-01",\n    "cluster_key": "prod-cluster-main",\n    "source": {\n      "host": "192.168.1.50",\n      "port": 3306,\n      "user": "repl",\n      "password": "your_repl_password",\n      "flavor": "mysql"\n    },\n    "start": { "mode": "LATEST" },\n    "storage": { "retention_days": 7 }\n  }\'',
@@ -1392,7 +1392,7 @@ into a production control plane</h2>
         check3Note: '归档解耦运行',
         ctaTitle: '将 MySQL Binlog 备份\n升级为生产级控制平面',
         ctaSub: '查阅详细部署指南，参考标准的生产配置模板，用专业可靠的控制系统彻底替换摇摇欲坠的定时脚本。',
-        ctaPrimary: '开始使用 v0.5.83',
+        ctaPrimary: '开始使用 v{ver}',
         ctaSecondary: '查阅部署指南',
         footerBrand: '面向生产环境的集中式 MySQL binlog 备份控制平面，具备本地 fsync 强一致检查点、多节点租约故障切换与解耦 S3 归档能力。基于 Apache 2.0 协议开源。',
         footerCol1: '运维指南',
@@ -1411,6 +1411,8 @@ into a production control plane</h2>
       }
     };
 
+    // The release version lives once, in <html data-version>; strings use {ver}.
+    const version = document.documentElement.dataset.version;
     const root = document.getElementById('i18n-root');
     const applyLanguage = (lang) => {
       const content = translations[lang] || translations.en;
@@ -1421,7 +1423,7 @@ into a production control plane</h2>
 
       document.querySelectorAll('[data-i18n]').forEach((node) => {
         const key = node.dataset.i18n;
-        if (content[key]) node.innerHTML = content[key].replace(/\n/g, '<br>');
+        if (content[key]) node.innerHTML = content[key].replaceAll('{ver}', version).replace(/\n/g, '<br>');
       });
 
       document.querySelectorAll('[data-i18n-aria-label]').forEach((node) => {

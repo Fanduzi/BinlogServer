@@ -1,0 +1,2 @@
+# Old screenshot paths from before the images moved to /images/.
+/docs/images/* /images/:splat 301
