@@ -9,6 +9,7 @@ P2-5.4（设计 0009 §26）：`Row.RetentionRemoved` 表示本地保留删过�
   - #348 QA 后：`UploadGrace` 未设置（≤0）时取 `DefaultUploadGrace`（15min）。I5 还覆盖 checkpoint 指向链上最后一个同前缀源文件之后的文件、以及 pos 超过所指封存段末尾（本地大小，否则行大小），位置判定不限 MySQL。新增 `I2_ORDER_INVALID`：调用方给的顺序漏掉本地账本里的段（例如整段回切 stint），或同一前缀内序号后退。链上段既无目录行也无本地文件报 `I6_MISSING_ROW`；只有头部事件的 open 文件不算 I4 副本（同一源文件的每份副本都以相同的头开始；#405：legacy failback 修复后续写的 open 文件在第一个事务前被误判为第二份副本）。本地大小与对象大小都不等于行大小时报 `I6_SIZE_MISMATCH` 与 `I6_OBJECT_SIZE_MISMATCH` 各一条（P2-5.1; P2-5.3 (§22): Switches suppress cross-stint I3; CheckCheckpoint separate from CheckBody 起对象大小不等是独立 kind；本地大小只在行已封存、`.seal-sha256` 无该段记录（旧段）时与行比较，账本有记录时以账本为准，计划中有 legacy failback 时不报，设计 0009 §20.2）；UPLOADED 行 `object_key` 为空报 `I6_MISSING_OBJECT`；内部 GTID 洞逐个区间报告，只跳过邻段判定已在同一后继段上报过的那个。
 - `gtid.go`: I3 的 GTID 洞判定（段内、相邻源文件、换源处），从 `tasks/window.go` 搬来，现在是唯一一份，`Check` 和 `WindowOf` 共用。
 - `window.go`: `WindowOf(segs, flavor, objectStorage, startGTID)`，`GET /window` 的唯一推导：最早/最晚 UTC 事件时间、MySQL 已存 GTID 集合和缺口（同一源文件名前缀内缺序号、相邻源文件或换源处的 GTID 洞、段内洞、已存序号中间的空缺、校验和 mismatch、配了对象存储时封存分段 `UPLOAD_FAILED`/`LOCAL_ONLY`、读不到）。起点集合算作已存。字节由调用方读好传入（tasks 经 `OpenTaskSegment`，可能来自另一个进程），损坏截断由调用方加。
+- `cover.go`: `Cover` 用同一次链上的 `ScanCover` 结果回答一个 UTC 秒或一条 MySQL GTID（ADR 0009 阶段 4/5）。Go 类型是 `CoverResult`，因为 `Coverage` 已经是巡检对一段做了什么。`segments` 是第一段到停点的前缀。窗口、校验和、全备 GTID 的预检也在这里：全备集合空着是 manual，起点不是它的子集（洞）或它和将要应用的事务相交（重叠）是 red。
 
 ## Exports
 - `Inputs`、`Row`、`Switch`、`Checkpoint`、`Segment`、`Violation`、`Kind`（`AllKinds`）、`ChainOf`、`Chain.Segments`、`Chain.Check`、`DefaultUploadGrace`。

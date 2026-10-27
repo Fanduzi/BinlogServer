@@ -28,6 +28,7 @@ on:
           - epoch-segments
           - gtid-purge
           - gtid-pitr
+          - coverage
           - source-switchover
           - meta-failover
           - upgrade-failback
@@ -109,7 +110,7 @@ jobs:
         run: go test -race -count=1 -timeout 30m ./...
 
   unit-and-e2e:
-    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback' && github.event.inputs.e2e_profile != 'tls') }}
+    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'coverage' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback' && github.event.inputs.e2e_profile != 'tls') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -529,6 +530,36 @@ jobs:
         if: failure()
         run: |
           cat /tmp/binlog-server-gtid-pitr.log || true
+          docker compose -f deploy/e2e/docker-compose.yml logs || true
+
+      - name: Cleanup
+        if: always()
+        run: ./scripts/e2e/down.sh
+
+  e2e-coverage:
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'coverage' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: E2E Coverage And Restore Plan
+        run: |
+          E2E_DIR="./tmp/e2e/data-ci-coverage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          E2E_SERVER_LOG="/tmp/binlog-server-coverage.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --scenarios smoke-coverage
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          cat /tmp/binlog-server-coverage.log || true
           docker compose -f deploy/e2e/docker-compose.yml logs || true
 
       - name: Cleanup
