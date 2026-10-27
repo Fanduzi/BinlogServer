@@ -34,7 +34,7 @@ make sqlc-verify
 ```
 
 5. If security-sensitive changes landed, confirm `SECURITY.md` and any public release note wording remain accurate.
-6. Set the repo-root `VERSION` file to the tag without a leading `v` (for example `0.5.76`). The same value must appear as `VER=<version>` in `README.md`, `README_ZH.md`, and `docs/guide/admin/deployment.md`, as `v<version>` in the first lines of `config.example.yaml` and `config.production.example.yaml`, and on the landing page as `v<version> (Current)`, `v<version> — latest release`, and `Get Started with v<version>`. `go test ./internal/config -run TestVersionPinsMatchVERSIONFile` enforces this. `docs/guide/admin/configuration.md` must name every YAML key the loader reads; `TestDocumentedConfigKeys` enforces that.
+6. Set the repo-root `VERSION` file to the tag without a leading `v` (for example `0.5.76`). The same value must appear as `VER=<version>` in `README.md`, `README_ZH.md`, and `docs/guide/admin/deployment.md`, as `v<version>` in the first lines of `config.example.yaml` and `config.production.example.yaml`, and on the landing page as `v<version> — latest release` and `Get Started with v<version>`. `go test ./internal/config -run TestVersionPinsMatchVERSIONFile` enforces this. The landing page is not a release log: do not add release highlights, dates, or checksums there; a pin PR changes only the version strings. `TestLandingPageHasNoReleaseHistory` fails on a release timeline, a hardcoded checksum, any `vX.Y.Z` other than `VERSION`, or a page over 96 KiB. `docs/guide/admin/configuration.md` must name every YAML key the loader reads; `TestDocumentedConfigKeys` enforces that.
 
 ## Changelog Convention
 

@@ -118,10 +118,12 @@
     }
     .nav-cta:hover { opacity: 0.85; color: #0d1117; }
 
+    p code, td code, li code { font-family: 'IBM Plex Mono', monospace; font-size: 0.85em; color: var(--text); background: rgba(110,118,129,0.15); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
     .hero {
       padding: 150px 0 90px;
       text-align: center;
       position: relative;
+      overflow: hidden;
     }
     .hero::before {
       content: '';
@@ -235,6 +237,10 @@
     .fit-grid { grid-template-columns: repeat(3, 1fr); }
     .trust-grid { grid-template-columns: repeat(4, 1fr); }
     .release-grid { grid-template-columns: 1fr 1fr; }
+    .release-grid.single { grid-template-columns: minmax(0, 720px); }
+    .release-card p { overflow-wrap: anywhere; }
+    .release-line { margin-top: 20px; font-size: 0.9rem; color: var(--muted); }
+    .release-line a { color: var(--accent); }
 
     .card,
     .surface-card,
@@ -411,6 +417,7 @@
     .pipeline-step span { display: block; margin-top: 4px; font-size: 0.72rem; color: var(--muted); font-weight: 500; }
     .pipeline-arrow { color: var(--border); font-size: 1.2rem; }
 
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .rules-table {
       width: 100%;
       border-collapse: collapse;
@@ -587,7 +594,7 @@
           <li><a href="#guarantees" data-i18n="navGuarantees">Guarantees</a></li>
           <li><a href="#topologies" data-i18n="navTopologies">Topologies</a></li>
           <li><a href="#positioning" data-i18n="navPositioning">Positioning</a></li>
-          <li><a href="#changelog" data-i18n="navChangelog">Changelog</a></li>
+          <li><a href="#checklist" data-i18n="navChangelog">Checklist</a></li>
         </ul>
         <div class="nav-actions">
           <div class="nav-lang" data-i18n-aria-label="langToggleAria" aria-label="Language switcher" role="group">
@@ -618,7 +625,7 @@ CLUSTER       Multi-worker lease ownership with automatic failover &amp; zero sp
 OBSERVE       True lag vs source binlog tip, Prometheus metrics, and embedded Web UI</code>
         </div>
         <div class="badge-row">
-          <span class="tag tag-go">Go 1.26.10</span>
+          <span class="tag tag-go">Go</span>
           <span class="tag tag-cluster">MySQL 5.7+ / 8.0+ / MariaDB</span>
           <span class="tag tag-ui">Embedded Web Console</span>
           <span class="tag tag-api">REST &amp; Swagger</span>
@@ -672,7 +679,7 @@ inspect, and operate</h2>
         <p class="section-label" data-i18n="deployLabel">Install &amp; First Backup Path</p>
         <h2 class="section-title" data-i18n="deployTitle">Four disciplined steps from download
 to verified backup health</h2>
-        <p class="section-sub" data-i18n="deploySub">Packaged release archives contain precompiled statically-linked binaries (`binlog-server`, `migrate`), SQL migrations, and production config templates. Operators do not need Go installed.</p>
+        <p class="section-sub" data-i18n="deploySub">Packaged release archives contain precompiled statically-linked binaries (<code>binlog-server</code>, <code>migrate</code>), SQL migrations, and production config templates. Operators do not need Go installed.</p>
 
         <div class="step-grid">
           <div class="step-card">
@@ -697,11 +704,6 @@ export BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$PWD/task.key"
 export BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:8080
 export BINLOG_SERVER_DATA_DIR=./data
 ./binlog-server</code>
-              <code>24c9d9cc572607bfb9fb21c24fac546e4748723010fa35c733777c79adce8c8d  binlog-server_0.5.83_darwin_amd64.tar.gz
-d529de17810be71d69f5484e74df870d5e955d2ac705745b8cd4138f351517b3  binlog-server_0.5.83_darwin_arm64.tar.gz
-7c623eefaa00bc18a6b4f6058e043b4127e6ea59bac1bf9dcfdc5ed24bfc110b  binlog-server_0.5.83_linux_amd64.tar.gz
-bb610b7647f9b19a19cf5f40e03b7faef2f786f077aab4996d6960b2dfe45b9c  binlog-server_0.5.83_linux_arm64.tar.gz
-</code>
             </div>
           </div>
 
@@ -777,7 +779,7 @@ export BINLOG_SERVER_ENCRYPTION_KEY="$(openssl rand -hex 16)"
         </div>
 
         <p style="margin-top:24px; font-size:0.85rem; color:var(--muted);" data-i18n="deployNote">
-          ⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including `:8080` or `0.0.0.0:8080`) strictly fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are enabled.
+          ⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including <code>:8080</code> or <code>0.0.0.0:8080</code>) strictly fail-closes at startup unless <code>api.auth.enabled</code>, <code>protect_api</code>, and <code>protect_metrics</code> are enabled.
         </p>
         <p style="margin-top:12px; font-size:0.85rem; color:var(--muted);" data-i18n="deployFlavor">
           MariaDB sources must set <code>"flavor":"mariadb"</code>. The Console default and the MySQL Quick Start example use <code>mysql</code>. That flavor reads <code>@@server_uuid</code>, which MariaDB does not have, and the task fails immediately.
@@ -796,7 +798,7 @@ for database backup systems</h2>
           <div class="card">
             <div class="card-icon">🧱</div>
             <h3 data-i18n="g1Title">fsync Checkpoints</h3>
-            <p data-i18n="g1Body">Checkpoint offsets advance only after local `fsync` succeeds on disk. A process crash or sudden reboot never causes phantom progress.</p>
+            <p data-i18n="g1Body">Checkpoint offsets advance only after local <code>fsync</code> succeeds on disk. A process crash or sudden reboot never causes phantom progress.</p>
           </div>
           <div class="card">
             <div class="card-icon">🔄</div>
@@ -811,7 +813,7 @@ for database backup systems</h2>
           <div class="card">
             <div class="card-icon">🔐</div>
             <h3 data-i18n="g4Title">Fail-Closed Security</h3>
-            <p data-i18n="g4Body">Non-loopback binds mandate authentication. `PRODUCTION=true` refuses startup without a 32-byte AES key and encrypts source passwords.</p>
+            <p data-i18n="g4Body">Non-loopback binds mandate authentication. <code>PRODUCTION=true</code> refuses startup without a 32-byte AES key and encrypts source passwords.</p>
           </div>
         </div>
       </div>
@@ -828,7 +830,7 @@ with three battle-tested topologies</h2>
           <div class="surface-card">
             <div class="surface-icon">💻</div>
             <h3 data-i18n="topo1Title">1. Standalone Mode</h3>
-            <p data-i18n="topo1Body">Single process. Without `meta_dsn`, tasks run in-memory for testing. With `meta_dsn`, tasks, checkpoints, and sealed segments persist across restarts for simple single-node deployments.</p>
+            <p data-i18n="topo1Body">Single process. Without <code>meta_dsn</code>, tasks run in-memory for testing. With <code>meta_dsn</code>, tasks, checkpoints, and sealed segments persist across restarts for simple single-node deployments.</p>
           </div>
           <div class="surface-card">
             <div class="surface-icon">🏢</div>
@@ -865,12 +867,12 @@ from MySQL source to S3 archive</h2>
           <div class="surface-card">
             <div class="surface-icon">🎯</div>
             <h3 data-i18n="flow1Title">Flexible Start Modes</h3>
-            <p data-i18n="flow1Body">Support `LATEST` (start at source tip), `FILE_POS` (specific binlog file and offset), or `GTID` sets without losing consistency.</p>
+            <p data-i18n="flow1Body">Support <code>LATEST</code> (start at source tip), <code>FILE_POS</code> (specific binlog file and offset), or <code>GTID</code> sets without losing consistency.</p>
           </div>
           <div class="surface-card">
             <div class="surface-icon">⏱️</div>
             <h3 data-i18n="flow2Title">True Master Lag Tracking</h3>
-            <p data-i18n="flow2Body">Replication lag is evaluated directly against `SHOW MASTER STATUS` coordinates, avoiding misleading zeros during idle periods.</p>
+            <p data-i18n="flow2Body">Replication lag is evaluated directly against the source binlog position (<code>SHOW MASTER STATUS</code>, or <code>SHOW BINARY LOG STATUS</code> on MySQL 8.4+), avoiding misleading zeros during idle periods.</p>
           </div>
           <div class="surface-card">
             <div class="surface-icon">🗂️</div>
@@ -888,7 +890,7 @@ from MySQL source to S3 archive</h2>
 What BinlogServer is, and what it is not</h2>
         <p class="section-sub" data-i18n="positioningSub">Products are easier to trust when they draw hard boundaries. BinlogServer is a specialized MySQL binlog backup control plane, not a bloated generic data platform.</p>
 
-        <table class="rules-table">
+        <div class="table-scroll"><table class="rules-table">
           <thead>
             <tr>
               <th data-i18n="positioningHead1">Dimension</th>
@@ -918,7 +920,7 @@ What BinlogServer is, and what it is not</h2>
               <td class="mono" data-i18n="positioningRow4C">No heavy JVM dependencies, Kafka clusters, or complex schema registries.</td>
             </tr>
           </tbody>
-        </table>
+        </table></div>
       </div>
     </section>
 
@@ -988,58 +990,39 @@ rigorous automated verification</h2>
       </div>
     </section>
 
-    <section id="changelog" class="alt">
+    <section id="checklist" class="alt">
       <div class="container">
-        <p class="section-label" data-i18n="changelogLabel">Release Cadence</p>
-        <h2 class="section-title" data-i18n="changelogTitle">Continuous hardening focused on
-production stability and ergonomics</h2>
-        <p class="section-sub" data-i18n="changelogSub">Review recent release highlights designed specifically to eliminate operator surprise in production environments.</p>
+        <p class="section-label" data-i18n="changelogLabel">Before Production</p>
+        <h2 class="section-title" data-i18n="changelogTitle">Three things to settle
+before the first production task</h2>
+        <p class="section-sub" data-i18n="changelogSub">Isolate the metadata database, turn on authentication and encryption, and decide how long sealed binlogs stay on local disk.</p>
 
-        <div class="release-grid">
-          <div class="release-card">
-            <h3 data-i18n="releaseLeftTitle">Recent Releases</h3>
-            <div class="timeline">
-              <div class="timeline-item">
-                <div class="timeline-date">2026-10-27</div>
-                <div class="timeline-version">v0.5.83 (Current)</div>
-                <p data-i18n="release1">v0.5.83: MySQL 8.4 LTS support and in-place upgrade proven in CI. The source position is read with SHOW BINARY LOG STATUS on MySQL 8.4+, so LATEST starts work there; mysql:8.4 streaming and 5.7/8.4 restores run on every PR, as does an in-place upgrade from v0.5.82. Fixes a missing retention marker after an online migrate up. No new migration and no new config key.</p>
-              </div>
-              <div class="timeline-item">
-                <div class="timeline-date">2026-10-27</div>
-                <div class="timeline-version">v0.5.82</div>
-                <p data-i18n="release2">v0.5.82: task health metrics, recommended alert rules and a generic webhook. /metrics exports binlog_server_task_healthy and progress age, upload lag and open CRITICAL gauges; the repo ships Prometheus rules tested by promtool in CI; optional notify.* posts JSON on health changes. The evaluator still defaults to off. No new migration.</p>
-              </div>
-              <div class="timeline-item">
-                <div class="timeline-date">2026-10-27</div>
-                <div class="timeline-version">v0.5.81</div>
-                <p data-i18n="release3">v0.5.81: faster HTTP shutdown and deterministic race tests. Shutdown closes idle keep-alive connections and connections that never sent a request instead of waiting out the 5 s budget. The race gate runs every test, and the cold health walk is bounded in CI by a syscall and byte count. No new migration and no new config key.</p>
-              </div>
-            </div>
-          </div>
+        <div class="release-grid single">
           <div class="release-card">
             <h3 data-i18n="releaseRightTitle">DBA Production Checklist</h3>
             <div class="timeline">
               <div class="timeline-item">
                 <div class="timeline-date" data-i18n="check1Date">Step 1</div>
                 <div class="timeline-version" data-i18n="check1Title">Isolate Metadata MySQL</div>
-                <p data-i18n="check1Body">Ensure the metadata MySQL instance is dedicated and never added to the backup task set. Run `./migrate up` before starting.</p>
+                <p data-i18n="check1Body">Ensure the metadata MySQL instance is dedicated and never added to the backup task set. Run <code>./migrate up</code> before starting.</p>
                 <span class="release-note" data-i18n="check1Note">Isolation mandatory</span>
               </div>
               <div class="timeline-item">
                 <div class="timeline-date" data-i18n="check2Date">Step 2</div>
                 <div class="timeline-version" data-i18n="check2Title">Configure Production Auth</div>
-                <p data-i18n="check2Body">Use `config.production.example.yaml` with `BINLOG_SERVER_API_AUTH_BEARER_TOKEN` and supply 32-byte `--encryption-key`.</p>
+                <p data-i18n="check2Body">Use <code>config.production.example.yaml</code> with <code>BINLOG_SERVER_API_AUTH_BEARER_TOKEN</code> and supply 32-byte <code>--encryption-key</code>.</p>
                 <span class="release-note" data-i18n="check2Note">Fail-closed security</span>
               </div>
               <div class="timeline-item">
                 <div class="timeline-date" data-i18n="check3Date">Step 3</div>
                 <div class="timeline-version" data-i18n="check3Title">Configure S3 &amp; Retention</div>
-                <p data-i18n="check3Body">Set `storage.retention_days` (1..3650) to manage local disk space while streaming sealed binlogs to object storage.</p>
+                <p data-i18n="check3Body">Set <code>storage.retention_days</code> (1..3650) to manage local disk space while streaming sealed binlogs to object storage.</p>
                 <span class="release-note" data-i18n="check3Note">Decoupled archive</span>
               </div>
             </div>
           </div>
         </div>
+        <p class="release-line" data-i18n="releaseLine">What changed in each version: <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener">release notes</a> and <a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a>.</p>
       </div>
     </section>
 
@@ -1089,7 +1072,7 @@ into a production control plane</h2>
             <div class="footer-col-title" data-i18n="footerCol3">Project</div>
             <ul>
               <li><a href="https://github.com/Fanduzi/BinlogServer" target="_blank" rel="noopener">GitHub</a></li>
-              <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases (v0.5.83)</a></li>
+              <li><a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener" data-i18n="footerLink7">Releases</a></li>
               <li><a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" data-i18n="footerLink8">Changelog</a></li>
             </ul>
           </div>
@@ -1120,7 +1103,7 @@ into a production control plane</h2>
         navGuarantees: 'Guarantees',
         navTopologies: 'Topologies',
         navPositioning: 'Positioning',
-        navChangelog: 'Changelog',
+        navChangelog: 'Checklist',
         navCta: 'Releases',
         heroBadge: 'v0.5.83 — latest release',
         heroTitle: 'Centralized MySQL Binlog Backup\nControl Plane',
@@ -1152,24 +1135,24 @@ into a production control plane</h2>
         step4Title: 'Minimal Production Baseline',
         step4Body: 'Transition to production with non-negotiable security: AES-256 key, bearer auth token, and dedicated metadata MySQL.',
         step4Code: '# 1. Initialize dedicated metadata database\nexport META_DSN=\'binlog_meta:pass@tcp(10.0.0.15:3306)/meta?parseTime=true\'\n./migrate up --dsn "$META_DSN" --path ./migrations\n\n# 2. Start production daemon with encryption key\nexport PRODUCTION=true\nexport BINLOG_SERVER_META_DSN="$META_DSN"\nexport BINLOG_SERVER_API_AUTH_BEARER_TOKEN="your-secure-token"\nexport BINLOG_SERVER_ENCRYPTION_KEY="$(openssl rand -hex 16)"\n\n./binlog-server \\\n  --config config.production.example.yaml \\\n  --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"',
-        deployNote: '⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including `:8080` or `0.0.0.0:8080`) strictly fail-closes at startup unless `api.auth.enabled`, `protect_api`, and `protect_metrics` are enabled.',
+        deployNote: '⚠️ <strong>Security notice:</strong> Loopback binds allow unauthenticated local testing. Any non-loopback listen address (including <code>:8080</code> or <code>0.0.0.0:8080</code>) strictly fail-closes at startup unless <code>api.auth.enabled</code>, <code>protect_api</code>, and <code>protect_metrics</code> are enabled.',
         deployFlavor: 'MariaDB sources must set <code>"flavor":"mariadb"</code>. The Console default and the MySQL Quick Start example use <code>mysql</code>. That flavor reads <code>@@server_uuid</code>, which MariaDB does not have, and the task fails immediately.',
         guaranteesLabel: 'Architectural Guarantees',
         guaranteesTitle: 'The four non-negotiables\nfor database backup systems',
         guaranteesSub: 'DBAs cannot afford optimistic progress or unhandled edge cases. Every component in BinlogServer is built around predictable durability and operational transparency.',
         g1Title: 'fsync Checkpoints',
-        g1Body: 'Checkpoint offsets advance only after local `fsync` succeeds on disk. A process crash or sudden reboot never causes phantom progress.',
+        g1Body: 'Checkpoint offsets advance only after local <code>fsync</code> succeeds on disk. A process crash or sudden reboot never causes phantom progress.',
         g2Title: 'Decoupled Archiving',
         g2Body: 'S3-compatible upload is asynchronous and best-effort. Cloud storage throttling or outages never stall local replication streams.',
         g3Title: 'Lease HA & Failover',
         g3Body: 'Distributed lease locks backed by metadata MySQL ensure only one worker dumps a source at any time, with automatic timeout failover.',
         g4Title: 'Fail-Closed Security',
-        g4Body: 'Non-loopback binds mandate authentication. `PRODUCTION=true` refuses startup without a 32-byte AES key and encrypts source passwords.',
+        g4Body: 'Non-loopback binds mandate authentication. <code>PRODUCTION=true</code> refuses startup without a 32-byte AES key and encrypts source passwords.',
         topologiesLabel: 'Deployment Topologies',
         topologiesTitle: 'Fit into your infrastructure\nwith three battle-tested topologies',
         topologiesSub: 'Whether testing locally on a laptop or running hundreds of replication tasks across an enterprise cluster, choose the right architecture without changing binlog format or client protocols.',
         topo1Title: '1. Standalone Mode',
-        topo1Body: 'Single process. Without `meta_dsn`, tasks run in-memory for testing. With `meta_dsn`, tasks, checkpoints, and sealed segments persist across restarts for simple single-node deployments.',
+        topo1Body: 'Single process. Without <code>meta_dsn</code>, tasks run in-memory for testing. With <code>meta_dsn</code>, tasks, checkpoints, and sealed segments persist across restarts for simple single-node deployments.',
         topo2Title: '2. Control Plane + Workers',
         topo2Body: 'Production recommended. Dedicated Control Plane nodes serve API/UI/Scheduler, while a pool of headless Workers claim task leases and perform binlog replication with automatic crash failover.',
         topo3Title: '3. All-in-one Cluster Node',
@@ -1182,9 +1165,9 @@ into a production control plane</h2>
         pipelineStep3: '3. Rotate & Seal<span>Mark closed & advance checkpoint</span>',
         pipelineStep4: '4. Archive & Clean<span>Async S3 upload & retention purge</span>',
         flow1Title: 'Flexible Start Modes',
-        flow1Body: 'Support `LATEST` (start at source tip), `FILE_POS` (specific binlog file and offset), or `GTID` sets without losing consistency.',
+        flow1Body: 'Support <code>LATEST</code> (start at source tip), <code>FILE_POS</code> (specific binlog file and offset), or <code>GTID</code> sets without losing consistency.',
         flow2Title: 'True Master Lag Tracking',
-        flow2Body: 'Replication lag is evaluated directly against `SHOW MASTER STATUS` coordinates, avoiding misleading zeros during idle periods.',
+        flow2Body: 'Replication lag is evaluated directly against the source binlog position (<code>SHOW MASTER STATUS</code>, or <code>SHOW BINARY LOG STATUS</code> on MySQL 8.4+), avoiding misleading zeros during idle periods.',
         flow3Title: 'Automated Retention & Retry',
         flow3Body: 'Configurable retention (1..3650 days) cleans up expired sealed files on disk. Upload failures trigger backoff and explicit retry APIs.',
         positioningLabel: 'Positioning',
@@ -1232,25 +1215,22 @@ into a production control plane</h2>
         trust3Body: 'Production mode asserts valid 32-byte AES-256 keys and encrypted source credentials before binding network sockets.',
         trust4Title: 'SQL-Paged Scale',
         trust4Body: 'Dashboard and task summaries use SQL GROUP BY aggregations with bounded LIMIT/OFFSET paging to protect metadata databases.',
-        changelogLabel: 'Release Cadence',
-        changelogTitle: 'Continuous hardening focused on\nproduction stability and ergonomics',
-        changelogSub: 'Review recent release highlights designed specifically to eliminate operator surprise in production environments.',
-        releaseLeftTitle: 'Recent Releases',
-        release1: 'v0.5.83: MySQL 8.4 LTS support and in-place upgrade proven in CI. The source position is read with SHOW BINARY LOG STATUS on MySQL 8.4+, so LATEST starts work there; mysql:8.4 streaming and 5.7/8.4 restores run on every PR, as does an in-place upgrade from v0.5.82. Fixes a missing retention marker after an online migrate up. No new migration and no new config key.',
-        release2: 'v0.5.82: task health metrics, recommended alert rules and a generic webhook. /metrics exports binlog_server_task_healthy and progress age, upload lag and open CRITICAL gauges; the repo ships Prometheus rules tested by promtool in CI; optional notify.* posts JSON on health changes. The evaluator still defaults to off. No new migration.',
-        release3: 'v0.5.81: faster HTTP shutdown and deterministic race tests. Shutdown closes idle keep-alive connections and connections that never sent a request instead of waiting out the 5 s budget. The race gate runs every test, and the cold health walk is bounded in CI by a syscall and byte count. No new migration and no new config key.',
+        changelogLabel: 'Before Production',
+        changelogTitle: 'Three things to settle\nbefore the first production task',
+        changelogSub: 'Isolate the metadata database, turn on authentication and encryption, and decide how long sealed binlogs stay on local disk.',
         releaseRightTitle: 'DBA Production Checklist',
+        releaseLine: 'What changed in each version: <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener">release notes</a> and <a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a>.',
         check1Date: 'Step 1',
         check1Title: 'Isolate Metadata MySQL',
-        check1Body: 'Ensure the metadata MySQL instance is dedicated and never added to the backup task set. Run `./migrate up` before starting.',
+        check1Body: 'Ensure the metadata MySQL instance is dedicated and never added to the backup task set. Run <code>./migrate up</code> before starting.',
         check1Note: 'Isolation mandatory',
         check2Date: 'Step 2',
         check2Title: 'Configure Production Auth',
-        check2Body: 'Use `config.production.example.yaml` with `BINLOG_SERVER_API_AUTH_BEARER_TOKEN` and supply 32-byte `--encryption-key`.',
+        check2Body: 'Use <code>config.production.example.yaml</code> with <code>BINLOG_SERVER_API_AUTH_BEARER_TOKEN</code> and supply 32-byte <code>--encryption-key</code>.',
         check2Note: 'Fail-closed security',
         check3Date: 'Step 3',
         check3Title: 'Configure S3 & Retention',
-        check3Body: 'Set `storage.retention_days` (1..3650) to manage local disk space while streaming sealed binlogs to object storage.',
+        check3Body: 'Set <code>storage.retention_days</code> (1..3650) to manage local disk space while streaming sealed binlogs to object storage.',
         check3Note: 'Decoupled archive',
         ctaTitle: 'Move MySQL binlog backup\ninto a production control plane',
         ctaSub: 'Read the step-by-step deployment guide, inspect the real production configuration, and replace brittle cron jobs with an authoritative backup engine.',
@@ -1266,7 +1246,7 @@ into a production control plane</h2>
         footerLink5: 'Topologies',
         footerLink6: 'Fit Assessment',
         footerCol3: 'Project',
-        footerLink7: 'Releases (v0.5.83)',
+        footerLink7: 'Releases',
         footerLink8: 'Changelog',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer is Apache 2.0 licensed.',
         footerBottomRight: 'Bilingual production landing page for MySQL DBAs.'
@@ -1281,7 +1261,7 @@ into a production control plane</h2>
         navGuarantees: '核心保证',
         navTopologies: '架构拓扑',
         navPositioning: '产品定位',
-        navChangelog: '版本演进',
+        navChangelog: '上线清单',
         navCta: '下载发布包',
         heroBadge: 'v0.5.83 — 最新发布版本',
         heroTitle: '面向生产环境的集中式\nMySQL Binlog 备份控制平面',
@@ -1313,24 +1293,24 @@ into a production control plane</h2>
         step4Title: '生产落地最小安全基线',
         step4Body: '平滑切入生产环境：配置 32 字节 AES 密钥、Bearer 鉴权令牌与隔离的元数据库。',
         step4Code: '# 1. 独立部署元数据 MySQL 并执行迁移\nexport META_DSN=\'binlog_meta:pass@tcp(10.0.0.15:3306)/meta?parseTime=true\'\n./migrate up --dsn "$META_DSN" --path ./migrations\n\n# 2. 注入密钥并启动生产守护进程\nexport PRODUCTION=true\nexport BINLOG_SERVER_META_DSN="$META_DSN"\nexport BINLOG_SERVER_API_AUTH_BEARER_TOKEN="your-secure-token"\nexport BINLOG_SERVER_ENCRYPTION_KEY="$(openssl rand -hex 16)"\n\n./binlog-server \\\n  --config config.production.example.yaml \\\n  --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"',
-        deployNote: '⚠️ <strong>安全提示：</strong> 本机 Loopback 监听仅供本地评估。任何非 Loopback 监听地址（包括 `:8080` 或 `0.0.0.0:8080`）启动时严格 Fail-Close，必须配置 `api.auth.enabled=true` 并保护 `/api/*` 与 `/metrics`。',
+        deployNote: '⚠️ <strong>安全提示：</strong> 本机 Loopback 监听仅供本地评估。任何非 Loopback 监听地址（包括 <code>:8080</code> 或 <code>0.0.0.0:8080</code>）启动时严格 Fail-Close，必须配置 <code>api.auth.enabled=true</code> 并保护 <code>/api/*</code> 与 <code>/metrics</code>。',
         deployFlavor: 'MariaDB 源库必须设置 <code>"flavor":"mariadb"</code>。控制台默认值和 MySQL 快速开始示例都是 <code>mysql</code>。这个 flavor 会读 <code>@@server_uuid</code>，MariaDB 没有该变量，任务会立刻失败。',
         guaranteesLabel: '四大架构设计保证',
         guaranteesTitle: '数据库备份软件\n绝不可妥协的四大原则',
         guaranteesSub: '生产数据库备份经不起任何含糊。BinlogServer 的每一处设计均围绕确定性的故障恢复边界与运维透明度展开。',
         g1Title: 'fsync 强一致检查点',
-        g1Body: '检查点位点仅在本地文件完成 `fsync` 刷盘后推进。进程异常崩溃或主机断电重启，绝不产生虚假位点推进。',
+        g1Body: '检查点位点仅在本地文件完成 <code>fsync</code> 刷盘后推进。进程异常崩溃或主机断电重启，绝不产生虚假位点推进。',
         g2Title: '解耦异步归档',
         g2Body: 'S3 兼容对象存储上传完全异步执行。远端对象存储限流、不可用或网络异常，绝不阻塞本地 MySQL binlog 的实时拉取。',
         g3Title: '租约高可用与自动接管',
         g3Body: '基于 MySQL 元数据表的分布式租约锁，保证单个任务在任意时刻仅由单一 Worker 消费，节点故障后自动心跳超时接管。',
         g4Title: '严密 Fail-Closed 安全机制',
-        g4Body: '开放网络端口必须开启鉴权。设置 `PRODUCTION=true` 时强制要求 32 字节 AES 密钥并对源库明文口令实施加密存储。',
+        g4Body: '开放网络端口必须开启鉴权。设置 <code>PRODUCTION=true</code> 时强制要求 32 字节 AES 密钥并对源库明文口令实施加密存储。',
         topologiesLabel: '推荐部署架构',
         topologiesTitle: '灵活适配三种经受验证的生产拓扑',
         topologiesSub: '从单机轻量评估到跨机房数百实例的高可用备份集群，BinlogServer 均能以一致的运维心智模型高效支撑。',
         topo1Title: '1. 单机独立模式 (Standalone)',
-        topo1Body: '单进程运行。未配置 `meta_dsn` 时位点保存在内存，适合验证；配置 `meta_dsn` 后重启自动从检查点续传，适合单节点生产备份。',
+        topo1Body: '单进程运行。未配置 <code>meta_dsn</code> 时位点保存在内存，适合验证；配置 <code>meta_dsn</code> 后重启自动从检查点续传，适合单节点生产备份。',
         topo2Title: '2. 控制面 + Worker 集群 (推荐)',
         topo2Body: '生产标配架构。独立的 Control Plane 节点专职提供 API/UI/调度，多台无状态 Worker 竞争任务租约执行复制，节点崩溃自动平滑接管。',
         topo3Title: '3. 一体化集群节点 (All-in-one)',
@@ -1343,9 +1323,9 @@ into a production control plane</h2>
         pipelineStep3: '3. 轮转与封存<span>封存旧文件并原子推进检查点</span>',
         pipelineStep4: '4. 归档与清理<span>异步上传 S3 并在过期后安全清理</span>',
         flow1Title: '全模式起点支持',
-        flow1Body: '支持 `LATEST`（从当前源库最新位点）、`FILE_POS`（指定 binlog 文件与偏移量）及 `GTID` 集合起始，平滑衔接各类备份方案。',
+        flow1Body: '支持 <code>LATEST</code>（从当前源库最新位点）、<code>FILE_POS</code>（指定 binlog 文件与偏移量）及 <code>GTID</code> 集合起始，平滑衔接各类备份方案。',
         flow2Title: '真实主库位点延迟',
-        flow2Body: '延迟计算严格对比源库 `SHOW MASTER STATUS` 真实位点，彻底消除长事务空闲期产生的虚假零延迟误判。',
+        flow2Body: '延迟计算严格对比源库真实位点（<code>SHOW MASTER STATUS</code>，MySQL 8.4+ 为 <code>SHOW BINARY LOG STATUS</code>），彻底消除长事务空闲期产生的虚假零延迟误判。',
         flow3Title: '自动轮转清理与重试',
         flow3Body: '支持配置 1..3650 天保留期自动清理过期本地封存文件；上传失败自动退避，并支持 API/控制台手动一键补传。',
         positioningLabel: '产品定位与边界',
@@ -1393,25 +1373,22 @@ into a production control plane</h2>
         trust3Body: '生产模式启动严格校验 32 字节 AES 密钥与凭证，未配置或密码占位符未解析直接拒绝启动。',
         trust4Title: 'SQL 聚合规模防护',
         trust4Body: '控制台概览与状态计数全部下推为 SQL GROUP BY 与 LIMIT/OFFSET 分页，绝不大表全表扫内存。',
-        changelogLabel: '近期版本演进',
-        changelogTitle: '持续打磨生产可靠性与运维体验',
-        changelogSub: '近期版本的迭代重点不是无序堆砌功能，而是全面提升控制台稳定度、鉴权防护与底层执行确定性。',
-        releaseLeftTitle: '近期发布里程碑',
-        release1: 'v0.5.83：支持 MySQL 8.4 LTS，CI 验证原地升级。MySQL 8.4+ 用 SHOW BINARY LOG STATUS 读源库位点，LATEST 启动可用；每个 PR 都跑 mysql:8.4 流式备份、5.7/8.4 恢复，以及从 v0.5.82 原地升级。修复在线 migrate up 之后保留标记缺失。没有新迁移，也没有新配置项。',
-        release2: 'v0.5.82：任务健康指标、推荐告警规则和通用 webhook。/metrics 输出 binlog_server_task_healthy，以及 progress age、upload lag、open CRITICAL 三个 gauge；仓库附带 CI 里用 promtool 测过的 Prometheus 规则；可选的 notify.* 在健康变化时 POST JSON。评估器默认仍是 off。没有新迁移。',
-        release3: 'v0.5.81：HTTP 关停更快，race 测试更确定。关停时先关掉空闲 keep-alive 和从未发请求的连接，不再等满 5 秒预算。race 门禁跑全部测试，冷健康遍历在 CI 里用系统调用数和字节数封顶。没有新迁移，也没有新配置项。',
+        changelogLabel: '上线之前',
+        changelogTitle: '第一个生产任务之前，先定好三件事',
+        changelogSub: '隔离元数据库，打开鉴权和加密，并确定已封存的 binlog 在本地磁盘保留多久。',
         releaseRightTitle: 'DBA 生产上线检查清单',
+        releaseLine: '每个版本的变化见 <a href="https://github.com/Fanduzi/BinlogServer/releases" target="_blank" rel="noopener">发布说明</a> 和 <a href="https://github.com/Fanduzi/BinlogServer/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a>。',
         check1Date: '第一步',
         check1Title: '元数据库隔离',
-        check1Body: '元数据 MySQL 必须独立部署，严禁将元数据实例本身作为备份源。服务启动前务必先执行 `./migrate up`。',
+        check1Body: '元数据 MySQL 必须独立部署，严禁将元数据实例本身作为备份源。服务启动前务必先执行 <code>./migrate up</code>。',
         check1Note: '隔离性强制要求',
         check2Date: '第二步',
         check2Title: '生产安全凭证配置',
-        check2Body: '基于 `config.production.example.yaml` 配置 Bearer Token，并在启动命令行传入 32 字节 `--encryption-key`。',
+        check2Body: '基于 <code>config.production.example.yaml</code> 配置 Bearer Token，并在启动命令行传入 32 字节 <code>--encryption-key</code>。',
         check2Note: 'Fail-Closed 严密防护',
         check3Date: '第三步',
         check3Title: '配置对象存储与保留期',
-        check3Body: '根据磁盘规划配置 `storage.retention_days`（1..3650 天），并注入 S3 认证凭证实现双重持久化。',
+        check3Body: '根据磁盘规划配置 <code>storage.retention_days</code>（1..3650 天），并注入 S3 认证凭证实现双重持久化。',
         check3Note: '归档解耦运行',
         ctaTitle: '将 MySQL Binlog 备份\n升级为生产级控制平面',
         ctaSub: '查阅详细部署指南，参考标准的生产配置模板，用专业可靠的控制系统彻底替换摇摇欲坠的定时脚本。',
@@ -1427,7 +1404,7 @@ into a production control plane</h2>
         footerLink5: '架构拓扑',
         footerLink6: '适配建议',
         footerCol3: '开源项目',
-        footerLink7: 'Release 资产 (v0.5.83)',
+        footerLink7: '版本发布',
         footerLink8: '更新日志',
         footerBottomLeft: '© 2026 Fanduzi. BinlogServer 使用 Apache 2.0 许可证。',
         footerBottomRight: '专为 MySQL DBA 打造的单文件双语落地页。'
