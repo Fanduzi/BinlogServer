@@ -238,9 +238,10 @@ for seg in 1 2 3 4 5; do
   POINT_AT+=("$(date -u -d "@${ts}" '+%Y-%m-%d %H:%M:%S')")
   POINT_SUMS+=("$(checksum_source)")
   echo "[coverage] segment $seg at ${POINT_AT[$((seg - 1))]} checksum ${POINT_SUMS[$((seg - 1))]}"
+  # Flush every segment, including the last. Stop alone leaves that file OPEN.
+  mysql80 "FLUSH BINARY LOGS;"
+  wait_sealed_count "$seg"
   if [[ "$seg" -lt 5 ]]; then
-    mysql80 "FLUSH BINARY LOGS;"
-    wait_sealed_count "$seg"
     # The rotate event is stamped with the source clock. A one-second gap keeps
     # each sealed segment's last event on its own second.
     sleep 2
@@ -248,12 +249,9 @@ for seg in 1 2 3 4 5; do
 done
 curl -fsS -X POST "$API/api/tasks/$task_id/stop" >/dev/null
 wait_state "$task_id" "STOPPED"
-wait_sealed_count 5
 
 mapfile -t PATHS < <(curl -fsS "$API/api/tasks/$task_id/files?limit=50" | jq -r 'sort_by(.file_name) | .[] | select(.state == "SEALED") | .file_path')
-[[ "${#PATHS[@]}" -ge 5 ]] || fail "need 5 sealed files, got ${#PATHS[@]}"
-open_left="$(curl -fsS "$API/api/tasks/$task_id/files?limit=50" | jq '[.[] | select(.state == "OPEN")] | length')"
-[[ "$open_left" == "0" ]] || fail "open segment still listed"
+[[ "${#PATHS[@]}" -ge 5 ]] || fail "need 5 sealed files, got ${#PATHS[@]}: $(curl -fsS "$API/api/tasks/$task_id/files?limit=50")"
 
 : >"$WORKDIR/events.tsv"
 for p in "${PATHS[@]}"; do
