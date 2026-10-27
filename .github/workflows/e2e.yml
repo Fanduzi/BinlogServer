@@ -323,15 +323,38 @@ jobs:
         run: ./scripts/e2e/down.sh
 
   e2e-upgrade-failback:
-    # D2: after the legacy repair, A rotates to a sealed boundary and split
-    # retention (local 1 day, bucket 30) removes every segment before it from
-    # disk. /replay/archive must GET each one from MinIO (mc admin trace), no
-    # copy may appear under data_dir, the server TMPDIR or /tmp, and the bucket
+    # Legacy repair from v0.5.57 through 0a84917a (plain, object-only,
+    # object-gone) plus a plain in-place upgrade from v0.5.82. object-only is
+    # D2: after the repair, A rotates to a sealed boundary and split retention
+    # (local 1 day, bucket 30) removes every segment before it from disk.
+    # /replay/archive must GET each one from MinIO (mc admin trace), no copy
+    # may appear under data_dir, the server TMPDIR or /tmp, and the bucket
     # members alone, restored with mysqlbinlog 8.0, must match A's CHECKSUM
-    # TABLE at the boundary. Builds v0.5.57 and 0a84917a, so full history.
+    # TABLE at the boundary. The v0.5.57 legs build 0a84917a, so full history.
+    name: e2e-upgrade-failback (${{ matrix.case }} from ${{ matrix.old_ref }})
     if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'upgrade-failback' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: plain
+            old_ref: v0.5.57
+            skip_mid: "0"
+            require_reuse: "1"
+          - case: object-only
+            old_ref: v0.5.57
+            skip_mid: "0"
+            require_reuse: "1"
+          - case: object-gone
+            old_ref: v0.5.57
+            skip_mid: "0"
+            require_reuse: "1"
+          - case: plain
+            old_ref: v0.5.82
+            skip_mid: "1"
+            require_reuse: "0"
 
     steps:
       - name: Checkout
@@ -358,9 +381,12 @@ jobs:
           mysqlbinlog --version
           mysqlbinlog --version | grep -Eq 'Ver 8\.0\.|Distrib 8\.0\.| 8\.0\.[0-9]+'
 
-      - name: E2E Upgrade Failback (object-only restore)
+      - name: E2E Upgrade Failback (${{ matrix.case }} from ${{ matrix.old_ref }})
         env:
-          FBUP_CASE: object-only
+          FBUP_CASE: ${{ matrix.case }}
+          FBUP_OLD_REF: ${{ matrix.old_ref }}
+          FBUP_SKIP_MID: ${{ matrix.skip_mid }}
+          FBUP_REQUIRE_REUSE: ${{ matrix.require_reuse }}
           FBUP_WORK: ${{ runner.temp }}/fbup
         run: ./scripts/e2e/upgrade-legacy-failback.sh
 

@@ -10,9 +10,9 @@
 只能 `workflow_dispatch` 手动触发的 e2e 一律不算 MET。
 
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
-- 每个 PR 和 push main 都跑：`vulncheck`；`e2e-upgrade-failback`（`upgrade-legacy-failback.sh FBUP_CASE=object-only`）；`race-and-vet`（`go vet ./...`、`go test -race ./...`）；`release-archive`（snapshot 包报的 version 和 commit）；`e2e-verify`（真实 MinIO）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`；`e2e-observability`；`e2e-tls`（`TestLiveMySQLTLS`、`TestLiveAppTLS`、`TestLiveS3TLS`）；`promtool`（`promtool test rules deploy/prometheus/binlog-server-alerts.test.yml`）。
+- 每个 PR 和 push main 都跑：`vulncheck`；`e2e-upgrade-failback`（`upgrade-legacy-failback.sh` 的 `plain`、`object-only`、`object-gone` 从 v0.5.57，以及 `plain` 从 v0.5.82）；`race-and-vet`（`go vet ./...`、`go test -race ./...`）；`release-archive`（snapshot 包报的 version 和 commit）；`e2e-verify`（真实 MinIO）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`；`e2e-observability`；`e2e-tls`（`TestLiveMySQLTLS`、`TestLiveAppTLS`、`TestLiveS3TLS`）；`promtool`（`promtool test rules deploy/prometheus/binlog-server-alerts.test.yml`）。
 - 多节点：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover` 也是每个 PR 和 push main 都跑。
-- 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`；`upgrade-legacy-failback` 的 `plain`、`object-gone` 两档。
+- 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`。
 
 ## A. 数据完整性与零静默丢失
 
@@ -58,7 +58,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | E1 | 每个 schema 迁移都能 up/down 往返；新二进制拒绝太旧的 schema，旧二进制拒绝自己不认识的 schema | `smoke-task-desired-migration`（拿已发布的 v0.5.49/v0.5.52 实测）、`smoke-control-loop`（逐步 down 到 schema 3，每一步核对表和索引），都在 quick | MET | — |
-| E2 | 从上一个发布版带数据原地升级，续传没有缺口，旧数据目录能被修复 | `e2e-upgrade-failback` 每个 PR 跑 `upgrade-legacy-failback.sh FBUP_CASE=object-only`：v0.5.57 → 0a84917a → 当前构建带数据升级，修复旧数据目录后续传、还原和 A 一致；`plain`、`object-gone` 两档不在任何 job 里 | PARTIAL | #437（在线 migrate up 后，重启前的行不会被标记） |
+| E2 | 从上一个发布版带数据原地升级，续传没有缺口，旧数据目录能被修复 | `e2e-upgrade-failback` 每个 PR 跑四档：`plain`、`object-only`、`object-gone` 从 v0.5.57 → 0a84917a → 当前构建（旧目录修复后续传、还原和 A 一致；`object-gone` 拒绝且目录和对象不变）；`plain` 从 v0.5.82 直接升到当前构建（`FBUP_SKIP_MID=1`、`FBUP_REQUIRE_REUSE=0`），带数据原地升级后续传、还原和 A 一致。#437 由 `TestOnlineMigrateUpWritesRetentionMarkerWithoutSecondEvent`（`go test ./...`）锁住：000010 列缺席时只写一条 `RETENTION_REMOVED`，列出现后的下一轮只补 `retention_removed_at`、不写第二条事件 | MET | — |
 | E3 | cluster 滚动升级有栅栏：预检、`row_generation` 触发器、`MIXED_VERSION`；降级会拒绝不安全的状态 | ADR 0011 §5 的 000011 迁移，加 §4.2 第 12 行的 e2e | NOT MET | ADR 0011 PR-4 |
 
 ## F. 可观测与告警
@@ -101,7 +101,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 22 / PARTIAL 5 / NOT MET 8**。
+共 35 项：**MET 23 / PARTIAL 4 / NOT MET 8**。
 
 ## 最卡生产级的 5 项
 

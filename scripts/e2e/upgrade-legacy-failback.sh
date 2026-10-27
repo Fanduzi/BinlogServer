@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# input: two MySQL 8.0 servers in a GTID pair behind one TCP proxy, a meta MySQL, MinIO, and three binlog-server binaries (OLD, MID, NEW; default: built from v0.5.57, 0a84917a, and this checkout)
-# output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; object-only creates the task with local_retention_days 1 and bucket_retention_days 30, moves A's first-stint mysql-bin.00000N off disk (mv) so only its MinIO object holds it (Start must fetch it back), and after the repaired restore runs D2: FLUSH BINARY LOGS on A sets a sealed boundary, every segment before it must be SEALED and UPLOADED, the product's split retention (files aged 2 days, then another rotation) removes them from disk, 30 more transactions go to the local open segment only, then /replay must mark each removed segment bucket, /replay/archive must issue at least one MinIO GetObject per removed object key (mc admin trace) and return the removed bytes, no byte-identical copy may exist under data_dir (dot dirs included), the server TMPDIR ($FBUP_WORK/tmp) or newer /tmp files after the archive read and after the restore, the bucket members alone must restore A's CHECKSUM TABLE and gtid_executed at the boundary, and the local post-boundary members on top must reach A's final checksum; object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
-# pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1) and the object-only restore (D2); not in any run-suite.sh profile; e2e.yml e2e-upgrade-failback runs FBUP_CASE=object-only on every PR and alone for e2e_profile=upgrade-failback
+# input: two MySQL 8.0 servers in a GTID pair behind one TCP proxy, a meta MySQL, MinIO, and three binlog-server binaries (OLD, MID, NEW; default: built from FBUP_OLD_REF v0.5.57, FBUP_MID_REF 0a84917a unless FBUP_SKIP_MID=1, and this checkout; FBUP_REQUIRE_REUSE defaults to 1)
+# output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; FBUP_REQUIRE_REUSE=0 does not require the reused first-stint name (plain still asserts the chain, a continuous window, and a checksum match); object-only creates the task with local_retention_days 1 and bucket_retention_days 30, moves A's first-stint mysql-bin.00000N off disk (mv) so only its MinIO object holds it (Start must fetch it back), and after the repaired restore runs D2: FLUSH BINARY LOGS on A sets a sealed boundary, every segment before it must be SEALED and UPLOADED, the product's split retention (files aged 2 days, then another rotation) removes them from disk, 30 more transactions go to the local open segment only, then /replay must mark each removed segment bucket, /replay/archive must issue at least one MinIO GetObject per removed object key (mc admin trace) and return the removed bytes, no byte-identical copy may exist under data_dir (dot dirs included), the server TMPDIR ($FBUP_WORK/tmp) or newer /tmp files after the archive read and after the restore, the bucket members alone must restore A's CHECKSUM TABLE and gtid_executed at the boundary, and the local post-boundary members on top must reach A's final checksum; object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
+# pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1), the object-only restore (D2), and an in-place upgrade from the latest release; not in any run-suite.sh profile; e2e.yml e2e-upgrade-failback runs plain, object-only, and object-gone from v0.5.57, plus plain from v0.5.82 (FBUP_SKIP_MID=1, FBUP_REQUIRE_REUSE=0), on every PR and alone for e2e_profile=upgrade-failback
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
 
@@ -52,11 +52,17 @@ build_ref() {
   git -C "$ROOT_DIR" worktree remove --force "$src" >/dev/null 2>&1 || true
 }
 
+OLD_REF="${FBUP_OLD_REF:-v0.5.57}"
+MID_REF="${FBUP_MID_REF:-0a84917a}"
+SKIP_MID="${FBUP_SKIP_MID:-0}"
+REQUIRE_REUSE="${FBUP_REQUIRE_REUSE:-1}"
+case "$SKIP_MID" in 0|1) ;; *) echo "FBUP_SKIP_MID must be 0 or 1" >&2; exit 2 ;; esac
+case "$REQUIRE_REUSE" in 0|1) ;; *) echo "FBUP_REQUIRE_REUSE must be 0 or 1" >&2; exit 2 ;; esac
 OLD_BIN="${FBUP_OLD_BIN:-}"
 MID_BIN="${FBUP_MID_BIN:-}"
 NEW_BIN="${FBUP_NEW_BIN:-}"
-if [[ -z "$OLD_BIN" ]]; then OLD_BIN="$WORK/bin/old"; build_ref v0.5.57 "$OLD_BIN"; fi
-if [[ -z "$MID_BIN" ]]; then MID_BIN="$WORK/bin/mid"; build_ref 0a84917a "$MID_BIN"; fi
+if [[ -z "$OLD_BIN" ]]; then OLD_BIN="$WORK/bin/old"; build_ref "$OLD_REF" "$OLD_BIN"; fi
+if [[ "$SKIP_MID" != 1 && -z "$MID_BIN" ]]; then MID_BIN="$WORK/bin/mid"; build_ref "$MID_REF" "$MID_BIN"; fi
 if [[ -z "$NEW_BIN" ]]; then NEW_BIN="$WORK/bin/new"; (cd "$ROOT_DIR" && go build -o "$NEW_BIN" ./cmd/binlog-server) || die "build new"; fi
 MIGRATE="${FBUP_MIGRATE:-$OLD_BIN-migrate}"
 [[ -x "$MIGRATE" ]] || MIGRATE=""
@@ -520,7 +526,7 @@ object_only_restore() {
 }
 # --- object-only (D2) end
 
-log "=== OLD build: $OLD_BIN"
+log "=== OLD build: $OLD_BIN ($OLD_REF skip_mid=$SKIP_MID require_reuse=$REQUIRE_REUSE)"
 start_server "$OLD_BIN" old
 # object-only removes local files through split retention (local 1 day,
 # bucket 30 days): nothing is old enough until the D2 step ages it.
@@ -558,19 +564,33 @@ log "OLD after restart: $(curl -fsS "$API/api/tasks/$TASK" | jq -c '{state,last_
 snapshot "OLD after restart"
 stop_server
 
-log "=== MID build: $MID_BIN"
-start_server "$MID_BIN" mid
-sleep 10
-log "MID: $(curl -fsS "$API/api/tasks/$TASK" | jq -c '{state,last_error}')"
-snapshot "MID"
-stop_server
+if [[ "$SKIP_MID" != 1 ]]; then
+  log "=== MID build: $MID_BIN ($MID_REF)"
+  start_server "$MID_BIN" mid
+  sleep 10
+  log "MID: $(curl -fsS "$API/api/tasks/$TASK" | jq -c '{state,last_error}')"
+  snapshot "MID"
+  stop_server
+fi
 
-# A's first-stint file whose name the third stint took.
-FIRST="$(cd "$DATA/$TASK" && ls | grep -E '^mysql-bin\.[0-9]+\.(sealed|open)\.e1$' | sed -E 's/\.(sealed|open)\.e1$//' | sort -u | head -1)"
-[[ -n "$FIRST" && -f "$DATA/$TASK/$FIRST" ]] || die "no reused first-stint name in $DATA/$TASK"
-FIRST_KEY="$(mcx find fbup/fbup --name "$FIRST" 2>/dev/null | grep "/$UUID_A/$FIRST\$" | head -1 || true)"
-log "first stint file $FIRST object ${FIRST_KEY:-none}"
-FIRST_MD5="$(md5sum "$DATA/$TASK/$FIRST" | awk '{print $1}')"
+# A's first-stint file whose name the third stint took. v0.5.57 reuses that
+# name; a current release (FBUP_REQUIRE_REUSE=0) does not, and plain upgrade
+# still has to resume.
+FIRST=""
+FIRST_KEY=""
+FIRST_MD5=""
+FIRST="$(cd "$DATA/$TASK" && { ls | grep -E '^mysql-bin\.[0-9]+\.(sealed|open)\.e1$' || true; } | sed -E 's/\.(sealed|open)\.e1$//' | sort -u | head -1)"
+if [[ -n "$FIRST" && -f "$DATA/$TASK/$FIRST" ]]; then
+  FIRST_KEY="$(mcx find fbup/fbup --name "$FIRST" 2>/dev/null | grep "/$UUID_A/$FIRST\$" | head -1 || true)"
+  FIRST_MD5="$(md5sum "$DATA/$TASK/$FIRST" | awk '{print $1}')"
+  log "first stint file $FIRST object ${FIRST_KEY:-none}"
+else
+  FIRST=""
+  log "no reused first-stint name in $DATA/$TASK"
+fi
+if [[ "$REQUIRE_REUSE" == 1 ]]; then
+  [[ -n "$FIRST_MD5" ]] || die "no reused first-stint name in $DATA/$TASK"
+fi
 if [[ "$CASE" != plain ]]; then
   [[ -n "$FIRST_KEY" ]] || die "OLD never uploaded $FIRST"
   mv "$DATA/$TASK/$FIRST" "$OUT/$FIRST.removed"
@@ -659,8 +679,12 @@ case "$EXPECT" in
     jq -e '.warning == null or .warning == ""' "$OUT/new-replay-after.json" >/dev/null || die "replay warning after repair"
     [[ "$apply_rc" == 0 && -n "$want_sum" && "$want_sum" == "$got_sum" ]] || die "restore checksum A=$want_sum restore=$got_sum rc=$apply_rc"
     jq -e '.continuous == true' "$OUT/new-window-after.json" >/dev/null || die "window not continuous after repair"
-    [[ "$(md5sum "$DATA/$TASK/$FIRST" | awk '{print $1}')" == "$FIRST_MD5" ]] || die "$FIRST on disk after repair differs from the first stint"
-    log "evidence: repaired chain $(paste -sd, "$DATA/$TASK/.source-chain") $FIRST md5 $FIRST_MD5 checksum $got_sum matches A"
+    if [[ -n "$FIRST_MD5" ]]; then
+      [[ "$(md5sum "$DATA/$TASK/$FIRST" | awk '{print $1}')" == "$FIRST_MD5" ]] || die "$FIRST on disk after repair differs from the first stint"
+      log "evidence: repaired chain $(paste -sd, "$DATA/$TASK/.source-chain") $FIRST md5 $FIRST_MD5 checksum $got_sum matches A"
+    else
+      log "evidence: repaired chain $(paste -sd, "$DATA/$TASK/.source-chain") checksum $got_sum matches A (upgrade from $OLD_REF, no legacy name reuse)"
+    fi
     if [[ "$CASE" == object-only ]]; then
       object_only_restore
     fi
