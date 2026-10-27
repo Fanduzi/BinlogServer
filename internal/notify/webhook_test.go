@@ -1,6 +1,6 @@
 // Package notify posts health and finding events to one generic webhook.
 // input: an httptest server that records POSTs
-// output: proof of a JSON delivery with the token header, a retry after 500, and no retry after 400
+// output: proof of a JSON delivery with the token header, a retry after 500, no retry after 400, and no token on a redirect to another host
 // pos: F2 webhook tests
 // note: if this file changes, update this header and module README.md.
 package notify
@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -91,5 +92,43 @@ func TestWebhookDoesNotRetryClientError(t *testing.T) {
 	}})
 	if err == nil || n != 1 {
 		t.Fatalf("err=%v posts=%d", err, n)
+	}
+}
+
+// TestWebhookDoesNotForwardTokenOnRedirect is the redirect guard: a 302 to
+// another host must not carry X-BinlogServer-Token. The default client would
+// follow the redirect and copy that header; CheckRedirect stops it.
+func TestWebhookDoesNotForwardTokenOnRedirect(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var token, auth string
+	var hits int
+	other := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		token = r.Header.Get("X-BinlogServer-Token")
+		auth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	other.Listener = ln
+	other.Start()
+	defer other.Close()
+
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer src.Close()
+
+	_ = (Webhook{URL: src.URL, Token: "sekrit", Timeout: time.Second, Attempts: 1}).Post(context.Background(), []Event{{
+		Type: "health", TaskID: "7", Status: "UNHEALTHY", At: time.Now().UTC(),
+	}})
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 || token != "" || auth != "" {
+		t.Fatalf("token forwarded to %s: hits=%d token=%q authorization=%q", other.URL, hits, token, auth)
 	}
 }

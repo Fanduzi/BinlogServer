@@ -122,3 +122,96 @@ tests:
               task_id: stale
             exp_annotations:
               summary: "task stale last verified more than 48h ago"
+
+  # One firing sample for each legacy rule that the cases above do not cover.
+  - interval: 1m
+    input_series:
+      - series: 'binlog_server_replication_lag_seconds{task_id="9"}'
+        values: '60x20'
+      - series: 'binlog_server_source_switchovers{task_id="9",outcome="stopped"}'
+        values: '1x20'
+      - series: 'binlog_server_source_switchovers{task_id="4",outcome="continued"}'
+        values: '1x20'
+      - series: 'binlog_server_checkpoint_age_seconds{task_id="9"}'
+        values: '400x20'
+      - series: 'binlog_server_task_state_count{state="FAILED"}'
+        values: '1x20'
+      - series: 'binlog_server_worker_online{worker_id="w1"}'
+        values: '0x20'
+      - series: 'binlog_server_upload_failures_total'
+        values: '1x20'
+      - series: 'binlog_server_upload_retry_total{result="failed"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TaskHighLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              task_id: "9"
+            exp_annotations:
+              summary: "task 9 has high replication lag"
+      - eval_time: 2m
+        alertname: SourceSwitchStopped
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              task_id: "9"
+              outcome: stopped
+            exp_annotations:
+              summary: "task 9 stopped on a source switchover"
+      - eval_time: 1m
+        alertname: SourceSwitchContinued
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              task_id: "4"
+              outcome: continued
+            exp_annotations:
+              summary: "task 4 continued after a source switchover"
+      - eval_time: 6m
+        alertname: TaskCheckpointStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              task_id: "9"
+            exp_annotations:
+              summary: "task 9 checkpoint is stale"
+      - eval_time: 2m
+        alertname: TaskInFailedState
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              state: FAILED
+            exp_annotations:
+              summary: "a task is in FAILED state"
+      - eval_time: 2m
+        alertname: NoActiveWorkers
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "no active workers in the cluster"
+      - eval_time: 3m
+        alertname: WorkerOffline
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              worker_id: w1
+            exp_annotations:
+              summary: "worker w1 is offline"
+      - eval_time: 6m
+        alertname: UploadFailuresExist
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "upload failures exist"
+      - eval_time: 10m
+        alertname: UploadRetryFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              result: failed
+            exp_annotations:
+              summary: "upload retry is failing"
