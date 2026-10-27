@@ -361,19 +361,22 @@ for at in "${INSIDE_AT[@]}"; do assert_time inside "$at"; done
 for at in "${OUTSIDE_AT[@]}"; do assert_time outside "$at"; done
 for at in "${BOUNDARY_AT[@]}"; do assert_time boundary "$at"; done
 
-mapfile -t GTIDS < <(awk -F '\t' '$5 != "" { print $1 "\t" $2 "\t" $3 "\t" $5 }' "$WORKDIR/events.tsv")
+# mysqlbinlog appends SET GTID_NEXT='AUTOMATIC' after the last event. That is not a transaction.
+TX_GTID='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9]+$'
+mapfile -t GTIDS < <(awk -F '\t' -v re="$TX_GTID" '$5 ~ re { print $1 "\t" $2 "\t" $3 "\t" $5 }' "$WORKDIR/events.tsv")
 [[ "${#GTIDS[@]}" -ge 20 ]] || fail "need 20 GTID events, got ${#GTIDS[@]}"
 
 INSIDE_G=()
 BOUNDARY_G=()
 for base in "${DATA_FILES[@]}"; do
-  mapfile -t rows < <(awk -F '\t' -v b="$base" '$5 != "" && $1 == b { print $5 }' "$WORKDIR/events.tsv")
-  [[ "${#rows[@]}" -ge 4 ]] || fail "$base has ${#rows[@]} gtids"
+  mapfile -t rows < <(awk -F '\t' -v b="$base" -v re="$TX_GTID" '$1 == b && $5 ~ re && !seen[$5]++ { print $5 }' "$WORKDIR/events.tsv")
+  [[ "${#rows[@]}" -ge 4 ]] || fail "$base has ${#rows[@]} gtids: ${rows[*]:-none}"
   BOUNDARY_G+=("${rows[0]}" "${rows[${#rows[@]}-1]}")
   INSIDE_G+=("${rows[1]}" "${rows[2]}")
 done
 [[ "${#INSIDE_G[@]}" -eq 10 && "${#BOUNDARY_G[@]}" -eq 10 ]] || fail "gtid case count"
-[[ "$(printf '%s\n' "${INSIDE_G[@]}" "${BOUNDARY_G[@]}" | sort -u | wc -l | tr -d ' ')" == "20" ]] || fail "gtid cases are not 20 distinct values"
+distinct_g="$(printf '%s\n' "${INSIDE_G[@]}" "${BOUNDARY_G[@]}" | sort -u | wc -l | tr -d ' ')"
+[[ "$distinct_g" == "20" ]] || fail "gtid cases are not 20 distinct values (${distinct_g}): $(printf '%s\n' "${INSIDE_G[@]}" "${BOUNDARY_G[@]}" | sort | uniq -c | awk '$1>1')"
 
 uuid="${INSIDE_G[0]%%:*}"
 min_seq=999999999
@@ -395,8 +398,8 @@ done
 
 oracle_gtid() {
   local gtid="$1"
-  awk -F '\t' -v g="$gtid" '
-    $5 != "" {
+  awk -F '\t' -v g="$gtid" -v re="$TX_GTID" '
+    $5 ~ re {
       if ($5 == g) { file=$1; hit=1; nextpos="" }
       else if (hit && nextpos == "" && $1 == file) { nextpos=$2 }
     }
