@@ -12,6 +12,28 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.82] - 2026-10-27
+
+发布说明：`docs/releases/v0.5.82.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `notify.webhook_url`、`notify.webhook_token`、`notify.timeout_sec`、`notify.attempts`、`notify.backoff_ms`。`health.evaluator` 默认仍是 `off`。
+
+### Added
+
+- `/metrics` 增加 `binlog_server_task_healthy{task_id,reason}`、`binlog_server_task_progress_age_seconds`、`binlog_server_task_upload_lag_seconds`、`binlog_server_task_open_critical`（#545，ADR 0013）。只由正在评估该任务的节点输出；没有样本时输出哨兵 `{task_id="",reason="ok"} 1`，`== 0` 在评估器关闭时不响。
+- 推荐告警规则 `deploy/prometheus/binlog-server-alerts.yml`，16 条规则都有 promtool 用例；新 CI job `promtool` 每个 PR 跑 `promtool test rules`。
+- 通用 JSON webhook（`notify.*`）：健康状态变化和 CRITICAL finding 的 OPEN、CLOSE、ESCALATE 才发，首次 HEALTHY 只记基线，稳态不重发；传输错误、5xx、429 用同一个投递 id 重试；不跟随重定向；失败的一批留在内存里下一轮再送。
+
+### Fixed
+
+- META_UNREACHABLE：meta 中断期间开始、在第一次成功应答之后才落地的 findings 读取不再重开连续计数（#545）。
+
+### Upgrade notes
+
+- 要按任务分页，设 `health.evaluator: on` 并加载 `deploy/prometheus/binlog-server-alerts.yml`，抓取每一个节点。`BinlogProcessDown` 的 `job="binlog-server"` 要和 Prometheus 的 `job_name` 一致。
+
+### Known issues
+
+- #549（`cluster.role: worker` 没有 `/metrics`），#550、#551（P3）。#541、#540、#386（P3），#510，#473（P1），#462（P1），#513（P2），#539。#514、#512、#494、#500、#502、#503、#487、#488、#451、#452、#455、#456、#446、#437、#438 仍未关闭。
+
 ## [v0.5.81] - 2026-10-27
 
 发布说明：`docs/releases/v0.5.81.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。
