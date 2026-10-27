@@ -12,6 +12,23 @@ Maintenance rules:
 
 ## [Unreleased]
 
+## [v0.5.83] - 2026-10-27
+
+发布说明：`docs/releases/v0.5.83.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。
+
+### Added
+
+- 支持 MySQL 8.4 LTS（#555，D4）：按 `VERSION()` 选 binlog 状态语句，MySQL 8.4 及以上用 `SHOW BINARY LOG STATUS`，更早的 MySQL 和 MariaDB 用 `SHOW MASTER STATUS`；失败时回退其它已知写法，成功的语句按 `host:port` 记住。8.4 上 LATEST 启动和追平检查不再以 `ERROR 1064` 失败。
+- CI：`mysql:8.4` 进 e2e 矩阵；quick profile 新增 `smoke-version-restore.sh`，把 5.7 和 8.4 的备份恢复到新实例并比对 `CHECKSUM TABLE`。`e2e-upgrade-failback` 每个 PR 跑四档，包括从 v0.5.82 原地升级（#557，E2）。
+
+### Fixed
+
+- 在线 `migrate up` 到 000010 之后，同一进程已按保留策略删掉的行在下一轮补上 `retention_removed_at`，不再写第二条 `RETENTION_REMOVED`（#437，#557）。
+
+### Known issues
+
+- #559（P3，两个 standalone 共用一个 `meta_dsn` 会互传封存段），#558（P4），#556、#550、#551、#440（P3），#549（`cluster.role: worker` 没有 `/metrics`）。#541、#540、#386（P3），#510，#473（P1），#462（P1），#513（P2），#539。#514、#512、#494、#500、#502、#503、#487、#488、#451、#452、#455、#456、#446、#438 仍未关闭。
+
 ## [v0.5.82] - 2026-10-27
 
 发布说明：`docs/releases/v0.5.82.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6）。新增可选配置项 `notify.webhook_url`、`notify.webhook_token`、`notify.timeout_sec`、`notify.attempts`、`notify.backoff_ms`。`health.evaluator` 默认仍是 `off`。
