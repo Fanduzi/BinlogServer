@@ -38,6 +38,25 @@ services:
       - ./my.cnf/base.cnf:/etc/mysql/conf.d/00-base.cnf:ro
       - ./my.cnf/mysql80.cnf:/etc/mysql/conf.d/10-service.cnf:ro
 
+  mysql84:
+    image: mysql:8.4
+    container_name: binlog-e2e-mysql84
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: UTC
+    ports:
+      - "${E2E_MYSQL84_PORT:-13310}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ./init/00-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./my.cnf/base.cnf:/etc/mysql/conf.d/00-base.cnf:ro
+      - ./my.cnf/mysql84.cnf:/etc/mysql/conf.d/10-service.cnf:ro
+
   percona57:
     image: percona/percona-server:5.7
     platform: linux/amd64

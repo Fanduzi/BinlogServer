@@ -248,12 +248,19 @@ func countEventTypes(t *testing.T, path string) map[goreplication.EventType]int 
 }
 
 func masterStatus(db *sql.DB, file *string, pos *uint32) error {
-	rows, err := db.Query(`SHOW MASTER STATUS`)
-	if err != nil {
-		rows, err = db.Query(`SHOW BINARY LOG STATUS`)
-		if err != nil {
-			return err
+	var version string
+	_ = db.QueryRow(`SELECT VERSION()`).Scan(&version)
+	var rows *sql.Rows
+	var err error
+	for _, stmt := range binaryLogStatusStatements(version) {
+		rows, err = db.Query(stmt)
+		if err == nil {
+			break
 		}
+		rows = nil
+	}
+	if err != nil {
+		return err
 	}
 	defer rows.Close()
 	if !rows.Next() {

@@ -41,7 +41,7 @@ BinlogServer 将这些痛点彻底收敛为标准的控制面基础设施：
 - **无虚假乐观进度：** Checkpoint 位点严格在本地文件 `fsync` 刷盘成功后方才推进。
 - **解耦异步归档：** 远端 S3 / MinIO 对象存储的抖动、限流或不可用，绝不反压阻断本地核心 binlog 复制流。
 - **集群租约故障自愈：** 基于 MySQL 元数据表的排他分布式租约，确保同一任务在任意时刻仅有一个 Worker 执行拉取，节点崩溃自动心跳超时接管。
-- **生产透明可观测：** 内嵌运维 Web 控制台、交互式 Swagger API 与 Prometheus `/metrics`，延迟计算直接对比源库 `SHOW MASTER STATUS` / `SHOW BINLOG STATUS` 实时位点。
+- **生产透明可观测：** 内嵌运维 Web 控制台、交互式 Swagger API 与 Prometheus `/metrics`，延迟计算直接对比源库 `SHOW MASTER STATUS` / `SHOW BINARY LOG STATUS`（MySQL 8.4+）/ `SHOW BINLOG STATUS`（MariaDB）实时位点。
 
 ### 控制台与运维界面预览
 
@@ -64,7 +64,7 @@ BinlogServer 将这些痛点彻底收敛为标准的控制面基础设施：
 | **解耦异步归档** | S3 / MinIO 上传逻辑完全异步执行。上传遇到网络波动或对象存储故障时自动退避重试，并提供 API 与界面补传入口。 | 任何云存储服务故障或限流，绝不会牵连本地拉流核心链路，保障源库 binlog 持续快速腾挪。 |
 | **集群租约与防脑裂** | 基于独立元数据 MySQL 的分布式行级排他租约，并配合心跳持续续租。 | 杜绝多个节点同时拉取同一源库导致文件覆盖与网络浪费；Worker 故障停机后，其余健康节点在租约过期后自动竞态接管。 |
 | **严密 Fail-Closed 安全机制** | 非 Loopback 开放监听端口强制开启鉴权。设置 `PRODUCTION=true` 时，若未提供 32 字节 AES 密钥（`--encryption-key`）直接拒绝监听启动。 | 源库连接口令在元数据库中强制以 AES-256-GCM（`enc:aes256:`）密文存储；杜绝无认证控制面被暴露到公网。 |
-| **真实主库位点延迟** | 复制延迟计算直接比对源库当前的 `SHOW MASTER STATUS` 真实位点，而非仅参考 Binlog 事件 Header 中的历史时间戳。 | 彻底规避业务空闲期、夜间低峰期由时间戳静止引发的“虚假零延迟”或误告警。 |
+| **真实主库位点延迟** | 复制延迟计算直接比对源库当前位点（MySQL 8.4 起为 `SHOW BINARY LOG STATUS`，更早版本为 `SHOW MASTER STATUS`），而非仅参考 Binlog 事件 Header 中的历史时间戳。 | 彻底规避业务空闲期、夜间低峰期由时间戳静止引发的“虚假零延迟”或误告警。 |
 
 ---
 
@@ -90,7 +90,7 @@ BinlogServer 提供三种灵活的运行形态，完美契合不同规模与可�
 ### 前置条件
 
 - 从 [GitHub Releases](https://github.com/Fanduzi/BinlogServer/releases) 下载匹配当前操作系统与 CPU 架构的发布包。
-- 一台已启用 `log_bin=ON`、`binlog_format=ROW` 的 MySQL 或 MariaDB 源库，并创建复制账号（`GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.*`）。MariaDB 必须提交 `"flavor":"mariadb"`。`mysql` 会去读 `@@server_uuid`，MariaDB 没有这个变量。
+- 一台已启用 `log_bin=ON`、`binlog_format=ROW` 的 MySQL 或 MariaDB 源库，并创建复制账号（`GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.*`）。支持 MySQL 5.7、8.0、8.4 LTS，以及 MariaDB 10.3+（CI 在 11.4 上还原）。MariaDB 必须提交 `"flavor":"mariadb"`。`mysql` 会去读 `@@server_uuid`，MariaDB 没有这个变量。
 
 > ⚠️ **元数据库隔离红线：** 配置 `meta_dsn` 时，该 MySQL 实例必须独立部署，且**绝对不能**加入到备份任务集中。服务在启动与创建任务时会强校验 TCP `host:port` 与 Loopback 别名（`localhost`、`127/8`、`::1`），防止自引用死锁。
 

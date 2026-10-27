@@ -15,9 +15,10 @@ import (
 	"binlog_server/internal/tasks"
 )
 
-// MasterStatus 对应源库 SHOW MASTER STATUS 返回的位点。
+// MasterStatus 是源库当前 binlog 文件和位点。
+// MySQL 8.4 起这条信息来自 SHOW BINARY LOG STATUS；更早的 MySQL 和 MariaDB 仍是 SHOW MASTER STATUS。
 type MasterStatus struct {
-	// File/Pos 对应 SHOW MASTER STATUS 的当前位点。
+	// File/Pos 是当前 binlog 文件和位点。
 	File string
 	Pos  uint32
 }
