@@ -68,7 +68,7 @@ bundle: {url}
 
 - 真实 MySQL 8.0 分段。用 `mysqlbinlog` 独立解析事件头时间和 `GTID_NEXT`，不读本服务的 `/window`。
 - 窗口内、窗口外、段边界上，时间和 GTID 各 10 例。`covered`、分段名顺序、`stop_at.pos` 与该解析一致。
-- 按还原计划的 `restore_sh` 对 5 个时间点回放到空实例，`CHECKSUM TABLE` 与写入当时的源库一致。
+- 按还原计划的 `restore_sh` 对 5 个时间点回放到空实例，`CHECKSUM TABLE` 与写入当时的源库一致。插入的事件头时间取源库时钟 120 秒之后，使 `--stop-datetime` 晚于格式描述；停在文件头上时 mysqlbinlog 不会写出这些行。
 - 全量备份 GTID 有洞或与将应用的事务重叠时，`full_backup_gtid` 预检为红。
 
 单测覆盖：不截断（250 段）、断点前后、预检红/绿、集群 501、跨任务查询。

@@ -2,7 +2,7 @@
 # input: mysql80 with GTID on, the suite API, the task data directory, and the Percona 8.0 mysqlbinlog client
 # output: coverage answers for 10 inside, 10 outside, and 10 boundary cases of both time and GTID that match an independent mysqlbinlog parse; five point-in-time restores whose CHECKSUM TABLE matches the source; a red full-backup precheck for a hole and for an overlap
 # pos: CI proof for ADR 0009 phases 4 and 5 (production-readiness D3)
-# note: if this file changes, update this header and scripts/e2e/README.md.
+# note: if this file changes, update this header and scripts/e2e/README.md. Insert timestamps are 120 seconds after the source clock so mysqlbinlog --stop-datetime does not stop on the format description.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -11,7 +11,6 @@ source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
 API="${E2E_API:-http://127.0.0.1:18080}"
 RUN_TAG="$(date +%s)"
 DB="binlog_cov_${RUN_TAG}"
-BASE=1704067200
 RESTORE="binlog-e2e-coverage"
 WORKDIR="$(mktemp -d)"
 
@@ -226,6 +225,11 @@ wait_gtid "$before"
 
 declare -a POINT_SUMS=()
 declare -a POINT_AT=()
+# A stop second in 2024 is before the format description, and mysqlbinlog
+# stops on that header and applies no rows. Stamp the inserts after the
+# source clock, as smoke-gtid-executed does.
+BASE="$(mysql80 "SELECT UNIX_TIMESTAMP();")"
+BASE=$((BASE + 120))
 n=0
 for seg in 1 2 3 4 5; do
   for j in 1 2 3 4; do
@@ -481,7 +485,8 @@ for at in "${POINT_AT[@]}"; do
   fi
   rm -f "$log"
   got="$(docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "CHECKSUM TABLE ${DB}.t" | awk '{ print $2 }' | tr -d '\r')"
-  [[ "$got" == "${POINT_SUMS[$i]}" ]] || fail "checksum at $at got $got want ${POINT_SUMS[$i]}"
+  rows="$(docker exec "$RESTORE" mysql -uroot -proot -h127.0.0.1 --protocol=tcp -Nse "SELECT COUNT(*) FROM ${DB}.t" | tr -d '\r')"
+  [[ "$got" == "${POINT_SUMS[$i]}" ]] || fail "checksum at $at got $got want ${POINT_SUMS[$i]} rows=$rows"
   echo "[coverage] restore $at checksum $got"
   i=$((i + 1))
 done
