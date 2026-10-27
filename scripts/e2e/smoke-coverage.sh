@@ -300,17 +300,16 @@ done
 oracle_time() {
   local at="$1"
   awk -F '\t' -v at="$at" '
-    $6 == 1 && $4 != "" && $4 <= at { file=$1; pos=$3; names[$1]=1; seen=1 }
-    $6 == 1 && $4 != "" { if (earliest == "" || $4 < earliest) earliest=$4; if ($4 > latest) latest=$4 }
+    $6 == 1 && $4 != "" {
+      if (earliest == "" || $4 < earliest) earliest = $4
+      if (latest == "" || $4 > latest) latest = $4
+      if ($4 <= at) { file = $1; pos = $3; seen = 1 }
+    }
     END {
-      if (!seen) {
-        if (at < earliest) print "0\tbefore earliest"
-        else print "0\tafter latest"
-        exit
-      }
-      printf "1\t%s\t%s", file, pos
-      # prefix is filled by the caller from the chain
-      printf "\n"
+      if (earliest == "" || at < earliest) { print "0\tbefore earliest"; exit }
+      if (at > latest) { print "0\tafter latest"; exit }
+      if (!seen) { print "0\tbefore earliest"; exit }
+      printf "1\t%s\t%s\n", file, pos
     }
   ' "$WORKDIR/events.tsv"
 }
