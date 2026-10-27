@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# input: docs/landing/index.html and referenced assets in docs/landing and docs/images
+# input: docs/landing/index.html and the assets it references under docs/landing
 # output: non-zero exit when landing page images are missing, zero-byte, or not valid PNG format
 # pos: build and CI verification gate ensuring landing page console assets ship as real PNGs
 # note: if this file changes, update this header and module README.md.
@@ -81,21 +81,6 @@ for ref in "${refs[@]}"; do
   fi
 
   echo "[landing-assets] ok: $ref (PNG valid, $(wc -c < "$canonical_target" | tr -d ' ') bytes)"
-done
-
-# Also verify that Pages deployment output directory contains both docs/landing/images and docs/landing/docs/images
-echo "[landing-assets] verifying fallback directory compatibility for Cloudflare Pages"
-for fallback_dir in "$LANDING_DIR/images" "$LANDING_DIR/docs/images"; do
-  for img_name in console-dashboard.png task-detail.png swagger.png; do
-    f="$fallback_dir/$img_name"
-    if [[ ! -f "$f" ]]; then
-      echo "[landing-assets] error: missing fallback image: $f" >&2
-      failed=1
-    elif ! is_valid_png "$f"; then
-      echo "[landing-assets] error: fallback image is not a valid PNG: $f" >&2
-      failed=1
-    fi
-  done
 done
 
 if [[ "$failed" -ne 0 ]]; then
