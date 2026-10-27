@@ -1,0 +1,45 @@
+{
+  "limits": {
+    "file_lines": 800,
+    "growth_tolerance_lines": 20,
+    "complexity": 40
+  },
+  "oversized_files": {
+    "internal/api/handlers_tasks.go": 1695,
+    "internal/app/app.go": 1530,
+    "internal/assurance/chain.go": 910,
+    "internal/assurance/mutants/kill.go": 897,
+    "internal/assurance/verify.go": 1825,
+    "internal/config/config.go": 1154,
+    "internal/meta/health_store.go": 901,
+    "internal/meta/mysql_store.go": 1994,
+    "internal/ownership/step.go": 828,
+    "internal/replication/mysql_runner.go": 3592,
+    "internal/tasks/evaluator.go": 1697,
+    "internal/tasks/finding.go": 1053,
+    "internal/tasks/legacy_failback.go": 1028,
+    "internal/tasks/scheduler.go": 1069,
+    "internal/tasks/scheduler_lifecycle.go": 1631,
+    "internal/tasks/verifier.go": 837
+  },
+  "complex_functions": {
+    "internal/api:Server.handleTaskAction": 54,
+    "internal/app:App.Run": 80,
+    "internal/assurance:Chain.CheckBody": 42,
+    "internal/assurance:closes": 56,
+    "internal/binlog:ScanOpenTail": 43,
+    "internal/health:CanonicalGTIDRanges": 41,
+    "internal/healthstore/storetest:Run": 59,
+    "internal/ownership:CheckStep": 70,
+    "internal/replication:MySQLRunner.enrollSealedUploads": 52,
+    "internal/replication:MySQLRunner.resolveRunStart": 46,
+    "internal/tasks:Evaluator.evaluate": 51,
+    "internal/tasks:Scheduler.runTask": 68,
+    "internal/tasks:Scheduler.settleForeignStop": 50,
+    "internal/tasks:Scheduler.startTask": 103,
+    "internal/tasks:planLegacyFailback": 71,
+    "internal/tasks:planStoredHole": 42
+  },
+  "issue_refs": 923,
+  "deadcode": 148
+}
