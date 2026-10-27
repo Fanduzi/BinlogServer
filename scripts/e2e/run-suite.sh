@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: local tooling, canonical E2E database topology, scenarios, and profile selection
-# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process (also passed with the server log and metadata DSN to the scenarios that restart it: smoke-unreachable-giveup and smoke-gtid-redump). quick includes smoke-version-restore (MySQL 5.7 and 8.4 LTS checksum restore)
+# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process (also passed with the server log and metadata DSN to the scenarios that restart it: smoke-unreachable-giveup and smoke-gtid-redump). quick includes smoke-version-restore (MySQL 5.7 and 8.4 LTS checksum restore). smoke-coverage compares /coverage and /restore-plan with mysqlbinlog
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -51,6 +51,7 @@ Scenarios:
   smoke-control-loop
   smoke-gtid-purge
   smoke-gtid-pitr
+  smoke-coverage
   smoke-gtid-executed
   smoke-source-switchover
   smoke-recovery-window
@@ -242,6 +243,9 @@ run_scenario() {
       ;;
     smoke-gtid-pitr)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-pitr.sh"
+      ;;
+    smoke-coverage)
+      E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-coverage.sh"
       ;;
     smoke-recovery-window)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-recovery-window.sh"
