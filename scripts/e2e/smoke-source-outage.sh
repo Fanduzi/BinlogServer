@@ -57,12 +57,12 @@ restore_mysql80() {
 }
 trap restore_mysql80 EXIT
 
+# The suite server's PID from run-suite.sh; never a name match, which could
+# pause another run's server on a shared host.
 server_pid() {
   if [[ -n "${E2E_SERVER_PID:-}" ]] && kill -0 "$E2E_SERVER_PID" 2>/dev/null; then
     printf '%s' "$E2E_SERVER_PID"
-    return
   fi
-  pgrep -n -f 'binlog-server-e2e' || true
 }
 
 task_json() {
@@ -261,7 +261,7 @@ for n in $(seq 1 "$RESTARTS"); do
   if [[ "$n" == "$RESTARTS" ]]; then
     PAUSED_PID="$(server_pid)"
     if [[ -z "$PAUSED_PID" ]]; then
-      echo "binlog-server pid not found; cannot insert while the dump is paused" >&2
+      echo "E2E_SERVER_PID is not a live binlog-server (run this scenario through run-suite.sh); cannot insert while the dump is paused" >&2
       exit 1
     fi
     kill -STOP "$PAUSED_PID"

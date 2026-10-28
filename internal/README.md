@@ -1,7 +1,7 @@
 # internal Module
 
 ## Files
-- `api`, `app`, `assurance`, `health`, `healthstore`, `binlog`, `config`, `logging`, `meta`, `ownership`, `replication`, `tasks`, `upload`, `ui`, `swaggerdocs`。
+- `api`, `app`, `assurance`, `health`, `healthstore`, `binlog`, `config`, `logging`, `meta`, `ownership`, `replication`, `tasks`, `upload`, `ui`, `swaggerdocs`，以及发版门禁 `releaseprep`（`cmd/release-check` 调它的 `Main`；它的发布面清单 `Surfaces` 也被 `config` 的版本 pin 测试读取）。
 
 ## Exports
 - 对外由 `cmd/*` 调用，不直接暴露给仓库外部导入。

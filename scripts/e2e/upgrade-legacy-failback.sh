@@ -27,6 +27,10 @@ OUT="$WORK/out"
 SERVER_TMP="$WORK/tmp"
 mkdir -p "$SERVER_TMP"
 SERVER_PID="" PROXY_PID="" TRACE_PID=""
+# Every server PID this run started, so cleanup kills only its own processes
+# (never a pattern match: other runs on a shared host use the same command line).
+SERVER_PIDFILE="$WORK/server.pids"
+: >"$SERVER_PIDFILE"
 
 log() { echo "[fbup] $*"; }
 die() { echo "[fbup] FAIL: $*" >&2; exit 1; }
@@ -35,7 +39,10 @@ cleanup() {
   # The object-only mc trace runs until killed; wait below would hang on it.
   [[ -n "$TRACE_PID" ]] && kill "$TRACE_PID" 2>/dev/null || true
   [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
-  pkill -f -- "-c $WORK/config.yaml" 2>/dev/null || true
+  local pid
+  while read -r pid; do
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  done <"$SERVER_PIDFILE"
   [[ -n "$PROXY_PID" ]] && kill "$PROXY_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   docker rm -f -v "$C_META" "$C_A" "$C_B" "$C_RESTORE" "$C_S3" >/dev/null 2>&1 || true
@@ -251,6 +258,7 @@ start_server() {
   # running and the next build's health check reaches the old process.
   (cd "$ROOT_DIR" && exec env -u BINLOG_SERVER_META_DSN TMPDIR="$SERVER_TMP" "$bin" -c "$WORK/config.yaml" --encryption-key 0123456789abcdef0123456789abcdef >>"$OUT/server-$tag.out" 2>&1) &
   SERVER_PID=$!
+  echo "$SERVER_PID" >>"$SERVER_PIDFILE"
   local i
   for i in $(seq 1 60); do
     if curl -fsS "$API/api/tasks" >/dev/null 2>&1; then log "server $tag up pid=$SERVER_PID"; return 0; fi

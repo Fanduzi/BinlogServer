@@ -1,7 +1,7 @@
 // Package config provides module-level functionality for config.
-// input: quoted YAML keys in config.go, docs/guide/admin/configuration.md, and the repo VERSION file
-// output: a failure when a loader key is undocumented or a shipped version pin disagrees with VERSION
-// pos: documentation contract for configuration keys and the current release pin
+// input: quoted YAML keys in config.go, docs/guide/admin/configuration.md, the repo VERSION file, and internal/releaseprep (History allowlist and Surfaces manifest)
+// output: a failure when a loader key is undocumented, a tracked file names the previous release outside release history, or a release surface disagrees with VERSION
+// pos: documentation contract for configuration keys and the current release pin; the surface list itself lives in internal/releaseprep
 // note: if this file changes, update this header and module README.md.
 package config
 
@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"binlog_server/internal/releaseprep"
 )
 
 var documentedKeyPattern = regexp.MustCompile(`"((?:listen_addr|data_dir|meta_dsn|mode)|(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+))"`)
@@ -48,26 +50,32 @@ func TestDocumentedConfigKeys(t *testing.T) {
 	}
 }
 
+// TestVersionPinsMatchVERSIONFile runs the release gate's checks
+// (releaseprep.Check with no tags: release notes, the CHANGELOG section, the stale
+// scan for the previous release and the Surfaces manifest, the same code
+// `make release-check` runs on a tag, tags aside) against VERSION, so a PR
+// that bumps VERSION without its notes or a surface fails here. The versions
+// scanned come from releaseprep's scanVersions, the same rule as the tag
+// gate; without tags the previous release is the newest older CHANGELOG
+// section. A new
+// surface goes in the manifest and a history mention in releaseprep.History,
+// not here.
 func TestVersionPinsMatchVERSIONFile(t *testing.T) {
 	root := repoRoot(t)
 	ver := strings.TrimSpace(mustRead(t, filepath.Join(root, "VERSION")))
 	if ver == "" || strings.Contains(ver, "\n") {
 		t.Fatalf("VERSION = %q", ver)
 	}
-	checks := []struct {
-		rel  string
-		need string
-	}{
-		{"README.md", "VER=" + ver},
-		{"README_ZH.md", "VER=" + ver},
-		{"docs/guide/admin/deployment.md", "VER=" + ver},
-		{"config.example.yaml", "v" + ver},
-		{"config.production.example.yaml", "v" + ver},
+	findings, err := releaseprep.Check(releaseprep.Dir(root), nil, "v"+ver)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, check := range checks {
-		body := mustRead(t, filepath.Join(root, check.rel))
-		if !strings.Contains(body, check.need) {
-			t.Errorf("%s missing %q", check.rel, check.need)
+	if len(findings) < len(releaseprep.Surfaces) {
+		t.Fatalf("%d findings for %d surfaces", len(findings), len(releaseprep.Surfaces))
+	}
+	for _, f := range findings {
+		if !f.OK {
+			t.Errorf("%s", f.Msg)
 		}
 	}
 }

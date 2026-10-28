@@ -19,8 +19,45 @@ jobs:
     name: ci
     uses: ./.github/workflows/e2e.yml
 
+  # The tagged commit is the release-prep commit: EN and zh release notes, the
+  # CHANGELOG section, README/README_ZH pins and install section, the
+  # deployment guide pin, VERSION and the landing page, all for this tag. It
+  # runs beside ci so a missing surface fails in about a minute, and release
+  # needs it, so nothing is built or published without it. Same check as
+  # `make release-check`. Pins in the tagged commit point at assets that
+  # release uploads a few minutes later. Prerelease tags (vX.Y.Z-rc1) are
+  # rejected on purpose: every tag is a release the docs point at. A manual
+  # run on a branch has no tag to check and publishes nothing.
+  release-prep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      # The previous release is the newest older tag in the tag's history
+      # with a published GitHub release, so gh is required here: a tag left
+      # by a failed release is never taken for the previous one.
+      - name: Check release surfaces for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "not a tag run; skipping release-prep check (run make release-check VERSION=vX.Y.Z locally)"
+            exit 0
+          fi
+          ./scripts/check-release-prep.sh -published=gh "${GITHUB_REF_NAME}" "${GITHUB_SHA}"
+
   release:
-    needs: [ci]
+    needs: [ci, release-prep]
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
