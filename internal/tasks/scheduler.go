@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder and SourceSwitchBinder so a closing dump can KILL its thread with the current password and a VIP switch appends one SOURCE_SWITCHOVER event, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.; the attached health evaluator (healthEval), the periodic verifier attached by SetVerifier, a startup object-probe detail that does not change health status unless the text is a TLS transport failure, which clears after a successful upload, an object-streak detail cleared when no task remains without zeroing the streak, and HoldChain so a rotate and that evaluator share one chain snapshot (#441); source.tls shape is validated without reading PEM files (ADR 0012)
+// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder and SourceSwitchBinder so a closing dump can KILL its thread with the current password and a VIP switch appends one SOURCE_SWITCHOVER event, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.; the attached health evaluator (healthEval), the periodic verifier attached by SetVerifier, a startup object-probe detail that does not change health status unless the text is a TLS transport failure, which clears after a successful upload, an object-streak detail cleared when no task remains without zeroing the streak, and HoldChain so a rotate and that evaluator share one chain snapshot (#441); source.tls shape is validated without reading PEM files (ADR 0012); Coverage, CoverageBySource, and RestorePlan answer from one ScanCover of the replay chain, and WithClusterMode makes those three return ErrCoverageUnsupported
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md. §29: yieldRelease, pendingRelease and yielded remember an epoch given up so a later claim can resume it. §29.10: ListTasksWithExpiredLease also returns STOPPED when desired RUN and the owner is empty.
 package tasks
@@ -254,6 +254,15 @@ func WithFileUploader(uploader FileUploader) Option {
 	}
 }
 
+// WithClusterMode marks this process as mode cluster. Coverage and restore
+// plan then refuse instead of answering from a partial per-node directory.
+// Standalone workers also hold a lease manager, so the lease is not the signal.
+func WithClusterMode() Option {
+	return func(s *Scheduler) {
+		s.clusterMode = true
+	}
+}
+
 // WithClusterLeaseManager 启用 cluster lease 管理。
 func WithClusterLeaseManager(manager LeaseManager) Option {
 	return func(s *Scheduler) {
@@ -392,6 +401,9 @@ type Scheduler struct {
 	// pendingEvents are in-memory events waiting for the event store.
 	// The scheduler lock is not held while they are written.
 	pendingEvents []queuedEvent
+	// clusterMode is set for mode cluster. Coverage refuses while ADR 0011
+	// ownership is unfinished, even on a control-plane that has no lease manager.
+	clusterMode bool
 	// dumpFenceRequired is set for cluster mode. Schema 3 then refuses a
 	// cross-worker finish or takeover that cannot share the connection id.
 	dumpFenceRequired bool

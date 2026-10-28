@@ -1,6 +1,6 @@
 // Package api provides module-level functionality for api.
 // input: HTTP requests, router params, scheduler/task service interfaces including ListClusterObservation
-// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, the resume checkpoint the next Start continues from, one inventory segment as raw bytes from local disk or a sealed uploaded object, one ustar of the replay selection, a UTC point-in-time window on that same replay route, a stop_gtid selection on that route, a start_gtid_set roll-forward from a restored backup, GET /api/tasks/{id}/window for the retained chain's earliest and latest UTC event times and breaks, /metrics 200 with metric_source_up task_list 0 on store list errors (no task series from memory), /healthz, anonymous GET /auth/config (auth mode and header name for the Consoles), /api/health, anonymous /ui/* (Console) and /ui-classic/* (classic Vue console, one release) so either can load, and the API auth middleware on /swagger/* when auth is enabled
+// output: REST API responses including SQL-paged task lists, cluster observation, adopt of a leftover data directory, the resume checkpoint the next Start continues from, one inventory segment as raw bytes from local disk or a sealed uploaded object, one ustar of the replay selection, a UTC point-in-time window on that same replay route, a stop_gtid selection on that route, a start_gtid_set roll-forward from a restored backup, GET /api/tasks/{id}/window for the retained chain's earliest and latest UTC event times and breaks, /metrics 200 with metric_source_up task_list 0 on store list errors (no task series from memory), /healthz, anonymous GET /auth/config (auth mode and header name for the Consoles), /api/health, anonymous /ui/* (Console) and /ui-classic/* (classic Vue console, one release) so either can load, and the API auth middleware on /swagger/* when auth is enabled; GET /api/tasks/{id}/coverage, GET /api/coverage, and POST /api/tasks/{id}/restore-plan
 // pos: external control-plane API layer bridging clients and domain services
 // note: if this file changes, update this header and module README.md.
 package api
@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"binlog_server/internal/assurance"
 	"binlog_server/internal/binlog"
 	_ "binlog_server/internal/swaggerdocs"
 	"binlog_server/internal/tasks"
@@ -47,6 +48,9 @@ type taskService interface {
 	ExecutedGTIDReplay(id string, executedRaw string, stopGTIDRaw string, stop *time.Time) (tasks.PITRSet, error)
 	OpenExecutedGTIDArchive(id string, executedRaw string, stopGTIDRaw string, stop *time.Time) (io.ReadCloser, int64, error)
 	RecoveryWindow(id string) (tasks.RecoveryWindow, error)
+	Coverage(id string, q tasks.CoverageQuery) (assurance.CoverResult, error)
+	CoverageBySource(host string, port int, q tasks.CoverageQuery) (tasks.SourceCoverage, error)
+	RestorePlan(id string, q tasks.CoverageQuery, fullBackup string) (tasks.RestorePlan, error)
 	RetryFailedUploads(id string, limit int) (tasks.UploadRetryStats, error)
 	GetUploadRetryMetrics() tasks.UploadRetryMetrics
 	ListUploadFailureReasons(id string, limit int) ([]tasks.UploadFailureReason, error)
@@ -130,6 +134,7 @@ func (s *Server) routes() {
 	apiGroup.GET("/workers", gin.WrapF(s.handleWorkers))
 	apiGroup.GET("/cluster/overview", gin.WrapF(s.handleClusterOverview))
 	apiGroup.GET("/findings", gin.WrapF(s.handleOpenFindings))
+	apiGroup.Any("/coverage", gin.WrapF(s.handleSourceCoverage))
 	apiGroup.POST("/alerts/waive", gin.WrapF(s.handleAlertsWaive))
 	apiGroup.DELETE("/alerts/waive", gin.WrapF(s.handleAlertsWaive))
 	apiGroup.POST("/tasks", gin.WrapF(s.handleTasks))

@@ -35,6 +35,7 @@
    - 确保代码通过 `go fmt` 格式化
    - 确保通过 `go vet` 检查
    - 为新功能添加测试
+   - 遵守[编码规范](docs/develop/coding-standards.zh-CN.md)（[English](docs/develop/coding-standards.md)），提交前跑 `make lint` 和 `make codehealth`
 
 4. **运行测试**
    ```bash

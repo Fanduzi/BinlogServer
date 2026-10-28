@@ -76,6 +76,12 @@ const (
 	// bound twice (ADR 0011). Task _cluster, subject the task id. Not a
 	// managed health kind, so Reconcile does not close it.
 	FindingMetaLockStalled FindingKind = "META_LOCK_STALLED"
+	// FindingSourceUnreachable and FindingTaskFailed are derived from the task
+	// row (signals.go); nothing reports them.
+	// FindingSourceUnreachable: the task has stayed in STARTING/RETRY_BACKOFF with desired RUN past health.unreachable_after_sec.
+	FindingSourceUnreachable FindingKind = "SOURCE_UNREACHABLE"
+	// FindingTaskFailed: the task is FAILED for the current spec revision; the subject is the failure class.
+	FindingTaskFailed FindingKind = "TASK_FAILED"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.

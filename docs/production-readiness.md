@@ -10,7 +10,7 @@
 只能 `workflow_dispatch` 手动触发的 e2e 一律不算 MET。
 
 CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
-- 每个 PR 和 push main 都跑：`vulncheck`；`e2e-upgrade-failback`（`upgrade-legacy-failback.sh` 的 `plain`、`object-only`、`object-gone` 从 v0.5.57，以及 `plain` 从 v0.5.82）；`race-and-vet`（`go vet ./...`、`go test -race ./...`）；`release-archive`（snapshot 包报的 version 和 commit）；`e2e-verify`（真实 MinIO）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-source-switchover`；`e2e-observability`；`e2e-tls`（`TestLiveMySQLTLS`、`TestLiveAppTLS`、`TestLiveS3TLS`）；`promtool`（`promtool test rules deploy/prometheus/binlog-server-alerts.test.yml`）。
+- 每个 PR 和 push main 都跑：`vulncheck`；`e2e-upgrade-failback`（`upgrade-legacy-failback.sh` 的 `plain`、`object-only`、`object-gone` 从 v0.5.57，以及 `plain` 从 v0.5.82）；`race-and-vet`（`go vet ./...`、`go test -race ./...`）；`release-archive`（snapshot 包报的 version 和 commit）；`e2e-verify`（真实 MinIO）；`unit-and-e2e`（`go test ./...` 加 quick 档的 10 个场景）；`e2e-retry-upload`、`e2e-split-retention`、`e2e-epoch-segments`、`e2e-gtid-purge`、`e2e-gtid-pitr`、`e2e-coverage`、`e2e-source-switchover`；`e2e-observability`；`e2e-tls`（`TestLiveMySQLTLS`、`TestLiveAppTLS`、`TestLiveS3TLS`）；`promtool`（`promtool test rules deploy/prometheus/binlog-server-alerts.test.yml`）。
 - 多节点：`e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover` 也是每个 PR 和 push main 都跑。
 - 任何 job 都不跑：`orchestrator`、`semisync`、`smoke-control-plane-failover`、`smoke-invalid-inputs`、`smoke-recovery-window`、`smoke-scale`。
 
@@ -50,7 +50,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 |---|---|---|---|---|
 | D1 | 用备份按 GTID 停点还原到一台新 MySQL，数据和预期一致（open 段和封存段都测） | `e2e-gtid-pitr`（`smoke-gtid-pitr`、`smoke-gtid-executed`）；只有 MySQL 8.0 | MET | — |
 | D2 | 本地文件已按保留期删掉、只剩对象存储时，仍能下载回放并还原 | `e2e-upgrade-failback` 每个 PR 跑 `upgrade-legacy-failback.sh FBUP_CASE=object-only`，任务配 `local_retention_days=1`、`bucket_retention_days=30`。修复后先在 A 上 `FLUSH BINARY LOGS` 定一个封存边界，等边界之前的每一段都 SEALED 且 UPLOADED、唯一没封存的是边界之后新开的那段。这些段（含 A 第一段）由产品自己的拆分保留删掉：脚本只把修改时间调到 2 天前，再 `FLUSH BINARY LOGS` 触发保留，本地文件删掉，对象和目录行留下，记 `RETENTION_REMOVED`；脚本不 mv、不删这些文件。`/replay` 必须把每个被删段标成 `bucket`。读 `/replay` 和 `/replay/archive` 期间用 `mc admin trace` 计数，每个被删段的对象键至少一次 MinIO `GetObject`。归档成员与删前的文件逐字节一致，被删段排在归档最前。归档读完、还原之后各扫一遍 md5：`data_dir`（递归，含 `.cache` 等点目录）、服务端 `TMPDIR`、`/tmp` 下比删除更新的文件，出现任何一个被删段的同字节副本就失败；扫描不覆盖这些目录以外的路径，那种藏起来的副本靠 `GetObject` 计数抓。只用这些 bucket 成员、宿主机 MySQL 8.0 `mysqlbinlog` 还原进清空的新库，`CHECKSUM TABLE` 和 `gtid_executed` 必须等于 A 在边界时的值，不依赖 open 尾段。open 尾段例外：边界之后写的事务只在本地（边界后封存的空段和 open 段），叠加还原后等于 A 的最终校验和，这一步读的是本地文件，不算对象存储的证明（丢盘时的 RPO 见 [#530](https://github.com/Fanduzi/BinlogServer/issues/530)）。`e2e-split-retention` 另外证明按保留期删掉本地文件后 download/replay/archive 仍从对象取回 | MET | — |
-| D3 | 给一个时间点或 GTID，能查出覆盖它的文件和对象（`/coverage`），并一步生成还原计划和预检（`/restore-plan`） | 没有接口。验收按 ADR 0009 阶段 4/5：窗口内、窗口外、断点上各 10 例，和 mysqlbinlog 的独立解析一致；向导还原 5 个时间点，校验和一致 | NOT MET | ADR 0009 阶段 4、5 |
+| D3 | 给一个时间点或 GTID，能查出覆盖它的文件和对象（`/coverage`），并一步生成还原计划和预检（`/restore-plan`） | `e2e-coverage` 每个 PR 跑 `smoke-coverage.sh`：窗口内、窗口外、断点上的时间和 GTID 各 10 例，答案与 mysqlbinlog 的独立解析一致（分段名和停止偏移）；5 个时间点按 `/restore-plan` 的 `--stop-datetime` 回放，`CHECKSUM TABLE` 与源库当时一致；全备 GTID 有洞或与将要应用的事务重叠时 `full_backup_gtid` 预检为 red。`limit` 不截断前缀。集群模式三个接口 501 由 `TestTaskAPI_CoverageAndRestorePlan` 覆盖（ADR 0011 PR-4 之前不按单节点目录回答） | MET | — |
 | D4 | 各支持版本上都能拉流并且能还原 | `unit-and-e2e` 每个 PR 的 quick 档：`smoke.sh` 在 mysql57、mysql80、mysql84、percona57、percona80 上拉流，写入后 checkpoint 的 file/pos 必须前进；`smoke-version-restore.sh` 把 mysql57 和 mysql84 在任务启动之后写入的库表（含一次 `FLUSH BINARY LOGS`）经 `mysqlbinlog` 回放到同版本空实例，`CHECKSUM TABLE` 和行文本与源库一致；`smoke-standalone-restart` 仍在 MySQL 8.0 和 MariaDB 11.4 上做还原 | MET | — |
 
 ## E. 升级、迁移与回滚
@@ -101,12 +101,12 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 23 / PARTIAL 4 / NOT MET 8**。
+共 35 项：**MET 24 / PARTIAL 4 / NOT MET 7**。
 
 ## 最卡生产级的 5 项
 
 1. **C2、C3、C5，cluster 故障切换**：两个 P1（#476、#473）都靠 ADR 0011 的 PR-2 到 PR-4；PR-1 的纯模型已合入（C1）。
 2. **A1 还不是 MET，C6 仍是 NOT MET**：#462 的「cluster 删封存段没有 finding」已有单测（ADR 0011 PR-3），但 GTID 内部空洞和手动档 cluster e2e 还没进 CI，所以 A1 仍是 PARTIAL。所有权变化时 finding 单调（C6）要等 PR-5。#471 不合并。
 3. **F4，评估器默认关**：`task_healthy`、推荐告警规则和 webhook 已经在（F2）。默认仍是 `health.evaluator: off`，所以不评估、不按任务输出、也不发 webhook，要等删掉这个开关。
-4. **D3，备份是否可还原没人持续验证**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4 PARTIAL，等 ADR 0011 的主人）。真实 MinIO 由 `e2e-verify` 每个 PR 跑；可选的还原演练还没有；没有覆盖查询和还原计划（ADR 0009 阶段 4、5）。
+4. **A4 仍是 PARTIAL，可选还原演练还没有**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4，等 ADR 0011 的主人）。真实 MinIO 由 `e2e-verify` 每个 PR 跑。覆盖查询和还原计划已由 `e2e-coverage` 每个 PR 对账（D3 MET）；按保留点做的可选演练还没有。
 5. **H1，上线前提没验**：约定负载下的长跑验收还没有（H1，ADR 0009 阶段 6）。G2 已由 `e2e-tls` 的 `TestLiveAppTLS`（真实任务路径的 dump 与 meta 池 `CONNECTION_TYPE`）、`TestLiveS3TLS`（私有 CA 的 HTTPS 上传）和 `TestLiveMySQLTLS`，以及 `unit-and-e2e` / `race-and-vet` 里的 TLS 单测盖住。

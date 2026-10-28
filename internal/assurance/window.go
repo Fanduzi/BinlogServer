@@ -1,6 +1,6 @@
 // Package assurance provides module-level functionality for assurance.
 // input: the chosen replay segments in chain order, each with its catalog state, event-header times and MySQL GTID log, plus the task flavor, whether object storage is configured, and the GTID start set
-// output: the recoverable window: earliest and latest UTC event time, the stored MySQL GTID set, and the breaks (missing index inside one source prefix, GTID hole between files or across a source switch, hole inside a segment, interior hole between stored sequences, checksum mismatch, not durable off-host, unreadable)
+// output: the recoverable window: earliest and latest UTC event time, the stored MySQL GTID set, and the breaks (missing index inside one source prefix, GTID hole between files or across a source switch, hole inside a segment, interior hole between stored sequences, checksum mismatch, not durable off-host, unreadable); Break JSON fields are files and reason
 // pos: the one derivation behind GET /window (ADR 0009 phase 1, P1-2); tasks only reads the bytes and adds the damage cut
 // note: if this file changes, update this header and module README.md.
 package assurance
@@ -27,8 +27,8 @@ const (
 
 // Break is one place the chain cannot be restored straight through.
 type Break struct {
-	Files  []string
-	Reason string
+	Files  []string `json:"files"`
+	Reason string   `json:"reason"`
 }
 
 // Window is the retained chain a restore can use right now. Continuous is

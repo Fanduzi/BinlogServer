@@ -89,6 +89,10 @@ definitions:
     type: object
   api.dashboardTaskItem:
     properties:
+      open_findings:
+        description: OpenFindings counts the task's open findings (ADR 0009); omitted
+          at 0.
+        type: integer
       replication:
         $ref: '#/definitions/api.taskReplicationResponse'
       task:
@@ -244,6 +248,21 @@ definitions:
         description: Storage 存储策略：retention_days 必须在 1..3650。local_retention_days
           与 bucket_retention_days 省略或 0 时等于 retention_days。桶保留短于本地保留则 400。
     type: object
+  api.waiveRequest:
+    properties:
+      actor:
+        type: string
+      evidence:
+        type: string
+      kind:
+        type: string
+      reason:
+        type: string
+      subject:
+        type: string
+      task_id:
+        type: string
+    type: object
   api.workerItem:
     properties:
       has_updated:
@@ -280,6 +299,19 @@ definitions:
       updated_at:
         type: string
     type: object
+  mysqltls.Config:
+    properties:
+      ca:
+        type: string
+      cert:
+        type: string
+      key:
+        type: string
+      mode:
+        type: string
+      server_name:
+        type: string
+    type: object
   tasks.BinlogFile:
     properties:
       checksum:
@@ -307,6 +339,15 @@ definitions:
         type: string
       file_path:
         type: string
+      first_event_at:
+        description: |-
+          FirstEventAt and LastEventAt are the sealed file's first and last
+          event-header times, SHA256 its digest (migration 000008, written at
+          seal). nil and "" are unknown: an older row, or a catalog without the
+          columns.
+        type: string
+      last_event_at:
+        type: string
       location:
         description: |-
           Location is local, bucket, or both. The files list fills it in.
@@ -315,9 +356,29 @@ definitions:
         type: string
       object_key:
         type: string
+      retention_removed_at:
+        description: |-
+          RetentionRemovedAt is when local retention deleted the local file and
+          left this row (migration 000010, design 0009 §26). nil means the column
+          is empty or the catalog has no such column. It is not filled by the
+          files-list SELECT.
+        type: string
       sealed_at:
         type: string
+      sha256:
+        type: string
       size_bytes:
+        type: integer
+      source_identity:
+        description: |-
+          SourceIdentity is the server that wrote this file. The files list fills
+          it in from the source chain. It is not stored. Empty when the chain is unknown.
+        type: string
+      source_server:
+        description: |-
+          SourceServer is the 1-based stint in source_chain.servers that wrote
+          this file. A failback A, B, A names stint 3 for A's new files.
+          It is not stored. 0 (omitted) when the chain is unknown.
         type: integer
       start_pos:
         description: |-
@@ -352,6 +413,85 @@ definitions:
       warning:
         type: string
     type: object
+  tasks.Finding:
+    properties:
+      count:
+        type: integer
+      detail:
+        type: string
+      first_seen:
+        type: string
+      kind:
+        $ref: '#/definitions/tasks.FindingKind'
+      last_seen:
+        type: string
+      resolved_at:
+        type: string
+      severity:
+        $ref: '#/definitions/tasks.FindingSeverity'
+      subject:
+        type: string
+      task_id:
+        type: string
+    type: object
+  tasks.FindingKind:
+    enum:
+    - TASK_PERSIST_FAILED
+    - METADATA_WRITE_BLOCKED
+    - EVENT_PERSIST_FAILED
+    - FINDINGS_PERSIST_FAILED
+    - EVENT_READ_FAILED
+    - DUMP_CLEANUP_PERSIST_FAILED
+    - DISK_LIST_FAILED
+    - UPLOAD_UNVERIFIED
+    - UPLOAD_RECORD_FAILED
+    - RETENTION_RECORD_FAILED
+    - RETRY_LOOP_FAILED
+    - DUMP_STALLED
+    - OPEN_TAIL_CUT_FAILED
+    - METRIC_SOURCE_FAILED
+    - TASK_TRANSITION_STALLED
+    - SEGMENT_UNREADABLE
+    - SEGMENT_OVERLAP
+    - TASK_RECORDS_FAILED
+    - META_UNREACHABLE
+    - HEALTH_STORE_UNAVAILABLE
+    - META_LOCK_STALLED
+    - SOURCE_UNREACHABLE
+    - TASK_FAILED
+    type: string
+    x-enum-varnames:
+    - FindingTaskPersistFailed
+    - FindingMetadataWriteBlocked
+    - FindingEventPersistFailed
+    - FindingFindingsPersistFailed
+    - FindingEventReadFailed
+    - FindingDumpCleanupPersistFailed
+    - FindingDiskListFailed
+    - FindingUploadUnverified
+    - FindingUploadRecordFailed
+    - FindingRetentionRecordFailed
+    - FindingRetryLoopFailed
+    - FindingDumpStalled
+    - FindingOpenTailCutFailed
+    - FindingMetricSourceFailed
+    - FindingTransitionStalled
+    - FindingSegmentUnreadable
+    - FindingSegmentOverlap
+    - FindingTaskRecordsFailed
+    - FindingMetaUnreachable
+    - FindingHealthStoreUnavailable
+    - FindingMetaLockStalled
+    - FindingSourceUnreachable
+    - FindingTaskFailed
+  tasks.FindingSeverity:
+    enum:
+    - CRITICAL
+    - WARNING
+    type: string
+    x-enum-varnames:
+    - FindingCritical
+    - FindingWarning
   tasks.PITRSet:
     properties:
       client:
@@ -376,6 +516,11 @@ definitions:
         items:
           type: string
         type: array
+      warning:
+        description: |-
+          Warning is set when a damaged segment and every later one were left
+          out, or when the request also sent limit, which this set ignores.
+        type: string
     type: object
   tasks.RecoveryBreak:
     properties:
@@ -418,19 +563,9 @@ definitions:
       server_id:
         type: integer
       tls:
-        description: ADR 0012。省略时更新保留已保存的块；mode disabled 清除。ca/cert/key 是路径，不是 PEM。
-        type: object
-        properties:
-          mode:
-            type: string
-          ca:
-            type: string
-          cert:
-            type: string
-          key:
-            type: string
-          server_name:
-            type: string
+        allOf:
+        - $ref: '#/definitions/mysqltls.Config'
+        description: TLS is source.tls (ADR 0012). Empty mode is plaintext.
       user:
         type: string
     type: object
@@ -488,9 +623,43 @@ definitions:
       retention_days:
         type: integer
     type: object
+  tasks.StorageAlert:
+    properties:
+      code:
+        type: string
+      detail:
+        description: Detail is what was found in Segment, in English.
+        type: string
+      message:
+        type: string
+      missing_gtids:
+        description: MissingGTIDs is what the checkpoint lists that no segment holds
+          (MySQL).
+        type: string
+      restart_gtid_set:
+        description: |-
+          RestartGTIDSet is the gtid_set a new task starts from to continue
+          right after ValidSegments. Empty when it cannot be computed.
+        type: string
+      segment:
+        description: Segment is the first damaged segment on disk.
+        type: string
+      valid_segments:
+        description: ValidSegments were written before the damage and still restore.
+        items:
+          type: string
+        type: array
+    type: object
   tasks.Task:
     properties:
       cluster_key:
+        type: string
+      desired_run:
+        description: |-
+          DesiredRun is RUN or STOP. Metadata mode persists it on backup_tasks.
+          Standalone keeps it on this struct until the process exits.
+          API JSON includes it so an operator can tell a desired STOP from a
+          STOPPED row whose desired state is still RUN.
         type: string
       epoch:
         type: integer
@@ -500,6 +669,12 @@ definitions:
         type: string
       name:
         type: string
+      open_findings:
+        description: |-
+          OpenFindings is the task's open finding count, filled by the API on
+          GET /api/tasks, /api/tasks/{id} and /api/dashboard. It is not stored;
+          nil (omitted) only when this process cannot count findings.
+        type: integer
       owner_worker_id:
         type: string
       pending_dump_cleanup:
@@ -520,6 +695,13 @@ definitions:
         $ref: '#/definitions/tasks.State'
       storage:
         $ref: '#/definitions/tasks.Storage'
+      storage_alert:
+        allOf:
+        - $ref: '#/definitions/tasks.StorageAlert'
+        description: |-
+          StorageAlert is computed when a task is listed or fetched.
+          It is not stored. A nil alert means this response did not find a
+          checkpoint or segment that disagrees with the files on disk.
       updated_at:
         type: string
     type: object
@@ -564,6 +746,35 @@ info:
   title: Binlog Server API
   version: 0.1.0
 paths:
+  /api/alerts/waive:
+    post:
+      consumes:
+      - application/json
+      description: Binds exact canonical GTID evidence to a waiver (ADR 0009 §7.1
+        / §22.3). Only GTID_HOLE.
+      parameters:
+      - description: waiver
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.waiveRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+      summary: Waive a GTID_HOLE finding
+      tags:
+      - alerts
   /api/cluster/overview:
     get:
       produces:
@@ -627,6 +838,27 @@ paths:
       summary: Get task dashboard with replication delay overview
       tags:
       - Dashboard
+  /api/findings:
+    get:
+      description: Open findings of every task, and of the cluster (task_id _cluster).
+        ADR 0009.
+      parameters:
+      - description: 1..1000, default 200
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/tasks.Finding'
+            type: array
+      summary: List open findings
+      tags:
+      - tasks
   /api/health:
     get:
       produces:
@@ -1087,6 +1319,36 @@ paths:
       summary: Retry failed upload binlog files
       tags:
       - Tasks
+  /api/tasks/{id}/findings:
+    get:
+      description: Persisted failures for one task (ADR 0009). Open findings first.
+        all=1 also returns resolved ones.
+      parameters:
+      - description: task id
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: include resolved findings
+        in: query
+        name: all
+        type: boolean
+      - description: 1..1000, default 200
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/tasks.Finding'
+            type: array
+      summary: List a task's findings
+      tags:
+      - tasks
   /api/tasks/{id}/lease:
     get:
       parameters:

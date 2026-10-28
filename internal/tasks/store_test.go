@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: persistence-backed scheduler coverage including GetTask/ListTasksPage fakes
+// output: persistence-backed scheduler coverage including GetTask/ListTasksPage fakes; fakeStore locks its map so a runner and a test can use it together
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -8,10 +8,12 @@ package tasks
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 )
 
 type fakeStore struct {
+	mu        sync.Mutex
 	tasks     map[string]Task
 	upsertErr error
 	listErr   error
@@ -25,6 +27,8 @@ func newFakeStore() *fakeStore {
 
 // UpsertTask 实现对应功能逻辑。
 func (f *fakeStore) UpsertTask(_ context.Context, task Task) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.upsertErr != nil {
 		return f.upsertErr
 	}
@@ -33,6 +37,8 @@ func (f *fakeStore) UpsertTask(_ context.Context, task Task) error {
 }
 
 func (f *fakeStore) snapshot() []Task {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	out := make([]Task, 0, len(f.tasks))
 	for _, t := range f.tasks {
 		out = append(out, t)
@@ -42,6 +48,8 @@ func (f *fakeStore) snapshot() []Task {
 
 // GetTask 实现对应功能逻辑。
 func (f *fakeStore) GetTask(_ context.Context, taskID string) (Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	task, ok := f.tasks[taskID]
 	if !ok {
 		return Task{}, ErrTaskNotFound
@@ -76,6 +84,8 @@ func (f *fakeStore) ListStartingUnownedTasks(_ context.Context) ([]Task, error) 
 
 // DeleteTask 实现对应功能逻辑。
 func (f *fakeStore) DeleteTask(_ context.Context, taskID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
