@@ -23,6 +23,7 @@ on:
           - cluster-roles
           - observability
           - worker-crash-recovery
+          - sigstop-takeover
           - retry-upload
           - split-retention
           - epoch-segments
@@ -110,7 +111,7 @@ jobs:
         run: go test -race -count=1 -timeout 30m ./...
 
   unit-and-e2e:
-    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'coverage' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback' && github.event.inputs.e2e_profile != 'tls') }}
+    if: ${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'sigstop-takeover' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'coverage' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback' && github.event.inputs.e2e_profile != 'tls') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -257,6 +258,36 @@ jobs:
         if: failure()
         run: |
           cat /tmp/binlog-server-worker-crash.log || true
+          docker compose -f deploy/e2e/docker-compose.yml logs || true
+
+      - name: Cleanup
+        if: always()
+        run: ./scripts/e2e/down.sh
+
+  e2e-sigstop-takeover:
+    if: ${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == 'sigstop-takeover' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: E2E SIGSTOP Takeover Scenario
+        run: |
+          E2E_DIR="./tmp/e2e/data-ci-sigstop-takeover-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          E2E_SERVER_LOG="/tmp/binlog-server-sigstop-takeover.log" E2E_DATA_DIR="$E2E_DIR" ./scripts/e2e/run-suite.sh --scenarios smoke-sigstop-takeover
+
+      - name: Dump Logs On Failure
+        if: failure()
+        run: |
+          cat /tmp/binlog-server-sigstop-takeover.log || true
           docker compose -f deploy/e2e/docker-compose.yml logs || true
 
       - name: Cleanup

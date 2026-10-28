@@ -38,7 +38,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 |---|---|---|---|---|
 | C1 | ADR 0011 被接受；PR-1 的纯过渡模型合入，十条不变量和活性上界都用有界搜索自动检查 | `internal/ownership` 的 `invariant_test.go`（含 `TestSafetyBoundedExhaustive`、`TestSafetyRandomPrefixes`）、`liveness_test.go`（含 `TestLivenessAllFairSchedules`）、`fault_matrix_test.go`，都在 CI 的 `go test ./...` | MET | ADR 0011 已接受；PR-1 经 #481 合入 main（`4a970319`，#478 第 12 轮 QA PASS） |
 | C2 | owner 握着 `task_leases` 行锁被暂停时，对端在 RTO 公式之内接管，等待期间 `/api/health` 返回 503 | `smoke-session-kill`（quick 档，`unit-and-e2e` 每个 PR 都跑）：在 MySQL 8.0 和 MariaDB 上各建持有 `task_leases` `FOR UPDATE` 的会话，`SIGSTOP` 后对端先拿不到行锁、在会话超时上限之内拿到（`TestSessionKillDropsSleepingForUpdate`、`TestQA484DeadlineMargin`、`TestQA484PoolPressure` 两台库都必须 PASS，SKIP 算失败）；没有 `PROCESS` 权限的账号下 `SIGSTOP` 持有者由本节点评估器开 `META_LOCK_STALLED`，期间 `GET /api/health` 为 503；另有一格确认只有一条已停止任务的集群进程在默认 60s sweep 下 `/api/health` 保持 200 且无 `HEALTH_STALE` | MET | ADR 0011 PR-2 已合入；#476（P1）、#463 |
-| C3 | per_node 存储下，接管不写 FAILED 或 desired STOP；原主人恢复后用更大的 epoch 继续，源上始终最多一条 dump | ADR 0011 PR-4 的 e2e：per_node 下 SIGSTOP/SIGCONT | NOT MET | #473（P1）、#455 |
+| C3 | per_node 存储下，接管不写 FAILED 或 desired STOP；原主人恢复后用更大的 epoch 继续，源上始终最多一条 dump | `smoke-sigstop-takeover`（CI `e2e-sigstop-takeover`，每个 PR）：per_node 独立 `data_dir` 的双 worker 上 `kill -STOP` owner 超过 `lease_ttl`，对端认领出更大 epoch 后因链尾巴在冻结节点盘上而让出成 `LEASE_DEGRADED`；每个采样点断言不是 `FAILED`、`desired_run` 不是 `STOP`、源库 `Binlog Dump` 线程至多一条；`SIGCONT` 后原主人让出旧 epoch、用更大的 epoch 重新认领回 `RUNNING` | MET | ADR 0011 PR-4 已合入（#524）；#473、#455 由该场景回归 |
 | C4 | 多节点 e2e 是每个 PR 的门禁 | `e2e-cluster-roles`、`e2e-worker-crash-recovery`、`e2e-meta-failover` 在每个 PR 和 push main 都跑（`if:` 与 `e2e-retry-upload` 等同形，`workflow_dispatch` 时只跑选中的 profile）。「每节点独立 data_dir 加 SIGSTOP 接管」的场景属于 C3/C5，随 ADR 0011 PR-4 加进来 | MET | — |
 | C5 | ADR 0011 §4.2 的故障注入矩阵（4 个阶段 × SIGSTOP/kill -9/分区/重启，再加 17 行补充）作为发布档 e2e，没跑的格子写明没跑 | 没有，PR-2 和 PR-4 要建 | NOT MET | ADR 0011 PR-2、PR-4 |
 | C6 | 所有权变化时 finding 保持单调（不先关再开），不完整的观察既不开也不关 finding | 生产 `Reconcile` 上的属性测试（PR-5） | NOT MET | ADR 0011 PR-5；#451、#452、#366 |
@@ -101,11 +101,11 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 25 / PARTIAL 4 / NOT MET 6**。
+共 35 项：**MET 26 / PARTIAL 4 / NOT MET 5**。
 
 ## 最卡生产级的 5 项
 
-1. **C3、C5，cluster 故障切换**：C2 已由 quick 档 `smoke-session-kill` 覆盖（SIGSTOP 下对端在会话超时上限内拿到行锁、stall 期间 `/api/health` 503）。剩 #473（P1）靠 ADR 0011 PR-4 的 per_node SIGSTOP/SIGCONT e2e 和 §4.2 矩阵；PR-1 的纯模型已合入（C1），PR-4 的模型接线已合入（#524，`1fe6832`）。
+1. **C5，cluster 故障注入矩阵**：C2 已由 quick 档 `smoke-session-kill` 覆盖（SIGSTOP 下对端在会话超时上限内拿到行锁、stall 期间 `/api/health` 503），C3 已由 `e2e-sigstop-takeover` 覆盖（per_node SIGSTOP/SIGCONT，#473 回归）。剩 §4.2 的 4 阶段 × 4 故障矩阵作为发布档 e2e；PR-1 的纯模型和 PR-4 的模型接线已合入（#481、#524）。
 2. **A1 还不是 MET，C6 仍是 NOT MET**：#462 的「cluster 删封存段没有 finding」已有单测（ADR 0011 PR-3），但 GTID 内部空洞和手动档 cluster e2e 还没进 CI，所以 A1 仍是 PARTIAL。所有权变化时 finding 单调（C6）要等 PR-5。#471 不合并。
 3. **F4，评估器默认关**：`task_healthy`、推荐告警规则和 webhook 已经在（F2）。默认仍是 `health.evaluator: off`，所以不评估、不按任务输出、也不发 webhook，要等删掉这个开关。
 4. **A4 仍是 PARTIAL，可选还原演练还没有**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4，等 ADR 0011 的主人）。真实 MinIO 由 `e2e-verify` 每个 PR 跑。覆盖查询和还原计划已由 `e2e-coverage` 每个 PR 对账（D3 MET）；按保留点做的可选演练还没有。
