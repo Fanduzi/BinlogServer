@@ -84,7 +84,7 @@ CI: golangci-lint `unused` (new findings only), and `deadcode`: every unreachabl
 
 - The README and landing page describe the product: what it does, how to install the current release, where the docs are. They are not a changelog.
 - Per-version notes go to the release notes and the upgrade guide; feature detail goes to a page under `docs/`, linked from the README.
-- Pending: the README shape guard and `make release-check` (`scripts/check-release-prep.sh`) arrive with #563 and #564. Until those land, this rule is a convention, not a CI check.
+- CI checks it: the README shape guard (`internal/config/readme_doc_test.go`) keeps per-version history out of the READMEs, and `make release-check` (`scripts/check-release-prep.sh`) fails a release that leaves the previous version on a release surface.
 
 ## 7. Design before the third patch
 

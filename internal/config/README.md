@@ -8,13 +8,16 @@
 | `config.go`（`StandaloneConfig`） | ADR 0010：`standalone.task_records`（on/off，默认 on）、`standalone.task_key_file`、`standalone.task_key_previous_file`；密钥本身走 `BINLOG_SERVER_TASK_KEY` 或密钥文件，不进配置 |
 | `config_test.go` | 配置加载、覆盖规则、protect 默认值、受保护 auth 未解析密钥、未设置的 `meta_dsn` 占位符、非数字拒绝、非 true/false 布尔拒绝，以及 `${ENV}` 不触发明文告警 |
 | `config_examples_test.go` | 用 `LoadConfig` 加载仓库根目录和发版归档里的每一份示例配置，包括 `BINLOG_SERVER_META_DSN` 未设置时 |
-| `config_doc_test.go` | `configuration.md` 必须写到 `config.go` 里的每一个 YAML 键；`VERSION` 必须通过不带 tag 的 `internal/releaseprep.Check`（`make release-check` 在打 tag 时用同一套）：有中英文发布说明和 CHANGELOG 小节，除发版历史白名单外没有上一个版本（和 tag 门禁同一个 `scanVersions`；没有 tag 时是 CHANGELOG 里比它旧的最新一节），并满足发布面清单 `Surfaces`：README、部署指南、示例头、落地页、VERSION。新增发布面只改清单 |
+| `config_doc_test.go` | `configuration.md` 必须写到 `config.go` 里的每一个 YAML 键；`VERSION` 必须通过不带 tag 的 `internal/releaseprep.Check`（`make release-check` 在打 tag 时用同一套）：有中英文发布说明和 CHANGELOG 小节，除发版历史白名单外没有上一个版本（和 tag 门禁同一个 `scanVersions`；没有 tag 时是 CHANGELOG 里比它旧的最新一节），并满足发布面清单 `Surfaces`：README、部署指南、升级指南、示例头、落地页、VERSION。新增发布面只改清单 |
 | `landing_doc_test.go` | 落地页白名单：`docs/landing` 的文件集合、section 数、标题和元素 id 固定；版本号只能是 `VERSION`，且只出现在 `data-version`、徽章、`VER=`、CTA 四处；禁止日期、40 位以上 hex、运行时加载、超出体积上限；表驱动反例覆盖 #565 r1 QA 的 24 种回流写法 |
 | `config_health_test.go` | `health.evaluator`（off/shadow/on，默认 off）、`health.sweep_interval_sec`（默认 60）、`health.rehash_bytes_per_sec`（默认 4 MiB/s）、`health.stale_after_sec`（默认 0 = 5×sweep，负数拒绝，§28）、`health.node_gone_after_sec`（默认 0 = max(3×sweep, lease_ttl+2×sweep)，负数拒绝，§30）、`health.refusal_retry_cap_sec`（默认 600）的默认值、覆盖与非法值 |
 | `config_notify_test.go` | `notify.webhook_url` 为空时不发；超时默认 5、次数默认 3、退避默认 200；非法 URL 和越界次数拒绝启动 |
 | `config_verify_test.go` | `verify.every_sec`（默认 86400）、预算、轮换、`verify.recent_share_percent`（默认 25，拒绝 0 和 1–100 以外）、截止时间、`verify.pass_max_bytes`、最近窗口和演练周期 |
 | `encryption.go` | AES-256-GCM `enc:aes256:` 加解密工具（配置值与 meta 源库密码共用） |
 | `encryption_test.go` | 加解密往返测试 |
+| `readme_doc_test.go` | README.md / README_ZH.md 白名单守卫，只防日常修改重新长出版本历史，不防刻意绕过：不得出现 `VERSION` 以外、以 `VERSION` 主.次版本号开头的三段版本号（带不带 `v`，含 `-rc` 后缀；0.99、0.5、`@` 后的固定版本、四段数字、其他软件版本和日期放行；minor/major 升级后旧版本线的漏改归发版检查的上一版本扫描）；一级/二级标题（ATX、setext、HTML，代码块 ``` 和 ~~~ 内不算）必须与 `readmeContracts` 逐条一致；每份 README 不得超过字节上限（设为大小 + 2048 + 最大的一条日常修改用例，所以 README 长 2 KB 后日常修改用例仍能逐条通过），上限也不得比大小多出 4 KB 以上；`Upgrading` / `升级` 一节到下一个一级/二级标题为止，只能是 `Latest release` / `最新版本` 一行加固定的升级指南链接，不得有三级及以下标题。每条规则都有只违反该规则的负例，日常修改有逐条单独检查的正例；全部用例还会在模拟的下一个 minor 和 major 版本下再跑一遍 |
+| `readme_accepts_test.go` | README 守卫的正例：日常修改（三级标题、安装片段、FAQ 段落、检查清单条目、其他软件版本、`@` 固定版本等）逐条单独加到 README 上都必须通过；headroom check：上限下剩余空间必须放得下最大的一条日常修改，放不下时只报一条 headroom check（给出该设的上限），不报某条用例；按“大小 + 2048 + 最大用例”设的上限下，README 长满 2048 字节仍全部通过，多 1 字节由 headroom check 报出 |
+| `upgrade_guide_doc_test.go` | `docs/guide/admin/upgrade*.md` 以版本号开头的顶层列表项、标题、引用列表项（可带强调、方括号、代码片段或 `Release`/`Version`/`版本` 前缀；嵌套子条目和表格行不算）必须严格从新到旧且最上面是 `VERSION`，格式不认识时报出那一行和可用格式。由 `readme_doc_test.go` 的升级用例在下一个 minor 和 major 版本下一并检查 |
 
 ## Exports
 - `LoadConfig(path)` - 加载配置（无加密）

@@ -293,6 +293,10 @@ export BINLOG_SERVER_UPLOAD_SECRET_KEY="..."
 ./binlog-server --config worker.yaml --encryption-key "$BINLOG_SERVER_ENCRYPTION_KEY"
 ```
 
+#### 4.2.4 集群元数据库会话超时（ADR 0011 PR-2）
+
+本节同样适用于 4.3 的一体化节点。集群的元数据库连接池在每条连接上设置 `wait_timeout`、`net_read_timeout` 和 `net_write_timeout`，MariaDB 还设置 `idle_transaction_timeout`。上界是 `min(5s, lease_ttl/2)`，最少 1 秒。`innodb_lock_wait_timeout` 取这个上界向下取整，最少 1 秒。每条加锁语句另有自己的客户端期限，等于该超时加 2 秒，所以即使事务里前面的操作已经用掉了时间，行锁仍以服务器错误 1205 结束。语句期限在锁超时之后才触发，也是同一种卡住，按耗时归类记录。这种检测只需要 `binlog_server_meta` 上的 `ALL` 权限。只授了 `PROCESS` 的 MySQL 8 无法识别锁的持有者；在某个点名视图答上之前，`/api/health` 报 `lock_detail=reduced`，没有打开的 CRITICAL finding 时仍返回 200。启动时在一条新取出的池连接上回读已设置的会话变量。`cluster.side_kill` 默认 `off`。仍持有 `FOR UPDATE` 的休眠事务会被空闲超时断开。健康写入在以下情况算锁卡住：遇到 1205；该会话等待 `task_leases` 或 `task_health` 时语句期限触发；或者在已确认的锁等待后面取池连接超时。慢语句，以及没有锁证据的慢连接池，都不算。公式和授权见 [adr-0011-pr2.zh-CN.md](../../releases/adr-0011-pr2.zh-CN.md)（English: [adr-0011-pr2.md](../../releases/adr-0011-pr2.md)）。
+
 ---
 
 ### 4.3 拓扑三：一体化集群节点 (All-in-one)

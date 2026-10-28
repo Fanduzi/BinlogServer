@@ -66,13 +66,6 @@ var History = []HistoryRule{
 	{Path: "docs/production-readiness.md", Line: "`plain` 从 v{p}\\b", Why: "the plain upgrade leg starts from the previous release"},
 	{Path: "scripts/e2e/README.md", Line: "`plain` 从 `v{p}`|从 `v{p}` 直接升级", Why: "the plain upgrade leg starts from the previous release"},
 
-	// Release history kept in the READMEs until the README cleanup moves it to
-	// the upgrade guides (it deletes these four rules). Never on a line with a pin.
-	{Path: "README.md", Line: readmeNoteLine, Unless: readmePin, Why: "README upgrade notes, one per release (#563 moves them)"},
-	{Path: "README_ZH.md", Line: readmeNoteLine, Unless: readmePin, Why: "README upgrade notes, one per release (#563 moves them)"},
-	{Path: "README.md", Line: `^Full release notes: .*`, Unless: readmePin, Why: "links to every release's notes (#563 removes them)"},
-	{Path: "README_ZH.md", Line: `^详细版本记录：.*`, Unless: readmePin, Why: "links to every release's notes (#563 removes them)"},
-
 	// The release skill's worked example: OLD is the previous release by
 	// definition (OLD=${LAST_TAG#v}), so the example names it on purpose.
 	{Path: ".agents/skills/binlogserver-release/SKILL.md", Line: `e\.g\. {p}\b`, Why: "the release runbook's OLD is the previous release by definition"},
@@ -85,14 +78,8 @@ var History = []HistoryRule{
 	{Path: landingPath, Line: `<p data-i18n="release1">v{v}[:：][^<]*</p>|\brelease1: 'v{v}[:：](?:[^'\\\n]|\\.)*'`, Why: "this release's timeline entry says what it upgrades from"},
 }
 
-const (
-	// readmeNoteLine is one README upgrade note: "- **vX.Y.Z: ...".
-	readmeNoteLine = `^- \*\*v[0-9]+\.[0-9]+\.[0-9]+[:：].*`
-	// readmePin marks an install command: never history.
-	readmePin = `VER=|binlog-server_|/releases/download/`
-	// guideHistory is the upgrade guides' history section.
-	guideHistory = `^## (?:Per-version notes|逐版本说明)\s*$`
-)
+// guideHistory is the upgrade guides' history section.
+const guideHistory = `^## (?:Per-version notes|逐版本说明)\s*$`
 
 // GuideNote is one upgrade-guide note: a list item, heading or quoted list
 // item that starts with a version (the three parts are its capture groups).
