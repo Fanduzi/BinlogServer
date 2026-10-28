@@ -88,11 +88,11 @@ type TaskRun struct {
 }
 
 type WorkerHeartbeat struct {
-	WorkerID   string
-	Host       string
-	Version    string
-	LastSeenAt time.Time
-	Status     string
+	WorkerID     string
+	Host         string
+	LastSeenAt   time.Time
+	Status       string
+	BuildVersion string
 }
 
 type WorkerRegistration struct {

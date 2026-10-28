@@ -504,3 +504,44 @@ func TestAdoptNewerStopCopiesStoredStopAndLeavesNewerRun(t *testing.T) {
 	default:
 	}
 }
+
+func TestOwnerlessStartDuringStoppingKeepsEpoch(t *testing.T) {
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	s := NewScheduler(
+		WithStore(store),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("control"),
+	)
+	task, err := s.CreateTask("ctl", "ctl-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	s.mu.Lock()
+	cur := s.tasks[task.ID]
+	cur.State = StateStopping
+	cur.DesiredRun = TaskDesiredStop
+	cur.OwnerWorkerID = "worker-a"
+	cur.Epoch = 3
+	cur.SpecRevision = 2
+	s.tasks[task.ID] = cur
+	// Start reloads STOPPING from the store. An unpersisted memory row
+	// would be replaced by the created task and dispatched as a new epoch.
+	if err := s.persistTaskLocked(cur); err != nil {
+		s.mu.Unlock()
+		t.Fatalf("persist: %v", err)
+	}
+	s.mu.Unlock()
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateStopping || got.Epoch != 3 || got.OwnerWorkerID != "worker-a" || got.DesiredRun != TaskDesiredRun || got.SpecRevision != 3 {
+		t.Fatalf("state=%s epoch=%d owner=%q desired=%s spec=%d", got.State, got.Epoch, got.OwnerWorkerID, got.DesiredRun, got.SpecRevision)
+	}
+}

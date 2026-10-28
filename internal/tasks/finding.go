@@ -82,6 +82,9 @@ const (
 	FindingSourceUnreachable FindingKind = "SOURCE_UNREACHABLE"
 	// FindingTaskFailed: the task is FAILED for the current spec revision; the subject is the failure class.
 	FindingTaskFailed FindingKind = "TASK_FAILED"
+	// FindingMixedVersion: a live registration is still on a protocol older
+	// than this binary (ADR 0011). Task _cluster. Claims are refused.
+	FindingMixedVersion FindingKind = "MIXED_VERSION"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.

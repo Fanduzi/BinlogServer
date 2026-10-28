@@ -112,7 +112,7 @@ if [[ ! -f "$open_path" ]]; then
 fi
 
 kill_server
-meta_sql "UPDATE backup_tasks SET state='STOPPED', epoch=0 WHERE id='${task_id}'"
+meta_sql "UPDATE backup_tasks SET state='STOPPED', epoch=0, row_generation=row_generation+1 WHERE id='${task_id}'"
 go run "$ROOT_DIR/scripts/e2e/gen-timed-segment.go" "$open_path" \
   "2020-01-01T00:20:00Z" "2020-01-01T00:30:00Z"
 

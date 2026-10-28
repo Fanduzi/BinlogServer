@@ -127,3 +127,23 @@ func TestMemoryLease_VerifyFalseAfterRelease(t *testing.T) {
 		t.Fatal("verify still true after Release")
 	}
 }
+
+func TestScheduler_StandaloneUsesMemoryLeaseDoor(t *testing.T) {
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("standalone"),
+	)
+	task, err := s.CreateTask("cluster-a", "cluster-a-key")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
+		t.Fatalf("ConfigureSource: %v", err)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		t.Fatalf("StartTask through MemoryLease: %v", err)
+	}
+	waitRunnerStarted(t, runner)
+}

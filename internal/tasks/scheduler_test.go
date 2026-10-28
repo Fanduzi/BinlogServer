@@ -713,11 +713,20 @@ func TestScheduler_StartTaskRejectsNonDispatchStartingTask(t *testing.T) {
 	s.mu.Unlock()
 
 	err = s.StartTask(task.ID)
-	if err == nil {
-		t.Fatal("expected cannot start from state STARTING, got nil")
+	if err != nil {
+		t.Fatalf("idempotent Start of STARTING: %v", err)
 	}
-	if err.Error() != "cannot start from state STARTING" {
-		t.Fatalf("expected cannot-start error, got %v", err)
+	got, getErr := s.GetTask(task.ID)
+	if getErr != nil {
+		t.Fatalf("GetTask: %v", getErr)
+	}
+	if got.OwnerWorkerID != "worker-old" || got.Epoch != 7 || got.RunID != "run-old" {
+		t.Fatalf("Start rewrote the holder: owner=%q epoch=%d run=%q", got.OwnerWorkerID, got.Epoch, got.RunID)
+	}
+	select {
+	case <-s.runner.(*fakeRunner).started:
+		t.Fatal("idempotent Start started a runner")
+	case <-time.After(30 * time.Millisecond):
 	}
 }
 

@@ -99,7 +99,7 @@ func (c connStatusSQL) queryRow(stmt string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if result == nil || result.Resultset == nil || result.Resultset.RowNumber() == 0 {
+	if result == nil || result.Resultset == nil || result.RowNumber() == 0 {
 		return nil, errEmptyBinaryLogStatus
 	}
 	if stmt == stmtVersion {

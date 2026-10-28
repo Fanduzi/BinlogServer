@@ -212,7 +212,7 @@ func TestApp_StartAndServeHealth(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// The idle keep-alive stays in the client's pool until Cleanup. Shutdown
 	// has to drop it; closing the client first would hide that.

@@ -36,21 +36,24 @@ var operatorFuncs = map[string]bool{
 var stateWriters = map[string]bool{
 	"transition_commit.go:commitTransitionLocked": true,
 	// runner / retry / lease recipes
-	"scheduler_transitions.go:markStartingLocked":      true,
-	"scheduler_transitions.go:markRetryBackoffLocked":  true,
-	"scheduler_transitions.go:markRetryingLocked":      true,
-	"scheduler_transitions.go:markRunnerReadyLocked":   true,
-	"scheduler_transitions.go:markLeaseDegradedLocked": true,
-	"scheduler_transitions.go:markLeaseRenewedLocked":  true,
-	"scheduler_transitions.go:failSafeStopLocked":      true,
-	"scheduler_transitions.go:markFailedLocked":        true,
-	"scheduler_transitions.go:writeStoppedLocked":      true,
-	"scheduler_transitions.go:finishStoredStopLocked":  true,
-	"scheduler_lifecycle.go:startTask":                 true,
-	"scheduler_lifecycle.go:runTask":                   true,
-	"scheduler_lifecycle.go:noteRemoteStopLocked":      true,
-	"scheduler_lifecycle.go:settleForeignStop":         true,
-	"scheduler_cluster_lease.go:yieldLostLeaseLocked":  true,
+	"scheduler_transitions.go:markStartingLocked":       true,
+	"scheduler_transitions.go:markRetryBackoffLocked":   true,
+	"scheduler_transitions.go:markRetryingLocked":       true,
+	"scheduler_transitions.go:markRunnerReadyLocked":    true,
+	"scheduler_transitions.go:markLeaseDegradedLocked":  true,
+	"scheduler_transitions.go:markLeaseRenewedLocked":   true,
+	"scheduler_transitions.go:failSafeStopLocked":       true,
+	"scheduler_transitions.go:markFailedLocked":         true,
+	"scheduler_transitions.go:writeStoppedLocked":       true,
+	"scheduler_transitions.go:writeStopExpiredLocked":   true, // StopExpired already decided STOPPED or delete
+	"scheduler_transitions.go:finishStoredStopLocked":   true,
+	"scheduler_transitions.go:markRestoredFailedLocked": true, // a restore with no safe position stays FAILED; it is not a runner event
+	"ownership_bridge.go:copyOwnership":                 true, // copies the phase Step already decided
+	"scheduler_lifecycle.go:startTask":                  true,
+	"scheduler_lifecycle.go:runTask":                    true,
+	"scheduler_lifecycle.go:noteRemoteStopLocked":       true,
+	"scheduler_lifecycle.go:settleForeignStop":          true,
+	"scheduler_cluster_lease.go:yieldLostLeaseLocked":   true,
 	// §29: this epoch's dump already stopped; the row stays desired RUN and is not persisted here
 	"scheduler_cluster_lease.go:yieldForResumeLocked": true,
 	// §29.10: a fenced append with no successor stays LEASE_DEGRADED, not STOPPED

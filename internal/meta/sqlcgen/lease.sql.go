@@ -19,26 +19,27 @@ import (
 
 const acquireTaskLease = `-- name: AcquireTaskLease :exec
 INSERT INTO task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
-VALUES (
+SELECT
   ?,
   ?,
   1,
-  DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
-  NOW(6)
-)
+  DATE_ADD(@bs_lease_now, INTERVAL ? MICROSECOND),
+  @bs_lease_now
+FROM (SELECT @bs_lease_now := NOW(6)) AS clk
 ON DUPLICATE KEY UPDATE
   epoch = IF(
-    lease_expire_at <= NOW(6) AND owner_worker_id <> ?,
+    lease_expire_at <= @bs_lease_now
+      AND (owner_worker_id = '' OR owner_worker_id <> ?),
     epoch + 1,
     epoch
   ),
-  owner_worker_id = IF(lease_expire_at <= NOW(6), ?, owner_worker_id),
+  owner_worker_id = IF(lease_expire_at <= @bs_lease_now, ?, owner_worker_id),
   lease_expire_at = IF(
-    lease_expire_at <= NOW(6),
-    DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
+    lease_expire_at <= @bs_lease_now,
+    DATE_ADD(@bs_lease_now, INTERVAL ? MICROSECOND),
     lease_expire_at
   ),
-  renewed_at = IF(lease_expire_at <= NOW(6), NOW(6), renewed_at)
+  renewed_at = IF(lease_expire_at <= @bs_lease_now, @bs_lease_now, renewed_at)
 `
 
 type AcquireTaskLeaseParams struct {
@@ -47,10 +48,13 @@ type AcquireTaskLeaseParams struct {
 	TtlMicros interface{}
 }
 
-// Epoch increases only when a different worker takes an expired lease.
-// The same worker_id keeps the epoch, including after restart once the lease
-// has expired. A released row stores an empty owner, so the next acquire
-// is a different owner and the epoch increases. A missing row inserts epoch 1.
+// Epoch increases when a different worker takes an expired lease, and when
+// the same worker_id re-acquires a released row whose owner is empty.
+// A non-empty same owner keeps the epoch, including after restart once the
+// lease has expired. A missing row inserts epoch 1.
+// @bs_lease_now is this statement's single NOW(6). Every comparison and every
+// written timestamp uses that pin, so a clock tick inside the statement cannot
+// split the expire check from the new deadline.
 // Assign epoch before owner_worker_id so the comparison sees the previous owner.
 func (q *Queries) AcquireTaskLease(ctx context.Context, arg AcquireTaskLeaseParams) error {
 	_, err := q.db.ExecContext(ctx, acquireTaskLease,

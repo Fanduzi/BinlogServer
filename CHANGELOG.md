@@ -12,6 +12,21 @@ Maintenance rules:
 
 ## [Unreleased]
 
+### Added
+
+- ADR 0011 PR-4：调度器改走 `ownership.Step`。迁移 `000011` 把 schema 下限抬到 11，增加 `row_generation`、`failed_reason`、`failed_at`、`tail_unreadable_since`、`pending_delete`、`task_chain`、`task_node_refusal`、`cluster_storage`、`meta_canary` 和 `worker_registrations.cluster_protocol_version`，并把 `worker_heartbeats.version` 改名为 `build_version`。不建触发器，也不建 `binlog_server_kill_trx`。应用自己的任务写入共用一处 `row_generation` 加一。过期 owner 的让出写若对不上 epoch 或世代，就是租约已丢。`cluster.side_kill=auto` 在过程没装上时是 `unavailable`，不要求这次杀才能升级。允许名单上的源错误先重试至少 2 分钟再进入 `FAILED`，期望保持 `RUN`。没有 runner 或没有数据目录的进程写出没有 owner 的 `STARTING`。认领登记 `cluster.storage`，模式不一致或仍有协议低于 11 的活注册时拒绝认领并打开 `MIXED_VERSION`。
+
+### Changed
+
+- 非终态名单上的 runner 错误（含 `SEGMENT_NOT_ON_WORKER`、封存文件已存在、未分类错误）让出为 `LEASE_DEGRADED`，期望保持 `RUN`，不再写成 `FAILED` 加期望 `STOP`。`SOURCE_SWITCHOVER` 仍是第一次就 `FAILED`。用尽 10 次的 `SOURCE_UNREACHABLE` 也是 `FAILED`（期望保持 `RUN`，epoch 写成 0），认领循环不会再 Acquire；同主人重启不把失败次数和 `last_error` 清掉。单机租约在内存里，没有 `task_leases` 行，这一步仍写入任务行，不会因为让出事务找不到租约行而被丢掉。过期的 `STOPPING` 由任一节点 `StopExpired` 收成 `STOPPED`；`pending_delete` 在同一步删除。`per_node` 删除留下目录墓碑。
+
+### Upgrade notes
+
+- 先停掉全部旧节点，再 `migrate up`，再启动新节点。新二进制在 schema 10 上拒绝启动。元数据库账号只要对该库有 `ALL`，`log_bin` 开着也能升级：迁移不建触发器和过程。没有 `PROCESS` 时，`./migrate` 会警告并继续；看得见超过 5 秒的事务则在 DDL 之前退出。原来期望是 `STOP` 的 `FAILED` 行会被改成期望 `RUN`，仍要停的任务需要再 Stop 一次。down 只在对象已经存在时才删过程和触发器。详见 `docs/releases/adr-0011-pr4.md`。
+
+### Known issues
+
+- #513（P2）仍留给 PR-5。接管之后旧 owner 恢复时的 `CHECKPOINT_WRITE_FAILED` / `busy buffer` 是客户端缓冲仍被占用，不是世代谓词没命中。这次栅栏只把对不上 epoch 或世代的让出写当成租约已丢。把所有 busy buffer 都当成租约已丢，会在本 epoch 仍握着租约时掩盖真实的 checkpoint 故障。
 ## [v0.5.83] - 2026-10-27
 
 发布说明：`docs/releases/v0.5.83.md`。没有新迁移（schema 最高仍为 10，`minRequiredSchemaVersion` 仍为 6），没有新配置项。

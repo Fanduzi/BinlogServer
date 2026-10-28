@@ -120,7 +120,7 @@ func refuseRedirect(*http.Request, []*http.Request) error {
 }
 
 func drain(body io.ReadCloser) {
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	buf := make([]byte, 512)
 	for {
 		_, err := body.Read(buf)

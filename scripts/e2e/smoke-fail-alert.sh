@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: the suite all-in-one server, mysql80, meta-primary, the task data directory, and the suite server log
-# output: proof that a sealed-file conflict and a file/pos MySQL 1236 with no stored GTID fail once with one TASK_FAILED and a released lease, that Start after FAILED returns to RUNNING, and that one metadata outage returns to RUNNING without FAILED
+# output: proof that a sealed-file conflict and a file/pos MySQL 1236 with no stored GTID yield once as LEASE_DEGRADED with desired RUN and no RETRY_BACKOFF, that Start after that yield returns to RUNNING, and that one metadata outage returns to RUNNING without FAILED
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -97,29 +97,23 @@ task_row() {
   meta_sql "SELECT CONCAT_WS('|', state, desired_run, spec_revision, failed_spec_revision, IFNULL(owner_worker_id,''), epoch, retry_attempt, consecutive_source_failures) FROM backup_tasks WHERE id=${1}"
 }
 
-assert_failed_row() {
+assert_yielded_once() {
   local id="$1"
-  local row state desired spec failed owner epoch attempt consecutive lease_owner
-  row="$(task_row "$id")"
-  IFS='|' read -r state desired spec failed owner epoch attempt consecutive <<<"$row"
-  [[ "$state" == "FAILED" ]] || fail "meta state=$state want FAILED row=$row"
-  [[ "$desired" == "STOP" ]] || fail "desired_run=$desired want STOP"
-  [[ "$spec" == "$failed" && "$spec" != "0" ]] || fail "failed_spec_revision=$failed spec_revision=$spec"
-  [[ -z "$owner" && "$epoch" == "0" ]] || fail "lease still held owner=$owner epoch=$epoch"
-  lease_owner="$(meta_sql "SELECT IFNULL(owner_worker_id,'') FROM task_leases WHERE task_id=${id}")"
-  [[ -z "$lease_owner" ]] || fail "task_leases owner=$lease_owner"
-}
-
-assert_one_failure() {
-  local id="$1"
-  local failed retries
+  local failed retries yielded
   failed="$(event_count "$id" "TASK_FAILED")"
   retries="$(event_count "$id" "TASK_RETRY_BACKOFF")"
-  [[ "$failed" == "1" ]] || fail "TASK_FAILED count=$failed want 1"
+  yielded="$(event_count "$id" "TASK_LEASE_DEGRADED")"
+  [[ "$failed" == "0" ]] || fail "TASK_FAILED count=$failed want 0"
   [[ "$retries" == "0" ]] || fail "TASK_RETRY_BACKOFF count=$retries want 0"
+  [[ "$yielded" -ge 1 ]] || fail "TASK_LEASE_DEGRADED count=$yielded want at least 1"
 }
 
-# --- sealed file: first non-allowlisted error is FAILED, then Start arms it ---
+yield_detail() {
+  local id="$1"
+  curl -fsS "$API/api/tasks/$id/events?limit=500" | jq -r '[.[] | select(.type=="TASK_LEASE_DEGRADED")] | sort_by(.sequence) | .[0].detail // empty'
+}
+
+# --- sealed file: first non-allowlisted error yields, then Start arms it ---
 echo "[fail-alert] sealed-file conflict"
 sealed_id="$(create_latest "e2e-fail-sealed-${RUN_TAG}" 310501)"
 wait_state "$sealed_id" "RUNNING"
@@ -151,31 +145,47 @@ for _ in $(seq 1 100); do
   if [[ "$sealed_state" == "RETRY_BACKOFF" ]]; then
     fail "sealed file entered RETRY_BACKOFF: $sealed_body"
   fi
-  if [[ "$sealed_state" == "FAILED" ]]; then
+  if [[ "$sealed_state" == "LEASE_DEGRADED" ]] || [[ "$(event_count "$sealed_id" "TASK_LEASE_DEGRADED")" -ge 1 ]]; then
     break
   fi
   sleep 0.3
 done
-[[ "$sealed_state" == "FAILED" ]] || fail "sealed file did not fail: $sealed_body"
-sealed_err="$(printf '%s' "$sealed_body" | jq -r '.last_error // empty')"
-[[ "$sealed_err" == *SEALED_FILE_EXISTS* ]] || fail "last_error=$sealed_err"
-sealed_epoch_api="$(printf '%s' "$sealed_body" | jq -r '.epoch // 0')"
-sealed_owner="$(printf '%s' "$sealed_body" | jq -r '.owner_worker_id // empty')"
-[[ "$sealed_epoch_api" == "0" && -z "$sealed_owner" ]] || fail "API lease not released epoch=$sealed_epoch_api owner=$sealed_owner"
-assert_one_failure "$sealed_id"
-assert_failed_row "$sealed_id"
-echo "[fail-alert] sealed task=$sealed_id FAILED once"
+[[ "$(event_count "$sealed_id" "TASK_LEASE_DEGRADED")" -ge 1 ]] || fail "sealed file did not yield: $sealed_body"
+sealed_err="$(yield_detail "$sealed_id")"
+[[ "$sealed_err" == *SEALED_FILE_EXISTS* ]] || fail "yield detail=$sealed_err"
+if [[ "$sealed_state" == "LEASE_DEGRADED" ]]; then
+  sealed_owner="$(printf '%s' "$sealed_body" | jq -r '.owner_worker_id // empty')"
+  sealed_desired="$(printf '%s' "$sealed_body" | jq -r '.desired_run // empty')"
+  [[ -z "$sealed_owner" && "$sealed_desired" == "RUN" ]] || fail "yield owner=$sealed_owner desired=$sealed_desired body=$sealed_body"
+fi
+assert_yielded_once "$sealed_id"
+echo "[fail-alert] sealed task=$sealed_id yielded once"
 
 rm -f "$sealed_dir/$sealed_source" "$sealed_dir/${sealed_source}.sealed.e${sealed_epoch}"
-start_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/tasks/$sealed_id/start")"
-[[ "$start_code" == "204" ]] || fail "restart after FAILED http=$start_code"
-wait_state "$sealed_id" "RUNNING"
+armed_ok=0
+for _ in $(seq 1 40); do
+  sealed_body="$(task_json "$sealed_id")"
+  sealed_state="$(printf '%s' "$sealed_body" | jq -r '.state // empty')"
+  if [[ "$sealed_state" == "RUNNING" ]]; then
+    armed_ok=1
+    break
+  fi
+  if [[ "$sealed_state" == "LEASE_DEGRADED" || "$sealed_state" == "FAILED" || "$sealed_state" == "STOPPED" ]]; then
+    start_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/tasks/$sealed_id/start" || true)"
+    if [[ "$start_code" == "204" ]]; then
+      wait_state "$sealed_id" "RUNNING"
+      armed_ok=1
+      break
+    fi
+  fi
+  sleep 0.5
+done
+[[ "$armed_ok" == "1" ]] || fail "sealed task did not return to RUNNING: $(task_json "$sealed_id")"
 armed="$(task_row "$sealed_id")"
-IFS='|' read -r armed_state armed_desired armed_spec armed_failed _ _ armed_attempt armed_consecutive <<<"$armed"
+IFS='|' read -r armed_state armed_desired _ _ _ _ armed_attempt armed_consecutive <<<"$armed"
 [[ "$armed_state" == "RUNNING" && "$armed_desired" == "RUN" ]] || fail "Start did not arm row=$armed"
-[[ "$armed_spec" -gt "$armed_failed" ]] || fail "spec_revision did not advance past failed_spec_revision row=$armed"
 [[ "$armed_attempt" == "0" && "$armed_consecutive" == "0" ]] || fail "counters not cleared row=$armed"
-echo "[fail-alert] Start after FAILED is RUNNING spec=$armed_spec failed_spec=$armed_failed"
+echo "[fail-alert] after the yield the sealed task is RUNNING"
 
 # --- file/pos resume, MySQL 1236, no stored GTID ---
 echo "[fail-alert] file/pos 1236 without GTID"
@@ -227,21 +237,22 @@ for _ in $(seq 1 100); do
   if [[ "$purge_state" == "RETRY_BACKOFF" ]]; then
     fail "1236 entered RETRY_BACKOFF: $purge_body"
   fi
-  if [[ "$purge_state" == "FAILED" ]]; then
+  if [[ "$purge_state" == "LEASE_DEGRADED" ]] || [[ "$(event_count "$purge_id" "TASK_LEASE_DEGRADED")" -ge 1 ]]; then
     break
   fi
   sleep 0.3
 done
-[[ "$purge_state" == "FAILED" ]] || fail "1236 did not fail on the first error: $purge_body"
-purge_err="$(printf '%s' "$purge_body" | jq -r '.last_error // empty')"
+[[ "$(event_count "$purge_id" "TASK_LEASE_DEGRADED")" -ge 1 ]] || fail "1236 did not yield on the first error: $purge_body"
+purge_err="$(yield_detail "$purge_id")"
 purge_err_l="$(printf '%s' "$purge_err" | tr '[:upper:]' '[:lower:]')"
-[[ "$purge_err" == *1236* && "$purge_err_l" == *purged* && "$purge_err_l" == *binlog* ]] || fail "last_error=$purge_err"
-purge_epoch="$(printf '%s' "$purge_body" | jq -r '.epoch // 0')"
-purge_owner="$(printf '%s' "$purge_body" | jq -r '.owner_worker_id // empty')"
-[[ "$purge_epoch" == "0" && -z "$purge_owner" ]] || fail "1236 lease not released epoch=$purge_epoch owner=$purge_owner"
-assert_one_failure "$purge_id"
-assert_failed_row "$purge_id"
-echo "[fail-alert] 1236 task=$purge_id FAILED once"
+[[ "$purge_err" == *1236* && "$purge_err_l" == *purged* && "$purge_err_l" == *binlog* ]] || fail "yield detail=$purge_err"
+if [[ "$purge_state" == "LEASE_DEGRADED" ]]; then
+  purge_owner="$(printf '%s' "$purge_body" | jq -r '.owner_worker_id // empty')"
+  purge_desired="$(printf '%s' "$purge_body" | jq -r '.desired_run // empty')"
+  [[ -z "$purge_owner" && "$purge_desired" == "RUN" ]] || fail "1236 yield owner=$purge_owner desired=$purge_desired body=$purge_body"
+fi
+assert_yielded_once "$purge_id"
+echo "[fail-alert] 1236 task=$purge_id yielded once"
 
 # --- one metadata outage, then RUNNING again without Start ---
 echo "[fail-alert] kill metadata once"

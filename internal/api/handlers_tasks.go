@@ -2,7 +2,7 @@
 // input: HTTP requests, router params, scheduler/task service interfaces, ListClusterObservation, shared source endpoint identity
 // output: REST API JSON responses including single/batch task creation, dashboard/summary counters from SQL GROUP BY (or one filtered read) with LIMIT/OFFSET task pages and replication progress on the visible page plus RUNNING-id delay counts, lookup from the unfiltered store ownership copy then SameSourceHost filter, independent STARTING/RUNNING counters, at-tip delay_seconds encoded as JSON 0 with NORMAL (omitted only when there is no event-time sample), structured 400 bodies, 400 on updates of read-only on-disk backups, plain-text 400 when a live dump's source, start, storage, or cluster_key would change, 200 when POST adopt attaches source identity to that same id, GET /api/tasks/{id}/checkpoint as the next Start file/pos with gtid_set when the stored checkpoint matches, GET /api/tasks/{id} source_chain when a VIP identity list or SOURCE_SWITCHOVER event exists, storage_alert on list, dashboard, and GET when a checkpoint or segment disagrees with the stored transactions, GET /api/tasks/{id}/replay one on-disk path per source index with the source.flavor client hint, the same route with stop_datetime returning the UTC point-in-time paths and command, the same route with stop_gtid stopping before that MySQL transaction, the same route with start_gtid_set rolling forward from a restored backup's executed GTID set, GET /api/tasks/{id}/replay/archive one ustar of that selection, and GET /api/tasks/{id}/files/{name} raw bytes of one inventory segment from local disk or a sealed uploaded object, and GET /api/tasks/{id}/window the retained chain's earliest and latest UTC event times, MySQL GTID coverage, and breaks. A held dump connection id is omitted from pending_dump_cleanup so the live dump is not shown as a leftover. GET /api/tasks/{id}/files returns JSON null for an unknown end_pos, the local event span when this process can read that segment, and source_identity for the server that wrote each file.; GET /checkpoint omits updated_at before the first checkpoint row; GET /replay drops a damaged segment and every later one and adds warning; GET /api/tasks/{id}/coverage and POST /api/tasks/{id}/restore-plan answer a point in time or one GTID from that same chain, and GET /api/coverage does it for every task on one source
 // pos: external control-plane API layer bridging clients and domain services
-// note: if this file changes, update this header and module README.md.
+// note: if this file changes, update this header and module README.md. Start and Stop map tasks.OperatorError to its HTTP status (409 or 503).
 package api
 
 import (
@@ -595,19 +595,30 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		if errors.Is(err, tasks.ErrTaskNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		if taskRecordsUnavailable(err) {
-			// A Start the record could not save is retryable (#395 QA P3).
-			writeTaskRecordsUnavailable(w, err)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeTaskActionError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeTaskActionError maps a start/stop failure to its status: missing task
+// is 404, a record write that failed stays retryable (#395 QA P3), an
+// OperatorError carries its own status, anything else is a bad request.
+func writeTaskActionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, tasks.ErrTaskNotFound) {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if taskRecordsUnavailable(err) {
+		writeTaskRecordsUnavailable(w, err)
+		return
+	}
+	var op *tasks.OperatorError
+	if errors.As(err, &op) && op != nil && op.Status != 0 {
+		http.Error(w, op.Error(), op.Status)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
 // handleTaskFileDownload streams one inventory segment.

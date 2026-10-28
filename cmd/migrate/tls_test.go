@@ -89,7 +89,7 @@ func serveMySQLTLS(t *testing.T, cert tls.Certificate) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -97,7 +97,7 @@ func serveMySQLTLS(t *testing.T, cert tls.Certificate) string {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				_ = c.SetDeadline(time.Now().Add(2 * time.Second))
 				payload := migrateGreeting()
 				hdr := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), 0}

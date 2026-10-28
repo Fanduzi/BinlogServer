@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State, one Event (LeaseUnreadable included), and the caller-supplied clock
-// output: Result, the next state, the side-effect intents, and one applied-event trace entry. NULL tail refusals are re-checked against CanRead. A lost chain directory becomes CHAIN_OWNER_GONE. ChainVerified and ChainOwnerBack reject a stopped, missing, or unreadable node
+// output: Result, the next state, the side-effect intents, and one applied-event trace entry. NULL tail refusals are re-checked against CanRead. A lost chain directory becomes CHAIN_OWNER_GONE. ChainVerified and ChainOwnerBack reject a stopped, missing, or unreadable node. Ownerless Start writes STARTING with an empty owner and does not Acquire. Ownerless Start during STOPPING records desired RUN and keeps the worker lease and epoch. TerminalError accepts SOURCE_AUTH, LOG_BIN_OFF, SOURCE_SWITCHOVER, and SOURCE_UNREACHABLE
 // pos: the single transition function; it does no I/O and reads no clock
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -326,6 +326,9 @@ func operatorStart(s State, e Event, now time.Time) partial {
 	if (s.Phase == PhaseStarting || s.Phase == PhaseRunning) && !e.ChangesSpec {
 		return appliedPair(s, Result{Decision: DecisionIdempotent, HTTP: 204, Detail: string(s.Phase)})
 	}
+	if s.Phase == PhaseStopping && e.Ownerless && !s.PendingDelete {
+		return ownerlessRestartWhileStopping(s)
+	}
 	if s.Phase == PhaseStopping || ((s.Phase == PhaseStarting || s.Phase == PhaseRunning) && e.ChangesSpec) {
 		return appliedPair(s, Result{Decision: DecisionRejected, HTTP: 409, Detail: string(s.Phase)})
 	}
@@ -339,6 +342,9 @@ func operatorStart(s State, e Event, now time.Time) partial {
 	}
 	if LeaseLive(s, now) && s.Lease.Owner != e.Node {
 		return appliedPair(s, Result{Decision: DecisionRejected, HTTP: 409, Detail: string(s.Phase) + " lease_held"})
+	}
+	if e.Ownerless {
+		return ownerlessStart(s, e, now)
 	}
 	next := s
 	next.takeLease(e.Node, now)
@@ -538,6 +544,12 @@ func terminal(s State, e Event, now time.Time) partial {
 		reason = ReasonSourceAuth
 	case CauseLogBinOff:
 		reason = ReasonLogBinOff
+	case CauseSourceSwitchover:
+		reason = ReasonSourceSwitchover
+	case CauseSourceUnreachable:
+		reason = ReasonSourceUnreachable
+	case CauseStorageInconsistent:
+		reason = ReasonStorageInconsistent
 	default:
 		return appliedPair(s, Result{Decision: DecisionRejected, Detail: "not on the terminal allowlist"})
 	}

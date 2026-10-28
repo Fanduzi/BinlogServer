@@ -366,6 +366,7 @@ func TestScheduler_AutoRetryAfterRunnerError(t *testing.T) {
 func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
 	runner := &permanentFailureRunner{}
 	s := NewScheduler(WithRunner(runner))
+	s.terminalRetry = 0
 
 	task, err := s.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
@@ -385,8 +386,8 @@ func TestScheduler_PermanentRunnerErrorTransitionsToFailed(t *testing.T) {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
 		if got.State == StateFailed {
-			if got.LastError != "SOURCE_ACCESS_DENIED: denied" {
-				t.Fatalf("expected permanent error detail, got %q", got.LastError)
+			if got.LastError != "SOURCE_ACCESS_DENIED: denied" || got.DesiredRun != TaskDesiredRun {
+				t.Fatalf("expected FAILED desired RUN, state=%s desired=%s last_error=%q", got.State, got.DesiredRun, got.LastError)
 			}
 			break
 		}
@@ -487,8 +488,8 @@ func TestScheduler_UnreachableSourceFailsAfterTenConsecutiveAttempts(t *testing.
 			t.Fatalf("GetTask returned error: %v", err)
 		}
 		if got.State == StateFailed {
-			if got.LastError != "SOURCE_UNREACHABLE: dial tcp: connection refused" {
-				t.Fatalf("expected stable source error detail, got %q", got.LastError)
+			if got.DesiredRun != TaskDesiredRun || got.LastError != "SOURCE_UNREACHABLE: dial tcp: connection refused" {
+				t.Fatalf("expected FAILED that keeps desired RUN, state=%s desired=%s last_error=%q", got.State, got.DesiredRun, got.LastError)
 			}
 			break
 		}
@@ -507,7 +508,7 @@ func TestScheduler_UnreachableSourceFailsAfterTenConsecutiveAttempts(t *testing.
 		t.Fatalf("ListEvents returned error: %v", err)
 	}
 	if n := len(events); n < 2 || events[n-2].Type != "TASK_RUNNER_ERROR" || events[n-1].Type != "TASK_FAILED" {
-		t.Fatalf("expected exhaustion to end with runner error then failed, got %#v", events)
+		t.Fatalf("expected exhaustion to end with runner error then FAILED, got %#v", events)
 	}
 }
 
@@ -625,48 +626,6 @@ func TestScheduler_TransientMetadataErrorIsNotCapped(t *testing.T) {
 	}
 }
 
-func TestScheduler_UnlistedSourceCodeFailsOnce(t *testing.T) {
-	runner := &scriptedRunner{fn: func(context.Context, Task, int) error {
-		return NewRetryableSourceError("SOURCE_THROTTLED", "source busy")
-	}}
-	s := NewScheduler(WithRunner(runner), WithRetryBackoff(time.Millisecond, time.Millisecond))
-	task, err := s.CreateTask("cluster-a", "cluster-a-key")
-	if err != nil {
-		t.Fatalf("CreateTask returned error: %v", err)
-	}
-	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
-		t.Fatalf("ConfigureSource returned error: %v", err)
-	}
-	if err := s.StartTask(task.ID); err != nil {
-		t.Fatalf("StartTask returned error: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		got, err := s.GetTask(task.ID)
-		if err != nil {
-			t.Fatalf("GetTask returned error: %v", err)
-		}
-		if got.State == StateFailed {
-			if got.LastError != "SOURCE_THROTTLED: source busy" {
-				t.Fatalf("last_error=%q", got.LastError)
-			}
-			break
-		}
-		if got.State == StateRetryBackoff {
-			t.Fatalf("unlisted source code entered RETRY_BACKOFF: %s", got.LastError)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s", got.State)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if calls := runner.callCount(); calls != 1 {
-		t.Fatalf("calls=%d, want 1", calls)
-	}
-}
-
-// TestScheduler_StartTaskTransitionsFromStartingAfterRunnerReady 验证相关行为。
 func TestScheduler_StartTaskTransitionsFromStartingAfterRunnerReady(t *testing.T) {
 	runner := &readyGateRunner{
 		entered: make(chan struct{}),

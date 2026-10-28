@@ -10,8 +10,9 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 |------|---------------|
 | `state.go` | 任务状态：期望、观察态、租约、备份链、拒绝、结论、节点。已应用事件轨迹不导出；`Step` 仍往里追加，调用方留着的 State 会随轨迹变长 |
 | `event.go` | ADR 0011 §3.2 的事件，以及续租、sweep、行锁、旧二进制更新 |
-| `step.go` | `Step`：一次事件到下一状态和意图。`per_node` 的 NULL 拒绝在 `CanRead` 恢复后不再挡住 `Acquire`。链主人目录没了时 `ChainOwnerGone` 立刻成立 |
-| `invariant.go` | 不变量 1–10 的可检查谓词。不变量 7 的 `ProgressOverdue` 只重放 `Step` 追加的未导出事件轨迹，不读 `ProgressAt` / `UnownedSince` / `NoProgress`，也不调用 `LeaseLive` / `LegalRetry`。终态 `FAILED` 只有 `spec_revision > failed_spec_revision` 才进认领集 |
+| `step.go` | `Step`：一次事件到下一状态和意图。`per_node` 的 NULL 拒绝在 `CanRead` 恢复后不再挡住 `Acquire`。链主人目录没了时 `ChainOwnerGone` 立刻成立。`TerminalError` 接受 `SOURCE_AUTH`、`LOG_BIN_OFF`、`SOURCE_SWITCHOVER`、用尽预算的 `SOURCE_UNREACHABLE` 和共享目录/对象存储里的 `STORAGE_INCONSISTENT` |
+| `step_ownerless.go` | N8 的无主 operator Start 转移（从 step.go 分出）：`ownerlessStart` 让接受进程不持租约、已在手的活租约同一决策释放；`ownerlessRestartWhileStopping` 在 STOPPING 上只推进 desired RUN 与 spec_revision，保留原 owner 与 epoch |
+| `invariant.go` | 不变量 1–10 的可检查谓词。`CheckStep` 的转移检查表是 `stepCheck` 表驱动，operator Start 一格同时覆盖推进与无主两种：STOPPING 上的无主 Start 保留原租约，其余无主 Start 不得拿租约。不变量 7 的 `ProgressOverdue` 只重放 `Step` 追加的未导出事件轨迹，不读 `ProgressAt` / `UnownedSince` / `NoProgress`，也不调用 `LeaseLive` / `LegalRetry`。终态 `FAILED` 只有 `spec_revision > failed_spec_revision` 才进认领集 |
 | `finding.go` | 结论从事实派生。事实没变时，同一键不会先关后开 |
 | `spec.go` | RTO、stale、`node_gone`、拒绝退避、迁移预检、旁路杀计划。`RefusalDelay` 在指数大于 20 或 `claim > cap>>shift` 时取 cap，移位回绕不能把期限算短 |
 | `invariant_test.go` | 安全性：固定种子的随机前缀，加深度 3 的有界穷举。字母表含旧 epoch、`StopConfirmed`、`StopExpired`、`Lock`，时钟会跳过租约 TTL |
@@ -37,12 +38,12 @@ ADR 0011 的任务所有权过渡。一个纯函数：当前任务状态加一�
 - `MigrationAllowed`、`PlanSideKill`、`BackfillChain`、`GenerationBumped`、`RefusalDelay`、`FairStepBound`
 - `New`、`DefaultParams`、`Held`
 
-`PlanSideKill` 在缺省 `off` 下不发 `KILL`。`auto` 只在直连、过程存在、演练通过、并且有 `PROCESS`（MySQL 还要 `data_locks`）时调用过程。
+`MigrationAllowed` 在活注册或长事务时拒绝，`log_bin` 开着且没有 `SUPER` 也允许（`000011` 不建例程）。`PlanSideKill` 在缺省 `off` 下不发 `KILL`。`auto` 只在直连、过程存在、演练通过、并且有 `PROCESS`（MySQL 还要 `data_locks`）时调用过程。过程不在时不调用；运行时健康把这种情况记为 `unavailable`。
 
 ## Dependencies
 
 - Upstream: 无。不导入调度器，不打开数据库。
-- Downstream: 集群元数据池用 `SessionKillBound` 武装会话超时；锁等待的打开和关闭调用 `Step`。调度器的让出和切回仍留到后续变更。catalog 一致性（F7）不在本包。
+- Downstream: 调度器的启动、停止、失败、认领和链确认调用 `Step`，不再自己推阶段。`Ownerless` 的 Start 写下空 owner 的 `STARTING`。停在 `STOPPING` 时，`Ownerless` 的 Start 只把期望改成 RUN，租约和 epoch 不动。集群元数据池用 `SessionKillBound` 武装会话超时。catalog 一致性（F7）不在本包。
 
 ## Update Rule
 

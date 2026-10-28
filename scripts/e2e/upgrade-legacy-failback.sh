@@ -2,6 +2,7 @@
 # input: two MySQL 8.0 servers in a GTID pair behind one TCP proxy, a meta MySQL, MinIO, and three binlog-server binaries (OLD, MID, NEW; default: built from FBUP_OLD_REF v0.5.57, FBUP_MID_REF 0a84917a unless FBUP_SKIP_MID=1, and this checkout; FBUP_REQUIRE_REUSE defaults to 1)
 # output: a task directory written by OLD after a real A→B→A failback (A's second stint reuses mysql-bin.00000N), carried through MID and NEW; the script prints the directory, the catalog rows, NEW's /files, /replay, /window, storage_alert, Start result and STORAGE_REPAIRED event, waits for the re-upload of repaired rows, then replays /replay with a host MySQL 8.0 mysqlbinlog (FBUP_MYSQLBINLOG) into a fresh MySQL and compares CHECKSUM TABLE with A. FBUP_MODE=cluster (default) or standalone (standalone with meta: the server restarts at epoch 1, so NEW must resume above the repaired .sealed.eN, QA #404). FBUP_CASE=plain (default) keeps the directory as OLD left it; FBUP_REQUIRE_REUSE=0 does not require the reused first-stint name (plain still asserts the chain, a continuous window, and a checksum match); object-only creates the task with local_retention_days 1 and bucket_retention_days 30, moves A's first-stint mysql-bin.00000N off disk (mv) so only its MinIO object holds it (Start must fetch it back), and after the repaired restore runs D2: FLUSH BINARY LOGS on A sets a sealed boundary, every segment before it must be SEALED and UPLOADED, the product's split retention (files aged 2 days, then another rotation) removes them from disk, 30 more transactions go to the local open segment only, then /replay must mark each removed segment bucket, /replay/archive must issue at least one MinIO GetObject per removed object key (mc admin trace) and return the removed bytes, no byte-identical copy may exist under data_dir (dot dirs included), the server TMPDIR ($FBUP_WORK/tmp) or newer /tmp files after the archive read and after the restore, the bucket members alone must restore A's CHECKSUM TABLE and gtid_executed at the boundary, and the local post-boundary members on top must reach A's final checksum; object-gone also removes that object (Start must refuse). Every case asserts that NEW changes neither the catalog nor MinIO before Start, and object-gone that the refusal changes neither. FBUP_EXPECT=repaired (default; refused for object-gone) asserts the outcome; report only prints
 # pos: upgrade coverage for the legacy failback name collision (QA 6c88ad5b P1), the object-only restore (D2), and an in-place upgrade from the latest release; not in any run-suite.sh profile; e2e.yml e2e-upgrade-failback runs plain, object-only, and object-gone from v0.5.57, plus plain from v0.5.82 (FBUP_SKIP_MID=1, FBUP_REQUIRE_REUSE=0), on every PR and alone for e2e_profile=upgrade-failback
+ Schema 11 renames worker_heartbeats.version, so it is applied only after OLD and MID have exited and no registration lease is still in the future.
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
 
@@ -80,6 +81,35 @@ rows() { m "$P_META" "SELECT file_name, epoch, state, file_path, start_pos, end_
 
 m() { local p="$1"; shift; mysql -uroot -proot -h127.0.0.1 -P"$p" --protocol=tcp -Nse "$*" 2>/dev/null; }
 gtid_of() { m "$1" "SELECT REPLACE(@@GLOBAL.gtid_executed, CHAR(10), '')"; }
+
+# v0.5.57 and the MID build select worker_heartbeats.version. Schema 11
+# renames that column, so those binaries only ever see migrations below 11.
+LEGACY_SCHEMA=10
+
+legacy_migration_dir() {
+  local dest="$1" f base n
+  mkdir -p "$dest"
+  for f in "$ROOT_DIR"/migrations/*; do
+    base="$(basename "$f")"
+    n="${base%%_*}"
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    (( 10#$n >= 11 )) && continue
+    cp "$f" "$dest/"
+  done
+}
+
+meta_dsn() { printf 'root:root@tcp(127.0.0.1:%s)/fbup?parseTime=true&multiStatements=true\n' "$P_META"; }
+
+# 000011 aborts every statement while a registration lease is still in the future.
+wait_registration_leases() {
+  local i n
+  for i in $(seq 1 40); do
+    n="$(m "$P_META" "SELECT COUNT(*) FROM fbup.worker_registrations WHERE lease_expire_at > NOW(6)")" || n=""
+    [[ -z "$n" || "$n" == "0" ]] && return 0
+    sleep 1
+  done
+  die "worker registration lease still in the future ($n)"
+}
 
 start_mysql() {
   local name="$1" port="$2" sid="$3"; shift 3
@@ -303,11 +333,17 @@ docker exec "$C_A" mysqldump -uroot -proot -h127.0.0.1 -P"$P_A" --protocol=tcp -
 SEED_GTID="$(gtid_of "$P_A")"
 log "seed gtid $SEED_GTID"
 
+LEGACY_MIG="$WORK/migrations-before-11"
+legacy_migration_dir "$LEGACY_MIG"
+DSN="$(meta_dsn)"
 if [[ -n "$MIGRATE" ]]; then
-  "$MIGRATE" up --dsn "root:root@tcp(127.0.0.1:${P_META})/fbup?parseTime=true&multiStatements=true" --path "$ROOT_DIR/migrations" >"$OUT/migrate.log" 2>&1 || die "migrate"
+  "$MIGRATE" up --dsn "$DSN" --path "$LEGACY_MIG" >"$OUT/migrate.log" 2>&1 || die "migrate"
 else
-  (cd "$ROOT_DIR" && META_DSN="root:root@tcp(127.0.0.1:${P_META})/fbup?parseTime=true&multiStatements=true" go run ./cmd/migrate up) >"$OUT/migrate.log" 2>&1 || die "migrate"
+  (cd "$ROOT_DIR" && go run ./cmd/migrate up --dsn "$DSN" --path "$LEGACY_MIG") >"$OUT/migrate.log" 2>&1 || die "migrate"
 fi
+read -r schema_version schema_dirty <<<"$(m "$P_META" "SELECT version, dirty FROM fbup.schema_migrations")"
+[[ "$schema_version" == "$LEGACY_SCHEMA" && "$schema_dirty" == "0" ]] || die "legacy schema is ${schema_version:-empty} dirty=${schema_dirty:-empty}, want $LEGACY_SCHEMA 0"
+m "$P_META" "SHOW COLUMNS FROM fbup.worker_heartbeats LIKE 'version'" | grep -q '^version' || die "worker_heartbeats.version missing before OLD"
 write_config
 
 # --- object-only (D2) begin: everything from here to "object-only (D2) end"
@@ -602,6 +638,13 @@ if [[ "$CASE" != plain ]]; then
 fi
 rows >"$OUT/rows-before-new.txt"
 objects >"$OUT/objects-before-new.txt"
+
+log "=== schema 11 after legacy binaries stopped"
+wait_registration_leases
+(cd "$ROOT_DIR" && go run ./cmd/migrate up --dsn "$(meta_dsn)" --path "$ROOT_DIR/migrations") >"$OUT/migrate-11.log" 2>&1 || die "migrate schema 11"
+read -r schema_version schema_dirty <<<"$(m "$P_META" "SELECT version, dirty FROM fbup.schema_migrations")"
+[[ "$schema_version" -ge 11 && "$schema_dirty" == "0" ]] || die "schema before NEW is ${schema_version:-empty} dirty=${schema_dirty:-empty}"
+m "$P_META" "SHOW COLUMNS FROM fbup.worker_heartbeats LIKE 'build_version'" | grep -q '^build_version' || die "worker_heartbeats.build_version missing before NEW"
 
 log "=== NEW build: $NEW_BIN"
 start_server "$NEW_BIN" new

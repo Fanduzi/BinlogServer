@@ -1,8 +1,8 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, loopback-aware metadata source policy, runner callbacks, store/lease/uploader dependencies
-// output: source validation decisions, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder and SourceSwitchBinder so a closing dump can KILL its thread with the current password and a VIP switch appends one SOURCE_SWITCHOVER event, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.; the attached health evaluator (healthEval), the periodic verifier attached by SetVerifier, a startup object-probe detail that does not change health status unless the text is a TLS transport failure, which clears after a successful upload, an object-streak detail cleared when no task remains without zeroing the streak, and HoldChain so a rotate and that evaluator share one chain snapshot (#441); source.tls shape is validated without reading PEM files (ADR 0012); Coverage, CoverageBySource, and RestorePlan answer from one ScanCover of the replay chain, and WithClusterMode makes those three return ErrCoverageUnsupported
+// output: source validation decisions, the committed row_generation copied back after a task upsert, a later smaller read left where it is, SameSourceHost/IsLoopbackHost identity, task state transitions, scheduling decisions, TaskStore PK/page/claim contracts, expired-lease listing contract including idle STOPPING, ErrExpiredLeaseLookupNotAvailable, ErrFailedUploadLookupNotAvailable, ErrTaskDumpConfigLocked when a live dump's source, start, storage, or cluster_key would change, local data dir for disk segment listing, read-only on-disk backup identity, adopt errors for leftover directories, execution coordination, store sync that cancels a live run when the row is STOPPING or STOPPED and does not replace an in-memory owner/epoch with a store row read before that publish, task persistence that keeps the newest snapshot when an older write finishes later and puts that snapshot back if a stale read landed during the write, event-store reads and inserts that do not hold the scheduler lock so one task's slow metadata I/O does not block Stop, Start, lease renewal, or progress for another task, SetRunner binding DumpSourceBinder and SourceSwitchBinder so a closing dump can KILL its thread with the current password and a VIP switch appends one SOURCE_SWITCHOVER event, and a process-local pending-dump registry that outlives runner teardown when the metadata row has no pending_dump_cleanup column A cluster process publishes the open dump connection id, retries a leftover KILL on every task state, and refuses to open another dump until that KILL is confirmed.; the attached health evaluator (healthEval), the periodic verifier attached by SetVerifier, a startup object-probe detail that does not change health status unless the text is a TLS transport failure, which clears after a successful upload, an object-streak detail cleared when no task remains without zeroing the streak, and HoldChain so a rotate and that evaluator share one chain snapshot (#441); source.tls shape is validated without reading PEM files (ADR 0012); Coverage, CoverageBySource, and RestorePlan answer from one ScanCover of the replay chain, and WithClusterMode makes those three return ErrCoverageUnsupported
 // pos: core domain orchestration layer governing backup task lifecycle and policies
-// note: if this file changes, update this header and module README.md. §29: yieldRelease, pendingRelease and yielded remember an epoch given up so a later claim can resume it. §29.10: ListTasksWithExpiredLease also returns STOPPED when desired RUN and the owner is empty.
+// note: if this file changes, update this header and module README.md. §29: yieldRelease, pendingRelease and yielded remember an epoch given up so a later claim can resume it. §29.10: ListTasksWithExpiredLease also returns STOPPED when desired RUN and the owner is empty. ADR 0011: terminalRetry defaults to 2 minutes, cluster.storage defaults to per_node, the refusal cap defaults to 600s, and a cluster gate refuses a storage mismatch or an older protocol.
 package tasks
 
 import (
@@ -20,6 +20,7 @@ import (
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/mysqltls"
+	"binlog_server/internal/ownership"
 )
 
 var ErrTaskNotFound = errors.New("task not found")
@@ -254,50 +255,12 @@ func WithFileUploader(uploader FileUploader) Option {
 	}
 }
 
-// WithClusterMode marks this process as mode cluster. Coverage and restore
-// plan then refuse instead of answering from a partial per-node directory.
-// Standalone workers also hold a lease manager, so the lease is not the signal.
-func WithClusterMode() Option {
-	return func(s *Scheduler) {
-		s.clusterMode = true
-	}
-}
-
-// WithClusterLeaseManager 启用 cluster lease 管理。
-func WithClusterLeaseManager(manager LeaseManager) Option {
-	return func(s *Scheduler) {
-		s.leaseManager = manager
-	}
-}
-
-// WithClusterWorkerID 设置当前实例在 cluster 中的 worker_id。
-func WithClusterWorkerID(workerID string) Option {
-	return func(s *Scheduler) {
-		s.clusterWorkerID = workerID
-	}
-}
-
 // WithLeaseClock makes the scheduler record each acquire and renew of its
 // leases on clock, and mark an epoch lost when renew says so or grace runs
 // out. The runner's write fence reads the same clock (ADR 0009 P2-6, #417).
 func WithLeaseClock(clock *LeaseClock) Option {
 	return func(s *Scheduler) {
 		s.leaseClock = clock
-	}
-}
-
-// WithClusterLease 配置 lease 的 TTL、续租周期和降级宽限时间。
-func WithClusterLease(ttl, renewInterval, grace time.Duration) Option {
-	return func(s *Scheduler) {
-		if ttl > 0 {
-			s.leaseTTL = ttl
-		}
-		if renewInterval > 0 {
-			s.leaseRenewInterval = renewInterval
-		}
-		if grace > 0 {
-			s.leaseGrace = grace
-		}
 	}
 }
 
@@ -357,6 +320,19 @@ type Scheduler struct {
 
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+	// terminalRetry is how long SOURCE_AUTH and LOG_BIN_OFF stay retryable
+	// before Step may write FAILED (ADR 0011 N7). Zero closes the window.
+	terminalRetry time.Duration
+	terminalSince map[string]time.Time
+	// storageMode is cluster.storage, per_node or shared.
+	storageMode string
+	// refusalCap is health.refusal_retry_cap_sec. Zero uses 600s.
+	refusalCap time.Duration
+	// clusterGate registers storage and counts older protocols before a claim.
+	clusterGate ClusterGate
+	// refusals is the in-memory task_node_refusal table. A claim skips a node
+	// whose refusal has not expired.
+	refusals map[string]map[string]ownership.Refusal
 	// 内部依赖调用超时治理：用于 store/lease/uploader 边界，避免无界阻塞。
 	internalReadTimeout   time.Duration
 	internalWriteTimeout  time.Duration
@@ -475,6 +451,9 @@ func NewScheduler(opts ...Option) *Scheduler {
 
 		retryBaseDelay:        time.Second,
 		retryMaxDelay:         30 * time.Second,
+		terminalRetry:         2 * time.Minute,
+		storageMode:           string(ownership.StoragePerNode),
+		refusalCap:            600 * time.Second,
 		leaseTTL:              15 * time.Second,
 		leaseRenewInterval:    5 * time.Second,
 		leaseGrace:            30 * time.Second,
@@ -596,8 +575,22 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 		s.writeEventBatch(batch)
 		ctx, cancel := s.withWriteTimeout(context.Background())
 		err := s.store.UpsertTask(ctx, snapshot)
+		var rowGen int64
+		rowGenOK := false
+		if err == nil {
+			if reader, ok := s.store.(rowGenerationReader); ok {
+				if g, gerr := reader.TaskRowGeneration(ctx, snapshot.ID); gerr == nil {
+					rowGen = g
+					rowGenOK = true
+				}
+			}
+		}
 		cancel()
 		s.mu.Lock()
+		if rowGenOK {
+			snapshot.RowGeneration = rowGen
+			snapshot.RowGenerationKnown = true
+		}
 		if err != nil {
 			s.notePersistFailureLocked(task.ID, snapshot.State, err)
 			return err
@@ -606,8 +599,13 @@ func (s *Scheduler) persistTaskLocked(task Task) error {
 		latest := s.persisted[task.ID]
 		if latest.gen == gen {
 			latest.published = gen
+			latest.task.RowGeneration = snapshot.RowGeneration
+			latest.task.RowGenerationKnown = snapshot.RowGenerationKnown
 			s.persisted[task.ID] = latest
 			s.restorePublishedTaskLocked(snapshot)
+			if rowGenOK {
+				s.noteRowGenerationLocked(snapshot.ID, rowGen)
+			}
 			return nil
 		}
 		gen = latest.gen

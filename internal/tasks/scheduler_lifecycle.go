@@ -1,10 +1,10 @@
 // Package tasks provides module-level functionality for tasks.
 // input: start/stop commands, metadata source policy, runner callbacks, typed source errors, cancellation signals, ListStartingUnownedTasks, ExpiredLeaseTaskLister
-// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, expired-lease takeover that errors when lookup is missing, FAILED on the first error that is not on the retry allowlist (SOURCE_UNREACHABLE budget of 10, transient metadata text, OBJECT_PURGE_FAILED) including an unclassified runner error and MySQL 1236 with no stored GTID, lease release with desired_run STOP and failed_spec_revision, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released; a run that already wrote FAILED is not turned into STOPPING by its own desired STOP row read back by a GET or sync before the run exits. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump, then proves and renews its lease at that epoch before the dump opens (#346)., and a legacy failback directory repaired or refused (RepairLegacyFailback) before the runner starts
+// output: guarded start/stop, a cluster run launched with the owner and epoch StartTask just acquired, a same-owner reclaim that does not Acquire, refusal to run a cluster dump at epoch 0, a control-plane stop that stays STOPPING while another worker owns the lease, cancellation of a local dump when the shared row is STOPPING or STOPPED, an idle store reload that keeps this process's pending dump, refusal to start or stop a read-only on-disk backup, a higher open epoch for an adopted leftover directory, ClaimRunnableTasks (remote stop, starting, expired, owned idle) that leaves a live owned run alone and does not Acquire a lease this worker already holds, and reopens a STOPPING row whose desired is RUN on that same epoch without finishing it as a stop or releasing that lease, expired-lease takeover that errors when lookup is missing, SOURCE_SWITCHOVER is FAILED on the first occurrence and desired stays RUN; the tenth SOURCE_UNREACHABLE is FAILED with the failure count and last_error kept, and a same-owner restart does not clear them or Acquire; every other error that is not on the retry allowlist (transient metadata text, OBJECT_PURGE_FAILED), including an unclassified runner error and MySQL 1236 with no stored GTID, yields LEASE_DEGRADED and keeps desired RUN, a lease-epoch handoff that stops this runner and releases only this epoch without writing FAILED or RETRY_BACKOFF, bounded SOURCE_UNREACHABLE retry read and written with retry_attempt and consecutive_source_failures on the task row, reset only by runner ready and operator Start, a retry that stops when the stored row is already a newer Stop, an error during that Stop (including a KILL that could not reach the source) that stays STOPPED with pending_dump_cleanup instead of FAILED, cancellation orchestration, and a run-exit done close that happens before the scheduler lock is released; a run that already wrote FAILED is not turned into STOPPING by its own desired STOP row read back by a GET or sync before the run exits. The holder renews its lease until Close returns. A worker that did not hold the dump does not write STOPPED for it; an expired lease fences the published connection id. Cluster schema 3 refuses to take over another worker's dump until migration 000004. Start KILL a pending connection before opening a dump, then proves and renews its lease at that epoch before the dump opens (#346)., and a legacy failback directory repaired or refused (RepairLegacyFailback) before the runner starts
 // note P2-6c (#421): a live run whose shared row is FAILED by another epoch is not a remote Stop: the run stops, its lease epoch is marked lost, memory takes the FAILED row and nothing is written
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
-// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost; ClaimExpiredTasks also claims STOPPED when desired RUN and the owner is empty
+// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost and skips a task_node_refusal row that is still open; ClaimExpiredTasks finalizes an expired STOPPING lease with StopExpired and also claims STOPPED when desired RUN and the owner is empty
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -71,6 +71,12 @@ type taskStart struct {
 }
 
 func (s *Scheduler) StartTask(id string) error {
+	s.mu.Lock()
+	before := int64(0)
+	if current, ok := s.tasks[id]; ok {
+		before = current.SpecRevision
+	}
+	s.mu.Unlock()
 	if err := s.writeStartIntent(id); err != nil {
 		return err
 	}
@@ -79,6 +85,13 @@ func (s *Scheduler) StartTask(id string) error {
 	// The control plane has no runner. The worker loop is the only starter.
 	// A process that has a runner converges now so all-in-one does not wait for the tick.
 	if s.runner == nil {
+		return nil
+	}
+	s.mu.Lock()
+	current, ok := s.tasks[id]
+	idempotent := ok && current.SpecRevision == before && (current.State == StateRunning || current.State == StateStarting)
+	s.mu.Unlock()
+	if idempotent {
 		return nil
 	}
 	_, err := s.convergeTask(id)
@@ -130,23 +143,9 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	if done, ok := s.runs[id]; ok && !isClosed(done) {
 		hasLiveRun = true
 	}
-	canClaimDispatched := task.State == StateStarting &&
-		task.OwnerWorkerID == "" &&
-		task.Epoch == 0 &&
-		task.RunID == "" &&
-		s.runner != nil &&
-		s.leaseManager != nil
-	canTakeoverExpired := s.runner != nil && s.leaseManager != nil && !hasLiveRun &&
-		(task.State == StateRunning || task.State == StateLeaseDegraded)
-	canResumeIdle := s.runner != nil && !hasLiveRun &&
-		(task.State == StateRunning || task.State == StateLeaseDegraded || task.State == StateStarting || task.State == StateRetryBackoff) &&
-		(s.leaseManager == nil || task.OwnerWorkerID == s.clusterWorkerID)
-	// 仅允许 claim “干净的 dispatch STARTING 任务”，避免误接管非预期中间态。
-	// 过期 RUNNING/LEASE_DEGRADED 可在 Acquire 成功后接管；Acquire 失败则不改状态。
-	// 本机空闲的 active 任务（开机接上 / 单机无租约表）走 canResumeIdle，不先 Stop。
-	if task.State != StateCreated && task.State != StateStopped && task.State != StateRetryBackoff && task.State != StateFailed && !canClaimDispatched && !canTakeoverExpired && !canResumeIdle {
+	if err := s.claimEligibilityLocked(task, hasLiveRun); err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("cannot start from state %s", task.State)
+		return err
 	}
 	// Scheduler 在 start 前强制校验最小 source config。
 	if task.Source.Host == "" || task.Source.Port == 0 || task.Source.User == "" {
@@ -164,8 +163,16 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	}
 	// A spec-0 active row still says desired STOP. The loop is starting it
 	// from the observed state. Persist RUN so the next read does not cancel it.
+	// The claim gate below reloads the memory row after it drops the lock, so
+	// the decision has to be on that row or the reload puts STOP back.
 	if effectiveDesired(task) == TaskDesiredRun {
 		task.DesiredRun = TaskDesiredRun
+	}
+	if current, ok := s.tasks[id]; ok {
+		current.DesiredRun = task.DesiredRun
+		current.RetryAttempt = task.RetryAttempt
+		current.ConsecutiveSourceFailures = task.ConsecutiveSourceFailures
+		s.tasks[id] = current
 	}
 	// Step 2: control-plane dispatch-only 分支（本地无 runner）。
 	// cluster control-plane 允许 dispatch-only start：仅写入 STARTING，由 worker 接管执行。
@@ -190,42 +197,17 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	// Step 3: worker 执行分支。只有所有权真正变化时才 Acquire。
 	// 本进程已经持有未过期租约时不调用 Acquire，epoch 保持不变。
 	if opts.acquireLease && s.refusesUnfencedTakeoverLocked(task) {
-		owner, epoch := task.OwnerWorkerID, task.Epoch
-		lease := s.leaseManager
-		s.mu.Unlock()
-		if lease != nil && owner != "" && epoch > 0 {
-			leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
-			held, err := lease.Verify(leaseCtx, id, owner, epoch)
-			cancelLease()
-			if err != nil || held {
-				return ErrLeaseNotAcquired
-			}
-		}
-		s.mu.Lock()
-		task, ok = s.tasks[id]
-		if !ok {
-			s.mu.Unlock()
-			return ErrTaskNotFound
-		}
-		if !s.refusesUnfencedTakeoverLocked(task) {
-			s.mu.Unlock()
-			return s.startTask(id, opts)
-		}
-		if task.State == StateRetryBackoff && task.LastError == ClusterDumpFenceSchemaMessage && task.DesiredRun == TaskDesiredRun {
-			s.mu.Unlock()
-			return nil
-		}
-		log.Printf("task=%s %s", id, ClusterDumpFenceSchemaMessage)
-		task.DesiredRun = TaskDesiredRun
-		if err := s.markRetryBackoffLocked(task, ClusterDumpFenceSchemaMessage); err != nil {
-			s.mu.Unlock()
-			return err
-		}
-		s.mu.Unlock()
-		return nil
+		return s.rejectUnfencedTakeover(id, task, opts)
 	}
 	acquiredNow := false
 	killedLeftover := false
+	if s.leaseManager != nil && opts.acquireLease {
+		var gateErr error
+		if task, gateErr = s.claimLeaseGateLocked(id); gateErr != nil {
+			s.mu.Unlock()
+			return gateErr
+		}
+	}
 	if s.leaseManager != nil && opts.acquireLease {
 		previousOwner := task.OwnerWorkerID
 		previousState := task.State
@@ -366,8 +348,12 @@ func (s *Scheduler) startTask(id string, opts taskStart) error {
 	// STARTING 写回这里，但 owner/epoch/runID 已经在上面写好。落库会放开锁，
 	// 并发的 GetTask 可能把旧行写进 s.tasks；runner 仍用这一份，不用落库期间的内存。
 	// applied_spec_revision 是这次打开的 spec。下一次 spec 更大才关掉再开一条。
+	// 操作员 Start 才清 last_error。同主人崩溃后续跑要留着上一笔失败，
+	// 否则重启后的 STARTING 把连续失败的原因抹掉。
 	task.State = StateStarting
-	task.LastError = ""
+	if opts.resetBudget {
+		task.LastError = ""
+	}
 	task.AppliedSpecRevision = task.SpecRevision
 	task.UpdatedAt = time.Now()
 	if err := s.markStartingLocked(task); err != nil {
@@ -559,7 +545,8 @@ func (s *Scheduler) ClaimStartingTasks() (int, error) {
 }
 
 // ClaimExpiredTasks 让在线 worker 接管租约已过期的 RUNNING/LEASE_DEGRADED/RETRY_BACKOFF 任务。
-// 租约已过期的 STOPPING 只收成 STOPPED，不在这里重新拉起。
+// 租约已过期、期望是 STOP 的 STOPPING 只收成 STOPPED，不在这里重新拉起。
+// 期望是 RUN 的 STOPPING 是 Close 之前到达的 Start，留给持有者重开。
 func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 	s.mu.Lock()
 	store := s.store
@@ -585,7 +572,9 @@ func (s *Scheduler) ClaimExpiredTasks() (int, error) {
 	claimed := 0
 	for _, item := range list {
 		if item.State == StateStopping {
-			s.completeIdleStop(item)
+			if item.DesiredRun != TaskDesiredRun {
+				s.completeIdleStop(item)
+			}
 			continue
 		}
 		if !isExpiredLeaseTakeoverState(item.State) && !claimableStoppedRun(item) {
@@ -644,7 +633,7 @@ func (s *Scheduler) claimOwnedIdleTasks() (int, error) {
 	for _, id := range ids {
 		s.mu.Lock()
 		task, ok := s.tasks[id]
-		if !ok || (!isClaimableActiveState(task.State) && !claimableStoppedRun(task)) {
+		if !ok || (!isClaimableActiveState(task.State) && !claimableStoppedRun(task) && !claimableStoppingReopen(task)) {
 			s.mu.Unlock()
 			continue
 		}
@@ -690,6 +679,12 @@ func isClaimableActiveState(state State) bool {
 // An operator Stop is desired STOP and stays terminal (#454, design §29.10).
 func claimableStoppedRun(task Task) bool {
 	return task.State == StateStopped && task.DesiredRun == TaskDesiredRun && task.OwnerWorkerID == ""
+}
+
+// claimableStoppingReopen is an operator Start that landed while Close was
+// still in flight. The owner starts that epoch again; it is not a stop.
+func claimableStoppingReopen(task Task) bool {
+	return task.State == StateStopping && effectiveDesired(task) == TaskDesiredRun
 }
 
 // prepareStartingTaskClaim 把 store 里的 STARTING 任务注入内存，并过滤本机不可接管场景。
@@ -906,7 +901,9 @@ func (s *Scheduler) applyRemoteStops() {
 			}
 			continue
 		}
-		if item.State != StateStopping {
+		if item.State != StateStopping || item.DesiredRun == TaskDesiredRun {
+			// desired RUN means a Start arrived before Close. Finishing
+			// that row would release the worker's lease and bump the epoch.
 			continue
 		}
 		s.completeIdleStop(item)
@@ -1010,18 +1007,28 @@ func (s *Scheduler) completeIdleStop(task Task) {
 // settleForeignStop writes STOPPED only when this process is not leaving a
 // dump behind. A held connection is fenced into pending cleanup. A cluster
 // without migration 000004 does not finish another worker's dump.
+
+// settleAlreadyDoneLocked reports the task is already settled in memory: a
+// STOPPED row, or a live run that only needs the remote-stop note flushed.
+// Caller holds s.mu and keeps it on false.
+func (s *Scheduler) settleAlreadyDoneLocked(task Task) bool {
+	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
+		return true
+	}
+	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
+		s.noteRemoteStopLocked(task)
+		s.flushPendingEventsLocked()
+		return true
+	}
+	return false
+}
+
 func (s *Scheduler) settleForeignStop(task Task) error {
 	if task.State == StateStopped || task.State == StateCreated || task.State == StateFailed {
 		return nil
 	}
 	s.mu.Lock()
-	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
-		s.mu.Unlock()
-		return nil
-	}
-	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
-		s.noteRemoteStopLocked(task)
-		s.flushPendingEventsLocked()
+	if s.settleAlreadyDoneLocked(task) {
 		s.mu.Unlock()
 		return nil
 	}
@@ -1057,13 +1064,7 @@ func (s *Scheduler) settleForeignStop(task Task) error {
 	}
 
 	s.mu.Lock()
-	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
-		s.mu.Unlock()
-		return nil
-	}
-	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
-		s.noteRemoteStopLocked(task)
-		s.flushPendingEventsLocked()
+	if s.settleAlreadyDoneLocked(task) {
 		s.mu.Unlock()
 		return nil
 	}
@@ -1122,13 +1123,7 @@ func (s *Scheduler) settleForeignStop(task Task) error {
 	}
 
 	s.mu.Lock()
-	if current, ok := s.tasks[task.ID]; ok && current.State == StateStopped {
-		s.mu.Unlock()
-		return nil
-	}
-	if done, ok := s.runs[task.ID]; ok && !isClosed(done) {
-		s.noteRemoteStopLocked(task)
-		s.flushPendingEventsLocked()
+	if s.settleAlreadyDoneLocked(task) {
 		s.mu.Unlock()
 		return nil
 	}
@@ -1144,13 +1139,21 @@ func (s *Scheduler) settleForeignStop(task Task) error {
 	}
 	s.tasks[task.ID] = base
 	releaseOwner, releaseEpoch := base.OwnerWorkerID, base.Epoch
-	if err := s.markStoppedLocked(task.ID); err != nil {
+	if err := s.markStopExpiredLocked(task.ID); err != nil {
 		s.mu.Unlock()
 		log.Printf("persist task transition failed task=%s state=%s err=%v", task.ID, StateStopped, err)
 		return err
 	}
+	// A newer Start kept the row. Releasing here would drop the epoch the
+	// holder is about to reopen.
+	landed := false
+	if mem, ok := s.tasks[task.ID]; ok && mem.State == StateStopped {
+		landed = true
+	}
 	s.mu.Unlock()
-	s.releaseTaskLease(task.ID, releaseOwner, releaseEpoch)
+	if landed {
+		s.releaseTaskLease(task.ID, releaseOwner, releaseEpoch)
+	}
 	return nil
 }
 
@@ -1343,20 +1346,28 @@ func (s *Scheduler) runTask(ctx context.Context, id string, task Task, done chan
 			s.SignalFailure(Finding{TaskID: id, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical,
 				Detail: "replication paused: the metadata store refused a write; the dump stopped and retries with backoff until the store accepts writes: " + errMsg})
 		}
-		// Allowlist only: SOURCE_UNREACHABLE (budget 10), transient metadata
-		// text, and OBJECT_PURGE_FAILED. Anything else fails once.
-		if !retryAllowed(err) {
-			s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
-			return
-		}
-		if IsSourceUnreachable(err) {
-			consecutiveSourceFailures++
-			if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
+		// N7: SOURCE_AUTH and LOG_BIN_OFF stay on the retry path until
+		// terminalRetry has elapsed. Then Step writes FAILED and desired stays RUN.
+		// SOURCE_SWITCHOVER is not in that window: it is FAILED on the first
+		// occurrence. The tenth SOURCE_UNREACHABLE is FAILED too: yielding
+		// it would release the lease, and the next claim would Acquire a
+		// new epoch and clear last_error. Other non-allowlist errors are
+		// EpochLost, not FAILED.
+		allowlistRetry := isTerminalAllowlist(err) && s.terminalWindowOpen(id, time.Now())
+		if !allowlistRetry {
+			if !retryAllowed(err) {
 				s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
 				return
 			}
-		} else {
-			consecutiveSourceFailures = 0
+			if IsSourceUnreachable(err) {
+				consecutiveSourceFailures++
+				if consecutiveSourceFailures >= maxConsecutiveRetryableSourceFailures {
+					s.failRunLocked(id, &current, attempt, consecutiveSourceFailures, errMsg)
+					return
+				}
+			} else {
+				consecutiveSourceFailures = 0
+			}
 		}
 
 		attempt++

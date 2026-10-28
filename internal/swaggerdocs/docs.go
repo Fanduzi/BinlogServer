@@ -2086,7 +2086,8 @@ const docTemplate = `{
                 "HEALTH_STORE_UNAVAILABLE",
                 "META_LOCK_STALLED",
                 "SOURCE_UNREACHABLE",
-                "TASK_FAILED"
+                "TASK_FAILED",
+                "MIXED_VERSION"
             ],
             "x-enum-varnames": [
                 "FindingTaskPersistFailed",
@@ -2111,7 +2112,8 @@ const docTemplate = `{
                 "FindingHealthStoreUnavailable",
                 "FindingMetaLockStalled",
                 "FindingSourceUnreachable",
-                "FindingTaskFailed"
+                "FindingTaskFailed",
+                "FindingMixedVersion"
             ]
         },
         "tasks.FindingSeverity": {
@@ -2354,6 +2356,10 @@ const docTemplate = `{
                 },
                 "epoch": {
                     "type": "integer"
+                },
+                "failed_reason": {
+                    "description": "FailedReason is why the row is FAILED. Console reads it. Empty on every\nother phase. ADR 0011 allows SOURCE_AUTH, LOG_BIN_OFF, SOURCE_SWITCHOVER,\nSOURCE_UNREACHABLE, CHAIN_OWNER_GONE, and LEGACY_UNKNOWN.",
+                    "type": "string"
                 },
                 "id": {
                     "type": "string"

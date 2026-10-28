@@ -226,7 +226,7 @@ func connectErrorCounts(t *testing.T, db *sql.DB) connectCounts {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var cache strings.Builder
 	for rows.Next() {
 		var ip string
@@ -281,7 +281,7 @@ func runPreferredBurst(t *testing.T, base, host string, port int, mode string, s
 				errs[i] = err
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			raw, _ := io.ReadAll(resp.Body)
 			if resp.StatusCode != http.StatusCreated {
 				errs[i] = fmt.Errorf("create %d: %s", resp.StatusCode, raw)
@@ -299,7 +299,7 @@ func runPreferredBurst(t *testing.T, base, host string, port int, mode string, s
 				return
 			}
 			raw, _ = io.ReadAll(start.Body)
-			start.Body.Close()
+			_ = start.Body.Close()
 			if start.StatusCode != http.StatusOK && start.StatusCode != http.StatusAccepted && start.StatusCode != http.StatusNoContent {
 				errs[i] = fmt.Errorf("start %d: %s", start.StatusCode, raw)
 			}
@@ -365,7 +365,7 @@ func postTask(t *testing.T, base, body string) tasks.Task {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create %d: %s", resp.StatusCode, raw)
@@ -383,7 +383,7 @@ func postAction(t *testing.T, base, id, action string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("%s %d: %s", action, resp.StatusCode, raw)
@@ -400,7 +400,7 @@ func waitState(t *testing.T, base, id string, want tasks.State) tasks.Task {
 			t.Fatal(err)
 		}
 		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err := json.Unmarshal(raw, &last); err != nil {
 			t.Fatalf("task json: %v body %s", err, raw)
 		}
@@ -481,7 +481,7 @@ func connTypes(t *testing.T, db *sql.DB, query string) []string {
 
 func scanTypes(t *testing.T, rows *sql.Rows) []string {
 	t.Helper()
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var kind string
@@ -503,7 +503,7 @@ func adminDB(t *testing.T, port int) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 

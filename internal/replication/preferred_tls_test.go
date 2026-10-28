@@ -59,7 +59,7 @@ func greet(t *testing.T, offers bool) *greetServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	srv := &greetServer{addr: ln.Addr().String()}
 	var wg sync.WaitGroup
 	go func() {
@@ -72,7 +72,7 @@ func greet(t *testing.T, offers bool) *greetServer {
 			wg.Add(1)
 			go func(c net.Conn) {
 				defer wg.Done()
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				payload := mysqlGreeting(offers)
 				hdr := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), 0}
 				_, _ = c.Write(append(hdr, payload...))
@@ -95,7 +95,7 @@ func greetAndClose(t *testing.T) *greetServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	srv := &greetServer{addr: ln.Addr().String()}
 	go func() {
 		for {
@@ -104,7 +104,7 @@ func greetAndClose(t *testing.T) *greetServer {
 				return
 			}
 			srv.accepts.Add(1)
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 	return srv
@@ -126,7 +126,7 @@ func dialPreferred(t *testing.T, addr string) {
 	}
 	conn, err := connectSource(context.Background(), src)
 	if conn != nil {
-		conn.Close()
+		_ = conn.Close()
 	}
 	if err == nil {
 		t.Fatal("preferred dial succeeded against a greeting-only server")

@@ -69,6 +69,7 @@ func TestGetBetweenFailedAndRunExitKeepsFailed(t *testing.T) {
 	lease := &holdReleaseLease{MemoryLease: NewMemoryLease(), entered: make(chan struct{}), proceed: make(chan struct{})}
 	runner := &epochRunner{lease: lease}
 	s := NewScheduler(WithStore(newFakeStore()), WithRunner(runner), WithClusterLeaseManager(lease), WithClusterWorkerID("standalone"))
+	s.terminalRetry = 0
 	task, err := s.CreateTask("a", "a")
 	if err != nil {
 		t.Fatal(err)

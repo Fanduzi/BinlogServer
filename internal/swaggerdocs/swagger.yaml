@@ -459,6 +459,7 @@ definitions:
     - META_LOCK_STALLED
     - SOURCE_UNREACHABLE
     - TASK_FAILED
+    - MIXED_VERSION
     type: string
     x-enum-varnames:
     - FindingTaskPersistFailed
@@ -484,6 +485,7 @@ definitions:
     - FindingMetaLockStalled
     - FindingSourceUnreachable
     - FindingTaskFailed
+    - FindingMixedVersion
   tasks.FindingSeverity:
     enum:
     - CRITICAL
@@ -663,6 +665,12 @@ definitions:
         type: string
       epoch:
         type: integer
+      failed_reason:
+        description: |-
+          FailedReason is why the row is FAILED. Console reads it. Empty on every
+          other phase. ADR 0011 allows SOURCE_AUTH, LOG_BIN_OFF, SOURCE_SWITCHOVER,
+          SOURCE_UNREACHABLE, CHAIN_OWNER_GONE, and LEGACY_UNKNOWN.
+        type: string
       id:
         type: string
       last_error:

@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: the event enum in ADR 0011 §3.2, plus the clock the caller passes to Step
-// output: Event and Cause, the only inputs Step reads besides State
+// output: Event and Cause, the only inputs Step reads besides State; Ownerless marks an API-only Start that does not Acquire
 // pos: names of every transition the ADR lists
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -38,21 +38,28 @@ const (
 )
 
 // Cause classifies a runner failure. TerminalError accepts only the closed
-// allowlist. Everything else is RetryableError or EpochLost.
+// allowlist: source authentication, log_bin off, a VIP switch this backup
+// cannot continue, a SOURCE_UNREACHABLE streak that has used its budget,
+// and a storage inconsistency in the shared catalog or object store that
+// no peer can repair by taking over. Everything else is RetryableError or
+// EpochLost.
 type Cause string
 
 const (
-	CauseSourceAuth         Cause = "SOURCE_AUTH"
-	CauseLogBinOff          Cause = "LOG_BIN_OFF"
-	CauseUnclassified       Cause = "UNCLASSIFIED"
-	CauseENOENT             Cause = "ENOENT"
-	CauseENOSPC             Cause = "ENOSPC"
-	CauseEROFS              Cause = "EROFS"
-	CauseWriteFenced        Cause = "WRITE_FENCED"
-	CauseLeaseUnreadable    Cause = "LEASE_UNREADABLE"
-	CauseLockWait           Cause = "1205"
-	CauseIdleKilled         Cause = "1927"
-	CauseSegmentNotOnWorker Cause = "SEGMENT_NOT_ON_WORKER"
+	CauseSourceAuth          Cause = "SOURCE_AUTH"
+	CauseLogBinOff           Cause = "LOG_BIN_OFF"
+	CauseSourceSwitchover    Cause = "SOURCE_SWITCHOVER"
+	CauseSourceUnreachable   Cause = "SOURCE_UNREACHABLE"
+	CauseStorageInconsistent Cause = "STORAGE_INCONSISTENT"
+	CauseUnclassified        Cause = "UNCLASSIFIED"
+	CauseENOENT              Cause = "ENOENT"
+	CauseENOSPC              Cause = "ENOSPC"
+	CauseEROFS               Cause = "EROFS"
+	CauseWriteFenced         Cause = "WRITE_FENCED"
+	CauseLeaseUnreadable     Cause = "LEASE_UNREADABLE"
+	CauseLockWait            Cause = "1205"
+	CauseIdleKilled          Cause = "1927"
+	CauseSegmentNotOnWorker  Cause = "SEGMENT_NOT_ON_WORKER"
 )
 
 // Event is one proposed transition. Now is not a field; Step receives it.
@@ -73,6 +80,11 @@ type Event struct {
 	// LeaseUnreadable means the decider could not read task_leases and must not
 	// assume the lease is still its own.
 	LeaseUnreadable bool
+	// Ownerless is an OperatorStart from a process that has no runner or no
+	// data directory. It writes STARTING with an empty owner and does not
+	// bump the epoch, so a node that has the directory can claim the row.
+	// The default is false: a normal Start still Acquires.
+	Ownerless bool
 }
 
 // Held fills the epoch fence from the lease the caller believes it holds.

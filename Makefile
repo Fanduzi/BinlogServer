@@ -16,7 +16,7 @@ help:
 	@echo "  make ui-build                   # test+build console -> internal/ui/static (/ui/), frontend -> internal/ui/classic (/ui-classic/), check ESM plus Console markers"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
 	@echo "  make e2e-topology-check         # validate E2E database topology without Docker"
-	@echo "  make e2e-quick                  # run quick e2e (includes smoke on 5.7/8.0/8.4/Percona and smoke-version-restore)"
+	@echo "  make e2e-quick                  # run quick e2e (includes smoke on 5.7/8.0/8.4/Percona, smoke-version-restore, smoke-least-privilege-migrate)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
 	@echo "  make e2e-observability          # run observability e2e (smoke-observability with OTLP tracing to a local sink)"
 	@echo "  make e2e-scale                  # opt-in 1000-control-task / 100-live-stream scale evidence"

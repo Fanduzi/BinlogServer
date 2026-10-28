@@ -810,6 +810,9 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 			facts.Complete[health.ScopeChainLocal] = true
 			if fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {
 				fence.ChainVerified = true
+				if e.s != nil && !e.s.confirmChainVerified(task.ID, fence.Node) {
+					fence.ChainVerified = false
+				}
 			}
 		}
 		if facts.Chain != nil {

@@ -100,26 +100,26 @@ func peekMySQLGreeting(ctx context.Context, addr string) (net.Conn, []byte, erro
 		return nil, nil, err
 	}
 	if err := raw.SetReadDeadline(time.Now().Add(sourceConnectTimeout)); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		return nil, nil, err
 	}
 	hdr := make([]byte, 4)
 	if _, err := io.ReadFull(raw, hdr); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		return nil, nil, err
 	}
 	n := int(hdr[0]) | int(hdr[1])<<8 | int(hdr[2])<<16
 	if n <= 0 || n > 1<<20 {
-		raw.Close()
+		_ = raw.Close()
 		return nil, nil, fmt.Errorf("source greeting length %d", n)
 	}
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(raw, payload); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		return nil, nil, err
 	}
 	if err := raw.SetReadDeadline(time.Time{}); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		return nil, nil, err
 	}
 	rawPacket := append(append([]byte{}, hdr...), payload...)
@@ -137,7 +137,7 @@ func sourceSyncerTLS(ctx context.Context, source tasks.SourceConfig) (*tls.Confi
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	res, err := conn.Execute("SHOW STATUS LIKE 'Ssl_cipher'")
 	if err != nil {
 		return nil, err

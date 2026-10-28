@@ -1,6 +1,6 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: Params and the migration facts the caller already collected
-// output: effective stale_after, node_gone_after, RTO, the session-kill bound, the same-node restart bound, and the capped refusal delay
+// output: effective stale_after, node_gone_after, RTO, the session-kill bound, the same-node restart bound, the capped refusal delay, and MigrationAllowed, which refuses a live registration or a long transaction and allows log_bin without SUPER
 // pos: formulas from ADR 0011 §2, §3.4, and §5 that are not themselves transitions
 // note: if this file changes, update this header and module README.md.
 package ownership
@@ -179,14 +179,13 @@ type Precheck struct {
 	SuperOrTrust     bool
 }
 
-// MigrationAllowed is false when a registration is still live, a transaction
-// is older than idle_kill, or binlog is on and the account cannot create the
-// trigger and the procedure.
+// MigrationAllowed is false when a registration is still live or a transaction
+// older than 5s is still open. log_bin does not block the migration: 000011
+// does not create a trigger or a procedure, so SUPER and
+// log_bin_trust_function_creators are not required. LogBin and SuperOrTrust
+// stay on Precheck so existing callers still compile.
 func MigrationAllowed(p Precheck) bool {
 	if p.LiveRegistration || p.LongTransaction {
-		return false
-	}
-	if p.LogBin && !p.SuperOrTrust {
 		return false
 	}
 	return true

@@ -17,8 +17,17 @@ import (
 )
 
 func TestAcquireLeaseSQLSameOwnerDoesNotBumpEpoch(t *testing.T) {
-	if !strings.Contains(acquireLeaseSQL, "lease_expire_at <= NOW(6) AND owner_worker_id <> ?") {
-		t.Fatalf("same-owner reclaim must not bump epoch: %s", acquireLeaseSQL)
+	if !strings.Contains(acquireLeaseSQL, "owner_worker_id = '' OR owner_worker_id <> ?") {
+		t.Fatalf("a released empty owner must bump epoch, a non-empty same owner must not: %s", acquireLeaseSQL)
+	}
+	if !strings.Contains(acquireLeaseSQL, "lease_expire_at <= @bs_lease_now") {
+		t.Fatalf("expire check must use the pinned timestamp: %s", acquireLeaseSQL)
+	}
+	if strings.Count(acquireLeaseSQL, "NOW(6)") != 1 {
+		t.Fatalf("acquire must compare against one statement NOW(6), got %d in %s", strings.Count(acquireLeaseSQL, "NOW(6)"), acquireLeaseSQL)
+	}
+	if !strings.Contains(acquireLeaseSQL, "@bs_lease_now := NOW(6)") {
+		t.Fatalf("the pin must be assigned from NOW(6) in this statement: %s", acquireLeaseSQL)
 	}
 	if !strings.Contains(acquireLeaseSQL, "epoch + 1") {
 		t.Fatal("a different worker taking an expired lease must still bump epoch")
