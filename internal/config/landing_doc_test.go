@@ -269,7 +269,7 @@ func sortedKeys(m map[string]string) []string {
 }
 
 // TestLandingGuardRejects feeds checkLanding the real tree with one edit each:
-// the 24 regrowth paths QA found on #565 r1 (B*, H*, X*, V*, F*), then one case
+// the 24 regrowth paths found in review (B*, H*, X*, V*, F*), then one case
 // per rule so every rule has a case only it explains.
 func TestLandingGuardRejects(t *testing.T) {
 	root := repoRoot(t)
@@ -333,7 +333,7 @@ func TestLandingGuardRejects(t *testing.T) {
 		ver  string // defaults to VERSION
 		want string
 	}{
-		// QA #565 r1 regrowth paths.
+		// Regrowth paths found in review.
 		{"B1 renamed timeline section", inject(`<section id="history"><h3>Release History</h3><ol><li><span class="milestone-date">Oct 2026</span> health metrics</li></ol></section>`), "", "element ids are"},
 		{"B2 table with bare versions", inject(`<table><tr><td>0.5.82</td><td>webhooks</td></tr></table>`), "", `names "0.5.82"`},
 		{"B3 spaced version", inject(`<p>v0 . 5 . 82 added webhooks</p>`), "", `names "v0 . 5 . 82"`},
@@ -391,7 +391,7 @@ func TestLandingGuardRejects(t *testing.T) {
 		{"src: iframe", inject(`<iframe src='https://example.com/releases'></iframe>`), "", `loads src="https://example.com/releases"`},
 
 		// A release bump: all four sites move together, or the guard fails.
-		{"bump: VER= left behind (#567)", bump("VER="), next, `names "` + ver + `"`},
+		{"bump: VER= left behind", bump("VER="), next, `names "` + ver + `"`},
 		{"bump: data-version left behind", bump(`data-version="`), next, `names "` + ver + `"`},
 	}
 	for _, tc := range cases {
