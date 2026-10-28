@@ -295,9 +295,21 @@ cell_teardown() {
   kill -CONT "$WORKER3_PID" >/dev/null 2>&1 || true
   kill_pid "$HOLD_PID"; HOLD_PID=""
   if [[ -n "$CELL_TASK" ]]; then
-    http_code POST "/api/tasks/$CELL_TASK/stop" >/dev/null 2>&1 || true
-    wait_task_state "$CELL_TASK" "STOPPED" 60 2>/dev/null || \
+    # A failed cell can leave desired_run RUN (the N8 restart) or a
+    # pending transition; retry the stop until the row settles. A
+    # running task holds a source dump thread — leaking it breaks the
+    # next cell's at-most-one-dump invariant.
+    local attempt
+    for attempt in 1 2 3 4; do
+      [[ "$(task_state "$CELL_TASK" 2>/dev/null)" == "STOPPED" ]] && break
+      curl -fsS -o /dev/null "$API/api/tasks/$CELL_TASK" 2>/dev/null || break # row gone
+      http_code POST "/api/tasks/$CELL_TASK/stop" >/dev/null 2>&1 || true
+      wait_task_state "$CELL_TASK" "STOPPED" 45 2>/dev/null && break
+      echo "[fm:teardown] task $CELL_TASK still $(task_state "$CELL_TASK" 2>/dev/null) after stop attempt $attempt" >&2
+    done
+    if [[ "$(task_state "$CELL_TASK" 2>/dev/null)" != "STOPPED" ]]; then
       echo "[fm:teardown] task $CELL_TASK did not stop: $(curl -fsS "$API/api/tasks/$CELL_TASK" 2>/dev/null)" >&2
+    fi
     CELL_TASK=""
   fi
 }
@@ -625,61 +637,60 @@ cell_operator_races() {
   http_code POST "/api/tasks/$task_id/start" >/dev/null
   wait_task_state "$task_id" "RUNNING" 120 || return 1
 
-  # Start on STOPPING -> 409. Freeze the holder so STOPPING persists across
-  # the two requests (a live holder finishes the stop in a tick).
+  # Freeze the holder so STOPPING persists across the requests (a live
+  # holder finishes the stop in a tick).
   local owner_id owner_pid
   owner_id="$(task_owner "$task_id")"
   owner_pid="$([ "$owner_id" == "$WORKER1_ID" ] && echo "$WORKER1_PID" || echo "$WORKER2_PID")"
+  local rev0 code pd
+  rev0="$(meta_sql "SELECT spec_revision FROM backup_tasks WHERE id='$task_id'" | tr -d ' \r\n')"
   kill -STOP "$owner_pid"
-  local code
   code="$(http_code POST "/api/tasks/$task_id/stop")"
   [[ "$code" == "204" ]] || { kill -CONT "$owner_pid"; echo "[fm:ops] stop http=$code" >&2; return 1; }
   wait_task_state "$task_id" "STOPPING" 60 || { kill -CONT "$owner_pid"; return 1; }
+
+  # N8: the control plane's Start while the worker is still closing the
+  # dump records desired RUN, spec_revision+1, and keeps phase STOPPING,
+  # the lease, the owner and the epoch. A worker-side Start on STOPPING
+  # is the 409 branch, but workers expose only their health listener in
+  # this topology — that branch is covered by ownership tests.
   code="$(http_code POST "/api/tasks/$task_id/start")"
-  if [[ "$code" != "409" ]]; then
+  if [[ "$code" != "204" ]]; then
     kill -CONT "$owner_pid"
-    echo "[fm:ops] Start on STOPPING http=$code, want 409: $(cat /tmp/e2e-fm-${RUN_TAG}.resp)" >&2
+    echo "[fm:ops] control-plane Start on STOPPING http=$code, want 204: $(cat /tmp/e2e-fm-${RUN_TAG}.resp)" >&2
     return 1
   fi
-  kill -CONT "$owner_pid"
-  wait_task_state "$task_id" "STOPPED" 90 || return 1
-
-  # Repeated Start with the same spec -> 204 and spec_revision unchanged.
-  code="$(http_code POST "/api/tasks/$task_id/start")"
-  [[ "$code" == "204" || "$code" == "200" ]] || { echo "[fm:ops] restart http=$code" >&2; return 1; }
-  wait_task_state "$task_id" "RUNNING" 120 || return 1
-  local rev1 rev2
+  local rev1 phase desired epoch
   rev1="$(meta_sql "SELECT spec_revision FROM backup_tasks WHERE id='$task_id'" | tr -d ' \r\n')"
-  code="$(http_code POST "/api/tasks/$task_id/start")"
-  [[ "$code" == "204" || "$code" == "200" || "$code" == "409" ]] || { echo "[fm:ops] dup start http=$code" >&2; return 1; }
-  rev2="$(meta_sql "SELECT spec_revision FROM backup_tasks WHERE id='$task_id'" | tr -d ' \r\n')"
-  if [[ "$rev1" != "$rev2" ]]; then
-    echo "[fm:ops] spec_revision moved on a same-spec Start: $rev1 -> $rev2" >&2
+  phase="$(task_state "$task_id")"
+  desired="$(task_desired "$task_id")"
+  epoch="$(task_epoch "$task_id")"
+  if [[ "$rev1" != "$((rev0 + 2))" ]]; then
+    kill -CONT "$owner_pid"
+    echo "[fm:ops] spec_revision after stop+start: $rev0 -> $rev1, want $((rev0 + 2))" >&2
+    return 1
+  fi
+  if [[ "$phase" != "STOPPING" || "$desired" != "RUN" || "$epoch" != "1" ]]; then
+    kill -CONT "$owner_pid"
+    echo "[fm:ops] N8 restart broke the invariants: phase=$phase desired=$desired epoch=$epoch (want STOPPING/RUN/1)" >&2
     return 1
   fi
 
-  # Delete mid-run -> STOPPING + pending_delete; Start on it -> 409.
+  # Delete mid-stop -> desired STOP + pending_delete, still STOPPING.
   code="$(http_code DELETE "/api/tasks/$task_id")"
-  [[ "$code" == "204" ]] || { echo "[fm:ops] delete http=$code: $(cat /tmp/e2e-fm-${RUN_TAG}.resp)" >&2; return 1; }
-  local pd
+  [[ "$code" == "204" ]] || { kill -CONT "$owner_pid"; echo "[fm:ops] delete http=$code: $(cat /tmp/e2e-fm-${RUN_TAG}.resp)" >&2; return 1; }
   pd="$(meta_sql "SELECT pending_delete FROM backup_tasks WHERE id='$task_id'" | tr -d ' \r\n')"
-  [[ "$pd" == "1" ]] || { echo "[fm:ops] pending_delete=$pd, want 1" >&2; return 1; }
+  [[ "$pd" == "1" ]] || { kill -CONT "$owner_pid"; echo "[fm:ops] pending_delete=$pd, want 1" >&2; return 1; }
   code="$(http_code POST "/api/tasks/$task_id/start")"
-  [[ "$code" == "409" ]] || { echo "[fm:ops] Start on pending_delete http=$code, want 409" >&2; return 1; }
+  [[ "$code" == "409" ]] || { kill -CONT "$owner_pid"; echo "[fm:ops] Start on pending_delete http=$code, want 409" >&2; return 1; }
+  # A refused Start must not touch the row.
+  rev1="$(meta_sql "SELECT spec_revision FROM backup_tasks WHERE id='$task_id'" | tr -d ' \r\n')"
+  [[ "$rev1" == "$((rev0 + 2))" ]] || { kill -CONT "$owner_pid"; echo "[fm:ops] refused Start moved spec_revision: $rev1" >&2; return 1; }
 
-  # kill -9 the holder; the row waits for lease expiry, then StopExpired
-  # removes it without the dead StopConfirmed.
-  local owner_id owner_pid
-  owner_id="$(task_owner "$task_id")"
-  if [[ -n "$owner_id" ]]; then
-    case "$owner_id" in
-      "$WORKER1_ID") owner_pid="$WORKER1_PID" ;;
-      "$WORKER2_ID") owner_pid="$WORKER2_PID" ;;
-      "$WORKER3_ID") owner_pid="$WORKER3_PID" ;;
-      *) owner_pid="" ;;
-    esac
-    [[ -n "$owner_pid" ]] && { kill -9 "$owner_pid" 2>/dev/null || true; wait "$owner_pid" 2>/dev/null || true; }
-  fi
+  # kill -9 the frozen holder: the row keeps pending_delete until the
+  # lease expires, then StopExpired deletes it without a StopConfirmed.
+  kill -9 "$owner_pid" 2>/dev/null || true
+  wait "$owner_pid" 2>/dev/null || true
   local gone=0
   for i in $(seq 1 90); do
     if [[ "$(meta_sql "SELECT COUNT(*) FROM backup_tasks WHERE id='$task_id'" | tr -d ' \r\n')" == "0" ]]; then
@@ -687,8 +698,9 @@ cell_operator_races() {
     fi
     sleep 1
   done
-  [[ "$gone" -eq 1 ]] || { echo "[fm:ops] row still present after lease expiry + StopExpired" >&2; return 1; }
-  cell_result "row11: operator races" "RUN" "pass: 409 on STOPPING, dup-Start same revision, delete->pending_delete, kill -9 + StopExpired removed the row"
+  [[ "$gone" -eq 1 ]] || { kill -CONT "$owner_pid" 2>/dev/null; echo "[fm:ops] row still present after lease expiry + StopExpired" >&2; return 1; }
+  CELL_TASK=""
+  cell_result "row11: operator races" "RUN" "pass: cp Start on STOPPING = N8 204 (desired RUN, spec+1, lease/epoch kept), delete->pending_delete, Start 409, kill -9 + StopExpired removed the row"
 }
 
 # ==============================================================================
