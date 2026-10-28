@@ -59,7 +59,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 |---|---|---|---|---|
 | E1 | 每个 schema 迁移都能 up/down 往返；新二进制拒绝太旧的 schema，旧二进制拒绝自己不认识的 schema | `smoke-task-desired-migration`（拿已发布的 v0.5.49/v0.5.52 实测）、`smoke-control-loop`（逐步 down 到 schema 3，每一步核对表和索引），都在 quick | MET | — |
 | E2 | 从上一个发布版带数据原地升级，续传没有缺口，旧数据目录能被修复 | `e2e-upgrade-failback` 每个 PR 跑四档：`plain`、`object-only`、`object-gone` 从 v0.5.57 → 0a84917a → 当前构建（旧目录修复后续传、还原和 A 一致；`object-gone` 拒绝且目录和对象不变）；`plain` 从 v0.5.82 直接升到当前构建（`FBUP_SKIP_MID=1`、`FBUP_REQUIRE_REUSE=0`），带数据原地升级后续传、还原和 A 一致。#437 由 `TestOnlineMigrateUpWritesRetentionMarkerWithoutSecondEvent`（`go test ./...`）锁住：000010 列缺席时只写一条 `RETENTION_REMOVED`，列出现后的下一轮只补 `retention_removed_at`、不写第二条事件 | MET | — |
-| E3 | cluster 滚动升级有栅栏：预检、`row_generation` 触发器、`MIXED_VERSION`；降级会拒绝不安全的状态 | ADR 0011 §5 的 000011 迁移，加 §4.2 第 12 行的 e2e | NOT MET | ADR 0011 PR-4 |
+| E3 | cluster 滚动升级有栅栏：预检、`row_generation` 触发器、`MIXED_VERSION`；降级会拒绝不安全的状态 | ADR 0011 §5 的 000011 迁移，加 §4.2 第 12 行的 e2e | NOT MET | `smoke-rolling-upgrade.sh` 已实现四道栅栏（up 预检拒绝/落地、MIXED_VERSION+认领闸住、down 预检拒绝/降级后旧二进制回跑），等 CI 首跑验证 |
 
 ## F. 可观测与告警
 
