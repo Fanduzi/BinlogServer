@@ -1,4 +1,4 @@
-.PHONY: help test build build-linux check-linux-compat check-linux-release-archive check-landing-assets ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e-scale e2e-session-kill e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test build build-linux check-linux-compat check-linux-release-archive check-landing-assets release-check release-check-test ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e-scale e2e-session-kill e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo devel)
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -15,6 +15,8 @@ help:
 	@echo "  make check-linux-release-archive VERSION=vX.Y.Z # verify required assets and glibc safety in the Linux amd64 release tar.gz"
 	@echo "  make ui-build                   # test+build console -> internal/ui/static (/ui/), frontend -> internal/ui/classic (/ui-classic/), check ESM plus Console markers"
 	@echo "  make release-assets VERSION=v0.1.0 # build release archives + checksums for darwin/linux amd64/arm64"
+	@echo "  make release-check [VERSION=vX.Y.Z] # before tagging: notes (EN+zh), CHANGELOG, no stale previous version (file:line), release surfaces; then the full config + releaseprep go tests (default v\$$(cat VERSION))"
+	@echo "  make release-check-test         # tests of the release-check gate (fake complete and incomplete releases)"
 	@echo "  make e2e-topology-check         # validate E2E database topology without Docker"
 	@echo "  make e2e-quick                  # run quick e2e (includes smoke on 5.7/8.0/8.4/Percona, smoke-version-restore, smoke-least-privilege-migrate)"
 	@echo "  make e2e-full                   # run full e2e (smoke,compression,orchestrator,semisync)"
@@ -69,6 +71,26 @@ check-linux-release-archive:
 
 check-landing-assets:
 	./scripts/check-landing-assets.sh
+
+# The release-prep commit (notes, CHANGELOG, VERSION, README pins, landing) is
+# what gets tagged; release.yml runs the same check on the tag before building.
+# VERSION defaults to git describe above, so read the VERSION file unless
+# VERSION was given on the command line.
+RELEASE_CHECK_VERSION = $(if $(filter command line,$(origin VERSION)),$(VERSION),v$(shell cat VERSION))
+
+# release-check runs the gate and then the same go tests every PR runs
+# (internal/config's TestVersionPinsMatchVERSIONFile plus the gate's own
+# tests), so a missing or stale site fails both. release.yml runs the gate
+# with -published=gh; here -published=auto falls back to the CHANGELOG
+# without gh.
+RELEASE_GATE_TESTS = go test -count=1 ./internal/config ./internal/releaseprep
+
+release-check:
+	./scripts/check-release-prep.sh "$(RELEASE_CHECK_VERSION)" $(REF)
+	$(RELEASE_GATE_TESTS)
+
+release-check-test:
+	$(RELEASE_GATE_TESTS)
 
 ui-build:
 	./scripts/build-ui.sh

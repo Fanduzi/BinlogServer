@@ -616,6 +616,30 @@ jobs:
           BINLOG_TEST_TLS: "1"
         run: go test -count=1 -timeout 25m -run 'TestLiveMySQLTLS|TestLiveAppTLS|TestLiveS3TLS' ./internal/replication/ ./internal/app/ ./internal/upload/
 
+  release-prep-selftest:
+    # The release-prep gate that release.yml runs on a tag, run on every PR
+    # against this tree (VERSION, with the tags for the previous release) and
+    # then its go tests against fake complete and incomplete releases, so it
+    # cannot rot. internal/lintguard TestReleasePrepGateIsWired locks this.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Run the release-prep gate and its tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make release-check
+
   promtool:
     runs-on: ubuntu-latest
     timeout-minutes: 10

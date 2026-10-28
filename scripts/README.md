@@ -12,6 +12,7 @@
 | check-linux-release-archive.sh | 解包 Linux release tar.gz，校验服务端、可执行 migrate、双向 migration SQL、可执行的 `scripts/adopt-leftovers.sh`，并复用 glibc 兼容性检查；设了 `EXPECT_VERSION` / `EXPECT_COMMIT` 时再核对包里 `binlog-server version` 报的 Version 和 Commit |
 | check-release-archive-identity.sh | 从 `dist/metadata.json` 取 goreleaser 构建的版本（打 tag 时还要等于去掉 `v` 的 tag，除非调用方设了 `RELEASE_IDENTITY_SNAPSHOT=true`：`e2e.yml` 的 snapshot 构建，`release.yml` 为 tag 调用时也一样），用 `EXPECT_VERSION` 和 `EXPECT_COMMIT=$GITHUB_SHA` 调 `check-linux-release-archive.sh` 检查 linux_amd64 包 |
 | check-landing-assets.sh | 校验落地页 HTML 引用的图片资源真实存在、非空且为有效 PNG 格式，防止部署回退为 HTML 造成图裂 |
+| check-release-prep.sh | 发版前检查（`make release-check`；`release.yml` 的 `release-prep` job 在 tag 上也跑）：先 `go build ./cmd/release-check` 再运行它（`go run` 会把所有非零退出码变成 1），参数 `[-published=auto|gh|off] vX.Y.Z [git-ref]`，不带 ref 读工作区；退出码 0 通过，1 有检查失败，2 是用法、读文件或构建错误（`TestReleaseScriptExitCodes` 经由这个脚本锁住三种）。检查项见 `internal/releaseprep/README.md`：中英文发布说明（标题和正文）、CHANGELOG 小节、除发版历史白名单外没有上一个版本（`文件:行`），以及发布面清单 `internal/releaseprep.Surfaces` 里的每个文件（README/README_ZH 的 `VER=` 和安装小节、部署指南 pin、配置示例头、落地页、`VERSION`）。测试是 `make release-check-test` |
 | release-assets.sh | 构建含服务端、migrate、migration SQL、`config.example.yaml`、`config.production.example.yaml`、`scripts/adopt-leftovers.sh`、`docs/guide`、`docs/security.md`、`docs/releases` 与 checksums 的多平台 release 归档；作为本地/手工发版兜底入口。示例配置、`scripts/adopt-leftovers.sh`、`docs/guide`、`docs/security.md` 和 `docs/releases` 与 GoReleaser 归档一致 |
 | verify-phase-acceptance.sh | 统一执行阶段验收命令（test/race/vet/e2e-quick）并输出耗时摘要 |
 | failover-dogfood.sh | 一个 meta MySQL 上的双 worker 租约接管复跑；控制面走 verify-binlog-server helper |
@@ -28,6 +29,8 @@
 - `make ui-build`
 - `./scripts/check-ui-bundle.sh`（ESM 语法，以及 frontend PITR 标记必须出现在 `index.html` 加载的 bundle 图里；CI 与 release workflow 在发布前跑这条）
 - `make release-assets VERSION=v0.1.0`
+- `make release-check [VERSION=vX.Y.Z] [REF=<git-ref>]`（默认版本取 `VERSION` 文件；先跑门禁，再跑 `internal/config`、`internal/releaseprep` 的全部 go test；tag 打在通过这条检查的发版准备提交上）
+- `make release-check-test`（`go test ./internal/config ./internal/releaseprep`；`make release-check` 跑完门禁后也跑这一套）
 - `make e2e-quick`
 - `make e2e-full`
 - `./scripts/verify-phase-acceptance.sh`
