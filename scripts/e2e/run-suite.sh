@@ -46,6 +46,7 @@ Scenarios:
   smoke-worker-crash-recovery
   smoke-sigstop-takeover
   smoke-fault-matrix
+  smoke-rolling-upgrade
   smoke-invalid-inputs
   smoke-retry-upload
   smoke-split-retention
@@ -160,7 +161,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-sigstop-takeover|smoke-fault-matrix|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk|smoke-session-kill|smoke-least-privilege-migrate|smoke-verify)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-sigstop-takeover|smoke-fault-matrix|smoke-rolling-upgrade|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk|smoke-session-kill|smoke-least-privilege-migrate|smoke-verify)
       return 0
       ;;
     *)
@@ -210,6 +211,9 @@ run_scenario() {
       ;;
     smoke-fault-matrix)
       E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-fault-matrix.sh"
+      ;;
+    smoke-rolling-upgrade)
+      E2E_DATA_DIR="$DATA_DIR" "$ROOT_DIR/scripts/e2e/smoke-rolling-upgrade.sh"
       ;;
     smoke-invalid-inputs)
       "$ROOT_DIR/scripts/e2e/smoke-invalid-inputs.sh"
