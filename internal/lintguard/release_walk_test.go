@@ -1,3 +1,9 @@
+// Package lintguard tests.
+// input: the workflow yaml under .github/workflows and the allowedIfs table
+// output: findings for any continue-on-error or unregistered if on the
+//   release path; the unit-and-e2e exclusion list is pinned verbatim
+// pos: regression coverage for the release-gate walker
+// note: if this file changes, update this header and module README.md.
 package lintguard
 
 import (
@@ -39,7 +45,7 @@ type allowedIf struct {
 var allowedIfs = []allowedIf{
 	{"e2e.yml", "", false, "", "${{ !github.event.inputs.e2e_profile }}",
 		"runs unless a manual e2e run picks a profile; release.yml never sets e2e_profile, so it always runs there"},
-	{"e2e.yml", "unit-and-e2e", false, "", "${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'sigstop-takeover' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'coverage' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback' && github.event.inputs.e2e_profile != 'tls') }}",
+	{"e2e.yml", "unit-and-e2e", false, "", "${{ !github.event.inputs.e2e_profile || (github.event.inputs.e2e_profile != 'cluster-roles' && github.event.inputs.e2e_profile != 'observability' && github.event.inputs.e2e_profile != 'worker-crash-recovery' && github.event.inputs.e2e_profile != 'sigstop-takeover' && github.event.inputs.e2e_profile != 'fault-matrix' && github.event.inputs.e2e_profile != 'gtid-purge' && github.event.inputs.e2e_profile != 'gtid-pitr' && github.event.inputs.e2e_profile != 'coverage' && github.event.inputs.e2e_profile != 'source-switchover' && github.event.inputs.e2e_profile != 'verify' && github.event.inputs.e2e_profile != 'upgrade-failback' && github.event.inputs.e2e_profile != 'tls') }}",
 		"skipped only for a manual run of another profile; with no e2e_profile (every release run) it runs"},
 	{"e2e.yml", "", false, "", "${{ !github.event.inputs.e2e_profile || github.event.inputs.e2e_profile == '{profile}' }}",
 		"a profile job runs with no profile (every release run) or its own"},
