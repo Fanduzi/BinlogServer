@@ -57,7 +57,7 @@ func TestMySQLTaskStore_UpsertTask(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "cluster-a-key", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
+		WithArgs("1", "cluster-a", "cluster-a-key", "RUNNING", "", "worker-a", int64(7), "run-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(insertTaskRunSQL)).
 		WithArgs("run-1", "1", "worker-a", int64(7), sqlmock.AnyArg()).
@@ -107,7 +107,7 @@ func TestMySQLTaskStore_UpsertTask_FinishPreviousRunOnStop(t *testing.T) {
 		WithArgs("1").
 		WillReturnRows(sqlmock.NewRows([]string{"run_id"}).AddRow("run-1"))
 	mock.ExpectExec(regexp.QuoteMeta(upsertTaskSQL)).
-		WithArgs("1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
+		WithArgs("1", "cluster-a", "cluster-a-key", "STOPPED", "", "", int64(0), "", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(finishTaskRunSQL)).
 		WithArgs(sqlmock.AnyArg(), "NORMAL_STOP", "run-1").
@@ -816,7 +816,7 @@ func TestMySQLTaskStore_EncryptsSourcePasswordWhenKeySet(t *testing.T) {
 			key:      testSourcePasswordKey,
 			password: "secret",
 			host:     "127.0.0.1",
-		}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0)).
+		}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "STOP", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -1564,7 +1564,7 @@ func expectSchemaCheckQueries(
 }
 
 func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
-	for _, version := range []int64{4, 5} {
+	for _, version := range []int64{4, 5, 10} {
 		t.Run(fmt.Sprintf("schema%d", version), func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			if err != nil {
@@ -1587,7 +1587,7 @@ func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
 				t.Fatalf("error should say schema version too old, got %v", err)
 			}
 			wantCurrent := fmt.Sprintf("current=%d", version)
-			if !strings.Contains(err.Error(), wantCurrent) || !strings.Contains(err.Error(), "required>=6") {
+			if !strings.Contains(err.Error(), wantCurrent) || !strings.Contains(err.Error(), "required>=11") {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -1598,8 +1598,14 @@ func TestMySQLTaskStore_EnsureSchemaTooOldTellsOperatorToMigrate(t *testing.T) {
 }
 
 func TestMySQLTaskStore_Schema6DropsFileEpochIndex(t *testing.T) {
-	if minRequiredSchemaVersion != 6 {
-		t.Fatalf("minRequiredSchemaVersion=%d, want 6", minRequiredSchemaVersion)
+	if minRequiredSchemaVersion != 11 {
+		t.Fatalf("minRequiredSchemaVersion=%d, want 11", minRequiredSchemaVersion)
+	}
+	if ClusterProtocolVersion != minRequiredSchemaVersion {
+		t.Fatalf("cluster protocol %d, want schema floor %d", ClusterProtocolVersion, minRequiredSchemaVersion)
+	}
+	if !strings.Contains(acquireWorkerRegistrationSQL, "11") {
+		t.Fatal("registration SQL must write protocol 11")
 	}
 	var indexes, columns []string
 	for _, table := range requiredTableSchemas {

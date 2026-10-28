@@ -11,18 +11,20 @@ import (
 
 	"binlog_server/internal/health"
 	"binlog_server/internal/healthstore"
+	"binlog_server/internal/ownership"
 )
 
-// nodeGoneAfter is health.node_gone_after (design §30). 0 means 3 sweeps.
+// nodeGoneAfter is health.node_gone_after. 0 means max(3×sweep, lease_ttl+2×sweep).
 func (e *Evaluator) nodeGoneAfter() time.Duration {
-	if e.cfg.NodeGoneAfter > 0 {
-		return e.cfg.NodeGoneAfter
-	}
 	sweep := e.cfg.Sweep
 	if sweep <= 0 {
 		sweep = time.Minute
 	}
-	return 3 * sweep
+	return ownership.EffectiveNodeGone(ownership.Params{
+		Sweep:         sweep,
+		LeaseTTL:      e.cfg.LeaseTTL,
+		NodeGoneAfter: e.cfg.NodeGoneAfter,
+	})
 }
 
 func (e *Evaluator) noteDelegated(id string, on bool) {
@@ -179,6 +181,9 @@ func (e *Evaluator) noteNodeGone(ctx context.Context, facts *health.Facts) {
 		return
 	}
 	facts.NodeGone = true
+	if e.s != nil {
+		e.s.noteChainOwnerGone(facts.TaskID)
+	}
 	if facts.Produced == nil {
 		facts.Produced = map[health.Scope]bool{}
 	}

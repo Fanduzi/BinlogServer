@@ -238,7 +238,7 @@ func TestReplayTempCount_CountsOnlyTheSeamDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	outside.Close()
+	_ = outside.Close()
 	t.Cleanup(func() { _ = os.Remove(outside.Name()) })
 	if replaySeamTempCount(t) != before {
 		t.Fatalf("process temp file %s changed the count from %d", outside.Name(), before)
@@ -247,7 +247,7 @@ func TestReplayTempCount_CountsOnlyTheSeamDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seam.Close()
+	_ = seam.Close()
 	t.Cleanup(func() { _ = os.Remove(seam.Name()) })
 	if got := replaySeamTempCount(t); got != before+1 {
 		t.Fatalf("seam leak count %d, want %d", got, before+1)

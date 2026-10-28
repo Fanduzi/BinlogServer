@@ -11,6 +11,45 @@ import (
 	"time"
 )
 
+func TestSourceSwitchoverIsTerminal(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	e := Held(s, EventTerminalError, "n1")
+	e.Cause = CauseSourceSwitchover
+	s = applied(t, s, e, t0)
+	if s.Phase != PhaseFailed || s.FailedReason != ReasonSourceSwitchover || s.Desired != DesiredRun {
+		t.Fatalf("phase %s reason %s desired %s", s.Phase, s.FailedReason, s.Desired)
+	}
+	if InClaimSet(s, t0) {
+		t.Fatal("SOURCE_SWITCHOVER FAILED is in the claim set")
+	}
+	bumped := s
+	bumped.SpecRevision = s.FailedSpec + 1
+	if !InClaimSet(bumped, t0) {
+		t.Fatal("a newer spec does not make the switchover row claimable")
+	}
+	ready := Held(s, EventDumpReady, "n1")
+	again := Step(s, ready, t0)
+	if again.State.Phase != PhaseFailed || again.Decision == DecisionApplied {
+		t.Fatalf("DumpReady resumed a switchover failure: %s %s", again.Decision, again.State.Phase)
+	}
+}
+
+func TestUnreachableBudgetIsTerminal(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	e := Held(s, EventTerminalError, "n1")
+	e.Cause = CauseSourceUnreachable
+	s = applied(t, s, e, t0)
+	if s.Phase != PhaseFailed || s.FailedReason != ReasonSourceUnreachable || s.Desired != DesiredRun {
+		t.Fatalf("phase %s reason %s desired %s", s.Phase, s.FailedReason, s.Desired)
+	}
+	if s.Phase == PhaseLeaseDegraded || InClaimSet(s, t0) {
+		t.Fatal("a used SOURCE_UNREACHABLE budget yielded")
+	}
+	if s.LastError == "" {
+		t.Fatal("last_error was cleared")
+	}
+}
+
 func TestStepDoesNotMutateInput(t *testing.T) {
 	s := New()
 	s.Nodes = []Node{peer("n1", true, t0)}

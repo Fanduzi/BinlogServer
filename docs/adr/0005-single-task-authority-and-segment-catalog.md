@@ -181,6 +181,8 @@ A same `worker_id` restart before lease expiry keeps the epoch. A crash alone do
 
 Default: an error that is not on the allowlist writes `FAILED`, sets `last_error`, appends `TASK_FAILED`, releases the lease, and sets `desired_run=STOP` with `failed_spec_revision=spec_revision`. The alert is those three facts: observed `FAILED`, `last_error`, and the `TASK_FAILED` event. The Console already shows the task state and `last_error`. This series adds no notifier and no new metric.
 
+ADR 0011 corrects this default. An error that is not on the terminal allowlist is a yield: the observed phase is `LEASE_DEGRADED`, `desired_run` stays `RUN`, and the lease is released. That includes `SEGMENT_NOT_ON_WORKER`, `SEALED_FILE_EXISTS`, and an unclassified error. `SOURCE_UNREACHABLE` after its budget of 10 is `FAILED` with desired `RUN` and epoch 0, same as the standalone give-up. `FAILED` is `SOURCE_ACCESS_DENIED`, `SOURCE_LOG_BIN_OFF`, `SOURCE_SWITCHOVER`, that used-up `SOURCE_UNREACHABLE` budget, and the historical `LEGACY_UNKNOWN` and `CHAIN_OWNER_GONE` rows. `SOURCE_ACCESS_DENIED` and `SOURCE_LOG_BIN_OFF` retry for at least two minutes before that `FAILED`, and `desired_run` stays `RUN`. The paragraphs below record the policy this ADR shipped with. The scheduler follows 0011. See `docs/adr/0011-cluster-ownership-and-failover.md`.
+
 Allowlist, retried inside the same ownership:
 
 | Error | Budget | Why it stays retryable |

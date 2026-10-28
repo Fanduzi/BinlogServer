@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, SQL schema/contracts, retry/lease timing policies
-// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify/ViewLease; same-owner reclaim keeps epoch; an armed pool reads @@session.wait_timeout, and on MariaDB @@session.idle_transaction_timeout, on that same transaction), runs, and checkpoints
+// output: persistent metadata operations for tasks, leases (Acquire/Renew/Release/Verify/ViewLease; a non-empty same owner keeps the epoch; a released empty owner bumps it; Acquire pins one NOW(6) in @bs_lease_now; an armed pool reads @@session.wait_timeout, and on MariaDB @@session.idle_transaction_timeout, on that same transaction), runs, and checkpoints
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -18,26 +18,27 @@ import (
 // comments from the executed text and keeps the -- name line.
 const acquireLeaseSQL = `-- name: AcquireTaskLease :exec
 INSERT INTO task_leases (task_id, owner_worker_id, epoch, lease_expire_at, renewed_at)
-VALUES (
+SELECT
   ?,
   ?,
   1,
-  DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
-  NOW(6)
-)
+  DATE_ADD(@bs_lease_now, INTERVAL ? MICROSECOND),
+  @bs_lease_now
+FROM (SELECT @bs_lease_now := NOW(6)) AS clk
 ON DUPLICATE KEY UPDATE
   epoch = IF(
-    lease_expire_at <= NOW(6) AND owner_worker_id <> ?,
+    lease_expire_at <= @bs_lease_now
+      AND (owner_worker_id = '' OR owner_worker_id <> ?),
     epoch + 1,
     epoch
   ),
-  owner_worker_id = IF(lease_expire_at <= NOW(6), ?, owner_worker_id),
+  owner_worker_id = IF(lease_expire_at <= @bs_lease_now, ?, owner_worker_id),
   lease_expire_at = IF(
-    lease_expire_at <= NOW(6),
-    DATE_ADD(NOW(6), INTERVAL ? MICROSECOND),
+    lease_expire_at <= @bs_lease_now,
+    DATE_ADD(@bs_lease_now, INTERVAL ? MICROSECOND),
     lease_expire_at
   ),
-  renewed_at = IF(lease_expire_at <= NOW(6), NOW(6), renewed_at)
+  renewed_at = IF(lease_expire_at <= @bs_lease_now, @bs_lease_now, renewed_at)
 `
 
 const renewLeaseSQL = `

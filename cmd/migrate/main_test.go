@@ -1,17 +1,19 @@
 // Package main provides module-level functionality for main.
 // input: migration files, META_DSN/env flags, a --config meta.tls block, golang-migrate driver dependencies
-// output: schema migration commands (up/down/version/force/goto) execution results; proof that --config applies meta.tls and that disabled leaves an existing tls=
+// output: schema migration commands (up/down/version/force/goto) execution results; proof that --config applies meta.tls and that disabled leaves an existing tls=, that crossing version 11 is detected from the current and target schema, and that only a dirty version 11 is recovered without a manual force
 // pos: database schema migration CLI for operational change management
 // note: if this file changes, update this header and module README.md.
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/golang-migrate/migrate/v4"
 )
 
 func TestNormalizeDSN(t *testing.T) {
@@ -86,6 +88,42 @@ func TestGuardDestructive(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestCrossingOwnershipMigration(t *testing.T) {
+	t.Parallel()
+	if !crossingOwnershipMigration(0, migrate.ErrNilVersion, ^uint(0)) {
+		t.Fatal("up from an empty schema must check")
+	}
+	if !crossingOwnershipMigration(10, nil, 11) {
+		t.Fatal("goto 11 from 10 must check")
+	}
+	if crossingOwnershipMigration(11, nil, ^uint(0)) {
+		t.Fatal("up already at 11 must not check")
+	}
+	if crossingOwnershipMigration(0, migrate.ErrNilVersion, 10) {
+		t.Fatal("goto below 11 must not check")
+	}
+	if crossingOwnershipMigration(11, nil, 12) {
+		t.Fatal("a schema already at 11 must not check again")
+	}
+	if crossingOwnershipMigration(10, errors.New("read failed"), ^uint(0)) {
+		t.Fatal("an unreadable version must not block on the precheck")
+	}
+}
+
+func TestOwnershipDirtyRecovery(t *testing.T) {
+	t.Parallel()
+	force, ok := ownershipDirtyRecovery(migrate.ErrDirty{Version: 11})
+	if !ok || force != 10 {
+		t.Fatalf("dirty 11 force=%d ok=%v, want 10", force, ok)
+	}
+	if _, ok := ownershipDirtyRecovery(migrate.ErrDirty{Version: 10}); ok {
+		t.Fatal("a dirty version other than 11 must still be a manual force")
+	}
+	if _, ok := ownershipDirtyRecovery(migrate.ErrNoChange); ok {
+		t.Fatal("a clean up must not force")
 	}
 }
 

@@ -316,11 +316,12 @@ func bottomKind(members []int, keys []string, sr *observer) string {
 }
 
 // adrOperatorFailed is the operator-required FAILED table in ADR 0011 §4.1(a):
-// SOURCE_AUTH, LOG_BIN_OFF, LEGACY_UNKNOWN, CHAIN_OWNER_GONE.
+// SOURCE_AUTH, LOG_BIN_OFF, STORAGE_INCONSISTENT, LEGACY_UNKNOWN,
+// CHAIN_OWNER_GONE.
 // It is a literal copy of that sentence, not operatorFailed.
 func adrOperatorFailed(reason string) bool {
 	switch reason {
-	case "SOURCE_AUTH", "LOG_BIN_OFF", "LEGACY_UNKNOWN", "CHAIN_OWNER_GONE":
+	case "SOURCE_AUTH", "LOG_BIN_OFF", "STORAGE_INCONSISTENT", "LEGACY_UNKNOWN", "CHAIN_OWNER_GONE":
 		return true
 	default:
 		return false

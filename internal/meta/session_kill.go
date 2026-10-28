@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a cluster meta DSN, the lease TTL, and cluster.side_kill
-// output: a pool whose every connection and reconnect sets the session-kill timeouts; each lock statement's client deadline is innodb_lock_wait_timeout plus 2s, with a longer outer backstop around the whole health write; a statement deadline that fires after that lock timeout is a lock wait classified by elapsed time; ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout; a startup readback of the armed session variables on a fresh pool connection (and again on the lease transaction), a mismatch or a failed read is degraded; lock_detail=reduced when the naming queries, which read one row, return 1227 or 1142 (not degraded)
+// output: a pool whose every connection and reconnect sets the session-kill timeouts; each lock statement's client deadline is innodb_lock_wait_timeout plus 2s, with a longer outer backstop around the whole health write; a statement deadline that fires after that lock timeout is a lock wait classified by elapsed time; ConnMaxIdleTime short enough that the pool closes idle connections before wait_timeout; a startup readback of the armed session variables on a fresh pool connection (and again on the lease transaction), a mismatch or a failed read is degraded; lock_detail=reduced when the naming queries, which read one row, return 1227 or 1142 (not degraded); side_kill armed is on, off, or unavailable
 // pos: ADR 0011 PR-2 session kill (P2-7, P2-8); standalone pools are not armed
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -48,6 +48,18 @@ func (st *sessionState) setKill(on bool) {
 		return
 	}
 	st.armed = "off"
+}
+
+// setKillUnavailable records that auto was requested and the optional
+// procedure drill did not pass. It is not off: off means the operator left
+// the switch off. Correctness does not require the procedure.
+func (st *sessionState) setKillUnavailable() {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.armed = "unavailable"
 }
 
 func (st *sessionState) kill() string {
@@ -263,8 +275,9 @@ func (s *MySQLTaskStore) SessionDegraded() (bool, string) {
 	return s.session.degradedReason()
 }
 
-// SideKill is "on" only after a passing drill. The default and a failed
-// drill are "off". An unarmed store returns an empty string.
+// SideKill is "on" only after a passing drill. The operator switch off stays
+// "off". auto whose drill did not pass is "unavailable". An unarmed store
+// with an empty armed value returns "off". A nil store returns an empty string.
 func (s *MySQLTaskStore) SideKill() string {
 	if s == nil || s.session == nil {
 		return ""

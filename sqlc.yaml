@@ -1,7 +1,9 @@
 version: "2"
 sql:
   - engine: "mysql"
-    schema: "migrations/000001_init_schema.up.sql"
+    schema:
+      - "migrations/000001_init_schema.up.sql"
+      - "internal/meta/sql/schema_overlay.sql"
     queries:
       - "internal/meta/sql/lease.sql"
       - "internal/meta/sql/task_runs_worker_heartbeats.sql"

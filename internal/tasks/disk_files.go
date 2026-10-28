@@ -2,7 +2,7 @@
 // input: local data_dir and task id for a binlog segment directory
 // output: sealed and open on-disk segments ordered by source generation then binlog index, WindowBinlogFilesForReplay for that same order on catalog rows, SelectReplayFiles for every sealed segment plus the highest open epoch of each source index except a sealed point-range row already covered by another sealed span of that index, ReplayLocations for local/bucket/both, ReplayClient for the mysqlbinlog or mariadb-binlog hint, leftover task ids when no task store is configured, the FILE_POS resume point at the end of the highest segment, and the next open epoch above those segments, FilePositionsForAPI for the files list (JSON null when the end is unknown, the event span when this process can read the local segment), and standalone listing positions from SegmentPositions; ReplaySet.warning when a damaged segment was left out; a listing that re-reads the directory until segments stop being renamed or removed under it (#322) The adopt resume point is the last complete event end (DurableResume), then a sealed file's Rotate target, never a file size (#356). Directory reads, lstats and stats go through the counted walk seam. A regular file from that listing is not stat'ed again for its location.
 // pos: disk listing and standalone leftover-directory discovery when the file catalog or task row is missing
-// note #405: diskNextSealedEpoch is one above the highest .sealed.eN (0 when none)
+// note #405: diskNextSealedEpoch is one above the highest .sealed.eN (0 when none). A per_node delete writes .binlog-server-tombstone in the task directory and the directory stays listed.
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -598,6 +598,23 @@ func listDiskBackupTasks(dataDir string, known map[string]struct{}) ([]Task, err
 		return LessTaskID(out[i].ID, out[j].ID)
 	})
 	return out, nil
+}
+
+const diskTombstoneName = ".binlog-server-tombstone"
+
+// leaveDiskTombstone marks a per_node directory so lookup does not adopt it
+// again. The existing leftovers path owns the cleanup. A missing directory
+// is not an error.
+func leaveDiskTombstone(dataDir, taskID string) {
+	dir, ok := taskBinlogDir(dataDir, taskID)
+	if !ok {
+		return
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, diskTombstoneName), []byte("deleted\n"), 0o644)
 }
 
 func lookupDiskBackupTask(dataDir, taskID string) (Task, bool, error) {

@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task commands/events, runner callbacks, store/lease/uploader dependencies
-// output: task state transitions, scheduling decisions, cluster lease, expired-lease takeover coverage, split control-plane/worker stop coverage, and a Stop that still stores STOPPED when the upsert keeps a newer spec_revision
+// output: task state transitions, scheduling decisions, cluster lease, expired-lease takeover coverage, split control-plane/worker stop coverage, an expired STOPPING row finalized by StopExpired, pending_delete erased in that same step, and a Stop that still stores STOPPED when the upsert keeps a newer spec_revision
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -898,6 +898,7 @@ func TestScheduler_FailedReleasesLeaseSoOtherWorkerCanStart(t *testing.T) {
 		WithClusterWorkerID("worker-a"),
 		WithClusterLease(ttl, time.Minute, time.Minute),
 	)
+	a.terminalRetry = 0
 	task, err := a.CreateTask("cluster-a", "cluster-a-key")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
@@ -992,8 +993,10 @@ func TestScheduler_RetryBackoffKeepsLeaseFromOtherWorker(t *testing.T) {
 	if err := b.Restore(context.Background()); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-	if err = b.StartTask(task.ID); err != nil {
-		t.Fatalf("operator Start while another worker holds the lease: %v", err)
+	err = b.StartTask(task.ID)
+	var op *OperatorError
+	if !errors.As(err, &op) || op.Status != 409 {
+		t.Fatalf("Start while another worker holds the lease: %v", err)
 	}
 	got, err := b.GetTask(task.ID)
 	if err != nil {
@@ -1007,26 +1010,6 @@ func TestScheduler_RetryBackoffKeepsLeaseFromOtherWorker(t *testing.T) {
 		t.Fatal("other worker started a dump while the lease is held")
 	case <-time.After(50 * time.Millisecond):
 	}
-}
-
-func TestScheduler_StandaloneUsesMemoryLeaseDoor(t *testing.T) {
-	runner := &fakeRunner{started: make(chan Task, 1)}
-	s := NewScheduler(
-		WithRunner(runner),
-		WithClusterLeaseManager(NewMemoryLease()),
-		WithClusterWorkerID("standalone"),
-	)
-	task, err := s.CreateTask("cluster-a", "cluster-a-key")
-	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
-	}
-	if err := s.ConfigureSource(task.ID, SourceConfig{Host: "127.0.0.1", Port: 3306, User: "repl"}); err != nil {
-		t.Fatalf("ConfigureSource: %v", err)
-	}
-	if err := s.StartTask(task.ID); err != nil {
-		t.Fatalf("StartTask through MemoryLease: %v", err)
-	}
-	waitRunnerStarted(t, runner)
 }
 
 func TestScheduler_ClaimExpiredTasksRequiresExpiredLeaseLookup(t *testing.T) {
@@ -1211,8 +1194,8 @@ func TestScheduler_StartTaskDoesNotStealLiveLease(t *testing.T) {
 	}
 
 	err = s.StartTask(task.ID)
-	if err == nil || err.Error() != "cannot start from state RUNNING" {
-		t.Fatalf("expected cannot start from state RUNNING, got %v", err)
+	if err != nil {
+		t.Fatalf("idempotent Start of a live RUNNING task: %v", err)
 	}
 	got, err := s.GetTask(task.ID)
 	if err != nil {
@@ -1927,5 +1910,29 @@ func TestScheduler_ExpiredStoppingFinalizesWithoutStartingDump(t *testing.T) {
 	lease.mu.Unlock()
 	if releases == 0 {
 		t.Fatal("expected lease release for expired STOPPING")
+	}
+}
+
+func TestScheduler_ExpiredStoppingPendingDeleteErases(t *testing.T) {
+	store := &expiredLeaseTestStore{tasks: make(map[string]Task)}
+	lease := &fakeLeaseManager{acquireOK: false}
+	runner := &fakeRunner{started: make(chan Task, 1)}
+	worker := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-b"),
+	)
+	task := newExpiredOwnedTask("1", "worker-dead", StateStopping)
+	task.DesiredRun = TaskDesiredStop
+	task.PendingDelete = true
+	store.tasks[task.ID] = task
+	store.expired = []Task{task}
+
+	if _, err := worker.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	if _, err := store.GetTask(context.Background(), task.ID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("pending_delete after StopExpired: err=%v", err)
 	}
 }

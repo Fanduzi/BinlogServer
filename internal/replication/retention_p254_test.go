@@ -174,7 +174,7 @@ func TestOnlineMigrateUpWritesRetentionMarkerWithoutSecondEvent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		file.Close()
+		_ = file.Close()
 	}
 
 	open("mysql-bin.000009")

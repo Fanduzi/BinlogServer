@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a failed or successful KILL of one Binlog Dump connection id, the task row, and the current source password
-// output: a process-local pending-dump registry, pending_dump_cleanup on the task including a held connection id, one DUMP_CLEANUP_PENDING event, one DUMP_CLEANUP_CLEARED event, and a 5s-30s KILL retry on every task state until the thread is gone or the task is deleted; a schema-4 empty column drops this process's copy so another process does not keep a cleared warning
+// output: a process-local pending-dump registry, pending_dump_cleanup on the task including a held connection id, the row_generation that save bumped, one DUMP_CLEANUP_PENDING event, one DUMP_CLEANUP_CLEARED event, and a 5s-30s KILL retry on every task state until the thread is gone or the task is deleted; a schema-4 empty column drops this process's copy so another process does not keep a cleared warning
 // pos: scheduler side of an operator Stop that could not reach the source
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -240,22 +240,12 @@ func (s *Scheduler) noteDumpCleanup(taskID string, source SourceConfig, connecti
 	store := s.store
 	s.mu.Unlock()
 
-	changed := true
-	if writer, ok := store.(pendingDumpWriter); ok && writer.PendingDumpColumn() {
-		ctx, cancel := s.withWriteTimeout(context.Background())
-		var err error
-		changed, err = writer.SavePendingDumpCleanup(ctx, taskID, previous, next)
-		cancel()
-		if err != nil {
-			log.Printf("pending dump cleanup write task=%s err=%v", taskID, err)
-			s.reportDumpCleanupPersist(taskID, err)
-			changed = true
-		} else {
-			s.SignalSuccess(taskID, FindingDumpCleanupPersistFailed, "")
-		}
-	}
+	changed, rowGen, rowGenOK := s.saveDumpCleanupChange(store, taskID, previous, next)
 
 	s.mu.Lock()
+	if rowGenOK {
+		s.noteRowGenerationLocked(taskID, rowGen)
+	}
 	task, ok = s.tasks[taskID]
 	if !ok {
 		s.mu.Unlock()
@@ -511,4 +501,70 @@ func (s *Scheduler) killLeftover(task Task, pending DumpCleanup, killer func(Sou
 // KILLed lives only in this process now; another worker or a restart cannot see it.
 func (s *Scheduler) reportDumpCleanupPersist(taskID string, err error) {
 	s.SignalFailure(Finding{TaskID: taskID, Kind: FindingDumpCleanupPersistFailed, Severity: FindingCritical, Detail: "pending_dump_cleanup not written; leftover Binlog Dump KILL is tracked only in this process: " + err.Error()})
+}
+
+// rejectUnfencedTakeover answers a claim while the pending_dump_cleanup
+// schema is missing: re-verify a still-held lease outside the lock, retry the
+// claim once the fence cleared, or park the task in RETRY_BACKOFF with the
+// fence message. Caller enters holding s.mu; every exit releases it (the
+// retry recurses unlocked).
+func (s *Scheduler) rejectUnfencedTakeover(id string, task Task, opts taskStart) error {
+	owner, epoch := task.OwnerWorkerID, task.Epoch
+	lease := s.leaseManager
+	s.mu.Unlock()
+	if lease != nil && owner != "" && epoch > 0 {
+		leaseCtx, cancelLease := s.withLeaseTimeout(context.Background())
+		held, err := lease.Verify(leaseCtx, id, owner, epoch)
+		cancelLease()
+		if err != nil || held {
+			return ErrLeaseNotAcquired
+		}
+	}
+	s.mu.Lock()
+	task, ok := s.tasks[id]
+	if !ok {
+		s.mu.Unlock()
+		return ErrTaskNotFound
+	}
+	if !s.refusesUnfencedTakeoverLocked(task) {
+		s.mu.Unlock()
+		return s.startTask(id, opts)
+	}
+	if task.State == StateRetryBackoff && task.LastError == ClusterDumpFenceSchemaMessage && task.DesiredRun == TaskDesiredRun {
+		s.mu.Unlock()
+		return nil
+	}
+	log.Printf("task=%s %s", id, ClusterDumpFenceSchemaMessage)
+	task.DesiredRun = TaskDesiredRun
+	if err := s.markRetryBackoffLocked(task, ClusterDumpFenceSchemaMessage); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// saveDumpCleanupChange writes the encoded cleanup marker through the
+// pending-dump column and reads back the row_generation the save bumped.
+// changed=false means a competing writer's row won.
+func (s *Scheduler) saveDumpCleanupChange(store TaskStore, taskID, previous, next string) (changed bool, rowGen int64, rowGenOK bool) {
+	changed = true
+	writer, ok := store.(pendingDumpWriter)
+	if !ok || !writer.PendingDumpColumn() {
+		return changed, 0, false
+	}
+	ctx, cancel := s.withWriteTimeout(context.Background())
+	defer cancel()
+	var err error
+	changed, err = writer.SavePendingDumpCleanup(ctx, taskID, previous, next)
+	if err != nil {
+		log.Printf("pending dump cleanup write task=%s err=%v", taskID, err)
+		s.reportDumpCleanupPersist(taskID, err)
+		return true, 0, false
+	}
+	s.SignalSuccess(taskID, FindingDumpCleanupPersistFailed, "")
+	if changed {
+		rowGen, rowGenOK = s.readRowGeneration(ctx, taskID)
+	}
+	return changed, rowGen, rowGenOK
 }

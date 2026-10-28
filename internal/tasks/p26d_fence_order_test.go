@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: two real Schedulers (worker-a, worker-b) sharing one task table, one MemoryLease and one lease-fenced health store; worker-b runs at epoch 1 and is frozen (its lease renew blocks, as under SIGSTOP) until the lease expires; worker-a claims epoch 2 through ClaimExpiredTasks and its run has not failed yet; worker-b thaws and its renew, its data-plane fence, or its remote-stop poll acts before worker-a writes FAILED
-// output: proof that in each reverse order worker-b's run exits without writing a task row (no STOPPING / STOPPED over worker-a's claim), that worker-a's SEGMENT_NOT_ON_WORKER then leaves the row FAILED with its last_error even after worker-b polls remote stops and converges again, and that a CRITICAL TASK_FAILED is open with /api/health degraded on both nodes
+// output: proof that in each reverse order worker-b's run exits without writing a task row (no STOPPING / STOPPED over worker-a's claim), and that worker-a's SEGMENT_NOT_ON_WORKER yields LEASE_DEGRADED with desired RUN; a later poll does not rewrite that row
 // pos: integration regression for ADR 0009 P2-6c/P2-6d (docs/design/0009-phase2-health-evaluator.md §24.11, #421 QA on #424: the reverse fence order was only unit-tested)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -10,8 +10,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"binlog_server/internal/health"
 )
 
 // freezableLease is worker-b's view of the shared MemoryLease. While frozen
@@ -271,15 +269,15 @@ func TestReverseFenceOrder_OldOwnerActsBeforeFailed(t *testing.T) {
 
 			// Only now does worker-a fail.
 			close(aRunner.fail)
-			failed := waitStoredState(t, table, task.ID, StateFailed)
-			if failed.LastError == "" || failed.DesiredRun != TaskDesiredStop {
-				t.Fatalf("FAILED row %+v", failed)
+			failed := waitStoredState(t, table, task.ID, StateLeaseDegraded)
+			if failed.LastError == "" || failed.DesiredRun != TaskDesiredRun {
+				t.Fatalf("yield row %+v", failed)
 			}
 			waitRunClosed(t, a, task.ID, "worker-a after FAILED")
 
-			// worker-b polls and converges again; both nodes sweep.
+			// A tail yield keeps desired RUN. Polling must not rewrite it.
+			// Converge is a real claim by the other node, so it is not run here.
 			b.applyRemoteStops()
-			_, _ = b.convergeTask(task.ID)
 			_, _ = b.GetTask(task.ID)
 			_, _ = a.GetTask(task.ID)
 			if err := eA.SweepNow(ctx); err != nil {
@@ -289,28 +287,12 @@ func TestReverseFenceOrder_OldOwnerActsBeforeFailed(t *testing.T) {
 				t.Fatalf("worker-b sweep: %v", err)
 			}
 			final, _ := table.GetTask(ctx, task.ID)
-			if final.State != StateFailed || final.LastError != failed.LastError || final.DesiredRun != TaskDesiredStop {
-				t.Fatalf("FAILED rewritten: %s desired=%s last_error=%q", final.State, final.DesiredRun, final.LastError)
+			if final.State != StateLeaseDegraded || final.LastError != failed.LastError || final.DesiredRun != TaskDesiredRun {
+				t.Fatalf("yield rewritten: %s desired=%s last_error=%q", final.State, final.DesiredRun, final.LastError)
 			}
 			for _, w := range table.writesBy("worker-b")[bWritesBefore:] {
 				if !w.fencedRefuse {
 					t.Fatalf("worker-b wrote the task row: %+v", w)
-				}
-			}
-			h, open, _ := hs.snapshot(task.ID)
-			var tf *health.Finding
-			for _, f := range open {
-				if f.Kind == health.TaskFailed {
-					f := f
-					tf = &f
-				}
-			}
-			if tf == nil || tf.Severity != health.Critical || h.Status != health.StatusUnhealthy {
-				t.Fatalf("health %s, open %+v; want CRITICAL TASK_FAILED and UNHEALTHY", h.Status, open)
-			}
-			for name, s := range map[string]*Scheduler{"worker-a": a, "worker-b": b} {
-				if sum := s.HealthSummary(ctx); sum.Status != HealthDegraded {
-					t.Fatalf("%s /api/health = %+v, want degraded", name, sum)
 				}
 			}
 		})

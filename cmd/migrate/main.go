@@ -1,11 +1,12 @@
 // Package main provides module-level functionality for main.
 // input: migration files, META_DSN/env flags, an optional --config whose meta.tls matches the server, golang-migrate driver dependencies
-// output: schema migration commands (up/down/version/force/goto) execution results; a DSN rewritten with meta.tls when --config is set; the pool is opened in this process so that registered tls config is the one migrate uses; a dial error is prefixed meta.tls the same way server startup prefixes it
+// output: schema migration commands (up/down/version/force/goto) execution results; up and goto warn and continue when crossing version 11 without PROCESS, and abort when a transaction older than 5s is visible; a dirty version 11 is applied again from version 10 without a manual force because that file's DDL is idempotent; a DSN rewritten with meta.tls when --config is set; the pool is opened in this process so that registered tls config is the one migrate uses; a dial error is prefixed meta.tls the same way server startup prefixes it
 // pos: database schema migration CLI for operational change management
 // note: if this file changes, update this header and module README.md.
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -13,6 +14,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"binlog_server/internal/meta"
 
 	"binlog_server/internal/config"
 	"binlog_server/internal/mysqltls"
@@ -103,11 +107,11 @@ func newUpCommand(opts *migrateOptions) *cobra.Command {
 				return metaDialErr(err)
 			}
 			defer closeMigrator(m)
-			if err := m.Up(); err != nil {
-				if errors.Is(err, migrate.ErrNoChange) {
-					fmt.Println("no change")
-					return nil
-				}
+			version, _, verr := m.Version()
+			if err := warnLongTransactions(opts, version, verr, ^uint(0)); err != nil {
+				return err
+			}
+			if err := applyUp(m); err != nil {
 				return metaDialErr(err)
 			}
 			version, dirty, err := m.Version()
@@ -233,11 +237,11 @@ func newGotoCommand(opts *migrateOptions) *cobra.Command {
 				return metaDialErr(err)
 			}
 			defer closeMigrator(m)
-			if err := m.Migrate(uint(version)); err != nil {
-				if errors.Is(err, migrate.ErrNoChange) {
-					fmt.Println("no change")
-					return nil
-				}
+			current, _, verr := m.Version()
+			if err := warnLongTransactions(opts, current, verr, uint(version)); err != nil {
+				return err
+			}
+			if err := applyMigrate(m, uint(version)); err != nil {
 				return metaDialErr(err)
 			}
 			fmt.Printf("version=%d dirty=false\n", version)
@@ -291,6 +295,104 @@ func closeMigrator(m *migrate.Migrate) {
 	if srcErr != nil || dbErr != nil {
 		fmt.Fprintf(os.Stderr, "close migrate resources warning: source=%v database=%v\n", srcErr, dbErr)
 	}
+}
+
+// ownershipSchemaVersion is migration 000011.
+const ownershipSchemaVersion uint = 11
+
+// ownershipDirtyRecovery is the version to force before re-applying 000011.
+// The up file's DDL is information_schema-conditional, so a lock-wait
+// timeout that left schema_migrations dirty can be retried by migrate up
+// alone. Any other dirty version still needs an operator force.
+func ownershipDirtyRecovery(err error) (forceVersion int, ok bool) {
+	var dirty migrate.ErrDirty
+	if err == nil || !errors.As(err, &dirty) {
+		return 0, false
+	}
+	if uint(dirty.Version) != ownershipSchemaVersion {
+		return 0, false
+	}
+	return int(ownershipSchemaVersion) - 1, true
+}
+
+func applyUp(m *migrate.Migrate) error {
+	err := m.Up()
+	if err == nil || errors.Is(err, migrate.ErrNoChange) {
+		return nil
+	}
+	forceTo, ok := ownershipDirtyRecovery(err)
+	if !ok {
+		return err
+	}
+	if ferr := m.Force(forceTo); ferr != nil {
+		return ferr
+	}
+	err = m.Up()
+	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return err
+	}
+	return nil
+}
+
+func applyMigrate(m *migrate.Migrate, version uint) error {
+	err := m.Migrate(version)
+	if err == nil || errors.Is(err, migrate.ErrNoChange) {
+		return nil
+	}
+	forceTo, ok := ownershipDirtyRecovery(err)
+	if !ok || version < ownershipSchemaVersion {
+		return err
+	}
+	if ferr := m.Force(forceTo); ferr != nil {
+		return ferr
+	}
+	err = m.Migrate(version)
+	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return err
+	}
+	return nil
+}
+
+// crossingOwnershipMigration reports whether target applies 000011 from a
+// schema that does not already have it. A later up at version 11 does not.
+func crossingOwnershipMigration(current uint, currentErr error, target uint) bool {
+	if target < ownershipSchemaVersion {
+		return false
+	}
+	if errors.Is(currentErr, migrate.ErrNilVersion) {
+		return true
+	}
+	if currentErr != nil {
+		return false
+	}
+	return current < ownershipSchemaVersion
+}
+
+func warnLongTransactions(opts *migrateOptions, current uint, currentErr error, target uint) error {
+	if !crossingOwnershipMigration(current, currentErr, target) {
+		return nil
+	}
+	db, err := sql.Open("mysql", driverDSN(opts.dsn))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	warning, err := meta.CheckLongTransactions(ctx, db)
+	if err != nil {
+		return err
+	}
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+warning)
+	}
+	return nil
+}
+
+func driverDSN(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	dsn = strings.TrimPrefix(dsn, "mysql://")
+	return dsn
 }
 
 // resolveMigrateDSN applies meta.tls from --config. Without --config the DSN

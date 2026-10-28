@@ -574,10 +574,7 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	// run. It must then be idle. A mark that keeps coming back does not.
 	idleDeadline := time.Now().Add(2 * time.Second)
 	drained := false
-	for {
-		if evalIdle(e) && clock.WaiterCount() > 0 {
-			break
-		}
+	for !evalIdle(e) || clock.WaiterCount() <= 0 {
 		if !drained && !evalRunningAny(e) {
 			clock.Advance(debounce)
 			drained = true

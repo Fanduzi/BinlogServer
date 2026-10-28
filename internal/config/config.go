@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = 3×sweep, not negative) for chain delegation (P2-6.2, §30); verify.every_sec, verify.budget_bytes_per_sec, verify.rotation_periods, verify.recent_share_percent (1–100, 0 rejected), verify.pass_deadline_sec, verify.pass_max_bytes, verify.object_recent_sec, verify.drill_dsn, verify.drill_every_sec and verify.drill_check_sql for the phase 3 verifier; meta.tls default disabled, upload.use_ssl default true, and upload.tls.ca_file an optional PEM trust store (ADR 0012)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = max(3×sweep, lease_ttl+2×sweep), not negative) for chain delegation (P2-6.2, §30), and health.refusal_retry_cap_sec (default 600) and cluster.storage (default per_node); verify.every_sec, verify.budget_bytes_per_sec, verify.rotation_periods, verify.recent_share_percent (1–100, 0 rejected), verify.pass_deadline_sec, verify.pass_max_bytes, verify.object_recent_sec, verify.drill_dsn, verify.drill_every_sec and verify.drill_check_sql for the phase 3 verifier; meta.tls default disabled, upload.use_ssl default true, and upload.tls.ca_file an optional PEM trust store (ADR 0012)
 // note ADR 0011: cluster.side_kill is off or auto, default off
 // note F2: notify.webhook_url (empty disables), notify.webhook_token, notify.timeout_sec (1–60, default 5), notify.attempts (1–8, default 3), notify.backoff_ms (1–30000, default 200)
 // pos: configuration boundary translating external settings into internal options
@@ -94,6 +94,8 @@ type ClusterConfig struct {
 	// SideKill is cluster.side_kill: off (default) or auto. auto is a direct
 	// connection only. Empty means off.
 	SideKill string
+	// Storage is cluster.storage: per_node (default) or shared.
+	Storage string
 }
 
 // LogConfig 定义日志级别、输出位置与轮转策略。
@@ -170,9 +172,13 @@ type HealthConfig struct {
 	// StaleAfterSec: HEALTH_STALE opens once a task's task_health row is
 	// this old (P2-6.1, design 0009 §28). 0 means 5×sweep. Not negative.
 	StaleAfterSec int
+	// RefusalRetryCapSec is how long a shared tail refusal or an EpochLost
+	// refusal waits before that node may claim again. 0 means 600 seconds.
+	// Negative is rejected.
+	RefusalRetryCapSec int
 	// NodeGoneAfterSec: on non-shared storage, chain.local becomes
 	// incomplete once the last chain owner's heartbeat is this old
-	// (P2-6.2, design 0009 §30). 0 means 3×sweep. Not negative.
+	// (P2-6.2, design 0009 §30). 0 means max(3×sweep, lease_ttl+2×sweep). Not negative.
 	NodeGoneAfterSec int
 	// SignalStaleAfterSec: an open signal row with no failure seen by this
 	// process for this long is shown as INFO (P2-4, default 86400).
@@ -282,6 +288,8 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("cluster.lease_grace_sec", 30)
 	v.SetDefault("cluster.failover_policy", "rebuild_current_file")
 	v.SetDefault("cluster.side_kill", "off")
+	v.SetDefault("cluster.storage", "per_node")
+	v.SetDefault("health.refusal_retry_cap_sec", 600)
 	v.SetDefault("upload.use_ssl", true)
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.encoding", "json")
@@ -376,6 +384,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			LeaseGraceSec:          getInt(&loadErr, v, "cluster.lease_grace_sec"),
 			FailoverPolicy:         getString(v, decryptor, "cluster.failover_policy"),
 			SideKill:               getString(v, decryptor, "cluster.side_kill"),
+			Storage:                getString(v, decryptor, "cluster.storage"),
 		},
 		UploadEndpoint: getString(v, decryptor, "upload.endpoint", "upload_endpoint"),
 		UploadBucket:   getString(v, decryptor, "upload.bucket", "upload_bucket"),
@@ -510,6 +519,7 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			NoProgressAfterSec:             getInt(&loadErr, v, "health.no_progress_after_sec", "health_no_progress_after_sec"),
 			StaleAfterSec:                  getInt(&loadErr, v, "health.stale_after_sec", "health_stale_after_sec"),
 			NodeGoneAfterSec:               getInt(&loadErr, v, "health.node_gone_after_sec", "health_node_gone_after_sec"),
+			RefusalRetryCapSec:             getInt(&loadErr, v, "health.refusal_retry_cap_sec", "health_refusal_retry_cap_sec"),
 			SignalStaleAfterSec:            getInt(&loadErr, v, "health.signal_stale_after_sec", "health_signal_stale_after_sec"),
 			UploadLateCriticalAfterSec:     getInt(&loadErr, v, "health.upload_late_critical_after_sec", "health_upload_late_critical_after_sec"),
 			UploadLateCriticalAfterTaskSec: healthTaskOverrides(&loadErr, "health.upload_late_critical_after_task_sec", v.GetStringMap("health.upload_late_critical_after_task_sec")),
@@ -923,6 +933,12 @@ func validateConfig(cfg Config) error {
 		return err
 	}
 	if err := validateSideKill(cfg.Cluster.SideKill); err != nil {
+		return err
+	}
+	if err := validateClusterStorage(cfg.Cluster.Storage); err != nil {
+		return err
+	}
+	if err := validateOwnershipBounds(cfg); err != nil {
 		return err
 	}
 	return nil

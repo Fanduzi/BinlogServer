@@ -3,7 +3,8 @@
 // Package main replays the verifier review mutants against the tests.
 // input: the module sources (internal/assurance/verify.go, internal/tasks/sealed_upload.go, internal/tasks/verifier.go, internal/tasks/finding.go, internal/app/app.go, internal/meta/mysql_store.go, internal/tasks/evaluator.go, internal/health/reconcile.go, internal/health/fence.go, internal/health/registry.go, internal/meta/health_store.go, internal/replication/mysql_runner.go, internal/assurance/chain.go) and the mutant table in this file
 // output: a kill table on stdout; exit status 1 when a mutant that is not marked equivalent survives
-// pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill.go [id ...]
+// pos: the reproducible mutation harness for the phase 3 verifier, excluded from go test; run from the module root with go run ./internal/assurance/mutants/kill*.go [id ...]
+// note ADR 0011 PR-4: P401-P407 cover a stored refusal, an in-memory refusal, an ownerless Start, the terminal window, mixed version, storage mismatch, and StopExpired on a live-looking lease
 // note: if this file changes, update this header and module README.md.
 package main
 
@@ -43,6 +44,10 @@ const (
 	runnerRet = "internal/replication/mysql_runner.go"
 	chainFile = "internal/assurance/chain.go"
 	regFile   = "internal/health/registry.go"
+	lifeFile  = "internal/tasks/scheduler_lifecycle.go"
+	ownFile   = "internal/tasks/ownership_bridge.go"
+	stepFile  = "internal/ownership/step.go"
+	stopFile  = "internal/tasks/scheduler_transitions.go"
 )
 
 // packages maps a mutated file to the go test arguments that judge it.
@@ -61,6 +66,10 @@ var packages = map[string][]string{
 	runnerRet: {"-run", "TestRunnerStartKeepsYoungMissingSegment|TestLocalOnlyRetention|TestRetentionNoUploaderStillDeletesExpiredLocalFile", "./internal/replication/"},
 	chainFile: {"-run", "TestSegmentMissingNotForOpenSegment", "./internal/tasks/"},
 	regFile:   {"-run", "TestI6MissingLocalNamesDirectoryNode", "./internal/health/"},
+	lifeFile:  {"-run", "TestStoredRefusalBlocksClaim|TestClaimLoopUnreachableReachesFailedWithoutEpochClimb", "./internal/tasks/"},
+	ownFile:   {"-run", "TestAllowlistRetriesUntilTerminalWindow|TestMixedVersionRefusesClaim|TestStorageMismatchRefusesClaim", "./internal/tasks/"},
+	stepFile:  {"-run", "TestOwnerlessStartDoesNotTakeLease", "./internal/ownership/"},
+	stopFile:  {"-run", "TestScheduler_ExpiredStoppingFinalizesWithoutStartingDump|TestScheduler_ExpiredStoppingPendingDeleteErases", "./internal/tasks/"},
 }
 
 var mutants = []mutant{
@@ -706,7 +715,7 @@ var mutants = []mutant{
 		old: "\t\t\t\tfence.ChainVerified = true\n",
 		new: "\t\t\t\tfence.ChainVerified = false\n"},
 	{id: "SM07", desc: "ChainVerified is set when the directory was not read", file: evalFacts,
-		old: "\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\t\tfence.ChainVerified = true\n\t\t\t}\n\t\t}\n",
+		old: "\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\t\tfence.ChainVerified = true\n\t\t\t\tif e.s != nil && !e.s.confirmChainVerified(task.ID, fence.Node) {\n\t\t\t\t\tfence.ChainVerified = false\n\t\t\t\t}\n\t\t\t}\n\t\t}\n",
 		new: "\t\tif fence.Mode == health.FenceCluster && !fence.Proxy && !fence.Delegated {\n\t\t\tfence.ChainVerified = true\n\t\t}\n\t\tif chain := e.chainFactsInto(task, now, facts); chain != nil {\n\t\t\tfacts.Chain = chain\n\t\t\tfacts.Complete[health.ScopeChainLocal] = true\n\t\t}\n"},
 	// PR #507 QA: a runner start must not drop the row of a missing segment
 	// inside local retention (P2); Q02 and Q08 were surviving test gaps.

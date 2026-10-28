@@ -1,7 +1,7 @@
 // Package meta provides module-level functionality for meta.
 // input: cluster.side_kill, information_schema, and meta_canary when that table exists
-// output: side_kill on only after the canary passes; otherwise off, including while the switch is off and while the naming views return 1227 or 1142. The privilege probe reads one row (LIMIT 1); LIMIT 0 does not fill information_schema, so MariaDB would skip the PROCESS check. The second probe must still be the same sleeping transaction or the procedure is not called. The client never sends a server kill statement. sleepingLeaseHolder matches one task id exactly on MySQL and on MariaDB
-// pos: ADR 0011 PR-2 drill and auto (P2-9). Creating the procedure is a later migration
+// output: side_kill on only after the canary passes; unavailable when mode is auto and the procedure, canary, or privilege check does not pass; off while the switch is off. The privilege probe reads one row (LIMIT 1); LIMIT 0 does not fill information_schema, so MariaDB would skip the PROCESS check. The second probe must still be the same sleeping transaction or the procedure is not called. The client never sends a server kill statement. sleepingLeaseHolder matches one task id exactly on MySQL and on MariaDB
+// pos: ADR 0011 PR-2 drill and auto (P2-9). Migration 000011 does not install the procedure; a missing procedure leaves side_kill unavailable and is not required for correctness
 // note: if this file changes, update this header and module README.md.
 package meta
 
@@ -15,8 +15,10 @@ import (
 )
 
 // RefreshSideKill runs the canary when cluster.side_kill is auto. A missing
-// procedure, a missing canary table, or a failed drill leaves the switch off
-// and does not fail the sweep.
+// procedure, a missing canary table, or a failed drill leaves the switch
+// unavailable and does not fail the sweep. off stays off. The procedure is
+// optional: migrate does not install it, and a stale write is already a lost
+// lease when it misses the epoch and row_generation predicate.
 func (s *MySQLTaskStore) RefreshSideKill(ctx context.Context, nodeID string) {
 	if s == nil || s.session == nil || s.db == nil {
 		return
@@ -36,7 +38,11 @@ func (s *MySQLTaskStore) RefreshSideKill(ctx context.Context, nodeID string) {
 		}
 		passed = true
 	}()
-	s.session.setKill(passed)
+	if passed {
+		s.session.setKill(true)
+		return
+	}
+	s.session.setKillUnavailable()
 }
 
 func (s *MySQLTaskStore) logDrillOnce() {
@@ -46,7 +52,7 @@ func (s *MySQLTaskStore) logDrillOnce() {
 		return
 	}
 	s.session.logged = true
-	log.Printf("cluster.side_kill=auto stayed off: procedure, canary, or privilege check did not pass")
+	log.Printf("cluster.side_kill=auto is unavailable: migrate does not install binlog_server_kill_trx; a stale write that misses the lease and row_generation predicate is a lost lease. Session timeouts still drop a sleeping transaction. The procedure is not required for correctness")
 }
 
 // SideKillStalled asks the server procedure to drop a stalled task_leases

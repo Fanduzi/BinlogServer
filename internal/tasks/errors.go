@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner/source failures and stable operator error codes
-// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, STREAM_REGRESSION when a dump contradicts stored bytes, STORAGE_INCONSISTENT when a checkpoint or segment already does, the SOURCE_UNREACHABLE budget predicate, the retry allowlist (SOURCE_UNREACHABLE, transient metadata text, OBJECT_PURGE_FAILED), a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker, and permanent SOURCE_SWITCHOVER when a VIP reaches a different server and the backup cannot continue
+// output: typed permanent/retryable source errors, SEALED_FILE_EXISTS and CHECKPOINT_WRITE_FAILED, STREAM_REGRESSION when a dump contradicts stored bytes, STORAGE_INCONSISTENT when a checkpoint or segment already does, the SOURCE_UNREACHABLE budget predicate, the retry allowlist (SOURCE_UNREACHABLE, transient metadata text, OBJECT_PURGE_FAILED), a lease-handoff error that must not be written as FAILED, EPOCH_NOT_ACQUIRED when a cluster runner is asked to run at epoch 0, SEGMENT_NOT_ON_WORKER for a takeover segment that is not on this worker, permanent SOURCE_SWITCHOVER when a VIP reaches a different server and the backup cannot continue, and OperatorError whose Status is the HTTP code from ownership.Step
 // pos: shared operator-error types used by scheduler retry policy and source probing
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -24,10 +24,10 @@ const (
 	// CodeInvalidRequest is a create/update validation failure.
 	CodeInvalidRequest = "INVALID_REQUEST"
 	// CodeSegmentNotOnWorker means takeover cannot read the previous worker's segment.
-	// The task stays FAILED until that file is readable here.
+	// ADR 0011: that is a tail yield, not FAILED.
 	CodeSegmentNotOnWorker = "SEGMENT_NOT_ON_WORKER"
 	// CodeSealedFileExists means the rotate target is already sealed on this disk.
-	// Another attempt will hit the same file. The task stays FAILED until an operator removes the conflict.
+	// ADR 0011: this is EpochLost (LEASE_DEGRADED, desired RUN), not FAILED.
 	CodeSealedFileExists = "SEALED_FILE_EXISTS"
 	// CodeCheckpointWriteFailed means the checkpoint store rejected a write for a reason that will not clear on its own.
 	CodeCheckpointWriteFailed = "CHECKPOINT_WRITE_FAILED"
@@ -40,13 +40,31 @@ const (
 	// CodeStreamRegression means the dump contradicted bytes already stored:
 	// a rotate to an older or current file, or a transaction event behind the
 	// cursor. A GTID hole or out-of-order GTIDs are legal on a replica and
-	// never raise it. Another start hits the same stream. The task stays FAILED.
+	// never raise it. ADR 0011: this is EpochLost, not FAILED.
 	CodeStreamRegression = "STREAM_REGRESSION"
 	// CodeStorageInconsistent means a checkpoint gtid_set or a segment on disk
 	// already disagrees with the transactions those files contain.
-	// Starting again would drop more transactions. The task stays FAILED.
+	// Starting again would drop more transactions. ADR 0011: this is EpochLost,
+	// not FAILED. Desired stays RUN.
 	CodeStorageInconsistent = "STORAGE_INCONSISTENT"
 )
+
+// OperatorError is an operator Start, Stop, or Delete that ownership.Step rejected.
+// Status is the HTTP status Step returned (409 or 503).
+type OperatorError struct {
+	Status int
+	Detail string
+}
+
+func (e *OperatorError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Detail == "" {
+		return fmt.Sprintf("operator error %d", e.Status)
+	}
+	return e.Detail
+}
 
 // ErrLeaseHandoff means this runner's lease epoch is no longer the one that owns the task.
 // The scheduler stops the runner and releases only this epoch. It does not write FAILED or RETRY_BACKOFF.

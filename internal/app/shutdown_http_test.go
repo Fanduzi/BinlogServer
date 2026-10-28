@@ -60,7 +60,7 @@ func TestShutdownHTTP_NeverRequestedConnAndInFlight(t *testing.T) {
 			respCh <- err
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			respCh <- err

@@ -55,14 +55,14 @@ func TestLiveMySQLTLS(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer root.Close()
+		defer func() { _ = root.Close() }()
 		beforeConn := globalStatus(t, root, "Connections")
 		beforeSSL := globalStatus(t, root, "Ssl_accepts")
 		bad := replSource(tlsPort, "preferred", "", "")
 		bad.Password = "not-the-password"
 		conn, err := connectSource(ctx, bad)
 		if conn != nil {
-			conn.Close()
+			_ = conn.Close()
 		}
 		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "access denied") {
 			t.Fatalf("preferred wrong password = %v", err)
@@ -124,7 +124,7 @@ func assertCipher(t *testing.T, ctx context.Context, src tasks.SourceConfig, wan
 	if err != nil {
 		t.Fatalf("%s dial: %v", src.TLS.Mode, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	res, err := conn.Execute("SHOW STATUS LIKE 'Ssl_cipher'")
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +145,7 @@ func assertDialFails(t *testing.T, ctx context.Context, src tasks.SourceConfig) 
 	t.Helper()
 	conn, err := connectSource(ctx, src)
 	if conn != nil {
-		conn.Close()
+		_ = conn.Close()
 	}
 	if err == nil {
 		t.Fatalf("mode %s ca %q name %q connected", src.TLS.Mode, src.TLS.CA, src.TLS.ServerName)
@@ -158,7 +158,7 @@ func assertDialFails(t *testing.T, ctx context.Context, src tasks.SourceConfig) 
 func assertMeta(t *testing.T, port int, tlsCfg mysqltls.Config, name string, wantTLS bool) {
 	t.Helper()
 	db := openMeta(t, port, tlsCfg, name)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var variable, cipher string
 	if err := db.QueryRow("SHOW STATUS LIKE 'Ssl_cipher'").Scan(&variable, &cipher); err != nil {
 		t.Fatal(err)
@@ -174,7 +174,7 @@ func assertMeta(t *testing.T, port int, tlsCfg mysqltls.Config, name string, wan
 func assertMetaFails(t *testing.T, port int, tlsCfg mysqltls.Config, name string) {
 	t.Helper()
 	db := openMeta(t, port, tlsCfg, name)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	err := db.Ping()
 	if err == nil {
 		t.Fatalf("meta %s ca %q name %q connected", tlsCfg.Mode, tlsCfg.CA, tlsCfg.ServerName)
@@ -209,7 +209,7 @@ func grantRepl(t *testing.T, port int, tlsOn bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Execute("CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED BY 'replpw'"); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func waitMySQL(t *testing.T, src tasks.SourceConfig) {
 		conn, err := connectSource(ctx, src)
 		cancel()
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 		last = err

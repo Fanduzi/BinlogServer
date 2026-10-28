@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task JSON payloads, runner callbacks, file lifecycle state, store/lease/uploader dependencies
-// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, desired_run on API JSON (RUN or STOP), retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions; storage_alert also carries segment, detail, missing_gtids, valid_segments, and restart_gtid_set; a listing lstat of a regular file is reused for that file's location; source.tls is the ADR 0012 block
+// output: task/start/source/file models including gtid alias decoding, optional local and bucket retention days, OPEN/SEALED observability, checksum match on UPLOADED or mismatch and an unfinished check on UPLOAD_FAILED, files-list location and source_identity, at-tip replication progress, the process-local KeepLocalSegments flag for adopted leftover directories, desired_run on API JSON (RUN or STOP), retry-budget fields omitted from the API JSON, pending_dump_cleanup when Stop could not KILL a Binlog Dump, with process_local when that column is absent, row_generation once the column has been read (a loaded 0 still fences), FilePos as JSON null and SQL NULL when a binlog position is unknown, SourceSwitchNotice for a VIP source switch event, and storage_alert when a checkpoint or segment disagrees with the stored transactions; storage_alert also carries segment, detail, missing_gtids, valid_segments, and restart_gtid_set; a listing lstat of a regular file is reused for that file's location; source.tls is the ADR 0012 block
 // pos: core domain orchestration layer governing backup task lifecycle and policies
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -103,6 +103,25 @@ type Task struct {
 	// GET /api/tasks, /api/tasks/{id} and /api/dashboard. It is not stored;
 	// nil (omitted) only when this process cannot count findings.
 	OpenFindings *int `json:"open_findings,omitempty"`
+	// FailedReason is why the row is FAILED. Console reads it. Empty on every
+	// other phase. ADR 0011 allows SOURCE_AUTH, LOG_BIN_OFF, SOURCE_SWITCHOVER,
+	// SOURCE_UNREACHABLE, CHAIN_OWNER_GONE, and LEGACY_UNKNOWN.
+	FailedReason string `json:"failed_reason,omitempty"`
+	// RowGeneration is backup_tasks.row_generation. RowGenerationKnown is
+	// false until a scan or a successful task write has observed it. A
+	// loaded 0 is a real value and still fences the yield.
+	RowGeneration      int64 `json:"-"`
+	RowGenerationKnown bool  `json:"-"`
+	// FailedAt is when FailedReason was written.
+	FailedAt time.Time `json:"-"`
+	// TailUnreadableSince is set by a tail yield and is not cleared by Start.
+	TailUnreadableSince time.Time `json:"-"`
+	// PendingDelete is set by operator Delete while a lease is still live.
+	PendingDelete bool `json:"-"`
+	// ChainOwner is task_chain.owner_node after ChainVerified.
+	ChainOwner string `json:"-"`
+	// ChainVerifiedAt is task_chain.verified_at. Zero means not verified.
+	ChainVerifiedAt time.Time `json:"-"`
 }
 
 // StorageAlert is a checkpoint or segment that cannot be continued safely.

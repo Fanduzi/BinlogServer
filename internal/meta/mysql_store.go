@@ -1,6 +1,7 @@
 // Package meta provides module-level functionality for meta.
 // input: MySQL connections, optional AES-256 encryption key from config.EncryptionKey, SQL schema/contracts including file lifecycle state, retry/lease timing policies
-// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, idle STOPPING, and STOPPED rows with desired RUN and an empty owner whose lease has expired (#454), ListTaskIDsWithExpiredOwnerLease (a row naming an owner, desired RUN, not FAILED/STOPPED/CREATED, lease expired by NOW(6)) for the _health holder (design 0009 §24.13), backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 6 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED that also returns sha256 and event times when migration 000008 columns exist (1054 falls back to the list without them); checkpoint and binlog_files upsert/delete run under execUnderFence when the context carries a fence identity (ADR 0009 P2-6b, #417)
+// output: persistent metadata operations for tasks, files, leases, runs, and checkpoints, with GetTask by id, ListTasksPage (Limit<=0 means no LIMIT, host filter uses IsLoopbackHost plus SameSourceHost loopback SQL), CountTaskStates and CountTasksBySource via GROUP BY, ListRunningTaskRefs for RUNNING id/host/port, ListTasksWithExpiredLease for cluster takeover, idle STOPPING, and STOPPED rows with desired RUN and an empty owner whose lease has expired (#454), ListTaskIDsWithExpiredOwnerLease (a row naming an owner, desired RUN, not FAILED/STOPPED/CREATED, lease expired by NOW(6)) for the _health holder (design 0009 §24.13), backup_tasks desired-run and retry-budget columns on the same task write, a one-time desired_run reconcile for rows still at spec_revision 0 and applied_spec_revision 0, startup refusal below schema 11 that tells the operator to run ./migrate up, required index uk_task_source_epoch without uk_task_file_epoch, an optional pending_dump_cleanup column when migration 000004 is applied, a task upsert that keeps the stored row when its spec_revision is newer than the incoming snapshot, UpsertBinlogFile identifying one segment by (task_id, source_file, epoch) with file_name kept equal to that source basename, ListBinlogFiles in ascending source-index replay order (every epoch of a source file; limit keeps the highest indexes) including checksum and epoch, ListBinlogFilesPage as a bounded (file_name, epoch) page for retention and rotate, DeleteBinlogFile by task id, source file name, and epoch, ListSourceSwitchEvents for SOURCE_SWITCHOVER rows oldest first, and Source.Password encrypted in source_json when a key is configured, an upsert that binds NULL and does not assign end_pos when the caller does not know it, and a failed-upload list limited to state SEALED that also returns sha256 and event times when migration 000008 columns exist (1054 falls back to the list without them); checkpoint and binlog_files upsert/delete run under execUnderFence when the context carries a fence identity (ADR 0009 P2-6b, #417)
+// note ADR 0011: upsert, pending-dump save, legacy reconcile, and CommitYield share rowGenerationBump; pending_delete and row_generation are scanned after the schema check so another process can erase a pending delete and a yield can fence on the generation it loaded. There is no generation trigger. A loaded generation of 0 still has to match the row; it is not an unread escape
 // pos: metadata persistence layer between domain scheduler and MySQL storage engine
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -25,7 +26,13 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-const minRequiredSchemaVersion int64 = 6
+// minRequiredSchemaVersion is the schema floor for this binary. Migration
+// 000011 is version 11. A process on an older schema refuses to start.
+// ClusterProtocolVersion is the value this binary writes on
+// worker_registrations. A live row below it is a mixed-version peer.
+const minRequiredSchemaVersion int64 = 11
+
+const ClusterProtocolVersion int64 = 11
 
 const currentSchemaVersionSQL = `
 SELECT version, dirty
@@ -70,6 +77,7 @@ var requiredTableSchemas = []tableSchemaSpec{
 			"source_json", "start_json", "storage_json", "updated_at",
 			"desired_run", "spec_revision", "applied_spec_revision", "failed_spec_revision",
 			"retry_attempt", "consecutive_source_failures",
+			"row_generation", "failed_reason", "failed_at", "tail_unreadable_since", "pending_delete",
 		},
 		Indexes: []string{"PRIMARY", "uk_backup_tasks_cluster_key"},
 	},
@@ -116,16 +124,42 @@ var requiredTableSchemas = []tableSchemaSpec{
 	{
 		Name: "worker_heartbeats",
 		Columns: []string{
-			"worker_id", "host", "version", "last_seen_at", "status",
+			"worker_id", "host", "build_version", "last_seen_at", "status",
 		},
 		Indexes: []string{"PRIMARY", "idx_worker_heartbeats_seen"},
 	},
 	{
 		Name: "worker_registrations",
 		Columns: []string{
-			"worker_id", "session_id", "lease_expire_at", "renewed_at",
+			"worker_id", "session_id", "lease_expire_at", "renewed_at", "cluster_protocol_version",
 		},
 		Indexes: []string{"PRIMARY", "idx_worker_registrations_expire"},
+	},
+	{
+		Name: "task_chain",
+		Columns: []string{
+			"task_id", "owner_node", "verified_at", "verified_epoch",
+		},
+		Indexes: []string{"PRIMARY"},
+	},
+	{
+		Name: "task_node_refusal",
+		Columns: []string{
+			"task_id", "node_id", "refuse_until", "reason", "attempts",
+		},
+		Indexes: []string{"PRIMARY"},
+	},
+	{
+		Name:    "meta_canary",
+		Columns: []string{"node_id"},
+		Indexes: []string{"PRIMARY"},
+	},
+	{
+		Name: "cluster_storage",
+		Columns: []string{
+			"id", "storage_mode", "registered_at",
+		},
+		Indexes: []string{"PRIMARY"},
 	},
 }
 
@@ -135,25 +169,14 @@ const taskSelectColumns = `id, name, cluster_key, state, last_error, owner_worke
 
 const savePendingDumpSQL = `
 UPDATE backup_tasks
-SET pending_dump_cleanup = ?
+SET pending_dump_cleanup = ?,
+    ` + rowGenerationBump + `
 WHERE id = ? AND pending_dump_cleanup = ?;
 `
 
-// withPendingColumn adds pending_dump_cleanup when migration 000004 is present.
-// Queries that do not use the column stay valid on schema 3.
-func (s *MySQLTaskStore) withPendingColumn(query string) string {
-	if s == nil || !s.hasPendingDump || strings.Contains(query, "pending_dump_cleanup") {
-		return query
-	}
-	if strings.Contains(query, "t.consecutive_source_failures") {
-		return strings.Replace(query, "t.consecutive_source_failures", "t.consecutive_source_failures, t.pending_dump_cleanup", 1)
-	}
-	return strings.Replace(query, taskSelectColumns, taskSelectColumns+", pending_dump_cleanup", 1)
-}
-
 const upsertTaskSQL = `
-INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, ` + taskBudgetColumns + `)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO backup_tasks (id, name, cluster_key, state, last_error, owner_worker_id, epoch, run_id, source_json, start_json, storage_json, updated_at, ` + taskBudgetColumns + `, pending_delete)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   name = IF(spec_revision > VALUES(spec_revision), name, VALUES(name)),
   cluster_key = IF(spec_revision > VALUES(spec_revision), cluster_key, VALUES(cluster_key)),
@@ -171,6 +194,8 @@ ON DUPLICATE KEY UPDATE
   failed_spec_revision = IF(spec_revision > VALUES(spec_revision), failed_spec_revision, VALUES(failed_spec_revision)),
   retry_attempt = IF(spec_revision > VALUES(spec_revision), retry_attempt, VALUES(retry_attempt)),
   consecutive_source_failures = IF(spec_revision > VALUES(spec_revision), consecutive_source_failures, VALUES(consecutive_source_failures)),
+  pending_delete = IF(spec_revision > VALUES(spec_revision), pending_delete, VALUES(pending_delete)),
+  ` + rowGenerationBump + `,
   spec_revision = IF(spec_revision > VALUES(spec_revision), spec_revision, VALUES(spec_revision));
 `
 
@@ -204,24 +229,6 @@ WHERE t.owner_worker_id <> '' AND t.epoch > 0
   AND t.state NOT IN ('FAILED', 'STOPPED', 'CREATED')
   AND l.lease_expire_at <= NOW(6)
 ORDER BY CAST(t.id AS UNSIGNED), t.id;
-`
-
-// reconcileLegacyDesiredRunSQL rewrites desired_run for rows no step-4 writer
-// has touched. spec_revision stays 0. A later operator Start or Stop moves
-// spec_revision off 0, so this UPDATE does not cover that ask. Repeating it
-// changes zero rows once desired_run already matches the state.
-const reconcileLegacyDesiredRunSQL = `
-UPDATE backup_tasks
-SET desired_run = CASE
-  WHEN state IN ('RUNNING', 'STARTING', 'RETRY_BACKOFF', 'LEASE_DEGRADED', 'REBUILDING_FILE') THEN 'RUN'
-  ELSE 'STOP'
-END
-WHERE spec_revision = 0
-  AND applied_spec_revision = 0
-  AND desired_run <> CASE
-    WHEN state IN ('RUNNING', 'STARTING', 'RETRY_BACKOFF', 'LEASE_DEGRADED', 'REBUILDING_FILE') THEN 'RUN'
-    ELSE 'STOP'
-  END
 `
 
 const getTaskSQL = `
@@ -456,9 +463,8 @@ ORDER BY started_at DESC
 LIMIT ?
 `
 
-const upsertWorkerHeartbeatSQL = `
--- name: UpsertWorkerHeartbeat :exec
-INSERT INTO worker_heartbeats (worker_id, host, version, last_seen_at, status)
+const upsertWorkerHeartbeatSQL = `-- name: UpsertWorkerHeartbeat :exec
+INSERT INTO worker_heartbeats (worker_id, host, build_version, last_seen_at, status)
 VALUES (
   ?,
   ?,
@@ -468,27 +474,16 @@ VALUES (
 )
 ON DUPLICATE KEY UPDATE
   host = VALUES(host),
-  version = VALUES(version),
+  build_version = VALUES(build_version),
   last_seen_at = VALUES(last_seen_at),
   status = VALUES(status)
 `
 
-const listWorkerHeartbeatsSQL = `
--- name: ListWorkerHeartbeats :many
-SELECT worker_id, host, version, last_seen_at, status
+const listWorkerHeartbeatsSQL = `-- name: ListWorkerHeartbeats :many
+SELECT worker_id, host, build_version AS version, last_seen_at, status
 FROM worker_heartbeats
 ORDER BY worker_id ASC
 LIMIT ?
-`
-
-// acquireWorkerRegistrationSQL 以单条 UPSERT 表达“同 session 续租 + 过期接管”语义。
-const acquireWorkerRegistrationSQL = `
-INSERT INTO worker_registrations (worker_id, session_id, lease_expire_at, renewed_at)
-VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), NOW(6))
-ON DUPLICATE KEY UPDATE
-  session_id = IF(session_id = VALUES(session_id) OR lease_expire_at <= NOW(6), VALUES(session_id), session_id),
-  lease_expire_at = IF(session_id = VALUES(session_id) OR lease_expire_at <= NOW(6), VALUES(lease_expire_at), lease_expire_at),
-  renewed_at = IF(session_id = VALUES(session_id) OR lease_expire_at <= NOW(6), NOW(6), renewed_at);
 `
 
 // renewWorkerRegistrationSQL 只允许当前 session 续租（条件更新）。
@@ -511,10 +506,11 @@ WHERE worker_id = ?;
 `
 
 type MySQLTaskStore struct {
-	db             *sql.DB
-	schemaTimeout  time.Duration
-	sourceCrypto   *config.Decryptor
-	hasPendingDump bool
+	db               *sql.DB
+	schemaTimeout    time.Duration
+	sourceCrypto     *config.Decryptor
+	hasPendingDump   bool
+	hasOwnershipCols bool
 	// sealFactsAbsent: the last probe found no 000008 columns. Cleared when a
 	// later probe sees them (design 0009 §26.5, #353). sealFactsSeen stays
 	// set for the life of the process once the columns have been present.
@@ -686,6 +682,8 @@ func (s *MySQLTaskStore) ensureSchema(ctx context.Context) error {
 		if !hasPending {
 			log.Printf("backup_tasks.pending_dump_cleanup is absent; leftover Binlog Dump cleanup stays in this process until ./migrate up")
 		}
+		// Schema 11 is required, so pending_delete is present once this check passes.
+		s.hasOwnershipCols = true
 		return nil
 	}
 	sort.Strings(missing)
@@ -864,6 +862,7 @@ func (s *MySQLTaskStore) upsertTaskInTx(ctx context.Context, tx *sql.Tx, task ta
 		task.FailedSpecRevision,
 		task.RetryAttempt,
 		task.ConsecutiveSourceFailures,
+		pendingDeleteArg(task.PendingDelete),
 	); err != nil {
 		return err
 	}
@@ -1006,18 +1005,20 @@ func runningTaskRefSQL(filter tasks.TaskListFilter) (string, []any) {
 
 func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 	var (
-		task        tasks.Task
-		state       string
-		ownerWorker sql.NullString
-		epoch       int64
-		runID       sql.NullString
-		sourceJSON  string
-		startJSON   string
-		storageJSON string
-		lastError   sql.NullString
-		updatedAt   time.Time
-		desiredRun  string
-		pendingRaw  sql.NullString
+		task          tasks.Task
+		state         string
+		ownerWorker   sql.NullString
+		epoch         int64
+		runID         sql.NullString
+		sourceJSON    string
+		startJSON     string
+		storageJSON   string
+		lastError     sql.NullString
+		updatedAt     time.Time
+		desiredRun    string
+		pendingRaw    sql.NullString
+		pendingDelete int
+		rowGen        int64
 	)
 	dest := []any{
 		&task.ID,
@@ -1042,6 +1043,9 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 	if s.hasPendingDump {
 		dest = append(dest, &pendingRaw)
 	}
+	if s.hasOwnershipCols {
+		dest = append(dest, &pendingDelete, &rowGen)
+	}
 	if err := src.Scan(dest...); err != nil {
 		return tasks.Task{}, err
 	}
@@ -1056,6 +1060,11 @@ func (s *MySQLTaskStore) scanTask(src rowScanner) (tasks.Task, error) {
 	task.RunID = runID.String
 	task.UpdatedAt = updatedAt
 	task.DesiredRun = desiredRun
+	task.PendingDelete = pendingDelete != 0
+	if s.hasOwnershipCols {
+		task.RowGeneration = rowGen
+		task.RowGenerationKnown = true
+	}
 	source, err := s.unmarshalSource(sourceJSON)
 	if err != nil {
 		return tasks.Task{}, fmt.Errorf("decode source json for task %s: %w", task.ID, err)
@@ -1141,6 +1150,15 @@ func (s *MySQLTaskStore) ListTasks(ctx context.Context) ([]tasks.Task, error) {
 	ctx, span := startMetaSpan(ctx, "meta.mysql_store.list_tasks")
 	defer endMetaSpan(span)
 	return s.queryTasks(ctx, s.withPendingColumn(listTaskSQL))
+}
+
+// TaskRowGeneration is the generation last committed for id. A yield fences
+// on this value. Missing the row is an error so the caller does not treat
+// it as generation 0.
+func (s *MySQLTaskStore) TaskRowGeneration(ctx context.Context, id string) (int64, error) {
+	var gen int64
+	err := s.db.QueryRowContext(ctx, `SELECT row_generation FROM backup_tasks WHERE id = ?`, id).Scan(&gen)
+	return gen, err
 }
 
 // GetTask 按主键读取单个任务。

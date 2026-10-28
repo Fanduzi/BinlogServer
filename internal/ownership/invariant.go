@@ -1,11 +1,14 @@
 // Package ownership is the pure task-ownership transition from ADR 0011.
 // input: State and the clock used for lease, refusal, and stale comparisons
-// output: Violation list for invariants 1–10, ProgressOverdue from the applied-event trace, claim and stop sets, FairTerminal, the operator FAILED table, /api/health code
+// output: Violation list for invariants 1–10, ProgressOverdue from the applied-event trace, claim and stop sets, FairTerminal, the operator FAILED table, /api/health code. CheckStep, the transition half, lives in invariant_step_test.go
 // pos: the checkable predicates ADR 0011 §2 requires of every prefix
 // note: if this file changes, update this header and module README.md.
 package ownership
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Violation is one failed predicate. Invariant is the ADR 0011 §2 number.
 type Violation struct {
@@ -146,12 +149,12 @@ func Check(s State, now time.Time) []Violation {
 	}
 	if s.Phase == PhaseFailed {
 		switch s.FailedReason {
-		case ReasonSourceAuth, ReasonLogBinOff, ReasonChainOwnerGone, ReasonLegacyUnknown:
+		case ReasonSourceAuth, ReasonLogBinOff, ReasonSourceSwitchover, ReasonSourceUnreachable, ReasonChainOwnerGone, ReasonLegacyUnknown:
 		default:
 			v = add(v, "2", "FAILED reason "+s.FailedReason+" is outside the allowlist")
 		}
 		switch s.FailedReason {
-		case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+		case ReasonSourceAuth, ReasonLogBinOff, ReasonSourceSwitchover, ReasonSourceUnreachable, ReasonLegacyUnknown:
 			// spec_revision > failed_spec_revision is the claim-pull shape and
 			// still FAILED. Zero, or a revision above the row, means the
 			// terminal write was dropped.
@@ -215,13 +218,13 @@ func Check(s State, now time.Time) []Violation {
 }
 
 // failedSpecClaimable is the claim gate for a whitelisted FAILED row.
-// SOURCE_AUTH, LOG_BIN_OFF, and LEGACY_UNKNOWN resume only when the spec
-// revision has moved past the revision recorded at failure.
+// SOURCE_AUTH, LOG_BIN_OFF, SOURCE_SWITCHOVER, SOURCE_UNREACHABLE, and LEGACY_UNKNOWN resume only
+// when the spec revision has moved past the revision recorded at failure.
 // CHAIN_OWNER_GONE never does: another node does not take over a chain
 // whose owner lost the directory.
 func failedSpecClaimable(s State) bool {
 	switch s.FailedReason {
-	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonSourceSwitchover, ReasonSourceUnreachable, ReasonStorageInconsistent, ReasonLegacyUnknown:
 		return s.SpecRevision > s.FailedSpec
 	default:
 		return false
@@ -243,7 +246,7 @@ func FairTerminal(s State, now time.Time) bool {
 		return false
 	}
 	switch s.FailedReason {
-	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown:
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonSourceSwitchover, ReasonSourceUnreachable, ReasonStorageInconsistent, ReasonLegacyUnknown:
 		return !InClaimSet(s, now)
 	case ReasonChainOwnerGone:
 		n := s.node(s.Chain.Owner)
@@ -285,7 +288,7 @@ func fairReader(s State, now time.Time) string {
 // operatorFailed is the ADR operator-required FAILED table.
 func operatorFailed(reason string) bool {
 	switch reason {
-	case ReasonSourceAuth, ReasonLogBinOff, ReasonLegacyUnknown, ReasonChainOwnerGone:
+	case ReasonSourceAuth, ReasonLogBinOff, ReasonSourceSwitchover, ReasonSourceUnreachable, ReasonStorageInconsistent, ReasonLegacyUnknown, ReasonChainOwnerGone:
 		return true
 	default:
 		return false
@@ -360,6 +363,13 @@ func replayProgress(trace []TraceEvent) (anchor, unownedSince time.Time, last Tr
 	return anchor, unownedSince, last
 }
 
+// stepCheck is one transition predicate and the violation it emits.
+type stepCheck struct {
+	fail bool
+	id   string
+	msg  string
+}
+
 // CheckStep is the transition half: desired STOP, FAILED, the epoch fence,
 // chain writes, close-then-open, and operator HTTP.
 func CheckStep(before, after State, e Event, res Result, now time.Time) []Violation {
@@ -369,81 +379,78 @@ func CheckStep(before, after State, e Event, res Result, now time.Time) []Violat
 	if res.Decision != DecisionApplied {
 		v = dropInv(v, "7")
 	}
-	if before.Desired != DesiredStop && after.Desired == DesiredStop {
-		if e.Kind != EventOperatorStop && e.Kind != EventOperatorDelete {
-			v = add(v, "1", "non-operator event wrote desired STOP")
+	epochOrRowMoved := before.Lease.Epoch != after.Lease.Epoch || before.RowGeneration != after.RowGeneration
+	moved := before.Phase != after.Phase || before.Desired != after.Desired || epochOrRowMoved
+	dropped := res.Decision == DecisionDiscarded || res.Decision == DecisionReread || res.Decision == DecisionRejected
+	becameFailed := after.Phase == PhaseFailed && before.Phase != PhaseFailed
+	checks := []stepCheck{
+		{before.Desired != DesiredStop && after.Desired == DesiredStop && e.Kind != EventOperatorStop && e.Kind != EventOperatorDelete, "1", "non-operator event wrote desired STOP"},
+		{before.Desired == DesiredStop && after.Desired == DesiredRun && res.Decision == DecisionApplied && e.Kind != EventOperatorStart, "1", "event cleared desired STOP"},
+		{becameFailed && e.Kind != EventTerminalError && e.Kind != EventChainOwnerGone, "2", "event entered FAILED"},
+	}
+	for _, c := range checks {
+		if c.fail {
+			v = add(v, c.id, c.msg)
 		}
 	}
-	if before.Desired == DesiredStop && after.Desired == DesiredRun && res.Decision == DecisionApplied {
-		if e.Kind != EventOperatorStart {
-			v = add(v, "1", "event cleared desired STOP")
-		}
-	}
-	if after.Phase == PhaseFailed && before.Phase != PhaseFailed {
-		if e.Kind != EventTerminalError && e.Kind != EventChainOwnerGone {
-			v = add(v, "2", "event entered FAILED")
-		}
-	}
-	switch e.Cause {
-	case CauseENOENT, CauseENOSPC, CauseEROFS, CauseUnclassified, CauseWriteFenced, CauseLeaseUnreadable:
-		if before.Phase != PhaseFailed && after.Phase == PhaseFailed {
+	if becameFailed {
+		switch e.Cause {
+		case CauseENOENT, CauseENOSPC, CauseEROFS, CauseUnclassified, CauseWriteFenced, CauseLeaseUnreadable:
 			v = add(v, "2", "local cause "+string(e.Cause)+" became FAILED")
 		}
 	}
-	if res.Decision == DecisionDiscarded || res.Decision == DecisionReread || res.Decision == DecisionRejected {
-		if before.Phase != after.Phase || before.RowGeneration != after.RowGeneration || before.Lease.Epoch != after.Lease.Epoch || before.Desired != after.Desired {
-			v = add(v, "3", "a dropped event wrote the task row")
+	checks = []stepCheck{
+		{dropped && moved, "3", "a dropped event wrote the task row"},
+		{LeaseLive(before, now) && after.Lease.Owner != "" && after.Lease.Owner != before.Lease.Owner, "3", "another node took a live lease"},
+		{e.Kind == EventStopExpired && res.Decision == DecisionApplied && LeaseLive(before, now), "3", "StopExpired applied while the lease was live"},
+		{res.Decision == DecisionApplied && epochFenced(e.Kind) && (e.Node != before.Lease.Owner || e.Epoch != before.Lease.Epoch), "3", "runner event applied without the current owner and epoch"},
+		{becameFailed && e.Kind == EventChainOwnerGone && (before.Phase != PhaseLeaseDegraded || before.TailSince.IsZero()), "2", "ChainOwnerGone entered FAILED outside LEASE_DEGRADED with a tail"},
+	}
+	for _, c := range checks {
+		if c.fail {
+			v = add(v, c.id, c.msg)
 		}
 	}
 	// Invariant 3 also constrains events that were accepted. A dropped-event
 	// check cannot see a stolen live lease or a stale epoch that was applied.
-	if LeaseLive(before, now) && after.Lease.Owner != "" && after.Lease.Owner != before.Lease.Owner {
-		v = add(v, "3", "another node took a live lease")
-	}
-	if e.Kind == EventStopExpired && res.Decision == DecisionApplied && LeaseLive(before, now) {
-		v = add(v, "3", "StopExpired applied while the lease was live")
-	}
-	if res.Decision == DecisionApplied && epochFenced(e.Kind) {
-		if e.Node != before.Lease.Owner || e.Epoch != before.Lease.Epoch {
-			v = add(v, "3", "runner event applied without the current owner and epoch")
-		}
-	}
-	if e.Kind == EventChainOwnerGone && before.Phase != PhaseFailed && after.Phase == PhaseFailed {
-		if before.Phase != PhaseLeaseDegraded || before.TailSince.IsZero() {
-			v = add(v, "2", "ChainOwnerGone entered FAILED outside LEASE_DEGRADED with a tail")
-		}
-	}
 	chainMoved := before.Chain.Owner != after.Chain.Owner || !before.Chain.VerifiedAt.Equal(after.Chain.VerifiedAt)
 	if chainMoved && !(e.Kind == EventChainVerified && e.ReadOK && !e.Incomplete && res.Decision == DecisionApplied) && !after.Deleted {
 		v = add(v, "4", "chain changed without ChainVerified")
 	}
-	opened := map[string]bool{}
-	for _, f := range res.Opened {
-		opened[f.Key()] = true
-	}
 	for _, f := range res.Closed {
-		if opened[f.Key()] {
+		if slices.ContainsFunc(res.Opened, func(g Finding) bool { return g.Key() == f.Key() }) {
 			v = add(v, "5", "finding "+f.Name+" closed and opened in one step")
 		}
 	}
-	if res.HTTP >= 400 {
-		if before.Phase != after.Phase || before.Desired != after.Desired || before.RowGeneration != after.RowGeneration || before.Lease.Epoch != after.Lease.Epoch || before.Lease.Owner != after.Lease.Owner || before.PendingDelete != after.PendingDelete {
-			v = add(v, "8", "HTTP error still changed the row")
+	checks = []stepCheck{
+		{res.HTTP >= 400 && (moved || before.Lease.Owner != after.Lease.Owner || before.PendingDelete != after.PendingDelete), "8", "HTTP error still changed the row"},
+		{res.HTTP == 400, "8", "operator HTTP is 400"},
+	}
+	for _, c := range checks {
+		if c.fail {
+			v = add(v, c.id, c.msg)
 		}
 	}
-	if res.HTTP == 400 {
-		v = add(v, "8", "operator HTTP is 400")
-	}
-	if e.Kind == EventOperatorStart && res.HTTP == 204 && res.Decision == DecisionApplied {
-		if after.Phase != PhaseStarting || after.Desired != DesiredRun || after.RunID != "" || after.Lease.Owner == "" {
-			v = add(v, "8", "advancing Start did not commit STARTING with an owner")
+	if e.Kind == EventOperatorStart {
+		if res.HTTP == 204 && res.Decision == DecisionApplied {
+			// A control-plane Start while the worker is still closing the
+			// dump records desired RUN and leaves the phase, owner, and
+			// epoch. The holder reopens that epoch when Close returns.
+			keptStop := e.Ownerless && before.Phase == PhaseStopping && !before.PendingDelete
+			checks = []stepCheck{
+				{keptStop && (after.Phase != PhaseStopping || after.Desired != DesiredRun || after.Lease.Owner != before.Lease.Owner || after.Lease.Epoch != before.Lease.Epoch || after.SpecRevision != before.SpecRevision+1), "8", "ownerless Start during STOPPING did not keep the lease"},
+				{!keptStop && (after.Phase != PhaseStarting || after.Desired != DesiredRun || after.RunID != ""), "8", "advancing Start did not commit STARTING"},
+				{e.Ownerless && !keptStop && (after.Lease.Owner != "" || after.Lease.Epoch != before.Lease.Epoch), "8", "ownerless Start took a lease"},
+				{!e.Ownerless && after.Lease.Owner == "", "8", "advancing Start did not commit STARTING with an owner"},
+				{!after.TailSince.Equal(before.TailSince), "5", "OperatorStart cleared tail_unreadable_since"},
+			}
+			for _, c := range checks {
+				if c.fail {
+					v = add(v, c.id, c.msg)
+				}
+			}
 		}
-		if !after.TailSince.Equal(before.TailSince) {
-			v = add(v, "5", "OperatorStart cleared tail_unreadable_since")
-		}
-	}
-	if e.Kind == EventOperatorStart && res.Decision == DecisionIdempotent {
-		if before.SpecRevision != after.SpecRevision || before.Lease.Epoch != after.Lease.Epoch || before.RowGeneration != after.RowGeneration {
+		if res.Decision == DecisionIdempotent && (before.SpecRevision != after.SpecRevision || epochOrRowMoved) {
 			v = add(v, "8", "idempotent Start wrote the row")
 		}
 	}

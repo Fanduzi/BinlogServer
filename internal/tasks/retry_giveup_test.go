@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: runner errors for a sealed local file, a lease epoch mismatch, a retryable source failure, and a non-allowlisted error during Stop
-// output: proof that a sealed file and an unclassified runner error fail once and release the lease, a lease mismatch hands the task off, a retryable source error stays in RETRY_BACKOFF, Start after FAILED arms the task again, and a non-allowlisted error during Stop (in memory, or a newer stored Stop whose KILL could not reach the source) stays STOPPED with pending_dump_cleanup and does not write TASK_FAILED
+// output: proof that a sealed file and an unclassified runner error yield once and release the lease, SOURCE_SWITCHOVER stays FAILED with desired RUN and is not claimed again, a memory lease with no task_leases row still writes that FAILED, a stored lease fences the yield on the loaded row_generation, a lease mismatch hands the task off, a retryable source error stays in RETRY_BACKOFF, Start after a yield arms the task again, including a data directory plus a memory lease where the released epoch must not stick the row in STARTING, and a non-allowlisted error during Stop (in memory, or a newer stored Stop whose KILL could not reach the source) stays STOPPED with pending_dump_cleanup and does not write TASK_FAILED
 // pos: scheduler retry-policy regression coverage for permanent local errors and source retry
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -64,19 +65,19 @@ func TestScheduler_SealedFileExistsFailsAndReleasesLease(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if got.State == StateFailed {
+		if got.State == StateLeaseDegraded {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s last_error=%q calls=%d release=%d", got.State, got.LastError, runner.callCount(), leaseReleaseCount(lease))
+			t.Fatalf("expected LEASE_DEGRADED, state=%s last_error=%q calls=%d release=%d", got.State, got.LastError, runner.callCount(), leaseReleaseCount(lease))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got.LastError != "SEALED_FILE_EXISTS: sealed file already exists: mysql-bin.000003" {
-		t.Fatalf("last_error=%q", got.LastError)
+	if got.LastError != "SEALED_FILE_EXISTS: sealed file already exists: mysql-bin.000003" || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("last_error=%q desired=%s", got.LastError, got.DesiredRun)
 	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 {
-		t.Fatalf("expected lease identity cleared, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	if got.OwnerWorkerID != "" || got.Epoch != 3 {
+		t.Fatalf("release clears the owner and keeps the epoch, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
 	}
 	time.Sleep(40 * time.Millisecond)
 	if calls := runner.callCount(); calls != 1 {
@@ -85,7 +86,66 @@ func TestScheduler_SealedFileExistsFailsAndReleasesLease(t *testing.T) {
 	if got := leaseReleaseCount(lease); got != 1 {
 		t.Fatalf("expected one lease release, got %d", got)
 	}
-	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 1})
+	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 0, "TASK_LEASE_DEGRADED": 1})
+}
+
+func TestScheduler_SourceSwitchoverStaysFailed(t *testing.T) {
+	runner := &scriptedRunner{fn: func(context.Context, Task, int) error {
+		return NewPermanentError(CodeSourceSwitchover, "source switched from old to new. no GTID set. Start a new task")
+	}}
+	lease := &fakeLeaseManager{acquireEpoch: 8, acquireOK: true}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithClusterLeaseManager(lease),
+		WithClusterWorkerID("worker-a"),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Millisecond, time.Millisecond),
+	)
+	task := mustStartSourcedTask(t, s)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var got Task
+	for {
+		var err error
+		got, err = s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask returned error: %v", err)
+		}
+		if got.State == StateFailed {
+			break
+		}
+		if got.State == StateLeaseDegraded || got.State == StateRetryBackoff {
+			t.Fatalf("SOURCE_SWITCHOVER entered %s: %s", got.State, got.LastError)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected FAILED, state=%s last_error=%q", got.State, got.LastError)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.HasPrefix(got.LastError, CodeSourceSwitchover+":") || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("last_error=%q desired=%s", got.LastError, got.DesiredRun)
+	}
+	if got.FailedReason != "SOURCE_SWITCHOVER" || got.FailedSpecRevision != got.SpecRevision {
+		t.Fatalf("reason=%q failed_spec=%d spec=%d", got.FailedReason, got.FailedSpecRevision, got.SpecRevision)
+	}
+	if got.OwnerWorkerID != "" {
+		t.Fatalf("owner=%q", got.OwnerWorkerID)
+	}
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if calls := runner.callCount(); calls != 1 {
+		t.Fatalf("claim restarted a SOURCE_SWITCHOVER task, calls=%d", calls)
+	}
+	after, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if after.State != StateFailed || after.Epoch != got.Epoch {
+		t.Fatalf("state=%s epoch %d -> %d", after.State, got.Epoch, after.Epoch)
+	}
+	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 1, "TASK_LEASE_DEGRADED": 0})
 }
 
 func TestScheduler_UnclassifiedRunnerErrorFailsOnce(t *testing.T) {
@@ -110,25 +170,22 @@ func TestScheduler_UnclassifiedRunnerErrorFailsOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if got.State == StateFailed {
+		if got.State == StateLeaseDegraded {
 			break
 		}
 		if got.State == StateRetryBackoff {
 			t.Fatalf("unclassified error entered RETRY_BACKOFF: %s", got.LastError)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s last_error=%q", got.State, got.LastError)
+			t.Fatalf("expected LEASE_DEGRADED, state=%s last_error=%q", got.State, got.LastError)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got.LastError != "append failed" {
-		t.Fatalf("last_error=%q", got.LastError)
+	if got.LastError != "append failed" || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("last_error=%q desired=%s", got.LastError, got.DesiredRun)
 	}
-	if got.DesiredRun != TaskDesiredStop || got.FailedSpecRevision != got.SpecRevision || got.SpecRevision == 0 {
-		t.Fatalf("desired=%s failed_spec=%d spec=%d", got.DesiredRun, got.FailedSpecRevision, got.SpecRevision)
-	}
-	if got.OwnerWorkerID != "" || got.Epoch != 0 {
-		t.Fatalf("expected lease identity cleared, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
+	if got.OwnerWorkerID != "" || got.Epoch != 6 {
+		t.Fatalf("release clears the owner and keeps the epoch, owner=%q epoch=%d", got.OwnerWorkerID, got.Epoch)
 	}
 	time.Sleep(40 * time.Millisecond)
 	if calls := runner.callCount(); calls != 1 {
@@ -137,7 +194,63 @@ func TestScheduler_UnclassifiedRunnerErrorFailsOnce(t *testing.T) {
 	if got := leaseReleaseCount(lease); got != 1 {
 		t.Fatalf("expected one lease release, got %d", got)
 	}
-	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 1})
+	assertEventTypes(t, s, task.ID, map[string]int{"TASK_RETRY_BACKOFF": 0, "TASK_FAILED": 0, "TASK_LEASE_DEGRADED": 1})
+}
+
+func TestScheduler_StartAfterYieldWithMemoryLeaseArmsTask(t *testing.T) {
+	runner := &scriptedRunner{fn: func(ctx context.Context, _ Task, call int) error {
+		if call == 1 {
+			return fmt.Errorf("sealed file already exists: mysql-bin.000003")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	s := NewScheduler(
+		WithRunner(runner),
+		WithDataDir(t.TempDir()),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("standalone"),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Millisecond, time.Millisecond),
+	)
+	task := mustStartSourcedTask(t, s)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateLeaseDegraded {
+			if got.OwnerWorkerID != "" {
+				t.Fatalf("yield owner=%q", got.OwnerWorkerID)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected LEASE_DEGRADED, state=%s", got.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := s.StartTask(task.ID); err != nil {
+		got, _ := s.GetTask(task.ID)
+		t.Fatalf("Start after yield: %v state=%s epoch=%d owner=%q", err, got.State, got.Epoch, got.OwnerWorkerID)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for runner.callCount() < 2 {
+		if time.Now().After(deadline) {
+			got, _ := s.GetTask(task.ID)
+			t.Fatalf("Start left the yield unclaimed, calls=%d state=%s epoch=%d owner=%q", runner.callCount(), got.State, got.Epoch, got.OwnerWorkerID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.State != StateRunning || got.Epoch == 0 || got.OwnerWorkerID == "" {
+		t.Fatalf("state=%s epoch=%d owner=%q", got.State, got.Epoch, got.OwnerWorkerID)
+	}
 }
 
 func TestScheduler_StartAfterFailedArmsTask(t *testing.T) {
@@ -159,11 +272,11 @@ func TestScheduler_StartAfterFailedArmsTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetTask returned error: %v", err)
 		}
-		if failed.State == StateFailed {
+		if failed.State == StateLeaseDegraded {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("expected FAILED, state=%s", failed.State)
+			t.Fatalf("expected LEASE_DEGRADED, state=%s", failed.State)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -462,6 +575,116 @@ func TestScheduler_StoredStopBeatsUnclassifiedError(t *testing.T) {
 		t.Fatalf("desired=%s", got.DesiredRun)
 	}
 	assertEventTypes(t, s, task.ID, map[string]int{"TASK_FAILED": 0, "TASK_RETRY_BACKOFF": 0})
+}
+
+// missingLeaseYieldStore is a meta store whose CommitYield finds no
+// task_leases row and reports the yield lost. Standalone e2e is this shape:
+// the gate is on, the lease is MemoryLease.
+type missingLeaseYieldStore struct {
+	*schedulerTestStore
+	yields atomic.Int32
+	expect atomic.Int64
+	gen    int64
+}
+
+func (s *missingLeaseYieldStore) CommitYield(_ context.Context, row YieldCommit) (int64, error) {
+	s.expect.Store(row.ExpectGeneration)
+	s.yields.Add(1)
+	return 0, nil
+}
+
+func (s *missingLeaseYieldStore) RegisterClusterStorage(context.Context, string) (string, error) {
+	return "per_node", nil
+}
+
+func (s *missingLeaseYieldStore) CountOlderProtocols(context.Context, string, int64) (int, error) {
+	return 0, nil
+}
+
+func (s *missingLeaseYieldStore) TaskRowGeneration(context.Context, string) (int64, error) {
+	return s.gen, nil
+}
+
+func TestMemoryLeaseTerminalDoesNotNeedLeaseRow(t *testing.T) {
+	store := &missingLeaseYieldStore{schedulerTestStore: &schedulerTestStore{tasks: map[string]Task{}}, gen: 4}
+	runner := &scriptedRunner{fn: func(context.Context, Task, int) error {
+		return NewPermanentError(CodeSourceSwitchover, "source switched from old to new. no GTID set. Start a new task")
+	}}
+	s := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(NewMemoryLease()),
+		WithClusterWorkerID("standalone"),
+		WithClusterGate(store),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Millisecond, time.Millisecond),
+	)
+	task := mustStartSourcedTask(t, s)
+	deadline := time.Now().Add(2 * time.Second)
+	var got Task
+	for {
+		var err error
+		got, err = s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state=%s last_error=%q yields=%d", got.State, got.LastError, store.yields.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.HasPrefix(got.LastError, CodeSourceSwitchover+":") || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("last_error=%q desired=%s", got.LastError, got.DesiredRun)
+	}
+	if store.yields.Load() != 0 {
+		t.Fatalf("memory lease consulted task_leases, yields=%d", store.yields.Load())
+	}
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if calls := runner.callCount(); calls != 1 {
+		t.Fatalf("claim restarted the switch, calls=%d", calls)
+	}
+}
+
+func TestStoredLeaseYieldUsesLoadedGeneration(t *testing.T) {
+	store := &missingLeaseYieldStore{schedulerTestStore: &schedulerTestStore{tasks: map[string]Task{}}, gen: 4}
+	runner := &scriptedRunner{fn: func(context.Context, Task, int) error {
+		return NewPermanentError(CodeSourceSwitchover, "source switched from old to new. no GTID set. Start a new task")
+	}}
+	s := NewScheduler(
+		WithStore(store),
+		WithRunner(runner),
+		WithClusterLeaseManager(&fakeLeaseManager{acquireEpoch: 3, acquireOK: true}),
+		WithClusterWorkerID("worker-a"),
+		WithClusterGate(store),
+		WithClusterLease(time.Hour, time.Hour, time.Hour),
+		WithRetryBackoff(time.Millisecond, time.Millisecond),
+	)
+	task := mustStartSourcedTask(t, s)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := s.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State == StateFailed || store.yields.Load() > 0 {
+			// 0 is the unread escape. The column is 4; a step may already
+			// have bumped the in-memory copy, but the yield must not send 0.
+			if store.expect.Load() == 0 {
+				t.Fatal("yield used generation 0")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("yield did not run, state=%s", got.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func mustStartSourcedTask(t *testing.T, s *Scheduler) Task {

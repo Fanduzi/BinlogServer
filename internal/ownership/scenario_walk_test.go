@@ -135,8 +135,8 @@ func TestScenarioS19_MigrationPrecheckAndTrigger(t *testing.T) {
 	if MigrationAllowed(Precheck{LiveRegistration: true, SuperOrTrust: true}) {
 		t.Fatal("live registration was allowed to migrate")
 	}
-	if MigrationAllowed(Precheck{LogBin: true}) {
-		t.Fatal("binlog without SUPER or trust was allowed to migrate")
+	if !MigrationAllowed(Precheck{LogBin: true}) {
+		t.Fatal("binlog without SUPER was refused; least-privilege migrate does not create a routine")
 	}
 	if !MigrationAllowed(Precheck{LogBin: true, SuperOrTrust: true}) {
 		t.Fatal("precheck rejected a ready account")
@@ -149,7 +149,7 @@ func TestScenarioS19_MigrationPrecheckAndTrigger(t *testing.T) {
 	}
 	// Renew writes task_leases, not backup_tasks, so it still applies.
 	if step(t, s, Event{Kind: EventRenew, Node: "n1", Epoch: s.Lease.Epoch}, t0).Decision != DecisionApplied {
-		t.Fatal("renew was caught by the backup_tasks trigger")
+		t.Fatal("renew was refused")
 	}
 }
 

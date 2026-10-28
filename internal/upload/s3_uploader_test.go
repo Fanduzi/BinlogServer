@@ -674,14 +674,14 @@ func firstDialByte(t *testing.T, useSSL bool) byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	got := make(chan byte, 1)
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		var b [1]byte
 		_, _ = conn.Read(b[:])
@@ -717,14 +717,14 @@ func TestCAFileTrustsOnlyThatCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go func(c net.Conn) { defer c.Close(); _ = c.(*tls.Conn).Handshake() }(c)
+			go func(c net.Conn) { defer func() { _ = c.Close() }(); _ = c.(*tls.Conn).Handshake() }(c)
 		}
 	}()
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
@@ -766,7 +766,7 @@ func TestProbeStorage_UntrustedCAIsNotATimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	var accepts atomic.Int32
 	go func() {
 		for {
@@ -775,7 +775,7 @@ func TestProbeStorage_UntrustedCAIsNotATimeout(t *testing.T) {
 				return
 			}
 			accepts.Add(1)
-			go func(c net.Conn) { defer c.Close(); _ = c.(*tls.Conn).Handshake() }(c)
+			go func(c net.Conn) { defer func() { _ = c.Close() }(); _ = c.(*tls.Conn).Handshake() }(c)
 		}
 	}()
 	wrongPEM, _ := privateServerCert(t)
@@ -859,7 +859,7 @@ func TestProbeStorage_ProtocolVersionIsNotATimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -867,7 +867,7 @@ func TestProbeStorage_ProtocolVersionIsNotATimeout(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				buf := make([]byte, 1024)
 				_, _ = c.Read(buf)
 				// fatal protocol_version alert
@@ -990,14 +990,14 @@ func TestProbeStorage_HostnameMismatchHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go func(c net.Conn) { defer c.Close(); _ = c.(*tls.Conn).Handshake() }(c)
+			go func(c net.Conn) { defer func() { _ = c.Close() }(); _ = c.(*tls.Conn).Handshake() }(c)
 		}
 	}()
 	caPath := filepath.Join(t.TempDir(), "ca.pem")

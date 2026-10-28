@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: sqlmock for pool checkout, side_kill probes, naming-view denials, and startup session readback; BINLOG_TEST_MYSQL_ROOT_DSNS for a SET the server rejects
-// output: proof that pool starvation is a lock stall only with lock evidence, a changed second probe does not call the procedure, side_kill stays off while off and while the naming views deny access, the privilege probe reads a row so MariaDB applies the PROCESS check, startup readback degrades before any lease write, and a rejected session SET refuses startup
+// output: proof that pool starvation is a lock stall only with lock evidence, a changed second probe does not call the procedure, side_kill stays off while off and is unavailable when auto cannot name a holder, the privilege probe reads a row so MariaDB applies the PROCESS check, startup readback degrades before any lease write, and a rejected session SET refuses startup
 // pos: ADR 0011 PR-2 deadline margin, pool checkout, and the privilege probe
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -194,8 +194,8 @@ func TestDrillStaysOffWithoutProcess(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec("meta_canary").WillReturnResult(sqlmock.NewResult(0, 1))
 	store.RefreshSideKill(context.Background(), "n1")
-	if store.SideKill() != "off" {
-		t.Fatalf("side_kill %s, want off", store.SideKill())
+	if store.SideKill() != "unavailable" {
+		t.Fatalf("side_kill %s, want unavailable", store.SideKill())
 	}
 	if err := mock.ExpectationsWereMet(); err == nil {
 		t.Fatal("the canary ran without a naming view")

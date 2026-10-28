@@ -39,10 +39,13 @@ const (
 
 // Failed reasons. FAILED is one of these, never an unclassified runner error.
 const (
-	ReasonSourceAuth     = "SOURCE_AUTH"
-	ReasonLogBinOff      = "LOG_BIN_OFF"
-	ReasonChainOwnerGone = "CHAIN_OWNER_GONE"
-	ReasonLegacyUnknown  = "LEGACY_UNKNOWN"
+	ReasonSourceAuth          = "SOURCE_AUTH"
+	ReasonLogBinOff           = "LOG_BIN_OFF"
+	ReasonSourceSwitchover    = "SOURCE_SWITCHOVER"
+	ReasonSourceUnreachable   = "SOURCE_UNREACHABLE"
+	ReasonStorageInconsistent = "STORAGE_INCONSISTENT"
+	ReasonChainOwnerGone      = "CHAIN_OWNER_GONE"
+	ReasonLegacyUnknown       = "LEGACY_UNKNOWN"
 )
 
 // Refusal reasons stored on task_node_refusal.

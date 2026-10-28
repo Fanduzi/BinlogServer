@@ -144,6 +144,22 @@ func TestTrajectory_FailedReadDoesNotStealChain(t *testing.T) {
 	}
 }
 
+func TestOwnerlessStartDuringStopKeepsTheLease(t *testing.T) {
+	s := boot(t, "n1", t0, nil)
+	s = applied(t, s, Event{Kind: EventOperatorStop, Node: "n1"}, t0)
+	epoch, spec, owner := s.Lease.Epoch, s.SpecRevision, s.Lease.Owner
+	res := step(t, s, Event{Kind: EventOperatorStart, Node: "control", Ownerless: true}, t0)
+	if res.HTTP != 204 || res.Decision != DecisionApplied || res.State.Phase != PhaseStopping || res.State.Desired != DesiredRun {
+		t.Fatalf("http %d decision %s phase %s desired %s", res.HTTP, res.Decision, res.State.Phase, res.State.Desired)
+	}
+	if res.State.Lease.Epoch != epoch || res.State.Lease.Owner != owner || res.State.SpecRevision != spec+1 || res.State.StoppedByOperator {
+		t.Fatalf("epoch %d owner %s spec %d -> %d stopped %v", res.State.Lease.Epoch, res.State.Lease.Owner, spec, res.State.SpecRevision, res.State.StoppedByOperator)
+	}
+	if step(t, s, Event{Kind: EventOperatorStart, Node: "n2"}, t0).HTTP != 409 {
+		t.Fatal("a worker start on STOPPING was accepted")
+	}
+}
+
 func TestTrajectory_StartAfterYieldAndRejectOnStopping(t *testing.T) {
 	s := boot(t, "n1", t0, []Node{peer("n2", false, t0)})
 	later := t0.Add(time.Hour)

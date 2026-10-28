@@ -162,8 +162,8 @@ func TestOpenEpochENOENTWhileOwnerStillFails(t *testing.T) {
 	id, _ := w.start()
 	close(release)
 	waitRunClosed(t, w.owner(), id, "stat while still owner")
-	stored := waitStoredState(t, w.table, id, StateFailed)
-	if stored.DesiredRun != TaskDesiredStop {
-		t.Fatalf("desired %s, want STOP after a missing open file while this epoch still holds the lease", stored.DesiredRun)
+	stored := waitStoredState(t, w.table, id, StateLeaseDegraded)
+	if stored.DesiredRun != TaskDesiredRun {
+		t.Fatalf("desired %s, want RUN after ENOENT while this epoch still holds the lease", stored.DesiredRun)
 	}
 }

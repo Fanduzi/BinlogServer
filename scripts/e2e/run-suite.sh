@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # input: local tooling, canonical E2E database topology, scenarios, and profile selection
-# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process (also passed with the server log and metadata DSN to the scenarios that restart it: smoke-unreachable-giveup and smoke-gtid-redump). quick includes smoke-version-restore (MySQL 5.7 and 8.4 LTS checksum restore). smoke-coverage compares /coverage and /restore-plan with mysqlbinlog
+# output: deterministic e2e orchestration, scenario execution, verification logs, and E2E_SERVER_PID for the suite process (also passed with the server log and metadata DSN to the scenarios that restart it: smoke-unreachable-giveup and smoke-gtid-redump). quick includes smoke-least-privilege-migrate and smoke-version-restore (MySQL 5.7 and 8.4 LTS checksum restore). smoke-coverage compares /coverage and /restore-plan with mysqlbinlog
+
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -22,7 +23,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-task-desired-migration,smoke,smoke-version-restore,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk,smoke-session-kill
+  quick  -> smoke-least-privilege-migrate,smoke-task-desired-migration,smoke,smoke-version-restore,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk,smoke-session-kill
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -62,6 +63,7 @@ Scenarios:
   smoke-standalone-restart
   smoke-standalone-full-disk
   smoke-session-kill
+  smoke-least-privilege-migrate
   smoke-verify
 EOF
 }
@@ -107,7 +109,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-task-desired-migration smoke smoke-version-restore compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk smoke-session-kill"
+      echo "smoke-least-privilege-migrate smoke-task-desired-migration smoke smoke-version-restore compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk smoke-session-kill"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -156,7 +158,7 @@ stop_suite_server() {
 is_self_managed_scenario() {
   local name="$1"
   case "$name" in
-    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk|smoke-session-kill|smoke-verify)
+    smoke-cluster-roles|smoke-control-plane-failover|smoke-worker-crash-recovery|smoke-retry-upload|smoke-split-retention|smoke-epoch-segments|smoke-task-desired-migration|smoke-control-loop|smoke-standalone-restart|smoke-standalone-full-disk|smoke-session-kill|smoke-least-privilege-migrate|smoke-verify)
       return 0
       ;;
     *)
@@ -230,6 +232,10 @@ run_scenario() {
     smoke-session-kill)
       # MySQL 8.0 from compose, its own MariaDB, health server on 18120.
       BINLOG_SERVER_META_DSN="$META_DSN" "$ROOT_DIR/scripts/e2e/smoke-session-kill.sh"
+      ;;
+    smoke-least-privilege-migrate)
+      # Scratch schemas on meta-primary and mysql80. Does not start a server.
+      "$ROOT_DIR/scripts/e2e/smoke-least-privilege-migrate.sh"
       ;;
     smoke-verify)
       # Own MinIO. Not part of quick or full; CI does not select it.

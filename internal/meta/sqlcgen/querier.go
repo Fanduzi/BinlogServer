@@ -17,17 +17,20 @@ import (
 )
 
 type Querier interface {
-	// Epoch increases only when a different worker takes an expired lease.
-	// The same worker_id keeps the epoch, including after restart once the lease
-	// has expired. A released row stores an empty owner, so the next acquire
-	// is a different owner and the epoch increases. A missing row inserts epoch 1.
+	// Epoch increases when a different worker takes an expired lease, and when
+	// the same worker_id re-acquires a released row whose owner is empty.
+	// A non-empty same owner keeps the epoch, including after restart once the
+	// lease has expired. A missing row inserts epoch 1.
+	// @bs_lease_now is this statement's single NOW(6). Every comparison and every
+	// written timestamp uses that pin, so a clock tick inside the statement cannot
+	// split the expire check from the new deadline.
 	// Assign epoch before owner_worker_id so the comparison sees the previous owner.
 	AcquireTaskLease(ctx context.Context, arg AcquireTaskLeaseParams) error
 	FinishTaskRun(ctx context.Context, arg FinishTaskRunParams) error
 	GetCurrentDBTime(ctx context.Context) (time.Time, error)
 	GetTaskLease(ctx context.Context, taskID string) (TaskLease, error)
 	ListTaskRuns(ctx context.Context, arg ListTaskRunsParams) ([]TaskRun, error)
-	ListWorkerHeartbeats(ctx context.Context, limit int32) ([]WorkerHeartbeat, error)
+	ListWorkerHeartbeats(ctx context.Context, limit int32) ([]ListWorkerHeartbeatsRow, error)
 	LoadTaskRunState(ctx context.Context, taskID string) (sql.NullString, error)
 	ReleaseTaskLease(ctx context.Context, arg ReleaseTaskLeaseParams) (sql.Result, error)
 	RenewTaskLease(ctx context.Context, arg RenewTaskLeaseParams) (sql.Result, error)

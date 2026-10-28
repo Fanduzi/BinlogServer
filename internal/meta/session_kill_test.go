@@ -1,6 +1,6 @@
 // Package meta provides module-level functionality for meta.
 // input: a session-kill bound and the side-kill sources
-// output: proof that a mismatched or failed wait_timeout readback is degraded, MariaDB idle_transaction_timeout is read on the same transaction, innodb_lock_wait_timeout stays strictly under the client deadline, the health-write backstop is four statement budgets plus 2s, a reduced lock detail is not degraded, a missing procedure stays off, the client sends no kill statement, idle pool time is capped at 2s and stays under wait_timeout, and a sleeping lease holder is matched by exact task id
+// output: proof that a mismatched or failed wait_timeout readback is degraded, MariaDB idle_transaction_timeout is read on the same transaction, innodb_lock_wait_timeout stays strictly under the client deadline, the health-write backstop is four statement budgets plus 2s, a reduced lock detail is not degraded, a missing procedure is unavailable while auto and off stays off, the client sends no kill statement, idle pool time is capped at 2s and stays under wait_timeout, and a sleeping lease holder is matched by exact task id
 // pos: ADR 0011 PR-2 P2-8 and P2-9 without a server
 // note: if this file changes, update this header and module README.md.
 package meta
@@ -168,8 +168,8 @@ func TestSideKillStaysOffWhenProcedureMissing(t *testing.T) {
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM information_schema.routines").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	store.RefreshSideKill(context.Background(), "n1")
-	if store.SideKill() != "off" {
-		t.Fatalf("side_kill %s, want off", store.SideKill())
+	if store.SideKill() != "unavailable" {
+		t.Fatalf("side_kill %s, want unavailable", store.SideKill())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

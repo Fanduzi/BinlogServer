@@ -80,21 +80,29 @@ func (q *Queries) ListTaskRuns(ctx context.Context, arg ListTaskRunsParams) ([]T
 }
 
 const listWorkerHeartbeats = `-- name: ListWorkerHeartbeats :many
-SELECT worker_id, host, version, last_seen_at, status
+SELECT worker_id, host, build_version AS version, last_seen_at, status
 FROM worker_heartbeats
 ORDER BY worker_id ASC
 LIMIT ?
 `
 
-func (q *Queries) ListWorkerHeartbeats(ctx context.Context, limit int32) ([]WorkerHeartbeat, error) {
+type ListWorkerHeartbeatsRow struct {
+	WorkerID   string
+	Host       string
+	Version    string
+	LastSeenAt time.Time
+	Status     string
+}
+
+func (q *Queries) ListWorkerHeartbeats(ctx context.Context, limit int32) ([]ListWorkerHeartbeatsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listWorkerHeartbeats, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []WorkerHeartbeat{}
+	items := []ListWorkerHeartbeatsRow{}
 	for rows.Next() {
-		var i WorkerHeartbeat
+		var i ListWorkerHeartbeatsRow
 		if err := rows.Scan(
 			&i.WorkerID,
 			&i.Host,
@@ -164,7 +172,7 @@ func (q *Queries) UpsertTaskRun(ctx context.Context, arg UpsertTaskRunParams) er
 }
 
 const upsertWorkerHeartbeat = `-- name: UpsertWorkerHeartbeat :exec
-INSERT INTO worker_heartbeats (worker_id, host, version, last_seen_at, status)
+INSERT INTO worker_heartbeats (worker_id, host, build_version, last_seen_at, status)
 VALUES (
   ?,
   ?,
@@ -174,7 +182,7 @@ VALUES (
 )
 ON DUPLICATE KEY UPDATE
   host = VALUES(host),
-  version = VALUES(version),
+  build_version = VALUES(build_version),
   last_seen_at = VALUES(last_seen_at),
   status = VALUES(status)
 `
