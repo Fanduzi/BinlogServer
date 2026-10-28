@@ -302,7 +302,7 @@ func (env *outageEnv) start(t *testing.T, name, role string, cluster bool, runne
 	// Sweep, liveness and the meta ping stay on real hour tickers so they
 	// cannot add observations while the test moves the clock. Observations
 	// come from noteMetaReach. Store calls still block on the gate.
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: env.hs, Cluster: cluster, NodeID: name, Instance: name + "-i",
+	e := NewEvaluator(s, EvaluatorConfig{Store: env.hs, Cluster: cluster, NodeID: name, Instance: name + "-i",
 		Sweep: time.Hour, Debounce: time.Millisecond, LivenessTick: time.Hour, Now: env.clock.Now,
 		NoProgressAfter: time.Hour, UnreachableAfter: time.Hour, DumpStalledAfter: time.Hour, StalledAfter: time.Hour,
 		MetaUnreachableAfter: metaUnreachableAfter, MetaPingInterval: time.Hour, MetaPingTimeout: time.Hour})

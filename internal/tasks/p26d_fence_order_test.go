@@ -191,7 +191,7 @@ func TestReverseFenceOrder_OldOwnerActsBeforeFailed(t *testing.T) {
 				WithLeaseClock(NewLeaseClock()),
 			)
 			b.SetRunner(bRunner)
-			eB := NewEvaluator(b, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, Cluster: true, NodeID: "worker-b", Instance: "b-i", Sweep: time.Minute})
+			eB := NewEvaluator(b, EvaluatorConfig{Store: hs, Cluster: true, NodeID: "worker-b", Instance: "b-i", Sweep: time.Minute})
 
 			task := ownedIdleTask(t, b, "", 0, StateStopped)
 			if err := b.startTask(task.ID, taskStart{acquireLease: true}); err != nil {
@@ -223,7 +223,7 @@ func TestReverseFenceOrder_OldOwnerActsBeforeFailed(t *testing.T) {
 				WithLeaseClock(NewLeaseClock()),
 			)
 			a.SetRunner(aRunner)
-			eA := NewEvaluator(a, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, Cluster: true, NodeID: "worker-a", Instance: "a-i", Sweep: time.Minute})
+			eA := NewEvaluator(a, EvaluatorConfig{Store: hs, Cluster: true, NodeID: "worker-a", Instance: "a-i", Sweep: time.Minute})
 			if n, err := a.ClaimExpiredTasks(); err != nil || n != 1 {
 				t.Fatalf("worker-a ClaimExpiredTasks = %d, %v; want 1 claim", n, err)
 			}

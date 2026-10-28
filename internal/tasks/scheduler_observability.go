@@ -80,8 +80,9 @@ func (s *Scheduler) Restore(ctx context.Context) error {
 			s.restoreRecordsLocked()
 		}
 		s.mu.Unlock()
-		// Leftover directories are reported in every evaluator mode (tip QA
-		// b4c52f4 P1); with the evaluator off this is the only report.
+		// Leftover directories are reported whether or not the evaluator
+		// is built yet (tip QA b4c52f4 P1); before it exists the legacy
+		// sink is the only report.
 		s.reconcileUnadoptedLegacy()
 		return nil
 	}

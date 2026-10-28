@@ -25,7 +25,7 @@ func segmentMissingNode(env *p262Env, id, data string, files FileStore) (*Schedu
 	s.tasks[env.task.ID] = env.task
 	s.mu.Unlock()
 	ev := NewEvaluator(s, EvaluatorConfig{
-		Mode: EvaluatorOn, Store: env.log, Cluster: true, NodeID: id, Instance: id + "-i",
+		Store: env.log, Cluster: true, NodeID: id, Instance: id + "-i",
 		Sweep: time.Minute, Debounce: time.Millisecond,
 	})
 	return s, ev

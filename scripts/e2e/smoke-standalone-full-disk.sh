@@ -32,7 +32,6 @@ sudo -n mount -t tmpfs -o "size=30m,uid=$(id -u),gid=$(id -g)" tmpfs "$DATA"
 "$BIN" task-key generate --out "$WORK/task.key" >/dev/null
 
 env -u BINLOG_SERVER_TASK_KEY BINLOG_SERVER_MODE=standalone BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18112 \
-  BINLOG_SERVER_DATA_DIR="$DATA" BINLOG_SERVER_META_DSN= BINLOG_SERVER_HEALTH_EVALUATOR=on \
   BINLOG_SERVER_STANDALONE_TASK_KEY_FILE="$WORK/task.key" \
   "$BIN" --config "$ROOT_DIR/deploy/e2e/config.yaml" >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!

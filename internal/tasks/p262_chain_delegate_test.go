@@ -120,7 +120,7 @@ func (e *p262Env) node(id, data string, store TaskStore) (*Scheduler, *Evaluator
 	s.tasks[e.task.ID] = e.task
 	s.mu.Unlock()
 	ev := NewEvaluator(s, EvaluatorConfig{
-		Mode: EvaluatorOn, Store: e.log, Cluster: true, NodeID: id, Instance: id + "-i",
+		Store: e.log, Cluster: true, NodeID: id, Instance: id + "-i",
 		Sweep: time.Minute, Debounce: time.Millisecond,
 	})
 	return s, ev
@@ -358,7 +358,7 @@ func TestP262StandaloneChainUnchanged(t *testing.T) {
 	task, dir := evalTask(t, s, data)
 	p262WriteChain(t, dir, true)
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	h, err := e.EvaluateNow(ctx, task.ID)
 	if err != nil {

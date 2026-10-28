@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: health-store reads and writes that return healthstore.ErrSchemaAbsent, the seal-fact probe's schema version, and the evaluator mode
-// output: an in-memory CRITICAL HEALTH_STORE_UNAVAILABLE (task _cluster, subject this node's id) while the evaluator is on and migration 000009 cannot be used; one WARN on open and one on close; after the store answers, standalone OPEN then CLOSE transitions (fact times are the first absence and the first successful write) or, in cluster, one resolved legacy row and one FINDING_RESOLVED
+// input: health-store reads and writes that return healthstore.ErrSchemaAbsent, and the seal-fact probe's schema version
+// output: an in-memory CRITICAL HEALTH_STORE_UNAVAILABLE (task _cluster, subject this node's id) while migration 000009 cannot be used; one WARN on open and one on close; after the store answers, standalone OPEN then CLOSE transitions (fact times are the first absence and the first successful write) or, in cluster, one resolved legacy row and one FINDING_RESOLVED
 // pos: ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md §27 (#436)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -22,17 +22,16 @@ import (
 // The finding is served from memory for the same reason META_UNREACHABLE is:
 // the store that would hold it is the thing that is missing (design §27).
 type healthGap struct {
-	mu           sync.Mutex
-	open         bool
-	recovering   bool
-	since        time.Time
-	recoveredAt  time.Time
-	ver          int
-	known        bool
-	logged       bool
-	shadowLogged bool
-	subject      string
-	reason       string
+	mu          sync.Mutex
+	open        bool
+	recovering  bool
+	since       time.Time
+	recoveredAt time.Time
+	ver         int
+	known       bool
+	logged      bool
+	subject     string
+	reason      string
 }
 
 // healthStoreReason is the /api/health sentence for a missing 000009.
@@ -47,7 +46,7 @@ func healthStoreReason(ver int, known bool) string {
 // probeHealthStore notices a missing or returned 000009 without waiting for
 // a task sweep. Run calls it at start (design §27 D3).
 func (e *Evaluator) probeHealthStore(ctx context.Context) {
-	if e == nil || e.cfg.Store == nil || e.cfg.Mode == EvaluatorOff {
+	if e == nil || e.cfg.Store == nil {
 		return
 	}
 	if ctx == nil {
@@ -65,13 +64,9 @@ func (e *Evaluator) probeHealthStore(ctx context.Context) {
 }
 
 // noteHealthStoreAbsent records that the health store cannot be used.
-// shadow logs one WARN and does not open the finding. off does nothing.
+// a task sweep. Run calls it at start (design §27 D2).
 func (e *Evaluator) noteHealthStoreAbsent(err error) {
-	if e == nil || e.s == nil || e.cfg.Mode == EvaluatorOff {
-		return
-	}
-	if e.cfg.Mode != EvaluatorOn {
-		e.noteHealthStoreShadow(err)
+	if e == nil || e.s == nil {
 		return
 	}
 	e.schemaAbsent.Store(true)
@@ -101,29 +96,11 @@ func (e *Evaluator) noteHealthStoreAbsent(err error) {
 	}
 }
 
-// noteHealthStoreShadow logs the absent-store error once. It does not
-// degrade /api/health (design §27 D2).
-func (e *Evaluator) noteHealthStoreShadow(err error) {
-	g := &e.s.healthGap
-	g.mu.Lock()
-	if g.shadowLogged {
-		g.mu.Unlock()
-		return
-	}
-	g.shadowLogged = true
-	g.mu.Unlock()
-	msg := healthstore.ErrSchemaAbsent.Error()
-	if err != nil && err.Error() != "" {
-		msg = err.Error()
-	}
-	zap.L().Warn("health tables are absent; run ./migrate up to 000009", zap.String("err", msg))
-}
-
 // noteHealthStoreWritable runs on a successful health-store read or write
 // after a gap. Standalone keeps the failure until the OPEN is stored, then
 // closes it at this moment. Cluster writes one resolved legacy row.
 func (e *Evaluator) noteHealthStoreWritable() {
-	if e == nil || e.s == nil || e.cfg.Mode != EvaluatorOn {
+	if e == nil || e.s == nil {
 		return
 	}
 	e.schemaAbsent.Store(false)
@@ -246,7 +223,7 @@ func (s *Scheduler) healthStoreFinding() (Finding, bool) {
 		return Finding{}, false
 	}
 	e := s.healthEval.Load()
-	if e == nil || e.cfg.Mode != EvaluatorOn {
+	if e == nil {
 		return Finding{}, false
 	}
 	g := &s.healthGap

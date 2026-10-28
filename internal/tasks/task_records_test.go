@@ -403,7 +403,7 @@ func TestTaskRecords_DeleteLeavesTombstoneNotUnadopted(t *testing.T) {
 	}
 	s2, _ := recordProcess(t, data, taskrecords.Open(data, key, nil), nil)
 	hs := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s2, hs, EvaluatorOn)
+	e := newEval(t, s2, hs)
 	if err := e.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func TestTaskRecords_UnusableFileIsLoudAndUntouched(t *testing.T) {
 				t.Fatal("finding detail holds the password")
 			}
 			// Nothing restored: the directory is unadopted, loudly.
-			e := newEval(t, s2, hs, EvaluatorOn)
+			e := newEval(t, s2, hs)
 			if err := e.SweepNow(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -841,7 +841,7 @@ func TestTaskRecords_LockReachesLaterEvaluator(t *testing.T) {
 		t.Fatal(err)
 	}
 	s2, _ := recordProcess(t, data, taskrecords.Open(data, recordKey(t, 2), nil), nil)
-	e := NewEvaluator(s2, EvaluatorConfig{Mode: EvaluatorOn, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
+	e := NewEvaluator(s2, EvaluatorConfig{NodeID: "n", Instance: "i", Debounce: time.Millisecond})
 	e.mu.Lock()
 	en := e.signals[ClusterFindingTask][health.SignalKey{Kind: health.Kind(FindingTaskRecordsFailed), Subject: RecordsWrongKey}]
 	e.mu.Unlock()
@@ -859,7 +859,7 @@ func TestTaskRecords_WrongKeyOpensClusterFinding(t *testing.T) {
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
 	s2 := NewScheduler(WithDataDir(data), WithRunner(newRecordRunner()), WithClusterLeaseManager(NewMemoryLease()),
 		WithClusterWorkerID("standalone"), WithTaskRecords(taskrecords.Open(data, recordKey(t, 2), nil), nil))
-	e := NewEvaluator(s2, EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
+	e := NewEvaluator(s2, EvaluatorConfig{Store: store, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
 	if err := s2.Restore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -898,7 +898,7 @@ func TestTaskRecords_RightKeyClosesEarlierLockFinding(t *testing.T) {
 		if err := s.Restore(context.Background()); err != nil { // before the evaluator, as app does without one yet
 			t.Fatal(err)
 		}
-		e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
+		e := NewEvaluator(s, EvaluatorConfig{Store: store, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
 		if _, err := e.EvaluateNow(context.Background(), ClusterFindingTask); err != nil {
 			t.Fatal(err)
 		}
@@ -924,7 +924,7 @@ func TestTaskRecords_EvaluateClusterNowClosesEarlierLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	cfg := EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: "n", Instance: "i", Debounce: time.Second}
+	cfg := EvaluatorConfig{Store: store, NodeID: "n", Instance: "i", Debounce: time.Second}
 	boot := func(key *taskrecords.Key) *Scheduler {
 		s := NewScheduler(WithDataDir(data), WithRunner(newRecordRunner()), WithClusterLeaseManager(NewMemoryLease()),
 			WithClusterWorkerID("standalone"), WithTaskRecords(taskrecords.Open(data, key, nil), nil))

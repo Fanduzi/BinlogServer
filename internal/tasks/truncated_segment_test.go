@@ -163,7 +163,7 @@ func TestEvaluator_ZeroByteRealSegment(t *testing.T) {
 				s, task, data, dir = realTask(t)
 			}
 			store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-			e := newEval(t, s, store, EvaluatorOn)
+			e := newEval(t, s, store)
 			ctx := context.Background()
 			if err := e.SweepNow(ctx); err != nil {
 				t.Fatal(err)

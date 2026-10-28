@@ -87,7 +87,7 @@ func newLvEnv(t *testing.T) *lvEnv {
 	s := tasks.NewScheduler(tasks.WithDataDir(data), tasks.WithSourceLiveness(lvProbeEvery, lvProbeTimeout), tasks.WithRetryBackoff(time.Second/lvScale, 30*time.Second/lvScale))
 	s.SetRunner(runner)
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := tasks.NewEvaluator(s, tasks.EvaluatorConfig{Mode: tasks.EvaluatorOn, Store: store, NodeID: "lv", Instance: "i1",
+	e := tasks.NewEvaluator(s, tasks.EvaluatorConfig{Store: store, NodeID: "lv", Instance: "i1",
 		Sweep: time.Second, Debounce: 50 * time.Millisecond, LivenessTick: lvTick,
 		DumpStalledAfter: lvStalled, UnreachableAfter: lvUnreachable})
 	ctx, cancel := context.WithCancel(context.Background())

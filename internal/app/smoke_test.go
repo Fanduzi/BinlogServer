@@ -22,6 +22,8 @@ import (
 
 	"binlog_server/internal/binlog"
 	"binlog_server/internal/config"
+	"binlog_server/internal/health"
+	"binlog_server/internal/healthstore"
 	"binlog_server/internal/replication"
 	"binlog_server/internal/tasks"
 )
@@ -41,6 +43,20 @@ type fakeAppMetaStore struct {
 }
 
 func (s *fakeAppMetaStore) Close() error { return nil }
+
+// The evaluator always runs, so the fake meta store must satisfy
+// healthstore.Store like the real one does.
+func (s *fakeAppMetaStore) ApplyTransitions(_ context.Context, _ string, _ health.Fence, _ []health.Transition, _ health.TaskHealth) (healthstore.Applied, error) {
+	return healthstore.Applied{}, nil
+}
+
+func (s *fakeAppMetaStore) ListOpenFindingsForTask(_ context.Context, _ string) ([]health.Finding, error) {
+	return nil, nil
+}
+
+func (s *fakeAppMetaStore) ListHealth(_ context.Context) ([]health.TaskHealth, error) {
+	return nil, nil
+}
 
 func (s *fakeAppMetaStore) UpsertTask(_ context.Context, task tasks.Task) error {
 	s.regMu.Lock()
@@ -359,6 +375,7 @@ func TestApp_ClusterControlPlaneRole(t *testing.T) {
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:0",
 		Mode:       "cluster",
+		DataDir:    t.TempDir(),
 		Cluster: config.ClusterConfig{
 			Role: "control-plane",
 		},

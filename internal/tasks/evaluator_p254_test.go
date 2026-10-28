@@ -52,7 +52,7 @@ func TestP254EvaluatorSealFactsAbsentOpensAndCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h.json"))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	h, err := e.EvaluateNow(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestP254RetentionCleanProbesRecordFailure(t *testing.T) {
 	s := NewScheduler()
 	runner := &p254CleanRunner{}
 	s.SetRunner(runner)
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Now: func() time.Time { return now }})
+	e := NewEvaluator(s, EvaluatorConfig{Now: func() time.Time { return now }})
 	e.Signal("1", FindingRetentionRecordFailed, "mysql-bin.000001", false, "event lost")
 	key := health.Key{TaskID: "1", Kind: health.RetentionRecordFailed, Subject: "mysql-bin.000001"}
 	open := []health.Finding{{TaskID: "1", Kind: health.RetentionRecordFailed, Subject: "mysql-bin.000001", LastSeen: now, Severity: health.Warning}}

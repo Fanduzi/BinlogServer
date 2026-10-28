@@ -107,9 +107,9 @@ func schemaStore(ver int, columnsAbsent bool) *p254Store {
 	return &p254Store{ver: ver, absent: columnsAbsent}
 }
 
-func healthEval(t *testing.T, s *Scheduler, store healthstore.Store, mode EvaluatorMode, now func() time.Time) *Evaluator {
+func healthEval(t *testing.T, s *Scheduler, store healthstore.Store, now func() time.Time) *Evaluator {
 	t.Helper()
-	return NewEvaluator(s, EvaluatorConfig{Mode: mode, Store: store, NodeID: evalNode, Instance: "i1", Sweep: 15 * time.Millisecond, Debounce: time.Millisecond, Now: now})
+	return NewEvaluator(s, EvaluatorConfig{Store: store, NodeID: evalNode, Instance: "i1", Sweep: 15 * time.Millisecond, Debounce: time.Millisecond, Now: now})
 }
 
 func joinedReasons(h HealthSummary) string { return strings.Join(h.Reasons, "\n") }
@@ -160,7 +160,7 @@ func TestHealthStoreUnavailableDegradesFromMemory(t *testing.T) {
 	}
 	hs := newAbsentHealth()
 	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorOn, time.Now)
+	e := healthEval(t, s, hs, time.Now)
 	if err := e.SweepNow(context.Background()); err != nil && !strings.Contains(err.Error(), "health tables are absent") {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestHealthStoreUnavailableBeforeFirstSweep(t *testing.T) {
 	s := NewScheduler(WithDataDir(t.TempDir()), WithStore(st))
 	hs := newAbsentHealth()
 	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorOn, time.Now)
+	e := healthEval(t, s, hs, time.Now)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go e.Run(ctx)
@@ -226,7 +226,7 @@ func TestHealthStoreUnavailableSchema7SkipsSealFacts(t *testing.T) {
 	}
 	hs := newAbsentHealth()
 	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorOn, time.Now)
+	e := healthEval(t, s, hs, time.Now)
 	_ = e.SweepNow(context.Background())
 	got := s.HealthSummary(context.Background())
 	if got.Status != HealthDegraded || !strings.Contains(joinedReasons(got), "HEALTH_STORE_UNAVAILABLE: schema 7 < 9, run ./migrate up") {
@@ -251,7 +251,7 @@ func TestHealthStoreUnavailableTablesDroppedNamesTheMigration(t *testing.T) {
 	s := NewScheduler(WithDataDir(t.TempDir()), WithStore(st))
 	hs := newAbsentHealth()
 	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorOn, time.Now)
+	e := healthEval(t, s, hs, time.Now)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go e.Run(ctx)
@@ -277,7 +277,7 @@ func TestHealthStoreUnavailableLoggedOnce(t *testing.T) {
 	}
 	hs := newAbsentHealth()
 	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorOn, time.Now)
+	e := healthEval(t, s, hs, time.Now)
 	ctx, cancel := context.WithCancel(context.Background())
 	go e.Run(ctx)
 	time.Sleep(120 * time.Millisecond)
@@ -286,50 +286,6 @@ func TestHealthStoreUnavailableLoggedOnce(t *testing.T) {
 	nWarn := warnCount(obs, "HEALTH_STORE_UNAVAILABLE opened")
 	if nInfo != 0 || nWarn != 1 {
 		t.Fatalf("absent-store info lines=%d, opened warns=%d; want 0 and 1\nlog:\n%s", nInfo, nWarn, buf.String())
-	}
-}
-
-func TestHealthStoreUnavailableShadowWarnsOnceAndStaysOK(t *testing.T) {
-	obs := installZap(t)
-	buf := captureLog(t)
-	data := t.TempDir()
-	s := NewScheduler(WithDataDir(data), WithStore(schemaStore(7, false)))
-	if _, err := s.CreateTaskFromSpec("mysql", "k", &SourceConfig{Host: "127.0.0.1", Port: 3306, User: "u", Password: "p", Flavor: "mysql"}, &StartConfig{Mode: StartModeLatest}, nil); err != nil {
-		t.Fatal(err)
-	}
-	hs := newAbsentHealth()
-	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorShadow, time.Now)
-	ctx, cancel := context.WithCancel(context.Background())
-	go e.Run(ctx)
-	time.Sleep(80 * time.Millisecond)
-	cancel()
-	got := s.HealthSummary(context.Background())
-	if got.Status != HealthOK {
-		t.Fatalf("shadow mode degraded /api/health: %+v", got)
-	}
-	if n := warnCount(obs, "health tables are absent"); n != 1 || strings.Count(buf.String(), "health tables are absent") != 0 {
-		t.Fatalf("shadow warns=%d info=%d, want one WARN and no per-sweep info\nlog:\n%s", n, strings.Count(buf.String(), "health tables are absent"), buf.String())
-	}
-}
-
-func TestHealthStoreUnavailableEvaluatorOffStaysOK(t *testing.T) {
-	s := NewScheduler(WithDataDir(t.TempDir()), WithStore(schemaStore(7, false)))
-	hs := newAbsentHealth()
-	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorOff, time.Now)
-	if err := e.SweepNow(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := s.HealthSummary(context.Background()); got.Status != HealthOK {
-		t.Fatalf("evaluator off: %+v", got)
-	}
-	open, err := s.OpenFindings(context.Background(), 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hasFinding(open, healthStoreKind, evalNode) {
-		t.Fatalf("evaluator off listed %+v", open)
 	}
 }
 
@@ -345,7 +301,7 @@ func TestHealthStoreUnavailablePersistsOpenAndClose(t *testing.T) {
 	}
 	hs := newAbsentHealth()
 	hs.down.Store(true)
-	e := healthEval(t, s, hs, EvaluatorOn, clock)
+	e := healthEval(t, s, hs, clock)
 	start := clock()
 	_ = e.SweepNow(context.Background())
 	advance(30 * time.Second)
@@ -391,7 +347,7 @@ func TestHealthStoreUnavailableClusterPersistsResolvedRow(t *testing.T) {
 	s := NewScheduler(WithDataDir(t.TempDir()), WithStore(schemaStore(8, false)), WithFindingStore(findings), WithEventStore(events))
 	hs := newAbsentHealth()
 	hs.down.Store(true)
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Cluster: true, Store: hs, NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond, Now: clock})
+	e := NewEvaluator(s, EvaluatorConfig{Cluster: true, Store: hs, NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond, Now: clock})
 	start := clock()
 	ctx, cancel := context.WithCancel(context.Background())
 	go e.Run(ctx)

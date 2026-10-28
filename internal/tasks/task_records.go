@@ -646,10 +646,10 @@ func (s *Scheduler) replayRecordSignals() {
 // task-record clear made during Restore is stored before the API serves.
 // The app attaches the evaluator before Restore, so that clear is only a
 // success signal until this runs; the sweep would otherwise wait out its
-// debounce. No evaluator, evaluator off, or cluster mode is a no-op.
+// debounce. No evaluator or cluster mode is a no-op.
 func (s *Scheduler) EvaluateClusterNow(ctx context.Context) error {
 	e := s.healthEval.Load()
-	if e == nil || e.Mode() != EvaluatorOn || e.cfg.Cluster {
+	if e == nil || e.cfg.Cluster {
 		return nil
 	}
 	_, err := e.EvaluateNow(ctx, ClusterFindingTask)

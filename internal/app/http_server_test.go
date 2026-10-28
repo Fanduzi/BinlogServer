@@ -105,7 +105,7 @@ func TestApp_LoopbackListenAllowsDisabledAuth(t *testing.T) {
 		}
 	}
 
-	a := New(config.Config{ListenAddr: "127.0.0.1:0"})
+	a := New(config.Config{ListenAddr: "127.0.0.1:0", DataDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- a.Run(ctx) }()

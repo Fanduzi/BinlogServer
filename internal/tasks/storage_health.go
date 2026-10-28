@@ -92,8 +92,8 @@ func (s *Scheduler) storageHealth(task Task, checkpointGTID string) StorageHealt
 
 // reportUnmanaged is the legacy Report for a kind the health evaluator
 // manages since P2-3: it writes only while the evaluator does not own the
-// kind (off, shadow, or a store without migration 000009), so a row has one
-// writer (design §5.6).
+// kind (the store lacks migration 000009, or no evaluator is wired), so a
+// row has one writer (design §5.6).
 func (s *Scheduler) reportUnmanaged(f Finding) {
 	if s.healthEval.Load().ownsManaged() {
 		return

@@ -311,7 +311,6 @@ cell_noprocess() {
       BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18121 \
       BINLOG_SERVER_DATA_DIR="$data" \
       BINLOG_SERVER_META_DSN="$dsn" \
-      BINLOG_SERVER_HEALTH_EVALUATOR=on \
       BINLOG_SERVER_CLUSTER_WORKER_ID=sk-np \
       BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC=2 \
       "$BIN" --config "$ROOT_DIR/deploy/e2e/config.yaml"
@@ -404,7 +403,6 @@ cell_health() {
       BINLOG_SERVER_LISTEN_ADDR=127.0.0.1:18120 \
       BINLOG_SERVER_DATA_DIR="$data" \
       BINLOG_SERVER_META_DSN="$dsn" \
-      BINLOG_SERVER_HEALTH_EVALUATOR=on \
       "$BIN" --config "$ROOT_DIR/deploy/e2e/config.yaml"
   ) >"$WORK/health-server.log" 2>&1 &
   HEALTH_PID=$!

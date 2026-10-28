@@ -19,7 +19,7 @@ func TestLoadConfig_HealthDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Health.Evaluator != "off" || cfg.Health.SweepIntervalSec != 60 || cfg.Health.RehashBytesPerSec != 4<<20 {
+	if cfg.Health.SweepIntervalSec != 60 || cfg.Health.RehashBytesPerSec != 4<<20 {
 		t.Fatalf("defaults %+v", cfg.Health)
 	}
 	path := filepath.Join(t.TempDir(), "c.yaml")
@@ -30,14 +30,8 @@ func TestLoadConfig_HealthDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Health.Evaluator != "shadow" || cfg.Health.SweepIntervalSec != 20 || cfg.Health.RehashBytesPerSec != 1<<20 {
+	if cfg.Health.SweepIntervalSec != 20 || cfg.Health.RehashBytesPerSec != 1<<20 {
 		t.Fatalf("overrides %+v", cfg.Health)
-	}
-	if err := os.WriteFile(path, []byte("health:\n  evaluator: maybe\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("unknown health.evaluator accepted")
 	}
 }
 

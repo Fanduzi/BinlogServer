@@ -61,7 +61,7 @@ func TestLoadConfig_ShippedExamples(t *testing.T) {
 	if cfg.Standalone.TaskRecords != "on" {
 		t.Fatalf("standalone.task_records = %q", cfg.Standalone.TaskRecords)
 	}
-	if cfg.Health.Evaluator != "off" || cfg.Health.SweepIntervalSec != 60 {
+	if cfg.Health.SweepIntervalSec != 60 {
 		t.Fatalf("health = %+v", cfg.Health)
 	}
 }

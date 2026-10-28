@@ -65,7 +65,7 @@ func TestHealthMetricsFromEvaluator(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := healthstore.NewFileStore(data + "/.health.json")
-	e := tasks.NewEvaluator(s, tasks.EvaluatorConfig{Mode: tasks.EvaluatorOn, Store: store, NodeID: "n", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond})
+	e := tasks.NewEvaluator(s, tasks.EvaluatorConfig{Store: store, NodeID: "n", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond})
 	ctx := context.Background()
 	if _, err := e.EvaluateNow(ctx, task.ID); err != nil {
 		t.Fatal(err)

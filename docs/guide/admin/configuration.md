@@ -586,18 +586,17 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 
 ### 3.11 健康评估（`health`）
 
-`health.evaluator` 为 `off`（默认）、`shadow` 或 `on`。`off` 只保留旧 finding。`shadow` 评估并写日志，不落库。`on` 时评估器接管对应 finding。负数拒绝启动。
+健康评估器始终在运行（v0.5.x 的 `health.evaluator` 开关已移除：仍然设置它的配置只会在启动时打一条警告，不会改变行为）。评估器接管它管理的 finding。负数拒绝启动。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `health.evaluator` | off | `off`、`shadow`、`on` |
 | `health.sweep_interval_sec` | 60 | 评估周期，秒 |
 | `health.rehash_bytes_per_sec` | 4194304 | 全局 sha256 复查预算，字节/秒（4 MiB/s） |
 | `health.unreachable_after_sec` | 90 | 源库无进展多久算 SOURCE_UNREACHABLE，秒 |
 | `health.unreachable_after_task_sec` | 空 | 按任务 id 覆盖上一行。每个值必须是正整数 |
 | `health.no_progress_after_sec` | 120 | 期望 RUN 的任务多久没有本地进展算 TASK_NO_PROGRESS，秒 |
-| `health.stale_after_sec` | 0 | 0 表示 5 倍 sweep。集群健康行过期则 HEALTH_STALE。需要 `health.evaluator: on` |
-| `health.node_gone_after_sec` | 0 | 0 表示 max(3×sweep, lease_ttl+2×sweep)。显式值低于 lease_ttl+2×sweep 时拒绝启动。需要 `health.evaluator: on` |
+| `health.stale_after_sec` | 0 | 0 表示 5 倍 sweep。集群健康行过期则 HEALTH_STALE |
+| `health.node_gone_after_sec` | 0 | 0 表示 max(3×sweep, lease_ttl+2×sweep)。显式值低于 lease_ttl+2×sweep 时拒绝启动 |
 | `health.refusal_retry_cap_sec` | 600 | shared 的尾巴拒绝和 EpochLost 再次认领前的等待上限。负值拒绝启动 |
 | `health.signal_stale_after_sec` | 86400 | 信号多久没有新消息就降为 INFO，秒 |
 | `health.upload_late_critical_after_sec` | 86400 | 上传落后多久升级为 CRITICAL，秒 |
@@ -624,7 +623,7 @@ export BINLOG_SERVER_HTTP_WORKER_HEALTH_READ_TIMEOUT_SEC="10"
 
 ### 3.11.2 告警 webhook（`notify`）
 
-一个通用 JSON POST（ADR 0009 决定 1）。不对接各家 IM。`notify.webhook_url` 为空则不发送。评估器为 `on` 且本轮写入成功后，健康状态变化或 CRITICAL finding 的打开、关闭、升级才发一批；第一次看到 HEALTHY 不发，状态不变也不发。`shadow` 和 `off` 不发。集群里只有正在评估该任务的节点发送。令牌放在请求头 `X-BinlogServer-Token`，不要明文写进会被收集的日志。投递失败按 `notify.attempts` 指数退避重试（传输错误、5xx、429）；其它 4xx 不重试。不跟随重定向。
+一个通用 JSON POST（ADR 0009 决定 1）。不对接各家 IM。`notify.webhook_url` 为空则不发送。评估器始终运行，本轮写入成功后，健康状态变化或 CRITICAL finding 的打开、关闭、升级才发一批；第一次看到 HEALTHY 不发，状态不变也不发。集群里只有正在评估该任务的节点发送。令牌放在请求头 `X-BinlogServer-Token`，不要明文写进会被收集的日志。投递失败按 `notify.attempts` 指数退避重试（传输错误、5xx、429）；其它 4xx 不重试。不跟随重定向。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|

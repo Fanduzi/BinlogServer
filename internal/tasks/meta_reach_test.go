@@ -122,7 +122,7 @@ func (f *flakyHealth) ApplyTransitions(ctx context.Context, id string, fence hea
 func TestHealthSummaryManagedReadErrorIsNotOK(t *testing.T) {
 	s := NewScheduler(WithStore(&reachStore{fakeStore: newFakeStore()}))
 	hs := &flakyHealth{FileStore: healthstore.NewFileStore(t.TempDir() + "/h")}
-	newEval(t, s, hs, EvaluatorOn)
+	newEval(t, s, hs)
 	if got := s.HealthSummary(context.Background()); got.Status != HealthOK {
 		t.Fatalf("healthy store: %+v", got)
 	}
@@ -144,7 +144,7 @@ func TestMetaUnreachableOpensAfterTenSecondsAndLeavesOpenClose(t *testing.T) {
 	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
 	s := NewScheduler(WithStore(&reachStore{fakeStore: newFakeStore()}))
 	hs := &flakyHealth{FileStore: healthstore.NewFileStore(t.TempDir() + "/h")}
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, NodeID: "n1", Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond, Now: clock})
+	e := NewEvaluator(s, EvaluatorConfig{Store: hs, NodeID: "n1", Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond, Now: clock})
 	key := health.SignalKey{Kind: health.MetaUnreachable, Subject: "n1"}
 	failing := func() bool {
 		e.mu.Lock()

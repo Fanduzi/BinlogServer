@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: a stuck rotate inside HoldChain, a hung checkpoint read, and a health store probed on every sweep
+// output: the evaluator never waits on a stuck rotate (the chain scope comes back incomplete), a checkpoint read under HoldChain is bounded and releases the lock, and a sweep still probes the store while the chain is held
+// pos: design 0009 §27.8 (R1/R2)
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
@@ -40,7 +45,7 @@ func chainFactsWithin(t *testing.T, e *Evaluator, task Task, limit time.Duration
 // must not stop the evaluator; the chain scope is incomplete instead.
 func TestChainFactsDoNotWaitForAStuckRotate(t *testing.T) {
 	f := sizedDir(t)
-	e := newEval(t, f.s, nil, EvaluatorOn)
+	e := newEval(t, f.s, nil)
 	release := f.s.HoldChain(f.task.ID)
 	defer release()
 	ok, isNil := chainFactsWithin(t, e, f.task, 5*time.Second)
@@ -56,7 +61,7 @@ func TestChainFactsDoNotWaitForAStuckRotate(t *testing.T) {
 // released, so a rotate is never held behind the evaluator's meta read.
 func TestChainSnapshotCheckpointReadIsBounded(t *testing.T) {
 	f := sizedDirWith(t, WithCheckpointReader(hangingCheckpoints{}), WithInternalCallTimeouts(InternalCallTimeouts{Read: 100 * time.Millisecond}))
-	e := newEval(t, f.s, nil, EvaluatorOn)
+	e := newEval(t, f.s, nil)
 	ok, isNil := chainFactsWithin(t, e, f.task, 3*time.Second)
 	if !ok {
 		t.Fatal("checkpoint read under HoldChain is unbounded")
@@ -77,7 +82,7 @@ func TestChainSnapshotCheckpointReadIsBounded(t *testing.T) {
 // so an open CHECKPOINT_AHEAD is not closed by a meta hiccup.
 func TestChainSnapshotCheckpointReadErrorIsIncomplete(t *testing.T) {
 	f := sizedDirWith(t, WithCheckpointReader(hangingCheckpoints{err: errors.New("meta: connection refused")}))
-	e := newEval(t, f.s, nil, EvaluatorOn)
+	e := newEval(t, f.s, nil)
 	ok, isNil := chainFactsWithin(t, e, f.task, 3*time.Second)
 	if !ok || !isNil {
 		t.Fatalf("checkpoint read error: returned=%v incomplete=%v, want an incomplete chain scope", ok, isNil)
@@ -90,7 +95,7 @@ func TestHealthStoreProbedEverySweepOnATasklessNode(t *testing.T) {
 	findings := newMemFindingStore()
 	s := NewScheduler(WithDataDir(t.TempDir()), WithStore(schemaStore(8, false)), WithFindingStore(findings), WithEventStore(newFakeEventStore()))
 	hs := newAbsentHealth()
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Cluster: true, Store: hs, NodeID: evalNode, Instance: "i1", Sweep: 15 * time.Millisecond, Debounce: time.Millisecond})
+	e := NewEvaluator(s, EvaluatorConfig{Cluster: true, Store: hs, NodeID: evalNode, Instance: "i1", Sweep: 15 * time.Millisecond, Debounce: time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go e.Run(ctx)

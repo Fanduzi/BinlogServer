@@ -564,7 +564,7 @@ func TestUnclaimedAfterGraceOpensNoProgress(t *testing.T) {
 	}
 	peer := w.nodes["n2"]
 	ev := NewEvaluator(peer, EvaluatorConfig{
-		Mode: EvaluatorOn, Store: w.hs, Cluster: true, NodeID: "n2", Instance: "n2-i",
+		Store: w.hs, Cluster: true, NodeID: "n2", Instance: "n2-i",
 		Sweep: 30 * time.Millisecond, NoProgressAfter: time.Hour,
 	})
 	ctx := context.Background()
@@ -605,7 +605,7 @@ func TestUnclaimedAfterGraceOpensNoProgress(t *testing.T) {
 	w.claim()
 	w.waitResumed(id, 0)
 	ownerEv := NewEvaluator(w.owner(), EvaluatorConfig{
-		Mode: EvaluatorOn, Store: w.hs, Cluster: true, NodeID: "n1", Instance: "n1-i",
+		Store: w.hs, Cluster: true, NodeID: "n1", Instance: "n1-i",
 		Sweep: 30 * time.Millisecond, NoProgressAfter: time.Hour,
 	})
 	if err := ownerEv.SweepNow(ctx); err != nil {

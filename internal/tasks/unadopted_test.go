@@ -40,7 +40,7 @@ func TestEvaluator_StandaloneLeftoverOpensTaskUnadopted(t *testing.T) {
 	data, _ := leftoverDataDir(t)
 	s := NewScheduler(WithDataDir(data))
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	if err := e.SweepNow(ctx); err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestEvaluator_TaskUnadoptedClosesWhenDirectoryMoved(t *testing.T) {
 	data, dir := leftoverDataDir(t)
 	s := NewScheduler(WithDataDir(data))
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	if err := e.SweepNow(ctx); err != nil {
 		t.Fatal(err)
@@ -107,7 +107,7 @@ func TestEvaluator_TaskUnadoptedClosesInLaterProcessWhenDirectoryGone(t *testing
 	data, dir := leftoverDataDir(t)
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
 	ctx := context.Background()
-	first := newEval(t, NewScheduler(WithDataDir(data)), store, EvaluatorOn)
+	first := newEval(t, NewScheduler(WithDataDir(data)), store)
 	if err := first.SweepNow(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestEvaluator_TaskUnadoptedClosesInLaterProcessWhenDirectoryGone(t *testing
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
-	second := newEval(t, NewScheduler(WithDataDir(data)), store, EvaluatorOn)
+	second := newEval(t, NewScheduler(WithDataDir(data)), store)
 	if err := second.SweepNow(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestEvaluator_TaskCreatedHereIsNotUnadopted(t *testing.T) {
 	task, dir := evalTask(t, s, data)
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	if err := e.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}

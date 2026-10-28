@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a standalone data_dir (no task store) and this process's in-memory tasks and tombstones
-// output: reconcileUnadoptedLegacy: CRITICAL TASK_UNADOPTED for each leftover task directory through SignalFailure (the legacy sink while the evaluator does not own the kind: off, shadow, before it is built), closed through SignalSuccess when the task is adopted, deleted or the directory leaves data_dir
-// pos: tip QA b4c52f4 P1 (ADR 0010 §Interaction with TASK_UNADOPTED): a leftover directory is never silent in any evaluator mode
+// output: reconcileUnadoptedLegacy: CRITICAL TASK_UNADOPTED for each leftover task directory through SignalFailure (the legacy sink before the evaluator is built, its signal book after), closed through SignalSuccess when the task is adopted, deleted or the directory leaves data_dir
+// pos: tip QA b4c52f4 P1 (ADR 0010 §Interaction with TASK_UNADOPTED): a leftover directory is never silent, with or without the evaluator
 // note: if this file changes, update this header and module README.md.
 package tasks
 

@@ -10,7 +10,7 @@
 | `config_examples_test.go` | 用 `LoadConfig` 加载仓库根目录和发版归档里的每一份示例配置，包括 `BINLOG_SERVER_META_DSN` 未设置时 |
 | `config_doc_test.go` | `configuration.md` 必须写到 `config.go` 里的每一个 YAML 键；`VERSION` 必须通过不带 tag 的 `internal/releaseprep.Check`（`make release-check` 在打 tag 时用同一套）：有中英文发布说明和 CHANGELOG 小节，除发版历史白名单外没有上一个版本（和 tag 门禁同一个 `scanVersions`；没有 tag 时是 CHANGELOG 里比它旧的最新一节），并满足发布面清单 `Surfaces`：README、部署指南、升级指南、示例头、落地页、VERSION。新增发布面只改清单 |
 | `landing_doc_test.go` | 落地页白名单：`docs/landing` 的文件集合、section 数、标题和元素 id 固定；版本号只能是 `VERSION`，且只出现在 `data-version`、徽章、`VER=`、CTA 四处；禁止日期、40 位以上 hex、运行时加载、超出体积上限；表驱动反例覆盖 #565 r1 QA 的 24 种回流写法 |
-| `config_health_test.go` | `health.evaluator`（off/shadow/on，默认 off）、`health.sweep_interval_sec`（默认 60）、`health.rehash_bytes_per_sec`（默认 4 MiB/s）、`health.stale_after_sec`（默认 0 = 5×sweep，负数拒绝，§28）、`health.node_gone_after_sec`（默认 0 = max(3×sweep, lease_ttl+2×sweep)，负数拒绝，§30）、`health.refusal_retry_cap_sec`（默认 600）的默认值、覆盖与非法值 |
+| `config_health_test.go` | `health.sweep_interval_sec`（默认 60）、`health.rehash_bytes_per_sec`（默认 4 MiB/s）、残留的 `health.evaluator` 键被忽略并告警、`health.stale_after_sec`（默认 0 = 5×sweep，负数拒绝，§28）、`health.node_gone_after_sec`（默认 0 = max(3×sweep, lease_ttl+2×sweep)，负数拒绝，§30）、`health.refusal_retry_cap_sec`（默认 600）的默认值、覆盖与非法值 |
 | `config_notify_test.go` | `notify.webhook_url` 为空时不发；超时默认 5、次数默认 3、退避默认 200；非法 URL 和越界次数拒绝启动 |
 | `config_verify_test.go` | `verify.every_sec`（默认 86400）、预算、轮换、`verify.recent_share_percent`（默认 25，拒绝 0 和 1–100 以外）、截止时间、`verify.pass_max_bytes`、最近窗口和演练周期 |
 | `encryption.go` | AES-256-GCM `enc:aes256:` 加解密工具（配置值与 meta 源库密码共用） |
