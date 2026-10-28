@@ -52,6 +52,7 @@
 - `release-assets.sh` 保留为本地验证和手工补发资产时的兜底入口，并与 GoReleaser 共享相同归档内容契约。
 - Linux 分发二进制统一以 `CGO_ENABLED=0` 构建，兼容老环境中的 `glibc 2.17` 基线。
 - 每个 tag 发布前需要先提交英文主 release note：`docs/releases/release-notes-vX.Y.Z.md`。
+- 发版准备 PR（在打 tag 之前合入）改 `VERSION`、README/README_ZH 安装段、`docs/guide/admin/deployment.md`、示例配置头和落地页；逐版本升级说明加在 `docs/guide/admin/upgrade.md` 与 `upgrade.zh-CN.md` 列表最上方，README 的 `Upgrading` / `升级` 一节只改 `Latest release` / `最新版本` 那一行摘要，不加条目。`internal/config/config_doc_test.go` 校验版本钉住，`internal/config/readme_doc_test.go` 校验 README 只出现 `VERSION` 和白名单版本号、标题不变、不超字节上限、升级一节保持两行模板，以及升级指南从新到旧。
 
 ## Update Rule
 

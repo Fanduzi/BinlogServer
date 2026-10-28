@@ -68,20 +68,7 @@ func withManifest(t *testing.T, s []Surface, h []HistoryRule) {
 const ver, prev = "0.5.100", "0.5.99" // the follow-up fixtures
 
 func fixture563() map[string]string {
-	f := Fixture(ver, prev)
-	r := strings.NewReplacer("@V@", ver, "@P@", prev)
-	cut := func(path, from string) {
-		f[path] = f[path][:strings.Index(f[path], from)]
-	}
-	cut("README.md", "## Upgrade Notes")
-	cut("README_ZH.md", "## 升级须知")
-	f["README.md"] += r.Replace("## Upgrading\n\nLatest release: `v@V@`. No migration; in-place upgrade from the previous release is supported.\n")
-	f["README_ZH.md"] += r.Replace("## 升级\n\n最新版本：`v@V@`。无需迁移，支持从上一个版本原地升级。\n")
-	f["docs/guide/admin/upgrade.md"] = r.Replace("# Upgrading\n\nRead every note, newest first. Versioned notes start at v0.0.1.\n\n## Per-version notes\n\n" +
-		"- **v@V@: retention marker, no migration:** in-place upgrade from v@P@ is tested. v@P@ runs on the same schema.\n" +
-		"- **v@P@: health metrics:** optional keys.\n- **Standalone: a note with no version.**\n- **v0.0.1: first.**\n")
-	f["docs/guide/admin/upgrade.zh-CN.md"] = r.Replace("# 升级\n\n## 逐版本说明\n\n- **v@V@：保留策略标记，没有迁移：** 测试过从 v@P@ 原地升级。\n- **v@P@：健康指标。**\n")
-	return f
+	return Fixture(ver, prev)
 }
 
 func fixture565() map[string]string {

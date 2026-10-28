@@ -15,8 +15,8 @@ import (
 
 // Fixture returns a complete release-prep tree for ver (X.Y.Z) that names prev
 // only where releaseprep.History allows it, the way the real tree does: the
-// CHANGELOG, the README upgrade notes and release-notes links, and the
-// landing timeline entries.
+// CHANGELOG, the upgrade guides' per-version notes, and the landing timeline
+// entries.
 func Fixture(ver, prev string) map[string]string {
 	r := strings.NewReplacer("@V@", ver, "@P@", prev)
 	return map[string]string{
@@ -32,6 +32,10 @@ func Fixture(ver, prev string) map[string]string {
 		"config.example.yaml":            r.Replace("# BinlogServer v@V@ Comprehensive Configuration Reference\nlisten_addr: 127.0.0.1:8080\n"),
 		"config.production.example.yaml": r.Replace("# Production deployment template for BinlogServer v@V@.\nlisten_addr: 0.0.0.0:8080\n"),
 		versionPath:                      ver + "\n",
+		"docs/guide/admin/upgrade.md": r.Replace("# Upgrading\n\nRead every note, newest first. Versioned notes start at v0.0.1.\n\n## Per-version notes\n\n" +
+			"- **v@V@: retention marker, no migration:** in-place upgrade from v@P@ is tested. v@P@ runs on the same schema.\n" +
+			"- **v@P@: health metrics:** optional keys.\n- **Standalone: a note with no version.**\n- **v0.0.1: first.**\n"),
+		"docs/guide/admin/upgrade.zh-CN.md": r.Replace("# 升级\n\n## 逐版本说明\n\n- **v@V@：保留策略标记，没有迁移：** 测试过从 v@P@ 原地升级。\n- **v@P@：健康指标。**\n"),
 		// The hero, install and CTA markup is the shape the landing-page
 		// cleanup keeps: the timeline and its "(Current)" marker are gone.
 		landingPath: r.Replace(`<!doctype html>
@@ -54,17 +58,13 @@ const readmeTemplate = "# BinlogServer\n\n## Quick Start\n\n### 1. Download, ver
 	"Published `v@V@` `checksums.txt`:\n\n```text\n" +
 	"24c9d9cc572607bfb9fb21c24fac546e4748723010fa35c733777c79adce8c8d  binlog-server_@V@_linux_amd64.tar.gz\n```\n\n" +
 	"```text\nbinlog-server_@V@_linux_amd64/\n  binlog-server\n```\n\n### 2. Run it\n\nStart it.\n\n" +
-	"## Upgrade Notes\n\n- **v@V@: retention marker, no migration:** in-place upgrade from v@P@ is supported.\n" +
-	"- **v@P@: health metrics, no migration:** optional keys.\n\n" +
-	"Full release notes: [v@V@](docs/releases/release-notes-v@V@.md) · v@P@: [notes](docs/releases/release-notes-v@P@.md)\n"
+	"## Upgrading\n\nLatest release: `v@V@`. No migration; in-place upgrade from the previous release is supported.\n"
 
 const readmeZHTemplate = "# BinlogServer\n\n## 快速开始\n\n### 1. 下载、校验并解压 v@V@\n\n```bash\nVER=@V@\n" +
 	"# 下载归档\ncurl -fsSL -O \"https://github.com/Fanduzi/BinlogServer/releases/download/v${VER}/binlog-server_${VER}_linux_amd64.tar.gz\"\n```\n\n" +
 	"已发布的 `v@V@` `checksums.txt`：\n\n```text\n" +
 	"24c9d9cc572607bfb9fb21c24fac546e4748723010fa35c733777c79adce8c8d  binlog-server_@V@_linux_amd64.tar.gz\n```\n\n" +
-	"### 2. 启动\n\n启动。\n\n## 升级须知\n\n- **v@V@：保留策略标记，没有迁移：** 支持从 v@P@ 原地升级。\n" +
-	"- **v@P@：健康指标，没有迁移：** 可选配置。\n\n" +
-	"详细版本记录：[v@V@](docs/releases/v@V@.zh-CN.md) · v@P@：[说明](docs/releases/v@P@.zh-CN.md)\n"
+	"### 2. 启动\n\n启动。\n\n## 升级\n\n最新版本：`v@V@`。无需迁移，支持从上一个版本原地升级。\n"
 
 // NewFixtureRepoDir builds a git repo whose v<prev> tag carries the prev release
 // and whose HEAD (branch main) carries the complete ver release.

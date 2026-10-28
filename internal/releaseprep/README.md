@@ -25,7 +25,7 @@
 要扫哪些旧版本只有一个来源：`scanVersions`。tag 门禁和每个 PR 的 go test 调的都是 `Check`，只是后者不传 tag。
 - 上一个版本 `P` = 比本版本旧的最新一个**已发布** release：有 `Published` 时取 `Published ∩ Merged`；不知道哪些已发布时（`-published=off`、`auto` 下 gh 不可用、go test）取 `CHANGELOG.md` 的 `## [vX.Y.Z]` 小节（注释和代码块里的不算；知道历史时还要求 tag 在历史里）。
 - 另外再扫：`CHANGELOG.md` 里有、或者历史里打了 tag，比 `P` 新、比本版本旧的每个版本。发版失败留下的版本（tag 打了、release 没发出来）已经把它的版本号写进了所有发布面，下一次发版漏改的地方就停在它上面。例：`v0.(y).(z+1)` 打了 tag 没发布，发 `v0.(y).(z+2)` 时部署指南还停在 `z+1`：`-published=gh` 下 `P` 是 `z`、另外扫 `z+1`，离线和 go test 下 `P` 就是 `z+1`，三种情况都失败（`cli_test.go` 的 `TestUnpublishedTaggedReleaseIsScanned`）。
-- 跨 minor/major 也一样：`VERSION` 升到下一个 minor（`0.y.0`）时，上一个版本是最后发布的 `0.(y-1).x`，留在归档路径里的旧版本照样失败（`TestMinorBumpScansThePreviousMinor`，测试的版本对里也有一组跨 minor 的）。#563 删掉 README 规则后，README 里的旧版本就靠这条扫描。
+- 跨 minor/major 也一样：`VERSION` 升到下一个 minor（`0.y.0`）时，上一个版本是最后发布的 `0.(y-1).x`，留在归档路径里的旧版本照样失败（`TestMinorBumpScansThePreviousMinor`，测试的版本对里也有一组跨 minor 的）。`History` 里没有 README 的规则，README 里的旧版本就靠这条扫描。
 - 历史里不能有比本版本新的 tag。历史里一个 tag 都没有时（浅克隆，`fetch-depth: 1`）明确报错，提示 `git fetch --tags`；`release.yml` 和 selftest 都用 `fetch-depth: 0`，`internal/lintguard` 的 `TestReleasePrepGateIsWired` 锁住这一点。
 - `release.yml` 用 `-published=gh`（gh 失败即 rc=2）；本地默认 `auto`，gh 不可用时打一行 `note` 后用 CHANGELOG。
 
@@ -40,8 +40,9 @@
 5. `CHANGELOG.md`：有 `## [vX.Y.Z]`（或 `## vX.Y.Z`）标题，下一个 `## ` 之前有非空内容；注释和代码块（` ``` ` 和 `~~~`）里的标题不算。
 6. 反向检查：除 `History` 允许的地方以外，没有一处写着 `P`（任何写法）。每个 PR 和 tag 都跑。
 7. 清单 `Surfaces`（显示文本见 `text.go`；可见字符串以版本结尾时，后面不能接着还是版本，比如 `v1.2.30`、`v1.2.3.1`、`v1.2.3-rc1` 都不是 `v1.2.3`）：
-   - `README.md`、`README_ZH.md`：每个 `VER=`（带引号、带 `v`、多一段、带 `-rc`、空值、`{VER}` 之类不是 `{ver}` 的占位符都算）都等于 `X.Y.Z`，至少有一个可见；安装小节（第一个 h2–h4 标题含 `unpack` 或 `解压`，到下一个同级或更高级标题为止，代码块里的 `#` 行不算标题）标题写这个版本，小节里的所有版本都是这个版本。
+   - `README.md`、`README_ZH.md`：显示文本里有 `` Latest release: `vX.Y.Z` `` / `` 最新版本：`vX.Y.Z` ``；每个 `VER=`（带引号、带 `v`、多一段、带 `-rc`、空值、`{VER}` 之类不是 `{ver}` 的占位符都算）都等于 `X.Y.Z`，至少有一个可见；安装小节（第一个 h2–h4 标题含 `unpack` 或 `解压`，到下一个同级或更高级标题为止，代码块里的 `#` 行不算标题）标题写这个版本，小节里的所有版本都是这个版本。
    - `docs/guide/admin/deployment.md`：`VER=` 同上。
+   - `docs/guide/admin/upgrade.md`、`upgrade.zh-CN.md`（`NewestNote: GuideNote`）：最新的一条逐版本说明是本版本，说明从新到旧。
    - `config.example.yaml`、`config.production.example.yaml`：有 `BinlogServer vX.Y.Z`，文件里其他版本也只能是这个。
    - `docs/landing/index.html`：`<html data-version>` 恰好是 `X.Y.Z`（第一个 `<html>` 标签），显示文本里有 `vX.Y.Z — latest release`、`Get Started with vX.Y.Z` 和时间线的 `vX.Y.Z (Current)`，至少一个可见的 `VER=X.Y.Z`。
    - `VERSION`：恰好一行 `X.Y.Z`。
@@ -58,17 +59,11 @@
 - 整个文件：`CHANGELOG.md`、`docs/releases/**`、`docs/adr/**`、`docs/design/**`（带日期的决策和设计记录，写的是当时发布的版本，不按版本改）、`**/*_test.go`（测试写假版本和某个行为从哪个版本开始，不发布）、`migrations/**`（迁移写加它的版本，发布后不再改）、`go.mod`、`go.sum`、`**/package-lock.json`（依赖版本）。
 - 小节：`docs/guide/admin/upgrade.md`、`upgrade.zh-CN.md` 的 `## Per-version notes` / `## 逐版本说明`（每个版本一条说明，小节里的说明文字也可以写旧版本）。
 - 行：e2e 原地升级那一条腿故意从上一个版本开始：`e2e.yml` 的 `old_ref: vP` 和 `in-place upgrade from vP`，`upgrade-legacy-failback.sh` 的 `plain from vP`，`docs/production-readiness.md` 的 `` `plain` 从 vP ``，`scripts/e2e/README.md` 的 `` `plain` 从 `vP` `` 和 `` 从 `vP` 直接升级 ``。
-- 行（#563 合入后删）：README 的升级须知 `- **vX.Y.Z:` 行、`Full release notes:` / `详细版本记录：` 行；带 `VER=`、归档名或下载链接的行不算。
 - 行（#565 合入后删）：落地页时间线的旧条目（`<div class="timeline-version">vX.Y.Z</div>`、`release2`–`release9` 的 `<p>` 和 JS 字符串），以及写着本版本的 `release1`。每条只覆盖那一个元素。
 
 新出现的、确实是历史的旧版本写进 `History`，写明原因；失败信息会提示这一点。releaseprep 自己的非测试代码里的例子一律用 `1.2.3` 这类假版本，否则下一次发版会扫到它们。
 
-## #563、#565 rebase 时的改动（已在合并模拟里跑通：`go test ./internal/config ./internal/releaseprep` 和对真实仓库当前 `VERSION` 跑的 `release-check` 都通过）
-- #563（自动合并，无冲突）：
-  - `manifest.go`：`README.md` 加 `Visible: []string{"Latest release: `+"`v{v}`"+`"}`，`README_ZH.md` 加 `Visible: []string{"最新版本：`+"`v{v}`"+`"}`；新增 `{Path: "docs/guide/admin/upgrade.md", NewestNote: GuideNote}` 和 `{Path: "docs/guide/admin/upgrade.zh-CN.md", NewestNote: GuideNote}`。
-  - `history.go`：删掉 README 的四条规则和 `readmeNoteLine`、`readmePin` 两个常量。
-  - `fixture_test.go`：两份 README 模板里的 `## Upgrade Notes` / `## 升级须知` 小节换成 `## Upgrading` / `## 升级` 和 `Latest release:` / `最新版本：` 一行；`Fixture` 加两份升级指南（内容同 `followup_test.go` 里原来的 `fixture563`）。
-  - `followup_test.go`：`fixture563()` 改成 `return Fixture(ver, prev)`；`manifest563()` 是幂等的，对新清单再应用一次什么也不变，`TestManifest563` 不用改，直接测真实清单。
+## #565 rebase 时的改动（已在合并模拟里跑通：`go test ./internal/config ./internal/releaseprep` 和对真实仓库当前 `VERSION` 跑的 `release-check` 都通过）
 - #565（`internal/config` 两处冲突）：
   - `manifest.go`：落地页一项换成 `Attrs: {{"html","data-version"}}`、`Visible: {"v{v} — latest release", "Get Started with v{v}"}`、`VERPins`、`OnlyThisVersion`、`ScriptUsesPlaceholder`、`Mentions: 4`（去掉 `v{v} (Current)`）。
   - `history.go`：删掉落地页的三条规则。

@@ -82,7 +82,7 @@ CI：golangci-lint 的 `unused`（只看新问题），以及 `deadcode`：每�
 
 - README 和 landing page 介绍产品：它做什么、怎么安装当前版本、文档在哪。它们不是 changelog。
 - 逐版本说明写进 release notes 和升级指南；功能细节写进 `docs/` 下的页面，从 README 链过去。
-- 待落地：README 形状守卫和 `make release-check`（`scripts/check-release-prep.sh`）随 #563、#564 加入。它们合入之前，这条规则只是约定，CI 不检查。
+- CI 检查这条：README 形状守卫（`internal/config/readme_doc_test.go`）不让逐版本历史回到 README，`make release-check`（`scripts/check-release-prep.sh`）在发布面上留着上一个版本时让发版失败。
 
 ## 7. 第三次打补丁之前先设计
 

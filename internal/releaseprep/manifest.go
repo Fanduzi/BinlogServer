@@ -66,8 +66,10 @@ const (
 // Check, for the tag and for every PR), so a surface added here is checked on every PR
 // (against VERSION) and on the tag.
 var Surfaces = []Surface{
-	{Path: "README.md", VERPins: true, InstallSection: true},
-	{Path: "README_ZH.md", VERPins: true, InstallSection: true},
+	{Path: "README.md", Visible: []string{"Latest release: `v{v}`"}, VERPins: true, InstallSection: true},
+	{Path: "README_ZH.md", Visible: []string{"最新版本：`v{v}`"}, VERPins: true, InstallSection: true},
+	{Path: "docs/guide/admin/upgrade.md", NewestNote: GuideNote},
+	{Path: "docs/guide/admin/upgrade.zh-CN.md", NewestNote: GuideNote},
 	{Path: deployPath, VERPins: true},
 	{Path: "config.example.yaml", Visible: []string{"BinlogServer v{v}"}, OnlyThisVersion: true},
 	{Path: "config.production.example.yaml", Visible: []string{"BinlogServer v{v}"}, OnlyThisVersion: true},
