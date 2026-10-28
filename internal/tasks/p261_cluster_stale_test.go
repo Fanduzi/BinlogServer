@@ -102,7 +102,7 @@ func (c *staleCluster) putOwned(id, owner string, epoch int64, evaluated time.Ti
 	return task
 }
 
-func (c *staleCluster) node(id string, mem []Task, cp bool, mode EvaluatorMode) (*Scheduler, *Evaluator) {
+func (c *staleCluster) node(id string, mem []Task, cp bool) (*Scheduler, *Evaluator) {
 	c.t.Helper()
 	s := NewScheduler(WithStore(c.store), WithClusterLeaseManager(c.leases), WithClusterWorkerID(id), WithFindingStore(c.hs))
 	s.mu.Lock()
@@ -111,7 +111,7 @@ func (c *staleCluster) node(id string, mem []Task, cp bool, mode EvaluatorMode) 
 	}
 	s.mu.Unlock()
 	e := NewEvaluator(s, EvaluatorConfig{
-		Mode: mode, Store: c.rec, Cluster: true, NodeID: id, Instance: id + "-i",
+		Store: c.rec, Cluster: true, NodeID: id, Instance: id + "-i",
 		Sweep: time.Minute, Now: c.now, ControlPlaneOnly: cp,
 	})
 	return s, e
@@ -133,9 +133,9 @@ func staleOpen(t *testing.T, hs *leaseHealthStore) []health.Finding {
 func TestClusterHealthStaleOnlyHolderWrites(t *testing.T) {
 	c := newStaleCluster(t)
 	task := c.putOwned("7", "n2", 4, c.start.Add(-6*time.Minute), true)
-	s1, e1 := c.node("n1", []Task{task}, false, EvaluatorOn)
-	_, e2 := c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, e3 := c.node("n3", []Task{task}, false, EvaluatorOn)
+	s1, e1 := c.node("n1", []Task{task}, false)
+	_, e2 := c.node("n2", []Task{task}, false)
+	_, e3 := c.node("n3", []Task{task}, false)
 	ctx := context.Background()
 	if err := e1.SweepNow(ctx); err != nil {
 		t.Fatalf("n1 sweep: %v", err)
@@ -205,9 +205,9 @@ func TestClusterHealthStaleNotBeforeFiveSweeps(t *testing.T) {
 		mem = append(mem, c.putOwned(fmt.Sprintf("t%03d", i), "n2", 1, c.start.Add(-60*time.Second), true))
 	}
 	mem = append(mem, c.putOwned("late", "n2", 1, c.start.Add(-126*time.Second), true))
-	_, e1 := c.node("n1", mem, false, EvaluatorOn)
-	_, _ = c.node("n2", mem, false, EvaluatorOn)
-	_, _ = c.node("n3", mem, false, EvaluatorOn)
+	_, e1 := c.node("n1", mem, false)
+	_, _ = c.node("n2", mem, false)
+	_, _ = c.node("n3", mem, false)
 	if err := e1.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -220,9 +220,9 @@ func TestClusterHealthStaleNotBeforeFiveSweeps(t *testing.T) {
 func TestClusterHealthStaleWaitsForKnownSince(t *testing.T) {
 	c := newStaleCluster(t)
 	task := c.putOwned("9", "n2", 2, time.Time{}, false)
-	_, e1 := c.node("n1", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n3", []Task{task}, false, EvaluatorOn)
+	_, e1 := c.node("n1", []Task{task}, false)
+	_, _ = c.node("n2", []Task{task}, false)
+	_, _ = c.node("n3", []Task{task}, false)
 	ctx := context.Background()
 	if err := e1.SweepNow(ctx); err != nil {
 		t.Fatal(err)
@@ -243,9 +243,9 @@ func TestClusterHealthStaleWaitsForKnownSince(t *testing.T) {
 func TestClusterHealthStaleClosesWhenEvaluated(t *testing.T) {
 	c := newStaleCluster(t)
 	task := c.putOwned("7", "n2", 4, c.start.Add(-6*time.Minute), true)
-	_, e1 := c.node("n1", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n3", []Task{task}, false, EvaluatorOn)
+	_, e1 := c.node("n1", []Task{task}, false)
+	_, _ = c.node("n2", []Task{task}, false)
+	_, _ = c.node("n3", []Task{task}, false)
 	ctx := context.Background()
 	if err := e1.SweepNow(ctx); err != nil {
 		t.Fatal(err)
@@ -269,9 +269,9 @@ func TestClusterHealthStaleClosesWhenEvaluated(t *testing.T) {
 func TestClusterHealthStaleClosesWhenTaskGone(t *testing.T) {
 	c := newStaleCluster(t)
 	task := c.putOwned("7", "n2", 4, c.start.Add(-6*time.Minute), true)
-	s1, e1 := c.node("n1", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n3", []Task{task}, false, EvaluatorOn)
+	s1, e1 := c.node("n1", []Task{task}, false)
+	_, _ = c.node("n2", []Task{task}, false)
+	_, _ = c.node("n3", []Task{task}, false)
 	ctx := context.Background()
 	if err := e1.SweepNow(ctx); err != nil {
 		t.Fatal(err)
@@ -294,9 +294,9 @@ func TestClusterHealthStaleClosesWhenTaskGone(t *testing.T) {
 func TestClusterHealthStaleListFailureDoesNotOpenOrClose(t *testing.T) {
 	c := newStaleCluster(t)
 	task := c.putOwned("7", "n2", 4, c.start.Add(-6*time.Minute), true)
-	_, e1 := c.node("n1", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n3", []Task{task}, false, EvaluatorOn)
+	_, e1 := c.node("n1", []Task{task}, false)
+	_, _ = c.node("n2", []Task{task}, false)
+	_, _ = c.node("n3", []Task{task}, false)
 	ctx := context.Background()
 	c.rec.mu.Lock()
 	c.rec.listErr = errors.New("list health down")
@@ -330,9 +330,9 @@ func TestClusterHealthStaleListFailureDoesNotOpenOrClose(t *testing.T) {
 func TestClusterHealthStaleFromControlPlane(t *testing.T) {
 	c := newStaleCluster(t)
 	task := c.putOwned("7", "n2", 4, c.start.Add(-6*time.Minute), true)
-	_, eCP := c.node("cp", nil, true, EvaluatorOn)
-	_, _ = c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n3", []Task{task}, false, EvaluatorOn)
+	_, eCP := c.node("cp", nil, true)
+	_, _ = c.node("n2", []Task{task}, false)
+	_, _ = c.node("n3", []Task{task}, false)
 	if err := eCP.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -355,9 +355,9 @@ func TestClusterHealthStaleLeavesMetaUnreachableOpen(t *testing.T) {
 	}
 	c.hs.open[ClusterFindingTask][key] = health.Finding{TaskID: ClusterFindingTask, Kind: health.MetaUnreachable, Subject: "n9", Severity: health.Critical, Detail: "meta away"}
 	c.hs.mu.Unlock()
-	_, e1 := c.node("n1", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n3", []Task{task}, false, EvaluatorOn)
+	_, e1 := c.node("n1", []Task{task}, false)
+	_, _ = c.node("n2", []Task{task}, false)
+	_, _ = c.node("n3", []Task{task}, false)
 	if err := e1.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -370,25 +370,8 @@ func TestClusterHealthStaleLeavesMetaUnreachableOpen(t *testing.T) {
 	}
 }
 
-func TestClusterHealthStaleShadowWritesNothing(t *testing.T) {
-	c := newStaleCluster(t)
-	task := c.putOwned("7", "n2", 4, c.start.Add(-6*time.Minute), true)
-	_, e1 := c.node("n1", []Task{task}, false, EvaluatorShadow)
-	_, _ = c.node("n2", []Task{task}, false, EvaluatorOn)
-	_, _ = c.node("n3", []Task{task}, false, EvaluatorOn)
-	if err := e1.SweepNow(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, writes := c.hs.snapshot(ClusterFindingTask); writes != 0 {
-		t.Fatalf("shadow wrote _cluster %d times", writes)
-	}
-	if got := staleOpen(t, c.hs); len(got) != 0 {
-		t.Fatalf("shadow opened %+v", got)
-	}
-}
-
 func TestStaleAfterFollowsSweep(t *testing.T) {
-	e := NewEvaluator(NewScheduler(), EvaluatorConfig{Mode: EvaluatorOff, Sweep: time.Minute})
+	e := NewEvaluator(NewScheduler(), EvaluatorConfig{Sweep: time.Minute})
 	if e.staleAfter() != 125*time.Second {
 		t.Fatalf("default %s, want 125s", e.staleAfter())
 	}
@@ -403,7 +386,7 @@ func TestStaleAfterFollowsSweep(t *testing.T) {
 }
 
 func TestConfiguredNoProgressStaysAboveRTO(t *testing.T) {
-	e := NewEvaluator(NewScheduler(), EvaluatorConfig{Mode: EvaluatorOff, NoProgressAfter: 120 * time.Second})
+	e := NewEvaluator(NewScheduler(), EvaluatorConfig{NoProgressAfter: 120 * time.Second})
 	if e.configuredNoProgress() != 120*time.Second {
 		t.Fatalf("no_progress %s, want 120s", e.configuredNoProgress())
 	}
@@ -418,7 +401,7 @@ func TestStandaloneClusterPathDoesNotOpenHealthStale(t *testing.T) {
 	s := NewScheduler()
 	start := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	e := NewEvaluator(s, EvaluatorConfig{
-		Mode: EvaluatorOn, Store: store, Cluster: false, NodeID: "local", Instance: "i",
+		Store: store, Cluster: false, NodeID: "local", Instance: "i",
 		Sweep: time.Minute, Now: func() time.Time { return start },
 	})
 	e.Signal(ClusterFindingTask, FindingDiskListFailed, "data", false, "list failed")

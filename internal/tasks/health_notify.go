@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: a written HealthOf verdict and that pass's finding transitions; HealthNotifier from config
 // output: one webhook batch on a health change or a CRITICAL finding OPEN, CLOSE, or ESCALATE; nothing on a steady pass; an undelivered batch retried on the next pass
-// pos: F2 notifier on the evaluator write path; shadow and off do not post
+// pos: F2 notifier on the evaluator write path; every applied pass may post
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -28,7 +28,7 @@ type notifyState struct {
 }
 
 func (e *Evaluator) publish(ctx context.Context, h health.TaskHealth, ts []health.Transition) {
-	if e == nil || e.cfg.Mode != EvaluatorOn || e.cfg.Notify == nil || h.TaskID == "" || e.notices == nil {
+	if e == nil || e.cfg.Notify == nil || h.TaskID == "" || e.notices == nil {
 		return
 	}
 	n := e.notices

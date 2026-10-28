@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: catalog rows with disk sizes, a fake object lister, and a test clock driving upload grace, UPLOAD_LATE escalation and object kinds
+// output: upload grace applies globally and per task, UPLOAD_LATE escalates then closes on upload, a missing object opens then closes, and a truncated or failed listing judges nothing
+// pos: design 0009 §21 (P2-5a)
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
@@ -92,7 +97,7 @@ func (p *p252Fixture) uploaded(name string) string {
 
 func (p *p252Fixture) eval(t *testing.T, cfg EvaluatorConfig) *Evaluator {
 	t.Helper()
-	cfg.Mode, cfg.Store, cfg.NodeID, cfg.Instance = EvaluatorOn, p.store, evalNode, "i1"
+	cfg.Store, cfg.NodeID, cfg.Instance = p.store, evalNode, "i1"
 	cfg.Sweep, cfg.Debounce, cfg.Now = time.Minute, time.Millisecond, p.clock.Now
 	return NewEvaluator(p.s, cfg)
 }

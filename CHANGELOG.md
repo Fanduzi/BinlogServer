@@ -19,10 +19,12 @@ Maintenance rules:
 ### Changed
 
 - 非终态名单上的 runner 错误（含 `SEGMENT_NOT_ON_WORKER`、封存文件已存在、未分类错误）让出为 `LEASE_DEGRADED`，期望保持 `RUN`，不再写成 `FAILED` 加期望 `STOP`。`SOURCE_SWITCHOVER` 仍是第一次就 `FAILED`。用尽 10 次的 `SOURCE_UNREACHABLE` 也是 `FAILED`（期望保持 `RUN`，epoch 写成 0），认领循环不会再 Acquire；同主人重启不把失败次数和 `last_error` 清掉。单机租约在内存里，没有 `task_leases` 行，这一步仍写入任务行，不会因为让出事务找不到租约行而被丢掉。过期的 `STOPPING` 由任一节点 `StopExpired` 收成 `STOPPED`；`pending_delete` 在同一步删除。`per_node` 删除留下目录墓碑。
+- **`health.evaluator` 开关移除，评估器始终运行**（生产验收 F4）。`off`/`shadow` 两个模式连同 `EvaluatorMode`、`tasks.ParseEvaluatorMode` 和 `EvaluatorConfig.Mode` 一并删除；`EvaluatorStats.Shadowed` 也随之移除。仍在配置里设置 `health.evaluator` 的部署会在启动时得到一条 `config warning: health.evaluator is retired`，键被忽略、评估器照常运行——旧配置文件不需要改就能滚动升级。Managed kind 的结论只剩评估器这一条写入路径。
 
 ### Upgrade notes
 
 - 先停掉全部旧节点，再 `migrate up`，再启动新节点。新二进制在 schema 10 上拒绝启动。元数据库账号只要对该库有 `ALL`，`log_bin` 开着也能升级：迁移不建触发器和过程。没有 `PROCESS` 时，`./migrate` 会警告并继续；看得见超过 5 秒的事务则在 DDL 之前退出。原来期望是 `STOP` 的 `FAILED` 行会被改成期望 `RUN`，仍要停的任务需要再 Stop 一次。down 只在对象已经存在时才删过程和触发器。详见 `docs/releases/adr-0011-pr4.md`。
+- `health.evaluator` 已从配置中移除。滚动升级窗口内，新节点一启动就在评估（等于旧开关的 `on`），旧节点保持它配置的模式；窗口随全部节点升级完毕而关闭。schema 下限 11 已高于评估器健康存储需要的 9，升级前运行 `./migrate up` 即可。原来依赖 `off`/`shadow` 静默比对的部署没有等价开关，只能回退二进制。
 
 ### Known issues
 

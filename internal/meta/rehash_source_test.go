@@ -97,7 +97,7 @@ func realCatalogTask(t *testing.T, root, name string) (*tasks.Scheduler, tasks.T
 
 func realEval(s *tasks.Scheduler, data string) (*tasks.Evaluator, *healthstore.FileStore) {
 	hs := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	return tasks.NewEvaluator(s, tasks.EvaluatorConfig{Mode: tasks.EvaluatorOn, Store: hs, NodeID: "n", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond}), hs
+	return tasks.NewEvaluator(s, tasks.EvaluatorConfig{Store: hs, NodeID: "n", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond}), hs
 }
 
 func TestRehasherReadsCatalogChecksumOnMySQL(t *testing.T) {

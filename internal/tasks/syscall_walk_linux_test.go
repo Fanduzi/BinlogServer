@@ -208,7 +208,7 @@ func syscallWalkPass(n int) error {
 		}
 	}
 	e := NewEvaluator(s, EvaluatorConfig{
-		Mode: EvaluatorShadow, Store: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
+		Store:  healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
 		NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond,
 	})
 	// Keep the two sentinel unlinks on this OS thread. The walk itself may

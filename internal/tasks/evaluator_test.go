@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
-// input: task directories with duplicated, stale-open, empty-leftover and bit-rotted segments, health stores that fail, fence or block, and evaluator modes off/shadow/on
-// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, shadow writes nothing, dirty marks merge with per-task serial evaluation on a test clock (four workers, a soak worker counts as held once its pass is inside the store including the TRANSITION mark CreateTask makes before it returns, the merged pass is applied at exactly one debounce, a second worker cannot enter the same task, and a mark after idle leaves the evaluator not idle) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a cold pass over 150 and 1500 segments stays within 36 in-process filesystem operations per segment plus 16 and the 1500-segment pass stays within 10.5 times the 150-segment pass, with a 2s hang ceiling on the 1500-segment pass; that counter is a local signal, and the syscall proof lives in syscall_walk_linux_test.go, a second pass over an unchanged directory reuses the chain cache, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
+// input: task directories with duplicated, stale-open, empty-leftover and bit-rotted segments, and health stores that fail, fence or block
+// output: the P2-3 QA plan as tests: a moved-away copy closes within one sweep with a CLOSE transition, .open.e4 ≡ .sealed.e5 opens SEGMENT_OVERLAP, a 4-byte .open.e3 only opens INFO SEGMENT_EMPTY_LEFTOVER and never cuts replay, an in-place byte flip with mtime kept opens SEGMENT_UNREADABLE within one rehash cycle, a read-only meta never closes legacy findings, dirty marks merge with per-task serial evaluation on a test clock (four workers, a soak worker counts as held once its pass is inside the store including the TRANSITION mark CreateTask makes before it returns, the merged pass is applied at exactly one debounce, a second worker cannot enter the same task, and a mark after idle leaves the evaluator not idle) and that run is joined before the temp directory is removed, 5000 open rows are all closed, ErrLeaseLagging keeps the pass and ErrFenced stops it, a cold pass over 150 and 1500 segments stays within 36 in-process filesystem operations per segment plus 16 and the 1500-segment pass stays within 10.5 times the 150-segment pass, with a 2s hang ceiling on the 1500-segment pass; that counter is a local signal, and the syscall proof lives in syscall_walk_linux_test.go, a second pass over an unchanged directory reuses the chain cache, the rehasher keeps to its byte budget over 100 tasks; two sweeps whose health write is ErrLockWait open META_LOCK_STALLED, and a successful write between two lock waits does not
 // pos: ADR 0009 phase 2 P2-3 (docs/design/0009-phase2-health-evaluator.md §5, §5.7, §6)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -50,9 +50,9 @@ func copyFile(t *testing.T, src, dst string) {
 	}
 }
 
-func newEval(t *testing.T, s *Scheduler, store healthstore.Store, mode EvaluatorMode) *Evaluator {
+func newEval(t *testing.T, s *Scheduler, store healthstore.Store) *Evaluator {
 	t.Helper()
-	return NewEvaluator(s, EvaluatorConfig{Mode: mode, Store: store, NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond})
+	return NewEvaluator(s, EvaluatorConfig{Store: store, NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond})
 }
 
 func openOf(t *testing.T, store healthstore.Store, taskID string) map[string]health.Finding {
@@ -77,7 +77,7 @@ func TestEvaluator_MovedCopyClosesWithinOneSweep(t *testing.T) {
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000003"), 41, 42)
 	copyFile(t, filepath.Join(dir, "mysql-bin.000002"), filepath.Join(dir, "mysql-bin.000002.sealed.e3"))
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	if err := e.SweepNow(ctx); err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestEvaluator_OpenEqualsSealedOpensOverlap(t *testing.T) {
 		t.Fatalf("verdict %+v, want overlap for .open.e4 ≡ .sealed.e5", h)
 	}
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	if err := e.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestEvaluator_EmptyOpenLeftoverIsInfoAndNeverCuts(t *testing.T) {
 		t.Fatalf("a 4-byte open leftover changed the verdict: %+v", h)
 	}
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	hv, err := e.EvaluateNow(context.Background(), task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +221,7 @@ func TestRehasher_InPlaceByteFlipOpensUnreadable(t *testing.T) {
 		cat.add(t, task.ID, p)
 	}
 	store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	r := NewRehasher(e, 1<<20)
 	ctx := context.Background()
 	target := filepath.Join(dir, "mysql-bin.000002")
@@ -275,7 +275,7 @@ func TestRehasher_SkipsSegmentsWithoutSHA(t *testing.T) {
 	s := NewScheduler(WithDataDir(data))
 	_, dir := evalTask(t, s, data)
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
-	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorOn)
+	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)))
 	r := NewRehasher(e, 1<<20)
 	if _, err := r.Step(context.Background()); err != nil {
 		t.Fatal(err)
@@ -298,6 +298,9 @@ type scriptedStore struct {
 	maxPer    int
 	appliedID []string
 }
+
+// Unwrap lets separateLegacyStore see the FileStore inside the hooks.
+func (s *scriptedStore) Unwrap() healthstore.Store { return s.FileStore }
 
 func (s *scriptedStore) ApplyTransitions(ctx context.Context, taskID string, f health.Fence, ts []health.Transition, h health.TaskHealth) (healthstore.Applied, error) {
 	s.mu.Lock()
@@ -354,7 +357,7 @@ func TestEvaluator_ReadOnlyMetaNeverClosesLegacyFindings(t *testing.T) {
 	readOnly := errors.New("Error 1290: --read-only")
 	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), seed: seed,
 		applyErr: []error{readOnly, readOnly, readOnly, readOnly}}
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	for i := 0; i < 3; i++ { // 60s of read-only meta at a 20s sweep
 		_ = e.SweepNow(ctx)
@@ -385,7 +388,7 @@ func TestEvaluator_ReadOnlyMetaNeverClosesLegacyFindings(t *testing.T) {
 	}
 }
 
-func TestEvaluator_ShadowWritesNoFindingRows(t *testing.T) {
+func TestEvaluator_ManagesKindsAndWritesRows(t *testing.T) {
 	data := t.TempDir()
 	s := NewScheduler(WithDataDir(data))
 	task, dir := evalTask(t, s, data)
@@ -393,21 +396,18 @@ func TestEvaluator_ShadowWritesNoFindingRows(t *testing.T) {
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000002"), 39, 40)
 	copyFile(t, filepath.Join(dir, "mysql-bin.000002"), filepath.Join(dir, "mysql-bin.000002.sealed.e3"))
 	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))}
-	e := newEval(t, s, store, EvaluatorShadow)
+	e := newEval(t, s, store)
 	if err := e.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.applied) != 0 {
-		t.Fatalf("shadow wrote %+v", store.applied)
+	if len(store.applied) == 0 {
+		t.Fatal("evaluator wrote nothing")
 	}
-	if st := e.Stats(); st.Shadowed == 0 {
-		t.Fatalf("shadow computed nothing: %+v", st)
-	}
-	// The legacy path still owns the row in shadow mode.
+	// The managed kind has one writer: the legacy path must not add a row.
 	s.storageHealth(task, "")
 	api, _ := s.ListFindings(context.Background(), task.ID, false, 10)
 	if len(api) != 1 || api[0].Kind != FindingSegmentOverlap {
-		t.Fatalf("legacy finding %+v", api)
+		t.Fatalf("findings %+v", api)
 	}
 }
 
@@ -418,7 +418,7 @@ func TestEvaluator_OnModeStopsLegacyReport(t *testing.T) {
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000002"), 39, 40)
 	copyFile(t, filepath.Join(dir, "mysql-bin.000002"), filepath.Join(dir, "mysql-bin.000002.sealed.e3"))
-	newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorOn)
+	newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)))
 	if h := s.storageHealth(task, ""); h.Kind != StorageOverlap {
 		t.Fatalf("verdict %+v", h)
 	}
@@ -464,7 +464,7 @@ func TestEvaluator_DirtyMergesAndTaskIsSerial(t *testing.T) {
 	clock := newManualClock(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
 	const debounce = time.Second
 	e := NewEvaluator(s, EvaluatorConfig{
-		Mode: EvaluatorOn, Store: store, NodeID: evalNode, Workers: 4,
+		Store: store, NodeID: evalNode, Workers: 4,
 		Sweep: time.Hour, LivenessTick: time.Hour, Debounce: debounce,
 		Now: clock.Now, After: clock.After,
 	})
@@ -717,7 +717,7 @@ func TestEvaluator_ClosesAllOf5000OpenAcrossTasks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	if err := e.SweepNow(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -736,7 +736,7 @@ func TestEvaluator_LaggingRetriesFencedStops(t *testing.T) {
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000002"), 39, 40)
 	copyFile(t, filepath.Join(dir, "mysql-bin.000002"), filepath.Join(dir, "mysql-bin.000002.sealed.e3"))
 	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), applyErr: []error{healthstore.ErrLeaseLagging}}
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	if _, err := e.EvaluateNow(ctx, task.ID); !errors.Is(err, healthstore.ErrLeaseLagging) {
 		t.Fatalf("err %v", err)
@@ -761,33 +761,6 @@ func TestEvaluator_LaggingRetriesFencedStops(t *testing.T) {
 	}
 	if e.Stats().Pending != 0 {
 		t.Fatal("a fenced pass is dropped, not kept")
-	}
-}
-
-func TestEvaluator_OffDoesNothing(t *testing.T) {
-	data := t.TempDir()
-	s := NewScheduler(WithDataDir(data))
-	task, dir := evalTask(t, s, data)
-	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
-	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))}
-	e := newEval(t, s, store, EvaluatorOff)
-	e.MarkDirty(task.ID, ReasonSeal)
-	if err := e.SweepNow(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(store.applied) != 0 || e.Stats().Evaluations != 0 {
-		t.Fatalf("off evaluated: %+v", e.Stats())
-	}
-}
-
-func TestParseEvaluatorMode(t *testing.T) {
-	for in, want := range map[string]EvaluatorMode{"": EvaluatorOff, "off": EvaluatorOff, "shadow": EvaluatorShadow, "ON": EvaluatorOn} {
-		if got, err := ParseEvaluatorMode(in); err != nil || got != want {
-			t.Errorf("%q: %v %v", in, got, err)
-		}
-	}
-	if _, err := ParseEvaluatorMode("maybe"); err == nil {
-		t.Error("unknown mode accepted")
 	}
 }
 
@@ -856,7 +829,7 @@ func evalPassTime(t *testing.T, ctx context.Context, n int) (time.Duration, int6
 	for i := 0; i < n; i++ {
 		writeAlertSegment(t, filepath.Join(dir, fmt.Sprintf("mysql-bin.%06d", i+1)), int64(37+i))
 	}
-	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorShadow)
+	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)))
 	binlog.ResetWalkOps()
 	start := time.Now()
 	if _, err := e.EvaluateNow(ctx, task.ID); err != nil {
@@ -880,7 +853,7 @@ func TestEvaluator_SecondPassUsesChainCache(t *testing.T) {
 	for i := 0; i < n; i++ {
 		writeAlertSegment(t, filepath.Join(dir, fmt.Sprintf("mysql-bin.%06d", i+1)), int64(37+i))
 	}
-	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorShadow)
+	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)))
 	pass := func() int64 {
 		t.Helper()
 		binlog.ResetWalkOps()
@@ -918,7 +891,7 @@ func TestRehasher_KeepsToByteBudgetOver100Tasks(t *testing.T) {
 		writeAlertSegment(t, p, seqs...)
 		cat.add(t, task.ID, p)
 	}
-	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorOn)
+	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)))
 	const rate = 32 << 10
 	r := NewRehasher(e, rate)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
@@ -945,7 +918,7 @@ func TestEvaluatorLockWaitOpensOnTheSecondSweep(t *testing.T) {
 	task, _ := evalTask(t, s, data)
 	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
 		applyErr: []error{healthstore.ErrLockWait, healthstore.ErrLockWait}}
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	_ = e.SweepNow(ctx)
 	if strings.Contains(strings.Join(s.HealthSummary(ctx).Reasons, " "), "META_LOCK_STALLED") {
@@ -967,7 +940,7 @@ func TestEvaluatorSuccessfulWriteResetsLockCount(t *testing.T) {
 	_, _ = evalTask(t, s, data)
 	store := &scriptedStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)),
 		applyErr: []error{healthstore.ErrLockWait}}
-	e := newEval(t, s, store, EvaluatorOn)
+	e := newEval(t, s, store)
 	ctx := context.Background()
 	_ = e.SweepNow(ctx)
 	_ = e.SweepNow(ctx)

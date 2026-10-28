@@ -436,7 +436,7 @@ func (s *Scheduler) memoryOpenFindings() []Finding {
 		local = append(local, f)
 	}
 	b.mu.Unlock()
-	if e := s.healthEval.Load(); e != nil && e.cfg.Mode == EvaluatorOn {
+	if e := s.healthEval.Load(); e != nil && e.ownsManaged() {
 		e.mu.Lock()
 		for _, u := range e.unsaved {
 			for _, f := range u.open {

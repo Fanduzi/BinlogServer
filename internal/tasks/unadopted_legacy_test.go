@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: a standalone data_dir with a leftover task directory (no .tasks.enc record), with and without an evaluator wired
+// output: TASK_UNADOPTED opens CRITICAL and degrades /api/health before the evaluator exists and through a signal once it runs; it closes when the directory moves out of data_dir
+// pos: tip QA b4c52f4 P1 / ADR 0010 unadopted records
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
@@ -12,11 +17,11 @@ import (
 	"binlog_server/internal/taskrecords"
 )
 
-// Tip QA b4c52f4 P1: with the default health.evaluator=off a standalone
-// leftover directory (every task upgraded from v0.5.66, and every task
-// created while no key was configured) raised nothing and /api/health
-// stayed 200, so the backup stopped silently. TASK_UNADOPTED must be raised
-// in every evaluator mode; while the evaluator does not own it, through the
+// Tip QA b4c52f4 P1: back when health.evaluator defaulted to off, a
+// standalone leftover directory (every task upgraded from v0.5.66, and every
+// task created while no key was configured) raised nothing and /api/health
+// stayed 200, so the backup stopped silently. TASK_UNADOPTED is raised with
+// the evaluator running; while the evaluator does not own it, through the
 // legacy sink.
 
 func unadoptedOpen(t *testing.T, s *Scheduler, id string) *Finding {
@@ -33,7 +38,7 @@ func unadoptedOpen(t *testing.T, s *Scheduler, id string) *Finding {
 	return nil
 }
 
-func TestUnadopted_EvaluatorOffRaisesItAndDegradesHealth(t *testing.T) {
+func TestUnadopted_NoEvaluatorYetRaisesItAndDegradesHealth(t *testing.T) {
 	data, dir := leftoverDataDir(t)
 	s := NewScheduler(WithDataDir(data))
 	if err := s.Restore(context.Background()); err != nil {
@@ -41,7 +46,7 @@ func TestUnadopted_EvaluatorOffRaisesItAndDegradesHealth(t *testing.T) {
 	}
 	f := unadoptedOpen(t, s, "7")
 	if f == nil || f.Severity != FindingCritical {
-		t.Fatalf("evaluator off: leftover directory raised %+v, want CRITICAL TASK_UNADOPTED", f)
+		t.Fatalf("no evaluator yet: leftover directory raised %+v, want CRITICAL TASK_UNADOPTED", f)
 	}
 	if got := s.HealthSummary(context.Background()); got.Status != HealthDegraded {
 		t.Fatalf("health %+v with a leftover directory, want degraded", got)
@@ -58,7 +63,7 @@ func TestUnadopted_EvaluatorOffRaisesItAndDegradesHealth(t *testing.T) {
 	_ = dir
 }
 
-func TestUnadopted_EvaluatorOffClosesWhenDirectoryMoved(t *testing.T) {
+func TestUnadopted_NoEvaluatorYetClosesWhenDirectoryMoved(t *testing.T) {
 	data, dir := leftoverDataDir(t)
 	s := NewScheduler(WithDataDir(data))
 	if err := s.Restore(context.Background()); err != nil {
@@ -76,15 +81,18 @@ func TestUnadopted_EvaluatorOffClosesWhenDirectoryMoved(t *testing.T) {
 	}
 }
 
-func TestUnadopted_EvaluatorShadowRaisesItThroughLegacySink(t *testing.T) {
+func TestUnadopted_EvaluatorRaisesItThroughASignal(t *testing.T) {
 	data, _ := leftoverDataDir(t)
 	s := NewScheduler(WithDataDir(data))
-	newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorShadow)
+	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)))
 	if err := s.Restore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if err := e.SweepNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if unadoptedOpen(t, s, "7") == nil {
-		t.Fatal("evaluator shadow: leftover directory raised nothing")
+		t.Fatal("evaluator: leftover directory raised nothing")
 	}
 }
 

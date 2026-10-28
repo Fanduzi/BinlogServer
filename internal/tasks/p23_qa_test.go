@@ -108,7 +108,7 @@ func TestEvaluator_MidFileCorruptionAgreesWithWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, task, data, dir := realTask(t, tc.fx)
 			store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-			e := newEval(t, s, store, EvaluatorOn)
+			e := newEval(t, s, store)
 			ctx := context.Background()
 			if err := e.SweepNow(ctx); err != nil {
 				t.Fatal(err)
@@ -153,7 +153,7 @@ func TestRehasher_DiskLedgerCatchesInPlaceFlip(t *testing.T) {
 				total += facts.Size
 			}
 			store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-			e := newEval(t, s, store, EvaluatorOn)
+			e := newEval(t, s, store)
 			r := NewRehasher(e, 64<<20)
 			ctx := context.Background()
 			cycle := func() {
@@ -219,7 +219,7 @@ func TestEvaluator_HalfOpenCopyStaysOpen(t *testing.T) {
 		t.Run(fx.flavor, func(t *testing.T) {
 			s, task, data, dir := realTask(t, fx)
 			store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-			e := newEval(t, s, store, EvaluatorOn)
+			e := newEval(t, s, store)
 			ctx := context.Background()
 			src := filepath.Join(dir, fx.files[0])
 			raw, err := os.ReadFile(src)
@@ -292,12 +292,12 @@ func kindsOf(f *health.ChainFacts) map[assurance.Kind][]string {
 // no I6_MISSING_ROW; without a catalog there are no rows to miss.
 func TestEvaluator_CatalogRowsReachTheChain(t *testing.T) {
 	s, task, data, _, _ := catalogTask(t)
-	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)), EvaluatorOn)
+	e := newEval(t, s, healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName)))
 	if got := kindsOf(e.chainFacts(task, time.Now())); len(got[assurance.I6MissingRow]) != 0 {
 		t.Fatalf("catalogued segments reported without a row: %v", got)
 	}
 	ds, dtask, ddata, _ := realTask(t)
-	de := newEval(t, ds, healthstore.NewFileStore(filepath.Join(ddata, healthstore.HealthFileName)), EvaluatorOn)
+	de := newEval(t, ds, healthstore.NewFileStore(filepath.Join(ddata, healthstore.HealthFileName)))
 	if got := kindsOf(de.chainFacts(dtask, time.Now())); len(got[assurance.I6MissingRow]) != 0 {
 		t.Fatalf("disk-only task has no catalog to miss rows in: %v", got)
 	}
@@ -312,7 +312,7 @@ func TestEvaluator_CatalogModeSeesHandAddedDiskCopy(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			s, task, data, dir, _ := catalogTask(t)
 			store := healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))
-			e := newEval(t, s, store, EvaluatorOn)
+			e := newEval(t, s, store)
 			ctx := context.Background()
 			src := filepath.Join(dir, realMySQL.files[0])
 			dup := src + ".sealed.e3"

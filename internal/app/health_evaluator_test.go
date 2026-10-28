@@ -1,3 +1,8 @@
+// Package app provides module-level functionality for app.
+// input: standalone and cluster-role configs fed to startHealthEvaluator and healthEvaluatorIdentity
+// output: the evaluator is always constructed and started; standalone persists the node id and writes .health.json; a control-plane-only node resolves a node id (cluster.worker_id, else persisted) yet never evaluates as a task holder
+// pos: P2-3 / design 0009 §24.13 wiring tests
+// note: if this file changes, update this header and module README.md.
 package app
 
 import (
@@ -10,30 +15,19 @@ import (
 	"binlog_server/internal/tasks"
 )
 
-// P2-3: off wires nothing; shadow/on in standalone persist the node id and
-// write .health.json; an unknown mode is refused.
+// P2-3: the evaluator always runs; in standalone it persists the node id
+// and writes .health.json.
 func TestStartHealthEvaluatorStandalone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := t.TempDir()
 	cfg := config.Config{DataDir: dir}
-	cfg.Health = config.HealthConfig{Evaluator: "off", SweepIntervalSec: 60, RehashBytesPerSec: 1 << 20}
-	if err := startHealthEvaluator(ctx, cfg, tasks.NewScheduler(tasks.WithDataDir(dir)), nil, "", func(f func()) { go f() }); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, tasks.NodeIDFileName)); !os.IsNotExist(err) {
-		t.Fatalf("off created a node id: %v", err)
-	}
-	cfg.Health.Evaluator = "shadow"
+	cfg.Health = config.HealthConfig{SweepIntervalSec: 60, RehashBytesPerSec: 1 << 20}
 	if err := startHealthEvaluator(ctx, cfg, tasks.NewScheduler(tasks.WithDataDir(dir)), nil, "", func(f func()) { go f() }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, tasks.NodeIDFileName)); err != nil {
-		t.Fatalf("shadow did not persist the node id: %v", err)
-	}
-	cfg.Health.Evaluator = "maybe"
-	if err := startHealthEvaluator(ctx, cfg, tasks.NewScheduler(tasks.WithDataDir(dir)), nil, "", func(f func()) { go f() }); err == nil {
-		t.Fatal("unknown mode accepted")
+		t.Fatalf("evaluator did not persist the node id: %v", err)
 	}
 }
 

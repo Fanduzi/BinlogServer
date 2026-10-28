@@ -88,15 +88,14 @@ meta:
   #   ca: /etc/binlog-server/ca.pem
   #   server_name: meta.example.com
 
-# ADR 0009 phase 2 health evaluator (P2-3). off: legacy findings only;
-# shadow: evaluate and log, write nothing; on: the evaluator owns
+# ADR 0009 phase 2 health evaluator (P2-3). Always on: the evaluator owns
 # SEGMENT_UNREADABLE, SEGMENT_OVERLAP and SEGMENT_EMPTY_LEFTOVER (needs
 # migration 000009 with a metadata DSN; standalone writes .health.json).
+# The retired health.evaluator key is ignored with a startup warning.
 health:
-  evaluator: "off" # off | shadow | on
   sweep_interval_sec: 60
-  stale_after_sec: 0 # 0 = 5x sweep; cluster HEALTH_STALE (needs evaluator: on)
-  node_gone_after_sec: 0 # 0 = 3x sweep; last chain owner gone -> UNKNOWN (needs evaluator: on)
+  stale_after_sec: 0 # 0 = 5x sweep; cluster HEALTH_STALE
+  node_gone_after_sec: 0 # 0 = 3x sweep; last chain owner gone -> UNKNOWN
   rehash_bytes_per_sec: 4194304 # global sha256 re-check budget (4 MiB/s)
 
 tracing:

@@ -270,9 +270,6 @@ func (r *Rehasher) hashFile(ctx context.Context, path string) (string, int64, er
 // Run re-checks segments until ctx ends, on one goroutine at idle I/O
 // priority where the OS allows it.
 func (r *Rehasher) Run(ctx context.Context) {
-	if r.e.cfg.Mode == EvaluatorOff {
-		return
-	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	setIdleIOPriority()

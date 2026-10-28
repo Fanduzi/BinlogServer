@@ -147,7 +147,7 @@ func (f *unownedFixture) node(t *testing.T, id string) (*Scheduler, *Evaluator) 
 	s.mu.Lock()
 	s.tasks[f.taskID] = task
 	s.mu.Unlock()
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: f.hs, Cluster: true, NodeID: id, Instance: id + "-i", Sweep: time.Minute})
+	e := NewEvaluator(s, EvaluatorConfig{Store: f.hs, Cluster: true, NodeID: id, Instance: id + "-i", Sweep: time.Minute})
 	return s, e
 }
 

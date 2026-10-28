@@ -66,9 +66,9 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | F1 | finding 指标（`binlog_server_finding_open` 等）总有输出；某个任务的读数失败时显式输出 0 并开 finding，不会直接丢掉这条序列 | `internal/api/metric_source_test.go`（S10/S11）、`metrics_findings` 单测 | MET | — |
-| F2 | 每个任务都有 `binlog_server_task_healthy` 和 SLO 指标；仓库里随附推荐告警规则文件（用 promtool 测）和一个通用 webhook（ADR 0009 的决定 1） | `internal/api/metrics_health_test.go` 断言 `/metrics` 里的 `binlog_server_task_healthy`、progress age、upload lag、open CRITICAL；`internal/tasks/health_export_test.go` 断言非主人不输出；`internal/notify/webhook_test.go` 覆盖投递、500 后重试、400 不重试；`internal/tasks/health_notify_test.go` 覆盖失败后重试和稳态不重复，以及 shadow 不发。都在 `unit-and-e2e` 的 `go test ./...` 里。`deploy/prometheus/binlog-server-alerts.yml` 由 `promtool` job 每个 PR 和 push main 跑 `promtool test rules`。评估器默认仍是 `off`（F4）：off 时只有哨兵序列，不按任务分页 | MET | 评估器默认 off 仍是 F4 |
+| F2 | 每个任务都有 `binlog_server_task_healthy` 和 SLO 指标；仓库里随附推荐告警规则文件（用 promtool 测）和一个通用 webhook（ADR 0009 的决定 1） | `internal/api/metrics_health_test.go` 断言 `/metrics` 里的 `binlog_server_task_healthy`、progress age、upload lag、open CRITICAL；`internal/tasks/health_export_test.go` 断言非主人不输出；`internal/notify/webhook_test.go` 覆盖投递、500 后重试、400 不重试；`internal/tasks/health_notify_test.go` 覆盖失败后重试和稳态不重复，以及 shadow 不发。都在 `unit-and-e2e` 的 `go test ./...` 里。`deploy/prometheus/binlog-server-alerts.yml` 由 `promtool` job 每个 PR 和 push main 跑 `promtool test rules` | MET | — |
 | F3 | `/metrics` 和 trace 的 e2e 每个 PR 都跑 | `e2e-observability`（`make e2e-observability`，即 `scripts/e2e/run-observability.sh`）在每个 PR 和 push main 都跑，`workflow_dispatch` 时只在选 `observability` 时跑。`/metrics`：`smoke-observability` 查 5 个核心指标和状态、checkpoint_age 的变化。trace：服务端开 OTLP/HTTP tracing（采样 1）导出到本地 `otlp-sink.py`，场景要求收到本次任务 start 请求的 API span（服务名、`POST /api/tasks/*path`、`http.target`），收不到就失败 | MET | — |
-| F4 | 健康评估器在默认配置下生效，结论只有一条写入路径，CI 测的就是生产跑的路径 | `health.evaluator` 默认是 `off`。CI 的 e2e 配置没有 health 段，所以除了 standalone 的两个场景显式设了 `on`，其余都按 `off` 在跑 | NOT MET | 已经决定删掉这个开关（卡 1），要等 ADR 0011 前两步落地 |
+| F4 | 健康评估器在默认配置下生效，结论只有一条写入路径，CI 测的就是生产跑的路径 | `health.evaluator` 开关已删：`EvaluatorMode`/`ParseEvaluatorMode`/`EvaluatorConfig.Mode`/shadow 写入路径与 `EvaluatorStats.Shadowed` 一并移除，评估器恒按旧 `on` 语义运行；仍设置该键的配置在启动时得到一条 retired 警告并被忽略（滚动升级兼容）。e2e 脚本里的 `BINLOG_SERVER_HEALTH_EVALUATOR` 全部清掉，CI 跑的就是生产路径 | MET | ADR 0011 PR-1（#481）、PR-4（#524）已落地 |
 
 ## G. 安全
 
@@ -101,12 +101,12 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 26 / PARTIAL 4 / NOT MET 5**。
+共 35 项：**MET 27 / PARTIAL 4 / NOT MET 4**。
 
 ## 最卡生产级的 5 项
 
 1. **C5，cluster 故障注入矩阵**：C2 已由 quick 档 `smoke-session-kill` 覆盖（SIGSTOP 下对端在会话超时上限内拿到行锁、stall 期间 `/api/health` 503），C3 已由 `e2e-sigstop-takeover` 覆盖（per_node SIGSTOP/SIGCONT，#473 回归）。剩 §4.2 的 4 阶段 × 4 故障矩阵作为发布档 e2e；PR-1 的纯模型和 PR-4 的模型接线已合入（#481、#524）。
 2. **A1 还不是 MET，C6 仍是 NOT MET**：#462 的「cluster 删封存段没有 finding」已有单测（ADR 0011 PR-3），但 GTID 内部空洞和手动档 cluster e2e 还没进 CI，所以 A1 仍是 PARTIAL。所有权变化时 finding 单调（C6）要等 PR-5。#471 不合并。
-3. **F4，评估器默认关**：`task_healthy`、推荐告警规则和 webhook 已经在（F2）。默认仍是 `health.evaluator: off`，所以不评估、不按任务输出、也不发 webhook，要等删掉这个开关。
+3. ~~F4，评估器默认关~~（已 MET：`health.evaluator` 开关删除，评估器恒运行，CI 跑的就是生产路径）。
 4. **A4 仍是 PARTIAL，可选还原演练还没有**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4，等 ADR 0011 的主人）。真实 MinIO 由 `e2e-verify` 每个 PR 跑。覆盖查询和还原计划已由 `e2e-coverage` 每个 PR 对账（D3 MET）；按保留点做的可选演练还没有。
 5. **H1，上线前提没验**：约定负载下的长跑验收还没有（H1，ADR 0009 阶段 6）。G2 已由 `e2e-tls` 的 `TestLiveAppTLS`（真实任务路径的 dump 与 meta 池 `CONNECTION_TYPE`）、`TestLiveS3TLS`（私有 CA 的 HTTPS 上传）和 `TestLiveMySQLTLS`，以及 `unit-and-e2e` / `race-and-vet` 里的 TLS 单测盖住。

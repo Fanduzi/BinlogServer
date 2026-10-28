@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: dirty marks (SEAL, UPLOAD, TRANSITION, LEASE_*, CATALOG, STARTUP, SWEEP, REHASH, API, CONFIRM) for tasks this node is responsible for, the task directory and replay order, rehash results, and the task's open findings from a healthstore.Store
-// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; feature flag off (nothing), shadow (compute, write nothing) and on (write; the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; EvaluatorConfig.After, when set, drives the worker debounce wait and that ping's interval and timeout; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
+// output: Evaluator: a dirty set (marks merge per task), per-task serial evaluation on a worker pool with a 1s debounce, a sweep that marks every responsible task dirty (CATALOG when the directory fingerprint changed), Facts with chain.local from assurance.Chain.Check, health.Reconcile and HealthOf, and the transitions written under a health.Fence; always on (the retired health.evaluator flag's on mode: the legacy Report path stops writing the managed kinds while the store has migration 000009); P2-4: signal facts (task.state, signals, open keys, probes, stale signals) from signals.go, the pseudo task _cluster in standalone, and a LivenessTick that marks a task dirty when its source liveness clock crosses a threshold (LIVENESS); §25.8: Run also starts the META_UNREACHABLE ping on its own goroutine, and the sweep's metadata calls are bounded (sweepMetaTimeout) so a hanging meta cannot hold the loop; EvaluatorConfig.After, when set, drives the worker debounce wait and that ping's interval and timeout; #385: standalone with no task store also evaluates, once, a task whose stored health names TASK_UNADOPTED after its directory left data_dir, with only task.state complete, so that row closes; NewEvaluator moves signal-kind failures raised before it existed (legacy book) into the signal book (adoptEarlySignals) and replays standalone task record signals (ADR 0010)
 // note P2-5.1 (§20): chain.local includes the planner (I3_LEGACY_FAILBACK); ADR 0011 PR-3 keeps I6_MISSING_LOCAL in cluster mode and sets Fence.ChainVerified only when this holder pass's chainFactsInto read the directory; a task directory that exists but cannot be read is logged once when it starts and once when it ends (noteDirRead) and listed on HealthSummary.Detail without changing status; a pass that read the directory sets Facts.DirectoryNode (cluster chain_owner, standalone node) so I6_MISSING_LOCAL names it; the Confirm keys a pass derives are kept for the next one, and a pending key queues a CONFIRM pass
 // note P2-5.3 (§22): chainFacts passes Switches, reads checkpoint before order/disk, caches CheckBody only and appends CheckCheckpoint; Facts.Waivers from WaiverStore
 // note P2-5.4 (§26): a non-proxy pass probes seal-fact columns into Facts.Store (a probe error leaves store incomplete); a finished retention pass later than a RETENTION_RECORD_FAILED FactAt probes that signal closed
@@ -37,28 +37,8 @@ import (
 	"binlog_server/internal/healthstore"
 )
 
-// EvaluatorMode is the health.evaluator feature flag.
-type EvaluatorMode string
-
-const (
-	// EvaluatorOff: no evaluation; the legacy Report/Resolve paths own every kind.
-	EvaluatorOff EvaluatorMode = "off"
-	// EvaluatorShadow: evaluate and count transitions, write nothing.
-	EvaluatorShadow EvaluatorMode = "shadow"
-	// EvaluatorOn: evaluate and write; managed kinds have one writer.
-	EvaluatorOn EvaluatorMode = "on"
-)
-
-// ParseEvaluatorMode reads health.evaluator ("" is off).
-func ParseEvaluatorMode(s string) (EvaluatorMode, error) {
-	switch m := EvaluatorMode(strings.ToLower(strings.TrimSpace(s))); m {
-	case "", EvaluatorOff:
-		return EvaluatorOff, nil
-	case EvaluatorShadow, EvaluatorOn:
-		return m, nil
-	}
-	return EvaluatorOff, fmt.Errorf("health.evaluator must be off, shadow or on, got %q", s)
-}
+// The evaluator always runs in the mode the retired health.evaluator
+// flag called on: managed kinds have one writer, transitions are applied.
 
 // EvalReason says why a task was marked dirty (design §5.2).
 type EvalReason string
@@ -82,7 +62,6 @@ const (
 
 // EvaluatorConfig configures NewEvaluator.
 type EvaluatorConfig struct {
-	Mode  EvaluatorMode
 	Store healthstore.Store
 	// Registry defaults to health.DefaultRegistry().
 	Registry health.Registry
@@ -173,7 +152,7 @@ type EvaluatorConfig struct {
 
 // EvaluatorStats counts what the evaluator did.
 type EvaluatorStats struct {
-	Evaluations, Applied, Errors, Shadowed, Pending int64
+	Evaluations, Applied, Errors, Pending int64
 }
 
 // chainCacheEntry is the last CheckBody of a task directory: reused while the
@@ -254,7 +233,7 @@ type Evaluator struct {
 	// notices dedups webhook delivery. Nil until the first post.
 	notices *notifyState
 
-	evaluations, applied, errs, shadowed atomic.Int64
+	evaluations, applied, errs atomic.Int64
 }
 
 // NewEvaluator builds the evaluator and attaches it to s, so the triggers
@@ -280,9 +259,6 @@ func NewEvaluator(s *Scheduler, cfg EvaluatorConfig) *Evaluator {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
-	}
-	if cfg.Mode == "" {
-		cfg.Mode = EvaluatorOff
 	}
 	if cfg.ObjectListInterval <= 0 {
 		cfg.ObjectListInterval = defaultObjectListInterval
@@ -340,18 +316,15 @@ func (e *Evaluator) adoptEarlySignals() {
 	}
 }
 
-// Mode is the feature flag.
-func (e *Evaluator) Mode() EvaluatorMode { return e.cfg.Mode }
-
 // ownsManaged: the legacy Report path must not write managed kinds.
 func (e *Evaluator) ownsManaged() bool {
-	return e != nil && e.cfg.Mode == EvaluatorOn && !e.schemaAbsent.Load()
+	return e != nil && !e.schemaAbsent.Load()
 }
 
 // MarkDirty never blocks and may be called with the scheduler lock held.
 // LEASE_LOST drops the task's queued marks instead of queueing one.
 func (e *Evaluator) MarkDirty(taskID string, r EvalReason) {
-	if e == nil || e.cfg.Mode == EvaluatorOff || strings.TrimSpace(taskID) == "" {
+	if e == nil || strings.TrimSpace(taskID) == "" {
 		return
 	}
 	e.mu.Lock()
@@ -387,7 +360,7 @@ func (e *Evaluator) Stats() EvaluatorStats {
 		pending += int64(len(ts))
 	}
 	e.mu.Unlock()
-	return EvaluatorStats{Evaluations: e.evaluations.Load(), Applied: e.applied.Load(), Errors: e.errs.Load(), Shadowed: e.shadowed.Load(), Pending: pending}
+	return EvaluatorStats{Evaluations: e.evaluations.Load(), Applied: e.applied.Load(), Errors: e.errs.Load(), Pending: pending}
 }
 
 // Run evaluates dirty tasks on the worker pool and sweeps every Sweep
@@ -395,9 +368,6 @@ func (e *Evaluator) Stats() EvaluatorStats {
 // probe runs first, so a process that booted below migration 000009 is
 // degraded before the first task sweep (design §27).
 func (e *Evaluator) Run(ctx context.Context) {
-	if e.cfg.Mode == EvaluatorOff {
-		return
-	}
 	e.probeHealthStore(ctx)
 	e.refreshSideKill(ctx)
 	var wg sync.WaitGroup
@@ -633,9 +603,6 @@ func (e *Evaluator) markResponsible(r EvalReason) []string {
 // SweepNow marks every responsible task dirty and evaluates each before
 // returning (a task another worker is evaluating stays dirty for it).
 func (e *Evaluator) SweepNow(ctx context.Context) error {
-	if e.cfg.Mode == EvaluatorOff {
-		return nil
-	}
 	e.probeHealthStore(ctx)
 	e.refreshSideKill(ctx)
 	var errs []error
@@ -659,9 +626,6 @@ func (e *Evaluator) SweepNow(ctx context.Context) error {
 // EvaluateNow evaluates one task at once (API, tests), waiting for a pass
 // already running on it.
 func (e *Evaluator) EvaluateNow(ctx context.Context, taskID string) (health.TaskHealth, error) {
-	if e.cfg.Mode == EvaluatorOff {
-		return health.TaskHealth{}, nil
-	}
 	for {
 		e.mu.Lock()
 		if !e.running[taskID] {
@@ -839,28 +803,26 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		return unknown(health.TaskHealth{}, nil, errors.New("no health store"))
 	}
 	// Transitions a failed write left behind go first, as they were.
-	if e.cfg.Mode == EvaluatorOn {
-		e.mu.Lock()
-		pending := append([]health.Transition(nil), e.pending[id]...)
-		e.mu.Unlock()
-		if len(pending) > 0 {
-			open, err := e.openFindings(ctx, id)
-			if err != nil {
-				if errors.Is(err, healthstore.ErrSchemaAbsent) {
-					e.noteHealthStoreAbsent(err)
-				}
-				return unknown(health.TaskHealth{}, nil, err)
+	e.mu.Lock()
+	pending := append([]health.Transition(nil), e.pending[id]...)
+	e.mu.Unlock()
+	if len(pending) > 0 {
+		open, err := e.openFindings(ctx, id)
+		if err != nil {
+			if errors.Is(err, healthstore.ErrSchemaAbsent) {
+				e.noteHealthStoreAbsent(err)
 			}
-			h := e.reg.HealthOf(afterTransitions(open, pending), facts)
-			if err := e.write(ctx, id, fence, pending, h); err != nil {
-				// Keep evaluating in memory on top of the unsaved transitions so
-				// a finding raised while the store is failing is still served.
-				open2 := afterTransitions(open, pending)
-				ts2, _ := e.reg.Reconcile(open2, facts)
-				settled := afterTransitions(open2, ts2)
-				e.noteUnsaved(id, settled, err)
-				return unknown(h, settled, err)
-			}
+			return unknown(health.TaskHealth{}, nil, err)
+		}
+		h := e.reg.HealthOf(afterTransitions(open, pending), facts)
+		if err := e.write(ctx, id, fence, pending, h); err != nil {
+			// Keep evaluating in memory on top of the unsaved transitions so
+			// a finding raised while the store is failing is still served.
+			open2 := afterTransitions(open, pending)
+			ts2, _ := e.reg.Reconcile(open2, facts)
+			settled := afterTransitions(open2, ts2)
+			e.noteUnsaved(id, settled, err)
+			return unknown(h, settled, err)
 		}
 	}
 	open, err := e.openFindings(ctx, id)
@@ -883,14 +845,6 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 	e.noteCandidates(id, facts)
 	settled := afterTransitions(open, ts)
 	h := e.reg.HealthOf(settled, facts)
-	if e.cfg.Mode == EvaluatorShadow {
-		e.shadowed.Add(1)
-		if len(ts) > 0 {
-			log.Printf("health shadow task=%s transitions=%s status=%s", id, describeTransitions(ts), h.Status)
-		}
-		e.noteVerdict(h, facts, settled, false)
-		return h, nil
-	}
 	if err := e.write(ctx, id, fence, ts, h); err != nil {
 		e.noteUnsaved(id, settled, err)
 		return unknown(h, settled, err)
@@ -1585,20 +1539,12 @@ func appendScope(list []health.Scope, s health.Scope) []health.Scope {
 	return append(list, s)
 }
 
-func describeTransitions(ts []health.Transition) string {
-	parts := make([]string, 0, len(ts))
-	for _, t := range ts {
-		parts = append(parts, string(t.Op)+":"+string(t.Kind)+"/"+t.Subject)
-	}
-	return strings.Join(parts, ",")
-}
-
 // openManagedFindings is the evaluator's open managed findings of a task
 // as API findings, when its store is separate from the legacy sink.
 // A read error is returned, not an empty set: a CRITICAL finding must not
 // vanish from the summary because the store did not answer (§25 D1).
 func (e *Evaluator) openManagedFindings(ctx context.Context, taskID string) ([]Finding, error) {
-	if e == nil || e.cfg.Mode != EvaluatorOn || !e.separateLegacyStore() {
+	if e == nil || !e.separateLegacyStore() {
 		return nil, nil
 	}
 	open, ok := e.unsavedOpen(taskID)

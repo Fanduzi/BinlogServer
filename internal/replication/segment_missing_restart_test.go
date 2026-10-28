@@ -94,7 +94,7 @@ func newRestartEnv(t *testing.T) *restartEnv {
 	}
 	env.store = healthstore.NewFileStore(filepath.Join(t.TempDir(), healthstore.HealthFileName))
 	env.eval = tasks.NewEvaluator(env.scheduler, tasks.EvaluatorConfig{
-		Mode: tasks.EvaluatorOn, Store: env.store, NodeID: "node-a", Instance: "node-a-i",
+		Store: env.store, NodeID: "node-a", Instance: "node-a-i",
 		Sweep: time.Minute, Debounce: time.Millisecond,
 	})
 	t.Cleanup(func() { _ = env.scheduler.StopTask(task.ID) })

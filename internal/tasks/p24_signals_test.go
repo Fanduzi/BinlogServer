@@ -57,7 +57,7 @@ type p24Env struct {
 	now   time.Time
 }
 
-func newP24(t *testing.T, mode EvaluatorMode) *p24Env {
+func newP24(t *testing.T) *p24Env {
 	t.Helper()
 	data := t.TempDir()
 	s := NewScheduler(WithDataDir(data))
@@ -65,7 +65,7 @@ func newP24(t *testing.T, mode EvaluatorMode) *p24Env {
 	writeAlertSegment(t, filepath.Join(dir, "mysql-bin.000001"), 37, 38)
 	env := &p24Env{s: s, task: task, now: time.Now(),
 		store: &recStore{FileStore: healthstore.NewFileStore(filepath.Join(data, healthstore.HealthFileName))}}
-	env.e = NewEvaluator(s, EvaluatorConfig{Mode: mode, Store: env.store, NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond,
+	env.e = NewEvaluator(s, EvaluatorConfig{Store: env.store, NodeID: evalNode, Instance: "i1", Sweep: time.Minute, Debounce: time.Millisecond,
 		Now: func() time.Time { env.mu.Lock(); defer env.mu.Unlock(); return env.now }})
 	return env
 }
@@ -98,7 +98,7 @@ func (p *p24Env) open(t *testing.T) map[string]health.Finding {
 }
 
 func TestP24_NoFindingsIsHealthyOnTheFirstPass(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.setTask(t, StateRunning, TaskDesiredRun, nil)
 	if h := p.eval(t); h.Status != health.StatusHealthy {
 		t.Fatalf("first pass: %+v", h)
@@ -106,7 +106,7 @@ func TestP24_NoFindingsIsHealthyOnTheFirstPass(t *testing.T) {
 }
 
 func TestP24_RestartWithMetaStillReadOnlyKeepsTheRowOpen(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.setTask(t, StateRetryBackoff, TaskDesiredRun, nil)
 	p.s.SignalFailure(Finding{TaskID: p.task.ID, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical, Detail: "Error 1290: --read-only"})
 	p.eval(t)
@@ -114,7 +114,7 @@ func TestP24_RestartWithMetaStillReadOnlyKeepsTheRowOpen(t *testing.T) {
 		t.Fatalf("failure did not open: %+v", p.open(t))
 	}
 	// Restart: a new evaluator with an empty signal book over the same store.
-	p.e = NewEvaluator(p.s, EvaluatorConfig{Mode: EvaluatorOn, Store: p.store, NodeID: evalNode, Instance: "i2", Debounce: time.Millisecond, Now: p.e.cfg.Now})
+	p.e = NewEvaluator(p.s, EvaluatorConfig{Store: p.store, NodeID: evalNode, Instance: "i2", Debounce: time.Millisecond, Now: p.e.cfg.Now})
 	for i := 0; i < 3; i++ {
 		if i == 1 {
 			p.s.SignalFailure(Finding{TaskID: p.task.ID, Kind: FindingMetadataWriteBlocked, Severity: FindingCritical, Detail: "Error 1290: --read-only"})
@@ -142,7 +142,7 @@ func (p *p24Env) at() time.Time { p.mu.Lock(); defer p.mu.Unlock(); return p.now
 // clock 45s after the last byte, in any state, keeps a finding open through
 // the retry loop, and hands off to SOURCE_UNREACHABLE in the same pass.
 func TestP24_BlackHoleKeepsAFindingOpenAndHandsOff(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.setTask(t, StateRunning, TaskDesiredRun, func(t *Task) { t.Epoch = 3 })
 	p.s.noteSourceRead(p.task.ID, p.at())
 	p.eval(t)
@@ -191,7 +191,7 @@ func TestP24_BlackHoleKeepsAFindingOpenAndHandsOff(t *testing.T) {
 // RUNNING for 92s never opens SOURCE_UNREACHABLE: the source answered a
 // probe at 70s, and every failure was within 63s of the last read.
 func TestP24_PlannedRestartWithLongBackoffNeverOpensUnreachable(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.setTask(t, StateRunning, TaskDesiredRun, nil)
 	p.s.noteSourceRead(p.task.ID, p.at())
 	for sec := 1; sec <= 92; sec++ {
@@ -217,7 +217,7 @@ func TestP24_PlannedRestartWithLongBackoffNeverOpensUnreachable(t *testing.T) {
 }
 
 func TestP24_StopClosesDumpStalled(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.setTask(t, StateRunning, TaskDesiredRun, func(t *Task) { t.Epoch = 3 })
 	p.s.noteSourceRead(p.task.ID, p.at())
 	p.advance(time.Minute)
@@ -311,7 +311,7 @@ type proberRunner struct {
 func (proberRunner) Run(ctx context.Context, task Task) error { <-ctx.Done(); return nil }
 
 func TestP24_FailedTaskOpensTaskFailedAndIsNotHealthy(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.setTask(t, StateFailed, TaskDesiredStop, func(t *Task) {
 		t.SpecRevision, t.FailedSpecRevision = 4, 4
 		t.LastError = "STREAM_REGRESSION: rotate to mysql-bin.000001 goes backwards"
@@ -330,7 +330,7 @@ func TestP24_FailedTaskOpensTaskFailedAndIsNotHealthy(t *testing.T) {
 }
 
 func TestP24_ClusterSignalIsEvaluatedStandalone(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.s.SignalFailure(Finding{TaskID: ClusterFindingTask, Kind: FindingRetryLoopFailed, Subject: "sync", Severity: FindingCritical, Detail: "task list read failed"})
 	if err := p.e.SweepNow(context.Background()); err != nil {
 		t.Fatal(err)
@@ -348,7 +348,7 @@ func TestP24_ClusterSignalIsEvaluatedStandalone(t *testing.T) {
 }
 
 func TestP24_LegacyReportOfAManagedKindNeverWritesTheSink(t *testing.T) {
-	p := newP24(t, EvaluatorOn)
+	p := newP24(t)
 	p.s.Report(Finding{TaskID: p.task.ID, Kind: FindingEventPersistFailed, Subject: "STARTED", Severity: FindingWarning, Detail: "x"})
 	p.s.Report(Finding{TaskID: p.task.ID, Kind: FindingTransitionStalled, Severity: FindingWarning, Detail: "x"})
 	if st := p.s.FindingStats(); len(st.Open) != 0 {

@@ -78,7 +78,7 @@ func TestHealthSamplesOmitOtherOwners(t *testing.T) {
 	s.mu.Unlock()
 
 	store := healthstore.NewFileStore(data + "/.health.json")
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: store, Cluster: true, NodeID: "me", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond})
+	e := NewEvaluator(s, EvaluatorConfig{Store: store, Cluster: true, NodeID: "me", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond})
 	e.noteVerdict(health.TaskHealth{TaskID: task.ID, Status: health.StatusHealthy}, nil, nil, false)
 	e.noteVerdict(health.TaskHealth{TaskID: "elsewhere", Status: health.StatusUnhealthy}, nil, nil, false)
 	for _, sample := range e.HealthSamples() {
@@ -93,7 +93,7 @@ func TestHealthSamplesIncludeUnevaluatedOwner(t *testing.T) {
 	s := NewScheduler(WithDataDir(data))
 	task, _ := evalTask(t, s, data)
 	store := healthstore.NewFileStore(data + "/.health.json")
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: "n", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond})
+	e := NewEvaluator(s, EvaluatorConfig{Store: store, NodeID: "n", Instance: "i", Sweep: time.Minute, Debounce: time.Millisecond})
 	var found bool
 	for _, sample := range s.HealthSamples() {
 		if sample.TaskID != task.ID {

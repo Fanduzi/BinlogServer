@@ -151,7 +151,7 @@ sum(rate(binlog_server_upload_retry_total[5m]))
 
 推荐规则在 [`deploy/prometheus/binlog-server-alerts.yml`](../../../deploy/prometheus/binlog-server-alerts.yml)。`promtool test rules deploy/prometheus/binlog-server-alerts.test.yml` 在 CI 的 `promtool` job 里每个 PR 都跑。下面是同一份规则，改规则先改那个文件。
 
-抓取每个节点。一个任务只由正在评估它的节点输出（lease 主人、委派的链主人，或持有 `_health` 的节点）。`binlog_server_task_healthy == 0` 不会因为哨兵序列（值为 1）触发。进程挂了用 `up == 0`。评估器默认 `off` 时没有每任务序列，这条告警不响；要分页把 `health.evaluator` 设为 `on`。
+抓取每个节点。一个任务只由正在评估它的节点输出（lease 主人、委派的链主人，或持有 `_health` 的节点）。`binlog_server_task_healthy == 0` 不会因为哨兵序列（值为 1）触发。进程挂了用 `up == 0`。评估器始终在运行，每个被评估的任务都有序列。
 
 | 告警 | 表达式 | for | 级别 |
 |------|--------|-----|------|
@@ -167,7 +167,7 @@ sum(rate(binlog_server_upload_retry_total[5m]))
 
 ### 4.1 通用 webhook
 
-`notify.webhook_url` 非空且 `health.evaluator: on` 时，评估器在健康状态变化，或 CRITICAL finding 打开、关闭、升级时 POST 一批 JSON。第一次观察到 HEALTHY 当作基线，不发。状态不变、也没有新的 CRITICAL 转移时不发。POST 失败留在本进程内存里，下一轮再送；进程重启可能再发一次。`shadow` 不发。集群里只有评估该任务的节点发。
+`notify.webhook_url` 非空时，评估器在健康状态变化，或 CRITICAL finding 打开、关闭、升级时 POST 一批 JSON。第一次观察到 HEALTHY 当作基线，不发。状态不变、也没有新的 CRITICAL 转移时不发。POST 失败留在本进程内存里，下一轮再送；进程重启可能再发一次。集群里只有评估该任务的节点发。
 
 ```json
 {"version":1,"events":[{"type":"health","task_id":"9","status":"UNHEALTHY","previous":"HEALTHY","at":"2026-10-26T18:00:00Z"}]}

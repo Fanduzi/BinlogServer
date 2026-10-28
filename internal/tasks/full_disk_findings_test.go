@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: a full data_dir whose .health.json and .findings.json reads work but every write fails ENOSPC until space returns
+// output: TASK_RECORDS_FAILED/write is still served by GET /api/findings and degrades GET /api/health; the in-memory finding state stays authoritative, the failed persistence is its own finding, and both clear once the disk has room
+// pos: #395 QA P2
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
@@ -59,7 +64,7 @@ func TestFullDisk_RecordsWriteFindingServedFromMemory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	s.StartFindingSink(ctx, 10*time.Millisecond)
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
+	e := NewEvaluator(s, EvaluatorConfig{Store: hs, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
 	if _, err := s.CreateTaskFromSpec("d", "d-key", recordSourceCfg(), nil, nil); err == nil {
 		t.Fatal("create accepted with a failing records save")
 	}
@@ -121,7 +126,7 @@ func TestTaskRecords_StaleStartupReasonClosesWhenReasonChanges(t *testing.T) {
 		t.Helper()
 		s := NewScheduler(WithDataDir(data), WithRunner(newRecordRunner()), WithClusterLeaseManager(NewMemoryLease()),
 			WithClusterWorkerID("standalone"), WithTaskRecords(file, keyErr))
-		e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: store, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
+		e := NewEvaluator(s, EvaluatorConfig{Store: store, NodeID: "n", Instance: "i", Debounce: time.Millisecond})
 		if err := s.Restore(context.Background()); err != nil {
 			t.Fatal(err)
 		}

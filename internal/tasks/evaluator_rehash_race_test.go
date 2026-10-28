@@ -1,3 +1,8 @@
+// Package tasks provides module-level functionality for tasks.
+// input: chainFacts iterating a task's rehash inner map while setRehash writes the same map under e.mu
+// output: no concurrent map read/write (run with -race); frequent rotation must not crash the node
+// pos: #413 regression
+// note: if this file changes, update this header and module README.md.
 package tasks
 
 // #413: chainFacts read e.rehash[task.ID] (the per-task inner map) after
@@ -24,7 +29,7 @@ func TestChainFacts_RehashMapNoRaceWithSetRehash(t *testing.T) {
 		writeAlertSegment(t, filepath.Join(dir, name), seqs...)
 		names = append(names, name)
 	}
-	e := newEval(t, s, nil, EvaluatorOn)
+	e := newEval(t, s, nil)
 	// a mismatch already recorded, so chainFacts iterates the inner map
 	e.setRehash(task.ID, names[0], rehashResult{ok: false, evidence: "seed"})
 

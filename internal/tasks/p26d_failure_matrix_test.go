@@ -189,7 +189,7 @@ func (env *matrixEnv) newNode(name, workerID string, runner Runner) *matrixNode 
 	if runner != nil {
 		s.SetRunner(runner)
 	}
-	e := NewEvaluator(s, EvaluatorConfig{Mode: EvaluatorOn, Store: hs, Cluster: env.cluster, NodeID: name, Instance: name + "-i",
+	e := NewEvaluator(s, EvaluatorConfig{Store: hs, Cluster: env.cluster, NodeID: name, Instance: name + "-i",
 		Sweep: time.Minute, NoProgressAfter: matrixNoProgressAfter, ControlPlaneOnly: workerID == "" && env.cluster})
 	return &matrixNode{name: name, s: s, e: e, lease: lease}
 }

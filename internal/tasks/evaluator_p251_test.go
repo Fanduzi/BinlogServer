@@ -70,7 +70,7 @@ func TestP251GoldenDirectories(t *testing.T) {
 		}
 		windowPinTimes(t, dir)
 		store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
-		sweepTwice(t, newEval(t, s, store, EvaluatorOn))
+		sweepTwice(t, newEval(t, s, store))
 		kinds := map[health.Kind]bool{}
 		for _, f := range p251Open(t, store, task.ID) {
 			kinds[f.Kind] = true
@@ -97,7 +97,7 @@ func TestP251GoldenDirectories(t *testing.T) {
 func TestP251LegacyFailbackOpensAndClosesAfterRepair(t *testing.T) {
 	f := legacyDir(t)
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
-	e := newEval(t, f.s, store, EvaluatorOn)
+	e := newEval(t, f.s, store)
 	sweepTwice(t, e)
 	open := p251Open(t, store, f.task.ID)
 	if _, ok := open[string(health.LegacyFailback)+"/mysql-bin.000004"]; !ok || len(open) != 1 {
@@ -149,7 +149,7 @@ func TestP251LegacyRowSizeMismatchOpensAndCloses(t *testing.T) {
 	f := sizedDir(t)
 	setRowSize(f, "mysql-bin.000001", -10)
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
-	e := newEval(t, f.s, store, EvaluatorOn)
+	e := newEval(t, f.s, store)
 	sweepTwice(t, e)
 	open := p251Open(t, store, f.task.ID)
 	got, ok := open[string(health.SegmentMissing)+"/mysql-bin.000001"]
@@ -176,7 +176,7 @@ func TestP251LedgerLineWinsOverStaleRow(t *testing.T) {
 	}
 	setRowSize(f, "mysql-bin.000001", -10)
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
-	sweepTwice(t, newEval(t, f.s, store, EvaluatorOn))
+	sweepTwice(t, newEval(t, f.s, store))
 	if open := p251Open(t, store, f.task.ID); len(open) != 0 {
 		t.Fatalf("stale row reported despite a matching ledger line: %v", open)
 	}
@@ -207,7 +207,7 @@ func TestP251SealedRowLocalMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
-	e := newEval(t, f.s, store, EvaluatorOn)
+	e := newEval(t, f.s, store)
 	sweepTwice(t, e)
 	got, ok := p251Open(t, store, f.task.ID)[string(health.SegmentMissing)+"/mysql-bin.000002"]
 	if !ok {
@@ -265,7 +265,7 @@ func TestP251SinglePassDoesNotOpen(t *testing.T) {
 	f := sizedDir(t)
 	setRowSize(f, "mysql-bin.000001", -10)
 	store := healthstore.NewFileStore(filepath.Join(t.TempDir(), "h"))
-	e := newEval(t, f.s, store, EvaluatorOn)
+	e := newEval(t, f.s, store)
 	if _, err := e.EvaluateNow(t.Context(), f.task.ID); err != nil {
 		t.Fatal(err)
 	}

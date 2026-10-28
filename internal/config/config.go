@@ -1,6 +1,6 @@
 // Package config provides module-level functionality for config.
 // input: YAML files, environment variables, default config constants, optional --encryption-key
-// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.evaluator (off|shadow|on), health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator, and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = max(3×sweep, lease_ttl+2×sweep), not negative) for chain delegation (P2-6.2, §30), and health.refusal_retry_cap_sec (default 600) and cluster.storage (default per_node); verify.every_sec, verify.budget_bytes_per_sec, verify.rotation_periods, verify.recent_share_percent (1–100, 0 rejected), verify.pass_deadline_sec, verify.pass_max_bytes, verify.object_recent_sec, verify.drill_dsn, verify.drill_every_sec and verify.drill_check_sql for the phase 3 verifier; meta.tls default disabled, upload.use_ssl default true, and upload.tls.ca_file an optional PEM trust store (ADR 0012)
+// output: validated runtime configuration structs that reject unresolved protected-auth secrets, reject an unset ${ENV} in meta_dsn by naming the variable, reject booleans other than true or false, reject non-numeric integers and numbers instead of treating them as 0, warn on plaintext secrets only when the file itself is plaintext, default protect flags to true when auth is enabled and unset, and retain EncryptionKey for meta source-password encryption; health.sweep_interval_sec and health.rehash_bytes_per_sec for the ADR 0009 P2-3 evaluator (always on; a stale health.evaluator key warns and is ignored), and health.unreachable_after_sec, health.unreachable_after_task_sec and health.signal_stale_after_sec for the P2-4 signal kinds, and health.no_progress_after_sec (default 120, not negative) for TASK_NO_PROGRESS (P2-6d), and health.stale_after_sec (default 0 = 5×sweep, not negative) for HEALTH_STALE (P2-6.1, §28), and health.node_gone_after_sec (default 0 = max(3×sweep, lease_ttl+2×sweep), not negative) for chain delegation (P2-6.2, §30), and health.refusal_retry_cap_sec (default 600) and cluster.storage (default per_node); verify.every_sec, verify.budget_bytes_per_sec, verify.rotation_periods, verify.recent_share_percent (1–100, 0 rejected), verify.pass_deadline_sec, verify.pass_max_bytes, verify.object_recent_sec, verify.drill_dsn, verify.drill_every_sec and verify.drill_check_sql for the phase 3 verifier; meta.tls default disabled, upload.use_ssl default true, and upload.tls.ca_file an optional PEM trust store (ADR 0012)
 // note ADR 0011: cluster.side_kill is off or auto, default off
 // note F2: notify.webhook_url (empty disables), notify.webhook_token, notify.timeout_sec (1–60, default 5), notify.attempts (1–8, default 3), notify.backoff_ms (1–30000, default 200)
 // pos: configuration boundary translating external settings into internal options
@@ -152,8 +152,6 @@ type HTTPServerTimeoutConfig struct {
 
 // HealthConfig configures the health evaluator (ADR 0009 phase 2, P2-3).
 type HealthConfig struct {
-	// Evaluator is off, shadow (compute and log, write nothing) or on.
-	Evaluator string
 	// SweepIntervalSec is the period of the sweep that marks every task dirty.
 	SweepIntervalSec int
 	// RehashBytesPerSec is the global byte budget of the sha256 re-checker.
@@ -317,7 +315,6 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 	v.SetDefault("http.worker_health.idle_timeout_sec", 30)
 	v.SetDefault("meta.timeout.read_sec", 3)
 	v.SetDefault("standalone.task_records", "on")
-	v.SetDefault("health.evaluator", "off")
 	v.SetDefault("health.sweep_interval_sec", 60)
 	v.SetDefault("health.rehash_bytes_per_sec", 4<<20)
 	v.SetDefault("health.unreachable_after_sec", 90)
@@ -511,7 +508,6 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 			},
 		},
 		Health: HealthConfig{
-			Evaluator:                      strings.ToLower(strings.TrimSpace(getString(v, decryptor, "health.evaluator", "health_evaluator"))),
 			SweepIntervalSec:               getInt(&loadErr, v, "health.sweep_interval_sec", "health_sweep_interval_sec"),
 			RehashBytesPerSec:              int64(getInt(&loadErr, v, "health.rehash_bytes_per_sec", "health_rehash_bytes_per_sec")),
 			UnreachableAfterSec:            getInt(&loadErr, v, "health.unreachable_after_sec", "health_unreachable_after_sec"),
@@ -594,6 +590,9 @@ func LoadConfigWithEncryption(path string, encryptionKey string) (Config, error)
 		return Config{}, err
 	}
 	warnSensitivePlaintextInConfig(v)
+	if v.IsSet("health.evaluator") {
+		log.Printf("config warning: health.evaluator is retired; the evaluator always runs")
+	}
 	return cfg, nil
 }
 
@@ -1082,11 +1081,6 @@ func validateVerifyConfig(v VerifyConfig) error {
 
 // validateHealthConfig checks the P2-3 evaluator keys.
 func validateHealthConfig(h HealthConfig) error {
-	switch h.Evaluator {
-	case "", "off", "shadow", "on":
-	default:
-		return fmt.Errorf("health.evaluator must be off, shadow or on, got %q", h.Evaluator)
-	}
 	if h.SweepIntervalSec < 0 || h.RehashBytesPerSec < 0 {
 		return fmt.Errorf("health.sweep_interval_sec and health.rehash_bytes_per_sec must not be negative")
 	}

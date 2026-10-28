@@ -51,7 +51,7 @@ func TestMetaProbe_HungPingFailsAtSendWhileStoreHangs(t *testing.T) {
 		timeout  = time.Second
 	)
 	e := NewEvaluator(s, EvaluatorConfig{
-		Mode: EvaluatorOn, Store: store, NodeID: evalNode, Workers: 2,
+		Store: store, NodeID: evalNode, Workers: 2,
 		Sweep: time.Hour, LivenessTick: time.Hour, Debounce: time.Millisecond,
 		MetaPingInterval: interval, MetaPingTimeout: timeout,
 		Now: clock.Now, After: clock.After,
