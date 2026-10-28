@@ -1,4 +1,4 @@
-.PHONY: help test build build-linux check-linux-compat check-linux-release-archive check-landing-assets release-check release-check-test ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e-scale e2e-session-kill e2e-sigstop-takeover e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
+.PHONY: help test build build-linux check-linux-compat check-linux-release-archive check-landing-assets release-check release-check-test ui-build release-assets e2e-topology-check e2e-quick e2e-full e2e-observability e2e-scale e2e-session-kill e2e-sigstop-takeover e2e-fault-matrix e2e migrate-up migrate-down migrate-version migrate-force sqlc-generate sqlc-verify
 
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo devel)
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -24,6 +24,7 @@ help:
 	@echo "  make e2e-scale                  # opt-in 1000-control-task / 100-live-stream scale evidence"
 	@echo "  make e2e-session-kill           # SIGSTOP on MySQL 8.0 and MariaDB, default sweep /api/health"
 	@echo "  make e2e-sigstop-takeover       # per_node SIGSTOP/SIGCONT worker takeover (ADR 0011 C3)"
+	@echo "  make e2e-fault-matrix           # ADR 0011 §4.2 fault-injection matrix (release tier; skips are reported)"
 	@echo "  make e2e SCENARIOS=a,b,c        # run custom e2e scenarios"
 	@echo "  make sqlc-generate              # generate typed SQL code from sqlc.yaml"
 	@echo "  make sqlc-verify                # regenerate and check for no git diff"
@@ -110,6 +111,9 @@ e2e-session-kill:
 
 e2e-sigstop-takeover:
 	./scripts/e2e/run-suite.sh --scenarios smoke-sigstop-takeover
+
+e2e-fault-matrix:
+	./scripts/e2e/run-suite.sh --scenarios smoke-fault-matrix
 
 e2e-full:
 	./scripts/e2e/run-suite.sh --profile full
