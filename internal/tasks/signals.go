@@ -23,14 +23,6 @@ const ReasonSignal EvalReason = "SIGNAL"
 // ReasonLiveness marks a task dirty because its source liveness clock crossed a threshold.
 const ReasonLiveness EvalReason = "LIVENESS"
 
-// Kinds added by P2-4; both are derived from the task row, nothing reports them.
-const (
-	// FindingSourceUnreachable: the task has stayed in STARTING/RETRY_BACKOFF with desired RUN past health.unreachable_after_sec.
-	FindingSourceUnreachable FindingKind = "SOURCE_UNREACHABLE"
-	// FindingTaskFailed: the task is FAILED for the current spec revision; the subject is the failure class.
-	FindingTaskFailed FindingKind = "TASK_FAILED"
-)
-
 // DefaultSignalStaleAfter is health.signal_stale_after: an open signal row
 // with no failure seen by this process for this long is shown as INFO.
 const DefaultSignalStaleAfter = 24 * time.Hour

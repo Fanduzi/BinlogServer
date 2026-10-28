@@ -2,6 +2,10 @@
 
 本文件为 Claude Code (claude.ai/code) 在本仓库工作时提供指导。
 
+## 编码规范
+
+改代码前先读 [docs/develop/coding-standards.md](docs/develop/coding-standards.md)（中文版 [coding-standards.zh-CN.md](docs/develop/coding-standards.zh-CN.md)）：文件 800 行软上限、新函数圈复杂度不超过 40、每个临界区一个加解锁点、注释不写 issue 编号、不留死代码、迁移时删掉旧路径、同一块 QA 失败两次先写 ADR。CI 的 `lint` workflow 强制执行；本地跑 `make lint` 和 `make codehealth`。
+
 ## 构建与测试命令
 
 ```bash

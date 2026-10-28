@@ -11,6 +11,8 @@
 ## Generation Note
 
 - 使用 `go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/binlog-server/main.go -o internal/swaggerdocs --parseInternal` 生成 `docs.go`、`swagger.json` 与 `swagger.yaml`。
+- 三个文件只能是这条命令的原样输出，不要手改。`internal/codehealth/baseline.json` 的 `generated_files` 把 `docs.go` 映射到这条命令；CI（`codehealth regen` 加 `git diff --exit-code`）重新生成后比对，有任何差异就失败。改 API 注释后重新运行命令并提交结果。
+- swag 按包内文件的遍历顺序拼接枚举值，一个枚举类型的常量分散在多个文件里时输出每次都不一样。所以同一枚举类型的常量写在同一个文件里（例如 `tasks.FindingKind` 全在 `internal/tasks/finding.go`）。
 
 ## Dependencies
 - Upstream: `internal/api` 注释与接口定义。
