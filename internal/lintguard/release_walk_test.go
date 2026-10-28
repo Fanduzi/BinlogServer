@@ -1,7 +1,6 @@
 // Package lintguard tests.
 // input: the workflow yaml under .github/workflows and the allowedIfs table
-// output: findings for any continue-on-error or unregistered if on the
-//   release path; the unit-and-e2e exclusion list is pinned verbatim
+// output: findings for any continue-on-error or unregistered if on the release path; the unit-and-e2e exclusion list is pinned verbatim
 // pos: regression coverage for the release-gate walker
 // note: if this file changes, update this header and module README.md.
 package lintguard
