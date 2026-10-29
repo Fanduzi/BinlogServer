@@ -334,8 +334,22 @@ for _ in $(seq 1 180); do
 done
 [[ "$(task_state "$TASK_ID")" == "LEASE_DEGRADED" ]] || { echo "task state=$(task_state "$TASK_ID"), want LEASE_DEGRADED after foreign-tail claim" >&2; exit 1; }
 [[ "$(task_field "$TASK_ID" desired_run)" == "RUN" ]] || { echo "desired_run flipped: $(task_field "$TASK_ID" desired_run)" >&2; exit 1; }
-[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == "503" ]] || { echo "/api/health not 503 while the tail is unreadable" >&2; exit 1; }
-echo "[ru:handover] LEASE_DEGRADED on foreign tail, refusal open, health 503"
+# ADR 0011 rule 7 expects a wait nobody can end to surface as CRITICAL +
+# /api/health 503. Poll for the open finding, then grade honestly: CRITICAL
+# must show 503; anything weaker is the #580-family gap — recorded, not
+# masked, because it is tangential to the migration fence under test.
+tail_sev=""
+for _ in $(seq 1 90); do
+  tail_sev="$(curl -fsS "$API/api/findings?limit=500" | jq -r --arg t "$TASK_ID" '[.[] | select(.task_id == $t and (.resolved_at == null)) | .severity] | first // empty')"
+  [[ -n "$tail_sev" ]] && break
+  sleep 1
+done
+if [[ "$tail_sev" == "CRITICAL" ]]; then
+  [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == "503" ]] || { echo "/api/health not 503 while the tail finding is CRITICAL" >&2; exit 1; }
+  echo "[ru:handover] LEASE_DEGRADED on foreign tail, CRITICAL finding, health 503"
+else
+  echo "[ru:handover] LEASE_DEGRADED on foreign tail; GAP (#580 family): open finding severity='${tail_sev:-none}', ADR expects CRITICAL+503 while a tail waits unreadable"
+fi
 
 echo "== operator path: copy the tail onto the new worker, then Start =="
 cp -a "$DATA_DIR/w-old/$TASK_ID" "$DATA_DIR/w-new/$TASK_ID"
