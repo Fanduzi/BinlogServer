@@ -1,7 +1,7 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the in-memory task list, a complete catalog listing, the task directory under data_dir, an object store that can HEAD and GET, and the open findings (severity and detail)
 // output: one assurance.Verify pass per allowed task, findings written through the existing sink (and the standalone file store when one is set), Report.VerifiedAt and Report.Read stored for the next pass (including a pass the deadline cuts short), progress for a gone segment or task removed from .verify.json, and the verify gauges. A pass that checks nothing does not write .verify.json. Write, Sync, Close, and Rename failures remove the temp file; a failed write is zap warn and dirty stays set until a write succeeds. Startup removes leftover .verify-*.tmp in the data dir only, unlinking a symlink without touching its target; a remove error is zap warn and the other temps are still removed. Temp names include the process id. Each pass logs at info: tasks, skipped, bytes, findings newly opened, findings currently open, findings closed, cut short, object incomplete, and duration. An object-storage error is zap warn and names the task, plus the object key and bucket when they are known (an empty object key uses the segment name; no per-object row omits the object field); three consecutive ones set health detail without changing status, and a finished object pass clears it. A pass with no tasks clears that detail but does not change the streak. A pass that skips every existing task changes neither. VerifierObjectBucket reports the bucket startVerifier stored. The streak is memory only. A corrupt .verify.json, a directory at that name, a catalog-list error, a retention-marker error, a per-task Verify error, and an encode error are zap warn and do not stop the process. pass_deadline_sec 0 uses every_sec. A cancelled pass keeps the partial progress it already applied and does not mark the task verified. An empty scheduler drops tasks that are no longer listed
-// pos: ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10). Cluster mode does not run it; Allows stays with ADR 0011. This file does not import internal/ownership
+// pos: ADR 0009 phase 3 worker (docs/design/0009-phase3-verifier.md §10). Cluster Allows is VerifyAllows: only the task lease holder verifies, per ADR 0011 per_node. This file does not import internal/ownership
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -834,4 +834,18 @@ func sweepVerifyTemps(dir string) error {
 		}
 	}
 	return failed
+}
+
+// VerifyAllows is the cluster gate the periodic verifier asks (ADR 0009
+// phase 3 §10): only the lease holder runs a pass, because the local
+// bytes live on the holder's disk (ADR 0011 per_node). A task this node
+// does not hold is skipped — a skip opens and closes nothing.
+func (s *Scheduler) VerifyAllows(_ context.Context, taskID string) (bool, error) {
+	if s.clusterWorkerID == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	t, ok := s.tasks[taskID]
+	s.mu.Unlock()
+	return ok && t.OwnerWorkerID == s.clusterWorkerID && t.Epoch > 0, nil
 }

@@ -14,7 +14,7 @@
 | 对象只在上传当时对过一次 ETag | 上传后桶里的对象被生命周期删掉或改掉一个字节，没有第二个人去 HEAD / 读 | #173 那类「看起来已上传」会在上传之后再次出现，而且本地保留删掉之后无本地可比 |
 | 链上的违反没有一个固定的周期作者 | 评估器会派生它读到的违反，但对象侧 scope 还没有被标成「有人生产」（`health.Produced` 不含 `chain.objects` 和 `verify`） | 对象丢失不会变成一条会自己关掉的 finding |
 
-还原演练（每 7 天在一台专用实例上放到一个时间点）默认仍关，等阶段 5 的还原计划。周期巡检的工人在 `internal/tasks/verifier.go`：缺本地文件和损坏对象由运行中的工人检出，经现有 API 报出，检查在 `go test ./...` 里。集群上 `Allows` 恒为 false，所以生产清单 A4 仍是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）落地后再开。真实 MinIO 场景仍不在任何 job 里。
+还原演练（每 7 天在一台专用实例上放到一个时间点）默认仍关，等阶段 5 的还原计划。周期巡检的工人在 `internal/tasks/verifier.go`：缺本地文件和损坏对象由运行中的工人检出，经现有 API 报出，检查在 `go test ./...` 里。集群上 `Allows` 已接 `Scheduler.VerifyAllows`：只有任务租约持有者巡检（ADR 0011 落地后实现，per_node 下持有者就是目录所在节点）；未持有租约的节点跳过，不开不关 finding。停止的任务没有持有者，暂无人巡检（与 #580 同族的停止任务覆盖缺口）。真实 MinIO 场景仍不在任何 job 里。
 
 ## 2. 这一份实现的边界
 
@@ -27,7 +27,7 @@
 - 上传成功时，如果目录行还没有 SHA-256，把它补进**已经存在**的 `binlog_files.sha256`（迁移 `000008`）。不新建列。
 - 用假对象存储的单测覆盖：删一个对象、改对象一个字节、改本地一个字节，下一轮都报出来；干净的链没有 finding；预算真的卡住读取。关闭、取消与截止时间、`last_verified_at`、强制重查、队列顺序、反复短截止时间下的进度上界各有单测，`internal/assurance/mutants/kill.go` 用它们打变异。
 
-工人（PR-2，`internal/tasks/verifier.go`）已接上周期循环：每个 `verify.every_sec` 对任务调用 `Verify`，输入来自目录、本地 `data_dir` 和对象存储，finding 走现有出口（集群 `task_findings` 和 standalone 的 `.findings.json`）。`Report.VerifiedAt` 与 `Report.Read` 写在 `{data_dir}/.verify.json`，不占迁移。进程内一把字节预算，任务轮转开头。链传 `nil`（不把没跑的链写成 finding）。集群上 `Allows` 恒为 false，等 ADR 0011 PR-2 换成当前主人；standalone 不设 `Allows`，恒为允许。
+工人（PR-2，`internal/tasks/verifier.go`）已接上周期循环：每个 `verify.every_sec` 对任务调用 `Verify`，输入来自目录、本地 `data_dir` 和对象存储，finding 走现有出口（集群 `task_findings` 和 standalone 的 `.findings.json`）。`Report.VerifiedAt` 与 `Report.Read` 写在 `{data_dir}/.verify.json`，不占迁移。进程内一把字节预算，任务轮转开头。链传 `nil`（不把没跑的链写成 finding）。集群上 `Allows` 是 `Scheduler.VerifyAllows`：任务租约持有者返回 true（ADR 0011 PR-2/PR-4 落地后接上，per_node 下持有者=目录所在节点）；standalone 不设 `Allows`，恒为允许。
 
 仍不做：
 
@@ -365,7 +365,7 @@ standalone 的 finding 文件和集群的 `task_findings` 都由现有出口写�
 | 第 2 轮本设计 | 开着 `OBJECT_CORRUPT` / `VERIFY_FAILED` 每轮强制 | 本地文件还在才每轮；不在时随轮换 | 第 6.3 节。QA r2 F2 |
 | ADR §3 | 每任务 `verify_budget` | 进程级一把预算，默认等于单任务上限 | 决定 6。多任务相加会打满磁盘 |
 | ADR 决定 4 | 抽样加上「上一轮之后新上传的全部」 | 最近档：未上传的行和 24 小时内上传的行，各在改动之后读一次（看 `last_verified_at`），每轮最多花 `min(25% × C, C − F − S)`；超出的和出了窗口还没验过的上传进末档，用剩下的预算 | 决定 4、第 5.2 节。「上一轮之后」用 `last_verified_at` 表达；份额上限让积压不挤掉轮换，末档让剩下的预算不空着 |
-| ADR §3 | 复用 ADR 0001 的租约判断主人 | 只留 `Allows`，实现等 ADR 0011 PR-2 | 0001 的续租循环会被 PR-2 换掉。现在接上就是在即将删除的代码上加一个调用方 |
+| ADR §3 | 复用 ADR 0001 的租约判断主人 | 只留 `Allows`，实现为 `Scheduler.VerifyAllows`（租约持有者） | ADR 0011 PR-2/PR-4 落地后接上：per_node 下持有者与目录所在节点同义 |
 | 阶段 2 §11 | 巡检让 `ScopeChainObjects` 变为 Complete 并 `MarkDirty` | 纯函数返回报告；`Produced` 保持不变 | 决定 9。没有周期调用就标成已生产，健康会误报 UNKNOWN |
 | 阶段 2 §11 | 新 kind 直接注册 | 名字定了，注册表不动 | 注册表一项没有 `Derive` 就会在评估器里开出空行为。等工人一起加 |
 | ADR 第 1 节草图 | 巡检器自己列举对象再喂给链 | HEAD 的结果就是对象见证 | 再列一遍会和 HEAD 看到的不一致，同一段可能开两条 I6 |
@@ -442,7 +442,7 @@ e2e-verify:
       run: ./scripts/e2e/smoke-verify.sh
 ```
 
-这个 job 已加进 `e2e.yml`，`workflow_dispatch` 的 `e2e_profile` 也有 `verify`。A4 不靠它：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出，并在 `/metrics` 上看到 `finding_open` 与 `binlog_server_verify_bytes_total`。`TestApp_VerifierTickerReportsTwoPasses` 从进程启动走到第一轮和 ticker 第二轮。它在 `go test ./...` 里，现有 `unit-and-e2e` 每个 PR 都跑。工人写回的多轮测试在 `internal/tasks/verifier_test.go`。集群仍不巡检（`TestStartVerifier_ClusterIsInert`），所以 A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。可选演练仍关。
+这个 job 已加进 `e2e.yml`，`workflow_dispatch` 的 `e2e_profile` 也有 `verify`。A4 不靠它：`TestVerifier_APIReportsMissingLocalAndCorruptObject`（`internal/api/verifier_api_test.go`）让运行中的工人发现缺本地文件和损坏对象，经 `GET /api/tasks/{id}/findings` 和 `GET /api/health` 报出，并在 `/metrics` 上看到 `finding_open` 与 `binlog_server_verify_bytes_total`。`TestApp_VerifierTickerReportsTwoPasses` 从进程启动走到第一轮和 ticker 第二轮。它在 `go test ./...` 里，现有 `unit-and-e2e` 每个 PR 都跑。工人写回的多轮测试在 `internal/tasks/verifier_test.go`。集群上未持有租约的节点不巡检（`TestStartVerifier_ClusterIsInert` 钉住非持有者跳过；`TestVerifyAllows_LeaseHolderOnly`、`TestVerifier_ClusterOwnerVerifies` 钉住持有者会巡检），停止的任务没有持有者所以也不巡检。可选演练仍关，A4 因此仍是 PARTIAL。
 
 ## 15. 留给后面的清单
 
@@ -455,7 +455,7 @@ e2e-verify:
 5. 不加 `binlog_files.last_verified_at` 列。进度在 `.verify.json`。
 6. 不和复核器合成一把字节预算。巡检自己一把。
 7. 阶段 5 的还原计划到位之后再开演练。演练默认仍关，工人不拨 `verify.drill_dsn`。
-8. 不改 `e2e.yml`。standalone 的周期巡检由 `go test ./...` 里的 `TestVerifier_APIReportsMissingLocalAndCorruptObject` 和 `TestApp_VerifierTickerReportsTwoPasses` 支撑。集群 `Allows` 仍关，A4 是 PARTIAL，等 ADR 0011 的主人（PR-2/PR-4）。第 14 节的 MinIO job 已进 CI（`e2e-verify`）。
+8. 不改 `e2e.yml`。standalone 的周期巡检由 `go test ./...` 里的 `TestVerifier_APIReportsMissingLocalAndCorruptObject` 和 `TestApp_VerifierTickerReportsTwoPasses` 支撑。集群 `Allows` 已接 `Scheduler.VerifyAllows`（租约持有者），A4 仍因可选演练未实现是 PARTIAL。第 14 节的 MinIO job 已进 CI（`e2e-verify`）。
 9. 两个 gauge 已从本轮 `Report` 导出。趁本地文件还在把空 `sha256` 写回目录行的后台任务还没有。
 10. 「row removed」关闭时记一条单独事件：还没有。关闭原因写在 finding 的 detail 里。
 
