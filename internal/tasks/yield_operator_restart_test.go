@@ -50,7 +50,7 @@ func newRefusalStore(inner *resumeTable, leases *MemoryLease) *refusalMetaStore 
 func (s *refusalMetaStore) CommitYield(ctx context.Context, row YieldCommit) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, err := s.resumeTable.GetTask(ctx, row.TaskID)
+	task, err := s.GetTask(ctx, row.TaskID)
 	if err != nil {
 		return 0, err
 	}
@@ -69,7 +69,7 @@ func (s *refusalMetaStore) CommitYield(ctx context.Context, row YieldCommit) (in
 	task.PendingDelete = row.PendingDelete
 	task.UpdatedAt = row.UpdatedAt
 	task.RowGeneration++
-	if err := s.resumeTable.UpsertTask(ctx, task); err != nil {
+	if err := s.UpsertTask(ctx, task); err != nil {
 		return 0, err
 	}
 	if row.RefusalNode != "" {
@@ -110,7 +110,7 @@ func (s *refusalMetaStore) DeleteTaskRefusals(_ context.Context, taskID string) 
 }
 
 func (s *refusalMetaStore) TaskRowGeneration(ctx context.Context, taskID string) (int64, error) {
-	task, err := s.resumeTable.GetTask(ctx, taskID)
+	task, err := s.GetTask(ctx, taskID)
 	if err != nil {
 		return 0, err
 	}
