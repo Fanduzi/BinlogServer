@@ -99,6 +99,27 @@ wait_no_open_hole() {
   return 1
 }
 
+# wait_new_open_segment waits until the task's live catalog row (state OPEN)
+# is not the segment named by $2 — proof the source FLUSH reached the task
+# and a new hole lands in a new segment. I3 reports only the first missing
+# GNO per segment, so a hole written back into the old segment would stay
+# masked by the waived one.
+wait_new_open_segment() {
+  local id="$1" old="$2" i name
+  for i in $(seq 1 90); do
+    name="$(curl -fsS "$API/api/tasks/$id/files" \
+      | jq -r '[.[] | select(.state == "OPEN")][0].file_name // empty')"
+    if [[ -n "$name" && "$name" != "$old" ]]; then
+      printf '%s' "$name"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "task $id never opened a new segment after the source rotate" >&2
+  curl -fsS "$API/api/tasks/$id/files" >&2 || true
+  return 1
+}
+
 # gap_commit moves GTID_NEXT past one unused interval: it commits
 # uuid:max+3 so uuid:max+1 and uuid:max+2 never execute — a hole in the
 # stored set, the #352 shape. Prints the first missing GNO uuid:max+1
@@ -182,9 +203,12 @@ done
 echo "[gtid-hole] waiver still in force after the stored set grew"
 
 # A hole in a NEW segment is a different fact: new subject, new evidence,
-# the finding reopens while the old waiver keeps its own hole closed.
+# the finding reopens while the old waiver keeps its own hole closed. Wait
+# for the task to consume the source rotate — a hole written before the
+# local segment turns would land back in SUBJECT1 and stay masked by the
+# waived first-missing GNO.
 docker compose -f "$COMPOSE_FILE" exec -T mysql80 mysql -uroot -proot -e "FLUSH BINARY LOGS;" >/dev/null
-sleep 3
+wait_new_open_segment "$TASK_ID" "$SUBJECT1" >/dev/null
 mysql80 "INSERT INTO ${DB}.t(v) VALUES ('seed2-${RUN_TAG}');"
 sleep 2
 EVIDENCE2="$(gap_commit)"
