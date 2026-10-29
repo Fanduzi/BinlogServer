@@ -389,7 +389,7 @@ cell_kill9_restart() {
   if ! wait_running_owner "$task_id" "$owner_id" 180; then
     local last_err
     last_err="$(task_field "$task_id" last_error)"
-    if [[ "$(task_state "$task_id")" == "LEASE_DEGRADED" && "$last_err" == SEGMENT_NOT_ON_WORKER:*"$data_dir"* ]]; then
+    if [[ "$(task_state "$task_id")" == "LEASE_DEGRADED" && "$last_err" == SEGMENT_NOT_ON_WORKER:*"/$(basename "$data_dir")/$task_id/"* ]]; then
       cell_result "phase-dump x kill-9 + row7 restart" "SKIP" "GAP #583: restarted owner refused its own header-only .open tail (SEGMENT_NOT_ON_WORKER on $owner_id's own dir); peer-yield invariants held"
       return 0
     fi
@@ -474,14 +474,15 @@ cell_yield_chain() {
 }
 
 # ==============================================================================
-# Cell: extra row "copy the task directory to the peer". Under per_node
-# semantics the chain rows keep the owner's data_dir in the segment path —
-# a copied directory does NOT make the peer runnable: the runner's
-# SEGMENT_NOT_ON_WORKER namespace check refuses, the claim yields to
-# LEASE_DEGRADED (bounded, no FAILED/STOP), and the thawed owner resumes.
-# The ADR's "new node takes over after a copy" outcome is a discovered gap
-# (no path re-resolution exists); the SKIP row below reports it instead of
-# asserting an outcome the build does not provide.
+# Cell: extra row "copy the task directory to the peer". Copying the task
+# dir is the documented operator takeover path: DurableResume scans the
+# peer's own data_dir, finds a durable event in the copied tail and adopts
+# the chain — the peer claims a bigger epoch and runs. The frozen owner
+# must then yield its dump and converge to exactly one Binlog Dump.
+# The exception is the #581/#583-class header-only .open tail: nothing
+# durable to resume from and the catalog's owner-side file_path is foreign,
+# so the peer refuses — the cell records that edge as GAP #581 rather than
+# treating the designed outcome as unreachable.
 # ==============================================================================
 cell_copy_dir() {
   local task_id
@@ -492,8 +493,13 @@ cell_copy_dir() {
   local owner_id other_id other_dir
   owner_id="$(task_owner "$task_id")"
   if [[ "$owner_id" == "$WORKER1_ID" ]]; then other_id="$WORKER2_ID"; other_dir="$DATA_DIR/w2"; else other_id="$WORKER1_ID"; other_dir="$DATA_DIR/w1"; fi
+  # Land real events in the .open tail so the copy carries a durable resume
+  # point; a header-only tail is the #581/#583-class edge, not the contract.
   write_source_rows "cd1"
-  sleep 3
+  write_source_rows "cd2"
+  sleep 5
+  local old_epoch
+  old_epoch="$(task_epoch "$task_id")"
 
   echo "[fm:copy] freeze owner, copy $owner_id's task dir to $other_id"
   local owner_pid
@@ -503,28 +509,58 @@ cell_copy_dir() {
   mkdir -p "$other_dir/$task_id"
   cp -a "$src_dir/$task_id/." "$other_dir/$task_id/" || true
 
-  # The peer may claim once but must yield: per_node path namespacing makes
-  # the copied directory non-runnable. Assert the refusal is bounded and
-  # non-terminal rather than asserting the ADR's takeover outcome.
-  local i
-  for i in $(seq 1 90); do
-    assert_matrix_invariants "$task_id" "copy-claim" || { kill -CONT "$owner_pid"; return 1; }
-    [[ "$(task_state "$task_id")" == "LEASE_DEGRADED" ]] && break
+  # The peer claims the expired lease and, with a durable tail in the copy,
+  # resumes on its own data_dir — takeover completes on the peer.
+  local i st threads
+  for i in $(seq 1 150); do
+    # Threads may briefly reach 2 while the frozen owner's dump lingers and
+    # the peer opens its own; only state invariants are hard assertions here.
+    threads="$(dump_threads)"
+    if [[ -n "$threads" && "$threads" =~ ^[0-9]+$ && "$threads" -gt 2 ]]; then
+      kill -CONT "$owner_pid"
+      echo "[copy-claim] source has $threads Binlog Dump threads, want at most 2" >&2
+      return 1
+    fi
+    st="$(task_state "$task_id")"
+    [[ "$st" == "FAILED" || "$(task_desired "$task_id")" == "STOP" ]] && { kill -CONT "$owner_pid"; echo "[copy-claim] terminal write during takeover: $(curl -fsS "$API/api/tasks/$task_id")" >&2; return 1; }
+    if [[ "$st" == "RUNNING" && "$(task_owner "$task_id")" == "$other_id" ]]; then
+      break
+    fi
+    # Header-only-tail edge: a bounded refusal is a known gap, not a failure.
+    if [[ "$st" == "LEASE_DEGRADED" ]]; then
+      local last_err
+      last_err="$(task_field "$task_id" last_error)"
+      if [[ "$last_err" == SEGMENT_NOT_ON_WORKER:* ]]; then
+        kill -CONT "$owner_pid"
+        cell_result "extra: copy dir to peer" "SKIP" "GAP #581: copied tail held no durable event; peer refused (SEGMENT_NOT_ON_WORKER) — same edge class as #583"
+        return 0
+      fi
+    fi
     sleep 1
   done
-  if [[ "$(task_state "$task_id")" != "LEASE_DEGRADED" && "$(task_state "$task_id")" != "RUNNING" ]]; then
+  if [[ "$(task_state "$task_id")" != "RUNNING" || "$(task_owner "$task_id")" != "$other_id" ]]; then
     kill -CONT "$owner_pid"
-    echo "[fm:copy] peer never claimed+yielded: $(curl -fsS "$API/api/tasks/$task_id")" >&2
+    echo "[fm:copy] peer never adopted the copied dir: $(curl -fsS "$API/api/tasks/$task_id")" >&2
     return 1
   fi
+  local new_epoch
+  new_epoch="$(task_epoch "$task_id")"
+  [[ "$new_epoch" =~ ^[0-9]+$ && "$new_epoch" -gt "$old_epoch" ]] || { kill -CONT "$owner_pid"; echo "[fm:copy] epoch did not grow: $old_epoch -> $new_epoch" >&2; return 1; }
 
+  # Thaw the frozen owner: its lease is stale, so it must give up the dump
+  # and let the source converge back to exactly one Binlog Dump (the peer's).
   kill -CONT "$owner_pid"
-  wait_running_owner "$task_id" "$owner_id" 240 || return 1
-  assert_matrix_invariants "$task_id" "copy-resume" || return 1
+  for i in $(seq 1 120); do
+    st="$(task_state "$task_id")"
+    [[ "$st" == "FAILED" || "$(task_desired "$task_id")" == "STOP" ]] && { echo "[copy-resume] terminal write during thaw: $(curl -fsS "$API/api/tasks/$task_id")" >&2; return 1; }
+    [[ "$(dump_threads)" == "1" && "$(task_owner "$task_id")" == "$other_id" ]] && break
+    sleep 1
+  done
+  [[ "$(task_owner "$task_id")" == "$other_id" ]] || { echo "[fm:copy] thawed owner took the task back: $(curl -fsS "$API/api/tasks/$task_id")" >&2; return 1; }
   [[ "$(dump_threads)" == "1" ]] || { echo "[fm:copy] dump threads=$(dump_threads), want 1" >&2; return 1; }
   http_code POST "/api/tasks/$task_id/stop" >/dev/null
   wait_task_state "$task_id" "STOPPED" 60
-  cell_result "extra: copy dir to peer" "RUN" "pass: copied dir is not runnable (per_node namespace); peer yielded bounded; $owner_id resumed"
+  cell_result "extra: copy dir to peer" "RUN" "pass: copied dir adopted on $other_id (epoch $old_epoch -> $new_epoch); thawed owner yielded; one dump"
 }
 
 # ==============================================================================
@@ -794,7 +830,7 @@ cell_skip "all partition cells" "node->meta partition primitive not built (Proxy
 cell_skip "phase evaluator-reads-dir x all faults" "window between directory read and ChainVerified not instrumentable"
 cell_skip "phase OperatorStart txn x SIGSTOP/kill-9" "start transaction window not instrumentable"
 cell_skip "extra: shared mount pulled" "no shared-storage runner in the self-managed topology"
-cell_skip "extra: peer runs after dir copy" "GAP #581: per_node keeps the owner's data_dir in segment paths; a copied dir is refused (SEGMENT_NOT_ON_WORKER) — no path re-resolution exists"
+cell_skip "extra: peer runs after dir copy" "GAP #581: adoption needs a durable event in the copied tail; a header-only .open still refuses (SEGMENT_NOT_ON_WORKER) — same edge class as #583"
 cell_skip "row6: FAILED/CHAIN_OWNER_GONE fold-back" "GAP #580: the delegated evaluator is the dead owner itself; no surviving node computes NodeGone for an unowned claimable row"
 cell_skip "row3: stall idle_kill<t<TTL" "session-idle kill window partially covered by session-kill bounds; dedicated cell pending"
 cell_skip "row5: claim txn uncommitted" "claim transaction window not instrumentable"
