@@ -209,9 +209,11 @@ func (p *probeObjects) counts() (heads, opens int) {
 	return p.heads, p.opens
 }
 
-// TestStartVerifier_ClusterIsInert is the cluster Allows=false pin. The
-// standalone subtest is the same wiring with Allows left unset, so a harness
-// that never starts the worker fails there instead of passing here.
+// TestStartVerifier_ClusterIsInert pins the not-owner side of the cluster
+// gate: VerifyAllows is bound, and a node holding no lease verifies
+// nothing. The standalone subtest is the same wiring with Allows left
+// unset, so a harness that never starts the worker fails there instead of
+// passing here.
 func TestStartVerifier_ClusterIsInert(t *testing.T) {
 	t.Run("cluster", func(t *testing.T) {
 		lists, heads, opens, findings, wrote := runVerifierProbe(t, "cluster")
