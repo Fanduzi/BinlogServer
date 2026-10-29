@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
-// input: an open chain-directory finding, Facts.ChainOwnerChanged, and Facts.NodeGone
-// output: proof that OWNER_CHANGED closes that finding even when the new directory is incomplete and reopens a still-desired key after the close, that UPLOAD_UNVERIFIED is not closed that way, and that NodeGone yields UNKNOWN(node gone) unless a non-chain CRITICAL is open
+// input: an open chain-directory finding observed by a new owner, and Facts.NodeGone
+// output: PR-5 monotonicity proof — an incomplete observation never closes a chain finding (the old OWNER_CHANGED close is deleted), a still-desired key stays open without a close-then-open pair, UPLOAD_UNVERIFIED is untouched, and NodeGone still yields UNKNOWN(node gone) unless a non-chain CRITICAL is open
 // pos: unit coverage for ADR 0009 P2-6.2 reconcile and health (design §30)
 // note: if this file changes, update this header and module README.md.
 package health
@@ -12,36 +12,35 @@ import (
 	"binlog_server/internal/assurance"
 )
 
-func TestOwnerChangedClosesIncompleteChain(t *testing.T) {
+func TestOwnerChangedKeepsIncompleteChainFinding(t *testing.T) {
 	key := Key{TaskID: "1", Kind: SegmentEmptyLeftover, Subject: "mysql-bin.000002.open.e3"}
 	open := []Finding{{TaskID: "1", Kind: SegmentEmptyLeftover, Subject: key.Subject, Severity: Info, Detail: "empty"}}
-	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true, Complete: map[Scope]bool{}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), Complete: map[Scope]bool{}}
 	ts, _ := DefaultRegistry().Reconcile(open, f)
-	if len(ts) != 1 || ts[0].Op != OpClose || ts[0].Reason != ReasonOwnerChanged || ts[0].Key != key {
-		t.Fatalf("transitions %+v, want one OWNER_CHANGED close", ts)
+	if len(ts) != 0 {
+		t.Fatalf("transitions %+v, want none — an incomplete read neither opens nor closes", ts)
 	}
 }
 
-func TestOwnerChangedReopensTheSameKey(t *testing.T) {
+func TestStillDesiredKeyStaysOpenAcrossOwnerChange(t *testing.T) {
 	subject := "mysql-bin.000002.open.e3"
 	key := Key{TaskID: "1", Kind: SegmentEmptyLeftover, Subject: subject}
 	open := []Finding{{TaskID: "1", Kind: SegmentEmptyLeftover, Subject: subject, Severity: Info, Detail: "old"}}
-	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true,
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(),
 		Complete: map[Scope]bool{ScopeChainLocal: true},
 		Chain:    &ChainFacts{Violations: []assurance.Violation{{Kind: assurance.I4EmptyLeftover, Segments: []string{subject}, Detail: "still there"}}},
 	}
 	ts, _ := DefaultRegistry().Reconcile(open, f)
-	if len(ts) != 2 || ts[0].Op != OpClose || ts[0].Reason != ReasonOwnerChanged || ts[1].Op != OpOpen || ts[1].Reason != ReasonEval {
-		t.Fatalf("transitions %+v, want CLOSE OWNER_CHANGED then OPEN EVAL", ts)
-	}
-	if ts[0].Key != key || ts[1].Key != key {
-		t.Fatalf("keys %+v %+v", ts[0].Key, ts[1].Key)
+	for _, tr := range ts {
+		if tr.Key == key && (tr.Op == OpClose || tr.Op == OpOpen) {
+			t.Fatalf("transitions %+v, a still-true fact must not close then open", ts)
+		}
 	}
 }
 
 func TestOwnerChangedLeavesSignalChainKinds(t *testing.T) {
 	open := []Finding{{TaskID: "1", Kind: UploadUnverified, Subject: "mysql-bin.000001", Severity: Critical}}
-	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true, Complete: map[Scope]bool{}}
+	f := &Facts{TaskID: "1", Now: time.Unix(1, 0).UTC(), Complete: map[Scope]bool{}}
 	ts, _ := DefaultRegistry().Reconcile(open, f)
 	if len(ts) != 0 {
 		t.Fatalf("transitions %+v, want none (signals incomplete, not a chain-directory finding)", ts)

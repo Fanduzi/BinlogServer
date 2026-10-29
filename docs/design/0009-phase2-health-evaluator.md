@@ -1917,3 +1917,13 @@ PR #453 把「期望被写成 STOP」堵住了。2 节点、`lease_ttl` 60、宽
 - §8.9：`_cluster` finding 以 `NODE_GONE` 关闭。
 - 改 `.github/workflows`。三节点 e2e 仍是 `workflow_dispatch`。
 - 真机 SIGSTOP / kill -9。QA 在非共享存储上停掉最后 owner：`node_gone_after` 之后健康是 UNKNOWN(node gone)，链 finding 仍开；任务在另一节点起来之后旧目录 finding 以 `OWNER_CHANGED` 关闭，旧 owner 的委派写被拒。
+
+### 30.6 PR-5：打开区间单调，移除 `OWNER_CHANGED`（2026-10-30）
+
+D5 与 §13/§15/§16 中所有 `OWNER_CHANGED` 行文是 PR-3 的历史 spec，已被本节取代。最终语义：
+
+- finding 的打开区间保持单调：fact 还在就不关。所有权变化只改「谁有权关」与归因，不再是关闭理由；`types.go` 的原因集合删掉了 `OWNER_CHANGED`。
+- 不完整的观察既不开也不关：读到目录的那一轮才产生 `chain.local`/`chain.objects` fact，`ScopeChainLocal`/`ScopeChainObjects` 不全完整时 reconcile 不产生 CLOSE（也不 UPDATE/DOWNGRADE）。
+- `SEGMENT_MISSING` 随统一规则：同一份已验证目录上该 key 不再被推导时以 `EVAL` 关闭——包括新 owner 读到目录且目录不再有缺失的第一轮（§30.4 的「第一轮不关」已随模型取消）；D5 描述的「owner 变了即使新目录不完整也关」路径整体不存在了，`Facts.ChainOwnerChanged` 与 `noteOwnerChanged` 一并删除。
+- `chain_owner` 与 `ChainVerified` 仍是委派与归因的记录，但不再是关闭触发器；`NODE_GONE` 路径（D6/D7）不变。
+- 测试侧：`pr5_property_test.go` 把这两条性质写成模型属性——(a) owner 变化序列下已开 finding 不产生 CLOSE；(b) 不完整观察对任何已开 key 都不产生转移；(c) 完整已验证观察下 key 移出 Desired 才以 `EVAL` 关闭。§30.4 的 `TestP262OwnerChangedClosesOldDirectory` 已改写为 `EVAL` 语义。

@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
 // input: one task's facts at one moment (task state, assurance chain verdicts, hot-path signals, store capability, waivers)
-// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.ChainOwnerChanged and Facts.NodeGone (§30; SEGMENT_MISSING is not closed on ChainOwnerChanged, ADR 0011 PR-3); Facts.DirectoryNode and NameChainOwner name the node that read the directory on an I6_MISSING_LOCAL detail; ChainFacts.UploadLag is the oldest unmatched sealed row when object storage is on; verifier kinds are registered and unmanaged, and Produced does not include verify
+// output: the findings that should be open now (Desire), the transitions from the stored open set to that (Reconcile), and the task's health (HealthOf); HEALTH_STALE reads Facts.StaleAfter, HealthEvaluatedAt and HealthKnownSince (§28); TASK_NO_PROGRESS with no local run reads Facts.UnownedAfter when set (§29); chain delegation reads Facts.NodeGone (§30; ADR 0011 PR-5 keeps a finding open across an ownership change while its fact still derives); Facts.DirectoryNode and NameChainOwner name the node that read the directory on an I6_MISSING_LOCAL detail; ChainFacts.UploadLag is the oldest unmatched sealed row when object storage is on; verifier kinds are registered and unmanaged, and Produced does not include verify
 // pos: the single lifecycle owner of findings (ADR 0009 phase 2, docs/design/0009-phase2-health-evaluator.md); pure, no I/O, imports only assurance
 // note: if this file changes, update this header and module README.md.
 package health
@@ -282,12 +282,6 @@ type Facts struct {
 	// HealthKnownSince is when this holder first saw a listed task that
 	// had no health row. Age starts there until a row appears.
 	HealthKnownSince map[string]time.Time
-	// ChainOwnerChanged: this pass is a new cluster holder and the recorded
-	// chain_owner is some other node (design §30). Chain-directory findings
-	// close with OWNER_CHANGED even when the new directory is incomplete.
-	// SEGMENT_MISSING does not (ADR 0011 PR-3): an ownership change must not
-	// close it, and the same pass must not open a second row for that key.
-	ChainOwnerChanged bool
 	// NodeGone: the last chain owner's heartbeat is older than
 	// node_gone_after (design §30). Chain-directory findings do not decide
 	// status; chain.local is unknown.
@@ -338,9 +332,6 @@ const (
 	ReasonConfig    = "CONFIG"
 	ReasonUpgrade   = "UPGRADE"
 	ReasonHandedOff = "HANDED_OFF"
-	// ReasonOwnerChanged: the task's chain now lives on another node
-	// (design §30). The closed finding described the previous directory.
-	ReasonOwnerChanged = "OWNER_CHANGED"
 )
 
 // Transition is one change to a finding. Generation is allocated by the

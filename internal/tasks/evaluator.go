@@ -782,7 +782,6 @@ func (e *Evaluator) evaluate(ctx context.Context, id string) (health.TaskHealth,
 		if facts.Chain != nil {
 			e.noteDirectoryRead(facts, fence)
 		}
-		e.noteOwnerChanged(ctx, fence, facts)
 	}
 	if !gone && !relay && !clusterStale {
 		e.signalFacts(ctx, task, isCluster, facts)

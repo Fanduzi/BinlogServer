@@ -226,7 +226,7 @@ func TestSegmentMissingUnverifiedOwnerDoesNotClose(t *testing.T) {
 	}
 }
 
-func TestSegmentMissingVerifiedSuccessorDoesNotCloseOnFirstPass(t *testing.T) {
+func TestSegmentMissingVerifiedSuccessorClosesEval(t *testing.T) {
 	c := newSealedCluster(t)
 	ctx := context.Background()
 	if _, err := c.e.EvaluateNow(ctx, c.env.task.ID); err != nil {
@@ -254,12 +254,9 @@ func TestSegmentMissingVerifiedSuccessorDoesNotCloseOnFirstPass(t *testing.T) {
 	if err != nil || owner != "n2" {
 		t.Fatalf("chain owner %q (%v), want n2 after that node read the directory", owner, err)
 	}
-	if !c.missingOpen(t) {
-		t.Fatal("first pass of the new holder closed SEGMENT_MISSING")
-	}
-	if _, err := e2.EvaluateNow(ctx, c.env.task.ID); err != nil {
-		t.Fatal(err)
-	}
+	// PR-5 derived-finding semantics: the new holder's first verified read
+	// already shows the key is not derived, so the pass closes it with EVAL
+	// on the spot — no owner-change holdover pass, no OWNER_CHANGED.
 	if c.missingOpen(t) {
 		t.Fatal("SEGMENT_MISSING stayed open after the new verified directory no longer derived it")
 	}
