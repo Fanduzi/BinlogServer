@@ -606,10 +606,8 @@ func (s *Scheduler) ClaimRunnableTasks() (int, error) {
 		return 0, err
 	}
 	s.applyRemoteStops()
-	// The mixed-version gate is a sweep-level fence, not a per-candidate one:
-	// the _cluster MIXED_VERSION finding must open while an old-protocol node
-	// still dumps, even when this worker currently has nothing to claim.
-	// refuseMixedClaimLocked drops and re-takes s.mu around the meta calls.
+	// Sweep-level gate: _cluster MIXED_VERSION must open while an old-protocol
+	// node still dumps, even with nothing claimable here.
 	s.mu.Lock()
 	gateErr := s.refuseMixedClaimLocked()
 	s.mu.Unlock()

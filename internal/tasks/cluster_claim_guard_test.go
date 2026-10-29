@@ -109,6 +109,20 @@ func TestMixedVersionSweepFiresWithoutCandidates(t *testing.T) {
 	if claimed != 0 {
 		t.Fatalf("claimed=%d, want 0", claimed)
 	}
+	// The gate must pair its open with a close: once the old registration
+	// expires a sweep with nothing claimable still resolves _cluster, or the
+	// finding stays CRITICAL forever (e2e-rolling-upgrade observed exactly
+	// that before the sweep-level gate existed).
+	s.clusterGate = claimGate{older: 0}
+	if _, err := s.ClaimRunnableTasks(); err != nil {
+		t.Fatalf("ClaimRunnableTasks after expiry err=%v, want nil", err)
+	}
+	s.findings.mu.Lock()
+	open := len(s.findings.open)
+	s.findings.mu.Unlock()
+	if open != 0 {
+		t.Fatalf("open findings=%d after old registration expired, want 0", open)
+	}
 }
 
 func TestStorageMismatchRefusesClaim(t *testing.T) {

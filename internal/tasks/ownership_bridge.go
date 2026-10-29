@@ -530,7 +530,8 @@ const clusterProtocolVersion int64 = 11
 
 // refuseMixedClaimLocked registers cluster.storage and refuses the claim when
 // another mode is already registered, or when a live registration is still on
-// an older protocol (MIXED_VERSION). Caller holds s.mu. The lock is dropped
+// an older protocol (MIXED_VERSION), and resolves that finding once
+// every live registration speaks the current protocol. Caller holds s.mu. The lock is dropped
 // for the meta calls and held again on return.
 func (s *Scheduler) refuseMixedClaimLocked() error {
 	gate := s.clusterGate
@@ -570,6 +571,7 @@ func (s *Scheduler) refuseMixedClaimLocked() error {
 		})
 		return fmt.Errorf("mixed version: %d registration(s) below protocol %d", older, clusterProtocolVersion)
 	}
+	s.SignalSuccess(ClusterFindingTask, FindingMixedVersion, "")
 	return nil
 }
 
