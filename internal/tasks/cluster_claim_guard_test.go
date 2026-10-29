@@ -95,6 +95,22 @@ func TestMixedVersionRefusesClaim(t *testing.T) {
 	}
 }
 
+// The gate is a sweep-level fence, not a per-candidate one: the _cluster
+// MIXED_VERSION finding must fire while an old-protocol node still dumps,
+// even when this worker has nothing claimable. A claim loop that only
+// checks per candidate would never open the finding under a live lease.
+func TestMixedVersionSweepFiresWithoutCandidates(t *testing.T) {
+	store := &schedulerTestStore{tasks: map[string]Task{}}
+	s, _ := newClaimScheduler(t, store, claimGate{older: 1})
+	claimed, err := s.ClaimRunnableTasks()
+	if err == nil || !strings.Contains(err.Error(), "mixed version") {
+		t.Fatalf("ClaimRunnableTasks err=%v, want mixed version", err)
+	}
+	if claimed != 0 {
+		t.Fatalf("claimed=%d, want 0", claimed)
+	}
+}
+
 func TestStorageMismatchRefusesClaim(t *testing.T) {
 	store := &schedulerTestStore{tasks: map[string]Task{}}
 	s, lease := newClaimScheduler(t, store, claimGate{registered: "shared"})
