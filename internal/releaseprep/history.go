@@ -70,6 +70,12 @@ var History = []HistoryRule{
 	// definition (OLD=${LAST_TAG#v}), so the example names it on purpose.
 	{Path: ".agents/skills/binlogserver-release/SKILL.md", Line: `e\.g\. {p}\b`, Why: "the release runbook's OLD is the previous release by definition"},
 
+	// The rolling-upgrade fence e2e pins the last release that predates
+	// migration 000011: the old binary must not know cluster_protocol_version,
+	// so the pin stays put when a newer release ships.
+	{Path: "scripts/e2e/smoke-rolling-upgrade.sh", Line: `v{p}\b`, Why: "E3's old binary is the last release before migration 000011; it is not the release to bump"},
+	{Path: "scripts/e2e/README.md", Line: `v{p}.*000011`, Why: "E3's old binary is the last release before migration 000011; it is not the release to bump"},
+
 	// The landing page release timeline until the landing-page cleanup removes
 	// it (and these three rules), each one element only. The first entry is this
 	// release, and its "(Current)" marker is a Surface.
