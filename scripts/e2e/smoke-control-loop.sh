@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # input: mysql57 source, a scratch metadata database, and the current binlog-server binary
-# output: one Binlog Dump after a password change during Stop then Start, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, a held proxy path where Stop then Start never has two Binlog Dumps and ends with pending cleared and dumps=1, a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile, dropping 000006 restores uk_task_file_epoch on schema 5, schema 4 still has pending_dump_cleanup after dropping 000005, and schema 3 (column absent) is refused by this binary with schema version too old and ./migrate up
+# output: one Binlog Dump after a password rotation then a Stop/Start probe that retries until it catches the transient STOPPING phase on the same epoch, zero dumps when a reachable Stop is STOPPED, a proxy cut that leaves pending_dump_cleanup on STOPPED and clears it with zero dumps after the path returns, a held proxy path where Stop then Start never has two Binlog Dumps and ends with pending cleared and dumps=1, a v0.5.45-shaped RUNNING row that stays running after upgrade reconcile, dropping 000006 restores uk_task_file_epoch on schema 5, schema 4 still has pending_dump_cleanup after dropping 000005, and schema 3 (column absent) is refused by this binary with schema version too old and ./migrate up
 # pos: acceptance check for the desired-run control loop, issue 193, issue 249, issue 252, and the spec_revision=0 upgrade reconcile
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -350,26 +350,10 @@ if [[ "$EPOCH" == "0" || "$EPOCH" == "null" ]]; then
   exit 1
 fi
 
-HTTP="$(curl -sS -o /tmp/e2e-ctl-stop.resp -w '%{http_code}' -X POST "$API/api/tasks/$TASK_ID/stop")"
-if [[ "$HTTP" != "204" ]]; then
-  echo "stop failed http=$HTTP body=$(cat /tmp/e2e-ctl-stop.resp)" >&2
-  exit 1
-fi
-
-# Change the password while Stop is in flight when we can still see STOPPING.
-# A fast Close may already be STOPPED; the following Start is still one dump.
-SEEN=""
-for _ in {1..2000}; do
-  SEEN="$(task_state "$TASK_ID")"
-  if [[ "$SEEN" == "STOPPING" || "$SEEN" == "STOPPED" ]]; then
-    break
-  fi
-done
-if [[ "$SEEN" != "STOPPING" && "$SEEN" != "STOPPED" ]]; then
-  echo "stop did not leave RUNNING; state=$SEEN" >&2
-  exit 1
-fi
-
+# Rotate the credential up front. The ALTER is a ~1s mysql exec; done
+# between the STOPPING observation and the Start it consumed most of the
+# window, so the restart below landed after the stop finalized and read as
+# an epoch bump (a correct outcome asserted as a failure).
 source_exec "ALTER USER '${DUMP_USER}'@'%' IDENTIFIED BY '${PASS2}'; FLUSH PRIVILEGES;"
 PUT_BODY="$(jq -n \
   --arg name "e2e-ctl-${RUN_TAG}" \
@@ -378,24 +362,58 @@ PUT_BODY="$(jq -n \
   --argjson port "$MYSQL57_PORT" \
   --argjson sid "$SID" \
   '{name:$name,cluster_key:$name,source:{host:"127.0.0.1",port:$port,user:$user,password:$pass,flavor:"mysql",server_id:$sid},start:{mode:"LATEST"},storage:{retention_days:7}}')"
-HTTP="$(curl -sS -o /tmp/e2e-ctl-put.resp -w '%{http_code}' -X PUT "$API/api/tasks/$TASK_ID" -H 'Content-Type: application/json' -d "$PUT_BODY")"
-if [[ "$HTTP" != "200" ]]; then
-  echo "update failed http=$HTTP body=$(cat /tmp/e2e-ctl-put.resp)" >&2
-  exit 1
-fi
-HTTP="$(curl -sS -o /tmp/e2e-ctl-restart.resp -w '%{http_code}' -X POST "$API/api/tasks/$TASK_ID/start")"
-if [[ "$HTTP" != "204" ]]; then
-  echo "restart failed http=$HTTP body=$(cat /tmp/e2e-ctl-restart.resp) state=$(task_state "$TASK_ID")" >&2
-  cat "$WORKER_LOG" >&2 || true
-  exit 1
-fi
-wait_state "$TASK_ID" "RUNNING"
-wait_dumps "$DUMP_USER" 1
-AFTER="$(task_json "$TASK_ID")"
-AFTER_EPOCH="$(printf '%s' "$AFTER" | jq -r '.epoch // 0')"
-AFTER_USER="$(printf '%s' "$AFTER" | jq -r '.source.user // empty')"
-if [[ "$SEEN" == "STOPPING" && "$AFTER_EPOCH" != "$EPOCH" ]]; then
-  echo "epoch changed during in-flight stop $EPOCH -> $AFTER_EPOCH" >&2
+
+# Probe the N8 branch: Start while the row is still STOPPING keeps the
+# epoch. STOPPING is transient — a fast Close finalizes before the PUT and
+# Start land, in which case the epoch legitimately grows. Retry the whole
+# probe a few times so one early-finalized stop does not fail the run.
+STOPPING_PROBED=""
+for ATTEMPT in 1 2 3 4; do
+  HTTP="$(curl -sS -o /tmp/e2e-ctl-stop.resp -w '%{http_code}' -X POST "$API/api/tasks/$TASK_ID/stop")"
+  if [[ "$HTTP" != "204" ]]; then
+    echo "stop failed http=$HTTP body=$(cat /tmp/e2e-ctl-stop.resp)" >&2
+    exit 1
+  fi
+  SEEN=""
+  for _ in {1..2000}; do
+    SEEN="$(task_state "$TASK_ID")"
+    if [[ "$SEEN" == "STOPPING" || "$SEEN" == "STOPPED" ]]; then
+      break
+    fi
+  done
+  if [[ "$SEEN" != "STOPPING" && "$SEEN" != "STOPPED" ]]; then
+    echo "stop did not leave RUNNING; state=$SEEN" >&2
+    exit 1
+  fi
+
+  HTTP="$(curl -sS -o /tmp/e2e-ctl-put.resp -w '%{http_code}' -X PUT "$API/api/tasks/$TASK_ID" -H 'Content-Type: application/json' -d "$PUT_BODY")"
+  if [[ "$HTTP" != "200" ]]; then
+    echo "update failed http=$HTTP body=$(cat /tmp/e2e-ctl-put.resp)" >&2
+    exit 1
+  fi
+  HTTP="$(curl -sS -o /tmp/e2e-ctl-restart.resp -w '%{http_code}' -X POST "$API/api/tasks/$TASK_ID/start")"
+  if [[ "$HTTP" != "204" ]]; then
+    echo "restart failed http=$HTTP body=$(cat /tmp/e2e-ctl-restart.resp) state=$(task_state "$TASK_ID")" >&2
+    cat "$WORKER_LOG" >&2 || true
+    exit 1
+  fi
+  wait_state "$TASK_ID" "RUNNING"
+  wait_dumps "$DUMP_USER" 1
+  AFTER="$(task_json "$TASK_ID")"
+  AFTER_EPOCH="$(printf '%s' "$AFTER" | jq -r '.epoch // 0')"
+  AFTER_USER="$(printf '%s' "$AFTER" | jq -r '.source.user // empty')"
+  if [[ "$SEEN" == "STOPPING" ]]; then
+    if [[ "$AFTER_EPOCH" == "$EPOCH" ]]; then
+      STOPPING_PROBED=1
+      break
+    fi
+    # Start landed after the stop finalized: epoch growth is correct.
+    # Re-probe on the new epoch.
+  fi
+  EPOCH="$AFTER_EPOCH"
+done
+if [[ "$SEEN" == "STOPPING" && -z "$STOPPING_PROBED" ]]; then
+  echo "epoch changed during in-flight stop across $ATTEMPT attempts (last $EPOCH -> $AFTER_EPOCH)" >&2
   exit 1
 fi
 if [[ "$AFTER_USER" != "$DUMP_USER" ]]; then
