@@ -6,8 +6,10 @@
 #   ordered gates: live registration refuses migrate up; expired registration
 #   lets it through; a post-migration protocol-0 registration opens
 #   CRITICAL MIXED_VERSION on _cluster and blocks new claims while the old
-#   node keeps dumping; live protocol-11 registrations refuse migrate down
-#   and the downed schema runs the old binary again
+#   node keeps dumping; the old node leaving closes the finding, the
+#   foreign per_node tail degrades the task until the documented operator
+#   copy + Start path restores it; live protocol-11 registrations refuse
+#   migrate down and the downed schema runs the old binary again
 # pos: integration-test automation layer validating end-to-end cluster
 #   upgrade/downgrade fencing
 # note: if this file changes, update this header and scripts/e2e/README.md.
@@ -318,12 +320,29 @@ sleep 20
 [[ "$(task_owner "$TASK_ID")" == "$OLD_WORKER_ID" ]] || { echo "task owner moved to $(task_owner "$TASK_ID") under MIXED_VERSION" >&2; exit 1; }
 echo "[ru:mixed] MIXED_VERSION open on _cluster, /api/health 503, no takeover"
 
-echo "== old worker leaves: gate clears, new worker takes over =="
+echo "== old worker leaves: gate clears, tail is foreign on per_node =="
 kill_pid "$OLD_WORKER_PID"; OLD_WORKER_PID=""
 wait_crit_closed "_cluster" "MIXED_VERSION" 120
+# ADR 0011: a per_node claim meeting the previous owner's foreign .open tail
+# is TailUnreadable — the new worker releases the epoch, writes an
+# open-ended refusal (refuse_until NULL) and the task waits in
+# LEASE_DEGRADED, desired RUN, with /api/health 503. Automatic takeover to
+# RUNNING is not possible: no surviving node has the old owner's tail.
+for _ in $(seq 1 180); do
+  [[ "$(task_state "$TASK_ID")" == "LEASE_DEGRADED" ]] && break
+  sleep 1
+done
+[[ "$(task_state "$TASK_ID")" == "LEASE_DEGRADED" ]] || { echo "task state=$(task_state "$TASK_ID"), want LEASE_DEGRADED after foreign-tail claim" >&2; exit 1; }
+[[ "$(task_field "$TASK_ID" desired_run)" == "RUN" ]] || { echo "desired_run flipped: $(task_field "$TASK_ID" desired_run)" >&2; exit 1; }
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == "503" ]] || { echo "/api/health not 503 while the tail is unreadable" >&2; exit 1; }
+echo "[ru:handover] LEASE_DEGRADED on foreign tail, refusal open, health 503"
+
+echo "== operator path: copy the tail onto the new worker, then Start =="
+cp -a "$DATA_DIR/w-old/$TASK_ID" "$DATA_DIR/w-new/$TASK_ID"
+[[ "$(http_code POST "/api/tasks/$TASK_ID/start")" == "204" ]] || { echo "operator start failed: $(cat "/tmp/e2e-ru-${RUN_TAG}.resp")" >&2; exit 1; }
 wait_running_owner "$TASK_ID" "$NEW_WORKER_ID" 180
 [[ "$(dump_threads)" == "1" ]] || { echo "[ru] dump threads=$(dump_threads), want 1" >&2; exit 1; }
-echo "[ru:handover] task re-owned by $NEW_WORKER_ID after old registration expired"
+echo "[ru:handover] task RUNNING on $NEW_WORKER_ID after operator copy + Start"
 
 echo "== fence 2: live protocol-11 registration refuses migrate down =="
 if migrate_new down --steps 1 --allow-destructive >/tmp/e2e-ru-${RUN_TAG}.down1.log 2>&1; then
