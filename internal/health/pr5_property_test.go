@@ -71,7 +71,7 @@ func TestPR5IncompleteObservationIsSilent(t *testing.T) {
 			Confirmed: map[Key]bool{}}
 		ts, _ := DefaultRegistry().Reconcile(open, f)
 		for _, tr := range ts {
-			if spec, ok := DefaultRegistry()[tr.Key.Kind]; ok && chainDirectoryOnly(spec) {
+			if spec, ok := DefaultRegistry()[tr.Kind]; ok && chainDirectoryOnly(spec) {
 				t.Fatalf("seed %d: incomplete chain.local emitted %+v (open=%+v)", seed, tr, open)
 			}
 		}
