@@ -4,7 +4,7 @@
 // note P2-6c (#421): a live run whose shared row is FAILED by another epoch is not a remote Stop: the run stops, its lease epoch is marked lost, memory takes the FAILED row and nothing is written
 // pos: scheduler execution loop delegating state mutations to scheduler_transitions.go
 // note #405: on a standalone server (MemoryLease, epoch 1 again after a restart) Start also resumes above every .sealed.eN in the task directory, so the open file never shares a sealed copy's catalog key (a silent GTID gap after the legacy failback repair)
-// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down; startTask refuses an epoch LeaseClock already marked lost and skips a task_node_refusal row that is still open; ClaimExpiredTasks finalizes an expired STOPPING lease with StopExpired and also claims STOPPED when desired RUN and the owner is empty
+// note §29: grace, a lease lost with no new owner, and a renew panic release that epoch on run exit and do not write desired STOP; a WRITE_FENCED append with no successor leaves LEASE_DEGRADED or RETRY_BACKOFF (#454); ENOENT on this run's .open.eN after the epoch is lost or a newer epoch holds the row is a lease handoff, not FAILED (#457); ClaimRunnableTasks retries a release that failed while meta was down and runs the mixed-version gate at sweep level so the _cluster finding opens without a claim candidate; startTask refuses an epoch LeaseClock already marked lost and skips a task_node_refusal row that is still open; ClaimExpiredTasks finalizes an expired STOPPING lease with StopExpired and also claims STOPPED when desired RUN and the owner is empty
 // note: if this file changes, update this header and module README.md.
 package tasks
 
@@ -606,6 +606,16 @@ func (s *Scheduler) ClaimRunnableTasks() (int, error) {
 		return 0, err
 	}
 	s.applyRemoteStops()
+	// The mixed-version gate is a sweep-level fence, not a per-candidate one:
+	// the _cluster MIXED_VERSION finding must open while an old-protocol node
+	// still dumps, even when this worker currently has nothing to claim.
+	// refuseMixedClaimLocked drops and re-takes s.mu around the meta calls.
+	s.mu.Lock()
+	gateErr := s.refuseMixedClaimLocked()
+	s.mu.Unlock()
+	if gateErr != nil {
+		return 0, gateErr
+	}
 	claimed, err := s.ClaimStartingTasks()
 	if err != nil {
 		return claimed, err
