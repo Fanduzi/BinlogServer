@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: two in-process cluster schedulers with separate data directories, one MemoryLease, and a health store that checks healthstore.CheckFence
-// output: acceptance for ADR 0009 P2-6.2 (design §30): a new lease rejects a delegated write; a node that is not the last owner is fenced; the last owner still opens and closes a chain finding after release; a restart on another node closes the old directory with OWNER_CHANGED; a gone last owner makes health UNKNOWN while the chain finding stays open; standalone is unchanged
+// output: acceptance for ADR 0009 P2-6.2 (design §30): a new lease rejects a delegated write; a node that is not the last owner is fenced; the last owner still opens and closes a chain finding after release; a restart on another node retires the old directory's finding with EVAL; a gone last owner makes health UNKNOWN while the chain finding stays open; standalone is unchanged
 // pos: regression for non-shared chain delegation; the in-process stand-in for the §13 QA row (the three-node e2e stays workflow_dispatch)
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -229,8 +229,10 @@ func TestP262OwnerChangedClosesOldDirectory(t *testing.T) {
 		t.Fatalf("new owner: %v", err)
 	}
 	reason, found := env.log.closeReason(health.SegmentEmptyLeftover)
-	if !found || reason != "OWNER_CHANGED" {
-		t.Fatalf("close reason %q found=%v, want OWNER_CHANGED", reason, found)
+	// PR-5: no OWNER_CHANGED close exists; the new owner's complete read
+	// retires the old directory's finding with EVAL.
+	if !found || reason != "EVAL" {
+		t.Fatalf("close reason %q found=%v, want EVAL", reason, found)
 	}
 }
 
@@ -381,7 +383,7 @@ func TestP262StandaloneChainUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
-		if row.Reason == "OWNER_CHANGED" {
+		if row.Reason != "EVAL" {
 			t.Fatalf("standalone transition %+v", row)
 		}
 	}

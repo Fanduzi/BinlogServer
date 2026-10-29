@@ -1,6 +1,6 @@
 // Package health provides module-level functionality for health.
-// input: an open SEGMENT_MISSING, Facts.ChainOwnerChanged, and whether chain.local is complete and still derives the key
-// output: proof that OWNER_CHANGED and an incomplete chain.local never close SEGMENT_MISSING, and that a close happens only when the owner did not change, chain.local is complete, and the violation is gone, with reason EVAL; I6_MISSING_LOCAL detail names chain_owner or node, and a size or object SEGMENT_MISSING does not
+// input: an open SEGMENT_MISSING and whether chain.local is complete and still derives the key
+// output: PR-5 proof that an incomplete chain.local never closes SEGMENT_MISSING, that a close happens only when chain.local is complete and the violation is gone, with reason EVAL; I6_MISSING_LOCAL detail names chain_owner or node, and a size or object SEGMENT_MISSING does not
 // pos: ADR 0011 PR-3 temporary no-close ban (docs/adr/0011-cluster-ownership-and-failover.md §3.5 and rollout row 3); PR-5 replaces it
 // note: if this file changes, update this header and module README.md.
 package health
@@ -37,9 +37,11 @@ func TestSegmentMissingStaysOpenWhenOwnerChanges(t *testing.T) {
 	key := Key{TaskID: "1", Kind: SegmentMissing, Subject: "mysql-bin.000002"}
 	open := []Finding{{TaskID: "1", Kind: SegmentMissing, Subject: key.Subject, Severity: Critical, Detail: "gone"}}
 	cases := []*Facts{
-		{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true, Complete: map[Scope]bool{}},
-		{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true, Complete: map[Scope]bool{ScopeChainLocal: true}},
-		{TaskID: "1", Now: time.Unix(1, 0).UTC(), ChainOwnerChanged: true, Complete: map[Scope]bool{ScopeChainLocal: true},
+		{TaskID: "1", Now: time.Unix(1, 0).UTC(), Complete: map[Scope]bool{}},
+		// A complete read where the violation is genuinely gone closes with
+		// EVAL even across an owner change (PR-5); what must stay open is an
+		// incomplete read, or a complete read where the fact still derives.
+		{TaskID: "1", Now: time.Unix(1, 0).UTC(), Complete: map[Scope]bool{ScopeChainLocal: true},
 			Chain: &ChainFacts{Violations: []assurance.Violation{{Kind: assurance.I6MissingLocal, Segments: []string{key.Subject}, Evidence: "LOCAL_ONLY"}}}},
 	}
 	for i, f := range cases {
@@ -57,10 +59,9 @@ func TestSegmentMissingClosesOnlyWhenVerifiedAndGone(t *testing.T) {
 	key := Key{TaskID: "1", Kind: SegmentMissing, Subject: subject}
 	open := []Finding{{TaskID: "1", Kind: key.Kind, Subject: subject, Severity: Critical}}
 	for seed := 0; seed < 200; seed++ {
-		ownerChanged := seed&1 == 1
 		localComplete := seed&2 == 2
 		violation := seed&4 == 4
-		f := &Facts{TaskID: "1", Now: time.Unix(int64(seed+1), 0).UTC(), ChainOwnerChanged: ownerChanged, Complete: map[Scope]bool{}, Chain: &ChainFacts{}}
+		f := &Facts{TaskID: "1", Now: time.Unix(int64(seed+1), 0).UTC(), Complete: map[Scope]bool{}, Chain: &ChainFacts{}}
 		if localComplete {
 			f.Complete[ScopeChainLocal] = true
 		}
@@ -81,7 +82,7 @@ func TestSegmentMissingClosesOnlyWhenVerifiedAndGone(t *testing.T) {
 				closed = &tr
 			}
 		}
-		wantClose := !ownerChanged && localComplete && !violation
+		wantClose := localComplete && !violation
 		if wantClose {
 			if closed == nil || closed.Reason != ReasonEval {
 				t.Fatalf("seed %d: close %+v, want one EVAL close", seed, closed)
@@ -89,7 +90,7 @@ func TestSegmentMissingClosesOnlyWhenVerifiedAndGone(t *testing.T) {
 			continue
 		}
 		if closed != nil {
-			t.Fatalf("seed %d ownerChanged=%v complete=%v violation=%v closed with %s", seed, ownerChanged, localComplete, violation, closed.Reason)
+			t.Fatalf("seed %d complete=%v violation=%v closed with %s", seed, localComplete, violation, closed.Reason)
 		}
 	}
 }

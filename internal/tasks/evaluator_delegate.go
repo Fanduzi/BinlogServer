@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: task_health.chain_owner (healthstore.ChainOwnerStore), the task lease row, and worker_heartbeats when the task store implements workerHeartbeatReader
-// output: delegatedFence (the last chain owner writes chain.local after its lease is released, bound to that lease epoch and node, design §30), noteOwnerChanged (OWNER_CHANGED when a new holder is a different node), noteNodeGone (chain.local incomplete and Facts.NodeGone after node_gone_after; a heartbeat read error is not gone)
+// output: delegatedFence (the last chain owner writes chain.local after its lease is released, bound to that lease epoch and node, design §30), noteNodeGone (chain.local incomplete and Facts.NodeGone after node_gone_after; a heartbeat read error is not gone)
 // pos: ADR 0009 phase 2 P2-6.2 (docs/design/0009-phase2-health-evaluator.md §30); standalone never reaches this file's fences
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -98,19 +98,6 @@ func (e *Evaluator) delegatedFence(t Task) (health.Fence, bool) {
 	}
 	e.noteDelegated(t.ID, true)
 	return health.Fence{Mode: health.FenceCluster, TaskEpoch: epoch, Node: e.cfg.NodeID, Instance: e.cfg.Instance, Delegated: true}, true
-}
-
-// noteOwnerChanged sets Facts.ChainOwnerChanged when this cluster holder is
-// not the node that last evaluated the directory. A read error does not.
-func (e *Evaluator) noteOwnerChanged(ctx context.Context, fence health.Fence, facts *health.Facts) {
-	if fence.Mode != health.FenceCluster || fence.Proxy || fence.Delegated || facts == nil {
-		return
-	}
-	owner, ok := e.chainOwner(ctx, facts.TaskID)
-	if !ok || owner == "" || owner == fence.Node {
-		return
-	}
-	facts.ChainOwnerChanged = true
 }
 
 func (e *Evaluator) taskStore() any {
