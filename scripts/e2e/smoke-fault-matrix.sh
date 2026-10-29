@@ -387,10 +387,15 @@ cell_kill9_restart() {
   # (SEGMENT_NOT_ON_WORKER on its own data_dir) instead of resuming from the
   # checkpoint — the cell reports the observed edge rather than masking it.
   if ! wait_running_owner "$task_id" "$owner_id" 180; then
-    local last_err
+    local last_err self_refusal
     last_err="$(task_field "$task_id" last_error)"
-    if [[ "$(task_state "$task_id")" == "LEASE_DEGRADED" && "$last_err" == SEGMENT_NOT_ON_WORKER:*"/$(basename "$data_dir")/$task_id/"* ]]; then
-      cell_result "phase-dump x kill-9 + row7 restart" "SKIP" "GAP #583: restarted owner refused its own header-only .open tail (SEGMENT_NOT_ON_WORKER on $owner_id's own dir); peer-yield invariants held"
+    # A self-refusal is the #583 class regardless of the error-text variant:
+    # catalog paths normalize differently per kill window (.open.eN path,
+    # ./-prefixed path, or a bare segment name), but a task_node_refusal row
+    # on the restarted owner itself is the precise signature.
+    self_refusal="$(meta_sql "SELECT COUNT(*) FROM task_node_refusal WHERE task_id='$task_id' AND node_id='$owner_id'" | tr -d ' \r\n')"
+    if [[ "$(task_state "$task_id")" == "LEASE_DEGRADED" && "$last_err" == SEGMENT_NOT_ON_WORKER:* && "$self_refusal" -ge 1 ]]; then
+      cell_result "phase-dump x kill-9 + row7 restart" "SKIP" "GAP #583: restarted owner refused its own tail on its own data_dir (refusal node=$owner_id, err=${last_err:0:120}); peer-yield invariants held"
       return 0
     fi
     return 1
