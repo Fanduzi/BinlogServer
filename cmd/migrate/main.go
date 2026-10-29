@@ -1,6 +1,6 @@
 // Package main provides module-level functionality for main.
 // input: migration files, META_DSN/env flags, an optional --config whose meta.tls matches the server, golang-migrate driver dependencies
-// output: schema migration commands (up/down/version/force/goto) execution results; up and goto warn and continue when crossing version 11 without PROCESS, and abort when a transaction older than 5s is visible; a dirty version 11 is applied again from version 10 without a manual force because that file's DDL is idempotent; a DSN rewritten with meta.tls when --config is set; the pool is opened in this process so that registered tls config is the one migrate uses; a dial error is prefixed meta.tls the same way server startup prefixes it
+// output: schema migration commands (up/down/version/force/goto) execution results; up and goto warn and continue when crossing version 11 without PROCESS, abort when a transaction older than 5s is visible, and refuse when an unexpired worker registration guards the crossing (the in-file divisor prechecks need a session sql_mode the pooled driver cannot guarantee, so the deterministic fence is liveRegistrationGate); a dirty version 11 is applied again from version 10 without a manual force because that file's DDL is idempotent; a DSN rewritten with meta.tls when --config is set; the pool is opened in this process so that registered tls config is the one migrate uses; a dial error is prefixed meta.tls the same way server startup prefixes it
 // pos: database schema migration CLI for operational change management
 // note: if this file changes, update this header and module README.md.
 package main
@@ -111,6 +111,9 @@ func newUpCommand(opts *migrateOptions) *cobra.Command {
 			if err := warnLongTransactions(opts, version, verr, ^uint(0)); err != nil {
 				return err
 			}
+			if err := liveRegistrationGate(opts, version, verr, ^uint(0)); err != nil {
+				return err
+			}
 			if err := applyUp(m); err != nil {
 				return metaDialErr(err)
 			}
@@ -144,6 +147,10 @@ func newDownCommand(opts *migrateOptions) *cobra.Command {
 			defer closeMigrator(m)
 			if steps <= 0 {
 				return errors.New("--steps must be > 0")
+			}
+			version, _, verr := m.Version()
+			if err := liveRegistrationGate(opts, version, verr, version-uint(steps)); err != nil {
+				return err
 			}
 			if err := m.Steps(-steps); err != nil {
 				if errors.Is(err, migrate.ErrNoChange) {
@@ -239,6 +246,9 @@ func newGotoCommand(opts *migrateOptions) *cobra.Command {
 			defer closeMigrator(m)
 			current, _, verr := m.Version()
 			if err := warnLongTransactions(opts, current, verr, uint(version)); err != nil {
+				return err
+			}
+			if err := liveRegistrationGate(opts, current, verr, uint(version)); err != nil {
 				return err
 			}
 			if err := applyMigrate(m, uint(version)); err != nil {
@@ -385,6 +395,61 @@ func warnLongTransactions(opts *migrateOptions, current uint, currentErr error, 
 	}
 	if warning != "" {
 		fmt.Fprintln(os.Stderr, "warning: "+warning)
+	}
+	return nil
+}
+
+// liveRegistrationGate is the deterministic form of 000011's in-file
+// prechecks. The .sql guards divide by zero, which needs a strict session
+// sql_mode on the same connection; golang-migrate executes statements over a
+// pool, so a SET SESSION can land on another conn and the guard degrades to a
+// NULL + warning. The real fence runs here:
+//   - applying 000011 (up/goto) while any registration is unexpired;
+//   - leaving 000011 (down/goto) while a protocol-11 registration is
+//     unexpired, mirroring the down file's divisor guard.
+//
+// A missing worker_registrations table (schemas before it existed) reads as
+// zero live registrations.
+func liveRegistrationGate(opts *migrateOptions, current uint, currentErr error, target uint) error {
+	if errors.Is(currentErr, migrate.ErrNilVersion) {
+		current = 0
+	} else if currentErr != nil {
+		return nil
+	}
+	if crossingOwnershipMigration(current, currentErr, target) {
+		return refuseLiveRegistrations(opts, "", "applying migration 000011")
+	}
+	if current == ownershipSchemaVersion && target < ownershipSchemaVersion {
+		return refuseLiveRegistrations(opts, "cluster_protocol_version >= 11 AND", "leaving migration 000011")
+	}
+	return nil
+}
+
+func refuseLiveRegistrations(opts *migrateOptions, protocolFilter, what string) error {
+	db, err := sql.Open("mysql", driverDSN(opts.dsn))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var present int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'worker_registrations'",
+	).Scan(&present); err != nil {
+		return metaDialErr(err)
+	}
+	if present == 0 {
+		return nil
+	}
+	var live int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM worker_registrations WHERE "+protocolFilter+" lease_expire_at > NOW(6)",
+	).Scan(&live); err != nil {
+		return metaDialErr(err)
+	}
+	if live > 0 {
+		return fmt.Errorf("refusing to %s while %d worker registration(s) are unexpired; stop every node first", what, live)
 	}
 	return nil
 }
