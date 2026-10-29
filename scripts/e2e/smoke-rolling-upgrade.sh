@@ -71,6 +71,10 @@ dump_threads() {
     -e "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE COMMAND LIKE 'Binlog Dump%';" 2>/dev/null | tr -d ' \r\n'
 }
 
+source_sql() {
+  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -N -e "$1" 2>/dev/null
+}
+
 kill_pid() {
   local pid="$1"
   if [[ -z "$pid" ]]; then
@@ -321,6 +325,15 @@ sleep 20
 echo "[ru:mixed] MIXED_VERSION open on _cluster, /api/health 503, no takeover"
 
 echo "== old worker leaves: gate clears, tail is foreign on per_node =="
+# Land a data event in the open segment before the old worker leaves. The
+# operator copy below only adopts when binlog.DurableResume finds a complete
+# event (end log_pos > 0) in the copied .open file; a preamble-only copy
+# still resolves Missing through the catalog file_path (#581 family, a real
+# gap — an empty tail cannot be adopted even after the operator copies it).
+source_sql "CREATE DATABASE IF NOT EXISTS e2e_ru;
+  CREATE TABLE IF NOT EXISTS e2e_ru.handover (id INT PRIMARY KEY AUTO_INCREMENT);
+  INSERT INTO e2e_ru.handover VALUES (NULL);"
+sleep 3
 kill_pid "$OLD_WORKER_PID"; OLD_WORKER_PID=""
 wait_crit_closed "_cluster" "MIXED_VERSION" 120
 # ADR 0011: a per_node claim meeting the previous owner's foreign .open tail
