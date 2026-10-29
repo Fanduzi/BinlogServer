@@ -23,7 +23,7 @@ Usage:
   ./scripts/e2e/run-suite.sh [--profile quick|full] [--scenarios a,b,c] [--keep-env]
 
 Profiles:
-  quick  -> smoke-least-privilege-migrate,smoke-task-desired-migration,smoke,smoke-version-restore,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-standalone-restart,smoke-standalone-full-disk,smoke-session-kill
+  quick  -> smoke-least-privilege-migrate,smoke-task-desired-migration,smoke,smoke-version-restore,compression,smoke-source-outage,smoke-unreachable-giveup,smoke-control-loop,smoke-fail-alert,smoke-gtid-redump,smoke-gtid-hole,smoke-standalone-restart,smoke-standalone-full-disk,smoke-session-kill
   full   -> smoke,compression,orchestrator,semisync,meta-failover
 
 Options:
@@ -112,7 +112,7 @@ build_scenarios() {
 
   case "$PROFILE" in
     quick)
-      echo "smoke-least-privilege-migrate smoke-task-desired-migration smoke smoke-version-restore compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-standalone-restart smoke-standalone-full-disk smoke-session-kill"
+      echo "smoke-least-privilege-migrate smoke-task-desired-migration smoke smoke-version-restore compression smoke-source-outage smoke-unreachable-giveup smoke-control-loop smoke-fail-alert smoke-gtid-redump smoke-gtid-hole smoke-standalone-restart smoke-standalone-full-disk smoke-session-kill"
       ;;
     full)
       echo "smoke compression orchestrator semisync meta-failover"
@@ -258,6 +258,9 @@ run_scenario() {
       ;;
     smoke-gtid-redump)
       E2E_DATA_DIR="$DATA_DIR" E2E_SERVER_PID="$SERVER_PID" E2E_SERVER_LOG="$SERVER_LOG" BINLOG_SERVER_META_DSN="$META_DSN" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-redump.sh"
+      ;;
+    smoke-gtid-hole)
+      E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-hole.sh"
       ;;
     smoke-gtid-pitr)
       E2E_DATA_DIR="$DATA_DIR" bash "$ROOT_DIR/scripts/e2e/smoke-gtid-pitr.sh"

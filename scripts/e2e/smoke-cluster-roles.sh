@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # input: canonical E2E database topology and cluster-role e2e dependencies
-# output: deterministic e2e orchestration, scenario execution, and verification logs
+# output: deterministic e2e orchestration, scenario execution, and verification logs;
+#   the last cell moves a sealed segment away, asserts SEGMENT_MISSING opens and
+#   /api/health turns 503, then moves it back and asserts EVAL closes the finding
 # pos: integration-test automation layer validating end-to-end system behavior
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
@@ -21,6 +23,8 @@ CONTROL_PID=""
 WORKER_PID=""
 CHECKPOINT_HTTP_CODE=""
 CHECKPOINT_HTTP_BODY=""
+SEALED_PATH=""
+STASHED_PATH=""
 
 source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
 MYSQL57_PORT="$E2E_MYSQL57_PORT"
@@ -36,6 +40,9 @@ need_cmd jq
 e2e_ensure_meta_schema "$ROOT_DIR" "$META_DSN"
 
 cleanup() {
+  if [[ -n "$STASHED_PATH" && -f "$STASHED_PATH" && -n "$SEALED_PATH" ]]; then
+    mv "$STASHED_PATH" "$SEALED_PATH" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$WORKER_PID" ]]; then
     kill "$WORKER_PID" >/dev/null 2>&1 || true
     wait "$WORKER_PID" >/dev/null 2>&1 || true
@@ -68,6 +75,7 @@ start_control_plane() {
   BINLOG_SERVER_LISTEN_ADDR="127.0.0.1:18080" \
   BINLOG_SERVER_DATA_DIR="$cp_data_dir" \
   BINLOG_SERVER_META_DSN="$META_DSN" \
+  BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC=2 \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$CONTROL_LOG" 2>&1 &
   CONTROL_PID=$!
 }
@@ -82,6 +90,7 @@ start_worker() {
   BINLOG_SERVER_CLUSTER_WORKER_HEALTH_LISTEN_ADDR="$WORKER_HEALTH_ADDR" \
   BINLOG_SERVER_DATA_DIR="$worker_data_dir" \
   BINLOG_SERVER_META_DSN="$META_DSN" \
+  BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC=2 \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$WORKER_LOG" 2>&1 &
   WORKER_PID=$!
 }
@@ -256,6 +265,76 @@ write_source_data() {
     -e "INSERT INTO binlog_e2e_57.t1(v) VALUES('${value}');"
 }
 
+mysql57() {
+  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -Nse "$1" | tr -d '\r'
+}
+
+health_code() {
+  curl -sS -o /dev/null -w '%{http_code}' "$API/api/health"
+}
+
+wait_health() {
+  local want="$1" secs="${2:-90}" i
+  for i in $(seq 1 "$secs"); do
+    if [[ "$(health_code)" == "$want" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "/api/health not $want in time (last=$(health_code))" >&2
+  curl -fsS "$API/api/findings?limit=500" >&2 || true
+  return 1
+}
+
+open_crit() {
+  curl -fsS "$API/api/findings?limit=500" \
+    | jq -e --arg t "$1" --arg k "$2" '[.[] | select(.task_id == $t and .kind == $k and .severity == "CRITICAL" and (.resolved_at == null))] | length >= 1' >/dev/null
+}
+
+wait_finding_open() {
+  local id="$1" kind="$2" secs="${3:-90}" i
+  for i in $(seq 1 "$secs"); do
+    if open_crit "$id" "$kind"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$kind never opened CRITICAL on task $id" >&2
+  curl -fsS "$API/api/findings?limit=500" >&2 || true
+  return 1
+}
+
+wait_finding_closed() {
+  local id="$1" kind="$2" secs="${3:-90}" i
+  for i in $(seq 1 "$secs"); do
+    if ! open_crit "$id" "$kind"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$kind still open on task $id" >&2
+  curl -fsS "$API/api/findings?limit=500" >&2 || true
+  return 1
+}
+
+# wait_sealed_file prints the catalog file_path of the first SEALED segment
+# whose local file exists on the worker's disk.
+wait_sealed_file() {
+  local id="$1" i path
+  for i in $(seq 1 60); do
+    path="$(curl -fsS "$API/api/tasks/$id/files" \
+      | jq -r '[.[] | select(.state == "SEALED" and (.file_path | length > 0))][0].file_path // empty')"
+    if [[ -n "$path" && -f "$path" ]]; then
+      printf '%s' "$path"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "no sealed segment with a local file for task $id" >&2
+  curl -fsS "$API/api/tasks/$id/files" >&2 || true
+  return 1
+}
+
 echo "[cluster-roles] start control-plane process"
 start_control_plane
 wait_control_plane_ready
@@ -310,5 +389,23 @@ wait_checkpoint_ready "$TASK_ID"
 RECOVER_AFTER_FILE="$(checkpoint_file)"
 RECOVER_AFTER_POS="$(checkpoint_pos)"
 echo "[cluster-roles] checkpoint after recovery: ${RECOVER_AFTER_FILE}:${RECOVER_AFTER_POS}"
+
+echo "[cluster-roles] seal a segment, move it away, expect SEGMENT_MISSING + health 503"
+wait_health 200
+mysql57 "FLUSH BINARY LOGS;" >/dev/null
+write_source_data "cluster-roles-post-rotate-${RUN_TAG}"
+SEALED_PATH="$(wait_sealed_file "$TASK_ID")"
+STASHED_PATH="$DATA_DIR/stash/$(basename "$SEALED_PATH")"
+mkdir -p "$DATA_DIR/stash"
+mv "$SEALED_PATH" "$STASHED_PATH"
+wait_finding_open "$TASK_ID" SEGMENT_MISSING 120
+[[ "$(health_code)" == "503" ]] || { echo "/api/health not 503 while SEGMENT_MISSING open" >&2; exit 1; }
+echo "[cluster-roles] SEGMENT_MISSING open for $(basename "$SEALED_PATH"), /api/health=503"
+
+mv "$STASHED_PATH" "$SEALED_PATH"
+STASHED_PATH=""
+wait_finding_closed "$TASK_ID" SEGMENT_MISSING 120
+wait_health 200
+echo "[cluster-roles] segment restored: finding closed by EVAL, /api/health=200"
 
 echo "[cluster-roles] success"
