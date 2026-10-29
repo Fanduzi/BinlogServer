@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: backup_tasks desired_run, spec_revision, applied_spec_revision, failed_spec_revision, lease hold, and whether this process has a live dump
-// output: (writeStartIntent records Start through ownership.Step and commitTransitionLocked: persist first, and only a recorded Start cancels a RETRY_BACKOFF loop; an idempotent STARTING or RUNNING Start does not Acquire; a process with no runner or no data directory writes owner-less STARTING; a Start during STOPPING keeps that phase, the worker lease, and the epoch; a Start on an empty owner writes epoch 0 so Acquire can claim that STARTING row) one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
+// output: (writeStartIntent records Start through ownership.Step and commitTransitionLocked: persist first, and only a recorded Start cancels a RETRY_BACKOFF loop; every Start — applied or idempotent — discharges this task's refusal rows in memory and task_node_refusal; a process with no runner or no data directory writes owner-less STARTING; a Start during STOPPING keeps that phase, the worker lease, and the epoch; a Start on an empty owner writes epoch 0 so Acquire can claim that STARTING row) one idempotent converge decision per task (none, stop, finish stop, restart, start on the held epoch, or acquire then start), a retry that adopts a stored Stop with a newer spec instead of covering it, and the scheduler methods that apply it Finishing an idle stop fences a held dump instead of writing STOPPED before that dump is confirmed gone.
 // pos: the only starter and stopper of a dump; operator Start, Stop, and spec edits write the row and this loop catches up
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -379,6 +379,10 @@ func (s *Scheduler) writeStartIntent(id string) error {
 	}
 	res := ownership.Step(s.ownershipState(task, now), ev, now)
 	if res.Decision == ownership.DecisionIdempotent {
+		// An idempotent Start still discharges refusals: a task_node_refusal
+		// row left by an earlier yield must not outlive the recorded intent.
+		s.rememberRefusalLocked(id, res.State)
+		s.deleteStoredRefusalsLocked(id)
 		return nil
 	}
 	if res.Decision != ownership.DecisionApplied {

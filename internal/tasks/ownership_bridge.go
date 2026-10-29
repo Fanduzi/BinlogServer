@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: the in-memory task row, ownership.Step, and the cluster storage mode
-// output: task phase, desired, failed_reason, and lease fields copied from one Step result; SOURCE_SWITCHOVER and a used SOURCE_UNREACHABLE budget are terminal FAILED and are not claimed again; a loaded row_generation of 0 still fences the yield; a memory lease has no task_leases row, so that step is kept and the task upsert writes it; a holder event synthesizes a lease only for the decision and does not invent an epoch on a row that had none; a late event that updates nothing is a no-op; an open task_node_refusal row blocks Acquire after restart; Start and DumpReady delete those rows
+// output: task phase, desired, failed_reason, and lease fields copied from one Step result; SOURCE_SWITCHOVER and a used SOURCE_UNREACHABLE budget are terminal FAILED and are not claimed again; a loaded row_generation of 0 still fences the yield; a memory lease has no task_leases row, so that step is kept and the task upsert writes it; a holder event synthesizes a lease only for the decision and does not invent an epoch on a row that had none; a late event that updates nothing is a no-op; with the lease in meta the task_node_refusal row is the cross-process record — Start and DumpReady delete it on any node, and a cached copy may not outlive it; an open row (or a cached one under a memory lease) blocks Acquire
 // pos: the only place the scheduler asks ADR 0011 what the next phase is
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -388,29 +388,28 @@ func (s *Scheduler) noteStepIntentsLocked(id string, res ownership.Result) {
 	}
 }
 
-// refuseStoredClaimLocked reads task_node_refusal. A restart has an empty
-// memory map; the row is what still blocks Acquire. Caller holds s.mu.
-func (s *Scheduler) refuseStoredClaimLocked(id string) error {
+// storedRefusalOpenLocked reads task_node_refusal. A restart has an empty
+// memory map; the row is what still blocks Acquire. known is false when the
+// store has no refusal surface, so a memory lease or a plain store keeps the
+// in-memory check as the only record. Caller holds s.mu.
+func (s *Scheduler) storedRefusalOpenLocked(id string) (open, known bool, err error) {
 	store := s.store
 	node := s.clusterWorkerID
 	q, ok := store.(interface {
 		RefusalOpen(context.Context, string, string) (bool, error)
 	})
 	if !ok {
-		return nil
+		return false, false, nil
 	}
 	s.mu.Unlock()
 	ctx, cancel := s.withLeaseTimeout(context.Background())
-	open, err := q.RefusalOpen(ctx, id, node)
+	open, err = q.RefusalOpen(ctx, id, node)
 	cancel()
 	s.mu.Lock()
 	if err != nil {
-		return err
+		return false, false, err
 	}
-	if open {
-		return ErrLeaseNotAcquired
-	}
-	return nil
+	return open, true, nil
 }
 
 // deleteStoredRefusalsLocked removes the task's refusal rows. Caller holds s.mu.
@@ -601,18 +600,32 @@ func (s *Scheduler) claimEligibilityLocked(task Task, hasLiveRun bool) error {
 }
 
 // claimLeaseGateLocked applies the refusal gates a lease claim must pass:
-// a mixed-version cluster, an open refusal row for this node, then a stored
-// refusal for this task. The memory row is reloaded last because a gate may
-// have rewritten it. Caller holds s.mu.
+// a mixed-version cluster, then the task_node_refusal record. When the lease
+// lives in meta that row is the cross-process record — an operator Start
+// deletes it from any node — so a cached copy in this process's memory must
+// not outlive it; a memory lease never wrote the row and keeps the map as
+// its only record. The memory row is reloaded last because a gate may have
+// rewritten it. Caller holds s.mu.
 func (s *Scheduler) claimLeaseGateLocked(id string) (Task, error) {
 	if err := s.refuseMixedClaimLocked(); err != nil {
 		return Task{}, err
 	}
+	if s.leaseStoredInMeta() {
+		open, known, err := s.storedRefusalOpenLocked(id)
+		if err != nil {
+			return Task{}, err
+		}
+		if known {
+			if open {
+				return Task{}, ErrLeaseNotAcquired
+			}
+			// The row is gone: Start deleted it on another node. The local
+			// cache this process wrote at its own yield is stale.
+			delete(s.refusals, id)
+		}
+	}
 	if s.refusalBlocksLocked(id, s.clusterWorkerID, time.Now()) {
 		return Task{}, ErrLeaseNotAcquired
-	}
-	if err := s.refuseStoredClaimLocked(id); err != nil {
-		return Task{}, err
 	}
 	task, ok := s.tasks[id]
 	if !ok {
