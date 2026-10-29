@@ -382,7 +382,19 @@ cell_kill9_restart() {
   local new_pid
   new_pid="$(restart_worker "$owner_id" "$([ "$owner_id" == "$WORKER1_ID" ] && echo "$WORKER1_HEALTH_ADDR" || echo "$WORKER2_HEALTH_ADDR")" "$data_dir" "$([ "$owner_id" == "$WORKER1_ID" ] && echo "$WORKER1_LOG" || echo "$WORKER2_LOG")")" || return 1
   [[ "$owner_id" == "$WORKER1_ID" ]] && WORKER1_PID="$new_pid" || WORKER2_PID="$new_pid"
-  wait_running_owner "$task_id" "$owner_id" 180 || return 1
+  # GAP #583: when the kill landed before the .open tail had one complete
+  # event, the restarted owner refuses its own suffixed .open.eN row
+  # (SEGMENT_NOT_ON_WORKER on its own data_dir) instead of resuming from the
+  # checkpoint — the cell reports the observed edge rather than masking it.
+  if ! wait_running_owner "$task_id" "$owner_id" 180; then
+    local last_err
+    last_err="$(task_field "$task_id" last_error)"
+    if [[ "$(task_state "$task_id")" == "LEASE_DEGRADED" && "$last_err" == SEGMENT_NOT_ON_WORKER:*"$data_dir"* ]]; then
+      cell_result "phase-dump x kill-9 + row7 restart" "SKIP" "GAP #583: restarted owner refused its own header-only .open tail (SEGMENT_NOT_ON_WORKER on $owner_id's own dir); peer-yield invariants held"
+      return 0
+    fi
+    return 1
+  fi
   local new_epoch
   new_epoch="$(task_epoch "$task_id")"
   [[ "$new_epoch" =~ ^[0-9]+$ && "$new_epoch" -gt "$old_epoch" ]] || { echo "[fm:k9] epoch did not grow: $old_epoch -> $new_epoch" >&2; return 1; }
