@@ -72,8 +72,7 @@ func newDrillFixture(t *testing.T, cfg VerifierConfig) (*Scheduler, *Verifier, T
 func drillCfg() VerifierConfig {
 	return VerifierConfig{
 		BudgetBytesPerSec: -1,
-		DrillDSN:          "drill:pw@tcp(127.0.0.1:4406)/drill",
-		DrillEvery:        time.Hour,
+		Drill:             DrillConfig{DSN: "drill:pw@tcp(127.0.0.1:4406)/drill", Every: time.Hour},
 	}
 }
 
@@ -92,7 +91,7 @@ func TestDrill_OffWithoutDSN(t *testing.T) {
 func TestDrill_RefusesTaskSource(t *testing.T) {
 	cfg := drillCfg()
 	// The drill DSN names the task's own source 127.0.0.1:3306.
-	cfg.DrillDSN = "repl:pw@tcp(127.0.0.1:3306)/x"
+	cfg.Drill.DSN = "repl:pw@tcp(127.0.0.1:3306)/x"
 	s, v, task, _ := newDrillFixture(t, cfg)
 	stubDrill(t, drillOps{
 		lookPath: func(string) (string, error) { t.Fatal("lookPath on a refused DSN"); return "", nil },
@@ -123,7 +122,9 @@ func TestDrill_Pass(t *testing.T) {
 		openDSN: func(string) (drillDB, error) { return db, nil },
 	})
 	s, v, task, _ := newDrillFixture(t, drillCfg())
-	now := time.Now()
+	// Anchor inside the hour period: a same-period call below adds a minute,
+	// so now must not sit within the last minute of a period.
+	now := time.Unix((time.Now().Unix()/3600)*3600+10, 0)
 	v.drillTask(context.Background(), task, now)
 	if !ran {
 		t.Fatal("replay never ran")

@@ -1425,9 +1425,11 @@ func startVerifier(ctx context.Context, cfg config.Config, scheduler *tasks.Sche
 		ObjectRecent:       time.Duration(cfg.Verify.ObjectRecentSec) * time.Second,
 		Objects:            tasks.NewObjectStore(objects),
 		ObjectBucket:       cfg.UploadBucket,
-		DrillDSN:           cfg.Verify.DrillDSN,
-		DrillEvery:         time.Duration(cfg.Verify.DrillEverySec) * time.Second,
-		DrillCheckSQL:      cfg.Verify.DrillCheckSQL,
+		Drill: tasks.DrillConfig{
+			DSN:      cfg.Verify.DrillDSN,
+			Every:    time.Duration(cfg.Verify.DrillEverySec) * time.Second,
+			CheckSQL: cfg.Verify.DrillCheckSQL,
+		},
 	}
 	if isClusterMode(cfg) {
 		vc.Allows = scheduler.VerifyAllows
