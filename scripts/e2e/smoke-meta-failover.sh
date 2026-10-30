@@ -91,7 +91,9 @@ cluster_json() {
 
 current_writer() {
   local anchor_host="$1"
-  cluster_json "$anchor_host" | jq -r '.[] | select(.ReadOnly == false) | .Key.Hostname' | head -n1
+  # first() inside jq: head -n1 would close the pipe mid-write and jq would
+  # die on SIGPIPE under pipefail.
+  cluster_json "$anchor_host" | jq -r 'first(.[] | select(.ReadOnly == false)) | .Key.Hostname'
 }
 
 wait_writer_changed() {

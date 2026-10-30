@@ -229,11 +229,14 @@ switch_event_count() {
 switch_metric() {
   local id="$1"
   local outcome="$2"
+  # awk must read the whole response: exiting on the first match closes the
+  # pipe while curl is still writing, and curl then dies with CURLE_WRITE_ERROR
+  # (23) under pipefail. Print the match in END instead.
   curl -fsS "$API/metrics" | awk -v id="$id" -v outcome="$outcome" '
     $1 ~ /^binlog_server_source_switchovers\{/ && index($0, "task_id=\"" id "\"") && index($0, "outcome=\"" outcome "\"") {
-      print $2
-      exit
+      v = $2
     }
+    END { if (v != "") print v }
   '
 }
 
@@ -681,8 +684,10 @@ assert_switch_metric "$latest_id" stopped eq 1
 echo "[switch] evidence: LATEST raw SOURCE_SWITCHOVER events=$latest_raw source_chain.switches=1 metric stopped=1"
 
 
-switch_msg="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r '.[] | select(.type=="SOURCE_SWITCHOVER") | .message' | head -n 1)"
-switch_detail="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r '.[] | select(.type=="SOURCE_SWITCHOVER") | .detail' | head -n 1)"
+# first() inside jq (no head): head -1 would close the pipe mid-write and
+# jq/curl would die on SIGPIPE (exit 23) under pipefail.
+switch_msg="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r 'first(.[] | select(.type=="SOURCE_SWITCHOVER")) | .message')"
+switch_detail="$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=100" | jq -r 'first(.[] | select(.type=="SOURCE_SWITCHOVER")) | .detail')"
 if [[ "$switch_msg" != *"$OLD_UUID"* || "$switch_msg" != *"$NEW_UUID"* || "$switch_msg" != *"continuing from the executed GTID set"* ]]; then
   echo "switch event [$switch_msg]" >&2
   exit 1
@@ -1048,7 +1053,9 @@ if [[ "$raw_after" != "$raw_fb" ]] \
   echo "restart on the old primary changed the chain raw=$raw_fb->$raw_after [$fb_json]" >&2
   exit 1
 fi
-if curl -fsS "$API/api/tasks/$gtid_id/events?limit=500" | jq -r '.[] | .message // ""' | grep -q 'SEALED_FILE_EXISTS'; then
+# grep -c reads the whole stream: -q would close the pipe mid-write and the
+# upstream jq/curl would die on SIGPIPE (exit 23) under pipefail.
+if [[ "$(curl -fsS "$API/api/tasks/$gtid_id/events?limit=500" | jq -r '.[] | .message // ""' | grep -c 'SEALED_FILE_EXISTS')" != "0" ]]; then
   echo "restart hit SEALED_FILE_EXISTS" >&2
   exit 1
 fi
