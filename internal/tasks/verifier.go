@@ -95,6 +95,13 @@ type VerifierConfig struct {
 	// ObjectBucket is the upload bucket named in an incomplete object pass.
 	// Empty when the process has no bucket configured.
 	ObjectBucket string
+	// DrillDSN is the restore drill's only address; empty leaves the drill
+	// off and it is never dialed. DrillEvery is the attempt period
+	// (config default 7d); <= 0 also leaves the drill off.
+	// DrillCheckSQL is the optional post-replay check statement.
+	DrillDSN      string
+	DrillEvery    time.Duration
+	DrillCheckSQL string
 }
 
 // TaskVerifyMetrics is one task's verifier series after the last finished pass.
@@ -110,6 +117,10 @@ type TaskVerifyMetrics struct {
 	NoDigestLocal        int
 	UnverifiableSize     int
 	Deferred             int
+	// LastDrillSuccessUnix is the last restore-drill pass. HaveDrillSuccess
+	// is false while no drill has passed, so the gauge stays unemitted.
+	LastDrillSuccessUnix int64
+	HaveDrillSuccess     bool
 }
 
 // VerifyMetrics is the process-wide snapshot /metrics reads.
@@ -174,6 +185,7 @@ type verifyStateFile struct {
 type verifyTaskState struct {
 	LastVerified map[string]time.Time          `json:"last_verified,omitempty"`
 	LastRead     map[string]assurance.ReadMark `json:"last_read,omitempty"`
+	Drill        *drillTaskState               `json:"drill,omitempty"`
 }
 
 // NewVerifier loads saved progress and builds the process-wide byte budget.
@@ -316,6 +328,7 @@ func (v *Verifier) Pass(ctx context.Context, now time.Time) {
 			break
 		}
 		checked, n, openedN, closedN, short, objErr, cause := v.passTask(ctx, task.ID, now)
+		v.drillTask(ctx, task, now)
 		if !checked {
 			skipped++
 			continue

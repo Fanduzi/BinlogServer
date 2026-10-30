@@ -108,5 +108,5 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 1. **C5，cluster 故障注入矩阵**：`smoke-fault-matrix.sh` 已建并随 `e2e-fault-matrix` job 每个 PR 运行；8 格实跑、5 格 COVERED、其余 SKIP 写明缺的注入原语（PR-2/PR-4 未覆盖的事务窗口、分区、共享存储）。达到 MET 需要补：节点→meta 分区原语、Acquire/评估读/claim 事务窗口注入点、共享存储 runner、PR-5 依赖格（row9/14）与 refusal-cap 调参格（row8）。
 2. ~~A1，链不变量 cluster 判定~~（已 MET：#462 的「cluster 删封存段没有 finding」有单测（ADR 0011 PR-3）；GTID 内部空洞的豁免链路 `smoke-gtid-hole` 在 quick 档、删封存段 `smoke-cluster-roles` 末格都进了 CI。所有权变化时 finding 单调（C6）已随 PR-5 落地：`OWNER_CHANGED` 关闭路径删除，`pr5_property_test.go` 三条属性跑在生产 `Reconcile` 上。#471 不合并）。
 3. ~~F4，评估器默认关~~（已 MET：`health.evaluator` 开关删除，评估器恒运行，CI 跑的就是生产路径）。
-4. **A4 仍是 PARTIAL，可选还原演练还没有**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）。集群仍不巡检（A4，等 ADR 0011 的主人）。真实 MinIO 由 `e2e-verify` 每个 PR 跑。覆盖查询和还原计划已由 `e2e-coverage` 每个 PR 对账（D3 MET）；按保留点做的可选演练还没有。
+4. **A4 仍是 PARTIAL，停止任务无人巡检**：standalone 的周期巡检在 CI 里（运行中的工人把缺本地文件和损坏对象报成 finding）；集群租约持有者巡检（`VerifyAllows`），可选还原演练已实现（`drill.go`，经 `Scheduler.RestorePlan` 出计划，单测覆盖）。真实 MinIO 由 `e2e-verify` 每个 PR 跑。覆盖查询和还原计划已由 `e2e-coverage` 每个 PR 对账（D3 MET）；停止的任务没有持有者所以暂无人巡检（与 #580 同族的覆盖缺口）。
 5. **H1，上线前提没验**：约定负载下的长跑验收还没有（H1，ADR 0009 阶段 6）。G2 已由 `e2e-tls` 的 `TestLiveAppTLS`（真实任务路径的 dump 与 meta 池 `CONNECTION_TYPE`）、`TestLiveS3TLS`（私有 CA 的 HTTPS 上传）和 `TestLiveMySQLTLS`，以及 `unit-and-e2e` / `race-and-vet` 里的 TLS 单测盖住。

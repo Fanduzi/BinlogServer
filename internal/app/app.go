@@ -1412,7 +1412,7 @@ func placeProbe(msg, bucket, endpoint string) string {
 // (no cluster lease) always verifies. Cluster asks the scheduler's
 // VerifyAllows — only the task lease holder verifies, because the local
 // bytes live on the holder's disk (ADR 0011 per_node, phase 3 §10). The
-// drill DSN is not logged and is not dialed.
+// drill DSN is not logged; it is dialed only by a due restore drill.
 func startVerifier(ctx context.Context, cfg config.Config, scheduler *tasks.Scheduler, objects tasks.ObjectHeadOpener, spawn func(func())) {
 	vc := tasks.VerifierConfig{
 		DataDir:            cfg.DataDir,
@@ -1425,6 +1425,9 @@ func startVerifier(ctx context.Context, cfg config.Config, scheduler *tasks.Sche
 		ObjectRecent:       time.Duration(cfg.Verify.ObjectRecentSec) * time.Second,
 		Objects:            tasks.NewObjectStore(objects),
 		ObjectBucket:       cfg.UploadBucket,
+		DrillDSN:           cfg.Verify.DrillDSN,
+		DrillEvery:         time.Duration(cfg.Verify.DrillEverySec) * time.Second,
+		DrillCheckSQL:      cfg.Verify.DrillCheckSQL,
 	}
 	if isClusterMode(cfg) {
 		vc.Allows = scheduler.VerifyAllows
