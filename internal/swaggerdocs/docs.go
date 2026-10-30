@@ -2064,8 +2064,6 @@ const docTemplate = `{
         "tasks.FindingKind": {
             "type": "string",
             "enum": [
-                "DRILL_FAILED",
-                "DRILL_REFUSED",
                 "TASK_PERSIST_FAILED",
                 "METADATA_WRITE_BLOCKED",
                 "EVENT_PERSIST_FAILED",
@@ -2089,11 +2087,11 @@ const docTemplate = `{
                 "META_LOCK_STALLED",
                 "SOURCE_UNREACHABLE",
                 "TASK_FAILED",
-                "MIXED_VERSION"
+                "MIXED_VERSION",
+                "DRILL_FAILED",
+                "DRILL_REFUSED"
             ],
             "x-enum-varnames": [
-                "FindingDrillFailed",
-                "FindingDrillRefused",
                 "FindingTaskPersistFailed",
                 "FindingMetadataWriteBlocked",
                 "FindingEventPersistFailed",
@@ -2117,7 +2115,9 @@ const docTemplate = `{
                 "FindingMetaLockStalled",
                 "FindingSourceUnreachable",
                 "FindingTaskFailed",
-                "FindingMixedVersion"
+                "FindingMixedVersion",
+                "FindingDrillFailed",
+                "FindingDrillRefused"
             ]
         },
         "tasks.FindingSeverity": {

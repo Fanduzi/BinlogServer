@@ -21,7 +21,10 @@ import (
 )
 
 // FindingKind is a closed set. Every kind has a fault-injection test in
-// finding_kinds_test.go; adding a kind without one fails that test.
+// finding_kinds_test.go; adding a kind without one fails that test. Keep
+// every kind constant in this file: swag merges a type's enum candidates
+// across files in nondeterministic order, so a kind declared elsewhere
+// makes `codehealth regen` a coin flip.
 type FindingKind string
 
 const (
@@ -85,6 +88,12 @@ const (
 	// FindingMixedVersion: a live registration is still on a protocol older
 	// than this binary (ADR 0011). Task _cluster. Claims are refused.
 	FindingMixedVersion FindingKind = "MIXED_VERSION"
+	// FindingDrillFailed: the drill replay's executed set missed the plan's
+	// end set, or the check SQL failed (phase 3 §12). CRITICAL.
+	FindingDrillFailed FindingKind = "DRILL_FAILED"
+	// FindingDrillRefused: the drill DSN names the task's own source
+	// host:port; the worker never dials it (decision 8). WARNING.
+	FindingDrillRefused FindingKind = "DRILL_REFUSED"
 )
 
 // FindingSeverity is CRITICAL (backup data or its record is at risk) or WARNING.

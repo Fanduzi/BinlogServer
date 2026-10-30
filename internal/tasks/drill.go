@@ -37,15 +37,6 @@ type DrillConfig struct {
 	CheckSQL string
 }
 
-// FindingDrillFailed: the drill replay's executed set missed the plan's end
-// set, or the check SQL failed (phase 3 §12). CRITICAL.
-// FindingDrillRefused: the drill DSN names the task's own source host:port;
-// the worker never dials it (decision 8). WARNING.
-const (
-	FindingDrillFailed  FindingKind = "DRILL_FAILED"
-	FindingDrillRefused FindingKind = "DRILL_REFUSED"
-)
-
 // drillEventType is the task event every drill attempt leaves (design §12:
 // a finding plus one RESTORE_DRILL event).
 const drillEventType = "RESTORE_DRILL"

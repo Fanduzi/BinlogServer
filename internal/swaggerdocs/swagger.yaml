@@ -436,8 +436,6 @@ definitions:
     type: object
   tasks.FindingKind:
     enum:
-    - DRILL_FAILED
-    - DRILL_REFUSED
     - TASK_PERSIST_FAILED
     - METADATA_WRITE_BLOCKED
     - EVENT_PERSIST_FAILED
@@ -462,10 +460,10 @@ definitions:
     - SOURCE_UNREACHABLE
     - TASK_FAILED
     - MIXED_VERSION
+    - DRILL_FAILED
+    - DRILL_REFUSED
     type: string
     x-enum-varnames:
-    - FindingDrillFailed
-    - FindingDrillRefused
     - FindingTaskPersistFailed
     - FindingMetadataWriteBlocked
     - FindingEventPersistFailed
@@ -490,6 +488,8 @@ definitions:
     - FindingSourceUnreachable
     - FindingTaskFailed
     - FindingMixedVersion
+    - FindingDrillFailed
+    - FindingDrillRefused
   tasks.FindingSeverity:
     enum:
     - CRITICAL
