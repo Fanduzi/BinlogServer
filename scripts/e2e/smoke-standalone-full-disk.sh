@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Package e2e provides module-level functionality for e2e.
-# input: a 30MB tmpfs as a standalone data_dir (needs passwordless sudo to mount; skipped otherwise)
-# output: with the disk full, a refused create answers 503 TASK_RECORDS_UNAVAILABLE, GET /api/findings serves TASK_RECORDS_FAILED/write and FINDINGS_PERSIST_FAILED from memory, GET /api/health is 503 degraded; after space is freed both close and health is ok
-# pos: #395 QA P2 (a full data_dir must not hide TASK_RECORDS_FAILED); no MySQL needed, the tasks are never started
+# input: a 30MB tmpfs as a standalone data_dir (needs passwordless sudo to mount; skipped otherwise), the suite mysql80 for the live-dump cell
+# output: with the disk full, a refused create answers 503 TASK_RECORDS_UNAVAILABLE, GET /api/findings serves TASK_RECORDS_FAILED/write and FINDINGS_PERSIST_FAILED from memory, GET /api/health is 503 degraded; after space is freed both close and health is ok. A5 live-dump cell: filling the disk under a RUNNING task leaves the row non-FAILED with findings open and /api/health 503; freeing space resumes the dump and the checkpoint's gtid_set covers every transaction written during the outage — no chain gap
+# pos: #395 QA P2 (a full data_dir must not hide TASK_RECORDS_FAILED) plus production-readiness A5 active-dump cell; the cluster-owner cell is the fault-matrix row15
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
 
@@ -68,4 +68,83 @@ wait_for "findings to close after space is freed (record retry every 30s)" \
   bash -c "[[ -z \"\$(curl -fsS $API/api/findings | jq -r '.[]|select(.kind==\"FINDINGS_PERSIST_FAILED\" or .kind==\"TASK_RECORDS_FAILED\")|.kind')\" ]]"
 [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == 200 ]]
 log "space freed: findings closed, /api/health ok"
+
+# ---- phase 2: a live dump while the disk fills (A5) --------------------------
+# A refused create proves nothing about the data plane. Fill the tmpfs under
+# a RUNNING task: ENOSPC is an epoch loss — the row keeps desired RUN and
+# never writes FAILED; findings and /api/health must say the backup is not
+# healthy. Freeing space must resume the dump and the checkpoint must pass
+# every transaction written while the disk was full — no chain gap.
+source "$ROOT_DIR/scripts/e2e/lib-topology.sh"
+
+mysql80() {
+  docker compose -f "$ROOT_DIR/deploy/e2e/docker-compose.yml" exec -T mysql80 \
+    mysql -uroot -proot -Nse "$1" | tr -d '\r'
+}
+
+wait_task_state() { # id want secs
+  local id="$1" want="$2" secs="${3:-60}" st i
+  for i in $(seq 1 "$secs"); do
+    st="$(curl -fsS "$API/api/tasks/$id" 2>/dev/null | jq -r '.state // empty')"
+    [[ "$st" == "$want" ]] && return 0
+    [[ "$st" == "FAILED" && "$want" != "FAILED" ]] && { echo "task $id FAILED" >&2; return 1; }
+    sleep 1
+  done
+  echo "task $id never reached $want (state=$st)" >&2
+  return 1
+}
+
+checkpoint() { curl -fsS "$API/api/tasks/$1/checkpoint" | jq -r '"\(.file):\(.pos) gtid=\(.gtid_set // "-")"'; }
+
+gtid_max() { # executed set -> largest GNO for the source uuid
+  local uuid="$1"
+  tr ',' '\n' | grep -i "^${uuid}:" | sed -E 's/.*[-:]([0-9]+)$/\1/' | sort -n | tail -1
+}
+
+RUN_TAG="$(date +%s)"
+DB2="a5full_${RUN_TAG}"
+UUID="$(mysql80 "SELECT @@server_uuid;")"
+mysql80 "CREATE DATABASE IF NOT EXISTS ${DB2}; CREATE TABLE IF NOT EXISTS ${DB2}.t(id INT PRIMARY KEY AUTO_INCREMENT, v VARCHAR(64));"
+
+tid="$(curl -fsS -X POST "$API/api/tasks" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"a5-dump-full-${RUN_TAG}\",\"cluster_key\":\"a5-dump-full-${RUN_TAG}\",\"source\":{\"host\":\"$E2E_SOURCE_HOST\",\"port\":$E2E_MYSQL80_PORT,\"user\":\"$E2E_SOURCE_USER\",\"password\":\"$E2E_SOURCE_PASS\",\"flavor\":\"mysql\",\"server_id\":442001},\"start\":{\"mode\":\"LATEST\"},\"storage\":{\"retention_days\":7}}" \
+  | jq -r '.id // empty')"
+[[ -n "$tid" && "$tid" != "null" ]] || { echo "create active task failed" >&2; exit 1; }
+curl -fsS -X POST "$API/api/tasks/$tid/start" >/dev/null
+wait_task_state "$tid" RUNNING 90
+mysql80 "INSERT INTO ${DB2}.t(v) VALUES ('before-${RUN_TAG}');"
+sleep 2
+log "active dump RUNNING, checkpoint $(checkpoint "$tid")"
+
+dd if=/dev/zero of="$DATA/fill2" bs=1M count=64 2>/dev/null || true
+log "data_dir full under a live dump: $(df -h "$DATA" | tail -1 | awk '{print $5}')"
+
+# The task must leave RUNNING (epoch lost, retries) but never write FAILED,
+# and the surface must admit the backup is not healthy.
+wait_for "task off RUNNING without FAILED on a full disk" \
+  bash -c "st=\"\$(curl -fsS $API/api/tasks/$tid | jq -r '.state')\"; [[ \"\$st\" != RUNNING && \"\$st\" != FAILED ]]"
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == 503 ]] \
+  || { echo "/api/health not 503 with the dump starved" >&2; exit 1; }
+log "live dump on a full disk: findings open, /api/health 503"
+
+mysql80 "INSERT INTO ${DB2}.t(v) VALUES ('during-${RUN_TAG}'),('during2-${RUN_TAG}');"
+max_at_fill="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | gtid_max "$UUID")"
+rm -f "$DATA/fill2"
+wait_task_state "$tid" RUNNING 120
+# gtid_set at the checkpoint must reach every source GTID present when the
+# disk filled — including the rows written during the outage.
+for _ in $(seq 1 120); do
+  got="$(checkpoint "$tid" | sed -E 's/.*gtid=//' | gtid_max "$UUID")"
+  [[ -n "$got" && -n "$max_at_fill" && "$got" -ge "$max_at_fill" ]] && break
+  sleep 1
+done
+got="$(checkpoint "$tid")"
+gtid_now="$(sed -E 's/.*gtid=//' <<<"$got" | gtid_max "$UUID")"
+[[ -n "$gtid_now" && "$gtid_now" -ge "$max_at_fill" ]] \
+  || { echo "checkpoint $got did not pass source GNO $max_at_fill" >&2; exit 1; }
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == 200 ]] \
+  || { echo "/api/health not 200 after the dump recovered" >&2; exit 1; }
+log "space freed under a live dump: RUNNING, checkpoint covers GNO $max_at_fill, /api/health ok"
+
+curl -fsS -X POST "$API/api/tasks/$tid/stop" >/dev/null || true
 log "success"

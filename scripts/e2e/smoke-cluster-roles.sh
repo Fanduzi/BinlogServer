@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# input: canonical E2E database topology and cluster-role e2e dependencies
+# input: canonical E2E database topology and cluster-role e2e dependencies; passwordless sudo mounts a 30MB tmpfs for the owner disk-full cell (skipped when sudo is missing)
 # output: deterministic e2e orchestration, scenario execution, and verification logs;
-#   the last cell moves a sealed segment away, asserts SEGMENT_MISSING opens and
-#   /api/health turns 503, then moves it back and asserts EVAL closes the finding
-# pos: integration-test automation layer validating end-to-end system behavior
+#   the A5 cell fills the owner worker's data_dir under a RUNNING task (the row never
+#   writes FAILED, /api/health goes 503, and after the space is freed the task returns
+#   to RUNNING with the checkpoint past the outage writes); the last cell moves a sealed
+#   segment away, asserts SEGMENT_MISSING opens and /api/health turns 503, then moves it
+#   back and asserts EVAL closes the finding
+# pos: integration-test automation layer validating end-to-end system behavior, including the production-readiness A5 cluster-owner cell (ADR 0011 §4.2 row 15)
 # note: if this file changes, update this header and module README.md.
 set -euo pipefail
 
@@ -51,8 +54,23 @@ cleanup() {
     kill "$CONTROL_PID" >/dev/null 2>&1 || true
     wait "$CONTROL_PID" >/dev/null 2>&1 || true
   fi
+  if [[ "$WORKER_TMPFS" == "1" ]]; then
+    mountpoint -q "$DATA_DIR/worker" && sudo -n umount -l "$DATA_DIR/worker" || true
+  fi
 }
 trap cleanup EXIT
+
+# The worker's data_dir rides a small tmpfs so the A5 cluster-owner cell can
+# fill it. When passwordless sudo is missing the cell is skipped and the
+# worker just uses the plain directory.
+WORKER_TMPFS=0
+if sudo -n true 2>/dev/null; then
+  mkdir -p "$DATA_DIR/worker"
+  if sudo -n mount -t tmpfs -o "size=30m,uid=$(id -u),gid=$(id -g)" tmpfs "$DATA_DIR/worker" 2>/dev/null; then
+    WORKER_TMPFS=1
+    echo "[cluster-roles] worker data_dir on a 30MB tmpfs: $DATA_DIR/worker"
+  fi
+fi
 
 wait_control_plane_ready() {
   for _ in {1..120}; do
@@ -75,7 +93,7 @@ start_control_plane() {
   BINLOG_SERVER_LISTEN_ADDR="127.0.0.1:18080" \
   BINLOG_SERVER_DATA_DIR="$cp_data_dir" \
   BINLOG_SERVER_META_DSN="$META_DSN" \
-  BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC=2 \
+  BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC="${E2E_HEALTH_SWEEP_SEC:-2}" \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$CONTROL_LOG" 2>&1 &
   CONTROL_PID=$!
 }
@@ -90,7 +108,7 @@ start_worker() {
   BINLOG_SERVER_CLUSTER_WORKER_HEALTH_LISTEN_ADDR="$WORKER_HEALTH_ADDR" \
   BINLOG_SERVER_DATA_DIR="$worker_data_dir" \
   BINLOG_SERVER_META_DSN="$META_DSN" \
-  BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC=2 \
+  BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC="${E2E_HEALTH_SWEEP_SEC:-2}" \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$WORKER_LOG" 2>&1 &
   WORKER_PID=$!
 }
@@ -390,6 +408,49 @@ RECOVER_AFTER_FILE="$(checkpoint_file)"
 RECOVER_AFTER_POS="$(checkpoint_pos)"
 echo "[cluster-roles] checkpoint after recovery: ${RECOVER_AFTER_FILE}:${RECOVER_AFTER_POS}"
 
+if [[ "$WORKER_TMPFS" == "1" ]]; then
+  echo "[cluster-roles] A5: fill the owner data_dir under a running task"
+  checkpoint_fetch "$TASK_ID"
+  FULL_BEFORE_FILE="$(checkpoint_file)"
+  FULL_BEFORE_POS="$(checkpoint_pos)"
+  dd if=/dev/zero of="$DATA_DIR/worker/fill" bs=1M count=64 2>/dev/null || true
+  echo "[cluster-roles] worker data_dir full: $(df -h "$DATA_DIR/worker" | tail -1 | awk '{print $5}')"
+
+  # ADR 0011 §4.2 row 15: ENOSPC is an epoch loss — desired stays RUN, the
+  # row never writes FAILED, and the control plane must admit degraded.
+  for _ in $(seq 1 120); do
+    st="$(task_state "$TASK_ID")"
+    [[ "$st" == "FAILED" ]] && { echo "task FAILED on owner disk full" >&2; exit 1; }
+    [[ "$st" != "RUNNING" ]] && break
+    sleep 1
+  done
+  [[ "$(task_state "$TASK_ID")" != "RUNNING" ]] \
+    || { echo "task stayed RUNNING with a full disk" >&2; exit 1; }
+  for _ in $(seq 1 150); do
+    health_code="$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")"
+    [[ "$health_code" == "503" ]] && break
+    sleep 1
+  done
+  [[ "$health_code" == "503" ]] \
+    || { echo "/api/health=$health_code on owner disk full, want 503" >&2; exit 1; }
+  echo "[cluster-roles] owner disk full: state=$(task_state "$TASK_ID"), /api/health 503"
+
+  write_source_data "cluster-roles-diskfull-${RUN_TAG}"
+  rm -f "$DATA_DIR/worker/fill"
+  wait_task_running "$TASK_ID"
+  wait_checkpoint_progress "$TASK_ID" "$FULL_BEFORE_FILE" "$FULL_BEFORE_POS"
+  for _ in $(seq 1 150); do
+    health_code="$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")"
+    [[ "$health_code" == "200" ]] && break
+    sleep 1
+  done
+  [[ "$health_code" == "200" ]] \
+    || { echo "/api/health=$health_code after the disk freed, want 200" >&2; exit 1; }
+  echo "[cluster-roles] owner disk freed: RUNNING, checkpoint past ${FULL_BEFORE_FILE}:${FULL_BEFORE_POS}, /api/health ok"
+else
+  echo "[cluster-roles] A5 owner disk-full cell skipped: no tmpfs (sudo mount unavailable)"
+fi
+
 echo "[cluster-roles] seal a segment, move it away, expect SEGMENT_MISSING + health 503"
 wait_health 200
 mysql57 "FLUSH BINARY LOGS;" >/dev/null
@@ -407,5 +468,6 @@ STASHED_PATH=""
 wait_finding_closed "$TASK_ID" SEGMENT_MISSING 120
 wait_health 200
 echo "[cluster-roles] segment restored: finding closed by EVAL, /api/health=200"
+
 
 echo "[cluster-roles] success"
