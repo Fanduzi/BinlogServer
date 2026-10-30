@@ -109,6 +109,7 @@ start_worker() {
   BINLOG_SERVER_DATA_DIR="$worker_data_dir" \
   BINLOG_SERVER_META_DSN="$META_DSN" \
   BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC="${E2E_HEALTH_SWEEP_SEC:-2}" \
+  BINLOG_SERVER_HEALTH_REFUSAL_RETRY_CAP_SEC="${E2E_REFUSAL_CAP_SEC:-15}" \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$WORKER_LOG" 2>&1 &
   WORKER_PID=$!
 }
@@ -416,6 +417,10 @@ if [[ "$WORKER_TMPFS" == "1" ]]; then
   dd if=/dev/zero of="$DATA_DIR/worker/fill" bs=1M count=64 2>/dev/null || true
   echo "[cluster-roles] worker data_dir full: $(df -h "$DATA_DIR/worker" | tail -1 | awk '{print $5}')"
 
+  # An idle task touches no local bytes: source writes force appends onto the
+  # full disk so the ENOSPC actually lands.
+  write_source_data "cluster-roles-diskfull-${RUN_TAG}"
+
   # ADR 0011 §4.2 row 15: ENOSPC is an epoch loss — desired stays RUN, the
   # row never writes FAILED, and the control plane must admit degraded.
   for _ in $(seq 1 120); do
@@ -435,7 +440,6 @@ if [[ "$WORKER_TMPFS" == "1" ]]; then
     || { echo "/api/health=$health_code on owner disk full, want 503" >&2; exit 1; }
   echo "[cluster-roles] owner disk full: state=$(task_state "$TASK_ID"), /api/health 503"
 
-  write_source_data "cluster-roles-diskfull-${RUN_TAG}"
   rm -f "$DATA_DIR/worker/fill"
   wait_task_running "$TASK_ID"
   wait_checkpoint_progress "$TASK_ID" "$FULL_BEFORE_FILE" "$FULL_BEFORE_POS"
