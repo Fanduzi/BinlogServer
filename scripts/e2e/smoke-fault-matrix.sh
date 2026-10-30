@@ -232,6 +232,11 @@ crit_any() {
   curl -fsS "$API/api/findings?limit=500" | jq -e --arg t "$task_id" '.[] | select(.task_id == $t and .severity == "CRITICAL" and (.resolved_at == null))' >/dev/null
 }
 
+# crit_set lists the task's open CRITICAL findings as "kind/subject", sorted.
+crit_set() {
+  curl -fsS "$API/api/findings?limit=500" | jq -r --arg t "$1" '.[] | select(.task_id == $t and .severity == "CRITICAL" and (.resolved_at == null)) | "\(.kind)/\(.subject)"' | sort
+}
+
 write_source_rows() {
   local tag="$1"
   docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -e \
@@ -880,6 +885,10 @@ cell_owner_disk_full() {
   assert_matrix_invariants "$task_id" "df-remount" || return 1
 
   echo "[fm:df] fill $data_dir (tmpfs) while task RUNNING"
+  # Baseline the task's open CRITICALs: earlier cells may leave some open, so
+  # recovery is "no new critical left by this cell", not "/api/health 200".
+  local crit_before
+  crit_before="$(crit_set "$task_id")"
   dd if=/dev/zero of="$data_dir/fill" bs=1M count=64 2>/dev/null || true
   # New events force a segment rotation whose open() lands ENOSPC on the full
   # tmpfs — the bridge maps it to EpochLost, not FAILED.
@@ -923,14 +932,19 @@ cell_owner_disk_full() {
     sleep 1
   done
   filepos_ge "$ckpt" "$src_pos" || { echo "[fm:df] checkpoint $ckpt did not reach source position $src_pos" >&2; return 1; }
+  # Every CRITICAL this cell opened must be closed after recovery; criticals
+  # left by earlier cells are not this cell's to close.
+  local crit_now="" leftover=""
   for i in $(seq 1 60); do
-    [[ "$(health_code)" == "200" ]] && break
+    crit_now="$(crit_set "$task_id")"
+    leftover="$(comm -13 <(printf '%s\n' "$crit_before") <(printf '%s\n' "$crit_now"))"
+    [[ -z "$leftover" ]] && break
     sleep 1
   done
-  [[ "$(health_code)" == "200" ]] || { echo "[fm:df] /api/health did not return 200 after recovery" >&2; return 1; }
+  [[ -z "$leftover" ]] || { echo "[fm:df] cell-opened CRITICALs still open after recovery: $leftover" >&2; return 1; }
   http_code POST "/api/tasks/$task_id/stop" >/dev/null
   wait_task_state "$task_id" "STOPPED" 60
-  cell_result "row15: owner disk full/EROFS" "RUN" "pass: EpochLost yield on ENOSPC (no FAILED/STOP), peer degraded on foreign tail, 503 while full; $owner_id re-owned epoch $new_epoch, checkpoint $ckpt >= source $src_pos"
+  cell_result "row15: owner disk full/EROFS" "RUN" "pass: EpochLost yield on ENOSPC (no FAILED/STOP), peer degraded on foreign tail, 503 while full; $owner_id re-owned epoch $new_epoch, checkpoint $ckpt >= source $src_pos, cell criticals closed"
 }
 
 # ==============================================================================
