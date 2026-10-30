@@ -242,8 +242,15 @@ assert_switch_metric() {
   local outcome="$2"
   local op="$3"
   local want="$4"
-  local got
-  got="$(switch_metric "$id" "$outcome")"
+  # The series is a scrape-time derivation of SourceChain: a transient
+  # meta read error skips the task's rows for one scrape, so poll like
+  # the other waits instead of judging a single scrape.
+  local got i
+  for i in $(seq 1 30); do
+    got="$(switch_metric "$id" "$outcome")"
+    [[ -n "$got" ]] && break
+    sleep 1
+  done
   if [[ -z "$got" ]]; then
     echo "missing binlog_server_source_switchovers task=$id outcome=$outcome" >&2
     curl -fsS "$API/metrics" | grep source_switchovers >&2 || true
