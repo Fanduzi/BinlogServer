@@ -54,7 +54,7 @@ go test -race ./...
 
 ### DoD 4：文档包含 runbook 与边界说明
 
-- [ ] 运维 runbook 文档（待补充）
+- [x] 运维 runbook 文档：`docs/guide/admin/troubleshooting.md`（§9 起每种 CRITICAL finding 一条目，命令块经 `bash -n` 契约测试 `internal/health/runbook_doc_test.go`）
 - [ ] 边界声明文档（待补充）
 
 ---
@@ -67,7 +67,7 @@ go test -race ./...
 | CHANGELOG.md | ✅ 存在 |
 | SECURITY.md | ✅ 存在 |
 | docs/releases/release-notes-v0.2.0.md | ✅ 双语发布说明 |
-| 运维 runbook | ❌ 缺失 |
+| 运维 runbook | ✅ `docs/guide/admin/troubleshooting.md` §9 |
 
 ---
 
@@ -75,9 +75,9 @@ go test -race ./...
 
 以下任意一项未完成，不得打 `v0.1.0-beta.0` tag：
 
-1. [ ] `smoke-worker-crash-recovery` 纳入 PR CI 门禁
-2. [ ] `smoke-retry-upload` 纳入 PR CI 门禁
-3. [ ] 运维 runbook 文档存在（至少覆盖：补传操作、crash 接管验证步骤）
+1. [x] `smoke-worker-crash-recovery` 纳入 PR CI 门禁（`e2e-worker-crash-recovery` job 每个 PR 跑）
+2. [x] `smoke-retry-upload` 纳入 PR CI 门禁（`e2e-retry-upload` job 每个 PR 跑）
+3. [x] 运维 runbook 文档存在（`troubleshooting.md` §9：每条 CRITICAL finding 一个条目，含补传操作；crash 接管见 §5.2 与 fault-matrix 文档）
 4. [x] `go test -race ./...` 全量通过
 5. [x] rate_limiter 单元测试覆盖
 

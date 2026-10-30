@@ -89,7 +89,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 | # | 要求 | 验证 | 状态 | 阻塞 |
 |---|---|---|---|---|
 | I1 | 每个配置项都有文档，文档里的版本号和 VERSION 一致 | `internal/config/config_doc_test.go` | MET | — |
-| I2 | 还原、升级/降级、每种 CRITICAL finding 都有 runbook，并且 runbook 里的命令能执行 | `deployment.md` §7/§8 和 `troubleshooting.md` 都有，但没有测试保证每种 finding 都有处置条目，也没人跑文档里的命令。`docs/develop/beta-acceptance.md` 里「runbook」一项还没勾，内容也过时了（写着 smoke-observability 在 CI 里） | PARTIAL | — |
+| I2 | 还原、升级/降级、每种 CRITICAL finding 都有 runbook，并且 runbook 里的命令能执行 | `troubleshooting.md` §9「CRITICAL finding 处置手册」：注册表 25 个 CRITICAL kind 加上表外的 `MIXED_VERSION`/`META_LOCK_STALLED`/`RETRY_LOOP_FAILED`/`FINDINGS_PERSIST_FAILED`/`UPLOAD_LATE` 每条一个 `### KIND` 小节（含义/处置/关闭条件）带命令块；`internal/health/runbook_doc_test.go` 契约测试枚举 `DefaultRegistry()` 的 CRITICAL 集合断言逐条覆盖、并对该节全部命令块跑 `bash -n`（`go test ./...` 每 PR 跑，命令写坏即红）。还原回放见 troubleshooting §7.4 与 deployment「源库不可用回放」节，升级/降级见 upgrade.md 与 deployment §7/§8；beta-acceptance 的 runbook 与两个 CI 门禁勾项已同步为当前事实 | MET | — |
 
 ## J. 发布完整性
 
@@ -101,7 +101,7 @@ CI 现状（`.github/workflows/e2e.yml`，workflow 名叫 `ci`）：
 
 ## 计数
 
-共 35 项：**MET 29 / PARTIAL 3 / NOT MET 3**。
+共 35 项：**MET 30 / PARTIAL 2 / NOT MET 3**。
 
 ## 最卡生产级的 5 项
 
