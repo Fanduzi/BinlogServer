@@ -145,8 +145,11 @@ clock_shift() {
 metric_value() {
   local name="$1"
   local id="$2"
+  # awk reads the whole body: an early exit closes the pipe mid-write and
+  # curl dies with CURLE_WRITE_ERROR (23) under pipefail.
   curl -fsS "$API/metrics" | awk -v n="$name" -v id="$id" '
-    index($1, n "{") == 1 && index($0, "task_id=\"" id "\"") { print $2; exit }
+    index($1, n "{") == 1 && index($0, "task_id=\"" id "\"") { v = $2 }
+    END { if (v != "") print v }
   '
 }
 
