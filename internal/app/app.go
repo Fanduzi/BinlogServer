@@ -485,9 +485,13 @@ func (a *App) Run(ctx context.Context) error {
 					5*time.Second,
 				)
 			})
-			// 定期认领 STARTING 与租约已过期任务，驱动分发后的任务进入真实执行。
-			spawn(func() { startWorkerClaimLoop(runCtx, scheduler, 2*time.Second) })
 		}
+	}
+	if workerEnabled {
+		// 定期认领 STARTING、过期租约与拒绝到期的任务。standalone 同样靠它把
+		// LEASE_DEGRADED（磁盘写满这类 EpochLost）在 refusal 到期后拉回
+		// RUNNING——没有它，那条路只能等人工 Start 或进程重启。
+		spawn(func() { startWorkerClaimLoop(runCtx, scheduler, 2*time.Second) })
 	}
 
 	if !controlPlaneEnabled {
