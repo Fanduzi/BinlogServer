@@ -95,7 +95,7 @@ type VerifierConfig struct {
 	// ObjectBucket is the upload bucket named in an incomplete object pass.
 	// Empty when the process has no bucket configured.
 	ObjectBucket string
-	Drill DrillConfig // optional restore drill (ADR 0009 phase 3 §12, drill.go)
+	Drill        DrillConfig // optional restore drill (ADR 0009 phase 3 §12, drill.go)
 }
 
 // TaskVerifyMetrics is one task's verifier series after the last finished pass.
