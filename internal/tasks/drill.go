@@ -21,10 +21,21 @@ import (
 	"strings"
 	"time"
 
-	driver "github.com/go-sql-driver/mysql"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+	driver "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
 )
+
+// DrillConfig is the restore drill's optional configuration on
+// VerifierConfig. DSN is the drill instance's only address — empty leaves
+// the drill off and never dialed (decision 8). Every is the attempt period
+// (config default 7d); <= 0 also leaves the drill off. CheckSQL is the
+// optional post-replay check statement.
+type DrillConfig struct {
+	DSN      string
+	Every    time.Duration
+	CheckSQL string
+}
 
 // FindingDrillFailed: the drill replay's executed set missed the plan's end
 // set, or the check SQL failed (phase 3 §12). CRITICAL.
@@ -145,7 +156,7 @@ func drillSHA256(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -165,8 +176,8 @@ func drillFlavor(flavor string) string {
 // called from the verifier pass so it inherits the Allows gate: only the
 // lease holder reads the local chain and may dial the drill instance.
 func (v *Verifier) drillTask(ctx context.Context, task Task, now time.Time) {
-	dsn := strings.TrimSpace(v.cfg.DrillDSN)
-	if dsn == "" || v.cfg.DrillEvery <= 0 {
+	dsn := strings.TrimSpace(v.cfg.Drill.DSN)
+	if dsn == "" || v.cfg.Drill.Every <= 0 {
 		return
 	}
 	if v.cfg.Allows != nil {
@@ -181,7 +192,7 @@ func (v *Verifier) drillTask(ctx context.Context, task Task, now time.Time) {
 		v.drillFail(task.ID, fmt.Sprintf("verify.drill_dsn does not parse: %v", err))
 		return
 	}
-	period := now.Unix() / int64(v.cfg.DrillEvery.Seconds())
+	period := now.Unix() / int64(v.cfg.Drill.Every.Seconds())
 	st := v.drillState(task.ID)
 	if st != nil && st.Period == period && st.Done {
 		return
@@ -245,9 +256,32 @@ func (v *Verifier) drillTask(ctx context.Context, task Task, now time.Time) {
 		fail("drill staging dir: %v", err)
 		return
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
-	// Materialize every planned file locally and check its digest.
+	paths, err := v.drillStage(ctx, plan, dir)
+	if err != nil {
+		fail("%v", err)
+		return
+	}
+	if err := v.drillReplay(ctx, task, dc, host, port, paths, point, dir); err != nil {
+		fail("%v", err)
+		return
+	}
+	if err := v.drillCheck(ctx, task, plan, dsn); err != nil {
+		fail("%v", err)
+		return
+	}
+
+	v.sched.ResolveWithReason(task.ID, FindingDrillFailed, "", "restore drill passed")
+	v.sched.noteEvent(task.ID, drillEventType, "restore drill passed",
+		fmt.Sprintf("restored %d files to %s on %s:%d", len(paths), point.UTC().Format(time.RFC3339), host, port))
+	v.markDrill(task.ID, period, point, true, now)
+}
+
+// drillStage materializes every planned file under dir — covered files that
+// are not local come down through the object store — and checks each digest
+// against the manifest.
+func (v *Verifier) drillStage(ctx context.Context, plan RestorePlan, dir string) ([]string, error) {
 	paths := make([]string, 0, len(plan.Manifest))
 	for _, f := range plan.Manifest {
 		p := f.LocalPath
@@ -255,100 +289,88 @@ func (v *Verifier) drillTask(ctx context.Context, task Task, now time.Time) {
 			var derr error
 			p, derr = v.drillFetch(ctx, dir, f)
 			if derr != nil {
-				fail("fetch %s: %v", f.Name, derr)
-				return
+				return nil, fmt.Errorf("fetch %s: %w", f.Name, derr)
 			}
 		}
 		if f.SHA256 != "" {
 			sum, herr := drillSHA256(p)
 			if herr != nil {
-				fail("hash %s: %v", f.Name, herr)
-				return
+				return nil, fmt.Errorf("hash %s: %w", f.Name, herr)
 			}
 			if !strings.EqualFold(sum, f.SHA256) {
-				fail("sha256 mismatch on %s: plan %s file %s", f.Name, f.SHA256, sum)
-				return
+				return nil, fmt.Errorf("sha256 mismatch on %s: plan %s file %s", f.Name, f.SHA256, sum)
 			}
 		}
 		paths = append(paths, p)
 	}
+	return paths, nil
+}
 
-	// Replay through the phase-5 client into the drill instance. The mysql
-	// client takes the password from MYSQL_PWD so it never sits on a command
-	// line (drill DSN secrets stay out of ps and logs).
+// drillReplay pipes the phase-5 replay client's binlog stream into the drill
+// instance's mysql client. The password rides MYSQL_PWD so it never sits on
+// a command line (drill DSN secrets stay out of ps and logs).
+func (v *Verifier) drillReplay(ctx context.Context, task Task, dc *driver.Config, host string, port int, paths []string, point time.Time, dir string) error {
 	client, _ := ReplayClient(task.Source.Flavor)
 	if client == "" && mysqlFlavor(task.Source.Flavor) {
 		client = "mysqlbinlog"
 	}
 	if client == "" {
-		fail("no replay client for source flavor %q", task.Source.Flavor)
-		return
+		return fmt.Errorf("no replay client for source flavor %q", task.Source.Flavor)
 	}
 	if _, err := drillExec.lookPath(client); err != nil {
-		fail("replay client %s not on PATH: %v", client, err)
-		return
+		return fmt.Errorf("replay client %s not on PATH: %w", client, err)
 	}
 	mysqlBin := "mysql"
 	if !mysqlFlavor(task.Source.Flavor) {
 		mysqlBin = "mariadb"
 	}
 	if _, err := drillExec.lookPath(mysqlBin); err != nil {
-		fail("client %s not on PATH: %v", mysqlBin, err)
-		return
+		return fmt.Errorf("client %s not on PATH: %w", mysqlBin, err)
 	}
 	apply := FormatPITRCommand(client, paths, nil, point.UTC().Truncate(time.Second).Add(time.Second))
 	if apply == "" {
-		fail("empty apply command at %s", point.UTC().Format(time.RFC3339))
-		return
+		return fmt.Errorf("empty apply command at %s", point.UTC().Format(time.RFC3339))
 	}
 	pipe := fmt.Sprintf("%s | %s --protocol=tcp -h%s -P%s -u%s", apply, mysqlBin,
 		shellToken(host), shellToken(strconv.Itoa(port)), shellToken(dc.User))
-	env := []string{"MYSQL_PWD=" + dc.Passwd}
-	if err := drillExec.run(ctx, dir, env, "sh", "-c", pipe); err != nil {
-		fail("replay at %s: %v", point.UTC().Format(time.RFC3339), err)
-		return
+	if err := drillExec.run(ctx, dir, []string{"MYSQL_PWD=" + dc.Passwd}, "sh", "-c", pipe); err != nil {
+		return fmt.Errorf("replay at %s: %w", point.UTC().Format(time.RFC3339), err)
 	}
+	return nil
+}
 
+// drillCheck dials the drill instance and requires its executed GTID set to
+// contain the plan's applied set, then runs the optional check SQL.
+func (v *Verifier) drillCheck(ctx context.Context, task Task, plan RestorePlan, dsn string) error {
 	db, err := drillExec.openDSN(dsn)
 	if err != nil {
-		fail("dial drill instance: %v", err)
-		return
+		return fmt.Errorf("dial drill instance: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
-	// The plan's applied set must be a subset of the instance's executed set.
 	if applied := strings.TrimSpace(plan.Coverage.Applied); applied != "" {
 		executed, derr := db.ExecutedSet(ctx, task.Source.Flavor)
 		if derr != nil {
-			fail("read executed set on the drill instance: %v", derr)
-			return
+			return fmt.Errorf("read executed set on the drill instance: %w", derr)
 		}
 		have, herr := gomysql.ParseGTIDSet(drillFlavor(task.Source.Flavor), executed)
 		if herr != nil {
-			fail("parse executed set %q: %v", executed, herr)
-			return
+			return fmt.Errorf("parse executed set %q: %w", executed, herr)
 		}
 		want, werr := gomysql.ParseGTIDSet(drillFlavor(task.Source.Flavor), applied)
 		if werr != nil {
-			fail("parse plan applied set %q: %v", applied, werr)
-			return
+			return fmt.Errorf("parse plan applied set %q: %w", applied, werr)
 		}
 		if !have.Contain(want) {
-			fail("drill executed set %s does not contain plan end set %s", executed, applied)
-			return
+			return fmt.Errorf("drill executed set %s does not contain plan end set %s", executed, applied)
 		}
 	}
-	if q := strings.TrimSpace(v.cfg.DrillCheckSQL); q != "" {
+	if q := strings.TrimSpace(v.cfg.Drill.CheckSQL); q != "" {
 		if err := db.ExecCheck(ctx, q); err != nil {
-			fail("verify.drill_check_sql: %v", err)
-			return
+			return fmt.Errorf("verify.drill_check_sql: %w", err)
 		}
 	}
-
-	v.sched.ResolveWithReason(task.ID, FindingDrillFailed, "", "restore drill passed")
-	v.sched.noteEvent(task.ID, drillEventType, "restore drill passed",
-		fmt.Sprintf("restored %d files to %s on %s:%d", len(paths), point.UTC().Format(time.RFC3339), host, port))
-	v.markDrill(task.ID, period, point, true, now)
+	return nil
 }
 
 // drillState returns the persisted drill record for taskID (nil if none).
@@ -427,7 +449,7 @@ func (v *Verifier) drillFetch(ctx context.Context, dir string, f RestoreFile) (s
 	if err != nil {
 		return "", err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	dst := filepath.Join(dir, filepath.Base(f.Name))
 	out, err := os.Create(dst)
 	if err != nil {

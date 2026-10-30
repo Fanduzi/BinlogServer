@@ -95,13 +95,7 @@ type VerifierConfig struct {
 	// ObjectBucket is the upload bucket named in an incomplete object pass.
 	// Empty when the process has no bucket configured.
 	ObjectBucket string
-	// DrillDSN is the restore drill's only address; empty leaves the drill
-	// off and it is never dialed. DrillEvery is the attempt period
-	// (config default 7d); <= 0 also leaves the drill off.
-	// DrillCheckSQL is the optional post-replay check statement.
-	DrillDSN      string
-	DrillEvery    time.Duration
-	DrillCheckSQL string
+	Drill DrillConfig // optional restore drill (ADR 0009 phase 3 §12, drill.go)
 }
 
 // TaskVerifyMetrics is one task's verifier series after the last finished pass.
@@ -117,8 +111,7 @@ type TaskVerifyMetrics struct {
 	NoDigestLocal        int
 	UnverifiableSize     int
 	Deferred             int
-	// LastDrillSuccessUnix is the last restore-drill pass. HaveDrillSuccess
-	// is false while no drill has passed, so the gauge stays unemitted.
+	// LastDrillSuccessUnix is the last drill pass (unemitted until one passes).
 	LastDrillSuccessUnix int64
 	HaveDrillSuccess     bool
 }
