@@ -185,7 +185,9 @@ restart_server() {
 gtid_next_gap() {
   local uuid executed max k foreign
   uuid="$(mysql80 "SELECT @@server_uuid;")"
-  executed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+  # REPLACE, not tr: the batch client escapes a multi-UUID set's embedded
+  # newlines as a literal \n, which the grep below cannot split on.
+  executed="$(mysql80 "SELECT REPLACE(@@GLOBAL.GTID_EXECUTED, CHAR(10), '');" | tr -d ' \n')"
   max="$(printf '%s' "$executed" | tr ',' '\n' | grep -i "^${uuid}:" | sed -E 's/.*[-:]([0-9]+)$/\1/')"
   if [[ -z "$max" ]]; then
     echo "cannot read the last GNO of $uuid from $executed" >&2
