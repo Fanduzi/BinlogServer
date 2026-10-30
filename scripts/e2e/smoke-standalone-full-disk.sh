@@ -119,6 +119,11 @@ log "active dump RUNNING, checkpoint $(checkpoint "$tid")"
 dd if=/dev/zero of="$DATA/fill2" bs=1M count=64 2>/dev/null || true
 log "data_dir full under a live dump: $(df -h "$DATA" | tail -1 | awk '{print $5}')"
 
+# An idle task touches no local bytes, so nothing would ever hit ENOSPC: new
+# source rows plus a rotation force appends/open() onto the full disk.
+mysql80 "INSERT INTO ${DB2}.t(v) VALUES ('during-${RUN_TAG}'),('during2-${RUN_TAG}'); FLUSH BINARY LOGS;"
+max_at_fill="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | gtid_max "$UUID")"
+
 # The task must leave RUNNING (epoch lost, retries) but never write FAILED,
 # and the surface must admit the backup is not healthy.
 wait_for "task off RUNNING without FAILED on a full disk" \
@@ -127,8 +132,6 @@ wait_for "task off RUNNING without FAILED on a full disk" \
   || { echo "/api/health not 503 with the dump starved" >&2; exit 1; }
 log "live dump on a full disk: findings open, /api/health 503"
 
-mysql80 "INSERT INTO ${DB2}.t(v) VALUES ('during-${RUN_TAG}'),('during2-${RUN_TAG}');"
-max_at_fill="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | gtid_max "$UUID")"
 rm -f "$DATA/fill2"
 wait_task_state "$tid" RUNNING 120
 # gtid_set at the checkpoint must reach every source GTID present when the
