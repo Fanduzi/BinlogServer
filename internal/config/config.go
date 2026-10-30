@@ -202,7 +202,7 @@ type NotifyConfig struct {
 }
 
 // VerifyConfig is the phase 3 verifier (design 0009-phase3 §9).
-// DrillDSN empty leaves the restore drill off. The worker does not dial it.
+// DrillDSN empty leaves the restore drill off; the worker dials it only when a drill period is due (design 0009-phase3 §12, decision 8).
 type VerifyConfig struct {
 	EverySec           int
 	BudgetBytesPerSec  int64

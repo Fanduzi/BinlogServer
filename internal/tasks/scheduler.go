@@ -704,6 +704,15 @@ func (s *Scheduler) appendEventLocked(taskID, eventType, message, detail string)
 	s.pendingEvents = append(s.pendingEvents, queuedEvent{event: event, ticket: ticket, lane: lane})
 }
 
+// noteEvent appends one task event from a path that does not hold s.mu
+// (the restore drill's RESTORE_DRILL record).
+func (s *Scheduler) noteEvent(taskID, eventType, message, detail string) {
+	s.mu.Lock()
+	s.appendEventLocked(taskID, eventType, message, detail)
+	s.flushPendingEventsLocked()
+	s.mu.Unlock()
+}
+
 func (s *Scheduler) issueEventTicketLocked(taskID string) (*eventLane, uint64) {
 	if s.eventLanes == nil {
 		s.eventLanes = make(map[string]*eventLane)

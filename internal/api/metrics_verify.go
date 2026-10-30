@@ -24,6 +24,7 @@ type verifyCollector struct {
 	backfill     *prometheus.Desc
 	sizeUnknown  *prometheus.Desc
 	deferred     *prometheus.Desc
+	drillSuccess *prometheus.Desc
 }
 
 func newVerifyCollector(src verifyMetricsSource) *verifyCollector {
@@ -50,6 +51,9 @@ func newVerifyCollector(src verifyMetricsSource) *verifyCollector {
 		deferred: prometheus.NewDesc("binlog_server_verify_deferred",
 			"Copies scheduled this pass that were not paid for.",
 			[]string{"task_id"}, nil),
+		drillSuccess: prometheus.NewDesc("binlog_server_restore_drill_last_success_timestamp",
+			"Unix time of the last restore drill that passed. Not emitted while no drill has passed.",
+			[]string{"task_id"}, nil),
 	}
 }
 
@@ -61,6 +65,7 @@ func (c *verifyCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.backfill
 	ch <- c.sizeUnknown
 	ch <- c.deferred
+	ch <- c.drillSuccess
 }
 
 func (c *verifyCollector) Collect(ch chan<- prometheus.Metric) {
@@ -78,6 +83,9 @@ func (c *verifyCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.backfill, prometheus.GaugeValue, float64(m.NoDigestLocal), id)
 		ch <- prometheus.MustNewConstMetric(c.sizeUnknown, prometheus.GaugeValue, float64(m.UnverifiableSize), id)
 		ch <- prometheus.MustNewConstMetric(c.deferred, prometheus.GaugeValue, float64(m.Deferred), id)
+		if m.HaveDrillSuccess {
+			ch <- prometheus.MustNewConstMetric(c.drillSuccess, prometheus.GaugeValue, float64(m.LastDrillSuccessUnix), id)
+		}
 	}
 }
 
