@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package e2e provides module-level functionality for e2e.
 # input: a 30MB tmpfs as a standalone data_dir (needs passwordless sudo to mount; skipped otherwise), the suite mysql80 for the live-dump cell
-# output: with the disk full, a refused create answers 503 TASK_RECORDS_UNAVAILABLE, GET /api/findings serves TASK_RECORDS_FAILED/write and FINDINGS_PERSIST_FAILED from memory, GET /api/health is 503 degraded; after space is freed both close and health is ok. A5 live-dump cell: filling the disk under a RUNNING task leaves the row non-FAILED with findings open and /api/health 503; freeing space resumes the dump and the checkpoint's gtid_set covers every transaction written during the outage — no chain gap
+# output: with the disk full, a refused create answers 503 TASK_RECORDS_UNAVAILABLE, GET /api/findings serves TASK_RECORDS_FAILED/write and FINDINGS_PERSIST_FAILED from memory, GET /api/health is 503 degraded; after space is freed both close and health is ok. A5 live-dump cell: filling the disk under a RUNNING task leaves the row non-FAILED with findings open and /api/health 503; freeing space resumes the dump and the checkpoint's file:pos covers every transaction written during the outage — no chain gap
 # pos: #395 QA P2 (a full data_dir must not hide TASK_RECORDS_FAILED) plus production-readiness A5 active-dump cell; the cluster-owner cell is the fault-matrix row15
 # note: if this file changes, update this header and scripts/e2e/README.md.
 set -euo pipefail
@@ -94,16 +94,25 @@ wait_task_state() { # id want secs
   return 1
 }
 
-checkpoint() { curl -fsS "$API/api/tasks/$1/checkpoint" | jq -r '"\(.file):\(.pos) gtid=\(.gtid_set // "-")"'; }
+checkpoint() { curl -fsS "$API/api/tasks/$1/checkpoint" | jq -r '"\(.file):\(.pos)"'; }
 
-gtid_max() { # executed set -> largest GNO for the source uuid
-  local uuid="$1"
-  tr ',' '\n' | grep -i "^${uuid}:" | sed -E 's/.*[-:]([0-9]+)$/\1/' | sort -n | tail -1
+# source_filepos prints the source's File:Position as name:N (the suite's
+# mysql80 does not enable gtid_mode, so file/pos is the outage-boundary proof).
+source_filepos() {
+  mysql80 "SHOW MASTER STATUS;" | awk '{n=$1; sub(/.*\./,"",n); print n ":" $2}'
+}
+
+filepos_ge() { # "name:pos" >= "name:pos" -> 0/1; names reduce to their digit tail
+  local af ap bf bp
+  af="$(basename "${1%%:*}" | tr -cd '0-9' | sed 's/^0*//')"
+  ap="${1##*:}"; bp="${2##*:}"
+  bf="$(basename "${2%%:*}" | tr -cd '0-9' | sed 's/^0*//')"
+  af="${af:-0}"; bf="${bf:-0}"; ap="${ap:-0}"; bp="${bp:-0}"
+  (( af > bf || (af == bf && ap >= bp) ))
 }
 
 RUN_TAG="$(date +%s)"
 DB2="a5full_${RUN_TAG}"
-UUID="$(mysql80 "SELECT @@server_uuid;")"
 mysql80 "CREATE DATABASE IF NOT EXISTS ${DB2}; CREATE TABLE IF NOT EXISTS ${DB2}.t(id INT PRIMARY KEY AUTO_INCREMENT, v VARCHAR(64));"
 
 tid="$(curl -fsS -X POST "$API/api/tasks" -H 'Content-Type: application/json' \
@@ -122,32 +131,31 @@ log "data_dir full under a live dump: $(df -h "$DATA" | tail -1 | awk '{print $5
 # An idle task touches no local bytes, so nothing would ever hit ENOSPC: new
 # source rows plus a rotation force appends/open() onto the full disk.
 mysql80 "INSERT INTO ${DB2}.t(v) VALUES ('during-${RUN_TAG}'),('during2-${RUN_TAG}'); FLUSH BINARY LOGS;"
-max_at_fill="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | gtid_max "$UUID")"
+pos_at_fill="$(source_filepos)"
 
 # The task must leave RUNNING (epoch lost, retries) but never write FAILED,
 # and the surface must admit the backup is not healthy.
 wait_for "task off RUNNING without FAILED on a full disk" \
   bash -c "st=\"\$(curl -fsS $API/api/tasks/$tid | jq -r '.state')\"; [[ \"\$st\" != RUNNING && \"\$st\" != FAILED ]]"
-[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == 503 ]] \
-  || { echo "/api/health not 503 with the dump starved" >&2; exit 1; }
+wait_for "/api/health 503 with the dump starved" \
+  bash -c "[[ \"\$(curl -sS -o /dev/null -w '%{http_code}' $API/api/health)\" == 503 ]]"
 log "live dump on a full disk: findings open, /api/health 503"
 
 rm -f "$DATA/fill2"
 wait_task_state "$tid" RUNNING 120
-# gtid_set at the checkpoint must reach every source GTID present when the
-# disk filled — including the rows written during the outage.
+# The checkpoint's file:pos must reach the source position captured while the
+# disk was full — including the rows written during the outage.
 for _ in $(seq 1 120); do
-  got="$(checkpoint "$tid" | sed -E 's/.*gtid=//' | gtid_max "$UUID")"
-  [[ -n "$got" && -n "$max_at_fill" && "$got" -ge "$max_at_fill" ]] && break
+  got="$(checkpoint "$tid")"
+  filepos_ge "$got" "$pos_at_fill" && break
   sleep 1
 done
 got="$(checkpoint "$tid")"
-gtid_now="$(sed -E 's/.*gtid=//' <<<"$got" | gtid_max "$UUID")"
-[[ -n "$gtid_now" && "$gtid_now" -ge "$max_at_fill" ]] \
-  || { echo "checkpoint $got did not pass source GNO $max_at_fill" >&2; exit 1; }
-[[ "$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")" == 200 ]] \
-  || { echo "/api/health not 200 after the dump recovered" >&2; exit 1; }
-log "space freed under a live dump: RUNNING, checkpoint covers GNO $max_at_fill, /api/health ok"
+filepos_ge "$got" "$pos_at_fill" \
+  || { echo "checkpoint $got did not pass source position $pos_at_fill" >&2; exit 1; }
+wait_for "/api/health 200 after the dump recovered" \
+  bash -c "[[ \"\$(curl -sS -o /dev/null -w '%{http_code}' $API/api/health)\" == 200 ]]"
+log "space freed under a live dump: RUNNING, checkpoint covers $pos_at_fill, /api/health ok"
 
 curl -fsS -X POST "$API/api/tasks/$tid/stop" >/dev/null || true
 log "success"
