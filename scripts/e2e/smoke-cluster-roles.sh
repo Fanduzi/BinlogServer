@@ -43,8 +43,15 @@ need_cmd jq
 e2e_ensure_meta_schema "$ROOT_DIR" "$META_DSN"
 
 cleanup() {
+  local rc=$?
   if [[ -n "$STASHED_PATH" && -f "$STASHED_PATH" && -n "$SEALED_PATH" ]]; then
     mv "$STASHED_PATH" "$SEALED_PATH" >/dev/null 2>&1 || true
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    echo "===== worker log tail =====" >&2
+    tail -n 120 "$WORKER_LOG" >&2 2>/dev/null || true
+    echo "===== control-plane log tail =====" >&2
+    tail -n 60 "$CONTROL_LOG" >&2 2>/dev/null || true
   fi
   if [[ -n "$WORKER_PID" ]]; then
     kill "$WORKER_PID" >/dev/null 2>&1 || true
@@ -417,20 +424,25 @@ if [[ "$WORKER_TMPFS" == "1" ]]; then
   dd if=/dev/zero of="$DATA_DIR/worker/fill" bs=1M count=64 2>/dev/null || true
   echo "[cluster-roles] worker data_dir full: $(df -h "$DATA_DIR/worker" | tail -1 | awk '{print $5}')"
 
-  # An idle task touches no local bytes: source writes force appends onto the
-  # full disk so the ENOSPC actually lands.
+  # An idle task touches no local bytes: source writes plus a rotation force
+  # appends/open() onto the full disk so the ENOSPC actually lands.
   write_source_data "cluster-roles-diskfull-${RUN_TAG}"
+  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -e "FLUSH BINARY LOGS;" 2>/dev/null || true
 
   # ADR 0011 §4.2 row 15: ENOSPC is an epoch loss — desired stays RUN, the
   # row never writes FAILED, and the control plane must admit degraded.
-  for _ in $(seq 1 120); do
+  for i in $(seq 1 120); do
     st="$(task_state "$TASK_ID")"
     [[ "$st" == "FAILED" ]] && { echo "task FAILED on owner disk full" >&2; exit 1; }
     [[ "$st" != "RUNNING" ]] && break
+    (( i % 15 == 0 )) && echo "[cluster-roles] full-disk wait ${i}s: state=$st" >&2
     sleep 1
   done
-  [[ "$(task_state "$TASK_ID")" != "RUNNING" ]] \
-    || { echo "task stayed RUNNING with a full disk" >&2; exit 1; }
+  if [[ "$(task_state "$TASK_ID")" == "RUNNING" ]]; then
+    curl -fsS "$API/api/tasks/$TASK_ID" >&2 || true
+    echo "task stayed RUNNING with a full disk" >&2
+    exit 1
+  fi
   for _ in $(seq 1 150); do
     health_code="$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")"
     [[ "$health_code" == "503" ]] && break
