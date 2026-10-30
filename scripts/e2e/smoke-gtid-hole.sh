@@ -127,7 +127,9 @@ wait_new_open_segment() {
 gap_commit() {
   local uuid executed max k
   uuid="$(mysql80 "SELECT @@server_uuid;")"
-  executed="$(mysql80 "SELECT @@GLOBAL.GTID_EXECUTED;" | tr -d ' \n')"
+  # The batch mysql client escapes embedded newlines as a literal \n; ask
+  # the server to strip them so the per-UUID parse below sees real commas.
+  executed="$(mysql80 "SELECT REPLACE(@@GLOBAL.GTID_EXECUTED, CHAR(10), '');" | tr -d ' \n')"
   max="$(printf '%s' "$executed" | tr ',' '\n' | grep -i "^${uuid}:" | sed -E 's/.*[-:]([0-9]+)$/\1/')"
   if [[ -z "$max" ]]; then
     echo "cannot read the last GNO of $uuid from $executed" >&2
