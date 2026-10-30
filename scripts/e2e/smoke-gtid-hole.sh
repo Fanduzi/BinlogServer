@@ -134,7 +134,9 @@ gap_commit() {
     return 1
   fi
   k=$((max + 3))
-  mysql80 "SET GTID_NEXT='${uuid}:${k}'; INSERT INTO ${DB}.t(id,v) VALUES (800100, 'hole-${RUN_TAG}-${k}'); SET GTID_NEXT='AUTOMATIC';"
+  # AUTO_INCREMENT id: an explicit value would collide with the first gap's
+  # row and the failing INSERT would burn GTID_NEXT without making a hole.
+  mysql80 "SET GTID_NEXT='${uuid}:${k}'; INSERT INTO ${DB}.t(v) VALUES ('hole-${RUN_TAG}-${k}'); SET GTID_NEXT='AUTOMATIC';"
   printf '%s:%s' "$uuid" "$((max + 1))"
 }
 
