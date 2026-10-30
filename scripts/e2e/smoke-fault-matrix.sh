@@ -196,14 +196,21 @@ meta_sql() {
   docker compose -f "$COMPOSE_FILE" exec -T meta-primary mysql -umeta -pmetapass -N binlog_meta -e "$1" 2>/dev/null
 }
 
-gtid_max() { # executed set on stdin -> largest GNO for one uuid
-  local uuid="$1"
-  tr ',' '\n' | grep -i "^${uuid}:" | sed -E 's/.*[-:]([0-9]+)$/\1/' | sort -n | tail -1
+source_filepos() { # -> "mysql-bin.0000NN:PPP" on stdout
+  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -N \
+    -e 'SHOW MASTER STATUS;' 2>/dev/null | awk '{print $1":"$2}' | tr -d ' \r\n'
 }
 
-source_gtid_max() {
-  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -N \
-    -e 'SELECT @@GLOBAL.GTID_EXECUTED;' 2>/dev/null | tr -d ' \r\n' | gtid_max "$1"
+# filepos_ge a b — true when checkpoint "file:pos" a is at or past b on the
+# same file index ordering (pos resets on rotation, so compare index first).
+filepos_ge() {
+  local af ap bf bp
+  af="$(printf '%s' "$1" | sed -E 's/mysql-bin\.0*([0-9]+):.*/\1/')"
+  ap="$(printf '%s' "$1" | sed -E 's/.*:([0-9]+)$/\1/')"
+  bf="$(printf '%s' "$2" | sed -E 's/mysql-bin\.0*([0-9]+):.*/\1/')"
+  bp="$(printf '%s' "$2" | sed -E 's/.*:([0-9]+)$/\1/')"
+  [[ "$af" =~ ^[0-9]+$ && "$ap" =~ ^[0-9]+$ && "$bf" =~ ^[0-9]+$ && "$bp" =~ ^[0-9]+$ ]] || return 1
+  [[ "$af" -gt "$bf" || ( "$af" -eq "$bf" && "$ap" -ge "$bp" ) ]]
 }
 
 dump_threads() {
@@ -872,10 +879,6 @@ cell_owner_disk_full() {
   wait_running_owner "$task_id" "$owner_id" 240 || return 1
   assert_matrix_invariants "$task_id" "df-remount" || return 1
 
-  local uuid
-  uuid="$(docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -N \
-    -e 'SELECT @@server_uuid;' 2>/dev/null | tr -d ' \r\n')"
-
   echo "[fm:df] fill $data_dir (tmpfs) while task RUNNING"
   dd if=/dev/zero of="$data_dir/fill" bs=1M count=64 2>/dev/null || true
   # New events force a segment rotation whose open() lands ENOSPC on the full
@@ -899,8 +902,10 @@ cell_owner_disk_full() {
 
   # Source writes during the outage must land in the chain after recovery.
   write_source_rows "df3"
-  local src_max
-  src_max="$(source_gtid_max "$uuid")"
+  # The source's master position at the fill boundary is the file/pos proof
+  # bar (mysql57 here runs without gtid_mode, so gtid_set evidence is empty).
+  local src_pos
+  src_pos="$(source_filepos)"
   rm -f "$data_dir/fill"
 
   wait_running_owner "$task_id" "$owner_id" 180 || return 1
@@ -909,15 +914,15 @@ cell_owner_disk_full() {
   [[ "$new_epoch" =~ ^[0-9]+$ && "$new_epoch" -gt "$old_epoch" ]] || { echo "[fm:df] epoch did not grow: $old_epoch -> $new_epoch" >&2; return 1; }
   assert_matrix_invariants "$task_id" "df-recovered" || return 1
   [[ "$(dump_threads)" == "1" ]] || { echo "[fm:df] dump threads=$(dump_threads), want 1" >&2; return 1; }
-  # The checkpoint GTID must reach every source GNO present when the disk
+  # The checkpoint must reach the source position captured when the disk
   # filled — including df3 — or the chain has a gap.
-  local got=""
+  local ckpt=""
   for i in $(seq 1 120); do
-    got="$(curl -fsS "$API/api/tasks/$task_id/checkpoint" | jq -r '.gtid_set // empty' | gtid_max "$uuid")"
-    [[ -n "$got" && -n "$src_max" && "$got" -ge "$src_max" ]] && break
+    ckpt="$(curl -fsS "$API/api/tasks/$task_id/checkpoint" | jq -r '"\(.file):\(.pos)"')"
+    filepos_ge "$ckpt" "$src_pos" && break
     sleep 1
   done
-  [[ -n "$got" && -n "$src_max" && "$got" -ge "$src_max" ]] || { echo "[fm:df] checkpoint gno '$got' did not reach source max $src_max" >&2; return 1; }
+  filepos_ge "$ckpt" "$src_pos" || { echo "[fm:df] checkpoint $ckpt did not reach source position $src_pos" >&2; return 1; }
   for i in $(seq 1 60); do
     [[ "$(health_code)" == "200" ]] && break
     sleep 1
@@ -925,7 +930,7 @@ cell_owner_disk_full() {
   [[ "$(health_code)" == "200" ]] || { echo "[fm:df] /api/health did not return 200 after recovery" >&2; return 1; }
   http_code POST "/api/tasks/$task_id/stop" >/dev/null
   wait_task_state "$task_id" "STOPPED" 60
-  cell_result "row15: owner disk full/EROFS" "RUN" "pass: EpochLost yield on ENOSPC (no FAILED/STOP), peer degraded on foreign tail, 503 while full; $owner_id re-owned epoch $new_epoch, checkpoint gno $got >= $src_max"
+  cell_result "row15: owner disk full/EROFS" "RUN" "pass: EpochLost yield on ENOSPC (no FAILED/STOP), peer degraded on foreign tail, 503 while full; $owner_id re-owned epoch $new_epoch, checkpoint $ckpt >= source $src_pos"
 }
 
 # ==============================================================================
