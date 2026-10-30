@@ -610,3 +610,322 @@ DELETE FROM task_leases WHERE lease_expire_at < NOW(6);
 ---
 
 **下一步**：阅读 [可观测性](./observability.md) 了解如何设置监控和告警。
+
+## 9. CRITICAL finding 处置手册
+
+`GET /api/findings` 里每条 `severity=CRITICAL` 的 finding 都在本节有对应条目。finding 的 `kind` 即小节的标题，`task_id`/`subject`/`detail` 是定位用的三元组。通用前置变量：
+
+```bash
+API="${API:-http://127.0.0.1:8080}"          # control-plane / standalone 地址
+TASK_ID="${TASK_ID:-1}"                       # finding.task_id；集群级 finding 是 _cluster
+DATA_DIR="${DATA_DIR:-/data/binlog}"          # 本进程 data_dir
+# cluster 模式再设一个能连 meta 库的客户端：
+# META="mysql -h 127.0.0.1 -umeta -pmetapass binlog_meta -N -e"
+```
+
+通用第一刀（任何 kind 都先看这两个）：
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.task_id == "'"$TASK_ID"'")'
+curl -fsS "$API/api/tasks/$TASK_ID" | jq '{state, desired_run, owner_worker_id, epoch, last_error}'
+```
+
+### CHAIN_INDEX_GAP
+
+链索引行不再连续（I2），或一次源切换没有记录。意味着回放时可能跳号或重复。
+处置：先 `GET /api/tasks/{id}/files` 看序号断在哪、`GET /api/tasks/{id}/source_chain` 看源身份历史；缺口若是源换了没登记，走「源切换」流程（新主身份 `POST /api/tasks/{id}/adopt`），若是目录行被删，按 SEGMENT_MISSING 处理。索引连续、每次切换都有记录后自动关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq -r '.[] | .file_name' | sort
+curl -fsS "$API/api/tasks/$TASK_ID" | jq '.source_chain // empty'
+```
+
+### CHECKPOINT_AHEAD
+
+checkpoint 越过链的切点（I5）：本地链里已经读不到 checkpoint 之前的位点，续传语义被破坏。多发生在手工改过 checkpoint 或段被删之后。
+处置：比对 `GET /api/tasks/{id}/checkpoint` 和 `GET /api/tasks/{id}/files` 的最末 `end_pos`；缺尾巴先从对象存储把封存段取回（`GET /api/tasks/{id}/files/{name}` 能从对象取字节放回本地）。checkpoint 回到链切点内后自动关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/checkpoint" | jq '{file,pos,gtid_set}'
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[-1] | {file_name,end_pos}'
+```
+
+### DISK_LIST_FAILED
+
+本进程列任务目录失败（S15）：data_dir 权限、坏盘、挂载断开都会触发。
+处置：在**报 finding 的节点**上 `ls`/`stat` 该任务目录，修权限或挂载；下一次目录列举成功自动关闭。subject 指名是哪个目录。
+
+```bash
+ls -la "$DATA_DIR/$TASK_ID/" && df -h "$DATA_DIR"
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="DISK_LIST_FAILED") | {subject,detail}'
+```
+
+### DRILL_FAILED
+
+可选还原演练失败：演练 DSN 上的校验 SQL 没通过，或还原的段放不到演练目录。
+处置：看 `verify.drill_dsn` 指向的库是否可达、最近一次 drill 的 detail；先修还原路径（对象可拉、mysqlbinlog 可用），下一次演练通过自动关闭。演练本身由 `verify.drill_every_sec`（默认关）控制。
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="DRILL_FAILED") | {subject,detail,last_seen}'
+curl -fsS "$API/api/tasks/$TASK_ID/replay" | jq '.[:3]'
+```
+
+### DUMP_CLEANUP_PERSIST_FAILED
+
+源库 KILL 标记没落盘（S3）：pending_dump_cleanup 只活在进程内存，进程重启后源库可能残留 Binlog Dump 线程。
+处置：修 meta 写入路径（同 METADATA_WRITE_BLOCKED 思路），标记写下或读回后关闭；若已重启过，去源库 `SHOW PROCESSLIST` 手工 KILL 残留的 `Binlog Dump` 连接。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/events?limit=50" | jq '.[] | select(.type|test("CLEANUP|KILL"))'
+# mysql -h <source> -e "SELECT ID,USER,COMMAND FROM information_schema.PROCESSLIST WHERE COMMAND LIKE 'Binlog Dump%';"
+```
+
+### GTID_HOLE
+
+链里缺一段 GTID 区间（I3）：源上执行过但备份没有，回放会丢这段事务。`detail` 里是规范化 evidence（`uuid:N` 或 `uuid:lo-hi`）。
+处置：先确认洞是不是真的——源 `@@GLOBAL.GTID_EXECUTED` 对比链 GTID；是源上 GTID_NEXT 手工跳号之类的**预期空洞**，用「确认事实」豁免：`POST /api/alerts/waive` 带 `task_id`、`kind`、`subject`（段名）、`evidence`（detail 里的原文），finding 以 WAIVED 关闭，同 fact 后续不再开。新段里出现新洞会以新 evidence 重新开 finding。洞不该存在时：被 `PURGE` 的源段无法补回，接受豁口需豁免，不接受则换源重备。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/findings" | jq '.[] | select(.kind=="GTID_HOLE")'
+curl -fsS -X POST "$API/api/alerts/waive" -H 'Content-Type: application/json' \
+  -d '{"task_id":"'"$TASK_ID"'","kind":"GTID_HOLE","subject":"<段名>","evidence":"<detail 里的规范 evidence>"}'
+```
+
+### HEALTH_STORE_UNAVAILABLE
+
+健康存储读写失败（S18）：finding 持久化这层断了，healthy/degraded 判断只能退化。subject 是节点 id。
+处置：查该节点 meta_dsn 连通性，确认 migration `000009`（health 表）已应用：`migrate version` 或 `SELECT version FROM schema_migrations`。一次读写成功自动关闭。
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="HEALTH_STORE_UNAVAILABLE") | {subject,detail}'
+# $META "SELECT MAX(version) FROM schema_migrations;"   # 需要 >= 9
+```
+
+### LEGACY_FAILBACK
+
+规划器判定当前源是个「旧主回退」（I3）：新链继续备份会把已备份过的事务再收一遍，链向后倒退。
+处置：不要强行续跑——先确认源 VIP 是否回到了旧主，查 `source_chain`；回退消失（切回新主）自动关闭。确实是旧主要接管时，按新源建新任务，旧任务停用。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID" | jq '{state,last_error,source_chain}'
+curl -fsS "$API/api/tasks/$TASK_ID/events?limit=50" | jq -r '.[].detail' | grep -i failback | tail -5
+```
+
+### METADATA_WRITE_BLOCKED
+
+checkpoint 或任务行写 meta 失败（S2）：链数据安全，但进度记录会停在最后一个成功写入处；行锁（1205）或断连常见。
+处置：查 meta 连通性和行锁（`information_schema.innodb_trx`）；一次后续写入成功自动关闭。长时间不消参考 META_LOCK_STALLED。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/checkpoint" | jq '{file,pos,updated_at}'
+# $META "SELECT trx_id,trx_started,trx_query FROM information_schema.innodb_trx ORDER BY trx_started LIMIT 10;"
+```
+
+### META_UNREACHABLE
+
+本节点连不上 meta 库（S17），cluster 模式下该节点调度、认领、评估全部停摆。
+处置：对 subject 指名的节点查 meta_dsn 网络/凭证；cluster 节点断联期间任务照常由活节点接管。连通恢复自动关闭。
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="META_UNREACHABLE") | {subject,detail,last_seen}'
+curl -fsS "$API/api/workers?limit=200" | jq '.[] | {worker_id,online,last_seen}'
+```
+
+### OBJECT_CORRUPT
+
+对象存储里的段与本地文件/目录摘要不一致：上传时被改、对象被覆盖或本地已坏。
+处置：比对 `GET /api/tasks/{id}/files` 里该段的 `checksum`/`md5`；本地是好的就 `POST /api/tasks/{id}/files/retry-upload` 重传覆盖坏对象；本地也坏按 SEGMENT_UNREADABLE 处理。重新校验一致或行被移除后关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | select(.checksum=="mismatch") | {file_name,checksum,md5}'
+curl -fsS -X POST "$API/api/tasks/$TASK_ID/files/retry-upload"
+```
+
+### OPEN_TAIL_CUT_FAILED
+
+打开尾巴的截断/切割失败（S4）：崩溃恢复或接管时切不干净。
+处置：看 detail 里的段名，本机 `ls`/`mysqlbinlog` 验证该 `.open` 文件可读尾部；下一次切割成功、段被封存或消失后自动关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | select(.state=="OPEN") | {file_name,file_path}'
+ls -la "$DATA_DIR/$TASK_ID/" | grep open
+```
+
+### SEGMENT_DAMAGED
+
+段的 `end_log_pos` 倒退（I1）：段内事件序列坏掉，回放会停在这。
+处置：`mysqlbinlog --verify-binlog-checksum` 实读该段确认；本地坏了从对象存储取回好副本放回目录，对象也坏则该段链断（按 CHECKPOINT_AHEAD/GTID_HOLE 思路处理缺口）。读取恢复一致后关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | select(.checksum!="match") | {file_name,checksum}'
+mysqlbinlog --verify-binlog-checksum "$DATA_DIR/$TASK_ID/<file_name>" >/dev/null && echo OK
+```
+
+### SEGMENT_MISSING
+
+catalog 行、本地文件、对象三者对不上（I6）：目录行还在但文件没了（对象也没）最典型——有人手工删了封存段。
+处置：`GET /api/tasks/{id}/files` 找出 `MISSING`/`UNREADABLE` 行；文件能找回（对象还有）就放回原目录，下一次扫描 `EVAL` 关闭；对象也没了就只剩豁免或接受链缺口（后果见 CHECKPOINT_AHEAD）。故意删的段用 waive 关（同 GTID_HOLE 的 waive 用法）。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | {file_name,state,checksum}'
+curl -fsS "$API/api/tasks/$TASK_ID/findings" | jq '.[] | select(.kind=="SEGMENT_MISSING") | {subject,detail}'
+```
+
+### SEGMENT_OVERLAP
+
+两段在 GTID 或位点上重叠（I4）：回放会重复应用事务。
+处置：`GET /api/tasks/{id}/files` 看相邻段的 end_pos/start_pos；重叠多发生在拷贝目录或接管写岔之后——隔离多余段（mv 出目录），链恢复「每段恰好出现一次」后关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq -r '.[] | "\(.file_name)\tpos \(.start_pos // "?")-\(.end_pos // "?")"'
+```
+
+### SEGMENT_UNREADABLE
+
+段解析不出来（I1）：文件坏、截断或不是 binlog。
+处置：`mysqlbinlog` 实读该段；本地坏了对象还有就取回覆盖；都没有按 SEGMENT_MISSING 处置。能干净读完或不在链上后关闭。
+
+```bash
+mysqlbinlog --verify-binlog-checksum "$DATA_DIR/$TASK_ID/<file_name>" >/dev/null
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | {file_name,state,checksum}'
+```
+
+### SOURCE_UNREACHABLE
+
+重试预算用尽的源不可达：连不上、认证失败或 binlog 关（`SOURCE_AUTH`/`LOG_BIN_OFF` 走 terminalRetry 后才转 FAILED）。
+处置：对 `last_error` 里的具体错误逐项排——网络/`repl` 账号/授权/`log_bin`/`server_id` 冲突；恢复后任务自行重试，不用 Start。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID" | jq '{state,last_error,retry_attempt}'
+# mysql -h <source> -urepl -p -e "SHOW VARIABLES LIKE 'log_bin'; SELECT @@server_id;"
+```
+
+### TASK_FAILED
+
+任务写了 FAILED（终态写，不是重试）：`last_error` 是原因，常见源不可恢复错误（SOURCE_SWITCHOVER 不带 GTID 等）。
+处置：读 `last_error` 和 events 定位根因；修好后 `POST /api/tasks/{id}/start` 重新开始（FAILED 不清 checkpoint）。换源类的 FAILED 要建新任务——它拒绝混源。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID" | jq '{state,last_error,failed_reason}'
+curl -fsS "$API/api/tasks/$TASK_ID/events?limit=50" | jq -r '.[] | "\(.type): \(.detail)"' | tail -10
+```
+
+### TASK_NO_PROGRESS
+
+checkpoint 超过 `health.no_progress_after_sec`（默认 120s）没推进。
+处置：先区分「源就是没写入」（正常）和「dump 卡住」——源上 `SHOW PROCESSLIST` 看 `Binlog Dump` 是否活着、`GET /api/tasks/{id}/replication` 看 delay；写一行源数据，checkpoint 动了即属正常空闲，finding 自动关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/replication" | jq '{status,delay_seconds,last_event_time}'
+curl -fsS "$API/api/tasks/$TASK_ID/checkpoint" | jq '{file,pos,updated_at}'
+```
+
+### TASK_PERSIST_FAILED
+
+任务行写不进 meta/任务存储（S2/S3）：状态机还在跑但行落不下去。
+处置：同 METADATA_WRITE_BLOCKED——查 meta 连通、锁、容量；一次写入成功自动关闭。standalone 下看 TASK_RECORDS_FAILED。
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="TASK_PERSIST_FAILED") | {subject,detail,last_seen}'
+```
+
+### TASK_RECORDS_FAILED
+
+standalone 的任务记录文件读不出或写不进（S16）：data_dir 满、只读、坏。
+处置：`df -h` + `ls -la` data_dir；空间释放或文件可读可写后，下一次 save/启动读成功自动关闭。standalone 无 meta_dsn 时这是任务清单的唯一事实源。
+
+```bash
+df -h "$DATA_DIR" && ls -la "$DATA_DIR/tasks/" 2>/dev/null | head
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="TASK_RECORDS_FAILED")'
+```
+
+### TASK_UNADOPTED
+
+前主留下的 dump/任务行没被现任接管：上一轮进程死了没清干净。
+处置：`GET /api/tasks/{id}` 看 `pending_dump_cleanup`；现任接管读链成功、或源上残留 `Binlog Dump` 被 KILL 后关闭。一直没人接管时是 owner/lease 问题，按 TASK_FAILED/lease 思路查。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID" | jq '{state,owner_worker_id,pending_dump_cleanup}'
+# mysql -h <source> -e "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE COMMAND LIKE 'Binlog Dump%';"
+```
+
+### UPLOAD_RECORD_FAILED
+
+上传完成但上传记录行写不进（S8）：对象已在桶里，catalog 不知道。
+处置：修 meta 写入（同 METADATA_WRITE_BLOCKED）；下一条该段的上传记录写入成功、或行已是 UPLOADED 后关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | select(.state=="UPLOAD_FAILED" or .state=="SEALED") | {file_name,state}'
+```
+
+### UPLOAD_UNVERIFIED
+
+对象存在但从没被巡检验过一致性。
+处置：确认 verifier 在跑（standalone 恒开；cluster 只有任务租约持有者验）：`GET /api/tasks/{id}/findings` 看该段有没有同期 VERIFY_FAILED；桶列表权限（ListObjectsV2）缺失会让对象永远排不进队列。验过一轮自动关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | select(.state=="UPLOADED") | {file_name,verified_at // "?"}'
+curl -fsS "$API/api/tasks/$TASK_ID/findings" | jq '.[] | select(.kind|test("VERIFY|OBJECT"))'
+```
+
+### VERIFY_FAILED
+
+巡检实读段时解析失败或与 catalog 行不符：本地坏、行过期、或 epoch 后缀对不上。
+处置：`GET /api/tasks/{id}/findings` 看 detail 的具体不符点；`mysqlbinlog` 实读本地段确认；本地坏取回对象副本（见 SEGMENT_MISSING），行过期清行。下轮读一致或行被移除后关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/findings" | jq '.[] | select(.kind=="VERIFY_FAILED") | {subject,detail}'
+```
+
+### UPLOAD_LATE
+
+封存段过了 `UploadLateCriticalAfter`（默认 24h）还没传上去，超时升 CRITICAL。
+处置：`GET /api/tasks/{id}/files` 看 SEALED/UPLOAD_FAILED 行；桶凭证、网络、`upload.*` 配置修好后 `POST /api/tasks/{id}/files/retry-upload`；传上去关闭。
+
+```bash
+curl -fsS "$API/api/tasks/$TASK_ID/files" | jq '.[] | select(.state=="SEALED" or .state=="UPLOAD_FAILED") | {file_name,state,sealed_at}'
+curl -fsS -X POST "$API/api/tasks/$TASK_ID/files/retry-upload"
+```
+
+### MIXED_VERSION
+
+集群里协议版本混跑（`_cluster` finding）：老 protocol 的 worker 还在线，新节点拒绝认领任务，防止接管语义分裂。
+处置：`GET /api/workers` 看各节点 `cluster_protocol_version`；滚动升级把旧节点升完、等注册过期，或停掉旧节点；只剩一个版本后自动关闭。期间任务由同版本节点持有是正常的。
+
+```bash
+curl -fsS "$API/api/workers?limit=200" | jq '.[] | {worker_id,online,version: .cluster_protocol_version}'
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="MIXED_VERSION")'
+```
+
+### META_LOCK_STALLED
+
+meta 库的行/元数据锁被一个会话握住超过判定界（评估器在拿不到 `task_leases` 行锁时开）：调度大面积停摆的「根因层」finding。
+处置：`information_schema.innodb_trx` + `processlist` 找持锁会话，KILL 或等它结束；锁释放、一次 `FOR UPDATE` 能拿到后自动关闭。
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="META_LOCK_STALLED") | {subject,detail}'
+# $META "SELECT p.ID,p.TIME,p.INFO FROM information_schema.PROCESSLIST p JOIN information_schema.innodb_trx t ON t.trx_mysql_thread_id=p.ID ORDER BY p.TIME DESC LIMIT 10;"
+```
+
+### RETRY_LOOP_FAILED
+
+后台补传轮询失败：`subject=sync` 是任务列表读不出来，`subject=task` 是这条任务的补传动作失败。
+处置：sync 级查 meta 读路径（同 META_UNREACHABLE）；task 级查该任务的对象存储凭证/网络，或直接 `POST /api/tasks/{id}/files/retry-upload` 手动补。下一轮成功自动关闭。
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="RETRY_LOOP_FAILED") | {task_id,subject,detail}'
+```
+
+### FINDINGS_PERSIST_FAILED
+
+finding 行本身写不进持久层（`_cluster` 级）：/api/findings 还从内存报得出，重启就丢。
+处置：修 meta/记录层写路径（同 TASK_RECORDS_FAILED/METADATA_WRITE_BLOCKED）；下一次 finding 持久化成功自动关闭。
+
+```bash
+curl -fsS "$API/api/findings?limit=200" | jq '.[] | select(.kind=="FINDINGS_PERSIST_FAILED")'
+curl -sS -o /dev/null -w '%{http_code}\n' "$API/api/health"
+```
+
+---
+
+**相关 runbook**：还原演练与回放见 [部署指南「源库不可用时，用本地分段回放」](deployment.md#replay-local-segments) 与本文件 §7.4；升级/降级（含 `migrate up/down`、滚动升级栅栏）见 [升级指南](upgrade.md) 与 deployment.md §7/§8。
