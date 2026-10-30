@@ -118,6 +118,16 @@ assert_no_finding_kind() {
     echo "unexpected $1: $(open_findings)" >&2; return 1
   fi
 }
+wait_no_finding_kind() {
+  # Poll: the evaluator closes the finding on a sweep after the fix that
+  # opened it, so a one-shot read can still see the finding it just cleared.
+  local i
+  for i in $(seq 1 120); do
+    open_findings | jq -e --arg k "$1" 'any(.[]; .kind==$k)' >/dev/null || return 0
+    sleep 0.5
+  done
+  echo "unexpected $1 still open: $(open_findings)" >&2; return 1
+}
 
 create_body() { # flavor port name [gtid_set]
   local start='{"mode":"LATEST"}'
@@ -305,7 +315,7 @@ locked_cases() { # flavor src id data log db
 
   start_server "$data" "$WORK/task.key" "$slog"
   wait_state "$id" RUNNING
-  assert_no_finding_kind TASK_RECORDS_FAILED
+  wait_no_finding_kind TASK_RECORDS_FAILED
   write_rows "$flavor" "$src" "$6" 151 160
   wait_caught_up "$flavor" "$src" "$id"
   log "right key again: task resumed"
@@ -337,7 +347,7 @@ key_after_tasks_case() { # flavor src db
   chmod 600 "$WORK/adopt-map.json"
   "$ROOT_DIR/scripts/adopt-leftovers.sh" --api "$API" --map "$WORK/adopt-map.json" --start
   wait_state "$id" RUNNING
-  assert_no_finding_kind TASK_UNADOPTED
+  wait_no_finding_kind TASK_UNADOPTED
   write_rows "$flavor" "$src" "$db" 166 170
   wait_caught_up "$flavor" "$src" "$id"
   code="$(curl -sS -o /dev/null -w '%{http_code}' "$API/api/health")"
