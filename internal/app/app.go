@@ -465,6 +465,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if workerEnabled {
 		spawn(func() { scheduler.RunDumpCleanupRetry(runCtx) })
+		// standalone 也跑认领 sweep：LEASE_DEGRADED（磁盘写满等 EpochLost）
+		// 在 dated refusal 到期后拉回 RUNNING，不必等人工 Start 或重启。
+		spawn(func() { startWorkerClaimLoop(runCtx, scheduler, 2*time.Second) })
 	}
 	if workerEnabled && uploadConfigured {
 		// 封存文件在本进程磁盘上。后台补传复用 RetryFailedUploads，不新增上传实现。
@@ -486,12 +489,6 @@ func (a *App) Run(ctx context.Context) error {
 				)
 			})
 		}
-	}
-	if workerEnabled {
-		// 定期认领 STARTING、过期租约与拒绝到期的任务。standalone 同样靠它把
-		// LEASE_DEGRADED（磁盘写满这类 EpochLost）在 refusal 到期后拉回
-		// RUNNING——没有它，那条路只能等人工 Start 或进程重启。
-		spawn(func() { startWorkerClaimLoop(runCtx, scheduler, 2*time.Second) })
 	}
 
 	if !controlPlaneEnabled {
