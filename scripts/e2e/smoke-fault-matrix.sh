@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # input: canonical E2E database topology (compose mysql57 as source), two to
-#   three workers on per_node storage with separate data_dirs, one meta DSN
+#   three workers on per_node storage with separate data_dirs, one meta DSN;
+#   the row-15 cell also needs passwordless sudo to swap the owner's data_dir
+#   onto a 30MB tmpfs (skipped with a reason where sudo -n is unavailable)
 # output: ADR 0011 §4.2 fault-injection matrix as a release-tier e2e: each
 #   cell asserts on meta rows, /api/health, findings and the source's Binlog
 #   Dump thread count (never on logs). Cells without a deterministic fault
@@ -39,6 +41,7 @@ WORKER1_PID=""
 WORKER2_PID=""
 WORKER3_PID=""
 HOLD_PID=""
+DF_MOUNT=""
 
 source "$ROOT_DIR/scripts/e2e/lib-migration.sh"
 MYSQL57_PORT="$E2E_MYSQL57_PORT"
@@ -69,6 +72,9 @@ cleanup() {
   kill_pid "$WORKER2_PID"
   kill_pid "$WORKER1_PID"
   kill_pid "$CONTROL_PID"
+  if [[ -n "$DF_MOUNT" ]]; then
+    sudo -n umount -l "$DF_MOUNT" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -116,6 +122,7 @@ start_worker() {
   BINLOG_SERVER_CLUSTER_LEASE_TTL_SEC=15 \
   BINLOG_SERVER_HEALTH_SWEEP_INTERVAL_SEC=2 \
   BINLOG_SERVER_HEALTH_NODE_GONE_AFTER_SEC="$NODE_GONE_SEC" \
+  BINLOG_SERVER_HEALTH_REFUSAL_RETRY_CAP_SEC="${E2E_REFUSAL_CAP_SEC:-15}" \
   nohup "$ROOT_DIR/scripts/e2e/run-server.sh" >"$log_file" 2>&1 &
   echo "$!"
 }
@@ -187,6 +194,16 @@ task_desired() { task_field "$1" desired_run; }
 
 meta_sql() {
   docker compose -f "$COMPOSE_FILE" exec -T meta-primary mysql -umeta -pmetapass -N binlog_meta -e "$1" 2>/dev/null
+}
+
+gtid_max() { # executed set on stdin -> largest GNO for one uuid
+  local uuid="$1"
+  tr ',' '\n' | grep -i "^${uuid}:" | sed -E 's/.*[-:]([0-9]+)$/\1/' | sort -n | tail -1
+}
+
+source_gtid_max() {
+  docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -N \
+    -e 'SELECT @@GLOBAL.GTID_EXECUTED;' 2>/dev/null | tr -d ' \r\n' | gtid_max "$1"
 }
 
 dump_threads() {
@@ -804,6 +821,114 @@ cell_locked_health() {
 }
 
 # ==============================================================================
+# Cell: row15 "owner disk full/EROFS" — the owner runs on a 30MB tmpfs, filling
+# it must yield EpochLost (dated refusal, never FAILED/desired STOP), the
+# dir-less peer claims once then degrades on the unreadable tail, and after
+# space frees the owner re-owns at a larger epoch with no chain gap.
+# ==============================================================================
+cell_owner_disk_full() {
+  if ! sudo -n true 2>/dev/null; then
+    cell_skip "row15: owner disk full/EROFS" "passwordless sudo unavailable for tmpfs"
+    return 0
+  fi
+  local task_id
+  task_id="$(create_task "e2e-fm-df-${RUN_TAG}")"
+  CELL_TASK="$task_id"
+  http_code POST "/api/tasks/$task_id/start" >/dev/null
+  wait_any_owner "$task_id"
+  local owner_id data_dir owner_var health_addr log_file
+  owner_id="$(task_owner "$task_id")"
+  if [[ "$owner_id" == "$WORKER1_ID" ]]; then
+    data_dir="$DATA_DIR/w1"; owner_var=WORKER1_PID
+    health_addr="$WORKER1_HEALTH_ADDR"; log_file="$WORKER1_LOG"
+  else
+    data_dir="$DATA_DIR/w2"; owner_var=WORKER2_PID
+    health_addr="$WORKER2_HEALTH_ADDR"; log_file="$WORKER2_LOG"
+  fi
+  local old_epoch
+  old_epoch="$(task_epoch "$task_id")"
+  write_source_rows "df1"
+
+  # Swap the owner's data_dir onto a small tmpfs while the worker is down: a
+  # live mount-over would leave the open segment fd on the underlying fs and
+  # hide the chain from a retrying owner, which would then misread its own
+  # empty mount as a foreign tail and open-end its own refusal.
+  echo "[fm:df] owner=$owner_id epoch=$old_epoch; graceful stop -> tmpfs swap"
+  kill_pid "${!owner_var}"; printf -v "$owner_var" '%s' ""
+  cp -a "$data_dir" "${data_dir}.real" || return 1
+  if ! sudo -n mount -t tmpfs -o "size=30m,uid=$(id -u),gid=$(id -g)" tmpfs "$data_dir" 2>/dev/null; then
+    rm -rf "${data_dir}.real"
+    cell_skip "row15: owner disk full/EROFS" "tmpfs mount failed"
+    return 0
+  fi
+  DF_MOUNT="$data_dir"
+  cp -a "${data_dir}.real/." "$data_dir/" || return 1
+  rm -rf "${data_dir}.real"
+  local new_pid
+  new_pid="$(restart_worker "$owner_id" "$health_addr" "$data_dir" "$log_file")" || return 1
+  printf -v "$owner_var" '%s' "$new_pid"
+  # The peer may claim the released lease in the dead window and yield on the
+  # unreadable tail; the restarted owner must take it back at a larger epoch.
+  wait_running_owner "$task_id" "$owner_id" 240 || return 1
+  assert_matrix_invariants "$task_id" "df-remount" || return 1
+
+  local uuid
+  uuid="$(docker compose -f "$COMPOSE_FILE" exec -T mysql57 mysql -uroot -proot -N \
+    -e 'SELECT @@server_uuid;' 2>/dev/null | tr -d ' \r\n')"
+
+  echo "[fm:df] fill $data_dir (tmpfs) while task RUNNING"
+  dd if=/dev/zero of="$data_dir/fill" bs=1M count=64 2>/dev/null || true
+  # New events force a segment rotation whose open() lands ENOSPC on the full
+  # tmpfs — the bridge maps it to EpochLost, not FAILED.
+  write_source_rows "df2"
+  local degraded=0 i
+  for i in $(seq 1 90); do
+    assert_matrix_invariants "$task_id" "df-full" || return 1
+    [[ "$(task_state "$task_id")" == "LEASE_DEGRADED" ]] && { degraded=1; break; }
+    sleep 1
+  done
+  [[ "$degraded" -eq 1 ]] || { echo "[fm:df] task never degraded on ENOSPC: $(curl -fsS "$API/api/tasks/$task_id")" >&2; return 1; }
+
+  # The degraded stretch must escalate to CRITICAL -> /api/health 503.
+  for i in $(seq 1 90); do
+    [[ "$(health_code)" == "503" ]] && break
+    assert_matrix_invariants "$task_id" "df-health" || return 1
+    sleep 1
+  done
+  [[ "$(health_code)" == "503" ]] || { echo "[fm:df] /api/health not 503 during LEASE_DEGRADED" >&2; return 1; }
+
+  # Source writes during the outage must land in the chain after recovery.
+  write_source_rows "df3"
+  local src_max
+  src_max="$(source_gtid_max "$uuid")"
+  rm -f "$data_dir/fill"
+
+  wait_running_owner "$task_id" "$owner_id" 180 || return 1
+  local new_epoch
+  new_epoch="$(task_epoch "$task_id")"
+  [[ "$new_epoch" =~ ^[0-9]+$ && "$new_epoch" -gt "$old_epoch" ]] || { echo "[fm:df] epoch did not grow: $old_epoch -> $new_epoch" >&2; return 1; }
+  assert_matrix_invariants "$task_id" "df-recovered" || return 1
+  [[ "$(dump_threads)" == "1" ]] || { echo "[fm:df] dump threads=$(dump_threads), want 1" >&2; return 1; }
+  # The checkpoint GTID must reach every source GNO present when the disk
+  # filled — including df3 — or the chain has a gap.
+  local got=""
+  for i in $(seq 1 120); do
+    got="$(curl -fsS "$API/api/tasks/$task_id/checkpoint" | jq -r '.gtid_set // empty' | gtid_max "$uuid")"
+    [[ -n "$got" && -n "$src_max" && "$got" -ge "$src_max" ]] && break
+    sleep 1
+  done
+  [[ -n "$got" && -n "$src_max" && "$got" -ge "$src_max" ]] || { echo "[fm:df] checkpoint gno '$got' did not reach source max $src_max" >&2; return 1; }
+  for i in $(seq 1 60); do
+    [[ "$(health_code)" == "200" ]] && break
+    sleep 1
+  done
+  [[ "$(health_code)" == "200" ]] || { echo "[fm:df] /api/health did not return 200 after recovery" >&2; return 1; }
+  http_code POST "/api/tasks/$task_id/stop" >/dev/null
+  wait_task_state "$task_id" "STOPPED" 60
+  cell_result "row15: owner disk full/EROFS" "RUN" "pass: EpochLost yield on ENOSPC (no FAILED/STOP), peer degraded on foreign tail, 503 while full; $owner_id re-owned epoch $new_epoch, checkpoint gno $got >= $src_max"
+}
+
+# ==============================================================================
 # Run the implemented cells; each failure is recorded, not fatal.
 # ==============================================================================
 for spec in \
@@ -813,7 +938,8 @@ for spec in \
   "row6: owner dead, per_node degrade|cell_node_gone_back" \
   "row10: three nodes, one dir|cell_three_nodes" \
   "row11: operator races|cell_operator_races" \
-  "row2: lease row locked, owner retries|cell_locked_health"; do
+  "row2: lease row locked, owner retries|cell_locked_health" \
+  "row15: owner disk full/EROFS|cell_owner_disk_full"; do
   cid="${spec%%|*}"; fn="${spec##*|}"
   CELL_TASK=""
   echo
@@ -841,7 +967,6 @@ cell_skip "row3: stall idle_kill<t<TTL" "session-idle kill window partially cove
 cell_skip "row5: claim txn uncommitted" "claim transaction window not instrumentable"
 cell_skip "row8: own .open ENOENT" "needs refusal_retry_cap tuning; next PR"
 cell_skip "row9/row14: stale-dir copy, corrupt replica" "chain-verification rules land in PR-5"
-cell_skip "row15: owner disk full/EROFS" "per-node disk-full primitive; backlog A5"
 cell_skip "row16: grace<TTL recovery window" "partially covered by meta-failover; dedicated cell pending"
 cell_skip "row17: uploads on/off takeover" "upload-toggle variants pending"
 
