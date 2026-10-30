@@ -2064,6 +2064,8 @@ const docTemplate = `{
         "tasks.FindingKind": {
             "type": "string",
             "enum": [
+                "DRILL_FAILED",
+                "DRILL_REFUSED",
                 "TASK_PERSIST_FAILED",
                 "METADATA_WRITE_BLOCKED",
                 "EVENT_PERSIST_FAILED",
@@ -2090,6 +2092,8 @@ const docTemplate = `{
                 "MIXED_VERSION"
             ],
             "x-enum-varnames": [
+                "FindingDrillFailed",
+                "FindingDrillRefused",
                 "FindingTaskPersistFailed",
                 "FindingMetadataWriteBlocked",
                 "FindingEventPersistFailed",
