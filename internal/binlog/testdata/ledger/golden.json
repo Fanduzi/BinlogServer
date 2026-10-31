@@ -74,7 +74,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-1155:1556-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:1-300"
+    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1556-1605"
   },
   "failback-damaged/checkpoint": {
     "Problem": {
@@ -305,7 +305,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-1155:1556-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:1-300"
+    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1556-1605"
   },
   "failback-hole/checkpoint": {
     "Problem": {
@@ -535,7 +535,7 @@
       "PartialInTxn": true
     },
     "TailOK": true,
-    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-1155:1556-1604,5e86458b-c3b5-11f1-8415-822b383dbcd0:1-300"
+    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1556-1604"
   },
   "failback-tail-partial/checkpoint": {
     "Problem": {
@@ -764,7 +764,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1-1155:1556-1605,5e86458b-c3b5-11f1-8415-822b383dbcd0:1-300"
+    "ResumeGTID": "5b4bc6b5-c3b5-11f1-84bd-822b383dbcd0:1556-1605"
   },
   "failback/checkpoint": {
     "Problem": {
@@ -960,7 +960,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-184"
+    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:170-184"
   },
   "live-damaged-first/checkpoint": {
     "Problem": {
@@ -1089,7 +1089,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-184"
+    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:170-184"
   },
   "live-damaged/checkpoint": {
     "Problem": {
@@ -1221,7 +1221,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-184"
+    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:170-184"
   },
   "live-hole/checkpoint": {
     "Problem": {
@@ -1403,7 +1403,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-169"
+    "ResumeGTID": ""
   },
   "live-tail-header/checkpoint": {
     "Problem": {
@@ -1496,7 +1496,7 @@
       "PartialInTxn": true
     },
     "TailOK": true,
-    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-183"
+    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:170-183"
   },
   "live-tail-partial/checkpoint": {
     "Problem": {
@@ -1620,7 +1620,7 @@
       "PartialInTxn": false
     },
     "TailOK": true,
-    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:1-184"
+    "ResumeGTID": "e2e732df-c5fa-11f1-9e48-822b383dbcd0:170-184"
   },
   "live/checkpoint": {
     "Problem": {

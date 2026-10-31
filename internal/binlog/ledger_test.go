@@ -123,7 +123,9 @@ func TestLedgerTailAndResume(t *testing.T) {
 		t.Fatalf("resume set %q", set)
 	}
 	durable := tail.Durable()
-	if len(durable) != len(tail.Previous)+len(tail.GTIDs) || durable[0] != tail.Previous[0] {
+	// Previous-GTIDs are a history claim, not durable bytes: only the
+	// complete transactions listed in the tail may enter a resume set.
+	if len(durable) != len(tail.GTIDs) || durable[0] != tail.GTIDs[0] {
 		t.Fatalf("durable %v", durable)
 	}
 	// Tear the last transaction: the resume set drops it and the cut is offered.

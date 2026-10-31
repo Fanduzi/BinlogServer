@@ -109,6 +109,28 @@ func TestExecutedGTID_GenericEventBodyCommitExtendsSeed(t *testing.T) {
 	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-12")
 }
 
+func TestExecutedGTID_PreviousGTIDsHeaderDoesNotClaim(t *testing.T) {
+	// A streamed previous-GTIDs header is the source's history claim — the
+	// task may never have persisted those transactions. Unioning it into the
+	// executed set makes a later resume tell the source they are captured,
+	// permanently skipping refetch of real holes.
+	seed := sampleGTID + ":1-10"
+	executed := newExecutedGTID("mysql", seed)
+	executed.note(&goreplication.BinlogEvent{
+		Header: &goreplication.EventHeader{EventType: goreplication.PREVIOUS_GTIDS_EVENT, LogPos: 126},
+		Event:  &goreplication.PreviousGTIDsEvent{GTIDSets: sampleGTID + ":1-999"},
+	})
+	assertGTID(t, "mysql", executed.current(), seed)
+
+	// An open tail's previous-GTIDs text is the same history claim; only the
+	// complete transactions in the segment are durable.
+	executed.absorbTail(binlog.OpenTail{
+		Previous: []string{sampleGTID + ":1-500"},
+		GTIDs:    []string{sampleGTID + ":11", sampleGTID + ":12"},
+	})
+	assertGTID(t, "mysql", executed.current(), sampleGTID+":1-12")
+}
+
 func TestMysqlError1236(t *testing.T) {
 	my := &gomysql.MyError{Code: 1236, State: "HY000", Message: "Could not find first log file name in binary log index file"}
 	if !mysqlError1236(my) || !mysqlError1236(fmt.Errorf("dump: %w", my)) {
