@@ -1,6 +1,6 @@
 // Package tasks provides module-level functionality for tasks.
 // input: three in-process schedulers sharing one MemoryLease and one fenced task table; the owner's meta calls can hang until their ctx ends, or its renew can freeze as under SIGSTOP; an in-flight append that returns WRITE_FENCED when grace cancels the dump
-// output: proof that a meta outage longer than lease grace resumes the task on a new epoch with one dump and no overlap, that a cluster-wide meta outage does the same (#599), that a WRITE_FENCED append at that handoff leaves a claimable row and resumes at epoch+1 (#454), that a STOPPED row with desired RUN and an empty owner is claimed the same way, that a shorter outage and a SIGSTOP keep the same dump, that an operator Stop and a FAILED task stay stopped, that a desired-RUN task nobody claims opens CRITICAL TASK_NO_PROGRESS within one sweep and degrades HealthSummary, and that a dead owner whose open tail lives only on its own disk is refused by every peer (SEGMENT_NOT_ON_WORKER → open-ended refusal, never FAILED, no overlap) while the proxy evaluator still opens TASK_NO_PROGRESS (#599)
+// output: proof that a meta outage longer than lease grace resumes the task on a new epoch with one dump and no overlap, that a cluster-wide meta outage does the same, that a WRITE_FENCED append at that handoff leaves a claimable row and resumes at epoch+1 (#454), that a STOPPED row with desired RUN and an empty owner is claimed the same way, that a shorter outage and a SIGSTOP keep the same dump, that an operator Stop and a FAILED task stay stopped, that a desired-RUN task nobody claims opens CRITICAL TASK_NO_PROGRESS within one sweep and degrades HealthSummary, and that a dead owner whose open tail lives only on its own disk is refused by every peer (SEGMENT_NOT_ON_WORKER → open-ended refusal, never FAILED, no overlap) while the proxy evaluator still opens TASK_NO_PROGRESS
 // pos: regression for issue 450 (design 0009 §29); the in-process three-scheduler harness
 // note: if this file changes, update this header and module README.md.
 package tasks
@@ -267,7 +267,7 @@ func newP29World(t *testing.T, ttl, renew, grace time.Duration, withGate, withFr
 
 // newP29GlobalWorld gates every node's store and lease behind one metaGate,
 // as a killed metadata server does: no node can list, claim, renew or release
-// while it is closed (#599).
+// while it is closed.
 func newP29GlobalWorld(t *testing.T, ttl, renew, grace time.Duration) *p29World {
 	t.Helper()
 	leases := NewMemoryLease()
@@ -479,7 +479,7 @@ func TestStoppedDesiredRunWithNoOwnerIsClaimed(t *testing.T) {
 // A global outage takes every node's meta calls away, not only the owner's.
 // The owner's renew dies past grace, its dump is fenced off, and the lease
 // release cannot land while the gate is closed; once meta answers, some node
-// must claim the row at a newer epoch with exactly one dump (#599).
+// must claim the row at a newer epoch with exactly one dump.
 func TestGlobalMetaOutageResumesOnNewEpoch(t *testing.T) {
 	w := newP29GlobalWorld(t, 2*time.Second, 15*time.Millisecond, 80*time.Millisecond)
 	id, epoch := w.start()
@@ -679,7 +679,7 @@ func TestUnclaimedAfterGraceOpensNoProgress(t *testing.T) {
 	}
 }
 
-// TestDeadOwnerTailRefusalStaysUnclaimedButEscalates pins the #599 contract:
+// TestDeadOwnerTailRefusalStaysUnclaimedButEscalates pins the dead-owner contract:
 // with per_node storage the open tail exists only on the dead owner's disk,
 // so every peer attach sees SEGMENT_NOT_ON_WORKER, yields the lease with an
 // open-ended refusal, and nobody claims forever. That is honest — the data
