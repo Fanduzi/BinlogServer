@@ -196,7 +196,7 @@ func (l *Ledger) ResumeGTID(flavor, seed string) (OpenTail, string, bool) {
 	if !ok {
 		return OpenTail{}, "", false
 	}
-	union := unionDurable(flavor, seed, OpenTail{Previous: []string{l.SealedText(flavor)}})
+	union := unionDurable(flavor, seed, OpenTail{GTIDs: []string{l.SealedText(flavor)}})
 	return tail, unionDurable(flavor, union, tail), true
 }
 
@@ -209,12 +209,12 @@ func (l *Ledger) SealedText(flavor string) string {
 	return l.SealedStored().String()
 }
 
-// Durable is every GTID text the tail durably holds, in the order a resume
-// absorbs them: previous-GTIDs first, then each complete transaction. The
-// trailing partial transaction is not in it.
+// Durable is every GTID text the tail durably holds: each complete
+// transaction. The open segment's previous-GTIDs header is a history claim,
+// not stored bytes (same rule as Stored), so it is not durable. The
+// trailing partial transaction is not in it either.
 func (t OpenTail) Durable() []string {
-	out := make([]string, 0, len(t.Previous)+len(t.GTIDs))
-	out = append(out, t.Previous...)
+	out := make([]string, 0, len(t.GTIDs))
 	return append(out, t.GTIDs...)
 }
 

@@ -131,9 +131,11 @@ func (t *executedGTID) endsTransaction(ev *replication.BinlogEvent) bool {
 	return binlog.TransactionQueryEffect(string(qe.Query), true) == binlog.QueryCommits
 }
 
-// absorbTail adds what the open segment already holds: its previous-GTIDs
-// text and every complete transaction. A trailing transaction the resume
-// continues inside stays pending so its commit records it.
+// absorbTail adds what the open segment already holds: every complete
+// transaction. The segment's previous-GTIDs header is a history claim, not
+// stored bytes, so it stays out of the executed set. A trailing
+// transaction the resume continues inside stays pending so its commit
+// records it.
 func (t *executedGTID) absorbTail(tail binlog.OpenTail) {
 	if t == nil {
 		return
@@ -173,9 +175,12 @@ func (t *executedGTID) note(ev *replication.BinlogEvent) {
 	case replication.GTID_EVENT, replication.GTID_TAGGED_LOG_EVENT, replication.MARIADB_GTID_EVENT:
 		t.noteGTID(ev)
 	case replication.PREVIOUS_GTIDS_EVENT:
-		if e, ok := ev.Event.(*replication.PreviousGTIDsEvent); ok {
-			t.union(e.GTIDSets)
-		}
+		// A previous-GTIDs header is the source's history claim, not bytes the
+		// task persisted. Unioning it would claim coverage of transactions that
+		// may never have reached a segment, and a resume hands this set back to
+		// the source — overclaiming skips refetch and silences real holes.
+		// Underclaiming is safe: re-served GTIDs are deduplicated by
+		// contains().
 	case replication.MARIADB_GTID_LIST_EVENT:
 		if e, ok := ev.Event.(*replication.MariadbGTIDListEvent); ok {
 			for _, g := range e.GTIDs {
