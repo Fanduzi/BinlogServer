@@ -1,12 +1,13 @@
 // Package tasks provides module-level functionality for tasks.
 // input: three in-process schedulers sharing one MemoryLease and one fenced task table; the owner's meta calls can hang until their ctx ends, or its renew can freeze as under SIGSTOP; an in-flight append that returns WRITE_FENCED when grace cancels the dump
-// output: proof that a meta outage longer than lease grace resumes the task on a new epoch with one dump and no overlap, that a WRITE_FENCED append at that handoff leaves a claimable row and resumes at epoch+1 (#454), that a STOPPED row with desired RUN and an empty owner is claimed the same way, that a shorter outage and a SIGSTOP keep the same dump, that an operator Stop and a FAILED task stay stopped, and that a desired-RUN task nobody claims opens CRITICAL TASK_NO_PROGRESS within one sweep and degrades HealthSummary
+// output: proof that a meta outage longer than lease grace resumes the task on a new epoch with one dump and no overlap, that a cluster-wide meta outage does the same, that a WRITE_FENCED append at that handoff leaves a claimable row and resumes at epoch+1 (#454), that a STOPPED row with desired RUN and an empty owner is claimed the same way, that a shorter outage and a SIGSTOP keep the same dump, that an operator Stop and a FAILED task stay stopped, that a desired-RUN task nobody claims opens CRITICAL TASK_NO_PROGRESS within one sweep and degrades HealthSummary, and that a dead owner whose open tail lives only on its own disk is refused by every peer (SEGMENT_NOT_ON_WORKER → open-ended refusal, never FAILED, no overlap) while the proxy evaluator still opens TASK_NO_PROGRESS
 // pos: regression for issue 450 (design 0009 §29); the in-process three-scheduler harness
 // note: if this file changes, update this header and module README.md.
 package tasks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -264,6 +265,37 @@ func newP29World(t *testing.T, ttl, renew, grace time.Duration, withGate, withFr
 	return w
 }
 
+// newP29GlobalWorld gates every node's store and lease behind one metaGate,
+// as a killed metadata server does: no node can list, claim, renew or release
+// while it is closed.
+func newP29GlobalWorld(t *testing.T, ttl, renew, grace time.Duration) *p29World {
+	t.Helper()
+	leases := NewMemoryLease()
+	table := &resumeTable{fencedMemoryStore: &fencedMemoryStore{lockedFakeStore: &lockedFakeStore{fakeStore: newFakeStore()}, leases: leases}}
+	w := &p29World{
+		t: t, leases: leases, table: table, hs: newLeaseHealthStore(leases), log: newDumpLog(),
+		nodes: map[string]*Scheduler{}, gate: &metaGate{},
+	}
+	timeouts := InternalCallTimeouts{Read: 40 * time.Millisecond, Write: 40 * time.Millisecond, Lease: 25 * time.Millisecond, Upload: 40 * time.Millisecond}
+	for _, id := range []string{"n1", "n2", "n3"} {
+		store := TaskStore(&ownerGatedStore{resumeTable: table, g: w.gate})
+		lease := LeaseManager(&ownerGatedLease{MemoryLease: leases, g: w.gate})
+		runner := &nodeRunner{node: id, log: w.log}
+		s := NewScheduler(
+			WithStore(store),
+			WithFindingStore(w.hs),
+			WithClusterLeaseManager(lease),
+			WithClusterWorkerID(id),
+			WithClusterLease(ttl, renew, grace),
+			WithLeaseClock(NewLeaseClock()),
+			WithInternalCallTimeouts(timeouts),
+		)
+		s.SetRunner(runner)
+		w.nodes[id] = s
+	}
+	return w
+}
+
 func (w *p29World) owner() *Scheduler { return w.nodes["n1"] }
 
 func (w *p29World) runner(id string) *nodeRunner {
@@ -441,6 +473,25 @@ func TestStoppedDesiredRunWithNoOwnerIsClaimed(t *testing.T) {
 	got := w.waitResumed(task.ID, 1)
 	if got.Epoch != 2 || got.DesiredRun != TaskDesiredRun || w.openRuns(task.ID) != 1 || w.log.overlaps() {
 		t.Fatalf("resumed %s desired %s epoch %d runs %d overlap %v, want RUNNING desired RUN epoch 2 and one dump", got.State, got.DesiredRun, got.Epoch, w.openRuns(task.ID), w.log.overlaps())
+	}
+}
+
+// A global outage takes every node's meta calls away, not only the owner's.
+// The owner's renew dies past grace, its dump is fenced off, and the lease
+// release cannot land while the gate is closed; once meta answers, some node
+// must claim the row at a newer epoch with exactly one dump.
+func TestGlobalMetaOutageResumesOnNewEpoch(t *testing.T) {
+	w := newP29GlobalWorld(t, 2*time.Second, 15*time.Millisecond, 80*time.Millisecond)
+	id, epoch := w.start()
+	w.gate.pause()
+	waitRunClosed(t, w.owner(), id, "global outage past grace")
+	time.Sleep(60 * time.Millisecond) // the release attempt must time out while meta is down
+	w.gate.resume()
+	w.owner().republishUnpublished()
+	w.claim()
+	got := w.waitResumed(id, epoch)
+	if got.OwnerWorkerID == "" {
+		t.Fatalf("resumed row has no owner")
 	}
 }
 
@@ -626,4 +677,66 @@ func TestUnclaimedAfterGraceOpensNoProgress(t *testing.T) {
 	if sum = peer.HealthSummary(ctx); sum.Status != HealthOK {
 		t.Fatalf("health after resume %+v, want ok", sum)
 	}
+}
+
+// TestDeadOwnerTailRefusalStaysUnclaimedButEscalates pins the dead-owner contract:
+// with per_node storage the open tail exists only on the dead owner's disk,
+// so every peer attach sees SEGMENT_NOT_ON_WORKER, yields the lease with an
+// open-ended refusal, and nobody claims forever. That is honest — the data
+// is unavailable until the owner returns — but the task still desires RUN,
+// so the _health holder must proxy the dead-owner row and open CRITICAL
+// TASK_NO_PROGRESS. A desired-RUN task that cannot be claimed is never
+// silent.
+func TestDeadOwnerTailRefusalStaysUnclaimedButEscalates(t *testing.T) {
+	w := newP29World(t, 2*time.Second, 15*time.Millisecond, 80*time.Millisecond, true, false)
+	id, _ := w.start()
+	for _, n := range []string{"n1", "n2", "n3"} {
+		w.runner(n).fail = errors.New(CodeSegmentNotOnWorker + ": open tail is on n1")
+	}
+	w.outagePastGrace(id)
+	deadline := time.Now().Add(2 * time.Second)
+	for !w.leaseFree(id) {
+		if time.Now().After(deadline) {
+			t.Fatal("lease still held")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	w.claim()
+	time.Sleep(150 * time.Millisecond)
+	w.claim()
+	time.Sleep(50 * time.Millisecond)
+	if n := w.openRuns(id); n != 0 {
+		t.Fatalf("open runs %d, want 0: no node may run a tail it cannot read", n)
+	}
+	if w.log.peak() != 1 || w.log.overlaps() {
+		t.Fatalf("peak %d overlap %v; want only the original dump, no overlap", w.log.peak(), w.log.overlaps())
+	}
+	got, err := w.table.GetTask(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State == StateFailed || got.DesiredRun != TaskDesiredRun {
+		t.Fatalf("row %s desired %s; a refused tail must not go FAILED and must still desire RUN", got.State, got.DesiredRun)
+	}
+	ev := NewEvaluator(w.nodes["n2"], EvaluatorConfig{
+		Store: w.hs, Cluster: true, NodeID: "n2", Instance: "n2-i",
+		Sweep: 30 * time.Millisecond, NoProgressAfter: time.Hour,
+	})
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := ev.SweepNow(ctx); err != nil {
+			t.Fatalf("sweep %d: %v", i, err)
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	open, err := w.hs.ListOpenFindings(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range open {
+		if f.TaskID == id && f.Kind == FindingKind(health.TaskNoProgress) && f.Severity == FindingCritical {
+			return
+		}
+	}
+	t.Fatalf("findings %+v, want CRITICAL TASK_NO_PROGRESS for the unclaimable desired-RUN task", open)
 }
