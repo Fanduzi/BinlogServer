@@ -5,6 +5,7 @@
 // note P2-6.2 (§30): health.node_gone_after_sec (0 = max(3×sweep, lease_ttl+2×sweep)) is EvaluatorConfig.NodeGoneAfter
 // note ADR 0011: the scheduler gets cluster.storage, the refusal cap, and the meta cluster gate when the store implements it
 // note F2: a non-empty notify.webhook_url is the evaluator's HealthNotifier; an empty URL leaves it nil
+// note: the startup meta open retries transient errors inside a bounded budget — a restart during a meta blip waits in place instead of crash-looping; permanent DSN/auth/schema errors still fail fast
 // pos: application composition layer that wires modules into runnable service modes
 // note: if this file changes, update this header and module README.md.
 package app
@@ -228,26 +229,12 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		// 如果配置了 metadata DB，把它同时注入 scheduler（control plane）
 		// 和 runner（data plane 的 checkpoint/file metadata）。
-		mysqlStore, err = newAppMetaStoreForRun(a.cfg)
+		mysqlStore, err = openMetaStoreForRun(runCtx, a.cfg)
 		if err != nil {
 			return err
 		}
-		defer mysqlStore.Close()
-		opts = append(opts, tasks.WithStore(mysqlStore))
-		opts = append(opts, tasks.WithCheckpointReader(mysqlStore))
-		opts = append(opts, tasks.WithEventStore(mysqlStore))
-		opts = append(opts, tasks.WithFileStore(mysqlStore))
-		if findingStore, ok := mysqlStore.(tasks.FindingStore); ok {
-			opts = append(opts, tasks.WithFindingStore(findingStore))
-		}
-		runnerOpts = append(runnerOpts, replication.WithCheckpointStore(mysqlStore))
-		runnerOpts = append(runnerOpts, replication.WithFileMetaStore(mysqlStore))
-		if isClusterMode(a.cfg) {
-			leaseManager = newClusterLeaseRuntimeForRun(mysqlStore)
-			if column, ok := mysqlStore.(interface{ PendingDumpColumn() bool }); ok && !column.PendingDumpColumn() {
-				log.Printf("%s", tasks.ClusterDumpFenceSchemaMessage)
-			}
-		}
+		defer func() { _ = mysqlStore.Close() }()
+		opts, runnerOpts, leaseManager = metaStoreRunOptions(mysqlStore, isClusterMode(a.cfg), opts, runnerOpts)
 	}
 	if workerEnabled && !isClusterMode(a.cfg) {
 		leaseManager = tasks.NewMemoryLease()

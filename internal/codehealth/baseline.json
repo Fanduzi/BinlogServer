@@ -20,7 +20,7 @@
     "internal/meta/mysql_store.go": 1994,
     "internal/ownership/step.go": 828,
     "internal/replication/mysql_runner.go": 3592,
-    "internal/tasks/evaluator.go": 1646,
+    "internal/tasks/evaluator.go": 1645,
     "internal/tasks/finding.go": 1059,
     "internal/tasks/legacy_failback.go": 1028,
     "internal/tasks/scheduler.go": 1069,
@@ -50,7 +50,7 @@
   },
   "complex_functions": {
     "internal/api:Server.handleTaskAction": 54,
-    "internal/app:App.Run": 80,
+    "internal/app:App.Run": 77,
     "internal/assurance:Chain.CheckBody": 42,
     "internal/assurance:closes": 56,
     "internal/binlog:ScanOpenTail": 43,
@@ -82,21 +82,21 @@
   },
   "long_functions": {
     "internal/api:Server.handleTaskAction": 159,
-    "internal/app:App.Run": 341,
+    "internal/app:App.Run": 331,
     "internal/config:LoadConfigWithEncryption": 326,
     "internal/healthstore/storetest:Run": 196,
     "internal/replication:MySQLRunner.enrollSealedUploads": 154,
     "internal/replication:MySQLRunner.resolveRunStart": 160,
-    "internal/tasks:Evaluator.evaluate": 155,
+    "internal/tasks:Evaluator.evaluate": 154,
     "internal/tasks:Scheduler.runTask": 194,
     "internal/tasks:Scheduler.startTask": 271,
     "internal/tasks:planLegacyFailback": 216
   },
   "statement_functions": {
     "internal/api:Server.handleTaskAction": 121,
-    "internal/app:App.Run": 195,
+    "internal/app:App.Run": 188,
     "internal/config:LoadConfigWithEncryption": 111,
-    "internal/tasks:Evaluator.evaluate": 117,
+    "internal/tasks:Evaluator.evaluate": 116,
     "internal/tasks:Scheduler.runTask": 117,
     "internal/tasks:Scheduler.startTask": 204,
     "internal/tasks:planLegacyFailback": 151
